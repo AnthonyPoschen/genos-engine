@@ -1,0 +1,8 @@
+[package]
+name = "genos-scene"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+rhai = "=1.26.0"

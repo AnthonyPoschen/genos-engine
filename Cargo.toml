@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/input",
+    "crates/scene",
+    "crates/window",
+    "crates/render",
+    "examples/camera",
+]
