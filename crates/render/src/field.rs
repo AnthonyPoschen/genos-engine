@@ -30,6 +30,7 @@ pub(crate) const BOUNCES: u32 = 4;
 /// Coarse world-probe spacing. These probes update behind the screen field.
 pub(crate) const WORLD_SPACING: f32 = 2.5;
 /// Directions in the screen field. The pixel averages these.
+#[allow(dead_code)]
 pub(crate) const SCREEN_DIRS: u32 = 16;
 /// One screen probe covers this many pixels.
 pub(crate) const SCREEN_TILE: u32 = 16;
@@ -893,6 +894,7 @@ fn leaving(
                 [normal[0], 0.0, normal[1]],
             )
         } else {
+            // A capped share of the top. The side does not become the lamp.
             one_lamp(
                 scene,
                 light,
@@ -901,6 +903,8 @@ fn leaving(
                 center[1],
                 [0.0, 1.0, 0.0],
             )
+            .min(2.0)
+                * 0.2
         };
     }
     let incoming = prev

@@ -18,7 +18,7 @@ Sannikov shipped a screen-space form of this in Path of Exile 2. That choice fit
 
 A radiance field is the light at each point, in each direction. A cascade is one distance range of that field.
 
-A radiance interval `L(a, b)` at a point, along a ray, is the light that leaves the first surface the ray hits between distance `a` and distance `b`. A miss stores no light. The ranges meet: the next cascade starts where the previous one ends.
+A radiance interval `L(a, b)` at a point, along a ray, is the light that leaves the first surface the ray hits between distance `a` and distance `b`. A miss stores no light and keeps the next range. The ranges meet: the next cascade starts where the previous one ends.
 
 The penumbra hypothesis is the reason the ranges are stored differently. Close to a surface you need many probe positions and only a few directions. Far from a surface you need few positions and many directions. A near cascade therefore has a smaller spacing and fewer directions than a far cascade. A world cascade is farther again, so it is coarser in space and finer in angle.
 
@@ -34,7 +34,7 @@ At a point, walk the directions of the nearest probes.
 
 The merged colors are blended between the four surrounding near probes. A lookup is not a copy of the single nearest square. The floor mesh asks for a color at each vertex, and the rasterizer blends those vertices.
 
-The picture gather places one probe on each 16 by 16 pixel tile. A 720p frame stays at or under 80 by 45 probes. Those probes sit on a world lattice around the eye, 0.5 m apart. A turn does not move the lattice. Each probe traces 4 m. The last 0.5 m blends into the world cache. A miss reads that cache.
+The picture gather builds three cascades over the floor. Spacing, direction count, and interval length double at each cascade. A near miss keeps the farther range. The second bounce reads that merged near cascade. The pixel reads the merged near cascade. A turn does not rebuild the field.
 
 The world cache is a 2.5 m grid with 8 directions. A lamp change marks the cache dirty. Each frame writes one band until the cache is current. A still camera with a clean cache submits no world work. The pixel reads the screen probes. A point outside that grid reads the world cache.
 
@@ -50,7 +50,7 @@ A lamp reaches a point only when the straight ray misses every wall and solid. T
 
 Each face is lit from a point just outside that face, and only when that face points toward the lamp. A face that only grazes the lamp gets less of that lamp. Light from a lamp about one meter away stays below a flat white. Light a few meters from the lamp is dimmer than light next to the lamp. A unit white lamp about 7 m above a white floor stays bright enough to read. A floor point inside an object's footprint gets no lamp. A point on the lamp side, outside that footprint, stays lit. The shadow edge is the lamp ray that hits a wall or a solid. A sample at the center of a wall is inside the volume. That sample does not light the back face. A probe inside that volume stores no light. A shaded point does not read a probe across a wall.
 
-The pixel lamp ray is the only direct term. The probe field stores the light that leaves a hit toward other surfaces. The gather the pixel reads is the screen probe grid. A wide wall stores the lamp that leaves the hit. A small solid also stores the screen gather. The lamp on the shaded point stays in the pixel ray. The world cache fills a miss. Light that leaves a surface is the arriving irradiance times the surface color and one reflectance. A material can set a reflectance from 0 to 1. A missing reflectance is `1 / π`. A material can set how much of its color mixes into the bounce. A missing mix uses the full surface color. A lamp above an object colors the floor on every side. A lamp on one side does not color the far side. A lit wall adds its bounce to the floor in front of that wall through the interval merge. The floor behind that wall stays dark.
+The pixel lamp ray is the only direct term. The probe field stores the light that leaves a hit toward other surfaces. The pixel reads the merged near cascade. A near miss keeps the farther cascade. The lamp on the shaded point stays in the pixel ray. Light that leaves a surface is the arriving irradiance times the surface color and one reflectance. A material can set a reflectance from 0 to 1. A missing reflectance is `1 / π`. A material can set how much of its color mixes into the bounce. A missing mix uses the full surface color. A lamp above an object tints the floor around it. The shadow under the object stays dark. A lamp on one side does not color the far side. A lit wall adds its bounce to the floor in front of that wall through the interval merge. The floor behind that wall stays dark.
 
 A red solid in a white lamp throws red light. A white floor shows that red next to the solid, on top of the white the lamp puts there directly. A colored receiver multiplies the bounce by its own color as well.
 
@@ -68,7 +68,7 @@ An empty nearer ray is the only place a world probe enters the merged field. A n
 
 ## What is fixed, and what comes from the scene
 
-The screen grid keeps a fixed probe count. The probes are a world lattice, so a turn does not move them. A miss stores radiance 0 and β = 1. A hit stores the outgoing light and β = 0. The merge is `L + β L_next`. A screen miss then reads the coarse world grid in that direction, so a bright lamp behind the camera still has a direction. The builder reads the camera for the screen grid. It does not read the example solids or the example light.
+The probes sit on the floor. A turn does not move them. A miss stores radiance 0 and β = 1. A hit stores the outgoing light and β = 0. The merge is `L + β L_next`. A screen miss then reads the coarse world grid in that direction, so a bright lamp behind the camera still has a direction. The builder reads the camera for the screen grid. It does not read the example solids or the example light.
 
 The CPU field used by the older checks still stores fewer directions in the near range than in the far range, and fewer in the far range than in the world range.
 
@@ -82,7 +82,7 @@ The balance used here is three cascades.
 
 - Cascade 0 covers the floor with a cell of about 0.28 m, 16 directions, and an interval of one cell. Spacing, direction count, and interval length double at each next cascade.
 - The world cascade covers the floor plus four probes of margin on each side. An on-screen miss reads that cascade.
-- Each probe stores the interval, not an average of its directions. The fragment shader merges the directions with the face normal, then multiplies by the albedo and `1 / π`.
+- Each probe stores the interval, not an average of its directions. The ray fan at a probe, and the fan at a shaded point, is rotated by a fraction of one step from a hash of that position. The fragment shader merges the directions with the face normal, then multiplies by the albedo and `1 / π`.
 - A lamp uses cosine over inverse-square falloff. There is no fill light. Empty space is cleared to black.
 
 ## What this cut does not do

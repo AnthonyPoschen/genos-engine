@@ -137,12 +137,12 @@ impl Renderer {
         self.wire_on = wireframe;
         let overlay_count = overlay_verts.len() as u32;
         // Overlay rectangles are not in `pack`. A short player or lamp move keeps the field.
-        let rewrite_light = !self.gpu.light_ready
-            || self
-                .field_anchor
-                .as_ref()
-                .map(|anchor| !anchor.holds(&pack))
-                .unwrap_or(true);
+        // An unfinished cascade is not a reason to start again.
+        let rewrite_light = self
+            .field_anchor
+            .as_ref()
+            .map(|anchor| !anchor.holds(&pack))
+            .unwrap_or(true);
         // The dynamic patch belongs to the frame that is about to record.
         let slot = self.gpu.flight;
         self.gpu.wait_flight(slot)?;
@@ -239,41 +239,24 @@ impl Renderer {
             // The cache caught up. Bake it into the screen field on this draw.
             self.screen_key = None;
         }
-        // A readback has to show this camera. A turn does not rebuild the world lattice.
+        // The cascades stay on the floor. A turn does not rebuild them.
         let rebuild = readback || rewrite_light || self.screen_key != Some(key);
         if rebuild {
             let mut pack = pack;
             pack::apply_view(&mut pack, camera, aspect, self.width, self.height);
             self.gpu.upload_scene(&pack)?;
-            if rewrite_light {
-                self.gpu.mark_world_dirty();
-            }
             self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
             self.screen_key = Some(key);
         }
         self.gpu.poll_light()?;
         let wait_light = readback || !self.gpu.light_ready;
-        if wait_light {
-            // A readback has to show this build. The first picture waits once.
-            if rebuild {
-                self.gpu.kick_light(true)?;
-            } else {
-                self.gpu.kick_world(true)?;
-            }
-        }
+        // One cascade row when the build is already going. A readback finishes every row.
+        self.gpu.kick_light(wait_light)?;
         self.gpu.note_vertex_count(world_dynamic);
         self.gpu.set_draws(draws);
         self.gpu.note_overlay_count(overlay_count);
         self.gpu.wire_on = wireframe;
         self.gpu.record_and_submit(&matrix)?;
-        if !wait_light {
-            // The gather writes the other field. This submit does not wait for it.
-            if rebuild {
-                self.gpu.kick_light(false)?;
-            } else {
-                self.gpu.kick_world(false)?;
-            }
-        }
         let pixels = if readback {
             self.gpu.wait_gpu()?;
             Some(self.gpu.read_color()?)
@@ -3006,7 +2989,7 @@ impl Gpu {
                 }
             }
             if !self.light_busy && self.light_building {
-                self.submit_hybrid(wait, true)?;
+                self.submit_slice()?;
             }
             let more = self.pending_light.is_some() || self.light_busy || self.light_building;
             if !wait || !more {
@@ -3107,11 +3090,9 @@ impl Gpu {
         self.light_busy = false;
         if self.light_pass >= LIGHT_SLICES {
             self.light_building = false;
-            if self.swap_on_done {
-                self.light_shown = self.light_dst;
-                self.desc_set = self.light_sets[self.light_shown];
-                self.light_ready = true;
-            }
+            self.light_shown = self.light_dst;
+            self.desc_set = self.light_sets[self.light_shown];
+            self.light_ready = true;
             self.light_wait_graphics = true;
         }
         Ok(())
@@ -3124,12 +3105,14 @@ impl Gpu {
     }
 
     /// A lamp or occluder change restarts the world cache. The screen field does not wait for it.
+    #[allow(dead_code)]
     fn mark_world_dirty(&mut self) {
         self.world_pending = self.world_bands.max(1);
         self.world_row = 0;
     }
 
     /// One world band into the cache the picture reads. The screen field stays.
+    #[allow(dead_code)]
     fn kick_world(&mut self, wait: bool) -> Result<(), String> {
         if self.world_pending == 0 {
             return Ok(());
@@ -3195,6 +3178,94 @@ impl Gpu {
         Ok(())
     }
 
+    /// One workgroup row of the current cascade. The next call continues the build.
+    fn submit_slice(&mut self) -> Result<(), String> {
+        let dst = self.light_dst;
+        let pass = self.light_pass;
+        let row = self.light_row;
+        let cascade = 2 - (pass % 3) as usize;
+        let bands = self.light_rows[cascade].max(1);
+        let cols = self.light_cols[cascade].max(1);
+        let rows = 1u32;
+        let fences = [self.light_fence];
+        unsafe {
+            check(
+                (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
+                "reset light fence",
+            )?;
+            check((self.fns.reset_cmd)(self.light_cmd, 0), "reset light cmd")?;
+            #[repr(C)]
+            struct BeginInfo {
+                s_type: i32,
+                next: *const c_void,
+                flags: u32,
+                inherit: *const c_void,
+            }
+            let begin = BeginInfo {
+                s_type: 42,
+                next: std::ptr::null(),
+                flags: 1,
+                inherit: std::ptr::null(),
+            };
+            check(
+                (self.fns.begin_cmd)(self.light_cmd, &begin as *const BeginInfo as *const u8),
+                "begin light",
+            )?;
+        }
+        self.dispatch_light_slice(self.light_cmd, self.light_sets[dst], pass, row, rows, cols)?;
+        unsafe {
+            check((self.fns.end_cmd)(self.light_cmd), "end light")?;
+            #[repr(C)]
+            struct Submit {
+                s_type: i32,
+                next: *const c_void,
+                wait_count: u32,
+                waits: *const Handle,
+                stages: *const u32,
+                cmd_count: u32,
+                cmds: *const Handle,
+                signal_count: u32,
+                signals: *const Handle,
+            }
+            let cmd = [self.light_cmd];
+            let wait_sem = [self.light_sem];
+            let signal_sem = [self.light_sem];
+            let wait_stage = 0x800u32;
+            let submit = Submit {
+                s_type: 4,
+                next: std::ptr::null(),
+                wait_count: u32::from(self.light_sem_hot),
+                waits: wait_sem.as_ptr(),
+                stages: &wait_stage,
+                cmd_count: 1,
+                cmds: cmd.as_ptr(),
+                signal_count: 1,
+                signals: signal_sem.as_ptr(),
+            };
+            self.light_sem_hot = true;
+            check(
+                (self.fns.queue_submit)(
+                    self.compute_queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    self.light_fence,
+                ),
+                "light submit",
+            )?;
+        }
+        let mut next_row = row + rows;
+        let mut next_pass = pass;
+        if next_row >= bands {
+            next_row = 0;
+            next_pass += 1;
+        }
+        self.light_row = next_row;
+        self.light_pass = next_pass;
+        self.light_busy = true;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
     fn submit_hybrid(&mut self, all_world: bool, screen: bool) -> Result<(), String> {
         self.swap_on_done = screen;
         let dst = self.light_dst;
@@ -3380,6 +3451,7 @@ impl Gpu {
 
     /// World bands, then the screen field when `screen` is set.
     /// A readback fills every world band. An interactive frame writes one band while the cache is dirty.
+    #[allow(dead_code)]
     fn record_hybrid(
         &mut self,
         cmd: Handle,
@@ -3387,44 +3459,18 @@ impl Gpu {
         all_world: bool,
         screen: bool,
     ) -> Result<(), String> {
-        let cols = self.world_cols.max(1);
-        let bands = self.world_bands.max(1);
-        let steps = if all_world {
-            bands
-        } else if self.world_pending > 0 {
-            1
-        } else {
-            0
-        };
-        if steps > 0 {
-            // Write the buffer the next screen gather reads. The picture keeps the other one.
-            for _ in 0..steps {
-                let row = self.world_row % bands;
-                self.dispatch_light_slice(cmd, self.light_sets[dst], 4, row, 1, cols)?;
-                self.world_row = row + 1;
-            }
-            let finished = self.world_pending > 0 && steps >= self.world_pending;
-            self.world_pending = if all_world {
-                0
-            } else {
-                self.world_pending.saturating_sub(steps)
-            };
-            // A full readback already gathered the screen against every band.
-            // The screen pass in this submit already read the finished cache.
-            if finished && !all_world && !screen {
-                self.world_refresh = true;
-            }
-        }
+        let _ = (all_world, self.world_cols, self.world_row);
         if !screen {
             return Ok(());
         }
-        let _dirs = crate::field::SCREEN_DIRS;
-        let groups_x = (self.screen_w + 7) / 8;
-        let groups_y = (self.screen_h + 7) / 8;
-        // Pass 0 stores the lamp on each hit. Pass 1 is the field the pixel reads.
-        for pass in 0..2u32 {
+        // Two bounces, farthest cascade first. The second bounce lands on the copy the pixel reads.
+        for pass in 0..6u32 {
+            let cascade = 2 - (pass % 3) as usize;
+            let groups_x = self.light_cols[cascade].max(1);
+            let groups_y = self.light_rows[cascade].max(1);
             self.dispatch_light_slice(cmd, self.light_sets[dst], pass, 0, groups_y, groups_x)?;
         }
+        self.world_pending = 0;
         Ok(())
     }
 

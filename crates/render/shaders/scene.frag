@@ -140,9 +140,14 @@ const float TAU = 6.2831853;
 
 bool probe_hidden(vec2 from, vec2 probe);
 
-vec4 probe_angle(uint copy, Cascade c, uint probe, float angle) {
+float ray_spin(vec2 p) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+vec4 probe_angle(uint copy, Cascade c, uint probe, vec2 probe_pos, float angle) {
     float n = max(c.dirs, 1.0);
-    float f = angle / TAU * n - 0.5;
+    float spun = angle - ray_spin(probe_pos) * (TAU / n);
+    float f = spun / TAU * n - 0.5;
     float i0 = floor(f);
     float t = clamp(f - i0, 0.0, 1.0);
     uint a = uint(mod(i0, n));
@@ -192,7 +197,7 @@ vec4 sample_interval(uint copy, uint index, vec2 xz, float angle) {
         if (probe_hidden(xz, probe_pos)) {
             continue;
         }
-        vec4 taken = probe_angle(copy, c, iz * stride + ix, angle);
+        vec4 taken = probe_angle(copy, c, iz * stride + ix, probe_pos, angle);
         if (taken.a < 0.0) {
             continue;
         }
@@ -539,16 +544,30 @@ void near_layout(out vec2 origin, out uint count_x, out uint count_z) {
 }
 
 vec3 merged_at(uint copy, vec3 world, vec2 face_n, bool uniform_disk) {
-    vec2 origin;
-    uint count_x;
-    uint count_z;
-    near_layout(origin, count_x, count_z);
-    vec2 far = origin + vec2(float(count_x), float(count_z)) * NEAR_SPACING;
-    if (world.x >= origin.x && world.z >= origin.y && world.x <= far.x && world.z <= far.y) {
-        return merged_grid(copy * FIELD_COPY, origin, NEAR_SPACING, count_x, count_z, SCREEN_DIRS, world.xz, face_n, uniform_disk);
+    // Cascade 0 already stores the merged interval. A miss there included the farther ranges.
+    Cascade near = scene.cascades[0];
+    uint dirs = uint(max(near.dirs, 1.0));
+    float step = TAU / float(dirs);
+    float spin = ray_spin(world.xz);
+    vec3 sum = vec3(0.0);
+    float weight = 0.0;
+    for (uint d = 0u; d < dirs; d++) {
+        float angle = (float(d) + spin + 0.5) * step;
+        float w = 1.0;
+        if (!uniform_disk) {
+            w = dot(face_n, vec2(cos(angle), sin(angle)));
+            if (w <= 0.0) {
+                continue;
+            }
+        }
+        vec4 near_i = sample_interval(copy, 0u, world.xz, angle);
+        sum += near_i.rgb * w;
+        weight += w;
     }
-    world_layout(origin, count_x, count_z);
-    return merged_grid(WORLD_OFFSET, origin, WORLD_SPACING, count_x, count_z, WORLD_DIRS, world.xz, face_n, uniform_disk);
+    if (weight <= 1.0e-4) {
+        return vec3(0.0);
+    }
+    return sum / weight;
 }
 
 bool inside_footprint(vec2 xz, Occ occ) {

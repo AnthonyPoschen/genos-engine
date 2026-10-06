@@ -16,7 +16,7 @@ A miss merges with the world cache. An average of nearby probes does not stand i
 
 A direct ray stops when it hits a wall or a solid. The ray uses those shapes. It is not a physics collision step. A ray that clears the top of a wall still arrives. A bounce ray stops on the first surface in its interval.
 
-Each face is shaded from a point just outside that face. The back of a wall stays dark when the lamp is on the other side. A brighter lamp does not pass through that wall. A lamp above an object colors the floor on every side. The vertical faces of that object stay unlit by that lamp. A lamp on one side does not color the far side.
+Each face is shaded from a point just outside that face. The back of a wall stays dark when the lamp is on the other side. A brighter lamp does not pass through that wall. A lamp above an object tints the floor around it. The shadow under the object stays dark. The vertical faces of that object stay unlit by that lamp. A lamp on one side does not color the far side.
 
 A lit wall adds its bounce to the floor in front of that wall through the interval merge. The floor behind that wall stays dark.
 
@@ -36,7 +36,7 @@ The GPU compute shader `shaders/light.comp` builds the field. The fragment shade
 
 Packed object ranges, colors, and texture ids live in one GPU buffer. An object with no texture stores texture id 0. A later frame does not upload that buffer again when the mesh is unchanged.
 
-The picture field is a world lattice, one probe per 16 pixels of budget, with 16 directions and a 4 m interval. It rebuilds when a lamp or an occluder changes, or when the grid size changes. A turn does not rebuild it. The pixel reads that lattice by world position. A point outside it reads the world cache. A readback fills every world band before the picture.
+The picture field is three radiance cascades on the floor. Spacing, direction count, and interval length double at each cascade. A near miss keeps the farther range. Four bounces run, farthest cascade first. Each frame writes one row. The pixel reads the merged near cascade. A turn does not rebuild the field. A readback finishes the build before the picture.
 
 A coarse world grid covers the floor at 2.5 m. A lamp or occluder change marks that cache dirty. Each later frame writes one band. A still camera with a clean cache submits no world work. A screen miss reads the cache, including light behind the camera.
 
