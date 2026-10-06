@@ -85,6 +85,7 @@ fn run() -> Result<(), String> {
         }
         update(
             &mut camera,
+            &mut world.scene,
             &Actions {
                 forward: move_axis.y,
                 strafe: move_axis.x,

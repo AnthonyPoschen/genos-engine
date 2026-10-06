@@ -1,11 +1,22 @@
 use genos_scene::{
-    transform_point, update, view_proj, viewport_uv, Actions, Camera, CAMERA_HEIGHT,
-    PITCH_LIMIT,
+    transform_point, update, view_proj, viewport_uv, Actions, Camera, Floor, Scene, Vec3,
+    CAMERA_HEIGHT, PITCH_LIMIT,
 };
 use std::f32::consts::FRAC_PI_2;
 
 fn tick(camera: &mut Camera, actions: &Actions, dt: f32) {
-    update(camera, actions, dt);
+    let mut scene = Scene {
+        floor: Floor {
+            position: Vec3::ZERO,
+            half_x: 1.0,
+            half_z: 1.0,
+            color: [1.0, 1.0, 1.0],
+        },
+        walls: Vec::new(),
+        solids: Vec::new(),
+        lights: Vec::new(),
+    };
+    update(camera, &mut scene, actions, dt);
 }
 
 fn cold() -> Camera {

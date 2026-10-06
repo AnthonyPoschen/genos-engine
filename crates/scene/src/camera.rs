@@ -2,6 +2,7 @@ use genos_math::{Mat4, Vec3};
 use genos_physics::{step, Body, World, GRAVITY};
 use std::f32::consts::{FRAC_PI_2, TAU};
 
+use crate::codimation::Codimation;
 use crate::types::{Scene, Shape, Solid};
 
 /// Eye height of the character controller. A resting capsule keeps the eye here.
@@ -51,6 +52,14 @@ pub struct Camera {
     pub view: usize,
     /// Body index of the first solid. `None` until `attach_scene`.
     solid_origin: Option<usize>,
+    /// Looping paths bound to solids. The frame step drives these bodies.
+    codimations: Vec<BoundCodimation>,
+}
+
+#[derive(Clone, Debug)]
+struct BoundCodimation {
+    solid: usize,
+    motion: Codimation,
 }
 
 impl Camera {
@@ -72,7 +81,23 @@ impl Camera {
             physics,
             view: 0,
             solid_origin: None,
+            codimations: Vec::new(),
         }
+    }
+
+    /// Bind a looping path to one solid. The solid should already sit on the first position.
+    /// Returns false when `solid` is not in `scene`.
+    pub fn codimate(&mut self, scene: &Scene, solid: usize, motion: Codimation) -> bool {
+        if solid >= scene.solids.len() {
+            return false;
+        }
+        if let Some(slot) = self.codimations.iter_mut().find(|slot| slot.solid == solid) {
+            slot.motion = motion;
+        } else {
+            self.codimations.push(BoundCodimation { solid, motion });
+        }
+        self.arm_solid(solid);
+        true
     }
 
     /// Replace the world with the room colliders and one capsule at the current eye.
@@ -98,6 +123,11 @@ impl Camera {
         self.view = physics.count - 1;
         self.solid_origin = Some(1 + scene.walls.len());
         self.physics = physics;
+        let count = self.codimations.len();
+        for index in 0..count {
+            let solid = self.codimations[index].solid;
+            self.arm_solid(solid);
+        }
     }
 
     /// Move the eye and the view capsule together. The next step starts here.
@@ -112,6 +142,35 @@ impl Camera {
         }
     }
 
+    /// Stop the looping path on this solid so a later step does not move it.
+    pub fn release_codimation(&mut self, solid: usize) {
+        self.codimations.retain(|slot| slot.solid != solid);
+    }
+
+    /// Drop the path on `solid` and keep later paths pointed at the solids that remain.
+    pub fn solid_removed(&mut self, solid: usize) {
+        self.codimations.retain(|slot| slot.solid != solid);
+        for slot in &mut self.codimations {
+            if slot.solid > solid {
+                slot.solid -= 1;
+            }
+        }
+    }
+
+    fn arm_solid(&mut self, solid: usize) {
+        let Some(origin) = self.solid_origin else {
+            return;
+        };
+        let index = origin + solid;
+        if index >= self.physics.count || index == self.view {
+            return;
+        }
+        let body = &mut self.physics.bodies[index];
+        if body.inverse_mass == 0.0 {
+            body.inverse_mass = 1.0;
+        }
+        body.motor = true;
+    }
 }
 
 fn view_capsule(eye: Vec3) -> Body {
@@ -174,8 +233,73 @@ fn center_lift(solid: &Solid) -> f32 {
     }
 }
 
+/// Submit each codimation displacement for this slice. Contact still runs inside `step`.
+fn drive_codimations(camera: &mut Camera, scene: &Scene, dt: f32) {
+    if !(dt > 0.0) {
+        return;
+    }
+    let gravity_y = camera.physics.gravity.y;
+    let Some(origin) = camera.solid_origin else {
+        return;
+    };
+    let count = camera.codimations.len();
+    for index in 0..count {
+        let solid_index = camera.codimations[index].solid;
+        let lift = {
+            let Some(solid) = scene.solids.get(solid_index) else {
+                continue;
+            };
+            center_lift(solid)
+        };
+        let body_index = origin + solid_index;
+        if body_index >= camera.physics.count || body_index == camera.view {
+            continue;
+        }
+        let before = camera.codimations[index].motion.sample();
+        camera.codimations[index].motion.advance(dt);
+        let after = camera.codimations[index].motion.sample();
+        let body = &mut camera.physics.bodies[body_index];
+        if body.inverse_mass == 0.0 {
+            body.inverse_mass = 1.0;
+        }
+        body.motor = true;
+        let current = body.position - Vec3::Y * lift;
+        let mut delta = after - current;
+        let path_step = (after - before).length();
+        let distance = delta.length();
+        if distance > path_step && distance > 1.0e-8 {
+            delta = delta * (path_step / distance);
+        }
+        let velocity = delta * (1.0 / dt);
+        body.wish = Vec3::new(velocity.x, 0.0, velocity.z);
+        // Gravity is applied inside the step. This preset lands on the path's vertical speed.
+        body.velocity.y = velocity.y - gravity_y * dt;
+    }
+}
+
+fn write_codimations(camera: &Camera, scene: &mut Scene) {
+    let Some(origin) = camera.solid_origin else {
+        return;
+    };
+    for slot in &camera.codimations {
+        let body_index = origin + slot.solid;
+        if body_index == camera.view {
+            continue;
+        }
+        let Some(body) = camera.physics.bodies.get(body_index) else {
+            continue;
+        };
+        let position = body.position;
+        let Some(solid) = scene.solids.get_mut(slot.solid) else {
+            continue;
+        };
+        solid.position = position - Vec3::Y * center_lift(solid);
+    }
+}
+
 /// Integrate look, then the physics step. Move input is a desired horizontal velocity.
-pub fn update(camera: &mut Camera, actions: &Actions, dt: f32) {
+/// A codimated solid moves in the same slices. The resolved body position is written back.
+pub fn update(camera: &mut Camera, scene: &mut Scene, actions: &Actions, dt: f32) {
     if actions.escape {
         camera.captured = false;
     } else if actions.capture_click {
@@ -204,7 +328,9 @@ pub fn update(camera: &mut Camera, actions: &Actions, dt: f32) {
     let slice = 1.0 / 60.0;
     while left > 0.0 {
         let step_dt = left.min(slice);
+        drive_codimations(camera, scene, step_dt);
         camera.physics = step(&camera.physics, step_dt);
+        write_codimations(camera, scene);
         left -= step_dt;
     }
     if let Some(body) = camera.physics.bodies.get(camera.view) {

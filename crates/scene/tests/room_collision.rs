@@ -16,10 +16,10 @@ fn placed(scene: &Scene, x: f32, z: f32, yaw: f32) -> Camera {
     camera
 }
 
-fn hold(camera: &mut Camera, _scene: &mut Scene, actions: Actions, seconds: f32) {
+fn hold(camera: &mut Camera, scene: &mut Scene, actions: Actions, seconds: f32) {
     let frames = (seconds * 60.0).round() as i32;
     for _ in 0..frames {
-        update(camera, &actions, 1.0 / 60.0);
+        update(camera, scene, &actions, 1.0 / 60.0);
     }
 }
 
