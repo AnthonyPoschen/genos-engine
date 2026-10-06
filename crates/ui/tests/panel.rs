@@ -652,6 +652,8 @@ fn lamp_scene(position: Vec3) -> Scene {
         lights: vec![Light {
             position,
             color: [0.5, 0.5, 0.5],
+
+            direction: Vec3::ZERO,
         }],
     }
 }

@@ -29,6 +29,36 @@ pub(crate) const FIELD_COPY: u32 = 524288;
 pub(crate) const BOUNCES: u32 = 4;
 /// Coarse world-probe spacing. These probes update behind the screen field.
 pub(crate) const WORLD_SPACING: f32 = 2.5;
+/// Directions in the screen field. The pixel averages these.
+pub(crate) const SCREEN_DIRS: u32 = 16;
+/// One screen probe covers this many pixels.
+pub(crate) const SCREEN_TILE: u32 = 16;
+/// Caps so a 720p frame stays near an 80 by 45 gather.
+/// `SCREEN_MAX_W * SCREEN_MAX_H * SCREEN_DIRS` stays below the world-cache texel.
+pub(crate) const SCREEN_MAX_W: u32 = 80;
+pub(crate) const SCREEN_MAX_H: u32 = 45;
+
+/// Screen-probe counts for a viewport. The cost stays fixed as the world grows.
+pub(crate) fn screen_grid(width: u32, height: u32) -> (u32, u32) {
+    (
+        (width / SCREEN_TILE).clamp(1, SCREEN_MAX_W),
+        (height / SCREEN_TILE).clamp(1, SCREEN_MAX_H),
+    )
+}
+
+/// Grid size of the screen field. A match keeps that field.
+/// A camera move does not rebuild it. The fragment keeps the camera that built it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScreenKey {
+    pub grid_w: u32,
+    pub grid_h: u32,
+}
+
+/// Key for the screen gather. A camera move does not rebuild it.
+pub(crate) fn screen_key(width: u32, height: u32) -> ScreenKey {
+    let (grid_w, grid_h) = screen_grid(width, height);
+    ScreenKey { grid_w, grid_h }
+}
 
 /// World-probe counts for a floor. The margin is two cells on each side.
 pub(crate) fn world_counts(half_x: f32, half_z: f32) -> (u32, u32) {
@@ -60,8 +90,7 @@ pub(crate) fn cascade_plans(floor: &genos_scene::Floor) -> [CascadePlan; 3] {
     let mut spacing0 = TARGET_SPACING;
     loop {
         let plans = plans_at(floor, spacing0);
-        let used = plans[2].offset
-            + plans[2].count_x * plans[2].count_z * plans[2].dirs;
+        let used = plans[2].offset + plans[2].count_x * plans[2].count_z * plans[2].dirs;
         if used <= FIELD_COPY || spacing0 > 2.0 {
             debug_assert!(
                 used <= FIELD_COPY,
@@ -216,18 +245,40 @@ fn one_lamp(
     normal: [f32; 3],
 ) -> f32 {
     let use_facing = normal[0] != 0.0 || normal[1] != 0.0 || normal[2] != 0.0;
-    let dx = light.position.x - x;
-    let dy = light.position.y - y;
-    let dz = light.position.z - z;
+    let (dx, dy, dz, dist2, reach) = lamp_ray(light, x, y, z);
     if use_facing && dx * normal[0] + dy * normal[1] + dz * normal[2] <= 0.0 {
         return 0.0;
     }
-    if lamp_is_blocked(scene, x, y, z, light) {
+    if lamp_is_blocked(scene, x, y, z, [dx, dy, dz], reach) {
         return 0.0;
     }
-    let dist2 = dx * dx + dy * dy + dz * dz;
     let strength = (light.color[0] + light.color[1] + light.color[2]) / 3.0;
     lamp_reach(dist2, strength, dx, dy, dz, normal)
+}
+
+/// Direction toward the source, the falloff distance squared, and the shadow-ray length.
+/// A sun uses the same falloff as a point lamp 7 m away.
+fn lamp_ray(light: &genos_scene::Light, x: f32, y: f32, z: f32) -> (f32, f32, f32, f32, f32) {
+    let span = light.direction.x * light.direction.x
+        + light.direction.y * light.direction.y
+        + light.direction.z * light.direction.z;
+    if span > 1.0e-8 {
+        let len = span.sqrt();
+        // Scale to length 7 so the cosine uses the same distance as the 7 m falloff.
+        let scale = 7.0 / len;
+        return (
+            -light.direction.x * scale,
+            -light.direction.y * scale,
+            -light.direction.z * scale,
+            49.0,
+            80.0,
+        );
+    }
+    let dx = light.position.x - x;
+    let dy = light.position.y - y;
+    let dz = light.position.z - z;
+    let dist2 = dx * dx + dy * dy + dz * dz;
+    (dx, dy, dz, dist2, dist2.sqrt())
 }
 
 /// Scene-lamp unit. The falloff is cosine over inverse-square.
@@ -250,18 +301,16 @@ fn lamp_reach(dist2: f32, strength: f32, dx: f32, dy: f32, dz: f32, normal: [f32
     strength * shade * LAMP_UNIT / (1.0 + dist2)
 }
 
-fn lamp_is_blocked(scene: &Scene, x: f32, y: f32, z: f32, light: &genos_scene::Light) -> bool {
+fn lamp_is_blocked(scene: &Scene, x: f32, y: f32, z: f32, toward: [f32; 3], reach: f32) -> bool {
     if covered_by_object(scene, x, y, z) {
         return true;
     }
-    let dx = light.position.x - x;
-    let dy = light.position.y - y;
-    let dz = light.position.z - z;
-    let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-    if dist < 1.0e-3 {
+    let dist = (toward[0] * toward[0] + toward[1] * toward[1] + toward[2] * toward[2]).sqrt();
+    if dist < 1.0e-3 || reach < 1.0e-3 {
         return false;
     }
-    let dir = [dx / dist, dy / dist, dz / dist];
+    let dir = [toward[0] / dist, toward[1] / dist, toward[2] / dist];
+    let dist = reach;
     let origin = [x, y, z];
     for solid in &scene.solids {
         if point_in_solid(x, y, z, solid) {
@@ -339,17 +388,14 @@ pub(crate) fn illuminate_resolved(
         if bit != 0 && blocked & bit != 0 {
             continue;
         }
-        let dx = light.position.x - x;
-        let dy = light.position.y - y;
-        let dz = light.position.z - z;
+        let (dx, dy, dz, dist2, reach) = lamp_ray(light, x, y, z);
         if use_facing && dx * normal[0] + dy * normal[1] + dz * normal[2] <= 0.0 {
             continue;
         }
         let known = bit != 0 && resolved & bit != 0;
-        if !known && lamp_is_blocked(scene, x, y, z, light) {
+        if !known && lamp_is_blocked(scene, x, y, z, [dx, dy, dz], reach) {
             continue;
         }
-        let dist2 = dx * dx + dy * dy + dz * dz;
         let strength = (light.color[0] + light.color[1] + light.color[2]) / 3.0;
         incoming += lamp_reach(dist2, strength, dx, dy, dz, normal);
     }
@@ -498,8 +544,7 @@ fn build_level(scene: &Scene, plan: &CascadePlan, prev: Option<&Field>) -> Casca
             for dir in 0..plan.dirs {
                 let angle = (dir as f32 + 0.5) * std::f32::consts::TAU / plan.dirs as f32;
                 let direction = [angle.cos(), angle.sin()];
-                let (color, hit_beta) =
-                    gather(scene, prev, [x, z], direction, plan.t0, plan.t1);
+                let (color, hit_beta) = gather(scene, prev, [x, z], direction, plan.t0, plan.t1);
                 radiance.push(color);
                 beta.push(hit_beta);
             }
@@ -969,6 +1014,8 @@ mod tests {
             lights: vec![Light {
                 position: Vec3::new(0.0, y, 0.0),
                 color: [1.0, 1.0, 1.0],
+
+                direction: Vec3::ZERO,
             }],
         }
     }

@@ -30,6 +30,8 @@ fn silhouette_world() -> World {
         lights: vec![Light {
             position: Vec3::new(0.0, 1.5, 1.5),
             color: [1.0, 1.0, 1.0],
+
+            direction: Vec3::ZERO,
         }],
     });
     world.objects.push(Object {
@@ -102,6 +104,8 @@ fn press_mode(mode_id: u32) -> PictureMode {
         lights: vec![Light {
             position: Vec3::new(0.0, 4.0, 0.0),
             color: [1.0, 1.0, 1.0],
+
+            direction: Vec3::ZERO,
         }],
     };
     apply_frame_action(&mut scene, action).expect("picture mode")

@@ -491,6 +491,8 @@ fn spawn_object(inner: &mut Inner, arguments: &Value) -> Result<String, String> 
             let mut light = Light {
                 position: Vec3::new(0.0, 2.0, 0.0),
                 color: [1.0, 1.0, 1.0],
+
+                direction: Vec3::ZERO,
             };
             apply_light(&mut light, &patch);
             let id = inner.handles.alloc();

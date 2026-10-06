@@ -21,6 +21,8 @@ fn a_wall_stops_the_lamp_and_a_short_wall_does_not() {
     scene.lights = vec![Light {
         position: Vec3::new(0.0, 2.0, 0.0),
         color: [1.0, 1.0, 1.0],
+
+        direction: Vec3::ZERO,
     }];
     let lit = illuminate(&scene, 0.0, 0.2, 0.5);
     let shadow = illuminate(&scene, 0.0, 0.2, 4.0);

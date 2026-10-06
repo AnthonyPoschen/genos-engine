@@ -362,6 +362,9 @@ fn hash_light(light: &Light, hasher: &mut impl std::hash::Hasher) {
     light.color[0].to_bits().hash(hasher);
     light.color[1].to_bits().hash(hasher);
     light.color[2].to_bits().hash(hasher);
+    light.direction.x.to_bits().hash(hasher);
+    light.direction.y.to_bits().hash(hasher);
+    light.direction.z.to_bits().hash(hasher);
 }
 
 fn hash_wall(wall: &Wall, hasher: &mut impl std::hash::Hasher) {

@@ -31,6 +31,8 @@ pub struct Renderer {
     height: u32,
     /// Player and lamps the resident field was built for.
     field_anchor: Option<pack::FieldAnchor>,
+    /// Grid the screen field was built for.
+    screen_key: Option<crate::field::ScreenKey>,
     wire_on: bool,
     memory: FrameMemory,
     shapes: crate::pool::MeshPool,
@@ -54,6 +56,7 @@ impl Renderer {
             width,
             height,
             field_anchor: None,
+            screen_key: None,
             wire_on: false,
             memory: FrameMemory::default(),
             shapes: crate::pool::MeshPool::default(),
@@ -93,6 +96,15 @@ impl Renderer {
         readback: bool,
     ) -> Result<Option<Vec<u8>>, String> {
         self.draw_with_overlay(world, camera, &[], readback, false)
+    }
+
+    /// Pixels of the last presented picture.
+    ///
+    /// Waits for that draw's graphics fence. Does not wait for a light gather.
+    /// A `readback` draw already waited, and its pixels are the finished field.
+    pub fn read_picture(&mut self) -> Result<Vec<u8>, String> {
+        self.gpu.wait_gpu()?;
+        self.gpu.read_color()
     }
 
     /// Draw the world, then screen rectangles. The rectangles ignore the depth test.
@@ -222,14 +234,32 @@ impl Renderer {
             self.gpu.upload_image(&bytes)?;
             self.memory.clear_image_upload();
         }
-        self.gpu.upload_scene(&pack)?;
-        if rewrite_light {
-            self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
+        let key = crate::field::screen_key(self.width, self.height);
+        if self.gpu.take_world_refresh() {
+            // The cache caught up. Bake it into the screen field on this draw.
+            self.screen_key = None;
         }
+        // A readback has to show this camera. A turn does not rebuild the world lattice.
+        let rebuild = readback || rewrite_light || self.screen_key != Some(key);
+        if rebuild {
+            let mut pack = pack;
+            pack::apply_view(&mut pack, camera, aspect, self.width, self.height);
+            self.gpu.upload_scene(&pack)?;
+            if rewrite_light {
+                self.gpu.mark_world_dirty();
+            }
+            self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
+            self.screen_key = Some(key);
+        }
+        self.gpu.poll_light()?;
         let wait_light = readback || !self.gpu.light_ready;
         if wait_light {
             // A readback has to show this build. The first picture waits once.
-            self.gpu.kick_light(true)?;
+            if rebuild {
+                self.gpu.kick_light(true)?;
+            } else {
+                self.gpu.kick_world(true)?;
+            }
         }
         self.gpu.note_vertex_count(world_dynamic);
         self.gpu.set_draws(draws);
@@ -238,7 +268,11 @@ impl Renderer {
         self.gpu.record_and_submit(&matrix)?;
         if !wait_light {
             // The gather writes the other field. This submit does not wait for it.
-            self.gpu.kick_light(false)?;
+            if rebuild {
+                self.gpu.kick_light(false)?;
+            } else {
+                self.gpu.kick_world(false)?;
+            }
         }
         let pixels = if readback {
             self.gpu.wait_gpu()?;
@@ -302,7 +336,9 @@ impl Renderer {
         let matrix = view_proj(&camera, 1.0);
         let eye = [camera.position.x, camera.position.y, camera.position.z];
         self.memory.begin_frame();
-        let pack = pack::pack_frame(world, &matrix, eye, &mut self.memory);
+        let mut pack = pack::pack_frame(world, &matrix, eye, &mut self.memory);
+        let aspect = self.width as f32 / self.height.max(1) as f32;
+        pack::apply_view(&mut pack, &camera, aspect, self.width, self.height);
         self.gpu.wait_all_inflight()?;
         self.gpu.upload_scene(&pack)?;
         self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
@@ -503,10 +539,19 @@ struct Gpu {
     /// Workgroup columns and row-bands for the near, far, and world cascades.
     light_cols: [u32; 3],
     light_rows: [u32; 3],
-    /// Coarse world-probe grid. One band advances per screen field.
+    /// Coarse world-probe grid. One band advances per frame while the cache is dirty.
     world_cols: u32,
     world_bands: u32,
     world_row: u32,
+    /// Bands still to write after a lamp or occluder change. Zero means the cache is current.
+    world_pending: u32,
+    /// A world-only band must not replace the screen field.
+    swap_on_done: bool,
+    /// The cache finished a band cycle. The next screen gather should bake it.
+    world_refresh: bool,
+    /// Screen-probe grid from the last uploaded view.
+    screen_w: u32,
+    screen_h: u32,
     /// Chains gather slices. The last slice leaves it signaled for one picture.
     light_sem: Handle,
     light_sem_hot: bool,
@@ -1131,6 +1176,11 @@ impl Gpu {
                 world_cols: 1,
                 world_bands: 1,
                 world_row: 0,
+                world_pending: 0,
+                swap_on_done: true,
+                world_refresh: false,
+                screen_w: 1,
+                screen_h: 1,
                 light_sem: std::ptr::null_mut(),
                 light_sem_hot: false,
                 light_wait_graphics: false,
@@ -2929,6 +2979,8 @@ impl Gpu {
         let (world_x, world_z) = crate::field::world_counts(pack.floor_half_x, pack.floor_half_z);
         self.world_cols = (world_x + 7) / 8;
         self.world_bands = (world_z + 7) / 8;
+        self.screen_w = pack.grid_w.max(1);
+        self.screen_h = pack.grid_h.max(1);
         self.pending_light = Some(bytes);
         Ok(())
     }
@@ -2954,7 +3006,7 @@ impl Gpu {
                 }
             }
             if !self.light_busy && self.light_building {
-                self.submit_hybrid(wait)?;
+                self.submit_hybrid(wait, true)?;
             }
             let more = self.pending_light.is_some() || self.light_busy || self.light_building;
             if !wait || !more {
@@ -3055,10 +3107,53 @@ impl Gpu {
         self.light_busy = false;
         if self.light_pass >= LIGHT_SLICES {
             self.light_building = false;
-            self.light_shown = self.light_dst;
-            self.desc_set = self.light_sets[self.light_shown];
-            self.light_ready = true;
+            if self.swap_on_done {
+                self.light_shown = self.light_dst;
+                self.desc_set = self.light_sets[self.light_shown];
+                self.light_ready = true;
+            }
             self.light_wait_graphics = true;
+        }
+        Ok(())
+    }
+
+    fn take_world_refresh(&mut self) -> bool {
+        let refresh = self.world_refresh;
+        self.world_refresh = false;
+        refresh
+    }
+
+    /// A lamp or occluder change restarts the world cache. The screen field does not wait for it.
+    fn mark_world_dirty(&mut self) {
+        self.world_pending = self.world_bands.max(1);
+        self.world_row = 0;
+    }
+
+    /// One world band into the cache the picture reads. The screen field stays.
+    fn kick_world(&mut self, wait: bool) -> Result<(), String> {
+        if self.world_pending == 0 {
+            return Ok(());
+        }
+        self.poll_light()?;
+        if self.publish_blocks() && !wait {
+            return Ok(());
+        }
+        if self.light_busy || self.light_building {
+            if !wait {
+                return Ok(());
+            }
+            self.wait_light()?;
+        }
+        if wait && self.publish_blocks() {
+            self.drain_publish()?;
+        }
+        if self.world_pending == 0 {
+            return Ok(());
+        }
+        self.light_dst = 1 - self.light_shown;
+        self.submit_hybrid(false, false)?;
+        if wait {
+            self.wait_light()?;
         }
         Ok(())
     }
@@ -3100,7 +3195,8 @@ impl Gpu {
         Ok(())
     }
 
-    fn submit_hybrid(&mut self, all_world: bool) -> Result<(), String> {
+    fn submit_hybrid(&mut self, all_world: bool, screen: bool) -> Result<(), String> {
+        self.swap_on_done = screen;
         let dst = self.light_dst;
         let fences = [self.light_fence];
         unsafe {
@@ -3127,7 +3223,7 @@ impl Gpu {
                 "begin light",
             )?;
         }
-        self.record_hybrid(self.light_cmd, dst, all_world)?;
+        self.record_hybrid(self.light_cmd, dst, all_world, screen)?;
         unsafe {
             check((self.fns.end_cmd)(self.light_cmd), "end light")?;
             #[repr(C)]
@@ -3282,16 +3378,52 @@ impl Gpu {
         Ok(())
     }
 
-    /// The coarse world grid, then the whole screen field. Both finish in this submit.
-    fn record_hybrid(&mut self, cmd: Handle, dst: usize, _all_world: bool) -> Result<(), String> {
+    /// World bands, then the screen field when `screen` is set.
+    /// A readback fills every world band. An interactive frame writes one band while the cache is dirty.
+    fn record_hybrid(
+        &mut self,
+        cmd: Handle,
+        dst: usize,
+        all_world: bool,
+        screen: bool,
+    ) -> Result<(), String> {
         let cols = self.world_cols.max(1);
         let bands = self.world_bands.max(1);
-        self.dispatch_light_slice(cmd, self.light_sets[dst], 4, 0, bands, cols)?;
-        let near = 12u32;
-        let far = 6u32;
-        for pass in 0..4u32 {
-            let groups = if pass & 1 == 1 { near } else { far };
-            self.dispatch_light_slice(cmd, self.light_sets[dst], pass, 0, groups, groups)?;
+        let steps = if all_world {
+            bands
+        } else if self.world_pending > 0 {
+            1
+        } else {
+            0
+        };
+        if steps > 0 {
+            // Write the buffer the next screen gather reads. The picture keeps the other one.
+            for _ in 0..steps {
+                let row = self.world_row % bands;
+                self.dispatch_light_slice(cmd, self.light_sets[dst], 4, row, 1, cols)?;
+                self.world_row = row + 1;
+            }
+            let finished = self.world_pending > 0 && steps >= self.world_pending;
+            self.world_pending = if all_world {
+                0
+            } else {
+                self.world_pending.saturating_sub(steps)
+            };
+            // A full readback already gathered the screen against every band.
+            // The screen pass in this submit already read the finished cache.
+            if finished && !all_world && !screen {
+                self.world_refresh = true;
+            }
+        }
+        if !screen {
+            return Ok(());
+        }
+        let _dirs = crate::field::SCREEN_DIRS;
+        let groups_x = (self.screen_w + 7) / 8;
+        let groups_y = (self.screen_h + 7) / 8;
+        // Pass 0 stores the lamp on each hit. Pass 1 is the field the pixel reads.
+        for pass in 0..2u32 {
+            self.dispatch_light_slice(cmd, self.light_sets[dst], pass, 0, groups_y, groups_x)?;
         }
         Ok(())
     }

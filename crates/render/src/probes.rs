@@ -688,10 +688,25 @@ mod tests {
                 "shader lamp unit left the Rust field"
             );
             assert!(
+                source.contains(&format!(
+                    "const uint SCREEN_DIRS = {}u;",
+                    crate::field::SCREEN_DIRS
+                )),
+                "shader screen directions left the Rust field"
+            );
+            assert!(
+                source.contains("vec4 view_grid;"),
+                "shader view block left the scene uniform"
+            );
+            assert!(
                 source.contains("Cascade cascades[3];"),
                 "shader cascade table left the scene block"
             );
         }
+        assert!(
+            comp.contains("const float SCREEN_REACH = 4.0;"),
+            "screen interval left the gather"
+        );
     }
 
     #[test]
@@ -749,8 +764,11 @@ mod tests {
             "the draw did not upload the player"
         );
         assert_ne!(west_bytes[2224..2228], east_bytes[2224..2228]);
-        assert!(west.cascades[2].offset + west.cascades[2].count_x * west.cascades[2].count_z * west.cascades[2].dirs
-            <= crate::field::FIELD_COPY);
+        assert!(
+            west.cascades[2].offset
+                + west.cascades[2].count_x * west.cascades[2].count_z * west.cascades[2].dirs
+                <= crate::field::FIELD_COPY
+        );
     }
 
     #[test]
@@ -760,6 +778,8 @@ mod tests {
         scene.lights = vec![Light {
             position: Vec3::new(0.0, 5.0, 0.0),
             color: [1.0, 1.0, 1.0],
+
+            direction: Vec3::ZERO,
         }];
         let top = shade_surface(&scene, 0.0, 0.0, [0.0, 1.2, 0.0], [0.0, 1.0, 0.0]);
         let under = shade_surface(&scene, 0.0, 0.0, [0.0, 0.05, 0.0], [0.0, -1.0, 0.0]);
@@ -799,6 +819,8 @@ mod tests {
         scene.lights = vec![Light {
             position: Vec3::new(1.6, 0.3, 0.0),
             color: [1.0, 1.0, 1.0],
+
+            direction: Vec3::ZERO,
         }];
         let below = shade_surface(&scene, 0.0, 0.0, [0.0, 1.2, 0.0], [0.0, 1.0, 0.0]);
         assert!(
@@ -820,6 +842,8 @@ mod tests {
         scene.lights = vec![Light {
             position: Vec3::new(-4.0, 3.0, 0.0),
             color: [1.0, 1.0, 1.0],
+
+            direction: Vec3::ZERO,
         }];
         let blocked = shade_surface(&scene, 0.0, 0.0, [0.0, 1.2, 0.0], [0.0, 1.0, 0.0]);
         assert!(
@@ -835,6 +859,8 @@ mod tests {
         scene.lights = vec![Light {
             position: Vec3::new(0.0, 3.0, 6.5),
             color: [1.0, 1.0, 1.0],
+
+            direction: Vec3::ZERO,
         }];
         let player = [0.0, 6.5];
         let layout = layout_for(&scene.floor, player[0], player[1]);

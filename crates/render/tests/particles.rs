@@ -33,6 +33,8 @@ fn room(lamp: [f32; 3]) -> Scene {
         lights: vec![Light {
             position: Vec3::new(0.0, 4.0, 0.0),
             color: lamp,
+
+            direction: Vec3::ZERO,
         }],
     }
 }

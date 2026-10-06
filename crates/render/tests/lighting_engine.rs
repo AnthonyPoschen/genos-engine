@@ -316,6 +316,8 @@ fn a_visible_part_that_does_not_affect_light_follows_scene_edits() {
         lights: vec![Light {
             position: Vec3::new(0.0, 3.0, -1.5),
             color: [1.0, 1.0, 1.0],
+
+            direction: Vec3::ZERO,
         }],
     };
     let mut world = World::from_scene(scene);

@@ -61,6 +61,8 @@ fn room(blocker: bool) -> Scene {
         lights: vec![Light {
             position: Vec3::new(0.0, 7.0, 0.0),
             color: [1.0, 1.0, 1.0],
+
+            direction: Vec3::ZERO,
         }],
     }
 }

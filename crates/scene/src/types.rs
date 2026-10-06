@@ -89,6 +89,8 @@ pub struct Solid {
 pub struct Light {
     pub position: Vec3,
     pub color: [f32; 3],
+    /// Direction the rays travel. Zero keeps a point lamp at `position`.
+    pub direction: Vec3,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -27,6 +27,8 @@ fn silhouette_world() -> World {
         lights: vec![Light {
             position: Vec3::new(0.0, 1.5, 1.5),
             color: [1.0, 1.0, 1.0],
+
+            direction: Vec3::ZERO,
         }],
     });
     world.objects.push(Object {

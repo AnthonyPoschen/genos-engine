@@ -50,6 +50,8 @@ pub struct GpuObject {
 pub struct GpuLamp {
     pub pos: [f32; 3],
     pub color: [f32; 3],
+    /// True when `pos` is the direction the rays travel, not a point.
+    pub directional: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -91,6 +93,13 @@ pub struct Pack {
     pub floor_color: [f32; 3],
     pub fire: FireLight,
     pub puffs: Vec<Puff>,
+    pub(crate) view_right: [f32; 3],
+    pub(crate) view_up: [f32; 3],
+    pub(crate) view_forward: [f32; 3],
+    pub(crate) view_tan: f32,
+    pub(crate) view_aspect: f32,
+    pub(crate) grid_w: u32,
+    pub(crate) grid_h: u32,
     /// Shapes and particle spans in draw order.
     pub draws: Vec<PackedDraw>,
 }
@@ -275,6 +284,13 @@ pub fn pack_frame(
         floor_color: world.scene.floor.color,
         fire,
         puffs,
+        view_right: [0.0; 3],
+        view_up: [0.0, 1.0, 0.0],
+        view_forward: [0.0, 0.0, -1.0],
+        view_tan: (30.0_f32.to_radians()).tan(),
+        view_aspect: 1.0,
+        grid_w: 1,
+        grid_h: 1,
         draws,
     }
 }
@@ -497,10 +513,11 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
         let lamp = pack.lamps.get(index);
         let pos = lamp.map(|lamp| lamp.pos).unwrap_or([0.0; 3]);
         let color = lamp.map(|lamp| lamp.color).unwrap_or([0.0; 3]);
+        let directional = lamp.is_some_and(|lamp| lamp.directional);
         push_f32(&mut bytes, pos[0]);
         push_f32(&mut bytes, pos[1]);
         push_f32(&mut bytes, pos[2]);
-        push_f32(&mut bytes, 0.0);
+        push_f32(&mut bytes, if directional { 1.0 } else { 0.0 });
         push_f32(&mut bytes, color[0]);
         push_f32(&mut bytes, color[1]);
         push_f32(&mut bytes, color[2]);
@@ -596,7 +613,46 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
         push_f32(&mut bytes, 0.0);
         push_f32(&mut bytes, 0.0);
     }
+    push_f32(&mut bytes, pack.view_right[0]);
+    push_f32(&mut bytes, pack.view_right[1]);
+    push_f32(&mut bytes, pack.view_right[2]);
+    push_f32(&mut bytes, pack.view_tan);
+    push_f32(&mut bytes, pack.view_up[0]);
+    push_f32(&mut bytes, pack.view_up[1]);
+    push_f32(&mut bytes, pack.view_up[2]);
+    push_f32(&mut bytes, 0.0);
+    push_f32(&mut bytes, pack.view_forward[0]);
+    push_f32(&mut bytes, pack.view_forward[1]);
+    push_f32(&mut bytes, pack.view_forward[2]);
+    push_f32(&mut bytes, pack.view_aspect);
+    push_f32(&mut bytes, pack.grid_w as f32);
+    push_f32(&mut bytes, pack.grid_h as f32);
+    push_f32(&mut bytes, 0.0);
+    push_f32(&mut bytes, 0.0);
+    debug_assert!(bytes.len() <= 4096, "scene block is {} bytes", bytes.len());
     bytes
+}
+
+pub(crate) fn apply_view(
+    pack: &mut Pack,
+    camera: &genos_scene::Camera,
+    aspect: f32,
+    width: u32,
+    height: u32,
+) {
+    let forward = genos_scene::look_direction(camera.yaw, camera.pitch);
+    let mut right = forward.cross(genos_scene::Vec3::Y);
+    let scale = right.length().max(1.0e-6);
+    right = right / scale;
+    let up = right.cross(forward);
+    let (grid_w, grid_h) = crate::field::screen_grid(width, height);
+    pack.view_right = [right.x, right.y, right.z];
+    pack.view_up = [up.x, up.y, up.z];
+    pack.view_forward = [forward.x, forward.y, forward.z];
+    pack.view_tan = (30.0_f32.to_radians()).tan();
+    pack.view_aspect = aspect.max(0.01);
+    pack.grid_w = grid_w;
+    pack.grid_h = grid_h;
 }
 
 pub fn overlay_vertex(pos: [f32; 3], color: [f32; 3]) -> GpuVertex {
@@ -615,9 +671,28 @@ fn lamps_of(world: &World) -> Vec<GpuLamp> {
         .lights
         .iter()
         .take(MAX_LAMPS)
-        .map(|light| GpuLamp {
-            pos: [light.position.x, light.position.y, light.position.z],
-            color: light.color,
+        .map(|light| {
+            let span = light.direction.x * light.direction.x
+                + light.direction.y * light.direction.y
+                + light.direction.z * light.direction.z;
+            if span > 1.0e-8 {
+                let len = span.sqrt();
+                GpuLamp {
+                    pos: [
+                        light.direction.x / len,
+                        light.direction.y / len,
+                        light.direction.z / len,
+                    ],
+                    color: light.color,
+                    directional: true,
+                }
+            } else {
+                GpuLamp {
+                    pos: [light.position.x, light.position.y, light.position.z],
+                    color: light.color,
+                    directional: false,
+                }
+            }
         })
         .collect()
 }
@@ -1430,6 +1505,7 @@ impl FieldAnchor {
         let mut lamps = [GpuLamp {
             pos: [0.0; 3],
             color: [0.0; 3],
+            directional: false,
         }; MAX_LAMPS];
         let lamp_count = pack.lamps.len().min(MAX_LAMPS);
         lamps[..lamp_count].copy_from_slice(&pack.lamps[..lamp_count]);
@@ -1450,6 +1526,14 @@ impl FieldAnchor {
         for (lamp, old) in pack.lamps.iter().zip(self.lamps.iter()) {
             if lamp.color.map(f32::to_bits) != old.color.map(f32::to_bits) {
                 return false;
+            }
+            if lamp.directional || old.directional {
+                if lamp.directional != old.directional
+                    || lamp.pos.map(f32::to_bits) != old.pos.map(f32::to_bits)
+                {
+                    return false;
+                }
+                continue;
             }
             let delta = [
                 lamp.pos[0] - old.pos[0],
@@ -1580,6 +1664,8 @@ mod tests {
             lights: vec![Light {
                 position: Vec3::new(0.0, 4.0, 0.0),
                 color: [1.0, 1.0, 1.0],
+
+                direction: Vec3::ZERO,
             }],
         };
         let world = World::from_scene(scene);
@@ -1655,6 +1741,8 @@ mod tests {
             lights: vec![Light {
                 position: Vec3::new(lamp[0], lamp[1], lamp[2]),
                 color: [1.0, 1.0, 1.0],
+
+                direction: Vec3::ZERO,
             }],
         };
         let world = World::from_scene(scene);

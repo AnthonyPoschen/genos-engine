@@ -34,9 +34,13 @@ At a point, walk the directions of the nearest probes.
 
 The merged colors are blended between the four surrounding near probes. A lookup is not a copy of the single nearest square. The floor mesh asks for a color at each vertex, and the rasterizer blends those vertices.
 
-The screen grid covers a 48 m window around the camera with 96 probes on a side and 8 directions. Its near interval is that whole window, so a wall you walk toward does not change cascade. Rays that miss the window read the coarse world grid. The picture always samples this screen grid. It does not switch to the coarse grid at a distance. An upward face reads probes outside that shape. It does not read the empty probes inside the footprint. A lamp that cannot see that face does not light it.
+The picture gather places one probe on each 16 by 16 pixel tile. A 720p frame stays at or under 80 by 45 probes. Those probes sit on a world lattice around the eye, 0.5 m apart. A turn does not move the lattice. Each probe traces 4 m. The last 0.5 m blends into the world cache. A miss reads that cache.
 
-The field is rebuilt when a lamp moves by about a meter, or when a lamp color, an occluder, or the light-affecting medium changes. A camera move does not rebuild it. Screen rectangles do not rebuild it. A hidden object that does not affect light is not part of that gather. A ray that starts inside a wall or a solid does not leave through the far side. That exit was painting the lit face onto the back face.
+The world cache is a 2.5 m grid with 8 directions. A lamp change marks the cache dirty. Each frame writes one band until the cache is current. A still camera with a clean cache submits no world work. The pixel reads the screen probes. A point outside that grid reads the world cache.
+
+The blend drops a probe behind the shaded face. It also drops a probe whose hit is much closer than the shaded point. An upward face reads probes outside its footprint. A probe inside that footprint stores no light.
+
+The field rebuilds when the grid size changes. A lamp change or an occluder change rebuilds it too. A turn does not rebuild it. The lattice stays on the eye that built it. A still camera keeps the field. Screen rectangles do not rebuild it. A hidden object that does not affect light is not part of that gather. A ray that starts inside a wall or a solid does not leave through the far side. That exit was painting the lit face onto the back face.
 
 ## Material color
 
@@ -46,11 +50,13 @@ A lamp reaches a point only when the straight ray misses every wall and solid. T
 
 Each face is lit from a point just outside that face, and only when that face points toward the lamp. A face that only grazes the lamp gets less of that lamp. Light from a lamp about one meter away stays below a flat white. Light a few meters from the lamp is dimmer than light next to the lamp. A unit white lamp about 7 m above a white floor stays bright enough to read. A floor point inside an object's footprint gets no lamp. A point on the lamp side, outside that footprint, stays lit. The shadow edge is the lamp ray that hits a wall or a solid. A sample at the center of a wall is inside the volume. That sample does not light the back face. A probe inside that volume stores no light. A shaded point does not read a probe across a wall.
 
-Light that leaves a surface is the arriving irradiance times the surface color and one reflectance. The arrival is the lamps plus the merged intervals from the previous bounce pass. A material can set a reflectance from 0 to 1. A missing reflectance is `1 / π`. A material can set how much of its color mixes into the bounce. A missing mix uses the full surface color. A lamp above an object colors the floor on every side. A lamp on one side does not color the far side. A lit wall adds its bounce to the floor in front of that wall through the interval merge. The floor behind that wall stays dark.
+The pixel lamp ray is the only direct term. The probe field stores the light that leaves a hit toward other surfaces. The gather the pixel reads is the screen probe grid. A wide wall stores the lamp that leaves the hit. A small solid also stores the screen gather. The lamp on the shaded point stays in the pixel ray. The world cache fills a miss. Light that leaves a surface is the arriving irradiance times the surface color and one reflectance. A material can set a reflectance from 0 to 1. A missing reflectance is `1 / π`. A material can set how much of its color mixes into the bounce. A missing mix uses the full surface color. A lamp above an object colors the floor on every side. A lamp on one side does not color the far side. A lit wall adds its bounce to the floor in front of that wall through the interval merge. The floor behind that wall stays dark.
 
 A red solid in a white lamp throws red light. A white floor shows that red next to the solid, on top of the white the lamp puts there directly. A colored receiver multiplies the bounce by its own color as well.
 
-The GPU builds the field in four passes on a second queue, a band of probe rows at a time. The picture keeps the last finished field until that gather completes. The first pass records light leaving each material under the lamps. Each later pass bounces that light once more and reads only the previous pass of the same build. A hit stores its color even when that color is black, so a dark face blocks the farther interval. A miss blends the next coarser range. Neither pass reads the previous frame. The CPU uploads positions, colors, texture ids, and lamp parameters. It does not compute the lit color. A later average of those probes does not add the bounces the gather skipped. The direct shadow stays the lamp ray.
+The GPU writes the world cache one band at a time, then two screen passes. The first screen pass stores the lamp on each hit. The second pass stores that same lamp on a wide wall. A small solid also adds the light gathered by the first pass, so an unlit face keeps the solid color. The pixel adds its own lamp ray. A hit stores its color even when that color is black.
+
+A miss in the last 0.5 m blends into the world cache. A new build does not read the previous frame. The picture keeps the last finished field until that gather completes. The CPU uploads positions, colors, texture ids, and lamp parameters. It does not compute the lit color. The direct shadow stays the lamp ray.
 
 A normal draw does not stall the game loop on that GPU work. A readback waits. Move or recolor an object and the next build follows the new scene.
 
@@ -62,7 +68,7 @@ An empty nearer ray is the only place a world probe enters the merged field. A n
 
 ## What is fixed, and what comes from the scene
 
-The screen grid follows the camera and is rebuilt every frame at a fixed probe count. A miss stores radiance 0 and β = 1. A hit stores the outgoing light and β = 0. The merge is `L + β L_next`. A screen miss then reads the coarse world grid in that direction, so a bright lamp behind the camera still has a direction. The builder reads the camera position for the screen grid. It does not read the example solids or the example light.
+The screen grid keeps a fixed probe count. The probes are a world lattice, so a turn does not move them. A miss stores radiance 0 and β = 1. A hit stores the outgoing light and β = 0. The merge is `L + β L_next`. A screen miss then reads the coarse world grid in that direction, so a bright lamp behind the camera still has a direction. The builder reads the camera for the screen grid. It does not read the example solids or the example light.
 
 The CPU field used by the older checks still stores fewer directions in the near range than in the far range, and fewer in the far range than in the world range.
 
@@ -81,6 +87,6 @@ The balance used here is three cascades.
 
 ## What this cut does not do
 
-Rays march on the ground plane. A full 3D volume of probes is not built yet. The GPU field stores one interval per direction. That field is not a lightmap. A new build does not read the previous frame. The engine keeps the finished field until a lamp moves by about a meter, or a lamp color, an occluder, or the light-affecting medium changes. A camera move does not rebuild it.
+Rays march on the ground plane. A full 3D volume of probes is not built yet. The GPU field stores one interval per direction. That field is not a lightmap. A new build does not read the previous frame. The engine keeps the finished field until the screen key changes, or a lamp, an occluder, or the light-affecting medium changes. A turn does not change that key.
 
 Emitting particles add one fire light on the ground probes. The light uses the particle positions and colors. A lit particle takes that field on its card. A density puff uses optical depth and in-scatter on the view ray. That medium is not a 3D probe grid.

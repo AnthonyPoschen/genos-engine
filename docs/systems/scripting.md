@@ -12,7 +12,7 @@ The `rhai` crate is the one scripting exception to the native-call rule. The eng
 
 A script starts after the host registers the functions. A name that is not registered is not available to the script.
 
-The first host loads a scene. The functions are `floor`, `wall`, `solid`, and `light`. Ground positions use X and depth Z. A light uses X, height Y, and depth Z.
+The first host loads a scene. The functions are `floor`, `wall`, `solid`, `light`, and `sun`. Ground positions use X and depth Z. A point light uses X, height Y, and depth Z. A sun uses the direction the rays travel.
 
 ## Code
 

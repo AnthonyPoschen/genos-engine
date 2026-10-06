@@ -141,6 +141,21 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
                 builder.borrow_mut().lights.push(Light {
                     position: Vec3::new(num(&x), num(&y), num(&z)),
                     color: [num(&r), num(&g), num(&b)],
+                    direction: Vec3::ZERO,
+                });
+            },
+        );
+    }
+    {
+        let builder = builder.clone();
+        engine.register_fn(
+            "sun",
+            move |x: Dynamic, y: Dynamic, z: Dynamic, r: Dynamic, g: Dynamic, b: Dynamic| {
+                // xyz is the direction the rays travel. (0, -1, 1) is 45 degrees down toward +Z.
+                builder.borrow_mut().lights.push(Light {
+                    position: Vec3::new(0.0, 7.0, 0.0),
+                    color: [num(&r), num(&g), num(&b)],
+                    direction: Vec3::new(num(&x), num(&y), num(&z)),
                 });
             },
         );

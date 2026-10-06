@@ -59,6 +59,12 @@ layout(std430, set = 0, binding = 0) readonly buffer SceneData {
     // x is half extent on Z. yzw is the floor color.
     vec4 floor_data;
     Cascade cascades[3];
+    // xyz is the camera basis. w is tan(half fov), 0, aspect, and unused.
+    vec4 view_right;
+    vec4 view_up;
+    vec4 view_forward;
+    // x is the screen-probe columns. y is the rows.
+    vec4 view_grid;
 } scene;
 
 layout(std430, set = 0, binding = 1) buffer FieldData {
@@ -71,16 +77,13 @@ layout(push_constant) uniform Pass {
 } pc;
 
 const uint FIELD_COPY = 524288u;
-const uint SCREEN_N = 96u;
-const uint SCREEN_DIRS = 8u;
-const uint SCREEN_FAR_N = 48u;
-const uint SCREEN_FAR_DIRS = 16u;
-const float SCREEN_RADIUS = 24.0;
+const uint SCREEN_DIRS = 16u;
+const float SCREEN_REACH = 4.0;
+const float NEAR_SPACING = 0.5;
+const float SCREEN_BLEND = 0.5;
 const float WORLD_SPACING = 2.5;
 const uint WORLD_DIRS = 8u;
-const uint SCREEN_NEAR_OFFSET = 0u;
-const uint SCREEN_FAR_OFFSET = 73728u;
-const uint WORLD_OFFSET = 110592u;
+const uint WORLD_OFFSET = 184320u;
 const float LAMBERT = 0.318309886;
 // A unit white lamp 7 m above a white floor stays near 0.46. A lamp 1 m away stays under white.
 const float LAMP_UNIT = 72.0;
@@ -160,6 +163,26 @@ float hit_box3(vec3 origin, vec3 dir, vec3 min_p, vec3 max_p) {
     return t_enter >= 0.0 ? t_enter : -1.0;
 }
 
+float hit_cyl(vec3 origin, vec3 dir, vec3 center, float radius, float y0, float y1) {
+    float best = -1.0;
+    vec2 o = origin.xz - center.xz;
+    float a = dot(dir.xz, dir.xz);
+    if (a > 1e-8) {
+        float b = dot(o, dir.xz);
+        float c = dot(o, o) - radius * radius;
+        float disc = b * b - a * c;
+        if (disc >= 0.0) {
+            float root = sqrt(disc);
+            float t0 = (-b - root) / a;
+            float y = origin.y + dir.y * t0;
+            if (t0 > 0.0 && y >= y0 && y <= y1) {
+                best = t0;
+            }
+        }
+    }
+    return best;
+}
+
 bool lamp_blocked(vec3 origin, vec3 lamp) {
     vec3 delta = lamp - origin;
     float dist = length(delta);
@@ -200,15 +223,28 @@ bool lamp_blocked(vec3 origin, vec3 lamp) {
     return false;
 }
 
-vec3 shade_lamp(vec3 origin, vec3 normal, vec3 lamp, vec3 color) {
-    vec3 delta = lamp - origin;
-    float dist = max(length(delta), 1.0e-4);
-    float nd = dot(delta, normal) / dist;
-    if (nd <= 0.0 || lamp_blocked(origin, lamp)) {
+vec3 shade_lamp(vec3 origin, vec3 normal, vec4 lamp, vec3 color) {
+    bool sun = lamp.w > 0.5;
+    vec3 toward;
+    vec3 target;
+    float dist2;
+    if (sun) {
+        // lamp.xyz is the direction the rays travel. The face looks back along that ray.
+        toward = -normalize(lamp.xyz);
+        target = origin + toward * 80.0;
+        dist2 = 49.0;
+    } else {
+        toward = lamp.xyz - origin;
+        float dist = max(length(toward), 1.0e-4);
+        toward /= dist;
+        target = lamp.xyz;
+        dist2 = dist * dist;
+    }
+    float nd = dot(toward, normal);
+    if (nd <= 0.0 || lamp_blocked(origin, target)) {
         return vec3(0.0);
     }
-    // Cosine over inverse-square. The unit keeps a 7 m lamp in the linear range.
-    float dist2 = dist * dist;
+    // Cosine over inverse-square. A sun uses the same unit as a lamp 7 m away.
     return color * nd * LAMP_UNIT / (1.0 + dist2);
 }
 
@@ -216,11 +252,11 @@ vec3 lights_at(vec3 origin, vec3 normal) {
     vec3 sum = vec3(0.0);
     uint lamps = min(scene.lamp_count, 4u);
     for (uint i = 0u; i < lamps; i++) {
-        sum += shade_lamp(origin, normal, scene.lamps[i].pos.xyz, scene.lamps[i].color.rgb);
+        sum += shade_lamp(origin, normal, scene.lamps[i].pos, scene.lamps[i].color.rgb);
     }
     // The flame is one more lamp. The same occlusion test stops it at a wall.
     if (scene.fire_pos.w > 0.0) {
-        sum += shade_lamp(origin, normal, scene.fire_pos.xyz, scene.fire_color.rgb * scene.fire_pos.w);
+        sum += shade_lamp(origin, normal, vec4(scene.fire_pos.xyz, 0.0), scene.fire_color.rgb * scene.fire_pos.w);
     }
     return sum;
 }
@@ -407,9 +443,10 @@ vec3 merged_at(uint copy, vec2 xz, vec2 face_n, bool uniform_disk) {
 }
 
 // rgb is the interval radiance. a is β. Below zero marks a probe inside a solid.
-vec3 screen_radiance(uint copy, vec2 xz, vec2 face_n, bool uniform_disk);
+vec3 screen_radiance(uint copy, vec3 world, vec2 face_n, bool uniform_disk);
 
-vec4 gather_interval(vec2 origin, vec2 dir, float t0, float t1) {
+vec4 gather_interval(vec2 origin, vec2 dir, float t0, float t1, out float hit_t) {
+    hit_t = t1;
     float best_t = t1;
     vec2 hit = origin;
     vec2 normal = vec2(0.0, 1.0);
@@ -439,6 +476,7 @@ vec4 gather_interval(vec2 origin, vec2 dir, float t0, float t1) {
         }
         if (t >= max(t0, 0.002) && t < t1 && t < best_t) {
             best_t = t;
+            hit_t = t;
             hit = origin + dir * t;
             normal = n;
             albedo = occ.albedo.rgb;
@@ -456,6 +494,9 @@ vec4 gather_interval(vec2 origin, vec2 dir, float t0, float t1) {
     bool over = false;
     uint lamps = min(scene.lamp_count, 4u);
     for (uint lamp_i = 0u; lamp_i < lamps; lamp_i++) {
+        if (scene.lamps[lamp_i].pos.w > 0.5) {
+            continue;
+        }
         vec2 delta = scene.lamps[lamp_i].pos.xz - chosen.center_shape.xz;
         if (chosen.center_shape.w > 0.5) {
             over = over || dot(delta, delta) <= chosen.extent.w * chosen.extent.w;
@@ -474,25 +515,133 @@ vec4 gather_interval(vec2 origin, vec2 dir, float t0, float t1) {
     if (over && dot(direct, vec3(1.0)) <= 1.0e-4) {
         direct += lights_at(top, vec3(0.0, 1.0, 0.0));
     }
-    vec3 incoming = vec3(0.0);
-    if (pc.pass < 4u && pc.pass >= 2u) {
-        incoming = screen_radiance(0u, hit + normal * 0.03, normal, false);
-    }
+    // Pass 0 and the world cache store the lamp on the hit. That is the source.
+    // Pass 1 is what the pixel reads. A wide wall keeps that lamp on the hit.
+    // A small solid also adds the screen gather, so an unlit face keeps its color.
+    // The pixel adds its own lamp ray.
+    bool source_pass = pc.pass == 0u || pc.pass >= 4u;
     float color_mix = chosen.bounce.y < 0.0 ? 1.0 : clamp(chosen.bounce.y, 0.0, 1.0);
     vec3 tint = mix(vec3(1.0), albedo, color_mix);
     float reflect = chosen.bounce.x < 0.0 ? LAMBERT : clamp(chosen.bounce.x, 0.0, 1.0);
-    return vec4(tint * reflect * (direct + incoming), 0.0);
+    bool wide = chosen.center_shape.w > 0.5
+        ? chosen.extent.w > 1.0
+        : max(chosen.extent.x, chosen.extent.z) > 1.0;
+    vec3 lighting = direct;
+    if (!source_pass && !wide) {
+        float height = chosen.extent.y * 0.45;
+        lighting = direct + screen_radiance(0u, vec3(hit + normal * 0.03, height), normal, false);
+    }
+    return vec4(tint * reflect * lighting, 0.0);
 }
 
-float screen_spacing() {
-    return (SCREEN_RADIUS * 2.0) / float(SCREEN_N);
+vec3 view_ray(vec2 uv) {
+    float ndc_x = uv.x * 2.0 - 1.0;
+    float ndc_y = uv.y * 2.0 - 1.0;
+    float tan_half = scene.view_right.w;
+    float aspect = scene.view_forward.w;
+    return scene.view_forward.xyz
+        + scene.view_right.xyz * (ndc_x * tan_half * aspect)
+        + scene.view_up.xyz * (-ndc_y * tan_half);
 }
 
-vec2 screen_origin() {
-    float spacing = screen_spacing();
-    vec2 eye = vec2(scene.eye.x, scene.eye.z);
-    vec2 snapped = floor(eye / spacing + 0.5) * spacing;
-    return snapped - vec2(SCREEN_RADIUS);
+bool project_uv(vec3 world, out vec2 uv) {
+    uv = vec2(0.0);
+    vec3 rel = world - scene.eye.xyz;
+    float depth = dot(rel, scene.view_forward.xyz);
+    if (depth <= 0.05) {
+        return false;
+    }
+    float tan_half = max(scene.view_right.w, 1.0e-4);
+    float aspect = max(scene.view_forward.w, 1.0e-4);
+    float ndc_x = dot(rel, scene.view_right.xyz) / (depth * tan_half * aspect);
+    float ndc_y = -dot(rel, scene.view_up.xyz) / (depth * tan_half);
+    uv = vec2(ndc_x * 0.5 + 0.5, ndc_y * 0.5 + 0.5);
+    return uv.x >= -0.02 && uv.x <= 1.02 && uv.y >= -0.02 && uv.y <= 1.02;
+}
+
+uvec2 screen_counts() {
+    return uvec2(
+        max(uint(scene.view_grid.x + 0.5), 1u),
+        max(uint(scene.view_grid.y + 0.5), 1u)
+    );
+}
+
+// The same ray and the same 4 cm offset place the probe in the fragment shader.
+bool surface_hit(vec3 eye, vec3 dir, out vec3 pos, out vec3 normal) {
+    float best = 1.0e20;
+    bool found = false;
+    pos = eye;
+    normal = vec3(0.0, 1.0, 0.0);
+    uint count = min(scene.occ_count, 16u);
+    for (uint i = 0u; i < count; i++) {
+        Occ occ = scene.occs[i];
+        float t = -1.0;
+        vec3 n = vec3(0.0, 1.0, 0.0);
+        vec3 center = vec3(occ.center_shape.x, occ.extent.y * 0.5, occ.center_shape.z);
+        if (occ.center_shape.w > 0.5) {
+            t = hit_cyl(eye, dir, center, occ.extent.w, 0.0, occ.extent.y);
+            if (t > 0.0) {
+                vec3 p = eye + dir * t;
+                vec2 d = p.xz - occ.center_shape.xz;
+                float len = max(length(d), 1.0e-4);
+                n = vec3(d.x / len, 0.0, d.y / len);
+            }
+        } else {
+            vec3 half_e = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
+            t = hit_box3(eye, dir, center - half_e, center + half_e);
+            if (t > 0.0) {
+                vec3 q = (eye + dir * t - center) / max(half_e, vec3(1.0e-4));
+                vec3 aq = abs(q);
+                if (aq.x >= aq.y && aq.x >= aq.z) {
+                    n = vec3(sign(q.x), 0.0, 0.0);
+                } else if (aq.y >= aq.z) {
+                    n = vec3(0.0, sign(q.y), 0.0);
+                } else {
+                    n = vec3(0.0, 0.0, sign(q.z));
+                }
+                if (dot(n, n) < 0.5) {
+                    n = vec3(0.0, 1.0, 0.0);
+                }
+            }
+        }
+        if (t > 0.002 && t < best) {
+            best = t;
+            pos = eye + dir * t;
+            normal = n;
+            found = true;
+        }
+    }
+    if (dir.y < -1.0e-6) {
+        float t = (0.0 - eye.y) / dir.y;
+        if (t > 0.002 && t < best) {
+            vec3 p = eye + dir * t;
+            vec2 half_e = vec2(max(scene.floor_center.w, 0.5), max(scene.floor_data.x, 0.5));
+            vec2 d = p.xz - vec2(scene.floor_center.x, scene.floor_center.z);
+            if (abs(d.x) <= half_e.x + 0.05 && abs(d.y) <= half_e.y + 0.05) {
+                pos = p;
+                normal = vec3(0.0, 1.0, 0.0);
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
+// World lattice around the eye. A turn does not move it. The fragment uses the same snap.
+void near_layout(out vec2 origin, out uint count_x, out uint count_z) {
+    uvec2 counts = screen_counts();
+    count_x = counts.x;
+    count_z = counts.y;
+    vec2 center = floor(vec2(scene.eye.x, scene.eye.z) / NEAR_SPACING + 0.5) * NEAR_SPACING;
+    origin = center - vec2(float(count_x), float(count_z)) * NEAR_SPACING * 0.5;
+}
+
+vec2 probe_xz(uint ix, uint iy) {
+    vec2 origin;
+    uint count_x;
+    uint count_z;
+    near_layout(origin, count_x, count_z);
+    return origin + (vec2(ix, iy) + 0.5) * NEAR_SPACING;
 }
 
 void world_layout(out vec2 origin, out uint count_x, out uint count_z) {
@@ -558,7 +707,7 @@ vec4 sample_open(uint base, vec2 origin, float spacing, uint count_x, uint count
     return acc / weight;
 }
 
-vec4 sample_world_dir(uint copy, vec2 xz, float angle) {
+vec4 sample_world_dir(vec2 xz, float angle) {
     vec2 origin;
     uint count_x;
     uint count_z;
@@ -566,54 +715,129 @@ vec4 sample_world_dir(uint copy, vec2 xz, float angle) {
     return sample_open(WORLD_OFFSET, origin, WORLD_SPACING, count_x, count_z, WORLD_DIRS, xz, angle);
 }
 
-vec3 screen_radiance(uint copy, vec2 xz, vec2 face_n, bool uniform_disk) {
-    vec2 origin = screen_origin();
-    float spacing = screen_spacing();
-    uint base = copy * FIELD_COPY + SCREEN_NEAR_OFFSET;
+vec4 screen_dir(uint copy, uint ix, uint iy, float angle) {
+    uvec2 counts = screen_counts();
+    uint probe = iy * counts.x + ix;
+    uint base = copy * FIELD_COPY + probe * SCREEN_DIRS;
+    float n = float(SCREEN_DIRS);
+    float f = angle / TAU * n - 0.5;
+    float i0 = floor(f);
+    float ang_t = clamp(f - i0, 0.0, 1.0);
+    uint a = uint(mod(i0, n));
+    uint b = uint(mod(i0 + 1.0, n));
+    vec4 s0 = field.texels[base + a];
+    vec4 s1 = field.texels[base + b];
+    vec4 taken = mix(s0, s1, ang_t);
+    if (s0.a < 0.0) {
+        taken = s1;
+    } else if (s1.a < 0.0) {
+        taken = s0;
+    }
+    return taken;
+}
+
+vec3 screen_radiance(uint copy, vec3 world, vec2 face_n, bool uniform_disk) {
+    vec2 origin;
+    uint count_x;
+    uint count_z;
+    near_layout(origin, count_x, count_z);
+    vec2 far = origin + vec2(float(count_x), float(count_z)) * NEAR_SPACING;
+    bool on_grid = world.x >= origin.x && world.z >= origin.y && world.x <= far.x && world.z <= far.y;
+    float corner_w[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    uvec2 corner_i[4] = uvec2[4](uvec2(0u), uvec2(0u), uvec2(0u), uvec2(0u));
+    float sum_w = 0.0;
+    if (on_grid) {
+        float fx = clamp((world.x - origin.x) / NEAR_SPACING - 0.5, 0.0, float(count_x - 1u));
+        float fz = clamp((world.z - origin.y) / NEAR_SPACING - 0.5, 0.0, float(count_z - 1u));
+        uint x0 = uint(floor(fx));
+        uint z0 = uint(floor(fz));
+        uint x1 = min(x0 + 1u, count_x - 1u);
+        uint z1 = min(z0 + 1u, count_z - 1u);
+        float tx = fx - float(x0);
+        float tz = fz - float(z0);
+        for (int corner = 0; corner < 4; corner++) {
+            uint ix = corner == 1 || corner == 3 ? x1 : x0;
+            uint iy = corner >= 2 ? z1 : z0;
+            float w = (corner == 1 || corner == 3 ? tx : 1.0 - tx) * (corner >= 2 ? tz : 1.0 - tz);
+            corner_w[corner] = w;
+            corner_i[corner] = uvec2(ix, iy);
+            sum_w += w;
+        }
+    }
+    bool use_screen = on_grid && sum_w > 1.0e-4;
+    if (!use_screen) {
+        return vec3(0.0);
+    }
     vec3 sum = vec3(0.0);
     float weight = 0.0;
     for (uint d = 0u; d < SCREEN_DIRS; d++) {
         float angle = (float(d) + 0.5) * TAU / float(SCREEN_DIRS);
-        vec2 dir = vec2(cos(angle), sin(angle));
-        float w = 1.0;
+        float facing = 1.0;
         if (!uniform_disk) {
-            w = dot(face_n, dir);
-            if (w <= 0.0) {
+            facing = dot(face_n, vec2(cos(angle), sin(angle)));
+            if (facing <= 0.0) {
                 continue;
             }
         }
-        vec4 near_i = sample_open(base, origin, spacing, SCREEN_N, SCREEN_N, SCREEN_DIRS, xz, angle);
-        sum += near_i.rgb * w;
-        weight += w;
+        vec3 color = vec3(0.0);
+        float got = 0.0;
+        for (int corner = 0; corner < 4; corner++) {
+            if (corner_w[corner] <= 1.0e-6) {
+                continue;
+            }
+            vec4 taken = screen_dir(copy, corner_i[corner].x, corner_i[corner].y, angle);
+            // A local hit stores its distance, at most SCREEN_REACH. A world fill is larger.
+            if (taken.a <= 0.0 || taken.a > SCREEN_REACH) {
+                continue;
+            }
+            color += taken.rgb * corner_w[corner];
+            got += corner_w[corner];
+        }
+        if (got > 1.0e-4) {
+            color /= got;
+        }
+        sum += color * facing;
+        weight += facing;
     }
-    if (weight <= 1e-4) {
+    if (weight <= 1.0e-4) {
         return vec3(0.0);
     }
     return sum / weight;
 }
 
-void write_dirs(uint base, vec2 origin, float t0, float t1, uint dirs, bool merge_far) {
+void write_dirs(uint base, vec2 origin, float t0, float t1, uint dirs, bool handoff) {
     if (origin_in_solid(origin)) {
         for (uint d = 0u; d < dirs; d++) {
             field.texels[base + d] = vec4(0.0, 0.0, 0.0, -1.0);
         }
         return;
     }
-    uint copy = pc.pass < 4u ? pc.pass / 2u : 0u;
     for (uint d = 0u; d < dirs; d++) {
         float angle = (float(d) + 0.5) * TAU / float(dirs);
         vec2 dir = vec2(cos(angle), sin(angle));
-        vec4 iv = gather_interval(origin, dir, t0, t1);
-        if (merge_far && iv.a > 0.5) {
-            float far_spacing = screen_spacing() * 2.0;
-            vec4 far_i = sample_open(copy * FIELD_COPY + SCREEN_FAR_OFFSET, screen_origin(), far_spacing, SCREEN_FAR_N, SCREEN_FAR_N, SCREEN_FAR_DIRS, origin, angle);
-            if (far_i.a > 0.5) {
-                far_i = sample_world_dir(copy, origin, angle);
-                far_i.a = 0.0;
+        float hit_t = t1;
+        vec4 iv = gather_interval(origin, dir, t0, t1, hit_t);
+        if (iv.a < 0.0) {
+            field.texels[base + d] = iv;
+            continue;
+        }
+        if (handoff) {
+            vec4 far_i = sample_world_dir(origin, angle);
+            float edge = t1 - SCREEN_BLEND;
+            if (iv.a > 0.5) {
+                // A world fill is not a local hit. The shade test ignores this distance.
+                iv = vec4(far_i.rgb, 1.0e6);
+            } else if (hit_t > edge) {
+                float near_w = clamp((t1 - hit_t) / SCREEN_BLEND, 0.0, 1.0);
+                float mark = near_w > 0.5 ? max(hit_t, 0.002) : 1.0e6;
+                iv = vec4(mix(far_i.rgb, iv.rgb, near_w), mark);
+            } else {
+                iv.a = max(hit_t, 0.002);
             }
-            iv = vec4(far_i.rgb, 0.0);
-        } else if (merge_far && iv.a >= 0.0) {
-            iv.a = 0.0;
+        } else if (iv.a > 0.5) {
+            iv.a = 1.0e6;
+        } else {
+            iv.a = max(hit_t, 0.002);
         }
         field.texels[base + d] = iv;
     }
@@ -636,23 +860,14 @@ void main() {
         write_dirs(WORLD_OFFSET + probe * WORLD_DIRS, origin, 0.0, reach, WORLD_DIRS, false);
         return;
     }
-    bool near = (pc.pass & 1u) == 1u;
-    uint copy = pc.pass / 2u;
-    uint n = near ? SCREEN_N : SCREEN_FAR_N;
-    uint dirs = near ? SCREEN_DIRS : SCREEN_FAR_DIRS;
-    float spacing = screen_spacing() * (near ? 1.0 : 2.0);
+    uvec2 counts = screen_counts();
     uint ix = gl_GlobalInvocationID.x;
-    uint iz = gl_GlobalInvocationID.y;
-    if (ix >= n || iz >= n) {
+    uint iy = gl_GlobalInvocationID.y;
+    if (ix >= counts.x || iy >= counts.y) {
         return;
     }
-    vec2 origin = screen_origin() + (vec2(ix, iz) + 0.5) * spacing;
-    uint probe = iz * n + ix;
-    uint offset = near ? SCREEN_NEAR_OFFSET : SCREEN_FAR_OFFSET;
-    // The near interval covers the whole screen window. A wall you walk toward
-    // stays on this cascade instead of crossing into the coarser one.
-    float window = SCREEN_RADIUS * 2.0;
-    float t0 = near ? 0.0 : window;
-    float t1 = near ? window : window * 2.0;
-    write_dirs(copy * FIELD_COPY + offset + probe * dirs, origin, t0, t1, dirs, near);
+    vec2 origin = probe_xz(ix, iy);
+    uint probe = iy * counts.x + ix;
+    uint copy = pc.pass;
+    write_dirs(copy * FIELD_COPY + probe * SCREEN_DIRS, origin, 0.0, SCREEN_REACH, SCREEN_DIRS, true);
 }

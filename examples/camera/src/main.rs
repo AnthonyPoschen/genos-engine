@@ -132,6 +132,8 @@ fn run() -> Result<(), String> {
             scene.lights = vec![genos_scene::Light {
                 position: genos_scene::Vec3::new(x, y, z),
                 color: [1.0, 1.0, 1.0],
+
+                direction: genos_scene::Vec3::ZERO,
             }];
         });
     }

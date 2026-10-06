@@ -63,6 +63,12 @@ layout(std430, set = 0, binding = 0) readonly buffer SceneData {
     // x is half extent on Z. yzw is the floor color.
     vec4 floor_data;
     Cascade cascades[3];
+    // xyz is the camera basis. w is tan(half fov), 0, aspect, and unused.
+    vec4 view_right;
+    vec4 view_up;
+    vec4 view_forward;
+    // x is the screen-probe columns. y is the rows.
+    vec4 view_grid;
 } scene;
 
 layout(std430, set = 0, binding = 1) readonly buffer FieldData {
@@ -120,13 +126,12 @@ vec4 particle_texel(vec2 uv) {
 }
 
 const uint FIELD_COPY = 524288u;
-const uint SCREEN_N = 96u;
-const uint SCREEN_DIRS = 8u;
-const float SCREEN_RADIUS = 24.0;
+const uint SCREEN_DIRS = 16u;
+const float SCREEN_REACH = 4.0;
 const float WORLD_SPACING = 2.5;
+const float NEAR_SPACING = 0.5;
 const uint WORLD_DIRS = 8u;
-const uint SCREEN_NEAR_OFFSET = 0u;
-const uint WORLD_OFFSET = 110592u;
+const uint WORLD_OFFSET = 184320u;
 const uint SHOWN_COPY = 1u;
 const float LAMBERT = 0.318309886;
 // A unit white lamp 7 m above a white floor stays near 0.46. A lamp 1 m away stays under white.
@@ -200,17 +205,6 @@ vec4 sample_interval(uint copy, uint index, vec2 xz, float angle) {
     return acc / weight;
 }
 
-float screen_spacing() {
-    return (SCREEN_RADIUS * 2.0) / float(SCREEN_N);
-}
-
-vec2 screen_origin() {
-    float spacing = screen_spacing();
-    vec2 eye = vec2(scene.eye.x, scene.eye.z);
-    vec2 snapped = floor(eye / spacing + 0.5) * spacing;
-    return snapped - vec2(SCREEN_RADIUS);
-}
-
 void world_layout(out vec2 origin, out uint count_x, out uint count_z) {
     vec2 half_e = vec2(max(scene.floor_center.w, 0.5), max(scene.floor_data.x, 0.5));
     vec2 span = half_e * 2.0;
@@ -270,6 +264,24 @@ vec4 sample_open(uint base, vec2 origin, float spacing, uint count_x, uint count
     return acc / weight;
 }
 
+// The direction from the probe toward the shaded point. A near hit there hides the point.
+bool hit_hides_point(uint base, uint probe, uint dirs, vec2 probe_pos, vec2 point) {
+    vec2 delta = point - probe_pos;
+    float dist = length(delta);
+    if (dist < 0.05) {
+        return false;
+    }
+    float angle = atan(delta.y, delta.x);
+    if (angle < 0.0) {
+        angle += TAU;
+    }
+    float n = float(max(dirs, 1u));
+    float f = angle / TAU * n - 0.5;
+    uint a = uint(mod(floor(f), n));
+    float hit_d = field.texels[base + probe * dirs + a].a;
+    return hit_d > 0.0 && hit_d <= SCREEN_REACH && hit_d + 0.4 < dist;
+}
+
 vec3 merged_grid(uint base, vec2 origin, float spacing, uint count_x, uint count_z, uint dirs, vec2 xz, vec2 face_n, bool uniform_disk) {
     float fx = clamp((xz.x - origin.x) / spacing - 0.5, 0.0, float(count_x - 1u));
     float fz = clamp((xz.y - origin.y) / spacing - 0.5, 0.0, float(count_z - 1u));
@@ -289,7 +301,13 @@ vec3 merged_grid(uint base, vec2 origin, float spacing, uint count_x, uint count
         float wz = corner >= 2 ? tz : 1.0 - tz;
         vec2 probe = origin + (vec2(ix, iz) + 0.5) * spacing;
         float w = wx * wz;
+        if (!uniform_disk && dot(probe - xz, face_n) < -0.02) {
+            w = 0.0;
+        }
         if (w > 1e-6 && probe_hidden(xz, probe)) {
+            w = 0.0;
+        }
+        if (w > 1e-6 && hit_hides_point(base, iz * count_x + ix, dirs, probe, xz)) {
             w = 0.0;
         }
         corner_w[corner] = w;
@@ -339,10 +357,6 @@ vec3 merged_grid(uint base, vec2 origin, float spacing, uint count_x, uint count
         return vec3(0.0);
     }
     return sum / weight;
-}
-
-vec3 merged_at(uint copy, vec2 xz, vec2 face_n, bool uniform_disk) {
-    return merged_grid(copy * FIELD_COPY + SCREEN_NEAR_OFFSET, screen_origin(), screen_spacing(), SCREEN_N, SCREEN_N, SCREEN_DIRS, xz, face_n, uniform_disk);
 }
 
 float hit_box(vec3 origin, vec3 dir, vec3 min_p, vec3 max_p) {
@@ -401,6 +415,142 @@ float hit_cyl(vec3 origin, vec3 dir, vec3 center, float radius, float y0, float 
     return best;
 }
 
+// Near cylinder hit. Matches the gather. The lamp test above also keeps the exit.
+float hit_cyl_near(vec3 origin, vec3 dir, vec3 center, float radius, float y0, float y1) {
+    vec2 o = origin.xz - center.xz;
+    float a = dot(dir.xz, dir.xz);
+    if (a <= 1.0e-8) {
+        return -1.0;
+    }
+    float b = dot(o, dir.xz);
+    float c = dot(o, o) - radius * radius;
+    float disc = b * b - a * c;
+    if (disc < 0.0) {
+        return -1.0;
+    }
+    float t0 = (-b - sqrt(disc)) / a;
+    float y = origin.y + dir.y * t0;
+    if (t0 > 0.0 && y >= y0 && y <= y1) {
+        return t0;
+    }
+    return -1.0;
+}
+
+vec3 view_ray(vec2 uv) {
+    float ndc_x = uv.x * 2.0 - 1.0;
+    float ndc_y = uv.y * 2.0 - 1.0;
+    float tan_half = scene.view_right.w;
+    float aspect = scene.view_forward.w;
+    return scene.view_forward.xyz
+        + scene.view_right.xyz * (ndc_x * tan_half * aspect)
+        + scene.view_up.xyz * (-ndc_y * tan_half);
+}
+
+bool project_uv(vec3 world, out vec2 uv) {
+    uv = vec2(0.0);
+    vec3 rel = world - scene.eye.xyz;
+    float depth = dot(rel, scene.view_forward.xyz);
+    if (depth <= 0.05) {
+        return false;
+    }
+    float tan_half = max(scene.view_right.w, 1.0e-4);
+    float aspect = max(scene.view_forward.w, 1.0e-4);
+    float ndc_x = dot(rel, scene.view_right.xyz) / (depth * tan_half * aspect);
+    float ndc_y = -dot(rel, scene.view_up.xyz) / (depth * tan_half);
+    uv = vec2(ndc_x * 0.5 + 0.5, ndc_y * 0.5 + 0.5);
+    return uv.x >= -0.02 && uv.x <= 1.02 && uv.y >= -0.02 && uv.y <= 1.02;
+}
+
+uvec2 screen_counts() {
+    return uvec2(
+        max(uint(scene.view_grid.x + 0.5), 1u),
+        max(uint(scene.view_grid.y + 0.5), 1u)
+    );
+}
+
+// The same ray and the same 4 cm offset the gather used to place the probe.
+bool surface_hit(vec3 eye, vec3 dir, out vec3 pos, out vec3 normal) {
+    float best = 1.0e20;
+    bool found = false;
+    pos = eye;
+    normal = vec3(0.0, 1.0, 0.0);
+    uint count = min(scene.occ_count, 16u);
+    for (uint i = 0u; i < count; i++) {
+        Occ occ = scene.occs[i];
+        float t = -1.0;
+        vec3 n = vec3(0.0, 1.0, 0.0);
+        vec3 center = vec3(occ.center_shape.x, occ.extent.y * 0.5, occ.center_shape.z);
+        if (occ.center_shape.w > 0.5) {
+            t = hit_cyl_near(eye, dir, center, occ.extent.w, 0.0, occ.extent.y);
+            if (t > 0.0) {
+                vec3 p = eye + dir * t;
+                vec2 d = p.xz - occ.center_shape.xz;
+                float len = max(length(d), 1.0e-4);
+                n = vec3(d.x / len, 0.0, d.y / len);
+            }
+        } else {
+            vec3 half_e = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
+            t = hit_box(eye, dir, center - half_e, center + half_e);
+            if (t > 0.0) {
+                vec3 q = (eye + dir * t - center) / max(half_e, vec3(1.0e-4));
+                vec3 aq = abs(q);
+                if (aq.x >= aq.y && aq.x >= aq.z) {
+                    n = vec3(sign(q.x), 0.0, 0.0);
+                } else if (aq.y >= aq.z) {
+                    n = vec3(0.0, sign(q.y), 0.0);
+                } else {
+                    n = vec3(0.0, 0.0, sign(q.z));
+                }
+                if (dot(n, n) < 0.5) {
+                    n = vec3(0.0, 1.0, 0.0);
+                }
+            }
+        }
+        if (t > 0.002 && t < best) {
+            best = t;
+            pos = eye + dir * t;
+            normal = n;
+            found = true;
+        }
+    }
+    if (dir.y < -1.0e-6) {
+        float t = (0.0 - eye.y) / dir.y;
+        if (t > 0.002 && t < best) {
+            vec3 p = eye + dir * t;
+            vec2 half_e = vec2(max(scene.floor_center.w, 0.5), max(scene.floor_data.x, 0.5));
+            vec2 d = p.xz - vec2(scene.floor_center.x, scene.floor_center.z);
+            if (abs(d.x) <= half_e.x + 0.05 && abs(d.y) <= half_e.y + 0.05) {
+                pos = p;
+                normal = vec3(0.0, 1.0, 0.0);
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
+// World lattice around the eye. A turn does not move it. The gather uses the same snap.
+void near_layout(out vec2 origin, out uint count_x, out uint count_z) {
+    uvec2 counts = screen_counts();
+    count_x = counts.x;
+    count_z = counts.y;
+    vec2 center = floor(vec2(scene.eye.x, scene.eye.z) / NEAR_SPACING + 0.5) * NEAR_SPACING;
+    origin = center - vec2(float(count_x), float(count_z)) * NEAR_SPACING * 0.5;
+}
+
+vec3 merged_at(uint copy, vec3 world, vec2 face_n, bool uniform_disk) {
+    vec2 origin;
+    uint count_x;
+    uint count_z;
+    near_layout(origin, count_x, count_z);
+    vec2 far = origin + vec2(float(count_x), float(count_z)) * NEAR_SPACING;
+    if (world.x >= origin.x && world.z >= origin.y && world.x <= far.x && world.z <= far.y) {
+        return merged_grid(copy * FIELD_COPY, origin, NEAR_SPACING, count_x, count_z, SCREEN_DIRS, world.xz, face_n, uniform_disk);
+    }
+    world_layout(origin, count_x, count_z);
+    return merged_grid(WORLD_OFFSET, origin, WORLD_SPACING, count_x, count_z, WORLD_DIRS, world.xz, face_n, uniform_disk);
+}
+
 bool inside_footprint(vec2 xz, Occ occ) {
     vec2 d = xz - occ.center_shape.xz;
     if (occ.center_shape.w > 0.5) {
@@ -451,17 +601,29 @@ bool blocked(vec3 origin, vec3 target) {
     return false;
 }
 
-vec3 shade_lamp(vec3 origin, vec3 normal, vec3 lamp, vec3 color, bool two_sided) {
-    vec3 delta = lamp - origin;
-    float dist = max(length(delta), 1.0e-4);
-    float nd = dot(delta, normal) / dist;
+vec3 shade_lamp(vec3 origin, vec3 normal, vec4 lamp, vec3 color, bool two_sided) {
+    bool sun = lamp.w > 0.5;
+    vec3 toward;
+    vec3 target;
+    float dist2;
+    if (sun) {
+        toward = -normalize(lamp.xyz);
+        target = origin + toward * 80.0;
+        dist2 = 49.0;
+    } else {
+        toward = lamp.xyz - origin;
+        float dist = max(length(toward), 1.0e-4);
+        toward /= dist;
+        target = lamp.xyz;
+        dist2 = dist * dist;
+    }
+    float nd = dot(toward, normal);
     if (two_sided) {
         nd = abs(nd);
     }
-    if (nd <= 0.0 || blocked(origin, lamp)) {
+    if (nd <= 0.0 || blocked(origin, target)) {
         return vec3(0.0);
     }
-    float dist2 = dist * dist;
     return color * nd * LAMP_UNIT / (1.0 + dist2);
 }
 
@@ -478,13 +640,13 @@ vec3 direct_at(vec3 pos, vec3 normal, bool two_sided) {
     vec3 incoming = vec3(0.0);
     uint lamps = min(scene.lamp_count, 4u);
     for (uint i = 0u; i < lamps; i++) {
-        incoming += shade_lamp(origin, normal, scene.lamps[i].pos.xyz, scene.lamps[i].color.rgb, two_sided);
+        incoming += shade_lamp(origin, normal, scene.lamps[i].pos, scene.lamps[i].color.rgb, two_sided);
     }
     if (scene.fire_pos.w > 0.0) {
         incoming += shade_lamp(
             origin,
             normal,
-            scene.fire_pos.xyz,
+            vec4(scene.fire_pos.xyz, 0.0),
             scene.fire_color.rgb * scene.fire_pos.w,
             two_sided
         );
@@ -601,7 +763,7 @@ bool probe_rejected(vec2 from, vec2 probe) {
 }
 
 vec3 sample_field(vec2 xz) {
-    return merged_at(SHOWN_COPY, xz, vec2(0.0), true);
+    return merged_at(SHOWN_COPY, vec3(xz.x, 0.0, xz.y), vec2(0.0), true);
 }
 
 void consider_exit(vec2 dest, float dist, inout vec2 best_free, inout float free_d, inout vec2 best_any, inout float any_d, inout bool has_free) {
@@ -662,8 +824,10 @@ bool lamp_sees_upward(vec3 pos, vec3 normal) {
     vec3 origin = pos + normal * 0.02;
     uint lamps = min(scene.lamp_count, 4u);
     for (uint i = 0u; i < lamps; i++) {
-        vec3 delta = scene.lamps[i].pos.xyz - origin;
-        if (dot(delta, normal) <= 0.0 || blocked(origin, scene.lamps[i].pos.xyz)) {
+        vec4 lamp = scene.lamps[i].pos;
+        vec3 toward = lamp.w > 0.5 ? -normalize(lamp.xyz) : lamp.xyz - origin;
+        vec3 target = lamp.w > 0.5 ? origin + toward * 80.0 : lamp.xyz;
+        if (dot(toward, normal) <= 0.0 || blocked(origin, target)) {
             continue;
         }
         return true;
@@ -726,11 +890,19 @@ vec3 scatter_light(vec3 p) {
     vec3 sum = vec3(0.0);
     uint lamps = min(scene.lamp_count, 4u);
     for (uint i = 0u; i < lamps; i++) {
-        vec3 lamp = scene.lamps[i].pos.xyz;
-        if (blocked(p, lamp)) {
+        vec4 lamp = scene.lamps[i].pos;
+        if (lamp.w > 0.5) {
+            vec3 toward = -normalize(lamp.xyz);
+            if (blocked(p, p + toward * 80.0)) {
+                continue;
+            }
+            sum += scene.lamps[i].color.rgb * LAMP_UNIT / 50.0;
             continue;
         }
-        vec3 delta = lamp - p;
+        if (blocked(p, lamp.xyz)) {
+            continue;
+        }
+        vec3 delta = lamp.xyz - p;
         float fall = LAMP_UNIT / (1.0 + dot(delta, delta));
         sum += scene.lamps[i].color.rgb * fall;
     }
@@ -816,7 +988,7 @@ void main() {
     vec3 direct = direct_at(v_pos, normal, two_sided);
     vec2 polled = poll_xz(v_pos, normal);
     bool floor_face = abs(normal.y) > 0.5;
-    vec3 bounce = merged_at(SHOWN_COPY, polled, normal.xz, floor_face);
+    vec3 bounce = merged_at(SHOWN_COPY, vec3(polled.x, v_pos.y, polled.y), normal.xz, floor_face);
     if (normal.y > 0.5 && probe_inside(v_pos.xz) && !lamp_sees_upward(v_pos, normal)) {
         bounce = vec3(0.0);
     }
