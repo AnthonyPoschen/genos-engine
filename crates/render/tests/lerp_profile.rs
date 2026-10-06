@@ -330,7 +330,9 @@ fn flicker(colors: &[[f32; 3]]) -> Option<(usize, f32, f32)> {
         let b = summed(window[1]);
         let c = summed(window[2]);
         let gap = (a - b).abs().min((c - b).abs());
-        if (a - c).abs() <= 0.05 && gap >= 0.15 {
+        // 0.45 is three times the old 0.15. The lamp unit is 72 instead of 24.
+        // A one-step shadow graze stays under this gap. A frame that drops to black does not.
+        if (a - c).abs() <= 0.05 && gap >= 0.45 {
             return Some((index, a, b));
         }
     }

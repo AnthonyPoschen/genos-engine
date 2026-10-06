@@ -27,6 +27,18 @@ pub(crate) const FINE_DIRS: u32 = 16;
 pub(crate) const FIELD_COPY: u32 = 524288;
 /// Bounces after the direct pass. The picture runs the same count.
 pub(crate) const BOUNCES: u32 = 4;
+/// Coarse world-probe spacing. These probes update behind the screen field.
+pub(crate) const WORLD_SPACING: f32 = 2.5;
+
+/// World-probe counts for a floor. The margin is two cells on each side.
+pub(crate) fn world_counts(half_x: f32, half_z: f32) -> (u32, u32) {
+    let span_x = (half_x * 2.0).max(1.0);
+    let span_z = (half_z * 2.0).max(1.0);
+    let margin = WORLD_SPACING * 2.0;
+    let count_x = ((span_x + margin * 2.0) / WORLD_SPACING).ceil().max(1.0) as u32;
+    let count_z = ((span_z + margin * 2.0) / WORLD_SPACING).ceil().max(1.0) as u32;
+    (count_x, count_z)
+}
 
 /// One cascade in the paper's doubling sequence.
 #[derive(Clone, Copy, Debug)]
@@ -218,8 +230,10 @@ fn one_lamp(
     lamp_reach(dist2, strength, dx, dy, dz, normal)
 }
 
-/// Scene-lamp unit. The falloff stays cosine over inverse square.
-const LAMP_UNIT: f32 = 24.0;
+/// Scene-lamp unit. The falloff is cosine over inverse-square.
+/// A unit white lamp 7 m above a white floor stays near 0.46 after reflectance.
+/// A lamp 1 m away stays under white.
+const LAMP_UNIT: f32 = 72.0;
 
 /// Cosine over inverse-square falloff. A face with no normal uses the distance term only.
 fn lamp_reach(dist2: f32, strength: f32, dx: f32, dy: f32, dz: f32, normal: [f32; 3]) -> f32 {
@@ -934,4 +948,47 @@ fn hit_circle(
     let nz = pz - cz;
     let len = (nx * nx + nz * nz).sqrt().max(1.0e-8);
     Some((t0, [nx / len, nz / len]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::illuminate_facing;
+    use crate::mesh::compose;
+    use genos_scene::{Floor, Light, Scene, Vec3};
+
+    fn one_lamp(y: f32) -> Scene {
+        Scene {
+            floor: Floor {
+                position: Vec3::new(0.0, 0.0, 0.0),
+                half_x: 8.0,
+                half_z: 8.0,
+                color: [1.0, 1.0, 1.0],
+            },
+            walls: Vec::new(),
+            solids: Vec::new(),
+            lights: vec![Light {
+                position: Vec3::new(0.0, y, 0.0),
+                color: [1.0, 1.0, 1.0],
+            }],
+        }
+    }
+
+    fn shaded_floor(y: f32) -> f32 {
+        let direct = illuminate_facing(&one_lamp(y), 0.0, 0.0, 0.0, [0.0, 1.0, 0.0]);
+        compose([1.0, 1.0, 1.0], direct, [0.0, 0.0, 0.0], true)[0]
+    }
+
+    #[test]
+    fn a_unit_lamp_at_the_shipped_height_lights_a_white_floor() {
+        let room = shaded_floor(7.0);
+        let close = shaded_floor(1.0);
+        assert!(
+            (0.42..0.52).contains(&room),
+            "a unit lamp 7 m up left the white floor dull or clipped: {room}"
+        );
+        assert!(
+            close > room && close < 0.85,
+            "a lamp 1 m away is not brighter, or it is flat white: close {close} room {room}"
+        );
+    }
 }

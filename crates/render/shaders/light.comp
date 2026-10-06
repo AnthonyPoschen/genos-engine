@@ -71,8 +71,19 @@ layout(push_constant) uniform Pass {
 } pc;
 
 const uint FIELD_COPY = 524288u;
+const uint SCREEN_N = 96u;
+const uint SCREEN_DIRS = 8u;
+const uint SCREEN_FAR_N = 48u;
+const uint SCREEN_FAR_DIRS = 16u;
+const float SCREEN_RADIUS = 24.0;
+const float WORLD_SPACING = 2.5;
+const uint WORLD_DIRS = 8u;
+const uint SCREEN_NEAR_OFFSET = 0u;
+const uint SCREEN_FAR_OFFSET = 73728u;
+const uint WORLD_OFFSET = 110592u;
 const float LAMBERT = 0.318309886;
-const float LAMP_UNIT = 24.0;
+// A unit white lamp 7 m above a white floor stays near 0.46. A lamp 1 m away stays under white.
+const float LAMP_UNIT = 72.0;
 const float TAU = 6.2831853;
 
 uint bounce_index() {
@@ -196,9 +207,7 @@ vec3 shade_lamp(vec3 origin, vec3 normal, vec3 lamp, vec3 color) {
     if (nd <= 0.0 || lamp_blocked(origin, lamp)) {
         return vec3(0.0);
     }
-    // A grazing face stays dim. The peak dies within a few meters so a corridor
-    // wall is not a flat white slab. The tail keeps a far ray above black.
-    // Equal color channels keep a white lamp on the old scalar result.
+    // Cosine over inverse-square. The unit keeps a 7 m lamp in the linear range.
     float dist2 = dist * dist;
     return color * nd * LAMP_UNIT / (1.0 + dist2);
 }
@@ -398,6 +407,8 @@ vec3 merged_at(uint copy, vec2 xz, vec2 face_n, bool uniform_disk) {
 }
 
 // rgb is the interval radiance. a is β. Below zero marks a probe inside a solid.
+vec3 screen_radiance(uint copy, vec2 xz, vec2 face_n, bool uniform_disk);
+
 vec4 gather_interval(vec2 origin, vec2 dir, float t0, float t1) {
     float best_t = t1;
     vec2 hit = origin;
@@ -464,8 +475,8 @@ vec4 gather_interval(vec2 origin, vec2 dir, float t0, float t1) {
         direct += lights_at(top, vec3(0.0, 1.0, 0.0));
     }
     vec3 incoming = vec3(0.0);
-    if (bounce_index() > 0u) {
-        incoming = merged_at(read_copy(), hit + normal * 0.03, normal, false);
+    if (pc.pass < 4u && pc.pass >= 2u) {
+        incoming = screen_radiance(0u, hit + normal * 0.03, normal, false);
     }
     float color_mix = chosen.bounce.y < 0.0 ? 1.0 : clamp(chosen.bounce.y, 0.0, 1.0);
     vec3 tint = mix(vec3(1.0), albedo, color_mix);
@@ -473,39 +484,175 @@ vec4 gather_interval(vec2 origin, vec2 dir, float t0, float t1) {
     return vec4(tint * reflect * (direct + incoming), 0.0);
 }
 
-void main() {
-    uint cascade = cascade_index();
-    Cascade c = scene.cascades[cascade];
-    uint ix = gl_GlobalInvocationID.x;
-    uint iz = gl_GlobalInvocationID.y + pc.y0;
-    if (ix >= uint(c.count_x) || iz >= uint(c.count_z)) {
-        return;
+float screen_spacing() {
+    return (SCREEN_RADIUS * 2.0) / float(SCREEN_N);
+}
+
+vec2 screen_origin() {
+    float spacing = screen_spacing();
+    vec2 eye = vec2(scene.eye.x, scene.eye.z);
+    vec2 snapped = floor(eye / spacing + 0.5) * spacing;
+    return snapped - vec2(SCREEN_RADIUS);
+}
+
+void world_layout(out vec2 origin, out uint count_x, out uint count_z) {
+    vec2 half_e = vec2(max(scene.floor_center.w, 0.5), max(scene.floor_data.x, 0.5));
+    vec2 span = half_e * 2.0;
+    float margin = WORLD_SPACING * 2.0;
+    origin = vec2(scene.floor_center.x, scene.floor_center.z) - half_e - vec2(margin);
+    count_x = max(uint(ceil((span.x + margin * 2.0) / WORLD_SPACING)), 1u);
+    count_z = max(uint(ceil((span.y + margin * 2.0) / WORLD_SPACING)), 1u);
+}
+
+vec4 sample_open(uint base, vec2 origin, float spacing, uint count_x, uint count_z, uint dirs, vec2 xz, float angle) {
+    if (count_x < 1u || count_z < 1u || spacing <= 0.0) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
     }
-    vec2 origin = vec2(
-        c.origin_x + (float(ix) + 0.5) * c.spacing,
-        c.origin_z + (float(iz) + 0.5) * c.spacing
-    );
-    uint dirs = uint(max(c.dirs, 1.0));
-    uint probe = iz * uint(c.count_x) + ix;
-    uint base = write_copy() * FIELD_COPY + uint(c.offset) + probe * dirs;
+    float fx = clamp((xz.x - origin.x) / spacing - 0.5, 0.0, float(count_x - 1u));
+    float fz = clamp((xz.y - origin.y) / spacing - 0.5, 0.0, float(count_z - 1u));
+    uint x0 = uint(floor(fx));
+    uint z0 = uint(floor(fz));
+    uint x1 = min(x0 + 1u, count_x - 1u);
+    uint z1 = min(z0 + 1u, count_z - 1u);
+    float tx = fx - float(x0);
+    float tz = fz - float(z0);
+    float n = float(max(dirs, 1u));
+    float f = angle / TAU * n - 0.5;
+    float i0 = floor(f);
+    float ang_t = clamp(f - i0, 0.0, 1.0);
+    uint a = uint(mod(i0, n));
+    uint b = uint(mod(i0 + 1.0, n));
+    vec4 acc = vec4(0.0);
+    float weight = 0.0;
+    for (int corner = 0; corner < 4; corner++) {
+        uint ix = corner == 1 || corner == 3 ? x1 : x0;
+        uint iz = corner >= 2 ? z1 : z0;
+        float wx = corner == 1 || corner == 3 ? tx : 1.0 - tx;
+        float wz = corner >= 2 ? tz : 1.0 - tz;
+        float w = wx * wz;
+        if (w <= 1e-6) {
+            continue;
+        }
+        vec2 probe_pos = origin + (vec2(ix, iz) + 0.5) * spacing;
+        if (probe_hidden(xz, probe_pos)) {
+            continue;
+        }
+        uint probe = iz * count_x + ix;
+        vec4 s0 = field.texels[base + probe * dirs + a];
+        vec4 s1 = field.texels[base + probe * dirs + b];
+        vec4 taken = mix(s0, s1, ang_t);
+        if (s0.a < 0.0) {
+            taken = s1;
+        } else if (s1.a < 0.0) {
+            taken = s0;
+        }
+        if (taken.a < 0.0) {
+            continue;
+        }
+        acc += taken * w;
+        weight += w;
+    }
+    if (weight <= 1e-4) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    return acc / weight;
+}
+
+vec4 sample_world_dir(uint copy, vec2 xz, float angle) {
+    vec2 origin;
+    uint count_x;
+    uint count_z;
+    world_layout(origin, count_x, count_z);
+    return sample_open(WORLD_OFFSET, origin, WORLD_SPACING, count_x, count_z, WORLD_DIRS, xz, angle);
+}
+
+vec3 screen_radiance(uint copy, vec2 xz, vec2 face_n, bool uniform_disk) {
+    vec2 origin = screen_origin();
+    float spacing = screen_spacing();
+    uint base = copy * FIELD_COPY + SCREEN_NEAR_OFFSET;
+    vec3 sum = vec3(0.0);
+    float weight = 0.0;
+    for (uint d = 0u; d < SCREEN_DIRS; d++) {
+        float angle = (float(d) + 0.5) * TAU / float(SCREEN_DIRS);
+        vec2 dir = vec2(cos(angle), sin(angle));
+        float w = 1.0;
+        if (!uniform_disk) {
+            w = dot(face_n, dir);
+            if (w <= 0.0) {
+                continue;
+            }
+        }
+        vec4 near_i = sample_open(base, origin, spacing, SCREEN_N, SCREEN_N, SCREEN_DIRS, xz, angle);
+        sum += near_i.rgb * w;
+        weight += w;
+    }
+    if (weight <= 1e-4) {
+        return vec3(0.0);
+    }
+    return sum / weight;
+}
+
+void write_dirs(uint base, vec2 origin, float t0, float t1, uint dirs, bool merge_far) {
     if (origin_in_solid(origin)) {
         for (uint d = 0u; d < dirs; d++) {
             field.texels[base + d] = vec4(0.0, 0.0, 0.0, -1.0);
         }
         return;
     }
+    uint copy = pc.pass < 4u ? pc.pass / 2u : 0u;
     for (uint d = 0u; d < dirs; d++) {
         float angle = (float(d) + 0.5) * TAU / float(dirs);
         vec2 dir = vec2(cos(angle), sin(angle));
-        vec4 iv = gather_interval(origin, dir, c.t0, c.t1);
-        // The near cascade stores the merged radiance, so a shade reads one grid.
-        if (cascade == 0u && iv.a > 0.5) {
-            vec4 far_i = sample_interval(write_copy(), 1u, origin, angle);
-            vec4 world_i = sample_interval(write_copy(), 2u, origin, angle);
-            iv = vec4(far_i.rgb + far_i.a * world_i.rgb, 0.0);
-        } else if (cascade == 0u && iv.a >= 0.0) {
+        vec4 iv = gather_interval(origin, dir, t0, t1);
+        if (merge_far && iv.a > 0.5) {
+            float far_spacing = screen_spacing() * 2.0;
+            vec4 far_i = sample_open(copy * FIELD_COPY + SCREEN_FAR_OFFSET, screen_origin(), far_spacing, SCREEN_FAR_N, SCREEN_FAR_N, SCREEN_FAR_DIRS, origin, angle);
+            if (far_i.a > 0.5) {
+                far_i = sample_world_dir(copy, origin, angle);
+                far_i.a = 0.0;
+            }
+            iv = vec4(far_i.rgb, 0.0);
+        } else if (merge_far && iv.a >= 0.0) {
             iv.a = 0.0;
         }
         field.texels[base + d] = iv;
     }
+}
+
+void main() {
+    if (pc.pass >= 4u) {
+        vec2 origin_w;
+        uint count_x;
+        uint count_z;
+        world_layout(origin_w, count_x, count_z);
+        uint ix = gl_GlobalInvocationID.x;
+        uint iz = gl_GlobalInvocationID.y + pc.y0;
+        if (ix >= count_x || iz >= count_z) {
+            return;
+        }
+        vec2 origin = origin_w + (vec2(ix, iz) + 0.5) * WORLD_SPACING;
+        uint probe = iz * count_x + ix;
+        float reach = max(max(scene.floor_center.w, scene.floor_data.x) * 4.0, 8.0);
+        write_dirs(WORLD_OFFSET + probe * WORLD_DIRS, origin, 0.0, reach, WORLD_DIRS, false);
+        return;
+    }
+    bool near = (pc.pass & 1u) == 1u;
+    uint copy = pc.pass / 2u;
+    uint n = near ? SCREEN_N : SCREEN_FAR_N;
+    uint dirs = near ? SCREEN_DIRS : SCREEN_FAR_DIRS;
+    float spacing = screen_spacing() * (near ? 1.0 : 2.0);
+    uint ix = gl_GlobalInvocationID.x;
+    uint iz = gl_GlobalInvocationID.y;
+    if (ix >= n || iz >= n) {
+        return;
+    }
+    vec2 origin = screen_origin() + (vec2(ix, iz) + 0.5) * spacing;
+    uint probe = iz * n + ix;
+    uint offset = near ? SCREEN_NEAR_OFFSET : SCREEN_FAR_OFFSET;
+    // The near interval covers the whole screen window. A wall you walk toward
+    // stays on this cascade instead of crossing into the coarser one.
+    float window = SCREEN_RADIUS * 2.0;
+    float t0 = near ? 0.0 : window;
+    float t1 = near ? window : window * 2.0;
+    write_dirs(copy * FIELD_COPY + offset + probe * dirs, origin, t0, t1, dirs, near);
 }

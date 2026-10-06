@@ -4,6 +4,9 @@ use std::time::{Duration, Instant};
 
 use genos_input::{character_controller, InputCode, InputSystem};
 use genos_render::{Antialias, Renderer, ScreenRect, Simulation, World};
+
+/// The flame, the smoke, and the flame lamp stay off while the radiance field is under study.
+const SHOW_PARTICLES: bool = false;
 use genos_scene::{load_path, update, Actions, Camera};
 use genos_ui::{
     apply_frame_action, lighting_frame, OpenFrame, Pointer, ProfileGraph, ProfileStream, State,
@@ -136,7 +139,7 @@ fn run() -> Result<(), String> {
     eprintln!("genos-camera mcp {}", server.url());
     let mut world = World::from_scene(host.drawn_scene());
     let mut scene_revision = host.scene_revision();
-    let mut fire = Simulation::from_scene(&world.scene);
+    let mut fire = SHOW_PARTICLES.then(|| Simulation::from_scene(&world.scene));
     let mut window = if proof {
         Window::open_proof(1280, 720)?
     } else {
@@ -362,7 +365,9 @@ fn run() -> Result<(), String> {
         // simulation step
         let sim_at = Instant::now();
         if !paused {
-            fire.advance(&mut world, dt);
+            if let Some(fire) = fire.as_mut() {
+                fire.advance(&mut world, dt);
+            }
         }
         let sim_cpu = sim_at.elapsed();
         // gpu draw/present

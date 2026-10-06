@@ -684,6 +684,10 @@ mod tests {
                 "shader reflectance left the Rust field"
             );
             assert!(
+                source.contains("const float LAMP_UNIT = 72.0;"),
+                "shader lamp unit left the Rust field"
+            );
+            assert!(
                 source.contains("Cascade cascades[3];"),
                 "shader cascade table left the scene block"
             );

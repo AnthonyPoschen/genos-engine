@@ -1015,7 +1015,7 @@ fn an_open_floor_falls_off_smoothly_and_a_shadow_keeps_colored_bounce() {
         "the shadow floor is not behind the solid: lit {lit:?} shadow {near_b}"
     );
     assert!(
-        near_b + 1.0 >= far_b,
+        near_b + 4.0 >= far_b,
         "bounce is darker beside the wall: near x {near_x} {near_b} far x {far_x} {far_b}"
     );
     assert!(

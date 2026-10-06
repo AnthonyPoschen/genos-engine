@@ -120,9 +120,17 @@ vec4 particle_texel(vec2 uv) {
 }
 
 const uint FIELD_COPY = 524288u;
+const uint SCREEN_N = 96u;
+const uint SCREEN_DIRS = 8u;
+const float SCREEN_RADIUS = 24.0;
+const float WORLD_SPACING = 2.5;
+const uint WORLD_DIRS = 8u;
+const uint SCREEN_NEAR_OFFSET = 0u;
+const uint WORLD_OFFSET = 110592u;
 const uint SHOWN_COPY = 1u;
 const float LAMBERT = 0.318309886;
-const float LAMP_UNIT = 24.0;
+// A unit white lamp 7 m above a white floor stays near 0.46. A lamp 1 m away stays under white.
+const float LAMP_UNIT = 72.0;
 const float TAU = 6.2831853;
 
 bool probe_hidden(vec2 from, vec2 probe);
@@ -192,31 +200,149 @@ vec4 sample_interval(uint copy, uint index, vec2 xz, float angle) {
     return acc / weight;
 }
 
-vec3 merged_at(uint copy, vec2 xz, vec2 face_n, bool uniform_disk) {
-    Cascade near = scene.cascades[0];
-    uint dirs = uint(max(near.dirs, 1.0));
+float screen_spacing() {
+    return (SCREEN_RADIUS * 2.0) / float(SCREEN_N);
+}
+
+vec2 screen_origin() {
+    float spacing = screen_spacing();
+    vec2 eye = vec2(scene.eye.x, scene.eye.z);
+    vec2 snapped = floor(eye / spacing + 0.5) * spacing;
+    return snapped - vec2(SCREEN_RADIUS);
+}
+
+void world_layout(out vec2 origin, out uint count_x, out uint count_z) {
+    vec2 half_e = vec2(max(scene.floor_center.w, 0.5), max(scene.floor_data.x, 0.5));
+    vec2 span = half_e * 2.0;
+    float margin = WORLD_SPACING * 2.0;
+    origin = vec2(scene.floor_center.x, scene.floor_center.z) - half_e - vec2(margin);
+    count_x = max(uint(ceil((span.x + margin * 2.0) / WORLD_SPACING)), 1u);
+    count_z = max(uint(ceil((span.y + margin * 2.0) / WORLD_SPACING)), 1u);
+}
+
+vec4 sample_open(uint base, vec2 origin, float spacing, uint count_x, uint count_z, uint dirs, vec2 xz, float angle) {
+    if (count_x < 1u || count_z < 1u || spacing <= 0.0) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    float fx = clamp((xz.x - origin.x) / spacing - 0.5, 0.0, float(count_x - 1u));
+    float fz = clamp((xz.y - origin.y) / spacing - 0.5, 0.0, float(count_z - 1u));
+    uint x0 = uint(floor(fx));
+    uint z0 = uint(floor(fz));
+    uint x1 = min(x0 + 1u, count_x - 1u);
+    uint z1 = min(z0 + 1u, count_z - 1u);
+    float tx = fx - float(x0);
+    float tz = fz - float(z0);
+    float n = float(max(dirs, 1u));
+    float f = angle / TAU * n - 0.5;
+    float i0 = floor(f);
+    float ang_t = clamp(f - i0, 0.0, 1.0);
+    uint a = uint(mod(i0, n));
+    uint b = uint(mod(i0 + 1.0, n));
+    vec4 acc = vec4(0.0);
+    float weight = 0.0;
+    for (int corner = 0; corner < 4; corner++) {
+        uint ix = corner == 1 || corner == 3 ? x1 : x0;
+        uint iz = corner >= 2 ? z1 : z0;
+        float wx = corner == 1 || corner == 3 ? tx : 1.0 - tx;
+        float wz = corner >= 2 ? tz : 1.0 - tz;
+        float w = wx * wz;
+        if (w <= 1e-6) {
+            continue;
+        }
+        uint probe = iz * count_x + ix;
+        vec4 s0 = field.texels[base + probe * dirs + a];
+        vec4 s1 = field.texels[base + probe * dirs + b];
+        vec4 taken = mix(s0, s1, ang_t);
+        if (s0.a < 0.0) {
+            taken = s1;
+        } else if (s1.a < 0.0) {
+            taken = s0;
+        }
+        if (taken.a < 0.0) {
+            continue;
+        }
+        acc += taken * w;
+        weight += w;
+    }
+    if (weight <= 1e-4) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    return acc / weight;
+}
+
+vec3 merged_grid(uint base, vec2 origin, float spacing, uint count_x, uint count_z, uint dirs, vec2 xz, vec2 face_n, bool uniform_disk) {
+    float fx = clamp((xz.x - origin.x) / spacing - 0.5, 0.0, float(count_x - 1u));
+    float fz = clamp((xz.y - origin.y) / spacing - 0.5, 0.0, float(count_z - 1u));
+    uint x0 = uint(floor(fx));
+    uint z0 = uint(floor(fz));
+    uint x1 = min(x0 + 1u, count_x - 1u);
+    uint z1 = min(z0 + 1u, count_z - 1u);
+    float tx = fx - float(x0);
+    float tz = fz - float(z0);
+    float corner_w[4];
+    uint corner_i[4];
+    float sum_w = 0.0;
+    for (int corner = 0; corner < 4; corner++) {
+        uint ix = corner == 1 || corner == 3 ? x1 : x0;
+        uint iz = corner >= 2 ? z1 : z0;
+        float wx = corner == 1 || corner == 3 ? tx : 1.0 - tx;
+        float wz = corner >= 2 ? tz : 1.0 - tz;
+        vec2 probe = origin + (vec2(ix, iz) + 0.5) * spacing;
+        float w = wx * wz;
+        if (w > 1e-6 && probe_hidden(xz, probe)) {
+            w = 0.0;
+        }
+        corner_w[corner] = w;
+        corner_i[corner] = iz * count_x + ix;
+        sum_w += w;
+    }
+    if (sum_w <= 1e-4) {
+        return vec3(0.0);
+    }
+    float n = float(max(dirs, 1u));
     vec3 sum = vec3(0.0);
     float weight = 0.0;
     for (uint d = 0u; d < dirs; d++) {
         float angle = (float(d) + 0.5) * TAU / float(dirs);
-        vec2 dir = vec2(cos(angle), sin(angle));
-        float w = 1.0;
+        float facing = 1.0;
         if (!uniform_disk) {
-            w = dot(face_n, dir);
-            if (w <= 0.0) {
+            facing = dot(face_n, vec2(cos(angle), sin(angle)));
+            if (facing <= 0.0) {
                 continue;
             }
         }
-        // Cascade 0 already stores the merged interval. β is 0 on that result.
-        vec4 near_i = sample_interval(copy, 0u, xz, angle);
-        vec3 color = near_i.rgb;
-        sum += color * w;
-        weight += w;
+        float f = angle / TAU * n - 0.5;
+        float i0 = floor(f);
+        float ang_t = clamp(f - i0, 0.0, 1.0);
+        uint a = uint(mod(i0, n));
+        uint b = uint(mod(i0 + 1.0, n));
+        vec3 color = vec3(0.0);
+        for (int corner = 0; corner < 4; corner++) {
+            if (corner_w[corner] <= 1e-6) {
+                continue;
+            }
+            uint probe = corner_i[corner];
+            vec4 s0 = field.texels[base + probe * dirs + a];
+            vec4 s1 = field.texels[base + probe * dirs + b];
+            vec3 taken = mix(s0.rgb, s1.rgb, ang_t);
+            if (s0.a < 0.0) {
+                taken = s1.rgb;
+            } else if (s1.a < 0.0) {
+                taken = s0.rgb;
+            }
+            color += taken * corner_w[corner];
+        }
+        sum += color / sum_w * facing;
+        weight += facing;
     }
     if (weight <= 1e-4) {
         return vec3(0.0);
     }
     return sum / weight;
+}
+
+vec3 merged_at(uint copy, vec2 xz, vec2 face_n, bool uniform_disk) {
+    return merged_grid(copy * FIELD_COPY + SCREEN_NEAR_OFFSET, screen_origin(), screen_spacing(), SCREEN_N, SCREEN_N, SCREEN_DIRS, xz, face_n, uniform_disk);
 }
 
 float hit_box(vec3 origin, vec3 dir, vec3 min_p, vec3 max_p) {

@@ -22,7 +22,7 @@ Hidden objects and objects outside the view stay in the field when `affects_ligh
 
 The march is on the XZ ground plane. World probes sit past the nearer ranges. They carry material color that the nearer ranges miss.
 
-Cascade 0 uses a cell of about 0.28 m and 16 directions. The near interval is one cell. Each next cascade doubles the spacing, the direction count, and the interval length. The grids stay on the world. A camera move does not move them. A miss stores β = 1 and radiance 0. The next cascade replaces that miss after interpolation in space and in angle.
+The screen grid follows the camera and finishes every frame. Its near cell is the 24 m window divided by 64, with 8 directions. The far screen cascade doubles that spacing and the direction count. A miss there reads the coarse world grid, which keeps a direction for light the screen rays do not reach.
 
 The floor, the walls, and the solids read that same field. An upward face reads probes outside its footprint. A later draw reuses the field until a lamp moves by about a meter, or a lamp color, an occluder, or the light-affecting medium changes. Screen rectangles do not rebuild it. An object that is hidden and does not affect light is left out of the gather. The paper links, including arXiv:2408.14425, are in the lighting notes.
 
@@ -34,13 +34,13 @@ The GPU compute shader `shaders/light.comp` builds the field. The fragment shade
 
 Packed object ranges, colors, and texture ids live in one GPU buffer. An object with no texture stores texture id 0. A later frame does not upload that buffer again when the mesh is unchanged.
 
-The gather runs when a lamp moves by about a meter, or when a lamp color, an occluder, or the light-affecting medium changes. A camera move does not start it. The gather is submitted on a second queue, a band of probe rows at a time, and writes the field the picture is not reading. The picture keeps the last finished field until that gather completes. A normal draw does not wait for that queue. A readback waits until the new field is the one on screen.
+The picture field is a fixed screen grid around the camera, 96 by 96 probes over a 48 m window, rebuilt every frame. A coarse world grid covers the floor at 2.5 m. It runs in the same submit and supplies a direction when a screen ray misses, including light behind the camera. The pixel reads the merged screen result. It does not test the walls itself. A readback waits until that submit is the field on screen.
 
 A probe inside a wall or a solid stores β below zero and is left out of the interpolation. A hit stores β = 0, so that direction does not read the light behind the hit. The blend also skips a probe when the segment to it crosses a wall. There is no extra accept radius around the sample.
 
 ## Game use
 
-Place lights in the scene script with `light(x, y, z, r, g, b)`. Do not call the field builder from the game loop.
+Place lights in the scene script with `light(x, y, z, r, g, b)`. A color of 1, 1, 1 is the unit lamp. At about 7 m above a white floor, that lamp stays bright enough to read. Do not call the field builder from the game loop.
 
 A new occluder is a wall or a solid in the scene. The direct ray and the bounce ray both see it. A mesh or a particle with `affects_light` becomes a stand-in solid in `World::light_scene`.
 

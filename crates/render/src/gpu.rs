@@ -222,8 +222,8 @@ impl Renderer {
             self.gpu.upload_image(&bytes)?;
             self.memory.clear_image_upload();
         }
+        self.gpu.upload_scene(&pack)?;
         if rewrite_light {
-            self.gpu.upload_scene(&pack)?;
             self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
         }
         let wait_light = readback || !self.gpu.light_ready;
@@ -503,6 +503,10 @@ struct Gpu {
     /// Workgroup columns and row-bands for the near, far, and world cascades.
     light_cols: [u32; 3],
     light_rows: [u32; 3],
+    /// Coarse world-probe grid. One band advances per screen field.
+    world_cols: u32,
+    world_bands: u32,
+    world_row: u32,
     /// Chains gather slices. The last slice leaves it signaled for one picture.
     light_sem: Handle,
     light_sem_hot: bool,
@@ -1124,6 +1128,9 @@ impl Gpu {
                 light_row: 0,
                 light_cols: [1; 3],
                 light_rows: [1; 3],
+                world_cols: 1,
+                world_bands: 1,
+                world_row: 0,
                 light_sem: std::ptr::null_mut(),
                 light_sem_hot: false,
                 light_wait_graphics: false,
@@ -2919,6 +2926,9 @@ impl Gpu {
             self.light_cols[index] = (cascade.count_x + 7) / 8;
             self.light_rows[index] = (cascade.count_z + 7) / 8;
         }
+        let (world_x, world_z) = crate::field::world_counts(pack.floor_half_x, pack.floor_half_z);
+        self.world_cols = (world_x + 7) / 8;
+        self.world_bands = (world_z + 7) / 8;
         self.pending_light = Some(bytes);
         Ok(())
     }
@@ -2944,7 +2954,7 @@ impl Gpu {
                 }
             }
             if !self.light_busy && self.light_building {
-                self.submit_slice()?;
+                self.submit_hybrid(wait)?;
             }
             let more = self.pending_light.is_some() || self.light_busy || self.light_building;
             if !wait || !more {
@@ -3090,15 +3100,8 @@ impl Gpu {
         Ok(())
     }
 
-    fn submit_slice(&mut self) -> Result<(), String> {
+    fn submit_hybrid(&mut self, all_world: bool) -> Result<(), String> {
         let dst = self.light_dst;
-        let pass = self.light_pass;
-        let row = self.light_row;
-        let cascade = 2 - (pass % 3) as usize;
-        let bands = self.light_rows[cascade].max(1);
-        let cols = self.light_cols[cascade].max(1);
-        // One workgroup row. A wider band still stretches the next picture past the frame band.
-        let rows = 1u32;
         let fences = [self.light_fence];
         unsafe {
             check(
@@ -3124,7 +3127,7 @@ impl Gpu {
                 "begin light",
             )?;
         }
-        self.dispatch_light_slice(self.light_cmd, self.light_sets[dst], pass, row, rows, cols)?;
+        self.record_hybrid(self.light_cmd, dst, all_world)?;
         unsafe {
             check((self.fns.end_cmd)(self.light_cmd), "end light")?;
             #[repr(C)]
@@ -3165,14 +3168,8 @@ impl Gpu {
                 "light submit",
             )?;
         }
-        let mut next_row = row + rows;
-        let mut next_pass = pass;
-        if next_row >= bands {
-            next_row = 0;
-            next_pass += 1;
-        }
-        self.light_row = next_row;
-        self.light_pass = next_pass;
+        self.light_row = 0;
+        self.light_pass = LIGHT_SLICES;
         self.light_busy = true;
         Ok(())
     }
@@ -3281,6 +3278,20 @@ impl Gpu {
             )?;
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped as *mut u8, bytes.len());
             (self.fns.unmap_mem)(self.device, buffer.memory);
+        }
+        Ok(())
+    }
+
+    /// The coarse world grid, then the whole screen field. Both finish in this submit.
+    fn record_hybrid(&mut self, cmd: Handle, dst: usize, _all_world: bool) -> Result<(), String> {
+        let cols = self.world_cols.max(1);
+        let bands = self.world_bands.max(1);
+        self.dispatch_light_slice(cmd, self.light_sets[dst], 4, 0, bands, cols)?;
+        let near = 12u32;
+        let far = 6u32;
+        for pass in 0..4u32 {
+            let groups = if pass & 1 == 1 { near } else { far };
+            self.dispatch_light_slice(cmd, self.light_sets[dst], pass, 0, groups, groups)?;
         }
         Ok(())
     }
