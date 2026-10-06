@@ -39,6 +39,7 @@ pub struct Renderer {
     /// Last overlay list. The same list reuses its vertices.
     overlay_rects: Vec<ScreenRect>,
     overlay_verts: Vec<crate::pack::GpuVertex>,
+    cascade_lines: Vec<crate::pack::GpuVertex>,
 }
 
 impl Renderer {
@@ -62,7 +63,23 @@ impl Renderer {
             shapes: crate::pool::MeshPool::default(),
             overlay_rects: Vec::new(),
             overlay_verts: Vec::new(),
+            cascade_lines: Vec::new(),
         })
+    }
+
+    /// Draw the selected cascade layers as unlit rays.
+    /// Index 0 is the near screen cascade, 1 is the far screen cascade, and 2 is the 3D world volume.
+    pub fn set_cascade_view(
+        &mut self,
+        scene: &genos_scene::Scene,
+        camera: &genos_scene::Camera,
+        show: [bool; 3],
+    ) {
+        self.cascade_lines = if show.iter().any(|on| *on) {
+            crate::field::cascade_debug_lines(scene, Some(camera), show)
+        } else {
+            Vec::new()
+        };
     }
 
     /// True when the last submit left its fence unsignaled. The caller can continue.
@@ -219,6 +236,17 @@ impl Renderer {
             };
             instances = vec![identity_instance()];
         }
+        if !self.cascade_lines.is_empty() {
+            let first = dynamic.len() as u32;
+            let count = self.cascade_lines.len() as u32;
+            dynamic.extend_from_slice(&self.cascade_lines);
+            draws.push(DrawSpan {
+                shapes: false,
+                first,
+                count,
+                instance: 0,
+            });
+        }
         let world_dynamic = dynamic.len() as u32;
         let mut dynamic = dynamic;
         dynamic.extend(overlay_verts);
@@ -234,20 +262,11 @@ impl Renderer {
             self.gpu.upload_image(&bytes)?;
             self.memory.clear_image_upload();
         }
-        let key = crate::field::screen_key(self.width, self.height);
-        if self.gpu.take_world_refresh() {
-            // The cache caught up. Bake it into the screen field on this draw.
-            self.screen_key = None;
-        }
-        // The cascades stay on the floor. A turn does not rebuild them.
-        let rebuild = readback || rewrite_light || self.screen_key != Some(key);
-        if rebuild {
-            let mut pack = pack;
-            pack::apply_view(&mut pack, camera, aspect, self.width, self.height);
-            self.gpu.upload_scene(&pack)?;
-            self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
-            self.screen_key = Some(key);
-        }
+        let _ = (rewrite_light, self.screen_key);
+        let mut pack = pack;
+        pack::apply_view(&mut pack, camera, aspect, self.width, self.height);
+        self.gpu.upload_scene(&pack)?;
+        self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
         self.gpu.poll_light()?;
         let wait_light = readback || !self.gpu.light_ready;
         // One cascade row when the build is already going. A readback finishes every row.
@@ -530,11 +549,11 @@ struct Gpu {
     world_pending: u32,
     /// A world-only band must not replace the screen field.
     swap_on_done: bool,
-    /// The cache finished a band cycle. The next screen gather should bake it.
-    world_refresh: bool,
     /// Screen-probe grid from the last uploaded view.
     screen_w: u32,
     screen_h: u32,
+    floor_half_x: f32,
+    floor_half_z: f32,
     /// Chains gather slices. The last slice leaves it signaled for one picture.
     light_sem: Handle,
     light_sem_hot: bool,
@@ -1161,9 +1180,10 @@ impl Gpu {
                 world_row: 0,
                 world_pending: 0,
                 swap_on_done: true,
-                world_refresh: false,
                 screen_w: 1,
                 screen_h: 1,
+                floor_half_x: 1.0,
+                floor_half_z: 1.0,
                 light_sem: std::ptr::null_mut(),
                 light_sem_hot: false,
                 light_wait_graphics: false,
@@ -2964,6 +2984,8 @@ impl Gpu {
         self.world_bands = (world_z + 7) / 8;
         self.screen_w = pack.grid_w.max(1);
         self.screen_h = pack.grid_h.max(1);
+        self.floor_half_x = pack.floor_half_x;
+        self.floor_half_z = pack.floor_half_z;
         self.pending_light = Some(bytes);
         Ok(())
     }
@@ -3098,12 +3120,6 @@ impl Gpu {
         Ok(())
     }
 
-    fn take_world_refresh(&mut self) -> bool {
-        let refresh = self.world_refresh;
-        self.world_refresh = false;
-        refresh
-    }
-
     /// A lamp or occluder change restarts the world cache. The screen field does not wait for it.
     #[allow(dead_code)]
     fn mark_world_dirty(&mut self) {
@@ -3181,12 +3197,6 @@ impl Gpu {
     /// One workgroup row of the current cascade. The next call continues the build.
     fn submit_slice(&mut self) -> Result<(), String> {
         let dst = self.light_dst;
-        let pass = self.light_pass;
-        let row = self.light_row;
-        let cascade = 2 - (pass % 3) as usize;
-        let bands = self.light_rows[cascade].max(1);
-        let cols = self.light_cols[cascade].max(1);
-        let rows = 1u32;
         let fences = [self.light_fence];
         unsafe {
             check(
@@ -3212,7 +3222,7 @@ impl Gpu {
                 "begin light",
             )?;
         }
-        self.dispatch_light_slice(self.light_cmd, self.light_sets[dst], pass, row, rows, cols)?;
+        self.dispatch_screen_field(self.light_cmd, self.light_sets[dst])?;
         unsafe {
             check((self.fns.end_cmd)(self.light_cmd), "end light")?;
             #[repr(C)]
@@ -3253,15 +3263,34 @@ impl Gpu {
                 "light submit",
             )?;
         }
-        let mut next_row = row + rows;
-        let mut next_pass = pass;
-        if next_row >= bands {
-            next_row = 0;
-            next_pass += 1;
-        }
-        self.light_row = next_row;
-        self.light_pass = next_pass;
+        self.light_row = 0;
+        self.light_pass = LIGHT_SLICES;
         self.light_busy = true;
+        Ok(())
+    }
+
+    /// 3D world probes, one bounce, then the screen cascades from far to near.
+    fn dispatch_screen_field(&mut self, cmd: Handle, set: Handle) -> Result<(), String> {
+        let half_x = self.floor_half_x.max(0.5);
+        let half_z = self.floor_half_z.max(0.5);
+        let span_x = half_x * 2.0 + 2.5 * 4.0;
+        let span_z = half_z * 2.0 + 2.5 * 4.0;
+        let count_x = ((span_x / 2.5).ceil() as u32).clamp(1, 48);
+        let count_z = ((span_z / 2.5).ceil() as u32).clamp(1, 48);
+        let count_y = 3u32;
+        let world_x = (count_x + 7) / 8;
+        let world_y = (count_y * count_z + 7) / 8;
+        // Pass 8 stores direct hits. Pass 9 adds one bounce from that volume.
+        self.dispatch_light_slice(cmd, set, 8, 0, world_y.max(1), world_x.max(1))?;
+        self.dispatch_light_slice(cmd, set, 9, 0, world_y.max(1), world_x.max(1))?;
+        for pass in 0..3u32 {
+            let level = 2 - pass;
+            let width = (self.screen_w >> level).max(1);
+            let height = (self.screen_h >> level).max(1);
+            let groups_x = (width + 7) / 8;
+            let groups_y = (height + 7) / 8;
+            self.dispatch_light_slice(cmd, set, pass, 0, groups_y, groups_x)?;
+        }
         Ok(())
     }
 

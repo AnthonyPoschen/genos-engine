@@ -180,6 +180,7 @@ fn run() -> Result<(), String> {
     let mut drag_origin: Option<Duration> = None;
     let boot = Instant::now();
     let mut wireframe = false;
+    let mut cascade_view = [false; 3];
     let mut frame_clock: Option<Instant> = None;
     loop {
         let now = Instant::now();
@@ -249,6 +250,7 @@ fn run() -> Result<(), String> {
         }
         let view = host.camera();
         wireframe = toggle_wireframe(wireframe, &input, view.captured);
+        cascade_view = toggle_cascade_view(cascade_view, &input);
         let lamp = world
             .scene
             .lights
@@ -373,6 +375,7 @@ fn run() -> Result<(), String> {
         }
         let sim_cpu = sim_at.elapsed();
         // gpu draw/present
+        renderer.set_cascade_view(&world.scene, &draw_camera, cascade_view);
         let want_read = readback.is_some();
         let draw_at = Instant::now();
         let (pixels, timing) = if detailed {
@@ -621,6 +624,25 @@ fn toggle_wireframe(on: bool, input: &InputSystem, pointer_captured: bool) -> bo
     on
 }
 
+/// Control plus 2, 3, or 4 toggles one cascade layer. 2 is near, 3 is far, 4 is world.
+fn toggle_cascade_view(mut show: [bool; 3], input: &InputSystem) -> [bool; 3] {
+    let control = input.keyboard.down(InputCode::key_control_left)
+        || input.keyboard.down(InputCode::key_control_right);
+    if !control {
+        return show;
+    }
+    let digits = [InputCode::key_2, InputCode::key_3, InputCode::key_4];
+    let control_rising = input.keyboard.pressed(InputCode::key_control_left)
+        || input.keyboard.pressed(InputCode::key_control_right);
+    for (index, digit) in digits.iter().enumerate() {
+        let rising = input.keyboard.pressed(*digit) || control_rising;
+        if input.keyboard.down(*digit) && rising {
+            show[index] = !show[index];
+        }
+    }
+    show
+}
+
 #[cfg(test)]
 mod tests {
     use genos_input::InputSystem;
@@ -631,7 +653,8 @@ mod tests {
     use genos_ui::{FrameSample, OpenFrame, ProfileGraph, STAGE_COUNT};
 
     use super::{
-        hold_ready_frames, parse_profile_mode, toggle_wireframe, PendingProfile, ProfileMode,
+        hold_ready_frames, parse_profile_mode, toggle_cascade_view, toggle_wireframe,
+        PendingProfile, ProfileMode,
     };
 
     const EVDEV_DIGIT_1: usize = 2;
@@ -759,5 +782,28 @@ mod tests {
             on,
             "the chord did not turn wireframe on again while captured"
         );
+    }
+
+    #[test]
+    fn control_and_2_toggles_the_near_cascade_only() {
+        let mut input = InputSystem::new();
+        let mut keys = [0u8; 256];
+        let mut show = [false; 3];
+        input.begin_frame();
+        input.apply_evdev_keys(&keys);
+        keys[3] = 1;
+        input.begin_frame();
+        input.apply_evdev_keys(&keys);
+        show = toggle_cascade_view(show, &input);
+        assert_eq!(show, [false, false, false]);
+        keys[EVDEV_CONTROL_LEFT] = 1;
+        input.begin_frame();
+        input.apply_evdev_keys(&keys);
+        show = toggle_cascade_view(show, &input);
+        assert_eq!(show, [true, false, false]);
+        input.begin_frame();
+        input.apply_evdev_keys(&keys);
+        show = toggle_cascade_view(show, &input);
+        assert_eq!(show, [true, false, false]);
     }
 }

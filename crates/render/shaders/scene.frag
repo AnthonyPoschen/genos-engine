@@ -132,13 +132,16 @@ const float WORLD_SPACING = 2.5;
 const float NEAR_SPACING = 0.5;
 const uint WORLD_DIRS = 8u;
 const uint WORLD_OFFSET = 184320u;
-const uint SHOWN_COPY = 1u;
+const uint WORLD_IRR_OFFSET = 176128u;
+const uint SCREEN_NORM_BASE = 8192u;
+const uint SHOWN_COPY = 0u;
 const float LAMBERT = 0.318309886;
 // A unit white lamp 7 m above a white floor stays near 0.46. A lamp 1 m away stays under white.
 const float LAMP_UNIT = 72.0;
 const float TAU = 6.2831853;
 
 bool probe_hidden(vec2 from, vec2 probe);
+bool blocked(vec3 origin, vec3 target);
 
 float ray_spin(vec2 p) {
     return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
@@ -543,31 +546,94 @@ void near_layout(out vec2 origin, out uint count_x, out uint count_z) {
     origin = center - vec2(float(count_x), float(count_z)) * NEAR_SPACING * 0.5;
 }
 
-vec3 merged_at(uint copy, vec3 world, vec2 face_n, bool uniform_disk) {
-    // Cascade 0 already stores the merged interval. A miss there included the farther ranges.
-    Cascade near = scene.cascades[0];
-    uint dirs = uint(max(near.dirs, 1.0));
-    float step = TAU / float(dirs);
-    float spin = ray_spin(world.xz);
+vec3 world_mean(vec3 pos) {
+    vec2 half_e = vec2(max(scene.floor_center.w, 0.5), max(scene.floor_data.x, 0.5));
+    vec3 origin = vec3(
+        scene.floor_center.x - half_e.x - WORLD_SPACING * 2.0,
+        0.45,
+        scene.floor_center.z - half_e.y - WORLD_SPACING * 2.0
+    );
+    uvec3 count = uvec3(
+        min(max(uint(ceil((half_e.x * 2.0 + WORLD_SPACING * 4.0) / WORLD_SPACING)), 1u), 48u),
+        3u,
+        min(max(uint(ceil((half_e.y * 2.0 + WORLD_SPACING * 4.0) / WORLD_SPACING)), 1u), 48u)
+    );
+    vec3 local = pos - origin;
+    float fx = clamp(local.x / WORLD_SPACING - 0.5, 0.0, float(count.x - 1u));
+    float fy = clamp((pos.y - origin.y) / 1.5, 0.0, float(count.y - 1u));
+    float fz = clamp(local.z / WORLD_SPACING - 0.5, 0.0, float(count.z - 1u));
+    uvec3 i0 = uvec3(uint(floor(fx)), uint(floor(fy)), uint(floor(fz)));
+    uvec3 i1 = min(i0 + uvec3(1u), count - uvec3(1u));
+    vec3 t = vec3(fx, fy, fz) - vec3(i0);
     vec3 sum = vec3(0.0);
     float weight = 0.0;
-    for (uint d = 0u; d < dirs; d++) {
-        float angle = (float(d) + spin + 0.5) * step;
-        float w = 1.0;
-        if (!uniform_disk) {
-            w = dot(face_n, vec2(cos(angle), sin(angle)));
-            if (w <= 0.0) {
-                continue;
-            }
+    for (uint corner = 0u; corner < 8u; corner++) {
+        uvec3 ip = uvec3(
+            (corner & 1u) == 0u ? i0.x : i1.x,
+            (corner & 2u) == 0u ? i0.y : i1.y,
+            (corner & 4u) == 0u ? i0.z : i1.z
+        );
+        float w = ((corner & 1u) == 0u ? 1.0 - t.x : t.x)
+            * ((corner & 2u) == 0u ? 1.0 - t.y : t.y)
+            * ((corner & 4u) == 0u ? 1.0 - t.z : t.z);
+        if (w <= 1.0e-5) {
+            continue;
         }
-        vec4 near_i = sample_interval(copy, 0u, world.xz, angle);
-        sum += near_i.rgb * w;
+        vec3 probe = origin + vec3((float(ip.x) + 0.5) * WORLD_SPACING, float(ip.y) * 1.5, (float(ip.z) + 0.5) * WORLD_SPACING);
+        if (blocked(pos, probe)) {
+            continue;
+        }
+        uint index = (ip.y * count.z + ip.z) * count.x + ip.x;
+        vec4 taken = field.texels[WORLD_IRR_OFFSET + index];
+        if (taken.a < 0.0) {
+            continue;
+        }
+        sum += taken.rgb * w;
         weight += w;
     }
     if (weight <= 1.0e-4) {
         return vec3(0.0);
     }
     return sum / weight;
+}
+
+vec3 screen_bounce(vec3 world) {
+    vec2 uv;
+    if (!project_uv(world, uv)) {
+        return world_mean(world);
+    }
+    uvec2 counts = screen_counts();
+    float fx = clamp(uv.x * float(counts.x) - 0.5, 0.0, float(counts.x - 1u));
+    float fy = clamp(uv.y * float(counts.y) - 0.5, 0.0, float(counts.y - 1u));
+    uint x0 = uint(floor(fx));
+    uint y0 = uint(floor(fy));
+    uint x1 = min(x0 + 1u, counts.x - 1u);
+    uint y1 = min(y0 + 1u, counts.y - 1u);
+    float tx = fx - float(x0);
+    float ty = fy - float(y0);
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    for (int corner = 0; corner < 4; corner++) {
+        uint ix = corner == 1 || corner == 3 ? x1 : x0;
+        uint iy = corner >= 2 ? y1 : y0;
+        float w = (corner == 1 || corner == 3 ? tx : 1.0 - tx) * (corner >= 2 ? ty : 1.0 - ty);
+        uint index = iy * counts.x + ix;
+        vec4 placed = field.texels[SCREEN_NORM_BASE + index];
+        if (placed.w < 0.5 || length(placed.xyz - world) > 1.5 || blocked(world, placed.xyz)) {
+            continue;
+        }
+        sum += field.texels[index].rgb * w;
+        wsum += w;
+    }
+    if (wsum <= 1.0e-4) {
+        return vec3(0.0);
+    }
+    return sum / wsum;
+}
+
+vec3 merged_at(uint copy, vec3 world, vec2 face_n, bool uniform_disk) {
+    // The screen cascade already merged directions, farther ranges, and world probes.
+    return screen_bounce(world);
 }
 
 bool inside_footprint(vec2 xz, Occ occ) {

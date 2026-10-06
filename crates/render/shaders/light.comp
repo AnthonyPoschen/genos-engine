@@ -82,8 +82,13 @@ const float SCREEN_REACH = 4.0;
 const float NEAR_SPACING = 0.5;
 const float SCREEN_BLEND = 0.5;
 const float WORLD_SPACING = 2.5;
-const uint WORLD_DIRS = 8u;
+const uint WORLD_DIRS = 16u;
 const uint WORLD_OFFSET = 184320u;
+const uint WORLD_IRR_OFFSET = 176128u;
+const uint WORLD_STRIDE = 163840u;
+const uint WORLD_BOUNCE_OFFSET = 348160u;
+const uint SCREEN_NORM_BASE = 8192u;
+const uint SCREEN_DIR_BASE = 16384u;
 const float LAMBERT = 0.318309886;
 // A unit white lamp 7 m above a white floor stays near 0.46. A lamp 1 m away stays under white.
 const float LAMP_UNIT = 72.0;
@@ -843,42 +848,515 @@ void write_dirs(uint base, vec2 origin, float t0, float t1, uint dirs, bool hand
     }
 }
 
-void main() {
-    uint cascade = cascade_index();
-    Cascade c = scene.cascades[cascade];
-    uint ix = gl_GlobalInvocationID.x;
-    uint iz = gl_GlobalInvocationID.y + pc.y0;
-    if (ix >= uint(c.count_x) || iz >= uint(c.count_z)) {
-        return;
+float ray_spin3(vec3 p) {
+    return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+
+vec3 hemisphere_dir(vec3 n, uint d, uint dirs, float spin) {
+    float nrm = float(max(dirs, 1u));
+    float i = float(d) + 0.5;
+    float cos_t = clamp(1.0 - i / nrm, 0.0, 1.0);
+    float sin_t = sqrt(max(1.0 - cos_t * cos_t, 0.0));
+    float phi = i * 2.39996323 + spin * TAU / nrm;
+    vec3 up = abs(n.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, n));
+    vec3 bitangent = cross(n, tangent);
+    return normalize(tangent * cos(phi) * sin_t + bitangent * sin(phi) * sin_t + n * cos_t);
+}
+
+vec3 sphere_dir(uint d, uint dirs, float spin) {
+    float nrm = float(max(dirs, 1u));
+    float i = float(d) + 0.5;
+    float y = 1.0 - 2.0 * i / nrm;
+    float radius = sqrt(max(1.0 - y * y, 0.0));
+    float phi = i * 2.39996323 + spin * TAU / nrm;
+    return vec3(cos(phi) * radius, y, sin(phi) * radius);
+}
+
+uvec2 screen_counts_at(uint cascade) {
+    uvec2 counts = screen_counts();
+    return max(uvec2(counts.x >> cascade, counts.y >> cascade), uvec2(1u));
+}
+
+uint screen_dirs_at(uint cascade) {
+    // The near fan is not stored. 64 fixed rays keep one hit from painting a grain.
+    if (cascade == 0u) {
+        return 64u;
     }
-    vec2 origin = vec2(
-        c.origin_x + (float(ix) + 0.5) * c.spacing,
-        c.origin_z + (float(iz) + 0.5) * c.spacing
+    return 16u << cascade;
+}
+
+void screen_range(uint cascade, out float t0, out float t1) {
+    if (cascade == 0u) {
+        t0 = 0.0;
+        t1 = 0.55;
+    } else if (cascade == 1u) {
+        t0 = 0.55;
+        t1 = 1.65;
+    } else {
+        t0 = 1.65;
+        t1 = 5.0;
+    }
+}
+
+uint screen_norm_offset(uint cascade) {
+    uint offset = SCREEN_NORM_BASE;
+    for (uint i = 0u; i < cascade; i++) {
+        uvec2 counts = screen_counts_at(i);
+        offset += counts.x * counts.y;
+    }
+    return offset;
+}
+
+uint screen_dir_offset(uint cascade) {
+    // Cascade 0 keeps only its integrated color. Farther cascades store directions.
+    uint offset = SCREEN_DIR_BASE;
+    for (uint i = 1u; i < cascade; i++) {
+        uvec2 counts = screen_counts_at(i);
+        offset += counts.x * counts.y * screen_dirs_at(i);
+    }
+    return offset;
+}
+
+bool on_floor_span(vec2 p) {
+    vec2 half_e = vec2(max(scene.floor_center.w, 0.5), max(scene.floor_data.x, 0.5));
+    vec2 d = p - vec2(scene.floor_center.x, scene.floor_center.z);
+    return abs(d.x) <= half_e.x + 0.05 && abs(d.y) <= half_e.y + 0.05;
+}
+
+bool point_in_volume(vec3 p) {
+    if (p.y <= 0.02) {
+        return false;
+    }
+    uint count = min(scene.occ_count, 16u);
+    for (uint i = 0u; i < count; i++) {
+        if (p.y < scene.occs[i].extent.y && over_footprint(p.xz, scene.occs[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A lamp above a solid stores a small share on the dark sides. The full top light stays off those sides.
+vec3 capped_side(Occ occ, vec3 direct) {
+    if (dot(direct, vec3(1.0)) > 1.0e-4) {
+        return direct;
+    }
+    bool over = false;
+    uint lamps = min(scene.lamp_count, 4u);
+    for (uint lamp_i = 0u; lamp_i < lamps; lamp_i++) {
+        if (scene.lamps[lamp_i].pos.w > 0.5) {
+            continue;
+        }
+        vec2 delta = scene.lamps[lamp_i].pos.xz - occ.center_shape.xz;
+        if (occ.center_shape.w > 0.5) {
+            over = over || dot(delta, delta) <= occ.extent.w * occ.extent.w;
+        } else {
+            over = over || (abs(delta.x) <= occ.extent.x && abs(delta.y) <= occ.extent.z);
+        }
+    }
+    if (scene.fire_pos.w > 0.0) {
+        vec2 delta = scene.fire_pos.xz - occ.center_shape.xz;
+        if (occ.center_shape.w > 0.5) {
+            over = over || dot(delta, delta) <= occ.extent.w * occ.extent.w;
+        } else {
+            over = over || (abs(delta.x) <= occ.extent.x && abs(delta.y) <= occ.extent.z);
+        }
+    }
+    if (!over) {
+        return direct;
+    }
+    vec3 top = vec3(occ.center_shape.x, occ.extent.y + 0.05, occ.center_shape.z);
+    return direct + min(lights_at(top, vec3(0.0, 1.0, 0.0)), vec3(2.0)) * 0.2;
+}
+
+struct TraceHit {
+    vec4 iv;
+    vec3 pos;
+    vec3 normal;
+    vec3 tint;
+    float reflect;
+};
+
+TraceHit trace_hit(vec3 origin, vec3 dir, float t0, float t1) {
+    TraceHit result;
+    result.iv = vec4(0.0, 0.0, 0.0, -2.0);
+    result.pos = origin;
+    result.normal = vec3(0.0, 1.0, 0.0);
+    result.tint = vec3(1.0);
+    result.reflect = LAMBERT;
+    float best = t1;
+    bool found = false;
+    bool floor_hit = false;
+    Occ chosen = scene.occs[0];
+    vec3 albedo = scene.floor_data.yzw;
+    float mix_color = 1.0;
+    float reflect = LAMBERT;
+    vec3 hit_n = vec3(0.0, 1.0, 0.0);
+    uint count = min(scene.occ_count, 16u);
+    for (uint i = 0u; i < count; i++) {
+        Occ occ = scene.occs[i];
+        float t = -1.0;
+        vec3 n = vec3(0.0, 1.0, 0.0);
+        vec3 center = vec3(occ.center_shape.x, occ.extent.y * 0.5, occ.center_shape.z);
+        if (occ.center_shape.w > 0.5) {
+            t = hit_cyl(origin, dir, center, occ.extent.w, 0.0, occ.extent.y);
+            if (t > 0.0) {
+                vec3 p = origin + dir * t;
+                vec2 side = p.xz - occ.center_shape.xz;
+                float len = max(length(side), 1.0e-4);
+                n = vec3(side.x / len, 0.0, side.y / len);
+            }
+        } else {
+            vec3 half_e = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
+            t = hit_box3(origin, dir, center - half_e, center + half_e);
+            if (t > 0.0) {
+                vec3 q = (origin + dir * t - center) / max(half_e, vec3(1.0e-4));
+                vec3 aq = abs(q);
+                if (aq.x >= aq.y && aq.x >= aq.z) {
+                    n = vec3(sign(q.x), 0.0, 0.0);
+                } else if (aq.y >= aq.z) {
+                    n = vec3(0.0, sign(q.y), 0.0);
+                } else {
+                    n = vec3(0.0, 0.0, sign(q.z));
+                }
+            }
+        }
+        if (t >= max(t0, 0.002) && t < t1 && t < best) {
+            best = t;
+            found = true;
+            floor_hit = false;
+            hit_n = n;
+            albedo = occ.albedo.rgb;
+            reflect = occ.bounce.x < 0.0 ? LAMBERT : clamp(occ.bounce.x, 0.0, 1.0);
+            mix_color = occ.bounce.y < 0.0 ? 1.0 : clamp(occ.bounce.y, 0.0, 1.0);
+            chosen = occ;
+        }
+    }
+    if (dir.y < -1.0e-6) {
+        float t = (0.0 - origin.y) / dir.y;
+        if (t >= max(t0, 0.002) && t < t1 && t < best) {
+            vec3 p = origin + dir * t;
+            if (on_floor_span(p.xz)) {
+                best = t;
+                found = true;
+                floor_hit = true;
+                hit_n = vec3(0.0, 1.0, 0.0);
+                albedo = scene.floor_data.yzw;
+                reflect = LAMBERT;
+                mix_color = 1.0;
+            }
+        }
+    }
+    if (!found) {
+        return result;
+    }
+    vec3 pos = origin + dir * best;
+    vec3 direct = lights_at(pos + hit_n * 0.03, hit_n);
+    if (!floor_hit) {
+        direct = capped_side(chosen, direct);
+    }
+    vec3 tint = mix(vec3(1.0), albedo, mix_color);
+    result.iv = vec4(tint * reflect * direct, best);
+    result.pos = pos;
+    result.normal = hit_n;
+    result.tint = tint;
+    result.reflect = reflect;
+    return result;
+}
+
+void world_layout3(out vec3 origin, out uvec3 count) {
+    vec2 half_e = vec2(max(scene.floor_center.w, 0.5), max(scene.floor_data.x, 0.5));
+    vec2 min_p = vec2(scene.floor_center.x, scene.floor_center.z) - half_e - vec2(WORLD_SPACING * 2.0);
+    vec2 size = half_e * 2.0 + vec2(WORLD_SPACING * 4.0);
+    count = uvec3(
+        min(max(uint(ceil(size.x / WORLD_SPACING)), 1u), 48u),
+        3u,
+        min(max(uint(ceil(size.y / WORLD_SPACING)), 1u), 48u)
     );
-    uint dirs = uint(max(c.dirs, 1.0));
-    uint probe = iz * uint(c.count_x) + ix;
-    uint base = write_copy() * FIELD_COPY + uint(c.offset) + probe * dirs;
-    if (origin_in_solid(origin)) {
+    origin = vec3(min_p.x, 0.45, min_p.y);
+}
+
+uint world_probe_index(uvec3 i, uvec3 count) {
+    return (i.y * count.z + i.z) * count.x + i.x;
+}
+
+vec3 world_probe_pos(uvec3 i, vec3 origin) {
+    return origin + vec3((float(i.x) + 0.5) * WORLD_SPACING, float(i.y) * 1.5, (float(i.z) + 0.5) * WORLD_SPACING);
+}
+
+uint match_sphere(vec3 dir, float spin) {
+    vec3 nray = normalize(dir);
+    uint best = 0u;
+    float best_dot = -2.0;
+    for (uint d = 0u; d < WORLD_DIRS; d++) {
+        float align = dot(nray, sphere_dir(d, WORLD_DIRS, spin));
+        if (align > best_dot) {
+            best_dot = align;
+            best = d;
+        }
+    }
+    return best;
+}
+
+vec4 world_texel(uint base, uvec3 ip, uvec3 count, uint dir) {
+    return field.texels[base + world_probe_index(ip, count) * WORLD_DIRS + dir];
+}
+
+vec4 world_interval(uint base, vec3 pos, vec3 dir) {
+    vec3 origin;
+    uvec3 count;
+    world_layout3(origin, count);
+    vec3 local = pos - origin;
+    float fx = clamp(local.x / WORLD_SPACING - 0.5, 0.0, float(count.x - 1u));
+    float fy = clamp((pos.y - origin.y) / 1.5, 0.0, float(count.y - 1u));
+    float fz = clamp(local.z / WORLD_SPACING - 0.5, 0.0, float(count.z - 1u));
+    uvec3 i0 = uvec3(uint(floor(fx)), uint(floor(fy)), uint(floor(fz)));
+    uvec3 i1 = min(i0 + uvec3(1u), count - uvec3(1u));
+    vec3 t = vec3(fx, fy, fz) - vec3(i0);
+    vec4 acc = vec4(0.0);
+    float weight = 0.0;
+    for (uint corner = 0u; corner < 8u; corner++) {
+        uvec3 ip = uvec3(
+            (corner & 1u) == 0u ? i0.x : i1.x,
+            (corner & 2u) == 0u ? i0.y : i1.y,
+            (corner & 4u) == 0u ? i0.z : i1.z
+        );
+        float w = ((corner & 1u) == 0u ? 1.0 - t.x : t.x)
+            * ((corner & 2u) == 0u ? 1.0 - t.y : t.y)
+            * ((corner & 4u) == 0u ? 1.0 - t.z : t.z);
+        if (w <= 1.0e-5) {
+            continue;
+        }
+        vec3 probe = world_probe_pos(ip, origin);
+        if (point_in_volume(probe) || lamp_blocked(pos, probe)) {
+            continue;
+        }
+        float spin = ray_spin3(probe);
+        uint dir_i = match_sphere(dir, spin);
+        if (dot(normalize(dir), sphere_dir(dir_i, WORLD_DIRS, spin)) < 0.5) {
+            continue;
+        }
+        vec4 taken = world_texel(base, ip, count, dir_i);
+        if (taken.a < 0.0) {
+            continue;
+        }
+        acc += taken * w;
+        weight += w;
+    }
+    if (weight <= 1.0e-4) {
+        return vec4(0.0, 0.0, 0.0, -2.0);
+    }
+    return acc / weight;
+}
+
+vec3 sample_world_mean(vec3 pos) {
+    vec3 origin;
+    uvec3 count;
+    world_layout3(origin, count);
+    vec3 local = pos - origin;
+    float fx = clamp(local.x / WORLD_SPACING - 0.5, 0.0, float(count.x - 1u));
+    float fy = clamp((pos.y - origin.y) / 1.5, 0.0, float(count.y - 1u));
+    float fz = clamp(local.z / WORLD_SPACING - 0.5, 0.0, float(count.z - 1u));
+    uvec3 i0 = uvec3(uint(floor(fx)), uint(floor(fy)), uint(floor(fz)));
+    uvec3 i1 = min(i0 + uvec3(1u), count - uvec3(1u));
+    vec3 t = vec3(fx, fy, fz) - vec3(i0);
+    vec3 sum = vec3(0.0);
+    float weight = 0.0;
+    for (uint corner = 0u; corner < 8u; corner++) {
+        uvec3 ip = uvec3(
+            (corner & 1u) == 0u ? i0.x : i1.x,
+            (corner & 2u) == 0u ? i0.y : i1.y,
+            (corner & 4u) == 0u ? i0.z : i1.z
+        );
+        float w = ((corner & 1u) == 0u ? 1.0 - t.x : t.x)
+            * ((corner & 2u) == 0u ? 1.0 - t.y : t.y)
+            * ((corner & 4u) == 0u ? 1.0 - t.z : t.z);
+        if (w <= 1.0e-5) {
+            continue;
+        }
+        vec3 probe = world_probe_pos(ip, origin);
+        if (point_in_volume(probe) || lamp_blocked(pos, probe)) {
+            continue;
+        }
+        vec4 taken = field.texels[WORLD_IRR_OFFSET + world_probe_index(ip, count)];
+        if (taken.a < 0.0) {
+            continue;
+        }
+        sum += taken.rgb * w;
+        weight += w;
+    }
+    if (weight <= 1.0e-4) {
+        return vec3(0.0);
+    }
+    return sum / weight;
+}
+
+vec4 screen_interval(uint cascade, vec2 uv, vec3 ray) {
+    uvec2 counts = screen_counts_at(cascade);
+    float fx = clamp(uv.x * float(counts.x) - 0.5, 0.0, float(counts.x - 1u));
+    float fy = clamp(uv.y * float(counts.y) - 0.5, 0.0, float(counts.y - 1u));
+    uint x0 = uint(floor(fx));
+    uint y0 = uint(floor(fy));
+    uint x1 = min(x0 + 1u, counts.x - 1u);
+    uint y1 = min(y0 + 1u, counts.y - 1u);
+    float tx = fx - float(x0);
+    float ty = fy - float(y0);
+    vec4 acc = vec4(0.0);
+    float weight = 0.0;
+    vec3 nray = normalize(ray);
+    for (uint corner = 0u; corner < 4u; corner++) {
+        uint ix = corner == 1u || corner == 3u ? x1 : x0;
+        uint iy = corner >= 2u ? y1 : y0;
+        float w = (corner == 1u || corner == 3u ? tx : 1.0 - tx) * (corner >= 2u ? ty : 1.0 - ty);
+        if (w <= 1.0e-5) {
+            continue;
+        }
+        uint probe = iy * counts.x + ix;
+        vec4 rec = field.texels[screen_norm_offset(cascade) + probe];
+        if (dot(rec.xyz, rec.xyz) < 0.5) {
+            continue;
+        }
+        uint dirs = screen_dirs_at(cascade);
+        uint best = 0u;
+        float best_dot = -2.0;
         for (uint d = 0u; d < dirs; d++) {
-            field.texels[base + d] = vec4(0.0, 0.0, 0.0, -1.0);
+            float align = dot(nray, hemisphere_dir(rec.xyz, d, dirs, rec.w));
+            if (align > best_dot) {
+                best_dot = align;
+                best = d;
+            }
+        }
+        vec4 taken = field.texels[screen_dir_offset(cascade) + probe * dirs + best];
+        if (taken.a < 0.0) {
+            continue;
+        }
+        acc += taken * w;
+        weight += w;
+    }
+    if (weight <= 1.0e-4) {
+        return vec4(0.0, 0.0, 0.0, -2.0);
+    }
+    return acc / weight;
+}
+
+void write_world(bool bounce) {
+    vec3 origin;
+    uvec3 count;
+    world_layout3(origin, count);
+    uint ix = gl_GlobalInvocationID.x;
+    uint row = gl_GlobalInvocationID.y;
+    uint iz = row % count.z;
+    uint iy = row / count.z;
+    if (ix >= count.x || iy >= count.y || iz >= count.z) {
+        return;
+    }
+    uvec3 ip = uvec3(ix, iy, iz);
+    vec3 pos = world_probe_pos(ip, origin);
+    uint dest = (bounce ? WORLD_BOUNCE_OFFSET : WORLD_OFFSET) + world_probe_index(ip, count) * WORLD_DIRS;
+    if (point_in_volume(pos)) {
+        for (uint d = 0u; d < WORLD_DIRS; d++) {
+            field.texels[dest + d] = vec4(0.0, 0.0, 0.0, -1.0);
+        }
+        if (bounce) {
+            field.texels[WORLD_IRR_OFFSET + world_probe_index(ip, count)] = vec4(0.0, 0.0, 0.0, -1.0);
         }
         return;
     }
-    float step = TAU / float(dirs);
-    float spin = ray_spin(origin);
-    for (uint d = 0u; d < dirs; d++) {
-        float angle = (float(d) + spin + 0.5) * step;
-        vec2 dir = vec2(cos(angle), sin(angle));
-        float hit_t = c.t1;
-        vec4 iv = gather_interval(origin, dir, c.t0, c.t1, hit_t);
-        // A near miss keeps the farther ranges. A hit keeps the light that leaves that surface.
-        if (cascade == 0u && iv.a > 0.5) {
-            vec4 far_i = sample_interval(write_copy(), 1u, origin, angle);
-            vec4 world_i = sample_interval(write_copy(), 2u, origin, angle);
-            iv = vec4(far_i.rgb + far_i.a * world_i.rgb, 0.0);
-        } else if (cascade == 0u) {
-            iv.a = 0.0;
+    float spin = ray_spin3(pos);
+    vec3 mean = vec3(0.0);
+    if (bounce) {
+        for (uint d = 0u; d < WORLD_DIRS; d++) {
+            vec4 direct = field.texels[WORLD_OFFSET + world_probe_index(ip, count) * WORLD_DIRS + d];
+            if (direct.a >= 0.0) {
+                mean += direct.rgb;
+            }
         }
-        field.texels[base + d] = iv;
+        mean /= float(WORLD_DIRS);
+        field.texels[WORLD_IRR_OFFSET + world_probe_index(ip, count)] = vec4(mean, 1.0);
     }
+    for (uint d = 0u; d < WORLD_DIRS; d++) {
+        vec3 ray = sphere_dir(d, WORLD_DIRS, spin);
+        TraceHit hit = trace_hit(pos, ray, 0.05, 8.0);
+        if (bounce && hit.iv.a >= 0.0) {
+            hit.iv.rgb += hit.tint * hit.reflect * mean;
+        }
+        field.texels[dest + d] = hit.iv;
+    }
+}
+
+void write_screen(uint cascade) {
+    uvec2 counts = screen_counts_at(cascade);
+    uint ix = gl_GlobalInvocationID.x;
+    uint iy = gl_GlobalInvocationID.y;
+    if (ix >= counts.x || iy >= counts.y) {
+        return;
+    }
+    uint probe = iy * counts.x + ix;
+    vec2 uv = (vec2(ix, iy) + 0.5) / vec2(counts);
+    vec3 pos;
+    vec3 normal;
+    bool placed = surface_hit(scene.eye.xyz, normalize(view_ray(uv)), pos, normal);
+    uint dirs = screen_dirs_at(cascade);
+    uint base = screen_dir_offset(cascade) + probe * dirs;
+    if (!placed) {
+        field.texels[screen_norm_offset(cascade) + probe] = vec4(0.0);
+        if (cascade > 0u) {
+            for (uint d = 0u; d < dirs; d++) {
+                field.texels[base + d] = vec4(0.0, 0.0, 0.0, -2.0);
+            }
+        }
+        if (cascade == 0u) {
+            field.texels[probe] = vec4(0.0);
+        }
+        return;
+    }
+    pos += normal * 0.04;
+    // A shared fan. A per-probe hash slides with the screen probe and the grain crawls.
+    float spin = 0.0;
+    field.texels[screen_norm_offset(cascade) + probe] = vec4(normal, spin);
+    float t0;
+    float t1;
+    screen_range(cascade, t0, t1);
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    for (uint d = 0u; d < dirs; d++) {
+        vec3 ray = hemisphere_dir(normal, d, dirs, spin);
+        TraceHit hit = trace_hit(pos, ray, t0, t1);
+        vec4 iv = hit.iv;
+        if (iv.a >= 0.15) {
+            iv.rgb += hit.tint * hit.reflect * sample_world_mean(hit.pos + hit.normal * 0.08);
+        }
+        if (iv.a < -1.5 && cascade < 2u) {
+            vec4 next = screen_interval(cascade + 1u, uv, ray);
+            if (next.a >= 0.0) {
+                iv = next;
+            }
+        }
+        if (iv.a < -1.5) {
+            vec4 far = world_interval(WORLD_BOUNCE_OFFSET, pos, ray);
+            if (far.a >= t1) {
+                iv = vec4(far.rgb, far.a);
+            }
+        }
+        if (cascade > 0u) {
+            field.texels[base + d] = iv;
+        }
+        float facing = max(dot(normal, ray), 0.0);
+        sum += iv.rgb * facing;
+        wsum += facing;
+    }
+    if (cascade == 0u) {
+        vec3 radiance = wsum > 1.0e-4 ? sum / wsum : vec3(0.0);
+        field.texels[probe] = vec4(radiance, 0.0);
+        field.texels[screen_norm_offset(0u) + probe] = vec4(pos, 1.0);
+    }
+}
+
+void main() {
+    if (pc.pass >= 8u) {
+        write_world(pc.pass >= 9u);
+        return;
+    }
+    write_screen(2u - pc.pass);
 }

@@ -14,7 +14,10 @@ mod world;
 
 pub use aa::Antialias;
 pub use budget::{FrameMemory, ImageAdmit};
-pub use field::{build, illuminate, illuminate_facing, probe_counts, sample, sample_world, Field};
+pub use field::{
+    build, cascade_debug_lines, illuminate, illuminate_facing, probe_counts, sample, sample_world,
+    Field,
+};
 pub use gpu::{DrawProfile, Renderer, ScreenRect};
 pub use lighting::Lighting;
 pub use mesh::Vertex;

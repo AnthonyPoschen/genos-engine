@@ -33,11 +33,10 @@ pub(crate) const WORLD_SPACING: f32 = 2.5;
 #[allow(dead_code)]
 pub(crate) const SCREEN_DIRS: u32 = 16;
 /// One screen probe covers this many pixels.
-pub(crate) const SCREEN_TILE: u32 = 16;
-/// Caps so a 720p frame stays near an 80 by 45 gather.
-/// `SCREEN_MAX_W * SCREEN_MAX_H * SCREEN_DIRS` stays below the world-cache texel.
-pub(crate) const SCREEN_MAX_W: u32 = 80;
-pub(crate) const SCREEN_MAX_H: u32 = 45;
+pub(crate) const SCREEN_TILE: u32 = 8;
+/// Caps so a screen cascade stays inside the field buffer.
+pub(crate) const SCREEN_MAX_W: u32 = 96;
+pub(crate) const SCREEN_MAX_H: u32 = 54;
 
 /// Screen-probe counts for a viewport. The cost stays fixed as the world grows.
 pub(crate) fn screen_grid(width: u32, height: u32) -> (u32, u32) {
@@ -47,18 +46,11 @@ pub(crate) fn screen_grid(width: u32, height: u32) -> (u32, u32) {
     )
 }
 
-/// Grid size of the screen field. A match keeps that field.
-/// A camera move does not rebuild it. The fragment keeps the camera that built it.
+/// Screen-probe grid size for one view.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ScreenKey {
     pub grid_w: u32,
     pub grid_h: u32,
-}
-
-/// Key for the screen gather. A camera move does not rebuild it.
-pub(crate) fn screen_key(width: u32, height: u32) -> ScreenKey {
-    let (grid_w, grid_h) = screen_grid(width, height);
-    ScreenKey { grid_w, grid_h }
 }
 
 /// World-probe counts for a floor. The margin is two cells on each side.
@@ -999,6 +991,339 @@ fn hit_circle(
     Some((t0, [nx / len, nz / len]))
 }
 
+const DEBUG_BUDGET: u32 = 2400;
+const DEBUG_COLORS: [[f32; 3]; 3] = [[0.25, 0.95, 1.0], [1.0, 0.82, 0.2], [1.0, 0.35, 0.8]];
+
+/// Unlit lines for the cascade layers that `show` enables.
+/// 0 is the near screen cascade, 1 is the far screen cascade, and 2 is the 3D world volume.
+pub fn cascade_debug_lines(
+    scene: &genos_scene::Scene,
+    camera: Option<&genos_scene::Camera>,
+    show: [bool; 3],
+) -> Vec<crate::pack::GpuVertex> {
+    let mut out = Vec::new();
+    if let Some(camera) = camera {
+        if show[0] {
+            push_screen_debug(
+                &mut out,
+                scene,
+                camera,
+                8,
+                5,
+                32,
+                0.0,
+                0.55,
+                DEBUG_COLORS[0],
+            );
+        }
+        if show[1] {
+            push_screen_debug(
+                &mut out,
+                scene,
+                camera,
+                8,
+                5,
+                32,
+                0.55,
+                1.65,
+                DEBUG_COLORS[1],
+            );
+        }
+    }
+    if show[2] {
+        push_world_debug(&mut out, &scene.floor, DEBUG_COLORS[2]);
+    }
+    out
+}
+
+fn push_screen_debug(
+    out: &mut Vec<crate::pack::GpuVertex>,
+    scene: &genos_scene::Scene,
+    camera: &genos_scene::Camera,
+    columns: u32,
+    rows: u32,
+    dirs: u32,
+    t0: f32,
+    t1: f32,
+    color: [f32; 3],
+) {
+    let forward = genos_scene::look_direction(camera.yaw, camera.pitch);
+    let mut right = forward.cross(genos_scene::Vec3::Y);
+    let scale = right.length().max(1.0e-6);
+    right = right / scale;
+    let up = right.cross(forward);
+    let tan = 30.0_f32.to_radians().tan();
+    let aspect = 1.77_f32;
+    let eye = [camera.position.x, camera.position.y, camera.position.z];
+    let stride = debug_stride(columns, rows, dirs).max(1);
+    let mut iy = 0u32;
+    while iy < rows {
+        let mut ix = 0u32;
+        while ix < columns {
+            let u = (ix as f32 + 0.5) / columns as f32;
+            let v = (iy as f32 + 0.5) / rows as f32;
+            let ndc_x = u * 2.0 - 1.0;
+            let ndc_y = v * 2.0 - 1.0;
+            let dir = [
+                forward.x + right.x * ndc_x * tan * aspect + up.x * (-ndc_y * tan),
+                forward.y + right.y * ndc_x * tan * aspect + up.y * (-ndc_y * tan),
+                forward.z + right.z * ndc_x * tan * aspect + up.z * (-ndc_y * tan),
+            ];
+            let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2])
+                .sqrt()
+                .max(1.0e-6);
+            let view = [dir[0] / len, dir[1] / len, dir[2] / len];
+            if let Some((pos, normal)) = debug_surface(scene, eye, view) {
+                let origin = [
+                    pos[0] + normal[0] * 0.04,
+                    pos[1] + normal[1] * 0.04,
+                    pos[2] + normal[2] * 0.04,
+                ];
+                for d in 0..dirs {
+                    let ray = debug_hemisphere(normal, d, dirs);
+                    let start = [
+                        origin[0] + ray[0] * t0,
+                        origin[1] + ray[1] * t0,
+                        origin[2] + ray[2] * t0,
+                    ];
+                    let end = [
+                        origin[0] + ray[0] * t1,
+                        origin[1] + ray[1] * t1,
+                        origin[2] + ray[2] * t1,
+                    ];
+                    push_debug_line(out, start, end, color);
+                }
+            }
+            ix += stride;
+        }
+        iy += stride;
+    }
+}
+
+fn debug_hemisphere(normal: [f32; 3], dir: u32, dirs: u32) -> [f32; 3] {
+    let nrm = dirs.max(1) as f32;
+    let i = dir as f32 + 0.5;
+    let cos_t = (1.0 - i / nrm).clamp(0.0, 1.0);
+    let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
+    let phi = i * 2.39996323;
+    let up = if normal[1].abs() < 0.9 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let mut tangent = [
+        up[1] * normal[2] - up[2] * normal[1],
+        up[2] * normal[0] - up[0] * normal[2],
+        up[0] * normal[1] - up[1] * normal[0],
+    ];
+    let tl = (tangent[0] * tangent[0] + tangent[1] * tangent[1] + tangent[2] * tangent[2])
+        .sqrt()
+        .max(1.0e-6);
+    tangent = [tangent[0] / tl, tangent[1] / tl, tangent[2] / tl];
+    let bitangent = [
+        normal[1] * tangent[2] - normal[2] * tangent[1],
+        normal[2] * tangent[0] - normal[0] * tangent[2],
+        normal[0] * tangent[1] - normal[1] * tangent[0],
+    ];
+    let ray = [
+        tangent[0] * phi.cos() * sin_t + bitangent[0] * phi.sin() * sin_t + normal[0] * cos_t,
+        tangent[1] * phi.cos() * sin_t + bitangent[1] * phi.sin() * sin_t + normal[1] * cos_t,
+        tangent[2] * phi.cos() * sin_t + bitangent[2] * phi.sin() * sin_t + normal[2] * cos_t,
+    ];
+    let len = (ray[0] * ray[0] + ray[1] * ray[1] + ray[2] * ray[2])
+        .sqrt()
+        .max(1.0e-6);
+    [ray[0] / len, ray[1] / len, ray[2] / len]
+}
+
+fn debug_surface(
+    scene: &genos_scene::Scene,
+    eye: [f32; 3],
+    dir: [f32; 3],
+) -> Option<([f32; 3], [f32; 3])> {
+    let mut best = f32::MAX;
+    let mut hit = None;
+    for wall in &scene.walls {
+        let min = [
+            wall.position.x - wall.half_x,
+            0.0,
+            wall.position.z - wall.half_z,
+        ];
+        let max = [
+            wall.position.x + wall.half_x,
+            wall.height,
+            wall.position.z + wall.half_z,
+        ];
+        if let Some(t) = hit_box(eye, dir, min, max) {
+            if t > 0.002 && t < best {
+                best = t;
+                let pos = [
+                    eye[0] + dir[0] * t,
+                    eye[1] + dir[1] * t,
+                    eye[2] + dir[2] * t,
+                ];
+                let center = [wall.position.x, wall.height * 0.5, wall.position.z];
+                let half = [wall.half_x, wall.height * 0.5, wall.half_z];
+                hit = Some((pos, box_face_normal(pos, center, half)));
+            }
+        }
+    }
+    for solid in &scene.solids {
+        if let Some(t) = hit_solid_3d(eye, dir, solid) {
+            if t > 0.002 && t < best {
+                best = t;
+                let pos = [
+                    eye[0] + dir[0] * t,
+                    eye[1] + dir[1] * t,
+                    eye[2] + dir[2] * t,
+                ];
+                let normal = match solid.shape {
+                    Shape::Circle => {
+                        let dx = pos[0] - solid.position.x;
+                        let dz = pos[2] - solid.position.z;
+                        let len = (dx * dx + dz * dz).sqrt().max(1.0e-4);
+                        [dx / len, 0.0, dz / len]
+                    }
+                    Shape::Square => {
+                        let half = solid.size * 0.5;
+                        box_face_normal(
+                            pos,
+                            [solid.position.x, solid.height * 0.5, solid.position.z],
+                            [half, solid.height * 0.5, half],
+                        )
+                    }
+                };
+                hit = Some((pos, normal));
+            }
+        }
+    }
+    if dir[1] < -1.0e-6 {
+        let t = (0.0 - eye[1]) / dir[1];
+        if t > 0.002 && t < best {
+            let pos = [eye[0] + dir[0] * t, 0.0, eye[2] + dir[2] * t];
+            let dx = (pos[0] - scene.floor.position.x).abs();
+            let dz = (pos[2] - scene.floor.position.z).abs();
+            if dx <= scene.floor.half_x + 0.05 && dz <= scene.floor.half_z + 0.05 {
+                hit = Some((pos, [0.0, 1.0, 0.0]));
+            }
+        }
+    }
+    hit
+}
+
+fn box_face_normal(pos: [f32; 3], center: [f32; 3], half: [f32; 3]) -> [f32; 3] {
+    let q = [
+        (pos[0] - center[0]) / half[0].max(1.0e-4),
+        (pos[1] - center[1]) / half[1].max(1.0e-4),
+        (pos[2] - center[2]) / half[2].max(1.0e-4),
+    ];
+    let ax = q[0].abs();
+    let ay = q[1].abs();
+    let az = q[2].abs();
+    if ax >= ay && ax >= az {
+        [q[0].signum(), 0.0, 0.0]
+    } else if ay >= az {
+        [0.0, q[1].signum(), 0.0]
+    } else {
+        [0.0, 0.0, q[2].signum()]
+    }
+}
+
+fn push_world_debug(
+    out: &mut Vec<crate::pack::GpuVertex>,
+    floor: &genos_scene::Floor,
+    color: [f32; 3],
+) {
+    let spacing = 2.5_f32;
+    let min_x = floor.position.x - floor.half_x - spacing * 2.0;
+    let min_z = floor.position.z - floor.half_z - spacing * 2.0;
+    let count_x = ((floor.half_x * 2.0 + spacing * 4.0) / spacing)
+        .ceil()
+        .max(1.0) as u32;
+    let count_z = ((floor.half_z * 2.0 + spacing * 4.0) / spacing)
+        .ceil()
+        .max(1.0) as u32;
+    let stride = debug_stride(count_x, count_z * 3, 16).max(1);
+    let mut iz = 0u32;
+    while iz < count_z {
+        let mut ix = 0u32;
+        while ix < count_x {
+            for iy in 0..3u32 {
+                let x = min_x + (ix as f32 + 0.5) * spacing;
+                let y = 0.45 + iy as f32 * 1.5;
+                let z = min_z + (iz as f32 + 0.5) * spacing;
+                push_debug_line(out, [x, y, z], [x, y + 0.2, z], color);
+                for dir in 0..16u32 {
+                    let i = dir as f32 + 0.5;
+                    let py = 1.0 - 2.0 * i / 16.0;
+                    let radius = (1.0 - py * py).max(0.0).sqrt();
+                    let phi = i * 2.39996323;
+                    let ray = [phi.cos() * radius, py, phi.sin() * radius];
+                    let end = [x + ray[0] * 2.5, y + ray[1] * 2.5, z + ray[2] * 2.5];
+                    push_debug_line(out, [x, y, z], end, color);
+                }
+            }
+            ix += stride;
+        }
+        iz += stride;
+    }
+}
+
+fn debug_stride(count_x: u32, count_z: u32, dirs: u32) -> u32 {
+    let mut stride = 1u32;
+    while count_x.div_ceil(stride) * count_z.div_ceil(stride) * dirs.max(1) > DEBUG_BUDGET {
+        stride += 1;
+    }
+    stride
+}
+
+fn push_debug_line(
+    out: &mut Vec<crate::pack::GpuVertex>,
+    a: [f32; 3],
+    b: [f32; 3],
+    color: [f32; 3],
+) {
+    let dx = b[0] - a[0];
+    let dy = b[1] - a[1];
+    let dz = b[2] - a[2];
+    let len = (dx * dx + dy * dy + dz * dz).sqrt();
+    if len < 1.0e-5 {
+        return;
+    }
+    let dir = [dx / len, dy / len, dz / len];
+    let axis = if dir[1].abs() < 0.9 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let side = [
+        dir[1] * axis[2] - dir[2] * axis[1],
+        dir[2] * axis[0] - dir[0] * axis[2],
+        dir[0] * axis[1] - dir[1] * axis[0],
+    ];
+    let sl = (side[0] * side[0] + side[1] * side[1] + side[2] * side[2])
+        .sqrt()
+        .max(1.0e-6);
+    let side = [
+        side[0] / sl * 0.012,
+        side[1] / sl * 0.012,
+        side[2] / sl * 0.012,
+    ];
+    let a0 = [a[0] - side[0], a[1] - side[1], a[2] - side[2]];
+    let a1 = [a[0] + side[0], a[1] + side[1], a[2] + side[2]];
+    let b0 = [b[0] - side[0], b[1] - side[1], b[2] - side[2]];
+    let b1 = [b[0] + side[0], b[1] + side[1], b[2] + side[2]];
+    for corner in [a0, b0, b1, a0, b1, a1] {
+        out.push(crate::pack::GpuVertex {
+            pos: corner,
+            albedo: color,
+            normal: [0.0, 1.0, 0.0],
+            shade: 0.0,
+            uv: [-1.0, -1.0],
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::illuminate_facing;
@@ -1041,5 +1366,29 @@ mod tests {
             close > room && close < 0.85,
             "a lamp 1 m away is not brighter, or it is flat white: close {close} room {room}"
         );
+    }
+
+    #[test]
+    fn near_debug_rays_are_denser_and_shorter_than_world_rays() {
+        let floor = Floor {
+            position: Vec3::new(0.0, 0.0, 0.0),
+            half_x: 16.0,
+            half_z: 18.0,
+            color: [1.0, 1.0, 1.0],
+        };
+        let plans = super::cascade_plans(&floor);
+        assert!(plans[0].spacing < plans[1].spacing && plans[1].spacing < plans[2].spacing);
+        assert!(plans[0].dirs < plans[2].dirs);
+        assert!(plans[0].t1 < plans[2].t1);
+        let scene = Scene {
+            floor,
+            walls: Vec::new(),
+            solids: Vec::new(),
+            lights: Vec::new(),
+        };
+        let near = super::cascade_debug_lines(&scene, None, [true, false, false]);
+        let world = super::cascade_debug_lines(&scene, None, [false, false, true]);
+        assert!(near.is_empty());
+        assert!(!world.is_empty());
     }
 }
