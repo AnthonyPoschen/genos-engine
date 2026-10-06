@@ -412,7 +412,8 @@ static void pump_events(struct GenosWindow *win) {
         wl_display_dispatch_pending(win->display);
     }
     wl_display_flush(win->display);
-    if (poll(&pfd, 1, 8) > 0) {
+    /* Timeout 0: an idle socket must not sleep. The frame rate owns the wait. */
+    if (poll(&pfd, 1, 0) > 0) {
         wl_display_read_events(win->display);
     } else {
         wl_display_cancel_read(win->display);

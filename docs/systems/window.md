@@ -8,7 +8,7 @@ A game window opens, takes focus, and gives the runtime a surface. A widget can 
 
 ## Intent
 
-The frame pulls state. `Window::pump` reads the compositor, then tells subscribers what changed. A listener runs inside `pump`. A listener must not call `pump`.
+The frame pulls state. `Window::pump` reads the compositor, then tells subscribers what changed. When no events are queued, `Window::pump` returns at once. A listener runs inside `pump`. A listener must not call `pump`.
 
 The window does not lock the pointer when it opens. A click does not lock the pointer. The frame calls `set_pointer_capture` when it accepts the click.
 
