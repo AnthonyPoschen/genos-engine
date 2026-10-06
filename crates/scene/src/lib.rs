@@ -1,4 +1,4 @@
-//! Scene, character-controller camera, and script host.
+//! Scene, capsule camera, and script host.
 //!
 //! Lights and objects live here. The renderer decides which light reaches which surface.
 //! Positions and directions use `genos-math`.

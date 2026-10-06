@@ -36,6 +36,8 @@ fn run() -> Result<(), String> {
 
     let scene_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scene.rhai");
     let scene = load_path(&scene_path)?;
+    let mut camera = Camera::opening();
+    camera.attach_scene(&scene);
     let mut world = World::from_scene(scene);
     let mut window = if proof {
         Window::open_proof(1280, 720)?
@@ -44,7 +46,6 @@ fn run() -> Result<(), String> {
     };
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
-    let mut camera = Camera::opening();
     let mut drawn = 0u32;
     let mut size = (renderer.width(), renderer.height());
     let mut focus = FocusGate::default();

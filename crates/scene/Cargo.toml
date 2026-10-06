@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 genos-math = { path = "../math" }
+genos-physics = { path = "../physics" }
 rhai = "=1.26.0"
 
 [dev-dependencies]

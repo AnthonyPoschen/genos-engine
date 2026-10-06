@@ -41,7 +41,7 @@ The step does not turn a body. There is no stack solver, no air drag, and no con
 
 A mesh collider is a few convex pieces, not the source triangles. Two concave meshes do not get a triangle-versus-triangle test. The piece count stops at 6. A very thin sheet can be missed by the voxel sample.
 
-Lights have no collider.
+The camera calls this step from the scene crate. Lights have no collider.
 
 ## Decisions
 

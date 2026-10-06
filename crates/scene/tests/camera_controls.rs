@@ -1,16 +1,37 @@
 use genos_scene::{
-    transform_point, update, view_proj, viewport_uv, Actions, Camera, CAMERA_HEIGHT, PITCH_LIMIT,
+    transform_point, update, view_proj, viewport_uv, Actions, Camera, CAMERA_HEIGHT,
+    PITCH_LIMIT,
 };
 use std::f32::consts::FRAC_PI_2;
+
+fn tick(camera: &mut Camera, actions: &Actions, dt: f32) {
+    update(camera, actions, dt);
+}
 
 fn cold() -> Camera {
     Camera::new(0.0, 8.0, 0.0)
 }
 
+fn on_open_floor(x: f32, z: f32, yaw: f32) -> Camera {
+    let scene = genos_scene::load_path(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/camera/scene.rhai"
+    )))
+    .unwrap();
+    let mut camera = Camera::new(x, z, yaw);
+    camera.attach_scene(&scene);
+    camera
+}
+
+fn eye_near_rest(camera: &Camera) {
+    let error = (camera.position.y - CAMERA_HEIGHT).abs();
+    assert!(error < 0.05, "eye y {} error {error}", camera.position.y);
+}
+
 #[test]
-fn forward_back_and_strafe_stay_on_one_height_and_follow_yaw() {
-    let mut camera = cold();
-    update(
+fn forward_back_and_strafe_follow_yaw_near_eye_height() {
+    let mut camera = on_open_floor(-6.0, 6.0, 0.0);
+    tick(
         &mut camera,
         &Actions {
             forward: 1.0,
@@ -18,11 +39,11 @@ fn forward_back_and_strafe_stay_on_one_height_and_follow_yaw() {
         },
         0.5,
     );
-    assert_eq!(camera.position.y, CAMERA_HEIGHT);
-    assert!(camera.position.z < 8.0, "yaw 0 faces -Z");
+    eye_near_rest(&camera);
+    assert!(camera.position.z < 6.0, "yaw 0 faces -Z");
     let z_after_forward = camera.position.z;
 
-    update(
+    tick(
         &mut camera,
         &Actions {
             forward: -1.0,
@@ -31,10 +52,10 @@ fn forward_back_and_strafe_stay_on_one_height_and_follow_yaw() {
         0.5,
     );
     assert!(camera.position.z > z_after_forward);
-    assert_eq!(camera.position.y, CAMERA_HEIGHT);
+    eye_near_rest(&camera);
 
-    let mut strafe = Camera::new(0.0, 0.0, 0.0);
-    update(
+    let mut strafe = on_open_floor(-6.0, 6.0, 0.0);
+    tick(
         &mut strafe,
         &Actions {
             strafe: 1.0,
@@ -42,56 +63,25 @@ fn forward_back_and_strafe_stay_on_one_height_and_follow_yaw() {
         },
         0.5,
     );
-    assert!(strafe.position.x > 0.0, "D moves toward +X");
-    assert_eq!(strafe.position.y, CAMERA_HEIGHT);
+    assert!(strafe.position.x > -6.0, "D moves toward +X");
+    eye_near_rest(&strafe);
 
-    let mut left = Camera::new(0.0, 0.0, 0.0);
-    update(
+    let mut left = on_open_floor(-6.0, 6.0, 0.0);
+    tick(
         &mut left,
         &Actions {
             strafe: -1.0,
             ..Actions::default()
         },
-        0.5,
+        0.25,
     );
-    assert!(left.position.x < 0.0);
-}
-
-#[test]
-fn move_crosses_a_wall_on_the_shipped_scene() {
-    let scene = genos_scene::load_path(std::path::Path::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../examples/camera/scene.rhai"
-    )))
-    .unwrap();
-    let wall = scene
-        .walls
-        .iter()
-        .find(|wall| wall.half_x > wall.half_z)
-        .unwrap();
-    let mut camera = Camera::new(
-        wall.position.x + wall.half_x - 0.3,
-        wall.position.z,
-        std::f32::consts::FRAC_PI_2,
-    );
-    let start_x = camera.position.x;
-    update(
-        &mut camera,
-        &Actions {
-            forward: 1.0,
-            ..Actions::default()
-        },
-        1.0,
-    );
-    assert!(camera.position.x > wall.position.x + wall.half_x);
-    assert!(camera.position.x > start_x);
-    assert_eq!(camera.position.y, CAMERA_HEIGHT);
+    assert!(left.position.x < -6.0);
 }
 
 #[test]
 fn mouse_and_right_stick_change_yaw_and_pitch_and_pitch_clamps() {
     let mut camera = cold();
-    update(
+    tick(
         &mut camera,
         &Actions {
             capture_click: true,
@@ -107,7 +97,7 @@ fn mouse_and_right_stick_change_yaw_and_pitch_and_pitch_clamps() {
 
     let yaw_before_stick = camera.yaw;
     let pitch_before_stick = camera.pitch;
-    update(
+    tick(
         &mut camera,
         &Actions {
             look_x: 1.0,
@@ -119,7 +109,7 @@ fn mouse_and_right_stick_change_yaw_and_pitch_and_pitch_clamps() {
     assert!(camera.yaw > yaw_before_stick);
     assert!(camera.pitch > pitch_before_stick);
 
-    update(
+    tick(
         &mut camera,
         &Actions {
             capture_click: true,
@@ -131,7 +121,7 @@ fn mouse_and_right_stick_change_yaw_and_pitch_and_pitch_clamps() {
     assert!((camera.pitch - PITCH_LIMIT).abs() < 1.0e-4);
     assert!(camera.pitch < FRAC_PI_2);
 
-    update(
+    tick(
         &mut camera,
         &Actions {
             capture_click: true,
@@ -148,7 +138,7 @@ fn mouse_and_right_stick_change_yaw_and_pitch_and_pitch_clamps() {
 fn first_click_captures_and_escape_releases() {
     let mut camera = cold();
     assert!(!camera.captured);
-    update(
+    tick(
         &mut camera,
         &Actions {
             capture_click: true,
@@ -158,7 +148,7 @@ fn first_click_captures_and_escape_releases() {
     );
     assert!(camera.captured);
     let yaw = camera.yaw;
-    update(
+    tick(
         &mut camera,
         &Actions {
             escape: true,

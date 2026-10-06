@@ -1,8 +1,23 @@
 use genos_math::{Mat4, Vec3};
-use std::f32::consts::FRAC_PI_2;
+use genos_physics::{step, Body, World, GRAVITY};
+use std::f32::consts::{FRAC_PI_2, TAU};
 
-/// Eye height of the character controller. Movement keeps this value.
+use crate::types::{Scene, Shape, Solid};
+
+/// Eye height of the character controller. A resting capsule keeps the eye here.
 pub const CAMERA_HEIGHT: f32 = 1.7;
+
+/// Capsule radius around the view. The eye sits at the top of the capsule.
+const VIEW_RADIUS: f32 = 0.3;
+
+/// Half-length of the capsule segment. Total height is `2 * (radius + half_height)`.
+const VIEW_HALF_HEIGHT: f32 = 0.55;
+
+/// Eye position is this far above the capsule center.
+const EYE_ABOVE_CENTER: f32 = VIEW_RADIUS + VIEW_HALF_HEIGHT;
+
+/// Floor box extends this far below y = 0. The top stays on the ground.
+const FLOOR_HALF_Y: f32 = 0.25;
 
 /// Pitch stops here, short of straight up and straight down.
 pub const PITCH_LIMIT: f32 = 1.45;
@@ -30,6 +45,12 @@ pub struct Camera {
     pub yaw: f32,
     pub pitch: f32,
     pub captured: bool,
+    /// Static room colliders plus the one capsule that carries the eye.
+    pub physics: World,
+    /// Index of the view capsule in `physics`.
+    pub view: usize,
+    /// Body index of the first solid. `None` until `attach_scene`.
+    solid_origin: Option<usize>,
 }
 
 impl Camera {
@@ -38,15 +59,104 @@ impl Camera {
         Self::new(-6.0, 6.0, std::f32::consts::FRAC_PI_4)
     }
 
-    /// `x` is across the ground. `z` is depth. Height stays on Y.
+    /// `x` is across the ground. `z` is depth. The eye starts at `CAMERA_HEIGHT`.
     pub fn new(x: f32, z: f32, yaw: f32) -> Self {
+        let position = Vec3::new(x, CAMERA_HEIGHT, z);
+        let mut physics = World::new(GRAVITY);
+        physics.insert(view_capsule(position));
         Self {
-            position: Vec3::new(x, CAMERA_HEIGHT, z),
+            position,
             yaw,
             pitch: 0.0,
             captured: false,
+            physics,
+            view: 0,
+            solid_origin: None,
         }
     }
+
+    /// Replace the world with the room colliders and one capsule at the current eye.
+    pub fn attach_scene(&mut self, scene: &Scene) {
+        let mut physics = World::new(GRAVITY);
+        let floor = &scene.floor;
+        physics.insert(Body::cuboid(
+            Vec3::new(floor.position.x, -FLOOR_HALF_Y, floor.position.z),
+            0.0,
+            Vec3::new(floor.half_x, FLOOR_HALF_Y, floor.half_z),
+        ));
+        for wall in &scene.walls {
+            physics.insert(Body::cuboid(
+                Vec3::new(wall.position.x, wall.height * 0.5, wall.position.z),
+                0.0,
+                Vec3::new(wall.half_x, wall.height * 0.5, wall.half_z),
+            ));
+        }
+        for solid in &scene.solids {
+            physics.insert(solid_collider(solid));
+        }
+        physics.insert(view_capsule(self.position));
+        self.view = physics.count - 1;
+        self.solid_origin = Some(1 + scene.walls.len());
+        self.physics = physics;
+    }
+
+    /// Move the eye and the view capsule together. The next step starts here.
+    pub fn set_pose(&mut self, position: Vec3, yaw: f32, pitch: f32) {
+        self.position = position;
+        self.yaw = yaw;
+        self.pitch = pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        if let Some(body) = self.physics.bodies.get_mut(self.view) {
+            body.position = position - Vec3::Y * EYE_ABOVE_CENTER;
+            body.velocity = Vec3::ZERO;
+            body.wish = Vec3::ZERO;
+        }
+    }
+
+}
+
+fn view_capsule(eye: Vec3) -> Body {
+    let mut body = Body::capsule(
+        eye - Vec3::Y * EYE_ABOVE_CENTER,
+        1.0,
+        VIEW_RADIUS,
+        VIEW_HALF_HEIGHT,
+    );
+    body.motor = true;
+    body
+}
+
+fn solid_collider(solid: &Solid) -> Body {
+    match solid.shape {
+        Shape::Square => {
+            let half = solid.size * 0.5;
+            Body::cuboid(
+                solid.position + Vec3::Y * center_lift(solid),
+                0.0,
+                Vec3::new(half, solid.height * 0.5, half),
+            )
+        }
+        Shape::Circle => {
+            let radius = solid.size * 0.5;
+            Body::mesh(solid.position, 0.0, &cylinder(radius, solid.height, 16))
+        }
+    }
+}
+
+fn cylinder(radius: f32, height: f32, sides: u32) -> Vec<[Vec3; 3]> {
+    let mut triangles = Vec::new();
+    for i in 0..sides {
+        let a0 = i as f32 / sides as f32 * TAU;
+        let a1 = (i + 1) as f32 / sides as f32 * TAU;
+        let p0 = Vec3::new(a0.cos() * radius, 0.0, a0.sin() * radius);
+        let p1 = Vec3::new(a1.cos() * radius, 0.0, a1.sin() * radius);
+        let p2 = Vec3::new(p1.x, height, p1.z);
+        let p3 = Vec3::new(p0.x, height, p0.z);
+        triangles.push([p0, p1, p2]);
+        triangles.push([p0, p2, p3]);
+        triangles.push([Vec3::new(0.0, height, 0.0), p3, p2]);
+        triangles.push([Vec3::ZERO, p1, p0]);
+    }
+    triangles
 }
 
 /// View direction. Yaw 0 looks along -Z. Positive yaw turns toward +X.
@@ -56,7 +166,15 @@ pub fn look_direction(yaw: f32, pitch: f32) -> Vec3 {
     Vec3::new(sy * cp, sp, -cy * cp)
 }
 
-/// Integrate the character controller. Walls are not tested. Height stays fixed.
+/// Vertical distance from a solid's scene position to its collider center.
+fn center_lift(solid: &Solid) -> f32 {
+    match solid.shape {
+        Shape::Square => solid.height * 0.5,
+        Shape::Circle => 0.0,
+    }
+}
+
+/// Integrate look, then the physics step. Move input is a desired horizontal velocity.
 pub fn update(camera: &mut Camera, actions: &Actions, dt: f32) {
     if actions.escape {
         camera.captured = false;
@@ -76,8 +194,22 @@ pub fn update(camera: &mut Camera, actions: &Actions, dt: f32) {
     let forward = look_direction(camera.yaw, 0.0);
     let right = look_direction(camera.yaw + FRAC_PI_2, 0.0);
     let wish = forward * actions.forward.clamp(-1.0, 1.0) + right * actions.strafe.clamp(-1.0, 1.0);
-    camera.position += wish * (MOVE_SPEED * dt);
-    camera.position.y = CAMERA_HEIGHT;
+    let speed = wish * MOVE_SPEED;
+    if let Some(body) = camera.physics.bodies.get_mut(camera.view) {
+        body.motor = true;
+        body.wish = Vec3::new(speed.x, 0.0, speed.z);
+    }
+
+    let mut left = dt.max(0.0);
+    let slice = 1.0 / 60.0;
+    while left > 0.0 {
+        let step_dt = left.min(slice);
+        camera.physics = step(&camera.physics, step_dt);
+        left -= step_dt;
+    }
+    if let Some(body) = camera.physics.bodies.get(camera.view) {
+        camera.position = body.position + Vec3::Y * EYE_ABOVE_CENTER;
+    }
 }
 
 /// Column-major view-projection for a Vulkan clip space with Y flipped.
