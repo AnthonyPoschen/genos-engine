@@ -133,7 +133,7 @@ impl Lighting {
                 let bounce = field::sample(field, lit.pos[0], lit.pos[2]);
                 cached.push(Vertex {
                     pos: lit.pos,
-                    color: mesh::compose(lit.albedo, lit.direct, bounce),
+                    color: mesh::compose(lit.albedo, lit.direct, bounce, lit.level),
                 });
             }
         }

@@ -14,7 +14,9 @@ A build does not read the previous frame. There is no lightmap and no ambient fi
 
 A direct ray stops when it hits a wall or a solid. The ray uses those shapes. It is not a physics collision step. A ray that clears the top of a wall still arrives. A bounce ray stops on the first surface in its interval.
 
-Each face is shaded from a point just outside that face. The back of a wall stays dark when the lamp is on the other side.
+Each face is shaded from a point just outside that face. The back of a wall stays dark when the lamp is on the other side. A lamp above an object colors the floor on every side. A lamp on one side does not color the far side.
+
+A lit wall adds light to the floor shadow in front of that wall. The shadow is brighter near the wall than far from the wall. The floor behind that wall stays dark.
 
 Hidden objects and objects outside the view stay in the field when `affects_light` is true. Culling removes them from the picture only.
 

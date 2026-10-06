@@ -44,7 +44,9 @@ A lamp reaches a point only when the straight ray misses every wall and solid. T
 
 Each face is lit from a point just outside that face, and only when that face points toward the lamp. A floor point inside an object's footprint gets no lamp. A point on the lamp side, outside that footprint, stays lit. The floor mesh is cut along the straight projection of each occluder, so the shadow edge is that line. The center of a wall is inside the volume, so one sample there lights the back face as well as the front.
 
-Light that leaves a surface is that surface's color multiplied by the light arriving there. The arrival is the lamps plus the previous bounce pass. A red solid in a white lamp throws red light. A white floor shows that red next to the solid, on top of the white the lamp puts there directly. A colored receiver multiplies the bounce by its own color as well.
+Light that leaves a surface is that surface's color multiplied by the light arriving there. The arrival is the lamps plus the previous bounce pass. A lamp above an object colors the floor on every side. A lamp on one side does not color the far side. A lit wall adds light to the floor shadow in front of that wall. The shadow is brighter near the wall than far from the wall.
+
+A red solid in a white lamp throws red light. A white floor shows that red next to the solid, on top of the white the lamp puts there directly. A colored receiver multiplies the bounce by its own color as well.
 
 The field is built twice from the current scene. The first pass records light leaving each material under the lamps. The second pass lets that colored light bounce once more. Neither pass reads the previous frame. Move or recolor an object and the next build follows the new scene.
 

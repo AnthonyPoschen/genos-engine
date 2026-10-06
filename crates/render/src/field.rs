@@ -80,23 +80,34 @@ pub fn illuminate(scene: &Scene, x: f32, y: f32, z: f32) -> f32 {
 
 /// Like [`illuminate`], but a face with a normal receives a lamp only when it points toward that lamp.
 pub fn illuminate_facing(scene: &Scene, x: f32, y: f32, z: f32, normal: [f32; 3]) -> f32 {
-    let use_facing = normal[0] != 0.0 || normal[1] != 0.0 || normal[2] != 0.0;
     let mut incoming = 0.0;
     for light in &scene.lights {
-        let dx = light.position.x - x;
-        let dy = light.position.y - y;
-        let dz = light.position.z - z;
-        if use_facing && dx * normal[0] + dy * normal[1] + dz * normal[2] <= 0.0 {
-            continue;
-        }
-        if lamp_is_blocked(scene, x, y, z, light) {
-            continue;
-        }
-        let dist2 = dx * dx + dy * dy + dz * dz;
-        let strength = (light.color[0] + light.color[1] + light.color[2]) / 3.0;
-        incoming += strength * 2.4 / (1.0 + dist2 * 0.08);
+        incoming += one_lamp(scene, light, x, y, z, normal);
     }
     incoming
+}
+
+fn one_lamp(
+    scene: &Scene,
+    light: &genos_scene::Light,
+    x: f32,
+    y: f32,
+    z: f32,
+    normal: [f32; 3],
+) -> f32 {
+    let use_facing = normal[0] != 0.0 || normal[1] != 0.0 || normal[2] != 0.0;
+    let dx = light.position.x - x;
+    let dy = light.position.y - y;
+    let dz = light.position.z - z;
+    if use_facing && dx * normal[0] + dy * normal[1] + dz * normal[2] <= 0.0 {
+        return 0.0;
+    }
+    if lamp_is_blocked(scene, x, y, z, light) {
+        return 0.0;
+    }
+    let dist2 = dx * dx + dy * dy + dz * dz;
+    let strength = (light.color[0] + light.color[1] + light.color[2]) / 3.0;
+    strength * 2.4 / (1.0 + dist2 * 0.08)
 }
 
 fn lamp_is_blocked(scene: &Scene, x: f32, y: f32, z: f32, light: &genos_scene::Light) -> bool {
@@ -549,22 +560,32 @@ fn gather(
     let mut best_t = t1;
     let mut color = [0.0; 3];
     for solid in &scene.solids {
-        if let Some(t) = hit_solid(origin, dir, solid) {
+        if let Some((t, normal)) = hit_solid(origin, dir, solid) {
             if t >= t0 && t < best_t {
                 best_t = t;
-                color = outgoing(
+                let half = solid.size * 0.5;
+                let footprint = match solid.shape {
+                    Shape::Square => Footprint::Box {
+                        half_x: half,
+                        half_z: half,
+                    },
+                    Shape::Circle => Footprint::Circle { radius: half },
+                };
+                color = leaving(
                     scene,
                     prev,
                     solid.color,
-                    origin[0] + dir[0] * t,
-                    solid.height * 0.5,
-                    origin[1] + dir[1] * t,
+                    [origin[0] + dir[0] * t, origin[1] + dir[1] * t],
+                    normal,
+                    [solid.position.x, solid.position.z],
+                    footprint,
+                    solid.height,
                 );
             }
         }
     }
     for wall in &scene.walls {
-        if let Some(t) = hit_aabb(
+        if let Some((t, normal)) = hit_aabb(
             origin,
             dir,
             wall.position.x - wall.half_x,
@@ -574,13 +595,18 @@ fn gather(
         ) {
             if t >= t0 && t < best_t {
                 best_t = t;
-                color = outgoing(
+                color = leaving(
                     scene,
                     prev,
                     wall.color,
-                    origin[0] + dir[0] * t,
-                    wall.height * 0.5,
-                    origin[1] + dir[1] * t,
+                    [origin[0] + dir[0] * t, origin[1] + dir[1] * t],
+                    normal,
+                    [wall.position.x, wall.position.z],
+                    Footprint::Box {
+                        half_x: wall.half_x,
+                        half_z: wall.half_z,
+                    },
+                    wall.height,
                 );
             }
         }
@@ -588,17 +614,66 @@ fn gather(
     color
 }
 
-/// Light leaving a surface. The material color multiplies the lamp and the light that arrived from the previous pass.
-fn outgoing(
+#[derive(Clone, Copy)]
+enum Footprint {
+    Box { half_x: f32, half_z: f32 },
+    Circle { radius: f32 },
+}
+
+fn lamp_over(light: &genos_scene::Light, center: [f32; 2], footprint: Footprint) -> bool {
+    let dx = light.position.x - center[0];
+    let dz = light.position.z - center[1];
+    match footprint {
+        Footprint::Box { half_x, half_z } => dx.abs() <= half_x && dz.abs() <= half_z,
+        Footprint::Circle { radius } => dx * dx + dz * dz <= radius * radius,
+    }
+}
+
+/// Light leaving a hit face.
+///
+/// A face that points toward a lamp stores that lamp. A lamp above the object stores light on every side, so the floor around the object keeps the color. A lamp on one side does not store light on the far face.
+fn leaving(
     scene: &Scene,
     prev: Option<&Field>,
     albedo: [f32; 3],
-    x: f32,
-    y: f32,
-    z: f32,
+    hit: [f32; 2],
+    normal: [f32; 2],
+    center: [f32; 2],
+    footprint: Footprint,
+    height: f32,
 ) -> [f32; 3] {
-    let direct = illuminate(scene, x, y, z);
-    let incoming = prev.map(|field| sample(field, x, z)).unwrap_or([0.0; 3]);
+    let mut direct = 0.0;
+    for light in &scene.lights {
+        let face =
+            (light.position.x - hit[0]) * normal[0] + (light.position.z - hit[1]) * normal[1];
+        let over = lamp_over(light, center, footprint);
+        if face <= 0.0 && !over {
+            continue;
+        }
+        direct += if face > 0.0 {
+            let gap = 1.0e-3;
+            one_lamp(
+                scene,
+                light,
+                hit[0] + normal[0] * gap,
+                height * 0.5,
+                hit[1] + normal[1] * gap,
+                [normal[0], 0.0, normal[1]],
+            )
+        } else {
+            one_lamp(
+                scene,
+                light,
+                center[0],
+                height + 0.05,
+                center[1],
+                [0.0, 1.0, 0.0],
+            )
+        };
+    }
+    let incoming = prev
+        .map(|field| sample(field, hit[0], hit[1]))
+        .unwrap_or([0.0; 3]);
     // A diffuse surface returns a bit over half of the light that hits it.
     // That is enough to tint a neighbor, and it does not flood the scene white.
     let reflected = direct * 0.55;
@@ -609,7 +684,11 @@ fn outgoing(
     ]
 }
 
-fn hit_solid(origin: [f32; 2], dir: [f32; 2], solid: &genos_scene::Solid) -> Option<f32> {
+fn hit_solid(
+    origin: [f32; 2],
+    dir: [f32; 2],
+    solid: &genos_scene::Solid,
+) -> Option<(f32, [f32; 2])> {
     let half = solid.size * 0.5;
     match solid.shape {
         Shape::Square => hit_aabb(
@@ -631,7 +710,7 @@ fn hit_aabb(
     min_z: f32,
     max_x: f32,
     max_z: f32,
-) -> Option<f32> {
+) -> Option<(f32, [f32; 2])> {
     let inv_x = if dir[0].abs() < 1.0e-8 {
         f32::INFINITY
     } else {
@@ -642,31 +721,34 @@ fn hit_aabb(
     } else {
         1.0 / dir[1]
     };
-    let (tx1, tx2) = slab(origin[0], inv_x, min_x, max_x);
-    let (tz1, tz2) = slab(origin[1], inv_z, min_z, max_z);
+    let (tx1, tx2, nx) = slab(origin[0], inv_x, min_x, max_x);
+    let (tz1, tz2, nz) = slab(origin[1], inv_z, min_z, max_z);
     let t_enter = tx1.max(tz1);
     let t_exit = tx2.min(tz2);
-    if t_exit < t_enter || t_exit < 0.0 {
+    if t_exit < t_enter || t_exit < 0.0 || t_enter < 0.0 {
         return None;
     }
-    if t_enter >= 0.0 {
-        Some(t_enter)
-    } else {
-        None
-    }
+    let normal = if tx1 >= tz1 { [nx, 0.0] } else { [0.0, nz] };
+    Some((t_enter, normal))
 }
 
-fn slab(origin: f32, inv_dir: f32, min_v: f32, max_v: f32) -> (f32, f32) {
+fn slab(origin: f32, inv_dir: f32, min_v: f32, max_v: f32) -> (f32, f32, f32) {
     let a = (min_v - origin) * inv_dir;
     let b = (max_v - origin) * inv_dir;
     if a < b {
-        (a, b)
+        (a, b, -1.0)
     } else {
-        (b, a)
+        (b, a, 1.0)
     }
 }
 
-fn hit_circle(origin: [f32; 2], dir: [f32; 2], cx: f32, cz: f32, radius: f32) -> Option<f32> {
+fn hit_circle(
+    origin: [f32; 2],
+    dir: [f32; 2],
+    cx: f32,
+    cz: f32,
+    radius: f32,
+) -> Option<(f32, [f32; 2])> {
     let ox = origin[0] - cx;
     let oz = origin[1] - cz;
     let b = ox * dir[0] + oz * dir[1];
@@ -677,9 +759,13 @@ fn hit_circle(origin: [f32; 2], dir: [f32; 2], cx: f32, cz: f32, radius: f32) ->
     }
     let root = disc.sqrt();
     let t0 = -b - root;
-    if t0 >= 0.0 {
-        Some(t0)
-    } else {
-        None
+    if t0 < 0.0 {
+        return None;
     }
+    let px = origin[0] + dir[0] * t0;
+    let pz = origin[1] + dir[1] * t0;
+    let nx = px - cx;
+    let nz = pz - cz;
+    let len = (nx * nx + nz * nz).sqrt().max(1.0e-8);
+    Some((t0, [nx / len, nz / len]))
 }

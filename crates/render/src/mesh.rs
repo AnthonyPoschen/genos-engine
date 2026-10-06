@@ -18,13 +18,21 @@ pub(crate) struct LitVertex {
     pub pos: [f32; 3],
     pub albedo: [f32; 3],
     pub direct: f32,
+    /// A level face. Its shadow keeps enough bounced light for a lit wall to show.
+    pub level: bool,
 }
 
-pub(crate) fn compose(albedo: [f32; 3], direct: f32, bounce: [f32; 3]) -> [f32; 3] {
+pub(crate) fn compose(albedo: [f32; 3], direct: f32, bounce: [f32; 3], level: bool) -> [f32; 3] {
+    // The field averages every direction. A lit wall fills only part of that average, so the raw value stays near black in a shadow.
+    let gain = if level {
+        1.0 + 3.0 * (1.0 - direct.clamp(0.0, 1.0))
+    } else {
+        1.0
+    };
     [
-        (albedo[0] * (direct + bounce[0])).min(1.0),
-        (albedo[1] * (direct + bounce[1])).min(1.0),
-        (albedo[2] * (direct + bounce[2])).min(1.0),
+        (albedo[0] * (direct + bounce[0] * gain)).min(1.0),
+        (albedo[1] * (direct + bounce[1] * gain)).min(1.0),
+        (albedo[2] * (direct + bounce[2] * gain)).min(1.0),
     ]
 }
 
@@ -566,20 +574,24 @@ fn push_tri_colored(
     db: f32,
     dc: f32,
 ) {
+    let level = face_normal(a, b, c)[1].abs() > 0.5;
     out.push(LitVertex {
         pos: a,
         albedo,
         direct: da,
+        level,
     });
     out.push(LitVertex {
         pos: b,
         albedo,
         direct: db,
+        level,
     });
     out.push(LitVertex {
         pos: c,
         albedo,
         direct: dc,
+        level,
     });
 }
 

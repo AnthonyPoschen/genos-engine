@@ -213,7 +213,7 @@ mod tests {
     use super::*;
     use crate::field::{build, sample};
     use crate::lighting::Lighting;
-    use genos_scene::{view_proj, Camera, Floor, Light, Scene, Shape, Solid, Vec3};
+    use genos_scene::{view_proj, Camera, Floor, Light, Scene, Shape, Solid, Vec3, Wall};
 
     fn red_scene() -> Scene {
         Scene {
@@ -365,6 +365,86 @@ mod tests {
         assert!(
             front > back + 0.25,
             "back face is as bright as the front: front {front} back {back}"
+        );
+        assert!(
+            back < 0.05,
+            "the unlit side carries the lit side: back {back} front {front}"
+        );
+
+        let mut colored = red_scene();
+        colored.lights[0].position = Vec3::new(-4.0, 3.0, 0.0);
+        let red = &colored.solids[0];
+        let far_x = red.position.x + red.size * 0.5 + 0.3;
+        let field = build(&colored);
+        let far = sample(&field, far_x, red.position.z);
+        assert!(
+            far[0] < 0.04 && far[0] <= far[1] + 0.02 && far[0] <= far[2] + 0.02,
+            "red underglow on the unlit side: {far:?} at x={far_x}"
+        );
+    }
+
+    #[test]
+    fn a_lit_wall_lifts_the_floor_shadow() {
+        let scene = |wall: bool| Scene {
+            floor: Floor {
+                position: Vec3::new(0.0, 0.0, 0.0),
+                half_x: 8.0,
+                half_z: 8.0,
+                color: [1.0, 1.0, 1.0],
+            },
+            walls: if wall {
+                vec![Wall {
+                    position: Vec3::new(3.0, 0.0, 0.0),
+                    half_x: 0.2,
+                    half_z: 3.0,
+                    height: 2.6,
+                    color: [1.0, 1.0, 1.0],
+                }]
+            } else {
+                Vec::new()
+            },
+            solids: vec![Solid {
+                shape: Shape::Square,
+                position: Vec3::new(0.0, 0.0, 0.0),
+                size: 1.5,
+                height: 1.5,
+                color: [0.8, 0.2, 0.1],
+            }],
+            lights: vec![Light {
+                position: Vec3::new(-5.0, 4.0, 0.0),
+                color: [1.0, 1.0, 1.0],
+            }],
+        };
+        let view = view_proj(&Camera::opening(), 16.0 / 9.0);
+        let floor_at = |wall: bool, x: f32, z: f32| {
+            let world = World::from_scene(scene(wall));
+            let mut lighting = Lighting::new();
+            let verts = lighting.vertices(&world, &view);
+            verts
+                .iter()
+                .filter(|vertex| {
+                    vertex.pos[1] < 0.02
+                        && (vertex.pos[0] - x).abs() < 0.2
+                        && (vertex.pos[2] - z).abs() < 0.2
+                })
+                .map(|vertex| vertex.color[0] + vertex.color[1] + vertex.color[2])
+                .fold(0.0_f32, f32::max)
+        };
+        let near = floor_at(true, 2.4, 0.0);
+        let far = floor_at(true, 1.2, 0.0);
+        let bare = floor_at(false, 2.4, 0.0);
+        let behind = floor_at(true, 3.6, 0.0);
+        assert!(
+            near > bare + 0.4,
+            "the lit wall did not lift the shadow: near {near} bare {bare}"
+        );
+        assert!(
+            near > far + 0.15,
+            "the shadow did not brighten toward the wall: near {near} far {far}"
+        );
+        assert!(
+            behind < 0.2,
+            "the floor behind the wall took the bounce: {behind}"
         );
     }
 }
