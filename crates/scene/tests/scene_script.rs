@@ -27,6 +27,27 @@ fn shipped_script_places_the_mvp_scene() {
         light.color.iter().all(|c| (*c - 1.0).abs() < 1.0e-4),
         "the lamp is white"
     );
+    let long = scene
+        .walls
+        .iter()
+        .find(|wall| wall.half_x > 3.0 && (wall.position.z - 5.0).abs() < 0.2)
+        .expect("long wall");
+    assert!(
+        scene
+            .walls
+            .iter()
+            .any(|wall| wall.position.z > long.position.z + 1.0),
+        "the corridor is on the +Z side of the long wall"
+    );
+    let north = scene
+        .walls
+        .iter()
+        .map(|wall| wall.position.z + wall.half_z)
+        .fold(long.position.z, f32::max);
+    assert!(
+        scene.floor.position.z + scene.floor.half_z >= north - 0.05,
+        "the floor stops short of the corridor"
+    );
 }
 
 #[test]
