@@ -86,20 +86,6 @@ impl Lighting {
         self.compose(world, &view_proj(camera, aspect))
     }
 
-    /// Bake or reuse the visible mesh. Returns the generation `Renderer` uploads.
-    pub(crate) fn prepare(&mut self, world: &World, view_proj: &[f32; 16]) -> u64 {
-        self.sync(world, view_proj);
-        self.generation
-    }
-
-    pub(crate) fn vertex_len(&self) -> usize {
-        self.cached.len()
-    }
-
-    pub(crate) fn copy_vertices(&self) -> Vec<Vertex> {
-        self.cached.clone()
-    }
-
     fn compose(&mut self, world: &World, view_proj: &[f32; 16]) -> Vec<Vertex> {
         self.sync(world, view_proj);
         self.cached.clone()
@@ -247,8 +233,15 @@ fn hash_kind(world: &World, kind: &DrawKind, hasher: &mut impl std::hash::Hasher
         }
         DrawKind::Particles {
             points,
+            ages,
             color,
             size,
+            emission,
+            density,
+            lit,
+            face_camera,
+            angle,
+            image,
         } => {
             4u8.hash(hasher);
             points.len().hash(hasher);
@@ -257,10 +250,29 @@ fn hash_kind(world: &World, kind: &DrawKind, hasher: &mut impl std::hash::Hasher
                 point[1].to_bits().hash(hasher);
                 point[2].to_bits().hash(hasher);
             }
+            for age in ages {
+                age.to_bits().hash(hasher);
+            }
             color[0].to_bits().hash(hasher);
             color[1].to_bits().hash(hasher);
             color[2].to_bits().hash(hasher);
             size.to_bits().hash(hasher);
+            emission[0].to_bits().hash(hasher);
+            emission[1].to_bits().hash(hasher);
+            emission[2].to_bits().hash(hasher);
+            density.to_bits().hash(hasher);
+            lit.hash(hasher);
+            face_camera.hash(hasher);
+            angle.to_bits().hash(hasher);
+            match image {
+                Some(image) => {
+                    image.width.hash(hasher);
+                    image.height.hash(hasher);
+                    image.pixels.len().hash(hasher);
+                    image.frame_seconds.to_bits().hash(hasher);
+                }
+                None => 0u8.hash(hasher),
+            }
         }
         DrawKind::Shader {
             space,

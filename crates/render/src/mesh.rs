@@ -23,17 +23,29 @@ pub(crate) struct LitVertex {
 }
 
 pub(crate) fn compose(albedo: [f32; 3], direct: f32, bounce: [f32; 3], level: bool) -> [f32; 3] {
-    // The field averages every direction. A lit wall fills only part of that average, so the raw value stays near black in a shadow.
+    // The field already stores reflected radiance. A level face gets one extra lift in shadow.
     let gain = if level {
-        1.0 + 3.0 * (1.0 - direct.clamp(0.0, 1.0))
+        1.0 + (1.0 - direct.clamp(0.0, 1.0))
     } else {
         1.0
     };
+    // Match the fragment: a smaller share of the lamp, so a white wall does not clip.
+    let carried = gain * 0.75;
+    let shown = direct * 0.58;
     [
-        (albedo[0] * (direct + bounce[0] * gain)).min(1.0),
-        (albedo[1] * (direct + bounce[1] * gain)).min(1.0),
-        (albedo[2] * (direct + bounce[2] * gain)).min(1.0),
+        tone(albedo[0] * (shown + bounce[0] * carried)),
+        tone(albedo[1] * (shown + bounce[1] * carried)),
+        tone(albedo[2] * (shown + bounce[2] * carried)),
     ]
+}
+
+/// A shadow stays linear. A hot corridor wall bends instead of clipping.
+fn tone(channel: f32) -> f32 {
+    if channel <= 0.64 {
+        return channel.max(0.0);
+    }
+    let extra = channel - 0.64;
+    0.64 + 0.14 * (extra / (extra + 1.1))
 }
 
 #[repr(C)]
@@ -81,7 +93,13 @@ pub(crate) fn shade_world(
                 points,
                 color,
                 size,
-            } => push_particles(&mut vertices, light, field, points, *color, *size),
+                density,
+                ..
+            } => {
+                if *density <= 0.0 {
+                    push_particles(&mut vertices, light, field, points, *color, *size);
+                }
+            }
             DrawKind::Shader {
                 space: ShaderSpace::Screen,
                 ..

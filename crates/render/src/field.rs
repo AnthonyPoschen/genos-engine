@@ -107,7 +107,25 @@ fn one_lamp(
     }
     let dist2 = dx * dx + dy * dy + dz * dz;
     let strength = (light.color[0] + light.color[1] + light.color[2]) / 3.0;
-    strength * 2.4 / (1.0 + dist2 * 0.08)
+    lamp_reach(dist2, strength, dx, dy, dz, normal)
+}
+
+/// Distance falloff shared by the CPU shade and the GPU lamp.
+/// The peak is local. The tail keeps a far ray lit. A grazing face is dimmer.
+fn lamp_reach(dist2: f32, strength: f32, dx: f32, dy: f32, dz: f32, normal: [f32; 3]) -> f32 {
+    let facing = normal[0] != 0.0 || normal[1] != 0.0 || normal[2] != 0.0;
+    let mut shade = 1.0;
+    if facing {
+        let dist = dist2.sqrt().max(1.0e-4);
+        let nd = (dx * normal[0] + dy * normal[1] + dz * normal[2]) / dist;
+        if nd <= 0.0 {
+            return 0.0;
+        }
+        shade = nd / (nd + 0.08);
+    }
+    let peak = 4.5 / (1.0 + dist2 * 12.0);
+    let tail = 0.90 / (1.0 + dist2 * 0.017);
+    strength * shade * (peak + tail)
 }
 
 fn lamp_is_blocked(scene: &Scene, x: f32, y: f32, z: f32, light: &genos_scene::Light) -> bool {
@@ -211,7 +229,7 @@ pub(crate) fn illuminate_resolved(
         }
         let dist2 = dx * dx + dy * dy + dz * dz;
         let strength = (light.color[0] + light.color[1] + light.color[2]) / 3.0;
-        incoming += strength * 2.4 / (1.0 + dist2 * 0.08);
+        incoming += lamp_reach(dist2, strength, dx, dy, dz, normal);
     }
     incoming
 }
@@ -575,6 +593,8 @@ fn gather(
                     scene,
                     prev,
                     solid.color,
+                    solid.reflectance,
+                    solid.color_mix,
                     [origin[0] + dir[0] * t, origin[1] + dir[1] * t],
                     normal,
                     [solid.position.x, solid.position.z],
@@ -599,6 +619,8 @@ fn gather(
                     scene,
                     prev,
                     wall.color,
+                    wall.reflectance,
+                    wall.color_mix,
                     [origin[0] + dir[0] * t, origin[1] + dir[1] * t],
                     normal,
                     [wall.position.x, wall.position.z],
@@ -636,6 +658,8 @@ fn leaving(
     scene: &Scene,
     prev: Option<&Field>,
     albedo: [f32; 3],
+    reflectance: f32,
+    color_mix: f32,
     hit: [f32; 2],
     normal: [f32; 2],
     center: [f32; 2],
@@ -674,14 +698,9 @@ fn leaving(
     let incoming = prev
         .map(|field| sample(field, hit[0], hit[1]))
         .unwrap_or([0.0; 3]);
-    // A diffuse surface returns a bit over half of the light that hits it.
-    // That is enough to tint a neighbor, and it does not flood the scene white.
-    let reflected = direct * 0.55;
-    [
-        albedo[0] * (reflected + incoming[0] * 0.5),
-        albedo[1] * (reflected + incoming[1] * 0.5),
-        albedo[2] * (reflected + incoming[2] * 0.5),
-    ]
+    // The surface color tints the lamp and the previous bounce.
+    // A negative reflectance keeps the built-in shares.
+    genos_scene::bounce_radiance(albedo, reflectance, color_mix, direct, incoming)
 }
 
 fn hit_solid(

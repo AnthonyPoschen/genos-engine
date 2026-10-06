@@ -10,7 +10,9 @@ A game can submit fixed shapes today, and can submit meshes, particles, and shad
 
 One Vulkan path serves Linux, Windows, and macOS. macOS uses MoltenVK. The renderer loads `libvulkan.so.1` directly. It does not use `ash`, `wgpu`, or `vulkano`.
 
-`Renderer::draw` passes the lights and the objects to the lighting engine, then uploads the visible triangles, then presents. The caller does not build the field and does not pair lamps with objects. The engine keeps the field while the lights and the occluders stay the same. The engine keeps the visible mesh while the same objects stay on screen.
+`Renderer::draw` uploads packed mesh ranges and lamp parameters, then submits GPU lighting and raster. A normal submit does not wait for that GPU work. The caller does not build the field and does not pair lamps with objects. The engine keeps the field while the lights and the occluders stay the same. The engine keeps the visible mesh while the same objects stay on screen.
+
+A profiled draw writes Vulkan timestamp queries around the GPU draw. The GPU time is that timestamp span. A fence wait is not the GPU time. `Renderer::draw` does not write timestamp queries. A stage with no GPU work has GPU time 0.
 
 `World::from_scene` makes one object for the floor, one for each wall, and one for each solid. Extra objects are meshes, particles, or shaders.
 
@@ -18,23 +20,25 @@ One Vulkan path serves Linux, Windows, and macOS. macOS uses MoltenVK. The rende
 
 - `Fixed` is the floor, a wall, or a solid from the scene.
 - `Mesh` is a triangle list plus a column-major pose. Replace the pose each frame to move the mesh.
-- `Particles` are points. Each point draws a small vertical quad.
+- `Particles` are cards. A card can face the camera or yaw by an angle. `lit` multiplies the base albedo by world light. `emission` adds that card to the one ground fire term. An image is a loaded texture or one texture-map frame chosen from the particle age. Density above zero is still one fog card.
 - `Shader` is `ShaderSpace::Mesh` or `ShaderSpace::Screen`. A mesh-space shader can carry a `Displacement` height map. The map builds a grid. A screen-space shader is recorded and is not drawn over the scene yet.
 
 `hidden` skips raster. `in_view` skips raster when the bounds miss the camera frustum. `affects_light` set to false also removes that object from the cascade scene. The floor stays in the cascade scene because the march runs on it.
 
 Each box face and each cylinder side is lit from a point just outside that face. One sample at the center of a wall lights the back face. Do not return to that sample.
 
-The floor, the walls, and the solids use 16 cm cells across this scene. A cast shadow on the floor follows the straight projection of the occluder through the lamp. There is no coarser cell between the objects.
+The GPU cascade uses 16 cm probes. The fragment shader shades each pixel. A cast shadow on the floor follows the lamp ray through the occluder.
 
 ## Code
 
 The crate is `crates/render`, package `genos-render`.
 
-- `Renderer` is in `src/gpu.rs`.
+- `Renderer` is in `src/gpu.rs`. `draw_profiled`, `poll_gpu_times`, and `finish_gpu_times` record the draw's GPU time.
 - `World`, `Object`, `DrawKind`, and `in_view` are in `src/world.rs`.
-- Triangle build is in `src/mesh.rs`.
-- `Lighting` is in `src/lighting.rs`. The field math is in `src/field.rs`.
+- Triangle positions are packed in `src/pack.rs`.
+- The particle step and the card builder are in `src/particles.rs`.
+- GPU lighting is `shaders/light.comp` and `shaders/scene.frag`. The fragment shader samples a particle image when a card has one.
+- `Lighting` in `src/lighting.rs` and `src/field.rs` keep the earlier CPU checks. The draw path does not call them.
 
 ## Game use
 
@@ -46,19 +50,25 @@ renderer.draw_with_overlay(&world, &camera, &rects, false)?;
 
 Each `ScreenRect` is a pixel rectangle. The draw places those rectangles after the world. The overlay does not test depth. The overlay does not write depth.
 
-Set `object.hidden = true` to hide an object and keep its light. Push a `DrawKind::Mesh` and replace `pose` to animate. Push a `DrawKind::Particles` to draw points. Push a `DrawKind::Shader` with a `Displacement` to build a grid from a height map.
+Set `object.hidden = true` to hide an object and keep its light. Push a `DrawKind::Mesh` and replace `pose` to animate. Push a `DrawKind::Particles` to draw cards. `color` is the base albedo. Also set `lit`, `emission`, `face_camera`, `angle`, and `image`. Push a `DrawKind::Shader` with a `Displacement` to build a grid from a height map.
+
+The camera steps a seeded emitter on the red solid. A stationary flame stays on that solid and animates in place. Embers and a smoke trail leave that flame. The fire light is at the center of the stationary flame. The draw submits those cards.
 
 Open the renderer with the window display and the window surface. Call `resize` when `WindowEvent::Resized` arrives.
+
+The camera calls `draw_profiled` on a verification frame. The camera calls `poll_gpu_times` while that frame runs. The camera calls `finish_gpu_times` before the process exits.
 
 ## Limits
 
 There is no skinned clip player. A mesh animates only when the game writes a new pose.
 
-There is no particle simulator. The game supplies the points.
+A particle does not occlude. `affects_light` is not the lit flag and is not the emission flag. Emitting particles share one fire term. There is not one lamp per ember.
 
 A screen-space shader does not run a custom program yet. Custom SPIR-V is not loaded.
 
-The draw is one forward pass. There is one swapchain and one depth buffer.
+Lighting and raster are two GPU stages in one submit. The CPU does not wait between them. A normal draw does not stall on the GPU fence. There are two frames in flight.
+
+The profile is not part of `Renderer::draw`. There is no per-shader GPU time. The timestamp span does not include a CPU wait.
 
 ## Decisions
 

@@ -1,12 +1,13 @@
 //! Vulkan loader and one forward pass. Entry points come from libvulkan.
 
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::os::raw::c_char;
+use std::time::{Duration, Instant};
 
 use genos_scene::{view_proj, Camera};
 
-use crate::lighting::Lighting;
-use crate::mesh::Vertex;
+use crate::pack::{self, GpuVertex, Pack};
 use crate::world::World;
 
 include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
@@ -22,10 +23,11 @@ type Pfn = *const c_void;
 
 pub struct Renderer {
     gpu: Gpu,
-    lighting: Lighting,
     width: u32,
     height: u32,
-    uploaded_generation: u64,
+    mesh_key: u64,
+    light_key: u64,
+    mesh_ready: bool,
     world_count: u32,
 }
 
@@ -41,12 +43,24 @@ impl Renderer {
         let height = gpu.extent_h;
         Ok(Self {
             gpu,
-            lighting: Lighting::new(),
             width,
             height,
-            uploaded_generation: 0,
+            mesh_key: 0,
+            light_key: 0,
+            mesh_ready: false,
             world_count: 0,
         })
+    }
+
+    /// True when the last submit left its fence unsignaled. The caller can continue.
+    pub fn submit_was_pending(&self) -> bool {
+        self.gpu.submit_pending
+    }
+
+    /// Pixels from the frame before the latest submit. That frame keeps its own lamp.
+    pub fn read_earlier_frame(&mut self) -> Result<Vec<u8>, String> {
+        let slot = self.gpu.flight;
+        self.gpu.read_host(slot)
     }
 
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
@@ -81,26 +95,39 @@ impl Renderer {
     ) -> Result<Option<Vec<u8>>, String> {
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let matrix = view_proj(camera, aspect);
+        let eye = [camera.position.x, camera.position.y, camera.position.z];
+        let pack = pack::pack_frame(world, &matrix, eye);
         let overlay_verts = screen_quads(overlay);
-        let generation = self.lighting.prepare(world, &matrix);
-        let world_len = self.lighting.vertex_len();
-        let total = world_len + overlay_verts.len();
-        if generation != self.uploaded_generation || self.gpu.vertex_slots() < total {
-            let mut verts = self.lighting.copy_vertices();
+        let total = pack.verts.len() + overlay_verts.len();
+        let rewrite_mesh =
+            !self.mesh_ready || pack.mesh_key != self.mesh_key || self.gpu.vertex_slots() < total;
+        let rewrite_light = pack.light_key != self.light_key || !self.gpu.light_ready;
+        if rewrite_mesh || rewrite_light || !overlay_verts.is_empty() {
+            self.gpu.wait_all_inflight()?;
+        }
+        if rewrite_mesh {
+            let mut verts = pack.verts.clone();
             self.world_count = verts.len() as u32;
             verts.extend(overlay_verts);
             if !verts.is_empty() {
                 self.gpu.upload(&verts)?;
             }
-            self.uploaded_generation = generation;
+            self.gpu.upload_image(&pack.image)?;
+            self.mesh_key = pack.mesh_key;
+            self.mesh_ready = true;
         } else {
             self.gpu.write_range(self.world_count, &overlay_verts)?;
+        }
+        if rewrite_light {
+            self.gpu.upload_scene(&pack)?;
+            self.gpu.light_dirty = true;
+            self.light_key = pack.light_key;
         }
         self.gpu.note_vertex_count(self.world_count);
         self.gpu.note_overlay_count(total as u32 - self.world_count);
         self.gpu.record_and_submit(&matrix)?;
-        self.gpu.wait_gpu()?;
         let pixels = if readback {
+            self.gpu.wait_gpu()?;
             Some(self.gpu.read_color()?)
         } else {
             None
@@ -114,6 +141,68 @@ impl Renderer {
         Ok(pixels)
     }
 
+    /// Draw one frame and record a Vulkan timestamp span around that GPU work.
+    ///
+    /// `cpu` is the host time of this call. `gpu` is the timestamp span when the
+    /// fence has already signaled, for example after a readback wait. The fence
+    /// wait is not the GPU time. [`Renderer::draw`] does not record timestamps.
+    pub fn draw_profiled(
+        &mut self,
+        world: &World,
+        camera: &Camera,
+        overlay: &[ScreenRect],
+        readback: bool,
+    ) -> Result<(Option<Vec<u8>>, DrawProfile), String> {
+        if self.gpu.timestamp_period <= 0.0 || self.gpu.timestamp_bits == 0 {
+            return Err("Vulkan timestamp queries are not available on this device".into());
+        }
+        let start = Instant::now();
+        self.gpu.profile_submit = true;
+        let drawn = self.draw_with_overlay(world, camera, overlay, readback);
+        let cpu = start.elapsed();
+        self.gpu.profile_submit = false;
+        let pixels = drawn?;
+        let gpu = self.gpu.collect_submitted_if_ready()?;
+        Ok((pixels, DrawProfile { cpu, gpu }))
+    }
+
+    /// GPU times whose fences have signaled, in submit order. This does not wait.
+    pub fn poll_gpu_times(&mut self) -> Result<Vec<Duration>, String> {
+        self.gpu.collect_ready(false)?;
+        Ok(self.gpu.ready.drain(..).collect())
+    }
+
+    /// Wait for outstanding timestamp queries and return those GPU times.
+    ///
+    /// The wait is not added to the returned durations. Call this before the
+    /// renderer is dropped so a finished run can store the device times.
+    pub fn finish_gpu_times(&mut self) -> Result<Vec<Duration>, String> {
+        self.gpu.collect_ready(true)?;
+        Ok(self.gpu.ready.drain(..).collect())
+    }
+
+    /// Write the world into the resident scene buffer. This does not present.
+    pub fn retain_scene(&mut self, world: &World) -> Result<(), String> {
+        let camera = Camera::opening();
+        let matrix = view_proj(&camera, 1.0);
+        let eye = [camera.position.x, camera.position.y, camera.position.z];
+        let pack = pack::pack_frame(world, &matrix, eye);
+        self.gpu.wait_all_inflight()?;
+        self.gpu.upload_scene(&pack)?;
+        self.gpu.light_dirty = true;
+        self.light_key = pack.light_key;
+        Ok(())
+    }
+
+    /// One compute pass over the resident occluders. This does not present and does not upload them.
+    pub fn transmission_gains(
+        &mut self,
+        listener: [f32; 3],
+        sources: &[[f32; 3]],
+    ) -> Result<Vec<f32>, String> {
+        self.gpu.transmission_gains(listener, sources)
+    }
+
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -121,6 +210,15 @@ impl Renderer {
     pub fn height(&self) -> u32 {
         self.height
     }
+}
+
+/// Host time and device time for one profiled draw.
+///
+/// `gpu` is `None` until that draw's fence has signaled. It is never a copy of `cpu`.
+#[derive(Clone, Copy, Debug)]
+pub struct DrawProfile {
+    pub cpu: Duration,
+    pub gpu: Option<Duration>,
 }
 
 /// One axis-aligned rectangle in window pixels. The origin is the top-left.
@@ -133,7 +231,7 @@ pub struct ScreenRect {
     pub color: [f32; 3],
 }
 
-fn screen_quads(rects: &[ScreenRect]) -> Vec<Vertex> {
+fn screen_quads(rects: &[ScreenRect]) -> Vec<GpuVertex> {
     let mut verts = Vec::with_capacity(rects.len() * 6);
     for rect in rects {
         if rect.w <= 0.0 || rect.h <= 0.0 {
@@ -144,10 +242,7 @@ fn screen_quads(rects: &[ScreenRect]) -> Vec<Vertex> {
         let x1 = rect.x + rect.w;
         let y1 = rect.y + rect.h;
         let color = rect.color;
-        let corner = |x: f32, y: f32| Vertex {
-            pos: [x, y, 0.0],
-            color,
-        };
+        let corner = |x: f32, y: f32| pack::overlay_vertex([x, y, 0.0], color);
         verts.push(corner(x0, y0));
         verts.push(corner(x1, y0));
         verts.push(corner(x1, y1));
@@ -206,6 +301,43 @@ struct Gpu {
     render_done: Handle,
     fence: Handle,
     present_index: u32,
+    cmds: [Handle; 2],
+    fences: [Handle; 2],
+    image_readies: [Handle; 2],
+    render_dones: [Handle; 2],
+    colors: [Image; 2],
+    depths: [Image; 2],
+    framebuffers: [Handle; 2],
+    hosts: [Buffer; 2],
+    flight: usize,
+    scene_buf: Buffer,
+    field_buf: Buffer,
+    particle_buf: Buffer,
+    desc_layout: Handle,
+    desc_pool: Handle,
+    desc_set: Handle,
+    compute_layout: Handle,
+    compute_pipe: Handle,
+    audio_rays: Buffer,
+    audio_gains: Buffer,
+    audio_desc_layout: Handle,
+    audio_desc_pool: Handle,
+    audio_set: Handle,
+    audio_layout: Handle,
+    audio_pipe: Handle,
+    audio_cmd: Handle,
+    audio_fence: Handle,
+    light_dirty: bool,
+    light_ready: bool,
+    submit_pending: bool,
+    timestamp_period: f32,
+    timestamp_bits: u32,
+    query_pool: Handle,
+    profile_submit: bool,
+    stamp_pending: [bool; 2],
+    inflight: VecDeque<usize>,
+    ready: VecDeque<Duration>,
+    submitted_slot: Option<usize>,
     fns: Fns,
     memory_props: MemProps,
 }
@@ -279,6 +411,16 @@ struct Fns {
     wait_fences: FnWait,
     reset_fences: FnResetFences,
     queue_submit: FnSubmit,
+    fence_status: FnFenceStatus,
+    cmd_bind_set: FnBindSet,
+    cmd_dispatch: FnDispatch,
+    update_desc: FnUpdateDesc,
+    create_desc_layout: FnDescLayout,
+    destroy_desc_layout: Fn2,
+    create_desc_pool: FnDescPool,
+    destroy_desc_pool: Fn2,
+    alloc_desc: FnAllocDesc,
+    create_compute: FnPipelines,
     device_wait: FnDevice,
     create_buffer: FnBuffer,
     destroy_buffer: Fn2,
@@ -295,12 +437,23 @@ struct Fns {
     enumerate_devices: FnEnumDev,
     queue_families: FnQueues,
     mem_props: FnMemProps,
+    create_query_pool: FnQueryPool,
+    destroy_query_pool: Fn2,
+    cmd_reset_query: FnResetQuery,
+    cmd_write_timestamp: FnWriteTs,
+    get_query_results: FnGetQuery,
 }
 
 type GetProc = unsafe extern "system" fn(Handle, *const c_char) -> Pfn;
 type FnDestroy = unsafe extern "system" fn(Handle, *const c_void);
 type Fn2 = unsafe extern "system" fn(Handle, Handle, *const c_void);
 type FnDevice = unsafe extern "system" fn(Handle) -> VkResult;
+type FnQueryPool =
+    unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+type FnResetQuery = unsafe extern "system" fn(Handle, Handle, u32, u32);
+type FnWriteTs = unsafe extern "system" fn(Handle, u32, Handle, u32);
+type FnGetQuery =
+    unsafe extern "system" fn(Handle, Handle, u32, u32, usize, *mut c_void, u64, u32) -> VkResult;
 type FnCmd = unsafe extern "system" fn(Handle);
 type FnCmdResult = unsafe extern "system" fn(Handle) -> VkResult;
 type FnCreateDevice =
@@ -365,6 +518,16 @@ type FnFence = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut 
 type FnWait = unsafe extern "system" fn(Handle, u32, *const Handle, u32, u64) -> VkResult;
 type FnResetFences = unsafe extern "system" fn(Handle, u32, *const Handle) -> VkResult;
 type FnSubmit = unsafe extern "system" fn(Handle, u32, *const u8, Handle) -> VkResult;
+type FnFenceStatus = unsafe extern "system" fn(Handle, Handle) -> VkResult;
+type FnBindSet =
+    unsafe extern "system" fn(Handle, u32, Handle, u32, u32, *const Handle, u32, *const u32);
+type FnDispatch = unsafe extern "system" fn(Handle, u32, u32, u32);
+type FnUpdateDesc = unsafe extern "system" fn(Handle, u32, *const u8, u32, *const u8);
+type FnDescLayout =
+    unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+type FnDescPool =
+    unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+type FnAllocDesc = unsafe extern "system" fn(Handle, *const u8, *mut Handle) -> VkResult;
 type FnBuffer =
     unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
 type FnBufReq = unsafe extern "system" fn(Handle, Handle, *mut u8);
@@ -533,6 +696,8 @@ impl Gpu {
                 "wayland surface",
             )?;
 
+            let get_props: unsafe extern "system" fn(Handle, *mut u8) =
+                transmute(load(b"vkGetPhysicalDeviceProperties\0"));
             let mut chosen = None;
             for physical in devices {
                 let mut family_count = 0u32;
@@ -540,18 +705,17 @@ impl Gpu {
                 let mut families = vec![0u8; family_count as usize * 24];
                 queue_families(physical, &mut family_count, families.as_mut_ptr());
                 for index in 0..family_count {
-                    let flags = u32::from_ne_bytes(
-                        families[index as usize * 24..index as usize * 24 + 4]
-                            .try_into()
-                            .unwrap(),
-                    );
+                    let base = index as usize * 24;
+                    let flags = u32::from_ne_bytes(families[base..base + 4].try_into().unwrap());
+                    let timestamp_bits =
+                        u32::from_ne_bytes(families[base + 8..base + 12].try_into().unwrap());
                     let mut supported = 0u32;
                     check(
                         surface_support(physical, index, vk_surface, &mut supported),
                         "present support",
                     )?;
-                    if flags & 1 != 0 && supported == 1 {
-                        chosen = Some((physical, index));
+                    if flags & 0x3 == 0x3 && supported == 1 {
+                        chosen = Some((physical, index, timestamp_bits));
                         break;
                     }
                 }
@@ -559,9 +723,19 @@ impl Gpu {
                     break;
                 }
             }
-            let Some((physical, queue_family)) = chosen else {
-                return Err("no graphics queue can present".into());
+            let Some((physical, queue_family, timestamp_bits)) = chosen else {
+                return Err("no graphics and compute queue can present".into());
             };
+            let mut prop_bytes = vec![0u8; 1024];
+            get_props(physical, prop_bytes.as_mut_ptr());
+            let timestamp_flag = u32::from_ne_bytes(prop_bytes[716..720].try_into().unwrap());
+            let mut timestamp_period = f32::from_ne_bytes(prop_bytes[720..724].try_into().unwrap());
+            if timestamp_flag == 0
+                || timestamp_bits == 0
+                || !(timestamp_period > 0.0 && timestamp_period < 10_000.0)
+            {
+                timestamp_period = 0.0;
+            }
 
             let mut raw_props = [0u8; 4 + 32 * 8 + 4 + 16 * 16];
             mem_props(physical, raw_props.as_mut_ptr());
@@ -658,6 +832,43 @@ impl Gpu {
                 render_done: std::ptr::null_mut(),
                 fence: std::ptr::null_mut(),
                 present_index: 0,
+                cmds: [std::ptr::null_mut(); 2],
+                fences: [std::ptr::null_mut(); 2],
+                image_readies: [std::ptr::null_mut(); 2],
+                render_dones: [std::ptr::null_mut(); 2],
+                colors: [Image::empty(), Image::empty()],
+                depths: [Image::empty(), Image::empty()],
+                framebuffers: [std::ptr::null_mut(); 2],
+                hosts: [Buffer::empty(), Buffer::empty()],
+                flight: 0,
+                scene_buf: Buffer::empty(),
+                field_buf: Buffer::empty(),
+                particle_buf: Buffer::empty(),
+                desc_layout: std::ptr::null_mut(),
+                desc_pool: std::ptr::null_mut(),
+                desc_set: std::ptr::null_mut(),
+                compute_layout: std::ptr::null_mut(),
+                compute_pipe: std::ptr::null_mut(),
+                audio_rays: Buffer::empty(),
+                audio_gains: Buffer::empty(),
+                audio_desc_layout: std::ptr::null_mut(),
+                audio_desc_pool: std::ptr::null_mut(),
+                audio_set: std::ptr::null_mut(),
+                audio_layout: std::ptr::null_mut(),
+                audio_pipe: std::ptr::null_mut(),
+                audio_cmd: std::ptr::null_mut(),
+                audio_fence: std::ptr::null_mut(),
+                light_dirty: true,
+                light_ready: false,
+                submit_pending: false,
+                timestamp_period,
+                timestamp_bits,
+                query_pool: std::ptr::null_mut(),
+                profile_submit: false,
+                stamp_pending: [false; 2],
+                inflight: VecDeque::new(),
+                ready: VecDeque::new(),
+                submitted_slot: None,
                 fns: load_fns(
                     dload,
                     create_wayland_surface,
@@ -683,9 +894,10 @@ impl Gpu {
     fn create_static_objects(&mut self) -> Result<(), String> {
         unsafe {
             self.render_pass = self.make_render_pass()?;
+            self.desc_layout = self.make_desc_layout()?;
             self.layout = self.make_layout()?;
-            self.pipeline = self.make_pipeline(true)?;
-            self.overlay_pipeline = self.make_pipeline(false)?;
+            self.pipeline = self.make_pipeline(true, true)?;
+            self.overlay_pipeline = self.make_pipeline(false, false)?;
             #[repr(C)]
             struct PoolInfo {
                 s_type: i32,
@@ -721,18 +933,17 @@ impl Gpu {
                 next: std::ptr::null(),
                 pool: self.pool,
                 level: 0,
-                count: 1,
+                count: 2,
             };
             check(
                 (self.fns.alloc_cmd)(
                     self.device,
                     &alloc as *const AllocInfo as *const u8,
-                    &mut self.cmd,
+                    self.cmds.as_mut_ptr(),
                 ),
                 "command buffer",
             )?;
-            self.image_ready = self.make_sem()?;
-            self.render_done = self.make_sem()?;
+            self.cmd = self.cmds[0];
             #[repr(C)]
             struct FenceInfo {
                 s_type: i32,
@@ -744,15 +955,26 @@ impl Gpu {
                 next: std::ptr::null(),
                 flags: 0x1,
             };
-            check(
-                (self.fns.create_fence)(
-                    self.device,
-                    &fence as *const FenceInfo as *const u8,
-                    std::ptr::null(),
-                    &mut self.fence,
-                ),
-                "fence",
-            )?;
+            for slot in 0..2 {
+                self.image_readies[slot] = self.make_sem()?;
+                self.render_dones[slot] = self.make_sem()?;
+                check(
+                    (self.fns.create_fence)(
+                        self.device,
+                        &fence as *const FenceInfo as *const u8,
+                        std::ptr::null(),
+                        &mut self.fences[slot],
+                    ),
+                    "fence",
+                )?;
+            }
+            self.image_ready = self.image_readies[0];
+            self.render_done = self.render_dones[0];
+            self.fence = self.fences[0];
+            if self.timestamp_period > 0.0 {
+                self.query_pool = self.make_query_pool()?;
+            }
+            self.make_lighting()?;
         }
         Ok(())
     }
@@ -897,25 +1119,33 @@ impl Gpu {
                 "image list",
             )?;
 
-            self.color = self.make_image(self.format, 0x10 | 0x4, 1)?;
-            self.depth = self.make_image(126, 0x20, 2)?;
-            self.framebuffer = self.make_framebuffer()?;
             let bytes = self.extent_w as u64 * self.extent_h as u64 * 4;
-            self.host = self.make_buffer(bytes, 0x2, true)?;
+            for slot in 0..2 {
+                self.colors[slot] = self.make_image(self.format, 0x10 | 0x4, 1)?;
+                self.depths[slot] = self.make_image(126, 0x20, 2)?;
+                self.color = copy_image(&self.colors[slot]);
+                self.depth = copy_image(&self.depths[slot]);
+                self.framebuffers[slot] = self.make_framebuffer()?;
+                self.hosts[slot] = self.make_buffer(bytes, 0x2, true)?;
+            }
+            self.color = copy_image(&self.colors[0]);
+            self.depth = copy_image(&self.depths[0]);
+            self.framebuffer = self.framebuffers[0];
+            self.host = copy_buffer(&self.hosts[0]);
             Ok(())
         }
     }
 
     fn vertex_slots(&self) -> usize {
-        self.vertex.size as usize / std::mem::size_of::<Vertex>()
+        self.vertex.size as usize / std::mem::size_of::<GpuVertex>()
     }
 
     /// Write `verts` at `first` without touching the world triangles before that slot.
-    fn write_range(&mut self, first: u32, verts: &[Vertex]) -> Result<(), String> {
+    fn write_range(&mut self, first: u32, verts: &[GpuVertex]) -> Result<(), String> {
         if verts.is_empty() {
             return Ok(());
         }
-        let stride = std::mem::size_of::<Vertex>() as u64;
+        let stride = std::mem::size_of::<GpuVertex>() as u64;
         let offset = first as u64 * stride;
         let bytes = verts.len() as u64 * stride;
         let end = offset + bytes;
@@ -938,11 +1168,11 @@ impl Gpu {
         Ok(())
     }
 
-    fn upload(&mut self, verts: &[Vertex]) -> Result<(), String> {
+    fn upload(&mut self, verts: &[GpuVertex]) -> Result<(), String> {
         if verts.is_empty() {
             return Ok(());
         }
-        let bytes = (verts.len() * std::mem::size_of::<Vertex>()) as u64;
+        let bytes = (verts.len() * std::mem::size_of::<GpuVertex>()) as u64;
         if self.vertex.size < bytes {
             unsafe {
                 if !self.vertex.buffer.is_null() {
@@ -968,13 +1198,36 @@ impl Gpu {
         Ok(())
     }
 
+    fn bind_flight(&mut self) {
+        let slot = self.flight;
+        self.cmd = self.cmds[slot];
+        self.fence = self.fences[slot];
+        self.image_ready = self.image_readies[slot];
+        self.render_done = self.render_dones[slot];
+        self.color = copy_image(&self.colors[slot]);
+        self.depth = copy_image(&self.depths[slot]);
+        self.framebuffer = self.framebuffers[slot];
+        self.host = copy_buffer(&self.hosts[slot]);
+    }
+
     fn record_and_submit(&mut self, matrix: &[f32; 16]) -> Result<(), String> {
+        let profiled = self.profile_submit;
+        self.profile_submit = false;
+        if profiled && (self.query_pool.is_null() || self.timestamp_period <= 0.0) {
+            return Err("Vulkan timestamp queries are not available on this device".into());
+        }
+        if self.light_dirty {
+            self.wait_other_flight()?;
+        }
+        self.bind_flight();
+        let slot = self.flight;
         unsafe {
             let fences = [self.fence];
             check(
                 (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
                 "wait fence",
             )?;
+            self.collect_slot_after_wait(slot)?;
             check(
                 (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
                 "reset fence",
@@ -1010,7 +1263,16 @@ impl Gpu {
                 (self.fns.begin_cmd)(self.cmd, &begin as *const BeginInfo as *const u8),
                 "begin cmd",
             )?;
-
+            if profiled {
+                self.reset_queries(slot);
+                // Top of pipe, before the GPU work. The value is device ticks.
+                self.write_stamp(slot, 0, 1);
+            }
+            if self.light_dirty {
+                self.dispatch_lighting()?;
+                self.light_dirty = false;
+                self.light_ready = true;
+            }
             let swap = self.swap_images[index as usize];
             self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
             let mut clears = [[0.0f32, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.0]];
@@ -1056,6 +1318,16 @@ impl Gpu {
             };
             (self.fns.cmd_begin_rp)(self.cmd, &rp as *const RpBegin as *const u8, 0);
             (self.fns.cmd_bind_pipe)(self.cmd, 0, self.pipeline);
+            (self.fns.cmd_bind_set)(
+                self.cmd,
+                0,
+                self.layout,
+                0,
+                1,
+                &self.desc_set,
+                0,
+                std::ptr::null(),
+            );
             let viewport = [
                 0.0f32,
                 0.0,
@@ -1096,6 +1368,11 @@ impl Gpu {
             self.copy_color_to_swapchain(swap);
             self.copy_color_to_buffer();
             self.image_barrier(swap, 7, 1000001002, 0x1000, 0x2000, 0x1000, 0);
+            if profiled {
+                // Bottom of pipe, after the draw and the copies.
+                // The value is device ticks, not the CPU time spent in submit.
+                self.write_stamp(slot, 1, 0x2000);
+            }
             check((self.fns.end_cmd)(self.cmd), "end cmd")?;
 
             let wait_stage = 0x400u32;
@@ -1135,6 +1412,205 @@ impl Gpu {
                 "submit",
             )?;
             self.present_index = index;
+            let status = (self.fns.fence_status)(self.device, self.fence);
+            self.submit_pending = status == 1;
+            if profiled {
+                self.stamp_pending[slot] = true;
+                self.inflight.push_back(slot);
+                self.submitted_slot = Some(slot);
+            } else {
+                self.submitted_slot = None;
+            }
+            self.flight = 1 - self.flight;
+        }
+        Ok(())
+    }
+
+    fn make_query_pool(&mut self) -> Result<Handle, String> {
+        #[repr(C)]
+        struct Info {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            query_type: u32,
+            query_count: u32,
+            pipeline_statistics: u32,
+        }
+        let info = Info {
+            s_type: 11,
+            next: std::ptr::null(),
+            flags: 0,
+            // VK_QUERY_TYPE_TIMESTAMP is 2. Type 1 is pipeline statistics.
+            query_type: 2,
+            query_count: 4,
+            pipeline_statistics: 0,
+        };
+        let mut pool = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_query_pool)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut pool,
+                ),
+                "query pool",
+            )?;
+        }
+        Ok(pool)
+    }
+
+    fn reset_queries(&self, slot: usize) {
+        unsafe {
+            (self.fns.cmd_reset_query)(self.cmd, self.query_pool, (slot * 2) as u32, 2);
+        }
+    }
+
+    fn write_stamp(&self, slot: usize, index: u32, stage: u32) {
+        unsafe {
+            (self.fns.cmd_write_timestamp)(
+                self.cmd,
+                stage,
+                self.query_pool,
+                (slot * 2) as u32 + index,
+            );
+        }
+    }
+
+    /// The slot fence has already been waited. Read the timestamp span if this slot still owes one.
+    fn collect_slot_after_wait(&mut self, slot: usize) -> Result<(), String> {
+        if !self.stamp_pending[slot] {
+            return Ok(());
+        }
+        if self.inflight.front().copied() != Some(slot) {
+            return Err("profile slot finished out of order".into());
+        }
+        let duration = self.read_span(slot)?;
+        self.stamp_pending[slot] = false;
+        self.inflight.pop_front();
+        self.ready.push_back(duration);
+        Ok(())
+    }
+
+    fn collect_submitted_if_ready(&mut self) -> Result<Option<Duration>, String> {
+        let Some(slot) = self.submitted_slot else {
+            return Ok(None);
+        };
+        if self.inflight.front().copied() != Some(slot) || !self.stamp_pending[slot] {
+            return Ok(None);
+        }
+        let status = unsafe { (self.fns.fence_status)(self.device, self.fences[slot]) };
+        if status == 1 {
+            return Ok(None);
+        }
+        check(status, "timestamp fence")?;
+        let duration = self.read_span(slot)?;
+        self.stamp_pending[slot] = false;
+        self.inflight.pop_front();
+        Ok(Some(duration))
+    }
+
+    fn collect_ready(&mut self, wait: bool) -> Result<(), String> {
+        while let Some(slot) = self.inflight.front().copied() {
+            if !self.stamp_pending[slot] {
+                self.inflight.pop_front();
+                continue;
+            }
+            let fence = self.fences[slot];
+            if wait {
+                let fences = [fence];
+                unsafe {
+                    check(
+                        (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
+                        "profile fence",
+                    )?;
+                }
+            } else {
+                let status = unsafe { (self.fns.fence_status)(self.device, fence) };
+                if status == 1 {
+                    break;
+                }
+                check(status, "profile fence")?;
+            }
+            let duration = self.read_span(slot)?;
+            self.stamp_pending[slot] = false;
+            self.inflight.pop_front();
+            self.ready.push_back(duration);
+        }
+        Ok(())
+    }
+
+    fn read_span(&self, slot: usize) -> Result<Duration, String> {
+        let mut raw = [0u64; 2];
+        let waited = unsafe {
+            (self.fns.get_query_results)(
+                self.device,
+                self.query_pool,
+                (slot * 2) as u32,
+                2,
+                std::mem::size_of::<[u64; 2]>(),
+                raw.as_mut_ptr() as *mut c_void,
+                8,
+                0x1 | 0x2,
+            )
+        };
+        check(waited, "timestamp query")?;
+        let delta = tick_delta(raw[0], raw[1], self.timestamp_bits);
+        if raw[0] == 0 || raw[1] == 0 || delta == 0 {
+            return Err("timestamp query returned no device time".into());
+        }
+        let nanos = delta as f64 * f64::from(self.timestamp_period);
+        if !nanos.is_finite() || nanos < 0.0 || nanos > u64::MAX as f64 {
+            return Err("timestamp period produced a bad duration".into());
+        }
+        Ok(Duration::from_nanos(nanos.round() as u64))
+    }
+
+    fn wait_all_inflight(&mut self) -> Result<(), String> {
+        for slot in 0..2 {
+            unsafe {
+                let fences = [self.fences[slot]];
+                if fences[0].is_null() {
+                    continue;
+                }
+                let status = (self.fns.fence_status)(self.device, fences[0]);
+                if status == 1 {
+                    check(
+                        (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
+                        "buffer wait",
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn read_host(&mut self, slot: usize) -> Result<Vec<u8>, String> {
+        unsafe {
+            let fences = [self.fences[slot]];
+            check(
+                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
+                "earlier frame",
+            )?;
+        }
+        let saved = copy_buffer(&self.host);
+        self.host = copy_buffer(&self.hosts[slot]);
+        let pixels = self.read_color()?;
+        self.host = saved;
+        Ok(pixels)
+    }
+
+    fn wait_other_flight(&mut self) -> Result<(), String> {
+        let other = 1 - self.flight;
+        unsafe {
+            let fences = [self.fences[other]];
+            let status = (self.fns.fence_status)(self.device, fences[0]);
+            if status == 1 {
+                check(
+                    (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
+                    "field wait",
+                )?;
+            }
         }
         Ok(())
     }
@@ -1152,7 +1628,6 @@ impl Gpu {
 
     fn present(&mut self) -> Result<VkResult, String> {
         unsafe {
-            self.wait_gpu()?;
             let swap = [self.swapchain];
             let index = [self.present_index];
             let wait = [self.render_done];
@@ -1234,6 +1709,894 @@ impl Gpu {
         Ok(sem)
     }
 
+    fn make_desc_layout(&self) -> Result<Handle, String> {
+        #[repr(C)]
+        struct Binding {
+            binding: u32,
+            kind: u32,
+            count: u32,
+            stages: u32,
+            samplers: *const c_void,
+        }
+        #[repr(C)]
+        struct Info {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            count: u32,
+            bindings: *const Binding,
+        }
+        let bindings = [
+            Binding {
+                binding: 0,
+                kind: 7,
+                count: 1,
+                stages: 0x10 | 0x20,
+                samplers: std::ptr::null(),
+            },
+            Binding {
+                binding: 1,
+                kind: 7,
+                count: 1,
+                stages: 0x10 | 0x20,
+                samplers: std::ptr::null(),
+            },
+            Binding {
+                binding: 2,
+                kind: 7,
+                count: 1,
+                stages: 0x10,
+                samplers: std::ptr::null(),
+            },
+        ];
+        let info = Info {
+            s_type: 32,
+            next: std::ptr::null(),
+            flags: 0,
+            count: 3,
+            bindings: bindings.as_ptr(),
+        };
+        let mut layout = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_desc_layout)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut layout,
+                ),
+                "descriptor layout",
+            )?;
+        }
+        Ok(layout)
+    }
+
+    fn make_lighting(&mut self) -> Result<(), String> {
+        self.scene_buf = self.make_buffer(4096, 0x20, true)?;
+        self.field_buf = self.make_buffer(2 * 128 * 128 * 16, 0x20, true)?;
+        self.particle_buf = self.make_buffer(16 + 256 * 256 * 4, 0x20, true)?;
+        self.write_buffer(&self.field_buf, &vec![0u8; 2 * 128 * 128 * 16])?;
+        self.write_buffer(&self.particle_buf, &vec![0u8; 16])?;
+        #[repr(C)]
+        struct Range {
+            stage: u32,
+            offset: u32,
+            size: u32,
+        }
+        #[repr(C)]
+        struct LayoutInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            set_count: u32,
+            sets: *const Handle,
+            push_count: u32,
+            push: *const Range,
+        }
+        let sets = [self.desc_layout];
+        let push = Range {
+            stage: 0x20,
+            offset: 0,
+            size: 4,
+        };
+        let layout = LayoutInfo {
+            s_type: 30,
+            next: std::ptr::null(),
+            flags: 0,
+            set_count: 1,
+            sets: sets.as_ptr(),
+            push_count: 1,
+            push: &push,
+        };
+        unsafe {
+            check(
+                (self.fns.create_layout)(
+                    self.device,
+                    &layout as *const LayoutInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.compute_layout,
+                ),
+                "compute layout",
+            )?;
+        }
+        let module = self.shader(COMP_SPV)?;
+        #[repr(C)]
+        struct Stage {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            stage: u32,
+            module: Handle,
+            name: *const i8,
+            spec: *const c_void,
+        }
+        #[repr(C)]
+        struct Pipe {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            stage: Stage,
+            layout: Handle,
+            base: Handle,
+            base_index: i32,
+        }
+        let pipe = Pipe {
+            s_type: 29,
+            next: std::ptr::null(),
+            flags: 0,
+            stage: Stage {
+                s_type: 18,
+                next: std::ptr::null(),
+                flags: 0,
+                stage: 0x20,
+                module,
+                name: b"main\0".as_ptr() as *const i8,
+                spec: std::ptr::null(),
+            },
+            layout: self.compute_layout,
+            base: std::ptr::null_mut(),
+            base_index: -1,
+        };
+        unsafe {
+            let result = (self.fns.create_compute)(
+                self.device,
+                std::ptr::null_mut(),
+                1,
+                &pipe as *const Pipe as *const u8,
+                std::ptr::null(),
+                &mut self.compute_pipe,
+            );
+            (self.fns.destroy_shader)(self.device, module, std::ptr::null());
+            check(result, "compute pipeline")?;
+        }
+        #[repr(C)]
+        struct Size {
+            kind: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct PoolInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            max_sets: u32,
+            size_count: u32,
+            sizes: *const Size,
+        }
+        let size = Size { kind: 7, count: 3 };
+        let pool = PoolInfo {
+            s_type: 33,
+            next: std::ptr::null(),
+            flags: 0,
+            max_sets: 1,
+            size_count: 1,
+            sizes: &size,
+        };
+        unsafe {
+            check(
+                (self.fns.create_desc_pool)(
+                    self.device,
+                    &pool as *const PoolInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.desc_pool,
+                ),
+                "descriptor pool",
+            )?;
+            #[repr(C)]
+            struct Alloc {
+                s_type: i32,
+                next: *const c_void,
+                pool: Handle,
+                count: u32,
+                layouts: *const Handle,
+            }
+            let alloc = Alloc {
+                s_type: 34,
+                next: std::ptr::null(),
+                pool: self.desc_pool,
+                count: 1,
+                layouts: sets.as_ptr(),
+            };
+            check(
+                (self.fns.alloc_desc)(
+                    self.device,
+                    &alloc as *const Alloc as *const u8,
+                    &mut self.desc_set,
+                ),
+                "descriptor set",
+            )?;
+        }
+        self.write_descriptors()?;
+        self.write_buffer(&self.scene_buf, &vec![0u8; 4096])?;
+        self.make_audio()?;
+        Ok(())
+    }
+
+    fn write_descriptors(&self) -> Result<(), String> {
+        #[repr(C)]
+        struct BufInfo {
+            buffer: Handle,
+            offset: u64,
+            range: u64,
+        }
+        #[repr(C)]
+        struct Write {
+            s_type: i32,
+            next: *const c_void,
+            set: Handle,
+            binding: u32,
+            element: u32,
+            count: u32,
+            kind: u32,
+            image: *const c_void,
+            buffer: *const BufInfo,
+            texel: *const c_void,
+        }
+        let infos = [
+            BufInfo {
+                buffer: self.scene_buf.buffer,
+                offset: 0,
+                range: u64::MAX,
+            },
+            BufInfo {
+                buffer: self.field_buf.buffer,
+                offset: 0,
+                range: u64::MAX,
+            },
+            BufInfo {
+                buffer: self.particle_buf.buffer,
+                offset: 0,
+                range: u64::MAX,
+            },
+        ];
+        let writes = [
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set: self.desc_set,
+                binding: 0,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: &infos[0],
+                texel: std::ptr::null(),
+            },
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set: self.desc_set,
+                binding: 1,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: &infos[1],
+                texel: std::ptr::null(),
+            },
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set: self.desc_set,
+                binding: 2,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: &infos[2],
+                texel: std::ptr::null(),
+            },
+        ];
+        unsafe {
+            (self.fns.update_desc)(
+                self.device,
+                3,
+                writes.as_ptr() as *const u8,
+                0,
+                std::ptr::null(),
+            );
+        }
+        Ok(())
+    }
+
+    fn make_audio(&mut self) -> Result<(), String> {
+        self.audio_rays = self.make_buffer(8192, 0x20, true)?;
+        self.audio_gains = self.make_buffer(4096, 0x20, true)?;
+        #[repr(C)]
+        struct Binding {
+            binding: u32,
+            kind: u32,
+            count: u32,
+            stages: u32,
+            samplers: *const c_void,
+        }
+        #[repr(C)]
+        struct SetInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            count: u32,
+            bindings: *const Binding,
+        }
+        let bindings = [
+            Binding {
+                binding: 0,
+                kind: 7,
+                count: 1,
+                stages: 0x20,
+                samplers: std::ptr::null(),
+            },
+            Binding {
+                binding: 1,
+                kind: 7,
+                count: 1,
+                stages: 0x20,
+                samplers: std::ptr::null(),
+            },
+            Binding {
+                binding: 2,
+                kind: 7,
+                count: 1,
+                stages: 0x20,
+                samplers: std::ptr::null(),
+            },
+        ];
+        let set_info = SetInfo {
+            s_type: 32,
+            next: std::ptr::null(),
+            flags: 0,
+            count: 3,
+            bindings: bindings.as_ptr(),
+        };
+        unsafe {
+            check(
+                (self.fns.create_desc_layout)(
+                    self.device,
+                    &set_info as *const SetInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.audio_desc_layout,
+                ),
+                "audio descriptor layout",
+            )?;
+        }
+        #[repr(C)]
+        struct LayoutInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            set_count: u32,
+            sets: *const Handle,
+            push_count: u32,
+            push: *const c_void,
+        }
+        let sets = [self.audio_desc_layout];
+        let layout = LayoutInfo {
+            s_type: 30,
+            next: std::ptr::null(),
+            flags: 0,
+            set_count: 1,
+            sets: sets.as_ptr(),
+            push_count: 0,
+            push: std::ptr::null(),
+        };
+        unsafe {
+            check(
+                (self.fns.create_layout)(
+                    self.device,
+                    &layout as *const LayoutInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.audio_layout,
+                ),
+                "audio pipeline layout",
+            )?;
+        }
+        let module = self.shader(AUDIO_SPV)?;
+        #[repr(C)]
+        struct Stage {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            stage: u32,
+            module: Handle,
+            name: *const i8,
+            spec: *const c_void,
+        }
+        #[repr(C)]
+        struct Pipe {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            stage: Stage,
+            layout: Handle,
+            base: Handle,
+            base_index: i32,
+        }
+        let pipe = Pipe {
+            s_type: 29,
+            next: std::ptr::null(),
+            flags: 0,
+            stage: Stage {
+                s_type: 18,
+                next: std::ptr::null(),
+                flags: 0,
+                stage: 0x20,
+                module,
+                name: b"main\0".as_ptr() as *const i8,
+                spec: std::ptr::null(),
+            },
+            layout: self.audio_layout,
+            base: std::ptr::null_mut(),
+            base_index: -1,
+        };
+        unsafe {
+            let result = (self.fns.create_compute)(
+                self.device,
+                std::ptr::null_mut(),
+                1,
+                &pipe as *const Pipe as *const u8,
+                std::ptr::null(),
+                &mut self.audio_pipe,
+            );
+            (self.fns.destroy_shader)(self.device, module, std::ptr::null());
+            check(result, "audio pipeline")?;
+        }
+        #[repr(C)]
+        struct Size {
+            kind: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct PoolInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            max_sets: u32,
+            size_count: u32,
+            sizes: *const Size,
+        }
+        let size = Size { kind: 7, count: 3 };
+        let pool = PoolInfo {
+            s_type: 33,
+            next: std::ptr::null(),
+            flags: 0,
+            max_sets: 1,
+            size_count: 1,
+            sizes: &size,
+        };
+        unsafe {
+            check(
+                (self.fns.create_desc_pool)(
+                    self.device,
+                    &pool as *const PoolInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.audio_desc_pool,
+                ),
+                "audio descriptor pool",
+            )?;
+            #[repr(C)]
+            struct Alloc {
+                s_type: i32,
+                next: *const c_void,
+                pool: Handle,
+                count: u32,
+                layouts: *const Handle,
+            }
+            let alloc = Alloc {
+                s_type: 34,
+                next: std::ptr::null(),
+                pool: self.audio_desc_pool,
+                count: 1,
+                layouts: sets.as_ptr(),
+            };
+            check(
+                (self.fns.alloc_desc)(
+                    self.device,
+                    &alloc as *const Alloc as *const u8,
+                    &mut self.audio_set,
+                ),
+                "audio descriptor set",
+            )?;
+            #[repr(C)]
+            struct CmdAlloc {
+                s_type: i32,
+                next: *const c_void,
+                pool: Handle,
+                level: u32,
+                count: u32,
+            }
+            let cmd_alloc = CmdAlloc {
+                s_type: 40,
+                next: std::ptr::null(),
+                pool: self.pool,
+                level: 0,
+                count: 1,
+            };
+            check(
+                (self.fns.alloc_cmd)(
+                    self.device,
+                    &cmd_alloc as *const CmdAlloc as *const u8,
+                    &mut self.audio_cmd,
+                ),
+                "audio command buffer",
+            )?;
+            #[repr(C)]
+            struct FenceInfo {
+                s_type: i32,
+                next: *const c_void,
+                flags: u32,
+            }
+            let fence = FenceInfo {
+                s_type: 8,
+                next: std::ptr::null(),
+                flags: 0x1,
+            };
+            check(
+                (self.fns.create_fence)(
+                    self.device,
+                    &fence as *const FenceInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.audio_fence,
+                ),
+                "audio fence",
+            )?;
+        }
+        self.write_audio_descriptors()
+    }
+
+    fn write_audio_descriptors(&self) -> Result<(), String> {
+        #[repr(C)]
+        struct BufInfo {
+            buffer: Handle,
+            offset: u64,
+            range: u64,
+        }
+        #[repr(C)]
+        struct Write {
+            s_type: i32,
+            next: *const c_void,
+            set: Handle,
+            binding: u32,
+            element: u32,
+            count: u32,
+            kind: u32,
+            image: *const c_void,
+            buffer: *const BufInfo,
+            texel: *const c_void,
+        }
+        let infos = [
+            BufInfo {
+                buffer: self.scene_buf.buffer,
+                offset: 0,
+                range: u64::MAX,
+            },
+            BufInfo {
+                buffer: self.audio_rays.buffer,
+                offset: 0,
+                range: u64::MAX,
+            },
+            BufInfo {
+                buffer: self.audio_gains.buffer,
+                offset: 0,
+                range: u64::MAX,
+            },
+        ];
+        let writes = [
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set: self.audio_set,
+                binding: 0,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: &infos[0],
+                texel: std::ptr::null(),
+            },
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set: self.audio_set,
+                binding: 1,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: &infos[1],
+                texel: std::ptr::null(),
+            },
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set: self.audio_set,
+                binding: 2,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: &infos[2],
+                texel: std::ptr::null(),
+            },
+        ];
+        unsafe {
+            (self.fns.update_desc)(
+                self.device,
+                3,
+                writes.as_ptr() as *const u8,
+                0,
+                std::ptr::null(),
+            );
+        }
+        Ok(())
+    }
+
+    fn transmission_gains(
+        &mut self,
+        listener: [f32; 3],
+        sources: &[[f32; 3]],
+    ) -> Result<Vec<f32>, String> {
+        if sources.len() > 256 {
+            return Err("too many audio sources".into());
+        }
+        if sources.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.write_buffer(&self.audio_rays, &ray_bytes(listener, sources))?;
+        self.write_buffer(&self.audio_gains, &vec![0u8; sources.len() * 4])?;
+        unsafe {
+            let fences = [self.audio_fence];
+            check(
+                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
+                "audio wait",
+            )?;
+            check(
+                (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
+                "audio reset fence",
+            )?;
+            check((self.fns.reset_cmd)(self.audio_cmd, 0), "audio reset")?;
+            #[repr(C)]
+            struct BeginInfo {
+                s_type: i32,
+                next: *const c_void,
+                flags: u32,
+                inherit: *const c_void,
+            }
+            let begin = BeginInfo {
+                s_type: 42,
+                next: std::ptr::null(),
+                flags: 1,
+                inherit: std::ptr::null(),
+            };
+            check(
+                (self.fns.begin_cmd)(self.audio_cmd, &begin as *const BeginInfo as *const u8),
+                "audio begin",
+            )?;
+            #[repr(C)]
+            struct MemBar {
+                s_type: i32,
+                next: *const c_void,
+                src_access: u32,
+                dst_access: u32,
+            }
+            let host = MemBar {
+                s_type: 46,
+                next: std::ptr::null(),
+                src_access: 0x4000,
+                dst_access: 0x20,
+            };
+            (self.fns.cmd_barrier)(
+                self.audio_cmd,
+                0x4000,
+                0x800,
+                0,
+                1,
+                &host as *const MemBar as *const c_void,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+            );
+            (self.fns.cmd_bind_pipe)(self.audio_cmd, 1, self.audio_pipe);
+            (self.fns.cmd_bind_set)(
+                self.audio_cmd,
+                1,
+                self.audio_layout,
+                0,
+                1,
+                &self.audio_set,
+                0,
+                std::ptr::null(),
+            );
+            let groups = (sources.len() as u32).div_ceil(64);
+            (self.fns.cmd_dispatch)(self.audio_cmd, groups, 1, 1);
+            let back = MemBar {
+                s_type: 46,
+                next: std::ptr::null(),
+                src_access: 0x40,
+                dst_access: 0x10,
+            };
+            (self.fns.cmd_barrier)(
+                self.audio_cmd,
+                0x800,
+                0x4000,
+                0,
+                1,
+                &back as *const MemBar as *const c_void,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+            );
+            check((self.fns.end_cmd)(self.audio_cmd), "audio end")?;
+            #[repr(C)]
+            struct Submit {
+                s_type: i32,
+                next: *const c_void,
+                wait_count: u32,
+                waits: *const Handle,
+                stages: *const u32,
+                cmd_count: u32,
+                cmds: *const Handle,
+                signal_count: u32,
+                signals: *const Handle,
+            }
+            let cmd = [self.audio_cmd];
+            let submit = Submit {
+                s_type: 4,
+                next: std::ptr::null(),
+                wait_count: 0,
+                waits: std::ptr::null(),
+                stages: std::ptr::null(),
+                cmd_count: 1,
+                cmds: cmd.as_ptr(),
+                signal_count: 0,
+                signals: std::ptr::null(),
+            };
+            check(
+                (self.fns.queue_submit)(
+                    self.queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    self.audio_fence,
+                ),
+                "audio submit",
+            )?;
+            check(
+                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
+                "audio done",
+            )?;
+        }
+        let memory = self.audio_gains.memory;
+        let device = self.device;
+        let map = self.fns.map_mem;
+        let unmap = self.fns.unmap_mem;
+        read_f32s(map, unmap, device, memory, sources.len())
+    }
+
+    fn upload_scene(&self, pack: &Pack) -> Result<(), String> {
+        self.write_buffer(&self.scene_buf, &pack::scene_bytes(pack))
+    }
+
+    fn upload_image(&self, bytes: &[u8]) -> Result<(), String> {
+        self.write_buffer(&self.particle_buf, bytes)
+    }
+
+    fn write_buffer(&self, buffer: &Buffer, bytes: &[u8]) -> Result<(), String> {
+        if bytes.len() as u64 > buffer.size {
+            return Err("gpu buffer is too small".into());
+        }
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(
+                    self.device,
+                    buffer.memory,
+                    0,
+                    bytes.len() as u64,
+                    0,
+                    &mut mapped,
+                ),
+                "map gpu buffer",
+            )?;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped as *mut u8, bytes.len());
+            (self.fns.unmap_mem)(self.device, buffer.memory);
+        }
+        Ok(())
+    }
+
+    fn dispatch_lighting(&self) -> Result<(), String> {
+        #[repr(C)]
+        struct MemBar {
+            s_type: i32,
+            next: *const c_void,
+            src_access: u32,
+            dst_access: u32,
+        }
+        unsafe {
+            let host = MemBar {
+                s_type: 46,
+                next: std::ptr::null(),
+                src_access: 0x4000,
+                dst_access: 0x20,
+            };
+            (self.fns.cmd_barrier)(
+                self.cmd,
+                0x4000,
+                0x800,
+                0,
+                1,
+                &host as *const MemBar as *const c_void,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+            );
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, self.compute_pipe);
+            (self.fns.cmd_bind_set)(
+                self.cmd,
+                1,
+                self.compute_layout,
+                0,
+                1,
+                &self.desc_set,
+                0,
+                std::ptr::null(),
+            );
+            // Direct light, then three bounces. Each pass reads the previous pass.
+            for pass in 0u32..4 {
+                (self.fns.cmd_push)(
+                    self.cmd,
+                    self.compute_layout,
+                    0x20,
+                    0,
+                    4,
+                    &pass as *const u32 as *const c_void,
+                );
+                (self.fns.cmd_dispatch)(self.cmd, 16, 16, 1);
+                let shade = MemBar {
+                    s_type: 46,
+                    next: std::ptr::null(),
+                    src_access: 0x40,
+                    dst_access: 0x20,
+                };
+                let dst_stage = if pass + 1 == 4 { 0x80u32 } else { 0x800 };
+                (self.fns.cmd_barrier)(
+                    self.cmd,
+                    0x800,
+                    dst_stage,
+                    0,
+                    1,
+                    &shade as *const MemBar as *const c_void,
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn make_layout(&mut self) -> Result<Handle, String> {
         #[repr(C)]
         struct Range {
@@ -1256,12 +2619,13 @@ impl Gpu {
             offset: 0,
             size: 64,
         };
+        let sets = [self.desc_layout];
         let info = Info {
             s_type: 30,
             next: std::ptr::null(),
             flags: 0,
-            set_count: 0,
-            sets: std::ptr::null(),
+            set_count: 1,
+            sets: sets.as_ptr() as *const c_void,
             push_count: 1,
             push: &range,
         };
@@ -1423,7 +2787,7 @@ impl Gpu {
         Ok(pass)
     }
 
-    fn make_pipeline(&mut self, depth_test: bool) -> Result<Handle, String> {
+    fn make_pipeline(&mut self, depth_test: bool, blend_on: bool) -> Result<Handle, String> {
         unsafe {
             let vert = self.shader(VERT_SPV)?;
             let frag = self.shader(FRAG_SPV)?;
@@ -1483,7 +2847,7 @@ impl Gpu {
             }
             let bind = Bind {
                 binding: 0,
-                stride: 24,
+                stride: 48,
                 rate: 0,
             };
             let attrs = [
@@ -1499,6 +2863,24 @@ impl Gpu {
                     format: 106,
                     offset: 12,
                 },
+                Attr {
+                    location: 2,
+                    binding: 0,
+                    format: 106,
+                    offset: 24,
+                },
+                Attr {
+                    location: 3,
+                    binding: 0,
+                    format: 100,
+                    offset: 36,
+                },
+                Attr {
+                    location: 4,
+                    binding: 0,
+                    format: 103,
+                    offset: 40,
+                },
             ];
             let vert_info = VertInfo {
                 s_type: 19,
@@ -1506,7 +2888,7 @@ impl Gpu {
                 flags: 0,
                 bind_count: 1,
                 binds: &bind,
-                attr_count: 2,
+                attr_count: 5,
                 attrs: attrs.as_ptr(),
             };
             #[repr(C)]
@@ -1673,15 +3055,30 @@ impl Gpu {
                 atts: *const BlendAtt,
                 blend: [f32; 4],
             }
-            let batt = BlendAtt {
-                enable: 0,
-                src: 1,
-                dst: 0,
-                op: 0,
-                src_a: 1,
-                dst_a: 0,
-                op_a: 0,
-                mask: 0xf,
+            let batt = if blend_on {
+                // Premultiplied. Opaque output uses alpha 1, so it replaces the target.
+                // Fog output uses alpha = 1 - transmittance and rgb = in-scatter.
+                BlendAtt {
+                    enable: 1,
+                    src: 1,
+                    dst: 7,
+                    op: 0,
+                    src_a: 1,
+                    dst_a: 7,
+                    op_a: 0,
+                    mask: 0xf,
+                }
+            } else {
+                BlendAtt {
+                    enable: 0,
+                    src: 1,
+                    dst: 0,
+                    op: 0,
+                    src_a: 1,
+                    dst_a: 0,
+                    op_a: 0,
+                    mask: 0xf,
+                }
             };
             let blend = Blend {
                 s_type: 26,
@@ -2267,17 +3664,29 @@ impl Gpu {
 
     fn destroy_targets(&mut self) {
         unsafe {
-            if self.framebuffer.is_null() {
+            if self.framebuffers[0].is_null() && self.framebuffer.is_null() {
                 return;
             }
-            (self.fns.destroy_framebuffer)(self.device, self.framebuffer, std::ptr::null());
+            for slot in 0..2 {
+                if !self.framebuffers[slot].is_null() {
+                    (self.fns.destroy_framebuffer)(
+                        self.device,
+                        self.framebuffers[slot],
+                        std::ptr::null(),
+                    );
+                    self.framebuffers[slot] = std::ptr::null_mut();
+                }
+                let mut color = std::mem::replace(&mut self.colors[slot], Image::empty());
+                let mut depth = std::mem::replace(&mut self.depths[slot], Image::empty());
+                let mut host = std::mem::replace(&mut self.hosts[slot], Buffer::empty());
+                self.destroy_image(&mut color);
+                self.destroy_image(&mut depth);
+                self.destroy_buffer(&mut host);
+            }
             self.framebuffer = std::ptr::null_mut();
-            let mut color = std::mem::replace(&mut self.color, Image::empty());
-            let mut depth = std::mem::replace(&mut self.depth, Image::empty());
-            let mut host = std::mem::replace(&mut self.host, Buffer::empty());
-            self.destroy_image(&mut color);
-            self.destroy_image(&mut depth);
-            self.destroy_buffer(&mut host);
+            self.color = Image::empty();
+            self.depth = Image::empty();
+            self.host = Buffer::empty();
             if !self.swapchain.is_null() {
                 (self.fns.destroy_swapchain)(self.device, self.swapchain, std::ptr::null());
                 self.swapchain = std::ptr::null_mut();
@@ -2314,6 +3723,63 @@ impl Gpu {
     }
 }
 
+fn copy_image(image: &Image) -> Image {
+    Image {
+        image: image.image,
+        view: image.view,
+        memory: image.memory,
+    }
+}
+
+fn ray_bytes(listener: [f32; 3], sources: &[[f32; 3]]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(16 + 16 + 256 * 16);
+    for value in [listener[0], listener[1], listener[2], 0.0] {
+        bytes.extend_from_slice(&value.to_ne_bytes());
+    }
+    for value in [sources.len() as u32, 0, 0, 0] {
+        bytes.extend_from_slice(&value.to_ne_bytes());
+    }
+    for index in 0..256 {
+        let source = sources.get(index).copied().unwrap_or([0.0; 3]);
+        for value in [source[0], source[1], source[2], 0.0] {
+            bytes.extend_from_slice(&value.to_ne_bytes());
+        }
+    }
+    bytes
+}
+
+fn read_f32s(
+    map: FnMap,
+    unmap: FnUnmap,
+    device: Handle,
+    memory: Handle,
+    count: usize,
+) -> Result<Vec<f32>, String> {
+    let bytes = count * 4;
+    let mut raw = vec![0u8; bytes];
+    unsafe {
+        let mut mapped = std::ptr::null_mut();
+        check(
+            map(device, memory, 0, bytes as u64, 0, &mut mapped),
+            "read audio gains",
+        )?;
+        std::ptr::copy_nonoverlapping(mapped as *const u8, raw.as_mut_ptr(), bytes);
+        unmap(device, memory);
+    }
+    Ok(raw
+        .chunks_exact(4)
+        .map(|chunk| f32::from_ne_bytes(chunk.try_into().unwrap()))
+        .collect())
+}
+
+fn copy_buffer(buffer: &Buffer) -> Buffer {
+    Buffer {
+        buffer: buffer.buffer,
+        memory: buffer.memory,
+        size: buffer.size,
+    }
+}
+
 impl Image {
     fn empty() -> Self {
         Self {
@@ -2343,18 +3809,64 @@ impl Drop for Gpu {
             (self.fns.device_wait)(self.device);
             self.destroy_targets();
             let mut vertex = std::mem::replace(&mut self.vertex, Buffer::empty());
+            let mut scene_buf = std::mem::replace(&mut self.scene_buf, Buffer::empty());
+            let mut field_buf = std::mem::replace(&mut self.field_buf, Buffer::empty());
+            let mut particle_buf = std::mem::replace(&mut self.particle_buf, Buffer::empty());
+            let mut audio_rays = std::mem::replace(&mut self.audio_rays, Buffer::empty());
+            let mut audio_gains = std::mem::replace(&mut self.audio_gains, Buffer::empty());
             self.destroy_buffer(&mut vertex);
-            if !self.fence.is_null() {
-                (self.fns.destroy_fence)(self.device, self.fence, std::ptr::null());
+            self.destroy_buffer(&mut scene_buf);
+            self.destroy_buffer(&mut field_buf);
+            self.destroy_buffer(&mut particle_buf);
+            self.destroy_buffer(&mut audio_rays);
+            self.destroy_buffer(&mut audio_gains);
+            if !self.audio_fence.is_null() {
+                (self.fns.destroy_fence)(self.device, self.audio_fence, std::ptr::null());
             }
-            if !self.image_ready.is_null() {
-                (self.fns.destroy_sem)(self.device, self.image_ready, std::ptr::null());
+            if !self.audio_pipe.is_null() {
+                (self.fns.destroy_pipeline)(self.device, self.audio_pipe, std::ptr::null());
             }
-            if !self.render_done.is_null() {
-                (self.fns.destroy_sem)(self.device, self.render_done, std::ptr::null());
+            if !self.audio_layout.is_null() {
+                (self.fns.destroy_layout)(self.device, self.audio_layout, std::ptr::null());
+            }
+            if !self.audio_desc_pool.is_null() {
+                (self.fns.destroy_desc_pool)(self.device, self.audio_desc_pool, std::ptr::null());
+            }
+            if !self.audio_desc_layout.is_null() {
+                (self.fns.destroy_desc_layout)(
+                    self.device,
+                    self.audio_desc_layout,
+                    std::ptr::null(),
+                );
+            }
+            for slot in 0..2 {
+                if !self.fences[slot].is_null() {
+                    (self.fns.destroy_fence)(self.device, self.fences[slot], std::ptr::null());
+                }
+                if !self.image_readies[slot].is_null() {
+                    (self.fns.destroy_sem)(self.device, self.image_readies[slot], std::ptr::null());
+                }
+                if !self.render_dones[slot].is_null() {
+                    (self.fns.destroy_sem)(self.device, self.render_dones[slot], std::ptr::null());
+                }
+            }
+            if !self.compute_pipe.is_null() {
+                (self.fns.destroy_pipeline)(self.device, self.compute_pipe, std::ptr::null());
+            }
+            if !self.compute_layout.is_null() {
+                (self.fns.destroy_layout)(self.device, self.compute_layout, std::ptr::null());
+            }
+            if !self.desc_pool.is_null() {
+                (self.fns.destroy_desc_pool)(self.device, self.desc_pool, std::ptr::null());
+            }
+            if !self.desc_layout.is_null() {
+                (self.fns.destroy_desc_layout)(self.device, self.desc_layout, std::ptr::null());
             }
             if !self.pool.is_null() {
                 (self.fns.destroy_pool)(self.device, self.pool, std::ptr::null());
+            }
+            if !self.query_pool.is_null() {
+                (self.fns.destroy_query_pool)(self.device, self.query_pool, std::ptr::null());
             }
             if !self.overlay_pipeline.is_null() {
                 (self.fns.destroy_pipeline)(self.device, self.overlay_pipeline, std::ptr::null());
@@ -2471,6 +3983,16 @@ fn load_fns(
             wait_fences: d!("vkWaitForFences"),
             reset_fences: d!("vkResetFences"),
             queue_submit: d!("vkQueueSubmit"),
+            fence_status: d!("vkGetFenceStatus"),
+            cmd_bind_set: d!("vkCmdBindDescriptorSets"),
+            cmd_dispatch: d!("vkCmdDispatch"),
+            update_desc: d!("vkUpdateDescriptorSets"),
+            create_desc_layout: d!("vkCreateDescriptorSetLayout"),
+            destroy_desc_layout: d!("vkDestroyDescriptorSetLayout"),
+            create_desc_pool: d!("vkCreateDescriptorPool"),
+            destroy_desc_pool: d!("vkDestroyDescriptorPool"),
+            alloc_desc: d!("vkAllocateDescriptorSets"),
+            create_compute: d!("vkCreateComputePipelines"),
             device_wait: d!("vkDeviceWaitIdle"),
             create_buffer: d!("vkCreateBuffer"),
             destroy_buffer: d!("vkDestroyBuffer"),
@@ -2487,8 +4009,21 @@ fn load_fns(
             enumerate_devices,
             queue_families,
             mem_props,
+            create_query_pool: d!("vkCreateQueryPool"),
+            destroy_query_pool: d!("vkDestroyQueryPool"),
+            cmd_reset_query: d!("vkCmdResetQueryPool"),
+            cmd_write_timestamp: d!("vkCmdWriteTimestamp"),
+            get_query_results: d!("vkGetQueryPoolResults"),
         }
     }
+}
+
+fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {
+    if bits == 0 || bits >= 64 {
+        return end.wrapping_sub(start);
+    }
+    let mask = (1u64 << bits) - 1;
+    end.wrapping_sub(start) & mask
 }
 
 extern "C" {

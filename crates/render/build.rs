@@ -5,18 +5,24 @@ fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let vert = compile("shaders/scene.vert", &out.join("scene.vert.spv"));
     let frag = compile("shaders/scene.frag", &out.join("scene.frag.spv"));
+    let comp = compile("shaders/light.comp", &out.join("light.comp.spv"));
+    let audio = compile("shaders/transmit.comp", &out.join("transmit.comp.spv"));
     let glue = out.join("shaders.rs");
     std::fs::write(
         &glue,
         format!(
-            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\n",
+            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static COMP_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\n",
             vert.display(),
-            frag.display()
+            frag.display(),
+            comp.display(),
+            audio.display()
         ),
     )
     .unwrap();
     println!("cargo:rerun-if-changed=shaders/scene.vert");
     println!("cargo:rerun-if-changed=shaders/scene.frag");
+    println!("cargo:rerun-if-changed=shaders/light.comp");
+    println!("cargo:rerun-if-changed=shaders/transmit.comp");
 }
 
 fn compile(src: &str, dest: &std::path::Path) -> PathBuf {

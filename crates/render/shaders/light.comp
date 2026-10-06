@@ -1,0 +1,538 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+
+struct Lamp {
+    vec4 pos;
+    vec4 color;
+};
+struct Occ {
+    vec4 center_shape;
+    vec4 extent;
+    vec4 albedo;
+    // x is reflectance. y is the surface-color mix. Below zero means the game default.
+    vec4 bounce;
+};
+struct Obj {
+    uvec4 range;
+    vec4 color;
+};
+struct Puff {
+    vec4 center_density;
+    vec4 radius;
+};
+layout(std430, set = 0, binding = 0) readonly buffer SceneData {
+    uint lamp_count;
+    uint occ_count;
+    uint obj_count;
+    uint count_x;
+    uint count_z;
+    float spacing;
+    float origin_x;
+    float origin_z;
+    float near_end;
+    float far_end;
+    float world_end;
+    uint pad2;
+    Lamp lamps[4];
+    Occ occs[16];
+    Obj objects[32];
+    vec4 eye;
+    vec4 fire_pos;
+    vec4 fire_color;
+    Puff puffs[8];
+    // xyz is the floor center. w is half extent on X.
+    vec4 floor_center;
+    // x is half extent on Z. yzw is the floor color.
+    vec4 floor_data;
+} scene;
+
+layout(std430, set = 0, binding = 1) buffer FieldData {
+    vec4 texels[];
+} field;
+
+layout(push_constant) uniform Pass {
+    uint pass;
+} pc;
+
+const uint GRID = 128u;
+
+float hit_aabb(vec2 origin, vec2 dir, vec2 min_p, vec2 max_p) {
+    float t_enter = 0.0;
+    float t_exit = 1e20;
+    for (int axis = 0; axis < 2; axis++) {
+        if (abs(dir[axis]) < 1e-8) {
+            if (origin[axis] < min_p[axis] || origin[axis] > max_p[axis]) {
+                return -1.0;
+            }
+            continue;
+        }
+        float inv = 1.0 / dir[axis];
+        float t1 = (min_p[axis] - origin[axis]) * inv;
+        float t2 = (max_p[axis] - origin[axis]) * inv;
+        float lo = min(t1, t2);
+        float hi = max(t1, t2);
+        t_enter = max(t_enter, lo);
+        t_exit = min(t_exit, hi);
+        if (t_exit < t_enter) {
+            return -1.0;
+        }
+    }
+    return t_enter >= 0.0 ? t_enter : -1.0;
+}
+
+float hit_circle(vec2 origin, vec2 dir, vec2 center, float radius) {
+    vec2 o = origin - center;
+    float b = dot(o, dir);
+    float c = dot(o, o) - radius * radius;
+    float disc = b * b - c;
+    if (disc < 0.0) {
+        return -1.0;
+    }
+    float t = -b - sqrt(disc);
+    return t >= 0.0 ? t : -1.0;
+}
+
+float hit_box3(vec3 origin, vec3 dir, vec3 min_p, vec3 max_p) {
+    float t_enter = 0.0;
+    float t_exit = 1e20;
+    for (int axis = 0; axis < 3; axis++) {
+        if (abs(dir[axis]) < 1e-8) {
+            if (origin[axis] < min_p[axis] || origin[axis] > max_p[axis]) {
+                return -1.0;
+            }
+            continue;
+        }
+        float inv = 1.0 / dir[axis];
+        float t1 = (min_p[axis] - origin[axis]) * inv;
+        float t2 = (max_p[axis] - origin[axis]) * inv;
+        t_enter = max(t_enter, min(t1, t2));
+        t_exit = min(t_exit, max(t1, t2));
+        if (t_exit < t_enter) {
+            return -1.0;
+        }
+    }
+    return t_enter >= 0.0 ? t_enter : -1.0;
+}
+
+bool lamp_blocked(vec3 origin, vec3 lamp) {
+    vec3 delta = lamp - origin;
+    float dist = length(delta);
+    if (dist < 1e-3) {
+        return false;
+    }
+    vec3 dir = delta / dist;
+    uint count = min(scene.occ_count, 16u);
+    for (uint i = 0u; i < count; i++) {
+        Occ occ = scene.occs[i];
+        float t;
+        if (occ.center_shape.w > 0.5) {
+            vec2 o = origin.xz - occ.center_shape.xz;
+            float a = dot(dir.xz, dir.xz);
+            t = -1.0;
+            if (a > 1e-8) {
+                float b = dot(o, dir.xz);
+                float c = dot(o, o) - occ.extent.w * occ.extent.w;
+                float disc = b * b - a * c;
+                if (disc >= 0.0) {
+                    float root = sqrt(disc);
+                    float t0 = (-b - root) / a;
+                    float y = origin.y + dir.y * t0;
+                    if (t0 >= 0.0 && y >= 0.0 && y <= occ.extent.y) {
+                        t = t0;
+                    }
+                }
+            }
+        } else {
+            vec3 half_e = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
+            vec3 center = vec3(occ.center_shape.x, occ.extent.y * 0.5, occ.center_shape.z);
+            t = hit_box3(origin, dir, center - half_e, center + half_e);
+        }
+        if (t > 1e-3 && t < dist - 1e-3) {
+            return true;
+        }
+    }
+    return false;
+}
+
+vec3 shade_lamp(vec3 origin, vec3 normal, vec3 lamp, vec3 color) {
+    vec3 delta = lamp - origin;
+    float dist = max(length(delta), 1.0e-4);
+    float nd = dot(delta, normal) / dist;
+    if (nd <= 0.0 || lamp_blocked(origin, lamp)) {
+        return vec3(0.0);
+    }
+    // A grazing face stays dim. The peak dies within a few meters so a corridor
+    // wall is not a flat white slab. The tail keeps a far ray above black.
+    // Equal color channels keep a white lamp on the old scalar result.
+    float shade = nd / (nd + 0.08);
+    float dist2 = dist * dist;
+    float peak = 4.5 / (1.0 + dist2 * 12.0);
+    float tail = 0.90 / (1.0 + dist2 * 0.017);
+    return color * shade * (peak + tail);
+}
+
+vec3 lights_at(vec3 origin, vec3 normal) {
+    vec3 sum = vec3(0.0);
+    uint lamps = min(scene.lamp_count, 4u);
+    for (uint i = 0u; i < lamps; i++) {
+        sum += shade_lamp(origin, normal, scene.lamps[i].pos.xyz, scene.lamps[i].color.rgb);
+    }
+    // The flame is one more lamp. The same occlusion test stops it at a wall.
+    if (scene.fire_pos.w > 0.0) {
+        sum += shade_lamp(origin, normal, scene.fire_pos.xyz, scene.fire_color.rgb * scene.fire_pos.w);
+    }
+    return sum;
+}
+
+bool over_footprint(vec2 p, Occ occ) {
+    vec2 d = p - occ.center_shape.xz;
+    if (occ.center_shape.w > 0.5) {
+        return dot(d, d) <= occ.extent.w * occ.extent.w;
+    }
+    return abs(d.x) <= occ.extent.x && abs(d.y) <= occ.extent.z;
+}
+
+vec2 quantize_dir(vec2 dir, uint dirs) {
+    float angle = atan(dir.y, dir.x);
+    float step = 6.2831853 / float(dirs);
+    float snapped = (floor(angle / step) + 0.5) * step;
+    return vec2(cos(snapped), sin(snapped));
+}
+
+bool origin_in_solid(vec2 p) {
+    uint count = min(scene.occ_count, 16u);
+    for (uint i = 0u; i < count; i++) {
+        if (over_footprint(p, scene.occs[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool segment_hits_box(vec2 a, vec2 b, vec2 min_p, vec2 max_p) {
+    vec2 delta = b - a;
+    float dist = length(delta);
+    if (dist < 1e-4) {
+        return false;
+    }
+    vec2 dir = delta / dist;
+    float t_enter = 0.0;
+    float t_exit = dist;
+    for (int axis = 0; axis < 2; axis++) {
+        if (abs(dir[axis]) < 1e-8) {
+            if (a[axis] < min_p[axis] || a[axis] > max_p[axis]) {
+                return false;
+            }
+            continue;
+        }
+        float inv = 1.0 / dir[axis];
+        float t1 = (min_p[axis] - a[axis]) * inv;
+        float t2 = (max_p[axis] - a[axis]) * inv;
+        t_enter = max(t_enter, min(t1, t2));
+        t_exit = min(t_exit, max(t1, t2));
+        if (t_exit < t_enter) {
+            return false;
+        }
+    }
+    float lo = max(t_enter, 1e-3);
+    float hi = min(t_exit, dist - 1e-3);
+    return hi > lo + 0.05;
+}
+
+bool segment_hits_circle(vec2 a, vec2 b, vec2 center, float radius) {
+    vec2 delta = b - a;
+    float dist = length(delta);
+    if (dist < 1e-4) {
+        return false;
+    }
+    vec2 dir = delta / dist;
+    vec2 o = a - center;
+    float along = dot(o, dir);
+    float disc = along * along - (dot(o, o) - radius * radius);
+    if (disc < 0.0) {
+        return false;
+    }
+    float root = sqrt(disc);
+    float lo = max(-along - root, 1e-3);
+    float hi = min(-along + root, dist - 1e-3);
+    return hi > lo + 0.05;
+}
+
+bool probe_hidden(vec2 from, vec2 probe) {
+    vec2 delta = probe - from;
+    if (length(delta) < 1e-3) {
+        return false;
+    }
+    uint count = min(scene.occ_count, 16u);
+    for (uint i = 0u; i < count; i++) {
+        Occ occ = scene.occs[i];
+        bool hit;
+        if (occ.center_shape.w > 0.5) {
+            hit = segment_hits_circle(from, probe, occ.center_shape.xz, occ.extent.w);
+        } else {
+            vec2 half_e = vec2(occ.extent.x, occ.extent.z);
+            hit = segment_hits_box(from, probe, occ.center_shape.xz - half_e, occ.center_shape.xz + half_e);
+        }
+        if (hit) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool probe_rejected(vec2 from, vec2 probe) {
+    if (origin_in_solid(probe)) {
+        return true;
+    }
+    // A neighbor one cell away is still this side of a wall. Rejecting it
+    // left a black ring where a solid meets the floor.
+    if (length(probe - from) <= scene.spacing * 1.25) {
+        return false;
+    }
+    return probe_hidden(from, probe);
+}
+
+uint read_base() {
+    return (pc.pass & 1u) == 0u ? GRID * GRID : 0u;
+}
+
+vec3 sample_bounce(vec2 xz) {
+    float fx = clamp((xz.x - scene.origin_x) / scene.spacing - 0.5, 0.0, float(scene.count_x - 1u));
+    float fz = clamp((xz.y - scene.origin_z) / scene.spacing - 0.5, 0.0, float(scene.count_z - 1u));
+    uint x0 = uint(floor(fx));
+    uint z0 = uint(floor(fz));
+    uint x1 = min(x0 + 1u, scene.count_x - 1u);
+    uint z1 = min(z0 + 1u, scene.count_z - 1u);
+    float tx = fx - float(x0);
+    float tz = fz - float(z0);
+    uint base = read_base();
+    vec2 c00 = vec2(scene.origin_x, scene.origin_z) + (vec2(float(x0), float(z0)) + 0.5) * scene.spacing;
+    vec2 c10 = vec2(scene.origin_x, scene.origin_z) + (vec2(float(x1), float(z0)) + 0.5) * scene.spacing;
+    vec2 c01 = vec2(scene.origin_x, scene.origin_z) + (vec2(float(x0), float(z1)) + 0.5) * scene.spacing;
+    vec2 c11 = vec2(scene.origin_x, scene.origin_z) + (vec2(float(x1), float(z1)) + 0.5) * scene.spacing;
+    float w00 = (1.0 - tx) * (1.0 - tz);
+    float w10 = tx * (1.0 - tz);
+    float w01 = (1.0 - tx) * tz;
+    float w11 = tx * tz;
+    if (probe_rejected(xz, c00)) w00 = 0.0;
+    if (probe_rejected(xz, c10)) w10 = 0.0;
+    if (probe_rejected(xz, c01)) w01 = 0.0;
+    if (probe_rejected(xz, c11)) w11 = 0.0;
+    float sum = w00 + w10 + w01 + w11;
+    if (sum < 1e-4) {
+        return vec3(0.0);
+    }
+    vec3 s00 = field.texels[base + z0 * GRID + x0].rgb;
+    vec3 s10 = field.texels[base + z0 * GRID + x1].rgb;
+    vec3 s01 = field.texels[base + z1 * GRID + x0].rgb;
+    vec3 s11 = field.texels[base + z1 * GRID + x1].rgb;
+    return (s00 * w00 + s10 * w10 + s01 * w01 + s11 * w11) / sum;
+}
+
+bool on_floor(vec2 xz) {
+    vec2 d = abs(xz - scene.floor_center.xz);
+    return d.x <= scene.floor_center.w && d.y <= scene.floor_data.x;
+}
+
+vec3 floor_emit(vec2 xz) {
+    if (!on_floor(xz) || origin_in_solid(xz)) {
+        return vec3(0.0);
+    }
+    vec3 lit = lights_at(vec3(xz.x, 0.05, xz.y), vec3(0.0, 1.0, 0.0));
+    // The fragment already shades the lit floor. This share is what leaves it.
+    return scene.floor_data.yzw * lit * 0.1;
+}
+
+vec3 floor_along(vec2 origin, vec2 dir, float t0, float limit) {
+    // Only the pass the picture reads. Earlier passes would add this again.
+    if (pc.pass != 3u) {
+        return vec3(0.0);
+    }
+    float span = limit - t0;
+    if (span < 0.25) {
+        return vec3(0.0);
+    }
+    vec3 sum = vec3(0.0);
+    float weight = 0.0;
+    for (int i = 0; i < 2; i++) {
+        float t = t0 + span * (float(i) + 0.5) / 2.0;
+        vec2 p = origin + dir * t;
+        if (probe_hidden(origin, p)) {
+            break;
+        }
+        sum += floor_emit(p);
+        weight += 1.0;
+    }
+    if (weight <= 0.0) {
+        return vec3(0.0);
+    }
+    return sum / weight;
+}
+
+struct RayHit {
+    vec3 color;
+    float found;
+};
+
+RayHit gather_interval(vec2 origin, vec2 dir, float t0, float t1) {
+    if (origin_in_solid(origin)) {
+        return RayHit(vec3(0.0), 1.0);
+    }
+    float best_t = t1;
+    vec2 hit = origin;
+    vec2 normal = vec2(0.0, 1.0);
+    vec3 albedo = vec3(0.0);
+    Occ chosen = scene.occs[0];
+    bool found = false;
+    uint count = min(scene.occ_count, 16u);
+    for (uint i = 0u; i < count; i++) {
+        Occ occ = scene.occs[i];
+        float t;
+        vec2 n;
+        if (occ.center_shape.w > 0.5) {
+            t = hit_circle(origin, dir, occ.center_shape.xz, occ.extent.w);
+            vec2 p = origin + dir * max(t, 0.0);
+            n = normalize(p - occ.center_shape.xz);
+        } else {
+            vec2 min_p = occ.center_shape.xz - vec2(occ.extent.x, occ.extent.z);
+            vec2 max_p = occ.center_shape.xz + vec2(occ.extent.x, occ.extent.z);
+            t = hit_aabb(origin, dir, min_p, max_p);
+            vec2 p = origin + dir * max(t, 0.0);
+            vec2 d = p - occ.center_shape.xz;
+            if (abs(d.x) / max(occ.extent.x, 1e-4) > abs(d.y) / max(occ.extent.z, 1e-4)) {
+                n = vec2(sign(d.x), 0.0);
+            } else {
+                n = vec2(0.0, sign(d.y));
+            }
+        }
+        if (t >= max(t0, 0.002) && t < t1 && t < best_t) {
+            best_t = t;
+            hit = origin + dir * t;
+            normal = n;
+            albedo = occ.albedo.rgb;
+            chosen = occ;
+            found = true;
+        }
+    }
+    if (!found) {
+        // The open floor still lights this ray. The miss does not become a hit.
+        return RayHit(floor_along(origin, dir, t0, t1), 0.0);
+    }
+    // A face that points away from a lamp stays dark. Pasting the lit top
+    // onto that face let a bright lamp through the wall.
+    // hit is XZ. Height stays on Y so the lamp ray is not tested through the face.
+    vec3 sample_pos = vec3(hit.x + normal.x * 0.02, chosen.extent.y * 0.45, hit.y + normal.y * 0.02);
+    vec3 direct = lights_at(sample_pos, vec3(normal.x, 0.0, normal.y));
+    vec3 incoming = vec3(0.0);
+    if (pc.pass > 0u) {
+        incoming = sample_bounce(hit + normal * 0.03);
+    }
+    // A dark face is still a hit. Later intervals must not see through it.
+    // Diffuse bounce is arriving light times the surface color.
+    // A negative control keeps the tuned game default.
+    float color_mix = chosen.bounce.y < 0.0 ? 1.0 : clamp(chosen.bounce.y, 0.0, 1.0);
+    vec3 tint = mix(vec3(1.0), albedo, color_mix);
+    vec3 surface;
+    if (chosen.bounce.x < 0.0) {
+        surface = tint * (direct * 0.55 + incoming * 0.68);
+    } else {
+        float reflect = clamp(chosen.bounce.x, 0.0, 1.0);
+        surface = tint * reflect * (direct + incoming);
+    }
+    // Floor light travels with the ray until the wall. The hit still blocks.
+    return RayHit(surface + floor_along(origin, dir, t0, best_t), 1.0);
+}
+
+float lum3(vec3 color) {
+    return color.r + color.g + color.b;
+}
+
+void take_coarse(inout vec3 sum, inout float weight, vec2 origin, vec2 probe, vec2 dir, float t0, float t1, float blend, float fine_lum) {
+    if (blend <= 0.0 || probe_rejected(origin, probe)) {
+        return;
+    }
+    RayHit hit = gather_interval(probe, dir, t0, t1);
+    if (hit.found < 0.5) {
+        return;
+    }
+    float other = lum3(hit.color);
+    if (abs(fine_lum - other) > max(fine_lum, 0.05) * 0.65) {
+        return;
+    }
+    sum += hit.color * blend;
+    weight += blend;
+}
+
+RayHit smoothed_interval(vec2 origin, vec2 dir, float t0, float t1, float step) {
+    RayHit fine = gather_interval(origin, dir, t0, t1);
+    if (fine.found < 0.5) {
+        return fine;
+    }
+    vec2 base = vec2(scene.origin_x, scene.origin_z);
+    vec2 cell = (origin - base) / step - 0.5;
+    float x0 = floor(cell.x);
+    float z0 = floor(cell.y);
+    float tx = clamp(cell.x - x0, 0.0, 1.0);
+    float tz = clamp(cell.y - z0, 0.0, 1.0);
+    vec2 p00 = base + (vec2(x0, z0) + 0.5) * step;
+    vec2 p10 = p00 + vec2(step, 0.0);
+    vec2 p01 = p00 + vec2(0.0, step);
+    vec2 p11 = p00 + vec2(step);
+    vec3 sum = fine.color;
+    float weight = 1.0;
+    float fine_lum = lum3(fine.color);
+    take_coarse(sum, weight, origin, p00, dir, t0, t1, (1.0 - tx) * (1.0 - tz), fine_lum);
+    take_coarse(sum, weight, origin, p10, dir, t0, t1, tx * (1.0 - tz), fine_lum);
+    take_coarse(sum, weight, origin, p01, dir, t0, t1, (1.0 - tx) * tz, fine_lum);
+    take_coarse(sum, weight, origin, p11, dir, t0, t1, tx * tz, fine_lum);
+    return RayHit(sum / weight, 1.0);
+}
+
+vec3 merged_dir(vec2 origin, vec2 dir) {
+    RayHit near = gather_interval(origin, dir, 0.0, scene.near_end);
+    if (near.found > 0.5) {
+        return near.color;
+    }
+    // Farther ranges use more direction buckets and a coarser spatial blend.
+    // The ray from this probe still decides the hit, so a neighbor cannot erase it.
+    // A miss keeps the floor light from the open interval.
+    vec2 far_dir = quantize_dir(dir, 36u);
+    RayHit far = smoothed_interval(origin, far_dir, scene.near_end * 0.85, scene.far_end, scene.spacing * 3.0);
+    if (far.found > 0.5) {
+        return far.color + near.color;
+    }
+    vec2 world_dir = quantize_dir(dir, 64u);
+    RayHit world = smoothed_interval(origin, world_dir, scene.far_end * 0.85, scene.world_end, scene.spacing * 8.0);
+    if (world.found > 0.5) {
+        return world.color + far.color + near.color;
+    }
+    return near.color + far.color + world.color;
+}
+
+void main() {
+    uint ix = gl_GlobalInvocationID.x;
+    uint iz = gl_GlobalInvocationID.y;
+    if (ix >= scene.count_x || iz >= scene.count_z || ix >= GRID || iz >= GRID) {
+        return;
+    }
+    vec2 origin = vec2(scene.origin_x, scene.origin_z) + (vec2(ix, iz) + 0.5) * scene.spacing;
+    uint slot = iz * GRID + ix;
+    if ((pc.pass & 1u) == 1u) {
+        slot += GRID * GRID;
+    }
+    if (origin_in_solid(origin)) {
+        field.texels[slot] = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    vec3 sum = vec3(0.0);
+    const uint dirs = 32u;
+    for (uint d = 0u; d < dirs; d++) {
+        float angle = (float(d) + 0.5) * 6.2831853 / float(dirs);
+        sum += merged_dir(origin, vec2(cos(angle), sin(angle)));
+    }
+    vec3 merged = sum / float(dirs);
+    field.texels[slot] = vec4(merged, 1.0);
+    if (scene.obj_count > 32u) {
+        field.texels[slot].a = 0.0;
+    }
+}

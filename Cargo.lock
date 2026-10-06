@@ -150,7 +150,9 @@ dependencies = [
 name = "genos-render"
 version = "0.1.0"
 dependencies = [
+ "genos-load",
  "genos-scene",
+ "genos-window",
 ]
 
 [[package]]

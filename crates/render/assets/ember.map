@@ -1,0 +1,6 @@
+# Ember frames. The clip advances with particle age.
+frame f0 0 0 64 64
+frame f1 64 0 64 64
+frame f2 128 0 64 64
+frame f3 192 0 64 64
+clip burn 0.16 f0 f1 f2 f3

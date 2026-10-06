@@ -1,8 +1,10 @@
 //! What the renderer can draw, and what it may skip on screen.
 //!
 //! Fixed parts are the authored floor, walls, and solids. A mesh can move by
-//! replacing its pose. Particles are points. A shader is either a mesh-space
-//! grid, optionally displaced by a height map, or a screen-space pass.
+//! replacing its pose. Particles are cards. A card can face the camera, sit at
+//! an angle, take world light, emit light, and show one texture-map frame.
+//! A shader is either a mesh-space grid, optionally displaced by a height map,
+//! or a screen-space pass.
 
 use genos_scene::{Scene, Shape, Solid};
 
@@ -35,6 +37,26 @@ pub enum FixedPart {
     Solid(usize),
 }
 
+/// One frame rectangle in a particle image. The origin is the top-left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParticleFrame {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Pixels a particle card can show. `frames` play in order for `frame_seconds` each.
+#[derive(Clone, Debug)]
+pub struct ParticleImage {
+    pub width: u32,
+    pub height: u32,
+    /// Row-major RGBA8. The length is `width * height * 4`.
+    pub pixels: Vec<u8>,
+    pub frames: Vec<ParticleFrame>,
+    pub frame_seconds: f32,
+}
+
 #[derive(Clone, Debug)]
 pub enum DrawKind {
     Fixed(FixedPart),
@@ -45,8 +67,22 @@ pub enum DrawKind {
     },
     Particles {
         points: Vec<[f32; 3]>,
+        /// Age in seconds, one entry per point. A missing age is zero.
+        ages: Vec<f32>,
+        /// Base albedo. The shade path multiplies this. It is not a built-in flame color.
         color: [f32; 3],
         size: f32,
+        /// Light added to the ground fire term. Zero leaves that term unchanged.
+        emission: [f32; 3],
+        /// Extinction of each point as one fog card. Zero draws a card per point.
+        density: f32,
+        /// When true, world light multiplies `color`. When false, the card keeps `color`.
+        lit: bool,
+        /// When true, the card normal points at the eye. `angle` is then unused.
+        face_camera: bool,
+        /// Radians of yaw away from the camera when `face_camera` is false.
+        angle: f32,
+        image: Option<ParticleImage>,
     },
     Shader {
         space: ShaderSpace,
