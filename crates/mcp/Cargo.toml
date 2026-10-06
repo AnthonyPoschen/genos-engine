@@ -1,0 +1,17 @@
+[package]
+name = "genos-mcp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+genos-physics = { path = "../physics" }
+genos-scene = { path = "../scene" }
+
+[dev-dependencies]
+genos-physics = { path = "../physics" }
+genos-render = { path = "../render" }
+genos-scene = { path = "../scene" }

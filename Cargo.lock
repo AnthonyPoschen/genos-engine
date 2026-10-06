@@ -140,6 +140,15 @@ name = "genos-math"
 version = "0.1.0"
 
 [[package]]
+name = "genos-mcp"
+version = "0.1.0"
+dependencies = [
+ "genos-physics",
+ "genos-render",
+ "genos-scene",
+]
+
+[[package]]
 name = "genos-physics"
 version = "0.1.0"
 dependencies = [
