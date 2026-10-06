@@ -3,13 +3,58 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use genos_input::{character_controller, InputCode, InputSystem};
-use genos_render::{Renderer, ScreenRect, Simulation, World, STEP_DT};
+use genos_render::{Antialias, Renderer, ScreenRect, Simulation, World};
 use genos_scene::{load_path, update, Actions, Camera};
 use genos_ui::{
-    apply_lamp, lighting_frame, profile_overlay, profiler_enabled, FrameSample, OpenFrame, Pointer,
-    ProfileStream, State,
+    apply_frame_action, lighting_frame, OpenFrame, Pointer, ProfileGraph, ProfileStream, State,
 };
 use genos_window::{extent_changed, FocusGate, Window};
+
+/// Seconds for the first frame, before a previous frame exists.
+const FIRST_FRAME_SECONDS: f32 = 1.0 / 60.0;
+/// A hitch longer than this does not replay the missed time.
+const MAX_FRAME_SECONDS: f32 = 0.25;
+
+/// Elapsed seconds since `previous`. The first frame uses [`FIRST_FRAME_SECONDS`].
+fn frame_seconds(previous: Option<Instant>, now: Instant) -> f32 {
+    let elapsed = match previous {
+        Some(start) => now.saturating_duration_since(start).as_secs_f32(),
+        None => FIRST_FRAME_SECONDS,
+    };
+    if elapsed.is_finite() && elapsed > 0.0 {
+        elapsed.min(MAX_FRAME_SECONDS)
+    } else {
+        0.0
+    }
+}
+
+/// On-screen cost of the camera profiler.
+///
+/// `Basic` is the user default. `Detailed` adds GPU timestamps and the profile
+/// file. Those queries cost frame time, so detailed stays off until a flag or
+/// a `--proof` check asks for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProfileMode {
+    Off,
+    Basic,
+    Detailed,
+}
+
+fn parse_profile_mode(explicit: Option<&str>, proof: bool) -> Result<ProfileMode, String> {
+    match explicit {
+        Some("off") => Ok(ProfileMode::Off),
+        Some("basic") => Ok(ProfileMode::Basic),
+        Some("detailed") => Ok(ProfileMode::Detailed),
+        Some(other) => Err(format!("unknown profile mode {other}")),
+        None if proof => Ok(ProfileMode::Detailed),
+        None => Ok(ProfileMode::Basic),
+    }
+}
+
+struct PendingProfile {
+    open: OpenFrame,
+    record: bool,
+}
 
 fn main() {
     if let Err(err) = run() {
@@ -26,6 +71,7 @@ fn run() -> Result<(), String> {
     let mut eye = None;
     let mut pitch = 0.0f32;
     let mut lamp = None;
+    let mut profile_arg = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -61,6 +107,9 @@ fn run() -> Result<(), String> {
                     y.parse::<f32>().map_err(|err| err.to_string())?,
                     z.parse::<f32>().map_err(|err| err.to_string())?,
                 ));
+            }
+            "--profile" => {
+                profile_arg = Some(args.next().ok_or("missing profile mode")?);
             }
             other => return Err(format!("unknown argument {other}")),
         }
@@ -101,20 +150,36 @@ fn run() -> Result<(), String> {
     let mut ui = State::default();
     let mut input = InputSystem::new();
     let controls = character_controller();
-    let profile = profiler_enabled(proof, frames);
-    let mut profile_stream = if profile {
-        let path = std::env::current_dir()
-            .map_err(|err| err.to_string())?
-            .join("genos-camera.profile");
-        let stream = ProfileStream::create(path)?;
-        eprintln!("genos-camera profile {}", stream.path().display());
-        Some(stream)
-    } else {
-        None
+    let profile_mode = parse_profile_mode(profile_arg.as_deref(), proof)?;
+    let mut profile_stream = match profile_mode {
+        ProfileMode::Detailed => {
+            let path = std::env::current_dir()
+                .map_err(|err| err.to_string())?
+                .join("genos-camera.profile");
+            let stream = ProfileStream::create(path)?;
+            eprintln!("genos-camera profile detailed {}", stream.path().display());
+            Some(stream)
+        }
+        ProfileMode::Basic => {
+            eprintln!("genos-camera profile basic");
+            None
+        }
+        ProfileMode::Off => {
+            eprintln!("genos-camera profile off");
+            None
+        }
     };
-    let mut profile_history = Vec::new();
-    let mut profile_pending: VecDeque<OpenFrame> = VecDeque::new();
+    let mut profile = ProfileGraph::default();
+    let mut profile_pending: VecDeque<PendingProfile> = VecDeque::new();
+    let mut graph_rects: Vec<ScreenRect> = Vec::new();
+    let mut drag_origin: Option<Duration> = None;
+    let boot = Instant::now();
+    let mut wireframe = false;
+    let mut frame_clock: Option<Instant> = None;
     loop {
+        let now = Instant::now();
+        let dt = frame_seconds(frame_clock, now);
+        frame_clock = Some(now);
         // window pump
         let pump_at = Instant::now();
         let frame = window.pump();
@@ -125,7 +190,7 @@ fn run() -> Result<(), String> {
             renderer.resize(frame.width, frame.height)?;
             size = (renderer.width(), renderer.height());
         }
-        let pump_cpu = stage_cpu(profile, pump_at);
+        let pump_cpu = pump_at.elapsed();
         // input
         let input_at = Instant::now();
         let gated = focus.gate(&frame);
@@ -136,16 +201,41 @@ fn run() -> Result<(), String> {
         input.poll_gamepads();
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
-        let input_cpu = stage_cpu(profile, input_at);
-        if profile {
+        let input_cpu = input_at.elapsed();
+        let graph_on = profile_mode != ProfileMode::Off;
+        let detailed = profile_mode == ProfileMode::Detailed;
+        if detailed {
+            let stream = profile_stream
+                .as_mut()
+                .ok_or("detailed profile is missing its file")?;
             publish_profile(
                 &mut renderer,
                 &mut profile_pending,
-                &mut profile_history,
-                profile_stream.as_mut().ok_or("profile stream is missing")?,
+                &mut profile,
+                stream,
                 false,
             )?;
         }
+        if graph_on && input.keyboard.pressed(InputCode::key_p) && !profile.is_paused() {
+            // Wait for GPU times that were submitted before this key, then freeze.
+            // A time that arrives after pause() stays out of the hold.
+            let times = if detailed {
+                renderer.finish_gpu_times()?
+            } else {
+                Vec::new()
+            };
+            hold_ready_frames(
+                &mut profile,
+                &mut profile_pending,
+                times,
+                profile_stream.as_mut(),
+            )?;
+        }
+        if graph_on && input.keyboard.pressed(InputCode::key_r) {
+            profile.reset();
+            drag_origin = None;
+        }
+        let paused = graph_on && profile.is_paused();
         // camera/scene update, first half: the panel reads the lamp after a reload
         let scene_at = Instant::now();
         if host.scene_revision() != scene_revision {
@@ -153,12 +243,13 @@ fn run() -> Result<(), String> {
             world = World::from_scene(host.drawn_scene());
         }
         let view = host.camera();
+        wireframe = toggle_wireframe(wireframe, &input, view.captured);
         let lamp = world
             .scene
             .lights
             .first()
             .map(|light| [light.position.x, light.position.y, light.position.z]);
-        let mut scene_cpu = stage_cpu(profile, scene_at);
+        let mut scene_cpu = scene_at.elapsed();
         // ui
         let ui_at = Instant::now();
         let ui_frame = lighting_frame(
@@ -185,39 +276,73 @@ fn run() -> Result<(), String> {
             })
             .collect();
         // The graph prints a live frame time. A readback file must stay the same on the next launch.
-        if profile && readback.is_none() {
-            let graph = profile_overlay(&profile_history, [size.0 as f32, size.1 as f32]);
-            overlay.extend(graph.paints.iter().map(|paint| ScreenRect {
-                x: paint.x,
-                y: paint.y,
-                w: paint.w,
-                h: paint.h,
-                color: paint.color,
-            }));
+        if readback.is_none() && graph_on {
+            let viewport = [size.0 as f32, size.1 as f32];
+            if profile.overlay_due(viewport, detailed, now) {
+                copy_graph(
+                    &profile.overlay_at(viewport, detailed, now),
+                    &mut graph_rects,
+                );
+            }
+            if paused {
+                let down = gated.mouse_left || gated.capture_click;
+                if let Some(start) = drag_origin {
+                    if let Some(time) = profile.cached_time_at_x(frame.pointer_x) {
+                        profile.select(start, time);
+                    }
+                    if !down {
+                        drag_origin = None;
+                    }
+                } else if down {
+                    if let Some(time) = profile.cached_time_at(frame.pointer_x, frame.pointer_y) {
+                        drag_origin = Some(time);
+                        profile.select(time, time);
+                    }
+                }
+            } else {
+                drag_origin = None;
+            }
+            // A drag stores the interval now. The picture still waits for the period.
+            if profile.overlay_due(viewport, detailed, now) {
+                copy_graph(
+                    &profile.overlay_at(viewport, detailed, now),
+                    &mut graph_rects,
+                );
+            }
+            overlay.extend_from_slice(&graph_rects);
         }
-        let ui_cpu = stage_cpu(profile, ui_at);
+        let ui_cpu = ui_at.elapsed();
         // camera/scene update
         let scene_at = Instant::now();
         let draw_camera = host.with_frame(|scene, camera| {
             for action in &ui_frame.actions {
-                apply_lamp(scene, *action);
+                if let Some(mode) = apply_frame_action(scene, *action) {
+                    renderer.set_antialias(Antialias::from_picture(mode.code()));
+                }
+            }
+            if paused {
+                camera.captured = false;
             }
             update(
                 camera,
                 scene,
                 &Actions {
-                    forward: move_axis.y,
-                    strafe: move_axis.x,
-                    mouse_dx: input.mouse.dx,
-                    mouse_dy: input.mouse.dy,
-                    look_x: look_axis.x,
-                    look_y: look_axis.y,
-                    capture_click: ui_frame.look_capture
+                    forward: if paused { 0.0 } else { move_axis.y },
+                    strafe: if paused { 0.0 } else { move_axis.x },
+                    mouse_dx: if paused { 0.0 } else { input.mouse.dx },
+                    mouse_dy: if paused { 0.0 } else { input.mouse.dy },
+                    look_x: if paused { 0.0 } else { look_axis.x },
+                    look_y: if paused { 0.0 } else { look_axis.y },
+                    capture_click: !paused
+                        && ui_frame.look_capture
                         && (gated.capture_click || controls.down(&input, "capture")),
                     escape: controls.down(&input, "release"),
                 },
-                1.0 / 60.0,
+                if paused { 0.0 } else { dt },
             );
+            if paused {
+                camera.captured = false;
+            }
             camera.clone()
         });
         if host.scene_revision() != scene_revision {
@@ -233,52 +358,69 @@ fn run() -> Result<(), String> {
                 }
             }
         }
-        scene_cpu += stage_cpu(profile, scene_at);
+        scene_cpu += scene_at.elapsed();
         // simulation step
         let sim_at = Instant::now();
-        fire.advance(&mut world, STEP_DT);
-        let sim_cpu = stage_cpu(profile, sim_at);
+        if !paused {
+            fire.advance(&mut world, dt);
+        }
+        let sim_cpu = sim_at.elapsed();
         // gpu draw/present
         let want_read = readback.is_some();
-        let (pixels, draw_cpu, draw_gpu) = if profile {
+        let draw_at = Instant::now();
+        let (pixels, timing) = if detailed {
             let (pixels, timing) =
-                renderer.draw_profiled(&world, &draw_camera, &overlay, want_read)?;
-            (pixels, timing.cpu, timing.gpu)
+                renderer.draw_profiled(&world, &draw_camera, &overlay, want_read, wireframe)?;
+            (pixels, Some(timing))
         } else {
-            let pixels = renderer.draw_with_overlay(&world, &draw_camera, &overlay, want_read)?;
-            (pixels, Duration::ZERO, None)
+            let pixels =
+                renderer.draw_with_overlay(&world, &draw_camera, &overlay, want_read, wireframe)?;
+            (pixels, None)
         };
-        if profile {
-            let duration = pump_cpu + input_cpu + ui_cpu + scene_cpu + sim_cpu + draw_cpu;
-            let open = OpenFrame {
-                duration,
-                cpu: [pump_cpu, input_cpu, ui_cpu, scene_cpu, sim_cpu, draw_cpu],
-            };
-            let stream = profile_stream.as_mut().ok_or("profile stream is missing")?;
+        let draw_cpu = timing
+            .map(|timing| timing.cpu)
+            .unwrap_or_else(|| draw_at.elapsed());
+        let draw_gpu = timing.and_then(|timing| timing.gpu);
+        let duration = pump_cpu + input_cpu + ui_cpu + scene_cpu + sim_cpu + draw_cpu;
+        let open = OpenFrame {
+            time: boot.elapsed(),
+            duration,
+            cpu: [pump_cpu, input_cpu, ui_cpu, scene_cpu, sim_cpu, draw_cpu],
+        };
+        if detailed {
+            let stream = profile_stream
+                .as_mut()
+                .ok_or("detailed profile is missing its file")?;
+            // A paused present stays on screen and does not enter the held graph.
+            let record = !paused;
             if let Some(gpu) = draw_gpu {
                 publish_profile(
                     &mut renderer,
                     &mut profile_pending,
-                    &mut profile_history,
+                    &mut profile,
                     stream,
                     false,
                 )?;
                 if !profile_pending.is_empty() {
                     return Err("profile gpu time arrived out of order".into());
                 }
-                let sample = open.finish(gpu);
-                stream.append(&sample)?;
-                profile_history.push(sample);
+                if record {
+                    let sample = open.finish(gpu);
+                    stream.append(&sample)?;
+                    profile.remember(sample);
+                }
             } else {
-                profile_pending.push_back(open);
+                profile_pending.push_back(PendingProfile { open, record });
                 publish_profile(
                     &mut renderer,
                     &mut profile_pending,
-                    &mut profile_history,
+                    &mut profile,
                     stream,
                     false,
                 )?;
             }
+        } else if graph_on && !paused {
+            profile.remember(open.finish(Duration::ZERO));
         }
         if want_read {
             if let Some(pixels) = pixels {
@@ -314,12 +456,15 @@ fn run() -> Result<(), String> {
             break;
         }
     }
-    if profile {
+    if profile_mode == ProfileMode::Detailed {
+        let stream = profile_stream
+            .as_mut()
+            .ok_or("detailed profile is missing its file")?;
         publish_profile(
             &mut renderer,
             &mut profile_pending,
-            &mut profile_history,
-            profile_stream.as_mut().ok_or("profile stream is missing")?,
+            &mut profile,
+            stream,
             true,
         )?;
         if !profile_pending.is_empty() {
@@ -330,18 +475,48 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn stage_cpu(enabled: bool, start: Instant) -> Duration {
-    if enabled {
-        start.elapsed()
-    } else {
-        Duration::ZERO
+fn copy_graph(view: &genos_ui::ProfileView, rects: &mut Vec<ScreenRect>) {
+    rects.clear();
+    rects.extend(view.paints.iter().map(|paint| ScreenRect {
+        x: paint.x,
+        y: paint.y,
+        w: paint.w,
+        h: paint.h,
+        color: paint.color,
+    }));
+}
+
+/// Publish GPU times for frames that were already submitted, then freeze the graph.
+///
+/// `record` frames land in the hold. Frames remembered after this call do not.
+fn hold_ready_frames(
+    graph: &mut ProfileGraph,
+    pending: &mut VecDeque<PendingProfile>,
+    gpu_times: Vec<Duration>,
+    mut stream: Option<&mut ProfileStream>,
+) -> Result<(), String> {
+    let mut finished = Vec::new();
+    for gpu in gpu_times {
+        let pending_frame = pending
+            .pop_front()
+            .ok_or("profile gpu time arrived without a frame")?;
+        if pending_frame.record {
+            finished.push(pending_frame.open.finish(gpu));
+        }
     }
+    graph.pause_after(finished.iter().cloned());
+    if let Some(stream) = stream.as_mut() {
+        for sample in &finished {
+            stream.append(sample)?;
+        }
+    }
+    Ok(())
 }
 
 fn publish_profile(
     renderer: &mut Renderer,
-    pending: &mut VecDeque<OpenFrame>,
-    history: &mut Vec<FrameSample>,
+    pending: &mut VecDeque<PendingProfile>,
+    graph: &mut ProfileGraph,
     stream: &mut ProfileStream,
     wait: bool,
 ) -> Result<(), String> {
@@ -351,12 +526,14 @@ fn publish_profile(
         renderer.poll_gpu_times()?
     };
     for gpu in times {
-        let open = pending
+        let pending_frame = pending
             .pop_front()
             .ok_or("profile gpu time arrived without a frame")?;
-        let sample = open.finish(gpu);
-        stream.append(&sample)?;
-        history.push(sample);
+        if pending_frame.record {
+            let sample = pending_frame.open.finish(gpu);
+            stream.append(&sample)?;
+            graph.remember(sample);
+        }
     }
     Ok(())
 }
@@ -419,4 +596,161 @@ fn write_chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
         }
     }
     out.extend_from_slice(&(!crc).to_be_bytes());
+}
+
+/// Digit-row 1 with either Control key toggles wireframe.
+/// `pointer_captured` does not block the chord. Look capture still receives it.
+fn toggle_wireframe(on: bool, input: &InputSystem, pointer_captured: bool) -> bool {
+    let _ = pointer_captured;
+    let control = input.keyboard.down(InputCode::key_control_left)
+        || input.keyboard.down(InputCode::key_control_right);
+    let one = input.keyboard.down(InputCode::key_1);
+    let rising = input.keyboard.pressed(InputCode::key_control_left)
+        || input.keyboard.pressed(InputCode::key_control_right)
+        || input.keyboard.pressed(InputCode::key_1);
+    if control && one && rising {
+        return !on;
+    }
+    on
+}
+
+#[cfg(test)]
+mod tests {
+    use genos_input::InputSystem;
+
+    use std::collections::VecDeque;
+    use std::time::Duration;
+
+    use genos_ui::{FrameSample, OpenFrame, ProfileGraph, STAGE_COUNT};
+
+    use super::{
+        hold_ready_frames, parse_profile_mode, toggle_wireframe, PendingProfile, ProfileMode,
+    };
+
+    const EVDEV_DIGIT_1: usize = 2;
+    const EVDEV_CONTROL_LEFT: usize = 29;
+    const EVDEV_CONTROL_RIGHT: usize = 97;
+
+    /// Same key step as the camera frame: begin the frame, apply evdev keys, then the chord.
+    fn frame_wireframe(
+        on: bool,
+        input: &mut InputSystem,
+        keys_down: &[u8; 256],
+        captured: bool,
+    ) -> bool {
+        input.begin_frame();
+        input.apply_evdev_keys(keys_down);
+        toggle_wireframe(on, input, captured)
+    }
+
+    #[test]
+    fn pause_holds_the_frame_whose_gpu_time_just_arrived() {
+        let mut graph = ProfileGraph::default();
+        let mut pending = VecDeque::new();
+        let mut cpu = [Duration::from_millis(1); STAGE_COUNT];
+        cpu[5] = Duration::from_millis(15);
+        pending.push_back(PendingProfile {
+            open: OpenFrame {
+                time: Duration::from_secs(2),
+                duration: Duration::from_millis(20),
+                cpu,
+            },
+            record: true,
+        });
+        hold_ready_frames(
+            &mut graph,
+            &mut pending,
+            vec![Duration::from_millis(9)],
+            None,
+        )
+        .expect("hold");
+        graph.remember(FrameSample::at(
+            Duration::from_secs(3),
+            Duration::from_millis(8),
+            [Duration::from_millis(1); STAGE_COUNT],
+            Duration::from_millis(1),
+        ));
+        assert!(pending.is_empty());
+        assert_eq!(graph.visible().len(), 1);
+        assert_eq!(graph.visible()[0].time, Duration::from_secs(2));
+        assert_eq!(graph.visible()[0].stages[5].cpu, Duration::from_millis(15));
+        assert_eq!(graph.visible()[0].stages[5].gpu, Duration::from_millis(9));
+        assert!(graph.is_paused());
+    }
+
+    #[test]
+    fn the_user_profile_defaults_to_basic() {
+        assert_eq!(
+            parse_profile_mode(None, false).expect("default"),
+            ProfileMode::Basic
+        );
+        assert_eq!(
+            parse_profile_mode(Some("off"), false).expect("off"),
+            ProfileMode::Off
+        );
+        assert_eq!(
+            parse_profile_mode(Some("detailed"), false).expect("detailed"),
+            ProfileMode::Detailed
+        );
+        assert_eq!(
+            parse_profile_mode(None, true).expect("proof"),
+            ProfileMode::Detailed
+        );
+        assert_eq!(
+            parse_profile_mode(Some("basic"), true).expect("proof basic"),
+            ProfileMode::Basic
+        );
+        assert!(parse_profile_mode(Some("nope"), false).is_err());
+    }
+
+    #[test]
+    fn control_and_1_toggles_wireframe_while_look_is_captured() {
+        let mut input = InputSystem::new();
+        let mut keys = [0u8; 256];
+        let mut on = false;
+
+        keys[EVDEV_DIGIT_1] = 1;
+        on = frame_wireframe(on, &mut input, &keys, false);
+        assert!(!on, "digit 1 alone turned wireframe on");
+
+        keys[EVDEV_DIGIT_1] = 0;
+        on = frame_wireframe(on, &mut input, &keys, false);
+        assert!(!on, "releasing digit 1 changed wireframe");
+
+        keys[EVDEV_CONTROL_LEFT] = 1;
+        on = frame_wireframe(on, &mut input, &keys, false);
+        assert!(!on, "control alone turned wireframe on");
+
+        keys[EVDEV_DIGIT_1] = 1;
+        on = frame_wireframe(on, &mut input, &keys, false);
+        assert!(on, "left control plus digit 1 did not turn wireframe on");
+
+        on = frame_wireframe(on, &mut input, &keys, false);
+        assert!(on, "holding the chord toggled wireframe again");
+
+        keys = [0u8; 256];
+        on = frame_wireframe(on, &mut input, &keys, true);
+        assert!(
+            on,
+            "releasing the chord while captured turned wireframe off"
+        );
+
+        keys[EVDEV_CONTROL_RIGHT] = 1;
+        keys[EVDEV_DIGIT_1] = 1;
+        on = frame_wireframe(on, &mut input, &keys, true);
+        assert!(
+            !on,
+            "right control plus digit 1 did not turn wireframe off while captured"
+        );
+
+        keys = [0u8; 256];
+        on = frame_wireframe(on, &mut input, &keys, true);
+        keys[EVDEV_CONTROL_RIGHT] = 1;
+        keys[EVDEV_DIGIT_1] = 1;
+        on = frame_wireframe(on, &mut input, &keys, true);
+        assert!(
+            on,
+            "the chord did not turn wireframe on again while captured"
+        );
+    }
 }

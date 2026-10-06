@@ -4,7 +4,7 @@ The UI owns layout, pointer hits, and the lighting panel. A menu and an in-game 
 
 ## Goal
 
-A game places UI on the viewport or on a world point. Focus, hover, and press change the look of an element. A player can drag a panel. On Omarchy, the lighting panel uses the current theme colors. A theme change updates those colors without a process restart. A verification frame shows the current frame rate and a line graph of stage time.
+A game places UI on the viewport or on a world point. Focus, hover, and press change the look of an element. A player can drag a panel. On Omarchy, the lighting panel uses the current theme colors. A theme change updates those colors without a process restart. A camera frame shows the current frame rate and a line graph of stage time.
 
 ## Intent
 
@@ -17,6 +17,8 @@ A screen root stays on its viewport point when the camera moves. A world root fo
 The lighting frame draws a sun on the first lamp. The sun uses world space. The panel stays in screen space. A press on the sun does not move the lamp. That press allows camera look capture.
 
 The panel moves that lamp with three sliders. Each slider has notches. Neighbor notches are 1 meter apart. A drag snaps to a notch and sets one axis. The Y slider includes a position below the floor and the height 7. Dim and bright scale the lamp color.
+
+The same panel shows the picture modes `off`, `FXAA`, and `SSAA`. A press selects that mode for the next picture. That press does not start camera look capture.
 
 Hover, focus, and press each select a look. A drag moves a draggable panel by the pointer delta. The children move with the panel. A press on the panel does not start camera look capture.
 
@@ -39,9 +41,23 @@ The idle look uses the theme background and the theme foreground. The hover bord
 
 A missing `colors.toml` during a theme swap does not lock the panel. The panel keeps the previous colors for that `current` directory. The next read that succeeds applies the new colors. When the `current` directory is absent, the panel keeps the built-in looks.
 
-The profiler is on when the camera launch passes `--proof` or `--frames`. The profiler is off when both flags are absent. Each completed frame stores a frame rate from that frame duration. Each stage stores a CPU time and a GPU time. Stage labels are `window pump`, `input`, `ui`, `camera/scene update`, `simulation step`, and `gpu draw/present`. A stage with no GPU work stores GPU time 0. GPU time for the draw comes from Vulkan timestamp queries.
+The profiler has three modes. The `make run` command uses basic mode. `--profile off` draws no profiler. `--profile detailed` records GPU time and writes `genos-camera.profile`. The `--proof` check uses detailed mode when `--profile` is absent.
 
-The graph draws one line for each CPU series and one line for each GPU series. Every frame in the history is a point on those lines. The readout is the frame rate of the latest sample. The profiler appends each completed frame to `genos-camera.profile` and flushes that frame. A reader can recover the frame rate and each stage time from that file.
+Each completed frame stores an ordering time and a CPU time for each stage. Stage labels are `window pump`, `input`, `ui`, `camera/scene update`, `simulation step`, and `gpu draw/present`. Basic mode stores GPU time 0. Detailed mode stores the Vulkan timestamp for the draw. A stage with no GPU work stores GPU time 0.
+
+The graph draws one line for each CPU series. Detailed mode also draws one line for each GPU series. The on-screen graph keeps frames from the last 10 seconds. Age is the gap from the newest frame. A frame older than 10 seconds is dropped. A frame at 10 seconds stays.
+
+The plot draws one box for each 250 ms interval. A CPU stage box is the average time in that interval. The DRAW box keeps the highest sample in that interval. The GPU box keeps the highest sample in that interval.
+
+The readout still shows the latest frame. While the history is shorter than 10 seconds, the plot shows only those intervals. A full window starts 10 seconds before the newest frame. The picture is built at most 5 times a second. Pause and reset build on that frame.
+
+While the graph is live, the readout shows the latest frame rate in frames per second. The readout shows each stage CPU time in milliseconds. Detailed mode also shows the draw GPU time. The on-screen names are `WINDOW`, `INPUT`, `UI`, `SCENE`, `SIM`, `DRAW`, and `GPU`.
+
+P pauses the camera. The pause stops camera motion and the simulation step. The graph holds. New frames do not enter that graph. The picture keeps drawing the held graph. Those boxes stay in use until the interval changes.
+
+A drag on the held graph chooses a time interval. The readout then shows the peak DRAW frame in that interval. Detailed mode also shows the peak GPU frame. R resets the graph. The graph follows new frames for the last 10 seconds.
+
+Detailed mode appends each completed live frame to `genos-camera.profile`. That write does not sync the file to disk. A reader can recover the ordering time and each stage CPU and GPU time. Basic mode does not write that file. Basic mode does not query GPU timestamps.
 
 ## Code
 
@@ -49,9 +65,9 @@ The crate is `crates/ui`, package `genos-ui`.
 
 - `layout` is in `src/layout.rs`.
 - Text measure is in `src/text.rs`.
-- `lighting_frame` and `apply_lamp` are in `src/panel.rs`.
+- `lighting_frame`, `apply_lamp`, and `apply_frame_action` are in `src/panel.rs`.
 - Omarchy theme colors are in `src/omarchy.rs`.
-- `profiler_enabled`, `profile_overlay`, and `ProfileStream` are in `src/profile.rs`.
+- `profile_overlay`, `remember_frame`, `ProfileGraph`, and `ProfileStream` are in `src/profile.rs`.
 
 ## Game use
 
@@ -59,19 +75,23 @@ Build a `Node` tree. Call `layout` with `Space::Screen` or `Space::World`.
 
 The camera frame calls `lighting_frame` each frame. The call passes the first lamp. That call loads the Omarchy theme when the `current` directory exists. A game does not pass a palette.
 
-The frame calls `apply_lamp` for each action. The frame draws every paint in `Frame::paints` with `Renderer::draw_with_overlay`. The sun is one of those paints. The frame starts look capture only when `look_capture` is true.
+The frame calls `apply_frame_action` for each action. A picture selection returns the mode. The frame sets that mode on the renderer before the draw. A lamp action stays on the lamp path. The frame draws every paint in `Frame::paints` with `Renderer::draw_with_overlay`. The sun is one of those paints. The frame starts look capture only when `look_capture` is true.
 
-A verification frame calls `profiler_enabled`. The frame calls `profile_overlay` and draws those paints with `Renderer::draw_with_overlay`. The frame calls `ProfileStream::append` for each completed sample. The file path is printed as `genos-camera profile`.
+Basic mode and detailed mode call `profile_overlay` and draw those paints. Detailed mode draws with `Renderer::draw_profiled`. That mode calls `ProfileStream::append` for each live sample. Basic mode draws with `Renderer::draw_with_overlay`.
+
+P pauses the graph. A drag inspects one interval. L follows live frames again.
 
 ## Limits
 
-There is no scroll, no image, and no font file. Text uses a built-in bitmap. The lighting panel is screen space. The panel controls one lamp.
+There is no scroll, no image, and no font file. Text uses a built-in bitmap. The lighting panel is screen space. The panel controls one lamp. The picture labels are `off`, `FXAA`, and `SSAA`.
 
 A sun marker follows the first lamp in world space. The marker is not a handle. Three notched sliders move that lamp. Each notch is 1 meter from the next. Y notches go below the floor.
 
 The theme colors do not change the lamp, the radiance field, or a non-UI surface. The reader does not apply ANSI colors or gradient keys.
 
-The graph has no pan, no zoom, and no scroll. An ordinary play launch does not show the graph. This crate does not read Vulkan timestamps.
+The graph has no pan, no zoom, and no free scroll. Pause holds the current window. A drag on the held graph chooses one interval. This crate does not read Vulkan timestamps. The profile does not time each Rust function. Timed work stays the frame stages.
+
+The graph draws one box per 250 ms average. It does not draw one box per frame.
 
 ## Decisions
 

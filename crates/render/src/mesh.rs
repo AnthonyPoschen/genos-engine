@@ -22,20 +22,12 @@ pub(crate) struct LitVertex {
     pub level: bool,
 }
 
-pub(crate) fn compose(albedo: [f32; 3], direct: f32, bounce: [f32; 3], level: bool) -> [f32; 3] {
-    // The field already stores reflected radiance. A level face gets one extra lift in shadow.
-    let gain = if level {
-        1.0 + (1.0 - direct.clamp(0.0, 1.0))
-    } else {
-        1.0
-    };
-    // Match the fragment: a smaller share of the lamp, so a white wall does not clip.
-    let carried = gain * 0.75;
-    let shown = direct * 0.58;
+pub(crate) fn compose(albedo: [f32; 3], direct: f32, bounce: [f32; 3], _level: bool) -> [f32; 3] {
+    let reflect = genos_scene::DEFAULT_REFLECTANCE;
     [
-        tone(albedo[0] * (shown + bounce[0] * carried)),
-        tone(albedo[1] * (shown + bounce[1] * carried)),
-        tone(albedo[2] * (shown + bounce[2] * carried)),
+        tone(albedo[0] * reflect * (direct + bounce[0])),
+        tone(albedo[1] * reflect * (direct + bounce[1])),
+        tone(albedo[2] * reflect * (direct + bounce[2])),
     ]
 }
 
@@ -284,8 +276,8 @@ fn push_displacement(
     }
 }
 
-fn surface_cell(field: &Field) -> f32 {
-    field.near.spacing.max(1.0e-3)
+fn surface_cell(_field: &Field) -> f32 {
+    crate::field::MESH_CELL
 }
 
 fn direct_at(scene: &Scene, x: f32, y: f32, z: f32, normal: [f32; 3]) -> f32 {

@@ -1,0 +1,61 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src {
+    uint pixels[];
+} src;
+
+layout(std430, set = 0, binding = 1) writeonly buffer Dst {
+    uint pixels[];
+} dst;
+
+layout(push_constant) uniform Push {
+    uint width;
+    uint height;
+    uint src_width;
+    uint bgra;
+} push;
+
+uint tent_weight(int offset) {
+    if (offset == 0 || offset == 3) {
+        return 1u;
+    }
+    return 3u;
+}
+
+uint load_at(int x, int y) {
+    int src_w = int(push.src_width);
+    int src_h = int(push.height) * 2;
+    x = clamp(x, 0, src_w - 1);
+    y = clamp(y, 0, src_h - 1);
+    return src.pixels[uint(y) * push.src_width + uint(x)];
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(push.width) || pixel.y >= int(push.height)) {
+        return;
+    }
+    // A 4x4 tent centered on the 2x2 tile. It overlaps the next presented pixel.
+    // A flat area stays exact: the weights sum to 64.
+    uvec4 sum = uvec4(0u);
+    int origin_x = pixel.x * 2 - 1;
+    int origin_y = pixel.y * 2 - 1;
+    for (int dy = 0; dy < 4; dy++) {
+        for (int dx = 0; dx < 4; dx++) {
+            uint packed = load_at(origin_x + dx, origin_y + dy);
+            uint weight = tent_weight(dx) * tent_weight(dy);
+            sum.x += (packed & 255u) * weight;
+            sum.y += ((packed >> 8u) & 255u) * weight;
+            sum.z += ((packed >> 16u) & 255u) * weight;
+            sum.w += ((packed >> 24u) & 255u) * weight;
+        }
+    }
+    uint b0 = sum.x / 64u;
+    uint b1 = sum.y / 64u;
+    uint b2 = sum.z / 64u;
+    uint b3 = sum.w / 64u;
+    dst.pixels[uint(pixel.y) * push.width + uint(pixel.x)] =
+        b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
+}

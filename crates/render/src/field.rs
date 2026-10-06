@@ -13,8 +13,120 @@ pub struct CascadeLevel {
     pub count_z: u32,
     /// Radiance per probe, then per direction. Owned by this build only.
     pub radiance: Vec<[f32; 3]>,
-    /// One merged color per probe. Empty until the field is sealed.
+    /// Transparency of that interval. `1` is a miss. `0` is a hit. Below `0` is an interior probe.
+    pub beta: Vec<f32>,
+    /// Mean merged radiance per probe. Empty until the field is sealed.
     pub merged: Vec<[f32; 3]>,
+}
+
+/// Near probe spacing, in meters. A larger floor keeps this cell until the buffer is full.
+pub(crate) const TARGET_SPACING: f32 = 0.28;
+/// Directions in the near cascade. Each coarser cascade doubles this count.
+pub(crate) const FINE_DIRS: u32 = 16;
+/// Texels reserved for one bounce inside the field buffer. The other bounce uses the next copy.
+pub(crate) const FIELD_COPY: u32 = 524288;
+/// Bounces after the direct pass. The picture runs the same count.
+pub(crate) const BOUNCES: u32 = 4;
+
+/// One cascade in the paper's doubling sequence.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CascadePlan {
+    pub spacing: f32,
+    pub dirs: u32,
+    pub t0: f32,
+    pub t1: f32,
+    pub origin_x: f32,
+    pub origin_z: f32,
+    pub count_x: u32,
+    pub count_z: u32,
+    pub offset: u32,
+}
+
+/// Near, far, and world plans for a floor. Spacing, directions, and interval length follow `2^i`.
+/// The world plan starts four probes outside the floor on each side.
+pub(crate) fn cascade_plans(floor: &genos_scene::Floor) -> [CascadePlan; 3] {
+    let mut spacing0 = TARGET_SPACING;
+    loop {
+        let plans = plans_at(floor, spacing0);
+        let used = plans[2].offset
+            + plans[2].count_x * plans[2].count_z * plans[2].dirs;
+        if used <= FIELD_COPY || spacing0 > 2.0 {
+            debug_assert!(
+                used <= FIELD_COPY,
+                "cascade texels {used} exceed {FIELD_COPY}"
+            );
+            return plans;
+        }
+        spacing0 *= 1.25;
+    }
+}
+
+fn plans_at(floor: &genos_scene::Floor, spacing0: f32) -> [CascadePlan; 3] {
+    let span_x = (floor.half_x * 2.0).max(1.0);
+    let span_z = (floor.half_z * 2.0).max(1.0);
+    let span = span_x.max(span_z);
+    // One near cell. The paper's near interval stays on the order of the probe spacing.
+    let interval0 = spacing0;
+    let min_x = floor.position.x - floor.half_x;
+    let min_z = floor.position.z - floor.half_z;
+    let mut offset = 0u32;
+    let mut plans = [CascadePlan {
+        spacing: spacing0,
+        dirs: FINE_DIRS,
+        t0: 0.0,
+        t1: interval0,
+        origin_x: min_x,
+        origin_z: min_z,
+        count_x: 1,
+        count_z: 1,
+        offset: 0,
+    }; 3];
+    for i in 0..3 {
+        let scale = 1u32 << i;
+        let spacing = spacing0 * scale as f32;
+        let dirs = FINE_DIRS * scale;
+        let t0 = if i == 0 {
+            0.0
+        } else {
+            interval0 * (scale as f32 * 0.5)
+        };
+        // The last interval runs to the domain edge. Earlier intervals double.
+        let doubled = interval0 * scale as f32;
+        let t1 = if i + 1 == 3 {
+            doubled.max(span * 4.0)
+        } else {
+            doubled
+        };
+        let (origin_x, origin_z, count_x, count_z) = if i < 2 {
+            (
+                min_x,
+                min_z,
+                (span_x / spacing).ceil().max(1.0) as u32,
+                (span_z / spacing).ceil().max(1.0) as u32,
+            )
+        } else {
+            let margin = spacing * 4.0;
+            (
+                min_x - margin,
+                min_z - margin,
+                ((span_x + margin * 2.0) / spacing).ceil().max(1.0) as u32,
+                ((span_z + margin * 2.0) / spacing).ceil().max(1.0) as u32,
+            )
+        };
+        plans[i] = CascadePlan {
+            spacing,
+            dirs,
+            t0,
+            t1,
+            origin_x,
+            origin_z,
+            count_x,
+            count_z,
+            offset,
+        };
+        offset = offset.saturating_add(count_x.saturating_mul(count_z).saturating_mul(dirs));
+    }
+    plans
 }
 
 /// Near range, far range, and world probes. A build does not keep a previous frame.
@@ -37,33 +149,29 @@ pub fn probe_counts(field: &Field) -> (u32, u32) {
 
 /// Build the field from the scene. The previous frame is not an input.
 ///
-/// The first pass records light that leaves each material. The second pass
-/// bounces that colored light one more time. Both passes are discarded after
-/// this call returns.
+/// The first pass records light that leaves each material under the lamps.
+/// Each later pass bounces that light once and reads only the previous pass.
 pub fn build(scene: &Scene) -> Field {
-    let direct = build_field(scene, None);
-    build_field(scene, Some(&direct))
+    let mut field = build_field(scene, None);
+    for _ in 1..BOUNCES {
+        field = build_field(scene, Some(&field));
+    }
+    field
 }
 
 pub fn ray_count(field: &Field) -> u64 {
     let level = |level: &CascadeLevel| {
         level.count_x as u64 * level.count_z as u64 * level.directions as u64
     };
-    (level(&field.near) + level(&field.far) + level(&field.world)) * 2
+    (level(&field.near) + level(&field.far) + level(&field.world)) * u64::from(BOUNCES)
 }
 
 /// Merged radiance at a ground position.
 ///
-/// A near hit wins. An empty near interval uses the far interval. An empty far
-/// interval uses the world probe. The result keeps the color of the material
-/// that was hit.
+/// Each direction merges `L + β L_next`. A miss is 0 with β = 1, so the next interval replaces it.
+/// The result is the mean of the near directions.
 pub fn sample(field: &Field, x: f32, z: f32) -> [f32; 3] {
-    let merged = bilinear(&field.near, x, z);
-    [
-        merged[0].clamp(0.0, 1.5),
-        merged[1].clamp(0.0, 1.5),
-        merged[2].clamp(0.0, 1.5),
-    ]
+    merged_uniform(field, x, z)
 }
 
 /// Radiance stored on the world probes only, before the near and far ranges.
@@ -110,8 +218,10 @@ fn one_lamp(
     lamp_reach(dist2, strength, dx, dy, dz, normal)
 }
 
-/// Distance falloff shared by the CPU shade and the GPU lamp.
-/// The peak is local. The tail keeps a far ray lit. A grazing face is dimmer.
+/// Scene-lamp unit. The falloff stays cosine over inverse square.
+const LAMP_UNIT: f32 = 24.0;
+
+/// Cosine over inverse-square falloff. A face with no normal uses the distance term only.
 fn lamp_reach(dist2: f32, strength: f32, dx: f32, dy: f32, dz: f32, normal: [f32; 3]) -> f32 {
     let facing = normal[0] != 0.0 || normal[1] != 0.0 || normal[2] != 0.0;
     let mut shade = 1.0;
@@ -121,11 +231,9 @@ fn lamp_reach(dist2: f32, strength: f32, dx: f32, dy: f32, dz: f32, normal: [f32
         if nd <= 0.0 {
             return 0.0;
         }
-        shade = nd / (nd + 0.08);
+        shade = nd;
     }
-    let peak = 4.5 / (1.0 + dist2 * 12.0);
-    let tail = 0.90 / (1.0 + dist2 * 0.017);
-    strength * shade * (peak + tail)
+    strength * shade * LAMP_UNIT / (1.0 + dist2)
 }
 
 fn lamp_is_blocked(scene: &Scene, x: f32, y: f32, z: f32, light: &genos_scene::Light) -> bool {
@@ -352,120 +460,62 @@ fn hit_cylinder(
     best
 }
 
-/// Near probes and surface cells, in meters.
-///
-/// A 3 cm cell on the opening floor made about 7.5 million vertices and about
-/// 11 million rays. The draw rebuilt those vertex colors on every camera
-/// frame. One 16 cm spacing stays the same across the floor. The floor shadow
-/// is the lamp's projected edge, so the cell does not have to carry that edge.
-const NEAR_SPACING: f32 = 0.16;
-
-/// Distances and probe counts for any floor. Spacing follows the floor size.
-/// Direction counts stay in the penumbra order: near < far < world.
-struct RangePlan {
-    spacing: f32,
-    directions: u32,
-    start: f32,
-    end: f32,
-}
-
-fn plans_for(span: f32) -> (RangePlan, RangePlan, RangePlan, f32) {
-    let span = span.max(1.0);
-    // One spacing for the whole floor. A second, coarser band shows up between objects.
-    let near_spacing = NEAR_SPACING;
-    let near_end = (span * 0.12).max(near_spacing * 4.0);
-    let far_end = (span * 0.85).max(near_end * 2.0);
-    let near = RangePlan {
-        spacing: near_spacing,
-        directions: 12,
-        start: 0.0,
-        end: near_end,
-    };
-    let far = RangePlan {
-        spacing: near_spacing * 3.0,
-        directions: 36,
-        start: near.end,
-        end: far_end,
-    };
-    let world = RangePlan {
-        spacing: near_spacing * 8.0,
-        directions: 64,
-        start: far.end,
-        end: (span * 4.0).max(far.end * 2.0),
-    };
-    let margin = span * 0.5;
-    (near, far, world, margin)
-}
+/// Floor mesh cell, in meters. The radiance field uses its own probe spacing.
+pub(crate) const MESH_CELL: f32 = 0.16;
 
 fn build_field(scene: &Scene, prev: Option<&Field>) -> Field {
-    let min_x = scene.floor.position.x - scene.floor.half_x;
-    let min_z = scene.floor.position.z - scene.floor.half_z;
-    let span_x = scene.floor.half_x * 2.0;
-    let span_z = scene.floor.half_z * 2.0;
-    let (near_plan, far_plan, world_plan, margin) = plans_for(span_x.max(span_z));
-    let near = build_level(scene, &near_plan, min_x, min_z, span_x, span_z, prev);
-    let far = build_level(scene, &far_plan, min_x, min_z, span_x, span_z, prev);
-    let world = build_level(
-        scene,
-        &world_plan,
-        min_x - margin,
-        min_z - margin,
-        span_x + margin * 2.0,
-        span_z + margin * 2.0,
-        prev,
-    );
+    let plans = cascade_plans(&scene.floor);
+    let near = build_level(scene, &plans[0], prev);
+    let far = build_level(scene, &plans[1], prev);
+    let world = build_level(scene, &plans[2], prev);
     let mut field = Field { near, far, world };
     seal(&mut field);
     field
 }
 
-fn build_level(
-    scene: &Scene,
-    plan: &RangePlan,
-    min_x: f32,
-    min_z: f32,
-    span_x: f32,
-    span_z: f32,
-    prev: Option<&Field>,
-) -> CascadeLevel {
-    let count_x = (span_x / plan.spacing).floor().max(1.0) as u32;
-    let count_z = (span_z / plan.spacing).floor().max(1.0) as u32;
-    let mut radiance = Vec::with_capacity((count_x * count_z * plan.directions) as usize);
-    for iz in 0..count_z {
-        for ix in 0..count_x {
-            let x = min_x + (ix as f32 + 0.5) * plan.spacing;
-            let z = min_z + (iz as f32 + 0.5) * plan.spacing;
-            for dir in 0..plan.directions {
-                let angle = (dir as f32 + 0.5) * std::f32::consts::TAU / plan.directions as f32;
+fn build_level(scene: &Scene, plan: &CascadePlan, prev: Option<&Field>) -> CascadeLevel {
+    let count = (plan.count_x * plan.count_z * plan.dirs) as usize;
+    let mut radiance = Vec::with_capacity(count);
+    let mut beta = Vec::with_capacity(count);
+    for iz in 0..plan.count_z {
+        for ix in 0..plan.count_x {
+            let x = plan.origin_x + (ix as f32 + 0.5) * plan.spacing;
+            let z = plan.origin_z + (iz as f32 + 0.5) * plan.spacing;
+            for dir in 0..plan.dirs {
+                let angle = (dir as f32 + 0.5) * std::f32::consts::TAU / plan.dirs as f32;
                 let direction = [angle.cos(), angle.sin()];
-                radiance.push(gather(scene, prev, [x, z], direction, plan.start, plan.end));
+                let (color, hit_beta) =
+                    gather(scene, prev, [x, z], direction, plan.t0, plan.t1);
+                radiance.push(color);
+                beta.push(hit_beta);
             }
         }
     }
     CascadeLevel {
         spacing: plan.spacing,
-        directions: plan.directions,
-        interval_start: plan.start,
-        interval_end: plan.end,
-        origin_x: min_x,
-        origin_z: min_z,
-        count_x,
-        count_z,
+        directions: plan.dirs,
+        interval_start: plan.t0,
+        interval_end: plan.t1,
+        origin_x: plan.origin_x,
+        origin_z: plan.origin_z,
+        count_x: plan.count_x,
+        count_z: plan.count_z,
         radiance,
+        beta,
         merged: Vec::new(),
     }
 }
 
 fn seal(field: &mut Field) {
-    let mut merged = Vec::with_capacity((field.near.count_x * field.near.count_z) as usize);
+    let mut near_merged = Vec::with_capacity((field.near.count_x * field.near.count_z) as usize);
     for iz in 0..field.near.count_z {
         for ix in 0..field.near.count_x {
             let x = field.near.origin_x + (ix as f32 + 0.5) * field.near.spacing;
             let z = field.near.origin_z + (iz as f32 + 0.5) * field.near.spacing;
-            merged.push(merge_at(field, x, z));
+            near_merged.push(merged_uniform(field, x, z));
         }
     }
-    field.near.merged = merged;
+    field.near.merged = near_merged;
     let world_probes = (field.world.count_x * field.world.count_z) as usize;
     field.world.merged = (0..world_probes)
         .map(|probe| average_probe(&field.world, probe))
@@ -500,59 +550,141 @@ fn bilinear(level: &CascadeLevel, x: f32, z: f32) -> [f32; 3] {
     out
 }
 
-fn merge_at(field: &Field, x: f32, z: f32) -> [f32; 3] {
-    let near_i = nearest_probe(&field.near, x, z);
-    let far_i = nearest_probe(&field.far, x, z);
-    let world_i = nearest_probe(&field.world, x, z);
-    let mut sum = [0.0; 3];
+/// Mean of the merged directions. A floor point uses every direction.
+fn merged_uniform(field: &Field, x: f32, z: f32) -> [f32; 3] {
     let directions = field.near.directions.max(1);
+    let mut sum = [0.0; 3];
+    let mut weight = 0.0;
     for dir in 0..directions {
         let angle = (dir as f32 + 0.5) * std::f32::consts::TAU / directions as f32;
-        let near = probe_dir(&field.near, near_i, dir);
-        let chosen = if radiance_of(near) > 1.0e-4 {
-            near
-        } else {
-            let far = probe_dir_at_angle(&field.far, far_i, angle);
-            if radiance_of(far) > 1.0e-4 {
-                scale_rgb(far, 0.45)
-            } else {
-                scale_rgb(probe_dir_at_angle(&field.world, world_i, angle), 0.2)
-            }
-        };
-        sum[0] += chosen[0];
-        sum[1] += chosen[1];
-        sum[2] += chosen[2];
+        let color = merged_direction(field, x, z, angle);
+        sum[0] += color[0];
+        sum[1] += color[1];
+        sum[2] += color[2];
+        weight += 1.0;
     }
-    let n = directions as f32;
-    [sum[0] / n, sum[1] / n, sum[2] / n]
+    if weight <= 0.0 {
+        return [0.0; 3];
+    }
+    [sum[0] / weight, sum[1] / weight, sum[2] / weight]
 }
 
-fn probe_dir(level: &CascadeLevel, probe: usize, dir: u32) -> [f32; 3] {
-    level.radiance[probe * level.directions as usize + dir as usize]
+/// Light arriving on a vertical face. Directions behind the normal contribute nothing.
+fn merged_facing(field: &Field, x: f32, z: f32, normal: [f32; 2]) -> [f32; 3] {
+    let directions = field.near.directions.max(1);
+    let mut sum = [0.0; 3];
+    let mut weight = 0.0;
+    for dir in 0..directions {
+        let angle = (dir as f32 + 0.5) * std::f32::consts::TAU / directions as f32;
+        let direction = [angle.cos(), angle.sin()];
+        let facing = direction[0] * normal[0] + direction[1] * normal[1];
+        if facing <= 0.0 {
+            continue;
+        }
+        let color = merged_direction(field, x, z, angle);
+        sum[0] += color[0] * facing;
+        sum[1] += color[1] * facing;
+        sum[2] += color[2] * facing;
+        weight += facing;
+    }
+    if weight <= 1.0e-4 {
+        return [0.0; 3];
+    }
+    [sum[0] / weight, sum[1] / weight, sum[2] / weight]
 }
 
-fn probe_dir_at_angle(level: &CascadeLevel, probe: usize, angle: f32) -> [f32; 3] {
-    let turns = angle / std::f32::consts::TAU;
-    let dir = (turns * level.directions as f32).floor() as u32 % level.directions;
-    probe_dir(level, probe, dir)
+/// `L_near + β_near (L_far + β_far L_world)` at one angle.
+fn merged_direction(field: &Field, x: f32, z: f32, angle: f32) -> [f32; 3] {
+    let (near, near_beta) = sample_interval(&field.near, x, z, angle);
+    let (far, far_beta) = sample_interval(&field.far, x, z, angle);
+    let (world, _) = sample_interval(&field.world, x, z, angle);
+    [
+        near[0] + near_beta * (far[0] + far_beta * world[0]),
+        near[1] + near_beta * (far[1] + far_beta * world[1]),
+        near[2] + near_beta * (far[2] + far_beta * world[2]),
+    ]
 }
 
-fn radiance_of(color: [f32; 3]) -> f32 {
-    color[0] + color[1] + color[2]
+fn sample_interval(level: &CascadeLevel, x: f32, z: f32, angle: f32) -> ([f32; 3], f32) {
+    if level.count_x == 0 || level.count_z == 0 || level.beta.is_empty() {
+        return ([0.0; 3], 1.0);
+    }
+    let max_x = (level.count_x - 1) as f32;
+    let max_z = (level.count_z - 1) as f32;
+    let fx = ((x - level.origin_x) / level.spacing - 0.5).clamp(0.0, max_x);
+    let fz = ((z - level.origin_z) / level.spacing - 0.5).clamp(0.0, max_z);
+    let x0 = fx.floor() as u32;
+    let z0 = fz.floor() as u32;
+    let x1 = (x0 + 1).min(level.count_x - 1);
+    let z1 = (z0 + 1).min(level.count_z - 1);
+    let tx = fx - x0 as f32;
+    let tz = fz - z0 as f32;
+    let corners = [
+        (x0, z0, (1.0 - tx) * (1.0 - tz)),
+        (x1, z0, tx * (1.0 - tz)),
+        (x0, z1, (1.0 - tx) * tz),
+        (x1, z1, tx * tz),
+    ];
+    let mut color = [0.0; 3];
+    let mut beta = 0.0;
+    let mut weight = 0.0;
+    for (ix, iz, corner_weight) in corners {
+        if corner_weight <= 1.0e-6 {
+            continue;
+        }
+        let probe = (iz * level.count_x + ix) as usize;
+        let (sample, sample_beta) = probe_angle(level, probe, angle);
+        if sample_beta < 0.0 {
+            continue;
+        }
+        color[0] += sample[0] * corner_weight;
+        color[1] += sample[1] * corner_weight;
+        color[2] += sample[2] * corner_weight;
+        beta += sample_beta * corner_weight;
+        weight += corner_weight;
+    }
+    if weight <= 1.0e-6 {
+        return ([0.0; 3], 1.0);
+    }
+    (
+        [color[0] / weight, color[1] / weight, color[2] / weight],
+        beta / weight,
+    )
 }
 
-fn scale_rgb(color: [f32; 3], scale: f32) -> [f32; 3] {
-    [color[0] * scale, color[1] * scale, color[2] * scale]
+fn probe_angle(level: &CascadeLevel, probe: usize, angle: f32) -> ([f32; 3], f32) {
+    let n = level.directions.max(1);
+    let f = angle / std::f32::consts::TAU * n as f32 - 0.5;
+    let i0 = f.floor();
+    let t = (f - i0).clamp(0.0, 1.0);
+    let a = wrap_index(i0, n);
+    let b = wrap_index(i0 + 1.0, n);
+    let (c0, b0) = probe_slot(level, probe, a);
+    let (c1, b1) = probe_slot(level, probe, b);
+    if b0 < 0.0 {
+        return (c1, b1);
+    }
+    if b1 < 0.0 {
+        return (c0, b0);
+    }
+    (
+        [
+            c0[0] + (c1[0] - c0[0]) * t,
+            c0[1] + (c1[1] - c0[1]) * t,
+            c0[2] + (c1[2] - c0[2]) * t,
+        ],
+        b0 + (b1 - b0) * t,
+    )
 }
 
-fn nearest_probe(level: &CascadeLevel, x: f32, z: f32) -> usize {
-    let ix = ((x - level.origin_x) / level.spacing - 0.5)
-        .round()
-        .clamp(0.0, (level.count_x - 1) as f32) as u32;
-    let iz = ((z - level.origin_z) / level.spacing - 0.5)
-        .round()
-        .clamp(0.0, (level.count_z - 1) as f32) as u32;
-    (iz * level.count_x + ix) as usize
+fn wrap_index(index: f32, count: u32) -> u32 {
+    let count = count.max(1) as i32;
+    (index.floor() as i32).rem_euclid(count) as u32
+}
+
+fn probe_slot(level: &CascadeLevel, probe: usize, dir: u32) -> ([f32; 3], f32) {
+    let slot = probe * level.directions as usize + dir as usize;
+    (level.radiance[slot], level.beta[slot])
 }
 
 fn average_probe(level: &CascadeLevel, probe: usize) -> [f32; 3] {
@@ -574,9 +706,13 @@ fn gather(
     dir: [f32; 2],
     t0: f32,
     t1: f32,
-) -> [f32; 3] {
+) -> ([f32; 3], f32) {
+    if xz_inside(scene, origin[0], origin[1]) {
+        return ([0.0; 3], -1.0);
+    }
     let mut best_t = t1;
     let mut color = [0.0; 3];
+    let mut found = false;
     for solid in &scene.solids {
         if let Some((t, normal)) = hit_solid(origin, dir, solid) {
             if t >= t0 && t < best_t {
@@ -601,6 +737,7 @@ fn gather(
                     footprint,
                     solid.height,
                 );
+                found = true;
             }
         }
     }
@@ -630,10 +767,22 @@ fn gather(
                     },
                     wall.height,
                 );
+                found = true;
             }
         }
     }
-    color
+    if found {
+        (color, 0.0)
+    } else {
+        ([0.0; 3], 1.0)
+    }
+}
+
+fn xz_inside(scene: &Scene, x: f32, z: f32) -> bool {
+    scene.solids.iter().any(|solid| solid.contains_xz(x, z))
+        || scene.walls.iter().any(|wall| {
+            (x - wall.position.x).abs() <= wall.half_x && (z - wall.position.z).abs() <= wall.half_z
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -696,10 +845,8 @@ fn leaving(
         };
     }
     let incoming = prev
-        .map(|field| sample(field, hit[0], hit[1]))
+        .map(|field| merged_facing(field, hit[0], hit[1], normal))
         .unwrap_or([0.0; 3]);
-    // The surface color tints the lamp and the previous bounce.
-    // A negative reflectance keeps the built-in shares.
     genos_scene::bounce_radiance(albedo, reflectance, color_mix, direct, incoming)
 }
 

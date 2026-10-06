@@ -65,7 +65,7 @@ impl Lighting {
         self.mesh_builds
     }
 
-    /// Spacing of the one range used for this scene. It does not change with the camera.
+    /// Spacing of the near cascade. The picture's probes stay on the world.
     pub fn spacing(&mut self, world: &World) -> f32 {
         self.ensure(world);
         self.field.as_ref().unwrap().near.spacing

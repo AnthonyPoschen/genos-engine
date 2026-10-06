@@ -54,6 +54,8 @@ pub struct Camera {
     solid_origin: Option<usize>,
     /// Looping paths bound to solids. The frame step drives these bodies.
     codimations: Vec<BoundCodimation>,
+    /// Seconds saved until the next fixed physics step.
+    step_left: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -82,6 +84,7 @@ impl Camera {
             view: 0,
             solid_origin: None,
             codimations: Vec::new(),
+            step_left: 0.0,
         }
     }
 
@@ -297,8 +300,11 @@ fn write_codimations(camera: &Camera, scene: &mut Scene) {
     }
 }
 
-/// Integrate look, then the physics step. Move input is a desired horizontal velocity.
-/// A codimated solid moves in the same slices. The resolved body position is written back.
+/// Integrate look by `dt`, then run fixed physics steps.
+/// Move input is a desired horizontal velocity in units per second.
+/// The solver runs at 1/60 s once the saved time reaches that step.
+/// A shorter remainder waits for the next frame.
+/// A codimated solid moves in those same steps. The resolved body position is written back.
 pub fn update(camera: &mut Camera, scene: &mut Scene, actions: &Actions, dt: f32) {
     if actions.escape {
         camera.captured = false;
@@ -310,9 +316,16 @@ pub fn update(camera: &mut Camera, scene: &mut Scene, actions: &Actions, dt: f32
         camera.yaw += actions.mouse_dx * MOUSE_SENS;
         camera.pitch -= actions.mouse_dy * MOUSE_SENS;
     }
-    camera.yaw += actions.look_x * STICK_LOOK_SPEED * dt;
-    camera.pitch += actions.look_y * STICK_LOOK_SPEED * dt;
+    // Mouse look is a pointer delta. Stick look, movement, and codimation use seconds.
+    let stepping = dt.is_finite() && dt > 0.0;
+    if stepping {
+        camera.yaw += actions.look_x * STICK_LOOK_SPEED * dt;
+        camera.pitch += actions.look_y * STICK_LOOK_SPEED * dt;
+    }
     camera.pitch = camera.pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    if !stepping {
+        return;
+    }
 
     // Ground travel ignores pitch. Right is the look direction a quarter turn toward +X.
     let forward = look_direction(camera.yaw, 0.0);
@@ -324,14 +337,13 @@ pub fn update(camera: &mut Camera, scene: &mut Scene, actions: &Actions, dt: f32
         body.wish = Vec3::new(speed.x, 0.0, speed.z);
     }
 
-    let mut left = dt.max(0.0);
-    let slice = 1.0 / 60.0;
-    while left > 0.0 {
-        let step_dt = left.min(slice);
-        drive_codimations(camera, scene, step_dt);
-        camera.physics = step(&camera.physics, step_dt);
+    const STEP: f32 = 1.0 / 60.0;
+    camera.step_left += dt;
+    while camera.step_left >= STEP {
+        drive_codimations(camera, scene, STEP);
+        camera.physics = step(&camera.physics, STEP);
         write_codimations(camera, scene);
-        left -= step_dt;
+        camera.step_left -= STEP;
     }
     if let Some(body) = camera.physics.bodies.get(camera.view) {
         camera.position = body.position + Vec3::Y * EYE_ABOVE_CENTER;

@@ -17,5 +17,5 @@ pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use script::{load_path, load_str};
 pub use types::{
     bounce_radiance, color_mix_of, reflectance_of, Floor, Light, Scene, Shape, Solid, Wall,
-    DEFAULT_BOUNCE, DEFAULT_REFLECTANCE,
+    DEFAULT_REFLECTANCE,
 };

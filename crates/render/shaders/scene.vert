@@ -12,11 +12,22 @@ layout(location = 4) out vec2 v_uv;
 layout(push_constant) uniform Push {
     mat4 view_proj;
 } pc;
+struct Instance {
+    mat4 model;
+    vec4 color;
+};
+layout(std430, set = 0, binding = 3) readonly buffer Instances {
+    Instance items[];
+} instances;
 void main() {
-    gl_Position = pc.view_proj * vec4(in_pos, 1.0);
-    v_pos = in_pos;
-    v_albedo = in_albedo;
-    v_normal = in_normal;
+    Instance item = instances.items[gl_InstanceIndex];
+    vec4 world = item.model * vec4(in_pos, 1.0);
+    vec3 spun = mat3(item.model) * in_normal;
+    float len = length(spun);
+    gl_Position = pc.view_proj * world;
+    v_pos = world.xyz;
+    v_albedo = in_albedo * item.color.rgb;
+    v_normal = len > 1e-6 ? spun / len : spun;
     v_shade = in_shade;
     v_uv = in_uv;
 }

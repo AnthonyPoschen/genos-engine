@@ -20,6 +20,21 @@ pub struct Look {
     pub border: [f32; 3],
 }
 
+/// Picture filter the lighting panel can select. `Off` is the unfiltered picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PictureMode {
+    Off = 0,
+    Fxaa = 1,
+    Ssaa = 2,
+}
+
+impl PictureMode {
+    /// Code the renderer reads. `0` is off, `1` is FXAA, and `2` is SSAA.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+}
+
 /// A control the lighting panel can fire.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
@@ -27,13 +42,18 @@ pub enum Action {
     SetLamp { axis: u8, position: f32 },
     /// Multiply `Light.color`. Brightness is the mean of that color.
     ScaleIntensity(f32),
+    /// Select the picture filter for the next presented frame.
+    SetAntialias(PictureMode),
 }
 
 pub use layout::{layout, Align, Direction, Node, Pad, Place, Rect, Sizing, Space};
-pub use panel::{apply_lamp, lighting_frame, Frame, Paint, Pointer, Shown, State};
+pub use panel::{
+    apply_frame_action, apply_lamp, lighting_frame, Frame, Paint, Pointer, Shown, State,
+};
 pub use profile::{
-    profile_overlay, profiler_enabled, FrameSample, OpenFrame, ProfileLine, ProfilePoint,
-    ProfileStream, ProfileView, StageSample, DRAW_STAGE, STAGE_COUNT, STAGE_LABELS,
+    inspect_region, profile_overlay, remember_frame, FrameSample, OpenFrame, PlotScale,
+    ProfileGraph, ProfileLine, ProfilePoint, ProfileStream, ProfileView, RegionHit, StageSample,
+    DRAW_STAGE, GRAPH_BUCKET, GRAPH_WINDOW, OVERLAY_PERIOD, STAGE_COUNT, STAGE_LABELS,
 };
 
 /// Ids for the lighting panel the camera frame submits.
@@ -50,4 +70,10 @@ pub mod id {
     pub const BRIGHT: u32 = 10;
     /// World-space sun on the first lamp. It is not a control.
     pub const SUN: u32 = 11;
+    /// Unfiltered picture.
+    pub const AA_OFF: u32 = 12;
+    /// Luminance-edge picture filter.
+    pub const AA_FXAA: u32 = 13;
+    /// Double-resolution picture, then a tent downsample.
+    pub const AA_SSAA: u32 = 14;
 }

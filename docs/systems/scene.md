@@ -55,7 +55,13 @@ The crate is `crates/scene`, package `genos-scene`.
 
 Load a script with `load_path` once, before the loop. Call `Camera::attach_scene` with that scene. Build a render `World` from the same `Scene`.
 
-Each frame, read `move` and `look` from the input system. Call `update` with the scene, those actions, and the time step. `update` writes the wish and steps physics. A long `dt` is split into steps of 1/60 s. Pass the camera to `Renderer::draw`.
+Each frame, read `move` and `look` from the input system. Measure the seconds since the previous frame. The first frame has no previous frame. Pass a finite positive fallback for that frame.
+
+Call `update` with the scene, those actions, and that interval. Call the particle advance with the same interval. Do not pass a fixed `1/60` s step as the frame interval.
+
+`update` writes the wish in units per second. The interval scales that wish. The physics solver runs at 1/60 s. It runs when the saved time reaches that step. A shorter remainder waits for the next frame. The camera loop caps one frame at 0.25 s.
+
+A non-positive or non-finite interval does not move the camera. It does not change stick look. It does not step physics. It does not advance a codimation. Mouse look stays a pointer delta. Pass the camera to `Renderer::draw`.
 
 Call `Camera::codimate` after `attach_scene`. Pass the solid index and a `Codimation`. The solid starts on the first position. Each slice submits that path's displacement to the physics step. The resolved position is written back onto the solid.
 

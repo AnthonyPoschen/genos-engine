@@ -7,7 +7,7 @@ use genos_scene::{Camera, Scene};
 use crate::layout::{self, Direction, Item, Node, Pad, Place, Rect, Sizing, Space};
 use crate::omarchy::{self, Palette};
 use crate::text::{self, Blot};
-use crate::{id, Action, Look};
+use crate::{id, Action, Look, PictureMode};
 
 const BRIGHTER: f32 = 1.25;
 const DIMMER: f32 = 0.8;
@@ -212,6 +212,21 @@ pub fn apply_lamp(scene: &mut Scene, action: Action) {
                 *channel = (*channel * scale).clamp(0.0, 8.0);
             }
         }
+        Action::SetAntialias(_) => {}
+    }
+}
+
+/// Apply one lighting-panel action.
+///
+/// A picture selection returns the mode. The caller sets that mode on the
+/// renderer before the draw. Lamp actions stay on the first lamp.
+pub fn apply_frame_action(scene: &mut Scene, action: Action) -> Option<PictureMode> {
+    match action {
+        Action::SetAntialias(mode) => Some(mode),
+        other => {
+            apply_lamp(scene, other);
+            None
+        }
     }
 }
 
@@ -273,6 +288,30 @@ fn lighting_panel(offset: [f32; 2], palette: Option<Palette>) -> Node {
                     id::BRIGHT,
                     "Bright",
                     Action::ScaleIntensity(BRIGHTER),
+                    palette,
+                ),
+            ],
+            fill,
+        ),
+        row(
+            25,
+            vec![
+                control(
+                    id::AA_OFF,
+                    "off",
+                    Action::SetAntialias(PictureMode::Off),
+                    palette,
+                ),
+                control(
+                    id::AA_FXAA,
+                    "FXAA",
+                    Action::SetAntialias(PictureMode::Fxaa),
+                    palette,
+                ),
+                control(
+                    id::AA_SSAA,
+                    "SSAA",
+                    Action::SetAntialias(PictureMode::Ssaa),
                     palette,
                 ),
             ],

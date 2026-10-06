@@ -33,7 +33,7 @@ fn a_profiled_draw_reports_device_time_for_the_draw() {
     let camera = Camera::opening();
     let _ = window.pump();
     let (pixels, profile) = renderer
-        .draw_profiled(&world, &camera, &[], true)
+        .draw_profiled(&world, &camera, &[], true, false)
         .expect("profiled draw");
     let pixels = pixels.expect("readback");
     assert_eq!(

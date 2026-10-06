@@ -88,7 +88,7 @@ A world holds fixed parts, meshes with a pose, particles, and shader draws. A sh
 
 ## Lighting
 
-Lighting is a renderer pass. It uses radiance cascades. Near probes are 16 cm apart across the floor. Far and world ranges keep fewer positions and more directions. World probes sit in the world, past those ranges, and carry material-colored light into empty rays. The engine keeps the field until a light or an occluder changes. See [Lighting](lighting.md) and [ADR 0008](adr/0008-lighting-uses-radiance-cascades.md).
+Lighting is a renderer pass. It uses radiance cascades. Probe spacing is finer beside the player than at the far side of the floor. Far and world ranges keep fewer positions and more directions. World probes sit in the world, past those ranges, and carry material-colored light into empty rays. The engine keeps the field until the player, a light, or an occluder changes. See [Lighting](lighting.md) and [ADR 0008](adr/0008-lighting-uses-radiance-cascades.md).
 
 ## Reference
 

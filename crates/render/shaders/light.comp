@@ -20,6 +20,20 @@ struct Puff {
     vec4 center_density;
     vec4 radius;
 };
+struct Cascade {
+    float spacing;
+    float t0;
+    float t1;
+    float origin_x;
+    float origin_z;
+    float count_x;
+    float count_z;
+    float dirs;
+    float offset;
+    float pad0;
+    float pad1;
+    float pad2;
+};
 layout(std430, set = 0, binding = 0) readonly buffer SceneData {
     uint lamp_count;
     uint occ_count;
@@ -44,6 +58,7 @@ layout(std430, set = 0, binding = 0) readonly buffer SceneData {
     vec4 floor_center;
     // x is half extent on Z. yzw is the floor color.
     vec4 floor_data;
+    Cascade cascades[3];
 } scene;
 
 layout(std430, set = 0, binding = 1) buffer FieldData {
@@ -52,9 +67,29 @@ layout(std430, set = 0, binding = 1) buffer FieldData {
 
 layout(push_constant) uniform Pass {
     uint pass;
+    uint y0;
 } pc;
 
-const uint GRID = 128u;
+const uint FIELD_COPY = 524288u;
+const float LAMBERT = 0.318309886;
+const float LAMP_UNIT = 24.0;
+const float TAU = 6.2831853;
+
+uint bounce_index() {
+    return pc.pass / 3u;
+}
+
+uint cascade_index() {
+    return 2u - (pc.pass % 3u);
+}
+
+uint write_copy() {
+    return bounce_index() % 2u;
+}
+
+uint read_copy() {
+    return 1u - write_copy();
+}
 
 float hit_aabb(vec2 origin, vec2 dir, vec2 min_p, vec2 max_p) {
     float t_enter = 0.0;
@@ -164,11 +199,8 @@ vec3 shade_lamp(vec3 origin, vec3 normal, vec3 lamp, vec3 color) {
     // A grazing face stays dim. The peak dies within a few meters so a corridor
     // wall is not a flat white slab. The tail keeps a far ray above black.
     // Equal color channels keep a white lamp on the old scalar result.
-    float shade = nd / (nd + 0.08);
     float dist2 = dist * dist;
-    float peak = 4.5 / (1.0 + dist2 * 12.0);
-    float tail = 0.90 / (1.0 + dist2 * 0.017);
-    return color * shade * (peak + tail);
+    return color * nd * LAMP_UNIT / (1.0 + dist2);
 }
 
 vec3 lights_at(vec3 origin, vec3 normal) {
@@ -190,13 +222,6 @@ bool over_footprint(vec2 p, Occ occ) {
         return dot(d, d) <= occ.extent.w * occ.extent.w;
     }
     return abs(d.x) <= occ.extent.x && abs(d.y) <= occ.extent.z;
-}
-
-vec2 quantize_dir(vec2 dir, uint dirs) {
-    float angle = atan(dir.y, dir.x);
-    float step = 6.2831853 / float(dirs);
-    float snapped = (floor(angle / step) + 0.5) * step;
-    return vec2(cos(snapped), sin(snapped));
 }
 
 bool origin_in_solid(vec2 p) {
@@ -280,104 +305,100 @@ bool probe_hidden(vec2 from, vec2 probe) {
     return false;
 }
 
-bool probe_rejected(vec2 from, vec2 probe) {
-    if (origin_in_solid(probe)) {
-        return true;
+vec4 probe_angle(uint copy, Cascade c, uint probe, float angle) {
+    float n = max(c.dirs, 1.0);
+    float f = angle / TAU * n - 0.5;
+    float i0 = floor(f);
+    float t = clamp(f - i0, 0.0, 1.0);
+    uint a = uint(mod(i0, n));
+    uint b = uint(mod(i0 + 1.0, n));
+    uint base = copy * FIELD_COPY + uint(c.offset);
+    uint stride = uint(c.dirs);
+    vec4 s0 = field.texels[base + probe * stride + a];
+    vec4 s1 = field.texels[base + probe * stride + b];
+    if (s0.a < 0.0) {
+        return s1;
     }
-    // A neighbor one cell away is still this side of a wall. Rejecting it
-    // left a black ring where a solid meets the floor.
-    if (length(probe - from) <= scene.spacing * 1.25) {
-        return false;
+    if (s1.a < 0.0) {
+        return s0;
     }
-    return probe_hidden(from, probe);
+    return mix(s0, s1, t);
 }
 
-uint read_base() {
-    return (pc.pass & 1u) == 0u ? GRID * GRID : 0u;
-}
-
-vec3 sample_bounce(vec2 xz) {
-    float fx = clamp((xz.x - scene.origin_x) / scene.spacing - 0.5, 0.0, float(scene.count_x - 1u));
-    float fz = clamp((xz.y - scene.origin_z) / scene.spacing - 0.5, 0.0, float(scene.count_z - 1u));
+vec4 sample_interval(uint copy, uint index, vec2 xz, float angle) {
+    Cascade c = scene.cascades[index];
+    if (c.count_x < 1.0 || c.count_z < 1.0 || c.spacing <= 0.0) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    float fx = clamp((xz.x - c.origin_x) / c.spacing - 0.5, 0.0, c.count_x - 1.0);
+    float fz = clamp((xz.y - c.origin_z) / c.spacing - 0.5, 0.0, c.count_z - 1.0);
     uint x0 = uint(floor(fx));
     uint z0 = uint(floor(fz));
-    uint x1 = min(x0 + 1u, scene.count_x - 1u);
-    uint z1 = min(z0 + 1u, scene.count_z - 1u);
+    uint x1 = min(x0 + 1u, uint(c.count_x) - 1u);
+    uint z1 = min(z0 + 1u, uint(c.count_z) - 1u);
     float tx = fx - float(x0);
     float tz = fz - float(z0);
-    uint base = read_base();
-    vec2 c00 = vec2(scene.origin_x, scene.origin_z) + (vec2(float(x0), float(z0)) + 0.5) * scene.spacing;
-    vec2 c10 = vec2(scene.origin_x, scene.origin_z) + (vec2(float(x1), float(z0)) + 0.5) * scene.spacing;
-    vec2 c01 = vec2(scene.origin_x, scene.origin_z) + (vec2(float(x0), float(z1)) + 0.5) * scene.spacing;
-    vec2 c11 = vec2(scene.origin_x, scene.origin_z) + (vec2(float(x1), float(z1)) + 0.5) * scene.spacing;
-    float w00 = (1.0 - tx) * (1.0 - tz);
-    float w10 = tx * (1.0 - tz);
-    float w01 = (1.0 - tx) * tz;
-    float w11 = tx * tz;
-    if (probe_rejected(xz, c00)) w00 = 0.0;
-    if (probe_rejected(xz, c10)) w10 = 0.0;
-    if (probe_rejected(xz, c01)) w01 = 0.0;
-    if (probe_rejected(xz, c11)) w11 = 0.0;
-    float sum = w00 + w10 + w01 + w11;
-    if (sum < 1e-4) {
-        return vec3(0.0);
+    uint stride = uint(c.count_x);
+    vec4 acc = vec4(0.0);
+    float weight = 0.0;
+    for (int corner = 0; corner < 4; corner++) {
+        uint ix = corner == 1 || corner == 3 ? x1 : x0;
+        uint iz = corner >= 2 ? z1 : z0;
+        float wx = corner == 1 || corner == 3 ? tx : 1.0 - tx;
+        float wz = corner >= 2 ? tz : 1.0 - tz;
+        float w = wx * wz;
+        if (w <= 1e-6) {
+            continue;
+        }
+        vec2 probe_pos = vec2(
+            c.origin_x + (float(ix) + 0.5) * c.spacing,
+            c.origin_z + (float(iz) + 0.5) * c.spacing
+        );
+        if (probe_hidden(xz, probe_pos)) {
+            continue;
+        }
+        vec4 taken = probe_angle(copy, c, iz * stride + ix, angle);
+        if (taken.a < 0.0) {
+            continue;
+        }
+        acc += taken * w;
+        weight += w;
     }
-    vec3 s00 = field.texels[base + z0 * GRID + x0].rgb;
-    vec3 s10 = field.texels[base + z0 * GRID + x1].rgb;
-    vec3 s01 = field.texels[base + z1 * GRID + x0].rgb;
-    vec3 s11 = field.texels[base + z1 * GRID + x1].rgb;
-    return (s00 * w00 + s10 * w10 + s01 * w01 + s11 * w11) / sum;
+    if (weight <= 1e-4) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    return acc / weight;
 }
 
-bool on_floor(vec2 xz) {
-    vec2 d = abs(xz - scene.floor_center.xz);
-    return d.x <= scene.floor_center.w && d.y <= scene.floor_data.x;
-}
-
-vec3 floor_emit(vec2 xz) {
-    if (!on_floor(xz) || origin_in_solid(xz)) {
-        return vec3(0.0);
-    }
-    vec3 lit = lights_at(vec3(xz.x, 0.05, xz.y), vec3(0.0, 1.0, 0.0));
-    // The fragment already shades the lit floor. This share is what leaves it.
-    return scene.floor_data.yzw * lit * 0.1;
-}
-
-vec3 floor_along(vec2 origin, vec2 dir, float t0, float limit) {
-    // Only the pass the picture reads. Earlier passes would add this again.
-    if (pc.pass != 3u) {
-        return vec3(0.0);
-    }
-    float span = limit - t0;
-    if (span < 0.25) {
-        return vec3(0.0);
-    }
+vec3 merged_at(uint copy, vec2 xz, vec2 face_n, bool uniform_disk) {
+    Cascade near = scene.cascades[0];
+    uint dirs = uint(max(near.dirs, 1.0));
     vec3 sum = vec3(0.0);
     float weight = 0.0;
-    for (int i = 0; i < 2; i++) {
-        float t = t0 + span * (float(i) + 0.5) / 2.0;
-        vec2 p = origin + dir * t;
-        if (probe_hidden(origin, p)) {
-            break;
+    for (uint d = 0u; d < dirs; d++) {
+        float angle = (float(d) + 0.5) * TAU / float(dirs);
+        vec2 dir = vec2(cos(angle), sin(angle));
+        float w = 1.0;
+        if (!uniform_disk) {
+            w = dot(face_n, dir);
+            if (w <= 0.0) {
+                continue;
+            }
         }
-        sum += floor_emit(p);
-        weight += 1.0;
+        // Cascade 0 of the previous bounce already stores the merged interval.
+        vec4 near_i = sample_interval(copy, 0u, xz, angle);
+        vec3 color = near_i.rgb;
+        sum += color * w;
+        weight += w;
     }
-    if (weight <= 0.0) {
+    if (weight <= 1e-4) {
         return vec3(0.0);
     }
     return sum / weight;
 }
 
-struct RayHit {
-    vec3 color;
-    float found;
-};
-
-RayHit gather_interval(vec2 origin, vec2 dir, float t0, float t1) {
-    if (origin_in_solid(origin)) {
-        return RayHit(vec3(0.0), 1.0);
-    }
+// rgb is the interval radiance. a is β. Below zero marks a probe inside a solid.
+vec4 gather_interval(vec2 origin, vec2 dir, float t0, float t1) {
     float best_t = t1;
     vec2 hit = origin;
     vec2 normal = vec2(0.0, 1.0);
@@ -415,124 +436,76 @@ RayHit gather_interval(vec2 origin, vec2 dir, float t0, float t1) {
         }
     }
     if (!found) {
-        // The open floor still lights this ray. The miss does not become a hit.
-        return RayHit(floor_along(origin, dir, t0, t1), 0.0);
+        return vec4(0.0, 0.0, 0.0, 1.0);
     }
-    // A face that points away from a lamp stays dark. Pasting the lit top
-    // onto that face let a bright lamp through the wall.
-    // hit is XZ. Height stays on Y so the lamp ray is not tested through the face.
     vec3 sample_pos = vec3(hit.x + normal.x * 0.02, chosen.extent.y * 0.45, hit.y + normal.y * 0.02);
     vec3 direct = lights_at(sample_pos, vec3(normal.x, 0.0, normal.y));
-    vec3 incoming = vec3(0.0);
-    if (pc.pass > 0u) {
-        incoming = sample_bounce(hit + normal * 0.03);
+    // The march is flat. A lamp above the footprint lights the top, and that light leaves every side.
+    vec3 top = vec3(chosen.center_shape.x, chosen.extent.y + 0.05, chosen.center_shape.z);
+    bool over = false;
+    uint lamps = min(scene.lamp_count, 4u);
+    for (uint lamp_i = 0u; lamp_i < lamps; lamp_i++) {
+        vec2 delta = scene.lamps[lamp_i].pos.xz - chosen.center_shape.xz;
+        if (chosen.center_shape.w > 0.5) {
+            over = over || dot(delta, delta) <= chosen.extent.w * chosen.extent.w;
+        } else {
+            over = over || (abs(delta.x) <= chosen.extent.x && abs(delta.y) <= chosen.extent.z);
+        }
     }
-    // A dark face is still a hit. Later intervals must not see through it.
-    // Diffuse bounce is arriving light times the surface color.
-    // A negative control keeps the tuned game default.
+    if (scene.fire_pos.w > 0.0) {
+        vec2 delta = scene.fire_pos.xz - chosen.center_shape.xz;
+        if (chosen.center_shape.w > 0.5) {
+            over = over || dot(delta, delta) <= chosen.extent.w * chosen.extent.w;
+        } else {
+            over = over || (abs(delta.x) <= chosen.extent.x && abs(delta.y) <= chosen.extent.z);
+        }
+    }
+    if (over && dot(direct, vec3(1.0)) <= 1.0e-4) {
+        direct += lights_at(top, vec3(0.0, 1.0, 0.0));
+    }
+    vec3 incoming = vec3(0.0);
+    if (bounce_index() > 0u) {
+        incoming = merged_at(read_copy(), hit + normal * 0.03, normal, false);
+    }
     float color_mix = chosen.bounce.y < 0.0 ? 1.0 : clamp(chosen.bounce.y, 0.0, 1.0);
     vec3 tint = mix(vec3(1.0), albedo, color_mix);
-    vec3 surface;
-    if (chosen.bounce.x < 0.0) {
-        surface = tint * (direct * 0.55 + incoming * 0.68);
-    } else {
-        float reflect = clamp(chosen.bounce.x, 0.0, 1.0);
-        surface = tint * reflect * (direct + incoming);
-    }
-    // Floor light travels with the ray until the wall. The hit still blocks.
-    return RayHit(surface + floor_along(origin, dir, t0, best_t), 1.0);
-}
-
-float lum3(vec3 color) {
-    return color.r + color.g + color.b;
-}
-
-void take_coarse(inout vec3 sum, inout float weight, vec2 origin, vec2 probe, vec2 dir, float t0, float t1, float blend, float fine_lum) {
-    if (blend <= 0.0 || probe_rejected(origin, probe)) {
-        return;
-    }
-    RayHit hit = gather_interval(probe, dir, t0, t1);
-    if (hit.found < 0.5) {
-        return;
-    }
-    float other = lum3(hit.color);
-    if (abs(fine_lum - other) > max(fine_lum, 0.05) * 0.65) {
-        return;
-    }
-    sum += hit.color * blend;
-    weight += blend;
-}
-
-RayHit smoothed_interval(vec2 origin, vec2 dir, float t0, float t1, float step) {
-    RayHit fine = gather_interval(origin, dir, t0, t1);
-    if (fine.found < 0.5) {
-        return fine;
-    }
-    vec2 base = vec2(scene.origin_x, scene.origin_z);
-    vec2 cell = (origin - base) / step - 0.5;
-    float x0 = floor(cell.x);
-    float z0 = floor(cell.y);
-    float tx = clamp(cell.x - x0, 0.0, 1.0);
-    float tz = clamp(cell.y - z0, 0.0, 1.0);
-    vec2 p00 = base + (vec2(x0, z0) + 0.5) * step;
-    vec2 p10 = p00 + vec2(step, 0.0);
-    vec2 p01 = p00 + vec2(0.0, step);
-    vec2 p11 = p00 + vec2(step);
-    vec3 sum = fine.color;
-    float weight = 1.0;
-    float fine_lum = lum3(fine.color);
-    take_coarse(sum, weight, origin, p00, dir, t0, t1, (1.0 - tx) * (1.0 - tz), fine_lum);
-    take_coarse(sum, weight, origin, p10, dir, t0, t1, tx * (1.0 - tz), fine_lum);
-    take_coarse(sum, weight, origin, p01, dir, t0, t1, (1.0 - tx) * tz, fine_lum);
-    take_coarse(sum, weight, origin, p11, dir, t0, t1, tx * tz, fine_lum);
-    return RayHit(sum / weight, 1.0);
-}
-
-vec3 merged_dir(vec2 origin, vec2 dir) {
-    RayHit near = gather_interval(origin, dir, 0.0, scene.near_end);
-    if (near.found > 0.5) {
-        return near.color;
-    }
-    // Farther ranges use more direction buckets and a coarser spatial blend.
-    // The ray from this probe still decides the hit, so a neighbor cannot erase it.
-    // A miss keeps the floor light from the open interval.
-    vec2 far_dir = quantize_dir(dir, 36u);
-    RayHit far = smoothed_interval(origin, far_dir, scene.near_end * 0.85, scene.far_end, scene.spacing * 3.0);
-    if (far.found > 0.5) {
-        return far.color + near.color;
-    }
-    vec2 world_dir = quantize_dir(dir, 64u);
-    RayHit world = smoothed_interval(origin, world_dir, scene.far_end * 0.85, scene.world_end, scene.spacing * 8.0);
-    if (world.found > 0.5) {
-        return world.color + far.color + near.color;
-    }
-    return near.color + far.color + world.color;
+    float reflect = chosen.bounce.x < 0.0 ? LAMBERT : clamp(chosen.bounce.x, 0.0, 1.0);
+    return vec4(tint * reflect * (direct + incoming), 0.0);
 }
 
 void main() {
+    uint cascade = cascade_index();
+    Cascade c = scene.cascades[cascade];
     uint ix = gl_GlobalInvocationID.x;
-    uint iz = gl_GlobalInvocationID.y;
-    if (ix >= scene.count_x || iz >= scene.count_z || ix >= GRID || iz >= GRID) {
+    uint iz = gl_GlobalInvocationID.y + pc.y0;
+    if (ix >= uint(c.count_x) || iz >= uint(c.count_z)) {
         return;
     }
-    vec2 origin = vec2(scene.origin_x, scene.origin_z) + (vec2(ix, iz) + 0.5) * scene.spacing;
-    uint slot = iz * GRID + ix;
-    if ((pc.pass & 1u) == 1u) {
-        slot += GRID * GRID;
-    }
+    vec2 origin = vec2(
+        c.origin_x + (float(ix) + 0.5) * c.spacing,
+        c.origin_z + (float(iz) + 0.5) * c.spacing
+    );
+    uint dirs = uint(max(c.dirs, 1.0));
+    uint probe = iz * uint(c.count_x) + ix;
+    uint base = write_copy() * FIELD_COPY + uint(c.offset) + probe * dirs;
     if (origin_in_solid(origin)) {
-        field.texels[slot] = vec4(0.0, 0.0, 0.0, 1.0);
+        for (uint d = 0u; d < dirs; d++) {
+            field.texels[base + d] = vec4(0.0, 0.0, 0.0, -1.0);
+        }
         return;
     }
-    vec3 sum = vec3(0.0);
-    const uint dirs = 32u;
     for (uint d = 0u; d < dirs; d++) {
-        float angle = (float(d) + 0.5) * 6.2831853 / float(dirs);
-        sum += merged_dir(origin, vec2(cos(angle), sin(angle)));
-    }
-    vec3 merged = sum / float(dirs);
-    field.texels[slot] = vec4(merged, 1.0);
-    if (scene.obj_count > 32u) {
-        field.texels[slot].a = 0.0;
+        float angle = (float(d) + 0.5) * TAU / float(dirs);
+        vec2 dir = vec2(cos(angle), sin(angle));
+        vec4 iv = gather_interval(origin, dir, c.t0, c.t1);
+        // The near cascade stores the merged radiance, so a shade reads one grid.
+        if (cascade == 0u && iv.a > 0.5) {
+            vec4 far_i = sample_interval(write_copy(), 1u, origin, angle);
+            vec4 world_i = sample_interval(write_copy(), 2u, origin, angle);
+            iv = vec4(far_i.rgb + far_i.a * world_i.rgb, 0.0);
+        } else if (cascade == 0u && iv.a >= 0.0) {
+            iv.a = 0.0;
+        }
+        field.texels[base + d] = iv;
     }
 }

@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use genos_scene::{view_proj, Camera};
 
+use crate::aa::Antialias;
+use crate::budget::FrameMemory;
 use crate::pack::{self, GpuVertex, Pack};
 use crate::world::World;
 
@@ -16,6 +18,8 @@ const API_VERSION: u32 = 1 << 22;
 const VK_SUCCESS: i32 = 0;
 const SUBOPTIMAL: i32 = 1000001003;
 const OUT_OF_DATE: i32 = -1000001004;
+/// Four bounces, and three cascades inside each bounce. Farther cascades run first.
+const LIGHT_SLICES: u32 = crate::field::BOUNCES * 3;
 
 type VkResult = i32;
 type Handle = *mut c_void;
@@ -25,10 +29,14 @@ pub struct Renderer {
     gpu: Gpu,
     width: u32,
     height: u32,
-    mesh_key: u64,
-    light_key: u64,
-    mesh_ready: bool,
-    world_count: u32,
+    /// Player and lamps the resident field was built for.
+    field_anchor: Option<pack::FieldAnchor>,
+    wire_on: bool,
+    memory: FrameMemory,
+    shapes: crate::pool::MeshPool,
+    /// Last overlay list. The same list reuses its vertices.
+    overlay_rects: Vec<ScreenRect>,
+    overlay_verts: Vec<crate::pack::GpuVertex>,
 }
 
 impl Renderer {
@@ -45,10 +53,12 @@ impl Renderer {
             gpu,
             width,
             height,
-            mesh_key: 0,
-            light_key: 0,
-            mesh_ready: false,
-            world_count: 0,
+            field_anchor: None,
+            wire_on: false,
+            memory: FrameMemory::default(),
+            shapes: crate::pool::MeshPool::default(),
+            overlay_rects: Vec::new(),
+            overlay_verts: Vec::new(),
         })
     }
 
@@ -82,50 +92,154 @@ impl Renderer {
         camera: &Camera,
         readback: bool,
     ) -> Result<Option<Vec<u8>>, String> {
-        self.draw_with_overlay(world, camera, &[], readback)
+        self.draw_with_overlay(world, camera, &[], readback, false)
     }
 
     /// Draw the world, then screen rectangles. The rectangles ignore the depth test.
+    ///
+    /// When `wireframe` is true, each floor, wall, and solid draws its vertices and its edges.
+    /// The filled shaded triangles stay in use when `wireframe` is false.
     pub fn draw_with_overlay(
         &mut self,
         world: &World,
         camera: &Camera,
         overlay: &[ScreenRect],
         readback: bool,
+        wireframe: bool,
     ) -> Result<Option<Vec<u8>>, String> {
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let matrix = view_proj(camera, aspect);
         let eye = [camera.position.x, camera.position.y, camera.position.z];
-        let pack = pack::pack_frame(world, &matrix, eye);
-        let overlay_verts = screen_quads(overlay);
-        let total = pack.verts.len() + overlay_verts.len();
-        let rewrite_mesh =
-            !self.mesh_ready || pack.mesh_key != self.mesh_key || self.gpu.vertex_slots() < total;
-        let rewrite_light = pack.light_key != self.light_key || !self.gpu.light_ready;
-        if rewrite_mesh || rewrite_light || !overlay_verts.is_empty() {
-            self.gpu.wait_all_inflight()?;
+        self.memory.begin_frame();
+        self.shapes.begin_frame();
+        let pack = pack::pack_frame(world, &matrix, eye, &mut self.memory);
+        for key in self.memory.take_dropped() {
+            self.shapes.release(key);
         }
-        if rewrite_mesh {
-            let mut verts = pack.verts.clone();
-            self.world_count = verts.len() as u32;
-            verts.extend(overlay_verts);
-            if !verts.is_empty() {
-                self.gpu.upload(&verts)?;
+        if self.overlay_rects.as_slice() != overlay {
+            self.overlay_verts = screen_quads(overlay);
+            self.overlay_rects.clear();
+            self.overlay_rects.extend_from_slice(overlay);
+        }
+        let overlay_verts = self.overlay_verts.clone();
+        self.wire_on = wireframe;
+        let overlay_count = overlay_verts.len() as u32;
+        // Overlay rectangles are not in `pack`. A short player or lamp move keeps the field.
+        let rewrite_light = !self.gpu.light_ready
+            || self
+                .field_anchor
+                .as_ref()
+                .map(|anchor| !anchor.holds(&pack))
+                .unwrap_or(true);
+        // The dynamic patch belongs to the frame that is about to record.
+        let slot = self.gpu.flight;
+        self.gpu.wait_flight(slot)?;
+        self.gpu.bind_flight();
+        let mut dynamic = Vec::new();
+        let mut draws = Vec::new();
+        let mut instances = vec![identity_instance()];
+        for item in &pack.draws {
+            match item {
+                pack::PackedDraw::Shape {
+                    key,
+                    model,
+                    color,
+                    source,
+                } => {
+                    if !self.memory.contains_shape(*key) {
+                        continue;
+                    }
+                    let block = if self.shapes.contains(*key) {
+                        self.shapes.use_mesh(*key, &[])
+                    } else {
+                        let local = pack::build_shape(source);
+                        self.shapes.use_mesh(*key, &local)
+                    };
+                    let Some(block) = block else {
+                        continue;
+                    };
+                    let instance = instances.len() as u32;
+                    instances.push(InstanceRec {
+                        model: *model,
+                        color: [color[0], color[1], color[2], 1.0],
+                    });
+                    draws.push(DrawSpan {
+                        shapes: true,
+                        first: block.offset,
+                        count: block.count,
+                        instance,
+                    });
+                }
+                pack::PackedDraw::Dynamic(verts) => {
+                    if verts.is_empty() {
+                        continue;
+                    }
+                    let first = dynamic.len() as u32;
+                    dynamic.extend_from_slice(verts);
+                    draws.push(DrawSpan {
+                        shapes: false,
+                        first,
+                        count: verts.len() as u32,
+                        instance: 0,
+                    });
+                }
             }
-            self.gpu.upload_image(&pack.image)?;
-            self.mesh_key = pack.mesh_key;
-            self.mesh_ready = true;
-        } else {
-            self.gpu.write_range(self.world_count, &overlay_verts)?;
+        }
+        self.shapes.finish_frame();
+        for key in self.memory.finish_frame() {
+            self.shapes.release(key);
+        }
+        self.gpu.upload_shapes(&self.shapes)?;
+        if wireframe {
+            let corners = pack::shape_corners(world, &matrix);
+            let wire = crate::wire::mark_vertices(&crate::wire::marks_from_triangles(&corners));
+            let count = wire.len() as u32;
+            dynamic = wire;
+            draws = if count == 0 {
+                Vec::new()
+            } else {
+                vec![DrawSpan {
+                    shapes: false,
+                    first: 0,
+                    count,
+                    instance: 0,
+                }]
+            };
+            instances = vec![identity_instance()];
+        }
+        let world_dynamic = dynamic.len() as u32;
+        let mut dynamic = dynamic;
+        dynamic.extend(overlay_verts);
+        if !dynamic.is_empty() {
+            self.gpu.upload(&dynamic)?;
+        }
+        self.gpu.write_instances(&instances)?;
+        if self.memory.image_uploaded() {
+            // The particle image is one shared buffer. Both frames can sample it.
+            let (width, height) = self.memory.image_size();
+            let bytes = pack::image_bytes(width, height, self.memory.image_pixels());
+            self.gpu.wait_flight(1 - slot)?;
+            self.gpu.upload_image(&bytes)?;
+            self.memory.clear_image_upload();
         }
         if rewrite_light {
             self.gpu.upload_scene(&pack)?;
-            self.gpu.light_dirty = true;
-            self.light_key = pack.light_key;
+            self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
         }
-        self.gpu.note_vertex_count(self.world_count);
-        self.gpu.note_overlay_count(total as u32 - self.world_count);
+        let wait_light = readback || !self.gpu.light_ready;
+        if wait_light {
+            // A readback has to show this build. The first picture waits once.
+            self.gpu.kick_light(true)?;
+        }
+        self.gpu.note_vertex_count(world_dynamic);
+        self.gpu.set_draws(draws);
+        self.gpu.note_overlay_count(overlay_count);
+        self.gpu.wire_on = wireframe;
         self.gpu.record_and_submit(&matrix)?;
+        if !wait_light {
+            // The gather writes the other field. This submit does not wait for it.
+            self.gpu.kick_light(false)?;
+        }
         let pixels = if readback {
             self.gpu.wait_gpu()?;
             Some(self.gpu.read_color()?)
@@ -152,13 +266,14 @@ impl Renderer {
         camera: &Camera,
         overlay: &[ScreenRect],
         readback: bool,
+        wireframe: bool,
     ) -> Result<(Option<Vec<u8>>, DrawProfile), String> {
         if self.gpu.timestamp_period <= 0.0 || self.gpu.timestamp_bits == 0 {
             return Err("Vulkan timestamp queries are not available on this device".into());
         }
         let start = Instant::now();
         self.gpu.profile_submit = true;
-        let drawn = self.draw_with_overlay(world, camera, overlay, readback);
+        let drawn = self.draw_with_overlay(world, camera, overlay, readback, wireframe);
         let cpu = start.elapsed();
         self.gpu.profile_submit = false;
         let pixels = drawn?;
@@ -186,12 +301,20 @@ impl Renderer {
         let camera = Camera::opening();
         let matrix = view_proj(&camera, 1.0);
         let eye = [camera.position.x, camera.position.y, camera.position.z];
-        let pack = pack::pack_frame(world, &matrix, eye);
+        self.memory.begin_frame();
+        let pack = pack::pack_frame(world, &matrix, eye, &mut self.memory);
         self.gpu.wait_all_inflight()?;
         self.gpu.upload_scene(&pack)?;
-        self.gpu.light_dirty = true;
-        self.light_key = pack.light_key;
+        self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
         Ok(())
+    }
+
+    /// Ground position the gather is tracking.
+    pub fn field_player(&self) -> [f32; 2] {
+        self.field_anchor
+            .as_ref()
+            .map(pack::FieldAnchor::player)
+            .unwrap_or([0.0, 0.0])
     }
 
     /// One compute pass over the resident occluders. This does not present and does not upload them.
@@ -210,6 +333,15 @@ impl Renderer {
     pub fn height(&self) -> u32 {
         self.height
     }
+
+    /// Picture filter for the next draw. The renderer starts at `Off`.
+    pub fn set_antialias(&mut self, mode: Antialias) {
+        self.gpu.antialias = mode;
+    }
+
+    pub fn antialias(&self) -> Antialias {
+        self.gpu.antialias
+    }
 }
 
 /// Host time and device time for one profiled draw.
@@ -222,13 +354,32 @@ pub struct DrawProfile {
 }
 
 /// One axis-aligned rectangle in window pixels. The origin is the top-left.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScreenRect {
     pub x: f32,
     pub y: f32,
     pub w: f32,
     pub h: f32,
     pub color: [f32; 3],
+}
+
+struct DrawSpan {
+    shapes: bool,
+    first: u32,
+    count: u32,
+    instance: u32,
+}
+
+struct InstanceRec {
+    model: [f32; 16],
+    color: [f32; 4],
+}
+
+fn identity_instance() -> InstanceRec {
+    InstanceRec {
+        model: crate::world::identity_pose(),
+        color: [1.0, 1.0, 1.0, 1.0],
+    }
 }
 
 fn screen_quads(rects: &[ScreenRect]) -> Vec<GpuVertex> {
@@ -278,6 +429,9 @@ struct Gpu {
     device: Handle,
     queue: Handle,
     queue_family: u32,
+    /// Gather queue. A graphics submit does not wait for this queue.
+    compute_queue: Handle,
+    compute_family: u32,
     surface: Handle,
     swapchain: Handle,
     format: i32,
@@ -288,12 +442,23 @@ struct Gpu {
     depth: Image,
     framebuffer: Handle,
     host: Buffer,
+    /// Alias of `vertices[flight]`. Drop destroys `vertices`, not this copy.
     vertex: Buffer,
+    vertices: [Buffer; 2],
+    /// Shared shape pool. Offsets stay put for the life of a block.
+    shapes: Buffer,
+    /// How many shape vertices have been read by a submitted frame.
+    shapes_submitted: u32,
+    instances: Buffer,
+    instance_cache: Vec<u8>,
+    draws: Vec<DrawSpan>,
     vertex_count: u32,
     overlay_count: u32,
     render_pass: Handle,
     pipeline: Handle,
     overlay_pipeline: Handle,
+    wire_pipeline: Handle,
+    wire_on: bool,
     layout: Handle,
     pool: Handle,
     cmd: Handle,
@@ -310,12 +475,43 @@ struct Gpu {
     framebuffers: [Handle; 2],
     hosts: [Buffer; 2],
     flight: usize,
+    /// Latest occluders for audio. The raster reads `light_scene[light_shown]`.
     scene_buf: Buffer,
-    field_buf: Buffer,
     particle_buf: Buffer,
     desc_layout: Handle,
     desc_pool: Handle,
+    /// Raster set. This is `light_sets[light_shown]`.
     desc_set: Handle,
+    light_scene: [Buffer; 2],
+    light_field: [Buffer; 2],
+    light_sets: [Handle; 2],
+    /// Shown field index. The gather writes the other one.
+    light_shown: usize,
+    light_dst: usize,
+    /// Field index each flight bound. `usize::MAX` means that flight has not drawn.
+    flight_light: [usize; 2],
+    light_cmd: Handle,
+    light_fence: Handle,
+    light_pool: Handle,
+    light_busy: bool,
+    /// True while a build still has slices to run or in flight.
+    light_building: bool,
+    /// Next gather slice. `LIGHT_SLICES` means the build has no slice left.
+    light_pass: u32,
+    /// Next workgroup row inside `light_pass`.
+    light_row: u32,
+    /// Workgroup columns and row-bands for the near, far, and world cascades.
+    light_cols: [u32; 3],
+    light_rows: [u32; 3],
+    /// Chains gather slices. The last slice leaves it signaled for one picture.
+    light_sem: Handle,
+    light_sem_hot: bool,
+    light_wait_graphics: bool,
+    /// Picture flight that waits `light_sem`, until that flight's fence signals.
+    /// A new slice must not signal the semaphore while this is set.
+    light_publish_flight: Option<usize>,
+    light_publish_fence: Handle,
+    pending_light: Option<Vec<u8>>,
     compute_layout: Handle,
     compute_pipe: Handle,
     audio_rays: Buffer,
@@ -327,7 +523,6 @@ struct Gpu {
     audio_pipe: Handle,
     audio_cmd: Handle,
     audio_fence: Handle,
-    light_dirty: bool,
     light_ready: bool,
     submit_pending: bool,
     timestamp_period: f32,
@@ -338,6 +533,21 @@ struct Gpu {
     inflight: VecDeque<usize>,
     ready: VecDeque<Duration>,
     submitted_slot: Option<usize>,
+    antialias: Antialias,
+    /// Last known layout of each flight's color image. `0` is undefined. `6` is transfer source.
+    color_layout: [u32; 2],
+    keep_pass: Handle,
+    aa_src: [Buffer; 2],
+    aa_dst: [Buffer; 2],
+    ssaa_color: [Image; 2],
+    ssaa_depth: [Image; 2],
+    ssaa_fb: [Handle; 2],
+    aa_desc_layout: Handle,
+    aa_layout: Handle,
+    aa_fxaa: Handle,
+    aa_ssaa: Handle,
+    aa_pool: Handle,
+    aa_sets: [Handle; 2],
     fns: Fns,
     memory_props: MemProps,
 }
@@ -404,6 +614,7 @@ struct Fns {
     cmd_barrier: FnBarrier,
     cmd_copy_image: FnCopyImage,
     cmd_copy_to_buffer: FnCopyBuf,
+    cmd_copy_to_image: FnCopyToImage,
     create_sem: FnCreateSem,
     destroy_sem: Fn2,
     create_fence: FnFence,
@@ -512,6 +723,7 @@ type FnBarrier = unsafe extern "system" fn(
 );
 type FnCopyImage = unsafe extern "system" fn(Handle, Handle, i32, Handle, i32, u32, *const u8);
 type FnCopyBuf = unsafe extern "system" fn(Handle, Handle, i32, Handle, u32, *const u8);
+type FnCopyToImage = unsafe extern "system" fn(Handle, Handle, Handle, i32, u32, *const u8);
 type FnCreateSem =
     unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
 type FnFence = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
@@ -715,7 +927,7 @@ impl Gpu {
                         "present support",
                     )?;
                     if flags & 0x3 == 0x3 && supported == 1 {
-                        chosen = Some((physical, index, timestamp_bits));
+                        chosen = Some((physical, index, timestamp_bits, families, family_count));
                         break;
                     }
                 }
@@ -723,9 +935,25 @@ impl Gpu {
                     break;
                 }
             }
-            let Some((physical, queue_family, timestamp_bits)) = chosen else {
+            let Some((physical, queue_family, timestamp_bits, families, family_count)) = chosen
+            else {
                 return Err("no graphics and compute queue can present".into());
             };
+            let mut compute_family = queue_family;
+            for index in 0..family_count {
+                let base = index as usize * 24;
+                let flags = u32::from_ne_bytes(families[base..base + 4].try_into().unwrap());
+                // Compute without graphics can run the gather beside the picture.
+                if flags & 0x1 == 0 && flags & 0x2 != 0 {
+                    compute_family = index;
+                    break;
+                }
+            }
+            let gfx_queues = u32::from_ne_bytes(
+                families[queue_family as usize * 24 + 4..queue_family as usize * 24 + 8]
+                    .try_into()
+                    .unwrap(),
+            );
             let mut prop_bytes = vec![0u8; 1024];
             get_props(physical, prop_bytes.as_mut_ptr());
             let timestamp_flag = u32::from_ne_bytes(prop_bytes[716..720].try_into().unwrap());
@@ -741,7 +969,7 @@ impl Gpu {
             mem_props(physical, raw_props.as_mut_ptr());
             let memory_props = parse_mem_props(&raw_props);
 
-            let priority = 1.0f32;
+            let priorities = [1.0f32, 0.0f32];
             #[repr(C)]
             struct QueueInfo {
                 s_type: i32,
@@ -751,13 +979,32 @@ impl Gpu {
                 count: u32,
                 priorities: *const f32,
             }
-            let queue_info = QueueInfo {
-                s_type: 2,
-                next: std::ptr::null(),
-                flags: 0,
-                family: queue_family,
-                count: 1,
-                priorities: &priority,
+            let separate = compute_family != queue_family;
+            let mut queue_infos = [
+                QueueInfo {
+                    s_type: 2,
+                    next: std::ptr::null(),
+                    flags: 0,
+                    family: queue_family,
+                    count: 1,
+                    priorities: priorities.as_ptr(),
+                },
+                QueueInfo {
+                    s_type: 2,
+                    next: std::ptr::null(),
+                    flags: 0,
+                    family: compute_family,
+                    count: 1,
+                    priorities: priorities.as_ptr().add(1),
+                },
+            ];
+            let queue_info_count = if separate {
+                2
+            } else if gfx_queues >= 2 {
+                queue_infos[0].count = 2;
+                1
+            } else {
+                1
             };
             let swap_ext = b"VK_KHR_swapchain\0";
             let ext_ptr = swap_ext.as_ptr() as *const c_char;
@@ -778,8 +1025,8 @@ impl Gpu {
                 s_type: 3,
                 next: std::ptr::null(),
                 flags: 0,
-                queue_count: 1,
-                queues: &queue_info,
+                queue_count: queue_info_count,
+                queues: queue_infos.as_ptr(),
                 layer_count: 0,
                 layers: std::ptr::null(),
                 ext_count: 1,
@@ -800,6 +1047,12 @@ impl Gpu {
             let get_device_queue: FnGetQueue = transmute(dload(b"vkGetDeviceQueue\0"));
             let mut queue = std::ptr::null_mut();
             get_device_queue(device, queue_family, 0, &mut queue);
+            let mut compute_queue = queue;
+            if separate {
+                get_device_queue(device, compute_family, 0, &mut compute_queue);
+            } else if gfx_queues >= 2 {
+                get_device_queue(device, queue_family, 1, &mut compute_queue);
+            }
 
             let mut gpu = Self {
                 get_instance,
@@ -809,6 +1062,8 @@ impl Gpu {
                 device,
                 queue,
                 queue_family,
+                compute_queue,
+                compute_family,
                 surface: vk_surface,
                 swapchain: std::ptr::null_mut(),
                 format: 44,
@@ -820,11 +1075,19 @@ impl Gpu {
                 framebuffer: std::ptr::null_mut(),
                 host: Buffer::empty(),
                 vertex: Buffer::empty(),
+                vertices: [Buffer::empty(), Buffer::empty()],
+                shapes: Buffer::empty(),
+                shapes_submitted: 0,
+                instances: Buffer::empty(),
+                instance_cache: Vec::new(),
+                draws: Vec::new(),
                 vertex_count: 0,
                 overlay_count: 0,
                 render_pass: std::ptr::null_mut(),
                 pipeline: std::ptr::null_mut(),
                 overlay_pipeline: std::ptr::null_mut(),
+                wire_pipeline: std::ptr::null_mut(),
+                wire_on: false,
                 layout: std::ptr::null_mut(),
                 pool: std::ptr::null_mut(),
                 cmd: std::ptr::null_mut(),
@@ -842,11 +1105,31 @@ impl Gpu {
                 hosts: [Buffer::empty(), Buffer::empty()],
                 flight: 0,
                 scene_buf: Buffer::empty(),
-                field_buf: Buffer::empty(),
                 particle_buf: Buffer::empty(),
                 desc_layout: std::ptr::null_mut(),
                 desc_pool: std::ptr::null_mut(),
                 desc_set: std::ptr::null_mut(),
+                light_scene: [Buffer::empty(), Buffer::empty()],
+                light_field: [Buffer::empty(), Buffer::empty()],
+                light_sets: [std::ptr::null_mut(); 2],
+                light_shown: 0,
+                light_dst: 1,
+                flight_light: [usize::MAX; 2],
+                light_cmd: std::ptr::null_mut(),
+                light_fence: std::ptr::null_mut(),
+                light_pool: std::ptr::null_mut(),
+                light_busy: false,
+                light_building: false,
+                light_pass: LIGHT_SLICES,
+                light_row: 0,
+                light_cols: [1; 3],
+                light_rows: [1; 3],
+                light_sem: std::ptr::null_mut(),
+                light_sem_hot: false,
+                light_wait_graphics: false,
+                light_publish_flight: None,
+                light_publish_fence: std::ptr::null_mut(),
+                pending_light: None,
                 compute_layout: std::ptr::null_mut(),
                 compute_pipe: std::ptr::null_mut(),
                 audio_rays: Buffer::empty(),
@@ -858,7 +1141,6 @@ impl Gpu {
                 audio_pipe: std::ptr::null_mut(),
                 audio_cmd: std::ptr::null_mut(),
                 audio_fence: std::ptr::null_mut(),
-                light_dirty: true,
                 light_ready: false,
                 submit_pending: false,
                 timestamp_period,
@@ -869,6 +1151,20 @@ impl Gpu {
                 inflight: VecDeque::new(),
                 ready: VecDeque::new(),
                 submitted_slot: None,
+                antialias: Antialias::Off,
+                color_layout: [0, 0],
+                keep_pass: std::ptr::null_mut(),
+                aa_src: [Buffer::empty(), Buffer::empty()],
+                aa_dst: [Buffer::empty(), Buffer::empty()],
+                ssaa_color: [Image::empty(), Image::empty()],
+                ssaa_depth: [Image::empty(), Image::empty()],
+                ssaa_fb: [std::ptr::null_mut(); 2],
+                aa_desc_layout: std::ptr::null_mut(),
+                aa_layout: std::ptr::null_mut(),
+                aa_fxaa: std::ptr::null_mut(),
+                aa_ssaa: std::ptr::null_mut(),
+                aa_pool: std::ptr::null_mut(),
+                aa_sets: [std::ptr::null_mut(); 2],
                 fns: load_fns(
                     dload,
                     create_wayland_surface,
@@ -893,11 +1189,13 @@ impl Gpu {
 
     fn create_static_objects(&mut self) -> Result<(), String> {
         unsafe {
-            self.render_pass = self.make_render_pass()?;
+            self.render_pass = self.make_render_pass(false)?;
+            self.keep_pass = self.make_render_pass(true)?;
             self.desc_layout = self.make_desc_layout()?;
             self.layout = self.make_layout()?;
-            self.pipeline = self.make_pipeline(true, true)?;
-            self.overlay_pipeline = self.make_pipeline(false, false)?;
+            self.pipeline = self.make_pipeline(true, true, false)?;
+            self.overlay_pipeline = self.make_pipeline(false, false, false)?;
+            self.wire_pipeline = self.make_pipeline(false, false, true)?;
             #[repr(C)]
             struct PoolInfo {
                 s_type: i32,
@@ -975,6 +1273,7 @@ impl Gpu {
                 self.query_pool = self.make_query_pool()?;
             }
             self.make_lighting()?;
+            self.make_aa_pipes()?;
         }
         Ok(())
     }
@@ -985,6 +1284,50 @@ impl Gpu {
         }
         self.destroy_targets();
         self.create_targets(width, height)
+    }
+
+    /// Mailbox (1) when the surface lists it, then immediate (0), then FIFO (2).
+    fn choose_present(&self) -> Result<i32, String> {
+        const MAILBOX: i32 = 1;
+        const IMMEDIATE: i32 = 0;
+        const FIFO: i32 = 2;
+        let mut count = 0u32;
+        unsafe {
+            check(
+                (self.fns.surface_modes)(
+                    self.physical,
+                    self.surface,
+                    &mut count,
+                    std::ptr::null_mut(),
+                ),
+                "present modes",
+            )?;
+            if count == 0 {
+                return Ok(FIFO);
+            }
+            let mut raw = vec![0u8; count as usize * 4];
+            check(
+                (self.fns.surface_modes)(self.physical, self.surface, &mut count, raw.as_mut_ptr()),
+                "present mode list",
+            )?;
+            let mut mailbox = false;
+            let mut immediate = false;
+            for chunk in raw.chunks(4).take(count as usize) {
+                let mode = i32::from_ne_bytes(chunk.try_into().unwrap());
+                if mode == MAILBOX {
+                    mailbox = true;
+                } else if mode == IMMEDIATE {
+                    immediate = true;
+                }
+            }
+            if mailbox {
+                Ok(MAILBOX)
+            } else if immediate {
+                Ok(IMMEDIATE)
+            } else {
+                Ok(FIFO)
+            }
+        }
     }
 
     fn create_targets(&mut self, width: u32, height: u32) -> Result<(), String> {
@@ -1067,6 +1410,14 @@ impl Gpu {
                 clipped: u32,
                 old: Handle,
             }
+            let present = self.choose_present()?;
+            // Mailbox needs a free image while one image is queued and one is on screen.
+            if present == 1 {
+                image_count = min_images.max(3);
+                if max_images > 0 && image_count > max_images {
+                    image_count = max_images;
+                }
+            }
             let transform = u32::from_ne_bytes(caps[36..40].try_into().unwrap());
             let swap = SwapInfo {
                 s_type: 1000001000,
@@ -1085,7 +1436,7 @@ impl Gpu {
                 queues: std::ptr::null(),
                 transform,
                 alpha: 1,
-                present: 2,
+                present,
                 clipped: 1,
                 old: std::ptr::null_mut(),
             };
@@ -1121,8 +1472,14 @@ impl Gpu {
 
             let bytes = self.extent_w as u64 * self.extent_h as u64 * 4;
             for slot in 0..2 {
-                self.colors[slot] = self.make_image(self.format, 0x10 | 0x4, 1)?;
-                self.depths[slot] = self.make_image(126, 0x20, 2)?;
+                self.colors[slot] = self.make_image(
+                    self.format,
+                    0x10 | 0x4 | 0x1 | 0x2,
+                    1,
+                    self.extent_w,
+                    self.extent_h,
+                )?;
+                self.depths[slot] = self.make_image(126, 0x20, 2, self.extent_w, self.extent_h)?;
                 self.color = copy_image(&self.colors[slot]);
                 self.depth = copy_image(&self.depths[slot]);
                 self.framebuffers[slot] = self.make_framebuffer()?;
@@ -1132,40 +1489,9 @@ impl Gpu {
             self.depth = copy_image(&self.depths[0]);
             self.framebuffer = self.framebuffers[0];
             self.host = copy_buffer(&self.hosts[0]);
+            self.make_aa_targets()?;
             Ok(())
         }
-    }
-
-    fn vertex_slots(&self) -> usize {
-        self.vertex.size as usize / std::mem::size_of::<GpuVertex>()
-    }
-
-    /// Write `verts` at `first` without touching the world triangles before that slot.
-    fn write_range(&mut self, first: u32, verts: &[GpuVertex]) -> Result<(), String> {
-        if verts.is_empty() {
-            return Ok(());
-        }
-        let stride = std::mem::size_of::<GpuVertex>() as u64;
-        let offset = first as u64 * stride;
-        let bytes = verts.len() as u64 * stride;
-        let end = offset + bytes;
-        if self.vertex.size < end {
-            return Err("vertex buffer is smaller than the frame".into());
-        }
-        unsafe {
-            let mut mapped = std::ptr::null_mut();
-            check(
-                (self.fns.map_mem)(self.device, self.vertex.memory, 0, end, 0, &mut mapped),
-                "map vertices",
-            )?;
-            std::ptr::copy_nonoverlapping(
-                verts.as_ptr() as *const u8,
-                (mapped as *mut u8).add(offset as usize),
-                bytes as usize,
-            );
-            (self.fns.unmap_mem)(self.device, self.vertex.memory);
-        }
-        Ok(())
     }
 
     fn upload(&mut self, verts: &[GpuVertex]) -> Result<(), String> {
@@ -1181,6 +1507,7 @@ impl Gpu {
                 }
             }
             self.vertex = self.make_buffer(bytes.max(1024), 0x80, true)?;
+            self.vertices[self.flight] = copy_buffer(&self.vertex);
         }
         unsafe {
             let mut mapped = std::ptr::null_mut();
@@ -1198,6 +1525,110 @@ impl Gpu {
         Ok(())
     }
 
+    fn set_draws(&mut self, draws: Vec<DrawSpan>) {
+        self.draws = draws;
+    }
+
+    /// Copy dirty shape ranges. A new tail does not wait. A reused span waits for both frames.
+    fn upload_shapes(&mut self, pool: &crate::pool::MeshPool) -> Result<(), String> {
+        let verts = pool.vertices();
+        if verts.is_empty() {
+            return Ok(());
+        }
+        let stride = std::mem::size_of::<GpuVertex>() as u64;
+        let bytes = verts.len() as u64 * stride;
+        let reuse = pool
+            .dirty()
+            .iter()
+            .any(|(offset, _)| *offset < self.shapes_submitted);
+        if reuse || self.shapes.size < bytes {
+            self.wait_all_inflight()?;
+        }
+        if self.shapes.size < bytes {
+            let next = self.make_buffer(
+                bytes.max(self.shapes.size.saturating_mul(2)).max(4096),
+                0x80,
+                true,
+            )?;
+            self.write_verts_at(&next, 0, verts)?;
+            let mut old = std::mem::replace(&mut self.shapes, next);
+            self.destroy_buffer(&mut old);
+        } else {
+            let shapes = copy_buffer(&self.shapes);
+            for &(offset, count) in pool.dirty() {
+                let start = offset as usize;
+                let end = start + count as usize;
+                self.write_verts_at(&shapes, offset, &verts[start..end])?;
+            }
+        }
+        self.shapes_submitted = verts.len() as u32;
+        Ok(())
+    }
+
+    fn write_verts_at(
+        &self,
+        buffer: &Buffer,
+        first: u32,
+        verts: &[GpuVertex],
+    ) -> Result<(), String> {
+        if verts.is_empty() {
+            return Ok(());
+        }
+        let stride = std::mem::size_of::<GpuVertex>() as u64;
+        let offset = first as u64 * stride;
+        let bytes = verts.len() as u64 * stride;
+        let end = offset + bytes;
+        if buffer.size < end {
+            return Err("shape buffer is smaller than the block".into());
+        }
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(self.device, buffer.memory, 0, end, 0, &mut mapped),
+                "map shape block",
+            )?;
+            std::ptr::copy_nonoverlapping(
+                verts.as_ptr() as *const u8,
+                (mapped as *mut u8).add(offset as usize),
+                bytes as usize,
+            );
+            (self.fns.unmap_mem)(self.device, buffer.memory);
+        }
+        Ok(())
+    }
+
+    fn write_instances(&mut self, items: &[InstanceRec]) -> Result<(), String> {
+        let mut bytes = Vec::with_capacity(items.len() * 80);
+        for item in items {
+            for value in item.model {
+                bytes.extend_from_slice(&value.to_ne_bytes());
+            }
+            for value in item.color {
+                bytes.extend_from_slice(&value.to_ne_bytes());
+            }
+        }
+        if bytes == self.instance_cache {
+            return Ok(());
+        }
+        if !self.instance_cache.is_empty() {
+            self.wait_all_inflight()?;
+        }
+        if self.instances.size < bytes.len() as u64 {
+            let next = self.make_buffer((bytes.len() as u64).max(5120), 0x20, true)?;
+            let mut old = std::mem::replace(&mut self.instances, next);
+            self.destroy_buffer(&mut old);
+            self.write_instance_binding()?;
+        }
+        self.write_buffer(&self.instances, &bytes)?;
+        self.instance_cache = bytes;
+        Ok(())
+    }
+
+    fn write_instance_binding(&self) -> Result<(), String> {
+        self.write_light_set(0)?;
+        self.write_light_set(1)
+    }
+
     fn bind_flight(&mut self) {
         let slot = self.flight;
         self.cmd = self.cmds[slot];
@@ -1208,6 +1639,7 @@ impl Gpu {
         self.depth = copy_image(&self.depths[slot]);
         self.framebuffer = self.framebuffers[slot];
         self.host = copy_buffer(&self.hosts[slot]);
+        self.vertex = copy_buffer(&self.vertices[slot]);
     }
 
     fn record_and_submit(&mut self, matrix: &[f32; 16]) -> Result<(), String> {
@@ -1216,9 +1648,8 @@ impl Gpu {
         if profiled && (self.query_pool.is_null() || self.timestamp_period <= 0.0) {
             return Err("Vulkan timestamp queries are not available on this device".into());
         }
-        if self.light_dirty {
-            self.wait_other_flight()?;
-        }
+        self.poll_light()?;
+        self.desc_set = self.light_sets[self.light_shown];
         self.bind_flight();
         let slot = self.flight;
         unsafe {
@@ -1227,6 +1658,9 @@ impl Gpu {
                 (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
                 "wait fence",
             )?;
+            if self.light_publish_flight == Some(slot) {
+                self.light_publish_flight = None;
+            }
             self.collect_slot_after_wait(slot)?;
             check(
                 (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
@@ -1268,103 +1702,34 @@ impl Gpu {
                 // Top of pipe, before the GPU work. The value is device ticks.
                 self.write_stamp(slot, 0, 1);
             }
-            if self.light_dirty {
-                self.dispatch_lighting()?;
-                self.light_dirty = false;
-                self.light_ready = true;
-            }
             let swap = self.swap_images[index as usize];
             self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
-            let mut clears = [[0.0f32, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.0]];
-            #[repr(C)]
-            struct Offset {
-                x: i32,
-                y: i32,
-            }
-            #[repr(C)]
-            struct Extent {
-                w: u32,
-                h: u32,
-            }
-            #[repr(C)]
-            struct Rect {
-                offset: Offset,
-                extent: Extent,
-            }
-            #[repr(C)]
-            struct RpBegin {
-                s_type: i32,
-                next: *const c_void,
-                pass: Handle,
-                fb: Handle,
-                area: Rect,
-                clear_count: u32,
-                clears: *const f32,
-            }
-            let rp = RpBegin {
-                s_type: 43,
-                next: std::ptr::null(),
-                pass: self.render_pass,
-                fb: self.framebuffer,
-                area: Rect {
-                    offset: Offset { x: 0, y: 0 },
-                    extent: Extent {
-                        w: self.extent_w,
-                        h: self.extent_h,
-                    },
-                },
-                clear_count: 2,
-                clears: clears.as_mut_ptr() as *const f32,
-            };
-            (self.fns.cmd_begin_rp)(self.cmd, &rp as *const RpBegin as *const u8, 0);
-            (self.fns.cmd_bind_pipe)(self.cmd, 0, self.pipeline);
-            (self.fns.cmd_bind_set)(
-                self.cmd,
-                0,
-                self.layout,
-                0,
-                1,
-                &self.desc_set,
-                0,
-                std::ptr::null(),
-            );
-            let viewport = [
-                0.0f32,
-                0.0,
-                self.extent_w as f32,
-                self.extent_h as f32,
-                0.0,
-                1.0,
-            ];
-            (self.fns.cmd_viewport)(self.cmd, 0, 1, viewport.as_ptr());
-            let scissor = [0i32, 0, self.extent_w as i32, self.extent_h as i32];
-            (self.fns.cmd_scissor)(self.cmd, 0, 1, scissor.as_ptr());
-            (self.fns.cmd_push)(
-                self.cmd,
-                self.layout,
-                1,
-                0,
-                64,
-                matrix.as_ptr() as *const c_void,
-            );
-            let vb = [self.vertex.buffer];
-            let off = [0u64];
-            (self.fns.cmd_bind_vb)(self.cmd, 0, 1, vb.as_ptr(), off.as_ptr());
-            (self.fns.cmd_draw)(self.cmd, self.vertex_count, 1, 0, 0);
-            if self.overlay_count > 0 && !self.overlay_pipeline.is_null() {
-                (self.fns.cmd_bind_pipe)(self.cmd, 0, self.overlay_pipeline);
-                let ortho = pixel_matrix(self.extent_w as f32, self.extent_h as f32);
-                (self.fns.cmd_push)(
-                    self.cmd,
-                    self.layout,
-                    1,
-                    0,
-                    64,
-                    ortho.as_ptr() as *const c_void,
+            let filtering = self.antialias != Antialias::Off;
+            if self.antialias == Antialias::Ssaa {
+                self.raster_scene(
+                    self.ssaa_fb[slot],
+                    self.extent_w * 2,
+                    self.extent_h * 2,
+                    matrix,
+                    false,
                 );
-                (self.fns.cmd_draw)(self.cmd, self.overlay_count, 1, self.vertex_count, 0);
+                self.resolve_ssaa(slot)?;
+            } else {
+                self.raster_scene(
+                    self.framebuffer,
+                    self.extent_w,
+                    self.extent_h,
+                    matrix,
+                    !filtering,
+                );
+                self.color_layout[slot] = 6;
+                if self.antialias == Antialias::Fxaa {
+                    self.resolve_fxaa(slot)?;
+                }
             }
-            (self.fns.cmd_end_rp)(self.cmd);
+            if filtering && self.overlay_count > 0 {
+                self.raster_overlay();
+            }
             self.copy_color_to_swapchain(swap);
             self.copy_color_to_buffer();
             self.image_barrier(swap, 7, 1000001002, 0x1000, 0x2000, 0x1000, 0);
@@ -1375,7 +1740,7 @@ impl Gpu {
             }
             check((self.fns.end_cmd)(self.cmd), "end cmd")?;
 
-            let wait_stage = 0x400u32;
+            let wait_stage = [0x400u32, 0x80];
             #[repr(C)]
             struct Submit {
                 s_type: i32,
@@ -1388,15 +1753,23 @@ impl Gpu {
                 signal_count: u32,
                 signals: *const Handle,
             }
-            let wait_sem = [self.image_ready];
+            let wait_sem = [self.image_ready, self.light_sem];
+            let mut wait_count = 1u32;
+            if self.light_wait_graphics {
+                wait_count = 2;
+                self.light_wait_graphics = false;
+                self.light_sem_hot = false;
+                // The signal stays with this flight until its fence signals.
+                self.light_publish_flight = Some(slot);
+            }
             let signal_sem = [self.render_done];
             let cmd = [self.cmd];
             let submit = Submit {
                 s_type: 4,
                 next: std::ptr::null(),
-                wait_count: 1,
+                wait_count,
                 waits: wait_sem.as_ptr(),
-                stages: &wait_stage,
+                stages: wait_stage.as_ptr(),
                 cmd_count: 1,
                 cmds: cmd.as_ptr(),
                 signal_count: 1,
@@ -1412,6 +1785,7 @@ impl Gpu {
                 "submit",
             )?;
             self.present_index = index;
+            self.flight_light[slot] = self.light_shown;
             let status = (self.fns.fence_status)(self.device, self.fence);
             self.submit_pending = status == 1;
             if profiled {
@@ -1566,21 +1940,29 @@ impl Gpu {
         Ok(Duration::from_nanos(nanos.round() as u64))
     }
 
+    fn wait_flight(&mut self, slot: usize) -> Result<(), String> {
+        unsafe {
+            let fences = [self.fences[slot]];
+            if fences[0].is_null() {
+                return Ok(());
+            }
+            let status = (self.fns.fence_status)(self.device, fences[0]);
+            if status == 1 {
+                check(
+                    (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
+                    "flight wait",
+                )?;
+            }
+        }
+        if self.light_publish_flight == Some(slot) {
+            self.light_publish_flight = None;
+        }
+        Ok(())
+    }
+
     fn wait_all_inflight(&mut self) -> Result<(), String> {
         for slot in 0..2 {
-            unsafe {
-                let fences = [self.fences[slot]];
-                if fences[0].is_null() {
-                    continue;
-                }
-                let status = (self.fns.fence_status)(self.device, fences[0]);
-                if status == 1 {
-                    check(
-                        (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                        "buffer wait",
-                    )?;
-                }
-            }
+            self.wait_flight(slot)?;
         }
         Ok(())
     }
@@ -1598,21 +1980,6 @@ impl Gpu {
         let pixels = self.read_color()?;
         self.host = saved;
         Ok(pixels)
-    }
-
-    fn wait_other_flight(&mut self) -> Result<(), String> {
-        let other = 1 - self.flight;
-        unsafe {
-            let fences = [self.fences[other]];
-            let status = (self.fns.fence_status)(self.device, fences[0]);
-            if status == 1 {
-                check(
-                    (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                    "field wait",
-                )?;
-            }
-        }
-        Ok(())
     }
 
     fn wait_gpu(&mut self) -> Result<(), String> {
@@ -1748,12 +2115,19 @@ impl Gpu {
                 stages: 0x10,
                 samplers: std::ptr::null(),
             },
+            Binding {
+                binding: 3,
+                kind: 7,
+                count: 1,
+                stages: 0x1,
+                samplers: std::ptr::null(),
+            },
         ];
         let info = Info {
             s_type: 32,
             next: std::ptr::null(),
             flags: 0,
-            count: 3,
+            count: 4,
             bindings: bindings.as_ptr(),
         };
         let mut layout = std::ptr::null_mut();
@@ -1773,9 +2147,17 @@ impl Gpu {
 
     fn make_lighting(&mut self) -> Result<(), String> {
         self.scene_buf = self.make_buffer(4096, 0x20, true)?;
-        self.field_buf = self.make_buffer(2 * 128 * 128 * 16, 0x20, true)?;
-        self.particle_buf = self.make_buffer(16 + 256 * 256 * 4, 0x20, true)?;
-        self.write_buffer(&self.field_buf, &vec![0u8; 2 * 128 * 128 * 16])?;
+        let share = self.light_families();
+        self.instances = self.make_buffer_queues(5120, 0x20, true, &share)?;
+        self.particle_buf = self.make_buffer_queues(16 + 256 * 256 * 4, 0x20, true, &share)?;
+        let field_bytes = vec![0u8; 2 * crate::field::FIELD_COPY as usize * 16];
+        for index in 0..2 {
+            self.light_scene[index] = self.make_buffer_queues(4096, 0x20, true, &share)?;
+            self.light_field[index] =
+                self.make_buffer_queues(field_bytes.len() as u64, 0x20, true, &share)?;
+            self.write_buffer(&self.light_field[index], &field_bytes)?;
+            self.write_buffer(&self.light_scene[index], &vec![0u8; 4096])?;
+        }
         self.write_buffer(&self.particle_buf, &vec![0u8; 16])?;
         #[repr(C)]
         struct Range {
@@ -1797,7 +2179,7 @@ impl Gpu {
         let push = Range {
             stage: 0x20,
             offset: 0,
-            size: 4,
+            size: 8,
         };
         let layout = LayoutInfo {
             s_type: 30,
@@ -1883,12 +2265,12 @@ impl Gpu {
             size_count: u32,
             sizes: *const Size,
         }
-        let size = Size { kind: 7, count: 3 };
+        let size = Size { kind: 7, count: 8 };
         let pool = PoolInfo {
             s_type: 33,
             next: std::ptr::null(),
             flags: 0,
-            max_sets: 1,
+            max_sets: 2,
             size_count: 1,
             sizes: &size,
         };
@@ -1910,29 +2292,49 @@ impl Gpu {
                 count: u32,
                 layouts: *const Handle,
             }
+            let layouts = [self.desc_layout, self.desc_layout];
             let alloc = Alloc {
                 s_type: 34,
                 next: std::ptr::null(),
                 pool: self.desc_pool,
-                count: 1,
-                layouts: sets.as_ptr(),
+                count: 2,
+                layouts: layouts.as_ptr(),
             };
             check(
                 (self.fns.alloc_desc)(
                     self.device,
                     &alloc as *const Alloc as *const u8,
-                    &mut self.desc_set,
+                    self.light_sets.as_mut_ptr(),
                 ),
                 "descriptor set",
             )?;
         }
-        self.write_descriptors()?;
+        self.desc_set = self.light_sets[0];
+        self.write_light_set(0)?;
+        self.write_light_set(1)?;
         self.write_buffer(&self.scene_buf, &vec![0u8; 4096])?;
+        self.make_light_queue()?;
         self.make_audio()?;
         Ok(())
     }
 
-    fn write_descriptors(&self) -> Result<(), String> {
+    fn light_families(&self) -> Vec<u32> {
+        if self.compute_family == self.queue_family {
+            Vec::new()
+        } else {
+            vec![self.queue_family, self.compute_family]
+        }
+    }
+
+    fn write_light_set(&self, index: usize) -> Result<(), String> {
+        self.write_descriptors(
+            self.light_sets[index],
+            &self.light_scene[index],
+            &self.light_field[index],
+        )
+    }
+
+    fn write_descriptors(&self, set: Handle, scene: &Buffer, field: &Buffer) -> Result<(), String> {
         #[repr(C)]
         struct BufInfo {
             buffer: Handle,
@@ -1954,12 +2356,12 @@ impl Gpu {
         }
         let infos = [
             BufInfo {
-                buffer: self.scene_buf.buffer,
+                buffer: scene.buffer,
                 offset: 0,
                 range: u64::MAX,
             },
             BufInfo {
-                buffer: self.field_buf.buffer,
+                buffer: field.buffer,
                 offset: 0,
                 range: u64::MAX,
             },
@@ -1968,12 +2370,17 @@ impl Gpu {
                 offset: 0,
                 range: u64::MAX,
             },
+            BufInfo {
+                buffer: self.instances.buffer,
+                offset: 0,
+                range: u64::MAX,
+            },
         ];
         let writes = [
             Write {
                 s_type: 35,
                 next: std::ptr::null(),
-                set: self.desc_set,
+                set,
                 binding: 0,
                 element: 0,
                 count: 1,
@@ -1985,7 +2392,7 @@ impl Gpu {
             Write {
                 s_type: 35,
                 next: std::ptr::null(),
-                set: self.desc_set,
+                set,
                 binding: 1,
                 element: 0,
                 count: 1,
@@ -1997,7 +2404,7 @@ impl Gpu {
             Write {
                 s_type: 35,
                 next: std::ptr::null(),
-                set: self.desc_set,
+                set,
                 binding: 2,
                 element: 0,
                 count: 1,
@@ -2006,11 +2413,23 @@ impl Gpu {
                 buffer: &infos[2],
                 texel: std::ptr::null(),
             },
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set,
+                binding: 3,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: &infos[3],
+                texel: std::ptr::null(),
+            },
         ];
         unsafe {
             (self.fns.update_desc)(
                 self.device,
-                3,
+                4,
                 writes.as_ptr() as *const u8,
                 0,
                 std::ptr::null(),
@@ -2493,8 +2912,350 @@ impl Gpu {
         read_f32s(map, unmap, device, memory, sources.len())
     }
 
-    fn upload_scene(&self, pack: &Pack) -> Result<(), String> {
-        self.write_buffer(&self.scene_buf, &pack::scene_bytes(pack))
+    fn upload_scene(&mut self, pack: &Pack) -> Result<(), String> {
+        let bytes = pack::scene_bytes(pack);
+        self.write_buffer(&self.scene_buf, &bytes)?;
+        for (index, cascade) in pack.cascades.iter().enumerate() {
+            self.light_cols[index] = (cascade.count_x + 7) / 8;
+            self.light_rows[index] = (cascade.count_z + 7) / 8;
+        }
+        self.pending_light = Some(bytes);
+        Ok(())
+    }
+
+    /// Record one slice of the gather. A readback waits until that build is the field on screen.
+    fn kick_light(&mut self, wait: bool) -> Result<(), String> {
+        loop {
+            self.poll_light()?;
+            // The finished field's signal belongs to the next picture. A slice
+            // that waits or signals it first makes that picture stall on the gather.
+            if self.publish_blocks() && !wait {
+                return Ok(());
+            }
+            if !self.light_busy && !self.light_building && self.pending_light.is_some() {
+                if self.light_dst_free() {
+                    if self.publish_blocks() {
+                        self.drain_publish()?;
+                    }
+                    self.begin_light()?;
+                } else if wait {
+                    self.wait_all_inflight()?;
+                    continue;
+                }
+            }
+            if !self.light_busy && self.light_building {
+                self.submit_slice()?;
+            }
+            let more = self.pending_light.is_some() || self.light_busy || self.light_building;
+            if !wait || !more {
+                return Ok(());
+            }
+            if self.light_busy {
+                self.wait_light()?;
+                continue;
+            }
+            self.wait_all_inflight()?;
+        }
+    }
+
+    fn publish_blocks(&self) -> bool {
+        self.light_wait_graphics || self.light_publish_flight.is_some()
+    }
+
+    /// The picture has not taken the publish signal yet, and a newer build has to signal it.
+    fn drain_publish(&mut self) -> Result<(), String> {
+        if let Some(slot) = self.light_publish_flight.take() {
+            let fences = [self.fences[slot]];
+            unsafe {
+                check(
+                    (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
+                    "light publish",
+                )?;
+            }
+            self.light_wait_graphics = false;
+            self.light_sem_hot = false;
+            return Ok(());
+        }
+        if self.light_wait_graphics {
+            self.consume_publish()?;
+        }
+        Ok(())
+    }
+
+    fn consume_publish(&mut self) -> Result<(), String> {
+        let fences = [self.light_publish_fence];
+        unsafe {
+            check(
+                (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
+                "reset light publish",
+            )?;
+            #[repr(C)]
+            struct Submit {
+                s_type: i32,
+                next: *const c_void,
+                wait_count: u32,
+                waits: *const Handle,
+                stages: *const u32,
+                cmd_count: u32,
+                cmds: *const Handle,
+                signal_count: u32,
+                signals: *const Handle,
+            }
+            let wait_sem = [self.light_sem];
+            let wait_stage = 0x80u32;
+            let submit = Submit {
+                s_type: 4,
+                next: std::ptr::null(),
+                wait_count: 1,
+                waits: wait_sem.as_ptr(),
+                stages: &wait_stage,
+                cmd_count: 0,
+                cmds: std::ptr::null(),
+                signal_count: 0,
+                signals: std::ptr::null(),
+            };
+            check(
+                (self.fns.queue_submit)(
+                    self.queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    self.light_publish_fence,
+                ),
+                "light publish",
+            )?;
+            check(
+                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
+                "light publish",
+            )?;
+        }
+        self.light_wait_graphics = false;
+        self.light_sem_hot = false;
+        Ok(())
+    }
+
+    fn poll_light(&mut self) -> Result<(), String> {
+        if !self.light_busy || self.light_fence.is_null() {
+            return Ok(());
+        }
+        let status = unsafe { (self.fns.fence_status)(self.device, self.light_fence) };
+        if status == 1 {
+            return Ok(());
+        }
+        check(status, "light fence")?;
+        self.light_busy = false;
+        if self.light_pass >= LIGHT_SLICES {
+            self.light_building = false;
+            self.light_shown = self.light_dst;
+            self.desc_set = self.light_sets[self.light_shown];
+            self.light_ready = true;
+            self.light_wait_graphics = true;
+        }
+        Ok(())
+    }
+
+    fn light_dst_free(&self) -> bool {
+        let dst = 1 - self.light_shown;
+        (0..2).all(|slot| self.flight_light[slot] != dst || !self.fence_pending(slot))
+    }
+
+    fn fence_pending(&self, slot: usize) -> bool {
+        let fence = self.fences[slot];
+        if fence.is_null() {
+            return false;
+        }
+        unsafe { (self.fns.fence_status)(self.device, fence) == 1 }
+    }
+
+    fn wait_light(&mut self) -> Result<(), String> {
+        let fences = [self.light_fence];
+        unsafe {
+            check(
+                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
+                "light wait",
+            )?;
+        }
+        self.poll_light()
+    }
+
+    fn begin_light(&mut self) -> Result<(), String> {
+        let Some(bytes) = self.pending_light.take() else {
+            return Ok(());
+        };
+        let dst = 1 - self.light_shown;
+        self.write_buffer(&self.light_scene[dst], &bytes)?;
+        self.light_dst = dst;
+        self.light_pass = 0;
+        self.light_row = 0;
+        self.light_building = true;
+        Ok(())
+    }
+
+    fn submit_slice(&mut self) -> Result<(), String> {
+        let dst = self.light_dst;
+        let pass = self.light_pass;
+        let row = self.light_row;
+        let cascade = 2 - (pass % 3) as usize;
+        let bands = self.light_rows[cascade].max(1);
+        let cols = self.light_cols[cascade].max(1);
+        // One workgroup row. A wider band still stretches the next picture past the frame band.
+        let rows = 1u32;
+        let fences = [self.light_fence];
+        unsafe {
+            check(
+                (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
+                "reset light fence",
+            )?;
+            check((self.fns.reset_cmd)(self.light_cmd, 0), "reset light cmd")?;
+            #[repr(C)]
+            struct BeginInfo {
+                s_type: i32,
+                next: *const c_void,
+                flags: u32,
+                inherit: *const c_void,
+            }
+            let begin = BeginInfo {
+                s_type: 42,
+                next: std::ptr::null(),
+                flags: 1,
+                inherit: std::ptr::null(),
+            };
+            check(
+                (self.fns.begin_cmd)(self.light_cmd, &begin as *const BeginInfo as *const u8),
+                "begin light",
+            )?;
+        }
+        self.dispatch_light_slice(self.light_cmd, self.light_sets[dst], pass, row, rows, cols)?;
+        unsafe {
+            check((self.fns.end_cmd)(self.light_cmd), "end light")?;
+            #[repr(C)]
+            struct Submit {
+                s_type: i32,
+                next: *const c_void,
+                wait_count: u32,
+                waits: *const Handle,
+                stages: *const u32,
+                cmd_count: u32,
+                cmds: *const Handle,
+                signal_count: u32,
+                signals: *const Handle,
+            }
+            let cmd = [self.light_cmd];
+            let wait_sem = [self.light_sem];
+            let signal_sem = [self.light_sem];
+            let wait_stage = 0x800u32;
+            let submit = Submit {
+                s_type: 4,
+                next: std::ptr::null(),
+                wait_count: u32::from(self.light_sem_hot),
+                waits: wait_sem.as_ptr(),
+                stages: &wait_stage,
+                cmd_count: 1,
+                cmds: cmd.as_ptr(),
+                signal_count: 1,
+                signals: signal_sem.as_ptr(),
+            };
+            self.light_sem_hot = true;
+            check(
+                (self.fns.queue_submit)(
+                    self.compute_queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    self.light_fence,
+                ),
+                "light submit",
+            )?;
+        }
+        let mut next_row = row + rows;
+        let mut next_pass = pass;
+        if next_row >= bands {
+            next_row = 0;
+            next_pass += 1;
+        }
+        self.light_row = next_row;
+        self.light_pass = next_pass;
+        self.light_busy = true;
+        Ok(())
+    }
+
+    fn make_light_queue(&mut self) -> Result<(), String> {
+        #[repr(C)]
+        struct PoolInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            family: u32,
+        }
+        let pool = PoolInfo {
+            s_type: 39,
+            next: std::ptr::null(),
+            flags: 0x2,
+            family: self.compute_family,
+        };
+        unsafe {
+            check(
+                (self.fns.create_pool)(
+                    self.device,
+                    &pool as *const PoolInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.light_pool,
+                ),
+                "light command pool",
+            )?;
+            #[repr(C)]
+            struct AllocInfo {
+                s_type: i32,
+                next: *const c_void,
+                pool: Handle,
+                level: u32,
+                count: u32,
+            }
+            let alloc = AllocInfo {
+                s_type: 40,
+                next: std::ptr::null(),
+                pool: self.light_pool,
+                level: 0,
+                count: 1,
+            };
+            check(
+                (self.fns.alloc_cmd)(
+                    self.device,
+                    &alloc as *const AllocInfo as *const u8,
+                    &mut self.light_cmd,
+                ),
+                "light command buffer",
+            )?;
+            #[repr(C)]
+            struct FenceInfo {
+                s_type: i32,
+                next: *const c_void,
+                flags: u32,
+            }
+            let fence = FenceInfo {
+                s_type: 8,
+                next: std::ptr::null(),
+                flags: 0x1,
+            };
+            check(
+                (self.fns.create_fence)(
+                    self.device,
+                    &fence as *const FenceInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.light_fence,
+                ),
+                "light fence",
+            )?;
+            check(
+                (self.fns.create_fence)(
+                    self.device,
+                    &fence as *const FenceInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.light_publish_fence,
+                ),
+                "light publish fence",
+            )?;
+        }
+        self.light_sem = self.make_sem()?;
+        Ok(())
     }
 
     fn upload_image(&self, bytes: &[u8]) -> Result<(), String> {
@@ -2524,7 +3285,15 @@ impl Gpu {
         Ok(())
     }
 
-    fn dispatch_lighting(&self) -> Result<(), String> {
+    fn dispatch_light_slice(
+        &self,
+        cmd: Handle,
+        set: Handle,
+        pass: u32,
+        row: u32,
+        rows: u32,
+        cols: u32,
+    ) -> Result<(), String> {
         #[repr(C)]
         struct MemBar {
             s_type: i32,
@@ -2540,7 +3309,7 @@ impl Gpu {
                 dst_access: 0x20,
             };
             (self.fns.cmd_barrier)(
-                self.cmd,
+                cmd,
                 0x4000,
                 0x800,
                 0,
@@ -2551,48 +3320,42 @@ impl Gpu {
                 0,
                 std::ptr::null(),
             );
-            (self.fns.cmd_bind_pipe)(self.cmd, 1, self.compute_pipe);
-            (self.fns.cmd_bind_set)(
-                self.cmd,
-                1,
+            (self.fns.cmd_bind_pipe)(cmd, 1, self.compute_pipe);
+            (self.fns.cmd_bind_set)(cmd, 1, self.compute_layout, 0, 1, &set, 0, std::ptr::null());
+            // One band of probe rows. Later slices cover the rest of this pass, then the next pass.
+            #[repr(C)]
+            struct Push {
+                pass: u32,
+                y0: u32,
+            }
+            let push = Push { pass, y0: row * 8 };
+            (self.fns.cmd_push)(
+                cmd,
                 self.compute_layout,
+                0x20,
+                0,
+                8,
+                &push as *const Push as *const c_void,
+            );
+            (self.fns.cmd_dispatch)(cmd, cols, rows, 1);
+            let shade = MemBar {
+                s_type: 46,
+                next: std::ptr::null(),
+                src_access: 0x40,
+                dst_access: 0x20,
+            };
+            (self.fns.cmd_barrier)(
+                cmd,
+                0x800,
+                0x800,
                 0,
                 1,
-                &self.desc_set,
+                &shade as *const MemBar as *const c_void,
+                0,
+                std::ptr::null(),
                 0,
                 std::ptr::null(),
             );
-            // Direct light, then three bounces. Each pass reads the previous pass.
-            for pass in 0u32..4 {
-                (self.fns.cmd_push)(
-                    self.cmd,
-                    self.compute_layout,
-                    0x20,
-                    0,
-                    4,
-                    &pass as *const u32 as *const c_void,
-                );
-                (self.fns.cmd_dispatch)(self.cmd, 16, 16, 1);
-                let shade = MemBar {
-                    s_type: 46,
-                    next: std::ptr::null(),
-                    src_access: 0x40,
-                    dst_access: 0x20,
-                };
-                let dst_stage = if pass + 1 == 4 { 0x80u32 } else { 0x800 };
-                (self.fns.cmd_barrier)(
-                    self.cmd,
-                    0x800,
-                    dst_stage,
-                    0,
-                    1,
-                    &shade as *const MemBar as *const c_void,
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                );
-            }
         }
         Ok(())
     }
@@ -2644,7 +3407,7 @@ impl Gpu {
         Ok(layout)
     }
 
-    fn make_render_pass(&mut self) -> Result<Handle, String> {
+    fn make_render_pass(&mut self, keep: bool) -> Result<Handle, String> {
         #[repr(C)]
         struct Att {
             flags: u32,
@@ -2697,28 +3460,37 @@ impl Gpu {
             dep_count: u32,
             deps: *const Dep,
         }
+        let color_load = if keep { 0 } else { 1 };
+        let color_initial = if keep { 6 } else { 0 };
+        let depth_load = if keep { 2 } else { 1 };
+        // Final layout cannot be undefined. The overlay pass discards depth.
+        let depth_final = 3;
+        let in_stage = if keep { 0x1000 } else { 0x400 };
+        // The filter leaves the color image visible to a transfer read.
+        let in_access = if keep { 0x800 } else { 0 };
+        let in_dst = if keep { 0x180 } else { 0x100 };
         let atts = [
             Att {
                 flags: 0,
                 format: self.format,
                 samples: 1,
-                load: 1,
+                load: color_load,
                 store: 0,
                 stencil_load: 1,
                 stencil_store: 1,
-                initial: 0,
+                initial: color_initial,
                 final_layout: 6,
             },
             Att {
                 flags: 0,
                 format: 126,
                 samples: 1,
-                load: 1,
+                load: depth_load,
                 store: 1,
                 stencil_load: 1,
                 stencil_store: 1,
                 initial: 0,
-                final_layout: 3,
+                final_layout: depth_final,
             },
         ];
         let color = Ref {
@@ -2745,10 +3517,10 @@ impl Gpu {
             Dep {
                 src: u32::MAX,
                 dst: 0,
-                src_stage: 0x400,
+                src_stage: in_stage,
                 dst_stage: 0x400,
-                src_access: 0,
-                dst_access: 0x100,
+                src_access: in_access,
+                dst_access: in_dst,
                 flags: 0,
             },
             Dep {
@@ -2787,10 +3559,15 @@ impl Gpu {
         Ok(pass)
     }
 
-    fn make_pipeline(&mut self, depth_test: bool, blend_on: bool) -> Result<Handle, String> {
+    fn make_pipeline(
+        &mut self,
+        depth_test: bool,
+        blend_on: bool,
+        additive: bool,
+    ) -> Result<Handle, String> {
         unsafe {
-            let vert = self.shader(VERT_SPV)?;
-            let frag = self.shader(FRAG_SPV)?;
+            let vert = self.shader(if additive { WIRE_VERT_SPV } else { VERT_SPV })?;
+            let frag = self.shader(if additive { WIRE_FRAG_SPV } else { FRAG_SPV })?;
             #[repr(C)]
             struct Stage {
                 s_type: i32,
@@ -3055,7 +3832,19 @@ impl Gpu {
                 atts: *const BlendAtt,
                 blend: [f32; 4],
             }
-            let batt = if blend_on {
+            let batt = if additive {
+                // Additive. A second copy of the same edge stays brighter than one copy.
+                BlendAtt {
+                    enable: 1,
+                    src: 1,
+                    dst: 1,
+                    op: 0,
+                    src_a: 1,
+                    dst_a: 1,
+                    op_a: 0,
+                    mask: 0xf,
+                }
+            } else if blend_on {
                 // Premultiplied. Opaque output uses alpha 1, so it replaces the target.
                 // Fog output uses alpha = 1 - transmittance and rgb = in-scatter.
                 BlendAtt {
@@ -3196,7 +3985,14 @@ impl Gpu {
         Ok(module)
     }
 
-    fn make_image(&self, format: i32, usage: u32, aspect: u32) -> Result<Image, String> {
+    fn make_image(
+        &self,
+        format: i32,
+        usage: u32,
+        aspect: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<Image, String> {
         #[repr(C)]
         struct Extent {
             w: u32,
@@ -3228,8 +4024,8 @@ impl Gpu {
             image_type: 1,
             format,
             extent: Extent {
-                w: self.extent_w,
-                h: self.extent_h,
+                w: width,
+                h: height,
                 d: 1,
             },
             mips: 1,
@@ -3336,6 +4132,16 @@ impl Gpu {
 
     fn make_framebuffer(&self) -> Result<Handle, String> {
         let views = [self.color.view, self.depth.view];
+        self.make_framebuffer_for(self.render_pass, &views, self.extent_w, self.extent_h)
+    }
+
+    fn make_framebuffer_for(
+        &self,
+        pass: Handle,
+        views: &[Handle],
+        width: u32,
+        height: u32,
+    ) -> Result<Handle, String> {
         #[repr(C)]
         struct Info {
             s_type: i32,
@@ -3352,11 +4158,11 @@ impl Gpu {
             s_type: 37,
             next: std::ptr::null(),
             flags: 0,
-            pass: self.render_pass,
-            count: 2,
+            pass,
+            count: views.len() as u32,
             views: views.as_ptr(),
-            width: self.extent_w,
-            height: self.extent_h,
+            width,
+            height,
             layers: 1,
         };
         let mut fb = std::ptr::null_mut();
@@ -3375,6 +4181,16 @@ impl Gpu {
     }
 
     fn make_buffer(&self, size: u64, usage: u32, host: bool) -> Result<Buffer, String> {
+        self.make_buffer_queues(size, usage, host, &[])
+    }
+
+    fn make_buffer_queues(
+        &self,
+        size: u64,
+        usage: u32,
+        host: bool,
+        families: &[u32],
+    ) -> Result<Buffer, String> {
         #[repr(C)]
         struct Info {
             s_type: i32,
@@ -3386,15 +4202,20 @@ impl Gpu {
             queue_count: u32,
             queues: *const u32,
         }
+        let shared = families.len() > 1;
         let info = Info {
             s_type: 12,
             next: std::ptr::null(),
             flags: 0,
             size,
             usage,
-            sharing: 0,
-            queue_count: 0,
-            queues: std::ptr::null(),
+            sharing: u32::from(shared),
+            queue_count: if shared { families.len() as u32 } else { 0 },
+            queues: if shared {
+                families.as_ptr()
+            } else {
+                std::ptr::null()
+            },
         };
         let mut buffer = std::ptr::null_mut();
         unsafe {
@@ -3665,8 +4486,10 @@ impl Gpu {
     fn destroy_targets(&mut self) {
         unsafe {
             if self.framebuffers[0].is_null() && self.framebuffer.is_null() {
+                self.destroy_aa_targets();
                 return;
             }
+            self.destroy_aa_targets();
             for slot in 0..2 {
                 if !self.framebuffers[slot].is_null() {
                     (self.fns.destroy_framebuffer)(
@@ -3808,16 +4631,41 @@ impl Drop for Gpu {
             }
             (self.fns.device_wait)(self.device);
             self.destroy_targets();
-            let mut vertex = std::mem::replace(&mut self.vertex, Buffer::empty());
+            self.vertex = Buffer::empty();
+            let mut vertices =
+                std::mem::replace(&mut self.vertices, [Buffer::empty(), Buffer::empty()]);
             let mut scene_buf = std::mem::replace(&mut self.scene_buf, Buffer::empty());
-            let mut field_buf = std::mem::replace(&mut self.field_buf, Buffer::empty());
+            let mut light_scene =
+                std::mem::replace(&mut self.light_scene, [Buffer::empty(), Buffer::empty()]);
+            let mut light_field =
+                std::mem::replace(&mut self.light_field, [Buffer::empty(), Buffer::empty()]);
             let mut particle_buf = std::mem::replace(&mut self.particle_buf, Buffer::empty());
             let mut audio_rays = std::mem::replace(&mut self.audio_rays, Buffer::empty());
             let mut audio_gains = std::mem::replace(&mut self.audio_gains, Buffer::empty());
-            self.destroy_buffer(&mut vertex);
+            self.destroy_buffer(&mut vertices[0]);
+            self.destroy_buffer(&mut vertices[1]);
+            let mut shapes = std::mem::replace(&mut self.shapes, Buffer::empty());
+            let mut instances = std::mem::replace(&mut self.instances, Buffer::empty());
+            self.destroy_buffer(&mut shapes);
+            self.destroy_buffer(&mut instances);
             self.destroy_buffer(&mut scene_buf);
-            self.destroy_buffer(&mut field_buf);
+            self.destroy_buffer(&mut light_scene[0]);
+            self.destroy_buffer(&mut light_scene[1]);
+            self.destroy_buffer(&mut light_field[0]);
+            self.destroy_buffer(&mut light_field[1]);
             self.destroy_buffer(&mut particle_buf);
+            if !self.light_fence.is_null() {
+                (self.fns.destroy_fence)(self.device, self.light_fence, std::ptr::null());
+            }
+            if !self.light_publish_fence.is_null() {
+                (self.fns.destroy_fence)(self.device, self.light_publish_fence, std::ptr::null());
+            }
+            if !self.light_sem.is_null() {
+                (self.fns.destroy_sem)(self.device, self.light_sem, std::ptr::null());
+            }
+            if !self.light_pool.is_null() {
+                (self.fns.destroy_pool)(self.device, self.light_pool, std::ptr::null());
+            }
             self.destroy_buffer(&mut audio_rays);
             self.destroy_buffer(&mut audio_gains);
             if !self.audio_fence.is_null() {
@@ -3868,6 +4716,9 @@ impl Drop for Gpu {
             if !self.query_pool.is_null() {
                 (self.fns.destroy_query_pool)(self.device, self.query_pool, std::ptr::null());
             }
+            if !self.wire_pipeline.is_null() {
+                (self.fns.destroy_pipeline)(self.device, self.wire_pipeline, std::ptr::null());
+            }
             if !self.overlay_pipeline.is_null() {
                 (self.fns.destroy_pipeline)(self.device, self.overlay_pipeline, std::ptr::null());
             }
@@ -3877,8 +4728,26 @@ impl Drop for Gpu {
             if !self.layout.is_null() {
                 (self.fns.destroy_layout)(self.device, self.layout, std::ptr::null());
             }
+            if !self.keep_pass.is_null() {
+                (self.fns.destroy_render_pass)(self.device, self.keep_pass, std::ptr::null());
+            }
             if !self.render_pass.is_null() {
                 (self.fns.destroy_render_pass)(self.device, self.render_pass, std::ptr::null());
+            }
+            if !self.aa_fxaa.is_null() {
+                (self.fns.destroy_pipeline)(self.device, self.aa_fxaa, std::ptr::null());
+            }
+            if !self.aa_ssaa.is_null() {
+                (self.fns.destroy_pipeline)(self.device, self.aa_ssaa, std::ptr::null());
+            }
+            if !self.aa_layout.is_null() {
+                (self.fns.destroy_layout)(self.device, self.aa_layout, std::ptr::null());
+            }
+            if !self.aa_pool.is_null() {
+                (self.fns.destroy_desc_pool)(self.device, self.aa_pool, std::ptr::null());
+            }
+            if !self.aa_desc_layout.is_null() {
+                (self.fns.destroy_desc_layout)(self.device, self.aa_desc_layout, std::ptr::null());
             }
             (self.fns.destroy_device)(self.device, std::ptr::null());
             if !self.surface.is_null() {
@@ -3976,6 +4845,7 @@ fn load_fns(
             cmd_barrier: d!("vkCmdPipelineBarrier"),
             cmd_copy_image: d!("vkCmdCopyImage"),
             cmd_copy_to_buffer: d!("vkCmdCopyImageToBuffer"),
+            cmd_copy_to_image: d!("vkCmdCopyBufferToImage"),
             create_sem: d!("vkCreateSemaphore"),
             destroy_sem: d!("vkDestroySemaphore"),
             create_fence: d!("vkCreateFence"),
@@ -4025,6 +4895,8 @@ fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {
     let mask = (1u64 << bits) - 1;
     end.wrapping_sub(start) & mask
 }
+
+include!("aa_gpu.rs");
 
 extern "C" {
     fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;

@@ -10,19 +10,21 @@ A player can see one lamp, a shadow where a wall blocks that lamp, and a bounce 
 
 The technique is radiance cascades. The working notes, the paper links, and the budget are in [Lighting notes](../lighting.md). Read that file before you change probe counts, interval length, or the merge rule.
 
-A build does not read the previous frame. There is no lightmap and no ambient fill. The gather is four GPU passes: the lamps, then three bounces. Each bounce reads the previous pass of that build.
+A build does not read the previous frame. There is no lightmap and no ambient fill. The gather is four GPU passes: the lamps, then three bounces. Each bounce reads the previous pass of that build. Inside a pass, the world cascade runs first, then the far cascade, then the near cascade. A miss merges with `L + β L_next`. An average of nearby probes does not stand in for a bounce the gather does not run.
 
 A direct ray stops when it hits a wall or a solid. The ray uses those shapes. It is not a physics collision step. A ray that clears the top of a wall still arrives. A bounce ray stops on the first surface in its interval.
 
 Each face is shaded from a point just outside that face. The back of a wall stays dark when the lamp is on the other side. A brighter lamp does not pass through that wall. A lamp above an object colors the floor on every side. The vertical faces of that object stay unlit by that lamp. A lamp on one side does not color the far side.
 
-A lit wall adds light to the floor shadow in front of that wall. The shadow is brighter near the wall than far from the wall. The floor behind that wall stays dark.
+A lit wall adds its bounce to the floor in front of that wall through the interval merge. The floor behind that wall stays dark.
 
 Hidden objects and objects outside the view stay in the field when `affects_light` is true. Culling removes them from the picture only.
 
 The march is on the XZ ground plane. World probes sit past the nearer ranges. They carry material color that the nearer ranges miss.
 
-This scene uses one near-probe spacing, 16 cm, across the floor. A miss stays on that probe and continues into the next range. Far and world ranges use more directions. They do not move the ray onto a coarser grid. The floor, the walls, and the solids sample that 16 cm field. There is no coarser surface cell between those objects. The grid stays fixed in the world. A later draw with the same lights and the same occluders reuses that field. An object that is hidden and does not affect light is left out of the gather. The paper links, including arXiv:2408.14425, are in the lighting notes.
+Cascade 0 uses a cell of about 0.28 m and 16 directions. The near interval is one cell. Each next cascade doubles the spacing, the direction count, and the interval length. The grids stay on the world. A camera move does not move them. A miss stores β = 1 and radiance 0. The next cascade replaces that miss after interpolation in space and in angle.
+
+The floor, the walls, and the solids read that same field. An upward face reads probes outside its footprint. A later draw reuses the field until a lamp moves by about a meter, or a lamp color, an occluder, or the light-affecting medium changes. Screen rectangles do not rebuild it. An object that is hidden and does not affect light is left out of the gather. The paper links, including arXiv:2408.14425, are in the lighting notes.
 
 A camera move does not rebuild the visible mesh. The draw rebuilds that mesh when the shaded scene changes or the on-screen set changes.
 
@@ -32,9 +34,9 @@ The GPU compute shader `shaders/light.comp` builds the field. The fragment shade
 
 Packed object ranges, colors, and texture ids live in one GPU buffer. An object with no texture stores texture id 0. A later frame does not upload that buffer again when the mesh is unchanged.
 
-The gather runs only when a light or an occluder changes. A normal draw returns before the GPU fence signals. The next scene update can run while that frame is still on the GPU. A readback waits for the fence.
+The gather runs when a lamp moves by about a meter, or when a lamp color, an occluder, or the light-affecting medium changes. A camera move does not start it. The gather is submitted on a second queue, a band of probe rows at a time, and writes the field the picture is not reading. The picture keeps the last finished field until that gather completes. A normal draw does not wait for that queue. A readback waits until the new field is the one on screen.
 
-A probe inside a wall or a solid stores no light. A shaded point does not read a probe across a wall.
+A probe inside a wall or a solid stores β below zero and is left out of the interpolation. A hit stores β = 0, so that direction does not read the light behind the hit. The blend also skips a probe when the segment to it crosses a wall. There is no extra accept radius around the sample.
 
 ## Game use
 
@@ -42,17 +44,17 @@ Place lights in the scene script with `light(x, y, z, r, g, b)`. Do not call the
 
 A new occluder is a wall or a solid in the scene. The direct ray and the bounce ray both see it. A mesh or a particle with `affects_light` becomes a stand-in solid in `World::light_scene`.
 
-Fire does not use that stand-in. The stationary flame is one lamp in the same cascade. A wall blocks that lamp. The flame does not light the far side of the wall. The floor beside the flame stays warm with the scene lamp off. A lit particle uses the same shade path as a face: albedo times direct plus bounce. A density puff is still optical depth and in-scatter on the view ray. The probes stay on the ground plane. Light that leaves the floor travels in the cascade until the first wall.
+Fire does not use that stand-in. The stationary flame is one lamp in the same cascade. A wall blocks that lamp. The flame does not light the far side of the wall. The floor beside the flame stays warm with the scene lamp off. A lit particle uses the same shade path as a face: albedo times reflectance times direct plus bounce. A density puff is still optical depth and in-scatter on the view ray. The probes stay on the ground plane. Light that leaves the floor travels in the cascade until the first wall.
 
 ## Limits
 
 The probes are not a 3D volume. A tall gap that the ground march misses can stay dark or can stay bright for the wrong reason.
 
-Screen-space cascades are not the shading path. A second probe grid stepped the opening view down, because those objects are meters from the camera. The picture uses the one 16 cm world field. The paper's heaviest ray counts are not the budget. The budget is in the lighting notes.
+Screen-space cascades are not the shading path. The probes stay on the world floor. The paper's heaviest ray counts are not the budget. The budget is in the lighting notes.
 
-Soft penumbras are not implemented. The cascade probes are 16 cm apart. The fragment shader shades each pixel. The shadow edge is the lamp ray. The lamp side of an object is not darkened by a margin around its base.
+The soft edge of a shadow is the coarser angle step of the next cascade, merged only where β is 1. There is no painted halo around a light square. The fragment shader shades each pixel. The direct shadow edge is the lamp ray. The lamp side of an object is not darkened by a margin around its base.
 
 ## Decisions
 
-- [ADR 0008](../adr/0008-lighting-uses-radiance-cascades.md) selects radiance cascades. The engine keeps a finished field until a light or an occluder changes. A new build still does not read the previous frame.
+- [ADR 0008](../adr/0008-lighting-uses-radiance-cascades.md) selects radiance cascades. The engine keeps a finished field until a lamp moves by about a meter, or a lamp color, an occluder, or the light-affecting medium changes. A camera move does not rebuild the field. A new build still does not read the previous frame.
 - [Renderer](renderer.md) owns the draw that runs this pass.

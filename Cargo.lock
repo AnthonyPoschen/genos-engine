@@ -162,6 +162,7 @@ version = "0.1.0"
 dependencies = [
  "genos-load",
  "genos-scene",
+ "genos-ui",
  "genos-window",
 ]
 

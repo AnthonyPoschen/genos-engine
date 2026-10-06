@@ -178,7 +178,10 @@ pub struct Simulation {
     flame: Option<Emitter>,
     slots: [Slot; MAX_SLOTS],
     rng: u32,
-    emit_left: f32,
+    /// Seconds since the emitter started. Spawn times use this clock.
+    elapsed: f64,
+    /// Next ember birth on `elapsed`.
+    spawn_at: f64,
     born: u32,
     retired: u32,
 }
@@ -192,7 +195,8 @@ impl Simulation {
             flame: None,
             slots: std::array::from_fn(|_| Slot::empty()),
             rng: SEED,
-            emit_left: 0.0,
+            elapsed: 0.0,
+            spawn_at: 0.0,
             born: 0,
             retired: 0,
         }
@@ -253,7 +257,8 @@ impl Simulation {
             flame: Some(flame),
             slots: std::array::from_fn(|_| Slot::empty()),
             rng: SEED,
-            emit_left: 0.0,
+            elapsed: 0.0,
+            spawn_at: 0.0,
             born: 0,
             retired: 0,
         };
@@ -283,8 +288,11 @@ impl Simulation {
     }
 
     /// Move, retire, and emit. `dt` is seconds. The same seed and the same calls match.
+    /// A non-positive or non-finite `dt` leaves ages, positions, and births unchanged.
     pub fn step(&mut self, dt: f32) {
-        let dt = dt.max(0.0);
+        if !(dt.is_finite() && dt > 0.0) {
+            return;
+        }
         let mut dying = [0usize; MAX_SLOTS];
         let mut dying_count = 0;
         for index in 0..MAX_SLOTS {
@@ -313,15 +321,17 @@ impl Simulation {
         if !self.ember.enabled || self.ember.capacity == 0 {
             return;
         }
-        self.emit_left -= dt;
+        self.elapsed += f64::from(dt);
+        let interval = f64::from(self.ember.interval.max(1.0e-4));
         let mut guard = 0;
         let limit = self.ember.capacity.min(MAX_SLOTS);
-        while self.emit_left <= 0.0 && guard < limit {
+        while self.spawn_at <= self.elapsed && guard < limit {
             guard += 1;
-            if !self.spawn_fire() {
+            let late = (self.elapsed - self.spawn_at).max(0.0) as f32;
+            if !self.spawn_fire(late) {
                 break;
             }
-            self.emit_left += self.ember.interval.max(1.0e-4);
+            self.spawn_at += interval;
         }
     }
 
@@ -425,7 +435,13 @@ impl Simulation {
             .count()
     }
 
-    fn spawn_fire(&mut self) -> bool {
+    fn spawn_fire(&mut self, late: f32) -> bool {
+        let life = self.ember.life.max(1.0e-3);
+        let late = late.max(0.0);
+        // The birth time already passed a full life while the emitter was full.
+        if late >= life {
+            return true;
+        }
         if self.count(Kind::Fire) >= self.ember.capacity {
             return false;
         }
@@ -440,13 +456,13 @@ impl Simulation {
             alive: true,
             kind: Kind::Fire,
             position: [
-                self.ember.origin[0] + ox,
-                self.ember.origin[1],
-                self.ember.origin[2] + oz,
+                self.ember.origin[0] + ox + vx * late,
+                self.ember.origin[1] + self.ember.rise * late,
+                self.ember.origin[2] + oz + vz * late,
             ],
             velocity: [vx, self.ember.rise, vz],
-            age: 0.0,
-            life: self.ember.life.max(1.0e-3),
+            age: late,
+            life,
         };
         self.born += 1;
         true
@@ -640,7 +656,7 @@ pub fn object_cards(object: &Object, eye: [f32; 3]) -> Vec<Card> {
     cards
 }
 
-/// `albedo * (direct + bounce)` with the same gain the fragment shader uses.
+/// `albedo * reflectance * (direct + bounce)`. The reflectance is the diffuse default.
 /// Albedo zero stays black. The result is not a built-in flame color.
 pub fn shade_lit(albedo: [f32; 3], direct: f32, bounce: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
     let level = normal[1].abs() > 0.5;

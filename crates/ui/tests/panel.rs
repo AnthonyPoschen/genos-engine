@@ -2,7 +2,9 @@
 
 use genos_render::illuminate_facing;
 use genos_scene::{viewport_uv, Camera, Floor, Light, Scene, Shape, Solid, Vec3};
-use genos_ui::{apply_lamp, id, lighting_frame, Action, Frame, Paint, Pointer, Shown, State};
+use genos_ui::{
+    apply_lamp, id, lighting_frame, Action, Frame, Paint, PictureMode, Pointer, Shown, State,
+};
 
 const VIEW: [f32; 2] = [1280.0, 720.0];
 
@@ -320,6 +322,41 @@ fn the_sun_tracks_the_lamp_and_a_press_does_not_move_it() {
     apply_actions(&mut scene, &drag);
     assert_eq!(scene.lights[0].position, before);
     assert_eq!(scene.solids[0].position, solid);
+}
+
+#[test]
+fn the_panel_shows_picture_modes_and_a_press_selects_one() {
+    let camera = Camera::opening();
+    let scene = lamp_scene(Vec3::new(0.0, 4.0, 0.0));
+    let mut state = State::default();
+    let frame = ui(&mut state, &scene, &camera, pointer(0.0, 0.0, false));
+    let texts: Vec<&str> = frame
+        .shown
+        .iter()
+        .filter_map(|item| item.text.as_deref())
+        .collect();
+    for label in [
+        "Light", "X", "Y", "Z", "Dim", "Bright", "off", "FXAA", "SSAA",
+    ] {
+        assert!(texts.contains(&label), "{label} is missing from {texts:?}");
+    }
+    assert_eq!(texts.iter().filter(|text| **text == "off").count(), 1);
+
+    for (control, mode, label) in [
+        (id::AA_OFF, PictureMode::Off, "off"),
+        (id::AA_FXAA, PictureMode::Fxaa, "FXAA"),
+        (id::AA_SSAA, PictureMode::Ssaa, "SSAA"),
+    ] {
+        let mut state = State::default();
+        let idle = ui(&mut state, &scene, &camera, pointer(0.0, 0.0, false));
+        let button = shown(&idle, control);
+        assert_eq!(button.text.as_deref(), Some(label));
+        let (x, y) = center(&button);
+        let mut state = State::default();
+        let press = ui(&mut state, &scene, &camera, pointer(x, y, true));
+        assert_eq!(press.actions, vec![Action::SetAntialias(mode)]);
+        assert!(!press.look_capture, "a picture-mode press captured look");
+    }
 }
 
 fn scale(control: u32, scene: &mut Scene, camera: &Camera) -> (f32, f32) {

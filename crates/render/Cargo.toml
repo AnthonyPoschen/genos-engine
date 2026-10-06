@@ -12,4 +12,5 @@ genos-load = { path = "../load" }
 genos-scene = { path = "../scene" }
 
 [dev-dependencies]
+genos-ui = { path = "../ui" }
 genos-window = { path = "../window" }

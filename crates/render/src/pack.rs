@@ -9,6 +9,7 @@
 
 use genos_scene::Shape;
 
+use crate::budget::FrameMemory;
 use crate::particles::{self, Card, FireLight, Puff};
 use crate::world::{
     transform_pose, DrawKind, FixedPart, ParticleFrame, ParticleImage, ShaderSpace, World,
@@ -18,6 +19,9 @@ pub const MAX_LAMPS: usize = 4;
 pub const MAX_OCCLUDERS: usize = 16;
 pub const MAX_OBJECTS: usize = 32;
 pub const FIELD_GRID: u32 = 128;
+/// The gather keeps one field until the player or a lamp moves this far, in meters.
+/// A shorter move does not rebuild. Screen rectangles are not part of this decision.
+pub const FIELD_PLACE: f32 = 1.0;
 
 /// One stored triangle corner. `shade` is 1 when the GPU lights the vertex.
 #[repr(C)]
@@ -66,11 +70,9 @@ pub struct GpuOcc {
 }
 
 pub struct Pack {
-    pub verts: Vec<GpuVertex>,
     pub objects: Vec<GpuObject>,
     pub lamps: Vec<GpuLamp>,
     pub occs: Vec<GpuOcc>,
-    pub mesh_key: u64,
     pub light_key: u64,
     pub count_x: u32,
     pub count_z: u32,
@@ -80,6 +82,8 @@ pub struct Pack {
     pub near_end: f32,
     pub far_end: f32,
     pub world_end: f32,
+    /// Near, far, and world cascades. The grids stay on the world.
+    pub(crate) cascades: [crate::field::CascadePlan; 3],
     pub eye: [f32; 3],
     pub floor_center: [f32; 3],
     pub floor_half_x: f32,
@@ -87,16 +91,72 @@ pub struct Pack {
     pub floor_color: [f32; 3],
     pub fire: FireLight,
     pub puffs: Vec<Puff>,
-    /// Particle image the fragment shader samples. Empty width means no image.
-    pub image: Vec<u8>,
+    /// Shapes and particle spans in draw order.
+    pub draws: Vec<PackedDraw>,
 }
 
-pub fn pack_frame(world: &World, view_proj: &[f32; 16], eye: [f32; 3]) -> Pack {
+/// One resident shape, or one particle span that changes every frame.
+pub enum PackedDraw {
+    Shape {
+        key: u64,
+        model: [f32; 16],
+        color: [f32; 3],
+        source: ShapeSource,
+    },
+    Dynamic(Vec<GpuVertex>),
+}
+
+/// Local geometry for a shape block. The pose and the color stay on the instance.
+pub enum ShapeSource {
+    Floor { half_x: f32, half_z: f32 },
+    Box { half: [f32; 3], top: bool },
+    Cylinder { radius: f32, height: f32 },
+    Mesh(Vec<[f32; 3]>),
+    Baked(Vec<GpuVertex>),
+}
+
+pub(crate) fn build_shape(source: &ShapeSource) -> Vec<GpuVertex> {
+    let white = [1.0, 1.0, 1.0];
     let mut verts = Vec::new();
-    let mut objects = Vec::new();
+    match source {
+        ShapeSource::Floor { half_x, half_z } => {
+            push_floor_local(&mut verts, *half_x, *half_z, white);
+        }
+        ShapeSource::Box { half, top } => {
+            push_box(&mut verts, white, [0.0, 0.0, 0.0], *half, *top);
+        }
+        ShapeSource::Cylinder { radius, height } => {
+            push_cylinder(&mut verts, white, 0.0, 0.0, *radius, *height);
+        }
+        ShapeSource::Mesh(positions) => {
+            let pose = crate::world::identity_pose();
+            push_mesh(&mut verts, positions, white, &pose);
+        }
+        ShapeSource::Baked(verts_in) => verts = verts_in.clone(),
+    }
+    verts
+}
+
+pub(crate) fn translation(x: f32, y: f32, z: f32) -> [f32; 16] {
+    let mut model = crate::world::identity_pose();
+    model[12] = x;
+    model[13] = y;
+    model[14] = z;
+    model
+}
+
+pub fn pack_frame(
+    world: &World,
+    view_proj: &[f32; 16],
+    eye: [f32; 3],
+    memory: &mut FrameMemory,
+) -> Pack {
+    memory.clear_frames();
+    let mut staged: Vec<StagedDraw> = Vec::new();
+    let mut shape_bytes = Vec::new();
     let mut occs = Vec::new();
     let (fire, puffs) = particles::medium(world, eye);
-    let atlas = build_atlas(world, view_proj);
+    let mut reserved = 0usize;
     for (index, object) in world.objects.iter().enumerate() {
         if object.affects_light {
             if let Some(occ) = occluder(world, object) {
@@ -108,26 +168,74 @@ pub fn pack_frame(world: &World, view_proj: &[f32; 16], eye: [f32; 3]) -> Pack {
         if object.hidden || !crate::world::in_view(view_proj, object.bounds) {
             continue;
         }
-        if objects.len() >= MAX_OBJECTS {
+        if reserved >= MAX_OBJECTS {
             continue;
         }
-        let first = verts.len() as u32;
-        push_object(&mut verts, world, object, eye, atlas.place(index));
-        let count = verts.len() as u32 - first;
-        if count == 0 {
+        let color = object_color(world, object);
+        if particle_cards(object) {
+            staged.push(StagedDraw::Particle { index, color });
+            reserved += 1;
             continue;
         }
-        objects.push(GpuObject {
-            first,
-            count,
-            texture: 0,
-            color: object_color(world, object),
-        });
+        let Some(draw) = pack_draw(world, object, eye, None, color) else {
+            continue;
+        };
+        if let PackedDraw::Shape { key, source, .. } = &draw {
+            let bytes = memory
+                .shape_bytes(*key)
+                .unwrap_or_else(|| shape_vertex_bytes(source));
+            shape_bytes.push((*key, bytes));
+        }
+        staged.push(StagedDraw::Ready { draw, color });
+        reserved += 1;
+    }
+    memory.admit_shapes(&shape_bytes);
+    let places = resident_atlas(memory, world, view_proj);
+    let mut draws = Vec::new();
+    let mut objects = Vec::new();
+    for item in staged {
+        match item {
+            StagedDraw::Ready { draw, color } => {
+                if let PackedDraw::Shape { key, .. } = &draw {
+                    if !memory.contains_shape(*key) {
+                        continue;
+                    }
+                }
+                draws.push(draw);
+                objects.push(gpu_object(color));
+            }
+            StagedDraw::Particle { index, color } => {
+                let object = &world.objects[index];
+                for card in particles::object_cards(object, eye) {
+                    if card.textured {
+                        memory.note_frame(card.frame);
+                    }
+                }
+                let Some(draw) = pack_draw(
+                    world,
+                    object,
+                    eye,
+                    places.get(index).copied().flatten(),
+                    color,
+                ) else {
+                    continue;
+                };
+                draws.push(draw);
+                objects.push(gpu_object(color));
+            }
+        }
     }
     let lamps = lamps_of(world);
-    let (count_x, count_z, spacing, origin_x, origin_z, near_end, far_end, world_end) =
-        field_grid(world);
-    let mesh_key = hash_mesh(&verts, &objects, &atlas.bytes);
+    let cascades = crate::field::cascade_plans(&world.scene.floor);
+    let near = cascades[0];
+    let count_x = near.count_x;
+    let count_z = near.count_z;
+    let spacing = near.spacing;
+    let origin_x = near.origin_x;
+    let origin_z = near.origin_z;
+    let near_end = near.t1;
+    let far_end = cascades[1].t1;
+    let world_end = cascades[2].t1;
     let light_key = hash_light(
         &lamps,
         &occs,
@@ -143,11 +251,9 @@ pub fn pack_frame(world: &World, view_proj: &[f32; 16], eye: [f32; 3]) -> Pack {
         world.scene.floor.color,
     );
     Pack {
-        verts,
         objects,
         lamps,
         occs,
-        mesh_key,
         light_key,
         count_x,
         count_z,
@@ -157,6 +263,7 @@ pub fn pack_frame(world: &World, view_proj: &[f32; 16], eye: [f32; 3]) -> Pack {
         near_end,
         far_end,
         world_end,
+        cascades,
         eye,
         floor_center: [
             world.scene.floor.position.x,
@@ -168,8 +275,207 @@ pub fn pack_frame(world: &World, view_proj: &[f32; 16], eye: [f32; 3]) -> Pack {
         floor_color: world.scene.floor.color,
         fire,
         puffs,
-        image: atlas.bytes,
+        draws,
     }
+}
+
+enum StagedDraw {
+    Ready { draw: PackedDraw, color: [f32; 3] },
+    Particle { index: usize, color: [f32; 3] },
+}
+
+fn particle_cards(object: &crate::world::Object) -> bool {
+    matches!(object.kind, DrawKind::Particles { density, .. } if density <= 0.0)
+}
+
+fn gpu_object(color: [f32; 3]) -> GpuObject {
+    GpuObject {
+        first: 0,
+        count: 1,
+        texture: 0,
+        color,
+    }
+}
+
+pub(crate) fn shape_vertex_bytes(source: &ShapeSource) -> u64 {
+    (build_shape(source).len() * std::mem::size_of::<GpuVertex>()) as u64
+}
+
+fn pack_draw(
+    world: &World,
+    object: &crate::world::Object,
+    eye: [f32; 3],
+    place: Option<AtlasPlace>,
+    color: [f32; 3],
+) -> Option<PackedDraw> {
+    match &object.kind {
+        DrawKind::Fixed(FixedPart::Floor) => {
+            let floor = &world.scene.floor;
+            let key = shape_key(1, &[floor.half_x, floor.half_z]);
+            Some(PackedDraw::Shape {
+                key,
+                model: translation(floor.position.x, 0.0, floor.position.z),
+                color,
+                source: ShapeSource::Floor {
+                    half_x: floor.half_x,
+                    half_z: floor.half_z,
+                },
+            })
+        }
+        DrawKind::Fixed(FixedPart::Wall(index)) => {
+            let wall = world.scene.walls.get(*index)?;
+            let half = [wall.half_x, wall.height * 0.5, wall.half_z];
+            let key = shape_key(2, &[half[0], half[1], half[2], 0.0]);
+            Some(PackedDraw::Shape {
+                key,
+                model: translation(wall.position.x, wall.height * 0.5, wall.position.z),
+                color,
+                source: ShapeSource::Box { half, top: false },
+            })
+        }
+        DrawKind::Fixed(FixedPart::Solid(index)) => {
+            let solid = world.scene.solids.get(*index)?;
+            match solid.shape {
+                Shape::Square => {
+                    let half = solid.size * 0.5;
+                    let extent = [half, solid.height * 0.5, half];
+                    let key = shape_key(2, &[extent[0], extent[1], extent[2], 1.0]);
+                    Some(PackedDraw::Shape {
+                        key,
+                        model: translation(solid.position.x, solid.height * 0.5, solid.position.z),
+                        color,
+                        source: ShapeSource::Box {
+                            half: extent,
+                            top: true,
+                        },
+                    })
+                }
+                Shape::Circle => {
+                    let radius = solid.size * 0.5;
+                    let key = shape_key(3, &[radius, solid.height]);
+                    Some(PackedDraw::Shape {
+                        key,
+                        model: translation(solid.position.x, 0.0, solid.position.z),
+                        color,
+                        source: ShapeSource::Cylinder {
+                            radius,
+                            height: solid.height,
+                        },
+                    })
+                }
+            }
+        }
+        DrawKind::Mesh { vertices, pose, .. } => {
+            let key = shape_key_positions(4, vertices);
+            Some(PackedDraw::Shape {
+                key,
+                model: *pose,
+                color,
+                source: ShapeSource::Mesh(vertices.clone()),
+            })
+        }
+        DrawKind::Particles { .. } => {
+            let mut verts = Vec::new();
+            push_object(&mut verts, world, object, eye, place);
+            if verts.is_empty() {
+                None
+            } else {
+                Some(PackedDraw::Dynamic(verts))
+            }
+        }
+        DrawKind::Shader {
+            space: ShaderSpace::Mesh,
+            displacement: Some(map),
+            ..
+        } => {
+            let mut baked = Vec::new();
+            push_height(&mut baked, map, [1.0, 1.0, 1.0]);
+            if baked.is_empty() {
+                return None;
+            }
+            let key = shape_key_verts(5, &baked);
+            Some(PackedDraw::Shape {
+                key,
+                model: crate::world::identity_pose(),
+                color,
+                source: ShapeSource::Baked(baked),
+            })
+        }
+        DrawKind::Shader { .. } => None,
+    }
+}
+
+fn shape_key(tag: u64, values: &[f32]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    tag.hash(&mut hasher);
+    for value in values {
+        value.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn shape_key_positions(tag: u64, positions: &[[f32; 3]]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    tag.hash(&mut hasher);
+    for position in positions {
+        for value in position {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn shape_key_verts(tag: u64, verts: &[GpuVertex]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    tag.hash(&mut hasher);
+    for vertex in verts {
+        for value in vertex.pos {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn push_floor_local(out: &mut Vec<GpuVertex>, half_x: f32, half_z: f32, color: [f32; 3]) {
+    let n = [0.0, 1.0, 0.0];
+    push_tri(
+        out,
+        [-half_x, 0.0, -half_z],
+        [half_x, 0.0, -half_z],
+        [half_x, 0.0, half_z],
+        n,
+        color,
+    );
+    push_tri(
+        out,
+        [-half_x, 0.0, -half_z],
+        [half_x, 0.0, half_z],
+        [-half_x, 0.0, half_z],
+        n,
+        color,
+    );
+}
+
+/// Corners of the floor, walls, and solids the shaded draw would rasterize.
+/// Each triangle is three positions. A second object on the same faces adds its corners.
+pub(crate) fn shape_corners(world: &World, view_proj: &[f32; 16]) -> Vec<[f32; 3]> {
+    let mut verts = Vec::new();
+    for object in &world.objects {
+        if object.hidden || !crate::world::in_view(view_proj, object.bounds) {
+            continue;
+        }
+        if !matches!(object.kind, DrawKind::Fixed(_)) {
+            continue;
+        }
+        push_object(&mut verts, world, object, [0.0, 0.0, 0.0], None);
+    }
+    verts.into_iter().map(|vert| vert.pos).collect()
 }
 
 /// Bytes matching the std430 scene block the shaders read.
@@ -276,6 +582,20 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     push_f32(&mut bytes, pack.floor_color[0]);
     push_f32(&mut bytes, pack.floor_color[1]);
     push_f32(&mut bytes, pack.floor_color[2]);
+    for cascade in &pack.cascades {
+        push_f32(&mut bytes, cascade.spacing);
+        push_f32(&mut bytes, cascade.t0);
+        push_f32(&mut bytes, cascade.t1);
+        push_f32(&mut bytes, cascade.origin_x);
+        push_f32(&mut bytes, cascade.origin_z);
+        push_f32(&mut bytes, cascade.count_x as f32);
+        push_f32(&mut bytes, cascade.count_z as f32);
+        push_f32(&mut bytes, cascade.dirs as f32);
+        push_f32(&mut bytes, cascade.offset as f32);
+        push_f32(&mut bytes, 0.0);
+        push_f32(&mut bytes, 0.0);
+        push_f32(&mut bytes, 0.0);
+    }
     bytes
 }
 
@@ -287,23 +607,6 @@ pub fn overlay_vertex(pos: [f32; 3], color: [f32; 3]) -> GpuVertex {
         shade: 0.0,
         uv: [-1.0, -1.0],
     }
-}
-
-fn field_grid(world: &World) -> (u32, u32, f32, f32, f32, f32, f32, f32) {
-    let spacing = 0.16_f32;
-    let origin_x = world.scene.floor.position.x - world.scene.floor.half_x;
-    let origin_z = world.scene.floor.position.z - world.scene.floor.half_z;
-    let span_x = world.scene.floor.half_x * 2.0;
-    let span_z = world.scene.floor.half_z * 2.0;
-    let count_x = ((span_x / spacing).ceil() as u32).clamp(1, FIELD_GRID);
-    let count_z = ((span_z / spacing).ceil() as u32).clamp(1, FIELD_GRID);
-    let span = span_x.max(span_z).max(1.0);
-    let near_end = (span * 0.12).max(spacing * 4.0);
-    let far_end = (span * 0.85).max(near_end * 2.0);
-    let world_end = (span * 4.0).max(far_end * 2.0);
-    (
-        count_x, count_z, spacing, origin_x, origin_z, near_end, far_end, world_end,
-    )
 }
 
 fn lamps_of(world: &World) -> Vec<GpuLamp> {
@@ -598,23 +901,22 @@ struct AtlasPlace {
     y: u32,
     atlas_w: u32,
     atlas_h: u32,
+    /// Atlas size the frame rectangle was measured in, before a budget scale.
+    source_w: u32,
+    source_h: u32,
 }
 
-struct Atlas {
-    bytes: Vec<u8>,
+struct AtlasLayout {
+    width: u32,
+    height: u32,
     places: Vec<Option<AtlasPlace>>,
 }
 
-impl Atlas {
-    fn place(&self, index: usize) -> Option<AtlasPlace> {
-        self.places.get(index).copied().flatten()
-    }
-}
-
-fn build_atlas(world: &World, view_proj: &[f32; 16]) -> Atlas {
-    let mut sources: Vec<Option<&ParticleImage>> = Vec::new();
-    for object in &world.objects {
-        let image = match &object.kind {
+fn particle_sources<'a>(world: &'a World, view_proj: &[f32; 16]) -> Vec<Option<&'a ParticleImage>> {
+    world
+        .objects
+        .iter()
+        .map(|object| match &object.kind {
             DrawKind::Particles { image, density, .. }
                 if *density <= 0.0
                     && !object.hidden
@@ -623,16 +925,43 @@ fn build_atlas(world: &World, view_proj: &[f32; 16]) -> Atlas {
                 image.as_ref()
             }
             _ => None,
-        };
-        sources.push(image);
+        })
+        .collect()
+}
+
+fn source_key(sources: &[Option<&ParticleImage>]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    for source in sources {
+        match source {
+            None => 0u8.hash(&mut hasher),
+            Some(image) => {
+                1u8.hash(&mut hasher);
+                image.width.hash(&mut hasher);
+                image.height.hash(&mut hasher);
+                image.pixels.hash(&mut hasher);
+                image.frames.len().hash(&mut hasher);
+                for frame in &image.frames {
+                    frame.x.hash(&mut hasher);
+                    frame.y.hash(&mut hasher);
+                    frame.width.hash(&mut hasher);
+                    frame.height.hash(&mut hasher);
+                }
+            }
+        }
     }
+    hasher.finish()
+}
+
+fn atlas_layout(sources: &[Option<&ParticleImage>]) -> AtlasLayout {
     let mut cursor_x = 0u32;
     let mut cursor_y = 0u32;
     let mut row_h = 0u32;
     let mut used_w = 0u32;
     let mut used_h = 0u32;
     let mut spots: Vec<Option<(u32, u32)>> = Vec::new();
-    for image in &sources {
+    for image in sources {
         let Some(image) = image else {
             spots.push(None);
             continue;
@@ -661,25 +990,11 @@ fn build_atlas(world: &World, view_proj: &[f32; 16]) -> Atlas {
         used_h = used_h.max(cursor_y + image.height);
     }
     if used_w == 0 || used_h == 0 {
-        return Atlas {
-            bytes: image_bytes(0, 0, &[]),
+        return AtlasLayout {
+            width: 0,
+            height: 0,
             places: vec![None; sources.len()],
         };
-    }
-    let mut pixels = vec![0u8; (used_w * used_h * 4) as usize];
-    for (image, spot) in sources.iter().zip(&spots) {
-        let (Some(image), Some((x, y))) = (image, spot) else {
-            continue;
-        };
-        for row in 0..image.height {
-            for col in 0..image.width {
-                let src = ((row * image.width + col) * 4) as usize;
-                let dst = (((y + row) * used_w + x + col) * 4) as usize;
-                if src + 3 < image.pixels.len() && dst + 3 < pixels.len() {
-                    pixels[dst..dst + 4].copy_from_slice(&image.pixels[src..src + 4]);
-                }
-            }
-        }
     }
     let places = spots
         .into_iter()
@@ -689,16 +1004,87 @@ fn build_atlas(world: &World, view_proj: &[f32; 16]) -> Atlas {
                 y,
                 atlas_w: used_w,
                 atlas_h: used_h,
+                source_w: used_w,
+                source_h: used_h,
             })
         })
         .collect();
-    Atlas {
-        bytes: image_bytes(used_w, used_h, &pixels),
+    AtlasLayout {
+        width: used_w,
+        height: used_h,
         places,
     }
 }
 
-fn image_bytes(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
+/// Copy source pixels into one atlas. A cache hit does not call this.
+fn blit_atlas(sources: &[Option<&ParticleImage>], layout: &AtlasLayout) -> Vec<u8> {
+    let mut pixels = vec![0u8; (layout.width * layout.height * 4) as usize];
+    for (image, place) in sources.iter().zip(&layout.places) {
+        let (Some(image), Some(place)) = (image, place) else {
+            continue;
+        };
+        for row in 0..image.height {
+            for col in 0..image.width {
+                let src = ((row * image.width + col) * 4) as usize;
+                let dst = (((place.y + row) * layout.width + place.x + col) * 4) as usize;
+                if src + 3 < image.pixels.len() && dst + 3 < pixels.len() {
+                    pixels[dst..dst + 4].copy_from_slice(&image.pixels[src..src + 4]);
+                }
+            }
+        }
+    }
+    pixels
+}
+
+fn resident_atlas(
+    memory: &mut FrameMemory,
+    world: &World,
+    view_proj: &[f32; 16],
+) -> Vec<Option<AtlasPlace>> {
+    let sources = particle_sources(world, view_proj);
+    let layout = atlas_layout(&sources);
+    if layout.width == 0 || layout.height == 0 {
+        return layout.places;
+    }
+    let key = source_key(&sources);
+    if memory.image_matches(key) {
+        let (width, height) = memory.image_size();
+        memory.admit_image(key, width, height, &[]);
+    } else {
+        let pixels = blit_atlas(&sources, &layout);
+        memory.admit_image(key, layout.width, layout.height, &pixels);
+    }
+    scale_places(layout, memory)
+}
+
+fn scale_places(layout: AtlasLayout, memory: &FrameMemory) -> Vec<Option<AtlasPlace>> {
+    if !memory.image_resident() {
+        return vec![None; layout.places.len()];
+    }
+    let (width, height) = memory.image_size();
+    if width == layout.width && height == layout.height {
+        return layout.places;
+    }
+    if layout.width == 0 || layout.height == 0 || width == 0 || height == 0 {
+        return vec![None; layout.places.len()];
+    }
+    layout
+        .places
+        .into_iter()
+        .map(|place| {
+            place.map(|place| AtlasPlace {
+                x: place.x * width / layout.width,
+                y: place.y * height / layout.height,
+                atlas_w: width,
+                atlas_h: height,
+                source_w: layout.width,
+                source_h: layout.height,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn image_bytes(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
     push_u32(&mut bytes, width);
     push_u32(&mut bytes, height);
@@ -766,8 +1152,11 @@ fn atlas_uv(card: &Card, index: usize, place: Option<AtlasPlace>) -> [f32; 2] {
         return [-1.0, -1.0];
     }
     let frame: ParticleFrame = card.frame;
-    let px = place.x as f32 + frame.x as f32 + corner[0] * frame.width as f32;
-    let py = place.y as f32 + frame.y as f32 + corner[1] * frame.height as f32;
+    // A budget scale shrinks the atlas. The frame rect is still in source pixels.
+    let sx = place.atlas_w as f32 / place.source_w.max(1) as f32;
+    let sy = place.atlas_h as f32 / place.source_h.max(1) as f32;
+    let px = place.x as f32 + (frame.x as f32 + corner[0] * frame.width as f32) * sx;
+    let py = place.y as f32 + (frame.y as f32 + corner[1] * frame.height as f32) * sy;
     [px / place.atlas_w as f32, py / place.atlas_h as f32]
 }
 
@@ -963,42 +1352,6 @@ fn normal_of(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
     }
 }
 
-fn hash_mesh(verts: &[GpuVertex], objects: &[GpuObject], image: &[u8]) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    verts.len().hash(&mut hasher);
-    objects.len().hash(&mut hasher);
-    for object in objects {
-        object.first.hash(&mut hasher);
-        object.count.hash(&mut hasher);
-        object.texture.hash(&mut hasher);
-        for channel in object.color {
-            channel.to_bits().hash(&mut hasher);
-        }
-    }
-    for vertex in verts {
-        for value in vertex
-            .pos
-            .into_iter()
-            .chain(vertex.albedo)
-            .chain(vertex.normal)
-        {
-            value.to_bits().hash(&mut hasher);
-        }
-        vertex.shade.to_bits().hash(&mut hasher);
-        vertex.uv[0].to_bits().hash(&mut hasher);
-        vertex.uv[1].to_bits().hash(&mut hasher);
-    }
-    image.len().hash(&mut hasher);
-    for (index, byte) in image.iter().enumerate() {
-        if index % 64 == 0 {
-            byte.hash(&mut hasher);
-        }
-    }
-    hasher.finish()
-}
-
 fn hash_light(
     lamps: &[GpuLamp],
     occs: &[GpuOcc],
@@ -1064,6 +1417,122 @@ fn hash_light(
     hasher.finish()
 }
 
+/// Placement captured the last time the field was built.
+pub(crate) struct FieldAnchor {
+    eye: [f32; 3],
+    lamps: [GpuLamp; MAX_LAMPS],
+    lamp_count: usize,
+    rest: u64,
+}
+
+impl FieldAnchor {
+    pub(crate) fn capture(pack: &Pack) -> Self {
+        let mut lamps = [GpuLamp {
+            pos: [0.0; 3],
+            color: [0.0; 3],
+        }; MAX_LAMPS];
+        let lamp_count = pack.lamps.len().min(MAX_LAMPS);
+        lamps[..lamp_count].copy_from_slice(&pack.lamps[..lamp_count]);
+        Self {
+            eye: pack.eye,
+            lamps,
+            lamp_count,
+            rest: field_rest(pack),
+        }
+    }
+
+    /// True when `pack` can keep showing the field this anchor built.
+    pub(crate) fn holds(&self, pack: &Pack) -> bool {
+        if field_rest(pack) != self.rest || pack.lamps.len() != self.lamp_count {
+            return false;
+        }
+        // The probe grids stay on the world. A camera move does not rebuild them.
+        for (lamp, old) in pack.lamps.iter().zip(self.lamps.iter()) {
+            if lamp.color.map(f32::to_bits) != old.color.map(f32::to_bits) {
+                return false;
+            }
+            let delta = [
+                lamp.pos[0] - old.pos[0],
+                lamp.pos[1] - old.pos[1],
+                lamp.pos[2] - old.pos[2],
+            ];
+            let dist2 = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
+            if dist2 >= FIELD_PLACE * FIELD_PLACE {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn player(&self) -> [f32; 2] {
+        [self.eye[0], self.eye[2]]
+    }
+}
+
+fn field_rest(pack: &Pack) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    pack.count_x.hash(&mut hasher);
+    pack.count_z.hash(&mut hasher);
+    for value in pack
+        .floor_center
+        .into_iter()
+        .chain([pack.floor_half_x, pack.floor_half_z])
+        .chain(pack.floor_color)
+    {
+        value.to_bits().hash(&mut hasher);
+    }
+    pack.lamps.len().hash(&mut hasher);
+    for lamp in &pack.lamps {
+        for value in lamp.color {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    pack.occs.len().hash(&mut hasher);
+    for occ in &pack.occs {
+        occ.shape.to_bits().hash(&mut hasher);
+        for value in occ
+            .center
+            .into_iter()
+            .chain([occ.half_x, occ.height, occ.half_z, occ.radius])
+            .chain(occ.albedo)
+            .chain([occ.absorption, occ.reflectance, occ.color_mix])
+        {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    for value in pack
+        .fire
+        .position
+        .into_iter()
+        .chain(pack.fire.color)
+        .chain([pack.fire.strength])
+    {
+        value.to_bits().hash(&mut hasher);
+    }
+    pack.puffs.len().hash(&mut hasher);
+    for puff in &pack.puffs {
+        for value in puff.center.into_iter().chain([puff.radius, puff.density]) {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Spacing of the cascade that covers `(x, z)`. The floor uses the near grid. Outside it, the world grid.
+pub fn probe_spacing(world: &World, _eye: [f32; 3], x: f32, z: f32) -> f32 {
+    let plans = crate::field::cascade_plans(&world.scene.floor);
+    let floor = &world.scene.floor;
+    let on_floor = (x - floor.position.x).abs() <= floor.half_x
+        && (z - floor.position.z).abs() <= floor.half_z;
+    if on_floor {
+        plans[0].spacing
+    } else {
+        plans[2].spacing
+    }
+}
+
 fn push_u32(bytes: &mut Vec<u8>, value: u32) {
     bytes.extend_from_slice(&value.to_ne_bytes());
 }
@@ -1076,6 +1545,7 @@ fn push_f32(bytes: &mut Vec<u8>, value: f32) {
 mod tests {
     use super::*;
     use crate::world::World;
+    use crate::FrameMemory;
     use genos_scene::{view_proj, Camera, Floor, Light, Scene, Shape, Solid, Vec3, Wall};
 
     #[test]
@@ -1116,25 +1586,99 @@ mod tests {
         let camera = Camera::opening();
         let view = view_proj(&camera, 16.0 / 9.0);
         let eye = [camera.position.x, camera.position.y, camera.position.z];
-        let pack = pack_frame(&world, &view, eye);
+        let mut memory = FrameMemory::default();
+        let pack = pack_frame(&world, &view, eye, &mut memory);
         assert!(pack.objects.len() >= 2);
-        let mut cursor = 0u32;
         for object in &pack.objects {
-            assert_eq!(object.first, cursor, "object ranges must be packed");
             assert!(object.count > 0);
             assert_eq!(object.texture, 0, "an empty texture reference stays zero");
-            cursor += object.count;
         }
-        assert_eq!(cursor, pack.verts.len() as u32);
         let bytes = scene_bytes(&pack);
         let obj_count = u32::from_ne_bytes(bytes[8..12].try_into().unwrap());
         assert_eq!(obj_count, pack.objects.len() as u32);
+        let solid = pack.draws.iter().find_map(|draw| match draw {
+            PackedDraw::Shape {
+                key,
+                model,
+                source: ShapeSource::Box { top: true, .. },
+                ..
+            } => Some((*key, *model)),
+            _ => None,
+        });
+        let (key, model) = solid.expect("the solid keeps a shape block");
         let mut moved = world.clone();
         moved.scene.solids[0].position.x += 1.5;
-        let again = pack_frame(&moved, &view, eye);
+        let again = pack_frame(&moved, &view, eye, &mut memory);
+        let again_key = again.draws.iter().find_map(|draw| match draw {
+            PackedDraw::Shape {
+                key: moved_key,
+                source: ShapeSource::Box { top: true, .. },
+                ..
+            } => Some(*moved_key),
+            _ => None,
+        });
+        assert_eq!(Some(key), again_key, "a moved solid keeps the shape key");
+        let moved_model = again.draws.iter().find_map(|draw| match draw {
+            PackedDraw::Shape {
+                key: moved_key,
+                model,
+                source: ShapeSource::Box { .. },
+                ..
+            } if *moved_key == key => Some(*model),
+            _ => None,
+        });
         assert_ne!(
-            pack.mesh_key, again.mesh_key,
-            "moving a solid kept the mesh key"
+            model[12],
+            moved_model.expect("the moved solid keeps the same block")[12]
         );
+    }
+
+    fn pack_at(eye: [f32; 3], lamp: [f32; 3], solid_x: f32) -> Pack {
+        let scene = Scene {
+            floor: Floor {
+                position: Vec3::new(0.0, 0.0, 0.0),
+                half_x: 8.0,
+                half_z: 8.0,
+                color: [1.0, 1.0, 1.0],
+            },
+            walls: Vec::new(),
+            solids: vec![Solid {
+                shape: Shape::Square,
+                position: Vec3::new(solid_x, 0.0, 0.0),
+                size: 1.0,
+                height: 1.0,
+                color: [1.0, 0.0, 0.0],
+                absorption: 0.0,
+                reflectance: -1.0,
+                color_mix: -1.0,
+            }],
+            lights: vec![Light {
+                position: Vec3::new(lamp[0], lamp[1], lamp[2]),
+                color: [1.0, 1.0, 1.0],
+            }],
+        };
+        let world = World::from_scene(scene);
+        let camera = Camera::opening();
+        let view = view_proj(&camera, 1.0);
+        let mut memory = FrameMemory::default();
+        pack_frame(&world, &view, eye, &mut memory)
+    }
+
+    #[test]
+    fn a_short_move_keeps_the_field_and_a_real_move_rebuilds_it() {
+        let eye = [0.0, 1.7, 0.0];
+        let lamp = [0.0, 7.0, 0.0];
+        let anchor = FieldAnchor::capture(&pack_at(eye, lamp, 0.0));
+        assert!(anchor.holds(&pack_at([0.2, 1.7, -0.1], lamp, 0.0)));
+        assert!(anchor.holds(&pack_at(eye, [0.2, 7.0, 0.0], 0.0)));
+        assert!(
+            anchor.holds(&pack_at([2.0, 1.7, 0.0], lamp, 0.0)),
+            "a camera move rebuilt the world grid"
+        );
+        assert!(!anchor.holds(&pack_at(eye, [0.0, 7.0, 2.0], 0.0)));
+        assert!(!anchor.holds(&pack_at(eye, lamp, 1.5)));
+        let mut tinted = pack_at(eye, lamp, 0.0);
+        tinted.lamps[0].color = [0.2, 0.2, 0.2];
+        assert!(!anchor.holds(&tinted));
     }
 }

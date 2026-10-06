@@ -1,0 +1,125 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src {
+    uint pixels[];
+} src;
+
+layout(std430, set = 0, binding = 1) writeonly buffer Dst {
+    uint pixels[];
+} dst;
+
+layout(push_constant) uniform Push {
+    uint width;
+    uint height;
+    uint src_width;
+    uint bgra;
+} push;
+
+uint load_at(int x, int y) {
+    x = clamp(x, 0, int(push.width) - 1);
+    y = clamp(y, 0, int(push.height) - 1);
+    return src.pixels[uint(y) * push.src_width + uint(x)];
+}
+
+vec3 unpack_rgb(uint packed) {
+    float c0 = float(packed & 255u) / 255.0;
+    float c1 = float((packed >> 8u) & 255u) / 255.0;
+    float c2 = float((packed >> 16u) & 255u) / 255.0;
+    if (push.bgra == 1u) {
+        return vec3(c2, c1, c0);
+    }
+    return vec3(c0, c1, c2);
+}
+
+uint pack_rgb(vec3 rgb) {
+    uint r = uint(clamp(rgb.r, 0.0, 1.0) * 255.0 + 0.5);
+    uint g = uint(clamp(rgb.g, 0.0, 1.0) * 255.0 + 0.5);
+    uint b = uint(clamp(rgb.b, 0.0, 1.0) * 255.0 + 0.5);
+    if (push.bgra == 1u) {
+        return b | (g << 8u) | (r << 16u) | (255u << 24u);
+    }
+    return r | (g << 8u) | (b << 16u) | (255u << 24u);
+}
+
+float luma_of(vec3 rgb) {
+    return dot(rgb, vec3(0.299, 0.587, 0.114));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(push.width) || pixel.y >= int(push.height)) {
+        return;
+    }
+    uint packed = load_at(pixel.x, pixel.y);
+    uint index = uint(pixel.y) * push.width + uint(pixel.x);
+    vec3 rgb_m = unpack_rgb(packed);
+    float luma_m = luma_of(rgb_m);
+    float luma_n = luma_of(unpack_rgb(load_at(pixel.x, pixel.y - 1)));
+    float luma_s = luma_of(unpack_rgb(load_at(pixel.x, pixel.y + 1)));
+    float luma_e = luma_of(unpack_rgb(load_at(pixel.x + 1, pixel.y)));
+    float luma_w = luma_of(unpack_rgb(load_at(pixel.x - 1, pixel.y)));
+    float luma_nw = luma_of(unpack_rgb(load_at(pixel.x - 1, pixel.y - 1)));
+    float luma_ne = luma_of(unpack_rgb(load_at(pixel.x + 1, pixel.y - 1)));
+    float luma_sw = luma_of(unpack_rgb(load_at(pixel.x - 1, pixel.y + 1)));
+    float luma_se = luma_of(unpack_rgb(load_at(pixel.x + 1, pixel.y + 1)));
+    float max_l = max(luma_m, max(max(luma_n, luma_s), max(luma_e, luma_w)));
+    max_l = max(max_l, max(max(luma_nw, luma_ne), max(luma_sw, luma_se)));
+    float min_l = min(luma_m, min(min(luma_n, luma_s), min(luma_e, luma_w)));
+    min_l = min(min_l, min(min(luma_nw, luma_ne), min(luma_sw, luma_se)));
+    float contrast = max_l - min_l;
+    // Flat areas keep the source texel. A real edge is above this contrast.
+    if (contrast < max(0.0312, max_l * 0.125)) {
+        dst.pixels[index] = packed;
+        return;
+    }
+    float edge_h = abs(luma_n + luma_s - 2.0 * luma_m) * 2.0
+        + abs(luma_nw + luma_ne - 2.0 * luma_n)
+        + abs(luma_sw + luma_se - 2.0 * luma_s);
+    float edge_v = abs(luma_e + luma_w - 2.0 * luma_m) * 2.0
+        + abs(luma_nw + luma_sw - 2.0 * luma_w)
+        + abs(luma_ne + luma_se - 2.0 * luma_e);
+    bool horizontal = edge_h >= edge_v;
+    float luma_neg = horizontal ? luma_n : luma_w;
+    float luma_pos = horizontal ? luma_s : luma_e;
+    float grad_neg = abs(luma_neg - luma_m);
+    float grad_pos = abs(luma_pos - luma_m);
+    int pair = grad_pos >= grad_neg ? 1 : -1;
+    float luma_end = pair > 0 ? luma_pos : luma_neg;
+    float gradient = max(grad_pos, grad_neg);
+    float luma_avg = 0.5 * (luma_m + luma_end);
+    ivec2 along = horizontal ? ivec2(1, 0) : ivec2(0, 1);
+    ivec2 perp = horizontal ? ivec2(0, pair) : ivec2(pair, 0);
+    int pos_end = 12;
+    int neg_end = 12;
+    for (int step = 1; step <= 12; step++) {
+        if (pos_end == 12) {
+            ivec2 at = pixel + along * step + perp;
+            float sample_l = luma_of(unpack_rgb(load_at(at.x, at.y)));
+            if (abs(sample_l - luma_avg) >= gradient * 0.25) {
+                pos_end = step;
+            }
+        }
+        if (neg_end == 12) {
+            ivec2 at = pixel - along * step + perp;
+            float sample_l = luma_of(unpack_rgb(load_at(at.x, at.y)));
+            if (abs(sample_l - luma_avg) >= gradient * 0.25) {
+                neg_end = step;
+            }
+        }
+    }
+    float span = float(pos_end + neg_end);
+    float shorter = float(min(pos_end, neg_end));
+    float pixel_offset = clamp(0.5 - shorter / span, 0.0, 1.0);
+    float neighbor_l = (luma_n + luma_s + luma_e + luma_w) * 0.25;
+    float subpixel = clamp((abs(neighbor_l - luma_m) / contrast - 0.25) * (1.0 / 0.75), 0.0, 1.0);
+    subpixel = subpixel * subpixel;
+    float blend = max(pixel_offset, subpixel);
+    if (blend < 1.0 / 255.0) {
+        dst.pixels[index] = packed;
+        return;
+    }
+    vec3 rgb_end = unpack_rgb(load_at(pixel.x + perp.x, pixel.y + perp.y));
+    dst.pixels[index] = pack_rgb(mix(rgb_m, rgb_end, blend));
+}

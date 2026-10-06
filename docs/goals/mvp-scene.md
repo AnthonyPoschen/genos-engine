@@ -20,7 +20,7 @@ The ground is the XZ plane. Y is up, and the camera height stays on Y. X is acro
 
 In the viewport, the top-left is `(0, 0)` and the bottom-right is `(1, 1)`. Vulkan NDC `y > 0` is the lower half of that viewport. A floor point in front of the camera and below the eye lands in that lower half. A point to the camera's right has NDC `x > 0`.
 
-Cascade rays march on the ground plane. Near spacing is 16 cm. Interval length follows the floor size, so a larger floor keeps the same cell and a longer range. A nearer range keeps more positions and fewer directions than a farther range. World probes sit on a coarser world grid past the floor and fill rays the nearer ranges miss. A hit takes the color of that material. Probe colors are blended, and each floor vertex samples that blend. The renderer builds the field from the current scene when a light or an occluder changes, and keeps it until then. The notes are in [Lighting](../lighting.md).
+Cascade rays march on the ground plane. Spacing is finer beside the player than at the far side of the floor. Interval length follows the floor size. A nearer range keeps more positions and fewer directions than a farther range. World probes sit on a coarser world grid past the floor and fill rays the nearer ranges miss. A hit takes the color of that material. Probe colors are blended, and each floor vertex samples that blend. The renderer builds the field from the current scene when the player, a light, or an occluder changes, and keeps it until then. The notes are in [Lighting](../lighting.md).
 
 ## Input
 
@@ -40,7 +40,7 @@ The component follows `input-zig`.
 
 The input map is a character controller, and it drives the camera.
 
-- The `move` action binds `W`, `A`, `S`, `D`, and the left stick.
+- The `move` action binds `W`, `A`, `S`, `D`, `I`, `J`, `K`, `L`, and the left stick.
 - `move` travels on the ground plane relative to the camera yaw.
 - Mouse movement and the right stick change yaw and pitch.
 - Pitch stops before the camera looks straight up or straight down.

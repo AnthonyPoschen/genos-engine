@@ -1,11 +1,8 @@
 use genos_math::Vec3;
 
 /// Diffuse reflectance used when a material does not set one.
-/// A white surface returns this share of the light that arrives.
-pub const DEFAULT_REFLECTANCE: f32 = 0.55;
-/// Incoming bounce share used with the default reflectance.
-/// It matches the tuned cascade so a corner still carries light.
-pub const DEFAULT_BOUNCE: f32 = 0.68;
+/// This is `1 / π`. A white surface returns that share of the irradiance.
+pub const DEFAULT_REFLECTANCE: f32 = std::f32::consts::FRAC_1_PI;
 
 /// Resolve a material reflectance. A negative value selects the game default.
 pub fn reflectance_of(value: f32) -> f32 {
@@ -27,9 +24,9 @@ pub fn color_mix_of(value: f32) -> f32 {
 
 /// Light leaving a diffuse hit.
 ///
-/// The lamp color and the previous bounce are multiplied by the surface color.
+/// The lamp and the previous bounce are one irradiance. The surface color tints both.
 /// `color_mix` is 1 for that full tint, and 0 to keep the arriving color.
-/// A negative `reflectance` keeps the built-in direct and bounce shares.
+/// A negative `reflectance` uses [`DEFAULT_REFLECTANCE`].
 pub fn bounce_radiance(
     albedo: [f32; 3],
     reflectance: f32,
@@ -43,14 +40,7 @@ pub fn bounce_radiance(
         1.0 + (albedo[1] - 1.0) * mix,
         1.0 + (albedo[2] - 1.0) * mix,
     ];
-    if reflectance < 0.0 {
-        return [
-            tint[0] * (direct * DEFAULT_REFLECTANCE + incoming[0] * DEFAULT_BOUNCE),
-            tint[1] * (direct * DEFAULT_REFLECTANCE + incoming[1] * DEFAULT_BOUNCE),
-            tint[2] * (direct * DEFAULT_REFLECTANCE + incoming[2] * DEFAULT_BOUNCE),
-        ];
-    }
-    let reflect = reflectance.clamp(0.0, 1.0);
+    let reflect = reflectance_of(reflectance);
     [
         tint[0] * reflect * (direct + incoming[0]),
         tint[1] * reflect * (direct + incoming[1]),

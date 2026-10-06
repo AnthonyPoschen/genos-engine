@@ -6,7 +6,7 @@ The hosting product stays in the `genos` repository.
 
 ## Run
 
-`make run` opens the lit scene as a normal window. Click it, then use `WASD` to walk and the mouse to look. `Escape` releases the pointer. Close the window to quit.
+`make run` opens the lit scene as a normal window. The window shows the frame rate and the stage times. Click it, then use `WASD` or `IJKL` to walk and the mouse to look. `Escape` releases the pointer. Close the window to quit. Press `P` to pause that graph. Drag across the graph to inspect a time interval. Press `R` to follow live frames again. Pass `--profile detailed` to record GPU time. Pass `--profile off` to hide the profiler.
 
 Checks use `genos-camera --proof`. That window stays floating and does not take focus.
 
