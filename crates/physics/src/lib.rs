@@ -1,8 +1,12 @@
 //! One collision step for dynamic bodies.
 //!
-//! `step` copies the world and returns the next world. Gravity, spring forces,
-//! and contact impulses run in that call. The call does not allocate.
-//! Gravity is along -Y. There is no air drag.
+//! `step` copies the world and returns the next world. Gravity, a move wish,
+//! spring forces, and contact run in that call. The call does not allocate.
+//! Gravity is along -Y. There is no air drag. Shapes are a sphere, a capsule,
+//! a box, a plane, and a mesh reduced to a few convex pieces.
+
+mod contact;
+mod mesh;
 
 use genos_math::{Quat, Vec3};
 
@@ -12,17 +16,140 @@ pub const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
 /// Bodies stored in one world. A step does not grow this set.
 pub const MAX_BODIES: usize = 32;
 
-/// A sphere, or a static plane. The plane normal points into the free half.
+/// Vertices stored on one convex hull piece.
+pub const MAX_HULL_VERTS: usize = 12;
+
+/// Triangle faces stored on one convex hull piece.
+pub const MAX_HULL_FACES: usize = 20;
+
+/// Convex pieces stored on one mesh collider.
+pub const MAX_MESH_PIECES: usize = 6;
+
+/// One outward triangle of a convex hull, in the body's local space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HullFace {
+    pub normal: Vec3,
+    pub offset: f32,
+    pub index: [u8; 3],
+}
+
+impl HullFace {
+    const EMPTY: Self = Self {
+        normal: Vec3::ZERO,
+        offset: 0.0,
+        index: [0, 0, 0],
+    };
+}
+
+/// A convex polyhedron in the body's local space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hull {
+    pub verts: [Vec3; MAX_HULL_VERTS],
+    pub vert_count: u8,
+    pub faces: [HullFace; MAX_HULL_FACES],
+    pub face_count: u8,
+}
+
+impl Hull {
+    const EMPTY: Self = Self {
+        verts: [Vec3::ZERO; MAX_HULL_VERTS],
+        vert_count: 0,
+        faces: [HullFace::EMPTY; MAX_HULL_FACES],
+        face_count: 0,
+    };
+}
+
+/// One convex piece of a simplified mesh.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Piece {
+    /// Axis-aligned box in the body's local space.
+    Cuboid {
+        center: Vec3,
+        half: Vec3,
+    },
+    Hull(Hull),
+}
+
+impl Piece {
+    const EMPTY: Self = Self::Cuboid {
+        center: Vec3::ZERO,
+        half: Vec3::ZERO,
+    };
+
+    fn faces(self) -> usize {
+        match self {
+            Self::Cuboid { .. } => 6,
+            Self::Hull(hull) => hull.face_count as usize,
+        }
+    }
+}
+
+/// A mesh reduced to a handful of convex pieces before contact.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mesh {
+    pub pieces: [Piece; MAX_MESH_PIECES],
+    pub count: u8,
+}
+
+impl Mesh {
+    const EMPTY: Self = Self {
+        pieces: [Piece::EMPTY; MAX_MESH_PIECES],
+        count: 0,
+    };
+
+    fn pieces(&self) -> &[Piece] {
+        &self.pieces[..self.count as usize]
+    }
+}
+
+/// A sphere, capsule, box, static plane, or simplified mesh.
+/// The plane normal points into the free half.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shape {
     Sphere {
         radius: f32,
+    },
+    /// Segment along local Y. `half_height` is the segment half-length.
+    Capsule {
+        radius: f32,
+        half_height: f32,
+    },
+    /// Oriented box. `half_extents` is half the size on each local axis.
+    Box {
+        half_extents: Vec3,
     },
     /// `normal · point = offset`.
     Plane {
         normal: Vec3,
         offset: f32,
     },
+    Mesh(Mesh),
+}
+
+impl Shape {
+    /// Faces the contact step uses. A mesh reports the reduced piece faces.
+    pub fn contact_faces(self) -> usize {
+        match self {
+            Self::Mesh(mesh) => mesh.pieces().iter().map(|piece| piece.faces()).sum(),
+            Self::Box { .. } => 6,
+            Self::Plane { .. } => 1,
+            Self::Sphere { .. } | Self::Capsule { .. } => 1,
+        }
+    }
+
+    /// Convex pieces the contact step tests. A primitive is one piece.
+    pub fn contact_pieces(self) -> usize {
+        match self {
+            Self::Mesh(mesh) => mesh.count as usize,
+            Self::Plane { .. } => 0,
+            Self::Sphere { .. } | Self::Capsule { .. } | Self::Box { .. } => 1,
+        }
+    }
+
+    /// Build a collider from a triangle list. A complex mesh is reduced first.
+    pub fn from_triangles(triangles: &[[Vec3; 3]]) -> Self {
+        Self::Mesh(mesh::simplify(triangles))
+    }
 }
 
 /// A support spring. It pushes while the body is closer than `rest_length`.
@@ -45,20 +172,32 @@ pub struct Body {
     pub friction: f32,
     pub shape: Shape,
     pub spring: Option<Spring>,
+    /// When set, the step copies `wish.x` and `wish.z` into the velocity before contact.
+    pub motor: bool,
+    /// Desired horizontal velocity. Contact can remove the blocked part.
+    pub wish: Vec3,
 }
 
 impl Body {
     pub const fn sphere(position: Vec3, mass: f32, radius: f32) -> Self {
-        Self {
+        Self::new(position, mass, Shape::Sphere { radius })
+    }
+
+    /// Upright when `orientation` is identity. The segment follows local Y.
+    pub const fn capsule(position: Vec3, mass: f32, radius: f32, half_height: f32) -> Self {
+        Self::new(
             position,
-            orientation: Quat::IDENTITY,
-            velocity: Vec3::ZERO,
-            inverse_mass: if mass > 0.0 { 1.0 / mass } else { 0.0 },
-            restitution: 0.0,
-            friction: 0.0,
-            shape: Shape::Sphere { radius },
-            spring: None,
-        }
+            mass,
+            Shape::Capsule {
+                radius,
+                half_height,
+            },
+        )
+    }
+
+    /// Box centered on `position`. Axes follow `orientation`.
+    pub const fn cuboid(position: Vec3, mass: f32, half_extents: Vec3) -> Self {
+        Self::new(position, mass, Shape::Box { half_extents })
     }
 
     pub fn plane(normal: Vec3, offset: f32) -> Self {
@@ -68,15 +207,26 @@ impl Body {
         } else {
             normal
         };
+        Self::new(Vec3::ZERO, 0.0, Shape::Plane { normal, offset })
+    }
+
+    /// Static when `mass` is 0. Vertices stay in the body's local space.
+    pub fn mesh(position: Vec3, mass: f32, triangles: &[[Vec3; 3]]) -> Self {
+        Self::new(position, mass, Shape::from_triangles(triangles))
+    }
+
+    const fn new(position: Vec3, mass: f32, shape: Shape) -> Self {
         Self {
-            position: Vec3::ZERO,
+            position,
             orientation: Quat::IDENTITY,
             velocity: Vec3::ZERO,
-            inverse_mass: 0.0,
+            inverse_mass: if mass > 0.0 { 1.0 / mass } else { 0.0 },
             restitution: 0.0,
             friction: 0.0,
-            shape: Shape::Plane { normal, offset },
+            shape,
             spring: None,
+            motor: false,
+            wish: Vec3::ZERO,
         }
     }
 
@@ -131,6 +281,10 @@ pub fn step(world: &World, dt: f32) -> World {
     let live = next.count;
     for body in &mut next.bodies[..live] {
         apply_forces(body, next.gravity, dt);
+        if body.motor {
+            body.velocity.x = body.wish.x;
+            body.velocity.z = body.wish.z;
+        }
     }
     for body in &mut next.bodies[..live] {
         if body.inverse_mass == 0.0 {
@@ -138,7 +292,9 @@ pub fn step(world: &World, dt: f32) -> World {
         }
         body.position += body.velocity * dt;
     }
-    collide(&mut next.bodies[..live]);
+    for _ in 0..4 {
+        contact::collide(&mut next.bodies[..live]);
+    }
     next
 }
 
@@ -164,88 +320,4 @@ fn apply_forces(body: &mut Body, gravity: Vec3, dt: f32) {
         }
     }
     body.velocity += acceleration * dt;
-}
-
-fn collide(bodies: &mut [Body]) {
-    for i in 0..bodies.len() {
-        for j in (i + 1)..bodies.len() {
-            let (left, right) = bodies.split_at_mut(j);
-            collide_pair(&mut left[i], &mut right[0]);
-        }
-    }
-}
-
-fn collide_pair(a: &mut Body, b: &mut Body) {
-    match (a.shape, b.shape) {
-        (Shape::Sphere { radius: ra }, Shape::Sphere { radius: rb }) => solve_spheres(a, b, ra, rb),
-        (Shape::Sphere { radius }, Shape::Plane { normal, offset }) => {
-            solve_sphere_plane(a, b, radius, normal, offset);
-        }
-        (Shape::Plane { normal, offset }, Shape::Sphere { radius }) => {
-            solve_sphere_plane(b, a, radius, normal, offset);
-        }
-        (Shape::Plane { .. }, Shape::Plane { .. }) => {}
-    }
-}
-
-fn solve_spheres(a: &mut Body, b: &mut Body, ra: f32, rb: f32) {
-    let delta = a.position - b.position;
-    let radius = ra + rb;
-    let dist_sq = delta.length_squared();
-    if dist_sq > radius * radius {
-        return;
-    }
-    let dist = dist_sq.sqrt();
-    let normal = if dist > 1.0e-8 {
-        delta * (1.0 / dist)
-    } else {
-        Vec3::Y
-    };
-    solve_contact(a, b, normal, radius - dist);
-}
-
-fn solve_sphere_plane(sphere: &mut Body, plane: &mut Body, radius: f32, normal: Vec3, offset: f32) {
-    let dist = normal.dot(sphere.position) - offset;
-    if dist > radius {
-        return;
-    }
-    solve_contact(sphere, plane, normal, radius - dist);
-}
-
-/// Contact restitution is the larger of the two bodies. Friction is the larger too.
-fn solve_contact(a: &mut Body, b: &mut Body, normal: Vec3, penetration: f32) {
-    let inv = a.inverse_mass + b.inverse_mass;
-    if inv <= 0.0 {
-        return;
-    }
-    let rel = a.velocity - b.velocity;
-    let vn = rel.dot(normal);
-    if vn < 0.0 {
-        let restitution = a.restitution.max(b.restitution).clamp(0.0, 1.0);
-        let j = -(1.0 + restitution) * vn / inv;
-        let impulse = normal * j;
-        a.velocity += impulse * a.inverse_mass;
-        b.velocity -= impulse * b.inverse_mass;
-
-        let tangent_vec = rel - normal * vn;
-        let vt = tangent_vec.length();
-        if vt > 1.0e-6 {
-            let friction = a.friction.max(b.friction).max(0.0);
-            if friction > 0.0 {
-                let tangent = tangent_vec * (1.0 / vt);
-                let jt = (-vt / inv).clamp(-friction * j, friction * j);
-                let kick = tangent * jt;
-                a.velocity += kick * a.inverse_mass;
-                b.velocity -= kick * b.inverse_mass;
-            }
-        }
-    }
-    const SLOP: f32 = 0.001;
-    const PERCENT: f32 = 0.8;
-    let depth = penetration - SLOP;
-    if depth > 0.0 {
-        let correction = normal * (depth * PERCENT / inv);
-        a.position += correction * a.inverse_mass;
-        b.position -= correction * b.inverse_mass;
-    }
 }
