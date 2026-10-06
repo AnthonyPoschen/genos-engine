@@ -10,7 +10,7 @@ mod system;
 
 pub use action::{character_controller, Action2dBinding, ActionMap, BoundInput};
 pub use code::{name, parse, InputCode};
-pub use device::{Axis2d, DeviceKind, DeviceView, FIRST_GAMEPAD_ID, DEFAULT_STICK_DEADZONE};
+pub use device::{Axis2d, DeviceKind, DeviceView, DEFAULT_STICK_DEADZONE, FIRST_GAMEPAD_ID};
 pub use system::InputSystem;
 
 #[cfg(test)]
@@ -59,18 +59,30 @@ mod tests {
         pad.left_stick.y = 0.04;
         pad.left_stick.x = 0.2;
         let mixed = pad.axis2d(InputCode::gamepad_left_stick).unwrap();
-        assert!((mixed.x - 0.2).abs() < 1.0e-5, "a real tilt was dropped: {mixed:?}");
+        assert!(
+            (mixed.x - 0.2).abs() < 1.0e-5,
+            "a real tilt was dropped: {mixed:?}"
+        );
         assert_eq!(mixed.y, 0.0);
         pad.left_stick.x = 1.0;
         let full = pad.axis2d(InputCode::gamepad_left_stick).unwrap();
-        assert!((full.x - 1.0).abs() < 1.0e-5, "full tilt was reduced: {full:?}");
+        assert!(
+            (full.x - 1.0).abs() < 1.0e-5,
+            "full tilt was reduced: {full:?}"
+        );
         pad.left_stick.x = 0.2;
         let partial = pad.axis2d(InputCode::gamepad_left_stick).unwrap();
-        assert!((partial.x - 0.2).abs() < 1.0e-5, "a tilt past the rest was scaled: {partial:?}");
+        assert!(
+            (partial.x - 0.2).abs() < 1.0e-5,
+            "a tilt past the rest was scaled: {partial:?}"
+        );
         pad.set_stick_deadzone(InputCode::gamepad_left_stick, 0.0);
         pad.left_stick.x = 0.04;
         let open = pad.axis2d(InputCode::gamepad_left_stick).unwrap();
-        assert!(open.x > 0.03, "clearing the deadzone should keep the drift, got {open:?}");
+        assert!(
+            open.x > 0.03,
+            "clearing the deadzone should keep the drift, got {open:?}"
+        );
         input.set_stick_deadzone(0.2);
         let pad = input.gamepad(0).unwrap();
         assert_eq!(pad.left_stick_deadzone, 0.2);
@@ -109,7 +121,10 @@ mod tests {
         other.view.connected = true;
         other.left_stick.x = 1.0;
         let both = map.axis_2d(&input, "move");
-        assert!(both.x > 0.5, "a second stick still contributes, got {both:?}");
+        assert!(
+            both.x > 0.5,
+            "a second stick still contributes, got {both:?}"
+        );
         assert!(both.y > 0.5);
     }
 

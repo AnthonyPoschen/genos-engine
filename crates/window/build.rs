@@ -67,8 +67,14 @@ fn scan(xml: &str, out: &std::path::Path) -> PathBuf {
         .unwrap();
     let header = out.join(format!("{stem}-client-protocol.h"));
     let protocol = out.join(format!("{stem}-protocol.c"));
-    run("wayland-scanner", &["client-header", xml, header.to_str().unwrap()]);
-    run("wayland-scanner", &["private-code", xml, protocol.to_str().unwrap()]);
+    run(
+        "wayland-scanner",
+        &["client-header", xml, header.to_str().unwrap()],
+    );
+    run(
+        "wayland-scanner",
+        &["private-code", xml, protocol.to_str().unwrap()],
+    );
     protocol
 }
 

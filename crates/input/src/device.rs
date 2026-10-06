@@ -63,7 +63,11 @@ impl KeyboardDevice {
     pub fn set(&mut self, code: InputCode, down: bool) {
         let index = code as u16 as usize;
         if index < self.keys.len() {
-            self.keys[index] = if down { ButtonState::Down } else { ButtonState::Up };
+            self.keys[index] = if down {
+                ButtonState::Down
+            } else {
+                ButtonState::Up
+            };
         }
     }
 
@@ -132,7 +136,11 @@ impl MouseDevice {
 
     pub fn set_button(&mut self, code: InputCode, down: bool) {
         if let Some(index) = mouse_index(code) {
-            self.buttons[index] = if down { ButtonState::Down } else { ButtonState::Up };
+            self.buttons[index] = if down {
+                ButtonState::Down
+            } else {
+                ButtonState::Up
+            };
         }
     }
 
@@ -235,8 +243,16 @@ impl GamepadDevice {
 
 fn apply_deadzone(stick: Axis2d, deadzone: f32) -> Axis2d {
     Axis2d {
-        x: if stick.x.abs() <= deadzone { 0.0 } else { stick.x },
-        y: if stick.y.abs() <= deadzone { 0.0 } else { stick.y },
+        x: if stick.x.abs() <= deadzone {
+            0.0
+        } else {
+            stick.x
+        },
+        y: if stick.y.abs() <= deadzone {
+            0.0
+        } else {
+            stick.y
+        },
     }
 }
 

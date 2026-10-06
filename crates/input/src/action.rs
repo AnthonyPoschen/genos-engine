@@ -90,7 +90,10 @@ impl ActionMap {
             if index > 0 {
                 out.push(',');
             }
-            out.push_str(&format!("{{\"name\":\"{}\",\"enabled\":{},", action.name, action.enabled));
+            out.push_str(&format!(
+                "{{\"name\":\"{}\",\"enabled\":{},",
+                action.name, action.enabled
+            ));
             match &action.kind {
                 ActionKind::Codes(codes) => {
                     out.push_str("\"kind\":\"codes\",\"codes\":[");
@@ -226,7 +229,10 @@ fn code_down(input: &InputSystem, code: InputCode) -> bool {
     if input.keyboard.down(code) || input.mouse.down(code) {
         return true;
     }
-    input.gamepads.iter().any(|pad| pad.view.connected && pad.down(code))
+    input
+        .gamepads
+        .iter()
+        .any(|pad| pad.view.connected && pad.down(code))
 }
 
 fn code_axis_2d(input: &InputSystem, code: InputCode) -> Option<Axis2d> {
@@ -253,7 +259,10 @@ fn write_codes(out: &mut String, codes: &[BoundInput]) {
         if index > 0 {
             out.push(',');
         }
-        out.push_str(&format!("{{\"code\":\"{}\"}}", crate::code::name(code.code)));
+        out.push_str(&format!(
+            "{{\"code\":\"{}\"}}",
+            crate::code::name(code.code)
+        ));
     }
 }
 

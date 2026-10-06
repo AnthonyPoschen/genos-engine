@@ -1,5 +1,7 @@
-use crate::device::{DeviceKind, DeviceView, GamepadDevice, KeyboardDevice, MouseDevice, MAX_GAMEPADS};
 use crate::code::InputCode;
+use crate::device::{
+    DeviceKind, DeviceView, GamepadDevice, KeyboardDevice, MouseDevice, MAX_GAMEPADS,
+};
 
 /// Owner of the keyboard, the mouse, and the stable gamepad slots.
 #[derive(Clone, Debug)]
@@ -35,7 +37,10 @@ impl InputSystem {
     }
 
     pub fn gamepad_count(&self) -> usize {
-        self.gamepads.iter().filter(|pad| pad.view.connected).count()
+        self.gamepads
+            .iter()
+            .filter(|pad| pad.view.connected)
+            .count()
     }
 
     pub fn list_devices(&self, kind: DeviceKind) -> Vec<DeviceView> {
@@ -141,7 +146,11 @@ fn set_nonblock(file: &mut std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
-fn apply_js_event(buf: &[u8; 8], left: &mut crate::device::Axis2d, right: &mut crate::device::Axis2d) {
+fn apply_js_event(
+    buf: &[u8; 8],
+    left: &mut crate::device::Axis2d,
+    right: &mut crate::device::Axis2d,
+) {
     let value = i16::from_ne_bytes([buf[4], buf[5]]);
     let kind = buf[6] & !0x80;
     let number = buf[7];

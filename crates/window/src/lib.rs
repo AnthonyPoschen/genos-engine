@@ -35,7 +35,12 @@ struct RawPump {
 }
 
 extern "C" {
-    fn genos_window_open(width: c_int, height: c_int, app_id: *const i8, title: *const i8) -> *mut c_void;
+    fn genos_window_open(
+        width: c_int,
+        height: c_int,
+        app_id: *const i8,
+        title: *const i8,
+    ) -> *mut c_void;
     fn genos_window_pump(window: *mut c_void, out: *mut RawPump);
     #[cfg_attr(not(test), allow(dead_code))]
     fn genos_window_pump_size() -> c_int;
@@ -88,9 +93,18 @@ impl Window {
     }
 
     pub fn open_named(width: u32, height: u32, app_id: &str, title: &str) -> Result<Self, String> {
-        let app_id = std::ffi::CString::new(app_id).map_err(|_| "app id contains a null".to_string())?;
-        let title = std::ffi::CString::new(title).map_err(|_| "title contains a null".to_string())?;
-        let raw = unsafe { genos_window_open(width as c_int, height as c_int, app_id.as_ptr(), title.as_ptr()) };
+        let app_id =
+            std::ffi::CString::new(app_id).map_err(|_| "app id contains a null".to_string())?;
+        let title =
+            std::ffi::CString::new(title).map_err(|_| "title contains a null".to_string())?;
+        let raw = unsafe {
+            genos_window_open(
+                width as c_int,
+                height as c_int,
+                app_id.as_ptr(),
+                title.as_ptr(),
+            )
+        };
         if raw.is_null() {
             return Err("Wayland window failed to open".into());
         }
@@ -178,7 +192,8 @@ impl Window {
     /// The window does not call this when it opens. `false` always releases.
     /// `true` fails when the compositor has no pointer-constraint or relative-pointer global.
     pub fn set_pointer_capture(&mut self, captured: bool) -> Result<(), String> {
-        let rc = unsafe { genos_window_set_pointer_capture(self.raw, if captured { 1 } else { 0 }) };
+        let rc =
+            unsafe { genos_window_set_pointer_capture(self.raw, if captured { 1 } else { 0 }) };
         if rc != 0 {
             Err("Wayland pointer lock failed".into())
         } else {
@@ -375,13 +390,17 @@ mod tests {
         if std::env::var_os("WAYLAND_DISPLAY").is_none() {
             return;
         }
-        let binary = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/genos-camera");
+        let binary = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/debug/genos-camera");
         if !binary.exists() {
             return;
         }
         let cursor = cursor_pos();
         set_focus_rule(true);
-        let _restore = CursorRestore { x: cursor.0, y: cursor.1 };
+        let _restore = CursorRestore {
+            x: cursor.0,
+            y: cursor.1,
+        };
         let child = std::process::Command::new(&binary)
             .args(["--frames", "400", "--trace", "--proof"])
             .stdout(std::process::Stdio::piped())
@@ -400,17 +419,27 @@ mod tests {
         }
         let (cx, cy, address) = placed.expect("shipped window was not mapped");
         let focus = std::process::Command::new("hyprctl")
-            .args(["dispatch", &format!("hl.dsp.focus({{ window = \"address:{address}\" }})")])
+            .args([
+                "dispatch",
+                &format!("hl.dsp.focus({{ window = \"address:{address}\" }})"),
+            ])
             .output();
         let moved = std::process::Command::new("hyprctl")
-            .args(["dispatch", &format!("hl.dsp.cursor.move({{ x = {cx}, y = {cy} }})")])
+            .args([
+                "dispatch",
+                &format!("hl.dsp.cursor.move({{ x = {cx}, y = {cy} }})"),
+            ])
             .output();
         std::thread::sleep(std::time::Duration::from_millis(300));
         let cursor_now = cursor_pos();
         eprintln!(
             "center {cx},{cy} address {address} cursor {cursor_now:?} focus {:?} move {:?}",
-            focus.ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string()),
-            moved.ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            focus
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()),
+            moved
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         );
         ydotool(&["click", "0xC0"]);
         // The frame locks the pointer after the pump. The next pump reports the lock.
