@@ -214,7 +214,10 @@ fn resources() -> Value {
     json::array(vec![json::object([
         ("uri", json::string(SCENE_URI)),
         ("name", json::string("scene")),
-        ("description", json::string("Live floor, walls, solids, lights, and camera.")),
+        (
+            "description",
+            json::string("Live floor, walls, solids, lights, and camera."),
+        ),
         ("mimeType", json::string("application/json")),
     ])])
 }

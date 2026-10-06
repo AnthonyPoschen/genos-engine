@@ -26,7 +26,9 @@ pub struct Server {
 impl Server {
     pub fn start(host: Host) -> Result<Self, String> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|err| err.to_string())?;
-        listener.set_nonblocking(true).map_err(|err| err.to_string())?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|err| err.to_string())?;
         let local = listener.local_addr().map_err(|err| err.to_string())?;
         if !local.ip().is_loopback() {
             return Err("mcp listener is not loopback".into());
@@ -95,11 +97,12 @@ fn accept_loop(
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
                 let host = host.clone();
                 let shutdown = Arc::clone(&shutdown);
-                let handle = thread::Builder::new()
-                    .name("genos-mcp-conn".into())
-                    .spawn(move || {
-                        let _ = serve_connection(stream, host, shutdown);
-                    });
+                let handle =
+                    thread::Builder::new()
+                        .name("genos-mcp-conn".into())
+                        .spawn(move || {
+                            let _ = serve_connection(stream, host, shutdown);
+                        });
                 if let Ok(handle) = handle {
                     lock_workers(&workers).push(handle);
                 }
@@ -112,18 +115,28 @@ fn accept_loop(
     }
 }
 
-fn lock_workers(workers: &Mutex<Vec<JoinHandle<()>>>) -> std::sync::MutexGuard<'_, Vec<JoinHandle<()>>> {
+fn lock_workers(
+    workers: &Mutex<Vec<JoinHandle<()>>>,
+) -> std::sync::MutexGuard<'_, Vec<JoinHandle<()>>> {
     workers.lock().unwrap_or_else(|err| err.into_inner())
 }
 
-fn serve_connection(mut stream: TcpStream, host: Host, shutdown: Arc<AtomicBool>) -> std::io::Result<()> {
+fn serve_connection(
+    mut stream: TcpStream,
+    host: Host,
+    shutdown: Arc<AtomicBool>,
+) -> std::io::Result<()> {
     let request = read_request(&mut stream)?;
     if let Some(origin) = header(&request.headers, "origin") {
         if !origin_allowed(origin) {
             return write_empty(&mut stream, 403, "Forbidden");
         }
     }
-    let path = request.path.split('?').next().unwrap_or(request.path.as_str());
+    let path = request
+        .path
+        .split('?')
+        .next()
+        .unwrap_or(request.path.as_str());
     if path != "/mcp" {
         return write_empty(&mut stream, 404, "Not Found");
     }
@@ -154,7 +167,13 @@ fn serve_post(stream: &mut TcpStream, host: &Host, request: &Request) -> std::io
     let message = match json::parse(&request.body) {
         Ok(value) => value,
         Err(err) => {
-            return write_json(stream, 400, "Bad Request", None, &error_body(&Value::Null, -32700, &err));
+            return write_json(
+                stream,
+                400,
+                "Bad Request",
+                None,
+                &error_body(&Value::Null, -32700, &err),
+            );
         }
     };
     if message.as_array().is_some() {
@@ -189,7 +208,10 @@ fn serve_post(stream: &mut TcpStream, host: &Host, request: &Request) -> std::io
                 &error_body(&Value::Null, -32600, "initialize requires an id"),
             );
         };
-        let params = message.get("params").cloned().unwrap_or_else(|| json::object([]));
+        let params = message
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| json::object([]));
         let session = host.open_session();
         let body = result_body(&id, rpc::initialize_result(&params));
         return write_json(stream, 200, "OK", Some(&session), &body);
@@ -217,7 +239,10 @@ fn serve_post(stream: &mut TcpStream, host: &Host, request: &Request) -> std::io
             &error_body(&id, -32600, "missing method"),
         );
     }
-    let params = message.get("params").cloned().unwrap_or_else(|| json::object([]));
+    let params = message
+        .get("params")
+        .cloned()
+        .unwrap_or_else(|| json::object([]));
     let body = match rpc::dispatch(host, session, method, &params) {
         Reply::Result(result) => result_body(&id, result),
         Reply::Error { code, message } => error_body(&id, code, &message),
@@ -402,9 +427,8 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Request> {
         body.extend_from_slice(&tmp[..count]);
     }
     body.truncate(length);
-    let body = String::from_utf8(body).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "body is not utf-8")
-    })?;
+    let body = String::from_utf8(body)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "body is not utf-8"))?;
     Ok(Request {
         method,
         path,
@@ -414,7 +438,9 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Request> {
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|window| window == b"\r\n\r\n").map(|index| index + 4)
+    buf.windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
 }
 
 fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {

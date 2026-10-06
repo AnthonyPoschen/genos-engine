@@ -26,7 +26,10 @@ impl Value {
         let Value::Object(pairs) = self else {
             return None;
         };
-        pairs.iter().find(|(name, _)| name == key).map(|(_, value)| value)
+        pairs
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
     }
 
     pub fn as_str(&self) -> Option<&str> {
@@ -47,7 +50,9 @@ impl Value {
         match self {
             Value::Number(Number::Int(value)) => Some(*value),
             Value::Number(Number::Float(value))
-                if value.fract() == 0.0 && *value >= i64::MIN as f64 && *value <= i64::MAX as f64 =>
+                if value.fract() == 0.0
+                    && *value >= i64::MIN as f64
+                    && *value <= i64::MAX as f64 =>
             {
                 Some(*value as i64)
             }
@@ -100,7 +105,12 @@ pub fn bool(value: bool) -> Value {
 }
 
 pub fn object<const N: usize>(pairs: [(&str, Value); N]) -> Value {
-    Value::Object(pairs.into_iter().map(|(key, value)| (key.to_string(), value)).collect())
+    Value::Object(
+        pairs
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value))
+            .collect(),
+    )
 }
 
 pub fn array(items: Vec<Value>) -> Value {

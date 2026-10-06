@@ -250,7 +250,10 @@ impl Host {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.shared.inner.lock().unwrap_or_else(|err| err.into_inner())
+        self.shared
+            .inner
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
     }
 }
 
@@ -416,7 +419,10 @@ fn set_object(inner: &mut Inner, arguments: &Value) -> Result<(), String> {
     reject_unused(slot.kind(), &patch)?;
     let before = inner.scene.clone();
     if let Slot::Solid(index) = slot {
-        if patch.position.is_some() || patch.shape.is_some() || patch.size.is_some() || patch.height.is_some()
+        if patch.position.is_some()
+            || patch.shape.is_some()
+            || patch.size.is_some()
+            || patch.height.is_some()
         {
             inner.camera.release_codimation(index);
         }
@@ -833,7 +839,9 @@ fn parse_color(value: &Value) -> Result<[f32; 3], String> {
 }
 
 fn parse_finite(value: &Value, name: &str) -> Result<f32, String> {
-    let number = value.as_f64().ok_or_else(|| format!("{name} must be a number"))? as f32;
+    let number = value
+        .as_f64()
+        .ok_or_else(|| format!("{name} must be a number"))? as f32;
     if !number.is_finite() {
         return Err(format!("{name} must be a finite number"));
     }
