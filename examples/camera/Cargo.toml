@@ -17,3 +17,4 @@ genos-scene = { path = "../../crates/scene" }
 genos-window = { path = "../../crates/window" }
 genos-render = { path = "../../crates/render" }
 genos-ui = { path = "../../crates/ui" }
+genos-mcp = { path = "../../crates/mcp" }
