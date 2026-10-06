@@ -69,10 +69,16 @@ fn run() -> Result<(), String> {
         input.poll_gamepads();
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
+        let lamp = world
+            .scene
+            .lights
+            .first()
+            .map(|light| [light.position.x, light.position.y, light.position.z]);
         let ui_frame = lighting_frame(
             &mut ui,
             [size.0 as f32, size.1 as f32],
             &camera,
+            lamp,
             Pointer {
                 x: frame.pointer_x,
                 y: frame.pointer_y,

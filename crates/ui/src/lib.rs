@@ -3,9 +3,12 @@
 //! A tree resolves to rectangles with no window and no Vulkan. A screen root
 //! stays on the viewport. A world root follows a world point through the camera.
 //! Children in the flow use Clay sizing. A child with a [`Place`] stays out of
-//! that flow.
+//! that flow. The lighting frame draws a sun on the first lamp and moves that
+//! lamp with notched sliders. On Omarchy, the lighting panel uses the current
+//! theme colors.
 
 mod layout;
+pub mod omarchy;
 mod panel;
 mod text;
 
@@ -19,8 +22,8 @@ pub struct Look {
 /// A control the lighting panel can fire.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
-    /// Add `delta` to the lamp on axis 0, 1, or 2 (`x`, `y`, `z`).
-    MoveLamp { axis: u8, delta: f32 },
+    /// Set the first lamp on axis 0, 1, or 2 (`x`, `y`, `z`) to `position`.
+    SetLamp { axis: u8, position: f32 },
     /// Multiply `Light.color`. Brightness is the mean of that color.
     ScaleIntensity(f32),
 }
@@ -32,12 +35,14 @@ pub use panel::{apply_lamp, lighting_frame, Frame, Paint, Pointer, Shown, State}
 pub mod id {
     pub const PANEL: u32 = 1;
     pub const TITLE: u32 = 2;
-    pub const X_NEG: u32 = 3;
-    pub const X_POS: u32 = 4;
-    pub const Y_NEG: u32 = 5;
-    pub const Y_POS: u32 = 6;
-    pub const Z_NEG: u32 = 7;
-    pub const Z_POS: u32 = 8;
+    /// Notched slider for the lamp X position.
+    pub const X: u32 = 3;
+    /// Notched slider for the lamp Y position.
+    pub const Y: u32 = 4;
+    /// Notched slider for the lamp Z position.
+    pub const Z: u32 = 5;
     pub const DIM: u32 = 9;
     pub const BRIGHT: u32 = 10;
+    /// World-space sun on the first lamp. It is not a control.
+    pub const SUN: u32 = 11;
 }
