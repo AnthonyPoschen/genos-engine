@@ -18,12 +18,13 @@ Each record uses these headings:
 - [Input](input.md) owns the keyboard, the mouse, the gamepad slots, and the action maps.
 - [Window](window.md) owns the Wayland seat, focus, pointer lock, and fullscreen.
 - [Math](math.md) owns positions, directions, matrices, and quaternions.
-- [Physics](physics.md) owns the collision step, including mass, friction, and springs.
-- [Scene](scene.md) owns the camera, the scripted layout, and the coordinate frame.
+- [Physics](physics.md) owns the collision step, including mass, friction, springs, and capsule, box, and mesh shapes.
+- [Scene](scene.md) owns the camera, the scripted layout, the coordinate frame, and the agent endpoint.
 - [Renderer](renderer.md) owns the Vulkan draw, the world, and culling.
 - [UI](ui.md) owns layout, pointer hits, and the lighting panel.
 - [Lighting](lighting.md) owns radiance cascades and the light pass inside a draw.
 - [Loading](loading.md) owns images, textures, texture maps, meshes, animations, PCM samples, and fonts.
+- [Audio](audio.md) owns playback, Doppler, stereo image, and direct-path transmission.
 - [Scripting](scripting.md) owns Rhai for games and mods.
 
 The crate map and the frame loop are in [Architecture](../architecture.md). The words are in `CONTEXT.md`.

@@ -76,6 +76,14 @@ _Avoid_: Mapping, shortcut
 The view a game uses to look at the world.
 _Avoid_: Viewport, spectator
 
+**Scene handle**:
+A stable name for one floor, wall, solid, or light in the live scene. The floor name is `floor`.
+_Avoid_: Entity id
+
+**Agent endpoint**:
+The loopback MCP session on the running camera. An agent reads and edits the live scene there.
+_Avoid_: Editor, game network
+
 **Ground plane**:
 The horizontal XZ plane. Up is positive Y. Yaw 0 looks along -Z. Positive yaw turns toward +X.
 _Avoid_: Floor
@@ -99,6 +107,10 @@ _Avoid_: Character controller, pawn
 **Physics step**:
 One update that moves bodies by gravity, contact, and springs.
 _Avoid_: Lighting ray, cascade
+
+**Codimation**:
+A looping move of one solid through fixed positions.
+_Avoid_: Animation clip, tween
 
 **Omarchy**:
 The Linux desktop the editor must fit first.

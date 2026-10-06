@@ -48,7 +48,7 @@ The input map is a character controller, and it drives the camera.
 - `Escape` destroys that lock and shows the pointer again.
 - The window close control exits the program.
 
-The camera does not collide with the floor or the walls. The physics library is separate from this proof.
+The camera is one capsule. It rests on the floor and stops on the walls and the solids. The physics step is `genos-physics`.
 
 On Wayland, the keyboard and the mouse act while the window has focus.
 
@@ -62,7 +62,7 @@ After a script edit, start the program again. The positions change.
 
 ## Out of this goal
 
-The editor, world probes, audio, network, and a second scene wait.
+The editor, world probes, audio, and a second scene wait. Gameplay networking waits. The camera serves a loopback agent endpoint for the live scene.
 
 ## Done
 

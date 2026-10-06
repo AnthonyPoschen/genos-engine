@@ -6,7 +6,7 @@ Genos Engine has two programs. The runtime runs a game on Linux, Windows, and ma
 
 Engine code makes each native call to the operating system or to Vulkan. A third-party crate does not own the window, the input, the renderer, the audio, or the network. The Rust standard library stays. See [ADR 0007](adr/0007-native-calls-go-to-the-system-and-vulkan.md).
 
-The first proof uses the window, the input, Vulkan, Rhai, and radiance cascades. Audio and network follow the same rule when they arrive.
+The first proof uses the window, the input, Vulkan, Rhai, and radiance cascades. Audio follows the same rule. The agent endpoint uses loopback sockets in this repository. Gameplay networking waits.
 
 ## First proof
 
@@ -40,15 +40,20 @@ crates/input/       package genos-input
 crates/math/        package genos-math
 crates/physics/     package genos-physics
 crates/scene/       package genos-scene
+crates/mcp/         package genos-mcp
 crates/window/      package genos-window
 crates/ui/          package genos-ui
 crates/render/      package genos-render
 crates/load/        package genos-load
 crates/load-check/  package genos-load-check
+crates/audio/       package genos-audio
+crates/audio-check/ package genos-audio-check
 examples/camera/    package genos-camera
 ```
 
-`genos-math` stores positions, directions, and rotations. `genos-physics` steps gravity, contact, and springs. The camera does not call that step.
+`genos-audio` mixes loaded PCM and submits that stereo buffer to the operating system. Direct-path transmission is one compute pass in `genos-render`. The camera scene does not open a sound device.
+
+`genos-math` stores positions, directions, and rotations. `genos-physics` steps gravity, a move wish, contact, and springs. The camera capsule calls that step.
 
 `genos-ui` lays out a tree and reports pointer hits. The UI crate does not open a window. The UI crate does not call Vulkan.
 
@@ -101,4 +106,4 @@ A file path and a memory block share the decoders. `genos-load-check` calls the 
 
 ## Out of this proof
 
-The editor, more scenes, audio playback, and networking wait. Fit for Omarchy belongs to the editor. See [ADR 0006](adr/0006-editor-is-linux-first.md).
+The editor, more scenes, and audio playback wait. Gameplay networking waits. The camera serves a loopback agent endpoint for the live scene. Fit for Omarchy belongs to the editor. See [ADR 0006](adr/0006-editor-is-linux-first.md).
