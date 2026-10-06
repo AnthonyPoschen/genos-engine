@@ -170,16 +170,16 @@ impl ActionMap {
     }
 }
 
-/// The character-controller map. `move` is WASD plus the left stick. `look` is the right stick.
+/// The character-controller map. `move` is WASD, IJKL, and the left stick. `look` is the right stick.
 pub fn character_controller() -> ActionMap {
     let mut map = ActionMap::new();
     map.set_2d(
         "move",
         Action2dBinding {
-            left: vec![bound(InputCode::key_a)],
-            right: vec![bound(InputCode::key_d)],
-            up: vec![bound(InputCode::key_w)],
-            down: vec![bound(InputCode::key_s)],
+            left: vec![bound(InputCode::key_a), bound(InputCode::key_j)],
+            right: vec![bound(InputCode::key_d), bound(InputCode::key_l)],
+            up: vec![bound(InputCode::key_w), bound(InputCode::key_i)],
+            down: vec![bound(InputCode::key_s), bound(InputCode::key_k)],
             vectors: vec![bound(InputCode::gamepad_left_stick)],
         },
     );

@@ -90,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn move_action_reads_wasd_and_the_left_stick() {
+    fn move_action_reads_wasd_ijkl_and_the_left_stick() {
         let mut input = InputSystem::new();
         let map = character_controller();
         input.set_key(InputCode::key_w, true);
@@ -110,6 +110,19 @@ mod tests {
         assert!(map.axis_2d(&input, "move").x > 0.0);
 
         input.set_key(InputCode::key_d, false);
+        input.set_key(InputCode::key_i, true);
+        assert!(map.axis_2d(&input, "move").y > 0.0);
+        input.set_key(InputCode::key_i, false);
+        input.set_key(InputCode::key_k, true);
+        assert!(map.axis_2d(&input, "move").y < 0.0);
+        input.set_key(InputCode::key_k, false);
+        input.set_key(InputCode::key_j, true);
+        assert!(map.axis_2d(&input, "move").x < 0.0);
+        input.set_key(InputCode::key_j, false);
+        input.set_key(InputCode::key_l, true);
+        assert!(map.axis_2d(&input, "move").x > 0.0);
+
+        input.set_key(InputCode::key_l, false);
         let pad = input.gamepad_mut(0).unwrap();
         pad.view.connected = true;
         pad.left_stick.y = 1.0;
@@ -138,6 +151,12 @@ mod tests {
         let original = map.axis_2d(&input, "move");
         let restored = loaded.axis_2d(&input, "move");
         assert!((original.y - restored.y).abs() < 1.0e-4);
+        input.set_key(InputCode::key_w, false);
+        input.set_key(InputCode::key_i, true);
+        let original_i = map.axis_2d(&input, "move");
+        let restored_i = loaded.axis_2d(&input, "move");
+        assert!((original_i.y - restored_i.y).abs() < 1.0e-4);
+        assert!(restored_i.y > 0.0);
         assert!(loaded.down(&input, "release") == false);
         input.set_key(InputCode::key_escape, true);
         assert!(loaded.down(&input, "release"));
