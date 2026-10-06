@@ -10,6 +10,7 @@
 mod layout;
 pub mod omarchy;
 mod panel;
+mod profile;
 mod text;
 
 /// Idle, hover, and pressed colors. Pointer state picks one.
@@ -30,6 +31,10 @@ pub enum Action {
 
 pub use layout::{layout, Align, Direction, Node, Pad, Place, Rect, Sizing, Space};
 pub use panel::{apply_lamp, lighting_frame, Frame, Paint, Pointer, Shown, State};
+pub use profile::{
+    profile_overlay, profiler_enabled, FrameSample, OpenFrame, ProfileLine, ProfilePoint,
+    ProfileStream, ProfileView, StageSample, DRAW_STAGE, STAGE_COUNT, STAGE_LABELS,
+};
 
 /// Ids for the lighting panel the camera frame submits.
 pub mod id {

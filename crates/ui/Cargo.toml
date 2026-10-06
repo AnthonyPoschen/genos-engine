@@ -12,3 +12,4 @@ genos-scene = { path = "../scene" }
 
 [dev-dependencies]
 genos-render = { path = "../render" }
+genos-window = { path = "../window" }

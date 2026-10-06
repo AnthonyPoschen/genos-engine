@@ -170,6 +170,7 @@ version = "0.1.0"
 dependencies = [
  "genos-render",
  "genos-scene",
+ "genos-window",
 ]
 
 [[package]]
