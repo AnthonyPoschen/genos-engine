@@ -72,7 +72,7 @@ glTF and FBX are not decoded. A face with more than three vertices becomes a tri
 
 The material stores a file name. It does not sample that texture.
 
-The animation does not move a mesh. WAV playback is not in this crate. OGG, MP3, and FLAC are not decoded.
+The animation does not move a mesh. WAV playback is the audio system. This crate does not open a device. OGG, MP3, and FLAC are not decoded.
 
 A composite TrueType glyph returns an error. The loader does not hint, kern, or shape text.
 

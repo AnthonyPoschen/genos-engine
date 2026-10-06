@@ -32,6 +32,7 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     │   ├── ui.md
     │   ├── lighting.md
     │   ├── loading.md
+    │   ├── audio.md
     │   └── scripting.md
     ├── goals/
     │   └── mvp-scene.md

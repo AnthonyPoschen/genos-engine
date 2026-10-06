@@ -10,6 +10,8 @@ members = [
     "crates/ui",
     "crates/load",
     "crates/load-check",
+    "crates/audio",
+    "crates/audio-check",
     "examples/camera",
 ]
 

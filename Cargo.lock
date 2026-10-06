@@ -91,6 +91,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-audio"
+version = "0.1.0"
+dependencies = [
+ "genos-load",
+ "genos-math",
+]
+
+[[package]]
+name = "genos-audio-check"
+version = "0.1.0"
+dependencies = [
+ "genos-audio",
+ "genos-load",
+]
+
+[[package]]
 name = "genos-camera"
 version = "0.1.0"
 dependencies = [

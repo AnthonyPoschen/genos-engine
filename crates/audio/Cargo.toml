@@ -1,0 +1,12 @@
+[package]
+name = "genos-audio"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+genos-load = { path = "../load" }
+genos-math = { path = "../math" }
