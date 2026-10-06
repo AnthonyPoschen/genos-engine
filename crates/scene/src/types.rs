@@ -1,5 +1,63 @@
 use genos_math::Vec3;
 
+/// Diffuse reflectance used when a material does not set one.
+/// A white surface returns this share of the light that arrives.
+pub const DEFAULT_REFLECTANCE: f32 = 0.55;
+/// Incoming bounce share used with the default reflectance.
+/// It matches the tuned cascade so a corner still carries light.
+pub const DEFAULT_BOUNCE: f32 = 0.68;
+
+/// Resolve a material reflectance. A negative value selects the game default.
+pub fn reflectance_of(value: f32) -> f32 {
+    if value < 0.0 {
+        DEFAULT_REFLECTANCE
+    } else {
+        value.clamp(0.0, 1.0)
+    }
+}
+
+/// Resolve how strongly the surface color tints a bounce. A negative value means full color.
+pub fn color_mix_of(value: f32) -> f32 {
+    if value < 0.0 {
+        1.0
+    } else {
+        value.clamp(0.0, 1.0)
+    }
+}
+
+/// Light leaving a diffuse hit.
+///
+/// The lamp color and the previous bounce are multiplied by the surface color.
+/// `color_mix` is 1 for that full tint, and 0 to keep the arriving color.
+/// A negative `reflectance` keeps the built-in direct and bounce shares.
+pub fn bounce_radiance(
+    albedo: [f32; 3],
+    reflectance: f32,
+    color_mix: f32,
+    direct: f32,
+    incoming: [f32; 3],
+) -> [f32; 3] {
+    let mix = color_mix_of(color_mix);
+    let tint = [
+        1.0 + (albedo[0] - 1.0) * mix,
+        1.0 + (albedo[1] - 1.0) * mix,
+        1.0 + (albedo[2] - 1.0) * mix,
+    ];
+    if reflectance < 0.0 {
+        return [
+            tint[0] * (direct * DEFAULT_REFLECTANCE + incoming[0] * DEFAULT_BOUNCE),
+            tint[1] * (direct * DEFAULT_REFLECTANCE + incoming[1] * DEFAULT_BOUNCE),
+            tint[2] * (direct * DEFAULT_REFLECTANCE + incoming[2] * DEFAULT_BOUNCE),
+        ];
+    }
+    let reflect = reflectance.clamp(0.0, 1.0);
+    [
+        tint[0] * reflect * (direct + incoming[0]),
+        tint[1] * reflect * (direct + incoming[1]),
+        tint[2] * reflect * (direct + incoming[2]),
+    ]
+}
+
 /// A square footprint or a circle footprint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shape {
@@ -7,31 +65,43 @@ pub enum Shape {
     Circle,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Wall {
     pub position: Vec3,
     pub half_x: f32,
     pub half_z: f32,
     pub height: f32,
     pub color: [f32; 3],
+    /// Nepers per meter along the straight path. Zero leaves the level unchanged.
+    pub absorption: f32,
+    /// Share of arriving light that leaves the surface. Below zero uses the game default.
+    pub reflectance: f32,
+    /// How much of `color` tints the bounce. Below zero uses the full surface color.
+    pub color_mix: f32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Solid {
     pub shape: Shape,
     pub position: Vec3,
     pub size: f32,
     pub height: f32,
     pub color: [f32; 3],
+    /// Nepers per meter along the straight path. Zero leaves the level unchanged.
+    pub absorption: f32,
+    /// Share of arriving light that leaves the surface. Below zero uses the game default.
+    pub reflectance: f32,
+    /// How much of `color` tints the bounce. Below zero uses the full surface color.
+    pub color_mix: f32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Light {
     pub position: Vec3,
     pub color: [f32; 3],
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Floor {
     pub position: Vec3,
     pub half_x: f32,
@@ -39,7 +109,7 @@ pub struct Floor {
     pub color: [f32; 3],
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Scene {
     pub floor: Floor,
     pub walls: Vec<Wall>,

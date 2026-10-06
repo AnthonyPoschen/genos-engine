@@ -44,6 +44,33 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
                     half_z: num(&depth).abs() * 0.5,
                     height: num(&height),
                     color: [1.0, 1.0, 1.0],
+                    absorption: 0.0,
+                    reflectance: -1.0,
+                    color_mix: -1.0,
+                });
+            },
+        );
+    }
+    {
+        let builder = builder.clone();
+        engine.register_fn(
+            "wall",
+            move |x: Dynamic,
+                  z: Dynamic,
+                  width: Dynamic,
+                  depth: Dynamic,
+                  height: Dynamic,
+                  reflectance: Dynamic,
+                  color_mix: Dynamic| {
+                builder.borrow_mut().walls.push(Wall {
+                    position: Vec3::new(num(&x), 0.0, num(&z)),
+                    half_x: num(&width).abs() * 0.5,
+                    half_z: num(&depth).abs() * 0.5,
+                    height: num(&height),
+                    color: [1.0, 1.0, 1.0],
+                    absorption: 0.0,
+                    reflectance: num(&reflectance),
+                    color_mix: num(&color_mix),
                 });
             },
         );
@@ -69,6 +96,39 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
                     size: num(&size),
                     height: 1.2,
                     color: [num(&r), num(&g), num(&b)],
+                    absorption: 0.0,
+                    reflectance: -1.0,
+                    color_mix: -1.0,
+                });
+            },
+        );
+    }
+    {
+        let builder = builder.clone();
+        engine.register_fn(
+            "solid",
+            move |shape: String,
+                  x: Dynamic,
+                  z: Dynamic,
+                  size: Dynamic,
+                  r: Dynamic,
+                  g: Dynamic,
+                  b: Dynamic,
+                  reflectance: Dynamic,
+                  color_mix: Dynamic| {
+                let shape = match shape.as_str() {
+                    "circle" => Shape::Circle,
+                    _ => Shape::Square,
+                };
+                builder.borrow_mut().solids.push(Solid {
+                    shape,
+                    position: Vec3::new(num(&x), 0.0, num(&z)),
+                    size: num(&size),
+                    height: 1.2,
+                    color: [num(&r), num(&g), num(&b)],
+                    absorption: 0.0,
+                    reflectance: num(&reflectance),
+                    color_mix: num(&color_mix),
                 });
             },
         );

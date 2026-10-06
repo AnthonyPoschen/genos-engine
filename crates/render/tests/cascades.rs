@@ -14,6 +14,9 @@ fn a_wall_stops_the_lamp_and_a_short_wall_does_not() {
         half_z: 0.3,
         height: 3.0,
         color: [1.0, 1.0, 1.0],
+        absorption: 0.0,
+        reflectance: -1.0,
+        color_mix: -1.0,
     });
     scene.lights = vec![Light {
         position: Vec3::new(0.0, 2.0, 0.0),
@@ -138,6 +141,9 @@ fn a_world_probe_carries_an_offscreen_material() {
         size: span * 0.2,
         height: 2.0,
         color: [1.0, 0.0, 1.0],
+        absorption: 0.0,
+        reflectance: -1.0,
+        color_mix: -1.0,
     });
     let field = build(&scene);
     let plain_field = build(&plain);

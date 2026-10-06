@@ -164,6 +164,9 @@ fn stand_in(object: &Object) -> Solid {
         size: half * 2.0,
         height: (object.bounds.half[1] * 2.0).max(0.05),
         color,
+        absorption: 0.0,
+        reflectance: -1.0,
+        color_mix: -1.0,
     }
 }
 
@@ -230,6 +233,9 @@ mod tests {
                 size: 1.5,
                 height: 1.2,
                 color: [1.0, 0.0, 0.0],
+                absorption: 0.0,
+                reflectance: -1.0,
+                color_mix: -1.0,
             }],
             lights: vec![Light {
                 position: Vec3::new(0.0, 7.0, 0.0),
@@ -342,6 +348,9 @@ mod tests {
             half_z: 0.3,
             height: 2.0,
             color: [1.0, 1.0, 1.0],
+            absorption: 0.0,
+            reflectance: -1.0,
+            color_mix: -1.0,
         });
         scene.lights[0].position.y = 1.5;
         scene.lights[0].position.z = -4.0;
@@ -399,6 +408,9 @@ mod tests {
                     half_z: 3.0,
                     height: 2.6,
                     color: [1.0, 1.0, 1.0],
+                    absorption: 0.0,
+                    reflectance: -1.0,
+                    color_mix: -1.0,
                 }]
             } else {
                 Vec::new()
@@ -409,6 +421,9 @@ mod tests {
                 size: 1.5,
                 height: 1.5,
                 color: [0.8, 0.2, 0.1],
+                absorption: 0.0,
+                reflectance: -1.0,
+                color_mix: -1.0,
             }],
             lights: vec![Light {
                 position: Vec3::new(-5.0, 4.0, 0.0),

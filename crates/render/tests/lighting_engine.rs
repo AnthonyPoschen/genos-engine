@@ -353,6 +353,9 @@ fn the_opening_view_uses_one_detail_and_reuses_it() {
         size: 1.2,
         height: 2.0,
         color: [1.0, 0.0, 1.0],
+        absorption: 0.0,
+        reflectance: -1.0,
+        color_mix: -1.0,
     });
     let index = ignored.scene.solids.len() - 1;
     ignored.objects.push(Object {
@@ -397,6 +400,9 @@ fn a_visible_part_that_does_not_affect_light_follows_scene_edits() {
             half_z: 0.4,
             height: 1.2,
             color: [0.8, 0.8, 0.8],
+            absorption: 0.0,
+            reflectance: -1.0,
+            color_mix: -1.0,
         }],
         solids: vec![Solid {
             shape: Shape::Square,
@@ -404,6 +410,9 @@ fn a_visible_part_that_does_not_affect_light_follows_scene_edits() {
             size: 0.8,
             height: 1.0,
             color: [1.0, 0.0, 0.0],
+            absorption: 0.0,
+            reflectance: -1.0,
+            color_mix: -1.0,
         }],
         lights: vec![Light {
             position: Vec3::new(0.0, 3.0, -1.5),

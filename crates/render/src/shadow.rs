@@ -471,6 +471,9 @@ mod tests {
                 half_z: 0.2,
                 height: 2.6,
                 color: [1.0, 1.0, 1.0],
+                absorption: 0.0,
+                reflectance: -1.0,
+                color_mix: -1.0,
             }],
             solids: Vec::new(),
             lights: vec![Light {

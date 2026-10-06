@@ -361,6 +361,7 @@ fn hash_wall(wall: &Wall, hasher: &mut impl std::hash::Hasher) {
     wall.color[0].to_bits().hash(hasher);
     wall.color[1].to_bits().hash(hasher);
     wall.color[2].to_bits().hash(hasher);
+    wall.absorption.to_bits().hash(hasher);
 }
 
 fn hash_solid(solid: &Solid, hasher: &mut impl std::hash::Hasher) {
@@ -375,4 +376,5 @@ fn hash_solid(solid: &Solid, hasher: &mut impl std::hash::Hasher) {
     solid.color[0].to_bits().hash(hasher);
     solid.color[1].to_bits().hash(hasher);
     solid.color[2].to_bits().hash(hasher);
+    solid.absorption.to_bits().hash(hasher);
 }
