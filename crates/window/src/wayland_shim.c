@@ -67,6 +67,7 @@ struct GenosWindow {
     int want_capture;
     int pointer_locked;
     int clicked_while_focused;
+    int fullscreen;
 };
 
 struct GenosPump {
@@ -87,6 +88,9 @@ struct GenosPump {
     uint8_t keys_down[256];
     int pointer_locked;
     int clicked_while_focused;
+    int fullscreen;
+    int pointer_x;
+    int pointer_y;
     void *display;
     void *surface;
 };
@@ -115,10 +119,20 @@ static const struct xdg_surface_listener xdg_surface_listener = {
     .configure = xdg_surface_configure,
 };
 
+static int has_toplevel_state(struct wl_array *states, uint32_t want) {
+    uint32_t *state;
+    wl_array_for_each(state, states) {
+        if (*state == want) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void toplevel_configure(void *data, struct xdg_toplevel *toplevel, int32_t width, int32_t height, struct wl_array *states) {
     (void)toplevel;
-    (void)states;
     struct GenosWindow *win = data;
+    win->fullscreen = has_toplevel_state(states, XDG_TOPLEVEL_STATE_FULLSCREEN);
     if (width > 0 && height > 0 && (width != win->width || height != win->height)) {
         win->width = width;
         win->height = height;
@@ -194,8 +208,7 @@ static void pointer_button(void *data, struct wl_pointer *pointer, uint32_t seri
             win->capture_click = 1;
             /* This click hit our surface. Capture even if keyboard focus is late. */
             win->clicked_while_focused = 1;
-            /* Lock and confine the pointer, then hide the cursor. */
-            engage_pointer_lock(win);
+            /* The frame locks the pointer after it accepts the click. */
         }
     }
 }
@@ -569,7 +582,7 @@ static void release_pointer_lock(struct GenosWindow *win) {
     apply_cursor(win);
 }
 
-struct GenosWindow *genos_window_open(int width, int height) {
+struct GenosWindow *genos_window_open(int width, int height, const char *app_id, const char *title) {
     struct GenosWindow *win = calloc(1, sizeof(*win));
     if (!win) {
         return NULL;
@@ -610,8 +623,14 @@ struct GenosWindow *genos_window_open(int width, int height) {
     xdg_surface_add_listener(win->xdg_surface, &xdg_surface_listener, win);
     win->toplevel = xdg_surface_get_toplevel(win->xdg_surface);
     xdg_toplevel_add_listener(win->toplevel, &toplevel_listener, win);
-    xdg_toplevel_set_app_id(win->toplevel, "genos-camera");
-    xdg_toplevel_set_title(win->toplevel, "Genos Engine");
+    if (!app_id || app_id[0] == '\0') {
+        app_id = "genos";
+    }
+    if (!title || title[0] == '\0') {
+        title = "Genos";
+    }
+    xdg_toplevel_set_app_id(win->toplevel, app_id);
+    xdg_toplevel_set_title(win->toplevel, title);
     wl_surface_commit(win->surface);
     while (!win->configured) {
         if (wl_display_dispatch(win->display) < 0) {
@@ -643,6 +662,9 @@ void genos_window_pump(struct GenosWindow *win, struct GenosPump *out) {
     memcpy(out->keys_down, win->keys_down, sizeof(out->keys_down));
     out->pointer_locked = win->pointer_locked;
     out->clicked_while_focused = win->clicked_while_focused;
+    out->fullscreen = win->fullscreen;
+    out->pointer_x = win->last_x;
+    out->pointer_y = win->last_y;
     out->display = win->display;
     out->surface = win->surface;
     win->mouse_dx = 0;
@@ -650,6 +672,24 @@ void genos_window_pump(struct GenosWindow *win, struct GenosPump *out) {
     win->capture_click = 0;
     win->clicked_while_focused = 0;
     win->resized = 0;
+}
+
+int genos_window_pump_size(void) {
+    return (int)sizeof(struct GenosPump);
+}
+
+int genos_window_set_fullscreen(struct GenosWindow *win, int fullscreen) {
+    if (!win || !win->toplevel) {
+        return -1;
+    }
+    if (fullscreen) {
+        xdg_toplevel_set_fullscreen(win->toplevel, NULL);
+    } else {
+        xdg_toplevel_unset_fullscreen(win->toplevel);
+    }
+    wl_surface_commit(win->surface);
+    wl_display_flush(win->display);
+    return 0;
 }
 
 int genos_window_set_pointer_capture(struct GenosWindow *win, int capture) {

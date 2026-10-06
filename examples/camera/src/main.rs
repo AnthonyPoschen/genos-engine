@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use genos_input::{character_controller, InputCode, InputSystem};
-use genos_render::Renderer;
-use genos_scene::{build, load_path, update, Actions, Camera};
+use genos_render::{Renderer, ScreenRect, World};
+use genos_scene::{load_path, update, Actions, Camera};
+use genos_ui::{apply_lamp, lighting_frame, Pointer, State};
 use genos_window::{extent_changed, FocusGate, Window};
 
 fn main() {
@@ -16,6 +17,7 @@ fn run() -> Result<(), String> {
     let mut frames = None;
     let mut readback = None;
     let mut trace = false;
+    let mut proof = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -27,19 +29,26 @@ fn run() -> Result<(), String> {
                 readback = Some(PathBuf::from(args.next().ok_or("missing readback path")?));
             }
             "--trace" => trace = true,
+            "--proof" => proof = true,
             other => return Err(format!("unknown argument {other}")),
         }
     }
 
     let scene_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scene.rhai");
     let scene = load_path(&scene_path)?;
-    let mut window = Window::open(1280, 720)?;
+    let mut world = World::from_scene(scene);
+    let mut window = if proof {
+        Window::open_proof(1280, 720)?
+    } else {
+        Window::open(1280, 720)?
+    };
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let mut camera = Camera::opening();
     let mut drawn = 0u32;
     let mut size = (renderer.width(), renderer.height());
     let mut focus = FocusGate::default();
+    let mut ui = State::default();
     let mut input = InputSystem::new();
     let controls = character_controller();
     loop {
@@ -59,6 +68,20 @@ fn run() -> Result<(), String> {
         input.poll_gamepads();
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
+        let ui_frame = lighting_frame(
+            &mut ui,
+            [size.0 as f32, size.1 as f32],
+            &camera,
+            Pointer {
+                x: frame.pointer_x,
+                y: frame.pointer_y,
+                // A click can press and release before the next pump. The latch still hits the UI.
+                down: !camera.captured && (gated.mouse_left || gated.capture_click),
+            },
+        );
+        for action in &ui_frame.actions {
+            apply_lamp(&mut world.scene, *action);
+        }
         update(
             &mut camera,
             &Actions {
@@ -68,7 +91,8 @@ fn run() -> Result<(), String> {
                 mouse_dy: input.mouse.dy,
                 look_x: look_axis.x,
                 look_y: look_axis.y,
-                capture_click: gated.capture_click || controls.down(&input, "capture"),
+                capture_click: ui_frame.look_capture
+                    && (gated.capture_click || controls.down(&input, "capture")),
                 escape: controls.down(&input, "release"),
             },
             1.0 / 60.0,
@@ -82,12 +106,27 @@ fn run() -> Result<(), String> {
                 }
             }
         }
-        let field = build(&scene);
         let want_read = readback.is_some();
-        let pixels = renderer.draw(&scene, &field, &camera, want_read)?;
+        let overlay: Vec<ScreenRect> = ui_frame
+            .paints
+            .iter()
+            .map(|paint| ScreenRect {
+                x: paint.x,
+                y: paint.y,
+                w: paint.w,
+                h: paint.h,
+                color: paint.color,
+            })
+            .collect();
+        let pixels = renderer.draw_with_overlay(&world, &camera, &overlay, want_read)?;
         if want_read {
             if let Some(pixels) = pixels {
-                write_png(readback.as_ref().unwrap(), renderer.width(), renderer.height(), &pixels)?;
+                write_png(
+                    readback.as_ref().unwrap(),
+                    renderer.width(),
+                    renderer.height(),
+                    &pixels,
+                )?;
             }
         }
         if trace {
@@ -100,9 +139,9 @@ fn run() -> Result<(), String> {
                 frame.pointer_locked as u8,
                 camera.yaw,
                 camera.pitch,
-                camera.position[0],
-                camera.position[1],
-                camera.position[2],
+                camera.position.x,
+                camera.position.y,
+                camera.position.z,
                 move_axis.x,
                 move_axis.y,
                 look_axis.x,

@@ -84,6 +84,22 @@ _Avoid_: Floor
 The input map that moves the camera on the ground plane and turns the view.
 _Avoid_: Physics body, pawn
 
+**Position**:
+A point in the world. Y is up. The camera and each placed object store one.
+_Avoid_: Coordinate, transform
+
+**Direction**:
+A vector that aims a view or a movement.
+_Avoid_: Heading, bearing
+
+**Body**:
+A simulated mass. It has a position, an orientation, a velocity, and a shape.
+_Avoid_: Character controller, pawn
+
+**Physics step**:
+One update that moves bodies by gravity, contact, and springs.
+_Avoid_: Lighting ray, cascade
+
 **Omarchy**:
 The Linux desktop the editor must fit first.
 _Avoid_: Hyprland
@@ -119,3 +135,35 @@ _Avoid_: Python, Lua
 **Mod**:
 A set of scripts and data that changes a game without a change to the engine.
 _Avoid_: Plugin, native library
+
+**System record**:
+The living note for one engine system. It states the goal, the intent, the code, the game use, and the limits. It changes when those facts change.
+_Avoid_: ADR, spec
+
+**UI element**:
+A rectangle in a UI tree. It has a size rule and a look.
+_Avoid_: Widget, control
+
+**Screen root**:
+A UI element placed on the viewport. It stays when the camera moves.
+_Avoid_: HUD, canvas
+
+**World root**:
+A UI element placed on a world point. Its screen rectangle follows that point.
+_Avoid_: Billboard, sprite
+
+**Asset**:
+Data a game holds after a load. An image, a mesh, PCM samples, and a font are assets.
+_Avoid_: Resource, content
+
+**Byte source**:
+The supplier of bytes for one load. A file path and a memory block are byte sources.
+_Avoid_: Stream, backend
+
+**Texture map**:
+One image with frame rectangles and named clips for 2D animation.
+_Avoid_: Sprite sheet, atlas
+
+**Loading**:
+The system that turns byte sources into assets. Loading does not play audio and does not upload to a GPU.
+_Avoid_: Asset manager, content pipeline

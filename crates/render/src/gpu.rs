@@ -3,9 +3,11 @@
 use std::ffi::c_void;
 use std::os::raw::c_char;
 
-use genos_scene::{view_proj, Camera, Field, Scene};
+use genos_scene::{view_proj, Camera};
 
-use crate::mesh::{scene_vertices, Vertex};
+use crate::lighting::Lighting;
+use crate::mesh::Vertex;
+use crate::world::World;
 
 include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 
@@ -20,16 +22,31 @@ type Pfn = *const c_void;
 
 pub struct Renderer {
     gpu: Gpu,
+    lighting: Lighting,
     width: u32,
     height: u32,
+    uploaded_generation: u64,
+    world_count: u32,
 }
 
 impl Renderer {
-    pub fn open(display: *mut c_void, surface: *mut c_void, width: u32, height: u32) -> Result<Self, String> {
+    pub fn open(
+        display: *mut c_void,
+        surface: *mut c_void,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
         let gpu = Gpu::open(display, surface, width, height)?;
         let width = gpu.extent_w;
         let height = gpu.extent_h;
-        Ok(Self { gpu, width, height })
+        Ok(Self {
+            gpu,
+            lighting: Lighting::new(),
+            width,
+            height,
+            uploaded_generation: 0,
+            world_count: 0,
+        })
     }
 
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
@@ -42,21 +59,52 @@ impl Renderer {
         Ok(())
     }
 
-    /// Draw one frame. When `readback` is set, return tightly packed BGRA8 pixels.
+    /// Draw one frame. Cascades are rebuilt here, then only the visible objects are rasterized.
+    ///
+    /// When `readback` is set, return tightly packed BGRA8 pixels.
     pub fn draw(
         &mut self,
-        scene: &Scene,
-        field: &Field,
+        world: &World,
         camera: &Camera,
         readback: bool,
     ) -> Result<Option<Vec<u8>>, String> {
-        let verts = scene_vertices(scene, field);
-        self.gpu.note_vertex_count(verts.len() as u32);
-        self.gpu.upload(&verts)?;
+        self.draw_with_overlay(world, camera, &[], readback)
+    }
+
+    /// Draw the world, then screen rectangles. The rectangles ignore the depth test.
+    pub fn draw_with_overlay(
+        &mut self,
+        world: &World,
+        camera: &Camera,
+        overlay: &[ScreenRect],
+        readback: bool,
+    ) -> Result<Option<Vec<u8>>, String> {
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let matrix = view_proj(camera, aspect);
+        let overlay_verts = screen_quads(overlay);
+        let generation = self.lighting.prepare(world, &matrix);
+        let world_len = self.lighting.vertex_len();
+        let total = world_len + overlay_verts.len();
+        if generation != self.uploaded_generation || self.gpu.vertex_slots() < total {
+            let mut verts = self.lighting.copy_vertices();
+            self.world_count = verts.len() as u32;
+            verts.extend(overlay_verts);
+            if !verts.is_empty() {
+                self.gpu.upload(&verts)?;
+            }
+            self.uploaded_generation = generation;
+        } else {
+            self.gpu.write_range(self.world_count, &overlay_verts)?;
+        }
+        self.gpu.note_vertex_count(self.world_count);
+        self.gpu.note_overlay_count(total as u32 - self.world_count);
         self.gpu.record_and_submit(&matrix)?;
-        let pixels = if readback { Some(self.gpu.read_color()?) } else { None };
+        self.gpu.wait_gpu()?;
+        let pixels = if readback {
+            Some(self.gpu.read_color()?)
+        } else {
+            None
+        };
         let result = self.gpu.present()?;
         if result == OUT_OF_DATE || result == SUBOPTIMAL {
             self.gpu.recreate(self.width, self.height)?;
@@ -73,6 +121,53 @@ impl Renderer {
     pub fn height(&self) -> u32 {
         self.height
     }
+}
+
+/// One axis-aligned rectangle in window pixels. The origin is the top-left.
+#[derive(Clone, Copy, Debug)]
+pub struct ScreenRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub color: [f32; 3],
+}
+
+fn screen_quads(rects: &[ScreenRect]) -> Vec<Vertex> {
+    let mut verts = Vec::with_capacity(rects.len() * 6);
+    for rect in rects {
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            continue;
+        }
+        let x0 = rect.x;
+        let y0 = rect.y;
+        let x1 = rect.x + rect.w;
+        let y1 = rect.y + rect.h;
+        let color = rect.color;
+        let corner = |x: f32, y: f32| Vertex {
+            pos: [x, y, 0.0],
+            color,
+        };
+        verts.push(corner(x0, y0));
+        verts.push(corner(x1, y0));
+        verts.push(corner(x1, y1));
+        verts.push(corner(x0, y0));
+        verts.push(corner(x1, y1));
+        verts.push(corner(x0, y1));
+    }
+    verts
+}
+
+/// Column-major map from pixel space to Vulkan NDC. (0, 0) is the top-left.
+fn pixel_matrix(width: f32, height: f32) -> [f32; 16] {
+    let mut matrix = [0.0; 16];
+    matrix[0] = 2.0 / width.max(1.0);
+    matrix[5] = 2.0 / height.max(1.0);
+    matrix[10] = 1.0;
+    matrix[12] = -1.0;
+    matrix[13] = -1.0;
+    matrix[15] = 1.0;
+    matrix
 }
 
 pub(crate) fn extent_needed(old_w: u32, old_h: u32, new_w: u32, new_h: u32) -> bool {
@@ -100,8 +195,10 @@ struct Gpu {
     host: Buffer,
     vertex: Buffer,
     vertex_count: u32,
+    overlay_count: u32,
     render_pass: Handle,
     pipeline: Handle,
+    overlay_pipeline: Handle,
     layout: Handle,
     pool: Handle,
     cmd: Handle,
@@ -206,21 +303,37 @@ type Fn2 = unsafe extern "system" fn(Handle, Handle, *const c_void);
 type FnDevice = unsafe extern "system" fn(Handle) -> VkResult;
 type FnCmd = unsafe extern "system" fn(Handle);
 type FnCmdResult = unsafe extern "system" fn(Handle) -> VkResult;
-type FnCreateDevice = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+type FnCreateDevice =
+    unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
 type FnGetQueue = unsafe extern "system" fn(Handle, u32, u32, *mut Handle);
-type FnWayland = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+type FnWayland =
+    unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
 type FnSupport = unsafe extern "system" fn(Handle, u32, Handle, *mut u32) -> VkResult;
 type FnCaps = unsafe extern "system" fn(Handle, Handle, *mut u8) -> VkResult;
 type FnCount = unsafe extern "system" fn(Handle, Handle, *mut u32, *mut u8) -> VkResult;
-type FnSwapchain = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
-type FnAcquire = unsafe extern "system" fn(Handle, Handle, u64, Handle, Handle, *mut u32) -> VkResult;
+type FnSwapchain =
+    unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+type FnAcquire =
+    unsafe extern "system" fn(Handle, Handle, u64, Handle, Handle, *mut u32) -> VkResult;
 type FnPresent = unsafe extern "system" fn(Handle, *const u8) -> VkResult;
-type FnCreateView = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
-type FnShader = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
-type FnLayout = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
-type FnRenderPass = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
-type FnPipelines = unsafe extern "system" fn(Handle, Handle, u32, *const u8, *const c_void, *mut Handle) -> VkResult;
-type FnFramebuffer = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+type FnCreateView =
+    unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+type FnShader =
+    unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+type FnLayout =
+    unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+type FnRenderPass =
+    unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+type FnPipelines = unsafe extern "system" fn(
+    Handle,
+    Handle,
+    u32,
+    *const u8,
+    *const c_void,
+    *mut Handle,
+) -> VkResult;
+type FnFramebuffer =
+    unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
 type FnPool = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
 type FnAllocCmd = unsafe extern "system" fn(Handle, *const u8, *mut Handle) -> VkResult;
 type FnBegin = unsafe extern "system" fn(Handle, *const u8) -> VkResult;
@@ -232,15 +345,28 @@ type FnDraw = unsafe extern "system" fn(Handle, u32, u32, u32, u32);
 type FnPush = unsafe extern "system" fn(Handle, Handle, u32, u32, u32, *const c_void);
 type FnViewport = unsafe extern "system" fn(Handle, u32, u32, *const f32);
 type FnScissor = unsafe extern "system" fn(Handle, u32, u32, *const i32);
-type FnBarrier = unsafe extern "system" fn(Handle, u32, u32, u32, u32, *const c_void, u32, *const c_void, u32, *const u8);
+type FnBarrier = unsafe extern "system" fn(
+    Handle,
+    u32,
+    u32,
+    u32,
+    u32,
+    *const c_void,
+    u32,
+    *const c_void,
+    u32,
+    *const u8,
+);
 type FnCopyImage = unsafe extern "system" fn(Handle, Handle, i32, Handle, i32, u32, *const u8);
 type FnCopyBuf = unsafe extern "system" fn(Handle, Handle, i32, Handle, u32, *const u8);
-type FnCreateSem = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+type FnCreateSem =
+    unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
 type FnFence = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
 type FnWait = unsafe extern "system" fn(Handle, u32, *const Handle, u32, u64) -> VkResult;
 type FnResetFences = unsafe extern "system" fn(Handle, u32, *const Handle) -> VkResult;
 type FnSubmit = unsafe extern "system" fn(Handle, u32, *const u8, Handle) -> VkResult;
-type FnBuffer = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+type FnBuffer =
+    unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
 type FnBufReq = unsafe extern "system" fn(Handle, Handle, *mut u8);
 type FnAlloc = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
 type FnBindBuf = unsafe extern "system" fn(Handle, Handle, Handle, u64) -> VkResult;
@@ -254,20 +380,43 @@ type FnQueues = unsafe extern "system" fn(Handle, *mut u32, *mut u8);
 type FnMemProps = unsafe extern "system" fn(Handle, *mut u8);
 
 impl Gpu {
-    fn open(display: *mut c_void, wl_surface: *mut c_void, width: u32, height: u32) -> Result<Self, String> {
+    fn open(
+        display: *mut c_void,
+        wl_surface: *mut c_void,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
         unsafe {
             let lib = dlopen(b"libvulkan.so.1\0".as_ptr() as *const c_char, 2);
             if lib.is_null() {
                 return Err("libvulkan.so.1 did not open".into());
             }
-            let get_instance: GetProc = transmute(dlsym(lib, b"vkGetInstanceProcAddr\0".as_ptr() as *const c_char));
-            let enumerate_ext: unsafe extern "system" fn(*const c_void, *mut u32, *mut u8) -> VkResult =
-                transmute(get_instance(std::ptr::null_mut(), b"vkEnumerateInstanceExtensionProperties\0".as_ptr() as *const c_char));
-            let create_instance: unsafe extern "system" fn(*const u8, *const c_void, *mut Handle) -> VkResult =
-                transmute(get_instance(std::ptr::null_mut(), b"vkCreateInstance\0".as_ptr() as *const c_char));
+            let get_instance: GetProc = transmute(dlsym(
+                lib,
+                b"vkGetInstanceProcAddr\0".as_ptr() as *const c_char,
+            ));
+            let enumerate_ext: unsafe extern "system" fn(
+                *const c_void,
+                *mut u32,
+                *mut u8,
+            ) -> VkResult = transmute(get_instance(
+                std::ptr::null_mut(),
+                b"vkEnumerateInstanceExtensionProperties\0".as_ptr() as *const c_char,
+            ));
+            let create_instance: unsafe extern "system" fn(
+                *const u8,
+                *const c_void,
+                *mut Handle,
+            ) -> VkResult = transmute(get_instance(
+                std::ptr::null_mut(),
+                b"vkCreateInstance\0".as_ptr() as *const c_char,
+            ));
 
             let mut ext_count = 0u32;
-            check(enumerate_ext(std::ptr::null(), &mut ext_count, std::ptr::null_mut()), "extensions")?;
+            check(
+                enumerate_ext(std::ptr::null(), &mut ext_count, std::ptr::null_mut()),
+                "extensions",
+            )?;
             let surface_ext = b"VK_KHR_surface\0";
             let wayland_ext = b"VK_KHR_wayland_surface\0";
             let exts = [
@@ -317,31 +466,46 @@ impl Gpu {
             };
             let mut instance = std::ptr::null_mut();
             check(
-                create_instance(&info as *const InstInfo as *const u8, std::ptr::null(), &mut instance),
+                create_instance(
+                    &info as *const InstInfo as *const u8,
+                    std::ptr::null(),
+                    &mut instance,
+                ),
                 "vkCreateInstance",
             )?;
             let load = |name: &[u8]| get_instance(instance, name.as_ptr() as *const c_char);
 
             let enumerate_devices: FnEnumDev = transmute(load(b"vkEnumeratePhysicalDevices\0"));
-            let queue_families: FnQueues = transmute(load(b"vkGetPhysicalDeviceQueueFamilyProperties\0"));
+            let queue_families: FnQueues =
+                transmute(load(b"vkGetPhysicalDeviceQueueFamilyProperties\0"));
             let mem_props: FnMemProps = transmute(load(b"vkGetPhysicalDeviceMemoryProperties\0"));
             let create_device: FnCreateDevice = transmute(load(b"vkCreateDevice\0"));
             let get_device: GetProc = transmute(load(b"vkGetDeviceProcAddr\0"));
             let create_wayland_surface: FnWayland = transmute(load(b"vkCreateWaylandSurfaceKHR\0"));
             let destroy_surface: Fn2 = transmute(load(b"vkDestroySurfaceKHR\0"));
-            let surface_support: FnSupport = transmute(load(b"vkGetPhysicalDeviceSurfaceSupportKHR\0"));
-            let surface_caps: FnCaps = transmute(load(b"vkGetPhysicalDeviceSurfaceCapabilitiesKHR\0"));
-            let surface_formats: FnCount = transmute(load(b"vkGetPhysicalDeviceSurfaceFormatsKHR\0"));
-            let surface_modes: FnCount = transmute(load(b"vkGetPhysicalDeviceSurfacePresentModesKHR\0"));
+            let surface_support: FnSupport =
+                transmute(load(b"vkGetPhysicalDeviceSurfaceSupportKHR\0"));
+            let surface_caps: FnCaps =
+                transmute(load(b"vkGetPhysicalDeviceSurfaceCapabilitiesKHR\0"));
+            let surface_formats: FnCount =
+                transmute(load(b"vkGetPhysicalDeviceSurfaceFormatsKHR\0"));
+            let surface_modes: FnCount =
+                transmute(load(b"vkGetPhysicalDeviceSurfacePresentModesKHR\0"));
             let destroy_instance: FnDestroy = transmute(load(b"vkDestroyInstance\0"));
 
             let mut dev_count = 0u32;
-            check(enumerate_devices(instance, &mut dev_count, std::ptr::null_mut()), "devices")?;
+            check(
+                enumerate_devices(instance, &mut dev_count, std::ptr::null_mut()),
+                "devices",
+            )?;
             if dev_count == 0 {
                 return Err("no Vulkan physical device".into());
             }
             let mut devices = vec![std::ptr::null_mut(); dev_count as usize];
-            check(enumerate_devices(instance, &mut dev_count, devices.as_mut_ptr()), "device list")?;
+            check(
+                enumerate_devices(instance, &mut dev_count, devices.as_mut_ptr()),
+                "device list",
+            )?;
 
             #[repr(C)]
             struct WaylandInfo {
@@ -360,7 +524,12 @@ impl Gpu {
             };
             let mut vk_surface = std::ptr::null_mut();
             check(
-                create_wayland_surface(instance, &wayland as *const WaylandInfo as *const u8, std::ptr::null(), &mut vk_surface),
+                create_wayland_surface(
+                    instance,
+                    &wayland as *const WaylandInfo as *const u8,
+                    std::ptr::null(),
+                    &mut vk_surface,
+                ),
                 "wayland surface",
             )?;
 
@@ -371,9 +540,16 @@ impl Gpu {
                 let mut families = vec![0u8; family_count as usize * 24];
                 queue_families(physical, &mut family_count, families.as_mut_ptr());
                 for index in 0..family_count {
-                    let flags = u32::from_ne_bytes(families[index as usize * 24..index as usize * 24 + 4].try_into().unwrap());
+                    let flags = u32::from_ne_bytes(
+                        families[index as usize * 24..index as usize * 24 + 4]
+                            .try_into()
+                            .unwrap(),
+                    );
                     let mut supported = 0u32;
-                    check(surface_support(physical, index, vk_surface, &mut supported), "present support")?;
+                    check(
+                        surface_support(physical, index, vk_surface, &mut supported),
+                        "present support",
+                    )?;
                     if flags & 1 != 0 && supported == 1 {
                         chosen = Some((physical, index));
                         break;
@@ -437,7 +613,15 @@ impl Gpu {
                 features: std::ptr::null(),
             };
             let mut device = std::ptr::null_mut();
-            check(create_device(physical, &dev_info as *const DevInfo as *const u8, std::ptr::null(), &mut device), "vkCreateDevice")?;
+            check(
+                create_device(
+                    physical,
+                    &dev_info as *const DevInfo as *const u8,
+                    std::ptr::null(),
+                    &mut device,
+                ),
+                "vkCreateDevice",
+            )?;
             let dload = |name: &[u8]| get_device(device, name.as_ptr() as *const c_char);
             let get_device_queue: FnGetQueue = transmute(dload(b"vkGetDeviceQueue\0"));
             let mut queue = std::ptr::null_mut();
@@ -463,8 +647,10 @@ impl Gpu {
                 host: Buffer::empty(),
                 vertex: Buffer::empty(),
                 vertex_count: 0,
+                overlay_count: 0,
                 render_pass: std::ptr::null_mut(),
                 pipeline: std::ptr::null_mut(),
+                overlay_pipeline: std::ptr::null_mut(),
                 layout: std::ptr::null_mut(),
                 pool: std::ptr::null_mut(),
                 cmd: std::ptr::null_mut(),
@@ -472,7 +658,19 @@ impl Gpu {
                 render_done: std::ptr::null_mut(),
                 fence: std::ptr::null_mut(),
                 present_index: 0,
-                fns: load_fns(dload, create_wayland_surface, destroy_surface, surface_support, surface_caps, surface_formats, surface_modes, destroy_instance, enumerate_devices, queue_families, mem_props),
+                fns: load_fns(
+                    dload,
+                    create_wayland_surface,
+                    destroy_surface,
+                    surface_support,
+                    surface_caps,
+                    surface_formats,
+                    surface_modes,
+                    destroy_instance,
+                    enumerate_devices,
+                    queue_families,
+                    mem_props,
+                ),
                 memory_props,
             };
             let _ = (destroy_instance, surface_support);
@@ -486,7 +684,8 @@ impl Gpu {
         unsafe {
             self.render_pass = self.make_render_pass()?;
             self.layout = self.make_layout()?;
-            self.pipeline = self.make_pipeline()?;
+            self.pipeline = self.make_pipeline(true)?;
+            self.overlay_pipeline = self.make_pipeline(false)?;
             #[repr(C)]
             struct PoolInfo {
                 s_type: i32,
@@ -494,8 +693,21 @@ impl Gpu {
                 flags: u32,
                 family: u32,
             }
-            let pool = PoolInfo { s_type: 39, next: std::ptr::null(), flags: 0x2, family: self.queue_family };
-            check((self.fns.create_pool)(self.device, &pool as *const PoolInfo as *const u8, std::ptr::null(), &mut self.pool), "command pool")?;
+            let pool = PoolInfo {
+                s_type: 39,
+                next: std::ptr::null(),
+                flags: 0x2,
+                family: self.queue_family,
+            };
+            check(
+                (self.fns.create_pool)(
+                    self.device,
+                    &pool as *const PoolInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.pool,
+                ),
+                "command pool",
+            )?;
             #[repr(C)]
             struct AllocInfo {
                 s_type: i32,
@@ -504,20 +716,51 @@ impl Gpu {
                 level: u32,
                 count: u32,
             }
-            let alloc = AllocInfo { s_type: 40, next: std::ptr::null(), pool: self.pool, level: 0, count: 1 };
-            check((self.fns.alloc_cmd)(self.device, &alloc as *const AllocInfo as *const u8, &mut self.cmd), "command buffer")?;
+            let alloc = AllocInfo {
+                s_type: 40,
+                next: std::ptr::null(),
+                pool: self.pool,
+                level: 0,
+                count: 1,
+            };
+            check(
+                (self.fns.alloc_cmd)(
+                    self.device,
+                    &alloc as *const AllocInfo as *const u8,
+                    &mut self.cmd,
+                ),
+                "command buffer",
+            )?;
             self.image_ready = self.make_sem()?;
             self.render_done = self.make_sem()?;
             #[repr(C)]
-            struct FenceInfo { s_type: i32, next: *const c_void, flags: u32 }
-            let fence = FenceInfo { s_type: 8, next: std::ptr::null(), flags: 0x1 };
-            check((self.fns.create_fence)(self.device, &fence as *const FenceInfo as *const u8, std::ptr::null(), &mut self.fence), "fence")?;
+            struct FenceInfo {
+                s_type: i32,
+                next: *const c_void,
+                flags: u32,
+            }
+            let fence = FenceInfo {
+                s_type: 8,
+                next: std::ptr::null(),
+                flags: 0x1,
+            };
+            check(
+                (self.fns.create_fence)(
+                    self.device,
+                    &fence as *const FenceInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.fence,
+                ),
+                "fence",
+            )?;
         }
         Ok(())
     }
 
     fn recreate(&mut self, width: u32, height: u32) -> Result<(), String> {
-        unsafe { (self.fns.device_wait)(self.device); }
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
         self.destroy_targets();
         self.create_targets(width, height)
     }
@@ -525,7 +768,10 @@ impl Gpu {
     fn create_targets(&mut self, width: u32, height: u32) -> Result<(), String> {
         unsafe {
             let mut caps = [0u8; 64];
-            check((self.fns.surface_caps)(self.physical, self.surface, caps.as_mut_ptr()), "caps")?;
+            check(
+                (self.fns.surface_caps)(self.physical, self.surface, caps.as_mut_ptr()),
+                "caps",
+            )?;
             let min_images = u32::from_ne_bytes(caps[0..4].try_into().unwrap());
             let max_images = u32::from_ne_bytes(caps[4..8].try_into().unwrap());
             let current_w = u32::from_ne_bytes(caps[8..12].try_into().unwrap());
@@ -542,9 +788,25 @@ impl Gpu {
                 self.extent_h = height.max(1);
             }
             let mut format_count = 0u32;
-            check((self.fns.surface_formats)(self.physical, self.surface, &mut format_count, std::ptr::null_mut()), "formats")?;
+            check(
+                (self.fns.surface_formats)(
+                    self.physical,
+                    self.surface,
+                    &mut format_count,
+                    std::ptr::null_mut(),
+                ),
+                "formats",
+            )?;
             let mut formats = vec![0u8; format_count as usize * 8];
-            check((self.fns.surface_formats)(self.physical, self.surface, &mut format_count, formats.as_mut_ptr()), "format list")?;
+            check(
+                (self.fns.surface_formats)(
+                    self.physical,
+                    self.surface,
+                    &mut format_count,
+                    formats.as_mut_ptr(),
+                ),
+                "format list",
+            )?;
             self.format = 44;
             let mut found = false;
             for chunk in formats.chunks(8) {
@@ -605,11 +867,35 @@ impl Gpu {
                 clipped: 1,
                 old: std::ptr::null_mut(),
             };
-            check((self.fns.create_swapchain)(self.device, &swap as *const SwapInfo as *const u8, std::ptr::null(), &mut self.swapchain), "swapchain")?;
+            check(
+                (self.fns.create_swapchain)(
+                    self.device,
+                    &swap as *const SwapInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.swapchain,
+                ),
+                "swapchain",
+            )?;
             let mut count = 0u32;
-            check((self.fns.swapchain_images)(self.device, self.swapchain, &mut count, std::ptr::null_mut()), "image count")?;
+            check(
+                (self.fns.swapchain_images)(
+                    self.device,
+                    self.swapchain,
+                    &mut count,
+                    std::ptr::null_mut(),
+                ),
+                "image count",
+            )?;
             self.swap_images = vec![std::ptr::null_mut(); count as usize];
-            check((self.fns.swapchain_images)(self.device, self.swapchain, &mut count, self.swap_images.as_mut_ptr() as *mut u8), "image list")?;
+            check(
+                (self.fns.swapchain_images)(
+                    self.device,
+                    self.swapchain,
+                    &mut count,
+                    self.swap_images.as_mut_ptr() as *mut u8,
+                ),
+                "image list",
+            )?;
 
             self.color = self.make_image(self.format, 0x10 | 0x4, 1)?;
             self.depth = self.make_image(126, 0x20, 2)?;
@@ -620,7 +906,42 @@ impl Gpu {
         }
     }
 
+    fn vertex_slots(&self) -> usize {
+        self.vertex.size as usize / std::mem::size_of::<Vertex>()
+    }
+
+    /// Write `verts` at `first` without touching the world triangles before that slot.
+    fn write_range(&mut self, first: u32, verts: &[Vertex]) -> Result<(), String> {
+        if verts.is_empty() {
+            return Ok(());
+        }
+        let stride = std::mem::size_of::<Vertex>() as u64;
+        let offset = first as u64 * stride;
+        let bytes = verts.len() as u64 * stride;
+        let end = offset + bytes;
+        if self.vertex.size < end {
+            return Err("vertex buffer is smaller than the frame".into());
+        }
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(self.device, self.vertex.memory, 0, end, 0, &mut mapped),
+                "map vertices",
+            )?;
+            std::ptr::copy_nonoverlapping(
+                verts.as_ptr() as *const u8,
+                (mapped as *mut u8).add(offset as usize),
+                bytes as usize,
+            );
+            (self.fns.unmap_mem)(self.device, self.vertex.memory);
+        }
+        Ok(())
+    }
+
     fn upload(&mut self, verts: &[Vertex]) -> Result<(), String> {
+        if verts.is_empty() {
+            return Ok(());
+        }
         let bytes = (verts.len() * std::mem::size_of::<Vertex>()) as u64;
         if self.vertex.size < bytes {
             unsafe {
@@ -633,8 +954,15 @@ impl Gpu {
         }
         unsafe {
             let mut mapped = std::ptr::null_mut();
-            check((self.fns.map_mem)(self.device, self.vertex.memory, 0, bytes, 0, &mut mapped), "map vertices")?;
-            std::ptr::copy_nonoverlapping(verts.as_ptr() as *const u8, mapped as *mut u8, bytes as usize);
+            check(
+                (self.fns.map_mem)(self.device, self.vertex.memory, 0, bytes, 0, &mut mapped),
+                "map vertices",
+            )?;
+            std::ptr::copy_nonoverlapping(
+                verts.as_ptr() as *const u8,
+                mapped as *mut u8,
+                bytes as usize,
+            );
             (self.fns.unmap_mem)(self.device, self.vertex.memory);
         }
         Ok(())
@@ -643,29 +971,64 @@ impl Gpu {
     fn record_and_submit(&mut self, matrix: &[f32; 16]) -> Result<(), String> {
         unsafe {
             let fences = [self.fence];
-            check((self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX), "wait fence")?;
-            check((self.fns.reset_fences)(self.device, 1, fences.as_ptr()), "reset fence")?;
+            check(
+                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
+                "wait fence",
+            )?;
+            check(
+                (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
+                "reset fence",
+            )?;
             let mut index = 0u32;
-            let acquire = (self.fns.acquire)(self.device, self.swapchain, u64::MAX, self.image_ready, std::ptr::null_mut(), &mut index);
+            let acquire = (self.fns.acquire)(
+                self.device,
+                self.swapchain,
+                u64::MAX,
+                self.image_ready,
+                std::ptr::null_mut(),
+                &mut index,
+            );
             if acquire == OUT_OF_DATE {
                 return Err("out of date".into());
             }
             check(acquire, "acquire")?;
             check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
             #[repr(C)]
-            struct BeginInfo { s_type: i32, next: *const c_void, flags: u32, inherit: *const c_void }
-            let begin = BeginInfo { s_type: 42, next: std::ptr::null(), flags: 1, inherit: std::ptr::null() };
-            check((self.fns.begin_cmd)(self.cmd, &begin as *const BeginInfo as *const u8), "begin cmd")?;
+            struct BeginInfo {
+                s_type: i32,
+                next: *const c_void,
+                flags: u32,
+                inherit: *const c_void,
+            }
+            let begin = BeginInfo {
+                s_type: 42,
+                next: std::ptr::null(),
+                flags: 1,
+                inherit: std::ptr::null(),
+            };
+            check(
+                (self.fns.begin_cmd)(self.cmd, &begin as *const BeginInfo as *const u8),
+                "begin cmd",
+            )?;
 
             let swap = self.swap_images[index as usize];
             self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
             let mut clears = [[0.0f32, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.0]];
             #[repr(C)]
-            struct Offset { x: i32, y: i32 }
+            struct Offset {
+                x: i32,
+                y: i32,
+            }
             #[repr(C)]
-            struct Extent { w: u32, h: u32 }
+            struct Extent {
+                w: u32,
+                h: u32,
+            }
             #[repr(C)]
-            struct Rect { offset: Offset, extent: Extent }
+            struct Rect {
+                offset: Offset,
+                extent: Extent,
+            }
             #[repr(C)]
             struct RpBegin {
                 s_type: i32,
@@ -681,21 +1044,54 @@ impl Gpu {
                 next: std::ptr::null(),
                 pass: self.render_pass,
                 fb: self.framebuffer,
-                area: Rect { offset: Offset { x: 0, y: 0 }, extent: Extent { w: self.extent_w, h: self.extent_h } },
+                area: Rect {
+                    offset: Offset { x: 0, y: 0 },
+                    extent: Extent {
+                        w: self.extent_w,
+                        h: self.extent_h,
+                    },
+                },
                 clear_count: 2,
                 clears: clears.as_mut_ptr() as *const f32,
             };
             (self.fns.cmd_begin_rp)(self.cmd, &rp as *const RpBegin as *const u8, 0);
             (self.fns.cmd_bind_pipe)(self.cmd, 0, self.pipeline);
-            let viewport = [0.0f32, 0.0, self.extent_w as f32, self.extent_h as f32, 0.0, 1.0];
+            let viewport = [
+                0.0f32,
+                0.0,
+                self.extent_w as f32,
+                self.extent_h as f32,
+                0.0,
+                1.0,
+            ];
             (self.fns.cmd_viewport)(self.cmd, 0, 1, viewport.as_ptr());
             let scissor = [0i32, 0, self.extent_w as i32, self.extent_h as i32];
             (self.fns.cmd_scissor)(self.cmd, 0, 1, scissor.as_ptr());
-            (self.fns.cmd_push)(self.cmd, self.layout, 1, 0, 64, matrix.as_ptr() as *const c_void);
+            (self.fns.cmd_push)(
+                self.cmd,
+                self.layout,
+                1,
+                0,
+                64,
+                matrix.as_ptr() as *const c_void,
+            );
             let vb = [self.vertex.buffer];
             let off = [0u64];
             (self.fns.cmd_bind_vb)(self.cmd, 0, 1, vb.as_ptr(), off.as_ptr());
             (self.fns.cmd_draw)(self.cmd, self.vertex_count, 1, 0, 0);
+            if self.overlay_count > 0 && !self.overlay_pipeline.is_null() {
+                (self.fns.cmd_bind_pipe)(self.cmd, 0, self.overlay_pipeline);
+                let ortho = pixel_matrix(self.extent_w as f32, self.extent_h as f32);
+                (self.fns.cmd_push)(
+                    self.cmd,
+                    self.layout,
+                    1,
+                    0,
+                    64,
+                    ortho.as_ptr() as *const c_void,
+                );
+                (self.fns.cmd_draw)(self.cmd, self.overlay_count, 1, self.vertex_count, 0);
+            }
             (self.fns.cmd_end_rp)(self.cmd);
             self.copy_color_to_swapchain(swap);
             self.copy_color_to_buffer();
@@ -729,16 +1125,34 @@ impl Gpu {
                 signal_count: 1,
                 signals: signal_sem.as_ptr(),
             };
-            check((self.fns.queue_submit)(self.queue, 1, &submit as *const Submit as *const u8, self.fence), "submit")?;
+            check(
+                (self.fns.queue_submit)(
+                    self.queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    self.fence,
+                ),
+                "submit",
+            )?;
             self.present_index = index;
+        }
+        Ok(())
+    }
+
+    fn wait_gpu(&mut self) -> Result<(), String> {
+        unsafe {
+            let fences = [self.fence];
+            check(
+                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
+                "present wait",
+            )?;
         }
         Ok(())
     }
 
     fn present(&mut self) -> Result<VkResult, String> {
         unsafe {
-            let fences = [self.fence];
-            check((self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX), "present wait")?;
+            self.wait_gpu()?;
             let swap = [self.swapchain];
             let index = [self.present_index];
             let wait = [self.render_done];
@@ -776,7 +1190,17 @@ impl Gpu {
         let mut out = vec![0u8; bytes];
         unsafe {
             let mut mapped = std::ptr::null_mut();
-            check((self.fns.map_mem)(self.device, self.host.memory, 0, self.host.size, 0, &mut mapped), "map readback")?;
+            check(
+                (self.fns.map_mem)(
+                    self.device,
+                    self.host.memory,
+                    0,
+                    self.host.size,
+                    0,
+                    &mut mapped,
+                ),
+                "map readback",
+            )?;
             std::ptr::copy_nonoverlapping(mapped as *const u8, out.as_mut_ptr(), bytes);
             (self.fns.unmap_mem)(self.device, self.host.memory);
         }
@@ -785,18 +1209,38 @@ impl Gpu {
 
     fn make_sem(&mut self) -> Result<Handle, String> {
         #[repr(C)]
-        struct Info { s_type: i32, next: *const c_void, flags: u32 }
-        let info = Info { s_type: 9, next: std::ptr::null(), flags: 0 };
+        struct Info {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+        }
+        let info = Info {
+            s_type: 9,
+            next: std::ptr::null(),
+            flags: 0,
+        };
         let mut sem = std::ptr::null_mut();
         unsafe {
-            check((self.fns.create_sem)(self.device, &info as *const Info as *const u8, std::ptr::null(), &mut sem), "semaphore")?;
+            check(
+                (self.fns.create_sem)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut sem,
+                ),
+                "semaphore",
+            )?;
         }
         Ok(sem)
     }
 
     fn make_layout(&mut self) -> Result<Handle, String> {
         #[repr(C)]
-        struct Range { stage: u32, offset: u32, size: u32 }
+        struct Range {
+            stage: u32,
+            offset: u32,
+            size: u32,
+        }
         #[repr(C)]
         struct Info {
             s_type: i32,
@@ -807,7 +1251,11 @@ impl Gpu {
             push_count: u32,
             push: *const Range,
         }
-        let range = Range { stage: 1, offset: 0, size: 64 };
+        let range = Range {
+            stage: 1,
+            offset: 0,
+            size: 64,
+        };
         let info = Info {
             s_type: 30,
             next: std::ptr::null(),
@@ -819,7 +1267,15 @@ impl Gpu {
         };
         let mut layout = std::ptr::null_mut();
         unsafe {
-            check((self.fns.create_layout)(self.device, &info as *const Info as *const u8, std::ptr::null(), &mut layout), "layout")?;
+            check(
+                (self.fns.create_layout)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut layout,
+                ),
+                "layout",
+            )?;
         }
         Ok(layout)
     }
@@ -838,7 +1294,10 @@ impl Gpu {
             final_layout: u32,
         }
         #[repr(C)]
-        struct Ref { attachment: u32, layout: u32 }
+        struct Ref {
+            attachment: u32,
+            layout: u32,
+        }
         #[repr(C)]
         struct Subpass {
             flags: u32,
@@ -875,11 +1334,37 @@ impl Gpu {
             deps: *const Dep,
         }
         let atts = [
-            Att { flags: 0, format: self.format, samples: 1, load: 1, store: 0, stencil_load: 1, stencil_store: 1, initial: 0, final_layout: 6 },
-            Att { flags: 0, format: 126, samples: 1, load: 1, store: 1, stencil_load: 1, stencil_store: 1, initial: 0, final_layout: 3 },
+            Att {
+                flags: 0,
+                format: self.format,
+                samples: 1,
+                load: 1,
+                store: 0,
+                stencil_load: 1,
+                stencil_store: 1,
+                initial: 0,
+                final_layout: 6,
+            },
+            Att {
+                flags: 0,
+                format: 126,
+                samples: 1,
+                load: 1,
+                store: 1,
+                stencil_load: 1,
+                stencil_store: 1,
+                initial: 0,
+                final_layout: 3,
+            },
         ];
-        let color = Ref { attachment: 0, layout: 2 };
-        let depth = Ref { attachment: 1, layout: 3 };
+        let color = Ref {
+            attachment: 0,
+            layout: 2,
+        };
+        let depth = Ref {
+            attachment: 1,
+            layout: 3,
+        };
         let sub = Subpass {
             flags: 0,
             pipeline: 0,
@@ -893,8 +1378,24 @@ impl Gpu {
             preserve: std::ptr::null(),
         };
         let deps = [
-            Dep { src: u32::MAX, dst: 0, src_stage: 0x400, dst_stage: 0x400, src_access: 0, dst_access: 0x100, flags: 0 },
-            Dep { src: 0, dst: u32::MAX, src_stage: 0x400, dst_stage: 0x1000, src_access: 0x100, dst_access: 0x800, flags: 0 },
+            Dep {
+                src: u32::MAX,
+                dst: 0,
+                src_stage: 0x400,
+                dst_stage: 0x400,
+                src_access: 0,
+                dst_access: 0x100,
+                flags: 0,
+            },
+            Dep {
+                src: 0,
+                dst: u32::MAX,
+                src_stage: 0x400,
+                dst_stage: 0x1000,
+                src_access: 0x100,
+                dst_access: 0x800,
+                flags: 0,
+            },
         ];
         let info = Info {
             s_type: 38,
@@ -909,12 +1410,20 @@ impl Gpu {
         };
         let mut pass = std::ptr::null_mut();
         unsafe {
-            check((self.fns.create_render_pass)(self.device, &info as *const Info as *const u8, std::ptr::null(), &mut pass), "render pass")?;
+            check(
+                (self.fns.create_render_pass)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut pass,
+                ),
+                "render pass",
+            )?;
         }
         Ok(pass)
     }
 
-    fn make_pipeline(&mut self) -> Result<Handle, String> {
+    fn make_pipeline(&mut self, depth_test: bool) -> Result<Handle, String> {
         unsafe {
             let vert = self.shader(VERT_SPV)?;
             let frag = self.shader(FRAG_SPV)?;
@@ -930,13 +1439,38 @@ impl Gpu {
             }
             let entry = b"main\0".as_ptr() as *const i8;
             let stages = [
-                Stage { s_type: 18, next: std::ptr::null(), flags: 0, stage: 1, module: vert, name: entry, spec: std::ptr::null() },
-                Stage { s_type: 18, next: std::ptr::null(), flags: 0, stage: 16, module: frag, name: entry, spec: std::ptr::null() },
+                Stage {
+                    s_type: 18,
+                    next: std::ptr::null(),
+                    flags: 0,
+                    stage: 1,
+                    module: vert,
+                    name: entry,
+                    spec: std::ptr::null(),
+                },
+                Stage {
+                    s_type: 18,
+                    next: std::ptr::null(),
+                    flags: 0,
+                    stage: 16,
+                    module: frag,
+                    name: entry,
+                    spec: std::ptr::null(),
+                },
             ];
             #[repr(C)]
-            struct Bind { binding: u32, stride: u32, rate: u32 }
+            struct Bind {
+                binding: u32,
+                stride: u32,
+                rate: u32,
+            }
             #[repr(C)]
-            struct Attr { location: u32, binding: u32, format: i32, offset: u32 }
+            struct Attr {
+                location: u32,
+                binding: u32,
+                format: i32,
+                offset: u32,
+            }
             #[repr(C)]
             struct VertInfo {
                 s_type: i32,
@@ -947,10 +1481,24 @@ impl Gpu {
                 attr_count: u32,
                 attrs: *const Attr,
             }
-            let bind = Bind { binding: 0, stride: 24, rate: 0 };
+            let bind = Bind {
+                binding: 0,
+                stride: 24,
+                rate: 0,
+            };
             let attrs = [
-                Attr { location: 0, binding: 0, format: 106, offset: 0 },
-                Attr { location: 1, binding: 0, format: 106, offset: 12 },
+                Attr {
+                    location: 0,
+                    binding: 0,
+                    format: 106,
+                    offset: 0,
+                },
+                Attr {
+                    location: 1,
+                    binding: 0,
+                    format: 106,
+                    offset: 12,
+                },
             ];
             let vert_info = VertInfo {
                 s_type: 19,
@@ -962,11 +1510,39 @@ impl Gpu {
                 attrs: attrs.as_ptr(),
             };
             #[repr(C)]
-            struct Ia { s_type: i32, next: *const c_void, flags: u32, topo: u32, restart: u32 }
-            let ia = Ia { s_type: 20, next: std::ptr::null(), flags: 0, topo: 3, restart: 0 };
+            struct Ia {
+                s_type: i32,
+                next: *const c_void,
+                flags: u32,
+                topo: u32,
+                restart: u32,
+            }
+            let ia = Ia {
+                s_type: 20,
+                next: std::ptr::null(),
+                flags: 0,
+                topo: 3,
+                restart: 0,
+            };
             #[repr(C)]
-            struct ViewportState { s_type: i32, next: *const c_void, flags: u32, vp_count: u32, vps: *const c_void, sc_count: u32, scs: *const c_void }
-            let vp = ViewportState { s_type: 22, next: std::ptr::null(), flags: 0, vp_count: 1, vps: std::ptr::null(), sc_count: 1, scs: std::ptr::null() };
+            struct ViewportState {
+                s_type: i32,
+                next: *const c_void,
+                flags: u32,
+                vp_count: u32,
+                vps: *const c_void,
+                sc_count: u32,
+                scs: *const c_void,
+            }
+            let vp = ViewportState {
+                s_type: 22,
+                next: std::ptr::null(),
+                flags: 0,
+                vp_count: 1,
+                vps: std::ptr::null(),
+                sc_count: 1,
+                scs: std::ptr::null(),
+            };
             #[repr(C)]
             struct Raster {
                 s_type: i32,
@@ -999,8 +1575,28 @@ impl Gpu {
                 line: 1.0,
             };
             #[repr(C)]
-            struct Ms { s_type: i32, next: *const c_void, flags: u32, samples: u32, sample_shading: u32, min_sample: f32, mask: *const u32, alpha_to_cov: u32, alpha_to_one: u32 }
-            let ms = Ms { s_type: 24, next: std::ptr::null(), flags: 0, samples: 1, sample_shading: 0, min_sample: 0.0, mask: std::ptr::null(), alpha_to_cov: 0, alpha_to_one: 0 };
+            struct Ms {
+                s_type: i32,
+                next: *const c_void,
+                flags: u32,
+                samples: u32,
+                sample_shading: u32,
+                min_sample: f32,
+                mask: *const u32,
+                alpha_to_cov: u32,
+                alpha_to_one: u32,
+            }
+            let ms = Ms {
+                s_type: 24,
+                next: std::ptr::null(),
+                flags: 0,
+                samples: 1,
+                sample_shading: 0,
+                min_sample: 0.0,
+                mask: std::ptr::null(),
+                alpha_to_cov: 0,
+                alpha_to_one: 0,
+            };
             #[repr(C)]
             struct Depth {
                 s_type: i32,
@@ -1028,12 +1624,13 @@ impl Gpu {
                 min: f32,
                 max: f32,
             }
+            let depth_on = if depth_test { 1 } else { 0 };
             let depth = Depth {
                 s_type: 25,
                 next: std::ptr::null(),
                 flags: 0,
-                test: 1,
-                write: 1,
+                test: depth_on,
+                write: depth_on,
                 compare: 1,
                 bounds: 0,
                 stencil: 0,
@@ -1076,12 +1673,42 @@ impl Gpu {
                 atts: *const BlendAtt,
                 blend: [f32; 4],
             }
-            let batt = BlendAtt { enable: 0, src: 1, dst: 0, op: 0, src_a: 1, dst_a: 0, op_a: 0, mask: 0xf };
-            let blend = Blend { s_type: 26, next: std::ptr::null(), flags: 0, logic: 0, logic_op: 0, att_count: 1, atts: &batt, blend: [0.0; 4] };
+            let batt = BlendAtt {
+                enable: 0,
+                src: 1,
+                dst: 0,
+                op: 0,
+                src_a: 1,
+                dst_a: 0,
+                op_a: 0,
+                mask: 0xf,
+            };
+            let blend = Blend {
+                s_type: 26,
+                next: std::ptr::null(),
+                flags: 0,
+                logic: 0,
+                logic_op: 0,
+                att_count: 1,
+                atts: &batt,
+                blend: [0.0; 4],
+            };
             #[repr(C)]
-            struct Dyn { s_type: i32, next: *const c_void, flags: u32, count: u32, states: *const u32 }
+            struct Dyn {
+                s_type: i32,
+                next: *const c_void,
+                flags: u32,
+                count: u32,
+                states: *const u32,
+            }
             let states = [0u32, 1];
-            let dyn_state = Dyn { s_type: 27, next: std::ptr::null(), flags: 0, count: 2, states: states.as_ptr() };
+            let dyn_state = Dyn {
+                s_type: 27,
+                next: std::ptr::null(),
+                flags: 0,
+                count: 2,
+                states: states.as_ptr(),
+            };
             #[repr(C)]
             struct Pipe {
                 s_type: i32,
@@ -1126,7 +1753,14 @@ impl Gpu {
                 base_index: -1,
             };
             let mut pipeline = std::ptr::null_mut();
-            let result = (self.fns.create_pipelines)(self.device, std::ptr::null_mut(), 1, &pipe as *const Pipe as *const u8, std::ptr::null(), &mut pipeline);
+            let result = (self.fns.create_pipelines)(
+                self.device,
+                std::ptr::null_mut(),
+                1,
+                &pipe as *const Pipe as *const u8,
+                std::ptr::null(),
+                &mut pipeline,
+            );
             (self.fns.destroy_shader)(self.device, vert, std::ptr::null());
             (self.fns.destroy_shader)(self.device, frag, std::ptr::null());
             check(result, "pipeline")?;
@@ -1136,18 +1770,42 @@ impl Gpu {
 
     fn shader(&self, code: &[u8]) -> Result<Handle, String> {
         #[repr(C)]
-        struct Info { s_type: i32, next: *const c_void, flags: u32, size: usize, code: *const u32 }
-        let info = Info { s_type: 16, next: std::ptr::null(), flags: 0, size: code.len(), code: code.as_ptr() as *const u32 };
+        struct Info {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            size: usize,
+            code: *const u32,
+        }
+        let info = Info {
+            s_type: 16,
+            next: std::ptr::null(),
+            flags: 0,
+            size: code.len(),
+            code: code.as_ptr() as *const u32,
+        };
         let mut module = std::ptr::null_mut();
         unsafe {
-            check((self.fns.create_shader)(self.device, &info as *const Info as *const u8, std::ptr::null(), &mut module), "shader")?;
+            check(
+                (self.fns.create_shader)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut module,
+                ),
+                "shader",
+            )?;
         }
         Ok(module)
     }
 
     fn make_image(&self, format: i32, usage: u32, aspect: u32) -> Result<Image, String> {
         #[repr(C)]
-        struct Extent { w: u32, h: u32, d: u32 }
+        struct Extent {
+            w: u32,
+            h: u32,
+            d: u32,
+        }
         #[repr(C)]
         struct Info {
             s_type: i32,
@@ -1172,7 +1830,11 @@ impl Gpu {
             flags: 0,
             image_type: 1,
             format,
-            extent: Extent { w: self.extent_w, h: self.extent_h, d: 1 },
+            extent: Extent {
+                w: self.extent_w,
+                h: self.extent_h,
+                d: 1,
+            },
             mips: 1,
             layers: 1,
             samples: 1,
@@ -1185,23 +1847,49 @@ impl Gpu {
         };
         let mut image = std::ptr::null_mut();
         unsafe {
-            check((self.fns.create_image)(self.device, &info as *const Info as *const u8, std::ptr::null(), &mut image), "image")?;
+            check(
+                (self.fns.create_image)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut image,
+                ),
+                "image",
+            )?;
             let mut req = [0u8; 24];
             (self.fns.image_reqs)(self.device, image, req.as_mut_ptr());
             let size = u64::from_ne_bytes(req[0..8].try_into().unwrap());
             let bits = u32::from_ne_bytes(req[16..20].try_into().unwrap());
             let memory = self.alloc(size, bits, false)?;
-            check((self.fns.bind_image)(self.device, image, memory, 0), "bind image")?;
+            check(
+                (self.fns.bind_image)(self.device, image, memory, 0),
+                "bind image",
+            )?;
             let view = self.make_view(image, format, aspect)?;
-            Ok(Image { image, view, memory })
+            Ok(Image {
+                image,
+                view,
+                memory,
+            })
         }
     }
 
     fn make_view(&self, image: Handle, format: i32, aspect: u32) -> Result<Handle, String> {
         #[repr(C)]
-        struct Comp { r: u32, g: u32, b: u32, a: u32 }
+        struct Comp {
+            r: u32,
+            g: u32,
+            b: u32,
+            a: u32,
+        }
         #[repr(C)]
-        struct Range { aspect: u32, mip: u32, levels: u32, layer: u32, layers: u32 }
+        struct Range {
+            aspect: u32,
+            mip: u32,
+            levels: u32,
+            layer: u32,
+            layers: u32,
+        }
         #[repr(C)]
         struct Info {
             s_type: i32,
@@ -1220,12 +1908,31 @@ impl Gpu {
             image,
             view_type: 1,
             format,
-            comp: Comp { r: 0, g: 0, b: 0, a: 0 },
-            range: Range { aspect, mip: 0, levels: 1, layer: 0, layers: 1 },
+            comp: Comp {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0,
+            },
+            range: Range {
+                aspect,
+                mip: 0,
+                levels: 1,
+                layer: 0,
+                layers: 1,
+            },
         };
         let mut view = std::ptr::null_mut();
         unsafe {
-            check((self.fns.create_image_view)(self.device, &info as *const Info as *const u8, std::ptr::null(), &mut view), "image view")?;
+            check(
+                (self.fns.create_image_view)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut view,
+                ),
+                "image view",
+            )?;
         }
         Ok(view)
     }
@@ -1257,7 +1964,15 @@ impl Gpu {
         };
         let mut fb = std::ptr::null_mut();
         unsafe {
-            check((self.fns.create_framebuffer)(self.device, &info as *const Info as *const u8, std::ptr::null(), &mut fb), "framebuffer")?;
+            check(
+                (self.fns.create_framebuffer)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut fb,
+                ),
+                "framebuffer",
+            )?;
         }
         Ok(fb)
     }
@@ -1274,22 +1989,50 @@ impl Gpu {
             queue_count: u32,
             queues: *const u32,
         }
-        let info = Info { s_type: 12, next: std::ptr::null(), flags: 0, size, usage, sharing: 0, queue_count: 0, queues: std::ptr::null() };
+        let info = Info {
+            s_type: 12,
+            next: std::ptr::null(),
+            flags: 0,
+            size,
+            usage,
+            sharing: 0,
+            queue_count: 0,
+            queues: std::ptr::null(),
+        };
         let mut buffer = std::ptr::null_mut();
         unsafe {
-            check((self.fns.create_buffer)(self.device, &info as *const Info as *const u8, std::ptr::null(), &mut buffer), "buffer")?;
+            check(
+                (self.fns.create_buffer)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut buffer,
+                ),
+                "buffer",
+            )?;
             let mut req = [0u8; 24];
             (self.fns.buffer_reqs)(self.device, buffer, req.as_mut_ptr());
             let req_size = u64::from_ne_bytes(req[0..8].try_into().unwrap());
             let bits = u32::from_ne_bytes(req[16..20].try_into().unwrap());
             let memory = self.alloc(req_size, bits, host)?;
-            check((self.fns.bind_buffer)(self.device, buffer, memory, 0), "bind buffer")?;
-            Ok(Buffer { buffer, memory, size: req_size })
+            check(
+                (self.fns.bind_buffer)(self.device, buffer, memory, 0),
+                "bind buffer",
+            )?;
+            Ok(Buffer {
+                buffer,
+                memory,
+                size: req_size,
+            })
         }
     }
 
     fn note_vertex_count(&mut self, count: u32) {
         self.vertex_count = count;
+    }
+
+    fn note_overlay_count(&mut self, count: u32) {
+        self.overlay_count = count;
     }
 
     fn alloc(&self, size: u64, type_bits: u32, host: bool) -> Result<Handle, String> {
@@ -1313,18 +2056,51 @@ impl Gpu {
             return Err("no memory type".into());
         };
         #[repr(C)]
-        struct Info { s_type: i32, next: *const c_void, size: u64, index: u32 }
-        let info = Info { s_type: 5, next: std::ptr::null(), size, index };
+        struct Info {
+            s_type: i32,
+            next: *const c_void,
+            size: u64,
+            index: u32,
+        }
+        let info = Info {
+            s_type: 5,
+            next: std::ptr::null(),
+            size,
+            index,
+        };
         let mut memory = std::ptr::null_mut();
         unsafe {
-            check((self.fns.alloc_mem)(self.device, &info as *const Info as *const u8, std::ptr::null(), &mut memory), "allocate")?;
+            check(
+                (self.fns.alloc_mem)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut memory,
+                ),
+                "allocate",
+            )?;
         }
         Ok(memory)
     }
 
-    fn image_barrier(&self, image: Handle, old: u32, new: u32, src_stage: u32, dst_stage: u32, src_access: u32, dst_access: u32) {
+    fn image_barrier(
+        &self,
+        image: Handle,
+        old: u32,
+        new: u32,
+        src_stage: u32,
+        dst_stage: u32,
+        src_access: u32,
+        dst_access: u32,
+    ) {
         #[repr(C)]
-        struct Range { aspect: u32, mip: u32, levels: u32, layer: u32, layers: u32 }
+        struct Range {
+            aspect: u32,
+            mip: u32,
+            levels: u32,
+            layer: u32,
+            layers: u32,
+        }
         #[repr(C)]
         struct Barrier {
             s_type: i32,
@@ -1348,7 +2124,13 @@ impl Gpu {
             src_queue: u32::MAX,
             dst_queue: u32::MAX,
             image,
-            range: Range { aspect: 1, mip: 0, levels: 1, layer: 0, layers: 1 },
+            range: Range {
+                aspect: 1,
+                mip: 0,
+                levels: 1,
+                layer: 0,
+                layers: 1,
+            },
         };
         unsafe {
             (self.fns.cmd_barrier)(
@@ -1369,11 +2151,24 @@ impl Gpu {
     fn copy_color_to_swapchain(&self, swap: Handle) {
         #[repr(C)]
         #[derive(Clone, Copy)]
-        struct Layers { aspect: u32, mip: u32, layer: u32, count: u32 }
+        struct Layers {
+            aspect: u32,
+            mip: u32,
+            layer: u32,
+            count: u32,
+        }
         #[repr(C)]
-        struct Offset { x: i32, y: i32, z: i32 }
+        struct Offset {
+            x: i32,
+            y: i32,
+            z: i32,
+        }
         #[repr(C)]
-        struct Extent { w: u32, h: u32, d: u32 }
+        struct Extent {
+            w: u32,
+            h: u32,
+            d: u32,
+        }
         #[repr(C)]
         struct Region {
             src_layers: Layers,
@@ -1382,13 +2177,22 @@ impl Gpu {
             dst_offset: Offset,
             extent: Extent,
         }
-        let layers = Layers { aspect: 1, mip: 0, layer: 0, count: 1 };
+        let layers = Layers {
+            aspect: 1,
+            mip: 0,
+            layer: 0,
+            count: 1,
+        };
         let region = Region {
             src_layers: layers,
             src_offset: Offset { x: 0, y: 0, z: 0 },
             dst_layers: layers,
             dst_offset: Offset { x: 0, y: 0, z: 0 },
-            extent: Extent { w: self.extent_w, h: self.extent_h, d: 1 },
+            extent: Extent {
+                w: self.extent_w,
+                h: self.extent_h,
+                d: 1,
+            },
         };
         unsafe {
             (self.fns.cmd_copy_image)(
@@ -1405,11 +2209,24 @@ impl Gpu {
 
     fn copy_color_to_buffer(&self) {
         #[repr(C)]
-        struct Layers { aspect: u32, mip: u32, layer: u32, count: u32 }
+        struct Layers {
+            aspect: u32,
+            mip: u32,
+            layer: u32,
+            count: u32,
+        }
         #[repr(C)]
-        struct Offset { x: i32, y: i32, z: i32 }
+        struct Offset {
+            x: i32,
+            y: i32,
+            z: i32,
+        }
         #[repr(C)]
-        struct Extent { w: u32, h: u32, d: u32 }
+        struct Extent {
+            w: u32,
+            h: u32,
+            d: u32,
+        }
         #[repr(C)]
         struct Region {
             offset: u64,
@@ -1423,9 +2240,18 @@ impl Gpu {
             offset: 0,
             row: 0,
             height: 0,
-            layers: Layers { aspect: 1, mip: 0, layer: 0, count: 1 },
+            layers: Layers {
+                aspect: 1,
+                mip: 0,
+                layer: 0,
+                count: 1,
+            },
             image_offset: Offset { x: 0, y: 0, z: 0 },
-            extent: Extent { w: self.extent_w, h: self.extent_h, d: 1 },
+            extent: Extent {
+                w: self.extent_w,
+                h: self.extent_h,
+                d: 1,
+            },
         };
         unsafe {
             (self.fns.cmd_copy_to_buffer)(
@@ -1490,13 +2316,21 @@ impl Gpu {
 
 impl Image {
     fn empty() -> Self {
-        Self { image: std::ptr::null_mut(), view: std::ptr::null_mut(), memory: std::ptr::null_mut() }
+        Self {
+            image: std::ptr::null_mut(),
+            view: std::ptr::null_mut(),
+            memory: std::ptr::null_mut(),
+        }
     }
 }
 
 impl Buffer {
     fn empty() -> Self {
-        Self { buffer: std::ptr::null_mut(), memory: std::ptr::null_mut(), size: 0 }
+        Self {
+            buffer: std::ptr::null_mut(),
+            memory: std::ptr::null_mut(),
+            size: 0,
+        }
     }
 }
 
@@ -1510,15 +2344,34 @@ impl Drop for Gpu {
             self.destroy_targets();
             let mut vertex = std::mem::replace(&mut self.vertex, Buffer::empty());
             self.destroy_buffer(&mut vertex);
-            if !self.fence.is_null() { (self.fns.destroy_fence)(self.device, self.fence, std::ptr::null()); }
-            if !self.image_ready.is_null() { (self.fns.destroy_sem)(self.device, self.image_ready, std::ptr::null()); }
-            if !self.render_done.is_null() { (self.fns.destroy_sem)(self.device, self.render_done, std::ptr::null()); }
-            if !self.pool.is_null() { (self.fns.destroy_pool)(self.device, self.pool, std::ptr::null()); }
-            if !self.pipeline.is_null() { (self.fns.destroy_pipeline)(self.device, self.pipeline, std::ptr::null()); }
-            if !self.layout.is_null() { (self.fns.destroy_layout)(self.device, self.layout, std::ptr::null()); }
-            if !self.render_pass.is_null() { (self.fns.destroy_render_pass)(self.device, self.render_pass, std::ptr::null()); }
+            if !self.fence.is_null() {
+                (self.fns.destroy_fence)(self.device, self.fence, std::ptr::null());
+            }
+            if !self.image_ready.is_null() {
+                (self.fns.destroy_sem)(self.device, self.image_ready, std::ptr::null());
+            }
+            if !self.render_done.is_null() {
+                (self.fns.destroy_sem)(self.device, self.render_done, std::ptr::null());
+            }
+            if !self.pool.is_null() {
+                (self.fns.destroy_pool)(self.device, self.pool, std::ptr::null());
+            }
+            if !self.overlay_pipeline.is_null() {
+                (self.fns.destroy_pipeline)(self.device, self.overlay_pipeline, std::ptr::null());
+            }
+            if !self.pipeline.is_null() {
+                (self.fns.destroy_pipeline)(self.device, self.pipeline, std::ptr::null());
+            }
+            if !self.layout.is_null() {
+                (self.fns.destroy_layout)(self.device, self.layout, std::ptr::null());
+            }
+            if !self.render_pass.is_null() {
+                (self.fns.destroy_render_pass)(self.device, self.render_pass, std::ptr::null());
+            }
             (self.fns.destroy_device)(self.device, std::ptr::null());
-            if !self.surface.is_null() { (self.fns.destroy_surface)(self.instance, self.surface, std::ptr::null()); }
+            if !self.surface.is_null() {
+                (self.fns.destroy_surface)(self.instance, self.surface, std::ptr::null());
+            }
             (self.fns.destroy_instance)(self.instance, std::ptr::null());
         }
     }
@@ -1564,7 +2417,9 @@ fn load_fns(
 ) -> Fns {
     unsafe {
         macro_rules! d {
-            ($name:literal) => { transmute(dload(concat!($name, "\0").as_bytes())) };
+            ($name:literal) => {
+                transmute(dload(concat!($name, "\0").as_bytes()))
+            };
         }
         Fns {
             destroy_instance,

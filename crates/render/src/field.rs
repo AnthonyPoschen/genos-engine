@@ -1,4 +1,4 @@
-use crate::types::{Scene, Shape};
+use genos_scene::{Scene, Shape};
 
 /// One distance range of the radiance field.
 #[derive(Clone, Debug)]
@@ -45,6 +45,13 @@ pub fn build(scene: &Scene) -> Field {
     build_field(scene, Some(&direct))
 }
 
+pub fn ray_count(field: &Field) -> u64 {
+    let level = |level: &CascadeLevel| {
+        level.count_x as u64 * level.count_z as u64 * level.directions as u64
+    };
+    (level(&field.near) + level(&field.far) + level(&field.world)) * 2
+}
+
 /// Merged radiance at a ground position.
 ///
 /// A near hit wins. An empty near interval uses the far interval. An empty far
@@ -66,18 +73,263 @@ pub fn sample_world(field: &Field, x: f32, z: f32) -> [f32; 3] {
 
 /// Scalar light reaching a point, from the scene lights only.
 /// No lamp means zero. There is no ambient term.
+/// A wall or solid between the point and a lamp stops that lamp.
 pub fn illuminate(scene: &Scene, x: f32, y: f32, z: f32) -> f32 {
+    illuminate_facing(scene, x, y, z, [0.0, 0.0, 0.0])
+}
+
+/// Like [`illuminate`], but a face with a normal receives a lamp only when it points toward that lamp.
+pub fn illuminate_facing(scene: &Scene, x: f32, y: f32, z: f32, normal: [f32; 3]) -> f32 {
+    let use_facing = normal[0] != 0.0 || normal[1] != 0.0 || normal[2] != 0.0;
     let mut incoming = 0.0;
     for light in &scene.lights {
-        let dx = x - light.x;
-        let dy = y - light.y;
-        let dz = z - light.z;
+        let dx = light.position.x - x;
+        let dy = light.position.y - y;
+        let dz = light.position.z - z;
+        if use_facing && dx * normal[0] + dy * normal[1] + dz * normal[2] <= 0.0 {
+            continue;
+        }
+        if lamp_is_blocked(scene, x, y, z, light) {
+            continue;
+        }
         let dist2 = dx * dx + dy * dy + dz * dz;
         let strength = (light.color[0] + light.color[1] + light.color[2]) / 3.0;
         incoming += strength * 2.4 / (1.0 + dist2 * 0.08);
     }
     incoming
 }
+
+fn lamp_is_blocked(scene: &Scene, x: f32, y: f32, z: f32, light: &genos_scene::Light) -> bool {
+    if covered_by_object(scene, x, y, z) {
+        return true;
+    }
+    let dx = light.position.x - x;
+    let dy = light.position.y - y;
+    let dz = light.position.z - z;
+    let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+    if dist < 1.0e-3 {
+        return false;
+    }
+    let dir = [dx / dist, dy / dist, dz / dist];
+    let origin = [x, y, z];
+    for solid in &scene.solids {
+        if point_in_solid(x, y, z, solid) {
+            continue;
+        }
+        if let Some(t) = hit_solid_3d(origin, dir, solid) {
+            if t > 1.0e-4 && t < dist - 1.0e-4 {
+                return true;
+            }
+        }
+    }
+    for wall in &scene.walls {
+        let min = [
+            wall.position.x - wall.half_x,
+            0.0,
+            wall.position.z - wall.half_z,
+        ];
+        let max = [
+            wall.position.x + wall.half_x,
+            wall.height,
+            wall.position.z + wall.half_z,
+        ];
+        if point_in_box(x, y, z, min, max) {
+            continue;
+        }
+        if let Some(t) = hit_box(origin, dir, min, max) {
+            if t > 1.0e-4 && t < dist - 1.0e-4 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A ground point inside an object's footprint gets no lamp. The lamp side, outside that footprint, stays lit.
+fn covered_by_object(scene: &Scene, x: f32, y: f32, z: f32) -> bool {
+    if y < -0.001 || y >= 0.02 {
+        return false;
+    }
+    for solid in &scene.solids {
+        if y > solid.height {
+            continue;
+        }
+        if solid.contains_xz(x, z) {
+            return true;
+        }
+    }
+    for wall in &scene.walls {
+        if y > wall.height {
+            continue;
+        }
+        if (x - wall.position.x).abs() <= wall.half_x && (z - wall.position.z).abs() <= wall.half_z
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Direct light when `blocked` lights are already known to miss this point.
+/// Lights marked in `resolved` do not get another ray test.
+pub(crate) fn illuminate_resolved(
+    scene: &Scene,
+    x: f32,
+    y: f32,
+    z: f32,
+    normal: [f32; 3],
+    blocked: u32,
+    resolved: u32,
+) -> f32 {
+    let use_facing = normal[0] != 0.0 || normal[1] != 0.0 || normal[2] != 0.0;
+    let mut incoming = 0.0;
+    for (index, light) in scene.lights.iter().enumerate() {
+        let bit = if index < 32 { 1u32 << index } else { 0 };
+        if bit != 0 && blocked & bit != 0 {
+            continue;
+        }
+        let dx = light.position.x - x;
+        let dy = light.position.y - y;
+        let dz = light.position.z - z;
+        if use_facing && dx * normal[0] + dy * normal[1] + dz * normal[2] <= 0.0 {
+            continue;
+        }
+        let known = bit != 0 && resolved & bit != 0;
+        if !known && lamp_is_blocked(scene, x, y, z, light) {
+            continue;
+        }
+        let dist2 = dx * dx + dy * dy + dz * dz;
+        let strength = (light.color[0] + light.color[1] + light.color[2]) / 3.0;
+        incoming += strength * 2.4 / (1.0 + dist2 * 0.08);
+    }
+    incoming
+}
+
+fn point_in_solid(x: f32, y: f32, z: f32, solid: &genos_scene::Solid) -> bool {
+    if y <= 0.001 || y >= solid.height {
+        return false;
+    }
+    solid.contains_xz(x, z)
+}
+
+fn point_in_box(x: f32, y: f32, z: f32, min: [f32; 3], max: [f32; 3]) -> bool {
+    x > min[0] && x < max[0] && y > min[1] + 0.001 && y < max[1] && z > min[2] && z < max[2]
+}
+
+fn hit_solid_3d(origin: [f32; 3], dir: [f32; 3], solid: &genos_scene::Solid) -> Option<f32> {
+    let half = solid.size * 0.5;
+    match solid.shape {
+        Shape::Square => hit_box(
+            origin,
+            dir,
+            [solid.position.x - half, 0.0, solid.position.z - half],
+            [
+                solid.position.x + half,
+                solid.height,
+                solid.position.z + half,
+            ],
+        ),
+        Shape::Circle => hit_cylinder(
+            origin,
+            dir,
+            solid.position.x,
+            solid.position.z,
+            half,
+            0.0,
+            solid.height,
+        ),
+    }
+}
+
+fn hit_box(origin: [f32; 3], dir: [f32; 3], min: [f32; 3], max: [f32; 3]) -> Option<f32> {
+    let mut t_enter = 0.0_f32;
+    let mut t_exit = f32::INFINITY;
+    for axis in 0..3 {
+        if dir[axis].abs() < 1.0e-8 {
+            if origin[axis] < min[axis] || origin[axis] > max[axis] {
+                return None;
+            }
+            continue;
+        }
+        let inv = 1.0 / dir[axis];
+        let (mut t1, mut t2) = (
+            (min[axis] - origin[axis]) * inv,
+            (max[axis] - origin[axis]) * inv,
+        );
+        if t1 > t2 {
+            std::mem::swap(&mut t1, &mut t2);
+        }
+        t_enter = t_enter.max(t1);
+        t_exit = t_exit.min(t2);
+        if t_exit < t_enter {
+            return None;
+        }
+    }
+    if t_exit < 0.0 {
+        return None;
+    }
+    if t_enter >= 0.0 {
+        Some(t_enter)
+    } else {
+        None
+    }
+}
+
+fn hit_cylinder(
+    origin: [f32; 3],
+    dir: [f32; 3],
+    cx: f32,
+    cz: f32,
+    radius: f32,
+    y0: f32,
+    y1: f32,
+) -> Option<f32> {
+    let ox = origin[0] - cx;
+    let oz = origin[2] - cz;
+    let a = dir[0] * dir[0] + dir[2] * dir[2];
+    let mut best: Option<f32> = None;
+    if a > 1.0e-8 {
+        let b = ox * dir[0] + oz * dir[2];
+        let c = ox * ox + oz * oz - radius * radius;
+        let disc = b * b - a * c;
+        if disc >= 0.0 {
+            let root = disc.sqrt();
+            for t in [(-b - root) / a, (-b + root) / a] {
+                if t < 0.0 {
+                    continue;
+                }
+                let y = origin[1] + dir[1] * t;
+                if y >= y0 && y <= y1 {
+                    best = Some(best.map(|old| old.min(t)).unwrap_or(t));
+                }
+            }
+        }
+    }
+    if dir[1].abs() > 1.0e-8 {
+        for cap in [y0, y1] {
+            let t = (cap - origin[1]) / dir[1];
+            if t < 0.0 {
+                continue;
+            }
+            let x = origin[0] + dir[0] * t;
+            let z = origin[2] + dir[2] * t;
+            let dx = x - cx;
+            let dz = z - cz;
+            if dx * dx + dz * dz <= radius * radius {
+                best = Some(best.map(|old| old.min(t)).unwrap_or(t));
+            }
+        }
+    }
+    best
+}
+
+/// Near probes and surface cells, in meters.
+///
+/// A 3 cm cell on the opening floor made about 7.5 million vertices and about
+/// 11 million rays. The draw rebuilt those vertex colors on every camera
+/// frame. One 16 cm spacing stays the same across the floor. The floor shadow
+/// is the lamp's projected edge, so the cell does not have to carry that edge.
+const NEAR_SPACING: f32 = 0.16;
 
 /// Distances and probe counts for any floor. Spacing follows the floor size.
 /// Direction counts stay in the penumbra order: near < far < world.
@@ -90,9 +342,8 @@ struct RangePlan {
 
 fn plans_for(span: f32) -> (RangePlan, RangePlan, RangePlan, f32) {
     let span = span.max(1.0);
-    // About 48 probes across the floor. Finer than that mostly repeats the
-    // bilinear blend. Coarser than that reads as tiles.
-    let near_spacing = (span / 48.0).clamp(0.12, 0.45);
+    // One spacing for the whole floor. A second, coarser band shows up between objects.
+    let near_spacing = NEAR_SPACING;
     let near_end = (span * 0.12).max(near_spacing * 4.0);
     let far_end = (span * 0.85).max(near_end * 2.0);
     let near = RangePlan {
@@ -118,20 +369,12 @@ fn plans_for(span: f32) -> (RangePlan, RangePlan, RangePlan, f32) {
 }
 
 fn build_field(scene: &Scene, prev: Option<&Field>) -> Field {
-    let min_x = scene.floor.x - scene.floor.half_x;
-    let min_z = scene.floor.z - scene.floor.half_z;
+    let min_x = scene.floor.position.x - scene.floor.half_x;
+    let min_z = scene.floor.position.z - scene.floor.half_z;
     let span_x = scene.floor.half_x * 2.0;
     let span_z = scene.floor.half_z * 2.0;
     let (near_plan, far_plan, world_plan, margin) = plans_for(span_x.max(span_z));
-    let near = build_level(
-        scene,
-        &near_plan,
-        min_x,
-        min_z,
-        span_x,
-        span_z,
-        prev,
-    );
+    let near = build_level(scene, &near_plan, min_x, min_z, span_x, span_z, prev);
     let far = build_level(scene, &far_plan, min_x, min_z, span_x, span_z, prev);
     let world = build_level(
         scene,
@@ -309,7 +552,14 @@ fn gather(
         if let Some(t) = hit_solid(origin, dir, solid) {
             if t >= t0 && t < best_t {
                 best_t = t;
-                color = outgoing(scene, prev, solid.color, origin[0] + dir[0] * t, solid.height * 0.5, origin[1] + dir[1] * t);
+                color = outgoing(
+                    scene,
+                    prev,
+                    solid.color,
+                    origin[0] + dir[0] * t,
+                    solid.height * 0.5,
+                    origin[1] + dir[1] * t,
+                );
             }
         }
     }
@@ -317,14 +567,21 @@ fn gather(
         if let Some(t) = hit_aabb(
             origin,
             dir,
-            wall.x - wall.half_x,
-            wall.z - wall.half_z,
-            wall.x + wall.half_x,
-            wall.z + wall.half_z,
+            wall.position.x - wall.half_x,
+            wall.position.z - wall.half_z,
+            wall.position.x + wall.half_x,
+            wall.position.z + wall.half_z,
         ) {
             if t >= t0 && t < best_t {
                 best_t = t;
-                color = outgoing(scene, prev, wall.color, origin[0] + dir[0] * t, wall.height * 0.5, origin[1] + dir[1] * t);
+                color = outgoing(
+                    scene,
+                    prev,
+                    wall.color,
+                    origin[0] + dir[0] * t,
+                    wall.height * 0.5,
+                    origin[1] + dir[1] * t,
+                );
             }
         }
     }
@@ -352,24 +609,39 @@ fn outgoing(
     ]
 }
 
-fn hit_solid(origin: [f32; 2], dir: [f32; 2], solid: &crate::types::Solid) -> Option<f32> {
+fn hit_solid(origin: [f32; 2], dir: [f32; 2], solid: &genos_scene::Solid) -> Option<f32> {
     let half = solid.size * 0.5;
     match solid.shape {
         Shape::Square => hit_aabb(
             origin,
             dir,
-            solid.x - half,
-            solid.z - half,
-            solid.x + half,
-            solid.z + half,
+            solid.position.x - half,
+            solid.position.z - half,
+            solid.position.x + half,
+            solid.position.z + half,
         ),
-        Shape::Circle => hit_circle(origin, dir, solid.x, solid.z, half),
+        Shape::Circle => hit_circle(origin, dir, solid.position.x, solid.position.z, half),
     }
 }
 
-fn hit_aabb(origin: [f32; 2], dir: [f32; 2], min_x: f32, min_z: f32, max_x: f32, max_z: f32) -> Option<f32> {
-    let inv_x = if dir[0].abs() < 1.0e-8 { f32::INFINITY } else { 1.0 / dir[0] };
-    let inv_z = if dir[1].abs() < 1.0e-8 { f32::INFINITY } else { 1.0 / dir[1] };
+fn hit_aabb(
+    origin: [f32; 2],
+    dir: [f32; 2],
+    min_x: f32,
+    min_z: f32,
+    max_x: f32,
+    max_z: f32,
+) -> Option<f32> {
+    let inv_x = if dir[0].abs() < 1.0e-8 {
+        f32::INFINITY
+    } else {
+        1.0 / dir[0]
+    };
+    let inv_z = if dir[1].abs() < 1.0e-8 {
+        f32::INFINITY
+    } else {
+        1.0 / dir[1]
+    };
     let (tx1, tx2) = slab(origin[0], inv_x, min_x, max_x);
     let (tz1, tz2) = slab(origin[1], inv_z, min_z, max_z);
     let t_enter = tx1.max(tz1);
@@ -380,14 +652,18 @@ fn hit_aabb(origin: [f32; 2], dir: [f32; 2], min_x: f32, min_z: f32, max_x: f32,
     if t_enter >= 0.0 {
         Some(t_enter)
     } else {
-        Some(t_exit)
+        None
     }
 }
 
 fn slab(origin: f32, inv_dir: f32, min_v: f32, max_v: f32) -> (f32, f32) {
     let a = (min_v - origin) * inv_dir;
     let b = (max_v - origin) * inv_dir;
-    if a < b { (a, b) } else { (b, a) }
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 fn hit_circle(origin: [f32; 2], dir: [f32; 2], cx: f32, cz: f32, radius: f32) -> Option<f32> {
@@ -401,11 +677,8 @@ fn hit_circle(origin: [f32; 2], dir: [f32; 2], cx: f32, cz: f32, radius: f32) ->
     }
     let root = disc.sqrt();
     let t0 = -b - root;
-    let t1 = -b + root;
     if t0 >= 0.0 {
         Some(t0)
-    } else if t1 >= 0.0 {
-        Some(t1)
     } else {
         None
     }

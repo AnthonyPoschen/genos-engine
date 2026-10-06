@@ -1,0 +1,104 @@
+//! Fixed-cell labels. Measure and draw use the same cell, so a wrapped line
+//! changes the fit size the layout sees.
+
+pub(crate) const CELL_W: f32 = 12.0;
+pub(crate) const CELL_H: f32 = 16.0;
+const PIXEL: f32 = 2.0;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Blot {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+pub(crate) fn measure(text: &str, max_width: Option<f32>) -> (f32, f32) {
+    let lines = wrap(text, max_width);
+    if lines.is_empty() {
+        return (0.0, 0.0);
+    }
+    let width = lines
+        .iter()
+        .map(|line| line.chars().count() as f32 * CELL_W)
+        .fold(0.0_f32, f32::max);
+    (width, lines.len() as f32 * CELL_H)
+}
+
+pub(crate) fn blots(text: &str, x: f32, y: f32, max_width: f32) -> Vec<Blot> {
+    let mut out = Vec::new();
+    for (row, line) in wrap(text, Some(max_width)).into_iter().enumerate() {
+        let top = y + row as f32 * CELL_H;
+        for (col, ch) in line.chars().enumerate() {
+            let left = x + col as f32 * CELL_W;
+            stamp(&mut out, ch, left, top);
+        }
+    }
+    out
+}
+
+fn wrap(text: &str, max_width: Option<f32>) -> Vec<String> {
+    let limit = max_width.unwrap_or(f32::INFINITY);
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in words {
+        let trial = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        let width = trial.chars().count() as f32 * CELL_W;
+        if width <= limit || current.is_empty() {
+            current = trial;
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current = word.to_string();
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn stamp(out: &mut Vec<Blot>, ch: char, x: f32, y: f32) {
+    for (row, bits) in glyph(ch).into_iter().enumerate() {
+        for col in 0..5 {
+            if bits & (0x10 >> col) == 0 {
+                continue;
+            }
+            out.push(Blot {
+                x: x + col as f32 * PIXEL,
+                y: y + row as f32 * PIXEL,
+                w: PIXEL,
+                h: PIXEL,
+            });
+        }
+    }
+}
+
+fn glyph(ch: char) -> [u8; 7] {
+    match ch.to_ascii_uppercase() {
+        ' ' => [0, 0, 0, 0, 0, 0, 0],
+        '+' => [0x04, 0x04, 0x1f, 0x04, 0x04, 0, 0],
+        '-' => [0, 0, 0x1f, 0, 0, 0, 0],
+        'A' => [0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11],
+        'B' => [0x1e, 0x11, 0x11, 0x1e, 0x11, 0x11, 0x1e],
+        'D' => [0x1e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1e],
+        'G' => [0x0e, 0x10, 0x10, 0x17, 0x11, 0x11, 0x0e],
+        'H' => [0x11, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11],
+        'I' => [0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1f],
+        'L' => [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1f],
+        'M' => [0x11, 0x1b, 0x15, 0x11, 0x11, 0x11, 0x11],
+        'R' => [0x1e, 0x11, 0x11, 0x1e, 0x14, 0x12, 0x11],
+        'T' => [0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+        'X' => [0x11, 0x11, 0x0a, 0x04, 0x0a, 0x11, 0x11],
+        'Y' => [0x11, 0x11, 0x0a, 0x04, 0x04, 0x04, 0x04],
+        'Z' => [0x1f, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1f],
+        _ => [0x1f, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1f],
+    }
+}

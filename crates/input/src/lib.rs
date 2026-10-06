@@ -10,7 +10,7 @@ mod system;
 
 pub use action::{character_controller, Action2dBinding, ActionMap, BoundInput};
 pub use code::{name, parse, InputCode};
-pub use device::{Axis2d, DeviceKind, DeviceView, FIRST_GAMEPAD_ID};
+pub use device::{Axis2d, DeviceKind, DeviceView, FIRST_GAMEPAD_ID, DEFAULT_STICK_DEADZONE};
 pub use system::InputSystem;
 
 #[cfg(test)]
@@ -44,6 +44,37 @@ mod tests {
         assert_eq!(second.view.id, FIRST_GAMEPAD_ID + 1);
         assert!(!first.view.connected);
         assert!(input.list_devices(DeviceKind::Gamepad).is_empty());
+    }
+
+    #[test]
+    fn a_tiny_stick_rest_is_zero_until_the_deadzone_is_raised() {
+        let mut input = InputSystem::new();
+        let pad = input.gamepad_mut(0).unwrap();
+        assert_eq!(pad.left_stick_deadzone, DEFAULT_STICK_DEADZONE);
+        pad.left_stick.x = 0.07;
+        pad.left_stick.y = 0.07;
+        let resting = pad.axis2d(InputCode::gamepad_left_stick).unwrap();
+        assert_eq!(resting.x, 0.0);
+        assert_eq!(resting.y, 0.0);
+        pad.left_stick.y = 0.04;
+        pad.left_stick.x = 0.2;
+        let mixed = pad.axis2d(InputCode::gamepad_left_stick).unwrap();
+        assert!((mixed.x - 0.2).abs() < 1.0e-5, "a real tilt was dropped: {mixed:?}");
+        assert_eq!(mixed.y, 0.0);
+        pad.left_stick.x = 1.0;
+        let full = pad.axis2d(InputCode::gamepad_left_stick).unwrap();
+        assert!((full.x - 1.0).abs() < 1.0e-5, "full tilt was reduced: {full:?}");
+        pad.left_stick.x = 0.2;
+        let partial = pad.axis2d(InputCode::gamepad_left_stick).unwrap();
+        assert!((partial.x - 0.2).abs() < 1.0e-5, "a tilt past the rest was scaled: {partial:?}");
+        pad.set_stick_deadzone(InputCode::gamepad_left_stick, 0.0);
+        pad.left_stick.x = 0.04;
+        let open = pad.axis2d(InputCode::gamepad_left_stick).unwrap();
+        assert!(open.x > 0.03, "clearing the deadzone should keep the drift, got {open:?}");
+        input.set_stick_deadzone(0.2);
+        let pad = input.gamepad(0).unwrap();
+        assert_eq!(pad.left_stick_deadzone, 0.2);
+        assert_eq!(pad.right_stick_deadzone, 0.2);
     }
 
     #[test]

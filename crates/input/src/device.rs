@@ -1,12 +1,11 @@
 use crate::code::InputCode;
 
-pub const MAX_NAME_LEN: usize = 32;
 pub const MAX_KEYS: usize = 256;
 pub const MAX_MOUSE_BUTTONS: usize = 16;
 pub const MAX_GAMEPADS: usize = 16;
 pub const MAX_GAMEPAD_BUTTONS: usize = 32;
 pub const FIRST_GAMEPAD_ID: u32 = 100;
-pub const DEFAULT_STICK_DEADZONE: f32 = 0.04;
+pub const DEFAULT_STICK_DEADZONE: f32 = 0.08;
 pub const DEFAULT_ACTIVATION_THRESHOLD: f32 = 0.5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,6 +205,16 @@ impl GamepadDevice {
         }
     }
 
+    /// Per-axis rest deadzone. Each axis inside it becomes zero. A larger tilt on that axis stays as it is.
+    pub fn set_stick_deadzone(&mut self, code: InputCode, deadzone: f32) {
+        let deadzone = deadzone.clamp(0.0, 0.95);
+        if code == InputCode::gamepad_right_stick {
+            self.right_stick_deadzone = deadzone;
+        } else {
+            self.left_stick_deadzone = deadzone;
+        }
+    }
+
     pub fn axis2d(&self, code: InputCode) -> Option<Axis2d> {
         let stick = match code {
             InputCode::gamepad_left_stick => self.left_stick,
@@ -225,15 +234,9 @@ impl GamepadDevice {
 }
 
 fn apply_deadzone(stick: Axis2d, deadzone: f32) -> Axis2d {
-    let mag = (stick.x * stick.x + stick.y * stick.y).sqrt();
-    if mag <= deadzone || mag <= f32::EPSILON {
-        Axis2d::default()
-    } else {
-        let scaled = ((mag - deadzone) / (1.0 - deadzone)).clamp(0.0, 1.0) / mag;
-        Axis2d {
-            x: stick.x * scaled,
-            y: stick.y * scaled,
-        }
+    Axis2d {
+        x: if stick.x.abs() <= deadzone { 0.0 } else { stick.x },
+        y: if stick.y.abs() <= deadzone { 0.0 } else { stick.y },
     }
 }
 

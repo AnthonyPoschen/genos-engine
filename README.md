@@ -4,6 +4,12 @@ Genos Engine is a Rust game runtime and a Linux editor. The runtime runs on Linu
 
 The hosting product stays in the `genos` repository.
 
+## Run
+
+`make run` opens the lit scene as a normal window. Click it, then use `WASD` to walk and the mouse to look. `Escape` releases the pointer. Close the window to quit.
+
+Checks use `genos-camera --proof`. That window stays floating and does not take focus.
+
 ## Plan
 
 - `CONTEXT.md` holds the vocabulary.

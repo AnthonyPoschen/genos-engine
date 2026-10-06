@@ -1,10 +1,51 @@
-use genos_scene::{build, load_path, probe_counts, sample, sample_world, Shape, Solid};
+use genos_render::{build, probe_counts, sample, sample_world};
+use genos_scene::{load_path, Shape, Solid, Vec3};
+
+#[test]
+fn a_wall_stops_the_lamp_and_a_short_wall_does_not() {
+    use genos_render::illuminate;
+    use genos_scene::{Light, Vec3, Wall};
+    let mut scene = shipped();
+    scene.solids.clear();
+    scene.walls.clear();
+    scene.walls.push(Wall {
+        position: Vec3::new(0.0, 0.0, 2.0),
+        half_x: 4.0,
+        half_z: 0.3,
+        height: 3.0,
+        color: [1.0, 1.0, 1.0],
+    });
+    scene.lights = vec![Light {
+        position: Vec3::new(0.0, 2.0, 0.0),
+        color: [1.0, 1.0, 1.0],
+    }];
+    let lit = illuminate(&scene, 0.0, 0.2, 0.5);
+    let shadow = illuminate(&scene, 0.0, 0.2, 4.0);
+    let seam = illuminate(&scene, 0.0, 0.0, 2.32);
+    assert!(lit > 0.2, "same side of the wall should be lit: {lit}");
+    assert!(
+        shadow < 0.02,
+        "the wall let the lamp through: shadow {shadow} lit {lit}"
+    );
+    assert!(
+        seam < 0.02,
+        "the lamp reaches the floor under the wall: {seam}"
+    );
+
+    scene.walls[0].height = 0.4;
+    scene.lights[0].position.y = 6.0;
+    let over = illuminate(&scene, 0.0, 0.2, 4.0);
+    assert!(
+        over > 0.2,
+        "a ray over a short wall should still arrive: {over}"
+    );
+}
 
 #[test]
 fn a_scene_with_no_lamps_is_black() {
     let mut scene = shipped();
     scene.lights.clear();
-    assert_eq!(genos_scene::illuminate(&scene, 0.0, 1.0, 0.0), 0.0);
+    assert_eq!(genos_render::illuminate(&scene, 0.0, 1.0, 0.0), 0.0);
     let field = build(&scene);
     let bounced = sample(&field, 1.2, 0.0);
     assert!(
@@ -31,22 +72,25 @@ fn cascades_merge_a_tint_and_do_not_reuse_the_previous_field() {
     assert!(first.near.interval_end <= first.far.interval_start + 1.0e-4);
 
     let red = scene.solid_by_color([1.0, 0.0, 0.0]).unwrap();
-    let outside_x = red.x + red.size * 0.5 + 0.4;
-    let outside_z = red.z;
+    let outside_x = red.position.x + red.size * 0.5 + 0.4;
+    let outside_z = red.position.z;
     assert!(!red.contains_xz(outside_x, outside_z));
     let tint = sample(&first, outside_x, outside_z);
     assert!(tint[0] > tint[1], "red {tint:?} should lead green");
     assert!(tint[0] > tint[2], "red {tint:?} should lead blue");
-    assert!(tint[0] > 0.02, "floor sample missing the solid color: {tint:?}");
+    assert!(
+        tint[0] > 0.02,
+        "floor sample missing the solid color: {tint:?}"
+    );
 
     let mut moved = scene.clone();
     let solid = moved.solid_by_color([1.0, 0.0, 0.0]).unwrap();
     let index = moved
         .solids
         .iter()
-        .position(|item| (item.x - solid.x).abs() < 1.0e-4 && item.color[0] > 0.9)
+        .position(|item| (item.position.x - solid.position.x).abs() < 1.0e-4 && item.color[0] > 0.9)
         .unwrap();
-    moved.solids[index].x = 80.0;
+    moved.solids[index].position.x = 80.0;
     let second = build(&moved);
     let faded = sample(&second, outside_x, outside_z);
     assert!(
@@ -65,8 +109,8 @@ fn each_material_tints_the_floor_with_its_own_color() {
         ([0.0, 1.0, 0.0], "green"),
     ] {
         let solid = scene.solid_by_color(color).unwrap();
-        let outside_x = solid.x + solid.size * 0.5 + 0.4;
-        let outside_z = solid.z;
+        let outside_x = solid.position.x + solid.size * 0.5 + 0.4;
+        let outside_z = solid.position.z;
         assert!(!solid.contains_xz(outside_x, outside_z));
         let tint = sample(&field, outside_x, outside_z);
         let lead = match name {
@@ -86,8 +130,11 @@ fn a_world_probe_carries_an_offscreen_material() {
     let span = (scene.floor.half_x * 2.0).max(scene.floor.half_z * 2.0);
     scene.solids.push(Solid {
         shape: Shape::Square,
-        x: scene.floor.x + scene.floor.half_x + span * 2.0,
-        z: scene.floor.z,
+        position: Vec3::new(
+            scene.floor.position.x + scene.floor.half_x + span * 2.0,
+            0.0,
+            scene.floor.position.z,
+        ),
         size: span * 0.2,
         height: 2.0,
         color: [1.0, 0.0, 1.0],
@@ -98,9 +145,9 @@ fn a_world_probe_carries_an_offscreen_material() {
     assert!(field.world.spacing > field.far.spacing);
     assert!(field.world.interval_start + 1.0e-3 >= field.far.interval_end);
 
-    let edge_x = scene.floor.x + scene.floor.half_x - field.near.spacing;
-    let carried = sample_world(&field, edge_x, scene.floor.z);
-    let base = sample_world(&plain_field, edge_x, scene.floor.z);
+    let edge_x = scene.floor.position.x + scene.floor.half_x - field.near.spacing;
+    let carried = sample_world(&field, edge_x, scene.floor.position.z);
+    let base = sample_world(&plain_field, edge_x, scene.floor.position.z);
     assert!(
         carried[0] > carried[1] && carried[2] > carried[1],
         "world probe lost the off-screen magenta material: {carried:?}"

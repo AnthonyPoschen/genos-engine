@@ -1,0 +1,11 @@
+[package]
+name = "genos-load"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+genos-math = { path = "../math" }

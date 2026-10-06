@@ -1,6 +1,6 @@
 # Architecture
 
-Genos Engine has two programs. The runtime runs a game on Linux, Windows, and macOS. The editor makes games on Linux. The decisions are in `docs/adr/`.
+Genos Engine has two programs. The runtime runs a game on Linux, Windows, and macOS. The editor makes games on Linux. The decisions are in `docs/adr/`. The living record for each system is in [Systems](systems/README.md).
 
 ## Native calls
 
@@ -26,22 +26,33 @@ Each frame does these steps:
 
 1. Pump the window.
 2. Update the keyboard, the mouse, and the gamepad slots.
-3. Move the camera from `move` and from look.
-4. Build the radiance field.
-5. Draw the scene with the camera matrix.
-6. Present the surface.
+3. Lay out the screen UI.
+4. Apply each lamp action from that UI.
+5. Move the camera from `move` and from look. A press on the UI does not start look capture.
+6. Draw the world, then the UI rectangles. The draw rebuilds the radiance field, then rasterizes objects that are in view and not hidden.
+7. Present the surface.
 
 ## Crates
 
 ```text
 Cargo.toml
 crates/input/       package genos-input
+crates/math/        package genos-math
+crates/physics/     package genos-physics
+crates/scene/       package genos-scene
 crates/window/      package genos-window
+crates/ui/          package genos-ui
 crates/render/      package genos-render
+crates/load/        package genos-load
+crates/load-check/  package genos-load-check
 examples/camera/    package genos-camera
 ```
 
-`genos-input` does not depend on the window or the renderer. The window exposes plain focus events. On Wayland, input maps those events to input codes. On X11, Windows, and macOS, input polls the system. The renderer takes a surface from the window. The renderer does not open a window.
+`genos-math` stores positions, directions, and rotations. `genos-physics` steps gravity, contact, and springs. The camera does not call that step.
+
+`genos-ui` lays out a tree and reports pointer hits. The UI crate does not open a window. The UI crate does not call Vulkan.
+
+`genos-input` does not depend on the window or the renderer. Each pump records resize, focus, unfocus, cursor lock, and fullscreen changes. `Window::on` delivers those facts to widgets. `lock_cursor` hides and confines the pointer, and `unlock_cursor` frees it. `set_mode` asks for fullscreen or a normal window. The compositor confirms the mode on a later pump. On Wayland, input maps seat events to input codes. On X11, Windows, and macOS, input polls the system. The renderer takes a surface from the window. The renderer does not open a window.
 
 A later `crates/editor` package can depend on these crates. These crates do not depend on the editor. See [ADR 0002](adr/0002-runtime-and-editor-share-one-repository.md).
 
@@ -68,11 +79,11 @@ The ground is the XZ plane. Y is up. Yaw 0 looks along -Z, and positive yaw turn
 
 `genos-render` uses Vulkan on every platform. On macOS, the build links MoltenVK. The window creates a Metal layer for `VK_EXT_metal_surface`. See [ADR 0003](adr/0003-one-vulkan-renderer-moltenvk-on-macos.md).
 
-The first scene uses one swapchain, one depth buffer, and one view-projection matrix. The done picture is the lit scene in [MVP scene](goals/mvp-scene.md).
+A world holds fixed parts, meshes with a pose, particles, and shader draws. A shader draw is mesh-space or screen-space. A mesh-space shader can build its grid from a height map. Each draw asks the lighting engine for shaded triangles, then rasterizes objects that are inside the view and not hidden. The engine rebuilds the field only when the lights or the occluders change. Hidden objects and objects outside the view stay in the field when they affect light. The done picture is the lit scene in [MVP scene](goals/mvp-scene.md).
 
 ## Lighting
 
-Lighting uses radiance cascades. Spacing follows the floor size. Near ranges keep more probe positions and fewer directions. Far ranges do the reverse. World probes sit in the world, past those ranges, and carry material-colored light into empty rays. The field is built again every frame. See [Lighting](lighting.md) and [ADR 0008](adr/0008-lighting-uses-radiance-cascades.md).
+Lighting is a renderer pass. It uses radiance cascades. Near probes are 16 cm apart across the floor. Far and world ranges keep fewer positions and more directions. World probes sit in the world, past those ranges, and carry material-colored light into empty rays. The engine keeps the field until a light or an occluder changes. See [Lighting](lighting.md) and [ADR 0008](adr/0008-lighting-uses-radiance-cascades.md).
 
 ## Reference
 
@@ -82,6 +93,12 @@ Breaking Point is an old engine. Read it for math and camera ideas. The note is 
 
 Games and mods use Rhai. A script calls registered engine functions. The first script is `examples/camera/scene.rhai`. See [ADR 0009](adr/0009-rhai-is-the-scripting-language.md).
 
+## Loading
+
+`genos-load` decodes images, textures, texture maps, meshes, materials, animations, PCM samples, and fonts. The crate depends on `genos-math` for quaternion sampling. The crate does not depend on `genos-window` or `genos-render`.
+
+A file path and a memory block share the decoders. `genos-load-check` calls the public load API from a second package. That package does not open a window or a Vulkan device. See [Loading](systems/loading.md).
+
 ## Out of this proof
 
-The editor, more scenes, audio, and networking wait. Fit for Omarchy belongs to the editor. See [ADR 0006](adr/0006-editor-is-linux-first.md).
+The editor, more scenes, audio playback, and networking wait. Fit for Omarchy belongs to the editor. See [ADR 0006](adr/0006-editor-is-linux-first.md).

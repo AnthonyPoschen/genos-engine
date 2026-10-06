@@ -18,9 +18,9 @@ fn forward_back_and_strafe_stay_on_one_height_and_follow_yaw() {
         },
         0.5,
     );
-    assert_eq!(camera.position[1], CAMERA_HEIGHT);
-    assert!(camera.position[2] < 8.0, "yaw 0 faces -Z");
-    let z_after_forward = camera.position[2];
+    assert_eq!(camera.position.y, CAMERA_HEIGHT);
+    assert!(camera.position.z < 8.0, "yaw 0 faces -Z");
+    let z_after_forward = camera.position.z;
 
     update(
         &mut camera,
@@ -30,8 +30,8 @@ fn forward_back_and_strafe_stay_on_one_height_and_follow_yaw() {
         },
         0.5,
     );
-    assert!(camera.position[2] > z_after_forward);
-    assert_eq!(camera.position[1], CAMERA_HEIGHT);
+    assert!(camera.position.z > z_after_forward);
+    assert_eq!(camera.position.y, CAMERA_HEIGHT);
 
     let mut strafe = Camera::new(0.0, 0.0, 0.0);
     update(
@@ -42,8 +42,8 @@ fn forward_back_and_strafe_stay_on_one_height_and_follow_yaw() {
         },
         0.5,
     );
-    assert!(strafe.position[0] > 0.0, "D moves toward +X");
-    assert_eq!(strafe.position[1], CAMERA_HEIGHT);
+    assert!(strafe.position.x > 0.0, "D moves toward +X");
+    assert_eq!(strafe.position.y, CAMERA_HEIGHT);
 
     let mut left = Camera::new(0.0, 0.0, 0.0);
     update(
@@ -54,7 +54,7 @@ fn forward_back_and_strafe_stay_on_one_height_and_follow_yaw() {
         },
         0.5,
     );
-    assert!(left.position[0] < 0.0);
+    assert!(left.position.x < 0.0);
 }
 
 #[test]
@@ -70,11 +70,11 @@ fn move_crosses_a_wall_on_the_shipped_scene() {
         .find(|wall| wall.half_x > wall.half_z)
         .unwrap();
     let mut camera = Camera::new(
-        wall.x + wall.half_x - 0.3,
-        wall.z,
+        wall.position.x + wall.half_x - 0.3,
+        wall.position.z,
         std::f32::consts::FRAC_PI_2,
     );
-    let start_x = camera.position[0];
+    let start_x = camera.position.x;
     update(
         &mut camera,
         &Actions {
@@ -83,9 +83,9 @@ fn move_crosses_a_wall_on_the_shipped_scene() {
         },
         1.0,
     );
-    assert!(camera.position[0] > wall.x + wall.half_x);
-    assert!(camera.position[0] > start_x);
-    assert_eq!(camera.position[1], CAMERA_HEIGHT);
+    assert!(camera.position.x > wall.position.x + wall.half_x);
+    assert!(camera.position.x > start_x);
+    assert_eq!(camera.position.y, CAMERA_HEIGHT);
 }
 
 #[test]
@@ -216,7 +216,5 @@ fn the_opening_view_puts_the_floor_low_and_the_corner_on_the_right() {
         strafe_ndc_x > 0.0,
         "strafe toward +X must be screen-right, ndc x {strafe_ndc_x}"
     );
-    eprintln!(
-        "ndc floor_y={floor_ndc_y:.3} corner_x={corner_ndc_x:.3} strafe_x={strafe_ndc_x:.3}"
-    );
+    eprintln!("ndc floor_y={floor_ndc_y:.3} corner_x={corner_ndc_x:.3} strafe_x={strafe_ndc_x:.3}");
 }

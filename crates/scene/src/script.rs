@@ -4,6 +4,8 @@ use std::rc::Rc;
 
 use rhai::{Dynamic, Engine};
 
+use genos_math::Vec3;
+
 use crate::types::{Floor, Light, Scene, Shape, Solid, Wall};
 
 /// Load the shipped scene file through the Rhai host.
@@ -19,15 +21,17 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
 
     {
         let builder = builder.clone();
-        engine.register_fn("floor", move |x: Dynamic, z: Dynamic, width: Dynamic, depth: Dynamic| {
-            builder.borrow_mut().floor = Some(Floor {
-                x: num(&x),
-                z: num(&z),
-                half_x: num(&width).abs() * 0.5,
-                half_z: num(&depth).abs() * 0.5,
-                color: [1.0, 1.0, 1.0],
-            });
-        });
+        engine.register_fn(
+            "floor",
+            move |x: Dynamic, z: Dynamic, width: Dynamic, depth: Dynamic| {
+                builder.borrow_mut().floor = Some(Floor {
+                    position: Vec3::new(num(&x), 0.0, num(&z)),
+                    half_x: num(&width).abs() * 0.5,
+                    half_z: num(&depth).abs() * 0.5,
+                    color: [1.0, 1.0, 1.0],
+                });
+            },
+        );
     }
     {
         let builder = builder.clone();
@@ -35,8 +39,7 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
             "wall",
             move |x: Dynamic, z: Dynamic, width: Dynamic, depth: Dynamic, height: Dynamic| {
                 builder.borrow_mut().walls.push(Wall {
-                    x: num(&x),
-                    z: num(&z),
+                    position: Vec3::new(num(&x), 0.0, num(&z)),
                     half_x: num(&width).abs() * 0.5,
                     half_z: num(&depth).abs() * 0.5,
                     height: num(&height),
@@ -49,15 +52,20 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
         let builder = builder.clone();
         engine.register_fn(
             "solid",
-            move |shape: String, x: Dynamic, z: Dynamic, size: Dynamic, r: Dynamic, g: Dynamic, b: Dynamic| {
+            move |shape: String,
+                  x: Dynamic,
+                  z: Dynamic,
+                  size: Dynamic,
+                  r: Dynamic,
+                  g: Dynamic,
+                  b: Dynamic| {
                 let shape = match shape.as_str() {
                     "circle" => Shape::Circle,
                     _ => Shape::Square,
                 };
                 builder.borrow_mut().solids.push(Solid {
                     shape,
-                    x: num(&x),
-                    z: num(&z),
+                    position: Vec3::new(num(&x), 0.0, num(&z)),
                     size: num(&size),
                     height: 1.2,
                     color: [num(&r), num(&g), num(&b)],
@@ -71,9 +79,7 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
             "light",
             move |x: Dynamic, y: Dynamic, z: Dynamic, r: Dynamic, g: Dynamic, b: Dynamic| {
                 builder.borrow_mut().lights.push(Light {
-                    x: num(&x),
-                    y: num(&y),
-                    z: num(&z),
+                    position: Vec3::new(num(&x), num(&y), num(&z)),
                     color: [num(&r), num(&g), num(&b)],
                 });
             },

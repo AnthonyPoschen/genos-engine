@@ -28,9 +28,17 @@ Before you add lights, shadows, or global illumination, read `docs/lighting.md` 
 
 Before you write vector math, quaternion math, a camera, or a view-projection, read `docs/references/breaking-point.md`.
 
+## Rust
+
+Finish a Rust change only after `cargo build --workspace` and the tests for the crates you touched pass. The workspace denies compiler warnings. A new crate sets `[lints] workspace = true`. `InputCode` keeps the input-zig names, so that enum is the one allowed `non_camel_case_types` exception.
+
 ## Input behavior
 
 `../input-zig` is the behavior source for the input port. Preserve the tested platform calls. The file list is in `docs/architecture.md`.
+
+## Systems
+
+Before you change a system, rewrite a system, or add a game feature that uses one, read `docs/systems/README.md` and the matching system file. When the goal, the intent, the game use, or a limit changes, edit that system file in the same change.
 
 ## Proof
 

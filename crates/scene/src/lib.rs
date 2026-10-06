@@ -1,13 +1,16 @@
-//! Scene, character-controller camera, script host, and radiance cascades.
+//! Scene, character-controller camera, and script host.
+//!
+//! Lights and objects live here. The renderer decides which light reaches which surface.
+//! Positions and directions use `genos-math`.
 
 mod camera;
-mod cascade;
 mod script;
 mod types;
 
 pub use camera::{
-    transform_point, update, view_proj, viewport_uv, Actions, Camera, CAMERA_HEIGHT, PITCH_LIMIT,
+    look_direction, transform_point, update, view_proj, viewport_uv, Actions, Camera,
+    CAMERA_HEIGHT, PITCH_LIMIT,
 };
-pub use cascade::{build, illuminate, probe_counts, sample, sample_world, Field};
+pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use script::{load_path, load_str};
 pub use types::{Floor, Light, Scene, Shape, Solid, Wall};

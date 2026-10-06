@@ -6,10 +6,11 @@ Genos Engine lights a scene with radiance cascades. The notes here are the worki
 
 Read these before changing the field.
 
-- Alexander Sannikov, *Radiance Cascades: A Novel Approach to Calculating Global Illumination*. Working paper, not a journal article. Repository: <https://github.com/Raikiri/RadianceCascadesPaper>
+- Alexander Sannikov, *Radiance Cascades: A Novel Approach to Calculating Global Illumination*. Working paper for the game-lighting form. Repository: <https://github.com/Raikiri/RadianceCascadesPaper>
 - PDF: <https://github.com/Raikiri/RadianceCascadesPaper/blob/main/out_latexmk2/RadianceCascades.pdf>
 - Source: <https://github.com/Raikiri/RadianceCascadesPaper/blob/main/RadianceCascades.tex>
 - Overview that points at the paper: <https://80.lv/articles/radiance-cascades-new-approach-to-calculating-global-illumination>
+- Christopher M. J. Osborne and Alexander Sannikov, *Radiance Cascades: A Novel High-Resolution Formal Solution for Multidimensional Non-LTE Radiative Transfer*. arXiv:2408.14425. <https://arxiv.org/abs/2408.14425>
 
 Sannikov shipped a screen-space form of this in Path of Exile 2. That choice fits a fixed camera. This engine moves the camera, so the probes stay in the world.
 
@@ -31,11 +32,17 @@ At a point, walk the directions of the nearest probes.
 - If the near interval missed, use the far interval in that direction.
 - If the far interval missed, use the world probe in that direction.
 
-The merged colors are blended between the four surrounding near probes. A lookup is not a copy of the single nearest square. The floor mesh asks for a color at each vertex, and the rasterizer blends those vertices. The cell size follows the near spacing, which follows the floor size.
+The merged colors are blended between the four surrounding near probes. A lookup is not a copy of the single nearest square. The floor mesh asks for a color at each vertex, and the rasterizer blends those vertices.
+
+The near probes are 16 cm apart across the whole floor. The opening camera uses that one field for every solid, wall, and the floor between them. There is no second, coarser spacing in that view. The field is kept until a light or an occluder changes. A hidden object that does not affect light is not part of that gather. A ray that starts inside a wall or a solid does not leave through the far side. That exit was painting the lit face onto the back face.
 
 ## Material color
 
 Nothing is added in the dark. A point with no lamp and no bounced light is black.
+
+A lamp reaches a point only when the straight ray misses every wall and solid. The ray uses those shapes. It is not a physics collision step. A wall taller than the ray stops the lamp. A ray that clears the top of a wall still arrives. Bounce rays already stop on the first surface in their interval.
+
+Each face is lit from a point just outside that face, and only when that face points toward the lamp. A floor point inside an object's footprint gets no lamp. A point on the lamp side, outside that footprint, stays lit. The floor mesh is cut along the straight projection of each occluder, so the shadow edge is that line. The center of a wall is inside the volume, so one sample there lights the back face as well as the front.
 
 Light that leaves a surface is that surface's color multiplied by the light arriving there. The arrival is the lamps plus the previous bounce pass. A red solid in a white lamp throws red light. A white floor shows that red next to the solid, on top of the white the lamp puts there directly. A colored receiver multiplies the bounce by its own color as well.
 
@@ -49,7 +56,7 @@ An empty nearer ray is the only place a world probe enters the merged field. A n
 
 ## What is fixed, and what comes from the scene
 
-Direction counts stay in penumbra order: near, then far, then world. Spacing, interval length, and the margin past the floor are fractions of the floor's longest side. A larger floor gets a larger grid of the same density. The builder does not read the example solids, the example light, or the camera.
+Direction counts stay in penumbra order: near, then far, then world. Near spacing is 16 cm across the whole floor. Far spacing is three times that. World spacing is eight times that. Interval length and the margin past the floor follow the floor's longest side. The builder does not read the example solids, the example light, or the camera.
 
 The example scene in `examples/camera/scene.rhai` is one scene. It is not the layout of the field.
 
@@ -59,7 +66,7 @@ Four figures from the paper are the upper end: intervals that double, ray counts
 
 The balance used here is three cascades.
 
-- Near spacing is about 1/48 of the floor's longest side. A denser grid mostly repeats the blend between probes. A coarser grid reads as tiles.
+- Near spacing is 16 cm. The floor, the walls, and the solids use that same cell. A coarser cell between those objects is the step this view must not show.
 - Directions are 12, then 36, then 64. Each step is about three times the last. Near stays finer in space and coarser in angle.
 - The near interval is about 12% of the floor. Color from a solid stays next to that solid. The far interval reaches most of the floor. World probes go past the floor.
 - Probe colors are blended. The floor mesh samples each vertex. One flat color per probe is what made the first pictures blocky.
@@ -67,4 +74,4 @@ The balance used here is three cascades.
 
 ## What this cut does not do
 
-Rays march on the ground plane. A full 3D volume of probes is not built yet. The mesh stores the merged color. The field is not a lightmap, and it is not reused next frame.
+Rays march on the ground plane. A full 3D volume of probes is not built yet. The mesh stores the merged color. The stored field is not a lightmap. A new build does not read the previous frame. The engine keeps the finished field until a light or an occluder changes.

@@ -2,8 +2,16 @@
 resolver = "2"
 members = [
     "crates/input",
+    "crates/math",
+    "crates/physics",
     "crates/scene",
     "crates/window",
     "crates/render",
+    "crates/ui",
+    "crates/load",
+    "crates/load-check",
     "examples/camera",
 ]
+
+[workspace.lints.rust]
+warnings = "deny"

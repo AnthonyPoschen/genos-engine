@@ -1,3 +1,5 @@
+use genos_math::Vec3;
+
 /// A square footprint or a circle footprint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shape {
@@ -7,8 +9,7 @@ pub enum Shape {
 
 #[derive(Clone, Debug)]
 pub struct Wall {
-    pub x: f32,
-    pub z: f32,
+    pub position: Vec3,
     pub half_x: f32,
     pub half_z: f32,
     pub height: f32,
@@ -18,8 +19,7 @@ pub struct Wall {
 #[derive(Clone, Debug)]
 pub struct Solid {
     pub shape: Shape,
-    pub x: f32,
-    pub z: f32,
+    pub position: Vec3,
     pub size: f32,
     pub height: f32,
     pub color: [f32; 3],
@@ -27,16 +27,13 @@ pub struct Solid {
 
 #[derive(Clone, Debug)]
 pub struct Light {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
+    pub position: Vec3,
     pub color: [f32; 3],
 }
 
 #[derive(Clone, Debug)]
 pub struct Floor {
-    pub x: f32,
-    pub z: f32,
+    pub position: Vec3,
     pub half_x: f32,
     pub half_z: f32,
     pub color: [f32; 3],
@@ -63,8 +60,8 @@ impl Scene {
     pub fn walls_share_a_corner(&self) -> bool {
         for (i, a) in self.walls.iter().enumerate() {
             for b in self.walls.iter().skip(i + 1) {
-                let overlap_x = (a.x - b.x).abs() <= a.half_x + b.half_x + 0.05;
-                let overlap_z = (a.z - b.z).abs() <= a.half_z + b.half_z + 0.05;
+                let overlap_x = (a.position.x - b.position.x).abs() <= a.half_x + b.half_x + 0.05;
+                let overlap_z = (a.position.z - b.position.z).abs() <= a.half_z + b.half_z + 0.05;
                 if overlap_x && overlap_z {
                     return true;
                 }
@@ -76,8 +73,8 @@ impl Scene {
 
 impl Solid {
     pub fn contains_xz(&self, x: f32, z: f32) -> bool {
-        let dx = x - self.x;
-        let dz = z - self.z;
+        let dx = x - self.position.x;
+        let dz = z - self.position.z;
         let half = self.size * 0.5;
         match self.shape {
             Shape::Square => dx.abs() <= half && dz.abs() <= half,

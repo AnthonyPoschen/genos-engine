@@ -26,6 +26,14 @@ impl InputSystem {
         self.gamepads.get_mut(slot)
     }
 
+    /// Set the per-axis rest deadzone on every gamepad slot. The default is `0.08`. A full tilt still reaches `1`.
+    pub fn set_stick_deadzone(&mut self, deadzone: f32) {
+        for pad in &mut self.gamepads {
+            pad.set_stick_deadzone(crate::code::InputCode::gamepad_left_stick, deadzone);
+            pad.set_stick_deadzone(crate::code::InputCode::gamepad_right_stick, deadzone);
+        }
+    }
+
     pub fn gamepad_count(&self) -> usize {
         self.gamepads.iter().filter(|pad| pad.view.connected).count()
     }

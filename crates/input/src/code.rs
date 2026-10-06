@@ -2,6 +2,7 @@
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u16)]
+#[allow(non_camel_case_types)] // Names match input-zig and the JSON bindings.
 pub enum InputCode {
     mouse_left = 1000,
     mouse_right = 1001,

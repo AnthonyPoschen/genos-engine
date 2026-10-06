@@ -21,16 +21,19 @@ fn shipped_script_places_the_mvp_scene() {
     assert!(matches!(green.shape, Shape::Square | Shape::Circle));
     assert!(!scene.lights.is_empty());
     let light = &scene.lights[0];
-    assert!((light.y - 7.0).abs() < 1.0e-4, "light height is Y");
-    assert!((light.z - 0.0).abs() < 1.0e-4, "light depth is Z");
-    assert!(light.color.iter().all(|c| (*c - 1.0).abs() < 1.0e-4), "the lamp is white");
+    assert!((light.position.y - 7.0).abs() < 1.0e-4, "light height is Y");
+    assert!((light.position.z - 0.0).abs() < 1.0e-4, "light depth is Z");
+    assert!(
+        light.color.iter().all(|c| (*c - 1.0).abs() < 1.0e-4),
+        "the lamp is white"
+    );
 }
 
 #[test]
 fn a_second_script_moves_one_solid() {
     let original = shipped();
     let red = original.solid_by_color([1.0, 0.0, 0.0]).unwrap();
-    let moved_x = red.x + 4.0;
+    let moved_x = red.position.x + 4.0;
     let source = format!(
         "floor(0.0, 0.0, 16.0, 16.0);\n\
          wall(2.0, 5.0, 8.0, 0.4, 2.6);\n\
@@ -42,6 +45,6 @@ fn a_second_script_moves_one_solid() {
     );
     let next = load_str(&source).unwrap();
     let next_red = next.solid_by_color([1.0, 0.0, 0.0]).unwrap();
-    assert!((next_red.x - moved_x).abs() < 1.0e-4);
-    assert!((next_red.x - red.x).abs() > 1.0);
+    assert!((next_red.position.x - moved_x).abs() < 1.0e-4);
+    assert!((next_red.position.x - red.position.x).abs() > 1.0);
 }

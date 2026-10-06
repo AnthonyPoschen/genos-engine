@@ -21,6 +21,18 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     │   └── domain.md
     ├── architecture.md
     ├── lighting.md
+    ├── systems/
+    │   ├── README.md
+    │   ├── input.md
+    │   ├── window.md
+    │   ├── scene.md
+    │   ├── math.md
+    │   ├── physics.md
+    │   ├── renderer.md
+    │   ├── ui.md
+    │   ├── lighting.md
+    │   ├── loading.md
+    │   └── scripting.md
     ├── goals/
     │   └── mvp-scene.md
     └── references/

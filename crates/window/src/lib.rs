@@ -1,6 +1,12 @@
-//! Wayland window. The seat feeds keyboard and mouse focus into one frame record.
+//! Wayland window. Each pump pulls the seat, then tells subscribers what changed.
+
+mod events;
+
+pub use events::{WindowEvent, WindowMode};
 
 use std::os::raw::{c_int, c_void};
+
+use events::EventHub;
 
 #[repr(C)]
 struct RawPump {
@@ -21,14 +27,20 @@ struct RawPump {
     keys_down: [u8; 256],
     pointer_locked: i32,
     clicked_while_focused: i32,
+    fullscreen: i32,
+    pointer_x: i32,
+    pointer_y: i32,
     display: *mut c_void,
     surface: *mut c_void,
 }
 
 extern "C" {
-    fn genos_window_open(width: c_int, height: c_int) -> *mut c_void;
+    fn genos_window_open(width: c_int, height: c_int, app_id: *const i8, title: *const i8) -> *mut c_void;
     fn genos_window_pump(window: *mut c_void, out: *mut RawPump);
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn genos_window_pump_size() -> c_int;
     fn genos_window_set_pointer_capture(window: *mut c_void, capture: c_int) -> c_int;
+    fn genos_window_set_fullscreen(window: *mut c_void, fullscreen: c_int) -> c_int;
     fn genos_window_destroy(window: *mut c_void);
 }
 
@@ -51,17 +63,34 @@ pub struct Frame {
     pub pointer_locked: bool,
     /// Left click landed on this surface. Keyboard focus can be late or already gone.
     pub clicked_while_focused: bool,
+    pub mode: WindowMode,
+    /// Pointer position in window pixels. The origin is the top-left.
+    pub pointer_x: f32,
+    pub pointer_y: f32,
 }
 
 pub struct Window {
     raw: *mut c_void,
     pub display: *mut c_void,
     pub surface: *mut c_void,
+    hub: EventHub,
 }
 
 impl Window {
+    /// A normal desktop window. Hyprland can focus and tile it.
     pub fn open(width: u32, height: u32) -> Result<Self, String> {
-        let raw = unsafe { genos_window_open(width as c_int, height as c_int) };
+        Self::open_named(width, height, "genos", "Genos")
+    }
+
+    /// The check window. Its class and title match the compositor rule that floats it and refuses focus.
+    pub fn open_proof(width: u32, height: u32) -> Result<Self, String> {
+        Self::open_named(width, height, "genos-camera", "Genos Engine")
+    }
+
+    pub fn open_named(width: u32, height: u32, app_id: &str, title: &str) -> Result<Self, String> {
+        let app_id = std::ffi::CString::new(app_id).map_err(|_| "app id contains a null".to_string())?;
+        let title = std::ffi::CString::new(title).map_err(|_| "title contains a null".to_string())?;
+        let raw = unsafe { genos_window_open(width as c_int, height as c_int, app_id.as_ptr(), title.as_ptr()) };
         if raw.is_null() {
             return Err("Wayland window failed to open".into());
         }
@@ -74,38 +103,74 @@ impl Window {
             unsafe { genos_window_destroy(raw) };
             return Err("Wayland surface is missing".into());
         }
+        let frame = decode(&pump);
         Ok(Self {
             raw,
             display: pump.display,
             surface: pump.surface,
+            hub: EventHub::from_frame(&frame),
         })
     }
 
     pub fn pump(&mut self) -> Frame {
+        let frame = self.read_frame();
+        self.hub.apply(&frame);
+        frame
+    }
+
+    /// Receive later changes, plus the size and any active focus, lock, or fullscreen state.
+    ///
+    /// The listener runs inside `pump`. It must not call `pump` again.
+    pub fn on(&mut self, listener: impl FnMut(&WindowEvent) + 'static) {
+        self.hub.on(listener);
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        self.hub.size()
+    }
+
+    pub fn focused(&self) -> bool {
+        self.hub.focused()
+    }
+
+    pub fn cursor_locked(&self) -> bool {
+        self.hub.cursor_locked()
+    }
+
+    pub fn mode(&self) -> WindowMode {
+        self.hub.mode()
+    }
+
+    /// Hide the cursor and confine it to this window until [`Self::unlock_cursor`].
+    pub fn lock_cursor(&mut self) -> Result<(), String> {
+        self.set_pointer_capture(true)
+    }
+
+    /// Show the cursor and let it leave the window.
+    pub fn unlock_cursor(&mut self) -> Result<(), String> {
+        self.set_pointer_capture(false)
+    }
+
+    /// Ask the compositor for fullscreen or a normal window.
+    ///
+    /// [`WindowEvent::ModeChanged`] arrives on a later pump, after the compositor applies it.
+    pub fn set_mode(&mut self, mode: WindowMode) -> Result<(), String> {
+        let fullscreen = if mode == WindowMode::Fullscreen { 1 } else { 0 };
+        let rc = unsafe { genos_window_set_fullscreen(self.raw, fullscreen) };
+        if rc != 0 {
+            Err("fullscreen request failed".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn read_frame(&mut self) -> Frame {
         let raw = unsafe {
             let mut out = std::mem::zeroed();
             genos_window_pump(self.raw, &mut out);
             out
         };
-        Frame {
-            width: raw.width.max(1) as u32,
-            height: raw.height.max(1) as u32,
-            closing: raw.closing != 0,
-            focused: raw.focused != 0,
-            mouse_dx: raw.mouse_dx as f32,
-            mouse_dy: raw.mouse_dy as f32,
-            capture_click: raw.capture_click != 0,
-            key_w: raw.key_w != 0,
-            key_a: raw.key_a != 0,
-            key_s: raw.key_s != 0,
-            key_d: raw.key_d != 0,
-            escape: raw.key_escape != 0,
-            resized: raw.resized != 0,
-            mouse_left: raw.mouse_left != 0,
-            keys_down: raw.keys_down,
-            pointer_locked: raw.pointer_locked != 0,
-            clicked_while_focused: raw.clicked_while_focused != 0,
-        }
+        decode(&raw)
     }
 
     /// Lock and hide the Wayland pointer, or destroy that lock and show it again.
@@ -125,6 +190,35 @@ impl Window {
 impl Drop for Window {
     fn drop(&mut self) {
         unsafe { genos_window_destroy(self.raw) };
+    }
+}
+
+fn decode(raw: &RawPump) -> Frame {
+    Frame {
+        width: raw.width.max(1) as u32,
+        height: raw.height.max(1) as u32,
+        closing: raw.closing != 0,
+        focused: raw.focused != 0,
+        mouse_dx: raw.mouse_dx as f32,
+        mouse_dy: raw.mouse_dy as f32,
+        capture_click: raw.capture_click != 0,
+        key_w: raw.key_w != 0,
+        key_a: raw.key_a != 0,
+        key_s: raw.key_s != 0,
+        key_d: raw.key_d != 0,
+        escape: raw.key_escape != 0,
+        resized: raw.resized != 0,
+        mouse_left: raw.mouse_left != 0,
+        keys_down: raw.keys_down,
+        pointer_locked: raw.pointer_locked != 0,
+        clicked_while_focused: raw.clicked_while_focused != 0,
+        pointer_x: raw.pointer_x as f32,
+        pointer_y: raw.pointer_y as f32,
+        mode: if raw.fullscreen != 0 {
+            WindowMode::Fullscreen
+        } else {
+            WindowMode::Windowed
+        },
     }
 }
 
@@ -201,7 +295,9 @@ impl FocusGate {
 
 #[cfg(test)]
 mod tests {
-    use super::{extent_changed, FocusGate, Frame, GatedInput, Window};
+    use super::{
+        extent_changed, genos_window_pump_size, FocusGate, Frame, GatedInput, RawPump, WindowMode,
+    };
 
     #[test]
     fn resize_is_a_real_extent_change() {
@@ -251,7 +347,18 @@ mod tests {
             keys_down: [0; 256],
             pointer_locked: false,
             clicked_while_focused: false,
+            mode: WindowMode::Windowed,
+            pointer_x: 0.0,
+            pointer_y: 0.0,
         }
+    }
+
+    #[test]
+    fn the_pump_record_matches_the_wayland_struct() {
+        assert_eq!(
+            unsafe { genos_window_pump_size() } as usize,
+            std::mem::size_of::<RawPump>()
+        );
     }
 
     #[test]
@@ -275,15 +382,16 @@ mod tests {
         let cursor = cursor_pos();
         set_focus_rule(true);
         let _restore = CursorRestore { x: cursor.0, y: cursor.1 };
-        let mut child = std::process::Command::new(&binary)
-            .args(["--frames", "400", "--trace"])
+        let child = std::process::Command::new(&binary)
+            .args(["--frames", "400", "--trace", "--proof"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("spawn shipped camera");
         let pid = child.id();
         let mut placed = None;
-        for _ in 0..50 {
+        // Scene load and the first device setup run before the toplevel is mapped.
+        for _ in 0..400 {
             if let Some(found) = client_center(pid) {
                 placed = Some(found);
                 break;
@@ -305,11 +413,13 @@ mod tests {
             moved.ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         );
         ydotool(&["click", "0xC0"]);
-        std::thread::sleep(std::time::Duration::from_millis(400));
+        // The frame locks the pointer after the pump. The next pump reports the lock.
+        std::thread::sleep(std::time::Duration::from_millis(5000));
         ydotool(&["key", "1:1"]);
-        std::thread::sleep(std::time::Duration::from_millis(120));
+        // A frame can be slower than a short key tap. Hold Escape across one pump.
+        std::thread::sleep(std::time::Duration::from_millis(4000));
         ydotool(&["key", "1:0"]);
-        std::thread::sleep(std::time::Duration::from_millis(400));
+        std::thread::sleep(std::time::Duration::from_millis(4000));
         dispatch(&format!(
             "hl.dsp.window.close({{ window = \"address:{address}\" }})"
         ));

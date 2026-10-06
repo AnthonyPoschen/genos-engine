@@ -14,13 +14,13 @@ The window shows one scene.
 - Each solid is a square or a circle.
 - The script places at least one light.
 - Color from a colored solid appears on the white floor or on a wall, beyond that solid.
-- Radiance cascades build that bounced light again every frame.
+- Radiance cascades build that bounced light. The renderer keeps the field until a light or an occluder changes.
 
 The ground is the XZ plane. Y is up, and the camera height stays on Y. X is across the screen. Z is depth. Yaw 0 looks along -Z. Positive yaw turns toward +X. Strafe positive moves toward +X.
 
 In the viewport, the top-left is `(0, 0)` and the bottom-right is `(1, 1)`. Vulkan NDC `y > 0` is the lower half of that viewport. A floor point in front of the camera and below the eye lands in that lower half. A point to the camera's right has NDC `x > 0`.
 
-Cascade rays march on the ground plane. Spacing and range length follow the floor size, so the same builder fits any scene. A nearer range keeps more positions and fewer directions than a farther range. World probes sit on a coarse world grid past the floor and fill rays the nearer ranges miss. A hit takes the color of that material. Probe colors are blended, and each floor vertex samples that blend. The field is built again every frame from the current scene. The notes are in [Lighting](../lighting.md).
+Cascade rays march on the ground plane. Near spacing is 16 cm. Interval length follows the floor size, so a larger floor keeps the same cell and a longer range. A nearer range keeps more positions and fewer directions than a farther range. World probes sit on a coarser world grid past the floor and fill rays the nearer ranges miss. A hit takes the color of that material. Probe colors are blended, and each floor vertex samples that blend. The renderer builds the field from the current scene when a light or an occluder changes, and keeps it until then. The notes are in [Lighting](../lighting.md).
 
 ## Input
 
@@ -48,7 +48,7 @@ The input map is a character controller, and it drives the camera.
 - `Escape` destroys that lock and shows the pointer again.
 - The window close control exits the program.
 
-The camera does not collide with the floor or the walls. This proof has no physics engine.
+The camera does not collide with the floor or the walls. The physics library is separate from this proof.
 
 On Wayland, the keyboard and the mouse act while the window has focus.
 
@@ -62,7 +62,7 @@ After a script edit, start the program again. The positions change.
 
 ## Out of this goal
 
-The editor, physics, collision, world probes, audio, network, and a second scene wait.
+The editor, world probes, audio, network, and a second scene wait.
 
 ## Done
 
