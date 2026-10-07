@@ -1122,7 +1122,7 @@ vec4 world_texel(uint base, uvec3 ip, uvec3 count, uint dir) {
     return field.texels[base + world_probe_index(ip, count) * WORLD_DIRS + dir];
 }
 
-vec4 world_interval(uint base, vec3 pos, vec3 dir) {
+vec4 world_interval(uint base, vec3 pos, vec3 dir, vec3 face_n) {
     vec3 origin;
     uvec3 count;
     world_layout3(origin, count);
@@ -1135,6 +1135,7 @@ vec4 world_interval(uint base, vec3 pos, vec3 dir) {
     vec3 t = vec3(fx, fy, fz) - vec3(i0);
     vec4 acc = vec4(0.0);
     float weight = 0.0;
+    float hit_w = 0.0;
     for (uint corner = 0u; corner < 8u; corner++) {
         uvec3 ip = uvec3(
             (corner & 1u) == 0u ? i0.x : i1.x,
@@ -1153,20 +1154,29 @@ vec4 world_interval(uint base, vec3 pos, vec3 dir) {
         }
         float spin = ray_spin3(probe);
         uint dir_i = match_sphere(dir, spin);
-        if (dot(normalize(dir), sphere_dir(dir_i, WORLD_DIRS, spin)) < 0.5) {
+        vec3 snapped = sphere_dir(dir_i, WORLD_DIRS, spin);
+        // The nearest of 16 directions can sit 60 degrees off. Below the face it
+        // looks back at the lit surface the pin stands on, and that light leaks in.
+        if (dot(normalize(dir), snapped) < 0.5 || dot(snapped, face_n) <= 0.0) {
             continue;
         }
         vec4 taken = world_texel(base, ip, count, dir_i);
+        if (taken.a < -1.5) {
+            // A miss is a real answer: nothing out there. It keeps its weight.
+            weight += w;
+            continue;
+        }
         if (taken.a < 0.0) {
             continue;
         }
         acc += taken * w;
+        hit_w += w;
         weight += w;
     }
-    if (weight <= 1.0e-4) {
+    if (hit_w <= 1.0e-4) {
         return vec4(0.0, 0.0, 0.0, -2.0);
     }
-    return acc / weight;
+    return vec4(acc.rgb / weight, acc.a / hit_w);
 }
 
 vec3 sample_world_mean(vec3 pos) {
@@ -1428,7 +1438,7 @@ void write_pinned(uint cascade) {
             }
         }
         if (iv.a < -1.5) {
-            vec4 far = world_interval(WORLD_BOUNCE_OFFSET, pos, ray);
+            vec4 far = world_interval(WORLD_BOUNCE_OFFSET, pos, ray, normal);
             if (far.a >= t1) {
                 iv = vec4(far.rgb, far.a);
             }
@@ -1501,7 +1511,7 @@ void write_screen(uint cascade) {
             }
         }
         if (iv.a < -1.5) {
-            vec4 far = world_interval(WORLD_BOUNCE_OFFSET, pos, ray);
+            vec4 far = world_interval(WORLD_BOUNCE_OFFSET, pos, ray, normal);
             if (far.a >= t1) {
                 iv = vec4(far.rgb, far.a);
             }
