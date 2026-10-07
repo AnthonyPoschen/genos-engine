@@ -241,6 +241,10 @@ fn run() -> Result<(), String> {
     let mut cascade_view = [false; 3];
     let mut frame_clock: Option<Instant> = None;
     let mut bench = Bench::from_env(&world.scene, bench_camera)?;
+    if let Some(dir) = bench.as_ref().and_then(|bench| bench.shots.as_ref()) {
+        std::fs::create_dir_all(dir).map_err(|e| format!("GENOS_BENCH_SHOTS {}: {e}", dir.display()))?;
+        renderer.set_live_readback(true);
+    }
     loop {
         let now = Instant::now();
         let dt = frame_seconds(frame_clock, now);
@@ -454,7 +458,11 @@ fn run() -> Result<(), String> {
         };
         // gpu draw/present
         renderer.set_cascade_view(&world.scene, &draw_camera, cascade_view);
-        let want_read = readback.is_some();
+        let shot = bench.as_ref().and_then(|bench| {
+            let name = bench.shot.as_ref()?;
+            Some(bench.shots.as_ref()?.join(name))
+        });
+        let want_read = readback.is_some() || shot.is_some();
         let draw_at = Instant::now();
         let (pixels, timing) = if detailed {
             let (pixels, timing) =
@@ -513,7 +521,7 @@ fn run() -> Result<(), String> {
         if want_read {
             if let Some(pixels) = pixels {
                 write_png(
-                    readback.as_ref().unwrap(),
+                    shot.as_ref().or(readback.as_ref()).unwrap(),
                     renderer.width(),
                     renderer.height(),
                     &pixels,
@@ -582,7 +590,17 @@ struct Bench {
     /// When a drop or a rise had taken all its change passes: the visible change.
     visible: Option<Duration>,
     lines: Vec<String>,
+    /// `GENOS_BENCH_SHOTS=<dir>`: live pictures at fixed times into each drop and rise.
+    shots: Option<PathBuf>,
+    /// The next of `BENCH_SHOT_MS` to take, and the name of the picture due this frame.
+    next_shot: usize,
+    shot: Option<String>,
+    /// The tier as of the last frame: bricks in it, and those still changing or due.
+    tier: genos_render::TierStats,
 }
+
+/// Milliseconds into a drop or a rise at which `GENOS_BENCH_SHOTS` takes a picture.
+const BENCH_SHOT_MS: [u64; 12] = [0, 17, 33, 50, 100, 150, 200, 300, 500, 1000, 2000, 4000];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum BenchPhase {
@@ -618,12 +636,17 @@ impl Bench {
             frames: Vec::new(),
             visible: None,
             lines: Vec::new(),
+            shots: std::env::var_os("GENOS_BENCH_SHOTS").map(PathBuf::from),
+            next_shot: 0,
+            shot: None,
+            tier: genos_render::TierStats::default(),
         }))
     }
 
     /// Set the lamp for this frame and record the last frame's time. True when done.
     fn step(&mut self, scene: &mut Scene, tier: genos_render::TierStats, now: Instant) -> bool {
         let pending = tier.pending_bricks;
+        self.tier = tier;
         if let Some(last) = self.last {
             self.frames.push((now - last).as_secs_f32() * 1000.0);
         }
@@ -653,8 +676,17 @@ impl Bench {
             self.phase_start = now;
             self.frames.clear();
             self.visible = None;
+            self.next_shot = 0;
         }
         let t = (now - self.phase_start).as_secs_f32();
+        self.shot = None;
+        if self.shots.is_some() && matches!(self.phase, BenchPhase::Down | BenchPhase::Up) {
+            let ms = (now - self.phase_start).as_millis() as u64;
+            while self.next_shot < BENCH_SHOT_MS.len() && BENCH_SHOT_MS[self.next_shot] <= ms {
+                self.next_shot += 1;
+                self.shot = Some(format!("{:?}_{ms:05}ms.png", self.phase).to_lowercase());
+            }
+        }
         let lamp = &mut scene.lights[0].position;
         *lamp = match self.phase {
             BenchPhase::Warmup | BenchPhase::Still | BenchPhase::Up => self.home,
@@ -685,9 +717,12 @@ impl Bench {
         if matches!(self.phase, BenchPhase::Down | BenchPhase::Up) {
             let visible = self.visible.map_or(-1.0, |v| v.as_secs_f32() * 1000.0);
             line.push_str(&format!(
-                " visible_ms={visible:.0} settle_ms={:.0} settled={}",
+                " visible_ms={visible:.0} settle_ms={:.0} settled={} bricks={} changing={} pending={}",
                 elapsed.as_secs_f32() * 1000.0,
-                pending == 0
+                pending == 0,
+                self.tier.bricks,
+                self.tier.changing_bricks,
+                pending,
             ));
         }
         eprintln!("{line}");

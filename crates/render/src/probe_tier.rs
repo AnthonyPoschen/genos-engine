@@ -394,7 +394,6 @@ pub struct TierItem {
     pub brick: [i32; 3],
     pub rays: u32,
     pub reset: bool,
-    pub gen: u64,
     pub live: u32,
     /// For a change pass: the history, in rays, the pass keeps. `None` averages into
     /// all of it (refine) or, with `reset`, replaces it (a brick's first pass).
@@ -462,6 +461,23 @@ struct BuildCost {
     ms_per_ray: Option<f64>,
     /// Milliseconds a build takes however few rays it has.
     latency_ms: f64,
+}
+
+/// How far one slower build moves the per-ray cost toward itself.
+const COST_RISE: f64 = 0.05;
+
+/// A build shares the GPU with the picture, and that only ever makes it look slower:
+/// the fastest builds show what a ray costs. A faster sample is taken at once; a
+/// slower one moves the cost a little, so a lasting change (a heavier scene, lower
+/// clocks) still comes through within some tens of builds while a frame that held the
+/// GPU does not shrink the budget. (The latency is not learned this way: a slower
+/// sample there makes builds larger, never smaller.)
+fn learn_cost(old: f64, sample: f64) -> f64 {
+    if sample < old {
+        sample
+    } else {
+        old + (sample - old) * COST_RISE
+    }
 }
 
 impl Default for TierState {
@@ -718,7 +734,7 @@ impl TierState {
         match cost.ms_per_ray {
             None => cost.ms_per_ray = Some(sample),
             Some(per_ray) if per_ray * probe_rays as f64 >= 0.5 * ms => {
-                cost.ms_per_ray = Some(per_ray * 0.5 + sample * 0.5);
+                cost.ms_per_ray = Some(learn_cost(per_ray, sample));
             }
             Some(_) => cost.latency_ms = cost.latency_ms * 0.5 + ms * 0.5,
         }
@@ -761,7 +777,6 @@ impl TierState {
                 brick,
                 rays,
                 reset,
-                gen: self.light_gen,
                 live,
                 history,
             });
@@ -1005,6 +1020,28 @@ mod tests {
         let mut fast = TierState::default();
         fast.note_time(300_000, 0.6);
         assert!(fast.budget_rays(1.5) >= 700_000);
+    }
+
+    #[test]
+    fn builds_slowed_by_the_picture_do_not_shrink_the_budget() {
+        let mut tier = TierState::default();
+        tier.note_time(200_000, 40.0);
+        let clean = tier.budget_rays(1.5);
+        // Most builds run beside the picture and take three times as long; some run alone.
+        for k in 0..40 {
+            let ms = if k % 4 == 0 { 1.5 } else { 4.5 };
+            tier.note_time(clean, ms);
+        }
+        let shared = tier.budget_rays(1.5);
+        assert!(shared * 10 >= clean * 8, "{shared} of {clean}");
+        // A GPU that really got slower (full builds take twice as long) is followed.
+        let mut slow = TierState::default();
+        slow.note_time(200_000, 40.0);
+        for _ in 0..80 {
+            slow.note_time(200_000, 80.0);
+        }
+        let slower = slow.budget_rays(1.5);
+        assert!(slower * 10 <= clean * 6, "{slower} of {clean}");
     }
 
     #[test]

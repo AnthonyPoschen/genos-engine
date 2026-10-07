@@ -44,6 +44,8 @@ pub struct Renderer {
     tier: crate::probe_tier::TierState,
     /// GPU milliseconds a frame may spend on tier work.
     tier_ms: f64,
+    /// Readbacks show the light on screen instead of settling it first.
+    live_readback: bool,
 }
 
 fn env_f32(name: &str) -> Option<f32> {
@@ -118,6 +120,7 @@ impl Renderer {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1.5),
+            live_readback: false,
         })
     }
 
@@ -364,8 +367,9 @@ impl Renderer {
         self.gpu.poll_light()?;
         // A readback, and the first picture of a renderer, show the settled light: they
         // run builds until the tier has no work. Later changes fill in under the budget.
-        let settle = readback || !self.gpu.light_ready;
-        let wait_light = readback || !self.gpu.light_ready;
+        // A live readback shows the picture as it is, mid-change, at the normal budget.
+        let settle = (readback && !self.live_readback) || !self.gpu.light_ready;
+        let wait_light = settle;
         self.stage_tier(world, &pack, settle);
         self.gpu.upload_scene(&pack)?;
         self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
@@ -466,6 +470,7 @@ impl Renderer {
         } else {
             (Some(self.tier.budget_rays(self.tier_ms)), crate::probe_tier::FIRST_RAYS)
         };
+        self.gpu.tier_budget = budget;
         let batch = self.tier.batch(pack.eye, budget, first);
         self.gpu.light_key = self.tier.light_gen();
         self.gpu.tier_batch = Some(batch);
@@ -538,6 +543,12 @@ impl Renderer {
 
     pub fn antialias(&self) -> Antialias {
         self.gpu.antialias
+    }
+
+    /// When on, a readback returns the picture as drawn, without settling the light or
+    /// waiting for a build: a capture of what the screen shows mid-change.
+    pub fn set_live_readback(&mut self, on: bool) {
+        self.live_readback = on;
     }
 }
 
@@ -743,6 +754,8 @@ struct Gpu {
     plan_rays: u64,
     /// Probe rays and GPU milliseconds of the last timed tier pass.
     tier_time: Option<(u64, f64)>,
+    /// The ray budget of the last batch, None while settling. Printed by `GENOS_GPU_TIMES`.
+    tier_budget: Option<u64>,
     compute_layout: Handle,
     compute_pipe: Handle,
     audio_rays: Buffer,
@@ -1390,6 +1403,7 @@ impl Gpu {
                 plan_slots: 0,
                 plan_rays: 0,
                 tier_time: None,
+                tier_budget: None,
                 compute_layout: std::ptr::null_mut(),
                 compute_pipe: std::ptr::null_mut(),
                 audio_rays: Buffer::empty(),
@@ -2161,6 +2175,8 @@ impl Gpu {
         if let Some(times) = self.gpu_times.as_mut() {
             times.builds += 1;
             times.rays += self.plan_rays;
+            times.max_rays = times.max_rays.max(self.plan_rays);
+            times.tier_builds += u32::from(self.plan_items > 0);
             for (sum, v) in times.light.iter_mut().zip(&ms) {
                 *sum += v;
             }
@@ -2223,15 +2239,17 @@ impl Gpu {
             times.frame[k] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
         }
         times.frames += 1;
+        let since = *times.since.get_or_insert_with(std::time::Instant::now);
         if times.frames < times.every {
             return;
         }
         let n = f64::from(times.frames);
+        let seconds = since.elapsed().as_secs_f64().max(1.0e-6);
         let f = times.frame.map(|v| v / n);
         let builds = times.builds.max(1) as f64;
         let l = times.light.map(|v| v / builds);
         eprintln!(
-            "GPU_MS frames={} raster+near={:.3} aa({:?})={:.3} overlay={:.3} copy={:.3} frame={:.3} | light builds={} per_frame={:.2} copy={:.3} world_direct={:.3} world_bounce={:.3} tier={:.3} tier_rays={:.0} light_per_frame={:.3}",
+            "GPU_MS frames={} raster+near={:.3} aa({:?})={:.3} overlay={:.3} copy={:.3} frame={:.3} | light builds={} per_frame={:.2} copy={:.3} world_direct={:.3} world_bounce={:.3} tier={:.3} tier_rays={:.0} light_per_frame={:.3} | builds_per_s={:.0} tier_builds_per_s={:.0} max_tier_rays={} budget_rays={} fps={:.0}",
             times.frames,
             f[0],
             antialias,
@@ -2247,6 +2265,11 @@ impl Gpu {
             l[3],
             times.rays as f64 / builds,
             times.light.iter().sum::<f64>() / n,
+            f64::from(times.builds) / seconds,
+            f64::from(times.tier_builds) / seconds,
+            times.max_rays,
+            self.tier_budget.map_or_else(|| "settle".to_string(), |b| b.to_string()),
+            n / seconds,
         );
         let pool = times.pool;
         **times = GpuTimes { pool, written: times.written, every: times.every, ..GpuTimes::default() };
@@ -3374,6 +3397,14 @@ impl Gpu {
     fn kick_light(&mut self, wait: bool) -> Result<(), String> {
         loop {
             self.poll_light()?;
+            // The picture that took the last publish may already be done. Its fence is
+            // only reaped when its slot comes round again; looking now lets the next build
+            // start a frame earlier.
+            if let Some(slot) = self.light_publish_flight {
+                if !self.fence_pending(slot) {
+                    self.light_publish_flight = None;
+                }
+            }
             // The finished field's signal belongs to the next picture. A slice
             // that waits or signals it first makes that picture stall on the gather.
             if self.publish_blocks() && !wait {
@@ -5489,7 +5520,12 @@ struct GpuTimes {
     /// Raster, resolve, overlay, copy.
     frame: [f64; 4],
     builds: u32,
+    /// Builds that ran tier work, and the most rays one of them traced.
+    tier_builds: u32,
+    max_rays: u64,
     rays: u64,
+    /// When this line's first frame was read: builds per second count from there.
+    since: Option<std::time::Instant>,
     /// Light build: copy forward, world direct, world bounce, tier.
     light: [f64; 4],
 }
@@ -5503,7 +5539,10 @@ impl Default for GpuTimes {
             frames: 0,
             frame: [0.0; 4],
             builds: 0,
+            tier_builds: 0,
+            max_rays: 0,
             rays: 0,
+            since: None,
             light: [0.0; 4],
         }
     }
