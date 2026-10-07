@@ -312,15 +312,16 @@ vec4 world_texel(uint base, uvec3 ip, uvec3 count, uint dir) {
 // the end.
 const float BORROW_COS = 0.5;
 
-bool borrowed_hit_seen(vec3 start, vec3 ray, float t_from, vec3 hit_at, vec3 hit_ray) {
+bool borrowed_hit_ahead(vec3 start, vec3 ray, float t_from, vec3 hit_at) {
     vec3 dir = normalize(ray);
-    vec3 from = start + dir * t_from;
-    vec3 to_hit = hit_at - from;
+    vec3 to_hit = hit_at - (start + dir * t_from);
     float dist = length(to_hit);
-    if (dist < 1.0e-3 || dot(to_hit / dist, dir) < BORROW_COS) {
-        return false;
-    }
-    return !scene_occluded(from, hit_at - hit_ray * 0.02);
+    return dist >= 1.0e-3 && dot(to_hit / dist, dir) >= BORROW_COS;
+}
+
+bool borrowed_hit_seen(vec3 start, vec3 ray, float t_from, vec3 hit_at, vec3 hit_ray) {
+    return borrowed_hit_ahead(start, ray, t_from, hit_at)
+        && !scene_occluded(start + normalize(ray) * t_from, hit_at - hit_ray * 0.02);
 }
 
 vec4 world_interval(uint base, vec3 pos, vec3 dir, vec3 face_n, float t_from) {
@@ -492,9 +493,10 @@ vec4 pinned_interval(vec3 world, vec3 face_n, vec3 ray, float t_from) {
                     if (taken.a < 0.0) {
                         continue;
                     }
+                    // Ahead only: see pinned_interval_cached.
                     vec3 hit_ray = hemisphere_dir(normal, best, dirs, 0.0);
                     vec3 hit_at = stored.xyz + normal * 0.04 + hit_ray * taken.a;
-                    if (!borrowed_hit_seen(world + face_n * 0.04, nray, t_from, hit_at, hit_ray)) {
+                    if (!borrowed_hit_ahead(world + face_n * 0.04, nray, t_from, hit_at)) {
                         continue;
                     }
                     acc += taken * w;
@@ -611,9 +613,14 @@ vec4 pinned_interval_cached(vec3 face_n, vec3 ray) {
         if (taken.a < 0.0) {
             continue;
         }
+        // A cascade 1 answer that came from a world probe keeps only its distance,
+        // so along the pin's own ray it marks roughly where the hit is, not exactly.
+        // A sight test against that point rejected good hits (the room's colour
+        // bleed under the boxes fell from 0.04 to 0.11 chroma L1 vs the path
+        // tracer), so these hits only have to lie ahead of the ray.
         vec3 hit_ray = hemisphere_dir(normal, best, dirs, 0.0);
         vec3 hit_at = field.texels[PIN_POS1 + probe].xyz + normal * 0.04 + hit_ray * taken.a;
-        if (!borrowed_hit_seen(next_from, nray, next_t, hit_at, hit_ray)) {
+        if (!borrowed_hit_ahead(next_from, nray, next_t, hit_at)) {
             continue;
         }
         acc += taken * next_w[k];
