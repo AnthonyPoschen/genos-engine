@@ -151,11 +151,12 @@ fn the_gpu_frame_keeps_the_learned_light() {
     );
     let picture = draw(&mut window, &mut renderer, &blocked, &camera);
     let lit_floor = sample(&picture, width, height, &camera, [-1.2, 0.0, 0.0]);
-    let shadow_floor = sample(&picture, width, height, &camera, [1.2, 0.0, 0.0]);
     let lit_face = sample(&picture, width, height, &camera, [-0.25, 1.2, 0.0]);
     let east = Camera::new(6.0, 0.0, -std::f32::consts::FRAC_PI_2);
     let from_east = draw(&mut window, &mut renderer, &blocked, &east);
     let far_face = sample(&from_east, width, height, &east, [0.25, 1.2, 0.0]);
+    // The opening camera sees the wall's lit face where this floor point projects.
+    let shadow_floor = sample(&from_east, width, height, &east, [1.2, 0.0, 0.0]);
     assert!(
         brightness(lit_floor) > brightness(shadow_floor) + 12.0,
         "the wall did not darken the floor: lit {lit_floor:?} shadow {shadow_floor:?}"
