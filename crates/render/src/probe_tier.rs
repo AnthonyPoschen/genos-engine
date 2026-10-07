@@ -148,15 +148,23 @@ impl BrickSet {
     }
 }
 
-/// True when the probe at `p` is outside every box and within `reach` of a surface.
-/// Nothing stands below the ground, so a probe under it is dead.
+/// Least gap between a live probe and any surface, in metres. A probe on a face (a
+/// wall face on a lattice plane) is not strictly inside, but its rays into that solid
+/// start on the face: the ray test sees no entry and the rays come out on the far side
+/// with the light there. The bounce rays skip hits nearer than 2 mm, so the gap must
+/// be wider than that. 1 cm is far above float noise at the window edge (50 m).
+pub const PROBE_CLEARANCE: f32 = 0.01;
+
+/// True when the probe at `p` is outside every box, at least `PROBE_CLEARANCE` from
+/// every surface, and within `reach` of one. Nothing stands below the ground, so a
+/// probe under it is dead.
 pub fn probe_live(boxes: &[SurfaceBox], p: [f32; 3], reach: f32) -> bool {
     if p[1] < 0.0 {
         return false;
     }
     let mut near = false;
     for b in boxes {
-        if b.inside(p) {
+        if b.inside(p) || b.surface_distance(p) < PROBE_CLEARANCE {
             return false;
         }
         if !near && b.surface_distance(p) <= reach {
@@ -736,6 +744,19 @@ mod tests {
         assert!(probe_live(&[block], [10.5, 0.5, 0.5], layout.reach));
         let set = allocate(&[block], [0.0, 0.0, 0.0], &layout);
         assert!(set.bricks.iter().all(|b| b.iter().any(|&c| c <= -3 || c >= 2)));
+    }
+
+    #[test]
+    fn a_probe_on_a_face_is_dead() {
+        // A wall whose face lies on the lattice plane x = 1.5.
+        let wall = SurfaceBox { min: [1.5, 0.0, -4.0], max: [1.9, 5.0, 4.0] };
+        assert!(!probe_live(&[wall], [1.5, 0.5, 0.5], 1.7));
+        assert!(!probe_live(&[wall], [1.495, 0.5, 0.5], 1.7));
+        assert!(probe_live(&[wall], [1.48, 0.5, 0.5], 1.7));
+        // Two crossing walls: inside either one is dead, the open corner is live.
+        let cross = SurfaceBox { min: [-0.3, 0.0, 1.8], max: [3.7, 5.0, 2.2] };
+        assert!(!probe_live(&[wall, cross], [1.7, 0.5, 2.0], 1.7));
+        assert!(probe_live(&[wall, cross], [1.0, 0.5, 1.5], 1.7));
     }
 
     #[test]

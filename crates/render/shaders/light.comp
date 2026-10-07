@@ -386,6 +386,16 @@ void write_tier() {
     bool live = ((chunk >> (probe & 15u)) & 1u) != 0u;
     bool reset = work.z > 0.5;
     uint dest = TIER_PROBES + (slot * 64u + probe) * TIER_PROBE_TEXELS;
+    float spacing = tier_spacing();
+    ivec3 local = ivec3(int(probe & 3u), int(probe >> 4u), int((probe >> 2u) & 3u));
+    vec3 pos = (vec3(ivec3(floor(brick.xyz + 0.5)) * 4 + local) + 0.5) * spacing;
+    // A ray that starts inside a solid sees no entry into it and leaves on the far
+    // side. The CPU keeps such probes dead (probe_tier.rs); this holds for any shape
+    // it only approximates.
+    if (live && scene_inside(pos)) {
+        live = false;
+        reset = true;
+    }
     if (!live) {
         // A reused slot may hold another brick's light. A dead probe reads as none.
         if (reset) {
@@ -395,9 +405,6 @@ void write_tier() {
         }
         return;
     }
-    float spacing = tier_spacing();
-    ivec3 local = ivec3(int(probe & 3u), int(probe >> 4u), int((probe >> 2u) & 3u));
-    vec3 pos = (vec3(ivec3(floor(brick.xyz + 0.5)) * 4 + local) + 0.5) * spacing;
     uint rays = max(uint(work.y + 0.5), 1u);
     // A new random orientation of the ray set every pass and probe, so refining adds
     // new directions at every elevation. Turning about one axis only kept the same

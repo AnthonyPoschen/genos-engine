@@ -73,6 +73,12 @@ bool tier_sample2(vec3 world, vec3 face_n, uint cube_a, uint cube_b, out vec3 co
     vec3 near_lo = (vec3(i0) + 0.5) * spacing;
     vec3 near_hi = near_lo + vec3(spacing);
     uint blockers = scene_candidates(min(near_lo, from), max(near_hi, from));
+    // A point wedged in a corner can start inside the other solid. Rays from there see
+    // no entry into it and would reach probes on its far side. Nothing reaches a point
+    // inside a solid.
+    if (blockers != 0u && scene_inside(from)) {
+        return true;
+    }
     vec3 sum_a = vec3(0.0);
     vec3 sum_b = vec3(0.0);
     float wsum = 0.0;
