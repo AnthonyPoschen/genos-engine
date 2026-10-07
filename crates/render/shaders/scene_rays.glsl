@@ -36,8 +36,12 @@ void occ_span(Occ occ, out float y0, out float y1) {
     y1 = occ.center_shape.y + occ.extent.y * 0.5;
 }
 
-// Entry distance into a box, or -1. An origin inside reports -1: scene_inside covers it.
-bool ray_box(vec3 origin, vec3 dir, vec3 min_p, vec3 max_p, out float t, out vec3 normal) {
+// The span t_in..t_out of the ray inside a box, with the normal of the entry face.
+// t_in is negative when the origin is inside. A ray that starts on a face, or a hair
+// in front of it, still enters: the caller clamps the entry to its own t0 instead of
+// dropping a solid whose entry falls before t0, which let a point beside a wall see
+// through it.
+bool ray_box(vec3 origin, vec3 dir, vec3 min_p, vec3 max_p, out float t_in, out float t_out, out vec3 normal) {
     float t_enter = -1.0e20;
     float t_exit = 1.0e20;
     int axis_in = 0;
@@ -58,60 +62,69 @@ bool ray_box(vec3 origin, vec3 dir, vec3 min_p, vec3 max_p, out float t, out vec
         }
         t_exit = min(t_exit, max(t1, t2));
     }
-    if (t_exit < t_enter || t_enter <= 0.0) {
+    if (t_exit < t_enter || t_exit <= 0.0) {
         return false;
     }
-    t = t_enter;
+    t_in = t_enter;
+    t_out = t_exit;
     normal = vec3(0.0);
     normal[axis_in] = dir[axis_in] > 0.0 ? -1.0 : 1.0;
     return true;
 }
 
-// Entry distance into a closed cylinder: the side and both caps.
-bool ray_cylinder(vec3 origin, vec3 dir, vec2 center, float radius, float y0, float y1, out float t, out vec3 normal) {
-    float best = 1.0e20;
+// The span of the ray inside a closed cylinder (side and both caps), as ray_box.
+bool ray_cylinder(vec3 origin, vec3 dir, vec2 center, float radius, float y0, float y1, out float t_in, out float t_out, out vec3 normal) {
     vec2 o = origin.xz - center;
     float a = dot(dir.xz, dir.xz);
+    float side_in = -1.0e20;
+    float side_out = 1.0e20;
+    float c = dot(o, o) - radius * radius;
     if (a > 1.0e-8) {
         float b = dot(o, dir.xz);
-        float c = dot(o, o) - radius * radius;
         float disc = b * b - a * c;
-        if (disc >= 0.0) {
-            float t0 = (-b - sqrt(disc)) / a;
-            float y = origin.y + dir.y * t0;
-            if (t0 > 0.0 && y >= y0 && y <= y1) {
-                best = t0;
-                vec2 side = (o + dir.xz * t0) / max(radius, 1.0e-4);
-                normal = vec3(side.x, 0.0, side.y);
-            }
+        if (disc < 0.0) {
+            return false;
         }
-    }
-    if (abs(dir.y) > 1.0e-8) {
-        float cap = dir.y < 0.0 ? y1 : y0;
-        float tc = (cap - origin.y) / dir.y;
-        vec2 at = o + dir.xz * tc;
-        if (tc > 0.0 && tc < best && dot(at, at) <= radius * radius) {
-            best = tc;
-            normal = vec3(0.0, dir.y < 0.0 ? 1.0 : -1.0, 0.0);
-        }
-    }
-    if (best >= 1.0e19) {
+        float root = sqrt(disc);
+        side_in = (-b - root) / a;
+        side_out = (-b + root) / a;
+    } else if (c > 0.0) {
         return false;
     }
-    t = best;
+    float cap_in = -1.0e20;
+    float cap_out = 1.0e20;
+    if (abs(dir.y) > 1.0e-8) {
+        float t1 = (y0 - origin.y) / dir.y;
+        float t2 = (y1 - origin.y) / dir.y;
+        cap_in = min(t1, t2);
+        cap_out = max(t1, t2);
+    } else if (origin.y < y0 || origin.y > y1) {
+        return false;
+    }
+    t_in = max(side_in, cap_in);
+    t_out = min(side_out, cap_out);
+    if (t_out < t_in || t_out <= 0.0) {
+        return false;
+    }
+    if (side_in >= cap_in) {
+        vec2 at = (o + dir.xz * t_in) / max(radius, 1.0e-4);
+        normal = vec3(at.x, 0.0, at.y);
+    } else {
+        normal = vec3(0.0, dir.y < 0.0 ? 1.0 : -1.0, 0.0);
+    }
     return true;
 }
 
-bool occ_ray(Occ occ, vec3 origin, vec3 dir, out float t, out vec3 normal) {
+bool occ_ray(Occ occ, vec3 origin, vec3 dir, out float t_in, out float t_out, out vec3 normal) {
     float y0;
     float y1;
     occ_span(occ, y0, y1);
     if (occ.center_shape.w > 0.5) {
-        return ray_cylinder(origin, dir, occ.center_shape.xz, occ.extent.w, y0, y1, t, normal);
+        return ray_cylinder(origin, dir, occ.center_shape.xz, occ.extent.w, y0, y1, t_in, t_out, normal);
     }
     vec3 lo = vec3(occ.center_shape.x - occ.extent.x, y0, occ.center_shape.z - occ.extent.z);
     vec3 hi = vec3(occ.center_shape.x + occ.extent.x, y1, occ.center_shape.z + occ.extent.z);
-    return ray_box(origin, dir, lo, hi, t, normal);
+    return ray_box(origin, dir, lo, hi, t_in, t_out, normal);
 }
 
 const uint SCENE_FLOOR_BIT = 1u << 16u;
@@ -162,10 +175,13 @@ bool scene_ray_masked(vec3 origin, vec3 dir, float t0, float t1, uint mask, out 
             continue;
         }
         Occ occ = scene.occs[i];
-        float t;
+        float t_in;
+        float t_out;
         vec3 n;
-        if (occ_ray(occ, origin, dir, t, n) && t >= t0 && t < hit.t) {
-            hit.t = t;
+        // Any part of the solid inside t0..t1 stops the ray, at t0 at the earliest. A
+        // ray leaving the face it starts on has t_out at or before t0 and passes.
+        if (occ_ray(occ, origin, dir, t_in, t_out, n) && t_out > t0 && max(t_in, t0) < hit.t) {
+            hit.t = max(t_in, t0);
             hit.normal = n;
             hit.albedo = occ.albedo.rgb;
             hit.reflect = occ.bounce.x < 0.0 ? SCENE_LAMBERT : clamp(occ.bounce.x, 0.0, 1.0);
