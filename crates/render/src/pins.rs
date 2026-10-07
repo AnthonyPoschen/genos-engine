@@ -26,6 +26,7 @@ pub const HASH_DIM0: u32 = 32;
 /// Hash cube for cascade 1. 28 cells at 1 m covers the 14 m keep window.
 pub const HASH_DIM1: u32 = 28;
 /// Integrated irradiance for cascade 1. Cascade 0 uses probe index 0.
+#[cfg_attr(not(test), allow(dead_code))] // only the shader-constant check reads it
 pub const PIN_IRR1: u32 = PROBE_CAP0;
 
 /// Texel where cascade 0 stores positions. The gather and the fragment sample read here.
@@ -60,13 +61,17 @@ pub const VOL_XZ0: u32 = HASH_DIM0;
 /// Fine volume layers above the floor (0.5 m each, 3 m).
 pub const VOL_Y0: u32 = 6;
 /// `xyz` volume origin, `w` cell size.
+#[cfg_attr(not(test), allow(dead_code))] // only the shader-constant check reads it
 pub const VOL0_INFO: u32 = 16_384 + PROBE_CAP1 * 32;
+#[cfg_attr(not(test), allow(dead_code))] // only the shader-constant check reads it
 pub const VOL0_BASE: u32 = VOL0_INFO + 1;
 /// Next-level volume, 1 m cells, 3 layers.
 pub const VOL_XZ1: u32 = HASH_DIM1;
 pub const VOL_Y1: u32 = 3;
 /// After the pin upload span, before the world-probe irradiance.
+#[cfg_attr(not(test), allow(dead_code))] // only the shader-constant check reads it
 pub const VOL1_INFO: u32 = HASH_BASE1 + HASH_CELLS1;
+#[cfg_attr(not(test), allow(dead_code))] // only the shader-constant check reads it
 pub const VOL1_BASE: u32 = VOL1_INFO + 1;
 const _: () = assert!(VOL0_BASE + VOL_XZ0 * VOL_XZ0 * VOL_Y0 * 6 <= PIN_POS0);
 const _: () = assert!(VOL1_BASE + VOL_XZ1 * VOL_XZ1 * VOL_Y1 * 6 <= 176_128);
