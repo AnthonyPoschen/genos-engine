@@ -6,7 +6,7 @@ use rhai::{Dynamic, Engine};
 
 use genos_math::Vec3;
 
-use crate::types::{Floor, Light, Scene, Shape, Solid, Wall};
+use crate::types::{Ceiling, Floor, Light, Scene, Shape, Solid, Wall};
 
 /// Load the shipped scene file through the Rhai host.
 pub fn load_path(path: &Path) -> Result<Scene, String> {
@@ -29,6 +29,28 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
                     half_x: num(&width).abs() * 0.5,
                     half_z: num(&depth).abs() * 0.5,
                     color: [1.0, 1.0, 1.0],
+                });
+            },
+        );
+    }
+    {
+        let builder = builder.clone();
+        // `ceiling` is Rhai's own rounding function, so the roof is `roof`.
+        engine.register_fn("roof", move |height: Dynamic| {
+            builder.borrow_mut().ceiling = Some(Ceiling {
+                height: num(&height),
+                color: [1.0, 1.0, 1.0],
+            });
+        });
+    }
+    {
+        let builder = builder.clone();
+        engine.register_fn(
+            "roof",
+            move |height: Dynamic, r: Dynamic, g: Dynamic, b: Dynamic| {
+                builder.borrow_mut().ceiling = Some(Ceiling {
+                    height: num(&height),
+                    color: [num(&r), num(&g), num(&b)],
                 });
             },
         );
@@ -173,11 +195,22 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
     if built.lights.is_empty() {
         return Err("script placed no light".into());
     }
+    if let Some(ceiling) = &built.ceiling {
+        let top = built.walls.iter().map(|wall| wall.height).fold(0.0_f32, f32::max);
+        // The baked light volumes cover the first 3 m above the floor.
+        if ceiling.height <= 0.5 || ceiling.height > 3.0 {
+            return Err("roof height must be above 0.5 m and at most 3 m".into());
+        }
+        if ceiling.height < top - 1.0e-3 {
+            return Err("roof sits below a wall top".into());
+        }
+    }
     Ok(Scene {
         floor,
         walls: built.walls.clone(),
         solids: built.solids.clone(),
         lights: built.lights.clone(),
+        ceiling: built.ceiling.clone(),
     })
 }
 
@@ -197,4 +230,5 @@ struct Builder {
     walls: Vec<Wall>,
     solids: Vec<Solid>,
     lights: Vec<Light>,
+    ceiling: Option<Ceiling>,
 }

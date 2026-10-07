@@ -578,6 +578,7 @@ fn the_graph_paint_is_a_different_color_from_its_background() {
         walls: Vec::new(),
         solids: Vec::new(),
         lights: Vec::new(),
+        ceiling: None,
     });
     let camera = Camera::opening();
     let mut spiked = calm();

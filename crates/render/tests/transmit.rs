@@ -30,6 +30,7 @@ fn world(walls: Vec<Wall>) -> World {
         walls,
         solids: Vec::new(),
         lights: Vec::new(),
+        ceiling: None,
     })
 }
 

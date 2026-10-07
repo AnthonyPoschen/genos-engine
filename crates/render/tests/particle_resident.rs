@@ -16,6 +16,7 @@ fn floor_scene() -> Scene {
         walls: Vec::new(),
         solids: Vec::new(),
         lights: Vec::new(),
+        ceiling: None,
     }
 }
 

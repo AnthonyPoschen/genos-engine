@@ -65,11 +65,16 @@ layout(std430, set = 0, binding = 0) readonly buffer SceneData {
     vec4 view_forward;
     // x is the screen-probe columns. y is the rows.
     vec4 view_grid;
+    // x is the roof underside height over the floor footprint (0 = no roof). yzw is its color.
+    vec4 ceiling;
 } scene;
 
 layout(std430, set = 0, binding = 1) buffer FieldData {
     vec4 texels[];
 } field;
+
+#extension GL_GOOGLE_include_directive : require
+#include "scene_rays.glsl"
 
 layout(push_constant) uniform Pass {
     uint pass;
@@ -215,44 +220,9 @@ float hit_cyl(vec3 origin, vec3 dir, vec3 center, float radius, float y0, float 
     return best;
 }
 
+// Shared path (scene_rays.glsl): every surface type blocks the lamp the same way.
 bool lamp_blocked(vec3 origin, vec3 lamp) {
-    vec3 delta = lamp - origin;
-    float dist = length(delta);
-    if (dist < 1e-3) {
-        return false;
-    }
-    vec3 dir = delta / dist;
-    uint count = min(scene.occ_count, 16u);
-    for (uint i = 0u; i < count; i++) {
-        Occ occ = scene.occs[i];
-        float t;
-        if (occ.center_shape.w > 0.5) {
-            vec2 o = origin.xz - occ.center_shape.xz;
-            float a = dot(dir.xz, dir.xz);
-            t = -1.0;
-            if (a > 1e-8) {
-                float b = dot(o, dir.xz);
-                float c = dot(o, o) - occ.extent.w * occ.extent.w;
-                float disc = b * b - a * c;
-                if (disc >= 0.0) {
-                    float root = sqrt(disc);
-                    float t0 = (-b - root) / a;
-                    float y = origin.y + dir.y * t0;
-                    if (t0 >= 0.0 && y >= 0.0 && y <= occ.extent.y) {
-                        t = t0;
-                    }
-                }
-            }
-        } else {
-            vec3 half_e = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
-            vec3 center = vec3(occ.center_shape.x, occ.extent.y * 0.5, occ.center_shape.z);
-            t = hit_box3(origin, dir, center - half_e, center + half_e);
-        }
-        if (t > 1e-3 && t < dist - 1e-3) {
-            return true;
-        }
-    }
-    return false;
+    return scene_occluded(origin, lamp);
 }
 
 vec3 shade_lamp(vec3 origin, vec3 normal, vec4 lamp, vec3 color) {
@@ -600,63 +570,15 @@ uvec2 screen_counts() {
 
 // The same ray and the same 4 cm offset place the probe in the fragment shader.
 bool surface_hit(vec3 eye, vec3 dir, out vec3 pos, out vec3 normal) {
-    float best = 1.0e20;
-    bool found = false;
+    SceneHit hit;
     pos = eye;
     normal = vec3(0.0, 1.0, 0.0);
-    uint count = min(scene.occ_count, 16u);
-    for (uint i = 0u; i < count; i++) {
-        Occ occ = scene.occs[i];
-        float t = -1.0;
-        vec3 n = vec3(0.0, 1.0, 0.0);
-        vec3 center = vec3(occ.center_shape.x, occ.extent.y * 0.5, occ.center_shape.z);
-        if (occ.center_shape.w > 0.5) {
-            t = hit_cyl(eye, dir, center, occ.extent.w, 0.0, occ.extent.y);
-            if (t > 0.0) {
-                vec3 p = eye + dir * t;
-                vec2 d = p.xz - occ.center_shape.xz;
-                float len = max(length(d), 1.0e-4);
-                n = vec3(d.x / len, 0.0, d.y / len);
-            }
-        } else {
-            vec3 half_e = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
-            t = hit_box3(eye, dir, center - half_e, center + half_e);
-            if (t > 0.0) {
-                vec3 q = (eye + dir * t - center) / max(half_e, vec3(1.0e-4));
-                vec3 aq = abs(q);
-                if (aq.x >= aq.y && aq.x >= aq.z) {
-                    n = vec3(sign(q.x), 0.0, 0.0);
-                } else if (aq.y >= aq.z) {
-                    n = vec3(0.0, sign(q.y), 0.0);
-                } else {
-                    n = vec3(0.0, 0.0, sign(q.z));
-                }
-                if (dot(n, n) < 0.5) {
-                    n = vec3(0.0, 1.0, 0.0);
-                }
-            }
-        }
-        if (t > 0.002 && t < best) {
-            best = t;
-            pos = eye + dir * t;
-            normal = n;
-            found = true;
-        }
+    if (!scene_ray(eye, dir, 0.002, 1.0e20, hit)) {
+        return false;
     }
-    if (dir.y < -1.0e-6) {
-        float t = (0.0 - eye.y) / dir.y;
-        if (t > 0.002 && t < best) {
-            vec3 p = eye + dir * t;
-            vec2 half_e = vec2(max(scene.floor_center.w, 0.5), max(scene.floor_data.x, 0.5));
-            vec2 d = p.xz - vec2(scene.floor_center.x, scene.floor_center.z);
-            if (abs(d.x) <= half_e.x + 0.05 && abs(d.y) <= half_e.y + 0.05) {
-                pos = p;
-                normal = vec3(0.0, 1.0, 0.0);
-                found = true;
-            }
-        }
-    }
-    return found;
+    pos = eye + dir * hit.t;
+    normal = hit.normal;
+    return true;
 }
 
 // World lattice around the eye. A turn does not move it. The fragment uses the same snap.
@@ -950,23 +872,8 @@ uint lattice_index(ivec3 cell, uint dim) {
     return uint((cell.y * int(dim) + cell.z) * int(dim) + cell.x);
 }
 
-bool on_floor_span(vec2 p) {
-    vec2 half_e = vec2(max(scene.floor_center.w, 0.5), max(scene.floor_data.x, 0.5));
-    vec2 d = p - vec2(scene.floor_center.x, scene.floor_center.z);
-    return abs(d.x) <= half_e.x + 0.05 && abs(d.y) <= half_e.y + 0.05;
-}
-
 bool point_in_volume(vec3 p) {
-    if (p.y <= 0.02) {
-        return false;
-    }
-    uint count = min(scene.occ_count, 16u);
-    for (uint i = 0u; i < count; i++) {
-        if (p.y < scene.occs[i].extent.y && over_footprint(p.xz, scene.occs[i])) {
-            return true;
-        }
-    }
-    return false;
+    return scene_inside(p);
 }
 
 struct TraceHit {
@@ -984,77 +891,20 @@ TraceHit trace_hit(vec3 origin, vec3 dir, float t0, float t1) {
     result.normal = vec3(0.0, 1.0, 0.0);
     result.tint = vec3(1.0);
     result.reflect = LAMBERT;
-    float best = t1;
-    bool found = false;
-    vec3 albedo = scene.floor_data.yzw;
-    float mix_color = 1.0;
-    float reflect = LAMBERT;
-    vec3 hit_n = vec3(0.0, 1.0, 0.0);
-    uint count = min(scene.occ_count, 16u);
-    for (uint i = 0u; i < count; i++) {
-        Occ occ = scene.occs[i];
-        float t = -1.0;
-        vec3 n = vec3(0.0, 1.0, 0.0);
-        vec3 center = vec3(occ.center_shape.x, occ.extent.y * 0.5, occ.center_shape.z);
-        if (occ.center_shape.w > 0.5) {
-            t = hit_cyl(origin, dir, center, occ.extent.w, 0.0, occ.extent.y);
-            if (t > 0.0) {
-                vec3 p = origin + dir * t;
-                vec2 side = p.xz - occ.center_shape.xz;
-                float len = max(length(side), 1.0e-4);
-                n = vec3(side.x / len, 0.0, side.y / len);
-            }
-        } else {
-            vec3 half_e = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
-            t = hit_box3(origin, dir, center - half_e, center + half_e);
-            if (t > 0.0) {
-                vec3 q = (origin + dir * t - center) / max(half_e, vec3(1.0e-4));
-                vec3 aq = abs(q);
-                if (aq.x >= aq.y && aq.x >= aq.z) {
-                    n = vec3(sign(q.x), 0.0, 0.0);
-                } else if (aq.y >= aq.z) {
-                    n = vec3(0.0, sign(q.y), 0.0);
-                } else {
-                    n = vec3(0.0, 0.0, sign(q.z));
-                }
-            }
-        }
-        if (t >= max(t0, 0.002) && t < t1 && t < best) {
-            best = t;
-            found = true;
-            hit_n = n;
-            albedo = occ.albedo.rgb;
-            reflect = occ.bounce.x < 0.0 ? LAMBERT : clamp(occ.bounce.x, 0.0, 1.0);
-            mix_color = occ.bounce.y < 0.0 ? 1.0 : clamp(occ.bounce.y, 0.0, 1.0);
-        }
-    }
-    if (dir.y < -1.0e-6) {
-        float t = (0.0 - origin.y) / dir.y;
-        if (t >= max(t0, 0.002) && t < t1 && t < best) {
-            vec3 p = origin + dir * t;
-            if (on_floor_span(p.xz)) {
-                best = t;
-                found = true;
-                hit_n = vec3(0.0, 1.0, 0.0);
-                albedo = scene.floor_data.yzw;
-                reflect = LAMBERT;
-                mix_color = 1.0;
-            }
-        }
-    }
-    if (!found) {
+    SceneHit hit;
+    if (!scene_ray(origin, dir, max(t0, 0.002), t1, hit)) {
         return result;
     }
-    vec3 pos = origin + dir * best;
+    vec3 pos = origin + dir * hit.t;
     // Only the light that reaches the face. A dark side under a lamp stays dark and
     // takes its share from the bounce below, like any other face.
-    vec3 direct = lights_at(pos + hit_n * 0.03, hit_n);
-    vec3 tint = mix(vec3(1.0), albedo, mix_color);
-    result.iv = vec4(tint * reflect * direct, best);
+    vec3 direct = lights_at(pos + hit.normal * 0.03, hit.normal);
+    vec3 tint = mix(vec3(1.0), hit.albedo, hit.color_mix);
+    result.iv = vec4(tint * hit.reflect * direct, hit.t);
     result.pos = pos;
-    result.normal = hit_n;
+    result.normal = hit.normal;
     result.tint = tint;
-    result.reflect = reflect;
+    result.reflect = hit.reflect;
     return result;
 }
 
@@ -1281,7 +1131,7 @@ vec4 pinned_interval(vec3 world, vec3 face_n, vec3 ray) {
                     if (dist >= reach) {
                         continue;
                     }
-                    if (world.y < 0.05 && stored.y < 0.05 && probe_hidden(world.xz, stored.xz)) {
+                    if (scene_occluded(world + face_n * 0.05, stored.xyz + normal * 0.05)) {
                         continue;
                     }
                     float w = 1.0 - dist / reach;
@@ -1358,7 +1208,7 @@ void gather_next(vec3 world, vec3 face_n) {
                     if (dist >= reach) {
                         continue;
                     }
-                    if (world.y < 0.05 && stored.y < 0.05 && probe_hidden(world.xz, stored.xz)) {
+                    if (scene_occluded(world + face_n * 0.05, stored.xyz + normal * 0.05)) {
                         continue;
                     }
                     float w = 1.0 - dist / reach;
@@ -1573,7 +1423,10 @@ void write_pinned(uint cascade) {
     }
     for (uint d = 0u; d < dirs; d++) {
         vec3 ray = hemisphere_dir(normal, d, dirs, spin);
-        TraceHit hit = trace_hit(pos, ray, t0, t1);
+        // The ray starts at the pin, not at t0. A cascade 1 pin a few cm outside a
+        // wall would otherwise skip that wall and read the room behind it. The
+        // nearest surface is the answer for this direction, near or far.
+        TraceHit hit = trace_hit(pos, ray, 0.0, t1);
         vec4 iv = hit.iv;
         if (iv.a >= 0.15) {
             iv.rgb += hit.tint * hit.reflect * WORLD_IRR * sample_world_cube(hit.pos + hit.normal * 0.08, hit.normal);
@@ -1693,28 +1546,7 @@ vec3 cube_axis(uint face) {
 }
 
 bool segment_blocked(vec3 a, vec3 b) {
-    vec3 delta = b - a;
-    float dist = length(delta);
-    if (dist < 1.0e-3) {
-        return false;
-    }
-    vec3 dir = delta / dist;
-    uint count = min(scene.occ_count, 16u);
-    for (uint i = 0u; i < count; i++) {
-        Occ occ = scene.occs[i];
-        vec3 center = vec3(occ.center_shape.x, occ.extent.y * 0.5, occ.center_shape.z);
-        float t;
-        if (occ.center_shape.w > 0.5) {
-            t = hit_cyl(a, dir, center, occ.extent.w, 0.0, occ.extent.y);
-        } else {
-            vec3 half_e = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
-            t = hit_box3(a, dir, center - half_e, center + half_e);
-        }
-        if (t > 1.0e-4 && t < dist - 1.0e-4) {
-            return true;
-        }
-    }
-    return false;
+    return scene_occluded(a, b);
 }
 
 void write_volume(uint level) {

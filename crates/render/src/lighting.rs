@@ -198,6 +198,16 @@ fn hash_kind(world: &World, kind: &DrawKind, hasher: &mut impl std::hash::Hasher
             0u8.hash(hasher);
             hash_floor_geom(&world.scene.floor, hasher);
         }
+        DrawKind::Fixed(FixedPart::Ceiling) => {
+            6u8.hash(hasher);
+            hash_floor_geom(&world.scene.floor, hasher);
+            if let Some(ceiling) = &world.scene.ceiling {
+                ceiling.height.to_bits().hash(hasher);
+                for value in ceiling.color {
+                    value.to_bits().hash(hasher);
+                }
+            }
+        }
         DrawKind::Fixed(FixedPart::Wall(index)) => {
             1u8.hash(hasher);
             index.hash(hasher);
@@ -340,6 +350,10 @@ fn scene_key(scene: &Scene) -> u64 {
     scene.solids.len().hash(&mut hasher);
     for solid in &scene.solids {
         hash_solid(solid, &mut hasher);
+    }
+    if let Some(ceiling) = &scene.ceiling {
+        bits(ceiling.height, &mut hasher);
+        color(ceiling.color, &mut hasher);
     }
     hasher.finish()
 }

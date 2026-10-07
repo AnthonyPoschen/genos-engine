@@ -101,12 +101,23 @@ pub struct Floor {
     pub color: [f32; 3],
 }
 
+/// A flat roof over the whole floor footprint, facing down. It closes a room so no
+/// light escapes upward.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ceiling {
+    /// Height of the underside above the floor, in meters.
+    pub height: f32,
+    pub color: [f32; 3],
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Scene {
     pub floor: Floor,
     pub walls: Vec<Wall>,
     pub solids: Vec<Solid>,
     pub lights: Vec<Light>,
+    /// None leaves the scene open to the sky.
+    pub ceiling: Option<Ceiling>,
 }
 
 impl Scene {

@@ -761,8 +761,12 @@ fn in_window(position: [f32; 3], eye: [f32; 3], reach: f32) -> bool {
 fn lattice_hits(scene: &Scene, eye: [f32; 3], spacing: f32, reach: f32) -> Vec<ScreenPin> {
     let mut hits = Vec::new();
     stamp_floor(&mut hits, scene, eye, spacing, reach);
+    let roof = scene.ceiling.as_ref().map(|ceiling| ceiling.height);
     for wall in &scene.walls {
-        stamp_wall(&mut hits, wall, eye, spacing, reach);
+        stamp_wall(&mut hits, wall, eye, spacing, reach, roof);
+    }
+    if let Some(height) = roof {
+        stamp_ceiling(&mut hits, scene, eye, spacing, reach, height);
     }
     hits
 }
@@ -793,12 +797,40 @@ fn stamp_floor(out: &mut Vec<ScreenPin>, scene: &Scene, eye: [f32; 3], spacing: 
     }
 }
 
+/// The roof gets the floor's cells, one face down at the roof height.
+fn stamp_ceiling(
+    out: &mut Vec<ScreenPin>,
+    scene: &Scene,
+    eye: [f32; 3],
+    spacing: f32,
+    reach: f32,
+    height: f32,
+) {
+    let floor = &scene.floor;
+    stamp_axis(
+        out,
+        eye,
+        spacing,
+        reach,
+        1,
+        height,
+        [0.0, -1.0, 0.0],
+        0,
+        floor.position.x - floor.half_x,
+        floor.position.x + floor.half_x,
+        2,
+        floor.position.z - floor.half_z,
+        floor.position.z + floor.half_z,
+    );
+}
+
 fn stamp_wall(
     out: &mut Vec<ScreenPin>,
     wall: &genos_scene::Wall,
     eye: [f32; 3],
     spacing: f32,
     reach: f32,
+    roof: Option<f32>,
 ) {
     let x0 = wall.position.x - wall.half_x;
     let x1 = wall.position.x + wall.half_x;
@@ -865,6 +897,10 @@ fn stamp_wall(
         0.0,
         y1,
     );
+    // A wall that reaches the roof has no open top.
+    if roof.is_some_and(|height| y1 >= height - 1.0e-3) {
+        return;
+    }
     stamp_axis(
         out,
         eye,
@@ -1089,6 +1125,27 @@ fn surface_hit(scene: &Scene, eye: [f32; 3], dir: [f32; 3]) -> Option<(ScreenPin
             }
         }
     }
+    if let Some(ceiling) = &scene.ceiling {
+        if dir[1] > 1.0e-6 {
+            let t = (ceiling.height - eye[1]) / dir[1];
+            if t > 0.002 && t < best {
+                let point = [
+                    eye[0] + dir[0] * t,
+                    eye[1] + dir[1] * t,
+                    eye[2] + dir[2] * t,
+                ];
+                let floor = &scene.floor;
+                let dx = point[0] - floor.position.x;
+                let dz = point[2] - floor.position.z;
+                if dx.abs() <= floor.half_x + 0.05 && dz.abs() <= floor.half_z + 0.05 {
+                    pos = point;
+                    normal = [0.0, -1.0, 0.0];
+                    kind = SurfaceKind::Floor;
+                    found = true;
+                }
+            }
+        }
+    }
     if !found {
         return None;
     }
@@ -1228,6 +1285,7 @@ mod debug_lines {
             walls: Vec::new(),
             solids: Vec::new(),
             lights: Vec::new(),
+            ceiling: None,
         };
         let mut camera = Camera::new(0.0, 2.0, 0.0);
         camera.pitch = -0.45;

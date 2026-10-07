@@ -126,6 +126,8 @@ fn push_fixed(
 ) {
     match part {
         FixedPart::Floor => push_floor(out, geom, light, field, floor_shadows),
+        // The CPU-lit mesh has no roof term yet. The GPU path draws and lights it.
+        FixedPart::Ceiling => {}
         FixedPart::Wall(index) => {
             let Some(wall) = geom.walls.get(*index) else {
                 return;

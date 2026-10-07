@@ -91,6 +91,8 @@ pub struct Pack {
     pub floor_half_x: f32,
     pub floor_half_z: f32,
     pub floor_color: [f32; 3],
+    /// Underside height and color of the roof over the floor. Height 0 leaves it open.
+    pub ceiling: [f32; 4],
     pub fire: FireLight,
     pub puffs: Vec<Puff>,
     pub(crate) view_right: [f32; 3],
@@ -121,6 +123,8 @@ pub enum PackedDraw {
 /// Local geometry for a shape block. The pose and the color stay on the instance.
 pub enum ShapeSource {
     Floor { half_x: f32, half_z: f32 },
+    /// The floor rectangle facing down.
+    Ceiling { half_x: f32, half_z: f32 },
     Box { half: [f32; 3], top: bool },
     Cylinder { radius: f32, height: f32 },
     Mesh(Vec<[f32; 3]>),
@@ -133,6 +137,9 @@ pub(crate) fn build_shape(source: &ShapeSource) -> Vec<GpuVertex> {
     match source {
         ShapeSource::Floor { half_x, half_z } => {
             push_floor_local(&mut verts, *half_x, *half_z, white);
+        }
+        ShapeSource::Ceiling { half_x, half_z } => {
+            push_ceiling_local(&mut verts, *half_x, *half_z, white);
         }
         ShapeSource::Box { half, top } => {
             push_box(&mut verts, white, [0.0, 0.0, 0.0], *half, *top);
@@ -261,6 +268,7 @@ pub fn pack_frame(
         world.scene.floor.half_x,
         world.scene.floor.half_z,
         world.scene.floor.color,
+        ceiling_of(&world.scene),
     );
     Pack {
         objects,
@@ -285,6 +293,7 @@ pub fn pack_frame(
         floor_half_x: world.scene.floor.half_x,
         floor_half_z: world.scene.floor.half_z,
         floor_color: world.scene.floor.color,
+        ceiling: ceiling_of(&world.scene),
         fire,
         puffs,
         view_right: [0.0; 3],
@@ -338,6 +347,20 @@ fn pack_draw(
                 model: translation(floor.position.x, 0.0, floor.position.z),
                 color,
                 source: ShapeSource::Floor {
+                    half_x: floor.half_x,
+                    half_z: floor.half_z,
+                },
+            })
+        }
+        DrawKind::Fixed(FixedPart::Ceiling) => {
+            let floor = &world.scene.floor;
+            let ceiling = world.scene.ceiling.as_ref()?;
+            let key = shape_key(6, &[floor.half_x, floor.half_z]);
+            Some(PackedDraw::Shape {
+                key,
+                model: translation(floor.position.x, ceiling.height, floor.position.z),
+                color,
+                source: ShapeSource::Ceiling {
                     half_x: floor.half_x,
                     half_z: floor.half_z,
                 },
@@ -461,6 +484,21 @@ fn shape_key_verts(tag: u64, verts: &[GpuVertex]) -> u64 {
         }
     }
     hasher.finish()
+}
+
+/// The roof is a plane like the floor, so the light shaders test it directly and it
+/// takes no occluder slot.
+fn ceiling_of(scene: &genos_scene::Scene) -> [f32; 4] {
+    match &scene.ceiling {
+        Some(ceiling) => [ceiling.height, ceiling.color[0], ceiling.color[1], ceiling.color[2]],
+        None => [0.0; 4],
+    }
+}
+
+fn push_ceiling_local(out: &mut Vec<GpuVertex>, half_x: f32, half_z: f32, color: [f32; 3]) {
+    let n = [0.0, -1.0, 0.0];
+    push_tri(out, [-half_x, 0.0, -half_z], [half_x, 0.0, half_z], [half_x, 0.0, -half_z], n, color);
+    push_tri(out, [-half_x, 0.0, -half_z], [-half_x, 0.0, half_z], [half_x, 0.0, half_z], n, color);
 }
 
 fn push_floor_local(out: &mut Vec<GpuVertex>, half_x: f32, half_z: f32, color: [f32; 3]) {
@@ -634,6 +672,9 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     push_f32(&mut bytes, pack.grid_h as f32);
     push_f32(&mut bytes, pack.pin_count0 as f32);
     push_f32(&mut bytes, pack.pin_count1 as f32);
+    for value in pack.ceiling {
+        push_f32(&mut bytes, value);
+    }
     debug_assert!(bytes.len() <= 4096, "scene block is {} bytes", bytes.len());
     bytes
 }
@@ -704,7 +745,7 @@ fn lamps_of(world: &World) -> Vec<GpuLamp> {
 
 fn occluder(world: &World, object: &crate::world::Object) -> Option<GpuOcc> {
     match &object.kind {
-        DrawKind::Fixed(FixedPart::Floor) => None,
+        DrawKind::Fixed(FixedPart::Floor) | DrawKind::Fixed(FixedPart::Ceiling) => None,
         DrawKind::Fixed(FixedPart::Wall(index)) => {
             world.scene.walls.get(*index).map(|wall| GpuOcc {
                 center: [wall.position.x, wall.height * 0.5, wall.position.z],
@@ -760,6 +801,11 @@ fn solid_occ(solid: &genos_scene::Solid) -> GpuOcc {
 fn object_color(world: &World, object: &crate::world::Object) -> [f32; 3] {
     match &object.kind {
         DrawKind::Fixed(FixedPart::Floor) => world.scene.floor.color,
+        DrawKind::Fixed(FixedPart::Ceiling) => world
+            .scene
+            .ceiling
+            .as_ref()
+            .map_or([1.0, 1.0, 1.0], |ceiling| ceiling.color),
         DrawKind::Fixed(FixedPart::Wall(index)) => world
             .scene
             .walls
@@ -787,6 +833,19 @@ fn push_object(
 ) {
     match &object.kind {
         DrawKind::Fixed(FixedPart::Floor) => push_floor(out, world),
+        DrawKind::Fixed(FixedPart::Ceiling) => {
+            if let Some(ceiling) = &world.scene.ceiling {
+                let floor = &world.scene.floor;
+                let mut local = Vec::new();
+                push_ceiling_local(&mut local, floor.half_x, floor.half_z, ceiling.color);
+                for mut vertex in local {
+                    vertex.pos[0] += floor.position.x;
+                    vertex.pos[1] += ceiling.height;
+                    vertex.pos[2] += floor.position.z;
+                    out.push(vertex);
+                }
+            }
+        }
         DrawKind::Fixed(FixedPart::Wall(index)) => {
             if let Some(wall) = world.scene.walls.get(*index) {
                 push_box(
@@ -1445,6 +1504,7 @@ fn hash_light(
     floor_half_x: f32,
     floor_half_z: f32,
     floor_color: [f32; 3],
+    ceiling: [f32; 4],
 ) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -1455,7 +1515,7 @@ fn hash_light(
     floor_z.to_bits().hash(&mut hasher);
     floor_half_x.to_bits().hash(&mut hasher);
     floor_half_z.to_bits().hash(&mut hasher);
-    for value in floor_color {
+    for value in floor_color.into_iter().chain(ceiling) {
         value.to_bits().hash(&mut hasher);
     }
     lamps.len().hash(&mut hasher);
@@ -1672,6 +1732,7 @@ mod tests {
 
                 direction: Vec3::ZERO,
             }],
+            ceiling: None,
         };
         let world = World::from_scene(scene);
         let camera = Camera::opening();
@@ -1749,6 +1810,7 @@ mod tests {
 
                 direction: Vec3::ZERO,
             }],
+            ceiling: None,
         };
         let world = World::from_scene(scene);
         let camera = Camera::opening();

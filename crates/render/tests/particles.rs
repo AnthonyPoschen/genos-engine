@@ -36,6 +36,7 @@ fn room(lamp: [f32; 3]) -> Scene {
 
             direction: Vec3::ZERO,
         }],
+        ceiling: None,
     }
 }
 

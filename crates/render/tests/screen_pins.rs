@@ -31,6 +31,7 @@ fn room() -> Scene {
             color: [1.0, 1.0, 1.0],
             direction: Vec3::ZERO,
         }],
+        ceiling: None,
     }
 }
 
@@ -246,6 +247,7 @@ fn floor_pins_behind_a_wall_stay_on_the_floor() {
         }],
         solids: Vec::new(),
         lights: Vec::new(),
+        ceiling: None,
     };
     let west = view_sized(-4.0, 0.0, std::f32::consts::FRAC_PI_2, -0.55, 1280, 720);
     let mut pins = ScreenPins::default();

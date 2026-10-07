@@ -15,6 +15,7 @@ fn tick(camera: &mut Camera, actions: &Actions, dt: f32) {
         walls: Vec::new(),
         solids: Vec::new(),
         lights: Vec::new(),
+        ceiling: None,
     };
     update(camera, &mut scene, actions, dt);
 }

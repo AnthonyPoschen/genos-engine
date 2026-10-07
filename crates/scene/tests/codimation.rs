@@ -64,6 +64,7 @@ fn room(blocker: bool) -> Scene {
 
             direction: Vec3::ZERO,
         }],
+        ceiling: None,
     }
 }
 

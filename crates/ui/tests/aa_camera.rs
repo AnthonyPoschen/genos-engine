@@ -33,6 +33,7 @@ fn silhouette_world() -> World {
 
             direction: Vec3::ZERO,
         }],
+        ceiling: None,
     });
     world.objects.push(Object {
         hidden: false,
@@ -107,6 +108,7 @@ fn press_mode(mode_id: u32) -> PictureMode {
 
             direction: Vec3::ZERO,
         }],
+        ceiling: None,
     };
     apply_frame_action(&mut scene, action).expect("picture mode")
 }

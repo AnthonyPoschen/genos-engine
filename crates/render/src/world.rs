@@ -33,6 +33,8 @@ pub struct Displacement {
 #[derive(Clone, Debug)]
 pub enum FixedPart {
     Floor,
+    /// The roof over the floor footprint, when the scene has one.
+    Ceiling,
     Wall(usize),
     Solid(usize),
 }
@@ -118,6 +120,17 @@ impl World {
             },
             kind: DrawKind::Fixed(FixedPart::Floor),
         });
+        if let Some(ceiling) = &scene.ceiling {
+            objects.push(Object {
+                hidden: false,
+                affects_light: true,
+                bounds: Bounds {
+                    center: [scene.floor.position.x, ceiling.height, scene.floor.position.z],
+                    half: [scene.floor.half_x, 0.05, scene.floor.half_z],
+                },
+                kind: DrawKind::Fixed(FixedPart::Ceiling),
+            });
+        }
         for (index, wall) in scene.walls.iter().enumerate() {
             objects.push(Object {
                 hidden: false,
@@ -279,6 +292,7 @@ mod tests {
 
                 direction: Vec3::ZERO,
             }],
+            ceiling: None,
         }
     }
 
@@ -469,6 +483,7 @@ mod tests {
 
                 direction: Vec3::ZERO,
             }],
+            ceiling: None,
         };
         let view = view_proj(&Camera::opening(), 16.0 / 9.0);
         let floor_at = |wall: bool, x: f32, z: f32| {

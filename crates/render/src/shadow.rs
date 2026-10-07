@@ -482,6 +482,7 @@ mod tests {
 
                 direction: Vec3::ZERO,
             }],
+            ceiling: None,
         }
     }
 

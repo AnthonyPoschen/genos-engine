@@ -79,6 +79,7 @@ fn equal_elapsed_time_matches_across_frame_schedules() {
         walls: Vec::new(),
         solids: Vec::new(),
         lights: Vec::new(),
+        ceiling: None,
     };
     let mouse = Actions {
         capture_click: true,

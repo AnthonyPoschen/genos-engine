@@ -69,7 +69,12 @@ layout(std430, set = 0, binding = 0) readonly buffer SceneData {
     vec4 view_forward;
     // x is the screen-probe columns. y is the rows.
     vec4 view_grid;
+    // x is the roof underside height over the floor footprint (0 = no roof). yzw is its color.
+    vec4 ceiling;
 } scene;
+
+#extension GL_GOOGLE_include_directive : require
+#include "scene_rays.glsl"
 
 layout(std430, set = 0, binding = 1) readonly buffer FieldData {
     vec4 texels[];
@@ -503,63 +508,15 @@ uvec2 screen_counts() {
 
 // The same ray and the same 4 cm offset the gather used to place the probe.
 bool surface_hit(vec3 eye, vec3 dir, out vec3 pos, out vec3 normal) {
-    float best = 1.0e20;
-    bool found = false;
+    SceneHit hit;
     pos = eye;
     normal = vec3(0.0, 1.0, 0.0);
-    uint count = min(scene.occ_count, 16u);
-    for (uint i = 0u; i < count; i++) {
-        Occ occ = scene.occs[i];
-        float t = -1.0;
-        vec3 n = vec3(0.0, 1.0, 0.0);
-        vec3 center = vec3(occ.center_shape.x, occ.extent.y * 0.5, occ.center_shape.z);
-        if (occ.center_shape.w > 0.5) {
-            t = hit_cyl_near(eye, dir, center, occ.extent.w, 0.0, occ.extent.y);
-            if (t > 0.0) {
-                vec3 p = eye + dir * t;
-                vec2 d = p.xz - occ.center_shape.xz;
-                float len = max(length(d), 1.0e-4);
-                n = vec3(d.x / len, 0.0, d.y / len);
-            }
-        } else {
-            vec3 half_e = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
-            t = hit_box(eye, dir, center - half_e, center + half_e);
-            if (t > 0.0) {
-                vec3 q = (eye + dir * t - center) / max(half_e, vec3(1.0e-4));
-                vec3 aq = abs(q);
-                if (aq.x >= aq.y && aq.x >= aq.z) {
-                    n = vec3(sign(q.x), 0.0, 0.0);
-                } else if (aq.y >= aq.z) {
-                    n = vec3(0.0, sign(q.y), 0.0);
-                } else {
-                    n = vec3(0.0, 0.0, sign(q.z));
-                }
-                if (dot(n, n) < 0.5) {
-                    n = vec3(0.0, 1.0, 0.0);
-                }
-            }
-        }
-        if (t > 0.002 && t < best) {
-            best = t;
-            pos = eye + dir * t;
-            normal = n;
-            found = true;
-        }
+    if (!scene_ray(eye, dir, 0.002, 1.0e20, hit)) {
+        return false;
     }
-    if (dir.y < -1.0e-6) {
-        float t = (0.0 - eye.y) / dir.y;
-        if (t > 0.002 && t < best) {
-            vec3 p = eye + dir * t;
-            vec2 half_e = vec2(max(scene.floor_center.w, 0.5), max(scene.floor_data.x, 0.5));
-            vec2 d = p.xz - vec2(scene.floor_center.x, scene.floor_center.z);
-            if (abs(d.x) <= half_e.x + 0.05 && abs(d.y) <= half_e.y + 0.05) {
-                pos = p;
-                normal = vec3(0.0, 1.0, 0.0);
-                found = true;
-            }
-        }
-    }
-    return found;
+    pos = eye + dir * hit.t;
+    normal = hit.normal;
+    return true;
 }
 
 // World lattice around the eye. A turn does not move it. The gather uses the same snap.
@@ -646,6 +603,7 @@ bool volume_sample(uint info_at, uint base, uint across, uint layers, vec3 world
         return false;
     }
     vec3 q = (world + face_n * (0.5 * spacing) - info.xyz) / spacing - 0.5;
+    vec3 from = world + face_n * 0.02;
     ivec3 i0 = ivec3(floor(q));
     vec3 t = q - vec3(i0);
     vec3 nn = face_n * face_n;
@@ -663,6 +621,12 @@ bool volume_sample(uint info_at, uint base, uint across, uint layers, vec3 world
             * ((corner & 2u) == 0u ? 1.0 - t.y : t.y)
             * ((corner & 4u) == 0u ? 1.0 - t.z : t.z);
         if (w <= 1.0e-5) {
+            continue;
+        }
+        // The cell must see this point. Without the test a cell on the far side of a
+        // thin wall or the roof (one cell away) blends its light through.
+        vec3 cell_center = info.xyz + (vec3(c) + 0.5) * spacing;
+        if (segment_blocked(from, cell_center)) {
             continue;
         }
         uint cb = base + ((uint(c.y) * across + uint(c.z)) * across + uint(c.x)) * 6u;
@@ -730,46 +694,13 @@ bool inside_footprint(vec2 xz, Occ occ) {
     return abs(d.x) <= occ.extent.x && abs(d.y) <= occ.extent.z;
 }
 
+// Shared path (scene_rays.glsl): every surface type occludes the same way.
 bool inside_solid(vec3 p) {
-    uint count = min(scene.occ_count, 16u);
-    for (uint i = 0u; i < count; i++) {
-        Occ occ = scene.occs[i];
-        if (p.y <= 0.001 || p.y >= occ.extent.y) {
-            continue;
-        }
-        if (inside_footprint(p.xz, occ)) {
-            return true;
-        }
-    }
-    return false;
+    return scene_inside(p);
 }
 
 bool blocked(vec3 origin, vec3 target) {
-    if (inside_solid(origin)) {
-        return true;
-    }
-    vec3 delta = target - origin;
-    float dist = length(delta);
-    if (dist < 1e-3) {
-        return false;
-    }
-    vec3 dir = delta / dist;
-    uint count = min(scene.occ_count, 16u);
-    for (uint i = 0u; i < count; i++) {
-        Occ occ = scene.occs[i];
-        float t;
-        if (occ.center_shape.w > 0.5) {
-            t = hit_cyl(origin, dir, occ.center_shape.xyz, occ.extent.w, 0.0, occ.extent.y);
-        } else {
-            vec3 half_e = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
-            vec3 center = vec3(occ.center_shape.x, occ.extent.y * 0.5, occ.center_shape.z);
-            t = hit_box(origin, dir, center - half_e, center + half_e);
-        }
-        if (t > 1e-4 && t < dist - 1e-4) {
-            return true;
-        }
-    }
-    return false;
+    return scene_occluded(origin, target);
 }
 
 // blocked() without the inside test, for callers that test the origin once.
@@ -779,23 +710,8 @@ bool segment_blocked(vec3 origin, vec3 target) {
     if (dist < 1e-3) {
         return false;
     }
-    vec3 dir = delta / dist;
-    uint count = min(scene.occ_count, 16u);
-    for (uint i = 0u; i < count; i++) {
-        Occ occ = scene.occs[i];
-        float t;
-        if (occ.center_shape.w > 0.5) {
-            t = hit_cyl(origin, dir, occ.center_shape.xyz, occ.extent.w, 0.0, occ.extent.y);
-        } else {
-            vec3 half_e = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
-            vec3 center = vec3(occ.center_shape.x, occ.extent.y * 0.5, occ.center_shape.z);
-            t = hit_box(origin, dir, center - half_e, center + half_e);
-        }
-        if (t > 1e-4 && t < dist - 1e-4) {
-            return true;
-        }
-    }
-    return false;
+    SceneHit hit;
+    return scene_ray(origin, delta / dist, 1.0e-4, dist - 1.0e-3, hit);
 }
 
 vec3 shade_lamp(vec3 origin, vec3 normal, vec4 lamp, vec3 color, bool two_sided) {
@@ -825,16 +741,7 @@ vec3 shade_lamp(vec3 origin, vec3 normal, vec4 lamp, vec3 color, bool two_sided)
 }
 
 vec3 direct_at(vec3 pos, vec3 normal, bool two_sided) {
-    // Only floor under a footprint is dark here. The bottom of a wall face sits
-    // on its own footprint edge and must keep its lamp.
-    if (pos.y < 0.02 && normal.y > 0.5) {
-        uint count = min(scene.occ_count, 16u);
-        for (uint i = 0u; i < count; i++) {
-            if (inside_footprint(pos.xz, scene.occs[i])) {
-                return vec3(0.0);
-            }
-        }
-    }
+    // A point inside a solid (floor under a footprint) starts occluded in blocked().
     vec3 origin = pos + normal * 0.02;
     vec3 incoming = vec3(0.0);
     uint lamps = min(scene.lamp_count, 4u);
@@ -1128,7 +1035,8 @@ void main() {
     // The probes store the cosine-weighted mean radiance. Irradiance is pi times that,
     // and the direct term below is irradiance too.
     vec3 bounce = 3.14159265 * merged_at(SHOWN_COPY, v_pos, normal, floor_face);
-    if (normal.y > 0.5 && probe_inside(v_pos.xz) && !lamp_sees_upward(v_pos, normal)) {
+    // A face point inside geometry (floor under a footprint) receives nothing.
+    if (inside_solid(v_pos + normal * 0.02)) {
         bounce = vec3(0.0);
     }
     vec3 color = tone(albedo * LAMBERT * (direct + bounce));

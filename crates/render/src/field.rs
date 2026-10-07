@@ -1346,6 +1346,7 @@ mod tests {
 
                 direction: Vec3::ZERO,
             }],
+            ceiling: None,
         }
     }
 
@@ -1385,6 +1386,7 @@ mod tests {
             walls: Vec::new(),
             solids: Vec::new(),
             lights: Vec::new(),
+            ceiling: None,
         };
         let near = super::cascade_debug_lines(&scene, None, [true, false, false]);
         let world = super::cascade_debug_lines(&scene, None, [false, false, true]);

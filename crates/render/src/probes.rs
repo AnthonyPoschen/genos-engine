@@ -991,6 +991,7 @@ mod tests {
                 color_mix: -1.0,
             }],
             lights: Vec::new(),
+            ceiling: None,
         }
     }
 }

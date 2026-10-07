@@ -30,6 +30,7 @@ fn silhouette_world() -> World {
 
             direction: Vec3::ZERO,
         }],
+        ceiling: None,
     });
     world.objects.push(Object {
         hidden: false,
