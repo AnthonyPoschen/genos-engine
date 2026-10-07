@@ -505,6 +505,13 @@ pub struct TierState {
 /// How far one slower build moves the per-ray cost toward itself.
 const COST_RISE: f64 = 0.05;
 
+/// Probe rays a build needs before it can show that rays got dearer. A probe is one
+/// workgroup, so a build of fewer probes leaves most of a GPU idle: they run side by
+/// side in the time of one, and its time is the latency of a probe and the wait for
+/// the queue, not the cost of its rays. Learning from it shrank the budget to one
+/// probe a build in busy scenes.
+const FILL_RAYS: u64 = 128 * CHANGE_RAYS as u64;
+
 /// A build shares the GPU with the picture, and that only ever makes it look slower:
 /// the fastest builds show what a ray costs. A faster sample is taken at once; a
 /// slower one moves the cost a little, so a lasting change (a heavier scene, lower
@@ -766,15 +773,17 @@ impl TierState {
     }
 
     /// Learn the per-ray cost from a timed build. A faster build than the cost predicts
-    /// always teaches. A slower one teaches only when it used most of its budget: a
-    /// small build cannot fill the GPU, so its rays look dearer than they are, and
-    /// learning from it would shrink the next build and make it look dearer still.
+    /// always teaches. A slower one teaches only when it used most of its budget and
+    /// had at least [`FILL_RAYS`]: a small build cannot fill the GPU, so its rays look
+    /// dearer than they are, and learning from it would shrink the next build and make
+    /// it look dearer still.
     pub fn note_time(&mut self, probe_rays: u64, ms: f64) {
         if probe_rays < 256 || !(ms > 0.0) {
             return;
         }
         let sample = ms / probe_rays as f64;
-        let full = self.last_budget.is_none_or(|budget| probe_rays.saturating_mul(2) >= budget);
+        let full = probe_rays >= FILL_RAYS
+            && self.last_budget.is_none_or(|budget| probe_rays.saturating_mul(2) >= budget);
         self.ms_per_ray = match self.ms_per_ray {
             None => Some(sample),
             Some(per_ray) if sample < per_ray || full => Some(learn_cost(per_ray, sample)),
@@ -1230,6 +1239,13 @@ mod tests {
         // Builds with little work cannot fill the GPU: their rays look dear.
         for _ in 0..40 {
             tier.note_time(1024, 1.0);
+        }
+        assert_eq!(tier.budget_rays(1.5), first);
+        // A budget of one probe: each build is all of it, but one probe is the latency
+        // of a workgroup and a wait for the queue, so it does not shrink the budget.
+        tier.last_budget = Some(u64::from(CHANGE_RAYS));
+        for _ in 0..40 {
+            tier.note_time(u64::from(CHANGE_RAYS), 28.0);
         }
         assert_eq!(tier.budget_rays(1.5), first);
         // A fast GPU: the budget grows to fit 1.5 ms.
