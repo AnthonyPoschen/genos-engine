@@ -462,7 +462,12 @@ fn run() -> Result<(), String> {
             let name = bench.shot.as_ref()?;
             Some(bench.shots.as_ref()?.join(name))
         });
-        let want_read = readback.is_some() || shot.is_some();
+        let flicker_frame = bench.as_ref().is_some_and(Bench::wants_frame);
+        let want_read = readback.is_some() || shot.is_some() || flicker_frame;
+        if bench.is_some() {
+            // The panel and the live graph are not the scene: a bench draws without them.
+            overlay.clear();
+        }
         let draw_at = Instant::now();
         let (pixels, timing) = if detailed {
             let (pixels, timing) =
@@ -518,7 +523,12 @@ fn run() -> Result<(), String> {
         } else if graph_on && !paused {
             profile.remember(open.finish(Duration::ZERO));
         }
-        if want_read {
+        if flicker_frame {
+            if let (Some(pixels), Some(bench)) = (pixels.as_ref(), bench.as_mut()) {
+                bench.flicker.take(pixels, renderer.width(), renderer.height());
+            }
+        }
+        if want_read && (readback.is_some() || shot.is_some()) {
             if let Some(pixels) = pixels {
                 write_png(
                     shot.as_ref().or(readback.as_ref()).unwrap(),
@@ -597,6 +607,91 @@ struct Bench {
     shot: Option<String>,
     /// The tier as of the last frame: bricks in it, and those still changing or due.
     tier: genos_render::TierStats,
+    flicker: Flicker,
+}
+
+/// Frames the flicker phase measures (`GENOS_BENCH_FLICKER=<frames>`, 0 skips it).
+const BENCH_FLICKER_FRAMES: u32 = 240;
+/// Frames of orbit before it measures, so the drop from the rise is gone.
+const BENCH_FLICKER_LEAD: u32 = 60;
+/// The lamp's turn per frame while it measures flicker: one turn in 360 frames.
+const BENCH_FLICKER_STEP: f32 = std::f32::consts::TAU / 360.0;
+/// The flicker grid: 4 x 4 screen tiles.
+const FLICKER_TILES: usize = 4;
+
+/// The flicker phase: the lamp orbits a fixed step per frame and every frame is read
+/// back. A pixel's flicker is how far it leaves the line through its neighbours in
+/// time, |L(t) - (L(t-1) + L(t+1)) / 2| in 8-bit luminance, so the smooth change of a
+/// moving lamp drops out. Each tile takes the median of its pixels (a moving shadow
+/// edge is a thin line; flicker covers an area), averaged over the frames.
+#[derive(Default)]
+struct Flicker {
+    frames: u32,
+    drawn: u32,
+    measured: u32,
+    last: Vec<Vec<f32>>,
+    tiles: [f64; FLICKER_TILES * FLICKER_TILES],
+}
+
+impl Flicker {
+    fn take(&mut self, bgra: &[u8], width: u32, height: u32) {
+        self.drawn += 1;
+        if self.drawn <= BENCH_FLICKER_LEAD {
+            return;
+        }
+        let (w, h) = (width as usize, height as usize);
+        let luma: Vec<f32> = bgra
+            .chunks_exact(4)
+            .take(w * h)
+            .map(|p| 0.0722 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.2126 * f32::from(p[2]))
+            .collect();
+        if luma.len() < w * h {
+            return;
+        }
+        self.last.push(luma);
+        if self.last.len() < 3 {
+            return;
+        }
+        let (a, b, c) = (&self.last[0], &self.last[1], &self.last[2]);
+        let mut cell = Vec::new();
+        for ty in 0..FLICKER_TILES {
+            for tx in 0..FLICKER_TILES {
+                cell.clear();
+                for y in ty * h / FLICKER_TILES..(ty + 1) * h / FLICKER_TILES {
+                    for x in tx * w / FLICKER_TILES..(tx + 1) * w / FLICKER_TILES {
+                        let i = y * w + x;
+                        cell.push((b[i] - 0.5 * (a[i] + c[i])).abs());
+                    }
+                }
+                if cell.is_empty() {
+                    continue;
+                }
+                let mid = cell.len() / 2;
+                let (_, median, _) = cell.select_nth_unstable_by(mid, f32::total_cmp);
+                self.tiles[ty * FLICKER_TILES + tx] += f64::from(*median);
+            }
+        }
+        self.last.remove(0);
+        self.measured += 1;
+    }
+
+    fn summary(&self) -> String {
+        let n = f64::from(self.measured.max(1));
+        let tiles: Vec<f64> = self.tiles.iter().map(|t| t / n).collect();
+        let mean = tiles.iter().sum::<f64>() / tiles.len() as f64;
+        let (worst, max) = tiles
+            .iter()
+            .enumerate()
+            .fold((0, 0.0f64), |best, (i, &v)| if v > best.1 { (i, v) } else { best });
+        let all: Vec<String> = tiles.iter().map(|t| format!("{t:.2}")).collect();
+        format!(
+            " flicker_frames={} flicker_mean={mean:.3} flicker_max={max:.3} worst_tile={},{} tiles={}",
+            self.measured,
+            worst % FLICKER_TILES,
+            worst / FLICKER_TILES,
+            all.join(","),
+        )
+    }
 }
 
 /// Milliseconds into a drop or a rise at which `GENOS_BENCH_SHOTS` takes a picture.
@@ -609,6 +704,7 @@ enum BenchPhase {
     Moving,
     Down,
     Up,
+    Flicker,
 }
 
 /// The longest a drop or a rise may take to settle before the bench gives up on it.
@@ -640,6 +736,13 @@ impl Bench {
             next_shot: 0,
             shot: None,
             tier: genos_render::TierStats::default(),
+            flicker: Flicker {
+                frames: match std::env::var("GENOS_BENCH_FLICKER") {
+                    Ok(v) => v.parse().map_err(|_| format!("GENOS_BENCH_FLICKER={v} is not frames"))?,
+                    Err(_) => BENCH_FLICKER_FRAMES,
+                },
+                ..Flicker::default()
+            },
         }))
     }
 
@@ -657,7 +760,10 @@ impl Bench {
             BenchPhase::Still => (elapsed >= self.span).then_some(BenchPhase::Moving),
             BenchPhase::Moving => (elapsed >= self.span).then_some(BenchPhase::Down),
             BenchPhase::Down => (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::Up),
-            BenchPhase::Up => (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::Up),
+            BenchPhase::Up => (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::Flicker),
+            BenchPhase::Flicker => {
+                (self.flicker.measured >= self.flicker.frames).then_some(BenchPhase::Flicker)
+            }
         };
         // A drop or a rise counts from its first frame; its first frame always has work.
         let settle = matches!(self.phase, BenchPhase::Down | BenchPhase::Up);
@@ -669,7 +775,12 @@ impl Bench {
             if self.phase != BenchPhase::Warmup {
                 self.finish(elapsed, pending);
             }
-            if self.phase == BenchPhase::Up {
+            let last = match self.phase {
+                BenchPhase::Up => self.flicker.frames == 0,
+                BenchPhase::Flicker => true,
+                _ => false,
+            };
+            if last {
                 return true;
             }
             self.phase = next.unwrap_or(self.phase);
@@ -693,8 +804,17 @@ impl Bench {
             // About one turn every six seconds, around the boxes.
             BenchPhase::Moving => Vec3::new(1.0 + 2.5 * t.cos(), 2.5, -1.0 + 2.5 * t.sin()),
             BenchPhase::Down => Vec3::new(0.8, 1.6, -1.6),
+            BenchPhase::Flicker => {
+                let a = self.flicker.drawn as f32 * BENCH_FLICKER_STEP;
+                Vec3::new(1.0 + 2.5 * a.cos(), 2.5, -1.0 + 2.5 * a.sin())
+            }
         };
         false
+    }
+
+    /// The flicker phase reads back every frame.
+    fn wants_frame(&self) -> bool {
+        self.phase == BenchPhase::Flicker
     }
 
     fn finish(&mut self, elapsed: Duration, pending: usize) {
@@ -724,6 +844,9 @@ impl Bench {
                 self.tier.changing_bricks,
                 pending,
             ));
+        }
+        if self.phase == BenchPhase::Flicker {
+            line.push_str(&self.flicker.summary());
         }
         eprintln!("{line}");
         self.lines.push(line);
