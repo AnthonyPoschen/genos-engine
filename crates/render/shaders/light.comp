@@ -302,7 +302,26 @@ vec4 world_texel(uint base, uvec3 ip, uvec3 count, uint dir) {
     return field.texels[base + world_probe_index(ip, count) * WORLD_DIRS + dir];
 }
 
-vec4 world_interval(uint base, vec3 pos, vec3 dir, vec3 face_n) {
+// Light borrowed from another probe (a world probe or a cascade 1 pin) for a ray
+// that left this probe's own range empty. The other probe can stand metres away, so
+// its hit must be a surface that the ray's end (`ray * t_from`, free space) sees,
+// within the 60 degrees a world direction may snap by. Without the test a lamp
+// beside a wall end lights the far side of the wall through probes that see round
+// the end.
+const float BORROW_COS = 0.5;
+
+bool borrowed_hit_seen(vec3 start, vec3 ray, float t_from, vec3 hit_at, vec3 hit_ray) {
+    vec3 dir = normalize(ray);
+    vec3 from = start + dir * t_from;
+    vec3 to_hit = hit_at - from;
+    float dist = length(to_hit);
+    if (dist < 1.0e-3 || dot(to_hit / dist, dir) < BORROW_COS) {
+        return false;
+    }
+    return !scene_occluded(from, hit_at - hit_ray * 0.02);
+}
+
+vec4 world_interval(uint base, vec3 pos, vec3 dir, vec3 face_n, float t_from) {
     vec3 origin;
     uvec3 count;
     world_layout3(origin, count);
@@ -349,7 +368,12 @@ vec4 world_interval(uint base, vec3 pos, vec3 dir, vec3 face_n) {
         if (taken.a < 0.0) {
             continue;
         }
-        acc += taken * w;
+        vec3 hit_at = probe + snapped * taken.a;
+        if (!borrowed_hit_seen(pos, dir, t_from, hit_at, snapped)) {
+            continue;
+        }
+        // Distance from the pin, so the caller compares it with its own interval.
+        acc += vec4(taken.rgb, length(hit_at - pos)) * w;
         hit_w += w;
         weight += w;
     }
@@ -407,7 +431,7 @@ vec3 sample_cube(uint cube_base, vec3 pos, vec3 n) {
     return sum / weight;
 }
 
-vec4 pinned_interval(vec3 world, vec3 face_n, vec3 ray) {
+vec4 pinned_interval(vec3 world, vec3 face_n, vec3 ray, float t_from) {
     vec4 info = field.texels[HASH_ORIGIN1];
     float spacing = info.w;
     if (spacing <= 0.0) {
@@ -466,6 +490,11 @@ vec4 pinned_interval(vec3 world, vec3 face_n, vec3 ray) {
                     if (taken.a < 0.0) {
                         continue;
                     }
+                    vec3 hit_ray = hemisphere_dir(normal, best, dirs, 0.0);
+                    vec3 hit_at = stored.xyz + normal * 0.04 + hit_ray * taken.a;
+                    if (!borrowed_hit_seen(world + face_n * 0.04, nray, t_from, hit_at, hit_ray)) {
+                        continue;
+                    }
                     acc += taken * w;
                     weight += w;
                 }
@@ -485,10 +514,15 @@ uint next_ids[NEXT_MAX];
 float next_w[NEXT_MAX];
 uint next_count = 0u;
 bool next_overflow = false;
+vec3 next_from = vec3(0.0);
+float next_t = 0.0;
 
-void gather_next(vec3 world, vec3 face_n) {
+void gather_next(vec3 world, vec3 face_n, float t_from) {
     next_count = 0u;
     next_overflow = false;
+    // The cascade 0 rays start here (write_pinned) and run empty to t_from.
+    next_from = world + face_n * 0.04;
+    next_t = t_from;
     vec4 info = field.texels[HASH_ORIGIN1];
     float spacing = info.w;
     if (spacing <= 0.0) {
@@ -573,6 +607,11 @@ vec4 pinned_interval_cached(vec3 face_n, vec3 ray) {
         }
         vec4 taken = field.texels[screen_dir_offset(1u) + probe * dirs + best];
         if (taken.a < 0.0) {
+            continue;
+        }
+        vec3 hit_ray = hemisphere_dir(normal, best, dirs, 0.0);
+        vec3 hit_at = field.texels[PIN_POS1 + probe].xyz + normal * 0.04 + hit_ray * taken.a;
+        if (!borrowed_hit_seen(next_from, nray, next_t, hit_at, hit_ray)) {
             continue;
         }
         acc += taken * next_w[k];
@@ -684,7 +723,7 @@ void write_pinned(uint cascade) {
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
     if (cascade == 0u) {
-        gather_next(stored, normal);
+        gather_next(stored, normal, t1);
     }
     for (uint d = 0u; d < dirs; d++) {
         vec3 ray = hemisphere_dir(normal, d, dirs, spin);
@@ -698,14 +737,14 @@ void write_pinned(uint cascade) {
         }
         if (iv.a < -1.5 && cascade == 0u) {
             vec4 next = next_overflow
-                ? pinned_interval(stored, normal, ray)
+                ? pinned_interval(stored, normal, ray, t1)
                 : pinned_interval_cached(normal, ray);
             if (next.a >= 0.0) {
                 iv = next;
             }
         }
         if (iv.a < -1.5) {
-            vec4 far = world_interval(WORLD_BOUNCE_OFFSET, pos, ray, normal);
+            vec4 far = world_interval(WORLD_BOUNCE_OFFSET, pos, ray, normal, t1);
             if (far.a >= t1) {
                 iv = vec4(far.rgb, far.a);
             }
