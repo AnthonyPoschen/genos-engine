@@ -693,7 +693,7 @@ void write_pinned(uint cascade) {
         // nearest surface is the answer for this direction, near or far.
         TraceHit hit = trace_hit(pos, ray, 0.0, t1);
         vec4 iv = hit.iv;
-        if (iv.a >= 0.15) {
+        if (iv.a >= 0.0) {
             iv.rgb += hit.tint * hit.reflect * WORLD_IRR * sample_cube(WORLD_CUBE_OFFSET, hit.pos + hit.normal * 0.08, hit.normal);
         }
         if (iv.a < -1.5 && cascade == 0u) {
