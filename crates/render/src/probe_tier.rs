@@ -422,6 +422,9 @@ pub struct TierStats {
     pub live_probes: usize,
     pub filled_bricks: usize,
     pub pending_bricks: usize,
+    /// Bricks still taking their first or a change pass: the visible part of a change.
+    /// Refining after that only averages noise away.
+    pub changing_bricks: usize,
     pub dropped_bricks: usize,
 }
 
@@ -625,8 +628,11 @@ impl TierState {
             if slot.filled {
                 stats.filled_bricks += 1;
             }
-            if self.class(slot).is_some() {
+            if let Some(class) = self.class(slot) {
                 stats.pending_bricks += 1;
+                if class < REFINE_CLASS {
+                    stats.changing_bricks += 1;
+                }
             }
         }
         stats

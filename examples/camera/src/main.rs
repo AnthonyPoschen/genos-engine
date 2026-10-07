@@ -183,6 +183,7 @@ fn run() -> Result<(), String> {
             camera.set_codimation_running(index, false);
         }
     }
+    let bench_camera = camera.clone();
     let host = genos_mcp::Host::new(scene, camera);
     if let Some((x, y, z)) = lamp {
         host.with_frame(|scene, _| {
@@ -239,6 +240,7 @@ fn run() -> Result<(), String> {
     let mut wireframe = false;
     let mut cascade_view = [false; 3];
     let mut frame_clock: Option<Instant> = None;
+    let mut bench = Bench::from_env(&world.scene, bench_camera)?;
     loop {
         let now = Instant::now();
         let dt = frame_seconds(frame_clock, now);
@@ -423,7 +425,7 @@ fn run() -> Result<(), String> {
             scene_revision = host.scene_revision();
             world = World::from_scene(host.drawn_scene());
         }
-        if draw_camera.captured != frame.pointer_locked {
+        if bench.is_none() && draw_camera.captured != frame.pointer_locked {
             match window.set_pointer_capture(draw_camera.captured) {
                 Ok(()) => {}
                 Err(err) => {
@@ -441,6 +443,15 @@ fn run() -> Result<(), String> {
             }
         }
         let sim_cpu = sim_at.elapsed();
+        let draw_camera = match bench.as_mut() {
+            Some(bench) => {
+                if bench.step(&mut world.scene, renderer.tier_stats(), now) {
+                    break;
+                }
+                bench.camera.clone()
+            }
+            None => draw_camera,
+        };
         // gpu draw/present
         renderer.set_cascade_view(&world.scene, &draw_camera, cascade_view);
         let want_read = readback.is_some();
@@ -548,8 +559,147 @@ fn run() -> Result<(), String> {
             return Err("profile frames are missing gpu time".into());
         }
     }
+    if let Some(bench) = bench {
+        bench.report(renderer.width(), renderer.height(), renderer.antialias());
+    }
     println!("genos-camera frames={drawn}");
     Ok(())
+}
+
+/// `GENOS_BENCH=<seconds>`: an unattended benchmark. The camera stays where it starts
+/// (the opening view, or `--eye`/`--pitch`); input is ignored. After a short warm-up the scene stands still for a third
+/// of the time, then the first lamp circles the boxes for a third, then it drops to
+/// beside the boxes and rises back (the settling clip), each time until the tier has
+/// no work left. One `BENCH` line per phase, then the program exits.
+struct Bench {
+    camera: Camera,
+    phase: BenchPhase,
+    phase_start: Instant,
+    span: Duration,
+    home: Vec3,
+    last: Option<Instant>,
+    frames: Vec<f32>,
+    /// When a drop or a rise had taken all its change passes: the visible change.
+    visible: Option<Duration>,
+    lines: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BenchPhase {
+    Warmup,
+    Still,
+    Moving,
+    Down,
+    Up,
+}
+
+/// The longest a drop or a rise may take to settle before the bench gives up on it.
+const BENCH_SETTLE_LIMIT: Duration = Duration::from_secs(10);
+/// Seconds of warm-up before the first measured phase.
+const BENCH_WARMUP: Duration = Duration::from_secs(3);
+
+impl Bench {
+    fn from_env(scene: &Scene, camera: Camera) -> Result<Option<Self>, String> {
+        let Ok(value) = std::env::var("GENOS_BENCH") else {
+            return Ok(None);
+        };
+        let seconds: f32 = value.parse().map_err(|_| format!("GENOS_BENCH={value} is not seconds"))?;
+        if scene.lights.is_empty() {
+            return Err("GENOS_BENCH needs a lamp in the scene".into());
+        }
+        let now = Instant::now();
+        Ok(Some(Self {
+            camera,
+            phase: BenchPhase::Warmup,
+            phase_start: now,
+            span: Duration::from_secs_f32((seconds / 3.0).max(1.0)),
+            home: scene.lights[0].position,
+            last: None,
+            frames: Vec::new(),
+            visible: None,
+            lines: Vec::new(),
+        }))
+    }
+
+    /// Set the lamp for this frame and record the last frame's time. True when done.
+    fn step(&mut self, scene: &mut Scene, tier: genos_render::TierStats, now: Instant) -> bool {
+        let pending = tier.pending_bricks;
+        if let Some(last) = self.last {
+            self.frames.push((now - last).as_secs_f32() * 1000.0);
+        }
+        self.last = Some(now);
+        let elapsed = now - self.phase_start;
+        let next = match self.phase {
+            BenchPhase::Warmup => (elapsed >= BENCH_WARMUP).then_some(BenchPhase::Still),
+            BenchPhase::Still => (elapsed >= self.span).then_some(BenchPhase::Moving),
+            BenchPhase::Moving => (elapsed >= self.span).then_some(BenchPhase::Down),
+            BenchPhase::Down => (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::Up),
+            BenchPhase::Up => (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::Up),
+        };
+        // A drop or a rise counts from its first frame; its first frame always has work.
+        let settle = matches!(self.phase, BenchPhase::Down | BenchPhase::Up);
+        if settle && self.frames.len() > 1 && tier.changing_bricks == 0 && self.visible.is_none() {
+            self.visible = Some(elapsed);
+        }
+        let done = next.is_some() && (!settle || self.frames.len() > 1);
+        if done {
+            if self.phase != BenchPhase::Warmup {
+                self.finish(elapsed, pending);
+            }
+            if self.phase == BenchPhase::Up {
+                return true;
+            }
+            self.phase = next.unwrap_or(self.phase);
+            self.phase_start = now;
+            self.frames.clear();
+            self.visible = None;
+        }
+        let t = (now - self.phase_start).as_secs_f32();
+        let lamp = &mut scene.lights[0].position;
+        *lamp = match self.phase {
+            BenchPhase::Warmup | BenchPhase::Still | BenchPhase::Up => self.home,
+            // About one turn every six seconds, around the boxes.
+            BenchPhase::Moving => Vec3::new(1.0 + 2.5 * t.cos(), 2.5, -1.0 + 2.5 * t.sin()),
+            BenchPhase::Down => Vec3::new(0.8, 1.6, -1.6),
+        };
+        false
+    }
+
+    fn finish(&mut self, elapsed: Duration, pending: usize) {
+        let mut sorted = self.frames.clone();
+        sorted.sort_by(f32::total_cmp);
+        let n = sorted.len().max(1);
+        let mean = sorted.iter().sum::<f32>() / n as f32;
+        let at = |q: f32| sorted.get(((n as f32 * q) as usize).min(n - 1)).copied().unwrap_or(0.0);
+        let mut line = format!(
+            "BENCH {:?} frames={} seconds={:.2} fps={:.0} ms_mean={:.3} ms_p50={:.3} ms_p99={:.3} ms_max={:.3}",
+            self.phase,
+            sorted.len(),
+            elapsed.as_secs_f32(),
+            1000.0 / mean.max(1.0e-6),
+            mean,
+            at(0.5),
+            at(0.99),
+            sorted.last().copied().unwrap_or(0.0),
+        );
+        if matches!(self.phase, BenchPhase::Down | BenchPhase::Up) {
+            let visible = self.visible.map_or(-1.0, |v| v.as_secs_f32() * 1000.0);
+            line.push_str(&format!(
+                " visible_ms={visible:.0} settle_ms={:.0} settled={}",
+                elapsed.as_secs_f32() * 1000.0,
+                pending == 0
+            ));
+        }
+        eprintln!("{line}");
+        self.lines.push(line);
+    }
+
+    fn report(&self, width: u32, height: u32, antialias: Antialias) {
+        println!("BENCH size={width}x{height} antialias={antialias:?}");
+        for line in &self.lines {
+            println!("{line}");
+        }
+    }
 }
 
 fn copy_graph(view: &genos_ui::ProfileView, rects: &mut Vec<ScreenRect>) {
