@@ -419,13 +419,10 @@ void tier_bounce_at(vec3 pos, vec3 n, uint twice_far, uint tier_twice, vec2 u, o
     // the order-limited cube, the full light when feeding back.
     vec3 near_once = tint * hit.reflect * direct;
     vec3 near_twice = tint * hit.reflect * (direct + WORLD_IRR * tier_cube_face(tier_twice == TIER_CUBE2 ? f1 : f2, hit.normal));
-    // Expected over the cosine-distributed direction this is near_field's ratio form:
-    // the probes' answer loses the share of its light from the directions that meet a
-    // surface, and those directions bring that surface's light.
-    vec3 m1 = max(tier_cube_hemi(f1, n), vec3(1.0e-6));
-    vec3 m2 = max(tier_cube_hemi(f2, n), vec3(1.0e-6));
-    once += near_once - once * tier_cube_dir(f1, dir) / m1;
-    twice += near_twice - twice * tier_cube_dir(f2, dir) / m2;
+    // One cosine-distributed sample of near_field's difference: along a direction that
+    // meets a surface, that surface's light replaces what the probes see that way.
+    once += near_once - tier_cube_dir(f1, dir);
+    twice += near_twice - tier_cube_dir(f2, dir);
 }
 
 // Uniform random rotation from three uniform numbers (Shoemake's quaternion).

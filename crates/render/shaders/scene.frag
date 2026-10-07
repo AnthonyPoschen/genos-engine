@@ -227,9 +227,13 @@ vec3 direct_at(vec3 pos, vec3 normal, bool two_sided);
 // in that direction. Rays from the face up to one spacing find those surfaces. A ray
 // that meets one takes the light leaving it: the lamps there, plus all the bounced
 // light from the same probes (their cube turned to the face it met; that face is
-// within a spacing of the point, the probes' own resolution). The probes' answer loses the share of its light that
-// arrives from the directions those rays covered (judged by the probes' own six-face
-// cube along each ray). With nothing near, the answer is the probes' alone.
+// within a spacing of the point, the probes' own resolution). Each ray that meets a
+// surface swaps what the probes see along it (their six-face cube in that direction)
+// for that surface's light: the cosine-weighted estimate of the difference, added to
+// the probes' answer. A ratio of the cube along the hit rays to the cube over the
+// whole hemisphere took too little away beside a wall (the cube's side faces see the
+// lit floor too), so corners and wall feet came out brighter than a path trace. With
+// nothing near, the answer is the probes' alone.
 vec3 near_field(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], vec3 far) {
     uint rays = scene.view_grid.z > 0.5 ? uint(scene.view_grid.z + 0.5) - 1u : NEAR_RAYS;
     float reach = TIER_NEAR_REACH * tier_spacing();
@@ -251,7 +255,6 @@ vec3 near_field(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], vec
     float spin = (float(BAYER[cell.y * 4u + cell.x]) + 0.5) / (16.0 * float(rays));
     vec3 hit_light = vec3(0.0);
     vec3 share_hit = vec3(0.0);
-    vec3 share_all = vec3(0.0);
     for (uint k = 0u; k < rays; k++) {
         // Cosine-weighted spiral over the hemisphere.
         float u = (float(k) + 0.5) / float(rays);
@@ -259,7 +262,6 @@ vec3 near_field(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], vec
         float phi = TAU * (float(k) * 0.61803399 + spin);
         vec3 dir = tx * (r * cos(phi)) + ty * (r * sin(phi)) + n * sqrt(max(1.0 - u, 0.0));
         vec3 seen = tier_cube_dir(faces, dir);
-        share_all += seen;
         SceneHit hit;
         if (!scene_ray_masked(origin, dir, 1.0e-4, reach, mask, hit)) {
             continue;
@@ -273,8 +275,7 @@ vec3 near_field(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], vec
     if (all(lessThanEqual(share_hit, vec3(0.0))) && all(lessThanEqual(hit_light, vec3(0.0)))) {
         return far;
     }
-    vec3 share = clamp(share_hit / max(share_all, vec3(1.0e-6)), 0.0, 1.0);
-    return far * (1.0 - share) + hit_light / float(rays);
+    return max(far + (hit_light - share_hit) / float(rays), vec3(0.0));
 }
 
 // Bounce light at a face: the persistent tier inside its window, the coarse world

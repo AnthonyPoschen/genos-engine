@@ -256,11 +256,3 @@ float tier_cover(vec3 world, float fade) {
     return clamp(edge / fade, 0.0, 1.0);
 }
 
-// Cosine-weighted mean, over the hemisphere around `n`, of the radiance
-// tier_cube_dir gives: half the face along `n` and an eighth of each side face.
-vec3 tier_cube_hemi(vec3 faces[6], vec3 n) {
-    vec3 all6 = faces[0] + faces[1] + faces[2] + faces[3] + faces[4] + faces[5];
-    vec3 along = tier_cube_face(faces, n);
-    vec3 behind = tier_cube_face(faces, -n);
-    return 0.5 * along + 0.125 * (all6 - along - behind);
-}
