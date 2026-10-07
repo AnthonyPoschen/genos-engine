@@ -132,6 +132,10 @@ const float WORLD_SPACING = 2.5;
 const float NEAR_SPACING = 0.5;
 const uint WORLD_DIRS = 16u;
 const uint WORLD_BOUNCE_OFFSET = 348160u;
+const uint WORLD_CUBE_OFFSET = 458752u;
+// The world probes sit 2.5 m apart. A per-corner occluder test keeps a probe behind
+// a wall out of the blend.
+const bool WORLD_TAP_VISIBILITY = true;
 const uint WORLD_OFFSET = 184320u;
 const uint WORLD_IRR_OFFSET = 176128u;
 const uint PIN_POS0 = 98304u;
@@ -161,6 +165,7 @@ const float TAU = 6.2831853;
 
 bool probe_hidden(vec2 from, vec2 probe);
 bool blocked(vec3 origin, vec3 target);
+bool segment_blocked(vec3 origin, vec3 target);
 bool inside_solid(vec3 p);
 
 float ray_spin(vec2 p) {
@@ -566,15 +571,6 @@ void near_layout(out vec2 origin, out uint count_x, out uint count_z) {
     origin = center - vec2(float(count_x), float(count_z)) * NEAR_SPACING * 0.5;
 }
 
-vec3 world_sphere_dir(uint d, float spin) {
-    // Same fan as sphere_dir in light.comp.
-    float i = float(d) + 0.5;
-    float y = 1.0 - 2.0 * i / float(WORLD_DIRS);
-    float radius = sqrt(max(1.0 - y * y, 0.0));
-    float phi = i * 2.39996323 + spin * TAU / float(WORLD_DIRS);
-    return vec3(cos(phi) * radius, y, sin(phi) * radius);
-}
-
 // Cosine-weighted mean radiance over the hemisphere around face_n, the same quantity
 // the pinned cells store. The old sphere mean also counted the rays below a floor
 // point, which see the lit floor itself, so the far field read several times brighter
@@ -598,6 +594,8 @@ vec3 world_mean(vec3 pos, vec3 face_n) {
     uvec3 i0 = uvec3(uint(floor(fx)), uint(floor(fy)), uint(floor(fz)));
     uvec3 i1 = min(i0 + uvec3(1u), count - uvec3(1u));
     vec3 t = vec3(fx, fy, fz) - vec3(i0);
+    // One inside test per pixel, not one per corner.
+    bool pos_inside = WORLD_TAP_VISIBILITY && inside_solid(pos);
     vec3 sum = vec3(0.0);
     float weight = 0.0;
     for (uint corner = 0u; corner < 8u; corner++) {
@@ -612,33 +610,23 @@ vec3 world_mean(vec3 pos, vec3 face_n) {
         if (w <= 1.0e-5) {
             continue;
         }
-        vec3 probe = origin + vec3((float(ip.x) + 0.5) * WORLD_SPACING, float(ip.y) * 1.5, (float(ip.z) + 0.5) * WORLD_SPACING);
-        if (blocked(pos, probe)) {
-            continue;
-        }
         uint index = (ip.y * count.z + ip.z) * count.x + ip.x;
+        // A probe inside a solid holds nothing.
         if (field.texels[WORLD_IRR_OFFSET + index].a < 0.0) {
             continue;
         }
-        float spin = fract(sin(dot(probe, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
-        vec3 hemi = vec3(0.0);
-        float cos_sum = 0.0;
-        for (uint d = 0u; d < WORLD_DIRS; d++) {
-            float facing = dot(world_sphere_dir(d, spin), face_n);
-            if (facing <= 0.0) {
+        if (WORLD_TAP_VISIBILITY) {
+            vec3 probe = origin + vec3((float(ip.x) + 0.5) * WORLD_SPACING, float(ip.y) * 1.5, (float(ip.z) + 0.5) * WORLD_SPACING);
+            if (pos_inside || segment_blocked(pos, probe)) {
                 continue;
             }
-            // A miss leaves the scene and brings nothing back, but its cone still counts.
-            vec4 taken = field.texels[WORLD_BOUNCE_OFFSET + index * WORLD_DIRS + d];
-            if (taken.a >= 0.0) {
-                hemi += taken.rgb * facing;
-            }
-            cos_sum += facing;
         }
-        if (cos_sum <= 1.0e-4) {
-            continue;
-        }
-        sum += hemi / cos_sum * w;
+        uint cube = WORLD_CUBE_OFFSET + index * 6u;
+        vec3 nn = face_n * face_n;
+        vec3 hemi = nn.x * field.texels[cube + (face_n.x >= 0.0 ? 0u : 1u)].rgb
+            + nn.y * field.texels[cube + (face_n.y >= 0.0 ? 2u : 3u)].rgb
+            + nn.z * field.texels[cube + (face_n.z >= 0.0 ? 4u : 5u)].rgb;
+        sum += hemi * w;
         weight += w;
     }
     if (weight <= 1.0e-4) {
@@ -760,6 +748,32 @@ bool blocked(vec3 origin, vec3 target) {
     if (inside_solid(origin)) {
         return true;
     }
+    vec3 delta = target - origin;
+    float dist = length(delta);
+    if (dist < 1e-3) {
+        return false;
+    }
+    vec3 dir = delta / dist;
+    uint count = min(scene.occ_count, 16u);
+    for (uint i = 0u; i < count; i++) {
+        Occ occ = scene.occs[i];
+        float t;
+        if (occ.center_shape.w > 0.5) {
+            t = hit_cyl(origin, dir, occ.center_shape.xyz, occ.extent.w, 0.0, occ.extent.y);
+        } else {
+            vec3 half_e = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
+            vec3 center = vec3(occ.center_shape.x, occ.extent.y * 0.5, occ.center_shape.z);
+            t = hit_box(origin, dir, center - half_e, center + half_e);
+        }
+        if (t > 1e-4 && t < dist - 1e-4) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// blocked() without the inside test, for callers that test the origin once.
+bool segment_blocked(vec3 origin, vec3 target) {
     vec3 delta = target - origin;
     float dist = length(delta);
     if (dist < 1e-3) {

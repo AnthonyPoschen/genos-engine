@@ -87,6 +87,10 @@ const uint WORLD_OFFSET = 184320u;
 const uint WORLD_IRR_OFFSET = 176128u;
 const uint WORLD_STRIDE = 163840u;
 const uint WORLD_BOUNCE_OFFSET = 348160u;
+// Six cosine-weighted facings per world probe (+X, -X, +Y, -Y, +Z, -Z), after the
+// largest bounce block (48 x 3 x 48 probes x 16 directions).
+const uint WORLD_CUBE_OFFSET = 458752u;
+vec3 cube_axis(uint face);
 const uint SCREEN_NORM_BASE = 8192u;
 const uint SCREEN_DIR_BASE = 16384u;
 // Pinned hits for cascades 0 and 1. Cascade 2 stays on the screen grid.
@@ -1490,6 +1494,8 @@ void write_world(bool bounce) {
         mean /= float(WORLD_DIRS);
         field.texels[WORLD_IRR_OFFSET + world_probe_index(ip, count)] = vec4(mean, 1.0);
     }
+    vec3 cube[6] = vec3[6](vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
+    float cube_w[6] = float[6](0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     for (uint d = 0u; d < WORLD_DIRS; d++) {
         vec3 ray = sphere_dir(d, WORLD_DIRS, spin);
         TraceHit hit = trace_hit(pos, ray, 0.05, 8.0);
@@ -1497,6 +1503,21 @@ void write_world(bool bounce) {
             hit.iv.rgb += hit.tint * hit.reflect * WORLD_IRR * mean;
         }
         field.texels[dest + d] = hit.iv;
+        if (bounce) {
+            // A miss brings nothing back but its cone still counts.
+            for (uint f = 0u; f < 6u; f++) {
+                float facing = max(dot(ray, cube_axis(f)), 0.0);
+                cube[f] += (hit.iv.a >= 0.0 ? hit.iv.rgb : vec3(0.0)) * facing;
+                cube_w[f] += facing;
+            }
+        }
+    }
+    if (bounce) {
+        // The picture reads three of these per probe instead of all 16 directions.
+        uint cube_at = WORLD_CUBE_OFFSET + world_probe_index(ip, count) * 6u;
+        for (uint f = 0u; f < 6u; f++) {
+            field.texels[cube_at + f] = vec4(cube_w[f] > 1.0e-4 ? cube[f] / cube_w[f] : vec3(0.0), 1.0);
+        }
     }
 }
 
