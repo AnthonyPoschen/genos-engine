@@ -652,6 +652,11 @@ float lattice_weight(uint pin, uint pos_base, uint nrm_base, vec3 world, vec3 fa
         return 0.0;
     }
     float dist = length(stored.xyz - world);
+    // Most pins the cell walk finds sit outside the reach. Skip the
+    // occluder loop for them.
+    if (dist >= reach) {
+        return 0.0;
+    }
     // Lift off the face so a probe on this surface is not rejected as a hit
     // on its own volume. Floor pairs still use the ground-plane wall test.
     vec3 from = world + face_n * 0.05;
@@ -659,7 +664,7 @@ float lattice_weight(uint pin, uint pos_base, uint nrm_base, vec3 world, vec3 fa
     bool crosses = world.y < 0.05 && stored.y < 0.05
         ? probe_hidden(from.xz, to.xz)
         : blocked(from, to);
-    if (dist >= reach || crosses) {
+    if (crosses) {
         return 0.0;
     }
     return 1.0 - dist / reach;
@@ -727,30 +732,36 @@ float fade_out(float start, float end, float dist) {
 }
 
 vec3 screen_bounce(vec3 world, vec3 face_n) {
-    float dist = length(world - scene.eye.xyz);
-    vec3 fine = vec3(0.0);
-    vec3 mid = vec3(0.0);
-    bool has_fine = lattice_sample(
-        world, face_n, HASH_ORIGIN0, HASH_BASE0, HASH_DIM0, PIN_POS0, PIN_NRM0, 0u, 1.5, fine
-    );
-    bool has_mid = lattice_sample(
-        world, face_n, HASH_ORIGIN1, HASH_BASE1, HASH_DIM1, PIN_POS1, PIN_NRM1, PIN_IRR1, 2.0, mid
-    );
-    // Lift off the face. A point on the face can test as inside its own solid.
-    vec3 bounce = world_mean(world + face_n * 0.05, face_n);
     // The cells live in axis-aligned windows around the eye (pins.rs in_window): fine
     // pins within 8 m, the next level within 12 m. A round fade that ends past those
     // edges cuts off mid-blend and leaves a line that walks with the camera. Fade on
     // the same box metric and finish one lattice reach inside each window.
     vec3 rel = abs(world - scene.eye.xyz);
     float box = max(rel.x, max(rel.y, rel.z));
-    if (has_mid) {
-        bounce = mix(bounce, mid, 1.0 - fade_out(7.0, 10.0, box));
+    // Near to far. A level that is fully covered by a nearer one is not sampled.
+    vec3 fine = vec3(0.0);
+    float fine_w = 0.0;
+    if (box < 6.5 && lattice_sample(
+        world, face_n, HASH_ORIGIN0, HASH_BASE0, HASH_DIM0, PIN_POS0, PIN_NRM0, 0u, 1.5, fine
+    )) {
+        fine_w = 1.0 - fade_out(4.0, 6.5, box);
     }
-    if (has_fine) {
-        bounce = mix(bounce, fine, 1.0 - fade_out(4.0, 6.5, box));
+    if (fine_w >= 1.0) {
+        return fine;
     }
-    return bounce;
+    vec3 mid = vec3(0.0);
+    float mid_w = 0.0;
+    if (box < 10.0 && lattice_sample(
+        world, face_n, HASH_ORIGIN1, HASH_BASE1, HASH_DIM1, PIN_POS1, PIN_NRM1, PIN_IRR1, 2.0, mid
+    )) {
+        mid_w = 1.0 - fade_out(7.0, 10.0, box);
+    }
+    vec3 bounce = mid;
+    if (mid_w < 1.0) {
+        // Lift off the face. A point on the face can test as inside its own solid.
+        bounce = mix(world_mean(world + face_n * 0.05, face_n), mid, mid_w);
+    }
+    return mix(bounce, fine, fine_w);
 }
 
 vec3 merged_at(uint copy, vec3 world, vec3 face_n, bool uniform_disk) {
