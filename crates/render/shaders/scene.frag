@@ -130,7 +130,8 @@ const uint SCREEN_DIRS = 16u;
 const float SCREEN_REACH = 4.0;
 const float WORLD_SPACING = 2.5;
 const float NEAR_SPACING = 0.5;
-const uint WORLD_DIRS = 8u;
+const uint WORLD_DIRS = 16u;
+const uint WORLD_BOUNCE_OFFSET = 348160u;
 const uint WORLD_OFFSET = 184320u;
 const uint WORLD_IRR_OFFSET = 176128u;
 const uint PIN_POS0 = 98304u;
@@ -556,7 +557,20 @@ void near_layout(out vec2 origin, out uint count_x, out uint count_z) {
     origin = center - vec2(float(count_x), float(count_z)) * NEAR_SPACING * 0.5;
 }
 
-vec3 world_mean(vec3 pos) {
+vec3 world_sphere_dir(uint d, float spin) {
+    // Same fan as sphere_dir in light.comp.
+    float i = float(d) + 0.5;
+    float y = 1.0 - 2.0 * i / float(WORLD_DIRS);
+    float radius = sqrt(max(1.0 - y * y, 0.0));
+    float phi = i * 2.39996323 + spin * TAU / float(WORLD_DIRS);
+    return vec3(cos(phi) * radius, y, sin(phi) * radius);
+}
+
+// Cosine-weighted mean radiance over the hemisphere around face_n, the same quantity
+// the pinned cells store. The old sphere mean also counted the rays below a floor
+// point, which see the lit floor itself, so the far field read several times brighter
+// than the near cells and the hand-off showed as a band on the floor.
+vec3 world_mean(vec3 pos, vec3 face_n) {
     vec2 half_e = vec2(max(scene.floor_center.w, 0.5), max(scene.floor_data.x, 0.5));
     vec3 origin = vec3(
         scene.floor_center.x - half_e.x - WORLD_SPACING * 2.0,
@@ -594,11 +608,28 @@ vec3 world_mean(vec3 pos) {
             continue;
         }
         uint index = (ip.y * count.z + ip.z) * count.x + ip.x;
-        vec4 taken = field.texels[WORLD_IRR_OFFSET + index];
-        if (taken.a < 0.0) {
+        if (field.texels[WORLD_IRR_OFFSET + index].a < 0.0) {
             continue;
         }
-        sum += taken.rgb * w;
+        float spin = fract(sin(dot(probe, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+        vec3 hemi = vec3(0.0);
+        float cos_sum = 0.0;
+        for (uint d = 0u; d < WORLD_DIRS; d++) {
+            float facing = dot(world_sphere_dir(d, spin), face_n);
+            if (facing <= 0.0) {
+                continue;
+            }
+            // A miss leaves the scene and brings nothing back, but its cone still counts.
+            vec4 taken = field.texels[WORLD_BOUNCE_OFFSET + index * WORLD_DIRS + d];
+            if (taken.a >= 0.0) {
+                hemi += taken.rgb * facing;
+            }
+            cos_sum += facing;
+        }
+        if (cos_sum <= 1.0e-4) {
+            continue;
+        }
+        sum += hemi / cos_sum * w;
         weight += w;
     }
     if (weight <= 1.0e-4) {
@@ -706,7 +737,7 @@ vec3 screen_bounce(vec3 world, vec3 face_n) {
         world, face_n, HASH_ORIGIN1, HASH_BASE1, HASH_DIM1, PIN_POS1, PIN_NRM1, PIN_IRR1, 2.0, mid
     );
     // Lift off the face. A point on the face can test as inside its own solid.
-    vec3 bounce = world_mean(world + face_n * 0.05);
+    vec3 bounce = world_mean(world + face_n * 0.05, face_n);
     if (has_mid) {
         bounce = mix(bounce, mid, 1.0 - fade_out(10.0, 14.0, dist));
     }
