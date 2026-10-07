@@ -1195,6 +1195,53 @@ vec3 sample_world_mean(vec3 pos) {
     return sum / weight;
 }
 
+// Light arriving at a face, from the world probes' six-facing cubes (direct plus one
+// bounce, written by pass 9). The sphere mean counts the dark solid behind the face
+// as half of what the face sees, which roughly halved the light a side passes on.
+vec3 sample_world_cube(vec3 pos, vec3 n) {
+    vec3 origin;
+    uvec3 count;
+    world_layout3(origin, count);
+    vec3 local = pos - origin;
+    float fx = clamp(local.x / WORLD_SPACING - 0.5, 0.0, float(count.x - 1u));
+    float fy = clamp((pos.y - origin.y) / 1.5, 0.0, float(count.y - 1u));
+    float fz = clamp(local.z / WORLD_SPACING - 0.5, 0.0, float(count.z - 1u));
+    uvec3 i0 = uvec3(uint(floor(fx)), uint(floor(fy)), uint(floor(fz)));
+    uvec3 i1 = min(i0 + uvec3(1u), count - uvec3(1u));
+    vec3 t = vec3(fx, fy, fz) - vec3(i0);
+    vec3 n2 = n * n;
+    uvec3 face = uvec3(n.x >= 0.0 ? 0u : 1u, n.y >= 0.0 ? 2u : 3u, n.z >= 0.0 ? 4u : 5u);
+    vec3 sum = vec3(0.0);
+    float weight = 0.0;
+    for (uint corner = 0u; corner < 8u; corner++) {
+        uvec3 ip = uvec3(
+            (corner & 1u) == 0u ? i0.x : i1.x,
+            (corner & 2u) == 0u ? i0.y : i1.y,
+            (corner & 4u) == 0u ? i0.z : i1.z
+        );
+        float w = ((corner & 1u) == 0u ? 1.0 - t.x : t.x)
+            * ((corner & 2u) == 0u ? 1.0 - t.y : t.y)
+            * ((corner & 4u) == 0u ? 1.0 - t.z : t.z);
+        if (w <= 1.0e-5) {
+            continue;
+        }
+        vec3 probe = world_probe_pos(ip, origin);
+        if (point_in_volume(probe) || lamp_blocked(pos, probe)) {
+            continue;
+        }
+        uint at = WORLD_CUBE_OFFSET + world_probe_index(ip, count) * 6u;
+        vec3 c = field.texels[at + face.x].rgb * n2.x
+            + field.texels[at + face.y].rgb * n2.y
+            + field.texels[at + face.z].rgb * n2.z;
+        sum += c * w;
+        weight += w;
+    }
+    if (weight <= 1.0e-4) {
+        return vec3(0.0);
+    }
+    return sum / weight;
+}
+
 vec4 pinned_interval(vec3 world, vec3 face_n, vec3 ray) {
     vec4 info = field.texels[HASH_ORIGIN1];
     float spacing = info.w;
@@ -1529,7 +1576,7 @@ void write_pinned(uint cascade) {
         TraceHit hit = trace_hit(pos, ray, t0, t1);
         vec4 iv = hit.iv;
         if (iv.a >= 0.15) {
-            iv.rgb += hit.tint * hit.reflect * WORLD_IRR * sample_world_mean(hit.pos + hit.normal * 0.08);
+            iv.rgb += hit.tint * hit.reflect * WORLD_IRR * sample_world_cube(hit.pos + hit.normal * 0.08, hit.normal);
         }
         if (iv.a < -1.5 && cascade == 0u) {
             vec4 next = next_overflow
