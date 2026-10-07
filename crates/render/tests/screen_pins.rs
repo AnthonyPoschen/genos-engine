@@ -262,15 +262,13 @@ fn floor_pins_behind_a_wall_stay_on_the_floor() {
     update_screen_pins(&mut pins, &scene, &east);
     assert!(pins.layers[0].len() as u32 <= PROBE_CAP0);
     for old in &floor_before {
-        let away = {
-            let d = [
-                old[0] - east.eye[0],
-                old[1] - east.eye[1],
-                old[2] - east.eye[2],
-            ];
-            (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
-        };
-        if away > 14.0 {
+        // Fine cells are dropped at their 8 m creation box (pins.rs FINE_REACH):
+        // past it the fine hash cannot reach them.
+        let away = (old[0] - east.eye[0])
+            .abs()
+            .max((old[1] - east.eye[1]).abs())
+            .max((old[2] - east.eye[2]).abs());
+        if away > 8.0 {
             continue;
         }
         assert!(
