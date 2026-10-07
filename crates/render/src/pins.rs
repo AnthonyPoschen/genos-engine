@@ -443,7 +443,10 @@ fn update_lattice(
     with_objects: bool,
 ) {
     let hits = lattice_hits(scene, eye, spacing, reach);
-    pins.retain(|pin| pin.object || in_window(pin.position, eye, DROP));
+    // Drop at the creation window. A fine pin kept past FINE_REACH sits outside the
+    // fine hash: it is traced every build but no pixel can find it. A next-level pin
+    // kept to 14 m made coverage depend on the path the camera took.
+    pins.retain(|pin| pin.object || in_window(pin.position, eye, reach));
     if with_objects {
         pins.retain(|pin| !pin.object);
     }

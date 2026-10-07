@@ -738,11 +738,17 @@ vec3 screen_bounce(vec3 world, vec3 face_n) {
     );
     // Lift off the face. A point on the face can test as inside its own solid.
     vec3 bounce = world_mean(world + face_n * 0.05, face_n);
+    // The cells live in axis-aligned windows around the eye (pins.rs in_window): fine
+    // pins within 8 m, the next level within 12 m. A round fade that ends past those
+    // edges cuts off mid-blend and leaves a line that walks with the camera. Fade on
+    // the same box metric and finish one lattice reach inside each window.
+    vec3 rel = abs(world - scene.eye.xyz);
+    float box = max(rel.x, max(rel.y, rel.z));
     if (has_mid) {
-        bounce = mix(bounce, mid, 1.0 - fade_out(10.0, 14.0, dist));
+        bounce = mix(bounce, mid, 1.0 - fade_out(7.0, 10.0, box));
     }
     if (has_fine) {
-        bounce = mix(bounce, fine, 1.0 - fade_out(6.0, 12.0, dist));
+        bounce = mix(bounce, fine, 1.0 - fade_out(4.0, 6.5, box));
     }
     return bounce;
 }
