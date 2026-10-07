@@ -15,8 +15,7 @@ use crate::world::{
     transform_pose, DrawKind, FixedPart, ParticleFrame, ParticleImage, ShaderSpace, World,
 };
 
-pub const MAX_LAMPS: usize = 4;
-pub const MAX_OCCLUDERS: usize = 16;
+pub use genos_scene::{MAX_LAMPS, MAX_OCCLUDERS};
 pub const MAX_OBJECTS: usize = 32;
 pub const FIELD_GRID: u32 = 128;
 /// The gather keeps one field until the player or a lamp moves this far, in meters.

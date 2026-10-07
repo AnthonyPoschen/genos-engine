@@ -3,6 +3,10 @@ use genos_math::Vec3;
 /// Diffuse reflectance used when a material does not set one.
 /// This is `1 / π`. A white surface returns that share of the irradiance.
 pub const DEFAULT_REFLECTANCE: f32 = std::f32::consts::FRAC_1_PI;
+/// Lamps and suns the renderer lights a frame with.
+pub const MAX_LAMPS: usize = 4;
+/// Walls and solids the renderer traces light against.
+pub const MAX_OCCLUDERS: usize = 16;
 
 /// Resolve a material reflectance. A negative value selects the game default.
 pub fn reflectance_of(value: f32) -> f32 {

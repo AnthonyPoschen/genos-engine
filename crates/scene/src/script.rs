@@ -6,7 +6,7 @@ use rhai::{Dynamic, Engine};
 
 use genos_math::Vec3;
 
-use crate::types::{Ceiling, Floor, Light, Scene, Shape, Solid, Wall};
+use crate::types::{Ceiling, Floor, Light, Scene, Shape, Solid, Wall, MAX_LAMPS, MAX_OCCLUDERS};
 
 /// Load the shipped scene file through the Rhai host.
 pub fn load_path(path: &Path) -> Result<Scene, String> {
@@ -194,6 +194,22 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
     }
     if built.lights.is_empty() {
         return Err("script placed no light".into());
+    }
+    // The renderer has room for this many. Past it a lamp or an occluder would
+    // silently drop out of the light.
+    if built.lights.len() > MAX_LAMPS {
+        return Err(format!(
+            "script placed {} lights (lamps and suns); the renderer lights at most {MAX_LAMPS}",
+            built.lights.len()
+        ));
+    }
+    let occluders = built.walls.len() + built.solids.len();
+    if occluders > MAX_OCCLUDERS {
+        return Err(format!(
+            "script placed {occluders} walls and solids ({} walls, {} solids); the renderer traces light against at most {MAX_OCCLUDERS}",
+            built.walls.len(),
+            built.solids.len()
+        ));
     }
     if let Some(ceiling) = &built.ceiling {
         let top = built.walls.iter().map(|wall| wall.height).fold(0.0_f32, f32::max);
