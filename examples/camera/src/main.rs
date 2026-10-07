@@ -122,6 +122,7 @@ fn run() -> Result<(), String> {
     let mut lamp = None;
     let mut profile_arg = None;
     let mut scene_name = String::from("scene.rhai");
+    let mut size = (1280u32, 720u32);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -164,6 +165,14 @@ fn run() -> Result<(), String> {
             "--scene" => {
                 scene_name = args.next().ok_or("missing scene file")?;
             }
+            "--size" => {
+                let text = args.next().ok_or("missing size")?;
+                let (w, h) = text.split_once('x').ok_or(format!("bad size {text}, want WxH"))?;
+                size = (
+                    w.parse::<u32>().map_err(|err| err.to_string())?,
+                    h.parse::<u32>().map_err(|err| err.to_string())?,
+                );
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -201,9 +210,9 @@ fn run() -> Result<(), String> {
     let mut scene_revision = host.scene_revision();
     let mut fire = SHOW_PARTICLES.then(|| Simulation::from_scene(&world.scene));
     let mut window = if proof {
-        Window::open_proof(1280, 720)?
+        Window::open_proof(size.0, size.1)?
     } else {
-        Window::open(1280, 720)?
+        Window::open(size.0, size.1)?
     };
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;

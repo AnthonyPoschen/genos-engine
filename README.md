@@ -10,7 +10,7 @@ The hosting product stays in the `genos` repository.
 
 `make stress` opens the lighting stress building: a 25 m section with windows, skylights, wide doorways, still and moving lamps, a sun on a two-minute day, and sliding, spinning boxes. The panel switches the lamp count, the moving share, the scale and the sun live. `make stress-big` opens 16 sections with 100 lamps. `make stress-bench` sweeps lamp count × moving share × scale and prints tables. `genos-stress --help` lists every option. See `examples/stress/README.md`.
 
-Checks use `genos-camera --proof`. That window stays floating and does not take focus.
+Checks use `genos-camera --proof`. That window stays floating and does not take focus. `--size WxH` sets the window size (1280x720 by default).
 
 ## Plan
 
