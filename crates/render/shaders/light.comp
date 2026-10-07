@@ -1694,8 +1694,11 @@ void write_volume(uint level) {
     uint iz = (cell / across) % across;
     uint iy = cell / (across * across);
     vec3 center = vec3(hinfo.x, 0.0, hinfo.z) + (vec3(float(ix), float(iy), float(iz)) + 0.5) * spacing;
-    // A cell inside a wall or solid holds nothing. The picture skips it.
-    if (point_in_volume(center)) {
+    // A cell inside a wall or solid holds nothing. The picture skips it. A center on a
+    // side (the 0.5 m grid lines up with many faces) is half outside: it keeps the
+    // contact probes beside that side.
+    if (point_in_volume(center + vec3(0.02, 0.0, 0.0)) && point_in_volume(center - vec3(0.02, 0.0, 0.0))
+        && point_in_volume(center + vec3(0.0, 0.0, 0.02)) && point_in_volume(center - vec3(0.0, 0.0, 0.02))) {
         return;
     }
     uint dim = level == 0u ? HASH_DIM0 : HASH_DIM1;

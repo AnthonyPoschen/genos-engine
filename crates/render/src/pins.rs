@@ -504,10 +504,11 @@ fn update_lattice(
             continue;
         }
         let index = pins.len();
+        let (position, hidden) = contact_place(scene, hit, spacing);
         pins.push(ScreenPin {
-            position: hit.position,
+            position,
             normal: hit.normal,
-            hidden: covered_by_solid(scene, hit),
+            hidden,
             object: false,
         });
         taken.entry(key).or_default().push(index);
@@ -526,6 +527,58 @@ fn update_lattice(
         }
     }
     trim_to_cap(pins, cap, eye);
+}
+
+/// Gap between a solid's side and a floor probe moved out from under it. The
+/// gather gives a hit closer than 0.15 m no bounce, so the side must be farther.
+const CONTACT_GAP: f32 = 0.16;
+
+/// A floor cell whose center sits under a solid would leave the band beside that solid
+/// without a probe. Move the probe just outside the nearest side when that point is
+/// still in the same cell and on open floor. Otherwise it stays parked and hidden.
+fn contact_place(scene: &Scene, hit: &ScreenPin, spacing: f32) -> ([f32; 3], bool) {
+    if !covered_by_solid(scene, hit) {
+        return (hit.position, false);
+    }
+    let Some(solid) = scene
+        .solids
+        .iter()
+        .find(|solid| solid.height > 0.05 && solid.contains_xz(hit.position[0], hit.position[2]))
+    else {
+        return (hit.position, true);
+    };
+    let half = solid.size * 0.5;
+    let dx = hit.position[0] - solid.position.x;
+    let dz = hit.position[2] - solid.position.z;
+    let (x, z) = match solid.shape {
+        Shape::Square => {
+            if half - dx.abs() <= half - dz.abs() {
+                (solid.position.x + dx.signum() * (half + CONTACT_GAP), hit.position[2])
+            } else {
+                (hit.position[0], solid.position.z + dz.signum() * (half + CONTACT_GAP))
+            }
+        }
+        Shape::Circle => {
+            let len = (dx * dx + dz * dz).sqrt();
+            if len < 1.0e-4 {
+                return (hit.position, true);
+            }
+            let reach = half + CONTACT_GAP;
+            (solid.position.x + dx / len * reach, solid.position.z + dz / len * reach)
+        }
+    };
+    let moved = [x, hit.position[1], z];
+    let probe = ScreenPin { position: moved, ..*hit };
+    let floor = &scene.floor;
+    let on_floor = (x - floor.position.x).abs() <= floor.half_x + 0.05
+        && (z - floor.position.z).abs() <= floor.half_z + 0.05;
+    if cell_key(moved, spacing) != cell_key(hit.position, spacing)
+        || !on_floor
+        || covered_by_solid(scene, &probe)
+    {
+        return (hit.position, true);
+    }
+    (moved, false)
 }
 
 fn cell_key(position: [f32; 3], spacing: f32) -> [i32; 3] {
