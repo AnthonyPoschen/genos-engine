@@ -23,15 +23,12 @@ pub struct CascadeLevel {
 pub(crate) const TARGET_SPACING: f32 = 0.28;
 /// Directions in the near cascade. Each coarser cascade doubles this count.
 pub(crate) const FINE_DIRS: u32 = 16;
-/// Texels reserved for one bounce inside the field buffer. The other bounce uses the next copy.
+/// Texels in the GPU field buffer (and the CPU cascade budget).
 pub(crate) const FIELD_COPY: u32 = 524288;
 /// Bounces after the direct pass. The picture runs the same count.
 pub(crate) const BOUNCES: u32 = 4;
 /// Coarse world-probe spacing. These probes update behind the screen field.
 pub(crate) const WORLD_SPACING: f32 = 2.5;
-/// Directions in the screen field. The pixel averages these.
-#[allow(dead_code)]
-pub(crate) const SCREEN_DIRS: u32 = 16;
 /// One screen probe covers this many pixels.
 pub(crate) const SCREEN_TILE: u32 = 8;
 /// Caps so a screen cascade stays inside the field buffer.

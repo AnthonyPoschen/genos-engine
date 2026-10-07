@@ -2327,7 +2327,7 @@ impl Gpu {
         let share = self.light_families();
         self.instances = self.make_buffer_queues(5120, 0x20, true, &share)?;
         self.particle_buf = self.make_buffer_queues(16 + 256 * 256 * 4, 0x20, true, &share)?;
-        let field_bytes = vec![0u8; 2 * crate::field::FIELD_COPY as usize * 16];
+        let field_bytes = vec![0u8; crate::field::FIELD_COPY as usize * 16];
         for index in 0..2 {
             self.light_scene[index] = self.make_buffer_queues(4096, 0x20, true, &share)?;
             self.light_field[index] =
@@ -3267,43 +3267,6 @@ impl Gpu {
         Ok(())
     }
 
-    /// A lamp or occluder change restarts the world cache. The screen field does not wait for it.
-    #[allow(dead_code)]
-    fn mark_world_dirty(&mut self) {
-        self.world_pending = self.world_bands.max(1);
-        self.world_row = 0;
-    }
-
-    /// One world band into the cache the picture reads. The screen field stays.
-    #[allow(dead_code)]
-    fn kick_world(&mut self, wait: bool) -> Result<(), String> {
-        if self.world_pending == 0 {
-            return Ok(());
-        }
-        self.poll_light()?;
-        if self.publish_blocks() && !wait {
-            return Ok(());
-        }
-        if self.light_busy || self.light_building {
-            if !wait {
-                return Ok(());
-            }
-            self.wait_light()?;
-        }
-        if wait && self.publish_blocks() {
-            self.drain_publish()?;
-        }
-        if self.world_pending == 0 {
-            return Ok(());
-        }
-        self.light_dst = 1 - self.light_shown;
-        self.submit_hybrid(false, false)?;
-        if wait {
-            self.wait_light()?;
-        }
-        Ok(())
-    }
-
     fn light_dst_free(&self) -> bool {
         let dst = 1 - self.light_shown;
         (0..2).all(|slot| self.flight_light[slot] != dst || !self.fence_pending(slot))
@@ -3463,82 +3426,6 @@ impl Gpu {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    fn submit_hybrid(&mut self, all_world: bool, screen: bool) -> Result<(), String> {
-        self.swap_on_done = screen;
-        let dst = self.light_dst;
-        let fences = [self.light_fence];
-        unsafe {
-            check(
-                (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
-                "reset light fence",
-            )?;
-            check((self.fns.reset_cmd)(self.light_cmd, 0), "reset light cmd")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inherit: *const c_void,
-            }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 1,
-                inherit: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(self.light_cmd, &begin as *const BeginInfo as *const u8),
-                "begin light",
-            )?;
-        }
-        self.record_hybrid(self.light_cmd, dst, all_world, screen)?;
-        unsafe {
-            check((self.fns.end_cmd)(self.light_cmd), "end light")?;
-            #[repr(C)]
-            struct Submit {
-                s_type: i32,
-                next: *const c_void,
-                wait_count: u32,
-                waits: *const Handle,
-                stages: *const u32,
-                cmd_count: u32,
-                cmds: *const Handle,
-                signal_count: u32,
-                signals: *const Handle,
-            }
-            let cmd = [self.light_cmd];
-            let wait_sem = [self.light_sem];
-            let signal_sem = [self.light_sem];
-            let wait_stage = 0x800u32;
-            let submit = Submit {
-                s_type: 4,
-                next: std::ptr::null(),
-                wait_count: u32::from(self.light_sem_hot),
-                waits: wait_sem.as_ptr(),
-                stages: &wait_stage,
-                cmd_count: 1,
-                cmds: cmd.as_ptr(),
-                signal_count: 1,
-                signals: signal_sem.as_ptr(),
-            };
-            self.light_sem_hot = true;
-            check(
-                (self.fns.queue_submit)(
-                    self.compute_queue,
-                    1,
-                    &submit as *const Submit as *const u8,
-                    self.light_fence,
-                ),
-                "light submit",
-            )?;
-        }
-        self.light_row = 0;
-        self.light_pass = LIGHT_SLICES;
-        self.light_busy = true;
-        Ok(())
-    }
-
     fn make_light_queue(&mut self) -> Result<(), String> {
         #[repr(C)]
         struct PoolInfo {
@@ -3648,31 +3535,6 @@ impl Gpu {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped as *mut u8, bytes.len());
             (self.fns.unmap_mem)(self.device, buffer.memory);
         }
-        Ok(())
-    }
-
-    /// World bands, then the screen field when `screen` is set.
-    /// A readback fills every world band. An interactive frame writes one band while the cache is dirty.
-    #[allow(dead_code)]
-    fn record_hybrid(
-        &mut self,
-        cmd: Handle,
-        dst: usize,
-        all_world: bool,
-        screen: bool,
-    ) -> Result<(), String> {
-        let _ = (all_world, self.world_cols, self.world_row);
-        if !screen {
-            return Ok(());
-        }
-        // Two bounces, farthest cascade first. The second bounce lands on the copy the pixel reads.
-        for pass in 0..6u32 {
-            let cascade = 2 - (pass % 3) as usize;
-            let groups_x = self.light_cols[cascade].max(1);
-            let groups_y = self.light_rows[cascade].max(1);
-            self.dispatch_light_slice(cmd, self.light_sets[dst], pass, 0, groups_y, groups_x)?;
-        }
-        self.world_pending = 0;
         Ok(())
     }
 

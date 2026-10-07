@@ -676,23 +676,12 @@ mod tests {
         let comp = include_str!("../shaders/light.comp");
         for source in [frag, comp] {
             assert!(
-                source.contains("const uint FIELD_COPY = 524288u;"),
-                "shader field copy left the Rust field"
-            );
-            assert!(
                 source.contains("const float LAMBERT = 0.318309886;"),
                 "shader reflectance left the Rust field"
             );
             assert!(
                 source.contains("const float LAMP_UNIT = 72.0;"),
                 "shader lamp unit left the Rust field"
-            );
-            assert!(
-                source.contains(&format!(
-                    "const uint SCREEN_DIRS = {}u;",
-                    crate::field::SCREEN_DIRS
-                )),
-                "shader screen directions left the Rust field"
             );
             assert!(
                 source.contains("vec4 view_grid;"),
@@ -702,53 +691,34 @@ mod tests {
                 source.contains("Cascade cascades[3];"),
                 "shader cascade table left the scene block"
             );
+        }
+        // The picture reads the baked volumes. The light pass also owns the pin lattice.
+        for (name, value) in [
+            ("VOL0_INFO", crate::pins::VOL0_INFO),
+            ("VOL0_BASE", crate::pins::VOL0_BASE),
+            ("VOL1_INFO", crate::pins::VOL1_INFO),
+            ("VOL1_BASE", crate::pins::VOL1_BASE),
+        ] {
+            for source in [frag, comp] {
+                assert!(
+                    source.contains(&format!("const uint {name} = {value}u;")),
+                    "shader {name} left the Rust field"
+                );
+            }
+        }
+        for (name, value) in [
+            ("PIN_POS0", crate::pins::PIN_POS0),
+            ("PIN_NRM0", crate::pins::PIN_NRM0),
+            ("HASH_BASE0", crate::pins::HASH_BASE0),
+            ("HASH_BASE1", crate::pins::HASH_BASE1),
+            ("HASH_DIM1", crate::pins::HASH_DIM1),
+            ("PIN_IRR1", crate::pins::PIN_IRR1),
+        ] {
             assert!(
-                source.contains(&format!(
-                    "const uint PIN_POS0 = {}u;",
-                    crate::pins::PIN_POS0
-                )),
-                "shader pin positions left the Rust field"
-            );
-            assert!(
-                source.contains(&format!(
-                    "const uint HASH_BASE0 = {}u;",
-                    crate::pins::HASH_BASE0
-                )),
-                "shader lattice hash left the Rust field"
-            );
-            assert!(
-                source.contains(&format!(
-                    "const uint HASH_BASE1 = {}u;",
-                    crate::pins::HASH_BASE1
-                )),
-                "shader lattice hash left the Rust field"
-            );
-            assert!(
-                source.contains(&format!(
-                    "const uint PIN_NRM0 = {}u;",
-                    crate::pins::PIN_NRM0
-                )),
-                "shader pin normals left the Rust field"
-            );
-            assert!(
-                source.contains(&format!(
-                    "const uint HASH_DIM1 = {}u;",
-                    crate::pins::HASH_DIM1
-                )),
-                "shader cascade 1 hash left the Rust field"
-            );
-            assert!(
-                source.contains(&format!(
-                    "const uint PIN_IRR1 = {}u;",
-                    crate::pins::PIN_IRR1
-                )),
-                "shader cascade 1 irradiance left the Rust field"
+                comp.contains(&format!("const uint {name} = {value}u;")),
+                "light pass {name} left the Rust field"
             );
         }
-        assert!(
-            comp.contains("const float SCREEN_REACH = 4.0;"),
-            "screen interval left the gather"
-        );
     }
 
     #[test]
