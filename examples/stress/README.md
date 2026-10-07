@@ -91,13 +91,19 @@ the same frames on any machine. Interactive runs use the wall clock.
 
 `--bench SECONDS` sweeps `--sweep-lights` (default 5,25,50,100) × `--sweep-dynamic`
 (default 0,25,100) × `--sweep-scales` (default small,big) from the hall viewpoint with
-the sun running, in the `--layout` given. Each configuration rewinds the clocks, draws `--warmup` frames
+the sun running. A bench lays the lamps out `first` unless `--layout` says otherwise, so
+the camera sees the same lamps at every scale and a scale delta is the cost of size. It
+opens the proof window (it floats and takes no focus, so the compositor keeps its size)
+at 2560x1440 unless `--size` says otherwise, follows any resize, and reports the size
+each run drew at. Each configuration rewinds the clocks, draws `--warmup` frames
 (default 30), then measures for SECONDS. It prints Markdown tables (and writes them
 to `--bench-out`):
 
+- point lamps whose range reaches into the view (the lamps the pixel loops can meet);
 - frame time (wall clock per frame) and its p95;
 - draw-call CPU time;
-- raster GPU time (Vulkan timestamps around the draw);
+- raster GPU time (Vulkan timestamps around the draw; the light builds run on their own
+  queue at the same time, so this span includes GPU time the two share);
 - light build GPU time per frame and builds per second (`Renderer::take_light_builds`);
 - the same split into the passes copy, world direct, world bounce and tier;
 - the cost of one static and one dynamic lamp: the slope between the fewest and the

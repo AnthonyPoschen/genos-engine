@@ -32,7 +32,8 @@ const USAGE: &str = "genos-stress [options]
   --lights N                lamps in the whole building (panel: 5/25/50/100)
   --dynamic PCT             share of lamps that move, 0-100 (panel: 0/25/50/75/100)
   --layout spread|first     lamps spread over every section, or all in section 0
-                            where the benchmark camera stands (default spread)
+                            where the benchmark camera stands (default spread;
+                            first for --bench, so every scale sees the same lamps)
   --power X                 lamp total multiplier (default 1)
   --day-seconds S           seconds per day/night cycle (default 120)
   --time F                  start time as a fraction of a day: 0 sunrise, 0.25 noon,
@@ -44,8 +45,9 @@ const USAGE: &str = "genos-stress [options]
   --seed N                  lamp and box layout seed (default 1)
   --view hall|roomA         start (and benchmark) viewpoint (default hall)
   --eye X Y Z YAW PITCH     start the camera here instead of --view (free look)
-  --size WxH                window size (default 1280x720)
-  --proof                   open the headless proof window
+  --size WxH                window size (default 1280x720; 2560x1440 for --bench)
+  --proof                   open the proof window (floats, takes no focus; --bench
+                            always uses it, so the compositor keeps its size)
   --frames N                quit after N frames; frames step 1/60 s of scene time
   --shot PATH               settle the light on the last frame and write a PNG
   --no-panel                hide the panel
@@ -144,6 +146,8 @@ fn options() -> Result<Options, String> {
         bench_out: None,
     };
     let mut seconds = None;
+    let mut size_set = false;
+    let mut layout_set = std::env::var("GENOS_STRESS_LAYOUT").is_ok();
     let mut warmup = 30;
     let mut sweep_lights = LIGHT_STEPS.to_vec();
     let mut sweep_dynamic = vec![0, 25, 100];
@@ -158,6 +162,7 @@ fn options() -> Result<Options, String> {
             "--layout" => {
                 let text = value()?;
                 opts.layout = Layout::parse(&text).ok_or(format!("unknown layout {text}"))?;
+                layout_set = true;
             }
             "--power" => opts.power = parse(&arg, &value()?)?,
             "--day-seconds" => opts.day_seconds = parse(&arg, &value()?)?,
@@ -182,6 +187,7 @@ fn options() -> Result<Options, String> {
                 let text = value()?;
                 let (w, h) = text.split_once('x').ok_or(format!("bad size {text}"))?;
                 opts.size = (parse(&arg, w)?, parse(&arg, h)?);
+                size_set = true;
             }
             "--proof" => opts.proof = true,
             "--frames" => opts.frames = Some(parse(&arg, &value()?)?),
@@ -207,6 +213,15 @@ fn options() -> Result<Options, String> {
     }
     opts.dynamic = opts.dynamic.min(100);
     if let Some(seconds) = seconds {
+        // A benchmark draws at a fixed size in a window the compositor does not tile,
+        // and with the same lamps near the camera at every scale.
+        opts.proof = true;
+        if !size_set {
+            opts.size = (2560, 1440);
+        }
+        if !layout_set {
+            opts.layout = Layout::First;
+        }
         opts.bench = Some(bench::Plan {
             seconds,
             warmup_frames: warmup,
@@ -215,6 +230,7 @@ fn options() -> Result<Options, String> {
             scales: sweep_scales,
             day: opts.time,
             layout: opts.layout,
+            size: opts.size,
         });
     }
     Ok(opts)

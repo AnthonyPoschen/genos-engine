@@ -4,9 +4,9 @@
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use genos_render::{LightBuildTimes, Renderer, TierStats};
-use genos_scene::Camera;
-use genos_window::Window;
+use genos_render::{in_view, lamp_range, Bounds, LightBuildTimes, Renderer, TierStats};
+use genos_scene::{view_proj, Camera};
+use genos_window::{extent_changed, Window};
 
 use crate::building::{Layout, LightMix};
 use crate::stage::{Scale, Stage};
@@ -26,13 +26,21 @@ pub struct Plan {
     pub scales: Vec<Scale>,
     pub day: f32,
     pub layout: Layout,
+    /// The window size asked for. The compositor can give another; the report gives
+    /// the size each run drew at.
+    pub size: (u32, u32),
 }
 
 struct Run {
     scale: Scale,
     mix: LightMix,
     lamps: usize,
+    /// Point lamps whose range reaches into the view frustum: the lamps the pixels'
+    /// lamp loops can meet.
+    view_lamps: usize,
     occluders: usize,
+    /// Picture size the run drew at.
+    size: (u32, u32),
     frames: usize,
     seconds: f64,
     frame_ms: Vec<f64>,
@@ -109,10 +117,13 @@ pub fn run(
                 stage.rewind(plan.day);
                 let run = run_one(renderer, window, stage, camera, plan, &mut profiled)?;
                 eprintln!(
-                    "bench {:>5} lights={:>3} dynamic={:>3}% frames={:>4} frame={:.2} ms p95={:.2} raster gpu={:.2} ms light gpu={:.2} ms/frame builds/s={:.1}",
+                    "bench {:>5} lights={:>3} in view={:>3} dynamic={:>3}% {}x{} frames={:>4} frame={:.2} ms p95={:.2} raster gpu={:.2} ms light gpu={:.2} ms/frame builds/s={:.1}",
                     scale.label(),
                     run.lamps,
+                    run.view_lamps,
                     dynamic_pct,
+                    run.size.0,
+                    run.size.1,
                     run.frames,
                     run.frame_mean(),
                     run.frame_p95(),
@@ -124,13 +135,30 @@ pub fn run(
             }
         }
     }
-    Ok(report(
-        plan,
-        &runs,
-        renderer.width(),
-        renderer.height(),
-        profiled,
-    ))
+    Ok(report(plan, &runs, profiled))
+}
+
+/// Point lamps whose range box meets the camera frustum.
+fn lamps_in_view(stage: &Stage, camera: &Camera, aspect: f32) -> usize {
+    let matrix = view_proj(camera, aspect);
+    stage
+        .world
+        .scene
+        .lights
+        .iter()
+        .filter(|light| light.direction == genos_scene::Vec3::ZERO)
+        .filter(|light| {
+            let p = light.position;
+            let r = lamp_range(light.color);
+            in_view(
+                &matrix,
+                Bounds {
+                    center: [p.x, p.y, p.z],
+                    half: [r, r, r],
+                },
+            )
+        })
+        .count()
 }
 
 fn run_one(
@@ -149,6 +177,10 @@ fn run_one(
         let pumped = window.pump();
         if pumped.closing {
             return Err("window closed during the benchmark".into());
+        }
+        // Draw at the size the compositor gave, not the size the window opened at.
+        if extent_changed(renderer.width(), renderer.height(), pumped.width, pumped.height) {
+            renderer.resize(pumped.width, pumped.height)?;
         }
         stage.advance(STEP);
         if *profiled {
@@ -175,6 +207,8 @@ fn run_one(
         renderer.finish_gpu_times()?;
     }
     renderer.take_light_builds();
+    let size = (renderer.width(), renderer.height());
+    let mut view_lamps = 0usize;
     let mut frame_ms = Vec::new();
     let mut cpu_ms = Vec::new();
     let mut gpu_ms = Vec::new();
@@ -183,6 +217,7 @@ fn run_one(
     let mut last = start;
     while start.elapsed().as_secs_f32() < plan.seconds || frame_ms.is_empty() {
         let (cpu, gpu) = frame(renderer, stage, profiled)?;
+        view_lamps += lamps_in_view(stage, camera, size.0 as f32 / size.1.max(1) as f32);
         cpu_ms.push(cpu);
         gpu_ms.extend(gpu);
         if *profiled {
@@ -212,7 +247,9 @@ fn run_one(
         scale: stage.scale,
         mix: stage.mix,
         lamps: stage.lamp_count(),
+        view_lamps: (view_lamps as f64 / frame_ms.len().max(1) as f64).round() as usize,
         occluders: stage.occluders(),
+        size,
         frames: frame_ms.len(),
         seconds,
         frame_ms,
@@ -277,12 +314,24 @@ fn table(out: &mut String, title: &str, plan: &Plan, runs: &[Run], metric: &dyn 
     }
 }
 
-fn report(plan: &Plan, runs: &[Run], width: u32, height: u32, profiled: bool) -> String {
+fn report(plan: &Plan, runs: &[Run], profiled: bool) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "## genos-stress benchmark\n");
+    let mut sizes: Vec<(u32, u32)> = runs.iter().map(|r| r.size).collect();
+    sizes.dedup();
+    let size = sizes
+        .iter()
+        .map(|(w, h)| format!("{w}x{h}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let asked = if sizes == [plan.size] {
+        String::new()
+    } else {
+        format!(" (asked {}x{}; the compositor gave the size above)", plan.size.0, plan.size.1)
+    };
     let _ = writeln!(
         out,
-        "{width}x{height}, {} s per configuration after {} warm-up frames, scene step {:.4} s per frame, sun starting at day {:.3}, lamp layout `{}`.",
+        "{size}{asked}, {} s per configuration after {} warm-up frames, scene step {:.4} s per frame, sun starting at day {:.3}, lamp layout `{}`.",
         plan.seconds,
         plan.warmup_frames,
         STEP,
@@ -306,6 +355,19 @@ fn report(plan: &Plan, runs: &[Run], width: u32, height: u32, profiled: bool) ->
             );
         }
     }
+    if plan.layout == Layout::Spread && plan.scales.len() > 1 {
+        let _ = writeln!(
+            out,
+            "\nLayout `spread` puts fewer lamps near the camera at a bigger scale, so a scale delta mixes size with lamp density; see the lamps in view, or use `--layout first`."
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\nThe light builds run on their own queue beside the picture, so the raster GPU span includes time the two share."
+    );
+    table(&mut out, "Point lamps whose range reaches the view", plan, runs, &|r| {
+        r.view_lamps as f64
+    });
     table(
         &mut out,
         "Frame time, ms (wall clock per frame)",
