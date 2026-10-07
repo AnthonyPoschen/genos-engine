@@ -201,10 +201,13 @@ fn assert_picture(
         warmth(flame_dark) > 12.0 && brightness(flame_dark) > 30.0,
         "{label} the emitting card did not stay warm without the lamp: {flame_dark:?}"
     );
+    // White paint returns 0.8 of the light: direct light on the floor drops to 0.8 and
+    // light that bounced once to 0.64. This floor is mostly lit by the fire's bounce,
+    // so the bounds are the 1 / pi-era 80 / 40 / 30 at 0.6.
     assert!(
-        brightness(near_dark) > 80.0
-            && brightness(near_dark) > brightness(far_dark) + 40.0
-            && warmth(near_dark) > warmth(far_dark) + 30.0,
+        brightness(near_dark) > 48.0
+            && brightness(near_dark) > brightness(far_dark) + 24.0
+            && warmth(near_dark) > warmth(far_dark) + 18.0,
         "{label} the fire did not light the floor without the lamp: near {near_dark:?} far {far_dark:?}"
     );
 }

@@ -274,7 +274,7 @@ fn lamp_ray(light: &genos_scene::Light, x: f32, y: f32, z: f32) -> (f32, f32, f3
 }
 
 /// Scene-lamp unit. The falloff is cosine over inverse-square.
-/// A unit white lamp 7 m above a white floor stays near 0.46 after reflectance.
+/// A unit white lamp 7 m above a white painted floor stays near 0.37 after reflectance.
 const LAMP_UNIT: f32 = 72.0;
 /// Radius of a lamp bulb. Outside it a lamp falls off with the inverse square.
 const LAMP_RADIUS: f32 = 0.1;
@@ -1359,8 +1359,9 @@ mod tests {
     fn a_unit_lamp_at_the_shipped_height_lights_a_white_floor() {
         let room = shaded_floor(7.0);
         let close = shaded_floor(1.0);
+        // White paint (0.8) reflects 0.8 of the 1 / pi-era 0.42..0.52.
         assert!(
-            (0.42..0.52).contains(&room),
+            (0.336..0.416).contains(&room),
             "a unit lamp 7 m up left the white floor dull or clipped: {room}"
         );
         assert!(

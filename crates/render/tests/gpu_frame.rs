@@ -86,7 +86,7 @@ fn direct_wall_pixel(scene: &Scene, surface: [f32; 3], normal: [f32; 3]) -> [f32
         surface[2] + normal[2] * 0.02,
     ];
     let direct = genos_render::illuminate_facing(scene, origin[0], origin[1], origin[2], normal);
-    let linear = 0.318309886 * direct;
+    let linear = 0.254647909 * direct;
     let toned = if linear <= 0.64 {
         linear.max(0.0)
     } else {

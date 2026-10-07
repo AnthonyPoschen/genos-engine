@@ -96,8 +96,8 @@ const uint WORLD_CUBE_OFFSET = 458752u;
 const uint WORLD_DIRECT_CUBE_OFFSET = 294912u;
 vec3 cube_axis(uint face);
 void bounce_at2(vec3 pos, vec3 normal, uint twice_far, out vec3 once, out vec3 twice);
-const float LAMBERT = 0.318309886;
-// A unit white lamp 7 m above a white floor stays near 0.46.
+const float LAMBERT = 0.254647909;
+// A unit white lamp 7 m above a white painted floor stays near 0.37.
 const float LAMP_UNIT = 72.0;
 // Radius of a lamp bulb. Outside it a lamp falls off with the inverse square.
 const float LAMP_RADIUS = 0.1;

@@ -672,11 +672,15 @@ mod tests {
 
     #[test]
     fn the_shaders_share_the_density_curve() {
+        assert!(
+            (genos_scene::DEFAULT_REFLECTANCE - 0.254647909).abs() < 1.0e-7,
+            "the shader reflectance is not the scene's white paint"
+        );
         let frag = include_str!("../shaders/scene.frag");
         let comp = include_str!("../shaders/light.comp");
         for source in [frag, comp] {
             assert!(
-                source.contains("const float LAMBERT = 0.318309886;"),
+                source.contains("const float LAMBERT = 0.254647909;"),
                 "shader reflectance left the Rust field"
             );
             assert!(

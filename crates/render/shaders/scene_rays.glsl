@@ -18,7 +18,7 @@ struct SceneHit {
     float color_mix;
 };
 
-const float SCENE_LAMBERT = 0.318309886;
+const float SCENE_LAMBERT = 0.254647909;
 
 bool floor_span(vec2 p) {
     vec2 half_e = vec2(max(scene.floor_center.w, 0.5), max(scene.floor_data.x, 0.5));

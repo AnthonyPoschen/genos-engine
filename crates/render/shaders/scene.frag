@@ -139,8 +139,8 @@ const uint WORLD_CUBE_OFFSET = 458752u;
 // a wall out of the blend.
 const bool WORLD_TAP_VISIBILITY = true;
 const uint WORLD_IRR_OFFSET = 176128u;
-const float LAMBERT = 0.318309886;
-// A unit white lamp 7 m above a white floor stays near 0.46.
+const float LAMBERT = 0.254647909;
+// A unit white lamp 7 m above a white painted floor stays near 0.37.
 const float LAMP_UNIT = 72.0;
 // Radius of a lamp bulb. Outside it a lamp falls off with the inverse square.
 const float LAMP_RADIUS = 0.1;

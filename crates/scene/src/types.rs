@@ -1,8 +1,10 @@
 use genos_math::Vec3;
 
+/// Share of the incoming light a white painted surface sends back out.
+pub const PAINT_ALBEDO: f32 = 0.8;
 /// Diffuse reflectance used when a material does not set one.
-/// This is `1 / π`. A white surface returns that share of the irradiance.
-pub const DEFAULT_REFLECTANCE: f32 = std::f32::consts::FRAC_1_PI;
+/// This is white paint, `PAINT_ALBEDO / π`. A surface returns that share of the irradiance.
+pub const DEFAULT_REFLECTANCE: f32 = PAINT_ALBEDO * std::f32::consts::FRAC_1_PI;
 /// Lamps and suns the renderer lights a frame with.
 pub const MAX_LAMPS: usize = 32;
 /// Walls and solids the renderer traces light against.
