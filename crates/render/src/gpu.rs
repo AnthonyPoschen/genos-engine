@@ -441,13 +441,13 @@ impl Renderer {
         pack.pin_count0 = self.screen_pins.layers[0].len() as u32;
         pack.pin_count1 = self.screen_pins.layers[1].len() as u32;
         let texels = crate::pins::pin_texels(&self.screen_pins, &view);
-        let mut bytes = Vec::with_capacity(texels.len() * 16);
-        for texel in texels {
-            for value in texel {
-                bytes.extend_from_slice(&value.to_ne_bytes());
-            }
-        }
-        self.gpu.pin_bytes = bytes;
+        // One copy of the whole span. A per-float push took ~10 ms a frame in a debug build.
+        // SAFETY: `[f32; 4]` is 16 plain bytes with no padding, and u8 has alignment 1.
+        let raw = unsafe {
+            std::slice::from_raw_parts(texels.as_ptr().cast::<u8>(), texels.len() * 16)
+        };
+        self.gpu.pin_bytes.clear();
+        self.gpu.pin_bytes.extend_from_slice(raw);
     }
 
     /// Ground position the gather is tracking.
@@ -659,6 +659,11 @@ struct Gpu {
     pin_counts: [u32; 2],
     /// Pin positions, normals, and cell index. Written into the field before the gather.
     pin_bytes: Vec<u8>,
+    /// Inputs of the last light build that began: scene bytes, pin bytes and dispatch sizes.
+    /// A frame whose inputs match it keeps that field instead of building it again.
+    built_scene: Vec<u8>,
+    built_pins: Vec<u8>,
+    built_dims: [u32; 14],
     floor_half_x: f32,
     floor_half_z: f32,
     /// Chains gather slices. The last slice leaves it signaled for one picture.
@@ -1291,6 +1296,9 @@ impl Gpu {
                 screen_h: 1,
                 pin_counts: [0, 0],
                 pin_bytes: Vec::new(),
+                built_scene: Vec::new(),
+                built_pins: Vec::new(),
+                built_dims: [0; 14],
                 floor_half_x: 1.0,
                 floor_half_z: 1.0,
                 light_sem: std::ptr::null_mut(),
@@ -3096,8 +3104,37 @@ impl Gpu {
         self.pin_counts = [pack.pin_count0, pack.pin_count1];
         self.floor_half_x = pack.floor_half_x;
         self.floor_half_z = pack.floor_half_z;
+        // The field only reads these inputs. Unchanged inputs give the field already built,
+        // so the gather does not run again (a still camera used to rebuild every few frames).
+        if !self.built_scene.is_empty()
+            && self.light_dims() == self.built_dims
+            && bytes == self.built_scene
+            && self.pin_bytes == self.built_pins
+        {
+            self.pending_light = None;
+            return Ok(());
+        }
         self.pending_light = Some(bytes);
         Ok(())
+    }
+
+    fn light_dims(&self) -> [u32; 14] {
+        [
+            self.light_cols[0],
+            self.light_cols[1],
+            self.light_cols[2],
+            self.light_rows[0],
+            self.light_rows[1],
+            self.light_rows[2],
+            self.world_cols,
+            self.world_bands,
+            self.screen_w,
+            self.screen_h,
+            self.pin_counts[0],
+            self.pin_counts[1],
+            self.floor_half_x.to_bits(),
+            self.floor_half_z.to_bits(),
+        ]
     }
 
     /// Record one slice of the gather. A readback waits until that build is the field on screen.
@@ -3301,6 +3338,10 @@ impl Gpu {
             let offset = crate::pins::PIN_SPAN_START as u64 * 16;
             self.write_buffer_at(&self.light_field[dst], offset, &self.pin_bytes)?;
         }
+        self.built_dims = self.light_dims();
+        self.built_pins.clear();
+        self.built_pins.extend_from_slice(&self.pin_bytes);
+        self.built_scene = bytes;
         self.light_dst = dst;
         self.light_pass = 0;
         self.light_row = 0;
