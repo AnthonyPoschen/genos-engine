@@ -142,7 +142,8 @@ const uint HASH_BASE0 = 104449u;
 const uint HASH_DIM0 = 32u;
 const uint HASH_ORIGIN1 = 137217u;
 const uint HASH_BASE1 = 137218u;
-const uint HASH_DIM1 = 16u;
+const uint HASH_DIM1 = 28u;
+const uint PIN_IRR1 = 2048u;
 const uint SHOWN_COPY = 0u;
 const float LAMBERT = 0.318309886;
 // A unit white lamp 7 m above a white floor stays near 0.46. A lamp 1 m away stays under white.
@@ -610,7 +611,7 @@ uint lattice_index(ivec3 cell, uint dim) {
     return uint((cell.y * int(dim) + cell.z) * int(dim) + cell.x);
 }
 
-float lattice_weight(uint pin, uint pos_base, uint nrm_base, vec3 world, vec3 face_n) {
+float lattice_weight(uint pin, uint pos_base, uint nrm_base, vec3 world, vec3 face_n, float reach) {
     vec4 stored = field.texels[pos_base + pin];
     if (stored.w < 0.5) {
         return 0.0;
@@ -627,17 +628,29 @@ float lattice_weight(uint pin, uint pos_base, uint nrm_base, vec3 world, vec3 fa
     bool crosses = world.y < 0.05 && stored.y < 0.05
         ? probe_hidden(from.xz, to.xz)
         : blocked(from, to);
-    if (dist >= 1.5 || crosses) {
+    if (dist >= reach || crosses) {
         return 0.0;
     }
-    return 1.0 - dist / 1.5;
+    return 1.0 - dist / reach;
 }
 
-vec3 lattice_radiance(vec3 world, vec3 face_n) {
-    vec4 info = field.texels[HASH_ORIGIN0];
+bool lattice_sample(
+    vec3 world,
+    vec3 face_n,
+    uint origin_texel,
+    uint hash_base,
+    uint dim,
+    uint pos_base,
+    uint nrm_base,
+    uint rad_base,
+    float reach,
+    out vec3 color
+) {
+    vec4 info = field.texels[origin_texel];
     float spacing = info.w;
+    color = vec3(0.0);
     if (spacing <= 0.0) {
-        return vec3(0.0);
+        return false;
     }
     ivec3 base = ivec3(floor((world - info.xyz) / spacing));
     vec3 sum = vec3(0.0);
@@ -647,42 +660,56 @@ vec3 lattice_radiance(vec3 world, vec3 face_n) {
             for (int dx = -1; dx <= 1; dx++) {
                 ivec3 cell = base + ivec3(dx, dy, dz);
                 if (cell.x < 0 || cell.y < 0 || cell.z < 0
-                    || cell.x >= int(HASH_DIM0) || cell.y >= int(HASH_DIM0) || cell.z >= int(HASH_DIM0)) {
+                    || cell.x >= int(dim) || cell.y >= int(dim) || cell.z >= int(dim)) {
                     continue;
                 }
-                vec4 rec = field.texels[HASH_BASE0 + lattice_index(cell, HASH_DIM0)];
+                vec4 rec = field.texels[hash_base + lattice_index(cell, dim)];
                 for (int slot = 0; slot < 2; slot++) {
                     float index = slot == 0 ? rec.x : rec.y;
                     if (index < 0.0) {
                         continue;
                     }
                     uint pin = uint(index + 0.5);
-                    float weight = lattice_weight(pin, PIN_POS0, PIN_NRM0, world, face_n);
+                    float weight = lattice_weight(pin, pos_base, nrm_base, world, face_n, reach);
                     if (weight <= 1.0e-4) {
                         continue;
                     }
-                    sum += field.texels[pin].rgb * weight;
+                    sum += field.texels[rad_base + pin].rgb * weight;
                     wsum += weight;
                 }
             }
         }
     }
     if (wsum <= 1.0e-4) {
-        return vec3(0.0);
+        return false;
     }
-    return sum / wsum;
+    color = sum / wsum;
+    return true;
+}
+
+float fade_out(float start, float end, float dist) {
+    float t = clamp((dist - start) / (end - start), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
 }
 
 vec3 screen_bounce(vec3 world, vec3 face_n) {
-    vec3 lattice = lattice_radiance(world, face_n);
-    vec2 uv;
-    if (!project_uv(world, uv)) {
-        if (dot(lattice, lattice) > 1.0e-8) {
-            return lattice;
-        }
-        return world_mean(world);
+    float dist = length(world - scene.eye.xyz);
+    vec3 fine = vec3(0.0);
+    vec3 mid = vec3(0.0);
+    bool has_fine = lattice_sample(
+        world, face_n, HASH_ORIGIN0, HASH_BASE0, HASH_DIM0, PIN_POS0, PIN_NRM0, 0u, 1.5, fine
+    );
+    bool has_mid = lattice_sample(
+        world, face_n, HASH_ORIGIN1, HASH_BASE1, HASH_DIM1, PIN_POS1, PIN_NRM1, PIN_IRR1, 2.0, mid
+    );
+    vec3 bounce = world_mean(world);
+    if (has_mid) {
+        bounce = mix(bounce, mid, 1.0 - fade_out(10.0, 14.0, dist));
     }
-    return lattice;
+    if (has_fine) {
+        bounce = mix(bounce, fine, 1.0 - fade_out(6.0, 12.0, dist));
+    }
+    return bounce;
 }
 
 vec3 merged_at(uint copy, vec3 world, vec3 face_n, bool uniform_disk) {

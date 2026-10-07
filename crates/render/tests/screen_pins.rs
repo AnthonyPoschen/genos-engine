@@ -178,7 +178,7 @@ fn a_turn_onto_a_wall_keeps_old_cells_and_adds_the_wall() {
                 ];
                 (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
             };
-            if away > 10.0 {
+            if away > 14.0 {
                 continue;
             }
             assert!(
@@ -270,7 +270,7 @@ fn floor_pins_behind_a_wall_stay_on_the_floor() {
             ];
             (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
         };
-        if away > 10.0 {
+        if away > 14.0 {
             continue;
         }
         assert!(

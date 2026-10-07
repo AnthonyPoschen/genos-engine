@@ -730,6 +730,20 @@ mod tests {
                 )),
                 "shader pin normals left the Rust field"
             );
+            assert!(
+                source.contains(&format!(
+                    "const uint HASH_DIM1 = {}u;",
+                    crate::pins::HASH_DIM1
+                )),
+                "shader cascade 1 hash left the Rust field"
+            );
+            assert!(
+                source.contains(&format!(
+                    "const uint PIN_IRR1 = {}u;",
+                    crate::pins::PIN_IRR1
+                )),
+                "shader cascade 1 irradiance left the Rust field"
+            );
         }
         assert!(
             comp.contains("const float SCREEN_REACH = 4.0;"),

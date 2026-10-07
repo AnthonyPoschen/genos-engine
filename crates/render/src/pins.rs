@@ -23,8 +23,10 @@ pub const PROBE_CAP0: u32 = 2048;
 pub const PROBE_CAP1: u32 = 1024;
 /// Hash cube for cascade 0. 32 cells at 0.5 m is a 16 m window.
 pub const HASH_DIM0: u32 = 32;
-/// Hash cube for cascade 1. 16 cells at 1 m is a 16 m window.
-pub const HASH_DIM1: u32 = 16;
+/// Hash cube for cascade 1. 28 cells at 1 m covers the 14 m keep window.
+pub const HASH_DIM1: u32 = 28;
+/// Integrated irradiance for cascade 1. Cascade 0 uses probe index 0.
+pub const PIN_IRR1: u32 = PROBE_CAP0;
 
 /// Texel where cascade 0 stores positions. The gather and the fragment sample read here.
 pub const PIN_POS0: u32 = 98304;
@@ -54,14 +56,18 @@ pub const PIN_SPAN_LEN: u32 = HASH_BASE1 + HASH_CELLS1 - PIN_POS0;
 const _: () = assert!(PIN_SPAN_START + PIN_SPAN_LEN < 176_128);
 /// Cascade 0 radiance is stored at the probe index, below the screen-normal base.
 const _: () = assert!(PROBE_CAP0 < 8192);
+/// Cascade 1 irradiance sits after cascade 0 and still below the screen normals.
+const _: () = assert!(PIN_IRR1 + PROBE_CAP1 < 8192);
 /// Cascade 1 directions plus the farthest screen cascade end before the pin block.
 const _: () =
     assert!(16_384 + PROBE_CAP1 * 32 + (SCREEN_MAX_W / 4) * (SCREEN_MAX_H / 4) * 64 < PIN_POS0);
 
-/// Create a cell while it is inside the hash window around the camera.
-const ACTIVATE: f32 = 8.0;
-/// Drop a world cell only after it leaves a larger window.
-const DROP: f32 = 10.0;
+/// Cascade 0 cells are created inside this window. The picture fades them out by 12 m.
+const FINE_REACH: f32 = 8.0;
+/// Cascade 1 cells cover the fade after the fine window.
+const NEXT_REACH: f32 = 12.0;
+/// Keep a cell until the fade into the world volume has finished.
+const DROP: f32 = 14.0;
 /// Two hits share a face when their normals agree by at least this much.
 const FACE_DOT: f32 = 0.6;
 
@@ -166,6 +172,7 @@ pub fn update_screen_pins(pins: &mut ScreenPins, scene: &Scene, view: &PinView) 
         scene,
         view.eye,
         FINE_SPACING,
+        FINE_REACH,
         PROBE_CAP0 as usize,
         true,
     );
@@ -174,6 +181,7 @@ pub fn update_screen_pins(pins: &mut ScreenPins, scene: &Scene, view: &PinView) 
         scene,
         view.eye,
         NEXT_SPACING,
+        NEXT_REACH,
         PROBE_CAP1 as usize,
         false,
     );
@@ -430,10 +438,11 @@ fn update_lattice(
     scene: &Scene,
     eye: [f32; 3],
     spacing: f32,
+    reach: f32,
     cap: usize,
     with_objects: bool,
 ) {
-    let hits = lattice_hits(scene, eye, spacing);
+    let hits = lattice_hits(scene, eye, spacing, reach);
     pins.retain(|pin| pin.object || in_window(pin.position, eye, DROP));
     if with_objects {
         pins.retain(|pin| !pin.object);
@@ -452,7 +461,7 @@ fn update_lattice(
             .push(index);
     }
     for hit in &hits {
-        if !in_window(hit.position, eye, ACTIVATE) {
+        if !in_window(hit.position, eye, reach) {
             continue;
         }
         let key = cell_key(hit.position, spacing);
@@ -669,21 +678,21 @@ fn in_window(position: [f32; 3], eye: [f32; 3], reach: f32) -> bool {
         && (position[2] - eye[2]).abs() <= reach
 }
 
-fn lattice_hits(scene: &Scene, eye: [f32; 3], spacing: f32) -> Vec<ScreenPin> {
+fn lattice_hits(scene: &Scene, eye: [f32; 3], spacing: f32, reach: f32) -> Vec<ScreenPin> {
     let mut hits = Vec::new();
-    stamp_floor(&mut hits, scene, eye, spacing);
+    stamp_floor(&mut hits, scene, eye, spacing, reach);
     for wall in &scene.walls {
-        stamp_wall(&mut hits, wall, eye, spacing);
+        stamp_wall(&mut hits, wall, eye, spacing, reach);
     }
     hits
 }
 
-fn stamp_floor(out: &mut Vec<ScreenPin>, scene: &Scene, eye: [f32; 3], spacing: f32) {
+fn stamp_floor(out: &mut Vec<ScreenPin>, scene: &Scene, eye: [f32; 3], spacing: f32, reach: f32) {
     let floor = &scene.floor;
-    let x0 = ((eye[0] - ACTIVATE) / spacing).floor() as i32;
-    let x1 = ((eye[0] + ACTIVATE) / spacing).floor() as i32;
-    let z0 = ((eye[2] - ACTIVATE) / spacing).floor() as i32;
-    let z1 = ((eye[2] + ACTIVATE) / spacing).floor() as i32;
+    let x0 = ((eye[0] - reach) / spacing).floor() as i32;
+    let x1 = ((eye[0] + reach) / spacing).floor() as i32;
+    let z0 = ((eye[2] - reach) / spacing).floor() as i32;
+    let z1 = ((eye[2] + reach) / spacing).floor() as i32;
     for ix in x0..=x1 {
         for iz in z0..=z1 {
             let point = [
@@ -691,7 +700,7 @@ fn stamp_floor(out: &mut Vec<ScreenPin>, scene: &Scene, eye: [f32; 3], spacing: 
                 0.0,
                 (iz as f32 + 0.5) * spacing,
             ];
-            if !in_window(point, eye, ACTIVATE) {
+            if !in_window(point, eye, reach) {
                 continue;
             }
             let dx = point[0] - floor.position.x;
@@ -704,7 +713,13 @@ fn stamp_floor(out: &mut Vec<ScreenPin>, scene: &Scene, eye: [f32; 3], spacing: 
     }
 }
 
-fn stamp_wall(out: &mut Vec<ScreenPin>, wall: &genos_scene::Wall, eye: [f32; 3], spacing: f32) {
+fn stamp_wall(
+    out: &mut Vec<ScreenPin>,
+    wall: &genos_scene::Wall,
+    eye: [f32; 3],
+    spacing: f32,
+    reach: f32,
+) {
     let x0 = wall.position.x - wall.half_x;
     let x1 = wall.position.x + wall.half_x;
     let z0 = wall.position.z - wall.half_z;
@@ -714,6 +729,7 @@ fn stamp_wall(out: &mut Vec<ScreenPin>, wall: &genos_scene::Wall, eye: [f32; 3],
         out,
         eye,
         spacing,
+        reach,
         0,
         x1,
         [1.0, 0.0, 0.0],
@@ -728,6 +744,7 @@ fn stamp_wall(out: &mut Vec<ScreenPin>, wall: &genos_scene::Wall, eye: [f32; 3],
         out,
         eye,
         spacing,
+        reach,
         0,
         x0,
         [-1.0, 0.0, 0.0],
@@ -742,6 +759,7 @@ fn stamp_wall(out: &mut Vec<ScreenPin>, wall: &genos_scene::Wall, eye: [f32; 3],
         out,
         eye,
         spacing,
+        reach,
         2,
         z1,
         [0.0, 0.0, 1.0],
@@ -756,6 +774,7 @@ fn stamp_wall(out: &mut Vec<ScreenPin>, wall: &genos_scene::Wall, eye: [f32; 3],
         out,
         eye,
         spacing,
+        reach,
         2,
         z0,
         [0.0, 0.0, -1.0],
@@ -770,6 +789,7 @@ fn stamp_wall(out: &mut Vec<ScreenPin>, wall: &genos_scene::Wall, eye: [f32; 3],
         out,
         eye,
         spacing,
+        reach,
         1,
         y1,
         [0.0, 1.0, 0.0],
@@ -786,6 +806,7 @@ fn stamp_axis(
     out: &mut Vec<ScreenPin>,
     eye: [f32; 3],
     spacing: f32,
+    reach: f32,
     fixed_axis: usize,
     fixed: f32,
     normal: [f32; 3],
@@ -816,7 +837,7 @@ fn stamp_axis(
             position[fixed_axis] = fixed;
             position[u_axis] = u;
             position[v_axis] = v;
-            if in_window(position, eye, ACTIVATE) {
+            if in_window(position, eye, reach) {
                 out.push(world_pin(position, normal));
             }
         }

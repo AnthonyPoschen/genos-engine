@@ -99,7 +99,8 @@ const uint HASH_BASE0 = 104449u;
 const uint HASH_DIM0 = 32u;
 const uint HASH_ORIGIN1 = 137217u;
 const uint HASH_BASE1 = 137218u;
-const uint HASH_DIM1 = 16u;
+const uint HASH_DIM1 = 28u;
+const uint PIN_IRR1 = 2048u;
 const float LAMBERT = 0.318309886;
 // A unit white lamp 7 m above a white floor stays near 0.46. A lamp 1 m away stays under white.
 const float LAMP_UNIT = 72.0;
@@ -1396,6 +1397,8 @@ void write_pinned(uint cascade) {
         }
         if (cascade == 0u) {
             field.texels[pin] = vec4(0.0);
+        } else {
+            field.texels[PIN_IRR1 + pin] = vec4(0.0);
         }
         return;
     }
@@ -1434,9 +1437,11 @@ void write_pinned(uint cascade) {
         sum += iv.rgb * facing;
         wsum += facing;
     }
+    vec3 radiance = wsum > 1.0e-4 ? sum / wsum : vec3(0.0);
     if (cascade == 0u) {
-        vec3 radiance = wsum > 1.0e-4 ? sum / wsum : vec3(0.0);
         field.texels[pin] = vec4(radiance, 0.0);
+    } else {
+        field.texels[PIN_IRR1 + pin] = vec4(radiance, 1.0);
     }
 }
 
