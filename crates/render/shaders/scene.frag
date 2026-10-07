@@ -153,6 +153,10 @@ const float TAU = 6.2831853;
 
 bool probe_hidden(vec2 from, vec2 probe);
 bool blocked(vec3 origin, vec3 target);
+uint occ_near_mask(vec2 xz, float reach);
+bool probe_hidden_masked(vec2 from, vec2 probe, uint mask);
+bool segment_blocked_masked(vec3 origin, vec3 target, uint mask);
+bool inside_solid(vec3 p);
 
 float ray_spin(vec2 p) {
     return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
@@ -642,7 +646,7 @@ uint lattice_index(ivec3 cell, uint dim) {
     return uint((cell.y * int(dim) + cell.z) * int(dim) + cell.x);
 }
 
-float lattice_weight(uint pin, uint pos_base, uint nrm_base, vec3 world, vec3 face_n, float reach) {
+float lattice_weight(uint pin, uint pos_base, uint nrm_base, vec3 world, vec3 face_n, float reach, uint near, bool lifted_inside) {
     vec4 stored = field.texels[pos_base + pin];
     if (stored.w < 0.5) {
         return 0.0;
@@ -662,8 +666,8 @@ float lattice_weight(uint pin, uint pos_base, uint nrm_base, vec3 world, vec3 fa
     vec3 from = world + face_n * 0.05;
     vec3 to = stored.xyz + face_n * 0.05;
     bool crosses = world.y < 0.05 && stored.y < 0.05
-        ? probe_hidden(from.xz, to.xz)
-        : blocked(from, to);
+        ? probe_hidden_masked(from.xz, to.xz, near)
+        : lifted_inside || segment_blocked_masked(from, to, near);
     if (crosses) {
         return 0.0;
     }
@@ -692,6 +696,9 @@ bool lattice_sample(
     // Every pin inside the reach must sit in the cells walked below, or the
     // set of pins jumps when the shaded point crosses a cell edge.
     reach = min(reach, spacing * 2.0);
+    // Per pixel, not per pin: the lifted point and the occluders that can matter.
+    bool lifted_inside = inside_solid(world + face_n * 0.05);
+    uint near = occ_near_mask((world + face_n * 0.05).xz, reach);
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
     for (int dz = -2; dz <= 2; dz++) {
@@ -709,7 +716,7 @@ bool lattice_sample(
                         continue;
                     }
                     uint pin = uint(index + 0.5);
-                    float weight = lattice_weight(pin, pos_base, nrm_base, world, face_n, reach);
+                    float weight = lattice_weight(pin, pos_base, nrm_base, world, face_n, reach, near, lifted_inside);
                     if (weight <= 1.0e-4) {
                         continue;
                     }
@@ -954,6 +961,72 @@ bool probe_hidden(vec2 from, vec2 probe) {
             hit = segment_hits_box(from, probe, occ.center_shape.xz - half_e, occ.center_shape.xz + half_e);
         }
         if (hit) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// blocked and probe_hidden over a subset of occluders. The lattice gather tests a
+// dozen short segments per pixel; only occluders near the pixel can cut them.
+uint occ_near_mask(vec2 xz, float reach) {
+    uint mask = 0u;
+    uint count = min(scene.occ_count, 16u);
+    for (uint i = 0u; i < count; i++) {
+        Occ occ = scene.occs[i];
+        vec2 half_e = occ.center_shape.w > 0.5 ? vec2(occ.extent.w) : vec2(occ.extent.x, occ.extent.z);
+        vec2 gap = max(abs(xz - occ.center_shape.xz) - half_e, vec2(0.0));
+        if (dot(gap, gap) < (reach + 0.01) * (reach + 0.01)) {
+            mask |= 1u << i;
+        }
+    }
+    return mask;
+}
+
+bool probe_hidden_masked(vec2 from, vec2 probe, uint mask) {
+    vec2 delta = probe - from;
+    if (dot(delta, delta) < 1e-6) {
+        return false;
+    }
+    while (mask != 0u) {
+        uint i = uint(findLSB(mask));
+        mask &= mask - 1u;
+        Occ occ = scene.occs[i];
+        bool hit;
+        if (occ.center_shape.w > 0.5) {
+            hit = segment_hits_circle(from, probe, occ.center_shape.xz, occ.extent.w);
+        } else {
+            vec2 half_e = vec2(occ.extent.x, occ.extent.z);
+            hit = segment_hits_box(from, probe, occ.center_shape.xz - half_e, occ.center_shape.xz + half_e);
+        }
+        if (hit) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// blocked() without the inside_solid test, which the caller does once per pixel.
+bool segment_blocked_masked(vec3 origin, vec3 target, uint mask) {
+    vec3 delta = target - origin;
+    float dist = length(delta);
+    if (dist < 1e-3) {
+        return false;
+    }
+    vec3 dir = delta / dist;
+    while (mask != 0u) {
+        uint i = uint(findLSB(mask));
+        mask &= mask - 1u;
+        Occ occ = scene.occs[i];
+        float t;
+        if (occ.center_shape.w > 0.5) {
+            t = hit_cyl(origin, dir, occ.center_shape.xyz, occ.extent.w, 0.0, occ.extent.y);
+        } else {
+            vec3 half_e = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
+            vec3 center = vec3(occ.center_shape.x, occ.extent.y * 0.5, occ.center_shape.z);
+            t = hit_box(origin, dir, center - half_e, center + half_e);
+        }
+        if (t > 1e-4 && t < dist - 1e-4) {
             return true;
         }
     }
