@@ -692,32 +692,23 @@ mod tests {
                 "shader cascade table left the scene block"
             );
         }
-        // The picture reads the baked volumes. The light pass also owns the pin lattice.
-        for (name, value) in [
-            ("VOL0_INFO", crate::pins::VOL0_INFO),
-            ("VOL0_BASE", crate::pins::VOL0_BASE),
-            ("VOL1_INFO", crate::pins::VOL1_INFO),
-            ("VOL1_BASE", crate::pins::VOL1_BASE),
+        // Both shaders read the world tier through tier.glsl.
+        let tier = include_str!("../shaders/tier.glsl");
+        for line in [
+            format!("const uint TIER_INFO = {}u;", crate::probe_tier::TIER_INFO),
+            format!("const uint TIER_INDIR_CAP = {}u;", crate::probe_tier::TIER_INDIR_CAP),
+            format!(
+                "const uint TIER_PROBES = TIER_INFO + {}u;",
+                crate::probe_tier::TIER_PROBES - crate::probe_tier::TIER_INFO
+            ),
+            format!("const uint TIER_PROBE_TEXELS = {}u;", crate::probe_tier::PROBE_TEXELS),
         ] {
-            for source in [frag, comp] {
-                assert!(
-                    source.contains(&format!("const uint {name} = {value}u;")),
-                    "shader {name} left the Rust field"
-                );
-            }
+            assert!(tier.contains(&line), "tier.glsl left the Rust layout: {line}");
         }
-        for (name, value) in [
-            ("PIN_POS0", crate::pins::PIN_POS0),
-            ("PIN_NRM0", crate::pins::PIN_NRM0),
-            ("HASH_BASE0", crate::pins::HASH_BASE0),
-            ("HASH_BASE1", crate::pins::HASH_BASE1),
-            ("HASH_DIM1", crate::pins::HASH_DIM1),
-            ("PIN_IRR1", crate::pins::PIN_IRR1),
-        ] {
-            assert!(
-                comp.contains(&format!("const uint {name} = {value}u;")),
-                "light pass {name} left the Rust field"
-            );
+        assert_eq!(crate::probe_tier::TIER_INDIR - crate::probe_tier::TIER_INFO, 2);
+        assert!(tier.contains("const uint TIER_INDIR = TIER_INFO + 2u;"));
+        for source in [frag, comp] {
+            assert!(source.contains("#include \"tier.glsl\""), "a shader does not read the tier");
         }
     }
 
@@ -769,13 +760,18 @@ mod tests {
         let west_bytes = scene_bytes(&west);
         let east_bytes = scene_bytes(&east);
         let west_spacing = f32::from_ne_bytes(west_bytes[20..24].try_into().unwrap());
-        let east_eye = f32::from_ne_bytes(east_bytes[2224..2228].try_into().unwrap());
+        // The eye follows the header, the lamps, the occluders and the objects.
+        let eye_at = 48
+            + crate::pack::MAX_LAMPS * 32
+            + crate::pack::MAX_OCCLUDERS * 64
+            + crate::pack::MAX_OBJECTS * 32;
+        let east_eye = f32::from_ne_bytes(east_bytes[eye_at..eye_at + 4].try_into().unwrap());
         assert!((west_spacing - west.spacing).abs() < 1.0e-6);
         assert!(
             (east_eye - east_x).abs() < 1.0e-4,
             "the draw did not upload the player"
         );
-        assert_ne!(west_bytes[2224..2228], east_bytes[2224..2228]);
+        assert_ne!(west_bytes[eye_at..eye_at + 4], east_bytes[eye_at..eye_at + 4]);
         assert!(
             west.cascades[2].offset
                 + west.cascades[2].count_x * west.cascades[2].count_z * west.cascades[2].dirs

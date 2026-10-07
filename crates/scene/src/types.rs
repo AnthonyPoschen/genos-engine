@@ -4,7 +4,7 @@ use genos_math::Vec3;
 /// This is `1 / π`. A white surface returns that share of the irradiance.
 pub const DEFAULT_REFLECTANCE: f32 = std::f32::consts::FRAC_1_PI;
 /// Lamps and suns the renderer lights a frame with.
-pub const MAX_LAMPS: usize = 4;
+pub const MAX_LAMPS: usize = 32;
 /// Walls and solids the renderer traces light against.
 pub const MAX_OCCLUDERS: usize = 16;
 

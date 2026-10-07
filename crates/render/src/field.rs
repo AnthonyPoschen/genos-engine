@@ -25,6 +25,8 @@ pub(crate) const TARGET_SPACING: f32 = 0.28;
 pub(crate) const FINE_DIRS: u32 = 16;
 /// Texels in the GPU field buffer (and the CPU cascade budget).
 pub(crate) const FIELD_COPY: u32 = 524288;
+/// First texel of the world probes (light.comp WORLD_IRR_OFFSET). They run to `FIELD_COPY`.
+pub(crate) const WORLD_BEGIN: u32 = 176128;
 /// Bounces after the direct pass. The picture runs the same count.
 pub(crate) const BOUNCES: u32 = 4;
 /// Coarse world-probe spacing. These probes update behind the screen field.

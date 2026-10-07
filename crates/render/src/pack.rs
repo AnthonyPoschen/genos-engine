@@ -102,8 +102,6 @@ pub struct Pack {
     pub(crate) grid_w: u32,
     pub(crate) grid_h: u32,
     /// Live pins in the two finest screen cascades. The shader reads these from `view_grid.zw`.
-    pub(crate) pin_count0: u32,
-    pub(crate) pin_count1: u32,
     /// Shapes and particle spans in draw order.
     pub draws: Vec<PackedDraw>,
 }
@@ -302,8 +300,6 @@ pub fn pack_frame(
         view_aspect: 1.0,
         grid_w: 1,
         grid_h: 1,
-        pin_count0: 0,
-        pin_count1: 0,
         draws,
     }
 }
@@ -669,8 +665,9 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     push_f32(&mut bytes, pack.view_aspect);
     push_f32(&mut bytes, pack.grid_w as f32);
     push_f32(&mut bytes, pack.grid_h as f32);
-    push_f32(&mut bytes, pack.pin_count0 as f32);
-    push_f32(&mut bytes, pack.pin_count1 as f32);
+    // view_grid.zw are unused since the world tier replaced the pinned cascades.
+    push_f32(&mut bytes, 0.0);
+    push_f32(&mut bytes, 0.0);
     for value in pack.ceiling {
         push_f32(&mut bytes, value);
     }

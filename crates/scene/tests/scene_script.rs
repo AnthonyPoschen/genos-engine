@@ -91,9 +91,9 @@ fn base_script(extra_walls: usize, lights: usize) -> String {
 #[test]
 fn a_script_past_the_light_limits_is_rejected() {
     let room = genos_scene::MAX_OCCLUDERS - 5;
-    load_str(&base_script(room, genos_scene::MAX_LAMPS)).expect("16 occluders and 4 lights fit");
+    load_str(&base_script(room, genos_scene::MAX_LAMPS)).expect("16 occluders and 32 lights fit");
     let err = load_str(&base_script(room + 1, 1)).unwrap_err();
     assert!(err.contains("17 walls and solids") && err.contains("at most 16"), "{err}");
     let err = load_str(&base_script(0, genos_scene::MAX_LAMPS + 1)).unwrap_err();
-    assert!(err.contains("5 lights") && err.contains("at most 4"), "{err}");
+    assert!(err.contains("33 lights") && err.contains("at most 32"), "{err}");
 }

@@ -51,7 +51,7 @@ layout(std430, set = 0, binding = 0) readonly buffer SceneData {
     float far_end;
     float world_end;
     uint pad2;
-    Lamp lamps[4];
+    Lamp lamps[32];
     Occ occs[16];
     Obj objects[32];
     vec4 eye;
@@ -79,6 +79,8 @@ layout(std430, set = 0, binding = 0) readonly buffer SceneData {
 layout(std430, set = 0, binding = 1) readonly buffer FieldData {
     vec4 texels[];
 } field;
+
+#include "tier.glsl"
 
 layout(std430, set = 0, binding = 2) readonly buffer ParticleImage {
     uint width;
@@ -136,14 +138,6 @@ const uint WORLD_CUBE_OFFSET = 458752u;
 // a wall out of the blend.
 const bool WORLD_TAP_VISIBILITY = true;
 const uint WORLD_IRR_OFFSET = 176128u;
-const uint VOL_XZ0 = 32u;
-const uint VOL_Y0 = 6u;
-const uint VOL0_INFO = 49152u;
-const uint VOL0_BASE = 49153u;
-const uint VOL_XZ1 = 28u;
-const uint VOL_Y1 = 3u;
-const uint VOL1_INFO = 159170u;
-const uint VOL1_BASE = 159171u;
 const float LAMBERT = 0.318309886;
 // A unit white lamp 7 m above a white floor stays near 0.46.
 const float LAMP_UNIT = 72.0;
@@ -218,103 +212,21 @@ vec3 world_mean(vec3 pos, vec3 face_n) {
     return sum / weight;
 }
 
-// Baked pin volume (light.comp write_volume). Eight cells around the point, pushed
-// half a cell off the face so the taps sit on the lit side; a cell inside a solid
-// or with no pin for this facing has w = 0 and drops out of the blend.
-bool volume_sample(uint info_at, uint base, uint across, uint layers, vec3 world, vec3 face_n, out vec3 color) {
-    color = vec3(0.0);
-    vec4 info = field.texels[info_at];
-    float spacing = info.w;
-    if (spacing <= 0.0) {
-        return false;
-    }
-    vec3 q = (world + face_n * (0.5 * spacing) - info.xyz) / spacing - 0.5;
-    vec3 from = world + face_n * 0.02;
-    ivec3 i0 = ivec3(floor(q));
-    vec3 t = q - vec3(i0);
-    vec3 nn = face_n * face_n;
-    uint fx = face_n.x >= 0.0 ? 0u : 1u;
-    uint fy = face_n.y >= 0.0 ? 2u : 3u;
-    uint fz = face_n.z >= 0.0 ? 4u : 5u;
-    vec3 sum = vec3(0.0);
-    float wsum = 0.0;
-    // Only surfaces reaching into the box around this point and its 8 cell centers can
-    // block a tap. Away from geometry that is none, and the taps cost no ray tests.
-    vec3 near_lo = info.xyz + (vec3(i0) + 0.5) * spacing;
-    vec3 near_hi = near_lo + vec3(spacing);
-    uint blockers = scene_candidates(min(near_lo, from), max(near_hi, from));
-    for (uint corner = 0u; corner < 8u; corner++) {
-        ivec3 c = i0 + ivec3(int(corner & 1u), int((corner >> 1u) & 1u), int((corner >> 2u) & 1u));
-        if (c.x < 0 || c.y < 0 || c.z < 0 || c.x >= int(across) || c.y >= int(layers) || c.z >= int(across)) {
-            continue;
-        }
-        float w = ((corner & 1u) == 0u ? 1.0 - t.x : t.x)
-            * ((corner & 2u) == 0u ? 1.0 - t.y : t.y)
-            * ((corner & 4u) == 0u ? 1.0 - t.z : t.z);
-        if (w <= 1.0e-5) {
-            continue;
-        }
-        // The cell must see this point. Without the test a cell on the far side of a
-        // thin wall or the roof (one cell away) blends its light through.
-        vec3 cell_center = info.xyz + (vec3(c) + 0.5) * spacing;
-        if (blockers != 0u) {
-            vec3 delta = cell_center - from;
-            float dist = length(delta);
-            SceneHit hit;
-            if (dist > 1.0e-3 && scene_ray_masked(from, delta / dist, 1.0e-4, dist - 1.0e-3, blockers, hit)) {
-                continue;
-            }
-        }
-        uint cb = base + ((uint(c.y) * across + uint(c.z)) * across + uint(c.x)) * 6u;
-        vec4 a = field.texels[cb + fx];
-        vec4 b = field.texels[cb + fy];
-        vec4 d = field.texels[cb + fz];
-        float cw = nn.x * a.w + nn.y * b.w + nn.z * d.w;
-        if (cw <= 1.0e-4) {
-            continue;
-        }
-        sum += w * (nn.x * a.w * a.rgb + nn.y * b.w * b.rgb + nn.z * d.w * d.rgb);
-        wsum += w * cw;
-    }
-    if (wsum <= 1.0e-4) {
-        return false;
-    }
-    color = sum / wsum;
-    return true;
-}
-
-float fade_out(float start, float end, float dist) {
-    float t = clamp((dist - start) / (end - start), 0.0, 1.0);
-    return t * t * (3.0 - 2.0 * t);
-}
-
+// Bounce light at a face: the persistent tier inside its window, the coarse world
+// probes beyond it. One tier at one spacing covers the whole window, so walking never
+// hands a wall from one probe level to another. Where no probe around a point holds
+// light yet (a brick still waiting for its first pass) the world probes answer.
 vec3 screen_bounce(vec3 world, vec3 face_n) {
-    // The cells live in axis-aligned windows around the eye (pins.rs in_window): fine
-    // pins within 8 m, the next level within 12 m. A round fade that ends past those
-    // edges cuts off mid-blend and leaves a line that walks with the camera. Fade on
-    // the same box metric and finish one lattice reach inside each window.
-    vec3 rel = abs(world - scene.eye.xyz);
-    float box = max(rel.x, max(rel.y, rel.z));
-    // Near to far. A level that is fully covered by a nearer one is not sampled.
-    vec3 fine = vec3(0.0);
-    float fine_w = 0.0;
-    if (box < 6.5 && volume_sample(VOL0_INFO, VOL0_BASE, VOL_XZ0, VOL_Y0, world, face_n, fine)) {
-        fine_w = 1.0 - fade_out(4.0, 6.5, box);
-    }
-    if (fine_w >= 1.0) {
-        return fine;
-    }
-    vec3 mid = vec3(0.0);
-    float mid_w = 0.0;
-    if (box < 10.0 && volume_sample(VOL1_INFO, VOL1_BASE, VOL_XZ1, VOL_Y1, world, face_n, mid)) {
-        mid_w = 1.0 - fade_out(7.0, 10.0, box);
-    }
-    vec3 bounce = mid;
-    if (mid_w < 1.0) {
+    float cover = tier_cover(world, 4.0);
+    vec3 near;
+    if (cover > 0.0 && tier_sample(world, face_n, near)) {
+        if (cover >= 1.0) {
+            return near;
+        }
         // Lift off the face. A point on the face can test as inside its own solid.
-        bounce = mix(world_mean(world + face_n * 0.05, face_n), mid, mid_w);
+        return mix(world_mean(world + face_n * 0.05, face_n), near, cover);
     }
-    return mix(bounce, fine, fine_w);
+    return world_mean(world + face_n * 0.05, face_n);
 }
 
 
@@ -368,7 +280,7 @@ vec3 direct_at(vec3 pos, vec3 normal, bool two_sided) {
     // A point inside a solid (floor under a footprint) starts occluded in blocked().
     vec3 origin = pos + normal * 0.02;
     vec3 incoming = vec3(0.0);
-    uint lamps = min(scene.lamp_count, 4u);
+    uint lamps = min(scene.lamp_count, 32u);
     for (uint i = 0u; i < lamps; i++) {
         incoming += shade_lamp(origin, normal, scene.lamps[i].pos, scene.lamps[i].color.rgb, two_sided);
     }
@@ -431,7 +343,7 @@ vec2 fog_field_xz(vec2 xz) {
 
 vec3 scatter_light(vec3 p) {
     vec3 sum = vec3(0.0);
-    uint lamps = min(scene.lamp_count, 4u);
+    uint lamps = min(scene.lamp_count, 32u);
     for (uint i = 0u; i < lamps; i++) {
         vec4 lamp = scene.lamps[i].pos;
         if (lamp.w > 0.5) {

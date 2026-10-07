@@ -40,48 +40,46 @@ pub struct Renderer {
     overlay_rects: Vec<ScreenRect>,
     overlay_verts: Vec<crate::pack::GpuVertex>,
     cascade_lines: Vec<crate::pack::GpuVertex>,
-    /// Pinned hits for the two finest screen cascades. Cascade 2 is cast in the shader.
-    screen_pins: crate::pins::ScreenPins,
-    /// Floor and occluders the pin set was cast against. A geometry change starts a new cast.
-    pin_geometry: Option<u64>,
+    /// The persistent world probe tier: bricks, slots and the work still due.
+    tier: crate::probe_tier::TierState,
+    /// GPU milliseconds a frame may spend on tier work.
+    tier_ms: f64,
 }
 
-/// Floor and occluders. A lamp change does not start a new pin cast.
-fn pin_geometry(scene: &genos_scene::Scene) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
+fn env_f32(name: &str) -> Option<f32> {
+    std::env::var(name).ok().and_then(|v| v.parse().ok())
+}
+
+/// Lamps and the flame as the tier compares them.
+fn tier_lights(pack: &pack::Pack) -> Vec<crate::probe_tier::TierLight> {
+    let mut out: Vec<crate::probe_tier::TierLight> = pack
+        .lamps
+        .iter()
+        .map(|lamp| crate::probe_tier::TierLight {
+            pos: lamp.pos,
+            color: lamp.color,
+            directional: lamp.directional,
+        })
+        .collect();
+    if pack.fire.strength > 0.0 {
+        out.push(crate::probe_tier::TierLight {
+            pos: pack.fire.position,
+            color: pack.fire.color.map(|c| c * pack.fire.strength),
+            directional: false,
+        });
+    }
+    out
+}
+
+/// Surface colours the bounce depends on.
+fn material_key(pack: &pack::Pack) -> u64 {
     use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    let floor = &scene.floor;
-    for value in [
-        floor.position.x,
-        floor.position.z,
-        floor.half_x,
-        floor.half_z,
-    ] {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for value in pack.floor_color.iter().chain(pack.ceiling.iter()) {
         value.to_bits().hash(&mut hasher);
     }
-    scene.walls.len().hash(&mut hasher);
-    for wall in &scene.walls {
-        for value in [
-            wall.position.x,
-            wall.position.z,
-            wall.half_x,
-            wall.half_z,
-            wall.height,
-        ] {
-            value.to_bits().hash(&mut hasher);
-        }
-    }
-    scene.solids.len().hash(&mut hasher);
-    for solid in &scene.solids {
-        let shape = match solid.shape {
-            genos_scene::Shape::Square => 0u8,
-            genos_scene::Shape::Circle => 1u8,
-        };
-        shape.hash(&mut hasher);
-        // Position is not part of the key. A moving solid keeps the floor and
-        // wall cells, and its own lattice follows it.
-        for value in [solid.size, solid.height] {
+    for occ in &pack.occs {
+        for value in occ.albedo.iter().chain([occ.absorption, occ.reflectance, occ.color_mix].iter()) {
             value.to_bits().hash(&mut hasher);
         }
     }
@@ -110,47 +108,63 @@ impl Renderer {
             overlay_rects: Vec::new(),
             overlay_verts: Vec::new(),
             cascade_lines: Vec::new(),
-            screen_pins: crate::pins::ScreenPins::default(),
-            pin_geometry: None,
+            tier: crate::probe_tier::TierState::new(crate::probe_tier::TierLayout::new(
+                env_f32("GENOS_TIER_SPACING").unwrap_or(1.0),
+                env_f32("GENOS_TIER_RADIUS").unwrap_or(50.0),
+            )),
+            tier_ms: std::env::var("GENOS_TIER_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4.0),
         })
     }
 
-    /// Draw the selected cascade layers as unlit rays.
-    /// Index 0 is the near screen cascade, 1 is the far screen cascade, and 2 is the 3D world volume.
+    /// Draw the selected light layers as unlit lines: 0 marks the lit probes of the
+    /// world tier, 1 outlines its allocated bricks, and 2 shows the coarse world volume.
     pub fn set_cascade_view(
         &mut self,
         scene: &genos_scene::Scene,
-        camera: &genos_scene::Camera,
+        _camera: &genos_scene::Camera,
         show: [bool; 3],
     ) {
         if !show.iter().any(|on| *on) {
             self.cascade_lines.clear();
             return;
         }
-        let geometry = pin_geometry(scene);
-        if self.pin_geometry != Some(geometry) {
-            self.screen_pins = crate::pins::ScreenPins::default();
-            self.pin_geometry = Some(geometry);
-        }
-        let aspect = self.width as f32 / self.height.max(1) as f32;
-        let view = crate::pins::PinView::from_camera(camera, aspect, self.width, self.height);
-        crate::pins::update_screen_pins(&mut self.screen_pins, scene, &view);
         let mut lines = Vec::new();
+        let mut line = |a: [f32; 3], b: [f32; 3], color: [f32; 3]| {
+            lines.push(crate::pack::overlay_vertex(a, color));
+            lines.push(crate::pack::overlay_vertex(b, color));
+        };
         if show[0] {
-            lines.extend(crate::pins::pinned_debug_lines(
-                &self.screen_pins.layers[0],
-                &view,
-                0,
-                [0.25, 0.95, 1.0],
-            ));
+            let r = 0.06;
+            for p in self.tier.lit_probes() {
+                for axis in 0..3 {
+                    let mut a = p;
+                    let mut b = p;
+                    a[axis] -= r;
+                    b[axis] += r;
+                    line(a, b, [0.25, 0.95, 1.0]);
+                }
+            }
         }
         if show[1] {
-            lines.extend(crate::pins::pinned_debug_lines(
-                &self.screen_pins.layers[1],
-                &view,
-                1,
-                [1.0, 0.82, 0.2],
-            ));
+            for (lo, hi) in self.tier.brick_boxes() {
+                for edge in 0..12 {
+                    let axis = edge / 4;
+                    let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+                    let mut a = lo;
+                    if edge & 1 != 0 {
+                        a[u] = hi[u];
+                    }
+                    if edge & 2 != 0 {
+                        a[v] = hi[v];
+                    }
+                    let mut b = a;
+                    b[axis] = hi[axis];
+                    line(a, b, [1.0, 0.82, 0.2]);
+                }
+            }
         }
         if show[2] {
             lines.extend(crate::field::cascade_debug_lines(
@@ -345,13 +359,19 @@ impl Renderer {
         let _ = (rewrite_light, self.screen_key);
         let mut pack = pack;
         pack::apply_view(&mut pack, camera, aspect, self.width, self.height);
-        self.stage_pins(world, &mut pack);
+        self.gpu.poll_light()?;
+        // A readback, and the first picture of a renderer, show the settled light: they
+        // run builds until the tier has no work. Later changes fill in under the budget.
+        let settle = readback || !self.gpu.light_ready;
+        let wait_light = readback || !self.gpu.light_ready;
+        self.stage_tier(world, &pack, settle);
         self.gpu.upload_scene(&pack)?;
         self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
-        self.gpu.poll_light()?;
-        let wait_light = readback || !self.gpu.light_ready;
-        // One cascade row when the build is already going. A readback finishes every row.
         self.gpu.kick_light(wait_light)?;
+        self.commit_tier();
+        if settle {
+            self.settle_tier(world, &pack)?;
+        }
         self.gpu.note_vertex_count(world_dynamic);
         self.gpu.set_draws(draws);
         self.gpu.note_overlay_count(overlay_count);
@@ -422,32 +442,63 @@ impl Renderer {
         let mut pack = pack::pack_frame(world, &matrix, eye, &mut self.memory);
         let aspect = self.width as f32 / self.height.max(1) as f32;
         pack::apply_view(&mut pack, &camera, aspect, self.width, self.height);
-        self.stage_pins(world, &mut pack);
+        self.stage_tier(world, &pack, true);
         self.gpu.wait_all_inflight()?;
         self.gpu.upload_scene(&pack)?;
         self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
         Ok(())
     }
 
-    /// Keep the two finest cascades on their world cells, then hand those hits to the gather.
-    fn stage_pins(&mut self, world: &World, pack: &mut pack::Pack) {
-        let geometry = pin_geometry(&world.scene);
-        if self.pin_geometry != Some(geometry) {
-            self.screen_pins = crate::pins::ScreenPins::default();
-            self.pin_geometry = Some(geometry);
+    /// Follow the camera, scene and lights in the tier, then hand the next build its
+    /// work. `settle` takes everything that is due in one build; otherwise the work
+    /// fits `tier_ms` of GPU time.
+    fn stage_tier(&mut self, world: &World, pack: &pack::Pack, settle: bool) {
+        let boxes = crate::probe_tier::scene_boxes(&world.scene);
+        let lights = tier_lights(pack);
+        self.tier.update(boxes, material_key(pack), pack.eye, &lights);
+        if let Some((rays, ms)) = self.gpu.tier_time.take() {
+            self.tier.note_time(rays, ms);
         }
-        let view = crate::pins::PinView::from_pack(pack);
-        crate::pins::update_screen_pins(&mut self.screen_pins, &world.scene, &view);
-        pack.pin_count0 = self.screen_pins.layers[0].len() as u32;
-        pack.pin_count1 = self.screen_pins.layers[1].len() as u32;
-        let texels = crate::pins::pin_texels(&self.screen_pins, &view);
-        // One copy of the whole span. A per-float push took ~10 ms a frame in a debug build.
-        // SAFETY: `[f32; 4]` is 16 plain bytes with no padding, and u8 has alignment 1.
-        let raw = unsafe {
-            std::slice::from_raw_parts(texels.as_ptr().cast::<u8>(), texels.len() * 16)
+        let (budget, first) = if settle {
+            (None, crate::probe_tier::REFINE_RAYS)
+        } else {
+            (Some(self.tier.budget_rays(self.tier_ms)), crate::probe_tier::FIRST_RAYS)
         };
-        self.gpu.pin_bytes.clear();
-        self.gpu.pin_bytes.extend_from_slice(raw);
+        let batch = self.tier.batch(pack.eye, budget, first);
+        self.gpu.light_key = self.tier.light_gen();
+        self.gpu.tier_batch = Some(batch);
+    }
+
+    /// The build that began took its batch. That light counts from now on.
+    fn commit_tier(&mut self) {
+        if let Some(batch) = self.gpu.tier_started.take() {
+            if !batch.items.is_empty() {
+                self.tier.commit(&batch);
+                self.gpu.world_stale = true;
+            }
+        }
+    }
+
+    /// Run builds until the tier has nothing due and the world probes have seen it.
+    fn settle_tier(&mut self, world: &World, pack: &pack::Pack) -> Result<(), String> {
+        for _ in 0..32 {
+            if !self.tier.has_work() && !self.gpu.world_stale {
+                break;
+            }
+            self.stage_tier(world, pack, true);
+            self.gpu.upload_scene(pack)?;
+            if self.gpu.pending_light.is_none() {
+                break;
+            }
+            self.gpu.kick_light(true)?;
+            self.commit_tier();
+        }
+        Ok(())
+    }
+
+    /// Tier counts for reports.
+    pub fn tier_stats(&self) -> crate::probe_tier::TierStats {
+        self.tier.stats()
     }
 
     /// Ground position the gather is tracking.
@@ -655,15 +706,10 @@ struct Gpu {
     /// Screen-probe grid from the last uploaded view.
     screen_w: u32,
     screen_h: u32,
-    /// Live pins for cascades 0 and 1. Cascade 2 stays on the screen grid.
-    pin_counts: [u32; 2],
-    /// Pin positions, normals, and cell index. Written into the field before the gather.
-    pin_bytes: Vec<u8>,
     /// Inputs of the last light build that began: scene bytes, pin bytes and dispatch sizes.
     /// A frame whose inputs match it keeps that field instead of building it again.
     built_scene: Vec<u8>,
-    built_pins: Vec<u8>,
-    built_dims: [u32; 14],
+    built_dims: [u32; 4],
     floor_half_x: f32,
     floor_half_z: f32,
     /// Chains gather slices. The last slice leaves it signaled for one picture.
@@ -675,6 +721,23 @@ struct Gpu {
     light_publish_flight: Option<usize>,
     light_publish_fence: Handle,
     pending_light: Option<Vec<u8>>,
+    /// Tier tables and work for the next build. Replaced every frame.
+    tier_batch: Option<crate::probe_tier::TierBatch>,
+    /// The batch the last build that began took, for the renderer to commit.
+    tier_started: Option<crate::probe_tier::TierBatch>,
+    /// Light generation (lights, geometry, materials) the world probes need.
+    light_key: u64,
+    /// Light generation of the last world probe build.
+    built_light_key: Option<u64>,
+    /// The tier changed since the world probes last read it.
+    world_stale: bool,
+    /// What the build in flight runs: world passes, tier items, slots to copy forward.
+    plan_world: bool,
+    plan_items: u32,
+    plan_slots: u32,
+    plan_rays: u64,
+    /// Probe rays and GPU milliseconds of the last timed tier pass.
+    tier_time: Option<(u64, f64)>,
     compute_layout: Handle,
     compute_pipe: Handle,
     audio_rays: Buffer,
@@ -691,6 +754,9 @@ struct Gpu {
     timestamp_period: f32,
     timestamp_bits: u32,
     query_pool: Handle,
+    /// Timestamps around the light passes. The tier budget learns its cost from them.
+    light_qp: Handle,
+    light_stamp: u32,
     profile_submit: bool,
     stamp_pending: [bool; 2],
     inflight: VecDeque<usize>,
@@ -777,6 +843,7 @@ struct Fns {
     cmd_barrier: FnBarrier,
     cmd_copy_image: FnCopyImage,
     cmd_copy_to_buffer: FnCopyBuf,
+    cmd_copy_buffer: FnCopyBuffer,
     cmd_copy_to_image: FnCopyToImage,
     create_sem: FnCreateSem,
     destroy_sem: Fn2,
@@ -886,6 +953,7 @@ type FnBarrier = unsafe extern "system" fn(
 );
 type FnCopyImage = unsafe extern "system" fn(Handle, Handle, i32, Handle, i32, u32, *const u8);
 type FnCopyBuf = unsafe extern "system" fn(Handle, Handle, i32, Handle, u32, *const u8);
+type FnCopyBuffer = unsafe extern "system" fn(Handle, Handle, Handle, u32, *const u8);
 type FnCopyToImage = unsafe extern "system" fn(Handle, Handle, Handle, i32, u32, *const u8);
 type FnCreateSem =
     unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
@@ -1294,11 +1362,8 @@ impl Gpu {
                 swap_on_done: true,
                 screen_w: 1,
                 screen_h: 1,
-                pin_counts: [0, 0],
-                pin_bytes: Vec::new(),
                 built_scene: Vec::new(),
-                built_pins: Vec::new(),
-                built_dims: [0; 14],
+                built_dims: [0; 4],
                 floor_half_x: 1.0,
                 floor_half_z: 1.0,
                 light_sem: std::ptr::null_mut(),
@@ -1307,6 +1372,16 @@ impl Gpu {
                 light_publish_flight: None,
                 light_publish_fence: std::ptr::null_mut(),
                 pending_light: None,
+                tier_batch: None,
+                tier_started: None,
+                light_key: 0,
+                built_light_key: None,
+                world_stale: false,
+                plan_world: false,
+                plan_items: 0,
+                plan_slots: 0,
+                plan_rays: 0,
+                tier_time: None,
                 compute_layout: std::ptr::null_mut(),
                 compute_pipe: std::ptr::null_mut(),
                 audio_rays: Buffer::empty(),
@@ -1323,6 +1398,8 @@ impl Gpu {
                 timestamp_period,
                 timestamp_bits,
                 query_pool: std::ptr::null_mut(),
+                light_qp: std::ptr::null_mut(),
+                light_stamp: 0,
                 profile_submit: false,
                 stamp_pending: [false; 2],
                 inflight: VecDeque::new(),
@@ -1448,6 +1525,7 @@ impl Gpu {
             self.fence = self.fences[0];
             if self.timestamp_period > 0.0 {
                 self.query_pool = self.make_query_pool()?;
+                self.light_qp = self.make_query_pool_n(16)?;
             }
             self.make_lighting()?;
             self.make_aa_pipes()?;
@@ -1978,6 +2056,10 @@ impl Gpu {
     }
 
     fn make_query_pool(&mut self) -> Result<Handle, String> {
+        self.make_query_pool_n(4)
+    }
+
+    fn make_query_pool_n(&mut self, count: u32) -> Result<Handle, String> {
         #[repr(C)]
         struct Info {
             s_type: i32,
@@ -1993,7 +2075,7 @@ impl Gpu {
             flags: 0,
             // VK_QUERY_TYPE_TIMESTAMP is 2. Type 1 is pipeline statistics.
             query_type: 2,
-            query_count: 4,
+            query_count: count,
             pipeline_statistics: 0,
         };
         let mut pool = std::ptr::null_mut();
@@ -2009,6 +2091,58 @@ impl Gpu {
             )?;
         }
         Ok(pool)
+    }
+
+    fn light_mark(&mut self, cmd: Handle) {
+        if self.light_qp.is_null() || self.light_stamp >= 16 {
+            return;
+        }
+        unsafe {
+            (self.fns.cmd_write_timestamp)(cmd, 0x2000, self.light_qp, self.light_stamp);
+        }
+        self.light_stamp += 1;
+    }
+
+    fn light_times(&mut self) {
+        if self.light_qp.is_null() || self.light_stamp < 2 {
+            return;
+        }
+        let n = self.light_stamp as usize;
+        let mut raw = vec![0u64; n];
+        let got = unsafe {
+            (self.fns.get_query_results)(
+                self.device,
+                self.light_qp,
+                0,
+                n as u32,
+                8 * n,
+                raw.as_mut_ptr() as *mut c_void,
+                8,
+                0x1 | 0x2,
+            )
+        };
+        if got != 0 {
+            return;
+        }
+        let ms: Vec<f64> = raw
+            .windows(2)
+            .map(|w| tick_delta(w[0], w[1], self.timestamp_bits) as f64 * f64::from(self.timestamp_period) / 1.0e6)
+            .collect();
+        // Stamps: start, copy, world direct, world bounce, tier.
+        if self.plan_items > 0 && ms.len() >= 4 {
+            self.tier_time = Some((self.plan_rays, ms[3]));
+        }
+        if std::env::var("GENOS_PASS_TIMES").is_ok() {
+            let text: Vec<String> = ms.iter().map(|v| format!("{v:.3}")).collect();
+            eprintln!(
+                "PASS_MS {} world={} items={} slots={} rays={}",
+                text.join(" "),
+                self.plan_world,
+                self.plan_items,
+                self.plan_slots,
+                self.plan_rays
+            );
+        }
     }
 
     fn reset_queries(&self, slot: usize) {
@@ -2327,11 +2461,12 @@ impl Gpu {
         let share = self.light_families();
         self.instances = self.make_buffer_queues(5120, 0x20, true, &share)?;
         self.particle_buf = self.make_buffer_queues(16 + 256 * 256 * 4, 0x20, true, &share)?;
-        let field_bytes = vec![0u8; crate::field::FIELD_COPY as usize * 16];
+        let field_bytes = vec![0u8; crate::probe_tier::TIER_END as usize * 16];
         for index in 0..2 {
             self.light_scene[index] = self.make_buffer_queues(4096, 0x20, true, &share)?;
+            // Storage, plus transfer source and destination for the copy forward.
             self.light_field[index] =
-                self.make_buffer_queues(field_bytes.len() as u64, 0x20, true, &share)?;
+                self.make_buffer_queues(field_bytes.len() as u64, 0x20 | 0x1 | 0x2, true, &share)?;
             self.write_buffer(&self.light_field[index], &field_bytes)?;
             self.write_buffer(&self.light_scene[index], &vec![0u8; 4096])?;
         }
@@ -3101,37 +3236,28 @@ impl Gpu {
         self.world_bands = (world_z + 7) / 8;
         self.screen_w = pack.grid_w.max(1);
         self.screen_h = pack.grid_h.max(1);
-        self.pin_counts = [pack.pin_count0, pack.pin_count1];
         self.floor_half_x = pack.floor_half_x;
         self.floor_half_z = pack.floor_half_z;
-        // The field only reads these inputs. Unchanged inputs give the field already built,
-        // so the gather does not run again (a still camera used to rebuild every few frames).
-        if !self.built_scene.is_empty()
-            && self.light_dims() == self.built_dims
-            && bytes == self.built_scene
-            && self.pin_bytes == self.built_pins
-        {
+        // The field reads lights, geometry and the tier, never the camera. A build runs
+        // for new lights or geometry, for due tier work, or for world probes that have
+        // not seen the settled tier. A still or walking camera in a lit tier runs none.
+        let items = self.tier_batch.as_ref().map_or(0, |b| b.items.len());
+        let new_light = self.built_light_key != Some(self.light_key)
+            || self.light_dims() != self.built_dims;
+        let world = new_light || (self.world_stale && items == 0);
+        if !world && items == 0 {
             self.pending_light = None;
             return Ok(());
         }
+        self.plan_world = world;
         self.pending_light = Some(bytes);
         Ok(())
     }
 
-    fn light_dims(&self) -> [u32; 14] {
+    fn light_dims(&self) -> [u32; 4] {
         [
-            self.light_cols[0],
-            self.light_cols[1],
-            self.light_cols[2],
-            self.light_rows[0],
-            self.light_rows[1],
-            self.light_rows[2],
             self.world_cols,
             self.world_bands,
-            self.screen_w,
-            self.screen_h,
-            self.pin_counts[0],
-            self.pin_counts[1],
             self.floor_half_x.to_bits(),
             self.floor_half_z.to_bits(),
         ]
@@ -3262,6 +3388,7 @@ impl Gpu {
             self.light_shown = self.light_dst;
             self.desc_set = self.light_sets[self.light_shown];
             self.light_ready = true;
+            self.light_times();
             self.light_wait_graphics = true;
         }
         Ok(())
@@ -3297,13 +3424,24 @@ impl Gpu {
         };
         let dst = 1 - self.light_shown;
         self.write_buffer(&self.light_scene[dst], &bytes)?;
-        if !self.pin_bytes.is_empty() {
-            let offset = crate::pins::PIN_SPAN_START as u64 * 16;
-            self.write_buffer_at(&self.light_field[dst], offset, &self.pin_bytes)?;
+        let batch = self.tier_batch.take().unwrap_or_default();
+        if !batch.texels.is_empty() {
+            // SAFETY: `[f32; 4]` is 16 plain bytes with no padding, and u8 has alignment 1.
+            let raw = unsafe {
+                std::slice::from_raw_parts(batch.texels.as_ptr().cast::<u8>(), batch.texels.len() * 16)
+            };
+            let offset = crate::probe_tier::TIER_INFO as u64 * 16;
+            self.write_buffer_at(&self.light_field[dst], offset, raw)?;
         }
-        self.built_dims = self.light_dims();
-        self.built_pins.clear();
-        self.built_pins.extend_from_slice(&self.pin_bytes);
+        self.plan_items = batch.items.len() as u32;
+        self.plan_slots = batch.used_slots;
+        self.plan_rays = batch.probe_rays;
+        if self.plan_world {
+            self.built_light_key = Some(self.light_key);
+            self.built_dims = self.light_dims();
+            self.world_stale = false;
+        }
+        self.tier_started = Some(batch);
         self.built_scene = bytes;
         self.light_dst = dst;
         self.light_pass = 0;
@@ -3340,6 +3478,12 @@ impl Gpu {
                 "begin light",
             )?;
         }
+        if !self.light_qp.is_null() {
+            unsafe { (self.fns.cmd_reset_query)(self.light_cmd, self.light_qp, 0, 16) };
+        }
+        self.light_stamp = 0;
+        let cmd = self.light_cmd;
+        self.light_mark(cmd);
         self.dispatch_screen_field(self.light_cmd, self.light_sets[dst])?;
         unsafe {
             check((self.fns.end_cmd)(self.light_cmd), "end light")?;
@@ -3387,42 +3531,91 @@ impl Gpu {
         Ok(())
     }
 
-    /// 3D world probes, one bounce, then the screen cascades from far to near.
+    /// Copy the lit tier (and the world probes when they do not run) forward from the
+    /// field on screen, light the world probes when lights or geometry changed, then
+    /// run the tier work.
     fn dispatch_screen_field(&mut self, cmd: Handle, set: Handle) -> Result<(), String> {
-        let half_x = self.floor_half_x.max(0.5);
-        let half_z = self.floor_half_z.max(0.5);
-        let span_x = half_x * 2.0 + 2.5 * 4.0;
-        let span_z = half_z * 2.0 + 2.5 * 4.0;
-        let count_x = ((span_x / 2.5).ceil() as u32).clamp(1, 48);
-        let count_z = ((span_z / 2.5).ceil() as u32).clamp(1, 48);
-        let count_y = 3u32;
-        let world_x = (count_x + 7) / 8;
-        let world_y = (count_y * count_z + 7) / 8;
-        // Pass 8 stores direct hits. Pass 9 adds one bounce from that volume.
-        self.dispatch_light_slice(cmd, set, 8, 0, world_y.max(1), world_x.max(1))?;
-        self.dispatch_light_slice(cmd, set, 9, 0, world_y.max(1), world_x.max(1))?;
-        for pass in 0..3u32 {
-            let level = 2 - pass;
-            if level < 2 {
-                let count = self.pin_counts[level as usize];
-                if count == 0 {
-                    continue;
-                }
-                // One workgroup is 8 by 8. The shader reads a linear pin index.
-                let groups = (count + 63) / 64;
-                self.dispatch_light_slice(cmd, set, pass, 0, 1, groups)?;
-                continue;
+        let src = self.light_field[self.light_shown].buffer;
+        let dst = self.light_field[self.light_dst].buffer;
+        #[repr(C)]
+        struct Region {
+            src: u64,
+            dst: u64,
+            size: u64,
+        }
+        let mut regions = Vec::new();
+        if self.plan_slots > 0 {
+            let at = crate::probe_tier::TIER_PROBES as u64 * 16;
+            let size = u64::from(self.plan_slots)
+                * u64::from(crate::probe_tier::BRICK_PROBES * crate::probe_tier::PROBE_TEXELS)
+                * 16;
+            regions.push(Region { src: at, dst: at, size });
+        }
+        if !self.plan_world {
+            let at = crate::field::WORLD_BEGIN as u64 * 16;
+            let size = (crate::field::FIELD_COPY - crate::field::WORLD_BEGIN) as u64 * 16;
+            regions.push(Region { src: at, dst: at, size });
+        }
+        if !regions.is_empty() && src != dst {
+            #[repr(C)]
+            struct MemBar {
+                s_type: i32,
+                next: *const c_void,
+                src_access: u32,
+                dst_access: u32,
             }
-            // Screen cascade 2 is not read since the pinned cascades took over 0 and 1:
-            // only screen_interval reads it, and only the screen path for 0 and 1 calls that.
+            unsafe {
+                (self.fns.cmd_copy_buffer)(
+                    cmd,
+                    src,
+                    dst,
+                    regions.len() as u32,
+                    regions.as_ptr().cast::<u8>(),
+                );
+                let copied = MemBar {
+                    s_type: 46,
+                    next: std::ptr::null(),
+                    src_access: 0x1000,
+                    dst_access: 0x20 | 0x40,
+                };
+                (self.fns.cmd_barrier)(
+                    cmd,
+                    0x1000,
+                    0x800,
+                    0,
+                    1,
+                    &copied as *const MemBar as *const c_void,
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                );
+            }
         }
-        // Bake the lit pins into the two lookup volumes the picture samples.
-        for (level, cells) in [
-            (0u32, crate::pins::VOL_XZ0 * crate::pins::VOL_XZ0 * crate::pins::VOL_Y0),
-            (1u32, crate::pins::VOL_XZ1 * crate::pins::VOL_XZ1 * crate::pins::VOL_Y1),
-        ] {
-            self.dispatch_light_slice(cmd, set, 10 + level, 0, 1, (cells + 63) / 64)?;
+        self.light_mark(cmd);
+        if self.plan_world {
+            let half_x = self.floor_half_x.max(0.5);
+            let half_z = self.floor_half_z.max(0.5);
+            let span_x = half_x * 2.0 + 2.5 * 4.0;
+            let span_z = half_z * 2.0 + 2.5 * 4.0;
+            let count_x = ((span_x / 2.5).ceil() as u32).clamp(1, 48);
+            let count_z = ((span_z / 2.5).ceil() as u32).clamp(1, 48);
+            let count_y = 3u32;
+            let world_x = (count_x + 7) / 8;
+            let world_y = (count_y * count_z + 7) / 8;
+            // Pass 8 stores direct hits. Pass 9 adds the bounce at each hit from the tier.
+            self.dispatch_light_slice(cmd, set, 8, 0, world_y.max(1), world_x.max(1))?;
+            self.light_mark(cmd);
+            self.dispatch_light_slice(cmd, set, 9, 0, world_y.max(1), world_x.max(1))?;
+        } else {
+            self.light_mark(cmd);
         }
+        self.light_mark(cmd);
+        if self.plan_items > 0 {
+            // One workgroup (64 invocations) per brick, one probe per invocation.
+            self.dispatch_light_slice(cmd, set, 12, 0, 1, self.plan_items)?;
+        }
+        self.light_mark(cmd);
         Ok(())
     }
 
@@ -5098,6 +5291,7 @@ fn load_fns(
             cmd_barrier: d!("vkCmdPipelineBarrier"),
             cmd_copy_image: d!("vkCmdCopyImage"),
             cmd_copy_to_buffer: d!("vkCmdCopyImageToBuffer"),
+            cmd_copy_buffer: d!("vkCmdCopyBuffer"),
             cmd_copy_to_image: d!("vkCmdCopyBufferToImage"),
             create_sem: d!("vkCreateSemaphore"),
             destroy_sem: d!("vkDestroySemaphore"),
@@ -5155,3 +5349,4 @@ extern "C" {
     fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> Pfn;
 }
+

@@ -47,7 +47,7 @@ layout(std430, set = 0, binding = 0) readonly buffer SceneData {
     float far_end;
     float world_end;
     uint pad2;
-    Lamp lamps[4];
+    Lamp lamps[32];
     Occ occs[16];
     Obj objects[32];
     vec4 eye;
@@ -75,6 +75,7 @@ layout(std430, set = 0, binding = 1) buffer FieldData {
 
 #extension GL_GOOGLE_include_directive : require
 #include "scene_rays.glsl"
+#include "tier.glsl"
 
 layout(push_constant) uniform Pass {
     uint pass;
@@ -94,28 +95,7 @@ const uint WORLD_CUBE_OFFSET = 458752u;
 // end at 294912, and 6 faces per probe end below WORLD_BOUNCE_OFFSET.
 const uint WORLD_DIRECT_CUBE_OFFSET = 294912u;
 vec3 cube_axis(uint face);
-const uint SCREEN_DIR_BASE = 16384u;
-// Pinned hits for cascades 0 and 1. Cascade 2 stays on the screen grid.
-const uint PIN_POS0 = 98304u;
-const uint PIN_NRM0 = 100352u;
-const uint PIN_POS1 = 102400u;
-const uint PIN_NRM1 = 103424u;
-const uint HASH_ORIGIN0 = 104448u;
-const uint HASH_BASE0 = 104449u;
-const uint HASH_DIM0 = 32u;
-const uint HASH_ORIGIN1 = 137217u;
-const uint HASH_BASE1 = 137218u;
-const uint HASH_DIM1 = 28u;
-const uint PIN_IRR1 = 2048u;
-const uint VOL_XZ0 = 32u;
-const uint VOL_Y0 = 6u;
-const uint VOL0_INFO = 49152u;
-const uint VOL0_BASE = 49153u;
-const uint VOL_XZ1 = 28u;
-const uint VOL_Y1 = 3u;
-const uint VOL1_INFO = 159170u;
-const uint VOL1_BASE = 159171u;
-const float VOL_REACH = 1.0;
+void bounce_at2(vec3 pos, vec3 normal, uint twice_far, out vec3 once, out vec3 twice);
 const float LAMBERT = 0.318309886;
 // A unit white lamp 7 m above a white floor stays near 0.46.
 const float LAMP_UNIT = 72.0;
@@ -157,7 +137,7 @@ vec3 shade_lamp(vec3 origin, vec3 normal, vec4 lamp, vec3 color) {
 
 vec3 lights_at(vec3 origin, vec3 normal) {
     vec3 sum = vec3(0.0);
-    uint lamps = min(scene.lamp_count, 4u);
+    uint lamps = min(scene.lamp_count, 32u);
     for (uint i = 0u; i < lamps; i++) {
         sum += shade_lamp(origin, normal, scene.lamps[i].pos, scene.lamps[i].color.rgb);
     }
@@ -173,18 +153,6 @@ float ray_spin3(vec3 p) {
     return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
 }
 
-vec3 hemisphere_dir(vec3 n, uint d, uint dirs, float spin) {
-    float nrm = float(max(dirs, 1u));
-    float i = float(d) + 0.5;
-    float cos_t = clamp(1.0 - i / nrm, 0.0, 1.0);
-    float sin_t = sqrt(max(1.0 - cos_t * cos_t, 0.0));
-    float phi = i * 2.39996323 + spin * TAU / nrm;
-    vec3 up = abs(n.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-    vec3 tangent = normalize(cross(up, n));
-    vec3 bitangent = cross(n, tangent);
-    return normalize(tangent * cos(phi) * sin_t + bitangent * sin(phi) * sin_t + n * cos_t);
-}
-
 vec3 sphere_dir(uint d, uint dirs, float spin) {
     float nrm = float(max(dirs, 1u));
     float i = float(d) + 0.5;
@@ -192,42 +160,6 @@ vec3 sphere_dir(uint d, uint dirs, float spin) {
     float radius = sqrt(max(1.0 - y * y, 0.0));
     float phi = i * 2.39996323 + spin * TAU / nrm;
     return vec3(cos(phi) * radius, y, sin(phi) * radius);
-}
-
-uint screen_dirs_at(uint cascade) {
-    // The near fan is not stored. 64 fixed rays keep one hit from painting a grain.
-    if (cascade == 0u) {
-        return 64u;
-    }
-    return 16u << cascade;
-}
-
-void screen_range(uint cascade, out float t0, out float t1) {
-    if (cascade == 0u) {
-        t0 = 0.0;
-        t1 = 0.55;
-    } else if (cascade == 1u) {
-        t0 = 0.55;
-        t1 = 1.65;
-    } else {
-        t0 = 1.65;
-        t1 = 5.0;
-    }
-}
-
-uint screen_dir_offset(uint cascade) {
-    // Cascade 0 keeps only its integrated color. Cascade 1 stores one interval
-    // per direction. Cascade 2 starts after the live cascade 1 probes.
-    uint offset = SCREEN_DIR_BASE;
-    if (cascade >= 2u) {
-        uint slots = uint(scene.view_grid.w + 0.5);
-        offset += slots * screen_dirs_at(1u);
-    }
-    return offset;
-}
-
-uint lattice_index(ivec3 cell, uint dim) {
-    return uint((cell.y * int(dim) + cell.z) * int(dim) + cell.x);
 }
 
 bool point_in_volume(vec3 p) {
@@ -286,106 +218,6 @@ vec3 world_probe_pos(uvec3 i, vec3 origin) {
     return origin + vec3((float(i.x) + 0.5) * WORLD_SPACING, float(i.y) * 1.5, (float(i.z) + 0.5) * WORLD_SPACING);
 }
 
-uint match_sphere(vec3 dir, float spin) {
-    vec3 nray = normalize(dir);
-    uint best = 0u;
-    float best_dot = -2.0;
-    for (uint d = 0u; d < WORLD_DIRS; d++) {
-        float align = dot(nray, sphere_dir(d, WORLD_DIRS, spin));
-        if (align > best_dot) {
-            best_dot = align;
-            best = d;
-        }
-    }
-    return best;
-}
-
-vec4 world_texel(uint base, uvec3 ip, uvec3 count, uint dir) {
-    return field.texels[base + world_probe_index(ip, count) * WORLD_DIRS + dir];
-}
-
-// Light borrowed from another probe (a world probe or a cascade 1 pin) for a ray
-// that left this probe's own range empty. The other probe can stand metres away, so
-// its hit must be a surface that the ray's end (`ray * t_from`, free space) sees,
-// within the 60 degrees a world direction may snap by. Without the test a lamp
-// beside a wall end lights the far side of the wall through probes that see round
-// the end.
-const float BORROW_COS = 0.5;
-
-bool borrowed_hit_ahead(vec3 start, vec3 ray, float t_from, vec3 hit_at) {
-    vec3 dir = normalize(ray);
-    vec3 to_hit = hit_at - (start + dir * t_from);
-    float dist = length(to_hit);
-    return dist >= 1.0e-3 && dot(to_hit / dist, dir) >= BORROW_COS;
-}
-
-bool borrowed_hit_seen(vec3 start, vec3 ray, float t_from, vec3 hit_at, vec3 hit_ray) {
-    return borrowed_hit_ahead(start, ray, t_from, hit_at)
-        && !scene_occluded(start + normalize(ray) * t_from, hit_at - hit_ray * 0.02);
-}
-
-vec4 world_interval(uint base, vec3 pos, vec3 dir, vec3 face_n, float t_from) {
-    vec3 origin;
-    uvec3 count;
-    world_layout3(origin, count);
-    vec3 local = pos - origin;
-    float fx = clamp(local.x / WORLD_SPACING - 0.5, 0.0, float(count.x - 1u));
-    float fy = clamp((pos.y - origin.y) / 1.5, 0.0, float(count.y - 1u));
-    float fz = clamp(local.z / WORLD_SPACING - 0.5, 0.0, float(count.z - 1u));
-    uvec3 i0 = uvec3(uint(floor(fx)), uint(floor(fy)), uint(floor(fz)));
-    uvec3 i1 = min(i0 + uvec3(1u), count - uvec3(1u));
-    vec3 t = vec3(fx, fy, fz) - vec3(i0);
-    vec4 acc = vec4(0.0);
-    float weight = 0.0;
-    float hit_w = 0.0;
-    for (uint corner = 0u; corner < 8u; corner++) {
-        uvec3 ip = uvec3(
-            (corner & 1u) == 0u ? i0.x : i1.x,
-            (corner & 2u) == 0u ? i0.y : i1.y,
-            (corner & 4u) == 0u ? i0.z : i1.z
-        );
-        float w = ((corner & 1u) == 0u ? 1.0 - t.x : t.x)
-            * ((corner & 2u) == 0u ? 1.0 - t.y : t.y)
-            * ((corner & 4u) == 0u ? 1.0 - t.z : t.z);
-        if (w <= 1.0e-5) {
-            continue;
-        }
-        vec3 probe = world_probe_pos(ip, origin);
-        if (point_in_volume(probe) || lamp_blocked(pos, probe)) {
-            continue;
-        }
-        float spin = ray_spin3(probe);
-        uint dir_i = match_sphere(dir, spin);
-        vec3 snapped = sphere_dir(dir_i, WORLD_DIRS, spin);
-        // The nearest of 16 directions can sit 60 degrees off. Below the face it
-        // looks back at the lit surface the pin stands on, and that light leaks in.
-        if (dot(normalize(dir), snapped) < 0.5 || dot(snapped, face_n) <= 0.0) {
-            continue;
-        }
-        vec4 taken = world_texel(base, ip, count, dir_i);
-        if (taken.a < -1.5) {
-            // A miss is a real answer: nothing out there. It keeps its weight.
-            weight += w;
-            continue;
-        }
-        if (taken.a < 0.0) {
-            continue;
-        }
-        vec3 hit_at = probe + snapped * taken.a;
-        if (!borrowed_hit_seen(pos, dir, t_from, hit_at, snapped)) {
-            continue;
-        }
-        // Distance from the pin, so the caller compares it with its own interval.
-        acc += vec4(taken.rgb, length(hit_at - pos)) * w;
-        hit_w += w;
-        weight += w;
-    }
-    if (hit_w <= 1.0e-4) {
-        return vec4(0.0, 0.0, 0.0, -2.0);
-    }
-    return vec4(acc.rgb / weight, acc.a / hit_w);
-}
-
 // Light arriving at a face, from one set of the world probes' six-facing cubes:
 // WORLD_DIRECT_CUBE_OFFSET (direct only, pass 8) or WORLD_CUBE_OFFSET (direct plus
 // one bounce, pass 9). The sphere mean counts the dark solid behind the face
@@ -434,204 +266,6 @@ vec3 sample_cube(uint cube_base, vec3 pos, vec3 n) {
     return sum / weight;
 }
 
-vec4 pinned_interval(vec3 world, vec3 face_n, vec3 ray, float t_from) {
-    vec4 info = field.texels[HASH_ORIGIN1];
-    float spacing = info.w;
-    if (spacing <= 0.0) {
-        return vec4(0.0, 0.0, 0.0, -2.0);
-    }
-    ivec3 base = ivec3(floor((world - info.xyz) / spacing));
-    vec4 acc = vec4(0.0);
-    float weight = 0.0;
-    vec3 nray = normalize(ray);
-    uint dirs = screen_dirs_at(1u);
-    float reach = min(2.0, spacing * 2.0);
-    for (int dz = -2; dz <= 2; dz++) {
-        for (int dy = -2; dy <= 2; dy++) {
-            for (int dx = -2; dx <= 2; dx++) {
-                ivec3 cell = base + ivec3(dx, dy, dz);
-                if (cell.x < 0 || cell.y < 0 || cell.z < 0
-                    || cell.x >= int(HASH_DIM1) || cell.y >= int(HASH_DIM1) || cell.z >= int(HASH_DIM1)) {
-                    continue;
-                }
-                vec4 rec = field.texels[HASH_BASE1 + lattice_index(cell, HASH_DIM1)];
-                for (int slot = 0; slot < 2; slot++) {
-                    float index = slot == 0 ? rec.x : rec.y;
-                    if (index < 0.0) {
-                        continue;
-                    }
-                    uint probe = uint(index + 0.5);
-                    vec4 stored = field.texels[PIN_POS1 + probe];
-                    if (stored.w < 0.5) {
-                        continue;
-                    }
-                    vec3 normal = field.texels[PIN_NRM1 + probe].xyz;
-                    if (dot(normal, face_n) <= 0.6) {
-                        continue;
-                    }
-                    float dist = length(stored.xyz - world);
-                    if (dist >= reach) {
-                        continue;
-                    }
-                    if (scene_occluded(world + face_n * 0.05, stored.xyz + normal * 0.05)) {
-                        continue;
-                    }
-                    float w = 1.0 - dist / reach;
-                    if (w <= 1.0e-5) {
-                        continue;
-                    }
-                    uint best = 0u;
-                    float best_dot = -2.0;
-                    for (uint d = 0u; d < dirs; d++) {
-                        float align = dot(nray, hemisphere_dir(normal, d, dirs, 0.0));
-                        if (align > best_dot) {
-                            best_dot = align;
-                            best = d;
-                        }
-                    }
-                    vec4 taken = field.texels[screen_dir_offset(1u) + probe * dirs + best];
-                    if (taken.a < 0.0) {
-                        continue;
-                    }
-                    // Ahead only: see pinned_interval_cached.
-                    vec3 hit_ray = hemisphere_dir(normal, best, dirs, 0.0);
-                    vec3 hit_at = stored.xyz + normal * 0.04 + hit_ray * taken.a;
-                    if (!borrowed_hit_ahead(world + face_n * 0.04, nray, t_from, hit_at)) {
-                        continue;
-                    }
-                    acc += taken * w;
-                    weight += w;
-                }
-            }
-        }
-    }
-    if (weight <= 1.0e-4) {
-        return vec4(0.0, 0.0, 0.0, -2.0);
-    }
-    return acc / weight;
-}
-
-// The cascade 1 neighbours of a cascade 0 pin do not depend on the ray. Find them
-// once per pin instead of once per escaping ray (64 times).
-const uint NEXT_MAX = 32u;
-uint next_ids[NEXT_MAX];
-float next_w[NEXT_MAX];
-uint next_count = 0u;
-bool next_overflow = false;
-vec3 next_from = vec3(0.0);
-float next_t = 0.0;
-
-void gather_next(vec3 world, vec3 face_n, float t_from) {
-    next_count = 0u;
-    next_overflow = false;
-    // The cascade 0 rays start here (write_pinned) and run empty to t_from.
-    next_from = world + face_n * 0.04;
-    next_t = t_from;
-    vec4 info = field.texels[HASH_ORIGIN1];
-    float spacing = info.w;
-    if (spacing <= 0.0) {
-        return;
-    }
-    ivec3 base = ivec3(floor((world - info.xyz) / spacing));
-    float reach = min(2.0, spacing * 2.0);
-    for (int dz = -2; dz <= 2; dz++) {
-        for (int dy = -2; dy <= 2; dy++) {
-            for (int dx = -2; dx <= 2; dx++) {
-                ivec3 cell = base + ivec3(dx, dy, dz);
-                if (cell.x < 0 || cell.y < 0 || cell.z < 0
-                    || cell.x >= int(HASH_DIM1) || cell.y >= int(HASH_DIM1) || cell.z >= int(HASH_DIM1)) {
-                    continue;
-                }
-                vec4 rec = field.texels[HASH_BASE1 + lattice_index(cell, HASH_DIM1)];
-                for (int slot = 0; slot < 2; slot++) {
-                    float index = slot == 0 ? rec.x : rec.y;
-                    if (index < 0.0) {
-                        continue;
-                    }
-                    uint probe = uint(index + 0.5);
-                    vec4 stored = field.texels[PIN_POS1 + probe];
-                    if (stored.w < 0.5) {
-                        continue;
-                    }
-                    vec3 normal = field.texels[PIN_NRM1 + probe].xyz;
-                    if (dot(normal, face_n) <= 0.6) {
-                        continue;
-                    }
-                    float dist = length(stored.xyz - world);
-                    if (dist >= reach) {
-                        continue;
-                    }
-                    if (scene_occluded(world + face_n * 0.05, stored.xyz + normal * 0.05)) {
-                        continue;
-                    }
-                    float w = 1.0 - dist / reach;
-                    if (w <= 1.0e-5) {
-                        continue;
-                    }
-                    if (next_count >= NEXT_MAX) {
-                        next_overflow = true;
-                        return;
-                    }
-                    next_ids[next_count] = probe;
-                    next_w[next_count] = w;
-                    next_count++;
-                }
-            }
-        }
-    }
-}
-
-// pinned_interval over the neighbours gather_next found.
-vec4 pinned_interval_cached(vec3 face_n, vec3 ray) {
-    vec4 acc = vec4(0.0);
-    float weight = 0.0;
-    vec3 nray = normalize(ray);
-    uint dirs = screen_dirs_at(1u);
-    // Same-facing neighbours (every floor pin) share one direction match.
-    int own = -1;
-    for (uint k = 0u; k < next_count; k++) {
-        uint probe = next_ids[k];
-        vec3 normal = field.texels[PIN_NRM1 + probe].xyz;
-        uint best = 0u;
-        bool same = all(equal(normal, face_n));
-        if (same && own >= 0) {
-            best = uint(own);
-        } else {
-            float best_dot = -2.0;
-            for (uint d = 0u; d < dirs; d++) {
-                float align = dot(nray, hemisphere_dir(normal, d, dirs, 0.0));
-                if (align > best_dot) {
-                    best_dot = align;
-                    best = d;
-                }
-            }
-            if (same) {
-                own = int(best);
-            }
-        }
-        vec4 taken = field.texels[screen_dir_offset(1u) + probe * dirs + best];
-        if (taken.a < 0.0) {
-            continue;
-        }
-        // A cascade 1 answer that came from a world probe keeps only its distance,
-        // so along the pin's own ray it marks roughly where the hit is, not exactly.
-        // A sight test against that point rejected good hits (the room's colour
-        // bleed under the boxes fell from 0.04 to 0.11 chroma L1 vs the path
-        // tracer), so these hits only have to lie ahead of the ray.
-        vec3 hit_ray = hemisphere_dir(normal, best, dirs, 0.0);
-        vec3 hit_at = field.texels[PIN_POS1 + probe].xyz + normal * 0.04 + hit_ray * taken.a;
-        if (!borrowed_hit_ahead(next_from, nray, next_t, hit_at)) {
-            continue;
-        }
-        acc += taken * next_w[k];
-        weight += next_w[k];
-    }
-    if (weight <= 1.0e-4) {
-        return vec4(0.0, 0.0, 0.0, -2.0);
-    }
-    return acc / weight;
-}
-
 void write_world(bool bounce) {
     vec3 origin;
     uvec3 count;
@@ -673,10 +307,12 @@ void write_world(bool bounce) {
         vec3 ray = sphere_dir(d, WORLD_DIRS, spin);
         TraceHit hit = trace_hit(pos, ray, 0.0, 8.0);
         if (bounce && hit.iv.a >= 0.0) {
-            // Direct light arriving at the hit, from the probes around the hit (not the
-            // probe that cast the ray, which can stand 8 m away in other light).
-            hit.iv.rgb += hit.tint * hit.reflect * WORLD_IRR
-                * sample_cube(WORLD_DIRECT_CUBE_OFFSET, hit.pos + hit.normal * 0.08, hit.normal);
+            // Light arriving at the hit, from the tier around the hit (the same light the
+            // tier probes take), or from the world probes beyond the tier.
+            vec3 once;
+            vec3 twice;
+            bounce_at2(hit.pos, hit.normal, WORLD_DIRECT_CUBE_OFFSET, once, twice);
+            hit.iv.rgb += hit.tint * hit.reflect * WORLD_IRR * twice;
         }
         field.texels[dest + d] = hit.iv;
         // A miss brings nothing back but its cone still counts.
@@ -694,93 +330,6 @@ void write_world(bool bounce) {
     }
 }
 
-uint pin_linear() {
-    return gl_LocalInvocationIndex + gl_WorkGroupID.x * 64u;
-}
-
-void write_pinned(uint cascade) {
-    uint count = uint((cascade == 0u ? scene.view_grid.z : scene.view_grid.w) + 0.5);
-    uint pin = pin_linear();
-    if (pin >= count) {
-        return;
-    }
-    uint pos_base = cascade == 0u ? PIN_POS0 : PIN_POS1;
-    uint nrm_base = cascade == 0u ? PIN_NRM0 : PIN_NRM1;
-    vec4 stored4 = field.texels[pos_base + pin];
-    vec3 stored = stored4.xyz;
-    vec3 normal = field.texels[nrm_base + pin].xyz;
-    uint dirs = screen_dirs_at(cascade);
-    uint base = screen_dir_offset(cascade) + pin * dirs;
-    if (stored4.w < 0.5 || dot(normal, normal) < 0.5) {
-        if (cascade > 0u) {
-            for (uint d = 0u; d < dirs; d++) {
-                field.texels[base + d] = vec4(0.0, 0.0, 0.0, -2.0);
-            }
-        }
-        if (cascade == 0u) {
-            field.texels[pin] = vec4(0.0);
-        } else {
-            field.texels[PIN_IRR1 + pin] = vec4(0.0);
-        }
-        return;
-    }
-    vec3 pos = stored + normal * 0.04;
-    float spin = 0.0;
-    float t0;
-    float t1;
-    screen_range(cascade, t0, t1);
-    vec3 sum = vec3(0.0);
-    float wsum = 0.0;
-    if (cascade == 0u) {
-        gather_next(stored, normal, t1);
-    }
-    for (uint d = 0u; d < dirs; d++) {
-        vec3 ray = hemisphere_dir(normal, d, dirs, spin);
-        // The ray starts at the pin, not at t0. A cascade 1 pin a few cm outside a
-        // wall would otherwise skip that wall and read the room behind it. The
-        // nearest surface is the answer for this direction, near or far.
-        TraceHit hit = trace_hit(pos, ray, 0.0, t1);
-        vec4 iv = hit.iv;
-        if (iv.a >= 0.0) {
-            iv.rgb += hit.tint * hit.reflect * WORLD_IRR * sample_cube(WORLD_CUBE_OFFSET, hit.pos + hit.normal * 0.08, hit.normal);
-        }
-        if (iv.a < -1.5 && cascade == 0u) {
-            vec4 next = next_overflow
-                ? pinned_interval(stored, normal, ray, t1)
-                : pinned_interval_cached(normal, ray);
-            if (next.a >= 0.0) {
-                iv = next;
-            }
-        }
-        if (iv.a < -1.5) {
-            vec4 far = world_interval(WORLD_BOUNCE_OFFSET, pos, ray, normal, t1);
-            if (far.a >= t1) {
-                iv = vec4(far.rgb, far.a);
-            }
-        }
-        if (cascade > 0u) {
-            field.texels[base + d] = iv;
-        }
-        float facing = max(dot(normal, ray), 0.0);
-        sum += iv.rgb * facing;
-        wsum += facing;
-    }
-    vec3 radiance = wsum > 1.0e-4 ? sum / wsum : vec3(0.0);
-    if (cascade == 0u) {
-        field.texels[pin] = vec4(radiance, 0.0);
-    } else {
-        field.texels[PIN_IRR1 + pin] = vec4(radiance, 1.0);
-    }
-}
-
-
-
-// ---- Baked pin volume -------------------------------------------------------
-// The picture used to walk 125 hash cells per pixel and test every pin it found
-// against every occluder. The same gather now runs once per volume cell, after the
-// pins are lit. A cell keeps one color per axis facing (an ambient cube). The
-// picture reads 8 cells.
-
 vec3 cube_axis(uint face) {
     float s = (face & 1u) == 0u ? 1.0 : -1.0;
     uint axis = face >> 1u;
@@ -791,106 +340,118 @@ bool segment_blocked(vec3 a, vec3 b) {
     return scene_occluded(a, b);
 }
 
-void write_volume(uint level) {
-    uint cell = gl_LocalInvocationIndex + gl_WorkGroupID.x * 64u;
-    uint across = level == 0u ? VOL_XZ0 : VOL_XZ1;
-    uint layers = level == 0u ? VOL_Y0 : VOL_Y1;
-    if (cell >= across * across * layers) {
+// ---- Persistent probe tier ---------------------------------------------------
+// One probe per invocation, one brick (64 probes) per workgroup. Each ray takes the
+// light leaving what it hits: direct light there plus the bounce the tier holds at
+// that point (the world probes beyond it), the same light the world probes take.
+// The same rays build all three bounce orders: a hit adds its direct light to each,
+// plus the next lower order from the tier at the hit.
+
+const float TIER_RAY_END = 64.0;
+// A probe averages at most this many samples, so a change still shows.
+const float TIER_HISTORY = 512.0;
+
+// Light that bounced up to once (`once`) and up to twice (`twice`) arriving at a
+// surface point, from the tier, or from the world probes where the tier has none:
+// the direct cube, and the cube at `twice_far` (the bounce cube, or the direct cube
+// again for the pass that writes the bounce cube).
+void bounce_at2(vec3 pos, vec3 normal, uint twice_far, out vec3 once, out vec3 twice) {
+    if (tier_sample2(pos, normal, TIER_CUBE1, TIER_CUBE2, once, twice)) {
         return;
     }
-    vec4 hinfo = field.texels[level == 0u ? HASH_ORIGIN0 : HASH_ORIGIN1];
-    float spacing = hinfo.w;
-    uint dest = (level == 0u ? VOL0_BASE : VOL1_BASE) + cell * 6u;
-    if (cell == 0u) {
-        // x and z follow the pin hash. Height starts at the floor.
-        field.texels[level == 0u ? VOL0_INFO : VOL1_INFO] = vec4(hinfo.x, 0.0, hinfo.z, max(spacing, 0.0));
-    }
-    for (uint f = 0u; f < 6u; f++) {
-        field.texels[dest + f] = vec4(0.0);
-    }
-    if (spacing <= 0.0) {
-        return;
-    }
-    uint ix = cell % across;
-    uint iz = (cell / across) % across;
-    uint iy = cell / (across * across);
-    vec3 center = vec3(hinfo.x, 0.0, hinfo.z) + (vec3(float(ix), float(iy), float(iz)) + 0.5) * spacing;
-    // A cell inside a wall or solid holds nothing. The picture skips it. A center on a
-    // side (the 0.5 m grid lines up with many faces) is half outside: it keeps the
-    // contact probes beside that side.
-    if (point_in_volume(center + vec3(0.02, 0.0, 0.0)) && point_in_volume(center - vec3(0.02, 0.0, 0.0))
-        && point_in_volume(center + vec3(0.0, 0.0, 0.02)) && point_in_volume(center - vec3(0.0, 0.0, 0.02))) {
-        return;
-    }
-    uint dim = level == 0u ? HASH_DIM0 : HASH_DIM1;
-    uint hash_base = level == 0u ? HASH_BASE0 : HASH_BASE1;
-    uint pos_base = level == 0u ? PIN_POS0 : PIN_POS1;
-    uint nrm_base = level == 0u ? PIN_NRM0 : PIN_NRM1;
-    uint rad_base = level == 0u ? 0u : PIN_IRR1;
-    // One lattice spacing, the support of linear interpolation between pins. Two
-    // spacings (1 m for the fine level) averaged the contact band beside a solid with
-    // pins a metre away and washed its color out.
-    float reach = spacing * VOL_REACH;
-    vec3 sum[6] = vec3[6](vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
-    float wsum[6] = float[6](0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    ivec3 base = ivec3(floor((center - hinfo.xyz) / spacing));
-    for (int dz = -2; dz <= 2; dz++) {
-        for (int dy = -2; dy <= 2; dy++) {
-            for (int dx = -2; dx <= 2; dx++) {
-                ivec3 hc = base + ivec3(dx, dy, dz);
-                if (hc.x < 0 || hc.y < 0 || hc.z < 0
-                    || hc.x >= int(dim) || hc.y >= int(dim) || hc.z >= int(dim)) {
-                    continue;
-                }
-                vec4 rec = field.texels[hash_base + lattice_index(hc, dim)];
-                for (int slot = 0; slot < 2; slot++) {
-                    float index = slot == 0 ? rec.x : rec.y;
-                    if (index < 0.0) {
-                        continue;
-                    }
-                    uint pin = uint(index + 0.5);
-                    vec4 stored = field.texels[pos_base + pin];
-                    if (stored.w < 0.5) {
-                        continue;
-                    }
-                    float dist = length(stored.xyz - center);
-                    if (dist >= reach) {
-                        continue;
-                    }
-                    vec3 normal = field.texels[nrm_base + pin].xyz;
-                    // The cell must see the lit side of the pin.
-                    if (dot(center - stored.xyz, normal) <= 0.0
-                        || segment_blocked(center, stored.xyz + normal * 0.05)) {
-                        continue;
-                    }
-                    float w = 1.0 - dist / reach;
-                    vec3 rad = field.texels[rad_base + pin].rgb;
-                    for (uint f = 0u; f < 6u; f++) {
-                        if (dot(normal, cube_axis(f)) > 0.6) {
-                            sum[f] += rad * w;
-                            wsum[f] += w;
-                        }
-                    }
-                }
+    once = sample_cube(WORLD_DIRECT_CUBE_OFFSET, pos + normal * 0.08, normal);
+    twice = twice_far == WORLD_DIRECT_CUBE_OFFSET ? once : sample_cube(twice_far, pos + normal * 0.08, normal);
+}
+
+// Uniform random rotation from three uniform numbers (Shoemake's quaternion).
+mat3 random_rotation(vec3 u) {
+    float a = sqrt(1.0 - u.x);
+    float b = sqrt(u.x);
+    vec4 q = vec4(a * sin(TAU * u.y), a * cos(TAU * u.y), b * sin(TAU * u.z), b * cos(TAU * u.z));
+    float x = q.x, y = q.y, z = q.z, w = q.w;
+    return mat3(
+        1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + z * w), 2.0 * (x * z - y * w),
+        2.0 * (x * y - z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + x * w),
+        2.0 * (x * z + y * w), 2.0 * (y * z - x * w), 1.0 - 2.0 * (x * x + y * y)
+    );
+}
+
+void write_tier() {
+    vec4 work = field.texels[TIER_WORK + gl_WorkGroupID.x];
+    uint probe = gl_LocalInvocationIndex;
+    uint slot = uint(work.x + 0.5);
+    vec4 brick = field.texels[TIER_SLOTS + slot * 2u];
+    vec4 mask = field.texels[TIER_SLOTS + slot * 2u + 1u];
+    uint chunk = uint(mask[probe >> 4u] + 0.5);
+    bool live = ((chunk >> (probe & 15u)) & 1u) != 0u;
+    bool reset = work.z > 0.5;
+    uint dest = TIER_PROBES + (slot * 64u + probe) * TIER_PROBE_TEXELS;
+    if (!live) {
+        // A reused slot may hold another brick's light. A dead probe reads as none.
+        if (reset) {
+            for (uint f = 0u; f < TIER_PROBE_TEXELS; f++) {
+                field.texels[dest + f] = vec4(0.0);
             }
         }
+        return;
     }
-    for (uint f = 0u; f < 6u; f++) {
-        if (wsum[f] > 1.0e-4) {
-            field.texels[dest + f] = vec4(sum[f] / wsum[f], 1.0);
+    float spacing = tier_spacing();
+    ivec3 local = ivec3(int(probe & 3u), int(probe >> 4u), int((probe >> 2u) & 3u));
+    vec3 pos = (vec3(ivec3(floor(brick.xyz + 0.5)) * 4 + local) + 0.5) * spacing;
+    uint rays = max(uint(work.y + 0.5), 1u);
+    // A new random orientation of the ray set every pass and probe, so refining adds
+    // new directions at every elevation. Turning about one axis only kept the same
+    // rings of elevation every pass and left ring-shaped blotches.
+    mat3 turn = random_rotation(vec3(
+        fract(ray_spin3(pos) + work.w * 0.61803399),
+        fract(ray_spin3(pos + 17.0) + work.w * 0.75487767),
+        fract(ray_spin3(pos - 31.0) + work.w * 0.56984029)
+    ));
+    vec3 cube[18];
+    float cube_w[6] = float[6](0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (uint f = 0u; f < 18u; f++) {
+        cube[f] = vec3(0.0);
+    }
+    for (uint d = 0u; d < rays; d++) {
+        vec3 ray = turn * sphere_dir(d, rays, 0.0);
+        TraceHit hit = trace_hit(pos, ray, 0.0, TIER_RAY_END);
+        vec3 r1 = vec3(0.0);
+        vec3 r2 = vec3(0.0);
+        vec3 r3 = vec3(0.0);
+        if (hit.iv.a >= 0.0) {
+            vec3 once;
+            vec3 twice;
+            bounce_at2(hit.pos, hit.normal, WORLD_CUBE_OFFSET, once, twice);
+            vec3 k = hit.tint * hit.reflect * WORLD_IRR;
+            r1 = hit.iv.rgb;
+            r2 = hit.iv.rgb + k * once;
+            r3 = hit.iv.rgb + k * twice;
         }
+        // A miss brings nothing back but its cone still counts.
+        for (uint f = 0u; f < 6u; f++) {
+            float facing = max(dot(ray, cube_axis(f)), 0.0);
+            cube[TIER_CUBE3 + f] += r3 * facing;
+            cube[TIER_CUBE2 + f] += r2 * facing;
+            cube[TIER_CUBE1 + f] += r1 * facing;
+            cube_w[f] += facing;
+        }
+    }
+    float count = reset ? 0.0 : max(field.texels[dest + TIER_CUBE3].w, 0.0);
+    float alpha = reset ? 1.0 : min(max(float(rays) / (count + float(rays)), float(rays) / TIER_HISTORY), 1.0);
+    float samples = min(count + float(rays), TIER_HISTORY);
+    for (uint f = 0u; f < 18u; f++) {
+        float wf = cube_w[f % 6u];
+        vec3 fresh = wf > 1.0e-4 ? cube[f] / wf : vec3(0.0);
+        vec3 old = field.texels[dest + f].rgb;
+        field.texels[dest + f] = vec4(mix(old, fresh, alpha), samples);
     }
 }
 
 void main() {
-    if (pc.pass >= 10u) {
-        write_volume(pc.pass - 10u);
+    if (pc.pass == 12u) {
+        write_tier();
         return;
     }
-    if (pc.pass >= 8u) {
-        write_world(pc.pass >= 9u);
-        return;
-    }
-    // Pass 1 lights cascade 1 pins, pass 2 cascade 0 pins (which merge cascade 1).
-    write_pinned(2u - pc.pass);
+    // Pass 8 lights the world probes directly, pass 9 adds the bounce.
+    write_world(pc.pass >= 9u);
 }
