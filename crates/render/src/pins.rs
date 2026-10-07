@@ -52,6 +52,25 @@ pub const HASH_CELLS1: u32 = HASH_DIM1 * HASH_DIM1 * HASH_DIM1;
 pub const PIN_SPAN_START: u32 = PIN_POS0;
 pub const PIN_SPAN_LEN: u32 = HASH_BASE1 + HASH_CELLS1 - PIN_POS0;
 
+/// Baked fine-field volume: one cell per fine hash column cell, from the floor up.
+/// Six texels per cell (+X, -X, +Y, -Y, +Z, -Z): the pin radiance gathered around the
+/// cell center for that facing, `w` = 1 when any pin fed it. The bake reuses the
+/// storage the screen cascade 2 directions held before the pinned cascades took over.
+pub const VOL_XZ0: u32 = HASH_DIM0;
+/// Fine volume layers above the floor (0.5 m each, 3 m).
+pub const VOL_Y0: u32 = 6;
+/// `xyz` volume origin, `w` cell size.
+pub const VOL0_INFO: u32 = 16_384 + PROBE_CAP1 * 32;
+pub const VOL0_BASE: u32 = VOL0_INFO + 1;
+/// Next-level volume, 1 m cells, 3 layers.
+pub const VOL_XZ1: u32 = HASH_DIM1;
+pub const VOL_Y1: u32 = 3;
+/// After the pin upload span, before the world-probe irradiance.
+pub const VOL1_INFO: u32 = HASH_BASE1 + HASH_CELLS1;
+pub const VOL1_BASE: u32 = VOL1_INFO + 1;
+const _: () = assert!(VOL0_BASE + VOL_XZ0 * VOL_XZ0 * VOL_Y0 * 6 <= PIN_POS0);
+const _: () = assert!(VOL1_BASE + VOL_XZ1 * VOL_XZ1 * VOL_Y1 * 6 <= 176_128);
+
 /// The pin block ends before the world-probe irradiance at texel 176128.
 const _: () = assert!(PIN_SPAN_START + PIN_SPAN_LEN < 176_128);
 /// Cascade 0 radiance is stored at the probe index, below the screen-normal base.

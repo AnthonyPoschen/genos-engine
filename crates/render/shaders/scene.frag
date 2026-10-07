@@ -145,6 +145,14 @@ const uint HASH_ORIGIN1 = 137217u;
 const uint HASH_BASE1 = 137218u;
 const uint HASH_DIM1 = 28u;
 const uint PIN_IRR1 = 2048u;
+const uint VOL_XZ0 = 32u;
+const uint VOL_Y0 = 6u;
+const uint VOL0_INFO = 49152u;
+const uint VOL0_BASE = 49153u;
+const uint VOL_XZ1 = 28u;
+const uint VOL_Y1 = 3u;
+const uint VOL1_INFO = 159170u;
+const uint VOL1_BASE = 159171u;
 const uint SHOWN_COPY = 0u;
 const float LAMBERT = 0.318309886;
 // A unit white lamp 7 m above a white floor stays near 0.46. A lamp 1 m away stays under white.
@@ -153,9 +161,6 @@ const float TAU = 6.2831853;
 
 bool probe_hidden(vec2 from, vec2 probe);
 bool blocked(vec3 origin, vec3 target);
-uint occ_near_mask(vec2 xz, float reach);
-bool probe_hidden_masked(vec2 from, vec2 probe, uint mask);
-bool segment_blocked_masked(vec3 origin, vec3 target, uint mask);
 bool inside_solid(vec3 p);
 
 float ray_spin(vec2 p) {
@@ -642,89 +647,46 @@ vec3 world_mean(vec3 pos, vec3 face_n) {
     return sum / weight;
 }
 
-uint lattice_index(ivec3 cell, uint dim) {
-    return uint((cell.y * int(dim) + cell.z) * int(dim) + cell.x);
-}
-
-float lattice_weight(uint pin, uint pos_base, uint nrm_base, vec3 world, vec3 face_n, float reach, uint near, bool lifted_inside) {
-    vec4 stored = field.texels[pos_base + pin];
-    if (stored.w < 0.5) {
-        return 0.0;
-    }
-    vec3 normal = field.texels[nrm_base + pin].xyz;
-    if (dot(normal, face_n) <= 0.6) {
-        return 0.0;
-    }
-    float dist = length(stored.xyz - world);
-    // Most pins the cell walk finds sit outside the reach. Skip the
-    // occluder loop for them.
-    if (dist >= reach) {
-        return 0.0;
-    }
-    // Lift off the face so a probe on this surface is not rejected as a hit
-    // on its own volume. Floor pairs still use the ground-plane wall test.
-    vec3 from = world + face_n * 0.05;
-    vec3 to = stored.xyz + face_n * 0.05;
-    bool crosses = world.y < 0.05 && stored.y < 0.05
-        ? probe_hidden_masked(from.xz, to.xz, near)
-        : lifted_inside || segment_blocked_masked(from, to, near);
-    if (crosses) {
-        return 0.0;
-    }
-    return 1.0 - dist / reach;
-}
-
-bool lattice_sample(
-    vec3 world,
-    vec3 face_n,
-    uint origin_texel,
-    uint hash_base,
-    uint dim,
-    uint pos_base,
-    uint nrm_base,
-    uint rad_base,
-    float reach,
-    out vec3 color
-) {
-    vec4 info = field.texels[origin_texel];
-    float spacing = info.w;
+// Baked pin volume (light.comp write_volume). Eight cells around the point, pushed
+// half a cell off the face so the taps sit on the lit side; a cell inside a solid
+// or with no pin for this facing has w = 0 and drops out of the blend.
+bool volume_sample(uint info_at, uint base, uint across, uint layers, vec3 world, vec3 face_n, out vec3 color) {
     color = vec3(0.0);
+    vec4 info = field.texels[info_at];
+    float spacing = info.w;
     if (spacing <= 0.0) {
         return false;
     }
-    ivec3 base = ivec3(floor((world - info.xyz) / spacing));
-    // Every pin inside the reach must sit in the cells walked below, or the
-    // set of pins jumps when the shaded point crosses a cell edge.
-    reach = min(reach, spacing * 2.0);
-    // Per pixel, not per pin: the lifted point and the occluders that can matter.
-    bool lifted_inside = inside_solid(world + face_n * 0.05);
-    uint near = occ_near_mask((world + face_n * 0.05).xz, reach);
+    vec3 q = (world + face_n * (0.5 * spacing) - info.xyz) / spacing - 0.5;
+    ivec3 i0 = ivec3(floor(q));
+    vec3 t = q - vec3(i0);
+    vec3 nn = face_n * face_n;
+    uint fx = face_n.x >= 0.0 ? 0u : 1u;
+    uint fy = face_n.y >= 0.0 ? 2u : 3u;
+    uint fz = face_n.z >= 0.0 ? 4u : 5u;
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
-    for (int dz = -2; dz <= 2; dz++) {
-        for (int dy = -2; dy <= 2; dy++) {
-            for (int dx = -2; dx <= 2; dx++) {
-                ivec3 cell = base + ivec3(dx, dy, dz);
-                if (cell.x < 0 || cell.y < 0 || cell.z < 0
-                    || cell.x >= int(dim) || cell.y >= int(dim) || cell.z >= int(dim)) {
-                    continue;
-                }
-                vec4 rec = field.texels[hash_base + lattice_index(cell, dim)];
-                for (int slot = 0; slot < 2; slot++) {
-                    float index = slot == 0 ? rec.x : rec.y;
-                    if (index < 0.0) {
-                        continue;
-                    }
-                    uint pin = uint(index + 0.5);
-                    float weight = lattice_weight(pin, pos_base, nrm_base, world, face_n, reach, near, lifted_inside);
-                    if (weight <= 1.0e-4) {
-                        continue;
-                    }
-                    sum += field.texels[rad_base + pin].rgb * weight;
-                    wsum += weight;
-                }
-            }
+    for (uint corner = 0u; corner < 8u; corner++) {
+        ivec3 c = i0 + ivec3(int(corner & 1u), int((corner >> 1u) & 1u), int((corner >> 2u) & 1u));
+        if (c.x < 0 || c.y < 0 || c.z < 0 || c.x >= int(across) || c.y >= int(layers) || c.z >= int(across)) {
+            continue;
         }
+        float w = ((corner & 1u) == 0u ? 1.0 - t.x : t.x)
+            * ((corner & 2u) == 0u ? 1.0 - t.y : t.y)
+            * ((corner & 4u) == 0u ? 1.0 - t.z : t.z);
+        if (w <= 1.0e-5) {
+            continue;
+        }
+        uint cb = base + ((uint(c.y) * across + uint(c.z)) * across + uint(c.x)) * 6u;
+        vec4 a = field.texels[cb + fx];
+        vec4 b = field.texels[cb + fy];
+        vec4 d = field.texels[cb + fz];
+        float cw = nn.x * a.w + nn.y * b.w + nn.z * d.w;
+        if (cw <= 1.0e-4) {
+            continue;
+        }
+        sum += w * (nn.x * a.w * a.rgb + nn.y * b.w * b.rgb + nn.z * d.w * d.rgb);
+        wsum += w * cw;
     }
     if (wsum <= 1.0e-4) {
         return false;
@@ -748,9 +710,7 @@ vec3 screen_bounce(vec3 world, vec3 face_n) {
     // Near to far. A level that is fully covered by a nearer one is not sampled.
     vec3 fine = vec3(0.0);
     float fine_w = 0.0;
-    if (box < 6.5 && lattice_sample(
-        world, face_n, HASH_ORIGIN0, HASH_BASE0, HASH_DIM0, PIN_POS0, PIN_NRM0, 0u, 1.5, fine
-    )) {
+    if (box < 6.5 && volume_sample(VOL0_INFO, VOL0_BASE, VOL_XZ0, VOL_Y0, world, face_n, fine)) {
         fine_w = 1.0 - fade_out(4.0, 6.5, box);
     }
     if (fine_w >= 1.0) {
@@ -758,9 +718,7 @@ vec3 screen_bounce(vec3 world, vec3 face_n) {
     }
     vec3 mid = vec3(0.0);
     float mid_w = 0.0;
-    if (box < 10.0 && lattice_sample(
-        world, face_n, HASH_ORIGIN1, HASH_BASE1, HASH_DIM1, PIN_POS1, PIN_NRM1, PIN_IRR1, 2.0, mid
-    )) {
+    if (box < 10.0 && volume_sample(VOL1_INFO, VOL1_BASE, VOL_XZ1, VOL_Y1, world, face_n, mid)) {
         mid_w = 1.0 - fade_out(7.0, 10.0, box);
     }
     vec3 bounce = mid;
@@ -961,72 +919,6 @@ bool probe_hidden(vec2 from, vec2 probe) {
             hit = segment_hits_box(from, probe, occ.center_shape.xz - half_e, occ.center_shape.xz + half_e);
         }
         if (hit) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// blocked and probe_hidden over a subset of occluders. The lattice gather tests a
-// dozen short segments per pixel; only occluders near the pixel can cut them.
-uint occ_near_mask(vec2 xz, float reach) {
-    uint mask = 0u;
-    uint count = min(scene.occ_count, 16u);
-    for (uint i = 0u; i < count; i++) {
-        Occ occ = scene.occs[i];
-        vec2 half_e = occ.center_shape.w > 0.5 ? vec2(occ.extent.w) : vec2(occ.extent.x, occ.extent.z);
-        vec2 gap = max(abs(xz - occ.center_shape.xz) - half_e, vec2(0.0));
-        if (dot(gap, gap) < (reach + 0.01) * (reach + 0.01)) {
-            mask |= 1u << i;
-        }
-    }
-    return mask;
-}
-
-bool probe_hidden_masked(vec2 from, vec2 probe, uint mask) {
-    vec2 delta = probe - from;
-    if (dot(delta, delta) < 1e-6) {
-        return false;
-    }
-    while (mask != 0u) {
-        uint i = uint(findLSB(mask));
-        mask &= mask - 1u;
-        Occ occ = scene.occs[i];
-        bool hit;
-        if (occ.center_shape.w > 0.5) {
-            hit = segment_hits_circle(from, probe, occ.center_shape.xz, occ.extent.w);
-        } else {
-            vec2 half_e = vec2(occ.extent.x, occ.extent.z);
-            hit = segment_hits_box(from, probe, occ.center_shape.xz - half_e, occ.center_shape.xz + half_e);
-        }
-        if (hit) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// blocked() without the inside_solid test, which the caller does once per pixel.
-bool segment_blocked_masked(vec3 origin, vec3 target, uint mask) {
-    vec3 delta = target - origin;
-    float dist = length(delta);
-    if (dist < 1e-3) {
-        return false;
-    }
-    vec3 dir = delta / dist;
-    while (mask != 0u) {
-        uint i = uint(findLSB(mask));
-        mask &= mask - 1u;
-        Occ occ = scene.occs[i];
-        float t;
-        if (occ.center_shape.w > 0.5) {
-            t = hit_cyl(origin, dir, occ.center_shape.xyz, occ.extent.w, 0.0, occ.extent.y);
-        } else {
-            vec3 half_e = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
-            vec3 center = vec3(occ.center_shape.x, occ.extent.y * 0.5, occ.center_shape.z);
-            t = hit_box(origin, dir, center - half_e, center + half_e);
-        }
-        if (t > 1e-4 && t < dist - 1e-4) {
             return true;
         }
     }

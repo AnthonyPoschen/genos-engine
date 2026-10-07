@@ -101,6 +101,15 @@ const uint HASH_ORIGIN1 = 137217u;
 const uint HASH_BASE1 = 137218u;
 const uint HASH_DIM1 = 28u;
 const uint PIN_IRR1 = 2048u;
+const uint VOL_XZ0 = 32u;
+const uint VOL_Y0 = 6u;
+const uint VOL0_INFO = 49152u;
+const uint VOL0_BASE = 49153u;
+const uint VOL_XZ1 = 28u;
+const uint VOL_Y1 = 3u;
+const uint VOL1_INFO = 159170u;
+const uint VOL1_BASE = 159171u;
+const float VOL_REACH = 2.0;
 const float LAMBERT = 0.318309886;
 // A unit white lamp 7 m above a white floor stays near 0.46. A lamp 1 m away stays under white.
 const float LAMP_UNIT = 72.0;
@@ -1641,7 +1650,135 @@ void write_screen(uint cascade) {
     }
 }
 
+
+// ---- Baked pin volume -------------------------------------------------------
+// The picture used to walk 125 hash cells per pixel and test every pin it found
+// against every occluder. The same gather now runs once per volume cell, after the
+// pins are lit. A cell keeps one color per axis facing (an ambient cube). The
+// picture reads 8 cells.
+
+vec3 cube_axis(uint face) {
+    float s = (face & 1u) == 0u ? 1.0 : -1.0;
+    uint axis = face >> 1u;
+    return axis == 0u ? vec3(s, 0.0, 0.0) : (axis == 1u ? vec3(0.0, s, 0.0) : vec3(0.0, 0.0, s));
+}
+
+bool segment_blocked(vec3 a, vec3 b) {
+    vec3 delta = b - a;
+    float dist = length(delta);
+    if (dist < 1.0e-3) {
+        return false;
+    }
+    vec3 dir = delta / dist;
+    uint count = min(scene.occ_count, 16u);
+    for (uint i = 0u; i < count; i++) {
+        Occ occ = scene.occs[i];
+        vec3 center = vec3(occ.center_shape.x, occ.extent.y * 0.5, occ.center_shape.z);
+        float t;
+        if (occ.center_shape.w > 0.5) {
+            t = hit_cyl(a, dir, center, occ.extent.w, 0.0, occ.extent.y);
+        } else {
+            vec3 half_e = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
+            t = hit_box3(a, dir, center - half_e, center + half_e);
+        }
+        if (t > 1.0e-4 && t < dist - 1.0e-4) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void write_volume(uint level) {
+    uint cell = gl_LocalInvocationIndex + gl_WorkGroupID.x * 64u;
+    uint across = level == 0u ? VOL_XZ0 : VOL_XZ1;
+    uint layers = level == 0u ? VOL_Y0 : VOL_Y1;
+    if (cell >= across * across * layers) {
+        return;
+    }
+    vec4 hinfo = field.texels[level == 0u ? HASH_ORIGIN0 : HASH_ORIGIN1];
+    float spacing = hinfo.w;
+    uint dest = (level == 0u ? VOL0_BASE : VOL1_BASE) + cell * 6u;
+    if (cell == 0u) {
+        // x and z follow the pin hash. Height starts at the floor.
+        field.texels[level == 0u ? VOL0_INFO : VOL1_INFO] = vec4(hinfo.x, 0.0, hinfo.z, max(spacing, 0.0));
+    }
+    for (uint f = 0u; f < 6u; f++) {
+        field.texels[dest + f] = vec4(0.0);
+    }
+    if (spacing <= 0.0) {
+        return;
+    }
+    uint ix = cell % across;
+    uint iz = (cell / across) % across;
+    uint iy = cell / (across * across);
+    vec3 center = vec3(hinfo.x, 0.0, hinfo.z) + (vec3(float(ix), float(iy), float(iz)) + 0.5) * spacing;
+    // A cell inside a wall or solid holds nothing. The picture skips it.
+    if (point_in_volume(center)) {
+        return;
+    }
+    uint dim = level == 0u ? HASH_DIM0 : HASH_DIM1;
+    uint hash_base = level == 0u ? HASH_BASE0 : HASH_BASE1;
+    uint pos_base = level == 0u ? PIN_POS0 : PIN_POS1;
+    uint nrm_base = level == 0u ? PIN_NRM0 : PIN_NRM1;
+    uint rad_base = level == 0u ? 0u : PIN_IRR1;
+    // Same reach as the old per-pixel gather (two cells).
+    float reach = spacing * VOL_REACH;
+    vec3 sum[6] = vec3[6](vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
+    float wsum[6] = float[6](0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    ivec3 base = ivec3(floor((center - hinfo.xyz) / spacing));
+    for (int dz = -2; dz <= 2; dz++) {
+        for (int dy = -2; dy <= 2; dy++) {
+            for (int dx = -2; dx <= 2; dx++) {
+                ivec3 hc = base + ivec3(dx, dy, dz);
+                if (hc.x < 0 || hc.y < 0 || hc.z < 0
+                    || hc.x >= int(dim) || hc.y >= int(dim) || hc.z >= int(dim)) {
+                    continue;
+                }
+                vec4 rec = field.texels[hash_base + lattice_index(hc, dim)];
+                for (int slot = 0; slot < 2; slot++) {
+                    float index = slot == 0 ? rec.x : rec.y;
+                    if (index < 0.0) {
+                        continue;
+                    }
+                    uint pin = uint(index + 0.5);
+                    vec4 stored = field.texels[pos_base + pin];
+                    if (stored.w < 0.5) {
+                        continue;
+                    }
+                    float dist = length(stored.xyz - center);
+                    if (dist >= reach) {
+                        continue;
+                    }
+                    vec3 normal = field.texels[nrm_base + pin].xyz;
+                    // The cell must see the lit side of the pin.
+                    if (dot(center - stored.xyz, normal) <= 0.0
+                        || segment_blocked(center, stored.xyz + normal * 0.05)) {
+                        continue;
+                    }
+                    float w = 1.0 - dist / reach;
+                    vec3 rad = field.texels[rad_base + pin].rgb;
+                    for (uint f = 0u; f < 6u; f++) {
+                        if (dot(normal, cube_axis(f)) > 0.6) {
+                            sum[f] += rad * w;
+                            wsum[f] += w;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (uint f = 0u; f < 6u; f++) {
+        if (wsum[f] > 1.0e-4) {
+            field.texels[dest + f] = vec4(sum[f] / wsum[f], 1.0);
+        }
+    }
+}
+
 void main() {
+    if (pc.pass >= 10u) {
+        write_volume(pc.pass - 10u);
+        return;
+    }
     if (pc.pass >= 8u) {
         write_world(pc.pass >= 9u);
         return;

@@ -3412,6 +3412,13 @@ impl Gpu {
             // Screen cascade 2 is not read since the pinned cascades took over 0 and 1:
             // only screen_interval reads it, and only the screen path for 0 and 1 calls that.
         }
+        // Bake the lit pins into the two lookup volumes the picture samples.
+        for (level, cells) in [
+            (0u32, crate::pins::VOL_XZ0 * crate::pins::VOL_XZ0 * crate::pins::VOL_Y0),
+            (1u32, crate::pins::VOL_XZ1 * crate::pins::VOL_XZ1 * crate::pins::VOL_Y1),
+        ] {
+            self.dispatch_light_slice(cmd, set, 10 + level, 0, 1, (cells + 63) / 64)?;
+        }
         Ok(())
     }
 
