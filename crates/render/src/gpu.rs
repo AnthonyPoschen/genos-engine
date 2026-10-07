@@ -3409,11 +3409,8 @@ impl Gpu {
                 self.dispatch_light_slice(cmd, set, pass, 0, 1, groups)?;
                 continue;
             }
-            let width = (self.screen_w >> level).max(1);
-            let height = (self.screen_h >> level).max(1);
-            let groups_x = (width + 7) / 8;
-            let groups_y = (height + 7) / 8;
-            self.dispatch_light_slice(cmd, set, pass, 0, groups_y, groups_x)?;
+            // Screen cascade 2 is not read since the pinned cascades took over 0 and 1:
+            // only screen_interval reads it, and only the screen path for 0 and 1 calls that.
         }
         Ok(())
     }
