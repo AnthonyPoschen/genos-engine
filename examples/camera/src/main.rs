@@ -243,6 +243,11 @@ fn run() -> Result<(), String> {
     let mut bench = Bench::from_env(&world.scene, bench_camera)?;
     if let Some(dir) = bench.as_ref().and_then(|bench| bench.shots.as_ref()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("GENOS_BENCH_SHOTS {}: {e}", dir.display()))?;
+    }
+    if bench.is_some() {
+        // A bench reads the picture as it is drawn (shots, the flicker phase): a
+        // readback that settled the light would measure the settled field, not what
+        // a moving lamp shows, and would run every build due inside the frame.
         renderer.set_live_readback(true);
     }
     loop {
@@ -619,16 +624,20 @@ struct Bench {
 const BENCH_FLICKER_FRAMES: u32 = 240;
 /// Frames of orbit before it measures, so the drop from the rise is gone.
 const BENCH_FLICKER_LEAD: u32 = 60;
-/// The lamp's turn per frame while it measures flicker: one turn in 360 frames.
-const BENCH_FLICKER_STEP: f32 = std::f32::consts::TAU / 360.0;
+/// The lamp's turn per frame while it measures flicker: one turn in 3600 frames, about
+/// the orbit's pace (one turn in six seconds) at 600 frames a second. A faster step
+/// moves a lit floor pixel several 8-bit codes a frame, and its rounding alone then
+/// reads as flicker.
+const BENCH_FLICKER_STEP: f32 = std::f32::consts::TAU / 3600.0;
 /// The flicker grid: 4 x 4 screen tiles.
 const FLICKER_TILES: usize = 4;
 
 /// The flicker phase: the lamp orbits a fixed step per frame and every frame is read
-/// back. A pixel's flicker is how far it leaves the line through its neighbours in
-/// time, |L(t) - (L(t-1) + L(t+1)) / 2| in 8-bit luminance, so the smooth change of a
-/// moving lamp drops out. Each tile takes the median of its pixels (a moving shadow
-/// edge is a thin line; flicker covers an area), averaged over the frames.
+/// back. A pixel flickers when its 8-bit luminance turns back: it rises then falls, or
+/// falls then rises, by the smaller of the two steps. A moving lamp or a moving shadow
+/// edge changes a pixel one way at a time, rounding and all, so it reads zero. Each
+/// tile takes the mean of its pixels (a small flickering patch still counts), averaged
+/// over the frames.
 #[derive(Default)]
 struct Flicker {
     frames: u32,
@@ -658,22 +667,23 @@ impl Flicker {
             return;
         }
         let (a, b, c) = (&self.last[0], &self.last[1], &self.last[2]);
-        let mut cell = Vec::new();
         for ty in 0..FLICKER_TILES {
             for tx in 0..FLICKER_TILES {
-                cell.clear();
+                let mut sum = 0.0f64;
+                let mut count = 0usize;
                 for y in ty * h / FLICKER_TILES..(ty + 1) * h / FLICKER_TILES {
                     for x in tx * w / FLICKER_TILES..(tx + 1) * w / FLICKER_TILES {
                         let i = y * w + x;
-                        cell.push((b[i] - 0.5 * (a[i] + c[i])).abs());
+                        let (before, after) = (b[i] - a[i], c[i] - b[i]);
+                        if before * after < 0.0 {
+                            sum += f64::from(before.abs().min(after.abs()));
+                        }
+                        count += 1;
                     }
                 }
-                if cell.is_empty() {
-                    continue;
+                if count > 0 {
+                    self.tiles[ty * FLICKER_TILES + tx] += sum / count as f64;
                 }
-                let mid = cell.len() / 2;
-                let (_, median, _) = cell.select_nth_unstable_by(mid, f32::total_cmp);
-                self.tiles[ty * FLICKER_TILES + tx] += f64::from(*median);
             }
         }
         self.last.remove(0);
@@ -688,7 +698,7 @@ impl Flicker {
             .iter()
             .enumerate()
             .fold((0, 0.0f64), |best, (i, &v)| if v > best.1 { (i, v) } else { best });
-        let all: Vec<String> = tiles.iter().map(|t| format!("{t:.2}")).collect();
+        let all: Vec<String> = tiles.iter().map(|t| format!("{t:.3}")).collect();
         format!(
             " flicker_frames={} flicker_mean={mean:.3} flicker_max={max:.3} worst_tile={},{} tiles={}",
             self.measured,
@@ -1043,6 +1053,31 @@ fn toggle_cascade_view(mut show: [bool; 3], input: &InputSystem) -> [bool; 3] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn flicker_counts_a_pixel_that_turns_back_and_not_a_ramp() {
+        use super::{Flicker, BENCH_FLICKER_LEAD};
+        let (w, h) = (8u32, 8u32);
+        let frame = |f: u32| -> Vec<u8> {
+            let mut px = vec![0u8; (w * h * 4) as usize];
+            for i in 0..(w * h) as usize {
+                // Every pixel ramps; pixel 0 of the top-left tile also blinks by 4.
+                let mut v = (10 + 3 * f) as u8;
+                if i == 0 && f % 2 == 1 {
+                    v += 4;
+                }
+                px[i * 4..i * 4 + 3].copy_from_slice(&[v, v, v]);
+            }
+            px
+        };
+        let mut flicker = Flicker { frames: 10, ..Flicker::default() };
+        for f in 0..BENCH_FLICKER_LEAD + 10 {
+            flicker.take(&frame(f), w, h);
+        }
+        let n = f64::from(flicker.measured);
+        // The blink turns back by 1 (3 - 4 then 3 + 4) on every frame, one pixel of four.
+        assert!((flicker.tiles[0] / n - 1.0 / 4.0).abs() < 1.0e-3, "{}", flicker.tiles[0] / n);
+        assert!(flicker.tiles[1..].iter().all(|&t| t == 0.0));
+    }
     use genos_input::InputSystem;
 
     use std::collections::VecDeque;
