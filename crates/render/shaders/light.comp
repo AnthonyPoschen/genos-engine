@@ -89,6 +89,10 @@ const uint WORLD_BOUNCE_OFFSET = 348160u;
 // Six cosine-weighted facings per world probe (+X, -X, +Y, -Y, +Z, -Z), after the
 // largest bounce block (48 x 3 x 48 probes x 16 directions).
 const uint WORLD_CUBE_OFFSET = 458752u;
+// Direct-light ambient cube per world probe (pass 8), read by the bounce pass. It
+// sits in the unused tail of the direct block: 48 x 3 x 48 probes x 16 directions
+// end at 294912, and 6 faces per probe end below WORLD_BOUNCE_OFFSET.
+const uint WORLD_DIRECT_CUBE_OFFSET = 294912u;
 vec3 cube_axis(uint face);
 const uint SCREEN_DIR_BASE = 16384u;
 // Pinned hits for cascades 0 and 1. Cascade 2 stays on the screen grid.
@@ -355,10 +359,11 @@ vec4 world_interval(uint base, vec3 pos, vec3 dir, vec3 face_n) {
     return vec4(acc.rgb / weight, acc.a / hit_w);
 }
 
-// Light arriving at a face, from the world probes' six-facing cubes (direct plus one
-// bounce, written by pass 9). The sphere mean counts the dark solid behind the face
+// Light arriving at a face, from one set of the world probes' six-facing cubes:
+// WORLD_DIRECT_CUBE_OFFSET (direct only, pass 8) or WORLD_CUBE_OFFSET (direct plus
+// one bounce, pass 9). The sphere mean counts the dark solid behind the face
 // as half of what the face sees, which roughly halved the light a side passes on.
-vec3 sample_world_cube(vec3 pos, vec3 n) {
+vec3 sample_cube(uint cube_base, vec3 pos, vec3 n) {
     vec3 origin;
     uvec3 count;
     world_layout3(origin, count);
@@ -389,7 +394,7 @@ vec3 sample_world_cube(vec3 pos, vec3 n) {
         if (point_in_volume(probe) || lamp_blocked(pos, probe)) {
             continue;
         }
-        uint at = WORLD_CUBE_OFFSET + world_probe_index(ip, count) * 6u;
+        uint at = cube_base + world_probe_index(ip, count) * 6u;
         vec3 c = field.texels[at + face.x].rgb * n2.x
             + field.texels[at + face.y].rgb * n2.y
             + field.texels[at + face.z].rgb * n2.z;
@@ -618,26 +623,26 @@ void write_world(bool bounce) {
     float cube_w[6] = float[6](0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     for (uint d = 0u; d < WORLD_DIRS; d++) {
         vec3 ray = sphere_dir(d, WORLD_DIRS, spin);
-        TraceHit hit = trace_hit(pos, ray, 0.05, 8.0);
+        TraceHit hit = trace_hit(pos, ray, 0.0, 8.0);
         if (bounce && hit.iv.a >= 0.0) {
-            hit.iv.rgb += hit.tint * hit.reflect * WORLD_IRR * mean;
+            // Direct light arriving at the hit, from the probes around the hit (not the
+            // probe that cast the ray, which can stand 8 m away in other light).
+            hit.iv.rgb += hit.tint * hit.reflect * WORLD_IRR
+                * sample_cube(WORLD_DIRECT_CUBE_OFFSET, hit.pos + hit.normal * 0.08, hit.normal);
         }
         field.texels[dest + d] = hit.iv;
-        if (bounce) {
-            // A miss brings nothing back but its cone still counts.
-            for (uint f = 0u; f < 6u; f++) {
-                float facing = max(dot(ray, cube_axis(f)), 0.0);
-                cube[f] += (hit.iv.a >= 0.0 ? hit.iv.rgb : vec3(0.0)) * facing;
-                cube_w[f] += facing;
-            }
+        // A miss brings nothing back but its cone still counts.
+        for (uint f = 0u; f < 6u; f++) {
+            float facing = max(dot(ray, cube_axis(f)), 0.0);
+            cube[f] += (hit.iv.a >= 0.0 ? hit.iv.rgb : vec3(0.0)) * facing;
+            cube_w[f] += facing;
         }
     }
-    if (bounce) {
-        // The picture reads three of these per probe instead of all 16 directions.
-        uint cube_at = WORLD_CUBE_OFFSET + world_probe_index(ip, count) * 6u;
-        for (uint f = 0u; f < 6u; f++) {
-            field.texels[cube_at + f] = vec4(cube_w[f] > 1.0e-4 ? cube[f] / cube_w[f] : vec3(0.0), 1.0);
-        }
+    // The picture reads three of these per probe instead of all 16 directions. The
+    // direct pass keeps its own cube for the bounce pass to read at each hit.
+    uint cube_at = (bounce ? WORLD_CUBE_OFFSET : WORLD_DIRECT_CUBE_OFFSET) + world_probe_index(ip, count) * 6u;
+    for (uint f = 0u; f < 6u; f++) {
+        field.texels[cube_at + f] = vec4(cube_w[f] > 1.0e-4 ? cube[f] / cube_w[f] : vec3(0.0), 1.0);
     }
 }
 
@@ -689,7 +694,7 @@ void write_pinned(uint cascade) {
         TraceHit hit = trace_hit(pos, ray, 0.0, t1);
         vec4 iv = hit.iv;
         if (iv.a >= 0.15) {
-            iv.rgb += hit.tint * hit.reflect * WORLD_IRR * sample_world_cube(hit.pos + hit.normal * 0.08, hit.normal);
+            iv.rgb += hit.tint * hit.reflect * WORLD_IRR * sample_cube(WORLD_CUBE_OFFSET, hit.pos + hit.normal * 0.08, hit.normal);
         }
         if (iv.a < -1.5 && cascade == 0u) {
             vec4 next = next_overflow
