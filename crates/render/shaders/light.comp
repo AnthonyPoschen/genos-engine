@@ -2,6 +2,7 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 
 #extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
 #include "scene_data.glsl"
 
 layout(std430, set = 0, binding = 1) buffer FieldData {
@@ -71,22 +72,15 @@ vec3 shade_lamp(vec3 origin, vec3 normal, vec4 lamp, vec3 color) {
 
 vec3 lights_at(vec3 origin, vec3 normal) {
     vec3 sum = vec3(0.0);
-    uvec2 suns = lamp_suns();
-    for (uint k = 0u; k < suns.y; k++) {
-        Lamp lamp = scene_lamp(grid_word(suns.x + k));
-        sum += shade_lamp(origin, normal, lamp.pos, lamp.color.rgb);
-    }
-    uvec2 near = lamp_cell_at(origin);
-    for (uint k = 0u; k < near.y; k++) {
-        Lamp lamp = scene_lamp(grid_word(near.x + k));
+    LampList list = lamps_at(origin);
+    uint count = lamp_list_size(list);
+    [[dont_unroll]] for (uint k = 0u; k < count; k++) {
+        Lamp lamp = lamp_list_get(list, k);
         if (lamp_reaches(lamp, origin)) {
             sum += shade_lamp(origin, normal, lamp.pos, lamp.color.rgb);
         }
     }
-    // The flame is one more lamp. The same occlusion test stops it at a wall.
-    if (scene.fire_pos.w > 0.0) {
-        sum += shade_lamp(origin, normal, vec4(scene.fire_pos.xyz, 0.0), scene.fire_color.rgb * scene.fire_pos.w);
-    }
+    // The flame is the list's last lamp. The same occlusion test stops it at a wall.
     return sum;
 }
 

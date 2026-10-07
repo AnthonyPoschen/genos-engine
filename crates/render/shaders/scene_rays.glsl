@@ -7,7 +7,14 @@
 // the occluder list (walls, solids, stand-ins), the floor plane and the roof plane.
 // A new primitive goes in scene_ray and scene_inside and nowhere else.
 //
-// Needs the scene block (scene_data.glsl) declared first.
+// Needs the scene block (scene_data.glsl) declared first, and
+// GL_EXT_control_flow_attributes.
+//
+// Every loop here runs over data the scene block sizes (cells, list entries), with a
+// bound read from the block and [[dont_unroll]]. These functions are inlined at every
+// ray and shadow test, so a loop with a large constant bound (the DDA once had 4096)
+// invites a driver to unroll it into each copy: the NVIDIA compiler grew past 17 GB
+// and never finished the pipeline. A data bound cannot be unrolled.
 //
 // The occluders sit in a grid of square cells on the ground plane. A ray walks the
 // cells it crosses and tests only the occluders listed there, so its cost follows
@@ -236,10 +243,10 @@ uint scene_candidates_skip(vec3 lo, vec3 hi, bool skip, vec3 skip_in) {
     if (!occ_grid_empty()) {
         ivec2 c0 = occ_cell_of(lo.xz);
         ivec2 c1 = occ_cell_of(hi.xz);
-        for (int cz = c0.y; cz <= c1.y && mask == 0u; cz++) {
-            for (int cx = c0.x; cx <= c1.x && mask == 0u; cx++) {
+        [[dont_unroll]] for (int cz = c0.y; cz <= c1.y && mask == 0u; cz++) {
+            [[dont_unroll]] for (int cx = c0.x; cx <= c1.x && mask == 0u; cx++) {
                 uvec2 cell = occ_cell(ivec2(cx, cz));
-                for (uint k = 0u; k < cell.y; k++) {
+                [[dont_unroll]] for (uint k = 0u; k < cell.y; k++) {
                     Occ occ = scene_occ(grid_word(cell.x + k));
                     if (occ_meets(occ, lo, hi) && !(skip && occ_inside(occ, skip_in))) {
                         mask |= SCENE_OCC_BIT;
@@ -268,7 +275,7 @@ bool scene_ray(vec3 origin, vec3 dir, float t0, float t1, out SceneHit hit);
 // Test the occluders of one cell against the ray, keeping the nearest hit.
 void occ_test_cell(ivec2 c, vec3 origin, vec3 dir, float t0, inout SceneHit hit, inout bool found) {
     uvec2 cell = occ_cell(c);
-    for (uint k = 0u; k < cell.y; k++) {
+    [[dont_unroll]] for (uint k = 0u; k < cell.y; k++) {
         Occ occ = scene_occ(grid_word(cell.x + k));
         float t_in;
         float t_out;
@@ -337,7 +344,9 @@ void occ_walk(vec3 origin, vec3 dir, float t0, inout SceneHit hit, inout bool fo
         abs(dir.z) > 1.0e-8 ? (edge.y - origin.z) * inv.y : 1.0e30
     );
     vec2 t_cell = vec2(abs(cell * inv.x), abs(cell * inv.y));
-    for (int i = 0; i < 4096; i++) {
+    // A walk steps one cell on one axis at a time, so it visits at most x + z cells.
+    int steps = dims.x + dims.y;
+    [[dont_unroll]] for (int i = 0; i < steps; i++) {
         occ_test_cell(c, origin, dir, t0, hit, found);
         float leave = min(t_next.x, t_next.y);
         if (leave >= min(hit.t, hi_t)) {
@@ -412,7 +421,7 @@ bool scene_inside(vec3 p) {
         return false;
     }
     uvec2 cell = occ_cell(occ_cell_of(p.xz));
-    for (uint k = 0u; k < cell.y; k++) {
+    [[dont_unroll]] for (uint k = 0u; k < cell.y; k++) {
         if (occ_inside(scene_occ(grid_word(cell.x + k)), p)) {
             return true;
         }
@@ -490,4 +499,36 @@ bool lamp_reaches(Lamp lamp, vec3 p) {
     }
     vec3 d = lamp.pos.xyz - p;
     return dot(d, d) <= lamp.color.w * lamp.color.w;
+}
+
+// The suns, the point lamps of p's cell and the flame, as one list: a caller walks it
+// in one loop and inlines its lamp shading (and the shadow ray in it) once, not once
+// for the suns, again for the lamps and again for the flame.
+struct LampList {
+    uvec2 suns;
+    uvec2 near;
+};
+
+LampList lamps_at(vec3 p) {
+    LampList list;
+    list.suns = lamp_suns();
+    list.near = lamp_cell_at(p);
+    return list;
+}
+
+uint lamp_list_size(LampList list) {
+    return list.suns.y + list.near.y + (scene.fire_pos.w > 0.0 ? 1u : 0u);
+}
+
+// The flame is a point lamp with no range (color.w 0: lamp_reaches always passes).
+Lamp lamp_list_get(LampList list, uint k) {
+    uint lamps = list.suns.y + list.near.y;
+    if (k >= lamps) {
+        Lamp fire;
+        fire.pos = vec4(scene.fire_pos.xyz, 0.0);
+        fire.color = vec4(scene.fire_color.rgb * scene.fire_pos.w, 0.0);
+        return fire;
+    }
+    uint word = k < list.suns.y ? list.suns.x + k : list.near.x + (k - list.suns.y);
+    return scene_lamp(grid_word(word));
 }

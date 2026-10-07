@@ -7,6 +7,7 @@ layout(location = 4) in vec2 v_uv;
 layout(location = 0) out vec4 out_color;
 
 #extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
 #include "scene_data.glsl"
 
 #include "scene_rays.glsl"
@@ -287,26 +288,13 @@ vec3 direct_at(vec3 pos, vec3 normal, bool two_sided) {
     // A point inside a solid (floor under a footprint) starts occluded in blocked().
     vec3 origin = pos + normal * 0.02;
     vec3 incoming = vec3(0.0);
-    uvec2 suns = lamp_suns();
-    for (uint k = 0u; k < suns.y; k++) {
-        Lamp lamp = scene_lamp(grid_word(suns.x + k));
-        incoming += shade_lamp(origin, normal, lamp.pos, lamp.color.rgb, two_sided);
-    }
-    uvec2 near = lamp_cell_at(origin);
-    for (uint k = 0u; k < near.y; k++) {
-        Lamp lamp = scene_lamp(grid_word(near.x + k));
+    LampList list = lamps_at(origin);
+    uint count = lamp_list_size(list);
+    [[dont_unroll]] for (uint k = 0u; k < count; k++) {
+        Lamp lamp = lamp_list_get(list, k);
         if (lamp_reaches(lamp, origin)) {
             incoming += shade_lamp(origin, normal, lamp.pos, lamp.color.rgb, two_sided);
         }
-    }
-    if (scene.fire_pos.w > 0.0) {
-        incoming += shade_lamp(
-            origin,
-            normal,
-            vec4(scene.fire_pos.xyz, 0.0),
-            scene.fire_color.rgb * scene.fire_pos.w,
-            two_sided
-        );
     }
     return incoming;
 }
@@ -363,31 +351,21 @@ vec2 fog_field_xz(vec2 xz) {
 
 vec3 scatter_light(vec3 p) {
     vec3 sum = vec3(0.0);
-    uvec2 suns = lamp_suns();
-    for (uint k = 0u; k < suns.y; k++) {
-        Lamp lamp = scene_lamp(grid_word(suns.x + k));
-        vec3 toward = -normalize(lamp.pos.xyz);
-        if (!blocked(p, p + toward * 80.0)) {
-            sum += lamp.color.rgb * LAMP_UNIT / 50.0;
+    LampList list = lamps_at(p);
+    uint count = lamp_list_size(list);
+    [[dont_unroll]] for (uint k = 0u; k < count; k++) {
+        Lamp lamp = lamp_list_get(list, k);
+        if (!lamp_reaches(lamp, p)) {
+            continue;
         }
-    }
-    uvec2 near = lamp_cell_at(p);
-    for (uint k = 0u; k < near.y; k++) {
-        Lamp lamp = scene_lamp(grid_word(near.x + k));
-        if (!lamp_reaches(lamp, p) || blocked(p, lamp.pos.xyz)) {
+        bool sun = lamp.pos.w > 0.5;
+        vec3 target = sun ? p - normalize(lamp.pos.xyz) * 80.0 : lamp.pos.xyz;
+        if (blocked(p, target)) {
             continue;
         }
         vec3 delta = lamp.pos.xyz - p;
-        float fall = LAMP_UNIT / max(dot(delta, delta), LAMP_RADIUS * LAMP_RADIUS);
+        float fall = sun ? LAMP_UNIT / 50.0 : LAMP_UNIT / max(dot(delta, delta), LAMP_RADIUS * LAMP_RADIUS);
         sum += lamp.color.rgb * fall;
-    }
-    if (scene.fire_pos.w > 0.0) {
-        vec3 fire = scene.fire_pos.xyz;
-        if (!blocked(p, fire)) {
-            vec3 delta = fire - p;
-            float fall = scene.fire_pos.w * LAMP_UNIT / max(dot(delta, delta), LAMP_RADIUS * LAMP_RADIUS);
-            sum += scene.fire_color.rgb * fall;
-        }
     }
     sum += sample_field(fog_field_xz(p.xz));
     return sum;
