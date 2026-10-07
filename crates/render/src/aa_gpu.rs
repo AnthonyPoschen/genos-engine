@@ -376,7 +376,8 @@ impl Gpu {
             } else {
                 self.pipeline
             };
-            (self.fns.cmd_bind_pipe)(self.cmd, 0, world_pipe);
+            let depth_first = !self.wire_on && !self.depth_pipeline.is_null();
+            (self.fns.cmd_bind_pipe)(self.cmd, 0, if depth_first { self.depth_pipeline } else { world_pipe });
             (self.fns.cmd_bind_set)(
                 self.cmd,
                 0,
@@ -400,6 +401,20 @@ impl Gpu {
                 matrix.as_ptr() as *const c_void,
             );
             let mut bound = std::ptr::null_mut();
+            if depth_first {
+                // The opaque shapes' depth first: the shading pass then runs once per
+                // pixel instead of once per overlapping face.
+                for draw in self.draws.iter().filter(|d| d.shapes && d.count > 0) {
+                    if self.shapes.buffer != bound {
+                        let vb = [self.shapes.buffer];
+                        let off = [0u64];
+                        (self.fns.cmd_bind_vb)(self.cmd, 0, 1, vb.as_ptr(), off.as_ptr());
+                        bound = self.shapes.buffer;
+                    }
+                    (self.fns.cmd_draw)(self.cmd, draw.count, 1, draw.first, draw.instance);
+                }
+                (self.fns.cmd_bind_pipe)(self.cmd, 0, world_pipe);
+            }
             for draw in &self.draws {
                 if draw.count == 0 {
                     continue;

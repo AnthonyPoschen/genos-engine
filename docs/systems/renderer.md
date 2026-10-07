@@ -81,7 +81,7 @@ A particle does not occlude. `affects_light` is not the lit flag and is not the 
 
 A screen-space shader does not run a custom program yet. Custom SPIR-V is not loaded.
 
-Lighting and raster are two GPU stages in one submit. The CPU does not wait between them. A normal draw does not stall on the GPU fence. There are two frames in flight.
+The raster draws the opaque shapes' depth first, with no shading, then shades with an equal-or-nearer depth test, so each pixel shades one opaque surface however many faces cover it. Lighting and raster are two GPU stages in one submit. The CPU does not wait between them. A normal draw does not stall on the GPU fence. There are two frames in flight.
 
 The picture modes are `off`, FXAA, and SSAA. The draw does not run MSAA, SMAA, or TAA. The filter does not change the light field. The filter does not change the overlay.
 

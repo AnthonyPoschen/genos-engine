@@ -9,6 +9,9 @@ layout(location = 1) out vec3 v_albedo;
 layout(location = 2) out vec3 v_normal;
 layout(location = 3) out float v_shade;
 layout(location = 4) out vec2 v_uv;
+// The depth pass (gpu.rs make_depth_pipeline) and the shading pass draw the same
+// shapes; both must land on the same depth.
+invariant gl_Position;
 layout(push_constant) uniform Push {
     mat4 view_proj;
 } pc;

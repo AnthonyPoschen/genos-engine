@@ -731,6 +731,8 @@ struct Gpu {
     overlay_count: u32,
     render_pass: Handle,
     pipeline: Handle,
+    /// Depth only, over the opaque shapes, before `pipeline` (aa_gpu.rs raster_scene).
+    depth_pipeline: Handle,
     overlay_pipeline: Handle,
     wire_pipeline: Handle,
     wire_on: bool,
@@ -1420,6 +1422,7 @@ impl Gpu {
                 overlay_count: 0,
                 render_pass: std::ptr::null_mut(),
                 pipeline: std::ptr::null_mut(),
+                depth_pipeline: std::ptr::null_mut(),
                 overlay_pipeline: std::ptr::null_mut(),
                 wire_pipeline: std::ptr::null_mut(),
                 wire_on: false,
@@ -1563,6 +1566,7 @@ impl Gpu {
             self.desc_layout = self.make_desc_layout()?;
             self.layout = self.make_layout()?;
             self.pipeline = self.make_pipeline(true, true, false)?;
+            self.depth_pipeline = self.make_depth_pipeline()?;
             self.overlay_pipeline = self.make_pipeline(false, false, false)?;
             self.wire_pipeline = self.make_pipeline(false, false, true)?;
             #[repr(C)]
@@ -4349,11 +4353,23 @@ impl Gpu {
         Ok(pass)
     }
 
-    fn make_pipeline(
+    fn make_pipeline(&mut self, depth_test: bool, blend_on: bool, additive: bool) -> Result<Handle, String> {
+        self.make_raster_pipeline(depth_test, blend_on, additive, false)
+    }
+
+    /// The depth of the opaque shapes alone: no fragment shader, no color. The scene
+    /// pass after it tests equal-or-nearer, so each pixel shades one opaque surface
+    /// however the shapes overlap or are ordered.
+    fn make_depth_pipeline(&mut self) -> Result<Handle, String> {
+        self.make_raster_pipeline(true, false, false, true)
+    }
+
+    fn make_raster_pipeline(
         &mut self,
         depth_test: bool,
         blend_on: bool,
         additive: bool,
+        depth_only: bool,
     ) -> Result<Handle, String> {
         unsafe {
             let vert = self.shader(if additive { WIRE_VERT_SPV } else { VERT_SPV })?;
@@ -4580,7 +4596,9 @@ impl Gpu {
                 flags: 0,
                 test: depth_on,
                 write: depth_on,
-                compare: 1,
+                // LESS for the depth pass, LESS_OR_EQUAL after it: the same shape
+                // (scene.vert's invariant position) passes at the depth it wrote.
+                compare: if depth_only { 1 } else { 3 },
                 bounds: 0,
                 stencil: 0,
                 front_fail: 0,
@@ -4656,7 +4674,7 @@ impl Gpu {
                     src_a: 1,
                     dst_a: 0,
                     op_a: 0,
-                    mask: 0xf,
+                    mask: if depth_only { 0 } else { 0xf },
                 }
             };
             let blend = Blend {
@@ -4711,7 +4729,7 @@ impl Gpu {
                 s_type: 28,
                 next: std::ptr::null(),
                 flags: 0,
-                stage_count: 2,
+                stage_count: if depth_only { 1 } else { 2 },
                 stages: stages.as_ptr(),
                 vertex: &vert_info,
                 ia: &ia,
@@ -5546,6 +5564,9 @@ impl Drop for Gpu {
             }
             if !self.overlay_pipeline.is_null() {
                 (self.fns.destroy_pipeline)(self.device, self.overlay_pipeline, std::ptr::null());
+            }
+            if !self.depth_pipeline.is_null() {
+                (self.fns.destroy_pipeline)(self.device, self.depth_pipeline, std::ptr::null());
             }
             if !self.pipeline.is_null() {
                 (self.fns.destroy_pipeline)(self.device, self.pipeline, std::ptr::null());
