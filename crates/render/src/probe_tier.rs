@@ -445,7 +445,23 @@ pub struct TierState {
     dropped: usize,
     live: usize,
     /// GPU milliseconds per probe ray, learned from the last builds.
-    ms_per_ray: f64,
+    /// GPU cost of a build: about max(latency, rays x per-ray cost). See [`Self::note_time`].
+    cost: BuildCost,
+}
+
+/// What a build of tier rays costs on this GPU. A GPU runs many workgroups (one per
+/// brick) at once, so a small build costs about one workgroup's run time however few
+/// rays it has; only a build that fills the GPU costs in proportion to its rays.
+/// Learning one per-ray cost from every build made small builds look expensive: where
+/// one workgroup outlasts the budget the budget stayed at one brick a build, and a
+/// GPU that starts from a slow guess climbed out only slowly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BuildCost {
+    /// Milliseconds a probe ray costs in a build that fills the GPU. None before the
+    /// first timed build.
+    ms_per_ray: Option<f64>,
+    /// Milliseconds a build takes however few rays it has.
+    latency_ms: f64,
 }
 
 impl Default for TierState {
@@ -470,7 +486,7 @@ impl TierState {
             dropped: 0,
             live: 0,
             // A first guess (lavapipe, a room). The first timed build replaces it.
-            ms_per_ray: 2.0e-4,
+            cost: BuildCost { ms_per_ray: None, latency_ms: 0.0 },
         }
     }
 
@@ -679,22 +695,33 @@ impl TierState {
         self.slots.iter().flatten().any(|s| self.class(s).is_some())
     }
 
-    /// Probe rays that fit in `ms` of GPU time.
+    /// Probe rays for a build of `ms` GPU milliseconds. A build costs at least its
+    /// latency, so when that is above `ms` the build takes the rays that fit in the
+    /// latency: they run side by side for the same time. Before the first timed build
+    /// everything due fits, and that build measures the GPU.
     pub fn budget_rays(&self, ms: f64) -> u64 {
-        (ms / self.ms_per_ray.max(1.0e-9)).max(1.0) as u64
+        match self.cost.ms_per_ray {
+            Some(per_ray) => (ms.max(self.cost.latency_ms) / per_ray.max(1.0e-9)).max(1.0) as u64,
+            None => u64::MAX,
+        }
     }
 
-    /// Learn the cost of a probe ray from a timed build.
+    /// Learn from a timed build. A build whose rays at the known per-ray cost explain
+    /// at least half its time filled the GPU: it moves the per-ray cost. A shorter one
+    /// waited on its slowest workgroup: it moves the latency.
     pub fn note_time(&mut self, probe_rays: u64, ms: f64) {
         if probe_rays < 256 || !(ms > 0.0) {
             return;
         }
         let sample = ms / probe_rays as f64;
-        self.ms_per_ray = self.ms_per_ray * 0.5 + sample * 0.5;
-    }
-
-    pub fn ms_per_ray(&self) -> f64 {
-        self.ms_per_ray
+        let cost = &mut self.cost;
+        match cost.ms_per_ray {
+            None => cost.ms_per_ray = Some(sample),
+            Some(per_ray) if per_ray * probe_rays as f64 >= 0.5 * ms => {
+                cost.ms_per_ray = Some(per_ray * 0.5 + sample * 0.5);
+            }
+            Some(_) => cost.latency_ms = cost.latency_ms * 0.5 + ms * 0.5,
+        }
     }
 
     /// The next build's work, up to `budget` probe rays (`None`: everything that is
@@ -956,6 +983,28 @@ mod tests {
         }
         let batch = tier.batch([0.0, 1.7, 0.0], None, FIRST_RAYS);
         assert!(batch.items.iter().all(|i| !i.reset && i.history.is_none() && i.rays == REFINE_RAYS));
+    }
+
+    #[test]
+    fn a_slow_workgroup_does_not_shrink_the_budget_to_one_brick() {
+        let mut tier = TierState::default();
+        assert_eq!(tier.budget_rays(1.5), u64::MAX);
+        // A full build measures the GPU: 200k rays in 40 ms.
+        tier.note_time(200_000, 40.0);
+        let first = tier.budget_rays(1.5);
+        assert_eq!(first, 7500);
+        // One brick takes 6 ms on its own, four times the budget.
+        for _ in 0..8 {
+            tier.note_time(8192, 6.0);
+        }
+        // The build then fills the 6 ms that one brick costs anyway.
+        let filled = tier.budget_rays(1.5);
+        assert!(filled > 3 * first, "{filled}");
+        assert!(filled <= 30_000, "{filled}");
+        // A fast GPU: a small build is quick, the budget grows to fit 1.5 ms.
+        let mut fast = TierState::default();
+        fast.note_time(300_000, 0.6);
+        assert!(fast.budget_rays(1.5) >= 700_000);
     }
 
     #[test]
