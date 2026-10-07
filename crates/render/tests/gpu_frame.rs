@@ -1422,8 +1422,10 @@ fn an_open_floor_falls_off_smoothly_and_a_shadow_keeps_colored_bounce() {
         }
     }
     if drop > 1.0 {
+        // The picture is dithered: up to one code of zero-mean noise per pixel, about
+        // 0.1 code in a 5 x 5 sample mean. A reversal under half a code is that noise.
         assert!(
-            worst < drop * 0.15,
+            worst < (drop * 0.15).max(0.5),
             "bounce reverses by {worst:.1}, drop {drop:.1}, line {line:?}"
         );
     }

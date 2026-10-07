@@ -1,5 +1,6 @@
 #version 450
 
+#extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(std430, set = 0, binding = 0) readonly buffer Src {
@@ -16,6 +17,8 @@ layout(push_constant) uniform Push {
     uint src_width;
     uint bgra;
 } push;
+
+#include "dither.glsl"
 
 uint tent_weight(int offset) {
     if (offset == 0 || offset == 3) {
@@ -52,10 +55,14 @@ void main() {
             sum.w += ((packed >> 24u) & 255u) * weight;
         }
     }
-    uint b0 = sum.x / 64u;
-    uint b1 = sum.y / 64u;
-    uint b2 = sum.z / 64u;
-    uint b3 = sum.w / 64u;
+    // The mean of the 16 samples, rounded with dither. Integer division would floor
+    // every pixel (half a code darker on average) and band again.
+    vec3 mean = vec3(sum.xyz) / (64.0 * 255.0);
+    vec3 d = dither8(mean, uvec2(pixel)) * 255.0;
+    uint b0 = uint(clamp(d.x + 0.5, 0.0, 255.0));
+    uint b1 = uint(clamp(d.y + 0.5, 0.0, 255.0));
+    uint b2 = uint(clamp(d.z + 0.5, 0.0, 255.0));
+    uint b3 = (sum.w + 32u) / 64u;
     dst.pixels[uint(pixel.y) * push.width + uint(pixel.x)] =
         b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
 }

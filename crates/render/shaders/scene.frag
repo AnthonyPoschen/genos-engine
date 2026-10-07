@@ -81,6 +81,7 @@ layout(std430, set = 0, binding = 1) readonly buffer FieldData {
 } field;
 
 #include "tier.glsl"
+#include "dither.glsl"
 
 layout(std430, set = 0, binding = 2) readonly buffer ParticleImage {
     uint width;
@@ -449,5 +450,10 @@ void main() {
         bounce = vec3(0.0);
     }
     vec3 color = tone(albedo * LAMBERT * (direct + bounce));
+    // An opaque face goes straight to the 8-bit target: dither its rounding. A
+    // blended card stays exact so its layers do not stack noise.
+    if (texel.a >= 1.0) {
+        color = dither8(color, uvec2(gl_FragCoord.xy));
+    }
     out_color = vec4(color * texel.a, texel.a);
 }

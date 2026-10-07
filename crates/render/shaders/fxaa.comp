@@ -1,5 +1,6 @@
 #version 450
 
+#extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(std430, set = 0, binding = 0) readonly buffer Src {
@@ -32,6 +33,8 @@ vec3 unpack_rgb(uint packed) {
     }
     return vec3(c0, c1, c2);
 }
+
+#include "dither.glsl"
 
 uint pack_rgb(vec3 rgb) {
     uint r = uint(clamp(rgb.r, 0.0, 1.0) * 255.0 + 0.5);
@@ -121,5 +124,6 @@ void main() {
         return;
     }
     vec3 rgb_end = unpack_rgb(load_at(pixel.x + perp.x, pixel.y + perp.y));
-    dst.pixels[index] = pack_rgb(mix(rgb_m, rgb_end, blend));
+    // A blended pixel is a new value between two codes: dither its rounding too.
+    dst.pixels[index] = pack_rgb(dither8(mix(rgb_m, rgb_end, blend), uvec2(pixel)));
 }
