@@ -114,8 +114,42 @@ bool occ_ray(Occ occ, vec3 origin, vec3 dir, out float t, out vec3 normal) {
     return ray_box(origin, dir, lo, hi, t, normal);
 }
 
+const uint SCENE_FLOOR_BIT = 1u << 16u;
+const uint SCENE_ROOF_BIT = 1u << 17u;
+const uint SCENE_ALL = 0xFFFFFFFFu;
+
+// The surfaces that reach into the box lo..hi: bit i for occluder i, plus the floor
+// and roof bits. A segment with both ends in the box can only meet these, so a caller
+// testing many short segments in one neighbourhood tests only them (often none).
+uint scene_candidates(vec3 lo, vec3 hi) {
+    uint mask = 0u;
+    uint count = min(scene.occ_count, 16u);
+    for (uint i = 0u; i < count; i++) {
+        Occ occ = scene.occs[i];
+        float y0;
+        float y1;
+        occ_span(occ, y0, y1);
+        vec2 half_e = occ.center_shape.w > 0.5 ? vec2(occ.extent.w) : vec2(occ.extent.x, occ.extent.z);
+        vec3 o_lo = vec3(occ.center_shape.x - half_e.x, y0, occ.center_shape.z - half_e.y);
+        vec3 o_hi = vec3(occ.center_shape.x + half_e.x, y1, occ.center_shape.z + half_e.y);
+        if (all(lessThanEqual(o_lo, hi)) && all(lessThanEqual(lo, o_hi))) {
+            mask |= 1u << i;
+        }
+    }
+    if (lo.y <= 0.0 && hi.y >= 0.0) {
+        mask |= SCENE_FLOOR_BIT;
+    }
+    if (has_roof() && lo.y <= scene.ceiling.x && hi.y >= scene.ceiling.x) {
+        mask |= SCENE_ROOF_BIT;
+    }
+    return mask;
+}
+
 // Nearest surface along the ray with t0 <= t < t1.
-bool scene_ray(vec3 origin, vec3 dir, float t0, float t1, out SceneHit hit) {
+bool scene_ray(vec3 origin, vec3 dir, float t0, float t1, out SceneHit hit);
+
+// scene_ray over the surfaces in mask (scene_candidates) only.
+bool scene_ray_masked(vec3 origin, vec3 dir, float t0, float t1, uint mask, out SceneHit hit) {
     hit.t = t1;
     hit.normal = vec3(0.0, 1.0, 0.0);
     hit.albedo = vec3(1.0);
@@ -124,6 +158,9 @@ bool scene_ray(vec3 origin, vec3 dir, float t0, float t1, out SceneHit hit) {
     bool found = false;
     uint count = min(scene.occ_count, 16u);
     for (uint i = 0u; i < count; i++) {
+        if ((mask & (1u << i)) == 0u) {
+            continue;
+        }
         Occ occ = scene.occs[i];
         float t;
         vec3 n;
@@ -142,6 +179,9 @@ bool scene_ray(vec3 origin, vec3 dir, float t0, float t1, out SceneHit hit) {
         if (plane == 1 && !has_roof()) {
             continue;
         }
+        if ((mask & (plane == 0 ? SCENE_FLOOR_BIT : SCENE_ROOF_BIT)) == 0u) {
+            continue;
+        }
         float height = plane == 0 ? 0.0 : scene.ceiling.x;
         if (abs(dir.y) < 1.0e-8) {
             continue;
@@ -157,6 +197,10 @@ bool scene_ray(vec3 origin, vec3 dir, float t0, float t1, out SceneHit hit) {
         }
     }
     return found;
+}
+
+bool scene_ray(vec3 origin, vec3 dir, float t0, float t1, out SceneHit hit) {
+    return scene_ray_masked(origin, dir, t0, t1, SCENE_ALL, hit);
 }
 
 // Strictly inside a solid or wall, or above the roof over the floor footprint. A

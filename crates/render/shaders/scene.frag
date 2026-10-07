@@ -236,6 +236,11 @@ bool volume_sample(uint info_at, uint base, uint across, uint layers, vec3 world
     uint fz = face_n.z >= 0.0 ? 4u : 5u;
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
+    // Only surfaces reaching into the box around this point and its 8 cell centers can
+    // block a tap. Away from geometry that is none, and the taps cost no ray tests.
+    vec3 near_lo = info.xyz + (vec3(i0) + 0.5) * spacing;
+    vec3 near_hi = near_lo + vec3(spacing);
+    uint blockers = scene_candidates(min(near_lo, from), max(near_hi, from));
     for (uint corner = 0u; corner < 8u; corner++) {
         ivec3 c = i0 + ivec3(int(corner & 1u), int((corner >> 1u) & 1u), int((corner >> 2u) & 1u));
         if (c.x < 0 || c.y < 0 || c.z < 0 || c.x >= int(across) || c.y >= int(layers) || c.z >= int(across)) {
@@ -250,8 +255,13 @@ bool volume_sample(uint info_at, uint base, uint across, uint layers, vec3 world
         // The cell must see this point. Without the test a cell on the far side of a
         // thin wall or the roof (one cell away) blends its light through.
         vec3 cell_center = info.xyz + (vec3(c) + 0.5) * spacing;
-        if (segment_blocked(from, cell_center)) {
-            continue;
+        if (blockers != 0u) {
+            vec3 delta = cell_center - from;
+            float dist = length(delta);
+            SceneHit hit;
+            if (dist > 1.0e-3 && scene_ray_masked(from, delta / dist, 1.0e-4, dist - 1.0e-3, blockers, hit)) {
+                continue;
+            }
         }
         uint cb = base + ((uint(c.y) * across + uint(c.z)) * across + uint(c.x)) * 6u;
         vec4 a = field.texels[cb + fx];
