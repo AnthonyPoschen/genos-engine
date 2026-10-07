@@ -36,6 +36,6 @@ pub use particles::{
     Puff, Simulation, FIRE_COLOR, PROOF_STEPS, SMOKE_ALBEDO, SMOKE_DENSITY, SMOKE_RADIUS, STEP_DT,
 };
 pub use world::{
-    fixed_bounds, identity_pose, solid_reach, Bounds, Displacement, DrawKind, FixedPart, Object, ParticleFrame, ParticleImage,
+    fixed_bounds, identity_pose, in_view, solid_reach, Bounds, Displacement, DrawKind, FixedPart, Object, ParticleFrame, ParticleImage,
     ShaderSpace, World,
 };
