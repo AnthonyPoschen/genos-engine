@@ -192,6 +192,53 @@ fn two_easings_differ_mid_segment_and_both_finish_on_the_end() {
 }
 
 #[test]
+fn ease_in_out_starts_slower_than_linear() {
+    let points = path();
+    let start = points[0];
+    let mut linear_scene = room(false);
+    let mut eased_scene = room(false);
+    linear_scene.solids[0].position = start;
+    eased_scene.solids[0].position = start;
+    let mut linear = rig(&linear_scene);
+    let mut eased = rig(&eased_scene);
+    bind(&mut linear, &linear_scene, Easing::Linear, points.clone());
+    bind(&mut eased, &eased_scene, Easing::EaseInOut, points);
+    frames(&mut linear, &mut linear_scene, 15);
+    frames(&mut eased, &mut eased_scene, 15);
+    let linear_travel = (linear_scene.solids[0].position - start).length();
+    let eased_travel = (eased_scene.solids[0].position - start).length();
+    assert!(eased_travel > 0.02, "ease-in-out did not leave the start");
+    assert!(
+        eased_travel < linear_travel,
+        "ease-in-out traveled {eased_travel}, linear {linear_travel}"
+    );
+}
+
+#[test]
+fn a_held_path_stays_put_and_a_resume_continues() {
+    let points = path();
+    let start = points[0];
+    let mut scene = room(false);
+    scene.solids[0].position = start;
+    let mut camera = rig(&scene);
+    bind(&mut camera, &scene, Easing::EaseInOut, points);
+    assert!(camera.set_codimation_running(0, false));
+    frames(&mut camera, &mut scene, 30);
+    assert!(
+        (scene.solids[0].position - start).length() < 0.02,
+        "a held path moved to {:?}",
+        scene.solids[0].position
+    );
+    assert!(camera.set_codimation_running(0, true));
+    frames(&mut camera, &mut scene, 20);
+    assert!(
+        (scene.solids[0].position - start).length() > 0.05,
+        "resume left the solid at {:?}",
+        scene.solids[0].position
+    );
+}
+
+#[test]
 fn a_wall_blocks_the_segment_and_a_clear_path_reaches_the_end() {
     let points = path();
     let end = points[1];

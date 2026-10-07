@@ -37,7 +37,7 @@ The scene crate does not call Vulkan. It keeps the lights and the objects. The r
 The crate is `crates/scene`, package `genos-scene`.
 
 - `Camera`, `attach_scene`, `codimate`, `update`, `look_direction`, and `view_proj` are in `src/camera.rs`.
-- `Codimation` and `Easing` are in `src/codimation.rs`. `Easing` is `Linear`, `EaseIn`, or `EaseOut`.
+- `Codimation` and `Easing` are in `src/codimation.rs`. `Easing` is `Linear`, `EaseIn`, `EaseOut`, or `EaseInOut`.
 - `Camera.position` is the eye. `Camera.physics` is the world. `Camera.view` is the capsule index.
 - `look_direction` returns the view direction.
 - `Scene`, `Floor`, `Wall`, `Solid`, and `Light` are in `src/types.rs`.
@@ -63,7 +63,7 @@ Call `update` with the scene, those actions, and that interval. Call the particl
 
 A non-positive or non-finite interval does not move the camera. It does not change stick look. It does not step physics. It does not advance a codimation. Mouse look stays a pointer delta. Pass the camera to `Renderer::draw`.
 
-Call `Camera::codimate` after `attach_scene`. Pass the solid index and a `Codimation`. The solid starts on the first position. Each slice submits that path's displacement to the physics step. The resolved position is written back onto the solid.
+Call `Camera::codimate` after `attach_scene`. Pass the solid index and a `Codimation`. The solid starts on the first position. Each slice submits that path's displacement to the physics step. The resolved position is written back onto the solid. `set_codimation_running(solid, false)` holds the solid at its current point. The path time stays. `true` resumes from that point.
 
 The camera starts the endpoint after it loads the script. An agent discovers the URL from the record for that process. A record for a dead process is not a live endpoint.
 

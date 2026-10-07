@@ -7,12 +7,15 @@ use genos_render::{Antialias, Renderer, ScreenRect, Simulation, World};
 
 /// The flame, the smoke, and the flame lamp stay off while the radiance field is under study.
 const SHOW_PARTICLES: bool = false;
-use genos_scene::{load_path, update, Actions, Camera};
+use genos_scene::{load_path, update, Actions, Camera, Codimation, Easing, Scene, Vec3};
 use genos_ui::{
-    apply_frame_action, lighting_frame, OpenFrame, Pointer, ProfileGraph, ProfileStream, State,
+    apply_frame_action, lighting_frame, Action, OpenFrame, Pointer, ProfileGraph, ProfileStream,
+    State,
 };
 use genos_window::{extent_changed, FocusGate, Window};
 
+/// Seconds for one leg of the red box path.
+const BOX_LEG_SECONDS: f32 = 8.0;
 /// Seconds for the first frame, before a previous frame exists.
 const FIRST_FRAME_SECONDS: f32 = 1.0 / 60.0;
 /// A hitch longer than this does not replay the missed time.
@@ -57,6 +60,49 @@ fn parse_profile_mode(explicit: Option<&str>, proof: bool) -> Result<ProfileMode
 struct PendingProfile {
     open: OpenFrame,
     record: bool,
+}
+
+/// The red square in `scene.rhai`.
+fn red_box_index(scene: &Scene) -> Option<usize> {
+    scene
+        .solids
+        .iter()
+        .position(|solid| solid.color[0] > 0.9 && solid.color[1] < 0.05 && solid.color[2] < 0.05)
+}
+
+/// Ease in and out between the wall corner and the far floor edge.
+///
+/// The loop starts on the home position, which sits on that diagonal.
+fn red_box_path() -> Option<Codimation> {
+    // Inner corner of the L. The long wall's south face is z = 4.8.
+    // The east wall's west face is x = 5.8. The box is 1.5 m wide.
+    let near = Vec3::new(5.8 - 0.75 - 0.08, 0.0, 4.8 - 0.75 - 0.08);
+    let span = near.length();
+    if span < 1.0e-4 {
+        return None;
+    }
+    // Floor center (0, 1.4), half extents 8 and 9.36. Keep the box on the floor.
+    let outward = near * (-1.0 / span);
+    let min_x = -8.0 + 0.75;
+    let min_z = 1.4 - 9.36 + 0.75;
+    let tx = if outward.x < 0.0 {
+        min_x / outward.x
+    } else {
+        f32::MAX
+    };
+    let tz = if outward.z < 0.0 {
+        min_z / outward.z
+    } else {
+        f32::MAX
+    };
+    let far = outward * tx.min(tz);
+    // The first leg runs from the floor edge to the corner, so Run from home
+    // approaches the wall before it travels back out.
+    let leg = near - far;
+    let along = (Vec3::ZERO - far).dot(leg) / leg.length_squared().max(1.0e-6);
+    let mut motion = Codimation::new(vec![far, near], Easing::EaseInOut, BOX_LEG_SECONDS)?;
+    motion.seek(along.clamp(0.0, 1.0) * BOX_LEG_SECONDS);
+    Some(motion)
 }
 
 fn main() {
@@ -126,6 +172,13 @@ fn run() -> Result<(), String> {
     };
     camera.pitch = pitch;
     camera.attach_scene(&scene);
+    let red_box = red_box_index(&scene);
+    if let Some(index) = red_box {
+        if let Some(motion) = red_box_path() {
+            camera.codimate(&scene, index, motion);
+            camera.set_codimation_running(index, false);
+        }
+    }
     let host = genos_mcp::Host::new(scene, camera);
     if let Some((x, y, z)) = lamp {
         host.with_frame(|scene, _| {
@@ -321,7 +374,17 @@ fn run() -> Result<(), String> {
         let ui_cpu = ui_at.elapsed();
         // camera/scene update
         let scene_at = Instant::now();
+        let mut box_running = ui.box_running;
+        for action in &ui_frame.actions {
+            if matches!(action, Action::ToggleBoxRun) {
+                box_running = !box_running;
+            }
+        }
+        ui.box_running = box_running;
         let draw_camera = host.with_frame(|scene, camera| {
+            if let Some(index) = red_box_index(scene) {
+                camera.set_codimation_running(index, box_running);
+            }
             for action in &ui_frame.actions {
                 if let Some(mode) = apply_frame_action(scene, *action) {
                     renderer.set_antialias(Antialias::from_picture(mode.code()));

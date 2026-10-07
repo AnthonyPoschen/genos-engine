@@ -20,6 +20,8 @@ The panel moves that lamp with three sliders. Each slider has notches. Neighbor 
 
 The same panel shows the picture modes `off`, `FXAA`, and `SSAA`. A press selects that mode for the next picture. That press does not start camera look capture.
 
+The same panel shows `Run` or `Stop` for the red box path. `Run` starts the loop. `Stop` holds the box at its current point on that path. The next `Run` continues from that point. That press does not start camera look capture.
+
 Hover, focus, and press each select a look. A drag moves a draggable panel by the pointer delta. The children move with the panel. A press on the panel does not start camera look capture.
 
 `lighting_frame` reads `current/theme/colors.toml` when the process is on Omarchy. The `current` directory is `$XDG_STATE_HOME/omarchy/current` when `XDG_STATE_HOME` is set. Otherwise the directory is `~/.local/state/omarchy/current`. The process is on Omarchy only when that directory exists. Detection does not read `/etc/os-release`.
@@ -75,7 +77,7 @@ Build a `Node` tree. Call `layout` with `Space::Screen` or `Space::World`.
 
 The camera frame calls `lighting_frame` each frame. The call passes the first lamp. That call loads the Omarchy theme when the `current` directory exists. A game does not pass a palette.
 
-The frame calls `apply_frame_action` for each action. A picture selection returns the mode. The frame sets that mode on the renderer before the draw. A lamp action stays on the lamp path. The frame draws every paint in `Frame::paints` with `Renderer::draw_with_overlay`. The sun is one of those paints. The frame starts look capture only when `look_capture` is true.
+The frame calls `apply_frame_action` for each action. A picture selection returns the mode. The frame sets that mode on the renderer before the draw. A lamp action stays on the lamp path. `ToggleBoxRun` stays with the caller. The caller holds or resumes the red box path. The frame draws every paint in `Frame::paints` with `Renderer::draw_with_overlay`. The sun is one of those paints. The frame starts look capture only when `look_capture` is true.
 
 Basic mode and detailed mode call `profile_overlay` and draw those paints. Detailed mode draws with `Renderer::draw_profiled`. That mode calls `ProfileStream::append` for each live sample. Basic mode draws with `Renderer::draw_with_overlay`.
 

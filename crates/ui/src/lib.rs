@@ -44,6 +44,8 @@ pub enum Action {
     ScaleIntensity(f32),
     /// Select the picture filter for the next presented frame.
     SetAntialias(PictureMode),
+    /// Start or hold the red box path. The caller keeps the on/off state.
+    ToggleBoxRun,
 }
 
 pub use layout::{layout, Align, Direction, Node, Pad, Place, Rect, Sizing, Space};
@@ -76,4 +78,6 @@ pub mod id {
     pub const AA_FXAA: u32 = 13;
     /// Double-resolution picture, then a tent downsample.
     pub const AA_SSAA: u32 = 14;
+    /// Starts or holds the red box path.
+    pub const BOX_RUN: u32 = 15;
 }

@@ -53,6 +53,8 @@ pub struct State {
     /// The current press missed the panel, so look capture stays on.
     look_hold: bool,
     focus: Option<u32>,
+    /// True while the red box path is advancing.
+    pub box_running: bool,
     /// Omarchy `current` directory. `None` uses the real state path.
     pub omarchy_current: Option<PathBuf>,
     palette: Option<Palette>,
@@ -70,6 +72,7 @@ impl Default for State {
             sliding: None,
             look_hold: false,
             focus: None,
+            box_running: false,
             omarchy_current: None,
             palette: None,
             palette_from: None,
@@ -122,7 +125,7 @@ pub fn lighting_frame(
         state.panel_offset[1] += pointer.y - state.pointer_y;
     }
     refresh_palette(state);
-    let root = lighting_panel(state.panel_offset, state.palette);
+    let root = lighting_panel(state.panel_offset, state.palette, state.box_running);
     let items = layout::layout(&root, Space::Screen, viewport, Some(camera));
     let hit = items
         .iter()
@@ -212,7 +215,7 @@ pub fn apply_lamp(scene: &mut Scene, action: Action) {
                 *channel = (*channel * scale).clamp(0.0, 8.0);
             }
         }
-        Action::SetAntialias(_) => {}
+        Action::SetAntialias(_) | Action::ToggleBoxRun => {}
     }
 }
 
@@ -266,7 +269,7 @@ fn refresh_palette(state: &mut State) {
     }
 }
 
-fn lighting_panel(offset: [f32; 2], palette: Option<Palette>) -> Node {
+fn lighting_panel(offset: [f32; 2], palette: Option<Palette>, box_running: bool) -> Node {
     let mut panel = Node::new(id::PANEL);
     panel.direction = Direction::TopToBottom;
     panel.pad = Pad::all(8.0);
@@ -315,6 +318,16 @@ fn lighting_panel(offset: [f32; 2], palette: Option<Palette>) -> Node {
                     palette,
                 ),
             ],
+            fill,
+        ),
+        row(
+            26,
+            vec![control(
+                id::BOX_RUN,
+                if box_running { "Stop" } else { "Run" },
+                Action::ToggleBoxRun,
+                palette,
+            )],
             fill,
         ),
     ];

@@ -336,7 +336,7 @@ fn the_panel_shows_picture_modes_and_a_press_selects_one() {
         .filter_map(|item| item.text.as_deref())
         .collect();
     for label in [
-        "Light", "X", "Y", "Z", "Dim", "Bright", "off", "FXAA", "SSAA",
+        "Light", "X", "Y", "Z", "Dim", "Bright", "off", "FXAA", "SSAA", "Run",
     ] {
         assert!(texts.contains(&label), "{label} is missing from {texts:?}");
     }
@@ -357,6 +357,25 @@ fn the_panel_shows_picture_modes_and_a_press_selects_one() {
         assert_eq!(press.actions, vec![Action::SetAntialias(mode)]);
         assert!(!press.look_capture, "a picture-mode press captured look");
     }
+}
+
+#[test]
+fn the_run_button_holds_the_label_until_the_caller_flips_it() {
+    let camera = Camera::opening();
+    let scene = lamp_scene(Vec3::new(0.0, 4.0, 0.0));
+    let mut state = State::default();
+    let idle = ui(&mut state, &scene, &camera, pointer(0.0, 0.0, false));
+    let button = shown(&idle, id::BOX_RUN);
+    assert_eq!(button.text.as_deref(), Some("Run"));
+    let (x, y) = center(&button);
+    let mut state = State::default();
+    let press = ui(&mut state, &scene, &camera, pointer(x, y, true));
+    assert_eq!(press.actions, vec![Action::ToggleBoxRun]);
+    assert!(!press.look_capture, "the run press captured look");
+    let mut state = State::default();
+    state.box_running = true;
+    let running = ui(&mut state, &scene, &camera, pointer(0.0, 0.0, false));
+    assert_eq!(shown(&running, id::BOX_RUN).text.as_deref(), Some("Stop"));
 }
 
 fn scale(control: u32, scene: &mut Scene, camera: &Camera) -> (f32, f32) {

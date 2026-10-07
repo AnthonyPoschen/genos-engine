@@ -62,6 +62,8 @@ pub struct Camera {
 struct BoundCodimation {
     solid: usize,
     motion: Codimation,
+    /// False holds the solid at its current point on the path.
+    running: bool,
 }
 
 impl Camera {
@@ -96,10 +98,27 @@ impl Camera {
         }
         if let Some(slot) = self.codimations.iter_mut().find(|slot| slot.solid == solid) {
             slot.motion = motion;
+            slot.running = true;
         } else {
-            self.codimations.push(BoundCodimation { solid, motion });
+            self.codimations.push(BoundCodimation {
+                solid,
+                motion,
+                running: true,
+            });
         }
         self.arm_solid(solid);
+        true
+    }
+
+    /// Hold or resume the path on `solid`. A hold leaves the solid where it is.
+    pub fn set_codimation_running(&mut self, solid: usize, running: bool) -> bool {
+        let Some(slot) = self.codimations.iter_mut().find(|slot| slot.solid == solid) else {
+            return false;
+        };
+        slot.running = running;
+        if running {
+            self.arm_solid(solid);
+        }
         true
     }
 
@@ -256,6 +275,14 @@ fn drive_codimations(camera: &mut Camera, scene: &Scene, dt: f32) {
         };
         let body_index = origin + solid_index;
         if body_index >= camera.physics.count || body_index == camera.view {
+            continue;
+        }
+        if !camera.codimations[index].running {
+            let body = &mut camera.physics.bodies[body_index];
+            body.inverse_mass = 0.0;
+            body.motor = false;
+            body.wish = Vec3::ZERO;
+            body.velocity = Vec3::ZERO;
             continue;
         }
         let before = camera.codimations[index].motion.sample();

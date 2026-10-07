@@ -14,6 +14,8 @@ pub enum Easing {
     EaseIn,
     /// Fast at the start of the segment, then slower.
     EaseOut,
+    /// Slow at both ends of the segment, faster through the middle.
+    EaseInOut,
 }
 
 /// A loop through fixed positions. Each segment takes the same number of seconds.
@@ -57,6 +59,13 @@ impl Codimation {
             self.elapsed += dt;
         }
     }
+
+    /// Place the loop at `elapsed` seconds. The path still wraps.
+    pub fn seek(&mut self, elapsed: f32) {
+        if elapsed.is_finite() && elapsed >= 0.0 {
+            self.elapsed = elapsed;
+        }
+    }
 }
 
 fn finite_point(point: Vec3) -> bool {
@@ -94,5 +103,6 @@ fn ease(easing: Easing, fraction: f32) -> f32 {
         Easing::Linear => fraction,
         Easing::EaseIn => fraction * fraction,
         Easing::EaseOut => 1.0 - (1.0 - fraction) * (1.0 - fraction),
+        Easing::EaseInOut => fraction * fraction * (3.0 - 2.0 * fraction),
     }
 }
