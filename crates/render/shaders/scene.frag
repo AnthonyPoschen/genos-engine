@@ -653,11 +653,14 @@ bool lattice_sample(
         return false;
     }
     ivec3 base = ivec3(floor((world - info.xyz) / spacing));
+    // Every pin inside the reach must sit in the cells walked below, or the
+    // set of pins jumps when the shaded point crosses a cell edge.
+    reach = min(reach, spacing * 2.0);
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
-    for (int dz = -1; dz <= 1; dz++) {
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
+    for (int dz = -2; dz <= 2; dz++) {
+        for (int dy = -2; dy <= 2; dy++) {
+            for (int dx = -2; dx <= 2; dx++) {
                 ivec3 cell = base + ivec3(dx, dy, dz);
                 if (cell.x < 0 || cell.y < 0 || cell.z < 0
                     || cell.x >= int(dim) || cell.y >= int(dim) || cell.z >= int(dim)) {
@@ -702,7 +705,8 @@ vec3 screen_bounce(vec3 world, vec3 face_n) {
     bool has_mid = lattice_sample(
         world, face_n, HASH_ORIGIN1, HASH_BASE1, HASH_DIM1, PIN_POS1, PIN_NRM1, PIN_IRR1, 2.0, mid
     );
-    vec3 bounce = world_mean(world);
+    // Lift off the face. A point on the face can test as inside its own solid.
+    vec3 bounce = world_mean(world + face_n * 0.05);
     if (has_mid) {
         bounce = mix(bounce, mid, 1.0 - fade_out(10.0, 14.0, dist));
     }
@@ -794,7 +798,9 @@ vec3 shade_lamp(vec3 origin, vec3 normal, vec4 lamp, vec3 color, bool two_sided)
 }
 
 vec3 direct_at(vec3 pos, vec3 normal, bool two_sided) {
-    if (pos.y < 0.02) {
+    // Only floor under a footprint is dark here. The bottom of a wall face sits
+    // on its own footprint edge and must keep its lamp.
+    if (pos.y < 0.02 && normal.y > 0.5) {
         uint count = min(scene.occ_count, 16u);
         for (uint i = 0u; i < count; i++) {
             if (inside_footprint(pos.xz, scene.occs[i])) {
@@ -1092,7 +1098,9 @@ void main() {
     bool two_sided = v_shade > 1.15 && v_shade < 1.5;
     vec3 direct = direct_at(v_pos, normal, two_sided);
     bool floor_face = abs(normal.y) > 0.5;
-    vec3 bounce = merged_at(SHOWN_COPY, v_pos, normal, floor_face);
+    // The probes store the cosine-weighted mean radiance. Irradiance is pi times that,
+    // and the direct term below is irradiance too.
+    vec3 bounce = 3.14159265 * merged_at(SHOWN_COPY, v_pos, normal, floor_face);
     if (normal.y > 0.5 && probe_inside(v_pos.xz) && !lamp_sees_upward(v_pos, normal)) {
         bounce = vec3(0.0);
     }

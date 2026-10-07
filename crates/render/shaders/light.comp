@@ -105,6 +105,8 @@ const float LAMBERT = 0.318309886;
 // A unit white lamp 7 m above a white floor stays near 0.46. A lamp 1 m away stays under white.
 const float LAMP_UNIT = 72.0;
 const float TAU = 6.2831853;
+// The world volume stores mean radiance. A surface takes about pi times that as irradiance.
+const float WORLD_IRR = 3.14159265;
 
 uint bounce_index() {
     return pc.pass / 3u;
@@ -1220,9 +1222,10 @@ vec4 pinned_interval(vec3 world, vec3 face_n, vec3 ray) {
     float weight = 0.0;
     vec3 nray = normalize(ray);
     uint dirs = screen_dirs_at(1u);
-    for (int dz = -1; dz <= 1; dz++) {
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
+    float reach = min(2.0, spacing * 2.0);
+    for (int dz = -2; dz <= 2; dz++) {
+        for (int dy = -2; dy <= 2; dy++) {
+            for (int dx = -2; dx <= 2; dx++) {
                 ivec3 cell = base + ivec3(dx, dy, dz);
                 if (cell.x < 0 || cell.y < 0 || cell.z < 0
                     || cell.x >= int(HASH_DIM1) || cell.y >= int(HASH_DIM1) || cell.z >= int(HASH_DIM1)) {
@@ -1244,13 +1247,13 @@ vec4 pinned_interval(vec3 world, vec3 face_n, vec3 ray) {
                         continue;
                     }
                     float dist = length(stored.xyz - world);
-                    if (dist >= 2.0) {
+                    if (dist >= reach) {
                         continue;
                     }
                     if (world.y < 0.05 && stored.y < 0.05 && probe_hidden(world.xz, stored.xz)) {
                         continue;
                     }
-                    float w = 1.0 - dist / 2.0;
+                    float w = 1.0 - dist / reach;
                     if (w <= 1.0e-5) {
                         continue;
                     }
@@ -1366,7 +1369,7 @@ void write_world(bool bounce) {
         vec3 ray = sphere_dir(d, WORLD_DIRS, spin);
         TraceHit hit = trace_hit(pos, ray, 0.05, 8.0);
         if (bounce && hit.iv.a >= 0.0) {
-            hit.iv.rgb += hit.tint * hit.reflect * mean;
+            hit.iv.rgb += hit.tint * hit.reflect * WORLD_IRR * mean;
         }
         field.texels[dest + d] = hit.iv;
     }
@@ -1416,7 +1419,7 @@ void write_pinned(uint cascade) {
         TraceHit hit = trace_hit(pos, ray, t0, t1);
         vec4 iv = hit.iv;
         if (iv.a >= 0.15) {
-            iv.rgb += hit.tint * hit.reflect * sample_world_mean(hit.pos + hit.normal * 0.08);
+            iv.rgb += hit.tint * hit.reflect * WORLD_IRR * sample_world_mean(hit.pos + hit.normal * 0.08);
         }
         if (iv.a < -1.5 && cascade == 0u) {
             vec4 next = pinned_interval(stored, normal, ray);
@@ -1489,7 +1492,7 @@ void write_screen(uint cascade) {
         TraceHit hit = trace_hit(pos, ray, t0, t1);
         vec4 iv = hit.iv;
         if (iv.a >= 0.15) {
-            iv.rgb += hit.tint * hit.reflect * sample_world_mean(hit.pos + hit.normal * 0.08);
+            iv.rgb += hit.tint * hit.reflect * WORLD_IRR * sample_world_mean(hit.pos + hit.normal * 0.08);
         }
         if (iv.a < -1.5 && cascade < 2u) {
             vec4 next = screen_interval(cascade + 1u, uv, ray);
