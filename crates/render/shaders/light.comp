@@ -289,7 +289,7 @@ bool segment_blocked(vec3 a, vec3 b) {
 }
 
 // ---- Persistent probe tier ---------------------------------------------------
-// One probe per invocation, one brick (64 probes) per workgroup. Each ray takes the
+// One probe per workgroup, one brick (64 probes) a row of workgroups. Each ray takes the
 // light leaving what it hits: direct light there plus the bounce the tier holds at
 // that point (the world probes beyond it), the same light the world probes take.
 // The same rays build all three cubes: a hit adds its direct light to each, plus
@@ -385,10 +385,23 @@ mat3 random_rotation(vec3 u) {
     );
 }
 
+// One probe per workgroup: its rays are spread over the 64 invocations, so a build
+// fills the GPU however few bricks it has. One probe per invocation tracing all its
+// rays in turn left a build as long as one probe's 256 serial rays (8 ms on an RTX
+// 4070 for any number of bricks). Each round every invocation traces one ray into
+// shared memory; then 18 invocations fold the round into the cube texels and 6 into
+// the face weights.
+shared vec3 tier_r1[64];
+shared vec3 tier_r2[64];
+shared vec3 tier_r3[64];
+shared vec3 tier_ray[64];
+shared float tier_face_w[6];
+
 void write_tier() {
     uint item = TIER_WORK + gl_WorkGroupID.x * TIER_WORK_TEXELS;
     vec4 work = field.texels[item];
-    uint probe = gl_LocalInvocationIndex;
+    uint probe = gl_WorkGroupID.y;
+    uint lane = gl_LocalInvocationIndex;
     uint slot = uint(work.x + 0.5);
     vec4 mask = field.texels[TIER_SLOTS + slot * 2u + 1u];
     uint chunk = uint(mask[probe >> 4u] + 0.5);
@@ -409,12 +422,11 @@ void write_tier() {
         live = false;
         reset = true;
     }
+    // `live` and `reset` are the same in the whole workgroup.
     if (!live) {
         // A reused slot may hold another brick's light. A dead probe reads as none.
-        if (reset) {
-            for (uint f = 0u; f < TIER_PROBE_TEXELS; f++) {
-                field.texels[dest + f] = vec4(0.0);
-            }
+        if (reset && lane < TIER_PROBE_TEXELS) {
+            field.texels[dest + lane] = vec4(0.0);
         }
         return;
     }
@@ -427,57 +439,81 @@ void write_tier() {
         fract(ray_spin3(pos + 17.0) + work.w * 0.75487767),
         fract(ray_spin3(pos - 31.0) + work.w * 0.56984029)
     ));
-    vec3 cube[18];
-    float cube_w[6] = float[6](0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    for (uint f = 0u; f < 18u; f++) {
-        cube[f] = vec3(0.0);
-    }
-    for (uint d = 0u; d < rays; d++) {
-        vec3 ray = turn * sphere_dir(d, rays, 0.0);
-        TraceHit hit = trace_hit(pos, ray, 0.0, TIER_RAY_END);
+    // The stored light, read before any invocation writes it.
+    vec4 old = lane < 18u ? field.texels[dest + lane] : vec4(0.0);
+    float stored = field.texels[dest + TIER_CUBE3].w;
+    vec3 axis = cube_axis(lane % 6u);
+    vec3 sum = vec3(0.0);
+    float sum_w = 0.0;
+    for (uint first = 0u; first < rays; first += 64u) {
+        uint d = first + lane;
+        vec3 ray = vec3(0.0);
         vec3 r1 = vec3(0.0);
         vec3 r2 = vec3(0.0);
         vec3 r3 = vec3(0.0);
-        if (hit.iv.a >= 0.0) {
-            vec3 once;
-            vec3 twice;
-            vec2 u = vec2(
-                fract(ray_spin3(hit.pos + work.w * 0.37) + float(d) * 0.61803399),
-                fract(ray_spin3(hit.pos * 1.7 - work.w * 0.21) + float(d) * 0.75487767)
-            );
-            tier_bounce_at(hit.pos, hit.normal, WORLD_CUBE_OFFSET, TIER_CUBE3, u, once, twice);
-            vec3 k = hit.tint * hit.reflect * WORLD_IRR;
-            r1 = hit.iv.rgb;
-            r2 = hit.iv.rgb + k * once;
-            r3 = hit.iv.rgb + k * twice;
-        } else {
-            // A ray that leaves the scene brings the sky, in every bounce order: it is
-            // light from outside, like a lamp's at the hit.
-            r1 = sky_beyond(pos, ray, TIER_RAY_END);
-            r2 = r1;
-            r3 = r1;
+        if (d < rays) {
+            ray = turn * sphere_dir(d, rays, 0.0);
+            TraceHit hit = trace_hit(pos, ray, 0.0, TIER_RAY_END);
+            if (hit.iv.a >= 0.0) {
+                vec3 once;
+                vec3 twice;
+                vec2 u = vec2(
+                    fract(ray_spin3(hit.pos + work.w * 0.37) + float(d) * 0.61803399),
+                    fract(ray_spin3(hit.pos * 1.7 - work.w * 0.21) + float(d) * 0.75487767)
+                );
+                tier_bounce_at(hit.pos, hit.normal, WORLD_CUBE_OFFSET, TIER_CUBE3, u, once, twice);
+                vec3 k = hit.tint * hit.reflect * WORLD_IRR;
+                r1 = hit.iv.rgb;
+                r2 = hit.iv.rgb + k * once;
+                r3 = hit.iv.rgb + k * twice;
+            } else {
+                // A ray that leaves the scene brings the sky, in every bounce order: it
+                // is light from outside, like a lamp's at the hit.
+                r1 = sky_beyond(pos, ray, TIER_RAY_END);
+                r2 = r1;
+                r3 = r1;
+            }
         }
-        // A miss brings nothing back but its cone still counts.
-        for (uint f = 0u; f < 6u; f++) {
-            float facing = max(dot(ray, cube_axis(f)), 0.0);
-            cube[TIER_CUBE3 + f] += r3 * facing;
-            cube[TIER_CUBE2 + f] += r2 * facing;
-            cube[TIER_CUBE1 + f] += r1 * facing;
-            cube_w[f] += facing;
+        tier_ray[lane] = ray;
+        tier_r1[lane] = r1;
+        tier_r2[lane] = r2;
+        tier_r3[lane] = r3;
+        barrier();
+        // A miss brings nothing back but its cone still counts. Rays past the end
+        // have no direction and add nothing.
+        uint n = min(rays - first, 64u);
+        if (lane < 24u) {
+            for (uint k = 0u; k < n; k++) {
+                float facing = max(dot(tier_ray[k], axis), 0.0);
+                if (lane >= 18u) {
+                    sum_w += facing;
+                } else if (lane >= TIER_CUBE1) {
+                    sum += tier_r1[k] * facing;
+                } else if (lane >= TIER_CUBE2) {
+                    sum += tier_r2[k] * facing;
+                } else {
+                    sum += tier_r3[k] * facing;
+                }
+            }
         }
+        barrier();
     }
-    float count = reset ? 0.0 : min(max(field.texels[dest + TIER_CUBE3].w, 0.0), history_cap);
+    if (lane >= 18u && lane < 24u) {
+        tier_face_w[lane - 18u] = sum_w;
+    }
+    barrier();
+    float count = reset ? 0.0 : min(max(stored, 0.0), history_cap);
     float alpha = reset ? 1.0 : min(max(float(rays) / (count + float(rays)), float(rays) / TIER_HISTORY), 1.0);
     float samples = min(count + float(rays), TIER_HISTORY);
-    for (uint f = 0u; f < 18u; f++) {
-        float wf = cube_w[f % 6u];
+    if (lane < 18u) {
+        float wf = tier_face_w[lane % 6u];
         // One near-field sample can take more than its share; a pass's mean cannot
         // go below no light.
-        vec3 fresh = wf > 1.0e-4 ? max(cube[f] / wf, vec3(0.0)) : vec3(0.0);
-        vec3 old = field.texels[dest + f].rgb;
-        field.texels[dest + f] = vec4(mix(old, fresh, alpha), samples);
+        vec3 fresh = wf > 1.0e-4 ? max(sum / wf, vec3(0.0)) : vec3(0.0);
+        field.texels[dest + lane] = vec4(mix(old.rgb, fresh, alpha), samples);
+    } else if (lane == TIER_POSITION) {
+        field.texels[dest + TIER_POSITION] = vec4(pos, 1.0);
     }
-    field.texels[dest + TIER_POSITION] = vec4(pos, 1.0);
 }
 
 void main() {

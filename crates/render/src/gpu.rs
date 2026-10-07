@@ -841,6 +841,8 @@ struct Gpu {
     aa_sets: [Handle; 2],
     fns: Fns,
     memory_props: MemProps,
+    /// Upload buffers that went to device-local memory, and all upload buffers.
+    upload_local: std::cell::Cell<[u32; 2]>,
 }
 
 struct Image {
@@ -1501,6 +1503,7 @@ impl Gpu {
                     mem_props,
                 ),
                 memory_props,
+                upload_local: std::cell::Cell::new([0, 0]),
             };
             let _ = (destroy_instance, surface_support);
             gpu.create_static_objects()?;
@@ -1814,7 +1817,7 @@ impl Gpu {
                 self.color = copy_image(&self.colors[slot]);
                 self.depth = copy_image(&self.depths[slot]);
                 self.framebuffers[slot] = self.make_framebuffer()?;
-                self.hosts[slot] = self.make_buffer(bytes, 0x2, true)?;
+                self.hosts[slot] = self.make_buffer(bytes, 0x2, Memory::Readback)?;
             }
             self.color = copy_image(&self.colors[0]);
             self.depth = copy_image(&self.depths[0]);
@@ -1837,7 +1840,7 @@ impl Gpu {
                     (self.fns.free_mem)(self.device, self.vertex.memory, std::ptr::null());
                 }
             }
-            self.vertex = self.make_buffer(bytes.max(1024), 0x80, true)?;
+            self.vertex = self.make_buffer(bytes.max(1024), 0x80, Memory::Upload)?;
             self.vertices[self.flight] = copy_buffer(&self.vertex);
         }
         unsafe {
@@ -1879,7 +1882,7 @@ impl Gpu {
             let next = self.make_buffer(
                 bytes.max(self.shapes.size.saturating_mul(2)).max(4096),
                 0x80,
-                true,
+                Memory::Upload,
             )?;
             self.write_verts_at(&next, 0, verts)?;
             let mut old = std::mem::replace(&mut self.shapes, next);
@@ -1945,7 +1948,7 @@ impl Gpu {
             self.wait_all_inflight()?;
         }
         if self.instances.size < bytes.len() as u64 {
-            let next = self.make_buffer((bytes.len() as u64).max(5120), 0x20, true)?;
+            let next = self.make_buffer((bytes.len() as u64).max(5120), 0x20, Memory::Upload)?;
             let mut old = std::mem::replace(&mut self.instances, next);
             self.destroy_buffer(&mut old);
             self.write_instance_binding()?;
@@ -2323,8 +2326,12 @@ impl Gpu {
             self.tier_budget.map_or_else(|| "settle".to_string(), |b| b.to_string()),
             n / seconds,
         );
+        if !times.placed {
+            let [local, all] = self.upload_local.get();
+            eprintln!("GPU_MEM upload buffers in device-local memory: {local} of {all}");
+        }
         let pool = times.pool;
-        **times = GpuTimes { pool, written: times.written, every: times.every, ..GpuTimes::default() };
+        **times = GpuTimes { pool, written: times.written, every: times.every, placed: true, ..GpuTimes::default() };
     }
 
     fn reset_queries(&self, slot: usize) {
@@ -2639,17 +2646,17 @@ impl Gpu {
     }
 
     fn make_lighting(&mut self) -> Result<(), String> {
-        self.scene_buf = self.make_buffer(pack::SCENE_CAPACITY as u64, 0x20, true)?;
+        self.scene_buf = self.make_buffer(pack::SCENE_CAPACITY as u64, 0x20, Memory::Upload)?;
         let share = self.light_families();
-        self.instances = self.make_buffer_queues(5120, 0x20, true, &share)?;
-        self.particle_buf = self.make_buffer_queues(16 + 256 * 256 * 4, 0x20, true, &share)?;
+        self.instances = self.make_buffer_queues(5120, 0x20, Memory::Upload, &share)?;
+        self.particle_buf = self.make_buffer_queues(16 + 256 * 256 * 4, 0x20, Memory::Upload, &share)?;
         let field_bytes = vec![0u8; crate::probe_tier::TIER_END as usize * 16];
         for index in 0..2 {
             self.light_scene[index] =
-                self.make_buffer_queues(pack::SCENE_CAPACITY as u64, 0x20, true, &share)?;
+                self.make_buffer_queues(pack::SCENE_CAPACITY as u64, 0x20, Memory::Upload, &share)?;
             // Storage, plus transfer source and destination for the copy forward.
             self.light_field[index] =
-                self.make_buffer_queues(field_bytes.len() as u64, 0x20 | 0x1 | 0x2, true, &share)?;
+                self.make_buffer_queues(field_bytes.len() as u64, 0x20 | 0x1 | 0x2, Memory::Upload, &share)?;
             self.write_buffer(&self.light_field[index], &field_bytes)?;
             self.write_buffer(&self.light_scene[index], &vec![0u8; pack::SCENE_TAIL])?;
         }
@@ -2934,8 +2941,8 @@ impl Gpu {
     }
 
     fn make_audio(&mut self) -> Result<(), String> {
-        self.audio_rays = self.make_buffer(8192, 0x20, true)?;
-        self.audio_gains = self.make_buffer(4096, 0x20, true)?;
+        self.audio_rays = self.make_buffer(8192, 0x20, Memory::Upload)?;
+        self.audio_gains = self.make_buffer(4096, 0x20, Memory::Readback)?;
         #[repr(C)]
         struct Binding {
             binding: u32,
@@ -3804,8 +3811,8 @@ impl Gpu {
         }
         self.light_mark(cmd);
         if self.plan_items > 0 {
-            // One workgroup (64 invocations) per brick, one probe per invocation.
-            self.dispatch_light_slice(cmd, set, 12, 0, 1, self.plan_items)?;
+            // One workgroup (64 invocations sharing its rays) per probe, 64 per brick.
+            self.dispatch_light_slice(cmd, set, 12, 0, crate::probe_tier::BRICK_PROBES, self.plan_items)?;
         }
         self.light_mark(cmd);
         Ok(())
@@ -4691,7 +4698,7 @@ impl Gpu {
             (self.fns.image_reqs)(self.device, image, req.as_mut_ptr());
             let size = u64::from_ne_bytes(req[0..8].try_into().unwrap());
             let bits = u32::from_ne_bytes(req[16..20].try_into().unwrap());
-            let memory = self.alloc(size, bits, false)?;
+            let memory = self.alloc(size, bits, Memory::Device)?;
             check(
                 (self.fns.bind_image)(self.device, image, memory, 0),
                 "bind image",
@@ -4818,15 +4825,15 @@ impl Gpu {
         Ok(fb)
     }
 
-    fn make_buffer(&self, size: u64, usage: u32, host: bool) -> Result<Buffer, String> {
-        self.make_buffer_queues(size, usage, host, &[])
+    fn make_buffer(&self, size: u64, usage: u32, memory: Memory) -> Result<Buffer, String> {
+        self.make_buffer_queues(size, usage, memory, &[])
     }
 
     fn make_buffer_queues(
         &self,
         size: u64,
         usage: u32,
-        host: bool,
+        memory: Memory,
         families: &[u32],
     ) -> Result<Buffer, String> {
         #[repr(C)]
@@ -4870,7 +4877,7 @@ impl Gpu {
             (self.fns.buffer_reqs)(self.device, buffer, req.as_mut_ptr());
             let req_size = u64::from_ne_bytes(req[0..8].try_into().unwrap());
             let bits = u32::from_ne_bytes(req[16..20].try_into().unwrap());
-            let memory = self.alloc(req_size, bits, host)?;
+            let memory = self.alloc(req_size, bits, memory)?;
             check(
                 (self.fns.bind_buffer)(self.device, buffer, memory, 0),
                 "bind buffer",
@@ -4891,15 +4898,33 @@ impl Gpu {
         self.overlay_count = count;
     }
 
-    fn alloc(&self, size: u64, type_bits: u32, host: bool) -> Result<Handle, String> {
-        let want = if host { 2 | 4 } else { 1 };
-        let mut index = None;
-        for i in 0..self.memory_props.count {
-            if type_bits & (1 << i) != 0 && self.memory_props.types[i as usize] & want == want {
-                index = Some(i);
-                break;
+    fn alloc(&self, size: u64, type_bits: u32, memory: Memory) -> Result<Handle, String> {
+        // Buffers the CPU only writes go in memory the GPU reads at full speed when the
+        // device has it (resizable BAR, or the 256 MB BAR window): from plain host memory
+        // every probe, scene and tier read crossed PCIe. Readbacks want cached host memory.
+        let first = match memory {
+            Memory::Device => None,
+            Memory::Upload => Some(1 | 2 | 4),
+            Memory::Readback => Some(2 | 4 | 8),
+        };
+        if memory == Memory::Upload {
+            let [local, all] = self.upload_local.get();
+            self.upload_local.set([local, all + 1]);
+        }
+        if let Some(want) = first {
+            if let Some(index) = self.memory_index(type_bits, want) {
+                if let Ok(handle) = self.alloc_index(size, index) {
+                    if memory == Memory::Upload {
+                        let [local, all] = self.upload_local.get();
+                        self.upload_local.set([local + 1, all]);
+                    }
+                    return Ok(handle);
+                }
             }
         }
+        let host = memory != Memory::Device;
+        let want = if host { 2 | 4 } else { 1 };
+        let mut index = self.memory_index(type_bits, want);
         if index.is_none() && !host {
             for i in 0..self.memory_props.count {
                 if type_bits & (1 << i) != 0 {
@@ -4911,6 +4936,16 @@ impl Gpu {
         let Some(index) = index else {
             return Err("no memory type".into());
         };
+        self.alloc_index(size, index)
+    }
+
+    /// The first memory type allowed by `type_bits` with every flag in `want`.
+    fn memory_index(&self, type_bits: u32, want: u32) -> Option<u32> {
+        (0..self.memory_props.count)
+            .find(|&i| type_bits & (1 << i) != 0 && self.memory_props.types[i as usize] & want == want)
+    }
+
+    fn alloc_index(&self, size: u64, index: u32) -> Result<Handle, String> {
         #[repr(C)]
         struct Info {
             s_type: i32,
@@ -5564,6 +5599,14 @@ enum FrameStamp {
 }
 
 /// Running sums for `GENOS_GPU_TIMES`.
+/// Where a buffer lives: GPU-only, written by the CPU and read by the GPU, or read back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Memory {
+    Device,
+    Upload,
+    Readback,
+}
+
 struct GpuTimes {
     pool: Handle,
     /// Frames per printed line.
@@ -5580,6 +5623,8 @@ struct GpuTimes {
     rays: u64,
     /// When this line's first frame was read: builds per second count from there.
     since: Option<std::time::Instant>,
+    /// The memory placement line has been printed.
+    placed: bool,
     /// Light build: copy forward, world direct, world bounce, tier.
     light: [f64; 4],
 }
@@ -5597,6 +5642,7 @@ impl Default for GpuTimes {
             max_rays: 0,
             rays: 0,
             since: None,
+            placed: false,
             light: [0.0; 4],
         }
     }

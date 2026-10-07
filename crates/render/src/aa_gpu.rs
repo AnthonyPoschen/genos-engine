@@ -222,8 +222,8 @@ impl Gpu {
             let views = [self.ssaa_color[slot].view, self.ssaa_depth[slot].view];
             self.ssaa_fb[slot] =
                 self.make_framebuffer_for(self.render_pass, &views, w * 2, h * 2)?;
-            self.aa_src[slot] = self.make_buffer(hi, 0x20 | 0x1 | 0x2, false)?;
-            self.aa_dst[slot] = self.make_buffer(presented, 0x20 | 0x1 | 0x2, false)?;
+            self.aa_src[slot] = self.make_buffer(hi, 0x20 | 0x1 | 0x2, crate::gpu::Memory::Device)?;
+            self.aa_dst[slot] = self.make_buffer(presented, 0x20 | 0x1 | 0x2, crate::gpu::Memory::Device)?;
             self.color_layout[slot] = 0;
         }
         self.write_aa_sets()?;
