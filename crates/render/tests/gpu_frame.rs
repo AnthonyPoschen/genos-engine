@@ -26,6 +26,7 @@ fn scene(lights: Vec<Light>, walls: Vec<Wall>, solids: Vec<Solid>) -> World {
         solids,
         lights,
         ceiling: None,
+        sky: None,
     })
 }
 

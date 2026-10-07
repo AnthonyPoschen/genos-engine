@@ -676,5 +676,6 @@ fn lamp_scene(position: Vec3) -> Scene {
             direction: Vec3::ZERO,
         }],
         ceiling: None,
+        sky: None,
     }
 }

@@ -20,6 +20,9 @@ One section is 25 m × 25 m under a flat roof at 3 m (slabs 3.00-3.25 m). It has
   opening, and no lamp slot has a straight line to the opening (a unit test checks
   every slot along its whole path). Room A is lit by the sun bouncing off the light
   well and the screen by day and by lamp light bouncing in from the hall at night.
+  It does see a thin band of sky up through the light well's slot (steep rays under
+  the opening's head), so by day it also takes a little sky light directly; at night,
+  or with `--no-sky`, it is lit by bounce alone.
   A red box, a blue cylinder and a green wall panel are the colour-bleed checks.
 - **Hall**: the open middle with a 5 × 4 m skylight, four pillars, a 1.6 m partition
   that light passes over, benches, a green box orbiting under the skylight and a red
@@ -36,7 +39,7 @@ building. The floor runs 8 m past the walls so the sun lands outside too.
 | scale | sections | footprint | floor area | occluders | moving boxes |
 |---|---|---|---|---|---|
 | `small` | 1 | 25 m × 25 m | 625 m² | 87 | 3 |
-| `big` | 4 × 4 | 100 m × 100 m | 10 000 m² (16×) | 1 041 | 48 |
+| `big` | 4 × 4 | 100 m × 100 m | 10 000 m² (16×) | 1 068 | 48 |
 | `N` / `NxM` | N × N / N × M | 25 m per section | up to 64 sections | | 3 per section |
 
 From the benchmark viewpoint (section 0, the north-west corner) the far corner of
@@ -71,6 +74,12 @@ A directional light on a day/night cycle: 120 s per day by default
 0.25 noon, 0.5 sunset in the west, the arc leaning north as seen from Sydney). The
 night half has no sun. The sun fades in over the first ~6° above the horizon (a stand-in
 for the long air path; it costs nothing).
+
+The sky (`Scene::sky`) follows the sun: (0.11, 0.14, 0.19) radiance at full day, so
+open ground takes about a sixth of the noon sun's light from it; it brightens until
+the sun is 30° up, glows through twilight to 6° below the horizon and is gone at
+night. The windows and skylights show it, and probe rays that leave the building
+bring it in. `--no-sky` or the panel's Sky row turns it off.
 
 ## Determinism
 

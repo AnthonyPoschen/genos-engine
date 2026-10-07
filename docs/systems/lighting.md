@@ -62,6 +62,12 @@ A wall has a `base`. Above the floor it is a lintel, a sill, a beam or a roof sl
 
 A sun is a directional lamp. It lights the pixel directly and lights the probe tier as a directional `TierLight`, so its bounce reaches rooms the sun does not. It has no range and is never culled.
 
+## Sky
+
+`Scene::sky` (`Sky { color }`) is the light from outside the scene: a ray that leaves the scene without meeting anything brings `color` back as radiance. A floor open under it takes π × `color`; the stress example's day sky (0.11, 0.14, 0.19) gives open ground about a sixth of what the noon sun gives, as on a clear day. A world probe ray (8 m) or tier probe ray (64 m) that met nothing looks on with `sky_beyond`; the occluder walk stops at the grid's edge and the occluders' top, so that extra span costs only the cells still inside the scene. Sky light counts in every bounce order, like the light of a lamp at a hit, and the picture takes it through the probes like any bounce. A pixel that meets nothing shows the sky (the clear colour is the sky through the tone curve). A sky change relights the tier like a sun. With no sky, a miss brings nothing, as before.
+
+The sky is one radiance in every direction, below the horizon too. Gain: one clear colour and one extra ray per miss, and the picture and the light agree. Cost: no sun disc, no horizon glow, no gradient, and a floor that ends shows sky below it and takes that light from beneath; a scene that wants ground to the horizon gives its floor the reach.
+
 ## Limits
 
 The world probes are a coarse 3D volume. A gap smaller than that spacing can stay dark or can stay bright for the wrong reason.
@@ -70,7 +76,9 @@ The two finest cascades are world cells at 0.5 m and 1 m. Rebound past 14 m come
 
 The soft edge of a shadow is the coarser angle step of the next cascade, merged only where β is 1. There is no painted halo around a light square. The fragment shader shades each pixel. The direct shadow edge is the lamp ray. The lamp side of an object is not darkened by a margin around its base.
 
-The per-pixel cost grows with the lamps in range: each one is a shadow ray. A dense cluster of lamps costs a ray each, wherever the level is. The world volume is at most 48 × 3 × 48 probes at 2.5 m, so it covers 120 m from the floor corner and does not follow the camera. Any moving occluder, or a lamp that moves 0.1 m, restarts every tier brick. `examples/stress` measures these.
+The per-pixel cost grows with the lamps in range: each one is a shadow ray. A dense cluster of lamps costs a ray each, wherever the level is. The world volume is at most 48 × 3 × 48 probes at 2.5 m, so it covers 120 m from the floor corner and does not follow the camera. A moving occluder blends every tier brick toward the new light; a lamp that moves 0.1 m, the sun or the sky blends the bricks its light reaches. With boxes moving all the time the tier never settles. `examples/stress` measures these.
+
+The picture is linear radiance through the tone curve into an 8-bit UNORM target: no exposure and no display encoding. A room lit by bounce alone sits at 5 to 15 % of a sunlit wall, so 10 to 40 of 255, and reads near black next to a sunlit patch. That is the light, not a gap in the bounce.
 
 ## Decisions
 

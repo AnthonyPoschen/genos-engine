@@ -32,7 +32,7 @@ pub(crate) fn compose(albedo: [f32; 3], direct: f32, bounce: [f32; 3], _level: b
 }
 
 /// A shadow stays linear. A hot corridor wall bends instead of clipping.
-fn tone(channel: f32) -> f32 {
+pub(crate) fn tone(channel: f32) -> f32 {
     if channel <= 0.64 {
         return channel.max(0.0);
     }

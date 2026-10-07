@@ -327,7 +327,8 @@ impl Gpu {
     }
 
     fn raster_scene(&self, fb: Handle, width: u32, height: u32, matrix: &[f32; 16], overlay: bool) {
-        let mut clears = [[0.0f32, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.0]];
+        let [r, g, b] = self.background;
+        let mut clears = [[r, g, b, 1.0], [1.0, 0.0, 0.0, 0.0]];
         #[repr(C)]
         struct Offset {
             x: i32,

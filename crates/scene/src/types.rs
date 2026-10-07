@@ -139,6 +139,21 @@ pub struct Ceiling {
     pub color: [f32; 3],
 }
 
+/// Light from the sky around the scene: a ray that leaves the scene without meeting
+/// anything brings `color` back, in the units a surface sends out (radiance). A
+/// floor open under it takes pi × `color` as irradiance; a sun at `Light::color` c
+/// gives a face turned to it c × 72 / 49 (the sun is one unit lamp 7 m away).
+///
+/// The sky is one radiance in every direction, below the horizon too: a scene that
+/// wants ground out to the horizon gives its floor that reach. Gain: the picture's
+/// background and the light agree, and the sky costs one clear colour plus a ray past
+/// the end of each probe ray that met nothing. Cost: no sun disc, no horizon glow,
+/// no blue-to-white gradient.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sky {
+    pub color: [f32; 3],
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Scene {
     pub floor: Floor,
@@ -147,6 +162,8 @@ pub struct Scene {
     pub lights: Vec<Light>,
     /// None leaves the scene open to the sky.
     pub ceiling: Option<Ceiling>,
+    /// None: a ray that leaves the scene brings nothing back, and the background is black.
+    pub sky: Option<Sky>,
 }
 
 impl Scene {

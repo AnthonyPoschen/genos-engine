@@ -434,6 +434,29 @@ bool scene_occluded(vec3 a, vec3 b) {
     return scene_ray(a, delta / dist, 1.0e-4, dist - 1.0e-3, hit);
 }
 
+// ---- Sky ---------------------------------------------------------------------
+// A ray that leaves the scene meets the sky (genos_scene::Sky): one radiance in every
+// direction. A probe ray that met nothing up to its end looks on from there; the
+// occluder walk stops at the grid's edge and the occluders' top, so the extra span
+// costs the cells the ray still crosses inside the scene and nothing past it.
+
+bool has_sky() {
+    return any(greaterThan(scene.sky.rgb, vec3(0.0)));
+}
+
+// The sky's radiance when a ray that met nothing before `t_end` meets nothing after
+// it either; zero when something lies beyond or there is no sky.
+vec3 sky_beyond(vec3 origin, vec3 dir, float t_end) {
+    if (!has_sky()) {
+        return vec3(0.0);
+    }
+    SceneHit hit;
+    if (scene_ray(origin, dir, t_end, 1.0e7, hit)) {
+        return vec3(0.0);
+    }
+    return scene.sky.rgb;
+}
+
 // ---- Lamps -------------------------------------------------------------------
 // A pixel or a ray hit visits the suns, then the point lamps listed in its lamp cell:
 // those whose range (pack.rs lamp_range) can reach that cell. lamp_reaches is the

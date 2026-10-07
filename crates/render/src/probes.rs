@@ -968,6 +968,7 @@ mod tests {
             }],
             lights: Vec::new(),
             ceiling: None,
+            sky: None,
         }
     }
 }

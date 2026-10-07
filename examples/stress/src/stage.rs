@@ -72,6 +72,8 @@ pub struct Stage {
     pub day_seconds: f32,
     pub sun_speed: f32,
     pub sun_frozen: bool,
+    /// The sky follows the sun; off leaves only the sun and the lamps.
+    pub sky_on: bool,
     pub boxes_still: bool,
 }
 
@@ -99,6 +101,7 @@ impl Stage {
             day_seconds: day_seconds.max(1.0),
             sun_speed: 1.0,
             sun_frozen: false,
+            sky_on: true,
             boxes_still: false,
         };
         stage.apply();
@@ -135,13 +138,18 @@ impl Stage {
         self.apply();
     }
 
-    /// Write the boxes, lamps and sun for the current clocks into the world.
+    /// Write the boxes, lamps, sun and sky for the current clocks into the world.
     pub fn apply(&mut self) {
         self.building
             .place_movers(&mut self.world.scene.solids, self.box_clock);
         let mut lights = self.building.lamps(self.mix, self.lamp_clock, self.power);
         lights.extend(building::sun(self.day));
         self.world.scene.lights = lights;
+        self.world.scene.sky = if self.sky_on {
+            building::sky(self.day)
+        } else {
+            None
+        };
     }
 
     /// Lamps actually placed (the building may have fewer slots than asked).

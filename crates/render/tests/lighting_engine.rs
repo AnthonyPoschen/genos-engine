@@ -323,6 +323,7 @@ fn a_visible_part_that_does_not_affect_light_follows_scene_edits() {
             direction: Vec3::ZERO,
         }],
         ceiling: None,
+        sky: None,
     };
     let mut world = World::from_scene(scene);
     for object in &mut world.objects {

@@ -34,7 +34,7 @@
 //! an outside wall with windows and big doorways; a shared edge is an inside wall with
 //! wide openings so the sections join into one open building.
 
-use genos_scene::{Floor, Light, Scene, Shape, Solid, Vec3, Wall};
+use genos_scene::{Floor, Light, Scene, Shape, Sky, Solid, Vec3, Wall};
 
 /// Side of one square section in metres.
 pub const SECTION: f32 = 25.0;
@@ -57,6 +57,14 @@ const SUN_COLOR: [f32; 3] = [2.0, 1.9, 1.7];
 /// Height of the sun (sine of its elevation) over which it fades in from the horizon.
 /// A scene stand-in for the long air path at sunrise and sunset; it has no cost.
 const SUN_FADE: f32 = 0.1;
+/// Sky radiance at full day. A floor open to it takes pi times this, about 0.45, while
+/// the noon sun gives a face turned to it 2.0 × 72 / 49 ≈ 2.9: the sky is about a sixth
+/// of the light on open ground, as on a clear day. Slightly blue.
+const SKY_COLOR: [f32; 3] = [0.11, 0.14, 0.19];
+/// Sun height (sine of elevation) at which the sky reaches full day, and how far below
+/// the horizon it still glows (twilight, about 6 degrees).
+const SKY_FULL: f32 = 0.5;
+const SKY_TWILIGHT: f32 = 0.1;
 
 /// A gap in a wall: `from..to` along the wall, open between `sill` and `head`.
 #[derive(Clone, Copy, Debug)]
@@ -434,6 +442,7 @@ impl Building {
             solids,
             lights: Vec::new(),
             ceiling: None,
+            sky: None,
         };
         let mut building = Self {
             scene,
@@ -512,6 +521,16 @@ pub fn sun(day: f32) -> Option<Light> {
         position: Vec3::new(0.0, 7.0, 0.0),
         color: SUN_COLOR.map(|c| c * fade),
         direction: toward * -1.0,
+    })
+}
+
+/// The sky for a day fraction: it brightens with the sun's height, glows through
+/// twilight and is gone at night.
+pub fn sky(day: f32) -> Option<Sky> {
+    let up = (std::f32::consts::TAU * day.rem_euclid(1.0)).sin();
+    let light = ((up + SKY_TWILIGHT) / (SKY_FULL + SKY_TWILIGHT)).clamp(0.0, 1.0);
+    (light > 0.0).then(|| Sky {
+        color: SKY_COLOR.map(|c| c * light),
     })
 }
 
@@ -1019,6 +1038,16 @@ mod tests {
                 assert!((a.position - b.position).length() < 1.0e-4);
             }
         }
+    }
+
+    #[test]
+    fn the_sky_follows_the_sun_and_glows_through_twilight() {
+        let noon = sky(0.25).expect("sky at noon").color;
+        assert_eq!(noon, SKY_COLOR);
+        // Just after sunset the sun is gone but the sky still glows.
+        assert!(sun(0.51).is_none());
+        assert!(sky(0.51).is_some());
+        assert!(sky(0.75).is_none());
     }
 
     #[test]

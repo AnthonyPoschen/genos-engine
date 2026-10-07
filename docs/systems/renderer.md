@@ -48,6 +48,7 @@ The crate is `crates/render`, package `genos-render`.
 - GPU lighting is `shaders/light.comp` and `shaders/scene.frag`. The fragment shader samples a particle image when a card has one.
 - `Lighting` in `src/lighting.rs` and `src/field.rs` keep the earlier CPU checks. The draw path does not call them.
 
+- The picture clears to the scene's sky through the tone curve (black with no sky), so a pixel that meets nothing shows the light a ray that leaves the scene brings.
 - `Renderer::take_light_builds` returns the GPU time of each light build that finished since the last call. `LightBuildTimes::passes_ms` holds the spans copy, world direct, world bounce and tier, in that order. A still scene in a settled tier runs no build and returns none.
 - A wall draws its top face. A raised wall (`base` above 0) also draws its underside. A square solid draws turned by its `yaw`.
 - `MAX_OBJECTS` is 8192. Lamps, occluders and their grids are packed in the scene buffer tail; see [Lighting](lighting.md).

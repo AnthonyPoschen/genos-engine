@@ -80,6 +80,8 @@ One frame publishes one update when the scene or the camera pose changes. The en
 
 A new room is a new script. Register a new function on the Rhai host before a script can call it. See [Scripting](scripting.md).
 
+`Scene::sky` is `None` or `Some(Sky { color })`: the radiance a ray that leaves the scene brings, and the picture's background. See [Lighting](lighting.md#sky). Scripts do not set it yet.
+
 ## Limits
 
 The capsule does not jump or crouch. The step does not turn it. There is one room script. There is no scene graph. The scene types have no entity id. The agent endpoint assigns a handle, and that handle stays until removal.

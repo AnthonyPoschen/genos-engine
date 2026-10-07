@@ -39,6 +39,7 @@ const USAGE: &str = "genos-stress [options]
                             0.5 sunset (default 0.12)
   --sun-speed X             day clock multiplier (default 1)
   --freeze-sun              hold the sun at --time
+  --no-sky                  no sky light: only the sun and the lamps
   --still-boxes             hold the coloured boxes
   --seed N                  lamp and box layout seed (default 1)
   --view hall|roomA         start (and benchmark) viewpoint (default hall)
@@ -66,6 +67,7 @@ const ID_SUN: u32 = 400;
 const ID_SPEED: u32 = 410;
 const ID_BOXES: u32 = 500;
 const ID_LAYOUT: u32 = 600;
+const ID_SKY: u32 = 700;
 /// A hitch longer than this does not replay the missed time.
 const MAX_FRAME_SECONDS: f32 = 0.25;
 
@@ -79,6 +81,7 @@ struct Options {
     time: f32,
     sun_speed: f32,
     freeze_sun: bool,
+    no_sky: bool,
     still_boxes: bool,
     seed: u64,
     view: View,
@@ -127,6 +130,7 @@ fn options() -> Result<Options, String> {
         time: 0.12,
         sun_speed: 1.0,
         freeze_sun: false,
+        no_sky: false,
         still_boxes: false,
         seed: 1,
         view: View::Hall,
@@ -160,6 +164,7 @@ fn options() -> Result<Options, String> {
             "--time" => opts.time = parse(&arg, &value()?)?,
             "--sun-speed" => opts.sun_speed = parse(&arg, &value()?)?,
             "--freeze-sun" => opts.freeze_sun = true,
+            "--no-sky" => opts.no_sky = true,
             "--still-boxes" => opts.still_boxes = true,
             "--seed" => opts.seed = parse(&arg, &value()?)?,
             "--view" => {
@@ -282,6 +287,7 @@ fn run() -> Result<(), String> {
     );
     stage.sun_speed = opts.sun_speed;
     stage.sun_frozen = opts.freeze_sun;
+    stage.sky_on = !opts.no_sky;
     stage.boxes_still = opts.still_boxes;
     let mut camera = camera_at(opts.view);
     if let Some([x, y, z, yaw, pitch]) = opts.eye {
@@ -542,6 +548,13 @@ fn panel_rows(stage: &Stage) -> Vec<PanelRow> {
             ],
         ),
         row(
+            "Sky",
+            vec![
+                button(ID_SKY, "on".into(), stage.sky_on),
+                button(ID_SKY + 1, "off".into(), !stage.sky_on),
+            ],
+        ),
+        row(
             "Sun speed",
             SPEED_STEPS
                 .iter()
@@ -573,6 +586,8 @@ fn press(stage: &mut Stage, id: u32) {
         stage.set_scale([Scale::SMALL, Scale::BIG][i]);
     } else if let Some(i) = pick(ID_SUN, 2) {
         stage.sun_frozen = i == 1;
+    } else if let Some(i) = pick(ID_SKY, 2) {
+        stage.sky_on = i == 0;
     } else if let Some(i) = pick(ID_SPEED, SPEED_STEPS.len()) {
         stage.sun_speed = SPEED_STEPS[i];
     } else if let Some(i) = pick(ID_BOXES, 2) {

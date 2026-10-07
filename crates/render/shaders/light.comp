@@ -255,6 +255,12 @@ void write_world(bool bounce) {
             vec3 twice;
             bounce_at2(hit.pos, hit.normal, WORLD_DIRECT_CUBE_OFFSET, once, twice);
             hit.iv.rgb += hit.tint * hit.reflect * WORLD_IRR * twice;
+        } else if (hit.iv.a < 0.0 && has_sky()) {
+            // A ray that leaves the scene brings the sky.
+            vec3 sky = sky_beyond(pos, ray, 8.0);
+            if (any(greaterThan(sky, vec3(0.0)))) {
+                hit.iv = vec4(sky, 8.0);
+            }
         }
         field.texels[dest + d] = hit.iv;
         // A miss brings nothing back but its cone still counts.
@@ -444,6 +450,12 @@ void write_tier() {
             r1 = hit.iv.rgb;
             r2 = hit.iv.rgb + k * once;
             r3 = hit.iv.rgb + k * twice;
+        } else {
+            // A ray that leaves the scene brings the sky, in every bounce order: it is
+            // light from outside, like a lamp's at the hit.
+            r1 = sky_beyond(pos, ray, TIER_RAY_END);
+            r2 = r1;
+            r3 = r1;
         }
         // A miss brings nothing back but its cone still counts.
         for (uint f = 0u; f < 6u; f++) {

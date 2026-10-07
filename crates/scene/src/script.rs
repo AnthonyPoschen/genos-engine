@@ -266,6 +266,7 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
         solids: built.solids.clone(),
         lights: built.lights.clone(),
         ceiling: built.ceiling.clone(),
+        sky: None,
     })
 }
 

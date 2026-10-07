@@ -317,6 +317,7 @@ mod tests {
                 direction: Vec3::ZERO,
             }],
             ceiling: None,
+            sky: None,
         }
     }
 
@@ -511,6 +512,7 @@ mod tests {
                 direction: Vec3::ZERO,
             }],
             ceiling: None,
+            sky: None,
         };
         let view = view_proj(&Camera::opening(), 16.0 / 9.0);
         let floor_at = |wall: bool, x: f32, z: f32| {

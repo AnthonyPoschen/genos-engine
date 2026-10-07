@@ -70,6 +70,14 @@ fn tier_lights(pack: &pack::Pack) -> Vec<crate::probe_tier::TierLight> {
             directional: false,
         });
     }
+    // The sky reaches every brick, like a sun; only its colour changes.
+    if pack.sky.iter().any(|c| *c > 0.0) {
+        out.push(crate::probe_tier::TierLight {
+            pos: [0.0, -1.0, 0.0],
+            color: pack.sky,
+            directional: true,
+        });
+    }
     out
 }
 
@@ -756,6 +764,9 @@ struct Gpu {
     built_dims: [u32; 4],
     floor_half_x: f32,
     floor_half_z: f32,
+    /// Clear colour of the picture: the sky's radiance through the tone curve, so a
+    /// pixel that meets nothing shows the light a ray that leaves the scene brings.
+    background: [f32; 3],
     /// Chains gather slices. The last slice leaves it signaled for one picture.
     light_sem: Handle,
     light_sem_hot: bool,
@@ -1416,6 +1427,7 @@ impl Gpu {
                 built_scene: Vec::new(),
                 built_dims: [0; 4],
                 floor_half_x: 1.0,
+                background: [0.0; 3],
                 floor_half_z: 1.0,
                 light_sem: std::ptr::null_mut(),
                 light_sem_hot: false,
@@ -3408,6 +3420,7 @@ impl Gpu {
         self.screen_w = pack.grid_w.max(1);
         self.screen_h = pack.grid_h.max(1);
         self.floor_half_x = pack.floor_half_x;
+        self.background = pack.sky.map(crate::mesh::tone);
         self.floor_half_z = pack.floor_half_z;
         // The field reads lights, geometry and the tier, never the camera. A build runs
         // for new lights or geometry, for due tier work, or for world probes that have

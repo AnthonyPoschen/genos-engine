@@ -30,6 +30,7 @@ fn a_profiled_draw_reports_device_time_for_the_draw() {
         solids: Vec::new(),
         lights: Vec::new(),
         ceiling: None,
+        sky: None,
     });
     let camera = Camera::opening();
     let _ = window.pump();

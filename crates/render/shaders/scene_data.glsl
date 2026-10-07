@@ -68,6 +68,8 @@ layout(std430, set = 0, binding = 0) readonly buffer SceneData {
     vec4 view_grid;
     // x is the roof underside height over the floor footprint (0 = no roof). yzw is its color.
     vec4 ceiling;
+    // rgb is the sky's radiance (0 = no sky): what a ray that leaves the scene brings.
+    vec4 sky;
     // Occluder grid on the ground plane: low x, low z, cell size, top of the tallest
     // occluder.
     vec4 occ_grid;

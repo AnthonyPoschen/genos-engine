@@ -141,6 +141,8 @@ pub struct Pack {
     pub floor_color: [f32; 3],
     /// Underside height and color of the roof over the floor. Height 0 leaves it open.
     pub ceiling: [f32; 4],
+    /// Radiance of the sky around the scene (genos_scene::Sky); zero for none.
+    pub sky: [f32; 3],
     pub fire: FireLight,
     pub puffs: Vec<Puff>,
     pub(crate) view_right: [f32; 3],
@@ -467,6 +469,7 @@ pub fn pack_frame(
         world.scene.floor.half_z,
         world.scene.floor.color,
         ceiling_of(&world.scene),
+        sky_of(&world.scene),
     );
     let grid = build_grid(&lamps, &occs);
     Pack {
@@ -494,6 +497,7 @@ pub fn pack_frame(
         floor_half_z: world.scene.floor.half_z,
         floor_color: world.scene.floor.color,
         ceiling: ceiling_of(&world.scene),
+        sky: sky_of(&world.scene),
         fire,
         puffs,
         view_right: [0.0; 3],
@@ -705,6 +709,10 @@ fn shape_key_verts(tag: u64, verts: &[GpuVertex]) -> u64 {
 
 /// The roof is a plane like the floor, so the light shaders test it directly and it
 /// takes no occluder slot.
+fn sky_of(scene: &genos_scene::Scene) -> [f32; 3] {
+    scene.sky.as_ref().map_or([0.0; 3], |sky| sky.color.map(|c| c.max(0.0)))
+}
+
 fn ceiling_of(scene: &genos_scene::Scene) -> [f32; 4] {
     match &scene.ceiling {
         Some(ceiling) => [ceiling.height, ceiling.color[0], ceiling.color[1], ceiling.color[2]],
@@ -756,7 +764,7 @@ pub(crate) fn shape_corners(world: &World, view_proj: &[f32; 16]) -> Vec<[f32; 3
 
 /// Byte offset of the tail in the scene block (scene_data.glsl): the fixed fields end
 /// here and the lamps, occluders and grid words follow.
-pub const SCENE_TAIL: usize = 688;
+pub const SCENE_TAIL: usize = 704;
 
 /// Bytes matching the std430 scene block the shaders read (scene_data.glsl): the fixed
 /// fields, then a tail of 16-byte words with the lamps (two words each), the occluders
@@ -854,6 +862,9 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     push_f32(&mut bytes, pack.near_rays as f32);
     push_f32(&mut bytes, 0.0);
     for value in pack.ceiling {
+        push_f32(&mut bytes, value);
+    }
+    for value in pack.sky.into_iter().chain([0.0]) {
         push_f32(&mut bytes, value);
     }
     for value in grid.occ.into_iter().chain(grid.lamp) {
@@ -1770,6 +1781,7 @@ fn hash_light(
     floor_half_z: f32,
     floor_color: [f32; 3],
     ceiling: [f32; 4],
+    sky: [f32; 3],
 ) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -1780,7 +1792,7 @@ fn hash_light(
     floor_z.to_bits().hash(&mut hasher);
     floor_half_x.to_bits().hash(&mut hasher);
     floor_half_z.to_bits().hash(&mut hasher);
-    for value in floor_color.into_iter().chain(ceiling) {
+    for value in floor_color.into_iter().chain(ceiling).chain(sky) {
         value.to_bits().hash(&mut hasher);
     }
     lamps.len().hash(&mut hasher);
@@ -1995,6 +2007,7 @@ mod tests {
                 direction: Vec3::ZERO,
             }],
             ceiling: None,
+            sky: None,
         };
         let world = World::from_scene(scene);
         let camera = Camera::opening();
@@ -2075,6 +2088,7 @@ mod tests {
                 direction: Vec3::ZERO,
             }],
             ceiling: None,
+            sky: None,
         };
         let world = World::from_scene(scene);
         let camera = Camera::opening();
