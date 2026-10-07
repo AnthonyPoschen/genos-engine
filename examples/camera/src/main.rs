@@ -121,6 +121,7 @@ fn run() -> Result<(), String> {
     let mut pitch = 0.0f32;
     let mut lamp = None;
     let mut profile_arg = None;
+    let mut scene_name = String::from("scene.rhai");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -160,11 +161,14 @@ fn run() -> Result<(), String> {
             "--profile" => {
                 profile_arg = Some(args.next().ok_or("missing profile mode")?);
             }
+            "--scene" => {
+                scene_name = args.next().ok_or("missing scene file")?;
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
 
-    let scene_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scene.rhai");
+    let scene_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&scene_name);
     let scene = load_path(&scene_path)?;
     let mut camera = match eye {
         Some((x, z, yaw)) => Camera::new(x, z, yaw),
