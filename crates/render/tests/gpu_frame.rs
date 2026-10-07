@@ -462,6 +462,7 @@ fn an_earlier_frame_keeps_its_lamp_after_the_next_submit() {
         Vec::new(),
     );
     let dark = scene(Vec::new(), Vec::new(), Vec::new());
+    renderer.set_keep_pictures(true);
     let _ = window.pump();
     renderer.draw(&lit, &camera, false).expect("lamp frame");
     let _ = window.pump();

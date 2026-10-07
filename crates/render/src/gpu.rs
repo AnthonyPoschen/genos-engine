@@ -46,6 +46,8 @@ pub struct Renderer {
     tier_ms: f64,
     /// Readbacks show the light on screen instead of settling it first.
     live_readback: bool,
+    /// Every frame copies its picture into host memory, for `read_earlier_frame`.
+    keep_pictures: bool,
     /// When the last picture was drawn: the shown tier light moves by the time since.
     last_draw: Option<std::time::Instant>,
     /// Time constant of the shown tier light, seconds (0: the field as it lands).
@@ -138,6 +140,7 @@ impl Renderer {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1.5),
             live_readback: false,
+            keep_pictures: false,
             last_draw: None,
             view_seconds: env_f32("GENOS_TIER_VIEW_MS").map_or(TIER_VIEW_SECONDS, |ms| ms.max(0.0) / 1000.0),
         })
@@ -206,6 +209,8 @@ impl Renderer {
     }
 
     /// Pixels from the frame before the latest submit. That frame keeps its own lamp.
+    ///
+    /// Needs `set_keep_pictures(true)` before both draws.
     pub fn read_earlier_frame(&mut self) -> Result<Vec<u8>, String> {
         let slot = self.gpu.flight;
         self.gpu.read_host(slot)
@@ -238,7 +243,7 @@ impl Renderer {
     /// Waits for that draw's graphics fence. Does not wait for a light gather.
     /// A `readback` draw already waited, and its pixels are the finished field.
     pub fn read_picture(&mut self) -> Result<Vec<u8>, String> {
-        self.gpu.wait_gpu()?;
+        self.gpu.copy_last_picture()?;
         self.gpu.read_color()
     }
 
@@ -411,6 +416,7 @@ impl Renderer {
         self.gpu.set_draws(draws);
         self.gpu.note_overlay_count(overlay_count);
         self.gpu.wire_on = wireframe;
+        self.gpu.copy_picture = readback || self.keep_pictures;
         self.gpu.record_and_submit(&matrix)?;
         let pixels = if readback {
             self.gpu.wait_gpu()?;
@@ -596,6 +602,13 @@ impl Renderer {
     pub fn set_live_readback(&mut self, on: bool) {
         self.live_readback = on;
     }
+
+    /// When on, every frame copies its picture into host memory, so
+    /// `read_earlier_frame` can read a frame after the next one is submitted.
+    /// Off by default: the copy is a whole picture over the bus each frame.
+    pub fn set_keep_pictures(&mut self, on: bool) {
+        self.keep_pictures = on;
+    }
 }
 
 /// GPU milliseconds of one light build, from its timestamps. `passes_ms` holds the
@@ -736,6 +749,8 @@ struct Gpu {
     overlay_pipeline: Handle,
     wire_pipeline: Handle,
     wire_on: bool,
+    /// This frame also copies its picture into host memory, for a readback.
+    copy_picture: bool,
     layout: Handle,
     pool: Handle,
     cmd: Handle,
@@ -1426,6 +1441,7 @@ impl Gpu {
                 overlay_pipeline: std::ptr::null_mut(),
                 wire_pipeline: std::ptr::null_mut(),
                 wire_on: false,
+                copy_picture: false,
                 layout: std::ptr::null_mut(),
                 pool: std::ptr::null_mut(),
                 cmd: std::ptr::null_mut(),
@@ -2120,7 +2136,10 @@ impl Gpu {
             }
             self.frame_stamp(slot, FrameStamp::Overlay);
             self.copy_color_to_swapchain(swap);
-            self.copy_color_to_buffer();
+            // The host copy is a whole picture over the bus; only a readback pays it.
+            if self.copy_picture {
+                self.copy_color_to_buffer();
+            }
             self.image_barrier(swap, 7, 1000001002, 0x1000, 0x2000, 0x1000, 0);
             self.frame_stamp(slot, FrameStamp::Copy);
             if profiled {
@@ -2574,6 +2593,75 @@ impl Gpu {
             }
             Ok(result)
         }
+    }
+
+    /// Copy the last frame's picture into host memory, after that frame's fence.
+    ///
+    /// Reuses that frame's command buffer and fence; the next frame on this flight
+    /// waits for the fence as usual.
+    fn copy_last_picture(&mut self) -> Result<(), String> {
+        self.wait_gpu()?;
+        unsafe {
+            let fences = [self.fence];
+            check(
+                (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
+                "reset fence",
+            )?;
+            check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
+            #[repr(C)]
+            struct BeginInfo {
+                s_type: i32,
+                next: *const c_void,
+                flags: u32,
+                inherit: *const c_void,
+            }
+            let begin = BeginInfo {
+                s_type: 42,
+                next: std::ptr::null(),
+                flags: 1,
+                inherit: std::ptr::null(),
+            };
+            check(
+                (self.fns.begin_cmd)(self.cmd, &begin as *const BeginInfo as *const u8),
+                "begin cmd",
+            )?;
+            self.copy_color_to_buffer();
+            check((self.fns.end_cmd)(self.cmd), "end cmd")?;
+            #[repr(C)]
+            struct Submit {
+                s_type: i32,
+                next: *const c_void,
+                wait_count: u32,
+                waits: *const Handle,
+                stages: *const u32,
+                cmd_count: u32,
+                cmds: *const Handle,
+                signal_count: u32,
+                signals: *const Handle,
+            }
+            let cmd = [self.cmd];
+            let submit = Submit {
+                s_type: 4,
+                next: std::ptr::null(),
+                wait_count: 0,
+                waits: std::ptr::null(),
+                stages: std::ptr::null(),
+                cmd_count: 1,
+                cmds: cmd.as_ptr(),
+                signal_count: 0,
+                signals: std::ptr::null(),
+            };
+            check(
+                (self.fns.queue_submit)(
+                    self.queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    self.fence,
+                ),
+                "submit copy",
+            )?;
+        }
+        self.wait_gpu()
     }
 
     fn read_color(&self) -> Result<Vec<u8>, String> {
