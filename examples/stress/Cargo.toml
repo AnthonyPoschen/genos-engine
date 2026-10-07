@@ -1,0 +1,19 @@
+[package]
+name = "genos-stress"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "genos-stress"
+path = "src/main.rs"
+
+[dependencies]
+genos-input = { path = "../../crates/input" }
+genos-scene = { path = "../../crates/scene" }
+genos-window = { path = "../../crates/window" }
+genos-render = { path = "../../crates/render" }
+genos-ui = { path = "../../crates/ui" }

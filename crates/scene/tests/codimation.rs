@@ -7,6 +7,7 @@ const SEGMENT_SECONDS: f32 = 1.0;
 
 fn room(blocker: bool) -> Scene {
     let mut walls = vec![Wall {
+        base: 0.0,
         position: Vec3::new(0.0, 0.0, -4.0),
         half_x: 6.0,
         half_z: 0.2,
@@ -18,6 +19,7 @@ fn room(blocker: bool) -> Scene {
     }];
     if blocker {
         walls.push(Wall {
+            base: 0.0,
             position: Vec3::new(1.2, 0.0, 0.4),
             half_x: 0.15,
             half_z: 2.5,
@@ -38,6 +40,7 @@ fn room(blocker: bool) -> Scene {
         walls,
         solids: vec![
             Solid {
+                yaw: 0.0,
                 shape: Shape::Square,
                 position: Vec3::ZERO,
                 size: 1.0,
@@ -48,6 +51,7 @@ fn room(blocker: bool) -> Scene {
                 color_mix: -1.0,
             },
             Solid {
+                yaw: 0.0,
                 shape: Shape::Square,
                 position: Vec3::new(-6.0, 0.0, 3.0),
                 size: 1.0,

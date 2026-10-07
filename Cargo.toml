@@ -14,6 +14,7 @@ members = [
     "crates/audio",
     "crates/audio-check",
     "examples/camera",
+    "examples/stress",
 ]
 
 [workspace.lints.rust]

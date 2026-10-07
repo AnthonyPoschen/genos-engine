@@ -176,6 +176,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-stress"
+version = "0.1.0"
+dependencies = [
+ "genos-input",
+ "genos-render",
+ "genos-scene",
+ "genos-ui",
+ "genos-window",
+]
+
+[[package]]
 name = "genos-ui"
 version = "0.1.0"
 dependencies = [

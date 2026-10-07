@@ -22,6 +22,8 @@ pub fn load_path(path: &Path) -> Result<Scene, String> {
 /// all of it); the engine divides by π where it needs radiance. A negative value is the
 /// default, white paint at 0.8. `color_mix` is how much of the color tints the bounce
 /// (negative: all of it). Overloads without them use both defaults.
+/// `raised_wall(x, z, width, depth, height, base)` places a wall whose underside is
+/// `base` metres above the floor.
 pub fn load_str(source: &str) -> Result<Scene, String> {
     let builder = Rc::new(RefCell::new(Builder::default()));
     let mut engine = Engine::new();
@@ -68,6 +70,7 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
             "wall",
             move |x: Dynamic, z: Dynamic, width: Dynamic, depth: Dynamic, height: Dynamic| {
                 builder.borrow_mut().walls.push(Wall {
+                    base: 0.0,
                     position: Vec3::new(num(&x), 0.0, num(&z)),
                     half_x: num(&width).abs() * 0.5,
                     half_z: num(&depth).abs() * 0.5,
@@ -92,6 +95,7 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
                   reflectance: Dynamic,
                   color_mix: Dynamic| {
                 builder.borrow_mut().walls.push(Wall {
+                    base: 0.0,
                     position: Vec3::new(num(&x), 0.0, num(&z)),
                     half_x: num(&width).abs() * 0.5,
                     half_z: num(&depth).abs() * 0.5,
@@ -100,6 +104,32 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
                     absorption: 0.0,
                     reflectance: num(&reflectance),
                     color_mix: num(&color_mix),
+                });
+            },
+        );
+    }
+    {
+        let builder = builder.clone();
+        // A box from `base` to `base + height` above the floor: a lintel, a sill, a
+        // beam or a roof slab.
+        engine.register_fn(
+            "raised_wall",
+            move |x: Dynamic,
+                  z: Dynamic,
+                  width: Dynamic,
+                  depth: Dynamic,
+                  height: Dynamic,
+                  base: Dynamic| {
+                builder.borrow_mut().walls.push(Wall {
+                    position: Vec3::new(num(&x), 0.0, num(&z)),
+                    half_x: num(&width).abs() * 0.5,
+                    half_z: num(&depth).abs() * 0.5,
+                    height: num(&height),
+                    base: num(&base).max(0.0),
+                    color: [1.0, 1.0, 1.0],
+                    absorption: 0.0,
+                    reflectance: -1.0,
+                    color_mix: -1.0,
                 });
             },
         );
@@ -120,6 +150,7 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
                     _ => Shape::Square,
                 };
                 builder.borrow_mut().solids.push(Solid {
+                    yaw: 0.0,
                     shape,
                     position: Vec3::new(num(&x), 0.0, num(&z)),
                     size: num(&size),
@@ -150,6 +181,7 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
                     _ => Shape::Square,
                 };
                 builder.borrow_mut().solids.push(Solid {
+                    yaw: 0.0,
                     shape,
                     position: Vec3::new(num(&x), 0.0, num(&z)),
                     size: num(&size),

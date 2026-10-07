@@ -8,6 +8,7 @@ fn wall(z0: f32, z1: f32, absorption: f32) -> Wall {
     let min_z = z0.min(z1);
     let max_z = z0.max(z1);
     Wall {
+        base: 0.0,
         position: Vec3::new(0.0, 0.0, (min_z + max_z) * 0.5),
         half_x: 1.0,
         half_z: (max_z - min_z) * 0.5,

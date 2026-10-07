@@ -143,30 +143,7 @@ const float TIER_NEAR_REACH = 1.0;
 // leaving the floor or the roof upward or downward never meets that plane: on open
 // floor or an open wall this is none and the gather costs nothing.
 uint near_candidates(vec3 pos, vec3 n, float reach) {
-    uint mask = scene_candidates(pos - vec3(reach), pos + vec3(reach));
-    uint count = min(scene.occ_count, 16u);
-    for (uint i = 0u; i < count; i++) {
-        if ((mask & (1u << i)) == 0u) {
-            continue;
-        }
-        Occ occ = scene.occs[i];
-        float y0;
-        float y1;
-        occ_span(occ, y0, y1);
-        vec3 c = vec3(occ.center_shape.x, 0.5 * (y0 + y1), occ.center_shape.z);
-        vec3 lift = pos - n * 0.01;
-        bool on_it;
-        if (occ.center_shape.w > 0.5) {
-            vec2 d = lift.xz - c.xz;
-            on_it = dot(d, d) < occ.extent.w * occ.extent.w && lift.y > y0 && lift.y < y1;
-        } else {
-            vec3 half_e = vec3(occ.extent.x, 0.5 * (y1 - y0), occ.extent.z);
-            on_it = all(lessThan(abs(lift - c), half_e));
-        }
-        if (on_it) {
-            mask &= ~(1u << i);
-        }
-    }
+    uint mask = scene_candidates_skip(pos - vec3(reach), pos + vec3(reach), true, pos - n * 0.01);
     if (abs(n.y) > 0.999) {
         mask &= ~(n.y > 0.0 ? SCENE_FLOOR_BIT : SCENE_ROOF_BIT);
     }

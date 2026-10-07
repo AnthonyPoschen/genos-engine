@@ -506,6 +506,13 @@ impl Renderer {
         Ok(())
     }
 
+    /// GPU times of the light builds that finished since the last call, oldest first.
+    /// Builds run on their own submit and only when lights, geometry or the tier have
+    /// work, so a still scene in a settled tier returns none.
+    pub fn take_light_builds(&mut self) -> Vec<LightBuildTimes> {
+        self.gpu.light_builds.drain(..).collect()
+    }
+
     /// Tier counts for reports.
     pub fn tier_stats(&self) -> crate::probe_tier::TierStats {
         self.tier.stats()
@@ -549,6 +556,27 @@ impl Renderer {
     /// waiting for a build: a capture of what the screen shows mid-change.
     pub fn set_live_readback(&mut self, on: bool) {
         self.live_readback = on;
+    }
+}
+
+/// GPU milliseconds of one light build, from its timestamps. `passes_ms` holds the
+/// spans between the stamps in order: the copy forward, the world probes' direct pass,
+/// their bounce pass and the tier pass (a pass that did not run reads near 0).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LightBuildTimes {
+    pub passes_ms: Vec<f64>,
+    /// The world probe passes ran.
+    pub world: bool,
+    /// Tier bricks lit.
+    pub tier_items: u32,
+    /// Tier probe rays cast.
+    pub probe_rays: u64,
+}
+
+impl LightBuildTimes {
+    /// Whole build, start stamp to end stamp.
+    pub fn total_ms(&self) -> f64 {
+        self.passes_ms.iter().sum()
     }
 }
 
@@ -756,6 +784,8 @@ struct Gpu {
     tier_time: Option<(u64, f64)>,
     /// The ray budget of the last batch, None while settling. Printed by `GENOS_GPU_TIMES`.
     tier_budget: Option<u64>,
+    /// Timed light builds the game has not taken yet (bounded).
+    light_builds: VecDeque<LightBuildTimes>,
     compute_layout: Handle,
     compute_pipe: Handle,
     audio_rays: Buffer,
@@ -1404,6 +1434,7 @@ impl Gpu {
                 plan_rays: 0,
                 tier_time: None,
                 tier_budget: None,
+                light_builds: VecDeque::new(),
                 compute_layout: std::ptr::null_mut(),
                 compute_pipe: std::ptr::null_mut(),
                 audio_rays: Buffer::empty(),
@@ -2181,6 +2212,15 @@ impl Gpu {
                 *sum += v;
             }
         }
+        if self.light_builds.len() >= 256 {
+            self.light_builds.pop_front();
+        }
+        self.light_builds.push_back(LightBuildTimes {
+            passes_ms: ms.clone(),
+            world: self.plan_world,
+            tier_items: self.plan_items,
+            probe_rays: self.plan_rays,
+        });
         if std::env::var("GENOS_PASS_TIMES").is_ok() {
             let text: Vec<String> = ms.iter().map(|v| format!("{v:.3}")).collect();
             eprintln!(
@@ -2587,18 +2627,19 @@ impl Gpu {
     }
 
     fn make_lighting(&mut self) -> Result<(), String> {
-        self.scene_buf = self.make_buffer(4096, 0x20, true)?;
+        self.scene_buf = self.make_buffer(pack::SCENE_CAPACITY as u64, 0x20, true)?;
         let share = self.light_families();
         self.instances = self.make_buffer_queues(5120, 0x20, true, &share)?;
         self.particle_buf = self.make_buffer_queues(16 + 256 * 256 * 4, 0x20, true, &share)?;
         let field_bytes = vec![0u8; crate::probe_tier::TIER_END as usize * 16];
         for index in 0..2 {
-            self.light_scene[index] = self.make_buffer_queues(4096, 0x20, true, &share)?;
+            self.light_scene[index] =
+                self.make_buffer_queues(pack::SCENE_CAPACITY as u64, 0x20, true, &share)?;
             // Storage, plus transfer source and destination for the copy forward.
             self.light_field[index] =
                 self.make_buffer_queues(field_bytes.len() as u64, 0x20 | 0x1 | 0x2, true, &share)?;
             self.write_buffer(&self.light_field[index], &field_bytes)?;
-            self.write_buffer(&self.light_scene[index], &vec![0u8; 4096])?;
+            self.write_buffer(&self.light_scene[index], &vec![0u8; pack::SCENE_TAIL])?;
         }
         self.write_buffer(&self.particle_buf, &vec![0u8; 16])?;
         #[repr(C)]
@@ -2754,7 +2795,7 @@ impl Gpu {
         self.desc_set = self.light_sets[0];
         self.write_light_set(0)?;
         self.write_light_set(1)?;
-        self.write_buffer(&self.scene_buf, &vec![0u8; 4096])?;
+        self.write_buffer(&self.scene_buf, &vec![0u8; pack::SCENE_TAIL])?;
         self.make_light_queue()?;
         self.make_audio()?;
         Ok(())

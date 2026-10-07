@@ -448,6 +448,7 @@ fn spawn_object(inner: &mut Inner, arguments: &Value) -> Result<String, String> 
                 return Err("the room is full".into());
             }
             let mut wall = Wall {
+                base: 0.0,
                 position: Vec3::ZERO,
                 half_x: 0.5,
                 half_z: 0.5,
@@ -470,6 +471,7 @@ fn spawn_object(inner: &mut Inner, arguments: &Value) -> Result<String, String> 
                 return Err("the room is full".into());
             }
             let mut solid = Solid {
+                yaw: 0.0,
                 shape: Shape::Square,
                 position: Vec3::ZERO,
                 size: 1.0,

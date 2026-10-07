@@ -138,12 +138,12 @@ fn push_fixed(
                 field,
                 wall.color,
                 wall.position.x,
-                wall.height * 0.5,
+                wall.base + wall.height * 0.5,
                 wall.position.z,
                 wall.half_x,
                 wall.height * 0.5,
                 wall.half_z,
-                false,
+                wall.base > 0.0,
             );
         }
         FixedPart::Solid(index) => {

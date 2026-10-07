@@ -178,7 +178,7 @@ pub fn lighting_frame(
             idle: item.idle,
             text: item.text.clone(),
         });
-        push_paints(&mut paints, item, look, state.palette, painted_lamp);
+        push_paints(&mut paints, item, look, state.palette, painted_lamp, true);
     }
     // The sun is not in `items`, so a press on it misses the panel.
     push_sun(&mut shown, &mut paints, viewport, camera, painted_lamp);
@@ -188,6 +188,121 @@ pub fn lighting_frame(
     if !pointer.down {
         state.dragging = false;
         state.sliding = None;
+        state.look_hold = false;
+    }
+    Frame {
+        shown,
+        paints,
+        actions,
+        look_capture,
+    }
+}
+
+/// One row of a game panel: a label, then buttons left to right.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PanelRow {
+    pub label: String,
+    pub buttons: Vec<PanelButton>,
+}
+
+/// A game button. A press fires [`Action::Press`] with `id`. `selected` draws the
+/// button in its pressed look, for a choice that is on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PanelButton {
+    /// Game id. Ids from `u32::MAX - 4095` up are the panel's own rows and labels.
+    pub id: u32,
+    pub text: String,
+    pub selected: bool,
+}
+
+/// Lay out a game panel of labelled button rows at `state.panel_offset`, apply hover,
+/// press and drag, and paint it. A press on a button fires [`Action::Press`]; a press
+/// elsewhere on the panel drags it. A press that misses the panel sets `look_capture`.
+pub fn button_panel(
+    state: &mut State,
+    title: &str,
+    rows: &[PanelRow],
+    viewport: [f32; 2],
+    camera: &Camera,
+    pointer: Pointer,
+) -> Frame {
+    let press_edge = pointer.down && !state.down;
+    if state.dragging && pointer.down && !press_edge {
+        state.panel_offset[0] += pointer.x - state.pointer_x;
+        state.panel_offset[1] += pointer.y - state.pointer_y;
+    }
+    refresh_palette(state);
+    let palette = state.palette;
+    let fill = surface(palette);
+    let own = u32::MAX - 4095;
+    let mut panel = Node::new(own);
+    panel.direction = Direction::TopToBottom;
+    panel.pad = Pad::all(8.0);
+    panel.gap = 6.0;
+    panel.place = Some(Place::point([0.0, 0.0], [0.0, 0.0], state.panel_offset));
+    panel.draggable = true;
+    paint_looks(&mut panel, chrome_looks(palette));
+    panel.children.push(label(own + 1, title, fill));
+    for (index, item) in rows.iter().enumerate() {
+        let at = own + 2 + 2 * index as u32;
+        let mut children = vec![label(at + 1, &item.label, fill)];
+        for button in &item.buttons {
+            let mut node = control(button.id, &button.text, Action::Press(button.id), palette);
+            if button.selected {
+                let looks = control_looks(palette);
+                node.idle = looks.pressed;
+                node.hover = looks.pressed;
+            }
+            children.push(node);
+        }
+        panel.children.push(row(at, children, fill));
+    }
+    let items = layout::layout(&panel, Space::Screen, viewport, Some(camera));
+    let hit = items
+        .iter()
+        .rev()
+        .find(|item| item.rect.contains(pointer.x, pointer.y));
+    let mut actions = Vec::new();
+    let mut look_capture = false;
+    if press_edge {
+        if let Some(item) = hit {
+            state.focus = Some(item.id);
+            state.look_hold = false;
+            state.sliding = None;
+            if let Some(action) = item.action {
+                actions.push(action);
+                state.dragging = false;
+            } else {
+                state.dragging = draggable(&items, item.id);
+            }
+        } else {
+            state.focus = None;
+            state.dragging = false;
+            state.sliding = None;
+            state.look_hold = true;
+            look_capture = true;
+        }
+    } else if pointer.down && state.look_hold {
+        look_capture = true;
+    }
+    let mut shown = Vec::with_capacity(items.len());
+    let mut paints = Vec::new();
+    for item in &items {
+        let look = choose(item, pointer.down, hit.map(|hit| hit.id), state.focus);
+        shown.push(Shown {
+            id: item.id,
+            rect: item.rect,
+            look,
+            idle: item.idle,
+            text: item.text.clone(),
+        });
+        push_paints(&mut paints, item, look, palette, None, false);
+    }
+    state.pointer_x = pointer.x;
+    state.pointer_y = pointer.y;
+    state.down = pointer.down;
+    if !pointer.down {
+        state.dragging = false;
         state.look_hold = false;
     }
     Frame {
@@ -215,7 +330,7 @@ pub fn apply_lamp(scene: &mut Scene, action: Action) {
                 *channel = (*channel * scale).clamp(0.0, 8.0);
             }
         }
-        Action::SetAntialias(_) | Action::ToggleBoxRun => {}
+        Action::SetAntialias(_) | Action::ToggleBoxRun | Action::Press(_) => {}
     }
 }
 
@@ -563,6 +678,7 @@ fn push_paints(
     look: Look,
     palette: Option<Palette>,
     lamp: Option<[f32; 3]>,
+    sliders: bool,
 ) {
     push_rect(out, item.rect, look.background);
     push_border(out, item.rect, look.border);
@@ -572,7 +688,7 @@ fn push_paints(
             push_blot(out, blot, color);
         }
     }
-    if let Some(axis) = slider_axis(item.id) {
+    if let Some(axis) = slider_axis(item.id).filter(|_| sliders) {
         push_slider(out, item.rect, axis, lamp, palette);
     }
 }

@@ -6,75 +6,9 @@ layout(location = 3) in float v_shade;
 layout(location = 4) in vec2 v_uv;
 layout(location = 0) out vec4 out_color;
 
-struct Lamp {
-    vec4 pos;
-    vec4 color;
-};
-struct Occ {
-    vec4 center_shape;
-    vec4 extent;
-    vec4 albedo;
-    vec4 bounce;
-};
-struct Obj {
-    uvec4 range;
-    vec4 color;
-};
-struct Puff {
-    vec4 center_density;
-    vec4 radius;
-};
-struct Cascade {
-    float spacing;
-    float t0;
-    float t1;
-    float origin_x;
-    float origin_z;
-    float count_x;
-    float count_z;
-    float dirs;
-    float offset;
-    float pad0;
-    float pad1;
-    float pad2;
-};
-layout(std430, set = 0, binding = 0) readonly buffer SceneData {
-    uint lamp_count;
-    uint occ_count;
-    uint obj_count;
-    uint count_x;
-    uint count_z;
-    float spacing;
-    float origin_x;
-    float origin_z;
-    float near_end;
-    float far_end;
-    float world_end;
-    uint pad2;
-    Lamp lamps[32];
-    Occ occs[16];
-    Obj objects[32];
-    vec4 eye;
-    vec4 fire_pos;
-    vec4 fire_color;
-    Puff puffs[8];
-    // xyz is the floor center. w is half extent on X.
-    vec4 floor_center;
-    // x is half extent on Z. yzw is the floor color.
-    vec4 floor_data;
-    Cascade cascades[3];
-    // xyz is the camera basis. w is tan(half fov), 0, aspect, and unused.
-    vec4 view_right;
-    vec4 view_up;
-    vec4 view_forward;
-    // x is the screen-probe columns. y is the rows. z is the near-field rays plus one
-    // (0: NEAR_RAYS).
-    vec4 view_grid;
-    // x is the roof underside height over the floor footprint (0 = no roof). yzw is its color.
-    vec4 ceiling;
-} scene;
-
 #extension GL_GOOGLE_include_directive : require
+#include "scene_data.glsl"
+
 #include "scene_rays.glsl"
 
 layout(std430, set = 0, binding = 1) readonly buffer FieldData {
@@ -353,9 +287,17 @@ vec3 direct_at(vec3 pos, vec3 normal, bool two_sided) {
     // A point inside a solid (floor under a footprint) starts occluded in blocked().
     vec3 origin = pos + normal * 0.02;
     vec3 incoming = vec3(0.0);
-    uint lamps = min(scene.lamp_count, 32u);
-    for (uint i = 0u; i < lamps; i++) {
-        incoming += shade_lamp(origin, normal, scene.lamps[i].pos, scene.lamps[i].color.rgb, two_sided);
+    uvec2 suns = lamp_suns();
+    for (uint k = 0u; k < suns.y; k++) {
+        Lamp lamp = scene_lamp(grid_word(suns.x + k));
+        incoming += shade_lamp(origin, normal, lamp.pos, lamp.color.rgb, two_sided);
+    }
+    uvec2 near = lamp_cell_at(origin);
+    for (uint k = 0u; k < near.y; k++) {
+        Lamp lamp = scene_lamp(grid_word(near.x + k));
+        if (lamp_reaches(lamp, origin)) {
+            incoming += shade_lamp(origin, normal, lamp.pos, lamp.color.rgb, two_sided);
+        }
     }
     if (scene.fire_pos.w > 0.0) {
         incoming += shade_lamp(
@@ -391,24 +333,29 @@ float sphere_chord(vec3 origin, vec3 dir, vec3 center, float radius) {
 }
 
 vec2 fog_field_xz(vec2 xz) {
-    uint count = min(scene.occ_count, 16u);
-    for (uint i = 0u; i < count; i++) {
-        Occ occ = scene.occs[i];
+    if (occ_grid_empty()) {
+        return xz;
+    }
+    uvec2 cell = occ_cell(occ_cell_of(xz));
+    for (uint k = 0u; k < cell.y; k++) {
+        Occ occ = scene_occ(grid_word(cell.x + k));
         vec2 d = xz - occ.center_shape.xz;
         if (occ.center_shape.w > 0.5) {
             if (dot(d, d) < occ.extent.w * occ.extent.w) {
                 vec2 n = dot(d, d) < 1.0e-6 ? vec2(1.0, 0.0) : normalize(d);
                 return occ.center_shape.xz + n * (occ.extent.w + 0.1);
             }
-        } else if (abs(d.x) < occ.extent.x - 0.001 && abs(d.y) < occ.extent.z - 0.001) {
-            float ax = abs(d.x) / max(occ.extent.x, 1.0e-4);
-            float az = abs(d.y) / max(occ.extent.z, 1.0e-4);
-            if (ax >= az) {
-                float s = d.x < 0.0 ? -1.0 : 1.0;
-                return vec2(occ.center_shape.x + s * (occ.extent.x + 0.1), xz.y);
-            }
-            float s = d.y < 0.0 ? -1.0 : 1.0;
-            return vec2(xz.x, occ.center_shape.y + s * (occ.extent.z + 0.1));
+            continue;
+        }
+        vec2 l = occ_turned(occ) ? occ_local(occ, d) : d;
+        if (abs(l.x) < occ.extent.x - 0.001 && abs(l.y) < occ.extent.z - 0.001) {
+            float ax = abs(l.x) / max(occ.extent.x, 1.0e-4);
+            float az = abs(l.y) / max(occ.extent.z, 1.0e-4);
+            vec2 out_l = ax >= az
+                ? vec2((l.x < 0.0 ? -1.0 : 1.0) * (occ.extent.x + 0.1), l.y)
+                : vec2(l.x, (l.y < 0.0 ? -1.0 : 1.0) * (occ.extent.z + 0.1));
+            vec2 back = occ_turned(occ) ? occ_world(occ, out_l) : out_l;
+            return occ.center_shape.xz + back;
         }
     }
     return xz;
@@ -416,23 +363,23 @@ vec2 fog_field_xz(vec2 xz) {
 
 vec3 scatter_light(vec3 p) {
     vec3 sum = vec3(0.0);
-    uint lamps = min(scene.lamp_count, 32u);
-    for (uint i = 0u; i < lamps; i++) {
-        vec4 lamp = scene.lamps[i].pos;
-        if (lamp.w > 0.5) {
-            vec3 toward = -normalize(lamp.xyz);
-            if (blocked(p, p + toward * 80.0)) {
-                continue;
-            }
-            sum += scene.lamps[i].color.rgb * LAMP_UNIT / 50.0;
+    uvec2 suns = lamp_suns();
+    for (uint k = 0u; k < suns.y; k++) {
+        Lamp lamp = scene_lamp(grid_word(suns.x + k));
+        vec3 toward = -normalize(lamp.pos.xyz);
+        if (!blocked(p, p + toward * 80.0)) {
+            sum += lamp.color.rgb * LAMP_UNIT / 50.0;
+        }
+    }
+    uvec2 near = lamp_cell_at(p);
+    for (uint k = 0u; k < near.y; k++) {
+        Lamp lamp = scene_lamp(grid_word(near.x + k));
+        if (!lamp_reaches(lamp, p) || blocked(p, lamp.pos.xyz)) {
             continue;
         }
-        if (blocked(p, lamp.xyz)) {
-            continue;
-        }
-        vec3 delta = lamp.xyz - p;
+        vec3 delta = lamp.pos.xyz - p;
         float fall = LAMP_UNIT / max(dot(delta, delta), LAMP_RADIUS * LAMP_RADIUS);
-        sum += scene.lamps[i].color.rgb * fall;
+        sum += lamp.color.rgb * fall;
     }
     if (scene.fire_pos.w > 0.0) {
         vec3 fire = scene.fire_pos.xyz;

@@ -125,6 +125,7 @@ fn required_geometry_stays_when_the_particle_image_does_not_fit() {
 
 fn solid(x: f32, z: f32, size: f32) -> Solid {
     Solid {
+        yaw: 0.0,
         shape: Shape::Square,
         position: Vec3::new(x, 0.0, z),
         size,

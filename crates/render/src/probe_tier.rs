@@ -65,12 +65,17 @@ pub fn scene_boxes(scene: &genos_scene::Scene) -> Vec<SurfaceBox> {
     let mut out = vec![SurfaceBox { min: [fx0, 0.0, fz0], max: [fx1, 0.0, fz1] }];
     for wall in &scene.walls {
         out.push(SurfaceBox {
-            min: [wall.position.x - wall.half_x, 0.0, wall.position.z - wall.half_z],
-            max: [wall.position.x + wall.half_x, wall.height, wall.position.z + wall.half_z],
+            min: [wall.position.x - wall.half_x, wall.base, wall.position.z - wall.half_z],
+            max: [
+                wall.position.x + wall.half_x,
+                wall.base + wall.height,
+                wall.position.z + wall.half_z,
+            ],
         });
     }
     for solid in &scene.solids {
-        let half = solid.size * 0.5;
+        // A turned square: the box around its corners.
+        let half = crate::world::solid_reach(solid);
         out.push(SurfaceBox {
             min: [solid.position.x - half, 0.0, solid.position.z - half],
             max: [solid.position.x + half, solid.height, solid.position.z + half],

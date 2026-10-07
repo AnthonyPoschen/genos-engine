@@ -46,11 +46,14 @@ pub enum Action {
     SetAntialias(PictureMode),
     /// Start or hold the red box path. The caller keeps the on/off state.
     ToggleBoxRun,
+    /// A press on a game button in a [`button_panel`]. The game reads the id.
+    Press(u32),
 }
 
 pub use layout::{layout, Align, Direction, Node, Pad, Place, Rect, Sizing, Space};
 pub use panel::{
-    apply_frame_action, apply_lamp, lighting_frame, Frame, Paint, Pointer, Shown, State,
+    apply_frame_action, apply_lamp, button_panel, lighting_frame, Frame, PanelButton, PanelRow,
+    Paint, Pointer, Shown, State,
 };
 pub use profile::{
     inspect_region, profile_overlay, remember_frame, FrameSample, OpenFrame, PlotScale,

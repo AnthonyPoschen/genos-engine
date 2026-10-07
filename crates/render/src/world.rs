@@ -102,6 +102,54 @@ pub struct Object {
     pub kind: DrawKind,
 }
 
+impl Object {
+    /// Bounds of the object as the scene holds it now. A floor, wall or solid follows
+    /// edits to `World::scene` (a game may move or turn a solid every frame); other
+    /// kinds keep `bounds`, which the game updates with the pose.
+    pub fn live_bounds(&self, scene: &Scene) -> Bounds {
+        match &self.kind {
+            DrawKind::Fixed(part) => fixed_bounds(scene, part).unwrap_or(self.bounds),
+            _ => self.bounds,
+        }
+    }
+}
+
+/// World box of one authored part. A raised wall starts at its base; a turned square
+/// solid covers its turned corners.
+pub fn fixed_bounds(scene: &Scene, part: &FixedPart) -> Option<Bounds> {
+    match part {
+        FixedPart::Floor => Some(Bounds {
+            center: [scene.floor.position.x, 0.0, scene.floor.position.z],
+            half: [scene.floor.half_x, 0.5, scene.floor.half_z],
+        }),
+        FixedPart::Ceiling => scene.ceiling.as_ref().map(|ceiling| Bounds {
+            center: [scene.floor.position.x, ceiling.height, scene.floor.position.z],
+            half: [scene.floor.half_x, 0.05, scene.floor.half_z],
+        }),
+        FixedPart::Wall(index) => scene.walls.get(*index).map(|wall| Bounds {
+            center: [wall.position.x, wall.base + wall.height * 0.5, wall.position.z],
+            half: [wall.half_x, wall.height * 0.5, wall.half_z],
+        }),
+        FixedPart::Solid(index) => scene.solids.get(*index).map(|solid| {
+            let reach = solid_reach(solid);
+            Bounds {
+                center: [solid.position.x, solid.height * 0.5, solid.position.z],
+                half: [reach, solid.height * 0.5, reach],
+            }
+        }),
+    }
+}
+
+/// Half width on X and on Z of the ground box around a solid. A square turned by
+/// its yaw reaches out to its corners.
+pub fn solid_reach(solid: &Solid) -> f32 {
+    let half = solid.size * 0.5;
+    match solid.shape {
+        Shape::Circle => half,
+        Shape::Square => half * (solid.yaw.cos().abs() + solid.yaw.sin().abs()),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct World {
     pub scene: Scene,
@@ -110,50 +158,24 @@ pub struct World {
 
 impl World {
     pub fn from_scene(scene: Scene) -> Self {
-        let mut objects = Vec::new();
-        objects.push(Object {
-            hidden: false,
-            affects_light: true,
-            bounds: Bounds {
-                center: [scene.floor.position.x, 0.0, scene.floor.position.z],
-                half: [scene.floor.half_x, 0.5, scene.floor.half_z],
-            },
-            kind: DrawKind::Fixed(FixedPart::Floor),
-        });
-        if let Some(ceiling) = &scene.ceiling {
-            objects.push(Object {
+        let mut parts = vec![FixedPart::Floor];
+        if scene.ceiling.is_some() {
+            parts.push(FixedPart::Ceiling);
+        }
+        parts.extend((0..scene.walls.len()).map(FixedPart::Wall));
+        parts.extend((0..scene.solids.len()).map(FixedPart::Solid));
+        let objects = parts
+            .into_iter()
+            .map(|part| Object {
                 hidden: false,
                 affects_light: true,
-                bounds: Bounds {
-                    center: [scene.floor.position.x, ceiling.height, scene.floor.position.z],
-                    half: [scene.floor.half_x, 0.05, scene.floor.half_z],
-                },
-                kind: DrawKind::Fixed(FixedPart::Ceiling),
-            });
-        }
-        for (index, wall) in scene.walls.iter().enumerate() {
-            objects.push(Object {
-                hidden: false,
-                affects_light: true,
-                bounds: Bounds {
-                    center: [wall.position.x, wall.height * 0.5, wall.position.z],
-                    half: [wall.half_x, wall.height * 0.5, wall.half_z],
-                },
-                kind: DrawKind::Fixed(FixedPart::Wall(index)),
-            });
-        }
-        for (index, solid) in scene.solids.iter().enumerate() {
-            let half = solid.size * 0.5;
-            objects.push(Object {
-                hidden: false,
-                affects_light: true,
-                bounds: Bounds {
-                    center: [solid.position.x, solid.height * 0.5, solid.position.z],
-                    half: [half, solid.height * 0.5, half],
-                },
-                kind: DrawKind::Fixed(FixedPart::Solid(index)),
-            });
-        }
+                bounds: fixed_bounds(&scene, &part).unwrap_or(Bounds {
+                    center: [0.0; 3],
+                    half: [0.0; 3],
+                }),
+                kind: DrawKind::Fixed(part),
+            })
+            .collect();
         Self { scene, objects }
     }
 
@@ -208,6 +230,7 @@ fn stand_in(object: &Object) -> Solid {
     };
     let half = object.bounds.half[0].max(object.bounds.half[2]).max(0.05);
     Solid {
+        yaw: 0.0,
         shape: Shape::Square,
         position: genos_scene::Vec3::new(object.bounds.center[0], 0.0, object.bounds.center[2]),
         size: half * 2.0,
@@ -277,6 +300,7 @@ mod tests {
             },
             walls: Vec::new(),
             solids: vec![Solid {
+                yaw: 0.0,
                 shape: Shape::Square,
                 position: Vec3::new(0.0, 0.0, 0.0),
                 size: 1.5,
@@ -395,6 +419,7 @@ mod tests {
         let mut scene = red_scene();
         scene.solids.clear();
         scene.walls.push(Wall {
+            base: 0.0,
             position: Vec3::new(0.0, 0.0, 0.0),
             half_x: 1.0,
             half_z: 0.3,
@@ -455,6 +480,7 @@ mod tests {
             },
             walls: if wall {
                 vec![Wall {
+                    base: 0.0,
                     position: Vec3::new(3.0, 0.0, 0.0),
                     half_x: 0.2,
                     half_z: 3.0,
@@ -468,6 +494,7 @@ mod tests {
                 Vec::new()
             },
             solids: vec![Solid {
+                yaw: 0.0,
                 shape: Shape::Square,
                 position: Vec3::new(0.0, 0.0, 0.0),
                 size: 1.5,

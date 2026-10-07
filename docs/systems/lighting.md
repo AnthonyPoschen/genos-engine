@@ -50,6 +50,18 @@ A new occluder is a wall or a solid in the scene. The direct ray and the bounce 
 
 Fire does not use that stand-in. The stationary flame is one lamp in the same cascade. A wall blocks that lamp. The flame does not light the far side of the wall. The floor beside the flame stays warm with the scene lamp off. A lit particle uses the same shade path as a face: albedo times reflectance over π times direct plus bounce. A density puff is still optical depth and in-scatter on the view ray. Light that leaves a surface travels in the cascade until the next surface.
 
+## Many lamps and occluders
+
+Lamps and occluders sit in the tail of the scene storage buffer (8 MiB). The caps are `MAX_LAMPS` (4096) and `MAX_OCCLUDERS` (8192). A ray does not loop over every occluder. `build_grid` bins the occluders on a uniform 2D grid in X and Z each pack, with cells of at least 2 m and at most 256 cells a side. A ray walks the cells it crosses with a 2D DDA, clipped to the grid and to the height band from the floor to the tallest occluder top. It tests only the boxes in those cells.
+
+Each point lamp has a range: the distance where its brightest channel on white paint falls to half a display step (`LAMP_CUTOFF`, 0.5/255). `lamp_range` gives it: about 97 m for a unit lamp and about 22 m at 0.05. A second grid of 4 m cells lists each lamp in every cell its range circle meets. A pixel visits the suns, then the lamps in its cell that reach it.
+
+That range is a shortcut. Cost: light past the range is dropped. Over many lamps in an open area that tail can add up to a visible step; walls usually cut it first. Gain: the per-pixel lamp loop follows the lamps near the pixel, not the lamp count of the level.
+
+A wall has a `base`. Above the floor it is a lintel, a sill, a beam or a roof slab, and the rays, the raster and the probe tier use that box. A square solid has a `yaw` about +Y. The rays turn into its frame, so a spinning box casts a turned shadow.
+
+A sun is a directional lamp. It lights the pixel directly and lights the probe tier as a directional `TierLight`, so its bounce reaches rooms the sun does not. It has no range and is never culled.
+
 ## Limits
 
 The world probes are a coarse 3D volume. A gap smaller than that spacing can stay dark or can stay bright for the wrong reason.
@@ -57,6 +69,8 @@ The world probes are a coarse 3D volume. A gap smaller than that spacing can sta
 The two finest cascades are world cells at 0.5 m and 1 m. Rebound past 14 m comes from the world volume. The fade into that volume starts at 10 m. The safety caps are 2048 and 1024 probes. The paper's heaviest ray counts are not the budget. The budget is in the lighting notes.
 
 The soft edge of a shadow is the coarser angle step of the next cascade, merged only where β is 1. There is no painted halo around a light square. The fragment shader shades each pixel. The direct shadow edge is the lamp ray. The lamp side of an object is not darkened by a margin around its base.
+
+The per-pixel cost grows with the lamps in range: each one is a shadow ray. A dense cluster of lamps costs a ray each, wherever the level is. The world volume is at most 48 × 3 × 48 probes at 2.5 m, so it covers 120 m from the floor corner and does not follow the camera. Any moving occluder, or a lamp that moves 0.1 m, restarts every tier brick. `examples/stress` measures these.
 
 ## Decisions
 

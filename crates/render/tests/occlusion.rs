@@ -59,6 +59,7 @@ fn lamp(x: f32, y: f32, z: f32) -> Light {
 
 fn wall(x: f32, z: f32, width: f32, depth: f32, height: f32) -> Wall {
     Wall {
+        base: 0.0,
         position: Vec3::new(x, 0.0, z),
         half_x: width * 0.5,
         half_z: depth * 0.5,
@@ -72,6 +73,7 @@ fn wall(x: f32, z: f32, width: f32, depth: f32, height: f32) -> Wall {
 
 fn solid(shape: Shape, size: f32, height: f32) -> Solid {
     Solid {
+        yaw: 0.0,
         shape,
         position: Vec3::new(0.0, 0.0, 0.0),
         size,

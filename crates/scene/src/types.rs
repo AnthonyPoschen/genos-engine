@@ -10,10 +10,13 @@ pub const PAINT_ALBEDO: f32 = 0.8;
 pub const DEFAULT_REFLECTANCE: f32 = PAINT_ALBEDO;
 /// Lambertian BRDF of a surface with the default reflectance, `PAINT_ALBEDO / π`.
 pub const DEFAULT_BRDF: f32 = PAINT_ALBEDO * std::f32::consts::FRAC_1_PI;
-/// Lamps and suns the renderer lights a frame with.
-pub const MAX_LAMPS: usize = 32;
-/// Walls and solids the renderer traces light against.
-pub const MAX_OCCLUDERS: usize = 16;
+/// Lamps and suns the renderer lights a frame with. A pixel or a probe ray only
+/// visits the lamps that can reach it (see the renderer's lamp range), so the cost
+/// follows the lamps nearby, not this total.
+pub const MAX_LAMPS: usize = 4096;
+/// Walls and solids the renderer traces light against. Rays walk a grid over them,
+/// so a ray tests the shapes along its path, not every shape.
+pub const MAX_OCCLUDERS: usize = 8192;
 
 /// Resolve a material reflectance (albedo, 0 to 1). A negative value selects the game
 /// default.
@@ -79,6 +82,9 @@ pub struct Wall {
     pub half_x: f32,
     pub half_z: f32,
     pub height: f32,
+    /// Height of the underside above the floor. 0 stands on the floor; above it the
+    /// box is a lintel over a door or window, a sill, a beam or a roof slab.
+    pub base: f32,
     pub color: [f32; 3],
     /// Nepers per meter along the straight path. Zero leaves the level unchanged.
     pub absorption: f32,
@@ -95,6 +101,9 @@ pub struct Solid {
     pub position: Vec3,
     pub size: f32,
     pub height: f32,
+    /// Turn about +Y in radians. Positive turns +X toward -Z, the same sense as
+    /// [`Quat::from_axis_angle`](genos_math::Quat) about +Y. A circle ignores it.
+    pub yaw: f32,
     pub color: [f32; 3],
     /// Nepers per meter along the straight path. Zero leaves the level unchanged.
     pub absorption: f32,

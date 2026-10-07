@@ -138,6 +138,7 @@ fn the_gpu_frame_keeps_the_learned_light() {
             direction: Vec3::ZERO,
         }],
         vec![Wall {
+            base: 0.0,
             position: Vec3::new(0.0, 0.0, 0.0),
             half_x: 0.2,
             half_z: 2.0,
@@ -175,6 +176,7 @@ fn the_gpu_frame_keeps_the_learned_light() {
         }],
         Vec::new(),
         vec![Solid {
+            yaw: 0.0,
             shape: Shape::Square,
             position: Vec3::new(0.0, 0.0, 0.0),
             size: 1.2,
@@ -201,6 +203,7 @@ fn the_gpu_frame_keeps_the_learned_light() {
         }],
         Vec::new(),
         vec![Solid {
+            yaw: 0.0,
             shape: Shape::Square,
             position: Vec3::new(0.0, 0.0, 0.0),
             size: 1.4,
@@ -229,6 +232,7 @@ fn the_gpu_frame_keeps_the_learned_light() {
             direction: Vec3::ZERO,
         }],
         vec![Wall {
+            base: 0.0,
             position: Vec3::new(3.0, 0.0, 0.0),
             half_x: 0.2,
             half_z: 2.5,
@@ -239,6 +243,7 @@ fn the_gpu_frame_keeps_the_learned_light() {
             color_mix: -1.0,
         }],
         vec![Solid {
+            yaw: 0.0,
             shape: Shape::Square,
             position: Vec3::new(0.0, 0.0, 0.0),
             size: 1.2,
@@ -322,6 +327,7 @@ fn a_far_miss_and_a_world_solid_tint_the_floor() {
     let far = scene(
         vec![lamp.clone()],
         vec![Wall {
+            base: 0.0,
             position: Vec3::new(0.0, 0.0, 4.0),
             half_x: 3.0,
             half_z: 0.2,
@@ -346,6 +352,7 @@ fn a_far_miss_and_a_world_solid_tint_the_floor() {
     let world_solid = scene(
         vec![lamp],
         vec![Wall {
+            base: 0.0,
             position: Vec3::new(0.0, 0.0, 22.0),
             half_x: 12.0,
             half_z: 0.3,
@@ -382,6 +389,7 @@ fn moving_a_middle_solid_moves_it_on_the_gpu() {
         Vec::new(),
         vec![
             Solid {
+                yaw: 0.0,
                 shape: Shape::Square,
                 position: Vec3::new(-2.0, 0.0, 0.0),
                 size: 1.0,
@@ -392,6 +400,7 @@ fn moving_a_middle_solid_moves_it_on_the_gpu() {
                 color_mix: -1.0,
             },
             Solid {
+                yaw: 0.0,
                 shape: Shape::Square,
                 position: Vec3::new(0.0, 0.0, 0.0),
                 size: 1.0,
@@ -402,6 +411,7 @@ fn moving_a_middle_solid_moves_it_on_the_gpu() {
                 color_mix: -1.0,
             },
             Solid {
+                yaw: 0.0,
                 shape: Shape::Square,
                 position: Vec3::new(2.0, 0.0, 0.0),
                 size: 1.0,
@@ -476,6 +486,7 @@ fn a_close_lamp_does_not_cross_the_wall() {
             direction: Vec3::ZERO,
         }],
         vec![Wall {
+            base: 0.0,
             position: Vec3::new(0.0, 0.0, 0.0),
             half_x: 0.2,
             half_z: 2.0,
@@ -528,6 +539,7 @@ fn the_wall_has_no_bright_dashes_and_the_cube_shadow_keeps_some_light() {
         }],
         vec![
             Wall {
+                base: 0.0,
                 position: Vec3::new(2.0, 0.0, 5.0),
                 half_x: 4.0,
                 half_z: 0.2,
@@ -538,6 +550,7 @@ fn the_wall_has_no_bright_dashes_and_the_cube_shadow_keeps_some_light() {
                 color_mix: -1.0,
             },
             Wall {
+                base: 0.0,
                 position: Vec3::new(6.0, 0.0, 1.5),
                 half_x: 0.2,
                 half_z: 3.5,
@@ -549,6 +562,7 @@ fn the_wall_has_no_bright_dashes_and_the_cube_shadow_keeps_some_light() {
             },
         ],
         vec![Solid {
+            yaw: 0.0,
             shape: Shape::Square,
             position: Vec3::new(0.0, 0.0, 0.0),
             size: 1.5,
@@ -796,6 +810,7 @@ fn a_small_step_does_not_flash_a_wall() {
             direction: Vec3::ZERO,
         }],
         vec![Wall {
+            base: 0.0,
             position: Vec3::new(0.0, 0.0, 0.0),
             half_x: 4.0,
             half_z: 0.2,
@@ -841,6 +856,7 @@ fn lit_views_stay_smooth_and_low_lamps_stop_at_the_wall() {
     let width = renderer.width();
     let height = renderer.height();
     let wall = Wall {
+        base: 0.0,
         position: Vec3::new(0.0, 0.0, 0.0),
         half_x: 4.0,
         half_z: 0.2,
@@ -911,6 +927,7 @@ fn lit_views_stay_smooth_and_low_lamps_stop_at_the_wall() {
         }],
         vec![wall],
         vec![Solid {
+            yaw: 0.0,
             shape: Shape::Square,
             position: Vec3::new(-0.4, 0.0, -1.5),
             size: 1.3,
@@ -1142,6 +1159,7 @@ fn the_outside_lamp_and_the_fire_stop_at_the_corridor_wall() {
 
 fn opaque_wall() -> Wall {
     Wall {
+        base: 0.0,
         position: Vec3::new(0.0, 0.0, 0.0),
         half_x: 0.2,
         half_z: 3.0,
@@ -1367,6 +1385,7 @@ fn an_open_floor_falls_off_smoothly_and_a_shadow_keeps_colored_bounce() {
             direction: Vec3::ZERO,
         }],
         vec![Wall {
+            base: 0.0,
             position: Vec3::new(3.0, 0.0, 0.0),
             half_x: 0.2,
             half_z: 2.5,
@@ -1377,6 +1396,7 @@ fn an_open_floor_falls_off_smoothly_and_a_shadow_keeps_colored_bounce() {
             color_mix: -1.0,
         }],
         vec![Solid {
+            yaw: 0.0,
             shape: Shape::Square,
             position: Vec3::new(0.0, 0.0, 0.0),
             size: 1.2,
@@ -1461,6 +1481,7 @@ fn wireframe_draws_wall_vertices_and_keeps_a_second_face() {
         direction: Vec3::ZERO,
     };
     let wall = Wall {
+        base: 0.0,
         position: Vec3::new(0.0, 0.0, 0.0),
         half_x: 0.2,
         half_z: 1.0,

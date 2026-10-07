@@ -33,6 +33,7 @@ fn main() {
     println!("cargo:rerun-if-changed=shaders/wire.frag");
     println!("cargo:rerun-if-changed=shaders/light.comp");
     println!("cargo:rerun-if-changed=shaders/scene_rays.glsl");
+    println!("cargo:rerun-if-changed=shaders/scene_data.glsl");
     println!("cargo:rerun-if-changed=shaders/tier.glsl");
     println!("cargo:rerun-if-changed=shaders/dither.glsl");
     println!("cargo:rerun-if-changed=shaders/transmit.comp");

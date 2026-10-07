@@ -9,6 +9,7 @@ fn a_wall_stops_the_lamp_and_a_short_wall_does_not() {
     scene.solids.clear();
     scene.walls.clear();
     scene.walls.push(Wall {
+        base: 0.0,
         position: Vec3::new(0.0, 0.0, 2.0),
         half_x: 4.0,
         half_z: 0.3,
@@ -138,6 +139,7 @@ fn a_world_probe_carries_an_offscreen_material() {
     let mut scene = plain.clone();
     let span = (scene.floor.half_x * 2.0).max(scene.floor.half_z * 2.0);
     scene.solids.push(Solid {
+        yaw: 0.0,
         shape: Shape::Square,
         position: Vec3::new(
             scene.floor.position.x + scene.floor.half_x + span * 0.2,

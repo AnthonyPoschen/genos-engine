@@ -466,6 +466,7 @@ mod tests {
                 color: [1.0, 1.0, 1.0],
             },
             walls: vec![Wall {
+                base: 0.0,
                 position: Vec3::new(2.0, 0.0, 5.0),
                 half_x: 4.0,
                 half_z: 0.2,

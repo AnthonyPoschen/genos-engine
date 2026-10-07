@@ -247,6 +247,7 @@ fn the_opening_view_reuses_the_field() {
     let open = floor_color_at(&verts, 4.0, -4.0);
     let mut ignored = world.clone();
     ignored.scene.solids.push(Solid {
+        yaw: 0.0,
         shape: Shape::Square,
         position: Vec3::new(3.4, 0.0, -3.4),
         size: 1.2,
@@ -294,6 +295,7 @@ fn a_visible_part_that_does_not_affect_light_follows_scene_edits() {
             color: [1.0, 1.0, 1.0],
         },
         walls: vec![Wall {
+            base: 0.0,
             position: Vec3::new(1.6, 0.0, 0.0),
             half_x: 0.15,
             half_z: 0.4,
@@ -304,6 +306,7 @@ fn a_visible_part_that_does_not_affect_light_follows_scene_edits() {
             color_mix: -1.0,
         }],
         solids: vec![Solid {
+            yaw: 0.0,
             shape: Shape::Square,
             position: Vec3::new(0.0, 0.0, 0.0),
             size: 0.8,

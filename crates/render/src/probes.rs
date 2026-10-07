@@ -688,14 +688,19 @@ mod tests {
                 "shader lamp unit left the Rust field"
             );
             assert!(
-                source.contains("vec4 view_grid;"),
-                "shader view block left the scene uniform"
-            );
-            assert!(
-                source.contains("Cascade cascades[3];"),
-                "shader cascade table left the scene block"
+                source.contains("#include \"scene_data.glsl\""),
+                "shader left the shared scene block"
             );
         }
+        let scene_data = include_str!("../shaders/scene_data.glsl");
+        assert!(
+            scene_data.contains("vec4 view_grid;"),
+            "shader view block left the scene uniform"
+        );
+        assert!(
+            scene_data.contains("Cascade cascades[3];"),
+            "shader cascade table left the scene block"
+        );
         // Both shaders read the world tier through tier.glsl.
         let tier = include_str!("../shaders/tier.glsl");
         for line in [
@@ -766,11 +771,8 @@ mod tests {
         let west_bytes = scene_bytes(&west);
         let east_bytes = scene_bytes(&east);
         let west_spacing = f32::from_ne_bytes(west_bytes[20..24].try_into().unwrap());
-        // The eye follows the header, the lamps, the occluders and the objects.
-        let eye_at = 48
-            + crate::pack::MAX_LAMPS * 32
-            + crate::pack::MAX_OCCLUDERS * 64
-            + crate::pack::MAX_OBJECTS * 32;
+        // The eye follows the 48-byte header; the lamps and occluders sit in the tail.
+        let eye_at = 48;
         let east_eye = f32::from_ne_bytes(east_bytes[eye_at..eye_at + 4].try_into().unwrap());
         assert!((west_spacing - west.spacing).abs() < 1.0e-6);
         assert!(
@@ -844,6 +846,7 @@ mod tests {
         );
 
         scene.walls = vec![Wall {
+            base: 0.0,
             position: Vec3::new(-1.6, 0.0, 0.0),
             half_x: 0.2,
             half_z: 2.0,
@@ -953,6 +956,7 @@ mod tests {
             },
             walls: Vec::new(),
             solids: vec![Solid {
+                yaw: 0.0,
                 shape: Shape::Square,
                 position: Vec3::new(0.0, 0.0, 0.0),
                 size: 1.5,

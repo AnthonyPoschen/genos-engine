@@ -51,6 +51,9 @@ The crate is `crates/scene`, package `genos-scene`.
 - The resource URI is `genos://scene`.
 - Handles are `floor`, `wall:<id>`, `solid:<id>`, and `light:<id>`.
 
+- `Wall.base` is the height of the underside. 0 stands on the floor. The script call `raised_wall(x, z, width, depth, height, base)` places a lintel, a sill, a beam or a roof slab.
+- `Solid.yaw` turns a square solid about +Y in radians, the sense of `Quat::from_axis_angle` about +Y. The collider, the picture and the light use it. A circle ignores it.
+
 ## Game use
 
 Load a script with `load_path` once, before the loop. Call `Camera::attach_scene` with that scene. Build a render `World` from the same `Scene`.
@@ -86,6 +89,8 @@ The endpoint listens on `127.0.0.1` only. The endpoint stops when that camera pr
 A codimation translates one solid. It does not rotate or scale that solid. The script cannot author a path. A slice longer than the collider can still pass through it. The picture places a wall or a square solid from `position.x`, `position.z`, and `height`. The picture does not follow `position.y`.
 
 This crate does not march light. The ground-plane march is in the renderer.
+
+The physics world holds `MAX_BODIES` (32) bodies. `attach_scene` with more than 30 walls and solids drops the rest, and the view capsule with them, so a large level cannot be walked with colliders yet. The stress example flies instead.
 
 ## Decisions
 

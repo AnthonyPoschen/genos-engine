@@ -1,80 +1,13 @@
 #version 450
 layout(local_size_x = 8, local_size_y = 8) in;
 
-struct Lamp {
-    vec4 pos;
-    vec4 color;
-};
-struct Occ {
-    vec4 center_shape;
-    vec4 extent;
-    vec4 albedo;
-    // x is reflectance, an albedo 0..1 (divided by pi where it shades). y is the
-    // surface-color mix. Below zero means the game default.
-    vec4 bounce;
-};
-struct Obj {
-    uvec4 range;
-    vec4 color;
-};
-struct Puff {
-    vec4 center_density;
-    vec4 radius;
-};
-struct Cascade {
-    float spacing;
-    float t0;
-    float t1;
-    float origin_x;
-    float origin_z;
-    float count_x;
-    float count_z;
-    float dirs;
-    float offset;
-    float pad0;
-    float pad1;
-    float pad2;
-};
-layout(std430, set = 0, binding = 0) readonly buffer SceneData {
-    uint lamp_count;
-    uint occ_count;
-    uint obj_count;
-    uint count_x;
-    uint count_z;
-    float spacing;
-    float origin_x;
-    float origin_z;
-    float near_end;
-    float far_end;
-    float world_end;
-    uint pad2;
-    Lamp lamps[32];
-    Occ occs[16];
-    Obj objects[32];
-    vec4 eye;
-    vec4 fire_pos;
-    vec4 fire_color;
-    Puff puffs[8];
-    // xyz is the floor center. w is half extent on X.
-    vec4 floor_center;
-    // x is half extent on Z. yzw is the floor color.
-    vec4 floor_data;
-    Cascade cascades[3];
-    // xyz is the camera basis. w is tan(half fov), 0, aspect, and unused.
-    vec4 view_right;
-    vec4 view_up;
-    vec4 view_forward;
-    // x is the screen-probe columns. y is the rows.
-    vec4 view_grid;
-    // x is the roof underside height over the floor footprint (0 = no roof). yzw is its color.
-    vec4 ceiling;
-} scene;
+#extension GL_GOOGLE_include_directive : require
+#include "scene_data.glsl"
 
 layout(std430, set = 0, binding = 1) buffer FieldData {
     vec4 texels[];
 } field;
 
-#extension GL_GOOGLE_include_directive : require
 #include "scene_rays.glsl"
 #include "tier.glsl"
 
@@ -138,9 +71,17 @@ vec3 shade_lamp(vec3 origin, vec3 normal, vec4 lamp, vec3 color) {
 
 vec3 lights_at(vec3 origin, vec3 normal) {
     vec3 sum = vec3(0.0);
-    uint lamps = min(scene.lamp_count, 32u);
-    for (uint i = 0u; i < lamps; i++) {
-        sum += shade_lamp(origin, normal, scene.lamps[i].pos, scene.lamps[i].color.rgb);
+    uvec2 suns = lamp_suns();
+    for (uint k = 0u; k < suns.y; k++) {
+        Lamp lamp = scene_lamp(grid_word(suns.x + k));
+        sum += shade_lamp(origin, normal, lamp.pos, lamp.color.rgb);
+    }
+    uvec2 near = lamp_cell_at(origin);
+    for (uint k = 0u; k < near.y; k++) {
+        Lamp lamp = scene_lamp(grid_word(near.x + k));
+        if (lamp_reaches(lamp, origin)) {
+            sum += shade_lamp(origin, normal, lamp.pos, lamp.color.rgb);
+        }
     }
     // The flame is one more lamp. The same occlusion test stops it at a wall.
     if (scene.fire_pos.w > 0.0) {

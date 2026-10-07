@@ -208,6 +208,7 @@ fn notched_sliders_set_one_axis_and_wait_for_a_drag() {
 fn the_sun_tracks_the_lamp_and_a_press_does_not_move_it() {
     let mut scene = lamp_scene(Vec3::new(0.0, 7.0, 0.0));
     scene.solids.push(Solid {
+        yaw: 0.0,
         shape: Shape::Square,
         position: Vec3::new(3.0, 0.0, 3.0),
         size: 1.0,

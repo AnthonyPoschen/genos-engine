@@ -1,35 +1,8 @@
 #version 450
 layout(local_size_x = 64) in;
 
-struct Lamp {
-    vec4 pos;
-    vec4 color;
-};
-
-struct Occ {
-    vec4 center_shape;
-    vec4 extent;
-    vec4 albedo;
-    vec4 bounce;
-};
-
-// Same resident scene block the light pass reads. Absorption is albedo.a.
-layout(std430, set = 0, binding = 0) readonly buffer SceneData {
-    uint lamp_count;
-    uint occ_count;
-    uint obj_count;
-    uint count_x;
-    uint count_z;
-    float spacing;
-    float origin_x;
-    float origin_z;
-    float near_end;
-    float far_end;
-    float world_end;
-    uint pad2;
-    Lamp lamps[32];
-    Occ occs[16];
-} scene;
+#extension GL_GOOGLE_include_directive : require
+#include "scene_data.glsl"
 
 layout(std430, set = 0, binding = 1) readonly buffer RayBlock {
     vec4 listener;
@@ -87,11 +60,10 @@ void main() {
     vec3 source = rays.sources[index].xyz;
     vec3 listener = rays.listener.xyz;
     float gain = 1.0;
-    // Touch the lamp block so its std430 slot stays in front of the occluders.
-    gain += scene.lamps[0].pos.x * 0.0;
-    uint count = min(scene.occ_count, 16u);
-    for (uint i = 0u; i < count; i++) {
-        Occ occ = scene.occs[i];
+    // Audio tests every occluder: a few hundred sources against the list is cheap,
+    // and the walk would need the light passes' cell helpers.
+    for (uint i = 0u; i < scene.occ_count; i++) {
+        Occ occ = scene_occ(i);
         vec3 half_ext = vec3(occ.extent.x, occ.extent.y * 0.5, occ.extent.z);
         vec3 box_min = occ.center_shape.xyz - half_ext;
         vec3 box_max = occ.center_shape.xyz + half_ext;

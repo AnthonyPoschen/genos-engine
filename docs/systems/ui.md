@@ -71,6 +71,8 @@ The crate is `crates/ui`, package `genos-ui`.
 - Omarchy theme colors are in `src/omarchy.rs`.
 - `profile_overlay`, `remember_frame`, `ProfileGraph`, and `ProfileStream` are in `src/profile.rs`.
 
+- `button_panel` lays out a draggable panel of labelled button rows (`PanelRow`, `PanelButton`). A press fires `Action::Press(id)` with the game's id. `selected` draws a button in its pressed look. Ids from `u32::MAX - 4095` up belong to the panel.
+
 ## Game use
 
 Build a `Node` tree. Call `layout` with `Space::Screen` or `Space::World`.

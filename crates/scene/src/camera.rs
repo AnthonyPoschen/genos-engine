@@ -1,4 +1,4 @@
-use genos_math::{Mat4, Vec3};
+use genos_math::{Mat4, Quat, Vec3};
 use genos_physics::{step, Body, World, GRAVITY};
 use std::f32::consts::{FRAC_PI_2, TAU};
 
@@ -133,7 +133,7 @@ impl Camera {
         ));
         for wall in &scene.walls {
             physics.insert(Body::cuboid(
-                Vec3::new(wall.position.x, wall.height * 0.5, wall.position.z),
+                Vec3::new(wall.position.x, wall.base + wall.height * 0.5, wall.position.z),
                 0.0,
                 Vec3::new(wall.half_x, wall.height * 0.5, wall.half_z),
             ));
@@ -210,11 +210,13 @@ fn solid_collider(solid: &Solid) -> Body {
     match solid.shape {
         Shape::Square => {
             let half = solid.size * 0.5;
-            Body::cuboid(
+            let mut body = Body::cuboid(
                 solid.position + Vec3::Y * center_lift(solid),
                 0.0,
                 Vec3::new(half, solid.height * 0.5, half),
-            )
+            );
+            body.orientation = Quat::from_axis_angle(Vec3::Y, solid.yaw);
+            body
         }
         Shape::Circle => {
             let radius = solid.size * 0.5;
