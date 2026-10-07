@@ -364,6 +364,9 @@ struct Slot {
     samples: u32,
     /// Change passes still due (see [`CHANGE_PASSES`]).
     change_left: u32,
+    /// Probes (bits of `mask`) that already ran the pass under way. A pass larger than
+    /// a build's budget runs a share of the probes per build; it counts once all have.
+    done: u64,
 }
 
 /// Passes a brick takes after a light or geometry change that reaches it. The stored
@@ -392,14 +395,16 @@ const LAMP_UNIT: f32 = 72.0;
 /// Scheduling class of the averaging refine passes, after every change pass.
 const REFINE_CLASS: u32 = CHANGE_PASSES + 1;
 
-/// One brick of work in a build.
+/// One brick's pass, or a share of its probes, in a build.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TierItem {
     pub slot: u32,
     pub brick: [i32; 3],
     pub rays: u32,
     pub reset: bool,
-    pub live: u32,
+    /// The live probes (bits of the brick's mask) this item runs: all of them, or the
+    /// share of a pass that fits what is left of the budget.
+    pub probes: u64,
     /// The build runs its items in rounds, one after another: a brick on screen takes
     /// all its change passes in one build, pass k in round k.
     pub round: u32,
@@ -489,24 +494,12 @@ pub struct TierState {
     next_batch: u64,
     dropped: usize,
     live: usize,
-    /// GPU milliseconds per probe ray, learned from the last builds.
-    /// GPU cost of a build: about max(latency, rays x per-ray cost). See [`Self::note_time`].
-    cost: BuildCost,
-}
-
-/// What a build of tier rays costs on this GPU. A GPU runs many workgroups (one per
-/// brick) at once, so a small build costs about one workgroup's run time however few
-/// rays it has; only a build that fills the GPU costs in proportion to its rays.
-/// Learning one per-ray cost from every build made small builds look expensive: where
-/// one workgroup outlasts the budget the budget stayed at one brick a build, and a
-/// GPU that starts from a slow guess climbed out only slowly.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct BuildCost {
-    /// Milliseconds a probe ray costs in a build that fills the GPU. None before the
-    /// first timed build.
+    /// GPU milliseconds per probe ray, learned from timed builds ([`Self::note_time`]).
+    /// None before the first.
     ms_per_ray: Option<f64>,
-    /// Milliseconds a build takes however few rays it has.
-    latency_ms: f64,
+    /// The last budget a batch was cut to: only a build that used most of its budget
+    /// teaches the per-ray cost.
+    last_budget: Option<u64>,
 }
 
 /// How far one slower build moves the per-ray cost toward itself.
@@ -516,8 +509,7 @@ const COST_RISE: f64 = 0.05;
 /// the fastest builds show what a ray costs. A faster sample is taken at once; a
 /// slower one moves the cost a little, so a lasting change (a heavier scene, lower
 /// clocks) still comes through within some tens of builds while a frame that held the
-/// GPU does not shrink the budget. (The latency is not learned this way: a slower
-/// sample there makes builds larger, never smaller.)
+/// GPU does not shrink the budget.
 fn learn_cost(old: f64, sample: f64) -> f64 {
     if sample < old {
         sample
@@ -549,8 +541,8 @@ impl TierState {
             next_batch: 1,
             dropped: 0,
             live: 0,
-            // A first guess (lavapipe, a room). The first timed build replaces it.
-            cost: BuildCost { ms_per_ray: None, latency_ms: 0.0 },
+            ms_per_ray: None,
+            last_budget: None,
         }
     }
 
@@ -611,6 +603,7 @@ impl TierState {
                 let hi = slot.brick.map(|b| (b + 1) as f32 * span);
                 if geometry_changed || reach.iter().any(|l| l.reaches(lo, hi)) {
                     slot.change_left = CHANGE_PASSES;
+                    slot.done = 0;
                 }
             }
         }
@@ -665,6 +658,7 @@ impl TierState {
                     entry.filled = false;
                     entry.samples = 0;
                     entry.change_left = 0;
+                    entry.done = 0;
                     changed = true;
                 }
                 continue;
@@ -684,6 +678,7 @@ impl TierState {
                 filled: false,
                 samples: 0,
                 change_left: 0,
+                done: 0,
             });
             self.by_brick.insert(*brick, slot);
             changed = true;
@@ -761,33 +756,30 @@ impl TierState {
         self.slots.iter().flatten().any(|s| self.class(s).is_some())
     }
 
-    /// Probe rays for a build of `ms` GPU milliseconds. A build costs at least its
-    /// latency, so when that is above `ms` the build takes the rays that fit in the
-    /// latency: they run side by side for the same time. Before the first timed build
+    /// Probe rays for a build of `ms` GPU milliseconds. Before the first timed build
     /// everything due fits, and that build measures the GPU.
     pub fn budget_rays(&self, ms: f64) -> u64 {
-        match self.cost.ms_per_ray {
-            Some(per_ray) => (ms.max(self.cost.latency_ms) / per_ray.max(1.0e-9)).max(1.0) as u64,
+        match self.ms_per_ray {
+            Some(per_ray) => (ms / per_ray.max(1.0e-9)).max(1.0) as u64,
             None => u64::MAX,
         }
     }
 
-    /// Learn from a timed build. A build whose rays at the known per-ray cost explain
-    /// at least half its time filled the GPU: it moves the per-ray cost. A shorter one
-    /// waited on its slowest workgroup: it moves the latency.
+    /// Learn the per-ray cost from a timed build. A faster build than the cost predicts
+    /// always teaches. A slower one teaches only when it used most of its budget: a
+    /// small build cannot fill the GPU, so its rays look dearer than they are, and
+    /// learning from it would shrink the next build and make it look dearer still.
     pub fn note_time(&mut self, probe_rays: u64, ms: f64) {
         if probe_rays < 256 || !(ms > 0.0) {
             return;
         }
         let sample = ms / probe_rays as f64;
-        let cost = &mut self.cost;
-        match cost.ms_per_ray {
-            None => cost.ms_per_ray = Some(sample),
-            Some(per_ray) if per_ray * probe_rays as f64 >= 0.5 * ms => {
-                cost.ms_per_ray = Some(learn_cost(per_ray, sample));
-            }
-            Some(_) => cost.latency_ms = cost.latency_ms * 0.5 + ms * 0.5,
-        }
+        let full = self.last_budget.is_none_or(|budget| probe_rays.saturating_mul(2) >= budget);
+        self.ms_per_ray = match self.ms_per_ray {
+            None => Some(sample),
+            Some(per_ray) if sample < per_ray || full => Some(learn_cost(per_ray, sample)),
+            keep => keep,
+        };
     }
 
     /// The next build's work, up to `budget` probe rays (`None`: everything that is
@@ -836,22 +828,32 @@ impl TierState {
         // rest, up to every change pass they have left, one round per pass. A brick's
         // passes read its neighbours' light, so with room for everything every changing
         // brick runs all its passes together and none converges on stale neighbours.
-        let mut picked: Vec<(u32, u32, u64, u32)> = Vec::new(); // (index, passes, cost, group)
+        // (slot, passes, cost of a whole pass, group, probes of the first pass)
+        let mut picked: Vec<(u32, u32, u64, u32, u64)> = Vec::new();
         let mut spent = 0u64;
         for &(group, class, _, _, index) in &due {
             let slot = self.slots[index as usize].as_ref().expect("due slot");
-            let rays = match class {
+            let rays = u64::from(match class {
                 0 => first,
                 REFINE_CLASS => REFINE_RAYS,
                 _ => CHANGE_RAYS,
-            };
-            let cost = u64::from(slot.mask.count_ones()) * u64::from(rays);
-            if budget.is_some_and(|limit| spent + cost > limit) && !picked.is_empty() {
-                break;
+            });
+            let left = slot.mask & !slot.done;
+            let mut probes = left;
+            if let Some(limit) = budget {
+                // A pass that does not fit runs the share of its probes that does, lowest
+                // first; the rest follow in the next builds. No build passes its budget
+                // by more than one probe's rays.
+                let room = (limit.saturating_sub(spent) / rays) as u32;
+                let fit = if picked.is_empty() { room.max(1) } else { room };
+                if fit == 0 {
+                    break;
+                }
+                probes = lowest_bits(left, fit);
             }
-            spent += cost;
-            picked.push((index, 1, cost, group));
-            if picked.len() >= TIER_SLOT_CAP as usize {
+            spent += u64::from(probes.count_ones()) * rays;
+            picked.push((index, 1, u64::from(slot.mask.count_ones()) * rays, group, probes));
+            if probes != left || picked.len() >= TIER_SLOT_CAP as usize {
                 break;
             }
         }
@@ -859,7 +861,8 @@ impl TierState {
         for deepen in [1, 2] {
             for entry in picked.iter_mut().filter(|e| e.3 == deepen) {
                 let slot = self.slots[entry.0 as usize].as_ref().expect("due slot");
-                if self.class(slot).is_none_or(|class| class == 0 || class >= REFINE_CLASS) {
+                // Only a whole pass deepens: the next passes run all the brick's probes.
+                if entry.4 != slot.mask || self.class(slot).is_none_or(|class| class == 0 || class >= REFINE_CLASS) {
                     continue;
                 }
                 let mut extra = slot.change_left.min(CHANGE_PASSES).saturating_sub(1);
@@ -874,7 +877,7 @@ impl TierState {
         }
         let mut items = Vec::new();
         let mut critical = 0;
-        for &(index, passes, _, group) in &picked {
+        for &(index, passes, _, group, probes) in &picked {
             let slot = self.slots[index as usize].as_ref().expect("due slot");
             let class = self.class(slot).expect("due class");
             let (rays, reset, history) = match class {
@@ -886,7 +889,8 @@ impl TierState {
                 critical += 1;
             }
             for round in 0..passes {
-                items.push(TierItem { slot: index, brick: slot.brick, rays, reset, live: slot.mask.count_ones(), round, history });
+                let probes = if round == 0 { probes } else { slot.mask };
+                items.push(TierItem { slot: index, brick: slot.brick, rays, reset, probes, round, history });
             }
         }
         items.truncate(TIER_SLOT_CAP as usize);
@@ -909,6 +913,7 @@ impl TierState {
             .map(|i| i as u32 + 1)
             .unwrap_or(0);
         self.critical = critical;
+        self.last_budget = budget;
         self.batch_us = started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
         TierBatch { id, texels, items, used_slots, probe_rays: spent, rounds }
     }
@@ -931,15 +936,23 @@ impl TierState {
         for texel in &mut out[indir..indir + cells as usize] {
             *texel = [-1.0, 0.0, 0.0, 0.0];
         }
-        let in_batch: std::collections::HashSet<u32> = items.iter().map(|i| i.slot).collect();
+        // Bricks whose first pass this batch finishes: the picture reads them from now.
+        let lit_now: std::collections::HashSet<u32> = items
+            .iter()
+            .filter(|i| {
+                i.reset
+                    && self.slots[i.slot as usize].as_ref().is_some_and(|s| (s.done | i.probes) & s.mask == s.mask)
+            })
+            .map(|i| i.slot)
+            .collect();
         let slots = (TIER_SLOTS - TIER_INFO) as usize;
         for (index, slot) in self.slots.iter().enumerate() {
             let Some(slot) = slot else { continue };
             let b = slot.brick;
             out[slots + index * 2] = [b[0] as f32, b[1] as f32, b[2] as f32, 1.0];
             out[slots + index * 2 + 1] = [0, 1, 2, 3].map(|k| ((slot.mask >> (16 * k)) & 0xffff) as f32);
-            // The picture reads a brick once a build has lit it.
-            if slot.filled || in_batch.contains(&(index as u32)) {
+            // The picture reads a brick once a build has lit all of it.
+            if slot.filled || lit_now.contains(&(index as u32)) {
                 let rel = [b[0] - lo[0], b[1] - lo[1], b[2] - lo[2]];
                 let cell = ((rel[1] * dims[2] + rel[2]) * dims[0] + rel[0]) as usize;
                 out[indir + cell] = [index as f32, 1.0, 0.0, 0.0];
@@ -962,8 +975,12 @@ impl TierState {
             let seed = if item.history.is_some() { 0.0 } else { seed };
             out[at] = [item.slot as f32, item.rays as f32, mode, seed];
             if let Some(Some(slot)) = self.slots.get(item.slot as usize) {
+                // w = 1: the probe runs in this item. The pass's first share also takes
+                // the dead probes, which a first pass clears.
+                let dead = if slot.done == 0 { !slot.mask } else { 0 };
                 for (i, p) in slot.positions.iter().enumerate() {
-                    out[at + 1 + i] = [p[0], p[1], p[2], 1.0];
+                    let runs = (item.probes | dead) >> i & 1 != 0;
+                    out[at + 1 + i] = [p[0], p[1], p[2], if runs { 1.0 } else { 0.0 }];
                 }
             }
         }
@@ -977,6 +994,12 @@ impl TierState {
             if slot.brick != item.brick {
                 continue;
             }
+            slot.done |= item.probes & slot.mask;
+            if slot.done != slot.mask {
+                // A share of the pass: it counts once every probe has run it.
+                continue;
+            }
+            slot.done = 0;
             if item.reset {
                 // A new brick converges its bounces like a change does.
                 slot.filled = true;
@@ -991,6 +1014,18 @@ impl TierState {
             }
         }
     }
+}
+
+/// The lowest `n` set bits of `bits`.
+fn lowest_bits(bits: u64, n: u32) -> u64 {
+    let mut out = 0u64;
+    let mut rest = bits;
+    for _ in 0..n.min(bits.count_ones()) {
+        let low = rest & rest.wrapping_neg();
+        out |= low;
+        rest &= !low;
+    }
+    out
 }
 
 fn boxes_key(boxes: &[SurfaceBox]) -> u64 {
@@ -1184,25 +1219,63 @@ mod tests {
     }
 
     #[test]
-    fn a_slow_workgroup_does_not_shrink_the_budget_to_one_brick() {
+    fn small_builds_do_not_shrink_the_budget() {
         let mut tier = TierState::default();
         assert_eq!(tier.budget_rays(1.5), u64::MAX);
         // A full build measures the GPU: 200k rays in 40 ms.
         tier.note_time(200_000, 40.0);
         let first = tier.budget_rays(1.5);
         assert_eq!(first, 7500);
-        // One brick takes 6 ms on its own, four times the budget.
-        for _ in 0..8 {
-            tier.note_time(8192, 6.0);
+        tier.last_budget = Some(first);
+        // Builds with little work cannot fill the GPU: their rays look dear.
+        for _ in 0..40 {
+            tier.note_time(1024, 1.0);
         }
-        // The build then fills the 6 ms that one brick costs anyway.
-        let filled = tier.budget_rays(1.5);
-        assert!(filled > 3 * first, "{filled}");
-        assert!(filled <= 30_000, "{filled}");
-        // A fast GPU: a small build is quick, the budget grows to fit 1.5 ms.
+        assert_eq!(tier.budget_rays(1.5), first);
+        // A fast GPU: the budget grows to fit 1.5 ms.
         let mut fast = TierState::default();
         fast.note_time(300_000, 0.6);
         assert!(fast.budget_rays(1.5) >= 700_000);
+    }
+
+    #[test]
+    fn a_pass_larger_than_the_budget_runs_in_shares() {
+        let eye = [0.0, 1.7, 0.0];
+        let lamp = TierLight { pos: [0.0, 2.5, 0.0], color: [1.0; 3], directional: false };
+        let mut tier = TierState::default();
+        tier.update(room(), 0, eye, &[lamp]);
+        // A budget of ten probes' first rays: under a brick of the floor.
+        let budget = 10 * u64::from(FIRST_RAYS);
+        let mut builds = 0;
+        while tier.stats().filled_bricks < tier.stats().bricks {
+            let batch = tier.batch(eye, Some(budget), FIRST_RAYS);
+            assert!(batch.probe_rays <= budget, "{} rays over {budget}", batch.probe_rays);
+            assert!(!batch.items.is_empty());
+            // A brick shows once all its probes have their first light.
+            let indir = (TIER_INDIR - TIER_INFO) as usize;
+            let readable = batch.texels[indir..indir + 26 * 26 * 26].iter().filter(|t| t[0] >= 0.0).count();
+            tier.commit(&batch);
+            assert_eq!(readable, tier.stats().filled_bricks);
+            builds += 1;
+            assert!(builds < 10_000);
+        }
+        let live = tier.stats().live_probes as u64;
+        assert!(builds as u64 >= live / 10, "{builds} builds for {live} probes");
+        // A change pass too: every brick's first change pass lands before any second.
+        let moved = TierLight { pos: [1.0, 2.5, 0.0], ..lamp };
+        tier.update(room(), 0, eye, &[moved]);
+        let budget = 10 * u64::from(CHANGE_RAYS);
+        let changing = tier.stats().changing_bricks;
+        let mut passes = 0;
+        while tier.slots.iter().flatten().any(|s| s.change_left == CHANGE_PASSES) {
+            let batch = tier.batch(eye, Some(budget), FIRST_RAYS);
+            assert!(batch.probe_rays <= budget);
+            assert!(batch.items.iter().all(|i| i.history == Some(CHANGE_HISTORY)));
+            tier.commit(&batch);
+            passes += 1;
+        }
+        assert_eq!(tier.stats().changing_bricks, changing);
+        assert!(passes > changing);
     }
 
     #[test]
@@ -1211,12 +1284,18 @@ mod tests {
         tier.note_time(200_000, 40.0);
         let clean = tier.budget_rays(1.5);
         // Most builds run beside the picture and take three times as long; some run alone.
-        for k in 0..40 {
+        // Each slower build moves the cost a little and the next one alone resets it, so
+        // the budget dips between them and never drifts down.
+        let mut lows = Vec::new();
+        for k in 0..80 {
             let ms = if k % 4 == 0 { 1.5 } else { 4.5 };
             tier.note_time(clean, ms);
+            if k % 4 == 3 {
+                lows.push(tier.budget_rays(1.5));
+            }
         }
-        let shared = tier.budget_rays(1.5);
-        assert!(shared * 10 >= clean * 8, "{shared} of {clean}");
+        assert!(lows.iter().all(|&low| low * 10 >= clean * 7), "{lows:?} of {clean}");
+        assert_eq!(lows.first(), lows.last());
         // A GPU that really got slower (full builds take twice as long) is followed.
         let mut slow = TierState::default();
         slow.note_time(200_000, 40.0);
@@ -1249,10 +1328,17 @@ mod tests {
         let batch = tier.batch([4.5, 1.7, 4.5], Some(1), FIRST_RAYS);
         assert_eq!(batch.items.len(), 1);
         assert_eq!(batch.items[0].brick, [1, 0, 1]);
-        // Only lit bricks are readable.
+        // The budget holds one probe's rays: the brick takes a share of its first pass.
+        assert_eq!(batch.items[0].probes.count_ones(), 1);
+        // Only bricks lit all through are readable.
         let indir = (TIER_INDIR - TIER_INFO) as usize;
-        let readable = batch.texels[indir..indir + 26 * 26 * 26].iter().filter(|t| t[0] >= 0.0).count();
-        assert_eq!(readable, 1);
+        let readable = |batch: &TierBatch| batch.texels[indir..indir + 26 * 26 * 26].iter().filter(|t| t[0] >= 0.0).count();
+        assert_eq!(readable(&batch), 0);
+        let slot = tier.by_brick[&[1, 0, 1]];
+        let live = tier.slots[slot as usize].as_ref().unwrap().mask.count_ones();
+        let whole = tier.batch([4.5, 1.7, 4.5], Some(u64::from(FIRST_RAYS * live)), FIRST_RAYS);
+        assert_eq!(whole.items[0].brick, [1, 0, 1]);
+        assert_eq!(readable(&whole), 1);
     }
 
     #[test]

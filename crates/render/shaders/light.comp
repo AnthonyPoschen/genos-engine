@@ -414,7 +414,12 @@ void write_tier() {
     uint dest = TIER_PROBES + (slot * 64u + probe) * TIER_PROBE_TEXELS;
     // Where the CPU placed the probe: its lattice point, or just outside a solid it
     // started in (probe_tier.rs place_probe).
-    vec3 pos = field.texels[item + 1u + probe].xyz;
+    vec4 placed = field.texels[item + 1u + probe];
+    // w = 0: this item runs a share of the brick's probes, and not this one.
+    if (placed.w < 0.5) {
+        return;
+    }
+    vec3 pos = placed.xyz;
     // A ray that starts inside a solid sees no entry into it and leaves on the far
     // side. The CPU keeps such probes dead (probe_tier.rs); this holds for any shape
     // it only approximates.
