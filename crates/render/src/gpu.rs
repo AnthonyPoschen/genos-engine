@@ -112,10 +112,12 @@ impl Renderer {
                 env_f32("GENOS_TIER_SPACING").unwrap_or(1.0),
                 env_f32("GENOS_TIER_RADIUS").unwrap_or(50.0),
             )),
+            // 1.5 ms a build (one build every two or three frames) keeps the GI update of a
+            // constantly moving lamp near half a millisecond a frame, inside a 2 ms frame.
             tier_ms: std::env::var("GENOS_TIER_MS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(4.0),
+                .unwrap_or(1.5),
         })
     }
 
@@ -481,8 +483,9 @@ impl Renderer {
 
     /// Run builds until the tier has nothing due and the world probes have seen it.
     fn settle_tier(&mut self, world: &World, pack: &pack::Pack) -> Result<(), String> {
-        // Every restart pass and the refine passes, with room to spare.
-        let builds = 2 * (crate::probe_tier::RESTART_PASSES + 8) + 8;
+        // A first pass, every change pass and the refine passes, with room to spare.
+        use crate::probe_tier::{CHANGE_PASSES, REFINE_RAYS, TARGET_SAMPLES};
+        let builds = 2 * (1 + CHANGE_PASSES + TARGET_SAMPLES / REFINE_RAYS) + 8;
         for _ in 0..builds {
             if !self.tier.has_work() && !self.gpu.world_stale {
                 break;
@@ -759,6 +762,9 @@ struct Gpu {
     /// Timestamps around the light passes. The tier budget learns its cost from them.
     light_qp: Handle,
     light_stamp: u32,
+    /// `GENOS_GPU_TIMES[=frames]`: per-pass GPU times of every frame and light build,
+    /// averaged and printed every `frames` frames ([`GPU_TIMES_FRAMES`] by default).
+    gpu_times: Option<Box<GpuTimes>>,
     profile_submit: bool,
     stamp_pending: [bool; 2],
     inflight: VecDeque<usize>,
@@ -1401,6 +1407,9 @@ impl Gpu {
                 timestamp_bits,
                 query_pool: std::ptr::null_mut(),
                 light_qp: std::ptr::null_mut(),
+                gpu_times: std::env::var("GENOS_GPU_TIMES").ok().map(|v| {
+                    Box::new(GpuTimes { every: v.parse().unwrap_or(GPU_TIMES_FRAMES).max(1), ..GpuTimes::default() })
+                }),
                 light_stamp: 0,
                 profile_submit: false,
                 stamp_pending: [false; 2],
@@ -1528,6 +1537,14 @@ impl Gpu {
             if self.timestamp_period > 0.0 {
                 self.query_pool = self.make_query_pool()?;
                 self.light_qp = self.make_query_pool_n(16)?;
+                if self.gpu_times.is_some() {
+                    let pool = self.make_query_pool_n(2 * FRAME_STAMPS)?;
+                    if let Some(times) = self.gpu_times.as_mut() {
+                        times.pool = pool;
+                    }
+                }
+            } else if self.gpu_times.take().is_some() {
+                eprintln!("GENOS_GPU_TIMES: this device has no timestamp queries");
             }
             self.make_lighting()?;
             self.make_aa_pipes()?;
@@ -1919,6 +1936,7 @@ impl Gpu {
                 self.light_publish_flight = None;
             }
             self.collect_slot_after_wait(slot)?;
+            self.collect_frame_times(slot);
             check(
                 (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
                 "reset fence",
@@ -1959,6 +1977,7 @@ impl Gpu {
                 // Top of pipe, before the GPU work. The value is device ticks.
                 self.write_stamp(slot, 0, 1);
             }
+            self.frame_stamp(slot, FrameStamp::Start);
             let swap = self.swap_images[index as usize];
             self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
             let filtering = self.antialias != Antialias::Off;
@@ -1970,6 +1989,7 @@ impl Gpu {
                     matrix,
                     false,
                 );
+                self.frame_stamp(slot, FrameStamp::Raster);
                 self.resolve_ssaa(slot)?;
             } else {
                 self.raster_scene(
@@ -1980,16 +2000,20 @@ impl Gpu {
                     !filtering,
                 );
                 self.color_layout[slot] = 6;
+                self.frame_stamp(slot, FrameStamp::Raster);
                 if self.antialias == Antialias::Fxaa {
                     self.resolve_fxaa(slot)?;
                 }
             }
+            self.frame_stamp(slot, FrameStamp::Resolve);
             if filtering && self.overlay_count > 0 {
                 self.raster_overlay();
             }
+            self.frame_stamp(slot, FrameStamp::Overlay);
             self.copy_color_to_swapchain(swap);
             self.copy_color_to_buffer();
             self.image_barrier(swap, 7, 1000001002, 0x1000, 0x2000, 0x1000, 0);
+            self.frame_stamp(slot, FrameStamp::Copy);
             if profiled {
                 // Bottom of pipe, after the draw and the copies.
                 // The value is device ticks, not the CPU time spent in submit.
@@ -2134,6 +2158,13 @@ impl Gpu {
         if self.plan_items > 0 && ms.len() >= 4 {
             self.tier_time = Some((self.plan_rays, ms[3]));
         }
+        if let Some(times) = self.gpu_times.as_mut() {
+            times.builds += 1;
+            times.rays += self.plan_rays;
+            for (sum, v) in times.light.iter_mut().zip(&ms) {
+                *sum += v;
+            }
+        }
         if std::env::var("GENOS_PASS_TIMES").is_ok() {
             let text: Vec<String> = ms.iter().map(|v| format!("{v:.3}")).collect();
             eprintln!(
@@ -2145,6 +2176,80 @@ impl Gpu {
                 self.plan_rays
             );
         }
+    }
+
+    /// A frame timestamp for `GENOS_GPU_TIMES`, at the end of everything recorded so far.
+    fn frame_stamp(&self, slot: usize, stamp: FrameStamp) {
+        let Some(times) = self.gpu_times.as_ref() else { return };
+        let first = slot as u32 * FRAME_STAMPS;
+        unsafe {
+            if stamp == FrameStamp::Start {
+                (self.fns.cmd_reset_query)(self.cmd, times.pool, first, FRAME_STAMPS);
+                (self.fns.cmd_write_timestamp)(self.cmd, 0x1, times.pool, first);
+            } else {
+                (self.fns.cmd_write_timestamp)(self.cmd, 0x2000, times.pool, first + stamp as u32);
+            }
+        }
+    }
+
+    /// Read a finished frame's stamps (its fence has been waited) and print the averages
+    /// every `every` frames.
+    fn collect_frame_times(&mut self, slot: usize) {
+        let bits = self.timestamp_bits;
+        let period = f64::from(self.timestamp_period);
+        let antialias = self.antialias;
+        let Some(times) = self.gpu_times.as_mut() else { return };
+        if !times.written[slot] {
+            times.written[slot] = true;
+            return;
+        }
+        let mut raw = [0u64; FRAME_STAMPS as usize];
+        let got = unsafe {
+            (self.fns.get_query_results)(
+                self.device,
+                times.pool,
+                slot as u32 * FRAME_STAMPS,
+                FRAME_STAMPS,
+                8 * raw.len(),
+                raw.as_mut_ptr() as *mut c_void,
+                8,
+                0x1,
+            )
+        };
+        if got != 0 {
+            return;
+        }
+        for (k, w) in raw.windows(2).enumerate() {
+            times.frame[k] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+        }
+        times.frames += 1;
+        if times.frames < times.every {
+            return;
+        }
+        let n = f64::from(times.frames);
+        let f = times.frame.map(|v| v / n);
+        let builds = times.builds.max(1) as f64;
+        let l = times.light.map(|v| v / builds);
+        eprintln!(
+            "GPU_MS frames={} raster+near={:.3} aa({:?})={:.3} overlay={:.3} copy={:.3} frame={:.3} | light builds={} per_frame={:.2} copy={:.3} world_direct={:.3} world_bounce={:.3} tier={:.3} tier_rays={:.0} light_per_frame={:.3}",
+            times.frames,
+            f[0],
+            antialias,
+            f[1],
+            f[2],
+            f[3],
+            f.iter().sum::<f64>(),
+            times.builds,
+            times.builds as f64 / n,
+            l[0],
+            l[1],
+            l[2],
+            l[3],
+            times.rays as f64 / builds,
+            times.light.iter().sum::<f64>() / n,
+        );
+        let pool = times.pool;
+        **times = GpuTimes { pool, written: times.written, every: times.every, ..GpuTimes::default() };
     }
 
     fn reset_queries(&self, slot: usize) {
@@ -5102,6 +5207,11 @@ impl Drop for Gpu {
             self.destroy_buffer(&mut light_field[0]);
             self.destroy_buffer(&mut light_field[1]);
             self.destroy_buffer(&mut particle_buf);
+            if let Some(times) = self.gpu_times.as_ref() {
+                if !times.pool.is_null() {
+                    (self.fns.destroy_query_pool)(self.device, times.pool, std::ptr::null());
+                }
+            }
             if !self.light_fence.is_null() {
                 (self.fns.destroy_fence)(self.device, self.light_fence, std::ptr::null());
             }
@@ -5352,3 +5462,49 @@ extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> Pfn;
 }
 
+/// Frame timestamps per flight slot for `GENOS_GPU_TIMES`.
+const FRAME_STAMPS: u32 = 5;
+/// Frames averaged per `GENOS_GPU_TIMES` line unless it gives a number.
+const GPU_TIMES_FRAMES: u32 = 120;
+
+/// Where a frame timestamp sits: after the scene raster (which shades the near field
+/// per pixel), the antialias resolve, the overlay and the copies to the screen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FrameStamp {
+    Start = 0,
+    Raster = 1,
+    Resolve = 2,
+    Overlay = 3,
+    Copy = 4,
+}
+
+/// Running sums for `GENOS_GPU_TIMES`.
+struct GpuTimes {
+    pool: Handle,
+    /// Frames per printed line.
+    every: u32,
+    /// A slot's stamps hold a frame that has not been read yet.
+    written: [bool; 2],
+    frames: u32,
+    /// Raster, resolve, overlay, copy.
+    frame: [f64; 4],
+    builds: u32,
+    rays: u64,
+    /// Light build: copy forward, world direct, world bounce, tier.
+    light: [f64; 4],
+}
+
+impl Default for GpuTimes {
+    fn default() -> Self {
+        Self {
+            pool: std::ptr::null_mut(),
+            every: GPU_TIMES_FRAMES,
+            written: [false; 2],
+            frames: 0,
+            frame: [0.0; 4],
+            builds: 0,
+            rays: 0,
+            light: [0.0; 4],
+        }
+    }
+}

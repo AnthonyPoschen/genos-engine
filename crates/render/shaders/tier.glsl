@@ -2,8 +2,8 @@
 // in bricks of 4 x 4 x 4 that exist only near geometry. A window of bricks around
 // the camera maps each brick to a slot, or to none. Each probe keeps three ambient
 // cubes, six faces each of cosine-weighted mean radiance: light after every bounce
-// (TIER_CUBE3, alpha = samples, 0 = no light yet; three bounces until the feedback
-// passes after a change have run), up to twice (TIER_CUBE2) and once (TIER_CUBE1),
+// (TIER_CUBE3, alpha = samples, 0 = no light yet; every pass feeds it back, so it
+// converges to unlimited bounces), up to twice (TIER_CUBE2) and once (TIER_CUBE1),
 // and where it sits (TIER_POSITION).
 //
 // Needs `field` and scene_rays.glsl declared first. Offsets mirror probe_tier.rs.
@@ -20,8 +20,6 @@ const uint TIER_PROBE_TEXELS = 19u;
 const uint TIER_CUBE3 = 0u;
 const uint TIER_CUBE2 = 6u;
 const uint TIER_CUBE1 = 12u;
-// Restart passes that build bounce orders one to three; later passes feed back.
-const uint TIER_ORDER_PASSES = 3u;
 // xyz: where the probe sits. A probe moved out of a solid is off its lattice point.
 const uint TIER_POSITION = 18u;
 

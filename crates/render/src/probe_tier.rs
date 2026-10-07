@@ -12,10 +12,9 @@ pub const BRICK: i32 = 4;
 /// Field texels per probe: three ambient cubes of six RGBA32F faces, then the probe's
 /// position (the last texel, xyz: a probe moved out of a solid sits off its lattice
 /// point). The first cube holds all the bounced light (the picture reads it; alpha
-/// counts samples), then up to two bounces, then one. After a change the hits read
-/// the lower orders to rebuild orders one to three free of the old light, then feed
-/// the first cube back for unlimited bounces (see [`FEEDBACK_PASSES`]); white paint
-/// returns 0.8 of the light, so the series converges.
+/// counts samples), then up to two bounces, then one. Every pass feeds the first cube
+/// back at the hits, so each pass adds a bounce and the light converges to unlimited
+/// bounces; white paint returns 0.8 of the light, so the series converges.
 pub const PROBE_TEXELS: u32 = 19;
 /// Bytes kept per probe.
 pub const PROBE_BYTES: usize = PROBE_TEXELS as usize * 16;
@@ -290,7 +289,8 @@ pub const TIER_SLOTS: u32 = TIER_INDIR + TIER_INDIR_CAP;
 pub const TIER_SLOT_CAP: u32 = 1024;
 /// Room reserved for the slot table.
 const TIER_TABLE_ROOM: u32 = 2048;
-/// Work list, `WORK_TEXELS` per item: slot, rays, 0 = refine or 1 + restart pass, pass seed; then the
+/// Work list, `WORK_TEXELS` per item: slot, rays, blend mode (0 averages, 1 replaces, 2 + h
+/// keeps h rays of history), pass seed; then the
 /// position of each of the brick's probes.
 pub const TIER_WORK: u32 = TIER_SLOTS + TIER_TABLE_ROOM * 2;
 pub const WORK_TEXELS: u32 = 1 + BRICK_PROBES;
@@ -301,7 +301,7 @@ pub const TIER_END: u32 = TIER_PROBES + TIER_SLOT_CAP * BRICK_PROBES * PROBE_TEX
 
 const _: () = assert!(TIER_SLOT_CAP <= TIER_TABLE_ROOM && TIER_WORK + TIER_SLOT_CAP * WORK_TEXELS <= TIER_PROBES);
 
-/// Rays a probe takes on its first pass and after a change: quick and noisy.
+/// Rays a probe takes on its brick's first pass: quick and noisy.
 pub const FIRST_RAYS: u32 = 16;
 /// Rays per refine pass.
 pub const REFINE_RAYS: u32 = 64;
@@ -322,6 +322,18 @@ pub struct TierLight {
 }
 
 impl TierLight {
+    /// True when this light's irradiance can reach the box `lo`..`hi` above
+    /// [`LAMP_REACH_IRRADIANCE`]. A directional light reaches everything.
+    fn reaches(&self, lo: [f32; 3], hi: [f32; 3]) -> bool {
+        if self.directional {
+            return true;
+        }
+        let strength = self.color.iter().fold(0.0_f32, |m, c| m.max(c.abs()));
+        let reach2 = LAMP_UNIT * strength / LAMP_REACH_IRRADIANCE;
+        let d2: f32 = (0..3).map(|i| (self.pos[i] - self.pos[i].clamp(lo[i], hi[i])).powi(2)).sum();
+        d2 <= reach2
+    }
+
     /// True when `self` differs from `old` enough to relight the bounce.
     fn moved_from(&self, old: &TierLight) -> bool {
         if self.directional != old.directional {
@@ -345,24 +357,35 @@ struct Slot {
     /// Lit at least once, so the picture may read it.
     filled: bool,
     samples: u32,
-    /// Light generation the stored light belongs to.
-    clean_gen: u64,
-    /// Passes that started over for `clean_gen`. Bounce order k reads order k - 1 at
-    /// the hits, so after a change the third such pass is the first with no light
-    /// left from before; until then a pass replaces instead of averaging.
-    restarts: u32,
+    /// Change passes still due (see [`CHANGE_PASSES`]).
+    change_left: u32,
 }
 
-/// Restart passes that build the bounce orders one, two and three from the order
-/// below at the hits. After them no probe holds light from before the change.
-pub const ORDER_PASSES: u32 = 3;
-/// Restart passes after those that feed the full light back: a ray takes the direct
-/// light at its hit plus all the light the probes there hold, so each pass adds one
-/// bounce. White paint returns 0.8, and a closed room needs about 17 bounces before
-/// more change nothing visible; the refine passes that follow keep feeding back.
-pub const FEEDBACK_PASSES: u32 = 14;
-/// Passes that start over (replace instead of average) after a change.
-pub const RESTART_PASSES: u32 = ORDER_PASSES + FEEDBACK_PASSES;
+/// Passes a brick takes after a light or geometry change that reaches it. The stored
+/// light is kept, never cleared: each pass moves it a fixed share of the way to the
+/// new light ([`CHANGE_HISTORY`]) and feeds the stored light back at its hits, so the
+/// direct change lands on the first pass and each pass adds a bounce. Every brick the
+/// change reaches takes pass k before any takes pass k + 1, so neighbours agree and
+/// the change spreads evenly instead of brick by brick. The schedule is kept per slot
+/// and only ever blends, so further light layers per probe can take the same passes.
+/// Averaging refine passes follow:
+/// they keep all the history, so the share of each new pass falls from there on and
+/// the noise of the fast passes averages away without holding up the visible change.
+pub const CHANGE_PASSES: u32 = 6;
+/// Rays per change pass.
+pub const CHANGE_RAYS: u32 = 256;
+/// History, in rays, a change pass keeps: a third of its own rays, so a pass takes
+/// three quarters of the way to its new estimate. The rest of the old light fades by
+/// a quarter of itself per pass; the remaining error shrinks by (1 - 0.75 (1 - r)) per
+/// pass for a scene that returns r of its light per bounce.
+pub const CHANGE_HISTORY: u32 = CHANGE_RAYS / 3;
+/// Irradiance below which a lamp no longer reaches a brick: a change to that lamp
+/// leaves the brick alone. A unit lamp reaches about 270 m.
+pub const LAMP_REACH_IRRADIANCE: f32 = 1.0e-3;
+/// Irradiance of a unit lamp at 1 m (light.comp LAMP_UNIT).
+const LAMP_UNIT: f32 = 72.0;
+/// Scheduling class of the averaging refine passes, after every change pass.
+const REFINE_CLASS: u32 = CHANGE_PASSES + 1;
 
 /// One brick of work in a build.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -373,8 +396,9 @@ pub struct TierItem {
     pub reset: bool,
     pub gen: u64,
     pub live: u32,
-    /// For a reset: restarts this slot had done for `gen` when the item was issued.
-    pub stage: u32,
+    /// For a change pass: the history, in rays, the pass keeps. `None` averages into
+    /// all of it (refine) or, with `reset`, replaces it (a brick's first pass).
+    pub history: Option<u32>,
 }
 
 /// Everything one light build needs from the tier.
@@ -464,12 +488,14 @@ impl TierState {
         let mut changed = false;
         let geometry = boxes_key(&boxes) ^ materials.rotate_left(17);
         let mut realloc = false;
+        let mut geometry_changed = false;
         if self.geometry != Some(geometry) {
             self.geometry = Some(geometry);
             self.boxes = boxes;
             realloc = true;
             self.light_gen += 1;
             changed = true;
+            geometry_changed = true;
         }
         let window = self.layout.window(eye);
         if self.window != Some(window) {
@@ -479,12 +505,31 @@ impl TierState {
         if realloc {
             changed |= self.reallocate(eye);
         }
-        let relight = lights.len() != self.lights.len()
-            || lights.iter().zip(&self.lights).any(|(new, old)| new.moved_from(old));
-        if relight {
+        // Lamps that changed, where they were and where they are now.
+        let mut reach: Vec<TierLight> = Vec::new();
+        for i in 0..lights.len().max(self.lights.len()) {
+            match (self.lights.get(i), lights.get(i)) {
+                (Some(old), Some(new)) if !new.moved_from(old) => {}
+                (old, new) => reach.extend(old.into_iter().chain(new).copied()),
+            }
+        }
+        if !reach.is_empty() {
             self.lights = lights.to_vec();
             self.light_gen += 1;
             changed = true;
+        }
+        if geometry_changed || !reach.is_empty() {
+            let span = self.layout.brick_span();
+            for slot in self.slots.iter_mut().flatten() {
+                if !slot.filled {
+                    continue;
+                }
+                let lo = slot.brick.map(|b| b as f32 * span);
+                let hi = slot.brick.map(|b| (b + 1) as f32 * span);
+                if geometry_changed || reach.iter().any(|l| l.reaches(lo, hi)) {
+                    slot.change_left = CHANGE_PASSES;
+                }
+            }
         }
         changed
     }
@@ -536,7 +581,7 @@ impl TierState {
                     entry.positions = positions.clone();
                     entry.filled = false;
                     entry.samples = 0;
-                    entry.restarts = 0;
+                    entry.change_left = 0;
                     changed = true;
                 }
                 continue;
@@ -555,8 +600,7 @@ impl TierState {
                 positions: positions.clone(),
                 filled: false,
                 samples: 0,
-                clean_gen: 0,
-                restarts: 0,
+                change_left: 0,
             });
             self.by_brick.insert(*brick, slot);
             changed = true;
@@ -588,23 +632,15 @@ impl TierState {
         stats
     }
 
-    /// Restarts done for the current light, or none.
-    fn restarts(&self, slot: &Slot) -> u32 {
-        if slot.filled && slot.clean_gen == self.light_gen {
-            slot.restarts
-        } else {
-            0
-        }
-    }
-
-    /// Below RESTART_PASSES: the restart pass due (the number done so far).
-    /// RESTART_PASSES: refining.
+    /// 0: the brick's first pass. 1 + k: change pass k is due. REFINE_CLASS: refining.
+    /// None: converged, nothing to do.
     fn class(&self, slot: &Slot) -> Option<u32> {
-        let restarts = self.restarts(slot);
-        if restarts < RESTART_PASSES {
-            Some(restarts)
+        if !slot.filled {
+            Some(0)
+        } else if slot.change_left > 0 {
+            Some(1 + CHANGE_PASSES - slot.change_left.min(CHANGE_PASSES))
         } else if slot.samples < TARGET_SAMPLES {
-            Some(RESTART_PASSES)
+            Some(REFINE_CLASS)
         } else {
             None
         }
@@ -656,9 +692,9 @@ impl TierState {
     }
 
     /// The next build's work, up to `budget` probe rays (`None`: everything that is
-    /// due). Every brick's first restart comes before any brick's second, and all
-    /// restarts before refining; nearest first inside each. `first` is the ray count
-    /// of a restart pass.
+    /// due). First passes come first, then change passes (every brick's pass k before
+    /// any brick's pass k + 1), then refining; nearest first inside each. `first` is
+    /// the ray count of a brick's first pass.
     pub fn batch(&mut self, eye: [f32; 3], budget: Option<u64>, first: u32) -> TierBatch {
         let span = self.layout.brick_span();
         let mut due: Vec<(u32, f32, [i32; 3], u32)> = Vec::new();
@@ -675,8 +711,11 @@ impl TierState {
         for (class, _, brick, index) in due {
             let slot = self.slots[index as usize].as_ref().expect("due slot");
             let live = slot.mask.count_ones();
-            let (rays, reset) =
-                if class == RESTART_PASSES { (REFINE_RAYS, false) } else { (first, true) };
+            let (rays, reset, history) = match class {
+                0 => (first, true, None),
+                REFINE_CLASS => (REFINE_RAYS, false, None),
+                _ => (CHANGE_RAYS, false, Some(CHANGE_HISTORY)),
+            };
             let cost = u64::from(live) * u64::from(rays);
             if let Some(limit) = budget {
                 if !items.is_empty() && spent + cost > limit {
@@ -691,7 +730,7 @@ impl TierState {
                 reset,
                 gen: self.light_gen,
                 live,
-                stage: class.min(RESTART_PASSES),
+                history,
             });
             if items.len() >= TIER_SLOT_CAP as usize {
                 break;
@@ -745,8 +784,13 @@ impl TierState {
         let seed = (id % 4096) as f32;
         for (k, item) in items.iter().enumerate() {
             let at = work + k * WORK_TEXELS as usize;
-            let stage = if item.reset { 1.0 + item.stage as f32 } else { 0.0 };
-            out[at] = [item.slot as f32, item.rays as f32, stage, seed];
+            // z: 0 averages into the history, 1 replaces it, 2 + h keeps h rays of it.
+            let mode = match (item.reset, item.history) {
+                (true, _) => 1.0,
+                (false, Some(h)) => 2.0 + h as f32,
+                (false, None) => 0.0,
+            };
+            out[at] = [item.slot as f32, item.rays as f32, mode, seed];
             if let Some(Some(slot)) = self.slots.get(item.slot as usize) {
                 for (i, p) in slot.positions.iter().enumerate() {
                     out[at + 1 + i] = [p[0], p[1], p[2], 1.0];
@@ -764,14 +808,14 @@ impl TierState {
                 continue;
             }
             if item.reset {
-                if slot.filled && slot.clean_gen == item.gen {
-                    slot.restarts = slot.restarts.max(item.stage + 1);
-                } else {
-                    slot.restarts = 1;
-                }
+                // A new brick converges its bounces like a change does.
                 slot.filled = true;
                 slot.samples = item.rays;
-                slot.clean_gen = item.gen;
+                slot.change_left = CHANGE_PASSES;
+            } else if let Some(history) = item.history {
+                // The shader keeps at most `history` of the stored rays.
+                slot.change_left = slot.change_left.saturating_sub(1);
+                slot.samples = (slot.samples.min(history) + item.rays).min(TARGET_SAMPLES);
             } else {
                 slot.samples = (slot.samples + item.rays).min(TARGET_SAMPLES);
             }
@@ -889,14 +933,38 @@ mod tests {
             tier.commit(&batch);
         }
         assert!(!tier.has_work());
-        // A small lamp move keeps the light. A real move relights every brick.
+        // A small lamp move keeps the light. A real move blends every brick it reaches
+        // toward the new light, all of them in each pass, and never clears one.
         let nudged = [TierLight { pos: [0.05, 2.5, 0.0], ..lights[0] }];
         assert!(!tier.update(room(), 0, [0.0, 1.7, 0.0], &nudged));
         let moved = [TierLight { pos: [1.0, 2.5, 0.0], ..lights[0] }];
         assert!(tier.update(room(), 0, [0.0, 1.7, 0.0], &moved));
+        for _ in 0..CHANGE_PASSES {
+            let batch = tier.batch([0.0, 1.7, 0.0], Some(1), FIRST_RAYS);
+            // One brick fits the budget, yet a pass still waits for every brick.
+            assert_eq!(batch.items.len(), 1);
+            let batch = tier.batch([0.0, 1.7, 0.0], None, FIRST_RAYS);
+            assert_eq!(batch.items.len(), tier.stats().bricks);
+            assert!(batch.items.iter().all(|i| !i.reset && i.history == Some(CHANGE_HISTORY)));
+            tier.commit(&batch);
+        }
         let batch = tier.batch([0.0, 1.7, 0.0], None, FIRST_RAYS);
-        assert!(batch.items.iter().all(|i| i.reset && i.rays == FIRST_RAYS));
-        assert_eq!(batch.items.len(), tier.stats().bricks);
+        assert!(batch.items.iter().all(|i| !i.reset && i.history.is_none() && i.rays == REFINE_RAYS));
+    }
+
+    #[test]
+    fn a_dim_lamp_far_away_leaves_the_tier_alone() {
+        let mut tier = TierState::default();
+        let lamp = TierLight { pos: [0.0, 2.5, 0.0], color: [1.0; 3], directional: false };
+        let candle = TierLight { pos: [400.0, 1.0, 0.0], color: [0.001; 3], directional: false };
+        tier.update(room(), 0, [0.0, 1.7, 0.0], &[lamp, candle]);
+        while tier.has_work() {
+            let batch = tier.batch([0.0, 1.7, 0.0], None, REFINE_RAYS);
+            tier.commit(&batch);
+        }
+        let moved = TierLight { pos: [401.0, 1.0, 0.0], ..candle };
+        tier.update(room(), 0, [0.0, 1.7, 0.0], &[lamp, moved]);
+        assert!(!tier.has_work());
     }
 
     #[test]

@@ -67,7 +67,8 @@ layout(std430, set = 0, binding = 0) readonly buffer SceneData {
     vec4 view_right;
     vec4 view_up;
     vec4 view_forward;
-    // x is the screen-probe columns. y is the rows.
+    // x is the screen-probe columns. y is the rows. z is the near-field rays plus one
+    // (0: NEAR_RAYS).
     vec4 view_grid;
     // x is the roof underside height over the floor footprint (0 = no roof). yzw is its color.
     vec4 ceiling;
@@ -230,8 +231,9 @@ vec3 direct_at(vec3 pos, vec3 normal, bool two_sided);
 // arrives from the directions those rays covered (judged by the probes' own six-face
 // cube along each ray). With nothing near, the answer is the probes' alone.
 vec3 near_field(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], vec3 far) {
+    uint rays = scene.view_grid.z > 0.5 ? uint(scene.view_grid.z + 0.5) - 1u : NEAR_RAYS;
     float reach = TIER_NEAR_REACH * tier_spacing();
-    uint mask = near_candidates(pos, n, reach);
+    uint mask = rays == 0u ? 0u : near_candidates(pos, n, reach);
     if (mask == 0u) {
         return far;
     }
@@ -246,13 +248,13 @@ vec3 near_field(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], vec
     // fine dither instead of random grain.
     const uint BAYER[16] = uint[16](0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
     uvec2 cell = uvec2(gl_FragCoord.xy) & 3u;
-    float spin = (float(BAYER[cell.y * 4u + cell.x]) + 0.5) / (16.0 * float(NEAR_RAYS));
+    float spin = (float(BAYER[cell.y * 4u + cell.x]) + 0.5) / (16.0 * float(rays));
     vec3 hit_light = vec3(0.0);
     vec3 share_hit = vec3(0.0);
     vec3 share_all = vec3(0.0);
-    for (uint k = 0u; k < NEAR_RAYS; k++) {
+    for (uint k = 0u; k < rays; k++) {
         // Cosine-weighted spiral over the hemisphere.
-        float u = (float(k) + 0.5) / float(NEAR_RAYS);
+        float u = (float(k) + 0.5) / float(rays);
         float r = sqrt(u);
         float phi = TAU * (float(k) * 0.61803399 + spin);
         vec3 dir = tx * (r * cos(phi)) + ty * (r * sin(phi)) + n * sqrt(max(1.0 - u, 0.0));
@@ -272,7 +274,7 @@ vec3 near_field(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], vec
         return far;
     }
     vec3 share = clamp(share_hit / max(share_all, vec3(1.0e-6)), 0.0, 1.0);
-    return far * (1.0 - share) + hit_light / float(NEAR_RAYS);
+    return far * (1.0 - share) + hit_light / float(rays);
 }
 
 // Bounce light at a face: the persistent tier inside its window, the coarse world

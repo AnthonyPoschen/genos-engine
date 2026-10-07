@@ -102,7 +102,10 @@ pub struct Pack {
     pub(crate) view_aspect: f32,
     pub(crate) grid_w: u32,
     pub(crate) grid_h: u32,
-    /// Live pins in the two finest screen cascades. The shader reads these from `view_grid.zw`.
+    /// Near-field rays per pixel plus one, 0 for the shader's own count (scene.frag
+    /// NEAR_RAYS). `GENOS_NEAR_RAYS` sets it, so the near field's share of the raster
+    /// time can be measured (0 turns it off). The shader reads it from `view_grid.z`.
+    pub(crate) near_rays: u32,
     /// Shapes and particle spans in draw order.
     pub draws: Vec<PackedDraw>,
 }
@@ -301,8 +304,20 @@ pub fn pack_frame(
         view_aspect: 1.0,
         grid_w: 1,
         grid_h: 1,
+        near_rays: near_rays_override(),
         draws,
     }
+}
+
+/// `GENOS_NEAR_RAYS` as the scene block wants it: the count plus one, 0 when unset.
+fn near_rays_override() -> u32 {
+    static RAYS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *RAYS.get_or_init(|| {
+        std::env::var("GENOS_NEAR_RAYS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .map_or(0, |n| n.min(64) + 1)
+    })
 }
 
 enum StagedDraw {
@@ -666,8 +681,8 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     push_f32(&mut bytes, pack.view_aspect);
     push_f32(&mut bytes, pack.grid_w as f32);
     push_f32(&mut bytes, pack.grid_h as f32);
-    // view_grid.zw are unused since the world tier replaced the pinned cascades.
-    push_f32(&mut bytes, 0.0);
+    // view_grid.z is the near-field ray override; w is unused.
+    push_f32(&mut bytes, pack.near_rays as f32);
     push_f32(&mut bytes, 0.0);
     for value in pack.ceiling {
         push_f32(&mut bytes, value);

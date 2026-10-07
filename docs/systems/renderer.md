@@ -86,6 +86,8 @@ A write into a live pool block waits until both frames are done. A new block at 
 
 The profile is not part of `Renderer::draw`. There is no per-shader GPU time. The timestamp span does not include a CPU wait.
 
+`GENOS_GPU_TIMES=1` prints a `GPU_MS` line every 120 frames (`GENOS_GPU_TIMES=N`: every N). It gives the mean GPU time of each frame pass: the scene raster (which shades the near field per pixel), the antialias resolve, the overlay, and the copies. It also gives each light build's passes: the tier copy, the world direct and bounce passes, and the tier rays, with builds per frame and rays per build. `GENOS_NEAR_RAYS=N` sets the near-field rays per pixel (0 turns the near field off), so the raster difference is the near field's share. `GENOS_TIER_MS` is the tier's GPU budget per build (1.5 ms). `GENOS_PASS_TIMES=1` prints every light build.
+
 ## Decisions
 
 - [ADR 0003](../adr/0003-one-vulkan-renderer-moltenvk-on-macos.md) keeps one Vulkan renderer.

@@ -449,11 +449,11 @@ void write_tier() {
     vec4 mask = field.texels[TIER_SLOTS + slot * 2u + 1u];
     uint chunk = uint(mask[probe >> 4u] + 0.5);
     bool live = ((chunk >> (probe & 15u)) & 1u) != 0u;
-    bool reset = work.z > 0.5;
-    // After the order passes (TIER_ORDER_PASSES) no probe holds light from before a
-    // change, and a ray feeds back all the light at its hit: the light the picture
-    // shows converges to every bounce, not three.
-    bool feedback = !reset || work.z > float(TIER_ORDER_PASSES) + 0.5;
+    // work.z: 0 averages into the stored light, 1 replaces it (a brick's first pass),
+    // 2 + h keeps at most h rays of it (a pass after a change: probe_tier.rs
+    // CHANGE_HISTORY). Every pass feeds the stored light back at its hits.
+    bool reset = work.z > 0.5 && work.z < 1.5;
+    float history_cap = work.z > 1.5 ? work.z - 2.0 : 1.0e9;
     uint dest = TIER_PROBES + (slot * 64u + probe) * TIER_PROBE_TEXELS;
     // Where the CPU placed the probe: its lattice point, or just outside a solid it
     // started in (probe_tier.rs place_probe).
@@ -501,7 +501,7 @@ void write_tier() {
                 fract(ray_spin3(hit.pos + work.w * 0.37) + float(d) * 0.61803399),
                 fract(ray_spin3(hit.pos * 1.7 - work.w * 0.21) + float(d) * 0.75487767)
             );
-            tier_bounce_at(hit.pos, hit.normal, WORLD_CUBE_OFFSET, feedback ? TIER_CUBE3 : TIER_CUBE2, u, once, twice);
+            tier_bounce_at(hit.pos, hit.normal, WORLD_CUBE_OFFSET, TIER_CUBE3, u, once, twice);
             vec3 k = hit.tint * hit.reflect * WORLD_IRR;
             r1 = hit.iv.rgb;
             r2 = hit.iv.rgb + k * once;
@@ -516,7 +516,7 @@ void write_tier() {
             cube_w[f] += facing;
         }
     }
-    float count = reset ? 0.0 : max(field.texels[dest + TIER_CUBE3].w, 0.0);
+    float count = reset ? 0.0 : min(max(field.texels[dest + TIER_CUBE3].w, 0.0), history_cap);
     float alpha = reset ? 1.0 : min(max(float(rays) / (count + float(rays)), float(rays) / TIER_HISTORY), 1.0);
     float samples = min(count + float(rays), TIER_HISTORY);
     for (uint f = 0u; f < 18u; f++) {

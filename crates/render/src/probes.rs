@@ -706,7 +706,6 @@ mod tests {
                 crate::probe_tier::TIER_PROBES - crate::probe_tier::TIER_INFO
             ),
             format!("const uint TIER_PROBE_TEXELS = {}u;", crate::probe_tier::PROBE_TEXELS),
-            format!("const uint TIER_ORDER_PASSES = {}u;", crate::probe_tier::ORDER_PASSES),
             format!("const uint TIER_POSITION = {}u;", crate::probe_tier::PROBE_TEXELS - 1),
             format!("const uint TIER_WORK_TEXELS = {}u;", crate::probe_tier::WORK_TEXELS),
         ] {
