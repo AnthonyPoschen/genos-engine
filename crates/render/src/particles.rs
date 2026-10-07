@@ -656,7 +656,7 @@ pub fn object_cards(object: &Object, eye: [f32; 3]) -> Vec<Card> {
     cards
 }
 
-/// `albedo * reflectance * (direct + bounce)`. The reflectance is the diffuse default.
+/// `albedo * reflectance / π * (direct + bounce)`. The reflectance is the diffuse default.
 /// Albedo zero stays black. The result is not a built-in flame color.
 pub fn shade_lit(albedo: [f32; 3], direct: f32, bounce: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
     let level = normal[1].abs() > 0.5;

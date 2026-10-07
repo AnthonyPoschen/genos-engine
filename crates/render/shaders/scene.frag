@@ -213,14 +213,83 @@ vec3 world_mean(vec3 pos, vec3 face_n) {
     return sum / weight;
 }
 
+const float TAU = 6.2831853;
+// Rays per pixel for the light from surfaces within a probe spacing.
+const uint NEAR_RAYS = 16u;
+
+vec3 direct_at(vec3 pos, vec3 normal, bool two_sided);
+
+// Bounce light at a face from the probes `faces` (`far`: their cosine-weighted mean
+// for this face), corrected for the surfaces within a probe spacing. The probes sit up
+// to a spacing away and see past a solid the face cannot: on the floor at a solid's
+// foot the solid hides the lit roof above it, and its own side is all the face sees
+// in that direction. Rays from the face up to one spacing find those surfaces. A ray
+// that meets one takes the light leaving it: the lamps there, plus all the bounced
+// light from the same probes (their cube turned to the face it met; that face is
+// within a spacing of the point, the probes' own resolution). The probes' answer loses the share of its light that
+// arrives from the directions those rays covered (judged by the probes' own six-face
+// cube along each ray). With nothing near, the answer is the probes' alone.
+vec3 near_field(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], vec3 far) {
+    float reach = TIER_NEAR_REACH * tier_spacing();
+    uint mask = near_candidates(pos, n, reach);
+    if (mask == 0u) {
+        return far;
+    }
+    vec3 faces[6];
+    tier_cube6(count, base, weight, TIER_CUBE3, faces);
+    vec3 origin = pos + n * 0.02;
+    vec3 helper = abs(n.y) > 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    vec3 tx = normalize(cross(helper, n));
+    vec3 ty = cross(n, tx);
+    // Interleaved: each pixel of a 4 x 4 block turns the spiral by its own sixteenth,
+    // so neighbouring pixels cover 16 times as many directions between them. An even
+    // fine dither instead of random grain.
+    const uint BAYER[16] = uint[16](0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
+    uvec2 cell = uvec2(gl_FragCoord.xy) & 3u;
+    float spin = (float(BAYER[cell.y * 4u + cell.x]) + 0.5) / (16.0 * float(NEAR_RAYS));
+    vec3 hit_light = vec3(0.0);
+    vec3 share_hit = vec3(0.0);
+    vec3 share_all = vec3(0.0);
+    for (uint k = 0u; k < NEAR_RAYS; k++) {
+        // Cosine-weighted spiral over the hemisphere.
+        float u = (float(k) + 0.5) / float(NEAR_RAYS);
+        float r = sqrt(u);
+        float phi = TAU * (float(k) * 0.61803399 + spin);
+        vec3 dir = tx * (r * cos(phi)) + ty * (r * sin(phi)) + n * sqrt(max(1.0 - u, 0.0));
+        vec3 seen = tier_cube_dir(faces, dir);
+        share_all += seen;
+        SceneHit hit;
+        if (!scene_ray_masked(origin, dir, 1.0e-4, reach, mask, hit)) {
+            continue;
+        }
+        share_hit += seen;
+        vec3 at = origin + dir * hit.t;
+        vec3 tint = mix(vec3(1.0), hit.albedo, hit.color_mix);
+        vec3 incoming = direct_at(at, hit.normal, false) + 3.14159265 * tier_cube_face(faces, hit.normal);
+        hit_light += tint * hit.reflect * incoming;
+    }
+    if (all(lessThanEqual(share_hit, vec3(0.0))) && all(lessThanEqual(hit_light, vec3(0.0)))) {
+        return far;
+    }
+    vec3 share = clamp(share_hit / max(share_all, vec3(1.0e-6)), 0.0, 1.0);
+    return far * (1.0 - share) + hit_light / float(NEAR_RAYS);
+}
+
 // Bounce light at a face: the persistent tier inside its window, the coarse world
 // probes beyond it. One tier at one spacing covers the whole window, so walking never
 // hands a wall from one probe level to another. Where no probe around a point holds
 // light yet (a brick still waiting for its first pass) the world probes answer.
 vec3 screen_bounce(vec3 world, vec3 face_n) {
     float cover = tier_cover(world, 4.0);
-    vec3 near;
-    if (cover > 0.0 && tier_sample(world, face_n, near)) {
+    uint base[8];
+    float weight[8];
+    uint count = cover > 0.0 ? tier_taps(world, face_n, tier_faces_of(face_n).x, base, weight) : 0u;
+    if (count > 0u) {
+        vec3 far = vec3(0.0);
+        for (uint k = 0u; k < count; k++) {
+            far += weight[k] * tier_cube_at(base[k], TIER_CUBE3, face_n);
+        }
+        vec3 near = near_field(world, face_n, count, base, weight, far);
         if (cover >= 1.0) {
             return near;
         }

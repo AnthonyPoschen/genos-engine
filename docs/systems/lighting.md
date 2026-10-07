@@ -48,7 +48,7 @@ In the camera example, Control+2 draws the finest lattice and Control+3 the next
 
 A new occluder is a wall or a solid in the scene. The direct ray and the bounce ray both see it. A mesh or a particle with `affects_light` becomes a stand-in solid in `World::light_scene`.
 
-Fire does not use that stand-in. The stationary flame is one lamp in the same cascade. A wall blocks that lamp. The flame does not light the far side of the wall. The floor beside the flame stays warm with the scene lamp off. A lit particle uses the same shade path as a face: albedo times reflectance times direct plus bounce. A density puff is still optical depth and in-scatter on the view ray. Light that leaves a surface travels in the cascade until the next surface.
+Fire does not use that stand-in. The stationary flame is one lamp in the same cascade. A wall blocks that lamp. The flame does not light the far side of the wall. The floor beside the flame stays warm with the scene lamp off. A lit particle uses the same shade path as a face: albedo times reflectance over π times direct plus bounce. A density puff is still optical depth and in-scatter on the view ray. Light that leaves a surface travels in the cascade until the next surface.
 
 ## Limits
 

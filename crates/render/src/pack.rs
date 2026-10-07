@@ -64,7 +64,8 @@ pub struct GpuOcc {
     pub albedo: [f32; 3],
     /// Nepers per meter. The light shader reads only `albedo`.
     pub absorption: f32,
-    /// Diffuse reflectance. Below zero selects the game default.
+    /// Diffuse reflectance as an albedo, 0 to 1 (the shaders divide by π). Below zero
+    /// selects the game default, white paint 0.8.
     pub reflectance: f32,
     /// Surface-color mix for bounce. Below zero selects a full tint.
     pub color_mix: f32,

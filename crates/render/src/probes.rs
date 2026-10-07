@@ -673,7 +673,7 @@ mod tests {
     #[test]
     fn the_shaders_share_the_density_curve() {
         assert!(
-            (genos_scene::DEFAULT_REFLECTANCE - 0.254647909).abs() < 1.0e-7,
+            (genos_scene::DEFAULT_BRDF - 0.254647909).abs() < 1.0e-7,
             "the shader reflectance is not the scene's white paint"
         );
         let frag = include_str!("../shaders/scene.frag");
@@ -706,6 +706,9 @@ mod tests {
                 crate::probe_tier::TIER_PROBES - crate::probe_tier::TIER_INFO
             ),
             format!("const uint TIER_PROBE_TEXELS = {}u;", crate::probe_tier::PROBE_TEXELS),
+            format!("const uint TIER_ORDER_PASSES = {}u;", crate::probe_tier::ORDER_PASSES),
+            format!("const uint TIER_POSITION = {}u;", crate::probe_tier::PROBE_TEXELS - 1),
+            format!("const uint TIER_WORK_TEXELS = {}u;", crate::probe_tier::WORK_TEXELS),
         ] {
             assert!(tier.contains(&line), "tier.glsl left the Rust layout: {line}");
         }

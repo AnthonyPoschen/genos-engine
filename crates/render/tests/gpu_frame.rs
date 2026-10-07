@@ -212,7 +212,10 @@ fn the_gpu_frame_keeps_the_learned_light() {
         }],
     );
     let sided = draw(&mut window, &mut renderer, &side, &camera);
-    let far_floor = sample(&sided, width, height, &camera, [1.6, 0.0, 0.0]);
+    // In the box's shadow and clear of its outline from this camera: at (1.6, 0, 0)
+    // the sample block reached the 1.4 m box's corner and averaged in its own red
+    // face, lit by the floor in front of it (engine 28 vs path-traced 28 there).
+    let far_floor = sample(&sided, width, height, &camera, [2.2, 0.0, 0.3]);
     assert!(
         far_floor[0] < far_floor[1] + 8.0 && far_floor[0] < far_floor[2] + 8.0,
         "a side lamp colored the far floor: {far_floor:?}"

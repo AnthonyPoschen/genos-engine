@@ -18,6 +18,7 @@ struct SceneHit {
     float color_mix;
 };
 
+// Lambertian BRDF of the default reflectance, white paint: 0.8 / pi.
 const float SCENE_LAMBERT = 0.254647909;
 
 bool floor_span(vec2 p) {
@@ -184,7 +185,8 @@ bool scene_ray_masked(vec3 origin, vec3 dir, float t0, float t1, uint mask, out 
             hit.t = max(t_in, t0);
             hit.normal = n;
             hit.albedo = occ.albedo.rgb;
-            hit.reflect = occ.bounce.x < 0.0 ? SCENE_LAMBERT : clamp(occ.bounce.x, 0.0, 1.0);
+            // A set reflectance is an albedo, 0 to 1: over pi it is the Lambertian BRDF.
+            hit.reflect = occ.bounce.x < 0.0 ? SCENE_LAMBERT : clamp(occ.bounce.x, 0.0, 1.0) * 0.318309886;
             hit.color_mix = occ.bounce.y < 0.0 ? 1.0 : clamp(occ.bounce.y, 0.0, 1.0);
             found = true;
         }

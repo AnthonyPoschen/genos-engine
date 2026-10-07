@@ -16,6 +16,6 @@ pub use codimation::{Codimation, Easing};
 pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use script::{load_path, load_str};
 pub use types::{
-    bounce_radiance, color_mix_of, reflectance_of, Ceiling, Floor, Light, Scene, Shape, Solid, Wall,
-    DEFAULT_REFLECTANCE, MAX_LAMPS, MAX_OCCLUDERS, PAINT_ALBEDO,
+    bounce_radiance, color_mix_of, diffuse_brdf, reflectance_of, Ceiling, Floor, Light, Scene, Shape, Solid, Wall,
+    DEFAULT_BRDF, DEFAULT_REFLECTANCE, MAX_LAMPS, MAX_OCCLUDERS, PAINT_ALBEDO,
 };

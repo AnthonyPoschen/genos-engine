@@ -15,6 +15,13 @@ pub fn load_path(path: &Path) -> Result<Scene, String> {
 }
 
 /// Run one script once and return the scene it placed.
+///
+/// Materials: `wall(x, z, width, depth, height, reflectance, color_mix)` and
+/// `solid(shape, x, z, size, r, g, b, reflectance, color_mix)` take `reflectance` as a
+/// plain albedo from 0 to 1, the share of arriving light the surface sends back (1 is
+/// all of it); the engine divides by π where it needs radiance. A negative value is the
+/// default, white paint at 0.8. `color_mix` is how much of the color tints the bounce
+/// (negative: all of it). Overloads without them use both defaults.
 pub fn load_str(source: &str) -> Result<Scene, String> {
     let builder = Rc::new(RefCell::new(Builder::default()));
     let mut engine = Engine::new();

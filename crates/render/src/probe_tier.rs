@@ -9,12 +9,14 @@
 
 /// Probes along one brick edge.
 pub const BRICK: i32 = 4;
-/// Field texels per probe: three ambient cubes of six RGBA32F faces. The first holds
-/// light that bounced up to three times (the picture reads it; alpha counts samples),
-/// then up to twice, then once (hits read those to build the next order). The engine
-/// stops at three bounces like the reference path tracer: with white walls of albedo 1
-/// a closed room has no finite answer for unlimited bounces.
-pub const PROBE_TEXELS: u32 = 18;
+/// Field texels per probe: three ambient cubes of six RGBA32F faces, then the probe's
+/// position (the last texel, xyz: a probe moved out of a solid sits off its lattice
+/// point). The first cube holds all the bounced light (the picture reads it; alpha
+/// counts samples), then up to two bounces, then one. After a change the hits read
+/// the lower orders to rebuild orders one to three free of the old light, then feed
+/// the first cube back for unlimited bounces (see [`FEEDBACK_PASSES`]); white paint
+/// returns 0.8 of the light, so the series converges.
+pub const PROBE_TEXELS: u32 = 19;
 /// Bytes kept per probe.
 pub const PROBE_BYTES: usize = PROBE_TEXELS as usize * 16;
 /// Probes in one brick.
@@ -127,6 +129,9 @@ pub struct BrickSet {
     pub bricks: Vec<[i32; 3]>,
     /// Live probes of each brick, one bit per probe at `(y * BRICK + z) * BRICK + x`.
     pub masks: Vec<u64>,
+    /// Position of every probe of each brick, in the same order (lattice points for
+    /// dead ones).
+    pub positions: Vec<Vec<[f32; 3]>>,
     /// Live probes (outside solids, near a surface) inside the allocated bricks.
     pub live_probes: usize,
     /// Bricks in the window, allocated or not.
@@ -174,6 +179,54 @@ pub fn probe_live(boxes: &[SurfaceBox], p: [f32; 3], reach: f32) -> bool {
     near
 }
 
+/// Gap between a solid's face and a probe moved out of that solid, in spacings.
+pub const RELOCATE_GAP: f32 = 0.1;
+
+/// Where the probe of lattice point `p` sits, or none when it is dead. A lattice point
+/// inside a solid (or touching one) would leave the band beside that solid with no
+/// probe of its own, and the light there changes fastest: a solid hides the light
+/// behind it from the floor at its foot. Such a probe moves straight out through the
+/// nearest face (through each of two or three faces that are equally near, so a probe
+/// in a corner lands outside the corner) to `RELOCATE_GAP` spacings past it. It stays
+/// dead when that leaves its own cell (half a spacing on any axis) or lands in or
+/// against another surface. This is the same physics as a probe on its lattice point,
+/// measured where the light is.
+pub fn place_probe(boxes: &[SurfaceBox], p: [f32; 3], layout: &TierLayout) -> Option<[f32; 3]> {
+    if p[1] < 0.0 {
+        return None;
+    }
+    let gap = RELOCATE_GAP * layout.spacing;
+    let mut q = p;
+    let solid = |b: &SurfaceBox| (0..3).all(|i| b.max[i] - b.min[i] > 1.0e-4);
+    if let Some(b) = boxes
+        .iter()
+        .find(|b| solid(b) && (b.inside(p) || b.surface_distance(p) < PROBE_CLEARANCE))
+    {
+        // Exits: (axis, toward max, distance to that face). A box standing on the
+        // ground has no way out below.
+        let mut exits: Vec<(usize, bool, f32)> = Vec::new();
+        for axis in 0..3 {
+            if axis != 1 || b.min[1] > 0.0 {
+                exits.push((axis, false, p[axis] - b.min[axis]));
+            }
+            exits.push((axis, true, b.max[axis] - p[axis]));
+        }
+        let least = exits.iter().map(|e| e.2).fold(f32::MAX, f32::min);
+        let mut moved = [false; 3];
+        for &(axis, up, d) in &exits {
+            // Equal exits on one axis (the middle of a thin wall): the low side.
+            if d <= least + 1.0e-3 && !moved[axis] {
+                moved[axis] = true;
+                q[axis] = if up { b.max[axis] + gap } else { b.min[axis] - gap };
+            }
+        }
+        if (0..3).any(|i| (q[i] - p[i]).abs() > 0.5 * layout.spacing) {
+            return None;
+        }
+    }
+    probe_live(boxes, q, layout.reach).then_some(q)
+}
+
 /// Allocate the bricks of the window around `eye` that hold a live probe.
 pub fn allocate(boxes: &[SurfaceBox], eye: [f32; 3], layout: &TierLayout) -> BrickSet {
     let (lo, hi) = layout.window(eye);
@@ -192,12 +245,16 @@ pub fn allocate(boxes: &[SurfaceBox], eye: [f32; 3], layout: &TierLayout) -> Bri
                     continue;
                 }
                 let mut mask = 0u64;
+                let mut positions = vec![[0.0f32; 3]; BRICK_PROBES as usize];
                 for ly in 0..BRICK {
                     for lz in 0..BRICK {
                         for lx in 0..BRICK {
                             let p = layout.probe_position(brick, [lx, ly, lz]);
-                            if probe_live(&nearby, p, layout.reach) {
-                                mask |= 1 << ((ly * BRICK + lz) * BRICK + lx);
+                            let bit = (ly * BRICK + lz) * BRICK + lx;
+                            positions[bit as usize] = p;
+                            if let Some(q) = place_probe(&nearby, p, layout) {
+                                mask |= 1 << bit;
+                                positions[bit as usize] = q;
                             }
                         }
                     }
@@ -205,6 +262,7 @@ pub fn allocate(boxes: &[SurfaceBox], eye: [f32; 3], layout: &TierLayout) -> Bri
                 if mask != 0 {
                     set.bricks.push(brick);
                     set.masks.push(mask);
+                    set.positions.push(positions);
                     set.live_probes += mask.count_ones() as usize;
                 }
             }
@@ -230,16 +288,18 @@ pub const TIER_INDIR_CAP: u32 = 32768;
 pub const TIER_SLOTS: u32 = TIER_INDIR + TIER_INDIR_CAP;
 /// Bricks the tier can hold. Past it the farthest bricks drop to the world probes.
 pub const TIER_SLOT_CAP: u32 = 1024;
-/// Room reserved for the slot table and the work list.
+/// Room reserved for the slot table.
 const TIER_TABLE_ROOM: u32 = 2048;
-/// One texel per work item: slot, rays, 1 = start over, pass seed.
+/// Work list, `WORK_TEXELS` per item: slot, rays, 0 = refine or 1 + restart pass, pass seed; then the
+/// position of each of the brick's probes.
 pub const TIER_WORK: u32 = TIER_SLOTS + TIER_TABLE_ROOM * 2;
+pub const WORK_TEXELS: u32 = 1 + BRICK_PROBES;
 /// Probe cubes, `PROBE_TEXELS` per probe and `BRICK_PROBES` per slot.
-pub const TIER_PROBES: u32 = TIER_INFO + 40960;
+pub const TIER_PROBES: u32 = TIER_INFO + 106496;
 /// End of the tier, the size of the light field in texels.
 pub const TIER_END: u32 = TIER_PROBES + TIER_SLOT_CAP * BRICK_PROBES * PROBE_TEXELS;
 
-const _: () = assert!(TIER_SLOT_CAP <= TIER_TABLE_ROOM && TIER_WORK + TIER_TABLE_ROOM <= TIER_PROBES);
+const _: () = assert!(TIER_SLOT_CAP <= TIER_TABLE_ROOM && TIER_WORK + TIER_SLOT_CAP * WORK_TEXELS <= TIER_PROBES);
 
 /// Rays a probe takes on its first pass and after a change: quick and noisy.
 pub const FIRST_RAYS: u32 = 16;
@@ -281,6 +341,7 @@ impl TierLight {
 struct Slot {
     brick: [i32; 3],
     mask: u64,
+    positions: Vec<[f32; 3]>,
     /// Lit at least once, so the picture may read it.
     filled: bool,
     samples: u32,
@@ -292,8 +353,16 @@ struct Slot {
     restarts: u32,
 }
 
-/// Passes that start over after a change, one per bounce order.
-pub const RESTART_PASSES: u32 = 3;
+/// Restart passes that build the bounce orders one, two and three from the order
+/// below at the hits. After them no probe holds light from before the change.
+pub const ORDER_PASSES: u32 = 3;
+/// Restart passes after those that feed the full light back: a ray takes the direct
+/// light at its hit plus all the light the probes there hold, so each pass adds one
+/// bounce. White paint returns 0.8, and a closed room needs about 17 bounces before
+/// more change nothing visible; the refine passes that follow keep feeding back.
+pub const FEEDBACK_PASSES: u32 = 14;
+/// Passes that start over (replace instead of average) after a change.
+pub const RESTART_PASSES: u32 = ORDER_PASSES + FEEDBACK_PASSES;
 
 /// One brick of work in a build.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -312,7 +381,7 @@ pub struct TierItem {
 #[derive(Clone, Debug, Default)]
 pub struct TierBatch {
     pub id: u64,
-    /// Texels from `TIER_INFO` up to `TIER_WORK` plus one per item.
+    /// Texels from `TIER_INFO` up to `TIER_WORK` plus `WORK_TEXELS` per item.
     pub texels: Vec<[f32; 4]>,
     pub items: Vec<TierItem>,
     /// Slots below this index may hold light. The build copies them forward.
@@ -441,6 +510,7 @@ impl TierState {
             self.dropped = set.bricks.len() - order.len();
             set.bricks = order.iter().map(|&i| set.bricks[i]).collect();
             set.masks = order.iter().map(|&i| set.masks[i]).collect();
+            set.positions = order.iter().map(|&i| set.positions[i].clone()).collect();
         }
         let keep: std::collections::HashMap<[i32; 3], u64> =
             set.bricks.iter().copied().zip(set.masks.iter().copied()).collect();
@@ -457,12 +527,13 @@ impl TierState {
         }
         // Lowest free slot first, so the used span stays short.
         self.free.sort_unstable_by(|a, b| b.cmp(a));
-        for (brick, mask) in set.bricks.iter().zip(&set.masks) {
+        for ((brick, mask), positions) in set.bricks.iter().zip(&set.masks).zip(&set.positions) {
             if let Some(&slot) = self.by_brick.get(brick) {
                 let entry = self.slots[slot as usize].as_mut().expect("mapped slot");
-                if entry.mask != *mask {
-                    // A probe came alive or died: light the whole brick again.
+                if entry.mask != *mask || entry.positions != *positions {
+                    // A probe came alive, died or moved: light the whole brick again.
                     entry.mask = *mask;
+                    entry.positions = positions.clone();
                     entry.filled = false;
                     entry.samples = 0;
                     entry.restarts = 0;
@@ -481,6 +552,7 @@ impl TierState {
                 Some(Slot {
                 brick: *brick,
                 mask: *mask,
+                positions: positions.clone(),
                 filled: false,
                 samples: 0,
                 clean_gen: 0,
@@ -525,7 +597,8 @@ impl TierState {
         }
     }
 
-    /// 0 to 2: restart passes still due (the number done so far). 3: refining.
+    /// Below RESTART_PASSES: the restart pass due (the number done so far).
+    /// RESTART_PASSES: refining.
     fn class(&self, slot: &Slot) -> Option<u32> {
         let restarts = self.restarts(slot);
         if restarts < RESTART_PASSES {
@@ -543,8 +616,7 @@ impl TierState {
         for slot in self.slots.iter().flatten().filter(|s| s.filled) {
             for bit in 0..BRICK_PROBES as i32 {
                 if slot.mask & (1 << bit) != 0 {
-                    let local = [bit % BRICK, bit / (BRICK * BRICK), (bit / BRICK) % BRICK];
-                    out.push(self.layout.probe_position(slot.brick, local));
+                    out.push(slot.positions[bit as usize]);
                 }
             }
         }
@@ -638,7 +710,7 @@ impl TierState {
     }
 
     fn texels(&self, items: &[TierItem], id: u64) -> Vec<[f32; 4]> {
-        let count = (TIER_WORK - TIER_INFO) as usize + items.len();
+        let count = (TIER_WORK - TIER_INFO) as usize + items.len() * WORK_TEXELS as usize;
         let mut out = vec![[0.0f32; 4]; count];
         let Some((lo, hi)) = self.window else {
             return out;
@@ -672,7 +744,14 @@ impl TierState {
         let work = (TIER_WORK - TIER_INFO) as usize;
         let seed = (id % 4096) as f32;
         for (k, item) in items.iter().enumerate() {
-            out[work + k] = [item.slot as f32, item.rays as f32, if item.reset { 1.0 } else { 0.0 }, seed];
+            let at = work + k * WORK_TEXELS as usize;
+            let stage = if item.reset { 1.0 + item.stage as f32 } else { 0.0 };
+            out[at] = [item.slot as f32, item.rays as f32, stage, seed];
+            if let Some(Some(slot)) = self.slots.get(item.slot as usize) {
+                for (i, p) in slot.positions.iter().enumerate() {
+                    out[at + 1 + i] = [p[0], p[1], p[2], 1.0];
+                }
+            }
         }
         out
     }
@@ -760,6 +839,25 @@ mod tests {
     }
 
     #[test]
+    fn a_probe_inside_a_solid_moves_out_beside_it() {
+        let layout = TierLayout::new(1.0, 50.0);
+        let floor = SurfaceBox { min: [-8.0, 0.0, -8.0], max: [8.0, 0.0, 8.0] };
+        let block = SurfaceBox { min: [-0.75, 0.0, -0.75], max: [0.75, 1.2, 0.75] };
+        let boxes = [floor, block];
+        // Equally near two sides: out through both, past the corner.
+        let q = place_probe(&boxes, [0.5, 0.5, -0.5], &layout).expect("moved out");
+        assert!((q[0] - 0.85).abs() < 1.0e-5 && (q[2] + 0.85).abs() < 1.0e-5 && q[1] == 0.5);
+        // Nearer one side: out through that side only.
+        let q = place_probe(&boxes, [0.5, 0.5, -0.6], &layout).expect("moved out");
+        assert!((q[2] + 0.85).abs() < 1.0e-5 && q[0] == 0.5);
+        // The middle of a wide solid is too far from any side to leave its cell.
+        let big = SurfaceBox { min: [-3.0, 0.0, -3.0], max: [3.0, 1.2, 3.0] };
+        assert!(place_probe(&[floor, big], [0.5, 0.5, 0.5], &layout).is_none());
+        // A probe on the lattice outside every solid stays put.
+        assert_eq!(place_probe(&boxes, [1.5, 0.5, 1.5], &layout), Some([1.5, 0.5, 1.5]));
+    }
+
+    #[test]
     fn moving_the_camera_keeps_probe_positions() {
         let layout = TierLayout::new(1.0, 50.0);
         let floor = SurfaceBox { min: [-80.0, 0.0, -80.0], max: [80.0, 0.0, 80.0] };
@@ -782,7 +880,7 @@ mod tests {
         let lights = [TierLight { pos: [0.0, 2.5, 0.0], color: [1.0; 3], directional: false }];
         tier.update(room(), 0, [0.0, 1.7, 0.0], &lights);
         assert!(tier.has_work());
-        for _ in 0..16 {
+        for _ in 0..64 {
             let batch = tier.batch([0.0, 1.7, 0.0], None, REFINE_RAYS);
             assert!(batch.items.iter().all(|i| i.reset) || batch.items.iter().all(|i| !i.reset));
             if batch.items.is_empty() {

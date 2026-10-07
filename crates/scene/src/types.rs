@@ -2,21 +2,33 @@ use genos_math::Vec3;
 
 /// Share of the incoming light a white painted surface sends back out.
 pub const PAINT_ALBEDO: f32 = 0.8;
-/// Diffuse reflectance used when a material does not set one.
-/// This is white paint, `PAINT_ALBEDO / π`. A surface returns that share of the irradiance.
-pub const DEFAULT_REFLECTANCE: f32 = PAINT_ALBEDO * std::f32::consts::FRAC_1_PI;
+/// Reflectance used when a material does not set one: white paint.
+///
+/// A reflectance is a plain albedo from 0 to 1, the share of the arriving light a
+/// surface sends back out (1 sends all of it). The engine divides by π itself where it
+/// turns that into outgoing radiance; see [`diffuse_brdf`].
+pub const DEFAULT_REFLECTANCE: f32 = PAINT_ALBEDO;
+/// Lambertian BRDF of a surface with the default reflectance, `PAINT_ALBEDO / π`.
+pub const DEFAULT_BRDF: f32 = PAINT_ALBEDO * std::f32::consts::FRAC_1_PI;
 /// Lamps and suns the renderer lights a frame with.
 pub const MAX_LAMPS: usize = 32;
 /// Walls and solids the renderer traces light against.
 pub const MAX_OCCLUDERS: usize = 16;
 
-/// Resolve a material reflectance. A negative value selects the game default.
+/// Resolve a material reflectance (albedo, 0 to 1). A negative value selects the game
+/// default.
 pub fn reflectance_of(value: f32) -> f32 {
     if value < 0.0 {
         DEFAULT_REFLECTANCE
     } else {
         value.clamp(0.0, 1.0)
     }
+}
+
+/// Lambertian BRDF of a material reflectance: its albedo over π. Radiance leaving a
+/// diffuse surface is this times the irradiance arriving at it.
+pub fn diffuse_brdf(value: f32) -> f32 {
+    reflectance_of(value) * std::f32::consts::FRAC_1_PI
 }
 
 /// Resolve how strongly the surface color tints a bounce. A negative value means full color.
@@ -32,7 +44,7 @@ pub fn color_mix_of(value: f32) -> f32 {
 ///
 /// The lamp and the previous bounce are one irradiance. The surface color tints both.
 /// `color_mix` is 1 for that full tint, and 0 to keep the arriving color.
-/// A negative `reflectance` uses [`DEFAULT_REFLECTANCE`].
+/// `reflectance` is an albedo from 0 to 1; a negative one uses [`DEFAULT_REFLECTANCE`].
 pub fn bounce_radiance(
     albedo: [f32; 3],
     reflectance: f32,
@@ -46,7 +58,7 @@ pub fn bounce_radiance(
         1.0 + (albedo[1] - 1.0) * mix,
         1.0 + (albedo[2] - 1.0) * mix,
     ];
-    let reflect = reflectance_of(reflectance);
+    let reflect = diffuse_brdf(reflectance);
     [
         tint[0] * reflect * (direct + incoming[0]),
         tint[1] * reflect * (direct + incoming[1]),
@@ -70,7 +82,8 @@ pub struct Wall {
     pub color: [f32; 3],
     /// Nepers per meter along the straight path. Zero leaves the level unchanged.
     pub absorption: f32,
-    /// Share of arriving light that leaves the surface. Below zero uses the game default.
+    /// Albedo, 0 to 1: the share of arriving light that leaves the surface (the engine
+    /// divides by π for radiance). Below zero uses the game default, white paint 0.8.
     pub reflectance: f32,
     /// How much of `color` tints the bounce. Below zero uses the full surface color.
     pub color_mix: f32,
@@ -85,7 +98,8 @@ pub struct Solid {
     pub color: [f32; 3],
     /// Nepers per meter along the straight path. Zero leaves the level unchanged.
     pub absorption: f32,
-    /// Share of arriving light that leaves the surface. Below zero uses the game default.
+    /// Albedo, 0 to 1: the share of arriving light that leaves the surface (the engine
+    /// divides by π for radiance). Below zero uses the game default, white paint 0.8.
     pub reflectance: f32,
     /// How much of `color` tints the bounce. Below zero uses the full surface color.
     pub color_mix: f32,

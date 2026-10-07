@@ -23,7 +23,7 @@ pub(crate) struct LitVertex {
 }
 
 pub(crate) fn compose(albedo: [f32; 3], direct: f32, bounce: [f32; 3], _level: bool) -> [f32; 3] {
-    let reflect = genos_scene::DEFAULT_REFLECTANCE;
+    let reflect = genos_scene::DEFAULT_BRDF;
     [
         tone(albedo[0] * reflect * (direct + bounce[0])),
         tone(albedo[1] * reflect * (direct + bounce[1])),

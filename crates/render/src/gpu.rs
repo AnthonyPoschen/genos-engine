@@ -481,7 +481,9 @@ impl Renderer {
 
     /// Run builds until the tier has nothing due and the world probes have seen it.
     fn settle_tier(&mut self, world: &World, pack: &pack::Pack) -> Result<(), String> {
-        for _ in 0..32 {
+        // Every restart pass and the refine passes, with room to spare.
+        let builds = 2 * (crate::probe_tier::RESTART_PASSES + 8) + 8;
+        for _ in 0..builds {
             if !self.tier.has_work() && !self.gpu.world_stale {
                 break;
             }

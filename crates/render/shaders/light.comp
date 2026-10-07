@@ -9,7 +9,8 @@ struct Occ {
     vec4 center_shape;
     vec4 extent;
     vec4 albedo;
-    // x is reflectance. y is the surface-color mix. Below zero means the game default.
+    // x is reflectance, an albedo 0..1 (divided by pi where it shades). y is the
+    // surface-color mix. Below zero means the game default.
     vec4 bounce;
 };
 struct Obj {
@@ -344,8 +345,9 @@ bool segment_blocked(vec3 a, vec3 b) {
 // One probe per invocation, one brick (64 probes) per workgroup. Each ray takes the
 // light leaving what it hits: direct light there plus the bounce the tier holds at
 // that point (the world probes beyond it), the same light the world probes take.
-// The same rays build all three bounce orders: a hit adds its direct light to each,
-// plus the next lower order from the tier at the hit.
+// The same rays build all three cubes: a hit adds its direct light to each, plus
+// the next lower order from the tier at the hit; once no stale light is left, the
+// top cube takes the top cube at the hit instead and so holds every bounce.
 
 const float TIER_RAY_END = 64.0;
 // A probe averages at most this many samples, so a change still shows.
@@ -354,13 +356,76 @@ const float TIER_HISTORY = 512.0;
 // Light that bounced up to once (`once`) and up to twice (`twice`) arriving at a
 // surface point, from the tier, or from the world probes where the tier has none:
 // the direct cube, and the cube at `twice_far` (the bounce cube, or the direct cube
-// again for the pass that writes the bounce cube).
-void bounce_at2(vec3 pos, vec3 normal, uint twice_far, out vec3 once, out vec3 twice) {
-    if (tier_sample2(pos, normal, TIER_CUBE1, TIER_CUBE2, once, twice)) {
+// again for the pass that writes the bounce cube). `tier_twice` picks the tier cube
+// for `twice`: TIER_CUBE2, or TIER_CUBE3 to feed all the light back.
+void bounce_at3(vec3 pos, vec3 normal, uint twice_far, uint tier_twice, out vec3 once, out vec3 twice) {
+    if (tier_sample2(pos, normal, TIER_CUBE1, tier_twice, once, twice)) {
         return;
     }
     once = sample_cube(WORLD_DIRECT_CUBE_OFFSET, pos + normal * 0.08, normal);
     twice = twice_far == WORLD_DIRECT_CUBE_OFFSET ? once : sample_cube(twice_far, pos + normal * 0.08, normal);
+}
+
+void bounce_at2(vec3 pos, vec3 normal, uint twice_far, out vec3 once, out vec3 twice) {
+    bounce_at3(pos, normal, twice_far, TIER_CUBE2, once, twice);
+}
+
+// bounce_at3 for a probe ray's hit, with the light from surfaces within a spacing of
+// the hit. The probes around a hit sit up to a spacing away and see past the solids
+// beside it, so in corners and at the foot of a solid they answer too bright, and
+// every bounce carried that gain. One cosine-distributed ray from the hit per probe
+// ray (the probe averages hundreds) corrects it as the picture's near_field does: if
+// it meets a surface within reach, that direction takes the light leaving the surface
+// instead of its share of the probes' answer. `u` picks the direction.
+void tier_bounce_at(vec3 pos, vec3 n, uint twice_far, uint tier_twice, vec2 u, out vec3 once, out vec3 twice) {
+    uint base[8];
+    float weight[8];
+    uint count = tier_taps(pos, n, tier_faces_of(n).x, base, weight);
+    if (count == 0u) {
+        once = vec3(0.0);
+        twice = vec3(0.0);
+        if (!(tier_spacing() > 0.0 && scene_inside(pos + n * 0.02))) {
+            // No probe answers: the world probes beyond the tier.
+            bounce_at3(pos, n, twice_far, tier_twice, once, twice);
+        }
+        return;
+    }
+    vec3 f1[6];
+    vec3 f2[6];
+    tier_cube6(count, base, weight, TIER_CUBE1, f1);
+    tier_cube6(count, base, weight, tier_twice, f2);
+    once = tier_cube_face(f1, n);
+    twice = tier_cube_face(f2, n);
+    float reach = TIER_NEAR_REACH * tier_spacing();
+    uint mask = near_candidates(pos, n, reach);
+    if (mask == 0u) {
+        return;
+    }
+    vec3 helper = abs(n.y) > 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    vec3 tx = normalize(cross(helper, n));
+    vec3 ty = cross(n, tx);
+    float r = sqrt(u.x);
+    float phi = TAU * u.y;
+    vec3 dir = tx * (r * cos(phi)) + ty * (r * sin(phi)) + n * sqrt(max(1.0 - u.x, 0.0));
+    vec3 origin = pos + n * 0.02;
+    SceneHit hit;
+    if (!scene_ray_masked(origin, dir, 1.0e-4, reach, mask, hit)) {
+        return;
+    }
+    vec3 at = origin + dir * hit.t;
+    vec3 tint = mix(vec3(1.0), hit.albedo, hit.color_mix);
+    vec3 direct = lights_at(at + hit.normal * 0.03, hit.normal);
+    // The surface met takes the probes' cube turned to its face, one order lower for
+    // the order-limited cube, the full light when feeding back.
+    vec3 near_once = tint * hit.reflect * direct;
+    vec3 near_twice = tint * hit.reflect * (direct + WORLD_IRR * tier_cube_face(tier_twice == TIER_CUBE2 ? f1 : f2, hit.normal));
+    // Expected over the cosine-distributed direction this is near_field's ratio form:
+    // the probes' answer loses the share of its light from the directions that meet a
+    // surface, and those directions bring that surface's light.
+    vec3 m1 = max(tier_cube_hemi(f1, n), vec3(1.0e-6));
+    vec3 m2 = max(tier_cube_hemi(f2, n), vec3(1.0e-6));
+    once += near_once - once * tier_cube_dir(f1, dir) / m1;
+    twice += near_twice - twice * tier_cube_dir(f2, dir) / m2;
 }
 
 // Uniform random rotation from three uniform numbers (Shoemake's quaternion).
@@ -377,18 +442,22 @@ mat3 random_rotation(vec3 u) {
 }
 
 void write_tier() {
-    vec4 work = field.texels[TIER_WORK + gl_WorkGroupID.x];
+    uint item = TIER_WORK + gl_WorkGroupID.x * TIER_WORK_TEXELS;
+    vec4 work = field.texels[item];
     uint probe = gl_LocalInvocationIndex;
     uint slot = uint(work.x + 0.5);
-    vec4 brick = field.texels[TIER_SLOTS + slot * 2u];
     vec4 mask = field.texels[TIER_SLOTS + slot * 2u + 1u];
     uint chunk = uint(mask[probe >> 4u] + 0.5);
     bool live = ((chunk >> (probe & 15u)) & 1u) != 0u;
     bool reset = work.z > 0.5;
+    // After the order passes (TIER_ORDER_PASSES) no probe holds light from before a
+    // change, and a ray feeds back all the light at its hit: the light the picture
+    // shows converges to every bounce, not three.
+    bool feedback = !reset || work.z > float(TIER_ORDER_PASSES) + 0.5;
     uint dest = TIER_PROBES + (slot * 64u + probe) * TIER_PROBE_TEXELS;
-    float spacing = tier_spacing();
-    ivec3 local = ivec3(int(probe & 3u), int(probe >> 4u), int((probe >> 2u) & 3u));
-    vec3 pos = (vec3(ivec3(floor(brick.xyz + 0.5)) * 4 + local) + 0.5) * spacing;
+    // Where the CPU placed the probe: its lattice point, or just outside a solid it
+    // started in (probe_tier.rs place_probe).
+    vec3 pos = field.texels[item + 1u + probe].xyz;
     // A ray that starts inside a solid sees no entry into it and leaves on the far
     // side. The CPU keeps such probes dead (probe_tier.rs); this holds for any shape
     // it only approximates.
@@ -428,7 +497,11 @@ void write_tier() {
         if (hit.iv.a >= 0.0) {
             vec3 once;
             vec3 twice;
-            bounce_at2(hit.pos, hit.normal, WORLD_CUBE_OFFSET, once, twice);
+            vec2 u = vec2(
+                fract(ray_spin3(hit.pos + work.w * 0.37) + float(d) * 0.61803399),
+                fract(ray_spin3(hit.pos * 1.7 - work.w * 0.21) + float(d) * 0.75487767)
+            );
+            tier_bounce_at(hit.pos, hit.normal, WORLD_CUBE_OFFSET, feedback ? TIER_CUBE3 : TIER_CUBE2, u, once, twice);
             vec3 k = hit.tint * hit.reflect * WORLD_IRR;
             r1 = hit.iv.rgb;
             r2 = hit.iv.rgb + k * once;
@@ -448,10 +521,13 @@ void write_tier() {
     float samples = min(count + float(rays), TIER_HISTORY);
     for (uint f = 0u; f < 18u; f++) {
         float wf = cube_w[f % 6u];
-        vec3 fresh = wf > 1.0e-4 ? cube[f] / wf : vec3(0.0);
+        // One near-field sample can take more than its share; a pass's mean cannot
+        // go below no light.
+        vec3 fresh = wf > 1.0e-4 ? max(cube[f] / wf, vec3(0.0)) : vec3(0.0);
         vec3 old = field.texels[dest + f].rgb;
         field.texels[dest + f] = vec4(mix(old, fresh, alpha), samples);
     }
+    field.texels[dest + TIER_POSITION] = vec4(pos, 1.0);
 }
 
 void main() {
