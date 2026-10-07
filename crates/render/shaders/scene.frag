@@ -133,7 +133,16 @@ const float NEAR_SPACING = 0.5;
 const uint WORLD_DIRS = 8u;
 const uint WORLD_OFFSET = 184320u;
 const uint WORLD_IRR_OFFSET = 176128u;
-const uint SCREEN_NORM_BASE = 8192u;
+const uint PIN_POS0 = 98304u;
+const uint PIN_NRM0 = 100352u;
+const uint PIN_POS1 = 102400u;
+const uint PIN_NRM1 = 103424u;
+const uint HASH_ORIGIN0 = 104448u;
+const uint HASH_BASE0 = 104449u;
+const uint HASH_DIM0 = 32u;
+const uint HASH_ORIGIN1 = 137217u;
+const uint HASH_BASE1 = 137218u;
+const uint HASH_DIM1 = 16u;
 const uint SHOWN_COPY = 0u;
 const float LAMBERT = 0.318309886;
 // A unit white lamp 7 m above a white floor stays near 0.46. A lamp 1 m away stays under white.
@@ -597,33 +606,66 @@ vec3 world_mean(vec3 pos) {
     return sum / weight;
 }
 
-vec3 screen_bounce(vec3 world) {
-    vec2 uv;
-    if (!project_uv(world, uv)) {
-        return world_mean(world);
+uint lattice_index(ivec3 cell, uint dim) {
+    return uint((cell.y * int(dim) + cell.z) * int(dim) + cell.x);
+}
+
+float lattice_weight(uint pin, uint pos_base, uint nrm_base, vec3 world, vec3 face_n) {
+    vec4 stored = field.texels[pos_base + pin];
+    if (stored.w < 0.5) {
+        return 0.0;
     }
-    uvec2 counts = screen_counts();
-    float fx = clamp(uv.x * float(counts.x) - 0.5, 0.0, float(counts.x - 1u));
-    float fy = clamp(uv.y * float(counts.y) - 0.5, 0.0, float(counts.y - 1u));
-    uint x0 = uint(floor(fx));
-    uint y0 = uint(floor(fy));
-    uint x1 = min(x0 + 1u, counts.x - 1u);
-    uint y1 = min(y0 + 1u, counts.y - 1u);
-    float tx = fx - float(x0);
-    float ty = fy - float(y0);
+    vec3 normal = field.texels[nrm_base + pin].xyz;
+    if (dot(normal, face_n) <= 0.6) {
+        return 0.0;
+    }
+    float dist = length(stored.xyz - world);
+    // Lift off the face so a probe on this surface is not rejected as a hit
+    // on its own volume. Floor pairs still use the ground-plane wall test.
+    vec3 from = world + face_n * 0.05;
+    vec3 to = stored.xyz + face_n * 0.05;
+    bool crosses = world.y < 0.05 && stored.y < 0.05
+        ? probe_hidden(from.xz, to.xz)
+        : blocked(from, to);
+    if (dist >= 1.5 || crosses) {
+        return 0.0;
+    }
+    return 1.0 - dist / 1.5;
+}
+
+vec3 lattice_radiance(vec3 world, vec3 face_n) {
+    vec4 info = field.texels[HASH_ORIGIN0];
+    float spacing = info.w;
+    if (spacing <= 0.0) {
+        return vec3(0.0);
+    }
+    ivec3 base = ivec3(floor((world - info.xyz) / spacing));
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
-    for (int corner = 0; corner < 4; corner++) {
-        uint ix = corner == 1 || corner == 3 ? x1 : x0;
-        uint iy = corner >= 2 ? y1 : y0;
-        float w = (corner == 1 || corner == 3 ? tx : 1.0 - tx) * (corner >= 2 ? ty : 1.0 - ty);
-        uint index = iy * counts.x + ix;
-        vec4 placed = field.texels[SCREEN_NORM_BASE + index];
-        if (placed.w < 0.5 || length(placed.xyz - world) > 1.5 || blocked(world, placed.xyz)) {
-            continue;
+    for (int dz = -1; dz <= 1; dz++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                ivec3 cell = base + ivec3(dx, dy, dz);
+                if (cell.x < 0 || cell.y < 0 || cell.z < 0
+                    || cell.x >= int(HASH_DIM0) || cell.y >= int(HASH_DIM0) || cell.z >= int(HASH_DIM0)) {
+                    continue;
+                }
+                vec4 rec = field.texels[HASH_BASE0 + lattice_index(cell, HASH_DIM0)];
+                for (int slot = 0; slot < 2; slot++) {
+                    float index = slot == 0 ? rec.x : rec.y;
+                    if (index < 0.0) {
+                        continue;
+                    }
+                    uint pin = uint(index + 0.5);
+                    float weight = lattice_weight(pin, PIN_POS0, PIN_NRM0, world, face_n);
+                    if (weight <= 1.0e-4) {
+                        continue;
+                    }
+                    sum += field.texels[pin].rgb * weight;
+                    wsum += weight;
+                }
+            }
         }
-        sum += field.texels[index].rgb * w;
-        wsum += w;
     }
     if (wsum <= 1.0e-4) {
         return vec3(0.0);
@@ -631,9 +673,21 @@ vec3 screen_bounce(vec3 world) {
     return sum / wsum;
 }
 
-vec3 merged_at(uint copy, vec3 world, vec2 face_n, bool uniform_disk) {
-    // The screen cascade already merged directions, farther ranges, and world probes.
-    return screen_bounce(world);
+vec3 screen_bounce(vec3 world, vec3 face_n) {
+    vec3 lattice = lattice_radiance(world, face_n);
+    vec2 uv;
+    if (!project_uv(world, uv)) {
+        if (dot(lattice, lattice) > 1.0e-8) {
+            return lattice;
+        }
+        return world_mean(world);
+    }
+    return lattice;
+}
+
+vec3 merged_at(uint copy, vec3 world, vec3 face_n, bool uniform_disk) {
+    // Cascade 0 already merged directions, farther ranges, and the world volume.
+    return screen_bounce(world, face_n);
 }
 
 bool inside_footprint(vec2 xz, Occ occ) {
@@ -848,61 +902,7 @@ bool probe_rejected(vec2 from, vec2 probe) {
 }
 
 vec3 sample_field(vec2 xz) {
-    return merged_at(SHOWN_COPY, vec3(xz.x, 0.0, xz.y), vec2(0.0), true);
-}
-
-void consider_exit(vec2 dest, float dist, inout vec2 best_free, inout float free_d, inout vec2 best_any, inout float any_d, inout bool has_free) {
-    if (dist < any_d) {
-        any_d = dist;
-        best_any = dest;
-    }
-    if (dist < free_d && !probe_inside(dest)) {
-        free_d = dist;
-        best_free = dest;
-        has_free = true;
-    }
-}
-
-void exits_of(Occ occ, vec2 p, inout vec2 best_free, inout float free_d, inout vec2 best_any, inout float any_d, inout bool has_free, inout bool found) {
-    if (!inside_footprint(p, occ)) {
-        return;
-    }
-    found = true;
-    vec2 d = p - occ.center_shape.xz;
-    if (occ.center_shape.w > 0.5) {
-        float reach = occ.extent.w + 0.06;
-        vec2 n = dot(d, d) < 1.0e-8 ? vec2(1.0, 0.0) : normalize(d);
-        consider_exit(occ.center_shape.xz + n * reach, reach - length(d), best_free, free_d, best_any, any_d, has_free);
-        return;
-    }
-    consider_exit(vec2(occ.center_shape.x + occ.extent.x + 0.06, p.y), occ.extent.x - d.x + 0.06, best_free, free_d, best_any, any_d, has_free);
-    consider_exit(vec2(occ.center_shape.x - occ.extent.x - 0.06, p.y), occ.extent.x + d.x + 0.06, best_free, free_d, best_any, any_d, has_free);
-    consider_exit(vec2(p.x, occ.center_shape.z + occ.extent.z + 0.06), occ.extent.z - d.y + 0.06, best_free, free_d, best_any, any_d, has_free);
-    consider_exit(vec2(p.x, occ.center_shape.z - occ.extent.z - 0.06), occ.extent.z + d.y + 0.06, best_free, free_d, best_any, any_d, has_free);
-}
-
-vec2 push_outside(vec2 xz) {
-    vec2 p = xz;
-    for (int step = 0; step < 4; step++) {
-        vec2 best_free = p;
-        vec2 best_any = p;
-        float free_d = 1.0e9;
-        float any_d = 1.0e9;
-        bool has_free = false;
-        bool found = false;
-        uint count = min(scene.occ_count, 16u);
-        for (uint i = 0u; i < count; i++) {
-            exits_of(scene.occs[i], p, best_free, free_d, best_any, any_d, has_free, found);
-        }
-        if (!found) {
-            return p;
-        }
-        p = has_free ? best_free : best_any;
-        if (has_free) {
-            return p;
-        }
-    }
-    return p;
+    return merged_at(SHOWN_COPY, vec3(xz.x, 0.0, xz.y), vec3(0.0, 1.0, 0.0), true);
 }
 
 bool lamp_sees_upward(vec3 pos, vec3 normal) {
@@ -921,13 +921,6 @@ bool lamp_sees_upward(vec3 pos, vec3 normal) {
         return true;
     }
     return false;
-}
-
-vec2 poll_xz(vec3 pos, vec3 normal) {
-    if (normal.y <= 0.5) {
-        return pos.xz + normal.xz * 0.04;
-    }
-    return push_outside(pos.xz);
 }
 
 float sphere_chord(vec3 origin, vec3 dir, vec3 center, float radius) {
@@ -1071,9 +1064,8 @@ void main() {
     // A camera card is thin. The lamp can light the visible side from either face.
     bool two_sided = v_shade > 1.15 && v_shade < 1.5;
     vec3 direct = direct_at(v_pos, normal, two_sided);
-    vec2 polled = poll_xz(v_pos, normal);
     bool floor_face = abs(normal.y) > 0.5;
-    vec3 bounce = merged_at(SHOWN_COPY, vec3(polled.x, v_pos.y, polled.y), normal.xz, floor_face);
+    vec3 bounce = merged_at(SHOWN_COPY, v_pos, normal, floor_face);
     if (normal.y > 0.5 && probe_inside(v_pos.xz) && !lamp_sees_upward(v_pos, normal)) {
         bounce = vec3(0.0);
     }

@@ -12,7 +12,7 @@ Read these before changing the field.
 - Overview that points at the paper: <https://80.lv/articles/radiance-cascades-new-approach-to-calculating-global-illumination>
 - Christopher M. J. Osborne and Alexander Sannikov, *Radiance Cascades: A Novel High-Resolution Formal Solution for Multidimensional Non-LTE Radiative Transfer*. arXiv:2408.14425. <https://arxiv.org/abs/2408.14425>
 
-Sannikov shipped a screen-space form of this in Path of Exile 2. The picture uses that screen grid and rebuilds it with the camera. A 3D world volume keeps light from outside the view. A screen ray that misses reads that volume in the same direction.
+Sannikov shipped a screen-space form of this in Path of Exile 2. The farthest screen cascade uses that screen grid and rebuilds with the camera. The two finest cascades keep a probe at the center of each floor or wall cell. Cascade 0 uses 0.5 m cells. The next cascade uses 1 m cells. The screen does not name the probe. Each solid carries its own face lattice on the finest cascade, and those points follow the solid. A 3D world volume keeps light from outside the view. A screen ray that misses reads that volume in the same direction.
 
 ## What a radiance cascade is
 
@@ -32,15 +32,15 @@ At a point, walk the directions of the nearest probes.
 - If the near interval missed, use the far interval in that direction.
 - If the far interval missed, use the world probe in that direction.
 
-The merged colors are blended between the four surrounding near probes. A lookup is not a copy of the single nearest square. The fragment shader reads that blend at the shaded point.
+The merged colors are blended from nearby probes on the same face, by world distance, out to 1.5 m. A lookup is not a copy of the single nearest cell. The fragment shader reads that blend at the shaded point.
 
-The picture gather builds three screen cascades. The near grid is the finest. A near miss keeps the farther screen range in that direction, then the 3D world probe. The pixel reads the merged near cascade. The screen field follows the camera. The world volume stays on the floor.
+The picture gather builds three screen cascades. The finest cascade stores the merged irradiance. A near miss keeps the farther screen range in that direction, then the 3D world volume. The pixel reads that irradiance from the 0.5 m cells. The farthest screen cascade follows the camera. The world volume stays on its grid.
 
 The world volume is a 2.5 m grid in X and Z, with three heights. Each probe stores 16 directions. A hit stores the light that leaves that surface. The next world pass adds one bounce from the volume. A screen miss reads that bounced volume. A hit does not.
 
 The blend drops a probe behind the shaded face. It also drops a probe whose hit is much closer than the shaded point. An upward face reads probes outside its footprint. A probe inside that footprint stores no light.
 
-The screen field rebuilds with the camera. A lamp change or an occluder change rebuilds it too. A turn does not rebuild it. Screen rectangles do not rebuild it. A hidden object that does not affect light is not part of that gather. A ray that starts inside a wall or a solid does not leave through the far side. That exit was painting the lit face onto the back face.
+A lamp change or an occluder change rebuilds the field. The two finest cascades keep each floor or wall cell fixed. A camera move, including a turn, adds a cell only when it enters the 8 m window and drops a cell only after it leaves the 10 m window. A move inside that window does not create, move, or delete a cell that is already there. A floor probe under a solid stays, and the sample skips it until the solid moves off. The farthest screen cascade follows the camera. The world volume stays on its grid. A turn does not rebuild the world volume. Screen rectangles do not rebuild the field. A hidden object that does not affect light is not part of that gather. A ray that starts inside a wall or a solid does not leave through the far side. That exit was painting the lit face onto the back face.
 
 ## Material color
 
@@ -68,7 +68,9 @@ An empty screen ray is the only place a world probe enters the merged field. A s
 
 ## What is fixed, and what comes from the scene
 
-The screen probes move with the camera. The world probes stay put. A miss stores radiance 0 and β = 1. A hit stores the outgoing light and β = 0. The merge is `L + β L_next` for each direction. A screen miss then reads the 3D world volume in that direction, so a bright lamp behind the camera still has a direction. The builder reads the camera for the screen grid. It does not read the example solids or the example light.
+The two finest cascades keep their hits fixed in world cells. Cascade 0 is 0.5 m. Cascade 1 is 1 m. The probe sits at the center of the cell on that face. A later camera does not move it. A cell is created inside an 8 m window around the camera, and it is dropped only outside 10 m. The same camera a second time does not move those hits or grow the count. A miss is not stored. Each solid has a face lattice on cascade 0. The points are fixed on the solid, the bottom face is left out, and the world positions follow the solid. Those points are not snapped onto the floor cells. A floor cell under a solid stays and is hidden. The live counts have a safety cap of 2048 and 1024. The farthest screen cascade moves with the camera. The world volume stays put. A miss stores radiance 0 and β = 1. A hit stores the outgoing light and β = 0. The merge is `L + β L_next` for each direction. A screen miss then reads the 3D world volume in that direction, so a bright lamp behind the camera still has a direction. Radiance at a probe is traced from the current scene. It is not copied from the previous frame. The builder reads the camera for the farthest screen cascade and for which cells are live. It does not read the example light.
+
+[ADR 0008](adr/0008-lighting-uses-radiance-cascades.md) says the screen grid rebuilds with the camera. That sentence does not hold for the two finest cascades. Their positions stay in world cells. A new gather still does not read the previous frame, which is the other sentence in that ADR.
 
 The CPU field used by the older checks still stores fewer directions in the near range than in the far range, and fewer in the far range than in the world range.
 
@@ -80,7 +82,7 @@ Four figures from the paper are the upper end: intervals that double, ray counts
 
 The balance used here is three screen cascades plus one 3D world volume.
 
-- Cascade 0 covers the screen with one probe per 8 pixels, 64 directions, and an interval of 0.55 m. The cap is 96 by 54 probes. Each next cascade halves the probe count, starts from 32 directions, and lengthens the interval.
+- Cascade 0 places probes on 0.5 m world cells, with 64 directions and an interval of 0.55 m. Cascade 1 places probes on 1 m world cells, with 32 directions and a longer interval. Each of those layers keeps the cell center on that face. The safety caps are 2048 and 1024 probes. The farthest screen cascade is one probe per 32 pixels, 64 directions, and an interval out to 5 m. It is cast again with the camera. The screen grid cap is 96 by 54.
 - The world volume covers the floor plus two cells of margin on each side, at three heights. An on-screen miss reads that volume.
 - Farther probes store one interval per direction. The near probe stores the merged irradiance. The screen ray fan is fixed in the surface frame. The fragment shader reads that irradiance, then multiplies by the albedo and `1 / π`.
 - A lamp uses cosine over inverse-square falloff. There is no fill light. Empty space is cleared to black.

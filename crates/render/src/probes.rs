@@ -702,6 +702,34 @@ mod tests {
                 source.contains("Cascade cascades[3];"),
                 "shader cascade table left the scene block"
             );
+            assert!(
+                source.contains(&format!(
+                    "const uint PIN_POS0 = {}u;",
+                    crate::pins::PIN_POS0
+                )),
+                "shader pin positions left the Rust field"
+            );
+            assert!(
+                source.contains(&format!(
+                    "const uint HASH_BASE0 = {}u;",
+                    crate::pins::HASH_BASE0
+                )),
+                "shader lattice hash left the Rust field"
+            );
+            assert!(
+                source.contains(&format!(
+                    "const uint HASH_BASE1 = {}u;",
+                    crate::pins::HASH_BASE1
+                )),
+                "shader lattice hash left the Rust field"
+            );
+            assert!(
+                source.contains(&format!(
+                    "const uint PIN_NRM0 = {}u;",
+                    crate::pins::PIN_NRM0
+                )),
+                "shader pin normals left the Rust field"
+            );
         }
         assert!(
             comp.contains("const float SCREEN_REACH = 4.0;"),

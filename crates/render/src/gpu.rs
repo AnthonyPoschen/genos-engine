@@ -40,6 +40,52 @@ pub struct Renderer {
     overlay_rects: Vec<ScreenRect>,
     overlay_verts: Vec<crate::pack::GpuVertex>,
     cascade_lines: Vec<crate::pack::GpuVertex>,
+    /// Pinned hits for the two finest screen cascades. Cascade 2 is cast in the shader.
+    screen_pins: crate::pins::ScreenPins,
+    /// Floor and occluders the pin set was cast against. A geometry change starts a new cast.
+    pin_geometry: Option<u64>,
+}
+
+/// Floor and occluders. A lamp change does not start a new pin cast.
+fn pin_geometry(scene: &genos_scene::Scene) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    let floor = &scene.floor;
+    for value in [
+        floor.position.x,
+        floor.position.z,
+        floor.half_x,
+        floor.half_z,
+    ] {
+        value.to_bits().hash(&mut hasher);
+    }
+    scene.walls.len().hash(&mut hasher);
+    for wall in &scene.walls {
+        for value in [
+            wall.position.x,
+            wall.position.z,
+            wall.half_x,
+            wall.half_z,
+            wall.height,
+        ] {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    scene.solids.len().hash(&mut hasher);
+    for solid in &scene.solids {
+        let shape = match solid.shape {
+            genos_scene::Shape::Square => 0u8,
+            genos_scene::Shape::Circle => 1u8,
+        };
+        shape.hash(&mut hasher);
+        // Position is not part of the key. A moving solid keeps the floor and
+        // wall cells, and its own lattice follows it.
+        for value in [solid.size, solid.height] {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 impl Renderer {
@@ -64,6 +110,8 @@ impl Renderer {
             overlay_rects: Vec::new(),
             overlay_verts: Vec::new(),
             cascade_lines: Vec::new(),
+            screen_pins: crate::pins::ScreenPins::default(),
+            pin_geometry: None,
         })
     }
 
@@ -75,11 +123,43 @@ impl Renderer {
         camera: &genos_scene::Camera,
         show: [bool; 3],
     ) {
-        self.cascade_lines = if show.iter().any(|on| *on) {
-            crate::field::cascade_debug_lines(scene, Some(camera), show)
-        } else {
-            Vec::new()
-        };
+        if !show.iter().any(|on| *on) {
+            self.cascade_lines.clear();
+            return;
+        }
+        let geometry = pin_geometry(scene);
+        if self.pin_geometry != Some(geometry) {
+            self.screen_pins = crate::pins::ScreenPins::default();
+            self.pin_geometry = Some(geometry);
+        }
+        let aspect = self.width as f32 / self.height.max(1) as f32;
+        let view = crate::pins::PinView::from_camera(camera, aspect, self.width, self.height);
+        crate::pins::update_screen_pins(&mut self.screen_pins, scene, &view);
+        let mut lines = Vec::new();
+        if show[0] {
+            lines.extend(crate::pins::pinned_debug_lines(
+                &self.screen_pins.layers[0],
+                &view,
+                0,
+                [0.25, 0.95, 1.0],
+            ));
+        }
+        if show[1] {
+            lines.extend(crate::pins::pinned_debug_lines(
+                &self.screen_pins.layers[1],
+                &view,
+                1,
+                [1.0, 0.82, 0.2],
+            ));
+        }
+        if show[2] {
+            lines.extend(crate::field::cascade_debug_lines(
+                scene,
+                None,
+                [false, false, true],
+            ));
+        }
+        self.cascade_lines = lines;
     }
 
     /// True when the last submit left its fence unsignaled. The caller can continue.
@@ -265,6 +345,7 @@ impl Renderer {
         let _ = (rewrite_light, self.screen_key);
         let mut pack = pack;
         pack::apply_view(&mut pack, camera, aspect, self.width, self.height);
+        self.stage_pins(world, &mut pack);
         self.gpu.upload_scene(&pack)?;
         self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
         self.gpu.poll_light()?;
@@ -341,10 +422,32 @@ impl Renderer {
         let mut pack = pack::pack_frame(world, &matrix, eye, &mut self.memory);
         let aspect = self.width as f32 / self.height.max(1) as f32;
         pack::apply_view(&mut pack, &camera, aspect, self.width, self.height);
+        self.stage_pins(world, &mut pack);
         self.gpu.wait_all_inflight()?;
         self.gpu.upload_scene(&pack)?;
         self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
         Ok(())
+    }
+
+    /// Keep the two finest cascades on their world cells, then hand those hits to the gather.
+    fn stage_pins(&mut self, world: &World, pack: &mut pack::Pack) {
+        let geometry = pin_geometry(&world.scene);
+        if self.pin_geometry != Some(geometry) {
+            self.screen_pins = crate::pins::ScreenPins::default();
+            self.pin_geometry = Some(geometry);
+        }
+        let view = crate::pins::PinView::from_pack(pack);
+        crate::pins::update_screen_pins(&mut self.screen_pins, &world.scene, &view);
+        pack.pin_count0 = self.screen_pins.layers[0].len() as u32;
+        pack.pin_count1 = self.screen_pins.layers[1].len() as u32;
+        let texels = crate::pins::pin_texels(&self.screen_pins, &view);
+        let mut bytes = Vec::with_capacity(texels.len() * 16);
+        for texel in texels {
+            for value in texel {
+                bytes.extend_from_slice(&value.to_ne_bytes());
+            }
+        }
+        self.gpu.pin_bytes = bytes;
     }
 
     /// Ground position the gather is tracking.
@@ -552,6 +655,10 @@ struct Gpu {
     /// Screen-probe grid from the last uploaded view.
     screen_w: u32,
     screen_h: u32,
+    /// Live pins for cascades 0 and 1. Cascade 2 stays on the screen grid.
+    pin_counts: [u32; 2],
+    /// Pin positions, normals, and cell index. Written into the field before the gather.
+    pin_bytes: Vec<u8>,
     floor_half_x: f32,
     floor_half_z: f32,
     /// Chains gather slices. The last slice leaves it signaled for one picture.
@@ -1182,6 +1289,8 @@ impl Gpu {
                 swap_on_done: true,
                 screen_w: 1,
                 screen_h: 1,
+                pin_counts: [0, 0],
+                pin_bytes: Vec::new(),
                 floor_half_x: 1.0,
                 floor_half_z: 1.0,
                 light_sem: std::ptr::null_mut(),
@@ -2984,6 +3093,7 @@ impl Gpu {
         self.world_bands = (world_z + 7) / 8;
         self.screen_w = pack.grid_w.max(1);
         self.screen_h = pack.grid_h.max(1);
+        self.pin_counts = [pack.pin_count0, pack.pin_count1];
         self.floor_half_x = pack.floor_half_x;
         self.floor_half_z = pack.floor_half_z;
         self.pending_light = Some(bytes);
@@ -3187,6 +3297,10 @@ impl Gpu {
         };
         let dst = 1 - self.light_shown;
         self.write_buffer(&self.light_scene[dst], &bytes)?;
+        if !self.pin_bytes.is_empty() {
+            let offset = crate::pins::PIN_SPAN_START as u64 * 16;
+            self.write_buffer_at(&self.light_field[dst], offset, &self.pin_bytes)?;
+        }
         self.light_dst = dst;
         self.light_pass = 0;
         self.light_row = 0;
@@ -3285,6 +3399,16 @@ impl Gpu {
         self.dispatch_light_slice(cmd, set, 9, 0, world_y.max(1), world_x.max(1))?;
         for pass in 0..3u32 {
             let level = 2 - pass;
+            if level < 2 {
+                let count = self.pin_counts[level as usize];
+                if count == 0 {
+                    continue;
+                }
+                // One workgroup is 8 by 8. The shader reads a linear pin index.
+                let groups = (count + 63) / 64;
+                self.dispatch_light_slice(cmd, set, pass, 0, 1, groups)?;
+                continue;
+            }
             let width = (self.screen_w >> level).max(1);
             let height = (self.screen_h >> level).max(1);
             let groups_x = (width + 7) / 8;
@@ -3456,7 +3580,11 @@ impl Gpu {
     }
 
     fn write_buffer(&self, buffer: &Buffer, bytes: &[u8]) -> Result<(), String> {
-        if bytes.len() as u64 > buffer.size {
+        self.write_buffer_at(buffer, 0, bytes)
+    }
+
+    fn write_buffer_at(&self, buffer: &Buffer, offset: u64, bytes: &[u8]) -> Result<(), String> {
+        if offset.saturating_add(bytes.len() as u64) > buffer.size {
             return Err("gpu buffer is too small".into());
         }
         unsafe {
@@ -3465,7 +3593,7 @@ impl Gpu {
                 (self.fns.map_mem)(
                     self.device,
                     buffer.memory,
-                    0,
+                    offset,
                     bytes.len() as u64,
                     0,
                     &mut mapped,

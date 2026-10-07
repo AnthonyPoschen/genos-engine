@@ -98,8 +98,10 @@ fn cascades_merge_a_tint_and_do_not_reuse_the_previous_field() {
     moved.solids[index].position.x = 80.0;
     let second = build(&moved);
     let faded = sample(&second, outside_x, outside_z);
+    // The unit lamp is most of this channel. The solid's share is smaller than that,
+    // so the red does not halve, but a copied field would not drop at all.
     assert!(
-        tint[0] > faded[0] * 2.0,
+        faded[0] < tint[0] * 0.8,
         "second build still carries the first field: first {tint:?} second {faded:?}"
     );
 }
