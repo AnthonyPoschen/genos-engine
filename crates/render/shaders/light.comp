@@ -115,7 +115,7 @@ const uint VOL_XZ1 = 28u;
 const uint VOL_Y1 = 3u;
 const uint VOL1_INFO = 159170u;
 const uint VOL1_BASE = 159171u;
-const float VOL_REACH = 2.0;
+const float VOL_REACH = 1.0;
 const float LAMBERT = 0.318309886;
 // A unit white lamp 7 m above a white floor stays near 0.46. A lamp 1 m away stays under white.
 const float LAMP_UNIT = 72.0;
@@ -779,7 +779,9 @@ void write_volume(uint level) {
     uint pos_base = level == 0u ? PIN_POS0 : PIN_POS1;
     uint nrm_base = level == 0u ? PIN_NRM0 : PIN_NRM1;
     uint rad_base = level == 0u ? 0u : PIN_IRR1;
-    // Same reach as the old per-pixel gather (two cells).
+    // One lattice spacing, the support of linear interpolation between pins. Two
+    // spacings (1 m for the fine level) averaged the contact band beside a solid with
+    // pins a metre away and washed its color out.
     float reach = spacing * VOL_REACH;
     vec3 sum[6] = vec3[6](vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
     float wsum[6] = float[6](0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
