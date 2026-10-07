@@ -46,7 +46,16 @@ pub struct Renderer {
     tier_ms: f64,
     /// Readbacks show the light on screen instead of settling it first.
     live_readback: bool,
+    /// When the last picture was drawn: the shown tier light moves by the time since.
+    last_draw: Option<std::time::Instant>,
+    /// Time constant of the shown tier light, seconds (0: the field as it lands).
+    view_seconds: f32,
 }
+
+/// Time constant of the shown tier light: a change is 95% shown after three of these.
+/// Builds land every few frames with fresh, noisy estimates; following them at a fixed
+/// rate per second hides the steps and the noise and adds this much lag.
+const TIER_VIEW_SECONDS: f32 = 0.033;
 
 fn env_f32(name: &str) -> Option<f32> {
     std::env::var(name).ok().and_then(|v| v.parse().ok())
@@ -129,6 +138,8 @@ impl Renderer {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1.5),
             live_readback: false,
+            last_draw: None,
+            view_seconds: env_f32("GENOS_TIER_VIEW_MS").map_or(TIER_VIEW_SECONDS, |ms| ms.max(0.0) / 1000.0),
         })
     }
 
@@ -377,6 +388,16 @@ impl Renderer {
         // run builds until the tier has no work. Later changes fill in under the budget.
         // A live readback shows the picture as it is, mid-change, at the normal budget.
         let settle = (readback && !self.live_readback) || !self.gpu.light_ready;
+        // The picture's tier light follows the field at a fixed rate per second, so
+        // builds landing never show as steps; a settled picture shows the field itself.
+        let now = std::time::Instant::now();
+        let dt = self.last_draw.map_or(1.0, |t| (now - t).as_secs_f32());
+        self.last_draw = Some(now);
+        self.gpu.view_weight = if settle || self.view_seconds <= 0.0 {
+            1.0
+        } else {
+            1.0 - (-dt / self.view_seconds).exp()
+        };
         let wait_light = settle;
         self.stage_tier(world, &pack, settle);
         self.gpu.upload_scene(&pack)?;
@@ -479,7 +500,17 @@ impl Renderer {
             (Some(self.tier.budget_rays(self.tier_ms)), crate::probe_tier::FIRST_RAYS)
         };
         self.gpu.tier_budget = budget;
-        let batch = self.tier.batch(pack.eye, budget, first);
+        // On-screen importance: changing bricks the camera sees take all their change
+        // passes in this build. A settling build takes everything anyway.
+        let camera = crate::probe_tier::TierCamera {
+            eye: pack.eye,
+            right: pack.view_right,
+            up: pack.view_up,
+            forward: pack.view_forward,
+            tan_x: pack.view_tan * pack.view_aspect,
+            tan_y: pack.view_tan,
+        };
+        let batch = self.tier.batch_seen(pack.eye, Some(&camera), budget, first);
         self.gpu.light_key = self.tier.light_gen();
         self.gpu.tier_batch = Some(batch);
     }
@@ -728,6 +759,13 @@ struct Gpu {
     desc_set: Handle,
     light_scene: [Buffer; 2],
     light_field: [Buffer; 2],
+    /// The tier light the picture shows: every probe's top cube, moved toward the
+    /// field on screen a little each frame (light.comp pass 13).
+    tier_view: Buffer,
+    /// Slots the field on screen uses, so pass 13 covers them.
+    view_slots: u32,
+    /// How far this frame's pass 13 moves the shown light toward the field (1: all).
+    view_weight: f32,
     light_sets: [Handle; 2],
     /// Shown field index. The gather writes the other one.
     light_shown: usize,
@@ -793,6 +831,8 @@ struct Gpu {
     plan_rays: u64,
     /// Probe rays and GPU milliseconds of the last timed tier pass.
     tier_time: Option<(u64, f64)>,
+    /// Work items in each tier round of the build being recorded.
+    plan_rounds: Vec<u32>,
     /// The ray budget of the last batch, None while settling. Printed by `GENOS_GPU_TIMES`.
     tier_budget: Option<u64>,
     /// Timed light builds the game has not taken yet (bounded).
@@ -1406,6 +1446,9 @@ impl Gpu {
                 desc_set: std::ptr::null_mut(),
                 light_scene: [Buffer::empty(), Buffer::empty()],
                 light_field: [Buffer::empty(), Buffer::empty()],
+                tier_view: Buffer::empty(),
+                view_slots: 0,
+                view_weight: 1.0,
                 light_sets: [std::ptr::null_mut(); 2],
                 light_shown: 0,
                 light_dst: 1,
@@ -1447,6 +1490,7 @@ impl Gpu {
                 plan_slots: 0,
                 plan_rays: 0,
                 tier_time: None,
+                plan_rounds: Vec::new(),
                 tier_budget: None,
                 light_builds: VecDeque::new(),
                 compute_layout: std::ptr::null_mut(),
@@ -2038,6 +2082,7 @@ impl Gpu {
                 self.write_stamp(slot, 0, 1);
             }
             self.frame_stamp(slot, FrameStamp::Start);
+            self.blend_view();
             let swap = self.swap_images[index as usize];
             self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
             let filtering = self.antialias != Antialias::Off;
@@ -2622,12 +2667,19 @@ impl Gpu {
                 stages: 0x1,
                 samplers: std::ptr::null(),
             },
+            Binding {
+                binding: 4,
+                kind: 7,
+                count: 1,
+                stages: 0x10 | 0x20,
+                samplers: std::ptr::null(),
+            },
         ];
         let info = Info {
             s_type: 32,
             next: std::ptr::null(),
             flags: 0,
-            count: 4,
+            count: bindings.len() as u32,
             bindings: bindings.as_ptr(),
         };
         let mut layout = std::ptr::null_mut();
@@ -2661,6 +2713,10 @@ impl Gpu {
             self.write_buffer(&self.light_scene[index], &vec![0u8; pack::SCENE_TAIL])?;
         }
         self.write_buffer(&self.particle_buf, &vec![0u8; 16])?;
+        // Laid out like the tier's probes, so the picture reads it at the same index.
+        let view_bytes = (crate::probe_tier::TIER_END - crate::probe_tier::TIER_PROBES) as u64 * 16;
+        self.tier_view = self.make_buffer_queues(view_bytes, 0x20, Memory::Upload, &share)?;
+        self.write_buffer(&self.tier_view, &vec![0u8; view_bytes as usize])?;
         #[repr(C)]
         struct Range {
             stage: u32,
@@ -2767,7 +2823,7 @@ impl Gpu {
             size_count: u32,
             sizes: *const Size,
         }
-        let size = Size { kind: 7, count: 8 };
+        let size = Size { kind: 7, count: 10 };
         let pool = PoolInfo {
             s_type: 33,
             next: std::ptr::null(),
@@ -2877,6 +2933,11 @@ impl Gpu {
                 offset: 0,
                 range: u64::MAX,
             },
+            BufInfo {
+                buffer: self.tier_view.buffer,
+                offset: 0,
+                range: u64::MAX,
+            },
         ];
         let writes = [
             Write {
@@ -2927,11 +2988,23 @@ impl Gpu {
                 buffer: &infos[3],
                 texel: std::ptr::null(),
             },
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set,
+                binding: 4,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: &infos[4],
+                texel: std::ptr::null(),
+            },
         ];
         unsafe {
             (self.fns.update_desc)(
                 self.device,
-                4,
+                writes.len() as u32,
                 writes.as_ptr() as *const u8,
                 0,
                 std::ptr::null(),
@@ -3587,6 +3660,7 @@ impl Gpu {
             self.light_shown = self.light_dst;
             self.desc_set = self.light_sets[self.light_shown];
             self.light_ready = true;
+            self.view_slots = self.view_slots.max(self.plan_slots);
             self.light_times();
             self.light_wait_graphics = true;
         }
@@ -3633,6 +3707,7 @@ impl Gpu {
             self.write_buffer_at(&self.light_field[dst], offset, raw)?;
         }
         self.plan_items = batch.items.len() as u32;
+        self.plan_rounds = batch.rounds.clone();
         self.plan_slots = batch.used_slots;
         self.plan_rays = batch.probe_rays;
         if self.plan_world {
@@ -3810,9 +3885,15 @@ impl Gpu {
             self.light_mark(cmd);
         }
         self.light_mark(cmd);
-        if self.plan_items > 0 {
-            // One workgroup (64 invocations sharing its rays) per probe, 64 per brick.
-            self.dispatch_light_slice(cmd, set, 12, 0, crate::probe_tier::BRICK_PROBES, self.plan_items)?;
+        // One workgroup (64 invocations sharing its rays) per probe, 64 per brick. The
+        // rounds run one after another: a brick on screen takes pass k in round k, and
+        // each round reads the light the one before wrote.
+        let mut first = 0u32;
+        for &count in &self.plan_rounds {
+            if count > 0 {
+                self.dispatch_light_slice(cmd, set, 12, first, crate::probe_tier::BRICK_PROBES, count)?;
+            }
+            first += count;
         }
         self.light_mark(cmd);
         Ok(())
@@ -3935,7 +4016,7 @@ impl Gpu {
         cmd: Handle,
         set: Handle,
         pass: u32,
-        row: u32,
+        y0: u32,
         rows: u32,
         cols: u32,
     ) -> Result<(), String> {
@@ -3967,13 +4048,13 @@ impl Gpu {
             );
             (self.fns.cmd_bind_pipe)(cmd, 1, self.compute_pipe);
             (self.fns.cmd_bind_set)(cmd, 1, self.compute_layout, 0, 1, &set, 0, std::ptr::null());
-            // One band of probe rows. Later slices cover the rest of this pass, then the next pass.
+            // y0: the first probe row of a world pass, the first work item of a tier round.
             #[repr(C)]
             struct Push {
                 pass: u32,
                 y0: u32,
             }
-            let push = Push { pass, y0: row * 8 };
+            let push = Push { pass, y0 };
             (self.fns.cmd_push)(
                 cmd,
                 self.compute_layout,
@@ -4003,6 +4084,70 @@ impl Gpu {
             );
         }
         Ok(())
+    }
+
+    /// Light.comp pass 13 in the frame's commands, before the raster: the shown tier
+    /// light moves `view_weight` of the way to the field on screen.
+    fn blend_view(&self) {
+        if self.view_slots == 0 || self.compute_pipe.is_null() {
+            return;
+        }
+        #[repr(C)]
+        struct MemBar {
+            s_type: i32,
+            next: *const c_void,
+            src_access: u32,
+            dst_access: u32,
+        }
+        #[repr(C)]
+        struct Push {
+            pass: u32,
+            y0: u32,
+        }
+        let cmd = self.cmd;
+        let set = self.desc_set;
+        unsafe {
+            // The last frame's picture read the shown light; this pass rewrites it.
+            let before = MemBar { s_type: 46, next: std::ptr::null(), src_access: 0x20, dst_access: 0x20 | 0x40 };
+            (self.fns.cmd_barrier)(
+                cmd,
+                0x80 | 0x800,
+                0x800,
+                0,
+                1,
+                &before as *const MemBar as *const c_void,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+            );
+            (self.fns.cmd_bind_pipe)(cmd, 1, self.compute_pipe);
+            (self.fns.cmd_bind_set)(cmd, 1, self.compute_layout, 0, 1, &set, 0, std::ptr::null());
+            let push = Push { pass: 13, y0: self.view_weight.to_bits() };
+            (self.fns.cmd_push)(
+                cmd,
+                self.compute_layout,
+                0x20,
+                0,
+                8,
+                &push as *const Push as *const c_void,
+            );
+            // One workgroup per slot, one probe per invocation.
+            (self.fns.cmd_dispatch)(cmd, self.view_slots, 1, 1);
+            let after = MemBar { s_type: 46, next: std::ptr::null(), src_access: 0x40, dst_access: 0x20 };
+            (self.fns.cmd_barrier)(
+                cmd,
+                0x800,
+                0x80,
+                0,
+                1,
+                &after as *const MemBar as *const c_void,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+            );
+        }
     }
 
     fn make_layout(&mut self) -> Result<Handle, String> {
@@ -5326,6 +5471,8 @@ impl Drop for Gpu {
             self.destroy_buffer(&mut light_scene[1]);
             self.destroy_buffer(&mut light_field[0]);
             self.destroy_buffer(&mut light_field[1]);
+            let mut tier_view = std::mem::replace(&mut self.tier_view, Buffer::empty());
+            self.destroy_buffer(&mut tier_view);
             self.destroy_buffer(&mut particle_buf);
             if let Some(times) = self.gpu_times.as_ref() {
                 if !times.pool.is_null() {

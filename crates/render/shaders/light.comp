@@ -9,6 +9,11 @@ layout(std430, set = 0, binding = 1) buffer FieldData {
     vec4 texels[];
 } field;
 
+// The tier light the picture shows, written by pass 13 (tier.glsl tier_light).
+layout(std430, set = 0, binding = 4) buffer TierView {
+    vec4 texels[];
+} tier_view;
+
 #include "scene_rays.glsl"
 #include "tier.glsl"
 
@@ -392,7 +397,8 @@ shared vec3 tier_ray[64];
 shared float tier_face_w[6];
 
 void write_tier() {
-    uint item = TIER_WORK + gl_WorkGroupID.x * TIER_WORK_TEXELS;
+    // pc.y0: the round's first work item (probe_tier.rs TierBatch::rounds).
+    uint item = TIER_WORK + (pc.y0 + gl_WorkGroupID.x) * TIER_WORK_TEXELS;
     vec4 work = field.texels[item];
     uint probe = gl_WorkGroupID.y;
     uint lane = gl_LocalInvocationIndex;
@@ -510,9 +516,32 @@ void write_tier() {
     }
 }
 
+// Pass 13, every frame before the picture: the shown light of each probe moves a
+// fraction (pc.y0, a float: 1 - exp(-dt / tau)) of the way to the stored top cube. A
+// probe that is new to its slot, unlit, or dead takes the stored light at once.
+void blend_view() {
+    uint p = (gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex) * TIER_PROBE_TEXELS;
+    uint b = TIER_PROBES + p;
+    float w = uintBitsToFloat(pc.y0);
+    vec4 pos = field.texels[b + TIER_POSITION];
+    vec4 tag = tier_view.texels[p + TIER_POSITION];
+    bool lit = field.texels[b + TIER_CUBE3].w > 0.0;
+    bool snap = w >= 1.0 || !lit || tag.w <= 0.0 || tag.xyz != pos.xyz;
+    for (uint f = 0u; f < 6u; f++) {
+        vec3 target = field.texels[b + TIER_CUBE3 + f].rgb;
+        vec3 shown = tier_view.texels[p + TIER_CUBE3 + f].rgb;
+        tier_view.texels[p + TIER_CUBE3 + f] = vec4(snap ? target : mix(shown, target, w), 0.0);
+    }
+    tier_view.texels[p + TIER_POSITION] = vec4(pos.xyz, lit ? 1.0 : 0.0);
+}
+
 void main() {
     if (pc.pass == 12u) {
         write_tier();
+        return;
+    }
+    if (pc.pass == 13u) {
+        blend_view();
         return;
     }
     // Pass 8 lights the world probes directly, pass 9 adds the bounce.

@@ -16,6 +16,13 @@ layout(std430, set = 0, binding = 1) readonly buffer FieldData {
     vec4 texels[];
 } field;
 
+// The tier light the picture shows (light.comp pass 13): the probes' top cube moved
+// toward the field a little each frame, so builds landing never show as steps.
+layout(std430, set = 0, binding = 4) readonly buffer TierView {
+    vec4 texels[];
+} tier_view;
+#define TIER_VIEW
+
 #include "tier.glsl"
 #include "dither.glsl"
 

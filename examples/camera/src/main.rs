@@ -599,6 +599,11 @@ struct Bench {
     frames: Vec<f32>,
     /// When a drop or a rise had taken all its change passes: the visible change.
     visible: Option<Duration>,
+    /// When no brick on screen was still changing (its passes issued), the most bricks
+    /// on screen a batch took at once, and the slowest batch pick in microseconds.
+    view: Option<Duration>,
+    critical: usize,
+    batch_us: u32,
     lines: Vec<String>,
     /// `GENOS_BENCH_SHOTS=<dir>`: live pictures at fixed times into each drop and rise.
     shots: Option<PathBuf>,
@@ -731,6 +736,9 @@ impl Bench {
             last: None,
             frames: Vec::new(),
             visible: None,
+            view: None,
+            critical: 0,
+            batch_us: 0,
             lines: Vec::new(),
             shots: std::env::var_os("GENOS_BENCH_SHOTS").map(PathBuf::from),
             next_shot: 0,
@@ -770,6 +778,13 @@ impl Bench {
         if settle && self.frames.len() > 1 && tier.changing_bricks == 0 && self.visible.is_none() {
             self.visible = Some(elapsed);
         }
+        if settle {
+            self.critical = self.critical.max(tier.critical_bricks);
+            self.batch_us = self.batch_us.max(tier.batch_us);
+            if self.frames.len() > 1 && tier.critical_bricks == 0 && self.view.is_none() {
+                self.view = Some(elapsed);
+            }
+        }
         let done = next.is_some() && (!settle || self.frames.len() > 1);
         if done {
             if self.phase != BenchPhase::Warmup {
@@ -787,6 +802,9 @@ impl Bench {
             self.phase_start = now;
             self.frames.clear();
             self.visible = None;
+            self.view = None;
+            self.critical = 0;
+            self.batch_us = 0;
             self.next_shot = 0;
         }
         let t = (now - self.phase_start).as_secs_f32();
@@ -836,6 +854,11 @@ impl Bench {
         );
         if matches!(self.phase, BenchPhase::Down | BenchPhase::Up) {
             let visible = self.visible.map_or(-1.0, |v| v.as_secs_f32() * 1000.0);
+            let view = self.view.map_or(-1.0, |v| v.as_secs_f32() * 1000.0);
+            line.push_str(&format!(
+                " view_ms={view:.0} critical={} batch_us={}",
+                self.critical, self.batch_us
+            ));
             line.push_str(&format!(
                 " visible_ms={visible:.0} settle_ms={:.0} settled={} bricks={} changing={} pending={}",
                 elapsed.as_secs_f32() * 1000.0,

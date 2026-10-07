@@ -155,12 +155,23 @@ uvec3 tier_faces_of(vec3 n) {
     return uvec3(n.x >= 0.0 ? 0u : 1u, n.y >= 0.0 ? 2u : 3u, n.z >= 0.0 ? 4u : 5u);
 }
 
+// Face `f` of cube `cube` of the probe at texel `b`. The picture (TIER_VIEW) reads the
+// shown light, which holds only the top cube, at the same index; the light passes
+// read the stored light.
+vec3 tier_light(uint b, uint cube, uint f) {
+#ifdef TIER_VIEW
+    return tier_view.texels[b - TIER_PROBES + cube + f].rgb;
+#else
+    return field.texels[b + cube + f].rgb;
+#endif
+}
+
 vec3 tier_cube_at(uint b, uint cube, vec3 n) {
     uvec3 f = tier_faces_of(n);
     vec3 nn = n * n;
-    return nn.x * field.texels[b + cube + f.x].rgb
-        + nn.y * field.texels[b + cube + f.y].rgb
-        + nn.z * field.texels[b + cube + f.z].rgb;
+    return nn.x * tier_light(b, cube, f.x)
+        + nn.y * tier_light(b, cube, f.y)
+        + nn.z * tier_light(b, cube, f.z);
 }
 
 // Cosine-weighted mean radiance arriving at a face at `world` with normal `face_n`,
@@ -201,7 +212,7 @@ void tier_cube6(uint count, uint base[8], float weight[8], uint cube, out vec3 f
     }
     for (uint k = 0u; k < count; k++) {
         for (uint f = 0u; f < 6u; f++) {
-            faces[f] += weight[k] * field.texels[base[k] + cube + f].rgb;
+            faces[f] += weight[k] * tier_light(base[k], cube, f);
         }
     }
 }
