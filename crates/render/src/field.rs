@@ -273,8 +273,9 @@ fn lamp_ray(light: &genos_scene::Light, x: f32, y: f32, z: f32) -> (f32, f32, f3
 
 /// Scene-lamp unit. The falloff is cosine over inverse-square.
 /// A unit white lamp 7 m above a white floor stays near 0.46 after reflectance.
-/// A lamp 1 m away stays under white.
 const LAMP_UNIT: f32 = 72.0;
+/// Radius of a lamp bulb. Outside it a lamp falls off with the inverse square.
+const LAMP_RADIUS: f32 = 0.1;
 
 /// Cosine over inverse-square falloff. A face with no normal uses the distance term only.
 fn lamp_reach(dist2: f32, strength: f32, dx: f32, dy: f32, dz: f32, normal: [f32; 3]) -> f32 {
@@ -288,7 +289,7 @@ fn lamp_reach(dist2: f32, strength: f32, dx: f32, dy: f32, dz: f32, normal: [f32
         }
         shade = nd;
     }
-    strength * shade * LAMP_UNIT / (1.0 + dist2)
+    strength * shade * LAMP_UNIT / dist2.max(LAMP_RADIUS * LAMP_RADIUS)
 }
 
 fn lamp_is_blocked(scene: &Scene, x: f32, y: f32, z: f32, toward: [f32; 3], reach: f32) -> bool {

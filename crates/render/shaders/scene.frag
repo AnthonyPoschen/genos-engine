@@ -145,8 +145,10 @@ const uint VOL_Y1 = 3u;
 const uint VOL1_INFO = 159170u;
 const uint VOL1_BASE = 159171u;
 const float LAMBERT = 0.318309886;
-// A unit white lamp 7 m above a white floor stays near 0.46. A lamp 1 m away stays under white.
+// A unit white lamp 7 m above a white floor stays near 0.46.
 const float LAMP_UNIT = 72.0;
+// Radius of a lamp bulb. Outside it a lamp falls off with the inverse square.
+const float LAMP_RADIUS = 0.1;
 
 bool blocked(vec3 origin, vec3 target);
 bool segment_blocked(vec3 origin, vec3 target);
@@ -359,7 +361,7 @@ vec3 shade_lamp(vec3 origin, vec3 normal, vec4 lamp, vec3 color, bool two_sided)
     if (nd <= 0.0 || blocked(origin, target)) {
         return vec3(0.0);
     }
-    return color * nd * LAMP_UNIT / (1.0 + dist2);
+    return color * nd * LAMP_UNIT / max(dist2, LAMP_RADIUS * LAMP_RADIUS);
 }
 
 vec3 direct_at(vec3 pos, vec3 normal, bool two_sided) {
@@ -444,14 +446,14 @@ vec3 scatter_light(vec3 p) {
             continue;
         }
         vec3 delta = lamp.xyz - p;
-        float fall = LAMP_UNIT / (1.0 + dot(delta, delta));
+        float fall = LAMP_UNIT / max(dot(delta, delta), LAMP_RADIUS * LAMP_RADIUS);
         sum += scene.lamps[i].color.rgb * fall;
     }
     if (scene.fire_pos.w > 0.0) {
         vec3 fire = scene.fire_pos.xyz;
         if (!blocked(p, fire)) {
             vec3 delta = fire - p;
-            float fall = scene.fire_pos.w * LAMP_UNIT / (1.0 + dot(delta, delta));
+            float fall = scene.fire_pos.w * LAMP_UNIT / max(dot(delta, delta), LAMP_RADIUS * LAMP_RADIUS);
             sum += scene.fire_color.rgb * fall;
         }
     }

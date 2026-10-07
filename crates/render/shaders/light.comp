@@ -117,8 +117,10 @@ const uint VOL1_INFO = 159170u;
 const uint VOL1_BASE = 159171u;
 const float VOL_REACH = 1.0;
 const float LAMBERT = 0.318309886;
-// A unit white lamp 7 m above a white floor stays near 0.46. A lamp 1 m away stays under white.
+// A unit white lamp 7 m above a white floor stays near 0.46.
 const float LAMP_UNIT = 72.0;
+// Radius of a lamp bulb. Outside it a lamp falls off with the inverse square.
+const float LAMP_RADIUS = 0.1;
 const float TAU = 6.2831853;
 // The world volume stores mean radiance. A surface takes about pi times that as irradiance.
 const float WORLD_IRR = 3.14159265;
@@ -150,7 +152,7 @@ vec3 shade_lamp(vec3 origin, vec3 normal, vec4 lamp, vec3 color) {
         return vec3(0.0);
     }
     // Cosine over inverse-square. A sun uses the same unit as a lamp 7 m away.
-    return color * nd * LAMP_UNIT / (1.0 + dist2);
+    return color * nd * LAMP_UNIT / max(dist2, LAMP_RADIUS * LAMP_RADIUS);
 }
 
 vec3 lights_at(vec3 origin, vec3 normal) {
