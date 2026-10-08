@@ -1,6 +1,7 @@
 //! Every surface type is opaque through the same visibility path: a lamp on the far
 //! side of a floor, roof, wall, box or cylinder lights nothing on the near side,
-//! neither directly nor through a bounce.
+//! neither directly nor through a bounce. And a moving solid shades with where it is
+//! now: a turning box's faces never test as inside where the box stood before.
 
 use genos_render::{Renderer, World};
 use genos_scene::{viewport_uv, Camera, Ceiling, Floor, Light, Scene, Shape, Solid, Vec3, Wall};
@@ -252,4 +253,60 @@ fn a_lamp_inside_a_cylinder_lights_nothing_outside_even_over_its_cap() {
         &camera,
         &[[1.79, 2.0, 0.0], [1.79, 1.6, -0.6], [1.0, 0.0, -1.2]],
     );
+}
+
+/// A box turns 5 degrees a frame in front of a lamp, the picture read back live (no
+/// waiting for the light builds). Every face the camera and the lamp see stays lit:
+/// the picture must shade the box where it rasterizes it, not where it stood when the
+/// last light build began (inside that box a face gets no light at all).
+#[test]
+fn a_turning_box_keeps_its_faces_lit_every_frame() {
+    let (_gpu, mut window, mut renderer) = open();
+    let width = renderer.width();
+    let height = renderer.height();
+    renderer.set_live_readback(true);
+    let scene = Scene {
+        floor: floor(6.0),
+        walls: Vec::new(),
+        solids: vec![solid(Shape::Square, 1.0, 1.0)],
+        lights: vec![Light {
+            position: Vec3::new(0.0, 2.0, -3.0),
+            color: [0.6, 0.6, 0.6],
+            direction: Vec3::ZERO,
+        }],
+        ceiling: None,
+        sky: None,
+    };
+    let mut world = World::from_scene(scene);
+    let mut camera = Camera::new(0.0, -4.0, std::f32::consts::PI);
+    camera.pitch = -0.15;
+    let eye = [0.0f32, -4.0];
+    for step in 0..=36 {
+        let yaw = (step as f32 * 5.0).to_radians();
+        world.scene.solids[0].yaw = yaw;
+        let pixels = draw(&mut window, &mut renderer, &world, &camera);
+        let (s, c) = yaw.sin_cos();
+        // The four side faces: outward normals local -Z, +X, +Z, -X turned by yaw
+        // (+X goes to (cos, 0, -sin)).
+        for normal in [[-s, -c], [c, -s], [s, c], [-c, s]] {
+            let center = [normal[0] * 0.5, normal[1] * 0.5];
+            let facing = normal[0] * (eye[0] - center[0]) + normal[1] * (eye[1] - center[1]);
+            if facing < 1.0 {
+                continue;
+            }
+            // Across the face (inset from its edges) at three heights.
+            let along = [-normal[1], normal[0]];
+            for across in [-0.3f32, 0.0, 0.3] {
+                for y in [0.25f32, 0.5, 0.75] {
+                    let point = [center[0] + along[0] * across, y, center[1] + along[1] * across];
+                    let value = sample(&pixels, width, height, &camera, point);
+                    assert!(
+                        value > 60.0,
+                        "yaw {:.0}: the face toward {normal:?} is dark at {point:?} ({value})",
+                        yaw.to_degrees()
+                    );
+                }
+            }
+        }
+    }
 }

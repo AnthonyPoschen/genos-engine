@@ -52,6 +52,7 @@ The crate is `crates/render`, package `genos-render`.
 - `Renderer::take_light_builds` returns the GPU time of each light build that finished since the last call. `LightBuildTimes::passes_ms` holds the spans copy, world direct, world bounce and tier, in that order. A still scene in a settled tier runs no build and returns none.
 - A wall draws its top face. A raised wall (`base` above 0) also draws its underside. A square solid draws turned by its `yaw`.
 - `MAX_OBJECTS` is 8192. Lamps, occluders and their grids are packed in the scene buffer tail; see [Lighting](lighting.md).
+- Each light build reads its own copy of the scene. The picture reads the scene of the frame it draws (one buffer per frame in flight): its direct light, shadows, inside tests and near-field rays use the solids and lamps where it rasterizes them, while the bounce comes from the last finished build. A box that turned since that build never tests its own faces as inside its old pose (which left them black until the next build landed).
 
 ## Game use
 

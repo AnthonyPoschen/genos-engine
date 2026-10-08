@@ -788,12 +788,21 @@ struct Gpu {
     framebuffers: [Handle; 2],
     hosts: [Buffer; 2],
     flight: usize,
-    /// Latest occluders for audio. The raster reads `light_scene[light_shown]`.
+    /// Latest occluders for audio.
     scene_buf: Buffer,
+    /// The scene as this frame draws it, one per frame in flight: the picture shades
+    /// with the solids and lamps it rasterizes. Its light field comes from a build of
+    /// an older scene, but a moving box's own faces must never test against where the
+    /// box stood then (inside it: no light at all until the next build lands).
+    frame_scene: [Buffer; 2],
+    /// This frame's scene bytes, written into `frame_scene` once its slot is free.
+    frame_bytes: Vec<u8>,
+    /// Raster sets: `[light field][frame slot]`, the field with that frame's scene.
+    raster_sets: [[Handle; 2]; 2],
     particle_buf: Buffer,
     desc_layout: Handle,
     desc_pool: Handle,
-    /// Raster set. This is `light_sets[light_shown]`.
+    /// Raster set. This is `raster_sets[light_shown][flight]`.
     desc_set: Handle,
     light_scene: [Buffer; 2],
     light_field: [Buffer; 2],
@@ -1486,6 +1495,9 @@ impl Gpu {
                 desc_layout: std::ptr::null_mut(),
                 desc_pool: std::ptr::null_mut(),
                 desc_set: std::ptr::null_mut(),
+                frame_scene: [Buffer::empty(), Buffer::empty()],
+                frame_bytes: Vec::new(),
+                raster_sets: [[std::ptr::null_mut(); 2]; 2],
                 light_scene: [Buffer::empty(), Buffer::empty()],
                 light_field: [Buffer::empty(), Buffer::empty()],
                 tier_view: Buffer::empty(),
@@ -2071,7 +2083,6 @@ impl Gpu {
             return Err("Vulkan timestamp queries are not available on this device".into());
         }
         self.poll_light()?;
-        self.desc_set = self.light_sets[self.light_shown];
         self.bind_flight();
         let slot = self.flight;
         unsafe {
@@ -2085,6 +2096,11 @@ impl Gpu {
             }
             self.collect_slot_after_wait(slot)?;
             self.collect_frame_times(slot);
+            // The slot's last frame is done with its scene: this frame's goes in.
+            if !self.frame_bytes.is_empty() {
+                self.write_buffer(&self.frame_scene[slot], &self.frame_bytes)?;
+            }
+            self.desc_set = self.raster_sets[self.light_shown][slot];
             check(
                 (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
                 "reset fence",
@@ -2829,6 +2845,8 @@ impl Gpu {
                 self.make_buffer_queues(field_bytes.len() as u64, 0x20 | 0x1 | 0x2, Memory::Upload, &share)?;
             self.write_buffer(&self.light_field[index], &field_bytes)?;
             self.write_buffer(&self.light_scene[index], &vec![0u8; pack::SCENE_TAIL])?;
+            self.frame_scene[index] = self.make_buffer(pack::SCENE_CAPACITY as u64, 0x20, Memory::Upload)?;
+            self.write_buffer(&self.frame_scene[index], &vec![0u8; pack::SCENE_TAIL])?;
         }
         self.write_buffer(&self.particle_buf, &vec![0u8; 16])?;
         // Laid out like the tier's probes, so the picture reads it at the same index.
@@ -2941,12 +2959,12 @@ impl Gpu {
             size_count: u32,
             sizes: *const Size,
         }
-        let size = Size { kind: 7, count: 10 };
+        let size = Size { kind: 7, count: 30 };
         let pool = PoolInfo {
             s_type: 33,
             next: std::ptr::null(),
             flags: 0,
-            max_sets: 2,
+            max_sets: 6,
             size_count: 1,
             sizes: &size,
         };
@@ -2968,24 +2986,23 @@ impl Gpu {
                 count: u32,
                 layouts: *const Handle,
             }
-            let layouts = [self.desc_layout, self.desc_layout];
+            let layouts = [self.desc_layout; 6];
             let alloc = Alloc {
                 s_type: 34,
                 next: std::ptr::null(),
                 pool: self.desc_pool,
-                count: 2,
+                count: 6,
                 layouts: layouts.as_ptr(),
             };
+            let mut sets = [std::ptr::null_mut(); 6];
             check(
-                (self.fns.alloc_desc)(
-                    self.device,
-                    &alloc as *const Alloc as *const u8,
-                    self.light_sets.as_mut_ptr(),
-                ),
+                (self.fns.alloc_desc)(self.device, &alloc as *const Alloc as *const u8, sets.as_mut_ptr()),
                 "descriptor set",
             )?;
+            self.light_sets = [sets[0], sets[1]];
+            self.raster_sets = [[sets[2], sets[3]], [sets[4], sets[5]]];
         }
-        self.desc_set = self.light_sets[0];
+        self.desc_set = self.raster_sets[0][0];
         self.write_light_set(0)?;
         self.write_light_set(1)?;
         self.write_buffer(&self.scene_buf, &vec![0u8; pack::SCENE_TAIL])?;
@@ -3007,7 +3024,11 @@ impl Gpu {
             self.light_sets[index],
             &self.light_scene[index],
             &self.light_field[index],
-        )
+        )?;
+        for slot in 0..2 {
+            self.write_descriptors(self.raster_sets[index][slot], &self.frame_scene[slot], &self.light_field[index])?;
+        }
+        Ok(())
     }
 
     fn write_descriptors(&self, set: Handle, scene: &Buffer, field: &Buffer) -> Result<(), String> {
@@ -3608,6 +3629,7 @@ impl Gpu {
     fn upload_scene(&mut self, pack: &Pack) -> Result<(), String> {
         let bytes = pack::scene_bytes(pack);
         self.write_buffer(&self.scene_buf, &bytes)?;
+        self.frame_bytes.clone_from(&bytes);
         for (index, cascade) in pack.cascades.iter().enumerate() {
             self.light_cols[index] = (cascade.count_x + 7) / 8;
             self.light_rows[index] = (cascade.count_z + 7) / 8;
@@ -3776,7 +3798,6 @@ impl Gpu {
         if self.light_pass >= LIGHT_SLICES {
             self.light_building = false;
             self.light_shown = self.light_dst;
-            self.desc_set = self.light_sets[self.light_shown];
             self.light_ready = true;
             self.view_slots = self.view_slots.max(self.plan_slots);
             self.light_times();
@@ -5587,6 +5608,8 @@ impl Drop for Gpu {
             let mut scene_buf = std::mem::replace(&mut self.scene_buf, Buffer::empty());
             let mut light_scene =
                 std::mem::replace(&mut self.light_scene, [Buffer::empty(), Buffer::empty()]);
+            let mut frame_scene =
+                std::mem::replace(&mut self.frame_scene, [Buffer::empty(), Buffer::empty()]);
             let mut light_field =
                 std::mem::replace(&mut self.light_field, [Buffer::empty(), Buffer::empty()]);
             let mut particle_buf = std::mem::replace(&mut self.particle_buf, Buffer::empty());
@@ -5601,6 +5624,8 @@ impl Drop for Gpu {
             self.destroy_buffer(&mut scene_buf);
             self.destroy_buffer(&mut light_scene[0]);
             self.destroy_buffer(&mut light_scene[1]);
+            self.destroy_buffer(&mut frame_scene[0]);
+            self.destroy_buffer(&mut frame_scene[1]);
             self.destroy_buffer(&mut light_field[0]);
             self.destroy_buffer(&mut light_field[1]);
             let mut tier_view = std::mem::replace(&mut self.tier_view, Buffer::empty());
