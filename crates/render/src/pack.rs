@@ -27,7 +27,7 @@ pub const SCENE_CAPACITY: usize = 8 << 20;
 /// return a pixel or a probe ray visits only the lamps whose range covers it, so the
 /// cost follows the lamps nearby instead of every lamp in the scene.
 pub const LAMP_CUTOFF: f32 = 0.5 / 255.0;
-/// Lamp brightness unit the shaders use (`LAMP_UNIT` in light.comp and scene.frag):
+/// Lamp brightness unit the shaders use (`LAMP_UNIT` in scene_rays.glsl):
 /// irradiance of a unit lamp 1 m away, facing it.
 pub const LAMP_UNIT: f32 = 72.0;
 /// Smallest occluder grid cell, in metres.

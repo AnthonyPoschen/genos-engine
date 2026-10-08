@@ -83,13 +83,8 @@ const uint WORLD_CUBE_OFFSET = 458752u;
 const bool WORLD_TAP_VISIBILITY = true;
 const uint WORLD_IRR_OFFSET = 176128u;
 const float LAMBERT = 0.254647909;
-// A unit white lamp 7 m above a white painted floor stays near 0.37.
-const float LAMP_UNIT = 72.0;
-// Radius of a lamp bulb. Outside it a lamp falls off with the inverse square.
-const float LAMP_RADIUS = 0.1;
 
 bool blocked(vec3 origin, vec3 target);
-bool segment_blocked(vec3 origin, vec3 target);
 bool inside_solid(vec3 p);
 
 // Cosine-weighted mean radiance over the hemisphere around face_n, the same quantity
@@ -138,7 +133,7 @@ vec3 world_mean(vec3 pos, vec3 face_n) {
         }
         if (WORLD_TAP_VISIBILITY) {
             vec3 probe = origin + vec3((float(ip.x) + 0.5) * WORLD_SPACING, float(ip.y) * 1.5, (float(ip.z) + 0.5) * WORLD_SPACING);
-            if (pos_inside || segment_blocked(pos, probe)) {
+            if (pos_inside || scene_segment_blocked(pos, probe)) {
                 continue;
             }
         }
@@ -254,56 +249,10 @@ bool blocked(vec3 origin, vec3 target) {
     return scene_occluded(origin, target);
 }
 
-// blocked() without the inside test, for callers that test the origin once.
-bool segment_blocked(vec3 origin, vec3 target) {
-    vec3 delta = target - origin;
-    float dist = length(delta);
-    if (dist < 1e-3) {
-        return false;
-    }
-    SceneHit hit;
-    return scene_ray(origin, delta / dist, 1.0e-4, dist - 1.0e-3, hit);
-}
-
-vec3 shade_lamp(vec3 origin, vec3 normal, vec4 lamp, vec3 color, bool two_sided) {
-    bool sun = lamp.w > 0.5;
-    vec3 toward;
-    vec3 target;
-    float dist2;
-    if (sun) {
-        toward = -normalize(lamp.xyz);
-        target = origin + toward * 80.0;
-        dist2 = 49.0;
-    } else {
-        toward = lamp.xyz - origin;
-        float dist = max(length(toward), 1.0e-4);
-        toward /= dist;
-        target = lamp.xyz;
-        dist2 = dist * dist;
-    }
-    float nd = dot(toward, normal);
-    if (two_sided) {
-        nd = abs(nd);
-    }
-    if (nd <= 0.0 || blocked(origin, target)) {
-        return vec3(0.0);
-    }
-    return color * nd * LAMP_UNIT / max(dist2, LAMP_RADIUS * LAMP_RADIUS);
-}
-
+// Light from every lamp at a face. Raised off the face so the face does not shadow
+// itself.
 vec3 direct_at(vec3 pos, vec3 normal, bool two_sided) {
-    // A point inside a solid (floor under a footprint) starts occluded in blocked().
-    vec3 origin = pos + normal * 0.02;
-    vec3 incoming = vec3(0.0);
-    LampList list = lamps_at(origin);
-    uint count = lamp_list_size(list);
-    [[dont_unroll]] for (uint k = 0u; k < count; k++) {
-        Lamp lamp = lamp_list_get(list, k);
-        if (lamp_reaches(lamp, origin)) {
-            incoming += shade_lamp(origin, normal, lamp.pos, lamp.color.rgb, two_sided);
-        }
-    }
-    return incoming;
+    return lamps_light(pos + normal * 0.02, normal, two_sided, 0xFFFFFFFFu, 0.0);
 }
 
 vec3 sample_field(vec2 xz) {

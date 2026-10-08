@@ -37,10 +37,6 @@ const uint WORLD_DIRECT_CUBE_OFFSET = 294912u;
 vec3 cube_axis(uint face);
 void bounce_at2(vec3 pos, vec3 normal, uint twice_far, out vec3 once, out vec3 twice);
 const float LAMBERT = 0.254647909;
-// A unit white lamp 7 m above a white painted floor stays near 0.37.
-const float LAMP_UNIT = 72.0;
-// Radius of a lamp bulb. Outside it a lamp falls off with the inverse square.
-const float LAMP_RADIUS = 0.1;
 const float TAU = 6.2831853;
 // The world volume stores mean radiance. A surface takes about pi times that as irradiance.
 const float WORLD_IRR = 3.14159265;
@@ -50,45 +46,13 @@ bool lamp_blocked(vec3 origin, vec3 lamp) {
     return scene_occluded(origin, lamp);
 }
 
-vec3 shade_lamp(vec3 origin, vec3 normal, vec4 lamp, vec3 color) {
-    bool sun = lamp.w > 0.5;
-    vec3 toward;
-    vec3 target;
-    float dist2;
-    if (sun) {
-        // lamp.xyz is the direction the rays travel. The face looks back along that ray.
-        toward = -normalize(lamp.xyz);
-        target = origin + toward * 80.0;
-        dist2 = 49.0;
-    } else {
-        toward = lamp.xyz - origin;
-        float dist = max(length(toward), 1.0e-4);
-        toward /= dist;
-        target = lamp.xyz;
-        dist2 = dist * dist;
-    }
-    float nd = dot(toward, normal);
-    if (nd <= 0.0 || lamp_blocked(origin, target)) {
-        return vec3(0.0);
-    }
-    // Cosine over inverse-square. A sun uses the same unit as a lamp 7 m away.
-    return color * nd * LAMP_UNIT / max(dist2, LAMP_RADIUS * LAMP_RADIUS);
-}
-
-vec3 lights_at(vec3 origin, vec3 normal) {
-    vec3 sum = vec3(0.0);
-    LampList list = lamps_at(origin);
-    uint count = lamp_list_size(list);
-    [[dont_unroll]] for (uint k = 0u; k < count; k++) {
-        Lamp lamp = lamp_list_get(list, k);
-        if (lamp_reaches(lamp, origin)) {
-            sum += shade_lamp(origin, normal, lamp.pos, lamp.color.rgb);
-        }
-    }
-    // The flame is the list's last lamp. The same occlusion test stops it at a wall.
-    return sum;
-}
-
+// Lamps shadow-tested per ray hit (lamps_light: that many chosen by their light, or
+// every lamp where fewer light the hit), so a hit costs the same for 5 lamps or 100.
+// A tier probe averages hundreds of rays over its passes, so two per hit settle on
+// the light of every lamp. A world probe is rebuilt from 16 rays each time, so it
+// takes more per ray to keep its error small.
+const uint TIER_LAMP_PICKS = 2u;
+const uint WORLD_LAMP_PICKS = 8u;
 
 float ray_spin3(vec3 p) {
     return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
@@ -115,7 +79,8 @@ struct TraceHit {
     float reflect;
 };
 
-TraceHit trace_hit(vec3 origin, vec3 dir, float t0, float t1) {
+// `picks` and `u` choose the lamps at the hit (lamps_light).
+TraceHit trace_hit(vec3 origin, vec3 dir, float t0, float t1, uint picks, float u) {
     TraceHit result;
     result.iv = vec4(0.0, 0.0, 0.0, -2.0);
     result.pos = origin;
@@ -129,7 +94,7 @@ TraceHit trace_hit(vec3 origin, vec3 dir, float t0, float t1) {
     vec3 pos = origin + dir * hit.t;
     // Only the light that reaches the face. A dark side under a lamp stays dark and
     // takes its share from the bounce below, like any other face.
-    vec3 direct = lights_at(pos + hit.normal * 0.03, hit.normal);
+    vec3 direct = lamps_light(pos + hit.normal * 0.03, hit.normal, false, picks, u);
     vec3 tint = mix(vec3(1.0), hit.albedo, hit.color_mix);
     result.iv = vec4(tint * hit.reflect * direct, hit.t);
     result.pos = pos;
@@ -246,7 +211,7 @@ void write_world(bool bounce) {
     float cube_w[6] = float[6](0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     for (uint d = 0u; d < WORLD_DIRS; d++) {
         vec3 ray = sphere_dir(d, WORLD_DIRS, spin);
-        TraceHit hit = trace_hit(pos, ray, 0.0, 8.0);
+        TraceHit hit = trace_hit(pos, ray, 0.0, 8.0, WORLD_LAMP_PICKS, fract(spin + float(d) * 0.61803399));
         if (bounce && hit.iv.a >= 0.0) {
             // Light arriving at the hit, from the tier around the hit (the same light the
             // tier probes take), or from the world probes beyond the tier.
@@ -322,8 +287,9 @@ void bounce_at2(vec3 pos, vec3 normal, uint twice_far, out vec3 once, out vec3 t
 // every bounce carried that gain. One cosine-distributed ray from the hit per probe
 // ray (the probe averages hundreds) corrects it as the picture's near_field does: if
 // it meets a surface within reach, that direction takes the light leaving the surface
-// instead of its share of the probes' answer. `u` picks the direction.
-void tier_bounce_at(vec3 pos, vec3 n, uint twice_far, uint tier_twice, vec2 u, out vec3 once, out vec3 twice) {
+// instead of its share of the probes' answer. `u` picks the direction, `pick` the
+// lamps at the surface met.
+void tier_bounce_at(vec3 pos, vec3 n, uint twice_far, uint tier_twice, vec2 u, float pick, out vec3 once, out vec3 twice) {
     uint base[8];
     float weight[8];
     uint count = tier_taps(pos, n, tier_faces_of(n).x, base, weight);
@@ -360,7 +326,7 @@ void tier_bounce_at(vec3 pos, vec3 n, uint twice_far, uint tier_twice, vec2 u, o
     }
     vec3 at = origin + dir * hit.t;
     vec3 tint = mix(vec3(1.0), hit.albedo, hit.color_mix);
-    vec3 direct = lights_at(at + hit.normal * 0.03, hit.normal);
+    vec3 direct = lamps_light(at + hit.normal * 0.03, hit.normal, false, TIER_LAMP_PICKS, pick);
     // The surface met takes the probes' cube turned to its face, one order lower for
     // the order-limited cube, the full light when feeding back.
     vec3 near_once = tint * hit.reflect * direct;
@@ -458,7 +424,7 @@ void write_tier() {
         vec3 r3 = vec3(0.0);
         if (d < rays) {
             ray = turn * sphere_dir(d, rays, 0.0);
-            TraceHit hit = trace_hit(pos, ray, 0.0, TIER_RAY_END);
+            TraceHit hit = trace_hit(pos, ray, 0.0, TIER_RAY_END, TIER_LAMP_PICKS, fract(ray_spin3(pos - work.w * 0.29) + float(d) * 0.56984029));
             if (hit.iv.a >= 0.0) {
                 vec3 once;
                 vec3 twice;
@@ -466,7 +432,8 @@ void write_tier() {
                     fract(ray_spin3(hit.pos + work.w * 0.37) + float(d) * 0.61803399),
                     fract(ray_spin3(hit.pos * 1.7 - work.w * 0.21) + float(d) * 0.75487767)
                 );
-                tier_bounce_at(hit.pos, hit.normal, WORLD_CUBE_OFFSET, TIER_CUBE3, u, once, twice);
+                float pick = fract(ray_spin3(hit.pos * 2.3 + work.w * 0.11) + float(d) * 0.38196601);
+                tier_bounce_at(hit.pos, hit.normal, WORLD_CUBE_OFFSET, TIER_CUBE3, u, pick, once, twice);
                 vec3 k = hit.tint * hit.reflect * WORLD_IRR;
                 r1 = hit.iv.rgb;
                 r2 = hit.iv.rgb + k * once;

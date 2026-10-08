@@ -406,6 +406,19 @@ bool scene_ray(vec3 origin, vec3 dir, float t0, float t1, out SceneHit hit) {
     return scene_ray_masked(origin, dir, t0, t1, SCENE_ALL, hit);
 }
 
+// True when anything opaque lies between a and b. Unlike scene_occluded a start
+// inside a solid is not tested: a caller with many segments from one point tests it
+// once.
+bool scene_segment_blocked(vec3 a, vec3 b) {
+    vec3 delta = b - a;
+    float dist = length(delta);
+    if (dist < 1.0e-3) {
+        return false;
+    }
+    SceneHit hit;
+    return scene_ray(a, delta / dist, 1.0e-4, dist - 1.0e-3, hit);
+}
+
 // Strictly inside a solid or wall, or above the roof over the floor footprint. A
 // point on a face is outside.
 bool scene_inside(vec3 p) {
@@ -531,4 +544,93 @@ Lamp lamp_list_get(LampList list, uint k) {
     }
     uint word = k < list.suns.y ? list.suns.x + k : list.near.x + (k - list.suns.y);
     return scene_lamp(grid_word(word));
+}
+
+// A unit white lamp 7 m above a white painted floor stays near 0.37.
+const float LAMP_UNIT = 72.0;
+// Radius of a lamp bulb. Outside it a lamp falls off with the inverse square.
+const float LAMP_RADIUS = 0.1;
+
+// Light a lamp brings to a face at origin before any shadow test (zero out of its
+// range or behind the face), and the point a shadow ray runs to. A two-sided face
+// (a camera card) takes the light on either side.
+vec3 lamp_light(Lamp lamp, vec3 origin, vec3 normal, bool two_sided, out vec3 target) {
+    target = origin;
+    if (!lamp_reaches(lamp, origin)) {
+        return vec3(0.0);
+    }
+    vec3 toward;
+    float dist2;
+    if (lamp.pos.w > 0.5) {
+        // A sun's xyz is the direction its rays travel. It uses the same unit as a
+        // lamp 7 m away.
+        toward = -normalize(lamp.pos.xyz);
+        target = origin + toward * 80.0;
+        dist2 = 49.0;
+    } else {
+        toward = lamp.pos.xyz - origin;
+        float dist = max(length(toward), 1.0e-4);
+        toward /= dist;
+        target = lamp.pos.xyz;
+        dist2 = dist * dist;
+    }
+    float nd = dot(toward, normal);
+    if (two_sided) {
+        nd = abs(nd);
+    }
+    if (nd <= 0.0) {
+        return vec3(0.0);
+    }
+    return lamp.color.rgb * nd * LAMP_UNIT / max(dist2, LAMP_RADIUS * LAMP_RADIUS);
+}
+
+// Shadowed light at a face at origin from the lamps of its list. Where at most
+// `picks` lamps light the face, each is shadow-tested: the exact sum. Where more do,
+// `picks` of them are chosen in proportion to their unshadowed light, and a chosen
+// lamp's shadowed light is divided by the number of times it is expected to be
+// chosen: an unbiased estimate of the same sum for `picks` shadow rays, however many
+// lamps light the face. The choice is systematic: points (j + u) / picks along the
+// running total of the lamps' light, j = 0 .. picks - 1, u in [0, 1), so a lamp
+// with that share s of the light is chosen floor or ceil of s * picks times, and a
+// caller that averages many samples (a probe, a pixel's rays) varies u to cover them.
+// The unshadowed light is cheap; the shadow rays are the cost.
+vec3 lamps_light(vec3 origin, vec3 normal, bool two_sided, uint picks, float u) {
+    // A face inside a solid sees no lamp: one test instead of one per shadow ray.
+    if (scene_inside(origin)) {
+        return vec3(0.0);
+    }
+    LampList list = lamps_at(origin);
+    uint count = lamp_list_size(list);
+    float total = 0.0;
+    uint lit = 0u;
+    [[dont_unroll]] for (uint k = 0u; k < count; k++) {
+        vec3 target;
+        vec3 light = lamp_light(lamp_list_get(list, k), origin, normal, two_sided, target);
+        float w = light.r + light.g + light.b;
+        total += w;
+        lit += w > 0.0 ? 1u : 0u;
+    }
+    bool exact = lit <= picks;
+    // Light per pick.
+    float step = total / float(max(picks, 1u));
+    float run = 0.0;
+    vec3 sum = vec3(0.0);
+    [[dont_unroll]] for (uint k = 0u; k < count && lit > 0u; k++) {
+        vec3 target;
+        vec3 light = lamp_light(lamp_list_get(list, k), origin, normal, two_sided, target);
+        float w = light.r + light.g + light.b;
+        if (w <= 0.0) {
+            continue;
+        }
+        float times = 1.0;
+        if (!exact) {
+            float before = ceil(run / step - u);
+            run += w;
+            times = ceil(run / step - u) - before;
+        }
+        if (times > 0.0 && !scene_segment_blocked(origin, target)) {
+            sum += exact ? light : light * (times * step / w);
+        }
+    }
+    return sum;
 }

@@ -684,14 +684,14 @@ mod tests {
                 "shader reflectance left the Rust field"
             );
             assert!(
-                source.contains("const float LAMP_UNIT = 72.0;"),
-                "shader lamp unit left the Rust field"
-            );
-            assert!(
                 source.contains("#include \"scene_data.glsl\""),
                 "shader left the shared scene block"
             );
         }
+        assert!(
+            include_str!("../shaders/scene_rays.glsl").contains("const float LAMP_UNIT = 72.0;"),
+            "shader lamp unit left the Rust field"
+        );
         let scene_data = include_str!("../shaders/scene_data.glsl");
         assert!(
             scene_data.contains("vec4 view_grid;"),
