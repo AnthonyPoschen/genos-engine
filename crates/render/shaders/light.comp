@@ -285,7 +285,7 @@ void bounce_at2(vec3 pos, vec3 normal, uint twice_far, out vec3 once, out vec3 t
 // the hit. The probes around a hit sit up to a spacing away and see past the solids
 // beside it, so in corners and at the foot of a solid they answer too bright, and
 // every bounce carried that gain. One cosine-distributed ray from the hit per probe
-// ray (the probe averages hundreds) corrects it as the picture's near_field does: if
+// ray (the probe averages hundreds) corrects it as the picture's near_rays do: if
 // it meets a surface within reach, that direction takes the light leaving the surface
 // instead of its share of the probes' answer. `u` picks the direction, `pick` the
 // lamps at the surface met.
@@ -331,7 +331,7 @@ void tier_bounce_at(vec3 pos, vec3 n, uint twice_far, uint tier_twice, vec2 u, f
     // the order-limited cube, the full light when feeding back.
     vec3 near_once = tint * hit.reflect * direct;
     vec3 near_twice = tint * hit.reflect * (direct + WORLD_IRR * tier_cube_face(tier_twice == TIER_CUBE2 ? f1 : f2, hit.normal));
-    // One cosine-distributed sample of near_field's difference: along a direction that
+    // One cosine-distributed sample of near_rays' difference: along a direction that
     // meets a surface, that surface's light replaces what the probes see that way.
     once += near_once - tier_cube_dir(f1, dir);
     twice += near_twice - tier_cube_dir(f2, dir);

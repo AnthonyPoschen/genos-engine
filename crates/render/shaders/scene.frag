@@ -171,12 +171,21 @@ vec3 direct_at(vec3 pos, vec3 normal, bool two_sided);
 // whole hemisphere took too little away beside a wall (the cube's side faces see the
 // lit floor too), so corners and wall feet came out brighter than a path trace. With
 // nothing near, the answer is the probes' alone.
-vec3 near_field(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], vec3 far) {
+//
+// The rays are shared across each 2 x 2 pixel quad: the pixel `lane` of `lanes` casts
+// rays lane, lane + lanes, ...; the quad adds up what its pixels found (quad_sum).
+// Returns the summed difference (rgb) and the rays cast (a).
+vec4 near_rays(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], uint lane, uint lanes) {
     uint rays = scene.view_grid.z > 0.5 ? uint(scene.view_grid.z + 0.5) - 1u : NEAR_RAYS;
+    if (lane >= rays) {
+        return vec4(0.0);
+    }
+    float own = float((rays - lane + lanes - 1u) / lanes);
     float reach = TIER_NEAR_REACH * tier_spacing();
-    uint mask = rays == 0u ? 0u : near_candidates(pos, n, reach);
+    uint mask = near_candidates(pos, n, reach);
     if (mask == 0u) {
-        return far;
+        // Nothing near: every ray would leave the probes' answer as it is.
+        return vec4(0.0, 0.0, 0.0, own);
     }
     vec3 faces[6];
     tier_cube6(count, base, weight, TIER_CUBE3, faces);
@@ -192,7 +201,7 @@ vec3 near_field(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], vec
     float spin = (float(BAYER[cell.y * 4u + cell.x]) + 0.5) / (16.0 * float(rays));
     vec3 hit_light = vec3(0.0);
     vec3 share_hit = vec3(0.0);
-    for (uint k = 0u; k < rays; k++) {
+    for (uint k = lane; k < rays; k += lanes) {
         // Cosine-weighted spiral over the hemisphere.
         float u = (float(k) + 0.5) / float(rays);
         float r = sqrt(u);
@@ -209,34 +218,56 @@ vec3 near_field(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], vec
         vec3 incoming = direct_at(at, hit.normal, false) + 3.14159265 * tier_cube_face(faces, hit.normal);
         hit_light += tint * hit.reflect * incoming;
     }
-    if (all(lessThanEqual(share_hit, vec3(0.0))) && all(lessThanEqual(hit_light, vec3(0.0)))) {
-        return far;
-    }
-    return max(far + (hit_light - share_hit) / float(rays), vec3(0.0));
+    return vec4(hit_light - share_hit, own);
+}
+
+// The sum of `v` over the pixel's 2 x 2 quad. Fine derivatives are the difference to
+// the neighbour across x, then across y, so each pixel rebuilds its neighbours' values.
+// Every pixel of the quad must call it (all of a quad lies on one primitive).
+vec4 quad_sum(vec4 v) {
+    float sx = (uint(gl_FragCoord.x) & 1u) == 0u ? 1.0 : -1.0;
+    float sy = (uint(gl_FragCoord.y) & 1u) == 0u ? 1.0 : -1.0;
+    vec4 pair = 2.0 * v + sx * dFdxFine(v);
+    return 2.0 * pair + sy * dFdyFine(pair);
 }
 
 // Bounce light at a face: the persistent tier inside its window, the coarse world
 // probes beyond it. One tier at one spacing covers the whole window, so walking never
 // hands a wall from one probe level to another. Where no probe around a point holds
 // light yet (a brick still waiting for its first pass) the world probes answer.
-vec3 screen_bounce(vec3 world, vec3 face_n) {
+//
+// `quad`: the pixel's quad shares the near rays (every pixel of the quad must take
+// this path). `casts`: this pixel's rays count; a helper pixel or one inside a solid
+// adds nothing to its quad.
+vec3 screen_bounce(vec3 world, vec3 face_n, bool quad, bool casts) {
     float cover = tier_cover(world, 4.0);
     uint base[8];
     float weight[8];
     uint count = cover > 0.0 ? tier_taps(world, face_n, tier_faces_of(face_n).x, base, weight) : 0u;
+    uint lanes = quad ? 4u : 1u;
+    uint lane = quad ? (uint(gl_FragCoord.x) & 1u) + 2u * (uint(gl_FragCoord.y) & 1u) : 0u;
+    vec3 far = vec3(0.0);
+    vec4 near = vec4(0.0);
     if (count > 0u) {
-        vec3 far = vec3(0.0);
         for (uint k = 0u; k < count; k++) {
             far += weight[k] * tier_cube_at(base[k], TIER_CUBE3, face_n);
         }
-        vec3 near = near_field(world, face_n, count, base, weight, far);
-        if (cover >= 1.0) {
-            return near;
+        if (casts) {
+            near = near_rays(world, face_n, count, base, weight, lane, lanes);
         }
-        // Lift off the face. A point on the face can test as inside its own solid.
-        return mix(world_mean(world + face_n * 0.05, face_n), near, cover);
     }
-    return world_mean(world + face_n * 0.05, face_n);
+    if (quad) {
+        near = quad_sum(near);
+    }
+    if (count == 0u) {
+        return world_mean(world + face_n * 0.05, face_n);
+    }
+    vec3 lit = near.a > 0.5 ? max(far + near.rgb / near.a, vec3(0.0)) : far;
+    if (cover >= 1.0) {
+        return lit;
+    }
+    // Lift off the face. A point on the face can test as inside its own solid.
+    return mix(world_mean(world + face_n * 0.05, face_n), lit, cover);
 }
 
 
@@ -256,7 +287,7 @@ vec3 direct_at(vec3 pos, vec3 normal, bool two_sided) {
 }
 
 vec3 sample_field(vec2 xz) {
-    return screen_bounce(vec3(xz.x, 0.0, xz.y), vec3(0.0, 1.0, 0.0));
+    return screen_bounce(vec3(xz.x, 0.0, xz.y), vec3(0.0, 1.0, 0.0), false, true);
 }
 
 float sphere_chord(vec3 origin, vec3 dir, vec3 center, float radius) {
@@ -395,11 +426,14 @@ void main() {
     // A camera card is thin. The lamp can light the visible side from either face.
     bool two_sided = v_shade > 1.15 && v_shade < 1.5;
     vec3 direct = direct_at(v_pos, normal, two_sided);
-    // The probes store the cosine-weighted mean radiance. Irradiance is pi times that,
-    // and the direct term below is irradiance too.
-    vec3 bounce = 3.14159265 * screen_bounce(v_pos, normal);
     // A face point inside geometry (floor under a footprint) receives nothing.
-    if (inside_solid(v_pos + normal * 0.02)) {
+    bool inside = inside_solid(v_pos + normal * 0.02);
+    // The probes store the cosine-weighted mean radiance. Irradiance is pi times that,
+    // and the direct term below is irradiance too. A textured card can drop pixels
+    // (discard above), so only untextured faces share rays across their quads.
+    bool quad = v_uv.x < 0.0;
+    vec3 bounce = 3.14159265 * screen_bounce(v_pos, normal, quad, !inside && !gl_HelperInvocation);
+    if (inside) {
         bounce = vec3(0.0);
     }
     vec3 color = tone(albedo * LAMBERT * (direct + bounce));
