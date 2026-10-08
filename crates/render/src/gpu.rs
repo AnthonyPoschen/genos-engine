@@ -506,8 +506,9 @@ impl Renderer {
             (Some(self.tier.budget_rays(self.tier_ms)), crate::probe_tier::FIRST_RAYS)
         };
         self.gpu.tier_budget = budget;
-        // On-screen importance: changing bricks the camera sees take all their change
-        // passes in this build. A settling build takes everything anyway.
+        // On-screen importance: the bricks whose light the camera sees go first, and
+        // changing ones take all their change passes in this build. A settling build
+        // takes everything anyway.
         let camera = crate::probe_tier::TierCamera {
             eye: pack.eye,
             right: pack.view_right,
@@ -517,6 +518,8 @@ impl Renderer {
             tan_y: pack.view_tan,
         };
         let batch = self.tier.batch_seen(pack.eye, Some(&camera), budget, first);
+        let stats = self.tier.stats();
+        self.gpu.tier_seen = (stats.seen_settled, stats.seen_bricks);
         self.gpu.light_key = self.tier.light_gen();
         self.gpu.tier_batch = Some(batch);
     }
@@ -852,6 +855,8 @@ struct Gpu {
     plan_rounds: Vec<u32>,
     /// The ray budget of the last batch, None while settling. Printed by `GENOS_GPU_TIMES`.
     tier_budget: Option<u64>,
+    /// Bricks in view with no work left, and all bricks in view, for `GPU_MS`.
+    tier_seen: (usize, usize),
     /// Timed light builds the game has not taken yet (bounded).
     light_builds: VecDeque<LightBuildTimes>,
     compute_layout: Handle,
@@ -1511,6 +1516,7 @@ impl Gpu {
                 tier_time: None,
                 plan_rounds: Vec::new(),
                 tier_budget: None,
+                tier_seen: (0, 0),
                 light_builds: VecDeque::new(),
                 compute_layout: std::ptr::null_mut(),
                 compute_pipe: std::ptr::null_mut(),
@@ -2372,7 +2378,7 @@ impl Gpu {
         let builds = times.builds.max(1) as f64;
         let l = times.light.map(|v| v / builds);
         eprintln!(
-            "GPU_MS frames={} raster+near={:.3} aa({:?})={:.3} overlay={:.3} copy={:.3} frame={:.3} | light builds={} per_frame={:.2} copy={:.3} world_direct={:.3} world_bounce={:.3} tier={:.3} tier_rays={:.0} light_per_frame={:.3} | builds_per_s={:.0} tier_builds_per_s={:.0} max_tier_rays={} budget_rays={} fps={:.0}",
+            "GPU_MS frames={} raster+near={:.3} aa({:?})={:.3} overlay={:.3} copy={:.3} frame={:.3} | light builds={} per_frame={:.2} copy={:.3} world_direct={:.3} world_bounce={:.3} tier={:.3} tier_rays={:.0} light_per_frame={:.3} | builds_per_s={:.0} tier_builds_per_s={:.0} max_tier_rays={} budget_rays={} seen_settled={}/{} fps={:.0}",
             times.frames,
             f[0],
             antialias,
@@ -2392,6 +2398,8 @@ impl Gpu {
             f64::from(times.tier_builds) / seconds,
             times.max_rays,
             self.tier_budget.map_or_else(|| "settle".to_string(), |b| b.to_string()),
+            self.tier_seen.0,
+            self.tier_seen.1,
             n / seconds,
         );
         if !times.placed {

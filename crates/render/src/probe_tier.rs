@@ -55,6 +55,28 @@ impl SurfaceBox {
         (0..3).all(|i| self.min[i] <= max[i] && self.max[i] >= min[i])
     }
 
+    /// Where the ray from `origin` along `dir` enters the box: the distance and the axis
+    /// of the face it enters through. None when it misses or starts inside.
+    fn entry(&self, origin: [f32; 3], dir: [f32; 3]) -> Option<(f32, usize)> {
+        let (mut t0, mut t1, mut axis) = (f32::MIN, f32::MAX, 0);
+        for i in 0..3 {
+            if dir[i].abs() < 1.0e-9 {
+                if origin[i] < self.min[i] || origin[i] > self.max[i] {
+                    return None;
+                }
+                continue;
+            }
+            let (a, b) = ((self.min[i] - origin[i]) / dir[i], (self.max[i] - origin[i]) / dir[i]);
+            let (near, far) = (a.min(b), a.max(b));
+            if near > t0 {
+                t0 = near;
+                axis = i;
+            }
+            t1 = t1.min(far);
+        }
+        (t0 <= t1 && t0 > 1.0e-4).then_some((t0, axis))
+    }
+
     /// True when the segment `a`..`b` passes through the box.
     fn crosses(&self, a: [f32; 3], b: [f32; 3]) -> bool {
         let (mut t0, mut t1) = (0.0_f32, 1.0_f32);
@@ -533,8 +555,8 @@ pub struct TierBatch {
     pub rounds: Vec<u32>,
 }
 
-/// The camera, for on-screen importance: changing bricks it sees take all their
-/// change passes at once.
+/// The camera, for on-screen importance: the bricks whose light it sees go first, and
+/// changing ones take all their change passes at once.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TierCamera {
     pub eye: [f32; 3],
@@ -546,20 +568,16 @@ pub struct TierCamera {
     pub tan_y: f32,
 }
 
-impl TierCamera {
-    /// True when the sphere at `center` of `radius` may show: it is not wholly behind
-    /// the eye or outside a side of the view.
-    fn sees(&self, center: [f32; 3], radius: f32) -> bool {
-        let d = [center[0] - self.eye[0], center[1] - self.eye[1], center[2] - self.eye[2]];
-        let dot = |a: [f32; 3]| a[0] * d[0] + a[1] * d[1] + a[2] * d[2];
-        let (x, y, z) = (dot(self.right), dot(self.up), dot(self.forward));
-        if z < -radius {
-            return false;
-        }
-        let side = |t: f32, v: f32| v.abs() <= z * t + radius * (1.0 + t * t).sqrt();
-        side(self.tan_x, x) && side(self.tan_y, y)
-    }
-}
+/// Rays across the view each frame (columns, rows) for what the camera sees. The
+/// grid turns by a sixteenth of a cell each frame, so 16 frames cover the screen on a
+/// grid four times as fine.
+const LOOK_COLS: u32 = 32;
+const LOOK_ROWS: u32 = 18;
+/// Share of a brick's seen count kept from one frame to the next: a brick stays seen
+/// for a few frames after the rays last met it.
+const LOOK_KEEP: f32 = 0.75;
+/// Seen count above which a brick is in view.
+const LOOK_SEEN: f32 = 0.05;
 
 /// Counts for reports.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -576,6 +594,9 @@ pub struct TierStats {
     /// Changing bricks on screen in the last batch: they took all their change passes
     /// in it (as far as the budget reached).
     pub critical_bricks: usize,
+    /// Bricks whose light the camera sees, and how many of those have no work left.
+    pub seen_bricks: usize,
+    pub seen_settled: usize,
     /// CPU microseconds the last batch took to pick its work, on-screen test included.
     pub batch_us: u32,
 }
@@ -607,6 +628,9 @@ pub struct TierState {
     /// The last budget a batch was cut to: only a build that used most of its budget
     /// teaches the per-ray cost.
     last_budget: Option<u64>,
+    /// Per slot: how much of the view reads the brick's light ([`Self::look`]).
+    seen: Vec<f32>,
+    look_frame: u32,
 }
 
 /// How far one slower build moves the per-ray cost toward itself.
@@ -658,6 +682,8 @@ impl TierState {
             live: 0,
             ms_per_ray: None,
             last_budget: None,
+            seen: Vec::new(),
+            look_frame: 0,
         }
     }
 
@@ -810,6 +836,9 @@ impl TierState {
                 (self.slots.len() - 1) as u32
             }
         };
+        if let Some(seen) = self.seen.get_mut(slot as usize) {
+            *seen = 0.0;
+        }
         self.slots[slot as usize] = Some(Slot {
             brick,
             mask,
@@ -881,7 +910,12 @@ impl TierState {
             batch_us: self.batch_us,
             ..TierStats::default()
         };
-        for slot in self.slots.iter().flatten() {
+        for (index, slot) in self.slots.iter().enumerate() {
+            let Some(slot) = slot else { continue };
+            if self.in_view(index) {
+                stats.seen_bricks += 1;
+                stats.seen_settled += usize::from(self.class(slot).is_none());
+            }
             stats.bricks += 1;
             stats.live_probes += slot.mask.count_ones() as usize;
             if slot.filled {
@@ -895,6 +929,55 @@ impl TierState {
             }
         }
         stats
+    }
+
+    fn in_view(&self, slot: usize) -> bool {
+        self.seen.get(slot).is_some_and(|&s| s > LOOK_SEEN)
+    }
+
+    /// What the camera sees: rays across the view meet the nearest surface, and each
+    /// hit counts toward the bricks of the probes the picture reads there (around the
+    /// point lifted half a spacing off the face). Faces hidden behind others and
+    /// everything off screen count nothing. The counts fade by [`LOOK_KEEP`] a frame.
+    pub fn look(&mut self, camera: &TierCamera) {
+        self.seen.resize(self.slots.len(), 0.0);
+        for seen in &mut self.seen {
+            *seen *= LOOK_KEEP;
+        }
+        const BAYER: [u32; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+        let turn = BAYER[(self.look_frame % 16) as usize];
+        self.look_frame = self.look_frame.wrapping_add(1);
+        let (ox, oy) = (((turn % 4) as f32 + 0.5) / 4.0, ((turn / 4) as f32 + 0.5) / 4.0);
+        let spacing = self.layout.spacing;
+        for row in 0..LOOK_ROWS {
+            for col in 0..LOOK_COLS {
+                let sx = ((col as f32 + ox) / LOOK_COLS as f32 * 2.0 - 1.0) * camera.tan_x;
+                let sy = (1.0 - (row as f32 + oy) / LOOK_ROWS as f32 * 2.0) * camera.tan_y;
+                let d = [0, 1, 2].map(|i| camera.forward[i] + camera.right[i] * sx + camera.up[i] * sy);
+                let len = d.iter().map(|v| v * v).sum::<f32>().sqrt().max(1.0e-6);
+                let dir = d.map(|v| v / len);
+                let Some((t, axis)) = self.boxes.iter().filter_map(|b| b.entry(camera.eye, dir)).min_by(|a, b| a.0.total_cmp(&b.0))
+                else {
+                    continue;
+                };
+                let mut q = [0, 1, 2].map(|i| camera.eye[i] + dir[i] * t);
+                q[axis] -= dir[axis].signum() * 0.5 * spacing;
+                let cell = q.map(|v| (v / spacing - 0.5).floor() as i32);
+                let mut bricks: Vec<[i32; 3]> = Vec::with_capacity(8);
+                for corner in 0..8 {
+                    let c = [0, 1, 2].map(|i| cell[i] + (corner >> i & 1));
+                    let brick = c.map(|v| v.div_euclid(BRICK));
+                    if !bricks.contains(&brick) {
+                        bricks.push(brick);
+                    }
+                }
+                for brick in bricks {
+                    if let Some(&slot) = self.by_brick.get(&brick) {
+                        self.seen[slot as usize] += 1.0;
+                    }
+                }
+            }
+        }
     }
 
     /// 0: the brick's first pass. 1 + k: change pass k is due. REFINE_CLASS: refining.
@@ -986,24 +1069,44 @@ impl TierState {
         first: u32,
     ) -> TierBatch {
         let started = std::time::Instant::now();
+        if let Some(camera) = camera {
+            self.look(camera);
+        }
         let span = self.layout.brick_span();
-        let radius = span * 0.866;
+        // The bricks in view, and those beside them: their light reaches the view in
+        // one bounce.
+        let in_view: std::collections::HashSet<[i32; 3]> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.in_view(*index))
+            .filter_map(|(_, slot)| slot.as_ref().map(|s| s.brick))
+            .collect();
+        let beside = |brick: [i32; 3]| {
+            (0..27).any(|k| {
+                let o = [k % 3 - 1, k / 3 % 3 - 1, k / 9 - 1];
+                in_view.contains(&[0, 1, 2].map(|i| brick[i] + o[i]))
+            })
+        };
         // (group, calm, class, distance, brick, slot): group 0 waits for its first light,
-        // 1 is changing and on screen, 2 is the rest. Inside a group the bricks moving
-        // geometry reached (not calm) go first.
+        // 1 is in view, 2 is beside the view, 3 is the rest. Inside a group the bricks
+        // moving geometry reached (not calm) go first, then pass k before pass k + 1.
+        // So what the camera sees converges, refining included, before any work the
+        // view cannot see.
         let mut due: Vec<(u32, bool, u32, f32, [i32; 3], u32)> = Vec::new();
         for (index, slot) in self.slots.iter().enumerate() {
             let Some(slot) = slot else { continue };
             let Some(class) = self.class(slot) else { continue };
             let center = [0, 1, 2].map(|i| (slot.brick[i] as f32 + 0.5) * span);
             let d: f32 = (0..3).map(|i| (center[i] - eye[i]).powi(2)).sum();
-            let changing = class >= 1 && class < REFINE_CLASS;
             let group = if class == 0 {
                 0
-            } else if changing && camera.is_some_and(|c| c.sees(center, radius)) {
+            } else if in_view.contains(&slot.brick) {
                 1
-            } else {
+            } else if beside(slot.brick) {
                 2
+            } else {
+                3
             };
             due.push((group, !slot.urgent, class, d, slot.brick, index as u32));
         }
@@ -1045,7 +1148,7 @@ impl TierState {
             }
         }
         let mut count = picked.len();
-        for deepen in [1, 2] {
+        for deepen in [1, 2, 3] {
             for entry in picked.iter_mut().filter(|e| e.3 == deepen) {
                 let slot = self.slots[entry.0 as usize].as_ref().expect("due slot");
                 // Only a whole pass deepens: the next passes run all the brick's probes.
@@ -1072,7 +1175,7 @@ impl TierState {
                 REFINE_CLASS => (REFINE_RAYS, false, None),
                 _ => (CHANGE_RAYS, false, Some(CHANGE_HISTORY)),
             };
-            if group == 1 {
+            if group == 1 && class < REFINE_CLASS {
                 critical += 1;
             }
             for round in 0..passes {
@@ -1351,6 +1454,49 @@ mod tests {
     }
 
     #[test]
+    fn the_view_takes_the_budget_before_hidden_bricks() {
+        // A hall split by a wall at x = 0. The camera stands at x = -6 and looks away
+        // from the wall, down -x: the bricks behind it and past the wall are hidden,
+        // many of them nearer than the far end of the view.
+        let mut boxes = hall(30.0);
+        boxes.push(SurfaceBox { min: [0.0, 0.0, -20.0], max: [0.2, 3.0, 20.0] });
+        let eye = [-6.0, 1.7, 0.0];
+        let camera = TierCamera {
+            eye,
+            right: [0.0, 0.0, -1.0],
+            up: [0.0, 1.0, 0.0],
+            forward: [-1.0, 0.0, 0.0],
+            tan_x: 0.7,
+            tan_y: 0.4,
+        };
+        let lamp = TierLight { pos: [3.0, 2.5, 0.0], color: [1.0; 3], directional: false };
+        let mut tier = TierState::default();
+        tier.update(boxes.clone(), 0, eye, &[lamp]);
+        settle(&mut tier, eye);
+        for _ in 0..16 {
+            tier.look(&camera);
+        }
+        let seen = tier.stats().seen_bricks;
+        assert!(seen > 0 && seen * 3 < tier.stats().bricks, "{seen} of {} bricks seen", tier.stats().bricks);
+        // Every brick in view lies ahead of the camera, on its side of the wall.
+        for (index, slot) in tier.slots.iter().enumerate() {
+            let slot = slot.as_ref().unwrap();
+            if tier.in_view(index) {
+                assert!(slot.brick[0] * BRICK <= -2, "{:?} is behind the camera", slot.brick);
+            }
+        }
+        // The lamp moves; a budget of a few passes goes to the bricks in view first.
+        let moved = TierLight { pos: [3.0, 2.5, 1.0], ..lamp };
+        tier.update(boxes, 0, eye, &[moved]);
+        let budget = 4 * u64::from(BRICK_PROBES) * u64::from(CHANGE_RAYS);
+        let batch = tier.batch_seen(eye, Some(&camera), Some(budget), FIRST_RAYS);
+        assert!(!batch.items.is_empty());
+        for item in &batch.items {
+            assert!(tier.in_view(item.slot as usize), "{:?} is out of view", item.brick);
+        }
+    }
+
+    #[test]
     fn a_lamp_shadow_of_a_moved_solid_reaches_far_bricks() {
         // A low lamp beside the crate throws its shadow far across the floor.
         let lamp = TierLight { pos: [-2.0, 0.6, 0.0], color: [4.0; 3], directional: false };
@@ -1411,9 +1557,7 @@ mod tests {
         assert!(!deep.is_empty());
         for slot in &deep {
             let brick = tier.slots[*slot as usize].as_ref().unwrap().brick;
-            let span = tier.layout.brick_span();
-            let center = [0, 1, 2].map(|i| (brick[i] as f32 + 0.5) * span);
-            assert!(camera.sees(center, span * 0.866), "a brick off screen went deep: {brick:?}");
+            assert!(tier.in_view(*slot as usize), "a brick out of view went deep: {brick:?}");
         }
         assert!(tier.stats().critical_bricks > 0);
         tier.commit(&batch);
