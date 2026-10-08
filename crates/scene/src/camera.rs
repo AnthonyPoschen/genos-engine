@@ -141,8 +141,7 @@ impl Camera {
         for solid in &scene.solids {
             physics.insert(solid_collider(solid));
         }
-        physics.insert(view_capsule(self.position));
-        self.view = physics.count - 1;
+        self.view = physics.insert(view_capsule(self.position));
         self.solid_origin = Some(1 + scene.walls.len());
         self.physics = physics;
         let count = self.codimations.len();
@@ -184,7 +183,7 @@ impl Camera {
             return;
         };
         let index = origin + solid;
-        if index >= self.physics.count || index == self.view {
+        if index >= self.physics.bodies.len() || index == self.view {
             return;
         }
         let body = &mut self.physics.bodies[index];
@@ -276,7 +275,7 @@ fn drive_codimations(camera: &mut Camera, scene: &Scene, dt: f32) {
             center_lift(solid)
         };
         let body_index = origin + solid_index;
-        if body_index >= camera.physics.count || body_index == camera.view {
+        if body_index >= camera.physics.bodies.len() || body_index == camera.view {
             continue;
         }
         if !camera.codimations[index].running {
@@ -370,7 +369,7 @@ pub fn update(camera: &mut Camera, scene: &mut Scene, actions: &Actions, dt: f32
     camera.step_left += dt;
     while camera.step_left >= STEP {
         drive_codimations(camera, scene, STEP);
-        camera.physics = step(&camera.physics, STEP);
+        step(&mut camera.physics, STEP);
         write_codimations(camera, scene);
         camera.step_left -= STEP;
     }

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use genos_math::{Mat4, Quat, Vec3};
-use genos_physics::{step, Body, World, GRAVITY, MAX_BODIES};
+use genos_physics::{step, Body, World, GRAVITY};
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
@@ -36,12 +36,15 @@ fn timed_math_and_physics_batch_does_not_allocate() {
     let mut matrix = Mat4::from_translation(Vec3::new(0.4, -0.2, 1.5));
     let turn = Quat::from_axis_angle(Vec3::Y, 0.35);
     let mut world = World::new(GRAVITY);
-    for index in 0..MAX_BODIES {
+    for index in 0..32 {
         let x = index as f32 * 0.75;
         let mut body = Body::sphere(Vec3::new(x, 1.0 + (index % 3) as f32, 0.0), 1.0, 0.4);
         body.velocity = Vec3::new(0.2, -1.0, 0.1);
-        assert!(world.insert(body));
+        world.insert(body);
     }
+
+    // The first step sizes the contact lists the later ones reuse.
+    step(&mut world, 1.0 / 60.0);
 
     let started = Instant::now();
     let before = ALLOCS.load(Ordering::Relaxed);
@@ -50,15 +53,15 @@ fn timed_math_and_physics_batch_does_not_allocate() {
         matrix = spin * matrix;
         direction = turn.rotate(direction);
     }
-    world = step(&world, 1.0 / 60.0);
+    step(&mut world, 1.0 / 60.0);
     let allocs = ALLOCS.load(Ordering::Relaxed) - before;
     let elapsed = started.elapsed();
-    std::hint::black_box((direction, matrix, world));
+    std::hint::black_box((direction, matrix, &world));
 
     println!("normalizes={BATCH}");
     println!("matrix_multiplies={BATCH}");
     println!("quaternion_direction_rotations={BATCH}");
-    println!("physics_step_bodies={}", world.count);
+    println!("physics_step_bodies={}", world.bodies.len());
     println!("allocs={allocs}");
     println!("elapsed_ns={}", elapsed.as_nanos());
     println!(

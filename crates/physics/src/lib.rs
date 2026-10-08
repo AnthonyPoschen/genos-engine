@@ -1,7 +1,9 @@
 //! One collision step for dynamic bodies.
 //!
-//! `step` copies the world and returns the next world. Gravity, a move wish,
-//! spring forces, and contact run in that call. The call does not allocate.
+//! `step` advances the world in place. Gravity, a move wish, spring forces, and
+//! contact run in that call. Contact tests only the pairs whose bounds meet (a
+//! sweep along X), so a world of hundreds of walls costs about as much per body as
+//! a room of a few.
 //! Gravity is along -Y. There is no air drag. Shapes are a sphere, a capsule,
 //! a box, a plane, and a mesh reduced to a few convex pieces.
 
@@ -12,9 +14,6 @@ use genos_math::{Quat, Vec3};
 
 /// Acceleration along -Y, in meters per second squared.
 pub const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
-
-/// Bodies stored in one world. A step does not grow this set.
-pub const MAX_BODIES: usize = 32;
 
 /// Vertices stored on one convex hull piece.
 pub const MAX_HULL_VERTS: usize = 12;
@@ -239,63 +238,60 @@ impl Body {
     }
 }
 
-const fn resting() -> Body {
-    Body::sphere(Vec3::ZERO, 0.0, 0.0)
+/// Bodies plus a gravity acceleration.
+#[derive(Clone, Debug)]
+pub struct World {
+    pub bodies: Vec<Body>,
+    pub gravity: Vec3,
+    /// The contact pass's lists, kept so a step after the first does not allocate.
+    pairs: contact::Pairs,
 }
 
-/// Bodies plus a gravity acceleration. Only `bodies[..count]` is live.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct World {
-    pub bodies: [Body; MAX_BODIES],
-    pub count: usize,
-    pub gravity: Vec3,
+/// Two worlds are equal when their bodies and gravity are.
+impl PartialEq for World {
+    fn eq(&self, other: &Self) -> bool {
+        self.bodies == other.bodies && self.gravity == other.gravity
+    }
 }
 
 impl World {
     pub const fn new(gravity: Vec3) -> Self {
         Self {
-            bodies: [resting(); MAX_BODIES],
-            count: 0,
+            bodies: Vec::new(),
             gravity,
+            pairs: contact::Pairs::new(),
         }
     }
 
-    /// Store one body. Returns false when the world is already full.
-    pub fn insert(&mut self, body: Body) -> bool {
-        if self.count >= MAX_BODIES {
-            return false;
-        }
-        self.bodies[self.count] = body;
-        self.count += 1;
-        true
+    /// Store one body. Returns its index in `bodies`.
+    pub fn insert(&mut self, body: Body) -> usize {
+        self.bodies.push(body);
+        self.bodies.len() - 1
     }
 }
 
-/// Advance every live body by `dt` seconds.
-#[must_use]
-pub fn step(world: &World, dt: f32) -> World {
-    let mut next = *world;
+/// Advance every body by `dt` seconds.
+pub fn step(world: &mut World, dt: f32) {
     if !(dt > 0.0) {
-        return next;
+        return;
     }
-    let live = next.count;
-    for body in &mut next.bodies[..live] {
-        apply_forces(body, next.gravity, dt);
+    let gravity = world.gravity;
+    for body in &mut world.bodies {
+        apply_forces(body, gravity, dt);
         if body.motor {
             body.velocity.x = body.wish.x;
             body.velocity.z = body.wish.z;
         }
     }
-    for body in &mut next.bodies[..live] {
+    for body in &mut world.bodies {
         if body.inverse_mass == 0.0 {
             continue;
         }
         body.position += body.velocity * dt;
     }
     for _ in 0..4 {
-        contact::collide(&mut next.bodies[..live]);
+        contact::collide(&mut world.bodies, &mut world.pairs);
     }
-    next
 }
 
 fn apply_forces(body: &mut Body, gravity: Vec3, dt: f32) {

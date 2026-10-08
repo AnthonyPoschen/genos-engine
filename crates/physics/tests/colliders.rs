@@ -32,10 +32,10 @@ fn a_capsule_stops_against_a_round_mesh() {
     let mut capsule = Body::capsule(Vec3::new(0.0, 0.6, 1.4), 1.0, 0.3, 0.4);
     capsule.velocity = Vec3::new(0.0, 0.0, -3.0);
     let mut world = World::new(Vec3::ZERO);
-    assert!(world.insert(capsule));
-    assert!(world.insert(Body::mesh(Vec3::ZERO, 0.0, &triangles)));
+    world.insert(capsule);
+    world.insert(Body::mesh(Vec3::ZERO, 0.0, &triangles));
     for _ in 0..60 {
-        world = step(&world, 1.0 / 60.0);
+        step(&mut world, 1.0 / 60.0);
     }
     let z = world.bodies[0].position.z;
     assert!(z > 0.9, "capsule entered the round mesh at z {z}");
@@ -53,10 +53,10 @@ fn an_overlapping_capsule_and_box_separate_along_the_contact() {
     capsule.velocity = Vec3::new(-1.5, 0.0, 0.0);
     let wall = Body::cuboid(Vec3::ZERO, 0.0, Vec3::new(0.5, 0.5, 0.5));
     let mut world = World::new(Vec3::ZERO);
-    assert!(world.insert(capsule));
-    assert!(world.insert(wall));
+    world.insert(capsule);
+    world.insert(wall);
     for _ in 0..30 {
-        world = step(&world, 1.0 / 60.0);
+        step(&mut world, 1.0 / 60.0);
     }
     let center = world.bodies[0].position.x;
     assert!(
@@ -76,10 +76,10 @@ fn a_capsule_rests_on_a_static_box() {
     let capsule = Body::capsule(Vec3::new(0.0, 2.2, 0.0), 1.0, 0.25, 0.4);
     let stand = Body::cuboid(Vec3::new(0.0, 0.5, 0.0), 0.0, Vec3::new(1.0, 0.5, 1.0));
     let mut world = World::new(genos_physics::GRAVITY);
-    assert!(world.insert(capsule));
-    assert!(world.insert(stand));
+    world.insert(capsule);
+    world.insert(stand);
     for _ in 0..240 {
-        world = step(&world, 1.0 / 60.0);
+        step(&mut world, 1.0 / 60.0);
     }
     let bottom = world.bodies[0].position.y - 0.65;
     within(bottom, 1.0, 0.05);
@@ -95,10 +95,10 @@ fn a_box_rests_on_a_static_plane() {
     let block = Body::cuboid(Vec3::new(0.2, 2.0, -0.4), 2.0, Vec3::new(0.3, 0.5, 0.4));
     let floor = Body::plane(Vec3::Y, 0.0);
     let mut world = World::new(genos_physics::GRAVITY);
-    assert!(world.insert(block));
-    assert!(world.insert(floor));
+    world.insert(block);
+    world.insert(floor);
     for _ in 0..240 {
-        world = step(&world, 1.0 / 60.0);
+        step(&mut world, 1.0 / 60.0);
     }
     let bottom = world.bodies[0].position.y - 0.5;
     within(bottom, 0.0, 0.05);
@@ -244,10 +244,10 @@ fn a_dense_concave_mesh_blocks_only_its_volume() {
     let mut mover = Body::sphere(Vec3::new(1.0, 0.5, -0.8), 1.0, 0.15);
     mover.velocity = Vec3::new(0.0, 0.0, 3.0);
     let mut world = World::new(Vec3::ZERO);
-    assert!(world.insert(mover));
-    assert!(world.insert(Body::mesh(Vec3::ZERO, 0.0, &triangles)));
+    world.insert(mover);
+    world.insert(Body::mesh(Vec3::ZERO, 0.0, &triangles));
     for _ in 0..90 {
-        world = step(&world, 1.0 / 60.0);
+        step(&mut world, 1.0 / 60.0);
     }
     let z = world.bodies[0].position.z;
     assert!(z < 0.25, "sphere passed through the solid, z {z}");
@@ -256,10 +256,10 @@ fn a_dense_concave_mesh_blocks_only_its_volume() {
     let mut clear = Body::sphere(Vec3::new(1.6, 0.5, 1.6), 1.0, 0.1);
     clear.velocity = Vec3::new(3.0, 0.0, 0.0);
     let mut open = World::new(Vec3::ZERO);
-    assert!(open.insert(clear));
-    assert!(open.insert(Body::mesh(Vec3::ZERO, 0.0, &triangles)));
+    open.insert(clear);
+    open.insert(Body::mesh(Vec3::ZERO, 0.0, &triangles));
     for _ in 0..60 {
-        open = step(&open, 1.0 / 60.0);
+        step(&mut open, 1.0 / 60.0);
     }
     let x = open.bodies[0].position.x;
     assert!(
@@ -377,10 +377,10 @@ fn rest_against_hull(
     };
     body.velocity = velocity;
     let mut world = World::new(Vec3::ZERO);
-    assert!(world.insert(body));
-    assert!(world.insert(Body::mesh(Vec3::ZERO, 0.0, triangles)));
+    world.insert(body);
+    world.insert(Body::mesh(Vec3::ZERO, 0.0, triangles));
     for _ in 0..120 {
-        world = step(&world, 1.0 / 60.0);
+        step(&mut world, 1.0 / 60.0);
     }
     let pos = world.bodies[0].position;
     let along = pos.dot(outward);

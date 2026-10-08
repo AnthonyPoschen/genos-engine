@@ -31,7 +31,7 @@ fn near(got: f32, expected: f32) -> bool {
 fn the_loaded_room_has_one_capsule_and_a_collider_on_each_object() {
     let scene = shipped();
     let camera = placed(&scene, -6.0, 6.0, 0.0);
-    let bodies = &camera.physics.bodies[..camera.physics.count];
+    let bodies = &camera.physics.bodies[..];
     let dynamic: Vec<_> = bodies
         .iter()
         .filter(|body| body.inverse_mass > 0.0)

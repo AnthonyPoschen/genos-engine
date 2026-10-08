@@ -194,7 +194,7 @@ fn a_separate_client_discovers_reads_and_edits_the_live_scene() {
     );
 
     let stepped = host.camera();
-    let bodies = &stepped.physics.bodies[..stepped.physics.count];
+    let bodies = &stepped.physics.bodies[..];
     assert_eq!(bodies.len(), 1 + drawn.walls.len() + drawn.solids.len() + 1);
     assert!(
         bodies.iter().any(|body| {

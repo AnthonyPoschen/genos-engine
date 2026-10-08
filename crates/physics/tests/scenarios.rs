@@ -14,11 +14,11 @@ fn within_one_percent(got: f32, expected: f32) {
 fn free_fall_matches_half_gt_squared_and_gt() {
     let start = Vec3::new(2.0, 8.0, -3.0);
     let mut world = World::new(GRAVITY);
-    assert!(world.insert(Body::sphere(start, 1.5, 0.25)));
+    world.insert(Body::sphere(start, 1.5, 0.25));
     let dt = 0.001;
     let steps = 400;
     for _ in 0..steps {
-        world = step(&world, dt);
+        step(&mut world, dt);
     }
     let t = steps as f32 * dt;
     let body = world.bodies[0];
@@ -36,9 +36,9 @@ fn a_static_surface_bounce_keeps_restitution() {
     body.velocity = Vec3::new(0.0, -impact, 0.0);
     body.restitution = restitution;
     let mut world = World::new(GRAVITY);
-    assert!(world.insert(body));
-    assert!(world.insert(Body::plane(Vec3::Y, 0.0)));
-    world = step(&world, 0.001);
+    world.insert(body);
+    world.insert(Body::plane(Vec3::Y, 0.0));
+    step(&mut world, 0.001);
     within_one_percent(world.bodies[0].velocity.y, restitution * impact);
 }
 
@@ -48,9 +48,9 @@ fn zero_restitution_does_not_separate() {
     body.velocity = Vec3::new(0.0, -6.0, 0.0);
     body.restitution = 0.0;
     let mut world = World::new(GRAVITY);
-    assert!(world.insert(body));
-    assert!(world.insert(Body::plane(Vec3::Y, 0.0)));
-    world = step(&world, 0.001);
+    world.insert(body);
+    world.insert(Body::plane(Vec3::Y, 0.0));
+    step(&mut world, 0.001);
     assert!(
         world.bodies[0].velocity.y <= 1.0e-4,
         "restitution 0 separated at {}",
@@ -69,9 +69,9 @@ fn unequal_masses_conserve_normal_momentum() {
     let light_speed = light.velocity.x;
     let heavy_speed = heavy.velocity.x;
     let mut world = World::new(GRAVITY);
-    assert!(world.insert(light));
-    assert!(world.insert(heavy));
-    world = step(&world, 1.0 / 60.0);
+    world.insert(light);
+    world.insert(heavy);
+    step(&mut world, 1.0 / 60.0);
     let a = world.bodies[0];
     let b = world.bodies[1];
     let after = a.mass() * a.velocity.x + b.mass() * b.velocity.x;
@@ -106,9 +106,10 @@ fn tangential_after(friction: f32) -> f32 {
     body.friction = friction;
     body.restitution = 0.0;
     let mut world = World::new(GRAVITY);
-    assert!(world.insert(body));
-    assert!(world.insert(Body::plane(Vec3::Y, 0.0)));
-    step(&world, 1.0 / 120.0).bodies[0].velocity.x
+    world.insert(body);
+    world.insert(Body::plane(Vec3::Y, 0.0));
+    step(&mut world, 1.0 / 120.0);
+    world.bodies[0].velocity.x
 }
 
 #[test]
@@ -128,12 +129,12 @@ fn a_spring_rests_at_mg_over_k_and_does_not_pass_through() {
         damping: 25.0,
     });
     let mut world = World::new(GRAVITY);
-    assert!(world.insert(body));
-    assert!(world.insert(Body::plane(Vec3::Y, 0.0)));
+    world.insert(body);
+    world.insert(Body::plane(Vec3::Y, 0.0));
     let mut lowest = rest;
     let dt = 0.001;
     for _ in 0..4_000 {
-        world = step(&world, dt);
+        step(&mut world, dt);
         lowest = lowest.min(world.bodies[0].position.y);
     }
     let body = world.bodies[0];
@@ -165,11 +166,11 @@ fn a_spring_released_away_from_balance_moves_back() {
         damping: 25.0,
     });
     let mut world = World::new(GRAVITY);
-    assert!(world.insert(body));
-    assert!(world.insert(Body::plane(Vec3::Y, 0.0)));
+    world.insert(body);
+    world.insert(Body::plane(Vec3::Y, 0.0));
     let start_error = ((rest - start_y) - target).abs();
     for _ in 0..200 {
-        world = step(&world, 0.001);
+        step(&mut world, 0.001);
     }
     let compression = rest - world.bodies[0].position.y;
     let error = (compression - target).abs();
@@ -177,4 +178,24 @@ fn a_spring_released_away_from_balance_moves_back() {
         error < start_error,
         "error {error} did not fall from {start_error}"
     );
+}
+
+#[test]
+fn a_ball_lands_on_its_own_pillar_among_hundreds() {
+    // A 20 x 20 field of static pillars, 2 m apart, far past the old 32-body world.
+    let mut world = World::new(GRAVITY);
+    for x in 0..20 {
+        for z in 0..20 {
+            let center = Vec3::new(x as f32 * 2.0, 0.5, z as f32 * 2.0);
+            world.insert(Body::cuboid(center, 0.0, Vec3::new(0.5, 0.5, 0.5)));
+        }
+    }
+    let ball = world.insert(Body::sphere(Vec3::new(14.0, 3.0, 22.0), 1.0, 0.25));
+    for _ in 0..240 {
+        step(&mut world, 1.0 / 120.0);
+    }
+    let body = world.bodies[ball];
+    assert!((body.position.y - 1.25).abs() < 0.02, "the ball rests at {}", body.position.y);
+    assert!(body.velocity.length() < 0.05, "the ball still moves at {:?}", body.velocity);
+    assert_eq!(world.bodies.len(), 401);
 }

@@ -243,9 +243,8 @@ fn main() {
     }
 }
 
-/// A fly camera at `view`. It has no colliders: the engine's physics world holds 32
-/// bodies, far fewer than the big building's walls, so the stress test flies through
-/// walls instead of walking.
+/// A fly camera at `view`. It has no colliders: the stress test flies through walls,
+/// so a view or a bench pose can sit anywhere in the building.
 fn camera_at(view: View) -> Camera {
     let (x, z, yaw, pitch) = view.pose();
     let mut camera = Camera::new(x, z, yaw);

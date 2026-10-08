@@ -10,13 +10,117 @@ use crate::{Body, Hull, Mesh, Piece, Shape};
 const SLOP: f32 = 0.001;
 const PERCENT: f32 = 0.8;
 
-pub(crate) fn collide(bodies: &mut [Body]) {
-    for i in 0..bodies.len() {
-        for j in (i + 1)..bodies.len() {
-            let (left, right) = bodies.split_at_mut(j);
-            collide_pair(&mut left[i], &mut right[0]);
+/// Scratch lists for [`collide`], kept across passes and steps.
+#[derive(Clone, Debug)]
+pub(crate) struct Pairs {
+    /// Bounded bodies: low corner, high corner, index; sorted by low X.
+    boxes: Vec<(Vec3, Vec3, u32)>,
+    planes: Vec<u32>,
+    pairs: Vec<(u32, u32)>,
+}
+
+impl Pairs {
+    pub(crate) const fn new() -> Self {
+        Self {
+            boxes: Vec::new(),
+            planes: Vec::new(),
+            pairs: Vec::new(),
         }
     }
+}
+
+/// Bounds grow this much, so a pair a contact earlier in the same pass pushed
+/// together is still tested.
+const BOUNDS_MARGIN: f32 = 0.02;
+
+/// One contact pass over every pair that can touch: bounds that meet (a sweep along
+/// X), and every bounded body against every plane. Two static bodies never move, so
+/// their pair is skipped. The pairs run in index order, the order a pass over every
+/// pair took.
+pub(crate) fn collide(bodies: &mut [Body], scratch: &mut Pairs) {
+    scratch.boxes.clear();
+    scratch.planes.clear();
+    scratch.pairs.clear();
+    for (index, body) in bodies.iter().enumerate() {
+        match bounds(body) {
+            Some((lo, hi)) => {
+                let margin = Vec3::new(BOUNDS_MARGIN, BOUNDS_MARGIN, BOUNDS_MARGIN);
+                scratch.boxes.push((lo - margin, hi + margin, index as u32));
+            }
+            None => scratch.planes.push(index as u32),
+        }
+    }
+    scratch.boxes.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
+    let moving = |i: u32| bodies[i as usize].inverse_mass != 0.0;
+    for (at, &(lo, hi, i)) in scratch.boxes.iter().enumerate() {
+        for &(lo2, hi2, j) in &scratch.boxes[at + 1..] {
+            if lo2.x > hi.x {
+                break;
+            }
+            let meet = lo2.y <= hi.y && lo.y <= hi2.y && lo2.z <= hi.z && lo.z <= hi2.z;
+            if meet && (moving(i) || moving(j)) {
+                scratch.pairs.push((i.min(j), i.max(j)));
+            }
+        }
+    }
+    for &plane in &scratch.planes {
+        for &(_, _, i) in &scratch.boxes {
+            if moving(i) || moving(plane) {
+                scratch.pairs.push((i.min(plane), i.max(plane)));
+            }
+        }
+    }
+    scratch.pairs.sort_unstable();
+    for &(i, j) in &scratch.pairs {
+        let (left, right) = bodies.split_at_mut(j as usize);
+        collide_pair(&mut left[i as usize], &mut right[0]);
+    }
+}
+
+/// World bounds of a body: low and high corners. None for a plane, which is
+/// unbounded.
+fn bounds(body: &Body) -> Option<(Vec3, Vec3)> {
+    let mut lo = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+    let mut hi = -lo;
+    let mut add = |p: Vec3| {
+        lo = Vec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+        hi = Vec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+    };
+    match body.shape {
+        Shape::Plane { .. } => return None,
+        Shape::Mesh(mesh) => {
+            for piece in mesh.pieces() {
+                match piece {
+                    Piece::Cuboid { center, half } => {
+                        for corner in 0..8 {
+                            let local = Vec3::new(
+                                if corner & 1 == 0 { -half.x } else { half.x },
+                                if corner & 2 == 0 { -half.y } else { half.y },
+                                if corner & 4 == 0 { -half.z } else { half.z },
+                            );
+                            add(body.position + body.orientation.rotate(*center + local));
+                        }
+                    }
+                    Piece::Hull(hull) => {
+                        for vert in &hull.verts[..hull.vert_count as usize] {
+                            add(body.position + body.orientation.rotate(*vert));
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                add(support_point(body, axis, None));
+                add(support_point(body, -axis, None));
+            }
+        }
+    }
+    if lo.x > hi.x {
+        // A mesh with no pieces: the position alone.
+        return Some((body.position, body.position));
+    }
+    Some((lo, hi))
 }
 
 fn collide_pair(a: &mut Body, b: &mut Body) {

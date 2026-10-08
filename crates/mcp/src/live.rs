@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
-use genos_physics::MAX_BODIES;
 use genos_scene::{
     look_direction, Camera, Floor, Light, Scene, Shape, Solid, Vec3, Wall, PITCH_LIMIT,
 };
@@ -444,9 +443,6 @@ fn spawn_object(inner: &mut Inner, arguments: &Value) -> Result<String, String> 
     let handle = match kind {
         "wall" => {
             reject_unused(Kind::Wall, &patch)?;
-            if !room_fits(inner.scene.walls.len() + 1, inner.scene.solids.len()) {
-                return Err("the room is full".into());
-            }
             let mut wall = Wall {
                 base: 0.0,
                 position: Vec3::ZERO,
@@ -467,9 +463,6 @@ fn spawn_object(inner: &mut Inner, arguments: &Value) -> Result<String, String> 
         }
         "solid" => {
             reject_unused(Kind::Solid, &patch)?;
-            if !room_fits(inner.scene.walls.len(), inner.scene.solids.len() + 1) {
-                return Err("the room is full".into());
-            }
             let mut solid = Solid {
                 yaw: 0.0,
                 shape: Shape::Square,
@@ -567,10 +560,6 @@ fn set_camera(inner: &mut Inner, arguments: &Value) -> Result<(), String> {
 fn touch_scene(inner: &mut Inner) {
     inner.scene_revision = inner.scene_revision.wrapping_add(1);
     inner.published = inner.published.wrapping_add(1);
-}
-
-fn room_fits(walls: usize, solids: usize) -> bool {
-    walls.saturating_add(solids).saturating_add(2) <= MAX_BODIES
 }
 
 fn yaw_pitch(look: Vec3) -> (f32, f32) {
