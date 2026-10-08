@@ -54,6 +54,30 @@ impl SurfaceBox {
     fn overlaps(&self, min: [f32; 3], max: [f32; 3]) -> bool {
         (0..3).all(|i| self.min[i] <= max[i] && self.max[i] >= min[i])
     }
+
+    /// True when the segment `a`..`b` passes through the box.
+    fn crosses(&self, a: [f32; 3], b: [f32; 3]) -> bool {
+        let (mut t0, mut t1) = (0.0_f32, 1.0_f32);
+        for i in 0..3 {
+            let d = b[i] - a[i];
+            if d.abs() < 1.0e-9 {
+                if a[i] < self.min[i] || a[i] > self.max[i] {
+                    return false;
+                }
+                continue;
+            }
+            let (mut near, mut far) = ((self.min[i] - a[i]) / d, (self.max[i] - a[i]) / d);
+            if near > far {
+                std::mem::swap(&mut near, &mut far);
+            }
+            t0 = t0.max(near);
+            t1 = t1.min(far);
+            if t0 > t1 {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// Every surface in a scene as boxes: floor, walls, solids (a circle uses its square)
@@ -234,36 +258,13 @@ pub fn place_probe(boxes: &[SurfaceBox], p: [f32; 3], layout: &TierLayout) -> Op
 /// Allocate the bricks of the window around `eye` that hold a live probe.
 pub fn allocate(boxes: &[SurfaceBox], eye: [f32; 3], layout: &TierLayout) -> BrickSet {
     let (lo, hi) = layout.window(eye);
-    let span = layout.brick_span();
     let mut set = BrickSet::default();
     for by in lo[1]..=hi[1] {
         for bz in lo[2]..=hi[2] {
             for bx in lo[0]..=hi[0] {
                 set.window_bricks += 1;
                 let brick = [bx, by, bz];
-                let min = brick.map(|b| b as f32 * span - layout.reach);
-                let max = brick.map(|b| (b + 1) as f32 * span + layout.reach);
-                let nearby: Vec<SurfaceBox> =
-                    boxes.iter().copied().filter(|b| b.overlaps(min, max)).collect();
-                if nearby.is_empty() {
-                    continue;
-                }
-                let mut mask = 0u64;
-                let mut positions = vec![[0.0f32; 3]; BRICK_PROBES as usize];
-                for ly in 0..BRICK {
-                    for lz in 0..BRICK {
-                        for lx in 0..BRICK {
-                            let p = layout.probe_position(brick, [lx, ly, lz]);
-                            let bit = (ly * BRICK + lz) * BRICK + lx;
-                            positions[bit as usize] = p;
-                            if let Some(q) = place_probe(&nearby, p, layout) {
-                                mask |= 1 << bit;
-                                positions[bit as usize] = q;
-                            }
-                        }
-                    }
-                }
-                if mask != 0 {
+                if let Some((mask, positions)) = place_brick(boxes, brick, layout) {
                     set.bricks.push(brick);
                     set.masks.push(mask);
                     set.positions.push(positions);
@@ -273,6 +274,108 @@ pub fn allocate(boxes: &[SurfaceBox], eye: [f32; 3], layout: &TierLayout) -> Bri
         }
     }
     set
+}
+
+/// Bounds of the surfaces that can make a probe of `brick` live, dead or moved.
+fn brick_reach(brick: [i32; 3], layout: &TierLayout) -> ([f32; 3], [f32; 3]) {
+    let span = layout.brick_span();
+    (brick.map(|b| b as f32 * span - layout.reach), brick.map(|b| (b + 1) as f32 * span + layout.reach))
+}
+
+/// The live probes of `brick` and where each probe sits, or none when no probe is live.
+fn place_brick(boxes: &[SurfaceBox], brick: [i32; 3], layout: &TierLayout) -> Option<(u64, Vec<[f32; 3]>)> {
+    let (min, max) = brick_reach(brick, layout);
+    let nearby: Vec<SurfaceBox> = boxes.iter().copied().filter(|b| b.overlaps(min, max)).collect();
+    if nearby.is_empty() {
+        return None;
+    }
+    let mut mask = 0u64;
+    let mut positions = vec![[0.0f32; 3]; BRICK_PROBES as usize];
+    for ly in 0..BRICK {
+        for lz in 0..BRICK {
+            for lx in 0..BRICK {
+                let p = layout.probe_position(brick, [lx, ly, lz]);
+                let bit = (ly * BRICK + lz) * BRICK + lx;
+                positions[bit as usize] = p;
+                if let Some(q) = place_probe(&nearby, p, layout) {
+                    mask |= 1 << bit;
+                    positions[bit as usize] = q;
+                }
+            }
+        }
+    }
+    (mask != 0).then_some((mask, positions))
+}
+
+/// Margin, in metres, around a moved solid inside which every brick relights.
+const GEOMETRY_MARGIN: f32 = 1.0;
+/// Bounce reach of a moved solid, in its own sizes past the margin. A diffuse face of
+/// size s seen from d away covers about s^2 / (pi d^2) of the sky: past two sizes its
+/// light, or the light it hid, is under a tenth of what a face beside it gets.
+const GEOMETRY_SIZES: f32 = 2.0;
+/// How far a directional light's shadow of a moved solid is followed, in metres.
+const SUN_SHADOW: f32 = 80.0;
+
+/// True when moving the solids `moved` (their old and new places) can change the light
+/// in the brick `lo`..`hi`: it is within their bounce reach, or a light that reaches it
+/// passes one of them on the way (their shadow fell or now falls on it).
+fn geometry_reaches(moved: &[SurfaceBox], lights: &[TierLight], lo: [f32; 3], hi: [f32; 3]) -> bool {
+    let center = [0, 1, 2].map(|i| 0.5 * (lo[i] + hi[i]));
+    let half = 0.5 * (0..3).map(|i| (hi[i] - lo[i]).powi(2)).sum::<f32>().sqrt();
+    for m in moved {
+        let size = (0..3).map(|i| m.max[i] - m.min[i]).fold(0.0_f32, f32::max);
+        let reach = GEOMETRY_MARGIN + GEOMETRY_SIZES * size;
+        let gap2: f32 = (0..3)
+            .map(|i| (m.min[i] - hi[i]).max(lo[i] - m.max[i]).max(0.0).powi(2))
+            .sum();
+        if gap2 <= reach * reach {
+            return true;
+        }
+        let m_center = [0, 1, 2].map(|i| 0.5 * (m.min[i] + m.max[i]));
+        let m_half = 0.5 * (0..3).map(|i| (m.max[i] - m.min[i]).powi(2)).sum::<f32>().sqrt();
+        for light in lights.iter().filter(|l| l.reaches(lo, hi)) {
+            // The rays from the light to the brick fill a cone (a cylinder for a
+            // directional light); at the solid it is as wide as the brick times the
+            // solid's share of the way there.
+            let (to, share) = if light.directional {
+                let len = light.pos.iter().map(|v| v * v).sum::<f32>().sqrt().max(1.0e-6);
+                ([0, 1, 2].map(|i| center[i] - light.pos[i] / len * SUN_SHADOW), 1.0)
+            } else {
+                let dist = |p: [f32; 3]| (0..3).map(|i| (p[i] - light.pos[i]).powi(2)).sum::<f32>().sqrt();
+                (light.pos, ((dist(m_center) + m_half) / dist(center).max(1.0e-6)).min(1.0))
+            };
+            let grow = half * share;
+            let grown = SurfaceBox { min: m.min.map(|v| v - grow), max: m.max.map(|v| v + grow) };
+            if grown.crosses(center, to) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The boxes of `old` that `new` lacks, then those of `new` that `old` lacks: the old
+/// and new places of everything that moved, appeared or went.
+fn moved_boxes(old: &[SurfaceBox], new: &[SurfaceBox]) -> Vec<SurfaceBox> {
+    let key = |b: &SurfaceBox| [b.min, b.max].map(|v| v.map(f32::to_bits));
+    let mut count: std::collections::HashMap<_, i32> = std::collections::HashMap::new();
+    for b in old {
+        *count.entry(key(b)).or_default() += 1;
+    }
+    for b in new {
+        *count.entry(key(b)).or_default() -= 1;
+    }
+    let mut out = Vec::new();
+    for (list, sign) in [(old, 1), (new, -1)] {
+        for b in list {
+            let left = count.get_mut(&key(b)).expect("counted");
+            if *left * sign > 0 {
+                *left -= sign;
+                out.push(*b);
+            }
+        }
+    }
+    out
 }
 
 
@@ -367,6 +470,8 @@ struct Slot {
     /// Probes (bits of `mask`) that already ran the pass under way. A pass larger than
     /// a build's budget runs a share of the probes per build; it counts once all have.
     done: u64,
+    /// Moving geometry reached the brick: its change passes go before a light's.
+    urgent: bool,
 }
 
 /// Passes a brick takes after a light or geometry change that reaches it. The stored
@@ -480,7 +585,9 @@ pub struct TierStats {
 #[derive(Clone, Debug)]
 pub struct TierState {
     pub layout: TierLayout,
+    /// Keys of the boxes and of the surface colours last seen.
     geometry: Option<u64>,
+    materials: Option<u64>,
     boxes: Vec<SurfaceBox>,
     window: Option<([i32; 3], [i32; 3])>,
     slots: Vec<Option<Slot>>,
@@ -536,6 +643,7 @@ impl TierState {
         Self {
             layout,
             geometry: None,
+            materials: None,
             boxes: Vec::new(),
             window: None,
             slots: Vec::new(),
@@ -568,24 +676,33 @@ impl TierState {
         lights: &[TierLight],
     ) -> bool {
         let mut changed = false;
-        let geometry = boxes_key(&boxes) ^ materials.rotate_left(17);
-        let mut realloc = false;
-        let mut geometry_changed = false;
-        if self.geometry != Some(geometry) {
-            self.geometry = Some(geometry);
-            self.boxes = boxes;
-            realloc = true;
+        let geometry = boxes_key(&boxes);
+        // What a geometry change reaches: nothing, the bricks near the boxes that moved
+        // (`Some`), or every brick (`None`: new surface colours).
+        let mut reached: Option<Vec<SurfaceBox>> = Some(Vec::new());
+        if self.materials != Some(materials) {
+            reached = None;
+            self.materials = Some(materials);
             self.light_gen += 1;
             changed = true;
-            geometry_changed = true;
+        }
+        let mut moved = Vec::new();
+        if self.geometry != Some(geometry) {
+            self.geometry = Some(geometry);
+            moved = moved_boxes(&self.boxes, &boxes);
+            self.boxes = boxes;
+            if let Some(list) = reached.as_mut() {
+                list.extend_from_slice(&moved);
+            }
+            self.light_gen += 1;
+            changed = true;
         }
         let window = self.layout.window(eye);
         if self.window != Some(window) {
             self.window = Some(window);
-            realloc = true;
-        }
-        if realloc {
             changed |= self.reallocate(eye);
+        } else if !moved.is_empty() {
+            changed |= self.reallocate_near(&moved, eye);
         }
         // Lamps that changed, where they were and where they are now.
         let mut reach: Vec<TierLight> = Vec::new();
@@ -600,21 +717,111 @@ impl TierState {
             self.light_gen += 1;
             changed = true;
         }
-        if geometry_changed || !reach.is_empty() {
-            let span = self.layout.brick_span();
-            for slot in self.slots.iter_mut().flatten() {
-                if !slot.filled {
-                    continue;
-                }
-                let lo = slot.brick.map(|b| b as f32 * span);
-                let hi = slot.brick.map(|b| (b + 1) as f32 * span);
-                if geometry_changed || reach.iter().any(|l| l.reaches(lo, hi)) {
-                    slot.change_left = CHANGE_PASSES;
-                    slot.done = 0;
+        let geometry_reach = |lo, hi| match &reached {
+            None => true,
+            Some(list) => !list.is_empty() && geometry_reaches(list, &self.lights, lo, hi),
+        };
+        let span = self.layout.brick_span();
+        let mut relit = Vec::new();
+        for (index, slot) in self.slots.iter().enumerate() {
+            let Some(slot) = slot.as_ref().filter(|s| s.filled) else { continue };
+            let lo = slot.brick.map(|b| b as f32 * span);
+            let hi = slot.brick.map(|b| (b + 1) as f32 * span);
+            let urgent = geometry_reach(lo, hi);
+            if urgent || reach.iter().any(|l| l.reaches(lo, hi)) {
+                relit.push((index, urgent));
+            }
+        }
+        for (index, urgent) in relit {
+            let slot = self.slots[index].as_mut().expect("relit slot");
+            slot.change_left = CHANGE_PASSES;
+            slot.done = 0;
+            slot.urgent |= urgent;
+        }
+        changed
+    }
+
+    /// Place the probes again in the bricks the boxes `moved` can reach, after only
+    /// they moved: the rest of the window keeps its probes, so dragging a solid does
+    /// not walk the whole window every frame.
+    fn reallocate_near(&mut self, moved: &[SurfaceBox], eye: [f32; 3]) -> bool {
+        let Some((lo, hi)) = self.window else { return false };
+        let span = self.layout.brick_span();
+        let reach = self.layout.reach;
+        let mut changed = false;
+        for m in moved {
+            let first = [0, 1, 2].map(|i| (((m.min[i] - reach) / span).floor() as i32).max(lo[i]));
+            let last = [0, 1, 2].map(|i| (((m.max[i] + reach) / span).floor() as i32).min(hi[i]));
+            for by in first[1]..=last[1] {
+                for bz in first[2]..=last[2] {
+                    for bx in first[0]..=last[0] {
+                        let brick = [bx, by, bz];
+                        match place_brick(&self.boxes, brick, &self.layout) {
+                            Some((mask, positions)) => {
+                                if !self.by_brick.contains_key(&brick)
+                                    && self.by_brick.len() >= TIER_SLOT_CAP as usize
+                                {
+                                    // Full: the nearest bricks win, as a whole placement picks.
+                                    return self.reallocate(eye) || changed;
+                                }
+                                changed |= self.place(brick, mask, positions);
+                            }
+                            None => {
+                                if let Some(slot) = self.by_brick.remove(&brick) {
+                                    self.slots[slot as usize] = None;
+                                    self.free.push(slot);
+                                    self.free.sort_unstable_by(|a, b| b.cmp(a));
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
+        self.live = self.slots.iter().flatten().map(|s| s.mask.count_ones() as usize).sum();
         changed
+    }
+
+    /// Put `brick`'s probes in its slot, or in a new one. A brick whose probes came
+    /// alive, died or moved keeps its light and takes the change passes: a probe that
+    /// moved starts from the light it had a fraction of a spacing away, a new one from
+    /// nothing (the picture skips it until its first pass), and a dead one is cleared
+    /// by the next pass. Returns true when anything changed.
+    fn place(&mut self, brick: [i32; 3], mask: u64, positions: Vec<[f32; 3]>) -> bool {
+        if let Some(&slot) = self.by_brick.get(&brick) {
+            let entry = self.slots[slot as usize].as_mut().expect("mapped slot");
+            if entry.mask == mask && entry.positions == positions {
+                return false;
+            }
+            entry.mask = mask;
+            entry.positions = positions;
+            entry.done = 0;
+            if entry.filled {
+                entry.change_left = CHANGE_PASSES;
+                entry.urgent = true;
+            }
+            return true;
+        }
+        let slot = match self.free.pop() {
+            Some(slot) => slot,
+            None => {
+                self.slots.push(None);
+                (self.slots.len() - 1) as u32
+            }
+        };
+        self.slots[slot as usize] = Some(Slot {
+            brick,
+            mask,
+            positions,
+            filled: false,
+            samples: 0,
+            change_left: 0,
+            done: 0,
+            urgent: false,
+        });
+        self.by_brick.insert(brick, slot);
+        true
     }
 
     fn reallocate(&mut self, eye: [f32; 3]) -> bool {
@@ -655,40 +862,8 @@ impl TierState {
         }
         // Lowest free slot first, so the used span stays short.
         self.free.sort_unstable_by(|a, b| b.cmp(a));
-        for ((brick, mask), positions) in set.bricks.iter().zip(&set.masks).zip(&set.positions) {
-            if let Some(&slot) = self.by_brick.get(brick) {
-                let entry = self.slots[slot as usize].as_mut().expect("mapped slot");
-                if entry.mask != *mask || entry.positions != *positions {
-                    // A probe came alive, died or moved: light the whole brick again.
-                    entry.mask = *mask;
-                    entry.positions = positions.clone();
-                    entry.filled = false;
-                    entry.samples = 0;
-                    entry.change_left = 0;
-                    entry.done = 0;
-                    changed = true;
-                }
-                continue;
-            }
-            let slot = match self.free.pop() {
-                Some(slot) => slot,
-                None => {
-                    self.slots.push(None);
-                    (self.slots.len() - 1) as u32
-                }
-            };
-            self.slots[slot as usize] =
-                Some(Slot {
-                brick: *brick,
-                mask: *mask,
-                positions: positions.clone(),
-                filled: false,
-                samples: 0,
-                change_left: 0,
-                done: 0,
-            });
-            self.by_brick.insert(*brick, slot);
-            changed = true;
+        for ((brick, mask), positions) in set.bricks.iter().zip(&set.masks).zip(set.positions) {
+            changed |= self.place(*brick, *mask, positions);
         }
         self.live = set.live_probes;
         changed
@@ -813,9 +988,10 @@ impl TierState {
         let started = std::time::Instant::now();
         let span = self.layout.brick_span();
         let radius = span * 0.866;
-        // (group, class, distance, brick, slot): group 0 waits for its first light,
-        // 1 is changing and on screen, 2 is the rest.
-        let mut due: Vec<(u32, u32, f32, [i32; 3], u32)> = Vec::new();
+        // (group, calm, class, distance, brick, slot): group 0 waits for its first light,
+        // 1 is changing and on screen, 2 is the rest. Inside a group the bricks moving
+        // geometry reached (not calm) go first.
+        let mut due: Vec<(u32, bool, u32, f32, [i32; 3], u32)> = Vec::new();
         for (index, slot) in self.slots.iter().enumerate() {
             let Some(slot) = slot else { continue };
             let Some(class) = self.class(slot) else { continue };
@@ -829,9 +1005,11 @@ impl TierState {
             } else {
                 2
             };
-            due.push((group, class, d, slot.brick, index as u32));
+            due.push((group, !slot.urgent, class, d, slot.brick, index as u32));
         }
-        due.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.total_cmp(&b.2)).then(a.3.cmp(&b.3)));
+        due.sort_by(|a, b| {
+            a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)).then(a.3.total_cmp(&b.3)).then(a.4.cmp(&b.4))
+        });
         // Every brick due takes its next pass first, in that order, as far as the budget
         // goes. What is left deepens changing bricks: those on screen first, then the
         // rest, up to every change pass they have left, one round per pass. A brick's
@@ -840,7 +1018,7 @@ impl TierState {
         // (slot, passes, cost of a whole pass, group, probes of the first pass)
         let mut picked: Vec<(u32, u32, u64, u32, u64)> = Vec::new();
         let mut spent = 0u64;
-        for &(group, class, _, _, index) in &due {
+        for &(group, _, class, _, _, index) in &due {
             let slot = self.slots[index as usize].as_ref().expect("due slot");
             let rays = u64::from(match class {
                 0 => first,
@@ -1014,9 +1192,11 @@ impl TierState {
                 slot.filled = true;
                 slot.samples = item.rays;
                 slot.change_left = CHANGE_PASSES;
+                slot.urgent = false;
             } else if let Some(history) = item.history {
                 // The shader keeps at most `history` of the stored rays.
                 slot.change_left = slot.change_left.saturating_sub(1);
+                slot.urgent &= slot.change_left > 0;
                 slot.samples = (slot.samples.min(history) + item.rays).min(TARGET_SAMPLES);
             } else {
                 slot.samples = (slot.samples + item.rays).min(TARGET_SAMPLES);
@@ -1123,6 +1303,63 @@ mod tests {
         let b = allocate(&[floor], [1.3, 1.7, 0.0], &layout);
         let shared = a.bricks.iter().filter(|x| b.bricks.contains(x)).count();
         assert!(shared >= a.bricks.len() - 25 * 2, "a small move keeps nearly every brick");
+    }
+
+    /// A wide hall: a floor 40 m across and one wall, and a 1 m crate at `x`.
+    fn hall(x: f32) -> Vec<SurfaceBox> {
+        vec![
+            SurfaceBox { min: [-20.0, 0.0, -20.0], max: [20.0, 0.0, 20.0] },
+            SurfaceBox { min: [-20.0, 0.0, -20.2], max: [20.0, 3.0, -20.0] },
+            SurfaceBox { min: [x - 0.5, 0.0, -0.5], max: [x + 0.5, 1.0, 0.5] },
+        ]
+    }
+
+    fn settle(tier: &mut TierState, eye: [f32; 3]) {
+        while tier.has_work() {
+            let batch = tier.batch(eye, None, REFINE_RAYS);
+            tier.commit(&batch);
+        }
+    }
+
+    #[test]
+    fn a_moved_solid_relights_only_the_bricks_it_reaches() {
+        let eye = [0.0, 1.7, 4.0];
+        let lamp = TierLight { pos: [0.0, 2.5, 3.0], color: [1.0; 3], directional: false };
+        let mut tier = TierState::default();
+        tier.update(hall(0.0), 0, eye, &[lamp]);
+        settle(&mut tier, eye);
+        let bricks = tier.stats().bricks;
+        tier.update(hall(0.6), 0, eye, &[lamp]);
+        let stats = tier.stats();
+        // Every brick stays readable: none goes back to waiting for its first light.
+        assert_eq!(stats.filled_bricks, stats.bricks);
+        assert!(stats.changing_bricks > 0);
+        assert!(stats.changing_bricks * 4 < bricks, "{} of {bricks} bricks relight", stats.changing_bricks);
+        // The bricks around the crate relight first; a far corner of the hall does not.
+        let batch = tier.batch(eye, Some(u64::from(CHANGE_RAYS)), REFINE_RAYS);
+        let near = batch.items[0].brick.map(|b| (b as f32 + 0.5) * tier.layout.brick_span());
+        assert!(near[0].abs() < 5.0 && near[2].abs() < 5.0, "{near:?}");
+        let far = tier.by_brick[&[4, 0, 4]] as usize;
+        assert_eq!(tier.slots[far].as_ref().unwrap().change_left, 0);
+        // Placing only near the crate gives the probes a whole placement gives.
+        let whole = allocate(&hall(0.6), eye, &tier.layout);
+        for ((brick, mask), positions) in whole.bricks.iter().zip(&whole.masks).zip(&whole.positions) {
+            let slot = tier.slots[tier.by_brick[brick] as usize].as_ref().unwrap();
+            assert_eq!((slot.mask, &slot.positions), (*mask, positions), "{brick:?}");
+        }
+        assert_eq!(whole.bricks.len(), tier.stats().bricks);
+    }
+
+    #[test]
+    fn a_lamp_shadow_of_a_moved_solid_reaches_far_bricks() {
+        // A low lamp beside the crate throws its shadow far across the floor.
+        let lamp = TierLight { pos: [-2.0, 0.6, 0.0], color: [4.0; 3], directional: false };
+        let moved = [hall(0.0)[2], hall(0.6)[2]];
+        let span = 4.0;
+        let behind = ([12.0, 0.0, -2.0], [12.0 + span, span, -2.0 + span]);
+        let aside = ([-2.0, 0.0, 12.0], [-2.0 + span, span, 12.0 + span]);
+        assert!(geometry_reaches(&moved, &[lamp], behind.0, behind.1));
+        assert!(!geometry_reaches(&moved, &[lamp], aside.0, aside.1));
     }
 
     fn room() -> Vec<SurfaceBox> {

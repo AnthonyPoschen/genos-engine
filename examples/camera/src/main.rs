@@ -539,7 +539,7 @@ fn run() -> Result<(), String> {
         }
         if flicker_frame {
             if let (Some(pixels), Some(bench)) = (pixels.as_ref(), bench.as_mut()) {
-                bench.flicker.take(pixels, renderer.width(), renderer.height());
+                bench.flicker_mut().take(pixels, renderer.width(), renderer.height());
             }
         }
         if want_read && (readback.is_some() || shot.is_some()) {
@@ -602,7 +602,11 @@ fn run() -> Result<(), String> {
 /// (the opening view, or `--eye`/`--pitch`); input is ignored. After a short warm-up the scene stands still for a third
 /// of the time, then the first lamp circles the boxes for a third, then it drops to
 /// beside the boxes and rises back (the settling clip), each time until the tier has
-/// no work left. One `BENCH` line per phase, then the program exits.
+/// no work left. Then the lamp orbits for the flicker phase, and the red box (or the
+/// first solid) is dragged across the floor: `Drag` times the frames while it moves,
+/// `Rest` how long its light takes to settle once it stops, and `DragFlicker` reads
+/// back every frame as it moves a fixed step a frame. One `BENCH` line per phase, then
+/// the program exits.
 struct Bench {
     camera: Camera,
     phase: BenchPhase,
@@ -627,7 +631,17 @@ struct Bench {
     /// The tier as of the last frame: bricks in it, and those still changing or due.
     tier: genos_render::TierStats,
     flicker: Flicker,
+    /// The solid the drag phases move, and where it started.
+    drag: Option<(usize, Vec3)>,
+    drag_flicker: Flicker,
 }
+
+/// How fast the drag phases move the solid, in metres a second, and for how long
+/// `Drag` moves it.
+const BENCH_DRAG_SPEED: f32 = 1.0;
+const BENCH_DRAG_TIME: Duration = Duration::from_millis(1500);
+/// The solid's step per frame in `DragFlicker`: the drag speed at 600 frames a second.
+const BENCH_DRAG_STEP: f32 = BENCH_DRAG_SPEED / 600.0;
 
 /// Frames the flicker phase measures (`GENOS_BENCH_FLICKER=<frames>`, 0 skips it).
 const BENCH_FLICKER_FRAMES: u32 = 240;
@@ -729,6 +743,9 @@ enum BenchPhase {
     Down,
     Up,
     Flicker,
+    Drag,
+    Rest,
+    DragFlicker,
 }
 
 /// The longest a drop or a rise may take to settle before the bench gives up on it.
@@ -746,6 +763,13 @@ impl Bench {
             return Err("GENOS_BENCH needs a lamp in the scene".into());
         }
         let now = Instant::now();
+        let flicker_frames = match std::env::var("GENOS_BENCH_FLICKER") {
+            Ok(v) => v.parse().map_err(|_| format!("GENOS_BENCH_FLICKER={v} is not frames"))?,
+            Err(_) => BENCH_FLICKER_FRAMES,
+        };
+        let drag = red_box_index(scene)
+            .or((!scene.solids.is_empty()).then_some(0))
+            .map(|i| (i, scene.solids[i].position));
         Ok(Some(Self {
             camera,
             phase: BenchPhase::Warmup,
@@ -763,13 +787,9 @@ impl Bench {
             next_shot: 0,
             shot: None,
             tier: genos_render::TierStats::default(),
-            flicker: Flicker {
-                frames: match std::env::var("GENOS_BENCH_FLICKER") {
-                    Ok(v) => v.parse().map_err(|_| format!("GENOS_BENCH_FLICKER={v} is not frames"))?,
-                    Err(_) => BENCH_FLICKER_FRAMES,
-                },
-                ..Flicker::default()
-            },
+            flicker: Flicker { frames: flicker_frames, ..Flicker::default() },
+            drag,
+            drag_flicker: Flicker { frames: flicker_frames, ..Flicker::default() },
         }))
     }
 
@@ -789,11 +809,19 @@ impl Bench {
             BenchPhase::Down => (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::Up),
             BenchPhase::Up => (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::Flicker),
             BenchPhase::Flicker => {
-                (self.flicker.measured >= self.flicker.frames).then_some(BenchPhase::Flicker)
+                (self.flicker.measured >= self.flicker.frames).then_some(BenchPhase::Drag)
+            }
+            BenchPhase::Drag => (elapsed >= BENCH_DRAG_TIME).then_some(BenchPhase::Rest),
+            BenchPhase::Rest => {
+                (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::DragFlicker)
+            }
+            BenchPhase::DragFlicker => {
+                (self.drag_flicker.measured >= self.drag_flicker.frames).then_some(BenchPhase::DragFlicker)
             }
         };
-        // A drop or a rise counts from its first frame; its first frame always has work.
-        let settle = matches!(self.phase, BenchPhase::Down | BenchPhase::Up);
+        // A drop, a rise or a rest counts from its first frame; its first frame always
+        // has work.
+        let settle = matches!(self.phase, BenchPhase::Down | BenchPhase::Up | BenchPhase::Rest);
         if settle && self.frames.len() > 1 && tier.changing_bricks == 0 && self.visible.is_none() {
             self.visible = Some(elapsed);
         }
@@ -810,14 +838,19 @@ impl Bench {
                 self.finish(elapsed, pending);
             }
             let last = match self.phase {
-                BenchPhase::Up => self.flicker.frames == 0,
-                BenchPhase::Flicker => true,
+                BenchPhase::Up => self.flicker.frames == 0 && self.drag.is_none(),
+                BenchPhase::Flicker => self.drag.is_none(),
+                BenchPhase::Rest => self.drag_flicker.frames == 0,
+                BenchPhase::DragFlicker => true,
                 _ => false,
             };
             if last {
                 return true;
             }
             self.phase = next.unwrap_or(self.phase);
+            if self.phase == BenchPhase::Flicker && self.flicker.frames == 0 {
+                self.phase = BenchPhase::Drag;
+            }
             self.phase_start = now;
             self.frames.clear();
             self.visible = None;
@@ -845,13 +878,34 @@ impl Bench {
                 let a = self.flicker.drawn as f32 * BENCH_FLICKER_STEP;
                 Vec3::new(1.0 + 2.5 * a.cos(), 2.5, -1.0 + 2.5 * a.sin())
             }
+            BenchPhase::Drag | BenchPhase::Rest | BenchPhase::DragFlicker => self.home,
         };
+        if let Some((index, start)) = self.drag {
+            // Out along x while `Drag` runs, held for `Rest`, then back a step a frame.
+            let out = BENCH_DRAG_SPEED * BENCH_DRAG_TIME.as_secs_f32();
+            let x = match self.phase {
+                BenchPhase::Drag => BENCH_DRAG_SPEED * t.min(BENCH_DRAG_TIME.as_secs_f32()),
+                BenchPhase::Rest => out,
+                BenchPhase::DragFlicker => out - self.drag_flicker.drawn as f32 * BENCH_DRAG_STEP,
+                _ => 0.0,
+            };
+            scene.solids[index].position = start + Vec3::new(x, 0.0, 0.0);
+        }
         false
     }
 
-    /// The flicker phase reads back every frame.
+    /// The flicker phases read back every frame.
     fn wants_frame(&self) -> bool {
-        self.phase == BenchPhase::Flicker
+        matches!(self.phase, BenchPhase::Flicker | BenchPhase::DragFlicker)
+    }
+
+    /// The flicker phase this frame's readback feeds.
+    fn flicker_mut(&mut self) -> &mut Flicker {
+        if self.phase == BenchPhase::DragFlicker {
+            &mut self.drag_flicker
+        } else {
+            &mut self.flicker
+        }
     }
 
     fn finish(&mut self, elapsed: Duration, pending: usize) {
@@ -871,7 +925,7 @@ impl Bench {
             at(0.99),
             sorted.last().copied().unwrap_or(0.0),
         );
-        if matches!(self.phase, BenchPhase::Down | BenchPhase::Up) {
+        if matches!(self.phase, BenchPhase::Down | BenchPhase::Up | BenchPhase::Rest) {
             let visible = self.visible.map_or(-1.0, |v| v.as_secs_f32() * 1000.0);
             let view = self.view.map_or(-1.0, |v| v.as_secs_f32() * 1000.0);
             line.push_str(&format!(
@@ -889,6 +943,9 @@ impl Bench {
         }
         if self.phase == BenchPhase::Flicker {
             line.push_str(&self.flicker.summary());
+        }
+        if self.phase == BenchPhase::DragFlicker {
+            line.push_str(&self.drag_flicker.summary());
         }
         eprintln!("{line}");
         self.lines.push(line);

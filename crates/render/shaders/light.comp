@@ -391,13 +391,16 @@ void write_tier() {
     // it only approximates.
     if (live && scene_inside(pos)) {
         live = false;
-        reset = true;
     }
     // `live` and `reset` are the same in the whole workgroup.
     if (!live) {
-        // A reused slot may hold another brick's light. A dead probe reads as none.
-        if (reset && lane < TIER_PROBE_TEXELS) {
-            field.texels[dest + lane] = vec4(0.0);
+        // A dead probe is skipped by every reader (no samples). A brick's first pass
+        // clears it: the slot may hold another brick's light. Otherwise it keeps its
+        // light with the sample count negated, so the picture still holds that light
+        // and, when a moved solid frees the probe again, blends from it to the new.
+        if (lane < TIER_PROBE_TEXELS) {
+            vec4 kept = field.texels[dest + lane];
+            field.texels[dest + lane] = reset ? vec4(0.0) : vec4(kept.rgb, lane < 18u ? -abs(kept.w) : kept.w);
         }
         return;
     }
@@ -489,22 +492,38 @@ void write_tier() {
 }
 
 // Pass 13, every frame before the picture: the shown light of each probe moves a
-// fraction (pc.y0, a float: 1 - exp(-dt / tau)) of the way to the stored top cube. A
-// probe that is new to its slot, unlit, or dead takes the stored light at once.
+// fraction (pc.y0, a float: 1 - exp(-dt / tau)) of the way to the stored top cube.
+// The shown light is never dropped: a dead probe holds what it showed (no reader
+// takes it), and a probe that comes back or moves a little blends from there. Only a
+// probe that never had light, or whose slot now holds another brick (it sits bricks
+// away), takes the stored light at once. The tag's w: 1 lit, 0.5 holding, 0 none.
 void blend_view() {
     uint p = (gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex) * TIER_PROBE_TEXELS;
     uint b = TIER_PROBES + p;
     float w = uintBitsToFloat(pc.y0);
     vec4 pos = field.texels[b + TIER_POSITION];
     vec4 tag = tier_view.texels[p + TIER_POSITION];
-    bool lit = field.texels[b + TIER_CUBE3].w > 0.0;
-    bool snap = w >= 1.0 || !lit || tag.w <= 0.0 || tag.xyz != pos.xyz;
+    float stored = field.texels[b + TIER_CUBE3].w;
+    bool lit = stored > 0.0;
+    bool other = distance(tag.xyz, pos.xyz) > 2.0 * tier_spacing();
+    if (!lit) {
+        // Dead with light kept: hold what is shown. Never lit: nothing to show.
+        bool hold = stored < 0.0 && tag.w > 0.0 && !other;
+        if (!hold) {
+            for (uint f = 0u; f < 6u; f++) {
+                tier_view.texels[p + TIER_CUBE3 + f] = vec4(field.texels[b + TIER_CUBE3 + f].rgb, 0.0);
+            }
+        }
+        tier_view.texels[p + TIER_POSITION] = vec4(pos.xyz, hold ? 0.5 : 0.0);
+        return;
+    }
+    bool snap = w >= 1.0 || tag.w <= 0.0 || other;
     for (uint f = 0u; f < 6u; f++) {
         vec3 target = field.texels[b + TIER_CUBE3 + f].rgb;
         vec3 shown = tier_view.texels[p + TIER_CUBE3 + f].rgb;
         tier_view.texels[p + TIER_CUBE3 + f] = vec4(snap ? target : mix(shown, target, w), 0.0);
     }
-    tier_view.texels[p + TIER_POSITION] = vec4(pos.xyz, lit ? 1.0 : 0.0);
+    tier_view.texels[p + TIER_POSITION] = vec4(pos.xyz, 1.0);
 }
 
 void main() {
