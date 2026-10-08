@@ -476,7 +476,7 @@ fn run() -> Result<(), String> {
             let name = bench.shot.as_ref()?;
             Some(bench.shots.as_ref()?.join(name))
         });
-        let flicker_frame = bench.as_ref().is_some_and(Bench::wants_frame);
+        let flicker_frame = bench.as_mut().is_some_and(|bench| bench.wants_frame(now));
         let want_read = readback.is_some() || shot.is_some() || flicker_frame;
         if bench.is_some() {
             // The panel and the live graph are not the scene: a bench draws without them.
@@ -539,7 +539,7 @@ fn run() -> Result<(), String> {
         }
         if flicker_frame {
             if let (Some(pixels), Some(bench)) = (pixels.as_ref(), bench.as_mut()) {
-                bench.flicker_mut().take(pixels, renderer.width(), renderer.height());
+                bench.take_frame(pixels, renderer.width(), renderer.height(), now);
             }
         }
         if want_read && (readback.is_some() || shot.is_some()) {
@@ -592,7 +592,7 @@ fn run() -> Result<(), String> {
         }
     }
     if let Some(bench) = bench {
-        bench.report(renderer.width(), renderer.height(), renderer.antialias());
+        bench.report(renderer.width(), renderer.height(), renderer.antialias(), renderer.tier_weights());
     }
     println!("genos-camera frames={drawn}");
     Ok(())
@@ -605,8 +605,10 @@ fn run() -> Result<(), String> {
 /// no work left. Then the lamp orbits for the flicker phase, and the red box (or the
 /// first solid) is dragged across the floor: `Drag` times the frames while it moves,
 /// `Rest` how long its light takes to settle once it stops, and `DragFlicker` reads
-/// back every frame as it moves a fixed step a frame. One `BENCH` line per phase, then
-/// the program exits.
+/// back every frame as it moves a fixed step a frame. Last, `Switch` moves every solid
+/// off the probe grid at once (every brick places its probes again, like loading
+/// another room) and times how the picture converges. One `BENCH` line per phase,
+/// then the program exits.
 struct Bench {
     camera: Camera,
     phase: BenchPhase,
@@ -634,6 +636,10 @@ struct Bench {
     /// The solid the drag phases move, and where it started.
     drag: Option<(usize, Vec3)>,
     drag_flicker: Flicker,
+    /// Where every solid started, for `Switch`.
+    solids: Vec<Vec3>,
+    /// Pictures of the phase that settles (`Rest`, `Switch`), against its last.
+    converge: Converge,
 }
 
 /// How fast the drag phases move the solid, in metres a second, and for how long
@@ -732,6 +738,82 @@ impl Flicker {
     }
 }
 
+/// How far `Switch` moves every solid, in metres along x and z: off the probe grid, so
+/// every brick near a face places its probes again.
+const BENCH_SWITCH_SHIFT: f32 = 0.37;
+/// How often a settling phase reads the picture back for its convergence.
+const CONVERGE_EVERY: Duration = Duration::from_millis(25);
+/// A converge picture keeps every this-many-th pixel along x and y.
+const CONVERGE_STEP: usize = 4;
+/// A pixel has converged within this many 8-bit luminance codes of the last picture.
+const CONVERGE_CODES: u8 = 6;
+/// The share of pixels that have converged for the picture to count as converged.
+const CONVERGE_SHARE: f64 = 0.95;
+
+/// A settling phase's pictures (luminance, every [`CONVERGE_STEP`]-th pixel), read
+/// back every [`CONVERGE_EVERY`] so the readbacks barely slow it. The last is the
+/// settled picture; `conv95_ms` is when the share of pixels within
+/// [`CONVERGE_CODES`] of it reached [`CONVERGE_SHARE`] for good, and `start_err` the
+/// mean luminance error and `start_within` the share within tolerance of the first.
+#[derive(Default)]
+struct Converge {
+    last: Option<Instant>,
+    pictures: Vec<(f32, Vec<u8>)>,
+}
+
+impl Converge {
+    fn wants(&mut self, now: Instant) -> bool {
+        if self.last.is_some_and(|last| now - last < CONVERGE_EVERY) {
+            return false;
+        }
+        self.last = Some(now);
+        true
+    }
+
+    fn take(&mut self, bgra: &[u8], width: u32, height: u32, ms: f32) {
+        let (w, h) = (width as usize, height as usize);
+        if bgra.len() < w * h * 4 {
+            return;
+        }
+        let mut luma = Vec::with_capacity((w / CONVERGE_STEP + 1) * (h / CONVERGE_STEP + 1));
+        for y in (0..h).step_by(CONVERGE_STEP) {
+            for x in (0..w).step_by(CONVERGE_STEP) {
+                let p = &bgra[(y * w + x) * 4..(y * w + x) * 4 + 3];
+                let l = 0.0722 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.2126 * f32::from(p[2]);
+                luma.push(l.round().clamp(0.0, 255.0) as u8);
+            }
+        }
+        self.pictures.push((ms, luma));
+    }
+
+    fn summary(&self) -> String {
+        let Some((_, last)) = self.pictures.last() else {
+            return " conv95_ms=-1".into();
+        };
+        let n = last.len().max(1) as f64;
+        let within = |picture: &[u8]| {
+            picture.iter().zip(last).filter(|(a, b)| a.abs_diff(**b) <= CONVERGE_CODES).count() as f64 / n
+        };
+        // The first picture from which every later one stays converged.
+        let mut conv = None;
+        for (ms, picture) in &self.pictures {
+            if within(picture) < CONVERGE_SHARE {
+                conv = None;
+            } else if conv.is_none() {
+                conv = Some(*ms);
+            }
+        }
+        let first = &self.pictures[0].1;
+        let err = first.iter().zip(last).map(|(a, b)| f64::from(a.abs_diff(*b))).sum::<f64>() / n;
+        format!(
+            " conv95_ms={:.0} start_err={err:.2} start_within={:.3} pictures={}",
+            conv.unwrap_or(-1.0),
+            within(first),
+            self.pictures.len()
+        )
+    }
+}
+
 /// Milliseconds into a drop or a rise at which `GENOS_BENCH_SHOTS` takes a picture.
 const BENCH_SHOT_MS: [u64; 12] = [0, 17, 33, 50, 100, 150, 200, 300, 500, 1000, 2000, 4000];
 
@@ -746,6 +828,7 @@ enum BenchPhase {
     Drag,
     Rest,
     DragFlicker,
+    Switch,
 }
 
 /// The longest a drop or a rise may take to settle before the bench gives up on it.
@@ -790,6 +873,8 @@ impl Bench {
             flicker: Flicker { frames: flicker_frames, ..Flicker::default() },
             drag,
             drag_flicker: Flicker { frames: flicker_frames, ..Flicker::default() },
+            solids: scene.solids.iter().map(|s| s.position).collect(),
+            converge: Converge::default(),
         }))
     }
 
@@ -816,12 +901,13 @@ impl Bench {
                 (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::DragFlicker)
             }
             BenchPhase::DragFlicker => {
-                (self.drag_flicker.measured >= self.drag_flicker.frames).then_some(BenchPhase::DragFlicker)
+                (self.drag_flicker.measured >= self.drag_flicker.frames).then_some(BenchPhase::Switch)
             }
+            BenchPhase::Switch => (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::Switch),
         };
         // A drop, a rise or a rest counts from its first frame; its first frame always
         // has work.
-        let settle = matches!(self.phase, BenchPhase::Down | BenchPhase::Up | BenchPhase::Rest);
+        let settle = matches!(self.phase, BenchPhase::Down | BenchPhase::Up | BenchPhase::Rest | BenchPhase::Switch);
         if settle && self.frames.len() > 1 && tier.changing_bricks == 0 && self.visible.is_none() {
             self.visible = Some(elapsed);
         }
@@ -840,8 +926,7 @@ impl Bench {
             let last = match self.phase {
                 BenchPhase::Up => self.flicker.frames == 0 && self.drag.is_none(),
                 BenchPhase::Flicker => self.drag.is_none(),
-                BenchPhase::Rest => self.drag_flicker.frames == 0,
-                BenchPhase::DragFlicker => true,
+                BenchPhase::Switch => true,
                 _ => false,
             };
             if last {
@@ -858,6 +943,10 @@ impl Bench {
             self.critical = 0;
             self.batch_us = 0;
             self.next_shot = 0;
+            self.converge = Converge::default();
+            if self.phase == BenchPhase::DragFlicker && self.drag_flicker.frames == 0 {
+                self.phase = BenchPhase::Switch;
+            }
         }
         let t = (now - self.phase_start).as_secs_f32();
         self.shot = None;
@@ -878,7 +967,7 @@ impl Bench {
                 let a = self.flicker.drawn as f32 * BENCH_FLICKER_STEP;
                 Vec3::new(1.0 + 2.5 * a.cos(), 2.5, -1.0 + 2.5 * a.sin())
             }
-            BenchPhase::Drag | BenchPhase::Rest | BenchPhase::DragFlicker => self.home,
+            BenchPhase::Drag | BenchPhase::Rest | BenchPhase::DragFlicker | BenchPhase::Switch => self.home,
         };
         if let Some((index, start)) = self.drag {
             // Out along x while `Drag` runs, held for `Rest`, then back a step a frame.
@@ -891,20 +980,34 @@ impl Bench {
             };
             scene.solids[index].position = start + Vec3::new(x, 0.0, 0.0);
         }
+        if self.phase == BenchPhase::Switch {
+            let shift = Vec3::new(BENCH_SWITCH_SHIFT, 0.0, BENCH_SWITCH_SHIFT);
+            for (solid, start) in scene.solids.iter_mut().zip(&self.solids) {
+                solid.position = *start + shift;
+            }
+        }
         false
     }
 
-    /// The flicker phases read back every frame.
-    fn wants_frame(&self) -> bool {
-        matches!(self.phase, BenchPhase::Flicker | BenchPhase::DragFlicker)
+    /// The flicker phases read back every frame, the settling ones every
+    /// [`CONVERGE_EVERY`].
+    fn wants_frame(&mut self, now: Instant) -> bool {
+        match self.phase {
+            BenchPhase::Flicker | BenchPhase::DragFlicker => true,
+            BenchPhase::Rest | BenchPhase::Switch => self.converge.wants(now),
+            _ => false,
+        }
     }
 
-    /// The flicker phase this frame's readback feeds.
-    fn flicker_mut(&mut self) -> &mut Flicker {
-        if self.phase == BenchPhase::DragFlicker {
-            &mut self.drag_flicker
-        } else {
-            &mut self.flicker
+    /// Hand this frame's readback to the phase that asked for it.
+    fn take_frame(&mut self, bgra: &[u8], width: u32, height: u32, now: Instant) {
+        match self.phase {
+            BenchPhase::DragFlicker => self.drag_flicker.take(bgra, width, height),
+            BenchPhase::Flicker => self.flicker.take(bgra, width, height),
+            _ => {
+                let ms = (now - self.phase_start).as_secs_f32() * 1000.0;
+                self.converge.take(bgra, width, height, ms);
+            }
         }
     }
 
@@ -925,7 +1028,7 @@ impl Bench {
             at(0.99),
             sorted.last().copied().unwrap_or(0.0),
         );
-        if matches!(self.phase, BenchPhase::Down | BenchPhase::Up | BenchPhase::Rest) {
+        if matches!(self.phase, BenchPhase::Down | BenchPhase::Up | BenchPhase::Rest | BenchPhase::Switch) {
             let visible = self.visible.map_or(-1.0, |v| v.as_secs_f32() * 1000.0);
             let view = self.view.map_or(-1.0, |v| v.as_secs_f32() * 1000.0);
             line.push_str(&format!(
@@ -947,12 +1050,16 @@ impl Bench {
         if self.phase == BenchPhase::DragFlicker {
             line.push_str(&self.drag_flicker.summary());
         }
+        if matches!(self.phase, BenchPhase::Rest | BenchPhase::Switch) {
+            line.push_str(&self.converge.summary());
+        }
         eprintln!("{line}");
         self.lines.push(line);
     }
 
-    fn report(&self, width: u32, height: u32, antialias: Antialias) {
+    fn report(&self, width: u32, height: u32, antialias: Antialias, weights: genos_render::TierWeights) {
         println!("BENCH size={width}x{height} antialias={antialias:?}");
+        println!("BENCH tier_weights {weights}");
         for line in &self.lines {
             println!("{line}");
         }

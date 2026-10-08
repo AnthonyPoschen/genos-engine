@@ -22,6 +22,9 @@ const uint TIER_CUBE2 = 6u;
 const uint TIER_CUBE1 = 12u;
 // xyz: where the probe sits. A probe moved out of a solid is off its lattice point.
 const uint TIER_POSITION = 18u;
+// In the view copy (which holds only the top cube), where the second cube's texels
+// would be: the last whole update of the top cube, which the view blends toward.
+const uint TIER_VIEW_TARGET = TIER_CUBE2;
 
 float tier_spacing() {
     return field.texels[TIER_INFO].w;

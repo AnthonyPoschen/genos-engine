@@ -129,10 +129,19 @@ impl Renderer {
             overlay_rects: Vec::new(),
             overlay_verts: Vec::new(),
             cascade_lines: Vec::new(),
-            tier: crate::probe_tier::TierState::new(crate::probe_tier::TierLayout::new(
-                env_f32("GENOS_TIER_SPACING").unwrap_or(1.0),
-                env_f32("GENOS_TIER_RADIUS").unwrap_or(50.0),
-            )),
+            tier: {
+                let mut tier = crate::probe_tier::TierState::new(crate::probe_tier::TierLayout::new(
+                    env_f32("GENOS_TIER_SPACING").unwrap_or(1.0),
+                    env_f32("GENOS_TIER_RADIUS").unwrap_or(50.0),
+                ));
+                if let Ok(text) = std::env::var("GENOS_TIER_WEIGHTS") {
+                    tier.weights = crate::probe_tier::TierWeights::parse(&text)?;
+                }
+                if std::env::var_os("GENOS_GPU_TIMES").is_some() {
+                    eprintln!("TIER_WEIGHTS {}", tier.weights);
+                }
+                tier
+            },
             // 1.5 ms a build (one build every two or three frames) keeps the GI update of a
             // constantly moving lamp near half a millisecond a frame, inside a 2 ms frame.
             tier_ms: std::env::var("GENOS_TIER_MS")
@@ -506,9 +515,8 @@ impl Renderer {
             (Some(self.tier.budget_rays(self.tier_ms)), crate::probe_tier::FIRST_RAYS)
         };
         self.gpu.tier_budget = budget;
-        // On-screen importance: the bricks whose light the camera sees go first, and
-        // changing ones take all their change passes in this build. A settling build
-        // takes everything anyway.
+        // The bricks are weighed by what the camera sees of their light, and the
+        // heaviest take all their passes first. A settling build takes everything.
         let camera = crate::probe_tier::TierCamera {
             eye: pack.eye,
             right: pack.view_right,
@@ -564,6 +572,16 @@ impl Renderer {
     /// Tier counts for reports.
     pub fn tier_stats(&self) -> crate::probe_tier::TierStats {
         self.tier.stats()
+    }
+
+    /// How the tier ranks its work (see [`crate::probe_tier::TierWeights`]).
+    pub fn tier_weights(&self) -> crate::probe_tier::TierWeights {
+        self.tier.weights
+    }
+
+    /// Change how the tier ranks its work; the next build uses it.
+    pub fn set_tier_weights(&mut self, weights: crate::probe_tier::TierWeights) {
+        self.tier.weights = weights;
     }
 
     /// Ground position the gather is tracking.

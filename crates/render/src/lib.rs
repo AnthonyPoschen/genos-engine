@@ -23,7 +23,7 @@ pub use gpu::{DrawProfile, LightBuildTimes, Renderer, ScreenRect};
 pub use lighting::Lighting;
 pub use probe_tier::{
     allocate, probe_live, scene_boxes, BrickSet, SurfaceBox, TierBatch, TierItem, TierLayout,
-    TierLight, TierState, TierStats, BRICK, PROBE_BYTES,
+    TierLight, TierState, TierStats, TierWeights, BRICK, PROBE_BYTES,
 };
 pub use mesh::Vertex;
 pub use pack::{
