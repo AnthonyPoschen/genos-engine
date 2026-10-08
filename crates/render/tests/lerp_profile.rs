@@ -156,7 +156,7 @@ fn one_frame(
     timestamps: bool,
     scene_cpu: Duration,
     ui_cpu: Duration,
-) -> Result<OpenFrame, String> {
+) -> Result<(OpenFrame, Option<Duration>), String> {
     let pump_at = Instant::now();
     let pumped = window.pump();
     if pumped.closing {
@@ -170,21 +170,25 @@ fn one_frame(
     sim.advance(world, 1.0 / 120.0);
     let sim_cpu = sim_at.elapsed();
     let draw_at = Instant::now();
-    let draw_cpu = if timestamps {
+    // A frame whose fence has already signaled hands back its span here; the others
+    // come later through `take_ready`.
+    let (draw_cpu, gpu) = if timestamps {
         let (_pixels, profile) = renderer.draw_profiled(world, camera, overlay, false, false)?;
-        let _ = profile.gpu;
-        profile.cpu
+        (profile.cpu, profile.gpu)
     } else {
         renderer.draw_with_overlay(world, camera, overlay, false, false)?;
-        draw_at.elapsed()
+        (draw_at.elapsed(), None)
     };
     let cpu = [pump_cpu, input_cpu, ui_cpu, scene_cpu, sim_cpu, draw_cpu];
     let duration = cpu.iter().copied().sum();
-    Ok(OpenFrame {
-        time: boot.elapsed(),
-        duration,
-        cpu,
-    })
+    Ok((
+        OpenFrame {
+            time: boot.elapsed(),
+            duration,
+            cpu,
+        },
+        gpu,
+    ))
 }
 
 fn record(
@@ -200,14 +204,14 @@ fn record(
     ui_cpu: Duration,
     timed: &mut Timed,
 ) -> Result<(), String> {
-    let open = one_frame(
+    let (open, gpu) = one_frame(
         window, renderer, world, sim, boot, camera, overlay, timestamps, scene_cpu, ui_cpu,
     )?;
     if timestamps {
         take_ready(renderer, &mut timed.gpus);
     }
     timed.frames.push(open);
-    timed.gpus.push(None);
+    timed.gpus.push(gpu);
     Ok(())
 }
 
