@@ -752,9 +752,11 @@ const CONVERGE_SHARE: f64 = 0.95;
 
 /// A settling phase's pictures (luminance, every [`CONVERGE_STEP`]-th pixel), read
 /// back every [`CONVERGE_EVERY`] so the readbacks barely slow it. The last is the
-/// settled picture; `conv95_ms` is when the share of pixels within
-/// [`CONVERGE_CODES`] of it reached [`CONVERGE_SHARE`] for good, and `start_err` the
-/// mean luminance error and `start_within` the share within tolerance of the first.
+/// settled picture. The pixels the change touched are those off it by more than
+/// [`CONVERGE_CODES`] in any picture (`touched`, a share of the screen); `conv95_ms`
+/// is when [`CONVERGE_SHARE`] of them came within it for good, `start_within` the
+/// share of them within it in the first picture, and `start_err` the first picture's
+/// mean luminance error over the whole screen.
 #[derive(Default)]
 struct Converge {
     last: Option<Instant>,
@@ -790,25 +792,30 @@ impl Converge {
         let Some((_, last)) = self.pictures.last() else {
             return " conv95_ms=-1".into();
         };
-        let n = last.len().max(1) as f64;
-        let within = |picture: &[u8]| {
-            picture.iter().zip(last).filter(|(a, b)| a.abs_diff(**b) <= CONVERGE_CODES).count() as f64 / n
+        let off = |picture: &[u8], i: usize| picture[i].abs_diff(last[i]) > CONVERGE_CODES;
+        // The pixels the change touched: off the settled picture in any picture.
+        let touched: Vec<usize> =
+            (0..last.len()).filter(|&i| self.pictures.iter().any(|(_, picture)| off(picture, i))).collect();
+        let share = |picture: &[u8]| {
+            1.0 - touched.iter().filter(|&&i| off(picture, i)).count() as f64 / touched.len().max(1) as f64
         };
         // The first picture from which every later one stays converged.
         let mut conv = None;
         for (ms, picture) in &self.pictures {
-            if within(picture) < CONVERGE_SHARE {
+            if share(picture) < CONVERGE_SHARE {
                 conv = None;
             } else if conv.is_none() {
                 conv = Some(*ms);
             }
         }
         let first = &self.pictures[0].1;
+        let n = last.len().max(1) as f64;
         let err = first.iter().zip(last).map(|(a, b)| f64::from(a.abs_diff(*b))).sum::<f64>() / n;
         format!(
-            " conv95_ms={:.0} start_err={err:.2} start_within={:.3} pictures={}",
+            " conv95_ms={:.0} touched={:.3} start_err={err:.2} start_within={:.3} pictures={}",
             conv.unwrap_or(-1.0),
-            within(first),
+            touched.len() as f64 / n,
+            share(first),
             self.pictures.len()
         )
     }

@@ -494,19 +494,15 @@ struct Slot {
     done: u64,
     /// When the brick last finished an update (all its change passes), or was made.
     since: std::time::Instant,
-    /// A change reached the brick while its passes were under way: those finish (the
-    /// picture takes them whole), then it takes its change passes again.
-    again: bool,
+    /// Change passes since the picture last took the brick's light: after
+    /// [`CHANGE_PASSES`] it is a whole update, even with changes still coming.
+    run: u32,
 }
 
 impl Slot {
-    /// A change reached the brick: it takes its change passes, after those under way.
+    /// A change reached the brick: it takes its change passes again.
     fn restart(&mut self) {
-        if self.change_left > 0 {
-            self.again = true;
-        } else {
-            self.change_left = CHANGE_PASSES;
-        }
+        self.change_left = CHANGE_PASSES;
     }
 }
 
@@ -924,7 +920,7 @@ impl TierState {
             change_left: 0,
             done: 0,
             since: std::time::Instant::now(),
-            again: false,
+            run: 0,
         });
         self.by_brick.insert(brick, slot);
         true
@@ -1191,10 +1187,11 @@ impl TierState {
         let weight = self.weights();
         // (order, weight, class key, distance, brick, slot). Order 0: a brick the
         // picture uses that waits for its first light (a cheap pass, and until it lands
-        // the picture falls back to the world probes). 1: the other bricks the picture
-        // uses, by weight. 2 and 3: the same for bricks it does not use; they only get
-        // what is left. Inside a weight bucket the brick nearest done goes first, so it
-        // finishes.
+        // the picture falls back to the world probes). 1: one the picture uses with a
+        // change under way (its light is wrong), by weight. 2: one the picture uses that
+        // refines (its light is right but noisy). 3 to 5: the same for bricks it does not
+        // use; they only get what is left. Inside a weight bucket the brick nearest done
+        // goes first, so it finishes.
         let mut due: Vec<(u32, i32, u32, f32, [i32; 3], u32)> = Vec::new();
         for (index, slot) in self.slots.iter().enumerate() {
             let Some(slot) = slot else { continue };
@@ -1207,7 +1204,11 @@ impl TierState {
             let near = self.weights.near.max(1.0e-3);
             let stale = 1.0 + slot.since.elapsed().as_secs_f32() / self.weights.stale.max(1.0e-3);
             let w = weight[index] * near / (near + d.sqrt()) * stale;
-            let order = 2 * u32::from(w <= 0.0) + u32::from(class != 0);
+            let order = 3 * u32::from(w <= 0.0) + match class {
+                0 => 0,
+                REFINE_CLASS => 2,
+                _ => 1,
+            };
             // Weight buckets a factor of two apart, so the jittered counts do not
             // reorder bricks of about the same weight from one build to the next.
             let bucket = if w > 0.0 { w.log2().floor() as i32 } else { i32::MIN };
@@ -1218,21 +1219,21 @@ impl TierState {
         due.sort_by(|a, b| {
             a.0.cmp(&b.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)).then(a.3.total_cmp(&b.3)).then(a.4.cmp(&b.4))
         });
-        // Depth first: each brick in that order takes every pass it has left (its change
-        // passes as rounds of one pass each) before the next brick takes any, so the
-        // bricks that matter most to the picture converge, bounces included, while the
-        // rest wait. A pass that does not fit runs the share of its probes that does,
-        // lowest first, and the batch ends there: no build passes its budget by more
-        // than one probe's rays. With room for everything (a settling draw) every brick
-        // runs all its passes together.
+        // Each brick in that order takes its next pass, as far as the budget goes: the
+        // bricks that matter most, and those furthest along, run while the rest wait,
+        // and one pass of many bricks keeps the GPU full (a round of a few bricks
+        // leaves most of it idle). A pass that does not fit runs the share of its
+        // probes that does, lowest first, and the batch ends there: no build passes its
+        // budget by more than one probe's rays. What is left deepens the bricks picked,
+        // in the same order: each takes every change pass it has left, as rounds of one
+        // pass each, before the next takes more. With room for everything (a settling
+        // draw) every brick runs all its passes together.
         // (slot, passes, weight, probes of the first pass)
         let mut picked: Vec<(u32, u32, f32, u64)> = Vec::new();
         let mut spent = 0u64;
-        let mut count = 0usize;
         for &(_, _, _, _, _, index) in &due {
             let slot = self.slots[index as usize].as_ref().expect("due slot");
-            let class = self.class(slot).expect("due class");
-            let rays = u64::from(match class {
+            let rays = u64::from(match self.class(slot).expect("due class") {
                 0 => first,
                 REFINE_CLASS => REFINE_RAYS,
                 _ => CHANGE_RAYS,
@@ -1248,26 +1249,29 @@ impl TierState {
                 probes = lowest_bits(left, fit);
             }
             spent += u64::from(probes.count_ones()) * rays;
-            let mut passes = 1;
-            // A brick deepens once this batch finishes its pass under way: the next
-            // passes run all its probes.
-            if probes == left && class > 0 && class < REFINE_CLASS {
-                let whole = u64::from(slot.mask.count_ones()) * rays;
-                let mut extra = slot.change_left.min(CHANGE_PASSES).saturating_sub(1);
-                extra = extra.min((TIER_SLOT_CAP as usize).saturating_sub(count + 1) as u32);
-                if let Some(limit) = budget {
-                    extra = extra.min((limit.saturating_sub(spent) / whole.max(1)) as u32);
-                }
-                passes += extra;
-                spent += u64::from(extra) * whole;
-            }
-            count += passes as usize;
-            picked.push((index, passes, weight[index as usize], probes));
-            // A brick cut short ends the batch: the next brick waits for it.
-            let short = class > 0 && class < REFINE_CLASS && passes < slot.change_left.min(CHANGE_PASSES);
-            if probes != left || short || count >= TIER_SLOT_CAP as usize {
+            picked.push((index, 1, weight[index as usize], probes));
+            if probes != left || picked.len() >= TIER_SLOT_CAP as usize {
                 break;
             }
+        }
+        let mut count = picked.len();
+        for entry in &mut picked {
+            let slot = self.slots[entry.0 as usize].as_ref().expect("due slot");
+            let class = self.class(slot).expect("due class");
+            // A brick deepens once this batch finishes its pass under way: the next
+            // passes run all its probes.
+            if entry.3 != slot.mask & !slot.done || class == 0 || class >= REFINE_CLASS {
+                continue;
+            }
+            let whole = u64::from(slot.mask.count_ones()) * u64::from(CHANGE_RAYS);
+            let mut extra = slot.change_left.min(CHANGE_PASSES).saturating_sub(1);
+            extra = extra.min((TIER_SLOT_CAP as usize).saturating_sub(count) as u32);
+            if let Some(limit) = budget {
+                extra = extra.min((limit.saturating_sub(spent) / whole.max(1)) as u32);
+            }
+            entry.1 += extra;
+            spent += u64::from(extra) * whole;
+            count += extra as usize;
         }
         let mut items = Vec::new();
         let mut critical = 0;
@@ -1393,12 +1397,13 @@ impl TierState {
         out
     }
 
-    /// Whether `slot`'s (at `index`) light is a whole update once `items` run: no
-    /// change pass under way, and either a change finished in them or refining has
-    /// reached [`TARGET_SAMPLES`]. The bookkeeping of [`TierState::commit`], without
-    /// changing anything.
+    /// Whether `slot`'s (at `index`) light is a whole update once `items` run: no pass
+    /// part way through, and a change finished in them, refining reached
+    /// [`TARGET_SAMPLES`], or [`CHANGE_PASSES`] change passes landed since the picture
+    /// last took it (so a brick that changes all the time still updates). The
+    /// bookkeeping of [`TierState::commit`], without changing anything.
     fn whole_after(&self, index: u32, slot: &Slot, items: &[TierItem]) -> bool {
-        let (mut left, mut done, mut samples) = (slot.change_left, slot.done, slot.samples);
+        let (mut left, mut done, mut samples, mut run) = (slot.change_left, slot.done, slot.samples, slot.run);
         let mut changed = false;
         for item in items.iter().filter(|item| item.slot == index) {
             done |= item.probes & slot.mask;
@@ -1411,17 +1416,28 @@ impl TierState {
                 samples = item.rays;
             } else if let Some(history) = item.history {
                 left = left.saturating_sub(1);
+                run += 1;
                 samples = (samples.min(history) + item.rays).min(TARGET_SAMPLES);
                 changed |= left == 0;
             } else {
                 samples = (samples + item.rays).min(TARGET_SAMPLES);
             }
         }
-        left == 0 && done == 0 && (changed || samples >= TARGET_SAMPLES)
+        done == 0 && (run >= CHANGE_PASSES || left == 0 && (changed || samples >= TARGET_SAMPLES))
     }
 
     /// The build that carries `batch` has started. Its light counts from now on.
     pub fn commit(&mut self, batch: &TierBatch) {
+        // The bricks the picture takes from this build: their update counts from now.
+        let mut wholes: Vec<u32> = batch.items.iter().map(|item| item.slot).collect();
+        wholes.sort_unstable();
+        wholes.dedup();
+        wholes.retain(|&index| {
+            self.slots.get(index as usize).and_then(Option::as_ref).is_some_and(|slot| {
+                batch.items.iter().any(|i| i.slot == index && i.brick == slot.brick)
+                    && self.whole_after(index, slot, &batch.items)
+            })
+        });
         for item in &batch.items {
             let Some(Some(slot)) = self.slots.get_mut(item.slot as usize) else { continue };
             if slot.brick != item.brick {
@@ -1441,15 +1457,16 @@ impl TierState {
             } else if let Some(history) = item.history {
                 // The shader keeps at most `history` of the stored rays.
                 slot.change_left = slot.change_left.saturating_sub(1);
-                if slot.change_left == 0 {
-                    slot.since = std::time::Instant::now();
-                    if std::mem::take(&mut slot.again) {
-                        slot.change_left = CHANGE_PASSES;
-                    }
-                }
+                slot.run += 1;
                 slot.samples = (slot.samples.min(history) + item.rays).min(TARGET_SAMPLES);
             } else {
                 slot.samples = (slot.samples + item.rays).min(TARGET_SAMPLES);
+            }
+        }
+        for index in wholes {
+            if let Some(Some(slot)) = self.slots.get_mut(index as usize) {
+                slot.run = 0;
+                slot.since = std::time::Instant::now();
             }
         }
     }
@@ -1632,14 +1649,17 @@ mod tests {
                 assert!(slot.brick[0] * BRICK <= -2, "{:?} is behind the camera", slot.brick);
             }
         }
-        // The lamp moves; a budget of a few passes goes to the bricks in view first.
+        // The lamp moves; a budget of a few passes goes to the bricks the picture uses
+        // (in view, at its edge, or feeding it), none behind the wall.
         let moved = TierLight { pos: [3.0, 2.5, 1.0], ..lamp };
         tier.update(boxes, 0, eye, &[moved]);
         let budget = 4 * u64::from(BRICK_PROBES) * u64::from(CHANGE_RAYS);
         let batch = tier.batch_seen(eye, Some(&camera), Some(budget), FIRST_RAYS);
         assert!(!batch.items.is_empty());
+        let weight = tier.weights();
         for item in &batch.items {
-            assert!(tier.in_view(item.slot as usize), "{:?} is out of view", item.brick);
+            assert!(weight[item.slot as usize] > 0.0, "{:?} is not used by the picture", item.brick);
+            assert!(item.brick[0] * BRICK < 0, "{:?} is behind the wall", item.brick);
         }
     }
 
@@ -1689,9 +1709,12 @@ mod tests {
         let pass = |i: u32| u64::from(tier.slots[i as usize].as_ref().unwrap().mask.count_ones()) * u64::from(CHANGE_RAYS);
         let one_each: u64 = changing.iter().map(|&i| pass(i)).sum();
         let biggest = changing.iter().map(|&i| pass(i)).max().unwrap();
-        // Room for the whole change of about one brick, less than a pass each.
-        let budget = biggest * u64::from(CHANGE_PASSES);
-        assert!(budget < one_each);
+        // A budget of a few passes goes to bricks the picture uses, none to the others.
+        let few = tier.batch_seen(eye, Some(&camera), Some(biggest * 3), FIRST_RAYS);
+        let weight = tier.weights();
+        assert!(few.items.iter().all(|item| weight[item.slot as usize] > 0.0));
+        // Room for a pass each and the rest of the passes of about one brick.
+        let budget = one_each + biggest * u64::from(CHANGE_PASSES - 1);
         let batch = tier.batch_seen(eye, Some(&camera), Some(budget), FIRST_RAYS);
         assert_eq!(batch.rounds.len(), CHANGE_PASSES as usize);
         assert_eq!(batch.rounds.iter().sum::<u32>() as usize, batch.items.len());
@@ -1700,28 +1723,20 @@ mod tests {
         for item in &batch.items {
             *passes.entry(item.slot).or_insert(0u32) += 1;
         }
-        // Depth first: the bricks the picture uses most take all their passes, and
-        // the bricks it does not use take none.
-        assert!(passes.len() < changing.len());
-        let weight = tier.weights();
-        for slot in passes.keys() {
-            let brick = tier.slots[*slot as usize].as_ref().unwrap().brick;
-            assert!(weight[*slot as usize] > 0.0, "a brick out of view took a pass: {brick:?}");
-        }
+        assert_eq!(passes.len(), changing.len(), "every changing brick takes a pass");
+        // The rest of the budget finishes the bricks the picture uses most first.
         let deep: Vec<u32> = passes.iter().filter(|(_, &n)| n == CHANGE_PASSES).map(|(&s, _)| s).collect();
         assert!(!deep.is_empty());
-        assert!(passes.len() <= deep.len() + 1, "only the last brick may stop short");
+        for slot in &deep {
+            let brick = tier.slots[*slot as usize].as_ref().unwrap().brick;
+            assert!(weight[*slot as usize] > 0.0, "a brick out of view went deep: {brick:?}");
+        }
         assert!(tier.stats().critical_bricks > 0);
         tier.commit(&batch);
         assert_eq!(tier.stats().changing_bricks, changing.len() - deep.len());
 
-        // With room for everything, every changing brick runs all its passes together;
-        // those the new change reached part way through finish, then run them again.
+        // With room for everything, every changing brick runs all its passes together.
         tier.update(room(), 0, eye, &[lamp]);
-        let all = tier.batch_seen(eye, Some(&camera), None, FIRST_RAYS);
-        tier.commit(&all);
-        let again = tier.stats().changing_bricks;
-        assert!(again > 0 && again < changing.len());
         let all = tier.batch_seen(eye, Some(&camera), None, FIRST_RAYS);
         tier.commit(&all);
         assert_eq!(tier.stats().changing_bricks, 0);
