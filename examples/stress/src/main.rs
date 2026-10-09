@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use genos_debug::{lighting_knobs, png, set_lighting_knob, Host};
 use genos_input::{character_controller, InputCode, InputSystem};
-use genos_render::{Renderer, ScreenRect};
+use genos_render::{Renderer, ScreenLine, ScreenRect};
 use genos_scene::{look_direction, update, Actions, Camera, Scene, Vec3, PITCH_LIMIT};
 use genos_ui::{button_panel, Action, PanelButton, PanelRow, PanelSlider, Pointer, State};
 use genos_window::{extent_changed, FocusGate, Window};
@@ -445,6 +445,7 @@ fn run() -> Result<(), String> {
     let mut drawn = 0u32;
     let mut clock: Option<Instant> = None;
     let mut fps = FrameRate::default();
+    let mut graph = FrameGraph::default();
     loop {
         let now = Instant::now();
         let real_dt = clock
@@ -544,6 +545,12 @@ fn run() -> Result<(), String> {
             host: &mut stage,
         });
         overlay.extend_from_slice(tools.overlay());
+        graph.push(real_dt * 1000.0);
+        if opts.panel {
+            let (rects, lines) = graph.draw([size.0 as f32, size.1 as f32]);
+            overlay.extend(rects);
+            renderer.set_overlay_lines(&lines);
+        }
 
         drawn += 1;
         let last = opts.frames.is_some_and(|limit| drawn >= limit);
@@ -604,6 +611,64 @@ fn run() -> Result<(), String> {
         std::process::exit(code);
     }
     Ok(())
+}
+
+/// Frame time over the last 240 frames as a line, bottom left, with 16.7 ms and
+/// 33.3 ms guides. Drawn in the overlay pass with the panel.
+#[derive(Default)]
+struct FrameGraph {
+    ms: std::collections::VecDeque<f32>,
+}
+
+impl FrameGraph {
+    const FRAMES: usize = 240;
+    const W: f32 = 240.0;
+    const H: f32 = 72.0;
+    /// Milliseconds at the top of the graph.
+    const TOP_MS: f32 = 50.0;
+
+    fn push(&mut self, ms: f32) {
+        self.ms.push_back(ms);
+        while self.ms.len() > Self::FRAMES {
+            self.ms.pop_front();
+        }
+    }
+
+    fn draw(&self, viewport: [f32; 2]) -> (Vec<ScreenRect>, Vec<ScreenLine>) {
+        let (x0, y0) = (16.0, viewport[1] - 16.0 - Self::H);
+        // 50 ms tall unless frames run longer; then the slowest frame fits.
+        let top = self.ms.iter().fold(Self::TOP_MS, |m, v| m.max(*v * 1.1));
+        let y_of = |ms: f32| y0 + Self::H * (1.0 - (ms / top).clamp(0.0, 1.0));
+        let back = ScreenRect {
+            x: x0,
+            y: y0,
+            w: Self::W,
+            h: Self::H,
+            color: [0.08, 0.09, 0.11],
+        };
+        let guide = |ms: f32| ScreenLine {
+            a: [x0, y_of(ms)],
+            b: [x0 + Self::W, y_of(ms)],
+            width: 1.0,
+            color: [0.35, 0.38, 0.42],
+        };
+        let mut lines = vec![guide(1000.0 / 60.0), guide(1000.0 / 30.0)];
+        let step = Self::W / (Self::FRAMES - 1) as f32;
+        let start = Self::FRAMES - self.ms.len();
+        let points: Vec<[f32; 2]> = self
+            .ms
+            .iter()
+            .enumerate()
+            .map(|(i, ms)| [x0 + (start + i) as f32 * step, y_of(*ms)])
+            .collect();
+        lines.extend(points.windows(2).map(|p| ScreenLine {
+            a: p[0],
+            b: p[1],
+            width: 2.0,
+            color: [0.45, 0.85, 0.40],
+        }));
+        (vec![back], lines)
+    }
 }
 
 /// Frame rate and light build time over the last half second, for the panel title.
