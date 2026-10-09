@@ -70,18 +70,17 @@ layout(std430, set = 0, binding = 0) readonly buffer SceneData {
     vec4 ceiling;
     // rgb is the sky's radiance (0 = no sky): what a ray that leaves the scene brings.
     vec4 sky;
-    // Occluder grid on the ground plane: low x, low z, cell size, top of the tallest
-    // occluder.
+    // Sparse occluder box: origin x, origin z, cell size, origin y.
     vec4 occ_grid;
-    // Lamp grid: low x, low z, cell size, unused.
+    // Lamp grid: low x, low z, cell size, notice band.
     vec4 lamp_grid;
-    // Cells: occluder grid x and z, lamp grid x and z.
+    // Cells: occluder box x and z, lamp grid x and z. The occluder y count is grid word 1.
     uvec4 grid_dims;
     // Tail word where the lamps start (2 per lamp), the occluders (4 each), and the
     // grid words (4 uints per tail word); w is the sun count.
     uvec4 tail_at;
-    // Grid word of the occluder cell table, the lamp cell table and the sun list.
-    // A cell holds (first word, count) of its list of indices.
+    // Grid word of the occluder directory, the lamp cell table and the sun list.
+    // A lamp cell holds (first word, count). The directory layout is in scene_rays.glsl.
     uvec4 grid_at;
     uvec4 tail[];
 } scene;

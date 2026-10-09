@@ -123,11 +123,19 @@ pub fn fixed_bounds(scene: &Scene, part: &FixedPart) -> Option<Bounds> {
             half: [scene.floor.half_x, 0.5, scene.floor.half_z],
         }),
         FixedPart::Ceiling => scene.ceiling.as_ref().map(|ceiling| Bounds {
-            center: [scene.floor.position.x, ceiling.height, scene.floor.position.z],
+            center: [
+                scene.floor.position.x,
+                ceiling.height,
+                scene.floor.position.z,
+            ],
             half: [scene.floor.half_x, 0.05, scene.floor.half_z],
         }),
         FixedPart::Wall(index) => scene.walls.get(*index).map(|wall| Bounds {
-            center: [wall.position.x, wall.base + wall.height * 0.5, wall.position.z],
+            center: [
+                wall.position.x,
+                wall.base + wall.height * 0.5,
+                wall.position.z,
+            ],
             half: [wall.half_x, wall.height * 0.5, wall.half_z],
         }),
         FixedPart::Solid(index) => scene.solids.get(*index).map(|solid| {

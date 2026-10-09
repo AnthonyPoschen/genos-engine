@@ -705,21 +705,42 @@ mod tests {
         let tier = include_str!("../shaders/tier.glsl");
         for line in [
             format!("const uint TIER_INFO = {}u;", crate::probe_tier::TIER_INFO),
-            format!("const uint TIER_INDIR_CAP = {}u;", crate::probe_tier::TIER_INDIR_CAP),
+            format!(
+                "const uint TIER_INDIR_CAP = {}u;",
+                crate::probe_tier::TIER_INDIR_CAP
+            ),
             format!(
                 "const uint TIER_PROBES = TIER_INFO + {}u;",
                 crate::probe_tier::TIER_PROBES - crate::probe_tier::TIER_INFO
             ),
-            format!("const uint TIER_PROBE_TEXELS = {}u;", crate::probe_tier::PROBE_TEXELS),
-            format!("const uint TIER_POSITION = {}u;", crate::probe_tier::PROBE_TEXELS - 1),
-            format!("const uint TIER_WORK_TEXELS = {}u;", crate::probe_tier::WORK_TEXELS),
+            format!(
+                "const uint TIER_PROBE_TEXELS = {}u;",
+                crate::probe_tier::PROBE_TEXELS
+            ),
+            format!(
+                "const uint TIER_POSITION = {}u;",
+                crate::probe_tier::PROBE_TEXELS - 1
+            ),
+            format!(
+                "const uint TIER_WORK_TEXELS = {}u;",
+                crate::probe_tier::WORK_TEXELS
+            ),
         ] {
-            assert!(tier.contains(&line), "tier.glsl left the Rust layout: {line}");
+            assert!(
+                tier.contains(&line),
+                "tier.glsl left the Rust layout: {line}"
+            );
         }
-        assert_eq!(crate::probe_tier::TIER_INDIR - crate::probe_tier::TIER_INFO, 2);
+        assert_eq!(
+            crate::probe_tier::TIER_INDIR - crate::probe_tier::TIER_INFO,
+            2
+        );
         assert!(tier.contains("const uint TIER_INDIR = TIER_INFO + 2u;"));
         for source in [frag, comp] {
-            assert!(source.contains("#include \"tier.glsl\""), "a shader does not read the tier");
+            assert!(
+                source.contains("#include \"tier.glsl\""),
+                "a shader does not read the tier"
+            );
         }
     }
 
@@ -779,7 +800,10 @@ mod tests {
             (east_eye - east_x).abs() < 1.0e-4,
             "the draw did not upload the player"
         );
-        assert_ne!(west_bytes[eye_at..eye_at + 4], east_bytes[eye_at..eye_at + 4]);
+        assert_ne!(
+            west_bytes[eye_at..eye_at + 4],
+            east_bytes[eye_at..eye_at + 4]
+        );
         assert!(
             west.cascades[2].offset
                 + west.cascades[2].count_x * west.cascades[2].count_z * west.cascades[2].dirs

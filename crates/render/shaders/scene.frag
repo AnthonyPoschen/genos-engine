@@ -354,9 +354,32 @@ vec2 fog_field_xz(vec2 xz) {
     if (occ_grid_empty()) {
         return xz;
     }
-    uvec2 cell = occ_cell(occ_cell_of(xz));
-    for (uint k = 0u; k < cell.y; k++) {
-        Occ occ = scene_occ(grid_word(cell.x + k));
+    vec3 org = occ_box_origin();
+    int ix = int(floor((xz.x - org.x) / scene.occ_grid.z));
+    int iz = int(floor((xz.y - org.z) / scene.occ_grid.z));
+    ivec3 dims = ivec3(int(scene.grid_dims.x), int(grid_word(1u)), int(scene.grid_dims.y));
+    if (ix < 0 || iz < 0 || ix >= dims.x || iz >= dims.z) {
+        return xz;
+    }
+    uint bricks_y = (uint(dims.y) + 7u) / 8u;
+    [[dont_unroll]] for (uint cy = 0u; cy < bricks_y; cy++) {
+        uint brick;
+        if (!occ_brick(ivec3(ix >> 3, int(cy), iz >> 3), brick)) {
+            continue;
+        }
+        uint nrec = grid_word(brick + 512u) & 1023u;
+        uint rec = brick + 513u;
+        [[dont_unroll]] for (uint r = 0u; r < nrec; r++) {
+        uint local = grid_word(rec + r * 3u);
+        int fx = int((ix >> 3) << 3) + int(local & 7u);
+        int fz = int((iz >> 3) << 3) + int((local >> 3u) & 7u);
+        if (fx != ix || fz != iz) {
+            continue;
+        }
+        uint list = grid_word(rec + r * 3u + 1u);
+        uint list_n = grid_word(rec + r * 3u + 2u);
+        [[dont_unroll]] for (uint k = 0u; k < list_n; k++) {
+        Occ occ = scene_occ(grid_word(list + k));
         vec2 d = xz - occ.center_shape.xz;
         if (occ.center_shape.w > 0.5) {
             if (dot(d, d) < occ.extent.w * occ.extent.w) {
@@ -374,6 +397,8 @@ vec2 fog_field_xz(vec2 xz) {
                 : vec2(l.x, (l.y < 0.0 ? -1.0 : 1.0) * (occ.extent.z + 0.1));
             vec2 back = occ_turned(occ) ? occ_world(occ, out_l) : out_l;
             return occ.center_shape.xz + back;
+        }
+        }
         }
     }
     return xz;

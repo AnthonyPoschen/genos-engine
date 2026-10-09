@@ -587,6 +587,21 @@ void write_tier() {
                 store_w = max(wf, 8192.0);
             }
         }
+        // Same test as probe_tier.rs notice_keeps_face. The band is scene.lamp_grid.w
+        // (NOTICE_BAND). A face inside the band keeps the stored colour. This does
+        // not scale the new rays toward that colour. Replaces (caps 0, 1, 2, 7, 8)
+        // still write the new light.
+        bool special_cap = history_cap < 2.5 || abs(history_cap - 7.0) < 0.5 || abs(history_cap - 8.0) < 0.5;
+        if (!reset && !special_cap) {
+            float band = scene.lamp_grid.w;
+            float ay = dot(old.rgb, vec3(0.2126, 0.7152, 0.0722));
+            float by = dot(mean, vec3(0.2126, 0.7152, 0.0722));
+            float scale = max(max(ay, by), 1.0e-3);
+            if (band > 0.0 && abs(ay - by) / scale < band) {
+                mean = old.rgb;
+                store_w = max(old.a, 0.0);
+            }
+        }
         field.texels[dest + lane] = vec4(mean, store_w);
     } else if (lane == TIER_POSITION) {
         field.texels[dest + TIER_POSITION] = vec4(pos, samples);
@@ -647,7 +662,14 @@ void blend_view() {
         }
         vec3 target = tier_view.texels[p + TIER_VIEW_TARGET + f].rgb;
         vec3 shown = tier_view.texels[p + TIER_CUBE3 + f].rgb;
-        tier_view.texels[p + TIER_CUBE3 + f] = vec4(snap ? target : mix(shown, target, w), 0.0);
+        // A face the new gather moved by half or more is the new light at once.
+        // Mixing it with the old face is the grey morning: the fine shell still
+        // holds the night while the sun is already up. A small step still eases.
+        float shown_y = dot(shown, vec3(0.2126, 0.7152, 0.0722));
+        float target_y = dot(target, vec3(0.2126, 0.7152, 0.0722));
+        float scale = max(max(shown_y, target_y), 1.0e-3);
+        bool jumped = abs(shown_y - target_y) / scale > 0.5;
+        tier_view.texels[p + TIER_CUBE3 + f] = vec4((snap || jumped) ? target : mix(shown, target, w), 0.0);
     }
     tier_view.texels[p + TIER_POSITION] = vec4(pos.xyz, 1.0);
 }

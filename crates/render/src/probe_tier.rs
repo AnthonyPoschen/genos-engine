@@ -66,7 +66,10 @@ impl SurfaceBox {
                 }
                 continue;
             }
-            let (a, b) = ((self.min[i] - origin[i]) / dir[i], (self.max[i] - origin[i]) / dir[i]);
+            let (a, b) = (
+                (self.min[i] - origin[i]) / dir[i],
+                (self.max[i] - origin[i]) / dir[i],
+            );
             let (near, far) = (a.min(b), a.max(b));
             if near > t0 {
                 t0 = near;
@@ -108,10 +111,17 @@ pub fn scene_boxes(scene: &genos_scene::Scene) -> Vec<SurfaceBox> {
     let f = &scene.floor;
     let (fx0, fx1) = (f.position.x - f.half_x, f.position.x + f.half_x);
     let (fz0, fz1) = (f.position.z - f.half_z, f.position.z + f.half_z);
-    let mut out = vec![SurfaceBox { min: [fx0, 0.0, fz0], max: [fx1, 0.0, fz1] }];
+    let mut out = vec![SurfaceBox {
+        min: [fx0, 0.0, fz0],
+        max: [fx1, 0.0, fz1],
+    }];
     for wall in &scene.walls {
         out.push(SurfaceBox {
-            min: [wall.position.x - wall.half_x, wall.base, wall.position.z - wall.half_z],
+            min: [
+                wall.position.x - wall.half_x,
+                wall.base,
+                wall.position.z - wall.half_z,
+            ],
             max: [
                 wall.position.x + wall.half_x,
                 wall.base + wall.height,
@@ -124,11 +134,18 @@ pub fn scene_boxes(scene: &genos_scene::Scene) -> Vec<SurfaceBox> {
         let half = crate::world::solid_reach(solid);
         out.push(SurfaceBox {
             min: [solid.position.x - half, 0.0, solid.position.z - half],
-            max: [solid.position.x + half, solid.height, solid.position.z + half],
+            max: [
+                solid.position.x + half,
+                solid.height,
+                solid.position.z + half,
+            ],
         });
     }
     if let Some(ceiling) = &scene.ceiling {
-        out.push(SurfaceBox { min: [fx0, ceiling.height, fz0], max: [fx1, ceiling.height, fz1] });
+        out.push(SurfaceBox {
+            min: [fx0, ceiling.height, fz0],
+            max: [fx1, ceiling.height, fz1],
+        });
     }
     out
 }
@@ -147,7 +164,11 @@ pub struct TierLayout {
 
 impl TierLayout {
     pub fn new(spacing: f32, radius: f32) -> Self {
-        Self { spacing, radius, reach: spacing * 3.0_f32.sqrt() }
+        Self {
+            spacing,
+            radius,
+            reach: spacing * 3.0_f32.sqrt(),
+        }
     }
 
     fn brick_span(&self) -> f32 {
@@ -274,7 +295,11 @@ pub fn place_probe(boxes: &[SurfaceBox], p: [f32; 3], layout: &TierLayout) -> Op
             // Equal exits on one axis (the middle of a thin wall): the low side.
             if d <= least + 1.0e-3 && !moved[axis] {
                 moved[axis] = true;
-                q[axis] = if up { b.max[axis] + gap } else { b.min[axis] - gap };
+                q[axis] = if up {
+                    b.max[axis] + gap
+                } else {
+                    b.min[axis] - gap
+                };
             }
         }
         if (0..3).any(|i| (q[i] - p[i]).abs() > 0.5 * layout.spacing) {
@@ -308,13 +333,24 @@ pub fn allocate(boxes: &[SurfaceBox], eye: [f32; 3], layout: &TierLayout) -> Bri
 /// Bounds of the surfaces that can make a probe of `brick` live, dead or moved.
 fn brick_reach(brick: [i32; 3], layout: &TierLayout) -> ([f32; 3], [f32; 3]) {
     let span = layout.brick_span();
-    (brick.map(|b| b as f32 * span - layout.reach), brick.map(|b| (b + 1) as f32 * span + layout.reach))
+    (
+        brick.map(|b| b as f32 * span - layout.reach),
+        brick.map(|b| (b + 1) as f32 * span + layout.reach),
+    )
 }
 
 /// The live probes of `brick` and where each probe sits, or none when no probe is live.
-fn place_brick(boxes: &[SurfaceBox], brick: [i32; 3], layout: &TierLayout) -> Option<(u64, Vec<[f32; 3]>)> {
+fn place_brick(
+    boxes: &[SurfaceBox],
+    brick: [i32; 3],
+    layout: &TierLayout,
+) -> Option<(u64, Vec<[f32; 3]>)> {
     let (min, max) = brick_reach(brick, layout);
-    let nearby: Vec<SurfaceBox> = boxes.iter().copied().filter(|b| b.overlaps(min, max)).collect();
+    let nearby: Vec<SurfaceBox> = boxes
+        .iter()
+        .copied()
+        .filter(|b| b.overlaps(min, max))
+        .collect();
     if nearby.is_empty() {
         return None;
     }
@@ -343,7 +379,16 @@ const GEOMETRY_MARGIN: f32 = 1.0;
 /// light, or the light it hid, is under a tenth of what a face beside it gets.
 const GEOMETRY_SIZES: f32 = 2.0;
 /// How far a directional light's shadow of a moved solid is followed, in metres.
-const SUN_SHADOW: f32 = 80.0;
+/// The shaft is the box silhouette extruded along the sun, not a cone grown to the brick.
+pub const SUN_SHADOW: f32 = 80.0;
+/// Relative luminance under which a new probe face is the same light. The gather
+/// leaves the stored face and skips that run. It does not pull the new rays toward
+/// the stored face.
+pub const NOTICE_BAND: f32 = 0.02;
+/// Irradiance where a point lamp falls under the visible floor. One of the five
+/// small-stress lamps (peak 0.2) reaches about 17 m. A hundred lamps that share
+/// that same total reach a few metres.
+pub const VISIBLE_FLOOR: f32 = 0.05;
 
 /// Walls and solids, not the floor or roof sheets. The eye is outside and far when it
 /// is beyond this hull and can see the whole of it. Interior animation then does not
@@ -367,7 +412,9 @@ fn building_hull(boxes: &[SurfaceBox]) -> Option<SurfaceBox> {
 
 /// True when `eye` is outside `hull` and far enough to see all of it.
 fn outside_far(eye: [f32; 3], hull: &SurfaceBox) -> bool {
-    let inside_xz = (0..3).step_by(2).all(|i| eye[i] > hull.min[i] && eye[i] < hull.max[i]);
+    let inside_xz = (0..3)
+        .step_by(2)
+        .all(|i| eye[i] > hull.min[i] && eye[i] < hull.max[i]);
     let inside_y = eye[1] > hull.min[1] - 0.5 && eye[1] < hull.max[1] + 1.5;
     if inside_xz && inside_y {
         return false;
@@ -388,42 +435,261 @@ fn interior_box(b: &SurfaceBox, hull: &SurfaceBox) -> bool {
     interior_point(c, hull)
 }
 
-/// True when moving the solids `moved` (their old and new places) can change the light
-/// in the brick `lo`..`hi`: it is within their bounce reach, or a light that reaches it
-/// passes one of them on the way (their shadow fell or now falls on it).
-fn geometry_reaches(moved: &[SurfaceBox], lights: &[TierLight], lo: [f32; 3], hi: [f32; 3]) -> bool {
+/// Relative luminance of one probe face.
+pub fn face_luma(color: [f32; 3]) -> f32 {
+    0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
+}
+
+/// True when `fresh` is inside [`NOTICE_BAND`] of `stored`. The gather keeps `stored`.
+pub fn notice_keeps_face(stored: [f32; 3], fresh: [f32; 3]) -> bool {
+    let a = face_luma(stored);
+    let b = face_luma(fresh);
+    let scale = a.max(b).max(1.0e-3);
+    (a - b).abs() / scale < NOTICE_BAND
+}
+
+/// The face the picture stores: `stored` when the new light is inside the notice band.
+pub fn apply_notice(stored: [f32; 3], fresh: [f32; 3]) -> [f32; 3] {
+    if notice_keeps_face(stored, fresh) {
+        stored
+    } else {
+        fresh
+    }
+}
+
+fn normalize3(v: [f32; 3]) -> [f32; 3] {
+    let len = v.iter().map(|c| c * c).sum::<f32>().sqrt().max(1.0e-6);
+    v.map(|c| c / len)
+}
+
+/// True when the brick `lo`..`hi` meets the silhouette of `solid` extruded `length`
+/// metres along `dir`. The shaft is not grown out to the brick.
+pub fn shaft_overlaps(
+    solid: &SurfaceBox,
+    dir: [f32; 3],
+    length: f32,
+    lo: [f32; 3],
+    hi: [f32; 3],
+) -> bool {
+    let dir = normalize3(dir);
+    let mut t0 = 0.0_f32;
+    let mut t1 = length.max(0.0);
+    for i in 0..3 {
+        let d = dir[i];
+        if d.abs() < 1.0e-8 {
+            if solid.max[i] < lo[i] || solid.min[i] > hi[i] {
+                return false;
+            }
+            continue;
+        }
+        let (mut a, mut b) = ((lo[i] - solid.max[i]) / d, (hi[i] - solid.min[i]) / d);
+        if a > b {
+            std::mem::swap(&mut a, &mut b);
+        }
+        t0 = t0.max(a);
+        t1 = t1.min(b);
+        if t0 > t1 {
+            return false;
+        }
+    }
+    t0 <= t1
+}
+
+fn box_center(b: &SurfaceBox) -> [f32; 3] {
+    [0, 1, 2].map(|i| 0.5 * (b.min[i] + b.max[i]))
+}
+
+/// True when the segment from `from` to `target` meets no other box first.
+fn sees_box(from: [f32; 3], target: &SurfaceBox, blockers: &[SurfaceBox]) -> bool {
+    let to = box_center(target);
+    let dist: f32 = (0..3)
+        .map(|i| (to[i] - from[i]).powi(2))
+        .sum::<f32>()
+        .sqrt();
+    if dist < 1.0e-3 {
+        return true;
+    }
+    for block in blockers {
+        if block.min == target.min && block.max == target.max {
+            continue;
+        }
+        if block.max[1] - block.min[1] < 0.4 {
+            continue;
+        }
+        if block.crosses(from, to) {
+            let hit = block.entry(from, [0, 1, 2].map(|i| (to[i] - from[i]) / dist));
+            if hit.is_some_and(|(t, _)| t < dist - 0.05) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// True when moving `moved` can change the light in the brick `lo`..`hi`.
+/// The brick is inside the bounce margin and can see the box, or it sits in the
+/// sun-shadow shaft of the box. A point lamp does not widen that shaft.
+pub fn geometry_reaches(
+    moved: &[SurfaceBox],
+    lights: &[TierLight],
+    blockers: &[SurfaceBox],
+    lo: [f32; 3],
+    hi: [f32; 3],
+) -> bool {
     let center = [0, 1, 2].map(|i| 0.5 * (lo[i] + hi[i]));
-    let half = 0.5 * (0..3).map(|i| (hi[i] - lo[i]).powi(2)).sum::<f32>().sqrt();
     for m in moved {
         let size = (0..3).map(|i| m.max[i] - m.min[i]).fold(0.0_f32, f32::max);
         let reach = GEOMETRY_MARGIN + GEOMETRY_SIZES * size;
         let gap2: f32 = (0..3)
             .map(|i| (m.min[i] - hi[i]).max(lo[i] - m.max[i]).max(0.0).powi(2))
             .sum();
-        if gap2 <= reach * reach {
+        if gap2 <= reach * reach && sees_box(center, m, blockers) {
             return true;
         }
-        let m_center = [0, 1, 2].map(|i| 0.5 * (m.min[i] + m.max[i]));
-        let m_half = 0.5 * (0..3).map(|i| (m.max[i] - m.min[i]).powi(2)).sum::<f32>().sqrt();
-        for light in lights.iter().filter(|l| l.reaches(lo, hi)) {
-            // The rays from the light to the brick fill a cone (a cylinder for a
-            // directional light); at the solid it is as wide as the brick times the
-            // solid's share of the way there.
-            let (to, share) = if light.directional {
-                let len = light.pos.iter().map(|v| v * v).sum::<f32>().sqrt().max(1.0e-6);
-                ([0, 1, 2].map(|i| center[i] - light.pos[i] / len * SUN_SHADOW), 1.0)
-            } else {
-                let dist = |p: [f32; 3]| (0..3).map(|i| (p[i] - light.pos[i]).powi(2)).sum::<f32>().sqrt();
-                (light.pos, ((dist(m_center) + m_half) / dist(center).max(1.0e-6)).min(1.0))
-            };
-            let grow = half * share;
-            let grown = SurfaceBox { min: m.min.map(|v| v - grow), max: m.max.map(|v| v + grow) };
-            if grown.crosses(center, to) {
+        for light in lights.iter().filter(|light| light.directional) {
+            if shaft_overlaps(m, light.pos, SUN_SHADOW, lo, hi) {
                 return true;
             }
         }
     }
     false
+}
+
+/// Walls and solids. A floor sheet does not cast a sun shaft onto the probes.
+fn casts_shadow(b: &SurfaceBox) -> bool {
+    b.max[1] - b.min[1] >= 0.4
+}
+
+/// Bricks in the shaft of `dir` and not of `other`, or the reverse. A slow sun
+/// moves only that wedge.
+fn shaft_xor(
+    occluders: &[SurfaceBox],
+    old_dir: [f32; 3],
+    new_dir: [f32; 3],
+    lo: [f32; 3],
+    hi: [f32; 3],
+) -> bool {
+    occluders.iter().filter(|b| casts_shadow(b)).any(|b| {
+        let a = shaft_overlaps(b, old_dir, SUN_SHADOW, lo, hi);
+        let c = shaft_overlaps(b, new_dir, SUN_SHADOW, lo, hi);
+        a != c
+    })
+}
+
+fn shaft_any(occluders: &[SurfaceBox], dir: [f32; 3], lo: [f32; 3], hi: [f32; 3]) -> bool {
+    occluders
+        .iter()
+        .filter(|b| casts_shadow(b))
+        .any(|b| shaft_overlaps(b, dir, SUN_SHADOW, lo, hi))
+}
+
+fn shaft_union(
+    occluders: &[SurfaceBox],
+    old_dir: [f32; 3],
+    new_dir: [f32; 3],
+    lo: [f32; 3],
+    hi: [f32; 3],
+) -> bool {
+    occluders.iter().filter(|b| casts_shadow(b)).any(|b| {
+        shaft_overlaps(b, old_dir, SUN_SHADOW, lo, hi)
+            || shaft_overlaps(b, new_dir, SUN_SHADOW, lo, hi)
+    })
+}
+
+/// One directional light that turned, jumped, or only changed colour.
+struct SunShift {
+    old: [f32; 3],
+    new: [f32; 3],
+    jump: bool,
+    tint: bool,
+}
+
+/// Angular size of a surface of `extent` metres at `depth` metres from the eye.
+/// The eye is the centre. A surface behind the camera uses the same depth.
+pub fn prominence(extent: f32, depth: f32) -> f32 {
+    extent.max(0.0) / depth.max(0.25)
+}
+
+/// Probe spacing for `score`. A large score stays at 1 m. Smaller scores step
+/// through 2 m, 4 m and 8 m. The step does not grow past `geometry`.
+pub fn prominence_spacing(score: f32, geometry: f32) -> f32 {
+    let mut step = if score >= 0.5 {
+        1.0
+    } else if score >= 0.15 {
+        2.0
+    } else if score >= 0.04 {
+        4.0
+    } else {
+        8.0
+    };
+    let cap = geometry.max(1.0);
+    while step > cap && step > 1.0 {
+        step *= 0.5;
+    }
+    step
+}
+
+/// Spacing a surface deserves from `eye`. Depth is the distance, not a screen test.
+pub fn surface_spacing(eye: [f32; 3], center: [f32; 3], extent: f32, geometry: f32) -> f32 {
+    let depth = (0..3)
+        .map(|i| (center[i] - eye[i]).powi(2))
+        .sum::<f32>()
+        .sqrt();
+    prominence_spacing(prominence(extent, depth), geometry)
+}
+
+/// True when a probe already finer than `score_spacing` keeps its samples.
+/// A change inside the notice band does not rebuild it and does not coarsen it.
+/// A change outside the band does not keep it.
+pub fn keep_finer(spacing: f32, score_spacing: f32, stored: [f32; 3], fresh: [f32; 3]) -> bool {
+    spacing + 1.0e-3 < score_spacing && notice_keeps_face(stored, fresh)
+}
+
+/// Sort key for dropping a brick when the slot cap is full.
+/// Off-screen low scores come first. On-screen bricks come last.
+pub fn retire_key(on_screen: bool, score: f32) -> (u8, i32) {
+    (u8::from(on_screen), (score * 1000.0) as i32)
+}
+
+/// How far the sun on an upward face has moved since `basis`.
+/// An interior probe scores 0: the house barely changes when the sun climbs.
+/// A larger score is gathered first. The picture then shows that light at once.
+pub fn shell_priority(now: f32, basis: f32, outside: bool) -> f32 {
+    if !outside {
+        return 0.0;
+    }
+    let scale = now.max(basis).max(0.05);
+    (now - basis).abs() / scale
+}
+
+/// Upward-face sun, 0 at night and 1 when the rays travel straight down.
+fn sun_up(dir: [f32; 3]) -> f32 {
+    (-dir[1]).max(0.0)
+}
+
+/// `(mark, hard)`. `hard` is a large jump: those bricks replace. A slow turn blends.
+fn sun_touch(
+    occluders: &[SurfaceBox],
+    shifts: &[SunShift],
+    lo: [f32; 3],
+    hi: [f32; 3],
+) -> (bool, bool) {
+    let mut mark = false;
+    let mut jump = false;
+    for shift in shifts {
+        let hit = if shift.tint {
+            shaft_any(occluders, shift.new, lo, hi)
+        } else if shift.jump {
+            shaft_union(occluders, shift.old, shift.new, lo, hi)
+        } else {
+            shaft_xor(occluders, shift.old, shift.new, lo, hi)
+        };
+        if hit {
+            mark = true;
+            jump |= shift.jump;
+        }
+    }
+    (mark, jump)
 }
 
 /// The boxes of `old` that `new` lacks, then those of `new` that `old` lacks: the old
@@ -449,7 +715,6 @@ fn moved_boxes(old: &[SurfaceBox], new: &[SurfaceBox]) -> Vec<SurfaceBox> {
     }
     out
 }
-
 
 // ---- Field layout ----------------------------------------------------------
 // The tier lives after the world probes in the light field (texel = 16 bytes).
@@ -479,7 +744,9 @@ pub const TIER_PROBES: u32 = TIER_INFO + 106496;
 /// End of the tier, the size of the light field in texels.
 pub const TIER_END: u32 = TIER_PROBES + TIER_SLOT_CAP * BRICK_PROBES * PROBE_TEXELS;
 
-const _: () = assert!(TIER_SLOT_CAP <= TIER_TABLE_ROOM && TIER_WORK + TIER_SLOT_CAP * WORK_TEXELS <= TIER_PROBES);
+const _: () = assert!(
+    TIER_SLOT_CAP <= TIER_TABLE_ROOM && TIER_WORK + TIER_SLOT_CAP * WORK_TEXELS <= TIER_PROBES
+);
 
 /// Rays a probe takes on its brick's first pass: quick and noisy.
 pub const FIRST_RAYS: u32 = 16;
@@ -502,16 +769,17 @@ pub struct TierLight {
 }
 
 impl TierLight {
-    /// True when this light's irradiance can reach the box `lo`..`hi` above
-    /// [`LAMP_REACH_IRRADIANCE`]. A directional light reaches everything.
+    /// True when this light's irradiance at the box `lo`..`hi` is still above
+    /// [`VISIBLE_FLOOR`]. A directional light is not asked: the sun marks shafts.
     fn reaches(&self, lo: [f32; 3], hi: [f32; 3]) -> bool {
         if self.directional {
-            return true;
+            return false;
         }
-        let strength = self.color.iter().fold(0.0_f32, |m, c| m.max(c.abs()));
-        let reach2 = LAMP_UNIT * strength / LAMP_REACH_IRRADIANCE;
-        let d2: f32 = (0..3).map(|i| (self.pos[i] - self.pos[i].clamp(lo[i], hi[i])).powi(2)).sum();
-        d2 <= reach2
+        let reach = visible_reach(self.color);
+        let d2: f32 = (0..3)
+            .map(|i| (self.pos[i] - self.pos[i].clamp(lo[i], hi[i])).powi(2))
+            .sum();
+        d2 <= reach * reach
     }
 
     /// True when `self` differs from `old` enough to relight the bounce.
@@ -519,7 +787,10 @@ impl TierLight {
         if self.directional != old.directional {
             return true;
         }
-        let d: f32 = (0..3).map(|i| (self.pos[i] - old.pos[i]).powi(2)).sum::<f32>().sqrt();
+        let d: f32 = (0..3)
+            .map(|i| (self.pos[i] - old.pos[i]).powi(2))
+            .sum::<f32>()
+            .sqrt();
         let limit = if self.directional { 0.01 } else { LAMP_MOVE };
         if d >= limit {
             return true;
@@ -565,15 +836,27 @@ struct Slot {
     /// Change passes since the picture last took the brick's light: after
     /// [`CHANGE_PASSES`] it is a whole update, even with changes still coming.
     run: u32,
+    /// The box or the lamp moved again while this run was still going.
+    /// The run finishes, then one new run starts. The pass count stays.
+    again: bool,
+    /// Sun on an upward face when this brick last finished. The next sun
+    /// climb is scored against it.
+    basis_up: f32,
 }
 
 impl Slot {
     /// A change reached the brick: it takes its change passes again.
+    /// A run that is already going keeps its pass count and finishes first.
     fn restart(&mut self) {
+        if self.change_left > 0 && !self.replace {
+            self.again = true;
+            return;
+        }
         self.change_left = CHANGE_PASSES;
         self.replace = false;
         self.darken = false;
         self.done = 0;
+        self.again = false;
     }
 
     /// A sun, the sky, or a point lamp appeared or disappeared. One pass replaces the
@@ -583,6 +866,7 @@ impl Slot {
         self.replace = true;
         self.darken = darken;
         self.done = 0;
+        self.again = false;
     }
 }
 
@@ -620,9 +904,15 @@ const NIGHT_HOPS: u32 = 8;
 /// Probe rays one night pass may spend. The pass has to finish inside the
 /// live picture's tenth of a second, with the passes that follow it.
 const NIGHT_RAY_BUDGET: u64 = 200_000;
-/// Irradiance below which a lamp no longer reaches a brick: a change to that lamp
-/// leaves the brick alone. A unit lamp reaches about 270 m.
-pub const LAMP_REACH_IRRADIANCE: f32 = 1.0e-3;
+/// Distance at which `color` falls under [`VISIBLE_FLOOR`], in metres.
+pub fn visible_reach(color: [f32; 3]) -> f32 {
+    let peak = color.iter().fold(0.0_f32, |m, c| m.max(c.abs()));
+    if peak <= 1.0e-8 {
+        return 0.0;
+    }
+    (LAMP_UNIT * peak / VISIBLE_FLOOR).sqrt()
+}
+
 /// Irradiance of a unit lamp at 1 m (light.comp LAMP_UNIT).
 const LAMP_UNIT: f32 = 72.0;
 /// Scheduling class of the averaging refine passes, after every change pass.
@@ -713,7 +1003,15 @@ pub struct TierWeights {
 
 impl Default for TierWeights {
     fn default() -> Self {
-        Self { near: 4.0, feed: 0.5, margin: 0.25, edge: 0.25, stale: 0.25, far: 8.0, far_skip: 0.03 }
+        Self {
+            near: 4.0,
+            feed: 0.5,
+            margin: 0.25,
+            edge: 0.25,
+            stale: 0.25,
+            far: 8.0,
+            far_skip: 0.03,
+        }
     }
 }
 
@@ -722,8 +1020,13 @@ impl TierWeights {
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut out = Self::default();
         for pair in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-            let (name, value) = pair.split_once('=').ok_or(format!("tier weight {pair} is not name=value"))?;
-            let value: f32 = value.trim().parse().map_err(|_| format!("tier weight {pair} is not a number"))?;
+            let (name, value) = pair
+                .split_once('=')
+                .ok_or(format!("tier weight {pair} is not name=value"))?;
+            let value: f32 = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("tier weight {pair} is not a number"))?;
             let field = match name.trim() {
                 "near" => &mut out.near,
                 "feed" => &mut out.feed,
@@ -773,6 +1076,149 @@ pub struct TierStats {
     /// Bricks left unlit because the camera was outside and far, and the change was
     /// a box or a lamp inside the building.
     pub interior_skipped: u64,
+}
+
+/// One light the shade uses. A parent holds the sum of its children.
+#[derive(Clone, Copy, Debug)]
+struct LightNode {
+    pos: [f32; 3],
+    color: [f32; 3],
+    children: Option<(usize, usize)>,
+}
+
+/// Lamps clustered by position. A probe keeps the deepest node that is still one
+/// light from where it stands. The shade reads [`LightTree::pick`].
+#[derive(Clone, Debug, Default)]
+pub struct LightTree {
+    nodes: Vec<LightNode>,
+    root: Option<usize>,
+    sources: Vec<([f32; 3], [f32; 3])>,
+}
+
+/// Angle, in radians, under which two lights stay one light.
+pub const CLUSTER_ANGLE: f32 = 0.2;
+
+impl LightTree {
+    pub fn build(lamps: &[TierLight]) -> Self {
+        let points: Vec<&TierLight> = lamps.iter().filter(|light| !light.directional).collect();
+        let mut nodes: Vec<LightNode> = points
+            .iter()
+            .map(|light| LightNode {
+                pos: light.pos,
+                color: light.color,
+                children: None,
+            })
+            .collect();
+        let sources = points
+            .iter()
+            .map(|light| (light.pos, light.color))
+            .collect();
+        if nodes.is_empty() {
+            return Self {
+                nodes,
+                root: None,
+                sources,
+            };
+        }
+        let mut live: Vec<usize> = (0..nodes.len()).collect();
+        while live.len() > 1 {
+            let mut best = (0usize, 1usize, f32::MAX);
+            for i in 0..live.len() {
+                for j in (i + 1)..live.len() {
+                    let d = light_dist(nodes[live[i]].pos, nodes[live[j]].pos);
+                    if d < best.2 {
+                        best = (i, j, d);
+                    }
+                }
+            }
+            let a = live[best.0];
+            let b = live[best.1];
+            let color = [0, 1, 2].map(|i| nodes[a].color[i] + nodes[b].color[i]);
+            let wa = nodes[a].color.iter().fold(0.0f32, |m, c| m + c.abs());
+            let wb = nodes[b].color.iter().fold(0.0f32, |m, c| m + c.abs());
+            let w = (wa + wb).max(1.0e-4);
+            let pos = [0, 1, 2].map(|i| (nodes[a].pos[i] * wa + nodes[b].pos[i] * wb) / w);
+            let parent = nodes.len();
+            nodes.push(LightNode {
+                pos,
+                color,
+                children: Some((a, b)),
+            });
+            let (lo, hi) = if best.0 < best.1 {
+                (best.0, best.1)
+            } else {
+                (best.1, best.0)
+            };
+            live.remove(hi);
+            live.remove(lo);
+            live.push(parent);
+        }
+        Self {
+            root: Some(live[0]),
+            nodes,
+            sources,
+        }
+    }
+
+    /// A sway under each lamp's move limit keeps these nodes.
+    pub fn same_nodes(&self, lamps: &[TierLight]) -> bool {
+        let points: Vec<&TierLight> = lamps.iter().filter(|light| !light.directional).collect();
+        if points.len() != self.sources.len() {
+            return false;
+        }
+        points.iter().zip(&self.sources).all(|(light, old)| {
+            light_dist(light.pos, old.0) <= cluster_move_limit(old.1)
+                && light
+                    .color
+                    .iter()
+                    .zip(old.1)
+                    .all(|(a, b)| (a - b).abs() <= NOTICE_BAND * b.abs().max(1.0e-3))
+        })
+    }
+
+    /// The lights `from` shades. A small angle is the parent. A wide angle is the children.
+    pub fn pick(&self, from: [f32; 3]) -> Vec<([f32; 3], [f32; 3])> {
+        let mut out = Vec::new();
+        if let Some(root) = self.root {
+            self.walk(root, from, &mut out);
+        }
+        out
+    }
+
+    fn walk(&self, index: usize, from: [f32; 3], out: &mut Vec<([f32; 3], [f32; 3])>) {
+        let node = &self.nodes[index];
+        if let Some((a, b)) = node.children {
+            let ang = light_angle(from, self.nodes[a].pos, self.nodes[b].pos);
+            if ang <= CLUSTER_ANGLE {
+                out.push((node.pos, node.color));
+            } else {
+                self.walk(a, from, out);
+                self.walk(b, from, out);
+            }
+        } else {
+            out.push((node.pos, node.color));
+        }
+    }
+}
+
+fn cluster_move_limit(color: [f32; 3]) -> f32 {
+    (visible_reach(color) * 0.01).max(LAMP_MOVE)
+}
+
+fn light_dist(a: [f32; 3], b: [f32; 3]) -> f32 {
+    (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>().sqrt()
+}
+
+fn light_angle(from: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
+    let u = [0, 1, 2].map(|i| a[i] - from[i]);
+    let v = [0, 1, 2].map(|i| b[i] - from[i]);
+    let lu = light_dist(u, [0.0; 3]);
+    let lv = light_dist(v, [0.0; 3]);
+    if lu < 1.0e-4 || lv < 1.0e-4 {
+        return 0.0;
+    }
+    let d = (0..3).map(|i| u[i] * v[i]).sum::<f32>() / (lu * lv);
+    d.clamp(-1.0, 1.0).acos()
 }
 
 /// The persistent tier on the CPU: which brick lives in which slot, what each slot
@@ -826,6 +1272,12 @@ pub struct TierState {
     long_build: bool,
     /// See [`TierStats::interior_skipped`].
     interior_skipped: u64,
+    /// Last camera position. Prominence is measured from here.
+    eye: [f32; 3],
+    /// Lamp clusters the shade reads. Rebuilt when a lamp moves past its threshold.
+    light_tree: LightTree,
+    /// Debug overlay. Off unless asked. Turning it on does not allocate probes.
+    debug_view: bool,
     /// Per slot: how much of the view reads the brick's light ([`Self::look`]).
     seen: Vec<f32>,
     look_frame: u32,
@@ -896,6 +1348,75 @@ impl TierState {
             seen: Vec::new(),
             weights: TierWeights::default(),
             look_frame: 0,
+            eye: [0.0; 3],
+            light_tree: LightTree::default(),
+            debug_view: false,
+        }
+    }
+
+    /// The lamp clusters a probe at `from` shades with. One cluster is one light.
+    pub fn shade_at(&self, from: [f32; 3]) -> Vec<([f32; 3], [f32; 3])> {
+        self.light_tree.pick(from)
+    }
+
+    pub fn debug_view(&self) -> bool {
+        self.debug_view
+    }
+
+    fn spacing_at(&self, brick: [i32; 3]) -> f32 {
+        let mut best = 1.0f32;
+        let mut best_score = -1.0f32;
+        for b in &self.boxes {
+            let extent = (0..3)
+                .map(|i| b.max[i] - b.min[i])
+                .fold(0.0f32, f32::max)
+                .max(1.0);
+            let mid = [0, 1, 2].map(|i| 0.5 * (b.min[i] + b.max[i]));
+            let step = surface_spacing(self.eye, mid, extent, extent);
+            let depth = light_dist(self.eye, mid).max(0.25);
+            let score = prominence(extent, depth);
+            if score > best_score {
+                best_score = score;
+                best = step;
+            }
+        }
+        let _ = brick;
+        best
+    }
+
+    /// The debug view does not place or drop probes.
+    pub fn set_debug_view(&mut self, on: bool) {
+        self.debug_view = on;
+    }
+
+    /// Replace the flat 50 m / 1 m window with the spacing the surfaces deserve
+    /// from `eye`, and a window that covers those surfaces.
+    pub fn fit_prominence(&mut self, boxes: &[SurfaceBox], eye: [f32; 3]) {
+        if boxes.is_empty() {
+            return;
+        }
+        let mut best_score = 0.0f32;
+        let mut geometry = 1.0f32;
+        let mut far = 8.0f32;
+        for b in boxes {
+            let extent = (0..3)
+                .map(|i| b.max[i] - b.min[i])
+                .fold(0.0f32, f32::max)
+                .max(0.25);
+            let mid = [0, 1, 2].map(|i| 0.5 * (b.min[i] + b.max[i]));
+            let depth = light_dist(eye, mid).max(0.25);
+            let score = prominence(extent, depth);
+            if score > best_score {
+                best_score = score;
+                geometry = extent.max(1.0);
+            }
+            far = far.max(depth + extent);
+        }
+        let spacing = prominence_spacing(best_score, geometry);
+        let radius = far.min(80.0).max(spacing * 4.0);
+        if (self.layout.spacing - spacing).abs() > 0.1 || (self.layout.radius - radius).abs() > 1.0
+        {
+            self.layout = TierLayout::new(spacing, radius);
         }
     }
 
@@ -912,7 +1433,11 @@ impl TierState {
     /// The world volume should be rebuilt from this update.
     pub fn world_now(&self) -> bool {
         self.world_now
-            || self.slots.iter().flatten().any(|slot| slot.replace && slot.change_left > 0)
+            || self
+                .slots
+                .iter()
+                .flatten()
+                .any(|slot| slot.replace && slot.change_left > 0)
     }
 
     /// True when the last update removed the sun or the sky.
@@ -930,6 +1455,7 @@ impl TierState {
         lights: &[TierLight],
     ) -> bool {
         let mut changed = false;
+        self.eye = eye;
         let geometry = boxes_key(&boxes);
         // What a geometry change reaches: nothing, the bricks near the boxes that moved
         // (`Some`), or every brick (`None`: new surface colours).
@@ -974,18 +1500,18 @@ impl TierState {
             changed |= self.reallocate_near(&moved, eye);
         }
         // Lamps that changed, where they were and where they are now.
-        // A sun or the sky coming or going is one replacing pass. A drift of colour is not:
-        // the running sun would replace every probe several times a second.
+        // A sun or the sky coming or going is one replacing pass over the tier.
+        // A slow turn of the sun marks only the shaft wedge. It does not mark
+        // every brick: a directional light would, so the sun stays out of `reach`.
         let old_dirs = self.lights.iter().filter(|light| light.directional).count();
         let new_dirs = lights.iter().filter(|light| light.directional).count();
         let wide = old_dirs != new_dirs;
         self.sun_wide = wide;
         let mut reach: Vec<TierLight> = Vec::new();
-        // Point lamps that switched on or off. Their bricks take one replacing pass.
         let mut flips: Vec<TierLight> = Vec::new();
         let mut went_dark = new_dirs < old_dirs;
-        // A running sun drifts. A jump, such as a time skip, replaces the field.
         let mut sun_jump = false;
+        let mut suns: Vec<SunShift> = Vec::new();
         for i in 0..lights.len().max(self.lights.len()) {
             match (self.lights.get(i), lights.get(i)) {
                 (Some(old), Some(new)) if !new.moved_from(old) => {}
@@ -998,7 +1524,28 @@ impl TierState {
                                 .sqrt();
                             if d > 0.15 {
                                 sun_jump = true;
+                                suns.push(SunShift {
+                                    old: old.pos,
+                                    new: new.pos,
+                                    jump: true,
+                                    tint: false,
+                                });
+                            } else if d > 0.01 {
+                                suns.push(SunShift {
+                                    old: old.pos,
+                                    new: new.pos,
+                                    jump: false,
+                                    tint: false,
+                                });
+                            } else {
+                                suns.push(SunShift {
+                                    old: new.pos,
+                                    new: new.pos,
+                                    jump: false,
+                                    tint: true,
+                                });
                             }
+                            continue;
                         }
                         if new.strength_flip(old) {
                             flips.extend([*old, *new]);
@@ -1009,7 +1556,11 @@ impl TierState {
                             }
                         }
                     }
-                    reach.extend(old.into_iter().chain(new).copied());
+                    for light in old.into_iter().chain(new).copied() {
+                        if !light.directional {
+                            reach.push(light);
+                        }
+                    }
                 }
             }
         }
@@ -1028,40 +1579,50 @@ impl TierState {
         if far {
             if let Some(hull) = building_hull(&self.boxes) {
                 let before = reach.len();
-                reach.retain(|light| light.directional || !interior_point(light.pos, &hull));
-                flips.retain(|light| light.directional || !interior_point(light.pos, &hull));
+                reach.retain(|light| !interior_point(light.pos, &hull));
+                flips.retain(|light| !interior_point(light.pos, &hull));
                 self.interior_skipped += (before - reach.len()) as u64;
             }
         }
-        if !reach.is_empty() {
+        if !reach.is_empty() || !suns.is_empty() || wide {
             self.lights = lights.to_vec();
             self.light_gen += 1;
             changed = true;
         }
-        let geometry_reach = |lo, hi| match &reached {
-            None => true,
-            Some(list) => !list.is_empty() && geometry_reaches(list, &self.lights, lo, hi),
-        };
         let span = self.layout.brick_span();
-        let mut relit = Vec::new();
+        let mut relit: Vec<(usize, bool)> = Vec::new();
         for (index, slot) in self.slots.iter().enumerate() {
-            let Some(slot) = slot.as_ref().filter(|s| s.filled) else { continue };
+            let Some(slot) = slot.as_ref().filter(|s| s.filled) else {
+                continue;
+            };
             let lo = slot.brick.map(|b| b as f32 * span);
             let hi = slot.brick.map(|b| (b + 1) as f32 * span);
-            if geometry_reach(lo, hi) || reach.iter().any(|l| l.reaches(lo, hi)) {
-                relit.push(index);
+            let geometry_hit = match &reached {
+                None => true,
+                Some(list) => {
+                    !list.is_empty() && geometry_reaches(list, &self.lights, &self.boxes, lo, hi)
+                }
+            };
+            let lamp_hit = reach.iter().any(|light| light.reaches(lo, hi));
+            let (sun_hit, sun_hard) = sun_touch(&self.boxes, &suns, lo, hi);
+            if wide || geometry_hit || lamp_hit || sun_hit {
+                let hard = wide || sun_hard || flips.iter().any(|light| light.reaches(lo, hi));
+                relit.push((index, hard));
             }
         }
-        for index in relit {
-            let brick = self.slots[index].as_ref().expect("relit slot").brick;
-            let lo = brick.map(|b| b as f32 * span);
-            let hi = brick.map(|b| (b + 1) as f32 * span);
+        if !relit.is_empty() {
+            changed = true;
+        }
+        for (index, hard) in relit {
             let slot = self.slots[index].as_mut().expect("relit slot");
-            if wide || sun_jump || flips.iter().any(|light| light.reaches(lo, hi)) {
+            if hard {
                 slot.restart_wide(went_dark);
             } else {
                 slot.restart();
             }
+        }
+        if !self.light_tree.same_nodes(lights) {
+            self.light_tree = LightTree::build(lights);
         }
         changed
     }
@@ -1070,7 +1631,9 @@ impl TierState {
     /// they moved: the rest of the window keeps its probes, so dragging a solid does
     /// not walk the whole window every frame.
     fn reallocate_near(&mut self, moved: &[SurfaceBox], eye: [f32; 3]) -> bool {
-        let Some((lo, hi)) = self.window else { return false };
+        let Some((lo, hi)) = self.window else {
+            return false;
+        };
         let span = self.layout.brick_span();
         let reach = self.layout.reach;
         let mut changed = false;
@@ -1104,7 +1667,12 @@ impl TierState {
                 }
             }
         }
-        self.live = self.slots.iter().flatten().map(|s| s.mask.count_ones() as usize).sum();
+        self.live = self
+            .slots
+            .iter()
+            .flatten()
+            .map(|s| s.mask.count_ones() as usize)
+            .sum();
         changed
     }
 
@@ -1121,9 +1689,11 @@ impl TierState {
             }
             entry.mask = mask;
             entry.positions = positions;
-            entry.done = 0;
             if entry.filled {
+                // A run already going keeps `done`. `restart` sets the flag and returns.
                 entry.restart();
+            } else {
+                entry.done = 0;
             }
             return true;
         }
@@ -1149,6 +1719,8 @@ impl TierState {
             done: 0,
             since: std::time::Instant::now(),
             run: 0,
+            again: false,
+            basis_up: 0.0,
         });
         self.by_brick.insert(brick, slot);
         true
@@ -1163,11 +1735,29 @@ impl TierState {
             let span = self.layout.brick_span();
             let mut order: Vec<usize> = (0..set.bricks.len()).collect();
             let dist = |b: [i32; 3]| -> f32 {
-                (0..3).map(|i| ((b[i] as f32 + 0.5) * span - eye[i]).powi(2)).sum()
+                (0..3)
+                    .map(|i| ((b[i] as f32 + 0.5) * span - eye[i]).powi(2))
+                    .sum()
             };
             order.sort_by(|&a, &b| {
-                dist(set.bricks[a])
-                    .total_cmp(&dist(set.bricks[b]))
+                let score = |brick: [i32; 3]| {
+                    let center = [0, 1, 2].map(|i| (brick[i] as f32 + 0.5) * span);
+                    let mut best = 0.0f32;
+                    for b in &self.boxes {
+                        let extent = (0..3).map(|i| b.max[i] - b.min[i]).fold(0.0f32, f32::max);
+                        let mid = [0, 1, 2].map(|i| 0.5 * (b.min[i] + b.max[i]));
+                        let depth = (0..3)
+                            .map(|i| (mid[i] - eye[i]).powi(2))
+                            .sum::<f32>()
+                            .sqrt();
+                        best = best.max(prominence(extent, depth));
+                    }
+                    let _ = center;
+                    best
+                };
+                retire_key(false, score(set.bricks[b]))
+                    .cmp(&retire_key(false, score(set.bricks[a])))
+                    .then(dist(set.bricks[a]).total_cmp(&dist(set.bricks[b])))
                     .then(set.bricks[a].cmp(&set.bricks[b]))
             });
             order.truncate(TIER_SLOT_CAP as usize);
@@ -1177,12 +1767,20 @@ impl TierState {
             set.masks = order.iter().map(|&i| set.masks[i]).collect();
             set.positions = order.iter().map(|&i| set.positions[i].clone()).collect();
         }
-        let keep: std::collections::HashMap<[i32; 3], u64> =
-            set.bricks.iter().copied().zip(set.masks.iter().copied()).collect();
+        let keep: std::collections::HashMap<[i32; 3], u64> = set
+            .bricks
+            .iter()
+            .copied()
+            .zip(set.masks.iter().copied())
+            .collect();
         let mut changed = false;
         // Free the bricks that left.
-        let gone: Vec<[i32; 3]> =
-            self.by_brick.keys().filter(|b| !keep.contains_key(*b)).copied().collect();
+        let gone: Vec<[i32; 3]> = self
+            .by_brick
+            .keys()
+            .filter(|b| !keep.contains_key(*b))
+            .copied()
+            .collect();
         for brick in gone {
             if let Some(slot) = self.by_brick.remove(&brick) {
                 self.slots[slot as usize] = None;
@@ -1202,7 +1800,11 @@ impl TierState {
     pub fn stats(&self) -> TierStats {
         let window_bricks = self
             .window
-            .map(|(lo, hi)| (0..3).map(|i| (hi[i] - lo[i] + 1).max(0) as usize).product())
+            .map(|(lo, hi)| {
+                (0..3)
+                    .map(|i| (hi[i] - lo[i] + 1).max(0) as usize)
+                    .product()
+            })
             .unwrap_or(0);
         let mut stats = TierStats {
             window_bricks,
@@ -1239,7 +1841,9 @@ impl TierState {
     /// neighbours' light and their light reaches the view in one bounce. Zero: the
     /// picture does not use the brick now.
     fn weights(&self) -> Vec<f32> {
-        let mut weight: Vec<f32> = (0..self.slots.len()).map(|i| self.seen.get(i).copied().unwrap_or(0.0)).collect();
+        let mut weight: Vec<f32> = (0..self.slots.len())
+            .map(|i| self.seen.get(i).copied().unwrap_or(0.0))
+            .collect();
         let fed: Vec<(usize, f32)> = self
             .slots
             .iter()
@@ -1284,19 +1888,31 @@ impl TierState {
         const BAYER: [u32; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
         let turn = BAYER[(self.look_frame % 16) as usize];
         self.look_frame = self.look_frame.wrapping_add(1);
-        let (ox, oy) = (((turn % 4) as f32 + 0.5) / 4.0, ((turn / 4) as f32 + 0.5) / 4.0);
+        let (ox, oy) = (
+            ((turn % 4) as f32 + 0.5) / 4.0,
+            ((turn / 4) as f32 + 0.5) / 4.0,
+        );
         let spacing = self.layout.spacing;
         for row in 0..LOOK_ROWS {
             for col in 0..LOOK_COLS {
                 let reach = 1.0 + self.weights.margin.max(0.0);
                 let fx = ((col as f32 + ox) / LOOK_COLS as f32 * 2.0 - 1.0) * reach;
                 let fy = (1.0 - (row as f32 + oy) / LOOK_ROWS as f32 * 2.0) * reach;
-                let count = if fx.abs() > 1.0 || fy.abs() > 1.0 { self.weights.edge } else { 1.0 };
+                let count = if fx.abs() > 1.0 || fy.abs() > 1.0 {
+                    self.weights.edge
+                } else {
+                    1.0
+                };
                 let (sx, sy) = (fx * camera.tan_x, fy * camera.tan_y);
-                let d = [0, 1, 2].map(|i| camera.forward[i] + camera.right[i] * sx + camera.up[i] * sy);
+                let d =
+                    [0, 1, 2].map(|i| camera.forward[i] + camera.right[i] * sx + camera.up[i] * sy);
                 let len = d.iter().map(|v| v * v).sum::<f32>().sqrt().max(1.0e-6);
                 let dir = d.map(|v| v / len);
-                let Some((t, axis)) = self.boxes.iter().filter_map(|b| b.entry(camera.eye, dir)).min_by(|a, b| a.0.total_cmp(&b.0))
+                let Some((t, axis)) = self
+                    .boxes
+                    .iter()
+                    .filter_map(|b| b.entry(camera.eye, dir))
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
                 else {
                     continue;
                 };
@@ -1353,7 +1969,12 @@ impl TierState {
         self.slots
             .iter()
             .flatten()
-            .map(|s| (s.brick.map(|b| b as f32 * span), s.brick.map(|b| (b + 1) as f32 * span)))
+            .map(|s| {
+                (
+                    s.brick.map(|b| b as f32 * span),
+                    s.brick.map(|b| (b + 1) as f32 * span),
+                )
+            })
             .collect()
     }
 
@@ -1404,7 +2025,9 @@ impl TierState {
         }
         let sample = ms / probe_rays as f64;
         let full = probe_rays >= FILL_RAYS
-            && self.last_budget.is_none_or(|budget| probe_rays.saturating_mul(2) >= budget);
+            && self
+                .last_budget
+                .is_none_or(|budget| probe_rays.saturating_mul(2) >= budget);
         self.ms_per_ray = match self.ms_per_ray {
             None => Some(sample),
             Some(per_ray) if sample < per_ray || full => Some(learn_cost(per_ray, sample)),
@@ -1435,7 +2058,10 @@ impl TierState {
         // fit_depth runs before this batch and can leave a 4 m shell. From
         // outside, the yard is tens of metres away and would read the coarse
         // world probes. Pin the shell after that shrink.
-        if building_hull(&self.boxes).as_ref().is_some_and(|hull| outside_far(eye, hull)) {
+        if building_hull(&self.boxes)
+            .as_ref()
+            .is_some_and(|hull| outside_far(eye, hull))
+        {
             self.fine_depth = self.fine_depth.max(48.0);
         }
         if let Some(camera) = camera {
@@ -1459,7 +2085,9 @@ impl TierState {
                     // A lamp that went out keeps its short result only on screen. Off screen,
                     // that hold would leave the yard dark after the lamp comes back.
                     // A lamp that came on still replaces off-screen bricks, in this build.
-                    (slot.replace && slot.darken && weight.get(index).copied().unwrap_or(0.0) <= 0.0)
+                    (slot.replace
+                        && slot.darken
+                        && weight.get(index).copied().unwrap_or(0.0) <= 0.0)
                         .then_some(index)
                 })
                 .collect()
@@ -1476,10 +2104,12 @@ impl TierState {
         // refines (its light is right but noisy). 3 to 5: the same for bricks it does not
         // use; they only get what is left. Inside a weight bucket the brick nearest done
         // goes first, so it finishes.
-        let mut due: Vec<(u32, i32, u32, f32, [i32; 3], u32)> = Vec::new();
+        let mut due: Vec<(u32, i32, u32, f32, f32, [i32; 3], u32)> = Vec::new();
         for (index, slot) in self.slots.iter().enumerate() {
             let Some(slot) = slot else { continue };
-            let Some(class) = self.class(slot) else { continue };
+            let Some(class) = self.class(slot) else {
+                continue;
+            };
             let center = [0, 1, 2].map(|i| (slot.brick[i] as f32 + 0.5) * span);
             let d: f32 = (0..3).map(|i| (center[i] - eye[i]).powi(2)).sum();
             // Share of the screen, times nearness, times staleness: a brick the picture
@@ -1491,33 +2121,62 @@ impl TierState {
             let w = weight[index] * near / (near + depth) * stale;
             // Off-screen bricks wait. On-screen bricks run even when the surface
             // is far, so a sun change still lands on the ground in view.
-            let order = 3 * u32::from(w <= 0.0) + match class {
-                0 => 0,
-                REFINE_CLASS => 2,
-                _ => 1,
-            };
+            let order = 3 * u32::from(w <= 0.0)
+                + match class {
+                    0 => 0,
+                    REFINE_CLASS => 2,
+                    _ => 1,
+                };
+            let sun_now = self
+                .lights
+                .iter()
+                .filter(|light| light.directional)
+                .map(|light| sun_up(light.pos))
+                .fold(0.0f32, f32::max);
+            let outside = building_hull(&self.boxes)
+                .as_ref()
+                .is_none_or(|hull| !interior_point(center, hull));
+            let priority = shell_priority(sun_now, slot.basis_up, outside);
             // Weight buckets a factor of two apart, so the jittered counts do not
             // reorder bricks of about the same weight from one build to the next.
-            let bucket = if w > 0.0 { w.log2().floor() as i32 } else { i32::MIN };
+            let bucket = if w > 0.0 {
+                w.log2().floor() as i32
+            } else {
+                i32::MIN
+            };
             // Change passes before refining; among change passes, the furthest along.
-            let key = if class >= REFINE_CLASS { u32::MAX } else { CHANGE_PASSES - class.min(CHANGE_PASSES) };
-            due.push((order, bucket, key, d, slot.brick, index as u32));
+            let key = if class >= REFINE_CLASS {
+                u32::MAX
+            } else {
+                CHANGE_PASSES - class.min(CHANGE_PASSES)
+            };
+            due.push((order, bucket, key, priority, d, slot.brick, index as u32));
         }
         due.sort_by(|a, b| {
-            a.0.cmp(&b.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)).then(a.3.total_cmp(&b.3)).then(a.4.cmp(&b.4))
+            a.0.cmp(&b.0)
+                .then(b.1.cmp(&a.1))
+                .then(a.2.cmp(&b.2))
+                .then(b.3.total_cmp(&a.3))
+                .then(a.4.total_cmp(&b.4))
+                .then(a.5.cmp(&b.5))
+                .then(a.6.cmp(&b.6))
         });
         // A sun or the sky came or went. Every on-screen brick it reaches replaces its
         // light in this build, so the next picture is the new light. Off-screen bricks
         // wait until the camera sees them. A colour drift still uses the short passes
         // below, or the nearest brick would take the whole budget.
         let wide = budget.is_some()
-            && due.iter().any(|&(_, _, _, _, _, index)| {
+            && due.iter().any(|&(_, _, _, _, _, _, index)| {
                 weight[index as usize] > 0.0
-                    && self.slots[index as usize].as_ref().is_some_and(|slot| slot.replace && slot.change_left > 0)
+                    && self.slots[index as usize]
+                        .as_ref()
+                        .is_some_and(|slot| slot.replace && slot.change_left > 0)
             });
-        let spread = !wide && budget.is_some() && due.len() > 48;
-        let mut change_rays: u32 = if spread { 32 } else { CHANGE_RAYS };
-        let change_history: u32 = if spread { 4 } else { CHANGE_HISTORY };
+        // Many bricks due: finish the ones on screen, at the full ray count, and
+        // leave the rest. A thin pass on every brick is the grey morning.
+        let many = !wide && budget.is_some() && due.len() > 48;
+        let mut change_rays: u32 = CHANGE_RAYS;
+        let change_history: u32 = CHANGE_HISTORY;
         // Each brick in that order takes its next pass, as far as the budget goes: the
         // bricks that matter most, and those furthest along, run while the rest wait,
         // and one pass of many bricks keeps the GPU full (a round of a few bricks
@@ -1539,8 +2198,10 @@ impl TierState {
         if wide && !night_hop {
             let mut chosen: Vec<(u32, u64, f32)> = Vec::new();
             let mut probes_n = 0u64;
-            for &(_, _, _, _, _, index) in &due {
-                let Some(slot) = self.slots[index as usize].as_ref() else { continue };
+            for &(_, _, _, _, _, _, index) in &due {
+                let Some(slot) = self.slots[index as usize].as_ref() else {
+                    continue;
+                };
                 if !slot.replace || slot.change_left == 0 {
                     continue;
                 }
@@ -1560,9 +2221,15 @@ impl TierState {
             // catch the bounce the floor already holds. A lamp that comes back
             // stays at four; six passes there left the hall short.
             let went_out = chosen.iter().any(|(index, _, _)| {
-                self.slots[*index as usize].as_ref().is_some_and(|slot| slot.darken)
+                self.slots[*index as usize]
+                    .as_ref()
+                    .is_some_and(|slot| slot.darken)
             });
-            let flush_passes = if self.sun_wide || went_out { FLUSH_PASSES + 2 } else { FLUSH_PASSES };
+            let flush_passes = if self.sun_wide || went_out {
+                FLUSH_PASSES + 2
+            } else {
+                FLUSH_PASSES
+            };
             let pass_budget = FLUSH_RAY_BUDGET / u64::from(flush_passes);
             // A lamp that comes back uses the full ray set. Sixteen rays left the
             // box face short of the trace on some gathers. A lamp that goes out
@@ -1573,7 +2240,11 @@ impl TierState {
                 FLUSH_RAYS_MIN
             };
             let most = FLUSH_RAYS_MAX;
-            let mut rays = if probes_n == 0 { most } else { pass_budget / probes_n.max(1) };
+            let mut rays = if probes_n == 0 {
+                most
+            } else {
+                pass_budget / probes_n.max(1)
+            };
             rays = rays.clamp(least, most);
             change_rays = rays as u32;
             for (index, left, w) in chosen {
@@ -1581,8 +2252,8 @@ impl TierState {
                 picked.push((index, flush_passes, w, left));
             }
         } else if !night_hop {
-            for &(_, _, _, _, _, index) in &due {
-                if spread && weight[index as usize] <= 0.0 {
+            for &(_, _, _, _, _, _, index) in &due {
+                if many && weight[index as usize] <= 0.0 {
                     break;
                 }
                 let slot = self.slots[index as usize].as_ref().expect("due slot");
@@ -1617,11 +2288,7 @@ impl TierState {
                     continue;
                 }
                 let whole = u64::from(slot.mask.count_ones()) * u64::from(change_rays);
-                let mut extra = if spread {
-                    0
-                } else {
-                    slot.change_left.min(CHANGE_PASSES).saturating_sub(1)
-                };
+                let mut extra = slot.change_left.min(CHANGE_PASSES).saturating_sub(1);
                 extra = extra.min((TIER_SLOT_CAP as usize).saturating_sub(count) as u32);
                 if let Some(limit) = budget {
                     extra = extra.min((limit.saturating_sub(spent) / whole.max(1)) as u32);
@@ -1640,9 +2307,9 @@ impl TierState {
                     REFINE_CLASS => (REFINE_RAYS, false, None),
                     _ if slot.replace && slot.darken => (change_rays, false, Some(0)),
                     _ if slot.replace => (change_rays, false, Some(1)),
-                    // The first pass after a move replaces the stale light. Blending the
-                    // old value left the new box face short of the ray trace.
-                    _ if slot.change_left == CHANGE_PASSES => (CHANGE_RAYS, false, Some(3)),
+                    // A moving box blends. History 3 used to replace the stored light
+                    // and flush the picture on the first pass. The picture keeps the
+                    // last finished light until this run ends.
                     _ => (change_rays, false, Some(change_history)),
                 };
                 if w > 0.0 && class < REFINE_CLASS {
@@ -1654,9 +2321,6 @@ impl TierState {
                         // The floor is already the lamp-off light. Later passes
                         // are for a face that is still dark, such as the box.
                         Some(8)
-                    } else if history == Some(3) && round > 0 {
-                        // Only the first pass after a move replaces. Later passes blend.
-                        Some(change_history)
                     } else {
                         history
                     };
@@ -1696,9 +2360,20 @@ impl TierState {
         // as the ray price shrinks later frames, and the outside shadow then
         // stops short of the ray trace.
         self.long_build = night_hop || wide;
-        self.last_budget = if self.long_build { Some(u64::MAX) } else { budget };
+        self.last_budget = if self.long_build {
+            Some(u64::MAX)
+        } else {
+            budget
+        };
         self.batch_us = started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
-        TierBatch { id, texels, items, used_slots, probe_rays: spent, rounds }
+        TierBatch {
+            id,
+            texels,
+            items,
+            used_slots,
+            probe_rays: spent,
+            rounds,
+        }
     }
 
     /// One sun-gone pass over every filled brick. The first pass drops the old
@@ -1722,7 +2397,8 @@ impl TierState {
             if !dropping {
                 if let Some(hull) = hull.as_ref() {
                     let center = [0, 1, 2].map(|i| (slot.brick[i] as f32 + 0.5) * span);
-                    let near = (0..3).all(|i| center[i] >= hull.min[i] - 8.0 && center[i] <= hull.max[i] + 8.0);
+                    let near = (0..3)
+                        .all(|i| center[i] >= hull.min[i] - 8.0 && center[i] <= hull.max[i] + 8.0);
                     if !near {
                         continue;
                     }
@@ -1751,7 +2427,10 @@ impl TierState {
         // The batch holds 1024 bricks. Ground at the yards goes first so the
         // open yard and the shadow are not the ones cut off.
         chosen.sort_by_key(|index| {
-            let brick = self.slots[*index as usize].as_ref().expect("night brick").brick;
+            let brick = self.slots[*index as usize]
+                .as_ref()
+                .expect("night brick")
+                .brick;
             (brick[1], -(brick[0].abs() + brick[2].abs()))
         });
         for index in chosen {
@@ -1785,8 +2464,18 @@ impl TierState {
             // The window does not fit the indirection table: no tier this build.
             return out;
         }
-        out[0] = [lo[0] as f32, lo[1] as f32, lo[2] as f32, self.layout.spacing];
-        out[1] = [dims[0] as f32, dims[1] as f32, dims[2] as f32, self.fine_depth];
+        out[0] = [
+            lo[0] as f32,
+            lo[1] as f32,
+            lo[2] as f32,
+            self.layout.spacing,
+        ];
+        out[1] = [
+            dims[0] as f32,
+            dims[1] as f32,
+            dims[2] as f32,
+            self.fine_depth,
+        ];
         let indir = (TIER_INDIR - TIER_INFO) as usize;
         for texel in &mut out[indir..indir + cells as usize] {
             *texel = [-1.0, 0.0, 0.0, 0.0];
@@ -1796,7 +2485,9 @@ impl TierState {
             .iter()
             .filter(|i| {
                 i.reset
-                    && self.slots[i.slot as usize].as_ref().is_some_and(|s| (s.done | i.probes) & s.mask == s.mask)
+                    && self.slots[i.slot as usize]
+                        .as_ref()
+                        .is_some_and(|s| (s.done | i.probes) & s.mask == s.mask)
             })
             .map(|i| i.slot)
             .collect();
@@ -1810,14 +2501,18 @@ impl TierState {
             // less than s (a far brick skips small steps).
             let show = if self.whole_after(index as u32, slot, items) {
                 let center = [0, 1, 2].map(|i| (b[i] as f32 + 0.5) * self.layout.brick_span());
-                let d = (0..3).map(|i| (center[i] - eye[i]).powi(2)).sum::<f32>().sqrt();
+                let d = (0..3)
+                    .map(|i| (center[i] - eye[i]).powi(2))
+                    .sum::<f32>()
+                    .sqrt();
                 let far = self.weights.far.max(1.0e-3);
                 1.0 + self.weights.far_skip.max(0.0) * ((d - far) / far).clamp(0.0, 1.0)
             } else {
                 0.0
             };
             out[slots + index * 2] = [b[0] as f32, b[1] as f32, b[2] as f32, show];
-            out[slots + index * 2 + 1] = [0, 1, 2, 3].map(|k| ((slot.mask >> (16 * k)) & 0xffff) as f32);
+            out[slots + index * 2 + 1] =
+                [0, 1, 2, 3].map(|k| ((slot.mask >> (16 * k)) & 0xffff) as f32);
             // The picture reads a brick once a build has lit all of it.
             if slot.filled || lit_now.contains(&(index as u32)) {
                 let rel = [b[0] - lo[0], b[1] - lo[1], b[2] - lo[2]];
@@ -1838,7 +2533,11 @@ impl TierState {
             // narrow opening on every hop, so the shadow stays dark. Other
             // passes share the build seed: the history blend still damps a
             // moving lamp.
-            let spin = if self.sun_wide { u64::from(item.round) } else { 0 };
+            let spin = if self.sun_wide {
+                u64::from(item.round)
+            } else {
+                0
+            };
             let seed = ((id + spin) % 4096) as f32;
             out[at] = [item.slot as f32, item.rays as f32, mode, seed];
             if let Some(Some(slot)) = self.slots.get(item.slot as usize) {
@@ -1860,7 +2559,8 @@ impl TierState {
     /// last took it (so a brick that changes all the time still updates). The
     /// bookkeeping of [`TierState::commit`], without changing anything.
     fn whole_after(&self, index: u32, slot: &Slot, items: &[TierItem]) -> bool {
-        let (mut left, mut done, mut samples, mut run) = (slot.change_left, slot.done, slot.samples, slot.run);
+        let (mut left, mut done, mut samples, mut run) =
+            (slot.change_left, slot.done, slot.samples, slot.run);
         let mut changed = false;
         for item in items.iter().filter(|item| item.slot == index) {
             done |= item.probes & slot.mask;
@@ -1890,13 +2590,21 @@ impl TierState {
         wholes.sort_unstable();
         wholes.dedup();
         wholes.retain(|&index| {
-            self.slots.get(index as usize).and_then(Option::as_ref).is_some_and(|slot| {
-                batch.items.iter().any(|i| i.slot == index && i.brick == slot.brick)
-                    && self.whole_after(index, slot, &batch.items)
-            })
+            self.slots
+                .get(index as usize)
+                .and_then(Option::as_ref)
+                .is_some_and(|slot| {
+                    batch
+                        .items
+                        .iter()
+                        .any(|i| i.slot == index && i.brick == slot.brick)
+                        && self.whole_after(index, slot, &batch.items)
+                })
         });
         for item in &batch.items {
-            let Some(Some(slot)) = self.slots.get_mut(item.slot as usize) else { continue };
+            let Some(Some(slot)) = self.slots.get_mut(item.slot as usize) else {
+                continue;
+            };
             if slot.brick != item.brick {
                 continue;
             }
@@ -1924,10 +2632,35 @@ impl TierState {
                 slot.samples = (slot.samples + item.rays).min(TARGET_SAMPLES);
             }
         }
+        let sun_now = self
+            .lights
+            .iter()
+            .filter(|light| light.directional)
+            .map(|light| sun_up(light.pos))
+            .fold(0.0f32, f32::max);
         for index in wholes {
             if let Some(Some(slot)) = self.slots.get_mut(index as usize) {
                 slot.run = 0;
                 slot.since = std::time::Instant::now();
+                slot.basis_up = sun_now;
+            }
+        }
+        // A move that arrived during the run starts one new run now, not one per frame.
+        let again: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                slot.as_ref().and_then(|slot| {
+                    (slot.again && slot.change_left == 0 && !slot.replace).then_some(index)
+                })
+            })
+            .collect();
+        for index in again {
+            if let Some(slot) = self.slots[index].as_mut() {
+                slot.again = false;
+                slot.change_left = CHANGE_PASSES;
+                slot.done = 0;
             }
         }
         if self.night_freeze {
@@ -1937,9 +2670,58 @@ impl TierState {
                 slot.change_left = 0;
                 slot.replace = false;
                 slot.darken = false;
+                slot.again = false;
             }
         }
     }
+
+    /// Keep each face the notice band would keep. A brick whose faces all stay
+    /// stored skips the run that was marked. A face outside the band marks the brick.
+    /// The gather in `light.comp` applies the same test before it copies a face.
+    pub fn review_faces(
+        &mut self,
+        brick: [i32; 3],
+        stored: [[f32; 3]; 6],
+        fresh: [[f32; 3]; 6],
+    ) -> [[f32; 3]; 6] {
+        let mut kept = stored;
+        let mut outside = false;
+        for i in 0..6 {
+            kept[i] = apply_notice(stored[i], fresh[i]);
+            outside |= !notice_keeps_face(stored[i], fresh[i]);
+        }
+        let score_spacing = self.spacing_at(brick);
+        if let Some(&id) = self.by_brick.get(&brick) {
+            if let Some(slot) = self.slots.get_mut(id as usize).and_then(Option::as_mut) {
+                let finer = (0..6)
+                    .all(|i| keep_finer(self.layout.spacing, score_spacing, stored[i], fresh[i]));
+                if finer {
+                    slot.change_left = 0;
+                    slot.again = false;
+                    slot.replace = false;
+                    slot.darken = false;
+                    return kept;
+                }
+                if !outside {
+                    slot.change_left = 0;
+                    slot.again = false;
+                    slot.replace = false;
+                    slot.darken = false;
+                } else if slot.filled && slot.change_left == 0 && !slot.replace {
+                    slot.restart();
+                }
+            }
+        }
+        kept
+    }
+}
+
+/// The picture shows this build at once. A moving box blends, so a history of 3
+/// is not a flush. Lamp and sun replaces (0, 1, 2) and the last night pass (7) are.
+pub fn picture_flushes(items: &[TierItem]) -> bool {
+    items
+        .iter()
+        .any(|item| item.history.is_some_and(|h| h <= 2 || h == 7))
 }
 
 /// The lowest `n` set bits of `bits`.
@@ -1982,7 +2764,10 @@ mod tests {
     #[test]
     fn a_floor_allocates_one_layer_of_bricks() {
         let layout = TierLayout::new(1.0, 50.0);
-        let floor = SurfaceBox { min: [-8.0, 0.0, -8.0], max: [8.0, 0.0, 8.0] };
+        let floor = SurfaceBox {
+            min: [-8.0, 0.0, -8.0],
+            max: [8.0, 0.0, 8.0],
+        };
         let set = allocate(&[floor], [0.0, 1.7, 0.0], &layout);
         // Probes at y 0.5 and 1.5 are within sqrt(3) m. Nothing is below the ground.
         let ys: std::collections::BTreeSet<i32> = set.bricks.iter().map(|b| b[1]).collect();
@@ -1993,22 +2778,34 @@ mod tests {
     #[test]
     fn a_solid_interior_is_dead() {
         let layout = TierLayout::new(1.0, 50.0);
-        let block = SurfaceBox { min: [-10.0, -10.0, -10.0], max: [10.0, 10.0, 10.0] };
+        let block = SurfaceBox {
+            min: [-10.0, -10.0, -10.0],
+            max: [10.0, 10.0, 10.0],
+        };
         assert!(!probe_live(&[block], [0.5, 0.5, 0.5], layout.reach));
         assert!(probe_live(&[block], [10.5, 0.5, 0.5], layout.reach));
         let set = allocate(&[block], [0.0, 0.0, 0.0], &layout);
-        assert!(set.bricks.iter().all(|b| b.iter().any(|&c| c <= -3 || c >= 2)));
+        assert!(set
+            .bricks
+            .iter()
+            .all(|b| b.iter().any(|&c| c <= -3 || c >= 2)));
     }
 
     #[test]
     fn a_probe_on_a_face_is_dead() {
         // A wall whose face lies on the lattice plane x = 1.5.
-        let wall = SurfaceBox { min: [1.5, 0.0, -4.0], max: [1.9, 5.0, 4.0] };
+        let wall = SurfaceBox {
+            min: [1.5, 0.0, -4.0],
+            max: [1.9, 5.0, 4.0],
+        };
         assert!(!probe_live(&[wall], [1.5, 0.5, 0.5], 1.7));
         assert!(!probe_live(&[wall], [1.495, 0.5, 0.5], 1.7));
         assert!(probe_live(&[wall], [1.48, 0.5, 0.5], 1.7));
         // Two crossing walls: inside either one is dead, the open corner is live.
-        let cross = SurfaceBox { min: [-0.3, 0.0, 1.8], max: [3.7, 5.0, 2.2] };
+        let cross = SurfaceBox {
+            min: [-0.3, 0.0, 1.8],
+            max: [3.7, 5.0, 2.2],
+        };
         assert!(!probe_live(&[wall, cross], [1.7, 0.5, 2.0], 1.7));
         assert!(probe_live(&[wall, cross], [1.0, 0.5, 1.5], 1.7));
     }
@@ -2016,8 +2813,14 @@ mod tests {
     #[test]
     fn a_probe_inside_a_solid_moves_out_beside_it() {
         let layout = TierLayout::new(1.0, 50.0);
-        let floor = SurfaceBox { min: [-8.0, 0.0, -8.0], max: [8.0, 0.0, 8.0] };
-        let block = SurfaceBox { min: [-0.75, 0.0, -0.75], max: [0.75, 1.2, 0.75] };
+        let floor = SurfaceBox {
+            min: [-8.0, 0.0, -8.0],
+            max: [8.0, 0.0, 8.0],
+        };
+        let block = SurfaceBox {
+            min: [-0.75, 0.0, -0.75],
+            max: [0.75, 1.2, 0.75],
+        };
         let boxes = [floor, block];
         // Equally near two sides: out through both, past the corner.
         let q = place_probe(&boxes, [0.5, 0.5, -0.5], &layout).expect("moved out");
@@ -2026,28 +2829,49 @@ mod tests {
         let q = place_probe(&boxes, [0.5, 0.5, -0.6], &layout).expect("moved out");
         assert!((q[2] + 0.85).abs() < 1.0e-5 && q[0] == 0.5);
         // The middle of a wide solid is too far from any side to leave its cell.
-        let big = SurfaceBox { min: [-3.0, 0.0, -3.0], max: [3.0, 1.2, 3.0] };
+        let big = SurfaceBox {
+            min: [-3.0, 0.0, -3.0],
+            max: [3.0, 1.2, 3.0],
+        };
         assert!(place_probe(&[floor, big], [0.5, 0.5, 0.5], &layout).is_none());
         // A probe on the lattice outside every solid stays put.
-        assert_eq!(place_probe(&boxes, [1.5, 0.5, 1.5], &layout), Some([1.5, 0.5, 1.5]));
+        assert_eq!(
+            place_probe(&boxes, [1.5, 0.5, 1.5], &layout),
+            Some([1.5, 0.5, 1.5])
+        );
     }
 
     #[test]
     fn moving_the_camera_keeps_probe_positions() {
         let layout = TierLayout::new(1.0, 50.0);
-        let floor = SurfaceBox { min: [-80.0, 0.0, -80.0], max: [80.0, 0.0, 80.0] };
+        let floor = SurfaceBox {
+            min: [-80.0, 0.0, -80.0],
+            max: [80.0, 0.0, 80.0],
+        };
         let a = allocate(&[floor], [0.0, 1.7, 0.0], &layout);
         let b = allocate(&[floor], [1.3, 1.7, 0.0], &layout);
         let shared = a.bricks.iter().filter(|x| b.bricks.contains(x)).count();
-        assert!(shared >= a.bricks.len() - 25 * 2, "a small move keeps nearly every brick");
+        assert!(
+            shared >= a.bricks.len() - 25 * 2,
+            "a small move keeps nearly every brick"
+        );
     }
 
     /// A wide hall: a floor 40 m across and one wall, and a 1 m crate at `x`.
     fn hall(x: f32) -> Vec<SurfaceBox> {
         vec![
-            SurfaceBox { min: [-20.0, 0.0, -20.0], max: [20.0, 0.0, 20.0] },
-            SurfaceBox { min: [-20.0, 0.0, -20.2], max: [20.0, 3.0, -20.0] },
-            SurfaceBox { min: [x - 0.5, 0.0, -0.5], max: [x + 0.5, 1.0, 0.5] },
+            SurfaceBox {
+                min: [-20.0, 0.0, -20.0],
+                max: [20.0, 0.0, 20.0],
+            },
+            SurfaceBox {
+                min: [-20.0, 0.0, -20.2],
+                max: [20.0, 3.0, -20.0],
+            },
+            SurfaceBox {
+                min: [x - 0.5, 0.0, -0.5],
+                max: [x + 0.5, 1.0, 0.5],
+            },
         ]
     }
 
@@ -2061,7 +2885,11 @@ mod tests {
     #[test]
     fn a_moved_solid_relights_only_the_bricks_it_reaches() {
         let eye = [0.0, 1.7, 4.0];
-        let lamp = TierLight { pos: [0.0, 2.5, 3.0], color: [1.0; 3], directional: false };
+        let lamp = TierLight {
+            pos: [0.0, 2.5, 3.0],
+            color: [1.0; 3],
+            directional: false,
+        };
         let mut tier = TierState::default();
         tier.update(hall(0.0), 0, eye, &[lamp]);
         settle(&mut tier, eye);
@@ -2071,18 +2899,30 @@ mod tests {
         // Every brick stays readable: none goes back to waiting for its first light.
         assert_eq!(stats.filled_bricks, stats.bricks);
         assert!(stats.changing_bricks > 0);
-        assert!(stats.changing_bricks * 4 < bricks, "{} of {bricks} bricks relight", stats.changing_bricks);
+        assert!(
+            stats.changing_bricks * 4 < bricks,
+            "{} of {bricks} bricks relight",
+            stats.changing_bricks
+        );
         // The bricks around the crate relight first; a far corner of the hall does not.
         let batch = tier.batch(eye, Some(u64::from(CHANGE_RAYS)), REFINE_RAYS);
-        let near = batch.items[0].brick.map(|b| (b as f32 + 0.5) * tier.layout.brick_span());
+        let near = batch.items[0]
+            .brick
+            .map(|b| (b as f32 + 0.5) * tier.layout.brick_span());
         assert!(near[0].abs() < 5.0 && near[2].abs() < 5.0, "{near:?}");
         let far = tier.by_brick[&[4, 0, 4]] as usize;
         assert_eq!(tier.slots[far].as_ref().unwrap().change_left, 0);
         // Placing only near the crate gives the probes a whole placement gives.
         let whole = allocate(&hall(0.6), eye, &tier.layout);
-        for ((brick, mask), positions) in whole.bricks.iter().zip(&whole.masks).zip(&whole.positions) {
+        for ((brick, mask), positions) in
+            whole.bricks.iter().zip(&whole.masks).zip(&whole.positions)
+        {
             let slot = tier.slots[tier.by_brick[brick] as usize].as_ref().unwrap();
-            assert_eq!((slot.mask, &slot.positions), (*mask, positions), "{brick:?}");
+            assert_eq!(
+                (slot.mask, &slot.positions),
+                (*mask, positions),
+                "{brick:?}"
+            );
         }
         assert_eq!(whole.bricks.len(), tier.stats().bricks);
     }
@@ -2093,7 +2933,10 @@ mod tests {
         // from the wall, down -x: the bricks behind it and past the wall are hidden,
         // many of them nearer than the far end of the view.
         let mut boxes = hall(30.0);
-        boxes.push(SurfaceBox { min: [0.0, 0.0, -20.0], max: [0.2, 3.0, 20.0] });
+        boxes.push(SurfaceBox {
+            min: [0.0, 0.0, -20.0],
+            max: [0.2, 3.0, 20.0],
+        });
         let eye = [-6.0, 1.7, 0.0];
         let camera = TierCamera {
             eye,
@@ -2103,7 +2946,11 @@ mod tests {
             tan_x: 0.7,
             tan_y: 0.4,
         };
-        let lamp = TierLight { pos: [3.0, 2.5, 0.0], color: [1.0; 3], directional: false };
+        let lamp = TierLight {
+            pos: [3.0, 2.5, 0.0],
+            color: [1.0; 3],
+            directional: false,
+        };
         let mut tier = TierState::default();
         tier.update(boxes.clone(), 0, eye, &[lamp]);
         settle(&mut tier, eye);
@@ -2111,38 +2958,83 @@ mod tests {
             tier.look(&camera);
         }
         let seen = tier.stats().seen_bricks;
-        assert!(seen > 0 && seen * 3 < tier.stats().bricks, "{seen} of {} bricks seen", tier.stats().bricks);
+        assert!(
+            seen > 0 && seen * 3 < tier.stats().bricks,
+            "{seen} of {} bricks seen",
+            tier.stats().bricks
+        );
         // Every brick in view lies ahead of the camera, on its side of the wall.
         for (index, slot) in tier.slots.iter().enumerate() {
             let slot = slot.as_ref().unwrap();
             if tier.in_view(index) {
-                assert!(slot.brick[0] * BRICK <= -2, "{:?} is behind the camera", slot.brick);
+                assert!(
+                    slot.brick[0] * BRICK <= -2,
+                    "{:?} is behind the camera",
+                    slot.brick
+                );
             }
         }
         // The lamp moves; a budget of a few passes goes to the bricks the picture uses
         // (in view, at its edge, or feeding it), none behind the wall.
-        let moved = TierLight { pos: [3.0, 2.5, 1.0], ..lamp };
+        let moved = TierLight {
+            pos: [3.0, 2.5, 1.0],
+            ..lamp
+        };
         tier.update(boxes, 0, eye, &[moved]);
         let budget = 4 * u64::from(BRICK_PROBES) * u64::from(CHANGE_RAYS);
         let batch = tier.batch_seen(eye, Some(&camera), Some(budget), FIRST_RAYS);
         assert!(!batch.items.is_empty());
         let weight = tier.weights();
         for item in &batch.items {
-            assert!(weight[item.slot as usize] > 0.0, "{:?} is not used by the picture", item.brick);
-            assert!(item.brick[0] * BRICK < 0, "{:?} is behind the wall", item.brick);
+            assert!(
+                weight[item.slot as usize] > 0.0,
+                "{:?} is not used by the picture",
+                item.brick
+            );
+            assert!(
+                item.brick[0] * BRICK < 0,
+                "{:?} is behind the wall",
+                item.brick
+            );
         }
     }
 
     #[test]
     fn an_outside_camera_leaves_interior_motion_out_of_the_probes() {
-        let floor = SurfaceBox { min: [-8.0, 0.0, -8.0], max: [8.0, 0.0, 8.0] };
-        let wall = SurfaceBox { min: [-6.0, 0.0, -6.0], max: [6.0, 3.0, -5.6] };
-        let east = SurfaceBox { min: [5.6, 0.0, -6.0], max: [6.0, 3.0, 6.0] };
-        let west = SurfaceBox { min: [-6.0, 0.0, -6.0], max: [-5.6, 3.0, 6.0] };
-        let south = SurfaceBox { min: [-6.0, 0.0, 5.6], max: [6.0, 3.0, 6.0] };
-        let mut crate_at = SurfaceBox { min: [-0.5, 0.0, -0.5], max: [0.5, 1.0, 0.5] };
-        let lamp = TierLight { pos: [0.0, 2.2, 0.0], color: [1.0; 3], directional: false };
-        let sun = TierLight { pos: [0.2, -0.6, -0.8], color: [1.0; 3], directional: true };
+        let floor = SurfaceBox {
+            min: [-8.0, 0.0, -8.0],
+            max: [8.0, 0.0, 8.0],
+        };
+        let wall = SurfaceBox {
+            min: [-6.0, 0.0, -6.0],
+            max: [6.0, 3.0, -5.6],
+        };
+        let east = SurfaceBox {
+            min: [5.6, 0.0, -6.0],
+            max: [6.0, 3.0, 6.0],
+        };
+        let west = SurfaceBox {
+            min: [-6.0, 0.0, -6.0],
+            max: [-5.6, 3.0, 6.0],
+        };
+        let south = SurfaceBox {
+            min: [-6.0, 0.0, 5.6],
+            max: [6.0, 3.0, 6.0],
+        };
+        let mut crate_at = SurfaceBox {
+            min: [-0.5, 0.0, -0.5],
+            max: [0.5, 1.0, 0.5],
+        };
+        let lamp = TierLight {
+            pos: [0.0, 2.2, 0.0],
+            color: [1.0; 3],
+            directional: false,
+        };
+        let sun = TierLight {
+            pos: [0.2, -0.6, -0.8],
+            color: [1.0; 3],
+            directional: true,
+        };
         let boxes = vec![floor, wall, east, west, south, crate_at];
         let far_eye = [24.0, 18.0, 24.0];
         let mut tier = TierState::default();
@@ -2158,8 +3050,15 @@ mod tests {
         moved_boxes[5] = crate_at;
         let before = tier.stats().interior_skipped;
         tier.update(moved_boxes.clone(), 1, far_eye, &[lamp, sun]);
-        assert!(tier.stats().interior_skipped > before, "interior move was not skipped");
-        assert_eq!(tier.stats().changing_bricks, 0, "interior move relit probes from outside");
+        assert!(
+            tier.stats().interior_skipped > before,
+            "interior move was not skipped"
+        );
+        assert_eq!(
+            tier.stats().changing_bricks,
+            0,
+            "interior move relit probes from outside"
+        );
         // The same kind of move from inside the room does relight.
         let eye = [0.0, 1.6, 0.0];
         let mut inside = TierState::default();
@@ -2169,39 +3068,91 @@ mod tests {
             inside.commit(&batch);
         }
         inside.update(moved_boxes, 1, eye, &[lamp, sun]);
-        assert!(inside.stats().changing_bricks > 0, "an interior camera ignored the crate");
+        assert!(
+            inside.stats().changing_bricks > 0,
+            "an interior camera ignored the crate"
+        );
     }
 
     #[test]
-    fn a_lamp_shadow_of_a_moved_solid_reaches_far_bricks() {
-        // A low lamp beside the crate throws its shadow far across the floor.
-        let lamp = TierLight { pos: [-2.0, 0.6, 0.0], color: [4.0; 3], directional: false };
+    fn a_sun_shaft_of_a_moved_solid_is_not_a_wide_cone() {
+        let sun = TierLight {
+            pos: [0.0, -1.0, 0.0],
+            color: [1.0; 3],
+            directional: true,
+        };
+        let lamp = TierLight {
+            pos: [-2.0, 0.6, 0.0],
+            color: [4.0; 3],
+            directional: false,
+        };
         let moved = [hall(0.0)[2], hall(0.6)[2]];
-        let span = 4.0;
-        let behind = ([12.0, 0.0, -2.0], [12.0 + span, span, -2.0 + span]);
-        let aside = ([-2.0, 0.0, 12.0], [-2.0 + span, span, 12.0 + span]);
-        assert!(geometry_reaches(&moved, &[lamp], behind.0, behind.1));
-        assert!(!geometry_reaches(&moved, &[lamp], aside.0, aside.1));
+        let blockers = hall(0.6);
+        // Straight down: the shaft is the crate's footprint, not a cone out to 80 m.
+        let under = ([0.0, 0.0, -2.0], [4.0, 4.0, 2.0]);
+        let aside = ([12.0, 0.0, 12.0], [16.0, 4.0, 16.0]);
+        let far_along = ([0.0, 0.0, 70.0], [4.0, 4.0, 74.0]);
+        assert!(geometry_reaches(
+            &moved,
+            &[sun],
+            &blockers,
+            under.0,
+            under.1
+        ));
+        assert!(!geometry_reaches(
+            &moved,
+            &[sun],
+            &blockers,
+            aside.0,
+            aside.1
+        ));
+        assert!(!geometry_reaches(
+            &moved,
+            &[lamp],
+            &blockers,
+            far_along.0,
+            far_along.1
+        ));
+        assert!(!geometry_reaches(
+            &moved,
+            &[lamp],
+            &blockers,
+            aside.0,
+            aside.1
+        ));
     }
 
     fn room() -> Vec<SurfaceBox> {
         vec![
-            SurfaceBox { min: [-5.0, 0.0, -5.0], max: [5.0, 0.0, 5.0] },
-            SurfaceBox { min: [-5.0, 0.0, -5.2], max: [5.0, 3.0, -5.0] },
+            SurfaceBox {
+                min: [-5.0, 0.0, -5.0],
+                max: [5.0, 0.0, 5.0],
+            },
+            SurfaceBox {
+                min: [-5.0, 0.0, -5.2],
+                max: [5.0, 3.0, -5.0],
+            },
         ]
     }
 
     #[test]
     fn bricks_on_screen_take_every_change_pass_in_one_build() {
         let eye = [0.0, 1.7, 0.0];
-        let lamp = TierLight { pos: [0.0, 2.5, 0.0], color: [1.0; 3], directional: false };
+        let lamp = TierLight {
+            pos: [0.0, 2.5, 0.0],
+            color: [1.0; 3],
+            directional: false,
+        };
         let mut tier = TierState::default();
         tier.update(room(), 0, eye, &[lamp]);
         while tier.has_work() {
             let batch = tier.batch(eye, None, REFINE_RAYS);
             tier.commit(&batch);
         }
-        let moved = TierLight { pos: [1.0, 2.0, -1.0], ..lamp };
+        let moved = TierLight {
+            pos: [1.0, 2.0, -1.0],
+            ..lamp
+        };
         tier.update(room(), 0, eye, &[moved]);
         // Looking along -z at the wall: the bricks behind the eye are off screen.
         let camera = TierCamera {
@@ -2213,15 +3164,25 @@ mod tests {
             tan_y: 0.58,
         };
         let changing: Vec<u32> = (0..tier.slots.len() as u32)
-            .filter(|&i| tier.slots[i as usize].as_ref().is_some_and(|s| s.filled && s.change_left > 0))
+            .filter(|&i| {
+                tier.slots[i as usize]
+                    .as_ref()
+                    .is_some_and(|s| s.filled && s.change_left > 0)
+            })
             .collect();
-        let pass = |i: u32| u64::from(tier.slots[i as usize].as_ref().unwrap().mask.count_ones()) * u64::from(CHANGE_RAYS);
+        let pass = |i: u32| {
+            u64::from(tier.slots[i as usize].as_ref().unwrap().mask.count_ones())
+                * u64::from(CHANGE_RAYS)
+        };
         let one_each: u64 = changing.iter().map(|&i| pass(i)).sum();
         let biggest = changing.iter().map(|&i| pass(i)).max().unwrap();
         // A budget of a few passes goes to bricks the picture uses, none to the others.
         let few = tier.batch_seen(eye, Some(&camera), Some(biggest * 3), FIRST_RAYS);
         let weight = tier.weights();
-        assert!(few.items.iter().all(|item| weight[item.slot as usize] > 0.0));
+        assert!(few
+            .items
+            .iter()
+            .all(|item| weight[item.slot as usize] > 0.0));
         // Room for a pass each and the rest of the passes of about one brick.
         let budget = one_each + biggest * u64::from(CHANGE_PASSES - 1);
         let batch = tier.batch_seen(eye, Some(&camera), Some(budget), FIRST_RAYS);
@@ -2232,20 +3193,34 @@ mod tests {
         for item in &batch.items {
             *passes.entry(item.slot).or_insert(0u32) += 1;
         }
-        assert_eq!(passes.len(), changing.len(), "every changing brick takes a pass");
+        assert_eq!(
+            passes.len(),
+            changing.len(),
+            "every changing brick takes a pass"
+        );
         // The rest of the budget finishes the bricks the picture uses most first.
-        let deep: Vec<u32> = passes.iter().filter(|(_, &n)| n == CHANGE_PASSES).map(|(&s, _)| s).collect();
+        let deep: Vec<u32> = passes
+            .iter()
+            .filter(|(_, &n)| n == CHANGE_PASSES)
+            .map(|(&s, _)| s)
+            .collect();
         assert!(!deep.is_empty());
         for slot in &deep {
             let brick = tier.slots[*slot as usize].as_ref().unwrap().brick;
-            assert!(weight[*slot as usize] > 0.0, "a brick out of view went deep: {brick:?}");
+            assert!(
+                weight[*slot as usize] > 0.0,
+                "a brick out of view went deep: {brick:?}"
+            );
         }
         assert!(tier.stats().critical_bricks > 0);
         tier.commit(&batch);
         assert_eq!(tier.stats().changing_bricks, changing.len() - deep.len());
 
-        // With room for everything, every changing brick runs all its passes together.
+        // The lamp moves back while some runs are still open. Those runs finish,
+        // then one new run starts. A second full build finishes that run.
         tier.update(room(), 0, eye, &[lamp]);
+        let all = tier.batch_seen(eye, Some(&camera), None, FIRST_RAYS);
+        tier.commit(&all);
         let all = tier.batch_seen(eye, Some(&camera), None, FIRST_RAYS);
         tier.commit(&all);
         assert_eq!(tier.stats().changing_bricks, 0);
@@ -2258,15 +3233,29 @@ mod tests {
     #[test]
     fn the_picture_takes_a_brick_only_once_its_change_is_whole() {
         let eye = [0.0, 1.7, 0.0];
-        let lamp = TierLight { pos: [0.0, 2.5, 0.0], color: [1.0; 3], directional: false };
+        let lamp = TierLight {
+            pos: [0.0, 2.5, 0.0],
+            color: [1.0; 3],
+            directional: false,
+        };
         let mut tier = TierState::default();
         tier.update(room(), 0, eye, &[lamp]);
         while tier.has_work() {
             let batch = tier.batch(eye, None, REFINE_RAYS);
             tier.commit(&batch);
         }
-        tier.update(room(), 0, eye, &[TierLight { pos: [1.0, 2.0, -1.0], ..lamp }]);
-        let shown = |batch: &TierBatch, slot: u32| batch.texels[(TIER_SLOTS - TIER_INFO) as usize + slot as usize * 2][3];
+        tier.update(
+            room(),
+            0,
+            eye,
+            &[TierLight {
+                pos: [1.0, 2.0, -1.0],
+                ..lamp
+            }],
+        );
+        let shown = |batch: &TierBatch, slot: u32| {
+            batch.texels[(TIER_SLOTS - TIER_INFO) as usize + slot as usize * 2][3]
+        };
         // One pass of one brick: under way, so the picture holds it.
         let one = tier.batch(eye, Some(u64::from(CHANGE_RAYS)), FIRST_RAYS);
         let slot = one.items[0].slot;
@@ -2280,8 +3269,18 @@ mod tests {
     #[test]
     fn tier_weights_parse_over_the_defaults() {
         let weights = TierWeights::parse("near=2, stale=1").unwrap();
-        assert_eq!(weights, TierWeights { near: 2.0, stale: 1.0, ..TierWeights::default() });
-        assert_eq!(TierWeights::parse(&TierWeights::default().to_string().replace(' ', ",")).unwrap(), TierWeights::default());
+        assert_eq!(
+            weights,
+            TierWeights {
+                near: 2.0,
+                stale: 1.0,
+                ..TierWeights::default()
+            }
+        );
+        assert_eq!(
+            TierWeights::parse(&TierWeights::default().to_string().replace(' ', ",")).unwrap(),
+            TierWeights::default()
+        );
         assert!(TierWeights::parse("nearness=2").is_err());
         assert!(TierWeights::parse("near=x").is_err());
     }
@@ -2289,7 +3288,11 @@ mod tests {
     #[test]
     fn a_converged_tier_has_no_work() {
         let mut tier = TierState::default();
-        let lights = [TierLight { pos: [0.0, 2.5, 0.0], color: [1.0; 3], directional: false }];
+        let lights = [TierLight {
+            pos: [0.0, 2.5, 0.0],
+            color: [1.0; 3],
+            directional: false,
+        }];
         tier.update(room(), 0, [0.0, 1.7, 0.0], &lights);
         assert!(tier.has_work());
         for _ in 0..64 {
@@ -2303,24 +3306,40 @@ mod tests {
         assert!(!tier.has_work());
         // A small lamp move keeps the light. A real move blends every brick it reaches
         // toward the new light, all of them in each pass, and never clears one.
-        let nudged = [TierLight { pos: [0.05, 2.5, 0.0], ..lights[0] }];
+        let nudged = [TierLight {
+            pos: [0.05, 2.5, 0.0],
+            ..lights[0]
+        }];
         assert!(!tier.update(room(), 0, [0.0, 1.7, 0.0], &nudged));
-        let moved = [TierLight { pos: [1.0, 2.5, 0.0], ..lights[0] }];
+        let moved = [TierLight {
+            pos: [1.0, 2.5, 0.0],
+            ..lights[0]
+        }];
         assert!(tier.update(room(), 0, [0.0, 1.7, 0.0], &moved));
         // One brick fits the budget, yet a pass still waits for every brick.
         let batch = tier.batch([0.0, 1.7, 0.0], Some(1), FIRST_RAYS);
         assert_eq!(batch.items.len(), 1);
         // Without a budget every brick takes all its change passes, one round each.
         let batch = tier.batch([0.0, 1.7, 0.0], None, FIRST_RAYS);
-        assert_eq!(batch.items.len(), tier.stats().bricks * CHANGE_PASSES as usize);
-        assert_eq!(batch.rounds, vec![tier.stats().bricks as u32; CHANGE_PASSES as usize]);
-        assert!(batch.items.iter().all(|i| {
-            !i.reset
-                && if i.round == 0 { i.history == Some(3) } else { i.history == Some(CHANGE_HISTORY) }
-        }));
+        assert_eq!(
+            batch.items.len(),
+            tier.stats().bricks * CHANGE_PASSES as usize
+        );
+        assert_eq!(
+            batch.rounds,
+            vec![tier.stats().bricks as u32; CHANGE_PASSES as usize]
+        );
+        assert!(batch
+            .items
+            .iter()
+            .all(|i| !i.reset && i.history == Some(CHANGE_HISTORY)));
+        assert!(!picture_flushes(&batch.items));
         tier.commit(&batch);
         let batch = tier.batch([0.0, 1.7, 0.0], None, FIRST_RAYS);
-        assert!(batch.items.iter().all(|i| !i.reset && i.history.is_none() && i.rays == REFINE_RAYS));
+        assert!(batch
+            .items
+            .iter()
+            .all(|i| !i.reset && i.history.is_none() && i.rays == REFINE_RAYS));
     }
 
     #[test]
@@ -2370,7 +3389,11 @@ mod tests {
     #[test]
     fn a_pass_larger_than_the_budget_runs_in_shares() {
         let eye = [0.0, 1.7, 0.0];
-        let lamp = TierLight { pos: [0.0, 2.5, 0.0], color: [1.0; 3], directional: false };
+        let lamp = TierLight {
+            pos: [0.0, 2.5, 0.0],
+            color: [1.0; 3],
+            directional: false,
+        };
         let mut tier = TierState::default();
         tier.update(room(), 0, eye, &[lamp]);
         // A budget of ten probes' first rays: under a brick of the floor.
@@ -2378,20 +3401,33 @@ mod tests {
         let mut builds = 0;
         while tier.stats().filled_bricks < tier.stats().bricks {
             let batch = tier.batch(eye, Some(budget), FIRST_RAYS);
-            assert!(batch.probe_rays <= budget, "{} rays over {budget}", batch.probe_rays);
+            assert!(
+                batch.probe_rays <= budget,
+                "{} rays over {budget}",
+                batch.probe_rays
+            );
             assert!(!batch.items.is_empty());
             // A brick shows once all its probes have their first light.
             let indir = (TIER_INDIR - TIER_INFO) as usize;
-            let readable = batch.texels[indir..indir + 26 * 26 * 26].iter().filter(|t| t[0] >= 0.0).count();
+            let readable = batch.texels[indir..indir + 26 * 26 * 26]
+                .iter()
+                .filter(|t| t[0] >= 0.0)
+                .count();
             tier.commit(&batch);
             assert_eq!(readable, tier.stats().filled_bricks);
             builds += 1;
             assert!(builds < 10_000);
         }
         let live = tier.stats().live_probes as u64;
-        assert!(builds as u64 >= live / 10, "{builds} builds for {live} probes");
+        assert!(
+            builds as u64 >= live / 10,
+            "{builds} builds for {live} probes"
+        );
         // Change passes too: a brick's pass runs in shares, and every brick converges.
-        let moved = TierLight { pos: [1.0, 2.5, 0.0], ..lamp };
+        let moved = TierLight {
+            pos: [1.0, 2.5, 0.0],
+            ..lamp
+        };
         tier.update(room(), 0, eye, &[moved]);
         let budget = 10 * u64::from(CHANGE_RAYS);
         let changing = tier.stats().changing_bricks;
@@ -2422,7 +3458,10 @@ mod tests {
                 lows.push(tier.budget_rays(1.5));
             }
         }
-        assert!(lows.iter().all(|&low| low * 10 >= clean * 7), "{lows:?} of {clean}");
+        assert!(
+            lows.iter().all(|&low| low * 10 >= clean * 7),
+            "{lows:?} of {clean}"
+        );
         assert_eq!(lows.first(), lows.last());
         // A GPU that really got slower (full builds take twice as long) is followed.
         let mut slow = TierState::default();
@@ -2437,14 +3476,25 @@ mod tests {
     #[test]
     fn a_dim_lamp_far_away_leaves_the_tier_alone() {
         let mut tier = TierState::default();
-        let lamp = TierLight { pos: [0.0, 2.5, 0.0], color: [1.0; 3], directional: false };
-        let candle = TierLight { pos: [400.0, 1.0, 0.0], color: [0.001; 3], directional: false };
+        let lamp = TierLight {
+            pos: [0.0, 2.5, 0.0],
+            color: [1.0; 3],
+            directional: false,
+        };
+        let candle = TierLight {
+            pos: [400.0, 1.0, 0.0],
+            color: [0.001; 3],
+            directional: false,
+        };
         tier.update(room(), 0, [0.0, 1.7, 0.0], &[lamp, candle]);
         while tier.has_work() {
             let batch = tier.batch([0.0, 1.7, 0.0], None, REFINE_RAYS);
             tier.commit(&batch);
         }
-        let moved = TierLight { pos: [401.0, 1.0, 0.0], ..candle };
+        let moved = TierLight {
+            pos: [401.0, 1.0, 0.0],
+            ..candle
+        };
         tier.update(room(), 0, [0.0, 1.7, 0.0], &[lamp, moved]);
         assert!(!tier.has_work());
     }
@@ -2460,11 +3510,24 @@ mod tests {
         assert_eq!(batch.items[0].probes.count_ones(), 1);
         // Only bricks lit all through are readable.
         let indir = (TIER_INDIR - TIER_INFO) as usize;
-        let readable = |batch: &TierBatch| batch.texels[indir..indir + 26 * 26 * 26].iter().filter(|t| t[0] >= 0.0).count();
+        let readable = |batch: &TierBatch| {
+            batch.texels[indir..indir + 26 * 26 * 26]
+                .iter()
+                .filter(|t| t[0] >= 0.0)
+                .count()
+        };
         assert_eq!(readable(&batch), 0);
         let slot = tier.by_brick[&[1, 0, 1]];
-        let live = tier.slots[slot as usize].as_ref().unwrap().mask.count_ones();
-        let whole = tier.batch([4.5, 1.7, 4.5], Some(u64::from(FIRST_RAYS * live)), FIRST_RAYS);
+        let live = tier.slots[slot as usize]
+            .as_ref()
+            .unwrap()
+            .mask
+            .count_ones();
+        let whole = tier.batch(
+            [4.5, 1.7, 4.5],
+            Some(u64::from(FIRST_RAYS * live)),
+            FIRST_RAYS,
+        );
         assert_eq!(whole.items[0].brick, [1, 0, 1]);
         assert_eq!(readable(&whole), 1);
     }
@@ -2480,5 +3543,397 @@ mod tests {
                 assert_eq!(old, slot);
             }
         }
+    }
+
+    fn change_at(tier: &TierState, at: [f32; 3]) -> Option<u32> {
+        let span = tier.layout.brick_span();
+        let brick = at.map(|v| v.div_euclid(span) as i32);
+        let slot = tier.by_brick.get(&brick)?;
+        Some(tier.slots[*slot as usize].as_ref()?.change_left)
+    }
+
+    #[test]
+    fn a_moved_lamp_marks_only_its_visible_reach() {
+        let eye = [0.0, 1.7, 0.0];
+        let floor = SurfaceBox {
+            min: [-40.0, 0.0, -40.0],
+            max: [40.0, 0.0, 40.0],
+        };
+        // One of five small-stress lamps: peak 0.2. The visible floor puts it near 17 m.
+        let color = [0.2, 0.16, 0.08];
+        let reach = visible_reach(color);
+        assert!(reach > 16.0 && reach < 18.0, "{reach}");
+        let lamp = TierLight {
+            pos: [0.0, 2.5, 0.0],
+            color,
+            directional: false,
+        };
+        let sun = TierLight {
+            pos: [0.05, -1.0, 0.0],
+            color: [1.0; 3],
+            directional: true,
+        };
+        let mut tier = TierState::default();
+        tier.update(vec![floor], 0, eye, &[lamp, sun]);
+        settle(&mut tier, eye);
+        let moved = TierLight {
+            pos: [0.4, 2.5, 0.0],
+            ..lamp
+        };
+        tier.update(vec![floor], 0, eye, &[moved, sun]);
+        assert_eq!(change_at(&tier, [4.0, 0.5, 0.0]), Some(CHANGE_PASSES));
+        // Outside the lamp, and not in a new sun shaft: the sun did not move.
+        assert_eq!(change_at(&tier, [30.0, 0.5, 0.0]), Some(0));
+        let shared = [0.01, 0.008, 0.004];
+        assert!(visible_reach(shared) < 8.0);
+        let mut many = TierState::default();
+        let lamps: Vec<TierLight> = (0..100)
+            .map(|i| TierLight {
+                pos: [0.0, 2.5, i as f32 * 0.01],
+                color: shared,
+                directional: false,
+            })
+            .collect();
+        many.update(vec![floor], 0, eye, &lamps);
+        settle(&mut many, eye);
+        let mut nudged = lamps.clone();
+        nudged[0].pos[0] = 0.4;
+        many.update(vec![floor], 0, eye, &nudged);
+        assert_eq!(change_at(&many, [0.5, 0.5, 0.5]), Some(CHANGE_PASSES));
+        assert_eq!(change_at(&many, [12.0, 0.5, 0.0]), Some(0));
+    }
+
+    #[test]
+    fn a_large_near_surface_behind_the_camera_is_finer_than_a_small_far_one() {
+        let eye = [0.0, 1.7, 0.0];
+        let behind = surface_spacing(eye, [0.0, 1.7, -3.0], 6.0, 6.0);
+        let far = surface_spacing(eye, [0.0, 1.7, 40.0], 0.4, 6.0);
+        assert!(behind < far, "behind {behind} m, far {far} m");
+        assert!((behind - 1.0).abs() < 1.0e-4);
+        assert!(far >= 4.0);
+    }
+
+    #[test]
+    fn a_finer_probe_inside_the_band_is_kept() {
+        let stored = [0.20, 0.18, 0.16];
+        let fresh = [0.202, 0.181, 0.161];
+        assert!(keep_finer(1.0, 4.0, stored, fresh));
+        assert!(!keep_finer(4.0, 4.0, stored, fresh));
+        assert!(!keep_finer(1.0, 4.0, stored, [0.8, 0.1, 0.1]));
+    }
+
+    #[test]
+    fn the_slot_cap_drops_a_dim_offscreen_probe_before_one_on_screen() {
+        let dim = retire_key(false, 0.01);
+        let bright = retire_key(false, 2.0);
+        let shown = retire_key(true, 0.01);
+        assert!(dim < bright);
+        assert!(bright < shown);
+    }
+
+    #[test]
+    fn the_flat_window_follows_prominence() {
+        let eye = [0.0, 1.7, 4.0];
+        let near = SurfaceBox {
+            min: [-3.0, 0.0, -3.0],
+            max: [3.0, 3.0, 3.0],
+        };
+        let mut tier = TierState::default();
+        tier.fit_prominence(&[near], eye);
+        assert!((tier.layout.spacing - 1.0).abs() < 1.0e-3);
+        assert!(
+            tier.layout.radius < 50.0,
+            "radius stayed {}",
+            tier.layout.radius
+        );
+        let small = SurfaceBox {
+            min: [30.0, 0.0, 30.0],
+            max: [34.0, 4.0, 34.0],
+        };
+        let mut far = TierState::default();
+        far.fit_prominence(&[small], eye);
+        assert!(
+            far.layout.spacing > tier.layout.spacing,
+            "far {} near {}",
+            far.layout.spacing,
+            tier.layout.spacing
+        );
+    }
+
+    #[test]
+    fn the_debug_view_does_not_allocate() {
+        let mut tier = TierState::default();
+        assert!(!tier.debug_view());
+        tier.update(room(), 0, [0.0, 1.7, 4.0], &[]);
+        let before = tier.stats().bricks;
+        tier.set_debug_view(true);
+        assert!(tier.debug_view());
+        assert_eq!(tier.stats().bricks, before);
+    }
+
+    #[test]
+    fn a_far_pair_is_one_light_and_a_near_pair_is_two() {
+        let lamps = [
+            TierLight {
+                pos: [0.0, 2.0, 0.0],
+                color: [0.4, 0.2, 0.1],
+                directional: false,
+            },
+            TierLight {
+                pos: [1.0, 2.0, 0.0],
+                color: [0.2, 0.3, 0.1],
+                directional: false,
+            },
+        ];
+        let tree = LightTree::build(&lamps);
+        let far = tree.pick([0.5, 2.0, 40.0]);
+        assert_eq!(far.len(), 1, "a far pair stayed split");
+        let near = tree.pick([0.5, 2.0, 0.5]);
+        assert_eq!(near.len(), 2, "a near pair stayed one light");
+        let sum = [0, 1, 2].map(|i| lamps[0].color[i] + lamps[1].color[i]);
+        for i in 0..3 {
+            let scale = sum[i].abs().max(1.0e-3);
+            assert!(
+                (far[0].1[i] - sum[i]).abs() / scale < NOTICE_BAND,
+                "the cluster missed the lamp sum"
+            );
+        }
+        let sway = [
+            TierLight {
+                pos: [0.02, 2.0, 0.0],
+                ..lamps[0]
+            },
+            lamps[1],
+        ];
+        assert!(tree.same_nodes(&sway), "a sway rebuilt the tree");
+        let moved = [
+            TierLight {
+                pos: [3.0, 2.0, 0.0],
+                ..lamps[0]
+            },
+            lamps[1],
+        ];
+        assert!(!tree.same_nodes(&moved), "a real move kept the old nodes");
+        let mut tier = TierState::default();
+        tier.update(Vec::new(), 0, [0.0, 1.7, 0.0], &lamps);
+        assert_eq!(tier.shade_at([0.5, 2.0, 40.0]).len(), 1);
+        tier.update(Vec::new(), 0, [0.0, 1.7, 0.0], &sway);
+        assert_eq!(tier.shade_at([0.5, 2.0, 40.0]).len(), 1);
+        tier.update(Vec::new(), 0, [0.5, 2.0, 0.5], &moved);
+        assert_eq!(tier.shade_at([0.5, 2.0, 0.5]).len(), 2);
+    }
+
+    #[test]
+    fn a_sun_climb_scores_the_yard_above_the_room() {
+        let night = 0.0;
+        let morning = 0.35;
+        let yard = shell_priority(morning, night, true);
+        let room = shell_priority(morning, night, false);
+        assert!(yard > 0.5, "the yard did not score the sunrise");
+        assert_eq!(room, 0.0, "the room scored a sun it does not see");
+        assert!(yard > room);
+    }
+
+    #[test]
+    fn a_slow_sun_marks_the_shaft_wedge_only() {
+        let eye = [0.0, 1.7, 8.0];
+        let floor = SurfaceBox {
+            min: [-40.0, 0.0, -40.0],
+            max: [40.0, 0.0, 40.0],
+        };
+        let wall = SurfaceBox {
+            min: [-1.0, 0.0, -1.0],
+            max: [1.0, 3.0, 1.0],
+        };
+        // A low sun casts the wall across the floor. A small turn moves that edge.
+        let sun = TierLight {
+            pos: [0.40, -0.50, 0.0],
+            color: [1.0; 3],
+            directional: true,
+        };
+        let mut tier = TierState::default();
+        tier.update(vec![floor, wall], 0, eye, &[sun]);
+        settle(&mut tier, eye);
+        assert_eq!(tier.stats().changing_bricks, 0);
+        let slow = TierLight {
+            pos: [0.48, -0.50, 0.0],
+            ..sun
+        };
+        tier.update(vec![floor, wall], 0, eye, &[slow]);
+        settle(&mut tier, eye);
+        // The same sun, and a still camera, leave the gather idle.
+        assert!(!tier.update(vec![floor, wall], 0, eye, &[slow]));
+        assert_eq!(tier.stats().changing_bricks, 0);
+        let again = TierLight {
+            pos: [0.56, -0.50, 0.0],
+            ..sun
+        };
+        tier.update(vec![floor, wall], 0, eye, &[again]);
+        let stats = tier.stats();
+        assert!(stats.changing_bricks > 0);
+        assert!(
+            stats.changing_bricks * 4 < stats.bricks,
+            "{} of {}",
+            stats.changing_bricks,
+            stats.bricks
+        );
+        assert_eq!(change_at(&tier, [30.0, 0.5, 20.0]), Some(0));
+    }
+
+    #[test]
+    fn a_camera_turn_does_not_dirty_the_tier() {
+        let eye = [0.0, 1.7, 4.0];
+        let lamp = TierLight {
+            pos: [0.0, 2.5, 0.0],
+            color: [1.0; 3],
+            directional: false,
+        };
+        let mut tier = TierState::default();
+        tier.update(room(), 0, eye, &[lamp]);
+        settle(&mut tier, eye);
+        let camera = TierCamera {
+            eye,
+            right: [0.0, 0.0, -1.0],
+            up: [0.0, 1.0, 0.0],
+            forward: [-1.0, 0.0, 0.0],
+            tan_x: 0.7,
+            tan_y: 0.4,
+        };
+        tier.look(&camera);
+        assert_eq!(tier.stats().changing_bricks, 0);
+        assert!(!tier.update(room(), 0, eye, &[lamp]));
+        assert_eq!(tier.stats().changing_bricks, 0);
+    }
+
+    #[test]
+    fn a_moving_box_finishes_its_run_before_the_next_one() {
+        let eye = [0.0, 1.7, 4.0];
+        let lamp = TierLight {
+            pos: [0.0, 2.5, 3.0],
+            color: [1.0; 3],
+            directional: false,
+        };
+        let mut tier = TierState::default();
+        tier.update(hall(0.0), 0, eye, &[lamp]);
+        settle(&mut tier, eye);
+        tier.update(hall(0.4), 0, eye, &[lamp]);
+        let batch = tier.batch(eye, None, FIRST_RAYS);
+        assert!(batch.items.iter().all(|item| item.history != Some(3)));
+        assert!(!picture_flushes(&batch.items));
+        let slot = batch.items[0].slot;
+        let first: Vec<_> = batch
+            .items
+            .iter()
+            .copied()
+            .filter(|item| item.slot == slot && item.round == 0)
+            .collect();
+        let partial = TierBatch {
+            items: first,
+            probe_rays: 0,
+            rounds: vec![1],
+            ..batch
+        };
+        tier.commit(&partial);
+        assert_eq!(
+            tier.slots[slot as usize].as_ref().unwrap().change_left,
+            CHANGE_PASSES - 1
+        );
+        tier.update(hall(0.9), 0, eye, &[lamp]);
+        assert_eq!(
+            tier.slots[slot as usize].as_ref().unwrap().change_left,
+            CHANGE_PASSES - 1
+        );
+        assert!(tier.slots[slot as usize].as_ref().unwrap().again);
+        while tier.slots[slot as usize].as_ref().unwrap().change_left == CHANGE_PASSES - 1 {
+            let batch = tier.batch(eye, None, FIRST_RAYS);
+            tier.commit(&batch);
+        }
+        assert_eq!(
+            tier.slots[slot as usize].as_ref().unwrap().change_left,
+            CHANGE_PASSES
+        );
+    }
+
+    #[test]
+    fn the_notice_band_skips_a_face_run_or_marks_it() {
+        let eye = [0.0, 1.7, 0.0];
+        let lamp = TierLight {
+            pos: [0.0, 2.5, 0.0],
+            color: [1.0; 3],
+            directional: false,
+        };
+        let mut tier = TierState::default();
+        tier.update(room(), 0, eye, &[lamp]);
+        settle(&mut tier, eye);
+        tier.update(
+            room(),
+            0,
+            eye,
+            &[TierLight {
+                pos: [1.0, 2.5, 0.0],
+                ..lamp
+            }],
+        );
+        let brick = tier
+            .slots
+            .iter()
+            .flatten()
+            .find(|slot| slot.change_left > 0)
+            .unwrap()
+            .brick;
+        let stored = [[0.40, 0.40, 0.40]; 6];
+        let close = [[0.404, 0.40, 0.40]; 6];
+        let kept = tier.review_faces(brick, stored, close);
+        assert_eq!(kept, stored);
+        assert_eq!(
+            change_at(
+                &tier,
+                brick.map(|b| (b as f32 + 0.5) * tier.layout.brick_span())
+            ),
+            Some(0)
+        );
+        let fresh = [[0.80, 0.40, 0.40]; 6];
+        let marked = tier.review_faces(brick, stored, fresh);
+        assert_eq!(marked[0], fresh[0]);
+        assert_eq!(
+            change_at(
+                &tier,
+                brick.map(|b| (b as f32 + 0.5) * tier.layout.brick_span())
+            ),
+            Some(CHANGE_PASSES)
+        );
+    }
+
+    #[test]
+    fn a_doorway_move_leaves_bricks_outside_the_shaft_idle() {
+        // Eye in the hall, lamp beside the crate, sun steep. A crate step must
+        // not put every live brick into a change pass.
+        let eye = [0.0, 1.7, 6.0];
+        let mut boxes = hall(0.0);
+        let lamp = TierLight {
+            pos: [0.5, 2.6, 2.0],
+            color: [0.2, 0.16, 0.08],
+            directional: false,
+        };
+        let sun = TierLight {
+            pos: [0.02, -1.0, 0.0],
+            color: [1.0; 3],
+            directional: true,
+        };
+        let mut tier = TierState::default();
+        tier.update(boxes.clone(), 0, eye, &[lamp, sun]);
+        settle(&mut tier, eye);
+        boxes[2].min[0] += 0.5;
+        boxes[2].max[0] += 0.5;
+        tier.update(boxes, 0, eye, &[lamp, sun]);
+        let stats = tier.stats();
+        assert!(stats.changing_bricks > 0);
+        assert!(
+            stats.changing_bricks * 4 < stats.bricks,
+            "{} of {} bricks changed",
+            stats.changing_bricks,
+            stats.bricks
+        );
+        assert_eq!(change_at(&tier, [-16.0, 0.5, 16.0]), Some(0));
     }
 }

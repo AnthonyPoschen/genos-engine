@@ -125,7 +125,8 @@ pub fn samples_toward(
     let mut peak = 0.0_f32;
     for i in 0..n {
         let dir = cosine_dir(i, n, normal);
-        if dot(dir, aim) < 0.990 { // about 8 degrees
+        if dot(dir, aim) < 0.990 {
+            // about 8 degrees
             continue;
         }
         count += 1;
@@ -186,7 +187,13 @@ fn path_in(scene: &Scene, origin: [f32; 3], dir: [f32; 3], hits: u32, seed: u32)
             hit.normal,
         );
         scale(
-            path_in(scene, origin, dir, hits - 1, seed ^ hits.wrapping_mul(0x9E37)),
+            path_in(
+                scene,
+                origin,
+                dir,
+                hits - 1,
+                seed ^ hits.wrapping_mul(0x9E37),
+            ),
             PI,
         )
     };
@@ -202,21 +209,26 @@ struct Hit {
 fn trace(scene: &Scene, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Option<Hit> {
     let mut best_t = reach;
     let mut best: Option<Hit> = None;
-    let consider = |t: f32, normal: [f32; 3], albedo: [f32; 3], best_t: &mut f32, best: &mut Option<Hit>| {
-        if t > 1.0e-3 && t < *best_t {
-            *best_t = t;
-            *best = Some(Hit {
-                point: add(origin, scale(dir, t)),
-                normal,
-                albedo,
-            });
-        }
-    };
+    let consider =
+        |t: f32, normal: [f32; 3], albedo: [f32; 3], best_t: &mut f32, best: &mut Option<Hit>| {
+            if t > 1.0e-3 && t < *best_t {
+                *best_t = t;
+                *best = Some(Hit {
+                    point: add(origin, scale(dir, t)),
+                    normal,
+                    albedo,
+                });
+            }
+        };
     if dir[1].abs() > 1.0e-8 {
         let t = (0.0 - origin[1]) / dir[1];
         let p = add(origin, scale(dir, t));
         if on_floor(scene, p[0], p[2]) {
-            let n = if origin[1] >= 0.0 { [0.0, 1.0, 0.0] } else { [0.0, -1.0, 0.0] };
+            let n = if origin[1] >= 0.0 {
+                [0.0, 1.0, 0.0]
+            } else {
+                [0.0, -1.0, 0.0]
+            };
             consider(t, n, scene.floor.color, &mut best_t, &mut best);
         }
     }
@@ -251,7 +263,12 @@ fn trace(scene: &Scene, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Option<H
 pub fn ray_land(scene: &Scene, from: [f32; 3], point: [f32; 3]) -> Option<([f32; 3], f32)> {
     let delta = sub(point, from);
     let dist = length(delta);
-    let hit = trace(scene, from, scale(delta, 1.0 / dist.max(1.0e-6)), dist + 1.0)?;
+    let hit = trace(
+        scene,
+        from,
+        scale(delta, 1.0 / dist.max(1.0e-6)),
+        dist + 1.0,
+    )?;
     let at = add(hit.point, scale(hit.normal, 0.02));
     let y = luminance(mul(
         hit.albedo,
@@ -339,7 +356,12 @@ fn hit_wall(origin: [f32; 3], dir: [f32; 3], wall: &Wall, t_max: f32) -> Option<
     hit_box(origin, dir, min, max, t_max)
 }
 
-fn hit_solid(origin: [f32; 3], dir: [f32; 3], solid: &Solid, t_max: f32) -> Option<(f32, [f32; 3])> {
+fn hit_solid(
+    origin: [f32; 3],
+    dir: [f32; 3],
+    solid: &Solid,
+    t_max: f32,
+) -> Option<(f32, [f32; 3])> {
     match solid.shape {
         Shape::Circle => hit_cylinder(origin, dir, solid, t_max),
         Shape::Square => {
@@ -361,7 +383,12 @@ fn hit_solid(origin: [f32; 3], dir: [f32; 3], solid: &Solid, t_max: f32) -> Opti
     }
 }
 
-fn hit_cylinder(origin: [f32; 3], dir: [f32; 3], solid: &Solid, t_max: f32) -> Option<(f32, [f32; 3])> {
+fn hit_cylinder(
+    origin: [f32; 3],
+    dir: [f32; 3],
+    solid: &Solid,
+    t_max: f32,
+) -> Option<(f32, [f32; 3])> {
     let (ox, oz) = local_xz(origin[0], origin[2], solid);
     let (dx, dz) = local_dir(dir[0], dir[2], solid);
     let radius = solid.size * 0.5;
@@ -561,7 +588,10 @@ mod tests {
         };
         let blocked = room(vec![lamp], vec![wall], Vec::new());
         let shadow = radiance(&blocked, [0.0, 0.0, 2.0], [0.0, 1.0, 0.0], [1.0, 1.0, 1.0]);
-        assert!(luminance(shadow) < luminance(lit) * 0.25, "shadow {shadow:?} lit {lit:?}");
+        assert!(
+            luminance(shadow) < luminance(lit) * 0.25,
+            "shadow {shadow:?} lit {lit:?}"
+        );
     }
 
     #[test]

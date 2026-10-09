@@ -97,7 +97,14 @@ fn floor(half: f32) -> Floor {
 
 /// Draw the scene with the hidden lamp and with a control lamp the camera side sees.
 /// Every sample must be black with the hidden lamp and the control must light the first.
-fn check(label: &str, scene: Scene, hidden: Light, control: Light, camera: &Camera, points: &[[f32; 3]]) {
+fn check(
+    label: &str,
+    scene: Scene,
+    hidden: Light,
+    control: Light,
+    camera: &Camera,
+    points: &[[f32; 3]],
+) {
     let (_gpu, mut window, mut renderer) = open();
     let width = renderer.width();
     let height = renderer.height();
@@ -115,13 +122,20 @@ fn check(label: &str, scene: Scene, hidden: Light, control: Light, camera: &Came
     }
     for point in points {
         let value = sample(&dark_px, width, height, camera, *point);
-        assert!(value < 3.0, "{label}: a hidden lamp lit {point:?} ({value})");
+        assert!(
+            value < 3.0,
+            "{label}: a hidden lamp lit {point:?} ({value})"
+        );
     }
     let mut lit = scene;
     lit.lights = vec![control];
     let lit_px = draw(&mut window, &mut renderer, &World::from_scene(lit), camera);
     let value = sample(&lit_px, width, height, camera, points[0]);
-    assert!(value > 60.0, "{label}: the control lamp left {:?} dark ({value})", points[0]);
+    assert!(
+        value > 60.0,
+        "{label}: the control lamp left {:?} dark ({value})",
+        points[0]
+    );
 }
 
 #[test]
@@ -298,7 +312,11 @@ fn a_turning_box_keeps_its_faces_lit_every_frame() {
             let along = [-normal[1], normal[0]];
             for across in [-0.3f32, 0.0, 0.3] {
                 for y in [0.25f32, 0.5, 0.75] {
-                    let point = [center[0] + along[0] * across, y, center[1] + along[1] * across];
+                    let point = [
+                        center[0] + along[0] * across,
+                        y,
+                        center[1] + along[1] * across,
+                    ];
                     let value = sample(&pixels, width, height, &camera, point);
                     assert!(
                         value > 60.0,

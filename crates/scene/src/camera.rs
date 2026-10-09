@@ -381,7 +381,7 @@ pub fn update(camera: &mut Camera, scene: &mut Scene, actions: &Actions, dt: f32
 /// Column-major view-projection for a Vulkan clip space with Y flipped.
 pub fn view_proj(camera: &Camera, aspect: f32) -> [f32; 16] {
     let view = view_matrix(camera);
-    let proj = perspective(60.0_f32.to_radians(), aspect.max(0.01), 0.05, 200.0);
+    let proj = perspective(60.0_f32.to_radians(), aspect.max(0.01), CAMERA_NEAR, CAMERA_FAR);
     (proj * view).cols
 }
 
@@ -411,6 +411,10 @@ fn view_matrix(camera: &Camera) -> Mat4 {
         1.0,
     ])
 }
+
+/// Near and far clip of the picture, in metres. The occluder box reads [`CAMERA_FAR`].
+pub const CAMERA_NEAR: f32 = 0.05;
+pub const CAMERA_FAR: f32 = 200.0;
 
 fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
     let h = 1.0 / (fovy * 0.5).tan();

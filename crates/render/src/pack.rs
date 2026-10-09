@@ -30,10 +30,8 @@ pub const LAMP_CUTOFF: f32 = 0.5 / 255.0;
 /// Lamp brightness unit the shaders use (`LAMP_UNIT` in scene_rays.glsl):
 /// irradiance of a unit lamp 1 m away, facing it.
 pub const LAMP_UNIT: f32 = 72.0;
-/// Smallest occluder grid cell, in metres.
-const OCC_CELL: f32 = 2.0;
-/// Most occluder grid cells along one axis.
-const OCC_CELLS: f32 = 256.0;
+/// Occluder cell, in metres. The cell does not grow.
+pub(crate) const OCC_CELL: f32 = 2.0;
 /// Smallest lamp grid cell, in metres.
 const LAMP_CELL: f32 = 4.0;
 /// Most lamp grid cells along one axis.
@@ -115,7 +113,10 @@ impl GpuOcc {
         }
         let (s, c) = self.yaw.sin_cos();
         let (s, c) = (s.abs(), c.abs());
-        [c * self.half_x + s * self.half_z, s * self.half_x + c * self.half_z]
+        [
+            c * self.half_x + s * self.half_z,
+            s * self.half_x + c * self.half_z,
+        ]
     }
 }
 
@@ -168,18 +169,18 @@ pub struct Pack {
     pub grid: SceneGrid,
 }
 
-/// The occluder grid and the lamp grid on the ground plane, as the shaders read them
-/// (scene_rays.glsl). Each cell lists indices; `words` holds the cell tables (first
-/// word and count per cell), the sun list and the lists.
+/// The sparse occluder directory and the lamp grid, as the shaders read them
+/// (`scene_rays.glsl`). `words` holds the directory, the lamp cell table, the sun
+/// list and the lamp lists.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SceneGrid {
-    /// Occluder grid: low x, low z, cell size, top of the tallest occluder.
+    /// Occluder box: origin x, origin z, cell size, origin y.
     pub occ: [f32; 4],
-    /// Lamp grid: low x, low z, cell size, 0.
+    /// Lamp grid: low x, low z, cell size, notice band.
     pub lamp: [f32; 4],
-    /// Cells on x and z of the occluder grid, then of the lamp grid.
+    /// Cells on x and z of the occluder box, then of the lamp grid.
     pub dims: [u32; 4],
-    /// Words where the occluder cells, the lamp cells and the sun list start.
+    /// Words where the occluder directory, the lamp cells and the sun list start.
     pub at: [u32; 3],
     pub suns: u32,
     pub words: Vec<u32>,
@@ -193,45 +194,14 @@ fn grid_axis(lo: f32, hi: f32, cell: f32, cap: f32) -> (f32, u32) {
     (cell, ((span / cell).ceil() as u32).max(1))
 }
 
-/// Bin the occluders by their ground boxes and the point lamps by their range, so a
-/// ray walks only the cells it crosses and a point visits only the lamps that reach it.
-pub fn build_grid(lamps: &[GpuLamp], occs: &[GpuOcc]) -> SceneGrid {
+/// Store occluder cells in the camera box and point lamps by their range.
+/// A ray jumps to the next stored cell. A point lamp visits the cells its range meets.
+pub fn build_grid(lamps: &[GpuLamp], occs: &[GpuOcc], eye: [f32; 3], far: f32) -> SceneGrid {
     let mut grid = SceneGrid::default();
-    let mut words: Vec<u32> = Vec::new();
-    // Occluders.
-    let mut lo = [f32::MAX; 2];
-    let mut hi = [f32::MIN; 2];
-    let mut top = 0.0_f32;
-    for occ in occs {
-        let r = occ.reach();
-        lo = [lo[0].min(occ.center[0] - r[0]), lo[1].min(occ.center[2] - r[1])];
-        hi = [hi[0].max(occ.center[0] + r[0]), hi[1].max(occ.center[2] + r[1])];
-        top = top.max(occ.center[1] + occ.height * 0.5);
-    }
-    let mut occ_lists: Vec<Vec<u32>> = Vec::new();
-    if !occs.is_empty() {
-        let (cx, _) = grid_axis(lo[0], hi[0], OCC_CELL, OCC_CELLS);
-        let (cz, _) = grid_axis(lo[1], hi[1], OCC_CELL, OCC_CELLS);
-        let cell = cx.max(cz);
-        let nx = (((hi[0] - lo[0]).max(1.0e-3) / cell).ceil() as u32).max(1);
-        let nz = (((hi[1] - lo[1]).max(1.0e-3) / cell).ceil() as u32).max(1);
-        grid.occ = [lo[0], lo[1], cell, top];
-        grid.dims[0] = nx;
-        grid.dims[1] = nz;
-        occ_lists = vec![Vec::new(); (nx * nz) as usize];
-        for (index, occ) in occs.iter().enumerate() {
-            let r = occ.reach();
-            let x0 = (((occ.center[0] - r[0] - lo[0]) / cell).floor().max(0.0) as u32).min(nx - 1);
-            let x1 = (((occ.center[0] + r[0] - lo[0]) / cell).floor().max(0.0) as u32).min(nx - 1);
-            let z0 = (((occ.center[2] - r[1] - lo[1]) / cell).floor().max(0.0) as u32).min(nz - 1);
-            let z1 = (((occ.center[2] + r[1] - lo[1]) / cell).floor().max(0.0) as u32).min(nz - 1);
-            for z in z0..=z1 {
-                for x in x0..=x1 {
-                    occ_lists[(z * nx + x) as usize].push(index as u32);
-                }
-            }
-        }
-    }
+    let (origin, dims, mut words) = crate::occ_grid::occ_directory(occs, eye, far);
+    grid.occ = [origin[0], origin[2], OCC_CELL, origin[1]];
+    grid.dims[0] = dims[0];
+    grid.dims[1] = dims[2];
     // Point lamps by range. Suns go in their own list.
     let mut lo = [f32::MAX; 2];
     let mut hi = [f32::MIN; 2];
@@ -244,8 +214,14 @@ pub fn build_grid(lamps: &[GpuLamp], occs: &[GpuOcc]) -> SceneGrid {
         if lamp.range <= 0.0 {
             continue;
         }
-        lo = [lo[0].min(lamp.pos[0] - lamp.range), lo[1].min(lamp.pos[2] - lamp.range)];
-        hi = [hi[0].max(lamp.pos[0] + lamp.range), hi[1].max(lamp.pos[2] + lamp.range)];
+        lo = [
+            lo[0].min(lamp.pos[0] - lamp.range),
+            lo[1].min(lamp.pos[2] - lamp.range),
+        ];
+        hi = [
+            hi[0].max(lamp.pos[0] + lamp.range),
+            hi[1].max(lamp.pos[2] + lamp.range),
+        ];
     }
     let mut lamp_lists: Vec<Vec<u32>> = Vec::new();
     if lo[0] <= hi[0] {
@@ -254,7 +230,7 @@ pub fn build_grid(lamps: &[GpuLamp], occs: &[GpuOcc]) -> SceneGrid {
         let cell = cx.max(cz);
         let nx = (((hi[0] - lo[0]) / cell).ceil() as u32).max(1);
         let nz = (((hi[1] - lo[1]) / cell).ceil() as u32).max(1);
-        grid.lamp = [lo[0], lo[1], cell, 0.0];
+        grid.lamp = [lo[0], lo[1], cell, crate::probe_tier::NOTICE_BAND];
         grid.dims[2] = nx;
         grid.dims[3] = nz;
         lamp_lists = vec![Vec::new(); (nx * nz) as usize];
@@ -281,25 +257,23 @@ pub fn build_grid(lamps: &[GpuLamp], occs: &[GpuOcc]) -> SceneGrid {
             }
         }
     }
-    // Tables first, then the sun list, then the cell lists.
-    let occ_cells = occ_lists.len() as u32;
+    // The directory already fills `words`. The lamp table follows it, then the sun
+    // list, then the lamp lists. Occluder list words stay inside the directory.
+    let occ_len = words.len() as u32;
     let lamp_cells = lamp_lists.len() as u32;
-    grid.at = [0, occ_cells * 2, (occ_cells + lamp_cells) * 2];
+    grid.at = [0, occ_len, occ_len + lamp_cells * 2];
     grid.suns = suns.len() as u32;
-    words.resize(((occ_cells + lamp_cells) * 2) as usize, 0);
+    let lamp_table = words.len();
+    words.resize(lamp_table + (lamp_cells * 2) as usize, 0);
     words.extend_from_slice(&suns);
-    for (cell, list) in occ_lists.iter().enumerate() {
-        words[cell * 2] = words.len() as u32;
-        words[cell * 2 + 1] = list.len() as u32;
-        words.extend_from_slice(list);
-    }
-    let base = (occ_cells * 2) as usize;
     for (cell, list) in lamp_lists.iter().enumerate() {
-        words[base + cell * 2] = words.len() as u32;
-        words[base + cell * 2 + 1] = list.len() as u32;
+        words[lamp_table + cell * 2] = words.len() as u32;
+        words[lamp_table + cell * 2 + 1] = list.len() as u32;
         words.extend_from_slice(list);
     }
     grid.words = words;
+    // The gather reads the notice band from lamp_grid.w even when no point lamp is binned.
+    grid.lamp[3] = crate::probe_tier::NOTICE_BAND;
     grid
 }
 
@@ -316,12 +290,25 @@ pub enum PackedDraw {
 
 /// Local geometry for a shape block. The pose and the color stay on the instance.
 pub enum ShapeSource {
-    Floor { half_x: f32, half_z: f32 },
+    Floor {
+        half_x: f32,
+        half_z: f32,
+    },
     /// The floor rectangle facing down.
-    Ceiling { half_x: f32, half_z: f32 },
+    Ceiling {
+        half_x: f32,
+        half_z: f32,
+    },
     /// `top` and `bottom` add those faces. A box on the floor needs no bottom.
-    Box { half: [f32; 3], top: bool, bottom: bool },
-    Cylinder { radius: f32, height: f32 },
+    Box {
+        half: [f32; 3],
+        top: bool,
+        bottom: bool,
+    },
+    Cylinder {
+        radius: f32,
+        height: f32,
+    },
     Mesh(Vec<[f32; 3]>),
     Baked(Vec<GpuVertex>),
 }
@@ -477,7 +464,7 @@ pub fn pack_frame(
         ceiling_of(&world.scene),
         sky_of(&world.scene),
     );
-    let grid = build_grid(&lamps, &occs);
+    let grid = build_grid(&lamps, &occs, eye, genos_scene::CAMERA_FAR);
     Pack {
         grid,
         objects,
@@ -594,12 +581,23 @@ fn pack_draw(
             // A wall lower than the eye shows its top; a raised one (lintel, sill, roof
             // slab) shows its underside too. The fourth key value names the faces.
             let bottom = wall.base > 0.0;
-            let key = shape_key(2, &[half[0], half[1], half[2], if bottom { 3.0 } else { 1.0 }]);
+            let key = shape_key(
+                2,
+                &[half[0], half[1], half[2], if bottom { 3.0 } else { 1.0 }],
+            );
             Some(PackedDraw::Shape {
                 key,
-                model: translation(wall.position.x, wall.base + wall.height * 0.5, wall.position.z),
+                model: translation(
+                    wall.position.x,
+                    wall.base + wall.height * 0.5,
+                    wall.position.z,
+                ),
                 color,
-                source: ShapeSource::Box { half, top: true, bottom },
+                source: ShapeSource::Box {
+                    half,
+                    top: true,
+                    bottom,
+                },
             })
         }
         DrawKind::Fixed(FixedPart::Solid(index)) => {
@@ -718,20 +716,42 @@ fn shape_key_verts(tag: u64, verts: &[GpuVertex]) -> u64 {
 /// The roof is a plane like the floor, so the light shaders test it directly and it
 /// takes no occluder slot.
 fn sky_of(scene: &genos_scene::Scene) -> [f32; 3] {
-    scene.sky.as_ref().map_or([0.0; 3], |sky| sky.color.map(|c| c.max(0.0)))
+    scene
+        .sky
+        .as_ref()
+        .map_or([0.0; 3], |sky| sky.color.map(|c| c.max(0.0)))
 }
 
 fn ceiling_of(scene: &genos_scene::Scene) -> [f32; 4] {
     match &scene.ceiling {
-        Some(ceiling) => [ceiling.height, ceiling.color[0], ceiling.color[1], ceiling.color[2]],
+        Some(ceiling) => [
+            ceiling.height,
+            ceiling.color[0],
+            ceiling.color[1],
+            ceiling.color[2],
+        ],
         None => [0.0; 4],
     }
 }
 
 fn push_ceiling_local(out: &mut Vec<GpuVertex>, half_x: f32, half_z: f32, color: [f32; 3]) {
     let n = [0.0, -1.0, 0.0];
-    push_tri(out, [-half_x, 0.0, -half_z], [half_x, 0.0, half_z], [half_x, 0.0, -half_z], n, color);
-    push_tri(out, [-half_x, 0.0, -half_z], [-half_x, 0.0, half_z], [half_x, 0.0, half_z], n, color);
+    push_tri(
+        out,
+        [-half_x, 0.0, -half_z],
+        [half_x, 0.0, half_z],
+        [half_x, 0.0, -half_z],
+        n,
+        color,
+    );
+    push_tri(
+        out,
+        [-half_x, 0.0, -half_z],
+        [-half_x, 0.0, half_z],
+        [half_x, 0.0, half_z],
+        n,
+        color,
+    );
 }
 
 fn push_floor_local(out: &mut Vec<GpuVertex>, half_x: f32, half_z: f32, color: [f32; 3]) {
@@ -779,7 +799,8 @@ pub const SCENE_TAIL: usize = 704;
 /// (four each) and the grid words (four per tail word). Past [`SCENE_CAPACITY`] the
 /// last lamps, occluders or grid cells are dropped, never written out of bounds.
 pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
-    let tail_words = |lamps: usize, occs: usize, grid: usize| lamps * 2 + occs * 4 + grid.div_ceil(4);
+    let tail_words =
+        |lamps: usize, occs: usize, grid: usize| lamps * 2 + occs * 4 + grid.div_ceil(4);
     let room = (SCENE_CAPACITY - SCENE_TAIL) / 16;
     let mut lamp_count = pack.lamps.len().min(MAX_LAMPS);
     let mut occ_count = pack.occs.len().min(MAX_OCCLUDERS);
@@ -787,11 +808,12 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     if tail_words(lamp_count, occ_count, grid.words.len()) > room {
         // Over capacity: keep the lamps and occluders, drop the grid lists (every cell
         // empty), then trim the lists themselves if even that does not fit.
-        grid = build_grid(&[], &[]);
+        grid = build_grid(&[], &[], pack.eye, genos_scene::CAMERA_FAR);
         lamp_count = lamp_count.min(room / 4);
         occ_count = occ_count.min((room - lamp_count * 2) / 4);
     }
-    let mut bytes = Vec::with_capacity(SCENE_TAIL + tail_words(lamp_count, occ_count, grid.words.len()) * 16);
+    let mut bytes =
+        Vec::with_capacity(SCENE_TAIL + tail_words(lamp_count, occ_count, grid.words.len()) * 16);
     push_u32(&mut bytes, lamp_count as u32);
     push_u32(&mut bytes, occ_count as u32);
     push_u32(&mut bytes, pack.objects.len() as u32);
@@ -929,7 +951,11 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     while bytes.len() % 16 != 0 {
         push_u32(&mut bytes, 0);
     }
-    debug_assert!(bytes.len() <= SCENE_CAPACITY, "scene block is {} bytes", bytes.len());
+    debug_assert!(
+        bytes.len() <= SCENE_CAPACITY,
+        "scene block is {} bytes",
+        bytes.len()
+    );
     bytes
 }
 
@@ -1004,7 +1030,11 @@ fn occluder(world: &World, object: &crate::world::Object) -> Option<GpuOcc> {
         DrawKind::Fixed(FixedPart::Floor) | DrawKind::Fixed(FixedPart::Ceiling) => None,
         DrawKind::Fixed(FixedPart::Wall(index)) => {
             world.scene.walls.get(*index).map(|wall| GpuOcc {
-                center: [wall.position.x, wall.base + wall.height * 0.5, wall.position.z],
+                center: [
+                    wall.position.x,
+                    wall.base + wall.height * 0.5,
+                    wall.position.z,
+                ],
                 shape: 0.0,
                 half_x: wall.half_x,
                 height: wall.height,
@@ -1113,7 +1143,11 @@ fn push_object(
                 push_box(
                     out,
                     wall.color,
-                    [wall.position.x, wall.base + wall.height * 0.5, wall.position.z],
+                    [
+                        wall.position.x,
+                        wall.base + wall.height * 0.5,
+                        wall.position.z,
+                    ],
                     [wall.half_x, wall.height * 0.5, wall.half_z],
                     true,
                     wall.base > 0.0,
@@ -1134,7 +1168,10 @@ fn push_object(
                             true,
                             false,
                         );
-                        let model = turned(translation(solid.position.x, 0.0, solid.position.z), solid.yaw);
+                        let model = turned(
+                            translation(solid.position.x, 0.0, solid.position.z),
+                            solid.yaw,
+                        );
                         for vert in &mut out[first..] {
                             let [x, y, z] = vert.pos;
                             vert.pos = [
@@ -1143,7 +1180,11 @@ fn push_object(
                                 model[2] * x + model[10] * z + model[14],
                             ];
                             let [nx, ny, nz] = vert.normal;
-                            vert.normal = [model[0] * nx + model[8] * nz, ny, model[2] * nx + model[10] * nz];
+                            vert.normal = [
+                                model[0] * nx + model[8] * nz,
+                                ny,
+                                model[2] * nx + model[10] * nz,
+                            ];
                         }
                     }
                     Shape::Circle => push_cylinder(

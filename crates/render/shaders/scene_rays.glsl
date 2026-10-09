@@ -16,9 +16,10 @@
 // invites a driver to unroll it into each copy: the NVIDIA compiler grew past 17 GB
 // and never finished the pipeline. A data bound cannot be unrolled.
 //
-// The occluders sit in a grid of square cells on the ground plane. A ray walks the
-// cells it crosses and tests only the occluders listed there, so its cost follows
-// the shapes along its path, not the size of the scene.
+// The occluders sit in a sparse box centered on the camera. The cell is 2 m. A ray
+// jumps empty 16 m bricks. Inside a brick, one test covers the fine cells that
+// repeat the same shapes. The floor plane and the roof plane stay single tests.
+// A ray that leaves the box misses.
 
 struct SceneHit {
     float t;
@@ -200,21 +201,51 @@ bool occ_inside(Occ occ, vec3 p) {
     return abs(d.x) < occ.extent.x && abs(d.y) < occ.extent.z;
 }
 
-// Occluder grid cell of a ground point, clamped into the grid.
-ivec2 occ_cell_of(vec2 p) {
-    ivec2 dims = ivec2(scene.grid_dims.xy);
-    ivec2 c = ivec2(floor((p - scene.occ_grid.xy) / scene.occ_grid.z));
-    return clamp(c, ivec2(0), dims - 1);
+// Origin of the camera box. occ_grid is (origin.x, origin.z, cell, origin.y).
+vec3 occ_box_origin() {
+    return vec3(scene.occ_grid.x, scene.occ_grid.w, scene.occ_grid.y);
 }
 
 bool occ_grid_empty() {
-    return scene.occ_count == 0u || scene.grid_dims.x == 0u || scene.grid_dims.y == 0u;
+    return scene.occ_count == 0u || scene.occ_grid.z <= 0.0 || scene.grid_dims.x == 0u || grid_word(6u) == 0u;
 }
 
-// First list word and count of one occluder cell.
-uvec2 occ_cell(ivec2 c) {
-    uint at = scene.grid_at.x + 2u * (uint(c.y) * scene.grid_dims.x + uint(c.x));
-    return uvec2(grid_word(at), grid_word(at + 1u));
+// Header: fine counts, step cap, coarse counts x y, brick count, coarse count z.
+// Word 8 on is one entry per 16 m brick. A brick is 512 fine slots, a record count,
+// then records (local, list word, count). A fine slot is 0 or the list's count word.
+
+uint occ_local_index(ivec3 cell) {
+    return uint(cell.x & 7) + 8u * uint(cell.z & 7) + 64u * uint(cell.y & 7);
+}
+
+// Brick word for a coarse cell, when any shape overlaps that 16 m brick.
+bool occ_brick(ivec3 coarse, out uint brick) {
+    ivec3 n = ivec3(int(grid_word(4u)), int(grid_word(5u)), int(grid_word(7u)));
+    brick = 0u;
+    if (any(lessThan(coarse, ivec3(0))) || any(greaterThanEqual(coarse, n))) {
+        return false;
+    }
+    uint at = 8u + uint((coarse.z * n.y + coarse.y) * n.x + coarse.x);
+    brick = grid_word(at);
+    return brick != 0u;
+}
+
+// Shape list for one stored 2 m cell inside `brick`. A high bit is an empty-cell jump.
+bool occ_fine(uint brick, ivec3 cell, out uint list, out uint n) {
+    uint at = grid_word(brick + occ_local_index(cell));
+    list = 0u;
+    n = 0u;
+    if (at == 0u || (at & 0x80000000u) != 0u) {
+        return false;
+    }
+    n = grid_word(at) & 255u;
+    list = at + 1u;
+    return n != 0u;
+}
+
+ivec3 occ_cell_at(vec3 origin, vec3 dir, float t) {
+    vec3 p = origin + dir * (t + 1.0e-3);
+    return ivec3(floor((p - occ_box_origin()) / scene.occ_grid.z));
 }
 
 // A candidate mask: whether any occluder, the floor, or the roof reaches a box.
@@ -241,16 +272,50 @@ bool occ_meets(Occ occ, vec3 lo, vec3 hi) {
 uint scene_candidates_skip(vec3 lo, vec3 hi, bool skip, vec3 skip_in) {
     uint mask = 0u;
     if (!occ_grid_empty()) {
-        ivec2 c0 = occ_cell_of(lo.xz);
-        ivec2 c1 = occ_cell_of(hi.xz);
-        [[dont_unroll]] for (int cz = c0.y; cz <= c1.y && mask == 0u; cz++) {
-            [[dont_unroll]] for (int cx = c0.x; cx <= c1.x && mask == 0u; cx++) {
-                uvec2 cell = occ_cell(ivec2(cx, cz));
-                [[dont_unroll]] for (uint k = 0u; k < cell.y; k++) {
-                    Occ occ = scene_occ(grid_word(cell.x + k));
-                    if (occ_meets(occ, lo, hi) && !(skip && occ_inside(occ, skip_in))) {
-                        mask |= SCENE_OCC_BIT;
-                        break;
+        vec3 org = occ_box_origin();
+        float cell = scene.occ_grid.z;
+        ivec3 dims = ivec3(int(scene.grid_dims.x), int(grid_word(1u)), int(scene.grid_dims.y));
+        ivec3 c0 = clamp(ivec3(floor((min(lo, hi) - org) / cell)), ivec3(0), dims - 1);
+        ivec3 c1 = clamp(ivec3(floor((max(lo, hi) - org) / cell)), ivec3(0), dims - 1);
+        ivec3 b0 = c0 >> 3;
+        ivec3 b1 = c1 >> 3;
+        // A neighbourhood covers a few 16 m bricks. Empty bricks are one hash miss.
+        [[dont_unroll]] for (int cy = b0.y; cy <= b1.y && mask == 0u; cy++) {
+            [[dont_unroll]] for (int cz = b0.z; cz <= b1.z && mask == 0u; cz++) {
+                [[dont_unroll]] for (int cx = b0.x; cx <= b1.x && mask == 0u; cx++) {
+                    uint brick;
+                    if (!occ_brick(ivec3(cx, cy, cz), brick)) {
+                        continue;
+                    }
+                    int x0 = max(c0.x, cx << 3);
+                    int x1 = min(c1.x, (cx << 3) + 7);
+                    int y0 = max(c0.y, cy << 3);
+                    int y1 = min(c1.y, (cy << 3) + 7);
+                    int z0 = max(c0.z, cz << 3);
+                    int z1 = min(c1.z, (cz << 3) + 7);
+                    if (x1 < x0 || y1 < y0 || z1 < z0) {
+                        continue;
+                    }
+                    uint nx = uint(x1 - x0 + 1);
+                    uint ny = uint(y1 - y0 + 1);
+                    uint nz = uint(z1 - z0 + 1);
+                    uint total = nx * ny * nz;
+                    [[dont_unroll]] for (uint i = 0u; i < total && mask == 0u; i++) {
+                        uint ix = uint(x0) + (i % nx);
+                        uint yz = i / nx;
+                        uint iy = uint(y0) + (yz % ny);
+                        uint iz = uint(z0) + (yz / ny);
+                        uint list;
+                        uint list_n;
+                        if (!occ_fine(brick, ivec3(ix, iy, iz), list, list_n)) {
+                            continue;
+                        }
+                        [[dont_unroll]] for (uint k = 0u; k < list_n && mask == 0u; k++) {
+                            Occ occ = scene_occ(grid_word(list + k));
+                            if (occ_meets(occ, lo, hi) && !(skip && occ_inside(occ, skip_in))) {
+                                mask |= SCENE_OCC_BIT;
+                            }
+                        }
                     }
                 }
             }
@@ -272,11 +337,10 @@ uint scene_candidates(vec3 lo, vec3 hi) {
 // Nearest surface along the ray with t0 <= t < t1.
 bool scene_ray(vec3 origin, vec3 dir, float t0, float t1, out SceneHit hit);
 
-// Test the occluders of one cell against the ray, keeping the nearest hit.
-void occ_test_cell(ivec2 c, vec3 origin, vec3 dir, float t0, inout SceneHit hit, inout bool found) {
-    uvec2 cell = occ_cell(c);
-    [[dont_unroll]] for (uint k = 0u; k < cell.y; k++) {
-        Occ occ = scene_occ(grid_word(cell.x + k));
+// Test the occluders of one stored cell against the ray, keeping the nearest hit.
+void occ_test_list(uint list, uint n, vec3 origin, vec3 dir, float t0, inout SceneHit hit, inout bool found) {
+    [[dont_unroll]] for (uint k = 0u; k < n; k++) {
+        Occ occ = scene_occ(grid_word(list + k));
         float t_in;
         float t_out;
         vec3 n;
@@ -294,73 +358,94 @@ void occ_test_cell(ivec2 c, vec3 origin, vec3 dir, float t0, inout SceneHit hit,
     }
 }
 
-// Walk the occluder cells the ray crosses from t0 to hit.t, nearest first, and stop
-// once the nearest hit lies before the next cell. The span is first cut to the grid
-// and to the height band the occluders fill (floor to the tallest top).
+// Jump the stored cells from t0 to hit.t. Stop when the nearest hit is closer than
+// the next cell. The step cap is header word 3. A ray that leaves the box misses.
 void occ_walk(vec3 origin, vec3 dir, float t0, inout SceneHit hit, inout bool found) {
-    float lo_t = t0;
-    float hi_t = hit.t;
-    float top = scene.occ_grid.w;
-    if (abs(dir.y) > 1.0e-8) {
-        float ta = (0.0 - origin.y) / dir.y;
-        float tb = (top - origin.y) / dir.y;
-        lo_t = max(lo_t, min(ta, tb));
-        hi_t = min(hi_t, max(ta, tb));
-    } else if (origin.y < 0.0 || origin.y > top) {
+    if (occ_grid_empty()) {
         return;
     }
-    vec2 g0 = scene.occ_grid.xy;
+    vec3 org = occ_box_origin();
     float cell = scene.occ_grid.z;
-    vec2 g1 = g0 + vec2(scene.grid_dims.xy) * cell;
-    for (int axis = 0; axis < 2; axis++) {
-        float o = origin[axis * 2];
-        float d = dir[axis * 2];
+    vec3 box_hi = org + vec3(float(scene.grid_dims.x), float(grid_word(1u)), float(scene.grid_dims.y)) * cell;
+    float t_enter = t0;
+    float box_leave = hit.t;
+    for (int axis = 0; axis < 3; axis++) {
+        float d = dir[axis];
+        float o = origin[axis];
         if (abs(d) < 1.0e-8) {
-            if (o < g0[axis] || o > g1[axis]) {
+            if (o < org[axis] || o > box_hi[axis]) {
                 return;
             }
             continue;
         }
-        float ta = (g0[axis] - o) / d;
-        float tb = (g1[axis] - o) / d;
-        lo_t = max(lo_t, min(ta, tb));
-        hi_t = min(hi_t, max(ta, tb));
+        float ta = (org[axis] - o) / d;
+        float tb = (box_hi[axis] - o) / d;
+        t_enter = max(t_enter, min(ta, tb));
+        box_leave = min(box_leave, max(ta, tb));
     }
-    if (hi_t < lo_t) {
+    if (t_enter >= box_leave) {
         return;
     }
-    vec2 start = origin.xz + dir.xz * lo_t;
-    ivec2 c = occ_cell_of(start);
-    ivec2 dims = ivec2(scene.grid_dims.xy);
-    ivec2 step = ivec2(dir.x > 0.0 ? 1 : -1, dir.z > 0.0 ? 1 : -1);
-    vec2 inv = vec2(
-        abs(dir.x) > 1.0e-8 ? 1.0 / dir.x : 1.0e30,
-        abs(dir.z) > 1.0e-8 ? 1.0 / dir.z : 1.0e30
-    );
-    // Ray time at the next cell edge on each axis, and the time to cross one cell.
-    vec2 edge = g0 + (vec2(c) + vec2(step.x > 0 ? 1.0 : 0.0, step.y > 0 ? 1.0 : 0.0)) * cell;
-    vec2 t_next = vec2(
-        abs(dir.x) > 1.0e-8 ? (edge.x - origin.x) * inv.x : 1.0e30,
-        abs(dir.z) > 1.0e-8 ? (edge.y - origin.z) * inv.y : 1.0e30
-    );
-    vec2 t_cell = vec2(abs(cell * inv.x), abs(cell * inv.y));
-    // A walk steps one cell on one axis at a time, so it visits at most x + z cells.
-    int steps = dims.x + dims.y;
-    [[dont_unroll]] for (int i = 0; i < steps; i++) {
-        occ_test_cell(c, origin, dir, t0, hit, found);
-        float leave = min(t_next.x, t_next.y);
-        if (leave >= min(hit.t, hi_t)) {
+    float t = max(t_enter, t0);
+    ivec3 c = occ_cell_at(origin, dir, t);
+    ivec3 dims = ivec3(int(scene.grid_dims.x), int(grid_word(1u)), int(scene.grid_dims.y));
+    uint safety = max(grid_word(3u), 1u);
+    [[dont_unroll]] for (uint i = 0u; i < safety; i++) {
+        float limit = min(hit.t, box_leave);
+        if (t >= limit - 1.0e-4) {
             return;
         }
-        if (t_next.x < t_next.y) {
-            c.x += step.x;
-            t_next.x += t_cell.x;
+        if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, dims))) {
+            return;
+        }
+        ivec3 coarse = c >> 3;
+        uint brick;
+        if (occ_brick(coarse, brick)) {
+            // A miss crosses every fine cell that repeats this cell's shapes.
+            ivec3 lo = c;
+            ivec3 hi = c + ivec3(1);
+            uint slot = grid_word(brick + occ_local_index(c));
+            if (slot != 0u && (slot & 0x80000000u) == 0u) {
+                uint raw = grid_word(slot);
+                occ_test_list(slot + 1u, raw & 255u, origin, dir, t0, hit, found);
+                ivec3 base = coarse << 3;
+                lo = base + ivec3(int((raw >> 8u) & 7u), int((raw >> 11u) & 7u), int((raw >> 14u) & 7u));
+                hi = base + ivec3(int((raw >> 17u) & 7u), int((raw >> 20u) & 7u), int((raw >> 23u) & 7u)) + ivec3(1);
+            }
+            float leave = 1.0e30;
+            for (int axis = 0; axis < 3; axis++) {
+                if (abs(dir[axis]) < 1.0e-8) {
+                    continue;
+                }
+                int face = dir[axis] > 0.0 ? hi[axis] : lo[axis];
+                float hit_t = (org[axis] + float(face) * cell - origin[axis]) / dir[axis];
+                if (hit_t > t + 1.0e-5) {
+                    leave = min(leave, hit_t);
+                }
+            }
+            if ((found && hit.t <= leave) || leave <= t + 1.0e-5 || leave >= limit) {
+                return;
+            }
+            t = leave;
+            c = occ_cell_at(origin, dir, t);
         } else {
-            c.y += step.y;
-            t_next.y += t_cell.y;
-        }
-        if (c.x < 0 || c.y < 0 || c.x >= dims.x || c.y >= dims.y) {
-            return;
+            ivec3 base = coarse << 3;
+            float jump = 1.0e30;
+            for (int axis = 0; axis < 3; axis++) {
+                if (abs(dir[axis]) < 1.0e-8) {
+                    continue;
+                }
+                int face = dir[axis] > 0.0 ? base[axis] + 8 : base[axis];
+                float hit_t = (org[axis] + float(face) * cell - origin[axis]) / dir[axis];
+                if (hit_t > t + 1.0e-5) {
+                    jump = min(jump, hit_t);
+                }
+            }
+            if (jump >= limit - 1.0e-4 || jump <= t + 1.0e-5) {
+                return;
+            }
+            t = jump;
+            c = occ_cell_at(origin, dir, t);
         }
     }
 }
@@ -428,14 +513,20 @@ bool scene_inside(vec3 p) {
     if (occ_grid_empty()) {
         return false;
     }
-    vec2 g0 = scene.occ_grid.xy;
-    vec2 g1 = g0 + vec2(scene.grid_dims.xy) * scene.occ_grid.z;
-    if (any(lessThan(p.xz, g0)) || any(greaterThan(p.xz, g1))) {
+    vec3 org = occ_box_origin();
+    vec3 box_hi = org + vec3(float(scene.grid_dims.x), float(grid_word(1u)), float(scene.grid_dims.y)) * scene.occ_grid.z;
+    if (any(lessThan(p, org)) || any(greaterThan(p, box_hi))) {
         return false;
     }
-    uvec2 cell = occ_cell(occ_cell_of(p.xz));
-    [[dont_unroll]] for (uint k = 0u; k < cell.y; k++) {
-        if (occ_inside(scene_occ(grid_word(cell.x + k)), p)) {
+    ivec3 cell = ivec3(floor((p - org) / scene.occ_grid.z));
+    uint brick;
+    uint list;
+    uint n;
+    if (!occ_brick(cell >> 3, brick) || !occ_fine(brick, cell, list, n)) {
+        return false;
+    }
+    [[dont_unroll]] for (uint k = 0u; k < n; k++) {
+        if (occ_inside(scene_occ(grid_word(list + k)), p)) {
             return true;
         }
     }
@@ -459,8 +550,8 @@ bool scene_occluded(vec3 a, vec3 b) {
 // ---- Sky ---------------------------------------------------------------------
 // A ray that leaves the scene meets the sky (genos_scene::Sky): one radiance in every
 // direction. A probe ray that met nothing up to its end looks on from there; the
-// occluder walk stops at the grid's edge and the occluders' top, so the extra span
-// costs the cells the ray still crosses inside the scene and nothing past it.
+// occluder walk stops at the camera box, so the extra span tests stored cells
+// inside that box and nothing past it.
 
 bool has_sky() {
     return any(greaterThan(scene.sky.rgb, vec3(0.0)));

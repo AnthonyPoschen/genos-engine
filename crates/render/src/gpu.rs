@@ -104,7 +104,11 @@ fn material_key(pack: &pack::Pack) -> u64 {
         value.to_bits().hash(&mut hasher);
     }
     for occ in &pack.occs {
-        for value in occ.albedo.iter().chain([occ.absorption, occ.reflectance, occ.color_mix].iter()) {
+        for value in occ
+            .albedo
+            .iter()
+            .chain([occ.absorption, occ.reflectance, occ.color_mix].iter())
+        {
             value.to_bits().hash(&mut hasher);
         }
     }
@@ -134,10 +138,11 @@ impl Renderer {
             overlay_verts: Vec::new(),
             cascade_lines: Vec::new(),
             tier: {
-                let mut tier = crate::probe_tier::TierState::new(crate::probe_tier::TierLayout::new(
-                    env_f32("GENOS_TIER_SPACING").unwrap_or(1.0),
-                    env_f32("GENOS_TIER_RADIUS").unwrap_or(50.0),
-                ));
+                let mut tier =
+                    crate::probe_tier::TierState::new(crate::probe_tier::TierLayout::new(
+                        env_f32("GENOS_TIER_SPACING").unwrap_or(1.0),
+                        env_f32("GENOS_TIER_RADIUS").unwrap_or(50.0),
+                    ));
                 if let Ok(text) = std::env::var("GENOS_TIER_WEIGHTS") {
                     tier.weights = crate::probe_tier::TierWeights::parse(&text)?;
                 }
@@ -155,7 +160,8 @@ impl Renderer {
             live_readback: false,
             keep_pictures: false,
             last_draw: None,
-            view_seconds: env_f32("GENOS_TIER_VIEW_MS").map_or(TIER_VIEW_SECONDS, |ms| ms.max(0.0) / 1000.0),
+            view_seconds: env_f32("GENOS_TIER_VIEW_MS")
+                .map_or(TIER_VIEW_SECONDS, |ms| ms.max(0.0) / 1000.0),
             night_frames: 0,
             last_sun: [0.0, -1.0],
         })
@@ -443,9 +449,7 @@ impl Renderer {
             .gpu
             .tier_batch
             .as_ref()
-            .is_some_and(|batch| {
-                batch.items.iter().any(|item| item.history.is_some_and(|h| h <= 2 || h == 3 || h == 7))
-            });
+            .is_some_and(|batch| crate::probe_tier::picture_flushes(&batch.items));
         if flush || show_night {
             self.gpu.view_weight = 1.0;
         }
@@ -540,7 +544,11 @@ impl Renderer {
     fn stage_tier(&mut self, world: &World, pack: &pack::Pack, settle: bool) {
         let boxes = crate::probe_tier::scene_boxes(&world.scene);
         let lights = tier_lights(pack);
-        self.tier.update(boxes, material_key(pack), pack.eye, &lights);
+        if std::env::var_os("GENOS_TIER_SPACING").is_none() {
+            self.tier.fit_prominence(&boxes, pack.eye);
+        }
+        self.tier
+            .update(boxes, material_key(pack), pack.eye, &lights);
         if let Some((rays, ms)) = self.gpu.tier_time.take() {
             self.tier.note_time(rays, ms);
             // A settling build is allowed to be long. A game frame moves the fine
@@ -1622,7 +1630,10 @@ impl Gpu {
                 query_pool: std::ptr::null_mut(),
                 light_qp: std::ptr::null_mut(),
                 gpu_times: std::env::var("GENOS_GPU_TIMES").ok().map(|v| {
-                    Box::new(GpuTimes { every: v.parse().unwrap_or(GPU_TIMES_FRAMES).max(1), ..GpuTimes::default() })
+                    Box::new(GpuTimes {
+                        every: v.parse().unwrap_or(GPU_TIMES_FRAMES).max(1),
+                        ..GpuTimes::default()
+                    })
                 }),
                 light_stamp: 0,
                 profile_submit: false,
@@ -2100,7 +2111,12 @@ impl Gpu {
         let slot = self.flight;
         if self.instance_bufs[slot].size < bytes.len() as u64 {
             let share = self.light_families();
-            let next = self.make_buffer_queues((bytes.len() as u64).max(5120), 0x20, Memory::Upload, &share)?;
+            let next = self.make_buffer_queues(
+                (bytes.len() as u64).max(5120),
+                0x20,
+                Memory::Upload,
+                &share,
+            )?;
             let mut old = std::mem::replace(&mut self.instance_bufs[slot], next);
             self.destroy_buffer(&mut old);
             self.write_light_set(0)?;
@@ -2369,7 +2385,11 @@ impl Gpu {
         }
         let ms: Vec<f64> = raw
             .windows(2)
-            .map(|w| tick_delta(w[0], w[1], self.timestamp_bits) as f64 * f64::from(self.timestamp_period) / 1.0e6)
+            .map(|w| {
+                tick_delta(w[0], w[1], self.timestamp_bits) as f64
+                    * f64::from(self.timestamp_period)
+                    / 1.0e6
+            })
             .collect();
         // Stamps: start, copy, world direct, world bounce, tier.
         if self.plan_items > 0 && ms.len() >= 4 {
@@ -2408,7 +2428,9 @@ impl Gpu {
 
     /// A frame timestamp for `GENOS_GPU_TIMES`, at the end of everything recorded so far.
     fn frame_stamp(&self, slot: usize, stamp: FrameStamp) {
-        let Some(times) = self.gpu_times.as_ref() else { return };
+        let Some(times) = self.gpu_times.as_ref() else {
+            return;
+        };
         let first = slot as u32 * FRAME_STAMPS;
         unsafe {
             if stamp == FrameStamp::Start {
@@ -2426,7 +2448,9 @@ impl Gpu {
         let bits = self.timestamp_bits;
         let period = f64::from(self.timestamp_period);
         let antialias = self.antialias;
-        let Some(times) = self.gpu_times.as_mut() else { return };
+        let Some(times) = self.gpu_times.as_mut() else {
+            return;
+        };
         if !times.written[slot] {
             times.written[slot] = true;
             return;
@@ -2490,7 +2514,13 @@ impl Gpu {
             eprintln!("GPU_MEM upload buffers in device-local memory: {local} of {all}");
         }
         let pool = times.pool;
-        **times = GpuTimes { pool, written: times.written, every: times.every, placed: true, ..GpuTimes::default() };
+        **times = GpuTimes {
+            pool,
+            written: times.written,
+            every: times.every,
+            placed: true,
+            ..GpuTimes::default()
+        };
     }
 
     fn reset_queries(&self, slot: usize) {
@@ -2887,17 +2917,23 @@ impl Gpu {
             self.make_buffer_queues(5120, 0x20, Memory::Upload, &share)?,
             self.make_buffer_queues(5120, 0x20, Memory::Upload, &share)?,
         ];
-        self.particle_buf = self.make_buffer_queues(16 + 256 * 256 * 4, 0x20, Memory::Upload, &share)?;
+        self.particle_buf =
+            self.make_buffer_queues(16 + 256 * 256 * 4, 0x20, Memory::Upload, &share)?;
         let field_bytes = vec![0u8; crate::probe_tier::TIER_END as usize * 16];
         for index in 0..2 {
             self.light_scene[index] =
                 self.make_buffer_queues(pack::SCENE_CAPACITY as u64, 0x20, Memory::Upload, &share)?;
             // Storage, plus transfer source and destination for the copy forward.
-            self.light_field[index] =
-                self.make_buffer_queues(field_bytes.len() as u64, 0x20 | 0x1 | 0x2, Memory::Upload, &share)?;
+            self.light_field[index] = self.make_buffer_queues(
+                field_bytes.len() as u64,
+                0x20 | 0x1 | 0x2,
+                Memory::Upload,
+                &share,
+            )?;
             self.write_buffer(&self.light_field[index], &field_bytes)?;
             self.write_buffer(&self.light_scene[index], &vec![0u8; pack::SCENE_TAIL])?;
-            self.frame_scene[index] = self.make_buffer(pack::SCENE_CAPACITY as u64, 0x20, Memory::Upload)?;
+            self.frame_scene[index] =
+                self.make_buffer(pack::SCENE_CAPACITY as u64, 0x20, Memory::Upload)?;
             self.write_buffer(&self.frame_scene[index], &vec![0u8; pack::SCENE_TAIL])?;
         }
         self.write_buffer(&self.particle_buf, &vec![0u8; 16])?;
@@ -3048,7 +3084,11 @@ impl Gpu {
             };
             let mut sets = [std::ptr::null_mut(); 6];
             check(
-                (self.fns.alloc_desc)(self.device, &alloc as *const Alloc as *const u8, sets.as_mut_ptr()),
+                (self.fns.alloc_desc)(
+                    self.device,
+                    &alloc as *const Alloc as *const u8,
+                    sets.as_mut_ptr(),
+                ),
                 "descriptor set",
             )?;
             self.light_sets = [sets[0], sets[1]];
@@ -3710,8 +3750,8 @@ impl Gpu {
         // for new lights or geometry, for due tier work, or for world probes that have
         // not seen the settled tier. A still or walking camera in a lit tier runs none.
         let items = self.tier_batch.as_ref().map_or(0, |b| b.items.len());
-        let new_light = self.built_light_key != Some(self.light_key)
-            || self.light_dims() != self.built_dims;
+        let new_light =
+            self.built_light_key != Some(self.light_key) || self.light_dims() != self.built_dims;
         // The picture reads the tier. Rebuilding the world volume on every moved
         // box costs most of the frame and does not change that picture. Catch the
         // world up when the tier is idle, and immediately when the sun or the sky
@@ -3918,7 +3958,10 @@ impl Gpu {
         if !batch.texels.is_empty() {
             // SAFETY: `[f32; 4]` is 16 plain bytes with no padding, and u8 has alignment 1.
             let raw = unsafe {
-                std::slice::from_raw_parts(batch.texels.as_ptr().cast::<u8>(), batch.texels.len() * 16)
+                std::slice::from_raw_parts(
+                    batch.texels.as_ptr().cast::<u8>(),
+                    batch.texels.len() * 16,
+                )
             };
             let offset = crate::probe_tier::TIER_INFO as u64 * 16;
             self.write_buffer_at(&self.light_field[dst], offset, raw)?;
@@ -4040,12 +4083,20 @@ impl Gpu {
             let size = u64::from(self.plan_slots)
                 * u64::from(crate::probe_tier::BRICK_PROBES * crate::probe_tier::PROBE_TEXELS)
                 * 16;
-            regions.push(Region { src: at, dst: at, size });
+            regions.push(Region {
+                src: at,
+                dst: at,
+                size,
+            });
         }
         if !self.plan_world {
             let at = crate::field::WORLD_BEGIN as u64 * 16;
             let size = (crate::field::FIELD_COPY - crate::field::WORLD_BEGIN) as u64 * 16;
-            regions.push(Region { src: at, dst: at, size });
+            regions.push(Region {
+                src: at,
+                dst: at,
+                size,
+            });
         }
         if !regions.is_empty() && src != dst {
             #[repr(C)]
@@ -4108,7 +4159,14 @@ impl Gpu {
         let mut first = 0u32;
         for &count in &self.plan_rounds {
             if count > 0 {
-                self.dispatch_light_slice(cmd, set, 12, first, crate::probe_tier::BRICK_PROBES, count)?;
+                self.dispatch_light_slice(
+                    cmd,
+                    set,
+                    12,
+                    first,
+                    crate::probe_tier::BRICK_PROBES,
+                    count,
+                )?;
             }
             first += count;
         }
@@ -4325,7 +4383,12 @@ impl Gpu {
         let set = self.desc_set;
         unsafe {
             // The last frame's picture read the shown light; this pass rewrites it.
-            let before = MemBar { s_type: 46, next: std::ptr::null(), src_access: 0x20, dst_access: 0x20 | 0x40 };
+            let before = MemBar {
+                s_type: 46,
+                next: std::ptr::null(),
+                src_access: 0x20,
+                dst_access: 0x20 | 0x40,
+            };
             (self.fns.cmd_barrier)(
                 cmd,
                 0x80 | 0x800,
@@ -4340,7 +4403,10 @@ impl Gpu {
             );
             (self.fns.cmd_bind_pipe)(cmd, 1, self.compute_pipe);
             (self.fns.cmd_bind_set)(cmd, 1, self.compute_layout, 0, 1, &set, 0, std::ptr::null());
-            let push = Push { pass: 13, y0: self.view_weight.to_bits() };
+            let push = Push {
+                pass: 13,
+                y0: self.view_weight.to_bits(),
+            };
             (self.fns.cmd_push)(
                 cmd,
                 self.compute_layout,
@@ -4351,7 +4417,12 @@ impl Gpu {
             );
             // One workgroup per slot, one probe per invocation.
             (self.fns.cmd_dispatch)(cmd, self.view_slots, 1, 1);
-            let after = MemBar { s_type: 46, next: std::ptr::null(), src_access: 0x40, dst_access: 0x20 };
+            let after = MemBar {
+                s_type: 46,
+                next: std::ptr::null(),
+                src_access: 0x40,
+                dst_access: 0x20,
+            };
             (self.fns.cmd_barrier)(
                 cmd,
                 0x800,
@@ -4566,7 +4637,12 @@ impl Gpu {
         Ok(pass)
     }
 
-    fn make_pipeline(&mut self, depth_test: bool, blend_on: bool, additive: bool) -> Result<Handle, String> {
+    fn make_pipeline(
+        &mut self,
+        depth_test: bool,
+        blend_on: bool,
+        additive: bool,
+    ) -> Result<Handle, String> {
         self.make_raster_pipeline(depth_test, blend_on, additive, false)
     }
 
@@ -5317,8 +5393,9 @@ impl Gpu {
 
     /// The first memory type allowed by `type_bits` with every flag in `want`.
     fn memory_index(&self, type_bits: u32, want: u32) -> Option<u32> {
-        (0..self.memory_props.count)
-            .find(|&i| type_bits & (1 << i) != 0 && self.memory_props.types[i as usize] & want == want)
+        (0..self.memory_props.count).find(|&i| {
+            type_bits & (1 << i) != 0 && self.memory_props.types[i as usize] & want == want
+        })
     }
 
     fn alloc_index(&self, size: u64, index: u32) -> Result<Handle, String> {
