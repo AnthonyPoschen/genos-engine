@@ -217,10 +217,10 @@ flowchart TB
 1. **CPU: changes.** Collect what changed since last frame: lights moved, dimmed or toggled; instances moved; materials changed; the sun or sky moved. Each change becomes a list of affected cards and probe bricks (by bounds and light range, never by camera position). Update instance transforms. Refit the TLAS for moved instances when RT is on.
 2. **G-buffer.** Depth prepass, then one raster pass writing normal, albedo, roughness, metallic, emissive, motion vectors and instance id. Meshes are drawn from the shape pool as now.
 3. **Scheduler.** Read last frame's screen-impact counters (which cards and bricks the picture used). Pick this frame's card pages and probe bricks by one score (below). Fill a fixed GPU time budget.
-4. **Surface cache update.** For each picked card page: direct light per texel (shadow rays via the tracer, light tree), then indirect per texel from world probes. Write into the page's layer, finish the page, blend it in once.
-5. **World probe update.** For each picked brick: trace each probe's rays with the tracer. A hit reads the surface cache at the hit (that is the bounce). A miss reads the next coarser probe level, then the sky. Finish the brick, blend once.
+4. **Surface cache update.** For each picked card page: direct light per texel (shadow rays via the tracer, light tree), then indirect per texel from world probes. Write into a working copy of the page. Readers never see the working copy; when the page is finished it is published and blended in once.
+5. **World probe update.** For each picked brick: trace each probe's rays with the tracer. A hit reads the surface cache at the hit (that is the bounce). A miss reads the next coarser probe level, then the sky. Write into a working copy of the brick; publish it when finished and blend once. Nothing runs here unless a change touched the brick (see [Near and far](#near-and-far-one-answer-per-ray-no-double-work)).
 6. **Direct light per pixel.** Sun and the light tree's chosen lights, one shadow ray each, through the same tracer.
-7. **Screen probes.** Place probes on the G-buffer every N pixels. Reuse last frame's ray hits where they pass the reuse rules, trace the rest. Shade every hit from the current surface cache (or world probes or sky for misses). Integrate, then filter across neighbouring probes.
+7. **Screen probes.** Place probes on the G-buffer every N pixels. Reuse last frame's ray hits where they pass the reuse rules, trace the rest. Rays stop at the screen probe range; a hit is shaded from the published surface cache, and a ray that reaches the range without a hit takes the published world probes (far field) or the sky. Integrate, then filter across neighbouring probes.
 8. **Upsample and composite.** Each pixel blends its nearby screen probes. Final colour is albedo times (direct + indirect) plus emissive, then the tone curve.
 
 Steps 4 and 5 are budgeted and spread over frames. Steps 6 to 8 run every frame at a fixed cost set by the preset. The GPU sharing work (short submissions, low priority for scripts) applies to all of them.
@@ -299,10 +299,10 @@ A moving instance's cards are in object space and move with it. They are lit lik
 
 ## World probes (radiance cache)
 
-The world probes stay, as the far field and the off-screen cache. They change in three ways:
+The world probes stay, as the far field and the bounce source for the surface cache. They never light a near pixel directly (see [Near and far](#near-and-far-one-answer-per-ray-no-double-work)). They change in three ways:
 
 1. Rays hit meshes through the tracer, and a hit reads the surface cache instead of computing light at the hit.
-2. The probe grid gets coarser levels (1, 2, 4 and 8 m) in the same brick structure. These replace the 2.5 m world volume. All levels update through the same scheduler, all the time. There is no "only when idle" rebuild, which removes the sun pop at its root.
+2. The probe grid gets coarser levels (1, 2, 4 and 8 m) in the same brick structure. These replace the 2.5 m world volume. All levels update through the same scheduler, whenever a change touches them. There is no "only when idle" rebuild, which removes the sun pop at its root.
 3. Each brick stores its light per layer (see Light layers).
 
 Probes still: sit on a world-anchored lattice; skip being inside geometry; get pushed off surfaces; store hit distances so a pixel can skip a probe that cannot see it (the DDGI-style test). The bleed fixes in our notes stay.
@@ -312,15 +312,51 @@ Probes still: sit on a world-anchored lattice; skip being inside geometry; get p
 Screen probes replace the per-pixel probe sampling, the near-field rays and the screen cascades.
 
 - **Placement.** One probe per N x N pixel tile, on the G-buffer surface at the tile's centre (N = 32 at Low, 16 at Medium and above). Tiles with a depth or normal edge get one or two extra probes on the far side of the edge, from a fixed pool (25 % of the probe count at Ultra, 10 % below).
-- **Rays.** Each probe traces M rays (64 at Low, 128 at Ultra) in an octahedral layout, importance-weighted toward bright directions from last frame. The first part of each ray is checked against the depth buffer (a short screen trace, as in Lumen), then the tracer takes over. A hit reads the surface cache. A miss past the probe's range reads the world probes, then the sky.
-- **Temporal reuse without ghosting.** We reuse visibility, not light. Each probe ray keeps its last hit (instance, card texel, distance). Next frame, a reprojected probe may keep a ray's hit only if: the probe's position and normal agree (plane-distance and angle tests); the hit instance has not moved; and the ray is not this frame's share for re-tracing (one ray in 4 at Low, one in 2 at High). Kept hits are shaded again from the current surface cache every frame. So a light that turns off goes dark this frame, and a moving object leaves no trail, because the light is never averaged over time. Visibility history is capped at 8 frames. There is no exponential moving average of radiance anywhere in the final gather.
+- **Rays.** Each probe traces M rays (64 at Low, 128 at Ultra) in a fixed, stratified octahedral pattern. The pattern's rotation comes from a hash of the probe's world cell, not the frame number, so the same probe shoots the same directions every frame. Any noise left is a fixed pattern that does not crawl. There is no importance sampling from last frame's light in v2; it would change the directions every frame. The first part of each ray is checked against the depth buffer (a short screen trace, as in Lumen), then the tracer takes over, out to the screen probe range `R` (below). A hit reads the published surface cache. A ray that reaches `R` without a hit reads the published world probes at its end point, in its direction (the far field). A ray that leaves the scene reads the sky.
+- **Temporal reuse without ghosting.** We reuse visibility, not light. Each probe ray keeps its last hit (instance, card texel, distance). Next frame, a reprojected probe may keep a ray's hit only if: the probe's position and normal agree (plane-distance and angle tests); the hit instance has not moved; and the ray is not this frame's share for re-tracing (one ray in 4 at Low, one in 2 at High). A kept ray whose path crosses the swept bounds of an instance that moved this frame is re-traced at once, so a box that rolls into a ray is seen in the same frame. With a still camera and nothing moving, re-tracing is skipped: the same directions would return the same hits. Kept hits are shaded again from the current surface cache every frame. So a light that turns off goes dark this frame, and a moving object leaves no trail, because the light is never averaged over time. Visibility history is capped at 8 frames. There is no exponential moving average of radiance anywhere in the final gather.
 - **Filtering.** Noise is handled by more rays and a spatial filter across neighbouring probes (3x3, weighted by plane distance, normal and hit distance), not by long history.
-- **Integration and upsample.** Each probe is reduced to irradiance (third-order spherical harmonics, or a small octahedral map at Ultra). Each pixel blends its 4 nearest probes with plane-distance and normal weights. If all 4 fail (thin geometry), the pixel reads the world probes directly. At High and Ultra, one short contact ray per pixel (about 0.5 m) handles the smallest gaps.
+- **Integration and upsample.** Each probe is reduced to irradiance (third-order spherical harmonics, or a small octahedral map at Ultra). Each pixel blends its 4 nearest probes with plane-distance and normal weights. If all 4 fail (thin geometry), the placement pass has already put an extra probe on that surface in the same frame, from the edge pool. If the pool is full, the pixel uses the closest-plane probe within 2 tiles, and the debug counter records it. A pixel never reads the world probes directly. At High and Ultra, one short contact ray per pixel (about 0.5 m) handles the smallest gaps.
+
+## Near and far: one answer per ray, no double work
+
+Two probe systems run, but they never answer the same question. Screen probes answer "what light reaches this visible pixel" out to a short range. World probes answer "what light arrives here from far away", and they are the bounce source for the surface cache. Each ray gets exactly one answer, from exactly one system.
+
+### Who answers what
+
+| Question | Answered by | World probes involved? |
+|---|---|---|
+| Direct light on a pixel | Per-pixel shadow rays (or cached masks) | No |
+| Indirect light on a pixel, from surfaces within `R` | Screen probe rays hitting the published surface cache | Only through the card's own bounce (below) |
+| Indirect light on a pixel, from beyond `R` | The published world probes at the ray's end point | Yes: the far field |
+| A screen probe ray that hits an evicted or uncovered card | The published world probes at the hit point | Yes: a counted fallback |
+| The bounce stored on a card texel | The published world probes at the texel | Yes: this is how bounces add up |
+| Light off screen, for when the camera turns | The surface cache and world probes, already stored | Not recomputed |
+
+Screen probe range `R` is the distance a screen probe ray is traced before it hands over: 6 m at Low, 8 m at Medium, 12 m at High and 16 m at Ultra. A longer `R` means fewer world-probe reads near the camera and more tracing. Inside a room, almost every ray hits a wall before `R`, so world probes contribute almost nothing directly. In the open, rays past `R` usually end on sky, which the world probes also hold as sky.
+
+The world probes replace the long part of each ray. They do not repeat it. A screen probe ray never traces past `R`, and a world probe never shades a pixel. The world probes' 1 m level exists for the card bounce (cards everywhere need it, on screen or not, and it must not depend on the view), not for the near picture.
+
+### Bounded weight
+
+- A world probe reaches a near pixel by only two direct paths: the ray-past-`R` far field, and the evicted-card fallback. Both are counted per pixel by a debug view (`share:world`).
+- Budget: in the standard indoor views, the world-probe share of a near pixel's indirect light (pixels within 10 m) is under 10 % on average. The fallback path is under 0.5 % of rays. Outdoor views are measured and must not grow from one phase to the next.
+- The card bounce path is indirect by one more bounce, so a world-probe change reaches the picture only after the card update that reads it has finished and been published.
+
+### Published values only
+
+- Every cache (card pages, probe bricks, layer pages) has a published copy and a small pool of working slots. Updates write into a working slot. Readers (screen probes, cards, the picture) only read published copies, and nothing reads a working slot.
+- When an update finishes, the slot is published at the end of the frame and blends in once, over a fixed 4 frames from the old published value. That is Anthony's rule: complete updates, one blend.
+- A brick or page is only updated when a change touched it, or when it first becomes resident. Refinement stops once it reaches its target sample count. A static scene publishes nothing, so nothing in it can flicker.
+- The working pool is small (64 bricks and 64 card pages in flight, about 6 MB at Ultra). It is counted in the scheduler row of [the VRAM table](#vram-budget).
+
+### Cost in a static scene
+
+With nothing changing, the frame runs the G-buffer, direct light (mostly cached masks at Low), the screen probes and the composite. The surface cache, the world probes, the far SDF and the BVH all do no work. The scheduler's budget is a cap, not something it tries to spend. A camera move costs only screen probe tracing and first fills for bricks that newly became resident; it never relights stored values.
 
 ## Direct lighting
 
 - **Per pixel, via the tracer.** Every pixel gets real shadow rays to the sun and to its chosen lamps, through `trace_occluded`. The same function lights card texels, so the picture and the caches agree.
-- **Light tree.** All point, spot and area lights go into a tree, clustered by position, colour and power. For each 16x16 pixel tile, the tree is cut to the K most important nodes for that tile (K = 4 at Low, 16 at Ultra). Each chosen node is one shadow ray per pixel. A far cluster that subtends a small angle is one light, as in our current CPU tree. The choice is deterministic per tile, so there is no noise and no temporal accumulation. Light that falls outside the cut is small by construction; the light tree's error budget is checked against the reference.
+- **Light tree.** All point, spot and area lights go into a tree, clustered by position, colour and power. For each 16x16 pixel tile, the tree is cut to the K most important nodes for that tile (K = 4 at Low, 16 at Ultra). Each chosen node is one shadow ray per pixel. A far cluster that subtends a small angle is one light, as in our current CPU tree. The choice is deterministic per tile, so there is no noise and no temporal accumulation. A light that enters or leaves a tile's cut fades over a fixed 4 frames, with hysteresis on the cut, so a moving lamp cannot make tiles flick between two cuts. Light that falls outside the cut is small by construction; the light tree's error budget is checked against the reference.
 - **Cached shadow masks for static lights.** Each card texel stores the shadow (visibility) of up to 4 static lights that matter most there, 8 bits each. A pixel on a static surface computes the light's falloff and angle from its own position and normal, then multiplies by the cached mask instead of tracing a ray. Low and Medium use masks for all static lights. High and Ultra trace real rays for the static lights within 10 m of the camera (sharp contact shadows) and use masks beyond. Masks are rebuilt only when static geometry or a static light changes.
 - **Cached sun visibility.** The sun moves slowly, so each card texel also keeps a sun visibility value, refreshed by the scheduler as the sun moves. Low reads it per pixel instead of tracing; Medium and above trace the sun per pixel and use the cache for card lighting.
 - **Light range.** The range cutoff (`lamp_range`) stays as a tree pruning rule, not a per-pixel loop.
@@ -342,13 +378,13 @@ Light is linear. The total at any point is the sum of each light's contribution.
 One rule for every cache (card pages, probe bricks, layer pages):
 
 ```text
-score = screen_impact x expected_error + waiting_time x screen_impact x k
+score = screen_impact x expected_error x (1 + waiting_time x k)
 ```
 
 - `screen_impact`: how much of last frame's picture this page or brick lit, counted on the GPU from screen probe hits and pixel reads. Zero if the picture did not use it.
 - `expected_error`: how wrong its stored light probably is, from the change list (the relative change of the light that touched it, or 1 for new geometry).
-- The waiting term makes visible work that keeps losing eventually win. Work the picture does not use only runs with leftover budget, nearest first.
-- Highest score first. Each picked item finishes completely in that frame's batch, then blends in once. No partial passes are shown, no snap rules, no notice-band skip, no outside or inside camera rules.
+- The waiting term makes visible work that keeps losing eventually win. It multiplies the expected error, so work with no pending change scores zero and is never refreshed just because it is old. Work the picture does not use only runs with leftover budget, nearest first.
+- Highest score first. Each picked item finishes completely in a working slot, is published at the end of the frame, then blends in once. No partial passes are shown, no snap rules, no notice-band skip, no outside or inside camera rules.
 - The camera only changes the order. Every test that walks the camera (entrance walk, floor edge walk) must show no step in lighting.
 
 ## Materials
@@ -365,13 +401,35 @@ Budgets are GPU milliseconds per frame for the GI parts (surface cache + probes 
 | Preset | Target GPU | Resolution, fps | Tracer | Screen probes | Rays per probe | Card texel | Probe levels | Light cut per tile | Moving-light layers | Lighting VRAM |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Low | GTX 1060 6 GB, RX 580 (reference); GTX 1650, Iris Xe | 1080p 60 (Iris Xe 720p 60) | Software | every 32 px | 64, re-trace 1 in 4 | 12 cm | 1, 2, 4, 8 m | 4 | 8 | about 90 MB |
-| Medium | RTX 2060, RX 5700 | 1080p 60-120 | Software or RT | every 16 px | 64, re-trace 1 in 3 | 12 cm | 1, 2, 4, 8 m | 8 | 16 | about 120 MB |
-| High | RTX 3060, RX 6600 | 1440p 60-144 | RT if present | every 16 px | 96, re-trace 1 in 2 | 8 cm | 1, 2, 4, 8 m | 8 | 32 | about 150 MB |
+| Medium | RTX 2060, RX 5700 | 1080p 60-120 | Software or RT | every 16 px | 64, re-trace 1 in 3 | 12 cm | 1, 2, 4, 8 m | 8 | 16 | about 126 MB |
+| High | RTX 3060, RX 6600 | 1440p 60-144 | RT if present | every 16 px | 96, re-trace 1 in 2 | 8 cm | 1, 2, 4, 8 m | 8 | 32 | about 152 MB |
 | Ultra | RTX 4070 and up | 1440p 100+ | RT | every 16 px, extra probes on edges, contact rays | 128, re-trace 1 in 2 | 6 cm | 1, 2, 4, 8 m, denser 1 m reach | 16 | 32 | about 190 MB |
 
 Low does not cut the caches much. The floor card is short on compute, not memory, so Low keeps the same card texel size as Medium and leans hardest on cached light and cached shadows.
 
 GI time budgets per preset: Low 4 ms on the GTX 1060; Medium 3 ms; High 2.5 ms; Ultra up to 6 ms (the stress scene).
+
+### Per-pass GPU budget
+
+Estimates in GPU milliseconds per frame, to be replaced by measurements as each phase lands. "Static" means nothing moves (the camera may). "Moving" means lights and boxes moving, as in the stress runs. The surface cache, world probe and scene-update rows are caps the scheduler may spend when changes are waiting; with no changes they are zero. GTX 1060 numbers are estimates until a card is available.
+
+| Pass | 4070, High, 1440p, basic scene, static | 4070, Ultra, 1440p, stress, moving | GTX 1060, Low, 1080p, static | GTX 1060, Low, 1080p, moving |
+|---|---|---|---|---|
+| Depth prepass + G-buffer | 0.35 | 1.5 | 2.0 | 2.0 |
+| Direct light (shadow rays, cached masks) | 0.25 | 1.8 | 0.8 | 1.0 |
+| Screen probe placement | 0.03 | 0.05 | 0.05 | 0.05 |
+| Screen probe trace (to `R`) | 0.25 (0 with a still camera) | 1.1 | 1.0 (0 with a still camera) | 1.0 |
+| Screen probe shade, integrate, filter | 0.15 | 0.45 | 0.3 | 0.3 |
+| Upsample, contact rays, composite | 0.1 | 0.5 | 0.4 | 0.4 |
+| Surface cache updates | 0 | 1.2 (cap) | 0 | 0.7 (cap) |
+| World probe updates | 0 | 0.6 (cap) | 0 | 0.5 (cap) |
+| Scene updates (TLAS refit, SDF patches, light tree) | 0 | 0.3 | 0 | 0.05 |
+| Tone map, AA, copies | 0.15 | 0.3 | 0.5 | 0.5 |
+| **GI total** (direct through scene updates) | **0.78** | **6.0** | **2.55** | **4.0** |
+| **Frame total** | **1.28 (about 780 fps)** | **7.8 (about 128 fps)** | **5.05** | **6.45** |
+
+The 4070 rows leave headroom on the targets (above 500 fps basic, about 100 fps stress). The GTX 1060 rows leave most of a 16.7 ms frame (60 fps) for the game itself. World probes cost nothing in a static scene and at most their cap when changes are waiting; they never run per pixel.
+
 
 The 4070 targets, measured as now (release, 600 frames, after warmup):
 
@@ -409,8 +467,8 @@ Estimates in MB for a scene the size of the stress scene, at the preset's target
 | Mesh SDF pool | Sparse 8^3 bricks, 8-bit distances, coarse mips | 16 | 24 | 0 | 0 |
 | Far SDF and occupancy | World-anchored sparse bricks, 4 levels, 1-bit occupancy | 8 | 12 | 0 | 0 |
 | Screen probes | Ray radiance (4 B) + hit records (8 B, current and previous), irradiance | 3 | 10 | 28 | 35 |
-| Light tree, tile cuts, object proxies, scheduler | Small buffers | 2 | 2 | 3 | 4 |
-| **Lighting total** | | **about 89** | **about 124** | **about 149** | **about 187** |
+| Light tree, tile cuts, object proxies, scheduler, working slots | Small buffers, plus the in-flight update pool | 4 | 4 | 6 | 8 |
+| **Lighting total** | | **about 91** | **about 126** | **about 152** | **about 191** |
 | BVH (RT only, stress scene) | BLAS + TLAS, compacted, about 60-100 B per triangle | - | - (32 if RT) | 40 | 40 |
 | G-buffer (for the fit check) | Depth, normal, albedo, roughness, metallic, emissive, motion, id | about 50 | about 50 | about 90 | about 90 |
 
@@ -419,7 +477,7 @@ Notes:
 - A Medium card with RT drops the SDF pools (36 MB) and adds the BVH (about 32 MB), so the total stays about the same. A hardware preset that is forced to software adds the SDF pools back (about 36 MB).
 - The world probe and card numbers grow with level size. Residency (evicting far pages and bricks) keeps each preset at its number; an evicted card falls back to probes, an evicted brick to the next coarser level. Residency is camera-driven, the values are not.
 - **Floor fit.** On a 4 GB card (the minimum: GTX 1650, RX 580 4 GB), Low uses about 90 MB for lighting plus about 50 MB of G-buffer: under 4 % of the card, leaving more than 3.5 GB for meshes and textures. On the GTX 1060 6 GB reference it is under 3 %. Even Medium fits easily. On Iris Xe the same 90 MB comes from shared system memory, which is fine with 8 GB of RAM. 4 GB covers 89.8 % of Steam users; the budget would still fit a 2 GB card, but the floor does not promise that.
-- **Ultra over budget.** Ultra's about 187 MB plus about 40 MB of BVH is over 200 MB in total. That is accepted, because the BVH is what makes it fast. Further Ultra growth (for example a wider 1 m probe reach) is fine when it is measured to buy speed.
+- **Ultra over budget.** Ultra's about 191 MB plus about 40 MB of BVH is over 200 MB in total. That is accepted, because the BVH is what makes it fast. Further Ultra growth (for example a wider 1 m probe reach) is fine when it is measured to buy speed.
 - The debug panel shows live use per component, so the table can be checked against real numbers in phase 8.
 
 ## The quality gate
@@ -429,9 +487,11 @@ The reference path tracer, `compare` and the regression scripts stay the gate. T
 1. **Meshes in the reference.** `crates/debug/src/reference.rs` and `crates/render/src/trace.rs` gain a CPU triangle BVH (written in this repository, as ADR 0007 asks) and glTF materials with texture sampling and emission. Analytic shapes go through the same mesh path, so the reference and the engine see the same triangles.
 2. **Both tracers.** `compare` and every script take `tracer: "sw" | "hw"`. The test suite runs each script on both. On the 4070 that is a forced software run plus a hardware run.
 3. **Mesh scenes.** Add glTF test scenes next to the stress scene: a Cornell box, a thin-wall room (leak test), a sealed white room with a lamp (light should settle at direct / (1 - albedo), with nothing outside), and one detailed open scene (for example Khronos' Sponza sample). Each gets standard reference poses.
-4. **New regression scripts.** Ghosting (an object moves across a lit wall; no pixel stays wrong more than 1 frame after it passes), light toggle latency (a layered light off goes dark in the same frame), camera independence (two poses 0.2 m apart across the entrance and the floor edge show the same lighting on shared surfaces), and the existing entrance walk, sun pop, night to day and box drag scripts.
+4. **New regression scripts.** Ghosting (an object moves across a lit wall; no pixel stays wrong more than 1 frame after it passes), light toggle latency (a layered light off goes dark in the same frame), camera independence (two poses 0.2 m apart across the entrance and the floor edge show the same lighting on shared surfaces), and the existing entrance walk, sun pop, night to day and box drag scripts. Two more guard against our own artefacts:
+   - **`temporal_flicker.rhai`.** Several stress poses (hall, room A, doorway, outside) with the camera still, lamps orbiting and boxes moving. A static mask keeps only pixels whose G-buffer (depth, normal, albedo, instance) is unchanged over the window and which sit outside every moving light's and box's direct reach. In those pixels the script measures flicker per frame: a change that reverses direction (up then down, or down then up), by the smaller of the two steps, in linear luminance, averaged over 4x4 screen tiles (the bench's existing flicker measure). Thresholds come from the reference: the mean must stay under a quarter of the reference's noise target (0.25 x 3 % of the reference pixel's luminance) and the worst tile under half of it, never more than 1 display code. A second run freezes everything; then flicker must be exactly zero, because every ray direction and every choice is deterministic. Both runs pass on both tracers.
+   - **`world_probe_role.rhai`.** (1) With the scene frozen and the camera still, after settling, 300 frames: world probe and surface cache GPU time each under 0.02 ms per frame, and zero bricks or pages scheduled or published. (2) Camera-only moves (a walk through the hall): zero bricks relit; only first fills for newly resident bricks, counted separately. (3) In every standard view, the `share:world` debug view: world-probe share of indirect light in pixels within 10 m under 10 % indoors, fallback rays under 0.5 %, and zero world-probe reads from screen probe rays shorter than `R` except the counted fallback. (4) A box moved in room A: only bricks and pages within the change's reach are updated. (5) A debug counter of reads from working slots stays at zero. Runs on both tracers.
 
-Thresholds: mean relative error under 3 % static per view and per tracer; no frame-to-frame step above the flicker threshold in the walk scripts; fps targets above.
+Thresholds: mean relative error under 3 % static per view and per tracer; no frame-to-frame step above the flicker threshold in the walk scripts; the flicker and world-probe role thresholds above; fps targets and the per-pass budget above.
 
 ## What happens to existing code
 
@@ -462,7 +522,7 @@ Each phase keeps `genos-stress` runnable and is gated by the reference views (no
 2. **Mesh SDF, far SDF, software tracer.** Build SDFs at import. Implement `trace_ray` and `trace_occluded` in software. Switch direct shadows and probe rays to it. Gate: the direct view matches a `bounces: 0` reference within 2 %; the leak tests pass; reference views no worse; 4070 compile test passes.
 3. **Hardware tracer.** BLAS and TLAS, ray queries behind the same interface. Gate: both tracers pass the same scripts; RT is faster; forced software on the 4070 still passes.
 4. **Surface cache.** Cards at import, the atlas, card lighting, probe hits read cards. Gate: reference error better on room A and the corners; settle times no worse.
-5. **Screen probes.** The new final gather behind a setting, next to the old per-pixel probe read and near field. Gate: corner and thin-wall error improve; ghosting, toggle latency and camera-independence scripts pass; fps targets hold.
+5. **Screen probes.** The new final gather behind a setting, next to the old per-pixel probe read and near field. Gate: corner and thin-wall error improve; ghosting, toggle latency, camera-independence, flicker and world-probe role scripts pass; fps targets hold.
 6. **Retire the old paths.** Delete the near field, the cascades, the world volume, the occluder grid and the old CPU paths. Mark ADR 0008 and ADR 0011 superseded. Update [Lighting](lighting.md).
 7. **Port the layers.** Static, sun and per moving light layers on cards and probes; moving-object proxies; the light tree on the picture path; emissive area lights. Gate: toggling a layered light is free (no work scheduled) and correct against the reference; moving boxes schedule no static work.
 8. **Presets and old hardware.** Tune Low to Ultra. Tune Low on the 4070 with the software tracer forced on until a GTX 1060 or RX 580 is available, then run the gate on the real card. Run the macOS software path on Anthony's MacBook. Write the presets into the settings doc.
@@ -473,6 +533,8 @@ Each phase keeps `genos-stress` runnable and is gated by the reference views (no
 - **Card coverage.** Cards can miss concave or hidden parts of a complex mesh (a known Lumen issue). Mitigation: greedy cover with a coverage report at import; uncovered hits fall back to world probes.
 - **Old GPU speed.** Low must hold 60 fps at 1080p on a GTX 1060 and RX 580, without one to test on yet. Mitigation: tune on the 4070 with the software tracer and a scaled budget, keep the floor numbers marked as estimates, and get a floor card. Iris Xe uses render scale and 720p.
 - **Pascal and Polaris drivers are frozen.** Their last driver branches support Vulkan 1.3 (AMD on Windows) and 1.4 (NVIDIA), with no new features coming. Any future required feature has to be checked against them first.
+- **Our own flicker and noise instead of Lumen's ghosting.** Live world probe updates could add noise or flicker on top of what screen probes read from the surface cache, and per-frame changes in ray directions could make noise crawl. Mitigations, all in this design: near pixels get their light from screen probes reading the surface cache, and world probes only answer rays past `R`, evicted-card fallbacks and the card bounce, with a bounded, measured share; every cache publishes only finished values and blends them once, and nothing reads a working slot; screen probe ray directions are fixed per probe (hashed from its world cell), so leftover noise is static; there is no temporal averaging of light; a static scene publishes nothing; light-tree cuts fade with hysteresis. Test: `temporal_flicker.rhai` and `world_probe_role.rhai` on both tracers, in every phase from 4 on.
+- **Paying twice for two probe systems.** Screen probes and world probes could duplicate work. Mitigation: they split by distance (screen probes trace only to `R`; world probes answer past it and never shade a pixel), world probes run only when a change touches them, and the per-pass budget shows each one's cost. Test: `world_probe_role.rhai` asserts near-zero world probe time in a static scene and no near-field work.
 - **Compiler fragility.** The NVIDIA compiler failures came from large inlined walks. Mitigation: small shaders, one trace site each, a compile check on the 4070 in the gate.
 - **Writing our own loaders.** ADR 0007 means glTF, JPEG and a BVH builder live in this repository. That is real work, mostly in phase 1.
 - **Layer memory with many moving lights.** Capped per preset; the rest share one layer.
