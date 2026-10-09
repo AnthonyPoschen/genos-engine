@@ -281,15 +281,9 @@ void bounce_at2(vec3 pos, vec3 normal, uint twice_far, out vec3 once, out vec3 t
     bounce_at3(pos, normal, twice_far, TIER_CUBE2, once, twice);
 }
 
-// bounce_at3 for a probe ray's hit, with the light from surfaces within a spacing of
-// the hit. The probes around a hit sit up to a spacing away and see past the solids
-// beside it, so in corners and at the foot of a solid they answer too bright, and
-// every bounce carried that gain. One cosine-distributed ray from the hit per probe
-// ray (the probe averages hundreds) corrects it as the picture's near_rays do: if
-// it meets a surface within reach, that direction takes the light leaving the surface
-// instead of its share of the probes' answer. `u` picks the direction, `pick` the
-// lamps at the surface met.
-void tier_bounce_at(vec3 pos, vec3 n, uint twice_far, uint tier_twice, vec2 u, float pick, bool correct, out vec3 once, out vec3 twice) {
+// bounce_at3 for a probe ray's hit, from the tier's probes around it. Where no tier
+// probe covers the hit, the world volume answers, unless the hit is inside a solid.
+void tier_bounce_at(vec3 pos, vec3 n, uint twice_far, uint tier_twice, out vec3 once, out vec3 twice) {
     uint base[8];
     float weight[8];
     uint count = tier_taps(pos, n, tier_faces_of(n).x, base, weight);
@@ -307,38 +301,6 @@ void tier_bounce_at(vec3 pos, vec3 n, uint twice_far, uint tier_twice, vec2 u, f
     tier_cube6(count, base, weight, tier_twice, f2);
     once = tier_cube_face(f1, n);
     twice = tier_cube_face(f2, n);
-    // A dim hemisphere has not captured a sunlit face. A cosine ray that sees
-    // more direct light than this direction of the cube adds that difference.
-    // A bright hemisphere already holds the lamp, so the ray stays off: one
-    // sample of the hotspot would stack on the cube.
-    float have = dot(twice, vec3(0.2126, 0.7152, 0.0722));
-    // A replace pass (a lamp or the sun just changed) keeps the cube. The extra
-    // sample would paint a sunlit face onto a floor that only just went dark.
-    // Above 0.25 the cube already holds the bright face, so one sample of it
-    // would stack on the lamp.
-    if (!correct || have >= 0.25) {
-        return;
-    }
-    vec3 helper = abs(n.y) > 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
-    vec3 tx = normalize(cross(helper, n));
-    vec3 ty = cross(n, tx);
-    float r = sqrt(u.x);
-    float phi = TAU * u.y;
-    vec3 dir = tx * (r * cos(phi)) + ty * (r * sin(phi)) + n * sqrt(max(1.0 - u.x, 0.0));
-    vec3 origin = pos + n * 0.02;
-    SceneHit hit;
-    if (!scene_ray(origin, dir, 1.0e-4, 64.0, hit)) {
-        return;
-    }
-    vec3 at = origin + dir * hit.t;
-    vec3 tint = mix(vec3(1.0), hit.albedo, hit.color_mix);
-    vec3 direct = lamps_light(at + hit.normal * 0.03, hit.normal, false, TIER_LAMP_PICKS, pick);
-    vec3 found = tint * hit.reflect * direct;
-    vec3 gap = found - tier_cube_dir(f1, dir);
-    if (dot(gap, vec3(0.2126, 0.7152, 0.0722)) > 0.0) {
-        once += gap;
-        twice += gap;
-    }
 }
 
 // Uniform random rotation from three uniform numbers (Shoemake's quaternion).
@@ -414,14 +376,9 @@ void write_tier() {
     // The first pass of that replace still sees the old bounce. Drop it, so the
     // passes that follow build the new bounces from the new direct light.
     float sample_count = field.texels[dest + TIER_POSITION].w;
-    // Cap 0 holds a lamp that went out. Cap 2 is the first pass after the sun
-    // leaves: it drops the old bounce and does not hold, so the passes after
-    // it rebuild the lamp light. A later pass stores a small sample count, so
-    // this drop only runs while the texel still has the previous light.
+    // Cap 0 holds a lamp that went out. A later pass stores a small sample count,
+    // so this drop only runs while the texel still has the previous light.
     bool drop_bounce = !reset && sample_count > 1.0 && history_cap <= 0.0;
-    if (!reset && sample_count > 0.5 && abs(history_cap - 2.0) < 0.5) {
-        drop_bounce = true;
-    }
     // A new random orientation of the ray set every pass and probe, so refining adds
     // new directions at every elevation. Turning about one axis only kept the same
     // rings of elevation every pass and left ring-shaped blotches.
@@ -458,19 +415,9 @@ void write_tier() {
             }
             TraceHit hit = trace_hit(origin, ray, 0.0, TIER_RAY_END, TIER_LAMP_PICKS, fract(ray_spin3(pos - work.w * 0.29) + float(d) * 0.56984029));
             if (hit.iv.a >= 0.0) {
-                vec2 u = vec2(
-                    fract(ray_spin3(hit.pos + work.w * 0.37) + float(d) * 0.61803399),
-                    fract(ray_spin3(hit.pos * 1.7 - work.w * 0.21) + float(d) * 0.75487767)
-                );
-                float pick = fract(ray_spin3(hit.pos * 2.3 + work.w * 0.11) + float(d) * 0.38196601);
                 vec3 once;
                 vec3 twice;
-                // Cap 0 is a lamp that went out: the extra sample would paint sun on that
-                // floor. Any other pass, including the lamp coming back, may take it.
-                // While the sun is out, that sample adds lamp light the night trace
-                // does not have on the open yard. The cube transport is enough.
-                bool correct = history_cap > 0.5 && scene.view_grid.w < 0.5;
-                tier_bounce_at(hit.pos, hit.normal, WORLD_CUBE_OFFSET, TIER_CUBE3, u, pick, correct, once, twice);
+                tier_bounce_at(hit.pos, hit.normal, WORLD_CUBE_OFFSET, TIER_CUBE3, once, twice);
                 if (drop_bounce) {
                     once = vec3(0.0);
                     twice = vec3(0.0);
@@ -532,45 +479,6 @@ void write_tier() {
         float old_w = old_a * keep;
         float new_w = old_w + wf;
         vec3 mean = new_w > 1.0e-4 ? max((old.rgb * old_w + sum) / new_w, vec3(0.0)) : vec3(0.0);
-        // The last night pass. A dark floor probe keeps about a fifth of a lit
-        // floor probe two metres away. The doorway light stops in that gap.
-        // The open yard is outside this window and reads the world volume, so
-        // this copy does not paint that ground.
-        if (lane < 6u && abs(history_cap - 7.0) < 0.5 && pos.y < 4.0) {
-            float y = dot(mean, vec3(0.2126, 0.7152, 0.0722));
-            if (y < 0.05) {
-                vec3 best = mean;
-                float best_y = y;
-                float spacing = max(tier_spacing(), 1.0e-3);
-                vec3 reach = vec3(2.2, 0.0, 0.0);
-                for (int side = 0; side < 4; side++) {
-                    vec3 delta = reach;
-                    if (side == 1) {
-                        delta = -reach;
-                    } else if (side == 2) {
-                        delta = reach.zyx;
-                    } else if (side == 3) {
-                        delta = -reach.zyx;
-                    }
-                    int at = tier_probe(ivec3(floor((pos + delta) / spacing)));
-                    if (at < 0) {
-                        continue;
-                    }
-                    vec4 face = field.texels[uint(at) + lane];
-                    if (face.w <= 0.0) {
-                        continue;
-                    }
-                    float sy = dot(face.rgb, vec3(0.2126, 0.7152, 0.0722));
-                    if (sy > best_y) {
-                        best = face.rgb;
-                        best_y = sy;
-                    }
-                }
-                if (best_y > max(y * 3.0, 0.04)) {
-                    mean = max(mean, best * 0.23);
-                }
-            }
-        }
         // A replace pass is the new light. A heavy weight keeps the next refine
         // rays from painting a sunlit sample over that light within a tenth of a second.
         float store_w = history_cap <= 0.0 ? max(new_w, 8192.0) : new_w;

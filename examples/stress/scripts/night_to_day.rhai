@@ -12,7 +12,7 @@ camera(#{ position: [12.5, 1.7, 34.0], look_at: [12.5, 1.0, 20.0] });
 let s = wait_settled(#{ timeout_frames: 900 });
 shot("noon-outside");
 let l = luminance(#{});
-log(`outside at noon ${l.luminance}, settled ${s.settled} in ${s.frames} frames`);
+log(`outside at noon ${l.luminance}, settled ${s.settled} in ${s.frames} frames, ${s.wall_ms} ms wall, ${s.light_gpu_ms} ms light GPU`);
 check_gt(l.luminance, 0.15, "outdoors at noon is bright");
 let c = compare(#{ prefix: "noon-outside", width: 160, noise: 0.04, seconds: 400 });
 log(`against ground truth: mean_rel ${c.mean_rel} bias ${c.bias}`);

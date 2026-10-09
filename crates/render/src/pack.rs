@@ -157,9 +157,6 @@ pub struct Pack {
     /// NEAR_RAYS). `GENOS_NEAR_RAYS` sets it, so the near field's share of the raster
     /// time can be measured (0 turns it off). The shader reads it from `view_grid.z`.
     pub(crate) near_rays: u32,
-    /// 1 while floors drop the sun the probes still hold, just after it sets.
-    /// The shader reads it from `view_grid.w`.
-    pub(crate) night_drop: f32,
     /// Debug word the shader reads from `grid_at.w` (gpu debug_view); 0 is the picture.
     pub(crate) debug_view: u32,
     /// XZ of the last sun's travel direction. Kept after the sun sets so the
@@ -505,7 +502,6 @@ pub fn pack_frame(
         grid_w: 1,
         grid_h: 1,
         near_rays: near_rays_override(),
-        night_drop: 0.0,
         debug_view: 0,
         last_sun: [0.0, -1.0],
         draws,
@@ -908,7 +904,7 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     push_f32(&mut bytes, pack.grid_h as f32);
     // view_grid.z is the near-field ray override; w is unused.
     push_f32(&mut bytes, pack.near_rays as f32);
-    push_f32(&mut bytes, pack.night_drop);
+    push_f32(&mut bytes, 0.0);
     for value in pack.ceiling {
         push_f32(&mut bytes, value);
     }

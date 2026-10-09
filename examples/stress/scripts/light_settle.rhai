@@ -14,7 +14,7 @@ let lamp = target[0];
 shot("before");
 light(#{ index: lamp.index, color: [1.0, 0.2, 0.1] });
 let s = wait_settled(#{ timeout_frames: 900 });
-log(`settled ${s.settled} in ${s.frames} frames`);
+log(`settled ${s.settled} in ${s.frames} frames, ${s.wall_ms} ms wall, ${s.light_gpu_ms} ms light GPU`);
 shot("after");
 check(s.settled, "the light settles after a colour change");
 check_lt(s.frames, 600.0, "within 600 frames");

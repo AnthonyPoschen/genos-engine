@@ -10,7 +10,7 @@ camera(#{ position: [12.5, 1.7, 20.0], look_at: [12.5, 1.0, 8.0] });
 fn judge(name, hours) {
     knob("time_of_day", hours);
     let s = wait_settled(#{ timeout_frames: 900 });
-    log(`${name}: settled ${s.settled} after ${s.frames} frames`);
+    log(`${name}: settled ${s.settled} after ${s.frames} frames, ${s.wall_ms} ms wall, ${s.light_gpu_ms} ms light GPU`);
     let c = compare(#{ prefix: name, width: 160, spp: 64, noise: 0.03, seconds: 600, frames: 30 });
     log(`${name}: mean_rel ${c.mean_rel} p95_rel ${c.p95_rel} bias ${c.bias} | reference ${c.spp} spp, noise ${c.noise}, ${c.trace_seconds} s`);
     check_lt(c.noise, 0.05, `${name}: the reference is converged enough to judge by`);

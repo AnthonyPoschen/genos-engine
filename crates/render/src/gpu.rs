@@ -60,10 +60,13 @@ pub struct Renderer {
     last_draw: Option<std::time::Instant>,
     /// Time constant of the shown tier light, seconds (0: the field as it lands).
     view_seconds: f32,
-    /// Frames left in which floors drop the sun the probes still hold.
-    night_frames: u8,
     /// XZ of the last sun's travel direction.
     last_sun: [f32; 2],
+    /// The light build that carries the last pass the bricks in view were due: once it
+    /// is on screen, the shown light only blends the rest of the way.
+    calm_build: u64,
+    /// When that build was on screen.
+    calm_since: Option<std::time::Instant>,
     /// Debug view and lighting overrides ([`debug_view`]).
     debug: debug_view::DebugState,
 }
@@ -183,8 +186,9 @@ impl Renderer {
             last_draw: None,
             view_seconds: env_f32("GENOS_TIER_VIEW_MS")
                 .map_or(TIER_VIEW_SECONDS, |ms| ms.max(0.0) / 1000.0),
-            night_frames: 0,
             last_sun: [0.0, -1.0],
+            calm_build: 0,
+            calm_since: None,
             debug: debug_view::DebugState::default(),
         })
     }
@@ -485,17 +489,6 @@ impl Renderer {
             }
         }
         pack.last_sun = self.last_sun;
-        // The sun leaving. The picture shows each new gather at once for a
-        // short run, so the rebuild is on screen inside a tenth of a second.
-        // A far brick otherwise skips those steps and keeps the flush.
-        if self.tier.sun_drop() {
-            self.night_frames = 14;
-        }
-        let show_night = self.night_frames > 0;
-        if self.night_frames > 0 {
-            pack.night_drop = 1.0;
-            self.night_frames -= 1;
-        }
         // A sun or the sky came or went. The gather replaces the on-screen probes and
         // this picture shows that light, instead of blending toward it over later frames.
         let flush = self
@@ -503,17 +496,18 @@ impl Renderer {
             .tier_batch
             .as_ref()
             .is_some_and(|batch| crate::probe_tier::picture_flushes(&batch.items));
-        if flush || show_night {
+        if flush {
             self.gpu.view_weight = 1.0;
         }
         self.sync_fields(world)?;
         self.gpu.upload_scene(&pack)?;
         self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
-        self.gpu.kick_light(wait_light || flush || show_night)?;
+        self.gpu.kick_light(wait_light || flush)?;
         self.commit_tier();
         if settle {
             self.settle_tier(world, &pack)?;
         }
+        self.note_calm();
         self.gpu.note_vertex_count(world_dynamic);
         self.gpu.set_draws(draws);
         self.gpu.note_overlay_count(overlay_count);
@@ -653,6 +647,26 @@ impl Renderer {
         self.gpu.tier_seen = (stats.seen_settled, stats.seen_bricks);
         self.gpu.light_key = self.tier.light_gen();
         self.gpu.tier_batch = Some(batch);
+    }
+
+    /// While a brick in view has work due, the picture waits for the build that takes
+    /// it (the one begun, or the one queued behind it).
+    fn note_calm(&mut self) {
+        let (settled, seen) = self.gpu.tier_seen;
+        if settled < seen {
+            self.calm_build =
+                self.gpu.light_begun + u64::from(self.gpu.pending_light.is_some());
+            self.calm_since = None;
+        } else if self.calm_since.is_none() && self.gpu.light_done >= self.calm_build {
+            self.calm_since = Some(std::time::Instant::now());
+        }
+    }
+
+    /// The picture has stopped changing: every brick in view has its whole update on
+    /// screen, and the shown light is 95% of the way to it (three time constants).
+    pub fn picture_settled(&self) -> bool {
+        self.calm_since
+            .is_some_and(|t| t.elapsed().as_secs_f32() >= 3.0 * self.view_seconds)
     }
 
     /// The build that began took its batch. That light counts from now on.
@@ -1095,6 +1109,9 @@ struct Gpu {
     tier_budget: Option<u64>,
     /// Bricks in view with no work left, and all bricks in view, for `GPU_MS`.
     tier_seen: (usize, usize),
+    /// Light builds begun, and finished (their light is the field on screen).
+    light_begun: u64,
+    light_done: u64,
     /// Timed light builds the game has not taken yet (bounded).
     light_builds: VecDeque<LightBuildTimes>,
     compute_layout: Handle,
@@ -1776,6 +1793,8 @@ impl Gpu {
                 plan_rounds: Vec::new(),
                 tier_budget: None,
                 tier_seen: (0, 0),
+                light_begun: 0,
+                light_done: 0,
                 light_builds: VecDeque::new(),
                 compute_layout: std::ptr::null_mut(),
                 compute_pipe: std::ptr::null_mut(),
@@ -4193,6 +4212,7 @@ impl Gpu {
             self.light_building = false;
             self.light_shown = self.light_dst;
             self.light_ready = true;
+            self.light_done += 1;
             self.read_changes();
             self.view_slots = self.view_slots.max(self.plan_slots);
             // Reading the timestamp query every build stalls the frame. The ray
@@ -4350,6 +4370,7 @@ impl Gpu {
         self.light_row = 0;
         self.light_pass = LIGHT_SLICES;
         self.light_busy = true;
+        self.light_begun += 1;
         Ok(())
     }
 

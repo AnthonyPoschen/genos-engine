@@ -247,6 +247,10 @@ enum Job {
         need: u32,
         strict: bool,
         frames: u32,
+        /// Wall milliseconds and light-build GPU milliseconds the wait took: frames
+        /// alone favour whichever build draws faster.
+        wall_ms: f64,
+        light_ms: f64,
     },
     Shots {
         shots: Vec<Shot>,
@@ -487,14 +491,20 @@ impl Tools {
         while self.timing.len() > 240 {
             self.timing.pop_front();
         }
+        let (frame_wall_ms, frame_light_ms) = self.timing.back().map_or((0.0, 0.0), |(_, t)| {
+            (t.frame_ms, t.light.iter().map(LightBuildTimes::total_ms).sum::<f64>())
+        });
         let image = match (self.reading, pixels) {
             (Some(_), Some(px)) => Some(Image::from_bgra(renderer.width(), renderer.height(), px)),
             _ => None,
         };
         let stats = renderer.tier_stats();
-        // Every brick in view settled; bricks out of view wait their turn.
-        let settled_now = stats.seen_bricks > 0 && stats.seen_settled == stats.seen_bricks;
-        let idle = stats.pending_bricks == 0;
+        // Every brick in view settled and its light blended in on screen; bricks out of
+        // view wait their turn.
+        let calm = renderer.picture_settled();
+        let settled_now =
+            calm && stats.seen_bricks > 0 && stats.seen_settled == stats.seen_bricks;
+        let idle = calm && stats.pending_bricks == 0;
         let mut image_used = false;
         let mut done = Vec::new();
         for (index, running) in self.jobs.iter_mut().enumerate() {
@@ -509,8 +519,12 @@ impl Tools {
                     need,
                     strict,
                     frames,
+                    wall_ms,
+                    light_ms,
                 } => {
                     *frames += 1;
+                    *wall_ms += frame_wall_ms;
+                    *light_ms += frame_light_ms;
                     let calm = if *strict { idle } else { settled_now };
                     *quiet = if calm { *quiet + 1 } else { 0 };
                     *left = left.saturating_sub(1);
@@ -518,6 +532,8 @@ impl Tools {
                         Some(Ok(obj(vec![
                             ("settled", Value::Bool(*quiet >= *need)),
                             ("frames", num(*frames as f64)),
+                            ("wall_ms", num((*wall_ms * 10.0).round() / 10.0)),
+                            ("light_gpu_ms", num((*light_ms * 10.0).round() / 10.0)),
                             ("pending", num(stats.pending_bricks as f64)),
                             ("changing", num(stats.changing_bricks as f64)),
                             ("seen", num(stats.seen_bricks as f64)),
@@ -787,6 +803,7 @@ impl Tools {
                     ("pending", num(stats.pending_bricks as f64)),
                     ("seen", num(stats.seen_bricks as f64)),
                     ("seen_settled", num(stats.seen_settled as f64)),
+                    ("picture_settled", Value::Bool(ctx.renderer.picture_settled())),
                 ]))
             }
             "lighting" => {
@@ -1036,6 +1053,8 @@ impl Tools {
                 need: args.u32("quiet_frames")?.unwrap_or(3).max(1),
                 strict: args.bool("strict")?.unwrap_or(false),
                 frames: 0,
+                wall_ms: 0.0,
+                light_ms: 0.0,
             })),
             "view" => {
                 if let Some(m) = args.str("mode")? {
