@@ -42,7 +42,8 @@ layout(std430, set = 0, binding = 8) buffer Out {
 layout(push_constant) uniform Push {
     // width, height, probe columns, probe rows
     uvec4 dims;
-    // rays per probe, tile size in pixels, bgra output (1), flags
+    // rays per probe, tile size in pixels, z: bgra output (bit 0) and frames the
+    // scene has held still (bits 1-7, capped), w: frame
     uvec4 params;
 } pc;
 
@@ -54,6 +55,12 @@ uint gi2_probes() {
 uint gi2_rays() {
     return pc.params.x;
 }
+// Frames in a row the scene (camera included) has not changed, up to 127: the
+// probes average that many frames' rays, each frame's set turned a new way.
+uint gi2_still() {
+    return (pc.params.z >> 1u) & 127u;
+}
+
 uint gi2_probe_at(uint i) {
     return 2u * i;
 }
@@ -159,8 +166,9 @@ const float GI2_PI = 3.14159265;
 
 // Ray k of a screen probe at pos facing n: uniform over the hemisphere, stratified
 // on a sqrt(R) x sqrt(R) grid of (cos theta, phi). The rotation and jitter come from
-// a hash of the probe's world cell (25 cm), never the frame, so a probe that stays
-// put shoots the same directions every frame and any leftover noise does not crawl.
+// a hash of the probe's world cell (25 cm) and, while the scene holds still, the
+// count of still frames: a probe that stays put averages a new set each frame, and
+// any change starts it over from the same set, so noise never crawls.
 vec3 gi2_dir(uint h, vec3 n, uint k, uint count) {
     uint s = max(uint(sqrt(float(count)) + 0.5), 1u);
     float phi0 = gi2_unit(h) * GI2_TAU;
@@ -178,7 +186,8 @@ vec3 gi2_dir(uint h, vec3 n, uint k, uint count) {
 
 vec3 gi2_ray_dir(vec3 pos, vec3 n, uint k) {
     ivec3 cell = ivec3(floor(pos / 0.25));
-    uint h = gi2_hash(uint(cell.x) * 73856093u ^ uint(cell.y) * 19349663u ^ uint(cell.z) * 83492791u);
+    uint h = gi2_hash(uint(cell.x) * 73856093u ^ uint(cell.y) * 19349663u ^ uint(cell.z) * 83492791u
+                      ^ gi2_still() * 0x27d4eb2du);
     return gi2_dir(h, n, k, gi2_rays());
 }
 

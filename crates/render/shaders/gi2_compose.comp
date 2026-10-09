@@ -22,7 +22,7 @@ float tone_channel(float x) {
 
 uint pack_rgb(vec3 rgb) {
     uvec3 c = uvec3(clamp(rgb, 0.0, 1.0) * 255.0 + 0.5);
-    if (pc.params.z == 1u) {
+    if ((pc.params.z & 1u) == 1u) {
         return c.b | (c.g << 8u) | (c.r << 16u) | (255u << 24u);
     }
     return c.r | (c.g << 8u) | (c.b << 16u) | (255u << 24u);

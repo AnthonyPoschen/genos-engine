@@ -1,9 +1,13 @@
 #version 450
 // GI v2 screen probes, pass 4: each probe's ray radiance projected to SH (bands
 // 0-2) and convolved with the cosine lobe: the probe's irradiance for any normal.
+// While the scene holds still a probe averages its frames (each a new ray set),
+// up to GI2_PROBE_AVERAGE, then keeps a running mean.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "gi2_common.glsl"
+
+const uint GI2_PROBE_AVERAGE = 32u;
 
 void main() {
     uint probe = gl_GlobalInvocationID.x;
@@ -38,6 +42,14 @@ void main() {
         c[f] *= scale * a;
     }
     uint base = gi2_sh_at(probe);
+    uint still = min(gi2_still(), GI2_PROBE_AVERAGE - 1u);
+    if (still > 0u) {
+        float keep = 1.0 / float(still + 1u);
+        [[dont_unroll]] for (uint f = 0u; f < 27u; f++) {
+            float old = work.v[base + f / 4u][f % 4u];
+            c[f] = old + (c[f] - old) * keep;
+        }
+    }
     [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
         work.v[base + q] = vec4(c[4u * q], c[4u * q + 1u], c[4u * q + 2u], q == 6u ? 0.0 : c[4u * q + 3u]);
     }

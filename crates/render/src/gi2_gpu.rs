@@ -33,6 +33,7 @@ fn gi2_tile(height: u32) -> u32 {
         .and_then(|v| v.parse::<u32>().ok())
         .map_or((height / 45).clamp(4, GI2_TILE), |t| t.clamp(4, 64))
 }
+
 /// Rays per screen probe (Low in the design; a square for the stratified pattern).
 pub(crate) const GI2_RAYS: u32 = 64;
 /// Light cache sizes; gi2_cache_slots.glsl has the same numbers.
@@ -40,9 +41,10 @@ const GI2_CACHE_SLOTS: u64 = 262144;
 const GI2_CACHE_BATCH: u32 = 16384;
 const GI2_CACHE_RAYS: u32 = 16;
 /// GI v2 counts as settled once the scene block (camera included) has stayed the
-/// same for this many frames and a full sweep of the light cache changed no patch
+/// same for this many frames (the screen probes average up to 32 frames' rays,
+/// gi2_gather.comp) and a full sweep of the light cache changed no patch
 /// by more than GI2_SETTLE_CHANGE.
-const GI2_SETTLE_FRAMES: u32 = 2;
+const GI2_SETTLE_FRAMES: u32 = 32;
 /// Largest relative change of a relit cache patch, in millionths, that counts as
 /// settled (0.2 %, well under a display code).
 const GI2_SETTLE_CHANGE: u32 = 2000;
@@ -670,7 +672,9 @@ impl Gpu {
             self.gi2.quiet = 0;
         }
         self.gi2.stats_still[slot] = self.gi2.still;
-        let pc = [w, h, cols, rows, GI2_RAYS, gi2_tile(h), bgra, self.gi2.frame];
+        // z: bgra and the still frames, capped (gi2_common.glsl).
+        let z = bgra | self.gi2.still.min(127) << 1;
+        let pc = [w, h, cols, rows, GI2_RAYS, gi2_tile(h), z, self.gi2.frame];
         let image = self.color.image;
         // The raster colour as the base: pixels with no surface keep it.
         self.copy_image_buffer(image, 6, self.gi2.out.buffer, w, h, true);
