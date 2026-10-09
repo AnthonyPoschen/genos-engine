@@ -324,11 +324,6 @@ vec3 screen_bounce(vec3 world, vec3 face_n, bool quad, bool casts) {
             lit += vec3(0.022) * smoothstep(0.03, 0.08, traced_y);
         }
     }
-    // From outside the shell is pinned far. The live yard is a few percent
-    // under the settled tier; inside, the shell is pulled in and this stays off.
-    if (face_n.y > 0.5 && field.texels[TIER_DIMS].w >= 40.0) {
-        lit *= 1.08;
-    }
     if (cover >= 1.0) {
         return lit;
     }

@@ -413,8 +413,8 @@ pub fn set_notice_band(band: f32) {
 pub const VISIBLE_FLOOR: f32 = 0.05;
 
 /// Walls and solids, not the floor or roof sheets. The eye is outside and far when it
-/// is beyond this hull and can see the whole of it. Interior animation then does not
-/// relight the probes: the outside picture stays the sun, the sky and the building.
+/// is beyond this hull and can see the whole of it. That only ranks work: what a probe
+/// holds never depends on where the camera stands.
 fn building_hull(boxes: &[SurfaceBox]) -> Option<SurfaceBox> {
     let mut lo = [f32::MAX; 3];
     let mut hi = [f32::MIN; 3];
@@ -450,11 +450,6 @@ fn outside_far(eye: [f32; 3], hull: &SurfaceBox) -> bool {
 /// A box or a point lamp that sits inside the hull, not on the outer shell.
 fn interior_point(p: [f32; 3], hull: &SurfaceBox) -> bool {
     (0..3).all(|i| p[i] > hull.min[i] + 0.3 && p[i] < hull.max[i] - 0.3) && p[1] < hull.max[1]
-}
-
-fn interior_box(b: &SurfaceBox, hull: &SurfaceBox) -> bool {
-    let c = [0, 1, 2].map(|i| 0.5 * (b.min[i] + b.max[i]));
-    interior_point(c, hull)
 }
 
 /// Relative luminance of one probe face.
@@ -1227,9 +1222,6 @@ pub struct TierStats {
     pub seen_settled: usize,
     /// CPU microseconds the last batch took to pick its work, on-screen test included.
     pub batch_us: u32,
-    /// Bricks left unlit because the camera was outside and far, and the change was
-    /// a box or a lamp inside the building.
-    pub interior_skipped: u64,
     /// Running time, in milliseconds, from a change reaching a brick to the brick's
     /// whole update: for changes of a light that brings at least half as much to the
     /// view as the brightest one, for changes of dimmer lights, and for outside
@@ -1433,8 +1425,6 @@ pub struct TierState {
     /// The last batch was a flush that is allowed to run long. It must not
     /// shrink the fine shell.
     long_build: bool,
-    /// See [`TierStats::interior_skipped`].
-    interior_skipped: u64,
     /// Last camera position. Prominence is measured from here.
     eye: [f32; 3],
     /// Lamp clusters the shade reads. Rebuilt when a lamp moves past its threshold.
@@ -1512,7 +1502,6 @@ impl TierState {
             night_left: 0,
             night_freeze: false,
             long_build: false,
-            interior_skipped: 0,
             seen: Vec::new(),
             impact: Vec::new(),
             settle_ms: [0.0; 3],
@@ -1648,21 +1637,6 @@ impl TierState {
             changed = true;
         }
         let window = self.layout.window(eye);
-        // Outside and far: a box or a lamp inside the building does not relight
-        // probes. The sun and the sky still do. The outside picture stays the
-        // static building.
-        let hull = building_hull(&self.boxes);
-        let far = hull.as_ref().is_some_and(|hull| outside_far(eye, hull));
-        if far {
-            if let Some(hull) = hull.as_ref() {
-                let before = moved.len();
-                moved.retain(|b| !interior_box(b, hull));
-                self.interior_skipped += (before - moved.len()) as u64;
-                if let Some(list) = reached.as_mut() {
-                    list.retain(|b| !interior_box(b, hull));
-                }
-            }
-        }
         if self.window != Some(window) {
             self.window = Some(window);
             changed |= self.reallocate(eye);
@@ -1752,14 +1726,6 @@ impl TierState {
         self.world_now = self.sun_wide || !flips.is_empty() || !suns.is_empty();
         if self.sun_drop {
             self.night_left = NIGHT_HOPS;
-        }
-        if far {
-            if let Some(hull) = building_hull(&self.boxes) {
-                let before = reach.len();
-                reach.retain(|(light, _)| !interior_point(light.pos, &hull));
-                flips.retain(|light| !interior_point(light.pos, &hull));
-                self.interior_skipped += (before - reach.len()) as u64;
-            }
         }
         if !reach.is_empty() || !suns.is_empty() || wide {
             self.lights = lights.to_vec();
@@ -2023,7 +1989,6 @@ impl TierState {
             dropped_bricks: self.dropped,
             critical_bricks: self.critical,
             batch_us: self.batch_us,
-            interior_skipped: self.interior_skipped,
             settle_focus_ms: self.settle_ms[0],
             settle_other_ms: self.settle_ms[1],
             settle_shell_ms: self.settle_ms[2],
@@ -3321,81 +3286,6 @@ mod tests {
                 item.brick
             );
         }
-    }
-
-    #[test]
-    fn an_outside_camera_leaves_interior_motion_out_of_the_probes() {
-        let floor = SurfaceBox {
-            min: [-8.0, 0.0, -8.0],
-            max: [8.0, 0.0, 8.0],
-        };
-        let wall = SurfaceBox {
-            min: [-6.0, 0.0, -6.0],
-            max: [6.0, 3.0, -5.6],
-        };
-        let east = SurfaceBox {
-            min: [5.6, 0.0, -6.0],
-            max: [6.0, 3.0, 6.0],
-        };
-        let west = SurfaceBox {
-            min: [-6.0, 0.0, -6.0],
-            max: [-5.6, 3.0, 6.0],
-        };
-        let south = SurfaceBox {
-            min: [-6.0, 0.0, 5.6],
-            max: [6.0, 3.0, 6.0],
-        };
-        let mut crate_at = SurfaceBox {
-            min: [-0.5, 0.0, -0.5],
-            max: [0.5, 1.0, 0.5],
-        };
-        let lamp = TierLight {
-            pos: [0.0, 2.2, 0.0],
-            color: [1.0; 3],
-            directional: false,
-        };
-        let sun = TierLight {
-            pos: [0.2, -0.6, -0.8],
-            color: [1.0; 3],
-            directional: true,
-        };
-        let boxes = vec![floor, wall, east, west, south, crate_at];
-        let far_eye = [24.0, 18.0, 24.0];
-        let mut tier = TierState::default();
-        tier.update(boxes.clone(), 1, far_eye, &[lamp, sun]);
-        while tier.has_work() {
-            let batch = tier.batch(far_eye, None, REFINE_RAYS);
-            tier.commit(&batch);
-        }
-        assert_eq!(tier.stats().changing_bricks, 0);
-        crate_at.min[0] += 0.4;
-        crate_at.max[0] += 0.4;
-        let mut moved_boxes = boxes.clone();
-        moved_boxes[5] = crate_at;
-        let before = tier.stats().interior_skipped;
-        tier.update(moved_boxes.clone(), 1, far_eye, &[lamp, sun]);
-        assert!(
-            tier.stats().interior_skipped > before,
-            "interior move was not skipped"
-        );
-        assert_eq!(
-            tier.stats().changing_bricks,
-            0,
-            "interior move relit probes from outside"
-        );
-        // The same kind of move from inside the room does relight.
-        let eye = [0.0, 1.6, 0.0];
-        let mut inside = TierState::default();
-        inside.update(boxes.clone(), 1, eye, &[lamp, sun]);
-        while inside.has_work() {
-            let batch = inside.batch(eye, None, REFINE_RAYS);
-            inside.commit(&batch);
-        }
-        inside.update(moved_boxes, 1, eye, &[lamp, sun]);
-        assert!(
-            inside.stats().changing_bricks > 0,
-            "an interior camera ignored the crate"
-        );
     }
 
     #[test]
