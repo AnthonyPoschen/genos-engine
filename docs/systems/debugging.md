@@ -37,7 +37,9 @@ on a box. Lighting quality is judged against ground truth, not by eye alone.
   `probe_report`, `lamp_report`.
 - `crates/render/src/trace.rs`: the CPU surfaces and direct light the reference uses.
 - `examples/stress/src/knobs.rs`: the stress knobs (time of day, sun, lights, ...).
-- `examples/stress/scripts/*.rhai`: regression scripts.
+- `examples/stress/scripts/*.rhai`: regression scripts. `reference.rhai` holds noon
+  and night at the hall bench pose to ground truth; `reference_views.rhai` measures
+  the hall, room A (bounce only), a doorway, the outside and room A's corner.
 
 ## Running
 
