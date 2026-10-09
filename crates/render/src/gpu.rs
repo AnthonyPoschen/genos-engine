@@ -1960,8 +1960,10 @@ impl Gpu {
                 self.light_qp = self.make_query_pool_n(16)?;
                 if self.gpu_times.is_some() {
                     let pool = self.make_query_pool_n(2 * FRAME_STAMPS)?;
+                    let gi2_pool = self.make_query_pool_n(2 * GI2_STAMPS)?;
                     if let Some(times) = self.gpu_times.as_mut() {
                         times.pool = pool;
+                        times.gi2_pool = gi2_pool;
                     }
                 }
             } else if self.gpu_times.take().is_some() {
@@ -2610,6 +2612,7 @@ impl Gpu {
             self.tier_time = Some((self.plan_rays, ms[3]));
         }
         if let Some(times) = self.gpu_times.as_mut() {
+            times.light_spans.push((raw[0], raw[n - 1]));
             times.builds += 1;
             times.rays += self.plan_rays;
             times.max_rays = times.max_rays.max(self.plan_rays);
@@ -2688,6 +2691,30 @@ impl Gpu {
         for (k, w) in raw.windows(2).enumerate() {
             times.frame[k] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
         }
+        times
+            .frame_spans
+            .push((raw[0], raw[FRAME_STAMPS as usize - 1]));
+        if times.gi2_full[slot] && !times.gi2_pool.is_null() {
+            let mut g = [0u64; GI2_STAMPS as usize];
+            let got = unsafe {
+                (self.fns.get_query_results)(
+                    self.device,
+                    times.gi2_pool,
+                    slot as u32 * GI2_STAMPS,
+                    GI2_STAMPS,
+                    8 * g.len(),
+                    g.as_mut_ptr() as *mut c_void,
+                    8,
+                    0x1,
+                )
+            };
+            if got == 0 {
+                for (k, w) in g.windows(2).enumerate() {
+                    times.gi2[k] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+                }
+                times.gi2_frames += 1;
+            }
+        }
         times.frames += 1;
         let since = *times.since.get_or_insert_with(std::time::Instant::now);
         if times.frames < times.every {
@@ -2723,13 +2750,38 @@ impl Gpu {
             self.tier_seen.1,
             n / seconds,
         );
+        if times.gi2_frames > 0 {
+            let g = times.gi2.map(|v| v / f64::from(times.gi2_frames));
+            eprintln!(
+                "GI2_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} total={:.3}",
+                times.gi2_frames,
+                g[0],
+                g[1],
+                g[2],
+                g[3],
+                g[4],
+                g[5],
+                g[6],
+                g[7],
+                g.iter().sum::<f64>()
+            );
+        }
+        if !times.light_spans.is_empty() {
+            let (light, inside) = overlap_ms(&times.light_spans, &times.frame_spans, period);
+            eprintln!(
+                "GPU_OVERLAP light_ms={light:.2} while_a_frame_ran_ms={inside:.2} share={:.2}",
+                inside / light.max(1.0e-9)
+            );
+        }
         if !times.placed {
             let [local, all] = self.upload_local.get();
             eprintln!("GPU_MEM upload buffers in device-local memory: {local} of {all}");
         }
         let pool = times.pool;
+        let gi2_pool = times.gi2_pool;
         **times = GpuTimes {
             pool,
+            gi2_pool,
             written: times.written,
             every: times.every,
             placed: true,
@@ -6497,6 +6549,39 @@ struct GpuTimes {
     placed: bool,
     /// Light build: copy forward, world direct, world bounce, tier.
     light: [f64; 4],
+    /// GI v2 pass stamps (2 slots x GI2_STAMPS), whether a slot holds a full frame's
+    /// passes, and the per-pass sums over `gi2_frames`.
+    gi2_pool: Handle,
+    gi2_full: [bool; 2],
+    gi2_frames: u32,
+    gi2: [f64; 8],
+    /// Absolute GPU spans (ticks) of frames and light builds since the last line, to
+    /// show how much light work ran while a frame was on the GPU.
+    frame_spans: Vec<(u64, u64)>,
+    light_spans: Vec<(u64, u64)>,
+}
+
+/// Stamps per frame for the GI v2 passes: one before, one after each of the 8.
+const GI2_STAMPS: u32 = 9;
+
+/// Milliseconds of `spans` that fall inside any of `within` (ticks, `period` ns each).
+fn overlap_ms(spans: &[(u64, u64)], within: &[(u64, u64)], period: f64) -> (f64, f64) {
+    let mut total = 0.0;
+    let mut inside = 0.0;
+    for &(a, b) in spans {
+        if b <= a {
+            continue;
+        }
+        total += (b - a) as f64;
+        for &(c, d) in within {
+            let lo = a.max(c);
+            let hi = b.min(d);
+            if hi > lo {
+                inside += (hi - lo) as f64;
+            }
+        }
+    }
+    (total * period / 1.0e6, inside * period / 1.0e6)
 }
 
 impl Default for GpuTimes {
@@ -6514,6 +6599,12 @@ impl Default for GpuTimes {
             since: None,
             placed: false,
             light: [0.0; 4],
+            gi2_pool: std::ptr::null_mut(),
+            gi2_full: [false; 2],
+            gi2_frames: 0,
+            gi2: [0.0; 8],
+            frame_spans: Vec::new(),
+            light_spans: Vec::new(),
         }
     }
 }

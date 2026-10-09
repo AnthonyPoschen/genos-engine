@@ -718,10 +718,27 @@ impl Gpu {
                 32,
                 pc.as_ptr() as *const c_void,
             );
-            for (pass, gx, gy) in groups {
+            // GENOS_GPU_TIMES: a stamp before the passes and after each (full frames).
+            let stamps = self
+                .gpu_times
+                .as_mut()
+                .filter(|t| !t.gi2_pool.is_null())
+                .map(|t| {
+                    t.gi2_full[slot] = groups.len() == 8;
+                    t.gi2_pool
+                });
+            let first = slot as u32 * GI2_STAMPS;
+            if let Some(pool) = stamps {
+                (self.fns.cmd_reset_query)(self.cmd, pool, first, GI2_STAMPS);
+                (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first);
+            }
+            for (k, (pass, gx, gy)) in groups.iter().copied().enumerate() {
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, self.gi2.pipes[pass]);
                 (self.fns.cmd_dispatch)(self.cmd, gx.max(1), gy.max(1), 1);
                 self.memory_barrier(0x800, 0x800 | 0x1000, 0x40, 0x20 | 0x40 | 0x800);
+                if let Some(pool) = stamps {
+                    (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first + 1 + k as u32);
+                }
             }
         }
         self.image_barrier(image, 6, 7, 0x1000, 0x1000, 0x800, 0x1000);
