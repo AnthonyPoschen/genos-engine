@@ -58,6 +58,9 @@ const USAGE: &str = "genos-stress [options]
   --sweep-dynamic LIST      benchmark dynamic shares (default 0,25,100)
   --sweep-scales LIST       benchmark scales (default small,big)
   --bench-out PATH          also write the tables to PATH
+  --gltf FILE               place a glTF 2.0 model (.gltf/.glb) in the building (mean
+                            material colour; lit, but casts no shadow yet); repeatable
+  --gltf-at X Y Z SCALE     where the following --gltf models go (default 0 0 0 1)
   --script FILE             run a rhai debug script (docs/systems/debugging.md); scene time
                             steps 1/60 s a frame; exit 0 when every check passes
   --report DIR              where the script writes report.md, result.json and pictures
@@ -108,6 +111,8 @@ struct Options {
     bench: Option<bench::Plan>,
     bench_out: Option<PathBuf>,
     script: Option<genos_debug::script::ScriptRun>,
+    /// glTF files to place in the building: path, position and uniform scale.
+    gltf: Vec<(PathBuf, [f32; 4])>,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, text: &str) -> Result<T, String> {
@@ -158,6 +163,7 @@ fn options() -> Result<Options, String> {
         bench: None,
         bench_out: None,
         script: None,
+        gltf: Vec::new(),
     };
     let mut report: Option<PathBuf> = None;
     let mut trace = false;
@@ -168,6 +174,7 @@ fn options() -> Result<Options, String> {
     let mut sweep_lights = LIGHT_STEPS.to_vec();
     let mut sweep_dynamic = vec![0, 25, 100];
     let mut sweep_scales = vec![Scale::SMALL, Scale::BIG];
+    let mut gltf_at = [0.0, 0.0, 0.0, 1.0];
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
@@ -227,6 +234,12 @@ fn options() -> Result<Options, String> {
                     trace: false,
                 })
             }
+            "--gltf-at" => {
+                for slot in &mut gltf_at {
+                    *slot = parse(&arg, &value()?)?;
+                }
+            }
+            "--gltf" => opts.gltf.push((PathBuf::from(value()?), gltf_at)),
             "--report" => report = Some(PathBuf::from(value()?)),
             "--trace" => trace = true,
             "--help" | "-h" => {
@@ -393,6 +406,21 @@ fn run() -> Result<(), String> {
     stage.sun_frozen = opts.freeze_sun;
     stage.sky_on = !opts.no_sky;
     stage.boxes_still = opts.still_boxes;
+    for (path, [x, y, z, scale]) in &opts.gltf {
+        let model = genos_load::load_gltf_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut place = [0.0; 16];
+        place[0] = *scale;
+        place[5] = *scale;
+        place[10] = *scale;
+        place[12] = *x;
+        place[13] = *y;
+        place[14] = *z;
+        place[15] = 1.0;
+        // Lighting still runs on the old shapes (GI v2 phase 1): a bounding-box stand-in
+        // would darken the model itself, so models are lit but do not shadow yet.
+        let added = stage.world.add_gltf(&model, &place, false);
+        eprintln!("genos-stress: {} placed as {} mesh draws", path.display(), added.len());
+    }
     let mut camera = camera_at(opts.view);
     if let Some([x, y, z, yaw, pitch]) = opts.eye {
         camera.set_pose(genos_scene::Vec3::new(x, y, z), yaw, pitch);

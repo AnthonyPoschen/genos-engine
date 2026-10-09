@@ -211,6 +211,7 @@ version = "0.1.0"
 dependencies = [
  "genos-debug",
  "genos-input",
+ "genos-load",
  "genos-mcp",
  "genos-render",
  "genos-scene",

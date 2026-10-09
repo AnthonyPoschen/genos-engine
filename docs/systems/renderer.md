@@ -68,6 +68,8 @@ The draw starts in `off`. That mode is the single-sample picture. `Renderer::set
 
 Set `object.hidden = true` to hide an object and keep its light. Push a `DrawKind::Mesh` and replace `pose` to animate. Push a `DrawKind::Particles` to draw cards. `color` is the base albedo. Also set `lit`, `emission`, `face_camera`, `angle`, and `image`. Push a `DrawKind::Shader` with a `Displacement` to build a grid from a height map.
 
+`World::add_gltf(&scene, &place, affects_light)` places a loaded glTF scene (`genos_load::load_gltf_file`): one `DrawKind::Mesh` per primitive per instance, posed by the node transforms after `place`, coloured by the material's mean diffuse albedo (base colour factor x mean texture colour x (1 - metallic)). Textures per texel come with the GI v2 G-buffer. Lighting still uses the analytic shapes (GI v2 phase 1); with `affects_light` a mesh stands in as its bounding box, which also darkens the mesh itself, so models are usually added with it off. `genos-stress --gltf-at X Y Z SCALE --gltf FILE` does this from the command line. `SceneMesh::from_scene` gives the analytic scene as triangles for the CPU tracers.
+
 The camera steps a seeded emitter on the red solid. A stationary flame stays on that solid and animates in place. Embers and a smoke trail leave that flame. The fire light is at the center of the stationary flame. The draw submits those cards.
 
 Open the renderer with the window display and the window surface. Call `resize` when `WindowEvent::Resized` arrives.

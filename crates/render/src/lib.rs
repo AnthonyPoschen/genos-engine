@@ -1,6 +1,7 @@
 mod aa;
 mod budget;
 mod field;
+mod gltf_draw;
 mod gpu;
 mod lighting;
 mod mesh;
