@@ -68,7 +68,52 @@ pub fn radiance_hits(
 /// Shadowed light from every lamp at `origin` (already lifted off its face), in the
 /// picture's lamp unit: what `radiance` adds before the bounce.
 pub fn direct_light(scene: &Scene, origin: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
-    if point_inside(scene, origin) {
+    direct_light_in(scene, scene, origin, normal)
+}
+
+/// What a tracer sees: the analytic shapes of a [`Scene`] or its triangles
+/// ([`crate::SceneMesh`]). Lamps and the sky always come from the scene.
+pub trait Surfaces: Sync {
+    /// The first surface along `dir` within `reach`; the normal faces the ray.
+    fn first_hit(&self, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Option<Hit>;
+    /// True when something lies between `from` and `to`.
+    fn blocked(&self, from: [f32; 3], to: [f32; 3]) -> bool;
+    /// True when `p` is inside a solid (gets no direct light). Meshes say no: a
+    /// closed one-sided mesh already hides its inside from every ray.
+    fn inside(&self, _p: [f32; 3]) -> bool {
+        false
+    }
+}
+
+impl Surfaces for Scene {
+    fn first_hit(&self, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Option<Hit> {
+        trace(self, origin, dir, reach)
+    }
+    fn blocked(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        occluded(self, from, to)
+    }
+    fn inside(&self, p: [f32; 3]) -> bool {
+        point_inside(self, p)
+    }
+}
+
+impl Surfaces for crate::scene_mesh::SceneMesh {
+    fn first_hit(&self, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Option<Hit> {
+        self.trace(origin, dir, reach)
+    }
+    fn blocked(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        self.occluded(from, to)
+    }
+}
+
+/// [`direct_light`] from `scene`'s lamps, with shadows from `surfaces`.
+pub fn direct_light_in(
+    scene: &Scene,
+    surfaces: &dyn Surfaces,
+    origin: [f32; 3],
+    normal: [f32; 3],
+) -> [f32; 3] {
+    if surfaces.inside(origin) {
         return [0.0; 3];
     }
     let mut sum = [0.0; 3];
@@ -78,7 +123,7 @@ pub fn direct_light(scene: &Scene, origin: [f32; 3], normal: [f32; 3]) -> [f32; 
         if nd <= 0.0 {
             continue;
         }
-        if occluded(scene, origin, target) {
+        if surfaces.blocked(origin, target) {
             continue;
         }
         let scale_l = nd * LAMP_UNIT / dist2.max(LAMP_RADIUS * LAMP_RADIUS);

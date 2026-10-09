@@ -111,6 +111,11 @@ at brick centres: unlit grey, changing red, refining yellow, steady green).
   bounce; the first bounce is stratified per pixel. Russian roulette ends paths
   after three bounces (`bounces` caps them, default 64; `bounces: 0` is direct only).
   A miss returns the sky colour.
+- `geometry: "triangles"` traces the scene's triangle form (`SceneMesh`: the
+  floor, roof, walls and solids as meshes, through the CPU BVH in `genos-mesh`)
+  instead of the analytic shapes (`"shapes"`, the default). Both agree within the
+  trace's noise (`triangles_match_the_analytic_reference`); GI v2 traces meshes only.
+  Triangle traces are cached under a separate key.
 - Passes of `spp` paths per pixel run on every core until the mean relative
   standard error of a pixel is at most `noise` (default 0.03), `max_spp` or
   `seconds` (default 300). The reply carries `spp` done, `noise`, `trace_seconds`.

@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use genos_render::{direct_light, linear_from_display, trace_ray, TraceHit};
+use genos_render::{direct_light_in, linear_from_display, SceneMesh, Surfaces, TraceHit};
 use genos_scene::{look_direction, Camera, Scene};
 
 use crate::image::{Image, Region};
@@ -40,6 +40,9 @@ pub struct RefSetup {
     pub seconds: f32,
     /// Hard cap on path length; Russian roulette ends most paths long before.
     pub max_bounces: u32,
+    /// Trace the scene's triangles ([`SceneMesh`], through the CPU BVH) instead of
+    /// its analytic shapes. Both must agree within the trace's noise.
+    pub triangles: bool,
 }
 
 impl RefSetup {
@@ -56,6 +59,7 @@ impl RefSetup {
             max_spp: spp.max(1),
             seconds: f32::INFINITY,
             max_bounces: 64,
+            triangles: false,
         }
     }
 }
@@ -153,13 +157,14 @@ fn lift(hit: &TraceHit) -> [f32; 3] {
 #[cfg(test)]
 fn path(scene: &Scene, first: &TraceHit, max_bounces: u32, rng: &mut Rng) -> [f32; 3] {
     let u = (rng.next(), rng.next());
-    path_from(scene, first, max_bounces, u, rng)
+    path_from(scene, scene, first, max_bounces, u, rng)
 }
 
 /// One path whose first bounce direction comes from `stratum`, a cell of the pixel's
 /// sample grid (less noise than chance).
 fn path_from(
     scene: &Scene,
+    surfaces: &dyn Surfaces,
     first: &TraceHit,
     max_bounces: u32,
     stratum: (f32, f32),
@@ -168,7 +173,7 @@ fn path_from(
     let sky = scene.sky.as_ref().map_or([0.0; 3], |s| s.color);
     let mut at = *first;
     let mut weight = scale(first.albedo, LAMBERT);
-    let mut sum = mul(weight, direct_light(scene, lift(&at), at.normal));
+    let mut sum = mul(weight, direct_light_in(scene, surfaces, lift(&at), at.normal));
     for bounce in 0..max_bounces {
         let (u, v) = if bounce == 0 {
             stratum
@@ -179,14 +184,14 @@ fn path_from(
         // A cosine sample estimates the cosine-weighted mean radiance; irradiance
         // is π times it.
         weight = scale(weight, PI);
-        let Some(next) = trace_ray(scene, lift(&at), dir, REACH) else {
+        let Some(next) = surfaces.first_hit(lift(&at), dir, REACH) else {
             sum = add(sum, mul(weight, sky));
             break;
         };
         weight = mul(weight, scale(next.albedo, LAMBERT));
         sum = add(
             sum,
-            mul(weight, direct_light(scene, lift(&next), next.normal)),
+            mul(weight, direct_light_in(scene, surfaces, lift(&next), next.normal)),
         );
         if bounce >= 2 {
             let keep = (next.albedo.iter().fold(0.0f32, |m, c| m.max(*c)) * LAMBERT * PI)
@@ -216,13 +221,20 @@ pub fn render(setup: &RefSetup) -> Reference {
     let tan_y = (FOV_Y.to_radians() * 0.5).tan();
     let aspect = w as f32 / h as f32;
     let sky = setup.scene.sky.as_ref().map_or([0.0; 3], |s| s.color);
+    let mesh;
+    let surfaces: &dyn Surfaces = if setup.triangles {
+        mesh = SceneMesh::from_scene(&setup.scene);
+        &mesh
+    } else {
+        &setup.scene
+    };
     let firsts: Vec<Option<TraceHit>> = (0..w * h)
         .map(|i| {
             let (x, y) = (i % w, i / w);
             let nx = (2.0 * (x as f32 + 0.5) / w as f32 - 1.0) * tan_y * aspect;
             let ny = (1.0 - 2.0 * (y as f32 + 0.5) / h as f32) * tan_y;
             let dir = normalize(add(add(forward, scale(right, nx)), scale(up, ny)));
-            trace_ray(&setup.scene, setup.eye, dir, REACH)
+            surfaces.first_hit(setup.eye, dir, REACH)
         })
         .collect();
     let hit: Vec<bool> = firsts.iter().map(Option::is_some).collect();
@@ -269,6 +281,7 @@ pub fn render(setup: &RefSetup) -> Reference {
                                     let stratum = ((u + sx).fract(), (v + sy).fract());
                                     let l = path_from(
                                         &setup.scene,
+                                        surfaces,
                                         first,
                                         setup.max_bounces,
                                         stratum,
@@ -360,6 +373,10 @@ pub fn render_cached(setup: &RefSetup, dir: &std::path::Path) -> Reference {
         setup.max_bounces
     )
     .hash(&mut hasher);
+    // Analytic traces keep their old keys, so existing caches stay valid.
+    if setup.triangles {
+        "triangles".hash(&mut hasher);
+    }
     let path = dir.join(format!("{:016x}.ref", hasher.finish()));
     if let Some(r) = load(&path, setup.width, setup.height) {
         if r.noise <= setup.noise_target || r.spp >= setup.max_spp {
@@ -584,6 +601,7 @@ pub fn compare(
 mod tests {
     use super::*;
     use genos_scene::{Ceiling, Floor, Light, Sky, Vec3, Wall};
+    use genos_render::trace_ray;
 
     fn lamp(x: f32, y: f32, z: f32) -> Light {
         Light {
@@ -824,6 +842,7 @@ mod tests {
                     max_spp: spp,
                     seconds: f32::INFINITY,
                     max_bounces: bounces,
+                    triangles: false,
                 });
                 r.image
                     .save(&dir.join(format!("{name}-b{bounces}.png")))
@@ -831,6 +850,63 @@ mod tests {
                 eprintln!("{name} b{bounces}: {:.2}s noise {:.4}", r.seconds, r.noise);
             }
         }
+    }
+
+    /// The triangle form of the scene (GI v2 phase 1) traces the same picture as the
+    /// analytic shapes, within the trace's own noise.
+    #[test]
+    fn triangles_match_the_analytic_reference() {
+        let mut scene = closed_room();
+        let solid = |shape, x: f32, z: f32| genos_scene::Solid {
+            shape,
+            position: Vec3::new(x, 0.0, z),
+            size: 0.9,
+            height: 1.2,
+            yaw: 0.5,
+            color: [0.9, 0.3, 0.2],
+            absorption: 0.0,
+            reflectance: -1.0,
+            color_mix: -1.0,
+        };
+        scene.solids = vec![
+            solid(genos_scene::Shape::Square, -1.2, -1.0),
+            solid(genos_scene::Shape::Circle, 1.2, 0.8),
+        ];
+        let setup = |triangles| RefSetup {
+            scene: scene.clone(),
+            eye: [0.0, 1.6, 2.7],
+            yaw: 0.0,
+            pitch: -0.25,
+            width: 64,
+            height: 48,
+            spp: 64,
+            noise_target: 0.0,
+            max_spp: 64,
+            seconds: f32::INFINITY,
+            max_bounces: 64,
+            triangles,
+        };
+        let a = render(&setup(false));
+        let b = render(&setup(true));
+        let (mut diff, mut sum, mut hit_diff) = (0.0f64, 0.0f64, 0);
+        for i in 0..a.linear.len() {
+            if a.hit[i] != b.hit[i] {
+                hit_diff += 1;
+                continue;
+            }
+            if a.hit[i] {
+                diff += (luma(a.linear[i]) - luma(b.linear[i])).abs() as f64;
+                sum += luma(a.linear[i]) as f64;
+            }
+        }
+        let rel = (diff / sum) as f32;
+        // Two independent traces of the same picture differ by about the noise.
+        let noise = a.noise.max(b.noise);
+        assert_eq!(hit_diff, 0);
+        assert!(rel < 2.0 * noise + 0.01, "mean relative difference {rel}, noise {noise}");
+        let mean = |r: &Reference| r.linear.iter().map(|c| luma(*c) as f64).sum::<f64>();
+        let bias = (mean(&b) / mean(&a) - 1.0).abs() as f32;
+        assert!(bias < 0.01, "picture mean differs by {bias}");
     }
 
     #[test]

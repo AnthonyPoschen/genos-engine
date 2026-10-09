@@ -10,6 +10,7 @@ mod particles;
 mod pool;
 mod probe_tier;
 mod probes;
+mod scene_mesh;
 mod shadow;
 mod trace;
 mod wire;
@@ -42,9 +43,10 @@ pub use probe_tier::{
     BrickState, SurfaceBox, TierBatch, TierItem, TierLayout, TierLight, TierState, TierStats,
     TierWeights, BRICK, PROBE_BYTES,
 };
+pub use scene_mesh::{SceneMesh, ShapeRef, SurfaceMaterial, CIRCLE_SEGMENTS};
 pub use trace::{
-    agreement, direct_light, first_outgoing, linear_from_display, luminance, radiance,
-    radiance_hits, ray_land, samples_toward, sees, trace as trace_ray, Hit as TraceHit,
+    agreement, direct_light, direct_light_in, first_outgoing, linear_from_display, luminance, radiance,
+    radiance_hits, ray_land, samples_toward, sees, Surfaces, trace as trace_ray, Hit as TraceHit,
 };
 pub use world::{
     fixed_bounds, identity_pose, in_view, solid_reach, Bounds, Displacement, DrawKind, FixedPart,

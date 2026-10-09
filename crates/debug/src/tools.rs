@@ -275,6 +275,8 @@ struct RefJob {
     seconds: f32,
     block: u32,
     max_bounces: u32,
+    /// Trace the scene's triangles instead of its analytic shapes.
+    triangles: bool,
     size: (u32, u32),
     worker: Option<std::thread::JoinHandle<Reference>>,
     reference: Option<Reference>,
@@ -421,6 +423,7 @@ impl Tools {
                 if job.worker.is_none() && job.reference.is_none() {
                     let setup = RefSetup {
                         max_bounces: job.max_bounces,
+                        triangles: job.triangles,
                         max_spp: job.max_spp.max(job.spp),
                         noise_target: job.noise_target,
                         seconds: job.seconds,
@@ -1193,6 +1196,11 @@ impl Tools {
                         .parse()
                         .map_err(|_| format!("bounces must be a number or inf, not {other}"))?,
                 };
+                let triangles = match args.str("geometry")?.as_deref() {
+                    None | Some("shapes") => false,
+                    Some("triangles") => true,
+                    Some(other) => return Err(format!("geometry must be shapes or triangles, not {other}")),
+                };
                 let grid = args
                     .floats("grid", 2)?
                     .map_or((3, 3), |g| (g[0].max(1.0) as u32, g[1].max(1.0) as u32));
@@ -1213,6 +1221,7 @@ impl Tools {
                     seconds: args.f32("seconds")?.unwrap_or(300.0),
                     block: args.u32("block")?.unwrap_or(2).max(1),
                     max_bounces,
+                    triangles,
                     size: (width, height),
                     worker: None,
                     reference: None,
@@ -1457,6 +1466,7 @@ fn finish_reference(
         ("reference", text(path("reference").display().to_string())),
         ("spp", num(r.spp as f64)),
         ("bounces", num(job.max_bounces as f64)),
+        ("geometry", text(if job.triangles { "triangles" } else { "shapes" })),
         ("width", num(r.image.width as f64)),
         ("height", num(r.image.height as f64)),
         ("trace_seconds", num(r.seconds as f64)),
