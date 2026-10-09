@@ -19,7 +19,7 @@ void main() {
     uint rays = gi2_rays();
     if (pp.w > 0.5) {
         [[dont_unroll]] for (uint k = 0u; k < rays; k++) {
-            vec3 l = work.v[gi2_rad_at(probe * rays + k)].rgb;
+            vec3 l = gi2_ray_light(work.v[gi2_rad_at(probe * rays + k)]);
             float y[9];
             gi2_sh9(gi2_ray_dir(pp.xyz, n, k), y);
             [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {

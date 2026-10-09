@@ -53,11 +53,16 @@ pub(crate) struct Gi2 {
     /// The G-buffer is new and gets filled with empty records first.
     gbuf_clear: bool,
     frame: u32,
-    /// Hash of the last frame's scene block, and frames it has stayed the same.
+    /// Hash of what GI v2 sees (scene block, traced and drawn meshes), and frames
+    /// it has stayed the same.
     scene_hash: u64,
     still: u32,
-    /// Per frame slot: the cache pass's counters (gi2_cache.glsl `CacheStats`).
+    /// Hash of this frame's draw instances (poses, colours, emission).
+    pub(crate) draw_key: u64,
+    /// Per frame slot: the cache pass's counters (gi2_cache.glsl `CacheStats`), and
+    /// `still` as it was when that slot's frame ran (0: the scene had just changed).
     stats: [Buffer; 2],
+    stats_still: [u32; 2],
     /// Frames in a row whose relit patches all stayed within GI2_SETTLE_CHANGE, and
     /// the live patch count last read back.
     quiet: u32,
@@ -85,9 +90,11 @@ impl Default for Gi2 {
             gbuf_clear: false,
             frame: 0,
             scene_hash: 0,
+            draw_key: 0,
             still: 0,
             stats: [Buffer::empty(), Buffer::empty()],
             quiet: 0,
+            stats_still: [0; 2],
             live: 0,
             dims: [0; 4],
         }
@@ -406,7 +413,8 @@ impl Gpu {
         let probes = (cols * rows) as u64;
         let rays = probes * GI2_RAYS as u64 + (GI2_CACHE_BATCH * GI2_CACHE_RAYS) as u64;
         let pixels = w as u64 * h as u64;
-        let work_vec4 = 2 * probes + 2 * rays + 14 * probes;
+        // Probes (2), one slot per ray (hit, then its light), SH and filtered SH (7 + 7).
+        let work_vec4 = 2 * probes + rays + 14 * probes;
         let mut gbuf = std::mem::replace(&mut self.gi2.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.gi2.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.gi2.out, Buffer::empty());
@@ -529,7 +537,11 @@ impl Gpu {
         // This slot's last frame is done (its fence was waited): read its counters.
         if !self.gi2.cache_clear {
             if let Ok(words) = self.read_gi2_stats(slot) {
-                if words[1] > 0 {
+                // A frame that ran just as the scene changed measured against the
+                // old light; it does not count toward settling.
+                if self.gi2.stats_still[slot] == 0 {
+                    self.gi2.quiet = 0;
+                } else if words[1] > 0 {
                     if words[0] <= GI2_SETTLE_CHANGE {
                         self.gi2.quiet = self.gi2.quiet.saturating_add(1);
                     } else {
@@ -621,7 +633,10 @@ impl Gpu {
         let hash = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            // Lamps, occluders and camera; the traced meshes; the drawn ones.
             self.frame_bytes.hash(&mut hasher);
+            self.mesh_field_key.hash(&mut hasher);
+            self.gi2.draw_key.hash(&mut hasher);
             hasher.finish()
         };
         if hash == self.gi2.scene_hash {
@@ -629,7 +644,9 @@ impl Gpu {
         } else {
             self.gi2.scene_hash = hash;
             self.gi2.still = 0;
+            self.gi2.quiet = 0;
         }
+        self.gi2.stats_still[slot] = self.gi2.still;
         let pc = [w, h, cols, rows, GI2_RAYS, GI2_TILE, bgra, self.gi2.frame];
         let image = self.color.image;
         // The raster colour as the base: pixels with no surface keep it.

@@ -32,11 +32,12 @@ void main() {
     uint first = gi2_probe_rays() + j * GI2_CACHE_RAYS;
     vec3 e = vec3(0.0);
     [[dont_unroll]] for (uint k = 0u; k < GI2_CACHE_RAYS; k++) {
-        if (work.v[gi2_hit_at(first + k)].x < -1.5) {
+        vec4 v = work.v[gi2_rad_at(first + k)];
+        if (gi2_ray_none(v)) {
             return;
         }
         vec3 dir = gi2_dir(key, n, k, GI2_CACHE_RAYS);
-        e += work.v[gi2_rad_at(first + k)].rgb * max(dot(dir, n), 0.0);
+        e += gi2_ray_light(v) * max(dot(dir, n), 0.0);
     }
     e *= GI2_TAU / float(GI2_CACHE_RAYS);
     vec4 old = cache.v[3u * slot + 2u];

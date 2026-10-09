@@ -42,14 +42,12 @@ void main() {
     vec3 dir;
     vec3 n;
     if (!gi2_ray(ray, origin, dir, n)) {
-        work.v[at] = vec4(-2.0, 0.0, 0.0, 0.0);
-        work.v[gi2_rad_at(ray)] = vec4(0.0);
+        work.v[at] = GI2_NO_RAY;
         return;
     }
     SceneHit hit;
     if (!trace_ray(origin, dir, 1.0e-4, 200.0, hit)) {
-        work.v[at] = vec4(-1.0, 0.0, 0.0, 0.0);
-        work.v[gi2_rad_at(ray)] = vec4(has_sky() ? scene.sky.rgb : vec3(0.0), 0.0);
+        work.v[at] = gi2_miss_slot(has_sky() ? scene.sky.rgb : vec3(0.0));
         return;
     }
     vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;

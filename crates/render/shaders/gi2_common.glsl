@@ -8,10 +8,13 @@
 // cache's B patches of C rays relit this frame (gi2_cache.glsl). Rays are numbered
 // probe rays first (P R), then cache rays (B C):
 //   probes      2 per probe: position (w 1 when placed), normal
-//   hits        1 per ray: x distance t (-1 a miss, -2 no ray), y the hit's normal
-//               (octahedral bits), z albedo times reflectance times pi (unorm4x8
-//               bits); the hit point is origin + dir t (gi2_ray)
-//   radiance    1 per ray: light leaving the hit back along the ray (rgb)
+//   rays        1 per ray. After the trace, a hit: x distance t (>= 0), y the hit's
+//               normal (octahedral bits), z albedo times reflectance times pi
+//               (unorm4x8 bits), w its emitted light (RGB9E5 bits); the hit point
+//               is origin + dir t (gi2_ray). A miss or no ray already holds its
+//               light, flagged by a negative x (gi2_ray_light). The light pass
+//               turns each hit into the light leaving it back along the ray (rgb,
+//               x >= 0) in place, so hits and radiance share the slot.
 // A pixel's direct irradiance goes into its G-buffer record's w (RGB9E5).
 //   sh          7 per probe: irradiance SH, 9 rgb coefficients
 //   filtered sh 7 per probe: the same after the spatial filter (gi2_filter.comp)
@@ -64,10 +67,24 @@ uint gi2_hit_at(uint ray) {
     return 2u * gi2_probes() + ray;
 }
 uint gi2_rad_at(uint ray) {
-    return 2u * gi2_probes() + gi2_all_rays() + ray;
+    return gi2_hit_at(ray);
 }
 uint gi2_sh_at(uint i) {
-    return 2u * gi2_probes() + 2u * gi2_all_rays() + 7u * i;
+    return 2u * gi2_probes() + gi2_all_rays() + 7u * i;
+}
+
+// A ray slot that already holds its final light: a miss takes the sky (x is -1 - r)
+// and a ray with no source is dark (x -0.5).
+vec4 gi2_miss_slot(vec3 light) {
+    return vec4(-1.0 - light.r, light.g, light.b, 0.0);
+}
+const vec4 GI2_NO_RAY = vec4(-0.5, 0.0, 0.0, 0.0);
+bool gi2_ray_none(vec4 v) {
+    return v.x > -0.75 && v.x < -0.25;
+}
+// Light a ray brought back, after the light pass.
+vec3 gi2_ray_light(vec4 v) {
+    return v.x < -0.75 ? vec3(-1.0 - v.x, v.y, v.z) : (v.x < 0.0 ? vec3(0.0) : v.xyz);
 }
 uint gi2_shf_at(uint i) {
     return gi2_sh_at(gi2_probes()) + 7u * i;

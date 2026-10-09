@@ -21,6 +21,7 @@ void main() {
     vec3 n;
     vec3 reflectance = vec3(1.0);
     bool two_sided = false;
+    vec3 glow = vec3(0.0);
     if (idx < pixels) {
         vec3 albedo;
         if (!gi2_surface(uvec2(idx % pc.dims.x, idx / pc.dims.x), pos, n, albedo, two_sided)) {
@@ -37,6 +38,7 @@ void main() {
         pos = origin + dir * h.x;
         n = gi2_unpack_normal(floatBitsToUint(h.y));
         reflectance = unpackUnorm4x8(floatBitsToUint(h.z)).rgb * (1.0 / GI2_PI);
+        glow = gi2_unpack_rgb9e5(floatBitsToUint(h.w));
     }
     vec3 origin = pos + n * 0.02;
     LampList list = lamps_at(origin);
@@ -53,12 +55,11 @@ void main() {
         }
     }
     if (idx < pixels) {
-        uint glow = gbuf.px[idx].w;
-        outc.px[idx] = glow == ~0u ? 0u : glow;
+        uint emitted = gbuf.px[idx].w;
+        outc.px[idx] = emitted == ~0u ? 0u : emitted;
         gbuf.px[idx].w = gi2_pack_rgb9e5(e);
     } else {
         e += gi2_cache_irradiance(pos, n);
-        vec3 glow = gi2_unpack_rgb9e5(floatBitsToUint(work.v[gi2_hit_at(idx - pixels)].w));
         work.v[gi2_rad_at(idx - pixels)] = vec4(reflectance * e + glow, 0.0);
     }
 }

@@ -2282,6 +2282,13 @@ impl Gpu {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
         }
+        // GI v2 holds its light while nothing it sees changes (gi2_gpu.rs).
+        self.gi2.draw_key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            hasher.finish()
+        };
         let slot = self.flight;
         if self.instance_bufs[slot].size < bytes.len() as u64 {
             let share = self.light_families();
