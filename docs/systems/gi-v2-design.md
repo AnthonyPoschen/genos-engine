@@ -1,6 +1,6 @@
 # GI v2: design
 
-Status: proposed, 2026-10-10. No code yet. The decision is [ADR 0012](../adr/0012-gi-v2.md).
+Status: proposed, 2026-10-10; Anthony's answers to the open questions folded in the same day. No code yet. The decision is [ADR 0012](../adr/0012-gi-v2.md).
 
 This is the plan for the next global illumination (GI) system in Genos Engine. It replaces what is left of radiance cascades ([ADR 0008](../adr/0008-lighting-uses-radiance-cascades.md)) and the analytic occluder grid ([ADR 0011](../adr/0011-occluders-use-a-sparse-camera-box.md)). The current system is described in [Lighting](lighting.md) and [the handoff](lighting-handoff.md). The quality gate is in [Debugging](debugging.md).
 
@@ -34,7 +34,7 @@ Lumen is the best-tested real-time GI in shipped games, so where it has solved a
 | Emissive surfaces | Light the scene through the surface cache (noisy for small bright emitters) | Through the surface cache, plus bright emitters become area lights in the light tree | **Copy** the cache path; **add** area lights so small bright emitters get clean direct light and shadows. |
 | Quality check | Visual comparison against the path tracer | A reference path tracer, numeric compare and regression scripts as a gate on every phase | **Ours.** We measure every change, on both tracers. |
 | Hardware floor | Software Lumen on DX11/SM5-class, hardware Lumen on DXR | Vulkan 1.3 floor from the Steam 80 % rule, hardware RT optional | **Same shape** (two tracers), floor chosen from data. |
-| Memory | Tuned to fit large open worlds on consoles | 100-200 MB on lighting, spent to make each pixel cheaper | **Diverge.** We have room to cache more, so we do (see [Trading memory for speed](#trading-memory-for-speed)). |
+| Memory | Tuned to fit large open worlds on consoles | About 200 MB on lighting (a soft budget), spent to make each pixel cheaper | **Diverge.** We have room to cache more, so we do (see [Trading memory for speed](#trading-memory-for-speed)). |
 
 Where we hope to do better than Lumen: no pops from camera movement (stored light is view-independent), no ghosting or light lag (no radiance history), free light toggles (layers), cheaper low-end frames (caches instead of rays), and a numeric gate against ground truth.
 
@@ -96,7 +96,8 @@ Notes on the grouping. Unnamed "AMD Radeon Graphics" rows are Ryzen APUs; most a
 ### What the numbers say
 
 - **80 % line.** Counting newest first, the 80 % line is crossed in the 2018 generation (row 13, 82.6 %). Including the 2018 Vega APUs gives 83.0 %. So the floor is the 2018-2019 class: NVIDIA Turing (GTX 16 and RTX 20), AMD RDNA 1, Ryzen Vega APUs, and Intel Xe (Gen12) integrated graphics.
-- **Below the floor** (about 17 %): Intel UHD and HD Gen9-11 integrated graphics (2.6 %), NVIDIA Pascal GTX 10 (4.35 %), AMD Polaris RX 400/500 (1.49 %), NVIDIA Maxwell GTX 900 (0.16 %), and the unnamed "Other" (8.33 %).
+- **Extended floor (Anthony, 2026-10-10).** Low is also tuned for NVIDIA Pascal (GTX 10) and AMD Polaris (RX 400/500): another 5.84 %. With them, the supported set is rows 1-14 plus 16-17, about 88.9 % of all users. The GTX 1060 was Anthony's own card.
+- **Below the floor** (about 11 %): Intel UHD and HD Gen9-11 integrated graphics (2.6 %), NVIDIA Maxwell GTX 900 (0.16 %), and the unnamed "Other" (8.33 %). They are best effort: not blocked if the driver has the features, not tuned, not gated.
 - **Hardware RT share:** 72.2 % of all users (78.7 % of the named cards): RTX 20 and newer, RX 6000 and newer, and Intel Arc. RT is the common case, not the exception, but the software path is needed for about a quarter of users and for macOS.
 - **Integrated GPUs:** 8.3 % of all users (Intel Xe, UHD, HD, Ryzen APUs, 780M). Laptop discrete GPUs are counted separately and are not included here.
 - **VRAM:** 16 GB 27.2 %, 12 GB 13.1 %, 8 GB 26.7 %, 6 GB 5.1 %, 4 GB 5.1 %, 3 GB 1.2 %, 2 GB 3.7 %, 1 GB 1.4 %, 512 MB 2.6 %; 10, 11, 20, 22, 24, 32 and 64 GB together 12.6 %. At least 8 GB: 79.6 %. At least 6 GB: 84.7 %. At least 4 GB: 89.8 %. Integrated GPUs report small numbers here because they share system memory.
@@ -104,13 +105,48 @@ Notes on the grouping. Unnamed "AMD Radeon Graphics" rows are Ryzen APUs; most a
 
 ### Chosen floor
 
-- **Graphics API:** Vulkan 1.3 core, with these features required: `descriptorIndexing` (runtime arrays, partially bound, update-after-bind for the card atlas and SDF pool), `bufferDeviceAddress`, `timelineSemaphore`, `scalarBlockLayout`, `synchronization2`, `dynamicRendering`, `shaderDrawParameters`, and subgroup basic, vote, ballot and arithmetic in compute. `storageBuffer16BitAccess` and `shaderFloat16` are used when present but are not required. Every floor GPU has a Vulkan 1.3 driver on Windows and Linux (NVIDIA, AMD, Intel and Mesa), and MoltenVK has shipped Vulkan 1.3 since 1.3.0 (May 2025). The engine requests Vulkan 1.0 today (`API_VERSION` in `gpu.rs`), so this is a raise. Confirm each feature on gpuinfo.org for GTX 1650, RX 5700, Iris Xe and Vega 8 before locking it.
-- **Hardware RT (optional):** `VK_KHR_acceleration_structure`, `VK_KHR_ray_query` and `VK_KHR_deferred_host_operations`. We use ray queries from compute shaders, not ray tracing pipelines, so both tracers share the same pass structure. MoltenVK has no released ray query support yet (an experimental pull request exists), so macOS uses the software tracer.
-- **Minimum VRAM:** 4 GB on discrete GPUs (89.8 % of users have that much, and the GTX 1650 is a 4 GB card). Lighting uses 100-200 MB at most (see [the VRAM budget](#vram-budget)), which is under 5 % of a 4 GB card. Integrated GPUs need 8 GB of system RAM.
-- **Floor cards for testing:** GTX 1650 4 GB (the most common card without RT) as the discrete floor, and Iris Xe (96 EU) as the integrated floor. Low targets 60 fps at 1080p on the GTX 1650, and 30 fps at 1080p (or 60 fps at 720p) on Iris Xe.
-- **Below the floor:** Pascal, Polaris and Gen9 UHD have the same Vulkan 1.3 features, so they are not blocked. They are best effort: Low should run, but we do not tune for them or gate on them. The GTX 1060 is about as fast as the GTX 1650, so it will mostly work anyway.
+- **Graphics API:** Vulkan 1.3 core, with these features required: `descriptorIndexing` (runtime arrays, partially bound, non-uniform indexing, update-after-bind for the card atlas and SDF pool), `bufferDeviceAddress`, `timelineSemaphore`, `scalarBlockLayout`, `synchronization2`, `dynamicRendering`, `maintenance4`, `shaderDrawParameters`, `storageBuffer16BitAccess`, `subgroupSizeControl`, and subgroup basic, vote, ballot and arithmetic in compute. `shaderFloat16` is used when present but is not required. Vulkan 1.4 is not required. MoltenVK has shipped Vulkan 1.3 since 1.3.0 (May 2025). The engine requests Vulkan 1.0 today (`API_VERSION` in `gpu.rs`), so this is a raise.
+- **Hardware RT (optional):** `VK_KHR_ray_query`, `VK_KHR_acceleration_structure` and `VK_KHR_deferred_host_operations`. We use ray queries from compute shaders, not ray tracing pipelines, so both tracers share the same pass structure. The hardware tracer is chosen only when `VK_KHR_ray_query` is present. Pascal's driver exposes `VK_KHR_acceleration_structure` without ray queries (a slow emulation), so checking for acceleration structures alone would pick the wrong tracer. MoltenVK has no released ray query support yet (an experimental pull request exists), so macOS uses the software tracer. That is accepted.
+- **Minimum VRAM:** 4 GB on discrete GPUs. It stays at 4 GB because memory has become expensive with AI demand, so players are not upgrading it quickly. 89.8 % of Steam users have at least 4 GB. The GTX 1060 3 GB is below this line; the 6 GB model is the reference. Integrated GPUs need 8 GB of system RAM.
+- **Lighting memory:** about 200 MB is a soft budget. Anthony accepts about 200 MB of a 4 GB card going to lighting without question. Ultra may go over it when that buys speed (see [the VRAM budget](#vram-budget)).
+- **Low reference card:** GTX 1060 6 GB (Pascal, 2016). The RX 580 8 GB (Polaris) is its AMD equivalent and must also run Low well. Low targets 60 fps at 1080p on both. Newer floor cards (GTX 1650, RX 5500/5700) are about as fast or faster, so tuning for the 1060 covers them. The integrated target is Iris Xe at 1080p 30 fps or 720p 60 fps.
+- **Steam Deck:** a target, but untested; there is no device to test on. It probably sits in "Other" in the survey. Its GPU (RDNA 2) is above the floor, and RADV on SteamOS should expose ray queries on it, so it may pick the hardware tracer; the Low or Medium preset at 800p is the likely fit.
 
-Anthony's earlier "10-year-old GPU" idea (GTX 900, Vulkan 1.1) is older than the 80 % rule needs. The rule lets us require Vulkan 1.3, which is simpler to write for. See open question 1.
+### Feature check on Pascal and Polaris (gpuinfo.org)
+
+Checked 2026-10-10 against the newest reports on the [Vulkan Hardware Database](https://vulkan.gpuinfo.org) for each card and OS: report 51058 (GTX 1060 6GB, Windows, NVIDIA 582.66, Vulkan 1.4.312), 52074 (GTX 1060 6GB, Linux, NVIDIA 580.178, Vulkan 1.4.312), 40823 (RX 580 2048SP, Windows, AMD 2.0.283, Vulkan 1.3.264) and 52304 (RX 580, Linux, RADV Mesa 26.2.4, Vulkan 1.4.354).
+
+| Feature | GTX 1060 Win | GTX 1060 Linux | RX 580 Win | RX 580 Linux |
+|---|---|---|---|---|
+| Vulkan version | 1.4 | 1.4 | **1.3** | 1.4 |
+| descriptorIndexing (all the parts above) | yes | yes | yes | yes |
+| bufferDeviceAddress | yes | yes | yes | yes |
+| timelineSemaphore, scalarBlockLayout | yes | yes | yes | yes |
+| synchronization2, dynamicRendering, maintenance4 | yes | yes | yes | yes |
+| shaderDrawParameters, storageBuffer16BitAccess | yes | yes | yes | yes |
+| subgroupSizeControl, computeFullSubgroups | yes | yes | yes | yes |
+| Subgroup basic, vote, arithmetic, ballot in compute | yes | yes | yes | yes |
+| Subgroup size | 32 | 32 | 64 | 64 |
+| shaderFloat16 | **no** | **no** | **no** | **no** |
+| VK_KHR_ray_query | no | no | no | no |
+| maxImageDimension3D | 16384 | 16384 | **2048** | **2048** |
+
+What this changes:
+
+- **No required feature is missing.** Pascal and Polaris both meet the Vulkan 1.3 floor as written, so no fallback path is needed.
+- **The floor stays Vulkan 1.3, not 1.4.** AMD's Windows driver for Polaris stops at Vulkan 1.3.264, and its driver is in maintenance, so 1.4 would cut the RX 580 on Windows. NVIDIA's 580/582 branch is the last for Pascal, so its features are frozen too.
+- **`shaderFloat16` stays optional.** Neither card has it. Shaders keep a 32-bit path and only use 16-bit floats where present.
+- **Shaders must not assume a subgroup size.** It is 32 on NVIDIA and 64 on Polaris. Write subgroup code that works for any size, and use `subgroupSizeControl` where a pass needs a fixed one.
+- **3D textures stay at or under 2048 per side** (the SDF brick pools and the occupancy grid). Polaris caps 3D images at 2048.
+- Pascal has weak async compute and coarse preemption, so the short GPU submissions we already use (so the desktop stays responsive) matter even more there.
+
+Re-check this table when a driver branch changes, and add the GTX 1650, Iris Xe and Vega 8 the next time the floor is reviewed.
+
+### Test machines
+
+- **zanven-pc:** Linux (Omarchy), RTX 4070. The hardware tracer, Ultra and High, and the software tracer forced on (`GENOS_TRACER=sw`) as a stand-in for old cards.
+- **Anthony's MacBook:** macOS, software tracer through MoltenVK.
+- **Not available:** a GTX 1060, RX 580, GTX 1650, Iris Xe or Steam Deck. Until one is available, Low is tuned on the 4070 with the software tracer forced on and a time budget scaled down to the floor card's speed, and the floor numbers in this doc are estimates. Getting a floor card is still open.
 
 ## The design in one picture
 
@@ -191,7 +227,9 @@ Steps 4 and 5 are budgeted and spread over frames. Steps 6 to 8 run every frame 
 
 ## Scene representation
 
-All of this is built per mesh at import and cached. A mesh that does not change never rebuilds.
+All of this is built per mesh and cached. A mesh that does not change never rebuilds.
+
+When it is built is a config option: at build time (prebuilt into the shipped assets), or at first load (cached on the player's disk). The default for our editor is prebuilt at build time. Which one a shipped game should use is not decided yet.
 
 ### Mesh asset
 
@@ -326,14 +364,14 @@ Budgets are GPU milliseconds per frame for the GI parts (surface cache + probes 
 
 | Preset | Target GPU | Resolution, fps | Tracer | Screen probes | Rays per probe | Card texel | Probe levels | Light cut per tile | Moving-light layers | Lighting VRAM |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Low | GTX 1650 4 GB, Iris Xe | 1080p 60 (Iris Xe 720p 60) | Software | every 32 px | 64, re-trace 1 in 4 | 12 cm | 1, 2, 4, 8 m | 4 | 8 | about 90 MB |
+| Low | GTX 1060 6 GB, RX 580 (reference); GTX 1650, Iris Xe | 1080p 60 (Iris Xe 720p 60) | Software | every 32 px | 64, re-trace 1 in 4 | 12 cm | 1, 2, 4, 8 m | 4 | 8 | about 90 MB |
 | Medium | RTX 2060, RX 5700 | 1080p 60-120 | Software or RT | every 16 px | 64, re-trace 1 in 3 | 12 cm | 1, 2, 4, 8 m | 8 | 16 | about 120 MB |
 | High | RTX 3060, RX 6600 | 1440p 60-144 | RT if present | every 16 px | 96, re-trace 1 in 2 | 8 cm | 1, 2, 4, 8 m | 8 | 32 | about 150 MB |
 | Ultra | RTX 4070 and up | 1440p 100+ | RT | every 16 px, extra probes on edges, contact rays | 128, re-trace 1 in 2 | 6 cm | 1, 2, 4, 8 m, denser 1 m reach | 16 | 32 | about 190 MB |
 
 Low does not cut the caches much. The floor card is short on compute, not memory, so Low keeps the same card texel size as Medium and leans hardest on cached light and cached shadows.
 
-GI time budgets per preset: Low 4 ms on the GTX 1650; Medium 3 ms; High 2.5 ms; Ultra up to 6 ms (the stress scene).
+GI time budgets per preset: Low 4 ms on the GTX 1060; Medium 3 ms; High 2.5 ms; Ultra up to 6 ms (the stress scene).
 
 The 4070 targets, measured as now (release, 600 frames, after warmup):
 
@@ -345,7 +383,7 @@ Scripted runs (benchmarks, regression scripts) ask for low GPU priority and keep
 
 ## Trading memory for speed
 
-Lighting uses about 10-20 MB of VRAM today (mostly the probe tier: up to 1024 bricks of 64 probes at 304 bytes each, about 20 MB). Anthony is happy to spend 100-200 MB if it makes each pixel cheaper while looking very good. Memory is cheap; per-pixel compute is what the floor card lacks. So every cache below exists to replace rays or maths per pixel with a read.
+Lighting uses about 10-20 MB of VRAM today (mostly the probe tier: up to 1024 bricks of 64 probes at 304 bytes each, about 20 MB). Anthony is happy to spend about 200 MB if it makes each pixel cheaper while looking very good. That is a soft budget: about 200 MB of a 4 GB card is accepted without question, and Ultra may go over it if that buys speed. Memory is cheap; per-pixel compute is what the floor card lacks. So every cache below exists to replace rays or maths per pixel with a read.
 
 1. **Static light is cached, not recomputed.** The static layer (static lamps, sky, emissive) lives in the surface cache and the world probes, direct and bounced. A static scene runs no cache updates at all; the frame cost is the G-buffer, screen probes and per-pixel direct for moving lights.
 2. **Cached shadow masks** for the 4 most important static lights per card texel, and a cached sun visibility value. They replace per-pixel shadow rays on Low and Medium, and far from the camera on High and Ultra.
@@ -380,7 +418,8 @@ Notes:
 
 - A Medium card with RT drops the SDF pools (36 MB) and adds the BVH (about 32 MB), so the total stays about the same. A hardware preset that is forced to software adds the SDF pools back (about 36 MB).
 - The world probe and card numbers grow with level size. Residency (evicting far pages and bricks) keeps each preset at its number; an evicted card falls back to probes, an evicted brick to the next coarser level. Residency is camera-driven, the values are not.
-- **Floor fit.** On the GTX 1650 (4 GB), Low uses about 90 MB for lighting plus about 50 MB of G-buffer: under 4 % of the card, leaving more than 3.5 GB for meshes and textures. Even Medium fits easily. On Iris Xe the same 90 MB comes from shared system memory, which is fine with 8 GB of RAM. 4 GB covers 89.8 % of Steam users; the budget would still fit a 2 GB card, but the floor does not promise that.
+- **Floor fit.** On a 4 GB card (the minimum: GTX 1650, RX 580 4 GB), Low uses about 90 MB for lighting plus about 50 MB of G-buffer: under 4 % of the card, leaving more than 3.5 GB for meshes and textures. On the GTX 1060 6 GB reference it is under 3 %. Even Medium fits easily. On Iris Xe the same 90 MB comes from shared system memory, which is fine with 8 GB of RAM. 4 GB covers 89.8 % of Steam users; the budget would still fit a 2 GB card, but the floor does not promise that.
+- **Ultra over budget.** Ultra's about 187 MB plus about 40 MB of BVH is over 200 MB in total. That is accepted, because the BVH is what makes it fast. Further Ultra growth (for example a wider 1 m probe reach) is fine when it is measured to buy speed.
 - The debug panel shows live use per component, so the table can be checked against real numbers in phase 8.
 
 ## The quality gate
@@ -426,26 +465,30 @@ Each phase keeps `genos-stress` runnable and is gated by the reference views (no
 5. **Screen probes.** The new final gather behind a setting, next to the old per-pixel probe read and near field. Gate: corner and thin-wall error improve; ghosting, toggle latency and camera-independence scripts pass; fps targets hold.
 6. **Retire the old paths.** Delete the near field, the cascades, the world volume, the occluder grid and the old CPU paths. Mark ADR 0008 and ADR 0011 superseded. Update [Lighting](lighting.md).
 7. **Port the layers.** Static, sun and per moving light layers on cards and probes; moving-object proxies; the light tree on the picture path; emissive area lights. Gate: toggling a layered light is free (no work scheduled) and correct against the reference; moving boxes schedule no static work.
-8. **Presets and old hardware.** Tune Low to Ultra. Run the gate on a GTX 1650-class card and an Iris Xe laptop. Write the presets into the settings doc.
+8. **Presets and old hardware.** Tune Low to Ultra. Tune Low on the 4070 with the software tracer forced on until a GTX 1060 or RX 580 is available, then run the gate on the real card. Run the macOS software path on Anthony's MacBook. Write the presets into the settings doc.
 
 ## Risks
 
 - **Leaks in the software tracer.** Mesh SDFs blur thin walls, and leaks were our biggest problem. Mitigation: thin flag and two-sided SDFs, import warnings, the thin-wall and sealed-room tests, and a check that both tracers agree.
 - **Card coverage.** Cards can miss concave or hidden parts of a complex mesh (a known Lumen issue). Mitigation: greedy cover with a coverage report at import; uncovered hits fall back to world probes.
-- **Old GPU speed.** Iris Xe may not hold 60 fps at 1080p even at Low. Mitigation: render scale, and 720p as its target.
+- **Old GPU speed.** Low must hold 60 fps at 1080p on a GTX 1060 and RX 580, without one to test on yet. Mitigation: tune on the 4070 with the software tracer and a scaled budget, keep the floor numbers marked as estimates, and get a floor card. Iris Xe uses render scale and 720p.
+- **Pascal and Polaris drivers are frozen.** Their last driver branches support Vulkan 1.3 (AMD on Windows) and 1.4 (NVIDIA), with no new features coming. Any future required feature has to be checked against them first.
 - **Compiler fragility.** The NVIDIA compiler failures came from large inlined walks. Mitigation: small shaders, one trace site each, a compile check on the 4070 in the gate.
 - **Writing our own loaders.** ADR 0007 means glTF, JPEG and a BVH builder live in this repository. That is real work, mostly in phase 1.
 - **Layer memory with many moving lights.** Capped per preset; the rest share one layer.
 - **Rewrite length.** Several focused stretches of work. Each phase is useful on its own, and the old path stays until the new one beats it.
 
+## Decided (2026-10-10)
+
+1. **Floor.** Low is tuned for the GTX 1060 6 GB (the reference) and the RX 580. Pascal and Polaris are supported, not best effort. The feature check found nothing missing; the floor stays Vulkan 1.3.
+2. **Minimum VRAM.** 4 GB, because memory is expensive with AI demand.
+3. **Steam Deck and macOS.** The Steam Deck is a target but is untested (no device). macOS uses the software tracer only, through MoltenVK; that is accepted. Test machines are zanven-pc (Linux, RTX 4070) and Anthony's MacBook.
+4. **Where import runs.** A config option. Our editor's default is prebuilt at build time. The final choice for shipped games is deferred.
+5. **Memory ceiling.** About 200 MB for lighting is a soft budget. Ultra may go over it if that buys speed.
+
 ## Open questions for Anthony
 
-1. **Floor generation.** The 80 % rule puts the floor at Turing / RDNA 1 / Intel Xe (2018-2019), not GTX 900. Pascal and Polaris (about 6 %) are just below. Are they best effort (runs, not tuned), or should we tune Low for a GTX 1060 too?
-2. **Minimum VRAM.** 80 % of users have 8 GB or more, but the floor includes 4 GB cards like the GTX 1650. Is 4 GB the minimum?
-3. **Steam Deck and macOS.** Is the Steam Deck a target (it would probably sit in "Other")? Is software-only on macOS acceptable until MoltenVK ships ray queries?
-4. **Floor hardware for testing.** Do you have, or can we get, a GTX 1650-class desktop and an Iris Xe laptop to run the gate on?
-5. **Moving-light layer caps.** Are 8 (Low) to 32 (Ultra) layered lights enough for the games you have in mind?
-6. **Where import runs.** Build SDFs and cards in the editor and ship them, or build at first load and cache on the player's disk?
-7. **Specular timing.** Start reflections straight after GI v2, or after HDR?
-8. **Memory ceiling.** The budget puts Ultra at about 190 MB for lighting plus about 40 MB of BVH. Is 200 MB a hard ceiling for lighting, or can Ultra go higher if it buys more speed (for example a denser 1 m probe reach)?
-9. **Snapshot cadence.** Re-check the survey every six months, or tie it to releases?
+1. **Floor hardware for testing.** No GTX 1060, RX 580, GTX 1650 or Iris Xe is available. Can we get one, so the floor numbers become measurements?
+2. **Moving-light layer caps.** Are 8 (Low) to 32 (Ultra) layered lights enough for the games you have in mind?
+3. **Specular timing.** Start reflections straight after GI v2, or after HDR?
+4. **Snapshot cadence.** Re-check the survey every six months, or tie it to releases?
