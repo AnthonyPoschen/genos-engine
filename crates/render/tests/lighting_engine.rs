@@ -208,6 +208,7 @@ fn the_opening_view_reuses_the_field() {
             vertices: vec![[-0.2, 0.2, 0.0], [0.2, 0.2, 0.0], [0.0, 0.8, 0.0]],
             color: [0.2, 0.9, 0.2],
             pose,
+            emission: [0.0; 3],
         },
     });
     let posed_verts = lighting.vertices_for_camera(&posed, &camera, aspect);

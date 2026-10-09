@@ -1,5 +1,6 @@
 #version 450
-// GI v2 final pass: per pixel, direct irradiance plus the screen probes' irradiance
+// GI v2 final pass: per pixel, emitted light, then direct irradiance plus the
+// screen probes' irradiance
 // (the 4 nearest probes, weighted by plane distance and normal; the light cache
 // where none matches), through the same
 // tone curve and dither as the picture. Pixels with no surface keep the raster
@@ -82,6 +83,8 @@ void main() {
         return;
     }
     vec3 direct = gi2_unpack_rgb9e5(gbuf.px[index].w);
+    // The light pass left the pixel's emitted light here.
+    vec3 glow = gi2_unpack_rgb9e5(outc.px[index]);
     gbuf.px[index] = uvec4(~0u);
     if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
         n = -n;
@@ -101,7 +104,10 @@ void main() {
     if (mode == 2u || mode == 3u || mode == 4u) {
         direct = vec3(0.0);
     }
-    vec3 c = albedo * LAMBERT * (direct + bounce);
+    if (mode == 2u || mode == 3u || mode == 4u) {
+        glow = vec3(0.0);
+    }
+    vec3 c = albedo * LAMBERT * (direct + bounce) + glow;
     shown = vec3(tone_channel(c.r), tone_channel(c.g), tone_channel(c.b));
     outc.px[index] = pack_rgb(dither8(shown, p));
 }

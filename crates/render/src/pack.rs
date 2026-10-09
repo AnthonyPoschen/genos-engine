@@ -285,6 +285,8 @@ pub enum PackedDraw {
         key: u64,
         model: [f32; 16],
         color: [f32; 3],
+        /// Emitted light (linear); GI v2 only.
+        emission: [f32; 3],
         source: ShapeSource,
     },
     Dynamic(Vec<GpuVertex>),
@@ -558,6 +560,7 @@ fn pack_draw(
                 key,
                 model: translation(floor.position.x, 0.0, floor.position.z),
                 color,
+                emission: [0.0; 3],
                 source: ShapeSource::Floor {
                     half_x: floor.half_x,
                     half_z: floor.half_z,
@@ -572,6 +575,7 @@ fn pack_draw(
                 key,
                 model: translation(floor.position.x, ceiling.height, floor.position.z),
                 color,
+                emission: [0.0; 3],
                 source: ShapeSource::Ceiling {
                     half_x: floor.half_x,
                     half_z: floor.half_z,
@@ -596,6 +600,7 @@ fn pack_draw(
                     wall.position.z,
                 ),
                 color,
+                emission: [0.0; 3],
                 source: ShapeSource::Box {
                     half,
                     top: true,
@@ -617,6 +622,7 @@ fn pack_draw(
                             solid.yaw,
                         ),
                         color,
+                        emission: [0.0; 3],
                         source: ShapeSource::Box {
                             half: extent,
                             top: true,
@@ -631,6 +637,7 @@ fn pack_draw(
                         key,
                         model: translation(solid.position.x, 0.0, solid.position.z),
                         color,
+                        emission: [0.0; 3],
                         source: ShapeSource::Cylinder {
                             radius,
                             height: solid.height,
@@ -639,12 +646,18 @@ fn pack_draw(
                 }
             }
         }
-        DrawKind::Mesh { vertices, pose, .. } => {
+        DrawKind::Mesh {
+            vertices,
+            pose,
+            emission,
+            ..
+        } => {
             let key = shape_key_positions(4, vertices);
             Some(PackedDraw::Shape {
                 key,
                 model: *pose,
                 color,
+                emission: *emission,
                 source: ShapeSource::Mesh(vertices.clone()),
             })
         }
@@ -672,6 +685,7 @@ fn pack_draw(
                 key,
                 model: crate::world::identity_pose(),
                 color,
+                emission: [0.0; 3],
                 source: ShapeSource::Baked(baked),
             })
         }
@@ -1205,6 +1219,7 @@ fn push_object(
             vertices,
             color,
             pose,
+            ..
         } => push_mesh(out, vertices, *color, pose),
         DrawKind::Particles {
             density,
@@ -2084,6 +2099,7 @@ mod tests {
                 model,
                 color,
                 source: ShapeSource::Box { .. },
+                ..
             } if color[1] < 0.5 => Some((*key, *model)),
             _ => None,
         });

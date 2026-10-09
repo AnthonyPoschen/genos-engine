@@ -358,6 +358,7 @@ impl Renderer {
                     key,
                     model,
                     color,
+                    emission,
                     source,
                 } => {
                     if !self.memory.contains_shape(*key) {
@@ -375,7 +376,14 @@ impl Renderer {
                     let instance = instances.len() as u32;
                     instances.push(InstanceRec {
                         model: *model,
-                        color: [color[0], color[1], color[2], 1.0],
+                        // w: emitted light as shared-exponent bits (0: none) for the
+                        // GI v2 G-buffer (gbuffer.vert); the picture ignores it.
+                        color: [
+                            color[0],
+                            color[1],
+                            color[2],
+                            f32::from_bits(crate::mesh_field::pack_rgb9e5(*emission)),
+                        ],
                     });
                     draws.push(DrawSpan {
                         shapes: true,
@@ -842,7 +850,8 @@ struct InstanceRec {
 fn identity_instance() -> InstanceRec {
     InstanceRec {
         model: crate::world::identity_pose(),
-        color: [1.0, 1.0, 1.0, 1.0],
+        // w 0: no emitted light (gbuffer.vert).
+        color: [1.0, 1.0, 1.0, 0.0],
     }
 }
 
@@ -990,6 +999,8 @@ struct Gpu {
     gi2: Gi2,
     /// Fragment shader for the next raster pipeline built, instead of scene.frag.
     frag_override: Option<&'static [u8]>,
+    /// The vertex shader the next raster pipeline uses instead of scene.vert.
+    vert_override: Option<&'static [u8]>,
     /// How long each pipeline took to build.
     pipeline_times: Vec<(String, Duration)>,
     desc_layout: Handle,
@@ -1704,6 +1715,7 @@ impl Gpu {
                 mesh_field_key: 0,
                 gi2: Gi2::default(),
                 frag_override: None,
+                vert_override: None,
                 pipeline_times: Vec::new(),
                 desc_layout: std::ptr::null_mut(),
                 desc_pool: std::ptr::null_mut(),
@@ -5009,7 +5021,11 @@ impl Gpu {
         depth_only: bool,
     ) -> Result<Handle, String> {
         unsafe {
-            let vert = self.shader(if additive { WIRE_VERT_SPV } else { VERT_SPV })?;
+            let vert = self.shader(if additive {
+                WIRE_VERT_SPV
+            } else {
+                self.vert_override.unwrap_or(VERT_SPV)
+            })?;
             let frag = self.shader(if additive {
                 WIRE_FRAG_SPV
             } else {

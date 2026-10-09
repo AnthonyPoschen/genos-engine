@@ -66,6 +66,8 @@ pub enum DrawKind {
         vertices: Vec<[f32; 3]>,
         color: [f32; 3],
         pose: [f32; 16],
+        /// Emitted light (linear). Only GI v2 draws it.
+        emission: [f32; 3],
     },
     Particles {
         points: Vec<[f32; 3]>,
@@ -358,6 +360,7 @@ mod tests {
                 vertices: vec![[-0.2, 0.0, -0.2], [0.2, 0.0, -0.2], [0.0, 0.5, 0.2]],
                 color: [0.0, 1.0, 1.0],
                 pose,
+                emission: [0.0; 3],
             },
         });
         let camera = Camera::opening();

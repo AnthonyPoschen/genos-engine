@@ -80,6 +80,7 @@ pub(crate) fn shade_world(
                 vertices: mesh,
                 color,
                 pose,
+                ..
             } => push_mesh(&mut vertices, light, field, mesh, *color, pose),
             DrawKind::Particles {
                 points,

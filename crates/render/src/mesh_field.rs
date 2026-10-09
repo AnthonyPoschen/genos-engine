@@ -8,7 +8,8 @@
 //! Word layout (all `u32`, floats as bits):
 //!
 //! ```text
-//! [0]  instance count   [1] max march steps   [2] reserved   [3] reserved
+//! [0]  instance count   [1] max march steps   [2] emission table word (0: none)
+//! [3] reserved
 //! per instance, 32 words from word 4:
 //!   0..12  world -> object rows (3 x vec4: m0 m1 m2 t)
 //!   12..15 world bounds low, 15 distance scale (object metres -> world metres)
@@ -19,6 +20,7 @@
 //! brick table: one word per brick cell, 0 for none, else 1 + the brick's first word
 //! brick: 128 words, 512 distances as bytes, x fastest
 //! coarse: one byte per brick cell, four per word
+//! emission table (GI v2): one word per instance, shared-exponent RGB (9e5)
 //! ```
 
 use std::sync::Arc;
@@ -40,6 +42,8 @@ pub struct FieldInstance {
     pub pose: [f32; 16],
     /// Mean diffuse albedo, linear.
     pub albedo: [f32; 3],
+    /// Mean emitted light, linear (GI v2 only).
+    pub emission: [f32; 3],
     /// The world object whose `hidden` flag this instance follows, if any.
     pub object: Option<usize>,
 }
@@ -203,7 +207,37 @@ pub fn field_words(instances: &[&FieldInstance]) -> Vec<u32> {
         words.extend_from_slice(r);
     }
     words.extend_from_slice(&data);
+    if kept
+        .iter()
+        .any(|(inst, _)| inst.emission.iter().any(|&e| e > 0.0))
+    {
+        words[2] = words.len() as u32;
+        words.extend(kept.iter().map(|(inst, _)| pack_rgb9e5(inst.emission)));
+    }
     words
+}
+
+/// Shared-exponent RGB, 9 bits each and a 5-bit exponent (the GLSL
+/// `gi2_unpack_rgb9e5` reads it back).
+pub fn pack_rgb9e5(rgb: [f32; 3]) -> u32 {
+    const MAX: f32 = 65408.0;
+    let c = rgb.map(|v| {
+        if v.is_finite() {
+            v.clamp(0.0, MAX)
+        } else {
+            0.0
+        }
+    });
+    let m = c[0].max(c[1]).max(c[2]);
+    let mut e = (m.max(1.0e-30).log2().floor() as i32).max(-16) + 1;
+    let mut scale = (9 - e) as f32;
+    scale = scale.exp2();
+    if (m * scale + 0.5).floor() >= 512.0 {
+        e += 1;
+        scale *= 0.5;
+    }
+    let q = c.map(|v| ((v * scale + 0.5).floor()).min(511.0) as u32);
+    q[0] | q[1] << 9 | q[2] << 18 | ((e + 15) as u32) << 27
 }
 
 /// Byte view of [`field_words`].
@@ -271,7 +305,7 @@ pub fn field_key(instances: &[&FieldInstance]) -> u64 {
         for v in inst.pose {
             eat(v.to_bits() as u64);
         }
-        for v in inst.albedo {
+        for v in inst.albedo.iter().chain(&inst.emission) {
             eat(v.to_bits() as u64);
         }
     }
@@ -316,6 +350,7 @@ mod tests {
             sdf: Arc::new(bake(&mesh, &settings).sdf),
             pose,
             albedo: [0.5, 0.25, 1.0],
+            emission: [0.0; 3],
             object: None,
         }
     }
@@ -373,6 +408,26 @@ mod tests {
         );
         assert_eq!(two[base + 19] & 0xff, 128, "albedo red 0.5");
         assert_ne!(field_key(&[&a]), field_key(&[&a, &b]));
+    }
+
+    #[test]
+    fn emission_packs_as_shared_exponent_rgb_in_a_table_after_the_data() {
+        // 1.0 and 0.5 at exponent 1: mantissas 256 and 128.
+        assert_eq!(pack_rgb9e5([1.0, 0.5, 0.0]), 256 | 128 << 9 | 16 << 27);
+        assert_eq!(pack_rgb9e5([0.0; 3]), 0);
+        let dark = cube_instance(crate::world::identity_pose());
+        assert_eq!(
+            field_words(&[&dark])[2],
+            0,
+            "no emissive instance, no table"
+        );
+        let mut lit = dark.clone();
+        lit.emission = [1.0, 0.5, 0.0];
+        let words = field_words(&[&dark, &lit]);
+        let table = words[2] as usize;
+        assert_eq!(table + 2, words.len());
+        assert_eq!(&words[table..], &[0, pack_rgb9e5(lit.emission)]);
+        assert_ne!(field_key(&[&dark]), field_key(&[&lit]));
     }
 
     #[test]

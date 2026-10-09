@@ -1,11 +1,12 @@
 #version 450
 // GI v2 G-buffer (gi2_gpu.rs): the scene's surfaces, one record per pixel, for the
-// GI v2 compute passes. Same vertex shader and depth prepass as the picture; early
+// GI v2 compute passes. Same vertices (gbuffer.vert) and depth prepass as the picture; early
 // depth tests so only the surface the pixel shows writes its record.
 //
 // Record (uvec4): x distance from the eye (float bits; all ones = nothing), y the normal
 // (octahedral, snorm 2x16), z albedo rgb and a flags byte (bit 0 two-sided), w
-// reserved for emission.
+// emitted light (shared-exponent RGB; the light pass moves it out and puts the
+// direct irradiance here).
 //
 // Particle cards, fog cards and unlit quads are not in GI v2 yet: they discard.
 #extension GL_GOOGLE_include_directive : require
@@ -16,6 +17,7 @@ layout(location = 1) in vec3 v_albedo;
 layout(location = 2) in vec3 v_normal;
 layout(location = 3) in float v_shade;
 layout(location = 4) in vec2 v_uv;
+layout(location = 5) flat in uint v_emit;
 layout(location = 0) out vec4 out_color;
 
 #include "scene_data.glsl"
@@ -45,5 +47,8 @@ void main() {
     atomicMin(gbuf.px[i].x, floatBitsToUint(max(length(v_pos - scene.eye.xyz), 1.0e-6)));
     atomicMin(gbuf.px[i].y, gi2_pack_normal(n));
     atomicMin(gbuf.px[i].z, packUnorm4x8(vec4(clamp(v_albedo, 0.0, 1.0), two_sided ? 1.0 / 255.0 : 0.0)));
+    if (v_emit != 0u) {
+        atomicMin(gbuf.px[i].w, v_emit);
+    }
     out_color = vec4(v_albedo, 1.0);
 }

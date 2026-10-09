@@ -14,6 +14,7 @@ fn main() {
     // Not embedded: catches errors in GI v2 shader pieces no pass includes yet.
     compile("shaders/gi2_check.comp", &out.join("gi2_check.comp.spv"));
     let gi2: Vec<(&str, PathBuf)> = [
+        ("GBUFFER_VERT_SPV", "gbuffer.vert"),
         ("GBUFFER_FRAG_SPV", "gbuffer.frag"),
         ("GI2_COMPACT_SPV", "gi2_compact.comp"),
         ("GI2_PLACE_SPV", "gi2_place.comp"),

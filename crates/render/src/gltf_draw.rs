@@ -67,11 +67,18 @@ impl World {
                     .sum::<f32>()
                     / weight
             });
+            let emission = std::array::from_fn(|c| {
+                mine.iter()
+                    .map(|p| p.emission[c] * p.triangles as f32)
+                    .sum::<f32>()
+                    / weight
+            });
             if let Some(sdf) = &sdfs[mesh] {
                 self.fields.push(crate::mesh_field::FieldInstance {
                     sdf: sdf.clone(),
                     pose: part.pose,
                     albedo,
+                    emission,
                     object: Some(part.object),
                 });
             }
@@ -85,7 +92,16 @@ impl World {
         place: &[f32; 16],
         affects_light: bool,
     ) -> Vec<GltfPart> {
-        let means: Vec<[f32; 3]> = scene.images.iter().map(mean_linear).collect();
+        let colors: Vec<[f32; 3]> = scene
+            .materials
+            .iter()
+            .map(|m| diffuse(m, &scene.images))
+            .collect();
+        let glows: Vec<[f32; 3]> = scene
+            .materials
+            .iter()
+            .map(|m| emission(m, &scene.images))
+            .collect();
         let mut added = Vec::new();
         for (instance_index, instance) in scene.instances.iter().enumerate() {
             let pose = mul(place, &instance.transform);
@@ -101,8 +117,14 @@ impl World {
                 if vertices.is_empty() {
                     continue;
                 }
-                let material = primitive.material.and_then(|m| scene.materials.get(m));
-                let color = material.map_or([1.0; 3], |m| diffuse(m, &means));
+                let color = primitive
+                    .material
+                    .and_then(|m| colors.get(m).copied())
+                    .unwrap_or([1.0; 3]);
+                let glow = primitive
+                    .material
+                    .and_then(|m| glows.get(m).copied())
+                    .unwrap_or([0.0; 3]);
                 let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
                 for v in &vertices {
                     let p = transform_pose(&pose, *v);
@@ -116,6 +138,7 @@ impl World {
                     object: self.objects.len(),
                     pose,
                     color,
+                    emission: glow,
                     triangles: vertices.len() / 3,
                 });
                 self.objects.push(Object {
@@ -129,6 +152,7 @@ impl World {
                         vertices,
                         color,
                         pose,
+                        emission: glow,
                     },
                 });
             }
@@ -143,38 +167,73 @@ struct GltfPart {
     object: usize,
     pose: [f32; 16],
     color: [f32; 3],
+    emission: [f32; 3],
     triangles: usize,
 }
 
-/// Mean diffuse albedo of a material, with textures reduced to their mean colour.
-pub fn diffuse(m: &PbrMaterial, image_means: &[[f32; 3]]) -> [f32; 3] {
-    let tex = m
-        .base_color_texture
-        .and_then(|t| image_means.get(t.image))
-        .copied()
-        .unwrap_or([1.0; 3]);
-    // Metallic lives in the blue channel of the metallic-roughness texture (linear).
-    let metal_tex = m
+/// Mean diffuse albedo of a material, with textures reduced to one colour.
+///
+/// The engine has no specular yet, so a surface's whole reflectance has to show as
+/// diffuse. Dielectric texels reflect their base colour. Metal texels have no
+/// diffuse lobe; a rough metal scatters its base colour broadly, close to diffuse,
+/// while a mirror-like one sends it into a lobe the engine cannot draw, so metal
+/// counts as base colour times roughness. Base colour and metallic-roughness are
+/// sampled at the same texture coordinates and averaged together, since the mean of
+/// a product is not the product of the means (metal parts are often the dark parts).
+pub fn diffuse(m: &PbrMaterial, images: &[Image]) -> [f32; 3] {
+    let base_img = m.base_color_texture.and_then(|t| images.get(t.image));
+    let mr_img = m
         .metallic_roughness_texture
-        .and_then(|t| image_means.get(t.image))
-        .map_or(1.0, |mean| srgb_to_linear_inverse(mean[2]));
-    let k = 1.0 - (m.metallic * metal_tex).clamp(0.0, 1.0);
-    std::array::from_fn(|c| m.base_color[c] * tex[c] * k)
+        .and_then(|t| images.get(t.image));
+    let lut = srgb_lut();
+    // A grid over texture space, fine enough for a mean and cheap on 4k textures.
+    const GRID: u32 = 256;
+    let mut sum = [0.0f64; 3];
+    for gy in 0..GRID {
+        for gx in 0..GRID {
+            let u = (gx as f32 + 0.5) / GRID as f32;
+            let v = (gy as f32 + 0.5) / GRID as f32;
+            let base = base_img.map_or([1.0; 3], |img| {
+                let p = texel(img, u, v);
+                [lut[p[0] as usize], lut[p[1] as usize], lut[p[2] as usize]]
+            });
+            let (rough, metal) = mr_img.map_or((1.0, 1.0), |img| {
+                let p = texel(img, u, v);
+                (p[1] as f32 / 255.0, p[2] as f32 / 255.0)
+            });
+            let metal = (m.metallic * metal).clamp(0.0, 1.0);
+            let rough = (m.roughness * rough).clamp(0.0, 1.0);
+            let k = 1.0 - metal + metal * rough;
+            for c in 0..3 {
+                sum[c] += (base[c] * k) as f64;
+            }
+        }
+    }
+    let n = (GRID * GRID) as f64;
+    std::array::from_fn(|c| m.base_color[c] * (sum[c] / n) as f32)
 }
 
-/// `mean_linear` decodes sRGB; a data texture (metallic) wants the stored value.
-/// Re-encoding the mean is close enough for a mean colour.
-fn srgb_to_linear_inverse(v: f32) -> f32 {
-    if v <= 0.003_130_8 {
-        v * 12.92
-    } else {
-        1.055 * v.powf(1.0 / 2.4) - 0.055
+/// Mean emitted light of a material (linear): factor, texture and strength.
+pub fn emission(m: &PbrMaterial, images: &[Image]) -> [f32; 3] {
+    let tex = m
+        .emissive_texture
+        .and_then(|t| images.get(t.image))
+        .map_or([1.0; 3], mean_linear);
+    std::array::from_fn(|c| m.emissive[c] * tex[c] * m.emissive_strength)
+}
+
+fn texel(img: &Image, u: f32, v: f32) -> [u8; 4] {
+    let x = ((u * img.width as f32) as u32).min(img.width.saturating_sub(1));
+    let y = ((v * img.height as f32) as u32).min(img.height.saturating_sub(1));
+    let i = ((y * img.width + x) * 4) as usize;
+    match img.pixels.get(i..i + 4) {
+        Some(p) => [p[0], p[1], p[2], p[3]],
+        None => [0; 4],
     }
 }
 
-/// Mean linear colour of an sRGB image.
-pub fn mean_linear(img: &Image) -> [f32; 3] {
-    let lut: Vec<f32> = (0..256)
+fn srgb_lut() -> Vec<f32> {
+    (0..256)
         .map(|v| {
             let v = v as f32 / 255.0;
             if v <= 0.04045 {
@@ -183,7 +242,12 @@ pub fn mean_linear(img: &Image) -> [f32; 3] {
                 ((v + 0.055) / 1.055).powf(2.4)
             }
         })
-        .collect();
+        .collect()
+}
+
+/// Mean linear colour of an sRGB image.
+pub fn mean_linear(img: &Image) -> [f32; 3] {
+    let lut = srgb_lut();
     let mut sum = [0.0f64; 3];
     for p in img.pixels.chunks_exact(4) {
         for c in 0..3 {
@@ -241,13 +305,14 @@ mod tests {
             vertices,
             color,
             pose,
+            ..
         } = &o.kind
         else {
             panic!("not a mesh");
         };
         assert_eq!(vertices.len(), 36);
-        // base 0.8, 0.1, 0.1 x (1 - 0.25)
-        assert!((color[0] - 0.6).abs() < 1e-6 && (color[1] - 0.075).abs() < 1e-6);
+        // base 0.8, 0.1, 0.1 x (1 - metal + metal x roughness) = x (1 - 0.25 + 0.125)
+        assert!((color[0] - 0.7).abs() < 1e-6 && (color[1] - 0.0875).abs() < 1e-6);
         // parent T(10,0,0), child R90 S2, then lifted: the cube spans x 8..12, y -1..3.
         assert!(
             (o.bounds.center[0] - 10.0).abs() < 1e-4 && (o.bounds.center[1] - 1.0).abs() < 1e-4

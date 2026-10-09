@@ -329,8 +329,10 @@ impl Gpu {
         }
         let start = Instant::now();
         self.frag_override = Some(GBUFFER_FRAG_SPV);
+        self.vert_override = Some(GBUFFER_VERT_SPV);
         let made = self.make_pipeline(true, false, false);
         self.frag_override = None;
+        self.vert_override = None;
         self.gi2.gbuffer_pipe = made?;
         self.note_pipeline_time("gi2 gbuffer", start);
         self.gi2.ready = true;

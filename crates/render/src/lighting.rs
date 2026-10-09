@@ -226,6 +226,7 @@ fn hash_kind(world: &World, kind: &DrawKind, hasher: &mut impl std::hash::Hasher
             vertices,
             color,
             pose,
+            ..
         } => {
             3u8.hash(hasher);
             vertices.len().hash(hasher);

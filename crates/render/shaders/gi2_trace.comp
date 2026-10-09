@@ -1,10 +1,36 @@
 #version 450
 // GI v2 rays, pass 2: the screen probes' rays, then the rays of the light cache
 // patches relit this frame. A hit stores its distance and surface for the light
-// pass; a miss takes the sky. One trace site.
+// pass; a miss takes the sky. One trace site. A hit on an emissive mesh also
+// stores the light it gives off (the mesh field's emission table).
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "gi2_common.glsl"
+
+// Emitted light at a hit point: the emissive instance whose surface is nearest,
+// when the point is on it. Only instances in the emission table are sampled.
+uint gi2_hit_glow(vec3 p) {
+    uint table = mesh_field.words[2];
+    if (table == 0u) {
+        return 0u;
+    }
+    uint best = 0u;
+    float nearest = 1.0e30;
+    [[dont_unroll]] for (uint i = 0u; i < mf_count(); i++) {
+        uint glow = mesh_field.words[table + i];
+        MfInst m = mf_inst(i);
+        float near = 4.0 * m.voxel * m.dscale;
+        if (glow == 0u || any(lessThan(p, m.lo - near)) || any(greaterThan(p, m.hi + near))) {
+            continue;
+        }
+        float d = abs(mf_sample(m, mf_to_object(m, p)).x) * m.dscale;
+        if (d < near && d < nearest) {
+            nearest = d;
+            best = glow;
+        }
+    }
+    return best;
+}
 
 void main() {
     uint ray = gl_GlobalInvocationID.x;
@@ -29,5 +55,6 @@ void main() {
     vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
     vec3 tint = mix(vec3(1.0), hit.albedo, hit.color_mix);
     work.v[at] = vec4(hit.t, uintBitsToFloat(gi2_pack_normal(hn)),
-                      uintBitsToFloat(packUnorm4x8(vec4(tint * hit.reflect * GI2_PI, 0.0))), 0.0);
+                      uintBitsToFloat(packUnorm4x8(vec4(tint * hit.reflect * GI2_PI, 0.0))),
+                      uintBitsToFloat(gi2_hit_glow(origin + dir * hit.t)));
 }

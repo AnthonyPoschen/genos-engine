@@ -44,6 +44,7 @@ fn silhouette_world() -> World {
             vertices: vec![[-1.2, 0.3, 0.0], [1.2, 0.3, 0.0], [0.0, 2.4, 0.0]],
             color: [1.0, 1.0, 1.0],
             pose: identity_pose(),
+            emission: [0.0; 3],
         },
     });
     world

@@ -3,7 +3,9 @@
 // the tracer. The points are the picture's pixels (G-buffer) followed by the screen
 // probes' and the light cache's ray hits, so all share this loop and its one trace
 // site. A pixel keeps its irradiance; a hit adds the light cache's bounced
-// irradiance and turns the sum into the light it sends back along the ray.
+// irradiance and turns the sum into the light it sends back along the ray, plus
+// any light the surface emits. A pixel's emitted light (G-buffer w from the
+// raster) moves to the output buffer for the final pass.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "gi2_common.glsl"
@@ -51,9 +53,12 @@ void main() {
         }
     }
     if (idx < pixels) {
+        uint glow = gbuf.px[idx].w;
+        outc.px[idx] = glow == ~0u ? 0u : glow;
         gbuf.px[idx].w = gi2_pack_rgb9e5(e);
     } else {
         e += gi2_cache_irradiance(pos, n);
-        work.v[gi2_rad_at(idx - pixels)] = vec4(reflectance * e, 0.0);
+        vec3 glow = gi2_unpack_rgb9e5(floatBitsToUint(work.v[gi2_hit_at(idx - pixels)].w));
+        work.v[gi2_rad_at(idx - pixels)] = vec4(reflectance * e + glow, 0.0);
     }
 }
