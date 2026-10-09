@@ -123,7 +123,8 @@ The goal is that a probe at rest holds the light a probe that never stops updati
 | Shell drift | `shell_priority`, `SHELL_DRIFT`, `ERROR_GAIN`, `basis_up` | An outside brick whose sun moved since it settled restarts and ranks higher | becomes the error estimate |
 | Lamp focus | `focus`, `FOCUS_FLOOR` | A change run ranks by the share of view light its lamp brings | becomes the error estimate |
 | Staleness | `since`, `weights.stale` | Rank rises with time since the last whole update | keep, visible bricks only |
-| Notice review | `review_faces`, `apply_notice`, `keep_finer` | CPU copy of the band test that skips or marks a run; only tests call it | remove |
+| Notice review | `review_faces`, `apply_notice`, `keep_finer` | CPU copy of the band test that skips or marks a run; only tests called it | removed |
+| Light tree | `LightTree`, `shade_at` | Lamp clusters rebuilt on every lamp change; only a test read them | removed |
 | Fine-depth pin | `batch_seen`, `outside_far` | Pins `fine_depth` to 48 m from far outside; `fine_depth` only feeds stats | remove |
 | Slot cap ranking | `reallocate` | Over 1024 bricks, keep the most prominent, then the nearest | keep |
 

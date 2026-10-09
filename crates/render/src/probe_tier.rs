@@ -459,28 +459,6 @@ fn interior_point(p: [f32; 3], hull: &SurfaceBox) -> bool {
     (0..3).all(|i| p[i] > hull.min[i] + 0.3 && p[i] < hull.max[i] - 0.3) && p[1] < hull.max[1]
 }
 
-/// Relative luminance of one probe face.
-pub fn face_luma(color: [f32; 3]) -> f32 {
-    0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
-}
-
-/// True when `fresh` is inside [`NOTICE_BAND`] of `stored`. The gather keeps `stored`.
-pub fn notice_keeps_face(stored: [f32; 3], fresh: [f32; 3]) -> bool {
-    let a = face_luma(stored);
-    let b = face_luma(fresh);
-    let scale = a.max(b).max(1.0e-3);
-    (a - b).abs() / scale < notice_band()
-}
-
-/// The face the picture stores: `stored` when the new light is inside the notice band.
-pub fn apply_notice(stored: [f32; 3], fresh: [f32; 3]) -> [f32; 3] {
-    if notice_keeps_face(stored, fresh) {
-        stored
-    } else {
-        fresh
-    }
-}
-
 fn normalize3(v: [f32; 3]) -> [f32; 3] {
     let len = v.iter().map(|c| c * c).sum::<f32>().sqrt().max(1.0e-6);
     v.map(|c| c / len)
@@ -653,22 +631,6 @@ pub fn prominence_spacing(score: f32, geometry: f32) -> f32 {
         step *= 0.5;
     }
     step
-}
-
-/// Spacing a surface deserves from `eye`. Depth is the distance, not a screen test.
-pub fn surface_spacing(eye: [f32; 3], center: [f32; 3], extent: f32, geometry: f32) -> f32 {
-    let depth = (0..3)
-        .map(|i| (center[i] - eye[i]).powi(2))
-        .sum::<f32>()
-        .sqrt();
-    prominence_spacing(prominence(extent, depth), geometry)
-}
-
-/// True when a probe already finer than `score_spacing` keeps its samples.
-/// A change inside the notice band does not rebuild it and does not coarsen it.
-/// A change outside the band does not keep it.
-pub fn keep_finer(spacing: f32, score_spacing: f32, stored: [f32; 3], fresh: [f32; 3]) -> bool {
-    spacing + 1.0e-3 < score_spacing && notice_keeps_face(stored, fresh)
 }
 
 /// Sort key for dropping a brick when the slot cap is full.
@@ -1264,147 +1226,8 @@ pub struct TierStats {
     pub top_light: Option<(usize, f32)>,
 }
 
-/// One light the shade uses. A parent holds the sum of its children.
-#[derive(Clone, Copy, Debug)]
-struct LightNode {
-    pos: [f32; 3],
-    color: [f32; 3],
-    children: Option<(usize, usize)>,
-}
-
-/// Lamps clustered by position. A probe keeps the deepest node that is still one
-/// light from where it stands. The shade reads [`LightTree::pick`].
-#[derive(Clone, Debug, Default)]
-pub struct LightTree {
-    nodes: Vec<LightNode>,
-    root: Option<usize>,
-    sources: Vec<([f32; 3], [f32; 3])>,
-}
-
-/// Angle, in radians, under which two lights stay one light.
-pub const CLUSTER_ANGLE: f32 = 0.2;
-
-impl LightTree {
-    pub fn build(lamps: &[TierLight]) -> Self {
-        let points: Vec<&TierLight> = lamps.iter().filter(|light| !light.directional).collect();
-        let mut nodes: Vec<LightNode> = points
-            .iter()
-            .map(|light| LightNode {
-                pos: light.pos,
-                color: light.color,
-                children: None,
-            })
-            .collect();
-        let sources = points
-            .iter()
-            .map(|light| (light.pos, light.color))
-            .collect();
-        if nodes.is_empty() {
-            return Self {
-                nodes,
-                root: None,
-                sources,
-            };
-        }
-        let mut live: Vec<usize> = (0..nodes.len()).collect();
-        while live.len() > 1 {
-            let mut best = (0usize, 1usize, f32::MAX);
-            for i in 0..live.len() {
-                for j in (i + 1)..live.len() {
-                    let d = light_dist(nodes[live[i]].pos, nodes[live[j]].pos);
-                    if d < best.2 {
-                        best = (i, j, d);
-                    }
-                }
-            }
-            let a = live[best.0];
-            let b = live[best.1];
-            let color = [0, 1, 2].map(|i| nodes[a].color[i] + nodes[b].color[i]);
-            let wa = nodes[a].color.iter().fold(0.0f32, |m, c| m + c.abs());
-            let wb = nodes[b].color.iter().fold(0.0f32, |m, c| m + c.abs());
-            let w = (wa + wb).max(1.0e-4);
-            let pos = [0, 1, 2].map(|i| (nodes[a].pos[i] * wa + nodes[b].pos[i] * wb) / w);
-            let parent = nodes.len();
-            nodes.push(LightNode {
-                pos,
-                color,
-                children: Some((a, b)),
-            });
-            let (lo, hi) = if best.0 < best.1 {
-                (best.0, best.1)
-            } else {
-                (best.1, best.0)
-            };
-            live.remove(hi);
-            live.remove(lo);
-            live.push(parent);
-        }
-        Self {
-            root: Some(live[0]),
-            nodes,
-            sources,
-        }
-    }
-
-    /// A sway under each lamp's move limit keeps these nodes.
-    pub fn same_nodes(&self, lamps: &[TierLight]) -> bool {
-        let points: Vec<&TierLight> = lamps.iter().filter(|light| !light.directional).collect();
-        if points.len() != self.sources.len() {
-            return false;
-        }
-        points.iter().zip(&self.sources).all(|(light, old)| {
-            light_dist(light.pos, old.0) <= cluster_move_limit(old.1)
-                && light
-                    .color
-                    .iter()
-                    .zip(old.1)
-                    .all(|(a, b)| (a - b).abs() <= notice_band() * b.abs().max(1.0e-3))
-        })
-    }
-
-    /// The lights `from` shades. A small angle is the parent. A wide angle is the children.
-    pub fn pick(&self, from: [f32; 3]) -> Vec<([f32; 3], [f32; 3])> {
-        let mut out = Vec::new();
-        if let Some(root) = self.root {
-            self.walk(root, from, &mut out);
-        }
-        out
-    }
-
-    fn walk(&self, index: usize, from: [f32; 3], out: &mut Vec<([f32; 3], [f32; 3])>) {
-        let node = &self.nodes[index];
-        if let Some((a, b)) = node.children {
-            let ang = light_angle(from, self.nodes[a].pos, self.nodes[b].pos);
-            if ang <= CLUSTER_ANGLE {
-                out.push((node.pos, node.color));
-            } else {
-                self.walk(a, from, out);
-                self.walk(b, from, out);
-            }
-        } else {
-            out.push((node.pos, node.color));
-        }
-    }
-}
-
-fn cluster_move_limit(color: [f32; 3]) -> f32 {
-    (visible_reach(color) * 0.01).max(LAMP_MOVE)
-}
-
 fn light_dist(a: [f32; 3], b: [f32; 3]) -> f32 {
     (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>().sqrt()
-}
-
-fn light_angle(from: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
-    let u = [0, 1, 2].map(|i| a[i] - from[i]);
-    let v = [0, 1, 2].map(|i| b[i] - from[i]);
-    let lu = light_dist(u, [0.0; 3]);
-    let lv = light_dist(v, [0.0; 3]);
-    if lu < 1.0e-4 || lv < 1.0e-4 {
-        return 0.0;
-    }
-    let d = (0..3).map(|i| u[i] * v[i]).sum::<f32>() / (lu * lv);
-    d.clamp(-1.0, 1.0).acos()
 }
 
 /// The persistent tier on the CPU: which brick lives in which slot, what each slot
@@ -1459,7 +1282,6 @@ pub struct TierState {
     /// Last camera position. Prominence is measured from here.
     eye: [f32; 3],
     /// Lamp clusters the shade reads. Rebuilt when a lamp moves past its threshold.
-    light_tree: LightTree,
     /// Debug overlay. Off unless asked. Turning it on does not allocate probes.
     debug_view: bool,
     /// Per slot: how much of the view reads the brick's light ([`Self::look`]).
@@ -1539,39 +1361,12 @@ impl TierState {
             weights: TierWeights::default(),
             look_frame: 0,
             eye: [0.0; 3],
-            light_tree: LightTree::default(),
             debug_view: false,
         }
     }
 
-    /// The lamp clusters a probe at `from` shades with. One cluster is one light.
-    pub fn shade_at(&self, from: [f32; 3]) -> Vec<([f32; 3], [f32; 3])> {
-        self.light_tree.pick(from)
-    }
-
     pub fn debug_view(&self) -> bool {
         self.debug_view
-    }
-
-    fn spacing_at(&self, brick: [i32; 3]) -> f32 {
-        let mut best = 1.0f32;
-        let mut best_score = -1.0f32;
-        for b in &self.boxes {
-            let extent = (0..3)
-                .map(|i| b.max[i] - b.min[i])
-                .fold(0.0f32, f32::max)
-                .max(1.0);
-            let mid = [0, 1, 2].map(|i| 0.5 * (b.min[i] + b.max[i]));
-            let step = surface_spacing(self.eye, mid, extent, extent);
-            let depth = light_dist(self.eye, mid).max(0.25);
-            let score = prominence(extent, depth);
-            if score > best_score {
-                best_score = score;
-                best = step;
-            }
-        }
-        let _ = brick;
-        best
     }
 
     /// The debug view does not place or drop probes.
@@ -1831,9 +1626,6 @@ impl TierState {
             } else {
                 slot.restart();
             }
-        }
-        if !self.light_tree.same_nodes(lights) {
-            self.light_tree = LightTree::build(lights);
         }
         changed
     }
@@ -3090,46 +2882,6 @@ impl TierState {
             }
         }
     }
-
-    /// Keep each face the notice band would keep. A brick whose faces all stay
-    /// stored skips the run that was marked. A face outside the band marks the brick.
-    /// The gather in `light.comp` applies the same test before it copies a face.
-    pub fn review_faces(
-        &mut self,
-        brick: [i32; 3],
-        stored: [[f32; 3]; 6],
-        fresh: [[f32; 3]; 6],
-    ) -> [[f32; 3]; 6] {
-        let mut kept = stored;
-        let mut outside = false;
-        for i in 0..6 {
-            kept[i] = apply_notice(stored[i], fresh[i]);
-            outside |= !notice_keeps_face(stored[i], fresh[i]);
-        }
-        let score_spacing = self.spacing_at(brick);
-        if let Some(&id) = self.by_brick.get(&brick) {
-            if let Some(slot) = self.slots.get_mut(id as usize).and_then(Option::as_mut) {
-                let finer = (0..6)
-                    .all(|i| keep_finer(self.layout.spacing, score_spacing, stored[i], fresh[i]));
-                if finer {
-                    slot.change_left = 0;
-                    slot.again = false;
-                    slot.replace = false;
-                    slot.darken = false;
-                    return kept;
-                }
-                if !outside {
-                    slot.change_left = 0;
-                    slot.again = false;
-                    slot.replace = false;
-                    slot.darken = false;
-                } else if slot.filled && slot.change_left == 0 && !slot.replace {
-                    slot.restart();
-                }
-            }
-        }
-        kept
-    }
 }
 
 /// The picture shows this build at once. A moving box blends, so a history of 3
@@ -4001,25 +3753,6 @@ mod tests {
     }
 
     #[test]
-    fn a_large_near_surface_behind_the_camera_is_finer_than_a_small_far_one() {
-        let eye = [0.0, 1.7, 0.0];
-        let behind = surface_spacing(eye, [0.0, 1.7, -3.0], 6.0, 6.0);
-        let far = surface_spacing(eye, [0.0, 1.7, 40.0], 0.4, 6.0);
-        assert!(behind < far, "behind {behind} m, far {far} m");
-        assert!((behind - 1.0).abs() < 1.0e-4);
-        assert!(far >= 4.0);
-    }
-
-    #[test]
-    fn a_finer_probe_inside_the_band_is_kept() {
-        let stored = [0.20, 0.18, 0.16];
-        let fresh = [0.202, 0.181, 0.161];
-        assert!(keep_finer(1.0, 4.0, stored, fresh));
-        assert!(!keep_finer(4.0, 4.0, stored, fresh));
-        assert!(!keep_finer(1.0, 4.0, stored, [0.8, 0.1, 0.1]));
-    }
-
-    #[test]
     fn the_slot_cap_drops_a_dim_offscreen_probe_before_one_on_screen() {
         let dim = retire_key(false, 0.01);
         let bright = retire_key(false, 2.0);
@@ -4087,58 +3820,6 @@ mod tests {
         tier.set_debug_view(true);
         assert!(tier.debug_view());
         assert_eq!(tier.stats().bricks, before);
-    }
-
-    #[test]
-    fn a_far_pair_is_one_light_and_a_near_pair_is_two() {
-        let lamps = [
-            TierLight {
-                pos: [0.0, 2.0, 0.0],
-                color: [0.4, 0.2, 0.1],
-                directional: false,
-            },
-            TierLight {
-                pos: [1.0, 2.0, 0.0],
-                color: [0.2, 0.3, 0.1],
-                directional: false,
-            },
-        ];
-        let tree = LightTree::build(&lamps);
-        let far = tree.pick([0.5, 2.0, 40.0]);
-        assert_eq!(far.len(), 1, "a far pair stayed split");
-        let near = tree.pick([0.5, 2.0, 0.5]);
-        assert_eq!(near.len(), 2, "a near pair stayed one light");
-        let sum = [0, 1, 2].map(|i| lamps[0].color[i] + lamps[1].color[i]);
-        for i in 0..3 {
-            let scale = sum[i].abs().max(1.0e-3);
-            assert!(
-                (far[0].1[i] - sum[i]).abs() / scale < NOTICE_BAND,
-                "the cluster missed the lamp sum"
-            );
-        }
-        let sway = [
-            TierLight {
-                pos: [0.02, 2.0, 0.0],
-                ..lamps[0]
-            },
-            lamps[1],
-        ];
-        assert!(tree.same_nodes(&sway), "a sway rebuilt the tree");
-        let moved = [
-            TierLight {
-                pos: [3.0, 2.0, 0.0],
-                ..lamps[0]
-            },
-            lamps[1],
-        ];
-        assert!(!tree.same_nodes(&moved), "a real move kept the old nodes");
-        let mut tier = TierState::default();
-        tier.update(Vec::new(), 0, [0.0, 1.7, 0.0], &lamps);
-        assert_eq!(tier.shade_at([0.5, 2.0, 40.0]).len(), 1);
-        tier.update(Vec::new(), 0, [0.0, 1.7, 0.0], &sway);
-        assert_eq!(tier.shade_at([0.5, 2.0, 40.0]).len(), 1);
-        tier.update(Vec::new(), 0, [0.5, 2.0, 0.5], &moved);
-        assert_eq!(tier.shade_at([0.5, 2.0, 0.5]).len(), 2);
     }
 
     #[test]
@@ -4389,56 +4070,6 @@ mod tests {
         assert_eq!(
             tier.slots[slot as usize].as_ref().unwrap().change_left,
             CHANGE_PASSES
-        );
-    }
-
-    #[test]
-    fn the_notice_band_skips_a_face_run_or_marks_it() {
-        let eye = [0.0, 1.7, 0.0];
-        let lamp = TierLight {
-            pos: [0.0, 2.5, 0.0],
-            color: [1.0; 3],
-            directional: false,
-        };
-        let mut tier = TierState::default();
-        tier.update(room(), 0, eye, &[lamp]);
-        settle(&mut tier, eye);
-        tier.update(
-            room(),
-            0,
-            eye,
-            &[TierLight {
-                pos: [1.0, 2.5, 0.0],
-                ..lamp
-            }],
-        );
-        let brick = tier
-            .slots
-            .iter()
-            .flatten()
-            .find(|slot| slot.change_left > 0)
-            .unwrap()
-            .brick;
-        let stored = [[0.40, 0.40, 0.40]; 6];
-        let close = [[0.404, 0.40, 0.40]; 6];
-        let kept = tier.review_faces(brick, stored, close);
-        assert_eq!(kept, stored);
-        assert_eq!(
-            change_at(
-                &tier,
-                brick.map(|b| (b as f32 + 0.5) * tier.layout.brick_span())
-            ),
-            Some(0)
-        );
-        let fresh = [[0.80, 0.40, 0.40]; 6];
-        let marked = tier.review_faces(brick, stored, fresh);
-        assert_eq!(marked[0], fresh[0]);
-        assert_eq!(
-            change_at(
-                &tier,
-                brick.map(|b| (b as f32 + 0.5) * tier.layout.brick_span())
-            ),
-            Some(CHANGE_PASSES)
         );
     }
 
