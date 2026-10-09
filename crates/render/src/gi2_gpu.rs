@@ -23,8 +23,8 @@ pub(crate) const GI2_TILE: u32 = 16;
 /// Rays per screen probe (Low in the design; a square for the stratified pattern).
 pub(crate) const GI2_RAYS: u32 = 64;
 /// Light cache sizes; gi2_cache_slots.glsl has the same numbers.
-const GI2_CACHE_SLOTS: u64 = 65536;
-const GI2_CACHE_BATCH: u32 = 8192;
+const GI2_CACHE_SLOTS: u64 = 262144;
+const GI2_CACHE_BATCH: u32 = 16384;
 const GI2_CACHE_RAYS: u32 = 16;
 /// GI v2 counts as settled once the scene block (camera included) has stayed the
 /// same for this many frames and a full sweep of the light cache changed no patch
@@ -487,12 +487,13 @@ impl Gpu {
                 self.gi2.live = words[2];
                 if std::env::var_os("GENOS_GI_DEBUG").is_some() {
                     eprintln!(
-                        "gi2 frame {} still {} change {} relit {} live {} quiet {}",
+                        "gi2 frame {} still {} change {} relit {} live {} missed {} quiet {}",
                         self.gi2.frame,
                         self.gi2.still,
                         words[0],
                         words[1],
                         words[2],
+                        words[3],
                         self.gi2.quiet
                     );
                 }

@@ -28,7 +28,8 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint max_change;
     uint relit;
     uint live;
-    uint pad;
+    // Lookups that found neither their patch nor a free slot (the table is full).
+    uint missed;
 } gstats;
 
 
@@ -103,6 +104,7 @@ uint gi2_cache_find(vec3 pos, vec3 n, bool claim) {
 vec3 gi2_cache_irradiance(vec3 pos, vec3 n) {
     uint slot = gi2_cache_find(pos, n, true);
     if (slot == ~0u) {
+        atomicAdd(gstats.missed, 1u);
         return vec3(0.0);
     }
     cache.v[3u * slot].w = uintBitsToFloat(gi2_frame());
