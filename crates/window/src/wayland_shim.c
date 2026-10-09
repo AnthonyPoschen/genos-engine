@@ -234,9 +234,13 @@ static void pointer_axis_value120(void *data, struct wl_pointer *pointer, uint32
 static void pointer_axis_relative_direction(void *data, struct wl_pointer *pointer, uint32_t axis, uint32_t direction) {
     (void)data; (void)pointer; (void)axis; (void)direction;
 }
+// wl_pointer.warp arrived in libwayland 1.24. The seat is bound at version 5, so
+// the event never comes; older headers just lack the member.
+#ifdef WL_POINTER_WARP_SINCE_VERSION
 static void pointer_warp(void *data, struct wl_pointer *pointer, wl_fixed_t x, wl_fixed_t y) {
     (void)data; (void)pointer; (void)x; (void)y;
 }
+#endif
 
 static const struct wl_pointer_listener pointer_listener = {
     .enter = pointer_enter,
@@ -250,7 +254,9 @@ static const struct wl_pointer_listener pointer_listener = {
     .axis_discrete = pointer_axis_discrete,
     .axis_value120 = pointer_axis_value120,
     .axis_relative_direction = pointer_axis_relative_direction,
+#ifdef WL_POINTER_WARP_SINCE_VERSION
     .warp = pointer_warp,
+#endif
 };
 
 static void keyboard_keymap(void *data, struct wl_keyboard *keyboard, uint32_t format, int32_t fd, uint32_t size) {
