@@ -44,7 +44,8 @@ layout(push_constant) uniform Push {
     uvec4 dims;
     // rays per probe, tile size in pixels, z: bgra output (bit 0), frames the
     // scene has held still (bits 1-7, capped), which rays run (bits 8-9,
-    // gi2_mode) and the light cache round (bits 10-31, gi2_round), w: frame
+    // gi2_mode), young-only rounds (bit 10), lamp picks on cache rays (bit 11)
+    // and the light cache round (bits 12-31, gi2_round), w: frame
     uvec4 params;
 } pc;
 

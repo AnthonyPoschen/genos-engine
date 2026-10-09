@@ -899,7 +899,7 @@ impl Gpu {
         self.gi2.world_round = round.wrapping_add(1);
         let mut pc = pc;
         // Light cache rays only (gi2_mode 2) and this round.
-        pc[6] = (pc[6] & 0x4ff) | 2 << 8 | (round & 0x1f_ffff) << 11;
+        pc[6] = (pc[6] & 0xcff) | 2 << 8 | (round & 0xf_ffff) << 12;
         let cmd = self.gi2.world_cmd;
         let fences = [self.gi2.world_fence];
         #[repr(C)]
@@ -1071,7 +1071,11 @@ impl Gpu {
         self.gi2.stats_light[slot] = light;
         self.gi2.stats_young[slot] = young_only;
         // z: bgra, the still frames (capped) and young-only rounds (gi2_common.glsl).
-        let z = bgra | self.gi2.still.min(127) << 1 | u32::from(young_only) << 10;
+        let picks = std::env::var("GENOS_GI2_CACHE_PICKS").is_ok_and(|v| v == "1");
+        let z = bgra
+            | self.gi2.still.min(127) << 1
+            | u32::from(young_only) << 10
+            | u32::from(picks) << 11;
         let pc = [w, h, cols, rows, GI2_RAYS, gi2_tile(h), z, self.gi2.frame];
         let image = self.color.image;
         // The raster colour as the base: pixels with no surface keep it.
@@ -1111,7 +1115,7 @@ impl Gpu {
         if round {
             let n = self.gi2.world_round;
             self.gi2.world_round = n.wrapping_add(1);
-            pc[6] |= (n & 0x1f_ffff) << 11;
+            pc[6] |= (n & 0xf_ffff) << 12;
         } else {
             pc[6] |= 1 << 8;
         }

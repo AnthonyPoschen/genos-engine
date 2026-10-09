@@ -47,15 +47,48 @@ void main() {
     vec3 origin = pos + n * 0.02;
     LampList list = lamps_at(origin);
     uint count = lamp_list_size(list);
+    // Light cache rays (params.z bit 11): at most GI2_CACHE_PICKS shadow rays,
+    // lamps picked systematically in proportion to their unshadowed light, each
+    // weighted by how often it is expected to be picked (unbiased, as
+    // lamps_light_only). The pick offset hangs on the patch and the ray, so a
+    // still scene relights to the same value.
+    uint ray = idx - pixels;
+    bool pick = idx >= pixels + gi2_probe_rays() && ((pc.params.z >> 11u) & 1u) != 0u;
+    float total = 0.0;
+    uint lit = 0u;
+    float u = 0.0;
+    if (pick) {
+        uint r = ray - gi2_probe_rays();
+        uint slot = gi2_cache_batch_slot(r / GI2_CACHE_RAYS);
+        uint key = slot == ~0u ? 0u : ckeys.key[slot];
+        u = gi2_unit(key ^ ((r % GI2_CACHE_RAYS) * 0x85ebca6bu + 0x5bd1e995u));
+        [[dont_unroll]] for (uint k = 0u; k < count; k++) {
+            vec3 target;
+            vec3 light = lamp_light(lamp_list_get(list, k), origin, n, two_sided, target);
+            float w = light.r + light.g + light.b;
+            total += w;
+            lit += w > 0.0 ? 1u : 0u;
+        }
+    }
+    bool exact = !pick || lit <= GI2_CACHE_PICKS;
+    float step = total / float(GI2_CACHE_PICKS);
+    float run = 0.0;
     vec3 e = vec3(0.0);
     [[dont_unroll]] for (uint k = 0u; k < count; k++) {
         vec3 target;
         vec3 light = lamp_light(lamp_list_get(list, k), origin, n, two_sided, target);
-        if (light.r + light.g + light.b <= 0.0) {
+        float w = light.r + light.g + light.b;
+        if (w <= 0.0) {
             continue;
         }
-        if (!trace_occluded(origin, target)) {
-            e += light;
+        float times = 1.0;
+        if (!exact) {
+            float before = ceil(run / step - u);
+            run += w;
+            times = ceil(run / step - u) - before;
+        }
+        if (times > 0.0 && !trace_occluded(origin, target)) {
+            e += exact ? light : light * (times * step / w);
         }
     }
     if (idx < pixels) {

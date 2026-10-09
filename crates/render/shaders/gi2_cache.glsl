@@ -54,7 +54,7 @@ uint gi2_frame() {
 // Light cache round: which batch of live patches is relit. Rounds are counted on
 // their own (gi2_gpu.rs), so a frame without one skips no batch.
 uint gi2_round() {
-    return pc.params.z >> 11u;
+    return pc.params.z >> 12u;
 }
 
 // This round relights young patches only (params.z bit 10).
