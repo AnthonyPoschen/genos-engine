@@ -4,6 +4,7 @@ members = [
     "crates/input",
     "crates/math",
     "crates/json",
+    "crates/mesh",
     "crates/physics",
     "crates/scene",
     "crates/mcp",

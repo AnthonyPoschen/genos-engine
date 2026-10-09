@@ -167,6 +167,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-mesh"
+version = "0.1.0"
+
+[[package]]
 name = "genos-physics"
 version = "0.1.0"
 dependencies = [
@@ -178,6 +182,7 @@ name = "genos-render"
 version = "0.1.0"
 dependencies = [
  "genos-load",
+ "genos-mesh",
  "genos-scene",
  "genos-ui",
  "genos-window",
