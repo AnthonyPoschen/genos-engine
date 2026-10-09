@@ -36,16 +36,14 @@ void main() {
     if (p.x >= gbuf.header.x || p.y >= gbuf.header.y) {
         return;
     }
-    // Coplanar surfaces (overlapping walls, a floor patch) both pass the depth test
-    // and their writes race. The nearest distance wins through atomicMin (the record
-    // is all ones when empty, positive floats order as uints), so the shading point,
-    // and every shadow ray from it, is the same each frame.
+    // Only fragments at the depth prepass's final depth get here (early tests), but
+    // where faces meet or overlap several do, and plain writes race: a pixel's
+    // normal or shading point could flip between frames. Each field takes the
+    // minimum over those fragments instead (records are all ones when empty, and
+    // positive floats order as uints), the same answer every frame.
     uint i = p.y * gbuf.header.x + p.x;
-    uint d = floatBitsToUint(max(length(v_pos - scene.eye.xyz), 1.0e-6));
-    uint prev = atomicMin(gbuf.px[i].x, d);
-    if (d <= prev) {
-        gbuf.px[i].y = gi2_pack_normal(n);
-        gbuf.px[i].z = packUnorm4x8(vec4(clamp(v_albedo, 0.0, 1.0), two_sided ? 1.0 / 255.0 : 0.0));
-    }
+    atomicMin(gbuf.px[i].x, floatBitsToUint(max(length(v_pos - scene.eye.xyz), 1.0e-6)));
+    atomicMin(gbuf.px[i].y, gi2_pack_normal(n));
+    atomicMin(gbuf.px[i].z, packUnorm4x8(vec4(clamp(v_albedo, 0.0, 1.0), two_sided ? 1.0 / 255.0 : 0.0)));
     out_color = vec4(v_albedo, 1.0);
 }
