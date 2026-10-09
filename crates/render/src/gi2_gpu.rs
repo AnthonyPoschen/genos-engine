@@ -59,6 +59,8 @@ pub(crate) struct Gi2 {
     still: u32,
     /// Hash of this frame's draw instances (poses, colours, emission).
     pub(crate) draw_key: u64,
+    /// Frames in a row drawn from held light (settled): the picture no longer changes.
+    held: u32,
     /// Per frame slot: the cache pass's counters (gi2_cache.glsl `CacheStats`), and
     /// `still` as it was when that slot's frame ran (0: the scene had just changed).
     stats: [Buffer; 2],
@@ -91,6 +93,7 @@ impl Default for Gi2 {
             frame: 0,
             scene_hash: 0,
             draw_key: 0,
+            held: 0,
             still: 0,
             stats: [Buffer::empty(), Buffer::empty()],
             quiet: 0,
@@ -521,6 +524,12 @@ impl Gpu {
         }
     }
 
+    /// The picture has stopped changing: a frame drawn from held light has been
+    /// submitted after another, so one is on screen.
+    fn gi2_picture_held(&self) -> bool {
+        self.gi2.held >= 2
+    }
+
     /// GI v2 runs this frame: on, built, sized for the picture, no supersampling.
     fn gi2_active(&self) -> bool {
         self.gi2.on
@@ -657,6 +666,7 @@ impl Gpu {
         // pixels' direct light and the final pass run, so a still scene draws the
         // same picture every frame (no residual cache drift) and idles cheaply.
         let frozen = self.gi2_stats().seen_settled == 1;
+        self.gi2.held = if frozen { self.gi2.held.saturating_add(1) } else { 0 };
         let groups: Vec<(usize, u32, u32)> = if frozen {
             vec![(3, (w * h).div_ceil(64), 1), (7, w.div_ceil(8), h.div_ceil(8))]
         } else {

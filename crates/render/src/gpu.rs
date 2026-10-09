@@ -654,8 +654,7 @@ impl Renderer {
     fn note_calm(&mut self) {
         let (settled, seen) = self.gpu.tier_seen;
         if settled < seen {
-            self.calm_build =
-                self.gpu.light_begun + u64::from(self.gpu.pending_light.is_some());
+            self.calm_build = self.gpu.light_begun + u64::from(self.gpu.pending_light.is_some());
             self.calm_since = None;
         } else if self.calm_since.is_none() && self.gpu.light_done >= self.calm_build {
             self.calm_since = Some(std::time::Instant::now());
@@ -665,6 +664,11 @@ impl Renderer {
     /// The picture has stopped changing: every brick in view has its whole update on
     /// screen, and the shown light is 95% of the way to it (three time constants).
     pub fn picture_settled(&self) -> bool {
+        // GI v2 has no blend toward a build: its picture is still once it holds
+        // its light and that frame is on screen.
+        if self.gpu.gi2_active() {
+            return self.gpu.gi2_picture_held();
+        }
         self.calm_since
             .is_some_and(|t| t.elapsed().as_secs_f32() >= 3.0 * self.view_seconds)
     }
