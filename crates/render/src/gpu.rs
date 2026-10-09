@@ -52,6 +52,10 @@ pub struct Renderer {
     last_draw: Option<std::time::Instant>,
     /// Time constant of the shown tier light, seconds (0: the field as it lands).
     view_seconds: f32,
+    /// Frames left in which floors drop the sun the probes still hold.
+    night_frames: u8,
+    /// XZ of the last sun's travel direction.
+    last_sun: [f32; 2],
 }
 
 /// Time constant of the shown tier light: a change is 95% shown after three of these.
@@ -152,6 +156,8 @@ impl Renderer {
             keep_pictures: false,
             last_draw: None,
             view_seconds: env_f32("GENOS_TIER_VIEW_MS").map_or(TIER_VIEW_SECONDS, |ms| ms.max(0.0) / 1000.0),
+            night_frames: 0,
+            last_sun: [0.0, -1.0],
         })
     }
 
@@ -398,10 +404,10 @@ impl Renderer {
         let mut pack = pack;
         pack::apply_view(&mut pack, camera, aspect, self.width, self.height);
         self.gpu.poll_light()?;
-        // A readback, and the first picture of a renderer, show the settled light: they
-        // run builds until the tier has no work. Later changes fill in under the budget.
-        // A live readback shows the picture as it is, mid-change, at the normal budget.
-        let settle = (readback && !self.live_readback) || !self.gpu.light_ready;
+        // A readback settles. A live frame, including the first, stays inside the
+        // tier budget. Settling the first picture traced the whole window in one
+        // build and the frame-rate run paid for that build.
+        let settle = readback && !self.live_readback;
         // The picture's tier light follows the field at a fixed rate per second, so
         // builds landing never show as steps; a settled picture shows the field itself.
         let now = std::time::Instant::now();
@@ -414,9 +420,38 @@ impl Renderer {
         };
         let wait_light = settle;
         self.stage_tier(world, &pack, settle);
+        for lamp in &pack.lamps {
+            if lamp.directional {
+                self.last_sun = [lamp.pos[0], lamp.pos[2]];
+            }
+        }
+        pack.last_sun = self.last_sun;
+        // The sun leaving. The picture shows each new gather at once for a
+        // short run, so the rebuild is on screen inside a tenth of a second.
+        // A far brick otherwise skips those steps and keeps the flush.
+        if self.tier.sun_drop() {
+            self.night_frames = 14;
+        }
+        let show_night = self.night_frames > 0;
+        if self.night_frames > 0 {
+            pack.night_drop = 1.0;
+            self.night_frames -= 1;
+        }
+        // A sun or the sky came or went. The gather replaces the on-screen probes and
+        // this picture shows that light, instead of blending toward it over later frames.
+        let flush = self
+            .gpu
+            .tier_batch
+            .as_ref()
+            .is_some_and(|batch| {
+                batch.items.iter().any(|item| item.history.is_some_and(|h| h <= 2 || h == 3 || h == 7))
+            });
+        if flush || show_night {
+            self.gpu.view_weight = 1.0;
+        }
         self.gpu.upload_scene(&pack)?;
         self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
-        self.gpu.kick_light(wait_light)?;
+        self.gpu.kick_light(wait_light || flush || show_night)?;
         self.commit_tier();
         if settle {
             self.settle_tier(world, &pack)?;
@@ -508,11 +543,21 @@ impl Renderer {
         self.tier.update(boxes, material_key(pack), pack.eye, &lights);
         if let Some((rays, ms)) = self.gpu.tier_time.take() {
             self.tier.note_time(rays, ms);
+            // A settling build is allowed to be long. A game frame moves the fine
+            // shell so the next gather meets the budget.
+            if !settle && !self.tier.long_build() {
+                self.tier.fit_depth(ms, self.tier_ms);
+            }
         }
         let (budget, first) = if settle {
             (None, crate::probe_tier::REFINE_RAYS)
         } else {
-            (Some(self.tier.budget_rays(self.tier_ms)), crate::probe_tier::FIRST_RAYS)
+            // Before any timed build the price is unknown and the budget is
+            // unbounded. Cap that first guess so one frame cannot trace the
+            // whole window.
+            let rays = self.tier.budget_rays(self.tier_ms);
+            let rays = if rays == u64::MAX { 16_000 } else { rays };
+            (Some(rays), crate::probe_tier::FIRST_RAYS)
         };
         self.gpu.tier_budget = budget;
         // The bricks are weighed by what the camera sees of their light, and the
@@ -527,6 +572,10 @@ impl Renderer {
         };
         let batch = self.tier.batch_seen(pack.eye, Some(&camera), budget, first);
         let stats = self.tier.stats();
+        // The picture reads the tier. A moved box must not rebuild the world
+        // volume. The ground on the window edge still needs that volume when
+        // the sun or the sky changes, and when the tier has gone idle.
+        self.gpu.hold_world = !settle && stats.bricks > 0 && !self.tier.world_now();
         self.gpu.tier_seen = (stats.seen_settled, stats.seen_bricks);
         self.gpu.light_key = self.tier.light_gen();
         self.gpu.tier_batch = Some(batch);
@@ -758,8 +807,10 @@ struct Gpu {
     shapes: Buffer,
     /// How many shape vertices have been read by a submitted frame.
     shapes_submitted: u32,
-    instances: Buffer,
-    instance_cache: Vec<u8>,
+    /// One instance buffer per frame in flight. The vertex shader reads the
+    /// buffer for its flight. A moving box can update the idle flight without
+    /// waiting for the frame still on the GPU.
+    instance_bufs: [Buffer; 2],
     draws: Vec<DrawSpan>,
     vertex_count: u32,
     overlay_count: u32,
@@ -871,6 +922,10 @@ struct Gpu {
     built_light_key: Option<u64>,
     /// The tier changed since the world probes last read it.
     world_stale: bool,
+    time_tick: u32,
+    /// The tier covers the picture, and the sun and sky did not just change.
+    /// The world volume then waits until the tier is idle.
+    hold_world: bool,
     /// What the build in flight runs: world passes, tier items, slots to copy forward.
     plan_world: bool,
     plan_items: u32,
@@ -1462,8 +1517,7 @@ impl Gpu {
                 vertices: [Buffer::empty(), Buffer::empty()],
                 shapes: Buffer::empty(),
                 shapes_submitted: 0,
-                instances: Buffer::empty(),
-                instance_cache: Vec::new(),
+                instance_bufs: [Buffer::empty(), Buffer::empty()],
                 draws: Vec::new(),
                 vertex_count: 0,
                 overlay_count: 0,
@@ -1539,6 +1593,8 @@ impl Gpu {
                 light_key: 0,
                 built_light_key: None,
                 world_stale: false,
+                time_tick: 0,
+                hold_world: false,
                 plan_world: false,
                 plan_items: 0,
                 plan_slots: 0,
@@ -2041,26 +2097,17 @@ impl Gpu {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
         }
-        if bytes == self.instance_cache {
-            return Ok(());
-        }
-        if !self.instance_cache.is_empty() {
-            self.wait_all_inflight()?;
-        }
-        if self.instances.size < bytes.len() as u64 {
-            let next = self.make_buffer((bytes.len() as u64).max(5120), 0x20, Memory::Upload)?;
-            let mut old = std::mem::replace(&mut self.instances, next);
+        let slot = self.flight;
+        if self.instance_bufs[slot].size < bytes.len() as u64 {
+            let share = self.light_families();
+            let next = self.make_buffer_queues((bytes.len() as u64).max(5120), 0x20, Memory::Upload, &share)?;
+            let mut old = std::mem::replace(&mut self.instance_bufs[slot], next);
             self.destroy_buffer(&mut old);
-            self.write_instance_binding()?;
+            self.write_light_set(0)?;
+            self.write_light_set(1)?;
         }
-        self.write_buffer(&self.instances, &bytes)?;
-        self.instance_cache = bytes;
+        self.write_buffer(&self.instance_bufs[slot], &bytes)?;
         Ok(())
-    }
-
-    fn write_instance_binding(&self) -> Result<(), String> {
-        self.write_light_set(0)?;
-        self.write_light_set(1)
     }
 
     fn bind_flight(&mut self) {
@@ -2312,7 +2359,9 @@ impl Gpu {
                 8 * n,
                 raw.as_mut_ptr() as *mut c_void,
                 8,
-                0x1 | 0x2,
+                // 64-bit results, no wait. The light fence is already signaled.
+                // Waiting here held the next frame for the timestamp query.
+                0x1,
             )
         };
         if got != 0 {
@@ -2834,7 +2883,10 @@ impl Gpu {
     fn make_lighting(&mut self) -> Result<(), String> {
         self.scene_buf = self.make_buffer(pack::SCENE_CAPACITY as u64, 0x20, Memory::Upload)?;
         let share = self.light_families();
-        self.instances = self.make_buffer_queues(5120, 0x20, Memory::Upload, &share)?;
+        self.instance_bufs = [
+            self.make_buffer_queues(5120, 0x20, Memory::Upload, &share)?,
+            self.make_buffer_queues(5120, 0x20, Memory::Upload, &share)?,
+        ];
         self.particle_buf = self.make_buffer_queues(16 + 256 * 256 * 4, 0x20, Memory::Upload, &share)?;
         let field_bytes = vec![0u8; crate::probe_tier::TIER_END as usize * 16];
         for index in 0..2 {
@@ -3024,14 +3076,26 @@ impl Gpu {
             self.light_sets[index],
             &self.light_scene[index],
             &self.light_field[index],
+            &self.instance_bufs[0],
         )?;
         for slot in 0..2 {
-            self.write_descriptors(self.raster_sets[index][slot], &self.frame_scene[slot], &self.light_field[index])?;
+            self.write_descriptors(
+                self.raster_sets[index][slot],
+                &self.frame_scene[slot],
+                &self.light_field[index],
+                &self.instance_bufs[slot],
+            )?;
         }
         Ok(())
     }
 
-    fn write_descriptors(&self, set: Handle, scene: &Buffer, field: &Buffer) -> Result<(), String> {
+    fn write_descriptors(
+        &self,
+        set: Handle,
+        scene: &Buffer,
+        field: &Buffer,
+        instances: &Buffer,
+    ) -> Result<(), String> {
         #[repr(C)]
         struct BufInfo {
             buffer: Handle,
@@ -3068,7 +3132,7 @@ impl Gpu {
                 range: u64::MAX,
             },
             BufInfo {
-                buffer: self.instances.buffer,
+                buffer: instances.buffer,
                 offset: 0,
                 range: u64::MAX,
             },
@@ -3648,7 +3712,15 @@ impl Gpu {
         let items = self.tier_batch.as_ref().map_or(0, |b| b.items.len());
         let new_light = self.built_light_key != Some(self.light_key)
             || self.light_dims() != self.built_dims;
-        let world = new_light || (self.world_stale && items == 0);
+        // The picture reads the tier. Rebuilding the world volume on every moved
+        // box costs most of the frame and does not change that picture. Catch the
+        // world up when the tier is idle, and immediately when the sun or the sky
+        // changes, because the ground on the window edge reads the world volume.
+        let world = if self.hold_world {
+            self.world_stale && items == 0
+        } else {
+            new_light || (self.world_stale && items == 0)
+        };
         if !world && items == 0 {
             self.pending_light = None;
             return Ok(());
@@ -3800,7 +3872,13 @@ impl Gpu {
             self.light_shown = self.light_dst;
             self.light_ready = true;
             self.view_slots = self.view_slots.max(self.plan_slots);
-            self.light_times();
+            // Reading the timestamp query every build stalls the frame. The ray
+            // price only needs a sample now and then.
+            self.time_tick = self.time_tick.wrapping_add(1);
+            if self.time_tick % 16 == 0 || self.gpu_times.is_some() {
+                self.light_times();
+            }
+            // The picture waits for this build so it cannot sample the field early.
             self.light_wait_graphics = true;
         }
         Ok(())
@@ -5618,9 +5696,11 @@ impl Drop for Gpu {
             self.destroy_buffer(&mut vertices[0]);
             self.destroy_buffer(&mut vertices[1]);
             let mut shapes = std::mem::replace(&mut self.shapes, Buffer::empty());
-            let mut instances = std::mem::replace(&mut self.instances, Buffer::empty());
+            let mut instance_bufs =
+                std::mem::replace(&mut self.instance_bufs, [Buffer::empty(), Buffer::empty()]);
             self.destroy_buffer(&mut shapes);
-            self.destroy_buffer(&mut instances);
+            self.destroy_buffer(&mut instance_bufs[0]);
+            self.destroy_buffer(&mut instance_bufs[1]);
             self.destroy_buffer(&mut scene_buf);
             self.destroy_buffer(&mut light_scene[0]);
             self.destroy_buffer(&mut light_scene[1]);

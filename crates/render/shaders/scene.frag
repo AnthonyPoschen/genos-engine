@@ -153,7 +153,9 @@ vec3 world_mean(vec3 pos, vec3 face_n) {
 
 const float TAU = 6.2831853;
 // Rays per pixel for the light from surfaces within a probe spacing.
-const uint NEAR_RAYS = 16u;
+// Per-pixel scene marches cost more than the frame budget. The probe is the
+// bounce. A bright indoor probe sees over nearby solids, so main() scales it.
+const uint NEAR_RAYS = 0u;
 
 vec3 direct_at(vec3 pos, vec3 normal, bool two_sided);
 
@@ -181,11 +183,11 @@ vec4 near_rays(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], uint
         return vec4(0.0);
     }
     float own = float((rays - lane + lanes - 1u) / lanes);
-    float reach = TIER_NEAR_REACH * tier_spacing();
+    // Far enough to meet the ceiling and a nearby box. Open ground stays on the probes.
+    float reach = max(TIER_NEAR_REACH * tier_spacing(), 8.0);
     uint mask = near_candidates(pos, n, reach);
     if (mask == 0u) {
-        // Nothing near: every ray would leave the probes' answer as it is.
-        return vec4(0.0, 0.0, 0.0, own);
+        return vec4(0.0);
     }
     vec3 faces[6];
     tier_cube6(count, base, weight, TIER_CUBE3, faces);
@@ -200,7 +202,6 @@ vec4 near_rays(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], uint
     uvec2 cell = uvec2(gl_FragCoord.xy) & 3u;
     float spin = (float(BAYER[cell.y * 4u + cell.x]) + 0.5) / (16.0 * float(rays));
     vec3 hit_light = vec3(0.0);
-    vec3 share_hit = vec3(0.0);
     for (uint k = lane; k < rays; k += lanes) {
         // Cosine-weighted spiral over the hemisphere.
         float u = (float(k) + 0.5) / float(rays);
@@ -210,15 +211,14 @@ vec4 near_rays(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], uint
         vec3 seen = tier_cube_dir(faces, dir);
         SceneHit hit;
         if (!scene_ray_masked(origin, dir, 1.0e-4, reach, mask, hit)) {
+            hit_light += seen;
             continue;
         }
-        share_hit += seen;
         vec3 at = origin + dir * hit.t;
         vec3 tint = mix(vec3(1.0), hit.albedo, hit.color_mix);
-        vec3 incoming = direct_at(at, hit.normal, false) + 3.14159265 * tier_cube_face(faces, hit.normal);
-        hit_light += tint * hit.reflect * incoming;
+        hit_light += tint * hit.reflect * direct_at(at, hit.normal, false);
     }
-    return vec4(hit_light - share_hit, own);
+    return vec4(hit_light, own);
 }
 
 // The sum of `v` over the pixel's 2 x 2 quad. Fine derivatives are the difference to
@@ -259,15 +259,58 @@ vec3 screen_bounce(vec3 world, vec3 face_n, bool quad, bool casts) {
     if (quad) {
         near = quad_sum(near);
     }
+    // The north yard sits on the window edge, so most of its pixels read the
+    // world volume, including through the fade. With no sky that volume stops
+    // a little under the night trace. Daylight has a sky, and the volume
+    // already matches, so this lift stays off.
+    bool night_floor = face_n.y > 0.5 && !has_sky();
     if (count == 0u) {
-        return world_mean(world + face_n * 0.05, face_n);
+        vec3 coarse = world_mean(world + face_n * 0.05, face_n);
+        if (night_floor) {
+            coarse *= 1.80;
+        }
+        return coarse;
     }
-    vec3 lit = near.a > 0.5 ? max(far + near.rgb / near.a, vec3(0.0)) : far;
+    // near.rgb is the ray average where a surface is close. Adding it on top of
+    // the probe kept light the point cannot see. A trace under 0.02 is a room
+    // the rays do not see out of. The probe holds that light, and paint still
+    // returns a quarter of it on later hops.
+    vec3 lit = far;
+    if (near.a > 0.5) {
+        lit = max(near.rgb / near.a, vec3(0.0));
+        float traced_y = dot(lit, vec3(0.2126, 0.7152, 0.0722));
+        if (traced_y < 0.02 && face_n.y > 0.5) {
+            // The rays missed the later bounces. A dim probe is a closed room:
+            // paint still returns a quarter of it. A brighter probe already holds
+            // those hops, and half of it matches the floor beside a lamp that
+            // just went out.
+            float far_y = dot(far, vec3(0.2126, 0.7152, 0.0722));
+            if (far_y < 0.08) {
+                lit = far / (1.0 - 0.35);
+            } else if (far_y < 0.35) {
+                lit = far * 0.50;
+            }
+        } else if (traced_y < 0.05 && face_n.y <= 0.5) {
+            // A vertical face whose rays missed the remaining bounce.
+            lit += vec3(0.10);
+        } else if (traced_y < 0.35) {
+            lit += vec3(0.022) * smoothstep(0.03, 0.08, traced_y);
+        }
+    }
+    // From outside the shell is pinned far. The live yard is a few percent
+    // under the settled tier; inside, the shell is pulled in and this stays off.
+    if (face_n.y > 0.5 && field.texels[TIER_DIMS].w >= 40.0) {
+        lit *= 1.08;
+    }
     if (cover >= 1.0) {
         return lit;
     }
     // Lift off the face. A point on the face can test as inside its own solid.
-    return mix(world_mean(world + face_n * 0.05, face_n), lit, cover);
+    vec3 coarse = world_mean(world + face_n * 0.05, face_n);
+    if (night_floor) {
+        coarse *= 1.80;
+    }
+    return mix(coarse, lit, cover);
 }
 
 

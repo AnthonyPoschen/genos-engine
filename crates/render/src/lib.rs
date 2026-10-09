@@ -10,6 +10,7 @@ mod pool;
 mod probe_tier;
 mod probes;
 mod shadow;
+mod trace;
 mod wire;
 mod world;
 
@@ -29,6 +30,11 @@ pub use mesh::Vertex;
 pub use pack::{
     build_grid, lamp_range, pack_frame, probe_spacing, Pack, PackedDraw, SceneGrid, FIELD_PLACE,
     LAMP_CUTOFF,
+};
+pub use trace::{
+    agreement, first_outgoing, linear_from_display, luminance, radiance, radiance_hits,
+    ray_land,
+    samples_toward, sees,
 };
 pub use particles::{
     card_quad, compose_fog, fire_radiance, fog_along, frame_at, image_from_map, image_from_texture,

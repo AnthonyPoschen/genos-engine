@@ -156,6 +156,12 @@ pub struct Pack {
     /// NEAR_RAYS). `GENOS_NEAR_RAYS` sets it, so the near field's share of the raster
     /// time can be measured (0 turns it off). The shader reads it from `view_grid.z`.
     pub(crate) near_rays: u32,
+    /// 1 while floors drop the sun the probes still hold, just after it sets.
+    /// The shader reads it from `view_grid.w`.
+    pub(crate) night_drop: f32,
+    /// XZ of the last sun's travel direction. Kept after the sun sets so the
+    /// ground it used to reach can drop that bounce. `view_up.w` and `sky.w`.
+    pub(crate) last_sun: [f32; 2],
     /// Shapes and particle spans in draw order.
     pub draws: Vec<PackedDraw>,
     /// Cells over the occluders and the lamps the light passes walk.
@@ -508,6 +514,8 @@ pub fn pack_frame(
         grid_w: 1,
         grid_h: 1,
         near_rays: near_rays_override(),
+        night_drop: 0.0,
+        last_sun: [0.0, -1.0],
         draws,
     }
 }
@@ -851,7 +859,8 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     push_f32(&mut bytes, pack.view_up[0]);
     push_f32(&mut bytes, pack.view_up[1]);
     push_f32(&mut bytes, pack.view_up[2]);
-    push_f32(&mut bytes, 0.0);
+    // view_up.w: x of the last sun travel direction.
+    push_f32(&mut bytes, pack.last_sun[0]);
     push_f32(&mut bytes, pack.view_forward[0]);
     push_f32(&mut bytes, pack.view_forward[1]);
     push_f32(&mut bytes, pack.view_forward[2]);
@@ -860,13 +869,15 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     push_f32(&mut bytes, pack.grid_h as f32);
     // view_grid.z is the near-field ray override; w is unused.
     push_f32(&mut bytes, pack.near_rays as f32);
-    push_f32(&mut bytes, 0.0);
+    push_f32(&mut bytes, pack.night_drop);
     for value in pack.ceiling {
         push_f32(&mut bytes, value);
     }
-    for value in pack.sky.into_iter().chain([0.0]) {
+    for value in pack.sky {
         push_f32(&mut bytes, value);
     }
+    // sky.w: z of the last sun travel direction.
+    push_f32(&mut bytes, pack.last_sun[1]);
     for value in grid.occ.into_iter().chain(grid.lamp) {
         push_f32(&mut bytes, value);
     }

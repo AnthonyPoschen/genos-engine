@@ -7,6 +7,10 @@ publish = false
 [lints]
 workspace = true
 
+[lib]
+name = "genos_stress"
+path = "src/lib.rs"
+
 [[bin]]
 name = "genos-stress"
 path = "src/main.rs"

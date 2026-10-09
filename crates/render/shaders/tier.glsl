@@ -163,10 +163,12 @@ uvec3 tier_faces_of(vec3 n) {
 // read the stored light.
 vec3 tier_light(uint b, uint cube, uint f) {
 #ifdef TIER_VIEW
-    return tier_view.texels[b - TIER_PROBES + cube + f].rgb;
-#else
-    return field.texels[b + cube + f].rgb;
+    // The view copy keeps only the top cube. Lower cubes stay in the field.
+    if (cube == TIER_CUBE3) {
+        return tier_view.texels[b - TIER_PROBES + cube + f].rgb;
+    }
 #endif
+    return field.texels[b + cube + f].rgb;
 }
 
 vec3 tier_cube_at(uint b, uint cube, vec3 n) {
