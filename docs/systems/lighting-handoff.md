@@ -28,6 +28,8 @@ Release, small stress, 1280×720, 600 frames, on the shipped shader:
 - Moving is about 55 percent of idle. The bar is 80 percent, about 466 fps.
 - Hall raster was about 2.7 ms.
 
+At 2560×1440 on an RTX 4070 (`9ae7541`): moving hall 102 to 104 fps, idle 246 to 251 fps, about 41 percent. Hall raster plus near is 9.1 to 9.4 ms. The moving hall is raster bound.
+
 That idle eye frames the 25 m south face at a 60 degree view. A closer eye cuts the sides off. Do not use a sky-heavy eye, and do not use a closer eye that cannot see the whole section.
 
 ## Tried and rejected
@@ -39,6 +41,8 @@ Do not repeat these. They either exhaust the NVIDIA compiler or make the hall sl
 - One shadow ray per pixel. That drops the other lamps, and the raster was still about 2.1 ms.
 - One sun ray shared by a 2×2 quad. About 8.8 ms when a triangle edge threw the ray, and about 3.6 ms with that throw clamped.
 - An empty-cell chebyshev jump in the shader, on top of the shipped safe-box jump. A later 600-frame pair was about 250 and 247 fps moving, and about 385 fps idle. Slower than the shipped shader. It was reverted. The CPU walk still has that jump. The shader steps one cell when the slot's high bit is set.
+
+- An any-hit walk: `occ_walk` and the shape list stop at the first blocker (a `first` flag), and `scene_ray_any` tests the planes first. It passed lavapipe, but on the RTX 4070 the driver compiler took the stress process to 23 GB resident before it was killed. It was reverted. `any` is a GLSL builtin, so do not name a function or variable that.
 
 Forcing early fragment tests, and turning depth writes off on the shade pass, left the hall raster at about 2.7 ms. The depth prepass is already vertex-only. That change was reverted.
 

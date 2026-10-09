@@ -42,8 +42,10 @@ pub struct Renderer {
     cascade_lines: Vec<crate::pack::GpuVertex>,
     /// The persistent world probe tier: bricks, slots and the work still due.
     tier: crate::probe_tier::TierState,
-    /// GPU milliseconds a frame may spend on tier work.
+    /// Least GPU milliseconds a light build may spend on tier work.
     tier_ms: f64,
+    /// Running time between pictures, milliseconds. A build may take as long as a frame.
+    frame_ms: f64,
     /// Readbacks show the light on screen instead of settling it first.
     live_readback: bool,
     /// Every frame copies its picture into host memory, for `read_earlier_frame`.
@@ -62,6 +64,15 @@ pub struct Renderer {
 /// Builds land every few frames with fresh, noisy estimates; following them at a fixed
 /// rate per second hides the steps and the noise and adds this much lag.
 const TIER_VIEW_SECONDS: f32 = 0.033;
+
+/// A light build runs on its own queue beside the pictures and is timed from start to
+/// end, so its time holds the frames it overlapped. A build as long as a frame keeps
+/// the picture near its rate while it traces several times what the fixed floor of
+/// `tier_ms` does: on a 9 ms frame the floor left a moving hall two bricks a second.
+/// Longer gaps than this are pauses, not frames.
+const FRAME_MS_MAX: f64 = 50.0;
+/// Weight of a new frame time in the running one.
+const FRAME_MS_RISE: f64 = 0.05;
 
 fn env_f32(name: &str) -> Option<f32> {
     std::env::var(name).ok().and_then(|v| v.parse().ok())
@@ -157,6 +168,7 @@ impl Renderer {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1.5),
+            frame_ms: 0.0,
             live_readback: false,
             keep_pictures: false,
             last_draw: None,
@@ -419,6 +431,9 @@ impl Renderer {
         let now = std::time::Instant::now();
         let dt = self.last_draw.map_or(1.0, |t| (now - t).as_secs_f32());
         self.last_draw = Some(now);
+        if !settle && dt < FRAME_MS_MAX as f32 / 1000.0 {
+            self.frame_ms += (f64::from(dt) * 1000.0 - self.frame_ms) * FRAME_MS_RISE;
+        }
         self.gpu.view_weight = if settle || self.view_seconds <= 0.0 {
             1.0
         } else {
@@ -540,7 +555,7 @@ impl Renderer {
 
     /// Follow the camera, scene and lights in the tier, then hand the next build its
     /// work. `settle` takes everything that is due in one build; otherwise the work
-    /// fits `tier_ms` of GPU time.
+    /// fits the time of a frame, and at least `tier_ms`.
     fn stage_tier(&mut self, world: &World, pack: &pack::Pack, settle: bool) {
         let boxes = crate::probe_tier::scene_boxes(&world.scene);
         let lights = tier_lights(pack);
@@ -549,12 +564,13 @@ impl Renderer {
         }
         self.tier
             .update(boxes, material_key(pack), pack.eye, &lights);
+        let build_ms = self.tier_ms.max(self.frame_ms);
         if let Some((rays, ms)) = self.gpu.tier_time.take() {
             self.tier.note_time(rays, ms);
             // A settling build is allowed to be long. A game frame moves the fine
             // shell so the next gather meets the budget.
             if !settle && !self.tier.long_build() {
-                self.tier.fit_depth(ms, self.tier_ms);
+                self.tier.fit_depth(ms, build_ms);
             }
         }
         let (budget, first) = if settle {
@@ -563,7 +579,7 @@ impl Renderer {
             // Before any timed build the price is unknown and the budget is
             // unbounded. Cap that first guess so one frame cannot trace the
             // whole window.
-            let rays = self.tier.budget_rays(self.tier_ms);
+            let rays = self.tier.budget_rays(build_ms);
             let rays = if rays == u64::MAX { 16_000 } else { rays };
             (Some(rays), crate::probe_tier::FIRST_RAYS)
         };
