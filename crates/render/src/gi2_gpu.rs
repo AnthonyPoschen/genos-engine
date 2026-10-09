@@ -8,6 +8,9 @@
 //   trace    the probes' rays through the tracer (analytic shapes + mesh SDFs)
 //   light    direct light with shadow rays at every pixel and every probe ray hit
 //   gather   ray radiance to irradiance SH per probe
+//   filter   each probe's SH averaged with its matching 3 x 3 neighbours
+//   cache    relight a batch of light cache patches (gi2_cache.glsl): every bounce
+//            after the first, read where probe and cache rays hit
 //   compose  direct + probe irradiance per pixel, tone curve, dither
 //
 // The result goes back into the colour image, so anti-aliasing, overlays, readback
@@ -18,6 +21,13 @@
 pub(crate) const GI2_TILE: u32 = 16;
 /// Rays per screen probe (Low in the design; a square for the stratified pattern).
 pub(crate) const GI2_RAYS: u32 = 64;
+/// Light cache sizes; gi2_cache_slots.glsl has the same numbers.
+const GI2_CACHE_SLOTS: u64 = 65536;
+const GI2_CACHE_BATCH: u32 = 8192;
+const GI2_CACHE_RAYS: u32 = 16;
+/// Frames of an unchanged scene after which GI v2 counts as settled: every cache
+/// patch relit four times (four more bounces).
+const GI2_SETTLE_FRAMES: u32 = 4 * (GI2_CACHE_SLOTS as u32 / GI2_CACHE_BATCH);
 
 pub(crate) struct Gi2 {
     pub(crate) on: bool,
@@ -26,11 +36,19 @@ pub(crate) struct Gi2 {
     layout: Handle,
     pool: Handle,
     sets: [Handle; 2],
-    pipes: [Handle; 5],
+    pipes: [Handle; 7],
     gbuffer_pipe: Handle,
     gbuf: Buffer,
     work: Buffer,
     out: Buffer,
+    cache_keys: Buffer,
+    cache: Buffer,
+    /// The cache buffers are new and get zeroed before the next frame's passes.
+    cache_clear: bool,
+    frame: u32,
+    /// Hash of the last frame's scene block, and frames it has stayed the same.
+    scene_hash: u64,
+    still: u32,
     dims: [u32; 4],
 }
 
@@ -43,21 +61,29 @@ impl Default for Gi2 {
             layout: std::ptr::null_mut(),
             pool: std::ptr::null_mut(),
             sets: [std::ptr::null_mut(); 2],
-            pipes: [std::ptr::null_mut(); 5],
+            pipes: [std::ptr::null_mut(); 7],
             gbuffer_pipe: std::ptr::null_mut(),
             gbuf: Buffer::empty(),
             work: Buffer::empty(),
             out: Buffer::empty(),
+            cache_keys: Buffer::empty(),
+            cache: Buffer::empty(),
+            cache_clear: false,
+            frame: 0,
+            scene_hash: 0,
+            still: 0,
             dims: [0; 4],
         }
     }
 }
 
-const GI2_PASS_NAMES: [&str; 5] = [
+const GI2_PASS_NAMES: [&str; 7] = [
     "gi2 place",
     "gi2 trace",
     "gi2 light",
     "gi2 gather",
+    "gi2 filter",
+    "gi2 cache",
     "gi2 compose",
 ];
 
@@ -98,7 +124,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -187,7 +213,7 @@ impl Gpu {
                 ),
                 "gi2 pipeline layout",
             )?;
-            let size = Size { kind: 7, count: 10 };
+            let size = Size { kind: 7, count: 14 };
             let pool = PoolInfo {
                 s_type: 33,
                 next: std::ptr::null(),
@@ -222,11 +248,13 @@ impl Gpu {
                 "gi2 descriptor sets",
             )?;
         }
-        let codes: [&[u8]; 5] = [
+        let codes: [&[u8]; 7] = [
             GI2_PLACE_SPV,
             GI2_TRACE_SPV,
             GI2_LIGHT_SPV,
             GI2_GATHER_SPV,
+            GI2_FILTER_SPV,
+            GI2_CACHE_SPV,
             GI2_COMPOSE_SPV,
         ];
         for (k, code) in codes.iter().enumerate() {
@@ -309,15 +337,21 @@ impl Gpu {
         let cols = w.div_ceil(GI2_TILE);
         let rows = h.div_ceil(GI2_TILE);
         let probes = (cols * rows) as u64;
-        let rays = probes * GI2_RAYS as u64;
+        let rays = probes * GI2_RAYS as u64 + (GI2_CACHE_BATCH * GI2_CACHE_RAYS) as u64;
         let pixels = w as u64 * h as u64;
-        let work_vec4 = 2 * probes + 4 * rays + pixels + 7 * probes;
+        let work_vec4 = 2 * probes + 4 * rays + pixels + 14 * probes;
         let mut gbuf = std::mem::replace(&mut self.gi2.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.gi2.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.gi2.out, Buffer::empty());
         self.destroy_buffer(&mut gbuf);
         self.destroy_buffer(&mut work);
         self.destroy_buffer(&mut out);
+        if self.gi2.cache_keys.buffer.is_null() {
+            self.gi2.cache_keys =
+                self.make_buffer(GI2_CACHE_SLOTS * 4, 0x20 | 0x2, Memory::Device)?;
+            self.gi2.cache = self.make_buffer(GI2_CACHE_SLOTS * 48, 0x20 | 0x2, Memory::Device)?;
+            self.gi2.cache_clear = true;
+        }
         self.gi2.gbuf = self.make_buffer(16 + pixels * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.gi2.work = self.make_buffer(work_vec4 * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.gi2.out = self.make_buffer(pixels * 4, 0x20 | 0x1 | 0x2, Memory::Device)?;
@@ -354,6 +388,8 @@ impl Gpu {
                 (6, self.gi2.gbuf.buffer),
                 (7, self.gi2.work.buffer),
                 (8, self.gi2.out.buffer),
+                (9, self.gi2.cache_keys.buffer),
+                (10, self.gi2.cache.buffer),
             ];
             let infos: Vec<BufInfo> = buffers
                 .iter()
@@ -392,6 +428,18 @@ impl Gpu {
         Ok(())
     }
 
+    /// Settle state for the debug tools, in the tier's terms: one "brick", settled
+    /// once the scene (camera included) has not changed for GI2_SETTLE_FRAMES.
+    fn gi2_stats(&self) -> crate::probe_tier::TierStats {
+        let settled = self.gi2.still >= GI2_SETTLE_FRAMES;
+        crate::probe_tier::TierStats {
+            seen_bricks: 1,
+            seen_settled: usize::from(settled),
+            pending_bricks: usize::from(!settled),
+            ..Default::default()
+        }
+    }
+
     /// GI v2 runs this frame: on, built, sized for the picture, no supersampling.
     fn gi2_active(&self) -> bool {
         self.gi2.on
@@ -403,9 +451,14 @@ impl Gpu {
 
     /// Before the raster: the G-buffer size header, and the last frame's passes done
     /// with the buffers this frame's raster writes.
-    fn gi2_begin(&self) {
+    fn gi2_begin(&mut self) {
         let header = [self.gi2.dims[0], self.gi2.dims[1], 0, 0];
         unsafe {
+            if self.gi2.cache_clear {
+                self.gi2.cache_clear = false;
+                (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache_keys.buffer, 0, u64::MAX, 0);
+                (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache.buffer, 0, u64::MAX, 0);
+            }
             (self.fns.cmd_update_buffer)(
                 self.cmd,
                 self.gi2.gbuf.buffer,
@@ -427,9 +480,22 @@ impl Gpu {
     fn gi2_passes(&mut self, slot: usize) {
         let [w, h, cols, rows] = self.gi2.dims;
         let probes = cols * rows;
-        let rays = probes * GI2_RAYS;
+        let rays = probes * GI2_RAYS + GI2_CACHE_BATCH * GI2_CACHE_RAYS;
         let bgra = if self.format == 44 { 1u32 } else { 0 };
-        let pc = [w, h, cols, rows, GI2_RAYS, GI2_TILE, bgra, 0];
+        self.gi2.frame = self.gi2.frame.wrapping_add(1);
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            self.frame_bytes.hash(&mut hasher);
+            hasher.finish()
+        };
+        if hash == self.gi2.scene_hash {
+            self.gi2.still = self.gi2.still.saturating_add(1);
+        } else {
+            self.gi2.scene_hash = hash;
+            self.gi2.still = 0;
+        }
+        let pc = [w, h, cols, rows, GI2_RAYS, GI2_TILE, bgra, self.gi2.frame];
         let image = self.color.image;
         // The raster colour as the base: pixels with no surface keep it.
         self.copy_image_buffer(image, 6, self.gi2.out.buffer, w, h, true);
@@ -440,7 +506,9 @@ impl Gpu {
             (1, rays.div_ceil(64), 1),
             (2, (w * h + rays).div_ceil(64), 1),
             (3, probes.div_ceil(64), 1),
-            (4, w.div_ceil(8), h.div_ceil(8)),
+            (4, probes.div_ceil(64), 1),
+            (5, GI2_CACHE_BATCH.div_ceil(64), 1),
+            (6, w.div_ceil(8), h.div_ceil(8)),
         ];
         unsafe {
             (self.fns.cmd_bind_set)(
@@ -506,9 +574,13 @@ impl Gpu {
         let mut gbuf = std::mem::replace(&mut self.gi2.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.gi2.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.gi2.out, Buffer::empty());
+        let mut keys = std::mem::replace(&mut self.gi2.cache_keys, Buffer::empty());
+        let mut cache = std::mem::replace(&mut self.gi2.cache, Buffer::empty());
         self.destroy_buffer(&mut gbuf);
         self.destroy_buffer(&mut work);
         self.destroy_buffer(&mut out);
+        self.destroy_buffer(&mut keys);
+        self.destroy_buffer(&mut cache);
         unsafe {
             for pipe in self
                 .gi2

@@ -4,13 +4,16 @@
 // are called, and many sites stalled the NVIDIA compiler and ran lavapipe out of
 // memory (docs/systems/gi-v2-design.md, Migration plan).
 //
-// Work buffer (vec4s), for P probes of R rays and a W x H picture:
+// Work buffer (vec4s), for P probes of R rays, a W x H picture and the light
+// cache's B patches of C rays relit this frame (gi2_cache.glsl). Rays are numbered
+// probe rays first (P R), then cache rays (B C):
 //   probes      2 per probe: position (w 1 when placed), normal
 //   hits        3 per ray: hit position (w: t, below 0 for a miss), normal, albedo
 //               already times reflectance (w unused)
-//   radiance    1 per ray: light leaving the hit toward the probe (rgb)
+//   radiance    1 per ray: light leaving the hit back along the ray (rgb)
 //   pixel light 1 per pixel: direct irradiance (rgb)
 //   sh          7 per probe: irradiance SH, 9 rgb coefficients
+//   filtered sh 7 per probe: the same after the spatial filter (gi2_filter.comp)
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_control_flow_attributes : require
 
@@ -39,6 +42,8 @@ layout(push_constant) uniform Push {
     uvec4 params;
 } pc;
 
+#include "gi2_cache_slots.glsl"
+
 uint gi2_probes() {
     return pc.dims.z * pc.dims.w;
 }
@@ -48,17 +53,26 @@ uint gi2_rays() {
 uint gi2_probe_at(uint i) {
     return 2u * i;
 }
+uint gi2_probe_rays() {
+    return gi2_probes() * gi2_rays();
+}
+uint gi2_all_rays() {
+    return gi2_probe_rays() + GI2_CACHE_BATCH * GI2_CACHE_RAYS;
+}
 uint gi2_hit_at(uint ray) {
     return 2u * gi2_probes() + 3u * ray;
 }
 uint gi2_rad_at(uint ray) {
-    return 2u * gi2_probes() + 3u * gi2_probes() * gi2_rays() + ray;
+    return 2u * gi2_probes() + 3u * gi2_all_rays() + ray;
 }
 uint gi2_pixel_at(uint p) {
-    return 2u * gi2_probes() + 4u * gi2_probes() * gi2_rays() + p;
+    return 2u * gi2_probes() + 4u * gi2_all_rays() + p;
 }
 uint gi2_sh_at(uint i) {
     return gi2_pixel_at(pc.dims.x * pc.dims.y) + 7u * i;
+}
+uint gi2_shf_at(uint i) {
+    return gi2_sh_at(gi2_probes()) + 7u * i;
 }
 
 // The eye ray through pixel p (picture y down, clip space Y flipped).
@@ -132,10 +146,8 @@ const float GI2_PI = 3.14159265;
 // on a sqrt(R) x sqrt(R) grid of (cos theta, phi). The rotation and jitter come from
 // a hash of the probe's world cell (25 cm), never the frame, so a probe that stays
 // put shoots the same directions every frame and any leftover noise does not crawl.
-vec3 gi2_ray_dir(vec3 pos, vec3 n, uint k) {
-    uint s = max(uint(sqrt(float(gi2_rays())) + 0.5), 1u);
-    ivec3 cell = ivec3(floor(pos / 0.25));
-    uint h = gi2_hash(uint(cell.x) * 73856093u ^ uint(cell.y) * 19349663u ^ uint(cell.z) * 83492791u);
+vec3 gi2_dir(uint h, vec3 n, uint k, uint count) {
+    uint s = max(uint(sqrt(float(count)) + 0.5), 1u);
     float phi0 = gi2_unit(h) * GI2_TAU;
     float j1 = gi2_unit(h ^ (k * 0x9e3779b9u + 1u));
     float j2 = gi2_unit(h ^ (k * 0x85ebca6bu + 2u));
@@ -148,6 +160,14 @@ vec3 gi2_ray_dir(vec3 pos, vec3 n, uint k) {
     vec3 ty = cross(n, tx);
     return tx * (r * cos(phi)) + ty * (r * sin(phi)) + n * u;
 }
+
+vec3 gi2_ray_dir(vec3 pos, vec3 n, uint k) {
+    ivec3 cell = ivec3(floor(pos / 0.25));
+    uint h = gi2_hash(uint(cell.x) * 73856093u ^ uint(cell.y) * 19349663u ^ uint(cell.z) * 83492791u);
+    return gi2_dir(h, n, k, gi2_rays());
+}
+
+#include "gi2_cache.glsl"
 
 // Real SH, bands 0-2, at unit direction d.
 void gi2_sh9(vec3 d, out float y[9]) {
@@ -164,10 +184,10 @@ void gi2_sh9(vec3 d, out float y[9]) {
 
 float gi2_sh_coef(uint probe, uint j, uint c) {
     uint f = 3u * j + c;
-    return work.v[gi2_sh_at(probe) + f / 4u][f % 4u];
+    return work.v[gi2_shf_at(probe) + f / 4u][f % 4u];
 }
 
-// Irradiance at normal n from probe's stored (already cosine-convolved) SH.
+// Irradiance at normal n from probe's filtered (already cosine-convolved) SH.
 vec3 gi2_probe_irradiance(uint probe, vec3 n) {
     float y[9];
     gi2_sh9(n, y);

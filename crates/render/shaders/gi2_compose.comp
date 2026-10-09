@@ -1,6 +1,7 @@
 #version 450
 // GI v2 final pass: per pixel, direct irradiance plus the screen probes' irradiance
-// (the 4 nearest probes, weighted by plane distance and normal), through the same
+// (the 4 nearest probes, weighted by plane distance and normal; the light cache
+// where none matches), through the same
 // tone curve and dither as the picture. Pixels with no surface keep the raster
 // colour already in the output. Clears the G-buffer record for the next frame.
 #extension GL_GOOGLE_include_directive : require
@@ -56,7 +57,13 @@ vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
         sum += w * gi2_probe_irradiance(probe, n);
         wsum += w;
     }
-    return wsum > 1.0e-6 ? sum / wsum : vec3(0.0);
+    // Pixels no probe matches (thin pillars, edges, surfaces no tile centre landed
+    // on) take the light cache's patch, which every pixel's lookup keeps alive.
+    // A small constant weight also steadies pixels the probes barely reach.
+    const float CACHE_WEIGHT = 0.02;
+    sum += CACHE_WEIGHT * gi2_cache_irradiance(pos, n);
+    wsum += CACHE_WEIGHT;
+    return sum / wsum;
 }
 
 void main() {

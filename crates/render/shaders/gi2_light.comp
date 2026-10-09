@@ -1,8 +1,9 @@
 #version 450
 // GI v2 direct light: every lamp at a surface point, each with a shadow ray through
 // the tracer. The points are the picture's pixels (G-buffer) followed by the screen
-// probes' ray hits, so both share this loop and its one trace site. A pixel keeps
-// its irradiance; a hit turns it into the light it sends back along the ray.
+// probes' and the light cache's ray hits, so all share this loop and its one trace
+// site. A pixel keeps its irradiance; a hit adds the light cache's bounced
+// irradiance and turns the sum into the light it sends back along the ray.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "gi2_common.glsl"
@@ -10,7 +11,7 @@ layout(local_size_x = 64) in;
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     uint pixels = pc.dims.x * pc.dims.y;
-    uint rays = gi2_probes() * gi2_rays();
+    uint rays = gi2_all_rays();
     if (idx >= pixels + rays) {
         return;
     }
@@ -51,6 +52,7 @@ void main() {
     if (idx < pixels) {
         work.v[gi2_pixel_at(idx)] = vec4(e, 0.0);
     } else {
+        e += gi2_cache_irradiance(pos, n);
         work.v[gi2_rad_at(idx - pixels)] = vec4(reflectance * e, 0.0);
     }
 }

@@ -19,6 +19,8 @@ fn main() {
         ("GI2_TRACE_SPV", "gi2_trace.comp"),
         ("GI2_LIGHT_SPV", "gi2_light.comp"),
         ("GI2_GATHER_SPV", "gi2_gather.comp"),
+        ("GI2_FILTER_SPV", "gi2_filter.comp"),
+        ("GI2_CACHE_SPV", "gi2_cache.comp"),
         ("GI2_COMPOSE_SPV", "gi2_compose.comp"),
     ]
     .iter()
@@ -52,7 +54,12 @@ fn main() {
         ));
     }
     std::fs::write(&glue, glue_text).unwrap();
-    for piece in ["gi2_common.glsl", "gi2_pack.glsl"] {
+    for piece in [
+        "gi2_common.glsl",
+        "gi2_pack.glsl",
+        "gi2_cache.glsl",
+        "gi2_cache_slots.glsl",
+    ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }
     println!("cargo:rerun-if-changed=shaders/scene.vert");

@@ -1,0 +1,57 @@
+#version 450
+// GI v2 screen probes, pass 5: spatial filter. Each probe's SH becomes a weighted
+// mean of itself and its 3 x 3 neighbours that lie on its plane and face its way,
+// which trades a little sharpness for much less probe noise (no temporal history:
+// the same scene gives the same answer every frame). No trace.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "gi2_common.glsl"
+
+void main() {
+    uint probe = gl_GlobalInvocationID.x;
+    if (probe >= gi2_probes()) {
+        return;
+    }
+    uint out_at = gi2_shf_at(probe);
+    vec4 pp = work.v[gi2_probe_at(probe)];
+    if (pp.w < 0.5) {
+        [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
+            work.v[out_at + q] = vec4(0.0);
+        }
+        return;
+    }
+    vec3 n = work.v[gi2_probe_at(probe) + 1u].xyz;
+    float plane = 0.03 + 0.01 * length(pp.xyz - scene.eye.xyz);
+    ivec2 c0 = ivec2(int(probe % pc.dims.z), int(probe / pc.dims.z));
+    ivec2 grid = ivec2(pc.dims.zw);
+    vec4 acc[7];
+    [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
+        acc[q] = vec4(0.0);
+    }
+    float wsum = 0.0;
+    [[dont_unroll]] for (uint k = 0u; k < 9u; k++) {
+        ivec2 c = c0 + ivec2(int(k % 3u) - 1, int(k / 3u) - 1);
+        if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, grid))) {
+            continue;
+        }
+        uint other = uint(c.y) * pc.dims.z + uint(c.x);
+        vec4 op = work.v[gi2_probe_at(other)];
+        if (op.w < 0.5) {
+            continue;
+        }
+        vec3 on = work.v[gi2_probe_at(other) + 1u].xyz;
+        float w = (k == 4u ? 1.0 : 0.5) * pow(max(dot(on, n), 0.0), 8.0)
+            * exp(-abs(dot(op.xyz - pp.xyz, n)) / plane);
+        if (w <= 1.0e-4) {
+            continue;
+        }
+        uint at = gi2_sh_at(other);
+        [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
+            acc[q] += w * work.v[at + q];
+        }
+        wsum += w;
+    }
+    [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
+        work.v[out_at + q] = acc[q] / max(wsum, 1.0e-6);
+    }
+}

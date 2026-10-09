@@ -1,27 +1,44 @@
 #version 450
-// GI v2 screen probes, pass 2: each probe's rays through the tracer. A hit stores
-// the surface for the light pass; a miss takes the sky. One trace site.
+// GI v2 rays, pass 2: the screen probes' rays, then the rays of the light cache
+// patches relit this frame. A hit stores the surface for the light pass; a miss
+// takes the sky. One trace site.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "gi2_common.glsl"
 
 void main() {
     uint ray = gl_GlobalInvocationID.x;
-    uint rays = gi2_rays();
-    if (ray >= gi2_probes() * rays) {
+    if (ray >= gi2_all_rays()) {
         return;
     }
-    uint probe = ray / rays;
-    vec4 pp = work.v[gi2_probe_at(probe)];
-    vec3 n = work.v[gi2_probe_at(probe) + 1u].xyz;
     uint at = gi2_hit_at(ray);
-    if (pp.w < 0.5) {
+    vec3 pos;
+    vec3 n;
+    vec3 dir;
+    bool live;
+    if (ray < gi2_probe_rays()) {
+        uint rays = gi2_rays();
+        uint probe = ray / rays;
+        vec4 pp = work.v[gi2_probe_at(probe)];
+        pos = pp.xyz;
+        n = work.v[gi2_probe_at(probe) + 1u].xyz;
+        live = pp.w >= 0.5;
+        dir = gi2_ray_dir(pos, n, ray % rays);
+    } else {
+        uint r = ray - gi2_probe_rays();
+        uint slot = gi2_cache_batch_slot(r / GI2_CACHE_RAYS);
+        uint key = ckeys.key[slot];
+        pos = cache.v[3u * slot].xyz;
+        n = cache.v[3u * slot + 1u].xyz;
+        live = key != 0u;
+        dir = gi2_dir(key, n, r % GI2_CACHE_RAYS, GI2_CACHE_RAYS);
+    }
+    if (!live) {
         work.v[at] = vec4(0.0, 0.0, 0.0, -2.0);
         work.v[gi2_rad_at(ray)] = vec4(0.0);
         return;
     }
-    vec3 dir = gi2_ray_dir(pp.xyz, n, ray % rays);
-    vec3 origin = pp.xyz + n * 0.02;
+    vec3 origin = pos + n * 0.02;
     SceneHit hit;
     if (!trace_ray(origin, dir, 1.0e-4, 200.0, hit)) {
         work.v[at] = vec4(0.0, 0.0, 0.0, -1.0);

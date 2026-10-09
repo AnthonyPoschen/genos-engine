@@ -689,6 +689,9 @@ impl Renderer {
 
     /// Tier counts for reports.
     pub fn tier_stats(&self) -> crate::probe_tier::TierStats {
+        if self.gpu.gi2_active() {
+            return self.gpu.gi2_stats();
+        }
         self.tier.stats()
     }
 
@@ -1198,6 +1201,7 @@ struct Fns {
     cmd_bind_set: FnBindSet,
     cmd_dispatch: FnDispatch,
     cmd_update_buffer: FnUpdateBuffer,
+    cmd_fill_buffer: FnFillBuffer,
     update_desc: FnUpdateDesc,
     create_desc_layout: FnDescLayout,
     destroy_desc_layout: Fn2,
@@ -1240,6 +1244,7 @@ type FnGetQuery =
     unsafe extern "system" fn(Handle, Handle, u32, u32, usize, *mut c_void, u64, u32) -> VkResult;
 type FnCmd = unsafe extern "system" fn(Handle);
 type FnUpdateBuffer = unsafe extern "system" fn(Handle, Handle, u64, u64, *const c_void);
+type FnFillBuffer = unsafe extern "system" fn(Handle, Handle, u64, u64, u32);
 type FnCmdResult = unsafe extern "system" fn(Handle) -> VkResult;
 type FnCreateDevice =
     unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
@@ -6341,6 +6346,7 @@ fn load_fns(
             cmd_bind_set: d!("vkCmdBindDescriptorSets"),
             cmd_dispatch: d!("vkCmdDispatch"),
             cmd_update_buffer: d!("vkCmdUpdateBuffer"),
+            cmd_fill_buffer: d!("vkCmdFillBuffer"),
             update_desc: d!("vkUpdateDescriptorSets"),
             create_desc_layout: d!("vkCreateDescriptorSetLayout"),
             destroy_desc_layout: d!("vkDestroyDescriptorSetLayout"),

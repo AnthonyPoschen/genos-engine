@@ -1,0 +1,36 @@
+#version 450
+// GI v2 light cache, last ray pass: each patch relit this frame sums its rays'
+// light into irradiance (uniform hemisphere: 2 pi / C times the cosine-weighted
+// sum). A patch nobody has read for GI2_CACHE_LIFE frames is freed. No trace.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "gi2_common.glsl"
+
+void main() {
+    uint j = gl_GlobalInvocationID.x;
+    if (j >= GI2_CACHE_BATCH) {
+        return;
+    }
+    uint slot = gi2_cache_batch_slot(j);
+    uint key = ckeys.key[slot];
+    if (key == 0u) {
+        return;
+    }
+    uint last = floatBitsToUint(cache.v[3u * slot].w);
+    if (gi2_frame() - last > GI2_CACHE_LIFE) {
+        ckeys.key[slot] = 0u;
+        cache.v[3u * slot + 2u] = vec4(0.0);
+        return;
+    }
+    vec3 n = cache.v[3u * slot + 1u].xyz;
+    uint first = gi2_probe_rays() + j * GI2_CACHE_RAYS;
+    vec3 e = vec3(0.0);
+    [[dont_unroll]] for (uint k = 0u; k < GI2_CACHE_RAYS; k++) {
+        if (work.v[gi2_hit_at(first + k)].w < -1.5) {
+            return;
+        }
+        vec3 dir = gi2_dir(key, n, k, GI2_CACHE_RAYS);
+        e += work.v[gi2_rad_at(first + k)].rgb * max(dot(dir, n), 0.0);
+    }
+    cache.v[3u * slot + 2u] = vec4(e * (GI2_TAU / float(GI2_CACHE_RAYS)), 1.0);
+}
