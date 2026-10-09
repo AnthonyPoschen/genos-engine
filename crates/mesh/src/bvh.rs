@@ -105,6 +105,24 @@ impl Bvh {
         found
     }
 
+    /// How many triangles a ray crosses beyond `T_MIN`, both sides counted. An odd
+    /// count from a point means it is inside a closed mesh.
+    pub fn crossings(&self, tris: &[MeshTriangle], origin: [f32; 3], dir: [f32; 3]) -> u32 {
+        let mut count = 0;
+        let mut limit = f32::INFINITY;
+        self.walk(origin, dir, &mut limit, &mut |i, limit| {
+            let tri = MeshTriangle {
+                two_sided: true,
+                ..tris[i as usize]
+            };
+            if hit_triangle(&tri, i, origin, dir, *limit).is_some() {
+                count += 1;
+            }
+            false
+        });
+        count
+    }
+
     /// Closest triangle to `p` within `max_dist`: (triangle, closest point, distance).
     pub fn closest(
         &self,

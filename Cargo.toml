@@ -5,6 +5,7 @@ members = [
     "crates/math",
     "crates/json",
     "crates/mesh",
+    "crates/bake",
     "crates/physics",
     "crates/scene",
     "crates/mcp",

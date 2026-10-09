@@ -107,6 +107,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-bake"
+version = "0.1.0"
+dependencies = [
+ "genos-load",
+ "genos-mesh",
+]
+
+[[package]]
 name = "genos-camera"
 version = "0.1.0"
 dependencies = [
