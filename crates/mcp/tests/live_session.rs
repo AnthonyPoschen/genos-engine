@@ -19,8 +19,15 @@ fn shipped_scene() -> Scene {
     .expect("shipped scene")
 }
 
+/// The servers of one test process share its discovery record; one test at a time.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|err| err.into_inner())
+}
+
 #[test]
 fn a_separate_client_discovers_reads_and_edits_the_live_scene() {
+    let _serial = serial();
     refuse_a_dead_process();
 
     let placed = shipped_scene();
@@ -288,6 +295,7 @@ fn a_separate_client_discovers_reads_and_edits_the_live_scene() {
 
 #[test]
 fn the_lighting_report_is_served_on_the_bound_port() {
+    let _serial = serial();
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("free port");
     let port = listener.local_addr().expect("addr").port();
     drop(listener);
@@ -307,6 +315,7 @@ fn the_lighting_report_is_served_on_the_bound_port() {
 
 #[test]
 fn a_client_sets_the_lighting_and_reads_the_shot() {
+    let _serial = serial();
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("free port");
     let port = listener.local_addr().expect("addr").port();
     drop(listener);
