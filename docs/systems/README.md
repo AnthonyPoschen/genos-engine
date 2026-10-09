@@ -23,6 +23,7 @@ Each record uses these headings:
 - [Renderer](renderer.md) owns the Vulkan draw, the world, and culling.
 - [UI](ui.md) owns layout, pointer hits, and the lighting panel.
 - [Lighting](lighting.md) owns radiance cascades and the light pass inside a draw.
+- [GI v2 design](gi-v2-design.md) is the proposed next lighting architecture: meshes, two tracers, a surface cache and screen probes.
 - [Loading](loading.md) owns images, textures, texture maps, meshes, animations, PCM samples, and fonts.
 - [Audio](audio.md) owns playback, Doppler, stereo image, and direct-path transmission.
 - [Scripting](scripting.md) owns Rhai for games and mods.
