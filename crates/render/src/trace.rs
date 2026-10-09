@@ -65,7 +65,9 @@ pub fn radiance_hits(
     mul(albedo, scale(add(direct, bounce), LAMBERT))
 }
 
-fn direct_light(scene: &Scene, origin: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
+/// Shadowed light from every lamp at `origin` (already lifted off its face), in the
+/// picture's lamp unit: what `radiance` adds before the bounce.
+pub fn direct_light(scene: &Scene, origin: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
     if point_inside(scene, origin) {
         return [0.0; 3];
     }
@@ -200,13 +202,16 @@ fn path_in(scene: &Scene, origin: [f32; 3], dir: [f32; 3], hits: u32, seed: u32)
     mul(hit.albedo, scale(add(direct, next), LAMBERT))
 }
 
-struct Hit {
-    point: [f32; 3],
-    normal: [f32; 3],
-    albedo: [f32; 3],
+/// The first surface a ray meets.
+#[derive(Clone, Copy, Debug)]
+pub struct Hit {
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+    pub albedo: [f32; 3],
 }
 
-fn trace(scene: &Scene, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Option<Hit> {
+/// The first floor, roof, wall or solid face along `dir` from `origin`, within `reach`.
+pub fn trace(scene: &Scene, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Option<Hit> {
     let mut best_t = reach;
     let mut best: Option<Hit> = None;
     let consider =
@@ -453,11 +458,11 @@ fn hit_box(
         };
         let mut ta = (min[axis] - origin[axis]) * inv;
         let mut tb = (max[axis] - origin[axis]) * inv;
+        // The face a ray enters faces against it.
         let mut n = [0.0; 3];
         n[axis] = -dir[axis].signum();
         if ta > tb {
             std::mem::swap(&mut ta, &mut tb);
-            n[axis] = -n[axis];
         }
         if ta > t0 {
             t0 = ta;
@@ -612,11 +617,45 @@ mod tests {
             reflectance: -1.0,
             color_mix: -1.0,
         };
-        let scene = room(vec![lamp], vec![wall], Vec::new());
-        let floor = radiance(&scene, [0.0, 0.0, 1.5], [0.0, 1.0, 0.0], [1.0, 1.0, 1.0]);
-        let direct = direct_light(&scene, [0.0, 0.02, 1.5], [0.0, 1.0, 0.0]);
+        // A post between the lamp and the floor point shades it; the lit face of
+        // the wall in front of it bounces light back.
+        let post = Solid {
+            yaw: 0.0,
+            shape: genos_scene::Shape::Square,
+            position: Vec3::new(0.0, 0.0, -0.65),
+            size: 0.2,
+            height: 1.2,
+            color: [1.0, 1.0, 1.0],
+            absorption: 0.0,
+            reflectance: -1.0,
+            color_mix: -1.0,
+        };
+        let scene = room(vec![lamp], vec![wall.clone()], vec![post]);
+        let floor = radiance(&scene, [0.0, 0.0, -0.3], [0.0, 1.0, 0.0], [1.0, 1.0, 1.0]);
+        let direct = direct_light(&scene, [0.0, 0.02, -0.3], [0.0, 1.0, 0.0]);
         assert!(luminance(direct) < 1.0e-4, "direct leaks {direct:?}");
         assert!(luminance(floor) > 0.01, "no bounce {floor:?}");
+        // Behind the wall nothing lit is in sight within one bounce.
+        let lone = room(scene.lights.clone(), vec![wall], Vec::new());
+        let behind = radiance(&lone, [0.0, 0.0, 1.5], [0.0, 1.0, 0.0], [1.0, 1.0, 1.0]);
+        assert!(
+            luminance(behind) < 1.0e-3,
+            "light leaks through the wall {behind:?}"
+        );
+    }
+
+    #[test]
+    fn a_ray_meets_a_face_whose_normal_faces_it() {
+        for (dir, want) in [
+            ([0.0, 0.0, -1.0], [0.0, 0.0, 1.0]),
+            ([0.0, 0.0, 1.0], [0.0, 0.0, -1.0]),
+            ([-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            ([1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]),
+        ] {
+            let origin = [-dir[0] * 3.0, 1.0, -dir[2] * 3.0];
+            let (_, n) = hit_box(origin, dir, [-1.0, 0.0, -1.0], [1.0, 2.0, 1.0], 10.0).unwrap();
+            assert_eq!(n, want, "ray {dir:?}");
+        }
     }
 
     #[test]
