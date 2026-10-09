@@ -1,0 +1,98 @@
+#version 450
+// GI v2 final pass: per pixel, direct irradiance plus the screen probes' irradiance
+// (the 4 nearest probes, weighted by plane distance and normal), through the same
+// tone curve and dither as the picture. Pixels with no surface keep the raster
+// colour already in the output. Clears the G-buffer record for the next frame.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "gi2_common.glsl"
+#include "dither.glsl"
+
+const float LAMBERT = 0.254647909;
+
+float tone_channel(float x) {
+    if (x <= 0.64) {
+        return max(x, 0.0);
+    }
+    float extra = x - 0.64;
+    return 0.64 + 0.14 * (extra / (extra + 1.1));
+}
+
+uint pack_rgb(vec3 rgb) {
+    uvec3 c = uvec3(clamp(rgb, 0.0, 1.0) * 255.0 + 0.5);
+    if (pc.params.z == 1u) {
+        return c.b | (c.g << 8u) | (c.r << 16u) | (255u << 24u);
+    }
+    return c.r | (c.g << 8u) | (c.b << 16u) | (255u << 24u);
+}
+
+vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
+    float tile = float(pc.params.y);
+    vec2 g = (vec2(p) + 0.5) / tile - 0.5;
+    ivec2 g0 = ivec2(floor(g));
+    vec2 f = g - vec2(g0);
+    float dist = length(pos - scene.eye.xyz);
+    float plane = 0.03 + 0.01 * dist;
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    ivec2 grid = ivec2(pc.dims.zw);
+    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
+        ivec2 c = g0 + ivec2(int(k & 1u), int(k >> 1u));
+        if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, grid))) {
+            continue;
+        }
+        uint probe = uint(c.y) * pc.dims.z + uint(c.x);
+        vec4 pp = work.v[gi2_probe_at(probe)];
+        if (pp.w < 0.5) {
+            continue;
+        }
+        vec3 pn = work.v[gi2_probe_at(probe) + 1u].xyz;
+        float bil = ((k & 1u) == 1u ? f.x : 1.0 - f.x) * ((k >> 1u) == 1u ? f.y : 1.0 - f.y);
+        float w = (bil + 1.0e-3) * pow(max(dot(pn, n), 0.0), 8.0)
+            * exp(-abs(dot(pp.xyz - pos, n)) / plane);
+        if (w <= 1.0e-6) {
+            continue;
+        }
+        sum += w * gi2_probe_irradiance(probe, n);
+        wsum += w;
+    }
+    return wsum > 1.0e-6 ? sum / wsum : vec3(0.0);
+}
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= pc.dims.x || p.y >= pc.dims.y) {
+        return;
+    }
+    vec3 pos;
+    vec3 n;
+    vec3 albedo;
+    bool two_sided;
+    uint index = p.y * pc.dims.x + p.x;
+    if (!gi2_surface(p, pos, n, albedo, two_sided)) {
+        return;
+    }
+    gbuf.px[index].x = 0u;
+    if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
+        n = -n;
+    }
+    uint mode = scene.grid_at.w & 255u;
+    vec3 shown;
+    if (mode == 5u || mode == 6u || mode == 7u) {
+        float depth = clamp(1.0 - length(pos - scene.eye.xyz) / 50.0, 0.0, 1.0);
+        shown = mode == 5u ? albedo : (mode == 6u ? n * 0.5 + 0.5 : vec3(depth));
+        outc.px[index] = pack_rgb(shown);
+        return;
+    }
+    vec3 direct = work.v[gi2_pixel_at(index)].rgb;
+    vec3 bounce = indirect(p, pos, n);
+    if (mode == 1u || mode == 8u) {
+        bounce = vec3(0.0);
+    }
+    if (mode == 2u || mode == 3u || mode == 4u) {
+        direct = vec3(0.0);
+    }
+    vec3 c = albedo * LAMBERT * (direct + bounce);
+    shown = vec3(tone_channel(c.r), tone_channel(c.g), tone_channel(c.b));
+    outc.px[index] = pack_rgb(dither8(shown, p));
+}

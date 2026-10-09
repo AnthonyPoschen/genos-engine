@@ -601,6 +601,10 @@ fn run() -> Result<(), String> {
             renderer.set_live_readback(true);
         }
         let want_read = shot || tools_read || (last && opts.shot.is_some());
+        if let Some(on) = stage.gi_v2_set.take() {
+            renderer.set_gi_v2(on)?;
+            stage.gi_v2 = renderer.gi_v2();
+        }
         let draw_start = Instant::now();
         let pixels =
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;

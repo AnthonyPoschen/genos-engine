@@ -75,6 +75,10 @@ pub struct Stage {
     /// The sky follows the sun; off leaves only the sun and the lamps.
     pub sky_on: bool,
     pub boxes_still: bool,
+    /// Lighting path: false the current one, true GI v2. `gi_v2_set` is a pending
+    /// switch the frame loop hands to the renderer.
+    pub gi_v2: bool,
+    pub gi_v2_set: Option<bool>,
 }
 
 impl Stage {
@@ -103,6 +107,8 @@ impl Stage {
             sun_frozen: false,
             sky_on: true,
             boxes_still: false,
+            gi_v2: std::env::var("GENOS_GI").is_ok_and(|v| v == "v2"),
+            gi_v2_set: None,
         };
         stage.apply();
         stage

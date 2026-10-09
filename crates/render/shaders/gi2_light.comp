@@ -1,0 +1,56 @@
+#version 450
+// GI v2 direct light: every lamp at a surface point, each with a shadow ray through
+// the tracer. The points are the picture's pixels (G-buffer) followed by the screen
+// probes' ray hits, so both share this loop and its one trace site. A pixel keeps
+// its irradiance; a hit turns it into the light it sends back along the ray.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "gi2_common.glsl"
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint pixels = pc.dims.x * pc.dims.y;
+    uint rays = gi2_probes() * gi2_rays();
+    if (idx >= pixels + rays) {
+        return;
+    }
+    vec3 pos;
+    vec3 n;
+    vec3 reflectance = vec3(1.0);
+    bool two_sided = false;
+    if (idx < pixels) {
+        vec3 albedo;
+        if (!gi2_surface(uvec2(idx % pc.dims.x, idx / pc.dims.x), pos, n, albedo, two_sided)) {
+            work.v[gi2_pixel_at(idx)] = vec4(0.0);
+            return;
+        }
+    } else {
+        uint at = gi2_hit_at(idx - pixels);
+        vec4 h = work.v[at];
+        if (h.w < 0.0) {
+            return;
+        }
+        pos = h.xyz;
+        n = work.v[at + 1u].xyz;
+        reflectance = work.v[at + 2u].rgb;
+    }
+    vec3 origin = pos + n * 0.02;
+    LampList list = lamps_at(origin);
+    uint count = lamp_list_size(list);
+    vec3 e = vec3(0.0);
+    [[dont_unroll]] for (uint k = 0u; k < count; k++) {
+        vec3 target;
+        vec3 light = lamp_light(lamp_list_get(list, k), origin, n, two_sided, target);
+        if (light.r + light.g + light.b <= 0.0) {
+            continue;
+        }
+        if (!trace_occluded(origin, target)) {
+            e += light;
+        }
+    }
+    if (idx < pixels) {
+        work.v[gi2_pixel_at(idx)] = vec4(e, 0.0);
+    } else {
+        work.v[gi2_rad_at(idx - pixels)] = vec4(reflectance * e, 0.0);
+    }
+}

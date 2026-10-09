@@ -13,6 +13,21 @@ fn main() {
     let ssaa = compile("shaders/ssaa.comp", &out.join("ssaa.comp.spv"));
     // Not embedded: catches errors in GI v2 shader pieces no pass includes yet.
     compile("shaders/gi2_check.comp", &out.join("gi2_check.comp.spv"));
+    let gi2: Vec<(&str, PathBuf)> = [
+        ("GBUFFER_FRAG_SPV", "gbuffer.frag"),
+        ("GI2_PLACE_SPV", "gi2_place.comp"),
+        ("GI2_TRACE_SPV", "gi2_trace.comp"),
+        ("GI2_LIGHT_SPV", "gi2_light.comp"),
+        ("GI2_GATHER_SPV", "gi2_gather.comp"),
+        ("GI2_COMPOSE_SPV", "gi2_compose.comp"),
+    ]
+    .iter()
+    .map(|(name, file)| {
+        let src = format!("shaders/{file}");
+        println!("cargo:rerun-if-changed={src}");
+        (*name, compile(&src, &out.join(format!("{file}.spv"))))
+    })
+    .collect();
     let glue = out.join("shaders.rs");
     std::fs::write(
         &glue,
@@ -29,6 +44,17 @@ fn main() {
         ),
     )
     .unwrap();
+    let mut glue_text = std::fs::read_to_string(&glue).unwrap();
+    for (name, path) in &gi2 {
+        glue_text.push_str(&format!(
+            "pub static {name}: &[u8] = include_bytes!(\"{}\");\n",
+            path.display()
+        ));
+    }
+    std::fs::write(&glue, glue_text).unwrap();
+    for piece in ["gi2_common.glsl", "gi2_pack.glsl"] {
+        println!("cargo:rerun-if-changed=shaders/{piece}");
+    }
     println!("cargo:rerun-if-changed=shaders/scene.vert");
     println!("cargo:rerun-if-changed=shaders/scene.frag");
     println!("cargo:rerun-if-changed=shaders/wire.vert");

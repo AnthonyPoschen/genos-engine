@@ -1,0 +1,44 @@
+#version 450
+// GI v2 screen probes, pass 4: each probe's ray radiance projected to SH (bands
+// 0-2) and convolved with the cosine lobe: the probe's irradiance for any normal.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "gi2_common.glsl"
+
+void main() {
+    uint probe = gl_GlobalInvocationID.x;
+    if (probe >= gi2_probes()) {
+        return;
+    }
+    vec4 pp = work.v[gi2_probe_at(probe)];
+    vec3 n = work.v[gi2_probe_at(probe) + 1u].xyz;
+    float c[27];
+    [[dont_unroll]] for (uint f = 0u; f < 27u; f++) {
+        c[f] = 0.0;
+    }
+    uint rays = gi2_rays();
+    if (pp.w > 0.5) {
+        [[dont_unroll]] for (uint k = 0u; k < rays; k++) {
+            vec3 l = work.v[gi2_rad_at(probe * rays + k)].rgb;
+            float y[9];
+            gi2_sh9(gi2_ray_dir(pp.xyz, n, k), y);
+            [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
+                c[3u * j] += l.r * y[j];
+                c[3u * j + 1u] += l.g * y[j];
+                c[3u * j + 2u] += l.b * y[j];
+            }
+        }
+    }
+    // Uniform hemisphere: each ray stands for 2 pi / R steradians. Cosine lobe per
+    // band: pi, 2 pi / 3, pi / 4.
+    float scale = GI2_TAU / float(max(rays, 1u));
+    [[dont_unroll]] for (uint f = 0u; f < 27u; f++) {
+        uint band = f < 3u ? 0u : (f < 12u ? 1u : 2u);
+        float a = band == 0u ? GI2_PI : (band == 1u ? GI2_TAU / 3.0 : GI2_PI / 4.0);
+        c[f] *= scale * a;
+    }
+    uint base = gi2_sh_at(probe);
+    [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
+        work.v[base + q] = vec4(c[4u * q], c[4u * q + 1u], c[4u * q + 2u], q == 6u ? 0.0 : c[4u * q + 3u]);
+    }
+}

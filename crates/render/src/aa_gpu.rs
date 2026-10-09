@@ -373,6 +373,8 @@ impl Gpu {
             (self.fns.cmd_begin_rp)(self.cmd, &rp as *const RpBegin as *const u8, 0);
             let world_pipe = if self.wire_on {
                 self.wire_pipeline
+            } else if self.gi2_active() {
+                self.gi2.gbuffer_pipe
             } else {
                 self.pipeline
             };

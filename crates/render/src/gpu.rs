@@ -662,6 +662,9 @@ impl Renderer {
         // A first pass, every change pass and the refine passes, with room to spare.
         use crate::probe_tier::{CHANGE_PASSES, REFINE_RAYS, TARGET_SAMPLES};
         let builds = 2 * (1 + CHANGE_PASSES + TARGET_SAMPLES / REFINE_RAYS) + 8;
+        if self.gpu.gi2_active() {
+            return Ok(());
+        }
         for _ in 0..builds {
             if !self.tier.has_work() && !self.gpu.world_stale {
                 break;
@@ -731,6 +734,22 @@ impl Renderer {
 
     pub fn antialias(&self) -> Antialias {
         self.gpu.antialias
+    }
+
+    /// Switch the frame between GI v2 (gi2_gpu.rs) and the current lighting. The
+    /// first switch on builds GI v2's pipelines and buffers. `GENOS_GI=v2` starts on.
+    /// GI v2 does not run under supersampling yet; that frame uses the current path.
+    pub fn set_gi_v2(&mut self, on: bool) -> Result<(), String> {
+        self.gpu.set_gi2(on)
+    }
+
+    pub fn gi_v2(&self) -> bool {
+        self.gpu.gi2.on
+    }
+
+    /// How long each pipeline took to build, in build order.
+    pub fn pipeline_times(&self) -> Vec<(String, Duration)> {
+        self.gpu.pipeline_times.clone()
     }
 
     /// When on, a readback returns the picture as drawn, without settling the light or
@@ -956,6 +975,12 @@ struct Gpu {
     mesh_field: Buffer,
     mesh_field_cap: u64,
     mesh_field_key: u64,
+    /// GI v2 frame path (gi2_gpu.rs).
+    gi2: Gi2,
+    /// Fragment shader for the next raster pipeline built, instead of scene.frag.
+    frag_override: Option<&'static [u8]>,
+    /// How long each pipeline took to build.
+    pipeline_times: Vec<(String, Duration)>,
     desc_layout: Handle,
     desc_pool: Handle,
     /// Raster set. This is `raster_sets[light_shown][flight]`.
@@ -1172,6 +1197,7 @@ struct Fns {
     fence_status: FnFenceStatus,
     cmd_bind_set: FnBindSet,
     cmd_dispatch: FnDispatch,
+    cmd_update_buffer: FnUpdateBuffer,
     update_desc: FnUpdateDesc,
     create_desc_layout: FnDescLayout,
     destroy_desc_layout: Fn2,
@@ -1213,6 +1239,7 @@ type FnWriteTs = unsafe extern "system" fn(Handle, u32, Handle, u32);
 type FnGetQuery =
     unsafe extern "system" fn(Handle, Handle, u32, u32, usize, *mut c_void, u64, u32) -> VkResult;
 type FnCmd = unsafe extern "system" fn(Handle);
+type FnUpdateBuffer = unsafe extern "system" fn(Handle, Handle, u64, u64, *const c_void);
 type FnCmdResult = unsafe extern "system" fn(Handle) -> VkResult;
 type FnCreateDevice =
     unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
@@ -1554,6 +1581,10 @@ impl Gpu {
             } else {
                 1
             };
+            // VkPhysicalDeviceFeatures: only fragmentStoresAndAtomics (26), for the GI
+            // v2 G-buffer. Every desktop driver (and lavapipe, MoltenVK) has it.
+            let mut features = [0u32; 55];
+            features[26] = 1;
             let swap_ext = b"VK_KHR_swapchain\0";
             let ext_ptr = swap_ext.as_ptr() as *const c_char;
             #[repr(C)]
@@ -1579,7 +1610,7 @@ impl Gpu {
                 layers: std::ptr::null(),
                 ext_count: 1,
                 exts: &ext_ptr,
-                features: std::ptr::null(),
+                features: features.as_ptr() as *const c_void,
             };
             let mut device = std::ptr::null_mut();
             check(
@@ -1658,6 +1689,9 @@ impl Gpu {
                 mesh_field: Buffer::empty(),
                 mesh_field_cap: 0,
                 mesh_field_key: 0,
+                gi2: Gi2::default(),
+                frag_override: None,
+                pipeline_times: Vec::new(),
                 desc_layout: std::ptr::null_mut(),
                 desc_pool: std::ptr::null_mut(),
                 desc_set: std::ptr::null_mut(),
@@ -1780,6 +1814,9 @@ impl Gpu {
             let _ = (destroy_instance, surface_support);
             gpu.create_static_objects()?;
             gpu.recreate(width, height)?;
+            if gpu.gi2.on {
+                gpu.set_gi2(true)?;
+            }
             Ok(gpu)
         }
     }
@@ -1790,7 +1827,9 @@ impl Gpu {
             self.keep_pass = self.make_render_pass(true)?;
             self.desc_layout = self.make_desc_layout()?;
             self.layout = self.make_layout()?;
+            let start = Instant::now();
             self.pipeline = self.make_pipeline(true, true, false)?;
+            self.note_pipeline_time("scene", start);
             self.depth_pipeline = self.make_depth_pipeline()?;
             self.overlay_pipeline = self.make_pipeline(false, false, false)?;
             self.wire_pipeline = self.make_pipeline(false, false, true)?;
@@ -1879,7 +1918,9 @@ impl Gpu {
             } else if self.gpu_times.take().is_some() {
                 eprintln!("GENOS_GPU_TIMES: this device has no timestamp queries");
             }
+            let start = Instant::now();
             self.make_lighting()?;
+            self.note_pipeline_time("light", start);
             self.make_aa_pipes()?;
         }
         Ok(())
@@ -2097,6 +2138,7 @@ impl Gpu {
             self.framebuffer = self.framebuffers[0];
             self.host = copy_buffer(&self.hosts[0]);
             self.make_aa_targets()?;
+            self.make_gi2_targets()?;
             Ok(())
         }
     }
@@ -2326,14 +2368,24 @@ impl Gpu {
                 self.frame_stamp(slot, FrameStamp::Raster);
                 self.resolve_ssaa(slot)?;
             } else {
+                let gi2 = self.gi2_active();
+                if gi2 {
+                    self.gi2_begin();
+                }
                 self.raster_scene(
                     self.framebuffer,
                     self.extent_w,
                     self.extent_h,
                     matrix,
-                    !filtering,
+                    !filtering && !gi2,
                 );
                 self.color_layout[slot] = 6;
+                if gi2 {
+                    self.gi2_passes(slot);
+                    if !filtering && self.overlay_count > 0 {
+                        self.raster_overlay();
+                    }
+                }
                 self.frame_stamp(slot, FrameStamp::Raster);
                 if self.antialias == Antialias::Fxaa {
                     self.resolve_fxaa(slot)?;
@@ -3000,6 +3052,14 @@ impl Gpu {
                 stages: 0x10 | 0x20,
                 samplers: std::ptr::null(),
             },
+            // GI v2 G-buffer (gbuffer.frag writes it).
+            Binding {
+                binding: 6,
+                kind: 7,
+                count: 1,
+                stages: 0x10,
+                samplers: std::ptr::null(),
+            },
         ];
         let info = Info {
             s_type: 32,
@@ -3164,7 +3224,7 @@ impl Gpu {
             size_count: u32,
             sizes: *const Size,
         }
-        let size = Size { kind: 7, count: 36 };
+        let size = Size { kind: 7, count: 42 };
         let pool = PoolInfo {
             s_type: 33,
             next: std::ptr::null(),
@@ -3303,6 +3363,16 @@ impl Gpu {
                 offset: 0,
                 range: u64::MAX,
             },
+            BufInfo {
+                // Any buffer until GI v2 sizes its G-buffer; only gbuffer.frag reads it.
+                buffer: if self.gi2.gbuf.buffer.is_null() {
+                    self.mesh_field.buffer
+                } else {
+                    self.gi2.gbuf.buffer
+                },
+                offset: 0,
+                range: u64::MAX,
+            },
         ];
         let writes = [
             Write {
@@ -3375,6 +3445,18 @@ impl Gpu {
                 kind: 7,
                 image: std::ptr::null(),
                 buffer: &infos[5],
+                texel: std::ptr::null(),
+            },
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set,
+                binding: 6,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: &infos[6],
                 texel: std::ptr::null(),
             },
         ];
@@ -3883,6 +3965,9 @@ impl Gpu {
             self.mesh_field_cap = cap;
             self.write_light_set(0)?;
             self.write_light_set(1)?;
+            if self.gi2.ready {
+                self.write_gi2_sets()?;
+            }
         }
         self.write_buffer(&self.mesh_field, &bytes)?;
         self.mesh_field_key = key;
@@ -3940,6 +4025,11 @@ impl Gpu {
 
     /// Record one slice of the gather. A readback waits until that build is the field on screen.
     fn kick_light(&mut self, wait: bool) -> Result<(), String> {
+        // GI v2 draws this frame: the current light does not run (a fair frame time).
+        // Its queued work stays queued and resumes when the frame switches back.
+        if self.gi2_active() {
+            return Ok(());
+        }
         loop {
             self.poll_light()?;
             // The picture that took the last publish may already be done. Its fence is
@@ -4906,7 +4996,11 @@ impl Gpu {
     ) -> Result<Handle, String> {
         unsafe {
             let vert = self.shader(if additive { WIRE_VERT_SPV } else { VERT_SPV })?;
-            let frag = self.shader(if additive { WIRE_FRAG_SPV } else { FRAG_SPV })?;
+            let frag = self.shader(if additive {
+                WIRE_FRAG_SPV
+            } else {
+                self.frag_override.unwrap_or(FRAG_SPV)
+            })?;
             #[repr(C)]
             struct Stage {
                 s_type: i32,
@@ -6000,6 +6094,7 @@ impl Drop for Gpu {
                 return;
             }
             (self.fns.device_wait)(self.device);
+            self.destroy_gi2();
             self.destroy_targets();
             self.vertex = Buffer::empty();
             let mut vertices =
@@ -6245,6 +6340,7 @@ fn load_fns(
             fence_status: d!("vkGetFenceStatus"),
             cmd_bind_set: d!("vkCmdBindDescriptorSets"),
             cmd_dispatch: d!("vkCmdDispatch"),
+            cmd_update_buffer: d!("vkCmdUpdateBuffer"),
             update_desc: d!("vkUpdateDescriptorSets"),
             create_desc_layout: d!("vkCreateDescriptorSetLayout"),
             destroy_desc_layout: d!("vkDestroyDescriptorSetLayout"),
@@ -6286,6 +6382,7 @@ fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {
 }
 
 include!("aa_gpu.rs");
+include!("gi2_gpu.rs");
 
 extern "C" {
     fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;

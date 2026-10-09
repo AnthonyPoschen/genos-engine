@@ -1,0 +1,36 @@
+#version 450
+// GI v2 screen probes, pass 2: each probe's rays through the tracer. A hit stores
+// the surface for the light pass; a miss takes the sky. One trace site.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "gi2_common.glsl"
+
+void main() {
+    uint ray = gl_GlobalInvocationID.x;
+    uint rays = gi2_rays();
+    if (ray >= gi2_probes() * rays) {
+        return;
+    }
+    uint probe = ray / rays;
+    vec4 pp = work.v[gi2_probe_at(probe)];
+    vec3 n = work.v[gi2_probe_at(probe) + 1u].xyz;
+    uint at = gi2_hit_at(ray);
+    if (pp.w < 0.5) {
+        work.v[at] = vec4(0.0, 0.0, 0.0, -2.0);
+        work.v[gi2_rad_at(ray)] = vec4(0.0);
+        return;
+    }
+    vec3 dir = gi2_ray_dir(pp.xyz, n, ray % rays);
+    vec3 origin = pp.xyz + n * 0.02;
+    SceneHit hit;
+    if (!trace_ray(origin, dir, 1.0e-4, 200.0, hit)) {
+        work.v[at] = vec4(0.0, 0.0, 0.0, -1.0);
+        work.v[gi2_rad_at(ray)] = vec4(has_sky() ? scene.sky.rgb : vec3(0.0), 0.0);
+        return;
+    }
+    vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
+    vec3 tint = mix(vec3(1.0), hit.albedo, hit.color_mix);
+    work.v[at] = vec4(origin + dir * hit.t, hit.t);
+    work.v[at + 1u] = vec4(hn, 0.0);
+    work.v[at + 2u] = vec4(tint * hit.reflect, 0.0);
+}

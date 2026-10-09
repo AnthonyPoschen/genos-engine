@@ -88,6 +88,7 @@ impl Host for Stage {
                 usize::from(self.scale == Scale::BIG),
                 &["small", "big"],
             ),
+            Knob::choice("gi", "GI", usize::from(self.gi_v2), &["v1", "v2"]),
             Knob::choice(
                 "layout",
                 "Lamps in",
@@ -108,6 +109,10 @@ impl Host for Stage {
             "dynamic" => self.mix.dynamic_pct = v as u32,
             "power" => self.power = v as f32,
             "scale" => self.set_scale(if v >= 0.5 { Scale::BIG } else { Scale::SMALL }),
+            "gi" => {
+                self.gi_v2 = v >= 0.5;
+                self.gi_v2_set = Some(self.gi_v2);
+            }
             "layout" => {
                 self.mix.layout = if v >= 0.5 {
                     Layout::First

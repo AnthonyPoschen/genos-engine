@@ -1,0 +1,37 @@
+#version 450
+// GI v2 screen probes, pass 1: place one probe per tile on the G-buffer surface at
+// the tile's centre, or the first of four inner points that shows a surface.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "gi2_common.glsl"
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= gi2_probes()) {
+        return;
+    }
+    uint tile = pc.params.y;
+    uvec2 origin = uvec2(i % pc.dims.z, i / pc.dims.z) * tile;
+    vec4 pos_out = vec4(0.0);
+    vec4 n_out = vec4(0.0, 1.0, 0.0, 0.0);
+    [[dont_unroll]] for (uint k = 0u; k < 5u; k++) {
+        uvec2 off = k == 0u ? uvec2(tile / 2u)
+            : uvec2((k & 1u) == 1u ? tile / 4u : 3u * tile / 4u, k < 3u ? tile / 4u : 3u * tile / 4u);
+        uvec2 p = min(origin + off, uvec2(pc.dims.x - 1u, pc.dims.y - 1u));
+        vec3 pos;
+        vec3 n;
+        vec3 albedo;
+        bool two_sided;
+        if (gi2_surface(p, pos, n, albedo, two_sided)) {
+            // A two-sided card's probe faces the eye.
+            if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
+                n = -n;
+            }
+            pos_out = vec4(pos, 1.0);
+            n_out = vec4(n, 0.0);
+            break;
+        }
+    }
+    work.v[gi2_probe_at(i)] = pos_out;
+    work.v[gi2_probe_at(i) + 1u] = n_out;
+}
