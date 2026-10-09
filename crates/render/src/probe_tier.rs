@@ -2898,7 +2898,7 @@ impl TierState {
             } else if let Some(history) = item.history {
                 left = left.saturating_sub(1);
                 run += 1;
-                samples = (samples.min(history) + item.rays).min(TARGET_SAMPLES);
+                samples = (samples + item.rays).min(history).min(TARGET_SAMPLES);
                 changed |= left == 0;
             } else {
                 samples = (samples + item.rays).min(TARGET_SAMPLES);
@@ -3023,14 +3023,15 @@ impl TierState {
                 slot.samples = item.rays;
                 slot.change_left = CHANGE_PASSES;
             } else if let Some(history) = item.history {
-                // The shader keeps at most `history` of the stored rays.
+                // The shader keeps at most `history` of the stored rays and stores at
+                // most `history` as the count, so refining starts from there.
                 slot.change_left = slot.change_left.saturating_sub(1);
                 if slot.change_left == 0 {
                     slot.replace = false;
                     slot.darken = false;
                 }
                 slot.run += 1;
-                slot.samples = (slot.samples.min(history) + item.rays).min(TARGET_SAMPLES);
+                slot.samples = (slot.samples + item.rays).min(history).min(TARGET_SAMPLES);
             } else {
                 slot.samples = (slot.samples + item.rays).min(TARGET_SAMPLES);
             }
