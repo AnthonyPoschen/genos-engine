@@ -1,0 +1,89 @@
+{
+ "asset": {
+  "version": "2.0"
+ },
+ "nodes": [
+  {
+   "mesh": 0,
+   "translation": [
+    0,
+    1,
+    0
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0
+     },
+     "material": 0
+    }
+   ]
+  }
+ ],
+ "materials": [
+  {
+   "emissiveTexture": {
+    "index": 0,
+    "texCoord": 0
+   },
+   "normalTexture": {
+    "index": 0,
+    "scale": 0.5
+   }
+  }
+ ],
+ "textures": [
+  {
+   "source": 0
+  }
+ ],
+ "images": [
+  {
+   "uri": "quad.png"
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 52,
+   "uri": "tri.bin"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteLength": 36
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 36,
+   "byteLength": 2
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 40,
+   "byteLength": 12
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC3",
+   "sparse": {
+    "count": 1,
+    "indices": {
+     "bufferView": 1,
+     "componentType": 5123
+    },
+    "values": {
+     "bufferView": 2
+    }
+   }
+  }
+ ]
+}

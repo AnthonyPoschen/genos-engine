@@ -6,6 +6,7 @@
 mod animation;
 mod bin;
 mod error;
+mod gltf;
 mod inflate;
 mod jpeg;
 mod material;
@@ -18,6 +19,10 @@ mod wav;
 
 pub use animation::{Animation, Transform, TransformKey};
 pub use error::LoadError;
+pub use gltf::{
+    transform_point, AlphaMode, GltfMesh, GltfScene, MeshInstance, PbrMaterial, Primitive, Sampler,
+    TextureSlot,
+};
 pub use material::Material;
 pub use mesh::{Mesh, Triangle};
 pub use png::Image;
@@ -28,6 +33,27 @@ pub use wav::Pcm;
 
 fn read(source: &dyn ByteSource) -> Result<Vec<u8>, LoadError> {
     source.read_bytes()
+}
+
+/// Decode a glTF 2.0 scene (`.gltf` or `.glb`). `resolve` reads a URI relative
+/// to the file (external buffers and images); `data:` URIs never reach it.
+pub fn load_gltf(
+    source: &dyn ByteSource,
+    resolve: &dyn Fn(&str) -> Result<Vec<u8>, LoadError>,
+) -> Result<GltfScene, LoadError> {
+    gltf::decode_gltf(&read(source)?, resolve)
+}
+
+/// Decode a glTF 2.0 file; relative URIs are read from the file's directory.
+pub fn load_gltf_file(path: impl AsRef<std::path::Path>) -> Result<GltfScene, LoadError> {
+    let path = path.as_ref();
+    let dir = path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    load_gltf(&FileSource::new(path), &|uri| {
+        FileSource::new(dir.join(uri)).read_bytes()
+    })
 }
 
 /// Decode a PNG or a JPEG into an RGBA8 image. The format comes from the bytes.

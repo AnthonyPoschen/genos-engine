@@ -13,9 +13,9 @@ const MAX_EDGE: usize = 8192;
 
 /// Natural (row-major) index of each zig-zag position.
 const ZIGZAG: [usize; 64] = [
-    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27,
-    20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58,
-    59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
+    13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
+    52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
 #[derive(Clone, Default)]
@@ -76,7 +76,13 @@ struct Bits<'a> {
 
 impl<'a> Bits<'a> {
     fn new(data: &'a [u8], pos: usize) -> Self {
-        Bits { data, pos, acc: 0, count: 0, marker: false }
+        Bits {
+            data,
+            pos,
+            acc: 0,
+            count: 0,
+            marker: false,
+        }
     }
 
     fn fill(&mut self) {
@@ -179,7 +185,10 @@ impl<'a> Bits<'a> {
     fn end(&self) -> usize {
         let mut p = self.pos;
         while p + 1 < self.data.len() {
-            if self.data[p] == 0xFF && self.data[p + 1] != 0x00 && !(0xD0..=0xD7).contains(&self.data[p + 1]) {
+            if self.data[p] == 0xFF
+                && self.data[p + 1] != 0x00
+                && !(0xD0..=0xD7).contains(&self.data[p + 1])
+            {
                 return p;
             }
             p += 1;
@@ -277,7 +286,10 @@ pub(crate) fn decode_jpeg(data: &[u8]) -> Result<Image, LoadError> {
                     let mut counts = [0u8; 16];
                     counts.copy_from_slice(seg.get(i + 1..i + 17).ok_or(LoadError::Truncated)?);
                     let total: usize = counts.iter().map(|&c| c as usize).sum();
-                    let values = seg.get(i + 17..i + 17 + total).ok_or(LoadError::Truncated)?.to_vec();
+                    let values = seg
+                        .get(i + 17..i + 17 + total)
+                        .ok_or(LoadError::Truncated)?
+                        .to_vec();
                     let table = Huffman::new(&counts, values)?;
                     if tc == 0 {
                         dc_tables[th] = Some(table);
@@ -295,7 +307,12 @@ pub(crate) fn decode_jpeg(data: &[u8]) -> Result<Image, LoadError> {
                 height = u16_at(seg, 1)?;
                 width = u16_at(seg, 3)?;
                 let n = *seg.get(5).ok_or(LoadError::Truncated)? as usize;
-                if width == 0 || height == 0 || width > MAX_EDGE || height > MAX_EDGE || !(n == 1 || n == 3) {
+                if width == 0
+                    || height == 0
+                    || width > MAX_EDGE
+                    || height > MAX_EDGE
+                    || !(n == 1 || n == 3)
+                {
                     return Err(LoadError::Unrecognized);
                 }
                 for c in 0..n {
@@ -346,20 +363,46 @@ pub(crate) fn decode_jpeg(data: &[u8]) -> Result<Image, LoadError> {
                 let mut scan = Vec::with_capacity(ns);
                 for i in 0..ns {
                     let b = seg.get(1 + i * 2..3 + i * 2).ok_or(LoadError::Truncated)?;
-                    let ci = comps.iter().position(|c| c.id == b[0]).ok_or(LoadError::Unrecognized)?;
+                    let ci = comps
+                        .iter()
+                        .position(|c| c.id == b[0])
+                        .ok_or(LoadError::Unrecognized)?;
                     comps[ci].dc_table = (b[1] >> 4) as usize & 3;
                     comps[ci].ac_table = (b[1] & 15) as usize & 3;
                     scan.push(ci);
                 }
-                let tail = seg.get(1 + ns * 2..4 + ns * 2).ok_or(LoadError::Truncated)?;
-                let (ss, se, ah, al) = (tail[0] as usize, tail[1] as usize, (tail[2] >> 4) as u32, (tail[2] & 15) as u32);
+                let tail = seg
+                    .get(1 + ns * 2..4 + ns * 2)
+                    .ok_or(LoadError::Truncated)?;
+                let (ss, se, ah, al) = (
+                    tail[0] as usize,
+                    tail[1] as usize,
+                    (tail[2] >> 4) as u32,
+                    (tail[2] & 15) as u32,
+                );
                 if ss > 63 || se > 63 || ss > se && progressive {
                     return Err(LoadError::Unrecognized);
                 }
                 let start = pos + len;
                 let mut bits = Bits::new(data, start);
-                let p = ScanParams { ss, se: if progressive { se } else { 63 }, ah, al, progressive };
-                decode_scan(&mut bits, &mut comps, &scan, &dc_tables, &ac_tables, p, restart_interval, mcux, mcuy)?;
+                let p = ScanParams {
+                    ss,
+                    se: if progressive { se } else { 63 },
+                    ah,
+                    al,
+                    progressive,
+                };
+                decode_scan(
+                    &mut bits,
+                    &mut comps,
+                    &scan,
+                    &dc_tables,
+                    &ac_tables,
+                    p,
+                    restart_interval,
+                    mcux,
+                    mcuy,
+                )?;
                 pos = bits.end();
                 continue;
             }
@@ -370,7 +413,15 @@ pub(crate) fn decode_jpeg(data: &[u8]) -> Result<Image, LoadError> {
     if comps.is_empty() {
         return Err(LoadError::Unrecognized);
     }
-    Ok(to_image(&comps, &quant, width, height, hmax, vmax, adobe_transform))
+    Ok(to_image(
+        &comps,
+        &quant,
+        width,
+        height,
+        hmax,
+        vmax,
+        adobe_transform,
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -415,10 +466,18 @@ fn decode_scan(
         }
         let (ux, uy) = (unit % units_x, unit / units_x);
         for &ci in scan {
-            let (h, v) = if single { (1, 1) } else { (comps[ci].h, comps[ci].v) };
+            let (h, v) = if single {
+                (1, 1)
+            } else {
+                (comps[ci].h, comps[ci].v)
+            };
             for by in 0..v {
                 for bx in 0..h {
-                    let (x, y) = if single { (ux, uy) } else { (ux * comps[ci].h + bx, uy * comps[ci].v + by) };
+                    let (x, y) = if single {
+                        (ux, uy)
+                    } else {
+                        (ux * comps[ci].h + bx, uy * comps[ci].v + by)
+                    };
                     let c = &mut comps[ci];
                     let index = y * c.bw + x;
                     let dc = dc_tables[c.dc_table].as_ref();
@@ -566,7 +625,13 @@ fn idct_block(coeffs: &[i32; 64], q: &[u16; 64], out: &mut [u8; 64]) {
         f[ZIGZAG[k]] = coeffs[k] as f32 * q[ZIGZAG[k]] as f32;
     }
     let mut tmp = [0f32; 64];
-    let c = |u: usize| if u == 0 { std::f32::consts::FRAC_1_SQRT_2 } else { 1.0 };
+    let c = |u: usize| {
+        if u == 0 {
+            std::f32::consts::FRAC_1_SQRT_2
+        } else {
+            1.0
+        }
+    };
     let mut cos = [[0f32; 8]; 8];
     for (x, row) in cos.iter_mut().enumerate() {
         for (u, v) in row.iter_mut().enumerate() {
@@ -634,8 +699,10 @@ fn to_image(
                 }
                 let cw = (width * c.h).div_ceil(hmax);
                 let ch = (height * c.v).div_ceil(vmax);
-                let fx = ((x as f32 + 0.5) * c.h as f32 / hmax as f32 - 0.5).clamp(0.0, (cw - 1) as f32);
-                let fy = ((y as f32 + 0.5) * c.v as f32 / vmax as f32 - 0.5).clamp(0.0, (ch - 1) as f32);
+                let fx =
+                    ((x as f32 + 0.5) * c.h as f32 / hmax as f32 - 0.5).clamp(0.0, (cw - 1) as f32);
+                let fy =
+                    ((y as f32 + 0.5) * c.v as f32 / vmax as f32 - 0.5).clamp(0.0, (ch - 1) as f32);
                 let (x0, y0) = (fx as usize, fy as usize);
                 let (x1, y1) = ((x0 + 1).min(cw - 1), (y0 + 1).min(ch - 1));
                 let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);

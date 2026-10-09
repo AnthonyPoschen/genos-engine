@@ -141,6 +141,7 @@ version = "0.1.0"
 name = "genos-load"
 version = "0.1.0"
 dependencies = [
+ "genos-json",
  "genos-math",
 ]
 

@@ -453,7 +453,12 @@ fn crc32(data: &[u8]) -> u32 {
 }
 
 fn fixture_bytes(name: &str) -> Vec<u8> {
-    std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures").join(name)).unwrap()
+    std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures")
+            .join(name),
+    )
+    .unwrap()
 }
 
 /// Mean and largest channel difference against the PNG a reference decoder (libjpeg via
@@ -515,5 +520,8 @@ fn jpeg_truncated_does_not_panic_and_arithmetic_is_refused() {
     // Turn the SOF0 marker into SOF9 (arithmetic coding).
     let at = arith.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
     arith[at + 1] = 0xC9;
-    assert_eq!(genos_load::decode_image(&arith), Err(LoadError::Unrecognized));
+    assert_eq!(
+        genos_load::decode_image(&arith),
+        Err(LoadError::Unrecognized)
+    );
 }
