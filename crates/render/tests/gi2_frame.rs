@@ -136,3 +136,94 @@ fn switching_back_from_gi_v2_restores_the_current_picture() {
         "the current picture changed by {mean:.2} of 255 after a GI v2 round trip"
     );
 }
+
+/// A dark room but for one emissive glTF cube: GI v2 draws the cube's own light,
+/// and rays that hit it carry that light onto the floor in front of it.
+#[test]
+fn gi_v2_draws_emitted_light_and_bounces_it() {
+    let (_gpu, mut window, mut renderer) = open();
+    let gltf = genos_load::load_gltf_file(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../load/fixtures/cube.gltf"
+    ))
+    .expect("cube fixture");
+    let settings = genos_bake::BakeSettings {
+        mode: genos_bake::BakeMode::OnLoad,
+        cache_dir: std::env::temp_dir().join("genos-gi2-emission-test"),
+        ..genos_bake::BakeSettings::default()
+    };
+    let dark_room = |glow: f32| {
+        let mut world = World::from_scene(Scene {
+            floor: genos_scene::Floor {
+                position: genos_scene::Vec3::ZERO,
+                half_x: 20.0,
+                half_z: 20.0,
+                color: [0.8; 3],
+            },
+            walls: Vec::new(),
+            solids: Vec::new(),
+            lights: Vec::new(),
+            ceiling: None,
+            sky: None,
+        });
+        let mut lit = gltf.clone();
+        for m in &mut lit.materials {
+            m.emissive = [glow; 3];
+            m.emissive_strength = 1.0;
+        }
+        // The fixture's cube spans x 8..12, y -2..2 at z 0: move it to stand on
+        // the floor 6 m ahead of the eye.
+        let mut place = genos_render::identity_pose();
+        place[12] = -10.0;
+        place[13] = 2.0;
+        place[14] = -6.0;
+        world
+            .add_gltf_traced(&lit, &place, &settings)
+            .expect("traced cube");
+        world
+    };
+    let mut camera = Camera::opening();
+    camera.set_pose(genos_scene::Vec3::new(0.0, 1.7, 4.0), 0.0, 0.0);
+    renderer.set_gi_v2(true).expect("GI v2");
+    let mut shot = |world: &World| {
+        let mut last = Vec::new();
+        for _ in 0..60 {
+            last = draw(&mut window, &mut renderer, world, &camera);
+        }
+        last
+    };
+    let dark = shot(&dark_room(0.0));
+    let glowing = shot(&dark_room(4.0));
+    let (w, h) = (320usize, 180usize);
+    assert_eq!(dark.len(), w * h * 4);
+    let mean = |p: &[u8], rows: std::ops::Range<usize>, cols: std::ops::Range<usize>| {
+        let mut sum = 0u64;
+        let mut n = 0u64;
+        for y in rows {
+            for x in cols.clone() {
+                let i = (y * w + x) * 4;
+                sum += u64::from(p[i]) + u64::from(p[i + 1]) + u64::from(p[i + 2]);
+                n += 3;
+            }
+        }
+        sum as f64 / n as f64
+    };
+    // The cube face fills the middle; the floor in front of it the bottom rows.
+    let face = (
+        mean(&dark, 70..100, 140..180),
+        mean(&glowing, 70..100, 140..180),
+    );
+    let floor = (
+        mean(&dark, 135..180, 100..220),
+        mean(&glowing, 135..180, 100..220),
+    );
+    eprintln!("face {face:?} floor {floor:?}");
+    assert!(
+        face.0 < 10.0 && face.1 > 150.0,
+        "the cube shows its own light: {face:?}"
+    );
+    assert!(
+        floor.1 > floor.0 + 10.0,
+        "the floor catches the cube's light: {floor:?}"
+    );
+}
