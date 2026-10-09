@@ -19,14 +19,19 @@
 // is what runs with GI v2 off: `GENOS_GI=v2` at start, or `Renderer::set_gi_v2`.
 
 /// Screen probe tile edge in pixels (Medium and above in the design).
+/// Screen probe tile at 720p and up, pixels (Lumen's size).
 pub(crate) const GI2_TILE: u32 = 16;
 
-/// Screen probe tile, pixels: GI2_TILE, or GENOS_GI2_TILE (4..64) to experiment.
-fn gi2_tile() -> u32 {
+/// Screen probe tile for a picture `height` pixels tall: GI2_TILE from 720p up;
+/// below that the tile shrinks with the picture (down to 4 px) so the probes keep
+/// the same spacing on screen, about 45 rows. A small picture would otherwise get
+/// probes a ninth of its height apart and lose detail a 720p picture keeps.
+/// GENOS_GI2_TILE (4..64) overrides it to experiment.
+fn gi2_tile(height: u32) -> u32 {
     std::env::var("GENOS_GI2_TILE")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
-        .map_or(GI2_TILE, |t| t.clamp(4, 64))
+        .map_or((height / 45).clamp(4, GI2_TILE), |t| t.clamp(4, 64))
 }
 /// Rays per screen probe (Low in the design; a square for the stratified pattern).
 pub(crate) const GI2_RAYS: u32 = 64;
@@ -419,7 +424,7 @@ impl Gpu {
             return Ok(());
         }
         let (w, h) = (self.extent_w.max(1), self.extent_h.max(1));
-        let tile = gi2_tile();
+        let tile = gi2_tile(h);
         let cols = w.div_ceil(tile);
         let rows = h.div_ceil(tile);
         let probes = (cols * rows) as u64;
@@ -665,7 +670,7 @@ impl Gpu {
             self.gi2.quiet = 0;
         }
         self.gi2.stats_still[slot] = self.gi2.still;
-        let pc = [w, h, cols, rows, GI2_RAYS, gi2_tile(), bgra, self.gi2.frame];
+        let pc = [w, h, cols, rows, GI2_RAYS, gi2_tile(h), bgra, self.gi2.frame];
         let image = self.color.image;
         // The raster colour as the base: pixels with no surface keep it.
         self.copy_image_buffer(image, 6, self.gi2.out.buffer, w, h, true);
