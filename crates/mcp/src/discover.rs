@@ -100,7 +100,10 @@ pub fn publish(url: &str) -> Result<(), String> {
         ("url", json::string(url)),
     ]));
     let path = record_path(pid);
-    let temporary = directory.join(format!(".{pid}.json.tmp"));
+    // Unique per call: two servers in one process (tests) publish at once.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = directory.join(format!(".{pid}-{n}.json.tmp"));
     fs::write(&temporary, body).map_err(|err| err.to_string())?;
     fs::rename(&temporary, &path).map_err(|err| err.to_string())?;
     Ok(())

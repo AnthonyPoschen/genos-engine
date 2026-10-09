@@ -31,9 +31,8 @@ impl Server {
     /// Bind `127.0.0.1` on `port`. Port 0 picks a free port. Any other port is that
     /// port, so a client can use the same address every run.
     pub fn start_on(host: Host, port: u16) -> Result<Self, String> {
-        let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|err| {
-            format!("mcp port {port} did not bind: {err}")
-        })?;
+        let listener = TcpListener::bind(("127.0.0.1", port))
+            .map_err(|err| format!("mcp port {port} did not bind: {err}"))?;
         listener
             .set_nonblocking(true)
             .map_err(|err| err.to_string())?;
@@ -164,9 +163,40 @@ fn serve_connection(
     }
     if path == "/shot.png" && request.method == "GET" {
         return match crate::control::wait_shot(std::time::Duration::from_secs(2)) {
-            Ok(_) => write_bytes(&mut stream, 200, "OK", "image/png", &crate::control::shot_bytes()),
+            Ok(_) => write_bytes(
+                &mut stream,
+                200,
+                "OK",
+                "image/png",
+                &crate::control::shot_bytes(),
+            ),
             Err(body) => write_text(&mut stream, 503, "Service Unavailable", &body),
         };
+    }
+    if let Some(name) = path.strip_prefix("/cmd/") {
+        if request.method != "POST" && request.method != "GET" {
+            return write_empty(&mut stream, 405, "Method Not Allowed");
+        }
+        let args = if request.body.trim().is_empty() {
+            crate::json::object([])
+        } else {
+            match crate::json::parse(&request.body) {
+                Ok(value) => value,
+                Err(err) => return write_text(&mut stream, 400, "Bad Request", &err),
+            }
+        };
+        let timeout = crate::rpc::command_timeout(&args);
+        return match crate::command::call(name, args, timeout) {
+            Ok(value) => write_text(&mut stream, 200, "OK", &crate::json::encode(&value)),
+            Err(body) => write_text(&mut stream, 400, "Bad Request", &body),
+        };
+    }
+    if path == "/cmd" && request.method == "GET" {
+        let names: Vec<String> = crate::command::specs()
+            .into_iter()
+            .map(|spec| format!("{}: {}", spec.name, spec.description))
+            .collect();
+        return write_text(&mut stream, 200, "OK", &(names.join("\n") + "\n"));
     }
     if path != "/mcp" {
         return write_empty(&mut stream, 404, "Not Found");
@@ -485,8 +515,19 @@ fn write_empty(stream: &mut TcpStream, status: u16, reason: &str) -> std::io::Re
     write_json(stream, status, reason, None, "")
 }
 
-fn write_text(stream: &mut TcpStream, status: u16, reason: &str, body: &str) -> std::io::Result<()> {
-    write_bytes(stream, status, reason, "text/plain; charset=utf-8", body.as_bytes())
+fn write_text(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: &str,
+) -> std::io::Result<()> {
+    write_bytes(
+        stream,
+        status,
+        reason,
+        "text/plain; charset=utf-8",
+        body.as_bytes(),
+    )
 }
 
 fn write_bytes(

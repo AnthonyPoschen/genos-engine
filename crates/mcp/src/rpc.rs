@@ -99,6 +99,14 @@ fn call_tool(host: &Host, params: &Value) -> Reply {
             Err(text) => Reply::Result(tool_content(text, true)),
         };
     }
+    if crate::command::known(name) {
+        return Reply::Result(
+            match crate::command::call(name, arguments.clone(), command_timeout(arguments)) {
+                Ok(value) => tool_content(json::encode(&value), false),
+                Err(text) => tool_content(text, true),
+            },
+        );
+    }
     match host.call_tool(name, arguments) {
         ToolResult::Unknown => Reply::Error {
             code: -32602,
@@ -107,6 +115,16 @@ fn call_tool(host: &Host, params: &Value) -> Reply {
         ToolResult::Done(Ok(text)) => Reply::Result(tool_content(text, false)),
         ToolResult::Done(Err(text)) => Reply::Result(tool_content(text, true)),
     }
+}
+
+/// How long a command may take: `timeout_s` in its arguments, else two minutes
+/// (a wait for the light to settle on a software GPU takes tens of seconds).
+pub fn command_timeout(arguments: &Value) -> std::time::Duration {
+    let seconds = arguments
+        .get("timeout_s")
+        .and_then(Value::as_f64)
+        .unwrap_or(120.0);
+    std::time::Duration::from_secs_f64(seconds.clamp(0.1, 3600.0) + 1.0)
 }
 
 fn read_resource(host: &Host, params: &Value) -> Reply {
@@ -165,7 +183,15 @@ fn tool_content(text: String, is_error: bool) -> Value {
 }
 
 fn tools() -> Value {
-    json::array(vec![
+    let mut list = builtin_tools();
+    for spec in crate::command::specs() {
+        list.push(tool(&spec.name, &spec.description, spec.schema));
+    }
+    json::array(list)
+}
+
+fn builtin_tools() -> Vec<Value> {
+    vec![
         tool(
             "read_scene",
             "Read the live floor, walls, solids, lights, and camera.",
@@ -249,7 +275,7 @@ fn tools() -> Value {
                 ],
             ),
         ),
-    ])
+    ]
 }
 
 fn resources() -> Value {
