@@ -20,6 +20,16 @@ pub struct Look {
     pub border: [f32; 3],
 }
 
+/// A line in window pixels, `width` pixels across. The renderer draws it as a thin
+/// quad in the same draw as the panel rectangles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Segment {
+    pub a: [f32; 2],
+    pub b: [f32; 2],
+    pub width: f32,
+    pub color: [f32; 3],
+}
+
 /// Picture filter the lighting panel can select. `Off` is the unfiltered picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PictureMode {
@@ -52,8 +62,8 @@ pub enum Action {
 
 pub use layout::{layout, Align, Direction, Node, Pad, Place, Rect, Sizing, Space};
 pub use panel::{
-    apply_frame_action, apply_lamp, button_panel, lighting_frame, Frame, PanelButton, PanelRow,
-    Paint, Pointer, Shown, State,
+    apply_frame_action, apply_lamp, button_panel, lighting_frame, Frame, Paint, PanelButton,
+    PanelRow, Pointer, Shown, State,
 };
 pub use profile::{
     inspect_region, profile_overlay, remember_frame, FrameSample, OpenFrame, PlotScale,

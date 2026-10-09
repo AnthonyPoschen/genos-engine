@@ -1,5 +1,5 @@
-//! Frame profile. The file stores every completed frame. The graph draws one
-//! box for each 250 ms average.
+//! Frame profile. The file stores every completed frame. The graph draws each
+//! series as a line through one point per 250 ms average.
 //!
 //! The camera records CPU stages on every user launch. GPU timestamps and the
 //! profile file run only in detailed mode. CPU time is the host time of a stage.
@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::panel::Paint;
 use crate::text;
+use crate::Segment;
 
 /// Stages the camera frame already runs, in order.
 pub const STAGE_LABELS: [&str; 6] = [
@@ -40,16 +41,18 @@ pub const GRAPH_WINDOW: Duration = Duration::from_secs(10);
 /// The on-screen picture is built at most 5 times a second.
 pub const OVERLAY_PERIOD: Duration = Duration::from_millis(200);
 
-/// The graph draws one box for this interval.
+/// The graph draws one point for this interval.
 ///
 /// A CPU stage uses the average of the frames in the interval. The draw CPU
-/// box and the draw GPU box keep the highest sample in the interval.
+/// point and the draw GPU point keep the highest sample in the interval.
 pub const GRAPH_BUCKET: Duration = Duration::from_millis(250);
 
 const GRAPH_W: f32 = 460.0;
 const GRAPH_H: f32 = 320.0;
 const MARGIN: f32 = 16.0;
 const POINT: f32 = 6.0;
+/// Pixels across a series line.
+const LINE_W: f32 = 2.0;
 const TEXT_PAD: f32 = 6.0;
 const BG: [f32; 3] = [0.05, 0.06, 0.08];
 const TEXT: [f32; 3] = [0.93, 0.95, 0.92];
@@ -443,7 +446,10 @@ pub struct ProfileView {
     pub background: Paint,
     pub plot: PlotScale,
     pub lines: Vec<ProfileLine>,
+    /// Background, readout text and the selection.
     pub paints: Vec<Paint>,
+    /// The series, one polyline each through the point centres.
+    pub segments: Vec<Segment>,
 }
 
 impl ProfileView {
@@ -512,6 +518,7 @@ fn compose(
             plot: empty_plot,
             lines: Vec::new(),
             paints: Vec::new(),
+            segments: Vec::new(),
         };
     }
     let latest = &history[history.len() - 1];
@@ -620,6 +627,7 @@ fn compose(
         }
     }
     let mut lines = Vec::new();
+    let mut segments = Vec::new();
     for (stage_index, gpu_series, color, marks) in prepared {
         push_series(
             marks,
@@ -634,7 +642,7 @@ fn compose(
             plot_h,
             max_nanos,
             &mut lines,
-            &mut paints,
+            &mut segments,
         );
     }
     ProfileView {
@@ -644,6 +652,7 @@ fn compose(
         plot,
         lines,
         paints,
+        segments,
     }
 }
 
@@ -723,7 +732,7 @@ fn push_series(
     plot_h: f32,
     max_nanos: u128,
     lines: &mut Vec<ProfileLine>,
-    paints: &mut Vec<Paint>,
+    segments: &mut Vec<Segment>,
 ) {
     let name = if gpu_series {
         format!("{} gpu", STAGE_LABELS[stage_index])
@@ -744,14 +753,25 @@ fn push_series(
             }
         })
         .collect::<Vec<_>>();
-    for point in &points {
-        paints.push(Paint {
-            x: point.x,
-            y: point.y,
-            w: point.w,
-            h: POINT,
+    let mid = |p: &ProfilePoint| [p.center_x(), p.y + POINT * 0.5];
+    match points.as_slice() {
+        [] => {}
+        [one] => segments.push(Segment {
+            a: [one.x, mid(one)[1]],
+            b: [one.x + one.w.max(LINE_W), mid(one)[1]],
+            width: LINE_W,
             color,
-        });
+        }),
+        _ => {
+            for pair in points.windows(2) {
+                segments.push(Segment {
+                    a: mid(&pair[0]),
+                    b: mid(&pair[1]),
+                    width: LINE_W,
+                    color,
+                });
+            }
+        }
     }
     lines.push(ProfileLine { name, points });
 }

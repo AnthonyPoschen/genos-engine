@@ -167,7 +167,9 @@ fn run() -> Result<(), String> {
             }
             "--size" => {
                 let text = args.next().ok_or("missing size")?;
-                let (w, h) = text.split_once('x').ok_or(format!("bad size {text}, want WxH"))?;
+                let (w, h) = text
+                    .split_once('x')
+                    .ok_or(format!("bad size {text}, want WxH"))?;
                 size = (
                     w.parse::<u32>().map_err(|err| err.to_string())?,
                     h.parse::<u32>().map_err(|err| err.to_string())?,
@@ -248,6 +250,7 @@ fn run() -> Result<(), String> {
     let mut profile = ProfileGraph::default();
     let mut profile_pending: VecDeque<PendingProfile> = VecDeque::new();
     let mut graph_rects: Vec<ScreenRect> = Vec::new();
+    let mut graph_lines: Vec<genos_render::ScreenLine> = Vec::new();
     let mut drag_origin: Option<Duration> = None;
     let boot = Instant::now();
     let mut wireframe = false;
@@ -255,7 +258,8 @@ fn run() -> Result<(), String> {
     let mut frame_clock: Option<Instant> = None;
     let mut bench = Bench::from_env(&world.scene, bench_camera)?;
     if let Some(dir) = bench.as_ref().and_then(|bench| bench.shots.as_ref()) {
-        std::fs::create_dir_all(dir).map_err(|e| format!("GENOS_BENCH_SHOTS {}: {e}", dir.display()))?;
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("GENOS_BENCH_SHOTS {}: {e}", dir.display()))?;
     }
     if bench.is_some() {
         // A bench reads the picture as it is drawn (shots, the flicker phase): a
@@ -370,6 +374,7 @@ fn run() -> Result<(), String> {
                 copy_graph(
                     &profile.overlay_at(viewport, detailed, now),
                     &mut graph_rects,
+                    &mut graph_lines,
                 );
             }
             if paused {
@@ -395,10 +400,16 @@ fn run() -> Result<(), String> {
                 copy_graph(
                     &profile.overlay_at(viewport, detailed, now),
                     &mut graph_rects,
+                    &mut graph_lines,
                 );
             }
             overlay.extend_from_slice(&graph_rects);
         }
+        renderer.set_overlay_lines(if readback.is_none() && graph_on {
+            &graph_lines
+        } else {
+            &[]
+        });
         let ui_cpu = ui_at.elapsed();
         // camera/scene update
         let scene_at = Instant::now();
@@ -607,7 +618,12 @@ fn run() -> Result<(), String> {
         }
     }
     if let Some(bench) = bench {
-        bench.report(renderer.width(), renderer.height(), renderer.antialias(), renderer.tier_weights());
+        bench.report(
+            renderer.width(),
+            renderer.height(),
+            renderer.antialias(),
+            renderer.tier_weights(),
+        );
     }
     println!("genos-camera frames={drawn}");
     Ok(())
@@ -738,10 +754,11 @@ impl Flicker {
         let n = f64::from(self.measured.max(1));
         let tiles: Vec<f64> = self.tiles.iter().map(|t| t / n).collect();
         let mean = tiles.iter().sum::<f64>() / tiles.len() as f64;
-        let (worst, max) = tiles
-            .iter()
-            .enumerate()
-            .fold((0, 0.0f64), |best, (i, &v)| if v > best.1 { (i, v) } else { best });
+        let (worst, max) =
+            tiles.iter().enumerate().fold(
+                (0, 0.0f64),
+                |best, (i, &v)| if v > best.1 { (i, v) } else { best },
+            );
         let all: Vec<String> = tiles.iter().map(|t| format!("{t:.3}")).collect();
         format!(
             " flicker_frames={} flicker_mean={mean:.3} flicker_max={max:.3} worst_tile={},{} tiles={}",
@@ -796,7 +813,8 @@ impl Converge {
         for y in (0..h).step_by(CONVERGE_STEP) {
             for x in (0..w).step_by(CONVERGE_STEP) {
                 let p = &bgra[(y * w + x) * 4..(y * w + x) * 4 + 3];
-                let l = 0.0722 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.2126 * f32::from(p[2]);
+                let l =
+                    0.0722 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.2126 * f32::from(p[2]);
                 luma.push(l.round().clamp(0.0, 255.0) as u8);
             }
         }
@@ -809,10 +827,12 @@ impl Converge {
         };
         let off = |picture: &[u8], i: usize| picture[i].abs_diff(last[i]) > CONVERGE_CODES;
         // The pixels the change touched: off the settled picture in any picture.
-        let touched: Vec<usize> =
-            (0..last.len()).filter(|&i| self.pictures.iter().any(|(_, picture)| off(picture, i))).collect();
+        let touched: Vec<usize> = (0..last.len())
+            .filter(|&i| self.pictures.iter().any(|(_, picture)| off(picture, i)))
+            .collect();
         let share = |picture: &[u8]| {
-            1.0 - touched.iter().filter(|&&i| off(picture, i)).count() as f64 / touched.len().max(1) as f64
+            1.0 - touched.iter().filter(|&&i| off(picture, i)).count() as f64
+                / touched.len().max(1) as f64
         };
         // The first picture from which every later one stays converged.
         let mut conv = None;
@@ -825,7 +845,12 @@ impl Converge {
         }
         let first = &self.pictures[0].1;
         let n = last.len().max(1) as f64;
-        let err = first.iter().zip(last).map(|(a, b)| f64::from(a.abs_diff(*b))).sum::<f64>() / n;
+        let err = first
+            .iter()
+            .zip(last)
+            .map(|(a, b)| f64::from(a.abs_diff(*b)))
+            .sum::<f64>()
+            / n;
         format!(
             " conv95_ms={:.0} touched={:.3} start_err={err:.2} start_within={:.3} pictures={}",
             conv.unwrap_or(-1.0),
@@ -863,13 +888,17 @@ impl Bench {
         let Ok(value) = std::env::var("GENOS_BENCH") else {
             return Ok(None);
         };
-        let seconds: f32 = value.parse().map_err(|_| format!("GENOS_BENCH={value} is not seconds"))?;
+        let seconds: f32 = value
+            .parse()
+            .map_err(|_| format!("GENOS_BENCH={value} is not seconds"))?;
         if scene.lights.is_empty() {
             return Err("GENOS_BENCH needs a lamp in the scene".into());
         }
         let now = Instant::now();
         let flicker_frames = match std::env::var("GENOS_BENCH_FLICKER") {
-            Ok(v) => v.parse().map_err(|_| format!("GENOS_BENCH_FLICKER={v} is not frames"))?,
+            Ok(v) => v
+                .parse()
+                .map_err(|_| format!("GENOS_BENCH_FLICKER={v} is not frames"))?,
             Err(_) => BENCH_FLICKER_FRAMES,
         };
         let drag = red_box_index(scene)
@@ -892,9 +921,15 @@ impl Bench {
             next_shot: 0,
             shot: None,
             tier: genos_render::TierStats::default(),
-            flicker: Flicker { frames: flicker_frames, ..Flicker::default() },
+            flicker: Flicker {
+                frames: flicker_frames,
+                ..Flicker::default()
+            },
             drag,
-            drag_flicker: Flicker { frames: flicker_frames, ..Flicker::default() },
+            drag_flicker: Flicker {
+                frames: flicker_frames,
+                ..Flicker::default()
+            },
             solids: scene.solids.iter().map(|s| s.position).collect(),
             converge: Converge::default(),
         }))
@@ -913,8 +948,12 @@ impl Bench {
             BenchPhase::Warmup => (elapsed >= BENCH_WARMUP).then_some(BenchPhase::Still),
             BenchPhase::Still => (elapsed >= self.span).then_some(BenchPhase::Moving),
             BenchPhase::Moving => (elapsed >= self.span).then_some(BenchPhase::Down),
-            BenchPhase::Down => (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::Up),
-            BenchPhase::Up => (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::Flicker),
+            BenchPhase::Down => {
+                (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::Up)
+            }
+            BenchPhase::Up => {
+                (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::Flicker)
+            }
             BenchPhase::Flicker => {
                 (self.flicker.measured >= self.flicker.frames).then_some(BenchPhase::Drag)
             }
@@ -922,14 +961,18 @@ impl Bench {
             BenchPhase::Rest => {
                 (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::DragFlicker)
             }
-            BenchPhase::DragFlicker => {
-                (self.drag_flicker.measured >= self.drag_flicker.frames).then_some(BenchPhase::Switch)
+            BenchPhase::DragFlicker => (self.drag_flicker.measured >= self.drag_flicker.frames)
+                .then_some(BenchPhase::Switch),
+            BenchPhase::Switch => {
+                (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::Switch)
             }
-            BenchPhase::Switch => (pending == 0 || elapsed >= BENCH_SETTLE_LIMIT).then_some(BenchPhase::Switch),
         };
         // A drop, a rise or a rest counts from its first frame; its first frame always
         // has work.
-        let settle = matches!(self.phase, BenchPhase::Down | BenchPhase::Up | BenchPhase::Rest | BenchPhase::Switch);
+        let settle = matches!(
+            self.phase,
+            BenchPhase::Down | BenchPhase::Up | BenchPhase::Rest | BenchPhase::Switch
+        );
         if settle && self.frames.len() > 1 && tier.changing_bricks == 0 && self.visible.is_none() {
             self.visible = Some(elapsed);
         }
@@ -989,7 +1032,9 @@ impl Bench {
                 let a = self.flicker.drawn as f32 * BENCH_FLICKER_STEP;
                 Vec3::new(1.0 + 2.5 * a.cos(), 2.5, -1.0 + 2.5 * a.sin())
             }
-            BenchPhase::Drag | BenchPhase::Rest | BenchPhase::DragFlicker | BenchPhase::Switch => self.home,
+            BenchPhase::Drag | BenchPhase::Rest | BenchPhase::DragFlicker | BenchPhase::Switch => {
+                self.home
+            }
         };
         if let Some((index, start)) = self.drag {
             // Out along x while `Drag` runs, held for `Rest`, then back a step a frame.
@@ -1038,7 +1083,12 @@ impl Bench {
         sorted.sort_by(f32::total_cmp);
         let n = sorted.len().max(1);
         let mean = sorted.iter().sum::<f32>() / n as f32;
-        let at = |q: f32| sorted.get(((n as f32 * q) as usize).min(n - 1)).copied().unwrap_or(0.0);
+        let at = |q: f32| {
+            sorted
+                .get(((n as f32 * q) as usize).min(n - 1))
+                .copied()
+                .unwrap_or(0.0)
+        };
         let mut line = format!(
             "BENCH {:?} frames={} seconds={:.2} fps={:.0} ms_mean={:.3} ms_p50={:.3} ms_p99={:.3} ms_max={:.3}",
             self.phase,
@@ -1050,7 +1100,10 @@ impl Bench {
             at(0.99),
             sorted.last().copied().unwrap_or(0.0),
         );
-        if matches!(self.phase, BenchPhase::Down | BenchPhase::Up | BenchPhase::Rest | BenchPhase::Switch) {
+        if matches!(
+            self.phase,
+            BenchPhase::Down | BenchPhase::Up | BenchPhase::Rest | BenchPhase::Switch
+        ) {
             let visible = self.visible.map_or(-1.0, |v| v.as_secs_f32() * 1000.0);
             let view = self.view.map_or(-1.0, |v| v.as_secs_f32() * 1000.0);
             line.push_str(&format!(
@@ -1079,7 +1132,13 @@ impl Bench {
         self.lines.push(line);
     }
 
-    fn report(&self, width: u32, height: u32, antialias: Antialias, weights: genos_render::TierWeights) {
+    fn report(
+        &self,
+        width: u32,
+        height: u32,
+        antialias: Antialias,
+        weights: genos_render::TierWeights,
+    ) {
         println!("BENCH size={width}x{height} antialias={antialias:?}");
         println!("BENCH tier_weights {weights}");
         for line in &self.lines {
@@ -1088,7 +1147,18 @@ impl Bench {
     }
 }
 
-fn copy_graph(view: &genos_ui::ProfileView, rects: &mut Vec<ScreenRect>) {
+fn copy_graph(
+    view: &genos_ui::ProfileView,
+    rects: &mut Vec<ScreenRect>,
+    lines: &mut Vec<genos_render::ScreenLine>,
+) {
+    lines.clear();
+    lines.extend(view.segments.iter().map(|s| genos_render::ScreenLine {
+        a: s.a,
+        b: s.b,
+        width: s.width,
+        color: s.color,
+    }));
     rects.clear();
     rects.extend(view.paints.iter().map(|paint| ScreenRect {
         x: paint.x,
@@ -1264,13 +1334,20 @@ mod tests {
             }
             px
         };
-        let mut flicker = Flicker { frames: 10, ..Flicker::default() };
+        let mut flicker = Flicker {
+            frames: 10,
+            ..Flicker::default()
+        };
         for f in 0..BENCH_FLICKER_LEAD + 10 {
             flicker.take(&frame(f), w, h);
         }
         let n = f64::from(flicker.measured);
         // The blink turns back by 1 (3 - 4 then 3 + 4) on every frame, one pixel of four.
-        assert!((flicker.tiles[0] / n - 1.0 / 4.0).abs() < 1.0e-3, "{}", flicker.tiles[0] / n);
+        assert!(
+            (flicker.tiles[0] / n - 1.0 / 4.0).abs() < 1.0e-3,
+            "{}",
+            flicker.tiles[0] / n
+        );
         assert!(flicker.tiles[1..].iter().all(|&t| t == 0.0));
     }
     use genos_input::InputSystem;

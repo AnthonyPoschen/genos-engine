@@ -206,12 +206,11 @@ fn the_graph_averages_each_quarter_second_into_one_box() {
             pair[1].x
         );
     }
+    // The line starts at the first box's centre.
     let point = &draw.points[0];
-    assert!(view.paints.iter().any(|paint| {
-        paint.color == point.color
-            && (paint.x - point.x).abs() < 0.01
-            && (paint.w - point.w).abs() < 0.01
-            && (paint.y - point.y).abs() < 0.01
+    assert!(view.segments.iter().any(|seg| {
+        seg.color == point.color
+            && (seg.a[0] - point.center_x()).abs() < 0.01
     }));
 }
 
@@ -362,7 +361,9 @@ fn the_graph_shows_the_latest_rate_and_one_line_per_series() {
             line.name
         );
     }
-    assert!(view.paints.len() > view.lines.len() * history.len());
+    // One polyline per series: a segment between each pair of points.
+    let points: usize = view.lines.iter().map(|line| line.points.len()).sum();
+    assert_eq!(view.segments.len(), points - view.lines.len());
 }
 
 #[test]
@@ -619,6 +620,17 @@ fn the_graph_paint_is_a_different_color_from_its_background() {
             color: paint.color,
         })
         .collect();
+    let lines: Vec<genos_render::ScreenLine> = view
+        .segments
+        .iter()
+        .map(|s| genos_render::ScreenLine {
+            a: s.a,
+            b: s.b,
+            width: s.width,
+            color: s.color,
+        })
+        .collect();
+    renderer.set_overlay_lines(&lines);
     let _ = window.pump();
     let pixels = renderer
         .draw_with_overlay(&world, &camera, &paints, true, false)
