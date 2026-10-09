@@ -20,6 +20,14 @@
 
 /// Screen probe tile edge in pixels (Medium and above in the design).
 pub(crate) const GI2_TILE: u32 = 16;
+
+/// Screen probe tile, pixels: GI2_TILE, or GENOS_GI2_TILE (4..64) to experiment.
+fn gi2_tile() -> u32 {
+    std::env::var("GENOS_GI2_TILE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map_or(GI2_TILE, |t| t.clamp(4, 64))
+}
 /// Rays per screen probe (Low in the design; a square for the stratified pattern).
 pub(crate) const GI2_RAYS: u32 = 64;
 /// Light cache sizes; gi2_cache_slots.glsl has the same numbers.
@@ -411,8 +419,9 @@ impl Gpu {
             return Ok(());
         }
         let (w, h) = (self.extent_w.max(1), self.extent_h.max(1));
-        let cols = w.div_ceil(GI2_TILE);
-        let rows = h.div_ceil(GI2_TILE);
+        let tile = gi2_tile();
+        let cols = w.div_ceil(tile);
+        let rows = h.div_ceil(tile);
         let probes = (cols * rows) as u64;
         let rays = probes * GI2_RAYS as u64 + (GI2_CACHE_BATCH * GI2_CACHE_RAYS) as u64;
         let pixels = w as u64 * h as u64;
@@ -656,7 +665,7 @@ impl Gpu {
             self.gi2.quiet = 0;
         }
         self.gi2.stats_still[slot] = self.gi2.still;
-        let pc = [w, h, cols, rows, GI2_RAYS, GI2_TILE, bgra, self.gi2.frame];
+        let pc = [w, h, cols, rows, GI2_RAYS, gi2_tile(), bgra, self.gi2.frame];
         let image = self.color.image;
         // The raster colour as the base: pixels with no surface keep it.
         self.copy_image_buffer(image, 6, self.gi2.out.buffer, w, h, true);
