@@ -365,6 +365,7 @@ shared vec3 tier_r2[64];
 shared vec3 tier_r3[64];
 shared vec3 tier_ray[64];
 shared float tier_face_w[6];
+shared float tier_face_y[12];
 
 void write_tier() {
     // pc.y0: the round's first work item (probe_tier.rs TierBatch::rounds).
@@ -587,24 +588,31 @@ void write_tier() {
                 store_w = max(wf, 8192.0);
             }
         }
-        // Same test as probe_tier.rs notice_keeps_face. The band is scene.lamp_grid.w
-        // (NOTICE_BAND). A face inside the band keeps the stored colour. This does
-        // not scale the new rays toward that colour. Replaces (caps 0, 1, 2, 7, 8)
-        // still write the new light.
-        bool special_cap = history_cap < 2.5 || abs(history_cap - 7.0) < 0.5 || abs(history_cap - 8.0) < 0.5;
-        if (!reset && !special_cap) {
-            float band = scene.lamp_grid.w;
-            float ay = dot(old.rgb, vec3(0.2126, 0.7152, 0.0722));
-            float by = dot(mean, vec3(0.2126, 0.7152, 0.0722));
-            float scale = max(max(ay, by), 1.0e-3);
-            if (band > 0.0 && abs(ay - by) / scale < band) {
-                mean = old.rgb;
-                store_w = max(old.a, 0.0);
-            }
-        }
+        // Every pass lands: the stored light is a running average of the passes, so it
+        // converges to the light the hits feed back. Whether a brick runs at all is the
+        // CPU's call (the notice band starts an update; it never drops a pass's rays).
         field.texels[dest + lane] = vec4(mean, store_w);
+        if (lane < 6u) {
+            float lum_old = reset ? 0.0 : dot(old.rgb, vec3(0.2126, 0.7152, 0.0722));
+            tier_face_y[lane] = lum_old;
+            tier_face_y[lane + 6u] = dot(mean, vec3(0.2126, 0.7152, 0.0722));
+        }
     } else if (lane == TIER_POSITION) {
         field.texels[dest + TIER_POSITION] = vec4(pos, samples);
+    }
+    barrier();
+    // The probe's change this pass (x, signed) and its light (y), as luminance summed
+    // over the six faces; w = 2 marks a probe that ran. The CPU reads them back to see
+    // whether the brick has settled and whether its neighbours, whose rays meet its
+    // light, need to gather again.
+    if (lane == 0u) {
+        float was = 0.0;
+        float now = 0.0;
+        for (uint f = 0u; f < 6u; f++) {
+            was += tier_face_y[f];
+            now += tier_face_y[f + 6u];
+        }
+        field.texels[item + 1u + probe] = vec4(now - was, max(was, now), 0.0, 2.0);
     }
 }
 
@@ -640,36 +648,18 @@ void blend_view() {
     }
     bool snap = w >= 1.0 || tag.w <= 0.0 || other;
     // The slot's w: 0 while the brick's update is under way (the built light is a
-    // working copy then), 1 + s once it is whole. The view keeps the last whole update
+    // working copy then), 1 once it is whole. The view keeps the last whole update
     // (TIER_VIEW_TARGET) and blends to it, so a value part way through never shows and
-    // each update is one blend. A whole update that changes no face by more than s of
-    // its light is skipped: a far brick does not creep by small steps.
+    // each update is one blend.
     uint slot = (gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex) / 64u;
-    float show = field.texels[TIER_SLOTS + slot * 2u].w;
-    bool take = snap;
-    if (!take && show >= 1.0) {
-        float skip = show - 1.0;
-        for (uint f = 0u; f < 6u; f++) {
-            vec3 target = field.texels[b + TIER_CUBE3 + f].rgb;
-            vec3 kept = tier_view.texels[p + TIER_VIEW_TARGET + f].rgb;
-            vec3 step = abs(target - kept);
-            take = take || max(step.r, max(step.g, step.b)) > skip * max(max(kept.r, max(kept.g, kept.b)), 1.0e-4);
-        }
-    }
+    bool take = snap || field.texels[TIER_SLOTS + slot * 2u].w >= 1.0;
     for (uint f = 0u; f < 6u; f++) {
         if (take) {
             tier_view.texels[p + TIER_VIEW_TARGET + f] = vec4(field.texels[b + TIER_CUBE3 + f].rgb, 0.0);
         }
         vec3 target = tier_view.texels[p + TIER_VIEW_TARGET + f].rgb;
         vec3 shown = tier_view.texels[p + TIER_CUBE3 + f].rgb;
-        // A face the new gather moved by half or more is the new light at once.
-        // Mixing it with the old face is the grey morning: the fine shell still
-        // holds the night while the sun is already up. A small step still eases.
-        float shown_y = dot(shown, vec3(0.2126, 0.7152, 0.0722));
-        float target_y = dot(target, vec3(0.2126, 0.7152, 0.0722));
-        float scale = max(max(shown_y, target_y), 1.0e-3);
-        bool jumped = abs(shown_y - target_y) / scale > 0.5;
-        tier_view.texels[p + TIER_CUBE3 + f] = vec4((snap || jumped) ? target : mix(shown, target, w), 0.0);
+        tier_view.texels[p + TIER_CUBE3 + f] = vec4(snap ? target : mix(shown, target, w), 0.0);
     }
     tier_view.texels[p + TIER_POSITION] = vec4(pos.xyz, 1.0);
 }

@@ -20,7 +20,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec("status", "Frame, pause state, view, camera, and the probe counts (stable when no brick is due)."),
         spec(
             "lighting",
-            "Read or change the lighting: tier_ms (probe budget), near_rays (-1/shader for the default), view_ms, bounces (0,1,2,inf), notice_band, spacing (m or auto), and the priority weights near, feed, margin, edge, stale, far, far_skip.",
+            "Read or change the lighting: tier_ms (probe budget), near_rays (-1/shader for the default), view_ms, bounces (0,1,2,inf), notice_band, spacing (m or auto), and the priority weights near, feed, margin, edge, stale.",
         ),
         spec("knobs", "List every knob (example and lighting.*) with range and step. With name and value, set one first."),
         spec(

@@ -820,6 +820,26 @@ pub const FIRST_RAYS: u32 = 16;
 pub const REFINE_RAYS: u32 = 64;
 /// Samples at which a probe stops refining.
 pub const TARGET_SAMPLES: u32 = 512;
+/// Share of a brick's settled change its neighbours take on: the next bounce of the
+/// light it holds reaches them.
+pub const BOUNCE_SHARE: f32 = 0.5;
+/// Refine passes a brick takes again when its light, or its neighbours', still moved.
+pub const SETTLE_PASSES: u32 = 4;
+/// Bricks the picture does not use take one part in this of a budget while any wait.
+const HIDDEN_SHARE: u64 = 4;
+/// A brick's move counts once it passes this many times the spread of its probes' moves.
+const NOISE_SIGMAS: f32 = 3.0;
+
+/// What the probes of one finished work item changed by: the luminance summed over
+/// their faces, signed, its square (for the noise), and their light, over `runs` probes.
+pub struct TierChange {
+    pub slot: u32,
+    pub brick: [i32; 3],
+    pub moved: f32,
+    pub square: f32,
+    pub light: f32,
+    pub runs: u32,
+}
 /// A lamp that moves this far (metres) marks the tier for relighting. Direct light is
 /// per pixel and follows every move; only the bounce waits for this.
 pub const LAMP_MOVE: f32 = 0.1;
@@ -916,6 +936,20 @@ struct Slot {
     marked: Option<std::time::Instant>,
     /// The run follows the sun and sky drifting from what an outside brick held.
     drift: bool,
+    /// What the brick's light moved by (signed luminance) over the passes since it last
+    /// settled, the light those passes saw, and how many probe passes ran, as the GPU
+    /// measured them.
+    moved: f32,
+    square: f32,
+    light: f32,
+    runs: u32,
+    /// Change the neighbours' settled updates passed on: their bounce reaches this brick.
+    owed: f32,
+}
+
+/// The brick is lit and has no pass due: its update is done.
+fn settled(slot: &Slot) -> bool {
+    slot.filled && slot.change_left == 0 && slot.samples >= TARGET_SAMPLES
 }
 
 impl Slot {
@@ -1086,12 +1120,6 @@ pub struct TierWeights {
     /// Seconds after its last finished update in which a brick's priority doubles
     /// (only a brick the picture uses).
     pub stale: f32,
-    /// Metres from the camera beyond which a brick skips small finished updates.
-    pub far: f32,
-    /// The largest change (a share of the light) a brick `far` metres beyond `far`
-    /// skips: it grows from 0 at `far` to this at twice `far`, so far light never
-    /// creeps by small steps.
-    pub far_skip: f32,
 }
 
 impl Default for TierWeights {
@@ -1102,8 +1130,6 @@ impl Default for TierWeights {
             margin: 0.25,
             edge: 0.25,
             stale: 0.25,
-            far: 8.0,
-            far_skip: 0.03,
         }
     }
 }
@@ -1126,8 +1152,6 @@ impl TierWeights {
                 "margin" => &mut out.margin,
                 "edge" => &mut out.edge,
                 "stale" => &mut out.stale,
-                "far" => &mut out.far,
-                "far_skip" => &mut out.far_skip,
                 other => return Err(format!("no tier weight {other}")),
             };
             *field = value;
@@ -1140,8 +1164,8 @@ impl std::fmt::Display for TierWeights {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "near={} feed={} margin={} edge={} stale={} far={} far_skip={}",
-            self.near, self.feed, self.margin, self.edge, self.stale, self.far, self.far_skip
+            "near={} feed={} margin={} edge={} stale={}",
+            self.near, self.feed, self.margin, self.edge, self.stale
         )
     }
 }
@@ -1899,6 +1923,11 @@ impl TierState {
             focus: 1.0,
             marked: None,
             drift: false,
+            moved: 0.0,
+            square: 0.0,
+            light: 0.0,
+            runs: 0,
+            owed: 0.0,
         });
         self.by_brick.insert(brick, slot);
         true
@@ -2449,9 +2478,6 @@ impl TierState {
                         .as_ref()
                         .is_some_and(|slot| slot.replace && slot.change_left > 0)
             });
-        // Many bricks due: finish the ones on screen, at the full ray count, and
-        // leave the rest. A thin pass on every brick is the grey morning.
-        let many = !wide && budget.is_some() && due.len() > 48;
         let mut change_rays: u32 = CHANGE_RAYS;
         let change_history: u32 = CHANGE_HISTORY;
         // Each brick in that order takes its next pass, as far as the budget goes: the
@@ -2529,30 +2555,39 @@ impl TierState {
                 picked.push((index, flush_passes, w, left));
             }
         } else if !night_hop {
-            for &(_, _, _, _, _, _, index) in &due {
-                if many && weight[index as usize] <= 0.0 {
-                    break;
-                }
-                let slot = self.slots[index as usize].as_ref().expect("due slot");
-                let rays = u64::from(match self.class(slot).expect("due class") {
-                    0 => first,
-                    REFINE_CLASS => REFINE_RAYS,
-                    _ => change_rays,
-                });
-                let left = slot.mask & !slot.done;
-                let mut probes = left;
-                if let Some(limit) = budget {
-                    let room = (limit.saturating_sub(spent) / rays) as u32;
-                    let fit = if picked.is_empty() { room.max(1) } else { room };
-                    if fit == 0 {
+            // Bricks the picture does not use keep a quarter of the budget while any wait.
+            // Their light feeds what it shows, so it converges wherever the camera is.
+            let hidden = due.iter().any(|entry| entry.0 >= 3);
+            for phase in 0..2u32 {
+                let cap = match budget {
+                    Some(limit) if phase == 0 && hidden => Some(limit - limit / HIDDEN_SHARE),
+                    other => other,
+                };
+                for &(order, _, _, _, _, _, index) in &due {
+                    if u32::from(order >= 3) != phase {
+                        continue;
+                    }
+                    let slot = self.slots[index as usize].as_ref().expect("due slot");
+                    let rays = u64::from(match self.class(slot).expect("due class") {
+                        0 => first,
+                        REFINE_CLASS => REFINE_RAYS,
+                        _ => change_rays,
+                    });
+                    let left = slot.mask & !slot.done;
+                    let mut probes = left;
+                    if let Some(limit) = cap {
+                        let room = (limit.saturating_sub(spent) / rays) as u32;
+                        let fit = if picked.is_empty() { room.max(1) } else { room };
+                        if fit == 0 {
+                            break;
+                        }
+                        probes = lowest_bits(left, fit);
+                    }
+                    spent += u64::from(probes.count_ones()) * rays;
+                    picked.push((index, 1, weight[index as usize], probes));
+                    if probes != left || picked.len() >= TIER_SLOT_CAP as usize {
                         break;
                     }
-                    probes = lowest_bits(left, fit);
-                }
-                spent += u64::from(probes.count_ones()) * rays;
-                picked.push((index, 1, weight[index as usize], probes));
-                if probes != left || picked.len() >= TIER_SLOT_CAP as usize {
-                    break;
                 }
             }
             let mut count = picked.len();
@@ -2625,7 +2660,7 @@ impl TierState {
         }
         let id = self.next_batch;
         self.next_batch += 1;
-        let texels = self.texels(&items, id, eye);
+        let texels = self.texels(&items, id);
         let used_slots = self
             .slots
             .iter()
@@ -2729,7 +2764,7 @@ impl TierState {
         }
     }
 
-    fn texels(&self, items: &[TierItem], id: u64, eye: [f32; 3]) -> Vec<[f32; 4]> {
+    fn texels(&self, items: &[TierItem], id: u64) -> Vec<[f32; 4]> {
         let count = (TIER_WORK - TIER_INFO) as usize + items.len() * WORK_TEXELS as usize;
         let mut out = vec![[0.0f32; 4]; count];
         let Some((lo, hi)) = self.window else {
@@ -2773,17 +2808,10 @@ impl TierState {
             let Some(slot) = slot else { continue };
             let b = slot.brick;
             // w: 0 while the brick's update is under way, so the picture keeps blending
-            // to the last whole one and never takes a value part way through. 1 + s
-            // once it is whole: the picture takes it, unless it changes the light by
-            // less than s (a far brick skips small steps).
+            // to the last whole one and never takes a value part way through. 1 once it
+            // is whole: the picture takes it, wherever the camera is.
             let show = if self.whole_after(index as u32, slot, items) {
-                let center = [0, 1, 2].map(|i| (b[i] as f32 + 0.5) * self.layout.brick_span());
-                let d = (0..3)
-                    .map(|i| (center[i] - eye[i]).powi(2))
-                    .sum::<f32>()
-                    .sqrt();
-                let far = self.weights.far.max(1.0e-3);
-                1.0 + self.weights.far_skip.max(0.0) * ((d - far) / far).clamp(0.0, 1.0)
+                1.0
             } else {
                 0.0
             };
@@ -2858,6 +2886,85 @@ impl TierState {
             }
         }
         done == 0 && (run >= CHANGE_PASSES || left == 0 && (changed || samples >= TARGET_SAMPLES))
+    }
+
+    /// Take in what the GPU measured for a finished build. A brick whose update is done
+    /// but whose light still moved by more than the notice band refines again, and passes
+    /// a share of the move on to its neighbours, whose bounce it feeds. So every settled
+    /// brick ends where an update that never stops would hold it, whatever its history.
+    pub fn observe(&mut self, changes: &[TierChange]) {
+        let mut touched: Vec<u32> = Vec::new();
+        for c in changes {
+            let Some(Some(slot)) = self.slots.get_mut(c.slot as usize) else {
+                continue;
+            };
+            if slot.brick != c.brick {
+                continue;
+            }
+            slot.moved += c.moved;
+            slot.square += c.square;
+            slot.light += c.light;
+            slot.runs += c.runs;
+            if !touched.contains(&c.slot) {
+                touched.push(c.slot);
+            }
+        }
+        let band = notice_band();
+        let mut spread: Vec<([i32; 3], f32)> = Vec::new();
+        for index in touched {
+            let Some(slot) = self.slots[index as usize].as_mut() else {
+                continue;
+            };
+            if settled(slot) {
+                // The brick's light moved by this share of it over the update: the
+                // passes' light averaged per probe pass, times the live probes.
+                let live = slot.mask.count_ones().max(1) as f32;
+                let light = slot.light / slot.runs.max(1) as f32 * live;
+                // Converged passes still move each probe by their noise, both ways:
+                // their sum stays within about the root of their squares. A brick still
+                // on its way moves every probe the same way, well past that.
+                let noise = NOISE_SIGMAS * slot.square.sqrt();
+                let e = if slot.runs == 0 || slot.moved.abs() <= noise {
+                    0.0
+                } else {
+                    slot.moved.abs() / light.max(1.0e-4)
+                };
+                slot.moved = 0.0;
+                slot.square = 0.0;
+                slot.light = 0.0;
+                slot.runs = 0;
+                // The update took in what the neighbours held.
+                slot.owed = 0.0;
+                // Below the band the move is the passes' noise: nothing to pass on.
+                if e > band {
+                    slot.samples = TARGET_SAMPLES.saturating_sub(SETTLE_PASSES * REFINE_RAYS);
+                    spread.push((slot.brick, e * BOUNCE_SHARE));
+                }
+            }
+        }
+        for (brick, share) in spread {
+            for n in 0..27 {
+                if n == 13 {
+                    continue;
+                }
+                let next = [
+                    brick[0] + n % 3 - 1,
+                    brick[1] + n / 3 % 3 - 1,
+                    brick[2] + n / 9 - 1,
+                ];
+                let Some(&index) = self.by_brick.get(&next) else {
+                    continue;
+                };
+                let Some(slot) = self.slots[index as usize].as_mut() else {
+                    continue;
+                };
+                slot.owed += share;
+                if slot.owed > band && settled(slot) {
+                    slot.owed = 0.0;
+                    slot.samples = TARGET_SAMPLES.saturating_sub(SETTLE_PASSES * REFINE_RAYS);
+                }
+            }
+        }
     }
 
     /// The build that carries `batch` has started. Its light counts from now on.
@@ -3264,7 +3371,8 @@ mod tests {
             }
         }
         // The lamp moves; a budget of a few passes goes to the bricks the picture uses
-        // (in view, at its edge, or feeding it), none behind the wall.
+        // (in view, at its edge, or feeding it). The bricks behind the wall keep their
+        // quarter, so their light converges too.
         let moved = TierLight {
             pos: [3.0, 2.5, 1.0],
             ..lamp
@@ -3274,18 +3382,23 @@ mod tests {
         let batch = tier.batch_seen(eye, Some(&camera), Some(budget), FIRST_RAYS);
         assert!(!batch.items.is_empty());
         let weight = tier.weights();
-        for item in &batch.items {
-            assert!(
-                weight[item.slot as usize] > 0.0,
-                "{:?} is not used by the picture",
-                item.brick
-            );
-            assert!(
-                item.brick[0] * BRICK < 0,
-                "{:?} is behind the wall",
-                item.brick
-            );
-        }
+        let rays = |used: bool| -> u64 {
+            batch
+                .items
+                .iter()
+                .filter(|item| (weight[item.slot as usize] > 0.0) == used)
+                .map(|item| u64::from(item.probes.count_ones()) * u64::from(item.rays))
+                .sum()
+        };
+        assert!(
+            rays(true) >= rays(false) * 2,
+            "{} used, {} hidden",
+            rays(true),
+            rays(false)
+        );
+        assert!(rays(false) > 0 && rays(false) <= budget / HIDDEN_SHARE);
+        // The first picks are all bricks the picture uses.
+        assert!(weight[batch.items[0].slot as usize] > 0.0);
     }
 
     #[test]
@@ -3390,13 +3503,18 @@ mod tests {
         };
         let one_each: u64 = changing.iter().map(|&i| pass(i)).sum();
         let biggest = changing.iter().map(|&i| pass(i)).max().unwrap();
-        // A budget of a few passes goes to bricks the picture uses, none to the others.
-        let few = tier.batch_seen(eye, Some(&camera), Some(biggest * 3), FIRST_RAYS);
+        // A budget of a few passes goes to bricks the picture uses, but for the quarter
+        // the others keep.
+        let few_budget = biggest * 3;
+        let few = tier.batch_seen(eye, Some(&camera), Some(few_budget), FIRST_RAYS);
         let weight = tier.weights();
-        assert!(few
+        let hidden: u64 = few
             .items
             .iter()
-            .all(|item| weight[item.slot as usize] > 0.0));
+            .filter(|item| weight[item.slot as usize] <= 0.0)
+            .map(|item| u64::from(item.probes.count_ones()) * u64::from(item.rays))
+            .sum();
+        assert!(hidden <= few_budget / HIDDEN_SHARE);
         // Room for a pass each and the rest of the passes of about one brick.
         let budget = one_each + biggest * u64::from(CHANGE_PASSES - 1);
         let batch = tier.batch_seen(eye, Some(&camera), Some(budget), FIRST_RAYS);
@@ -3554,6 +3672,51 @@ mod tests {
             .items
             .iter()
             .all(|i| !i.reset && i.history.is_none() && i.rays == REFINE_RAYS));
+    }
+
+    #[test]
+    fn a_settled_brick_whose_light_still_moved_refines_and_wakes_its_neighbours() {
+        let mut tier = TierState::default();
+        let lights = [TierLight {
+            pos: [0.0, 2.5, 0.0],
+            color: [1.0; 3],
+            directional: false,
+        }];
+        let eye = [0.0, 1.7, 0.0];
+        tier.update(room(), 0, eye, &lights);
+        settle(&mut tier, eye);
+        let report = |tier: &TierState, index: usize, moved: f32| {
+            let slot = tier.slots[index].as_ref().expect("slot");
+            let live = slot.mask.count_ones();
+            TierChange {
+                slot: index as u32,
+                brick: slot.brick,
+                moved: moved * live as f32,
+                square: moved * moved * live as f32,
+                light: live as f32,
+                runs: live,
+            }
+        };
+        let index = tier
+            .slots
+            .iter()
+            .position(|s| s.is_some())
+            .expect("a brick");
+        // Noise inside the band: nothing runs.
+        tier.observe(&[report(&tier, index, notice_band() * 0.5)]);
+        assert!(!tier.has_work());
+        // A real move: the brick refines again, and its neighbours take the bounce.
+        tier.observe(&[report(&tier, index, 0.2)]);
+        let brick = tier.slots[index].as_ref().expect("slot").brick;
+        assert!(tier.slots[index].as_ref().expect("slot").samples < TARGET_SAMPLES);
+        let woke = tier.slots.iter().flatten().filter(|s| {
+            s.brick != brick
+                && s.samples < TARGET_SAMPLES
+                && (0..3).all(|i| (s.brick[i] - brick[i]).abs() <= 1)
+        });
+        assert!(woke.count() > 0);
+        settle(&mut tier, eye);
+        assert!(!tier.has_work());
     }
 
     #[test]

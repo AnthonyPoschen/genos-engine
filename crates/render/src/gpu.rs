@@ -589,6 +589,8 @@ impl Renderer {
     fn stage_tier(&mut self, world: &World, pack: &pack::Pack, settle: bool) {
         let boxes = crate::probe_tier::scene_boxes(&world.scene);
         let lights = tier_lights(pack);
+        let changes = std::mem::take(&mut self.gpu.tier_read);
+        self.tier.observe(&changes);
         if std::env::var_os("GENOS_TIER_SPACING").is_none() && self.debug.spacing.is_none() {
             self.tier.fit_prominence(&boxes, pack.eye);
         }
@@ -1022,6 +1024,10 @@ struct Gpu {
     plan_rays: u64,
     /// Probe rays and GPU milliseconds of the last timed tier pass.
     tier_time: Option<(u64, f64)>,
+    /// The bricks of the build in flight (slot, brick, probes run), in work order.
+    read_plan: Vec<(u32, [i32; 3], u64)>,
+    /// What each probe of the last finished build changed by, for the tier.
+    tier_read: Vec<crate::probe_tier::TierChange>,
     /// Work items in each tier round of the build being recorded.
     plan_rounds: Vec<u32>,
     /// The ray budget of the last batch, None while settling. Printed by `GENOS_GPU_TIMES`.
@@ -1689,6 +1695,8 @@ impl Gpu {
                 plan_slots: 0,
                 plan_rays: 0,
                 tier_time: None,
+                read_plan: Vec::new(),
+                tier_read: Vec::new(),
                 plan_rounds: Vec::new(),
                 tier_budget: None,
                 tier_seen: (0, 0),
@@ -3992,6 +4000,7 @@ impl Gpu {
             self.light_building = false;
             self.light_shown = self.light_dst;
             self.light_ready = true;
+            self.read_changes();
             self.view_slots = self.view_slots.max(self.plan_slots);
             // Reading the timestamp query every build stalls the frame. The ray
             // price only needs a sample now and then.
@@ -4048,6 +4057,11 @@ impl Gpu {
             self.write_buffer_at(&self.light_field[dst], offset, raw)?;
         }
         self.plan_items = batch.items.len() as u32;
+        self.read_plan = batch
+            .items
+            .iter()
+            .map(|item| (item.slot, item.brick, item.probes))
+            .collect();
         self.plan_rounds = batch.rounds.clone();
         self.plan_slots = batch.used_slots;
         self.plan_rays = batch.probe_rays;
@@ -4338,6 +4352,56 @@ impl Gpu {
 
     fn upload_image(&self, bytes: &[u8]) -> Result<(), String> {
         self.write_buffer(&self.particle_buf, bytes)
+    }
+
+    /// Read back what the probes of the finished build changed by (light.comp stores
+    /// the change and the light in each work position texel, with w = 2; 1 means the
+    /// probe did not run).
+    fn read_changes(&mut self) {
+        let plan = std::mem::take(&mut self.read_plan);
+        if plan.is_empty() {
+            return;
+        }
+        let per = crate::probe_tier::WORK_TEXELS as u64 * 16;
+        let at = crate::probe_tier::TIER_WORK as u64 * 16;
+        let bytes = plan.len() as u64 * per;
+        let buffer = &self.light_field[self.light_dst];
+        if at + bytes > buffer.size {
+            return;
+        }
+        let mut raw = vec![0u8; bytes as usize];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(self.device, buffer.memory, at, bytes, 0, &mut mapped)
+                != VK_SUCCESS
+            {
+                return;
+            }
+            std::ptr::copy_nonoverlapping(mapped as *const u8, raw.as_mut_ptr(), raw.len());
+            (self.fns.unmap_mem)(self.device, buffer.memory);
+        }
+        for (k, (slot, brick, probes)) in plan.into_iter().enumerate() {
+            let float = |o: usize| f32::from_le_bytes([raw[o], raw[o + 1], raw[o + 2], raw[o + 3]]);
+            let mut change = crate::probe_tier::TierChange {
+                slot,
+                brick,
+                moved: 0.0,
+                square: 0.0,
+                light: 0.0,
+                runs: 0,
+            };
+            for probe in 0..64 {
+                let o = k * per as usize + (1 + probe) * 16;
+                if probes & (1u64 << probe) == 0 || float(o + 12) < 1.5 {
+                    continue;
+                }
+                change.moved += float(o);
+                change.square += float(o) * float(o);
+                change.light += float(o + 4);
+                change.runs += 1;
+            }
+            self.tier_read.push(change);
+        }
     }
 
     fn write_buffer(&self, buffer: &Buffer, bytes: &[u8]) -> Result<(), String> {

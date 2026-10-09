@@ -102,6 +102,60 @@ The per-pixel cost grows with the lamps in range: each one is a shadow ray. A de
 
 The picture is linear radiance through the tone curve into an 8-bit UNORM target: no exposure and no display encoding. A room lit by bounce alone sits at 5 to 15 % of a sunlit wall, so 10 to 40 of 255, and reads near black next to a sunlit patch. That is the light, not a gap in the bounce.
 
+## Mechanism audit
+
+The goal is that a probe at rest holds the light a probe that never stops updating holds: the reference, whatever the probe went through before. Every rule below decides whether a probe updates, how a pass is blended into it, or what the picture shows. The rules marked *remove* are special cases that the simplification pass takes out, one at a time, with the measurements in `examples/stress/scripts`. What stays: one priority score (visible coverage times error estimate, staleness only for visible bricks), whole updates with one blend to the picture, the notice band only to decide whether an update starts, and a running average that converges to the unlimited-bounce light.
+
+**Which bricks update (`probe_tier.rs`)**
+
+| Rule | Where | What it does | Verdict |
+|---|---|---|---|
+| First fill | `class` 0, `FIRST_RAYS` | A new brick takes a short reset pass, then `CHANGE_PASSES` | keep |
+| Change run | `restart`, `CHANGE_PASSES`, `CHANGE_HISTORY` | A moved box, lamp or sun shaft marks the bricks it reaches; 6 passes with a short history | keep |
+| Refine | `REFINE_RAYS` up to `TARGET_SAMPLES` | Adds rays until 512 are counted, then the brick is idle | keep |
+| Settle check | `observe`, `BOUNCE_SHARE`, `SETTLE_PASSES`, `NOISE_SIGMAS` | The GPU reports each probe's change in luminance. A brick whose light moved by more than the notice band over its update, and by more than three times the spread of its probes' moves (the passes' noise), refines again and passes half the move to its 26 neighbours | new |
+| `again` | `Slot::restart`, `commit` | A move during a run starts one new run after it | keep |
+| Wide replace / darken | `restart_wide`, `replace`, `darken`, flush passes and ray counts in `batch_seen` | A sun or lamp switching replaces on-screen bricks in one build, with special pass and ray counts for on and off | remove |
+| Off-screen downgrade | `batch_seen` `off_screen` | A darken brick off screen takes a normal run | remove with darken |
+| Night hops | `push_night_hop`, `NIGHT_HOPS`, `night_freeze` | Sun gone: 8 passes over every brick with history 2, 1, 7, then every brick is forced to converged | remove |
+| Hidden share | `batch_seen`, `HIDDEN_SHARE` | Bricks the picture does not use keep a quarter of the budget while any wait (the `many` cutoff gave them nothing past 48 bricks due, so their light depended on where the camera had been) | new |
+| Order buckets | `batch_seen` `order`, `bucket`, `key` | First fill, then change, then refine, on screen before off; weight buckets of 2x | fold into one score |
+| Shell drift | `shell_priority`, `SHELL_DRIFT`, `ERROR_GAIN`, `basis_up` | An outside brick whose sun moved since it settled restarts and ranks higher | becomes the error estimate |
+| Lamp focus | `focus`, `FOCUS_FLOOR` | A change run ranks by the share of view light its lamp brings | becomes the error estimate |
+| Staleness | `since`, `weights.stale` | Rank rises with time since the last whole update | keep, visible bricks only |
+| Notice review | `review_faces`, `apply_notice`, `keep_finer` | CPU copy of the band test that skips or marks a run; only tests call it | remove |
+| Fine-depth pin | `batch_seen`, `outside_far` | Pins `fine_depth` to 48 m from far outside; `fine_depth` only feeds stats | remove |
+| Slot cap ranking | `reallocate` | Over 1024 bricks, keep the most prominent, then the nearest | keep |
+
+**How a pass lands (`light.comp` `write_tier`)**
+
+| Rule | What it does | Verdict |
+|---|---|---|
+| Running average | `keep = cap / (cap + rays)` once 512 rays are counted, so the store is an exponential average that tracks the light the hits feed back | keep |
+| Three bounce cubes | CUBE3 feeds the tier back into itself, so repeated passes add bounces without limit | keep |
+| Per-pass notice discard | A face whose pass moved it less than 2 % kept the old value and weight. With an 11 % step a face stalled up to about 18 % from its target, compounded per bounce: settled probes stayed dark and depended on history | removed; the GPU now reports the change instead |
+| History caps 0, 1, 2, 7, 8 | Lamp off, replace, drop bounce, last night pass, after-floor repaint | remove |
+| `drop_bounce` | Cap 0 or 2 zeroes the feedback bounce | remove |
+| Weight 8192 | Lamp off and cap 8 hold the result against refine | remove |
+| Night copy (cap 7) | A dark floor probe takes 23 % of a lit one 2.2 m away | remove |
+| Cap 8 repaint | Lit faces kept, dark faces doubled | remove |
+| Floor origin | Steep rays of a low probe start on the floor | review |
+| `correct` sample | Extra bounce sample off when cap 0 or the sun is up | review |
+
+Open: walking in across the outer edge of the ground (`floor_edge_walk.rhai`) or up to the entrance (`entrance_walk.rhai`) with the lamps moving still steps the indirect light 2x to 3x in one frame. With still lamps the walk is smooth, but probes lit while the camera stood 45 m out settle about 40 % dark behind the doorway, steady, where a cold start at the ground edge matches the reference. The settle check does not see it: those bricks no longer move.
+
+**What the picture shows (`light.comp` `blend_view`, `scene.frag`, `gpu.rs`)**
+
+| Rule | What it does | Verdict |
+|---|---|---|
+| Whole update | The slot's w is 0 during a run, so the picture keeps the last whole update and blends to it (tau 33 ms) | keep |
+| Far skip | A whole update that moved no face by more than a distance-scaled share was not taken | removed: where the camera stands no longer decides what the view takes |
+| `jumped` snap | A face that moved by half or more snapped instead of blending | removed |
+| Flush | `picture_flushes`, `night_frames`, `sun_drop`: replace and night builds show at once | remove with the replaces |
+| World hold | `hold_world`: the world volume rebuilds only for sun, sky and lamp switches or when the tier is idle | replace by a continuous blended update |
+| Night floor lift | `scene.frag`: world volume times 1.8 on upward faces with no sky | removed |
+| Near-ray lifts | `scene.frag`: dim traced floor took far / 0.65 or far x 0.5; vertical faces +0.10; +0.022 under 0.35 | removed |
+
 ## Status of the local-update plan
 
 The handoff for the next agent is [lighting-handoff.md](lighting-handoff.md). The frame-rate band is not met. Do not start prominence or the light tree on the picture path until it is.

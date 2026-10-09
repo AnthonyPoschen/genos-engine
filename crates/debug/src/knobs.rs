@@ -215,22 +215,6 @@ pub fn lighting_knobs(c: &LightingConfig) -> Vec<Knob> {
             0.01,
             " s",
         ),
-        Knob::number(
-            "lighting.far",
-            "Far from",
-            w.far as f64,
-            (1.0, 64.0),
-            0.5,
-            " m",
-        ),
-        Knob::number(
-            "lighting.far_skip",
-            "Far skip",
-            w.far_skip as f64,
-            (0.0, 0.2),
-            0.005,
-            "",
-        ),
     ];
     if let Some(k) = out.iter_mut().find(|k| k.name == "lighting.near_rays") {
         if c.near_rays.is_none() {
@@ -263,8 +247,6 @@ pub fn set_lighting_knob(c: &mut LightingConfig, name: &str, v: f64) -> Result<(
         "lighting.margin" => w.margin = f,
         "lighting.edge" => w.edge = f,
         "lighting.stale" => w.stale = f,
-        "lighting.far" => w.far = f,
-        "lighting.far_skip" => w.far_skip = f,
         _ => return Err(format!("unknown knob {name}")),
     }
     Ok(())
