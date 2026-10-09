@@ -3,7 +3,7 @@
 // GI v2 compute passes. Same vertex shader and depth prepass as the picture; early
 // depth tests so only the surface the pixel shows writes its record.
 //
-// Record (uvec4): x distance from the eye (float bits; 0 = nothing), y the normal
+// Record (uvec4): x distance from the eye (float bits; all ones = nothing), y the normal
 // (octahedral, snorm 2x16), z albedo rgb and a flags byte (bit 0 two-sided), w
 // reserved for emission.
 //
@@ -36,11 +36,16 @@ void main() {
     if (p.x >= gbuf.header.x || p.y >= gbuf.header.y) {
         return;
     }
-    float dist = length(v_pos - scene.eye.xyz);
-    gbuf.px[p.y * gbuf.header.x + p.x] = uvec4(
-        floatBitsToUint(max(dist, 1.0e-6)),
-        gi2_pack_normal(n),
-        packUnorm4x8(vec4(clamp(v_albedo, 0.0, 1.0), two_sided ? 1.0 / 255.0 : 0.0)),
-        0u);
+    // Coplanar surfaces (overlapping walls, a floor patch) both pass the depth test
+    // and their writes race. The nearest distance wins through atomicMin (the record
+    // is all ones when empty, positive floats order as uints), so the shading point,
+    // and every shadow ray from it, is the same each frame.
+    uint i = p.y * gbuf.header.x + p.x;
+    uint d = floatBitsToUint(max(length(v_pos - scene.eye.xyz), 1.0e-6));
+    uint prev = atomicMin(gbuf.px[i].x, d);
+    if (d <= prev) {
+        gbuf.px[i].y = gi2_pack_normal(n);
+        gbuf.px[i].z = packUnorm4x8(vec4(clamp(v_albedo, 0.0, 1.0), two_sided ? 1.0 / 255.0 : 0.0));
+    }
     out_color = vec4(v_albedo, 1.0);
 }

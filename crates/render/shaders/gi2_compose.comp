@@ -81,7 +81,7 @@ void main() {
     if (!gi2_surface(p, pos, n, albedo, two_sided)) {
         return;
     }
-    gbuf.px[index].x = 0u;
+    gbuf.px[index].x = ~0u;
     if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
         n = -n;
     }

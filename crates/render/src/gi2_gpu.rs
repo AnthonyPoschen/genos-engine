@@ -50,6 +50,8 @@ pub(crate) struct Gi2 {
     cache: Buffer,
     /// The cache buffers are new and get zeroed before the next frame's passes.
     cache_clear: bool,
+    /// The G-buffer is new and gets filled with empty records first.
+    gbuf_clear: bool,
     frame: u32,
     /// Hash of the last frame's scene block, and frames it has stayed the same.
     scene_hash: u64,
@@ -80,6 +82,7 @@ impl Default for Gi2 {
             cache_keys: Buffer::empty(),
             cache: Buffer::empty(),
             cache_clear: false,
+            gbuf_clear: false,
             frame: 0,
             scene_hash: 0,
             still: 0,
@@ -375,6 +378,7 @@ impl Gpu {
         self.gi2.work = self.make_buffer(work_vec4 * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.gi2.out = self.make_buffer(pixels * 4, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.gi2.dims = [w, h, cols, rows];
+        self.gi2.gbuf_clear = true;
         self.write_light_set(0)?;
         self.write_light_set(1)?;
         self.write_gi2_sets()
@@ -506,6 +510,13 @@ impl Gpu {
                 (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache_keys.buffer, 0, u64::MAX, 0);
                 (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache.buffer, 0, u64::MAX, 0);
             }
+            if self.gi2.gbuf_clear {
+                self.gi2.gbuf_clear = false;
+                // Every record empty (distance all ones); the header goes in below.
+                (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.gbuf.buffer, 0, u64::MAX, u32::MAX);
+            }
+            // The whole-buffer clears land before the count and header writes.
+            self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             // The live patch count, rebuilt by the compact pass.
             (self.fns.cmd_fill_buffer)(
                 self.cmd,
