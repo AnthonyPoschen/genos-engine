@@ -5,7 +5,9 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use genos_mcp::{discovery_dir, endpoint_at, live_endpoints, parse, Host, Server, Value};
+use genos_mcp::{
+    discovery_dir, endpoint_at, live_endpoints, parse, publish_lighting, Host, Server, Value,
+};
 use genos_physics::Shape as Collider;
 use genos_render::World;
 use genos_scene::{look_direction, update, Actions, Camera, Scene, Vec3, CAMERA_HEIGHT};
@@ -282,6 +284,65 @@ fn a_separate_client_discovers_reads_and_edits_the_live_scene() {
             "the listener stayed up after the process dropped the server"
         );
     }
+}
+
+#[test]
+fn the_lighting_report_is_served_on_the_bound_port() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("free port");
+    let port = listener.local_addr().expect("addr").port();
+    drop(listener);
+    let host = Host::new(shipped_scene(), Camera::opening());
+    let server = Server::start_on(host, port).expect("server");
+    assert!(server.url().contains(&format!(":{port}/mcp")), "{}", server.url());
+    publish_lighting("stable: false\npending: 4\n");
+    let (status, _, body) = round_trip(
+        "127.0.0.1",
+        port,
+        b"GET /lighting HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("stable: false"), "{body}");
+    assert!(body.contains("pending: 4"), "{body}");
+}
+
+#[test]
+fn a_client_sets_the_lighting_and_reads_the_shot() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("free port");
+    let port = listener.local_addr().expect("addr").port();
+    drop(listener);
+    let host = Host::new(shipped_scene(), Camera::opening());
+    let _server = Server::start_on(host, port).expect("server");
+    let frame = std::thread::spawn(move || {
+        for _ in 0..100 {
+            if genos_mcp::take_shot_request() {
+                genos_mcp::finish_shot(&[137, 80, 78, 71, 1, 2, 3, 4]);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let (status, _, body) = round_trip(
+        "127.0.0.1",
+        port,
+        b"POST /settings HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nContent-Length: 11\r\nConnection: close\r\n\r\nsun=freeze\n",
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("sun: freeze"), "{body}");
+    let (status, headers, _) = round_trip(
+        "127.0.0.1",
+        port,
+        b"GET /shot.png HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(status, 200, "shot status {status}");
+    let kind = headers
+        .iter()
+        .find(|(name, _)| name == "content-type")
+        .map(|(_, value)| value.as_str())
+        .unwrap_or("");
+    assert!(kind.starts_with("image/png"), "{kind}");
+    let saved = std::fs::read(genos_mcp::shot_path()).expect("shot file");
+    assert_eq!(&saved[..4], &[137, 80, 78, 71]);
+    frame.join().expect("frame");
 }
 
 fn refuse_a_dead_process() {

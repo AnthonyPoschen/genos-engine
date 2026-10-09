@@ -81,6 +81,24 @@ fn call_tool(host: &Host, params: &Value) -> Reply {
     };
     let empty = json::object([]);
     let arguments = params.get("arguments").unwrap_or(&empty);
+    if name == "lighting_status" {
+        return Reply::Result(tool_content(crate::lighting::current(), false));
+    }
+    if name == "take_screenshot" {
+        return match crate::control::wait_shot(std::time::Duration::from_secs(2)) {
+            Ok(path) => Reply::Result(tool_content(path.display().to_string(), false)),
+            Err(text) => Reply::Result(tool_content(text, true)),
+        };
+    }
+    if name == "set_lighting" {
+        return match settings_text(arguments) {
+            Ok(text) => match crate::control::post_settings(&text) {
+                Ok(body) => Reply::Result(tool_content(body, false)),
+                Err(body) => Reply::Result(tool_content(body, true)),
+            },
+            Err(text) => Reply::Result(tool_content(text, true)),
+        };
+    }
     match host.call_tool(name, arguments) {
         ToolResult::Unknown => Reply::Error {
             code: -32602,
@@ -154,6 +172,30 @@ fn tools() -> Value {
             schema(&[], vec![]),
         ),
         tool(
+            "lighting_status",
+            "Read the live probe report. stable is true when no brick is still updating.",
+            schema(&[], vec![]),
+        ),
+        tool(
+            "take_screenshot",
+            "Save the live picture and return its path. The light is not settled first.",
+            schema(&[], vec![]),
+        ),
+        tool(
+            "set_lighting",
+            "Change the sun, the sky, the moving boxes, the moving-lamp share, or the time of day.",
+            schema(
+                &[],
+                vec![
+                    ("sun", enum_schema(&["freeze", "run"])),
+                    ("sky", enum_schema(&["on", "off"])),
+                    ("boxes", enum_schema(&["still", "move"])),
+                    ("dynamic", number_schema()),
+                    ("day", number_schema()),
+                ],
+            ),
+        ),
+        tool(
             "set_object",
             "Change stored fields on the object with this handle.",
             schema(
@@ -220,6 +262,22 @@ fn resources() -> Value {
         ),
         ("mimeType", json::string("application/json")),
     ])])
+}
+
+fn settings_text(arguments: &Value) -> Result<String, String> {
+    let mut lines = Vec::new();
+    for key in ["sun", "sky", "boxes", "dynamic", "day"] {
+        let Some(value) = arguments.get(key) else {
+            continue;
+        };
+        let text = value
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| value.as_f64().map(|n| n.to_string()))
+            .ok_or_else(|| format!("{key} is a string or a number"))?;
+        lines.push(format!("{key}={text}"));
+    }
+    Ok(lines.join("\n"))
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {

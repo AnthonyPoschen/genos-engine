@@ -1,11 +1,6 @@
 //! Minimal PNG writer for readback pictures: stored deflate blocks, no compression.
 
-pub fn write_png(
-    path: &std::path::Path,
-    width: u32,
-    height: u32,
-    bgra: &[u8],
-) -> Result<(), String> {
+pub fn encode_png(width: u32, height: u32, bgra: &[u8]) -> Vec<u8> {
     let mut raw = Vec::with_capacity(((width * 3 + 1) * height) as usize);
     for y in 0..height {
         raw.push(0);
@@ -47,7 +42,16 @@ pub fn write_png(
     });
     write_chunk(&mut png, b"IDAT", &zlib);
     write_chunk(&mut png, b"IEND", &[]);
-    std::fs::write(path, png).map_err(|err| err.to_string())
+    png
+}
+
+pub fn write_png(
+    path: &std::path::Path,
+    width: u32,
+    height: u32,
+    bgra: &[u8],
+) -> Result<(), String> {
+    std::fs::write(path, encode_png(width, height, bgra)).map_err(|err| err.to_string())
 }
 
 fn write_chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {

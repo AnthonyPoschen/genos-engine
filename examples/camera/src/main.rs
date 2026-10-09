@@ -204,8 +204,12 @@ fn run() -> Result<(), String> {
             }];
         });
     }
-    let server = genos_mcp::Server::start(host.clone())?;
+    let server = genos_mcp::Server::start_on(host.clone(), genos_mcp::listen_port())?;
     eprintln!("genos-camera mcp {}", server.url());
+    eprintln!(
+        "genos-camera lighting http://127.0.0.1:{}/lighting",
+        genos_mcp::listen_port()
+    );
     let mut world = World::from_scene(host.drawn_scene());
     let mut scene_revision = host.scene_revision();
     let mut fire = SHOW_PARTICLES.then(|| Simulation::from_scene(&world.scene));
@@ -492,6 +496,17 @@ fn run() -> Result<(), String> {
                 renderer.draw_with_overlay(&world, &draw_camera, &overlay, want_read, wireframe)?;
             (pixels, None)
         };
+        let stats = renderer.tier_stats();
+        genos_mcp::publish_lighting(&format!(
+            "stable: {}\npending: {}\nbricks: {}\nfilled: {}\nchanging: {}\nseen: {}\nseen_settled: {}\n",
+            stats.pending_bricks == 0 && stats.changing_bricks == 0,
+            stats.pending_bricks,
+            stats.bricks,
+            stats.filled_bricks,
+            stats.changing_bricks,
+            stats.seen_bricks,
+            stats.seen_settled,
+        ));
         let draw_cpu = timing
             .map(|timing| timing.cpu)
             .unwrap_or_else(|| draw_at.elapsed());

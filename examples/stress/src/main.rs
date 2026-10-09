@@ -257,9 +257,9 @@ const FLY_SPEED: f32 = 5.0;
 /// Stick look in radians per second.
 const STICK_LOOK: f32 = 2.0;
 
-/// Move the fly camera: move keys along the view on the ground plane, Space up and C
-/// down. Mouse look and capture go through [`update`] with no time step, which also
-/// skips its physics.
+/// Move the fly camera: move keys along the view on the ground plane. Space goes up.
+/// C, left Ctrl, and right Ctrl go down. Either Shift is four times faster. Mouse
+/// look and capture go through [`update`] with no time step, which also skips its physics.
 fn fly(camera: &mut Camera, scene: &mut Scene, input: &InputSystem, actions: &Actions, dt: f32) {
     update(camera, scene, actions, 0.0);
     camera.yaw += actions.look_x * STICK_LOOK * dt;
@@ -271,10 +271,15 @@ fn fly(camera: &mut Camera, scene: &mut Scene, input: &InputSystem, actions: &Ac
     if input.keyboard.down(InputCode::key_space) {
         lift += 1.0;
     }
-    if input.keyboard.down(InputCode::key_c) {
+    if input.keyboard.down(InputCode::key_c)
+        || input.keyboard.down(InputCode::key_control_left)
+        || input.keyboard.down(InputCode::key_control_right)
+    {
         lift -= 1.0;
     }
-    let boost = if input.keyboard.down(InputCode::key_shift_left) {
+    let boost = if input.keyboard.down(InputCode::key_shift_left)
+        || input.keyboard.down(InputCode::key_shift_right)
+    {
         4.0
     } else {
         1.0
@@ -283,6 +288,50 @@ fn fly(camera: &mut Camera, scene: &mut Scene, input: &InputSystem, actions: &Ac
         * (FLY_SPEED * boost * dt);
     let position = camera.position + step;
     camera.set_pose(position, camera.yaw, camera.pitch);
+}
+
+fn apply_lighting(stage: &mut Stage, patch: &genos_mcp::LightingSettings) {
+    if let Some(value) = patch.sun_frozen {
+        stage.sun_frozen = value;
+    }
+    if let Some(value) = patch.sky_on {
+        stage.sky_on = value;
+    }
+    if let Some(value) = patch.boxes_still {
+        stage.boxes_still = value;
+    }
+    if let Some(value) = patch.dynamic {
+        stage.mix.dynamic_pct = value;
+    }
+    if let Some(value) = patch.day {
+        stage.day = value;
+    }
+    stage.apply();
+}
+
+fn settings_text(stage: &Stage) -> String {
+    format!(
+        "sun: {}\nsky: {}\nboxes: {}\ndynamic: {}\nday: {}\n",
+        if stage.sun_frozen { "freeze" } else { "run" },
+        if stage.sky_on { "on" } else { "off" },
+        if stage.boxes_still { "still" } else { "move" },
+        stage.mix.dynamic_pct,
+        stage.day,
+    )
+}
+
+fn lighting_text(renderer: &Renderer) -> String {
+    let stats = renderer.tier_stats();
+    format!(
+        "stable: {}\npending: {}\nbricks: {}\nfilled: {}\nchanging: {}\nseen: {}\nseen_settled: {}\n",
+        stats.pending_bricks == 0 && stats.changing_bricks == 0,
+        stats.pending_bricks,
+        stats.bricks,
+        stats.filled_bricks,
+        stats.changing_bricks,
+        stats.seen_bricks,
+        stats.seen_settled,
+    )
 }
 
 fn run() -> Result<(), String> {
@@ -316,6 +365,12 @@ fn run() -> Result<(), String> {
     };
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let host = genos_mcp::Host::new(stage.world.scene.clone(), camera.clone());
+    let _server = genos_mcp::Server::start_on(host, genos_mcp::listen_port())?;
+    eprintln!(
+        "genos-stress lighting http://127.0.0.1:{}/lighting",
+        genos_mcp::listen_port()
+    );
     eprintln!(
         "genos-stress {} ({} sections), {} occluders, {} moving boxes, {} lamps ({} moving)",
         stage.scale.label(),
@@ -413,6 +468,9 @@ fn run() -> Result<(), String> {
             })
             .collect();
 
+        if let Some(patch) = genos_mcp::take_settings() {
+            apply_lighting(&mut stage, &patch);
+        }
         stage.advance(dt);
         fly(
             &mut camera,
@@ -440,9 +498,23 @@ fn run() -> Result<(), String> {
 
         drawn += 1;
         let last = opts.frames.is_some_and(|limit| drawn >= limit);
-        let want_read = last && opts.shot.is_some();
+        let shot = genos_mcp::take_shot_request();
+        if shot {
+            renderer.set_live_readback(true);
+        }
+        let want_read = shot || (last && opts.shot.is_some());
         let pixels =
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;
+        if shot {
+            renderer.set_live_readback(false);
+            let png = pixels
+                .as_ref()
+                .map(|pixels| png::encode_png(renderer.width(), renderer.height(), pixels))
+                .unwrap_or_default();
+            genos_mcp::finish_shot(&png);
+        }
+        genos_mcp::publish_lighting(&lighting_text(&renderer));
+        genos_mcp::publish_settings(&settings_text(&stage));
         if let (Some(path), Some(pixels)) = (&opts.shot, pixels) {
             png::write_png(path, renderer.width(), renderer.height(), &pixels)?;
             let (hh, mm) = building::clock(stage.day);

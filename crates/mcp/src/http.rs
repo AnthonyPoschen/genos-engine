@@ -25,7 +25,15 @@ pub struct Server {
 
 impl Server {
     pub fn start(host: Host) -> Result<Self, String> {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|err| err.to_string())?;
+        Self::start_on(host, 0)
+    }
+
+    /// Bind `127.0.0.1` on `port`. Port 0 picks a free port. Any other port is that
+    /// port, so a client can use the same address every run.
+    pub fn start_on(host: Host, port: u16) -> Result<Self, String> {
+        let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|err| {
+            format!("mcp port {port} did not bind: {err}")
+        })?;
         listener
             .set_nonblocking(true)
             .map_err(|err| err.to_string())?;
@@ -137,6 +145,29 @@ fn serve_connection(
         .split('?')
         .next()
         .unwrap_or(request.path.as_str());
+    if path == "/lighting" && request.method == "GET" {
+        return write_text(&mut stream, 200, "OK", &crate::lighting::current());
+    }
+    if path == "/settings" && request.method == "GET" {
+        return write_text(&mut stream, 200, "OK", &crate::control::settings_text());
+    }
+    if path == "/settings" && request.method == "POST" {
+        let text = if request.body.is_empty() {
+            request.path.clone()
+        } else {
+            request.body.clone()
+        };
+        return match crate::control::post_settings(&text) {
+            Ok(body) => write_text(&mut stream, 200, "OK", &body),
+            Err(body) => write_text(&mut stream, 400, "Bad Request", &body),
+        };
+    }
+    if path == "/shot.png" && request.method == "GET" {
+        return match crate::control::wait_shot(std::time::Duration::from_secs(2)) {
+            Ok(_) => write_bytes(&mut stream, 200, "OK", "image/png", &crate::control::shot_bytes()),
+            Err(body) => write_text(&mut stream, 503, "Service Unavailable", &body),
+        };
+    }
     if path != "/mcp" {
         return write_empty(&mut stream, 404, "Not Found");
     }
@@ -452,6 +483,26 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
 
 fn write_empty(stream: &mut TcpStream, status: u16, reason: &str) -> std::io::Result<()> {
     write_json(stream, status, reason, None, "")
+}
+
+fn write_text(stream: &mut TcpStream, status: u16, reason: &str, body: &str) -> std::io::Result<()> {
+    write_bytes(stream, status, reason, "text/plain; charset=utf-8", body.as_bytes())
+}
+
+fn write_bytes(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()
 }
 
 fn write_json(

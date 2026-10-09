@@ -180,6 +180,7 @@ name = "genos-stress"
 version = "0.1.0"
 dependencies = [
  "genos-input",
+ "genos-mcp",
  "genos-render",
  "genos-scene",
  "genos-ui",
