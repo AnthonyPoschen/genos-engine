@@ -81,6 +81,7 @@ void main() {
     if (!gi2_surface(p, pos, n, albedo, two_sided)) {
         return;
     }
+    vec3 direct = gi2_unpack_rgb9e5(gbuf.px[index].w);
     gbuf.px[index] = uvec4(~0u);
     if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
         n = -n;
@@ -93,7 +94,6 @@ void main() {
         outc.px[index] = pack_rgb(shown);
         return;
     }
-    vec3 direct = work.v[gi2_pixel_at(index)].rgb;
     vec3 bounce = indirect(p, pos, n);
     if (mode == 1u || mode == 8u) {
         bounce = vec3(0.0);

@@ -8,10 +8,11 @@
 // cache's B patches of C rays relit this frame (gi2_cache.glsl). Rays are numbered
 // probe rays first (P R), then cache rays (B C):
 //   probes      2 per probe: position (w 1 when placed), normal
-//   hits        3 per ray: hit position (w: t, below 0 for a miss), normal, albedo
-//               already times reflectance (w unused)
+//   hits        1 per ray: x distance t (-1 a miss, -2 no ray), y the hit's normal
+//               (octahedral bits), z albedo times reflectance times pi (unorm4x8
+//               bits); the hit point is origin + dir t (gi2_ray)
 //   radiance    1 per ray: light leaving the hit back along the ray (rgb)
-//   pixel light 1 per pixel: direct irradiance (rgb)
+// A pixel's direct irradiance goes into its G-buffer record's w (RGB9E5).
 //   sh          7 per probe: irradiance SH, 9 rgb coefficients
 //   filtered sh 7 per probe: the same after the spatial filter (gi2_filter.comp)
 #extension GL_GOOGLE_include_directive : require
@@ -60,16 +61,13 @@ uint gi2_all_rays() {
     return gi2_probe_rays() + GI2_CACHE_BATCH * GI2_CACHE_RAYS;
 }
 uint gi2_hit_at(uint ray) {
-    return 2u * gi2_probes() + 3u * ray;
+    return 2u * gi2_probes() + ray;
 }
 uint gi2_rad_at(uint ray) {
-    return 2u * gi2_probes() + 3u * gi2_all_rays() + ray;
-}
-uint gi2_pixel_at(uint p) {
-    return 2u * gi2_probes() + 4u * gi2_all_rays() + p;
+    return 2u * gi2_probes() + gi2_all_rays() + ray;
 }
 uint gi2_sh_at(uint i) {
-    return gi2_pixel_at(pc.dims.x * pc.dims.y) + 7u * i;
+    return 2u * gi2_probes() + 2u * gi2_all_rays() + 7u * i;
 }
 uint gi2_shf_at(uint i) {
     return gi2_sh_at(gi2_probes()) + 7u * i;
@@ -168,6 +166,36 @@ vec3 gi2_ray_dir(vec3 pos, vec3 n, uint k) {
 }
 
 #include "gi2_cache.glsl"
+
+// Ray `ray`'s origin (just off its surface) and direction: probe rays first, then
+// this frame's light cache rays. False when the ray has no live source.
+bool gi2_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
+    origin = vec3(0.0);
+    dir = vec3(0.0, 1.0, 0.0);
+    n = vec3(0.0, 1.0, 0.0);
+    if (ray < gi2_probe_rays()) {
+        uint rays = gi2_rays();
+        uint probe = ray / rays;
+        vec4 pp = work.v[gi2_probe_at(probe)];
+        if (pp.w < 0.5) {
+            return false;
+        }
+        n = work.v[gi2_probe_at(probe) + 1u].xyz;
+        origin = pp.xyz + n * 0.02;
+        dir = gi2_ray_dir(pp.xyz, n, ray % rays);
+        return true;
+    }
+    uint r = ray - gi2_probe_rays();
+    uint slot = gi2_cache_batch_slot(r / GI2_CACHE_RAYS);
+    uint key = slot == ~0u ? 0u : ckeys.key[slot];
+    if (key == 0u) {
+        return false;
+    }
+    n = cache.v[3u * slot + 1u].xyz;
+    origin = cache.v[3u * slot].xyz + n * 0.02;
+    dir = gi2_dir(key, n, r % GI2_CACHE_RAYS, GI2_CACHE_RAYS);
+    return true;
+}
 
 // Real SH, bands 0-2, at unit direction d.
 void gi2_sh9(vec3 d, out float y[9]) {

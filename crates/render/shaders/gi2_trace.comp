@@ -1,7 +1,7 @@
 #version 450
 // GI v2 rays, pass 2: the screen probes' rays, then the rays of the light cache
-// patches relit this frame. A hit stores the surface for the light pass; a miss
-// takes the sky. One trace site.
+// patches relit this frame. A hit stores its distance and surface for the light
+// pass; a miss takes the sky. One trace site.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "gi2_common.glsl"
@@ -12,42 +12,22 @@ void main() {
         return;
     }
     uint at = gi2_hit_at(ray);
-    vec3 pos;
-    vec3 n;
+    vec3 origin;
     vec3 dir;
-    bool live;
-    if (ray < gi2_probe_rays()) {
-        uint rays = gi2_rays();
-        uint probe = ray / rays;
-        vec4 pp = work.v[gi2_probe_at(probe)];
-        pos = pp.xyz;
-        n = work.v[gi2_probe_at(probe) + 1u].xyz;
-        live = pp.w >= 0.5;
-        dir = gi2_ray_dir(pos, n, ray % rays);
-    } else {
-        uint r = ray - gi2_probe_rays();
-        uint slot = gi2_cache_batch_slot(r / GI2_CACHE_RAYS);
-        uint key = slot == ~0u ? 0u : ckeys.key[slot];
-        live = key != 0u;
-        pos = live ? cache.v[3u * slot].xyz : vec3(0.0);
-        n = live ? cache.v[3u * slot + 1u].xyz : vec3(0.0, 1.0, 0.0);
-        dir = gi2_dir(key, n, r % GI2_CACHE_RAYS, GI2_CACHE_RAYS);
-    }
-    if (!live) {
-        work.v[at] = vec4(0.0, 0.0, 0.0, -2.0);
+    vec3 n;
+    if (!gi2_ray(ray, origin, dir, n)) {
+        work.v[at] = vec4(-2.0, 0.0, 0.0, 0.0);
         work.v[gi2_rad_at(ray)] = vec4(0.0);
         return;
     }
-    vec3 origin = pos + n * 0.02;
     SceneHit hit;
     if (!trace_ray(origin, dir, 1.0e-4, 200.0, hit)) {
-        work.v[at] = vec4(0.0, 0.0, 0.0, -1.0);
+        work.v[at] = vec4(-1.0, 0.0, 0.0, 0.0);
         work.v[gi2_rad_at(ray)] = vec4(has_sky() ? scene.sky.rgb : vec3(0.0), 0.0);
         return;
     }
     vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
     vec3 tint = mix(vec3(1.0), hit.albedo, hit.color_mix);
-    work.v[at] = vec4(origin + dir * hit.t, hit.t);
-    work.v[at + 1u] = vec4(hn, 0.0);
-    work.v[at + 2u] = vec4(tint * hit.reflect, 0.0);
+    work.v[at] = vec4(hit.t, uintBitsToFloat(gi2_pack_normal(hn)),
+                      uintBitsToFloat(packUnorm4x8(vec4(tint * hit.reflect * GI2_PI, 0.0))), 0.0);
 }

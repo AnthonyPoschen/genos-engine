@@ -358,7 +358,7 @@ impl Gpu {
         let probes = (cols * rows) as u64;
         let rays = probes * GI2_RAYS as u64 + (GI2_CACHE_BATCH * GI2_CACHE_RAYS) as u64;
         let pixels = w as u64 * h as u64;
-        let work_vec4 = 2 * probes + 4 * rays + pixels + 14 * probes;
+        let work_vec4 = 2 * probes + 2 * rays + 14 * probes;
         let mut gbuf = std::mem::replace(&mut self.gi2.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.gi2.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.gi2.out, Buffer::empty());

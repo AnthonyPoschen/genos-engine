@@ -18,3 +18,23 @@ vec3 gi2_unpack_normal(uint w) {
     }
     return normalize(n);
 }
+
+// Shared-exponent RGB (9 bits each, 5-bit exponent): non-negative light in a uint.
+uint gi2_pack_rgb9e5(vec3 rgb) {
+    const float MAX = 65408.0;
+    vec3 c = clamp(rgb, vec3(0.0), vec3(MAX));
+    float m = max(c.r, max(c.g, c.b));
+    int e = max(-16, int(floor(log2(max(m, 1.0e-30))))) + 1;
+    float scale = exp2(float(9 - e));
+    if (floor(m * scale + 0.5) >= 512.0) {
+        e += 1;
+        scale *= 0.5;
+    }
+    uvec3 q = uvec3(min(floor(c * scale + 0.5), vec3(511.0)));
+    return q.r | (q.g << 9u) | (q.b << 18u) | (uint(e + 15) << 27u);
+}
+
+vec3 gi2_unpack_rgb9e5(uint w) {
+    float scale = exp2(float(int(w >> 27u) - 15 - 9));
+    return vec3(float(w & 511u), float((w >> 9u) & 511u), float((w >> 18u) & 511u)) * scale;
+}
