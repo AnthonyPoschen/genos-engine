@@ -360,18 +360,65 @@ With nothing changing, the frame runs the G-buffer, direct light (mostly cached 
 - **Cached shadow masks for static lights.** Each card texel stores the shadow (visibility) of up to 4 static lights that matter most there, 8 bits each. A pixel on a static surface computes the light's falloff and angle from its own position and normal, then multiplies by the cached mask instead of tracing a ray. Low and Medium use masks for all static lights. High and Ultra trace real rays for the static lights within 10 m of the camera (sharp contact shadows) and use masks beyond. Masks are rebuilt only when static geometry or a static light changes.
 - **Cached sun visibility.** The sun moves slowly, so each card texel also keeps a sun visibility value, refreshed by the scheduler as the sun moves. Low reads it per pixel instead of tracing; Medium and above trace the sun per pixel and use the cache for card lighting.
 - **Light range.** The range cutoff (`lamp_range`) stays as a tree pruning rule, not a per-pixel loop.
-- **Emissive surfaces as lights.** Every emissive surface lights the scene through the surface cache automatically (a ray that hits it reads its emission). Emissive meshes above a power threshold also become area lights in the light tree, so they cast sharp direct shadows. The threshold is a setting and is tested against the reference.
+- **Emissive surfaces as lights.** Every emissive surface lights the scene through the surface cache. Small or bright emissive regions are also extracted at import as area lights in the light tree, so they get clean direct light and shadows. See [Emissive surfaces](#emissive-surfaces).
 
 ## Light layers
 
 Light is linear. The total at any point is the sum of each light's contribution. We store the big contributors separately so they can change without recomputing anything.
 
-- **Static layer.** Static lights, the sky and emissive surfaces. Recomputed only when static geometry or static lights change.
+- **Static layer.** Static lights, the sky and emissive surfaces that never change. Recomputed only when static geometry or static lights change.
 - **Sun layer.** The sun alone. It moves slowly and constantly, so it updates through the scheduler all the time. The sky colour scales its own part, so a sky fade is a multiply.
 - **Per moving light layer.** Each light marked "moving" (or "switchable") gets its own layer: its direct and bounced light on the cards and probe bricks within its range, at unit intensity. On, off, dim and colour changes are a multiply at read time, so they are free. Moving the light recomputes its own layer only, by priority, and the light's direct term is exact every frame anyway because it is per pixel.
 - **Layer cap.** Memory is cheap but not unlimited. Each preset has a layer cap (8 at Low, 32 at Ultra). Lights beyond the cap share one "dynamic rest" layer that updates by priority. The cap and a per-layer memory report are on the debug panel.
 - **Reading layers.** Each card texel and probe stores per-layer radiance only in the pages and bricks the layer reaches. A reader sums the layers it overlaps, times each layer's current intensity. The screen probes do not care about layers; they read the summed value.
 - **Per object (moving objects).** Moving objects never dirty static GI. Static layers trace with the "static only" mask, so a moving object is invisible to them. A moving object's effect reaches the picture three ways: its shadows are exact because direct light is per pixel and traced with all instances; its occlusion and bounce near the camera come from screen probes, which trace with all instances and read its own cards; and far from the camera (or off screen) a small object-space proxy around it (a few probes storing its occlusion and bounce colour, in its own frame) darkens and tints world probe reads nearby. That proxy moves with the object and is rebuilt only when the object's lighting changes, not when it moves.
+
+## Emissive surfaces
+
+Any surface can glow, including part of a mesh: a lit window in a building texture, the screen of a monitor, a strip light along one edge of a panel. glTF describes this per material, and the engine follows it exactly.
+
+### What a surface emits
+
+- Emitted radiance at a point = `emissiveTexture` (sRGB-decoded, RGB) x `emissiveFactor` x `KHR_materials_emissive_strength` (1 if absent). With no texture, the factor covers the whole material. A zero factor or a black texel emits nothing.
+- The unit is radiance, the same unit as the sky colour and as a card texel's stored outgoing light. A surface with emission `E` and albedo 0 seen through a ray reads exactly `E`.
+- Emission is one-sided (the front face) unless the material is double-sided. Alpha mask applies (a cut-out texel emits nothing). Blend materials draw their emission but give no GI, like the rest of their lighting.
+- The picture adds the pixel's own emission after lighting: albedo x (direct + indirect) + emissive, then the tone curve. The G-buffer already has an emissive target.
+- Phase 1 status: the glTF loader reads `emissiveFactor`, `emissiveTexture` and `KHR_materials_emissive_strength` into `PbrMaterial` (`emissive`, `emissive_texture`, `emissive_strength`). Nothing lights from it yet.
+
+### Path 1: through the surface cache (every emitter)
+
+- Cards capture emission at import together with albedo, normal and depth. Each card texel stores the area-weighted mean emission over its footprint (a box filter in texture space), so the total power of the surface is kept even when a texel covers a bright detail and a dark one.
+- A card texel's outgoing radiance is albedo x incoming + emission. Everything that reads cards therefore sees emission with no special case: screen probe rays that hit the surface, world probes, and the card-to-card bounce. Emissive light bounces any number of times through the normal cache feedback.
+- This path is exact in total power but blurs detail below the card texel size (6-12 cm), and a small bright source seen by few probe rays gives noisy or blotchy light. Path 2 covers that.
+
+### Path 2: area lights in the light tree (small or bright regions)
+
+- **Extraction at import, per mesh and texture-aware.** The importer rasterises each emissive material's emission over the mesh in texture space, at the texture's resolution (capped at 1024^2 per material). Texels above a floor (1 % of the material's peak, and above an absolute floor) are grouped into connected regions on the surface: connected in texture space and on adjacent triangles, split where the normal turns more than 45 degrees or the colour changes a lot. Each region stores its bounds, a normal cone, its total power (flux = pi x mean radiance x area for a Lambertian emitter), its mean colour, and a fixed set of 64 sample points placed by power (stratified over the region's emission, so the bright texels get more points).
+- **Which regions become lights.** A region is promoted when it is bright or small: its flux is above a power threshold (a setting, relative to the scene's brightest lamp), or its area is under about 4 card texels at the preset's card size (the cache cannot represent it). At most 16 regions per mesh; smaller ones merge. Dim, large regions (a softly glowing wall) stay cache-only, which is what the cache does well.
+- **Direct light from a region.** Promoted regions are nodes in the light tree with their bounds and normal cone, so the per-tile cut treats them like lamps. A chosen region gets N shadow rays per pixel to points from its fixed sample set (N = 1 at Low, 4 at Ultra), chosen by a fixed per-tile pattern, never rotated per frame, so its soft shadows do not crawl or flicker. Static regions use the cached shadow masks like static lamps, storing the mask averaged over the region's sample points.
+- **No double counting.** Card texels keep promoted emission separate from cache-only emission. A ray from a shading point that hits a promoted region reads only the cache-only part, because that region's direct light already came through the light tree. Light that bounces off other surfaces (their card texels) includes the region's light once, through their own direct term. A camera ray that sees the emitter shows its full emission. The reference check below proves this.
+- **Instances.** Regions live in mesh space; each instance places them through its transform, so one emissive mesh asset placed 50 times is 50 light tree leaves sharing one region table.
+
+### Animated and toggled emission: light changes, not geometry
+
+- Emission changes never touch SDFs, the BVH, card placement or depth. They are light changes and go through the layer model.
+- **Static emission** belongs to the static layer.
+- **Switchable emission** (a material or instance marked switchable: a sign that turns on, a screen that dims) gets its own layer, at unit intensity, like a moving light, counted against the preset's layer cap. On, off, dim and colour changes are a multiply at read time, for both its cache layer and its area light in the tree. They cost nothing and are correct in the same frame.
+- **Changing emission patterns** (a flipbook or scrolling emissive texture) re-capture that material's emission into its cards' emissive texels (a cheap texel update) and re-pick the region sample weights. The bounce of that layer is then a light change for the scheduler, with the expected error = relative change in the region's power. If the pattern changes every frame, the bounce follows by priority and the direct part stays exact through the light tree.
+- **Moving emissive objects** carry their emission on their own cards and their regions move with them in the light tree, like a moving lamp.
+
+### Memory and cost
+
+- Region tables: about 1 KB per region (bounds, cone, power, 64 points). 1024 regions are about 1 MB, inside the light tree row of the VRAM budget.
+- Card emission is already in the atlas texel (16 B covers albedo, normal, emissive and radiance).
+- Per-pixel cost is the same as a lamp in the tile's cut: N shadow rays, or a mask read for static regions.
+
+### Tests
+
+- **Reference support.** The CPU reference traces glTF meshes with emission: a primary or path vertex hitting an emissive texel adds its emission (sampled from the texture at the hit's UV), and next-event estimation samples promoted regions so the reference converges on small emitters. Item 1 of the quality gate.
+- **Scene: emissive panel room.** A closed white room (albedo 0.8) with no lamps, lit only by (a) a large dim emissive ceiling panel (cache-only), (b) a small bright emissive strip (promoted to an area light) and (c) a mesh with a texture-masked emissive pattern (part of one mesh emitting, the rest plain). Standard poses: facing the panel, facing away, under the strip, at the masked mesh.
+- **Script: `emissive_room.rhai`.** Against the reference per pose: mean relative error under 3 % and the same per-tracer gate as the other views. Turning the strip's layer off and back on matches a reference with and without it within the same frame. A frame-to-frame flicker check with everything still (must be zero, as in `temporal_flicker.rhai`). A double-counting check: switching the strip between promoted and cache-only (a debug setting) must leave the converged room within noise.
+- **Energy check (furnace).** A sealed room where every inner surface emits `E` and has albedo 0.8 must settle at outgoing radiance E / (1 - 0.8) = 5E everywhere, within 2 %, on both tracers. It catches lost or doubled emission in the cache feedback.
 
 ## Scheduling: one score
 
@@ -467,7 +514,7 @@ Estimates in MB for a scene the size of the stress scene, at the preset's target
 | Mesh SDF pool | Sparse 8^3 bricks, 8-bit distances, coarse mips | 16 | 24 | 0 | 0 |
 | Far SDF and occupancy | World-anchored sparse bricks, 4 levels, 1-bit occupancy | 8 | 12 | 0 | 0 |
 | Screen probes | Ray radiance (4 B) + hit records (8 B, current and previous), irradiance | 3 | 10 | 28 | 35 |
-| Light tree, tile cuts, object proxies, scheduler, working slots | Small buffers, plus the in-flight update pool | 4 | 4 | 6 | 8 |
+| Light tree, tile cuts, emissive regions, object proxies, scheduler, working slots | Small buffers, plus the in-flight update pool | 4 | 4 | 6 | 8 |
 | **Lighting total** | | **about 91** | **about 126** | **about 152** | **about 191** |
 | BVH (RT only, stress scene) | BLAS + TLAS, compacted, about 60-100 B per triangle | - | - (32 if RT) | 40 | 40 |
 | G-buffer (for the fit check) | Depth, normal, albedo, roughness, metallic, emissive, motion, id | about 50 | about 50 | about 90 | about 90 |
@@ -484,10 +531,10 @@ Notes:
 
 The reference path tracer, `compare` and the regression scripts stay the gate. They grow in four ways:
 
-1. **Meshes in the reference.** `crates/debug/src/reference.rs` and `crates/render/src/trace.rs` gain a CPU triangle BVH (written in this repository, as ADR 0007 asks) and glTF materials with texture sampling and emission. Analytic shapes go through the same mesh path, so the reference and the engine see the same triangles.
+1. **Meshes in the reference.** `crates/debug/src/reference.rs` and `crates/render/src/trace.rs` gain a CPU triangle BVH (written in this repository, as ADR 0007 asks) and glTF materials with texture sampling and emission (texture-aware emission at path hits, next-event sampling of promoted emissive regions; see [Emissive surfaces](#emissive-surfaces)). Analytic shapes go through the same mesh path, so the reference and the engine see the same triangles.
 2. **Both tracers.** `compare` and every script take `tracer: "sw" | "hw"`. The test suite runs each script on both. On the 4070 that is a forced software run plus a hardware run.
-3. **Mesh scenes.** Add glTF test scenes next to the stress scene: a Cornell box, a thin-wall room (leak test), a sealed white room with a lamp (light should settle at direct / (1 - albedo), with nothing outside), and one detailed open scene (for example Khronos' Sponza sample). Each gets standard reference poses.
-4. **New regression scripts.** Ghosting (an object moves across a lit wall; no pixel stays wrong more than 1 frame after it passes), light toggle latency (a layered light off goes dark in the same frame), camera independence (two poses 0.2 m apart across the entrance and the floor edge show the same lighting on shared surfaces), and the existing entrance walk, sun pop, night to day and box drag scripts. Two more guard against our own artefacts:
+3. **Mesh scenes.** Add glTF test scenes next to the stress scene: a Cornell box, a thin-wall room (leak test), a sealed white room with a lamp (light should settle at direct / (1 - albedo), with nothing outside), an emissive panel room (dim panel, small bright strip, texture-masked emitter, no lamps), and one detailed open scene (for example Khronos' Sponza sample). Each gets standard reference poses.
+4. **New regression scripts.** Ghosting (an object moves across a lit wall; no pixel stays wrong more than 1 frame after it passes), light toggle latency (a layered light off goes dark in the same frame), camera independence (two poses 0.2 m apart across the entrance and the floor edge show the same lighting on shared surfaces), and the existing entrance walk, sun pop, night to day and box drag scripts. `emissive_room.rhai` checks emitters against the reference (see [Emissive surfaces](#emissive-surfaces)). Two more guard against our own artefacts:
    - **`temporal_flicker.rhai`.** Several stress poses (hall, room A, doorway, outside) with the camera still, lamps orbiting and boxes moving. A static mask keeps only pixels whose G-buffer (depth, normal, albedo, instance) is unchanged over the window and which sit outside every moving light's and box's direct reach. In those pixels the script measures flicker per frame: a change that reverses direction (up then down, or down then up), by the smaller of the two steps, in linear luminance, averaged over 4x4 screen tiles (the bench's existing flicker measure). Thresholds come from the reference: the mean must stay under a quarter of the reference's noise target (0.25 x 3 % of the reference pixel's luminance) and the worst tile under half of it, never more than 1 display code. A second run freezes everything; then flicker must be exactly zero, because every ray direction and every choice is deterministic. Both runs pass on both tracers.
    - **`world_probe_role.rhai`.** (1) With the scene frozen and the camera still, after settling, 300 frames: world probe and surface cache GPU time each under 0.02 ms per frame, and zero bricks or pages scheduled or published. (2) Camera-only moves (a walk through the hall): zero bricks relit; only first fills for newly resident bricks, counted separately. (3) In every standard view, the `share:world` debug view: world-probe share of indirect light in pixels within 10 m under 10 % indoors, fallback rays under 0.5 %, and zero world-probe reads from screen probe rays shorter than `R` except the counted fallback. (4) A box moved in room A: only bricks and pages within the change's reach are updated. (5) A debug counter of reads from working slots stays at zero. Runs on both tracers.
 
@@ -518,13 +565,13 @@ Thresholds: mean relative error under 3 % static per view and per tracer; no fra
 Each phase keeps `genos-stress` runnable and is gated by the reference views (no worse than the previous phase on any view), the regression scripts, and the fps targets (no more than 10 % slower than the previous phase until the final phases). Each phase lands on master in small commits.
 
 0. **Baseline.** Finish the current static-accuracy fix and the probe priority simplification. Record the gate numbers: reference error per view, entrance walk, floor edge walk, sun pop, fps at 720p and 1440p.
-1. **Mesh import and glTF.** glTF 2.0 loader (`.gltf`, `.glb`, PNG and JPEG textures) in `genos-load`. Mesh asset cache. Analytic shapes generate meshes. The raster draws meshes with materials. The reference traces triangles. Lighting still uses the old tracer on the old shapes. Gate: the picture is unchanged (direct view within 1 %), and the triangle reference matches the analytic reference within noise.
+1. **Mesh import and glTF.** glTF 2.0 loader (`.gltf`, `.glb`, PNG and JPEG textures) in `genos-load`, including emissive factor, texture and strength in the material. Mesh asset cache. Analytic shapes generate meshes. The raster draws meshes with materials. The reference traces triangles. Lighting still uses the old tracer on the old shapes. Gate: the picture is unchanged (direct view within 1 %), and the triangle reference matches the analytic reference within noise.
 2. **Mesh SDF, far SDF, software tracer.** Build SDFs at import. Implement `trace_ray` and `trace_occluded` in software. Switch direct shadows and probe rays to it. Gate: the direct view matches a `bounces: 0` reference within 2 %; the leak tests pass; reference views no worse; 4070 compile test passes.
 3. **Hardware tracer.** BLAS and TLAS, ray queries behind the same interface. Gate: both tracers pass the same scripts; RT is faster; forced software on the 4070 still passes.
-4. **Surface cache.** Cards at import, the atlas, card lighting, probe hits read cards. Gate: reference error better on room A and the corners; settle times no worse.
+4. **Surface cache.** Cards at import (with captured emission), the atlas, card lighting, probe hits read cards; emitters light the room through the cache. Gate: reference error better on room A and the corners; settle times no worse.
 5. **Screen probes.** The new final gather behind a setting, next to the old per-pixel probe read and near field. Gate: corner and thin-wall error improve; ghosting, toggle latency, camera-independence, flicker and world-probe role scripts pass; fps targets hold.
 6. **Retire the old paths.** Delete the near field, the cascades, the world volume, the occluder grid and the old CPU paths. Mark ADR 0008 and ADR 0011 superseded. Update [Lighting](lighting.md).
-7. **Port the layers.** Static, sun and per moving light layers on cards and probes; moving-object proxies; the light tree on the picture path; emissive area lights. Gate: toggling a layered light is free (no work scheduled) and correct against the reference; moving boxes schedule no static work.
+7. **Port the layers.** Static, sun and per moving light layers on cards and probes; moving-object proxies; the light tree on the picture path; emissive region extraction and area lights; switchable and animated emission as layers. Gate adds `emissive_room.rhai`. Gate: toggling a layered light is free (no work scheduled) and correct against the reference; moving boxes schedule no static work.
 8. **Presets and old hardware.** Tune Low to Ultra. Tune Low on the 4070 with the software tracer forced on until a GTX 1060 or RX 580 is available, then run the gate on the real card. Run the macOS software path on Anthony's MacBook. Write the presets into the settings doc.
 
 ## Risks
