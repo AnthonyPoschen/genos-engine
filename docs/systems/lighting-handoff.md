@@ -43,6 +43,9 @@ Do not repeat these. They either exhaust the NVIDIA compiler or make the hall sl
 - An empty-cell chebyshev jump in the shader, on top of the shipped safe-box jump. A later 600-frame pair was about 250 and 247 fps moving, and about 385 fps idle. Slower than the shipped shader. It was reverted. The CPU walk still has that jump. The shader steps one cell when the slot's high bit is set.
 
 - An any-hit walk: `occ_walk` and the shape list stop at the first blocker (a `first` flag), and `scene_ray_any` tests the planes first. It passed lavapipe, but on the RTX 4070 the driver compiler took the stress process to 23 GB resident before it was killed. It was reverted. `any` is a GLSL builtin, so do not name a function or variable that.
+- Planes first in `scene_ray_masked` alone (floor and roof tested before `occ_walk`, so the walk stops at the roof), without the any-hit flag: the same 23 GB compile on the 4070. Any reorder that changes how `occ_walk` is inlined needs a short 4070 run before it lands.
+- A second inlined shadow ray and walk in `scene.frag` (the first `light:I` debug view) drew a frame in about a second on the 4070 and stalled the desktop. Keep one lamp loop and one walk per shader (`lamps_light_only`).
+- Cutting a light build into submissions of about 3 ms of rays, one a frame: a slice of one or two bricks leaves the GPU idle, each took about 7 ms anyway, and the hall fell from 108 to 70 fps.
 
 Forcing early fragment tests, and turning depth writes off on the shade pass, left the hall raster at about 2.7 ms. The depth prepass is already vertex-only. That change was reverted.
 
