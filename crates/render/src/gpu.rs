@@ -743,7 +743,15 @@ impl Renderer {
     /// first switch on builds GI v2's pipelines and buffers. `GENOS_GI=v2` starts on.
     /// GI v2 does not run under supersampling yet; that frame uses the current path.
     pub fn set_gi_v2(&mut self, on: bool) -> Result<(), String> {
-        self.gpu.set_gi2(on)
+        let was = self.gpu.gi2.on;
+        self.gpu.set_gi2(on)?;
+        if was && !on {
+            // The current lighting's fields were freed while GI v2 ran: start over.
+            let weights = self.tier.weights;
+            self.tier = crate::probe_tier::TierState::new(self.tier.layout);
+            self.tier.weights = weights;
+        }
+        Ok(())
     }
 
     pub fn gi_v2(&self) -> bool {
@@ -1820,6 +1828,7 @@ impl Gpu {
             gpu.create_static_objects()?;
             gpu.recreate(width, height)?;
             if gpu.gi2.on {
+                gpu.gi2.on = false;
                 gpu.set_gi2(true)?;
             }
             Ok(gpu)

@@ -105,3 +105,34 @@ fn gi_v2_direct_light_matches_the_current_direct_light() {
     let lit = |p: &[u8]| p.iter().map(|&c| u64::from(c)).sum::<u64>();
     assert!(lit(&full) > lit(&v2), "GI v2's bounce adds light");
 }
+
+/// Switching to GI v2 frees the current lighting's probe fields; switching back
+/// rebuilds them and the current picture comes back.
+#[test]
+fn switching_back_from_gi_v2_restores_the_current_picture() {
+    let (_gpu, mut window, mut renderer) = open();
+    let world = shipped_hall();
+    let camera = Camera::opening();
+    let settle = |window: &mut Window, renderer: &mut Renderer| {
+        let mut last = Vec::new();
+        for _ in 0..40 {
+            last = draw(window, renderer, &world, &camera);
+        }
+        last
+    };
+    let before = settle(&mut window, &mut renderer);
+    renderer.set_gi_v2(true).expect("GI v2 on");
+    let _ = settle(&mut window, &mut renderer);
+    renderer.set_gi_v2(false).expect("GI v2 off");
+    let after = settle(&mut window, &mut renderer);
+    let sum: u64 = before
+        .iter()
+        .zip(&after)
+        .map(|(a, b)| u64::from(a.abs_diff(*b)))
+        .sum();
+    let mean = sum as f64 / before.len() as f64;
+    assert!(
+        mean < 2.0,
+        "the current picture changed by {mean:.2} of 255 after a GI v2 round trip"
+    );
+}

@@ -113,16 +113,62 @@ impl Gpu {
     }
 
     /// Turn GI v2 on or off. The first time on builds its pipelines and buffers.
+    /// While on, the current lighting's probe fields shrink to a placeholder (about
+    /// 80 MB back); switching off rebuilds them empty, and the caller resets the tier
+    /// so the current lighting relearns its light.
     pub(crate) fn set_gi2(&mut self, on: bool) -> Result<(), String> {
+        if on == self.gi2.on && (!on || self.gi2.ready) {
+            return Ok(());
+        }
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
         self.gi2.on = on;
         if on && !self.gi2.ready {
-            unsafe {
-                (self.fns.device_wait)(self.device);
-            }
             self.make_gi2()?;
             self.make_gi2_targets()?;
         }
-        Ok(())
+        self.size_v1_light(!on)
+    }
+
+    /// Full-size (current lighting runs) or placeholder (GI v2 runs) probe fields.
+    fn size_v1_light(&mut self, full: bool) -> Result<(), String> {
+        let field = if full {
+            crate::probe_tier::TIER_END as u64 * 16
+        } else {
+            256
+        };
+        let view = if full {
+            (crate::probe_tier::TIER_END - crate::probe_tier::TIER_PROBES) as u64 * 16
+        } else {
+            256
+        };
+        if self.light_field[0].size == field && self.tier_view.size == view {
+            return Ok(());
+        }
+        let share = self.light_families();
+        for index in 0..2 {
+            let mut old = std::mem::replace(&mut self.light_field[index], Buffer::empty());
+            self.destroy_buffer(&mut old);
+            self.light_field[index] =
+                self.make_buffer_queues(field, 0x20 | 0x1 | 0x2, Memory::Upload, &share)?;
+            self.write_buffer(&self.light_field[index], &vec![0u8; field as usize])?;
+        }
+        let mut old = std::mem::replace(&mut self.tier_view, Buffer::empty());
+        self.destroy_buffer(&mut old);
+        self.tier_view = self.make_buffer_queues(view, 0x20, Memory::Upload, &share)?;
+        self.write_buffer(&self.tier_view, &vec![0u8; view as usize])?;
+        // Nothing built into the old fields survives.
+        self.pending_light = None;
+        self.tier_batch = None;
+        self.tier_started = None;
+        self.light_busy = false;
+        self.light_building = false;
+        self.light_publish_flight = None;
+        self.read_plan.clear();
+        self.world_stale = true;
+        self.write_light_set(0)?;
+        self.write_light_set(1)
     }
 
     fn make_gi2(&mut self) -> Result<(), String> {
