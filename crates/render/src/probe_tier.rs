@@ -1745,9 +1745,11 @@ impl TierState {
         // A jump that keeps the sun is not a drop. Only the light going out is.
         // One drop, then one pass per bounce the reference counts.
         self.sun_drop = self.sun_wide && went_dark;
-        // A moved box changes the generation too. The world volume only has to
-        // move when the sun, the sky, or a point lamp switches.
-        self.world_now = self.sun_wide || !flips.is_empty();
+        // A moved box changes the generation too. The world volume moves with the
+        // light, not the boxes: when the sun or the sky moves or fades, and when a
+        // light switches. Held until the tier went idle, the far yard kept the day
+        // through a fast dusk and then dropped to the night in one frame.
+        self.world_now = self.sun_wide || !flips.is_empty() || !suns.is_empty();
         if self.sun_drop {
             self.night_left = NIGHT_HOPS;
         }
