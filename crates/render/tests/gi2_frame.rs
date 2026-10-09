@@ -227,3 +227,67 @@ fn gi_v2_draws_emitted_light_and_bounces_it() {
         "the floor catches the cube's light: {floor:?}"
     );
 }
+
+/// The screen probes average up to 32 frames of rays while nothing changes
+/// (gi2_gather.comp). Any change (a lamp, an object, the camera) must restart that
+/// average on the very next frame, so the picture never lags behind the scene: the
+/// still count is 0 on the first frame after the change, the probes keep only that
+/// frame's rays (weight 1 / (0 + 1)), and the picture already differs from the one
+/// before.
+#[test]
+fn gi_v2_still_averaging_restarts_on_any_change() {
+    let (_gpu, mut window, mut renderer) = open();
+    renderer.set_gi_v2(true).expect("GI v2");
+    let base: Scene = shipped_hall().scene;
+    assert!(!base.lights.is_empty() && !base.solids.is_empty());
+    let camera = Camera::opening();
+    let mut moved_camera = Camera::opening();
+    moved_camera.set_pose(genos_scene::Vec3::new(0.3, 1.7, 0.0), 0.2, 0.0);
+    let mut relit = base.clone();
+    relit.lights[0].color = [
+        relit.lights[0].color[0] * 0.25,
+        relit.lights[0].color[1] * 0.25,
+        relit.lights[0].color[2] * 2.0,
+    ];
+    let mut moved_object = base.clone();
+    moved_object.solids[0].position.x += 0.5;
+    let changes: [(&str, Scene, &Camera); 3] = [
+        ("a lamp's colour", relit, &camera),
+        ("an object's place", moved_object, &camera),
+        ("the camera", base.clone(), &moved_camera),
+    ];
+    let still_world = World::from_scene(base.clone());
+    for (what, scene, cam) in changes {
+        let mut before = Vec::new();
+        for _ in 0..40 {
+            before = draw(&mut window, &mut renderer, &still_world, &camera);
+        }
+        let held = renderer.gi_v2_still_frames();
+        assert!(
+            held >= 32,
+            "{what}: the probes average while still ({held} frames)"
+        );
+        let changed = World::from_scene(scene);
+        let after = draw(&mut window, &mut renderer, &changed, cam);
+        assert_eq!(
+            renderer.gi_v2_still_frames(),
+            0,
+            "{what}: the first frame after the change starts the average over"
+        );
+        let diff = before
+            .iter()
+            .zip(&after)
+            .filter(|(a, b)| a.abs_diff(**b) > 2)
+            .count();
+        assert!(
+            diff > 0,
+            "{what}: the first frame after the change shows it"
+        );
+        let _ = draw(&mut window, &mut renderer, &changed, cam);
+        assert_eq!(
+            renderer.gi_v2_still_frames(),
+            1,
+            "{what}: and counts on from there while it holds"
+        );
+    }
+}
