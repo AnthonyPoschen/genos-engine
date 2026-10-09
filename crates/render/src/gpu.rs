@@ -485,7 +485,6 @@ impl Renderer {
         }
         let show_night = self.night_frames > 0;
         if self.night_frames > 0 {
-            pack.night_drop = 1.0;
             self.night_frames -= 1;
         }
         // A sun or the sky came or went. The gather replaces the on-screen probes and
