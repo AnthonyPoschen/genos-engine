@@ -13,6 +13,6 @@ shot("switch-2-frames");
 let s = wait_settled(#{ timeout_frames: 900 });
 shot("switch-settled");
 let b = luminance(#{});
-log(`before ${a.luminance}, after ${b.luminance}, settled ${s.settled} in ${s.frames} frames`);
+log(`before ${a.luminance}, after ${b.luminance}, settled ${s.settled} in ${s.frames} frames, ${s.wall_ms} ms wall, ${s.light_gpu_ms} ms light GPU`);
 check(s.settled, "the new room settles within 900 frames");
 check_gt(b.luminance, 0.02, "the new room is not black");

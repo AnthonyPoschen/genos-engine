@@ -40,7 +40,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec("wait", "Reply after frames (default 1). Scene time runs unless paused."),
         spec(
             "wait_settled",
-            "Reply when on-screen bricks have no change passes left for quiet_frames (default 3), or after timeout_frames (default 600). strict waits for every brick. Reply says settled true/false.",
+            "Reply when on-screen bricks have no passes left and the picture has blended their light in, for quiet_frames (default 3), or after timeout_frames (default 600). strict waits for every brick. Reply says settled true/false, frames, wall_ms and light_gpu_ms (GPU time of the light builds in the wait).",
         ),
         spec(
             "view",

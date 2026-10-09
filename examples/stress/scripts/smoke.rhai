@@ -4,7 +4,7 @@ knob("time_of_day", 12.0);
 knob("sun", "freeze");
 camera(#{ position: [12.5, 1.7, 20.0], look_at: [12.5, 1.0, 8.0] });
 let settled = wait_settled(#{ timeout_frames: 400 });
-log(`settled ${settled.settled} after ${settled.frames} frames`);
+log(`settled ${settled.settled} after ${settled.frames} frames, ${settled.wall_ms} ms wall, ${settled.light_gpu_ms} ms light GPU`);
 for mode in ["full", "direct", "bounce", "nobounce", "bounce:1", "albedo", "normal", "depth", "probes:state", "probes:age"] {
     shot(`view-${mode}`, mode);
 }

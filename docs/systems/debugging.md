@@ -93,6 +93,21 @@ let c = compare(#{ prefix: "noon", width: 160, noise: 0.03, frames: 30 });
 check_lt(c.mean_rel, 0.10, "under 10% of the light is wrong");
 ```
 
+### Settling
+
+`wait_settled` replies once every brick in view has no pass left, the build that
+carried the last one is on screen, and the shown light has blended 95% of the way to
+it (three `TIER_VIEW_SECONDS` of wall time), for `quiet_frames` in a row. The reply
+gives `frames`, `wall_ms` and `light_gpu_ms` (GPU time of the light builds during
+the wait); compare builds on the milliseconds, since frames favour whichever build
+draws faster. `status` reports `picture_settled`.
+
+The yardstick changed at the commit "wait_settled waits for the picture to stop
+changing". Before it, `wait_settled` replied when the last pass was submitted, while
+the picture still blended toward it; frame counts from before that commit
+(light_settle, room_switch, reference_views settle frames) read lower and are not
+comparable with later ones. `temporal_flicker` measured that blend tail as flicker.
+
 ## Views
 
 `full`, `direct` (lamps and sun, shadowed), `bounce` (indirect only), `nobounce`
