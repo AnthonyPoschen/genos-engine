@@ -190,6 +190,13 @@ impl TierLayout {
         (lo, hi)
     }
 
+    /// Whether the window around `eye` fits the shader's indirection table.
+    pub fn fits(&self, eye: [f32; 3]) -> bool {
+        let (lo, hi) = self.window(eye);
+        let cells: i64 = (0..3).map(|i| i64::from(hi[i] - lo[i] + 1)).product();
+        cells <= i64::from(TIER_INDIR_CAP)
+    }
+
     /// World position of probe `local` (0..BRICK on each axis) in brick `brick`.
     pub fn probe_position(&self, brick: [i32; 3], local: [i32; 3]) -> [f32; 3] {
         let mut p = [0.0; 3];
@@ -1596,7 +1603,12 @@ impl TierState {
             far = far.max(depth + extent);
         }
         let spacing = prominence_spacing(best_score, geometry);
-        let radius = far.min(80.0).max(spacing * 4.0);
+        let mut radius = far.min(80.0).max(spacing * 4.0);
+        // The shader finds a brick through the window's indirection table. A window
+        // too big for it would light nothing while the passes still counted.
+        while radius > spacing * 4.0 && !TierLayout::new(spacing, radius).fits(eye) {
+            radius -= spacing * BRICK as f32;
+        }
         if (self.layout.spacing - spacing).abs() > 0.1 || (self.layout.radius - radius).abs() > 1.0
         {
             self.layout = TierLayout::new(spacing, radius);
@@ -4006,6 +4018,27 @@ mod tests {
         let shown = retire_key(true, 0.01);
         assert!(dim < bright);
         assert!(bright < shown);
+    }
+
+    #[test]
+    fn a_far_camera_keeps_a_window_the_shader_can_index() {
+        // A building 25 m across seen from 20 m outside it, with a ground plane.
+        let building = SurfaceBox {
+            min: [0.0, 0.0, 0.0],
+            max: [25.0, 6.0, 25.0],
+        };
+        let ground = SurfaceBox {
+            min: [-8.0, -0.1, -8.0],
+            max: [33.0, 0.0, 33.0],
+        };
+        let eye = [12.0, 1.6, 45.0];
+        let mut tier = TierState::default();
+        tier.fit_prominence(&[building, ground], eye);
+        assert!(tier.layout.fits(eye), "radius {}", tier.layout.radius);
+        tier.update(vec![building, ground], 0, eye, &[]);
+        let batch = tier.batch(eye, None, FIRST_RAYS);
+        assert!(!batch.items.is_empty());
+        assert!(batch.texels[0][3] > 0.0, "the batch must carry the window");
     }
 
     #[test]

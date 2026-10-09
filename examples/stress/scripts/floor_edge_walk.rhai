@@ -2,7 +2,6 @@
 // entrance and back, with the lamps moving inside. Where the camera stands decides which
 // bricks the picture uses, and so which update first, but never the light they settle
 // on: no frame may step the indirect light in the view of the entrance.
-// Both checks still fail: the indirect light steps 2x to 3x in one frame near z = 33.
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("sun", "freeze");
 knob("time_of_day", 12.0);

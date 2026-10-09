@@ -142,7 +142,7 @@ The goal is that a probe at rest holds the light a probe that never stops updati
 | Floor origin | Steep rays of a low probe start on the floor | review |
 | `correct` sample | Extra bounce sample off when cap 0 or the sun is up | review |
 
-Open: walking in across the outer edge of the ground (`floor_edge_walk.rhai`) or up to the entrance (`entrance_walk.rhai`) with the lamps moving still steps the indirect light 2x to 3x in one frame. With still lamps the walk is smooth, but probes lit while the camera stood 45 m out settle about 40 % dark behind the doorway, steady, where a cold start at the ground edge matches the reference. The settle check does not see it: those bricks no longer move.
+Fixed: from about 30 m out the window that covers every box grew past the shader's indirection table (32768 cells). The CPU still counted the passes it scheduled, but the GPU found no brick and lit nothing, so bricks lit before the camera walked out stayed at their first 16 rays, marked settled. Walking back in, the picture took that dark light, then whatever ran next: the 2x to 3x step at the ground edge and the entrance, and the dark steady state behind the doorway that a cold start did not have. `TierLayout::fits` now shrinks the window until it fits, so every counted pass runs.
 
 **What the picture shows (`light.comp` `blend_view`, `scene.frag`, `gpu.rs`)**
 

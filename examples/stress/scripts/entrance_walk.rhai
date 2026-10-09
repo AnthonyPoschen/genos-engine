@@ -3,8 +3,8 @@
 // on where the camera stands: no frame may move the indirect light in the doorway
 // view by more than the lamps' own motion does. The probes used to leave the lamps
 // inside out of the bounce while the camera was outside and far: a 6x step at 27 m.
-// A 2.4x step at about 32.4 m remains with the lamps moving (not with them still):
-// the approach check fails until that is found.
+// A 2.4x step at about 32.4 m was the window outgrowing the shader's brick table:
+// passes counted on the CPU never ran.
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("sun", "freeze");
 knob("time_of_day", 12.0);
