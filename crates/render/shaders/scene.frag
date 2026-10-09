@@ -151,6 +151,29 @@ vec3 world_mean(vec3 pos, vec3 face_n) {
     return sum / weight;
 }
 
+// Debug view (gpu debug_view.rs): scene.grid_at.w holds the mode in bits 0-7, a
+// lamp in bits 8-23 and the probe cube in bits 24-25. 0 is the picture.
+const uint DBG_FULL = 0u;
+const uint DBG_DIRECT = 1u;
+const uint DBG_BOUNCE = 2u;
+const uint DBG_NEAR = 3u;
+const uint DBG_FAR = 4u;
+const uint DBG_ALBEDO = 5u;
+const uint DBG_NORMAL = 6u;
+const uint DBG_DEPTH = 7u;
+const uint DBG_LIGHT = 8u;
+uint dbg_mode() {
+    return scene.grid_at.w & 255u;
+}
+// The probe cube the picture reads: every bounce, up to two, or one.
+uint dbg_cube() {
+    uint pick = (scene.grid_at.w >> 24u) & 3u;
+    return pick == 1u ? TIER_CUBE1 : (pick == 2u ? TIER_CUBE2 : TIER_CUBE3);
+}
+bool dbg_no_bounce() {
+    return ((scene.grid_at.w >> 24u) & 3u) == 3u;
+}
+
 const float TAU = 6.2831853;
 // Rays per pixel for the light from surfaces within a probe spacing.
 // Per-pixel scene marches cost more than the frame budget. The probe is the
@@ -190,7 +213,7 @@ vec4 near_rays(vec3 pos, vec3 n, uint count, uint base[8], float weight[8], uint
         return vec4(0.0);
     }
     vec3 faces[6];
-    tier_cube6(count, base, weight, TIER_CUBE3, faces);
+    tier_cube6(count, base, weight, dbg_cube(), faces);
     vec3 origin = pos + n * 0.02;
     vec3 helper = abs(n.y) > 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
     vec3 tx = normalize(cross(helper, n));
@@ -248,11 +271,12 @@ vec3 screen_bounce(vec3 world, vec3 face_n, bool quad, bool casts) {
     uint lane = quad ? (uint(gl_FragCoord.x) & 1u) + 2u * (uint(gl_FragCoord.y) & 1u) : 0u;
     vec3 far = vec3(0.0);
     vec4 near = vec4(0.0);
+    uint cube = dbg_cube();
     if (count > 0u) {
         for (uint k = 0u; k < count; k++) {
-            far += weight[k] * tier_cube_at(base[k], TIER_CUBE3, face_n);
+            far += weight[k] * tier_cube_at(base[k], cube, face_n);
         }
-        if (casts) {
+        if (casts && dbg_mode() != DBG_FAR) {
             near = near_rays(world, face_n, count, base, weight, lane, lanes);
         }
     }
@@ -264,6 +288,9 @@ vec3 screen_bounce(vec3 world, vec3 face_n, bool quad, bool casts) {
     // a little under the night trace. Daylight has a sky, and the volume
     // already matches, so this lift stays off.
     bool night_floor = face_n.y > 0.5 && !has_sky();
+    if (dbg_mode() == DBG_NEAR) {
+        return near.a > 0.5 ? max(near.rgb / near.a, vec3(0.0)) : vec3(0.0);
+    }
     if (count == 0u) {
         vec3 coarse = world_mean(world + face_n * 0.05, face_n);
         if (night_floor) {
@@ -493,6 +520,27 @@ void main() {
     vec3 normal = normalize(v_normal);
     // A camera card is thin. The lamp can light the visible side from either face.
     bool two_sided = v_shade > 1.15 && v_shade < 1.5;
+    uint mode = dbg_mode();
+    if (mode == DBG_ALBEDO || mode == DBG_NORMAL || mode == DBG_DEPTH) {
+        float depth = clamp(1.0 - length(v_pos - scene.eye.xyz) / 50.0, 0.0, 1.0);
+        vec3 shown = mode == DBG_ALBEDO ? albedo : (mode == DBG_NORMAL ? normal * 0.5 + 0.5 : vec3(depth));
+        out_color = vec4(shown * texel.a, texel.a);
+        return;
+    }
+    if (mode == DBG_LIGHT) {
+        vec3 lit = vec3(0.0);
+        uint which = (scene.grid_at.w >> 8u) & 65535u;
+        vec3 origin = v_pos + normal * 0.02;
+        if (which < scene.lamp_count && !scene_inside(origin)) {
+            vec3 target;
+            lit = lamp_light(scene_lamp(which), origin, normal, two_sided, target);
+            if (lit.r + lit.g + lit.b > 0.0 && blocked(origin, target)) {
+                lit = vec3(0.0);
+            }
+        }
+        out_color = vec4(tone(albedo * LAMBERT * lit) * texel.a, texel.a);
+        return;
+    }
     vec3 direct = direct_at(v_pos, normal, two_sided);
     // A face point inside geometry (floor under a footprint) receives nothing.
     bool inside = inside_solid(v_pos + normal * 0.02);
@@ -501,8 +549,11 @@ void main() {
     // (discard above), so only untextured faces share rays across their quads.
     bool quad = v_uv.x < 0.0;
     vec3 bounce = 3.14159265 * screen_bounce(v_pos, normal, quad, !inside && !gl_HelperInvocation);
-    if (inside) {
+    if (inside || dbg_no_bounce() || mode == DBG_DIRECT) {
         bounce = vec3(0.0);
+    }
+    if (mode == DBG_BOUNCE || mode == DBG_NEAR || mode == DBG_FAR) {
+        direct = vec3(0.0);
     }
     vec3 color = tone(albedo * LAMBERT * (direct + bounce));
     // An opaque face goes straight to the 8-bit target: dither its rounding. A

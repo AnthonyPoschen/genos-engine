@@ -14,6 +14,10 @@ use crate::world::World;
 
 include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 
+#[path = "debug_view.rs"]
+mod debug_view;
+pub use debug_view::{Bounces, DebugView, LampReport, LightingConfig, ViewMode};
+
 const API_VERSION: u32 = 1 << 22;
 const VK_SUCCESS: i32 = 0;
 const SUBOPTIMAL: i32 = 1000001003;
@@ -38,6 +42,8 @@ pub struct Renderer {
     shapes: crate::pool::MeshPool,
     /// Last overlay list. The same list reuses its vertices.
     overlay_rects: Vec<ScreenRect>,
+    /// Lines drawn with the overlay rectangles, in the same draw.
+    overlay_lines: Vec<ScreenLine>,
     overlay_verts: Vec<crate::pack::GpuVertex>,
     cascade_lines: Vec<crate::pack::GpuVertex>,
     /// The persistent world probe tier: bricks, slots and the work still due.
@@ -58,6 +64,8 @@ pub struct Renderer {
     night_frames: u8,
     /// XZ of the last sun's travel direction.
     last_sun: [f32; 2],
+    /// Debug view and lighting overrides ([`debug_view`]).
+    debug: debug_view::DebugState,
 }
 
 /// Time constant of the shown tier light: a change is 95% shown after three of these.
@@ -146,6 +154,7 @@ impl Renderer {
             memory: FrameMemory::default(),
             shapes: crate::pool::MeshPool::default(),
             overlay_rects: Vec::new(),
+            overlay_lines: Vec::new(),
             overlay_verts: Vec::new(),
             cascade_lines: Vec::new(),
             tier: {
@@ -176,7 +185,26 @@ impl Renderer {
                 .map_or(TIER_VIEW_SECONDS, |ms| ms.max(0.0) / 1000.0),
             night_frames: 0,
             last_sun: [0.0, -1.0],
+            debug: debug_view::DebugState::default(),
         })
+    }
+
+    /// Lines drawn over the picture with the next overlay rectangles, in the same
+    /// draw. They stay until replaced.
+    pub fn set_overlay_lines(&mut self, lines: &[ScreenLine]) {
+        if self.overlay_lines.as_slice() != lines {
+            self.overlay_lines.clear();
+            self.overlay_lines.extend_from_slice(lines);
+            // Rebuild the vertices on the next draw.
+            self.overlay_rects.clear();
+            self.overlay_rects.push(ScreenRect {
+                x: f32::NAN,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+                color: [0.0; 3],
+            });
+        }
     }
 
     /// Draw the selected light layers as unlit lines: 0 marks the lit probes of the
@@ -303,6 +331,7 @@ impl Renderer {
         }
         if self.overlay_rects.as_slice() != overlay {
             self.overlay_verts = screen_quads(overlay);
+            self.overlay_verts.extend(screen_lines(&self.overlay_lines));
             self.overlay_rects.clear();
             self.overlay_rects.extend_from_slice(overlay);
         }
@@ -421,6 +450,7 @@ impl Renderer {
         let _ = (rewrite_light, self.screen_key);
         let mut pack = pack;
         pack::apply_view(&mut pack, camera, aspect, self.width, self.height);
+        self.debug.apply(&mut pack);
         self.gpu.poll_light()?;
         // A readback settles. A live frame, including the first, stays inside the
         // tier budget. Settling the first picture traced the whole window in one
@@ -559,7 +589,7 @@ impl Renderer {
     fn stage_tier(&mut self, world: &World, pack: &pack::Pack, settle: bool) {
         let boxes = crate::probe_tier::scene_boxes(&world.scene);
         let lights = tier_lights(pack);
-        if std::env::var_os("GENOS_TIER_SPACING").is_none() {
+        if std::env::var_os("GENOS_TIER_SPACING").is_none() && self.debug.spacing.is_none() {
             self.tier.fit_prominence(&boxes, pack.eye);
         }
         self.tier
@@ -745,6 +775,16 @@ pub struct ScreenRect {
     pub color: [f32; 3],
 }
 
+/// A line in window pixels, drawn as a thin quad with the overlay rectangles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenLine {
+    pub a: [f32; 2],
+    pub b: [f32; 2],
+    /// Pixels across.
+    pub width: f32,
+    pub color: [f32; 3],
+}
+
 struct DrawSpan {
     shapes: bool,
     first: u32,
@@ -782,6 +822,31 @@ fn screen_quads(rects: &[ScreenRect]) -> Vec<GpuVertex> {
         verts.push(corner(x0, y0));
         verts.push(corner(x1, y1));
         verts.push(corner(x0, y1));
+    }
+    verts
+}
+
+/// Each line as two triangles around its segment, `width` pixels across.
+fn screen_lines(lines: &[ScreenLine]) -> Vec<GpuVertex> {
+    let mut verts = Vec::with_capacity(lines.len() * 6);
+    for line in lines {
+        let d = [line.b[0] - line.a[0], line.b[1] - line.a[1]];
+        let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
+        if len <= 1.0e-6 || line.width <= 0.0 || !len.is_finite() {
+            continue;
+        }
+        let h = 0.5 * line.width / len;
+        let n = [-d[1] * h, d[0] * h];
+        let corner = |p: [f32; 2], s: f32| {
+            pack::overlay_vertex([p[0] + n[0] * s, p[1] + n[1] * s, 0.0], line.color)
+        };
+        let (a0, a1, b0, b1) = (
+            corner(line.a, 1.0),
+            corner(line.a, -1.0),
+            corner(line.b, 1.0),
+            corner(line.b, -1.0),
+        );
+        verts.extend([a0, b0, b1, a0, b1, a1]);
     }
     verts
 }

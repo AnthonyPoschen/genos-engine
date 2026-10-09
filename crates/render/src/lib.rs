@@ -21,7 +21,10 @@ pub use field::{
     build, cascade_debug_lines, illuminate, illuminate_facing, probe_counts, sample, sample_world,
     Field,
 };
-pub use gpu::{DrawProfile, LightBuildTimes, Renderer, ScreenRect};
+pub use gpu::{
+    Bounces, DebugView, DrawProfile, LampReport, LightBuildTimes, LightingConfig, Renderer,
+    ScreenLine, ScreenRect, ViewMode,
+};
 pub use lighting::Lighting;
 pub use mesh::Vertex;
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};
@@ -35,12 +38,13 @@ pub use particles::{
     Puff, Simulation, FIRE_COLOR, PROOF_STEPS, SMOKE_ALBEDO, SMOKE_DENSITY, SMOKE_RADIUS, STEP_DT,
 };
 pub use probe_tier::{
-    allocate, probe_live, scene_boxes, BrickSet, SurfaceBox, TierBatch, TierItem, TierLayout,
-    TierLight, TierState, TierStats, TierWeights, BRICK, PROBE_BYTES,
+    allocate, notice_band, probe_live, scene_boxes, set_notice_band, BrickReport, BrickSet,
+    BrickState, SurfaceBox, TierBatch, TierItem, TierLayout, TierLight, TierState, TierStats,
+    TierWeights, BRICK, PROBE_BYTES,
 };
 pub use trace::{
-    agreement, first_outgoing, linear_from_display, luminance, radiance, radiance_hits, ray_land,
-    samples_toward, sees,
+    agreement, direct_light, first_outgoing, linear_from_display, luminance, radiance,
+    radiance_hits, ray_land, samples_toward, sees, trace as trace_ray, Hit as TraceHit,
 };
 pub use world::{
     fixed_bounds, identity_pose, in_view, solid_reach, Bounds, Displacement, DrawKind, FixedPart,

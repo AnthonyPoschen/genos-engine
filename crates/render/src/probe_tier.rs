@@ -385,6 +385,28 @@ pub const SUN_SHADOW: f32 = 80.0;
 /// leaves the stored face and skips that run. It does not pull the new rays toward
 /// the stored face.
 pub const NOTICE_BAND: f32 = 0.02;
+
+/// [`NOTICE_BAND`] as bits, or a value the debug tools set.
+static NOTICE_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The notice band in use: [`NOTICE_BAND`] unless [`set_notice_band`] changed it.
+pub fn notice_band() -> f32 {
+    match NOTICE_BITS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => NOTICE_BAND,
+        bits => f32::from_bits(bits),
+    }
+}
+
+/// Change the notice band for every tier and gather in the process. 0 or less
+/// goes back to [`NOTICE_BAND`].
+pub fn set_notice_band(band: f32) {
+    let bits = if band > 0.0 && band.is_finite() {
+        band.to_bits()
+    } else {
+        0
+    };
+    NOTICE_BITS.store(bits, std::sync::atomic::Ordering::Relaxed);
+}
 /// Irradiance where a point lamp falls under the visible floor. One of the five
 /// small-stress lamps (peak 0.2) reaches about 17 m. A hundred lamps that share
 /// that same total reach a few metres.
@@ -445,7 +467,7 @@ pub fn notice_keeps_face(stored: [f32; 3], fresh: [f32; 3]) -> bool {
     let a = face_luma(stored);
     let b = face_luma(fresh);
     let scale = a.max(b).max(1.0e-3);
-    (a - b).abs() / scale < NOTICE_BAND
+    (a - b).abs() / scale < notice_band()
 }
 
 /// The face the picture stores: `stored` when the new light is inside the notice band.
@@ -1130,6 +1152,62 @@ impl std::fmt::Display for TierWeights {
 }
 
 /// Counts for reports.
+
+/// Where a brick is in its updates (see [`TierState::brick_reports`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrickState {
+    /// Waiting for its first light; the picture reads the world probes there.
+    Unlit,
+    /// Taking change passes: its light is wrong and moving.
+    Changing,
+    /// Right but noisy: refine passes average it.
+    Refining,
+    /// No work due.
+    Steady,
+}
+
+impl BrickState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unlit => "unlit",
+            Self::Changing => "changing",
+            Self::Refining => "refining",
+            Self::Steady => "steady",
+        }
+    }
+}
+
+/// One brick as the debug tools see it.
+#[derive(Clone, Debug)]
+pub struct BrickReport {
+    pub brick: [i32; 3],
+    pub center: [f32; 3],
+    /// Live probes in the brick.
+    pub probes: u32,
+    pub state: BrickState,
+    /// The next pass replaces the stored light (a sun, sky or lamp came or went).
+    pub replace: bool,
+    pub change_left: u32,
+    pub samples: u32,
+    /// Seconds since it last finished an update.
+    pub age: f32,
+    /// Screen weight: view rays that met it plus the share its neighbours feed.
+    pub seen: f32,
+    /// Metres from the camera.
+    pub depth: f32,
+    /// `near / (near + depth)`.
+    pub near_term: f32,
+    /// `1 + age / stale`.
+    pub stale_term: f32,
+    /// `seen * near_term * stale_term`: the weight its work is ranked by.
+    pub priority: f32,
+    /// Metres between its probes.
+    pub spacing: f32,
+    /// Why it takes no work now: "settled", "off_screen" (waits for budget the
+    /// on-screen bricks leave), or empty when it is due.
+    pub skip: &'static str,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TierStats {
     pub window_bricks: usize,
@@ -1257,7 +1335,7 @@ impl LightTree {
                     .color
                     .iter()
                     .zip(old.1)
-                    .all(|(a, b)| (a - b).abs() <= NOTICE_BAND * b.abs().max(1.0e-3))
+                    .all(|(a, b)| (a - b).abs() <= notice_band() * b.abs().max(1.0e-3))
         })
     }
 
@@ -2148,6 +2226,58 @@ impl TierState {
                     s.brick.map(|b| b as f32 * span),
                     s.brick.map(|b| (b + 1) as f32 * span),
                 )
+            })
+            .collect()
+    }
+
+    /// One line per allocated brick for the debug tools: its state, how long since it
+    /// last finished an update, and the terms [`Self::batch_seen`] ranks it by. Reads
+    /// only; the ranking itself stays in `batch_seen`.
+    pub fn brick_reports(&self) -> Vec<BrickReport> {
+        let span = self.layout.brick_span();
+        let weight = self.weights();
+        let near = self.weights.near.max(1.0e-3);
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let slot = slot.as_ref()?;
+                let center = [0, 1, 2].map(|i| (slot.brick[i] as f32 + 0.5) * span);
+                let depth = light_dist(self.eye, center);
+                let age = slot.since.elapsed().as_secs_f32();
+                let seen = weight.get(index).copied().unwrap_or(0.0);
+                let near_term = near / (near + depth);
+                let stale_term = 1.0 + age / self.weights.stale.max(1.0e-3);
+                let class = self.class(slot);
+                let state = match class {
+                    Some(0) => BrickState::Unlit,
+                    Some(REFINE_CLASS) => BrickState::Refining,
+                    Some(_) => BrickState::Changing,
+                    None => BrickState::Steady,
+                };
+                let priority = seen * near_term * stale_term;
+                let skip = match class {
+                    None => "settled",
+                    Some(_) if priority <= 0.0 => "off_screen",
+                    Some(_) => "",
+                };
+                Some(BrickReport {
+                    brick: slot.brick,
+                    center,
+                    probes: slot.mask.count_ones(),
+                    state,
+                    replace: slot.replace,
+                    change_left: slot.change_left,
+                    samples: slot.samples,
+                    age,
+                    seen,
+                    depth,
+                    near_term,
+                    stale_term,
+                    priority,
+                    spacing: self.layout.spacing,
+                    skip,
+                })
             })
             .collect()
     }

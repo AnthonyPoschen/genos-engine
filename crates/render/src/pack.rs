@@ -160,6 +160,8 @@ pub struct Pack {
     /// 1 while floors drop the sun the probes still hold, just after it sets.
     /// The shader reads it from `view_grid.w`.
     pub(crate) night_drop: f32,
+    /// Debug word the shader reads from `grid_at.w` (gpu debug_view); 0 is the picture.
+    pub(crate) debug_view: u32,
     /// XZ of the last sun's travel direction. Kept after the sun sets so the
     /// ground it used to reach can drop that bounce. `view_up.w` and `sky.w`.
     pub(crate) last_sun: [f32; 2],
@@ -230,7 +232,7 @@ pub fn build_grid(lamps: &[GpuLamp], occs: &[GpuOcc], eye: [f32; 3], far: f32) -
         let cell = cx.max(cz);
         let nx = (((hi[0] - lo[0]) / cell).ceil() as u32).max(1);
         let nz = (((hi[1] - lo[1]) / cell).ceil() as u32).max(1);
-        grid.lamp = [lo[0], lo[1], cell, crate::probe_tier::NOTICE_BAND];
+        grid.lamp = [lo[0], lo[1], cell, crate::probe_tier::notice_band()];
         grid.dims[2] = nx;
         grid.dims[3] = nz;
         lamp_lists = vec![Vec::new(); (nx * nz) as usize];
@@ -273,7 +275,7 @@ pub fn build_grid(lamps: &[GpuLamp], occs: &[GpuOcc], eye: [f32; 3], far: f32) -
     }
     grid.words = words;
     // The gather reads the notice band from lamp_grid.w even when no point lamp is binned.
-    grid.lamp[3] = crate::probe_tier::NOTICE_BAND;
+    grid.lamp[3] = crate::probe_tier::notice_band();
     grid
 }
 
@@ -502,6 +504,7 @@ pub fn pack_frame(
         grid_h: 1,
         near_rays: near_rays_override(),
         night_drop: 0.0,
+        debug_view: 0,
         last_sun: [0.0, -1.0],
         draws,
     }
@@ -912,7 +915,7 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     for value in [lamp_at, occ_at, grid_at, grid.suns] {
         push_u32(&mut bytes, value);
     }
-    for value in grid.at.into_iter().chain([0]) {
+    for value in grid.at.into_iter().chain([pack.debug_view]) {
         push_u32(&mut bytes, value);
     }
     debug_assert_eq!(bytes.len(), SCENE_TAIL);
