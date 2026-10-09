@@ -323,7 +323,8 @@ fn settings_text(stage: &Stage) -> String {
 fn lighting_text(renderer: &Renderer) -> String {
     let stats = renderer.tier_stats();
     format!(
-        "stable: {}\npending: {}\nbricks: {}\nfilled: {}\nchanging: {}\nseen: {}\nseen_settled: {}\n",
+        "stable: {}\npending: {}\nbricks: {}\nfilled: {}\nchanging: {}\nseen: {}\nseen_settled: {}\n\
+         settle_focus_ms: {:.0}\nsettle_other_ms: {:.0}\nsettle_shell_ms: {:.0}\ntop_light: {}\n",
         stats.pending_bricks == 0 && stats.changing_bricks == 0,
         stats.pending_bricks,
         stats.bricks,
@@ -331,6 +332,12 @@ fn lighting_text(renderer: &Renderer) -> String {
         stats.changing_bricks,
         stats.seen_bricks,
         stats.seen_settled,
+        stats.settle_focus_ms,
+        stats.settle_other_ms,
+        stats.settle_shell_ms,
+        stats
+            .top_light
+            .map_or("none".to_string(), |(index, share)| format!("{index} {share:.2}")),
     )
 }
 

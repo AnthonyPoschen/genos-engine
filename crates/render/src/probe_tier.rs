@@ -598,6 +598,8 @@ fn shaft_union(
 
 /// One directional light that turned, jumped, or only changed colour.
 struct SunShift {
+    /// Share of the view's light the sun brings ([`TierState::focus_of`]).
+    focus: f32,
     old: [f32; 3],
     new: [f32; 3],
     jump: bool,
@@ -667,15 +669,31 @@ fn sun_up(dir: [f32; 3]) -> f32 {
     (-dir[1]).max(0.0)
 }
 
-/// `(mark, hard)`. `hard` is a large jump: those bricks replace. A slow turn blends.
+/// Light of the suns and the sky on an upward face: each one's height times its
+/// brightest channel. The sky counts as a sun straight up, so a fading sky counts.
+fn up_light(lights: &[TierLight]) -> f32 {
+    lights
+        .iter()
+        .filter(|light| light.directional)
+        .map(|light| sun_up(light.pos) * peak(light.color))
+        .sum()
+}
+
+fn peak(color: [f32; 3]) -> f32 {
+    color.iter().fold(0.0f32, |m, c| m.max(c.abs()))
+}
+
+/// `(mark, hard, focus)`. `hard` is a large jump: those bricks replace. A slow turn
+/// blends. `focus` is the most any shift that marks the brick shows in the view.
 fn sun_touch(
     occluders: &[SurfaceBox],
     shifts: &[SunShift],
     lo: [f32; 3],
     hi: [f32; 3],
-) -> (bool, bool) {
+) -> (bool, bool, f32) {
     let mut mark = false;
     let mut jump = false;
+    let mut focus = 0.0f32;
     for shift in shifts {
         let hit = if shift.tint {
             shaft_any(occluders, shift.new, lo, hi)
@@ -687,9 +705,40 @@ fn sun_touch(
         if hit {
             mark = true;
             jump |= shift.jump;
+            focus = focus.max(shift.focus);
         }
     }
-    (mark, jump)
+    (mark, jump, focus)
+}
+
+/// Light `light` brings to a face at `p` facing `normal`: its direct light when
+/// nothing in `blockers` stands between, and [`IMPACT_BOUNCE`] of its unshadowed
+/// light for the bounce it makes around the face. A sun counts like a lamp 7 m away,
+/// as in the shade.
+fn light_at(light: &TierLight, p: [f32; 3], normal: [f32; 3], blockers: &[SurfaceBox]) -> f32 {
+    let (toward, dist2, dist) = if light.directional {
+        (normalize3(light.pos.map(|v| -v)), 49.0, 80.0)
+    } else {
+        let v = [0, 1, 2].map(|i| light.pos[i] - p[i]);
+        let d2: f32 = v.iter().map(|c| c * c).sum();
+        let d = d2.sqrt();
+        if d > visible_reach(light.color) {
+            return 0.0;
+        }
+        (v.map(|c| c / d.max(1.0e-4)), d2, d)
+    };
+    let open = peak(light.color) * LAMP_UNIT / dist2.max(0.01);
+    if open <= 0.0 {
+        return 0.0;
+    }
+    let nd: f32 = (0..3).map(|i| toward[i] * normal[i]).sum();
+    let from = [0, 1, 2].map(|i| p[i] + normal[i] * 1.0e-3);
+    let shadowed = nd <= 0.0
+        || blockers
+            .iter()
+            .any(|b| b.entry(from, toward).is_some_and(|(t, _)| t < dist));
+    let direct = if shadowed { 0.0 } else { open * nd };
+    direct + IMPACT_BOUNCE * open
 }
 
 /// The boxes of `old` that `new` lacks, then those of `new` that `old` lacks: the old
@@ -842,6 +891,14 @@ struct Slot {
     /// Sun on an upward face when this brick last finished. The next sun
     /// climb is scored against it.
     basis_up: f32,
+    /// Share of the view's light the lights whose change this run follows bring,
+    /// the most of them (1 for a moved box or a new brick). The run's priority scales
+    /// with it, so the lights the view shows most land first.
+    focus: f32,
+    /// When the change this run follows reached the brick, for the settle times.
+    marked: Option<std::time::Instant>,
+    /// The run follows the sun and sky drifting from what an outside brick held.
+    drift: bool,
 }
 
 impl Slot {
@@ -974,6 +1031,25 @@ const LOOK_ROWS: u32 = 18;
 const LOOK_KEEP: f32 = 0.75;
 /// Seen count above which a brick is in view.
 const LOOK_SEEN: f32 = 0.05;
+/// Least share of its priority a changing brick keeps when the light that changed it
+/// barely shows in the view. The light the view shows most keeps all of it. Bricks
+/// of a dim light lag, and staleness still brings them round.
+const FOCUS_FLOOR: f32 = 0.1;
+/// Bounce a light makes in the view, as a share of its unshadowed light at a seen
+/// surface. A light behind a wall keeps that share of it: its bounce still comes
+/// through the doorways.
+const IMPACT_BOUNCE: f32 = 0.3;
+/// One view ray in this many measures the lights' impact on a frame, in turn.
+const IMPACT_STRIDE: u32 = 16;
+/// Sun and sky change, relative to what an outside brick last settled under (see
+/// [`shell_priority`]), at which the brick relights. The shafts do not cover the
+/// open yard, so a sun that sets or a sky that fades would leave it at day.
+const SHELL_DRIFT: f32 = 0.2;
+/// Priority an outside brick gains per unit of that change: one whose light went
+/// from day to night runs before the bricks that only refresh.
+const ERROR_GAIN: f32 = 8.0;
+/// Weight of a new settle time in the running settle times of [`TierStats`].
+const SETTLE_RISE: f32 = 0.2;
 
 /// How the tier ranks its work and how far bricks hold still. Live: set it with
 /// `Renderer::set_tier_weights`; `GENOS_TIER_WEIGHTS=near=4,feed=0.5,...` sets it at
@@ -1076,6 +1152,15 @@ pub struct TierStats {
     /// Bricks left unlit because the camera was outside and far, and the change was
     /// a box or a lamp inside the building.
     pub interior_skipped: u64,
+    /// Running time, in milliseconds, from a change reaching a brick to the brick's
+    /// whole update: for changes of a light that brings at least half as much to the
+    /// view as the brightest one, for changes of dimmer lights, and for outside
+    /// bricks following the sun and sky. Zero before the first.
+    pub settle_focus_ms: f32,
+    pub settle_other_ms: f32,
+    pub settle_shell_ms: f32,
+    /// Share of the view's light the brightest light in it brings, and its index.
+    pub top_light: Option<(usize, f32)>,
 }
 
 /// One light the shade uses. A parent holds the sum of its children.
@@ -1280,6 +1365,11 @@ pub struct TierState {
     debug_view: bool,
     /// Per slot: how much of the view reads the brick's light ([`Self::look`]).
     seen: Vec<f32>,
+    /// Per light of `lights`: the light it brings to what the view sees, direct and
+    /// bounce, faded like `seen` ([`Self::look`]).
+    impact: Vec<f32>,
+    /// Running settle times in milliseconds (see [`TierStats::settle_focus_ms`]).
+    settle_ms: [f32; 3],
     look_frame: u32,
     pub weights: TierWeights,
 }
@@ -1346,6 +1436,8 @@ impl TierState {
             long_build: false,
             interior_skipped: 0,
             seen: Vec::new(),
+            impact: Vec::new(),
+            settle_ms: [0.0; 3],
             weights: TierWeights::default(),
             look_frame: 0,
             eye: [0.0; 3],
@@ -1507,7 +1599,8 @@ impl TierState {
         let new_dirs = lights.iter().filter(|light| light.directional).count();
         let wide = old_dirs != new_dirs;
         self.sun_wide = wide;
-        let mut reach: Vec<TierLight> = Vec::new();
+        // Each changed lamp with the share of the view's light it brings.
+        let mut reach: Vec<(TierLight, f32)> = Vec::new();
         let mut flips: Vec<TierLight> = Vec::new();
         let mut went_dark = new_dirs < old_dirs;
         let mut sun_jump = false;
@@ -1525,6 +1618,7 @@ impl TierState {
                             if d > 0.15 {
                                 sun_jump = true;
                                 suns.push(SunShift {
+                                    focus: self.focus_of(i),
                                     old: old.pos,
                                     new: new.pos,
                                     jump: true,
@@ -1532,6 +1626,7 @@ impl TierState {
                                 });
                             } else if d > 0.01 {
                                 suns.push(SunShift {
+                                    focus: self.focus_of(i),
                                     old: old.pos,
                                     new: new.pos,
                                     jump: false,
@@ -1539,6 +1634,7 @@ impl TierState {
                                 });
                             } else {
                                 suns.push(SunShift {
+                                    focus: self.focus_of(i),
                                     old: new.pos,
                                     new: new.pos,
                                     jump: false,
@@ -1556,9 +1652,10 @@ impl TierState {
                             }
                         }
                     }
+                    let focus = self.focus_of(i);
                     for light in old.into_iter().chain(new).copied() {
                         if !light.directional {
-                            reach.push(light);
+                            reach.push((light, focus));
                         }
                     }
                 }
@@ -1579,7 +1676,7 @@ impl TierState {
         if far {
             if let Some(hull) = building_hull(&self.boxes) {
                 let before = reach.len();
-                reach.retain(|light| !interior_point(light.pos, &hull));
+                reach.retain(|(light, _)| !interior_point(light.pos, &hull));
                 flips.retain(|light| !interior_point(light.pos, &hull));
                 self.interior_skipped += (before - reach.len()) as u64;
             }
@@ -1590,7 +1687,10 @@ impl TierState {
             changed = true;
         }
         let span = self.layout.brick_span();
-        let mut relit: Vec<(usize, bool)> = Vec::new();
+        let up_now = up_light(&self.lights);
+        let hull = building_hull(&self.boxes);
+        // (slot, hard, focus, drift)
+        let mut relit: Vec<(usize, bool, f32, bool)> = Vec::new();
         for (index, slot) in self.slots.iter().enumerate() {
             let Some(slot) = slot.as_ref().filter(|s| s.filled) else {
                 continue;
@@ -1603,18 +1703,47 @@ impl TierState {
                     !list.is_empty() && geometry_reaches(list, &self.lights, &self.boxes, lo, hi)
                 }
             };
-            let lamp_hit = reach.iter().any(|light| light.reaches(lo, hi));
-            let (sun_hit, sun_hard) = sun_touch(&self.boxes, &suns, lo, hi);
-            if wide || geometry_hit || lamp_hit || sun_hit {
+            let lamp_focus = reach
+                .iter()
+                .filter(|(light, _)| light.reaches(lo, hi))
+                .map(|&(_, focus)| focus)
+                .fold(None, |m: Option<f32>, f| Some(m.map_or(f, |m| m.max(f))));
+            let (sun_hit, sun_hard, sun_focus) = sun_touch(&self.boxes, &suns, lo, hi);
+            // An outside brick at rest whose sun and sky moved well away from the
+            // light it settled under. The shafts mark only where shadows moved.
+            let center = [0, 1, 2].map(|i| (slot.brick[i] as f32 + 0.5) * span);
+            let outside = hull
+                .as_ref()
+                .is_none_or(|hull| !interior_point(center, hull));
+            let drift = slot.change_left == 0
+                && shell_priority(up_now, slot.basis_up, outside) > SHELL_DRIFT;
+            if wide || geometry_hit || lamp_focus.is_some() || sun_hit || drift {
                 let hard = wide || sun_hard || flips.iter().any(|light| light.reaches(lo, hi));
-                relit.push((index, hard));
+                let mut focus = lamp_focus.unwrap_or(0.0);
+                if sun_hit {
+                    focus = focus.max(sun_focus);
+                }
+                if wide || geometry_hit || drift {
+                    focus = 1.0;
+                }
+                relit.push((index, hard, focus, drift));
             }
         }
         if !relit.is_empty() {
             changed = true;
         }
-        for (index, hard) in relit {
+        let now = std::time::Instant::now();
+        for (index, hard, focus, drift) in relit {
             let slot = self.slots[index].as_mut().expect("relit slot");
+            if slot.change_left == 0 {
+                slot.focus = focus;
+                slot.drift = drift;
+                slot.marked = Some(now);
+            } else {
+                slot.focus = slot.focus.max(focus);
+                slot.drift |= drift;
+                slot.marked.get_or_insert(now);
+            }
             if hard {
                 slot.restart_wide(went_dark);
             } else {
@@ -1721,6 +1850,9 @@ impl TierState {
             run: 0,
             again: false,
             basis_up: 0.0,
+            focus: 1.0,
+            marked: None,
+            drift: false,
         });
         self.by_brick.insert(brick, slot);
         true
@@ -1812,6 +1944,18 @@ impl TierState {
             critical_bricks: self.critical,
             batch_us: self.batch_us,
             interior_skipped: self.interior_skipped,
+            settle_focus_ms: self.settle_ms[0],
+            settle_other_ms: self.settle_ms[1],
+            settle_shell_ms: self.settle_ms[2],
+            top_light: {
+                let total: f32 = self.impact.iter().sum();
+                self.impact
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.total_cmp(b.1))
+                    .filter(|_| total > 0.0)
+                    .map(|(index, v)| (index, v / total))
+            },
             ..TierStats::default()
         };
         for (index, slot) in self.slots.iter().enumerate() {
@@ -1880,6 +2024,16 @@ impl TierState {
     /// hit counts toward the bricks of the probes the picture reads there (around the
     /// point lifted half a spacing off the face). Faces hidden behind others and
     /// everything off screen count nothing. The counts fade by [`LOOK_KEEP`] a frame.
+    /// Share of the view's light that light `index` brings, against the light that
+    /// brings the most: 1 for that light. Before the view has measured any, 1.
+    fn focus_of(&self, index: usize) -> f32 {
+        let most = self.impact.iter().copied().fold(0.0f32, f32::max);
+        if most <= 0.0 {
+            return 1.0;
+        }
+        self.impact.get(index).map_or(1.0, |v| v / most)
+    }
+
     pub fn look(&mut self, camera: &TierCamera) {
         self.seen.resize(self.slots.len(), 0.0);
         for seen in &mut self.seen {
@@ -1893,6 +2047,18 @@ impl TierState {
             ((turn / 4) as f32 + 0.5) / 4.0,
         );
         let spacing = self.layout.spacing;
+        if self.impact.len() != self.lights.len() {
+            self.impact = vec![0.0; self.lights.len()];
+        }
+        for impact in &mut self.impact {
+            *impact *= LOOK_KEEP;
+        }
+        let blockers: Vec<SurfaceBox> = self
+            .boxes
+            .iter()
+            .filter(|b| casts_shadow(b))
+            .copied()
+            .collect();
         for row in 0..LOOK_ROWS {
             for col in 0..LOOK_COLS {
                 let reach = 1.0 + self.weights.margin.max(0.0);
@@ -1917,6 +2083,14 @@ impl TierState {
                     continue;
                 };
                 let mut q = [0, 1, 2].map(|i| camera.eye[i] + dir[i] * t);
+                if (row * LOOK_COLS + col) % IMPACT_STRIDE == turn % IMPACT_STRIDE {
+                    let mut normal = [0.0; 3];
+                    normal[axis] = -dir[axis].signum();
+                    for (index, light) in self.lights.iter().enumerate() {
+                        self.impact[index] +=
+                            count * light_at(light, q, normal, &blockers) * IMPACT_STRIDE as f32;
+                    }
+                }
                 q[axis] -= dir[axis].signum() * 0.5 * spacing;
                 let cell = q.map(|v| (v / spacing - 0.5).floor() as i32);
                 let mut bricks: Vec<[i32; 3]> = Vec::with_capacity(8);
@@ -2105,6 +2279,8 @@ impl TierState {
         // use; they only get what is left. Inside a weight bucket the brick nearest done
         // goes first, so it finishes.
         let mut due: Vec<(u32, i32, u32, f32, f32, [i32; 3], u32)> = Vec::new();
+        let sun_now = up_light(&self.lights);
+        let hull = building_hull(&self.boxes);
         for (index, slot) in self.slots.iter().enumerate() {
             let Some(slot) = slot else { continue };
             let Some(class) = self.class(slot) else {
@@ -2118,7 +2294,21 @@ impl TierState {
             let near = self.weights.near.max(1.0e-3);
             let stale = 1.0 + slot.since.elapsed().as_secs_f32() / self.weights.stale.max(1.0e-3);
             let depth = d.sqrt();
-            let w = weight[index] * near / (near + depth) * stale;
+            let outside = hull
+                .as_ref()
+                .is_none_or(|hull| !interior_point(center, hull));
+            // How far the sun and sky moved from what an outside brick holds.
+            let priority = shell_priority(sun_now, slot.basis_up, outside);
+            // A change takes the share of the view's light its light brings.
+            let focus = if (1..=CHANGE_PASSES).contains(&class) {
+                FOCUS_FLOOR + (1.0 - FOCUS_FLOOR) * slot.focus
+            } else {
+                1.0
+            };
+            let w = weight[index] * near / (near + depth)
+                * stale
+                * focus
+                * (1.0 + ERROR_GAIN * if slot.filled { priority } else { 0.0 });
             // Off-screen bricks wait. On-screen bricks run even when the surface
             // is far, so a sun change still lands on the ground in view.
             let order = 3 * u32::from(w <= 0.0)
@@ -2127,16 +2317,6 @@ impl TierState {
                     REFINE_CLASS => 2,
                     _ => 1,
                 };
-            let sun_now = self
-                .lights
-                .iter()
-                .filter(|light| light.directional)
-                .map(|light| sun_up(light.pos))
-                .fold(0.0f32, f32::max);
-            let outside = building_hull(&self.boxes)
-                .as_ref()
-                .is_none_or(|hull| !interior_point(center, hull));
-            let priority = shell_priority(sun_now, slot.basis_up, outside);
             // Weight buckets a factor of two apart, so the jittered counts do not
             // reorder bricks of about the same weight from one build to the next.
             let bucket = if w > 0.0 {
@@ -2632,17 +2812,29 @@ impl TierState {
                 slot.samples = (slot.samples + item.rays).min(TARGET_SAMPLES);
             }
         }
-        let sun_now = self
-            .lights
-            .iter()
-            .filter(|light| light.directional)
-            .map(|light| sun_up(light.pos))
-            .fold(0.0f32, f32::max);
+        let sun_now = up_light(&self.lights);
         for index in wholes {
             if let Some(Some(slot)) = self.slots.get_mut(index as usize) {
                 slot.run = 0;
                 slot.since = std::time::Instant::now();
                 slot.basis_up = sun_now;
+                if let Some(marked) = slot.marked.take() {
+                    let kind = if slot.drift {
+                        2
+                    } else if slot.focus >= 0.5 {
+                        0
+                    } else {
+                        1
+                    };
+                    let ms = marked.elapsed().as_secs_f32() * 1000.0;
+                    let held = &mut self.settle_ms[kind];
+                    *held = if *held == 0.0 {
+                        ms
+                    } else {
+                        *held + SETTLE_RISE * (ms - *held)
+                    };
+                }
+                slot.drift = false;
             }
         }
         // A move that arrived during the run starts one new run now, not one per frame.
@@ -3778,6 +3970,126 @@ mod tests {
             stats.bricks
         );
         assert_eq!(change_at(&tier, [30.0, 0.5, 20.0]), Some(0));
+    }
+
+    #[test]
+    fn the_lamp_the_view_shows_most_relights_first() {
+        // Two lamps over one floor, 30 m apart, seen alike from above. The bright one
+        // brings most of the view's light; both move and the budget holds a few bricks.
+        let eye = [0.0, 12.0, 0.0];
+        let floor = SurfaceBox {
+            min: [-40.0, 0.0, -40.0],
+            max: [40.0, 0.0, 40.0],
+        };
+        let camera = TierCamera {
+            eye,
+            right: [1.0, 0.0, 0.0],
+            up: [0.0, 0.0, -1.0],
+            forward: [0.0, -1.0, 0.0],
+            tan_x: 1.5,
+            tan_y: 1.5,
+        };
+        let bright = TierLight {
+            pos: [0.0, 2.0, 15.0],
+            color: [0.2; 3],
+            directional: false,
+        };
+        let dim = TierLight {
+            pos: [0.0, 2.0, -15.0],
+            color: [0.05; 3],
+            directional: false,
+        };
+        let mut tier = TierState::default();
+        tier.update(vec![floor], 0, eye, &[bright, dim]);
+        settle(&mut tier, eye);
+        for _ in 0..16 {
+            tier.look(&camera);
+        }
+        assert_eq!(tier.focus_of(0), 1.0);
+        assert!(tier.focus_of(1) < 0.4, "{}", tier.focus_of(1));
+        let shift = |light: TierLight| TierLight {
+            pos: [light.pos[0] + 1.0, light.pos[1], light.pos[2]],
+            ..light
+        };
+        tier.update(vec![floor], 0, eye, &[shift(bright), shift(dim)]);
+        assert!(change_at(&tier, [0.5, 0.5, -15.0]).unwrap() > 0);
+        let budget = 4 * u64::from(BRICK_PROBES) * u64::from(CHANGE_RAYS);
+        let batch = tier.batch_seen(eye, Some(&camera), Some(budget), FIRST_RAYS);
+        assert!(!batch.items.is_empty());
+        let span = tier.layout.brick_span();
+        for item in &batch.items {
+            let lo = item.brick.map(|b| b as f32 * span);
+            let hi = item.brick.map(|b| (b + 1) as f32 * span);
+            assert!(
+                shift(bright).reaches(lo, hi),
+                "{:?} is only the dim lamp's brick",
+                item.brick
+            );
+        }
+    }
+
+    #[test]
+    fn a_fading_sky_relights_the_yard_and_the_yard_goes_first_in_view() {
+        // A tall room with a wide opening to the east, in a yard lit by the sky.
+        let floor = SurfaceBox {
+            min: [-40.0, 0.0, -40.0],
+            max: [40.0, 0.0, 40.0],
+        };
+        let mut boxes = vec![floor];
+        for (min, max) in [
+            ([-5.0, 0.0, -5.2], [5.0, 7.8, -5.0]),
+            ([-5.0, 0.0, 5.0], [5.0, 7.8, 5.2]),
+            ([-5.2, 0.0, -5.0], [-5.0, 7.8, 5.0]),
+            ([5.0, 0.0, -5.0], [5.2, 7.8, -1.0]),
+            ([5.0, 0.0, 1.0], [5.2, 7.8, 5.0]),
+            ([-5.2, 7.8, -5.2], [5.2, 8.0, 5.2]),
+        ] {
+            boxes.push(SurfaceBox { min, max });
+        }
+        let eye = [-3.0, 1.7, 0.0];
+        let sky = |light: f32| TierLight {
+            pos: [0.0, -1.0, 0.0],
+            color: [light; 3],
+            directional: true,
+        };
+        // A lamp in the room moves at dusk too: the room changes as well.
+        let lamp = |x: f32| TierLight {
+            pos: [x, 4.0, 0.0],
+            color: [0.2; 3],
+            directional: false,
+        };
+        let mut tier = TierState::default();
+        tier.update(boxes.clone(), 0, eye, &[sky(0.2), lamp(0.0)]);
+        settle(&mut tier, eye);
+        assert_eq!(tier.stats().changing_bricks, 0);
+        // A small drift leaves the yard.
+        tier.update(boxes.clone(), 0, eye, &[sky(0.19), lamp(0.0)]);
+        assert_eq!(change_at(&tier, [12.0, 0.5, 0.5]), Some(0));
+        // Dusk: the yard has to lose its day.
+        tier.update(boxes.clone(), 0, eye, &[sky(0.01), lamp(1.0)]);
+        assert!(change_at(&tier, [12.0, 0.5, 0.5]).unwrap() > 0);
+        assert!(change_at(&tier, [-2.0, 0.5, 0.5]).unwrap() > 0);
+        // Looking out through the opening: the room is nearer, but the yard bricks
+        // hold the most wrong light and go first.
+        // The lamp's own change in the room waits for them.
+        let camera = TierCamera {
+            eye,
+            right: [0.0, 0.0, 1.0],
+            up: [0.0, 1.0, 0.0],
+            forward: [1.0, 0.0, 0.0],
+            tan_x: 0.7,
+            tan_y: 0.4,
+        };
+        for _ in 0..16 {
+            tier.look(&camera);
+        }
+        let budget = u64::from(BRICK_PROBES) * u64::from(CHANGE_RAYS);
+        let batch = tier.batch_seen(eye, Some(&camera), Some(budget), FIRST_RAYS);
+        let span = tier.layout.brick_span();
+        let first = batch.items.first().expect("work").brick;
+        let center = first.map(|b| (b as f32 + 0.5) * span);
+        let hull = building_hull(&boxes).expect("room");
+        assert!(!interior_point(center, &hull), "{first:?} is in the room");
     }
 
     #[test]
