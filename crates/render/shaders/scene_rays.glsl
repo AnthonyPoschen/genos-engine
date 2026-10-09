@@ -624,6 +624,16 @@ uint lamp_list_size(LampList list) {
     return list.suns.y + list.near.y + (scene.fire_pos.w > 0.0 ? 1u : 0u);
 }
 
+// Index in the scene's lamp list of entry k; the flame has none.
+const uint LAMP_ALL = 0xFFFFFFFFu;
+uint lamp_list_index(LampList list, uint k) {
+    uint lamps = list.suns.y + list.near.y;
+    if (k >= lamps) {
+        return LAMP_ALL - 1u;
+    }
+    return grid_word(k < list.suns.y ? list.suns.x + k : list.near.x + (k - list.suns.y));
+}
+
 // The flame is a point lamp with no range (color.w 0: lamp_reaches always passes).
 Lamp lamp_list_get(LampList list, uint k) {
     uint lamps = list.suns.y + list.near.y;
@@ -684,8 +694,10 @@ vec3 lamp_light(Lamp lamp, vec3 origin, vec3 normal, bool two_sided, out vec3 ta
 // running total of the lamps' light, j = 0 .. picks - 1, u in [0, 1), so a lamp
 // with that share s of the light is chosen floor or ceil of s * picks times, and a
 // caller that averages many samples (a probe, a pixel's rays) varies u to cover them.
-// The unshadowed light is cheap; the shadow rays are the cost.
-vec3 lamps_light(vec3 origin, vec3 normal, bool two_sided, uint picks, float u) {
+// The unshadowed light is cheap; the shadow rays are the cost. `only` keeps one lamp
+// of the scene's list (LAMP_ALL: every lamp), so a view of one lamp shares this loop
+// and its shadow ray instead of inlining another.
+vec3 lamps_light_only(vec3 origin, vec3 normal, bool two_sided, uint picks, float u, uint only) {
     // A face inside a solid sees no lamp: one test instead of one per shadow ray.
     if (scene_inside(origin)) {
         return vec3(0.0);
@@ -695,6 +707,9 @@ vec3 lamps_light(vec3 origin, vec3 normal, bool two_sided, uint picks, float u) 
     float total = 0.0;
     uint lit = 0u;
     [[dont_unroll]] for (uint k = 0u; k < count; k++) {
+        if (only != LAMP_ALL && lamp_list_index(list, k) != only) {
+            continue;
+        }
         vec3 target;
         vec3 light = lamp_light(lamp_list_get(list, k), origin, normal, two_sided, target);
         float w = light.r + light.g + light.b;
@@ -707,6 +722,9 @@ vec3 lamps_light(vec3 origin, vec3 normal, bool two_sided, uint picks, float u) 
     float run = 0.0;
     vec3 sum = vec3(0.0);
     [[dont_unroll]] for (uint k = 0u; k < count && lit > 0u; k++) {
+        if (only != LAMP_ALL && lamp_list_index(list, k) != only) {
+            continue;
+        }
         vec3 target;
         vec3 light = lamp_light(lamp_list_get(list, k), origin, normal, two_sided, target);
         float w = light.r + light.g + light.b;
@@ -724,4 +742,8 @@ vec3 lamps_light(vec3 origin, vec3 normal, bool two_sided, uint picks, float u) 
         }
     }
     return sum;
+}
+
+vec3 lamps_light(vec3 origin, vec3 normal, bool two_sided, uint picks, float u) {
+    return lamps_light_only(origin, normal, two_sided, picks, u, LAMP_ALL);
 }

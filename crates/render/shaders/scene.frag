@@ -527,21 +527,9 @@ void main() {
         out_color = vec4(shown * texel.a, texel.a);
         return;
     }
-    if (mode == DBG_LIGHT) {
-        vec3 lit = vec3(0.0);
-        uint which = (scene.grid_at.w >> 8u) & 65535u;
-        vec3 origin = v_pos + normal * 0.02;
-        if (which < scene.lamp_count && !scene_inside(origin)) {
-            vec3 target;
-            lit = lamp_light(scene_lamp(which), origin, normal, two_sided, target);
-            if (lit.r + lit.g + lit.b > 0.0 && blocked(origin, target)) {
-                lit = vec3(0.0);
-            }
-        }
-        out_color = vec4(tone(albedo * LAMBERT * lit) * texel.a, texel.a);
-        return;
-    }
-    vec3 direct = direct_at(v_pos, normal, two_sided);
+    // One lamp with its shadow: the same lamp loop, kept to that lamp.
+    uint only = mode == DBG_LIGHT ? (scene.grid_at.w >> 8u) & 65535u : LAMP_ALL;
+    vec3 direct = lamps_light_only(v_pos + normal * 0.02, normal, two_sided, 0xFFFFFFFFu, 0.0, only);
     // A face point inside geometry (floor under a footprint) receives nothing.
     bool inside = inside_solid(v_pos + normal * 0.02);
     // The probes store the cosine-weighted mean radiance. Irradiance is pi times that,
@@ -549,7 +537,7 @@ void main() {
     // (discard above), so only untextured faces share rays across their quads.
     bool quad = v_uv.x < 0.0;
     vec3 bounce = 3.14159265 * screen_bounce(v_pos, normal, quad, !inside && !gl_HelperInvocation);
-    if (inside || dbg_no_bounce() || mode == DBG_DIRECT) {
+    if (inside || dbg_no_bounce() || mode == DBG_DIRECT || mode == DBG_LIGHT) {
         bounce = vec3(0.0);
     }
     if (mode == DBG_BOUNCE || mode == DBG_NEAR || mode == DBG_FAR) {
