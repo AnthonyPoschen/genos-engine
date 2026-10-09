@@ -104,6 +104,8 @@ The picture is linear radiance through the tone curve into an 8-bit UNORM target
 
 ## Status of the local-update plan
 
+The handoff for the next agent is [lighting-handoff.md](lighting-handoff.md). The frame-rate band is not met. Do not start prominence or the light tree on the picture path until it is.
+
 The local dirty rule is on the shipped tier update. A moved box marks its sun shaft and the probes that can see it. A lamp marks its own reach. A slow sun marks the shaft wedge. A run finishes its passes before the next move starts one new run. A sun climb gathers outside probes first. When the new light differs from the picture by half or more, the picture snaps. It does not fade through grey.
 
 The sparse 2 m camera box is in. ADR 0011 records it. ADR 0008 is unchanged. The picture walk is the shader in `scene_rays.glsl`. An incremental DDA, a nested cell loop, and a cached brick lookup make the NVIDIA compiler exhaust memory, so those shapes are not shipped.
