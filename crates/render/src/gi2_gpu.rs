@@ -636,16 +636,24 @@ impl Gpu {
         self.copy_image_buffer(image, 6, self.gi2.out.buffer, w, h, true);
         self.memory_barrier(0x80 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
         let set = self.gi2.sets[slot];
-        let groups = [
-            (0usize, (GI2_CACHE_SLOTS as u32).div_ceil(64), 1u32),
-            (1, probes.div_ceil(64), 1),
-            (2, rays.div_ceil(64), 1),
-            (3, (w * h + rays).div_ceil(64), 1),
-            (4, probes.div_ceil(64), 1),
-            (5, probes.div_ceil(64), 1),
-            (6, GI2_CACHE_BATCH.div_ceil(64), 1),
-            (7, w.div_ceil(8), h.div_ceil(8)),
-        ];
+        // Settled: the probes and the light cache hold their light, and only the
+        // pixels' direct light and the final pass run, so a still scene draws the
+        // same picture every frame (no residual cache drift) and idles cheaply.
+        let frozen = self.gi2_stats().seen_settled == 1;
+        let groups: Vec<(usize, u32, u32)> = if frozen {
+            vec![(3, (w * h).div_ceil(64), 1), (7, w.div_ceil(8), h.div_ceil(8))]
+        } else {
+            vec![
+                (0usize, (GI2_CACHE_SLOTS as u32).div_ceil(64), 1u32),
+                (1, probes.div_ceil(64), 1),
+                (2, rays.div_ceil(64), 1),
+                (3, (w * h + rays).div_ceil(64), 1),
+                (4, probes.div_ceil(64), 1),
+                (5, probes.div_ceil(64), 1),
+                (6, GI2_CACHE_BATCH.div_ceil(64), 1),
+                (7, w.div_ceil(8), h.div_ceil(8)),
+            ]
+        };
         unsafe {
             (self.fns.cmd_bind_set)(
                 self.cmd,
