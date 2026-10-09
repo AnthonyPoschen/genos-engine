@@ -1,0 +1,15 @@
+[package]
+name = "genos-debug"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+genos-load = { path = "../load" }
+genos-mcp = { path = "../mcp" }
+genos-render = { path = "../render" }
+genos-scene = { path = "../scene" }
+rhai = "=1.26.0"

@@ -208,10 +208,10 @@ fn the_graph_averages_each_quarter_second_into_one_box() {
     }
     // The line starts at the first box's centre.
     let point = &draw.points[0];
-    assert!(view.segments.iter().any(|seg| {
-        seg.color == point.color
-            && (seg.a[0] - point.center_x()).abs() < 0.01
-    }));
+    assert!(view
+        .segments
+        .iter()
+        .any(|seg| { seg.color == point.color && (seg.a[0] - point.center_x()).abs() < 0.01 }));
 }
 
 #[test]

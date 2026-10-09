@@ -55,7 +55,7 @@ The readout still shows the latest frame. While the history is shorter than 10 s
 
 While the graph is live, the readout shows the latest frame rate in frames per second. The readout shows each stage CPU time in milliseconds. Detailed mode also shows the draw GPU time. The on-screen names are `WINDOW`, `INPUT`, `UI`, `SCENE`, `SIM`, `DRAW`, and `GPU`.
 
-P pauses the camera. The pause stops camera motion and the simulation step. The graph holds. New frames do not enter that graph. The picture keeps drawing the held graph. Those boxes stay in use until the interval changes.
+P pauses the camera. The pause stops camera motion and the simulation step. The graph holds. New frames do not enter that graph. The picture keeps drawing the held graph. Those points stay in use until the interval changes.
 
 A drag on the held graph chooses a time interval. The readout then shows the peak DRAW frame in that interval. Detailed mode also shows the peak GPU frame. R resets the graph. The graph follows new frames for the last 10 seconds.
 
@@ -71,7 +71,7 @@ The crate is `crates/ui`, package `genos-ui`.
 - Omarchy theme colors are in `src/omarchy.rs`.
 - `profile_overlay`, `remember_frame`, `ProfileGraph`, and `ProfileStream` are in `src/profile.rs`.
 
-- `button_panel` lays out a draggable panel of labelled button rows (`PanelRow`, `PanelButton`). A press fires `Action::Press(id)` with the game's id. `selected` draws a button in its pressed look. Ids from `u32::MAX - 4095` up belong to the panel.
+- `button_panel` lays out a draggable panel of labelled button rows (`PanelRow`, `PanelButton`). A press fires `Action::Press(id)` with the game's id. `selected` draws a button in its pressed look. Ids from `u32::MAX - 4095` up belong to the panel. A row may end in a `PanelSlider` (value, min, max, step, readout text): a press anywhere on the track sets the value under the pointer and a held press follows it, firing `Action::Slide { id, value }` (snapped to `step`, 0 for continuous) each frame the value changes. The stress example builds its sliders from `genos-debug` knobs.
 
 ## Game use
 
@@ -95,7 +95,7 @@ The theme colors do not change the lamp, the radiance field, or a non-UI surface
 
 The graph has no pan, no zoom, and no free scroll. Pause holds the current window. A drag on the held graph chooses one interval. This crate does not read Vulkan timestamps. The profile does not time each Rust function. Timed work stays the frame stages.
 
-The graph draws one box per 250 ms average. It does not draw one box per frame.
+The graph draws one point per 250 ms average, joined by 2 px lines (`ProfileView.segments`, drawn as thin quads in the overlay draw). It does not draw one point per frame.
 
 ## Decisions
 

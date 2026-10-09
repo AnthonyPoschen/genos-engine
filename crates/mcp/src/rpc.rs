@@ -120,10 +120,15 @@ fn call_tool(host: &Host, params: &Value) -> Reply {
 /// How long a command may take: `timeout_s` in its arguments, else two minutes
 /// (a wait for the light to settle on a software GPU takes tens of seconds).
 pub fn command_timeout(arguments: &Value) -> std::time::Duration {
+    // A command that is given `seconds` of work gets them on top of the default.
+    let work = arguments
+        .get("seconds")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
     let seconds = arguments
         .get("timeout_s")
         .and_then(Value::as_f64)
-        .unwrap_or(120.0);
+        .unwrap_or(120.0 + work.max(0.0) * 1.5);
     std::time::Duration::from_secs_f64(seconds.clamp(0.1, 3600.0) + 1.0)
 }
 

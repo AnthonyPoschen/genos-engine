@@ -12,16 +12,17 @@
 
 mod bench;
 mod building;
-mod png;
+mod knobs;
 mod stage;
 
 use std::path::PathBuf;
 use std::time::Instant;
 
+use genos_debug::{lighting_knobs, png, set_lighting_knob, Host};
 use genos_input::{character_controller, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenRect};
 use genos_scene::{look_direction, update, Actions, Camera, Scene, Vec3, PITCH_LIMIT};
-use genos_ui::{button_panel, Action, PanelButton, PanelRow, Pointer, State};
+use genos_ui::{button_panel, Action, PanelButton, PanelRow, PanelSlider, Pointer, State};
 use genos_window::{extent_changed, FocusGate, Window};
 
 use building::{Layout, LightMix, View};
@@ -56,20 +57,31 @@ const USAGE: &str = "genos-stress [options]
   --sweep-lights LIST       benchmark lamp counts (default 5,25,50,100)
   --sweep-dynamic LIST      benchmark dynamic shares (default 0,25,100)
   --sweep-scales LIST       benchmark scales (default small,big)
-  --bench-out PATH          also write the tables to PATH";
+  --bench-out PATH          also write the tables to PATH
+  --script FILE             run a rhai debug script (docs/systems/debugging.md); scene time
+                            steps 1/60 s a frame; exit 0 when every check passes
+  --report DIR              where the script writes report.md, result.json and pictures
+                            (default target/debug-reports/<script name>)
+  --trace                   capture the picture after every script command that changes it";
 
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];
-const DYNAMIC_STEPS: [u32; 5] = [0, 25, 50, 75, 100];
-const SPEED_STEPS: [f32; 3] = [1.0, 4.0, 16.0];
 /// Panel ids. Each row's buttons count up from its base.
-const ID_LIGHTS: u32 = 100;
-const ID_DYNAMIC: u32 = 200;
 const ID_SCALE: u32 = 300;
 const ID_SUN: u32 = 400;
-const ID_SPEED: u32 = 410;
 const ID_BOXES: u32 = 500;
 const ID_LAYOUT: u32 = 600;
 const ID_SKY: u32 = 700;
+/// Sliders, one per knob: example knobs, then lighting settings.
+const ID_KNOB: u32 = 1000;
+const PANEL_KNOBS: [&str; 7] = [
+    "time_of_day",
+    "sun_speed",
+    "lights",
+    "dynamic",
+    "lighting.tier_ms",
+    "lighting.bounces",
+    "lighting.notice_band",
+];
 /// A hitch longer than this does not replay the missed time.
 const MAX_FRAME_SECONDS: f32 = 0.25;
 
@@ -95,6 +107,7 @@ struct Options {
     panel: bool,
     bench: Option<bench::Plan>,
     bench_out: Option<PathBuf>,
+    script: Option<genos_debug::script::ScriptRun>,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, text: &str) -> Result<T, String> {
@@ -144,7 +157,10 @@ fn options() -> Result<Options, String> {
         panel: true,
         bench: None,
         bench_out: None,
+        script: None,
     };
+    let mut report: Option<PathBuf> = None;
+    let mut trace = false;
     let mut seconds = None;
     let mut size_set = false;
     let mut layout_set = std::env::var("GENOS_STRESS_LAYOUT").is_ok();
@@ -204,6 +220,15 @@ fn options() -> Result<Options, String> {
                     .collect::<Result<_, _>>()?
             }
             "--bench-out" => opts.bench_out = Some(PathBuf::from(value()?)),
+            "--script" => {
+                opts.script = Some(genos_debug::script::ScriptRun {
+                    script: PathBuf::from(value()?),
+                    report_dir: PathBuf::new(),
+                    trace: false,
+                })
+            }
+            "--report" => report = Some(PathBuf::from(value()?)),
+            "--trace" => trace = true,
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -212,6 +237,14 @@ fn options() -> Result<Options, String> {
         }
     }
     opts.dynamic = opts.dynamic.min(100);
+    if let Some(run) = &mut opts.script {
+        let stem = run
+            .script
+            .file_stem()
+            .map_or("script".into(), |s| s.to_string_lossy().to_string());
+        run.report_dir = report.unwrap_or_else(|| PathBuf::from("target/debug-reports").join(stem));
+        run.trace = trace;
+    }
     if let Some(seconds) = seconds {
         // A benchmark draws at a fixed size in a window the compositor does not tile,
         // and with the same lamps near the camera at every scale.
@@ -397,6 +430,12 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
+    let mut tools = genos_debug::Tools::new();
+    let script = opts.script.clone().map(|run| {
+        tools.set_fixed_step(Some(bench::STEP));
+        tools.set_out_dir(run.report_dir.clone());
+        genos_debug::script::spawn(run)
+    });
     let fixed_step = opts.frames.is_some() || opts.shot.is_some();
     let mut size = (renderer.width(), renderer.height());
     let mut focus = FocusGate::default();
@@ -408,14 +447,14 @@ fn run() -> Result<(), String> {
     let mut fps = FrameRate::default();
     loop {
         let now = Instant::now();
-        let dt = if fixed_step {
+        let real_dt = clock
+            .map(|then| now.saturating_duration_since(then).as_secs_f32())
+            .unwrap_or(bench::STEP);
+        let dt = tools.scene_dt(if fixed_step {
             bench::STEP
         } else {
-            clock
-                .map(|then| now.saturating_duration_since(then).as_secs_f32())
-                .unwrap_or(bench::STEP)
-                .min(MAX_FRAME_SECONDS)
-        };
+            real_dt.min(MAX_FRAME_SECONDS)
+        });
         clock = Some(now);
         let frame = window.pump();
         if frame.closing {
@@ -434,19 +473,13 @@ fn run() -> Result<(), String> {
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
 
-        fps.note(
-            dt,
-            renderer
-                .take_light_builds()
-                .iter()
-                .map(|b| b.total_ms())
-                .sum(),
-        );
+        let light_builds = renderer.take_light_builds();
+        fps.note(real_dt, light_builds.iter().map(|b| b.total_ms()).sum());
         let (paints, look_capture) = if opts.panel {
             let ui_frame = button_panel(
                 &mut ui,
                 &panel_title(&stage, &fps),
-                &panel_rows(&stage),
+                &[panel_rows(&stage), knob_rows(&stage, &renderer)].concat(),
                 [size.0 as f32, size.1 as f32],
                 &camera,
                 Pointer {
@@ -456,15 +489,17 @@ fn run() -> Result<(), String> {
                 },
             );
             for action in &ui_frame.actions {
-                if let Action::Press(id) = action {
-                    press(&mut stage, *id);
+                match *action {
+                    Action::Press(id) => press(&mut stage, id),
+                    Action::Slide { id, value } => slide(&mut stage, &mut renderer, id, value),
+                    _ => {}
                 }
             }
             (ui_frame.paints, ui_frame.look_capture)
         } else {
             (Vec::new(), true)
         };
-        let overlay: Vec<ScreenRect> = paints
+        let mut overlay: Vec<ScreenRect> = paints
             .iter()
             .map(|p| ScreenRect {
                 x: p.x,
@@ -503,15 +538,33 @@ fn run() -> Result<(), String> {
             }
         }
 
+        let tools_read = tools.before_draw(&mut genos_debug::Ctx {
+            renderer: &mut renderer,
+            camera: &mut camera,
+            host: &mut stage,
+        });
+        overlay.extend_from_slice(tools.overlay());
+
         drawn += 1;
         let last = opts.frames.is_some_and(|limit| drawn >= limit);
         let shot = genos_mcp::take_shot_request();
         if shot {
             renderer.set_live_readback(true);
         }
-        let want_read = shot || (last && opts.shot.is_some());
+        let want_read = shot || tools_read || (last && opts.shot.is_some());
+        let draw_start = Instant::now();
         let pixels =
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;
+        tools.after_draw(
+            &mut renderer,
+            pixels.as_deref(),
+            genos_debug::FrameTiming {
+                frame_ms: real_dt as f64 * 1000.0,
+                draw_ms: draw_start.elapsed().as_secs_f64() * 1000.0,
+                gpu_ms: None,
+                light: light_builds,
+            },
+        );
         if shot {
             renderer.set_live_readback(false);
             let png = pixels
@@ -536,11 +589,20 @@ fn run() -> Result<(), String> {
                 camera.pitch
             );
         }
-        if last {
+        if last || tools.quit_code().is_some() {
             break;
         }
     }
     println!("genos-stress frames={drawn}");
+    if let Some(handle) = script {
+        let passed = handle.join().unwrap_or(false);
+        if !passed {
+            std::process::exit(1);
+        }
+    }
+    if let Some(code) = tools.quit_code().filter(|c| *c != 0) {
+        std::process::exit(code);
+    }
     Ok(())
 }
 
@@ -585,6 +647,50 @@ fn row(label: &str, buttons: Vec<PanelButton>) -> PanelRow {
     PanelRow {
         label: label.into(),
         buttons,
+        slider: None,
+    }
+}
+
+/// A slider row for each panel knob, with its value as the readout.
+fn knob_rows(stage: &Stage, renderer: &Renderer) -> Vec<PanelRow> {
+    let mut all = stage.knobs();
+    all.extend(lighting_knobs(&renderer.lighting_config()));
+    PANEL_KNOBS
+        .iter()
+        .enumerate()
+        .filter_map(|(i, name)| {
+            let k = all.iter().find(|k| k.name == *name)?;
+            Some(PanelRow {
+                label: k.label.clone(),
+                buttons: Vec::new(),
+                slider: Some(PanelSlider {
+                    id: ID_KNOB + i as u32,
+                    value: k.value,
+                    min: k.min,
+                    max: k.max,
+                    step: k.step,
+                    text: k.text.clone(),
+                }),
+            })
+        })
+        .collect()
+}
+
+/// A panel slider moved: set its knob.
+fn slide(stage: &mut Stage, renderer: &mut Renderer, id: u32, value: f64) {
+    let Some(name) = id
+        .checked_sub(ID_KNOB)
+        .and_then(|i| PANEL_KNOBS.get(i as usize))
+    else {
+        return;
+    };
+    if name.starts_with("lighting.") {
+        let mut config = renderer.lighting_config();
+        if set_lighting_knob(&mut config, name, value).is_ok() {
+            renderer.set_lighting_config(config);
+        }
+    } else {
+        let _ = stage.set_knob(name, value);
     }
 }
 
@@ -594,28 +700,6 @@ fn button(id: u32, text: String, selected: bool) -> PanelButton {
 
 fn panel_rows(stage: &Stage) -> Vec<PanelRow> {
     vec![
-        row(
-            "Lights",
-            LIGHT_STEPS
-                .iter()
-                .enumerate()
-                .map(|(i, n)| button(ID_LIGHTS + i as u32, n.to_string(), stage.mix.count == *n))
-                .collect(),
-        ),
-        row(
-            "Dynamic",
-            DYNAMIC_STEPS
-                .iter()
-                .enumerate()
-                .map(|(i, d)| {
-                    button(
-                        ID_DYNAMIC + i as u32,
-                        format!("{d}%"),
-                        stage.mix.dynamic_pct == *d,
-                    )
-                })
-                .collect(),
-        ),
         row(
             "Lamps in",
             vec![
@@ -649,14 +733,6 @@ fn panel_rows(stage: &Stage) -> Vec<PanelRow> {
             ],
         ),
         row(
-            "Sun speed",
-            SPEED_STEPS
-                .iter()
-                .enumerate()
-                .map(|(i, s)| button(ID_SPEED + i as u32, format!("x{s}"), stage.sun_speed == *s))
-                .collect(),
-        ),
-        row(
             "Boxes",
             vec![
                 button(ID_BOXES, "move".into(), !stage.boxes_still),
@@ -672,18 +748,12 @@ fn press(stage: &mut Stage, id: u32) {
             .contains(&id)
             .then(|| (id - base) as usize)
     };
-    if let Some(i) = pick(ID_LIGHTS, LIGHT_STEPS.len()) {
-        stage.mix.count = LIGHT_STEPS[i];
-    } else if let Some(i) = pick(ID_DYNAMIC, DYNAMIC_STEPS.len()) {
-        stage.mix.dynamic_pct = DYNAMIC_STEPS[i];
-    } else if let Some(i) = pick(ID_SCALE, 2) {
+    if let Some(i) = pick(ID_SCALE, 2) {
         stage.set_scale([Scale::SMALL, Scale::BIG][i]);
     } else if let Some(i) = pick(ID_SUN, 2) {
         stage.sun_frozen = i == 1;
     } else if let Some(i) = pick(ID_SKY, 2) {
         stage.sky_on = i == 0;
-    } else if let Some(i) = pick(ID_SPEED, SPEED_STEPS.len()) {
-        stage.sun_speed = SPEED_STEPS[i];
     } else if let Some(i) = pick(ID_BOXES, 2) {
         stage.boxes_still = i == 1;
     } else if let Some(i) = pick(ID_LAYOUT, 2) {

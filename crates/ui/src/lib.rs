@@ -58,12 +58,14 @@ pub enum Action {
     ToggleBoxRun,
     /// A press on a game button in a [`button_panel`]. The game reads the id.
     Press(u32),
+    /// A [`PanelSlider`] held or clicked to `value` (already snapped to its step).
+    Slide { id: u32, value: f64 },
 }
 
 pub use layout::{layout, Align, Direction, Node, Pad, Place, Rect, Sizing, Space};
 pub use panel::{
     apply_frame_action, apply_lamp, button_panel, lighting_frame, Frame, Paint, PanelButton,
-    PanelRow, Pointer, Shown, State,
+    PanelRow, PanelSlider, Pointer, Shown, State,
 };
 pub use profile::{
     inspect_region, profile_overlay, remember_frame, FrameSample, OpenFrame, PlotScale,

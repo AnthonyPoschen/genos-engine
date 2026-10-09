@@ -50,6 +50,8 @@ pub struct State {
     dragging: bool,
     /// Axis of the slider held by the current press.
     sliding: Option<u8>,
+    /// Game slider held by the current press.
+    held: Option<u32>,
     /// The current press missed the panel, so look capture stays on.
     look_hold: bool,
     focus: Option<u32>,
@@ -70,6 +72,7 @@ impl Default for State {
             down: false,
             dragging: false,
             sliding: None,
+            held: None,
             look_hold: false,
             focus: None,
             box_running: false,
@@ -198,11 +201,49 @@ pub fn lighting_frame(
     }
 }
 
-/// One row of a game panel: a label, then buttons left to right.
+/// One row of a game panel: a label, then buttons left to right, then a slider.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PanelRow {
     pub label: String,
     pub buttons: Vec<PanelButton>,
+    pub slider: Option<PanelSlider>,
+}
+
+/// A slider on a panel row. A press anywhere on the track sets the value there and a
+/// held press follows the pointer, firing [`Action::Slide`] each frame it changes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PanelSlider {
+    /// Game id, as for a button.
+    pub id: u32,
+    pub value: f64,
+    pub min: f64,
+    pub max: f64,
+    /// Values snap to `min + k * step`; 0 is continuous.
+    pub step: f64,
+    /// Readout beside the track, e.g. `23.9 H`.
+    pub text: String,
+}
+
+impl PanelSlider {
+    fn share(&self) -> f32 {
+        let span = self.max - self.min;
+        if span <= 0.0 {
+            0.0
+        } else {
+            ((self.value - self.min) / span).clamp(0.0, 1.0) as f32
+        }
+    }
+
+    fn value_at(&self, track: Rect, pointer_x: f32) -> f64 {
+        let (left, right) = track_ends(track);
+        let t = ((pointer_x - left) / (right - left).max(1.0)).clamp(0.0, 1.0) as f64;
+        let v = self.min + t * (self.max - self.min);
+        if self.step > 0.0 {
+            (self.min + ((v - self.min) / self.step).round() * self.step).clamp(self.min, self.max)
+        } else {
+            v
+        }
+    }
 }
 
 /// A game button. A press fires [`Action::Press`] with `id`. `selected` draws the
@@ -244,7 +285,7 @@ pub fn button_panel(
     paint_looks(&mut panel, chrome_looks(palette));
     panel.children.push(label(own + 1, title, fill));
     for (index, item) in rows.iter().enumerate() {
-        let at = own + 2 + 2 * index as u32;
+        let at = own + 2 + 3 * index as u32;
         let mut children = vec![label(at + 1, &item.label, fill)];
         for button in &item.buttons {
             let mut node = control(button.id, &button.text, Action::Press(button.id), palette);
@@ -255,8 +296,13 @@ pub fn button_panel(
             }
             children.push(node);
         }
+        if let Some(bar) = &item.slider {
+            children.push(slider(bar.id, palette));
+            children.push(label(at + 2, &bar.text, fill));
+        }
         panel.children.push(row(at, children, fill));
     }
+    let bars: Vec<&PanelSlider> = rows.iter().filter_map(|r| r.slider.as_ref()).collect();
     let items = layout::layout(&panel, Space::Screen, viewport, Some(camera));
     let hit = items
         .iter()
@@ -269,7 +315,11 @@ pub fn button_panel(
             state.focus = Some(item.id);
             state.look_hold = false;
             state.sliding = None;
-            if let Some(action) = item.action {
+            state.held = None;
+            if bars.iter().any(|b| b.id == item.id) {
+                state.held = Some(item.id);
+                state.dragging = false;
+            } else if let Some(action) = item.action {
                 actions.push(action);
                 state.dragging = false;
             } else {
@@ -285,6 +335,16 @@ pub fn button_panel(
     } else if pointer.down && state.look_hold {
         look_capture = true;
     }
+    if pointer.down {
+        let held = state.held.and_then(|id| bars.iter().find(|b| b.id == id));
+        let track = held.and_then(|b| items.iter().find(|i| i.id == b.id));
+        if let (Some(bar), Some(track)) = (held, track) {
+            let value = bar.value_at(track.rect, pointer.x);
+            if value != bar.value {
+                actions.push(Action::Slide { id: bar.id, value });
+            }
+        }
+    }
     let mut shown = Vec::with_capacity(items.len());
     let mut paints = Vec::new();
     for item in &items {
@@ -297,6 +357,18 @@ pub fn button_panel(
             text: item.text.clone(),
         });
         push_paints(&mut paints, item, look, palette, None, false);
+        if let Some(bar) = bars.iter().find(|b| b.id == item.id) {
+            // Show where a held slider is going this frame.
+            let value = actions.iter().rev().find_map(|a| match a {
+                Action::Slide { id, value } if *id == bar.id => Some(*value),
+                _ => None,
+            });
+            let shown_bar = PanelSlider {
+                value: value.unwrap_or(bar.value),
+                ..(*bar).clone()
+            };
+            push_bar(&mut paints, item.rect, shown_bar.share(), palette);
+        }
     }
     state.pointer_x = pointer.x;
     state.pointer_y = pointer.y;
@@ -304,6 +376,7 @@ pub fn button_panel(
     if !pointer.down {
         state.dragging = false;
         state.look_hold = false;
+        state.held = None;
     }
     Frame {
         shown,
@@ -311,6 +384,32 @@ pub fn button_panel(
         actions,
         look_capture,
     }
+}
+
+/// A game slider: the filled share of the track and a thumb at its end.
+fn push_bar(out: &mut Vec<Paint>, track: Rect, share: f32, palette: Option<Palette>) {
+    let (left, right) = track_ends(track);
+    let x = left + (right - left) * share;
+    push_rect(
+        out,
+        Rect {
+            x: left,
+            y: track.y + (track.h - NOTCH_H) * 0.5,
+            w: (x - left).max(0.0),
+            h: NOTCH_H,
+        },
+        notch_color(palette),
+    );
+    push_rect(
+        out,
+        Rect {
+            x: x - THUMB_W * 0.5,
+            y: track.y + (track.h - THUMB_H) * 0.5,
+            w: THUMB_W,
+            h: THUMB_H,
+        },
+        THUMB_COLOR,
+    );
 }
 
 /// Write one control onto the first lamp. Intensity scales `Light.color`.
@@ -330,7 +429,10 @@ pub fn apply_lamp(scene: &mut Scene, action: Action) {
                 *channel = (*channel * scale).clamp(0.0, 8.0);
             }
         }
-        Action::SetAntialias(_) | Action::ToggleBoxRun | Action::Press(_) => {}
+        Action::SetAntialias(_)
+        | Action::ToggleBoxRun
+        | Action::Press(_)
+        | Action::Slide { .. } => {}
     }
 }
 

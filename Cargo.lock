@@ -119,6 +119,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-debug"
+version = "0.1.0"
+dependencies = [
+ "genos-load",
+ "genos-mcp",
+ "genos-render",
+ "genos-scene",
+ "rhai",
+]
+
+[[package]]
 name = "genos-input"
 version = "0.1.0"
 
@@ -179,6 +190,7 @@ dependencies = [
 name = "genos-stress"
 version = "0.1.0"
 dependencies = [
+ "genos-debug",
  "genos-input",
  "genos-mcp",
  "genos-render",
