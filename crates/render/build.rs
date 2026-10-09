@@ -11,6 +11,8 @@ fn main() {
     let audio = compile("shaders/transmit.comp", &out.join("transmit.comp.spv"));
     let fxaa = compile("shaders/fxaa.comp", &out.join("fxaa.comp.spv"));
     let ssaa = compile("shaders/ssaa.comp", &out.join("ssaa.comp.spv"));
+    // Not embedded: catches errors in GI v2 shader pieces no pass includes yet.
+    compile("shaders/gi2_check.comp", &out.join("gi2_check.comp.spv"));
     let glue = out.join("shaders.rs");
     std::fs::write(
         &glue,
@@ -33,6 +35,8 @@ fn main() {
     println!("cargo:rerun-if-changed=shaders/wire.frag");
     println!("cargo:rerun-if-changed=shaders/light.comp");
     println!("cargo:rerun-if-changed=shaders/scene_rays.glsl");
+    println!("cargo:rerun-if-changed=shaders/mesh_field.glsl");
+    println!("cargo:rerun-if-changed=shaders/gi2_check.comp");
     println!("cargo:rerun-if-changed=shaders/scene_data.glsl");
     println!("cargo:rerun-if-changed=shaders/tier.glsl");
     println!("cargo:rerun-if-changed=shaders/dither.glsl");

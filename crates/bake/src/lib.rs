@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 pub use cards::{Card, CardTexel, Cards};
 pub use mesh::{BakeMaterial, BakeMesh};
-pub use sdf::{MeshSdf, SdfBrick, BRICK};
+pub use sdf::{decode as sdf_decode, MeshSdf, SdfBrick, BRICK};
 
 /// When SDFs and cards are built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

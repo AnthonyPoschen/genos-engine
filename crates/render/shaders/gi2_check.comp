@@ -1,0 +1,29 @@
+#version 450
+// Compile check for the GI v2 tracer pieces that no pass uses yet (build.rs compiles
+// this and discards it). Small on purpose: one trace site, as every GI v2 pass.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 64) in;
+
+struct SceneHit {
+    float t;
+    vec3 normal;
+    vec3 albedo;
+    float reflect;
+    float color_mix;
+};
+const float SCENE_LAMBERT = 0.254647909;
+#include "mesh_field.glsl"
+
+layout(std430, set = 0, binding = 6) buffer Out {
+    vec4 hits[];
+} result;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    vec3 dir = normalize(vec3(float(i & 7u) - 3.5, -1.0, float(i >> 3u) - 3.5));
+    SceneHit hit;
+    hit.t = 100.0;
+    bool found = mf_trace(vec3(0.0, 5.0, 0.0), dir, 0.0, hit);
+    result.hits[i] = vec4(hit.normal, found ? hit.t : -1.0) + vec4(float(mf_inside(dir)));
+}

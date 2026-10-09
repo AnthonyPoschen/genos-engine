@@ -162,6 +162,8 @@ pub fn solid_reach(solid: &Solid) -> f32 {
 pub struct World {
     pub scene: Scene,
     pub objects: Vec<Object>,
+    /// Meshes the GPU software tracer sees through their SDFs (GI v2).
+    pub fields: Vec<crate::mesh_field::FieldInstance>,
 }
 
 impl World {
@@ -184,7 +186,11 @@ impl World {
                 kind: DrawKind::Fixed(part),
             })
             .collect();
-        Self { scene, objects }
+        Self {
+            scene,
+            objects,
+            fields: Vec::new(),
+        }
     }
 
     /// Scene the cascades march. Hidden and off-screen objects stay in it.

@@ -189,6 +189,7 @@ dependencies = [
 name = "genos-render"
 version = "0.1.0"
 dependencies = [
+ "genos-bake",
  "genos-load",
  "genos-mesh",
  "genos-scene",

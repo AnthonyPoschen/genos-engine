@@ -59,7 +59,8 @@ const USAGE: &str = "genos-stress [options]
   --sweep-scales LIST       benchmark scales (default small,big)
   --bench-out PATH          also write the tables to PATH
   --gltf FILE               place a glTF 2.0 model (.gltf/.glb) in the building (mean
-                            material colour; lit, but casts no shadow yet); repeatable
+                            material colour; its SDF is baked on first load for the GI v2
+                            tracer, the current lighting does not see it); repeatable
   --gltf-at X Y Z SCALE     where the following --gltf models go (default 0 0 0 1)
   --script FILE             run a rhai debug script (docs/systems/debugging.md); scene time
                             steps 1/60 s a frame; exit 0 when every check passes
@@ -407,7 +408,8 @@ fn run() -> Result<(), String> {
     stage.sky_on = !opts.no_sky;
     stage.boxes_still = opts.still_boxes;
     for (path, [x, y, z, scale]) in &opts.gltf {
-        let model = genos_load::load_gltf_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let model =
+            genos_load::load_gltf_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut place = [0.0; 16];
         place[0] = *scale;
         place[5] = *scale;
@@ -416,10 +418,22 @@ fn run() -> Result<(), String> {
         place[13] = *y;
         place[14] = *z;
         place[15] = 1.0;
-        // Lighting still runs on the old shapes (GI v2 phase 1): a bounding-box stand-in
-        // would darken the model itself, so models are lit but do not shadow yet.
-        let added = stage.world.add_gltf(&model, &place, false);
-        eprintln!("genos-stress: {} placed as {} mesh draws", path.display(), added.len());
+        // Models carry their baked SDFs for the GI v2 software tracer; the current
+        // lighting does not see them. The stress tool bakes on first load unless
+        // GENOS_BAKE says otherwise.
+        let mut bake = genos_render::bake::BakeSettings::default();
+        if std::env::var_os("GENOS_BAKE").is_none() {
+            bake.mode = genos_render::bake::BakeMode::OnLoad;
+        }
+        let added = stage
+            .world
+            .add_gltf_traced(&model, &place, &bake)
+            .map_err(|e| format!("{}: bake: {e:?}", path.display()))?;
+        eprintln!(
+            "genos-stress: {} placed as {} mesh draws",
+            path.display(),
+            added.len()
+        );
     }
     let mut camera = camera_at(opts.view);
     if let Some([x, y, z, yaw, pitch]) = opts.eye {

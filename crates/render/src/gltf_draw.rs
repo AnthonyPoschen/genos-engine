@@ -20,9 +20,74 @@ impl World {
         place: &[f32; 16],
         affects_light: bool,
     ) -> Vec<usize> {
+        self.add_gltf_parts(scene, place, affects_light)
+            .into_iter()
+            .map(|p| p.object)
+            .collect()
+    }
+
+    /// Add the scene as [`World::add_gltf`] does, and give every mesh instance its
+    /// baked SDF (`World::fields`) for the GI v2 software tracer. The draws do not
+    /// stand in as boxes for the old tracer. Returns the new objects' indices.
+    pub fn add_gltf_traced(
+        &mut self,
+        scene: &GltfScene,
+        place: &[f32; 16],
+        settings: &genos_bake::BakeSettings,
+    ) -> Result<Vec<usize>, genos_bake::BakeError> {
+        let parts = self.add_gltf_parts(scene, place, false);
+        let mut sdfs: Vec<Option<std::sync::Arc<genos_bake::MeshSdf>>> =
+            vec![None; scene.meshes.len()];
+        let mut instance_at = usize::MAX;
+        for (k, part) in parts.iter().enumerate() {
+            if part.instance == instance_at {
+                continue;
+            }
+            instance_at = part.instance;
+            let mesh = scene.instances[part.instance].mesh;
+            if sdfs[mesh].is_none() {
+                let baked = genos_bake::load_or_bake(
+                    &genos_bake::BakeMesh::from_gltf(scene, mesh),
+                    settings,
+                )?;
+                sdfs[mesh] = Some(std::sync::Arc::new(baked.sdf));
+            }
+            let mine: Vec<&GltfPart> = parts[k..]
+                .iter()
+                .take_while(|p| p.instance == part.instance)
+                .collect();
+            let weight: f32 = mine
+                .iter()
+                .map(|p| p.triangles as f32)
+                .sum::<f32>()
+                .max(1.0);
+            let albedo = std::array::from_fn(|c| {
+                mine.iter()
+                    .map(|p| p.color[c] * p.triangles as f32)
+                    .sum::<f32>()
+                    / weight
+            });
+            if let Some(sdf) = &sdfs[mesh] {
+                self.fields.push(crate::mesh_field::FieldInstance {
+                    sdf: sdf.clone(),
+                    pose: part.pose,
+                    albedo,
+                    object: Some(part.object),
+                });
+            }
+        }
+        Ok(parts.into_iter().map(|p| p.object).collect())
+    }
+
+    fn add_gltf_parts(
+        &mut self,
+        scene: &GltfScene,
+        place: &[f32; 16],
+        affects_light: bool,
+    ) -> Vec<GltfPart> {
         let means: Vec<[f32; 3]> = scene.images.iter().map(mean_linear).collect();
         let mut added = Vec::new();
-        for instance in &scene.instances {
+        for (instance_index, instance) in scene.instances.iter().enumerate() {
             let pose = mul(place, &instance.transform);
             let Some(mesh) = scene.meshes.get(instance.mesh) else {
                 continue;
@@ -46,7 +111,13 @@ impl World {
                         hi[a] = hi[a].max(p[a]);
                     }
                 }
-                added.push(self.objects.len());
+                added.push(GltfPart {
+                    instance: instance_index,
+                    object: self.objects.len(),
+                    pose,
+                    color,
+                    triangles: vertices.len() / 3,
+                });
                 self.objects.push(Object {
                     hidden: false,
                     affects_light,
@@ -64,6 +135,15 @@ impl World {
         }
         added
     }
+}
+
+/// One primitive draw of one glTF instance.
+struct GltfPart {
+    instance: usize,
+    object: usize,
+    pose: [f32; 16],
+    color: [f32; 3],
+    triangles: usize,
 }
 
 /// Mean diffuse albedo of a material, with textures reduced to their mean colour.

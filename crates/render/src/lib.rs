@@ -5,6 +5,7 @@ mod gltf_draw;
 mod gpu;
 mod lighting;
 mod mesh;
+mod mesh_field;
 mod occ_grid;
 mod pack;
 mod particles;
@@ -23,12 +24,14 @@ pub use field::{
     build, cascade_debug_lines, illuminate, illuminate_facing, probe_counts, sample, sample_world,
     Field,
 };
+pub use genos_bake as bake;
 pub use gpu::{
     Bounces, DebugView, DrawProfile, LampReport, LightBuildTimes, LightingConfig, ProbeValue,
     Renderer, ScreenLine, ScreenRect, ViewMode,
 };
 pub use lighting::Lighting;
 pub use mesh::Vertex;
+pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};
 pub use pack::{
     build_grid, lamp_range, pack_frame, probe_spacing, Pack, PackedDraw, SceneGrid, FIELD_PLACE,
@@ -46,8 +49,9 @@ pub use probe_tier::{
 };
 pub use scene_mesh::{SceneMesh, ShapeRef, SurfaceMaterial, CIRCLE_SEGMENTS};
 pub use trace::{
-    agreement, direct_light, direct_light_in, first_outgoing, linear_from_display, luminance, radiance,
-    radiance_hits, ray_land, samples_toward, sees, Surfaces, trace as trace_ray, Hit as TraceHit,
+    agreement, direct_light, direct_light_in, first_outgoing, linear_from_display, luminance,
+    radiance, radiance_hits, ray_land, samples_toward, sees, trace as trace_ray, Hit as TraceHit,
+    Surfaces,
 };
 pub use world::{
     fixed_bounds, identity_pose, in_view, solid_reach, Bounds, Displacement, DrawKind, FixedPart,

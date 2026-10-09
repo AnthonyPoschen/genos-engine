@@ -498,6 +498,7 @@ impl Renderer {
         if flush || show_night {
             self.gpu.view_weight = 1.0;
         }
+        self.sync_fields(world)?;
         self.gpu.upload_scene(&pack)?;
         self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
         self.gpu.kick_light(wait_light || flush || show_night)?;
@@ -567,6 +568,14 @@ impl Renderer {
         Ok(self.gpu.ready.drain(..).collect())
     }
 
+    /// Hand the GPU tracer the world's mesh SDF instances when they changed.
+    fn sync_fields(&mut self, world: &World) -> Result<(), String> {
+        let live = crate::mesh_field::live_instances(world);
+        let key = crate::mesh_field::field_key(&live);
+        self.gpu
+            .sync_fields(key, || crate::mesh_field::field_bytes(&live))
+    }
+
     /// Write the world into the resident scene buffer. This does not present.
     pub fn retain_scene(&mut self, world: &World) -> Result<(), String> {
         let camera = Camera::opening();
@@ -578,6 +587,7 @@ impl Renderer {
         pack::apply_view(&mut pack, &camera, aspect, self.width, self.height);
         self.stage_tier(world, &pack, true);
         self.gpu.wait_all_inflight()?;
+        self.sync_fields(world)?;
         self.gpu.upload_scene(&pack)?;
         self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
         Ok(())
@@ -942,6 +952,10 @@ struct Gpu {
     /// Raster sets: `[light field][frame slot]`, the field with that frame's scene.
     raster_sets: [[Handle; 2]; 2],
     particle_buf: Buffer,
+    /// Mesh SDF instances for the software tracer (mesh_field.rs; binding 5).
+    mesh_field: Buffer,
+    mesh_field_cap: u64,
+    mesh_field_key: u64,
     desc_layout: Handle,
     desc_pool: Handle,
     /// Raster set. This is `raster_sets[light_shown][flight]`.
@@ -1641,6 +1655,9 @@ impl Gpu {
                 flight: 0,
                 scene_buf: Buffer::empty(),
                 particle_buf: Buffer::empty(),
+                mesh_field: Buffer::empty(),
+                mesh_field_cap: 0,
+                mesh_field_key: 0,
                 desc_layout: std::ptr::null_mut(),
                 desc_pool: std::ptr::null_mut(),
                 desc_set: std::ptr::null_mut(),
@@ -2976,6 +2993,13 @@ impl Gpu {
                 stages: 0x10 | 0x20,
                 samplers: std::ptr::null(),
             },
+            Binding {
+                binding: 5,
+                kind: 7,
+                count: 1,
+                stages: 0x10 | 0x20,
+                samplers: std::ptr::null(),
+            },
         ];
         let info = Info {
             s_type: 32,
@@ -3026,6 +3050,10 @@ impl Gpu {
             self.write_buffer(&self.frame_scene[index], &vec![0u8; pack::SCENE_TAIL])?;
         }
         self.write_buffer(&self.particle_buf, &vec![0u8; 16])?;
+        self.mesh_field_cap = 1 << 16;
+        self.mesh_field =
+            self.make_buffer_queues(self.mesh_field_cap, 0x20, Memory::Upload, &share)?;
+        self.write_buffer(&self.mesh_field, &[0u8; 16])?;
         // Laid out like the tier's probes, so the picture reads it at the same index.
         let view_bytes = (crate::probe_tier::TIER_END - crate::probe_tier::TIER_PROBES) as u64 * 16;
         self.tier_view = self.make_buffer_queues(view_bytes, 0x20, Memory::Upload, &share)?;
@@ -3136,7 +3164,7 @@ impl Gpu {
             size_count: u32,
             sizes: *const Size,
         }
-        let size = Size { kind: 7, count: 30 };
+        let size = Size { kind: 7, count: 36 };
         let pool = PoolInfo {
             s_type: 33,
             next: std::ptr::null(),
@@ -3270,6 +3298,11 @@ impl Gpu {
                 offset: 0,
                 range: u64::MAX,
             },
+            BufInfo {
+                buffer: self.mesh_field.buffer,
+                offset: 0,
+                range: u64::MAX,
+            },
         ];
         let writes = [
             Write {
@@ -3330,6 +3363,18 @@ impl Gpu {
                 kind: 7,
                 image: std::ptr::null(),
                 buffer: &infos[4],
+                texel: std::ptr::null(),
+            },
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set,
+                binding: 5,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: &infos[5],
                 texel: std::ptr::null(),
             },
         ];
@@ -3817,6 +3862,31 @@ impl Gpu {
         let map = self.fns.map_mem;
         let unmap = self.fns.unmap_mem;
         read_f32s(map, unmap, device, memory, sources.len())
+    }
+
+    /// Write the traced mesh instances when they changed (`key`). Waits for the GPU
+    /// first: every pass in flight reads the buffer.
+    fn sync_fields(&mut self, key: u64, bytes: impl FnOnce() -> Vec<u8>) -> Result<(), String> {
+        if key == self.mesh_field_key {
+            return Ok(());
+        }
+        let bytes = bytes();
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
+        if bytes.len() as u64 > self.mesh_field_cap {
+            let share = self.light_families();
+            let cap = (bytes.len() as u64).next_power_of_two();
+            let mut old = std::mem::replace(&mut self.mesh_field, Buffer::empty());
+            self.destroy_buffer(&mut old);
+            self.mesh_field = self.make_buffer_queues(cap, 0x20, Memory::Upload, &share)?;
+            self.mesh_field_cap = cap;
+            self.write_light_set(0)?;
+            self.write_light_set(1)?;
+        }
+        self.write_buffer(&self.mesh_field, &bytes)?;
+        self.mesh_field_key = key;
+        Ok(())
     }
 
     fn upload_scene(&mut self, pack: &Pack) -> Result<(), String> {
@@ -5942,6 +6012,7 @@ impl Drop for Gpu {
             let mut light_field =
                 std::mem::replace(&mut self.light_field, [Buffer::empty(), Buffer::empty()]);
             let mut particle_buf = std::mem::replace(&mut self.particle_buf, Buffer::empty());
+            let mut mesh_field = std::mem::replace(&mut self.mesh_field, Buffer::empty());
             let mut audio_rays = std::mem::replace(&mut self.audio_rays, Buffer::empty());
             let mut audio_gains = std::mem::replace(&mut self.audio_gains, Buffer::empty());
             self.destroy_buffer(&mut vertices[0]);
@@ -5962,6 +6033,7 @@ impl Drop for Gpu {
             let mut tier_view = std::mem::replace(&mut self.tier_view, Buffer::empty());
             self.destroy_buffer(&mut tier_view);
             self.destroy_buffer(&mut particle_buf);
+            self.destroy_buffer(&mut mesh_field);
             if let Some(times) = self.gpu_times.as_ref() {
                 if !times.pool.is_null() {
                     (self.fns.destroy_query_pool)(self.device, times.pool, std::ptr::null());
