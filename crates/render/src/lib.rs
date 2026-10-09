@@ -24,8 +24,8 @@ pub use field::{
     Field,
 };
 pub use gpu::{
-    Bounces, DebugView, DrawProfile, LampReport, LightBuildTimes, LightingConfig, Renderer,
-    ScreenLine, ScreenRect, ViewMode,
+    Bounces, DebugView, DrawProfile, LampReport, LightBuildTimes, LightingConfig, ProbeValue,
+    Renderer, ScreenLine, ScreenRect, ViewMode,
 };
 pub use lighting::Lighting;
 pub use mesh::Vertex;

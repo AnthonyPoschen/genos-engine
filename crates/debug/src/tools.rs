@@ -850,7 +850,11 @@ impl Tools {
                         .collect(),
                 ))
             }
-            "probes" => reply(probes_value(&ctx.renderer.probe_report(), args)?),
+            "probes" => reply(probes_value(
+                &ctx.renderer.probe_report(),
+                args,
+                ctx.renderer,
+            )?),
             "lights" => {
                 let report = ctx.renderer.lamp_report(ctx.host.scene(), ctx.camera);
                 reply(list(
@@ -1632,7 +1636,7 @@ fn brick_value(b: &BrickReport) -> Value {
     ])
 }
 
-fn probes_value(report: &[BrickReport], args: &Args) -> Result<Value, String> {
+fn probes_value(report: &[BrickReport], args: &Args, renderer: &Renderer) -> Result<Value, String> {
     let count = |s: BrickState| report.iter().filter(|b| b.state == s).count() as f64;
     let on_screen: Vec<&BrickReport> = report.iter().filter(|b| b.seen > 0.0).collect();
     let mut pick: Vec<&BrickReport> = report.iter().collect();
@@ -1654,6 +1658,7 @@ fn probes_value(report: &[BrickReport], args: &Args) -> Result<Value, String> {
         _ => pick.sort_by(|a, b| b.priority.total_cmp(&a.priority)),
     }
     let limit = args.u32("limit")?.unwrap_or(20) as usize;
+    let values = args.bool("values")? == Some(true);
     let oldest_seen = on_screen.iter().map(|b| b.age).fold(0.0f32, f32::max);
     Ok(obj(vec![
         ("bricks", num(report.len() as f64)),
@@ -1673,9 +1678,45 @@ fn probes_value(report: &[BrickReport], args: &Args) -> Result<Value, String> {
         ("matched", num(pick.len() as f64)),
         (
             "list",
-            list(pick.into_iter().take(limit).map(brick_value).collect()),
+            list(
+                pick.into_iter()
+                    .take(limit)
+                    .map(|b| {
+                        let mut v = brick_value(b);
+                        if values {
+                            if let Value::Object(fields) = &mut v {
+                                fields.push(("values".into(), probe_values(renderer, b.brick)));
+                            }
+                        }
+                        v
+                    })
+                    .collect(),
+            ),
         ),
     ]))
+}
+
+/// The stored light of each live probe of `brick`: position, samples, and the face
+/// luminances of its top cube (every bounce) and first cube (one bounce).
+fn probe_values(renderer: &Renderer, brick: [i32; 3]) -> Value {
+    let faces = |f: [f32; 6]| list(f.iter().map(|v| num(f64::from(*v))).collect());
+    list(
+        renderer
+            .probe_values(brick)
+            .into_iter()
+            .map(|p| {
+                obj(vec![
+                    (
+                        "position",
+                        list(p.position.iter().map(|v| num(f64::from(*v))).collect()),
+                    ),
+                    ("samples", num(f64::from(p.samples))),
+                    ("top", faces(p.top)),
+                    ("first", faces(p.first)),
+                ])
+            })
+            .collect(),
+    )
 }
 
 /// One square per brick at its projected centre, coloured by `color`.

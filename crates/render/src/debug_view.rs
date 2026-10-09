@@ -160,6 +160,17 @@ impl DebugState {
 }
 
 /// What one lamp gives the picture, from the CPU side.
+/// One live probe's stored light, for the debug tools.
+#[derive(Clone, Copy, Debug)]
+pub struct ProbeValue {
+    pub position: [f32; 3],
+    pub samples: f32,
+    /// Luminance of each face (+x, -x, +y, -y, +z, -z) of the top cube (every bounce).
+    pub top: [f32; 6],
+    /// The same for the first cube (one bounce).
+    pub first: [f32; 6],
+}
+
 #[derive(Clone, Debug)]
 pub struct LampReport {
     pub index: usize,
@@ -222,6 +233,32 @@ impl Renderer {
     /// Bricks the tier holds, with their state and ranking terms.
     pub fn probe_report(&self) -> Vec<BrickReport> {
         self.tier.brick_reports()
+    }
+
+    /// The light each live probe of `brick` holds in the field on screen: the luminance
+    /// of each face of its top cube (every bounce) and of its first cube (one bounce),
+    /// and its sample count.
+    pub fn probe_values(&self, brick: [i32; 3]) -> Vec<ProbeValue> {
+        let Some((slot, mask, positions)) = self.tier.slot_of(brick) else {
+            return Vec::new();
+        };
+        let Some(texels) = self.gpu.read_tier_slot(slot) else {
+            return Vec::new();
+        };
+        let luma = |t: [f32; 4]| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
+        let stride = crate::probe_tier::PROBE_TEXELS as usize;
+        (0..64usize)
+            .filter(|p| mask & (1u64 << p) != 0)
+            .map(|p| {
+                let t = &texels[p * stride..(p + 1) * stride];
+                ProbeValue {
+                    position: positions[p],
+                    samples: t[18][3],
+                    top: [0, 1, 2, 3, 4, 5].map(|f| luma(t[f])),
+                    first: [0, 1, 2, 3, 4, 5].map(|f| luma(t[12 + f])),
+                }
+            })
+            .collect()
     }
 
     /// The lamps of `scene` as the picture sees them from `camera`.

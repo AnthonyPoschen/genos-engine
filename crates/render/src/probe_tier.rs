@@ -2290,6 +2290,13 @@ impl TierState {
             .collect()
     }
 
+    /// The slot holding `brick`, with its live probe mask and probe positions.
+    pub fn slot_of(&self, brick: [i32; 3]) -> Option<(u32, u64, Vec<[f32; 3]>)> {
+        let index = *self.by_brick.get(&brick)?;
+        let slot = self.slots.get(index as usize)?.as_ref()?;
+        Some((index, slot.mask, slot.positions.clone()))
+    }
+
     pub fn has_work(&self) -> bool {
         self.slots.iter().flatten().any(|s| self.class(s).is_some())
     }

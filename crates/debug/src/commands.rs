@@ -25,7 +25,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec("knobs", "List every knob (example and lighting.*) with range and step. With name and value, set one first."),
         spec(
             "probes",
-            "Per-brick report: state (unlit/changing/refining/steady), age s, priority and its terms (seen, near_term, stale_term), spacing, skip reason. Filters: state, visible, near [x,y,z] + radius; sort priority|age|depth; limit.",
+            "Per-brick report: state (unlit/changing/refining/steady), age s, priority and its terms (seen, near_term, stale_term), spacing, skip reason. Filters: state, visible, near [x,y,z] + radius; sort priority|age|depth; limit; values true adds each live probe's face luminances (top and first cube) and samples.",
         ),
         spec("lights", "Every light: position, colour, range, distance, in_view, screen_share, impact (colour luminance x screen share), on."),
         spec(

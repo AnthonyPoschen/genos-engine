@@ -16,7 +16,7 @@ include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 
 #[path = "debug_view.rs"]
 mod debug_view;
-pub use debug_view::{Bounces, DebugView, LampReport, LightingConfig, ViewMode};
+pub use debug_view::{Bounces, DebugView, LampReport, LightingConfig, ProbeValue, ViewMode};
 
 const API_VERSION: u32 = 1 << 22;
 const VK_SUCCESS: i32 = 0;
@@ -4352,6 +4352,35 @@ impl Gpu {
 
     fn upload_image(&self, bytes: &[u8]) -> Result<(), String> {
         self.write_buffer(&self.particle_buf, bytes)
+    }
+
+    /// The texels of tier slot `slot` in the field on screen, for the debug tools.
+    pub(crate) fn read_tier_slot(&self, slot: u32) -> Option<Vec<[f32; 4]>> {
+        let per = u64::from(crate::probe_tier::BRICK_PROBES * crate::probe_tier::PROBE_TEXELS) * 16;
+        let at = crate::probe_tier::TIER_PROBES as u64 * 16 + u64::from(slot) * per;
+        let buffer = &self.light_field[self.light_shown];
+        if buffer.memory.is_null() || at + per > buffer.size {
+            return None;
+        }
+        let mut raw = vec![0u8; per as usize];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(self.device, buffer.memory, at, per, 0, &mut mapped) != VK_SUCCESS
+            {
+                return None;
+            }
+            std::ptr::copy_nonoverlapping(mapped as *const u8, raw.as_mut_ptr(), raw.len());
+            (self.fns.unmap_mem)(self.device, buffer.memory);
+        }
+        Some(
+            raw.chunks_exact(16)
+                .map(|t| {
+                    [0, 1, 2, 3].map(|k| {
+                        f32::from_le_bytes([t[4 * k], t[4 * k + 1], t[4 * k + 2], t[4 * k + 3]])
+                    })
+                })
+                .collect(),
+        )
     }
 
     /// Read back what the probes of the finished build changed by (light.comp stores
