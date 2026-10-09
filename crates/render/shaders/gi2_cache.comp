@@ -11,7 +11,13 @@ void main() {
     if (j >= GI2_CACHE_BATCH) {
         return;
     }
+    if (j == 0u) {
+        gstats.live = gi2_live_count();
+    }
     uint slot = gi2_cache_batch_slot(j);
+    if (slot == ~0u) {
+        return;
+    }
     uint key = ckeys.key[slot];
     if (key == 0u) {
         return;
@@ -32,5 +38,12 @@ void main() {
         vec3 dir = gi2_dir(key, n, k, GI2_CACHE_RAYS);
         e += work.v[gi2_rad_at(first + k)].rgb * max(dot(dir, n), 0.0);
     }
-    cache.v[3u * slot + 2u] = vec4(e * (GI2_TAU / float(GI2_CACHE_RAYS)), 1.0);
+    e *= GI2_TAU / float(GI2_CACHE_RAYS);
+    vec4 old = cache.v[3u * slot + 2u];
+    float lo = dot(old.rgb, vec3(0.2126, 0.7152, 0.0722));
+    float ln = dot(e, vec3(0.2126, 0.7152, 0.0722));
+    float change = old.w < 0.5 ? 1.0 : abs(ln - lo) / (max(lo, ln) + 0.05);
+    atomicMax(gstats.max_change, uint(clamp(change, 0.0, 1.0) * 1.0e6));
+    atomicAdd(gstats.relit, 1u);
+    cache.v[3u * slot + 2u] = vec4(e, 1.0);
 }

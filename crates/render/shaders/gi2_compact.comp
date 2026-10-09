@@ -1,0 +1,15 @@
+#version 450
+// GI v2 light cache, first pass: list the live patch slots (the count was zeroed
+// before the frame), so this frame's batch relights live patches only. No trace.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "gi2_common.glsl"
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    if (slot >= GI2_CACHE_SLOTS || ckeys.key[slot] == 0u) {
+        return;
+    }
+    uint at = atomicAdd(ckeys.key[GI2_CACHE_SLOTS], 1u);
+    ckeys.key[GI2_CACHE_SLOTS + 1u + at] = slot;
+}

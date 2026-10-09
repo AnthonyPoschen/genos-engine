@@ -4,6 +4,7 @@
 // depth prepass) instead of the old shading, then runs small compute passes, each
 // with at most one trace site:
 //
+//   compact  list the light cache's live patches
 //   place    one screen probe per tile on the G-buffer surface
 //   trace    the probes' rays through the tracer (analytic shapes + mesh SDFs)
 //   light    direct light with shadow rays at every pixel and every probe ray hit
@@ -25,9 +26,13 @@ pub(crate) const GI2_RAYS: u32 = 64;
 const GI2_CACHE_SLOTS: u64 = 65536;
 const GI2_CACHE_BATCH: u32 = 8192;
 const GI2_CACHE_RAYS: u32 = 16;
-/// Frames of an unchanged scene after which GI v2 counts as settled: every cache
-/// patch relit four times (four more bounces).
-const GI2_SETTLE_FRAMES: u32 = 4 * (GI2_CACHE_SLOTS as u32 / GI2_CACHE_BATCH);
+/// GI v2 counts as settled once the scene block (camera included) has stayed the
+/// same for this many frames and a full sweep of the light cache changed no patch
+/// by more than GI2_SETTLE_CHANGE.
+const GI2_SETTLE_FRAMES: u32 = 2;
+/// Largest relative change of a relit cache patch, in millionths, that counts as
+/// settled (0.2 %, well under a display code).
+const GI2_SETTLE_CHANGE: u32 = 2000;
 
 pub(crate) struct Gi2 {
     pub(crate) on: bool,
@@ -36,7 +41,7 @@ pub(crate) struct Gi2 {
     layout: Handle,
     pool: Handle,
     sets: [Handle; 2],
-    pipes: [Handle; 7],
+    pipes: [Handle; 8],
     gbuffer_pipe: Handle,
     gbuf: Buffer,
     work: Buffer,
@@ -49,6 +54,12 @@ pub(crate) struct Gi2 {
     /// Hash of the last frame's scene block, and frames it has stayed the same.
     scene_hash: u64,
     still: u32,
+    /// Per frame slot: the cache pass's counters (gi2_cache.glsl `CacheStats`).
+    stats: [Buffer; 2],
+    /// Frames in a row whose relit patches all stayed within GI2_SETTLE_CHANGE, and
+    /// the live patch count last read back.
+    quiet: u32,
+    live: u32,
     dims: [u32; 4],
 }
 
@@ -61,7 +72,7 @@ impl Default for Gi2 {
             layout: std::ptr::null_mut(),
             pool: std::ptr::null_mut(),
             sets: [std::ptr::null_mut(); 2],
-            pipes: [std::ptr::null_mut(); 7],
+            pipes: [std::ptr::null_mut(); 8],
             gbuffer_pipe: std::ptr::null_mut(),
             gbuf: Buffer::empty(),
             work: Buffer::empty(),
@@ -72,12 +83,16 @@ impl Default for Gi2 {
             frame: 0,
             scene_hash: 0,
             still: 0,
+            stats: [Buffer::empty(), Buffer::empty()],
+            quiet: 0,
+            live: 0,
             dims: [0; 4],
         }
     }
 }
 
-const GI2_PASS_NAMES: [&str; 7] = [
+const GI2_PASS_NAMES: [&str; 8] = [
+    "gi2 compact",
     "gi2 place",
     "gi2 trace",
     "gi2 light",
@@ -124,7 +139,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -213,7 +228,7 @@ impl Gpu {
                 ),
                 "gi2 pipeline layout",
             )?;
-            let size = Size { kind: 7, count: 14 };
+            let size = Size { kind: 7, count: 16 };
             let pool = PoolInfo {
                 s_type: 33,
                 next: std::ptr::null(),
@@ -248,7 +263,8 @@ impl Gpu {
                 "gi2 descriptor sets",
             )?;
         }
-        let codes: [&[u8]; 7] = [
+        let codes: [&[u8]; 8] = [
+            GI2_COMPACT_SPV,
             GI2_PLACE_SPV,
             GI2_TRACE_SPV,
             GI2_LIGHT_SPV,
@@ -348,9 +364,12 @@ impl Gpu {
         self.destroy_buffer(&mut out);
         if self.gi2.cache_keys.buffer.is_null() {
             self.gi2.cache_keys =
-                self.make_buffer(GI2_CACHE_SLOTS * 4, 0x20 | 0x2, Memory::Device)?;
+                self.make_buffer((2 * GI2_CACHE_SLOTS + 1) * 4, 0x20 | 0x2, Memory::Device)?;
             self.gi2.cache = self.make_buffer(GI2_CACHE_SLOTS * 48, 0x20 | 0x2, Memory::Device)?;
             self.gi2.cache_clear = true;
+            for k in 0..2 {
+                self.gi2.stats[k] = self.make_buffer(16, 0x20 | 0x2, Memory::Readback)?;
+            }
         }
         self.gi2.gbuf = self.make_buffer(16 + pixels * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.gi2.work = self.make_buffer(work_vec4 * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
@@ -390,6 +409,7 @@ impl Gpu {
                 (8, self.gi2.out.buffer),
                 (9, self.gi2.cache_keys.buffer),
                 (10, self.gi2.cache.buffer),
+                (11, self.gi2.stats[slot].buffer),
             ];
             let infos: Vec<BufInfo> = buffers
                 .iter()
@@ -431,7 +451,8 @@ impl Gpu {
     /// Settle state for the debug tools, in the tier's terms: one "brick", settled
     /// once the scene (camera included) has not changed for GI2_SETTLE_FRAMES.
     fn gi2_stats(&self) -> crate::probe_tier::TierStats {
-        let settled = self.gi2.still >= GI2_SETTLE_FRAMES;
+        let sweep = self.gi2.live.div_ceil(GI2_CACHE_BATCH).max(1) + 1;
+        let settled = self.gi2.still >= GI2_SETTLE_FRAMES && self.gi2.quiet >= sweep;
         crate::probe_tier::TierStats {
             seen_bricks: 1,
             seen_settled: usize::from(settled),
@@ -451,14 +472,47 @@ impl Gpu {
 
     /// Before the raster: the G-buffer size header, and the last frame's passes done
     /// with the buffers this frame's raster writes.
-    fn gi2_begin(&mut self) {
+    fn gi2_begin(&mut self, slot: usize) {
         let header = [self.gi2.dims[0], self.gi2.dims[1], 0, 0];
+        // This slot's last frame is done (its fence was waited): read its counters.
+        if !self.gi2.cache_clear {
+            if let Ok(words) = self.read_gi2_stats(slot) {
+                if words[1] > 0 {
+                    if words[0] <= GI2_SETTLE_CHANGE {
+                        self.gi2.quiet = self.gi2.quiet.saturating_add(1);
+                    } else {
+                        self.gi2.quiet = 0;
+                    }
+                }
+                self.gi2.live = words[2];
+                if std::env::var_os("GENOS_GI_DEBUG").is_some() {
+                    eprintln!(
+                        "gi2 frame {} still {} change {} relit {} live {} quiet {}",
+                        self.gi2.frame,
+                        self.gi2.still,
+                        words[0],
+                        words[1],
+                        words[2],
+                        self.gi2.quiet
+                    );
+                }
+            }
+        }
         unsafe {
+            (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.stats[slot].buffer, 0, 16, 0);
             if self.gi2.cache_clear {
                 self.gi2.cache_clear = false;
                 (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache_keys.buffer, 0, u64::MAX, 0);
                 (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache.buffer, 0, u64::MAX, 0);
             }
+            // The live patch count, rebuilt by the compact pass.
+            (self.fns.cmd_fill_buffer)(
+                self.cmd,
+                self.gi2.cache_keys.buffer,
+                GI2_CACHE_SLOTS * 4,
+                4,
+                0,
+            );
             (self.fns.cmd_update_buffer)(
                 self.cmd,
                 self.gi2.gbuf.buffer,
@@ -474,6 +528,27 @@ impl Gpu {
             0x20 | 0x40 | 0x1000,
             0x20 | 0x40,
         );
+    }
+
+    fn read_gi2_stats(&self, slot: usize) -> Result<[u32; 4], String> {
+        let mut words = [0u32; 4];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(
+                    self.device,
+                    self.gi2.stats[slot].memory,
+                    0,
+                    16,
+                    0,
+                    &mut mapped,
+                ),
+                "map gi2 stats",
+            )?;
+            std::ptr::copy_nonoverlapping(mapped as *const u32, words.as_mut_ptr(), 4);
+            (self.fns.unmap_mem)(self.device, self.gi2.stats[slot].memory);
+        }
+        Ok(words)
     }
 
     /// After the raster: the passes, then the result into the colour image.
@@ -502,13 +577,14 @@ impl Gpu {
         self.memory_barrier(0x80 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
         let set = self.gi2.sets[slot];
         let groups = [
-            (0usize, probes.div_ceil(64), 1u32),
-            (1, rays.div_ceil(64), 1),
-            (2, (w * h + rays).div_ceil(64), 1),
-            (3, probes.div_ceil(64), 1),
+            (0usize, (GI2_CACHE_SLOTS as u32).div_ceil(64), 1u32),
+            (1, probes.div_ceil(64), 1),
+            (2, rays.div_ceil(64), 1),
+            (3, (w * h + rays).div_ceil(64), 1),
             (4, probes.div_ceil(64), 1),
-            (5, GI2_CACHE_BATCH.div_ceil(64), 1),
-            (6, w.div_ceil(8), h.div_ceil(8)),
+            (5, probes.div_ceil(64), 1),
+            (6, GI2_CACHE_BATCH.div_ceil(64), 1),
+            (7, w.div_ceil(8), h.div_ceil(8)),
         ];
         unsafe {
             (self.fns.cmd_bind_set)(
@@ -576,6 +652,10 @@ impl Gpu {
         let mut out = std::mem::replace(&mut self.gi2.out, Buffer::empty());
         let mut keys = std::mem::replace(&mut self.gi2.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.gi2.cache, Buffer::empty());
+        for k in 0..2 {
+            let mut stats = std::mem::replace(&mut self.gi2.stats[k], Buffer::empty());
+            self.destroy_buffer(&mut stats);
+        }
         self.destroy_buffer(&mut gbuf);
         self.destroy_buffer(&mut work);
         self.destroy_buffer(&mut out);

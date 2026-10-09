@@ -15,6 +15,7 @@ fn main() {
     compile("shaders/gi2_check.comp", &out.join("gi2_check.comp.spv"));
     let gi2: Vec<(&str, PathBuf)> = [
         ("GBUFFER_FRAG_SPV", "gbuffer.frag"),
+        ("GI2_COMPACT_SPV", "gi2_compact.comp"),
         ("GI2_PLACE_SPV", "gi2_place.comp"),
         ("GI2_TRACE_SPV", "gi2_trace.comp"),
         ("GI2_LIGHT_SPV", "gi2_light.comp"),

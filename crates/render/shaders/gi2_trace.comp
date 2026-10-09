@@ -27,10 +27,10 @@ void main() {
     } else {
         uint r = ray - gi2_probe_rays();
         uint slot = gi2_cache_batch_slot(r / GI2_CACHE_RAYS);
-        uint key = ckeys.key[slot];
-        pos = cache.v[3u * slot].xyz;
-        n = cache.v[3u * slot + 1u].xyz;
+        uint key = slot == ~0u ? 0u : ckeys.key[slot];
         live = key != 0u;
+        pos = live ? cache.v[3u * slot].xyz : vec3(0.0);
+        n = live ? cache.v[3u * slot + 1u].xyz : vec3(0.0, 1.0, 0.0);
         dir = gi2_dir(key, n, r % GI2_CACHE_RAYS, GI2_CACHE_RAYS);
     }
     if (!live) {

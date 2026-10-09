@@ -47,7 +47,7 @@ fn gi_v2_pipelines_build_quickly() {
         .iter()
         .filter(|(name, _)| name.starts_with("gi2"))
         .collect();
-    assert_eq!(gi2.len(), 8, "every GI v2 pipeline is timed: {times:?}");
+    assert_eq!(gi2.len(), 9, "every GI v2 pipeline is timed: {times:?}");
     let limit = pipeline_limit();
     for (name, took) in &times {
         eprintln!("pipeline {name}: {:.3} s", took.as_secs_f64());

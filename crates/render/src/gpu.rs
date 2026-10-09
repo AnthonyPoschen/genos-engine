@@ -2375,7 +2375,7 @@ impl Gpu {
             } else {
                 let gi2 = self.gi2_active();
                 if gi2 {
-                    self.gi2_begin();
+                    self.gi2_begin(slot);
                 }
                 self.raster_scene(
                     self.framebuffer,

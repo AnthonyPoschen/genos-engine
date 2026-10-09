@@ -57,12 +57,14 @@ vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
         sum += w * gi2_probe_irradiance(probe, n);
         wsum += w;
     }
-    // Pixels no probe matches (thin pillars, edges, surfaces no tile centre landed
-    // on) take the light cache's patch, which every pixel's lookup keeps alive.
-    // A small constant weight also steadies pixels the probes barely reach.
-    const float CACHE_WEIGHT = 0.02;
-    sum += CACHE_WEIGHT * gi2_cache_irradiance(pos, n);
-    wsum += CACHE_WEIGHT;
+    // Pixels no probe matches well (thin pillars, edges, surfaces no tile centre
+    // landed on) blend in the light cache's patch; their lookup keeps it alive.
+    const float CACHE_WEIGHT = 0.05;
+    if (wsum < CACHE_WEIGHT) {
+        float w = CACHE_WEIGHT - wsum;
+        sum += w * gi2_cache_irradiance(pos, n);
+        wsum += w;
+    }
     return sum / wsum;
 }
 
