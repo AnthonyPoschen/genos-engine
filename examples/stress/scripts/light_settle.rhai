@@ -1,0 +1,22 @@
+// A light change should settle in a bounded number of frames and then stay calm.
+time(#{ fixed_dt: 0.0166667 });
+knob("time_of_day", 22.0);
+knob("sun", "freeze");
+knob("boxes", "still");
+knob("dynamic", 0.0);
+lighting(#{ tier_ms: 20.0 });
+camera(#{ position: [12.5, 1.7, 20.0], look_at: [12.5, 1.0, 8.0] });
+wait_settled(#{ timeout_frames: 900 });
+let lamps = lights();
+let target = lamps.filter(|l| l.in_view && !l.directional);
+require(target.len() > 0, "a lamp is in view");
+let lamp = target[0];
+shot("before");
+light(#{ index: lamp.index, color: [1.0, 0.2, 0.1] });
+let s = wait_settled(#{ timeout_frames: 900 });
+log(`settled ${s.settled} in ${s.frames} frames`);
+shot("after");
+check(s.settled, "the light settles after a colour change");
+check_lt(s.frames, 600.0, "within 600 frames");
+let f = flicker(#{ frames: 30 });
+check_lt(f.popped_share, 0.01, "and stays calm");
