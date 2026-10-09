@@ -1,15 +1,22 @@
 #version 450
-// GI v2 light cache, first pass: list the live patch slots (the count was zeroed
-// before the frame), so this frame's batch relights live patches only. No trace.
+// GI v2 light cache, first pass: list the live patch slots, mature from the front
+// and young from the back (both counts were zeroed before the round), so the
+// round's batch relights live patches only, the young first. A slot claimed but
+// not yet written (normal w 0) waits for the next round. No trace.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "gi2_common.glsl"
 
 void main() {
     uint slot = gl_GlobalInvocationID.x;
-    if (slot >= GI2_CACHE_SLOTS || ckeys.key[slot] == 0u) {
+    if (slot >= GI2_CACHE_SLOTS || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
         return;
     }
-    uint at = atomicAdd(ckeys.key[GI2_CACHE_SLOTS], 1u);
-    ckeys.key[GI2_CACHE_SLOTS + 1u + at] = slot;
+    if (cache.v[3u * slot + 2u].w < GI2_CACHE_MATURE - 0.5) {
+        uint at = atomicAdd(ckeys.key[2u * GI2_CACHE_SLOTS + 1u], 1u);
+        ckeys.key[2u * GI2_CACHE_SLOTS - at] = slot;
+    } else {
+        uint at = atomicAdd(ckeys.key[GI2_CACHE_SLOTS], 1u);
+        ckeys.key[GI2_CACHE_SLOTS + 1u + at] = slot;
+    }
 }

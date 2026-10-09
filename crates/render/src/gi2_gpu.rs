@@ -85,6 +85,45 @@ pub(crate) struct Gi2 {
     quiet: u32,
     live: u32,
     dims: [u32; 4],
+    /// The light cache's passes (compact, its rays' trace and light, relight) run on
+    /// the async compute queue (GENOS_GI2_ASYNC=0 keeps them in the frame): at most
+    /// one submission in flight, skipped while the last is still running.
+    async_on: bool,
+    world_cmd: Handle,
+    world_fence: Handle,
+    world_set: Handle,
+    world_qp: Handle,
+    /// Its own copy of the scene block and counters, both queues' sharing.
+    world_scene: Buffer,
+    world_stats: Buffer,
+    world_busy: bool,
+    /// What the submission in flight was built from: scene hash and still frames.
+    world_hash: u64,
+    world_still: u32,
+    /// Light cache rounds run (gi2_round), and frames to hold off after the cache
+    /// buffers were cleared on the graphics queue.
+    world_round: u32,
+    world_hold: u32,
+    /// Hash of the scene's light without the camera (lamps, occluders, fire, smoke,
+    /// floor, roof, sky; set with the scene upload), and with the traced and drawn
+    /// meshes: what the light cache's light depends on.
+    pub(crate) light_scene: u64,
+    light_hash: u64,
+    /// Rounds in a row, since that last changed, whose mature patches all stayed
+    /// within GI2_SETTLE_CHANGE: past a full sweep, rounds relight young patches only.
+    light_quiet: u32,
+    young_ok: bool,
+    /// What each round in flight was built from (frame slots, then the async one):
+    /// the light hash and whether it took young patches only.
+    stats_light: [u64; 2],
+    stats_young: [bool; 2],
+    world_light: u64,
+    world_young: bool,
+    /// Light cache rounds per second of wall time (GENOS_GI2_CACHE_HZ; 0: one every
+    /// frame), when the last began, and whether each frame slot ran one.
+    cache_hz: f64,
+    last_round: Option<Instant>,
+    stats_round: [bool; 2],
 }
 
 impl Default for Gi2 {
@@ -115,6 +154,32 @@ impl Default for Gi2 {
             stats_still: [0; 2],
             live: 0,
             dims: [0; 4],
+            async_on: std::env::var("GENOS_GI2_ASYNC").is_ok_and(|v| v == "1"),
+            world_cmd: std::ptr::null_mut(),
+            world_fence: std::ptr::null_mut(),
+            world_set: std::ptr::null_mut(),
+            world_qp: std::ptr::null_mut(),
+            world_scene: Buffer::empty(),
+            world_stats: Buffer::empty(),
+            world_busy: false,
+            world_hash: 0,
+            world_still: 0,
+            world_round: 0,
+            world_hold: 0,
+            light_scene: 0,
+            light_hash: 0,
+            light_quiet: 0,
+            young_ok: std::env::var("GENOS_GI2_YOUNG_ONLY").map_or(true, |v| v != "0"),
+            stats_light: [0; 2],
+            stats_young: [false; 2],
+            world_light: 0,
+            world_young: false,
+            cache_hz: std::env::var("GENOS_GI2_CACHE_HZ")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.0),
+            last_round: None,
+            stats_round: [false; 2],
         }
     }
 }
@@ -302,12 +367,12 @@ impl Gpu {
                 ),
                 "gi2 pipeline layout",
             )?;
-            let size = Size { kind: 7, count: 16 };
+            let size = Size { kind: 7, count: 24 };
             let pool = PoolInfo {
                 s_type: 33,
                 next: std::ptr::null(),
                 flags: 0,
-                max_sets: 2,
+                max_sets: 3,
                 size_count: 1,
                 sizes: &size,
             };
@@ -320,23 +385,27 @@ impl Gpu {
                 ),
                 "gi2 descriptor pool",
             )?;
-            let layouts = [self.gi2.desc_layout, self.gi2.desc_layout];
+            let layouts = [self.gi2.desc_layout; 3];
             let alloc = Alloc {
                 s_type: 34,
                 next: std::ptr::null(),
                 pool: self.gi2.pool,
-                count: 2,
+                count: 3,
                 layouts: layouts.as_ptr(),
             };
+            let mut sets = [std::ptr::null_mut(); 3];
             check(
                 (self.fns.alloc_desc)(
                     self.device,
                     &alloc as *const Alloc as *const u8,
-                    self.gi2.sets.as_mut_ptr(),
+                    sets.as_mut_ptr(),
                 ),
                 "gi2 descriptor sets",
             )?;
+            self.gi2.sets = [sets[0], sets[1]];
+            self.gi2.world_set = sets[2];
         }
+        self.make_gi2_world()?;
         let codes: [&[u8]; 8] = [
             GI2_COMPACT_SPV,
             GI2_PLACE_SPV,
@@ -362,6 +431,72 @@ impl Gpu {
         self.note_pipeline_time("gi2 gbuffer", start);
         self.gi2.ready = true;
         Ok(())
+    }
+
+    /// The async light cache submission's command buffer (compute family), its
+    /// fence (signalled: nothing in flight) and timestamps.
+    fn make_gi2_world(&mut self) -> Result<(), String> {
+        #[repr(C)]
+        struct AllocInfo {
+            s_type: i32,
+            next: *const c_void,
+            pool: Handle,
+            level: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct FenceInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+        }
+        if self.light_pool.is_null() {
+            self.gi2.async_on = false;
+            return Ok(());
+        }
+        let alloc = AllocInfo {
+            s_type: 40,
+            next: std::ptr::null(),
+            pool: self.light_pool,
+            level: 0,
+            count: 1,
+        };
+        let fence = FenceInfo {
+            s_type: 8,
+            next: std::ptr::null(),
+            flags: 0x1,
+        };
+        unsafe {
+            check(
+                (self.fns.alloc_cmd)(
+                    self.device,
+                    &alloc as *const AllocInfo as *const u8,
+                    &mut self.gi2.world_cmd,
+                ),
+                "gi2 world command buffer",
+            )?;
+            check(
+                (self.fns.create_fence)(
+                    self.device,
+                    &fence as *const FenceInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.gi2.world_fence,
+                ),
+                "gi2 world fence",
+            )?;
+        }
+        self.gi2.world_qp = self.make_query_pool_n(2)?;
+        Ok(())
+    }
+
+    /// Wait for the async light cache submission in flight, if any.
+    fn wait_gi2_world(&mut self) {
+        if !self.gi2.world_fence.is_null() {
+            let fences = [self.gi2.world_fence];
+            unsafe {
+                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX);
+            }
+        }
     }
 
     fn make_compute_pipe(&self, code: &[u8], layout: Handle, what: &str) -> Result<Handle, String> {
@@ -425,6 +560,8 @@ impl Gpu {
         if !self.gi2.ready {
             return Ok(());
         }
+        self.wait_gi2_world();
+        self.poll_gi2_world();
         let (w, h) = (self.extent_w.max(1), self.extent_h.max(1));
         let tile = gi2_tile(h);
         let cols = w.div_ceil(tile);
@@ -440,17 +577,34 @@ impl Gpu {
         self.destroy_buffer(&mut gbuf);
         self.destroy_buffer(&mut work);
         self.destroy_buffer(&mut out);
+        // Both queues use the light cache and the work buffer's ray slots.
+        let share = self.light_families();
         if self.gi2.cache_keys.buffer.is_null() {
-            self.gi2.cache_keys =
-                self.make_buffer((2 * GI2_CACHE_SLOTS + 1) * 4, 0x20 | 0x2, Memory::Device)?;
-            self.gi2.cache = self.make_buffer(GI2_CACHE_SLOTS * 48, 0x20 | 0x2, Memory::Device)?;
+            self.gi2.cache_keys = self.make_buffer_queues(
+                (2 * GI2_CACHE_SLOTS + 2) * 4,
+                0x20 | 0x2,
+                Memory::Device,
+                &share,
+            )?;
+            self.gi2.cache =
+                self.make_buffer_queues(GI2_CACHE_SLOTS * 48, 0x20 | 0x2, Memory::Device, &share)?;
             self.gi2.cache_clear = true;
             for k in 0..2 {
-                self.gi2.stats[k] = self.make_buffer(16, 0x20 | 0x2, Memory::Readback)?;
+                self.gi2.stats[k] = self.make_buffer(32, 0x20 | 0x2, Memory::Readback)?;
             }
+            self.gi2.world_stats =
+                self.make_buffer_queues(32, 0x20 | 0x2, Memory::Readback, &share)?;
+            self.gi2.world_scene = self.make_buffer_queues(
+                crate::pack::SCENE_CAPACITY as u64,
+                0x20,
+                Memory::Upload,
+                &share,
+            )?;
+            self.write_buffer(&self.gi2.world_scene, &vec![0u8; crate::pack::SCENE_TAIL])?;
         }
         self.gi2.gbuf = self.make_buffer(16 + pixels * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
-        self.gi2.work = self.make_buffer(work_vec4 * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        self.gi2.work =
+            self.make_buffer_queues(work_vec4 * 16, 0x20 | 0x1 | 0x2, Memory::Device, &share)?;
         self.gi2.out = self.make_buffer(pixels * 4, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.gi2.dims = [w, h, cols, rows];
         self.gi2.gbuf_clear = true;
@@ -479,16 +633,32 @@ impl Gpu {
             buffer: *const BufInfo,
             texel: *const c_void,
         }
-        for slot in 0..2 {
+        for slot in 0..3 {
+            let (scene, stats, set) = if slot < 2 {
+                (
+                    self.frame_scene[slot].buffer,
+                    self.gi2.stats[slot].buffer,
+                    self.gi2.sets[slot],
+                )
+            } else {
+                (
+                    self.gi2.world_scene.buffer,
+                    self.gi2.world_stats.buffer,
+                    self.gi2.world_set,
+                )
+            };
+            if set.is_null() {
+                continue;
+            }
             let buffers = [
-                (0u32, self.frame_scene[slot].buffer),
+                (0u32, scene),
                 (5, self.mesh_field.buffer),
                 (6, self.gi2.gbuf.buffer),
                 (7, self.gi2.work.buffer),
                 (8, self.gi2.out.buffer),
                 (9, self.gi2.cache_keys.buffer),
                 (10, self.gi2.cache.buffer),
-                (11, self.gi2.stats[slot].buffer),
+                (11, stats),
             ];
             let infos: Vec<BufInfo> = buffers
                 .iter()
@@ -504,7 +674,7 @@ impl Gpu {
                 .map(|((binding, _), info)| Write {
                     s_type: 35,
                     next: std::ptr::null(),
-                    set: self.gi2.sets[slot],
+                    set,
                     binding: *binding,
                     element: 0,
                     count: 1,
@@ -540,6 +710,10 @@ impl Gpu {
         }
     }
 
+    fn gi2_still_frames(&self) -> u32 {
+        self.gi2.still
+    }
+
     /// The picture has stopped changing: a frame drawn from held light has been
     /// submitted after another, so one is on screen.
     fn gi2_picture_held(&self) -> bool {
@@ -559,39 +733,33 @@ impl Gpu {
     /// with the buffers this frame's raster writes.
     fn gi2_begin(&mut self, slot: usize) {
         let header = [self.gi2.dims[0], self.gi2.dims[1], 0, 0];
-        // This slot's last frame is done (its fence was waited): read its counters.
-        if !self.gi2.cache_clear {
-            if let Ok(words) = self.read_gi2_stats(slot) {
+        let world = self.gi2.async_on;
+        if world {
+            self.poll_gi2_world();
+        }
+        // This slot's last frame is done (its fence was waited): read its counters
+        // (the async queue's come back with its own submission).
+        if !self.gi2.cache_clear && !world {
+            if !self.gi2.stats_round[slot] {
+                // No light cache round ran in that frame.
+            } else if let Ok(words) = self.read_gi2_stats(slot) {
                 // A frame that ran just as the scene changed measured against the
                 // old light; it does not count toward settling.
-                if self.gi2.stats_still[slot] == 0 {
-                    self.gi2.quiet = 0;
-                } else if words[1] > 0 {
-                    if words[0] <= GI2_SETTLE_CHANGE {
-                        self.gi2.quiet = self.gi2.quiet.saturating_add(1);
-                    } else {
-                        self.gi2.quiet = 0;
-                    }
-                }
-                self.gi2.live = words[2];
-                if std::env::var_os("GENOS_GI_DEBUG").is_some() {
-                    eprintln!(
-                        "gi2 frame {} still {} change {} relit {} live {} missed {} quiet {}",
-                        self.gi2.frame,
-                        self.gi2.still,
-                        words[0],
-                        words[1],
-                        words[2],
-                        words[3],
-                        self.gi2.quiet
-                    );
-                }
+                let light = self.gi2.stats_light[slot] == self.gi2.light_hash;
+                self.note_gi2_round(
+                    words,
+                    self.gi2.stats_still[slot] != 0,
+                    light,
+                    self.gi2.stats_young[slot],
+                );
             }
         }
         unsafe {
-            (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.stats[slot].buffer, 0, 16, 0);
+            (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.stats[slot].buffer, 0, 32, 0);
             if self.gi2.cache_clear {
                 self.gi2.cache_clear = false;
+                // The async queue starts once this frame (its slot) is surely done.
+                self.gi2.world_hold = 2;
                 (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache_keys.buffer, 0, u64::MAX, 0);
                 (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache.buffer, 0, u64::MAX, 0);
             }
@@ -602,14 +770,12 @@ impl Gpu {
             }
             // The whole-buffer clears land before the count and header writes.
             self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
-            // The live patch count, rebuilt by the compact pass.
-            (self.fns.cmd_fill_buffer)(
-                self.cmd,
-                self.gi2.cache_keys.buffer,
-                GI2_CACHE_SLOTS * 4,
-                4,
-                0,
-            );
+            // The mature and young patch counts, rebuilt by the compact pass.
+            if !world {
+                for at in [GI2_CACHE_SLOTS, 2 * GI2_CACHE_SLOTS + 1] {
+                    (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache_keys.buffer, at * 4, 4, 0);
+                }
+            }
             (self.fns.cmd_update_buffer)(
                 self.cmd,
                 self.gi2.gbuf.buffer,
@@ -627,23 +793,235 @@ impl Gpu {
         );
     }
 
-    fn read_gi2_stats(&self, slot: usize) -> Result<[u32; 4], String> {
-        let mut words = [0u32; 4];
+    /// Count one light cache round's counters toward settling (or not): a round
+    /// built from an older scene than the current one measured the old light.
+    /// `current`: built from the scene as it is now (camera included); `light`:
+    /// from its light as it is now; `young_only`: the round took young patches only,
+    /// so one that relit nothing found nothing left to light.
+    fn note_gi2_round(&mut self, words: [u32; 8], current: bool, light: bool, young_only: bool) {
+        if !current {
+            self.gi2.quiet = 0;
+        } else if words[1] > 0 {
+            if words[0] <= GI2_SETTLE_CHANGE {
+                self.gi2.quiet = self.gi2.quiet.saturating_add(1);
+            } else {
+                self.gi2.quiet = 0;
+            }
+        } else if young_only {
+            self.gi2.quiet = self.gi2.quiet.saturating_add(1);
+        }
+        if !light {
+            self.gi2.light_quiet = 0;
+        } else if words[5] > 0 {
+            if words[4] <= GI2_SETTLE_CHANGE {
+                self.gi2.light_quiet = self.gi2.light_quiet.saturating_add(1);
+            } else {
+                self.gi2.light_quiet = 0;
+            }
+        }
+        self.gi2.live = words[2];
+        if std::env::var_os("GENOS_GI_DEBUG").is_some() {
+            eprintln!(
+                "gi2 frame {} still {} change {} relit {} live {} missed {} quiet {} mature_change {} mature_relit {} light_quiet {} young_only {}",
+                self.gi2.frame,
+                self.gi2.still,
+                words[0],
+                words[1],
+                words[2],
+                words[3],
+                self.gi2.quiet,
+                words[4],
+                words[5],
+                self.gi2.light_quiet,
+                young_only
+            );
+        }
+    }
+
+    /// The async light cache round in flight has finished: read its counters and
+    /// GPU span.
+    fn poll_gi2_world(&mut self) {
+        if !self.gi2.world_busy {
+            return;
+        }
+        let status = unsafe { (self.fns.fence_status)(self.device, self.gi2.world_fence) };
+        if status != 0 {
+            return;
+        }
+        self.gi2.world_busy = false;
+        if let Ok(words) = self.read_stats_memory(self.gi2.world_stats.memory) {
+            let current = self.gi2.world_still > 0 && self.gi2.world_hash == self.gi2.scene_hash;
+            let light = self.gi2.world_light == self.gi2.light_hash;
+            self.note_gi2_round(words, current, light, self.gi2.world_young);
+        }
+        if self.gpu_times.is_some() && !self.gi2.world_qp.is_null() {
+            let mut raw = [0u64; 2];
+            let got = unsafe {
+                (self.fns.get_query_results)(
+                    self.device,
+                    self.gi2.world_qp,
+                    0,
+                    2,
+                    16,
+                    raw.as_mut_ptr() as *mut c_void,
+                    8,
+                    0x1,
+                )
+            };
+            let period = f64::from(self.timestamp_period);
+            let bits = self.timestamp_bits;
+            if got == 0 {
+                if let Some(times) = self.gpu_times.as_mut() {
+                    times.light_spans.push((raw[0], raw[1]));
+                    times.world_ms += tick_delta(raw[0], raw[1], bits) as f64 * period / 1.0e6;
+                    times.world_runs += 1;
+                }
+            }
+        }
+    }
+
+    /// Record and submit one light cache round on the async compute queue: list
+    /// the live patches, trace and light this round's batch of their rays, relight
+    /// them. Skipped while the last round still runs, so at most one is in flight
+    /// and a slow round never queues up work behind it.
+    fn submit_gi2_world(&mut self, pc: [u32; 8]) -> Result<bool, String> {
+        if self.gi2.world_busy || self.gi2.world_cmd.is_null() {
+            return Ok(false);
+        }
+        if self.gi2.world_hold > 0 {
+            self.gi2.world_hold -= 1;
+            return Ok(false);
+        }
+        if !self.frame_bytes.is_empty() {
+            self.write_buffer(&self.gi2.world_scene, &self.frame_bytes)?;
+        }
+        let round = self.gi2.world_round;
+        self.gi2.world_round = round.wrapping_add(1);
+        let mut pc = pc;
+        // Light cache rays only (gi2_mode 2) and this round.
+        pc[6] = (pc[6] & 0x4ff) | 2 << 8 | (round & 0x1f_ffff) << 11;
+        let cmd = self.gi2.world_cmd;
+        let fences = [self.gi2.world_fence];
+        #[repr(C)]
+        struct BeginInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            inherit: *const c_void,
+        }
+        #[repr(C)]
+        struct Submit {
+            s_type: i32,
+            next: *const c_void,
+            wait_count: u32,
+            waits: *const Handle,
+            stages: *const u32,
+            cmd_count: u32,
+            cmds: *const Handle,
+            signal_count: u32,
+            signals: *const Handle,
+        }
+        let rays = GI2_CACHE_BATCH * GI2_CACHE_RAYS;
+        let groups = [
+            (0usize, (GI2_CACHE_SLOTS as u32).div_ceil(64)),
+            (2, rays.div_ceil(64)),
+            (3, rays.div_ceil(64)),
+            (6, GI2_CACHE_BATCH.div_ceil(64)),
+        ];
+        unsafe {
+            check((self.fns.reset_fences)(self.device, 1, fences.as_ptr()), "reset gi2 world fence")?;
+            check((self.fns.reset_cmd)(cmd, 0), "reset gi2 world cmd")?;
+            let begin = BeginInfo {
+                s_type: 42,
+                next: std::ptr::null(),
+                flags: 1,
+                inherit: std::ptr::null(),
+            };
+            check(
+                (self.fns.begin_cmd)(cmd, &begin as *const BeginInfo as *const u8),
+                "begin gi2 world",
+            )?;
+            let qp = self.gi2.world_qp;
+            if !qp.is_null() {
+                (self.fns.cmd_reset_query)(cmd, qp, 0, 2);
+                (self.fns.cmd_write_timestamp)(cmd, 0x1, qp, 0);
+            }
+            (self.fns.cmd_fill_buffer)(cmd, self.gi2.world_stats.buffer, 0, 32, 0);
+            // The mature and young counts, rebuilt by the compact pass.
+            (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, GI2_CACHE_SLOTS * 4, 4, 0);
+            (self.fns.cmd_fill_buffer)(
+                cmd,
+                self.gi2.cache_keys.buffer,
+                (2 * GI2_CACHE_SLOTS + 1) * 4,
+                4,
+                0,
+            );
+            self.barrier_on(cmd, 0x1000, 0x800, 0x1000, 0x20 | 0x40);
+            let set = self.gi2.world_set;
+            (self.fns.cmd_bind_set)(cmd, 1, self.gi2.layout, 0, 1, &set, 0, std::ptr::null());
+            (self.fns.cmd_push)(cmd, self.gi2.layout, 0x20, 0, 32, pc.as_ptr() as *const c_void);
+            for (pass, gx) in groups {
+                (self.fns.cmd_bind_pipe)(cmd, 1, self.gi2.pipes[pass]);
+                (self.fns.cmd_dispatch)(cmd, gx.max(1), 1, 1);
+                self.barrier_on(cmd, 0x800, 0x800, 0x40, 0x20 | 0x40);
+            }
+            // The counters reach the host.
+            self.barrier_on(cmd, 0x800, 0x4000, 0x40, 0x2000);
+            if !qp.is_null() {
+                (self.fns.cmd_write_timestamp)(cmd, 0x2000, qp, 1);
+            }
+            check((self.fns.end_cmd)(cmd), "end gi2 world")?;
+            let cmds = [cmd];
+            let submit = Submit {
+                s_type: 4,
+                next: std::ptr::null(),
+                wait_count: 0,
+                waits: std::ptr::null(),
+                stages: std::ptr::null(),
+                cmd_count: 1,
+                cmds: cmds.as_ptr(),
+                signal_count: 0,
+                signals: std::ptr::null(),
+            };
+            check(
+                (self.fns.queue_submit)(
+                    self.compute_queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    self.gi2.world_fence,
+                ),
+                "gi2 world submit",
+            )?;
+        }
+        self.gi2.world_busy = true;
+        self.gi2.world_hash = self.gi2.scene_hash;
+        self.gi2.world_still = self.gi2.still;
+        self.gi2.world_light = self.gi2.light_hash;
+        self.gi2.world_young = pc[6] & 1 << 10 != 0;
+        Ok(true)
+    }
+
+    fn read_gi2_stats(&self, slot: usize) -> Result<[u32; 8], String> {
+        self.read_stats_memory(self.gi2.stats[slot].memory)
+    }
+
+    fn read_stats_memory(&self, memory: Handle) -> Result<[u32; 8], String> {
+        let mut words = [0u32; 8];
         unsafe {
             let mut mapped = std::ptr::null_mut();
             check(
                 (self.fns.map_mem)(
                     self.device,
-                    self.gi2.stats[slot].memory,
+                    memory,
                     0,
-                    16,
+                    32,
                     0,
                     &mut mapped,
                 ),
                 "map gi2 stats",
             )?;
-            std::ptr::copy_nonoverlapping(mapped as *const u32, words.as_mut_ptr(), 4);
-            (self.fns.unmap_mem)(self.device, self.gi2.stats[slot].memory);
+            std::ptr::copy_nonoverlapping(mapped as *const u32, words.as_mut_ptr(), 8);
+            (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(words)
     }
@@ -652,7 +1030,8 @@ impl Gpu {
     fn gi2_passes(&mut self, slot: usize) {
         let [w, h, cols, rows] = self.gi2.dims;
         let probes = cols * rows;
-        let rays = probes * GI2_RAYS + GI2_CACHE_BATCH * GI2_CACHE_RAYS;
+        let probe_rays = probes * GI2_RAYS;
+        let rays = probe_rays + GI2_CACHE_BATCH * GI2_CACHE_RAYS;
         let bgra = if self.format == 44 { 1u32 } else { 0 };
         self.gi2.frame = self.gi2.frame.wrapping_add(1);
         let hash = {
@@ -672,8 +1051,27 @@ impl Gpu {
             self.gi2.quiet = 0;
         }
         self.gi2.stats_still[slot] = self.gi2.still;
-        // z: bgra and the still frames, capped (gi2_common.glsl).
-        let z = bgra | self.gi2.still.min(127) << 1;
+        // The light alone (no camera): while it holds and a full sweep has changed
+        // no mature patch, rounds relight young patches only. Any change goes back
+        // to full sweeps at once.
+        let light = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            self.gi2.light_scene.hash(&mut hasher);
+            self.mesh_field_key.hash(&mut hasher);
+            self.gi2.draw_key.hash(&mut hasher);
+            hasher.finish()
+        };
+        if light != self.gi2.light_hash {
+            self.gi2.light_hash = light;
+            self.gi2.light_quiet = 0;
+        }
+        let sweep = self.gi2.live.div_ceil(GI2_CACHE_BATCH).max(1) + 1;
+        let young_only = self.gi2.young_ok && self.gi2.light_quiet >= sweep;
+        self.gi2.stats_light[slot] = light;
+        self.gi2.stats_young[slot] = young_only;
+        // z: bgra, the still frames (capped) and young-only rounds (gi2_common.glsl).
+        let z = bgra | self.gi2.still.min(127) << 1 | u32::from(young_only) << 10;
         let pc = [w, h, cols, rows, GI2_RAYS, gi2_tile(h), z, self.gi2.frame];
         let image = self.color.image;
         // The raster colour as the base: pixels with no surface keep it.
@@ -685,8 +1083,49 @@ impl Gpu {
         // same picture every frame (no residual cache drift) and idles cheaply.
         let frozen = self.gi2_stats().seen_settled == 1;
         self.gi2.held = if frozen { self.gi2.held.saturating_add(1) } else { 0 };
+        // A light cache round is due (GENOS_GI2_CACHE_HZ caps them per second). On
+        // the async queue (GENOS_GI2_ASYNC=1) it goes there, else into this frame;
+        // a frame without one runs the picture's passes only (gi2_mode 1).
+        let due = !frozen
+            && (self.gi2.cache_hz <= 0.0
+                || self
+                    .gi2
+                    .last_round
+                    .is_none_or(|t| t.elapsed().as_secs_f64() * self.gi2.cache_hz >= 1.0));
+        let mut round = false;
+        if due && self.gi2.async_on {
+            match self.submit_gi2_world(pc) {
+                Ok(true) => self.gi2.last_round = Some(Instant::now()),
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("gi2: async light cache off: {e}");
+                    self.gi2.async_on = false;
+                }
+            }
+        } else if due {
+            round = true;
+            self.gi2.last_round = Some(Instant::now());
+        }
+        self.gi2.stats_round[slot] = round;
+        let mut pc = pc;
+        if round {
+            let n = self.gi2.world_round;
+            self.gi2.world_round = n.wrapping_add(1);
+            pc[6] |= (n & 0x1f_ffff) << 11;
+        } else {
+            pc[6] |= 1 << 8;
+        }
         let groups: Vec<(usize, u32, u32)> = if frozen {
             vec![(3, (w * h).div_ceil(64), 1), (7, w.div_ceil(8), h.div_ceil(8))]
+        } else if !round {
+            vec![
+                (1usize, probes.div_ceil(64), 1u32),
+                (2, probe_rays.div_ceil(64), 1),
+                (3, (w * h + probe_rays).div_ceil(64), 1),
+                (4, probes.div_ceil(64), 1),
+                (5, probes.div_ceil(64), 1),
+                (7, w.div_ceil(8), h.div_ceil(8)),
+            ]
         } else {
             vec![
                 (0usize, (GI2_CACHE_SLOTS as u32).div_ceil(64), 1u32),
@@ -724,7 +1163,7 @@ impl Gpu {
                 .as_mut()
                 .filter(|t| !t.gi2_pool.is_null())
                 .map(|t| {
-                    t.gi2_full[slot] = groups.len() == 8;
+                    t.gi2_ids[slot] = groups.iter().map(|g| g.0).collect();
                     t.gi2_pool
                 });
             let first = slot as u32 * GI2_STAMPS;
@@ -747,6 +1186,17 @@ impl Gpu {
     }
 
     fn memory_barrier(&self, src_stage: u32, dst_stage: u32, src_access: u32, dst_access: u32) {
+        self.barrier_on(self.cmd, src_stage, dst_stage, src_access, dst_access);
+    }
+
+    fn barrier_on(
+        &self,
+        cmd: Handle,
+        src_stage: u32,
+        dst_stage: u32,
+        src_access: u32,
+        dst_access: u32,
+    ) {
         #[repr(C)]
         struct Barrier {
             s_type: i32,
@@ -762,7 +1212,7 @@ impl Gpu {
         };
         unsafe {
             (self.fns.cmd_barrier)(
-                self.cmd,
+                cmd,
                 src_stage,
                 dst_stage,
                 0,
@@ -777,6 +1227,20 @@ impl Gpu {
     }
 
     fn destroy_gi2(&mut self) {
+        self.wait_gi2_world();
+        self.gi2.world_busy = false;
+        let mut world_stats = std::mem::replace(&mut self.gi2.world_stats, Buffer::empty());
+        let mut world_scene = std::mem::replace(&mut self.gi2.world_scene, Buffer::empty());
+        self.destroy_buffer(&mut world_stats);
+        self.destroy_buffer(&mut world_scene);
+        unsafe {
+            if !self.gi2.world_fence.is_null() {
+                (self.fns.destroy_fence)(self.device, self.gi2.world_fence, std::ptr::null());
+                self.gi2.world_fence = std::ptr::null_mut();
+            }
+        }
+        // The command buffer goes with the light command pool; the query pool too
+        // is left to the device (as the frame's are).
         let mut gbuf = std::mem::replace(&mut self.gi2.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.gi2.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.gi2.out, Buffer::empty());
@@ -818,4 +1282,39 @@ impl Gpu {
         }
         self.gi2.ready = false;
     }
+}
+
+/// Hash of what lights the scene, without the camera: the lamp and occluder lists
+/// as uploaded (the tail of `bytes`, `pack::scene_bytes`), fire, smoke, floor, roof
+/// and sky.
+pub(crate) fn gi2_light_scene(pack: &crate::pack::Pack, bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let word = |at: usize| {
+        bytes
+            .get(at * 4..at * 4 + 4)
+            .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])) as usize
+    };
+    let tail = crate::pack::SCENE_TAIL;
+    let lists = (word(0) * 2 + word(1) * 4) * 16;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes[tail.min(bytes.len())..(tail + lists).min(bytes.len())].hash(&mut hasher);
+    let mut floats: Vec<f32> = Vec::new();
+    floats.extend(pack.fire.position);
+    floats.extend(pack.fire.color);
+    floats.push(pack.fire.strength);
+    for puff in &pack.puffs {
+        floats.extend(puff.center);
+        floats.push(puff.radius);
+        floats.push(puff.density);
+    }
+    floats.extend(pack.floor_center);
+    floats.push(pack.floor_half_x);
+    floats.push(pack.floor_half_z);
+    floats.extend(pack.floor_color);
+    floats.extend(pack.ceiling);
+    floats.extend(pack.sky);
+    for f in floats {
+        f.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
 }

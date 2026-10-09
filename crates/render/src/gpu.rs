@@ -784,6 +784,13 @@ impl Renderer {
         self.gpu.gi2.on
     }
 
+    /// Frames in a row GI v2 has seen the same scene (camera, lights, objects): its
+    /// screen probes average that many frames' rays (up to 32), and any change
+    /// starts the count, and so the average, over at 0.
+    pub fn gi_v2_still_frames(&self) -> u32 {
+        self.gpu.gi2_still_frames()
+    }
+
     /// How long each pipeline took to build, in build order.
     pub fn pipeline_times(&self) -> Vec<(String, Duration)> {
         self.gpu.pipeline_times.clone()
@@ -2694,14 +2701,15 @@ impl Gpu {
         times
             .frame_spans
             .push((raw[0], raw[FRAME_STAMPS as usize - 1]));
-        if times.gi2_full[slot] && !times.gi2_pool.is_null() {
-            let mut g = [0u64; GI2_STAMPS as usize];
+        let ids = std::mem::take(&mut times.gi2_ids[slot]);
+        if ids.len() > 2 && !times.gi2_pool.is_null() {
+            let mut g = vec![0u64; ids.len() + 1];
             let got = unsafe {
                 (self.fns.get_query_results)(
                     self.device,
                     times.gi2_pool,
                     slot as u32 * GI2_STAMPS,
-                    GI2_STAMPS,
+                    g.len() as u32,
                     8 * g.len(),
                     g.as_mut_ptr() as *mut c_void,
                     8,
@@ -2709,8 +2717,8 @@ impl Gpu {
                 )
             };
             if got == 0 {
-                for (k, w) in g.windows(2).enumerate() {
-                    times.gi2[k] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+                for (&pass, w) in ids.iter().zip(g.windows(2)) {
+                    times.gi2[pass] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
                 }
                 times.gi2_frames += 1;
             }
@@ -2753,7 +2761,7 @@ impl Gpu {
         if times.gi2_frames > 0 {
             let g = times.gi2.map(|v| v / f64::from(times.gi2_frames));
             eprintln!(
-                "GI2_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} total={:.3}",
+                "GI2_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} total={:.3} async_rounds={} async_ms={:.3}",
                 times.gi2_frames,
                 g[0],
                 g[1],
@@ -2763,7 +2771,9 @@ impl Gpu {
                 g[5],
                 g[6],
                 g[7],
-                g.iter().sum::<f64>()
+                g.iter().sum::<f64>(),
+                times.world_runs,
+                times.world_ms / f64::from(times.world_runs.max(1))
             );
         }
         if !times.light_spans.is_empty() {
@@ -4086,6 +4096,7 @@ impl Gpu {
         let bytes = pack::scene_bytes(pack);
         self.write_buffer(&self.scene_buf, &bytes)?;
         self.frame_bytes.clone_from(&bytes);
+        self.gi2.light_scene = gi2_light_scene(pack, &bytes);
         for (index, cascade) in pack.cascades.iter().enumerate() {
             self.light_cols[index] = (cascade.count_x + 7) / 8;
             self.light_rows[index] = (cascade.count_z + 7) / 8;
@@ -6552,9 +6563,12 @@ struct GpuTimes {
     /// GI v2 pass stamps (2 slots x GI2_STAMPS), whether a slot holds a full frame's
     /// passes, and the per-pass sums over `gi2_frames`.
     gi2_pool: Handle,
-    gi2_full: [bool; 2],
+    gi2_ids: [Vec<usize>; 2],
     gi2_frames: u32,
     gi2: [f64; 8],
+    /// Async light cache rounds (GI v2) and their GPU time.
+    world_runs: u32,
+    world_ms: f64,
     /// Absolute GPU spans (ticks) of frames and light builds since the last line, to
     /// show how much light work ran while a frame was on the GPU.
     frame_spans: Vec<(u64, u64)>,
@@ -6600,7 +6614,9 @@ impl Default for GpuTimes {
             placed: false,
             light: [0.0; 4],
             gi2_pool: std::ptr::null_mut(),
-            gi2_full: [false; 2],
+            gi2_ids: [Vec::new(), Vec::new()],
+            world_runs: 0,
+            world_ms: 0.0,
             gi2_frames: 0,
             gi2: [0.0; 8],
             frame_spans: Vec::new(),

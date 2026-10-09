@@ -8,11 +8,18 @@
 // rays a batch at a time, so a static scene converges to fixed values and nothing
 // crawls. Patches nobody reads for a while are freed.
 //
-// Keys (binding 9): one uint per slot, 0 when free; then the count of live slots
-// and their list, rebuilt each frame by gi2_compact.comp, so a frame relights live
-// patches only (one more bounce per frame while they fit in a batch).
+// Keys (binding 9): one uint per slot, 0 when free; then the count of mature live
+// slots and one list of SLOTS entries, rebuilt each round by gi2_compact.comp:
+// mature slots from the front, young ones (relit fewer than GI2_CACHE_MATURE
+// times) from the back; last, the young count. A round relights the young first
+// (a newly seen surface gets its light at once) and fills the batch from the
+// mature ones in turn. Once the lights and objects have held still long enough
+// for a full sweep to change nothing (gi2_gpu.rs), a round takes only the young:
+// their light cannot have changed, and a moving camera then costs only the new
+// surfaces it sees.
 // Patches (binding 10): 3 vec4 per slot: position (w: frame last read), normal
-// (w: cell size), irradiance (w: 1 once lit).
+// (w: cell size, 0 until claimed), irradiance (w: times relit, up to
+// GI2_CACHE_MATURE; 0 unlit).
 
 layout(std430, set = 0, binding = 9) buffer CacheKeys {
     uint key[];
@@ -30,11 +37,36 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint live;
     // Lookups that found neither their patch nor a free slot (the table is full).
     uint missed;
+    // The same two for mature patches only: has the light itself stopped changing.
+    uint mature_change;
+    uint mature_relit;
+    uint pad0;
+    uint pad1;
 } gstats;
+
+const float GI2_CACHE_MATURE = 3.0;
 
 
 uint gi2_frame() {
     return pc.params.w;
+}
+
+// Light cache round: which batch of live patches is relit. Rounds are counted on
+// their own (gi2_gpu.rs), so a frame without one skips no batch.
+uint gi2_round() {
+    return pc.params.z >> 11u;
+}
+
+// This round relights young patches only (params.z bit 10).
+bool gi2_young_only() {
+    return ((pc.params.z >> 10u) & 1u) != 0u;
+}
+
+uint gi2_young_count() {
+    return min(ckeys.key[2u * GI2_CACHE_SLOTS + 1u], GI2_CACHE_SLOTS);
+}
+uint gi2_mature_count() {
+    return min(ckeys.key[GI2_CACHE_SLOTS], GI2_CACHE_SLOTS);
 }
 
 float gi2_cell_size(vec3 pos) {
@@ -112,15 +144,21 @@ vec3 gi2_cache_irradiance(vec3 pos, vec3 n) {
 }
 
 uint gi2_live_count() {
-    return min(ckeys.key[GI2_CACHE_SLOTS], GI2_CACHE_SLOTS);
+    return min(gi2_young_count() + gi2_mature_count(), GI2_CACHE_SLOTS);
 }
 
-// Slot of this frame's batch entry j, or ~0u when the batch has no entry j.
+// Slot of this round's batch entry j, or ~0u when the batch has no entry j: the
+// young first, then the mature ones in turn.
 uint gi2_cache_batch_slot(uint j) {
-    uint count = gi2_live_count();
-    if (j >= count) {
+    uint first = min(gi2_young_count(), GI2_CACHE_BATCH);
+    if (j < first) {
+        return ckeys.key[2u * GI2_CACHE_SLOTS - j];
+    }
+    uint count = gi2_mature_count();
+    uint k = j - first;
+    if (gi2_young_only() || k >= count) {
         return ~0u;
     }
-    uint start = (gi2_frame() * GI2_CACHE_BATCH) % count;
-    return ckeys.key[GI2_CACHE_SLOTS + 1u + (start + j) % count];
+    uint start = (gi2_round() * GI2_CACHE_BATCH) % count;
+    return ckeys.key[GI2_CACHE_SLOTS + 1u + (start + k) % count];
 }

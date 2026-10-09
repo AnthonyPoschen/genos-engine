@@ -42,8 +42,9 @@ layout(std430, set = 0, binding = 8) buffer Out {
 layout(push_constant) uniform Push {
     // width, height, probe columns, probe rows
     uvec4 dims;
-    // rays per probe, tile size in pixels, z: bgra output (bit 0) and frames the
-    // scene has held still (bits 1-7, capped), w: frame
+    // rays per probe, tile size in pixels, z: bgra output (bit 0), frames the
+    // scene has held still (bits 1-7, capped), which rays run (bits 8-9,
+    // gi2_mode) and the light cache round (bits 10-31, gi2_round), w: frame
     uvec4 params;
 } pc;
 
@@ -59,6 +60,13 @@ uint gi2_rays() {
 // probes average that many frames' rays, each frame's set turned a new way.
 uint gi2_still() {
     return (pc.params.z >> 1u) & 127u;
+}
+
+// Which rays this dispatch runs: 0 all (one queue), 1 the picture's (pixels and
+// probe rays, in the frame), 2 the light cache's (gi2_compact, trace, light and
+// cache on the async compute queue, gi2_gpu.rs).
+uint gi2_mode() {
+    return (pc.params.z >> 8u) & 3u;
 }
 
 uint gi2_probe_at(uint i) {
@@ -214,7 +222,8 @@ bool gi2_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     uint r = ray - gi2_probe_rays();
     uint slot = gi2_cache_batch_slot(r / GI2_CACHE_RAYS);
     uint key = slot == ~0u ? 0u : ckeys.key[slot];
-    if (key == 0u) {
+    // A patch claimed while the list was built may not have its surface yet.
+    if (key == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
         return false;
     }
     n = cache.v[3u * slot + 1u].xyz;

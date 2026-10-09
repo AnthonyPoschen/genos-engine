@@ -34,7 +34,11 @@ uint gi2_hit_glow(vec3 p) {
 
 void main() {
     uint ray = gl_GlobalInvocationID.x;
-    if (ray >= gi2_all_rays()) {
+    uint mode = gi2_mode();
+    if (mode == 2u) {
+        ray += gi2_probe_rays();
+    }
+    if (ray >= (mode == 1u ? gi2_probe_rays() : gi2_all_rays())) {
         return;
     }
     uint at = gi2_hit_at(ray);
