@@ -974,13 +974,6 @@ const FLUSH_RAYS_MAX: u64 = 64;
 const FLUSH_RAY_BUDGET: u64 = 48_000;
 /// Passes in that build. Each pass reads the one before it and adds a bounce.
 const FLUSH_PASSES: u32 = 4;
-/// Sun-gone passes: the first drops the old bounce, then one pass per bounce
-/// the open yard needs. The shadow beside a wall reads a farther floor probe
-/// in the picture; more gather passes did not raise it.
-const NIGHT_HOPS: u32 = 8;
-/// Probe rays one night pass may spend. The pass has to finish inside the
-/// live picture's tenth of a second, with the passes that follow it.
-const NIGHT_RAY_BUDGET: u64 = 200_000;
 /// Distance at which `color` falls under [`VISIBLE_FLOOR`], in metres.
 pub fn visible_reach(color: [f32; 3]) -> f32 {
     let peak = color.iter().fold(0.0_f32, |m, c| m.max(c.abs()));
@@ -1266,16 +1259,6 @@ pub struct TierState {
     /// The sun, the sky, or a point lamp switched on or off on the last update.
     /// The world volume has to be rebuilt. A moved box does not.
     world_now: bool,
-    /// The sun or the sky went out on the last update. The first pass of that
-    /// build drops the old bounce. The picture keeps up with the rebuild.
-    sun_drop: bool,
-    /// Jacobi passes still due after the sun went out: one drop, then one pass
-    /// per bounce the ray trace keeps. Each pass is its own frame so it reads
-    /// the pass before it.
-    night_left: u32,
-    /// The last night pass has been scheduled. Commit then stops refine, so
-    /// later passes do not add bounces the ray trace does not count.
-    night_freeze: bool,
     /// The last batch was a flush that is allowed to run long. It must not
     /// shrink the fine shell.
     long_build: bool,
@@ -1351,9 +1334,6 @@ impl TierState {
             fine_depth: 16.0,
             sun_wide: false,
             world_now: false,
-            sun_drop: false,
-            night_left: 0,
-            night_freeze: false,
             long_build: false,
             seen: Vec::new(),
             impact: Vec::new(),
@@ -1428,11 +1408,6 @@ impl TierState {
                 .iter()
                 .flatten()
                 .any(|slot| slot.replace && slot.change_left > 0)
-    }
-
-    /// True when the last update removed the sun or the sky.
-    pub fn sun_drop(&self) -> bool {
-        self.sun_drop
     }
 
     /// Follow the scene, the camera and the lights. `materials` keys the surface
@@ -1547,17 +1522,11 @@ impl TierState {
         if sun_jump {
             self.sun_wide = true;
         }
-        // A jump that keeps the sun is not a drop. Only the light going out is.
-        // One drop, then one pass per bounce the reference counts.
-        self.sun_drop = self.sun_wide && went_dark;
         // A moved box changes the generation too. The world volume moves with the
         // light, not the boxes: when the sun or the sky moves or fades, and when a
         // light switches. Held until the tier went idle, the far yard kept the day
         // through a fast dusk and then dropped to the night in one frame.
         self.world_now = self.sun_wide || !flips.is_empty() || !suns.is_empty();
-        if self.sun_drop {
-            self.night_left = NIGHT_HOPS;
-        }
         if !reach.is_empty() || !suns.is_empty() || wide {
             self.lights = lights.to_vec();
             self.light_gen += 1;
@@ -2183,26 +2152,19 @@ impl TierState {
         // A replacing pass stores a short ray set and then holds it. A brick the
         // camera does not see takes a normal update instead, so that short set is
         // not what the picture shows when the camera turns toward the brick.
-        // A night hop has to cross the building, including bricks off screen.
-        // Downgrading those bricks would take them out of the hop.
-        let off_screen: Vec<usize> = if self.night_left > 0 {
-            Vec::new()
-        } else {
-            self.slots
-                .iter()
-                .enumerate()
-                .filter_map(|(index, slot)| {
-                    let slot = slot.as_ref()?;
-                    // A lamp that went out keeps its short result only on screen. Off screen,
-                    // that hold would leave the yard dark after the lamp comes back.
-                    // A lamp that came on still replaces off-screen bricks, in this build.
-                    (slot.replace
-                        && slot.darken
-                        && weight.get(index).copied().unwrap_or(0.0) <= 0.0)
-                        .then_some(index)
-                })
-                .collect()
-        };
+        let off_screen: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let slot = slot.as_ref()?;
+                // A lamp that went out keeps its short result only on screen. Off screen,
+                // that hold would leave the yard dark after the lamp comes back.
+                // A lamp that came on still replaces off-screen bricks, in this build.
+                (slot.replace && slot.darken && weight.get(index).copied().unwrap_or(0.0) <= 0.0)
+                    .then_some(index)
+            })
+            .collect();
         for index in off_screen {
             if let Some(slot) = self.slots[index].as_mut() {
                 slot.restart();
@@ -2304,12 +2266,8 @@ impl TierState {
         let mut items = Vec::new();
         let mut critical = 0;
         let mut spent = 0u64;
-        let night_hop = self.night_left > 0;
-        if night_hop {
-            self.push_night_hop(&mut items, &mut spent);
-        }
         let mut picked: Vec<(u32, u32, f32, u64)> = Vec::new();
-        if wide && !night_hop {
+        if wide {
             let mut chosen: Vec<(u32, u64, f32)> = Vec::new();
             let mut probes_n = 0u64;
             for &(_, _, _, _, _, _, index) in &due {
@@ -2365,7 +2323,7 @@ impl TierState {
                 spent += u64::from(left.count_ones()) * rays * u64::from(flush_passes);
                 picked.push((index, flush_passes, w, left));
             }
-        } else if !night_hop {
+        } else {
             // Bricks the picture does not use keep a quarter of the budget while any wait.
             // Their light feeds what it shows, so it converges wherever the camera is.
             let hidden = due.iter().any(|entry| entry.0 >= 3);
@@ -2421,42 +2379,40 @@ impl TierState {
                 count += extra as usize;
             }
         }
-        if !night_hop {
-            for &(index, passes, w, probes) in &picked {
-                let slot = self.slots[index as usize].as_ref().expect("due slot");
-                let class = self.class(slot).expect("due class");
-                let (rays, reset, history) = match class {
-                    0 => (first, true, None),
-                    REFINE_CLASS => (REFINE_RAYS, false, None),
-                    _ if slot.replace && slot.darken => (change_rays, false, Some(0)),
-                    _ if slot.replace => (change_rays, false, Some(1)),
-                    // A moving box blends. History 3 used to replace the stored light
-                    // and flush the picture on the first pass. The picture keeps the
-                    // last finished light until this run ends.
-                    _ => (change_rays, false, Some(change_history)),
+        for &(index, passes, w, probes) in &picked {
+            let slot = self.slots[index as usize].as_ref().expect("due slot");
+            let class = self.class(slot).expect("due class");
+            let (rays, reset, history) = match class {
+                0 => (first, true, None),
+                REFINE_CLASS => (REFINE_RAYS, false, None),
+                _ if slot.replace && slot.darken => (change_rays, false, Some(0)),
+                _ if slot.replace => (change_rays, false, Some(1)),
+                // A moving box blends. History 3 used to replace the stored light
+                // and flush the picture on the first pass. The picture keeps the
+                // last finished light until this run ends.
+                _ => (change_rays, false, Some(change_history)),
+            };
+            if w > 0.0 && class < REFINE_CLASS {
+                critical += 1;
+            }
+            for round in 0..passes {
+                let probes = if round == 0 { probes } else { slot.mask };
+                let history = if history == Some(0) && round >= 4 {
+                    // The floor is already the lamp-off light. Later passes
+                    // are for a face that is still dark, such as the box.
+                    Some(8)
+                } else {
+                    history
                 };
-                if w > 0.0 && class < REFINE_CLASS {
-                    critical += 1;
-                }
-                for round in 0..passes {
-                    let probes = if round == 0 { probes } else { slot.mask };
-                    let history = if history == Some(0) && round >= 4 {
-                        // The floor is already the lamp-off light. Later passes
-                        // are for a face that is still dark, such as the box.
-                        Some(8)
-                    } else {
-                        history
-                    };
-                    items.push(TierItem {
-                        slot: index,
-                        brick: slot.brick,
-                        rays,
-                        reset,
-                        probes,
-                        round,
-                        history,
-                    });
-                }
+                items.push(TierItem {
+                    slot: index,
+                    brick: slot.brick,
+                    rays,
+                    reset,
+                    probes,
+                    round,
+                    history,
+                });
             }
         }
         items.truncate(TIER_SLOT_CAP as usize);
@@ -2482,7 +2438,7 @@ impl TierState {
         // A forced flush spends more than a frame budget. Teaching that time
         // as the ray price shrinks later frames, and the outside shadow then
         // stops short of the ray trace.
-        self.long_build = night_hop || wide;
+        self.long_build = wide;
         self.last_budget = if self.long_build {
             Some(u64::MAX)
         } else {
@@ -2496,82 +2452,6 @@ impl TierState {
             used_slots,
             probe_rays: spent,
             rounds,
-        }
-    }
-
-    /// One sun-gone pass over every filled brick. The first pass drops the old
-    /// bounce. Each pass after reads that result and adds one bounce. The ray
-    /// trace stops at six bounces, so this does too.
-    fn push_night_hop(&mut self, items: &mut Vec<TierItem>, spent: &mut u64) {
-        let dropping = self.night_left == NIGHT_HOPS;
-        // The window follows a far camera, so most probes are empty ground.
-        // The night bounce that reaches the yard lives on the building and the
-        // ground beside it. Spending the rays there is what makes six bounces
-        // fit in the tenth of a second.
-        let hull = building_hull(&self.boxes);
-        let span = self.layout.brick_span();
-        let mut probes_n = 0u64;
-        let mut chosen = Vec::new();
-        for (index, slot) in self.slots.iter().enumerate() {
-            let Some(slot) = slot.as_ref() else { continue };
-            if !slot.filled || slot.mask == 0 {
-                continue;
-            }
-            if !dropping {
-                if let Some(hull) = hull.as_ref() {
-                    let center = [0, 1, 2].map(|i| (slot.brick[i] as f32 + 0.5) * span);
-                    let near = (0..3)
-                        .all(|i| center[i] >= hull.min[i] - 8.0 && center[i] <= hull.max[i] + 8.0);
-                    if !near {
-                        continue;
-                    }
-                }
-            }
-            probes_n += u64::from(slot.mask.count_ones());
-            chosen.push(index as u32);
-        }
-        // The drop only has to erase the sun. Later passes spend the rays on
-        // the building, where the lamp bounce is.
-        let (least, most) = if dropping { (16u64, 32u64) } else { (64, 256) };
-        let rays = if probes_n == 0 {
-            most as u32
-        } else {
-            (NIGHT_RAY_BUDGET / probes_n).clamp(least, most) as u32
-        };
-        // 7: the last pass lets a dark floor probe keep most of a lit floor
-        // probe two metres away. The doorway light dies in that gap otherwise.
-        let history = if dropping {
-            Some(2)
-        } else if self.night_left == 1 {
-            Some(7)
-        } else {
-            Some(1)
-        };
-        // The batch holds 1024 bricks. Ground at the yards goes first so the
-        // open yard and the shadow are not the ones cut off.
-        chosen.sort_by_key(|index| {
-            let brick = self.slots[*index as usize]
-                .as_ref()
-                .expect("night brick")
-                .brick;
-            (brick[1], -(brick[0].abs() + brick[2].abs()))
-        });
-        for index in chosen {
-            let slot = self.slots[index as usize].as_ref().expect("night brick");
-            *spent += u64::from(slot.mask.count_ones()) * u64::from(rays);
-            items.push(TierItem {
-                slot: index,
-                brick: slot.brick,
-                rays,
-                reset: false,
-                probes: slot.mask,
-                round: 0,
-                history,
-            });
-        }
-        self.night_left = self.night_left.saturating_sub(1);
-        if self.night_left == 0 {
-            self.night_freeze = true;
         }
     }
 
@@ -2871,25 +2751,15 @@ impl TierState {
                 slot.done = 0;
             }
         }
-        if self.night_freeze {
-            self.night_freeze = false;
-            for slot in self.slots.iter_mut().flatten() {
-                slot.samples = TARGET_SAMPLES;
-                slot.change_left = 0;
-                slot.replace = false;
-                slot.darken = false;
-                slot.again = false;
-            }
-        }
     }
 }
 
-/// The picture shows this build at once. A moving box blends, so a history of 3
-/// is not a flush. Lamp and sun replaces (0, 1, 2) and the last night pass (7) are.
+/// The picture shows this build at once. A moving box blends, so a change pass is
+/// not a flush. Lamp and sun replaces (history 0 and 1) are.
 pub fn picture_flushes(items: &[TierItem]) -> bool {
     items
         .iter()
-        .any(|item| item.history.is_some_and(|h| h <= 2 || h == 7))
+        .any(|item| item.history.is_some_and(|h| h <= 1))
 }
 
 /// The lowest `n` set bits of `bits`.

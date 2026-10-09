@@ -61,7 +61,6 @@ pub struct Renderer {
     /// Time constant of the shown tier light, seconds (0: the field as it lands).
     view_seconds: f32,
     /// Frames left in which floors drop the sun the probes still hold.
-    night_frames: u8,
     /// XZ of the last sun's travel direction.
     last_sun: [f32; 2],
     /// Debug view and lighting overrides ([`debug_view`]).
@@ -183,7 +182,6 @@ impl Renderer {
             last_draw: None,
             view_seconds: env_f32("GENOS_TIER_VIEW_MS")
                 .map_or(TIER_VIEW_SECONDS, |ms| ms.max(0.0) / 1000.0),
-            night_frames: 0,
             last_sun: [0.0, -1.0],
             debug: debug_view::DebugState::default(),
         })
@@ -477,16 +475,6 @@ impl Renderer {
             }
         }
         pack.last_sun = self.last_sun;
-        // The sun leaving. The picture shows each new gather at once for a
-        // short run, so the rebuild is on screen inside a tenth of a second.
-        // A far brick otherwise skips those steps and keeps the flush.
-        if self.tier.sun_drop() {
-            self.night_frames = 14;
-        }
-        let show_night = self.night_frames > 0;
-        if self.night_frames > 0 {
-            self.night_frames -= 1;
-        }
         // A sun or the sky came or went. The gather replaces the on-screen probes and
         // this picture shows that light, instead of blending toward it over later frames.
         let flush = self
@@ -494,12 +482,12 @@ impl Renderer {
             .tier_batch
             .as_ref()
             .is_some_and(|batch| crate::probe_tier::picture_flushes(&batch.items));
-        if flush || show_night {
+        if flush {
             self.gpu.view_weight = 1.0;
         }
         self.gpu.upload_scene(&pack)?;
         self.field_anchor = Some(pack::FieldAnchor::capture(&pack));
-        self.gpu.kick_light(wait_light || flush || show_night)?;
+        self.gpu.kick_light(wait_light || flush)?;
         self.commit_tier();
         if settle {
             self.settle_tier(world, &pack)?;
