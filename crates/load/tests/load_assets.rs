@@ -451,3 +451,69 @@ fn crc32(data: &[u8]) -> u32 {
     }
     crc
 }
+
+fn fixture_bytes(name: &str) -> Vec<u8> {
+    std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures").join(name)).unwrap()
+}
+
+/// Mean and largest channel difference against the PNG a reference decoder (libjpeg via
+/// Pillow) wrote. The IDCT and the chroma upsampling differ a little, the picture not.
+fn jpeg_error(name: &str) -> (f32, u8) {
+    let got = genos_load::decode_image(&fixture_bytes(&format!("{name}.jpg"))).unwrap();
+    let want = genos_load::decode_image(&fixture_bytes(&format!("{name}-expected.png"))).unwrap();
+    assert_eq!((got.width, got.height), (want.width, want.height));
+    let (mut sum, mut max) = (0u64, 0u8);
+    for (g, w) in got.pixels.chunks(4).zip(want.pixels.chunks(4)) {
+        assert_eq!(g[3], 255);
+        for c in 0..3 {
+            let d = g[c].abs_diff(w[c]);
+            sum += d as u64;
+            max = max.max(d);
+        }
+    }
+    (sum as f32 / (got.pixels.len() / 4 * 3) as f32, max)
+}
+
+#[test]
+fn jpeg_baseline_444_matches_reference_decoder() {
+    let (mean, max) = jpeg_error("gradient-444");
+    assert!(mean < 0.6 && max <= 3, "mean {mean} max {max}");
+}
+
+#[test]
+fn jpeg_baseline_420_matches_reference_decoder() {
+    let (mean, max) = jpeg_error("gradient-420");
+    assert!(mean < 0.6 && max <= 3, "mean {mean} max {max}");
+}
+
+#[test]
+fn jpeg_greyscale_matches_reference_decoder() {
+    let (mean, max) = jpeg_error("gradient-grey");
+    assert!(mean < 0.6 && max <= 3, "mean {mean} max {max}");
+}
+
+#[test]
+fn jpeg_progressive_matches_reference_decoder() {
+    let (mean, max) = jpeg_error("gradient-progressive");
+    assert!(mean < 0.6 && max <= 3, "mean {mean} max {max}");
+}
+
+#[test]
+fn jpeg_restart_markers_match_reference_decoder() {
+    let (mean, max) = jpeg_error("gradient-restart");
+    assert!(mean < 0.6 && max <= 3, "mean {mean} max {max}");
+}
+
+#[test]
+fn jpeg_truncated_does_not_panic_and_arithmetic_is_refused() {
+    let bytes = fixture_bytes("gradient-444.jpg");
+    // A cut file must not panic; whether the partial scan decodes is the decoder's call.
+    for cut in [2, 20, 200, bytes.len() / 3, bytes.len() - 2] {
+        let _ = genos_load::decode_image(&bytes[..cut]);
+    }
+    let mut arith = bytes.clone();
+    // Turn the SOF0 marker into SOF9 (arithmetic coding).
+    let at = arith.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+    arith[at + 1] = 0xC9;
+    assert_eq!(genos_load::decode_image(&arith), Err(LoadError::Unrecognized));
+}

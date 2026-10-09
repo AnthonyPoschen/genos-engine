@@ -134,6 +134,10 @@ name = "genos-input"
 version = "0.1.0"
 
 [[package]]
+name = "genos-json"
+version = "0.1.0"
+
+[[package]]
 name = "genos-load"
 version = "0.1.0"
 dependencies = [
@@ -155,6 +159,7 @@ version = "0.1.0"
 name = "genos-mcp"
 version = "0.1.0"
 dependencies = [
+ "genos-json",
  "genos-physics",
  "genos-render",
  "genos-scene",

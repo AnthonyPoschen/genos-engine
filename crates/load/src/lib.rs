@@ -7,6 +7,7 @@ mod animation;
 mod bin;
 mod error;
 mod inflate;
+mod jpeg;
 mod material;
 mod mesh;
 mod png;
@@ -29,12 +30,21 @@ fn read(source: &dyn ByteSource) -> Result<Vec<u8>, LoadError> {
     source.read_bytes()
 }
 
-/// Decode a PNG into an RGBA8 image.
+/// Decode a PNG or a JPEG into an RGBA8 image. The format comes from the bytes.
 pub fn load_image(source: &dyn ByteSource) -> Result<Image, LoadError> {
-    png::decode_png(&read(source)?)
+    decode_image(&read(source)?)
 }
 
-/// Decode a PNG and keep `name` as the texture's reference.
+/// Decode PNG or JPEG bytes into an RGBA8 image.
+pub fn decode_image(bytes: &[u8]) -> Result<Image, LoadError> {
+    if bytes.starts_with(&[0xFF, 0xD8]) {
+        jpeg::decode_jpeg(bytes)
+    } else {
+        png::decode_png(bytes)
+    }
+}
+
+/// Decode a PNG or a JPEG and keep `name` as the texture's reference.
 pub fn load_texture(source: &dyn ByteSource, name: &str) -> Result<Texture, LoadError> {
     if name.is_empty() {
         return Err(LoadError::Unrecognized);

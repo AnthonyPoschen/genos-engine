@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/input",
     "crates/math",
+    "crates/json",
     "crates/physics",
     "crates/scene",
     "crates/mcp",
