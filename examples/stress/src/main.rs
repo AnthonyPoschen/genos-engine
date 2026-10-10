@@ -43,6 +43,7 @@ const USAGE: &str = "genos-stress [options]
   --sun-speed X             day clock multiplier (default 1)
   --freeze-sun              hold the sun at --time
   --no-sky                  no sky light: only the sun and the lamps
+  --scene FILE              a scene file (genos-camera's .rhai) in place of the building; nothing moves
   --still-boxes             hold the coloured boxes
   --seed N                  lamp and box layout seed (default 1)
   --view hall|roomA         start (and benchmark) viewpoint (default hall)
@@ -101,6 +102,7 @@ struct Options {
     sun_speed: f32,
     freeze_sun: bool,
     no_sky: bool,
+    scene: Option<PathBuf>,
     still_boxes: bool,
     seed: u64,
     view: View,
@@ -153,6 +155,7 @@ fn options() -> Result<Options, String> {
         sun_speed: 1.0,
         freeze_sun: false,
         no_sky: false,
+        scene: None,
         still_boxes: false,
         seed: 1,
         view: View::Hall,
@@ -195,6 +198,7 @@ fn options() -> Result<Options, String> {
             "--sun-speed" => opts.sun_speed = parse(&arg, &value()?)?,
             "--freeze-sun" => opts.freeze_sun = true,
             "--no-sky" => opts.no_sky = true,
+            "--scene" => opts.scene = Some(PathBuf::from(value()?)),
             "--still-boxes" => opts.still_boxes = true,
             "--seed" => opts.seed = parse(&arg, &value()?)?,
             "--view" => {
@@ -411,6 +415,9 @@ fn run() -> Result<(), String> {
     stage.sun_frozen = opts.freeze_sun;
     stage.sky_on = !opts.no_sky;
     stage.boxes_still = opts.still_boxes;
+    if let Some(path) = &opts.scene {
+        stage.set_room(genos_scene::load_path(path)?);
+    }
     for (path, [x, y, z, scale]) in &opts.gltf {
         let model =
             genos_load::load_gltf_file(path).map_err(|e| format!("{}: {e}", path.display()))?;

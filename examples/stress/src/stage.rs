@@ -81,6 +81,9 @@ pub struct Stage {
     /// switch the frame loop hands to the renderer.
     pub gi_v2: bool,
     pub gi_v2_set: Option<bool>,
+    /// A scene file in place of the building (--scene): its walls, solids and
+    /// lights as they are; nothing moves, the sun, sky and lamp knobs do nothing.
+    pub room: Option<genos_scene::Scene>,
 }
 
 impl Stage {
@@ -112,6 +115,7 @@ impl Stage {
             lamps_still: false,
             gi_v2: std::env::var("GENOS_GI").is_ok_and(|v| v == "v2"),
             gi_v2_set: None,
+            room: None,
         };
         stage.apply();
         stage
@@ -119,7 +123,7 @@ impl Stage {
 
     /// Rebuild the building at another scale. The lamp mix and clocks carry over.
     pub fn set_scale(&mut self, scale: Scale) {
-        if scale == self.scale {
+        if scale == self.scale || self.room.is_some() {
             return;
         }
         self.scale = scale;
@@ -149,8 +153,20 @@ impl Stage {
         self.apply();
     }
 
+    /// Put a scene file in place of the building (--scene).
+    pub fn set_room(&mut self, room: genos_scene::Scene) {
+        self.world = World::from_scene(room.clone());
+        self.room = Some(room);
+        self.apply();
+    }
+
     /// Write the boxes, lamps, sun and sky for the current clocks into the world.
     pub fn apply(&mut self) {
+        if let Some(room) = &self.room {
+            self.world.scene.lights = room.lights.clone();
+            self.world.scene.sky = room.sky.clone();
+            return;
+        }
         self.building
             .place_movers(&mut self.world.scene.solids, self.box_clock);
         let mut lights = self.building.lamps(self.mix, self.lamp_clock, self.power);
