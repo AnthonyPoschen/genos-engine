@@ -15,9 +15,13 @@
 // - a kept ray whose path crosses the bounds of an object that moved, came or went
 //   since the last frame is dropped for good (the changes block, gi2_gpu.rs);
 // - every kept stratum is dropped when the traced world changes as a whole.
-// Each of the R cells of the stratified pattern is the mean of the rays it holds
-// (this frame's always among them), so a dropped ray thins a cell, never darkens
-// it.
+// Each of the R cells of the stratified pattern is the mean of its rays' SH
+// projections (this frame's ray always among them), so a dropped ray thins a cell,
+// never darkens it. Each ray is projected along its own direction: the strata of a
+// moving probe were traced from different world cells, so their turns differ and a
+// cell's rays point all over the ring; projecting the cell's mean light along its
+// mean direction (as before 2026-10-10) bent that light toward the normal and drew
+// moving probes 5-30 % too bright, in blotches.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "gi2_common.glsl"
@@ -101,8 +105,10 @@ void main() {
         vec3 from = pp.xyz + n * 0.02;
         uint samples = 0u;
         [[dont_unroll]] for (uint k = 0u; k < rays; k++) {
-            vec3 sum_l = vec3(0.0);
-            vec3 sum_d = vec3(0.0);
+            vec3 sum_ly[9];
+            [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
+                sum_ly[j] = vec3(0.0);
+            }
             float m = 0.0;
             [[dont_unroll]] for (uint s = 0u; s < GI2_STRATA; s++) {
                 if (src[s] == 0u) {
@@ -140,19 +146,21 @@ void main() {
                 if (len < 1.0e-4 || dot(d, n) <= 0.0) {
                     continue;
                 }
-                sum_l += gi2_kept_light(h);
-                sum_d += d / len;
+                vec3 l = gi2_kept_light(h);
+                float y[9];
+                gi2_sh9(d / len, y);
+                [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
+                    sum_ly[j] += l * y[j];
+                }
                 m += 1.0;
             }
             if (m > 0.0) {
                 samples += uint(m);
-                vec3 l = sum_l / m;
-                float y[9];
-                gi2_sh9(normalize(sum_d), y);
                 [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
-                    c[3u * j] += l.r * y[j];
-                    c[3u * j + 1u] += l.g * y[j];
-                    c[3u * j + 2u] += l.b * y[j];
+                    vec3 v = sum_ly[j] / m;
+                    c[3u * j] += v.r;
+                    c[3u * j + 1u] += v.g;
+                    c[3u * j + 2u] += v.b;
                 }
             }
         }
