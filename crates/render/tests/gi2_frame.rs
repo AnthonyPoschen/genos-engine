@@ -228,66 +228,186 @@ fn gi_v2_draws_emitted_light_and_bounces_it() {
     );
 }
 
-/// The screen probes average up to 32 frames of rays while nothing changes
-/// (gi2_gather.comp). Any change (a lamp, an object, the camera) must restart that
-/// average on the very next frame, so the picture never lags behind the scene: the
-/// still count is 0 on the first frame after the change, the probes keep only that
-/// frame's rays (weight 1 / (0 + 1)), and the picture already differs from the one
-/// before.
+/// Rays per placed probe GI v2's screen probes held in the last frame drawn.
+fn samples_per_probe(renderer: &mut Renderer) -> f32 {
+    let [rays, probes] = renderer.gi_v2_probe_samples();
+    assert!(probes > 0, "the probes are placed");
+    rays as f32 / probes as f32
+}
+
+/// Draw the still hall until every probe holds all its strata (8 frames of 64
+/// rays), well before the frame settles and stops running the probes.
+fn fill_strata(
+    window: &mut Window,
+    renderer: &mut Renderer,
+    world: &World,
+    camera: &Camera,
+) -> Vec<u8> {
+    let mut picture = Vec::new();
+    for _ in 0..10 {
+        picture = draw(window, renderer, world, camera);
+    }
+    let held = samples_per_probe(renderer);
+    assert!(
+        held > 0.95 * 512.0,
+        "a still probe holds its last 8 strata ({held} rays)"
+    );
+    picture
+}
+
+fn changed_pixels(a: &[u8], b: &[u8]) -> usize {
+    a.iter().zip(b).filter(|(x, y)| x.abs_diff(**y) > 2).count()
+}
+
+/// GI v2 keeps visibility (ray hits), never light: a lamp that moves, dims or turns
+/// off, and a sun or sky that changes, show in full on the next frame while every
+/// probe keeps all its kept rays, the far ones and the ones the lamp lights alike.
 #[test]
-fn gi_v2_still_averaging_restarts_on_any_change() {
+fn gi_v2_probes_keep_their_rays_when_the_light_changes() {
     let (_gpu, mut window, mut renderer) = open();
     renderer.set_gi_v2(true).expect("GI v2");
     let base: Scene = shipped_hall().scene;
-    assert!(!base.lights.is_empty() && !base.solids.is_empty());
+    assert!(!base.lights.is_empty());
     let camera = Camera::opening();
-    let mut moved_camera = Camera::opening();
-    moved_camera.set_pose(genos_scene::Vec3::new(0.3, 1.7, 0.0), 0.2, 0.0);
-    let mut relit = base.clone();
-    relit.lights[0].color = [
-        relit.lights[0].color[0] * 0.25,
-        relit.lights[0].color[1] * 0.25,
-        relit.lights[0].color[2] * 2.0,
+    let mut moved_lamp = base.clone();
+    moved_lamp.lights[0].position.x += 1.5;
+    let mut dimmed = base.clone();
+    dimmed.lights[0].color = [
+        dimmed.lights[0].color[0] * 0.25,
+        dimmed.lights[0].color[1] * 0.25,
+        dimmed.lights[0].color[2] * 2.0,
     ];
-    let mut moved_object = base.clone();
-    moved_object.solids[0].position.x += 0.5;
-    let changes: [(&str, Scene, &Camera); 3] = [
-        ("a lamp's colour", relit, &camera),
-        ("an object's place", moved_object, &camera),
-        ("the camera", base.clone(), &moved_camera),
-    ];
+    let mut off = base.clone();
+    off.lights.remove(0);
+    let mut sun = base.clone();
+    sun.lights.push(genos_scene::Light {
+        position: genos_scene::Vec3::new(0.0, 0.0, 0.0),
+        color: [2.0, 1.8, 1.5],
+        direction: genos_scene::Vec3::new(0.3, -1.0, 0.2),
+    });
+    sun.sky = Some(genos_scene::Sky {
+        color: [0.4, 0.5, 0.7],
+    });
     let still_world = World::from_scene(base.clone());
-    for (what, scene, cam) in changes {
-        let mut before = Vec::new();
-        for _ in 0..40 {
-            before = draw(&mut window, &mut renderer, &still_world, &camera);
-        }
-        let held = renderer.gi_v2_still_frames();
-        assert!(
-            held >= 32,
-            "{what}: the probes average while still ({held} frames)"
+    let changes: [(&str, Scene); 4] = [
+        ("a lamp moving", moved_lamp),
+        ("a lamp dimming", dimmed),
+        ("a lamp going off", off),
+        ("the sun and sky changing", sun),
+    ];
+    for (what, scene) in changes {
+        let before = fill_strata(&mut window, &mut renderer, &still_world, &camera);
+        let after = draw(
+            &mut window,
+            &mut renderer,
+            &World::from_scene(scene),
+            &camera,
         );
-        let changed = World::from_scene(scene);
-        let after = draw(&mut window, &mut renderer, &changed, cam);
-        assert_eq!(
-            renderer.gi_v2_still_frames(),
-            0,
-            "{what}: the first frame after the change starts the average over"
-        );
-        let diff = before
-            .iter()
-            .zip(&after)
-            .filter(|(a, b)| a.abs_diff(**b) > 2)
-            .count();
+        let held = samples_per_probe(&mut renderer);
         assert!(
-            diff > 0,
+            held > 0.95 * 512.0,
+            "{what}: every probe keeps its rays, near the change or far from it ({held})"
+        );
+        assert!(
+            changed_pixels(&before, &after) > 0,
             "{what}: the first frame after the change shows it"
         );
-        let _ = draw(&mut window, &mut renderer, &changed, cam);
-        assert_eq!(
-            renderer.gi_v2_still_frames(),
-            1,
-            "{what}: and counts on from there while it holds"
-        );
     }
+}
+
+/// An object that moves drops the kept rays whose paths cross where it was or is,
+/// and only those: the probes whose rays never reach it keep theirs. A new frame of
+/// rays always comes with it, so the change shows at once.
+#[test]
+fn gi_v2_moving_object_drops_only_the_rays_it_crosses() {
+    let (_gpu, mut window, mut renderer) = open();
+    renderer.set_gi_v2(true).expect("GI v2");
+    let base: Scene = shipped_hall().scene;
+    assert!(!base.solids.is_empty());
+    let camera = Camera::opening();
+    let mut moved = base.clone();
+    moved.solids[0].position.x += 0.5;
+    let before = fill_strata(
+        &mut window,
+        &mut renderer,
+        &World::from_scene(base),
+        &camera,
+    );
+    let full = samples_per_probe(&mut renderer);
+    let after = draw(
+        &mut window,
+        &mut renderer,
+        &World::from_scene(moved),
+        &camera,
+    );
+    let held = samples_per_probe(&mut renderer);
+    assert!(
+        held < full - 1.0,
+        "the rays that cross the moved object are dropped ({full} -> {held})"
+    );
+    assert!(
+        held > 0.5 * 512.0,
+        "the probes whose rays miss it keep their strata ({held})"
+    );
+    assert!(
+        changed_pixels(&before, &after) > 0,
+        "the first frame after the move shows it"
+    );
+}
+
+/// A camera that moves keeps a probe's strata only where reprojection holds: the
+/// probe that stood at the probe's place last frame lent its strata, and the probe
+/// still lies on their plane within half a spacing. A slight turn keeps most rays;
+/// a jump keeps few (only probes that land on the same plane nearby).
+#[test]
+fn gi_v2_camera_keeps_rays_only_where_reprojection_holds() {
+    let (_gpu, mut window, mut renderer) = open();
+    renderer.set_gi_v2(true).expect("GI v2");
+    let world = shipped_hall();
+    let camera = Camera::opening();
+    let p = camera.position;
+    let mut turned = Camera::opening();
+    turned.set_pose(p, camera.yaw + 0.002, camera.pitch);
+    let mut jumped = Camera::opening();
+    jumped.set_pose(genos_scene::Vec3::new(0.3, 1.7, 0.0), 0.2, 0.0);
+    fill_strata(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(&mut window, &mut renderer, &world, &turned);
+    let held = samples_per_probe(&mut renderer);
+    assert!(
+        held > 0.6 * 512.0,
+        "a slight turn keeps most kept rays ({held})"
+    );
+    fill_strata(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(&mut window, &mut renderer, &world, &jumped);
+    let held = samples_per_probe(&mut renderer);
+    assert!(held < 0.25 * 512.0, "a jump keeps few ({held})");
+}
+
+/// The traced world changing as a whole (here the floor's colour, which kept hits
+/// hold) drops every kept ray: each probe is back to this frame's 64 rays, then
+/// refills one stratum a frame.
+#[test]
+fn gi_v2_floor_change_drops_all_kept_rays() {
+    let (_gpu, mut window, mut renderer) = open();
+    renderer.set_gi_v2(true).expect("GI v2");
+    let base: Scene = shipped_hall().scene;
+    let camera = Camera::opening();
+    let mut floor = base.clone();
+    floor.floor.color = [0.2, 0.6, 0.3];
+    fill_strata(
+        &mut window,
+        &mut renderer,
+        &World::from_scene(base),
+        &camera,
+    );
+    let changed = World::from_scene(floor);
+    let _ = draw(&mut window, &mut renderer, &changed, &camera);
+    let held = samples_per_probe(&mut renderer);
+    assert!(held <= 64.5, "only this frame's rays are left ({held})");
+    let _ = draw(&mut window, &mut renderer, &changed, &camera);
+    let held = samples_per_probe(&mut renderer);
+    assert!(
+        held > 64.5 && held <= 128.5,
+        "the next frame keeps the first and adds its own ({held})"
+    );
 }

@@ -791,6 +791,13 @@ impl Renderer {
         self.gpu.gi2_still_frames()
     }
 
+    /// GI v2's screen probes in the last frame drawn: the rays they held, kept
+    /// strata included, and the probes placed. Rays over probes is each probe's
+    /// effective sample count (up to 8 strata of 64). Waits for that frame.
+    pub fn gi_v2_probe_samples(&mut self) -> [u32; 2] {
+        self.gpu.gi2_probe_samples()
+    }
+
     /// How long each pipeline took to build, in build order.
     pub fn pipeline_times(&self) -> Vec<(String, Duration)> {
         self.gpu.pipeline_times.clone()
@@ -4097,6 +4104,7 @@ impl Gpu {
         self.write_buffer(&self.scene_buf, &bytes)?;
         self.frame_bytes.clone_from(&bytes);
         self.gi2.light_scene = gi2_light_scene(pack, &bytes);
+        self.gi2.trace_key = gi2_trace_key(pack);
         for (index, cascade) in pack.cascades.iter().enumerate() {
             self.light_cols[index] = (cascade.count_x + 7) / 8;
             self.light_rows[index] = (cascade.count_z + 7) / 8;

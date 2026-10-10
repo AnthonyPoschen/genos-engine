@@ -40,6 +40,14 @@ pub(crate) const GI2_RAYS: u32 = 64;
 const GI2_CACHE_SLOTS: u64 = 262144;
 const GI2_CACHE_BATCH: u32 = 16384;
 const GI2_CACHE_RAYS: u32 = 16;
+/// Strata of the screen probes' ray directions, one traced per frame, all kept
+/// (gi2_common.glsl GI2_STRATA): the visibility history cap.
+pub(crate) const GI2_STRATA: u32 = 8;
+/// Bounds of moved objects one frame can list (gi2_common.glsl GI2_CHANGES); past
+/// that every kept stratum is dropped.
+const GI2_CHANGES: usize = 64;
+/// Vec4s before the bounds in the changes block (gi2_common.glsl GI2_CHANGE_HEAD).
+const GI2_CHANGE_HEAD: usize = 5;
 /// GI v2 counts as settled once the scene block (camera included) has stayed the
 /// same for this many frames (the screen probes average up to 32 frames' rays,
 /// gi2_gather.comp) and a full sweep of the light cache changed no patch
@@ -67,6 +75,21 @@ pub(crate) struct Gi2 {
     cache_clear: bool,
     /// The G-buffer is new and gets filled with empty records first.
     gbuf_clear: bool,
+    /// The work buffer is new: zeroed first, so no probe keeps a stratum.
+    work_clear: bool,
+    /// The traced world as of the last frame's passes: the scene block (its
+    /// occluder list is compared, gi2_changes) and the key of what else is traced
+    /// (meshes, floor, roof); a change of the key drops every kept stratum.
+    kept_bytes: Vec<u8>,
+    kept_key: u64,
+    /// Key of the traced world besides the occluders (set with the scene upload).
+    pub(crate) trace_key: u64,
+    /// Per frame slot, read back: rays the screen probes held and probes placed
+    /// (gi2_gather.comp). The last frame read and its slot.
+    probe_samples: [u32; 2],
+    last_slot: usize,
+    /// Frames the probes ran: which views block is last frame's (its parity).
+    probe_runs: u32,
     frame: u32,
     /// Hash of what GI v2 sees (scene block, traced and drawn meshes), and frames
     /// it has stayed the same.
@@ -144,6 +167,13 @@ impl Default for Gi2 {
             cache: Buffer::empty(),
             cache_clear: false,
             gbuf_clear: false,
+            work_clear: false,
+            kept_bytes: Vec::new(),
+            kept_key: 0,
+            trace_key: 0,
+            probe_samples: [0; 2],
+            last_slot: 0,
+            probe_runs: 0,
             frame: 0,
             scene_hash: 0,
             draw_key: 0,
@@ -567,10 +597,20 @@ impl Gpu {
         let cols = w.div_ceil(tile);
         let rows = h.div_ceil(tile);
         let probes = (cols * rows) as u64;
-        let rays = probes * GI2_RAYS as u64 + (GI2_CACHE_BATCH * GI2_CACHE_RAYS) as u64;
         let pixels = w as u64 * h as u64;
-        // Probes (2), one slot per ray (hit, then its light), SH and filtered SH (7 + 7).
-        let work_vec4 = 2 * probes + rays + 14 * probes;
+        // Probes (2), one slot per light cache ray (hit, then its light), SH and
+        // filtered SH (7 + 7), strata (2 per probe and stratum), kept hits and their
+        // light (a uint each), the changes block (gi2_common.glsl).
+        let kept = probes * GI2_RAYS as u64 * GI2_STRATA as u64;
+        let cache_rays = (GI2_CACHE_BATCH * GI2_CACHE_RAYS) as u64;
+        let work_vec4 = 2 * probes
+            + cache_rays
+            + 14 * probes
+            + 2 * GI2_STRATA as u64 * probes
+            + kept
+            + kept / 4
+            + (GI2_CHANGE_HEAD + GI2_CHANGES) as u64
+            + 4 * probes;
         let mut gbuf = std::mem::replace(&mut self.gi2.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.gi2.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.gi2.out, Buffer::empty());
@@ -608,6 +648,7 @@ impl Gpu {
         self.gi2.out = self.make_buffer(pixels * 4, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.gi2.dims = [w, h, cols, rows];
         self.gi2.gbuf_clear = true;
+        self.gi2.work_clear = true;
         self.write_light_set(0)?;
         self.write_light_set(1)?;
         self.write_gi2_sets()
@@ -714,6 +755,16 @@ impl Gpu {
         self.gi2.still
     }
 
+    /// Rays the screen probes held in the last frame drawn, and probes placed
+    /// (gi2_gather.comp): waits for that frame.
+    pub(crate) fn gi2_probe_samples(&mut self) -> [u32; 2] {
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
+        self.read_gi2_stats(self.gi2.last_slot)
+            .map_or(self.gi2.probe_samples, |w| [w[6], w[7]])
+    }
+
     /// The picture has stopped changing: a frame drawn from held light has been
     /// submitted after another, so one is on screen.
     fn gi2_picture_held(&self) -> bool {
@@ -739,6 +790,17 @@ impl Gpu {
         }
         // This slot's last frame is done (its fence was waited): read its counters
         // (the async queue's come back with its own submission).
+        if let Ok(words) = self.read_gi2_stats(slot) {
+            self.gi2.probe_samples = [words[6], words[7]];
+            if words[7] > 0 && std::env::var_os("GENOS_GI_DEBUG").is_some() {
+                eprintln!(
+                    "gi2 probes rays {} probes {} per_probe {:.1}",
+                    words[6],
+                    words[7],
+                    words[6] as f64 / words[7] as f64
+                );
+            }
+        }
         if !self.gi2.cache_clear && !world {
             if !self.gi2.stats_round[slot] {
                 // No light cache round ran in that frame.
@@ -762,6 +824,10 @@ impl Gpu {
                 self.gi2.world_hold = 2;
                 (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache_keys.buffer, 0, u64::MAX, 0);
                 (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache.buffer, 0, u64::MAX, 0);
+            }
+            if self.gi2.work_clear {
+                self.gi2.work_clear = false;
+                (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.work.buffer, 0, u64::MAX, 0);
             }
             if self.gi2.gbuf_clear {
                 self.gi2.gbuf_clear = false;
@@ -1051,6 +1117,75 @@ impl Gpu {
             self.gi2.quiet = 0;
         }
         self.gi2.stats_still[slot] = self.gi2.still;
+        self.gi2.last_slot = slot;
+        // What moved in the traced world since the last frame: the probes drop the
+        // kept rays that cross it (gi2_gather.comp). Light needs nothing here: every
+        // kept hit is shaded again each frame.
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            self.gi2.trace_key.hash(&mut hasher);
+            self.mesh_field_key.hash(&mut hasher);
+            hasher.finish()
+        };
+        let frozen = self.gi2_stats().seen_settled == 1;
+        let had = !self.gi2.kept_bytes.is_empty() && key == self.gi2.kept_key;
+        let changes = if had {
+            gi2_changes(&self.gi2.kept_bytes, &self.frame_bytes)
+        } else {
+            None
+        };
+        let mut block = vec![0f32; 4 * (GI2_CHANGE_HEAD + GI2_CHANGES)];
+        block[2] = (self.gi2.probe_runs & 1) as f32;
+        match &changes {
+            None => block[1] = 1.0,
+            Some(list) => {
+                block[0] = list.len() as f32;
+                for (j, b) in list.iter().enumerate() {
+                    let at = 4 * (GI2_CHANGE_HEAD + j);
+                    block[at..at + 4].copy_from_slice(b);
+                }
+            }
+        }
+        if had {
+            // Last frame's camera (scene_data.glsl): eye at byte 48, the basis at 528.
+            let f = |at: usize| {
+                let b = &self.gi2.kept_bytes[at..at + 4];
+                f32::from_le_bytes([b[0], b[1], b[2], b[3]])
+            };
+            for (v, at) in [(1usize, 48usize), (2, 528), (3, 544), (4, 560)] {
+                for c in 0..4 {
+                    block[4 * v + c] = f(at + 4 * c);
+                }
+            }
+            block[4 + 3] = 1.0;
+        }
+        // A frame drawn from held light runs no probes: what it saw is still what
+        // the probes last ran on.
+        if !frozen {
+            self.gi2.kept_key = key;
+            self.gi2.kept_bytes.clone_from(&self.frame_bytes);
+            self.gi2.probe_runs = self.gi2.probe_runs.wrapping_add(1);
+        }
+        let block_at = 16
+            * (2 * probes as u64
+                + (GI2_CACHE_BATCH * GI2_CACHE_RAYS) as u64
+                + 14 * probes as u64
+                + 2 * GI2_STRATA as u64 * probes as u64
+                + probe_rays as u64 * GI2_STRATA as u64 * 5 / 4);
+        let used = 4 * (GI2_CHANGE_HEAD + changes.as_ref().map_or(0, |l| l.len()));
+        unsafe {
+            // The last frame's passes are done with the block before it is written.
+            self.memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000);
+            (self.fns.cmd_update_buffer)(
+                self.cmd,
+                self.gi2.work.buffer,
+                block_at,
+                used as u64 * 4,
+                block.as_ptr() as *const c_void,
+            );
+            self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+        }
         // The light alone (no camera): while it holds and a full sweep has changed
         // no mature patch, rounds relight young patches only. Any change goes back
         // to full sweeps at once.
@@ -1082,10 +1217,10 @@ impl Gpu {
         self.copy_image_buffer(image, 6, self.gi2.out.buffer, w, h, true);
         self.memory_barrier(0x80 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
         let set = self.gi2.sets[slot];
-        // Settled: the probes and the light cache hold their light, and only the
-        // pixels' direct light and the final pass run, so a still scene draws the
-        // same picture every frame (no residual cache drift) and idles cheaply.
-        let frozen = self.gi2_stats().seen_settled == 1;
+        // Settled (frozen above): the probes and the light cache hold their light,
+        // and only the pixels' direct light and the final pass run, so a still
+        // scene draws the same picture every frame (no residual cache drift) and
+        // idles cheaply.
         self.gi2.held = if frozen { self.gi2.held.saturating_add(1) } else { 0 };
         // A light cache round is due (GENOS_GI2_CACHE_HZ caps them per second). On
         // the async queue (GENOS_GI2_ASYNC=1) it goes there, else into this frame;
@@ -1119,13 +1254,14 @@ impl Gpu {
         } else {
             pc[6] |= 1 << 8;
         }
+        let kept = probe_rays * GI2_STRATA;
         let groups: Vec<(usize, u32, u32)> = if frozen {
             vec![(3, (w * h).div_ceil(64), 1), (7, w.div_ceil(8), h.div_ceil(8))]
         } else if !round {
             vec![
                 (1usize, probes.div_ceil(64), 1u32),
                 (2, probe_rays.div_ceil(64), 1),
-                (3, (w * h + probe_rays).div_ceil(64), 1),
+                (3, (w * h + kept).div_ceil(64), 1),
                 (4, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
                 (7, w.div_ceil(8), h.div_ceil(8)),
@@ -1135,7 +1271,7 @@ impl Gpu {
                 (0usize, (GI2_CACHE_SLOTS as u32).div_ceil(64), 1u32),
                 (1, probes.div_ceil(64), 1),
                 (2, rays.div_ceil(64), 1),
-                (3, (w * h + rays).div_ceil(64), 1),
+                (3, (w * h + kept + rays - probe_rays).div_ceil(64), 1),
                 (4, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
                 (6, GI2_CACHE_BATCH.div_ceil(64), 1),
@@ -1286,6 +1422,63 @@ impl Gpu {
         }
         self.gi2.ready = false;
     }
+}
+
+/// Spheres (centre, radius) around every occluder that moved, came or went between
+/// two scene blocks (`pack::scene_bytes`): the bounds before and after, so a kept
+/// ray that crosses either sees something else now. None when there are more than
+/// GI2_CHANGES (drop every kept ray instead). Lamps are not compared: kept hits are
+/// shaded again every frame, so light needs no change list.
+pub(crate) fn gi2_changes(old: &[u8], new: &[u8]) -> Option<Vec<[f32; 4]>> {
+    fn occs(bytes: &[u8]) -> Vec<&[u8]> {
+        let word = |at: usize| {
+            bytes
+                .get(at * 4..at * 4 + 4)
+                .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])) as usize
+        };
+        let start = crate::pack::SCENE_TAIL + word(0) * 32;
+        (0..word(1))
+            .filter_map(|i| bytes.get(start + i * 64..start + i * 64 + 64))
+            .collect()
+    }
+    fn bounds(rec: &[u8]) -> [f32; 4] {
+        let f = |i: usize| f32::from_le_bytes([rec[i * 4], rec[i * 4 + 1], rec[i * 4 + 2], rec[i * 4 + 3]]);
+        // center_shape xyz; extent: x and z half extents, y full height, w radius.
+        let (hx, hy, hz, r) = (f(4).abs(), f(5).abs() * 0.5, f(6).abs(), f(7).abs());
+        let (hx, hz) = (hx.max(r), hz.max(r));
+        [f(0), f(1), f(2), (hx * hx + hy * hy + hz * hz).sqrt() + 0.05]
+    }
+    let (a, b) = (occs(old), occs(new));
+    if a == b {
+        return Some(Vec::new());
+    }
+    let left: std::collections::HashSet<&[u8]> = a.iter().copied().collect();
+    let right: std::collections::HashSet<&[u8]> = b.iter().copied().collect();
+    let mut out = Vec::new();
+    for rec in a.iter().filter(|r| !right.contains(*r)).chain(b.iter().filter(|r| !left.contains(*r))) {
+        if out.len() == GI2_CHANGES {
+            return None;
+        }
+        out.push(bounds(rec));
+    }
+    Some(out)
+}
+
+/// Key of what the probes trace besides the occluders and meshes: the floor and the
+/// roof (their place and colour, which kept hits hold).
+pub(crate) fn gi2_trace_key(pack: &crate::pack::Pack) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut floats: Vec<f32> = Vec::new();
+    floats.extend(pack.floor_center);
+    floats.push(pack.floor_half_x);
+    floats.push(pack.floor_half_z);
+    floats.extend(pack.floor_color);
+    floats.extend(pack.ceiling);
+    for f in floats {
+        f.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Hash of what lights the scene, without the camera: the lamp and occluder lists

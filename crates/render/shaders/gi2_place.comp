@@ -1,6 +1,7 @@
 #version 450
 // GI v2 screen probes, pass 1: place one probe per tile on the G-buffer surface at
-// the tile's centre, or the first of four inner points that shows a surface.
+// the tile's centre, or the first of four inner points that shows a surface. The
+// probe's place also opens this frame's stratum of its kept hits (gi2_common.glsl).
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "gi2_common.glsl"
@@ -34,4 +35,6 @@ void main() {
     }
     work.v[gi2_probe_at(i)] = pos_out;
     work.v[gi2_probe_at(i) + 1u] = n_out;
+    work.v[gi2_stratum_at(i, gi2_stratum())] = pos_out;
+    work.v[gi2_stratum_at(i, gi2_stratum()) + 1u] = n_out;
 }

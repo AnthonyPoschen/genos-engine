@@ -1,7 +1,8 @@
 #version 450
 // GI v2 rays, pass 2: the screen probes' rays, then the rays of the light cache
 // patches relit this frame. A hit stores its distance and surface for the light
-// pass; a miss takes the sky. One trace site. A hit on an emissive mesh also
+// pass; a miss takes the sky. A probe ray's record goes into this frame's
+// stratum of the probe's kept hits (gi2_hit_at). One trace site. A hit on an emissive mesh also
 // stores the light it gives off (the mesh field's emission table).
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
@@ -51,7 +52,9 @@ void main() {
     }
     SceneHit hit;
     if (!trace_ray(origin, dir, 1.0e-4, 200.0, hit)) {
-        work.v[at] = gi2_miss_slot(has_sky() ? scene.sky.rgb : vec3(0.0));
+        // A probe ray's miss is kept as a miss and takes the sky as it is when shaded.
+        work.v[at] = ray < gi2_probe_rays() ? GI2_MISS
+                                             : gi2_miss_slot(has_sky() ? scene.sky.rgb : vec3(0.0));
         return;
     }
     vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;

@@ -1,13 +1,34 @@
 #version 450
-// GI v2 screen probes, pass 4: each probe's ray radiance projected to SH (bands
-// 0-2) and convolved with the cosine lobe: the probe's irradiance for any normal.
-// While the scene holds still a probe averages its frames (each a new ray set),
-// up to GI2_PROBE_AVERAGE, then keeps a running mean.
+// GI v2 screen probes, pass 4: each probe's kept rays projected to SH (bands 0-2)
+// and convolved with the cosine lobe: the probe's irradiance for any normal.
+//
+// A probe keeps the hits of its last GI2_STRATA strata (gi2_common.glsl), and the
+// light pass has shaded every one of them this frame, so the probe sees up to
+// GI2_STRATA x R rays with no light carried over from a past frame: a lamp that
+// moves, dims or goes off shows in full on the next frame and never needs a reset.
+// Only visibility is kept, and only while it still holds:
+// - when the camera moves, a probe takes the strata of the probe that stood where
+//   it stands now last frame (reprojected through last frame's camera), each kept
+//   while the probe lies on the plane it was traced from, faces its way and is
+//   within half a probe spacing of it; its hits are then seen from the probe's new
+//   place (parallax), and a hit that falls behind the probe is not used;
+// - a kept ray whose path crosses the bounds of an object that moved, came or went
+//   since the last frame is dropped for good (the changes block, gi2_gpu.rs);
+// - every kept stratum is dropped when the traced world changes as a whole.
+// Each of the R cells of the stratified pattern is the mean of the rays it holds
+// (this frame's always among them), so a dropped ray thins a cell, never darkens
+// it.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "gi2_common.glsl"
 
-const uint GI2_PROBE_AVERAGE = 32u;
+// Distance from segment a-b to point c, squared.
+float gi2_seg_dist2(vec3 a, vec3 b, vec3 c) {
+    vec3 ab = b - a;
+    float t = clamp(dot(c - a, ab) / max(dot(ab, ab), 1.0e-12), 0.0, 1.0);
+    vec3 d = a + ab * t - c;
+    return dot(d, d);
+}
 
 void main() {
     uint probe = gl_GlobalInvocationID.x;
@@ -21,19 +42,124 @@ void main() {
         c[f] = 0.0;
     }
     uint rays = gi2_rays();
+    uint now = gi2_stratum();
+    vec4 head = work.v[gi2_change_at()];
+    uint changes = min(uint(head.x + 0.5), GI2_CHANGES);
+    bool drop_all = head.y > 0.5;
+    uint last = uint(head.z + 0.5) & 1u;
+    uint next = 1u - last;
+    uint src[GI2_STRATA];
+    [[dont_unroll]] for (uint s = 0u; s < GI2_STRATA; s++) {
+        src[s] = 0u;
+    }
     if (pp.w > 0.5) {
-        [[dont_unroll]] for (uint k = 0u; k < rays; k++) {
-            vec3 l = gi2_ray_light(work.v[gi2_rad_at(probe * rays + k)]);
-            float y[9];
-            gi2_sh9(gi2_ray_dir(pp.xyz, n, k), y);
-            [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
-                c[3u * j] += l.r * y[j];
-                c[3u * j + 1u] += l.g * y[j];
-                c[3u * j + 2u] += l.b * y[j];
+        src[now] = probe + 1u;
+        // Which probe stood here last frame: this place through last frame's camera.
+        vec4 eye = work.v[gi2_change_at() + 1u];
+        uint from_probe = ~0u;
+        if (!drop_all && eye.w > 0.5) {
+            vec4 right = work.v[gi2_change_at() + 2u];
+            vec3 up = work.v[gi2_change_at() + 3u].xyz;
+            vec4 fwd = work.v[gi2_change_at() + 4u];
+            vec3 rel = pp.xyz - eye.xyz;
+            float z = dot(rel, fwd.xyz);
+            if (z > 1.0e-3) {
+                vec2 ndc = vec2(dot(rel, right.xyz) / (z * right.w * fwd.w), dot(rel, up) / (z * right.w));
+                vec2 px = vec2((ndc.x + 1.0) * 0.5 * float(pc.dims.x), (1.0 - ndc.y) * 0.5 * float(pc.dims.y));
+                ivec2 t = ivec2(floor(px / float(pc.params.y)));
+                if (all(greaterThanEqual(t, ivec2(0))) && all(lessThan(t, ivec2(pc.dims.zw)))) {
+                    from_probe = uint(t.y) * pc.dims.z + uint(t.x);
+                }
+            }
+        }
+        // Which of its strata still hold for the probe where it stands now.
+        float dist = length(pp.xyz - scene.eye.xyz);
+        float plane = 0.03 + 0.01 * dist;
+        // A probe's spacing in metres at its distance (the tile across the view).
+        float spacing = float(pc.params.y) * 2.0 * scene.view_right.w * dist / float(pc.dims.y);
+        if (from_probe != ~0u) {
+            uvec4 v0 = floatBitsToUint(work.v[gi2_view_at(last, from_probe)]);
+            uvec4 v1 = floatBitsToUint(work.v[gi2_view_at(last, from_probe) + 1u]);
+            uint was[8] = uint[8](v0.x, v0.y, v0.z, v0.w, v1.x, v1.y, v1.z, v1.w);
+            [[dont_unroll]] for (uint s = 0u; s < GI2_STRATA; s++) {
+                if (s == now || was[s] == 0u) {
+                    continue;
+                }
+                vec4 sp = work.v[gi2_stratum_at(was[s] - 1u, s)];
+                vec3 sn = work.v[gi2_stratum_at(was[s] - 1u, s) + 1u].xyz;
+                vec3 d = pp.xyz - sp.xyz;
+                if (sp.w > 0.5 && dot(sn, n) > 0.95 && abs(dot(d, n)) < plane
+                    && length(d) < 0.5 * spacing + 0.01) {
+                    src[s] = was[s];
+                }
             }
         }
     }
-    // Uniform hemisphere: each ray stands for 2 pi / R steradians. Cosine lobe per
+    work.v[gi2_view_at(next, probe)] = uintBitsToFloat(uvec4(src[0], src[1], src[2], src[3]));
+    work.v[gi2_view_at(next, probe) + 1u] = uintBitsToFloat(uvec4(src[4], src[5], src[6], src[7]));
+    if (pp.w > 0.5) {
+        vec3 from = pp.xyz + n * 0.02;
+        uint samples = 0u;
+        [[dont_unroll]] for (uint k = 0u; k < rays; k++) {
+            vec3 sum_l = vec3(0.0);
+            vec3 sum_d = vec3(0.0);
+            float m = 0.0;
+            [[dont_unroll]] for (uint s = 0u; s < GI2_STRATA; s++) {
+                if (src[s] == 0u) {
+                    continue;
+                }
+                uint h = ((src[s] - 1u) * GI2_STRATA + s) * rays + k;
+                vec4 rec = work.v[gi2_kept_at(h)];
+                if (rec.x < 0.0 && rec.x > -0.75) {
+                    continue;
+                }
+                vec3 origin;
+                vec3 dir;
+                vec3 sn;
+                gi2_stratum_ray(src[s] - 1u, s, k, origin, dir, sn);
+                bool hit = rec.x >= 0.0;
+                vec3 end = origin + dir * (hit ? rec.x : 200.0);
+                if (s != now && changes > 0u) {
+                    bool crossed = false;
+                    [[dont_unroll]] for (uint j = 0u; j < changes; j++) {
+                        vec4 b = work.v[gi2_change_at() + GI2_CHANGE_HEAD + j];
+                        if (gi2_seg_dist2(origin, end, b.xyz) < b.w * b.w) {
+                            crossed = true;
+                            break;
+                        }
+                    }
+                    if (crossed) {
+                        work.v[gi2_kept_at(h)] = GI2_NO_RAY;
+                        continue;
+                    }
+                }
+                // Seen from where the probe stands now: a hit point from its new
+                // place, a miss (at infinity) along its own direction.
+                vec3 d = hit ? end - from : dir;
+                float len = length(d);
+                if (len < 1.0e-4 || dot(d, n) <= 0.0) {
+                    continue;
+                }
+                sum_l += gi2_kept_light(h);
+                sum_d += d / len;
+                m += 1.0;
+            }
+            if (m > 0.0) {
+                samples += uint(m);
+                vec3 l = sum_l / m;
+                float y[9];
+                gi2_sh9(normalize(sum_d), y);
+                [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
+                    c[3u * j] += l.r * y[j];
+                    c[3u * j + 1u] += l.g * y[j];
+                    c[3u * j + 2u] += l.b * y[j];
+                }
+            }
+        }
+        atomicAdd(gstats.pad0, samples);
+        atomicAdd(gstats.pad1, 1u);
+    }
+    // Uniform hemisphere: each cell stands for 2 pi / R steradians. Cosine lobe per
     // band: pi, 2 pi / 3, pi / 4.
     float scale = GI2_TAU / float(max(rays, 1u));
     [[dont_unroll]] for (uint f = 0u; f < 27u; f++) {
@@ -42,14 +168,6 @@ void main() {
         c[f] *= scale * a;
     }
     uint base = gi2_sh_at(probe);
-    uint still = min(gi2_still(), GI2_PROBE_AVERAGE - 1u);
-    if (still > 0u) {
-        float keep = 1.0 / float(still + 1u);
-        [[dont_unroll]] for (uint f = 0u; f < 27u; f++) {
-            float old = work.v[base + f / 4u][f % 4u];
-            c[f] = old + (c[f] - old) * keep;
-        }
-    }
     [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
         work.v[base + q] = vec4(c[4u * q], c[4u * q + 1u], c[4u * q + 2u], q == 6u ? 0.0 : c[4u * q + 3u]);
     }

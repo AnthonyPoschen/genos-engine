@@ -40,6 +40,8 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     // The same two for mature patches only: has the light itself stopped changing.
     uint mature_change;
     uint mature_relit;
+    // Screen probes: rays they hold this frame (kept strata included) and probes
+    // placed (gi2_gather.comp), for the effective sample count.
     uint pad0;
     uint pad1;
 } gstats;
