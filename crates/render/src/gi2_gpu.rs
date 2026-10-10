@@ -39,7 +39,7 @@ pub(crate) const GI2_RAYS: u32 = 64;
 /// Light cache sizes; gi2_cache_slots.glsl has the same numbers.
 const GI2_CACHE_SLOTS: u64 = 262144;
 const GI2_CACHE_BATCH: u32 = 16384;
-const GI2_CACHE_RAYS: u32 = 16;
+const GI2_CACHE_RAYS: u32 = 64;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
 /// (gi2_common.glsl GI2_STRATA): the visibility history cap.
 pub(crate) const GI2_STRATA: u32 = 8;

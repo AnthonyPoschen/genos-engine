@@ -3,7 +3,10 @@
 // (lumen-digest.md 1.4), run three times (gi2_filter_round: cells 0 -> 1 -> 0 ->
 // SH). Each cell of a probe becomes the weighted mean of its own light and the
 // light its 3 x 3 neighbours saw in the same direction (their cell that holds this
-// cell's centre direction):
+// cell's centre direction), the neighbours 2, 4 and 8 probes apart in the three
+// rounds (a-trous): the noise left is spread over blotches wider than the walls'
+// light varies, and less of it is redrawn as the probe grid slides with the camera
+// (gi-check room: grid redraw, blotch);
 // - weight by depth only: incoming light does not depend on the receiver's
 //   normal, so neighbours on other planes help, as long as they sit at about the
 //   same depth from the eye;
@@ -51,7 +54,7 @@ void main() {
         if (k == 4u) {
             continue;
         }
-        ivec2 c = c0 + ivec2(int(k % 3u) - 1, int(k / 3u) - 1);
+        ivec2 c = c0 + (2 << int(round)) * ivec2(int(k % 3u) - 1, int(k / 3u) - 1);
         if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, grid))) {
             continue;
         }
