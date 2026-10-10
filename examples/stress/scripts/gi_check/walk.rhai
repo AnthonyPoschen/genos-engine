@@ -21,7 +21,9 @@ for i in 0..15 {
     path.push([9.3, 1.6, 9.3 + i * 0.05, yaw, pitch]);
 }
 let z = 10.05;
-while z < 18.0 { path.push([9.3, 1.6, z, 3.14159, pitch]); z += 0.1; }
+// Stop 2 m short of the hall's low partition (z 16.9-17.1, top at the 1.6 m eye
+// height): walking on to z 18 put the eye through its top edge (frames 155-159).
+while z < 15.0 { path.push([9.3, 1.6, z, 3.14159, pitch]); z += 0.1; }
 let n = path.len();
 camera(#{ position: [2.0, 1.6, 9.3], yaw: 1.5708, pitch: pitch });
 wait_settled(#{ timeout_frames: 900 });

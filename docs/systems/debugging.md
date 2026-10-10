@@ -260,10 +260,13 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   the 5x5 strata reach). The worst-tile and flicker limits (0.35, 0.05) are set
   from v1 with a margin; the error limit stays 0.03. The mid-move worst-tile row
   is the mean over frames of each frame's worst 10x10 tile, over the tile's
-  reference light or the frame's mean tile, whichever is larger. Known flaw: the
-  settled reference at camera frame 159 (turning on the spot) is blank in its
-  lower half, so that frame is every build's worst; it adds about 0.001 to the
-  mean. Trail: v1 0.109 (its world probes lag), v2 0.057.
+  reference light or the frame's mean tile, whichever is larger. Fixed 2026-10-10: the
+  corner path used to walk on to z 18 at the 1.6 m eye height, through the top
+  edge of the hall's low partition (z 16.9-17.1, 1.6 m high), so frames 155-159
+  showed the partition face filling the lower half and frame 159 (through it in
+  the moving pass, not yet in the settled one) was every build's worst camera
+  frame and the corner walk's worst pop. The path now stops at z 15 and turns
+  there (camera.rhai, walk.rhai: 178 and 138 poses). Trail: v1 0.109 (its world probes lag), v2 0.057.
 
 ## Limits
 

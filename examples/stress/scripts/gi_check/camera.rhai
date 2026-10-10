@@ -23,8 +23,10 @@ for i in 0..15 {
     path.push([9.3, 1.6, 9.3 + i * 0.05, 1.5708 + a, pitch]);
 }
 let z = 10.05;
-while z < 18.0 { path.push([9.3, 1.6, z, 3.14159, pitch]); z += 0.1; }
-for i in 0..40 { path.push([9.3, 1.6, 18.0, 3.14159 + (i + 1) * 0.05236, pitch]); }
+// Stop 2 m short of the hall's low partition (z 16.9-17.1, top at the 1.6 m eye
+// height): walking on to z 18 put the eye through its top edge (frames 155-159).
+while z < 15.0 { path.push([9.3, 1.6, z, 3.14159, pitch]); z += 0.1; }
+for i in 0..40 { path.push([9.3, 1.6, 15.0, 3.14159 + (i + 1) * 0.05236, pitch]); }
 const CLIP = __CLIP__;
 if CLIP > 0 && CLIP < path.len() { path.truncate(CLIP); }
 let n = path.len();
