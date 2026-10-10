@@ -19,8 +19,12 @@ const TRAIL_SCRIPT: &str = include_str!("../../scripts/gi_check/trail.rhai");
 const FLICK_SCRIPT: &str = include_str!("../../scripts/gi_check/flick.rhai");
 const REPRO_SCRIPT: &str = include_str!("../../scripts/gi_check/repro.rhai");
 const TURN_SCRIPT: &str = include_str!("../../scripts/gi_check/turn.rhai");
-const RUNS: [&str; 9] = [
-    "repro", "settled", "moving", "walk", "flicker", "camera", "trail", "flick", "turn",
+const MIX_SCRIPT: &str = include_str!("../../scripts/gi_check/mix.rhai");
+const ROOM_SCRIPT: &str = include_str!("../../scripts/gi_check/room.rhai");
+const ROOM_SCENE: &str = include_str!("../../scenes/room.rhai");
+const RUNS: [&str; 12] = [
+    "repro", "settled", "moving", "walk", "flicker", "camera", "trail", "flick", "turn", "room",
+    "mix", "spin",
 ];
 const FLICKER_SCRIPT: &str = include_str!("../../scripts/temporal_flicker_aligned.rhai");
 const VIEWS: [&str; 5] = ["room-a", "corner", "contact", "lamp-wall", "hall"];
@@ -82,6 +86,30 @@ const TURN_HELD_LIMIT: f64 = 0.002;
 /// against the soaked baseline (return).
 const TURN_ONSET_LIMIT: f64 = 0.009;
 const TURN_RETURN_LIMIT: f64 = 0.002;
+/// Room run (room.rhai, room_rows): Anthony's make-run spot, turning on the spot
+/// in the default room, scored relative to the light where it is (a dim wall lit
+/// only by bounce counts as much as a lit one), on numbers alone:
+/// - turn swim: the world swim of the moving frames (metrics::world_swim: each
+///   frame turned onto the next, low-frequency change), mean over the turn;
+/// - grid redraw: the same between the pose settled and settled again half a
+///   probe further round (only the probe grid slid);
+/// - blotch: the settled picture against the path-traced reference at two poses
+///   (metrics::blotch: band of the error where blotches live).
+/// edffa81 0.0045 / 0.0037 / 0.0250-0.0270 (FAIL), the a-trous filter and 64-ray
+/// cache 0.0033 / 0.0019 / 0.0176-0.0206 (the blotch moves from process to process:
+/// which pixel claims a cache patch first pins where it is lit); lines between.
+const ROOM_SWIM_LIMIT: f64 = 0.0039;
+const ROOM_REDRAW_LIMIT: f64 = 0.0027;
+const ROOM_BLOTCH_LIMIT: f64 = 0.023;
+/// Mix run (mix.rhai): lamps and boxes moving, camera still and turning 3 deg a
+/// frame; relative error against each moving frame's scene state settled.
+/// edffa81: still 0.0043, turning 0.0070 (FAIL); fixed 0.0021 / 0.0040.
+const MIX_LIMIT: f64 = 0.0055;
+/// Spin run (mix.rhai, spin): error and flicker on the moving green box and the
+/// light around it (where its settled picture differs from the baseline).
+/// edffa81 0.0338 / 0.0302 (FAIL); fixed 0.0196 / 0.0119.
+const SPIN_ERR_LIMIT: f64 = 0.027;
+const SPIN_FLICKER_LIMIT: f64 = 0.02;
 
 struct Options {
     out: PathBuf,
@@ -204,14 +232,14 @@ fn tier(o: &mut Options, name: &str) -> Result<(), String> {
             // moving checks; the 90-pose camera clip (45 s) was cut 2026-10-10: the
             // turn run covers camera motion in a third of the time and caught what
             // the clip missed (the turn swim).
-            &["repro", "settled", "trail", "flick", "turn"]
+            &["repro", "settled", "trail", "flick", "turn", "room", "mix", "spin"]
         }
         "mid" => {
             o.stride = 2;
-            &["repro", "settled", "moving", "camera", "trail", "flick", "turn"]
+            &["repro", "settled", "moving", "camera", "trail", "flick", "turn", "room", "mix", "spin"]
         }
         "full" => &[
-            "repro", "settled", "moving", "camera", "trail", "flick", "turn", "flicker",
+            "repro", "settled", "moving", "camera", "trail", "flick", "turn", "room", "mix", "spin", "flicker",
         ],
         other => return Err(format!("gi-check: --tier quick, mid or full, not {other}")),
     };
@@ -220,7 +248,7 @@ fn tier(o: &mut Options, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-const HELP: &str = "genos-stress gi-check [--tier quick|mid|full] [--out DIR] [--only repro,settled,moving,walk,flicker,camera,trail,flick,turn] \
+const HELP: &str = "genos-stress gi-check [--tier quick|mid|full] [--out DIR] [--only repro,settled,moving,walk,flicker,camera,trail,flick,turn,room,mix,spin] \
 [--score-only] [--ref-noise 0.05] [--ref-spp 2048] [--ref-seconds 900] [--size 640x360] [--walk-size 1280x720] \
 [--settled-refs DIR] [--gi v2|v1] [--views corner,contact] [--stride 1] [--clip N] [--fail-fast] [--keep-going]
 Renders with GENOS_GI=v2 (or v1); GENOS_GI2_TILE defaults to the 1440p probe spacing (height / 90), references are \
@@ -248,6 +276,9 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
         "flick" => (fill(FLICK_SCRIPT), &o.size),
         "repro" => (fill(REPRO_SCRIPT), &o.size),
         "turn" => (fill(TURN_SCRIPT), &o.size),
+        "room" => (fill(ROOM_SCRIPT), &o.size),
+        "mix" => (fill(&MIX_SCRIPT.replace("__SEGS__", "mix")), &o.size),
+        "spin" => (fill(&MIX_SCRIPT.replace("__SEGS__", "spin")), &o.size),
         // The repo's flicker gate, with a heatmap per pose and window.
         _ => (
             fill(
@@ -284,6 +315,11 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
             .and_then(|h| h.parse().ok())
             .unwrap_or(720);
         cmd.env("GENOS_GI2_TILE", (rows / 90).clamp(4, 64).to_string());
+    }
+    if run == "room" {
+        let scene = dir.join("room-scene.rhai");
+        std::fs::write(&scene, ROOM_SCENE).map_err(|e| e.to_string())?;
+        cmd.arg("--scene").arg(scene);
     }
     if matches!(run, "moving" | "walk" | "camera" | "trail") {
         cmd.env("GENOS_GI_DEBUG", "1");
@@ -498,6 +534,9 @@ fn score_run(o: &Options, out: &Path, run: &str, rows: &mut Vec<Row>) -> Result<
             "trail" => trail_rows(rows, &dir)?,
             "flick" => flick_rows(rows, &dir)?,
             "turn" => turn_rows(rows, &dir)?,
+            "room" => room_rows(rows, &dir)?,
+            "mix" => mix_rows(rows, &dir)?,
+            "spin" => spin_rows(rows, &dir)?,
             _ => {
                 let text = std::fs::read_to_string(dir.join("report.md"))
                     .map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -900,6 +939,260 @@ fn turn_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
         limit: TURN_HELD_LIMIT,
         note: held.2,
         image: held.1,
+    });
+    Ok(())
+}
+
+/// One soak / move / return segment (mix.rhai, room.rhai): each moving frame with
+/// a settled picture of its scene state and pose. Returns the relative error
+/// (mean, worst frame), the swim between consecutive frames (mean) and the soaked
+/// end frame against the baseline (metrics::blob).
+fn segment_scores(dir: &Path) -> Result<(f64, (f64, usize), f64, f64), String> {
+    let mut errs = Vec::new();
+    let mut swims = Vec::new();
+    let mut prev: Option<(usize, metrics::Plane)> = None;
+    let mut k = 0;
+    let mut missing = 0;
+    while missing < 8 {
+        let (still, moving) = (frame(dir, "still", k), frame(dir, "move", k));
+        if !still.exists() || !moving.exists() {
+            missing += 1;
+            k += 1;
+            continue;
+        }
+        missing = 0;
+        let s = metrics::lum640(&still)?;
+        let e = metrics::rel_error(&metrics::lum640(&moving)?, &s);
+        let base = metrics::rel_base(&s);
+        errs.push((metrics::rel_mean(&e, &base), k));
+        if let Some((pk, pe)) = &prev {
+            if *pk + 1 == k {
+                swims.push(metrics::rel_swim(pe, &e, &base));
+            }
+        }
+        prev = Some((k, e));
+        k += 1;
+    }
+    if errs.is_empty() {
+        return Err(format!("gi-check: no still/move frames in {}", dir.display()));
+    }
+    let mean = errs.iter().map(|e| e.0).sum::<f64>() / errs.len() as f64;
+    let worst = errs.iter().copied().fold((0.0, 0), |a, e| if e.0 > a.0 { e } else { a });
+    let swim = if swims.is_empty() {
+        0.0
+    } else {
+        swims.iter().sum::<f64>() / swims.len() as f64
+    };
+    let end = metrics::blob(
+        &metrics::lum640(&dir.join("end.png"))?,
+        &metrics::lum640(&dir.join("baseline.png"))?,
+    );
+    Ok((mean, worst, swim, end))
+}
+
+/// The yaw of each frame of room.rhai's turn (path[0] the start pose; moving and
+/// settled frame k are at path[k + 1]).
+fn room_yaws() -> Vec<f64> {
+    let d2r = 0.0174533f64;
+    let y0 = -0.679f64;
+    let marks = [y0 / d2r, -16.0, -57.0, y0 / d2r];
+    let mut path = vec![y0];
+    for m in 1..marks.len() {
+        let (from, to) = (marks[m - 1], marks[m]);
+        let n = ((to - from).abs() / 3.0).ceil() as usize;
+        for i in 1..=n {
+            path.push((from + (to - from) * i as f64 / n as f64) * d2r);
+        }
+    }
+    path
+}
+
+const ROOM_PITCH: f64 = -0.12;
+
+/// World swim over a run's turn frames in `sub` (move or still): mean over
+/// consecutive pairs.
+fn room_swim(dir: &Path, sub: &str) -> Result<f64, String> {
+    let yaws = room_yaws();
+    let mut v = Vec::new();
+    for k in 0..yaws.len().saturating_sub(2) {
+        let (a, b) = (frame(dir, sub, k), frame(dir, sub, k + 1));
+        if !a.exists() || !b.exists() {
+            continue;
+        }
+        let (a, b) = (metrics::lum640(&a)?, metrics::lum640(&b)?);
+        v.push(metrics::world_swim(&a, &b, yaws[k + 1], yaws[k + 2], ROOM_PITCH, 8.0));
+    }
+    if v.is_empty() {
+        return Err(format!("gi-check: no {sub} frames in {}", dir.display()));
+    }
+    Ok(v.iter().sum::<f64>() / v.len() as f64)
+}
+
+/// Room run (room.rhai): Anthony's make-run spot, turning on the spot in the
+/// default room. Graded on numbers alone: the world swim of what is seen while
+/// turning (dim bounce-lit walls count as much as lit ones), the blotch of the
+/// settled picture against a path-traced reference, and the soaked end.
+fn room_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
+    let swim = room_swim(dir, "move")?;
+    let settled_swim = room_swim(dir, "still").unwrap_or(f64::NAN);
+    let lum = |p: &str| metrics::lum320(&dir.join(p));
+    let floor = metrics::world_swim(
+        &lum("room-b-reference.png")?,
+        &lum("room-c-reference.png")?,
+        -36f64.to_radians(),
+        -39f64.to_radians(),
+        ROOM_PITCH,
+        4.0,
+    );
+    let blotch_a = metrics::blotch(&lum("room-a-live.png")?, &lum("room-a-reference.png")?, 4.0);
+    let blotch_b = metrics::blotch(&lum("room-b-live.png")?, &lum("room-b-reference.png")?, 4.0);
+    let blotch = 0.5 * (blotch_a + blotch_b);
+    let end = metrics::blob(
+        &metrics::lum640(&dir.join("end.png"))?,
+        &metrics::lum640(&dir.join("baseline.png"))?,
+    );
+    let redraw = metrics::world_swim(
+        &metrics::lum640(&dir.join("grid-0.png"))?,
+        &metrics::lum640(&dir.join("grid-1.png"))?,
+        -36f64.to_radians(),
+        -36.23f64.to_radians(),
+        ROOM_PITCH,
+        8.0,
+    );
+    println!(
+        "room     world swim moving {swim:.4} settled-per-pose {settled_swim:.4} reference {floor:.4} | grid redraw {redraw:.4} | blotch start {blotch_a:.4} mid {blotch_b:.4} | end {end:.4}"
+    );
+    rows.push(Row {
+        check: "room grid redraw (half a probe)".into(),
+        value: redraw,
+        limit: ROOM_REDRAW_LIMIT,
+        note: "settled, 0.23 deg apart".into(),
+        image: dir.join("grid-1.png"),
+    });
+    rows.push(Row {
+        check: "room turn swim (world, relative)".into(),
+        value: swim,
+        limit: ROOM_SWIM_LIMIT,
+        note: format!("settled per pose {settled_swim:.4}, reference {floor:.4}"),
+        image: frame(dir, "move", room_yaws().len() / 2),
+    });
+    rows.push(Row {
+        check: "room blotch against reference".into(),
+        value: blotch,
+        limit: ROOM_BLOTCH_LIMIT,
+        note: format!("start {blotch_a:.4} mid {blotch_b:.4}"),
+        image: dir.join("room-b-heatmap.png"),
+    });
+    rows.push(Row {
+        check: "room end, soaked, against baseline".into(),
+        value: end,
+        limit: TURN_RETURN_LIMIT,
+        note: String::new(),
+        image: dir.join("end.png"),
+    });
+    Ok(())
+}
+
+/// Mix run (mix.rhai): lamps and boxes moving, camera still, then turning.
+fn mix_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
+    let mut end = (0.0f64, PathBuf::new(), String::new());
+    for (seg, check) in [
+        ("still", "mix lamps+boxes, camera still (relative)"),
+        ("turn", "mix lamps+boxes while turning (relative)"),
+    ] {
+        let d = dir.join(seg);
+        let (mean, worst, _swim, e) = segment_scores(&d)?;
+        println!("mix      {seg} relative error mean {mean:.4} worst {:.4}@{} end {e:.4}", worst.0, worst.1);
+        rows.push(Row {
+            check: check.into(),
+            value: mean,
+            limit: MIX_LIMIT,
+            note: format!("worst frame {} {:.4}", worst.1, worst.0),
+            image: frame(&d, "move", worst.1),
+        });
+        if e >= end.0 {
+            end = (e, d.join("end.png"), seg.to_string());
+        }
+    }
+    rows.push(Row {
+        check: "mix end, soaked, against baseline".into(),
+        value: end.0,
+        limit: TURN_RETURN_LIMIT,
+        note: end.2,
+        image: end.1,
+    });
+    Ok(())
+}
+
+/// Spin run (mix.rhai, spin): the green box moving and spinning before a still
+/// camera. Where its settled picture differs from the baseline (the box, its
+/// shadow and bounce): |moving - settled| over the settled light (error), and how
+/// much that error changes from frame to frame (flicker).
+fn spin_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
+    let d = dir.join("green");
+    let base = metrics::lum640(&d.join("baseline.png"))?;
+    let mean_b = base.v.iter().sum::<f64>() / base.v.len().max(1) as f64;
+    let mut errs = Vec::new();
+    let mut flicks = Vec::new();
+    let mut prev: Option<(Vec<f64>, Vec<bool>)> = None;
+    let mut k = 0;
+    while frame(&d, "still", k).exists() && frame(&d, "move", k).exists() {
+        let s = metrics::lum640(&frame(&d, "still", k))?;
+        let m = metrics::lum640(&frame(&d, "move", k))?;
+        let mask: Vec<bool> = s.v.iter().zip(&base.v).map(|(a, b)| (a - b).abs() > 0.1 * mean_b).collect();
+        let e: Vec<f64> = m.v.iter().zip(&s.v).map(|(a, b)| a - b).collect();
+        let (mut num, mut den) = (0.0, 0.0);
+        for i in 0..e.len() {
+            if mask[i] {
+                num += e[i].abs();
+                den += s.v[i];
+            }
+        }
+        if den > 0.0 {
+            errs.push(num / den);
+        }
+        if let Some((pe, pm)) = &prev {
+            let (mut num, mut den) = (0.0, 0.0);
+            for i in 0..e.len() {
+                if mask[i] || pm[i] {
+                    num += (e[i] - pe[i]).abs();
+                    den += s.v[i];
+                }
+            }
+            if den > 0.0 {
+                flicks.push(num / den);
+            }
+        }
+        prev = Some((e, mask));
+        k += 1;
+    }
+    if errs.is_empty() {
+        return Err(format!("gi-check: no spin frames in {}", d.display()));
+    }
+    let err = errs.iter().sum::<f64>() / errs.len() as f64;
+    let flick = flicks.iter().sum::<f64>() / flicks.len().max(1) as f64;
+    let end = metrics::blob(&metrics::lum640(&d.join("end.png"))?, &base);
+    println!("spin     green box error {err:.4} flicker {flick:.4} end {end:.4}");
+    rows.push(Row {
+        check: "spin green box error".into(),
+        value: err,
+        limit: SPIN_ERR_LIMIT,
+        note: format!("{} frames", errs.len()),
+        image: frame(&d, "move", errs.len() / 2),
+    });
+    rows.push(Row {
+        check: "spin green box flicker".into(),
+        value: flick,
+        limit: SPIN_FLICKER_LIMIT,
+        note: "frame to frame".into(),
+        image: frame(&d, "move", errs.len() / 2),
+    });
+    rows.push(Row {
+        check: "spin end, soaked, against baseline".into(),
+        value: end,
+        limit: TURN_RETURN_LIMIT,
+        note: String::new(),
+        image: d.join("end.png"),
     });
     Ok(())
 }

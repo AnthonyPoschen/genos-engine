@@ -223,13 +223,14 @@ a view on 16 cores).
 FAIL. Iterate on quick, run mid when quick passes, run full only before pushing.
 
 - `quick`: repro; the contact and lamp-wall views and the close-up settled; the
-  trail (reference every 4th); the flick run; the turn run; 640x360.
+  trail (reference every 4th); the flick run; the turn, room, mix and spin runs;
+  640x360.
   No moving views: each needs a fresh reference of its last frame, minutes each
   and too noisy when capped; the camera clip and the trail are quick's moving
   checks.
 - `mid`: repro; all five views settled and moving; the whole camera path, the
-  trail (references every 2nd pose), the flick run and the turn run.
-- `full`: repro, settled, moving, camera, trail, flick, turn and flicker,
+  trail (references every 2nd pose), the flick, turn, room, mix and spin runs.
+- `full`: repro, settled, moving, camera, trail, flick, turn, room, mix, spin and flicker,
   references at every pose. The corner walk (`--only walk`) is no longer in a tier.
 
 Cut 2026-10-10 (Anthony: cut what adds no value; keep what caught a regression
@@ -332,6 +333,61 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   passes), end and return 0.002. No stuck light was found after soaking on either
   build (end against a fresh render in a second process: 0.0027-0.0039 on
   10ce430, the process-to-process floor 0.0027-0.0029).
+
+- Room run (2026-10-11, 4070, about 20 s plus three path-traced references
+  the first time; room.rhai): Anthony's `make run` spot in the default room
+  (`genos-stress --scene scenes/room.rhai`: one point light, nothing moves) at
+  (0.664, 1.699, 9.629), pitch -0.12, turning on the spot at 3 degrees a frame
+  from yaw -38.9 to -16, to -57 and back, then held and soaked. Anthony saw the
+  dim bounce-lit walls and floor swim there while turning. Graded on numbers
+  alone, every score relative to the light where it is (blurred luminance plus
+  5 % of the picture's mean, so a dim wall counts as much as a lit one):
+  turn swim (metrics::world_swim: each moving frame turned onto the next by the
+  camera's rotation, which moves a still world exactly, low-frequency change
+  blurred 8 px, mean over the turn); grid redraw (the same between the pose
+  settled and settled again 0.23 degrees, half a probe, further round: only the
+  probe grid slid); blotch (metrics::blotch: the settled picture against the
+  path-traced reference at two poses, the error band between 4 and 24 px at
+  320x180, so an even bias does not count); end against the soaked baseline.
+  Cause: the settled picture itself was mottled with 10-30 px blotches (the
+  path-traced reference is smooth), and the pattern depended on where the
+  screen-locked probe grid landed, so a turn redrew it every frame: the half-probe
+  redraw (0.0036) was as large as a 3-degree turn settled (0.0036); kept strata
+  added the rest (0.0044 moving; keeping no strata gave 0.0036). Two sources:
+  the spatial filter's 3x3 neighbours one probe apart left blotches a few probes
+  wide, and the light cache's 16 fixed rays a patch gave every patch an error
+  of its own that probes carried onto the walls (the dim half; 64 rays halved
+  it, 256 did no better). Tried and dropped: a plane-aware filter weight
+  (streaks on slanted walls), a 5x5 neighbourhood (no gain), probes anchored to
+  world-lattice pixels and shorter kept-stratum reach (no gain), cache patches
+  averaging their relights with turned rays (blotch down, swim doubled: the
+  cache flickers until it converges). Fix: the filter's three rounds take
+  neighbours 2, 4 and 8 probes apart (a-trous), and 64 rays a cache patch.
+  edffa81: swim 0.0045, redraw 0.0037, blotch 0.0270 (all FAIL; the pictures
+  show the blotched walls against the smooth reference). Fixed: swim 0.0033,
+  redraw 0.0019, blotch 0.0181. The blotch moves from process to process
+  (edffa81 0.0250-0.0270, fixed 0.0176-0.0206 over three runs each), swim and
+  redraw by 0.0001. Limits 0.0039, 0.0027, 0.023; end 0.002. The
+  path-traced pair 3 degrees apart scores 0.0030 swim at 320x180 (its own noise).
+- Mix run (mix.rhai): the hall turn pose while lamps and boxes move, 30 frames
+  at 1/40 s, camera still and then turning at 3 degrees a frame; each moving
+  frame against the same frame's scene state settled (clock knobs), relative
+  error (metrics::rel_error, pixels off by more than 0.1 dropped, blurred 8 px).
+  edffa81: still 0.0043, turning 0.0070; fixed (below and the room fix): 0.0021,
+  0.0040. Limit 0.0055 for both (the still camera is the control).
+- Spin run (mix.rhai, spin segment): camera still on the green box spinning
+  (13, 1.6, 16.5), 24 frames; box-surface error and frame-to-frame flicker
+  against each frame settled, where the settled picture differs from the
+  baseline. Cause of the lag and artefacts on spinning boxes: probes on a box
+  kept strata traced from where its surface was (the re-trace from there lands
+  off the surface or inside the box), and the light cache around it lagged (new
+  patches read 0 until relit). Fix (each on unless its variable is 0): a stratum
+  traced from inside a change sphere is filled instead of kept
+  (`GENOS_GI2_MOVED_DROP`); patches within 1 m of a change are relit first
+  (`GENOS_GI2_URGENT`); a patch not lit yet reads its lit neighbours
+  (`GENOS_GI2_BORROW`). Moving a patch to its reader's point was tried and made
+  it worse. edffa81: error 0.0338, flicker 0.0302; fixed 0.0196, 0.0119.
+  Limits 0.027, 0.02.
 
 ## Limits
 

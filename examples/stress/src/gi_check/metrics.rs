@@ -17,7 +17,7 @@ pub struct Plane {
 }
 
 impl Plane {
-    fn new(w: usize, h: usize) -> Self {
+    pub fn new(w: usize, h: usize) -> Self {
         Self {
             w,
             h,
@@ -45,7 +45,7 @@ pub struct Mask {
 }
 
 impl Mask {
-    fn new(w: usize, h: usize) -> Self {
+    pub fn new(w: usize, h: usize) -> Self {
         Self {
             w,
             h,
@@ -491,6 +491,57 @@ pub fn blob(a: &Plane, b: &Plane) -> f64 {
     a.v.iter().zip(&b.v).map(|(x, y)| (x - y).abs()).sum::<f64>() / sum_b.max(1.0e-6)
 }
 
+/// Error of a moving frame against the settled picture at its pose, low frequency
+/// and relative to the light where it is (so a dim wall lit only by bounce counts
+/// as much as a sunlit one): a - b with pixels off by more than 0.1 (a box edge a
+/// pixel out of place, dilated 2 px) dropped, blurred 8 px.
+pub fn rel_error(a: &Plane, b: &Plane) -> Plane {
+    let (w, h) = (a.w, a.h);
+    let mut off = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            if (a.at(x, y) - b.at(x, y)).abs() > 0.1 {
+                for yy in y.saturating_sub(2)..(y + 3).min(h) {
+                    for xx in x.saturating_sub(2)..(x + 3).min(w) {
+                        off[yy * w + xx] = true;
+                    }
+                }
+            }
+        }
+    }
+    let mut e = Plane::new(w, h);
+    for i in 0..w * h {
+        e.v[i] = if off[i] { 0.0 } else { a.v[i] - b.v[i] };
+    }
+    blur(&e, 8.0)
+}
+
+/// The light it is relative to: b blurred 8 px plus 5 % of b's mean.
+pub fn rel_base(b: &Plane) -> Plane {
+    let mean = b.v.iter().sum::<f64>() / b.v.len().max(1) as f64;
+    let mut out = blur(b, 8.0);
+    for v in &mut out.v {
+        *v += 0.05 * mean;
+    }
+    out
+}
+
+/// Mean of |e| / base (rel_error, rel_base).
+pub fn rel_mean(e: &Plane, base: &Plane) -> f64 {
+    e.v.iter().zip(&base.v).map(|(x, y)| x.abs() / y).sum::<f64>() / e.v.len().max(1) as f64
+}
+
+/// Mean of |e1 - e0| / base: how much the error moved from one frame to the next
+/// (the swim).
+pub fn rel_swim(e0: &Plane, e1: &Plane, base: &Plane) -> f64 {
+    e0.v.iter()
+        .zip(&e1.v)
+        .zip(&base.v)
+        .map(|((a, b), y)| (b - a).abs() / y)
+        .sum::<f64>()
+        / e0.v.len().max(1) as f64
+}
+
 /// Linear luminance of a picture at 320 x 180.
 pub fn lum320(path: &Path) -> Result<Plane, String> {
     Ok(luminance(&load(path)?, 320, 180))
@@ -570,4 +621,119 @@ pub fn masked_err(a: &Plane, b: &Plane, mask: &[bool]) -> f64 {
         }
     }
     e / t.max(1.0e-6)
+}
+
+/// The light a relative score is taken against: b blurred s px plus 5 % of b's mean.
+fn rel_base_s(b: &Plane, s: f64) -> Plane {
+    let mean = b.v.iter().sum::<f64>() / b.v.len().max(1) as f64;
+    let mut out = blur(b, s);
+    for v in &mut out.v {
+        *v += 0.05 * mean;
+    }
+    out
+}
+
+/// Picture `a`, taken looking along (yaw_a, pitch), seen from (yaw_b, pitch) at the
+/// same eye: a turn on the spot moves the picture exactly by this (fovy 60 degrees,
+/// look = (sin y cos p, sin p, -cos y cos p)). Also whether each pixel came from
+/// inside `a`.
+pub fn warp_yaw(a: &Plane, yaw_a: f64, yaw_b: f64, pitch: f64) -> (Plane, Vec<bool>) {
+    let basis = |yaw: f64| {
+        let f = [yaw.sin() * pitch.cos(), pitch.sin(), -yaw.cos() * pitch.cos()];
+        let r = {
+            let r = [-f[2], 0.0, f[0]];
+            let l = (r[0] * r[0] + r[2] * r[2]).sqrt();
+            [r[0] / l, 0.0, r[2] / l]
+        };
+        let u = [
+            r[1] * f[2] - r[2] * f[1],
+            r[2] * f[0] - r[0] * f[2],
+            r[0] * f[1] - r[1] * f[0],
+        ];
+        (f, r, u)
+    };
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let (fb, rb, ub) = basis(yaw_b);
+    let (fa, ra, ua) = basis(yaw_a);
+    let (w, h) = (a.w, a.h);
+    let t = (30.0f64).to_radians().tan();
+    let aspect = w as f64 / h as f64;
+    let mut out = Plane::new(w, h);
+    let mut ok = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let nx = ((x as f64 + 0.5) / w as f64 * 2.0 - 1.0) * t * aspect;
+            let ny = (1.0 - (y as f64 + 0.5) / h as f64 * 2.0) * t;
+            let d = [0, 1, 2].map(|i| fb[i] + nx * rb[i] + ny * ub[i]);
+            let z = dot(d, fa);
+            if z <= 0.0 {
+                continue;
+            }
+            let px = dot(d, ra) / z / (t * aspect);
+            let py = dot(d, ua) / z / t;
+            let sx = (px + 1.0) / 2.0 * w as f64 - 0.5;
+            let sy = (1.0 - py) / 2.0 * h as f64 - 0.5;
+            if sx < 0.0 || sy < 0.0 || sx >= (w - 1) as f64 || sy >= (h - 1) as f64 {
+                continue;
+            }
+            let (x0, y0) = (sx.floor() as usize, sy.floor() as usize);
+            let (fx, fy) = (sx - x0 as f64, sy - y0 as f64);
+            out.v[y * w + x] = a.at(x0, y0) * (1.0 - fx) * (1.0 - fy)
+                + a.at(x0 + 1, y0) * fx * (1.0 - fy)
+                + a.at(x0, y0 + 1) * (1.0 - fx) * fy
+                + a.at(x0 + 1, y0 + 1) * fx * fy;
+            ok[y * w + x] = true;
+        }
+    }
+    (out, ok)
+}
+
+/// World swim of a turn on the spot: frame a (yaw_a) moved onto frame b (yaw_b)
+/// by the turn, then the low-frequency change (blurred s px, pixels off by more
+/// than 0.1 dropped) relative to the light there (blur of b plus 5 % of its
+/// mean), so a dim wall lit only by bounce counts as much as a lit one. A still
+/// world and a perfect solution give 0; light patterns redrawn by the turn
+/// (blotches that move or change as the probe grid slides) do not.
+pub fn world_swim(a: &Plane, b: &Plane, yaw_a: f64, yaw_b: f64, pitch: f64, s: f64) -> f64 {
+    let (wa, ok) = warp_yaw(a, yaw_a, yaw_b, pitch);
+    let mut e = Plane::new(b.w, b.h);
+    let mut m = Plane::new(b.w, b.h);
+    for i in 0..b.v.len() {
+        if ok[i] {
+            m.v[i] = 1.0;
+            let d = wa.v[i] - b.v[i];
+            if d.abs() <= 0.1 {
+                e.v[i] = d;
+            }
+        }
+    }
+    let (e, m) = (blur(&e, s), blur(&m, s));
+    let base = rel_base_s(b, s);
+    let (mut sum, mut n) = (0.0, 0usize);
+    for i in 0..b.v.len() {
+        if m.v[i] > 0.99 {
+            sum += e.v[i].abs() / base.v[i];
+            n += 1;
+        }
+    }
+    sum / n.max(1) as f64
+}
+
+/// Still-frame blotch: the band of the error of `live` against a path-traced
+/// `reference` that blotches live in (blurred s px, minus the error blurred 6 s
+/// px, so an even bias over a wall does not count), relative to the light there.
+pub fn blotch(live: &Plane, reference: &Plane, s: f64) -> f64 {
+    let mut e = Plane::new(live.w, live.h);
+    for i in 0..e.v.len() {
+        e.v[i] = live.v[i] - reference.v[i];
+    }
+    let (fine, coarse) = (blur(&e, s), blur(&e, 6.0 * s));
+    let base = rel_base_s(reference, s);
+    fine.v
+        .iter()
+        .zip(&coarse.v)
+        .zip(&base.v)
+        .map(|((f, c), b)| (f - c).abs() / b)
+        .sum::<f64>()
+        / e.v.len().max(1) as f64
 }
