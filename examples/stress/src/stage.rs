@@ -75,6 +75,8 @@ pub struct Stage {
     /// The sky follows the sun; off leaves only the sun and the lamps.
     pub sky_on: bool,
     pub boxes_still: bool,
+    /// The lamp paths' clock stands (moving lamps hold where they are).
+    pub lamps_still: bool,
     /// Lighting path: false the current one, true GI v2. `gi_v2_set` is a pending
     /// switch the frame loop hands to the renderer.
     pub gi_v2: bool,
@@ -107,6 +109,7 @@ impl Stage {
             sun_frozen: false,
             sky_on: true,
             boxes_still: false,
+            lamps_still: false,
             gi_v2: std::env::var("GENOS_GI").is_ok_and(|v| v == "v2"),
             gi_v2_set: None,
         };
@@ -134,7 +137,9 @@ impl Stage {
     }
 
     pub fn advance(&mut self, dt: f32) {
-        self.lamp_clock += dt;
+        if !self.lamps_still {
+            self.lamp_clock += dt;
+        }
         if !self.boxes_still {
             self.box_clock += dt;
         }
