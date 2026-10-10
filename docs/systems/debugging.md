@@ -168,6 +168,11 @@ table of PASS or FAIL against fixed limits; exit status 1 on any FAIL.
   dynamic, boxes moving, fixed 60 Hz step, padded so every build reaches the same
   scene moment), paused on the last moving frame and compared with a reference of
   that frame.
+- `repro`: the moving-camera brightness repro (`scripts/gi_check/repro.rhai`,
+  bounce view): settle at the contact pose, then three 24-frame clips that each end
+  on it (a 1e-5 rad wiggle, a 1.2 m slide, a 20° turn), every frame saved. Rows:
+  |mean of each clip's last frame / settled mean - 1| (limit 0.03). The same check
+  runs on lavapipe as `gi_v2_moving_camera_keeps_its_brightness` (gi2_frame.rs).
 - `walk`: the corner walk at 1280x720, every frame of the bounce view saved, cold then
   warm (`scripts/gi_check/walk.rhai`).
 - `flicker`: `temporal_flicker_aligned.rhai` at 1280x720, with a heatmap per pose.
@@ -211,6 +216,29 @@ rescores a folder, `--only settled,walk` picks runs (settled, moving, walk, flic
 References trace to 0.05 noise or 2048 paths per pixel (`--ref-noise`, `--ref-spp`)
 and are cached as for `compare`, so only the first run traces them (about 4 minutes
 a view on 16 cores).
+
+### Tiers
+
+`--tier quick|mid|full` picks the runs; every tier stops at the first run with a
+FAIL. Iterate on quick, run mid when quick passes, run full only before pushing.
+
+- `quick`: repro; the contact and lamp-wall views settled; the first 90 poses of
+  the camera path (reference every 4th); the trail (reference every 4th); 640x360.
+  No moving views: each needs a fresh reference of its last frame, minutes each
+  and too noisy when capped; the camera clip and the trail are quick's moving
+  checks.
+- `mid`: repro; all five views settled and moving; the whole camera path and the
+  trail, references every 2nd pose.
+- `full`: everything (repro, settled, moving, camera, trail, walk, flicker),
+  references at every pose.
+
+The camera flicker row needs references at consecutive poses, so only full has it.
+Quick's two views are a pair whose mean sits near the five-view mean (corner alone
+fails the five-view limits even when the five pass).
+
+`--keep-going` (after `--tier`) runs every run of the tier even past a FAIL.
+Without `--tier`, `--only` picks the runs (default settled, moving, walk, flicker)
+and nothing stops early.
 
 ### Validation
 

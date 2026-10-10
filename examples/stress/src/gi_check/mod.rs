@@ -16,7 +16,10 @@ const VIEWS_SCRIPT: &str = include_str!("../../scripts/gi_check/views.rhai");
 const WALK_SCRIPT: &str = include_str!("../../scripts/gi_check/walk.rhai");
 const CAMERA_SCRIPT: &str = include_str!("../../scripts/gi_check/camera.rhai");
 const TRAIL_SCRIPT: &str = include_str!("../../scripts/gi_check/trail.rhai");
-const RUNS: [&str; 6] = ["settled", "moving", "walk", "flicker", "camera", "trail"];
+const REPRO_SCRIPT: &str = include_str!("../../scripts/gi_check/repro.rhai");
+const RUNS: [&str; 7] = [
+    "repro", "settled", "moving", "walk", "flicker", "camera", "trail",
+];
 const FLICKER_SCRIPT: &str = include_str!("../../scripts/temporal_flicker_aligned.rhai");
 const VIEWS: [&str; 5] = ["room-a", "corner", "contact", "lamp-wall", "hall"];
 
@@ -53,6 +56,9 @@ const STOP_FRAMES_LIMIT: f64 = 10.0;
 /// over the frames and the worst frame.
 const TRAIL_LIMIT: f64 = 0.05;
 const TRAIL_WORST_LIMIT: f64 = 0.10;
+/// Repro run: the last frame of each clip that ends on the settled pose, against
+/// the settled picture: |mean ratio - 1|.
+const REPRO_LIMIT: f64 = 0.03;
 
 struct Options {
     out: PathBuf,
@@ -70,6 +76,10 @@ struct Options {
     views: String,
     /// Camera run: settle at every stride-th pose.
     stride: u32,
+    /// Camera run: only the first this many poses of the path (0: all).
+    clip: u32,
+    /// Stop at the first run with a FAIL (every --tier does).
+    fail_fast: bool,
 }
 
 pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
@@ -88,7 +98,10 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
         v2: true,
         views: String::new(),
         stride: 1,
+        clip: 0,
+        fail_fast: false,
     };
+    let mut keep_going = false;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
@@ -104,6 +117,10 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
             "--settled-refs" => o.settled_refs = Some(value()?.into()),
             "--views" => o.views = value()?,
             "--stride" => o.stride = value()?.parse().map_err(|e| format!("{arg}: {e}"))?,
+            "--clip" => o.clip = value()?.parse().map_err(|e| format!("{arg}: {e}"))?,
+            "--fail-fast" => o.fail_fast = true,
+            "--tier" => tier(&mut o, &value()?)?,
+            "--keep-going" => keep_going = true,
             "--gi" => {
                 o.v2 = match value()?.as_str() {
                     "v1" => false,
@@ -118,6 +135,9 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
             other => return Err(format!("gi-check: unknown option {other}\n{HELP}")),
         }
     }
+    if keep_going {
+        o.fail_fast = false;
+    }
     for r in &o.runs {
         if !RUNS.contains(&r.as_str()) {
             return Err(format!("gi-check: unknown run {r}"));
@@ -125,12 +145,19 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
     }
     std::fs::create_dir_all(&o.out).map_err(|e| format!("{}: {e}", o.out.display()))?;
     let out = std::fs::canonicalize(&o.out).map_err(|e| e.to_string())?;
-    if !o.score_only {
-        for r in &o.runs {
+    let started = std::time::Instant::now();
+    let mut rows = Vec::new();
+    for r in &o.runs {
+        if !o.score_only {
             render(&o, &out, r)?;
         }
+        score_run(&o, &out, r, &mut rows)?;
+        if o.fail_fast && rows.iter().any(|row| !row.pass()) {
+            println!("gi-check: stopped after the {r} run (first FAIL)");
+            break;
+        }
     }
-    let rows = score(&o, &out)?;
+    println!("gi-check: {:.0} s", started.elapsed().as_secs_f64());
     let failed = print_table(&rows);
     let table = rows.iter().map(Row::line).collect::<Vec<_>>().join("\n");
     let _ = std::fs::write(out.join("gi-check.txt"), format!("{table}\n"));
@@ -140,9 +167,37 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
     Ok(())
 }
 
-const HELP: &str = "genos-stress gi-check [--out DIR] [--only settled,moving,walk,flicker,camera,trail] \
+/// Tiers (debugging.md, gi-check): quick to iterate on, mid when quick passes,
+/// full before pushing. Every tier stops at the first run with a FAIL.
+fn tier(o: &mut Options, name: &str) -> Result<(), String> {
+    let runs: &[&str] = match name {
+        "quick" => {
+            o.size = "640x360".into();
+            o.views = "contact,lamp-wall".into();
+            o.stride = 4;
+            o.clip = 90;
+            // No moving views: each needs a fresh reference of its last frame
+            // (minutes, and too noisy when capped). The camera clip and the trail
+            // are quick's moving checks.
+            &["repro", "settled", "camera", "trail"]
+        }
+        "mid" => {
+            o.stride = 2;
+            &["repro", "settled", "moving", "camera", "trail"]
+        }
+        "full" => &[
+            "repro", "settled", "moving", "camera", "trail", "walk", "flicker",
+        ],
+        other => return Err(format!("gi-check: --tier quick, mid or full, not {other}")),
+    };
+    o.runs = runs.iter().map(|r| r.to_string()).collect();
+    o.fail_fast = true;
+    Ok(())
+}
+
+const HELP: &str = "genos-stress gi-check [--tier quick|mid|full] [--out DIR] [--only repro,settled,moving,walk,flicker,camera,trail] \
 [--score-only] [--ref-noise 0.05] [--ref-spp 2048] [--ref-seconds 900] [--size 640x360] [--walk-size 1280x720] \
-[--settled-refs DIR] [--gi v2|v1] [--views corner,contact] [--stride 1]
+[--settled-refs DIR] [--gi v2|v1] [--views corner,contact] [--stride 1] [--clip N] [--fail-fast] [--keep-going]
 Renders with GENOS_GI=v2 (or v1); GENOS_GI2_TILE defaults to the 1440p probe spacing (height / 90), references are \
 cached in $GENOS_REFERENCE_CACHE (default target/reference-cache). Exit status 1 on a FAIL.";
 
@@ -157,6 +212,7 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
             .replace("__ONLY__", &o.views)
             .replace("__GI__", if o.v2 { "1.0" } else { "0.0" })
             .replace("__STRIDE__", &o.stride.max(1).to_string())
+            .replace("__CLIP__", &o.clip.to_string())
             .replace("__DIR__", &dir.display().to_string())
     };
     let (script, size) = match run {
@@ -164,6 +220,7 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
         "walk" => (fill(WALK_SCRIPT), &o.walk_size),
         "camera" => (fill(CAMERA_SCRIPT), &o.size),
         "trail" => (fill(TRAIL_SCRIPT), &o.size),
+        "repro" => (fill(REPRO_SCRIPT), &o.size),
         // The repo's flicker gate, with a heatmap per pose and window.
         _ => (
             fill(
@@ -338,17 +395,17 @@ fn view_rows(rows: &mut Vec<Row>, run: &str, dir: &Path, refs: &Path) -> Result<
     Ok(())
 }
 
-fn score(o: &Options, out: &Path) -> Result<Vec<Row>, String> {
-    let mut rows = Vec::new();
-    for run in &o.runs {
+fn score_run(o: &Options, out: &Path, run: &str, rows: &mut Vec<Row>) -> Result<(), String> {
+    {
         let dir = out.join(run);
-        match run.as_str() {
+        match run {
+            "repro" => repro_rows(rows, &dir)?,
             "settled" => {
                 let refs = o.settled_refs.clone().unwrap_or_else(|| dir.clone());
-                view_rows(&mut rows, run, &dir, &refs)?;
+                view_rows(rows, run, &dir, &refs)?;
             }
             "moving" => {
-                view_rows(&mut rows, run, &dir, &dir)?;
+                view_rows(rows, run, &dir, &dir)?;
                 if let Some((mean, min)) = rays_per_probe(&dir.join("run.log")) {
                     println!(
                         "moving   rays held per probe while moving: mean {mean:.1}, least {min:.1}"
@@ -387,8 +444,8 @@ fn score(o: &Options, out: &Path) -> Result<Vec<Row>, String> {
                     image: dir.join(format!("cold/frame-{worst_at:04}.png")),
                 });
             }
-            "camera" => camera_rows(&mut rows, &dir)?,
-            "trail" => trail_rows(&mut rows, &dir)?,
+            "camera" => camera_rows(rows, &dir)?,
+            "trail" => trail_rows(rows, &dir)?,
             _ => {
                 let text = std::fs::read_to_string(dir.join("report.md"))
                     .map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -436,7 +493,7 @@ fn score(o: &Options, out: &Path) -> Result<Vec<Row>, String> {
             }
         }
     }
-    Ok(rows)
+    Ok(())
 }
 
 fn print_table(rows: &[Row]) -> usize {
@@ -599,6 +656,35 @@ fn camera_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
                 image: frame(dir, "stop", settle.saturating_sub(1)),
             });
         }
+    }
+    Ok(())
+}
+
+/// Repro run: each clip's last frame (on the settled pose) against the settled
+/// picture, as |mean ratio - 1| of the luminance.
+fn repro_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
+    let still = metrics::lum320(&dir.join("still.png"))?;
+    let mean = |p: &metrics::Plane| p.v.iter().sum::<f64>() / p.v.len().max(1) as f64;
+    let base = mean(&still).max(1.0e-6);
+    for clip in ["jitter", "slide", "turn"] {
+        let mut last = None;
+        for i in 0.. {
+            let f = frame(dir, clip, i);
+            if !f.exists() {
+                break;
+            }
+            last = Some((i, f));
+        }
+        let (i, f) = last.ok_or(format!("gi-check: no {clip} frames in {}", dir.display()))?;
+        let ratio = mean(&metrics::lum320(&f)?) / base;
+        let err = metrics::rel_err(&metrics::lum320(&f)?, &still).0;
+        rows.push(Row {
+            check: format!("repro {clip} brightness"),
+            value: (ratio - 1.0).abs(),
+            limit: REPRO_LIMIT,
+            note: format!("ratio {ratio:.4}, error {err:.4}, frame {i}"),
+            image: f,
+        });
     }
     Ok(())
 }

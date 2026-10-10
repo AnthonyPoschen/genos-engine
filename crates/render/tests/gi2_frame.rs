@@ -411,3 +411,62 @@ fn gi_v2_floor_change_drops_all_kept_rays() {
         "the next frame keeps the first and adds its own ({held})"
     );
 }
+
+/// Mean of a picture's RGB bytes.
+fn mean_byte(p: &[u8]) -> f64 {
+    p.chunks(4)
+        .map(|c| (c[0] as f64 + c[1] as f64 + c[2] as f64) / 3.0)
+        .sum::<f64>()
+        / (p.len() / 4).max(1) as f64
+}
+
+/// A moving camera draws the bounce light as bright as the settled picture. Three
+/// 12-frame clips end on the settled pose: a 1e-5 rad wiggle (nothing moves on
+/// screen, but each frame's camera differs), a 0.55 m slide and a 19 degree turn;
+/// the last frame of each must match the settled picture's mean. Until 2026-10-10
+/// the gather projected a cell's mean light along its rays' mean direction, which
+/// bends toward the normal once a probe holds strata traced from different world
+/// cells: 1.05, 1.22 and 1.31 here.
+#[test]
+fn gi_v2_moving_camera_keeps_its_brightness() {
+    let (_gpu, mut window, mut renderer) = open();
+    renderer.set_gi_v2(true).expect("GI v2");
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Bounce,
+        ..DebugView::default()
+    });
+    let world = shipped_hall();
+    let camera = Camera::opening();
+    let at = |dx: f32, yaw: f32| {
+        let mut c = Camera::opening();
+        c.set_pose(
+            camera.position + genos_scene::Vec3::new(dx, 0.0, 0.0),
+            camera.yaw + yaw,
+            camera.pitch,
+        );
+        c
+    };
+    for clip in ["wiggle", "slide", "turn"] {
+        let mut settled = Vec::new();
+        for _ in 0..30 {
+            settled = draw(&mut window, &mut renderer, &world, &camera);
+        }
+        let mut last = Vec::new();
+        for i in 0..12 {
+            let k = (11 - i) as f32;
+            let c = match clip {
+                "wiggle" if k > 0.0 => at(0.0, if i % 2 == 0 { 1.0e-5 } else { -1.0e-5 }),
+                "slide" => at(-0.05 * k, 0.0),
+                "turn" => at(0.0, -0.03 * k),
+                _ => at(0.0, 0.0),
+            };
+            last = draw(&mut window, &mut renderer, &world, &c);
+        }
+        let ratio = mean_byte(&last) / mean_byte(&settled).max(1.0e-6);
+        eprintln!("{clip}: moving / settled {ratio:.4}");
+        assert!(
+            (ratio - 1.0).abs() < 0.03,
+            "{clip}: the moving picture's bounce light is {ratio:.4} of the settled one"
+        );
+    }
+}

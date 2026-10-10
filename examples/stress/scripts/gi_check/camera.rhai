@@ -6,7 +6,7 @@
 // at every STRIDE-th pose until the GI settles and saves that to still/. gi-check
 // scores each moving frame against the still one (error, worst tile) and the
 // frame-to-frame change beyond the still pictures' own change (flicker).
-// Filled in: __DIR__, __GI__, __STRIDE__.
+// Filled in: __DIR__, __GI__, __STRIDE__, __CLIP__ (only the first CLIP poses; 0: all).
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("time_of_day", 12.0);
 knob("sun", "freeze");
@@ -25,6 +25,8 @@ for i in 0..15 {
 let z = 10.05;
 while z < 18.0 { path.push([9.3, 1.6, z, 3.14159, pitch]); z += 0.1; }
 for i in 0..40 { path.push([9.3, 1.6, 18.0, 3.14159 + (i + 1) * 0.05236, pitch]); }
+const CLIP = __CLIP__;
+if CLIP > 0 && CLIP < path.len() { path.truncate(CLIP); }
 let n = path.len();
 let p0 = path[0];
 camera(#{ position: [p0[0], p0[1], p0[2]], yaw: p0[3], pitch: p0[4] });
