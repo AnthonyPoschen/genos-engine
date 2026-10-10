@@ -3,7 +3,8 @@
 // patches relit this frame. A hit stores its distance and surface for the light
 // pass; a miss takes the sky. A probe ray's record goes into this frame's
 // stratum of the probe's kept hits (gi2_hit_at). Then every older kept hit whose
-// path crosses a change is traced again in place (gi2_kept_crossed). One trace
+// path crosses a change is traced again in place (gi2_kept_crossed), and the
+// strata a probe holds from nowhere are traced from its place (gi2_fill_ray). One trace
 // site. A hit on an emissive mesh also
 // stores the light it gives off (the mesh field's emission table).
 #extension GL_GOOGLE_include_directive : require
@@ -89,7 +90,18 @@ void main() {
     vec3 dir;
     vec3 n;
     bool probe_ray = ray < gi2_probe_rays();
-    if (ray >= rays_end) {
+    if (ray >= rays_end + gi2_kept_hits()) {
+        // Then one thread per fill slot: a stratum the probe holds from nowhere,
+        // traced from its place now (gi2_fill_ray). Not on the async queue.
+        uint h = ray - rays_end - gi2_kept_hits();
+        uint rays = gi2_rays();
+        if (mode == 2u || h >= gi2_kept_hits()
+            || !gi2_fill_ray(h / rays / GI2_STRATA, (h / rays) % GI2_STRATA, h % rays, origin, dir, n)) {
+            return;
+        }
+        at = gi2_fill_at(h);
+        probe_ray = true;
+    } else if (ray >= rays_end) {
         // Past this frame's rays: one thread per kept hit, re-traced where it crossed
         // a change (gi2_kept_crossed). Not on the async queue (mode 2).
         uint h = ray - rays_end;

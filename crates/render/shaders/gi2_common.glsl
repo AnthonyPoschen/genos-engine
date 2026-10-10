@@ -139,6 +139,36 @@ uint gi2_view_at(uint block, uint probe) {
 uint gi2_cell_at(uint table, uint probe, uint k) {
     return gi2_view_at(2u, 0u) + (table * gi2_probes() + probe) * gi2_rays() + k;
 }
+// Fill: the strata a probe holds from nowhere (no probe near its place traced
+// them: a surface the camera just turned or walked onto) are traced from the probe's
+// place in this frame (params.z bit 6), into the fill block, which mirrors the kept
+// hits (index (probe S + s) R + k) and is not kept: a filled stratum lives one frame.
+// The gather's first round (params.z bit 1) picks each probe's kept strata, so the
+// trace knows which to fill before the light pass shades them.
+bool gi2_fill_on() {
+    return ((pc.params.z >> 6u) & 1u) != 0u;
+}
+uint gi2_fill_at(uint h) {
+    return gi2_cell_at(2u, 0u, 0u) + h;
+}
+uint gi2_fill_light_at() {
+    return gi2_fill_at(gi2_kept_hits());
+}
+void gi2_put_fill_light(uint h, vec3 light) {
+    work.v[gi2_fill_light_at() + h / 4u][h % 4u] = uintBitsToFloat(gi2_pack_rgb9e5(light));
+}
+vec3 gi2_fill_light(uint h) {
+    return gi2_unpack_rgb9e5(floatBitsToUint(work.v[gi2_fill_light_at() + h / 4u][h % 4u]));
+}
+// The views block the gather writes this frame (its picks), 0 or 1.
+uint gi2_view_next() {
+    return 1u - (uint(work.v[gi2_change_at()].z + 0.5) & 1u);
+}
+// This frame's pick for probe's stratum s: last frame's probe + 1, or 0 for none.
+uint gi2_pick(uint probe, uint s) {
+    vec4 v = work.v[gi2_view_at(gi2_view_next(), probe) + s / 4u];
+    return floatBitsToUint(v[s % 4u]);
+}
 // Which spatial filter pass this dispatch is (gi2_filter.comp): 0, 1 or 2.
 uint gi2_filter_round() {
     return (pc.params.z >> 1u) & 3u;
@@ -273,15 +303,20 @@ vec3 gi2_dir(uint h, vec3 n, uint k, uint count) {
 // cover it 16 x 32. The turn and the jitter come from the probe's world cell
 // (25 cm), so a probe that stays put traces the same rays each time a stratum
 // comes round (noise never crawls), and so does a kept stratum shaded again.
-uint gi2_cell_hash(vec3 pos) {
-    ivec3 cell = ivec3(floor(pos / 0.25));
+uint gi2_cell_hash(vec3 pos, vec3 n) {
+    // Half a cell in from the surface: a floor or wall on a cell boundary (the
+    // stress scene's floor at 0 m, its roof at 3 m) would otherwise fall in one
+    // cell or the next by rounding, so the pattern of a probe that moved a hair
+    // (any camera motion) turned at random, and kept strata traced with one turn
+    // landed unevenly in the cells of the other (blotches that crawl with a turn).
+    ivec3 cell = ivec3(floor(pos / 0.25 - 0.5 * n));
     return gi2_hash(uint(cell.x) * 73856093u ^ uint(cell.y) * 19349663u ^ uint(cell.z) * 83492791u);
 }
 uint gi2_grid() {
     return max(uint(sqrt(float(gi2_rays())) + 0.5), 1u);
 }
 vec3 gi2_stratum_dir(vec3 pos, vec3 n, uint k, uint stratum) {
-    uint h = gi2_cell_hash(pos);
+    uint h = gi2_cell_hash(pos, n);
     uint s = gi2_grid();
     float j1 = gi2_unit(h ^ (k * 0x9e3779b9u + 1u));
     float j2 = gi2_unit(h ^ (k * 0x85ebca6bu + 2u));
@@ -298,7 +333,7 @@ vec3 gi2_cell_dir(vec3 pos, vec3 n, uint k) {
     uint s = gi2_grid();
     float r = float(k % s);
     float u = 0.5 * (sqrt(r / float(s)) + sqrt((r + 1.0) / float(s)));
-    return gi2_hemi_dir(gi2_cell_hash(pos), n, u, (float(k / s) + 0.5) / float(s));
+    return gi2_hemi_dir(gi2_cell_hash(pos, n), n, u, (float(k / s) + 0.5) / float(s));
 }
 // Solid angle of a cell in row k % sqrt(R).
 float gi2_cell_solid_angle(uint k) {
@@ -317,7 +352,7 @@ uint gi2_cell_of(vec3 pos, vec3 n, vec3 d) {
     vec3 helper = abs(n.y) > 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
     vec3 tx = normalize(cross(helper, n));
     vec3 ty = cross(n, tx);
-    float phi = atan(dot(d, ty), dot(d, tx)) - gi2_unit(gi2_cell_hash(pos)) * GI2_TAU;
+    float phi = atan(dot(d, ty), dot(d, tx)) - gi2_unit(gi2_cell_hash(pos, n)) * GI2_TAU;
     float v = fract(phi / GI2_TAU);
     uint row = min(uint(u * u * float(s)), s - 1u);
     uint col = min(uint(v * float(s)), s - 1u);
@@ -334,6 +369,20 @@ bool gi2_stratum_ray(uint probe, uint s, uint k, out vec3 origin, out vec3 dir, 
     origin = sp.xyz + n * 0.02;
     dir = gi2_stratum_dir(sp.xyz, n, k, s);
     return sp.w > 0.5;
+}
+
+// Ray k of probe's stratum s traced from its place now (a fill), when that stratum
+// is filled this frame.
+bool gi2_fill_ray(uint probe, uint s, uint k, out vec3 origin, out vec3 dir, out vec3 n) {
+    vec4 pp = work.v[gi2_probe_at(probe)];
+    n = work.v[gi2_probe_at(probe) + 1u].xyz;
+    origin = pp.xyz + n * 0.02;
+    dir = vec3(0.0, 1.0, 0.0);
+    if (!gi2_fill_on() || pp.w < 0.5 || s == gi2_stratum() || gi2_pick(probe, s) != 0u) {
+        return false;
+    }
+    dir = gi2_stratum_dir(pp.xyz, n, k, s);
+    return true;
 }
 
 // Ray `ray`'s origin (just off its surface) and direction: probe rays first, then

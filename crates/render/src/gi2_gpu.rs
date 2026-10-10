@@ -601,13 +601,16 @@ impl Gpu {
         // Probes (2), one slot per light cache ray (hit, then its light), filtered SH
         // (7), strata (2 per probe and stratum), kept hits and their light (a uint
         // each), the changes block, the views (2 blocks of 2 per probe) and the
-        // cells (2 tables of R per probe) (gi2_common.glsl).
+        // cells (2 tables of R per probe), then the fills and their light (as the
+        // kept hits) (gi2_common.glsl).
         let kept = probes * GI2_RAYS as u64 * GI2_STRATA as u64;
         let cache_rays = (GI2_CACHE_BATCH * GI2_CACHE_RAYS) as u64;
         let work_vec4 = gi2_change_at(probes, cache_rays, kept)
             + (GI2_CHANGE_HEAD + GI2_CHANGES) as u64
             + 4 * probes
-            + 2 * GI2_RAYS as u64 * probes;
+            + 2 * GI2_RAYS as u64 * probes
+            + kept
+            + kept / 4;
         let mut gbuf = std::mem::replace(&mut self.gi2.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.gi2.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.gi2.out, Buffer::empty());
@@ -1212,10 +1215,12 @@ impl Gpu {
         let young_only = self.gi2.young_ok && self.gi2.light_quiet >= sweep;
         self.gi2.stats_light[slot] = light;
         self.gi2.stats_young[slot] = young_only;
-        // z: bgra, young-only rounds and lamp picks (gi2_common.glsl); the filter
-        // passes add their round (bits 1-2) below.
+        // z: bgra, fills (bit 6), young-only rounds and lamp picks (gi2_common.glsl);
+        // the gather and filter passes add their round (bits 1-2) below.
         let picks = std::env::var("GENOS_GI2_CACHE_PICKS").is_ok_and(|v| v == "1");
+        let fill = std::env::var("GENOS_GI2_FILL").map_or(true, |v| v != "0");
         let z = bgra
+            | u32::from(fill) << 6
             | u32::from(young_only) << 10
             | u32::from(picks) << 11;
         let pc = [w, h, cols, rows, GI2_RAYS, gi2_tile(h), z, self.gi2.frame];
@@ -1267,10 +1272,12 @@ impl Gpu {
         } else if !round {
             vec![
                 (1usize, probes.div_ceil(64), 1u32),
-                // This frame's rays, then one thread per kept hit (re-traced where it
-                // crossed a change, gi2_trace.comp).
-                (2, (probe_rays + kept).div_ceil(64), 1),
-                (3, (w * h + kept).div_ceil(64), 1),
+                // The picks (gather's first round), this frame's rays, then one thread
+                // per kept hit (re-traced where it crossed a change) and per fill slot
+                // (gi2_trace.comp).
+                (4, probes.div_ceil(64), 1),
+                (2, (probe_rays + 2 * kept).div_ceil(64), 1),
+                (3, (w * h + 2 * kept).div_ceil(64), 1),
                 (4, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
@@ -1281,8 +1288,9 @@ impl Gpu {
             vec![
                 (0usize, (GI2_CACHE_SLOTS as u32).div_ceil(64), 1u32),
                 (1, probes.div_ceil(64), 1),
-                (2, (rays + kept).div_ceil(64), 1),
-                (3, (w * h + kept + rays - probe_rays).div_ceil(64), 1),
+                (4, probes.div_ceil(64), 1),
+                (2, (rays + 2 * kept).div_ceil(64), 1),
+                (3, (w * h + 2 * kept + rays - probe_rays).div_ceil(64), 1),
                 (4, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
@@ -1325,7 +1333,22 @@ impl Gpu {
                 (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first);
             }
             let mut filter_round = 0u32;
+            let mut picked = false;
             for (k, (pass, gx, gy)) in groups.iter().copied().enumerate() {
+                if pass == 4 {
+                    // The gather's two rounds: the picks (bit 1), then the binning.
+                    let mut round_pc = pc;
+                    round_pc[6] |= u32::from(!picked) << 1;
+                    picked = true;
+                    (self.fns.cmd_push)(
+                        self.cmd,
+                        self.gi2.layout,
+                        0x20,
+                        0,
+                        32,
+                        round_pc.as_ptr() as *const c_void,
+                    );
+                }
                 if pass == 5 {
                     // The spatial filter's three rounds (gi2_filter_round).
                     let mut round_pc = pc;

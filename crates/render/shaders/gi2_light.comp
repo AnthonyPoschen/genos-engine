@@ -2,7 +2,7 @@
 // GI v2 direct light: every lamp at a surface point, each with a shadow ray through
 // the tracer. The points are the picture's pixels (G-buffer) followed by every kept
 // hit of the screen probes (all strata, so a kept hit always carries this frame's
-// light: no light history) and the light cache's ray hits, so all share this loop
+// light: no light history), the light cache's ray hits and the probes' fills, so all share this loop
 // and its one trace site. A pixel keeps its irradiance; a hit adds the light cache's bounced
 // irradiance and turns the sum into the light it sends back along the ray, plus
 // any light the surface emits. A pixel's emitted light (G-buffer w from the
@@ -20,14 +20,17 @@ void main() {
     if (mode == 2u) {
         idx += pixels + kept;
     }
-    uint points = pixels + kept + (mode == 1u ? 0u : cache_rays);
+    // Then (not on the async queue) one point per fill slot (gi2_fill_ray).
+    uint fills = pixels + kept + (mode == 1u ? 0u : cache_rays);
+    uint points = fills + (mode == 2u ? 0u : kept);
     if (idx >= points) {
         return;
     }
-    // A kept probe hit (index h) or a light cache ray (ray).
-    bool probe_hit = idx >= pixels && idx < pixels + kept;
-    uint h = idx - pixels;
-    uint ray = idx < pixels + kept ? 0u : gi2_probe_rays() + (idx - pixels - kept);
+    // A kept probe hit (index h), a light cache ray (ray) or a fill (index h).
+    bool fill_hit = idx >= fills;
+    bool probe_hit = (idx >= pixels && idx < pixels + kept) || fill_hit;
+    uint h = fill_hit ? idx - fills : idx - pixels;
+    uint ray = idx < pixels + kept || fill_hit ? 0u : gi2_probe_rays() + (idx - pixels - kept);
     vec3 pos;
     vec3 n;
     vec3 reflectance = vec3(1.0);
@@ -47,11 +50,23 @@ void main() {
         if (probe_hit) {
             uint rays = gi2_rays();
             uint ps = h / rays;
-            rec = work.v[gi2_kept_at(h)];
-            live = gi2_stratum_ray(ps / GI2_STRATA, ps % GI2_STRATA, h % rays, origin, dir, from_n);
-            if (live && rec.x < -0.75) {
-                gi2_put_kept_light(h, has_sky() ? scene.sky.rgb : vec3(0.0));
-                return;
+            if (fill_hit) {
+                live = gi2_fill_ray(ps / GI2_STRATA, ps % GI2_STRATA, h % rays, origin, dir, from_n);
+                if (!live) {
+                    return;
+                }
+                rec = work.v[gi2_fill_at(h)];
+                if (rec.x < -0.75) {
+                    gi2_put_fill_light(h, has_sky() ? scene.sky.rgb : vec3(0.0));
+                    return;
+                }
+            } else {
+                rec = work.v[gi2_kept_at(h)];
+                live = gi2_stratum_ray(ps / GI2_STRATA, ps % GI2_STRATA, h % rays, origin, dir, from_n);
+                if (live && rec.x < -0.75) {
+                    gi2_put_kept_light(h, has_sky() ? scene.sky.rgb : vec3(0.0));
+                    return;
+                }
             }
         } else {
             rec = work.v[gi2_hit_at(ray)];
@@ -73,7 +88,7 @@ void main() {
     // weighted by how often it is expected to be picked (unbiased, as
     // lamps_light_only). The pick offset hangs on the patch and the ray, so a
     // still scene relights to the same value.
-    bool pick = idx >= pixels + kept && ((pc.params.z >> 11u) & 1u) != 0u;
+    bool pick = idx >= pixels + kept && !fill_hit && ((pc.params.z >> 11u) & 1u) != 0u;
     float total = 0.0;
     uint lit = 0u;
     float u = 0.0;
@@ -117,7 +132,9 @@ void main() {
         gbuf.px[idx].w = gi2_pack_rgb9e5(e);
     } else {
         e += gi2_cache_irradiance(pos, n);
-        if (probe_hit) {
+        if (fill_hit) {
+            gi2_put_fill_light(h, reflectance * e + glow);
+        } else if (probe_hit) {
             gi2_put_kept_light(h, reflectance * e + glow);
         } else {
             work.v[gi2_rad_at(ray)] = vec4(reflectance * e + glow, 0.0);
