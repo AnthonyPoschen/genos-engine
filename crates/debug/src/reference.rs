@@ -462,7 +462,7 @@ pub fn render_cached(setup: &RefSetup, dir: &std::path::Path) -> Reference {
     // GPU traces (triangles, their own tracer) keep their own keys.
     let gpu = gpu_wanted();
     if gpu {
-        "gpuref-v1".hash(&mut hasher);
+        "gpuref-v2".hash(&mut hasher);
     }
     let path = dir.join(format!("{:016x}.ref", hasher.finish()));
     if let Some(r) = load(&path, setup.width, setup.height) {

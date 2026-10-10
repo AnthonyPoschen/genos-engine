@@ -9,6 +9,13 @@
 // the cosine bounce only. Traced on the hardware ray tracer through its own
 // acceleration structures (VK_KHR_ray_query). No denoiser, no clamp.
 //
+// One difference from the CPU proof, on purpose: rays start at t = 1e-5, not 1e-3.
+// Every ray already starts 2 cm off its own surface, so the larger start only lets
+// a ray that begins within 1 mm of another face skip it: at a concave corner (the
+// stress room's long wall meeting a cross wall) a shadow ray from the corner
+// passed through the cross wall and lit the corner from the far side, a column of
+// white specks along the seam in the CPU references.
+//
 // One dispatch: every pixel runs `paths` paths into each half (A: even, B: odd
 // sample numbers) and writes the means of this pass; the host sums passes in f64.
 #extension GL_EXT_ray_query : require
@@ -43,6 +50,7 @@ const float PI = 3.14159265358979;
 const float REACH = 200.0;
 const float LAMP_UNIT = 72.0;
 const float LAMP_RADIUS = 0.1;
+const float GI_T_MIN = 1.0e-5;
 
 uint hash(uint x) {
     x ^= x >> 16; x *= 0x7feb352du;
@@ -67,7 +75,7 @@ struct Hit {
 // The closest hit within reach; the normal faces the ray (two-sided back hits flip).
 bool first_hit(vec3 o, vec3 d, float reach, out Hit h) {
     rayQueryEXT q;
-    rayQueryInitializeEXT(q, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, o, 1.0e-3, d, reach);
+    rayQueryInitializeEXT(q, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, o, GI_T_MIN, d, reach);
     while (rayQueryProceedEXT(q)) {}
     if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) {
         return false;
@@ -93,7 +101,7 @@ bool blocked(vec3 a, vec3 b) {
         return false;
     }
     rayQueryEXT q;
-    rayQueryInitializeEXT(q, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsCullBackFacingTrianglesEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, a, 1.0e-3, d / dist, dist - 1.0e-3);
+    rayQueryInitializeEXT(q, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsCullBackFacingTrianglesEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, a, GI_T_MIN, d / dist, dist - 1.0e-3);
     while (rayQueryProceedEXT(q)) {}
     return rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
 }
