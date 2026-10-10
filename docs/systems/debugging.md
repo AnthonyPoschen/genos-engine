@@ -222,14 +222,15 @@ a view on 16 cores).
 `--tier quick|mid|full` picks the runs; every tier stops at the first run with a
 FAIL. Iterate on quick, run mid when quick passes, run full only before pushing.
 
-- `quick`: repro; the contact and lamp-wall views settled; the first 90 poses of
-  the camera path (reference every 4th); the trail (reference every 4th); 640x360.
+- `quick`: repro; the contact and lamp-wall views and the close-up settled; the
+  first 90 poses of the camera path (reference every 4th); the trail (reference
+  every 4th); the flick run; 640x360.
   No moving views: each needs a fresh reference of its last frame, minutes each
   and too noisy when capped; the camera clip and the trail are quick's moving
   checks.
-- `mid`: repro; all five views settled and moving; the whole camera path and the
-  trail, references every 2nd pose.
-- `full`: everything (repro, settled, moving, camera, trail, walk, flicker),
+- `mid`: repro; all five views settled and moving; the whole camera path, the
+  trail (references every 2nd pose) and the flick run.
+- `full`: everything (repro, settled, moving, camera, trail, flick, walk, flicker),
   references at every pose.
 
 The camera flicker row needs references at consecutive poses, so only full has it.
@@ -267,6 +268,17 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   the moving pass, not yet in the settled one) was every build's worst camera
   frame and the corner walk's worst pop. The path now stops at z 15 and turns
   there (camera.rhai, walk.rhai: 178 and 138 poses). Trail: v1 0.109 (its world probes lag), v2 0.057.
+- Close-up (the hall's west bench at 1.3 m, settled only, own rows): GI v2
+  1129d5d mean 0.030, contact 0.026, open wall 0.028; the picture shows the
+  bench face, top and foot with their contact shading. Limits 0.045 each.
+- Flick run (2026-10-10, 4070, 12 s): the doorway pose while lamps and boxes move,
+  40 frames, upper third, per 4x4 block at 320x180 the frame-to-frame change
+  less the net change, per frame (light going back and forth, not the lamps'
+  steady change). GI v2 1129d5d, where kept rays a moving box crossed were
+  dropped until their stratum came round: 0.0005 (all change 0.00058), its
+  frames show the walls around the boxes shimmering. With the re-trace in the
+  frame (defa10a): 0.0001 (all change 0.00016). Limit 0.0003. The full tier's
+  moving flicker row on the same builds: 0.0008 FAIL, 0.0004 PASS.
 
 ## Limits
 

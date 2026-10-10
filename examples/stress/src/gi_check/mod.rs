@@ -16,9 +16,10 @@ const VIEWS_SCRIPT: &str = include_str!("../../scripts/gi_check/views.rhai");
 const WALK_SCRIPT: &str = include_str!("../../scripts/gi_check/walk.rhai");
 const CAMERA_SCRIPT: &str = include_str!("../../scripts/gi_check/camera.rhai");
 const TRAIL_SCRIPT: &str = include_str!("../../scripts/gi_check/trail.rhai");
+const FLICK_SCRIPT: &str = include_str!("../../scripts/gi_check/flick.rhai");
 const REPRO_SCRIPT: &str = include_str!("../../scripts/gi_check/repro.rhai");
-const RUNS: [&str; 7] = [
-    "repro", "settled", "moving", "walk", "flicker", "camera", "trail",
+const RUNS: [&str; 8] = [
+    "repro", "settled", "moving", "walk", "flicker", "camera", "trail", "flick",
 ];
 const FLICKER_SCRIPT: &str = include_str!("../../scripts/temporal_flicker_aligned.rhai");
 const VIEWS: [&str; 5] = ["room-a", "corner", "contact", "lamp-wall", "hall"];
@@ -66,6 +67,9 @@ const TRAIL_WORST_LIMIT: f64 = 0.10;
 /// Repro run: the last frame of each clip that ends on the settled pose, against
 /// the settled picture: |mean ratio - 1|.
 const REPRO_LIMIT: f64 = 0.03;
+/// Flick run: light going back and forth per frame (flick_rows), linear
+/// luminance. Set from the box-crossing fix (debugging.md).
+const FLICK_LIMIT: f64 = 0.0003;
 
 struct Options {
     out: PathBuf,
@@ -184,16 +188,16 @@ fn tier(o: &mut Options, name: &str) -> Result<(), String> {
             o.stride = 4;
             o.clip = 90;
             // No moving views: each needs a fresh reference of its last frame
-            // (minutes, and too noisy when capped). The camera clip and the trail
-            // are quick's moving checks.
-            &["repro", "settled", "camera", "trail"]
+            // (minutes, and too noisy when capped). The camera clip, the trail and
+            // the flick run are quick's moving checks.
+            &["repro", "settled", "camera", "trail", "flick"]
         }
         "mid" => {
             o.stride = 2;
-            &["repro", "settled", "moving", "camera", "trail"]
+            &["repro", "settled", "moving", "camera", "trail", "flick"]
         }
         "full" => &[
-            "repro", "settled", "moving", "camera", "trail", "walk", "flicker",
+            "repro", "settled", "moving", "camera", "trail", "flick", "walk", "flicker",
         ],
         other => return Err(format!("gi-check: --tier quick, mid or full, not {other}")),
     };
@@ -202,7 +206,7 @@ fn tier(o: &mut Options, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-const HELP: &str = "genos-stress gi-check [--tier quick|mid|full] [--out DIR] [--only repro,settled,moving,walk,flicker,camera,trail] \
+const HELP: &str = "genos-stress gi-check [--tier quick|mid|full] [--out DIR] [--only repro,settled,moving,walk,flicker,camera,trail,flick] \
 [--score-only] [--ref-noise 0.05] [--ref-spp 2048] [--ref-seconds 900] [--size 640x360] [--walk-size 1280x720] \
 [--settled-refs DIR] [--gi v2|v1] [--views corner,contact] [--stride 1] [--clip N] [--fail-fast] [--keep-going]
 Renders with GENOS_GI=v2 (or v1); GENOS_GI2_TILE defaults to the 1440p probe spacing (height / 90), references are \
@@ -227,6 +231,7 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
         "walk" => (fill(WALK_SCRIPT), &o.walk_size),
         "camera" => (fill(CAMERA_SCRIPT), &o.size),
         "trail" => (fill(TRAIL_SCRIPT), &o.size),
+        "flick" => (fill(FLICK_SCRIPT), &o.size),
         "repro" => (fill(REPRO_SCRIPT), &o.size),
         // The repo's flicker gate, with a heatmap per pose and window.
         _ => (
@@ -476,6 +481,7 @@ fn score_run(o: &Options, out: &Path, run: &str, rows: &mut Vec<Row>) -> Result<
             }
             "camera" => camera_rows(rows, &dir)?,
             "trail" => trail_rows(rows, &dir)?,
+            "flick" => flick_rows(rows, &dir)?,
             _ => {
                 let text = std::fs::read_to_string(dir.join("report.md"))
                     .map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -716,6 +722,50 @@ fn repro_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
             image: f,
         });
     }
+    Ok(())
+}
+
+/// Flick run (flick.rhai): the light that goes back and forth in the upper third
+/// of the doorway pose while lamps and boxes move. Per 4 x 4 block at 320 x 180:
+/// (sum of |frame-to-frame change| - |last - first|) / frames, linear luminance,
+/// averaged over the blocks. A lamp's light drifts one way and scores near zero.
+fn flick_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
+    let mut frames = Vec::new();
+    while frame(dir, "move", frames.len()).exists() {
+        frames.push(metrics::lum320(&frame(dir, "move", frames.len()))?);
+    }
+    if frames.len() < 3 {
+        return Err(format!("gi-check: no flick frames in {}", dir.display()));
+    }
+    let (w, h) = (frames[0].w, frames[0].h);
+    let (bw, bh) = (w / 4, h / 3 / 4);
+    let block = |p: &metrics::Plane, bx: usize, by: usize| -> f64 {
+        let mut s = 0.0;
+        for y in by * 4..by * 4 + 4 {
+            for x in bx * 4..bx * 4 + 4 {
+                s += p.v[y * w + x];
+            }
+        }
+        s / 16.0
+    };
+    let (mut back, mut total) = (0.0, 0.0);
+    for by in 0..bh {
+        for bx in 0..bw {
+            let v: Vec<f64> = frames.iter().map(|p| block(p, bx, by)).collect();
+            let steps: f64 = v.windows(2).map(|p| (p[1] - p[0]).abs()).sum();
+            let net = (v[v.len() - 1] - v[0]).abs();
+            back += steps - net;
+            total += steps;
+        }
+    }
+    let n = (bw * bh * (frames.len() - 1)) as f64;
+    rows.push(Row {
+        check: "flick back-and-forth".into(),
+        value: back / n,
+        limit: FLICK_LIMIT,
+        note: format!("all change {:.5} per frame", total / n),
+        image: frame(dir, "move", frames.len() - 1),
+    });
     Ok(())
 }
 
