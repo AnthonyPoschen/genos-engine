@@ -72,11 +72,16 @@ const REPRO_LIMIT: f64 = 0.03;
 /// luminance. Set from the box-crossing fix (debugging.md).
 const FLICK_LIMIT: f64 = 0.0003;
 /// Turn run (turn.rhai, turn_rows): blob of the frame that arrives at the pose
-/// (turning at 6 or 3 degrees a frame, or walking) against the pose settled from a
+/// (turning at 3 degrees a frame, or walking) against the pose settled from a
 /// fresh start, and of the last of 30 frames held there. Set from 10ce430 (turns
 /// fail, walking passes) and the leading-edge fill (debugging.md, Validation).
-const TURN_ARRIVE_LIMIT: f64 = 0.010;
+const TURN_ARRIVE_LIMIT: f64 = 0.008;
 const TURN_HELD_LIMIT: f64 = 0.002;
+/// Turn run, soak / move / return: the first 5 moving frames against each pose
+/// settled (onset pop, worst frame) and the frame held after turning out and back
+/// against the soaked baseline (return).
+const TURN_ONSET_LIMIT: f64 = 0.009;
+const TURN_RETURN_LIMIT: f64 = 0.002;
 
 struct Options {
     out: PathBuf,
@@ -193,18 +198,20 @@ fn tier(o: &mut Options, name: &str) -> Result<(), String> {
             o.size = "640x360".into();
             o.views = "contact,lamp-wall,close".into();
             o.stride = 4;
-            o.clip = 90;
             // No moving views: each needs a fresh reference of its last frame
-            // (minutes, and too noisy when capped). The camera clip, the trail and
-            // the flick run are quick's moving checks.
-            &["repro", "settled", "camera", "trail", "flick", "turn"]
+            // (minutes, and too noisy when capped). The turn run (soak, move,
+            // return; turning and walking), the trail and the flick run are quick's
+            // moving checks; the 90-pose camera clip (45 s) was cut 2026-10-10: the
+            // turn run covers camera motion in a third of the time and caught what
+            // the clip missed (the turn swim).
+            &["repro", "settled", "trail", "flick", "turn"]
         }
         "mid" => {
             o.stride = 2;
             &["repro", "settled", "moving", "camera", "trail", "flick", "turn"]
         }
         "full" => &[
-            "repro", "settled", "moving", "camera", "trail", "flick", "turn", "walk", "flicker",
+            "repro", "settled", "moving", "camera", "trail", "flick", "turn", "flicker",
         ],
         other => return Err(format!("gi-check: --tier quick, mid or full, not {other}")),
     };
@@ -788,7 +795,7 @@ fn turn_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
     let mut held = (0.0f64, PathBuf::new(), String::new());
     let mut walk = None;
     let mut notes = Vec::new();
-    for seg in ["turn6", "turn6r", "turn3", "walk"] {
+    for seg in ["turn", "walk"] {
         let last = |sub: &str| {
             let mut n = 0;
             while frame(dir, &format!("{seg}/{sub}"), n).exists() {
@@ -812,9 +819,69 @@ fn turn_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
         }
     }
     println!("turn     arrival/held blob by segment: {}", notes.join(", "));
+    // Onset: the first moving frame saved already stands one step in (back/move
+    // frame i - 1 is at back pose i; checked against the settled poses), so the
+    // soaked picture before it is ref.png.
+    let mut onset = (0.0f64, 0usize, 1.0f64);
+    let mut onset_notes = Vec::new();
+    for i in 1..6 {
+        let settled = frame(dir, "onset", i);
+        let moving = frame(dir, "back/move", i - 1);
+        if !settled.exists() || !moving.exists() {
+            return Err(format!("gi-check: no onset frame {i} in {}", dir.display()));
+        }
+        let (m, s) = (metrics::lum640(&moving)?, metrics::lum640(&settled)?);
+        let b = metrics::blob(&m, &s);
+        let ratio = m.v.iter().sum::<f64>() / s.v.iter().sum::<f64>().max(1.0e-6);
+        onset_notes.push(format!("{i}:{b:.4}/x{ratio:.3}"));
+        if b >= onset.0 {
+            onset = (b, i, ratio);
+        }
+    }
+    println!("turn     onset blob/ratio by frame: {}", onset_notes.join(" "));
+    let mut n = 0;
+    while frame(dir, "back/hold", n).exists() {
+        n += 1;
+    }
+    if n == 0 {
+        return Err(format!("gi-check: no back/hold frames in {}", dir.display()));
+    }
+    let back_hold = frame(dir, "back/hold", n - 1);
+    let ret = metrics::blob(&metrics::lum640(&back_hold)?, &reference);
+    // Every segment ends at the pose, held until settled: against ref.png, the pose
+    // settled from a fresh start in the same scene state (stuck or leftover light).
+    let mut end = (0.0f64, PathBuf::new(), String::new());
+    for seg in ["turn", "walk", "back"] {
+        let p = dir.join(format!("{seg}/end.png"));
+        let b = metrics::blob(&metrics::lum640(&p)?, &reference);
+        if b >= end.0 {
+            end = (b, p, seg.to_string());
+        }
+    }
+    rows.push(Row {
+        check: "turn end, soaked, against fresh".into(),
+        value: end.0,
+        limit: TURN_RETURN_LIMIT,
+        note: end.2,
+        image: end.1,
+    });
+    rows.push(Row {
+        check: "turn onset pop (frames 1-5, worst)".into(),
+        value: onset.0,
+        limit: TURN_ONSET_LIMIT,
+        note: format!("frame {} ratio {:.3}", onset.1, onset.2),
+        image: frame(dir, "back/move", onset.1 - 1),
+    });
+    rows.push(Row {
+        check: "turn return to soaked baseline".into(),
+        value: ret,
+        limit: TURN_RETURN_LIMIT,
+        note: "out 45 deg and back, held 30".into(),
+        image: back_hold,
+    });
     let (walk, walk_image) = walk.unwrap_or_default();
     rows.push(Row {
-        check: "turn arrival blob (worst turn)".into(),
+        check: "turn arrival blob (3 deg/frame)".into(),
         value: turn.0,
         limit: TURN_ARRIVE_LIMIT,
         note: turn.2,

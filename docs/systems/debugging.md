@@ -223,15 +223,45 @@ a view on 16 cores).
 FAIL. Iterate on quick, run mid when quick passes, run full only before pushing.
 
 - `quick`: repro; the contact and lamp-wall views and the close-up settled; the
-  first 90 poses of the camera path (reference every 4th); the trail (reference
-  every 4th); the flick run; the turn run; 640x360.
+  trail (reference every 4th); the flick run; the turn run; 640x360.
   No moving views: each needs a fresh reference of its last frame, minutes each
   and too noisy when capped; the camera clip and the trail are quick's moving
   checks.
 - `mid`: repro; all five views settled and moving; the whole camera path, the
   trail (references every 2nd pose), the flick run and the turn run.
-- `full`: everything (repro, settled, moving, camera, trail, flick, turn, walk, flicker),
-  references at every pose.
+- `full`: repro, settled, moving, camera, trail, flick, turn and flicker,
+  references at every pose. The corner walk (`--only walk`) is no longer in a tier.
+
+Cut 2026-10-10 (Anthony: cut what adds no value; keep what caught a regression
+or is the only coverage of a situation):
+- quick's 90-pose camera clip (45 s): the turn run covers camera motion (turning
+  both ways, walking, stopping, returning) in 15-25 s, against the pose settled,
+  and caught the turn swim the clip passed. The whole camera path stays in mid
+  and full (the only long mixed path; its worst-tile row caught the per-ray
+  gather bug).
+- full's corner walk (`walk`, 19 s): its pop row failed on every GI v2 build
+  (0.44-0.49, worst 10x10 tile of cold against warm, noise-bound) and never
+  pointed at a fix; walking is covered by the turn run's walk segment and the
+  camera path. Still runnable with `--only walk`.
+
+Kept: repro (caught both brightness bugs), settled (the only check against
+path-traced references), moving views (caught the moving mean), camera (per-ray
+gather bug), trail (the only check of the space a moving box leaves), flick
+(caught the box-crossing flicker in 5 s), flicker (the only frozen-picture
+check), turn.
+
+### Moving tests: soak, move, return
+
+Rule (Anthony, 2026-10-10) for every moving test: soak the scene until the
+probes report settled (`wait_settled`, the app's settled signal, never a fixed
+frame count), save that settled frame as the baseline, then start the motion.
+Score the onset (the first moving frames against the same poses settled: a pop
+when motion starts) and, where the path ends at a pose that was already settled,
+the return to the baseline (a state that motion leaves behind and that never
+recovers). Status: the turn run does all three (rows: arrival, onset pop,
+return to the soaked baseline). camera, trail, flick, flicker and the moving
+views already soak with `wait_settled` before moving; saving their baseline and
+scoring onset and return is the next step.
 
 The camera flicker row needs references at consecutive poses, so only full has it.
 Quick's two views are a pair whose mean sits near the five-view mean (corner alone
@@ -279,23 +309,29 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   frames show the walls around the boxes shimmering. With the re-trace in the
   frame (defa10a): 0.0001 (all change 0.00016). Limit 0.0003. The full tier's
   moving flicker row on the same builds: 0.0008 FAIL, 0.0004 PASS.
-- Turn run (2026-10-10, 4070, 15-20 s; turn.rhai): Anthony's live pose in the
-  hall (11.59, 1.7, 23.52, yaw -1.0, pitch -0.166, evening), bounce view at
-  640x360, sun, lamps and boxes still. The pose settled from a fresh start is the
-  reference; each segment settles at its start, arrives at the pose in 15 frames
-  (turning 6 degrees a frame from the left and from the right, 3 a frame, or
-  walking 5 cm a frame as the control) and holds 30 frames. Rows: blob (both
-  blurred 8 px, mean |difference| over the reference's mean light, linear) of the
-  worst turn's arrival frame, of walking's, and of the worst last held frame.
-  GI v2 10ce430, whose turn Anthony saw swim live and in our scripted turn: turn
-  arrivals 0.0146 / 0.0169 over two runs (3 a frame 0.012-0.016), walking 0.006 /
-  0.008; the arrival frames show the floor and ceiling blotched where the
-  settled picture is smooth. With the fill and the pattern cells moved in from
-  the surface (gi2_gather.comp, gi2_common.glsl): turns 0.0039-0.0046, walking
-  0.0036 / 0.0038, the blotches gone. Limit 0.010: 10ce430's turns fail, its
-  walking passes. Held frames score 0.0001-0.0002 on both builds (the picture
-  settles within 4 frames of stopping; a settle against a fresh render in a
-  second process differs by 0.002-0.003 from process to process). Limit 0.002.
+- Turn run (2026-10-10, 4070, about 20 s; turn.rhai): Anthony's live pose in the
+  hall (11.59, 1.7, 23.52, yaw -1.0, pitch -0.166, evening, lamps only), bounce
+  view at 640x360, clock fixed, sun, lamps and boxes still, so only the camera
+  moves and every path ends at the soaked pose. ref.png is the pose settled from
+  the process start (the baseline). Segments: turn (15 frames at 3 degrees a
+  frame, his real rate, arriving at the pose), walk (15 frames at 5 cm, the
+  control) and back (out 45 degrees at 3 a frame and straight back); each holds
+  30 frames and then soaks until settled (end.png). Rows (blob: both blurred 8 px,
+  mean |difference| over the reference's mean light, linear): arrival frame of
+  the turn and of the walk against ref.png; onset pop, the first 5 moving frames
+  of back against those poses settled (the first saved moving frame already
+  stands one step in, checked by matching); the soaked end frames and the frame
+  held after back against ref.png. GI v2 10ce430, whose turn Anthony saw swim
+  live and in our scripted turn: turn arrival 0.0131 / 0.0108 (two runs), walk
+  0.0067 / 0.0073, onset 0.0147 / 0.0133 (rising from 0.009 on the first moving
+  frame: the pop when motion starts), end and return 0.0001. The arrival and onset
+  frames show the floor and ceiling blotched where the settled picture is
+  smooth. With the fill and the pattern cells moved in from the surface: turn
+  0.0046 / 0.0050, walk 0.0037 / 0.0038, onset 0.0051 / 0.0050, end and return
+  0.0001. Limits: arrival 0.008, onset 0.009 (10ce430 fails both, walking
+  passes), end and return 0.002. No stuck light was found after soaking on either
+  build (end against a fresh render in a second process: 0.0027-0.0039 on
+  10ce430, the process-to-process floor 0.0027-0.0029).
 
 ## Limits
 
