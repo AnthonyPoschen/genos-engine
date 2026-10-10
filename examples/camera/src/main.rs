@@ -492,7 +492,12 @@ fn run() -> Result<(), String> {
             Some(bench.shots.as_ref()?.join(name))
         });
         let flicker_frame = bench.as_mut().is_some_and(|bench| bench.wants_frame(now));
-        let want_read = readback.is_some() || shot.is_some() || flicker_frame;
+        // A live client's /shot.png or take_screenshot (genos-mcp) waits for this frame.
+        let live_shot = genos_mcp::take_shot_request();
+        if live_shot {
+            renderer.set_live_readback(true);
+        }
+        let want_read = readback.is_some() || shot.is_some() || flicker_frame || live_shot;
         if bench.is_some() {
             // The panel and the live graph are not the scene: a bench draws without them.
             overlay.clear();
@@ -567,6 +572,13 @@ fn run() -> Result<(), String> {
             if let (Some(pixels), Some(bench)) = (pixels.as_ref(), bench.as_mut()) {
                 bench.take_frame(pixels, renderer.width(), renderer.height(), now);
             }
+        }
+        if live_shot {
+            let png = pixels
+                .as_ref()
+                .map(|pixels| encode_png(renderer.width(), renderer.height(), pixels))
+                .unwrap_or_default();
+            genos_mcp::finish_shot(&png);
         }
         if want_read && (readback.is_some() || shot.is_some()) {
             if let Some(pixels) = pixels {
@@ -1222,6 +1234,11 @@ fn publish_profile(
 }
 
 fn write_png(path: &std::path::Path, width: u32, height: u32, bgra: &[u8]) -> Result<(), String> {
+    std::fs::write(path, encode_png(width, height, bgra)).map_err(|err| err.to_string())
+}
+
+/// PNG of the renderer's BGRA readback: stored deflate blocks, no compression.
+fn encode_png(width: u32, height: u32, bgra: &[u8]) -> Vec<u8> {
     let mut raw = Vec::with_capacity(((width * 3 + 1) * height) as usize);
     for y in 0..height {
         raw.push(0);
@@ -1263,7 +1280,7 @@ fn write_png(path: &std::path::Path, width: u32, height: u32, bgra: &[u8]) -> Re
     });
     write_chunk(&mut png, b"IDAT", &zlib);
     write_chunk(&mut png, b"IEND", &[]);
-    std::fs::write(path, png).map_err(|err| err.to_string())
+    png
 }
 
 fn write_chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
