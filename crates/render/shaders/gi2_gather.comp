@@ -94,6 +94,13 @@ void main() {
         float facing = max(abs(dot(n, normalize(scene.eye.xyz - pp.xyz))), 0.2);
         float spacing = float(pc.params.y) * 2.0 * scene.view_right.w * dist / float(pc.dims.y) / facing;
         float reach = GI2_REACH * spacing + 0.02;
+        // The changes this frame (params.z bit 3): a kept stratum traced from inside
+        // the bounds of an object that moved, came or went (a probe on a moving box,
+        // or right by it) is not picked, so the probe traces it again from where it
+        // stands (a fill). Its old origin sits where the surface was, or inside the
+        // box now, and its re-trace (gi2_kept_crossed) would shade from there.
+        vec4 chead = work.v[gi2_change_at()];
+        uint changes = ((pc.params.z >> 3u) & 1u) != 0u ? min(uint(chead.x + 0.5), GI2_CHANGES) : 0u;
         float best[GI2_STRATA];
         [[dont_unroll]] for (uint s = 0u; s < GI2_STRATA; s++) {
             best[s] = 1.0e9;
@@ -118,7 +125,13 @@ void main() {
                     float off = abs(dot(d, n));
                     float side = length(d - n * dot(d, n));
                     float score = side + 4.0 * off;
-                    if (sp.w > 0.5 && dot(sn, n) > 0.9 && off < plane && side < reach && score < best[s]) {
+                    bool moved = false;
+                    [[dont_unroll]] for (uint c = 0u; c < changes && !moved; c++) {
+                        vec4 b = work.v[gi2_change_at() + GI2_CHANGE_HEAD + c];
+                        vec3 db = sp.xyz - b.xyz;
+                        moved = dot(db, db) < b.w * b.w;
+                    }
+                    if (!moved && sp.w > 0.5 && dot(sn, n) > 0.9 && off < plane && side < reach && score < best[s]) {
                         best[s] = score;
                         src[s] = was[s];
                     }

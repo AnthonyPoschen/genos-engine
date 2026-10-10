@@ -1219,7 +1219,18 @@ impl Gpu {
         // the gather and filter passes add their round (bits 1-2) below.
         let picks = std::env::var("GENOS_GI2_CACHE_PICKS").is_ok_and(|v| v == "1");
         let fill = std::env::var("GENOS_GI2_FILL").map_or(true, |v| v != "0");
+        // Moving objects (debugging.md, spinning boxes): a probe stratum traced from
+        // inside a change is filled, not kept (bit 3); patches near a change are
+        // relit first (bit 5); a patch not lit yet reads its lit neighbours (bit 7).
+        // Each on unless its variable is 0.
+        let on = |name: &str| std::env::var(name).map_or(true, |v| v != "0");
+        let moved_drop = on("GENOS_GI2_MOVED_DROP");
+        let urgent = on("GENOS_GI2_URGENT");
+        let borrow = on("GENOS_GI2_BORROW");
         let z = bgra
+            | u32::from(moved_drop) << 3
+            | u32::from(urgent) << 5
+            | u32::from(borrow) << 7
             | u32::from(fill) << 6
             | u32::from(young_only) << 10
             | u32::from(picks) << 11;

@@ -319,6 +319,9 @@ fn gi_v2_probes_keep_their_rays_when_the_light_changes() {
 /// traced again in the same frame (gi2_trace.comp), so the probes keep almost all
 /// 512 rays (about 496 here when they were dropped until their stratum came round,
 /// and which rays a cell held changed every frame: flicker around moving objects).
+/// Strata traced from inside the moved object's bounds are traced again from the
+/// probe's place in the same frame (a fill, GENOS_GI2_MOVED_DROP), which this
+/// counter does not count as kept: about 502 here, 512 with it off.
 /// The change shows at once.
 #[test]
 fn gi_v2_moving_object_retraces_the_rays_it_crosses() {
@@ -344,7 +347,7 @@ fn gi_v2_moving_object_retraces_the_rays_it_crosses() {
     );
     let held = samples_per_probe(&mut renderer);
     assert!(
-        held > full - 8.0,
+        held > full - 14.0,
         "the rays that cross the moved object are traced again, not dropped ({full} -> {held})"
     );
     assert!(

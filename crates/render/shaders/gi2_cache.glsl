@@ -134,6 +134,9 @@ uint gi2_cache_find(vec3 pos, vec3 n, bool claim) {
     return ~0u;
 }
 
+// How far around a change a patch is relit first (gi2_compact.comp), metres.
+const float GI2_NEAR_CHANGE = 1.0;
+
 // Irradiance already bounced onto the surface at pos facing n (0 for a new patch).
 vec3 gi2_cache_irradiance(vec3 pos, vec3 n) {
     uint slot = gi2_cache_find(pos, n, true);
@@ -142,7 +145,28 @@ vec3 gi2_cache_irradiance(vec3 pos, vec3 n) {
         return vec3(0.0);
     }
     cache.v[3u * slot].w = uintBitsToFloat(gi2_frame());
-    return cache.v[3u * slot + 2u].rgb;
+    vec4 e = cache.v[3u * slot + 2u];
+    // Not lit yet (claimed this round, params.z bit 7): the lit patches beside it
+    // on the same surface, so a surface coming into view or a box face entering
+    // new cells is not black until the next round relights it.
+    if (e.w < 0.5 && ((pc.params.z >> 7u) & 1u) != 0u) {
+        float size = cache.v[3u * slot + 1u].w;
+        vec3 t1 = normalize(abs(n.x) < 0.9 ? cross(n, vec3(1.0, 0.0, 0.0)) : cross(n, vec3(0.0, 1.0, 0.0)));
+        vec3 t2 = cross(n, t1);
+        vec4 sum = vec4(0.0);
+        [[dont_unroll]] for (uint i = 0u; i < 4u; i++) {
+            vec3 o = (i < 2u ? t1 : t2) * ((i & 1u) == 0u ? size : -size);
+            uint s2 = gi2_cache_find(pos + o, n, false);
+            if (s2 != ~0u) {
+                vec4 v = cache.v[3u * s2 + 2u];
+                if (v.w > 0.5) {
+                    sum += vec4(v.rgb, 1.0);
+                }
+            }
+        }
+        return sum.w > 0.0 ? sum.rgb / sum.w : vec3(0.0);
+    }
+    return e.rgb;
 }
 
 uint gi2_live_count() {
