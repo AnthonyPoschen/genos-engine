@@ -2,7 +2,9 @@
 // GI v2 rays, pass 2: the screen probes' rays, then the rays of the light cache
 // patches relit this frame. A hit stores its distance and surface for the light
 // pass; a miss takes the sky. A probe ray's record goes into this frame's
-// stratum of the probe's kept hits (gi2_hit_at). One trace site. A hit on an emissive mesh also
+// stratum of the probe's kept hits (gi2_hit_at). Then every older kept hit whose
+// path crosses a change is traced again in place (gi2_kept_crossed). One trace
+// site. A hit on an emissive mesh also
 // stores the light it gives off (the mesh field's emission table).
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
@@ -33,28 +35,80 @@ uint gi2_hit_glow(vec3 p) {
     return best;
 }
 
+// Distance from segment a-b to point c, squared.
+float gi2_seg_dist2(vec3 a, vec3 b, vec3 c) {
+    vec3 ab = b - a;
+    float t = clamp(dot(c - a, ab) / max(dot(ab, ab), 1.0e-12), 0.0, 1.0);
+    vec3 d = a + ab * t - c;
+    return dot(d, d);
+}
+
+// Kept hit h (an older stratum's) again when its path crosses an object that
+// moved, came or went since the last frame (the changes block, gi2_gpu.rs): its
+// origin and direction, or false when it stands. Re-traced here, in the frame,
+// before the light pass shades it: a dropped ray would thin its cell until its
+// stratum came round again (up to 8 frames), and which rays a cell held would
+// change every frame around a moving object (gi-check's moving flicker).
+bool gi2_kept_crossed(uint h, out vec3 origin, out vec3 dir) {
+    origin = vec3(0.0);
+    dir = vec3(0.0, 1.0, 0.0);
+    vec4 head = work.v[gi2_change_at()];
+    uint changes = min(uint(head.x + 0.5), GI2_CHANGES);
+    uint rays = gi2_rays();
+    uint s = (h / rays) % GI2_STRATA;
+    if (changes == 0u || head.y > 0.5 || s == gi2_stratum()) {
+        return false;
+    }
+    vec4 rec = work.v[gi2_kept_at(h)];
+    if (rec.x < 0.0 && rec.x > -0.75) {
+        return false;
+    }
+    vec3 n;
+    if (!gi2_stratum_ray(h / rays / GI2_STRATA, s, h % rays, origin, dir, n)) {
+        return false;
+    }
+    vec3 end = origin + dir * (rec.x >= 0.0 ? rec.x : 200.0);
+    [[dont_unroll]] for (uint j = 0u; j < changes; j++) {
+        vec4 b = work.v[gi2_change_at() + GI2_CHANGE_HEAD + j];
+        if (gi2_seg_dist2(origin, end, b.xyz) < b.w * b.w) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void main() {
     uint ray = gl_GlobalInvocationID.x;
     uint mode = gi2_mode();
     if (mode == 2u) {
         ray += gi2_probe_rays();
     }
-    if (ray >= (mode == 1u ? gi2_probe_rays() : gi2_all_rays())) {
-        return;
-    }
-    uint at = gi2_hit_at(ray);
+    uint rays_end = mode == 1u ? gi2_probe_rays() : gi2_all_rays();
+    uint at;
     vec3 origin;
     vec3 dir;
     vec3 n;
-    if (!gi2_ray(ray, origin, dir, n)) {
-        work.v[at] = GI2_NO_RAY;
-        return;
+    bool probe_ray = ray < gi2_probe_rays();
+    if (ray >= rays_end) {
+        // Past this frame's rays: one thread per kept hit, re-traced where it crossed
+        // a change (gi2_kept_crossed). Not on the async queue (mode 2).
+        uint h = ray - rays_end;
+        if (mode == 2u || h >= gi2_kept_hits() || !gi2_kept_crossed(h, origin, dir)) {
+            return;
+        }
+        at = gi2_kept_at(h);
+        probe_ray = true;
+    } else {
+        at = gi2_hit_at(ray);
+        if (!gi2_ray(ray, origin, dir, n)) {
+            work.v[at] = GI2_NO_RAY;
+            return;
+        }
     }
     SceneHit hit;
     if (!trace_ray(origin, dir, 1.0e-4, 200.0, hit)) {
         // A probe ray's miss is kept as a miss and takes the sky as it is when shaded.
-        work.v[at] = ray < gi2_probe_rays() ? GI2_MISS
-                                             : gi2_miss_slot(has_sky() ? scene.sky.rgb : vec3(0.0));
+        work.v[at] = probe_ray ? GI2_MISS : gi2_miss_slot(has_sky() ? scene.sky.rgb : vec3(0.0));
         return;
     }
     vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;

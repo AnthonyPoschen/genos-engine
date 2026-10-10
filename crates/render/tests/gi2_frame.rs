@@ -315,11 +315,13 @@ fn gi_v2_probes_keep_their_rays_when_the_light_changes() {
     }
 }
 
-/// An object that moves drops the kept rays whose paths cross where it was or is,
-/// and only those: the probes whose rays never reach it keep theirs. A new frame of
-/// rays always comes with it, so the change shows at once.
+/// An object that moves: the kept rays whose paths cross where it was or is are
+/// traced again in the same frame (gi2_trace.comp), so the probes keep almost all
+/// 512 rays (about 496 here when they were dropped until their stratum came round,
+/// and which rays a cell held changed every frame: flicker around moving objects).
+/// The change shows at once.
 #[test]
-fn gi_v2_moving_object_drops_only_the_rays_it_crosses() {
+fn gi_v2_moving_object_retraces_the_rays_it_crosses() {
     let (_gpu, mut window, mut renderer) = open();
     renderer.set_gi_v2(true).expect("GI v2");
     let base: Scene = shipped_hall().scene;
@@ -342,12 +344,8 @@ fn gi_v2_moving_object_drops_only_the_rays_it_crosses() {
     );
     let held = samples_per_probe(&mut renderer);
     assert!(
-        held < full - 1.0,
-        "the rays that cross the moved object are dropped ({full} -> {held})"
-    );
-    assert!(
-        held > 0.5 * 512.0,
-        "the probes whose rays miss it keep their strata ({held})"
+        held > full - 8.0,
+        "the rays that cross the moved object are traced again, not dropped ({full} -> {held})"
     );
     assert!(
         changed_pixels(&before, &after) > 0,

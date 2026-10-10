@@ -1267,7 +1267,9 @@ impl Gpu {
         } else if !round {
             vec![
                 (1usize, probes.div_ceil(64), 1u32),
-                (2, probe_rays.div_ceil(64), 1),
+                // This frame's rays, then one thread per kept hit (re-traced where it
+                // crossed a change, gi2_trace.comp).
+                (2, (probe_rays + kept).div_ceil(64), 1),
                 (3, (w * h + kept).div_ceil(64), 1),
                 (4, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
@@ -1279,7 +1281,7 @@ impl Gpu {
             vec![
                 (0usize, (GI2_CACHE_SLOTS as u32).div_ceil(64), 1u32),
                 (1, probes.div_ceil(64), 1),
-                (2, rays.div_ceil(64), 1),
+                (2, (rays + kept).div_ceil(64), 1),
                 (3, (w * h + kept + rays - probe_rays).div_ceil(64), 1),
                 (4, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
