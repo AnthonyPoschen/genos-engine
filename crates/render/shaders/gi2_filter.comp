@@ -126,6 +126,23 @@ void main() {
         c[f] *= band == 0u ? GI2_PI : (band == 1u ? GI2_TAU / 3.0 : GI2_PI / 4.0);
     }
     uint base = gi2_shf_at(probe);
+    if (gi2_world_mode() == 2u) {
+        float y[9];
+        gi2_sh9(n, y);
+        vec3 e = vec3(0.0);
+        [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
+            e += y[j] * vec3(c[3u * j], c[3u * j + 1u], c[3u * j + 2u]);
+        }
+        vec4 head = work.v[gi2_change_at()];
+        bool changed = head.y > 0.5;
+        [[dont_unroll]] for (uint j = 0u; j < uint(head.x); j++) {
+            vec4 b = work.v[gi2_change_at() + GI2_CHANGE_HEAD + j];
+            if (length(pp.xyz - b.xyz) < b.w + 0.5) {
+                changed = true;
+            }
+        }
+        gi2_world_add(pp.xyz, n, max(e, vec3(0.0)), changed);
+    }
     [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
         work.v[base + q] = vec4(c[4u * q], c[4u * q + 1u], c[4u * q + 2u], q == 6u ? 0.0 : c[4u * q + 3u]);
     }

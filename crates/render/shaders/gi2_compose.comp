@@ -66,7 +66,12 @@ vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
         sum += w * gi2_cache_irradiance(pos, n);
         wsum += w;
     }
-    return sum / wsum;
+    vec3 probes = sum / wsum;
+    if (gi2_world_mode() != 0u) {
+        vec4 world = gi2_world_irradiance(pos, n);
+        return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));
+    }
+    return probes;
 }
 
 void main() {

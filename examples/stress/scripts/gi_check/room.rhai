@@ -8,6 +8,9 @@
 // Then -36 deg settled, and settled again half a probe (0.23 deg) further round
 // (grid-0, grid-1): how much of the picture is redrawn when only the probe grid
 // slides.
+// Last, a close-up (close-0): 1.5 m on from the start, toward the bounce-lit
+// corridor wall and its foot on the floor, against a clean reference: whether a
+// near surface keeps its definition (contact, corner gradients) or is blurred.
 // Filled in: __DIR__, __GI__, __SECS__.
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("gi", __GI__);
@@ -38,7 +41,7 @@ camera(#{ position: P, yaw: y0, pitch: pitch });
 settle();
 view("full");
 capture(#{ path: "__DIR__/baseline.png" });
-compare(#{ prefix: "room-a", width: 320, spp: 64, noise: 0.025, max_spp: 8192, seconds: __SECS__, frames: 2 });
+compare(#{ prefix: "room-a", width: 320, spp: 64, noise: 0.01, max_spp: 4194304, seconds: __SECS__, frames: 2 });
 camera(#{ path: path, frames: N });
 flicker(#{ frames: N, threshold: 0.03, frames_dir: "__DIR__/move" });
 camera(#{ position: P, yaw: y0, pitch: pitch });
@@ -56,7 +59,7 @@ while k < N {
 for r in [["room-b", -36.0], ["room-c", -39.0]] {
     camera(#{ position: P, yaw: r[1] * d2r, pitch: pitch });
     settle();
-    compare(#{ prefix: r[0], width: 320, spp: 64, noise: 0.025, max_spp: 8192, seconds: __SECS__, frames: 2 });
+    compare(#{ prefix: r[0], width: 320, spp: 64, noise: 0.01, max_spp: 4194304, seconds: __SECS__, frames: 2 });
 }
 camera(#{ position: P, yaw: -36.0 * d2r, pitch: pitch });
 settle();
@@ -64,3 +67,7 @@ capture(#{ path: "__DIR__/grid-0.png" });
 camera(#{ position: P, yaw: -36.23 * d2r, pitch: pitch });
 settle();
 capture(#{ path: "__DIR__/grid-1.png" });
+// Close-up definition: the corridor wall and its foot on the floor, near.
+camera(#{ position: [-0.22, 1.2, 8.42], yaw: -36.0 * d2r, pitch: -0.3 });
+settle();
+compare(#{ prefix: "close-0", width: 320, spp: 64, noise: 0.01, max_spp: 4194304, seconds: __SECS__, frames: 2 });

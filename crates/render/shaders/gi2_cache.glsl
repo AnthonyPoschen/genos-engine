@@ -88,10 +88,33 @@ uint gi2_axis(vec3 n) {
     return n.z >= 0.0 ? 4u : 5u;
 }
 
+// World irradiance cells (experiment, GENOS_GI2_WORLD): the change block's head w
+// is mode * 1000 + cap. Mode 1: pixels read the light cache's patches,
+// interpolated; mode 2: screen probes average their irradiance into the patch they
+// sit in (a running mean of up to cap frames, binding 10 after the patches) and
+// pixels read that, interpolated, so what a pixel shows depends on where it is in
+// the world, not on where the probe grid fell this frame.
+uint gi2_world_mode() {
+    return uint(work.v[gi2_change_at()].w + 0.5) / 1000u;
+}
+float gi2_world_cap() {
+    return float(uint(work.v[gi2_change_at()].w + 0.5) % 1000u);
+}
+const uint GI2_WORLD_AT = 3u * GI2_CACHE_SLOTS;
+
+vec3 gi2_axis_vec(uint a) {
+    vec3 v = vec3(0.0);
+    v[a >> 1u] = (a & 1u) == 0u ? 1.0 : -1.0;
+    return v;
+}
+
 // Key of the patch holding pos facing n; never 0.
 uint gi2_cache_key(vec3 pos, vec3 n, out float size) {
     size = gi2_cell_size(pos);
-    ivec3 c = ivec3(floor(pos / size));
+    // World cells on: half a cell in from the surface, so a floor or wall on a cell
+    // boundary falls in one cell, not either by rounding.
+    vec3 inset = gi2_world_mode() != 0u ? 0.5 * gi2_axis_vec(gi2_axis(n)) : vec3(0.0);
+    ivec3 c = ivec3(floor(pos / size - inset));
     uint h = gi2_hash(uint(c.x) * 73856093u ^ gi2_hash(uint(c.y) * 19349663u ^ gi2_hash(uint(c.z) * 83492791u)));
     h = gi2_hash(h ^ (gi2_axis(n) * 0x27d4eb2du) ^ (floatBitsToUint(size) * 0x165667b1u));
     return max(h, 1u);
@@ -125,6 +148,7 @@ uint gi2_cache_find(vec3 pos, vec3 n, bool claim) {
             cache.v[3u * slot] = vec4(pos, uintBitsToFloat(gi2_frame()));
             cache.v[3u * slot + 1u] = vec4(n, size);
             cache.v[3u * slot + 2u] = vec4(0.0);
+            cache.v[GI2_WORLD_AT + slot] = vec4(0.0);
             return slot;
         }
         if (prev == key) {
@@ -187,4 +211,55 @@ uint gi2_cache_batch_slot(uint j) {
     }
     uint start = (gi2_round() * GI2_CACHE_BATCH) % count;
     return ckeys.key[GI2_CACHE_SLOTS + 1u + (start + k) % count];
+}
+
+// Mode 2: a screen probe at pos facing n adds its irradiance e to its world cell.
+// Inside a change (a sphere of an object that moved) the mean restarts short.
+void gi2_world_add(vec3 pos, vec3 n, vec3 e, bool changed) {
+    uint slot = gi2_cache_find(pos, n, true);
+    if (slot == ~0u) {
+        return;
+    }
+    cache.v[3u * slot].w = uintBitsToFloat(gi2_frame());
+    vec4 h = cache.v[GI2_WORLD_AT + slot];
+    float k = min(changed ? min(h.w, 1.0) + 1.0 : h.w + 1.0, max(gi2_world_cap(), 1.0));
+    cache.v[GI2_WORLD_AT + slot] = vec4(h.rgb + (e - h.rgb) / k, k);
+}
+
+// The world cells around pos facing n, interpolated across the surface (the four
+// cell centres nearest pos in the plane of its axis). Returns the irradiance and,
+// in w, how much of it to trust (0 to 1: the share of cells that have light,
+// counted up to 4 samples).
+vec4 gi2_world_irradiance(vec3 pos, vec3 n) {
+    uint mode = gi2_world_mode();
+    uint ax = gi2_axis(n) >> 1u;
+    vec3 ta = vec3(0.0);
+    vec3 tb = vec3(0.0);
+    ta[(ax + 1u) % 3u] = 1.0;
+    tb[(ax + 2u) % 3u] = 1.0;
+    float size = gi2_cell_size(pos);
+    vec2 uv = vec2(dot(pos, ta), dot(pos, tb)) / size - 0.5;
+    vec2 g0 = floor(uv);
+    vec2 f = uv - g0;
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    float trust = 0.0;
+    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
+        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + 0.5;
+        vec3 q = pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));
+        float bil = ((k & 1u) == 1u ? f.x : 1.0 - f.x) * ((k >> 1u) == 1u ? f.y : 1.0 - f.y);
+        uint slot = gi2_cache_find(q, n, mode == 1u);
+        if (slot == ~0u) {
+            continue;
+        }
+        cache.v[3u * slot].w = uintBitsToFloat(gi2_frame());
+        vec4 v = mode == 1u ? cache.v[3u * slot + 2u] : cache.v[GI2_WORLD_AT + slot];
+        if (v.w < 0.5) {
+            continue;
+        }
+        sum += bil * v.rgb;
+        wsum += bil;
+        trust += bil * (mode == 1u ? 1.0 : min(v.w / 4.0, 1.0));
+    }
+    return vec4(wsum > 0.0 ? sum / wsum : vec3(0.0), trust);
 }

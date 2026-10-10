@@ -627,7 +627,7 @@ impl Gpu {
                 &share,
             )?;
             self.gi2.cache =
-                self.make_buffer_queues(GI2_CACHE_SLOTS * 48, 0x20 | 0x2, Memory::Device, &share)?;
+                self.make_buffer_queues(GI2_CACHE_SLOTS * 64, 0x20 | 0x2, Memory::Device, &share)?;
             self.gi2.cache_clear = true;
             for k in 0..2 {
                 self.gi2.stats[k] = self.make_buffer(32, 0x20 | 0x2, Memory::Readback)?;
@@ -742,7 +742,15 @@ impl Gpu {
     /// once the scene (camera included) has not changed for GI2_SETTLE_FRAMES.
     fn gi2_stats(&self) -> crate::probe_tier::TierStats {
         let sweep = self.gi2.live.div_ceil(GI2_CACHE_BATCH).max(1) + 1;
-        let settled = self.gi2.still >= GI2_SETTLE_FRAMES && self.gi2.quiet >= sweep;
+        // World cells on (GENOS_GI2_WORLD=2): their running means (cap frames) have
+        // to forget the poses before this one, so settling waits four caps.
+        let world_wait = match std::env::var("GENOS_GI2_WORLD").as_deref() {
+            Ok("2") => {
+                4 * std::env::var("GENOS_GI2_WORLD_CAP").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(32)
+            }
+            _ => 0,
+        };
+        let settled = self.gi2.still >= GI2_SETTLE_FRAMES.max(world_wait) && self.gi2.quiet >= sweep;
         crate::probe_tier::TierStats {
             seen_bricks: 1,
             seen_settled: usize::from(settled),
@@ -1147,6 +1155,12 @@ impl Gpu {
         }
         let mut block = vec![0f32; 4 * (GI2_CHANGE_HEAD + GI2_CHANGES)];
         block[2] = (self.gi2.probe_runs & 1) as f32;
+        // World irradiance cells (gi2_cache.glsl, experiment): GENOS_GI2_WORLD mode
+        // (1: pixels read the light cache, 2: probes average into world cells) and
+        // GENOS_GI2_WORLD_CAP frames.
+        let world = std::env::var("GENOS_GI2_WORLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).min(2);
+        let cap = std::env::var("GENOS_GI2_WORLD_CAP").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(32).clamp(1, 999);
+        block[3] = (world * 1000 + cap) as f32;
         match &changes {
             None => block[1] = 1.0,
             Some(list) => {

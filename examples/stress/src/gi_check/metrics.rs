@@ -737,3 +737,127 @@ pub fn blotch(live: &Plane, reference: &Plane, s: f64) -> f64 {
         .sum::<f64>()
         / e.v.len().max(1) as f64
 }
+
+/// Close-up definition: how much of the reference's fine detail (band blurred s
+/// px minus blurred 4 s px: contact shadows, corner gradients, edges of light)
+/// `live` holds. Returns (error, kept): the band error relative to the light there
+/// (over-blurring and noise both raise it), and the band's energy in live over the
+/// reference's (under 1: detail smeared away; over 1: noise or blotches added).
+pub fn definition(live: &Plane, reference: &Plane, s: f64) -> (f64, f64) {
+    let band = |p: &Plane| {
+        let (f, c) = (blur(p, s), blur(p, 4.0 * s));
+        f.v.iter().zip(&c.v).map(|(f, c)| f - c).collect::<Vec<f64>>()
+    };
+    let (bl, br) = (band(live), band(reference));
+    let base = rel_base_s(reference, s);
+    let (mut e, mut el, mut er) = (0.0, 0.0, 0.0);
+    for i in 0..bl.len() {
+        e += (bl[i] - br[i]).abs() / base.v[i];
+        el += bl[i].abs() / base.v[i];
+        er += br[i].abs() / base.v[i];
+    }
+    (e / bl.len().max(1) as f64, el / er.max(1.0e-9))
+}
+
+/// Light structure: whether the smooth shape of the light on each surface (the
+/// band or pool of bounced light, its bright region and its falloff) is where the
+/// reference has it. The reference is cut into surfaces at its sharp edges (log
+/// luminance gradient over 0.08 after a 1 px blur, grown 2 px); within each
+/// surface both pictures are blurred s px over that surface only, so walls and
+/// corners do not bleed into each other. Returns (pattern, gradcorr):
+/// - pattern: the mean |log(live / reference)| after each surface's own mean is
+///   taken out, over pixels at least s px inside a surface: blotches in the wrong
+///   place count even when the mean is right, an even bias does not;
+/// - gradcorr: correlation of the two log-luminance gradient fields there (1: the
+///   light rises and falls in the same places).
+pub fn structure(live: &Plane, reference: &Plane, s: f64) -> (f64, f64) {
+    let (w, h) = (reference.w, reference.h);
+    let mean = reference.v.iter().sum::<f64>() / reference.v.len().max(1) as f64;
+    let eps = 0.05 * mean.max(1.0e-6);
+    // Sharp edges of the reference.
+    let soft = blur(reference, 1.0);
+    let logr = Plane { w, h, v: soft.v.iter().map(|v| (v + 0.4 * eps).ln()).collect() };
+    let (gx, gy) = grad(&logr);
+    let mut edge: Vec<bool> = (0..w * h).map(|i| gx.v[i].hypot(gy.v[i]) > 0.08).collect();
+    let grow = |m: &mut Vec<bool>, n: usize| {
+        for _ in 0..n {
+            let prev = m.clone();
+            for y in 0..h {
+                for x in 0..w {
+                    let i = y * w + x;
+                    if prev[i] {
+                        continue;
+                    }
+                    let near = (x > 0 && prev[i - 1])
+                        || (x + 1 < w && prev[i + 1])
+                        || (y > 0 && prev[i - w])
+                        || (y + 1 < h && prev[i + w]);
+                    m[i] = near;
+                }
+            }
+        }
+    };
+    grow(&mut edge, 2);
+    // Surfaces: 4-connected regions of non-edge pixels.
+    let mut label = vec![0usize; w * h];
+    let mut regions = 0usize;
+    for start in 0..w * h {
+        if edge[start] || label[start] != 0 {
+            continue;
+        }
+        regions += 1;
+        let mut stack = vec![start];
+        label[start] = regions;
+        while let Some(i) = stack.pop() {
+            let (x, y) = (i % w, i / w);
+            let mut push = |j: usize| {
+                if !edge[j] && label[j] == 0 {
+                    label[j] = regions;
+                    stack.push(j);
+                }
+            };
+            if x > 0 {
+                push(i - 1);
+            }
+            if x + 1 < w {
+                push(i + 1);
+            }
+            if y > 0 {
+                push(i - w);
+            }
+            if y + 1 < h {
+                push(i + w);
+            }
+        }
+    }
+    let min_px = (4.0 * s) * (4.0 * s);
+    let (mut num, mut dl, mut dr, mut err, mut count) = (0.0, 0.0, 0.0, 0.0, 0usize);
+    for k in 1..=regions {
+        let m = Plane { w, h, v: label.iter().map(|&l| f64::from(u8::from(l == k))).collect() };
+        if m.v.iter().sum::<f64>() < min_px {
+            continue;
+        }
+        // Inner pixels: at least s px from the surface's border.
+        let mut outside: Vec<bool> = m.v.iter().map(|&v| v < 0.5).collect();
+        grow(&mut outside, s.round() as usize);
+        let inner: Vec<usize> = (0..w * h).filter(|&i| !outside[i]).collect();
+        if inner.len() < 50 {
+            continue;
+        }
+        let (bl, _) = masked_blur(live, &m, s);
+        let (br, _) = masked_blur(reference, &m, s);
+        let ll = Plane { w, h, v: bl.v.iter().map(|v| (v.max(0.0) + eps).ln()).collect() };
+        let lr = Plane { w, h, v: br.v.iter().map(|v| (v.max(0.0) + eps).ln()).collect() };
+        let (ax, ay) = grad(&ll);
+        let (bx, by) = grad(&lr);
+        let d_mean = inner.iter().map(|&i| ll.v[i] - lr.v[i]).sum::<f64>() / inner.len() as f64;
+        for &i in &inner {
+            num += ax.v[i] * bx.v[i] + ay.v[i] * by.v[i];
+            dl += ax.v[i] * ax.v[i] + ay.v[i] * ay.v[i];
+            dr += bx.v[i] * bx.v[i] + by.v[i] * by.v[i];
+            err += (ll.v[i] - lr.v[i] - d_mean).abs();
+            count += 1;
+        }
+    }
+    (err / count.max(1) as f64, num / (dl * dr).sqrt().max(1.0e-12))
+}

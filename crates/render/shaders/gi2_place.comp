@@ -16,7 +16,16 @@ void main() {
     vec4 pos_out = vec4(0.0);
     vec4 n_out = vec4(0.0, 1.0, 0.0, 0.0);
     [[dont_unroll]] for (uint k = 0u; k < 5u; k++) {
-        uvec2 off = k == 0u ? uvec2(tile / 2u)
+        // World cells on (GENOS_GI2_WORLD=2, gi2_cache.glsl): the first point
+        // moves round the tile frame by frame (R2 sequence), so the world cells
+        // average the probes over every place in the tile, still or moving, and
+        // what a cell holds does not depend on where the grid fell.
+        uvec2 first = uvec2(tile / 2u);
+        if (gi2_world_mode() == 2u) {
+            vec2 j = fract(vec2(0.5) + float(gi2_frame() % 4096u) * vec2(0.7548777, 0.5698403));
+            first = min(uvec2(j * float(tile)), uvec2(tile - 1u));
+        }
+        uvec2 off = k == 0u ? first
             : uvec2((k & 1u) == 1u ? tile / 4u : 3u * tile / 4u, k < 3u ? tile / 4u : 3u * tile / 4u);
         uvec2 p = min(origin + off, uvec2(pc.dims.x - 1u, pc.dims.y - 1u));
         vec3 pos;

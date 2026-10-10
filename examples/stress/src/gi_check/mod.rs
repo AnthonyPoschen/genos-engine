@@ -101,6 +101,23 @@ const TURN_RETURN_LIMIT: f64 = 0.002;
 const ROOM_SWIM_LIMIT: f64 = 0.0039;
 const ROOM_REDRAW_LIMIT: f64 = 0.0027;
 const ROOM_BLOTCH_LIMIT: f64 = 0.023;
+/// Large-scale swim: the same world swim blurred 48 px (640 wide), the big soft
+/// blobs that slide. The line is GI v1 (0.0003) with 2x room: v1 is the floor for
+/// stability, so v2 must be at least as stable (edffa81 0.0024, a-trous fix 0.0026).
+/// A target (TARGET_CHECKS), not a gate.
+const ROOM_SWIM48_LIMIT: f64 = 0.0006;
+/// Close-up definition error (band 1.5-6 px at 320 wide, relative) against the
+/// clean reference; over-blurring the near field fails it. Against the GPU
+/// reference (2026-10-11): push 0.0106, world cells 0.0076, GI v1 0.0154, the light
+/// cache read directly 0.0326 (blocky 25 cm patches).
+const CLOSE_DEF_LIMIT: f64 = 0.013;
+/// Light structure (metrics::structure, 8 px at 320 wide, room-a and room-b):
+/// the smooth shape of the bounced light on each surface against the converged
+/// GPU reference, blotches in the wrong place counted even when the mean is right.
+/// 2026-10-11: edffa81 0.0218, push 0.0147, GI v1 0.0595 (soft and wrong), the
+/// GPU reference's own noise about 0.001. The line is a target (TARGET_CHECKS),
+/// not a gate: push misses it.
+const ROOM_STRUCTURE_LIMIT: f64 = 0.010;
 /// Mix run (mix.rhai): lamps and boxes moving, camera still and turning 3 deg a
 /// frame; relative error against each moving frame's scene state settled.
 /// edffa81: still 0.0043, turning 0.0070 (FAIL); fixed 0.0021 / 0.0040.
@@ -203,7 +220,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
             render(&o, &out, r)?;
         }
         score_run(&o, &out, r, &mut rows)?;
-        if o.fail_fast && rows.iter().any(|row| !row.pass()) {
+        if o.fail_fast && rows.iter().any(Row::failed) {
             println!("gi-check: stopped after the {r} run (first FAIL)");
             break;
         }
@@ -252,7 +269,8 @@ const HELP: &str = "genos-stress gi-check [--tier quick|mid|full] [--out DIR] [-
 [--score-only] [--ref-noise 0.05] [--ref-spp 2048] [--ref-seconds 900] [--size 640x360] [--walk-size 1280x720] \
 [--settled-refs DIR] [--gi v2|v1] [--views corner,contact] [--stride 1] [--clip N] [--fail-fast] [--keep-going]
 Renders with GENOS_GI=v2 (or v1); GENOS_GI2_TILE defaults to the 1440p probe spacing (height / 90), references are \
-cached in $GENOS_REFERENCE_CACHE (default target/reference-cache). Exit status 1 on a FAIL.";
+cached in $GENOS_REFERENCE_CACHE (default target/reference-cache). Exit status 1 on a FAIL;
+a missed target (MISS: 48 px swim, light structure) is reported but does not fail.";
 
 fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
     let dir = out.join(run);
@@ -336,6 +354,13 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Checks whose limit is a target GI v2 is working towards, not a gate: a miss
+/// prints MISS and does not fail the run, a tier or a push.
+const TARGET_CHECKS: &[&str] = &[
+    "room turn swim, large scale (48 px)",
+    "room light structure (smoothed 8 px)",
+];
+
 struct Row {
     check: String,
     value: f64,
@@ -349,13 +374,26 @@ impl Row {
     fn pass(&self) -> bool {
         self.value <= self.limit
     }
+    fn target(&self) -> bool {
+        TARGET_CHECKS.contains(&self.check.as_str())
+    }
+    /// Failed a gate (a missed target does not count).
+    fn failed(&self) -> bool {
+        !self.pass() && !self.target()
+    }
     fn line(&self) -> String {
         let mut line = format!(
             "{:<34} {:>9.4} {:>9.4}  {:<4}  {}",
             self.check,
             self.value,
             self.limit,
-            if self.pass() { "PASS" } else { "FAIL" },
+            if self.pass() {
+                "PASS"
+            } else if self.target() {
+                "MISS"
+            } else {
+                "FAIL"
+            },
             self.note
         );
         if !self.pass() {
@@ -596,7 +634,7 @@ fn print_table(rows: &[Row]) -> usize {
     for r in rows {
         println!("{}", r.line());
     }
-    rows.iter().filter(|r| !r.pass()).count()
+    rows.iter().filter(|r| r.failed()).count()
 }
 
 fn frame(dir: &Path, sub: &str, i: usize) -> PathBuf {
@@ -1012,6 +1050,10 @@ const ROOM_PITCH: f64 = -0.12;
 /// World swim over a run's turn frames in `sub` (move or still): mean over
 /// consecutive pairs.
 fn room_swim(dir: &Path, sub: &str) -> Result<f64, String> {
+    room_swim_s(dir, sub, 8.0)
+}
+
+fn room_swim_s(dir: &Path, sub: &str, s: f64) -> Result<f64, String> {
     let yaws = room_yaws();
     let mut v = Vec::new();
     for k in 0..yaws.len().saturating_sub(2) {
@@ -1020,7 +1062,7 @@ fn room_swim(dir: &Path, sub: &str) -> Result<f64, String> {
             continue;
         }
         let (a, b) = (metrics::lum640(&a)?, metrics::lum640(&b)?);
-        v.push(metrics::world_swim(&a, &b, yaws[k + 1], yaws[k + 2], ROOM_PITCH, 8.0));
+        v.push(metrics::world_swim(&a, &b, yaws[k + 1], yaws[k + 2], ROOM_PITCH, s));
     }
     if v.is_empty() {
         return Err(format!("gi-check: no {sub} frames in {}", dir.display()));
@@ -1035,6 +1077,8 @@ fn room_swim(dir: &Path, sub: &str) -> Result<f64, String> {
 fn room_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
     let swim = room_swim(dir, "move")?;
     let settled_swim = room_swim(dir, "still").unwrap_or(f64::NAN);
+    let swim48 = room_swim_s(dir, "move", 48.0)?;
+    let settled48 = room_swim_s(dir, "still", 48.0).unwrap_or(f64::NAN);
     let lum = |p: &str| metrics::lum320(&dir.join(p));
     let floor = metrics::world_swim(
         &lum("room-b-reference.png")?,
@@ -1076,6 +1120,37 @@ fn room_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
         note: format!("settled per pose {settled_swim:.4}, reference {floor:.4}"),
         image: frame(dir, "move", room_yaws().len() / 2),
     });
+    rows.push(Row {
+        check: "room turn swim, large scale (48 px)".into(),
+        value: swim48,
+        limit: ROOM_SWIM48_LIMIT,
+        note: format!("settled per pose {settled48:.4}; GI v1 0.0003"),
+        image: frame(dir, "move", room_yaws().len() / 2),
+    });
+    {
+        let (pa, ga) = metrics::structure(&lum("room-a-live.png")?, &lum("room-a-reference.png")?, 8.0);
+        let (pb, gb) = metrics::structure(&lum("room-b-live.png")?, &lum("room-b-reference.png")?, 8.0);
+        let (pattern, gradcorr) = (0.5 * (pa + pb), 0.5 * (ga + gb));
+        println!("room     light structure pattern start {pa:.4} mid {pb:.4} | gradient correlation {ga:.3} {gb:.3}");
+        rows.push(Row {
+            check: "room light structure (smoothed 8 px)".into(),
+            value: pattern,
+            limit: ROOM_STRUCTURE_LIMIT,
+            note: format!("start {pa:.4} mid {pb:.4}; gradient correlation {gradcorr:.3}"),
+            image: dir.join("room-b-live.png"),
+        });
+    }
+    if dir.join("close-0-reference.png").exists() {
+        let (def, kept) = metrics::definition(&lum("close-0-live.png")?, &lum("close-0-reference.png")?, 1.5);
+        println!("room     close-up definition {def:.4} detail kept {kept:.3}");
+        rows.push(Row {
+            check: "room close-up definition".into(),
+            value: def,
+            limit: CLOSE_DEF_LIMIT,
+            note: format!("detail kept {kept:.2} of the reference"),
+            image: dir.join("close-0-live.png"),
+        });
+    }
     rows.push(Row {
         check: "room blotch against reference".into(),
         value: blotch,
