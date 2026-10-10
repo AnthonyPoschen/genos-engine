@@ -69,7 +69,7 @@ impl Host for Stage {
                 "Lamp clock",
                 self.lamp_clock as f64,
                 (0.0, 1.0e6),
-                0.1,
+                1.0e-5,
                 " s",
             ),
             Knob::number(
@@ -77,7 +77,7 @@ impl Host for Stage {
                 "Box clock",
                 self.box_clock as f64,
                 (0.0, 1.0e6),
-                0.1,
+                1.0e-5,
                 " s",
             ),
             Knob::number(
