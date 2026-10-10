@@ -10,6 +10,7 @@ members = [
     "crates/scene",
     "crates/mcp",
     "crates/debug",
+    "crates/gpuref",
     "crates/window",
     "crates/render",
     "crates/ui",

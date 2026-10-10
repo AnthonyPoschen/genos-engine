@@ -244,7 +244,13 @@ pub fn render(setup: &RefSetup) -> Reference {
     let mut sq = vec![0.0f64; w * h];
     let batch = setup.spp.max(1);
     let side = (batch as f32).sqrt().floor().max(1.0) as u32;
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    // Half the cores unless GENOS_REFERENCE_THREADS says otherwise: a proof render
+    // runs for minutes and must not starve the desktop.
+    let threads = std::env::var("GENOS_REFERENCE_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()) / 2)
+        .max(1);
     let mut done = 0u32;
     let mut noise: f32;
     loop {
@@ -356,6 +362,82 @@ pub fn render(setup: &RefSetup) -> Reference {
     }
 }
 
+/// Whether references trace on the GPU (GENOS_REFERENCE_GPU=1, genos-gpuref).
+pub fn gpu_wanted() -> bool {
+    std::env::var("GENOS_REFERENCE_GPU").is_ok_and(|v| v == "1")
+}
+
+/// The same trace on the GPU's hardware ray tracer (genos-gpuref): the scene's
+/// triangles ([`SceneMesh`]), the same lamps, sky, camera and stopping rules.
+/// Primary rays and paths as `render`; the noise is the same measure.
+pub fn render_gpu(setup: &RefSetup) -> Result<Reference, String> {
+    let mesh = SceneMesh::from_scene(&setup.scene);
+    let tris = mesh
+        .triangles
+        .iter()
+        .map(|t| genos_gpuref::Tri {
+            positions: t.positions,
+            normals: t.normals,
+            albedo: mesh.materials[t.material as usize].albedo,
+            two_sided: t.two_sided,
+        })
+        .collect();
+    let lamps = setup
+        .scene
+        .lights
+        .iter()
+        .map(|l| genos_gpuref::Lamp {
+            position: [l.position.x, l.position.y, l.position.z],
+            direction: [l.direction.x, l.direction.y, l.direction.z],
+            color: l.color,
+        })
+        .collect();
+    let forward = {
+        let d = look_direction(setup.yaw, setup.pitch);
+        [d.x, d.y, d.z]
+    };
+    let right = normalize(cross(forward, [0.0, 1.0, 0.0]));
+    let up = cross(right, forward);
+    let out = genos_gpuref::render(&genos_gpuref::Setup {
+        tris,
+        lamps,
+        sky: setup.scene.sky.as_ref().map_or([0.0; 3], |s| s.color),
+        eye: setup.eye,
+        forward,
+        right,
+        up,
+        fov_y_deg: FOV_Y,
+        width: setup.width.max(1),
+        height: setup.height.max(1),
+        max_bounces: setup.max_bounces,
+        noise_target: setup.noise_target,
+        max_spp: setup.max_spp.max(1) as u64,
+        seconds: setup.seconds,
+        paths_per_pass: setup.spp.clamp(1, 64),
+    })?;
+    eprintln!(
+        "gpuref: {} spp in {:.1} s on {}, noise {:.4} (halves {:.4})",
+        out.spp, out.seconds, out.device, out.noise, out.noise_halves
+    );
+    let rgb = out
+        .linear
+        .iter()
+        .flat_map(|c| c.map(|v| (tone(v) * 255.0).round().clamp(0.0, 255.0) as u8))
+        .collect();
+    Ok(Reference {
+        image: Image {
+            width: setup.width.max(1),
+            height: setup.height.max(1),
+            rgb,
+        },
+        linear: out.linear,
+        hit: out.hit,
+        spp: out.spp.min(u32::MAX as u64) as u32,
+        seconds: out.seconds,
+        noise: out.noise,
+    })
+}
+
 /// `render`, reusing a trace saved under `dir` for the same scene, pose, size and
 /// bounce limit when it is at least as converged as asked; a new trace is saved there.
 /// The key hashes the scene's Debug text, so it holds within one build of the engine.
@@ -377,13 +459,28 @@ pub fn render_cached(setup: &RefSetup, dir: &std::path::Path) -> Reference {
     if setup.triangles {
         "triangles".hash(&mut hasher);
     }
+    // GPU traces (triangles, their own tracer) keep their own keys.
+    let gpu = gpu_wanted();
+    if gpu {
+        "gpuref-v1".hash(&mut hasher);
+    }
     let path = dir.join(format!("{:016x}.ref", hasher.finish()));
     if let Some(r) = load(&path, setup.width, setup.height) {
         if r.noise <= setup.noise_target || r.spp >= setup.max_spp {
             return r;
         }
     }
-    let r = render(setup);
+    let r = if gpu {
+        match render_gpu(setup) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{e}; tracing on the CPU");
+                render(setup)
+            }
+        }
+    } else {
+        render(setup)
+    };
     let _ = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, save(&r)));
     r
 }
