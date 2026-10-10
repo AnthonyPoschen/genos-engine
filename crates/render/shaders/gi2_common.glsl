@@ -81,6 +81,9 @@ uint gi2_rays() {
 // Strata of the probe ray directions: frame f traces stratum f % GI2_STRATA, and
 // a probe keeps the hits of the last GI2_STRATA frames (the visibility history
 // cap in gi-v2-design.md), so it sees GI2_STRATA x R directions.
+// How far (in probe spacings on the surface) a probe reaches for last frame's
+// kept strata (gi2_gather.comp).
+const float GI2_REACH = 2.5;
 const uint GI2_STRATA = 8u;
 const uint GI2_CHANGES = 64u;
 const uint GI2_CHANGE_HEAD = 5u;

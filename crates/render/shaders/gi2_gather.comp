@@ -7,11 +7,14 @@
 // GI2_STRATA x R rays with no light carried over from a past frame: a lamp that
 // moves, dims or goes off shows in full on the next frame and never needs a reset.
 // Only visibility is kept, and only while it still holds:
-// - when the camera moves, a probe takes the strata of the probe that stood where
-//   it stands now last frame (reprojected through last frame's camera), each kept
-//   while the probe lies on the plane it was traced from, faces its way and is
-//   within half a probe spacing of it; its hits are then seen from the probe's new
-//   place (parallax), and a hit that falls behind the probe is not used;
+// - each kept stratum comes from whichever of last frame's probes in the 5 x 5
+//   tiles around this place's old screen tile (reprojected through last frame's
+//   camera) traced it nearest this place, on the same surface: facing the same
+//   way (25 degrees), on its plane, within GI2_REACH probe spacings along it. A
+//   still probe takes its own; one that slid across its surface (the camera
+//   moved) or was just uncovered (an object moved off it) takes its neighbours'.
+//   Its hits are then seen from the probe's place (parallax), and a hit that
+//   falls behind the probe is not used;
 // - a kept ray whose path crosses the bounds of an object that moved, came or went
 //   since the last frame is dropped for good (the changes block, gi2_gpu.rs);
 // - every kept stratum is dropped when the traced world changes as a whole.
@@ -58,9 +61,9 @@ void main() {
     }
     if (pp.w > 0.5) {
         src[now] = probe + 1u;
-        // Which probe stood here last frame: this place through last frame's camera.
+        // Where this place stood on last frame's screen: its tile there.
         vec4 eye = work.v[gi2_change_at() + 1u];
-        uint from_probe = ~0u;
+        ivec2 t = ivec2(-1000);
         if (!drop_all && eye.w > 0.5) {
             vec4 right = work.v[gi2_change_at() + 2u];
             vec3 up = work.v[gi2_change_at() + 3u].xyz;
@@ -70,31 +73,49 @@ void main() {
             if (z > 1.0e-3) {
                 vec2 ndc = vec2(dot(rel, right.xyz) / (z * right.w * fwd.w), dot(rel, up) / (z * right.w));
                 vec2 px = vec2((ndc.x + 1.0) * 0.5 * float(pc.dims.x), (1.0 - ndc.y) * 0.5 * float(pc.dims.y));
-                ivec2 t = ivec2(floor(px / float(pc.params.y)));
-                if (all(greaterThanEqual(t, ivec2(0))) && all(lessThan(t, ivec2(pc.dims.zw)))) {
-                    from_probe = uint(t.y) * pc.dims.z + uint(t.x);
-                }
+                t = ivec2(floor(px / float(pc.params.y)));
             }
         }
-        // Which of its strata still hold for the probe where it stands now.
+        // Each kept stratum comes from whichever of last frame's probes around
+        // that tile traced it nearest this place on the same surface: the probe's
+        // own (it stays put while the camera does), a neighbour's when the probe
+        // slid across its surface (the camera moved) or was just uncovered (an
+        // object moved off it). Its hits are then seen from here (parallax).
         float dist = length(pp.xyz - scene.eye.xyz);
-        float plane = 0.03 + 0.01 * dist;
-        // A probe's spacing in metres at its distance (the tile across the view).
-        float spacing = float(pc.params.y) * 2.0 * scene.view_right.w * dist / float(pc.dims.y);
-        if (from_probe != ~0u) {
-            uvec4 v0 = floatBitsToUint(work.v[gi2_view_at(last, from_probe)]);
-            uvec4 v1 = floatBitsToUint(work.v[gi2_view_at(last, from_probe) + 1u]);
-            uint was[8] = uint[8](v0.x, v0.y, v0.z, v0.w, v1.x, v1.y, v1.z, v1.w);
-            [[dont_unroll]] for (uint s = 0u; s < GI2_STRATA; s++) {
-                if (s == now || was[s] == 0u) {
+        float plane = 0.05 + 0.02 * dist;
+        // A probe's spacing on its surface at its distance (the tile across the
+        // view, stretched where the surface is seen at a slant).
+        float facing = max(abs(dot(n, normalize(scene.eye.xyz - pp.xyz))), 0.2);
+        float spacing = float(pc.params.y) * 2.0 * scene.view_right.w * dist / float(pc.dims.y) / facing;
+        float reach = GI2_REACH * spacing + 0.02;
+        float best[GI2_STRATA];
+        [[dont_unroll]] for (uint s = 0u; s < GI2_STRATA; s++) {
+            best[s] = 1.0e9;
+        }
+        [[dont_unroll]] for (int dy = -2; dy <= 2; dy++) {
+            [[dont_unroll]] for (int dx = -2; dx <= 2; dx++) {
+                ivec2 q = t + ivec2(dx, dy);
+                if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(pc.dims.zw)))) {
                     continue;
                 }
-                vec4 sp = work.v[gi2_stratum_at(was[s] - 1u, s)];
-                vec3 sn = work.v[gi2_stratum_at(was[s] - 1u, s) + 1u].xyz;
-                vec3 d = pp.xyz - sp.xyz;
-                if (sp.w > 0.5 && dot(sn, n) > 0.95 && abs(dot(d, n)) < plane
-                    && length(d) < 0.5 * spacing + 0.01) {
-                    src[s] = was[s];
+                uint from_probe = uint(q.y) * pc.dims.z + uint(q.x);
+                uvec4 v0 = floatBitsToUint(work.v[gi2_view_at(last, from_probe)]);
+                uvec4 v1 = floatBitsToUint(work.v[gi2_view_at(last, from_probe) + 1u]);
+                uint was[8] = uint[8](v0.x, v0.y, v0.z, v0.w, v1.x, v1.y, v1.z, v1.w);
+                [[dont_unroll]] for (uint s = 0u; s < GI2_STRATA; s++) {
+                    if (s == now || was[s] == 0u) {
+                        continue;
+                    }
+                    vec4 sp = work.v[gi2_stratum_at(was[s] - 1u, s)];
+                    vec3 sn = work.v[gi2_stratum_at(was[s] - 1u, s) + 1u].xyz;
+                    vec3 d = pp.xyz - sp.xyz;
+                    float off = abs(dot(d, n));
+                    float side = length(d - n * dot(d, n));
+                    float score = side + 4.0 * off;
+                    if (sp.w > 0.5 && dot(sn, n) > 0.9 && off < plane && side < reach && score < best[s]) {
+                        best[s] = score;
+                        src[s] = was[s];
+                    }
                 }
             }
         }

@@ -355,10 +355,10 @@ fn gi_v2_moving_object_drops_only_the_rays_it_crosses() {
     );
 }
 
-/// A camera that moves keeps a probe's strata only where reprojection holds: the
-/// probe that stood at the probe's place last frame lent its strata, and the probe
-/// still lies on their plane within half a spacing. A slight turn keeps most rays;
-/// a jump keeps few (only probes that land on the same plane nearby).
+/// A camera that moves keeps a probe's strata only where reprojection holds: last
+/// frame's probes around the probe's old screen place lend the strata they traced
+/// on the probe's plane, within GI2_REACH spacings of it. A slight turn keeps
+/// almost all rays; turning round to surfaces last frame never saw keeps few.
 #[test]
 fn gi_v2_camera_keeps_rays_only_where_reprojection_holds() {
     let (_gpu, mut window, mut renderer) = open();
@@ -369,18 +369,18 @@ fn gi_v2_camera_keeps_rays_only_where_reprojection_holds() {
     let mut turned = Camera::opening();
     turned.set_pose(p, camera.yaw + 0.002, camera.pitch);
     let mut jumped = Camera::opening();
-    jumped.set_pose(genos_scene::Vec3::new(0.3, 1.7, 0.0), 0.2, 0.0);
+    jumped.set_pose(p, camera.yaw + std::f32::consts::PI, camera.pitch);
     fill_strata(&mut window, &mut renderer, &world, &camera);
     let _ = draw(&mut window, &mut renderer, &world, &turned);
     let held = samples_per_probe(&mut renderer);
     assert!(
-        held > 0.6 * 512.0,
-        "a slight turn keeps most kept rays ({held})"
+        held > 0.9 * 512.0,
+        "a slight turn keeps almost all kept rays ({held})"
     );
     fill_strata(&mut window, &mut renderer, &world, &camera);
     let _ = draw(&mut window, &mut renderer, &world, &jumped);
     let held = samples_per_probe(&mut renderer);
-    assert!(held < 0.25 * 512.0, "a jump keeps few ({held})");
+    assert!(held < 0.25 * 512.0, "turning round keeps few ({held})");
 }
 
 /// The traced world changing as a whole (here the floor's colour, which kept hits
