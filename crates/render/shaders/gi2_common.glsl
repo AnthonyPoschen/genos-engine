@@ -289,11 +289,16 @@ vec3 gi2_stratum_dir(vec3 pos, vec3 n, uint k, uint stratum) {
     float v = (float(k / s) + (float(stratum / 2u) + j2) * 0.25) / float(s);
     return gi2_hemi_dir(h, n, sqrt(u2), v);
 }
-// The centre of cell k of the pattern of a probe at pos facing n.
+// The centre of cell k of the pattern of a probe at pos facing n: its turn's
+// middle, and the middle of its cosine range (the cell's centroid over solid
+// angle, where its mean light sits). The middle of the cos^2 range, the rays'
+// centre, lies nearer the normal: projected there, uniform light reads 3.5 %
+// too bright along the normal.
 vec3 gi2_cell_dir(vec3 pos, vec3 n, uint k) {
     uint s = gi2_grid();
-    return gi2_hemi_dir(gi2_cell_hash(pos), n, sqrt((float(k % s) + 0.5) / float(s)),
-                        (float(k / s) + 0.5) / float(s));
+    float r = float(k % s);
+    float u = 0.5 * (sqrt(r / float(s)) + sqrt((r + 1.0) / float(s)));
+    return gi2_hemi_dir(gi2_cell_hash(pos), n, u, (float(k / s) + 0.5) / float(s));
 }
 // Solid angle of a cell in row k % sqrt(R).
 float gi2_cell_solid_angle(uint k) {
