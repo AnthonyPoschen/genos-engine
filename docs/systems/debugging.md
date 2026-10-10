@@ -155,11 +155,29 @@ and the cosine; a red wall bleeds red onto a white floor. `known_scenes` (ignore
 wall to look at. In the stress scene the engine's `direct` view matches a
 `bounces: 0` trace to about 2 %.
 
+GPU reference (`genos-gpuref`, `GENOS_REFERENCE_GPU=1`): the same paths on the
+4070's hardware ray queries (Vulkan `VK_KHR_ray_query`, headless, no GI v2 code):
+the scene's triangle form in two BLAS (one-sided culled, two-sided), the same
+Lambert materials, lamps (72 units, 10 cm), sun and sky, light sampling at every
+vertex, Russian roulette from the second bounce, f32 per path and f64 sums, two
+half buffers for the noise estimate, no denoiser. Rays start 1e-5 from a surface
+(the CPU proof's 1e-3 lets a shadow ray from a concave corner skip the cross wall:
+the column of white specks along the room's long-wall seam in the old references).
+Validated against the CPU proof at five stress poses (160x90, 1024 paths a pixel):
+the difference is 0.47-0.82 of the CPU's own noise, bias at most 0.0003
+(`gpu_reference` test in genos-stress, ignored). About 21x the CPU's paths a second
+at 8 threads (5x on the sky-heavy outside view); the room references at noise 0.01
+(320x180, about 150k paths a pixel) take about 260 s each. Cached as the CPU traces
+under their own key. The CPU proof runs at nice and half the cores
+(`GENOS_REFERENCE_THREADS`).
+
 ## gi-check
 
 `cargo run --release -p genos-stress -- gi-check [--out DIR]` is the GI picture gate.
 It runs this build of the stress test four times (one window at a time) and prints a
-table of PASS or FAIL against fixed limits; exit status 1 on any FAIL.
+table of PASS or FAIL against fixed limits; exit status 1 on any FAIL. A few rows
+are targets GI v2 is working towards (the room's 48 px swim and light structure):
+a miss prints MISS and fails nothing.
 
 - `settled`: the five diagnosis views (room-a, corner, contact, lamp-wall, hall) at
   640x360, clock paused, each compared with a 320x180 reference
@@ -388,6 +406,27 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   (`GENOS_GI2_BORROW`). Moving a patch to its reader's point was tried and made
   it worse. edffa81: error 0.0338, flicker 0.0302; fixed 0.0196, 0.0119.
   Limits 0.027, 0.02.
+
+- Room grades against the GPU reference (2026-10-11, room run, references at
+  noise 0.01): turn swim at 48 px (the same world swim blurred 48 px: the big soft
+  blobs that slide; target 0.0006, GI v1 0.0003, edffa81 0.0024, 839d449 0.0026);
+  light structure (metrics::structure: both pictures blurred 8 px at 320x180
+  within each surface, the reference split at its sharp edges, mean |log ratio|
+  with each surface's own mean removed, so a blotch in the wrong place counts even
+  when the mean is right; gradient correlation shown beside it; target 0.010:
+  GI v1 0.0595 / 0.76, edffa81 0.0218 / 0.94, 839d449 0.0147 / 0.97, the light
+  cache read directly at 12.5 cm and 1024 rays 0.0092); close-up definition
+  (metrics::definition: the 1.5-6 px band error against the reference at a pose
+  1 m from the bounce-lit corridor wall, and how much of the reference's detail
+  is kept; limit 0.013: 839d449 0.0106, GI v1 0.0154). The first pose by the red
+  box was too dark to converge and was moved.
+- World cells (GENOS_GI2_WORLD, experiment, off): 1, pixels read the light cache's
+  patches interpolated: with 64 rays a patch the picture is blotched (structure
+  0.0685) but as stable as GI v1; with 1024 rays at 12.5 cm structure 0.0092,
+  swim 0.0006 / 0.0002 at 48 px, blotch 0.014, close-up 0.0149 (blocky). 2,
+  probes average their irradiance into world cells: swim halves (cap 64: 0.0015 /
+  0.0008) but the settled picture depends on the path there (settled per pose
+  0.0066, end 0.0013-0.0021), with or without jittered probe placement.
 
 ## Limits
 
