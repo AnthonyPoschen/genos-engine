@@ -32,6 +32,7 @@ void main() {
         return;
     }
     vec3 n = cache.v[3u * slot + 1u].xyz;
+    uint rkey = gi2_sc_ray_key(slot, key);
     uint first = gi2_probe_rays() + j * GI2_CACHE_RAYS;
     vec3 e = vec3(0.0);
     [[dont_unroll]] for (uint k = 0u; k < GI2_CACHE_RAYS; k++) {
@@ -39,7 +40,7 @@ void main() {
         if (gi2_ray_none(v)) {
             return;
         }
-        vec3 dir = gi2_dir(key, n, k, GI2_CACHE_RAYS);
+        vec3 dir = gi2_dir(rkey, n, k, GI2_CACHE_RAYS);
         e += gi2_ray_light(v) * max(dot(dir, n), 0.0);
     }
     e *= GI2_TAU / float(GI2_CACHE_RAYS);
@@ -53,6 +54,32 @@ void main() {
     if (old.w > GI2_CACHE_MATURE - 0.5) {
         atomicMax(gstats.mature_change, millionths);
         atomicAdd(gstats.mature_relit, 1u);
+    }
+    if (gi2_world_mode() == 3u) {
+        // Surface cache: the running mean of the sets so far (a short one under
+        // change); w counts them, held at the cap once there.
+        float t = old.w < 0.5 ? 0.0 : gi2_sc_count(slot);
+        // Set k weighs k^2 (later sets read a cache that has converged further, so
+        // the first sets' darker second bounce fades as (k / n)^3, not k / n; the
+        // noise is that of 0.56 n sets).
+        float k = t + 1.0;
+        float w = (gi2_sc_flags() & 1u) != 0u ? 6.0 * k / ((k + 1.0) * (2.0 * k + 1.0)) : 2.0 / (k + 1.0);
+        vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * w;
+        float cap = gi2_sc_cap(slot);
+        float next = min(t + 1.0, cap);
+        // Second pass: the first time a texel reaches the cap its sets drop to a
+        // quarter (value kept), so the sets taken while the cache around it was
+        // still dark weigh less (world slot w marks the pass done).
+        if ((gi2_sc_flags() & 2u) != 0u && next >= cap && cache.v[GI2_WORLD_AT + slot].w < 0.5) {
+            cache.v[GI2_WORLD_AT + slot].w = 1.0;
+            next = max(floor(cap * 0.25), 1.0);
+        }
+        // Lit under changing light or inside a change: stale (w + 0.25) until a
+        // relight with everything still; pixels show the probes over it.
+        bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
+        bool stale = !gi2_sc_light_quiet() || (urgent && gi2_near_change(cache.v[3u * slot].xyz));
+        cache.v[3u * slot + 2u] = vec4(mean, next + (stale ? 0.25 : 0.0));
+        return;
     }
     cache.v[3u * slot + 2u] = vec4(e, min(max(old.w, 0.0) + 1.0, GI2_CACHE_MATURE));
 }

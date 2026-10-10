@@ -37,7 +37,7 @@ fn gi2_tile(height: u32) -> u32 {
 /// Rays per screen probe (Low in the design; a square for the stratified pattern).
 pub(crate) const GI2_RAYS: u32 = 64;
 /// Light cache sizes; gi2_cache_slots.glsl has the same numbers.
-const GI2_CACHE_SLOTS: u64 = 262144;
+const GI2_CACHE_SLOTS: u64 = 1048576;
 const GI2_CACHE_BATCH: u32 = 16384;
 const GI2_CACHE_RAYS: u32 = 64;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
@@ -886,6 +886,10 @@ impl Gpu {
         }
         if !light {
             self.gi2.light_quiet = 0;
+        } else if gi2_world_env() == 3 {
+            // Surface cache: texels keep adding sets, so their change says nothing
+            // of the light; rounds since the light last changed.
+            self.gi2.light_quiet = self.gi2.light_quiet.saturating_add(1);
         } else if words[5] > 0 {
             if words[4] <= GI2_SETTLE_CHANGE {
                 self.gi2.light_quiet = self.gi2.light_quiet.saturating_add(1);
@@ -1156,11 +1160,18 @@ impl Gpu {
         let mut block = vec![0f32; 4 * (GI2_CHANGE_HEAD + GI2_CHANGES)];
         block[2] = (self.gi2.probe_runs & 1) as f32;
         // World irradiance cells (gi2_cache.glsl, experiment): GENOS_GI2_WORLD mode
-        // (1: pixels read the light cache, 2: probes average into world cells) and
-        // GENOS_GI2_WORLD_CAP frames.
-        let world = std::env::var("GENOS_GI2_WORLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).min(2);
-        let cap = std::env::var("GENOS_GI2_WORLD_CAP").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(32).clamp(1, 999);
-        block[3] = (world * 1000 + cap) as f32;
+        // (1: pixels read the light cache, 2: probes average into world cells, 3:
+        // the surface cache) and GENOS_GI2_WORLD_CAP frames (mode 3: ray sets a
+        // texel averages, default 16).
+        let world = gi2_world_env();
+        let cap = std::env::var("GENOS_GI2_WORLD_CAP")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(if world == 3 { 16 } else { 32 })
+            .clamp(1, 999);
+        // Surface cache switches (gi2_cache.glsl gi2_sc_flags).
+        let flags = std::env::var("GENOS_GI2_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).min(127);
+        block[3] = (flags * 100_000 + world * 1000 + cap) as f32;
         match &changes {
             None => block[1] = 1.0,
             Some(list) => {
@@ -1226,9 +1237,12 @@ impl Gpu {
             self.gi2.light_quiet = 0;
         }
         let sweep = self.gi2.live.div_ceil(GI2_CACHE_BATCH).max(1) + 1;
-        let young_only = self.gi2.young_ok && self.gi2.light_quiet >= sweep;
+        // Surface cache (mode 3): bit 10 says the light has held two rounds, and a
+        // round that relights nothing has nothing left to converge.
+        let sc = gi2_world_env() == 3;
+        let young_only = if sc { self.gi2.light_quiet >= 2 } else { self.gi2.young_ok && self.gi2.light_quiet >= sweep };
         self.gi2.stats_light[slot] = light;
-        self.gi2.stats_young[slot] = young_only;
+        self.gi2.stats_young[slot] = young_only || sc;
         // z: bgra, fills (bit 6), young-only rounds and lamp picks (gi2_common.glsl);
         // the gather and filter passes add their round (bits 1-2) below.
         let picks = std::env::var("GENOS_GI2_CACHE_PICKS").is_ok_and(|v| v == "1");
@@ -1498,6 +1512,12 @@ impl Gpu {
         }
         self.gi2.ready = false;
     }
+}
+
+/// GENOS_GI2_WORLD (gi2_cache.glsl world modes): 0 off, 1 pixels read the light
+/// cache, 2 world irradiance cells, 3 the surface cache.
+fn gi2_world_env() -> u32 {
+    std::env::var("GENOS_GI2_WORLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).min(3)
 }
 
 /// Vec4 index of the changes block in the work buffer (gi2_common.glsl
