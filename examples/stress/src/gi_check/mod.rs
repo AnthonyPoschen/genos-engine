@@ -47,6 +47,8 @@ struct Options {
     settled_refs: Option<PathBuf>,
     /// GI v2 (default) or v1, for checking the tool on the old path.
     v2: bool,
+    /// Views to render (all five when empty).
+    views: String,
 }
 
 pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
@@ -63,6 +65,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
         walk_size: "1280x720".into(),
         settled_refs: None,
         v2: true,
+        views: String::new(),
     };
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
@@ -77,6 +80,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
             "--size" => o.size = value()?,
             "--walk-size" => o.walk_size = value()?,
             "--settled-refs" => o.settled_refs = Some(value()?.into()),
+            "--views" => o.views = value()?,
             "--gi" => {
                 o.v2 = match value()?.as_str() {
                     "v1" => false,
@@ -115,7 +119,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
 
 const HELP: &str = "genos-stress gi-check [--out DIR] [--only settled,moving,walk,flicker] \
 [--score-only] [--ref-noise 0.05] [--ref-spp 2048] [--ref-seconds 900] [--size 640x360] [--walk-size 1280x720] \
-[--settled-refs DIR] [--gi v2|v1]
+[--settled-refs DIR] [--gi v2|v1] [--views corner,contact]
 Renders with GENOS_GI=v2 (or v1); GENOS_GI2_TILE defaults to the 1440p probe spacing (height / 90), references are \
 cached in $GENOS_REFERENCE_CACHE (default target/reference-cache). Exit status 1 on a FAIL.";
 
@@ -127,7 +131,7 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
             .replace("__NOISE__", &format!("{:?}", o.noise))
             .replace("__MAXSPP__", &o.max_spp.to_string())
             .replace("__SECS__", &format!("{:?}", o.seconds))
-            .replace("__ONLY__", "")
+            .replace("__ONLY__", &o.views)
             .replace("__GI__", if o.v2 { "1.0" } else { "0.0" })
             .replace("__DIR__", &dir.display().to_string())
     };
