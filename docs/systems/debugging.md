@@ -225,6 +225,17 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   corner 0.078, visibly blotched walls). Right.
 - GI v1: mean, contact and open-wall FAIL (0.13 / 0.16 / 0.10: the corners and
   bounce-lit walls are visibly too dark), blob PASS (0.019: v1 is smooth). Right.
+- Camera and trail runs (2026-10-10, 4070, 640x360, tile 4): GI v1 is the
+  known-good picture in motion: mid-move error 0.028, worst tile 0.29, flicker
+  0.034, post-stop 0.003 in 0 frames. GI v2 before the per-ray gather fix: 0.092 /
+  0.63 / 0.12, its moving frames visibly blotched and 5 % too bright (14 % with
+  the 5x5 strata reach). The worst-tile and flicker limits (0.35, 0.05) are set
+  from v1 with a margin; the error limit stays 0.03. The mid-move worst-tile row
+  is the mean over frames of each frame's worst 10x10 tile, over the tile's
+  reference light or the frame's mean tile, whichever is larger. Known flaw: the
+  settled reference at camera frame 159 (turning on the spot) is blank in its
+  lower half, so that frame is every build's worst; it adds about 0.001 to the
+  mean. Trail: v1 0.109 (its world probes lag), v2 0.057.
 
 ## Limits
 

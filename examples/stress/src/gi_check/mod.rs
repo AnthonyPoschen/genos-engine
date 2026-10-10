@@ -38,11 +38,12 @@ const FROZEN_LIMIT: f64 = 0.004;
 /// Moving, worst pose mean_delta in the still region (v1 baseline at most 0.0004).
 const MOVING_FLICKER_LIMIT: f64 = 0.0005;
 /// Camera run: each moving frame against the settled picture at its pose (mean
-/// relative error, worst 10 x 10 px tile) and frame-to-frame change beyond the
-/// settled pictures' own.
+/// relative error; mean over frames of the worst 10 x 10 px tile) and frame-to-
+/// frame change beyond the settled pictures' own. Tile and flicker limits come
+/// from GI v1 in motion (0.29, 0.034) with a margin (debugging.md, Validation).
 const CAMERA_ERR_LIMIT: f64 = 0.03;
-const CAMERA_TILE_LIMIT: f64 = 0.10;
-const CAMERA_FLICKER_LIMIT: f64 = 0.01;
+const CAMERA_TILE_LIMIT: f64 = 0.35;
+const CAMERA_FLICKER_LIMIT: f64 = 0.05;
 /// After the camera stops: error of the first 10 frames against the settled
 /// picture, and frames until it stays under STOP_SETTLED.
 const STOP_ERR_LIMIT: f64 = 0.02;
