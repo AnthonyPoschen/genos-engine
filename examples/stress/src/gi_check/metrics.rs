@@ -477,3 +477,84 @@ pub fn walk_gap(cold: &Path, warm: &Path) -> Result<(f64, f64), String> {
     }
     Ok((gap, worst))
 }
+
+/// Linear luminance of a picture at 320 x 180.
+pub fn lum320(path: &Path) -> Result<Plane, String> {
+    Ok(luminance(&load(path)?, 320, 180))
+}
+
+/// Relative error of `a` against `b` over the whole picture, and the worst
+/// 10 x 10 px tile.
+pub fn rel_err(a: &Plane, b: &Plane) -> (f64, f64) {
+    let (w, h) = (a.w, a.h);
+    let sum_b: f64 = b.v.iter().sum();
+    let err: f64 =
+        a.v.iter()
+            .zip(&b.v)
+            .map(|(x, y)| (x - y).abs())
+            .sum::<f64>()
+            / sum_b.max(1.0e-6);
+    let mut worst: f64 = 0.0;
+    let tile_mean = sum_b / b.v.len().max(1) as f64 * 100.0;
+    for ty in 0..h / 10 {
+        for tx in 0..w / 10 {
+            let (mut sa, mut sb) = (0.0, 0.0);
+            for y in ty * 10..ty * 10 + 10 {
+                for x in tx * 10..tx * 10 + 10 {
+                    sa += a.at(x, y);
+                    sb += b.at(x, y);
+                }
+            }
+            // Over the tile's own light, or the frame's mean tile where the tile is
+            // darker (a near-black tile would turn any noise into a huge ratio).
+            worst = worst.max((sa - sb).abs() / sb.max(tile_mean).max(1.0));
+        }
+    }
+    (err, worst)
+}
+
+/// Frame-to-frame change of a beyond b's own change, over b's light.
+pub fn excess_change(a0: &Plane, a1: &Plane, b0: &Plane, b1: &Plane) -> f64 {
+    let sum_b: f64 = b1.v.iter().sum();
+    let e: f64 = (0..a1.v.len())
+        .map(|i| ((a1.v[i] - a0.v[i]) - (b1.v[i] - b0.v[i])).abs())
+        .sum();
+    e / sum_b.max(1.0e-6)
+}
+
+/// Depth view at 320 x 180 (near is bright, 0 where nothing).
+pub fn depth320(path: &Path) -> Result<Plane, String> {
+    Ok(rgb_plane(&load(path)?, 320, 180, |p| p[0]))
+}
+
+/// The space a box left: pixels some earlier pose had nearer (the box stood
+/// there) that this pose does not, grown by `grow` px (its contact shadow and
+/// bounce), minus where anything is nearer now than before (the box now).
+pub fn vacated(now: &Plane, before: &[&Plane], grow: usize) -> Vec<bool> {
+    let n = now.v.len();
+    let mut left = Mask::new(now.w, now.h);
+    let mut here = Mask::new(now.w, now.h);
+    for b in before {
+        for i in 0..n {
+            left.v[i] |= b.v[i] > now.v[i] + 0.02;
+            here.v[i] |= now.v[i] > b.v[i] + 0.02;
+        }
+    }
+    let here = here.dilate(1);
+    let grown = left.dilate(grow);
+    (0..n)
+        .map(|i| grown.v[i] && !here.v[i] && now.v[i] > 0.0)
+        .collect()
+}
+
+/// Relative error of `a` against `b` inside `mask`.
+pub fn masked_err(a: &Plane, b: &Plane, mask: &[bool]) -> f64 {
+    let (mut e, mut t) = (0.0, 0.0);
+    for i in 0..a.v.len() {
+        if mask[i] {
+            e += (a.v[i] - b.v[i]).abs();
+            t += b.v[i];
+        }
+    }
+    e / t.max(1.0e-6)
+}

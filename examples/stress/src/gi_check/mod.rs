@@ -14,6 +14,9 @@ use metrics::ViewScore;
 
 const VIEWS_SCRIPT: &str = include_str!("../../scripts/gi_check/views.rhai");
 const WALK_SCRIPT: &str = include_str!("../../scripts/gi_check/walk.rhai");
+const CAMERA_SCRIPT: &str = include_str!("../../scripts/gi_check/camera.rhai");
+const TRAIL_SCRIPT: &str = include_str!("../../scripts/gi_check/trail.rhai");
+const RUNS: [&str; 6] = ["settled", "moving", "walk", "flicker", "camera", "trail"];
 const FLICKER_SCRIPT: &str = include_str!("../../scripts/temporal_flicker_aligned.rhai");
 const VIEWS: [&str; 5] = ["room-a", "corner", "contact", "lamp-wall", "hall"];
 
@@ -34,6 +37,21 @@ const POP_LIMIT: f64 = 0.05;
 const FROZEN_LIMIT: f64 = 0.004;
 /// Moving, worst pose mean_delta in the still region (v1 baseline at most 0.0004).
 const MOVING_FLICKER_LIMIT: f64 = 0.0005;
+/// Camera run: each moving frame against the settled picture at its pose (mean
+/// relative error, worst 10 x 10 px tile) and frame-to-frame change beyond the
+/// settled pictures' own.
+const CAMERA_ERR_LIMIT: f64 = 0.03;
+const CAMERA_TILE_LIMIT: f64 = 0.10;
+const CAMERA_FLICKER_LIMIT: f64 = 0.01;
+/// After the camera stops: error of the first 10 frames against the settled
+/// picture, and frames until it stays under STOP_SETTLED.
+const STOP_ERR_LIMIT: f64 = 0.02;
+const STOP_SETTLED: f64 = 0.01;
+const STOP_FRAMES_LIMIT: f64 = 10.0;
+/// Trail run: error in the space a moving box left in the last 10 frames, mean
+/// over the frames and the worst frame.
+const TRAIL_LIMIT: f64 = 0.05;
+const TRAIL_WORST_LIMIT: f64 = 0.10;
 
 struct Options {
     out: PathBuf,
@@ -49,6 +67,8 @@ struct Options {
     v2: bool,
     /// Views to render (all five when empty).
     views: String,
+    /// Camera run: settle at every stride-th pose.
+    stride: u32,
 }
 
 pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
@@ -66,6 +86,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
         settled_refs: None,
         v2: true,
         views: String::new(),
+        stride: 1,
     };
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
@@ -81,6 +102,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
             "--walk-size" => o.walk_size = value()?,
             "--settled-refs" => o.settled_refs = Some(value()?.into()),
             "--views" => o.views = value()?,
+            "--stride" => o.stride = value()?.parse().map_err(|e| format!("{arg}: {e}"))?,
             "--gi" => {
                 o.v2 = match value()?.as_str() {
                     "v1" => false,
@@ -96,7 +118,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
         }
     }
     for r in &o.runs {
-        if !["settled", "moving", "walk", "flicker"].contains(&r.as_str()) {
+        if !RUNS.contains(&r.as_str()) {
             return Err(format!("gi-check: unknown run {r}"));
         }
     }
@@ -117,9 +139,9 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
     Ok(())
 }
 
-const HELP: &str = "genos-stress gi-check [--out DIR] [--only settled,moving,walk,flicker] \
+const HELP: &str = "genos-stress gi-check [--out DIR] [--only settled,moving,walk,flicker,camera,trail] \
 [--score-only] [--ref-noise 0.05] [--ref-spp 2048] [--ref-seconds 900] [--size 640x360] [--walk-size 1280x720] \
-[--settled-refs DIR] [--gi v2|v1] [--views corner,contact]
+[--settled-refs DIR] [--gi v2|v1] [--views corner,contact] [--stride 1]
 Renders with GENOS_GI=v2 (or v1); GENOS_GI2_TILE defaults to the 1440p probe spacing (height / 90), references are \
 cached in $GENOS_REFERENCE_CACHE (default target/reference-cache). Exit status 1 on a FAIL.";
 
@@ -133,11 +155,14 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
             .replace("__SECS__", &format!("{:?}", o.seconds))
             .replace("__ONLY__", &o.views)
             .replace("__GI__", if o.v2 { "1.0" } else { "0.0" })
+            .replace("__STRIDE__", &o.stride.max(1).to_string())
             .replace("__DIR__", &dir.display().to_string())
     };
     let (script, size) = match run {
         "settled" | "moving" => (fill(VIEWS_SCRIPT), &o.size),
         "walk" => (fill(WALK_SCRIPT), &o.walk_size),
+        "camera" => (fill(CAMERA_SCRIPT), &o.size),
+        "trail" => (fill(TRAIL_SCRIPT), &o.size),
         // The repo's flicker gate, with a heatmap per pose and window.
         _ => (
             fill(
@@ -175,7 +200,7 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
             .unwrap_or(720);
         cmd.env("GENOS_GI2_TILE", (rows / 90).clamp(4, 64).to_string());
     }
-    if run == "moving" || run == "walk" {
+    if matches!(run, "moving" | "walk" | "camera" | "trail") {
         cmd.env("GENOS_GI_DEBUG", "1");
     }
     eprintln!("gi-check: {run} -> {}", dir.display());
@@ -361,6 +386,8 @@ fn score(o: &Options, out: &Path) -> Result<Vec<Row>, String> {
                     image: dir.join(format!("cold/frame-{worst_at:04}.png")),
                 });
             }
+            "camera" => camera_rows(&mut rows, &dir)?,
+            "trail" => trail_rows(&mut rows, &dir)?,
             _ => {
                 let text = std::fs::read_to_string(dir.join("report.md"))
                     .map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -421,4 +448,246 @@ fn print_table(rows: &[Row]) -> usize {
         println!("{}", r.line());
     }
     rows.iter().filter(|r| !r.pass()).count()
+}
+
+fn frame(dir: &Path, sub: &str, i: usize) -> PathBuf {
+    dir.join(format!("{sub}/frame-{i:04}.png"))
+}
+
+/// `per_probe` (GENOS_GI_DEBUG) of the first `n` probe frames after the scene
+/// first stood frozen: the camera run's moving pass.
+fn rays_after_frozen(log: &Path, n: usize) -> Option<(f64, f64)> {
+    let text = std::fs::read_to_string(log).ok()?;
+    let v: Vec<f64> = text
+        .lines()
+        .skip_while(|l| !l.starts_with("gi2 frozen"))
+        .filter_map(|l| l.split("per_probe ").nth(1)?.trim().parse().ok())
+        .take(n)
+        .collect();
+    (!v.is_empty()).then(|| {
+        (
+            v.iter().sum::<f64>() / v.len() as f64,
+            v.iter().copied().fold(f64::MAX, f64::min),
+        )
+    })
+}
+
+fn camera_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
+    let mut moving = Vec::new();
+    while frame(dir, "move", moving.len()).exists() {
+        moving.push(metrics::lum320(&frame(dir, "move", moving.len()))?);
+    }
+    let still: Vec<(usize, metrics::Plane)> = (0..moving.len())
+        .filter(|&i| frame(dir, "still", i).exists())
+        .map(|i| metrics::lum320(&frame(dir, "still", i)).map(|p| (i, p)))
+        .collect::<Result<_, _>>()?;
+    if moving.is_empty() || still.is_empty() {
+        return Err(format!("gi-check: no camera frames in {}", dir.display()));
+    }
+    // The moving frames may start a frame early or late against the path: take the
+    // offset that fits best.
+    let at = |i: usize, o: isize| -> Option<&metrics::Plane> {
+        moving.get((i as isize + o).max(0) as usize)
+    };
+    let offset = (-2isize..=2)
+        .min_by(|&a, &b| {
+            let e = |o| {
+                still
+                    .iter()
+                    .filter_map(|(i, s)| at(*i, o).map(|m| metrics::rel_err(m, s).0))
+                    .sum::<f64>()
+            };
+            e(a).total_cmp(&e(b))
+        })
+        .unwrap_or(0);
+    let (mut err, mut n, mut tiles, mut worst, mut worst_at) = (0.0, 0, 0.0, 0.0f64, 0);
+    let (mut worst_err, mut worst_err_at) = (0.0f64, 0);
+    for (i, s) in &still {
+        if let Some(m) = at(*i, offset) {
+            let (e, t) = metrics::rel_err(m, s);
+            err += e;
+            tiles += t;
+            n += 1;
+            if t > worst {
+                (worst, worst_at) = (t, *i);
+            }
+            if e > worst_err {
+                (worst_err, worst_err_at) = (e, *i);
+            }
+        }
+    }
+    let err = err / n.max(1) as f64;
+    let tiles = tiles / n.max(1) as f64;
+    let mut flick = (0.0, 0);
+    for w in still.windows(2) {
+        let ((i0, s0), (i1, s1)) = (&w[0], &w[1]);
+        if i1 - i0 == 1 {
+            if let (Some(m0), Some(m1)) = (at(*i0, offset), at(*i1, offset)) {
+                flick.0 += metrics::excess_change(m0, m1, s0, s1);
+                flick.1 += 1;
+            }
+        }
+    }
+    if let Some((mean, least)) = rays_after_frozen(&dir.join("run.log"), moving.len()) {
+        println!("camera   rays held per probe while moving: mean {mean:.1}, least {least:.1}");
+    }
+    println!(
+        "camera   {} moving frames, {} settled poses, offset {offset}; worst frame {worst_err_at} error {worst_err:.4}",
+        moving.len(),
+        still.len()
+    );
+    let image = |i: usize| frame(dir, "move", (i as isize + offset).max(0) as usize);
+    rows.push(Row {
+        check: "camera mid-move error".into(),
+        value: err,
+        limit: CAMERA_ERR_LIMIT,
+        note: format!("worst frame {worst_err_at} {worst_err:.4}"),
+        image: image(worst_err_at),
+    });
+    rows.push(Row {
+        check: "camera mid-move worst tile".into(),
+        value: tiles,
+        limit: CAMERA_TILE_LIMIT,
+        note: format!("worst frame {worst_at} {worst:.4}"),
+        image: image(worst_at),
+    });
+    if flick.1 > 0 {
+        rows.push(Row {
+            check: "camera mid-move flicker".into(),
+            value: flick.0 / flick.1 as f64,
+            limit: CAMERA_FLICKER_LIMIT,
+            note: format!("{} frame pairs", flick.1),
+            image: image(worst_err_at),
+        });
+    }
+    // After stopping: the frames held on the last pose against its settled picture.
+    let last = moving.len() - 1;
+    if let Some((_, settled)) = still.iter().find(|(i, _)| *i == last) {
+        let mut errs = Vec::new();
+        while frame(dir, "stop", errs.len()).exists() {
+            let f = metrics::lum320(&frame(dir, "stop", errs.len()))?;
+            errs.push(metrics::rel_err(&f, settled).0);
+        }
+        if !errs.is_empty() {
+            let first = &errs[..10.min(errs.len())];
+            let mean = first.iter().sum::<f64>() / first.len() as f64;
+            let settle = errs
+                .iter()
+                .rposition(|&e| e > STOP_SETTLED)
+                .map_or(0, |i| i + 1);
+            println!(
+                "camera   after stopping, error by frame: {}",
+                errs.iter()
+                    .take(20)
+                    .map(|e| format!("{e:.3}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            rows.push(Row {
+                check: "camera post-stop error (frames 0-9)".into(),
+                value: mean,
+                limit: STOP_ERR_LIMIT,
+                note: format!("frame 0 {:.4}", errs[0]),
+                image: frame(dir, "stop", 0),
+            });
+            rows.push(Row {
+                check: "camera post-stop frames to settle".into(),
+                value: settle as f64,
+                limit: STOP_FRAMES_LIMIT,
+                note: format!("until under {STOP_SETTLED} for good, of {}", errs.len()),
+                image: frame(dir, "stop", settle.saturating_sub(1)),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn trail_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
+    let mut moving = Vec::new();
+    while frame(dir, "move", moving.len()).exists() {
+        moving.push(metrics::lum320(&frame(dir, "move", moving.len()))?);
+    }
+    let refs: Vec<(usize, metrics::Plane, metrics::Plane)> = (0..moving.len())
+        .filter(|&i| frame(dir, "still", i).exists() && frame(dir, "depth", i).exists())
+        .map(|i| {
+            Ok((
+                i,
+                metrics::lum320(&frame(dir, "still", i))?,
+                metrics::depth320(&frame(dir, "depth", i))?,
+            ))
+        })
+        .collect::<Result<_, String>>()?;
+    if moving.is_empty() || refs.len() < 2 {
+        return Err(format!("gi-check: no trail frames in {}", dir.display()));
+    }
+    // Per settled pose: the space the box left over the last 10 frames.
+    let masks: Vec<(usize, Vec<bool>)> = refs
+        .iter()
+        .map(|(i, _, d)| {
+            let before: Vec<&metrics::Plane> = refs
+                .iter()
+                .filter(|(j, _, _)| *j < *i && *j + 10 >= *i)
+                .map(|(_, _, d)| d)
+                .collect();
+            (*i, metrics::vacated(d, &before, 6))
+        })
+        .collect();
+    let at = |i: usize, o: isize| moving.get((i as isize + o).max(0) as usize);
+    let err_at = |o: isize| -> Vec<(usize, f64, usize)> {
+        refs.iter()
+            .zip(&masks)
+            .filter_map(|((i, s, _), (_, m))| {
+                let px = m.iter().filter(|&&b| b).count();
+                (px >= 30).then(|| at(*i, o).map(|f| (*i, metrics::masked_err(f, s, m), px)))?
+            })
+            .collect()
+    };
+    // The moving frames may start a frame early or late against the path.
+    let whole = |o: isize| {
+        refs.iter()
+            .filter_map(|(i, s, _)| at(*i, o).map(|f| metrics::rel_err(f, s).0))
+            .sum::<f64>()
+    };
+    let offset = (-2isize..=2)
+        .min_by(|&a, &b| whole(a).total_cmp(&whole(b)))
+        .unwrap_or(0);
+    let errs = err_at(offset);
+    if errs.is_empty() {
+        return Err(format!(
+            "gi-check: the trail box left too little space in {}",
+            dir.display()
+        ));
+    }
+    let mean = errs.iter().map(|e| e.1).sum::<f64>() / errs.len() as f64;
+    let worst = errs
+        .iter()
+        .copied()
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap_or((0, 0.0, 0));
+    let image = |i: usize| frame(dir, "move", (i as isize + offset).max(0) as usize);
+    println!(
+        "trail    offset {offset}; error in the space left, by frame: {}",
+        errs.iter()
+            .map(|(i, e, _)| format!("{i}:{e:.3}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    if let Some((mean, least)) = rays_after_frozen(&dir.join("run.log"), moving.len()) {
+        println!("trail    rays held per probe while it moves (whole picture): mean {mean:.1}, least {least:.1}");
+    }
+    rows.push(Row {
+        check: "trail error (space left, moving)".into(),
+        value: mean,
+        limit: TRAIL_LIMIT,
+        note: format!("worst frame {} {:.4} ({} px)", worst.0, worst.1, worst.2),
+        image: image(worst.0),
+    });
+    rows.push(Row {
+        check: "trail worst frame".into(),
+        value: worst.1,
+        limit: TRAIL_WORST_LIMIT,
+        note: format!("frame {}", worst.0),
+        image: image(worst.0),
+    });
+    Ok(())
 }

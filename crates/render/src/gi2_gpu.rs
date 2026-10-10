@@ -1135,6 +1135,16 @@ impl Gpu {
         } else {
             None
         };
+        if std::env::var_os("GENOS_GI_DEBUG").is_some() {
+            if frozen {
+                eprintln!("gi2 frozen");
+            } else {
+                eprintln!(
+                    "gi2 kept had {had} changes {}",
+                    changes.as_ref().map_or(-1, |c| c.len() as i64)
+                );
+            }
+        }
         let mut block = vec![0f32; 4 * (GI2_CHANGE_HEAD + GI2_CHANGES)];
         block[2] = (self.gi2.probe_runs & 1) as f32;
         match &changes {

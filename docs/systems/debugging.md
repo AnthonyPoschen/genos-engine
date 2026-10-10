@@ -171,6 +171,28 @@ table of PASS or FAIL against fixed limits; exit status 1 on any FAIL.
 - `walk`: the corner walk at 1280x720, every frame of the bounce view saved, cold then
   warm (`scripts/gi_check/walk.rhai`).
 - `flicker`: `temporal_flicker_aligned.rhai` at 1280x720, with a heatmap per pose.
+- `camera`: GI while only the camera moves (`scripts/gi_check/camera.rhai`, 640x360,
+  bounce view). Moving pass: the corner path at 6 m/s (the fly speed) with a 90°
+  turn at 6° a frame, then a turn on the spot at 3° a frame; one pose a frame at a
+  fixed 60 Hz step, every frame saved, no pause or script call between frames, so
+  the GI gets one frame per pose as live. Then the camera stops on the last pose for
+  60 more frames, all saved. Reference pass: the camera stands at every `--stride`-th
+  pose (default 1, and the last) until the GI settles, one capture each; this pass
+  steps and stops, but it only makes the answers. Rows: mid-move error (each moving
+  frame against the settled picture at its pose, mean), mid-move worst tile (the
+  worst 10x10 px tile of any frame), mid-move flicker (frame-to-frame change beyond
+  the settled pictures' own change), post-stop error (the first 10 frames after
+  stopping against the last pose's settled picture) and post-stop frames to settle
+  (until the error stays under 1 %). It also prints the rays each probe held while
+  moving.
+- `trail`: the trail a moving box leaves (`scripts/gi_check/trail.rhai`, 640x360,
+  bounce view, camera still). Moving pass: the box nearest the contact view's target
+  slides 1.2 m over 40 frames (about 1.8 m/s) and stays 30 frames, every frame saved,
+  one pose a frame as live. Reference pass: the box stands at every `--stride`-th of
+  those poses until the GI settles (bounce and depth views). Rows: trail error (each
+  moving frame against the settled one inside the space the box left over the last
+  10 frames, from the depth views, grown 6 px at 320x180, minus where it stands now;
+  mean over frames) and trail worst frame.
 
 Probes are spaced as the 16 px tile at 1440p in every run (`GENOS_GI2_TILE` =
 height / 90 unless set).
@@ -185,7 +207,7 @@ differs from the warm frame at the same pose; flicker frozen `max_delta` and mov
 0.03, pop 0.05, frozen 0.004, moving flicker 0.0005. Every FAIL line names the picture
 to look at (the worst view's heatmap, the worst walk frame, the worst pose's flicker
 heatmap). Results land in `target/gi-check` with `gi-check.txt`; `--score-only`
-rescores a folder, `--only settled,walk` picks runs, `--gi v1` runs the old path.
+rescores a folder, `--only settled,walk` picks runs (settled, moving, walk, flicker, camera, trail), `--gi v1` runs the old path.
 References trace to 0.05 noise or 2048 paths per pixel (`--ref-noise`, `--ref-spp`)
 and are cached as for `compare`, so only the first run traces them (about 4 minutes
 a view on 16 cores).
