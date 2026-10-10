@@ -1,35 +1,56 @@
 #version 450
-// GI v2 screen probes, pass 5: spatial filter. Each probe's SH becomes a weighted
-// mean of itself and its 3 x 3 neighbours that lie on its plane and face its way,
-// which trades a little sharpness for much less probe noise (no temporal history:
-// the same scene gives the same answer every frame). No trace.
+// GI v2 screen probes, pass 5: spatial filter in direction space, Lumen's recipe
+// (lumen-digest.md 1.4), run three times (gi2_filter_round: cells 0 -> 1 -> 0 ->
+// SH). Each cell of a probe becomes the weighted mean of its own light and the
+// light its 3 x 3 neighbours saw in the same direction (their cell that holds this
+// cell's centre direction):
+// - weight by depth only: incoming light does not depend on the receiver's
+//   normal, so neighbours on other planes help, as long as they sit at about the
+//   same depth from the eye;
+// - a neighbour's ray is used only if its hit, seen from this probe, lies within
+//   10 degrees of the direction, after clamping its hit distance to this probe's
+//   own: far light (no parallax) is shared, while a near occluder this probe sees
+//   (a contact shadow) is not washed out by neighbours that see past it.
+// The last round projects the cells to SH (bands 0-2, cosine-convolved): the
+// probe's irradiance for any normal. No temporal history and no trace.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "gi2_common.glsl"
+
+const float GI2_FILTER_COS = 0.98481; // cos 10 degrees
+const float GI2_DEPTH_WEIGHT = 1000.0;
+const float GI2_FAR_HIT = 1000.0;
 
 void main() {
     uint probe = gl_GlobalInvocationID.x;
     if (probe >= gi2_probes()) {
         return;
     }
-    uint out_at = gi2_shf_at(probe);
+    uint round = gi2_filter_round();
+    uint from_table = round == 1u ? 1u : 0u;
+    bool last = round == 2u;
     vec4 pp = work.v[gi2_probe_at(probe)];
     if (pp.w < 0.5) {
-        [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
-            work.v[out_at + q] = vec4(0.0);
+        if (last) {
+            [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
+                work.v[gi2_shf_at(probe) + q] = vec4(0.0);
+            }
         }
         return;
     }
     vec3 n = work.v[gi2_probe_at(probe) + 1u].xyz;
-    float plane = 0.03 + 0.01 * length(pp.xyz - scene.eye.xyz);
+    vec3 fwd = scene.view_forward.xyz;
+    float depth = max(dot(pp.xyz - scene.eye.xyz, fwd), 1.0e-3);
     ivec2 c0 = ivec2(int(probe % pc.dims.z), int(probe / pc.dims.z));
     ivec2 grid = ivec2(pc.dims.zw);
-    vec4 acc[7];
-    [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
-        acc[q] = vec4(0.0);
-    }
-    float wsum = 0.0;
+    // The neighbours that count (depth weight), self excluded.
+    uint nb[8];
+    float nw[8];
+    uint count = 0u;
     [[dont_unroll]] for (uint k = 0u; k < 9u; k++) {
+        if (k == 4u) {
+            continue;
+        }
         ivec2 c = c0 + ivec2(int(k % 3u) - 1, int(k / 3u) - 1);
         if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, grid))) {
             continue;
@@ -39,19 +60,70 @@ void main() {
         if (op.w < 0.5) {
             continue;
         }
-        vec3 on = work.v[gi2_probe_at(other) + 1u].xyz;
-        float w = (k == 4u ? 1.0 : 0.5) * pow(max(dot(on, n), 0.0), 8.0)
-            * exp(-abs(dot(op.xyz - pp.xyz, n)) / plane);
-        if (w <= 1.0e-4) {
+        float rel = (dot(op.xyz - scene.eye.xyz, fwd) - depth) / depth;
+        float w = exp2(-GI2_DEPTH_WEIGHT * rel * rel);
+        if (w < 1.0e-3) {
             continue;
         }
-        uint at = gi2_sh_at(other);
-        [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
-            acc[q] += w * work.v[at + q];
-        }
-        wsum += w;
+        nb[count] = other;
+        nw[count] = w;
+        count++;
     }
+    float c[27];
+    [[dont_unroll]] for (uint f = 0u; f < 27u; f++) {
+        c[f] = 0.0;
+    }
+    uint rays = gi2_rays();
+    [[dont_unroll]] for (uint k = 0u; k < rays; k++) {
+        vec4 own = work.v[gi2_cell_at(from_table, probe, k)];
+        vec3 d = gi2_cell_dir(pp.xyz, n, k);
+        float own_t = own.w >= 0.0 ? own.w : GI2_FAR_HIT;
+        vec3 sum = own.w >= 0.0 ? own.rgb : vec3(0.0);
+        float wsum = own.w >= 0.0 ? 1.0 : 0.0;
+        [[dont_unroll]] for (uint j = 0u; j < count; j++) {
+            vec4 op = work.v[gi2_probe_at(nb[j])];
+            vec3 on = work.v[gi2_probe_at(nb[j]) + 1u].xyz;
+            uint cell = gi2_cell_of(op.xyz, on, d);
+            if (cell == ~0u) {
+                continue;
+            }
+            vec4 v = work.v[gi2_cell_at(from_table, nb[j], cell)];
+            if (v.w < 0.0) {
+                continue;
+            }
+            // The neighbour's hit, no farther than ours, seen from this probe.
+            vec3 hit = op.xyz + d * min(v.w, own_t) - pp.xyz;
+            float len = length(hit);
+            if (len > 1.0e-4 && dot(hit / len, d) < GI2_FILTER_COS) {
+                continue;
+            }
+            sum += nw[j] * v.rgb;
+            wsum += nw[j];
+        }
+        vec3 l = wsum > 0.0 ? sum / wsum : vec3(0.0);
+        if (!last) {
+            work.v[gi2_cell_at(1u - from_table, probe, k)] = vec4(l, wsum > 0.0 ? own_t : -1.0);
+            continue;
+        }
+        float y[9];
+        gi2_sh9(d, y);
+        float a = gi2_cell_solid_angle(k);
+        [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
+            c[3u * j] += a * l.r * y[j];
+            c[3u * j + 1u] += a * l.g * y[j];
+            c[3u * j + 2u] += a * l.b * y[j];
+        }
+    }
+    if (!last) {
+        return;
+    }
+    // Cosine lobe per band: pi, 2 pi / 3, pi / 4.
+    [[dont_unroll]] for (uint f = 0u; f < 27u; f++) {
+        uint band = f < 3u ? 0u : (f < 12u ? 1u : 2u);
+        c[f] *= band == 0u ? GI2_PI : (band == 1u ? GI2_TAU / 3.0 : GI2_PI / 4.0);
+    }
+    uint base = gi2_shf_at(probe);
     [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
-        work.v[out_at + q] = acc[q] / max(wsum, 1.0e-6);
+        work.v[base + q] = vec4(c[4u * q], c[4u * q + 1u], c[4u * q + 2u], q == 6u ? 0.0 : c[4u * q + 3u]);
     }
 }

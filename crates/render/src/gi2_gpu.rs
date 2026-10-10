@@ -598,19 +598,16 @@ impl Gpu {
         let rows = h.div_ceil(tile);
         let probes = (cols * rows) as u64;
         let pixels = w as u64 * h as u64;
-        // Probes (2), one slot per light cache ray (hit, then its light), SH and
-        // filtered SH (7 + 7), strata (2 per probe and stratum), kept hits and their
-        // light (a uint each), the changes block (gi2_common.glsl).
+        // Probes (2), one slot per light cache ray (hit, then its light), filtered SH
+        // (7), strata (2 per probe and stratum), kept hits and their light (a uint
+        // each), the changes block, the views (2 blocks of 2 per probe) and the
+        // cells (2 tables of R per probe) (gi2_common.glsl).
         let kept = probes * GI2_RAYS as u64 * GI2_STRATA as u64;
         let cache_rays = (GI2_CACHE_BATCH * GI2_CACHE_RAYS) as u64;
-        let work_vec4 = 2 * probes
-            + cache_rays
-            + 14 * probes
-            + 2 * GI2_STRATA as u64 * probes
-            + kept
-            + kept / 4
+        let work_vec4 = gi2_change_at(probes, cache_rays, kept)
             + (GI2_CHANGE_HEAD + GI2_CHANGES) as u64
-            + 4 * probes;
+            + 4 * probes
+            + 2 * GI2_RAYS as u64 * probes;
         let mut gbuf = std::mem::replace(&mut self.gi2.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.gi2.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.gi2.out, Buffer::empty());
@@ -1178,11 +1175,11 @@ impl Gpu {
             self.gi2.probe_runs = self.gi2.probe_runs.wrapping_add(1);
         }
         let block_at = 16
-            * (2 * probes as u64
-                + (GI2_CACHE_BATCH * GI2_CACHE_RAYS) as u64
-                + 14 * probes as u64
-                + 2 * GI2_STRATA as u64 * probes as u64
-                + probe_rays as u64 * GI2_STRATA as u64 * 5 / 4);
+            * gi2_change_at(
+                probes as u64,
+                (GI2_CACHE_BATCH * GI2_CACHE_RAYS) as u64,
+                probe_rays as u64 * GI2_STRATA as u64,
+            );
         let used = 4 * (GI2_CHANGE_HEAD + changes.as_ref().map_or(0, |l| l.len()));
         unsafe {
             // The last frame's passes are done with the block before it is written.
@@ -1215,10 +1212,10 @@ impl Gpu {
         let young_only = self.gi2.young_ok && self.gi2.light_quiet >= sweep;
         self.gi2.stats_light[slot] = light;
         self.gi2.stats_young[slot] = young_only;
-        // z: bgra, the still frames (capped) and young-only rounds (gi2_common.glsl).
+        // z: bgra, young-only rounds and lamp picks (gi2_common.glsl); the filter
+        // passes add their round (bits 1-2) below.
         let picks = std::env::var("GENOS_GI2_CACHE_PICKS").is_ok_and(|v| v == "1");
         let z = bgra
-            | self.gi2.still.min(127) << 1
             | u32::from(young_only) << 10
             | u32::from(picks) << 11;
         let pc = [w, h, cols, rows, GI2_RAYS, gi2_tile(h), z, self.gi2.frame];
@@ -1274,6 +1271,8 @@ impl Gpu {
                 (3, (w * h + kept).div_ceil(64), 1),
                 (4, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
+                (5, probes.div_ceil(64), 1),
+                (5, probes.div_ceil(64), 1),
                 (7, w.div_ceil(8), h.div_ceil(8)),
             ]
         } else {
@@ -1283,6 +1282,8 @@ impl Gpu {
                 (2, rays.div_ceil(64), 1),
                 (3, (w * h + kept + rays - probe_rays).div_ceil(64), 1),
                 (4, probes.div_ceil(64), 1),
+                (5, probes.div_ceil(64), 1),
+                (5, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
                 (6, GI2_CACHE_BATCH.div_ceil(64), 1),
                 (7, w.div_ceil(8), h.div_ceil(8)),
@@ -1321,7 +1322,22 @@ impl Gpu {
                 (self.fns.cmd_reset_query)(self.cmd, pool, first, GI2_STAMPS);
                 (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first);
             }
+            let mut filter_round = 0u32;
             for (k, (pass, gx, gy)) in groups.iter().copied().enumerate() {
+                if pass == 5 {
+                    // The spatial filter's three rounds (gi2_filter_round).
+                    let mut round_pc = pc;
+                    round_pc[6] |= filter_round << 1;
+                    filter_round += 1;
+                    (self.fns.cmd_push)(
+                        self.cmd,
+                        self.gi2.layout,
+                        0x20,
+                        0,
+                        32,
+                        round_pc.as_ptr() as *const c_void,
+                    );
+                }
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, self.gi2.pipes[pass]);
                 (self.fns.cmd_dispatch)(self.cmd, gx.max(1), gy.max(1), 1);
                 self.memory_barrier(0x800, 0x800 | 0x1000, 0x40, 0x20 | 0x40 | 0x800);
@@ -1432,6 +1448,13 @@ impl Gpu {
         }
         self.gi2.ready = false;
     }
+}
+
+/// Vec4 index of the changes block in the work buffer (gi2_common.glsl
+/// gi2_change_at), for `probes` probes, `cache_rays` light cache rays and `kept`
+/// kept hits.
+fn gi2_change_at(probes: u64, cache_rays: u64, kept: u64) -> u64 {
+    2 * probes + cache_rays + 7 * probes + 2 * GI2_STRATA as u64 * probes + kept + kept / 4
 }
 
 /// Spheres (centre, radius) around every occluder that moved, came or went between

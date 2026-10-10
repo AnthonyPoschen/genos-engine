@@ -17,8 +17,8 @@
 //               turns each hit into the light leaving it back along the ray (rgb,
 //               x >= 0) in place, so hits and radiance share the slot.
 // A pixel's direct irradiance goes into its G-buffer record's w (RGB9E5).
-//   sh          7 per probe: irradiance SH, 9 rgb coefficients
-//   filtered sh 7 per probe: the same after the spatial filter (gi2_filter.comp)
+//   filtered sh 7 per probe: irradiance SH (9 rgb coefficients), from the filtered
+//               cells (gi2_filter.comp)
 //   strata      2 per probe and stratum: the probe's position (w 1 while the
 //               stratum's hits are kept) and normal when the stratum was traced
 //   kept hits   1 per probe, stratum and ray: the hit record as traced (x distance
@@ -39,6 +39,12 @@
 //               probe that moved on screen reads the strata of the probe that
 //               stood where it stands now, so kept hits follow the camera
 //               without being copied (gi2_gather.comp)
+//   cells       2 tables of R per probe: each cell of the probe's own pattern (as
+//               it stands now) holds the mean light its kept rays brought from
+//               that direction (rgb) and their mean hit distance (w; -1 when the
+//               cell has no ray). The gather fills table 0; the spatial filter
+//               passes go 0 -> 1 -> 0 -> SH. Table 1 also holds the gather's
+//               distance sums while it runs.
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_control_flow_attributes : require
 
@@ -63,8 +69,8 @@ layout(std430, set = 0, binding = 8) buffer Out {
 layout(push_constant) uniform Push {
     // width, height, probe columns, probe rows
     uvec4 dims;
-    // rays per probe, tile size in pixels, z: bgra output (bit 0), frames the
-    // scene has held still (bits 1-7, capped), which rays run (bits 8-9,
+    // rays per probe, tile size in pixels, z: bgra output (bit 0), the spatial
+    // filter pass (bits 1-2, gi2_filter_round), which rays run (bits 8-9,
     // gi2_mode), young-only rounds (bit 10), lamp picks on cache rays (bit 11)
     // and the light cache round (bits 12-31, gi2_round), w: frame
     uvec4 params;
@@ -108,11 +114,8 @@ uint gi2_all_rays() {
 uint gi2_stratum() {
     return pc.params.w % GI2_STRATA;
 }
-uint gi2_sh_at(uint i) {
-    return 2u * gi2_probes() + GI2_CACHE_BATCH * GI2_CACHE_RAYS + 7u * i;
-}
 uint gi2_shf_at(uint i) {
-    return gi2_sh_at(gi2_probes()) + 7u * i;
+    return 2u * gi2_probes() + GI2_CACHE_BATCH * GI2_CACHE_RAYS + 7u * i;
 }
 uint gi2_stratum_at(uint probe, uint s) {
     return gi2_shf_at(gi2_probes()) + 2u * (probe * GI2_STRATA + s);
@@ -132,6 +135,13 @@ uint gi2_change_at() {
 }
 uint gi2_view_at(uint block, uint probe) {
     return gi2_change_at() + GI2_CHANGE_HEAD + GI2_CHANGES + block * 2u * gi2_probes() + 2u * probe;
+}
+uint gi2_cell_at(uint table, uint probe, uint k) {
+    return gi2_view_at(2u, 0u) + (table * gi2_probes() + probe) * gi2_rays() + k;
+}
+// Which spatial filter pass this dispatch is (gi2_filter.comp): 0, 1 or 2.
+uint gi2_filter_round() {
+    return (pc.params.z >> 1u) & 3u;
 }
 // A ray's hit record: probe rays go straight into this frame's stratum of the
 // kept hits, cache rays into their own slots.
@@ -255,22 +265,58 @@ vec3 gi2_dir(uint h, vec3 n, uint k, uint count) {
     return gi2_hemi_dir(h, n, (float(k % s) + j1) / float(s), (float(k / s) + j2) / float(s));
 }
 
-// Ray k of a screen probe's stratum `stratum`, the probe at pos facing n. The 8 x 8
-// cells of (cos theta, phi) are cut 2 x 4, and each stratum takes one part of
-// every cell: one frame's R rays cover the hemisphere evenly on their own, and
-// the GI2_STRATA strata together cover it 16 x 32. The turn and the jitter
-// come from the probe's world cell (25 cm), so a probe that stays put traces the
-// same rays each time a stratum comes round (noise never crawls), and so does a
-// stratum kept from an earlier frame when it is shaded again.
-vec3 gi2_stratum_dir(vec3 pos, vec3 n, uint k, uint stratum) {
+// A screen probe's pattern: R cells on a sqrt(R) x sqrt(R) grid over the
+// hemisphere about its normal, aimed by the surface's response alone (the cosine):
+// rows are equal steps of cos^2 theta, columns equal steps of the turn. Each cell
+// is cut 2 x 4 and stratum s takes part s of every cell, so one frame's R rays
+// cover the hemisphere evenly on their own and the GI2_STRATA strata together
+// cover it 16 x 32. The turn and the jitter come from the probe's world cell
+// (25 cm), so a probe that stays put traces the same rays each time a stratum
+// comes round (noise never crawls), and so does a kept stratum shaded again.
+uint gi2_cell_hash(vec3 pos) {
     ivec3 cell = ivec3(floor(pos / 0.25));
-    uint h = gi2_hash(uint(cell.x) * 73856093u ^ uint(cell.y) * 19349663u ^ uint(cell.z) * 83492791u);
-    uint s = max(uint(sqrt(float(gi2_rays())) + 0.5), 1u);
+    return gi2_hash(uint(cell.x) * 73856093u ^ uint(cell.y) * 19349663u ^ uint(cell.z) * 83492791u);
+}
+uint gi2_grid() {
+    return max(uint(sqrt(float(gi2_rays())) + 0.5), 1u);
+}
+vec3 gi2_stratum_dir(vec3 pos, vec3 n, uint k, uint stratum) {
+    uint h = gi2_cell_hash(pos);
+    uint s = gi2_grid();
     float j1 = gi2_unit(h ^ (k * 0x9e3779b9u + 1u));
     float j2 = gi2_unit(h ^ (k * 0x85ebca6bu + 2u));
-    float u = (float(k % s) + (float(stratum % 2u) + j1) * 0.5) / float(s);
+    float u2 = (float(k % s) + (float(stratum % 2u) + j1) * 0.5) / float(s);
     float v = (float(k / s) + (float(stratum / 2u) + j2) * 0.25) / float(s);
-    return gi2_hemi_dir(h, n, u, v);
+    return gi2_hemi_dir(h, n, sqrt(u2), v);
+}
+// The centre of cell k of the pattern of a probe at pos facing n.
+vec3 gi2_cell_dir(vec3 pos, vec3 n, uint k) {
+    uint s = gi2_grid();
+    return gi2_hemi_dir(gi2_cell_hash(pos), n, sqrt((float(k % s) + 0.5) / float(s)),
+                        (float(k / s) + 0.5) / float(s));
+}
+// Solid angle of a cell in row k % sqrt(R).
+float gi2_cell_solid_angle(uint k) {
+    uint s = gi2_grid();
+    float r = float(k % s);
+    return GI2_TAU / float(s) * (sqrt((r + 1.0) / float(s)) - sqrt(r / float(s)));
+}
+// Which cell of the pattern of a probe at pos facing n holds direction d, or ~0u
+// below its horizon.
+uint gi2_cell_of(vec3 pos, vec3 n, vec3 d) {
+    float u = dot(d, n);
+    if (u <= 0.0) {
+        return ~0u;
+    }
+    uint s = gi2_grid();
+    vec3 helper = abs(n.y) > 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    vec3 tx = normalize(cross(helper, n));
+    vec3 ty = cross(n, tx);
+    float phi = atan(dot(d, ty), dot(d, tx)) - gi2_unit(gi2_cell_hash(pos)) * GI2_TAU;
+    float v = fract(phi / GI2_TAU);
+    uint row = min(uint(u * u * float(s)), s - 1u);
+    uint col = min(uint(v * float(s)), s - 1u);
+    return row + s * col;
 }
 
 #include "gi2_cache.glsl"

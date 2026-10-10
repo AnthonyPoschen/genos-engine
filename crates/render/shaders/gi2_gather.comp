@@ -1,6 +1,8 @@
 #version 450
-// GI v2 screen probes, pass 4: each probe's kept rays projected to SH (bands 0-2)
-// and convolved with the cosine lobe: the probe's irradiance for any normal.
+// GI v2 screen probes, pass 4: each probe's kept rays binned by direction into the
+// cells of its pattern as it stands now (gi2_common.glsl "cells"): per cell the mean
+// light and hit distance, which the spatial filter (gi2_filter.comp) compares
+// across neighbours and turns into SH.
 //
 // A probe keeps the hits of its last GI2_STRATA strata (gi2_common.glsl), and the
 // light pass has shaded every one of them this frame, so the probe sees up to
@@ -18,16 +20,17 @@
 // - a kept ray whose path crosses the bounds of an object that moved, came or went
 //   since the last frame is dropped for good (the changes block, gi2_gpu.rs);
 // - every kept stratum is dropped when the traced world changes as a whole.
-// Each of the R cells of the stratified pattern is the mean of its rays' SH
-// projections (this frame's ray always among them), so a dropped ray thins a cell,
-// never darkens it. Each ray is projected along its own direction: the strata of a
-// moving probe were traced from different world cells, so their turns differ and a
-// cell's rays point all over the ring; projecting the cell's mean light along its
-// mean direction (as before 2026-10-10) bent that light toward the normal and drew
-// moving probes 5-30 % too bright, in blotches.
+// Each kept ray is binned by its own direction (from the probe's place) into the
+// probe's direction cells, so strata traced with other turns (a moving probe's)
+// land where they point. Each cell is the mean of the rays that land in it (this
+// frame's ray always does), each weighted by 1 / cos to undo the cosine aim, so a cell's light is its
+// mean over solid angle and a dropped ray thins a cell, never darkens it.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "gi2_common.glsl"
+
+// Hit distance standing in for a miss (gi2_filter.comp's angle test).
+const float GI2_FAR = 1000.0;
 
 // Distance from segment a-b to point c, squared.
 float gi2_seg_dist2(vec3 a, vec3 b, vec3 c) {
@@ -44,10 +47,6 @@ void main() {
     }
     vec4 pp = work.v[gi2_probe_at(probe)];
     vec3 n = work.v[gi2_probe_at(probe) + 1u].xyz;
-    float c[27];
-    [[dont_unroll]] for (uint f = 0u; f < 27u; f++) {
-        c[f] = 0.0;
-    }
     uint rays = gi2_rays();
     uint now = gi2_stratum();
     vec4 head = work.v[gi2_change_at()];
@@ -124,13 +123,12 @@ void main() {
     work.v[gi2_view_at(next, probe) + 1u] = uintBitsToFloat(uvec4(src[4], src[5], src[6], src[7]));
     if (pp.w > 0.5) {
         vec3 from = pp.xyz + n * 0.02;
+        [[dont_unroll]] for (uint k = 0u; k < rays; k++) {
+            work.v[gi2_cell_at(0u, probe, k)] = vec4(0.0);
+            work.v[gi2_cell_at(1u, probe, k)] = vec4(0.0);
+        }
         uint samples = 0u;
         [[dont_unroll]] for (uint k = 0u; k < rays; k++) {
-            vec3 sum_ly[9];
-            [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
-                sum_ly[j] = vec3(0.0);
-            }
-            float m = 0.0;
             [[dont_unroll]] for (uint s = 0u; s < GI2_STRATA; s++) {
                 if (src[s] == 0u) {
                     continue;
@@ -164,40 +162,26 @@ void main() {
                 // place, a miss (at infinity) along its own direction.
                 vec3 d = hit ? end - from : dir;
                 float len = length(d);
-                if (len < 1.0e-4 || dot(d, n) <= 0.0) {
+                if (len < 1.0e-4) {
                     continue;
                 }
-                vec3 l = gi2_kept_light(h);
-                float y[9];
-                gi2_sh9(d / len, y);
-                [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
-                    sum_ly[j] += l * y[j];
+                d /= len;
+                uint cell = gi2_cell_of(pp.xyz, n, d);
+                if (cell == ~0u) {
+                    continue;
                 }
-                m += 1.0;
+                float w = 1.0 / max(dot(d, n), 0.05);
+                work.v[gi2_cell_at(0u, probe, cell)] += vec4(gi2_kept_light(h) * w, w);
+                work.v[gi2_cell_at(1u, probe, cell)].x += w * (hit ? len : GI2_FAR);
+                samples += 1u;
             }
-            if (m > 0.0) {
-                samples += uint(m);
-                [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
-                    vec3 v = sum_ly[j] / m;
-                    c[3u * j] += v.r;
-                    c[3u * j + 1u] += v.g;
-                    c[3u * j + 2u] += v.b;
-                }
-            }
+        }
+        [[dont_unroll]] for (uint k = 0u; k < rays; k++) {
+            vec4 a = work.v[gi2_cell_at(0u, probe, k)];
+            float t = work.v[gi2_cell_at(1u, probe, k)].x;
+            work.v[gi2_cell_at(0u, probe, k)] = a.w > 0.0 ? vec4(a.rgb / a.w, t / a.w) : vec4(0.0, 0.0, 0.0, -1.0);
         }
         atomicAdd(gstats.pad0, samples);
         atomicAdd(gstats.pad1, 1u);
-    }
-    // Uniform hemisphere: each cell stands for 2 pi / R steradians. Cosine lobe per
-    // band: pi, 2 pi / 3, pi / 4.
-    float scale = GI2_TAU / float(max(rays, 1u));
-    [[dont_unroll]] for (uint f = 0u; f < 27u; f++) {
-        uint band = f < 3u ? 0u : (f < 12u ? 1u : 2u);
-        float a = band == 0u ? GI2_PI : (band == 1u ? GI2_TAU / 3.0 : GI2_PI / 4.0);
-        c[f] *= scale * a;
-    }
-    uint base = gi2_sh_at(probe);
-    [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
-        work.v[base + q] = vec4(c[4u * q], c[4u * q + 1u], c[4u * q + 2u], q == 6u ? 0.0 : c[4u * q + 3u]);
     }
 }

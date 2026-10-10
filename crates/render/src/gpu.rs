@@ -6583,8 +6583,9 @@ struct GpuTimes {
     light_spans: Vec<(u64, u64)>,
 }
 
-/// Stamps per frame for the GI v2 passes: one before, one after each of the 8.
-const GI2_STAMPS: u32 = 9;
+/// Stamps per frame for the GI v2 passes: one before, one after each of the 10
+/// dispatches (the filter runs three rounds).
+const GI2_STAMPS: u32 = 11;
 
 /// Milliseconds of `spans` that fall inside any of `within` (ticks, `period` ns each).
 fn overlap_ms(spans: &[(u64, u64)], within: &[(u64, u64)], period: f64) -> (f64, f64) {
