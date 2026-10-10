@@ -155,6 +155,55 @@ and the cosine; a red wall bleeds red onto a white floor. `known_scenes` (ignore
 wall to look at. In the stress scene the engine's `direct` view matches a
 `bounces: 0` trace to about 2 %.
 
+## gi-check
+
+`cargo run --release -p genos-stress -- gi-check [--out DIR]` is the GI picture gate.
+It runs this build of the stress test four times (one window at a time) and prints a
+table of PASS or FAIL against fixed limits; exit status 1 on any FAIL.
+
+- `settled`: the five diagnosis views (room-a, corner, contact, lamp-wall, hall) at
+  640x360, clock paused, each compared with a 320x180 reference
+  (`scripts/gi_check/views.rhai`).
+- `moving`: the same views after 120 frames of the scene's own motion (lamps 50 %
+  dynamic, boxes moving, fixed 60 Hz step, padded so every build reaches the same
+  scene moment), paused on the last moving frame and compared with a reference of
+  that frame.
+- `walk`: the corner walk at 1280x720, every frame of the bounce view saved, cold then
+  warm (`scripts/gi_check/walk.rhai`).
+- `flicker`: `temporal_flicker_aligned.rhai` at 1280x720, with a heatmap per pose.
+
+Probes are spaced as the 16 px tile at 1440p in every run (`GENOS_GI2_TILE` =
+height / 90 unless set).
+
+Scores (all in linear luminance, shares of the light; the five-view mean is checked):
+mean error (as `compare`); blob, the band-pass (sigma 2 to 10 px) residual on flat
+evenly lit surfaces minus what the reference's own noise puts through the same band;
+contact error within 2 px of lines where surfaces meet; open-wall error more than 20 px
+from them; corner-walk pop, the worst 10x10 px tile (at 320x180) where a cold frame
+differs from the warm frame at the same pose; flicker frozen `max_delta` and moving
+`mean_delta`. Limits: mean 0.04, blob 0.02 (worst view 0.03), contact 0.045, open wall
+0.03, pop 0.05, frozen 0.004, moving flicker 0.0005. Every FAIL line names the picture
+to look at (the worst view's heatmap, the worst walk frame, the worst pose's flicker
+heatmap). Results land in `target/gi-check` with `gi-check.txt`; `--score-only`
+rescores a folder, `--only settled,walk` picks runs, `--gi v1` runs the old path.
+References trace to 0.05 noise or 2048 paths per pixel (`--ref-noise`, `--ref-spp`)
+and are cached as for `compare`, so only the first run traces them (about 4 minutes
+a view on 16 cores).
+
+### Validation
+
+Hand-checked on 2026-10-10 by looking at the pictures behind every row:
+
+- The metrics match the earlier Python tool (`splotch_metrics.py`) to the fourth
+  decimal on the same pictures.
+- GI v2 settled (gi-v2 7065edb): all view rows PASS (mean 0.037, blob 0.014, worst
+  view lamp-wall 0.027, which shows faint floor blotches). Right: this is the known
+  good state.
+- GI v2 with no still averaging (the moving state): all view rows FAIL (blob 0.049,
+  corner 0.078, visibly blotched walls). Right.
+- GI v1: mean, contact and open-wall FAIL (0.13 / 0.16 / 0.10: the corners and
+  bounce-lit walls are visibly too dark), blob PASS (0.019: v1 is smooth). Right.
+
 ## Limits
 
 - The reference knows floors, ceilings, walls and solids. It does not trace fog,

@@ -12,6 +12,7 @@
 
 mod bench;
 mod building;
+mod gi_check;
 mod knobs;
 mod stage;
 
@@ -389,6 +390,9 @@ fn lighting_text(renderer: &Renderer) -> String {
 }
 
 fn run() -> Result<(), String> {
+    if std::env::args().nth(1).as_deref() == Some("gi-check") {
+        return gi_check::run(std::env::args().skip(2));
+    }
     let opts = options()?;
     let mix = LightMix {
         count: opts.lights,
