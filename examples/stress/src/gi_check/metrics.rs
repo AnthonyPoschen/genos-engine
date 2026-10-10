@@ -478,6 +478,19 @@ pub fn walk_gap(cold: &Path, warm: &Path) -> Result<(f64, f64), String> {
     Ok((gap, worst))
 }
 
+/// Linear luminance of a picture at 640 x 360 (the turn check).
+pub fn lum640(path: &Path) -> Result<Plane, String> {
+    Ok(luminance(&load(path)?, 640, 360))
+}
+
+/// Low-frequency difference of a against b: both blurred (8 px at 640 x 360, the
+/// size of the blotches a turn leaves), mean |a - b| over b's mean light.
+pub fn blob(a: &Plane, b: &Plane) -> f64 {
+    let (a, b) = (blur(a, 8.0), blur(b, 8.0));
+    let sum_b: f64 = b.v.iter().sum();
+    a.v.iter().zip(&b.v).map(|(x, y)| (x - y).abs()).sum::<f64>() / sum_b.max(1.0e-6)
+}
+
 /// Linear luminance of a picture at 320 x 180.
 pub fn lum320(path: &Path) -> Result<Plane, String> {
     Ok(luminance(&load(path)?, 320, 180))

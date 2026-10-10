@@ -18,8 +18,9 @@ const CAMERA_SCRIPT: &str = include_str!("../../scripts/gi_check/camera.rhai");
 const TRAIL_SCRIPT: &str = include_str!("../../scripts/gi_check/trail.rhai");
 const FLICK_SCRIPT: &str = include_str!("../../scripts/gi_check/flick.rhai");
 const REPRO_SCRIPT: &str = include_str!("../../scripts/gi_check/repro.rhai");
-const RUNS: [&str; 8] = [
-    "repro", "settled", "moving", "walk", "flicker", "camera", "trail", "flick",
+const TURN_SCRIPT: &str = include_str!("../../scripts/gi_check/turn.rhai");
+const RUNS: [&str; 9] = [
+    "repro", "settled", "moving", "walk", "flicker", "camera", "trail", "flick", "turn",
 ];
 const FLICKER_SCRIPT: &str = include_str!("../../scripts/temporal_flicker_aligned.rhai");
 const VIEWS: [&str; 5] = ["room-a", "corner", "contact", "lamp-wall", "hall"];
@@ -70,6 +71,12 @@ const REPRO_LIMIT: f64 = 0.03;
 /// Flick run: light going back and forth per frame (flick_rows), linear
 /// luminance. Set from the box-crossing fix (debugging.md).
 const FLICK_LIMIT: f64 = 0.0003;
+/// Turn run (turn.rhai, turn_rows): blob of the frame that arrives at the pose
+/// (turning at 6 or 3 degrees a frame, or walking) against the pose settled from a
+/// fresh start, and of the last of 30 frames held there. Set from 10ce430 (turns
+/// fail, walking passes) and the leading-edge fill (debugging.md, Validation).
+const TURN_ARRIVE_LIMIT: f64 = 0.010;
+const TURN_HELD_LIMIT: f64 = 0.002;
 
 struct Options {
     out: PathBuf,
@@ -190,14 +197,14 @@ fn tier(o: &mut Options, name: &str) -> Result<(), String> {
             // No moving views: each needs a fresh reference of its last frame
             // (minutes, and too noisy when capped). The camera clip, the trail and
             // the flick run are quick's moving checks.
-            &["repro", "settled", "camera", "trail", "flick"]
+            &["repro", "settled", "camera", "trail", "flick", "turn"]
         }
         "mid" => {
             o.stride = 2;
-            &["repro", "settled", "moving", "camera", "trail", "flick"]
+            &["repro", "settled", "moving", "camera", "trail", "flick", "turn"]
         }
         "full" => &[
-            "repro", "settled", "moving", "camera", "trail", "flick", "walk", "flicker",
+            "repro", "settled", "moving", "camera", "trail", "flick", "turn", "walk", "flicker",
         ],
         other => return Err(format!("gi-check: --tier quick, mid or full, not {other}")),
     };
@@ -206,7 +213,7 @@ fn tier(o: &mut Options, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-const HELP: &str = "genos-stress gi-check [--tier quick|mid|full] [--out DIR] [--only repro,settled,moving,walk,flicker,camera,trail,flick] \
+const HELP: &str = "genos-stress gi-check [--tier quick|mid|full] [--out DIR] [--only repro,settled,moving,walk,flicker,camera,trail,flick,turn] \
 [--score-only] [--ref-noise 0.05] [--ref-spp 2048] [--ref-seconds 900] [--size 640x360] [--walk-size 1280x720] \
 [--settled-refs DIR] [--gi v2|v1] [--views corner,contact] [--stride 1] [--clip N] [--fail-fast] [--keep-going]
 Renders with GENOS_GI=v2 (or v1); GENOS_GI2_TILE defaults to the 1440p probe spacing (height / 90), references are \
@@ -233,6 +240,7 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
         "trail" => (fill(TRAIL_SCRIPT), &o.size),
         "flick" => (fill(FLICK_SCRIPT), &o.size),
         "repro" => (fill(REPRO_SCRIPT), &o.size),
+        "turn" => (fill(TURN_SCRIPT), &o.size),
         // The repo's flicker gate, with a heatmap per pose and window.
         _ => (
             fill(
@@ -482,6 +490,7 @@ fn score_run(o: &Options, out: &Path, run: &str, rows: &mut Vec<Row>) -> Result<
             "camera" => camera_rows(rows, &dir)?,
             "trail" => trail_rows(rows, &dir)?,
             "flick" => flick_rows(rows, &dir)?,
+            "turn" => turn_rows(rows, &dir)?,
             _ => {
                 let text = std::fs::read_to_string(dir.join("report.md"))
                     .map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -765,6 +774,65 @@ fn flick_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
         limit: FLICK_LIMIT,
         note: format!("all change {:.5} per frame", total / n),
         image: frame(dir, "move", frames.len() - 1),
+    });
+    Ok(())
+}
+
+/// Turn run (turn.rhai): per segment, the arrival frame (the last moving frame,
+/// standing exactly at the pose) and the last held frame against ref.png, the
+/// pose settled from a fresh start (metrics::blob). Rows: the worst turn arrival,
+/// walking's arrival (the control, same limit) and the worst held frame.
+fn turn_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
+    let reference = metrics::lum640(&dir.join("ref.png"))?;
+    let mut turn = (0.0f64, PathBuf::new(), String::new());
+    let mut held = (0.0f64, PathBuf::new(), String::new());
+    let mut walk = None;
+    let mut notes = Vec::new();
+    for seg in ["turn6", "turn6r", "turn3", "walk"] {
+        let last = |sub: &str| {
+            let mut n = 0;
+            while frame(dir, &format!("{seg}/{sub}"), n).exists() {
+                n += 1;
+            }
+            (n > 0).then(|| frame(dir, &format!("{seg}/{sub}"), n - 1))
+        };
+        let (Some(arrive), Some(hold)) = (last("move"), last("hold")) else {
+            return Err(format!("gi-check: no {seg} frames in {}", dir.display()));
+        };
+        let a = metrics::blob(&metrics::lum640(&arrive)?, &reference);
+        let h = metrics::blob(&metrics::lum640(&hold)?, &reference);
+        notes.push(format!("{seg} {a:.4}/{h:.4}"));
+        if seg == "walk" {
+            walk = Some((a, arrive));
+        } else if a >= turn.0 {
+            turn = (a, arrive, seg.to_string());
+        }
+        if h >= held.0 {
+            held = (h, hold, seg.to_string());
+        }
+    }
+    println!("turn     arrival/held blob by segment: {}", notes.join(", "));
+    let (walk, walk_image) = walk.unwrap_or_default();
+    rows.push(Row {
+        check: "turn arrival blob (worst turn)".into(),
+        value: turn.0,
+        limit: TURN_ARRIVE_LIMIT,
+        note: turn.2,
+        image: turn.1,
+    });
+    rows.push(Row {
+        check: "turn arrival blob (walking)".into(),
+        value: walk,
+        limit: TURN_ARRIVE_LIMIT,
+        note: "control".into(),
+        image: walk_image,
+    });
+    rows.push(Row {
+        check: "turn held 30 frames blob".into(),
+        value: held.0,
+        limit: TURN_HELD_LIMIT,
+        note: held.2,
+        image: held.1,
     });
     Ok(())
 }
