@@ -22,6 +22,13 @@ const RUNS: [&str; 7] = [
 ];
 const FLICKER_SCRIPT: &str = include_str!("../../scripts/temporal_flicker_aligned.rhai");
 const VIEWS: [&str; 5] = ["room-a", "corner", "contact", "lamp-wall", "hall"];
+/// The close-up view (views.rhai, settled only), scored on its own rows.
+const CLOSE_VIEW: &str = "close";
+/// Close-up limits, the five views' contact limit: GI v2 at 1129d5d (before the
+/// contact term) scored mean 0.030, contact 0.026, open 0.028.
+const CLOSE_MEAN_LIMIT: f64 = 0.045;
+const CLOSE_CONTACT_LIMIT: f64 = 0.045;
+const CLOSE_OPEN_LIMIT: f64 = 0.045;
 
 /// Limits, set 2026-10-10 from the GI v2 baseline measured on an RTX 4070 and
 /// the de-splotch targets (moving blob at most 0.02, mean at most 0.04). Errors are
@@ -173,7 +180,7 @@ fn tier(o: &mut Options, name: &str) -> Result<(), String> {
     let runs: &[&str] = match name {
         "quick" => {
             o.size = "640x360".into();
-            o.views = "contact,lamp-wall".into();
+            o.views = "contact,lamp-wall,close".into();
             o.stride = 4;
             o.clip = 90;
             // No moving views: each needs a fresh reference of its last frame
@@ -392,6 +399,29 @@ fn view_rows(rows: &mut Vec<Row>, run: &str, dir: &Path, refs: &Path) -> Result<
         note: worst(&blob),
         image: worst_image(&blob),
     });
+    // The close-up: its own rows, so the five-view means stay comparable.
+    if dir.join(format!("{CLOSE_VIEW}-live.png")).exists() {
+        let noise = ref_noise(&refs.join("report.md"), CLOSE_VIEW);
+        let s = metrics::score_view(dir, refs, CLOSE_VIEW, noise)?;
+        println!(
+            "{run:<8} {CLOSE_VIEW:<10} mean {:.4} bias {:+.4} blob {:.4} (floor {:.4}, excess {:.4}) contact {:.4} open {:.4} edge {:.3}",
+            s.mean_rel, s.bias, s.blob, s.blob_floor, s.blob_excess, s.contact, s.open, s.edge_err
+        );
+        let image = dir.join(format!("{CLOSE_VIEW}-heatmap.png"));
+        for (name, value, limit) in [
+            ("mean error", s.mean_rel, CLOSE_MEAN_LIMIT),
+            ("contact error", s.contact, CLOSE_CONTACT_LIMIT),
+            ("open-wall error", s.open, CLOSE_OPEN_LIMIT),
+        ] {
+            rows.push(Row {
+                check: format!("{run} close-up {name}"),
+                value,
+                limit,
+                note: format!("bias {:+.4}", s.bias),
+                image: image.clone(),
+            });
+        }
+    }
     Ok(())
 }
 

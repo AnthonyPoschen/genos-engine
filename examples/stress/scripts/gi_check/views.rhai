@@ -1,4 +1,4 @@
-// gi-check (docs/systems/debugging.md): the five GI diagnosis views, each compared
+// gi-check (docs/systems/debugging.md): the five GI diagnosis views and the close-up, each compared
 // with a CPU path-traced reference of that exact moment. Filled in by
 // `genos-stress gi-check`: __MOVING__, __NOISE__, __MAXSPP__, __SECS__, __ONLY__, __GI__.
 //
@@ -22,11 +22,15 @@ let views = [
     ["contact", 12.0, #{ position: [7.0, 1.4, 6.8], look_at: [5.0, 0.3, 3.6] }],
     ["lamp-wall", 22.0, #{ position: [12.5, 1.7, 20.0], look_at: [12.5, 1.0, 8.0] }],
     ["hall", 12.0, #{ position: [14.5, 1.7, 23.5], yaw: -0.3554, pitch: 0.08 }],
+    // Close-up (settled only, scored on its own rows): 1.3 m from the hall's west
+    // bench (0.45 m high), its face, top and foot on the floor.
+    ["close", 12.0, #{ position: [3.0, 0.9, 14.0], look_at: [3.6, 0.2, 12.9] }],
 ];
 let only = "__ONLY__";
 for v in views {
     let name = v[0];
     if only != "" && !only.contains(name) { continue; }
+    if moving && name == "close" { continue; }
     knob("time_of_day", v[1]);
     let c = ();
     let s = #{ settled: false, frames: -1, wall_ms: -1 };
