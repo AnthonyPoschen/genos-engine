@@ -22,7 +22,17 @@ void main() {
             }
             gi2_ls_note();
             uint room = gi2_sc_room();
-            uint budget = room - min(gi2_young_count(), room);
+            uint base = gi2_sc_base_room();
+            uint young = min(gi2_young_count(), base);
+            uint total = 0u;
+            for (uint b = 0u; b < GI2_SC_BUCKETS; b++) {
+                total += ckeys.key[GI2_SC_HIST_AT + b];
+            }
+            uint c = total > base - young ? min(ckeys.key[GI2_SC_BOOST_AT] + 1u, 100000u) : 0u;
+            ckeys.key[GI2_SC_BOOST_AT] = c;
+            bool boost = c > 0u && c <= GI2_SC_BOOST_ROUNDS;
+            gstats.pad3 = boost ? 1u : 0u;
+            uint budget = (boost ? room : base) - young;
             uint acc = 0u;
             uint thr = 0u;
             for (int b = int(GI2_SC_BUCKETS) - 1; b >= 0; b--) {

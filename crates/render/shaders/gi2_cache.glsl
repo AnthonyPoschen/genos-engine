@@ -169,6 +169,18 @@ const uint GI2_SC_TRICKLE_AT = GI2_SC_HIST_AT + 13200u;
 uint gi2_sc_room() {
     return GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES - GI2_WRC_REFRESH - GI2_SC_TRICKLE;
 }
+// S66A budget boost (Anthony): the texels' share of a round is normally
+// GI2_SC_BASE_BATCH entries' worth (the 1M-ray ceiling); while more is due than
+// that, for at most GI2_SC_BOOST_ROUNDS rounds in a row, the ceiling rises to
+// the whole batch (1.5x). A backlog that lasts longer (a scene that changes
+// forever) falls back to the normal ceiling until it clears, so the boost never
+// stays on. Decided by the cache pass's thread 0 from the due entries' histogram.
+const uint GI2_SC_BASE_BATCH = 65536u;
+const uint GI2_SC_BOOST_ROUNDS = 30u;
+const uint GI2_SC_BOOST_AT = GI2_SC_HIST_AT + 65u;
+uint gi2_sc_base_room() {
+    return GI2_SC_BASE_BATCH - GI2_WRC_SCOUT_ENTRIES - GI2_WRC_REFRESH - GI2_SC_TRICKLE;
+}
 const uint GI2_WRC_RING_HEAD_AT = GI2_SC_HIST_AT + 69u;
 const uint GI2_WRC_RING = 16u;
 // S65C: 9 words an entry (old place, new place, range, brightest channel,
@@ -1160,7 +1172,7 @@ uint gi2_cache_batch_slot(uint j) {
             return ~0u;
         }
     }
-    uint first = min(gi2_young_count(), room);
+    uint first = min(gi2_young_count(), gi2_world_mode() == 3u ? gi2_sc_base_room() : room);
     if (j < first) {
         return ckeys.key[2u * GI2_CACHE_SLOTS - j];
     }

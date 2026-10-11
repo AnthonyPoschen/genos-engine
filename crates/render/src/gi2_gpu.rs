@@ -38,7 +38,7 @@ fn gi2_tile(height: u32) -> u32 {
 pub(crate) const GI2_RAYS: u32 = 64;
 /// Light cache sizes; gi2_cache_slots.glsl has the same numbers.
 const GI2_CACHE_SLOTS: u64 = 1048576;
-const GI2_CACHE_BATCH: u32 = 65536;
+const GI2_CACHE_BATCH: u32 = 98304;
 const GI2_CACHE_RAYS: u32 = 16;
 /// ckeys word of the WRC refresh lists' two counts (gi2_cache.glsl GI2_WRC_CHG_COUNT_AT).
 const GI2_WRC_COUNTS_AT: u64 = 2 * GI2_CACHE_SLOTS + 2 + 66;
@@ -1147,8 +1147,8 @@ impl Gpu {
         }
         if let Ok(w) = self.read_stats16(memory) {
             eprintln!(
-                "gi2sc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {}",
-                self.gi2.frame, self.gi2.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20]
+                "gi2sc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {}",
+                self.gi2.frame, self.gi2.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21]
             );
         }
     }

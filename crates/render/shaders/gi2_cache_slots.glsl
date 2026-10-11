@@ -6,7 +6,9 @@ const uint GI2_CACHE_SEARCH = 16u;
 // blotches, gi-check room).
 // Entries a round (S59D: 65536 of 16 rays, the 1M rays a round of 16384 x 64;
 // S59E: 98304; S61A back to 65536, the world space radiance cache takes the bursts).
-const uint GI2_CACHE_BATCH = 65536u;
+// S66A: the batch holds a boost (1.5x); the normal ceiling is
+// GI2_SC_BASE_BATCH (gi2_cache.glsl), so unused entries cost no rays.
+const uint GI2_CACHE_BATCH = 98304u;
 // S59: 16, a quarter of a texel's 64-ray set (gi2_cache.glsl, few rays a relight).
 const uint GI2_CACHE_RAYS = 16u;
 // Shadow rays per light cache ray hit when lamp picks are on (gi2_light.comp).
