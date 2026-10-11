@@ -5,7 +5,8 @@ const uint GI2_CACHE_SEARCH = 16u;
 // fixed error of its own that probes carried onto the walls they light as
 // blotches, gi-check room).
 const uint GI2_CACHE_BATCH = 16384u;
-const uint GI2_CACHE_RAYS = 64u;
+// S59: 16, a quarter of a texel's 64-ray set (gi2_cache.glsl, few rays a relight).
+const uint GI2_CACHE_RAYS = 16u;
 // Shadow rays per light cache ray hit when lamp picks are on (gi2_light.comp).
 const uint GI2_CACHE_PICKS = 2u;
 // Frames a patch lives without a read (30 s at 60 fps).

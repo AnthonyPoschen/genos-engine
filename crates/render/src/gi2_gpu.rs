@@ -39,7 +39,7 @@ pub(crate) const GI2_RAYS: u32 = 64;
 /// Light cache sizes; gi2_cache_slots.glsl has the same numbers.
 const GI2_CACHE_SLOTS: u64 = 1048576;
 const GI2_CACHE_BATCH: u32 = 16384;
-const GI2_CACHE_RAYS: u32 = 64;
+const GI2_CACHE_RAYS: u32 = 16;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
 /// (gi2_common.glsl GI2_STRATA): the visibility history cap.
 pub(crate) const GI2_STRATA: u32 = 8;
@@ -1132,8 +1132,8 @@ impl Gpu {
         }
         if let Ok(w) = self.read_stats16(memory) {
             eprintln!(
-                "gi2sc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {}",
-                self.gi2.frame, self.gi2.still, w[1], w[8], w[9], w[10], w[11], w[2]
+                "gi2sc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {}",
+                self.gi2.frame, self.gi2.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15]
             );
         }
     }

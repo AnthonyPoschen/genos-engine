@@ -27,11 +27,20 @@ void main() {
                 }
             }
             ckeys.key[GI2_SC_THR_AT] = thr;
+            gstats.sched_thr = thr;
         }
     }
     uint slot = gi2_cache_batch_slot(j);
     if (slot == ~0u) {
         return;
+    }
+    // A texel's entries this round are consecutive; the first sums them all.
+    if (j > 0u && gi2_cache_batch_slot(j - 1u) == slot) {
+        return;
+    }
+    uint run = 1u;
+    while (run < GI2_SC_QUARTERS && j + run < GI2_CACHE_BATCH && gi2_cache_batch_slot(j + run) == slot) {
+        run++;
     }
     uint key = ckeys.key[slot];
     if (key == 0u) {
@@ -51,20 +60,42 @@ void main() {
     vec3 n;
     gi2_sc_texel_world(slot, tp, n);
     uint rkey = gi2_sc_ray_key(slot, key);
+    uint q0 = gi2_sc_quarter0(slot);
     uint first = gi2_probe_rays() + j * GI2_CACHE_RAYS;
     vec3 e = vec3(0.0);
-    [[dont_unroll]] for (uint k = 0u; k < GI2_CACHE_RAYS; k++) {
+    [[dont_unroll]] for (uint k = 0u; k < run * GI2_CACHE_RAYS; k++) {
         vec4 v = work.v[gi2_rad_at(first + k)];
         if (gi2_ray_none(v)) {
             return;
         }
-        vec3 dir = gi2_dir(rkey, n, k, GI2_CACHE_RAYS);
+        vec3 dir = gi2_dir(rkey, n, q0 * GI2_CACHE_RAYS + k, GI2_SC_SET_RAYS);
         e += gi2_ray_light(v) * max(dot(dir, n), 0.0);
     }
-    e *= GI2_TAU / float(GI2_CACHE_RAYS);
+    float rays = float(run * GI2_CACHE_RAYS);
+    if (run > 1u) {
+        atomicAdd(gstats.extra, 1u);
+    }
     if (gi2_world_mode() == 3u) {
         cache.v[GI2_SC_OBJ_AT + slot].y = uintBitsToFloat(gi2_frame());
+        // Few rays a relight: the set's quarters add up; the mean takes the set
+        // once its last quarter is in.
+        if (GI2_SC_QUARTERS > 1u) {
+            uint q = q0 + run;
+            if (q0 > 0u) {
+                e += gi2_unpack_rgb9e5(floatBitsToUint(cache.v[GI2_SC_OBJ_AT + slot].z));
+            }
+            if (q < GI2_SC_QUARTERS) {
+                cache.v[GI2_SC_OBJ_AT + slot].z = uintBitsToFloat(gi2_pack_rgb9e5(e));
+                cache.v[GI2_SC_OBJ_AT + slot].w = uintBitsToFloat(q);
+                atomicAdd(gstats.partial, 1u);
+                return;
+            }
+            cache.v[GI2_SC_OBJ_AT + slot].zw = vec2(0.0);
+            atomicAdd(gstats.sets, 1u);
+            rays = float(GI2_SC_SET_RAYS);
+        }
     }
+    e *= GI2_TAU / rays;
     vec4 old = cache.v[3u * slot + 2u];
     float lo = dot(old.rgb, vec3(0.2126, 0.7152, 0.0722));
     float ln = dot(e, vec3(0.2126, 0.7152, 0.0722));

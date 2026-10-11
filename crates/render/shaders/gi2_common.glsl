@@ -407,7 +407,8 @@ bool gi2_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
         return false;
     }
     origin = p + n * 0.02;
-    dir = gi2_dir(gi2_sc_ray_key(slot, key), n, r % GI2_CACHE_RAYS, GI2_CACHE_RAYS);
+    uint q = gi2_cache_entry_quarter(r / GI2_CACHE_RAYS, slot);
+    dir = gi2_dir(gi2_sc_ray_key(slot, key), n, q * GI2_CACHE_RAYS + r % GI2_CACHE_RAYS, GI2_SC_SET_RAYS);
     return true;
 }
 

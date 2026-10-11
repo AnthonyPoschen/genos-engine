@@ -50,10 +50,13 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint restarted;
     uint freed;
     uint atcap;
-    uint pad2;
-    uint pad3;
-    uint pad4;
-    uint pad5;
+    // Scheduler and few rays (S58/S59): the threshold bucket this round set,
+    // texels that took more than one entry (the rest of their set at once),
+    // relights that stored a partial quarter sum, sets committed.
+    uint sched_thr;
+    uint extra;
+    uint partial;
+    uint sets;
 } gstats;
 
 const float GI2_CACHE_MATURE = 3.0;
@@ -827,8 +830,42 @@ uint gi2_cache_batch_slot(uint j) {
     if ((gi2_young_only() && gi2_world_mode() != 3u) || k >= count) {
         return ~0u;
     }
-    uint start = (gi2_round() * GI2_CACHE_BATCH) % count;
+    // The scheduler lists only what this round should take (from the front);
+    // otherwise the sweep turns with the rounds.
+    uint start = (gi2_world_mode() == 3u && GI2_SC_SCHED) ? 0u : (gi2_round() * GI2_CACHE_BATCH) % count;
     return ckeys.key[GI2_CACHE_SLOTS + 1u + (start + k) % count];
+}
+
+// Few rays a relight (S59; Lumen: a few rays per texel per update, accumulated
+// over updates): a batch entry traces GI2_CACHE_RAYS rays, a quarter of a
+// GI2_SC_SET_RAYS set (its stratified pattern split in GI2_SC_QUARTERS). A
+// surface-cache texel adds its quarters' light to a partial sum (GI2_SC_OBJ_AT
+// .z, rgb9e5; .w the quarters so far) and commits the set to its mean when the
+// last quarter is in, so every history rule still counts whole sets. A texel
+// takes one entry a relight, or the rest of its set at once (consecutive
+// entries) when young, near a change, short of GI2_SC_FULL_SETS sets or
+// inconsistent (GIBS 2021: more rays where the estimate is unconverged or its
+// variance high). The other modes take whole sets.
+const uint GI2_SC_SET_RAYS = 64u;
+const uint GI2_SC_QUARTERS = GI2_SC_SET_RAYS / GI2_CACHE_RAYS;
+const float GI2_SC_FULL_SETS = 16.0;
+const float GI2_SC_FULL_INC = 1.0;
+uint gi2_sc_quarter0(uint slot) {
+    if (gi2_world_mode() != 3u) {
+        return 0u;
+    }
+    return min(floatBitsToUint(cache.v[GI2_SC_OBJ_AT + slot].w), GI2_SC_QUARTERS - 1u);
+}
+uint gi2_sc_entries(uint slot, bool full) {
+    return (full || gi2_world_mode() != 3u) ? GI2_SC_QUARTERS - gi2_sc_quarter0(slot) : 1u;
+}
+// Quarter of its set batch entry j (of slot) traces.
+uint gi2_cache_entry_quarter(uint j, uint slot) {
+    uint i = 0u;
+    while (i + 1u < GI2_SC_QUARTERS && j > i && gi2_cache_batch_slot(j - i - 1u) == slot) {
+        i++;
+    }
+    return min(gi2_sc_quarter0(slot) + i, GI2_SC_QUARTERS - 1u);
 }
 
 // Mode 2: a screen probe at pos facing n adds its irradiance e to its world cell.
