@@ -68,7 +68,16 @@ void main() {
         // GI2_WRC_YOUNG sets are the reveal burst: young, whole sets. New fine
         // texels start from the WRC (gi2_sc_resample) and take their turn.
         bool wrc = cache.v[3u * slot + 1u].w > 0.2;
-        bool burst = wrc && t < GI2_WRC_YOUNG - 0.5 && int(gi2_frame() - floatBitsToUint(cache.v[GI2_WORLD_AT + slot].z)) <= 2;
+        // S62B: the burst ends at what the cell can hold now (under changing
+        // light gi2_sc_count keeps it to the light window, 8 samples, which never
+        // reached GI2_WRC_YOUNG = 16: every needed cell stayed a burst and took
+        // the batch from the fine texels), and at most GI2_WRC_BURST_MAX cells a
+        // round burst.
+        float reach_wrc = gi2_sc_light_quiet() ? GI2_WRC_YOUNG : min(GI2_WRC_YOUNG, 0.5 * max(gi2_sc_light_window(), 2.0));
+        bool burst = wrc && t < reach_wrc - 0.5 && int(gi2_frame() - floatBitsToUint(cache.v[GI2_WORLD_AT + slot].z)) <= 2;
+        if (burst && atomicAdd(ckeys.key[GI2_WRC_BURST_COUNT_AT], 1u) >= GI2_WRC_BURST_MAX) {
+            burst = false;
+        }
         if (wrc && !burst && GI2_SC_SCHED) {
             // WRC refresh (fixed budget): change-driven list, else background.
             if (int(gi2_frame() - last) > int(GI2_CACHE_LIFE)) {

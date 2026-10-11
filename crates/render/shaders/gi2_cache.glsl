@@ -131,6 +131,10 @@ const float GI2_WRC_CHANGE_KEEP = 4.0;
 const uint GI2_WRC_CHG_COUNT_AT = GI2_SC_HIST_AT + 66u;
 const uint GI2_WRC_BG_COUNT_AT = GI2_SC_HIST_AT + 67u;
 const uint GI2_WRC_LAMPS_AT = GI2_SC_HIST_AT + 68u;
+// S62B: WRC cells bursting this round (zeroed with the two counts above), and
+// the most a round may burst (each takes 4 entries).
+const uint GI2_WRC_BURST_COUNT_AT = GI2_SC_HIST_AT + 70u;
+const uint GI2_WRC_BURST_MAX = 2048u;
 const uint GI2_WRC_RING_HEAD_AT = GI2_SC_HIST_AT + 69u;
 const uint GI2_WRC_RING = 16u;
 const uint GI2_WRC_RING_AT = GI2_SC_HIST_AT + 72u;
@@ -746,6 +750,8 @@ const float GI2_DN_STOP = 0.015;
 const float GI2_DN_DARK = 0.05;
 const float GI2_DN_SIGMA = 0.6;
 const float GI2_DN_LUM = 3.0;
+// Pool radius under changing light (cells; under 0.9 the kernel is 3 x 3).
+const float GI2_DN_CHANGE_SIGMA = 0.7;
 // Relative noise of slot's mean, and its luminance noise (w); x < 0 when the
 // estimator is not running (new, or the light changing).
 vec2 gi2_sc_noise(uint slot) {
@@ -788,6 +794,11 @@ void gi2_sc_pool(uint slot) {
     float own_lum = dot(own.rgb, vec3(0.2126, 0.7152, 0.0722));
     if (guided) {
         sigma = clamp(GI2_DN_SIGMA * nz.x / gi2_dn_target(slot), 0.4, 2.0);
+    }
+    // S62B: under changing light the history is short and stays short, so the
+    // pool keeps to the nearest texels (detail from the texels' own sets).
+    if (!gi2_sc_light_quiet()) {
+        sigma = min(sigma, GI2_DN_CHANGE_SIGMA);
     }
     uint ax = gi2_axis(n) >> 1u;
     vec3 ta = vec3(0.0);

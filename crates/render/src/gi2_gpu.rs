@@ -882,7 +882,7 @@ impl Gpu {
             self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             // The mature and young patch counts, rebuilt by the compact pass.
             if !world {
-                for at in [GI2_CACHE_SLOTS, 2 * GI2_CACHE_SLOTS + 1, GI2_WRC_COUNTS_AT, GI2_WRC_COUNTS_AT + 1] {
+                for at in [GI2_CACHE_SLOTS, 2 * GI2_CACHE_SLOTS + 1, GI2_WRC_COUNTS_AT, GI2_WRC_COUNTS_AT + 1, GI2_WRC_COUNTS_AT + 4] {
                     (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache_keys.buffer, at * 4, 4, 0);
                 }
             }
@@ -1072,6 +1072,7 @@ impl Gpu {
             (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, GI2_CACHE_SLOTS * 4, 4, 0);
             // The WRC refresh lists' counts (change, background; gi2_cache.glsl).
             (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, GI2_WRC_COUNTS_AT * 4, 8, 0);
+            (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, (GI2_WRC_COUNTS_AT + 4) * 4, 4, 0);
             (self.fns.cmd_fill_buffer)(
                 cmd,
                 self.gi2.cache_keys.buffer,
