@@ -123,6 +123,16 @@ void main() {
                 return;
             }
             if (used <= 0) {
+                // S62E (a): resident but unread, and the global light moved more
+                // than 10 % since its relight: a whole set from the WRC
+                // background list (within the WRC refresh cap). Shown rescaled
+                // meanwhile (gi2_ls_ratio).
+                if (abs(gi2_ls_ratio(gi2_sc_updated(slot)) - 1.0) > 0.1) {
+                    uint at = atomicAdd(ckeys.key[GI2_WRC_BG_COUNT_AT], 1u);
+                    if (at < GI2_WRC_REFRESH_CELLS) {
+                        ckeys.key[GI2_WRC_BG_AT + at] = slot;
+                    }
+                }
                 return;
             }
             float cap = gi2_sc_cap(slot);

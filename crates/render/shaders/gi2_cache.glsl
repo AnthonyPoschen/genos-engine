@@ -235,6 +235,54 @@ const uint GI2_SC_EST_AT = 4u * GI2_CACHE_SLOTS;
 // Object id + 1 of a texel keyed in a mover's frame (0: a world texel).
 const uint GI2_SC_OBJ_AT = 6u * GI2_CACHE_SLOTS;
 // Frame of a texel's last relight (0: never), beside its object id.
+// S62E global light scale (Anthony: day to night, unread texels kept daytime
+// light and faded as rays came in). The pixel's own direct light is already
+// separate (G-buffer w, every frame); the cache holds the gathered light, which
+// for sun and sky scales with them. Once a round the cache pass logs the global
+// light (each sun's height times its brightest channel, plus the sky's: as
+// probe_tier.rs up_light) against the frame (a ring, GI2_LS_RING rounds); a
+// texel or WRC cell is shown, and its history carried, times
+// (now + eps) / (then + eps), "then" being its last relight. An intensity change
+// is instant everywhere, read or not; only the bounce's shape converges by rays
+// (Lumen re-lights its surface cache's direct term each frame and lets the
+// radiosity converge).
+const uint GI2_LS_AT = GI2_SC_HIST_AT + 9000u;
+const uint GI2_LS_RING = 2048u;
+const float GI2_LS_EPS = 0.05;
+const float GI2_LS_MAX = 16.0;
+float gi2_global_light() {
+    float s = max(max(scene.sky.r, scene.sky.g), scene.sky.b);
+    uint n = scene.lamp_count;
+    [[dont_unroll]] for (uint i = 0u; i < n; i++) {
+        Lamp l = scene_lamp(i);
+        if (l.pos.w > 0.5) {
+            s += max(-normalize(l.pos.xyz).y, 0.0) * max(max(l.color.r, l.color.g), l.color.b);
+        }
+    }
+    return s;
+}
+void gi2_ls_note() {
+    uint f = gi2_frame();
+    uint at = GI2_LS_AT + 2u * (f % GI2_LS_RING);
+    ckeys.key[at] = f;
+    ckeys.key[at + 1u] = floatBitsToUint(gi2_global_light());
+    ckeys.key[GI2_LS_AT + 2u * GI2_LS_RING] = f;
+}
+// The ratio to carry light last relit at frame f to now (1 when unknown).
+float gi2_ls_ratio(uint f) {
+    uint at = GI2_LS_AT + 2u * (f % GI2_LS_RING);
+    if (f == 0u || ckeys.key[at] != f) {
+        return 1.0;
+    }
+    float then = uintBitsToFloat(ckeys.key[at + 1u]);
+    uint g = ckeys.key[GI2_LS_AT + 2u * GI2_LS_RING];
+    uint ga = GI2_LS_AT + 2u * (g % GI2_LS_RING);
+    if (ckeys.key[ga] != g) {
+        return 1.0;
+    }
+    float now = uintBitsToFloat(ckeys.key[ga + 1u]);
+    return clamp((now + GI2_LS_EPS) / (then + GI2_LS_EPS), 0.0, GI2_LS_MAX);
+}
 uint gi2_sc_updated(uint slot) {
     return floatBitsToUint(cache.v[GI2_SC_OBJ_AT + slot].y);
 }
@@ -877,10 +925,11 @@ void gi2_sc_pool(uint slot) {
 vec4 gi2_sc_shown(uint slot) {
     vec3 pooled = gi2_unpack_rgb9e5(floatBitsToUint(cache.v[GI2_WORLD_AT + slot].y));
     vec4 own = cache.v[3u * slot + 2u];
+    float ls = gi2_world_mode() == 3u ? gi2_ls_ratio(gi2_sc_updated(slot)) : 1.0;
     if (any(greaterThan(pooled, vec3(0.0)))) {
-        return vec4(pooled, 1.0);
+        return vec4(pooled * ls, 1.0);
     }
-    return own.w > 0.5 ? vec4(own.rgb, 1.0) : vec4(0.0);
+    return own.w > 0.5 ? vec4(own.rgb * ls, 1.0) : vec4(0.0);
 }
 
 // Surface cache read rule at a ray hit t from the ray's origin (SHaRC: a cache
@@ -1226,6 +1275,8 @@ vec4 gi2_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (mode == 3u && (gi2_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w < 0.5) {
             vec4 rs = gi2_sc_resample(q, n, size, slot);
             if (rs.w > 0.5) {
+                // S62E: the seed is light as of now; stored in the slot's scale.
+                rs.rgb /= max(gi2_ls_ratio(gi2_sc_updated(slot)), 1.0e-3);
                 cache.v[3u * slot + 2u] = rs;
             }
         }
