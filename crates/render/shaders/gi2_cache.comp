@@ -120,16 +120,18 @@ void main() {
         // window while the light changes); later sets weigh more (as the texels).
         // S61B: each entry is one 16-ray sample; a mover nearby or a lamp
         // that reaches it moved since its last relight drops the history to
-        // GI2_WRC_CHANGE_KEEP samples.
+        // GI2_WRC_CHANGE_KEEP samples (S62D: no longer; an EMA floor instead).
         float t = old.w < 0.5 ? 0.0 : gi2_sc_count(slot);
         bool urgent3 = ((pc.params.z >> 5u) & 1u) != 0u;
         vec3 cp = gi2_sc_texel_pos(slot);
-        if ((urgent3 && gi2_near_change(cp)) || gi2_wrc_lamp_changed(cp, prev_updated)) {
-            t = min(t, GI2_WRC_CHANGE_KEEP);
-        }
+        // S62D (Anthony): no history drop under a change; an exponential
+        // average with a responsive floor tracks it (local change faster).
+        bool local3 = (urgent3 && gi2_near_change(cp)) || gi2_wrc_lamp_changed(cp, prev_updated);
         float add = float(run);
         float wa = add / (t + add);
-        if (!gi2_sc_light_quiet()) {
+        if (local3) {
+            wa = max(wa, GI2_WRC_LOCAL_ALPHA * add);
+        } else if (!gi2_sc_light_quiet()) {
             wa = max(wa, GI2_WRC_CHANGE_ALPHA * add);
         }
         vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * min(wa, 1.0);

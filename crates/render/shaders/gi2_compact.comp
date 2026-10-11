@@ -92,7 +92,7 @@ void main() {
             vec3 cp = gi2_sc_texel_pos(slot);
             if (near || gi2_wrc_lamp_changed(cp, updated)) {
                 uint at = atomicAdd(ckeys.key[GI2_WRC_CHG_COUNT_AT], 1u);
-                if (at < GI2_WRC_REFRESH) {
+                if (at < GI2_WRC_REFRESH_CELLS) {
                     ckeys.key[GI2_WRC_CHG_AT + at] = slot;
                 }
                 return;
@@ -101,7 +101,7 @@ void main() {
             bool growing_wrc = t < GI2_WRC_CAP - 0.5 && int(last - updated) > 0;
             if (stale || growing_wrc) {
                 uint at = atomicAdd(ckeys.key[GI2_WRC_BG_COUNT_AT], 1u);
-                if (at < GI2_WRC_REFRESH) {
+                if (at < GI2_WRC_REFRESH_CELLS) {
                     ckeys.key[GI2_WRC_BG_AT + at] = slot;
                 }
             }

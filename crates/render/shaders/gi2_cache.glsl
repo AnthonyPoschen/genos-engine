@@ -125,6 +125,10 @@ const uint GI2_SC_THR_AT = GI2_SC_HIST_AT + GI2_SC_BUCKETS;
 // with what is left. Lumen's world space radiance cache: a fixed budget of probe
 // updates, the changed and the nearest first.
 const uint GI2_WRC_REFRESH = 4096u;
+// S62D (Anthony): a refresh takes a whole 64-ray set (GI2_SC_QUARTERS
+// consecutive entries), so the cap above holds GI2_WRC_REFRESH_CELLS cells a
+// round (1024; same rays as before).
+const uint GI2_WRC_REFRESH_CELLS = GI2_WRC_REFRESH / 4u;
 const uint GI2_WRC_REFRESH_FRAMES = 180u;
 const uint GI2_WRC_CHANGE_FRAMES = 120u;
 const float GI2_WRC_CHANGE_KEEP = 4.0;
@@ -680,6 +684,11 @@ bool gi2_sc_local_change(uint slot, out bool mover) {
 }
 float gi2_sc_count(uint slot) {
     float t = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+    if (gi2_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2) {
+        // S62D: WRC cells keep their history whatever the light does (they
+        // track it with an EMA floor, gi2_cache.comp).
+        return t;
+    }
     bool mover;
     if (gi2_sc_local_change(slot, mover)) {
         t = min(t, mover ? GI2_SC_MOVING : gi2_sc_light_window());
@@ -690,7 +699,10 @@ float gi2_sc_count(uint slot) {
 // (an exponential moving average that keeps up; Lumen's surface cache and
 // radiance cache keep a short temporal accumulation the same way).
 const float GI2_SC_CHANGE_ALPHA = 1.0 / 24.0;
-const float GI2_WRC_CHANGE_ALPHA = 1.0 / 16.0;
+// WRC: per 16-ray sample (a refresh adds 4): 1/32 while the light changes
+// anywhere (1/8 a set), 1/8 near a mover or a moved lamp (1/2 a set).
+const float GI2_WRC_CHANGE_ALPHA = 1.0 / 32.0;
+const float GI2_WRC_LOCAL_ALPHA = 1.0 / 8.0;
 
 float gi2_sc_cap(uint slot) {
     if (gi2_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2) {
@@ -964,14 +976,15 @@ uint gi2_cache_batch_slot(uint j) {
         }
         room = GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES - GI2_WRC_REFRESH;
         if (j >= room) {
-            // The WRC refresh entries: change-driven, then background.
-            uint k = j - room;
-            uint c = min(ckeys.key[GI2_WRC_CHG_COUNT_AT], GI2_WRC_REFRESH);
+            // The WRC refresh entries: change-driven, then background, each
+            // cell a whole set (4 consecutive entries).
+            uint k = (j - room) / 4u;
+            uint c = min(ckeys.key[GI2_WRC_CHG_COUNT_AT], GI2_WRC_REFRESH_CELLS);
             if (k < c) {
                 return ckeys.key[GI2_WRC_CHG_AT + k];
             }
             k -= c;
-            if (k < min(ckeys.key[GI2_WRC_BG_COUNT_AT], GI2_WRC_REFRESH)) {
+            if (k < min(ckeys.key[GI2_WRC_BG_COUNT_AT], GI2_WRC_REFRESH_CELLS)) {
                 return ckeys.key[GI2_WRC_BG_AT + k];
             }
             return ~0u;
@@ -1021,7 +1034,7 @@ bool gi2_sc_settled(uint slot, float t) {
     float reach = GI2_SC_FULL_SETS;
     if (cache.v[3u * slot + 1u].w > 0.2) {
         // A WRC cell: settled at its cap (or the window under changing light).
-        return floor(t) >= (gi2_sc_light_quiet() ? GI2_WRC_CAP : max(gi2_sc_light_window(), 2.0)) - 0.5;
+        return floor(t) >= GI2_WRC_CAP - 0.5;
     }
     vec4 b = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
     // S62A perceptual stop: quiet enough to the eye counts as settled.
