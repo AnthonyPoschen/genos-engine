@@ -150,6 +150,13 @@ uint gi2_cache_key_sized(vec3 pos, vec3 n, float size) {
     // boundary falls in one cell, not either by rounding.
     vec3 inset = gi2_world_mode() != 0u ? 0.5 * gi2_axis_vec(gi2_axis(n)) : vec3(0.0);
     ivec3 c = ivec3(floor(pos / size - inset));
+    // Flag 16384 (surface cache): a quarter of the cell along the axis, so two
+    // parallel surfaces close together (a panel on a wall, a box face by the wall
+    // behind it) do not share a texel lit from whichever was nearer its centre.
+    if (gi2_world_mode() == 3u && (gi2_sc_flags() & 16384u) != 0u) {
+        uint ax = gi2_axis(n) >> 1u;
+        c[ax] = int(floor(pos[ax] / (0.25 * size) - inset[ax]));
+    }
     uint h = gi2_hash(uint(c.x) * 73856093u ^ gi2_hash(uint(c.y) * 19349663u ^ gi2_hash(uint(c.z) * 83492791u)));
     h = gi2_hash(h ^ (gi2_axis(n) * 0x27d4eb2du) ^ (floatBitsToUint(size) * 0x165667b1u));
     return max(h, 1u);
@@ -341,6 +348,10 @@ uint gi2_sc_ray_key(uint slot, uint key) {
     if (!gi2_sc_light_quiet() && t >= gi2_sc_light_window() - 0.5 && (gi2_sc_flags() & 1024u) == 0u) {
         // Under changing light the count holds, so the set turns with the rounds.
         set += gi2_round();
+    } else if ((gi2_sc_flags() & 8192u) != 0u && t >= gi2_sc_cap(slot) - 0.5) {
+        // Relit at the cap (flag 8192): a new set each time, not set 0 over again
+        // (one set's noise would be all the running mean ends up with).
+        set += gi2_round() * 7919u + 1u;
     }
     set %= uint(gi2_sc_cap(slot));
     return gi2_hash(key ^ (set * 0x2545f491u + 0x68e31da4u));
@@ -429,7 +440,9 @@ vec3 gi2_cache_irradiance(vec3 pos, vec3 n) {
     // Not lit yet (claimed this round, params.z bit 7): the lit patches beside it
     // on the same surface, so a surface coming into view or a box face entering
     // new cells is not black until the next round relights it.
-    if (e.w < 0.5 && ((pc.params.z >> 7u) & 1u) != 0u) {
+    // Flag 32768 (surface cache): every round, not only the round that claimed it.
+    bool fill_any = gi2_world_mode() == 3u && (gi2_sc_flags() & 32768u) != 0u;
+    if (e.w < 0.5 && (fill_any || ((pc.params.z >> 7u) & 1u) != 0u)) {
         float size = cache.v[3u * slot + 1u].w;
         if (gi2_world_mode() == 3u) {
             vec4 up = gi2_sc_parent(pos, n, hsize);

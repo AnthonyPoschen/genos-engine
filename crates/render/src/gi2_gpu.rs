@@ -748,6 +748,9 @@ impl Gpu {
             Ok("2") => {
                 4 * std::env::var("GENOS_GI2_WORLD_CAP").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(32)
             }
+            // Surface cache: GENOS_GI2_SC_SETTLE frames still (experiment: how long
+            // its texels take to take in the bounced light).
+            Ok("3") => std::env::var("GENOS_GI2_SC_SETTLE").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0),
             _ => 0,
         };
         let settled = self.gi2.still >= GI2_SETTLE_FRAMES.max(world_wait) && self.gi2.quiet >= sweep;
