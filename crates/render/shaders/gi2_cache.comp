@@ -55,6 +55,12 @@ void main() {
         atomicMax(gstats.mature_change, millionths);
         atomicAdd(gstats.mature_relit, 1u);
     }
+    // Flag 131072: hit patches (25 cm and up) take each relight whole, as the
+    // light cache of the other modes does (no running mean of sets).
+    if (gi2_world_mode() == 3u && (gi2_sc_flags() & 131072u) != 0u && cache.v[3u * slot + 1u].w > 0.2) {
+        cache.v[3u * slot + 2u] = vec4(e, min(max(old.w, 0.0) + 1.0, GI2_CACHE_MATURE));
+        return;
+    }
     if (gi2_world_mode() == 3u) {
         // Surface cache: the running mean of the sets so far (a short one under
         // change); w counts them, held at the cap once there.

@@ -51,6 +51,9 @@ void main() {
         if ((gi2_sc_flags() & 1024u) != 0u && !gi2_sc_light_quiet() && !hit_patch && !near) {
             growing = false;
         }
+        if ((gi2_sc_flags() & 131072u) != 0u && hit_patch) {
+            growing = true;
+        }
         if (!(near || t < 0.5 || growing || changing)) {
             // Not in this round: a texel nobody has read for GI2_CACHE_LIFE frames
             // is freed here (gi2_cache.comp frees only what a round relights).

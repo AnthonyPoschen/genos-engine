@@ -753,7 +753,17 @@ impl Gpu {
             Ok("3") => std::env::var("GENOS_GI2_SC_SETTLE").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0),
             _ => 0,
         };
-        let settled = self.gi2.still >= GI2_SETTLE_FRAMES.max(world_wait) && self.gi2.quiet >= sweep;
+        // Surface cache with flag 8192: texels at the cap keep relighting (their
+        // change never drops under GI2_SETTLE_CHANGE), so it settles on frames still
+        // (GENOS_GI2_SC_SETTLE, default 300) and the light having held.
+        let sc_relit = world_wait != 0
+            || (gi2_world_env() == 3
+                && std::env::var("GENOS_GI2_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0) & 8192 != 0);
+        let settled = if gi2_world_env() == 3 && sc_relit {
+            self.gi2.still >= GI2_SETTLE_FRAMES.max(if world_wait != 0 { world_wait } else { 300 }) && self.gi2.light_quiet >= 2
+        } else {
+            self.gi2.still >= GI2_SETTLE_FRAMES.max(world_wait) && self.gi2.quiet >= sweep
+        };
         crate::probe_tier::TierStats {
             seen_bricks: 1,
             seen_settled: usize::from(settled),

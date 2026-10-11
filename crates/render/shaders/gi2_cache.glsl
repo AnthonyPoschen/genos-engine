@@ -433,7 +433,9 @@ vec3 gi2_cache_irradiance(vec3 pos, vec3 n) {
         return vec3(0.0);
     }
     cache.v[3u * slot].w = uintBitsToFloat(gi2_frame());
-    if (gi2_world_mode() == 3u && !gi2_sc_slanted(n)) {
+    // Flag 65536: hit patches stay lit from where they were claimed (as in the
+    // other modes), no offer.
+    if (gi2_world_mode() == 3u && !gi2_sc_slanted(n) && (gi2_sc_flags() & 65536u) == 0u) {
         gi2_sc_offer(slot, pos, gi2_sc_centre(pos, n, hsize));
     }
     vec4 e = cache.v[3u * slot + 2u];
