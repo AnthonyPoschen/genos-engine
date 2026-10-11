@@ -730,6 +730,38 @@ uint gi2_sc_ray_key(uint slot, uint key) {
 // a pixel last read the texel); 0 when not pooled.
 const float GI2_SC_POOL = 2.4;
 const float GI2_SC_POOL_FULL = 24.0;
+// S62A denoise (SVGF, Schied et al. 2017: variance-guided, edge-stopping; in
+// surface space, so it is anchored to the world and cannot swim): from
+// GI2_DN_MIN_SETS sets on, the pool's radius follows the texel's relative noise
+// (the GIBS estimator's per-set variance over its sets, sqrt(var / n) / mean):
+// sigma = GI2_DN_SIGMA * noise / target, 0.4 to 2 cells; each neighbour also
+// weighs exp(-|dL| / (GI2_DN_LUM * the noise in luminance)), so shadow edges and
+// contact darkening (real luminance steps) stop it, noise does not.
+// Perceptual stop rule (gi2_sc_settled): a texel with at least GI2_DN_MIN_SETS
+// sets whose relative noise is under GI2_DN_STOP (looser in the dark: under
+// GI2_DN_DARK luminance the target grows as GI2_DN_DARK / L, at most 4x)
+// counts as settled.
+const float GI2_DN_MIN_SETS = 8.0;
+const float GI2_DN_STOP = 0.015;
+const float GI2_DN_DARK = 0.05;
+const float GI2_DN_SIGMA = 0.6;
+const float GI2_DN_LUM = 3.0;
+// Relative noise of slot's mean, and its luminance noise (w); x < 0 when the
+// estimator is not running (new, or the light changing).
+vec2 gi2_sc_noise(uint slot) {
+    vec4 a = cache.v[GI2_SC_EST_AT + 2u * slot];
+    vec4 b = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
+    if (!(b.x > 0.0) || !(b.w > 0.5)) {
+        return vec2(-1.0, 0.0);
+    }
+    float lum = dot(cache.v[3u * slot + 2u].rgb, vec3(0.2126, 0.7152, 0.0722));
+    float sd = sqrt(max(a.w, 0.0) / max(b.w, 1.0));
+    return vec2(sd / max(lum, 1.0e-3), sd);
+}
+float gi2_dn_target(uint slot) {
+    float lum = dot(cache.v[3u * slot + 2u].rgb, vec3(0.2126, 0.7152, 0.0722));
+    return GI2_DN_STOP * clamp(GI2_DN_DARK / max(lum, 1.0e-4), 1.0, 4.0);
+}
 void gi2_sc_pool(uint slot) {
     vec4 own = cache.v[3u * slot + 2u];
     // A texel in a mover's frame pools with its neighbours in that frame: its
@@ -749,6 +781,13 @@ void gi2_sc_pool(uint slot) {
     float sigma = min(GI2_SC_POOL / sqrt(t + 1.0), 2.0);
     if (floor_on) {
         sigma = max(sigma, 0.6);
+    }
+    // S62A: variance-guided radius and luminance edge stop once warmed up.
+    vec2 nz = gi2_sc_noise(slot);
+    bool guided = t >= GI2_DN_MIN_SETS && nz.x >= 0.0;
+    float own_lum = dot(own.rgb, vec3(0.2126, 0.7152, 0.0722));
+    if (guided) {
+        sigma = clamp(GI2_DN_SIGMA * nz.x / gi2_dn_target(slot), 0.4, 2.0);
     }
     uint ax = gi2_axis(n) >> 1u;
     vec3 ta = vec3(0.0);
@@ -775,6 +814,10 @@ void gi2_sc_pool(uint slot) {
             float c = floor(max(v.w, 0.0));
             if (c < 0.5) {
                 continue;
+            }
+            if (guided && s2 != slot) {
+                float dl = abs(dot(v.rgb, vec3(0.2126, 0.7152, 0.0722)) - own_lum);
+                k *= exp(-dl / (GI2_DN_LUM * nz.y + 1.0e-4));
             }
             sum += k * c * v.rgb;
             wsum += k * c;
@@ -947,6 +990,11 @@ bool gi2_sc_settled(uint slot, float t) {
         return floor(t) >= (gi2_sc_light_quiet() ? GI2_WRC_CAP : max(gi2_sc_light_window(), 2.0)) - 0.5;
     }
     vec4 b = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
+    // S62A perceptual stop: quiet enough to the eye counts as settled.
+    vec2 nz = gi2_sc_noise(slot);
+    if (gi2_sc_light_quiet() && floor(t) >= GI2_DN_MIN_SETS && nz.x >= 0.0 && nz.x < gi2_dn_target(slot) && b.y < GI2_SC_SETTLE_SD) {
+        return true;
+    }
     return floor(t) >= reach - 0.5 && b.x > 0.0 && b.y < GI2_SC_SETTLE_SD;
 }
 uint gi2_sc_quarter0(uint slot) {
