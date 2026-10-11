@@ -999,7 +999,11 @@ void gi2_sc_pool(uint slot) {
     }
     // S62B: under changing light the history is short and stays short, so the
     // pool keeps to the nearest texels (detail from the texels' own sets).
-    if (!gi2_sc_light_quiet()) {
+    // S67A: only where the light changes locally (a mover, or a moved lamp's
+    // delta above the trickle threshold); the sun or a far lamp moving no
+    // longer narrows every texel's pool.
+    bool mover_p;
+    if (gi2_sc_local_change(slot, mover_p) || GI2_SC_LAMP_K * gi2_sc_lamp_change(slot) >= GI2_SC_TRICKLE_THR) {
         sigma = min(sigma, GI2_DN_CHANGE_SIGMA);
     }
     uint ax = gi2_axis(n) >> 1u;
@@ -1038,6 +1042,53 @@ void gi2_sc_pool(uint slot) {
     }
     cache.v[GI2_WORLD_AT + slot].y = uintBitsToFloat(gi2_pack_rgb9e5(wsum > 0.0 ? sum / wsum : vec3(0.0)));
     gi2_obj_salt = 0.0;
+}
+
+// S67A neighbourhood clamp (TAA-style variance box, as Lumen's and ReBLUR's
+// history clamps): while the light changes, a texel's long-term mean m is held
+// within the luminance box of its own and its four neighbours' short-term means
+// (the estimator's, this plane) widened by GI2_SC_CLAMP_SD standard
+// deviations; colour kept. It follows a change at once where the neighbourhood
+// agrees, and noise stays inside the box.
+const bool GI2_SC_NCLAMP = true;
+const float GI2_SC_CLAMP_SD = 2.0;
+vec3 gi2_sc_nclamp(uint slot, vec3 m, vec3 sm, float dev) {
+    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+    vec3 p = cache.v[3u * slot].xyz;
+    vec4 nb = cache.v[3u * slot + 1u];
+    vec3 n = nb.xyz;
+    float size = nb.w;
+    uint ax = gi2_axis(n) >> 1u;
+    vec3 ta = vec3(0.0);
+    vec3 tb = vec3(0.0);
+    ta[(ax + 1u) % 3u] = 1.0;
+    tb[(ax + 2u) % 3u] = 1.0;
+    float lo = dot(sm, lw);
+    float hi = lo;
+    float salt = gi2_obj_salt;
+    gi2_obj_salt = cache.v[GI2_SC_OBJ_AT + slot].x > 0.5 ? cache.v[GI2_SC_OBJ_AT + slot].x : 0.0;
+    [[dont_unroll]] for (uint i = 0u; i < 4u; i++) {
+        vec3 o = (i < 2u ? ta : tb) * ((i & 1u) == 0u ? size : -size);
+        uint s2 = gi2_cache_find_sized(p + o, n, false, size, p);
+        if (s2 == ~0u || abs(dot(cache.v[3u * s2].xyz - p, n)) > 0.5 * size) {
+            continue;
+        }
+        vec4 b2 = cache.v[GI2_SC_EST_AT + 2u * s2 + 1u];
+        if (b2.x <= 0.0) {
+            continue;
+        }
+        float l2 = dot(cache.v[GI2_SC_EST_AT + 2u * s2].rgb, lw);
+        lo = min(lo, l2);
+        hi = max(hi, l2);
+    }
+    gi2_obj_salt = salt;
+    lo = max(lo - GI2_SC_CLAMP_SD * dev, 0.0);
+    hi += GI2_SC_CLAMP_SD * dev;
+    float lm = dot(m, lw);
+    if (lm <= 1.0e-6) {
+        return m;
+    }
+    return m * (clamp(lm, lo, hi) / lm);
 }
 
 // Surface cache: what a texel shows (w 0 when it has nothing yet).
