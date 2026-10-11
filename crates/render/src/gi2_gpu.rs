@@ -139,6 +139,11 @@ pub(crate) struct Gi2 {
     /// GI2_MOVER_KEEP frames, with the frames left: movers. The surface cache leaves
     /// their pixels to the probes; once still that long they are scenery again.
     movers: std::collections::BTreeMap<usize, u32>,
+    /// Traced mesh instances (mesh_field order): last poses, the ones that moved in
+    /// the last GI2_MOVER_KEEP frames, and every instance's bounding sphere now.
+    mesh_poses: Vec<[f32; 16]>,
+    mesh_movers: std::collections::BTreeMap<usize, u32>,
+    mesh_spheres: Vec<[f32; 4]>,
     young_ok: bool,
     /// What each round in flight was built from (frame slots, then the async one):
     /// the light hash and whether it took young patches only.
@@ -204,6 +209,9 @@ impl Default for Gi2 {
             light_hash: 0,
             light_quiet: 0,
             movers: std::collections::BTreeMap::new(),
+            mesh_poses: Vec::new(),
+            mesh_movers: std::collections::BTreeMap::new(),
+            mesh_spheres: Vec::new(),
             young_ok: std::env::var("GENOS_GI2_YOUNG_ONLY").map_or(true, |v| v != "0"),
             stats_light: [0; 2],
             stats_young: [false; 2],
@@ -231,6 +239,12 @@ const GI2_PASS_NAMES: [&str; 8] = [
 ];
 
 impl Gpu {
+    /// Track which traced mesh instances move (surface cache movers).
+    pub(crate) fn note_field_movers(&mut self, live: &[&crate::mesh_field::FieldInstance]) {
+        let g = &mut self.gi2;
+        gi2_mesh_movers(live, &mut g.mesh_poses, &mut g.mesh_movers, &mut g.mesh_spheres);
+    }
+
     /// Note how long a pipeline took to build (tests check it stays short).
     fn note_pipeline_time(&mut self, name: &str, start: Instant) {
         self.pipeline_times
@@ -632,7 +646,7 @@ impl Gpu {
                 &share,
             )?;
             self.gi2.cache =
-                self.make_buffer_queues(GI2_CACHE_SLOTS * 96, 0x20 | 0x2, Memory::Device, &share)?;
+                self.make_buffer_queues(GI2_CACHE_SLOTS * 112, 0x20 | 0x2, Memory::Device, &share)?;
             self.gi2.cache_clear = true;
             for k in 0..2 {
                 self.gi2.stats[k] = self.make_buffer(64, 0x20 | 0x2, Memory::Readback)?;
@@ -1217,6 +1231,8 @@ impl Gpu {
         block[2] = ((self.gi2.probe_runs & 1) + 2 * flags) as f32;
         block[3] = (world * 1000 + cap) as f32;
         let mut used = 0;
+        // Vec4s of the block the GPU gets: head, changes and movers.
+        let mut sent = GI2_CHANGE_HEAD;
         match &changes {
             None => block[1] = 1.0,
             Some(list) => {
@@ -1228,18 +1244,37 @@ impl Gpu {
                 used = list.len();
             }
         }
+        sent += used;
         // Movers (surface cache): bounds of every occluder that moved in the
         // last GI2_MOVER_KEEP frames, after the changes; head w carries their count above mode and cap.
         // Compared whenever there is a last scene (not only when the trace key held:
         // a spinning box can change the key every frame and must stay a mover).
         if world == 3 && !self.gi2.kept_bytes.is_empty() {
             let movers = gi2_movers(&self.gi2.kept_bytes, &self.frame_bytes, &mut self.gi2.movers);
-            let n = movers.len().min(GI2_CHANGES - used);
-            for (j, b) in movers.iter().take(n).enumerate() {
-                let at = 4 * (GI2_CHANGE_HEAD + used + j);
-                block[at..at + 4].copy_from_slice(b);
+            let mut movers = movers;
+            // Traced mesh instances that moved: id 10001 + instance index (the
+            // shader reads their frame from the mesh field).
+            for &i in self.gi2.mesh_movers.keys() {
+                if let Some(sph) = self.gi2.mesh_spheres.get(i) {
+                    movers.push([*sph, [0.0, 0.0, 0.0, (10001 + i) as f32], [0.0; 4], [0.0; 4]]);
+                }
             }
-            block[3] += (n * 100000) as f32;
+            let n = movers.len().min((GI2_CHANGES - used) / 4);
+            for (j, m) in movers.iter().take(n).enumerate() {
+                for (k, b) in m.iter().enumerate() {
+                    let at = 4 * (GI2_CHANGE_HEAD + used + 4 * j + k);
+                    block[at..at + 4].copy_from_slice(b);
+                }
+            }
+            block[3] += (n * 200000) as f32;
+            sent += 4 * n;
+            if std::env::var_os("GENOS_GI_DEBUG").is_some() {
+                eprintln!("gi2 movers {n} of {} occs {} meshes {} of {} {:?}", self.gi2.movers.len(), gi2_occs(&self.frame_bytes).len(), self.gi2.mesh_movers.len(), self.gi2.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
+            }
+            // Object-local texels for movers (GIBS): GENOS_GI2_SC_LOCAL=1.
+            if std::env::var("GENOS_GI2_SC_LOCAL").is_ok_and(|v| v == "1") {
+                block[3] += 100000.0;
+            }
         }
         if had {
             // Last frame's camera (scene_data.glsl): eye at byte 48, the basis at 528.
@@ -1267,7 +1302,9 @@ impl Gpu {
                 (GI2_CACHE_BATCH * GI2_CACHE_RAYS) as u64,
                 probe_rays as u64 * GI2_STRATA as u64,
             );
-        let used = 4 * (GI2_CHANGE_HEAD + changes.as_ref().map_or(0, |l| l.len()));
+        // Movers ride after the changes: upload them too (S49/S50L sent only the
+        // head and changes, so every mover read zeros on the GPU).
+        let used = 4 * sent;
         unsafe {
             // The last frame's passes are done with the block before it is written.
             self.memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000);
@@ -1614,7 +1651,7 @@ fn gi2_occ_bounds(rec: &[u8]) -> [f32; 4] {
 /// Movers: occluders (by index) whose record differs between two scene blocks of
 /// the same length join `set` for good (a list of another length starts it again);
 /// returns their bounds now.
-pub(crate) fn gi2_movers(old: &[u8], new: &[u8], set: &mut std::collections::BTreeMap<usize, u32>) -> Vec<[f32; 4]> {
+pub(crate) fn gi2_movers(old: &[u8], new: &[u8], set: &mut std::collections::BTreeMap<usize, u32>) -> Vec<[[f32; 4]; 4]> {
     let (a, b) = (gi2_occs(old), gi2_occs(new));
     set.retain(|_, left| {
         *left = left.saturating_sub(1);
@@ -1629,7 +1666,56 @@ pub(crate) fn gi2_movers(old: &[u8], new: &[u8], set: &mut std::collections::BTr
             }
         }
     }
-    set.keys().filter_map(|&i| b.get(i)).map(|r| gi2_occ_bounds(r)).collect()
+    set.keys()
+        .filter_map(|&i| b.get(i).map(|r| (i, r)))
+        .map(|(i, r)| {
+            let f = |k: usize| f32::from_le_bytes([r[k * 4], r[k * 4 + 1], r[k * 4 + 2], r[k * 4 + 3]]);
+            let rad = f(7).abs();
+            // Shape 0 is a box (half extents x, z; height); else a round solid of
+            // radius r. Cosine and sine of the yaw sit in the bounce vec4 (z, w).
+            let (hx, hz) = if f(3) < 0.5 { (f(4).abs(), f(6).abs()) } else { (rad, rad) };
+            let (c, s) = if f(3) < 0.5 { (f(14), f(15)) } else { (1.0, 0.0) };
+            [
+                gi2_occ_bounds(r),
+                [f(0), f(1), f(2), (i + 1) as f32],
+                [hx, f(5).abs() * 0.5, hz, 0.0],
+                [c, s, 0.0, 0.0],
+            ]
+        })
+        .collect()
+}
+
+/// Mesh movers: traced instances whose pose changed join `set` for
+/// GI2_MOVER_KEEP frames (another count starts it again); `poses` and `spheres`
+/// become this frame's.
+pub(crate) fn gi2_mesh_movers(
+    live: &[&crate::mesh_field::FieldInstance],
+    poses: &mut Vec<[f32; 16]>,
+    set: &mut std::collections::BTreeMap<usize, u32>,
+    spheres: &mut Vec<[f32; 4]>,
+) {
+    set.retain(|_, left| {
+        *left = left.saturating_sub(1);
+        *left > 0
+    });
+    if poses.len() != live.len() {
+        set.clear();
+    } else {
+        for (i, (old, inst)) in poses.iter().zip(live).enumerate() {
+            if *old != inst.pose {
+                set.insert(i, GI2_MOVER_KEEP);
+            }
+        }
+    }
+    poses.clear();
+    poses.extend(live.iter().map(|f| f.pose));
+    spheres.clear();
+    spheres.extend(live.iter().map(|f| {
+        let (lo, hi) = f.world_bounds();
+        let c: [f32; 3] = std::array::from_fn(|a| 0.5 * (lo[a] + hi[a]));
+        let r = (0..3).map(|a| (0.5 * (hi[a] - lo[a])).powi(2)).sum::<f32>().sqrt();
+        [c[0], c[1], c[2], r + 0.05]
+    }));
 }
 
 /// Frames an occluder stays a mover after it last moved (Lumen treats a mesh as

@@ -15,7 +15,7 @@ void main() {
     // Near a change (params.z bit 5): a patch on or around an object that moved,
     // came or went sees a different scene, so it is relit with the young (first),
     // not when the sweep comes round (every live / batch rounds).
-    bool near = ((pc.params.z >> 5u) & 1u) != 0u && gi2_near_change(cache.v[3u * slot].xyz);
+    bool near = ((pc.params.z >> 5u) & 1u) != 0u && gi2_near_change(gi2_sc_texel_pos(slot));
     float t = cache.v[3u * slot + 2u].w;
     if (gi2_world_mode() == 3u) {
         gi2_sc_pool(slot);

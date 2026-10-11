@@ -402,8 +402,11 @@ bool gi2_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     if (key == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
         return false;
     }
-    n = cache.v[3u * slot + 1u].xyz;
-    origin = cache.v[3u * slot].xyz + n * 0.02;
+    vec3 p;
+    if (!gi2_sc_texel_world(slot, p, n)) {
+        return false;
+    }
+    origin = p + n * 0.02;
     dir = gi2_dir(gi2_sc_ray_key(slot, key), n, r % GI2_CACHE_RAYS, GI2_CACHE_RAYS);
     return true;
 }

@@ -32,7 +32,9 @@ void main() {
         cache.v[3u * slot + 2u] = vec4(0.0);
         return;
     }
-    vec3 n = cache.v[3u * slot + 1u].xyz;
+    vec3 tp;
+    vec3 n;
+    gi2_sc_texel_world(slot, tp, n);
     uint rkey = gi2_sc_ray_key(slot, key);
     uint first = gi2_probe_rays() + j * GI2_CACHE_RAYS;
     vec3 e = vec3(0.0);
@@ -88,7 +90,7 @@ void main() {
             vec4 a = cache.v[GI2_SC_EST_AT + 2u * slot];
             vec4 b = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
             bool urgent2 = ((pc.params.z >> 5u) & 1u) != 0u;
-            bool stale2 = !gi2_sc_light_quiet() || (urgent2 && gi2_near_change(cache.v[3u * slot].xyz));
+            bool stale2 = !gi2_sc_light_quiet() || (urgent2 && gi2_near_change(gi2_sc_texel_pos(slot)));
             if (stale2) {
                 // Light changing or a change nearby: a short plain mean (t is kept
                 // short by gi2_sc_count) and the estimator starts again once quiet.
@@ -156,7 +158,7 @@ void main() {
         // Lit under changing light or inside a change: stale (w + 0.25) until a
         // relight with everything still; pixels show the probes over it.
         bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
-        bool stale = !gi2_sc_light_quiet() || (urgent && gi2_near_change(cache.v[3u * slot].xyz));
+        bool stale = !gi2_sc_light_quiet() || (urgent && gi2_near_change(gi2_sc_texel_pos(slot)));
         cache.v[3u * slot + 2u] = vec4(mean, next + (stale ? 0.25 : 0.0));
         return;
     }

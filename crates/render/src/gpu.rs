@@ -573,6 +573,7 @@ impl Renderer {
     /// Hand the GPU tracer the world's mesh SDF instances when they changed.
     fn sync_fields(&mut self, world: &World) -> Result<(), String> {
         let live = crate::mesh_field::live_instances(world);
+        self.gpu.note_field_movers(&live);
         let key = crate::mesh_field::field_key(&live);
         self.gpu
             .sync_fields(key, || crate::mesh_field::field_bytes(&live))
