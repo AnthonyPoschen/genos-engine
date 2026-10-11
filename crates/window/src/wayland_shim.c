@@ -685,6 +685,15 @@ int genos_window_pump_size(void) {
     return (int)sizeof(struct GenosPump);
 }
 
+int genos_window_set_title(struct GenosWindow *win, const char *title) {
+    if (!win || !win->toplevel || !title) {
+        return -1;
+    }
+    xdg_toplevel_set_title(win->toplevel, title);
+    wl_display_flush(win->display);
+    return 0;
+}
+
 int genos_window_set_fullscreen(struct GenosWindow *win, int fullscreen) {
     if (!win || !win->toplevel) {
         return -1;

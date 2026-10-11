@@ -440,9 +440,15 @@ impl Tools {
                         )
                     };
                     let cache = job.cache.clone();
-                    job.worker = Some(std::thread::spawn(move || match cache {
-                        Some(dir) => reference::render_cached(&setup, &dir),
-                        None => reference::render(&setup),
+                    job.worker = Some(std::thread::spawn(move || {
+                        use std::sync::atomic::Ordering;
+                        reference::RENDERING.fetch_add(1, Ordering::SeqCst);
+                        let r = match cache {
+                            Some(dir) => reference::render_cached(&setup, &dir),
+                            None => reference::render(&setup),
+                        };
+                        reference::RENDERING.fetch_sub(1, Ordering::SeqCst);
+                        r
                     }));
                 }
             }

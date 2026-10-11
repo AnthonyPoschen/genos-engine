@@ -362,6 +362,9 @@ pub fn render(setup: &RefSetup) -> Reference {
     }
 }
 
+/// References being rendered right now (the window title shows REF meanwhile).
+pub static RENDERING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Whether references trace on the GPU (GENOS_REFERENCE_GPU=1, genos-gpuref).
 pub fn gpu_wanted() -> bool {
     std::env::var("GENOS_REFERENCE_GPU").is_ok_and(|v| v == "1")

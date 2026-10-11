@@ -37,7 +37,7 @@ fn gi2_tile(height: u32) -> u32 {
 /// Rays per screen probe (Low in the design; a square for the stratified pattern).
 pub(crate) const GI2_RAYS: u32 = 64;
 /// Light cache sizes; gi2_cache_slots.glsl has the same numbers.
-const GI2_CACHE_SLOTS: u64 = 262144;
+const GI2_CACHE_SLOTS: u64 = 1048576;
 const GI2_CACHE_BATCH: u32 = 16384;
 const GI2_CACHE_RAYS: u32 = 64;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
@@ -135,6 +135,10 @@ pub(crate) struct Gi2 {
     /// Rounds in a row, since that last changed, whose mature patches all stayed
     /// within GI2_SETTLE_CHANGE: past a full sweep, rounds relight young patches only.
     light_quiet: u32,
+    /// Occluders (index in the scene's list) that moved in the last
+    /// GI2_MOVER_KEEP frames, with the frames left: movers. The surface cache leaves
+    /// their pixels to the probes; once still that long they are scenery again.
+    movers: std::collections::BTreeMap<usize, u32>,
     young_ok: bool,
     /// What each round in flight was built from (frame slots, then the async one):
     /// the light hash and whether it took young patches only.
@@ -199,6 +203,7 @@ impl Default for Gi2 {
             light_scene: 0,
             light_hash: 0,
             light_quiet: 0,
+            movers: std::collections::BTreeMap::new(),
             young_ok: std::env::var("GENOS_GI2_YOUNG_ONLY").map_or(true, |v| v != "0"),
             stats_light: [0; 2],
             stats_young: [false; 2],
@@ -627,13 +632,13 @@ impl Gpu {
                 &share,
             )?;
             self.gi2.cache =
-                self.make_buffer_queues(GI2_CACHE_SLOTS * 64, 0x20 | 0x2, Memory::Device, &share)?;
+                self.make_buffer_queues(GI2_CACHE_SLOTS * 96, 0x20 | 0x2, Memory::Device, &share)?;
             self.gi2.cache_clear = true;
             for k in 0..2 {
-                self.gi2.stats[k] = self.make_buffer(32, 0x20 | 0x2, Memory::Readback)?;
+                self.gi2.stats[k] = self.make_buffer(64, 0x20 | 0x2, Memory::Readback)?;
             }
             self.gi2.world_stats =
-                self.make_buffer_queues(32, 0x20 | 0x2, Memory::Readback, &share)?;
+                self.make_buffer_queues(64, 0x20 | 0x2, Memory::Readback, &share)?;
             self.gi2.world_scene = self.make_buffer_queues(
                 crate::pack::SCENE_CAPACITY as u64,
                 0x20,
@@ -748,9 +753,22 @@ impl Gpu {
             Ok("2") => {
                 4 * std::env::var("GENOS_GI2_WORLD_CAP").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(32)
             }
+            // Surface cache: GENOS_GI2_SC_SETTLE frames still (experiment: how long
+            // its texels take to take in the bounced light).
+            Ok("3") => std::env::var("GENOS_GI2_SC_SETTLE").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0),
             _ => 0,
         };
-        let settled = self.gi2.still >= GI2_SETTLE_FRAMES.max(world_wait) && self.gi2.quiet >= sweep;
+        // Surface cache with flag 8192: texels at the cap keep relighting (their
+        // change never drops under GI2_SETTLE_CHANGE), so it settles on frames still
+        // (GENOS_GI2_SC_SETTLE, default 300) and the light having held.
+        let sc_relit = world_wait != 0
+            || (gi2_world_env() == 3
+                && std::env::var("GENOS_GI2_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0) & 8192 != 0);
+        let settled = if gi2_world_env() == 3 && sc_relit {
+            self.gi2.still >= GI2_SETTLE_FRAMES.max(if world_wait != 0 { world_wait } else { 300 }) && self.gi2.light_quiet >= 2
+        } else {
+            self.gi2.still >= GI2_SETTLE_FRAMES.max(world_wait) && self.gi2.quiet >= sweep
+        };
         crate::probe_tier::TierStats {
             seen_bricks: 1,
             seen_settled: usize::from(settled),
@@ -798,6 +816,7 @@ impl Gpu {
         }
         // This slot's last frame is done (its fence was waited): read its counters
         // (the async queue's come back with its own submission).
+        self.trace_sc(self.gi2.stats[slot].memory, "frame");
         if let Ok(words) = self.read_gi2_stats(slot) {
             self.gi2.probe_samples = [words[6], words[7]];
             if words[7] > 0 && std::env::var_os("GENOS_GI_DEBUG").is_some() {
@@ -825,7 +844,7 @@ impl Gpu {
             }
         }
         unsafe {
-            (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.stats[slot].buffer, 0, 32, 0);
+            (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.stats[slot].buffer, 0, 64, 0);
             if self.gi2.cache_clear {
                 self.gi2.cache_clear = false;
                 // The async queue starts once this frame (its slot) is surely done.
@@ -886,6 +905,10 @@ impl Gpu {
         }
         if !light {
             self.gi2.light_quiet = 0;
+        } else if gi2_world_env() == 3 {
+            // Surface cache: texels keep adding sets, so their change says nothing
+            // of the light; rounds since the light last changed.
+            self.gi2.light_quiet = self.gi2.light_quiet.saturating_add(1);
         } else if words[5] > 0 {
             if words[4] <= GI2_SETTLE_CHANGE {
                 self.gi2.light_quiet = self.gi2.light_quiet.saturating_add(1);
@@ -923,6 +946,7 @@ impl Gpu {
             return;
         }
         self.gi2.world_busy = false;
+        self.trace_sc(self.gi2.world_stats.memory, "round");
         if let Ok(words) = self.read_stats_memory(self.gi2.world_stats.memory) {
             let current = self.gi2.world_still > 0 && self.gi2.world_hash == self.gi2.scene_hash;
             let light = self.gi2.world_light == self.gi2.light_hash;
@@ -1020,7 +1044,7 @@ impl Gpu {
                 (self.fns.cmd_reset_query)(cmd, qp, 0, 2);
                 (self.fns.cmd_write_timestamp)(cmd, 0x1, qp, 0);
             }
-            (self.fns.cmd_fill_buffer)(cmd, self.gi2.world_stats.buffer, 0, 32, 0);
+            (self.fns.cmd_fill_buffer)(cmd, self.gi2.world_stats.buffer, 0, 64, 0);
             // The mature and young counts, rebuilt by the compact pass.
             (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, GI2_CACHE_SLOTS * 4, 4, 0);
             (self.fns.cmd_fill_buffer)(
@@ -1080,7 +1104,28 @@ impl Gpu {
     }
 
     fn read_stats_memory(&self, memory: Handle) -> Result<[u32; 8], String> {
+        let all = self.read_stats16(memory)?;
         let mut words = [0u32; 8];
+        words.copy_from_slice(&all[..8]);
+        Ok(words)
+    }
+
+    /// Surface cache trace (GENOS_GI2_SC_TRACE=1): one line per readback with the
+    /// frame, frames still and the claimed / restarted / freed / at-cap counters.
+    fn trace_sc(&self, memory: Handle, queue: &str) {
+        if std::env::var_os("GENOS_GI2_SC_TRACE").is_none() {
+            return;
+        }
+        if let Ok(w) = self.read_stats16(memory) {
+            eprintln!(
+                "gi2sc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {}",
+                self.gi2.frame, self.gi2.still, w[1], w[8], w[9], w[10], w[11], w[2]
+            );
+        }
+    }
+
+    fn read_stats16(&self, memory: Handle) -> Result<[u32; 16], String> {
+        let mut words = [0u32; 16];
         unsafe {
             let mut mapped = std::ptr::null_mut();
             check(
@@ -1088,13 +1133,13 @@ impl Gpu {
                     self.device,
                     memory,
                     0,
-                    32,
+                    64,
                     0,
                     &mut mapped,
                 ),
                 "map gi2 stats",
             )?;
-            std::ptr::copy_nonoverlapping(mapped as *const u32, words.as_mut_ptr(), 8);
+            std::ptr::copy_nonoverlapping(mapped as *const u32, words.as_mut_ptr(), 16);
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(words)
@@ -1156,11 +1201,22 @@ impl Gpu {
         let mut block = vec![0f32; 4 * (GI2_CHANGE_HEAD + GI2_CHANGES)];
         block[2] = (self.gi2.probe_runs & 1) as f32;
         // World irradiance cells (gi2_cache.glsl, experiment): GENOS_GI2_WORLD mode
-        // (1: pixels read the light cache, 2: probes average into world cells) and
-        // GENOS_GI2_WORLD_CAP frames.
-        let world = std::env::var("GENOS_GI2_WORLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).min(2);
-        let cap = std::env::var("GENOS_GI2_WORLD_CAP").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(32).clamp(1, 999);
+        // (1: pixels read the light cache, 2: probes average into world cells, 3:
+        // the surface cache) and GENOS_GI2_WORLD_CAP frames (mode 3: ray sets a
+        // texel averages, default 16).
+        let world = gi2_world_env();
+        let cap = std::env::var("GENOS_GI2_WORLD_CAP")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(if world == 3 { 16 } else { 32 })
+            .clamp(1, 999);
+        // Surface cache switches (gi2_cache.glsl gi2_sc_flags).
+        // Flags ride in head z above the probe-run bit (exact to 2^22); w keeps mode
+        // * 1000 + cap (flags * 100000 there lost precision past 2^24 and was capped).
+        let flags = std::env::var("GENOS_GI2_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).min((1 << 23) - 1);
+        block[2] = ((self.gi2.probe_runs & 1) + 2 * flags) as f32;
         block[3] = (world * 1000 + cap) as f32;
+        let mut used = 0;
         match &changes {
             None => block[1] = 1.0,
             Some(list) => {
@@ -1169,7 +1225,21 @@ impl Gpu {
                     let at = 4 * (GI2_CHANGE_HEAD + j);
                     block[at..at + 4].copy_from_slice(b);
                 }
+                used = list.len();
             }
+        }
+        // Movers (surface cache): bounds of every occluder that moved in the
+        // last GI2_MOVER_KEEP frames, after the changes; head w carries their count above mode and cap.
+        // Compared whenever there is a last scene (not only when the trace key held:
+        // a spinning box can change the key every frame and must stay a mover).
+        if world == 3 && !self.gi2.kept_bytes.is_empty() {
+            let movers = gi2_movers(&self.gi2.kept_bytes, &self.frame_bytes, &mut self.gi2.movers);
+            let n = movers.len().min(GI2_CHANGES - used);
+            for (j, b) in movers.iter().take(n).enumerate() {
+                let at = 4 * (GI2_CHANGE_HEAD + used + j);
+                block[at..at + 4].copy_from_slice(b);
+            }
+            block[3] += (n * 100000) as f32;
         }
         if had {
             // Last frame's camera (scene_data.glsl): eye at byte 48, the basis at 528.
@@ -1218,7 +1288,11 @@ impl Gpu {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             self.gi2.light_scene.hash(&mut hasher);
             self.mesh_field_key.hash(&mut hasher);
-            self.gi2.draw_key.hash(&mut hasher);
+            // The drawn list follows the camera (culling), so the surface cache
+            // (mode 3) leaves it out: a turn is not a light change there.
+            if gi2_world_env() != 3 {
+                self.gi2.draw_key.hash(&mut hasher);
+            }
             hasher.finish()
         };
         if light != self.gi2.light_hash {
@@ -1226,9 +1300,12 @@ impl Gpu {
             self.gi2.light_quiet = 0;
         }
         let sweep = self.gi2.live.div_ceil(GI2_CACHE_BATCH).max(1) + 1;
-        let young_only = self.gi2.young_ok && self.gi2.light_quiet >= sweep;
+        // Surface cache (mode 3): bit 10 says the light has held two rounds, and a
+        // round that relights nothing has nothing left to converge.
+        let sc = gi2_world_env() == 3;
+        let young_only = if sc { self.gi2.light_quiet >= 2 } else { self.gi2.young_ok && self.gi2.light_quiet >= sweep };
         self.gi2.stats_light[slot] = light;
-        self.gi2.stats_young[slot] = young_only;
+        self.gi2.stats_young[slot] = young_only || sc;
         // z: bgra, fills (bit 6), young-only rounds and lamp picks (gi2_common.glsl);
         // the gather and filter passes add their round (bits 1-2) below.
         let picks = std::env::var("GENOS_GI2_CACHE_PICKS").is_ok_and(|v| v == "1");
@@ -1500,12 +1577,64 @@ impl Gpu {
     }
 }
 
+/// GENOS_GI2_WORLD (gi2_cache.glsl world modes): 0 off, 1 pixels read the light
+/// cache, 2 world irradiance cells, 3 the surface cache.
+fn gi2_world_env() -> u32 {
+    std::env::var("GENOS_GI2_WORLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).min(3)
+}
+
 /// Vec4 index of the changes block in the work buffer (gi2_common.glsl
 /// gi2_change_at), for `probes` probes, `cache_rays` light cache rays and `kept`
 /// kept hits.
 fn gi2_change_at(probes: u64, cache_rays: u64, kept: u64) -> u64 {
     2 * probes + cache_rays + 7 * probes + 2 * GI2_STRATA as u64 * probes + kept + kept / 4
 }
+
+/// Occluder records of a scene block (`pack::scene_bytes`), 64 bytes each.
+fn gi2_occs(bytes: &[u8]) -> Vec<&[u8]> {
+    let word = |at: usize| {
+        bytes
+            .get(at * 4..at * 4 + 4)
+            .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])) as usize
+    };
+    let start = crate::pack::SCENE_TAIL + word(0) * 32;
+    (0..word(1))
+        .filter_map(|i| bytes.get(start + i * 64..start + i * 64 + 64))
+        .collect()
+}
+
+/// Bounding sphere of an occluder record.
+fn gi2_occ_bounds(rec: &[u8]) -> [f32; 4] {
+    let f = |i: usize| f32::from_le_bytes([rec[i * 4], rec[i * 4 + 1], rec[i * 4 + 2], rec[i * 4 + 3]]);
+    let (hx, hy, hz, r) = (f(4).abs(), f(5).abs() * 0.5, f(6).abs(), f(7).abs());
+    let (hx, hz) = (hx.max(r), hz.max(r));
+    [f(0), f(1), f(2), (hx * hx + hy * hy + hz * hz).sqrt() + 0.05]
+}
+
+/// Movers: occluders (by index) whose record differs between two scene blocks of
+/// the same length join `set` for good (a list of another length starts it again);
+/// returns their bounds now.
+pub(crate) fn gi2_movers(old: &[u8], new: &[u8], set: &mut std::collections::BTreeMap<usize, u32>) -> Vec<[f32; 4]> {
+    let (a, b) = (gi2_occs(old), gi2_occs(new));
+    set.retain(|_, left| {
+        *left = left.saturating_sub(1);
+        *left > 0
+    });
+    if a.len() != b.len() {
+        set.clear();
+    } else {
+        for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+            if x != y {
+                set.insert(i, GI2_MOVER_KEEP);
+            }
+        }
+    }
+    set.keys().filter_map(|&i| b.get(i)).map(|r| gi2_occ_bounds(r)).collect()
+}
+
+/// Frames an occluder stays a mover after it last moved (Lumen treats a mesh as
+/// dynamic while it moves; once it rests its surroundings are ordinary cache).
+const GI2_MOVER_KEEP: u32 = 240;
 
 /// Spheres (centre, radius) around every occluder that moved, came or went between
 /// two scene blocks (`pack::scene_bytes`): the bounds before and after, so a kept

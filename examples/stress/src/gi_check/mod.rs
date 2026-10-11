@@ -22,9 +22,9 @@ const TURN_SCRIPT: &str = include_str!("../../scripts/gi_check/turn.rhai");
 const MIX_SCRIPT: &str = include_str!("../../scripts/gi_check/mix.rhai");
 const ROOM_SCRIPT: &str = include_str!("../../scripts/gi_check/room.rhai");
 const ROOM_SCENE: &str = include_str!("../../scenes/room.rhai");
-const RUNS: [&str; 12] = [
+const RUNS: [&str; 13] = [
     "repro", "settled", "moving", "walk", "flicker", "camera", "trail", "flick", "turn", "room",
-    "mix", "spin",
+    "mix", "spin", "lampret",
 ];
 const FLICKER_SCRIPT: &str = include_str!("../../scripts/temporal_flicker_aligned.rhai");
 const VIEWS: [&str; 5] = ["room-a", "corner", "contact", "lamp-wall", "hall"];
@@ -79,6 +79,13 @@ const REPRO_LIMIT: f64 = 0.03;
 /// Flick run: light going back and forth per frame (flick_rows), linear
 /// luminance. Set from the box-crossing fix (debugging.md).
 const FLICK_LIMIT: f64 = 0.0003;
+/// Flick run, before anything moves: settled, camera still, the mean frame to
+/// frame change per 4 x 4 block (linear luminance) over 60 frames. Held light does
+/// not change; a cache that keeps relighting shimmers.
+const STILL_SHIMMER_LIMIT: f64 = 0.0002;
+/// Still drift: mean |change| per 4 x 4 block between the first still frame and
+/// the same pose 600 frames later (flick.rhai drift/), linear luminance.
+const STILL_DRIFT_LIMIT: f64 = 0.0005;
 /// Turn run (turn.rhai, turn_rows): blob of the frame that arrives at the pose
 /// (turning at 3 degrees a frame, or walking) against the pose settled from a
 /// fresh start, and of the last of 30 frames held there. Set from 10ce430 (turns
@@ -126,6 +133,29 @@ const ROOM_STRUCTURE_LIMIT: f64 = 0.010;
 /// frame; relative error against each moving frame's scene state settled.
 /// edffa81: still 0.0043, turning 0.0070 (FAIL); fixed 0.0021 / 0.0040.
 const MIX_LIMIT: f64 = 0.0055;
+/// Lights-only return (mix.rhai, lampret): every lamp moves far and comes back
+/// exactly; the soaked end against the soaked baseline (blob, and the relative
+/// error) must sit at the noise floor.
+const LAMP_RETURN_LIMIT: f64 = 0.002;
+fn lampret_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
+    for seg in ["hall", "room"] {
+        let d = dir.join(seg);
+        let end = metrics::lum640(&d.join("end.png"))?;
+        let base = metrics::lum640(&d.join("baseline.png"))?;
+        let blob = metrics::blob(&end, &base);
+        let rel = metrics::rel_mean(&metrics::rel_error(&end, &base), &metrics::rel_base(&base));
+        println!("lampret  {seg} end against baseline: blob {blob:.4} relative {rel:.4}");
+        rows.push(Row {
+            check: format!("lamps return {seg}, soaked, against baseline"),
+            value: blob,
+            limit: LAMP_RETURN_LIMIT,
+            note: format!("relative {rel:.4}"),
+            image: d.join("end.png"),
+        });
+    }
+    Ok(())
+}
+
 /// Spin run (mix.rhai, spin): error and flicker on the moving green box and the
 /// light around it (where its settled picture differs from the baseline).
 /// edffa81 0.0338 / 0.0302 (FAIL); fixed 0.0196 / 0.0119.
@@ -289,6 +319,10 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
             .replace("__STRIDE__", &o.stride.max(1).to_string())
             .replace("__CLIP__", &o.clip.to_string())
             .replace("__DIR__", &dir.display().to_string())
+            // GENOS_GI_CHECK_BOUNCES=N: references with at most N bounces (a bounce
+            // split of the error; pair with GENOS_GI2_SC_FLAGS bit 2097152 for a
+            // one-bounce engine).
+            .replace("__BOUNCES__", &std::env::var("GENOS_GI_CHECK_BOUNCES").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(64).to_string())
     };
     let (script, size) = match run {
         "settled" | "moving" => (fill(VIEWS_SCRIPT), &o.size),
@@ -301,6 +335,7 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
         "room" => (fill(ROOM_SCRIPT), &o.size),
         "mix" => (fill(&MIX_SCRIPT.replace("__SEGS__", "mix")), &o.size),
         "spin" => (fill(&MIX_SCRIPT.replace("__SEGS__", "spin")), &o.size),
+        "lampret" => (fill(&MIX_SCRIPT.replace("__SEGS__", "lampret")), &o.size),
         // The repo's flicker gate, with a heatmap per pose and window.
         _ => (
             fill(
@@ -321,12 +356,22 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
     std::fs::write(&path, script).map_err(|e| e.to_string())?;
     let log = std::fs::File::create(dir.join("run.log")).map_err(|e| e.to_string())?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let mut cmd = Command::new(exe);
+    let mut cmd = Command::new(&exe);
     cmd.args(["--proof", "--no-panel", "--size", size, "--script"])
         .arg(&path)
         .arg("--report")
         .arg(&dir)
         .env("GENOS_GI", if o.v2 { "v2" } else { "v1" })
+        .env("GENOS_TITLE_TAG", {
+            let var = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+            let id = exe.file_name().map_or("?".into(), |n| n.to_string_lossy().to_string());
+            format!(
+                "{id} | GI {} | mode {} | flags {} | {run}",
+                if o.v2 { "v2" } else { "v1" },
+                var("GENOS_GI2_WORLD", "0"),
+                var("GENOS_GI2_SC_FLAGS", "0")
+            )
+        })
         .stdout(log.try_clone().map_err(|e| e.to_string())?)
         .stderr(log);
     // Probes as far apart on screen as the 16 px tile at 1440p, at every size.
@@ -579,6 +624,7 @@ fn score_run(o: &Options, out: &Path, run: &str, rows: &mut Vec<Row>) -> Result<
             "room" => room_rows(rows, &dir)?,
             "mix" => mix_rows(rows, &dir)?,
             "spin" => spin_rows(rows, &dir)?,
+            "lampret" => lampret_rows(rows, &dir)?,
             _ => {
                 let text = std::fs::read_to_string(dir.join("report.md"))
                     .map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -827,6 +873,69 @@ fn repro_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
 /// (sum of |frame-to-frame change| - |last - first|) / frames, linear luminance,
 /// averaged over the blocks. A lamp's light drifts one way and scores near zero.
 fn flick_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
+    let mut still = Vec::new();
+    while frame(dir, "still", still.len()).exists() {
+        still.push(metrics::lum320(&frame(dir, "still", still.len()))?);
+    }
+    if still.len() >= 3 {
+        let (w, h) = (still[0].w, still[0].h);
+        let (bw, bh) = (w / 4, h / 4);
+        let mut sum = 0.0;
+        let mut worst = 0.0f64;
+        for pair in still.windows(2) {
+            let mut frame_sum = 0.0;
+            for by in 0..bh {
+                for bx in 0..bw {
+                    let mut d = 0.0;
+                    for y in by * 4..by * 4 + 4 {
+                        for x in bx * 4..bx * 4 + 4 {
+                            d += pair[1].v[y * w + x] - pair[0].v[y * w + x];
+                        }
+                    }
+                    frame_sum += (d / 16.0).abs();
+                }
+            }
+            let m = frame_sum / (bw * bh) as f64;
+            sum += m;
+            worst = worst.max(m);
+        }
+        let mean = sum / (still.len() - 1) as f64;
+        println!("flick    still shimmer mean {mean:.6} worst frame {worst:.6} ({} frames)", still.len());
+        rows.push(Row {
+            check: "still shimmer (camera and scene still)".into(),
+            value: mean,
+            limit: STILL_SHIMMER_LIMIT,
+            note: format!("worst frame pair {worst:.6}"),
+            image: frame(dir, "still", still.len() - 1),
+        });
+    }
+    if !still.is_empty() && frame(dir, "drift", 1).exists() {
+        let end = metrics::lum320(&frame(dir, "drift", 1))?;
+        let a = &still[0];
+        let (w, h) = (a.w, a.h);
+        let (bw, bh) = (w / 4, h / 4);
+        let mut total = 0.0;
+        for by in 0..bh {
+            for bx in 0..bw {
+                let mut d = 0.0;
+                for y in by * 4..by * 4 + 4 {
+                    for x in bx * 4..bx * 4 + 4 {
+                        d += end.v[y * w + x] - a.v[y * w + x];
+                    }
+                }
+                total += (d / 16.0).abs();
+            }
+        }
+        let drift = total / (bw * bh) as f64;
+        println!("flick    still drift over 600 frames {drift:.6}");
+        rows.push(Row {
+            check: "still drift (600 frames, nothing moving)".into(),
+            value: drift,
+            limit: STILL_DRIFT_LIMIT,
+            note: "first still frame against 600 frames later".into(),
+            image: frame(dir, "drift", 1),
+        });
+    }
     let mut frames = Vec::new();
     while frame(dir, "move", frames.len()).exists() {
         frames.push(metrics::lum320(&frame(dir, "move", frames.len()))?);

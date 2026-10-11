@@ -15,19 +15,71 @@ void main() {
     // Near a change (params.z bit 5): a patch on or around an object that moved,
     // came or went sees a different scene, so it is relit with the young (first),
     // not when the sweep comes round (every live / batch rounds).
-    bool near = false;
-    if (((pc.params.z >> 5u) & 1u) != 0u) {
-        vec4 head = work.v[gi2_change_at()];
-        uint changes = head.y > 0.5 ? 0u : min(uint(head.x + 0.5), GI2_CHANGES);
-        vec3 p = cache.v[3u * slot].xyz;
-        [[dont_unroll]] for (uint c = 0u; c < changes && !near; c++) {
-            vec4 b = work.v[gi2_change_at() + GI2_CHANGE_HEAD + c];
-            vec3 d = p - b.xyz;
-            float r = b.w + GI2_NEAR_CHANGE;
-            near = dot(d, d) < r * r;
+    bool near = ((pc.params.z >> 5u) & 1u) != 0u && gi2_near_change(cache.v[3u * slot].xyz);
+    float t = cache.v[3u * slot + 2u].w;
+    if (gi2_world_mode() == 3u) {
+        gi2_sc_pool(slot);
+        // Flag 4096: near a change the point a texel is lit from may now be inside
+        // the object that moved there; the readers of this frame offer again.
+        if (near && (gi2_sc_flags() & 4096u) != 0u) {
+            cache.v[GI2_WORLD_AT + slot].x = 1.0e30;
         }
+        // Surface cache: the young are new texels and those near a change; the
+        // sweep takes the texels still adding sets that someone read in the last
+        // second (every eighth round, all of them), and converged texels only while
+        // the light is changing.
+        // Texels pixels read in the last second grow to the cap; texels only rays
+        // read (the light bounced off them) to GI2_SC_HIT_CAP sets.
+        uint last = floatBitsToUint(cache.v[3u * slot].w);
+        uint shown = floatBitsToUint(cache.v[GI2_WORLD_AT + slot].z);
+        bool on_screen = shown != 0u && int(gi2_frame() - shown) <= 60;
+        bool read = int(gi2_frame() - last) <= 60;
+        bool growing = (gi2_sc_flags() & 4u) != 0u
+            ? (on_screen && t < gi2_sc_cap(slot) - 0.5) || (read && t < GI2_SC_HIT_CAP - 0.5)
+            : (read && t < gi2_sc_cap(slot) - 0.5);
+        // Flag 8192: texels someone read keep relighting at the cap (a running mean
+        // of weight 2 / (cap + 1)), so light bounced in after they converged (the
+        // cache around them was darker while they took their first sets) still
+        // reaches them.
+        if ((gi2_sc_flags() & 8192u) != 0u && read) {
+            growing = (gi2_sc_flags() & 262144u) == 0u || t < GI2_SC_HOLD * gi2_sc_cap(slot) - 0.5;
+        }
+        // Flag 1048576: a dormant texel (converged, its sets agree with its mean)
+        // is relit one sweep in GI2_SC_DORMANT, by slot, to notice change.
+        if ((gi2_sc_flags() & 1048576u) != 0u && growing && t >= gi2_sc_cap(slot) - 0.5 && gi2_sc_dormant(slot)) {
+            growing = ((gi2_hash(slot) + gi2_round()) % GI2_SC_DORMANT) == 0u;
+        }
+        // Flag 1024: while the light changes only the patches ray hits read (25 cm
+        // and up, flag 256) are relit, as in the other modes; pixels show the probes.
+        bool hit_patch = cache.v[3u * slot + 1u].w > 0.2;
+        bool changing = !gi2_sc_light_quiet() && ((gi2_sc_flags() & 1024u) == 0u || hit_patch);
+        if ((gi2_sc_flags() & 1024u) != 0u && !gi2_sc_light_quiet() && !hit_patch && !near) {
+            growing = false;
+        }
+        if ((gi2_sc_flags() & 131072u) != 0u && hit_patch) {
+            growing = true;
+        }
+        if (!(near || t < 0.5 || growing || changing)) {
+            // Not in this round: a texel nobody has read for GI2_CACHE_LIFE frames
+            // is freed here (gi2_cache.comp frees only what a round relights).
+            if (int(gi2_frame() - last) > int(GI2_CACHE_LIFE)) {
+                atomicAdd(gstats.freed, 1u);
+                ckeys.key[slot] = 0u;
+                cache.v[3u * slot + 1u] = vec4(0.0);
+                cache.v[3u * slot + 2u] = vec4(0.0);
+            }
+            return;
+        }
+        if (near || t < 1.5) {
+            uint at = atomicAdd(ckeys.key[2u * GI2_CACHE_SLOTS + 1u], 1u);
+            ckeys.key[2u * GI2_CACHE_SLOTS - at] = slot;
+        } else {
+            uint at = atomicAdd(ckeys.key[GI2_CACHE_SLOTS], 1u);
+            ckeys.key[GI2_CACHE_SLOTS + 1u + at] = slot;
+        }
+        return;
     }
-    if (near || cache.v[3u * slot + 2u].w < GI2_CACHE_MATURE - 0.5) {
+    if (near || t < GI2_CACHE_MATURE - 0.5) {
         uint at = atomicAdd(ckeys.key[2u * GI2_CACHE_SLOTS + 1u], 1u);
         ckeys.key[2u * GI2_CACHE_SLOTS - at] = slot;
     } else {

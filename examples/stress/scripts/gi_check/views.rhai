@@ -48,13 +48,13 @@ for v in views {
         wait(MOVE);
         time(#{ pause: true });
         capture(#{ name: `${name}-moving`, width: 320, height: 180 });
-        c = compare(#{ prefix: name, width: 320, spp: 64, noise: __NOISE__, max_spp: __MAXSPP__, seconds: __SECS__, live: `${name}-moving` });
+        c = compare(#{ prefix: name, width: 320, bounces: __BOUNCES__, spp: 64, noise: __NOISE__, max_spp: __MAXSPP__, seconds: __SECS__, live: `${name}-moving` });
     } else {
         camera(v[2]);
         for k in 0..8 {
             try { s = wait_settled(#{ timeout_frames: 900 }); break; } catch (e) { log(`settle retry ${k}: ${e}`); }
         }
-        c = compare(#{ prefix: name, width: 320, spp: 64, noise: __NOISE__, max_spp: __MAXSPP__, seconds: __SECS__, frames: 2 });
+        c = compare(#{ prefix: name, width: 320, bounces: __BOUNCES__, spp: 64, noise: __NOISE__, max_spp: __MAXSPP__, seconds: __SECS__, frames: 2 });
     }
     capture(#{ path: `${name}-albedo.png`, mode: "albedo", width: 320, height: 180 });
     capture(#{ path: `${name}-normal.png`, mode: "normal", width: 320, height: 180 });
