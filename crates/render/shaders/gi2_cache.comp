@@ -13,6 +13,21 @@ void main() {
     }
     if (j == 0u) {
         gstats.live = gi2_live_count();
+        // Scheduler: the next round lists the buckets from the top down until
+        // they fill what the young leave of the batch; the histogram restarts.
+        if (gi2_world_mode() == 3u && GI2_SC_SCHED) {
+            uint budget = GI2_CACHE_BATCH - min(gi2_young_count(), GI2_CACHE_BATCH);
+            uint acc = 0u;
+            uint thr = 0u;
+            for (int b = int(GI2_SC_BUCKETS) - 1; b >= 0; b--) {
+                acc += ckeys.key[GI2_SC_HIST_AT + uint(b)];
+                ckeys.key[GI2_SC_HIST_AT + uint(b)] = 0u;
+                if (acc >= budget && thr == 0u) {
+                    thr = uint(b);
+                }
+            }
+            ckeys.key[GI2_SC_THR_AT] = thr;
+        }
     }
     uint slot = gi2_cache_batch_slot(j);
     if (slot == ~0u) {
@@ -47,6 +62,9 @@ void main() {
         e += gi2_ray_light(v) * max(dot(dir, n), 0.0);
     }
     e *= GI2_TAU / float(GI2_CACHE_RAYS);
+    if (gi2_world_mode() == 3u) {
+        cache.v[GI2_SC_OBJ_AT + slot].y = uintBitsToFloat(gi2_frame());
+    }
     vec4 old = cache.v[3u * slot + 2u];
     float lo = dot(old.rgb, vec3(0.2126, 0.7152, 0.0722));
     float ln = dot(e, vec3(0.2126, 0.7152, 0.0722));

@@ -81,6 +81,19 @@ uint gi2_mature_count() {
     return min(ckeys.key[GI2_CACHE_SLOTS], GI2_CACHE_SLOTS);
 }
 
+// Surface cache scheduler (Lumen's surface cache update priority, FLumenCard
+// LastUsed - LastUpdated, under a fixed budget): each compact pass buckets the
+// priority of every texel it could relight into GI2_SC_BUCKETS log buckets and
+// lists those at or above the threshold the cache pass set from the previous
+// round's histogram, so the batch takes the most stale-for-their-use texels
+// first. GIBS (2021) weighs a texel still short of its cap up (more effort where
+// the estimate is unconverged) and a dormant one down. ckeys after the young
+// count: the histogram, then the threshold.
+const bool GI2_SC_SCHED = true;
+const uint GI2_SC_BUCKETS = 64u;
+const uint GI2_SC_HIST_AT = 2u * GI2_CACHE_SLOTS + 2u;
+const uint GI2_SC_THR_AT = GI2_SC_HIST_AT + GI2_SC_BUCKETS;
+
 // World irradiance cells (experiment, GENOS_GI2_WORLD): the change block's head w
 // is mode * 1000 + cap. Mode 1: pixels read the light cache's patches,
 // interpolated; mode 2: screen probes average their irradiance into the patch they
@@ -168,6 +181,10 @@ const uint GI2_WORLD_AT = 3u * GI2_CACHE_SLOTS;
 const uint GI2_SC_EST_AT = 4u * GI2_CACHE_SLOTS;
 // Object id + 1 of a texel keyed in a mover's frame (0: a world texel).
 const uint GI2_SC_OBJ_AT = 6u * GI2_CACHE_SLOTS;
+// Frame of a texel's last relight (0: never), beside its object id.
+uint gi2_sc_updated(uint slot) {
+    return floatBitsToUint(cache.v[GI2_SC_OBJ_AT + slot].y);
+}
 // Set while a lookup runs in a mover's frame: id + 1 salts the key.
 float gi2_obj_salt = 0.0;
 
