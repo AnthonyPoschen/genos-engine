@@ -250,6 +250,12 @@ const uint GI2_LS_AT = GI2_SC_HIST_AT + 9000u;
 const uint GI2_LS_RING = 2048u;
 const float GI2_LS_EPS = 0.05;
 const float GI2_LS_MAX = 16.0;
+// S62F: off. One scale for a texel's whole value also scales the light lamps
+// bounced into it: the stress room at night (lamp-lit) went to half its light on
+// the first frame (daynight check, first-frame error 0.49). Needs the cache's
+// sun/sky share kept apart from the lamps' (queued). The ratio still drives the
+// refresh of unread texels (gi2_compact.comp).
+const bool GI2_LS_RESCALE = false;
 float gi2_global_light() {
     float s = max(max(scene.sky.r, scene.sky.g), scene.sky.b);
     uint n = scene.lamp_count;
@@ -925,7 +931,7 @@ void gi2_sc_pool(uint slot) {
 vec4 gi2_sc_shown(uint slot) {
     vec3 pooled = gi2_unpack_rgb9e5(floatBitsToUint(cache.v[GI2_WORLD_AT + slot].y));
     vec4 own = cache.v[3u * slot + 2u];
-    float ls = gi2_world_mode() == 3u ? gi2_ls_ratio(gi2_sc_updated(slot)) : 1.0;
+    float ls = GI2_LS_RESCALE && gi2_world_mode() == 3u ? gi2_ls_ratio(gi2_sc_updated(slot)) : 1.0;
     if (any(greaterThan(pooled, vec3(0.0)))) {
         return vec4(pooled * ls, 1.0);
     }
@@ -1276,7 +1282,9 @@ vec4 gi2_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             vec4 rs = gi2_sc_resample(q, n, size, slot);
             if (rs.w > 0.5) {
                 // S62E: the seed is light as of now; stored in the slot's scale.
-                rs.rgb /= max(gi2_ls_ratio(gi2_sc_updated(slot)), 1.0e-3);
+                if (GI2_LS_RESCALE) {
+                    rs.rgb /= max(gi2_ls_ratio(gi2_sc_updated(slot)), 1.0e-3);
+                }
                 cache.v[3u * slot + 2u] = rs;
             }
         }

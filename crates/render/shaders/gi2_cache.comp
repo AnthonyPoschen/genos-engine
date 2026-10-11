@@ -103,7 +103,7 @@ void main() {
     }
     e *= GI2_TAU / rays;
     vec4 old = cache.v[3u * slot + 2u];
-    if (gi2_world_mode() == 3u && old.w > 0.5) {
+    if (GI2_LS_RESCALE && gi2_world_mode() == 3u && old.w > 0.5) {
         // S62E: carry the history to the global light of now (sun, sky).
         float ls = gi2_ls_ratio(prev_updated);
         if (abs(ls - 1.0) > 1.0e-3) {
