@@ -42,7 +42,7 @@ void main() {
         // cache around them was darker while they took their first sets) still
         // reaches them.
         if ((gi2_sc_flags() & 8192u) != 0u && read) {
-            growing = true;
+            growing = (gi2_sc_flags() & 262144u) == 0u || t < GI2_SC_HOLD * gi2_sc_cap(slot) - 0.5;
         }
         // Flag 1024: while the light changes only the patches ray hits read (25 cm
         // and up, flag 256) are relit, as in the other modes; pixels show the probes.

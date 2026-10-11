@@ -70,9 +70,16 @@ void main() {
         // noise is that of 0.56 n sets).
         float k = t + 1.0;
         float w = (gi2_sc_flags() & 1u) != 0u ? 6.0 * k / ((k + 1.0) * (2.0 * k + 1.0)) : 2.0 / (k + 1.0);
-        vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * w;
         float cap = gi2_sc_cap(slot);
-        float next = min(t + 1.0, cap);
+        // Flag 262144 (with 8192): past the cap a texel keeps a plain mean of its
+        // later sets (weight 1 / (k + 1)) up to GI2_SC_HOLD caps, then holds: its
+        // shimmer fades as 1 / k and stops, the bounce that came in late is kept.
+        bool hold = (gi2_sc_flags() & (8192u | 262144u)) == (8192u | 262144u);
+        if (hold && t >= cap - 0.5) {
+            w = 1.0 / (k + 1.0);
+        }
+        vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * w;
+        float next = min(t + 1.0, hold ? GI2_SC_HOLD * cap : cap);
         // Second pass: the first time a texel reaches the cap its sets drop to a
         // quarter (value kept), so the sets taken while the cache around it was
         // still dark weigh less (world slot w marks the pass done).

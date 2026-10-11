@@ -456,6 +456,17 @@ fn run() -> Result<(), String> {
     } else {
         Window::open_named(width, height, "genos-stress", "Genos lighting stress")?
     };
+    // Window title: what this run is (GENOS_TITLE_TAG from gi-check: binary, GI,
+    // world mode, flags, test), and REF while a reference renders. The app id the
+    // compositor rules match does not change.
+    let title_base = match std::env::var("GENOS_TITLE_TAG") {
+        Ok(tag) if opts.proof => format!("Genos Engine | {tag}"),
+        _ => String::new(),
+    };
+    let mut title_ref = false;
+    if !title_base.is_empty() {
+        window.set_title(&title_base);
+    }
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let host = genos_mcp::Host::new(stage.world.scene.clone(), camera.clone());
@@ -511,6 +522,13 @@ fn run() -> Result<(), String> {
         });
         clock = Some(now);
         let frame = window.pump();
+        if !title_base.is_empty() {
+            let rendering = genos_debug::reference::RENDERING.load(std::sync::atomic::Ordering::SeqCst) > 0;
+            if rendering != title_ref {
+                title_ref = rendering;
+                window.set_title(&if rendering { format!("{title_base} | REF") } else { title_base.clone() });
+            }
+        }
         if frame.closing {
             break;
         }

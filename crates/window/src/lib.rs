@@ -46,6 +46,7 @@ extern "C" {
     fn genos_window_pump_size() -> c_int;
     fn genos_window_set_pointer_capture(window: *mut c_void, capture: c_int) -> c_int;
     fn genos_window_set_fullscreen(window: *mut c_void, fullscreen: c_int) -> c_int;
+    fn genos_window_set_title(window: *mut c_void, title: *const i8) -> c_int;
     fn genos_window_destroy(window: *mut c_void);
 }
 
@@ -124,6 +125,13 @@ impl Window {
             surface: pump.surface,
             hub: EventHub::from_frame(&frame),
         })
+    }
+
+    /// Change the window title (the app id, which the compositor rules match, stays).
+    pub fn set_title(&mut self, title: &str) {
+        if let Ok(t) = std::ffi::CString::new(title) {
+            unsafe { genos_window_set_title(self.raw, t.as_ptr()) };
+        }
     }
 
     pub fn pump(&mut self) -> Frame {

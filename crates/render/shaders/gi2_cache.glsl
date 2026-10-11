@@ -112,6 +112,8 @@ const float GI2_SC_MOVING = 2.0;
 const float GI2_SC_LIGHT = 8.0;
 // Sets a texel only rays read (not on screen) grows to.
 const float GI2_SC_HIT_CAP = 8.0;
+// Flag 262144: caps of sets a texel takes past the cap before it holds.
+const float GI2_SC_HOLD = 4.0;
 // Flag 32: a texel's share of its pixels against the probes, sets / (sets + this).
 const float GI2_SC_TRUST_SETS = 6.0;
 

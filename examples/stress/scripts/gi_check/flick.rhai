@@ -14,6 +14,9 @@ knob("dynamic", 0.0);
 knob("gi", __GI__);
 camera(#{ position: [12.0, 1.6, 20.5], look_at: [22.0, 1.2, 20.5] });
 for k in 0..4 { try { wait_settled(#{ timeout_frames: 600 }); break; } catch (e) { log(`settle ${k}: ${e}`); } }
+// Still shimmer: nothing moving, camera still, settled; 60 frames to still/.
+// gi-check scores the frame-to-frame change (light that should hold).
+flicker(#{ frames: 60, threshold: 0.004, frames_dir: "__DIR__/still" });
 knob("dynamic", 50.0);
 knob("boxes", "move");
 wait(30);
