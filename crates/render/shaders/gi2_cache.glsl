@@ -1185,7 +1185,11 @@ uint gi2_sc_interval(uint slot, float t) {
         return 0u;
     }
     vec4 b = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
-    if (t < GI2_SC_FULL_SETS - 0.5 || b.x <= 0.0) {
+    // S64C: not yet settled (gi2_sc_settled: the perceptual stop or the full
+    // sets with agreement) = due every round. S64A asked for GI2_SC_FULL_SETS
+    // sets as well, which texels the perceptual stop settles early never
+    // reach: nothing ever waited (stats: waiting 0).
+    if (!gi2_sc_settled(slot, t)) {
         return 0u;
     }
     bool mover;
@@ -1193,7 +1197,7 @@ uint gi2_sc_interval(uint slot, float t) {
         return 0u;
     }
     float iv = GI2_SC_RATE_SLOW / (1.0 + GI2_SC_RATE_K * max(b.y, 0.0));
-    if (gi2_sc_settled(slot, t) && (gi2_sc_flags() & 1048576u) != 0u && t >= gi2_sc_cap(slot) - 0.5 && gi2_sc_dormant(slot)) {
+    if ((gi2_sc_flags() & 1048576u) != 0u && t >= gi2_sc_cap(slot) - 0.5 && gi2_sc_dormant(slot)) {
         iv = GI2_SC_RATE_DORMANT;
     }
     if (!gi2_sc_light_quiet()) {
