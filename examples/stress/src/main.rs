@@ -58,8 +58,9 @@ const USAGE: &str = "genos-stress [options]
   --sweep-dynamic LIST      benchmark dynamic shares (default 0,25,100)
   --sweep-scales LIST       benchmark scales (default small,big)
   --bench-out PATH          also write the tables to PATH
-  --gltf FILE               place a glTF 2.0 model (.gltf/.glb) in the building (mean
-                            material colour; lit, but casts no shadow yet); repeatable
+  --gltf FILE               place a model (.gltf/.glb, .fbx binary or ASCII, .obj with
+                            its .mtl) in the building (mean material colour; lit, but
+                            casts no shadow yet); repeatable. --model is the same
   --gltf-at X Y Z SCALE     where the following --gltf models go (default 0 0 0 1)
   --script FILE             run a rhai debug script (docs/systems/debugging.md); scene time
                             steps 1/60 s a frame; exit 0 when every check passes
@@ -239,7 +240,7 @@ fn options() -> Result<Options, String> {
                     *slot = parse(&arg, &value()?)?;
                 }
             }
-            "--gltf" => opts.gltf.push((PathBuf::from(value()?), gltf_at)),
+            "--gltf" | "--model" => opts.gltf.push((PathBuf::from(value()?), gltf_at)),
             "--report" => report = Some(PathBuf::from(value()?)),
             "--trace" => trace = true,
             "--help" | "-h" => {
@@ -407,7 +408,7 @@ fn run() -> Result<(), String> {
     stage.sky_on = !opts.no_sky;
     stage.boxes_still = opts.still_boxes;
     for (path, [x, y, z, scale]) in &opts.gltf {
-        let model = genos_load::load_gltf_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let model = genos_load::load_model_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut place = [0.0; 16];
         place[0] = *scale;
         place[5] = *scale;

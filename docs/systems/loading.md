@@ -20,6 +20,8 @@ A mesh is triangles from a Wavefront OBJ file. A material is a flat color and an
 
 A glTF 2.0 scene (`.gltf` or `.glb`) is meshes, metallic-roughness materials, decoded images and placed instances. A mesh has primitives: indexed triangles with positions, normals, `TEXCOORD_0` and tangents, and one material. An instance is a mesh and its node's world matrix (column-major, as glTF stores it).
 
+An OBJ with its MTL files and an FBX file (binary or ASCII, version 7) load into the same scene shape. `load_model_file` picks the format from the bytes and the extension.
+
 An animation is timed transform keys. Rotation is a quaternion in x, y, z, w order. `Quat::slerp` takes the short arc when the dot product is negative.
 
 PCM is 16-bit, mono or stereo. Samples are interleaved. A font glyph has a horizontal advance and a simple outline in font units.
@@ -35,6 +37,7 @@ The crate is `crates/load`, package `genos-load`.
 - `load_gltf` and `load_gltf_file` read glTF 2.0 in `src/gltf.rs`. JSON comes from the `genos-json` crate (`crates/json`), shared with the MCP server. `cargo run -p genos-load --example gltf_info -- file.glb` prints what a file holds.
 - `load_texture` and `load_texture_map` start in `src/lib.rs`. The map parser is in `src/texture.rs`.
 - `load_mesh` reads OBJ text in `src/mesh.rs`.
+- `load_obj_scene` reads OBJ and MTL into a scene in `src/obj_scene.rs`. `load_fbx` reads FBX in `src/fbx.rs`. `load_model_file` chooses glTF, FBX or OBJ. `cargo run -p genos-load --example model_info -- FILE...` prints the meshes, triangles, materials, images and bounds of each file.
 - `load_material` reads the material text in `src/material.rs`.
 - `load_animation` reads keys in `src/animation.rs`. Rotation uses `genos-math` `Quat::slerp`.
 - `load_pcm` reads WAV data in `src/wav.rs`.
@@ -73,7 +76,11 @@ PNG images are 8-bit and not interlaced. Each edge is at most 8192 pixels. JPEG 
 
 glTF: triangle lists, strips and fans; points and lines are skipped. A primitive without normals gets flat normals (its vertices are unwelded). Sparse accessors, `byteStride`, normalized integers, `data:` URIs and `KHR_materials_emissive_strength` are read. A file that requires any other extension (Draco, meshopt, KHR_texture_basisu, texture transforms) is refused. Skins, morph targets, animations, cameras and lights are ignored. Only `TEXCOORD_0` is kept. Images decode on load, single-threaded (Sponza: 69 images, about 4 s in release); the bake cache keeps the result.
 
-FBX is not decoded. A face with more than three vertices becomes a triangle fan.
+OBJ scene: `v`, `vt`, `vn`, `f`, `usemtl` and `mtllib` are read. Other tags are skipped. Corners with the same indices are welded. One primitive is made per material. A face without normals gets its flat normal. `v` is flipped to the glTF convention. MTL: `Kd`, `Ke`, `Ns` (roughness sqrt(2 / (Ns + 2))), `d` and `Tr` (blend), `map_Kd`, `map_Ke`, and `map_Bump`, `bump` and `norm`. Metallic is 0. A map that is missing, or is not PNG or JPEG, is left off. `load_mesh` stays strict, and it returns an error on tags it does not know.
+
+FBX: binary (32- and 64-bit records, zlib arrays) and ASCII, version 7. It reads `Geometry` meshes from the first normal, UV and material layers, in every mapping and reference mode. It reads the `Model` transforms with the FBX SDK formula: pre- and post-rotation, Euler order, pivots, offsets, geometric transforms and parents. It reads `Material` colours, opacity and shininess. Diffuse, normal and emissive textures come from embedded `Video` content or a file next to the model. The `GlobalSettings` axes and unit scale are applied, so the scene is Y up, in metres. Skins, blend shapes, animation, cameras, lights, NURBS and the property-template defaults are not read. A face with more than three vertices becomes a triangle fan.
+
+The stress tool places any of these with `--gltf FILE` (or `--model FILE`).
 
 The material stores a file name. It does not sample that texture.
 

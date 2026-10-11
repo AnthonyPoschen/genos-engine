@@ -6,11 +6,13 @@
 mod animation;
 mod bin;
 mod error;
+mod fbx;
 mod gltf;
 mod inflate;
 mod jpeg;
 mod material;
 mod mesh;
+mod obj_scene;
 mod png;
 mod source;
 mod texture;
@@ -59,6 +61,56 @@ pub fn load_gltf_file(path: impl AsRef<std::path::Path>) -> Result<GltfScene, Lo
 /// Decode a PNG or a JPEG into an RGBA8 image. The format comes from the bytes.
 pub fn load_image(source: &dyn ByteSource) -> Result<Image, LoadError> {
     decode_image(&read(source)?)
+}
+
+fn sibling_resolver(
+    path: &std::path::Path,
+) -> impl Fn(&str) -> Result<Vec<u8>, LoadError> {
+    let dir = path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    move |uri: &str| FileSource::new(dir.join(uri)).read_bytes()
+}
+
+/// Decode a Wavefront OBJ with its MTL materials as a scene (one mesh, one
+/// primitive per material). `resolve` reads `mtllib` files and texture maps.
+pub fn load_obj_scene(
+    source: &dyn ByteSource,
+    resolve: &dyn Fn(&str) -> Result<Vec<u8>, LoadError>,
+) -> Result<GltfScene, LoadError> {
+    obj_scene::decode_obj_scene(&read(source)?, resolve)
+}
+
+/// Decode a binary FBX (7.x) as a scene: meshes, materials, textures and
+/// placed instances, Y up, in metres. `resolve` reads texture files that are
+/// not embedded.
+pub fn load_fbx(
+    source: &dyn ByteSource,
+    resolve: &dyn Fn(&str) -> Result<Vec<u8>, LoadError>,
+) -> Result<GltfScene, LoadError> {
+    fbx::decode_fbx(&read(source)?, resolve)
+}
+
+/// Decode a model file by its contents: glTF (`.gltf` JSON or `.glb`), binary
+/// FBX, or OBJ (anything else that parses as OBJ). Relative files are read
+/// from the model's directory.
+pub fn load_model_file(path: impl AsRef<std::path::Path>) -> Result<GltfScene, LoadError> {
+    let path = path.as_ref();
+    let bytes = FileSource::new(path).read_bytes()?;
+    let resolve = sibling_resolver(path);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if bytes.starts_with(b"glTF") || ext == "gltf" || ext == "glb" {
+        gltf::decode_gltf(&bytes, &resolve)
+    } else if bytes.starts_with(b"Kaydara FBX Binary") || ext == "fbx" {
+        fbx::decode_fbx(&bytes, &resolve)
+    } else {
+        obj_scene::decode_obj_scene(&bytes, &resolve)
+    }
 }
 
 /// Decode PNG or JPEG bytes into an RGBA8 image.
