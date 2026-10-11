@@ -22,10 +22,16 @@ const TURN_SCRIPT: &str = include_str!("../../scripts/gi_check/turn.rhai");
 const MIX_SCRIPT: &str = include_str!("../../scripts/gi_check/mix.rhai");
 const ROOM_SCRIPT: &str = include_str!("../../scripts/gi_check/room.rhai");
 const APPROACH_SCRIPT: &str = include_str!("../../scripts/gi_check/approach.rhai");
+const DNOUT_SCRIPT: &str = include_str!("../../scripts/gi_check/dnout.rhai");
+/// Day to night on open ground: first frame after the pan against the night pose
+/// settled (4eb10b86 1.43 before the cache kept its sun/sky share, 0f288334
+/// 0.065), and frames until the error stays under 2 % (a target, not a gate).
+const DNOUT_FIRST_LIMIT: f64 = 0.10;
+const DNOUT_FRAMES_TARGET: f64 = 120.0;
 const ROOM_SCENE: &str = include_str!("../../scenes/room.rhai");
-const RUNS: [&str; 14] = [
+const RUNS: [&str; 15] = [
     "repro", "settled", "moving", "walk", "flicker", "camera", "trail", "flick", "turn", "room",
-    "mix", "spin", "lampret", "approach",
+    "mix", "spin", "lampret", "approach", "dnout",
 ];
 const FLICKER_SCRIPT: &str = include_str!("../../scripts/temporal_flicker_aligned.rhai");
 const VIEWS: [&str; 5] = ["room-a", "corner", "contact", "lamp-wall", "hall"];
@@ -171,6 +177,42 @@ const APPROACH_ONSET_LIMIT: f64 = 0.0045;
 const APPROACH_RECOVER_GRAIN: f64 = 0.003;
 const APPROACH_RECOVER_LIMIT: f64 = 120.0;
 const APPROACH_END_LIMIT: f64 = 0.016;
+fn dnout_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
+    let refp = metrics::lum640(&dir.join("ref.png"))?;
+    let base = metrics::rel_base(&refp);
+    let mut errs = Vec::new();
+    for n in [1usize, 4, 8, 16, 30, 60, 120, 240, 480] {
+        let p = dir.join(format!("t{n}.png"));
+        if p.exists() {
+            let m = metrics::lum640(&p)?;
+            errs.push((n, metrics::rel_mean(&metrics::rel_error(&m, &refp), &base)));
+        }
+    }
+    let Some(&(_, first)) = errs.first() else {
+        return Err(format!("gi-check: no dnout frames in {}", dir.display()));
+    };
+    let settle = (0..errs.len())
+        .find(|&i| errs[i..].iter().all(|&(_, e)| e < 0.02))
+        .map_or(960.0, |i| errs[i].0 as f64);
+    let curve: Vec<String> = errs.iter().map(|(n, e)| format!("{n}:{e:.3}")).collect();
+    println!("dnout error by frame: {}", curve.join(" "));
+    rows.push(Row {
+        check: "day to night pan: first frame".into(),
+        value: first,
+        limit: DNOUT_FIRST_LIMIT,
+        note: curve.join(" "),
+        image: dir.join("t1.png"),
+    });
+    rows.push(Row {
+        check: "day to night pan: frames to < 2 % (target)".into(),
+        value: settle,
+        limit: DNOUT_FRAMES_TARGET,
+        note: String::new(),
+        image: dir.join("t30.png"),
+    });
+    Ok(())
+}
+
 fn approach_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
     let (mut sum, mut n, mut worst, mut worst_at, mut onset, mut rel_sum) = (0.0, 0usize, 0.0f64, 0usize, 0.0f64, 0.0);
     let mut notes = Vec::new();
@@ -388,14 +430,14 @@ fn tier(o: &mut Options, name: &str) -> Result<(), String> {
             // moving checks; the 90-pose camera clip (45 s) was cut 2026-10-10: the
             // turn run covers camera motion in a third of the time and caught what
             // the clip missed (the turn swim).
-            &["repro", "settled", "trail", "flick", "turn", "room", "mix", "spin", "approach"]
+            &["repro", "settled", "trail", "flick", "turn", "room", "mix", "spin", "approach", "dnout"]
         }
         "mid" => {
             o.stride = 2;
-            &["repro", "settled", "moving", "camera", "trail", "flick", "turn", "room", "mix", "spin", "approach"]
+            &["repro", "settled", "moving", "camera", "trail", "flick", "turn", "room", "mix", "spin", "approach", "dnout"]
         }
         "full" => &[
-            "repro", "settled", "moving", "camera", "trail", "flick", "turn", "room", "mix", "spin", "approach", "flicker",
+            "repro", "settled", "moving", "camera", "trail", "flick", "turn", "room", "mix", "spin", "approach", "dnout", "flicker",
         ],
         other => return Err(format!("gi-check: --tier quick, mid or full, not {other}")),
     };
@@ -439,6 +481,7 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
         "turn" => (fill(TURN_SCRIPT), &o.size),
         "room" => (fill(ROOM_SCRIPT), &o.size),
         "approach" => (fill(APPROACH_SCRIPT), &o.size),
+        "dnout" => (fill(DNOUT_SCRIPT), &o.size),
         "mix" => (fill(&MIX_SCRIPT.replace("__SEGS__", "mix")), &o.size),
         "spin" => (fill(&MIX_SCRIPT.replace("__SEGS__", "spin")), &o.size),
         "lampret" => (fill(&MIX_SCRIPT.replace("__SEGS__", "lampret")), &o.size),
@@ -514,6 +557,7 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
 const TARGET_CHECKS: &[&str] = &[
     "room turn swim, large scale (48 px)",
     "room light structure (smoothed 8 px)",
+    "day to night pan: frames to < 2 % (target)",
 ];
 
 struct Row {
@@ -732,6 +776,7 @@ fn score_run(o: &Options, out: &Path, run: &str, rows: &mut Vec<Row>) -> Result<
             "spin" => spin_rows(rows, &dir)?,
             "lampret" => lampret_rows(rows, &dir)?,
             "approach" => approach_rows(rows, &dir)?,
+            "dnout" => dnout_rows(rows, &dir)?,
             _ => {
                 let text = std::fs::read_to_string(dir.join("report.md"))
                     .map_err(|e| format!("{}: {e}", dir.display()))?;
