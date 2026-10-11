@@ -156,7 +156,7 @@ const uint GI2_WRC_BURST_MAX = 2048u;
 // accumulated temporally) from its own list of at most GI2_SC_TRICKLE entries a
 // round. The rest are ranked by how much their light changes and take whole sets
 // from the main batch, so a big change syncs in a few rounds. Both are ceilings.
-const float GI2_SC_TRICKLE_THR = 0.3;
+const float GI2_SC_TRICKLE_THR = 0.173;
 const float GI2_SC_LAMP_K = 1.0;
 // S65C anti-lag (ReBLUR / A-SVGF): a set further than GI2_SC_ANTILAG_SD standard
 // deviations from the history pulls the blend up in proportion (to 1 at 4x),
