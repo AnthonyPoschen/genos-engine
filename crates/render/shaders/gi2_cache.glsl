@@ -93,6 +93,24 @@ uint gi2_mature_count() {
 // the estimate is unconverged) and a dormant one down. ckeys after the young
 // count: the histogram, then the threshold.
 const bool GI2_SC_SCHED = true;
+// World space radiance cache (WRC, S61A; Lumen's world space radiance cache,
+// SHaRC's hash grid): the 25 cm ray-hit cells. Kept resident and converging
+// around the camera, on screen or not, so a surface revealed by a turn or a
+// corner starts from converged light: each round GI2_WRC_SCOUT_ENTRIES batch
+// entries trace scout rays from the camera (half spread over the sphere, half
+// ahead of the motion and turn, a quarter of them from up to 2 m beside the eye
+// to see round corners); their hits claim and read WRC cells, which the
+// scheduler then relights like any other. A WRC cell keeps a running mean to
+// GI2_WRC_CAP sets (was: each relight replaced it, at most 3 sets). A WRC cell a
+// pixel needs as a seed (its fine texel has no light) with fewer than
+// GI2_WRC_YOUNG sets is relit first with whole sets (the reveal burst); new fine
+// texels start from the WRC (bilinear, coplanar cells only) with at most
+// GI2_WRC_SEED_SETS sets and take their turn by priority.
+const uint GI2_WRC_SCOUT_ENTRIES = 256u;
+const float GI2_WRC_CAP = 32.0;
+const float GI2_WRC_YOUNG = 4.0;
+const float GI2_WRC_SEED_SETS = 8.0;
+const float GI2_WRC_NEAR = 6.0;
 const uint GI2_SC_BUCKETS = 64u;
 const uint GI2_SC_HIST_AT = 2u * GI2_CACHE_SLOTS + 2u;
 const uint GI2_SC_THR_AT = GI2_SC_HIST_AT + GI2_SC_BUCKETS;
@@ -328,7 +346,14 @@ void gi2_sc_offer(uint slot, vec3 at, vec3 centre) {
 vec4 gi2_sc_parent(vec3 pos, vec3 n, float size) {
     [[dont_unroll]] for (uint l = 0u; l < 2u; l++) {
         size *= 2.0;
-        uint s = gi2_cache_find_sized(pos, n, false, size, pos);
+        // The WRC cell (25 cm) is claimed if missing and marked as a seed a
+        // pixel needs (the reveal burst, gi2_compact.comp).
+        bool seed = gi2_world_mode() == 3u && l == 0u && size > 0.2;
+        uint s = gi2_cache_find_sized(pos, n, seed, size, pos);
+        if (s != ~0u && seed) {
+            cache.v[3u * s].w = uintBitsToFloat(gi2_frame());
+            cache.v[GI2_WORLD_AT + s].z = uintBitsToFloat(gi2_frame());
+        }
         if (s != ~0u) {
             vec4 v = cache.v[3u * s + 2u];
             if (v.w > 0.5) {
@@ -383,6 +408,10 @@ vec4 gi2_sc_bilerp_sized(vec3 pos, vec3 n, float size) {
             continue;
         }
         vec4 v = cache.v[3u * s + 2u];
+        // Only cells on the same plane (a step or a ledge is another surface).
+        if (abs(dot(cache.v[3u * s].xyz - pos, n)) > 0.1) {
+            continue;
+        }
         if (v.w > 0.5 && fract(v.w) < 0.1) {
             cache.v[3u * s].w = uintBitsToFloat(gi2_frame());
             sum += bil * gi2_sc_shown(s).rgb;
@@ -420,7 +449,7 @@ vec4 gi2_sc_resample(vec3 pos, vec3 n, float size, uint slot) {
     // Near a change (an object moved, came or went) or under changing light the
     // light it starts from may be stale (a box's shadow where it stood): a short
     // count, so its own sets replace it fast.
-    float cap = gi2_sc_cap(slot);
+    float cap = min(gi2_sc_cap(slot), GI2_WRC_SEED_SETS);
     bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
     if ((urgent && gi2_near_change(pos)) || !gi2_sc_light_quiet()) {
         cap = min(cap, GI2_SC_RESAMPLE_SETS);
@@ -612,6 +641,9 @@ float gi2_sc_count(uint slot) {
 }
 
 float gi2_sc_cap(uint slot) {
+    if (gi2_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2) {
+        return GI2_WRC_CAP;
+    }
     float cap = max(gi2_world_cap(), 1.0);
     if ((gi2_sc_flags() & 16u) != 0u && cache.v[3u * slot + 1u].w < 0.1) {
         cap *= 2.0;
@@ -823,7 +855,10 @@ uint gi2_live_count() {
 // Slot of this round's batch entry j, or ~0u when the batch has no entry j: the
 // young first, then the mature ones in turn.
 uint gi2_cache_batch_slot(uint j) {
-    uint first = min(gi2_young_count(), GI2_CACHE_BATCH);
+    if (gi2_world_mode() == 3u && j >= GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES) {
+        return ~0u;
+    }
+    uint first = min(gi2_young_count(), GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES);
     if (j < first) {
         return ckeys.key[2u * GI2_CACHE_SLOTS - j];
     }
@@ -865,6 +900,10 @@ const float GI2_SC_FULL_INC = 1.0;
 // estimator restarts every relight, so nothing settles: whole sets throughout.
 bool gi2_sc_settled(uint slot, float t) {
     float reach = gi2_sc_light_quiet() ? GI2_SC_FULL_SETS : max(gi2_sc_light_window(), 2.0);
+    if (cache.v[3u * slot + 1u].w > 0.2) {
+        // A WRC cell: settled at its cap (or the window under changing light).
+        return floor(t) >= (gi2_sc_light_quiet() ? GI2_WRC_CAP : max(gi2_sc_light_window(), 2.0)) - 0.5;
+    }
     vec4 b = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
     return floor(t) >= reach - 0.5 && b.x > 0.0 && b.y < GI2_SC_SETTLE_SD;
 }
@@ -876,6 +915,42 @@ uint gi2_sc_quarter0(uint slot) {
 }
 uint gi2_sc_entries(uint slot, bool full) {
     return (full || gi2_world_mode() != 3u) ? GI2_SC_QUARTERS - gi2_sc_quarter0(slot) : 1u;
+}
+// WRC scout ray s of this round (entries past the batch's texels): from the eye
+// (a quarter from up to 2 m beside it), half over the sphere and half within
+// ~50 degrees of where the camera is heading (forward, plus its motion and turn
+// since the last frame the probes ran).
+void gi2_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
+    uint h = gi2_hash(s * 0x9e3779b9u ^ gi2_round() * 0x85ebca6bu);
+    float u1 = gi2_unit(h);
+    float u2 = gi2_unit(h ^ 0x68e31da4u);
+    vec4 head_at = vec4(0.0);
+    vec3 eye = scene.eye.xyz;
+    vec3 fwd = normalize(scene.view_forward.xyz);
+    vec4 last_eye = work.v[gi2_change_at() + 1u];
+    vec3 last_fwd = work.v[gi2_change_at() + 4u].xyz;
+    vec3 ahead = fwd;
+    if (last_eye.w > 0.5 && dot(last_fwd, last_fwd) > 0.5) {
+        ahead = fwd + 8.0 * (eye - last_eye.xyz) + 4.0 * (fwd - normalize(last_fwd));
+    }
+    ahead = normalize(ahead + vec3(0.0, 1.0e-4, 0.0));
+    float z = (s & 1u) == 0u ? 1.0 - 2.0 * u1 : 1.0 - u1 * 0.36;
+    float r = sqrt(max(1.0 - z * z, 0.0));
+    float a = GI2_TAU * u2;
+    vec3 local = vec3(r * cos(a), r * sin(a), z);
+    if ((s & 1u) == 0u) {
+        dir = local;
+    } else {
+        vec3 t = normalize(abs(ahead.y) < 0.9 ? cross(ahead, vec3(0.0, 1.0, 0.0)) : cross(ahead, vec3(1.0, 0.0, 0.0)));
+        vec3 b = cross(ahead, t);
+        dir = normalize(t * local.x + b * local.y + ahead * local.z);
+    }
+    origin = eye;
+    if ((s & 3u) == 3u) {
+        float u3 = gi2_unit(h ^ 0x27d4eb2fu);
+        float b3 = GI2_TAU * gi2_unit(h ^ 0x165667b1u);
+        origin += vec3(cos(b3), 0.0, sin(b3)) * (2.0 * u3);
+    }
 }
 // Quarter of its set batch entry j (of slot) traces.
 uint gi2_cache_entry_quarter(uint j, uint slot) {

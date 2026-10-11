@@ -16,7 +16,8 @@ void main() {
         // Scheduler: the next round lists the buckets from the top down until
         // they fill what the young leave of the batch; the histogram restarts.
         if (gi2_world_mode() == 3u && GI2_SC_SCHED) {
-            uint budget = GI2_CACHE_BATCH - min(gi2_young_count(), GI2_CACHE_BATCH);
+            uint room = GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES;
+            uint budget = room - min(gi2_young_count(), room);
             uint acc = 0u;
             uint thr = 0u;
             for (int b = int(GI2_SC_BUCKETS) - 1; b >= 0; b--) {
@@ -109,8 +110,15 @@ void main() {
     }
     // Flag 131072: hit patches (25 cm and up) take each relight whole, as the
     // light cache of the other modes does (no running mean of sets).
-    if (gi2_world_mode() == 3u && (gi2_sc_flags() & 131072u) != 0u && cache.v[3u * slot + 1u].w > 0.2) {
-        cache.v[3u * slot + 2u] = vec4(e, min(max(old.w, 0.0) + 1.0, GI2_CACHE_MATURE));
+    if (gi2_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2) {
+        // World space radiance cache (S61A): a running mean to GI2_WRC_CAP sets,
+        // change-aware through gi2_sc_count (short near a change, the light
+        // window while the light changes); later sets weigh more (as the texels).
+        float t = old.w < 0.5 ? 0.0 : gi2_sc_count(slot);
+        float k = t + 1.0;
+        float w = (gi2_sc_flags() & 1u) != 0u ? 6.0 * k / ((k + 1.0) * (2.0 * k + 1.0)) : 2.0 / (k + 1.0);
+        vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * min(w, 1.0);
+        cache.v[3u * slot + 2u] = vec4(mean, min(t + 1.0, GI2_WRC_CAP));
         return;
     }
     if (gi2_world_mode() == 3u) {

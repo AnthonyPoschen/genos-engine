@@ -396,7 +396,14 @@ bool gi2_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
         return gi2_stratum_ray(ray / rays, gi2_stratum(), ray % rays, origin, dir, n);
     }
     uint r = ray - gi2_probe_rays();
-    uint slot = gi2_cache_batch_slot(r / GI2_CACHE_RAYS);
+    uint entry = r / GI2_CACHE_RAYS;
+    if (gi2_world_mode() == 3u && entry >= GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES) {
+        // A WRC scout ray: its hit claims and reads the WRC cell there.
+        gi2_wrc_scout(r - (GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES) * GI2_CACHE_RAYS, origin, dir);
+        n = dir;
+        return true;
+    }
+    uint slot = gi2_cache_batch_slot(entry);
     uint key = slot == ~0u ? 0u : ckeys.key[slot];
     // A patch claimed while the list was built may not have its surface yet.
     if (key == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {

@@ -64,8 +64,19 @@ void main() {
         // LastUpdated), times cap / sets (GIBS: unconverged first, at most 8x),
         // over GI2_SC_DORMANT when dormant; a texel nobody read since its relight
         // waits. Listed when its bucket reaches the threshold.
-        if (GI2_SC_SCHED && !(near || t < 1.5)) {
-            int used = int(last - gi2_sc_updated(slot));
+        // WRC cells (25 cm) a pixel needs as a seed this frame with fewer than
+        // GI2_WRC_YOUNG sets are the reveal burst: young, whole sets. New fine
+        // texels start from the WRC (gi2_sc_resample) and take their turn.
+        bool wrc = cache.v[3u * slot + 1u].w > 0.2;
+        bool burst = wrc && t < GI2_WRC_YOUNG - 0.5 && int(gi2_frame() - floatBitsToUint(cache.v[GI2_WORLD_AT + slot].z)) <= 2;
+        bool young_now = near || burst || (!GI2_SC_SCHED && t < 1.5);
+        if (GI2_SC_SCHED && !young_now) {
+            uint updated = gi2_sc_updated(slot);
+            int used = int(last - updated);
+            if (updated == 0u) {
+                // Never relit: as if read for a second since.
+                used = min(used, 60);
+            }
             if (int(gi2_frame() - last) > int(GI2_CACHE_LIFE)) {
                 atomicAdd(gstats.freed, 1u);
                 ckeys.key[slot] = 0u;
@@ -80,10 +91,14 @@ void main() {
             // Hit patches taking each relight whole (flag 131072) hold at most
             // GI2_CACHE_MATURE sets: they weigh against that, not the pixel cap
             // (S59C weighed them 8x for good and they took the budget).
-            bool whole = (gi2_sc_flags() & 131072u) != 0u && hit_patch;
-            float own_cap = whole ? GI2_CACHE_MATURE : cap;
-            float w = clamp(own_cap / max(t, 1.0), 1.0, 8.0);
-            if (!whole && !gi2_sc_settled(slot, t)) {
+            float w = clamp(cap / max(t, 1.0), 1.0, 8.0);
+            if (wrc) {
+                // WRC cells near the camera first (Lumen keeps the radiance cache
+                // densest around the eye).
+                float d = length(gi2_sc_texel_pos(slot) - scene.eye.xyz);
+                w *= d < GI2_WRC_NEAR ? 2.0 : 0.5;
+            }
+            if (!gi2_sc_settled(slot, t)) {
                 // Not settled: never below twice a settled texel's priority.
                 w = max(w, GI2_SC_UNSETTLED_W);
             }
@@ -116,7 +131,7 @@ void main() {
             }
             return;
         }
-        bool young = near || t < 1.5;
+        bool young = young_now;
         uint m = gi2_sc_entries(slot, true);
         if (young) {
             uint at = atomicAdd(ckeys.key[2u * GI2_CACHE_SLOTS + 1u], m);
