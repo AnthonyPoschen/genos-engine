@@ -346,11 +346,13 @@ vec4 gi2_sc_parent(vec3 pos, vec3 n, float size) {
 // send only change-detection rays).
 const uint GI2_SC_DORMANT = 8u;
 const float GI2_SC_DORMANT_SETS = 128.0;
+// Agreement a dormant texel needs (S59E: 0.3 -> 0.15 standard deviations).
+const float GI2_SC_DORMANT_SD = 0.15;
 bool gi2_sc_dormant(uint slot) {
     vec4 b = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
     // Only once its mean holds GI2_SC_DORMANT_SETS sets: a texel still warming
     // up keeps its full rate whatever its inconsistency says.
-    return b.x > 0.0 && b.y < 0.3 && b.w >= GI2_SC_DORMANT_SETS;
+    return b.x > 0.0 && b.y < GI2_SC_DORMANT_SD && b.w >= GI2_SC_DORMANT_SETS;
 }
 
 // Surface cache, flag 524288: a new texel's first light (Lumen's "resample
@@ -848,7 +850,13 @@ uint gi2_cache_batch_slot(uint j) {
 // variance high). The other modes take whole sets.
 const uint GI2_SC_SET_RAYS = 64u;
 const uint GI2_SC_QUARTERS = GI2_SC_SET_RAYS / GI2_CACHE_RAYS;
-const float GI2_SC_FULL_SETS = 32.0;
+// Tunables (S59E, Anthony: "bump up the quality before it settles"): whole sets
+// until GI2_SC_FULL_SETS sets AND agreement within GI2_SC_SETTLE_SD standard
+// deviations; an unsettled texel's priority is at least GI2_SC_UNSETTLED_W times
+// a settled one's; dormancy needs the same agreement at the cap.
+const float GI2_SC_FULL_SETS = 64.0;
+const float GI2_SC_SETTLE_SD = 0.15;
+const float GI2_SC_UNSETTLED_W = 4.0;
 const float GI2_SC_FULL_INC = 1.0;
 // Settled (S59D, Anthony: "settling too soon ... splotchy"): GI2_SC_FULL_SETS
 // whole sets in its mean (or, while the light changes, the whole window) AND the
@@ -858,7 +866,7 @@ const float GI2_SC_FULL_INC = 1.0;
 bool gi2_sc_settled(uint slot, float t) {
     float reach = gi2_sc_light_quiet() ? GI2_SC_FULL_SETS : max(gi2_sc_light_window(), 2.0);
     vec4 b = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
-    return floor(t) >= reach - 0.5 && b.x > 0.0 && b.y < 0.3;
+    return floor(t) >= reach - 0.5 && b.x > 0.0 && b.y < GI2_SC_SETTLE_SD;
 }
 uint gi2_sc_quarter0(uint slot) {
     if (gi2_world_mode() != 3u) {

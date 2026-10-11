@@ -85,7 +85,7 @@ void main() {
             float w = clamp(own_cap / max(t, 1.0), 1.0, 8.0);
             if (!whole && !gi2_sc_settled(slot, t)) {
                 // Not settled: never below twice a settled texel's priority.
-                w = max(w, 2.0);
+                w = max(w, GI2_SC_UNSETTLED_W);
             }
             if ((gi2_sc_flags() & 1048576u) != 0u && t >= cap - 0.5 && gi2_sc_dormant(slot)) {
                 w /= float(GI2_SC_DORMANT);
