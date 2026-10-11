@@ -17,6 +17,10 @@ for k in 0..4 { try { wait_settled(#{ timeout_frames: 600 }); break; } catch (e)
 // Still shimmer: nothing moving, camera still, settled; 60 frames to still/.
 // gi-check scores the frame-to-frame change (light that should hold).
 flicker(#{ frames: 60, threshold: 0.004, frames_dir: "__DIR__/still" });
+// Still drift: the same pose 600 frames later (light that creeps while nothing
+// moves, slower than a frame-to-frame change shows at 8 bits).
+wait(540);
+flicker(#{ frames: 2, threshold: 0.004, frames_dir: "__DIR__/drift" });
 knob("dynamic", 50.0);
 knob("boxes", "move");
 wait(30);

@@ -1208,7 +1208,7 @@ impl Gpu {
         // Surface cache switches (gi2_cache.glsl gi2_sc_flags).
         // Flags ride in head z above the probe-run bit (exact to 2^22); w keeps mode
         // * 1000 + cap (flags * 100000 there lost precision past 2^24 and was capped).
-        let flags = std::env::var("GENOS_GI2_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).min((1 << 21) - 1);
+        let flags = std::env::var("GENOS_GI2_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).min((1 << 23) - 1);
         block[2] = ((self.gi2.probe_runs & 1) + 2 * flags) as f32;
         block[3] = (world * 1000 + cap) as f32;
         match &changes {

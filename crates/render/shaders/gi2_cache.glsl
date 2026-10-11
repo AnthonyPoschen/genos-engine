@@ -252,15 +252,17 @@ void gi2_sc_offer(uint slot, vec3 at, vec3 centre) {
     if (gi2_world_mode() != 3u) {
         return;
     }
-    // Flag 524288 (camera only orders updates): once a texel has a set its point
-    // stays, so a camera move never restarts it (Lumen: card texels are fixed by
-    // the geometry, never by who looks).
-    if ((gi2_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w > 0.5) {
-        return;
-    }
+    // Flag 524288 (camera only orders updates): the point still moves toward the
+    // cell's centre (a fixed point of the geometry, as Lumen's card texels), but
+    // the sets taken so far are kept: a camera move never restarts a texel.
+    bool keep_sets = (gi2_sc_flags() & 524288u) != 0u;
     float d = length(at - centre);
     if (d < cache.v[GI2_WORLD_AT + slot].x - 1.0e-4) {
         cache.v[GI2_WORLD_AT + slot].x = d;
+        if (keep_sets) {
+            cache.v[3u * slot].xyz = at;
+            return;
+        }
         // Lit from far from here so far: its sets start again (value kept).
         float size = cache.v[3u * slot + 1u].w;
         if ((gi2_sc_flags() & 64u) == 0u && length(at - cache.v[3u * slot].xyz) > 0.3 * size) {
@@ -303,9 +305,10 @@ bool gi2_sc_dormant(uint slot) {
 
 // Surface cache, flag 524288: a texel claimed at another size than the one that
 // lit this spot before (the eye moved across a texel-size ring) starts from that
-// texel's light and count (up to 16 sets) instead of from nothing: Lumen's
+// texel's light and count (up to GI2_SC_RESAMPLE_SETS) instead of from nothing: Lumen's
 // "resample lighting on realloc" (SurfaceCache.ResampleLighting). w 0 when there
 // is no lit texel of the next sizes up or down.
+const float GI2_SC_RESAMPLE_SETS = 4.0;
 vec4 gi2_sc_resample(vec3 pos, vec3 n, float size) {
     [[dont_unroll]] for (uint l = 0u; l < 4u; l++) {
         float s2 = size * ((l & 1u) == 0u ? 2.0 : 0.5) * ((l & 2u) == 0u ? 1.0 : ((l & 1u) == 0u ? 2.0 : 0.5));
@@ -314,7 +317,7 @@ vec4 gi2_sc_resample(vec3 pos, vec3 n, float size) {
             vec4 v = cache.v[3u * s + 2u];
             if (v.w > 0.5 && fract(v.w) < 0.1) {
                 cache.v[3u * s].w = uintBitsToFloat(gi2_frame());
-                return vec4(v.rgb, min(floor(v.w), 16.0));
+                return vec4(v.rgb, min(floor(v.w), GI2_SC_RESAMPLE_SETS));
             }
         }
     }
@@ -325,6 +328,21 @@ vec4 gi2_sc_resample(vec3 pos, vec3 n, float size) {
 const float GI2_NEAR_CHANGE = 1.0;
 
 // A point within GI2_NEAR_CHANGE of an object that moved, came or went this frame.
+// A point inside the bounds of an object that moved, came or went this frame
+// (no margin).
+bool gi2_in_change(vec3 p) {
+    vec4 head = work.v[gi2_change_at()];
+    uint changes = head.y > 0.5 ? 0u : min(uint(head.x + 0.5), GI2_CHANGES);
+    [[dont_unroll]] for (uint c = 0u; c < changes; c++) {
+        vec4 b = work.v[gi2_change_at() + GI2_CHANGE_HEAD + c];
+        vec3 d = p - b.xyz;
+        if (dot(d, d) < b.w * b.w) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool gi2_near_change(vec3 p) {
     vec4 head = work.v[gi2_change_at()];
     uint changes = head.y > 0.5 ? 0u : min(uint(head.x + 0.5), GI2_CHANGES);
@@ -484,6 +502,11 @@ vec4 gi2_sc_shown(uint slot) {
 
 // Irradiance already bounced onto the surface at pos facing n (0 for a new patch).
 vec3 gi2_cache_irradiance(vec3 pos, vec3 n) {
+    // Flag 2097152 (diagnostic): no light from the cache at ray hits, so the
+    // picture has one bounce (compare with GENOS_GI_CHECK_BOUNCES=1 references).
+    if ((gi2_sc_flags() & 2097152u) != 0u) {
+        return vec3(0.0);
+    }
     float hsize = gi2_hit_size_n(pos, n);
     uint slot = gi2_cache_find_sized(pos, n, true, hsize, pos);
     if (slot == ~0u) {
@@ -567,6 +590,13 @@ void gi2_world_add(vec3 pos, vec3 n, vec3 e, bool changed) {
 // counted up to 4 samples).
 vec4 gi2_world_irradiance(vec3 pos, vec3 n) {
     uint mode = gi2_world_mode();
+    // Flag 4194304 (surface cache): a pixel on or inside the bounds of an object
+    // that moved this frame takes the screen probes, which trace it as it is now
+    // (Lumen: moving objects' light comes from the screen traces while their
+    // cards catch up), instead of world texels it is sweeping through.
+    if (mode == 3u && (gi2_sc_flags() & 4194304u) != 0u && gi2_in_change(pos)) {
+        return vec4(0.0);
+    }
     if (gi2_sc_slanted(n)) {
         return vec4(0.0);
     }

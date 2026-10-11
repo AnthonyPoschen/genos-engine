@@ -79,6 +79,9 @@ const FLICK_LIMIT: f64 = 0.0003;
 /// frame change per 4 x 4 block (linear luminance) over 60 frames. Held light does
 /// not change; a cache that keeps relighting shimmers.
 const STILL_SHIMMER_LIMIT: f64 = 0.0002;
+/// Still drift: mean |change| per 4 x 4 block between the first still frame and
+/// the same pose 600 frames later (flick.rhai drift/), linear luminance.
+const STILL_DRIFT_LIMIT: f64 = 0.0005;
 /// Turn run (turn.rhai, turn_rows): blob of the frame that arrives at the pose
 /// (turning at 3 degrees a frame, or walking) against the pose settled from a
 /// fresh start, and of the last of 30 frames held there. Set from 10ce430 (turns
@@ -312,6 +315,10 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
             .replace("__STRIDE__", &o.stride.max(1).to_string())
             .replace("__CLIP__", &o.clip.to_string())
             .replace("__DIR__", &dir.display().to_string())
+            // GENOS_GI_CHECK_BOUNCES=N: references with at most N bounces (a bounce
+            // split of the error; pair with GENOS_GI2_SC_FLAGS bit 2097152 for a
+            // one-bounce engine).
+            .replace("__BOUNCES__", &std::env::var("GENOS_GI_CHECK_BOUNCES").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(64).to_string())
     };
     let (script, size) = match run {
         "settled" | "moving" => (fill(VIEWS_SCRIPT), &o.size),
@@ -896,6 +903,33 @@ fn flick_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
             limit: STILL_SHIMMER_LIMIT,
             note: format!("worst frame pair {worst:.6}"),
             image: frame(dir, "still", still.len() - 1),
+        });
+    }
+    if !still.is_empty() && frame(dir, "drift", 1).exists() {
+        let end = metrics::lum320(&frame(dir, "drift", 1))?;
+        let a = &still[0];
+        let (w, h) = (a.w, a.h);
+        let (bw, bh) = (w / 4, h / 4);
+        let mut total = 0.0;
+        for by in 0..bh {
+            for bx in 0..bw {
+                let mut d = 0.0;
+                for y in by * 4..by * 4 + 4 {
+                    for x in bx * 4..bx * 4 + 4 {
+                        d += end.v[y * w + x] - a.v[y * w + x];
+                    }
+                }
+                total += (d / 16.0).abs();
+            }
+        }
+        let drift = total / (bw * bh) as f64;
+        println!("flick    still drift over 600 frames {drift:.6}");
+        rows.push(Row {
+            check: "still drift (600 frames, nothing moving)".into(),
+            value: drift,
+            limit: STILL_DRIFT_LIMIT,
+            note: "first still frame against 600 frames later".into(),
+            image: frame(dir, "drift", 1),
         });
     }
     let mut frames = Vec::new();
