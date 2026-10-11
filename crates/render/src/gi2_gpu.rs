@@ -1170,8 +1170,11 @@ impl Gpu {
             .unwrap_or(if world == 3 { 16 } else { 32 })
             .clamp(1, 999);
         // Surface cache switches (gi2_cache.glsl gi2_sc_flags).
-        let flags = std::env::var("GENOS_GI2_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).min(127);
-        block[3] = (flags * 100_000 + world * 1000 + cap) as f32;
+        // Flags ride in head z above the probe-run bit (exact to 2^22); w keeps mode
+        // * 1000 + cap (flags * 100000 there lost precision past 2^24 and was capped).
+        let flags = std::env::var("GENOS_GI2_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).min((1 << 21) - 1);
+        block[2] = ((self.gi2.probe_runs & 1) + 2 * flags) as f32;
+        block[3] = (world * 1000 + cap) as f32;
         match &changes {
             None => block[1] = 1.0,
             Some(list) => {
@@ -1229,7 +1232,11 @@ impl Gpu {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             self.gi2.light_scene.hash(&mut hasher);
             self.mesh_field_key.hash(&mut hasher);
-            self.gi2.draw_key.hash(&mut hasher);
+            // The drawn list follows the camera (culling), so the surface cache
+            // (mode 3) leaves it out: a turn is not a light change there.
+            if gi2_world_env() != 3 {
+                self.gi2.draw_key.hash(&mut hasher);
+            }
             hasher.finish()
         };
         if light != self.gi2.light_hash {

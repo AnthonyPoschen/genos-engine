@@ -85,15 +85,18 @@ float gi2_world_cap() {
 }
 // Sets texel slot grows to.
 float gi2_sc_cap(uint slot);
+float gi2_sc_light_window();
+float gi2_hit_size(vec3 pos);
 
 // Surface cache switches (GENOS_GI2_SC_FLAGS, experiments): bit 0 sets weigh k^2
 // (else k); bit 1 a second pass (a texel reaching the cap the first time drops to a
 // quarter of it once); bit 2 texels only rays read grow to GI2_SC_HIT_CAP sets;
 // bit 3 pooling never narrower than 0.6 cells; bit 4 the finest texels (inside
 // GI2_SC_NEAR) grow to twice the cap; bit 5 a texel with few sets shares its
-// pixels with the probes.
+// pixels with the probes; bit 6 a texel's lit-from point moving does not restart
+// its sets.
 uint gi2_sc_flags() {
-    return uint(work.v[gi2_change_at()].w + 0.5) / 100000u;
+    return uint(work.v[gi2_change_at()].z + 0.5) >> 1u;
 }
 // Surface cache (mode 3, GENOS_GI2_WORLD=3): the light cache's patches are the
 // texels pixels read. A texel adds a new set of GI2_CACHE_RAYS rays each time it is
@@ -228,7 +231,7 @@ void gi2_sc_offer(uint slot, vec3 at, vec3 centre) {
         cache.v[GI2_WORLD_AT + slot].x = d;
         // Lit from far from here so far: its sets start again (value kept).
         float size = cache.v[3u * slot + 1u].w;
-        if (length(at - cache.v[3u * slot].xyz) > 0.3 * size) {
+        if ((gi2_sc_flags() & 64u) == 0u && length(at - cache.v[3u * slot].xyz) > 0.3 * size) {
             float t = cache.v[3u * slot + 2u].w;
             cache.v[3u * slot + 2u].w = min(t, 1.0);
         }
@@ -286,7 +289,7 @@ float gi2_sc_count(uint slot) {
     if (urgent && gi2_near_change(cache.v[3u * slot].xyz)) {
         t = min(t, GI2_SC_MOVING);
     } else if (!gi2_sc_light_quiet()) {
-        t = min(t, GI2_SC_LIGHT);
+        t = min(t, gi2_sc_light_window());
     }
     return t;
 }
@@ -299,6 +302,34 @@ float gi2_sc_cap(uint slot) {
     return cap;
 }
 
+// Sets a texel averages while the light changes: GI2_SC_LIGHT, or 0 (each relight
+// replaces it) with flag 128.
+float gi2_sc_light_window() {
+    return (gi2_sc_flags() & (128u | 1024u)) != 0u ? 0.0 : GI2_SC_LIGHT;
+}
+// Cell of the light cache a ray hit reads: flag 256 keeps the 25 cm patches of the
+// other modes for hits (relit fast), the fine texels for pixels.
+// Flag 2048: a surface not facing along an axis (a turned box) has no texels of
+// its own; it keeps the 25 cm patches of the other modes and the probes.
+bool gi2_sc_slanted(vec3 n) {
+    vec3 a = abs(n);
+    return gi2_world_mode() == 3u && (gi2_sc_flags() & 2048u) != 0u && max(a.x, max(a.y, a.z)) < 0.999;
+}
+float gi2_hit_size_n(vec3 pos, vec3 n) {
+    if (gi2_sc_slanted(n)) {
+        float d = length(pos - scene.eye.xyz);
+        return 0.25 * exp2(clamp(floor(log2(max(d / 8.0, 1.0))), 0.0, 6.0));
+    }
+    return gi2_hit_size(pos);
+}
+float gi2_hit_size(vec3 pos) {
+    if (gi2_world_mode() == 3u && (gi2_sc_flags() & 256u) != 0u) {
+        float d = length(pos - scene.eye.xyz);
+        return 0.25 * exp2(clamp(floor(log2(max(d / 8.0, 1.0))), 0.0, 6.0));
+    }
+    return gi2_cell_size(pos);
+}
+
 // Hash a texel's rays hang on: the set it is on (a new set each relight up to the
 // cap, so the mean takes new rays; the same set while it relights under change).
 uint gi2_sc_ray_key(uint slot, uint key) {
@@ -307,7 +338,7 @@ uint gi2_sc_ray_key(uint slot, uint key) {
     }
     float t = gi2_sc_count(slot);
     uint set = uint(t);
-    if (!gi2_sc_light_quiet() && t >= GI2_SC_LIGHT - 0.5) {
+    if (!gi2_sc_light_quiet() && t >= gi2_sc_light_window() - 0.5 && (gi2_sc_flags() & 1024u) == 0u) {
         // Under changing light the count holds, so the set turns with the rounds.
         set += gi2_round();
     }
@@ -384,14 +415,15 @@ vec4 gi2_sc_shown(uint slot) {
 
 // Irradiance already bounced onto the surface at pos facing n (0 for a new patch).
 vec3 gi2_cache_irradiance(vec3 pos, vec3 n) {
-    uint slot = gi2_cache_find(pos, n, true);
+    float hsize = gi2_hit_size_n(pos, n);
+    uint slot = gi2_cache_find_sized(pos, n, true, hsize, pos);
     if (slot == ~0u) {
         atomicAdd(gstats.missed, 1u);
         return vec3(0.0);
     }
     cache.v[3u * slot].w = uintBitsToFloat(gi2_frame());
-    if (gi2_world_mode() == 3u) {
-        gi2_sc_offer(slot, pos, gi2_sc_centre(pos, n, gi2_cell_size(pos)));
+    if (gi2_world_mode() == 3u && !gi2_sc_slanted(n)) {
+        gi2_sc_offer(slot, pos, gi2_sc_centre(pos, n, hsize));
     }
     vec4 e = cache.v[3u * slot + 2u];
     // Not lit yet (claimed this round, params.z bit 7): the lit patches beside it
@@ -400,7 +432,7 @@ vec3 gi2_cache_irradiance(vec3 pos, vec3 n) {
     if (e.w < 0.5 && ((pc.params.z >> 7u) & 1u) != 0u) {
         float size = cache.v[3u * slot + 1u].w;
         if (gi2_world_mode() == 3u) {
-            vec4 up = gi2_sc_parent(pos, n, gi2_cell_size(pos));
+            vec4 up = gi2_sc_parent(pos, n, hsize);
             if (up.w > 0.0) {
                 return up.rgb;
             }
@@ -410,7 +442,7 @@ vec3 gi2_cache_irradiance(vec3 pos, vec3 n) {
         vec4 sum = vec4(0.0);
         [[dont_unroll]] for (uint i = 0u; i < 4u; i++) {
             vec3 o = (i < 2u ? t1 : t2) * ((i & 1u) == 0u ? size : -size);
-            uint s2 = gi2_cache_find(pos + o, n, false);
+            uint s2 = gi2_cache_find_sized(pos + o, n, false, hsize, pos + o);
             if (s2 != ~0u) {
                 vec4 v = cache.v[3u * s2 + 2u];
                 if (v.w > 0.5) {
@@ -462,6 +494,9 @@ void gi2_world_add(vec3 pos, vec3 n, vec3 e, bool changed) {
 // counted up to 4 samples).
 vec4 gi2_world_irradiance(vec3 pos, vec3 n) {
     uint mode = gi2_world_mode();
+    if (gi2_sc_slanted(n)) {
+        return vec4(0.0);
+    }
     uint ax = gi2_axis(n) >> 1u;
     vec3 ta = vec3(0.0);
     vec3 tb = vec3(0.0);
@@ -508,7 +543,7 @@ vec4 gi2_world_irradiance(vec3 pos, vec3 n) {
     }
     // Surface cache: while the light changes or around an object that moves, the
     // probes (no history) show it.
-    if (mode == 3u && (!gi2_sc_light_quiet() || gi2_near_change(pos))) {
+    if (mode == 3u && (!gi2_sc_light_quiet() || gi2_near_change(pos) || (gi2_sc_flags() & 512u) != 0u)) {
         trust = 0.0;
     }
     return vec4(wsum > 0.0 ? sum / wsum : vec3(0.0), trust);

@@ -19,6 +19,11 @@ void main() {
     float t = cache.v[3u * slot + 2u].w;
     if (gi2_world_mode() == 3u) {
         gi2_sc_pool(slot);
+        // Flag 4096: near a change the point a texel is lit from may now be inside
+        // the object that moved there; the readers of this frame offer again.
+        if (near && (gi2_sc_flags() & 4096u) != 0u) {
+            cache.v[GI2_WORLD_AT + slot].x = 1.0e30;
+        }
         // Surface cache: the young are new texels and those near a change; the
         // sweep takes the texels still adding sets that someone read in the last
         // second (every eighth round, all of them), and converged texels only while
@@ -32,7 +37,21 @@ void main() {
         bool growing = (gi2_sc_flags() & 4u) != 0u
             ? (on_screen && t < gi2_sc_cap(slot) - 0.5) || (read && t < GI2_SC_HIT_CAP - 0.5)
             : (read && t < gi2_sc_cap(slot) - 0.5);
-        if (!(near || t < 0.5 || growing || !gi2_sc_light_quiet())) {
+        // Flag 8192: texels someone read keep relighting at the cap (a running mean
+        // of weight 2 / (cap + 1)), so light bounced in after they converged (the
+        // cache around them was darker while they took their first sets) still
+        // reaches them.
+        if ((gi2_sc_flags() & 8192u) != 0u && read) {
+            growing = true;
+        }
+        // Flag 1024: while the light changes only the patches ray hits read (25 cm
+        // and up, flag 256) are relit, as in the other modes; pixels show the probes.
+        bool hit_patch = cache.v[3u * slot + 1u].w > 0.2;
+        bool changing = !gi2_sc_light_quiet() && ((gi2_sc_flags() & 1024u) == 0u || hit_patch);
+        if ((gi2_sc_flags() & 1024u) != 0u && !gi2_sc_light_quiet() && !hit_patch && !near) {
+            growing = false;
+        }
+        if (!(near || t < 0.5 || growing || changing)) {
             // Not in this round: a texel nobody has read for GI2_CACHE_LIFE frames
             // is freed here (gi2_cache.comp frees only what a round relights).
             if (int(gi2_frame() - last) > int(GI2_CACHE_LIFE)) {
