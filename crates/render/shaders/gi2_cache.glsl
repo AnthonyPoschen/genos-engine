@@ -803,8 +803,15 @@ bool gi2_sc_local_change(uint slot, out bool mover) {
     if (mover) {
         return true;
     }
+    // S65B: a moved lamp no longer counts as a local change here (it shortened
+    // the history of every texel in its range, so a lamp moving slowly kept a
+    // whole room young): the texel is due (gi2_sc_lamp_touched) and its
+    // estimator measures how much its light actually changed.
+    return false;
+}
+bool gi2_sc_lamp_touched(uint slot) {
     uint upd = gi2_sc_upd_override != ~0u ? gi2_sc_upd_override : gi2_sc_updated(slot);
-    return !gi2_sc_light_quiet() && gi2_wrc_lamp_changed(p, upd);
+    return !gi2_sc_light_quiet() && gi2_wrc_lamp_changed(gi2_sc_texel_pos(slot), upd);
 }
 float gi2_sc_count(uint slot) {
     float t = floor(max(cache.v[3u * slot + 2u].w, 0.0));
@@ -1213,7 +1220,7 @@ uint gi2_sc_interval(uint slot, float t) {
         return 0u;
     }
     bool mover;
-    if (gi2_sc_local_change(slot, mover)) {
+    if (gi2_sc_local_change(slot, mover) || gi2_sc_lamp_touched(slot)) {
         return 0u;
     }
     float iv = GI2_SC_RATE_SLOW / (1.0 + GI2_SC_RATE_K * max(b.y, 0.0));
