@@ -121,7 +121,10 @@ const uint GI2_WRC_SCOUT_ENTRIES = 256u;
 // and counts as one sample; GI2_WRC_CAP is in those (128 = 32 whole sets).
 const float GI2_WRC_CAP = 128.0;
 const float GI2_WRC_YOUNG = 16.0;
-const float GI2_WRC_SEED_SETS = 8.0;
+// S68B: 8 -> 2. The turn's error was a dark bias (frame 1 -16.7 %, 16 -6.2 %,
+// 60 -2.7 %) decaying as seed / (seed + own sets): the seed (25 cm cells, young
+// after a reveal) is darker than the texel's own light and held 8 sets of weight.
+const float GI2_WRC_SEED_SETS = 2.0;
 const float GI2_WRC_NEAR = 6.0;
 const uint GI2_SC_BUCKETS = 64u;
 const uint GI2_SC_HIST_AT = 2u * GI2_CACHE_SLOTS + 2u;
