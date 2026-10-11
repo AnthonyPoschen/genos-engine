@@ -374,6 +374,22 @@ float gi2_ls_ratio(uint f) {
 uint gi2_sc_updated(uint slot) {
     return floatBitsToUint(cache.v[GI2_SC_OBJ_AT + slot].y);
 }
+// S69A (Anthony: night to day left hard black texels everywhere, cleaning up
+// slowly). A texel relit at night holds night light; the sun/sky share rescale
+// (S63A) cannot brighten it (share ~0, or a tiny value times a ratio capped at
+// GI2_LS_MAX), and the two-tier scheduler ranked it by its estimator's old
+// change, so it waited in the trickle tier. The global sun/sky light rising more
+// than GI2_SC_STALE_UP times since its relight makes it stale: due now, ranked
+// by that change, whole sets, and not shown (the pixel takes the probes, which
+// carry this frame's light) until it is relit.
+const float GI2_SC_STALE_UP = 2.0;
+float gi2_sc_global_change(uint slot) {
+    float r = gi2_ls_ratio(gi2_sc_updated(slot));
+    return max(r, 1.0 / max(r, 1.0e-3)) - 1.0;
+}
+bool gi2_sc_stale(uint slot) {
+    return gi2_world_mode() == 3u && gi2_sc_updated(slot) != 0u && gi2_ls_ratio(gi2_sc_updated(slot)) > GI2_SC_STALE_UP;
+}
 // Set while a lookup runs in a mover's frame: id + 1 salts the key.
 float gi2_obj_salt = 0.0;
 
@@ -1308,7 +1324,7 @@ uint gi2_sc_interval(uint slot, float t) {
     // sets with agreement) = due every round. S64A asked for GI2_SC_FULL_SETS
     // sets as well, which texels the perceptual stop settles early never
     // reach: nothing ever waited (stats: waiting 0).
-    if (!gi2_sc_settled(slot, t)) {
+    if (!gi2_sc_settled(slot, t) || gi2_sc_stale(slot)) {
         return 0u;
     }
     bool mover;
@@ -1546,6 +1562,9 @@ vec4 gi2_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             cache.v[GI2_WORLD_AT + slot].z = uintBitsToFloat(gi2_frame());
         }
         vec4 v = mode == 3u ? gi2_sc_shown(slot) : (mode != 2u ? cache.v[3u * slot + 2u] : cache.v[GI2_WORLD_AT + slot]);
+        if (mode == 3u && gi2_sc_stale(slot)) {
+            continue;
+        }
         if (v.w < 0.5 && mode == 3u) {
             v = gi2_sc_parent(q, n, size);
         }
