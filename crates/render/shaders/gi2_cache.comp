@@ -258,6 +258,13 @@ void main() {
             if (!gi2_sc_light_quiet()) {
                 blend = max(blend, GI2_SC_CHANGE_ALPHA);
             }
+            // S68D: a young texel's first sets are dark (the bounce light around
+            // a reveal builds up over rounds, hits read cells not lit yet); a
+            // plain mean keeps that darkness as 1 / n (turn: -4 % at frame 16,
+            // -1.8 % at 60). Until GI2_SC_YOUNG_SETS, an EMA floor forgets it.
+            if (t >= WARM && t < GI2_SC_YOUNG_SETS) {
+                blend = max(blend, GI2_SC_YOUNG_ALPHA);
+            }
             if (t >= WARM) {
                 float ri = abs(dot(y - old.rgb, lw)) / max(dev0, 0.02 * dot(old.rgb, lw) + 1.0e-4);
                 blend = max(blend, clamp((ri - GI2_SC_ANTILAG_SD) / (3.0 * GI2_SC_ANTILAG_SD), 0.0, 1.0));

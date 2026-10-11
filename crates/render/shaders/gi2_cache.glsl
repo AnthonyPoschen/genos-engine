@@ -1295,6 +1295,9 @@ const float GI2_SC_RATE_DORMANT = 600.0;
 const float GI2_SC_RATE_FAST = 1.0;
 // S68A: a texel read this recently counts as read since its relight.
 const uint GI2_SC_READ_SLACK = 2u;
+// S68D: EMA floor on a young texel's long mean (gi2_cache.comp).
+const float GI2_SC_YOUNG_ALPHA = 1.0 / 16.0;
+const float GI2_SC_YOUNG_SETS = 32.0;
 bool gi2_sc_dormant(uint slot);
 uint gi2_sc_interval(uint slot, float t) {
     if (!GI2_SC_RATE) {
