@@ -107,13 +107,37 @@ const bool GI2_SC_SCHED = true;
 // texels start from the WRC (bilinear, coplanar cells only) with at most
 // GI2_WRC_SEED_SETS sets and take their turn by priority.
 const uint GI2_WRC_SCOUT_ENTRIES = 256u;
-const float GI2_WRC_CAP = 32.0;
-const float GI2_WRC_YOUNG = 4.0;
+// S61B: a WRC relight is one batch entry (16 rays, a quarter of a texel's set)
+// and counts as one sample; GI2_WRC_CAP is in those (128 = 32 whole sets).
+const float GI2_WRC_CAP = 128.0;
+const float GI2_WRC_YOUNG = 16.0;
 const float GI2_WRC_SEED_SETS = 8.0;
 const float GI2_WRC_NEAR = 6.0;
 const uint GI2_SC_BUCKETS = 64u;
 const uint GI2_SC_HIST_AT = 2u * GI2_CACHE_SLOTS + 2u;
 const uint GI2_SC_THR_AT = GI2_SC_HIST_AT + GI2_SC_BUCKETS;
+// WRC refresh (S61B, Anthony: a hard, fixed budget): at most GI2_WRC_REFRESH
+// batch entries a round (~6 % of 65536) go to WRC cells outside the reveal
+// burst, from two lists: change-driven first (a mover nearby, or a lamp that
+// reaches the cell moved since its last relight: its history drops to
+// GI2_WRC_CHANGE_KEEP samples), then the steady background (a resident cell not
+// relit for GI2_WRC_REFRESH_FRAMES, or still short of its cap and read since)
+// with what is left. Lumen's world space radiance cache: a fixed budget of probe
+// updates, the changed and the nearest first.
+const uint GI2_WRC_REFRESH = 4096u;
+const uint GI2_WRC_REFRESH_FRAMES = 180u;
+const uint GI2_WRC_CHANGE_FRAMES = 120u;
+const float GI2_WRC_CHANGE_KEEP = 4.0;
+const uint GI2_WRC_CHG_COUNT_AT = GI2_SC_HIST_AT + 66u;
+const uint GI2_WRC_BG_COUNT_AT = GI2_SC_HIST_AT + 67u;
+const uint GI2_WRC_LAMPS_AT = GI2_SC_HIST_AT + 68u;
+const uint GI2_WRC_RING_HEAD_AT = GI2_SC_HIST_AT + 69u;
+const uint GI2_WRC_RING = 16u;
+const uint GI2_WRC_RING_AT = GI2_SC_HIST_AT + 72u;
+const uint GI2_WRC_SNAP_LAMPS = 128u;
+const uint GI2_WRC_SNAP_AT = GI2_SC_HIST_AT + 160u;
+const uint GI2_WRC_CHG_AT = GI2_SC_HIST_AT + 680u;
+const uint GI2_WRC_BG_AT = GI2_WRC_CHG_AT + GI2_WRC_REFRESH;
 
 // World irradiance cells (experiment, GENOS_GI2_WORLD): the change block's head w
 // is mode * 1000 + cap. Mode 1: pixels read the light cache's patches,
@@ -415,7 +439,8 @@ vec4 gi2_sc_bilerp_sized(vec3 pos, vec3 n, float size) {
         if (v.w > 0.5 && fract(v.w) < 0.1) {
             cache.v[3u * s].w = uintBitsToFloat(gi2_frame());
             sum += bil * gi2_sc_shown(s).rgb;
-            count += bil * floor(v.w);
+            // WRC samples are 16-ray quarters (S61B): four to a set.
+            count += bil * floor(v.w) * (size > 0.2 && gi2_world_mode() == 3u ? 0.25 : 1.0);
             wsum += bil;
         }
     }
@@ -855,10 +880,27 @@ uint gi2_live_count() {
 // Slot of this round's batch entry j, or ~0u when the batch has no entry j: the
 // young first, then the mature ones in turn.
 uint gi2_cache_batch_slot(uint j) {
-    if (gi2_world_mode() == 3u && j >= GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES) {
-        return ~0u;
+    uint room = GI2_CACHE_BATCH;
+    if (gi2_world_mode() == 3u) {
+        if (j >= GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES) {
+            return ~0u;
+        }
+        room = GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES - GI2_WRC_REFRESH;
+        if (j >= room) {
+            // The WRC refresh entries: change-driven, then background.
+            uint k = j - room;
+            uint c = min(ckeys.key[GI2_WRC_CHG_COUNT_AT], GI2_WRC_REFRESH);
+            if (k < c) {
+                return ckeys.key[GI2_WRC_CHG_AT + k];
+            }
+            k -= c;
+            if (k < min(ckeys.key[GI2_WRC_BG_COUNT_AT], GI2_WRC_REFRESH)) {
+                return ckeys.key[GI2_WRC_BG_AT + k];
+            }
+            return ~0u;
+        }
     }
-    uint first = min(gi2_young_count(), GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES);
+    uint first = min(gi2_young_count(), room);
     if (j < first) {
         return ckeys.key[2u * GI2_CACHE_SLOTS - j];
     }
@@ -951,6 +993,55 @@ void gi2_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
         float b3 = GI2_TAU * gi2_unit(h ^ 0x165667b1u);
         origin += vec3(cos(b3), 0.0, sin(b3)) * (2.0 * u3);
     }
+}
+// WRC: did a lamp that reaches p move since frame `updated` (within the last
+// GI2_WRC_CHANGE_FRAMES)? The ring holds moved lamps' spheres (both places,
+// range), written once a round by gi2_wrc_note_lamps.
+bool gi2_wrc_lamp_changed(vec3 p, uint updated) {
+    [[dont_unroll]] for (uint i = 0u; i < GI2_WRC_RING; i++) {
+        uint at = GI2_WRC_RING_AT + 5u * i;
+        uint f = ckeys.key[at + 4u];
+        if (f == 0u || int(gi2_frame() - f) > int(GI2_WRC_CHANGE_FRAMES) || int(updated - f) >= 0) {
+            continue;
+        }
+        vec4 s = vec4(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]),
+                      uintBitsToFloat(ckeys.key[at + 2u]), uintBitsToFloat(ckeys.key[at + 3u]));
+        if (length(p - s.xyz) < s.w) {
+            return true;
+        }
+    }
+    return false;
+}
+// Once a round (cache pass, thread 0): lamps that moved or changed range since
+// the last round go into the ring (suns are left to the light-change rule).
+void gi2_wrc_note_lamps() {
+    uint n = min(scene.lamp_count, GI2_WRC_SNAP_LAMPS);
+    uint had = ckeys.key[GI2_WRC_LAMPS_AT];
+    for (uint i = 0u; i < n; i++) {
+        Lamp l = scene_lamp(i);
+        uint at = GI2_WRC_SNAP_AT + 4u * i;
+        vec4 o = vec4(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]),
+                      uintBitsToFloat(ckeys.key[at + 2u]), uintBitsToFloat(ckeys.key[at + 3u]));
+        bool fresh = i >= had;
+        bool moved = fresh || length(o.xyz - l.pos.xyz) > 1.0e-3 || abs(o.w - l.color.w) > 1.0e-3;
+        if (moved && l.color.w > 0.0) {
+            vec3 c = fresh ? l.pos.xyz : 0.5 * (o.xyz + l.pos.xyz);
+            float r = l.color.w + (fresh ? 0.0 : 0.5 * length(o.xyz - l.pos.xyz));
+            uint h = ckeys.key[GI2_WRC_RING_HEAD_AT] % GI2_WRC_RING;
+            ckeys.key[GI2_WRC_RING_HEAD_AT] = h + 1u;
+            uint ra = GI2_WRC_RING_AT + 5u * h;
+            ckeys.key[ra] = floatBitsToUint(c.x);
+            ckeys.key[ra + 1u] = floatBitsToUint(c.y);
+            ckeys.key[ra + 2u] = floatBitsToUint(c.z);
+            ckeys.key[ra + 3u] = floatBitsToUint(r);
+            ckeys.key[ra + 4u] = max(gi2_frame(), 1u);
+        }
+        ckeys.key[at] = floatBitsToUint(l.pos.x);
+        ckeys.key[at + 1u] = floatBitsToUint(l.pos.y);
+        ckeys.key[at + 2u] = floatBitsToUint(l.pos.z);
+        ckeys.key[at + 3u] = floatBitsToUint(l.color.w);
+    }
+    ckeys.key[GI2_WRC_LAMPS_AT] = n;
 }
 // Quarter of its set batch entry j (of slot) traces.
 uint gi2_cache_entry_quarter(uint j, uint slot) {

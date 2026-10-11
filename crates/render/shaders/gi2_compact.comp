@@ -69,6 +69,34 @@ void main() {
         // texels start from the WRC (gi2_sc_resample) and take their turn.
         bool wrc = cache.v[3u * slot + 1u].w > 0.2;
         bool burst = wrc && t < GI2_WRC_YOUNG - 0.5 && int(gi2_frame() - floatBitsToUint(cache.v[GI2_WORLD_AT + slot].z)) <= 2;
+        if (wrc && !burst && GI2_SC_SCHED) {
+            // WRC refresh (fixed budget): change-driven list, else background.
+            if (int(gi2_frame() - last) > int(GI2_CACHE_LIFE)) {
+                atomicAdd(gstats.freed, 1u);
+                ckeys.key[slot] = 0u;
+                cache.v[3u * slot + 1u] = vec4(0.0);
+                cache.v[3u * slot + 2u] = vec4(0.0);
+                return;
+            }
+            uint updated = gi2_sc_updated(slot);
+            vec3 cp = gi2_sc_texel_pos(slot);
+            if (near || gi2_wrc_lamp_changed(cp, updated)) {
+                uint at = atomicAdd(ckeys.key[GI2_WRC_CHG_COUNT_AT], 1u);
+                if (at < GI2_WRC_REFRESH) {
+                    ckeys.key[GI2_WRC_CHG_AT + at] = slot;
+                }
+                return;
+            }
+            bool stale = int(gi2_frame() - updated) >= int(GI2_WRC_REFRESH_FRAMES);
+            bool growing_wrc = t < GI2_WRC_CAP - 0.5 && int(last - updated) > 0;
+            if (stale || growing_wrc) {
+                uint at = atomicAdd(ckeys.key[GI2_WRC_BG_COUNT_AT], 1u);
+                if (at < GI2_WRC_REFRESH) {
+                    ckeys.key[GI2_WRC_BG_AT + at] = slot;
+                }
+            }
+            return;
+        }
         bool young_now = near || burst || (!GI2_SC_SCHED && t < 1.5);
         if (GI2_SC_SCHED && !young_now) {
             uint updated = gi2_sc_updated(slot);

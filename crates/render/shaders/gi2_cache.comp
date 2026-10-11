@@ -16,7 +16,8 @@ void main() {
         // Scheduler: the next round lists the buckets from the top down until
         // they fill what the young leave of the batch; the histogram restarts.
         if (gi2_world_mode() == 3u && GI2_SC_SCHED) {
-            uint room = GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES;
+            gi2_wrc_note_lamps();
+            uint room = GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES - GI2_WRC_REFRESH;
             uint budget = room - min(gi2_young_count(), room);
             uint acc = 0u;
             uint thr = 0u;
@@ -62,6 +63,8 @@ void main() {
     gi2_sc_texel_world(slot, tp, n);
     uint rkey = gi2_sc_ray_key(slot, key);
     uint q0 = gi2_sc_quarter0(slot);
+    bool wrc_cell = gi2_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2;
+    uint prev_updated = gi2_sc_updated(slot);
     uint first = gi2_probe_rays() + j * GI2_CACHE_RAYS;
     vec3 e = vec3(0.0);
     [[dont_unroll]] for (uint k = 0u; k < run * GI2_CACHE_RAYS; k++) {
@@ -80,7 +83,7 @@ void main() {
         cache.v[GI2_SC_OBJ_AT + slot].y = uintBitsToFloat(gi2_frame());
         // Few rays a relight: the set's quarters add up; the mean takes the set
         // once its last quarter is in.
-        if (GI2_SC_QUARTERS > 1u) {
+        if (GI2_SC_QUARTERS > 1u && !wrc_cell) {
             uint q = q0 + run;
             if (q0 > 0u) {
                 e += gi2_unpack_rgb9e5(floatBitsToUint(cache.v[GI2_SC_OBJ_AT + slot].z));
@@ -114,11 +117,18 @@ void main() {
         // World space radiance cache (S61A): a running mean to GI2_WRC_CAP sets,
         // change-aware through gi2_sc_count (short near a change, the light
         // window while the light changes); later sets weigh more (as the texels).
+        // S61B: each entry is one 16-ray sample; a mover nearby or a lamp
+        // that reaches it moved since its last relight drops the history to
+        // GI2_WRC_CHANGE_KEEP samples.
         float t = old.w < 0.5 ? 0.0 : gi2_sc_count(slot);
-        float k = t + 1.0;
-        float w = (gi2_sc_flags() & 1u) != 0u ? 6.0 * k / ((k + 1.0) * (2.0 * k + 1.0)) : 2.0 / (k + 1.0);
-        vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * min(w, 1.0);
-        cache.v[3u * slot + 2u] = vec4(mean, min(t + 1.0, GI2_WRC_CAP));
+        bool urgent3 = ((pc.params.z >> 5u) & 1u) != 0u;
+        vec3 cp = gi2_sc_texel_pos(slot);
+        if ((urgent3 && gi2_near_change(cp)) || gi2_wrc_lamp_changed(cp, prev_updated)) {
+            t = min(t, GI2_WRC_CHANGE_KEEP);
+        }
+        float add = float(run);
+        vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * (add / (t + add));
+        cache.v[3u * slot + 2u] = vec4(mean, min(t + add, GI2_WRC_CAP));
         return;
     }
     if (gi2_world_mode() == 3u) {

@@ -40,6 +40,8 @@ pub(crate) const GI2_RAYS: u32 = 64;
 const GI2_CACHE_SLOTS: u64 = 1048576;
 const GI2_CACHE_BATCH: u32 = 65536;
 const GI2_CACHE_RAYS: u32 = 16;
+/// ckeys word of the WRC refresh lists' two counts (gi2_cache.glsl GI2_WRC_CHG_COUNT_AT).
+const GI2_WRC_COUNTS_AT: u64 = 2 * GI2_CACHE_SLOTS + 2 + 66;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
 /// (gi2_common.glsl GI2_STRATA): the visibility history cap.
 pub(crate) const GI2_STRATA: u32 = 8;
@@ -641,7 +643,7 @@ impl Gpu {
         let share = self.light_families();
         if self.gi2.cache_keys.buffer.is_null() {
             self.gi2.cache_keys = self.make_buffer_queues(
-                (2 * GI2_CACHE_SLOTS + 2 + 128) * 4, // + the scheduler's histogram and threshold
+                (2 * GI2_CACHE_SLOTS + 2 + 16384) * 4, // + the scheduler's histogram and threshold, the WRC refresh lists
                 0x20 | 0x2,
                 Memory::Device,
                 &share,
@@ -880,7 +882,7 @@ impl Gpu {
             self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             // The mature and young patch counts, rebuilt by the compact pass.
             if !world {
-                for at in [GI2_CACHE_SLOTS, 2 * GI2_CACHE_SLOTS + 1] {
+                for at in [GI2_CACHE_SLOTS, 2 * GI2_CACHE_SLOTS + 1, GI2_WRC_COUNTS_AT, GI2_WRC_COUNTS_AT + 1] {
                     (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache_keys.buffer, at * 4, 4, 0);
                 }
             }
@@ -1068,6 +1070,8 @@ impl Gpu {
             (self.fns.cmd_fill_buffer)(cmd, self.gi2.world_stats.buffer, 0, 64, 0);
             // The mature and young counts, rebuilt by the compact pass.
             (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, GI2_CACHE_SLOTS * 4, 4, 0);
+            // The WRC refresh lists' counts (change, background; gi2_cache.glsl).
+            (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, GI2_WRC_COUNTS_AT * 4, 8, 0);
             (self.fns.cmd_fill_buffer)(
                 cmd,
                 self.gi2.cache_keys.buffer,
