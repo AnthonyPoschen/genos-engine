@@ -4,7 +4,8 @@ const uint GI2_CACHE_SEARCH = 16u;
 // Patches relit per frame, and rays per patch (a square; 16 left each patch a
 // fixed error of its own that probes carried onto the walls they light as
 // blotches, gi-check room).
-const uint GI2_CACHE_BATCH = 16384u;
+// Entries a round (S59D: 65536 of 16 rays, the 1M rays a round of 16384 x 64).
+const uint GI2_CACHE_BATCH = 65536u;
 // S59: 16, a quarter of a texel's 64-ray set (gi2_cache.glsl, few rays a relight).
 const uint GI2_CACHE_RAYS = 16u;
 // Shadow rays per light cache ray hit when lamp picks are on (gi2_light.comp).

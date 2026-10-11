@@ -38,7 +38,7 @@ fn gi2_tile(height: u32) -> u32 {
 pub(crate) const GI2_RAYS: u32 = 64;
 /// Light cache sizes; gi2_cache_slots.glsl has the same numbers.
 const GI2_CACHE_SLOTS: u64 = 1048576;
-const GI2_CACHE_BATCH: u32 = 16384;
+const GI2_CACHE_BATCH: u32 = 65536;
 const GI2_CACHE_RAYS: u32 = 16;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
 /// (gi2_common.glsl GI2_STRATA): the visibility history cap.
@@ -534,7 +534,8 @@ impl Gpu {
                 "gi2 world fence",
             )?;
         }
-        self.gi2.world_qp = self.make_query_pool_n(2)?;
+        // Stamps 0 and 1: the round's start and end; 2 to 5: after each pass.
+        self.gi2.world_qp = self.make_query_pool_n(6)?;
         Ok(())
     }
 
@@ -967,14 +968,14 @@ impl Gpu {
             self.note_gi2_round(words, current, light, self.gi2.world_young);
         }
         if self.gpu_times.is_some() && !self.gi2.world_qp.is_null() {
-            let mut raw = [0u64; 2];
+            let mut raw = [0u64; 6];
             let got = unsafe {
                 (self.fns.get_query_results)(
                     self.device,
                     self.gi2.world_qp,
                     0,
-                    2,
-                    16,
+                    6,
+                    48,
                     raw.as_mut_ptr() as *mut c_void,
                     8,
                     0x1,
@@ -987,6 +988,12 @@ impl Gpu {
                     times.light_spans.push((raw[0], raw[1]));
                     times.world_ms += tick_delta(raw[0], raw[1], bits) as f64 * period / 1.0e6;
                     times.world_runs += 1;
+                    // Per pass: compact, trace, light, cache.
+                    let mut prev = raw[0];
+                    for k in 0..4 {
+                        times.world_pass[k] += tick_delta(prev, raw[2 + k], bits) as f64 * period / 1.0e6;
+                        prev = raw[2 + k];
+                    }
                 }
             }
         }
@@ -1055,7 +1062,7 @@ impl Gpu {
             )?;
             let qp = self.gi2.world_qp;
             if !qp.is_null() {
-                (self.fns.cmd_reset_query)(cmd, qp, 0, 2);
+                (self.fns.cmd_reset_query)(cmd, qp, 0, 6);
                 (self.fns.cmd_write_timestamp)(cmd, 0x1, qp, 0);
             }
             (self.fns.cmd_fill_buffer)(cmd, self.gi2.world_stats.buffer, 0, 64, 0);
@@ -1072,10 +1079,13 @@ impl Gpu {
             let set = self.gi2.world_set;
             (self.fns.cmd_bind_set)(cmd, 1, self.gi2.layout, 0, 1, &set, 0, std::ptr::null());
             (self.fns.cmd_push)(cmd, self.gi2.layout, 0x20, 0, 32, pc.as_ptr() as *const c_void);
-            for (pass, gx) in groups {
+            for (k, (pass, gx)) in groups.into_iter().enumerate() {
                 (self.fns.cmd_bind_pipe)(cmd, 1, self.gi2.pipes[pass]);
                 (self.fns.cmd_dispatch)(cmd, gx.max(1), 1, 1);
                 self.barrier_on(cmd, 0x800, 0x800, 0x40, 0x20 | 0x40);
+                if !qp.is_null() {
+                    (self.fns.cmd_write_timestamp)(cmd, 0x800, qp, 2 + k as u32);
+                }
             }
             // The counters reach the host.
             self.barrier_on(cmd, 0x800, 0x4000, 0x40, 0x2000);

@@ -77,17 +77,23 @@ void main() {
                 return;
             }
             float cap = gi2_sc_cap(slot);
-            float w = clamp(cap / max(t, 1.0), 1.0, 8.0);
+            // Hit patches taking each relight whole (flag 131072) hold at most
+            // GI2_CACHE_MATURE sets: they weigh against that, not the pixel cap
+            // (S59C weighed them 8x for good and they took the budget).
+            bool whole = (gi2_sc_flags() & 131072u) != 0u && hit_patch;
+            float own_cap = whole ? GI2_CACHE_MATURE : cap;
+            float w = clamp(own_cap / max(t, 1.0), 1.0, 8.0);
+            if (!whole && !gi2_sc_settled(slot, t)) {
+                // Not settled: never below twice a settled texel's priority.
+                w = max(w, 2.0);
+            }
             if ((gi2_sc_flags() & 1048576u) != 0u && t >= cap - 0.5 && gi2_sc_dormant(slot)) {
                 w /= float(GI2_SC_DORMANT);
             }
             uint b = uint(clamp(log2(1.0 + float(used) * w) * 4.0, 0.0, float(GI2_SC_BUCKETS - 1u)));
             vec4 est = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
-            // Unconverged: short of GI2_SC_FULL_SETS sets, or of half the history
-            // it can hold while the light changes (GI2_SC_LIGHT), else the window
-            // under changing light would keep every texel at full sets.
-            float reach = gi2_sc_light_quiet() ? GI2_SC_FULL_SETS : 0.5 * max(gi2_sc_light_window(), 2.0);
-            bool full = floor(t) < reach - 0.5 || (est.x > 0.0 && est.y > GI2_SC_FULL_INC);
+            // Whole 64-ray sets until the texel has settled (gi2_sc_settled).
+            bool full = !gi2_sc_settled(slot, t) || (est.x > 0.0 && est.y > GI2_SC_FULL_INC);
             uint m = gi2_sc_entries(slot, full);
             atomicAdd(ckeys.key[GI2_SC_HIST_AT + b], m);
             if (b < ckeys.key[GI2_SC_THR_AT]) {

@@ -2769,7 +2769,7 @@ impl Gpu {
         if times.gi2_frames > 0 {
             let g = times.gi2.map(|v| v / f64::from(times.gi2_frames));
             eprintln!(
-                "GI2_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} total={:.3} async_rounds={} async_ms={:.3}",
+                "GI2_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3}",
                 times.gi2_frames,
                 g[0],
                 g[1],
@@ -2781,7 +2781,11 @@ impl Gpu {
                 g[7],
                 g.iter().sum::<f64>(),
                 times.world_runs,
-                times.world_ms / f64::from(times.world_runs.max(1))
+                times.world_ms / f64::from(times.world_runs.max(1)),
+                times.world_pass[0] / f64::from(times.world_runs.max(1)),
+                times.world_pass[1] / f64::from(times.world_runs.max(1)),
+                times.world_pass[2] / f64::from(times.world_runs.max(1)),
+                times.world_pass[3] / f64::from(times.world_runs.max(1))
             );
         }
         if !times.light_spans.is_empty() {
@@ -6578,6 +6582,8 @@ struct GpuTimes {
     /// Async light cache rounds (GI v2) and their GPU time.
     world_runs: u32,
     world_ms: f64,
+    /// The async round's passes: compact, trace, light, cache (sums over world_runs).
+    world_pass: [f64; 4],
     /// Absolute GPU spans (ticks) of frames and light builds since the last line, to
     /// show how much light work ran while a frame was on the GPU.
     frame_spans: Vec<(u64, u64)>,
@@ -6627,6 +6633,7 @@ impl Default for GpuTimes {
             gi2_ids: [Vec::new(), Vec::new()],
             world_runs: 0,
             world_ms: 0.0,
+            world_pass: [0.0; 4],
             gi2_frames: 0,
             gi2: [0.0; 8],
             frame_spans: Vec::new(),

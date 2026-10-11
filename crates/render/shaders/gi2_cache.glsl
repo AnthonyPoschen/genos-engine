@@ -848,8 +848,18 @@ uint gi2_cache_batch_slot(uint j) {
 // variance high). The other modes take whole sets.
 const uint GI2_SC_SET_RAYS = 64u;
 const uint GI2_SC_QUARTERS = GI2_SC_SET_RAYS / GI2_CACHE_RAYS;
-const float GI2_SC_FULL_SETS = 16.0;
+const float GI2_SC_FULL_SETS = 32.0;
 const float GI2_SC_FULL_INC = 1.0;
+// Settled (S59D, Anthony: "settling too soon ... splotchy"): GI2_SC_FULL_SETS
+// whole sets in its mean (or, while the light changes, the whole window) AND the
+// GIBS estimator running with its short-term mean within 0.3 standard deviations
+// of the long-term one (the dormancy test's agreement). Under changing light the
+// estimator restarts every relight, so nothing settles: whole sets throughout.
+bool gi2_sc_settled(uint slot, float t) {
+    float reach = gi2_sc_light_quiet() ? GI2_SC_FULL_SETS : max(gi2_sc_light_window(), 2.0);
+    vec4 b = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
+    return floor(t) >= reach - 0.5 && b.x > 0.0 && b.y < 0.3;
+}
 uint gi2_sc_quarter0(uint slot) {
     if (gi2_world_mode() != 3u) {
         return 0u;
