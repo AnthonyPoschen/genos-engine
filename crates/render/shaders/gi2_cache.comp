@@ -69,13 +69,19 @@ void main() {
     gi2_sc_upd_override = prev_updated;
     uint first = gi2_probe_rays() + j * GI2_CACHE_RAYS;
     vec3 e = vec3(0.0);
+    float es = 0.0;
+    float el = 0.0;
     [[dont_unroll]] for (uint k = 0u; k < run * GI2_CACHE_RAYS; k++) {
         vec4 v = work.v[gi2_rad_at(first + k)];
         if (gi2_ray_none(v)) {
             return;
         }
         vec3 dir = gi2_dir(rkey, n, q0 * GI2_CACHE_RAYS + k, GI2_SC_SET_RAYS);
-        e += gi2_ray_light(v) * max(dot(dir, n), 0.0);
+        float c = max(dot(dir, n), 0.0);
+        vec3 lk = gi2_ray_light(v);
+        e += lk * c;
+        el += dot(lk, vec3(0.2126, 0.7152, 0.0722)) * c;
+        es += min(max(v.w, 0.0), dot(lk, vec3(0.2126, 0.7152, 0.0722))) * c;
     }
     float rays = float(run * GI2_CACHE_RAYS);
     if (run > 1u) {
@@ -103,10 +109,20 @@ void main() {
     }
     e *= GI2_TAU / rays;
     vec4 old = cache.v[3u * slot + 2u];
-    if (GI2_LS_RESCALE && gi2_world_mode() == 3u && old.w > 0.5) {
-        // S62E: carry the history to the global light of now (sun, sky).
-        float ls = gi2_ls_ratio(prev_updated);
-        if (abs(ls - 1.0) > 1.0e-3) {
+    if (gi2_world_mode() == 3u) {
+        // S63A: carry the history's sun/sky share to the sun and sky of now,
+        // then blend this set's share into it.
+        float fe = el > 1.0e-6 ? clamp(es / el, 0.0, 1.0) : 0.0;
+        float fnew = fe;
+        float ls = 1.0;
+        if (old.w > 0.5) {
+            ls = gi2_sc_sun_gain(slot);
+            float fo = gi2_sc_sunfrac_now(slot);
+            fnew = mix(fo, fe, max(1.0 / (floor(old.w) + 1.0), 1.0 / 16.0));
+        }
+        float now = gi2_ls_now();
+        cache.v[GI2_SC_SUN_AT + slot] = vec4(fnew, now < 0.0 ? cache.v[GI2_SC_SUN_AT + slot].y : now, 0.0, 0.0);
+        if (old.w > 0.5 && abs(ls - 1.0) > 1.0e-3) {
             old.rgb *= ls;
             cache.v[3u * slot + 2u].rgb = old.rgb;
             vec4 ea = cache.v[GI2_SC_EST_AT + 2u * slot];

@@ -194,8 +194,10 @@ vec3 gi2_kept_light(uint h) {
 
 // A ray slot that already holds its final light: a miss takes the sky (x is -1 - r)
 // and a ray with no source is dark (x -0.5).
+// w: the share of the light from the suns and the sky, as luminance (S63A; a
+// miss is all sky).
 vec4 gi2_miss_slot(vec3 light) {
-    return vec4(-1.0 - light.r, light.g, light.b, 0.0);
+    return vec4(-1.0 - light.r, light.g, light.b, dot(light, vec3(0.2126, 0.7152, 0.0722)));
 }
 const vec4 GI2_NO_RAY = vec4(-0.5, 0.0, 0.0, 0.0);
 bool gi2_ray_none(vec4 v) {

@@ -649,7 +649,7 @@ impl Gpu {
                 &share,
             )?;
             self.gi2.cache =
-                self.make_buffer_queues(GI2_CACHE_SLOTS * 112, 0x20 | 0x2, Memory::Device, &share)?;
+                self.make_buffer_queues(GI2_CACHE_SLOTS * 128, 0x20 | 0x2, Memory::Device, &share)?;
             self.gi2.cache_clear = true;
             for k in 0..2 {
                 self.gi2.stats[k] = self.make_buffer(64, 0x20 | 0x2, Memory::Readback)?;

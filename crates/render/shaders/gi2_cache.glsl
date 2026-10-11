@@ -234,6 +234,15 @@ const uint GI2_WORLD_AT = 3u * GI2_CACHE_SLOTS;
 const uint GI2_SC_EST_AT = 4u * GI2_CACHE_SLOTS;
 // Object id + 1 of a texel keyed in a mover's frame (0: a world texel).
 const uint GI2_SC_OBJ_AT = 6u * GI2_CACHE_SLOTS;
+// S63A sun/sky share (Anthony: day to night the outside ground kept daylight and
+// shifted slowly). Per slot: x the share of its light that came from the suns
+// and the sky (direct at ray hits, sky at misses, and that share of the cache
+// light read at hits), y the global sun/sky light (gi2_global_light) when it was
+// last relit. A sun or sky change scales only that share, at once, read or not:
+// shown = v ((1 - x) + x now / y). Lamp-bounced light is untouched; rays then
+// converge the shape (Lumen relights its surface cache's direct light every
+// frame, the radiosity converges over frames).
+const uint GI2_SC_SUN_AT = 7u * GI2_CACHE_SLOTS;
 // Frame of a texel's last relight (0: never), beside its object id.
 // S62E global light scale (Anthony: day to night, unread texels kept daytime
 // light and faded as rays came in). The pixel's own direct light is already
@@ -273,6 +282,34 @@ void gi2_ls_note() {
     ckeys.key[at] = f;
     ckeys.key[at + 1u] = floatBitsToUint(gi2_global_light());
     ckeys.key[GI2_LS_AT + 2u * GI2_LS_RING] = f;
+}
+// The global sun/sky light as of the last round (-1 when unknown).
+float gi2_ls_now() {
+    uint g = ckeys.key[GI2_LS_AT + 2u * GI2_LS_RING];
+    uint ga = GI2_LS_AT + 2u * (g % GI2_LS_RING);
+    return (g != 0u && ckeys.key[ga] == g) ? uintBitsToFloat(ckeys.key[ga + 1u]) : -1.0;
+}
+// The ratio of the sun/sky light now to when slot was last relit.
+float gi2_sc_sun_ratio(uint slot) {
+    vec4 sa = cache.v[GI2_SC_SUN_AT + slot];
+    float now = gi2_ls_now();
+    if (now < 0.0 || sa.y <= 0.0) {
+        return 1.0;
+    }
+    return clamp((now + 1.0e-4) / (sa.y + 1.0e-4), 0.0, GI2_LS_MAX);
+}
+// What slot's stored light is multiplied by to show it now.
+float gi2_sc_sun_gain(uint slot) {
+    float f = clamp(cache.v[GI2_SC_SUN_AT + slot].x, 0.0, 1.0);
+    return 1.0 - f + f * gi2_sc_sun_ratio(slot);
+}
+// The sun/sky share of the cache light last read at a ray hit (light pass).
+float gi2_hit_sunfrac = 0.0;
+float gi2_sc_sunfrac_now(uint slot) {
+    float f = clamp(cache.v[GI2_SC_SUN_AT + slot].x, 0.0, 1.0);
+    float r = gi2_sc_sun_ratio(slot);
+    float g = 1.0 - f + f * r;
+    return g > 1.0e-6 ? f * r / g : 0.0;
 }
 // The ratio to carry light last relit at frame f to now (1 when unknown).
 float gi2_ls_ratio(uint f) {
@@ -931,7 +968,7 @@ void gi2_sc_pool(uint slot) {
 vec4 gi2_sc_shown(uint slot) {
     vec3 pooled = gi2_unpack_rgb9e5(floatBitsToUint(cache.v[GI2_WORLD_AT + slot].y));
     vec4 own = cache.v[3u * slot + 2u];
-    float ls = GI2_LS_RESCALE && gi2_world_mode() == 3u ? gi2_ls_ratio(gi2_sc_updated(slot)) : 1.0;
+    float ls = gi2_world_mode() == 3u ? gi2_sc_sun_gain(slot) : 1.0;
     if (any(greaterThan(pooled, vec3(0.0)))) {
         return vec4(pooled * ls, 1.0);
     }
@@ -958,7 +995,8 @@ vec3 gi2_cache_irradiance_at(vec3 pos, vec3 n, float t) {
                 vec4 v = cache.v[3u * s + 2u];
                 if (v.w >= GI2_SC_READ_SETS && fract(v.w) < 0.1) {
                     cache.v[3u * s].w = uintBitsToFloat(gi2_frame());
-                    return v.rgb;
+                    gi2_hit_sunfrac = gi2_sc_sunfrac_now(s);
+                    return v.rgb * gi2_sc_sun_gain(s);
                 }
             }
         }
@@ -1013,6 +1051,10 @@ vec3 gi2_cache_irradiance(vec3 pos, vec3 n) {
             }
         }
         return sum.w > 0.0 ? sum.rgb / sum.w : vec3(0.0);
+    }
+    if (gi2_world_mode() == 3u) {
+        gi2_hit_sunfrac = gi2_sc_sunfrac_now(slot);
+        return e.rgb * gi2_sc_sun_gain(slot);
     }
     return e.rgb;
 }
@@ -1282,9 +1324,8 @@ vec4 gi2_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             vec4 rs = gi2_sc_resample(q, n, size, slot);
             if (rs.w > 0.5) {
                 // S62E: the seed is light as of now; stored in the slot's scale.
-                if (GI2_LS_RESCALE) {
-                    rs.rgb /= max(gi2_ls_ratio(gi2_sc_updated(slot)), 1.0e-3);
-                }
+                // S63A: the seed is light as of now; no sun share until relit.
+                cache.v[GI2_SC_SUN_AT + slot] = vec4(0.0, max(gi2_ls_now(), 0.0), 0.0, 0.0);
                 cache.v[3u * slot + 2u] = rs;
             }
         }
