@@ -33,6 +33,7 @@ void main() {
     uint ray = idx < pixels + kept || fill_hit ? 0u : gi2_probe_rays() + (idx - pixels - kept);
     vec3 pos;
     vec3 n;
+    float hit_t = 1.0e9;
     vec3 reflectance = vec3(1.0);
     bool two_sided = false;
     vec3 glow = vec3(0.0);
@@ -76,6 +77,7 @@ void main() {
             return;
         }
         pos = origin + dir * rec.x;
+        hit_t = rec.x;
         n = gi2_unpack_normal(floatBitsToUint(rec.y));
         reflectance = unpackUnorm4x8(floatBitsToUint(rec.z)).rgb * (1.0 / GI2_PI);
         glow = gi2_unpack_rgb9e5(floatBitsToUint(rec.w));
@@ -131,7 +133,7 @@ void main() {
         outc.px[idx] = emitted == ~0u ? 0u : emitted;
         gbuf.px[idx].w = gi2_pack_rgb9e5(e);
     } else {
-        e += gi2_cache_irradiance(pos, n);
+        e += gi2_cache_irradiance_at(pos, n, hit_t);
         if (fill_hit) {
             gi2_put_fill_light(h, reflectance * e + glow);
         } else if (probe_hit) {

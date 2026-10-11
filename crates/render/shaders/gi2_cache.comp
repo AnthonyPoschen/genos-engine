@@ -97,6 +97,15 @@ void main() {
                 cache.v[3u * slot + 2u] = vec4(m0, min(t + 1.0, cap) + 0.25);
                 return;
             }
+            // First quiet relight after the light changed: the sets taken while it
+            // changed describe light that is gone; start again from this set
+            // (A-SVGF / ReLAX: history dropped where the signal changed).
+            if (fract(old.w) > 0.1) {
+                cache.v[GI2_SC_EST_AT + 2u * slot] = vec4(e, pow(0.15 * dot(e, lw), 2.0) + 1.0e-8);
+                cache.v[GI2_SC_EST_AT + 2u * slot + 1u] = vec4(1.0, 1.0, 1.0, 1.0);
+                cache.v[3u * slot + 2u] = vec4(e, 1.0);
+                return;
+            }
             if (b.x <= 0.0) {
                 // First estimator step (new, or resampled from another size).
                 a = vec4(old.rgb, pow(0.15 * dot(old.rgb, lw), 2.0) + 1.0e-8);

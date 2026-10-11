@@ -298,9 +298,12 @@ vec4 gi2_sc_parent(vec3 pos, vec3 n, float size) {
 // round in GI2_SC_DORMANT, enough to notice a change (GIBS 2021: converged surfels
 // send only change-detection rays).
 const uint GI2_SC_DORMANT = 8u;
+const float GI2_SC_DORMANT_SETS = 128.0;
 bool gi2_sc_dormant(uint slot) {
     vec4 b = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
-    return b.x > 0.0 && b.y < 0.3;
+    // Only once its mean holds GI2_SC_DORMANT_SETS sets: a texel still warming
+    // up keeps its full rate whatever its inconsistency says.
+    return b.x > 0.0 && b.y < 0.3 && b.w >= GI2_SC_DORMANT_SETS;
 }
 
 // Surface cache, flag 524288: a texel claimed at another size than the one that
@@ -498,6 +501,34 @@ vec4 gi2_sc_shown(uint slot) {
         return vec4(pooled, 1.0);
     }
     return own.w > 0.5 ? vec4(own.rgb, 1.0) : vec4(0.0);
+}
+
+// Surface cache read rule at a ray hit t from the ray's origin (SHaRC: a cache
+// cell answers a ray only if it is small against the distance, t > size sqrt 3,
+// and holds enough samples): a near hit reads the finest lit texel with
+// t > size sqrt 3 and at least GI2_SC_READ_SETS sets; otherwise the 25 cm patch
+// as before, which falls back to its lit neighbours, never black.
+const float GI2_SC_READ_SETS = 4.0;
+vec3 gi2_cache_irradiance(vec3 pos, vec3 n);
+vec3 gi2_cache_irradiance_at(vec3 pos, vec3 n, float t) {
+    if (gi2_world_mode() == 3u && (gi2_sc_flags() & 2097152u) == 0u && !gi2_sc_slanted(n)) {
+        float hs = gi2_hit_size_n(pos, n);
+        if (t < hs * 1.7320508) {
+            float fs = 0.0625;
+            while (fs * 2.0 < hs && t >= fs * 2.0 * 1.7320508) {
+                fs *= 2.0;
+            }
+            uint s = gi2_cache_find_sized(pos, n, false, fs, pos);
+            if (s != ~0u) {
+                vec4 v = cache.v[3u * s + 2u];
+                if (v.w >= GI2_SC_READ_SETS && fract(v.w) < 0.1) {
+                    cache.v[3u * s].w = uintBitsToFloat(gi2_frame());
+                    return v.rgb;
+                }
+            }
+        }
+    }
+    return gi2_cache_irradiance(pos, n);
 }
 
 // Irradiance already bounced onto the surface at pos facing n (0 for a new patch).
