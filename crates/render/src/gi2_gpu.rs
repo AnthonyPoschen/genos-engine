@@ -643,7 +643,7 @@ impl Gpu {
         let share = self.light_families();
         if self.gi2.cache_keys.buffer.is_null() {
             self.gi2.cache_keys = self.make_buffer_queues(
-                (2 * GI2_CACHE_SLOTS + 2 + 16384) * 4, // + the scheduler's histogram and threshold, the WRC refresh lists
+                (2 * GI2_CACHE_SLOTS + 2 + 20480) * 4, // + the scheduler's histogram and threshold, the WRC refresh lists
                 0x20 | 0x2,
                 Memory::Device,
                 &share,
@@ -882,7 +882,7 @@ impl Gpu {
             self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             // The mature and young patch counts, rebuilt by the compact pass.
             if !world {
-                for at in [GI2_CACHE_SLOTS, 2 * GI2_CACHE_SLOTS + 1, GI2_WRC_COUNTS_AT, GI2_WRC_COUNTS_AT + 1, GI2_WRC_COUNTS_AT + 4] {
+                for at in [GI2_CACHE_SLOTS, 2 * GI2_CACHE_SLOTS + 1, GI2_WRC_COUNTS_AT, GI2_WRC_COUNTS_AT + 1, GI2_WRC_COUNTS_AT + 4, GI2_WRC_COUNTS_AT + 5] {
                     (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache_keys.buffer, at * 4, 4, 0);
                 }
             }
@@ -1072,7 +1072,7 @@ impl Gpu {
             (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, GI2_CACHE_SLOTS * 4, 4, 0);
             // The WRC refresh lists' counts (change, background; gi2_cache.glsl).
             (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, GI2_WRC_COUNTS_AT * 4, 8, 0);
-            (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, (GI2_WRC_COUNTS_AT + 4) * 4, 4, 0);
+            (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, (GI2_WRC_COUNTS_AT + 4) * 4, 8, 0);
             (self.fns.cmd_fill_buffer)(
                 cmd,
                 self.gi2.cache_keys.buffer,
@@ -1147,8 +1147,8 @@ impl Gpu {
         }
         if let Ok(w) = self.read_stats16(memory) {
             eprintln!(
-                "gi2sc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {}",
-                self.gi2.frame, self.gi2.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19]
+                "gi2sc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {}",
+                self.gi2.frame, self.gi2.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20]
             );
         }
     }

@@ -149,6 +149,21 @@ const uint GI2_WRC_LAMPS_AT = GI2_SC_HIST_AT + 68u;
 // the most a round may burst (each takes 4 entries).
 const uint GI2_WRC_BURST_COUNT_AT = GI2_SC_HIST_AT + 70u;
 const uint GI2_WRC_BURST_MAX = 2048u;
+// S65A two-tier updates (Anthony): a due texel whose light changes little (the
+// estimator's inconsistency under GI2_SC_TRICKLE_THR standard deviations, with
+// its own history, no local change) takes a trickle of one 16-ray entry (the smallest the batch
+// holds; its quarters add up to a set over updates, Lumen's few rays per texel
+// accumulated temporally) from its own list of at most GI2_SC_TRICKLE entries a
+// round. The rest are ranked by how much their light changes and take whole sets
+// from the main batch, so a big change syncs in a few rounds. Both are ceilings.
+const float GI2_SC_TRICKLE_THR = 0.3;
+const uint GI2_SC_TRICKLE = 4096u;
+const uint GI2_SC_TRICKLE_COUNT_AT = GI2_SC_HIST_AT + 71u;
+const uint GI2_SC_TRICKLE_AT = GI2_SC_HIST_AT + 13200u;
+// Batch entries before the trickle, WRC refresh and scout regions.
+uint gi2_sc_room() {
+    return GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES - GI2_WRC_REFRESH - GI2_SC_TRICKLE;
+}
 const uint GI2_WRC_RING_HEAD_AT = GI2_SC_HIST_AT + 69u;
 const uint GI2_WRC_RING = 16u;
 const uint GI2_WRC_RING_AT = GI2_SC_HIST_AT + 72u;
@@ -1093,11 +1108,16 @@ uint gi2_cache_batch_slot(uint j) {
         if (j >= GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES) {
             return ~0u;
         }
-        room = GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES - GI2_WRC_REFRESH;
+        room = gi2_sc_room();
+        if (j >= room && j < room + GI2_SC_TRICKLE) {
+            // S65A trickle entries: one a texel.
+            uint k = j - room;
+            return k < min(ckeys.key[GI2_SC_TRICKLE_COUNT_AT], GI2_SC_TRICKLE) ? ckeys.key[GI2_SC_TRICKLE_AT + k] : ~0u;
+        }
         if (j >= room) {
             // The WRC refresh entries: change-driven, then background, each
             // cell a whole set (4 consecutive entries).
-            uint k = (j - room) / 4u;
+            uint k = (j - room - GI2_SC_TRICKLE) / 4u;
             uint c = min(ckeys.key[GI2_WRC_CHG_COUNT_AT], GI2_WRC_REFRESH_CELLS);
             if (k < c) {
                 return ckeys.key[GI2_WRC_CHG_AT + k];

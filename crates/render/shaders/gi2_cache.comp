@@ -21,7 +21,7 @@ void main() {
                 atomicAdd(gstats.scouts, GI2_WRC_SCOUT_ENTRIES * GI2_CACHE_RAYS);
             }
             gi2_ls_note();
-            uint room = GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES - GI2_WRC_REFRESH;
+            uint room = gi2_sc_room();
             uint budget = room - min(gi2_young_count(), room);
             uint acc = 0u;
             uint thr = 0u;
