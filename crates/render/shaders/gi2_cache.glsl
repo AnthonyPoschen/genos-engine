@@ -153,6 +153,10 @@ const uint GI2_WORLD_AT = 3u * GI2_CACHE_SLOTS;
 // and short-term luminance variance (w); then the variance-based blend reduction
 // (x) and the inconsistency (y). Zero when the slot is claimed.
 const uint GI2_SC_EST_AT = 4u * GI2_CACHE_SLOTS;
+// Object id + 1 of a texel keyed in a mover's frame (0: a world texel).
+const uint GI2_SC_OBJ_AT = 6u * GI2_CACHE_SLOTS;
+// Set while a lookup runs in a mover's frame: id + 1 salts the key.
+float gi2_obj_salt = 0.0;
 
 vec3 gi2_axis_vec(uint a) {
     vec3 v = vec3(0.0);
@@ -168,6 +172,9 @@ uint gi2_cache_key_sized(vec3 pos, vec3 n, float size) {
     ivec3 c = ivec3(floor(pos / size - inset));
     uint h = gi2_hash(uint(c.x) * 73856093u ^ gi2_hash(uint(c.y) * 19349663u ^ gi2_hash(uint(c.z) * 83492791u)));
     h = gi2_hash(h ^ (gi2_axis(n) * 0x27d4eb2du) ^ (floatBitsToUint(size) * 0x165667b1u));
+    if (gi2_obj_salt > 0.5) {
+        h = gi2_hash(h ^ (uint(gi2_obj_salt) * 0x85ebca6bu));
+    }
     return max(h, 1u);
 }
 
@@ -232,6 +239,9 @@ uint gi2_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
             cache.v[GI2_WORLD_AT + slot] = vec4(length(at - gi2_sc_centre(pos, n, size)), 0.0, 0.0, 0.0);
             cache.v[GI2_SC_EST_AT + 2u * slot] = vec4(0.0);
             cache.v[GI2_SC_EST_AT + 2u * slot + 1u] = vec4(0.0);
+            if (gi2_world_mode() == 3u) {
+                cache.v[GI2_SC_OBJ_AT + slot] = vec4(gi2_obj_salt, 0.0, 0.0, 0.0);
+            }
             return slot;
         }
         if (prev == key) {
@@ -334,22 +344,150 @@ vec4 gi2_sc_resample(vec3 pos, vec3 n, float size) {
 // How far around a change a patch is relit first (gi2_compact.comp), metres.
 const float GI2_NEAR_CHANGE = 1.0;
 
-// A point within GI2_NEAR_CHANGE of an object that moved, came or went this frame.
-// A point inside the bounds of a mover: an occluder that has moved since the
-// scene loaded (gi2_gpu.rs gi2_movers; listed after the changes, count in head w
-// above mode and cap).
-bool gi2_in_change(vec3 p) {
+// Movers (gi2_gpu.rs gi2_movers): occluders that moved in the last
+// GI2_MOVER_KEEP frames, listed after the changes, four vec4 each: bounding
+// sphere; centre and id + 1; half extents (x, y, z); cosine and sine of the yaw.
+// Count in head w above 200000, the object-local texel switch at 100000.
+const uint GI2_MOVER_VEC4 = 4u;
+uint gi2_movers_first() {
     vec4 head = work.v[gi2_change_at()];
-    uint first = head.y > 0.5 ? 0u : min(uint(head.x + 0.5), GI2_CHANGES);
-    uint movers = uint(head.w + 0.5) / 100000u;
-    [[dont_unroll]] for (uint c = first; c < min(first + movers, GI2_CHANGES); c++) {
-        vec4 b = work.v[gi2_change_at() + GI2_CHANGE_HEAD + c];
+    return head.y > 0.5 ? 0u : min(uint(head.x + 0.5), GI2_CHANGES);
+}
+uint gi2_movers_count() {
+    uint n = uint(work.v[gi2_change_at()].w + 0.5) / 200000u;
+    return min(n, (GI2_CHANGES - gi2_movers_first()) / GI2_MOVER_VEC4);
+}
+vec4 gi2_mover(uint m, uint k) {
+    return work.v[gi2_change_at() + GI2_CHANGE_HEAD + gi2_movers_first() + GI2_MOVER_VEC4 * m + k];
+}
+// Object-local texels (GIBS 2021: surfels keep a transform id and a local
+// position): GENOS_GI2_SC_LOCAL=1.
+bool gi2_sc_local_on() {
+    return gi2_world_mode() == 3u && ((uint(work.v[gi2_change_at()].w + 0.5) / 100000u) & 1u) != 0u;
+}
+
+// A point inside the bounds of a mover.
+bool gi2_in_change(vec3 p) {
+    uint n = gi2_movers_count();
+    [[dont_unroll]] for (uint m = 0u; m < n; m++) {
+        vec4 b = gi2_mover(m, 0u);
         vec3 d = p - b.xyz;
         if (dot(d, d) < b.w * b.w) {
             return true;
         }
     }
     return false;
+}
+
+// Mover m's frame: world point to local and back. An occluder turns about +Y
+// (scene_rays.glsl occ_local and occ_world); a traced mesh instance (id + 1 past
+// 10000) uses its mesh field rows (world to object) and their inverse.
+bool gi2_mover_mesh(uint m, out MfInst mi) {
+    float idp = gi2_mover(m, 1u).w;
+    if (idp < 10000.5) {
+        return false;
+    }
+    mi = mf_inst(uint(idp + 0.5) - 10001u);
+    return true;
+}
+vec3 gi2_mover_to_local(uint m, vec3 p, bool dir) {
+    MfInst mi;
+    if (gi2_mover_mesh(m, mi)) {
+        return dir ? normalize(mf_dir_to_object(mi, p)) : mf_to_object(mi, p);
+    }
+    vec4 c = gi2_mover(m, 1u);
+    vec4 r = gi2_mover(m, 3u);
+    vec3 d = dir ? p : p - c.xyz;
+    return vec3(r.x * d.x - r.y * d.z, d.y, r.y * d.x + r.x * d.z);
+}
+vec3 gi2_mover_to_world(uint m, vec3 l, bool dir) {
+    MfInst mi;
+    if (gi2_mover_mesh(m, mi)) {
+        mat3 a = transpose(mat3(mi.r0.xyz, mi.r1.xyz, mi.r2.xyz));
+        mat3 inv = inverse(a);
+        if (dir) {
+            return normalize(transpose(a) * l);
+        }
+        return inv * (l - vec3(mi.r0.w, mi.r1.w, mi.r2.w));
+    }
+    vec4 c = gi2_mover(m, 1u);
+    vec4 r = gi2_mover(m, 3u);
+    vec3 d = vec3(r.x * l.x + r.y * l.z, l.y, -r.y * l.x + r.x * l.z);
+    return dir ? d : d + c.xyz;
+}
+// The mover whose surface pos (facing n) lies on, or ~0. An occluder: within its
+// local box plus 3 cm, on the face its normal points out of (not the floor under
+// or beside it). A mesh: within 3 cm of its distance field.
+uint gi2_mover_on(vec3 pos, vec3 n) {
+    if (!gi2_sc_local_on()) {
+        return ~0u;
+    }
+    uint cnt = gi2_movers_count();
+    [[dont_unroll]] for (uint m = 0u; m < cnt; m++) {
+        vec4 b = gi2_mover(m, 0u);
+        vec3 d = pos - b.xyz;
+        if (dot(d, d) >= b.w * b.w) {
+            continue;
+        }
+        MfInst mi;
+        if (gi2_mover_mesh(m, mi)) {
+            if (any(lessThan(pos, mi.lo - 0.03)) || any(greaterThan(pos, mi.hi + 0.03))) {
+                continue;
+            }
+            float dist = mf_sample(mi, mf_to_object(mi, pos)).x * mi.dscale;
+            if (abs(dist) < 0.04) {
+                return m;
+            }
+            continue;
+        }
+        vec3 l = gi2_mover_to_local(m, pos, false);
+        vec3 e = gi2_mover(m, 2u).xyz;
+        if (any(greaterThan(abs(l), e + 0.03))) {
+            continue;
+        }
+        vec3 ln = gi2_mover_to_local(m, n, true);
+        vec3 f = abs(l) - e;
+        uint k = f.x > f.y ? (f.x > f.z ? 0u : 2u) : (f.y > f.z ? 1u : 2u);
+        if (sign(l[k]) * ln[k] > 0.5) {
+            return m;
+        }
+    }
+    return ~0u;
+}
+// Mover list position of the object with id + 1 = idp, or ~0 (it has rested and
+// left the list).
+uint gi2_mover_by_id(float idp) {
+    uint n = gi2_movers_count();
+    [[dont_unroll]] for (uint m = 0u; m < n; m++) {
+        if (abs(gi2_mover(m, 1u).w - idp) < 0.5) {
+            return m;
+        }
+    }
+    return ~0u;
+}
+// Texel slot's surface point and normal in the world now: a texel of a moving
+// object stores them in the object's frame (GI2_SC_OBJ_AT holds id + 1). False
+// for an object texel whose object is no longer listed.
+bool gi2_sc_texel_world(uint slot, out vec3 p, out vec3 n) {
+    p = cache.v[3u * slot].xyz;
+    n = cache.v[3u * slot + 1u].xyz;
+    float idp = cache.v[GI2_SC_OBJ_AT + slot].x;
+    if (idp < 0.5) {
+        return true;
+    }
+    uint m = gi2_mover_by_id(idp);
+    if (m == ~0u) {
+        return false;
+    }
+    p = gi2_mover_to_world(m, p, false);
+    n = gi2_mover_to_world(m, n, true);
+    return true;
+}
+vec3 gi2_sc_texel_pos(uint slot) {
+    vec3 p;
+    vec3 n;
+    gi2_sc_texel_world(slot, p, n);
+    return p;
 }
 
 bool gi2_near_change(vec3 p) {
@@ -378,7 +516,7 @@ bool gi2_sc_light_quiet() {
 float gi2_sc_count(uint slot) {
     float t = floor(max(cache.v[3u * slot + 2u].w, 0.0));
     bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
-    if (urgent && gi2_near_change(cache.v[3u * slot].xyz)) {
+    if (urgent && gi2_near_change(gi2_sc_texel_pos(slot))) {
         t = min(t, GI2_SC_MOVING);
     } else if (!gi2_sc_light_quiet()) {
         t = min(t, gi2_sc_light_window());
@@ -452,10 +590,14 @@ const float GI2_SC_POOL = 2.4;
 const float GI2_SC_POOL_FULL = 24.0;
 void gi2_sc_pool(uint slot) {
     vec4 own = cache.v[3u * slot + 2u];
+    // A texel in a mover's frame pools with its neighbours in that frame: its
+    // position and normal are stored there, and the same salt finds them.
+    gi2_obj_salt = cache.v[GI2_SC_OBJ_AT + slot].x > 0.5 ? cache.v[GI2_SC_OBJ_AT + slot].x : 0.0;
     float t = floor(max(own.w, 0.0));
     bool floor_on = (gi2_sc_flags() & 8u) != 0u;
     if (t >= GI2_SC_POOL_FULL && !floor_on) {
         cache.v[GI2_WORLD_AT + slot].y = uintBitsToFloat(gi2_pack_rgb9e5(own.rgb));
+        gi2_obj_salt = 0.0;
         return;
     }
     vec3 p = cache.v[3u * slot].xyz;
@@ -497,6 +639,7 @@ void gi2_sc_pool(uint slot) {
         }
     }
     cache.v[GI2_WORLD_AT + slot].y = uintBitsToFloat(gi2_pack_rgb9e5(wsum > 0.0 ? sum / wsum : vec3(0.0)));
+    gi2_obj_salt = 0.0;
 }
 
 // Surface cache: what a texel shows (w 0 when it has nothing yet).
@@ -625,15 +768,34 @@ void gi2_world_add(vec3 pos, vec3 n, vec3 e, bool changed) {
 // cell centres nearest pos in the plane of its axis). Returns the irradiance and,
 // in w, how much of it to trust (0 to 1: the share of cells that have light,
 // counted up to 4 samples).
+// Experiment S54K: texels stay shown next to a moving object too (Lumen keeps
+// the surface cache and relights it; no method swap to the probes, whose
+// difference from the texels was the bright contact strip of the spin check).
+const bool GI2_SC_KEEP_NEAR = true;
+vec4 gi2_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj);
 vec4 gi2_world_irradiance(vec3 pos, vec3 n) {
     uint mode = gi2_world_mode();
+    // Object-local texels (GENOS_GI2_SC_LOCAL=1, GIBS): a pixel on a mover's
+    // surface reads texels keyed in the mover's frame, which move and turn with
+    // it and keep their light (relit fast while it moves, as near any change).
+    uint om = mode == 3u ? gi2_mover_on(pos, n) : ~0u;
+    if (om != ~0u) {
+        gi2_obj_salt = gi2_mover(om, 1u).w;
+        vec4 r = gi2_world_irradiance_in(gi2_mover_to_local(om, pos, false), gi2_mover_to_local(om, n, true), pos, true);
+        gi2_obj_salt = 0.0;
+        return r;
+    }
     // Flag 4194304 (surface cache): a pixel on or inside the bounds of a mover
-    // (an object that has moved since load, still or not) takes the screen probes,
-    // which trace it as it is now, instead of world texels it sweeps through; the
-    // same path moving and still, so its light does not jump when it stops.
-    if (mode == 3u && (gi2_sc_flags() & 4194304u) != 0u && gi2_in_change(pos)) {
+    // (an object that moved in the last GI2_MOVER_KEEP frames) takes the screen
+    // probes, which trace it as it is now, instead of world texels it sweeps
+    // through.
+    if (mode == 3u && !GI2_SC_KEEP_NEAR && (gi2_sc_flags() & 4194304u) != 0u && gi2_in_change(pos)) {
         return vec4(0.0);
     }
+    return gi2_world_irradiance_in(pos, n, pos, false);
+}
+vec4 gi2_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
+    uint mode = gi2_world_mode();
     if (gi2_sc_slanted(n)) {
         return vec4(0.0);
     }
@@ -642,7 +804,7 @@ vec4 gi2_world_irradiance(vec3 pos, vec3 n) {
     vec3 tb = vec3(0.0);
     ta[(ax + 1u) % 3u] = 1.0;
     tb[(ax + 2u) % 3u] = 1.0;
-    float size = gi2_cell_size(pos);
+    float size = gi2_cell_size(wpos);
     vec2 uv = vec2(dot(pos, ta), dot(pos, tb)) / size - 0.5;
     vec2 g0 = floor(uv);
     vec2 f = uv - g0;
@@ -685,7 +847,7 @@ vec4 gi2_world_irradiance(vec3 pos, vec3 n) {
         bool est = (gi2_sc_flags() & 1048576u) != 0u;
         bool stale = mode == 3u && fract(own_w) > 0.1 && !est;
         float sc_trust = stale ? 0.0 : 1.0;
-        if ((gi2_sc_flags() & 32u) != 0u) {
+        if ((gi2_sc_flags() & 32u) != 0u || obj) {
             // A texel with few sets shares the pixel with the probes.
             float c = floor(max(own_w, 0.0));
             sc_trust *= c / (c + GI2_SC_TRUST_SETS);
@@ -695,7 +857,7 @@ vec4 gi2_world_irradiance(vec3 pos, vec3 n) {
     // Surface cache: while the light changes or around an object that moves, the
     // probes (no history) show it.
     bool light_swap = !gi2_sc_light_quiet() && (gi2_sc_flags() & 1048576u) == 0u;
-    if (mode == 3u && (light_swap || gi2_near_change(pos) || (gi2_sc_flags() & 512u) != 0u)) {
+    if (mode == 3u && (light_swap || (!obj && !GI2_SC_KEEP_NEAR && gi2_near_change(pos)) || (gi2_sc_flags() & 512u) != 0u)) {
         trust = 0.0;
     }
     return vec4(wsum > 0.0 ? sum / wsum : vec3(0.0), trust);
