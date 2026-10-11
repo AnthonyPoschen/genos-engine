@@ -135,6 +135,11 @@ void main() {
                 }
                 return;
             }
+            // S64A: relit only once due (the budget is a ceiling).
+            if (int(gi2_frame() - updated) < int(gi2_sc_interval(slot, t))) {
+                atomicAdd(gstats.waiting, 1u);
+                return;
+            }
             float cap = gi2_sc_cap(slot);
             // Hit patches taking each relight whole (flag 131072) hold at most
             // GI2_CACHE_MATURE sets: they weigh against that, not the pixel cap
@@ -158,6 +163,7 @@ void main() {
             // Whole 64-ray sets until the texel has settled (gi2_sc_settled).
             bool full = !gi2_sc_settled(slot, t) || (est.x > 0.0 && est.y > GI2_SC_FULL_INC);
             uint m = gi2_sc_entries(slot, full);
+            atomicAdd(gstats.due, m);
             atomicAdd(ckeys.key[GI2_SC_HIST_AT + b], m);
             if (b < ckeys.key[GI2_SC_THR_AT]) {
                 return;

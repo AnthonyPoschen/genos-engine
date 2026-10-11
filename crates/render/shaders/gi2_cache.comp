@@ -17,6 +17,9 @@ void main() {
         // they fill what the young leave of the batch; the histogram restarts.
         if (gi2_world_mode() == 3u && GI2_SC_SCHED) {
             gi2_wrc_note_lamps();
+            if (gi2_wrc_scout_due()) {
+                atomicAdd(gstats.scouts, GI2_WRC_SCOUT_ENTRIES * GI2_CACHE_RAYS);
+            }
             gi2_ls_note();
             uint room = GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES - GI2_WRC_REFRESH;
             uint budget = room - min(gi2_young_count(), room);
@@ -49,6 +52,7 @@ void main() {
     if (key == 0u) {
         return;
     }
+    atomicAdd(gstats.rays, run * GI2_CACHE_RAYS);
     uint last = floatBitsToUint(cache.v[3u * slot].w);
     // Signed: on the async queue a frame drawn after this round was built may
     // already have read the patch (last ahead of this round's frame).

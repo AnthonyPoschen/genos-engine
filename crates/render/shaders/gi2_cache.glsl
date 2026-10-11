@@ -57,6 +57,16 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint extra;
     uint partial;
     uint sets;
+    // S64A rate-based scheduling: cache rays traced this round (texels, WRC,
+    // scouts), batch entries of the texels due, texels not yet due, scout rays.
+    uint rays;
+    uint due;
+    uint waiting;
+    uint scouts;
+    uint pad2;
+    uint pad3;
+    uint pad4;
+    uint pad5;
 } gstats;
 
 const float GI2_CACHE_MATURE = 3.0;
@@ -1140,6 +1150,54 @@ bool gi2_sc_settled(uint slot, float t) {
         return true;
     }
     return floor(t) >= reach - 0.5 && b.x > 0.0 && b.y < GI2_SC_SETTLE_SD;
+}
+// S64A rate-based scheduling (Anthony: "the budget is a ceiling, not a target").
+// A texel is relit only once it is due: its interval (frames) comes from how
+// much its light is changing. Young texels (short of GI2_SC_FULL_SETS sets) and
+// texels with a local change (a mover nearby, a moved lamp) are due every
+// round; the rest every GI2_SC_RATE_SLOW / (1 + GI2_SC_RATE_K inconsistency)
+// frames (the estimator's short/long divergence in standard deviations, GIBS),
+// at most GI2_SC_RATE_CHANGING while the light changes anywhere and
+// GI2_SC_RATE_DORMANT once dormant. Only when more is due than the batch holds
+// does the priority order choose among them; otherwise the rest of the batch
+// stays empty and the GPU idles.
+const bool GI2_SC_RATE = true;
+const float GI2_SC_RATE_SLOW = 240.0;
+const float GI2_SC_RATE_K = 16.0;
+const float GI2_SC_RATE_CHANGING = 30.0;
+const float GI2_SC_RATE_DORMANT = 600.0;
+const float GI2_SC_RATE_FAST = 1.0;
+bool gi2_sc_dormant(uint slot);
+uint gi2_sc_interval(uint slot, float t) {
+    if (!GI2_SC_RATE) {
+        return 0u;
+    }
+    vec4 b = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
+    if (t < GI2_SC_FULL_SETS - 0.5 || b.x <= 0.0) {
+        return 0u;
+    }
+    bool mover;
+    if (gi2_sc_local_change(slot, mover)) {
+        return 0u;
+    }
+    float iv = GI2_SC_RATE_SLOW / (1.0 + GI2_SC_RATE_K * max(b.y, 0.0));
+    if (gi2_sc_settled(slot, t) && (gi2_sc_flags() & 1048576u) != 0u && t >= gi2_sc_cap(slot) - 0.5 && gi2_sc_dormant(slot)) {
+        iv = GI2_SC_RATE_DORMANT;
+    }
+    if (!gi2_sc_light_quiet()) {
+        iv = min(iv, GI2_SC_RATE_CHANGING);
+    }
+    return uint(clamp(iv, GI2_SC_RATE_FAST, GI2_SC_RATE_DORMANT));
+}
+// Scouts (WRC pre-seeding) only while the camera moves or turns, else one
+// round in GI2_WRC_SCOUT_STILL.
+const uint GI2_WRC_SCOUT_STILL = 8u;
+bool gi2_wrc_scout_due() {
+    vec4 last_eye = work.v[gi2_change_at() + 1u];
+    vec3 last_fwd = work.v[gi2_change_at() + 4u].xyz;
+    bool moving = last_eye.w < 0.5 || length(scene.eye.xyz - last_eye.xyz) > 0.01
+        || dot(normalize(scene.view_forward.xyz), normalize(last_fwd + vec3(0.0, 1.0e-6, 0.0))) < 0.9999;
+    return moving || gi2_round() % GI2_WRC_SCOUT_STILL == 0u;
 }
 uint gi2_sc_quarter0(uint slot) {
     if (gi2_world_mode() != 3u) {

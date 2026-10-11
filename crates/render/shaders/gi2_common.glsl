@@ -401,6 +401,9 @@ bool gi2_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     uint entry = r / GI2_CACHE_RAYS;
     if (gi2_world_mode() == 3u && entry >= GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES) {
         // A WRC scout ray: its hit claims and reads the WRC cell there.
+        if (!gi2_wrc_scout_due()) {
+            return false;
+        }
         gi2_wrc_scout(r - (GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES) * GI2_CACHE_RAYS, origin, dir);
         n = dir;
         return true;

@@ -652,10 +652,10 @@ impl Gpu {
                 self.make_buffer_queues(GI2_CACHE_SLOTS * 128, 0x20 | 0x2, Memory::Device, &share)?;
             self.gi2.cache_clear = true;
             for k in 0..2 {
-                self.gi2.stats[k] = self.make_buffer(64, 0x20 | 0x2, Memory::Readback)?;
+                self.gi2.stats[k] = self.make_buffer(96, 0x20 | 0x2, Memory::Readback)?;
             }
             self.gi2.world_stats =
-                self.make_buffer_queues(64, 0x20 | 0x2, Memory::Readback, &share)?;
+                self.make_buffer_queues(96, 0x20 | 0x2, Memory::Readback, &share)?;
             self.gi2.world_scene = self.make_buffer_queues(
                 crate::pack::SCENE_CAPACITY as u64,
                 0x20,
@@ -861,7 +861,7 @@ impl Gpu {
             }
         }
         unsafe {
-            (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.stats[slot].buffer, 0, 64, 0);
+            (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.stats[slot].buffer, 0, 96, 0);
             if self.gi2.cache_clear {
                 self.gi2.cache_clear = false;
                 // The async queue starts once this frame (its slot) is surely done.
@@ -1067,7 +1067,7 @@ impl Gpu {
                 (self.fns.cmd_reset_query)(cmd, qp, 0, 6);
                 (self.fns.cmd_write_timestamp)(cmd, 0x1, qp, 0);
             }
-            (self.fns.cmd_fill_buffer)(cmd, self.gi2.world_stats.buffer, 0, 64, 0);
+            (self.fns.cmd_fill_buffer)(cmd, self.gi2.world_stats.buffer, 0, 96, 0);
             // The mature and young counts, rebuilt by the compact pass.
             (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, GI2_CACHE_SLOTS * 4, 4, 0);
             // The WRC refresh lists' counts (change, background; gi2_cache.glsl).
@@ -1147,14 +1147,14 @@ impl Gpu {
         }
         if let Ok(w) = self.read_stats16(memory) {
             eprintln!(
-                "gi2sc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {}",
-                self.gi2.frame, self.gi2.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15]
+                "gi2sc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {}",
+                self.gi2.frame, self.gi2.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19]
             );
         }
     }
 
-    fn read_stats16(&self, memory: Handle) -> Result<[u32; 16], String> {
-        let mut words = [0u32; 16];
+    fn read_stats16(&self, memory: Handle) -> Result<[u32; 24], String> {
+        let mut words = [0u32; 24];
         unsafe {
             let mut mapped = std::ptr::null_mut();
             check(
@@ -1162,13 +1162,13 @@ impl Gpu {
                     self.device,
                     memory,
                     0,
-                    64,
+                    96,
                     0,
                     &mut mapped,
                 ),
                 "map gi2 stats",
             )?;
-            std::ptr::copy_nonoverlapping(mapped as *const u32, words.as_mut_ptr(), 16);
+            std::ptr::copy_nonoverlapping(mapped as *const u32, words.as_mut_ptr(), 24);
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(words)
