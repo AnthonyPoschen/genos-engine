@@ -520,7 +520,10 @@ bool gi2_sc_dormant(uint slot) {
 // from nothing. Since the size bands went (S57) this only fills texels of
 // surfaces seen for the first time. w 0 when nothing lit covers it.
 vec4 gi2_sc_shown(uint slot);
+// S64B: the sun/sky share (as of now) of the last bilerp's sources.
+float gi2_bilerp_sunfrac = 0.0;
 vec4 gi2_sc_bilerp_sized(vec3 pos, vec3 n, float size) {
+    float fsum = 0.0;
     uint ax = gi2_axis(n) >> 1u;
     vec3 ta = vec3(0.0);
     vec3 tb = vec3(0.0);
@@ -548,6 +551,7 @@ vec4 gi2_sc_bilerp_sized(vec3 pos, vec3 n, float size) {
         if (v.w > 0.5 && fract(v.w) < 0.1) {
             cache.v[3u * s].w = uintBitsToFloat(gi2_frame());
             sum += bil * gi2_sc_shown(s).rgb;
+            fsum += bil * gi2_sc_sunfrac_now(s);
             // WRC samples are 16-ray quarters (S61B): four to a set.
             count += bil * floor(v.w) * (size > 0.2 && gi2_world_mode() == 3u ? 0.25 : 1.0);
             wsum += bil;
@@ -558,12 +562,15 @@ vec4 gi2_sc_bilerp_sized(vec3 pos, vec3 n, float size) {
     if (wsum < 0.5) {
         return vec4(0.0);
     }
+    gi2_bilerp_sunfrac = fsum / wsum;
     return vec4(sum / wsum, count / wsum);
 }
 const float GI2_SC_RESAMPLE_SETS = 4.0;
 bool gi2_near_change(vec3 p);
 bool gi2_sc_light_quiet();
+float gi2_seed_sunfrac = 0.0;
 vec4 gi2_sc_resample(vec3 pos, vec3 n, float size, uint slot) {
+    gi2_seed_sunfrac = 0.0;
     vec4 best = vec4(0.0);
     [[dont_unroll]] for (uint l = 0u; l < 4u; l++) {
         float s2 = size * ((l & 1u) == 0u ? 2.0 : 0.5) * ((l & 2u) == 0u ? 1.0 : ((l & 1u) == 0u ? 2.0 : 0.5));
@@ -572,6 +579,7 @@ vec4 gi2_sc_resample(vec3 pos, vec3 n, float size, uint slot) {
         // when neither has light.
         if (r.w > best.w) {
             best = r;
+            gi2_seed_sunfrac = gi2_bilerp_sunfrac;
         }
         if (l == 1u && best.w > 0.5) {
             break;
@@ -1050,16 +1058,20 @@ vec3 gi2_cache_irradiance(vec3 pos, vec3 n) {
         vec3 t1 = normalize(abs(n.x) < 0.9 ? cross(n, vec3(1.0, 0.0, 0.0)) : cross(n, vec3(0.0, 1.0, 0.0)));
         vec3 t2 = cross(n, t1);
         vec4 sum = vec4(0.0);
+        float fill_f = 0.0;
         [[dont_unroll]] for (uint i = 0u; i < 4u; i++) {
             vec3 o = (i < 2u ? t1 : t2) * ((i & 1u) == 0u ? size : -size);
             uint s2 = gi2_cache_find_sized(pos + o, n, false, hsize, pos + o);
             if (s2 != ~0u) {
                 vec4 v = cache.v[3u * s2 + 2u];
                 if (v.w > 0.5) {
-                    sum += vec4(v.rgb, 1.0);
+                    // S64B: scaled to the sun/sky of now, share noted.
+                    sum += vec4(v.rgb * (gi2_world_mode() == 3u ? gi2_sc_sun_gain(s2) : 1.0), 1.0);
+                    fill_f += gi2_world_mode() == 3u ? gi2_sc_sunfrac_now(s2) : 0.0;
                 }
             }
         }
+        gi2_hit_sunfrac = sum.w > 0.0 ? fill_f / sum.w : 0.0;
         return sum.w > 0.0 ? sum.rgb / sum.w : vec3(0.0);
     }
     if (gi2_world_mode() == 3u) {
@@ -1382,8 +1394,8 @@ vec4 gi2_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             vec4 rs = gi2_sc_resample(q, n, size, slot);
             if (rs.w > 0.5) {
                 // S62E: the seed is light as of now; stored in the slot's scale.
-                // S63A: the seed is light as of now; no sun share until relit.
-                cache.v[GI2_SC_SUN_AT + slot] = vec4(0.0, max(gi2_ls_now(), 0.0), 0.0, 0.0);
+                // S64B: the seed is light as of now, with its seeds' sun/sky share.
+                cache.v[GI2_SC_SUN_AT + slot] = vec4(gi2_seed_sunfrac, max(gi2_ls_now(), 0.0), 0.0, 0.0);
                 cache.v[3u * slot + 2u] = rs;
             }
         }

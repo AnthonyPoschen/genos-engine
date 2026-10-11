@@ -99,14 +99,19 @@ void main() {
             uint q = q0 + run;
             if (q0 > 0u) {
                 e += gi2_unpack_rgb9e5(floatBitsToUint(cache.v[GI2_SC_OBJ_AT + slot].z));
+                // S64B: and their sun/sky share (SUN_AT .z share, .w all, luminance).
+                es += cache.v[GI2_SC_SUN_AT + slot].z;
+                el += cache.v[GI2_SC_SUN_AT + slot].w;
             }
             if (q < GI2_SC_QUARTERS) {
                 cache.v[GI2_SC_OBJ_AT + slot].z = uintBitsToFloat(gi2_pack_rgb9e5(e));
                 cache.v[GI2_SC_OBJ_AT + slot].w = uintBitsToFloat(q);
+                cache.v[GI2_SC_SUN_AT + slot].zw = vec2(es, el);
                 atomicAdd(gstats.partial, 1u);
                 return;
             }
             cache.v[GI2_SC_OBJ_AT + slot].zw = vec2(0.0);
+            cache.v[GI2_SC_SUN_AT + slot].zw = vec2(0.0);
             atomicAdd(gstats.sets, 1u);
             rays = float(GI2_SC_SET_RAYS);
         }
