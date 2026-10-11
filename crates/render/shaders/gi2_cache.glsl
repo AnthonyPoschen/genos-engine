@@ -127,8 +127,11 @@ const float GI2_SC_HOLD = 4.0;
 // Flag 32: a texel's share of its pixels against the probes, sets / (sets + this).
 const float GI2_SC_TRUST_SETS = 6.0;
 
+float gi2_cell_size_d(float d);
 float gi2_cell_size(vec3 pos) {
-    float d = length(pos - scene.eye.xyz);
+    return gi2_cell_size_d(length(pos - scene.eye.xyz));
+}
+float gi2_cell_size_d(float d) {
     float level = clamp(floor(log2(max(d / 8.0, 1.0))), 0.0, 6.0);
     // Surface cache (mode 3): 12.5 cm texels to 8 m, 6.25 cm inside GI2_SC_NEAR.
     if (gi2_world_mode() == 3u) {
@@ -322,23 +325,93 @@ bool gi2_sc_dormant(uint slot) {
 
 // Surface cache, flag 524288: a texel claimed at another size than the one that
 // lit this spot before (the eye moved across a texel-size ring) starts from that
-// texel's light and count (up to GI2_SC_RESAMPLE_SETS) instead of from nothing: Lumen's
-// "resample lighting on realloc" (SurfaceCache.ResampleLighting). w 0 when there
-// is no lit texel of the next sizes up or down.
-const float GI2_SC_RESAMPLE_SETS = 4.0;
-vec4 gi2_sc_resample(vec3 pos, vec3 n, float size) {
-    [[dont_unroll]] for (uint l = 0u; l < 4u; l++) {
-        float s2 = size * ((l & 1u) == 0u ? 2.0 : 0.5) * ((l & 2u) == 0u ? 1.0 : ((l & 1u) == 0u ? 2.0 : 0.5));
-        uint s = gi2_cache_find_sized(pos, n, false, s2, pos);
-        if (s != ~0u) {
-            vec4 v = cache.v[3u * s + 2u];
-            if (v.w > 0.5 && fract(v.w) < 0.1) {
-                cache.v[3u * s].w = uintBitsToFloat(gi2_frame());
-                return vec4(v.rgb, min(floor(v.w), GI2_SC_RESAMPLE_SETS));
-            }
+// size's converged light, bilinear at its centre (the 4 nearest texels of that
+// size, or the 2 x 2 finer texels it covers), and the full sample count they hold
+// (to the cap): Lumen's "resample lighting on realloc"
+// (SurfaceCache.ResampleLighting). Its own sets then blend in by count (the
+// running mean), so crossing a band never shows fewer samples than before: no
+// restart, no coarse fill, no grain (S56, Anthony 2026-10-12: a ring where
+// quality dropped as he came closer; was: at most GI2_SC_RESAMPLE_SETS = 4 sets
+// from one texel, which read as grain until the fine texel converged). w 0 when
+// no lit texel of the next sizes up or down covers it.
+vec4 gi2_sc_shown(uint slot);
+vec4 gi2_sc_bilerp_sized(vec3 pos, vec3 n, float size) {
+    uint ax = gi2_axis(n) >> 1u;
+    vec3 ta = vec3(0.0);
+    vec3 tb = vec3(0.0);
+    ta[(ax + 1u) % 3u] = 1.0;
+    tb[(ax + 2u) % 3u] = 1.0;
+    vec2 uv = vec2(dot(pos, ta), dot(pos, tb)) / size - 0.5;
+    vec2 g0 = floor(uv);
+    vec2 f = uv - g0;
+    vec3 sum = vec3(0.0);
+    float count = 0.0;
+    float wsum = 0.0;
+    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
+        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + 0.5;
+        vec3 q = pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));
+        float bil = ((k & 1u) == 1u ? f.x : 1.0 - f.x) * ((k >> 1u) == 1u ? f.y : 1.0 - f.y);
+        uint s = gi2_cache_find_sized(q, n, false, size, q);
+        if (s == ~0u || bil <= 0.0) {
+            continue;
+        }
+        vec4 v = cache.v[3u * s + 2u];
+        if (v.w > 0.5 && fract(v.w) < 0.1) {
+            cache.v[3u * s].w = uintBitsToFloat(gi2_frame());
+            sum += bil * gi2_sc_shown(s).rgb;
+            count += bil * floor(v.w);
+            wsum += bil;
         }
     }
-    return vec4(0.0);
+    // Most of the footprint lit: a texel at the edge of what was lit keeps the
+    // light it has, but one mostly over unlit cells starts as new.
+    if (wsum < 0.5) {
+        return vec4(0.0);
+    }
+    return vec4(sum / wsum, count / wsum);
+}
+const float GI2_SC_RESAMPLE_SETS = 4.0;
+vec4 gi2_sc_resample(vec3 pos, vec3 n, float size, uint slot) {
+    vec4 best = vec4(0.0);
+    [[dont_unroll]] for (uint l = 0u; l < 4u; l++) {
+        float s2 = size * ((l & 1u) == 0u ? 2.0 : 0.5) * ((l & 2u) == 0u ? 1.0 : ((l & 1u) == 0u ? 2.0 : 0.5));
+        vec4 r = gi2_sc_bilerp_sized(pos, n, s2);
+        // The next size up or down with the most samples; the sizes beyond only
+        // when neither has light.
+        if (r.w > best.w) {
+            best = r;
+        }
+        if (l == 1u && best.w > 0.5) {
+            break;
+        }
+    }
+    if (best.w < 0.5) {
+        return vec4(0.0);
+    }
+    return vec4(best.rgb, max(min(floor(best.w), gi2_sc_cap(slot)), 1.0));
+}
+
+// Band hysteresis (S56): within GI2_SC_HYST of a band edge (2.5 m, 8 m, 16 m...)
+// a pixel keeps reading the size its surface is already lit at, so a camera
+// moving back and forth over an edge does not swap sizes; past the margin the new
+// size is claimed and resampled from the old (gi2_sc_resample).
+const float GI2_SC_HYST = 0.1;
+float gi2_sc_hyst_size(vec3 pos, vec3 n, float d, float size) {
+    float hi = gi2_cell_size_d(d * (1.0 + GI2_SC_HYST));
+    float lo = gi2_cell_size_d(d * (1.0 - GI2_SC_HYST));
+    float alt = hi != size ? hi : lo;
+    if (alt == size) {
+        return size;
+    }
+    uint s = gi2_cache_find_sized(pos, n, false, size, pos);
+    if (s != ~0u && cache.v[3u * s + 2u].w > 0.5) {
+        return size;
+    }
+    uint s2 = gi2_cache_find_sized(pos, n, false, alt, pos);
+    if (s2 != ~0u && cache.v[3u * s2 + 2u].w > 0.5) {
+        return alt;
+    }
+    return size;
 }
 
 // How far around a change a patch is relit first (gi2_compact.comp), metres.
@@ -794,6 +867,16 @@ vec4 gi2_world_irradiance(vec3 pos, vec3 n) {
     }
     return gi2_world_irradiance_in(pos, n, pos, false);
 }
+// Debug view "texels" (gi2_compose.comp mode 9): the size a pixel at pos facing n
+// reads (with the band hysteresis) and the sets its texel holds (0 when unclaimed).
+vec2 gi2_sc_debug_size(vec3 pos, vec3 n) {
+    float size = gi2_cell_size(pos);
+    if (gi2_world_mode() == 3u) {
+        size = gi2_sc_hyst_size(pos, n, length(pos - scene.eye.xyz), size);
+    }
+    uint s = gi2_cache_find_sized(pos, n, false, size, pos);
+    return vec2(size, s == ~0u ? 0.0 : floor(max(cache.v[3u * s + 2u].w, 0.0)));
+}
 vec4 gi2_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     uint mode = gi2_world_mode();
     if (gi2_sc_slanted(n)) {
@@ -805,6 +888,9 @@ vec4 gi2_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     ta[(ax + 1u) % 3u] = 1.0;
     tb[(ax + 2u) % 3u] = 1.0;
     float size = gi2_cell_size(wpos);
+    if (mode == 3u) {
+        size = gi2_sc_hyst_size(pos, n, length(wpos - scene.eye.xyz), size);
+    }
     vec2 uv = vec2(dot(pos, ta), dot(pos, tb)) / size - 0.5;
     vec2 g0 = floor(uv);
     vec2 f = uv - g0;
@@ -821,7 +907,7 @@ vec4 gi2_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         }
         cache.v[3u * slot].w = uintBitsToFloat(gi2_frame());
         if (mode == 3u && (gi2_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w < 0.5) {
-            vec4 rs = gi2_sc_resample(q, n, size);
+            vec4 rs = gi2_sc_resample(q, n, size, slot);
             if (rs.w > 0.5) {
                 cache.v[3u * slot + 2u] = rs;
             }

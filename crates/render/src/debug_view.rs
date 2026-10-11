@@ -25,10 +25,14 @@ pub enum ViewMode {
     Depth,
     /// Direct light of one lamp ([`DebugView::lamp`]), shadowed.
     Light,
+    /// GI v2 surface cache: the texel size each pixel reads (red 6.25 cm, green
+    /// 12.5 cm, blue 25 cm, magenta coarser), dimmed where the texel holds fewer
+    /// than 4 sets; shaded by the normal so surfaces read.
+    Texels,
 }
 
 impl ViewMode {
-    pub const ALL: [ViewMode; 9] = [
+    pub const ALL: [ViewMode; 10] = [
         Self::Full,
         Self::Direct,
         Self::Bounce,
@@ -38,6 +42,7 @@ impl ViewMode {
         Self::Normal,
         Self::Depth,
         Self::Light,
+        Self::Texels,
     ];
 
     pub fn name(self) -> &'static str {
@@ -51,6 +56,7 @@ impl ViewMode {
             Self::Normal => "normal",
             Self::Depth => "depth",
             Self::Light => "light",
+            Self::Texels => "texels",
         }
     }
 

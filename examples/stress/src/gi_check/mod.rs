@@ -21,10 +21,11 @@ const REPRO_SCRIPT: &str = include_str!("../../scripts/gi_check/repro.rhai");
 const TURN_SCRIPT: &str = include_str!("../../scripts/gi_check/turn.rhai");
 const MIX_SCRIPT: &str = include_str!("../../scripts/gi_check/mix.rhai");
 const ROOM_SCRIPT: &str = include_str!("../../scripts/gi_check/room.rhai");
+const APPROACH_SCRIPT: &str = include_str!("../../scripts/gi_check/approach.rhai");
 const ROOM_SCENE: &str = include_str!("../../scenes/room.rhai");
-const RUNS: [&str; 13] = [
+const RUNS: [&str; 14] = [
     "repro", "settled", "moving", "walk", "flicker", "camera", "trail", "flick", "turn", "room",
-    "mix", "spin", "lampret",
+    "mix", "spin", "lampret", "approach",
 ];
 const FLICKER_SCRIPT: &str = include_str!("../../scripts/temporal_flicker_aligned.rhai");
 const VIEWS: [&str; 5] = ["room-a", "corner", "contact", "lamp-wall", "hall"];
@@ -156,6 +157,99 @@ fn lampret_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Approach run (approach.rhai): running 9 m at 5 m/s up to a lit wall in the hall,
+/// across the surface cache's texel bands. Grain: metrics::blotch at 2 px (the
+/// fine band of the error) of each moving frame against its pose settled, mean
+/// over the settled poses; onset is the worst of the first 5. Recover: frames held
+/// after stopping until the grain stays under APPROACH_RECOVER_GRAIN against the
+/// soaked end. End: the soaked end against the end pose settled from a fresh
+/// start (blob). Limits set 2026-10-12 from S56 (texels inherit their old size's
+/// light and samples across a band, with hysteresis) with a margin; ba9adca0 (4
+/// sets resampled) scored them in the S56 commit message.
+const APPROACH_GRAIN_LIMIT: f64 = 0.0056;
+const APPROACH_ONSET_LIMIT: f64 = 0.0045;
+const APPROACH_RECOVER_GRAIN: f64 = 0.003;
+const APPROACH_RECOVER_LIMIT: f64 = 120.0;
+const APPROACH_END_LIMIT: f64 = 0.016;
+fn approach_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
+    let (mut sum, mut n, mut worst, mut worst_at, mut onset, mut rel_sum) = (0.0, 0usize, 0.0f64, 0usize, 0.0f64, 0.0);
+    let mut notes = Vec::new();
+    for k in 0..200 {
+        let (moving, settled) = (frame(dir, "move", k), frame(dir, "still", k));
+        if !settled.exists() {
+            continue;
+        }
+        if !moving.exists() {
+            break;
+        }
+        let (m, s) = (metrics::lum640(&moving)?, metrics::lum640(&settled)?);
+        let g = metrics::blotch(&m, &s, 2.0);
+        rel_sum += metrics::rel_mean(&metrics::rel_error(&m, &s), &metrics::rel_base(&s));
+        notes.push(format!("{k}:{g:.4}"));
+        if k < 5 {
+            onset = onset.max(g);
+        }
+        if g > worst {
+            (worst, worst_at) = (g, k);
+        }
+        sum += g;
+        n += 1;
+    }
+    if n == 0 {
+        return Err(format!("gi-check: no approach frames in {}", dir.display()));
+    }
+    let grain = sum / n as f64;
+    println!("approach grain by frame: {}", notes.join(" "));
+    let end = metrics::lum640(&dir.join("end.png"))?;
+    let mut held = Vec::new();
+    while frame(dir, "hold", held.len()).exists() {
+        let h = metrics::lum640(&frame(dir, "hold", held.len()))?;
+        held.push(metrics::blotch(&h, &end, 2.0));
+    }
+    let recover = held
+        .iter()
+        .rposition(|g| *g > APPROACH_RECOVER_GRAIN)
+        .map_or(0, |i| i + 1);
+    println!(
+        "approach hold grain against end: first {:.4} last {:.4}, recovered after {recover} of {} frames",
+        held.first().copied().unwrap_or(0.0),
+        held.last().copied().unwrap_or(0.0),
+        held.len()
+    );
+    let fresh = metrics::lum640(&dir.join("fresh.png"))?;
+    let end_blob = metrics::blob(&end, &fresh);
+    let end_grain = metrics::blotch(&end, &fresh, 2.0);
+    rows.push(Row {
+        check: "approach grain while running".into(),
+        value: grain,
+        limit: APPROACH_GRAIN_LIMIT,
+        note: format!("worst {worst:.4} at frame {worst_at}, low-freq rel {:.4}", rel_sum / n as f64),
+        image: frame(dir, "move", worst_at),
+    });
+    rows.push(Row {
+        check: "approach onset grain (first 5)".into(),
+        value: onset,
+        limit: APPROACH_ONSET_LIMIT,
+        note: String::new(),
+        image: frame(dir, "move", 0),
+    });
+    rows.push(Row {
+        check: "approach frames to recover".into(),
+        value: recover as f64,
+        limit: APPROACH_RECOVER_LIMIT,
+        note: format!("grain under {APPROACH_RECOVER_GRAIN} against the soaked end"),
+        image: frame(dir, "hold", 0),
+    });
+    rows.push(Row {
+        check: "approach soaked end against fresh".into(),
+        value: end_blob,
+        limit: APPROACH_END_LIMIT,
+        note: format!("grain {end_grain:.4}"),
+        image: dir.join("end.png"),
+    });
+    Ok(())
+}
+
 /// Spin run (mix.rhai, spin): error and flicker on the moving green box and the
 /// light around it (where its settled picture differs from the baseline).
 /// edffa81 0.0338 / 0.0302 (FAIL); fixed 0.0196 / 0.0119.
@@ -283,14 +377,14 @@ fn tier(o: &mut Options, name: &str) -> Result<(), String> {
             // moving checks; the 90-pose camera clip (45 s) was cut 2026-10-10: the
             // turn run covers camera motion in a third of the time and caught what
             // the clip missed (the turn swim).
-            &["repro", "settled", "trail", "flick", "turn", "room", "mix", "spin"]
+            &["repro", "settled", "trail", "flick", "turn", "room", "mix", "spin", "approach"]
         }
         "mid" => {
             o.stride = 2;
-            &["repro", "settled", "moving", "camera", "trail", "flick", "turn", "room", "mix", "spin"]
+            &["repro", "settled", "moving", "camera", "trail", "flick", "turn", "room", "mix", "spin", "approach"]
         }
         "full" => &[
-            "repro", "settled", "moving", "camera", "trail", "flick", "turn", "room", "mix", "spin", "flicker",
+            "repro", "settled", "moving", "camera", "trail", "flick", "turn", "room", "mix", "spin", "approach", "flicker",
         ],
         other => return Err(format!("gi-check: --tier quick, mid or full, not {other}")),
     };
@@ -299,7 +393,7 @@ fn tier(o: &mut Options, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-const HELP: &str = "genos-stress gi-check [--tier quick|mid|full] [--out DIR] [--only repro,settled,moving,walk,flicker,camera,trail,flick,turn,room,mix,spin] \
+const HELP: &str = "genos-stress gi-check [--tier quick|mid|full] [--out DIR] [--only repro,settled,moving,walk,flicker,camera,trail,flick,turn,room,mix,spin,lampret,approach] \
 [--score-only] [--ref-noise 0.05] [--ref-spp 2048] [--ref-seconds 900] [--size 640x360] [--walk-size 1280x720] \
 [--settled-refs DIR] [--gi v2|v1] [--views corner,contact] [--stride 1] [--clip N] [--fail-fast] [--keep-going]
 Renders with GENOS_GI=v2 (or v1); GENOS_GI2_TILE defaults to the 1440p probe spacing (height / 90), references are \
@@ -333,6 +427,7 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
         "repro" => (fill(REPRO_SCRIPT), &o.size),
         "turn" => (fill(TURN_SCRIPT), &o.size),
         "room" => (fill(ROOM_SCRIPT), &o.size),
+        "approach" => (fill(APPROACH_SCRIPT), &o.size),
         "mix" => (fill(&MIX_SCRIPT.replace("__SEGS__", "mix")), &o.size),
         "spin" => (fill(&MIX_SCRIPT.replace("__SEGS__", "spin")), &o.size),
         "lampret" => (fill(&MIX_SCRIPT.replace("__SEGS__", "lampret")), &o.size),
@@ -625,6 +720,7 @@ fn score_run(o: &Options, out: &Path, run: &str, rows: &mut Vec<Row>) -> Result<
             "mix" => mix_rows(rows, &dir)?,
             "spin" => spin_rows(rows, &dir)?,
             "lampret" => lampret_rows(rows, &dir)?,
+            "approach" => approach_rows(rows, &dir)?,
             _ => {
                 let text = std::fs::read_to_string(dir.join("report.md"))
                     .map_err(|e| format!("{}: {e}", dir.display()))?;
