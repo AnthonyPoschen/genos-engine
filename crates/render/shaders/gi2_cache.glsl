@@ -658,16 +658,39 @@ bool gi2_sc_light_quiet() {
 // Surface cache: sets the texel in slot has averaged going into this relight
 // (its running mean weighs the new set 1 / (count + 1)). Inside a change or
 // under changing light, at most GI2_SC_MOVING.
+// S62C (Anthony: a change anywhere held every texel at low detail): only a
+// local change shortens history: a mover nearby (GI2_SC_MOVING), or a lamp that
+// reaches the texel moved since its last relight (the light window). Light that
+// changes everywhere a little (the sun turning, any box moving somewhere) no
+// longer does: the estimator tracks it (gi2_cache.comp, a floor on its blend
+// while the light changes, GI2_SC_CHANGE_ALPHA).
+bool gi2_wrc_lamp_changed(vec3 p, uint updated);
+// The cache pass sets this to the texel's last relight before it stamps the new
+// one (~0u: read the stamp).
+uint gi2_sc_upd_override = ~0u;
+bool gi2_sc_local_change(uint slot, out bool mover) {
+    bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
+    vec3 p = gi2_sc_texel_pos(slot);
+    mover = urgent && gi2_near_change(p);
+    if (mover) {
+        return true;
+    }
+    uint upd = gi2_sc_upd_override != ~0u ? gi2_sc_upd_override : gi2_sc_updated(slot);
+    return !gi2_sc_light_quiet() && gi2_wrc_lamp_changed(p, upd);
+}
 float gi2_sc_count(uint slot) {
     float t = floor(max(cache.v[3u * slot + 2u].w, 0.0));
-    bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
-    if (urgent && gi2_near_change(gi2_sc_texel_pos(slot))) {
-        t = min(t, GI2_SC_MOVING);
-    } else if (!gi2_sc_light_quiet()) {
-        t = min(t, gi2_sc_light_window());
+    bool mover;
+    if (gi2_sc_local_change(slot, mover)) {
+        t = min(t, mover ? GI2_SC_MOVING : gi2_sc_light_window());
     }
     return t;
 }
+// Blend floor of a texel's long-term mean while the light changes anywhere
+// (an exponential moving average that keeps up; Lumen's surface cache and
+// radiance cache keep a short temporal accumulation the same way).
+const float GI2_SC_CHANGE_ALPHA = 1.0 / 24.0;
+const float GI2_WRC_CHANGE_ALPHA = 1.0 / 16.0;
 
 float gi2_sc_cap(uint slot) {
     if (gi2_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2) {
@@ -995,7 +1018,7 @@ const float GI2_SC_FULL_INC = 1.0;
 // of the long-term one (the dormancy test's agreement). Under changing light the
 // estimator restarts every relight, so nothing settles: whole sets throughout.
 bool gi2_sc_settled(uint slot, float t) {
-    float reach = gi2_sc_light_quiet() ? GI2_SC_FULL_SETS : max(gi2_sc_light_window(), 2.0);
+    float reach = GI2_SC_FULL_SETS;
     if (cache.v[3u * slot + 1u].w > 0.2) {
         // A WRC cell: settled at its cap (or the window under changing light).
         return floor(t) >= (gi2_sc_light_quiet() ? GI2_WRC_CAP : max(gi2_sc_light_window(), 2.0)) - 0.5;

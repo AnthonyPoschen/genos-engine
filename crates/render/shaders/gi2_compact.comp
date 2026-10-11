@@ -73,8 +73,9 @@ void main() {
         // reached GI2_WRC_YOUNG = 16: every needed cell stayed a burst and took
         // the batch from the fine texels), and at most GI2_WRC_BURST_MAX cells a
         // round burst.
-        float reach_wrc = gi2_sc_light_quiet() ? GI2_WRC_YOUNG : min(GI2_WRC_YOUNG, 0.5 * max(gi2_sc_light_window(), 2.0));
-        bool burst = wrc && t < reach_wrc - 0.5 && int(gi2_frame() - floatBitsToUint(cache.v[GI2_WORLD_AT + slot].z)) <= 2;
+        // S62C: near a mover the count stays short; those cells refresh from the
+        // change list, not as bursts.
+        bool burst = wrc && !near && t < GI2_WRC_YOUNG - 0.5 && int(gi2_frame() - floatBitsToUint(cache.v[GI2_WORLD_AT + slot].z)) <= 2;
         if (burst && atomicAdd(ckeys.key[GI2_WRC_BURST_COUNT_AT], 1u) >= GI2_WRC_BURST_MAX) {
             burst = false;
         }
