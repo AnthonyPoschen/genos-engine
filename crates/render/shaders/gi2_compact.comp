@@ -98,7 +98,7 @@ void main() {
                 return;
             }
             bool stale = int(gi2_frame() - updated) >= int(GI2_WRC_REFRESH_FRAMES);
-            bool growing_wrc = t < GI2_WRC_CAP - 0.5 && int(last - updated) > 0;
+            bool growing_wrc = t < GI2_WRC_CAP - 0.5 && (int(last - updated) > 0 || int(gi2_frame() - last) <= int(GI2_SC_READ_SLACK));
             if (stale || growing_wrc) {
                 uint at = atomicAdd(ckeys.key[GI2_WRC_BG_COUNT_AT], 1u);
                 if (at < GI2_WRC_REFRESH_CELLS) {
@@ -121,6 +121,14 @@ void main() {
                 cache.v[3u * slot + 1u] = vec4(0.0);
                 cache.v[3u * slot + 2u] = vec4(0.0);
                 return;
+            }
+            // S68A: the readers stamp the frame of the relight itself (or the
+            // one before, rounds are async), so a texel read every frame looked
+            // unread the round after each relight and was relit every other
+            // round (due alternated ~25k / ~50, half the rounds near idle).
+            // Read within the last GI2_SC_READ_SLACK frames counts as read.
+            if (used <= 0 && int(gi2_frame() - last) <= int(GI2_SC_READ_SLACK)) {
+                used = 1;
             }
             if (used <= 0) {
                 // S62E (a): resident but unread, and the global light moved more

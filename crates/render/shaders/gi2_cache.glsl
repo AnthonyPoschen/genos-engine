@@ -1293,6 +1293,8 @@ const float GI2_SC_RATE_K = 16.0;
 const float GI2_SC_RATE_CHANGING = 30.0;
 const float GI2_SC_RATE_DORMANT = 600.0;
 const float GI2_SC_RATE_FAST = 1.0;
+// S68A: a texel read this recently counts as read since its relight.
+const uint GI2_SC_READ_SLACK = 2u;
 bool gi2_sc_dormant(uint slot);
 uint gi2_sc_interval(uint slot, float t) {
     if (!GI2_SC_RATE) {
