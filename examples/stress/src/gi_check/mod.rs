@@ -216,6 +216,17 @@ fn approach_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
         held.last().copied().unwrap_or(0.0),
         held.len()
     );
+    // Noise floor: two settled pictures of the same pose (the soaked end and the
+    // last pose settled again), the grain no moving frame can beat.
+    let last = (0..200).rev().map(|k| frame(dir, "still", k)).find(|p| p.exists());
+    if let Some(last) = last {
+        let s = metrics::lum640(&last)?;
+        println!(
+            "approach settled noise floor (end against its pose settled again): grain {:.4} blob {:.4}",
+            metrics::blotch(&end, &s, 2.0),
+            metrics::blob(&end, &s)
+        );
+    }
     let fresh = metrics::lum640(&dir.join("fresh.png"))?;
     let end_blob = metrics::blob(&end, &fresh);
     let end_grain = metrics::blotch(&end, &fresh, 2.0);

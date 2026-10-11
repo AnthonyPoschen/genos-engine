@@ -101,8 +101,8 @@ float gi2_hit_size(vec3 pos);
 // Surface cache switches (GENOS_GI2_SC_FLAGS, experiments): bit 0 sets weigh k^2
 // (else k); bit 1 a second pass (a texel reaching the cap the first time drops to a
 // quarter of it once); bit 2 texels only rays read grow to GI2_SC_HIT_CAP sets;
-// bit 3 pooling never narrower than 0.6 cells; bit 4 the finest texels (inside
-// GI2_SC_NEAR) grow to twice the cap; bit 5 a texel with few sets shares its
+// bit 3 pooling never narrower than 0.6 cells; bit 4 the finest texels (under 10
+// cm; none since S57) grow to twice the cap; bit 5 a texel with few sets shares its
 // pixels with the probes; bit 6 a texel's lit-from point moving does not restart
 // its sets.
 uint gi2_sc_flags() {
@@ -111,9 +111,19 @@ uint gi2_sc_flags() {
 // Surface cache (mode 3, GENOS_GI2_WORLD=3): the light cache's patches are the
 // texels pixels read. A texel adds a new set of GI2_CACHE_RAYS rays each time it is
 // relit and keeps their running mean, up to cap sets; then it holds (converged)
-// until the light changes or an object moves near it. Within GI2_SC_NEAR of the
-// eye texels are 6.25 cm, to 8 m 12.5 cm.
-const float GI2_SC_NEAR = 2.5;
+// until the light changes or an object moves near it.
+// Texels are one size everywhere, GI2_SC_TEXEL (S57, Anthony 2026-10-12): the
+// camera-distance bands (6.25 cm within 2.5 m, 12.5 cm to 8 m, 25 cm and up past
+// it) are gone. Each band edge was a ring that followed the camera, and crossing
+// it re-keyed texels, which restarted (grain) however their light was resampled.
+// Neither Lumen's cards nor the papers surveyed key texel size to the eye;
+// detail and effort come from the light: change-aware history and dormancy
+// (GIBS), the relight budget and its order (Lumen), the read rule (SHaRC). The
+// camera only decides what stays resident and what is relit first.
+const float GI2_SC_TEXEL = 0.125;
+// Ray-hit patches (flag 256): one size too, GI2_SC_HIT (was 25 cm doubling past
+// 8 m from the eye).
+const float GI2_SC_HIT = 0.25;
 // Sets a texel inside a change, or under a light that is changing, averages over
 // (a short running mean on one fixed set: quick, and no flicker).
 const float GI2_SC_MOVING = 2.0;
@@ -133,9 +143,9 @@ float gi2_cell_size(vec3 pos) {
 }
 float gi2_cell_size_d(float d) {
     float level = clamp(floor(log2(max(d / 8.0, 1.0))), 0.0, 6.0);
-    // Surface cache (mode 3): 12.5 cm texels to 8 m, 6.25 cm inside GI2_SC_NEAR.
+    // Surface cache (mode 3): one texel size, whatever the distance.
     if (gi2_world_mode() == 3u) {
-        return d < GI2_SC_NEAR ? 0.0625 : (d < 8.0 ? 0.125 : 0.25 * exp2(level));
+        return GI2_SC_TEXEL;
     }
     return 0.25 * exp2(level);
 }
@@ -323,17 +333,12 @@ bool gi2_sc_dormant(uint slot) {
     return b.x > 0.0 && b.y < 0.3 && b.w >= GI2_SC_DORMANT_SETS;
 }
 
-// Surface cache, flag 524288: a texel claimed at another size than the one that
-// lit this spot before (the eye moved across a texel-size ring) starts from that
-// size's converged light, bilinear at its centre (the 4 nearest texels of that
-// size, or the 2 x 2 finer texels it covers), and the full sample count they hold
-// (to the cap): Lumen's "resample lighting on realloc"
-// (SurfaceCache.ResampleLighting). Its own sets then blend in by count (the
-// running mean), so crossing a band never shows fewer samples than before: no
-// restart, no coarse fill, no grain (S56, Anthony 2026-10-12: a ring where
-// quality dropped as he came closer; was: at most GI2_SC_RESAMPLE_SETS = 4 sets
-// from one texel, which read as grain until the fine texel converged). w 0 when
-// no lit texel of the next sizes up or down covers it.
+// Surface cache, flag 524288: a new texel's first light (Lumen's "resample
+// lighting on realloc", SurfaceCache.ResampleLighting): bilinear at its centre
+// from the lit texels of the next size up (the 25 cm ray-hit patches, flag 256)
+// or down, with the sample count they hold (to the cap), so it does not start
+// from nothing. Since the size bands went (S57) this only fills texels of
+// surfaces seen for the first time. w 0 when nothing lit covers it.
 vec4 gi2_sc_shown(uint slot);
 vec4 gi2_sc_bilerp_sized(vec3 pos, vec3 n, float size) {
     uint ax = gi2_axis(n) >> 1u;
@@ -371,6 +376,8 @@ vec4 gi2_sc_bilerp_sized(vec3 pos, vec3 n, float size) {
     return vec4(sum / wsum, count / wsum);
 }
 const float GI2_SC_RESAMPLE_SETS = 4.0;
+bool gi2_near_change(vec3 p);
+bool gi2_sc_light_quiet();
 vec4 gi2_sc_resample(vec3 pos, vec3 n, float size, uint slot) {
     vec4 best = vec4(0.0);
     [[dont_unroll]] for (uint l = 0u; l < 4u; l++) {
@@ -388,30 +395,15 @@ vec4 gi2_sc_resample(vec3 pos, vec3 n, float size, uint slot) {
     if (best.w < 0.5) {
         return vec4(0.0);
     }
-    return vec4(best.rgb, max(min(floor(best.w), gi2_sc_cap(slot)), 1.0));
-}
-
-// Band hysteresis (S56): within GI2_SC_HYST of a band edge (2.5 m, 8 m, 16 m...)
-// a pixel keeps reading the size its surface is already lit at, so a camera
-// moving back and forth over an edge does not swap sizes; past the margin the new
-// size is claimed and resampled from the old (gi2_sc_resample).
-const float GI2_SC_HYST = 0.1;
-float gi2_sc_hyst_size(vec3 pos, vec3 n, float d, float size) {
-    float hi = gi2_cell_size_d(d * (1.0 + GI2_SC_HYST));
-    float lo = gi2_cell_size_d(d * (1.0 - GI2_SC_HYST));
-    float alt = hi != size ? hi : lo;
-    if (alt == size) {
-        return size;
+    // Near a change (an object moved, came or went) or under changing light the
+    // light it starts from may be stale (a box's shadow where it stood): a short
+    // count, so its own sets replace it fast.
+    float cap = gi2_sc_cap(slot);
+    bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
+    if ((urgent && gi2_near_change(pos)) || !gi2_sc_light_quiet()) {
+        cap = min(cap, GI2_SC_RESAMPLE_SETS);
     }
-    uint s = gi2_cache_find_sized(pos, n, false, size, pos);
-    if (s != ~0u && cache.v[3u * s + 2u].w > 0.5) {
-        return size;
-    }
-    uint s2 = gi2_cache_find_sized(pos, n, false, alt, pos);
-    if (s2 != ~0u && cache.v[3u * s2 + 2u].w > 0.5) {
-        return alt;
-    }
-    return size;
+    return vec4(best.rgb, max(min(floor(best.w), cap), 1.0));
 }
 
 // How far around a change a patch is relit first (gi2_compact.comp), metres.
@@ -620,15 +612,13 @@ bool gi2_sc_slanted(vec3 n) {
 }
 float gi2_hit_size_n(vec3 pos, vec3 n) {
     if (gi2_sc_slanted(n)) {
-        float d = length(pos - scene.eye.xyz);
-        return 0.25 * exp2(clamp(floor(log2(max(d / 8.0, 1.0))), 0.0, 6.0));
+        return GI2_SC_HIT;
     }
     return gi2_hit_size(pos);
 }
 float gi2_hit_size(vec3 pos) {
     if (gi2_world_mode() == 3u && (gi2_sc_flags() & 256u) != 0u) {
-        float d = length(pos - scene.eye.xyz);
-        return 0.25 * exp2(clamp(floor(log2(max(d / 8.0, 1.0))), 0.0, 6.0));
+        return GI2_SC_HIT;
     }
     return gi2_cell_size(pos);
 }
@@ -736,7 +726,7 @@ vec3 gi2_cache_irradiance_at(vec3 pos, vec3 n, float t) {
     if (gi2_world_mode() == 3u && (gi2_sc_flags() & 2097152u) == 0u && !gi2_sc_slanted(n)) {
         float hs = gi2_hit_size_n(pos, n);
         if (t < hs * 1.7320508) {
-            float fs = 0.0625;
+            float fs = GI2_SC_TEXEL;
             while (fs * 2.0 < hs && t >= fs * 2.0 * 1.7320508) {
                 fs *= 2.0;
             }
@@ -868,12 +858,9 @@ vec4 gi2_world_irradiance(vec3 pos, vec3 n) {
     return gi2_world_irradiance_in(pos, n, pos, false);
 }
 // Debug view "texels" (gi2_compose.comp mode 9): the size a pixel at pos facing n
-// reads (with the band hysteresis) and the sets its texel holds (0 when unclaimed).
+// reads and the sets its texel holds (0 when unclaimed).
 vec2 gi2_sc_debug_size(vec3 pos, vec3 n) {
     float size = gi2_cell_size(pos);
-    if (gi2_world_mode() == 3u) {
-        size = gi2_sc_hyst_size(pos, n, length(pos - scene.eye.xyz), size);
-    }
     uint s = gi2_cache_find_sized(pos, n, false, size, pos);
     return vec2(size, s == ~0u ? 0.0 : floor(max(cache.v[3u * s + 2u].w, 0.0)));
 }
@@ -888,9 +875,6 @@ vec4 gi2_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     ta[(ax + 1u) % 3u] = 1.0;
     tb[(ax + 2u) % 3u] = 1.0;
     float size = gi2_cell_size(wpos);
-    if (mode == 3u) {
-        size = gi2_sc_hyst_size(pos, n, length(wpos - scene.eye.xyz), size);
-    }
     vec2 uv = vec2(dot(pos, ta), dot(pos, tb)) / size - 0.5;
     vec2 g0 = floor(uv);
     vec2 f = uv - g0;
