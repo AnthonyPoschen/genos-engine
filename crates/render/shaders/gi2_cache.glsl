@@ -166,13 +166,6 @@ uint gi2_cache_key_sized(vec3 pos, vec3 n, float size) {
     // boundary falls in one cell, not either by rounding.
     vec3 inset = gi2_world_mode() != 0u ? 0.5 * gi2_axis_vec(gi2_axis(n)) : vec3(0.0);
     ivec3 c = ivec3(floor(pos / size - inset));
-    // Flag 16384 (surface cache): a quarter of the cell along the axis, so two
-    // parallel surfaces close together (a panel on a wall, a box face by the wall
-    // behind it) do not share a texel lit from whichever was nearer its centre.
-    if (gi2_world_mode() == 3u && (gi2_sc_flags() & 16384u) != 0u) {
-        uint ax = gi2_axis(n) >> 1u;
-        c[ax] = int(floor(pos[ax] / (0.25 * size) - inset[ax]));
-    }
     uint h = gi2_hash(uint(c.x) * 73856093u ^ gi2_hash(uint(c.y) * 19349663u ^ gi2_hash(uint(c.z) * 83492791u)));
     h = gi2_hash(h ^ (gi2_axis(n) * 0x27d4eb2du) ^ (floatBitsToUint(size) * 0x165667b1u));
     return max(h, 1u);
@@ -225,6 +218,14 @@ uint gi2_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
         uint prev = atomicCompSwap(ckeys.key[slot], 0u, key);
         if (prev == 0u) {
             atomicAdd(gstats.claimed, 1u);
+            // Flag 16384 (surface cache): every texel and hit patch is lit from its
+            // cell's centre on the claimer's plane, whoever claimed it, and never
+            // moves (Lumen: card texels are placed by the geometry), so its light
+            // does not depend on the camera's path. (Was: a quarter-cell depth key,
+            // rejected 2026-10-11.)
+            if (gi2_world_mode() == 3u && (gi2_sc_flags() & 16384u) != 0u) {
+                at = gi2_sc_centre(pos, n, size);
+            }
             cache.v[3u * slot] = vec4(at, uintBitsToFloat(gi2_frame()));
             cache.v[3u * slot + 1u] = vec4(n, size);
             cache.v[3u * slot + 2u] = vec4(0.0);
@@ -255,6 +256,9 @@ void gi2_sc_offer(uint slot, vec3 at, vec3 centre) {
     // Flag 524288 (camera only orders updates): the point still moves toward the
     // cell's centre (a fixed point of the geometry, as Lumen's card texels), but
     // the sets taken so far are kept: a camera move never restarts a texel.
+    if ((gi2_sc_flags() & 16384u) != 0u) {
+        return;
+    }
     bool keep_sets = (gi2_sc_flags() & 524288u) != 0u;
     float d = length(at - centre);
     if (d < cache.v[GI2_WORLD_AT + slot].x - 1.0e-4) {
@@ -331,12 +335,14 @@ vec4 gi2_sc_resample(vec3 pos, vec3 n, float size) {
 const float GI2_NEAR_CHANGE = 1.0;
 
 // A point within GI2_NEAR_CHANGE of an object that moved, came or went this frame.
-// A point inside the bounds of an object that moved, came or went this frame
-// (no margin).
+// A point inside the bounds of a mover: an occluder that has moved since the
+// scene loaded (gi2_gpu.rs gi2_movers; listed after the changes, count in head w
+// above mode and cap).
 bool gi2_in_change(vec3 p) {
     vec4 head = work.v[gi2_change_at()];
-    uint changes = head.y > 0.5 ? 0u : min(uint(head.x + 0.5), GI2_CHANGES);
-    [[dont_unroll]] for (uint c = 0u; c < changes; c++) {
+    uint first = head.y > 0.5 ? 0u : min(uint(head.x + 0.5), GI2_CHANGES);
+    uint movers = uint(head.w + 0.5) / 100000u;
+    [[dont_unroll]] for (uint c = first; c < min(first + movers, GI2_CHANGES); c++) {
         vec4 b = work.v[gi2_change_at() + GI2_CHANGE_HEAD + c];
         vec3 d = p - b.xyz;
         if (dot(d, d) < b.w * b.w) {
@@ -621,10 +627,10 @@ void gi2_world_add(vec3 pos, vec3 n, vec3 e, bool changed) {
 // counted up to 4 samples).
 vec4 gi2_world_irradiance(vec3 pos, vec3 n) {
     uint mode = gi2_world_mode();
-    // Flag 4194304 (surface cache): a pixel on or inside the bounds of an object
-    // that moved this frame takes the screen probes, which trace it as it is now
-    // (Lumen: moving objects' light comes from the screen traces while their
-    // cards catch up), instead of world texels it is sweeping through.
+    // Flag 4194304 (surface cache): a pixel on or inside the bounds of a mover
+    // (an object that has moved since load, still or not) takes the screen probes,
+    // which trace it as it is now, instead of world texels it sweeps through; the
+    // same path moving and still, so its light does not jump when it stops.
     if (mode == 3u && (gi2_sc_flags() & 4194304u) != 0u && gi2_in_change(pos)) {
         return vec4(0.0);
     }
@@ -672,7 +678,12 @@ vec4 gi2_world_irradiance(vec3 pos, vec3 n) {
         sum += bil * v.rgb;
         wsum += bil;
         float own_w = cache.v[3u * slot + 2u].w;
-        bool stale = mode == 3u && fract(own_w) > 0.1;
+        // With the estimator (flag 1048576) a texel lit under changing light is
+        // still shown (its short mean lags a little, as Lumen's surface cache does);
+        // swapping the pixel to the probes swaps methods, and their difference was
+        // most of the mix error. Around a moving object the probes still take over.
+        bool est = (gi2_sc_flags() & 1048576u) != 0u;
+        bool stale = mode == 3u && fract(own_w) > 0.1 && !est;
         float sc_trust = stale ? 0.0 : 1.0;
         if ((gi2_sc_flags() & 32u) != 0u) {
             // A texel with few sets shares the pixel with the probes.
@@ -683,7 +694,8 @@ vec4 gi2_world_irradiance(vec3 pos, vec3 n) {
     }
     // Surface cache: while the light changes or around an object that moves, the
     // probes (no history) show it.
-    if (mode == 3u && (!gi2_sc_light_quiet() || gi2_near_change(pos) || (gi2_sc_flags() & 512u) != 0u)) {
+    bool light_swap = !gi2_sc_light_quiet() && (gi2_sc_flags() & 1048576u) == 0u;
+    if (mode == 3u && (light_swap || gi2_near_change(pos) || (gi2_sc_flags() & 512u) != 0u)) {
         trust = 0.0;
     }
     return vec4(wsum > 0.0 ? sum / wsum : vec3(0.0), trust);

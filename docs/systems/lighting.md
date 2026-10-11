@@ -113,8 +113,9 @@ One frame, passes in order (`crates/render/src/gi2_gpu.rs`, shaders `gi2_*.comp`
 - **Ours:** each frame lists the bounds of objects that moved, came or went (up to 64; more drops every kept stratum). Kept rays crossing them are re-traced; light-cache patches near a change (1 m) are relit first and run short means (2 sets) in SC.
 - **Reference:** Lumen: movers are in the SDF/BVH, their cards are recaptured, pixels whose rays hit movers switch to fast temporal update with stronger spatial filtering [W21 s.99, W22]. ReSTIR GI validates reused samples with visibility rays.
 - **Differences:** we invalidate by ray path (exact) rather than by hit velocity.
-- **Scores:** P6 passes trail, mix, spin. SC fails spin (0.1075) and mix (0.0116, target 0.0055).
-- **Open:** SC under moving boxes: the texels a mover passes keep stale light; candidate is Lumen's approach (screen probes over texels near movers, cache texels recaptured on change).
+- **SC movers (S42-S49):** occluders that moved in the last 240 frames are movers; pixels inside a mover's bounds and within 1 m of this frame's changes show the probes, texels near a change are relit first with 2-set means. While only the light changes (lamps move), texels stay shown and lag a little, as Lumen's surface cache does (S46/S47; swapping every pixel to the probes swapped methods and was most of the mix error).
+- **Scores:** P6 passes trail, mix, spin. SC (S49): mix 0.0084 / 0.0087 (target 0.0055), spin 0.0871 / flicker 0.0470 (the spinning green box is not caught as a mover; Anthony judges spin by eye).
+- **Open:** object-local texels (GIBS: transform id + local position) are not built; texels on a moving box are world-keyed and re-claimed as it moves.
 
 ## Contact term
 
@@ -144,15 +145,14 @@ One frame, passes in order (`crates/render/src/gi2_gpu.rs`, shaders `gi2_*.comp`
 
 Every failing grade of the surface cache, where it first appeared and which planned item should fix it. Re-checked before any push.
 
-| Grade | Now / limit | First seen | Expected fix |
+| Grade | Now / limit (S49, quick) | First seen | Expected fix |
 |---|---|---|---|
-| room end, soaked vs baseline | 0.0026 / 0.0020 | S26all, flags 239882, b1d7e956, 2026-10-11 | item 2 scheduler |
-| turn held / return / end | 0.0050 / 0.0067 / 0.0073, limit 0.0020 | S26all 239882 (0.0045 / 0.0037 / 0.0043); worse after the estimator (S34b) | item 2 scheduler |
-| lights-only return (lampret) | 0.0032 hall, 0.0023 room / 0.0020 | S29lr239882, cf916c36 (0.0020 / 0.0022) | item 4 change detector |
-| spin error / flicker | 0.1096 / 0.0519, limits 0.027 / 0.020 | S26all 239882 (0.1075 / 0.0529) | item 4 object-local texels |
-| mix still / turning | 0.0116 / 0.0117, limit 0.0055 | S26all 239882 | item 4 |
-| room light structure (target) | 0.0102 / 0.0100 | S34b estimator (239882 was 0.0079) | item 2 |
+| room end, soaked vs baseline | 0.0025 / 0.0020 | S26all, flags 239882, b1d7e956, 2026-10-11 | item 2 scheduler |
+| turn held / return / end | 0.0052 / 0.0067 / 0.0073, limit 0.0020 | S26all 239882 (0.0045 / 0.0037 / 0.0043); longer settle (900) does not help | item 2 scheduler |
+| lights-only return (lampret) | see SUMMARY (S47 0.0034 / 0.0025) / 0.0020 | S29lr239882, cf916c36 (0.0020 / 0.0022) | item 4 change detector |
+| spin error / flicker / end | 0.0871 / 0.0470 / 0.0058, limits 0.027 / 0.020 / 0.002 | S26all 239882 (0.1075 / 0.0529) | item 4 object-local texels; judged by eye |
+| mix still / turning / end | 0.0084 / 0.0087 / 0.0036, limit 0.0055 / 0.002 | S26all 239882 (0.0116) | item 4 |
+| room light structure (target) | 0.0106 / 0.0100 | S34b estimator (239882 was 0.0079) | item 2 |
 | room 48 px swim (target) | 0.0010 / 0.0006 | P6 itself 0.0025 | item 5 |
-| corner mean | 0.0421 / 0.040 (0.043 line) | S26 239882 0.0419 | item 3 (first bounce bright in corners) |
 
 Fixed: camera regeneration (settled-per-pose 0.0056 -> 0.0012) and grid redraw (0.0050 -> 0.0008) by the estimator; offer restarts on camera moves (234 -> 0 per readback) by 524288.

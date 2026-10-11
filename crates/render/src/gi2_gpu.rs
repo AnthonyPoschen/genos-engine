@@ -135,6 +135,10 @@ pub(crate) struct Gi2 {
     /// Rounds in a row, since that last changed, whose mature patches all stayed
     /// within GI2_SETTLE_CHANGE: past a full sweep, rounds relight young patches only.
     light_quiet: u32,
+    /// Occluders (index in the scene's list) that moved in the last
+    /// GI2_MOVER_KEEP frames, with the frames left: movers. The surface cache leaves
+    /// their pixels to the probes; once still that long they are scenery again.
+    movers: std::collections::BTreeMap<usize, u32>,
     young_ok: bool,
     /// What each round in flight was built from (frame slots, then the async one):
     /// the light hash and whether it took young patches only.
@@ -199,6 +203,7 @@ impl Default for Gi2 {
             light_scene: 0,
             light_hash: 0,
             light_quiet: 0,
+            movers: std::collections::BTreeMap::new(),
             young_ok: std::env::var("GENOS_GI2_YOUNG_ONLY").map_or(true, |v| v != "0"),
             stats_light: [0; 2],
             stats_young: [false; 2],
@@ -1211,6 +1216,7 @@ impl Gpu {
         let flags = std::env::var("GENOS_GI2_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).min((1 << 23) - 1);
         block[2] = ((self.gi2.probe_runs & 1) + 2 * flags) as f32;
         block[3] = (world * 1000 + cap) as f32;
+        let mut used = 0;
         match &changes {
             None => block[1] = 1.0,
             Some(list) => {
@@ -1219,7 +1225,21 @@ impl Gpu {
                     let at = 4 * (GI2_CHANGE_HEAD + j);
                     block[at..at + 4].copy_from_slice(b);
                 }
+                used = list.len();
             }
+        }
+        // Movers (surface cache): bounds of every occluder that moved in the
+        // last GI2_MOVER_KEEP frames, after the changes; head w carries their count above mode and cap.
+        // Compared whenever there is a last scene (not only when the trace key held:
+        // a spinning box can change the key every frame and must stay a mover).
+        if world == 3 && !self.gi2.kept_bytes.is_empty() {
+            let movers = gi2_movers(&self.gi2.kept_bytes, &self.frame_bytes, &mut self.gi2.movers);
+            let n = movers.len().min(GI2_CHANGES - used);
+            for (j, b) in movers.iter().take(n).enumerate() {
+                let at = 4 * (GI2_CHANGE_HEAD + used + j);
+                block[at..at + 4].copy_from_slice(b);
+            }
+            block[3] += (n * 100000) as f32;
         }
         if had {
             // Last frame's camera (scene_data.glsl): eye at byte 48, the basis at 528.
@@ -1569,6 +1589,52 @@ fn gi2_world_env() -> u32 {
 fn gi2_change_at(probes: u64, cache_rays: u64, kept: u64) -> u64 {
     2 * probes + cache_rays + 7 * probes + 2 * GI2_STRATA as u64 * probes + kept + kept / 4
 }
+
+/// Occluder records of a scene block (`pack::scene_bytes`), 64 bytes each.
+fn gi2_occs(bytes: &[u8]) -> Vec<&[u8]> {
+    let word = |at: usize| {
+        bytes
+            .get(at * 4..at * 4 + 4)
+            .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])) as usize
+    };
+    let start = crate::pack::SCENE_TAIL + word(0) * 32;
+    (0..word(1))
+        .filter_map(|i| bytes.get(start + i * 64..start + i * 64 + 64))
+        .collect()
+}
+
+/// Bounding sphere of an occluder record.
+fn gi2_occ_bounds(rec: &[u8]) -> [f32; 4] {
+    let f = |i: usize| f32::from_le_bytes([rec[i * 4], rec[i * 4 + 1], rec[i * 4 + 2], rec[i * 4 + 3]]);
+    let (hx, hy, hz, r) = (f(4).abs(), f(5).abs() * 0.5, f(6).abs(), f(7).abs());
+    let (hx, hz) = (hx.max(r), hz.max(r));
+    [f(0), f(1), f(2), (hx * hx + hy * hy + hz * hz).sqrt() + 0.05]
+}
+
+/// Movers: occluders (by index) whose record differs between two scene blocks of
+/// the same length join `set` for good (a list of another length starts it again);
+/// returns their bounds now.
+pub(crate) fn gi2_movers(old: &[u8], new: &[u8], set: &mut std::collections::BTreeMap<usize, u32>) -> Vec<[f32; 4]> {
+    let (a, b) = (gi2_occs(old), gi2_occs(new));
+    set.retain(|_, left| {
+        *left = left.saturating_sub(1);
+        *left > 0
+    });
+    if a.len() != b.len() {
+        set.clear();
+    } else {
+        for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+            if x != y {
+                set.insert(i, GI2_MOVER_KEEP);
+            }
+        }
+    }
+    set.keys().filter_map(|&i| b.get(i)).map(|r| gi2_occ_bounds(r)).collect()
+}
+
+/// Frames an occluder stays a mover after it last moved (Lumen treats a mesh as
+/// dynamic while it moves; once it rests its surroundings are ordinary cache).
+const GI2_MOVER_KEEP: u32 = 240;
 
 /// Spheres (centre, radius) around every occluder that moved, came or went between
 /// two scene blocks (`pack::scene_bytes`): the bounds before and after, so a kept
