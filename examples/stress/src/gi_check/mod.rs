@@ -368,8 +368,8 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
             format!(
                 "{id} | GI {} | mode {} | flags {} | {run}",
                 if o.v2 { "v2" } else { "v1" },
-                var("GENOS_GI2_WORLD", "0"),
-                var("GENOS_GI2_SC_FLAGS", "0")
+                var("GENOS_GI2_WORLD", "3"),
+                var("GENOS_GI2_SC_FLAGS", "6007050")
             )
         })
         .stdout(log.try_clone().map_err(|e| e.to_string())?)

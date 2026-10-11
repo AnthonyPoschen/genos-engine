@@ -113,7 +113,7 @@ impl Stage {
             sky_on: true,
             boxes_still: false,
             lamps_still: false,
-            gi_v2: std::env::var("GENOS_GI").is_ok_and(|v| v == "v2"),
+            gi_v2: std::env::var("GENOS_GI").map_or(true, |v| v != "v1"),
             gi_v2_set: None,
             room: None,
         };

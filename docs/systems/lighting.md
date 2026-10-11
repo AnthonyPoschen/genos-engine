@@ -2,7 +2,7 @@
 
 How GI v2, the lighting engine, works: direct light, shadows, global illumination, the reference it is checked against, and the checks. Each component lists our method, the published method it compares to (Lumen and papers, with links), how and why ours differs, current scores and open issues. The plan and budgets are in [GI v2 design](gi-v2-design.md); the gate is in [Debugging](debugging.md). Update this file whenever a method changes, in the same commit as the code.
 
-Scores are gi-check numbers (linear luminance, share of the light) against the GPU path-traced references, at the commit named in each section. "P6" is the gi-v2 default (6ce7fd4: screen probes, light cache in push mode, `GENOS_GI2_WORLD=0`). "SC" is the surface cache (`GENOS_GI2_WORLD=3`, branch `surface-cache`, flags in `GENOS_GI2_SC_FLAGS`).
+Scores are gi-check numbers (linear luminance, share of the light) against the GPU path-traced references, at the commit named in each section. "P6" is the probe path (6ce7fd4: screen probes, light cache in push mode, `GENOS_GI2_WORLD=0`); it was the gi-v2 default until S54K. Default now (no env, S54K): GI v2 with the surface cache, `GENOS_GI2_WORLD=3`, `GENOS_GI2_WORLD_CAP=64`, `GENOS_GI2_SC_FLAGS=6007050`, `GENOS_GI2_SC_LOCAL=1`; P6 back with `GENOS_GI2_WORLD=0`, GI v1 with `GENOS_GI=v1`. "SC" is the surface cache (`GENOS_GI2_WORLD=3`, branch `surface-cache`, flags in `GENOS_GI2_SC_FLAGS`).
 
 ## Sources
 
@@ -83,7 +83,7 @@ One frame, passes in order (`crates/render/src/gi2_gpu.rs`, shaders `gi2_*.comp`
 - **Differences:** replace-on-relight keeps it noisy per patch but unbiased and lag-free; ray hits average over many patches so the noise mostly cancels.
 - **Scores:** lights-only return (lampret, limit 0.002): hall 0.0002, room 0.0001 PASS.
 
-## Surface cache (experimental, `GENOS_GI2_WORLD=3`)
+## Surface cache (default since S54K, `GENOS_GI2_WORLD=3`)
 
 - **Ours:** the light cache with fine texels that pixels read directly (bilinear over the 4 nearest texels on the pixel's axis plane): 6.25 cm within 2.5 m, 12.5 cm to 8 m, then 25 cm × 2^level; ray hits read 25 cm patches. Each texel accumulates 64-ray sets as a running mean up to a cap (64). Texels start from a pooled Gaussian of their lit neighbours and from the lit texel twice the size. Relight budget: one batch of 16384 per round. Best flags 239882: slanted surfaces (|n| not axis-aligned) use the probes; texels read keep relighting at the cap with rotating ray sets (multi-bounce keeps arriving); hit patches replaced each relight (push-style, removes the hit-cache bias).
 - **Reference:** Lumen's surface cache: mesh cards fixed by geometry, resident pages sized by distance (5-20 cm), lighting updated within a fixed per-frame budget by priority = LastUsed − LastUpdated (direct 1/32, radiosity 1/64 of the atlas per frame), radiosity accumulated over at most 4 frames, lighting resampled when a page is reallocated, unused pages kept 256 frames [W22, SRC]. In Lumen pixels never read the cache directly; it is only read at ray hits, behind the screen-probe temporal filter.
@@ -114,7 +114,7 @@ One frame, passes in order (`crates/render/src/gi2_gpu.rs`, shaders `gi2_*.comp`
 - **Reference:** Lumen: movers are in the SDF/BVH, their cards are recaptured, pixels whose rays hit movers switch to fast temporal update with stronger spatial filtering [W21 s.99, W22]. ReSTIR GI validates reused samples with visibility rays.
 - **Differences:** we invalidate by ray path (exact) rather than by hit velocity.
 - **SC movers (S42-S49):** occluders that moved in the last 240 frames are movers; pixels inside a mover's bounds and within 1 m of this frame's changes show the probes, texels near a change are relit first with 2-set means. While only the light changes (lamps move), texels stay shown and lag a little, as Lumen's surface cache does (S46/S47; swapping every pixel to the probes swapped methods and was most of the mix error).
-- **Scores:** P6 passes trail, mix, spin. SC (S49): mix 0.0084 / 0.0087 (target 0.0055), spin 0.0871 / flicker 0.0470 (the spinning green box is not caught as a mover; Anthony judges spin by eye).
+- **Scores:** P6 passes trail, mix, spin. SC (S49): mix 0.0084 / 0.0087 (target 0.0055), spin 0.0871 / flicker 0.0470 (the spinning green box is not caught as a mover; Anthony judges spin by eye). S54K (headless gi-check, not comparable bit for bit with the windowed rows): the movers never reached the GPU before S52 (the change block upload stopped after the changes); fixed, object-local texels pooled and trusted by sets (S53), texels kept shown next to movers (S54K): spin 0.0716 / 0.0397 (S49 headless 0.0861 / 0.0460), mix 0.0092 / 0.0095 (S49 headless 0.0084 / 0.0087, worse). Quick tier not yet run on the S54K defaults.
 - **Open:** object-local texels (GIBS: transform id + local position) are not built; texels on a moving box are world-keyed and re-claimed as it moves.
 
 ## Contact term

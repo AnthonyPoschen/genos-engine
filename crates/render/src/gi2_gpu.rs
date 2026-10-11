@@ -161,7 +161,7 @@ pub(crate) struct Gi2 {
 impl Default for Gi2 {
     fn default() -> Self {
         Self {
-            on: std::env::var("GENOS_GI").is_ok_and(|v| v == "v2"),
+            on: gi2_env_on(),
             ready: false,
             desc_layout: std::ptr::null_mut(),
             layout: std::ptr::null_mut(),
@@ -763,13 +763,13 @@ impl Gpu {
         let sweep = self.gi2.live.div_ceil(GI2_CACHE_BATCH).max(1) + 1;
         // World cells on (GENOS_GI2_WORLD=2): their running means (cap frames) have
         // to forget the poses before this one, so settling waits four caps.
-        let world_wait = match std::env::var("GENOS_GI2_WORLD").as_deref() {
-            Ok("2") => {
+        let world_wait = match gi2_world_env() {
+            2 => {
                 4 * std::env::var("GENOS_GI2_WORLD_CAP").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(32)
             }
             // Surface cache: GENOS_GI2_SC_SETTLE frames still (experiment: how long
             // its texels take to take in the bounced light).
-            Ok("3") => std::env::var("GENOS_GI2_SC_SETTLE").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0),
+            3 => std::env::var("GENOS_GI2_SC_SETTLE").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0),
             _ => 0,
         };
         // Surface cache with flag 8192: texels at the cap keep relighting (their
@@ -777,7 +777,7 @@ impl Gpu {
         // (GENOS_GI2_SC_SETTLE, default 300) and the light having held.
         let sc_relit = world_wait != 0
             || (gi2_world_env() == 3
-                && std::env::var("GENOS_GI2_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0) & 8192 != 0);
+                && gi2_sc_flags_env() & 8192 != 0);
         let settled = if gi2_world_env() == 3 && sc_relit {
             self.gi2.still >= GI2_SETTLE_FRAMES.max(if world_wait != 0 { world_wait } else { 300 }) && self.gi2.light_quiet >= 2
         } else {
@@ -1222,12 +1222,12 @@ impl Gpu {
         let cap = std::env::var("GENOS_GI2_WORLD_CAP")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(if world == 3 { 16 } else { 32 })
+            .unwrap_or(if world == 3 { GI2_DEFAULT_SC_CAP } else { 32 })
             .clamp(1, 999);
         // Surface cache switches (gi2_cache.glsl gi2_sc_flags).
         // Flags ride in head z above the probe-run bit (exact to 2^22); w keeps mode
         // * 1000 + cap (flags * 100000 there lost precision past 2^24 and was capped).
-        let flags = std::env::var("GENOS_GI2_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).min((1 << 23) - 1);
+        let flags = gi2_sc_flags_env().min((1 << 23) - 1);
         block[2] = ((self.gi2.probe_runs & 1) + 2 * flags) as f32;
         block[3] = (world * 1000 + cap) as f32;
         let mut used = 0;
@@ -1269,10 +1269,10 @@ impl Gpu {
             block[3] += (n * 200000) as f32;
             sent += 4 * n;
             if std::env::var_os("GENOS_GI_DEBUG").is_some() {
-                eprintln!("gi2 movers {n} of {} occs {} meshes {} of {} {:?}", self.gi2.movers.len(), gi2_occs(&self.frame_bytes).len(), self.gi2.mesh_movers.len(), self.gi2.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
+                eprintln!("gi2 world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(gi2_sc_local_env()), self.gi2.movers.len(), gi2_occs(&self.frame_bytes).len(), self.gi2.mesh_movers.len(), self.gi2.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
             }
             // Object-local texels for movers (GIBS): GENOS_GI2_SC_LOCAL=1.
-            if std::env::var("GENOS_GI2_SC_LOCAL").is_ok_and(|v| v == "1") {
+            if gi2_sc_local_env() {
                 block[3] += 100000.0;
             }
         }
@@ -1616,8 +1616,30 @@ impl Gpu {
 
 /// GENOS_GI2_WORLD (gi2_cache.glsl world modes): 0 off, 1 pixels read the light
 /// cache, 2 world irradiance cells, 3 the surface cache.
+/// Default 3 (the surface cache); GENOS_GI2_WORLD=0 is the probe path (P6).
 fn gi2_world_env() -> u32 {
-    std::env::var("GENOS_GI2_WORLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0).min(3)
+    std::env::var("GENOS_GI2_WORLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(GI2_DEFAULT_WORLD).min(3)
+}
+
+// Defaults with no env set (S54K, gi-v2): GI v2, the surface cache, cap 64, the
+// S49 flag set and object-local texels. Each env var still overrides.
+const GI2_DEFAULT_WORLD: u32 = 3;
+const GI2_DEFAULT_SC_CAP: u32 = 64;
+const GI2_DEFAULT_SC_FLAGS: u32 = 6007050;
+
+/// GI v2 on unless GENOS_GI=v1 (default v2).
+fn gi2_env_on() -> bool {
+    std::env::var("GENOS_GI").map_or(true, |v| v != "v1")
+}
+
+/// GENOS_GI2_SC_FLAGS, default GI2_DEFAULT_SC_FLAGS.
+fn gi2_sc_flags_env() -> u32 {
+    std::env::var("GENOS_GI2_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(GI2_DEFAULT_SC_FLAGS)
+}
+
+/// GENOS_GI2_SC_LOCAL: object-local texels, on unless 0.
+fn gi2_sc_local_env() -> bool {
+    std::env::var("GENOS_GI2_SC_LOCAL").map_or(true, |v| v != "0")
 }
 
 /// Vec4 index of the changes block in the work buffer (gi2_common.glsl
