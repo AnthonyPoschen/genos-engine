@@ -157,6 +157,11 @@ const uint GI2_WRC_BURST_MAX = 2048u;
 // round. The rest are ranked by how much their light changes and take whole sets
 // from the main batch, so a big change syncs in a few rounds. Both are ceilings.
 const float GI2_SC_TRICKLE_THR = 0.3;
+const float GI2_SC_LAMP_K = 1.0;
+// S65C anti-lag (ReBLUR / A-SVGF): a set further than GI2_SC_ANTILAG_SD standard
+// deviations from the history pulls the blend up in proportion (to 1 at 4x),
+// so a big change follows within a few sets and a small one keeps the average.
+const float GI2_SC_ANTILAG_SD = 3.0;
 const uint GI2_SC_TRICKLE = 4096u;
 const uint GI2_SC_TRICKLE_COUNT_AT = GI2_SC_HIST_AT + 71u;
 const uint GI2_SC_TRICKLE_AT = GI2_SC_HIST_AT + 13200u;
@@ -166,7 +171,10 @@ uint gi2_sc_room() {
 }
 const uint GI2_WRC_RING_HEAD_AT = GI2_SC_HIST_AT + 69u;
 const uint GI2_WRC_RING = 16u;
-const uint GI2_WRC_RING_AT = GI2_SC_HIST_AT + 72u;
+// S65C: 9 words an entry (old place, new place, range, brightest channel,
+// frame), past the trickle list.
+const uint GI2_WRC_RING_AT = GI2_SC_HIST_AT + 17300u;
+const uint GI2_WRC_RING_W = 9u;
 const uint GI2_WRC_SNAP_LAMPS = 128u;
 const uint GI2_WRC_SNAP_AT = GI2_SC_HIST_AT + 160u;
 const uint GI2_WRC_CHG_AT = GI2_SC_HIST_AT + 680u;
@@ -809,6 +817,22 @@ bool gi2_sc_local_change(uint slot, out bool mover) {
     // estimator measures how much its light actually changed.
     return false;
 }
+// The lamps' change at slot relative to the light it shows (0 when none).
+float gi2_lamp_delta(vec3 p, uint updated);
+float gi2_sc_lamp_change(uint slot) {
+    if (gi2_sc_light_quiet()) {
+        return 0.0;
+    }
+    uint upd = gi2_sc_upd_override != ~0u ? gi2_sc_upd_override : gi2_sc_updated(slot);
+    float d = gi2_lamp_delta(gi2_sc_texel_pos(slot), upd);
+    if (d <= 0.0) {
+        return 0.0;
+    }
+    float lum = dot(cache.v[3u * slot + 2u].rgb, vec3(0.2126, 0.7152, 0.0722));
+    // Direct light reaching the texel is roughly pi times its bounce share;
+    // the ratio is what matters.
+    return d / (lum + 0.02);
+}
 bool gi2_sc_lamp_touched(uint slot) {
     uint upd = gi2_sc_upd_override != ~0u ? gi2_sc_upd_override : gi2_sc_updated(slot);
     return !gi2_sc_light_quiet() && gi2_wrc_lamp_changed(gi2_sc_texel_pos(slot), upd);
@@ -1291,19 +1315,34 @@ void gi2_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
 // GI2_WRC_CHANGE_FRAMES)? The ring holds moved lamps' spheres (both places,
 // range), written once a round by gi2_wrc_note_lamps.
 bool gi2_wrc_lamp_changed(vec3 p, uint updated) {
+    return gi2_lamp_delta(p, updated) >= 0.0;
+}
+// S65C: how much the lamps that moved since frame `updated` changed the
+// unshadowed light at p (sum over moved lamps of brightest channel times
+// |1/d_new^2 - 1/d_old^2| inside their range; -1 when none reaches p). The
+// light's delta in power and place at that point (Anthony, item 3).
+float gi2_lamp_delta(vec3 p, uint updated) {
+    float delta = -1.0;
     [[dont_unroll]] for (uint i = 0u; i < GI2_WRC_RING; i++) {
-        uint at = GI2_WRC_RING_AT + 5u * i;
-        uint f = ckeys.key[at + 4u];
+        uint at = GI2_WRC_RING_AT + GI2_WRC_RING_W * i;
+        uint f = ckeys.key[at + 8u];
         if (f == 0u || int(gi2_frame() - f) > int(GI2_WRC_CHANGE_FRAMES) || int(updated - f) >= 0) {
             continue;
         }
-        vec4 s = vec4(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]),
-                      uintBitsToFloat(ckeys.key[at + 2u]), uintBitsToFloat(ckeys.key[at + 3u]));
-        if (length(p - s.xyz) < s.w) {
-            return true;
+        vec3 a = vec3(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]));
+        vec3 b = vec3(uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]), uintBitsToFloat(ckeys.key[at + 5u]));
+        float range = uintBitsToFloat(ckeys.key[at + 6u]);
+        float pw = uintBitsToFloat(ckeys.key[at + 7u]);
+        float da = length(p - a);
+        float db = length(p - b);
+        if (min(da, db) >= range) {
+            continue;
         }
+        float ia = da < range ? 1.0 / max(da * da, 0.25) : 0.0;
+        float ib = db < range ? 1.0 / max(db * db, 0.25) : 0.0;
+        delta = max(delta, 0.0) + pw * abs(ib - ia);
     }
-    return false;
+    return delta;
 }
 // Once a round (cache pass, thread 0): lamps that moved or changed range since
 // the last round go into the ring (suns are left to the light-change rule).
@@ -1318,16 +1357,20 @@ void gi2_wrc_note_lamps() {
         bool fresh = i >= had;
         bool moved = fresh || length(o.xyz - l.pos.xyz) > 1.0e-3 || abs(o.w - l.color.w) > 1.0e-3;
         if (moved && l.color.w > 0.0) {
-            vec3 c = fresh ? l.pos.xyz : 0.5 * (o.xyz + l.pos.xyz);
-            float r = l.color.w + (fresh ? 0.0 : 0.5 * length(o.xyz - l.pos.xyz));
+            vec3 a = fresh ? l.pos.xyz : o.xyz;
             uint h = ckeys.key[GI2_WRC_RING_HEAD_AT] % GI2_WRC_RING;
             ckeys.key[GI2_WRC_RING_HEAD_AT] = h + 1u;
-            uint ra = GI2_WRC_RING_AT + 5u * h;
-            ckeys.key[ra] = floatBitsToUint(c.x);
-            ckeys.key[ra + 1u] = floatBitsToUint(c.y);
-            ckeys.key[ra + 2u] = floatBitsToUint(c.z);
-            ckeys.key[ra + 3u] = floatBitsToUint(r);
-            ckeys.key[ra + 4u] = max(gi2_frame(), 1u);
+            uint ra = GI2_WRC_RING_AT + GI2_WRC_RING_W * h;
+            ckeys.key[ra] = floatBitsToUint(a.x);
+            ckeys.key[ra + 1u] = floatBitsToUint(a.y);
+            ckeys.key[ra + 2u] = floatBitsToUint(a.z);
+            ckeys.key[ra + 3u] = floatBitsToUint(l.pos.x);
+            ckeys.key[ra + 4u] = floatBitsToUint(l.pos.y);
+            ckeys.key[ra + 5u] = floatBitsToUint(l.pos.z);
+            ckeys.key[ra + 6u] = floatBitsToUint(max(l.color.w, o.w));
+            // A new lamp: all of its light is new (the old place is far away).
+            ckeys.key[ra + 7u] = floatBitsToUint(max(max(l.color.r, l.color.g), l.color.b));
+            ckeys.key[ra + 8u] = max(gi2_frame(), 1u);
         }
         ckeys.key[at] = floatBitsToUint(l.pos.x);
         ckeys.key[at + 1u] = floatBitsToUint(l.pos.y);

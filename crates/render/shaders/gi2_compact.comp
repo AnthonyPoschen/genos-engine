@@ -142,7 +142,9 @@ void main() {
             }
             vec4 est = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
             bool settled_now = gi2_sc_settled(slot, t);
-            float chg = est.x > 0.0 ? max(est.y, 0.0) : 1.0e9;
+            // S65C: the change is the larger of the estimator's measure and the
+            // moved lamps' delta at the texel (GI2_SC_LAMP_K per unit ratio).
+            float chg = est.x > 0.0 ? max(max(est.y, 0.0), GI2_SC_LAMP_K * gi2_sc_lamp_change(slot)) : 1.0e9;
             bool mover_t;
             // Eligible once it has its own history (GI2_DN_MIN_SETS sets and the
             // estimator running), settled or not: the threshold alone splits.

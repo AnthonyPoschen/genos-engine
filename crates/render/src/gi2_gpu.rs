@@ -643,7 +643,7 @@ impl Gpu {
         let share = self.light_families();
         if self.gi2.cache_keys.buffer.is_null() {
             self.gi2.cache_keys = self.make_buffer_queues(
-                (2 * GI2_CACHE_SLOTS + 2 + 20480) * 4, // + the scheduler's histogram and threshold, the WRC refresh lists
+                (2 * GI2_CACHE_SLOTS + 2 + 17600) * 4, // + the scheduler's histogram and threshold, the WRC refresh lists
                 0x20 | 0x2,
                 Memory::Device,
                 &share,
