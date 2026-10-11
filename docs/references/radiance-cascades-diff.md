@@ -16,7 +16,7 @@ Opened and used:
 - Index <https://radiance-cascades.com/>. It lists the two papers above, the holographic paper (not used), and Yaazarai’s GM Shaders notes. A Shadertoy on that page is not used as a source.
 - Yaazarai, *GM Shaders Guest: Radiance Cascades 2*, <https://mini.gmshaders.com/p/radiance-cascades2>, 13 Jul 2024. Opened for the interval-overlap formula. The working paper does not contain that formula.
 - Our decision: `docs/adr/0008-lighting-uses-radiance-cascades.md`.
-- Our notes: `docs/lighting.md`, `docs/systems/lighting.md`. Where those notes disagree with the shaders, the shaders win. The disagreements are marked below.
+- Our notes: `docs/lighting.md`, `docs/systems/lighting-v1.md`. Where those notes disagree with the shaders, the shaders win. The disagreements are marked below.
 - Words: `CONTEXT.md` entries Radiance field, Radiance cascade, World probe.
 
 Tex sections used: Introduction (no previous frame), The Penumbra Condition, The Penumbra Hypothesis, Radiance Interval, Merging radiance intervals, Radiance cascades, Calculating indirect lighting, Analysis, Radiance 3d, Screen space probes with world space radiance intervals, Limitations.
@@ -167,7 +167,7 @@ The picture was not re-rendered for this note. The mappings below are from the s
 
 Evidence. The fire is one more lamp in `lights_at` (`light.comp` lines 240–243). A probe that sees a fire-lit face in any of 64 directions stores a red average (`light.comp` lines 529–537). `scene.frag` has no direction, so every pixel that accepts that probe gets the red (`scene.frag` lines 722–724). `probe_rejected` does not apply the wall test when the probe is within 1.25 fine cells (`scene.frag` lines 456–458). A fire-side probe that close to a hallway sample is blended in. Eq. (11) would have dropped the farther interval on the wall hit. The 1.25 exception is the line that lets the fire-side average cross the wall.
 
-`direct_at` is a different ray. It returns black when the 3D wall blocks the lamp (`scene.frag` lines 267–275 and 284–308). A smooth red wash from the analytic fire is that ray, and only where the ray misses the wall. The systems note says a ray that clears the top of a wall still arrives (`docs/systems/lighting.md`). That path is smooth, because it is per pixel.
+`direct_at` is a different ray. It returns black when the 3D wall blocks the lamp (`scene.frag` lines 267–275 and 284–308). A smooth red wash from the analytic fire is that ray, and only where the ray misses the wall. The systems note says a ray that clears the top of a wall still arrives (`docs/systems/lighting-v1.md`). That path is smooth, because it is per pixel.
 
 Guess. The word “dots” fits the probe averages, not `direct_at`. This note has no frame, so it does not prove the dots are those probes rather than a short wall letting `direct_at` through in spots. The code path that paints fire through a blocking wall is the 1.25-cell blend of averaged probes.
 

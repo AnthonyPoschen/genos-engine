@@ -44,6 +44,11 @@ void main() {
         if ((gi2_sc_flags() & 8192u) != 0u && read) {
             growing = (gi2_sc_flags() & 262144u) == 0u || t < GI2_SC_HOLD * gi2_sc_cap(slot) - 0.5;
         }
+        // Flag 1048576: a dormant texel (converged, its sets agree with its mean)
+        // is relit one sweep in GI2_SC_DORMANT, by slot, to notice change.
+        if ((gi2_sc_flags() & 1048576u) != 0u && growing && t >= gi2_sc_cap(slot) - 0.5 && gi2_sc_dormant(slot)) {
+            growing = ((gi2_hash(slot) + gi2_round()) % GI2_SC_DORMANT) == 0u;
+        }
         // Flag 1024: while the light changes only the patches ray hits read (25 cm
         // and up, flag 256) are relit, as in the other modes; pixels show the probes.
         bool hit_patch = cache.v[3u * slot + 1u].w > 0.2;
@@ -58,6 +63,7 @@ void main() {
             // Not in this round: a texel nobody has read for GI2_CACHE_LIFE frames
             // is freed here (gi2_cache.comp frees only what a round relights).
             if (int(gi2_frame() - last) > int(GI2_CACHE_LIFE)) {
+                atomicAdd(gstats.freed, 1u);
                 ckeys.key[slot] = 0u;
                 cache.v[3u * slot + 1u] = vec4(0.0);
                 cache.v[3u * slot + 2u] = vec4(0.0);

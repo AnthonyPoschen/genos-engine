@@ -627,13 +627,13 @@ impl Gpu {
                 &share,
             )?;
             self.gi2.cache =
-                self.make_buffer_queues(GI2_CACHE_SLOTS * 64, 0x20 | 0x2, Memory::Device, &share)?;
+                self.make_buffer_queues(GI2_CACHE_SLOTS * 96, 0x20 | 0x2, Memory::Device, &share)?;
             self.gi2.cache_clear = true;
             for k in 0..2 {
-                self.gi2.stats[k] = self.make_buffer(32, 0x20 | 0x2, Memory::Readback)?;
+                self.gi2.stats[k] = self.make_buffer(64, 0x20 | 0x2, Memory::Readback)?;
             }
             self.gi2.world_stats =
-                self.make_buffer_queues(32, 0x20 | 0x2, Memory::Readback, &share)?;
+                self.make_buffer_queues(64, 0x20 | 0x2, Memory::Readback, &share)?;
             self.gi2.world_scene = self.make_buffer_queues(
                 crate::pack::SCENE_CAPACITY as u64,
                 0x20,
@@ -811,6 +811,7 @@ impl Gpu {
         }
         // This slot's last frame is done (its fence was waited): read its counters
         // (the async queue's come back with its own submission).
+        self.trace_sc(self.gi2.stats[slot].memory, "frame");
         if let Ok(words) = self.read_gi2_stats(slot) {
             self.gi2.probe_samples = [words[6], words[7]];
             if words[7] > 0 && std::env::var_os("GENOS_GI_DEBUG").is_some() {
@@ -838,7 +839,7 @@ impl Gpu {
             }
         }
         unsafe {
-            (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.stats[slot].buffer, 0, 32, 0);
+            (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.stats[slot].buffer, 0, 64, 0);
             if self.gi2.cache_clear {
                 self.gi2.cache_clear = false;
                 // The async queue starts once this frame (its slot) is surely done.
@@ -940,6 +941,7 @@ impl Gpu {
             return;
         }
         self.gi2.world_busy = false;
+        self.trace_sc(self.gi2.world_stats.memory, "round");
         if let Ok(words) = self.read_stats_memory(self.gi2.world_stats.memory) {
             let current = self.gi2.world_still > 0 && self.gi2.world_hash == self.gi2.scene_hash;
             let light = self.gi2.world_light == self.gi2.light_hash;
@@ -1037,7 +1039,7 @@ impl Gpu {
                 (self.fns.cmd_reset_query)(cmd, qp, 0, 2);
                 (self.fns.cmd_write_timestamp)(cmd, 0x1, qp, 0);
             }
-            (self.fns.cmd_fill_buffer)(cmd, self.gi2.world_stats.buffer, 0, 32, 0);
+            (self.fns.cmd_fill_buffer)(cmd, self.gi2.world_stats.buffer, 0, 64, 0);
             // The mature and young counts, rebuilt by the compact pass.
             (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, GI2_CACHE_SLOTS * 4, 4, 0);
             (self.fns.cmd_fill_buffer)(
@@ -1097,7 +1099,28 @@ impl Gpu {
     }
 
     fn read_stats_memory(&self, memory: Handle) -> Result<[u32; 8], String> {
+        let all = self.read_stats16(memory)?;
         let mut words = [0u32; 8];
+        words.copy_from_slice(&all[..8]);
+        Ok(words)
+    }
+
+    /// Surface cache trace (GENOS_GI2_SC_TRACE=1): one line per readback with the
+    /// frame, frames still and the claimed / restarted / freed / at-cap counters.
+    fn trace_sc(&self, memory: Handle, queue: &str) {
+        if std::env::var_os("GENOS_GI2_SC_TRACE").is_none() {
+            return;
+        }
+        if let Ok(w) = self.read_stats16(memory) {
+            eprintln!(
+                "gi2sc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {}",
+                self.gi2.frame, self.gi2.still, w[1], w[8], w[9], w[10], w[11], w[2]
+            );
+        }
+    }
+
+    fn read_stats16(&self, memory: Handle) -> Result<[u32; 16], String> {
+        let mut words = [0u32; 16];
         unsafe {
             let mut mapped = std::ptr::null_mut();
             check(
@@ -1105,13 +1128,13 @@ impl Gpu {
                     self.device,
                     memory,
                     0,
-                    32,
+                    64,
                     0,
                     &mut mapped,
                 ),
                 "map gi2 stats",
             )?;
-            std::ptr::copy_nonoverlapping(mapped as *const u32, words.as_mut_ptr(), 8);
+            std::ptr::copy_nonoverlapping(mapped as *const u32, words.as_mut_ptr(), 16);
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(words)

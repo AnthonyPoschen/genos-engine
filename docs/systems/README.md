@@ -22,7 +22,8 @@ Each record uses these headings:
 - [Scene](scene.md) owns the camera, the scripted layout, the coordinate frame, and the agent endpoint.
 - [Renderer](renderer.md) owns the Vulkan draw, the world, and culling.
 - [UI](ui.md) owns layout, pointer hits, and the lighting panel.
-- [Lighting](lighting.md) owns radiance cascades and the light pass inside a draw.
+- [Lighting](lighting.md): how GI v2 lights the picture (direct, shadows, GI, references, checks), each component against Lumen and the papers.
+- [Lighting v1](lighting-v1.md): the radiance cascades path (GI v1), kept until v2 replaces it.
 - [GI v2 design](gi-v2-design.md) is the proposed next lighting architecture: meshes, two tracers, a surface cache and screen probes.
 - [Bake](bake.md) owns the import-time GI data per mesh: sparse SDFs, surface cache cards and their cache.
 - [Loading](loading.md) owns images, textures, texture maps, meshes, animations, PCM samples, and fonts.

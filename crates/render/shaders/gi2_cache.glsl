@@ -44,6 +44,16 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     // placed (gi2_gather.comp), for the effective sample count.
     uint pad0;
     uint pad1;
+    // Surface cache trace (GENOS_GI2_SC_TRACE): texels claimed, sets restarted by
+    // an offer move, texels freed, relights of texels already at the cap.
+    uint claimed;
+    uint restarted;
+    uint freed;
+    uint atcap;
+    uint pad2;
+    uint pad3;
+    uint pad4;
+    uint pad5;
 } gstats;
 
 const float GI2_CACHE_MATURE = 3.0;
@@ -139,6 +149,10 @@ uint gi2_axis(vec3 n) {
 }
 
 const uint GI2_WORLD_AT = 3u * GI2_CACHE_SLOTS;
+// Surface cache estimator (flag 1048576), 2 vec4s per slot: short-term mean (rgb)
+// and short-term luminance variance (w); then the variance-based blend reduction
+// (x) and the inconsistency (y). Zero when the slot is claimed.
+const uint GI2_SC_EST_AT = 4u * GI2_CACHE_SLOTS;
 
 vec3 gi2_axis_vec(uint a) {
     vec3 v = vec3(0.0);
@@ -210,10 +224,13 @@ uint gi2_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
         uint slot = (start + i) & (GI2_CACHE_SLOTS - 1u);
         uint prev = atomicCompSwap(ckeys.key[slot], 0u, key);
         if (prev == 0u) {
+            atomicAdd(gstats.claimed, 1u);
             cache.v[3u * slot] = vec4(at, uintBitsToFloat(gi2_frame()));
             cache.v[3u * slot + 1u] = vec4(n, size);
             cache.v[3u * slot + 2u] = vec4(0.0);
             cache.v[GI2_WORLD_AT + slot] = vec4(length(at - gi2_sc_centre(pos, n, size)), 0.0, 0.0, 0.0);
+            cache.v[GI2_SC_EST_AT + 2u * slot] = vec4(0.0);
+            cache.v[GI2_SC_EST_AT + 2u * slot + 1u] = vec4(0.0);
             return slot;
         }
         if (prev == key) {
@@ -235,6 +252,12 @@ void gi2_sc_offer(uint slot, vec3 at, vec3 centre) {
     if (gi2_world_mode() != 3u) {
         return;
     }
+    // Flag 524288 (camera only orders updates): once a texel has a set its point
+    // stays, so a camera move never restarts it (Lumen: card texels are fixed by
+    // the geometry, never by who looks).
+    if ((gi2_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w > 0.5) {
+        return;
+    }
     float d = length(at - centre);
     if (d < cache.v[GI2_WORLD_AT + slot].x - 1.0e-4) {
         cache.v[GI2_WORLD_AT + slot].x = d;
@@ -242,6 +265,9 @@ void gi2_sc_offer(uint slot, vec3 at, vec3 centre) {
         float size = cache.v[3u * slot + 1u].w;
         if ((gi2_sc_flags() & 64u) == 0u && length(at - cache.v[3u * slot].xyz) > 0.3 * size) {
             float t = cache.v[3u * slot + 2u].w;
+            if (t > 1.5) {
+                atomicAdd(gstats.restarted, 1u);
+            }
             cache.v[3u * slot + 2u].w = min(t, 1.0);
         }
         cache.v[3u * slot].xyz = at;
@@ -259,6 +285,36 @@ vec4 gi2_sc_parent(vec3 pos, vec3 n, float size) {
             if (v.w > 0.5) {
                 cache.v[3u * s].w = uintBitsToFloat(gi2_frame());
                 return vec4(v.rgb, 1.0);
+            }
+        }
+    }
+    return vec4(0.0);
+}
+
+// Surface cache estimator (flag 1048576): a converged texel whose recent sets
+// agree with its mean (inconsistency low) is dormant: the sweep relights it one
+// round in GI2_SC_DORMANT, enough to notice a change (GIBS 2021: converged surfels
+// send only change-detection rays).
+const uint GI2_SC_DORMANT = 8u;
+bool gi2_sc_dormant(uint slot) {
+    vec4 b = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
+    return b.x > 0.0 && b.y < 0.3;
+}
+
+// Surface cache, flag 524288: a texel claimed at another size than the one that
+// lit this spot before (the eye moved across a texel-size ring) starts from that
+// texel's light and count (up to 16 sets) instead of from nothing: Lumen's
+// "resample lighting on realloc" (SurfaceCache.ResampleLighting). w 0 when there
+// is no lit texel of the next sizes up or down.
+vec4 gi2_sc_resample(vec3 pos, vec3 n, float size) {
+    [[dont_unroll]] for (uint l = 0u; l < 4u; l++) {
+        float s2 = size * ((l & 1u) == 0u ? 2.0 : 0.5) * ((l & 2u) == 0u ? 1.0 : ((l & 1u) == 0u ? 2.0 : 0.5));
+        uint s = gi2_cache_find_sized(pos, n, false, s2, pos);
+        if (s != ~0u) {
+            vec4 v = cache.v[3u * s + 2u];
+            if (v.w > 0.5 && fract(v.w) < 0.1) {
+                cache.v[3u * s].w = uintBitsToFloat(gi2_frame());
+                return vec4(v.rgb, min(floor(v.w), 16.0));
             }
         }
     }
@@ -535,6 +591,12 @@ vec4 gi2_world_irradiance(vec3 pos, vec3 n) {
             continue;
         }
         cache.v[3u * slot].w = uintBitsToFloat(gi2_frame());
+        if (mode == 3u && (gi2_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w < 0.5) {
+            vec4 rs = gi2_sc_resample(q, n, size);
+            if (rs.w > 0.5) {
+                cache.v[3u * slot + 2u] = rs;
+            }
+        }
         if (mode == 3u) {
             gi2_sc_offer(slot, pos, gi2_sc_centre(q, n, size));
             cache.v[GI2_WORLD_AT + slot].z = uintBitsToFloat(gi2_frame());

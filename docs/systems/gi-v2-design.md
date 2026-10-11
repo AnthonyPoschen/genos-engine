@@ -2,7 +2,7 @@
 
 Status: proposed, 2026-10-10; Anthony's answers to the open questions folded in the same day. No code yet. The decision is [ADR 0012](../adr/0012-gi-v2.md).
 
-This is the plan for the next global illumination (GI) system in Genos Engine. It replaces what is left of radiance cascades ([ADR 0008](../adr/0008-lighting-uses-radiance-cascades.md)) and the analytic occluder grid ([ADR 0011](../adr/0011-occluders-use-a-sparse-camera-box.md)). The current system is described in [Lighting](lighting.md) and [the handoff](lighting-handoff.md). The quality gate is in [Debugging](debugging.md).
+This is the plan for the next global illumination (GI) system in Genos Engine. It replaces what is left of radiance cascades ([ADR 0008](../adr/0008-lighting-uses-radiance-cascades.md)) and the analytic occluder grid ([ADR 0011](../adr/0011-occluders-use-a-sparse-camera-box.md)). The v1 system is described in [Lighting v1](lighting-v1.md) and [the handoff](lighting-handoff.md). How v2 works now, component by component against Lumen and the papers, with scores: [Lighting](lighting.md). The quality gate is in [Debugging](debugging.md).
 
 ## Why change
 

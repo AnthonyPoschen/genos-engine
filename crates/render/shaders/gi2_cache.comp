@@ -26,6 +26,7 @@ void main() {
     // Signed: on the async queue a frame drawn after this round was built may
     // already have read the patch (last ahead of this round's frame).
     if (int(gi2_frame() - last) > int(GI2_CACHE_LIFE)) {
+        atomicAdd(gstats.freed, 1u);
         ckeys.key[slot] = 0u;
         cache.v[3u * slot + 1u] = vec4(0.0);
         cache.v[3u * slot + 2u] = vec4(0.0);
@@ -71,6 +72,50 @@ void main() {
         float k = t + 1.0;
         float w = (gi2_sc_flags() & 1u) != 0u ? 6.0 * k / ((k + 1.0) * (2.0 * k + 1.0)) : 2.0 / (k + 1.0);
         float cap = gi2_sc_cap(slot);
+        if (t >= cap - 0.5) {
+            atomicAdd(gstats.atcap, 1u);
+        }
+        // Flag 1048576: GIBS's estimator (Stachowiak's multi-scale mean, as in
+        // kajiya): a short-term mean and variance beside the long-term mean; the
+        // long-term blend grows with how far the short-term mean has moved from it
+        // in standard deviations and falls to 1/256 once they agree, so a converged
+        // texel neither drifts nor freezes. The first GI2_SC_EST_WARM sets are a
+        // plain mean (as before); under change gi2_sc_count keeps t short.
+        if ((gi2_sc_flags() & 1048576u) != 0u && old.w > 0.5) {
+            const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+            const float SB = 0.08;
+            const float WARM = 16.0;
+            vec4 a = cache.v[GI2_SC_EST_AT + 2u * slot];
+            vec4 b = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
+            if (b.x <= 0.0) {
+                // First estimator step (new, or resampled from another size).
+                a = vec4(old.rgb, pow(0.15 * dot(old.rgb, lw), 2.0) + 1.0e-8);
+                b = vec4(1.0, 1.0, 0.0, 0.0);
+            }
+            float early = 1.0 / (t + 1.0);
+            vec3 y = e;
+            float dev0 = sqrt(max(a.w, 1.0e-10));
+            y -= max(y - (a.rgb + 0.05 + 8.0 * dev0), vec3(0.0));
+            vec3 d1 = y - a.rgb;
+            vec3 sm = mix(a.rgb, y, max(SB, early));
+            vec3 d2 = y - sm;
+            float var = mix(a.w, max(dot(d1 * d2, lw), 0.0), max(0.5 * SB, early));
+            float dev = sqrt(max(var, 1.0e-10));
+            float rel = dot(abs(old.rgb - sm), lw) / dev;
+            float inc = mix(b.y, rel, SB);
+            float vbr = clamp(0.5 * dot(sm, lw) / dev, 1.0 / 32.0, 1.0);
+            float catchup = clamp(smoothstep(0.0, 1.0, rel * max(0.02, inc - 0.2)), 1.0 / 256.0, 1.0) * b.x;
+            float vb = mix(b.x, vbr, 0.1);
+            float blend = t < WARM ? early : max(catchup, 1.0 / 256.0);
+            vec3 m = old.rgb + (y - old.rgb) * blend;
+            cache.v[GI2_SC_EST_AT + 2u * slot] = vec4(sm, var);
+            cache.v[GI2_SC_EST_AT + 2u * slot + 1u] = vec4(vb, inc, blend, 0.0);
+            float nx = min(t + 1.0, cap);
+            bool urgent2 = ((pc.params.z >> 5u) & 1u) != 0u;
+            bool stale2 = !gi2_sc_light_quiet() || (urgent2 && gi2_near_change(cache.v[3u * slot].xyz));
+            cache.v[3u * slot + 2u] = vec4(m, nx + (stale2 ? 0.25 : 0.0));
+            return;
+        }
         // Flag 262144 (with 8192): past the cap a texel keeps a plain mean of its
         // later sets (weight 1 / (k + 1)) up to GI2_SC_HOLD caps, then holds: its
         // shimmer fades as 1 / k and stops, the bounce that came in late is kept.
