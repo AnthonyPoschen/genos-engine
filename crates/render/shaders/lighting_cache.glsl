@@ -1591,6 +1591,37 @@ vec4 lighting_sc_seed(uint slot) {
 
 // Surface cache: what a texel shows (w 0 when it has nothing yet).
 vec4 lighting_sc_own_shown(uint slot);
+// S72V10: the 25 cm WRC cells' light as of now, bilinear over the coplanar
+// cells with sets (no recursion into lighting_sc_shown); w 1 when any.
+vec4 lighting_sc_wrc_now(vec3 p, vec3 n) {
+    const float cs = 0.25;
+    uint ax = lighting_axis(n) >> 1u;
+    uint ua = (ax + 1u) % 3u;
+    uint ub = (ax + 2u) % 3u;
+    vec2 uv = vec2(p[ua], p[ub]) / cs - 0.5;
+    vec2 g0 = floor(uv);
+    vec2 fr = uv - g0;
+    vec3 sum = vec3(0.0);
+    float ws = 0.0;
+    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
+        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u));
+        vec3 q = p;
+        q[ua] = (c.x + 0.5) * cs;
+        q[ub] = (c.y + 0.5) * cs;
+        float bil = ((k & 1u) == 1u ? fr.x : 1.0 - fr.x) * ((k >> 1u) == 1u ? fr.y : 1.0 - fr.y);
+        uint s = lighting_cache_find_sized(q, n, false, cs, p);
+        if (s == ~0u || bil <= 0.0 || abs(dot(cache.v[3u * s].xyz - p, n)) > 0.5 * cs) {
+            continue;
+        }
+        vec4 v = cache.v[3u * s + 2u];
+        if (v.w < 0.5) {
+            continue;
+        }
+        sum += bil * v.rgb * lighting_sc_sun_gain(s);
+        ws += bil;
+    }
+    return ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);
+}
 vec4 lighting_sc_shown(uint slot) {
     // S72D coarse to fine: a texel shows the interpolation of the next level up
     // (level 0 from the 2-apart keys, else the 4-apart ones) until its own sets
@@ -1616,9 +1647,23 @@ vec4 lighting_sc_shown(uint slot) {
             // S72V: the pushed SVGF field covers what it reaches; the seed only
             // where nothing reached yet.
             // The field is light as of now (S72V7), no gain.
-            have = any(greaterThan(field, vec3(0.0)));
+            // S72V10: only a field the push wrote this frame or the last (stamp
+            // in the a-trous buffer B .w); a texel coming back on screen after
+            // more than 30 frames off it held the field from when it left. Until
+            // its field is rebuilt (next frame) it shows the WRC as of now
+            // (parent bilinear), not that old light.
+            uint pf = floatBitsToUint(cache.v[10u * LIGHTING_CACHE_SLOTS + slot].w);
+            bool fresh = pf != 0u && int(lighting_frame() - pf) <= 2;
+            have = fresh && any(greaterThan(field, vec3(0.0)));
             if (have) {
                 return vec4(field, 1.0);
+            }
+            if (!fresh && own.w > 0.5) {
+                vec4 nbs = cache.v[3u * slot + 1u];
+                vec4 pb = lighting_sc_wrc_now(cache.v[3u * slot].xyz, nbs.xyz);
+                if (pb.w > 0.5) {
+                    return vec4(pb.rgb, 1.0);
+                }
             }
             // S72V8: no field yet: the texel's own sets before its seed (a seed is
             // a first-fill guess and must never outlast real samples; S72V-V5
@@ -2679,6 +2724,7 @@ void lighting_svgf_push(uint slot) {
         outc = vec3(0.0);
     }
     cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(outc));
+    cache.v[LIGHTING_SC_ATROUS_B + slot].w = uintBitsToFloat(lighting_frame());
     // IC placement for the next rounds.
     if (W > 0.0 || cw > 0.0) {
         float e = dot(outc, LIGHTING_SVGF_LW);
