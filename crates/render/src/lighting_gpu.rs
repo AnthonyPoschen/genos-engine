@@ -606,7 +606,8 @@ impl Gpu {
                 &share,
             )?;
             self.lighting.cache =
-                self.make_buffer_queues(LIGHTING_CACHE_SLOTS * 240, 0x20 | 0x2, Memory::Device, &share)?; // S74A: + A-SVGF gradient (2 vec4) // 11 vec4 a slot (S72A: + sparse fill; S72V: + a-trous ping-pong)
+                self.make_buffer_queues(LIGHTING_CACHE_SLOTS * 368, // S77D: + 6 a-trous levels, 2 dirty-stamp vec4 + activity (23 vec4 a slot)
+                0x20 | 0x2, Memory::Device, &share)?; // S74A: + A-SVGF gradient (2 vec4) // 11 vec4 a slot (S72A: + sparse fill; S72V: + a-trous ping-pong)
             self.lighting.cache_clear = true;
             for k in 0..2 {
                 self.lighting.stats[k] = self.make_buffer(352, 0x20 | 0x2, Memory::Readback)?;

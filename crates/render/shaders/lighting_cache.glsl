@@ -2615,9 +2615,92 @@ vec4 lighting_svgf_load(uint at, uint s, out float var) {
     return vec4(lighting_unpack_rgb9e5(floatBitsToUint(v.x)), v.z);
 }
 const vec3 LIGHTING_SVGF_LW = vec3(0.2126, 0.7152, 0.0722);
+// S77D dirty-page a-trous (Anthony 17:31, 17:53): every level of the filter is
+// kept per slot (LIGHTING_SC_LVL_AT + k: level 0 the variance stage, 1-5 the
+// a-trous levels), so a texel whose inputs did not change keeps its value at every
+// level and its neighbours still read the right level from it. Level 0: a texel
+// is recomputed when its own input (rgb x sun gain, mask, temporal variance)
+// moved more than LIGHTING_DIRTY_EPS (1 %) from the stored one, when it was not
+// active last frame, or while its variance is the spatial estimate (young
+// texels; their 7 x 7 inputs change). A level k value that changed by more than
+// LIGHTING_DIRTY_EPS marks every texel that reads it at level k + 1 (its 5 x 5
+// taps at step 2^k, which hold the 3 x 3 variance blur) dirty for that level
+// (scatter: neighbour lookups only around what changed). A dirty texel is
+// recomputed; a clean one keeps its level. The push (stage 6) runs for all, as
+// before. Deviation: SVGF re-filters every pixel every frame; changes under 1 %
+// are held until they add up past it (bounded 1 % lag).
+const bool LIGHTING_DIRTY_ATROUS = true;
+const float LIGHTING_DIRTY_EPS = 0.01;
+const uint LIGHTING_SC_LVL_AT = 15u * LIGHTING_CACHE_SLOTS;
+const uint LIGHTING_SC_DIRTY_AT = 21u * LIGHTING_CACHE_SLOTS;
+uint lighting_svgf_lvl(uint k) {
+    return LIGHTING_SC_LVL_AT + k * LIGHTING_CACHE_SLOTS;
+}
+// Dirty stamp of level k (1..5) of slot s.
+uint lighting_svgf_dirty_word(uint k) {
+    return k - 1u;
+}
+bool lighting_svgf_is_dirty(uint s, uint k) {
+    uint w = k - 1u;
+    vec4 d = cache.v[LIGHTING_SC_DIRTY_AT + (w >> 2u) * LIGHTING_CACHE_SLOTS + s];
+    return floatBitsToUint(d[w & 3u]) == lighting_frame();
+}
+void lighting_svgf_mark(uint s, uint k) {
+    if (s == ~0u) {
+        return;
+    }
+    uint w = k - 1u;
+    cache.v[LIGHTING_SC_DIRTY_AT + (w >> 2u) * LIGHTING_CACHE_SLOTS + s][w & 3u] = uintBitsToFloat(lighting_frame());
+}
+bool lighting_svgf_moved(vec4 a, float va, vec4 b, float vb) {
+    float la = dot(a.rgb, vec3(0.2126, 0.7152, 0.0722));
+    float lb = dot(b.rgb, vec3(0.2126, 0.7152, 0.0722));
+    return abs(la - lb) > LIGHTING_DIRTY_EPS * max(max(la, lb), 1.0e-4)
+        || abs(a.w - b.w) > LIGHTING_DIRTY_EPS
+        || abs(va - vb) > 2.0 * LIGHTING_DIRTY_EPS * max(max(abs(va), abs(vb)), 1.0e-8);
+}
+// Level k of slot changed: its readers at level k + 1 are dirty.
+void lighting_svgf_scatter(uint slot, uint k) {
+    if (k >= 5u) {
+        return;
+    }
+    int step = 1 << k;
+    [[dont_unroll]] for (int j = -2; j <= 2; j++) {
+        [[dont_unroll]] for (int i = -2; i <= 2; i++) {
+            lighting_svgf_mark((i == 0 && j == 0) ? slot : lighting_sc_cell_slot(slot, ivec2(-i, -j) * step), k + 1u);
+        }
+    }
+}
+// Activity last frame (slot 22.y: 1 active).
+bool lighting_svgf_was_active(uint s) {
+    return cache.v[LIGHTING_SC_DIRTY_AT + LIGHTING_CACHE_SLOTS + s].y > 0.5;
+}
+void lighting_svgf_set_active(uint s, bool a) {
+    cache.v[LIGHTING_SC_DIRTY_AT + LIGHTING_CACHE_SLOTS + s].y = a ? 1.0 : 0.0;
+}
+// An inactive texel: mask 0 at every level (a flip marks its readers once).
+void lighting_svgf_inactive(uint slot) {
+    bool was = lighting_svgf_was_active(slot);
+    [[dont_unroll]] for (uint k = 0u; k <= 5u; k++) {
+        lighting_svgf_store(lighting_svgf_lvl(k), slot, vec3(0.0), 0.0, 0.0);
+    }
+    if (was) {
+        lighting_svgf_set_active(slot, false);
+        lighting_svgf_scatter(slot, 0u);
+    }
+}
 void lighting_svgf_variance(uint slot) {
     float var;
     vec4 v = lighting_svgf_in(slot, var);
+    bool spatial = var < 0.0;
+    bool flip = LIGHTING_DIRTY_ATROUS && !lighting_svgf_was_active(slot);
+    if (LIGHTING_DIRTY_ATROUS && !spatial && !flip) {
+        float vo;
+        vec4 o = lighting_svgf_load(lighting_svgf_lvl(0u), slot, vo);
+        if (!lighting_svgf_moved(v, var, o, vo)) {
+            return;
+        }
+    }
     if (var < 0.0) {
         // Spatial estimate, 7 x 7 moments weighted by w_z w_n.
         float s1 = 0.0;
@@ -2644,11 +2727,31 @@ void lighting_svgf_variance(uint slot) {
         float t = floor(max(cache.v[3u * slot + 2u].w, 0.0));
         var = sw > 0.0 ? max(s2 / sw - (s1 / sw) * (s1 / sw), 0.0) * 4.0 / max(t, 1.0) : 0.0;
     }
-    lighting_svgf_store(LIGHTING_SC_ATROUS_B, slot, v.rgb, var, v.w);
+    if (!LIGHTING_DIRTY_ATROUS) {
+        lighting_svgf_store(LIGHTING_SC_ATROUS_B, slot, v.rgb, var, v.w);
+        return;
+    }
+    float vo;
+    vec4 o = lighting_svgf_load(lighting_svgf_lvl(0u), slot, vo);
+    lighting_svgf_store(lighting_svgf_lvl(0u), slot, v.rgb, var, v.w);
+    if (flip) {
+        lighting_svgf_set_active(slot, true);
+    }
+    // Stored packed (rgb9e5): compare what the readers will see.
+    float vn;
+    vec4 nw = lighting_svgf_load(lighting_svgf_lvl(0u), slot, vn);
+    if (flip || lighting_svgf_moved(nw, vn, o, vo)) {
+        lighting_svgf_scatter(slot, 0u);
+    }
 }
 void lighting_svgf_iter(uint slot, uint it) {
-    uint src = (it & 1u) == 0u ? LIGHTING_SC_ATROUS_B : LIGHTING_SC_ATROUS_A;
-    uint dst = (it & 1u) == 0u ? LIGHTING_SC_ATROUS_A : LIGHTING_SC_ATROUS_B;
+    if (LIGHTING_DIRTY_ATROUS && !lighting_svgf_is_dirty(slot, it + 1u)) {
+        return;
+    }
+    uint src = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_B : LIGHTING_SC_ATROUS_A);
+    uint dst = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it + 1u) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_A : LIGHTING_SC_ATROUS_B);
+    float vold;
+    vec4 old = lighting_svgf_load(dst, slot, vold);
     int step = 1 << it;
     float varp;
     vec4 vp = lighting_svgf_load(src, slot, varp);
@@ -2705,6 +2808,17 @@ void lighting_svgf_iter(uint slot, uint it) {
         lighting_svgf_store(dst, slot, sum / wm, vsum / (wm * wm), wall > 0.0 ? min(1.0, 4.0 * wm / wall) : 0.0);
     } else {
         lighting_svgf_store(dst, slot, vec3(0.0), 0.0, 0.0);
+    }
+    if (LIGHTING_DIRTY_ATROUS) {
+        float vn;
+        vec4 nw = lighting_svgf_load(dst, slot, vn);
+        if (it + 1u == 5u) {
+            // The push and the IC placement read the last level from A.
+            cache.v[LIGHTING_SC_ATROUS_A + slot] = cache.v[dst + slot];
+        }
+        if (lighting_svgf_moved(nw, vn, old, vold)) {
+            lighting_svgf_scatter(slot, it + 1u);
+        }
     }
 }
 float lighting_svgf_lum_at(uint slot, ivec2 off, out bool ok) {

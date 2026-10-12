@@ -17,6 +17,9 @@ void main() {
             // No data for the levels: mask 0 in both ping-pong buffers.
             lighting_svgf_store(LIGHTING_SC_ATROUS_A, slot, vec3(0.0), 0.0, 0.0);
             lighting_svgf_store(LIGHTING_SC_ATROUS_B, slot, vec3(0.0), 0.0, 0.0);
+            if (LIGHTING_DIRTY_ATROUS) {
+                lighting_svgf_inactive(slot); // S77D: every kept level too
+            }
         }
         return;
     }
