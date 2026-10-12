@@ -184,6 +184,15 @@ void main() {
                     return;
                 }
             }
+            // S72O: per-texel commit timing: while refining (DN_MIN to FULL sets)
+            // a texel sits out one round in four, on its own phase (hash), so
+            // the texels of a page commit on different rounds and their counts
+            // spread; a page never steps as one.
+            if (!wrc && lighting_sc_decorrelate() && !near && t >= LIGHTING_DN_MIN_SETS - 0.5 && t < LIGHTING_SC_FULL_SETS - 0.5
+                && ((lighting_hash(slot ^ 0x5bd1e995u) + lighting_round()) & 3u) == 0u) {
+                atomicAdd(gstats.waiting, 1u);
+                return;
+            }
             // S64A: relit only once due (the budget is a ceiling).
             if (int(lighting_frame() - updated) < int(lighting_sc_interval(slot, t))) {
                 atomicAdd(gstats.waiting, 1u);

@@ -290,6 +290,12 @@ vec3 lighting_hemi_dir(uint h, vec3 n, float u, float v) {
 
 // Ray k of R over the hemisphere about n, stratified on a sqrt(R) x sqrt(R) grid
 // of (cos theta, phi) with a jitter and turn from hash h (lighting_cache.comp's rays).
+// S72O: a texel's 64-ray set is four quarters of strata; the quarter a relight
+// starts from is turned per texel and set (from its ray key), so the texels of a
+// page do not take the same part of the hemisphere in the same round.
+uint lighting_sc_stratum(uint rkey, uint idx, uint quarter_rays, uint set_rays) {
+    return (idx + quarter_rays * ((rkey >> 28u) & 3u)) % set_rays;
+}
 vec3 lighting_dir(uint h, vec3 n, uint k, uint count) {
     uint s = max(uint(sqrt(float(count)) + 0.5), 1u);
     float j1 = lighting_unit(h ^ (k * 0x9e3779b9u + 1u));
@@ -420,7 +426,8 @@ bool lighting_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     }
     origin = p + n * 0.02;
     uint q = lighting_cache_entry_quarter(r / LIGHTING_CACHE_RAYS, slot);
-    dir = lighting_dir(lighting_sc_ray_key(slot, key), n, q * LIGHTING_CACHE_RAYS + r % LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS);
+    uint rk = lighting_sc_ray_key(slot, key);
+    dir = lighting_dir(rk, n, lighting_sc_stratum(rk, q * LIGHTING_CACHE_RAYS + r % LIGHTING_CACHE_RAYS, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
     return true;
 }
 

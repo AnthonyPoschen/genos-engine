@@ -98,7 +98,7 @@ void main() {
         if (lighting_ray_none(v)) {
             return;
         }
-        vec3 dir = lighting_dir(rkey, n, q0 * LIGHTING_CACHE_RAYS + k, LIGHTING_SC_SET_RAYS);
+        vec3 dir = lighting_dir(rkey, n, lighting_sc_stratum(rkey, q0 * LIGHTING_CACHE_RAYS + k, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
         float c = max(dot(dir, n), 0.0);
         vec3 lk = lighting_ray_light(v);
         e += lk * c;

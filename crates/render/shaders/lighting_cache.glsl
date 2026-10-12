@@ -220,6 +220,13 @@ uint lighting_sc_flags() {
     // S72K: bits 23 and up ride in head 3.w (head z is a float, exact to 2^24).
     return (uint(work.v[lighting_change_at()].z + 0.5) >> 1u) | (uint(work.v[lighting_change_at() + 3u].w + 0.5) << 23u);
 }
+// S72O (Anthony: squares still build up; a page must never shift as a unit):
+// per-texel commit timing and ray strata, and the stored means rectified
+// against their edge-aware neighbourhood. Flag 268435456 off.
+uint lighting_world_mode();
+bool lighting_sc_decorrelate() {
+    return lighting_world_mode() == 3u && (lighting_sc_flags() & 268435456u) == 0u;
+}
 // Surface cache (mode 3, GENOS_LIGHTING_WORLD=3): the light cache's patches are the
 // texels pixels read. A texel adds a new set of LIGHTING_CACHE_RAYS rays each time it is
 // relit and keeps their running mean, up to cap sets; then it holds (converged)
@@ -1020,7 +1027,10 @@ uint lighting_sc_ray_key(uint slot, uint key) {
         set += lighting_round() * 7919u + 1u;
     }
     set %= uint(lighting_sc_cap(slot));
-    return lighting_hash(key ^ (set * 0x2545f491u + 0x68e31da4u));
+    // S72O: after the second pass (flag 2) drops a texel to a quarter of its
+    // sets, the sets it takes again are new rays, not the ones it already has.
+    uint pass = cache.v[LIGHTING_WORLD_AT + slot].w > 0.5 && lighting_sc_decorrelate() ? 0x7feb352du : 0u;
+    return lighting_hash(key ^ (set * 0x2545f491u + 0x68e31da4u) ^ pass);
 }
 
 // Surface cache: what a texel shows while it has few sets (its first fill, then
@@ -1075,6 +1085,15 @@ float lighting_dn_target(uint slot) {
 // contact) is many sigma and passes; as sets come in sigma falls and the
 // texel's own detail comes through. Flag 33554432 turns it off.
 const float LIGHTING_SC_REG_K = 2.0;
+// S72O: edge-aware and connected (Anthony: a-trous / pull-push over the stored
+// values, plane, normal and visibility aware, stopping at real edges). Four
+// directions a texel (axis or diagonal by its hash, so no grid shows), each
+// walked out 2, 4, 8, 16 cells (a-trous steps); a direction stops at the first
+// cell missing or off the plane (a wall, a gap: what is past it is not seen
+// from here) or across a significant step (its luminance more than
+// LIGHTING_SC_REG_EDGE standard errors from this texel's: a shadow edge or a
+// light gradient). Taps weigh by their sets and a Gaussian in standard errors.
+const float LIGHTING_SC_REG_EDGE = 4.0;
 vec3 lighting_sc_regularise(uint slot, vec3 value) {
     if (lighting_world_mode() != 3u || (lighting_sc_flags() & 33554432u) != 0u) {
         return value;
@@ -1094,37 +1113,72 @@ vec3 lighting_sc_regularise(uint slot, vec3 value) {
     vec3 tb = vec3(0.0);
     ta[(ax + 1u) % 3u] = 1.0;
     tb[(ax + 2u) % 3u] = 1.0;
-    vec3 sum = vec3(0.0);
-    float wsum = 0.0;
-    [[dont_unroll]] for (uint i = 0u; i < 16u; i++) {
-        float r = float(2u << (i >> 2u));
-        float a = 1.5707963 * float(i & 3u) + 0.7853982 * float((i >> 2u) & 1u);
-        vec3 q = p + (cos(a) * ta + sin(a) * tb) * r * size;
-        uint s2 = lighting_cache_find_sized(q, n, false, size, p);
-        if (s2 == ~0u || abs(dot(cache.v[3u * s2].xyz - p, n)) > 0.5 * size) {
-            continue;
-        }
-        vec4 v = cache.v[3u * s2 + 2u];
-        float c = min(floor(max(v.w, 0.0)), 64.0);
-        if (c < 0.5) {
-            continue;
-        }
-        sum += c * v.rgb;
-        wsum += c;
-    }
-    if (wsum < 4.0) {
-        return value;
-    }
-    vec3 mu = sum / wsum;
     vec4 ea = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
     vec4 eb = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
     float lum = max(dot(own.rgb, lw), 1.0e-4);
     float var = eb.x > 0.0 ? max(ea.w, 0.0) : pow(0.3 * lum, 2.0);
     float se2 = var / t;
+    bool edge_aware = lighting_sc_decorrelate();
+    float vlum = dot(value, lw);
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    float rot = edge_aware ? 0.7853982 * float(lighting_hash(slot * 0x27d4eb2du) & 1u) : 0.0;
+    [[dont_unroll]] for (uint d = 0u; d < 4u; d++) {
+        [[dont_unroll]] for (uint l = 0u; l < 4u; l++) {
+            uint i = l * 4u + d;
+            float r = float(2u << l);
+            float a = edge_aware ? 1.5707963 * float(d) + rot : 1.5707963 * float(i & 3u) + 0.7853982 * float((i >> 2u) & 1u);
+            vec3 q = p + (cos(a) * ta + sin(a) * tb) * r * size;
+            uint s2 = lighting_cache_find_sized(q, n, false, size, p);
+            if (s2 == ~0u || abs(dot(cache.v[3u * s2].xyz - p, n)) > 0.5 * size) {
+                if (edge_aware) {
+                    break;
+                }
+                continue;
+            }
+            vec4 v = cache.v[3u * s2 + 2u];
+            float c = min(floor(max(v.w, 0.0)), 64.0);
+            if (c < 0.5) {
+                continue;
+            }
+            float w = c;
+            if (edge_aware) {
+                // Standard error of the difference: this texel's and the tap's
+                // (same per-set variance, its sets).
+                float sd2 = se2 + var / c + 1.0e-10;
+                float dl = dot(v.rgb, lw) - vlum;
+                float z2 = dl * dl / sd2;
+                if (z2 > LIGHTING_SC_REG_EDGE * LIGHTING_SC_REG_EDGE) {
+                    break;
+                }
+                w *= exp(-0.5 * z2 / 4.0);
+            }
+            sum += w * v.rgb;
+            wsum += w;
+        }
+    }
+    if (wsum < 4.0) {
+        return value;
+    }
+    vec3 mu = sum / wsum;
     vec3 d = value - mu;
     float dl = dot(d, lw);
     float s = dl * dl / (dl * dl + LIGHTING_SC_REG_K * LIGHTING_SC_REG_K * se2 + 1.0e-12);
     return max(mu + d * s, vec3(0.0));
+}
+// S72O history rectification (Anthony: a page's early noise locks in and the
+// squares drift): the stored mean itself moves toward its regularised value
+// (the edge-aware neighbourhood plus its own significant difference) by one
+// set's worth, 1 / (sets + 1), while it is short of 64 sets. Noise-level
+// offsets a region took early are pulled to the neighbourhood instead of being
+// averaged down at 1 / n; real steps are many standard errors and stay.
+void lighting_sc_rectify(uint slot, vec3 reg) {
+    vec4 own = cache.v[3u * slot + 2u];
+    float t = floor(max(own.w, 0.0));
+    if (!lighting_sc_decorrelate() || t < 0.5 || t >= 64.0 || fract(own.w) > 0.1 || cache.v[3u * slot + 1u].w > 0.2) {
+        return;
+    }
+    cache.v[3u * slot + 2u].rgb = mix(own.rgb, reg, 1.0 / (t + 1.0));
 }
 void lighting_sc_pool(uint slot) {
     vec4 own = cache.v[3u * slot + 2u];
@@ -1134,7 +1188,9 @@ void lighting_sc_pool(uint slot) {
     float t = floor(max(own.w, 0.0));
     bool floor_on = (lighting_sc_flags() & 8u) != 0u;
     if (t >= LIGHTING_SC_POOL_FULL && !floor_on) {
-        cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(lighting_sc_regularise(slot, own.rgb)));
+        vec3 rg = lighting_sc_regularise(slot, own.rgb);
+        lighting_sc_rectify(slot, rg);
+        cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(rg));
         lighting_obj_salt = 0.0;
         return;
     }
@@ -1197,6 +1253,9 @@ void lighting_sc_pool(uint slot) {
         }
     }
     cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(wsum > 0.0 ? lighting_sc_regularise(slot, sum / wsum) : vec3(0.0)));
+    if (t >= 0.5) {
+        lighting_sc_rectify(slot, lighting_sc_regularise(slot, own.rgb));
+    }
     lighting_obj_salt = 0.0;
 }
 
@@ -1613,7 +1672,9 @@ float lighting_sc_page_bar(uint slot) {
         float w = ((i & 1u) == 1u ? f.x : 1.0 - f.x) * ((i >> 1u) == 1u ? f.y : 1.0 - f.y);
         acc += w * (m < 0.0 ? own : m);
     }
-    return acc + lighting_unit(slot * 0x9e3779b9u);
+    // S72O: the dither spans LIGHTING_SC_PAGE_LEAD sets (was 1), so a page's
+    // texels are held at independent points and never step as one.
+    return acc + lighting_unit(slot * 0x9e3779b9u) * (lighting_sc_decorrelate() ? LIGHTING_SC_PAGE_LEAD : 1.0);
 }
 // The page's fewest sets last round (-1: none known).
 float lighting_sc_page_min(uint page) {
