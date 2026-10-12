@@ -288,6 +288,8 @@ const uint LIGHTING_SC_OBJ_AT = 6u * LIGHTING_CACHE_SLOTS;
 // converge the shape (Lumen relights its surface cache's direct light every
 // frame, the radiosity converges over frames).
 const uint LIGHTING_SC_SUN_AT = 7u * LIGHTING_CACHE_SLOTS;
+// S71E display ramp per slot (lighting_sc_ramp).
+const uint LIGHTING_SC_RAMP_AT = 8u * LIGHTING_CACHE_SLOTS;
 // Frame of a texel's last relight (0: never), beside its object id.
 // S62E global light scale (Anthony: day to night, unread texels kept daytime
 // light and faded as rays came in). The pixel's own direct light is already
@@ -506,6 +508,7 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
             cache.v[LIGHTING_WORLD_AT + slot] = vec4(length(at - lighting_sc_centre(pos, n, size)), 0.0, 0.0, 0.0);
             cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(0.0);
             cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(0.0);
+            cache.v[LIGHTING_SC_RAMP_AT + slot] = vec4(0.0);
             if (lighting_world_mode() == 3u) {
                 cache.v[LIGHTING_SC_OBJ_AT + slot] = vec4(lighting_obj_salt, 0.0, 0.0, 0.0);
             }
@@ -1139,15 +1142,58 @@ vec3 lighting_sc_nclamp(uint slot, vec3 m, vec3 sm, float dev) {
     return m * (clamp(lm, lo, hi) / lm);
 }
 
+// S71E display ramp (Anthony 2026-10-12: light fills in with many small visible
+// steps as relight sets commit). Pixels (lighting_compose, lighting_sc_display set)
+// do not show a texel's committed value at once: per texel the displayed value
+// ramps from what was on screen to the new value over LIGHTING_SC_RAMP_FRAMES
+// frames for a small step, falling to 1 frame (instant) for a step of half the
+// light or more and for a texel that showed nothing. The ramp is in the texel's own
+// light before the sun/sky gain, so day/night (the global gain) stays instant; big
+// real changes (movers, lamp moves, which the anti-lag and change paths already
+// turn into large steps) stay fast. Lumen's surface cache is likewise only seen
+// through a temporal filter. Slot vec4 at LIGHTING_SC_RAMP_AT: x the target last
+// seen (rgb9e5), y the value the ramp started from (rgb9e5), z the frame it
+// started, w its length. Deterministic: every reader that frame computes the same.
+// Flag 16777216 turns it off.
+const float LIGHTING_SC_RAMP_FRAMES = 8.0;
+bool lighting_sc_display = false;
+vec3 lighting_sc_ramp(uint slot, vec3 target) {
+    if (!lighting_sc_display || (lighting_sc_flags() & 16777216u) != 0u) {
+        return target;
+    }
+    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+    uint now = lighting_frame();
+    uint packed = lighting_pack_rgb9e5(target);
+    vec4 r = cache.v[LIGHTING_SC_RAMP_AT + slot];
+    uint seen = floatBitsToUint(r.x);
+    uint at = floatBitsToUint(r.z);
+    float span = max(r.w, 1.0);
+    float k = clamp(float(now - at + 1u) / span, 0.0, 1.0);
+    if (r.w <= 0.0 || at == 0u) {
+        cache.v[LIGHTING_SC_RAMP_AT + slot] = vec4(uintBitsToFloat(packed), uintBitsToFloat(packed), uintBitsToFloat(now), 1.0);
+        return target;
+    }
+    if (packed == seen) {
+        return k >= 1.0 ? target : mix(lighting_unpack_rgb9e5(floatBitsToUint(r.y)), target, k);
+    }
+    vec3 shown = mix(lighting_unpack_rgb9e5(floatBitsToUint(r.y)), lighting_unpack_rgb9e5(seen), k);
+    float a = dot(shown, lw);
+    float b = dot(target, lw);
+    float rel = abs(b - a) / max(max(a, b), 1.0e-5);
+    float n = a <= 1.0e-5 ? 1.0 : floor(mix(LIGHTING_SC_RAMP_FRAMES, 1.0, smoothstep(0.25, 0.5, rel)) + 0.5);
+    cache.v[LIGHTING_SC_RAMP_AT + slot] = vec4(uintBitsToFloat(packed), uintBitsToFloat(lighting_pack_rgb9e5(shown)), uintBitsToFloat(now), n);
+    return mix(shown, target, 1.0 / n);
+}
+
 // Surface cache: what a texel shows (w 0 when it has nothing yet).
 vec4 lighting_sc_shown(uint slot) {
     vec3 pooled = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
     vec4 own = cache.v[3u * slot + 2u];
     float ls = lighting_world_mode() == 3u ? lighting_sc_sun_gain(slot) : 1.0;
     if (any(greaterThan(pooled, vec3(0.0)))) {
-        return vec4(pooled * ls, 1.0);
+        return vec4(lighting_sc_ramp(slot, pooled) * ls, 1.0);
     }
-    return own.w > 0.5 ? vec4(own.rgb * ls, 1.0) : vec4(0.0);
+    return own.w > 0.5 ? vec4(lighting_sc_ramp(slot, own.rgb) * ls, 1.0) : vec4(0.0);
 }
 
 // Surface cache read rule at a ray hit t from the ray's origin (SHaRC: a cache

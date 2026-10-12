@@ -138,6 +138,12 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 - **Scores (640x360, S68A de906b50 vs S67A cb215ee2):** turn error area 0.0573 -> 0.0425, light move 0.0262 -> 0.0205, turn frames to under 2 % 120 -> 60, rays per round 444k -> 446k, fps 50.4 -> 49.5. Threshold 0.173 against no trickle tier: 56 % fewer rays per round, +15 % fps, flicker 0.0052 -> 0.0030.
 - **Open:** the error after a turn is a dark bias (frame 1 -13.5 %, 16 -4 %, 60 -1.8 %). Cutting the seed's weight from 8 sets to 2 made it worse (S68B, reverted), so the early sets are dark as well as the seed. The likely cause is that bounce light builds up over rounds after a reveal, because hits read texels that are not lit yet. A temporary budget boost (S66A) fires for about 3 rounds after a turn and does not change the time to correct.
 
+## Display ramp (S71E, convergence pop)
+
+- **Ours:** pixels do not show a texel's committed value at once. Per texel (`lighting_sc_ramp`, one vec4 a slot at `LIGHTING_SC_RAMP_AT`) the shown value ramps from what was on screen to the new value over 8 frames for a step under 25 % of the light, shortening to 1 frame (instant) at 50 % and for a texel that showed nothing. It acts on the texel's own light before the global sun/sky gain, so day/night stays instant; movers and lamp moves, which the anti-lag and change paths turn into large steps, stay fast. Deterministic in the frame counter: no per-frame pass, only readers write it. Flag 16777216 turns it off (A/B).
+- **Reference:** Lumen never shows the surface cache directly: pixels see it through the screen-probe gather and its temporal filter [W21, W22]; ReBLUR and A-SVGF accelerate history where the signal really changes.
+- **Scores:** see the fill run (gi-check grades) and SUMMARY.md.
+
 ## Radiosity and multi-bounce
 
 - **Ours:** ray hits read the light cache's irradiance at the hit (last round's value), so each relight adds one bounce: infinite bounce by feedback. In SC, hit patches are 25 cm and replaced on each relight.
