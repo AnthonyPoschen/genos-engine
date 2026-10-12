@@ -27,5 +27,7 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 No light-pass gain in the still run, picture shifted. (Later S78J did this successfully after S78C fixed probe reprojection.)
 
+From Chief's notes: listed among Engine's reverts not decided with Chief [uncertain who decided].
+
 ## Lessons / when to revisit
 not recorded

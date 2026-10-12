@@ -30,5 +30,7 @@ Neighbour reuse without visibility spread correlated low-frequency blotches.
 ## From the Engine chat (Anthony's feedback, reasons, numbers stated)
 Reverted with S72G/S72H in the combined build 6d055836.
 
+From Chief's notes: listed among Engine's reverts not decided with Chief [uncertain who decided].
+
 ## Lessons / when to revisit
 not recorded

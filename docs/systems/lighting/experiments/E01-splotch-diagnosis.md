@@ -28,5 +28,7 @@ Splotches come mostly from screen-probe gather noise, not light-cache resolution
 ## From the Engine chat (Anthony's feedback, reasons, numbers stated)
 Anthony asked (t9u/t10u) to read exactly how Lumen solves it ('it is a very very good lighting engine'): Lumen's published methods became the default answer. He also asked (t12u/t13u) for executable checks instead of image interpretation, hand-validated first, then ~1% spot checks: this became gi-check.
 
+From Chief's notes: 2026-10-10 07:34, gi-v2 head 7065edb: better quality than v1 everywhere and 2x faster idle, but 10-15% slower when things move and blotchy light detail; Anthony found it splotchy, so the next step sent to Engine was an adaptive surface cache.
+
 ## Lessons / when to revisit
 Origin of gi-check and of the 'Lumen first' rule.

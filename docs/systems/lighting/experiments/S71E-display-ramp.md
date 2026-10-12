@@ -30,5 +30,7 @@ Anthony 12:37: smoothing would be lag; the goal is fast fill.
 ## From the Engine chat (Anthony's feedback, reasons, numbers stated)
 Anthony (t299u-t301u, 12:27-12:37): pops are fine if the screen fills near-immediately; smoothing becomes the issue.
 
+From Chief's notes: 4aeeced (12 Oct 12:37) reverted the display ramp; Anthony said smoothing would be lag and the goal is a fast fill.
+
 ## Lessons / when to revisit
 Principle: pop-in is fine if the screen fills near-immediately; no display smoothing.

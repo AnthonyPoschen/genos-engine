@@ -28,5 +28,7 @@ not recorded
 ## From the Engine chat (Anthony's feedback, reasons, numbers stated)
 Anthony (t294u-t297u): suspected transfers; design rule: everything frequently needed lives in GPU memory at deterministic locations, passes read/write each other there, CPU sends only small changes. (t297u answer) remove all v1 lighting and rename v2 (-> S71A-C); (t298u) no env variable needed.
 
+From Chief's notes: 6a3cd7c (S71A, 12 Oct 12:12) removed GI v1 [uncertain whether Anthony judged a master vs gi-v2 head-to-head first, and whether it is on master].
+
 ## Lessons / when to revisit
 Led to S69C and S70A-C.

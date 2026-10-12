@@ -28,7 +28,7 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 Lookup was ~0.06 ms; cost is the lighting itself.
 
 ## From the Engine chat (Anthony's feedback, reasons, numbers stated)
-Anthony picked it as an option after S78M/N; later (t429u) asked for a deep dive and accepted the rejection.
+Anthony (t429u, 20:42): after it was rejected, asked for a deep dive into what it did and how it went still vs moving. (t430u): 'ok that makes sense why we moved on'.
 
 ## Lessons / when to revisit
 not recorded

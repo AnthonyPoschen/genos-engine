@@ -28,5 +28,7 @@ Mover data was never uploaded to the GPU (S52), so none of the mover handling ha
 ## From the Engine chat (Anthony's feedback, reasons, numbers stated)
 Anthony (t171u): S49 at ~20 fps, 'looks pretty good visually, a massive improvement'; (t187u) 'everything was looking good'; (t188u) make it the default config so plain make stress works; (t193u) 'just git push' (ba9adca0, pushed untested).
 
+From Chief's notes: 2026-10-09 layered scheme: moving objects carry their own occlusion/bounce record over a static probe layer and never dirty probes; each moving light gets its own bounce layer.
+
 ## Lessons / when to revisit
 not recorded

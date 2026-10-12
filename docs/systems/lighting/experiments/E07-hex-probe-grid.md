@@ -28,5 +28,7 @@ not recorded
 ## From the Engine chat (Anthony's feedback, reasons, numbers stated)
 Anthony (t44u): A/B candidate after v2 is good; park and remind. (t123u): fold into the performance pass with the few-rays work.
 
+From Chief's notes: the OpenAI maths shortlist (/workspace/openai-math-engine-shortlist.md) [date uncertain, ~10-11 Oct] was sent to Engine; Engine adopted the sphere-energy score for probe ray sets and queued the hex-grid experiment. Result still open.
+
 ## Lessons / when to revisit
 not recorded

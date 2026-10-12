@@ -7,11 +7,22 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 ## Missing history (as of 2026-10-12)
 
 - Engine chat read from an export covering positions 33-3359 (Sat 10 Oct 11:53 to Mon 12 Oct 22:52). Not read: positions 0-32 and the gaps 80-94, 160-162, 240-248, 320-349, 480-488, 720-728, 800-804, 960-961, 1040-1052, 1200-1208, 1280-1281, 1360-1365, 1440-1447. Tool results were skipped; user messages, messages to Anthony and subagent reports were used. Long reports were read in part, so some figures inside them may be missing.
-- Chief's engine chats: pending a separate summary; only an unrelated recent page was available.
+- Before 10 Oct and Chief-side decisions: from Chief's notes (git, Chief's brief and memory; Chief's executor had no memory search, items marked [uncertain] are kept as such).
 - Chat from about 05:40 to 10:35 on 12 Oct (S63-S68 work) is mostly absent from the export; those entries rest on git and the doc.
 - S75, S76, S77 detail now comes from the chat reports; S70A-C and S71 have git only.
 - Scene, GPU and resolution are recorded only where an experiment file says so.
 - Screenshots and videos are referenced by name only, not copied.
+
+## From Chief's notes: decisions and rules
+
+- GI v2 design and ADR 0012 (7d35edd, 10 Oct 03:12; Anthony's answers b7b8ea7 03:27): Lumen-informed but aim to beat Lumen; stop when complete so Anthony can judge; lighting ~200 MB VRAM soft budget (Ultra may exceed); hardware floor newest 80% of the Steam survey, Low tuned for GTX 1060 / RX 580, Vulkan 1.3, 4 GB VRAM minimum; Steam Deck a target but untested; test machines zanven-pc (4070) and his MacBook; mesh SDFs and cards prebuilt at build time (configurable); emissive surfaces required, including texture-driven partial-mesh emission (639ab44).
+- v2 design rules: only finished values are published; fixed ray patterns; each ray answered by exactly one system; screen probes plus surface cache; software SDF plus hardware ray queries; world probes for the far field only.
+- GI v2 lives on gi-v2; phase-1 commits (13e02fe glTF, a22b1c8 BVH, 977ea71, e5cb9ba SDFs/cards, 84c303d) stay on master; master and gi-v2 compared head to head before any merge. Precomputed transport for master dropped.
+- v2 became a separate frame path (1a2229f, ec658c5, ~05:30 10 Oct) because the NVIDIA compiler hung with the tracer inside the existing shaders.
+- Proposed, not answered [uncertain status]: rewrites on their own branch with master fixes-only (P7); design doc before a new subsystem (P6). Approved (P9): visual results come with screenshots someone looked at; numbers help bots judge faster. Postmortems go to the shared file (P10).
+- zanven-pc etiquette: bench lock ~/genos-bench.lock and split/lock_run.sh, one time-limited window; low GPU priority, short submissions; must not freeze the desktop; exclusive fps windows Fri-Mon 05-10 and Tue-Thu 05-15 AEDT; never touch his input or processes.
+- Open (P3, unanswered): per-light layers, a 3-6 bounce slider, three proposed lighting locks [which three uncertain], neural radiance caching as an optional RTX 20+ tier (ruled out as v2's core on 1060-class cards, 9 Oct), weekly paper reading. Also open: Anthony's tail estimate for remaining bounces, last x r/(1-r), kept only if it lowers reference error; what the first-principles research track covers [uncertain].
+- Backlog (ge-* todo items) [dates uncertain]: fast settling (100-200 ms, all lights in one trace, GPU timing breakdown, bright corners and box feet); stress scene controls; settings struct and presets; 16-bit float pipeline, HDR10, bloom and glare; per-mesh PBR metal/rough (glTF-compatible) with saving loaders; probe specular and rough reflections; froxel fog, volumetrics and god rays; planar mirrors, portals, water with SSR plus probe fallback; 500+ fps from 4070 timings; smart layering for static lights; box-foot contact strip.
 
 ## Current state (2026-10-12)
 

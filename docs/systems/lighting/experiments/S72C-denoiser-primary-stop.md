@@ -30,5 +30,7 @@ Baked low-frequency blotches; stopped texels while error was low-frequency.
 ## From the Engine chat (Anthony's feedback, reasons, numbers stated)
 Smoke: none of A/B/C changed fps (29-35).
 
+From Chief's notes: listed among Engine's reverts not decided with Chief [uncertain who decided].
+
 ## Lessons / when to revisit
 not recorded

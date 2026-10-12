@@ -28,5 +28,7 @@ Surfaces settled with too few rays (splotchy); the traced surface-cache rays wer
 ## From the Engine chat (Anthony's feedback, reasons, numbers stated)
 Anthony (t220u-t230u): do all three, then test; don't loop on small misses. (t231u/t232u) 'it's settling too soon... splotchy'; (t233u) no performance gains seen; (t235u) bump quality before it settles (S59E). (t237u): quality eases in like an easing curve; (t238u) seed a big new area from a few heavily traced points and borrow -> world space radiance cache seeding (name chosen t241u).
 
+From Chief's notes: 2026-10-09: probe priority to be simplified to one score, view coverage x likely error, with aging.
+
 ## Lessons / when to revisit
 not recorded
