@@ -4,7 +4,7 @@ Genos Engine is the runtime and the Linux editor. The hosting service is `../gen
 
 ## Rubric
 
-Every coding agent and every planning agent follows `docs/agent-rubric.md`. A reviewer scores the change on that checklist. The pull request includes the self-scored table (`pass`, `fail`, or `n/a`, with evidence). The first scored item is a dedicated debug binary for every engine system, under `debug/<system>/`.
+Every coding agent and every planning agent follows `docs/agent-rubric.md`. A reviewer scores the change on that checklist. The pull request includes the self-scored table (`pass`, `fail`, or `n/a`, with evidence). The first scored item is a dedicated debug binary for every engine system, under `debug/<system>/`. The second is observability: every failure mode and every tunable has a probe.
 
 ## Domain
 

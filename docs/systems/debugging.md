@@ -25,6 +25,13 @@ that system's features. The agent rubric scores this.
   a guided-review panel that tells a person what to look at and what to test.
   An agent drives the same binary headlessly, over the CLI or MCP. A system is
   done when its binary covers its features.
+- Observability. A part that can fail, or that needs tuning, exposes its state
+  on the command queue (an agent, over the API, the CLI, or MCP) and in an
+  overlay or inspector (a person). That includes a per-entity dump, a
+  per-subsystem dump, counters, timings, heatmaps and debug draws, live
+  tunables, and a snapshot plus a restore. A new feature lists its failure
+  modes and its tunables, and the probe that exposes each one. A feature with
+  no probe fails review.
 - Deterministic when asked. A script runs scene time on a fixed step from frame 0.
   For repeatable light, `wait_settled` before reading (it waits for the lighting's
   `SettleStats.settled` and a held picture).
@@ -445,6 +452,11 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   harness that moves into `debug/lighting`. `examples/camera/scene.rhai` and
   `examples/stress/scenes/` are the scene files that move into `debug/scenes/`.
   `crates/debug` stays the shared command, knob, capture, and script code.
+- The command catalogue already answers status, knobs, lights, objects, camera,
+  time, view, capture, diff, flicker, compare (with a heatmap), and timing.
+  `Tools::overlay`, `profile_overlay`, and `inspect_region` draw for a person.
+  A general per-subsystem dump, and a snapshot plus restore of a whole
+  subsystem, are not shared commands yet. New probes extend the catalogue.
 - The reference knows floors, ceilings, walls and solids. It does not trace fog,
   particle cards, textures or per-material reflectance and colour mix (the stress
   scene uses the defaults). It does not cut lamps at their range as the engine does.

@@ -6,13 +6,14 @@ alwaysApply: true
 Before planning or changing code, read `docs/agent-rubric.md` and follow it. Score the pull request with that file's checklist (`pass`, `fail`, or `n/a`, with evidence). `docs/agent-rubric.md` is the scored text.
 
 1. Debug binary: every engine system ships `debug/<system>/` (lighting, physics, networking, ui, assets, and the rest) on one shared scaffolding. That scaffolding is a scene picker and a hotkey, one data-file scene library, preset locations and checkpoints, one-key reset and loop to start, deterministic replay, screenshots and metrics, live sliders, a guided-review panel, and a headless CLI or MCP drive. A system is done when that binary covers its features.
-2. Networking: for every new component or system, state what state replicates, who has authority, whether it needs prediction or rollback, determinism needs, and headless-server behaviour.
-3. Follow the cited paper exactly. Name every departure in the pull request.
-4. One change per commit. Normal push only. Never force-push.
-5. Ship a fast deterministic test. GPU work uses lavapipe. The debug binary writes screenshots and metrics for the owner's PC.
-6. Inventory existing code first and build on it.
-7. Performance: gate work by need; a budget is a ceiling; verify with a cheap check; no hard freezes; a steady scene approaches the non-GI frame-time floor.
-8. GI quality: refinement is even inside a region, with no pop and no patchwork.
-9. Reports include numbers, screenshots when the change is visual, and a five-line postmortem for a rollback or a false pass.
-10. Keep the task small. Leave long builds and benchmarks as commands.
-11. Put the self-scored checklist from `docs/agent-rubric.md` in the pull request.
+2. Observability: every part that can fail or needs tuning exposes its state. Agents query it through an API, the CLI, or MCP. A person uses an overlay or inspector. Expose per-entity and per-subsystem dumps, counters and timings, heatmaps and debug draws, live tunables, and snapshot plus restore. Every new feature lists its failure modes and tunables, and the probe for each one. A feature without a probe fails review.
+3. Networking: for every new component or system, state what state replicates, who has authority, whether it needs prediction or rollback, determinism needs, and headless-server behaviour.
+4. Follow the cited paper exactly. Name every departure in the pull request.
+5. One change per commit. Normal push only. Never force-push.
+6. Ship a fast deterministic test. GPU work uses lavapipe. The debug binary writes screenshots and metrics for the owner's PC.
+7. Inventory existing code first and build on it.
+8. Performance: gate work by need; a budget is a ceiling; verify with a cheap check; no hard freezes; a steady scene approaches the non-GI frame-time floor.
+9. GI quality: refinement is even inside a region, with no pop and no patchwork.
+10. Reports include numbers, screenshots when the change is visual, and a five-line postmortem for a rollback or a false pass.
+11. Keep the task small. Leave long builds and benchmarks as commands.
+12. Put the self-scored checklist from `docs/agent-rubric.md` in the pull request.
