@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use genos_scene::{Camera, Scene};
 
+use crate::damage::DamageTracker;
 use crate::layout::{self, Direction, Item, Node, Pad, Place, Rect, Sizing, Space};
 use crate::omarchy::{self, Palette};
 use crate::text::{self, Blot};
@@ -61,6 +62,8 @@ pub struct State {
     pub omarchy_current: Option<PathBuf>,
     palette: Option<Palette>,
     palette_from: Option<PathBuf>,
+    /// This panel's paints per element, as last frame left them.
+    damage: DamageTracker,
 }
 
 impl Default for State {
@@ -79,6 +82,7 @@ impl Default for State {
             omarchy_current: None,
             palette: None,
             palette_from: None,
+            damage: DamageTracker::default(),
         }
     }
 }
@@ -108,6 +112,9 @@ pub struct Frame {
     pub actions: Vec<Action>,
     /// True when this press missed the panel and the camera may capture look.
     pub look_capture: bool,
+    /// Window pixels whose paints differ from this panel's last frame, at most
+    /// [`crate::MAX_DAMAGE`] rectangles. Empty when the panel looks the same.
+    pub damage: Vec<Rect>,
 }
 
 /// Lay out the lighting panel and the lamp sun. Apply hover, press, and drag.
@@ -172,6 +179,7 @@ pub fn lighting_frame(
     let painted_lamp = lamp_after(lamp, &actions);
     let mut shown = Vec::with_capacity(items.len() + 1);
     let mut paints = Vec::new();
+    state.damage.begin(viewport);
     for item in &items {
         let look = choose(item, pointer.down, hit.map(|hit| hit.id), state.focus);
         shown.push(Shown {
@@ -181,10 +189,15 @@ pub fn lighting_frame(
             idle: item.idle,
             text: item.text.clone(),
         });
+        let start = paints.len();
         push_paints(&mut paints, item, look, state.palette, painted_lamp, true);
+        state.damage.paints(u64::from(item.id), &paints[start..]);
     }
     // The sun is not in `items`, so a press on it misses the panel.
+    let start = paints.len();
     push_sun(&mut shown, &mut paints, viewport, camera, painted_lamp);
+    state.damage.paints(u64::from(id::SUN), &paints[start..]);
+    let damage = state.damage.finish();
     state.pointer_x = pointer.x;
     state.pointer_y = pointer.y;
     state.down = pointer.down;
@@ -198,6 +211,7 @@ pub fn lighting_frame(
         paints,
         actions,
         look_capture,
+        damage,
     }
 }
 
@@ -347,6 +361,7 @@ pub fn button_panel(
     }
     let mut shown = Vec::with_capacity(items.len());
     let mut paints = Vec::new();
+    state.damage.begin(viewport);
     for item in &items {
         let look = choose(item, pointer.down, hit.map(|hit| hit.id), state.focus);
         shown.push(Shown {
@@ -356,6 +371,7 @@ pub fn button_panel(
             idle: item.idle,
             text: item.text.clone(),
         });
+        let start = paints.len();
         push_paints(&mut paints, item, look, palette, None, false);
         if let Some(bar) = bars.iter().find(|b| b.id == item.id) {
             // Show where a held slider is going this frame.
@@ -369,7 +385,9 @@ pub fn button_panel(
             };
             push_bar(&mut paints, item.rect, shown_bar.share(), palette);
         }
+        state.damage.paints(u64::from(item.id), &paints[start..]);
     }
+    let damage = state.damage.finish();
     state.pointer_x = pointer.x;
     state.pointer_y = pointer.y;
     state.down = pointer.down;
@@ -383,6 +401,7 @@ pub fn button_panel(
         paints,
         actions,
         look_capture,
+        damage,
     }
 }
 

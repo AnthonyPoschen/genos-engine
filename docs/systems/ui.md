@@ -24,6 +24,8 @@ The same panel shows `Run` or `Stop` for the red box path. `Run` starts the loop
 
 Hover, focus, and press each select a look. A drag moves a draggable panel by the pointer delta. The children move with the panel. A press on the panel does not start camera look capture.
 
+A panel frame reports the window pixels it changed since its last frame (`Frame::damage`). The diff is per UI element: an element whose rectangle, look, text or paints changed dirties its old and its new bounds, and an element that appears or goes away dirties its bounds. A viewport change dirties the whole screen. Close rectangles merge, and a frame reports at most `MAX_DAMAGE` (8). A frame that looks the same reports none. The renderer uses that report to redraw only those regions over a still scene. See [Frame reuse](../frame-reuse.md).
+
 `lighting_frame` reads `current/theme/colors.toml` when the process is on Omarchy. The `current` directory is `$XDG_STATE_HOME/omarchy/current` when `XDG_STATE_HOME` is set. Otherwise the directory is `~/.local/state/omarchy/current`. The process is on Omarchy only when that directory exists. Detection does not read `/etc/os-release`.
 
 A canonical color key wins over its legacy alias. These pairs follow that rule:
@@ -70,6 +72,7 @@ The crate is `crates/ui`, package `genos-ui`.
 - `lighting_frame`, `apply_lamp`, and `apply_frame_action` are in `src/panel.rs`.
 - Omarchy theme colors are in `src/omarchy.rs`.
 - `profile_overlay`, `remember_frame`, `ProfileGraph`, and `ProfileStream` are in `src/profile.rs`.
+- `DamageTracker` is in `src/damage.rs`. Each panel `State` keeps one for its elements.
 
 - `button_panel` lays out a draggable panel of labelled button rows (`PanelRow`, `PanelButton`). A press fires `Action::Press(id)` with the game's id. `selected` draws a button in its pressed look. Ids from `u32::MAX - 4095` up belong to the panel. A row may end in a `PanelSlider` (value, min, max, step, readout text): a press anywhere on the track sets the value under the pointer and a held press follows it, firing `Action::Slide { id, value }` (snapped to `step`, 0 for continuous) each frame the value changes. The stress example builds its sliders from `genos-debug` knobs.
 
@@ -80,6 +83,8 @@ Build a `Node` tree. Call `layout` with `Space::Screen` or `Space::World`.
 The camera frame calls `lighting_frame` each frame. The call passes the first lamp. That call loads the Omarchy theme when the `current` directory exists. A game does not pass a palette.
 
 The frame calls `apply_frame_action` for each action. A picture selection returns the mode. The frame sets that mode on the renderer before the draw. A lamp action stays on the lamp path. `ToggleBoxRun` stays with the caller. The caller holds or resumes the red box path. The frame draws every paint in `Frame::paints` with `Renderer::draw_with_overlay`. The sun is one of those paints. The frame starts look capture only when `look_capture` is true.
+
+The frame hands `Frame::damage`, joined with the damage of any other UI it draws, to `Renderer::report_overlay_damage` before the draw. UI with no panel, such as the profile graph, feeds its own `DamageTracker`: `begin`, then `paints` or `segments` per group, then `finish`.
 
 Basic mode and detailed mode call `profile_overlay` and draw those paints. Detailed mode draws with `Renderer::draw_profiled`. That mode calls `ProfileStream::append` for each live sample. Basic mode draws with `Renderer::draw_with_overlay`.
 
