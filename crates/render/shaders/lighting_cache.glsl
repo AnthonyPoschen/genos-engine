@@ -2197,6 +2197,14 @@ uint lighting_dense_entry(uint d) {
     }
     return LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES + (d - g);
 }
+// S73G: pre-fill entries this round: what young + mature leave of the base
+// ceiling (never the boost headroom).
+uint lighting_sc_prefill_take(uint first, uint mature) {
+    uint base = lighting_sc_base_room() >> lighting_sc_budget_shift();
+    uint used = first + mature;
+    uint have = min(ckeys.key[LIGHTING_SC_PREFILL_COUNT_AT], LIGHTING_SC_PREFILL_MAX >> lighting_sc_budget_shift());
+    return used < base ? min(have, base - used) : 0u;
+}
 void lighting_write_args() {
     uint a;
     uint b = 0u;
@@ -2207,7 +2215,7 @@ void lighting_write_args() {
         uint sh = lighting_sc_budget_shift();
         uint room = lighting_sc_room() >> sh;
         uint first = min(lighting_young_count(), lighting_sc_base_room() >> sh);
-        a = min(room, first + lighting_mature_count());
+        a = min(room, first + lighting_mature_count() + lighting_sc_prefill_take(first, lighting_mature_count()));
         b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> sh);
         // S77A: change-list cells are checks, one 16-ray entry each; the
         // background list (and escalated cells) take whole sets.
@@ -2286,8 +2294,17 @@ uint lighting_cache_batch_slot(uint j) {
     }
     uint count = lighting_mature_count();
     uint k = j - first;
-    if ((lighting_young_only() && lighting_world_mode() != 3u) || k >= count) {
+    if (lighting_young_only() && lighting_world_mode() != 3u) {
         return ~0u;
+    }
+    if (k >= count) {
+        uint p = k - count;
+        uint pf = lighting_world_mode() == 3u && LIGHTING_SC_SCHED ? lighting_sc_prefill_take(first, count) : 0u;
+        if (p >= pf) {
+            return ~0u;
+        }
+        uint have = min(ckeys.key[LIGHTING_SC_PREFILL_COUNT_AT], LIGHTING_SC_PREFILL_MAX >> lighting_sc_budget_shift());
+        return ckeys.key[LIGHTING_SC_PREFILL_AT + (p + lighting_hash(lighting_round()) % have) % have];
     }
     // The scheduler lists only what this round should take (from the front);
     // otherwise the sweep turns with the rounds.
