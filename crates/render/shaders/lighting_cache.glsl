@@ -2665,6 +2665,10 @@ void lighting_svgf_push(uint slot) {
     } else {
         outc = vec3(0.0);
     }
+    if ((lighting_sc_flags() & 8388608u) != 0u) {
+        // Diagnostic: red W, green coarse found, blue own sets >= 1.
+        outc = vec3(W, cw > 0.0 ? 1.0 : 0.0, cache.v[3u * slot + 2u].w >= 1.0 ? 1.0 : 0.0) * 0.3;
+    }
     cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(outc));
     // IC placement for the next rounds.
     if (W > 0.0 || cw > 0.0) {
