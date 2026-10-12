@@ -258,6 +258,7 @@ void main() {
             float np = min(t + 1.0, LIGHTING_SC_PREFILL_SETS);
             vec3 mp = old.w < 0.5 ? e : old.rgb + (e - old.rgb) / np;
             lighting_tex_put(slot, vec4(mp, np));
+            atomicAdd(gstats.diag[62], 1u);
             return;
         }
         // Flag 1048576: GIBS's estimator (Stachowiak's multi-scale mean, as in

@@ -2065,7 +2065,13 @@ void lighting_write_args() {
         uint sh = lighting_sc_budget_shift();
         uint room = lighting_sc_room() >> sh;
         uint first = min(lighting_young_count(), lighting_sc_base_room() >> sh);
-        a = min(room, first + lighting_mature_count() + lighting_sc_prefill_take(first, lighting_mature_count()));
+        // S73I: how many never-shown texels are waiting, and how many entries
+        // the base ceiling actually leaves them (0 while the screen fills it).
+        uint prefill_listed = ckeys.key[LIGHTING_SC_PREFILL_COUNT_AT];
+        uint prefill_taken = lighting_sc_prefill_take(first, lighting_mature_count());
+        gstats.diag[60] = prefill_listed;
+        gstats.diag[61] = prefill_taken;
+        a = min(room, first + lighting_mature_count() + prefill_taken);
         b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> sh);
         // S77A: change-list cells are checks, one 16-ray entry each; the
         // background list (and escalated cells) take whole sets.
