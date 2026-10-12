@@ -34,6 +34,12 @@ fn main() {
         (*name, compile(&src, &out.join(format!("{file}.spv"))))
     })
     .collect();
+    // Item A: the hit-light variant. Not dispatched until a later step.
+    let direct_queue = compile_with(
+        "shaders/lighting_direct.comp",
+        &out.join("lighting_direct_queue.comp.spv"),
+        &["LIGHTING_HIT_QUEUE=1"],
+    );
     let glue = out.join("shaders.rs");
     std::fs::write(
         &glue,
@@ -55,6 +61,10 @@ fn main() {
             path.display()
         ));
     }
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_DIRECT_QUEUE_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        direct_queue.display()
+    ));
     std::fs::write(&glue, glue_text).unwrap();
     for piece in [
         "lighting_common.glsl",
