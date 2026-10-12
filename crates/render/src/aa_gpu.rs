@@ -542,6 +542,20 @@ impl Gpu {
     fn bind_overlay(&self, width: u32, height: u32) {
         unsafe {
             (self.fns.cmd_bind_pipe)(self.cmd, 0, self.overlay_pipeline);
+            // The overlay shader reads the particle image. A reused frame draws
+            // this pass on its own, so the set is not already bound the way it is
+            // inside the scene pass. An unbound set is a null buffer; lavapipe
+            // gathers from it and faults.
+            (self.fns.cmd_bind_set)(
+                self.cmd,
+                0,
+                self.layout,
+                0,
+                1,
+                &self.desc_set,
+                0,
+                std::ptr::null(),
+            );
             let viewport = [0.0f32, 0.0, width as f32, height as f32, 0.0, 1.0];
             (self.fns.cmd_viewport)(self.cmd, 0, 1, viewport.as_ptr());
             let ortho = pixel_matrix(width as f32, height as f32);
