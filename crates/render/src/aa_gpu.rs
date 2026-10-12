@@ -414,7 +414,8 @@ impl Gpu {
                 (self.fns.cmd_draw)(self.cmd, draw.count, 1, draw.first, draw.instance);
             }
             if overlay && self.overlay_count > 0 && !self.overlay_pipeline.is_null() {
-                self.draw_overlay_quads(width, height);
+                self.bind_overlay(width, height);
+                self.draw_overlay_scissor([0, 0, width as i32, height as i32]);
             }
             (self.fns.cmd_end_rp)(self.cmd);
         }
@@ -463,18 +464,86 @@ impl Gpu {
         };
         unsafe {
             (self.fns.cmd_begin_rp)(self.cmd, &rp as *const RpBegin as *const u8, 0);
-            self.draw_overlay_quads(self.extent_w, self.extent_h);
+            self.bind_overlay(self.extent_w, self.extent_h);
+            self.draw_overlay_scissor([0, 0, self.extent_w as i32, self.extent_h as i32]);
             (self.fns.cmd_end_rp)(self.cmd);
         }
     }
 
-    fn draw_overlay_quads(&self, width: u32, height: u32) {
+    /// Redraw the overlay inside `regions`. The pass area is their bounds; each
+    /// rectangle is a scissor, so unchanged pixels are not written.
+    fn raster_overlay_in(&self, regions: &[crate::reuse::Region]) {
+        if self.overlay_count == 0 || regions.is_empty() || self.overlay_pipeline.is_null() {
+            return;
+        }
+        let mut x0 = regions[0][0];
+        let mut y0 = regions[0][1];
+        let mut x1 = regions[0][2];
+        let mut y1 = regions[0][3];
+        for region in &regions[1..] {
+            x0 = x0.min(region[0]);
+            y0 = y0.min(region[1]);
+            x1 = x1.max(region[2]);
+            y1 = y1.max(region[3]);
+        }
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        #[repr(C)]
+        struct Offset {
+            x: i32,
+            y: i32,
+        }
+        #[repr(C)]
+        struct Extent {
+            w: u32,
+            h: u32,
+        }
+        #[repr(C)]
+        struct Rect {
+            offset: Offset,
+            extent: Extent,
+        }
+        #[repr(C)]
+        struct RpBegin {
+            s_type: i32,
+            next: *const c_void,
+            pass: Handle,
+            fb: Handle,
+            area: Rect,
+            clear_count: u32,
+            clears: *const f32,
+        }
+        let rp = RpBegin {
+            s_type: 43,
+            next: std::ptr::null(),
+            pass: self.keep_pass,
+            fb: self.framebuffer,
+            area: Rect {
+                offset: Offset { x: x0, y: y0 },
+                extent: Extent {
+                    w: (x1 - x0) as u32,
+                    h: (y1 - y0) as u32,
+                },
+            },
+            clear_count: 0,
+            clears: std::ptr::null(),
+        };
+        unsafe {
+            (self.fns.cmd_begin_rp)(self.cmd, &rp as *const RpBegin as *const u8, 0);
+            self.bind_overlay(self.extent_w, self.extent_h);
+            for region in regions {
+                self.draw_overlay_scissor(*region);
+            }
+            (self.fns.cmd_end_rp)(self.cmd);
+        }
+    }
+
+    fn bind_overlay(&self, width: u32, height: u32) {
         unsafe {
             (self.fns.cmd_bind_pipe)(self.cmd, 0, self.overlay_pipeline);
             let viewport = [0.0f32, 0.0, width as f32, height as f32, 0.0, 1.0];
             (self.fns.cmd_viewport)(self.cmd, 0, 1, viewport.as_ptr());
-            let scissor = [0i32, 0, width as i32, height as i32];
-            (self.fns.cmd_scissor)(self.cmd, 0, 1, scissor.as_ptr());
             let ortho = pixel_matrix(width as f32, height as f32);
             (self.fns.cmd_push)(
                 self.cmd,
@@ -487,6 +556,21 @@ impl Gpu {
             let vb = [self.vertex.buffer];
             let off = [0u64];
             (self.fns.cmd_bind_vb)(self.cmd, 0, 1, vb.as_ptr(), off.as_ptr());
+        }
+    }
+
+    fn draw_overlay_scissor(&self, region: crate::reuse::Region) {
+        let scissor = [
+            region[0],
+            region[1],
+            region[2].saturating_sub(region[0]),
+            region[3].saturating_sub(region[1]),
+        ];
+        if scissor[2] <= 0 || scissor[3] <= 0 {
+            return;
+        }
+        unsafe {
+            (self.fns.cmd_scissor)(self.cmd, 0, 1, scissor.as_ptr());
             (self.fns.cmd_draw)(self.cmd, self.overlay_count, 1, self.vertex_count, 0);
         }
     }

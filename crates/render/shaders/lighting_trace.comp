@@ -79,8 +79,11 @@ bool lighting_kept_crossed(uint h, out vec3 origin, out vec3 dir) {
 }
 
 // S78K: a held stratum's check found its hit moved: full traces for a round.
+// The fail count is read by frame reuse (pad-style, not lighting_chg, which stays
+// off unless GENOS_LIGHTING_SC_TRACE set the enable word).
 void lighting_hold_fail(uint probe) {
     work.v[lighting_probe_at(probe) + 1u].w = uintBitsToFloat(lighting_frame() + LIGHTING_STRATA);
+    atomicAdd(gstats.chg[CHG_V_FAILS], 1u);
 }
 void main() {
     bool hold_check = false;
@@ -88,7 +91,15 @@ void main() {
     uint hold_probe = 0u;
     uint ray = gl_GlobalInvocationID.x;
     uint mode = lighting_mode();
-    if (lighting_dense()) {
+    // Mode 3 is one check ray per held probe. Frame reuse dispatches it while the
+    // picture is kept, and does not rotate the stratum, so the held one stays put.
+    if (mode == 3u && !lighting_dense()) {
+        uint probe = ray;
+        if (probe >= lighting_probes() || !lighting_stratum_held(probe)) {
+            return;
+        }
+        ray = probe * lighting_rays() + lighting_hold_check_k(probe);
+    } else if (lighting_dense()) {
         // S70A: this round's light cache rays only, live entries only.
         if (ray >= lighting_dense_count() * LIGHTING_CACHE_RAYS) {
             return;
@@ -140,6 +151,7 @@ void main() {
                 hold_check = true;
                 hold_old = old;
                 hold_probe = pr;
+                atomicAdd(gstats.chg[CHG_V_TESTS], 1u);
             }
         }
     }

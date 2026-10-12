@@ -262,6 +262,8 @@ const LIGHTING_ARGS: u32 = 1 << 30;
 const LIGHTING_MODE1: u32 = LIGHTING_ARGS + 1;
 const LIGHTING_DENSE_RAYS: u32 = LIGHTING_ARGS + 2;
 const LIGHTING_DENSE_ENTRIES: u32 = LIGHTING_ARGS + 3;
+/// One check ray per held screen probe. Mode 3 in the trace shader; not indirect.
+const LIGHTING_VERIFY: u32 = LIGHTING_ARGS + 4;
 /// Word of the dispatch args in the cache keys (lighting_cache.glsl LIGHTING_ARGS_AT).
 const LIGHTING_ARGS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 17600;
 const LIGHTING_PASS_NAMES: [&str; 9] = [
@@ -1190,12 +1192,20 @@ impl Gpu {
     }
 
     /// After the raster: the passes, then the result into the colour image.
-    fn lighting_passes(&mut self, slot: usize) {
+    ///
+    /// `verify_only` keeps the small always-on budget (compact, the dense cache
+    /// rays, one check ray per held probe) and does not compose. The G-buffer
+    /// stays, so the next full frame can still see the probes.
+    fn lighting_passes(&mut self, slot: usize, verify_only: bool) {
         let [w, h, cols, rows] = self.lighting.dims;
         let probes = cols * rows;
         let probe_rays = probes * LIGHTING_RAYS;
         let bgra = if self.format == 44 { 1u32 } else { 0 };
-        self.lighting.frame = self.lighting.frame.wrapping_add(1);
+        // A reuse frame must not rotate the stratum: place is not in the verify list,
+        // and the check rays read the stratum the last full frame held.
+        if !verify_only {
+            self.lighting.frame = self.lighting.frame.wrapping_add(1);
+        }
         // Set in the draw, from the same three inputs (lighting_scene_hash).
         let hash = self.lighting.frame_hash;
         if hash == self.lighting.scene_hash {
@@ -1217,7 +1227,11 @@ impl Gpu {
             self.mesh_field_key.hash(&mut hasher);
             hasher.finish()
         };
-        let frozen = self.lighting_stats().settled;
+        // The short list (direct + compose, no checks) is the hard freeze. Frame
+        // reuse leaves it off so the verification budget cannot stop. GENOS_FRAME_REUSE=0
+        // keeps the old list.
+        let settled_now = self.lighting_stats().settled;
+        let frozen = settled_now && !self.reuse.enabled;
         let had = !self.lighting.kept_bytes.is_empty() && key == self.lighting.kept_key;
         let changes = if had {
             lighting_changes(&self.lighting.kept_bytes, &self.frame_bytes)
@@ -1331,7 +1345,7 @@ impl Gpu {
         block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 15) << 12)) as f32;
         // A frame drawn from held light runs no probes: what it saw is still what
         // the probes last ran on.
-        if !frozen {
+        if !frozen && !verify_only {
             self.lighting.kept_key = key;
             self.lighting.kept_bytes.clone_from(&self.frame_bytes);
             self.lighting.probe_runs = self.lighting.probe_runs.wrapping_add(1);
@@ -1406,18 +1420,29 @@ impl Gpu {
         let pc = [w, h, cols, rows, LIGHTING_RAYS, lighting_tile(h), z, self.lighting.frame];
         let image = self.color.image;
         // The raster colour as the base: pixels with no surface keep it.
-        self.copy_image_buffer(image, 6, self.lighting.out.buffer, w, h, true);
-        self.memory_barrier(0x80 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
+        // A verify frame does not compose, so it must not replace the colour image.
+        if !verify_only {
+            self.copy_image_buffer(image, 6, self.lighting.out.buffer, w, h, true);
+            self.memory_barrier(0x80 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
+        }
         let set = self.lighting.sets[slot];
         // Settled (frozen above): the probes and the light cache hold their light,
         // and only the pixels' direct light and the final pass run, so a still
         // scene draws the same picture every frame (no residual cache drift) and
         // idles cheaply.
-        self.lighting.held = if frozen { self.lighting.held.saturating_add(1) } else { 0 };
+        // `held` still follows the settle counter, so picture_settled can flip while
+        // the passes themselves keep running.
+        self.lighting.held = if settled_now {
+            self.lighting.held.saturating_add(1)
+        } else {
+            0
+        };
         // A light cache round is due (GENOS_LIGHTING_CACHE_HZ caps them per second). On
         // the async queue (GENOS_LIGHTING_ASYNC=1) it goes there, else into this frame;
         // a frame without one runs the picture's passes only (lighting_mode 1).
+        // A verify frame runs its own short list and must not also submit the async round.
         let due = !frozen
+            && !verify_only
             && (self.lighting.cache_hz <= 0.0
                 || self
                     .lighting
@@ -1437,6 +1462,12 @@ impl Gpu {
             round = true;
             self.lighting.last_round = Some(Instant::now());
         }
+        if verify_only {
+            // Count the check as a round so the settle counter still moves, and keep
+            // mode 1 off the push constants: the verify dispatch sets mode 3 itself.
+            round = true;
+            self.lighting.last_round = Some(Instant::now());
+        }
         self.lighting.stats_round[slot] = round;
         let mut pc = pc;
         if round {
@@ -1447,7 +1478,16 @@ impl Gpu {
             pc[6] |= 1 << 8;
         }
         let kept = probe_rays * LIGHTING_STRATA;
-        let groups: Vec<(usize, u32, u32)> = if frozen {
+        let groups: Vec<(usize, u32, u32)> = if verify_only {
+            vec![
+                (0usize, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1u32),
+                (0, 1, LIGHTING_ARGS),
+                (2, 0, LIGHTING_DENSE_RAYS),
+                (3, 0, LIGHTING_DENSE_RAYS),
+                (6, 0, LIGHTING_DENSE_ENTRIES),
+                (2, probes.div_ceil(64).max(1), LIGHTING_VERIFY),
+            ]
+        } else if frozen {
             vec![(3, (w * h).div_ceil(64), 1), (7, w.div_ceil(8), h.div_ceil(8))]
         } else if !round {
             vec![
@@ -1587,6 +1627,9 @@ impl Gpu {
                         k_pc[6] = (cur_pc[6] & !0x310) | 1 << 8;
                     } else if kind == LIGHTING_DENSE_RAYS {
                         k_pc[6] = (k_pc[6] & !0x300) | 2 << 8;
+                    } else if kind == LIGHTING_VERIFY {
+                        // Mode 3, dense bit off. One thread group per 64 probes.
+                        k_pc[6] = (cur_pc[6] & !0x310) | 3 << 8;
                     }
                     (self.fns.cmd_push)(
                         self.cmd,
@@ -1615,9 +1658,16 @@ impl Gpu {
                 }
             }
         }
-        self.image_barrier(image, 6, 7, 0x1000, 0x1000, 0x800, 0x1000);
-        self.copy_image_buffer(image, 7, self.lighting.out.buffer, w, h, false);
-        self.image_barrier(image, 7, 6, 0x1000, 0x1000 | 0x800, 0x1000, 0x800 | 0x20);
+        if !verify_only {
+            self.image_barrier(image, 6, 7, 0x1000, 0x1000, 0x800, 0x1000);
+            self.copy_image_buffer(image, 7, self.lighting.out.buffer, w, h, false);
+            self.image_barrier(image, 7, 6, 0x1000, 0x1000 | 0x800, 0x1000, 0x800 | 0x20);
+        }
+        if self.reuse.enabled {
+            // The host copy below is what the next wait of this flight reads.
+            self.reuse.slot_verified[slot] = true;
+            self.reuse.slot_key[slot] = self.reuse.scene_key;
+        }
         // S78W: the frame's stats to the host-visible copy (read a frame later).
         self.memory_barrier(0x800 | 0x1000, 0x1000, 0x40 | 0x800, 0x800);
         unsafe {

@@ -46,6 +46,16 @@ pub(crate) struct FrameReuse {
     pub scene_writer: Option<usize>,
     /// The last capture's fence has been waited, so another flight may read it.
     pub scene_ready: bool,
+    /// The last finished checks for this scene key found no real change.
+    pub verify_ok: bool,
+    /// That flight copied verification counters for `slot_key`.
+    pub slot_verified: [bool; 2],
+    /// Scene key those counters were counted for.
+    pub slot_key: [u64; 2],
+    /// Scene key of the frame before this one. A capture waits until the key repeats.
+    pub seen_key: Option<u64>,
+    /// This frame's key matches `seen_key` from the frame before.
+    pub key_stable: bool,
     pub stats: ReuseStats,
 }
 
@@ -63,6 +73,11 @@ impl Default for FrameReuse {
             scene_key: 0,
             scene_writer: None,
             scene_ready: false,
+            verify_ok: false,
+            slot_verified: [false, false],
+            slot_key: [0, 0],
+            seen_key: None,
+            key_stable: false,
             stats: ReuseStats::default(),
         }
     }

@@ -322,7 +322,7 @@ impl Renderer {
         self.sync_fields(world)?;
         self.gpu.upload_scene(&pack)?;
         self.gpu.lighting.frame_hash = self.gpu.lighting_scene_hash();
-        self.gpu.reuse.scene_key = scene_key(
+        let next_key = scene_key(
             self.gpu.lighting.frame_hash,
             &dynamic[..world_dynamic as usize],
             &draws,
@@ -335,6 +335,21 @@ impl Renderer {
             self.gpu.extent_h,
             self.gpu.lighting_active(),
         );
+        if self.gpu.reuse.cached_key.is_some_and(|key| key != next_key) {
+            self.gpu.reuse.cached_key = None;
+            self.gpu.reuse.verify_ok = false;
+            self.gpu.reuse.scene_ready = false;
+        }
+        self.gpu.reuse.key_stable = self.gpu.reuse.seen_key == Some(next_key);
+        self.gpu.reuse.seen_key = Some(next_key);
+        self.gpu.reuse.scene_key = next_key;
+        let extent = (self.gpu.extent_w, self.gpu.extent_h);
+        let damage = self.gpu.reuse.frame_damage.clone();
+        for region in damage {
+            for slot_damage in &mut self.gpu.reuse.slot_damage {
+                crate::reuse::add_region(slot_damage, region, extent);
+            }
+        }
         self.gpu.note_vertex_count(world_dynamic);
         self.gpu.set_draws(draws);
         self.gpu.note_overlay_count(overlay_count);
@@ -1770,6 +1785,8 @@ impl Gpu {
         self.reuse.scene_writer = None;
         self.reuse.scene_ready = false;
         self.reuse.scene_layout = 0;
+        self.reuse.verify_ok = false;
+        self.reuse.slot_verified = [false, false];
     }
 
     /// This flight's fence has been waited, so its capture of the scene picture is done.
@@ -1778,6 +1795,83 @@ impl Gpu {
             self.reuse.scene_ready = true;
             self.reuse.scene_writer = None;
         }
+    }
+
+    /// Host copy of the verification counters. Word 22 is gradient checks run, word 23
+    /// is real gradient fails, word 109 is probe check rays, word 110 is probe fails.
+    /// A clean result counts only when a check actually ran.
+    fn note_verify_result(&mut self, slot: usize) {
+        if !self.reuse.slot_verified[slot] {
+            return;
+        }
+        self.reuse.slot_verified[slot] = false;
+        let Ok(words) = self.read_stats16(self.lighting.stats[slot].memory) else {
+            self.reuse.verify_ok = false;
+            return;
+        };
+        let checks = words[22];
+        let changed = words[23];
+        let tests = words[109];
+        let fails = words[110];
+        let ran = checks > 0 || tests > 0;
+        let same = self.reuse.slot_key[slot] == self.reuse.scene_key;
+        if changed > 0 || fails > 0 {
+            self.reuse.verify_ok = false;
+            self.reuse.cached_key = None;
+            self.reuse.generation = self.reuse.generation.wrapping_add(1);
+            self.reuse.scene_ready = false;
+            return;
+        }
+        if !same || !ran {
+            self.reuse.verify_ok = false;
+            return;
+        }
+        self.reuse.verify_ok = true;
+    }
+
+    /// The cached picture can stand in for a new raster.
+    fn reuse_scene(&self) -> bool {
+        self.reuse.enabled
+            && self.reuse.scene_ready
+            && self.reuse.cached_key == Some(self.reuse.scene_key)
+            && !self.lighting.world_busy
+            && (!self.lighting_active() || self.reuse.verify_ok)
+    }
+
+    /// Put the cached scene back into this flight's colour image, then the UI.
+    fn repair_reused_color(&mut self, slot: usize) {
+        let stale = self.reuse.slot_gen[slot] != self.reuse.generation || self.color_layout[slot] != 6;
+        if stale {
+            self.copy_scene_into_color(&[self.screen_region()]);
+            if self.overlay_count > 0 {
+                self.raster_overlay();
+            }
+            self.reuse.slot_gen[slot] = self.reuse.generation;
+            self.reuse.stats.full_restore = self.reuse.stats.full_restore.wrapping_add(1);
+        } else if !self.reuse.slot_damage[slot].is_empty() {
+            let regions = self.reuse.slot_damage[slot].clone();
+            self.copy_scene_into_color(&regions);
+            self.raster_overlay_in(&regions);
+            self.reuse.stats.ui_repaired = self.reuse.stats.ui_repaired.wrapping_add(1);
+            self.reuse.stats.rects = self.reuse.stats.rects.wrapping_add(regions.len() as u64);
+        }
+        self.reuse.slot_damage[slot].clear();
+        self.color_layout[slot] = 6;
+    }
+
+    fn copy_scene_into_color(&mut self, regions: &[crate::reuse::Region]) {
+        let color = self.color.image;
+        let scene = self.reuse.scene.image;
+        let old = self.color_layout[self.flight];
+        if old == 6 {
+            self.image_barrier(color, 6, 7, 0x1000, 0x1000, 0x800, 0x1000);
+        } else {
+            self.image_barrier(color, old, 7, 0x1, 0x1000, 0, 0x1000);
+        }
+        self.copy_images(scene, 6, color, 7, regions);
+        // Transfer write, then a transfer-read access so the overlay pass's
+        // incoming dependency (src access 0x800, layout 6) matches.
+        self.image_barrier(color, 7, 6, 0x1000, 0x1000, 0x1000, 0x800);
     }
 
     fn upload(&mut self, verts: &[GpuVertex]) -> Result<(), String> {
@@ -1951,6 +2045,12 @@ impl Gpu {
             self.collect_slot_after_wait(slot)?;
             self.collect_frame_times(slot);
             self.note_scene_writer(slot);
+            self.note_verify_result(slot);
+            if self.lighting.world_busy {
+                // An async round is changing the cache. Do not keep showing the old picture.
+                self.reuse.cached_key = None;
+                self.reuse.verify_ok = false;
+            }
             self.desc_set = self.raster_sets[slot];
             check(
                 (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
@@ -1997,7 +2097,15 @@ impl Gpu {
             self.update_resident_fields();
             let swap = self.swap_images[index as usize];
             self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
-            {
+            if self.reuse_scene() {
+                if self.lighting_active() {
+                    self.lighting_begin(slot);
+                    self.lighting_passes(slot, true);
+                }
+                self.frame_stamp(slot, FrameStamp::Raster);
+                self.frame_stamp(slot, FrameStamp::Resolve);
+                self.repair_reused_color(slot);
+            } else {
                 let lighting = self.lighting_active();
                 if lighting {
                     self.lighting_begin(slot);
@@ -2007,17 +2115,23 @@ impl Gpu {
                 self.raster_scene(self.framebuffer, self.extent_w, self.extent_h, matrix, false);
                 self.color_layout[slot] = 6;
                 if lighting {
-                    self.lighting_passes(slot);
+                    self.lighting_passes(slot, false);
                 }
                 self.frame_stamp(slot, FrameStamp::Raster);
                 if self.antialias == Antialias::Fxaa {
                     self.resolve_fxaa(slot)?;
                 }
-            }
-            self.frame_stamp(slot, FrameStamp::Resolve);
-            self.capture_scene_picture(slot);
-            if self.overlay_count > 0 {
-                self.raster_overlay();
+                self.frame_stamp(slot, FrameStamp::Resolve);
+                self.capture_scene_picture(slot);
+                // This colour image is a picture of the cached scene, even when the
+                // capture itself happened on the other flight. A later UI repair
+                // then redraws only the dirty rectangles.
+                if self.reuse.cached_key == Some(self.reuse.scene_key) {
+                    self.reuse.slot_gen[slot] = self.reuse.generation;
+                }
+                if self.overlay_count > 0 {
+                    self.raster_overlay();
+                }
             }
             self.frame_stamp(slot, FrameStamp::Overlay);
             self.copy_color_to_swapchain(swap);
@@ -4773,12 +4887,18 @@ impl Gpu {
 
     /// Copy the colour image (layout 6, no UI yet) into the scene picture.
     ///
-    /// Capture waits until the last writer flight's fence has been waited, so two
-    /// frames never write the same image. A busy async light cache is not captured:
-    /// that picture is still moving.
+    /// One capture per stable scene key. The key has to repeat for a frame first,
+    /// so a moving camera does not copy. The last writer flight's fence has to
+    /// have been waited, so two frames never write the image. A busy async light
+    /// cache is not captured.
     fn capture_scene_picture(&mut self, slot: usize) {
         let idle = self.reuse.scene_writer.is_none();
-        let capture = self.reuse.enabled && idle && !self.lighting.world_busy;
+        let missing = self.reuse.cached_key != Some(self.reuse.scene_key);
+        let capture = self.reuse.enabled
+            && self.reuse.key_stable
+            && missing
+            && idle
+            && !self.lighting.world_busy;
         if capture {
             let image = self.reuse.scene.image;
             let old = self.reuse.scene_layout;
