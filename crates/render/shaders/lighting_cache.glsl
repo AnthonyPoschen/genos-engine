@@ -2550,7 +2550,7 @@ void lighting_svgf_iter(uint slot, uint it) {
             float vq;
             vec4 x = lighting_svgf_load(src, q, vq);
             float w = h1[i + 2] * h1[j + 2] * lighting_svgf_wzn(slot, q);
-            if (q != slot && vp.w > 0.0 && x.w > 0.0) {
+            if (q != slot && vp.w > 0.0 && x.w > 0.0 && (lighting_sc_flags() & 128u) == 0u) {
                 w *= exp(-abs(lp - dot(x.rgb, LIGHTING_SVGF_LW)) / phi);
             }
             float a = w * x.w;
@@ -2627,9 +2627,8 @@ void lighting_svgf_push(uint slot) {
         outc = vec3(0.0);
     }
     if ((lighting_sc_flags() & 8388608u) != 0u) {
-        // Diagnostic: layer 2 is layer 1 (no filtering).
-        vec4 own1 = cache.v[3u * slot + 2u];
-        outc = own1.w > 0.5 ? own1.rgb : outc;
+        // Diagnostic: no WRC in the push.
+        outc = W > 0.0 ? f.rgb : outc;
     }
     cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(outc));
     // IC placement for the next rounds.
