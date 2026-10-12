@@ -24,4 +24,21 @@ d6 compares each lamp's epoch with the copy taken at the start of `lighting_shad
 
 Existing `CHG_KEPT_TDL_REUSE / CHECK / LAMPS` (`lightingchg` slots 6-8) still split the kept hits' direct light. `perf/chg.py` reads that line.
 
+## Divergence test (plan 0.3)
+
+`GENOS_DP_DIVERGE` is read at compile time. The default is 0 and the skip is not in the shader. Rebuild once per value, direct pass only, moving scene. Under each value a GI hit skips `trace_occluded` and takes `shadow_lit = true`:
+
+| Value | Who skips the shadow ray |
+|---|---|
+| 1 | every GI hit |
+| 2 | a random half, `lighting_hash(idx) & 1` |
+| 3 | a coherent half, `lighting_hash(idx >> 6) & 1`, one decision per 64 threads |
+
+The picture is wrong while this is on. Do not ship a non-zero value.
+
+How to read the direct-pass time:
+
+- If 2 saves far less than half of 1, and 3 saves about half, warps are diverging and item A is the lever.
+- If 2 and 3 save the same, the cost is the ray count. Then B and C rank above A.
+
 Timers are the ones already printed. `GENOS_GPU_TIMES=600 GENOS_GPU_DISPATCH=1` prints `LIGHTING_DISPATCH i:pass=ms` in dispatch order and `LIGHTING_MS` summed by pass. Pass ids: 0 compact (the args step is also 0), 1 place, 2 trace, 3 direct, 4 gather, 5 filter, 6 cache, 7 compose, 8 a-trous. The moving per-dispatch table (plan 0.1) is this line for `perf/moving.rhai` and for the still scene. Record trace, both direct dispatches, gather, the three filter rounds, cache, each of the seven a-trous dispatches, compose, and compact.
