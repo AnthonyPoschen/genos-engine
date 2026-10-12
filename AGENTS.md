@@ -46,7 +46,7 @@ Before you implement the first scene, read `docs/goals/mvp-scene.md`.
 
 ## Cursor Cloud
 
-Proof windows run on lavapipe under a headless Weston compositor. Boot starts Weston on socket `wayland-1`.
+Proof windows run on lavapipe under a headless Weston compositor. Desktop login starts `/usr/local/bin/genos-weston`. Wait until `pgrep -x weston` shows that process. The socket is `/tmp/genos-runtime/wayland-1`.
 
 Source `/etc/profile.d/genos-cloud.sh` before `make run`, `make verify`, or a test that opens a window. Login shells and interactive bash load that file. It sets `XDG_RUNTIME_DIR` (`/tmp/genos-runtime`), `WAYLAND_DISPLAY` (`wayland-1`), `VK_ICD_FILENAMES`, `VK_DRIVER_FILES`, and `MESA_SHADER_CACHE_DIR`.
 
