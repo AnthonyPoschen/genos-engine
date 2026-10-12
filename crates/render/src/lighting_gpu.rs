@@ -1198,7 +1198,10 @@ impl Gpu {
         // Surface cache switches (lighting_cache.glsl lighting_sc_flags).
         // Flags ride in head z above the probe-run bit (exact to 2^22); w keeps mode
         // * 1000 + cap (flags * 100000 there lost precision past 2^24 and was capped).
-        let flags = lighting_sc_flags_env().min((1 << 23) - 1);
+        // S72K: bits 23 and up go in head 3.w (was: capped at 2^23 - 1, so flag
+        // 16777216 and up turned every lower flag on instead).
+        let flags_all = lighting_sc_flags_env();
+        let flags = flags_all & ((1 << 23) - 1);
         block[2] = ((self.lighting.probe_runs & 1) + 2 * flags) as f32;
         block[3] = (world * 1000 + cap) as f32;
         let mut used = 0;
@@ -1260,6 +1263,8 @@ impl Gpu {
             }
             block[4 + 3] = 1.0;
         }
+        // The camera up's w (head 3.w) is unread: the flags' high bits.
+        block[4 * 3 + 3] = (flags_all >> 23) as f32;
         // A frame drawn from held light runs no probes: what it saw is still what
         // the probes last ran on.
         if !frozen {

@@ -217,7 +217,8 @@ float lighting_hit_size(vec3 pos);
 // pixels with the probes; bit 6 a texel's lit-from point moving does not restart
 // its sets.
 uint lighting_sc_flags() {
-    return uint(work.v[lighting_change_at()].z + 0.5) >> 1u;
+    // S72K: bits 23 and up ride in head 3.w (head z is a float, exact to 2^24).
+    return (uint(work.v[lighting_change_at()].z + 0.5) >> 1u) | (uint(work.v[lighting_change_at() + 3u].w + 0.5) << 23u);
 }
 // Surface cache (mode 3, GENOS_LIGHTING_WORLD=3): the light cache's patches are the
 // texels pixels read. A texel adds a new set of LIGHTING_CACHE_RAYS rays each time it is
@@ -606,6 +607,7 @@ bool lighting_sc_dormant(uint slot) {
 // from nothing. Since the size bands went (S57) this only fills texels of
 // surfaces seen for the first time. w 0 when nothing lit covers it.
 vec4 lighting_sc_shown(uint slot);
+bool lighting_sc_sparse_on();
 // S64B: the sun/sky share (as of now) of the last bilerp's sources.
 float lighting_bilerp_sunfrac = 0.0;
 vec4 lighting_sc_bilerp_sized(vec3 pos, vec3 n, float size) {
@@ -632,6 +634,20 @@ vec4 lighting_sc_bilerp_sized(vec3 pos, vec3 n, float size) {
         vec4 v = cache.v[3u * s + 2u];
         // Only cells on the same plane (a step or a ledge is another surface).
         if (abs(dot(cache.v[3u * s].xyz - pos, n)) > 0.1) {
+            continue;
+        }
+        // S72K: a texel with no sets yet that shows its keys' interpolation
+        // counts too (it used to drop out, the pixel took the other corners, and
+        // it popped in with its first set).
+        vec4 shown_s = vec4(0.0);
+        if (v.w < 0.5 && lighting_world_mode() == 3u && lighting_sc_sparse_on()) {
+            shown_s = lighting_sc_shown(s);
+            if (shown_s.w > 0.5) {
+                cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
+                sum += bil * shown_s.rgb;
+                fsum += bil * lighting_sc_sunfrac_now(s);
+                wsum += bil;
+            }
             continue;
         }
         if (v.w > 0.5 && fract(v.w) < 0.1) {
@@ -1176,6 +1192,9 @@ bool lighting_sc_key(uint slot) {
 // S72D: sets after which a texel shows only its own light; below, its own mean
 // is mixed with the interpolation from the coarser level by sets / this.
 const float LIGHTING_SC_SPARSE_OWN = 4.0;
+// S72K handover: interpolation fades out over this many own sets (weight K).
+const float LIGHTING_SC_HANDOVER = 16.0;
+const float LIGHTING_SC_HANDOVER_K = 2.0;
 // More due than the base budget (the boost counter runs): fine texels wait.
 bool lighting_sc_backlog() {
     return ckeys.key[LIGHTING_SC_BOOST_AT] > 0u;
@@ -1237,11 +1256,12 @@ vec4 lighting_sc_sparse(uint slot, float step) {
     if (result < 0.0) {
         return vec4(0.0, 0.0, 0.0, -1.0);
     }
-    if (hi > 1.0e-3 && hi > LIGHTING_SC_SPARSE_RATIO * lo) {
-        return vec4(0.0, 0.0, 0.0, -2.0);
-    }
     if (result < 0.5 || ws <= 0.0) {
         return vec4(0.0);
+    }
+    if (hi > 1.0e-3 && hi > LIGHTING_SC_SPARSE_RATIO * lo) {
+        // S72K: an edge; the blend still comes back (w -2 - confidence).
+        return vec4(sum / ws, -2.0 - cs / ws);
     }
     // S72I: w is 1 + the keys' confidence (their sets over LIGHTING_SC_SPARSE_OWN).
     return vec4(sum / ws, 1.0 + cs / ws);
@@ -1250,35 +1270,41 @@ vec4 lighting_sc_sparse(uint slot, float step) {
 // Surface cache: what a texel shows (w 0 when it has nothing yet).
 vec4 lighting_sc_own_shown(uint slot);
 vec4 lighting_sc_shown(uint slot) {
-    // S72D coarse to fine: a texel short of LIGHTING_SC_SPARSE_OWN sets shows the
-    // interpolation of the next level up (level 0 from the 2-apart keys, else
-    // the 4-apart ones), its own sets mixed in as they come (refines in place).
-    if (lighting_sc_sparse_on() && !lighting_sc_promoted(slot)) {
+    // S72D coarse to fine: a texel shows the interpolation of the next level up
+    // (level 0 from the 2-apart keys, else the 4-apart ones) until its own sets
+    // take over. S72K (Anthony: still-scene refinement popped): the handover is
+    // by sample count, never a switch: own weight n / (n + K c f), c the keys'
+    // confidence (half for 4-apart keys, half again across an edge), f fading
+    // to 0 at LIGHTING_SC_HANDOVER sets, so the value moves continuously. An edge
+    // (keys disagree) still promotes the texel to rays of its own (scheduling),
+    // but its light fades in the same way.
+    if (lighting_sc_sparse_on()) {
         vec4 own = cache.v[3u * slot + 2u];
-        float wo = clamp(floor(max(own.w, 0.0)) / LIGHTING_SC_SPARSE_OWN, 0.0, 1.0);
+        float n = floor(max(own.w, 0.0));
+        float fade = clamp(1.0 - n / LIGHTING_SC_HANDOVER, 0.0, 1.0);
         uint lvl = lighting_sc_level(slot);
-        if (wo < 1.0 && lvl < 2u) {
+        if (fade > 0.0 && lvl < 2u) {
             vec4 sp = vec4(0.0);
-            float used_step = 4.0;
+            float ck = 0.0;
             if (lvl == 0u) {
                 sp = lighting_sc_sparse(slot, 2.0);
-                used_step = 2.0;
-                if (sp.w < -1.5 && lighting_sc_display) {
-                    // A step between the keys (an edge): its own rays, own light.
-                    cache.v[LIGHTING_SC_SPARSE_AT + slot].x = uintBitsToFloat(lighting_frame() | 1u);
+                if (sp.w < -1.5) {
+                    if (lighting_sc_display && !lighting_sc_promoted(slot)) {
+                        cache.v[LIGHTING_SC_SPARSE_AT + slot].x = uintBitsToFloat(lighting_frame() | 1u);
+                    }
+                    ck = 0.5 * (-sp.w - 2.0);
+                } else if (sp.w > 0.5) {
+                    ck = sp.w - 1.0;
                 }
             }
             if (sp.w > -1.5 && sp.w < 0.5) {
                 sp = lighting_sc_sparse(slot, 4.0);
-                used_step = 4.0;
+                ck = sp.w < -1.5 ? 0.25 * (-sp.w - 2.0) : 0.5 * (sp.w - 1.0);
             }
-            if (sp.w > 0.5) {
-                // S72I: confidence-weighted (Anthony: spread must not bake in
-                // unconverged values): the keys' sets against the texel's own,
-                // the 4-apart keys at half weight; own sets overwrite them.
-                vec4 mine = wo > 0.0 ? lighting_sc_own_shown(slot) : vec4(0.0);
-                float ck = (sp.w - 1.0) * (used_step == 2.0 ? 1.0 : 0.5);
-                float a = mine.w > 0.5 ? wo / max(wo + ck, 1.0e-4) : 0.0;
+            if (abs(sp.w) > 0.5) {
+                vec4 mine = n > 0.5 ? lighting_sc_own_shown(slot) : vec4(0.0);
+                float k = LIGHTING_SC_HANDOVER_K * ck * fade;
+                float a = mine.w > 0.5 ? n / max(n + k, 1.0e-4) : 0.0;
                 return vec4(mix(sp.rgb, mine.rgb, a), 1.0);
             }
         }
@@ -1407,17 +1433,48 @@ const float LIGHTING_SC_PAGE_LEAD = 2.0;
 bool lighting_sc_pages_on() {
     return lighting_world_mode() == 3u && (lighting_sc_flags() & 128u) == 0u;
 }
-uint lighting_sc_page(uint slot) {
+// A texel's cell on its plane (xy), the plane's key (z: offset, w: axis), so
+// pages and their neighbours hash alike.
+ivec4 lighting_sc_cell(uint slot) {
     vec3 p = cache.v[3u * slot].xyz;
     vec4 nb = cache.v[3u * slot + 1u];
     float size = max(nb.w, 1.0e-3);
     uint axd = lighting_axis(nb.xyz);
     uint ax = axd >> 1u;
-    int a = int(floor(p[(ax + 1u) % 3u] / size)) >> 3;
-    int b = int(floor(p[(ax + 2u) % 3u] / size)) >> 3;
-    int d = int(floor(p[ax] / max(size, 0.0625) + 0.5));
-    uint h = lighting_hash(uint(a) * 73856093u ^ uint(b) * 19349663u ^ uint(d) * 83492791u ^ (axd * 2654435761u) ^ floatBitsToUint(size) ^ floatBitsToUint(cache.v[LIGHTING_SC_OBJ_AT + slot].x));
+    return ivec4(int(floor(p[(ax + 1u) % 3u] / size)), int(floor(p[(ax + 2u) % 3u] / size)), int(floor(p[ax] / max(size, 0.0625) + 0.5)), int(axd));
+}
+uint lighting_sc_page_at(uint slot, ivec4 c, ivec2 page) {
+    float size = max(cache.v[3u * slot + 1u].w, 1.0e-3);
+    uint h = lighting_hash(uint(page.x) * 73856093u ^ uint(page.y) * 19349663u ^ uint(c.z) * 83492791u ^ (uint(c.w) * 2654435761u) ^ floatBitsToUint(size) ^ floatBitsToUint(cache.v[LIGHTING_SC_OBJ_AT + slot].x));
     return h % LIGHTING_SC_PAGES;
+}
+uint lighting_sc_page(uint slot) {
+    ivec4 c = lighting_sc_cell(slot);
+    return lighting_sc_page_at(slot, c, c.xy >> 3);
+}
+float lighting_sc_page_min(uint page);
+// S72K (video: 8 x 8 pages popped as squares, neighbouring pages at different
+// stages): the bar a texel is held to is the page minima interpolated
+// bilinearly between page centres (a page unknown takes the texel's own), plus
+// a per-texel dither in [0, 1) sets, so the gate has no page edges and a page's
+// texels do not step together. -1 when its own page is unknown.
+float lighting_sc_page_bar(uint slot) {
+    ivec4 c = lighting_sc_cell(slot);
+    float own = lighting_sc_page_min(lighting_sc_page_at(slot, c, c.xy >> 3));
+    if (own < 0.0) {
+        return -1.0;
+    }
+    vec2 cf = (vec2(c.xy) + 0.5) / 8.0 - 0.5;
+    vec2 p0 = floor(cf);
+    vec2 f = cf - p0;
+    float acc = 0.0;
+    [[dont_unroll]] for (uint i = 0u; i < 4u; i++) {
+        ivec2 pg = ivec2(p0) + ivec2(int(i & 1u), int(i >> 1u));
+        float m = lighting_sc_page_min(lighting_sc_page_at(slot, c, pg));
+        float w = ((i & 1u) == 1u ? f.x : 1.0 - f.x) * ((i >> 1u) == 1u ? f.y : 1.0 - f.y);
+        acc += w * (m < 0.0 ? own : m);
+    }
+    return acc + lighting_unit(slot * 0x9e3779b9u);
 }
 // The page's fewest sets last round (-1: none known).
 float lighting_sc_page_min(uint page) {
