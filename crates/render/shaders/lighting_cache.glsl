@@ -1037,6 +1037,67 @@ float lighting_dn_target(uint slot) {
     float lum = dot(cache.v[3u * slot + 2u].rgb, vec3(0.2126, 0.7152, 0.0722));
     return LIGHTING_DN_STOP * clamp(LIGHTING_DN_DARK / max(lum, 1.0e-4), 1.0, 4.0);
 }
+// S72L wide regularisation (Anthony: squares compound as each region converges
+// to its own noisy mean; anchor convergence to the wider area). The shown value
+// is the wide same-plane mean (16 taps 2-16 cells out, weighed by their sets)
+// plus the texel's own difference shrunk by its significance: d^2 / (d^2 + (K
+// sigma)^2), sigma the standard error of its mean (the estimator's per-set
+// variance / sets; 30 % a set when it is not running). Noise-level
+// differences stay with the neighbourhood; a real step (a shadow edge, a
+// contact) is many sigma and passes; as sets come in sigma falls and the
+// texel's own detail comes through. Flag 33554432 turns it off.
+const float LIGHTING_SC_REG_K = 2.0;
+vec3 lighting_sc_regularise(uint slot, vec3 value) {
+    if (lighting_world_mode() != 3u || (lighting_sc_flags() & 33554432u) != 0u) {
+        return value;
+    }
+    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+    vec4 own = cache.v[3u * slot + 2u];
+    float t = floor(max(own.w, 0.0));
+    if (t < 0.5) {
+        return value;
+    }
+    vec3 p = cache.v[3u * slot].xyz;
+    vec4 nb = cache.v[3u * slot + 1u];
+    vec3 n = nb.xyz;
+    float size = nb.w;
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 ta = vec3(0.0);
+    vec3 tb = vec3(0.0);
+    ta[(ax + 1u) % 3u] = 1.0;
+    tb[(ax + 2u) % 3u] = 1.0;
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    [[dont_unroll]] for (uint i = 0u; i < 16u; i++) {
+        float r = float(2u << (i >> 2u));
+        float a = 1.5707963 * float(i & 3u) + 0.7853982 * float((i >> 2u) & 1u);
+        vec3 q = p + (cos(a) * ta + sin(a) * tb) * r * size;
+        uint s2 = lighting_cache_find_sized(q, n, false, size, p);
+        if (s2 == ~0u || abs(dot(cache.v[3u * s2].xyz - p, n)) > 0.5 * size) {
+            continue;
+        }
+        vec4 v = cache.v[3u * s2 + 2u];
+        float c = min(floor(max(v.w, 0.0)), 64.0);
+        if (c < 0.5) {
+            continue;
+        }
+        sum += c * v.rgb;
+        wsum += c;
+    }
+    if (wsum < 4.0) {
+        return value;
+    }
+    vec3 mu = sum / wsum;
+    vec4 ea = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
+    vec4 eb = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
+    float lum = max(dot(own.rgb, lw), 1.0e-4);
+    float var = eb.x > 0.0 ? max(ea.w, 0.0) : pow(0.3 * lum, 2.0);
+    float se2 = var / t;
+    vec3 d = value - mu;
+    float dl = dot(d, lw);
+    float s = dl * dl / (dl * dl + LIGHTING_SC_REG_K * LIGHTING_SC_REG_K * se2 + 1.0e-12);
+    return max(mu + d * s, vec3(0.0));
+}
 void lighting_sc_pool(uint slot) {
     vec4 own = cache.v[3u * slot + 2u];
     // A texel in a mover's frame pools with its neighbours in that frame: its
@@ -1045,7 +1106,7 @@ void lighting_sc_pool(uint slot) {
     float t = floor(max(own.w, 0.0));
     bool floor_on = (lighting_sc_flags() & 8u) != 0u;
     if (t >= LIGHTING_SC_POOL_FULL && !floor_on) {
-        cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(own.rgb));
+        cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(lighting_sc_regularise(slot, own.rgb)));
         lighting_obj_salt = 0.0;
         return;
     }
@@ -1107,7 +1168,7 @@ void lighting_sc_pool(uint slot) {
             wsum += k * c;
         }
     }
-    cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(wsum > 0.0 ? sum / wsum : vec3(0.0)));
+    cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(wsum > 0.0 ? lighting_sc_regularise(slot, sum / wsum) : vec3(0.0)));
     lighting_obj_salt = 0.0;
 }
 
@@ -1906,6 +1967,14 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (v.w < 0.5 && mode == 3u) {
             v = lighting_sc_parent(q, n, size);
         }
+        if (v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u) {
+            // S72L first fill: no texel, no parent lit yet; the hit-size patch
+            // or its lit neighbours (what the rays read), not the probes.
+            vec3 hc = lighting_cache_irradiance(q, n);
+            if (any(greaterThan(hc, vec3(0.0)))) {
+                v = vec4(hc, 1.0);
+            }
+        }
         if (v.w < 0.5) {
             continue;
         }
@@ -1928,6 +1997,12 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     }
     // Surface cache: while the light changes or around an object that moves, the
     // probes (no history) show it.
+    // S72L: corners with no light are left out of the blend, not handed to the
+    // probes texel by texel (first fill tore as corners flipped between the two
+    // methods); the probes take the pixel only where most of it has nothing.
+    if (mode == 3u && wsum > 0.0 && (lighting_sc_flags() & 33554432u) == 0u) {
+        trust = trust / wsum * min(4.0 * wsum, 1.0);
+    }
     bool light_swap = !lighting_sc_light_quiet() && (lighting_sc_flags() & 1048576u) == 0u;
     if (mode == 3u && (light_swap || (!obj && !LIGHTING_SC_KEEP_NEAR && lighting_near_change(pos)) || (lighting_sc_flags() & 512u) != 0u)) {
         trust = 0.0;
