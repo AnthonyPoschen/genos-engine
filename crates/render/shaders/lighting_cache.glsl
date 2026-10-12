@@ -3355,7 +3355,7 @@ uint lighting_pix_sig(vec3 pos, vec3 n, bool two_sided, LampList list) {
 // S78Q (held-probe gather): per probe two vec4 (x the frame its gather inputs
 // last changed, y its kept samples at its last gather; then its place there), then the gather's raw cell
 // table (R per probe), which the filter's first pass reads.
-const bool LIGHTING_GATHER_HOLD = false; // S78R: off pending re-test (S78S)
+const bool LIGHTING_GATHER_HOLD = true; // S78R (re-tested on S78W)
 uint lighting_gdirty_at() {
     return lighting_pix_at() + (pc.dims.x * pc.dims.y + 1u) / 2u;
 }
