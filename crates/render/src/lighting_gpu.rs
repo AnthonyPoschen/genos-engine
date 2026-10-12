@@ -140,6 +140,11 @@ pub(crate) struct Lighting {
     /// Rounds in a row, since that last changed, whose mature patches all stayed
     /// within LIGHTING_SETTLE_CHANGE: past a full sweep, rounds relight young patches only.
     light_quiet: u32,
+    /// Rounds that finished since the light last changed, counted from the rounds
+    /// the CPU submitted, so it needs no counter readback (S70B reads none in the
+    /// default surface cache mode, where `light_quiet` then never moved and the
+    /// lighting never settled). The surface cache's settle test reads it.
+    light_rounds: u32,
     /// Occluders (index in the scene's list) that moved in the last
     /// LIGHTING_MOVER_KEEP frames, with the frames left: movers. The surface cache leaves
     /// their pixels to the probes; once still that long they are scenery again.
@@ -227,6 +232,7 @@ impl Default for Lighting {
             light_scene: 0,
             light_hash: 0,
             light_quiet: 0,
+            light_rounds: 0,
             movers: std::collections::BTreeMap::new(),
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
@@ -753,7 +759,7 @@ impl Gpu {
             || (lighting_world_env() == 3
                 && lighting_sc_flags_env() & 8192 != 0);
         let settled = if lighting_world_env() == 3 && sc_relit {
-            self.lighting.still >= LIGHTING_SETTLE_FRAMES.max(if world_wait != 0 { world_wait } else { 300 }) && self.lighting.light_quiet >= 2
+            self.lighting.still >= LIGHTING_SETTLE_FRAMES.max(if world_wait != 0 { world_wait } else { 300 }) && self.lighting.light_rounds >= 2
         } else {
             self.lighting.still >= LIGHTING_SETTLE_FRAMES.max(world_wait) && self.lighting.quiet >= sweep
         };
@@ -819,6 +825,9 @@ impl Gpu {
                 );
             }
         }
+        if !self.lighting.cache_clear && !world && self.lighting.stats_round[slot] {
+            self.count_light_round(self.lighting.stats_light[slot]);
+        }
         if !self.lighting.cache_clear && !world {
             if !self.lighting.stats_round[slot] {
                 // No light cache round ran in that frame.
@@ -883,6 +892,15 @@ impl Gpu {
         );
     }
 
+    /// One light cache round finished, built from light `light`.
+    fn count_light_round(&mut self, light: u64) {
+        self.lighting.light_rounds = if light == self.lighting.light_hash {
+            self.lighting.light_rounds.saturating_add(1)
+        } else {
+            0
+        };
+    }
+
     /// Count one light cache round's counters toward settling (or not): a round
     /// built from an older scene than the current one measured the old light.
     /// `current`: built from the scene as it is now (camera included); `light`:
@@ -943,6 +961,7 @@ impl Gpu {
             return;
         }
         self.lighting.world_busy = false;
+        self.count_light_round(self.lighting.world_light);
         self.trace_sc(self.lighting.world_stats.memory, "round");
         if let Ok(words) = self.read_stats_memory(self.lighting.world_stats.memory) {
             let current = self.lighting.world_still > 0 && self.lighting.world_hash == self.lighting.scene_hash;
@@ -1349,6 +1368,7 @@ impl Gpu {
         if light != self.lighting.light_hash {
             self.lighting.light_hash = light;
             self.lighting.light_quiet = 0;
+            self.lighting.light_rounds = 0;
         }
         let sweep = self.lighting.live.div_ceil(LIGHTING_CACHE_BATCH).max(1) + 1;
         // Surface cache (mode 3): bit 10 says the light has held two rounds, and a

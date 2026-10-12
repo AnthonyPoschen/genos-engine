@@ -193,6 +193,8 @@ The lighting has one name scheme, `lighting`, everywhere; "GI v2" survives only 
 
 `gi-check` keeps its name (it is the tool), as does `GENOS_GI_CHECK_BOUNCES`.
 
+Settling (2026-10-12, frame reuse): the surface cache settles after `GENOS_LIGHTING_SC_SETTLE` still frames (300 when unset) and two light cache rounds since the light last changed. Those rounds are counted on the CPU from the rounds the frame submitted (`light_rounds`), not from the counters, which S70B stopped reading in the default mode. Before this, the default mode never settled (only `GENOS_LIGHTING_DEBUG` runs, which read the counters, did), so the lighting never held its light. Once settled, a frame runs only the pixels' direct light and the final pass (`frozen` in `lighting_passes`), and the renderer can reuse the picture (see [Frame reuse](../../frame-reuse.md)). `light_quiet`, and with it the young-only rounds (bit 10), is unchanged.
+
 No environment variable is needed: `make stress` and `make run` run the tuned defaults baked into the code (`LIGHTING_DEFAULT_WORLD` = 3, the surface cache; `LIGHTING_DEFAULT_SC_FLAGS` = 6007050). There is no lighting-selection switch (`GENOS_GI` is gone). The remaining variables are optional debug and tuning knobs:
 
 - Debug and traces: `GENOS_LIGHTING_DEBUG` (per-round counters; reads GPU counters back, so not for fps runs), `GENOS_LIGHTING_SC_TRACE` (surface cache claims and relights per readback), `GENOS_SCENE_DELTA` (resident scene and mesh field delta runs).
