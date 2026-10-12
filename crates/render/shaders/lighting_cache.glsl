@@ -2559,7 +2559,13 @@ void lighting_svgf_iter(uint slot, uint it) {
         }
     }
     if (wm > 0.0) {
-        lighting_svgf_store(dst, slot, sum / wm, vsum / (wm * wm), wall > 0.0 ? wm / wall : 0.0);
+        // S72V3 certainty as Gortler et al. 1996's pull, w' = min(1, sum h w)
+        // with the unnormalized 2D kernel (4 x the normalized one): a level whose
+        // footprint holds a quarter of full support is fully certain. S72V took
+        // the normalized certainty (Knutsson & Westin), so with IC sites 2 apart
+        // every texel stayed at 1/4 and the push gave 3/4 to the 25 cm WRC:
+        // the big splotches, and the WRC's lower level darkened the picture.
+        lighting_svgf_store(dst, slot, sum / wm, vsum / (wm * wm), wall > 0.0 ? min(1.0, 4.0 * wm / wall) : 0.0);
     } else {
         lighting_svgf_store(dst, slot, vec3(0.0), 0.0, 0.0);
     }

@@ -208,10 +208,12 @@ void main() {
             // 2 (level 1); keys, edge texels and texels near a change or a moved
             // lamp keep their rate (S72Q: the sun moving no longer exempts it).
             bool mover_l2;
-            if (!wrc && lighting_sc_layer2() && !lighting_sc_svgf() && !near && t >= 15.5 && !lighting_sc_promoted(slot) && !lighting_sc_local_change(slot, mover_l2)) {
-                float sup = cache.v[LIGHTING_SC_SPARSE_AT + slot].w;
+            // S72V3: under SVGF a settled IC site (a record, Ward 1988: kept
+            // until the light changes) is relit one round in 4 [inferred rate].
+            if (!wrc && lighting_sc_layer2() && !near && t >= 15.5 && !lighting_sc_promoted(slot) && !lighting_sc_local_change(slot, mover_l2)) {
+                float sup = lighting_sc_svgf() ? LIGHTING_SC_L2_FLAT : cache.v[LIGHTING_SC_SPARSE_AT + slot].w;
                 uint lv = lighting_sc_level(slot);
-                uint every = lv == 0u ? 4u : (lv == 1u ? 2u : 1u);
+                uint every = lighting_sc_svgf() ? 4u : (lv == 0u ? 4u : (lv == 1u ? 2u : 1u));
                 if (sup >= LIGHTING_SC_L2_FLAT && every > 1u && ((lighting_hash(slot ^ 0x1b873593u) + lighting_round()) % every) != 0u) {
                     atomicAdd(gstats.waiting, 1u);
                     return;
