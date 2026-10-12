@@ -2877,43 +2877,6 @@ void lighting_sc_grad_take(uint slot, float l_now) {
 // a whole-world change) falls within its range (suns: anywhere). A moving lamp
 // moves its epoch every frame, so it re-shadows as before.
 const bool LIGHTING_SHADOW_CACHE = true;
-// S74B per-lamp frame of its last own change, then [128] whole-picture stamp,
-// [129] frame the stamps were made, [130-134] flame and lamp count snapshot.
-const uint LIGHTING_LAMP_CHG_AT = LIGHTING_GRAD_LIST_AT + 32768u;
-const bool LIGHTING_PX_DIRECT_CACHE = true;
-float lighting_seg_d2(vec3 a, vec3 b, vec3 c) {
-    vec3 ab = b - a;
-    float t = clamp(dot(c - a, ab) / max(dot(ab, ab), 1.0e-12), 0.0, 1.0);
-    vec3 d = a + ab * t - c;
-    return dot(d, d);
-}
-// S74B: may a pixel reuse last frame's direct light? Its surface point is the
-// same (camera and surface still), the stamps are this frame's, nothing was
-// replaced as a whole, and for each lamp reaching it: the lamp did not change
-// this frame and its shadow segment misses every change bound (old and new) of
-// this frame. Checked every frame, so the chain holds.
-bool lighting_px_reuse_ok() {
-    uint g = LIGHTING_LAMP_CHG_AT + 128u;
-    return LIGHTING_PX_DIRECT_CACHE && lighting_world_mode() == 3u && ckeys.key[g + 1u] == pc.params.w && ckeys.key[g] != pc.params.w;
-}
-bool lighting_px_lamp_ok(uint li, vec3 origin, vec3 target) {
-    if (li < LIGHTING_WRC_SNAP_LAMPS) {
-        if (ckeys.key[LIGHTING_LAMP_CHG_AT + li] == pc.params.w) {
-            return false;
-        }
-    } else if (li != LAMP_ALL - 1u) {
-        return false;
-    }
-    vec4 head = work.v[lighting_change_at()];
-    uint changes = min(uint(head.x + 0.5), LIGHTING_CHANGES);
-    [[dont_unroll]] for (uint c = 0u; c < changes; c++) {
-        vec4 b = work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + c];
-        if (lighting_seg_d2(origin, target, b.xyz) < (b.w + 0.05) * (b.w + 0.05)) {
-            return false;
-        }
-    }
-    return true;
-}
 const uint LIGHTING_SHADOW_AT = 13u * LIGHTING_CACHE_SLOTS;
 void lighting_shadow_epochs() {
     if (!LIGHTING_SHADOW_CACHE) {
@@ -2922,36 +2885,13 @@ void lighting_shadow_epochs() {
     uint n = min(scene.lamp_count, LIGHTING_WRC_SNAP_LAMPS);
     vec4 head = work.v[lighting_change_at()];
     bool all = head.y > 0.5;
-    // S74B: whole-picture invalidation (traced world replaced, lamp count or
-    // the flame changed) and the frame these stamps are for.
-    uint g = LIGHTING_LAMP_CHG_AT + 128u;
-    vec4 fire = vec4(uintBitsToFloat(ckeys.key[g + 2u]), uintBitsToFloat(ckeys.key[g + 3u]), uintBitsToFloat(ckeys.key[g + 4u]), uintBitsToFloat(ckeys.key[g + 5u]));
-    vec4 fnow = scene.fire_pos * vec4(1.0, 1.0, 1.0, max(dot(scene.fire_color.rgb, vec3(1.0)), 0.0));
-    if (all || ckeys.key[g + 6u] != scene.lamp_count || any(notEqual(fire, fnow))) {
-        ckeys.key[g] = pc.params.w;
-        ckeys.key[g + 2u] = floatBitsToUint(fnow.x);
-        ckeys.key[g + 3u] = floatBitsToUint(fnow.y);
-        ckeys.key[g + 4u] = floatBitsToUint(fnow.z);
-        ckeys.key[g + 5u] = floatBitsToUint(fnow.w);
-        ckeys.key[g + 6u] = scene.lamp_count;
-    }
-    ckeys.key[g + 1u] = pc.params.w;
     uint changes = all ? 0u : min(uint(head.x + 0.5), LIGHTING_CHANGES);
     for (uint i = 0u; i < n; i++) {
         Lamp l = scene_lamp(i);
         uint at = LIGHTING_SHADOW_EPOCH_AT + 8u * i;
         vec4 last = vec4(uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]), uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]));
         vec4 now = vec4(l.pos.xyz, l.color.w);
-        vec3 col = vec3(uintBitsToFloat(ckeys.key[at + 5u]), uintBitsToFloat(ckeys.key[at + 6u]), uintBitsToFloat(ckeys.key[at + 7u]));
-        // S74B: the lamp itself changed (place, range, colour) this frame.
-        bool own = any(notEqual(last, now)) || any(notEqual(col, l.color.rgb));
-        if (own) {
-            ckeys.key[LIGHTING_LAMP_CHG_AT + i] = pc.params.w;
-            ckeys.key[at + 5u] = floatBitsToUint(l.color.r);
-            ckeys.key[at + 6u] = floatBitsToUint(l.color.g);
-            ckeys.key[at + 7u] = floatBitsToUint(l.color.b);
-        }
-        bool bump = all || own;
+        bool bump = all || any(notEqual(last, now));
         for (uint c = 0u; c < changes && !bump; c++) {
             vec4 b = work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + c];
             bump = l.color.w <= 0.0 || length(b.xyz - l.pos.xyz) < l.color.w + b.w;

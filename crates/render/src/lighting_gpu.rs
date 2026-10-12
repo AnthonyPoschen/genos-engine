@@ -600,7 +600,7 @@ impl Gpu {
         let share = self.light_families();
         if self.lighting.cache_keys.buffer.is_null() {
             self.lighting.cache_keys = self.make_buffer_queues(
-                (2 * LIGHTING_CACHE_SLOTS + 2 + 17600 + 16 + 3 * 65536 + 1024 + 32768 + 512) * 4, // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
+                (2 * LIGHTING_CACHE_SLOTS + 2 + 17600 + 16 + 3 * 65536 + 1024 + 32768) * 4, // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
                 0x20 | 0x2 | 0x100,
                 Memory::Device,
                 &share,
@@ -624,8 +624,7 @@ impl Gpu {
         self.lighting.gbuf = self.make_buffer(16 + pixels * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.work =
             self.make_buffer_queues(work_vec4 * 16, 0x20 | 0x1 | 0x2, Memory::Device, &share)?;
-        // S74B: + per pixel its last surface point and direct light (16 bytes).
-        self.lighting.out = self.make_buffer(pixels * 20, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        self.lighting.out = self.make_buffer(pixels * 4, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.gbuf_clear = true;
         self.lighting.work_clear = true;
