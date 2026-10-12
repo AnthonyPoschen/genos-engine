@@ -160,6 +160,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78X](experiments/S78X-atrous-work-lists.md) | 2026-10-13 | A-trous levels run dirty work lists | pushed (rough; idle A/B) | S78X |
 | [S78Z](experiments/S78Z-verify-ring-wakes.md) | 2026-10-13 | Probe verification + impact-tested ring wakes | not pushed (no fix; postmortem) | g78/S78Z-verify-ring-wakes.patch |
 | [S78T2](experiments/S78T2-texel-verify.md) | 2026-10-13 | Texel verification: rotating A-SVGF checks + ring wakes | not pushed (no healing; postmortem) | g78/S78T2-texel-verify.patch |
+| [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
 | [WAKE](experiments/WAKE-neighbour-wake-design.md) | 2026-10-12 | Anthony's wake design: no wakes from shared field; real change wakes neighbours by coarse-to-fine ring tests w | planned (approved by Anthony) | none yet |
 | [DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md) | 2026-10-12 | S-curve allowed quality lag for off-screen pages by priority | deferred | none |
 | [DUMP](experiments/DUMP-gpu-dump-tool.md) | 2026-10-12 | Debug dump of GPU data from two consecutive frames per component (direct, bounce, coarse/fine WRC, probe resul | in progress | none yet |
