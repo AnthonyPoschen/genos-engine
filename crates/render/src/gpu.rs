@@ -37,6 +37,12 @@ pub struct Renderer {
     overlay_rects: Vec<ScreenRect>,
     /// Lines drawn with the overlay rectangles, in the same draw.
     overlay_lines: Vec<ScreenLine>,
+    /// `set_overlay_lines` replaced the lines. The next draw rebuilds the vertices.
+    lines_dirty: bool,
+    /// Bounds of the line lists replaced since the last draw.
+    old_lines: Option<crate::reuse::Region>,
+    /// Dirty rectangles reported for the next draw. `None` means the caller did not report.
+    reported: Option<Vec<crate::reuse::DamageRect>>,
     overlay_verts: Vec<crate::pack::GpuVertex>,
     /// Every frame copies its picture into host memory, for `read_earlier_frame`.
     keep_pictures: bool,
@@ -63,6 +69,9 @@ impl Renderer {
             shapes: crate::pool::MeshPool::default(),
             overlay_rects: Vec::new(),
             overlay_lines: Vec::new(),
+            lines_dirty: false,
+            old_lines: None,
+            reported: None,
             overlay_verts: Vec::new(),
             keep_pictures: false,
             debug: debug_view::DebugState::default(),
@@ -73,18 +82,69 @@ impl Renderer {
     /// draw. They stay until replaced.
     pub fn set_overlay_lines(&mut self, lines: &[ScreenLine]) {
         if self.overlay_lines.as_slice() != lines {
+            if let Some(old) = crate::reuse::lines_region(&self.overlay_lines) {
+                self.old_lines = Some(match self.old_lines {
+                    Some(kept) => crate::reuse::union(kept, old),
+                    None => old,
+                });
+            }
             self.overlay_lines.clear();
             self.overlay_lines.extend_from_slice(lines);
-            // Rebuild the vertices on the next draw.
-            self.overlay_rects.clear();
-            self.overlay_rects.push(ScreenRect {
-                x: f32::NAN,
-                y: 0.0,
-                w: 0.0,
-                h: 0.0,
-                color: [0.0; 3],
-            });
+            self.lines_dirty = true;
         }
+    }
+
+    /// Diff the overlay against the last draw. The same lists keep their vertices.
+    fn note_overlay(&mut self, overlay: &[ScreenRect]) {
+        let same = self.overlay_rects.as_slice() == overlay && !self.lines_dirty;
+        let extent = (self.width, self.height);
+        let mut damage = Vec::new();
+        if !same {
+            let reported = self.reported.take().filter(|rects| !rects.is_empty());
+            if let Some(reported) = reported {
+                for rect in reported {
+                    crate::reuse::add_region(
+                        &mut damage,
+                        [
+                            rect.x as i32,
+                            rect.y as i32,
+                            rect.x.saturating_add(rect.w) as i32,
+                            rect.y.saturating_add(rect.h) as i32,
+                        ],
+                        extent,
+                    );
+                }
+            } else {
+                if let Some(old) = crate::reuse::rects_region(&self.overlay_rects) {
+                    crate::reuse::add_region(&mut damage, old, extent);
+                }
+                if let Some(new) = crate::reuse::rects_region(overlay) {
+                    crate::reuse::add_region(&mut damage, new, extent);
+                }
+                if let Some(old) = self.old_lines.take() {
+                    crate::reuse::add_region(&mut damage, old, extent);
+                }
+                if let Some(new) = crate::reuse::lines_region(&self.overlay_lines) {
+                    crate::reuse::add_region(&mut damage, new, extent);
+                }
+            }
+            self.overlay_verts = screen_quads(overlay);
+            self.overlay_verts.extend(screen_lines(&self.overlay_lines));
+            self.overlay_rects.clear();
+            self.overlay_rects.extend_from_slice(overlay);
+        }
+        self.reported = None;
+        self.old_lines = None;
+        self.lines_dirty = false;
+        self.gpu.reuse.frame_damage = damage;
+    }
+
+    /// Window pixels the caller says the overlay changed, for the next draw only.
+    ///
+    /// An empty report is not stored: when the overlay lists differ and no
+    /// rectangles were reported, the draw diffs the lists itself.
+    pub fn report_overlay_damage(&mut self, rects: &[crate::reuse::DamageRect]) {
+        self.reported = Some(rects.to_vec());
     }
 
     /// True when the last submit left its fence unsignaled. The caller can continue.
@@ -152,12 +212,7 @@ impl Renderer {
         for key in self.memory.take_dropped() {
             self.shapes.release(key);
         }
-        if self.overlay_rects.as_slice() != overlay {
-            self.overlay_verts = screen_quads(overlay);
-            self.overlay_verts.extend(screen_lines(&self.overlay_lines));
-            self.overlay_rects.clear();
-            self.overlay_rects.extend_from_slice(overlay);
-        }
+        self.note_overlay(overlay);
         let overlay_verts = self.overlay_verts.clone();
         self.wire_on = wireframe;
         let overlay_count = overlay_verts.len() as u32;
@@ -648,6 +703,8 @@ struct Gpu {
     ready: VecDeque<Duration>,
     submitted_slot: Option<usize>,
     antialias: Antialias,
+    /// Overlay damage and, once wired, the cached scene picture.
+    reuse: crate::reuse::FrameReuse,
     /// Last known layout of each flight's color image. `0` is undefined. `6` is transfer source.
     color_layout: [u32; 2],
     keep_pass: Handle,
@@ -1275,6 +1332,7 @@ impl Gpu {
                 ready: VecDeque::new(),
                 submitted_slot: None,
                 antialias: Antialias::Off,
+                reuse: crate::reuse::FrameReuse::default(),
                 color_layout: [0, 0],
                 keep_pass: std::ptr::null_mut(),
                 aa_src: [Buffer::empty(), Buffer::empty()],

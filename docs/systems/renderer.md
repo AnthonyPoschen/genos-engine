@@ -64,6 +64,8 @@ renderer.draw_with_overlay(&world, &camera, &rects, false)?;
 
 Each `ScreenRect` is a pixel rectangle. The draw places those rectangles after the world. The overlay does not test depth. The overlay does not write depth.
 
+`Renderer::report_overlay_damage` names the window pixels whose overlay changed, for the next draw only. When the overlay lists differ and nothing was reported, the draw diffs the old and new lists itself. The same lists keep their vertices. See [Frame reuse](../frame-reuse.md).
+
 The draw starts in `off`. That mode is the single-sample picture. `Renderer::set_antialias` selects the next picture. FXAA is a luminance-edge pass on the scene color. That pass runs before the overlay. SSAA was removed with GI v1 (it drew through the v1 fragment shader); panel code 2 now selects FXAA. The overlay is drawn at the presented size after the filter. A switch back to `off` draws the unfiltered image. The filter keeps no history.
 
 Set `object.hidden = true` to hide an object and keep its light. Push a `DrawKind::Mesh` and replace `pose` to animate. Push a `DrawKind::Particles` to draw cards. `color` is the base albedo. Also set `lit`, `emission`, `face_camera`, `angle`, and `image`. Push a `DrawKind::Shader` with a `Displacement` to build a grid from a height map.
