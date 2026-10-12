@@ -279,9 +279,12 @@ const LIGHTING_HIT_QUEUE_AT: u64 = LIGHTING_CKEYS_TAIL;
 const LIGHTING_HIT_QUEUE_COUNT_AT: u64 = LIGHTING_HIT_QUEUE_AT + 2 * LIGHTING_HIT_QUEUE_CAP;
 const LIGHTING_HIT_ARGS_AT: u64 = LIGHTING_HIT_QUEUE_COUNT_AT + 1;
 const LIGHTING_CKEYS_WORDS: u64 = LIGHTING_HIT_ARGS_AT + 4;
-/// Compute pipelines. Index 9 is the hit-light variant of the direct pass
-/// (`-DLIGHTING_HIT_QUEUE`), dispatched when GENOS_LIGHTING_HIT_QUEUE=1.
-const LIGHTING_PIPES: usize = 10;
+/// Compute pipelines. Index 9 is the hit-light variant (`-DLIGHTING_HIT_QUEUE`).
+/// Index 10 is the direct pass that queues misses (`-DLIGHTING_HIT_ENQUEUE`).
+/// Both are dispatched only when GENOS_LIGHTING_HIT_QUEUE=1. Slot 3 stays the
+/// shipped direct shader.
+const LIGHTING_PIPES: usize = 11;
+const LIGHTING_ENQUEUE_PIPE: usize = 10;
 const LIGHTING_PASS_NAMES: [&str; LIGHTING_PIPES] = [
     "lighting compact",
     "lighting place",
@@ -293,6 +296,7 @@ const LIGHTING_PASS_NAMES: [&str; LIGHTING_PIPES] = [
     "lighting compose",
     "lighting atrous",
     "lighting hit",
+    "lighting direct enqueue",
 ];
 
 impl Gpu {
@@ -464,6 +468,7 @@ impl Gpu {
             LIGHTING_COMPOSE_SPV,
             LIGHTING_ATROUS_SPV,
             LIGHTING_DIRECT_QUEUE_SPV,
+            LIGHTING_DIRECT_ENQUEUE_SPV,
         ];
         for (k, code) in codes.iter().enumerate() {
             let start = Instant::now();
@@ -1603,6 +1608,10 @@ impl Gpu {
                 // S70A kinds (the third field past 1): the args pass, the dense
                 // indirect dispatches, mode-1 picture parts of a round.
                 let kind = if gy >= LIGHTING_ARGS { gy } else { 0 };
+                // The enqueue shader is a separate pipeline. params.y bit 16
+                // arms it. The async light-cache submit keeps pipes[3] and
+                // never sets the bit, so its cache rays stay inline.
+                let enqueue_direct = hit_queue && pass == 3;
                 if kind != 0 {
                     let mut k_pc = cur_pc;
                     k_pc[6] |= 1 << 4;
@@ -1619,6 +1628,9 @@ impl Gpu {
                         // Not a dense dispatch. The consumer reads mode-0 indices.
                         k_pc[6] &= !(1 << 4);
                     }
+                    if enqueue_direct {
+                        k_pc[5] |= 1 << 16;
+                    }
                     (self.fns.cmd_push)(
                         self.cmd,
                         self.lighting.layout,
@@ -1627,8 +1639,20 @@ impl Gpu {
                         32,
                         k_pc.as_ptr() as *const c_void,
                     );
+                } else if enqueue_direct {
+                    let mut d_pc = cur_pc;
+                    d_pc[5] |= 1 << 16;
+                    (self.fns.cmd_push)(
+                        self.cmd,
+                        self.lighting.layout,
+                        0x20,
+                        0,
+                        32,
+                        d_pc.as_ptr() as *const c_void,
+                    );
                 }
-                (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.pipes[pass]);
+                let pipe = if enqueue_direct { LIGHTING_ENQUEUE_PIPE } else { pass };
+                (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.pipes[pipe]);
                 match kind {
                     LIGHTING_DENSE_RAYS | LIGHTING_DENSE_ENTRIES => {
                         let at = (LIGHTING_ARGS_AT + if kind == LIGHTING_DENSE_RAYS { 0 } else { 3 }) * 4;
@@ -1640,7 +1664,7 @@ impl Gpu {
                     }
                     _ => (self.fns.cmd_dispatch)(self.cmd, gx.max(1), if kind != 0 { 1 } else { gy.max(1) }, 1),
                 }
-                if kind != 0 {
+                if kind != 0 || enqueue_direct {
                     (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, 32, cur_pc.as_ptr() as *const c_void);
                 }
                 // The args pass's sizes are read as indirect commands (stage 0x2, access 0x1).
