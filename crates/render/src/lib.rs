@@ -57,3 +57,9 @@ pub use world::{
     fixed_bounds, identity_pose, in_view, solid_reach, Bounds, Displacement, DrawKind, FixedPart,
     Object, ParticleFrame, ParticleImage, ShaderSpace, World,
 };
+
+/// `GENOS_SCENE_DELTA=1`: print each frame's resident scene update (S70C).
+pub(crate) fn scene_delta_trace() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("GENOS_SCENE_DELTA").is_some())
+}

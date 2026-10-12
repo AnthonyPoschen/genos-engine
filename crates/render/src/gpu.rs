@@ -1021,6 +1021,10 @@ struct Gpu {
     frame_scene: [Buffer; 2],
     /// This frame's scene bytes, written into `frame_scene` once its slot is free.
     frame_bytes: Vec<u8>,
+    /// S70C: what the resident scene buffer holds (`frame_scene[0]`, device-local;
+    /// `[1]` names the same buffer). A frame records only the 256-byte blocks that
+    /// differ (vkCmdUpdateBuffer, in the frame's command stream).
+    scene_shadow: Vec<u8>,
     /// Raster sets: `[light field][frame slot]`, the field with that frame's scene.
     raster_sets: [[Handle; 2]; 2],
     particle_buf: Buffer,
@@ -1760,6 +1764,7 @@ impl Gpu {
                 desc_set: std::ptr::null_mut(),
                 frame_scene: [Buffer::empty(), Buffer::empty()],
                 frame_bytes: Vec::new(),
+                scene_shadow: Vec::new(),
                 raster_sets: [[std::ptr::null_mut(); 2]; 2],
                 light_scene: [Buffer::empty(), Buffer::empty()],
                 light_field: [Buffer::empty(), Buffer::empty()],
@@ -2383,9 +2388,6 @@ impl Gpu {
             self.collect_slot_after_wait(slot)?;
             self.collect_frame_times(slot);
             // The slot's last frame is done with its scene: this frame's goes in.
-            if !self.frame_bytes.is_empty() {
-                self.write_buffer(&self.frame_scene[slot], &self.frame_bytes)?;
-            }
             self.desc_set = self.raster_sets[self.light_shown][slot];
             check(
                 (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
@@ -2428,6 +2430,7 @@ impl Gpu {
                 self.write_stamp(slot, 0, 1);
             }
             self.frame_stamp(slot, FrameStamp::Start);
+            self.update_resident_scene();
             self.blend_view();
             let swap = self.swap_images[index as usize];
             self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
@@ -3237,10 +3240,12 @@ impl Gpu {
             )?;
             self.write_buffer(&self.light_field[index], &field_bytes)?;
             self.write_buffer(&self.light_scene[index], &vec![0u8; pack::SCENE_TAIL])?;
-            self.frame_scene[index] =
-                self.make_buffer(pack::SCENE_CAPACITY as u64, 0x20, Memory::Upload)?;
-            self.write_buffer(&self.frame_scene[index], &vec![0u8; pack::SCENE_TAIL])?;
         }
+        // S70C: one resident scene, written by deltas in the frame's command stream.
+        self.frame_scene[0] =
+            self.make_buffer(pack::SCENE_CAPACITY as u64, 0x20 | 0x2, Memory::Device)?;
+        self.frame_scene[1] = copy_buffer(&self.frame_scene[0]);
+        self.scene_shadow.clear();
         self.write_buffer(&self.particle_buf, &vec![0u8; 16])?;
         self.mesh_field_cap = 1 << 16;
         self.mesh_field =
@@ -4727,6 +4732,59 @@ impl Gpu {
             }
             self.tier_read.push(change);
         }
+    }
+
+    /// S70C: bring the resident scene up to this frame's bytes, recording only the
+    /// 256-byte blocks that changed (runs up to vkCmdUpdateBuffer's 64 KiB).
+    fn update_resident_scene(&mut self) {
+        const BLOCK: usize = 256;
+        const RUN: usize = 65536;
+        let bytes = std::mem::take(&mut self.frame_bytes);
+        if bytes.is_empty() || self.frame_scene[0].buffer.is_null() {
+            self.frame_bytes = bytes;
+            return;
+        }
+        let len = bytes.len().min(self.frame_scene[0].size as usize) & !3;
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        let mut at = 0;
+        while at < len {
+            let end = (at + BLOCK).min(len);
+            let same = self.scene_shadow.len() >= end && self.scene_shadow[at..end] == bytes[at..end];
+            if !same {
+                match runs.last_mut() {
+                    Some((start, stop)) if *stop == at && end - *start <= RUN => *stop = end,
+                    _ => runs.push((at, end)),
+                }
+            }
+            at = end;
+        }
+        if !runs.is_empty() {
+            // The last frame's reads are done before the writes (in queue order).
+            self.memory_barrier(0x10000, 0x1000, 0x20 | 0x8, 0x1000);
+            for &(start, stop) in &runs {
+                unsafe {
+                    (self.fns.cmd_update_buffer)(
+                        self.cmd,
+                        self.frame_scene[0].buffer,
+                        start as u64,
+                        (stop - start) as u64,
+                        bytes[start..stop].as_ptr() as *const c_void,
+                    );
+                }
+            }
+            self.memory_barrier(0x1000, 0x10000, 0x1000, 0x20 | 0x8);
+            if self.scene_shadow.len() < len {
+                self.scene_shadow.resize(len, 0);
+            }
+            for &(start, stop) in &runs {
+                self.scene_shadow[start..stop].copy_from_slice(&bytes[start..stop]);
+            }
+            if crate::scene_delta_trace() {
+                let sent: usize = runs.iter().map(|(a, b)| b - a).sum();
+                eprintln!("scene delta runs {} bytes {} of {}", runs.len(), sent, len);
+            }
+        }
+        self.frame_bytes = bytes;
     }
 
     fn write_buffer(&self, buffer: &Buffer, bytes: &[u8]) -> Result<(), String> {
@@ -6261,8 +6319,8 @@ impl Drop for Gpu {
             self.destroy_buffer(&mut scene_buf);
             self.destroy_buffer(&mut light_scene[0]);
             self.destroy_buffer(&mut light_scene[1]);
+            // [1] names the same buffer as [0] (S70C).
             self.destroy_buffer(&mut frame_scene[0]);
-            self.destroy_buffer(&mut frame_scene[1]);
             self.destroy_buffer(&mut light_field[0]);
             self.destroy_buffer(&mut light_field[1]);
             let mut tier_view = std::mem::replace(&mut self.tier_view, Buffer::empty());
