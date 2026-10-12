@@ -2458,8 +2458,6 @@ impl Gpu {
             f.iter().sum::<f64>(),
             n / seconds,
         );
-        emit_frame_reuse(&mut self.reuse.stats);
-        self.reuse.quiet_skips = 0;
         if times.lighting_frames > 0 && std::env::var_os("GENOS_GPU_DISPATCH").is_some() {
             let lf = f64::from(times.lighting_frames);
             let parts: Vec<String> = times.lighting_disp.iter().enumerate().map(|(i, (p, ms))| format!("{i}:{p}={:.3}", ms / lf)).collect();
@@ -2510,6 +2508,9 @@ impl Gpu {
             placed: true,
             ..GpuTimes::default()
         };
+        // After `times` is dropped: it borrowed `gpu_times` for the whole print.
+        emit_frame_reuse(&mut self.reuse.stats);
+        self.reuse.quiet_skips = 0;
     }
 
     fn reset_queries(&self, slot: usize) {
