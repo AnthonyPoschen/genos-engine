@@ -29,8 +29,8 @@ Each frame does these steps:
 3. Lay out the screen UI.
 4. Apply each lamp action from that UI.
 5. Move the camera from `move` and from look. A press on the UI does not start look capture.
-6. Draw the world, then the UI rectangles. The draw rebuilds the radiance field, then rasterizes objects that are in view and not hidden.
-7. Present the surface.
+6. Draw the world, then the UI rectangles. When the scene key matches the cached picture and the lighting verification found no real change, the draw reuses that picture and redraws only the dirty UI. When the screen would not change, the draw does not acquire or present. The lighting verification budget still runs.
+7. Present the surface when the frame acquired an image. When the device has `VK_KHR_incremental_present`, the present names the regions that changed.
 
 ## Crates
 

@@ -18,7 +18,9 @@ Particle image pixels stay in one resident buffer. The draw uploads those pixels
 
 Shape blocks and particle images share one byte budget. Required in-view geometry outranks unused blocks and optional particle images. A new admit that would pass the budget drops unused blocks first. It then shrinks or drops the particle image. Geometry that fits on its own stays resident.
 
-A profiled draw writes Vulkan timestamp queries around the GPU draw. The GPU time is that timestamp span. A fence wait is not the GPU time. `Renderer::draw` does not write timestamp queries. A stage with no GPU work has GPU time 0.
+A profiled draw writes Vulkan timestamp queries around the GPU draw. The GPU time is that timestamp span. A fence wait is not the GPU time. `Renderer::draw` does not write timestamp queries. A stage with no GPU work has GPU time 0. A frame that reuses its picture and still runs the lighting verification budget reports that budget's timestamp span. GPU time is 0 only when the draw submitted nothing.
+
+`GENOS_FRAME_REUSE=0` turns picture reuse off. Otherwise a frame whose scene key matches the cached picture, and whose lighting verification found no real change, reuses that picture. Dirty UI is redrawn in place. An unchanged screen is not acquired or presented. The verification budget keeps running, and a real change it finds drops the cached picture. See [Frame reuse](../frame-reuse.md).
 
 `World::from_scene` makes one object for the floor, one for each wall, and one for each solid. Extra objects are meshes, particles, or shaders.
 
@@ -64,7 +66,7 @@ renderer.draw_with_overlay(&world, &camera, &rects, false)?;
 
 Each `ScreenRect` is a pixel rectangle. The draw places those rectangles after the world. The overlay does not test depth. The overlay does not write depth.
 
-`Renderer::report_overlay_damage` names the window pixels whose overlay changed, for the next draw only. When the overlay lists differ and nothing was reported, the draw diffs the old and new lists itself. The same lists keep their vertices. See [Frame reuse](../frame-reuse.md).
+`Renderer::report_overlay_damage` names the window pixels whose overlay changed, for the next draw only. When the overlay lists differ and nothing was reported, the draw diffs the old and new lists itself. The same lists keep their vertices. `Renderer::frame_skipped` is true when that draw did not present. `Renderer::reuse_stats` returns the counts printed as `FRAME_REUSE`: `scene_drawn`, `ui_repaired`, `full_restore`, `skipped`, `rects`. See [Frame reuse](../frame-reuse.md).
 
 The draw starts in `off`. That mode is the single-sample picture. `Renderer::set_antialias` selects the next picture. FXAA is a luminance-edge pass on the scene color. That pass runs before the overlay. SSAA was removed with GI v1 (it drew through the v1 fragment shader); panel code 2 now selects FXAA. The overlay is drawn at the presented size after the filter. A switch back to `off` draws the unfiltered image. The filter keeps no history.
 
@@ -89,6 +91,8 @@ A screen-space shader does not run a custom program yet. Custom SPIR-V is not lo
 The raster draws the opaque shapes' depth first, with no shading, then shades with an equal-or-nearer depth test, so each pixel shades one opaque surface however many faces cover it. Lighting and raster are two GPU stages in one submit. The CPU does not wait between them. A normal draw does not stall on the GPU fence. There are two frames in flight.
 
 The picture modes are `off` and FXAA. The draw does not run MSAA, SMAA, or TAA. The filter does not change the lighting. The filter does not change the overlay.
+
+Frame reuse does not keep a UI layer texture. It does not redraw part of the scene. It does not copy part of the swapchain image. The present regions are a hint. A wrong damage report leaves stale UI; an empty report with changed lists falls back to the renderer's own diff. See [Frame reuse](../frame-reuse.md).
 
 The swapchain uses mailbox when the surface lists mailbox. The next choice is immediate mode. The last choice is FIFO. Each in-flight frame has its own dynamic patch. The shape pool is one shared buffer.
 

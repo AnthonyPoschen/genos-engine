@@ -161,6 +161,16 @@ Files: `docs/systems/renderer.md`, `docs/architecture.md`, `docs/frame-reuse.md`
 
 Commit: `docs: renderer record and frame loop for frame reuse`.
 
+## Deviations while building steps 3–8
+
+The owner ruled out a hard freeze. Reuse is gated on the lighting verification budget, not on the 300-frame settle counter.
+
+- There is no `held >= 1` capture and no `lighting_stats().settled` reuse test. A reused frame keeps running compact, the dense cache rays, and one check ray per held probe (trace mode 3). A real gradient fail (`pad5`) or a probe check fail drops the cached picture. A frame that ran no checks is not treated as clean.
+- While reuse is on, `frozen` is false, so the direct-and-compose short list does not run. `GENOS_FRAME_REUSE=0` restores that list and turns reuse off. `picture_settled` still follows the settle counter.
+- A skipped frame skips acquire and present. It still submits the verification budget when lighting is on. GPU time is that timestamp span. GPU time is 0 only when nothing was submitted.
+- The scene picture is captured once the scene key has repeated, not on a moving camera, and not while an async light-cache round is in flight. Two flights do not write it at once.
+- Step 4's commit is `render: reuse the scene picture while lighting verification stays clean`. Step 5's commit is `render: skip acquire and present when the screen would not change`.
+
 ## Step 9: One short headless check
 
 Run `make verify` once: the stress smoke script, 320x180, no panel. It must pass as before. Optionally, run once with `GENOS_GPU_TIMES=60` and confirm that `FRAME_REUSE` shows `skipped` rising on a still view after about 300 frames.
