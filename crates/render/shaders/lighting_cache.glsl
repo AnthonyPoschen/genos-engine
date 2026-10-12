@@ -2510,6 +2510,10 @@ void lighting_svgf_variance(uint slot) {
         var = sw > 0.0 ? max(s2 / sw - (s1 / sw) * (s1 / sw), 0.0) * 4.0 / max(t, 1.0) : 0.0;
     }
     lighting_svgf_store(LIGHTING_SC_ATROUS_B, slot, v.rgb, var, v.w);
+    if ((lighting_sc_flags() & 8388608u) != 0u) {
+        // Diagnostic: the push takes the input (no levels).
+        lighting_svgf_store(LIGHTING_SC_ATROUS_A, slot, v.rgb, var, v.w);
+    }
 }
 void lighting_svgf_iter(uint slot, uint it) {
     uint src = (it & 1u) == 0u ? LIGHTING_SC_ATROUS_B : LIGHTING_SC_ATROUS_A;
@@ -2550,7 +2554,7 @@ void lighting_svgf_iter(uint slot, uint it) {
             float vq;
             vec4 x = lighting_svgf_load(src, q, vq);
             float w = h1[i + 2] * h1[j + 2] * lighting_svgf_wzn(slot, q);
-            if (q != slot && vp.w > 0.0 && x.w > 0.0 && (lighting_sc_flags() & 128u) == 0u) {
+            if (q != slot && vp.w > 0.0 && x.w > 0.0) {
                 w *= exp(-abs(lp - dot(x.rgb, LIGHTING_SVGF_LW)) / phi);
             }
             float a = w * x.w;
@@ -2625,10 +2629,6 @@ void lighting_svgf_push(uint slot) {
         outc = f.rgb;
     } else {
         outc = vec3(0.0);
-    }
-    if ((lighting_sc_flags() & 8388608u) != 0u) {
-        // Diagnostic: no WRC in the push.
-        outc = W > 0.0 ? f.rgb : outc;
     }
     cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(outc));
     // IC placement for the next rounds.

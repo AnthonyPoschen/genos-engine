@@ -23,6 +23,10 @@ void main() {
     if (stage == 0u) {
         lighting_svgf_variance(slot);
     } else if (stage <= 5u) {
+        // Diagnostics: flag 8388608 no levels, flag 128 level 1 only.
+        if ((lighting_sc_flags() & 8388608u) != 0u || ((lighting_sc_flags() & 128u) != 0u && stage > 1u)) {
+            return;
+        }
         lighting_svgf_iter(slot, stage - 1u);
     } else {
         lighting_svgf_push(slot);
