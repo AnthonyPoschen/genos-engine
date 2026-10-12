@@ -114,6 +114,6 @@ Each table has the change from the first scale to the others, in ms and %.
 ## Camera
 
 The camera flies: WASD/IJKL along the view, Space up, C down, Shift ×4, mouse look
-after a click, Escape releases. The engine's physics world holds 32 bodies, far
-fewer than one section's walls, so there are no colliders. `--view hall|roomA` picks
-a start pose; `--eye X Y Z YAW PITCH` sets any pose.
+after a click, Escape releases. `fly` calls `update` with a zero interval, so the
+physics step does not run and a pose can sit inside the building. `--view hall|roomA`
+picks a start pose; `--eye X Y Z YAW PITCH` sets any pose.

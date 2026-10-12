@@ -98,7 +98,7 @@ A codimation translates one solid. It does not rotate or scale that solid. The s
 
 This crate does not march light. The ground-plane march is in the renderer.
 
-The physics world holds `MAX_BODIES` (32) bodies. `attach_scene` with more than 30 walls and solids drops the rest, and the view capsule with them, so a large level cannot be walked with colliders yet. The stress example flies instead.
+`attach_scene` inserts the floor, every wall, every solid, and the view capsule. The physics crate stores bodies in a `Vec` and does not drop them past a fixed cap. The stress example still flies: `fly` calls `update` with a zero interval, so the step does not run and a bench pose can sit inside the building.
 
 ## Decisions
 
