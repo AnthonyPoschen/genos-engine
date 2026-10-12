@@ -23,15 +23,22 @@ const MIX_SCRIPT: &str = include_str!("../../scripts/gi_check/mix.rhai");
 const ROOM_SCRIPT: &str = include_str!("../../scripts/gi_check/room.rhai");
 const APPROACH_SCRIPT: &str = include_str!("../../scripts/gi_check/approach.rhai");
 const DNOUT_SCRIPT: &str = include_str!("../../scripts/gi_check/dnout.rhai");
+const FILL_SCRIPT: &str = include_str!("../../scripts/gi_check/fill.rhai");
+/// Fill run (convergence pop, Anthony 2026-10-12: light fills in with many small
+/// visible steps): mean |frame - its 9-frame moving average|, linear luminance at
+/// 320 x 180, while light fills in with camera and scene still. Provisional limit.
+const FILL_POP_LIMIT: f64 = 0.0020;
+/// A pixel-frame further than this from its moving average is a visible pop.
+const FILL_POP_STEP: f64 = 0.01;
 /// Day to night on open ground: first frame after the pan against the night pose
 /// settled (4eb10b86 1.43 before the cache kept its sun/sky share, 0f288334
 /// 0.065), and frames until the error stays under 2 % (a target, not a gate).
 const DNOUT_FIRST_LIMIT: f64 = 0.10;
 const DNOUT_FRAMES_TARGET: f64 = 120.0;
 const ROOM_SCENE: &str = include_str!("../../scenes/room.rhai");
-const RUNS: [&str; 15] = [
+const RUNS: [&str; 16] = [
     "repro", "settled", "moving", "walk", "flicker", "camera", "trail", "flick", "turn", "room",
-    "mix", "spin", "lampret", "approach", "dnout",
+    "mix", "spin", "lampret", "approach", "dnout", "fill",
 ];
 const FLICKER_SCRIPT: &str = include_str!("../../scripts/temporal_flicker_aligned.rhai");
 const VIEWS: [&str; 5] = ["room-a", "corner", "contact", "lamp-wall", "hall"];
@@ -420,14 +427,14 @@ fn tier(o: &mut Options, name: &str) -> Result<(), String> {
             // moving checks; the 90-pose camera clip (45 s) was cut 2026-10-10: the
             // turn run covers camera motion in a third of the time and caught what
             // the clip missed (the turn swim).
-            &["repro", "settled", "trail", "flick", "turn", "room", "mix", "spin", "approach", "dnout"]
+            &["repro", "settled", "trail", "flick", "turn", "room", "mix", "spin", "approach", "dnout", "fill"]
         }
         "mid" => {
             o.stride = 2;
-            &["repro", "settled", "moving", "camera", "trail", "flick", "turn", "room", "mix", "spin", "approach", "dnout"]
+            &["repro", "settled", "moving", "camera", "trail", "flick", "turn", "room", "mix", "spin", "approach", "dnout", "fill"]
         }
         "full" => &[
-            "repro", "settled", "moving", "camera", "trail", "flick", "turn", "room", "mix", "spin", "approach", "dnout", "flicker",
+            "repro", "settled", "moving", "camera", "trail", "flick", "turn", "room", "mix", "spin", "approach", "dnout", "fill", "flicker",
         ],
         other => return Err(format!("gi-check: --tier quick, mid or full, not {other}")),
     };
@@ -436,7 +443,7 @@ fn tier(o: &mut Options, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-const HELP: &str = "genos-stress gi-check [--tier quick|mid|full] [--out DIR] [--only repro,settled,moving,walk,flicker,camera,trail,flick,turn,room,mix,spin,lampret,approach] \
+const HELP: &str = "genos-stress gi-check [--tier quick|mid|full] [--out DIR] [--only repro,settled,moving,walk,flicker,camera,trail,flick,turn,room,mix,spin,lampret,approach,dnout,fill] \
 [--score-only] [--ref-noise 0.05] [--ref-spp 2048] [--ref-seconds 900] [--size 640x360] [--walk-size 1280x720] \
 [--settled-refs DIR] [--views corner,contact] [--stride 1] [--clip N] [--fail-fast] [--keep-going]
 GENOS_LIGHTING_TILE defaults to the 1440p probe spacing (height / 90), references are \
@@ -471,6 +478,7 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
         "room" => (fill(ROOM_SCRIPT), &o.size),
         "approach" => (fill(APPROACH_SCRIPT), &o.size),
         "dnout" => (fill(DNOUT_SCRIPT), &o.size),
+        "fill" => (fill(FILL_SCRIPT), &o.size),
         "mix" => (fill(&MIX_SCRIPT.replace("__SEGS__", "mix")), &o.size),
         "spin" => (fill(&MIX_SCRIPT.replace("__SEGS__", "spin")), &o.size),
         "lampret" => (fill(&MIX_SCRIPT.replace("__SEGS__", "lampret")), &o.size),
@@ -757,6 +765,7 @@ fn score_run(o: &Options, out: &Path, run: &str, rows: &mut Vec<Row>) -> Result<
             "camera" => camera_rows(rows, &dir)?,
             "trail" => trail_rows(rows, &dir)?,
             "flick" => flick_rows(rows, &dir)?,
+            "fill" => fill_rows(rows, &dir)?,
             "turn" => turn_rows(rows, &dir)?,
             "room" => room_rows(rows, &dir)?,
             "mix" => mix_rows(rows, &dir)?,
@@ -1002,6 +1011,66 @@ fn repro_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
             limit: REPRO_LIMIT,
             note: format!("ratio {ratio:.4}, error {err:.4}, frame {i}"),
             image: f,
+        });
+    }
+    Ok(())
+}
+
+/// Fill run (fill.rhai): convergence pop while light fills in, camera and scene
+/// still, after a reveal (reveal/) and a sun move (light/). Per pixel and frame,
+/// |L - mean of L over the 9 frames around it| (a smooth ramp scores ~0, a step
+/// scores about half its size for 4 frames); the share of pixel-frames over
+/// FILL_POP_STEP; and the frames until the picture stays within 0.005 of its last
+/// frame (fill speed, so holding the old light does not pass).
+fn fill_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
+    for (sub, what) in [("reveal", "after a reveal"), ("light", "after a sun move")] {
+        let mut f = Vec::new();
+        while frame(dir, sub, f.len()).exists() {
+            f.push(metrics::lum320(&frame(dir, sub, f.len()))?);
+        }
+        if f.len() < 20 {
+            continue;
+        }
+        let n = f.len();
+        let px = f[0].v.len();
+        let (mut sum, mut count, mut over) = (0.0f64, 0usize, 0usize);
+        let mut worst = (0.0f64, 0usize);
+        for t in 4..n - 4 {
+            let mut fs = 0.0;
+            for i in 0..px {
+                let ma: f64 = (t - 4..=t + 4).map(|k| f[k].v[i]).sum::<f64>() / 9.0;
+                let d = (f[t].v[i] - ma).abs();
+                fs += d;
+                over += usize::from(d > FILL_POP_STEP);
+            }
+            let m = fs / px as f64;
+            if m > worst.0 {
+                worst = (m, t);
+            }
+            sum += fs;
+            count += px;
+        }
+        let pop = sum / count as f64;
+        let share = over as f64 / count as f64;
+        let last = &f[n - 1];
+        let gap = |p: &metrics::Plane| p.v.iter().zip(&last.v).map(|(a, b)| (a - b).abs()).sum::<f64>() / px as f64;
+        let settle = (0..n).rev().take_while(|&t| gap(&f[t]) < 0.005).last().unwrap_or(n - 1);
+        println!(
+            "fill     {sub}: pop {pop:.6} (worst frame {} at {}), pop share {share:.5}, filled by frame {settle}",
+            format_args!("{:.6}", worst.0),
+            worst.1
+        );
+        rows.push(Row {
+            check: format!("fill pop {what}"),
+            value: pop,
+            limit: FILL_POP_LIMIT,
+            note: format!(
+                "provisional; {:.3}% pixel-frames over {FILL_POP_STEP}; worst frame {} ({:.6}); filled by frame {settle}",
+                share * 100.0,
+                worst.1,
+                worst.0
+            ),
+            image: frame(dir, sub, worst.1),
         });
     }
     Ok(())
