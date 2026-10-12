@@ -2304,9 +2304,6 @@ void lighting_world_add(vec3 pos, vec3 n, vec3 e, bool changed) {
 // the surface cache and relights it; no method swap to the probes, whose
 // difference from the texels was the bright contact strip of the spin check).
 const bool LIGHTING_SC_KEEP_NEAR = true;
-// S73B Lumen surface cache GPU feedback (Wright et al. 2022): set while an
-// off-screen scout hit claims texels; they are stamped used, not shown.
-bool lighting_sc_feedback = false;
 vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj);
 // S72M: the pixel's screen-probe irradiance (lighting_compose.comp), -1 when none.
 vec3 lighting_px_probes = vec3(-1.0);
@@ -2380,11 +2377,7 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         }
         if (mode == 3u) {
             lighting_sc_offer(slot, pos, lighting_sc_centre(q, n, size));
-            // S73B: a feedback claim (off-screen scout hit) marks the texel used
-            // (LastUsed, above) but not shown.
-            if (!lighting_sc_feedback) {
-                cache.v[LIGHTING_WORLD_AT + slot].z = uintBitsToFloat(lighting_frame());
-            }
+            cache.v[LIGHTING_WORLD_AT + slot].z = uintBitsToFloat(lighting_frame());
         }
         vec4 v = mode == 3u ? lighting_sc_shown(slot) : (mode != 2u ? cache.v[3u * slot + 2u] : cache.v[LIGHTING_WORLD_AT + slot]);
         if (mode == 3u && lighting_sc_stale(slot)) {
