@@ -1132,6 +1132,7 @@ impl Gpu {
             );
             eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
             eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
+            eprintln!("lightingdp {queue} frame {} d {:?}", self.lighting.frame, &w[120..152]);
         }
     }
 
@@ -1816,10 +1817,11 @@ fn lighting_stats_wanted() -> bool {
 const LIGHTING_DEFAULT_WORLD: u32 = 3;
 const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
 const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
-/// Lighting stats buffer: 24 words, diag[64], chg[32] (lighting_cache.glsl).
-const LIGHTING_STATS_WORDS: usize = 120;
+/// Lighting stats buffer: 24 words, diag[64], chg[32], dp[32] (lighting_cache.glsl).
+/// chg[31] stays at word 119. dp[] follows it, so the enable word is not the last word.
+const LIGHTING_STATS_WORDS: usize = 152;
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
-const LIGHTING_CHG_ENABLE_BYTE: u64 = (LIGHTING_STATS_WORDS as u64 - 1) * 4;
+const LIGHTING_CHG_ENABLE_BYTE: u64 = (24 + 64 + 31) * 4;
 /// S78S: the change counters (lighting_chg) run with GENOS_LIGHTING_SC_TRACE.
 fn lighting_chg_on() -> bool {
     std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_some()

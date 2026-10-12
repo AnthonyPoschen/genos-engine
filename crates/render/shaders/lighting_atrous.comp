@@ -9,6 +9,10 @@ void main() {
     uint slot = gl_GlobalInvocationID.x;
     // S78X: levels 1-5 run their work list (lighting_svgf_mark).
     uint stage0 = lighting_atrous_stage();
+    // Phase 0 d8-d12: one thread records the list count (a value past the cap overflowed).
+    if (LIGHTING_DIAG != 0 && stage0 >= 1u && stage0 <= 5u && slot == 0u) {
+        atomicMax(gstats.dp[8u + stage0 - 1u], ckeys.key[lighting_atrous_list(stage0)]);
+    }
     if (LIGHTING_DIRTY_ATROUS && LIGHTING_ATROUS_LISTS && stage0 >= 1u && stage0 <= 5u) {
         uint cnt = ckeys.key[lighting_atrous_list(stage0)];
         if (cnt <= LIGHTING_ATROUS_LIST_CAP) {
