@@ -142,6 +142,149 @@ uint lighting_frame() {
     return pc.params.w;
 }
 
+// Quiet compose (lighting_compose.comp). The picture is kept in the output
+// buffer. An 8x8 block is redrawn only when a pass that feeds it writes a new
+// value: direct light or the surface point (lighting_direct.comp), a probe's SH
+// (lighting_filter.comp), or the filtered field of a texel that block reads
+// (the push below). The block list is indirect-dispatched, so a frame whose
+// producers write nothing launches no compose groups. Words live at the end of
+// the key buffer; lighting_gpu.rs sizes the same range.
+const uint LIGHTING_COMPOSE_CAP = 65535u;
+const uint LIGHTING_COMPOSE_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u + 16u + 3u * 65536u + 1024u + 32768u + 16u + 5u * LIGHTING_CACHE_SLOTS + 5u * 65537u + 6u * 65536u + 16u;
+const uint LIGHTING_COMPOSE_COUNT = LIGHTING_COMPOSE_AT;
+const uint LIGHTING_COMPOSE_FULL = LIGHTING_COMPOSE_AT + 3u;
+const uint LIGHTING_COMPOSE_STAMP = LIGHTING_COMPOSE_AT + 4u;
+const uint LIGHTING_COMPOSE_LIST = LIGHTING_COMPOSE_STAMP + LIGHTING_COMPOSE_CAP;
+const uint LIGHTING_COMPOSE_PACK = LIGHTING_COMPOSE_LIST + LIGHTING_COMPOSE_CAP;
+const uint LIGHTING_COMPOSE_MINX = LIGHTING_COMPOSE_PACK + LIGHTING_CACHE_SLOTS;
+const uint LIGHTING_COMPOSE_MINY = LIGHTING_COMPOSE_MINX + LIGHTING_CACHE_SLOTS;
+const uint LIGHTING_COMPOSE_MAXX = LIGHTING_COMPOSE_MINY + LIGHTING_CACHE_SLOTS;
+const uint LIGHTING_COMPOSE_MAXY = LIGHTING_COMPOSE_MAXX + LIGHTING_CACHE_SLOTS;
+// Set by the compose pass around the lookups that colour a pixel.
+bool lighting_sc_display = false;
+uvec2 lighting_compose_px = uvec2(0u);
+// The camera matches the one stored for last frame (change block head 1-4).
+// eye.w is the "last camera is valid" flag; up.w is the flag word, not the basis.
+bool lighting_view_held() {
+    vec4 eye = work.v[lighting_change_at() + 1u];
+    if (!(eye.w > 0.5)) {
+        return false;
+    }
+    if (any(notEqual(eye.xyz, scene.eye.xyz))) {
+        return false;
+    }
+    vec4 right = work.v[lighting_change_at() + 2u];
+    vec4 up = work.v[lighting_change_at() + 3u];
+    vec4 fwd = work.v[lighting_change_at() + 4u];
+    return all(equal(right.xyz, scene.view_right.xyz)) && right.w == scene.view_right.w
+        && all(equal(up.xyz, scene.view_up.xyz))
+        && all(equal(fwd.xyz, scene.view_forward.xyz)) && fwd.w == scene.view_forward.w;
+}
+// A pixel showed this texel within `window` frames, or the camera has not moved
+// since a pixel showed it. Compose skips redraws while the camera is held, so
+// the shown-frame stamp stops advancing; the texel is still the one on screen.
+bool lighting_sc_pixel_fresh(uint shown, int window) {
+    if (shown == 0u) {
+        return false;
+    }
+    if (int(lighting_frame() - shown) <= window) {
+        return true;
+    }
+    return lighting_view_held();
+}
+bool lighting_sc_expired(uint last, uint shown) {
+    return int(lighting_frame() - last) > int(LIGHTING_CACHE_LIFE) && !lighting_sc_pixel_fresh(shown, 60);
+}
+void lighting_compose_cover(uint slot) {
+    if (!lighting_sc_display || slot == ~0u || slot >= LIGHTING_CACHE_SLOTS) {
+        return;
+    }
+    uvec2 b = lighting_compose_px >> 3u;
+    atomicMin(ckeys.key[LIGHTING_COMPOSE_MINX + slot], b.x);
+    atomicMin(ckeys.key[LIGHTING_COMPOSE_MINY + slot], b.y);
+    atomicMax(ckeys.key[LIGHTING_COMPOSE_MAXX + slot], b.x);
+    atomicMax(ckeys.key[LIGHTING_COMPOSE_MAXY + slot], b.y);
+}
+void lighting_compose_mark_block(uint block) {
+    if (block >= LIGHTING_COMPOSE_CAP) {
+        return;
+    }
+    if (atomicExchange(ckeys.key[LIGHTING_COMPOSE_STAMP + block], lighting_frame()) == lighting_frame()) {
+        return;
+    }
+    uint at = atomicAdd(ckeys.key[LIGHTING_COMPOSE_COUNT], 1u);
+    if (at < LIGHTING_COMPOSE_CAP) {
+        ckeys.key[LIGHTING_COMPOSE_LIST + at] = block;
+    }
+}
+void lighting_compose_mark_px(uint idx) {
+    uint w = pc.dims.x;
+    uint bw = (w + 7u) / 8u;
+    uint x = idx % w;
+    uint y = idx / w;
+    lighting_compose_mark_block((y >> 3u) * bw + (x >> 3u));
+}
+void lighting_compose_mark_slot(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return;
+    }
+    uint x0 = ckeys.key[LIGHTING_COMPOSE_MINX + slot];
+    uint y0 = ckeys.key[LIGHTING_COMPOSE_MINY + slot];
+    uint x1 = ckeys.key[LIGHTING_COMPOSE_MAXX + slot];
+    uint y1 = ckeys.key[LIGHTING_COMPOSE_MAXY + slot];
+    if (x0 > x1 || y0 > y1) {
+        return;
+    }
+    uint bw = (pc.dims.x + 7u) / 8u;
+    uint bh = (pc.dims.y + 7u) / 8u;
+    if (bw == 0u || bh == 0u || x0 >= bw || y0 >= bh) {
+        return;
+    }
+    x1 = min(x1, bw - 1u);
+    y1 = min(y1, bh - 1u);
+    for (uint y = y0; y <= y1; ++y) {
+        for (uint x = x0; x <= x1; ++x) {
+            lighting_compose_mark_block(y * bw + x);
+        }
+    }
+}
+// Probe cell (cx, cy) is one of the four samples for the pixel cells around it
+// (lighting_compose.comp). Mark every 8x8 block those cells cover.
+void lighting_compose_mark_probe(uint probe) {
+    uint tile = max(pc.params.y, 1u);
+    uint cols = pc.dims.z;
+    if (cols == 0u) {
+        return;
+    }
+    int cx = int(probe % cols);
+    int cy = int(probe / cols);
+    int x0 = max(cx - 1, 0);
+    int y0 = max(cy - 1, 0);
+    int x1 = cx + 2;
+    int y1 = cy + 2;
+    uint bw = (pc.dims.x + 7u) / 8u;
+    uint bh = (pc.dims.y + 7u) / 8u;
+    uint bx0 = min(uint(x0) * tile, pc.dims.x) / 8u;
+    uint by0 = min(uint(y0) * tile, pc.dims.y) / 8u;
+    uint bx1 = min(uint(max(x1, 0)) * tile, pc.dims.x);
+    uint by1 = min(uint(max(y1, 0)) * tile, pc.dims.y);
+    bx1 = min((bx1 + 7u) / 8u, bw);
+    by1 = min((by1 + 7u) / 8u, bh);
+    for (uint y = by0; y < by1; ++y) {
+        for (uint x = bx0; x < bx1; ++x) {
+            lighting_compose_mark_block(y * bw + x);
+        }
+    }
+}
+void lighting_compose_note_field(uint slot, uint packed) {
+    uint now = packed + 1u;
+    uint prev = ckeys.key[LIGHTING_COMPOSE_PACK + slot];
+    ckeys.key[LIGHTING_COMPOSE_PACK + slot] = now;
+    if (prev != 0u && prev != now) {
+        lighting_compose_mark_slot(slot);
+    }
+}
+
 // Light cache round: which batch of live patches is relit. Rounds are counted on
 // their own (lighting_gpu.rs), so a frame without one skips no batch.
 uint lighting_round() {
@@ -569,7 +712,9 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
     [[dont_unroll]] for (uint i = 0u; i < LIGHTING_CACHE_SEARCH; i++) {
         uint k = ckeys.key[(start + i) & (LIGHTING_CACHE_SLOTS - 1u)];
         if (k == key) {
-            return (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
+            uint found = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
+            lighting_compose_cover(found);
+            return found;
         }
         if (k == 0u && free_at == LIGHTING_CACHE_SEARCH) {
             free_at = i;
@@ -601,9 +746,11 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
             if (lighting_world_mode() == 3u) {
                 cache.v[LIGHTING_SC_OBJ_AT + slot] = vec4(lighting_obj_salt, 0.0, 0.0, 0.0);
             }
+            lighting_compose_cover(slot);
             return slot;
         }
         if (prev == key) {
+            lighting_compose_cover(slot);
             return slot;
         }
     }
@@ -1391,7 +1538,7 @@ void lighting_sc_pool(uint slot) {
     if (lighting_sc_layer2() && cache.v[3u * slot + 1u].w <= 0.2) {
         // S72P: layer 2 for texels a pixel showed in the last half second.
         uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z);
-        if (shown != 0u && int(lighting_frame() - shown) <= 30) {
+        if (lighting_sc_pixel_fresh(shown, 30)) {
             lighting_sc_recon(slot);
         }
         lighting_obj_salt = 0.0;
@@ -1527,7 +1674,6 @@ vec3 lighting_sc_nclamp(uint slot, vec3 m, vec3 sm, float dev) {
 // by more than LIGHTING_SC_SPARSE_RATIO in luminance (contacts, shadow edges).
 // Flag 16777216 turns it off.
 const float LIGHTING_SC_SPARSE_RATIO = 1.3;
-bool lighting_sc_display = false;
 bool lighting_sc_svgf();
 bool lighting_sc_sparse_on() {
     return lighting_world_mode() == 3u && (lighting_sc_flags() & 16777216u) == 0u && !lighting_sc_svgf();
@@ -1724,7 +1870,11 @@ vec4 lighting_sc_shown(uint slot) {
             // its field is rebuilt (next frame) it shows the WRC as of now
             // (parent bilinear), not that old light.
             uint pf = floatBitsToUint(cache.v[10u * LIGHTING_CACHE_SLOTS + slot].w);
-            bool fresh = pf != 0u && int(lighting_frame() - pf) <= 2;
+            // While the camera is held, the field last written stays what pixels
+            // show. The push idle and a frozen frame do not rewrite the stamp, and
+            // dropping the field for the WRC on that timer would change a still
+            // picture that nothing else changed.
+            bool fresh = pf != 0u && (int(lighting_frame() - pf) <= 2 || lighting_view_held());
             have = fresh && any(greaterThan(field, vec3(0.0)));
             if (have) {
                 return vec4(field, 1.0);
@@ -2636,7 +2786,7 @@ bool lighting_svgf_active(uint s) {
         return true;
     }
     uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + s].z);
-    return shown != 0u && int(lighting_frame() - shown) <= 30;
+    return lighting_sc_pixel_fresh(shown, 30);
 }
 // Layer-1 input: rgb, luminance variance (-1 unknown), mask weight.
 vec4 lighting_svgf_in(uint s, out float var) {
@@ -2978,6 +3128,17 @@ void lighting_svgf_push(uint slot) {
     if (LIGHTING_DIRTY_ATROUS && W >= 0.999 && !lighting_svgf_stamp_recent(slot, 3u)
         && cache.v[LIGHTING_SC_ATROUS_B + slot].w != 0.0
         && ((lighting_hash(slot ^ 0x7f4a7c15u) + lighting_frame()) % LIGHTING_PUSH_IDLE) != 0u) {
+        // S72V10 trusts the field for two frames from this stamp. The idle skip
+        // does not rewrite the field, so while the camera is held the stamp stays
+        // current and compose keeps showing that field instead of dropping it
+        // for the WRC on a timer. A later push that writes a different field
+        // marks the blocks (lighting_compose_note_field).
+        if (lighting_view_held()) {
+            uint pf = floatBitsToUint(cache.v[LIGHTING_SC_ATROUS_B + slot].w);
+            if (pf != 0u && lighting_frame() - pf >= 2u) {
+                cache.v[LIGHTING_SC_ATROUS_B + slot].w = uintBitsToFloat(lighting_frame());
+            }
+        }
         return;
     }
     // Coarse: the WRC cells (2x size) bilinear, their filtered values and masks.
@@ -3016,8 +3177,10 @@ void lighting_svgf_push(uint slot) {
     } else {
         outc = vec3(0.0);
     }
-    cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(outc));
+    uint field_pack = lighting_pack_rgb9e5(outc);
+    cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(field_pack);
     cache.v[LIGHTING_SC_ATROUS_B + slot].w = uintBitsToFloat(lighting_frame());
+    lighting_compose_note_field(slot, field_pack);
     // IC placement for the next rounds.
     if (W > 0.0 || cw > 0.0) {
         float e = dot(outc, LIGHTING_SVGF_LW);

@@ -58,6 +58,33 @@ const LIGHTING_SETTLE_FRAMES: u32 = 32;
 /// Largest relative change of a relit cache patch, in millionths, that counts as
 /// settled (0.2 %, well under a display code).
 const LIGHTING_SETTLE_CHANGE: u32 = 2000;
+/// 8×8 compose blocks the quiet list can hold (lighting_cache.glsl LIGHTING_COMPOSE_CAP).
+const LIGHTING_COMPOSE_CAP: u64 = 65535;
+
+/// First key-buffer word of the quiet-compose list. Matches LIGHTING_COMPOSE_AT.
+fn lighting_compose_at() -> u64 {
+    2 * LIGHTING_CACHE_SLOTS
+        + 2
+        + 17600
+        + 16
+        + 3 * 65536
+        + 1024
+        + 32768
+        + 16
+        + 5 * LIGHTING_CACHE_SLOTS
+        + 5 * 65537
+        + 6 * 65536
+        + 16
+}
+
+fn lighting_ckeys_words() -> u64 {
+    // count, y, z, full flag, stamps, list, field packs, four rect words.
+    lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + 5 * LIGHTING_CACHE_SLOTS
+}
+
+fn lighting_compose_minx() -> u64 {
+    lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + LIGHTING_CACHE_SLOTS
+}
 
 pub(crate) struct Lighting {
     ready: bool,
@@ -78,6 +105,9 @@ pub(crate) struct Lighting {
     gbuf_clear: bool,
     /// The work buffer is new: zeroed first, so no probe keeps a stratum.
     work_clear: bool,
+    /// The picture in the output buffer was drawn for this size. A new buffer
+    /// has no picture yet, so the next compose covers every pixel.
+    compose_valid: bool,
     /// The traced world as of the last frame's passes: the scene block (its
     /// occluder list is compared, lighting_changes) and the key of what else is traced
     /// (meshes, floor, roof); a change of the key drops every kept stratum.
@@ -195,6 +225,7 @@ impl Default for Lighting {
             cache_clear: false,
             gbuf_clear: false,
             work_clear: false,
+            compose_valid: false,
             kept_bytes: Vec::new(),
             kept_key: 0,
             trace_key: 0,
@@ -613,7 +644,7 @@ impl Gpu {
         let share = self.light_families();
         if self.lighting.cache_keys.buffer.is_null() {
             self.lighting.cache_keys = self.make_buffer_queues(
-                (2 * LIGHTING_CACHE_SLOTS + 2 + 17600 + 16 + 3 * 65536 + 1024 + 32768 + 16 + 5 * LIGHTING_CACHE_SLOTS + 5 * 65537 + 6 * 65536 + 16) * 4, // S78Z: + verify / wake words // S78X: + a-trous marks and work lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
+                lighting_ckeys_words() * 4, // quiet compose list and texel rects past the S78Z/S78X words
                 0x20 | 0x2 | 0x100 | 0x1,
                 Memory::Device,
                 &share,
@@ -639,8 +670,10 @@ impl Gpu {
         self.lighting.gbuf = self.make_buffer(16 + pixels * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.work =
             self.make_buffer_queues(work_vec4 * 16, 0x20 | 0x1 | 0x2, Memory::Device, &share)?;
-        self.lighting.out = self.make_buffer(pixels * 4, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        // Picture, then this frame's emitted light (compose reads the second half).
+        self.lighting.out = self.make_buffer(pixels * 8, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.dims = [w, h, cols, rows];
+        self.lighting.compose_valid = false;
         self.lighting.gbuf_clear = true;
         self.lighting.work_clear = true;
         self.write_raster_sets()?;
@@ -853,11 +886,33 @@ impl Gpu {
                 self.lighting.work_clear = false;
                 (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.work.buffer, 0, u64::MAX, 0);
             }
-            if self.lighting.gbuf_clear {
-                self.lighting.gbuf_clear = false;
-                // Every record empty (distance all ones); the header goes in below.
-                (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.gbuf.buffer, 0, u64::MAX, u32::MAX);
-            }
+            self.lighting.gbuf_clear = false;
+            // Empty records (distance all ones). Compose no longer visits every
+            // pixel, so the next raster cannot rely on it to clear what it skipped.
+            // The header is written just below.
+            (self.fns.cmd_fill_buffer)(
+                self.cmd,
+                self.lighting.gbuf.buffer,
+                0,
+                self.lighting.gbuf.size,
+                u32::MAX,
+            );
+            // Quiet-compose indirect args: group count x starts at 0, y and z stay 1.
+            let yz = [1u32, 1u32];
+            (self.fns.cmd_fill_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                lighting_compose_at() * 4,
+                4,
+                0,
+            );
+            (self.fns.cmd_update_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                (lighting_compose_at() + 1) * 4,
+                8,
+                yz.as_ptr() as *const c_void,
+            );
             // The whole-buffer clears land before the count and header writes.
             self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             // The mature and young patch counts, rebuilt by the compact pass.
@@ -1378,8 +1433,20 @@ impl Gpu {
             | u32::from(picks) << 11;
         let pc = [w, h, cols, rows, LIGHTING_RAYS, lighting_tile(h), z, self.lighting.frame];
         let image = self.color.image;
-        // The raster colour as the base: pixels with no surface keep it.
-        self.copy_image_buffer(image, 6, self.lighting.out.buffer, w, h, true);
+        let blocks = (w.div_ceil(8) as u64) * (h.div_ceil(8) as u64);
+        // Full compose when the picture has no history yet, the scene moved, the
+        // surface cache is off, or the block list cannot cover the image.
+        // GENOS_LIGHTING_COMPOSE_ALL forces it (an A/B against the quiet path).
+        let compose_full = !self.lighting.compose_valid
+            || self.lighting.still == 0
+            || lighting_world_env() != 3
+            || std::env::var_os("GENOS_LIGHTING_COMPOSE_ALL").is_some()
+            || blocks > LIGHTING_COMPOSE_CAP;
+        // The raster colour as the base: pixels with no surface keep it. A held
+        // frame keeps last frame's picture in the buffer instead.
+        if compose_full {
+            self.copy_image_buffer(image, 6, self.lighting.out.buffer, w, h, true);
+        }
         self.memory_barrier(0x80 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
         let set = self.lighting.sets[slot];
         // Settled (frozen above): the probes and the light cache hold their light,
@@ -1467,6 +1534,34 @@ impl Gpu {
             ]
         };
         unsafe {
+            (self.fns.cmd_fill_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                (lighting_compose_at() + 3) * 4,
+                4,
+                u32::from(compose_full),
+            );
+            if compose_full {
+                // Empty rects (min > max) so this frame's compose records who reads
+                // each texel. The next held frame marks only those blocks.
+                let words = LIGHTING_CACHE_SLOTS * 2;
+                let minx = lighting_compose_minx();
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.cache_keys.buffer,
+                    minx * 4,
+                    words * 4,
+                    u32::MAX,
+                );
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.cache_keys.buffer,
+                    (minx + words) * 4,
+                    words * 4,
+                    0,
+                );
+            }
+            self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x1);
             (self.fns.cmd_bind_set)(
                 self.cmd,
                 1,
@@ -1571,12 +1666,20 @@ impl Gpu {
                     );
                 }
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.pipes[pass]);
-                match kind {
-                    LIGHTING_DENSE_RAYS | LIGHTING_DENSE_ENTRIES => {
-                        let at = (LIGHTING_ARGS_AT + if kind == LIGHTING_DENSE_RAYS { 0 } else { 3 }) * 4;
-                        (self.fns.cmd_dispatch_indirect)(self.cmd, self.lighting.cache_keys.buffer, at);
+                if pass == 7 && !compose_full {
+                    (self.fns.cmd_dispatch_indirect)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        lighting_compose_at() * 4,
+                    );
+                } else {
+                    match kind {
+                        LIGHTING_DENSE_RAYS | LIGHTING_DENSE_ENTRIES => {
+                            let at = (LIGHTING_ARGS_AT + if kind == LIGHTING_DENSE_RAYS { 0 } else { 3 }) * 4;
+                            (self.fns.cmd_dispatch_indirect)(self.cmd, self.lighting.cache_keys.buffer, at);
+                        }
+                        _ => (self.fns.cmd_dispatch)(self.cmd, gx.max(1), if kind != 0 { 1 } else { gy.max(1) }, 1),
                     }
-                    _ => (self.fns.cmd_dispatch)(self.cmd, gx.max(1), if kind != 0 { 1 } else { gy.max(1) }, 1),
                 }
                 if kind != 0 {
                     (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, 32, cur_pc.as_ptr() as *const c_void);
@@ -1587,6 +1690,9 @@ impl Gpu {
                     (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first + 1 + k as u32);
                 }
             }
+        }
+        if compose_full {
+            self.lighting.compose_valid = true;
         }
         self.image_barrier(image, 6, 7, 0x1000, 0x1000, 0x800, 0x1000);
         self.copy_image_buffer(image, 7, self.lighting.out.buffer, w, h, false);

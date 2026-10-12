@@ -223,8 +223,14 @@ void main() {
         uint c = (idx & 1u) * 2u;
         if (pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig && lighting_pix_quiet()) {
             uint emitted = gbuf.px[idx].w;
-            outc.px[idx] = emitted == ~0u ? 0u : emitted;
+            uint glow = emitted == ~0u ? 0u : emitted;
+            uint prev = outc.px[pixels + idx];
+            // Emitted stays out of the picture buffer; compose reads it here.
+            outc.px[pixels + idx] = glow;
             gbuf.px[idx].w = floatBitsToUint(pv[c + 1u]);
+            if (glow != prev) {
+                lighting_compose_mark_px(idx);
+            }
             return;
         }
     }
@@ -393,12 +399,26 @@ void main() {
     }
     if (idx < pixels) {
         uint emitted = gbuf.px[idx].w;
-        outc.px[idx] = emitted == ~0u ? 0u : emitted;
-        gbuf.px[idx].w = lighting_pack_rgb9e5(e);
-        if (LIGHTING_PIX_REUSE && lighting_world_mode() == 3u) {
+        uint glow = emitted == ~0u ? 0u : emitted;
+        uint prev_e = outc.px[pixels + idx];
+        uint packed = lighting_pack_rgb9e5(e);
+        uint prev_d = 0u;
+        uint prev_sig = 0u;
+        bool tracked = LIGHTING_PIX_REUSE && lighting_world_mode() == 3u;
+        if (tracked) {
+            uint c = (idx & 1u) * 2u;
+            prev_sig = floatBitsToUint(work.v[lighting_pix_at() + idx / 2u][c]);
+            prev_d = floatBitsToUint(work.v[lighting_pix_at() + idx / 2u][c + 1u]);
+        }
+        outc.px[pixels + idx] = glow;
+        gbuf.px[idx].w = packed;
+        if (tracked) {
             uint c = (idx & 1u) * 2u;
             work.v[lighting_pix_at() + idx / 2u][c] = uintBitsToFloat(pix_sig);
-            work.v[lighting_pix_at() + idx / 2u][c + 1u] = uintBitsToFloat(gbuf.px[idx].w);
+            work.v[lighting_pix_at() + idx / 2u][c + 1u] = uintBitsToFloat(packed);
+            if (glow != prev_e || packed != prev_d || pix_sig != prev_sig) {
+                lighting_compose_mark_px(idx);
+            }
         }
     } else {
         lighting_hit_sunfrac = 0.0;
