@@ -64,6 +64,8 @@ pub(crate) struct FrameReuse {
     pub submitted: bool,
     /// Skipped frames that submitted nothing, counted toward the `GPU_MS` print.
     pub quiet_skips: u32,
+    /// Regions passed to `VK_KHR_incremental_present` for the next present.
+    pub present_regions: Vec<Region>,
     pub stats: ReuseStats,
 }
 
@@ -90,6 +92,7 @@ impl Default for FrameReuse {
             skipped: false,
             submitted: false,
             quiet_skips: 0,
+            present_regions: Vec::new(),
             stats: ReuseStats::default(),
         }
     }

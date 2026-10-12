@@ -805,8 +805,10 @@ struct Gpu {
     ready: VecDeque<Duration>,
     submitted_slot: Option<usize>,
     antialias: Antialias,
-    /// Overlay damage and, once wired, the cached scene picture.
+    /// Overlay damage and the cached scene picture.
     reuse: crate::reuse::FrameReuse,
+    /// The device listed `VK_KHR_incremental_present`.
+    incremental_present: bool,
     /// Last known layout of each flight's color image. `0` is undefined. `6` is transfer source.
     color_layout: [u32; 2],
     keep_pass: Handle,
@@ -1289,8 +1291,42 @@ impl Gpu {
             // v2 G-buffer. Every desktop driver (and lavapipe, MoltenVK) has it.
             let mut features = [0u32; 55];
             features[26] = 1;
+            let enumerate_dev_ext: unsafe extern "system" fn(
+                Handle,
+                *const c_char,
+                *mut u32,
+                *mut u8,
+            ) -> VkResult = transmute(load(b"vkEnumerateDeviceExtensionProperties\0"));
+            let mut listed = 0u32;
+            let mut incremental_present = false;
+            if enumerate_dev_ext(physical, std::ptr::null(), &mut listed, std::ptr::null_mut()) == 0
+                && listed > 0
+            {
+                let mut listed_bytes = vec![0u8; listed as usize * 260];
+                if enumerate_dev_ext(
+                    physical,
+                    std::ptr::null(),
+                    &mut listed,
+                    listed_bytes.as_mut_ptr(),
+                ) == 0
+                {
+                    let want = b"VK_KHR_incremental_present";
+                    for chunk in listed_bytes.chunks(260).take(listed as usize) {
+                        let end = chunk[..256].iter().position(|&byte| byte == 0).unwrap_or(256);
+                        if &chunk[..end] == want {
+                            incremental_present = true;
+                            break;
+                        }
+                    }
+                }
+            }
             let swap_ext = b"VK_KHR_swapchain\0";
-            let ext_ptr = swap_ext.as_ptr() as *const c_char;
+            let inc_ext = b"VK_KHR_incremental_present\0";
+            let ext_ptrs = [
+                swap_ext.as_ptr() as *const c_char,
+                inc_ext.as_ptr() as *const c_char,
+            ];
+            let dev_ext_count = if incremental_present { 2u32 } else { 1 };
             #[repr(C)]
             struct DevInfo {
                 s_type: i32,
@@ -1312,8 +1348,8 @@ impl Gpu {
                 queues: queue_infos.as_ptr(),
                 layer_count: 0,
                 layers: std::ptr::null(),
-                ext_count: 1,
-                exts: &ext_ptr,
+                ext_count: dev_ext_count,
+                exts: ext_ptrs.as_ptr(),
                 features: features.as_ptr() as *const c_void,
             };
             let mut device = std::ptr::null_mut();
@@ -1437,6 +1473,7 @@ impl Gpu {
                 submitted_slot: None,
                 antialias: Antialias::Off,
                 reuse: crate::reuse::FrameReuse::default(),
+                incremental_present,
                 color_layout: [0, 0],
                 keep_pass: std::ptr::null_mut(),
                 aa_src: [Buffer::empty(), Buffer::empty()],
@@ -2269,6 +2306,7 @@ impl Gpu {
                 self.reuse.skipped = true;
                 self.reuse.stats.skipped = self.reuse.stats.skipped.wrapping_add(1);
             } else {
+                self.note_present_regions(!keep);
                 self.present_index = index;
             }
             let status = (self.fns.fence_status)(self.device, self.fence);
@@ -2630,11 +2668,40 @@ impl Gpu {
         Ok(())
     }
 
+    fn note_present_regions(&mut self, scene_drawn: bool) {
+        self.reuse.present_regions.clear();
+        if scene_drawn || self.reuse.frame_damage.is_empty() {
+            self.reuse.present_regions.push(self.screen_region());
+        } else {
+            self.reuse.present_regions.extend_from_slice(&self.reuse.frame_damage);
+        }
+    }
+
     fn present(&mut self) -> Result<VkResult, String> {
         unsafe {
             let swap = [self.swapchain];
             let index = [self.present_index];
             let wait = [self.render_done];
+            #[repr(C)]
+            struct RectLayer {
+                x: i32,
+                y: i32,
+                w: u32,
+                h: u32,
+                layer: u32,
+            }
+            #[repr(C)]
+            struct PresentRegion {
+                count: u32,
+                rects: *const RectLayer,
+            }
+            #[repr(C)]
+            struct PresentRegions {
+                s_type: i32,
+                next: *const c_void,
+                swapchain_count: u32,
+                regions: *const PresentRegion,
+            }
             #[repr(C)]
             struct Present {
                 s_type: i32,
@@ -2646,9 +2713,46 @@ impl Gpu {
                 indices: *const u32,
                 results: *mut i32,
             }
+            let mut rects: Vec<RectLayer> = self
+                .reuse
+                .present_regions
+                .iter()
+                .map(|region| RectLayer {
+                    x: region[0],
+                    y: region[1],
+                    w: region[2].saturating_sub(region[0]) as u32,
+                    h: region[3].saturating_sub(region[1]) as u32,
+                    layer: 0,
+                })
+                .filter(|region| region.w > 0 && region.h > 0)
+                .collect();
+            // A count of 0 means the whole image. Always name the rectangles.
+            if rects.is_empty() {
+                rects.push(RectLayer {
+                    x: 0,
+                    y: 0,
+                    w: self.extent_w,
+                    h: self.extent_h,
+                    layer: 0,
+                });
+            }
+            let region = PresentRegion {
+                count: rects.len() as u32,
+                rects: rects.as_ptr(),
+            };
+            let regions = PresentRegions {
+                s_type: 1000084000,
+                next: std::ptr::null(),
+                swapchain_count: 1,
+                regions: &region,
+            };
             let info = Present {
                 s_type: 1000001001,
-                next: std::ptr::null(),
+                next: if self.incremental_present {
+                    &regions as *const PresentRegions as *const c_void
+                } else {
+                    std::ptr::null()
+                },
                 wait_count: 1,
                 waits: wait.as_ptr(),
                 swap_count: 1,
