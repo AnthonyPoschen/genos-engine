@@ -1,14 +1,219 @@
 # Entity and networking co-design
 
-> **For agentic workers:** Implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
+> **For agentic workers:** Do not start N1. D1–D19 are unanswered, and the datagram bytes are the replay file, so building N7 before those decisions are answered locks the recording format. When they are answered, implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
 
-**Goal:** One entity id space that a headless authority runtime can replicate to player runtimes, with prediction of the owned pawn, interpolation of everyone else, and a packet budget that still works at thousands of entities.
+**Goal:** One entity id space that a headless authority runtime can replicate to player runtimes, with prediction of the owned pawn, interpolation of everyone else, and a packet budget that still works at thousands of entities. The same datagrams are the replay, in a file or on the socket.
 
-**Architecture:** The simulation store is an entity id plus plain components, updated by ordered tick passes. That store is the replication model. The authority runtime (the process Genos hosts) is the only writer of replicated state. A player runtime predicts only the entity it has input authority for, and reconciles by restoring that entity and replaying its commands. Remote entities interpolate. Snapshots are unreliable deltas against the last acknowledged snapshot. A spatial grid and a byte budget decide who is in the packet.
+**Architecture:** The simulation store is an entity id plus plain components, updated by ordered tick passes. That store is the replication model. The authority runtime (the process Genos hosts) is the only writer of replicated state. A player runtime predicts only the entity it has input authority for, and reconciles by restoring that entity and replaying its commands. Remote entities interpolate. Snapshots are unreliable deltas against the last acknowledged snapshot. A spatial grid and a byte budget decide who is in the packet. A replay stores that stream and plays it back through the same apply path.
 
 **Tech stack:** Rust, `std::net::UdpSocket` at the socket edge, no extra networking crate. `genos-math` stays `f32` and stays out of the replicated bytes. ADR 0007 forbids a crate that owns the network. ADR 0009 forbids a script that owns the network.
 
-Written against `gi-v2` at `e61b89d`. This file does not add a crate and does not open a socket.
+Written against `gi-v2` at `e61b89d`. This file does not add a crate, does not open a socket, and does not write a replay file.
+
+## Open decisions
+
+These are the questions to settle before any step is built. Each one is **Open**. The recommendation is a proposal for that discussion.
+
+**Settled, and kept out of the list.** A replay is a recorded network stream. Commands, notices, and snapshots in the file are the datagram bytes a `Link` or a `UdpSocket` would carry. The reader feeds those bytes to the same apply path a live player runtime uses. Entity actions are the command (`buttons`, `aim_tick`) and the component results a snapshot already carries (`Health`, `StunUntil`). Inputs are commands. The event stream is notices. There is no second gameplay codec, no dump of `Sim` memory as the file, and no replay-only component. If a value must be in the recording, it is in the live datagram. The entity store in [Decision](#decision) stays the store. Replay does not reopen that choice unless the owner says so.
+
+**Working proposal.** Record the authority's full stream and each player runtime's own stream (D8, D9). Keep commands, notices, snapshot deltas, and a baseline-0 keyframe every 120 ticks (D1, D3). Watching applies those datagrams (D2). A seek jumps to the previous keyframe and applies forward (D4). A debug flag resims from that keyframe and compares per-tick hashes (D11, D12, D15). Public spectators receive the authority stream 10 seconds late (D6, D7). A killcam is the last 10 seconds of the authority stream, played through the same path, with the camera chosen locally (D5, D19). The file adds a header and a length prefix so a datagram boundary survives the disk; the slice inside each frame is the datagram (D14). A protocol mismatch refuses the file. A sim-epoch mismatch still plays snapshots and refuses resim (D13).
+
+D1 and D2 move together. D1.C is what makes D2.C possible. D1.A leaves playback as resim. D1.B leaves playback as apply. D11 and D14 move together. D11.C stores the live snapshot hash inside the datagram and the per-tick hash in the D14 frame. D14.B (raw concatenation) cannot represent a tick that sent nothing, so D11.C's empty frames would be dropped and the hash story becomes D11.A or D11.B. D3, D5, D7, and D18 share one cost: a full baseline of 4096 entities is about 34 bytes each in the [Locked names](#locked-names) layout (index, generation, flags, pose, input authority, stun, health), about 140 KB. That figure is a layout estimate, not a measurement.
+
+### D1. Which datagrams the stream keeps
+
+**Question.** Playback has to reconstruct actions, inputs, and events. Which subset of the session datagrams is the recording?
+
+- **A. Commands and notices only.** The file is small. Playback resims every tick from the command log. A sim that is not deterministic on the machine doing the playback produces a different picture. Seeking from the start of a long file resims the whole prefix.
+- **B. Snapshots and notices only.** Playback applies datagrams and matches what the network said, including after a sim change that stays inside the same protocol. The command that caused a tick is absent, so a debug resim has nothing to rerun.
+- **C. Commands, notices, snapshot deltas, and periodic baseline-0 keyframes.** The file is the union. A keyframe is a snapshot datagram whose baseline tick is 0, which the codec already defines. Watching applies snapshots. Debugging resims commands and checks them against the stored hashes.
+
+**Recommendation.** C. A cannot show a correct picture when the physics step diverges across machines. B cannot rerun the command that produced a bug. The owner asked for actions, inputs, and the event stream together.
+
+### D2. How playback advances a tick
+
+**Question.** Given C from D1, what does the player runtime do while a replay is open?
+
+- **A. Always resim.** Snapshots are a check, not the picture. This requires the sim that recorded the file. The physics plan refuses a cross-machine golden hash, so another machine can fail the check on a correct file.
+- **B. Always apply snapshots and notices.** Commands stay in the file and are ignored during playback. The picture matches the recording inside one protocol. The question "which command diverged" has no run to point at.
+- **C. Apply snapshots to watch.** Resim from the last keyframe only when a debug flag is set, or when a stored hash mismatches. Shipping playback does not depend on input-only resim.
+
+**Recommendation.** C. Input replay is the check. Snapshot apply is the picture.
+
+### D3. Keyframe interval
+
+**Question.** How often is a baseline-0 datagram written?
+
+- **Every snapshot** (every 3 ticks, 20 Hz). A seek is one datagram. Baselines of a full 4096-entity world are about 2.8 MB/s before deltas.
+- **60 ticks** (1 s). About 140 KB/s of baselines.
+- **120 ticks** (2 s). About 70 KB/s of baselines. A seek reads at most about 2 seconds of deltas.
+- **600 ticks** (10 s). Smaller file. A killcam that starts mid-interval still applies up to 10 seconds of deltas.
+- **1800 ticks** (30 s). Unreal's documented default for `demo.CVarCheckpointUploadDelayInSeconds` is 30 seconds ([DemoNetDriver and Streamers](https://docs.unrealengine.com/4.27/en-US/TestingAndOptimization/ReplaySystem/Streamers/)). Scrubbing backward gets slower as the gap grows. Thirty seconds is coarse for inspecting one tick.
+
+**Recommendation.** 120 ticks. The killcam window then contains a handful of keyframes, and tick inspection never applies more than about 2 seconds of deltas. The interval stays a multiple of `SNAPSHOT_EVERY` (3) so a keyframe lands on a snapshot tick. 120 is a multiple of 3.
+
+### D4. Seek, rewind, and scrub
+
+**Question.** How does playback land on tick N, including a tick behind the playhead?
+
+- **A. Keyframe, then forward.** Load the greatest keyframe with tick `<= N`, apply it, apply deltas through N. Rewind is the same seek to an earlier tick. The kinematic pass and the physics step have no inverse, so nothing simulates backward.
+- **B. Decoded bracket in memory.** After A, keep the decoded poses for that keyframe bracket. A scrub that stays inside the 120 ticks does not read the file again.
+- **C. Reverse simulation.** Run the tick pass backward from the current tick.
+
+**Recommendation.** A on disk, for a cold seek. B inside `genos-net-view` after the first seek into a bracket, so the scrub control moves inside those 120 ticks without another read. C is a bad fit for this sim.
+
+### D5. Killcam
+
+**Question.** When a pawn's `Health` drops, what is played, and how long is the window?
+
+- **A. The victim's received stream**, the last N seconds. Playback shows the datagrams that player runtime actually applied. An attacker outside that interest set is absent.
+- **B. The attacker's view only.** Smaller. The victim's surroundings are whatever that view's interest set contained.
+- **C. A slice of the authority's omniscient recording.** The attacker is present even when the victim's live packet culled them. Playback uses the same apply path. The camera starts on the attacker's pawn, which is already an entity in the slice, and can be moved locally (D19).
+
+The Overwatch written notes describe about 8–12 seconds of network data fed to replay as if it were live ([GDC 2017 notes](https://www.lfzxb.top/ow-gdc-gameplay-architecture-and-netcode/)). That range is a design input from those notes, not a number from a public paper. Duration choices: 8 s, 10 s, 12 s.
+
+**Recommendation.** C, with a 600-tick (10 s) window. The ring stores datagrams and includes a keyframe at the start of the window, so the killcam does not resim the match. An upper bound, if every snapshot in the window is a full baseline, is the 2.8 MB/s figure from D3, about 28 MB for 10 seconds. Deltas of clean fields are smaller. The number 10 is the part to argue.
+
+### D6. Live spectators
+
+**Question.** What does a spectator connection receive while the match is running?
+
+- **A. Player-like interest.** The connection follows one pawn, uses the 32 m grid, and stays inside `POSE_BUDGET`. A coach sees the packet that pawn's player would see. The connection sends no commands.
+- **B. Omniscient, delay 0.** Every replicated entity, as it happens. A spectator can relay that picture back to a player in the match.
+- **C. Omniscient, delayed.** The authority sim writes the stream immediately. The spectator socket receives copies after a delay. SourceTV broadcasts this way (`tv_delay`). Competitive TF2 leagues require a long delay so a spectator cannot ghost for a team; RGL's floor is 90 seconds ([RGL SourceTV](https://docs.rgl.gg/guides/servers/sourcetv/)). That 90 is a league rule, not an engine default.
+
+**Recommendation.** C for a public spectator. A stays available as a coach connection: a normal connection, a chosen view entity, no input authority. B is a poor default on a match anyone can join.
+
+### D7. Spectator delay
+
+**Question.** How long is the public delay, and does the file wait too?
+
+Choices: 0, 3 s (180 ticks), 10 s (600 ticks), 30 s (1800 ticks), 90 s (5400 ticks).
+
+**Recommendation.** 10 seconds, stored in the header, configurable per spectator session. The authority file is written immediately, with delay 0 in its header. Stopping the process keeps the tail, because the tail is already on disk. The spectator socket is what waits. A killcam plays the recorded slice at once; it is not a live spectator. An operator can set 90 seconds for a broadcast. At the D5 upper bound, 90 seconds of that full-baseline stream is about 250 MB of queued datagrams.
+
+### D8. Who records
+
+**Question.** Which runtime opens the file?
+
+- **A. The authority runtime only.** One omniscient file. A bug that existed only in the bytes a player runtime applied, after loss, is not in the file.
+- **B. Each player runtime**, writing the datagrams it sent and the datagrams it applied.
+- **C. Both.** The header says which.
+
+**Recommendation.** C. Killcams and public replays need the authority file. A bug report from one machine needs the bytes that machine actually applied.
+
+### D9. Interest in the authority file
+
+**Question.** Does the authority recording use the live interest set and the pose budget?
+
+- **Authority file.** Every replicated entity. Interest and `POSE_BUDGET` do not apply. The datagram layout is unchanged.
+- **Player file.** The datagrams that runtime sent and applied, including loss and the budget.
+
+**Recommendation.** That split. Playing a player file shows the holes that player had. Playing the authority file shows the match. D18 is the budget half of the same split.
+
+### D10. The map inside the file
+
+**Question.** Playback has to load the same static geometry the session loaded before the loop. What does the file store?
+
+- **A. The scene script bytes, plus a hash of those bytes.** The session loader runs before the first tick, as it does for a live session. The script is not an entity codec. The body of the file stays datagrams. A caller that also passes a path must hash-match the embedded bytes, or the open fails.
+- **B. The hash and a path.** Opening the file on a machine without that path fails. A bug file does not travel.
+- **C. The hash only.** The caller has already loaded a map. A mismatch refuses the open. The smallest header, and a file that cannot be attached to a bug report on its own.
+
+**Recommendation.** A.
+
+### D11. Per-tick state hashes
+
+**Question.** The checksum under [Components, dirty state, deltas](#components-dirty-state-deltas) is the state hash (FNV-1a over generation, pose, origin sectors, input authority, stun, health). When N24 has linked physics, `hash_world` is a second `u64`. Where are they written?
+
+- **A. Snapshot ticks only** (every 3rd tick), inside the snapshot datagram. Live and file match. A resim can diverge on the two ticks between snapshots and look clean at the next snapshot.
+- **B. Every tick, on the live stream and in the file**, as its own datagram. The diverging tick is visible immediately. Every connection pays for a datagram 60 times a second even when no pose is dirty.
+- **C. Every tick in the file, in the frame beside the datagram.** Live snapshot datagrams carry the checksum of that snapshot tick as a trailing `u64`, and a second `u64` for `hash_world` (zero until N24). A tick that sent nothing stores `len = 0` and still stores the hash. Intra-snapshot divergence is visible in the recording and in a resim. Live players learn the hash when a snapshot arrives.
+
+**Recommendation.** C. Accepting it adds those two `u64` words to the end of the authority datagram in [Locked names](#locked-names). The in-memory checksum function stays the one N5 already specifies.
+
+### D12. What a hash mismatch does
+
+**Question.** Playback has a stored hash and a hash it just computed. They differ.
+
+- **A. Stop** at that tick.
+- **B. Mark the tick and keep resimulating.** The next mismatch is measured against a sim that is already wrong.
+- **C. Stop the resim, keep applying recorded snapshots from that tick, and keep the tick in the report.** A `--strict` flag uses A.
+
+**Recommendation.** C for watching a bug. A for a test that must fail on divergence.
+
+### D13. Versioning and compatibility
+
+**Question.** Which header fields decide whether a binary will open a file, and how many old protocols one binary reads?
+
+Header fields in the proposal:
+
+- magic `GNOS` (4 bytes)
+- `protocol: u16` (the datagram layout)
+- `sim_epoch: u32` (bumped when tick-pass results change and the datagram layout does not)
+- `tick_rate: u32` (60)
+- `keyframe_interval: u32` (ticks)
+- `recorder_role: u8` (`1` authority, `2` player)
+- `spectator_delay_ticks: u32` (0 on an authority file)
+- `map_hash: u64`
+- git hash as `u16` length plus bytes, for a person reading the file
+
+A protocol mismatch refuses the open. A sim-epoch mismatch allows snapshot playback and refuses resim. The git hash is not a compatibility check. It changes every commit.
+
+How many old protocols:
+
+- **A. Current only.**
+- **B. Current, plus one previous, snapshot playback only.**
+- **C. Every protocol the project has ever written.**
+
+**Recommendation.** A until a recording has been given to someone other than the person who recorded it. Then B. The RTS command-log lesson (StarCraft, Warcraft III) is why `sim_epoch` is its own field: those games store commands plus a version, and a later sim does not promise to reproduce the match. This plan does not cite a primary URL for those formats. The lesson is the split. Snapshot playback still works when resim is refused, which is what an input-only file cannot do.
+
+### D14. Framing around the datagram
+
+**Question.** A UDP datagram has a length the socket provides. A file of concatenated payloads does not. How is the file cut back into datagrams?
+
+- **A. A header, then length-prefixed frames.** Each frame is `tick: u32`, `state_hash: u64`, `physics_hash: u64`, `len: u32`, then `len` datagram bytes. A trailer maps each baseline-0 tick to a file offset and is rewritten on close. A missing trailer (a crash) still scans the length prefixes of the flushed prefix. The datagram slice is what `Link` delivered or would have delivered.
+- **B. Raw concatenated payloads.** The reader must parse the codec to find the next datagram. A corrupt byte shifts the rest of the file. A tick that sent nothing cannot be stored.
+
+Source demos are the precedent for A. A `dem_packet` wraps raw network packets in a demo command header, and playback feeds those packets to the client net channel, which is the player runtime's apply path in this repo ([DEM format](https://github.com/SizzlingStats/demboyz/blob/master/docs/DemFormat.md)). The header is framing. The packet is the packet.
+
+**Recommendation.** A. The length prefix is the file's copy of the socket's datagram length. A test compares the slice to the bytes `Link` sent, byte for byte. Framing is not a gameplay format.
+
+### D15. What the debug binary shows at tick N
+
+**Question.** The default inspect path, before any flag.
+
+- **Apply.** Load the keyframe at or before N, apply deltas through N, print the components. The picture is what the network said.
+- **Resim.** Rerun stored commands from that keyframe and print the resim hash next to the stored hash.
+
+**Recommendation.** Apply by default. `--resim` prints both hashes.
+
+### D16. Recording with no socket
+
+**Question.** Does a session that never binds a port still write a replay?
+
+**Recommendation.** Yes. `genos-session --bind off` and `genos-net-view` run the same codec into the recorder. A single-player bug in those programs is a file. `examples/camera` still does not open a session and does not write a replay in this plan. Recording from the camera loop is a later plan.
+
+### D17. Playback controls
+
+**Question.** Which controls exist on the first debug binary?
+
+**Recommendation.** Pause, step one tick, fast-forward, and a tick integer for scrub, all in `genos-net-view`. Headless flags call the same functions: `--replay PATH --tick N`, `--step`, `--resim`. The window's scrub control is that tick integer. There is no third binary.
+
+### D18. Pose budget on the recorder
+
+**Question.** `POSE_BUDGET` is 1024 bytes for a live player link. Does a keyframe, or an omniscient authority datagram, have to fit in it?
+
+**Recommendation.** No. The budget stays on live player links. A keyframe and an omniscient datagram may be larger. Spawns and despawns already ignore the budget. The cost is the size in D3 and D7.
+
+### D19. Camera during playback and killcam
+
+**Question.** Is the camera a track in the file?
+
+The view target is an entity that already has a pose in the stream. A free camera during playback is local UI state and is not written back. Choosing which pawn to follow is local and is not a notice. The strike command already identifies the attacking connection, and that connection's pawn is the entity the killcam starts on.
+
+**Recommendation.** Both. Playback can follow any entity with a pose, and it can fly a free camera. The file does not store a camera track.
+
+## Global constraints
 
 ## Global constraints
 
@@ -22,7 +227,7 @@ Written against `gi-v2` at `e61b89d`. This file does not add a crate and does no
 - The agent endpoint stays loopback MCP on `127.0.0.1`. It is not the game session. `CONTEXT.md` says to avoid calling that endpoint a game network.
 - The person is the player. Sources say "client" for the program that person runs. In this repo that program is the player runtime. Sources say "server" for the authoritative program. In this repo that program is the authority runtime, and it is still a runtime. The game is not a server. Genos, the other repository, starts the authority process.
 - "System" in this repo is a system record. The ECS behavior is a tick pass.
-- New public words (`EntityId`, tick pass, authority runtime, player runtime, connection, snapshot, command, notice) are added to `CONTEXT.md` in the commit that first publishes them (step N1).
+- New public words (`EntityId`, tick pass, authority runtime, player runtime, connection, snapshot, command, notice, replay, keyframe, spectator) are added to `CONTEXT.md` in the commit that first publishes them (step N1). N1 waits until D1–D19 are answered.
 - A new crate sets `[lints] workspace = true`, joins the workspace `Cargo.toml`, and is named in `docs/architecture.md` in that same commit.
 - `examples/camera` does not open a game socket in any step of this plan. The first proof stays the lit scene.
 - Headless tests use a fixed command list, a fixed tick, a seeded link, and no window. Two runs in one process match on the integers the step names. Do not check wall-clock time, thread scheduling, or a hash from another operating system.
@@ -64,6 +269,18 @@ _Avoid_: Action (the named intent on the device), notice.
 **Notice**:
 A reliable ordered message that is not itself the replicated state. Join, leave, and a request use a notice. The result of a request is a component in a snapshot.
 _Avoid_: Command, MCP tool call.
+
+**Replay**:
+The session datagram stream, written to a file or sent to a spectator connection, and read back through the same apply path. Prediction still says "replay the commands" for the owned-entity reconcile in N13. That verb is the pawn correction. This noun is the recording.
+_Avoid_: A second gameplay codec, a dump of simulation memory.
+
+**Keyframe**:
+A snapshot datagram whose baseline tick is 0, written into the replay on an interval, so a seek can start there.
+_Avoid_: A copy of the whole `Sim`, a checkpoint that skips later datagrams while it saves.
+
+**Spectator**:
+A connection that receives the session stream and does not hold input authority.
+_Avoid_: A second protocol, the player (the person).
 
 ## Current state
 
@@ -128,7 +345,7 @@ Replication, the snapshot ring, and prediction replay stay on the tick thread. A
 
 `docs/systems/loading.md` says a network payload and a disc payload share the decoders after the bytes arrive. Loading does not open a socket.
 
-Nothing in the tree sends a pose, a command, or a delta.
+Nothing in the tree sends a pose, a command, or a delta. Nothing records that stream to a file or to a spectator.
 
 ## Gaps
 
@@ -149,10 +366,11 @@ Nothing in the tree sends a pose, a command, or a delta.
 | Headless process | `examples/stress` can render without a visible monitor. It is still a picture tool. | `genos-session`, no window crate, the process Genos starts. |
 | Scale test | Hundreds of static pillars in one physics test. | 4096 entities, 8 connections, a far entity absent from the packet. |
 | Debug view | Lighting and MCP screenshots. | One process, authority plus player runtimes, seeded loss, desync rows. |
+| Replay | None. No file, no spectator stream, no per-tick hash on the wire. | The session datagram stream, to a file or to a spectator connection, with keyframes and per-tick hashes. D1–D19 are open. |
 
 ## Decision
 
-Use a small in-repo entity store. An entity is an id. A component is state with no functions. A tick pass is behavior with no stored simulation state. The id in the store is the id in the snapshot. This is an ECS in the sense of the Overwatch talk. It is not a Bevy app, and it is not an actor graph.
+Use a small in-repo entity store. An entity is an id. A component is state with no functions. A tick pass is behavior with no stored simulation state. The id in the store is the id in the snapshot. This is an ECS in the sense of the Overwatch talk. It is not a Bevy app, and it is not an actor graph. Replay does not reopen this choice. A recording is the replication stream of this store. Reopen the store only by saying so.
 
 Three shapes were compared.
 
@@ -399,7 +617,77 @@ Window mode, the same binary without `--headless`: a `genos-ui` `button_panel` (
 
 A button reseeds from a counter the test can set, so the seed is not taken from the clock. The picture uses the UI crate's rectangles: for each entity, a mark at the authority XZ and a mark at each player runtime's rendered XZ. A row whose millimeters differ by 1 or more uses the panel's selected look. The correction count is the slider readout text, not a new text renderer. No Vulkan debug pass and no new shader. The window mode is N23. Its test does not open a display: it drives `LinkConfig` from the same slider values `button_panel` would produce, runs one session, and checks the report.
 
-Desync means the predicted pose at the acknowledged tick differed and a replay ran. The view shows that count. It does not show a physics `hash_world` unless N24 has filled that field in the report. When it has, the row gains `physics_hash` for the authority and for the player, and a mismatch is a row even if the millimeters were quantized equal. That last case is the "sub-millimeter dust" the quantization is there to ignore, so the view shows it and the test asserts the net checksum still matches.
+Desync means the predicted pose at the acknowledged tick differed and the owned entity was restored and its commands were rerun. The view shows that count. It does not show a physics `hash_world` unless N24 has filled that field in the report. When it has, the row gains `physics_hash` for the authority and for the player, and a mismatch is a row even if the millimeters were quantized equal. That last case is the "sub-millimeter dust" the quantization is there to ignore, so the view shows it and the test asserts the net checksum still matches.
+
+N28 adds replay controls to this same binary. The scrub control is a tick integer. Headless mode takes `--replay`, `--tick`, `--step`, and `--resim`. The slider test still does not open a window.
+
+## Replay
+
+D1–D19 are the decisions. This section is the argument, the sources, and the way the recommendations sit on the datagram layout above. Nothing here is built.
+
+### One stream
+
+A live authority tick already produces the bytes a replay needs. Commands arrive from the player. Notices carry join, leave, and request. Snapshots carry the component results, including `Health` and `StunUntil`. Writing those datagrams to a file, or sending them to a spectator connection, is the recording. Reading them back calls the same `apply` the player runtime calls for a socket. `genos-sim` does not open files and does not call `std::net`. `genos-net` owns the recorder beside `Link` and `UdpEdge`, and it uses `std::fs` for the file. ADR 0007 still holds: the standard library, no crate that owns the network.
+
+Unreal's replay system is the same shape at a larger size. A `DemoNetDriver` reads the replication stream the way a live `NetDriver` does, hands it to a Replay Streamer, and playback reconstructs the session from that data. `demoscrub` jumps to a time. A game with no remote peer can still record, as long as the data is replicated ([Using the Replay System](https://dev.epicgames.com/documentation/en-us/unreal-engine/using-the-replay-system-in-unreal-engine)). That is the reason D16 records `--bind off`. Unreal also allows fields that are relevant only to replays. This plan does not. A replay-only component would be a second stream.
+
+Source demos wrap the same idea in a file header (demo protocol, network protocol, map name) and `dem_packet` records of raw network packets. Playback feeds those packets through the client net channel (the player runtime's apply path). The map name in that header is why D10 embeds the scene script: a bug file has to open on a machine that does not already have the path loaded. The script runs in the existing loader before the tick loop. It does not encode entities.
+
+### Input log, snapshot log, or both
+
+An input log is the RTS replay and the fighting-game training mode. StarCraft and Warcraft III store the commands and a version. GGPO's training use is the same loop in miniature: an input log plus savestates, which is a keyframe ([pond3r/ggpo](https://github.com/pond3r/ggpo)). Playback is cheap to store and exact when every machine runs the same sim. This repository does not have that sim. The physics plan's `hash_world` is an in-process bitwise check, and it refuses a cross-OS golden hash. A file recorded on one machine and resimmed on another can diverge with every command still intact. Shipping playback cannot depend on input-only resim. The input log stays in the file because the debug question is "rerun these commands."
+
+A snapshot log is a Quake or Source demo: the deltas the protocol already sends, applied in order. A lost baseline becomes a zero-baseline full update, which this plan's codec already writes. Playback survives a sim-epoch change. It cannot tell you which command diverged, because the commands were not kept. Seeking without a keyframe means applying every delta from the start of the file. Rewind means doing that again from the start. That is correct and slow, and it is the whole of option D1.B.
+
+The hybrid keeps both, and writes a zero-baseline datagram on an interval. Watching applies snapshots, so the picture is what the network said. A debug resim starts at the last keyframe, reruns the stored commands, and compares hashes. The keyframe is not a new codec. Baseline tick `0` is already the full update in [Locked names](#locked-names).
+
+### Keyframes, seek, scrub
+
+Unreal writes checkpoints on a timer. The documented default of `demo.CVarCheckpointUploadDelayInSeconds` is 30 seconds. A longer gap makes the file smaller and makes a backward scrub apply more deltas. Thirty seconds is a long way to walk to look at one tick, which is why D3 recommends 120 ticks.
+
+Unreal can also spread a checkpoint across later frames (`demo.CheckpointSaveMaxMSPerFrame`). Actors that miss the time limit are queued, and the checkpoint then mixes frames. A forum report of killcam recording describes `TickDemoRecordFrame` stopping while a checkpoint saves, which leaves gaps in the recorded traffic ([TickDemoRecordFrame during checkpoint save](https://forums.unrealengine.com/t/demonetdriver-tickdemorecordframe-not-called-during-checkpoint-saving-ultimately-resulting-in-missing-network-traffic/2600457)). This plan writes the keyframe in the tick that owns it. Later ticks keep their own datagrams. A hitch is preferable to a hole.
+
+Seek to tick N loads the greatest keyframe with tick `<= N`, applies it, and applies deltas through N. Rewind is that seek aimed backward. Scrub is that seek driven by a tick integer. Inside the debug binary, once a bracket is decoded, moving within those 120 ticks uses the in-memory poses. The file has no reverse-simulation path.
+
+### Killcam and live spectators
+
+A killcam is a short replay played as if it were live. The Overwatch notes describe about 8–12 seconds of network data handed to replay. D5 recommends 10 seconds from the authority's omniscient stream, so the attacker is in the slice even when the victim's interest set omitted them. The victim's own file remains the record of what that runtime was sent (D8). The camera starts on the attacker's pawn and is local (D19).
+
+A public spectator is a connection with no input authority. The authority writes the stream at once. The spectator socket receives it after the header's delay. SourceTV's `tv_delay` is this queue. A league such as RGL sets the delay on the order of 90 seconds so a spectator cannot ghost. The engine default in this plan is 10 seconds, and the operator can raise it. The file does not wait. A recorder that stored only the delayed bytes would hold the tail in memory and drop it on a crash; the immediate authority file is what makes a stop keep the tail.
+
+A coach connection is the cheap form: player-like interest, the pose budget, no commands. It exists beside the public stream. It is not a second protocol.
+
+The omniscient queue is the memory cost. A world in which every snapshot is a full baseline is the 2.8 MB/s figure from D3: about 28 MB for a 10 second killcam and about 250 MB for a 90 second delay. A quiet world is far smaller, because clean entities stay out of the delta. If that upper bound is unacceptable, the answer to change is D6, toward interest-limited spectators, or D7, toward a shorter delay. A spectator delay queue is not a numbered step. Numbering it before D6 and D7 are answered would let an implementer start it.
+
+### Hashes, desync, versions
+
+The state hash is the checksum N5 defines. It folds the replicated columns in index order. `hash_world`, once N24 can see it, is a second word and a different hash. The two answers to "did this tick match" are not interchangeable. The net checksum can match while the physics hash differs; the debug row already plans to show that.
+
+Hashes on snapshot ticks only hide a divergence on the ticks in between. The owner asked for per-tick hashes. D11.C puts one in every file frame, and puts the snapshot tick's hash on the live datagram so a player runtime can compare when a snapshot arrives. Live bandwidth does not grow by 60 empty datagrams a second.
+
+On a mismatch while watching, resim stops and snapshot apply continues, and the report keeps the tick. `--strict` stops. A test that is supposed to catch a bad command uses `--strict`. A person watching a bug uses the continuing picture.
+
+The header separates the datagram protocol from the sim epoch. A layout change refuses the file. A tick-pass change, with the same bytes, still applies snapshots and refuses resim. That is the RTS lesson applied to a hybrid file: an input-only recording would have nothing left to show. The git hash is a label for humans. Compatibility is `protocol` and `sim_epoch`. Until a file has been handed to someone else, a binary reads only the protocol it writes.
+
+### Debug
+
+The path for a bug is: run `genos-net-view` or `genos-session`, write the file, open the same binary with `--replay` and `--tick`, print the components at that tick. `--resim` prints the hash from the commands and the hash stored in the frame. `--step` advances one tick. Pause and fast-forward call the same functions. Fast-forward applies datagrams in a loop and does not sleep. The desync rows already defined for the live session gain the stored hash, the applied hash, and the tick.
+
+No third binary. No window in the headless test.
+
+### What acceptance changes in the locked layout
+
+If D11.C is accepted, the authority datagram gains `u64 checksum` and `u64 physics_hash` after the notice block. `physics_hash` is 0 until N24. The rest of [Locked names](#locked-names) stays the working layout. D14 does not change those bytes. It stores them in a frame:
+
+- `u32` tick
+- `u64` state hash
+- `u64` physics hash
+- `u32` length
+- that many datagram bytes
+
+On a snapshot tick the frame hash equals the checksum inside the datagram. On a tick that sent nothing, the length is 0. The trailer is a list of `(tick, file offset)` for frames whose datagram baseline is 0, rewritten when the file closes.
+
+N25–N28 state the tests for these recommendations. If an open decision moves, edit the step before implementing it.
 
 ## Locked names
 
@@ -495,12 +783,15 @@ Spawn and despawn records are written even when the pose budget is spent. Pose r
 | `crates/sim/src/rewind.rs` | Hit-volume history and the segment test. From N15. |
 | `crates/net/src/lib.rs` | `Link`, datagram codec, notices. Package `genos-net`. From N8. |
 | `crates/net/src/udp.rs` | `UdpSocket` edge. From N20. |
+| `crates/net/src/replay.rs` | File header, length-prefixed frames, keyframe trailer. From N25. The datagram slice is the session codec. |
 | `examples/session/` | Headless authority. Package `genos-session`. From N21. |
 | `examples/net-view/` | Debug binary. Package `genos-net-view`. From N22. |
 
 `genos-sim` depends on nothing in this workspace at N1. `genos-net` depends on `genos-sim`. `genos-session` depends on `genos-net`, `genos-scene`, and `genos-json`. `genos-net-view` depends on `genos-net` and `genos-ui`. The window is not linked into `genos-session`.
 
 ## Steps
+
+Do not start N1. D1–D19 are unanswered. The datagram layout and the replay file are the same bytes, so N7 is the commit that would lock the recording format. N25–N28 describe the recommended answers. If a decision above moves, edit that step before implementing it. The steps stay in order: N25 follows N24.
 
 ### N1. Entity id
 
@@ -554,10 +845,11 @@ Spawn and despawn records are written even when the pose budget is spent. Pose r
 ### N7. Snapshot delta
 
 - [ ] **Files:** `crates/sim/src/snapshot.rs`. Test `crates/sim/tests/snapshot.rs`.
-- **Behavior:** `take_snapshot(baseline_tick)` writes the datagram in [Locked names](#locked-names) for every entity dirty since `baseline_tick`, plus spawns and despawns since that tick. Inside a dirty pose, a field that equals the baseline snapshot is left out of the field mask. `baseline_tick == 0` writes every live entity and all four pose fields (the zero baseline). The ring stores 32 snapshots. `ack(tick)` sets the baseline. If the acked tick is not in the ring, the next take uses baseline 0. `apply(bytes)` reproduces `checksum` when the receiver already has that baseline. An entity that was not dirty is not in the record list. Records are in ascending index order.
+- **Behavior:** `take_snapshot(baseline_tick)` writes the datagram in [Locked names](#locked-names) for every entity dirty since `baseline_tick`, plus spawns and despawns since that tick. Inside a dirty pose, a field that equals the baseline snapshot is left out of the field mask. `baseline_tick == 0` writes every live entity and all four pose fields (the zero baseline). The ring stores 32 snapshots. `ack(tick)` sets the baseline. If the acked tick is not in the ring, the next take uses baseline 0. `apply(bytes)` reproduces `checksum` when the receiver already has that baseline. An entity that was not dirty is not in the record list. Records are in ascending index order. If D11.C is the accepted answer, this datagram ends with the `u64` checksum and the `u64` physics hash from [Replay](#replay), and the test below checks the checksum word. Do not land a datagram here that N25 then extends. Physics hash is 0 in this step.
 - **Test:** `a_delta_omits_a_clean_field_and_a_lost_baseline_sends_the_full_set`
   - Two entities, change one entity's `x_mm` only. The delta from an ack of the previous snapshot contains that entity, the field mask has bit `1` set, and bits `2`, `4`, and `8` clear. Apply it on a sim that already had the acked state: checksums match, and that entity's `y_mm` is unchanged.
   - Force the ack to a tick older than the ring. The next datagram's baseline is 0 and applying it on an empty sim reproduces the checksum.
+  - If D11.C was accepted: the last 16 bytes are the sim checksum at that snapshot tick, then `physics_hash` 0.
 - **Commit:** `sim: delta snapshots against the last ack`
 
 ### N8. Seeded lossy link
@@ -707,6 +999,38 @@ Spawn and despawn records are written even when the pose budget is spent. Pose r
   - The assertions above, 60 steps, strafe command converted to a wish of `4` m/s on X (the camera's `MOVE_SPEED`). The test tolerates the pose: both sides equal each other. It does not hard-code the millimeter, because the physics step is allowed to slide along a wall. With no wall, both checksums match.
 - **Commit:** `session: drive the pawn from the physics step`
 
+### N25. Record the session stream and read it back
+
+- [ ] **Files:** `crates/net/src/replay.rs`. Test `crates/net/tests/replay.rs`.
+- **Behavior:** `Recorder` writes the D14 frame around datagram bytes the N8 codec already produced. `Reader` returns those slices. `apply` on a fresh sim consumes them in tick order. `genos-sim` still does not reference `std::fs` or `std::net`. A tick with nothing to send writes length 0 and still writes the checksum. The authority datagram's trailing checksum matches the frame hash on snapshot ticks.
+- **Test:** `recorded_datagrams_match_the_link_and_replay_the_checksum`
+  - Run the N8 harness (seed 3, loss 30, latency 50, jitter 20, 40 ticks, one strafing pawn) and record both directions. For every frame with length greater than 0, the slice equals the bytes `Link` sent on that tick, byte for byte. Applying the authority slices on a fresh sim reproduces the authority checksum at tick 40. A second record with the same seed writes the same file bytes.
+- **Commit:** `net: record the session datagrams`
+
+### N26. Seek to a keyframe
+
+- [ ] **Files:** `replay.rs`. Test `crates/net/tests/replay.rs`.
+- **Behavior:** Tick 0 is a baseline-0 datagram. Further keyframes fall every 120 ticks, which is a multiple of `SNAPSHOT_EVERY`. Each keyframe is appended to the trailer. `seek(tick)` loads the greatest keyframe with tick `<=` the target, applies it, then applies later frames through the target. It does not run tick passes for ticks before the keyframe.
+- **Test:** `a_seek_matches_playback_from_the_start`
+  - Record 240 ticks of strafe 127 with loss 0. `seek(200)` and a full apply from tick 0 leave the same checksum and the same `x_mm`. The seek path's applied frame ticks are the keyframe tick and the frames after it, not tick 0, when the keyframe tick is greater than 0.
+- **Commit:** `net: seek a replay to a keyframe`
+
+### N27. Resim from a keyframe and compare hashes
+
+- [ ] **Files:** `replay.rs`, `crates/sim/src/predict.rs` only if the owned-entity replay helper needs a tick range. Test `crates/net/tests/replay.rs`.
+- **Behavior:** `resim(tick)` loads the keyframe, runs the kinematic pass with the stored commands through `tick`, and compares `checksum` to the stored frame hash at each tick. An equal hash continues. A mismatch returns that tick and does not keep resimulating. Snapshot apply of the same file still reaches the end.
+- **Test:** `an_altered_command_mismatches_at_that_tick`
+  - An unaltered recording resims equal at every tick through 200. Replacing the command at tick 50 with a different strafe makes `resim` return 50. Applying the recorded snapshots anyway still reproduces the original checksum at tick 200.
+- **Commit:** `net: compare a resim to the stored hashes`
+
+### N28. Inspect one tick in the debug binary
+
+- [ ] **Files:** `examples/net-view/src/replay.rs`, `examples/net-view/src/main.rs`. Test `examples/net-view/tests/replay.rs`.
+- **Behavior:** `inspect(path, tick, resim) -> Report` loads the keyframe at or before `tick`, applies frames through `tick`, and returns the pawn pose, the stored hash, and the applied hash. `resim: true` also runs N27 and fills `resim_hash`. `step(report)` advances one tick with the same functions. `--replay PATH --tick N` is the headless `main` path. `--step` and `--resim` call `step` and `inspect`. The scrub control writes the same tick integer. This step does not open a window.
+- **Test:** `inspect_tick_prints_the_recorded_pose`
+  - Record 90 ticks, strafe 127, loss 0. `inspect(path, 60, false)` returns `x_mm == 60 * 67` and equal stored and applied hashes. `inspect(path, 60, true)` returns the same pose and a `resim_hash` equal to the stored hash. `step` from that report moves to tick 61 and `x_mm == 61 * 67`. Two calls write identical JSON.
+- **Commit:** `net-view: inspect a replay at a tick`
+
 ## Limits
 
 - The authority runtime is the only state authority. Input authority can move. A player runtime does not keep the true state of a pawn after it loses input authority.
@@ -722,7 +1046,13 @@ Spawn and despawn records are written even when the pose budget is spent. Pose r
 - There is no job scheduler. Parallel physics, if it lands, is allowed on the authority only when its hash matches `step`.
 - `examples/camera` does not join a session.
 - The debug window shows four player runtimes. The scale test's eight connections are headless.
-- Cross-machine bitwise identity is not claimed.
+- Cross-machine bitwise identity is not claimed. Snapshot playback is the picture. Resim is a debug check against the stored hashes.
+- The replay file has no reverse-simulation path. Rewind seeks to an earlier keyframe and applies forward.
+- A keyframe is written in the tick that owns it. Later ticks are not dropped to pay for it.
+- There is no replay-only component. A value in the file is a value in the live datagram, or a frame field from D14 (tick, hashes, length).
+- Public spectators are delayed. The authority file is written immediately.
+- `examples/camera` does not write a replay.
+- D1–D19 are open. The recommendations are not a decision record.
 - Genos's process supervisor, matchmaking, and account system are out of this repository. The contract is the binary, the bind address, the scene path, and stdin.
 
 ## Records each step touches
@@ -753,7 +1083,14 @@ N1 is the one that edits `CONTEXT.md`, `docs/architecture.md`, and the new ADR. 
 | ECS decision | Decision | N1 (the ADR) |
 | Job system left alone | Jobs, Global constraints | No step adds one |
 | Rhai stays off the socket | ADR 0009, Scripting | No step links Rhai into `genos-sim` |
+| Replay is the recorded network stream | Open decisions, Replay | N25 |
+| Input replay, snapshot deltas, and keyframes | D1, D2, D3 | N25, N26, N27 |
+| Seek, rewind, scrub | D4, D17 | N26, N28 |
+| Killcam and live spectators | D5, D6, D7, D19 | N25 records the stream a killcam would slice. The window and the delay wait on those decisions |
+| Per-tick hashes and desync | D11, D12, D15 | N27, N28 |
+| Recording version and map bytes | D10, D13, D14 | N25 |
+| Record a bug and inspect a tick | D8, D15, D16, D17 | N28 |
 
 ## What this plan does not do
 
-It does not implement the steps. It does not change `step`, the camera loop, or the MCP endpoint. It does not merge the physics plan. N24 is the seam, and it waits for that plan's `BodyId` and `hash_world`.
+It does not implement the steps. It does not settle D1–D19. It does not change `step`, the camera loop, or the MCP endpoint. It does not merge the physics plan. N24 is the seam, and it waits for that plan's `BodyId` and `hash_world`. N1 waits until the open decisions are answered, because the datagram layout and the replay file are the same bytes.
