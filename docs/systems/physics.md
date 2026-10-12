@@ -47,6 +47,16 @@ The camera calls this step from the scene crate. Lights have no collider.
 
 The next pipeline is [physics/plan.md](physics/plan.md). That file is a plan. It does not change this step.
 
+## Networking
+
+The step does not replicate. Gameplay networking waits ([Architecture](../architecture.md)). The contract the pipeline will meet:
+
+- Replicated state: awake poses and the sleep bit, vehicle chassis and wheel speeds, pre-fracture seeds (or the asset hash when the file is already local), bond-break events.
+- Authority: the server owns body state. The owning client sends input for the view body.
+- Prediction / rollback: the owned view body only. Vehicles, other dynamics, and destruction interpolate.
+- Determinism: one process, the fixed `1/60` step, single-thread `step`. Cross-platform bit identity is not required.
+- Headless server: `step` needs no window and no Vulkan device.
+
 ## Decisions
 
 - [ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps this step in the repository. There is no physics middleware crate.

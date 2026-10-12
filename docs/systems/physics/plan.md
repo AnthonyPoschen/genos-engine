@@ -2,9 +2,9 @@
 
 > **For agentic workers:** Implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
 
-**Goal:** Replace the single discrete contact pass with a physics pipeline that can run a large world, a person, a vehicle, a fast ship, and a pre-fractured breakable, with work gated by what is awake.
+**Goal:** Replace the single discrete contact pass with a physics pipeline that can run a large world, a person, a vehicle, a fast ship, and a pre-fractured breakable, with work gated by what is awake, and with a server-authoritative replication contract for each of those systems.
 
-**Architecture:** Rigid bodies stay on the CPU. A layered AABB tree feeds GJK/EPA manifolds into a soft-step solver. Islands sleep. Characters, vehicles, CCD, and destruction are opt-in on that pipeline. Poses of awake bodies are the only per-frame upload. A GPU solver waits on a profile. Offline Voronoi fracture builds the chunk asset; the step only swaps and simulates the broken branch.
+**Architecture:** Rigid bodies stay on the CPU. A layered AABB tree feeds GJK/EPA manifolds into a soft-step solver. Islands sleep. Characters, vehicles, CCD, and destruction are opt-in on that pipeline. Poses of awake bodies are the only per-frame upload. A GPU solver waits on a profile. Offline Voronoi fracture builds the chunk asset; the step only swaps and simulates the broken branch. The server owns body state. The owning client predicts the view body and rolls that body back. Vehicles and destruction replicate as snapshots and events. Each of those systems has a debug binary with the lighting command, script, screenshot, and metrics path.
 
 **Tech stack:** Rust, `genos-math` (`f32` `Vec3` / `Quat`), `std::thread::scope`, Vulkan only for the debug picture and the awake-pose buffer. ADR 0007 forbids a physics middleware crate.
 
@@ -25,6 +25,9 @@ Written against `gi-v2` parent `e61b89d`. This file does not change `step`.
 - Every step keeps `cargo test -p genos-physics` and `cargo test -p genos-scene` green, plus the tests of any other crate that step touches. `cargo build --workspace` passes. The workspace denies warnings.
 - Headless tests use a fixed `dt`, a fixed call order, and no window. Two runs in one process match bitwise on the values the step names. Do not check thread scheduling or wall-clock time.
 - `step(&mut World, dt)` stays the call the scene crate uses. New behavior has defaults that keep the existing assertions in `crates/physics/tests/scenarios.rs`, `crates/physics/tests/colliders.rs`, and `crates/physics/tests/bench.rs`.
+- Gameplay networking still waits ([Architecture](../../architecture.md)). The session, the socket, interest, and the snapshot codec belong to [core-networking/plan.md](../core-networking/plan.md). Physics does not open a socket. If a name in that file differs from this one, that file wins.
+- The recorded server tick and the rollback resim call `step`, the one-thread color order. `step_parallel` may run on a server only after it hash-matches `step`.
+- Every new system in this plan states replicated state, authority, prediction or rollback, determinism, and headless-server behavior in its system record in the commit that first implements them.
 
 ## Current state
 
@@ -93,7 +96,8 @@ The character controller (`crates/input/src/action.rs`, `character_controller`) 
 | Vehicles | The push spring is the only suspension-like force. | Ray or shape-cast wheels, spring-damper, slip friction, torque curve, gearbox, differential, anti-roll bar. Separate 6-DOF thrusters, zero gravity, large-orbit precision. |
 | Scale | Hundreds of static pillars in one test. `f32` world positions. | Thousands of active bodies, origin shift, awake-only GPU poses, a CPU solver that does not touch the asleep set. |
 | Destruction | A mesh collider is a few convex pieces. | Offline Voronoi chunks, interior faces, hierarchy, bond graph, hot-swap, one damage API, debris sleep and cull. Runtime slicing only when asked. |
-| Debug | Lighting binaries and a fly camera. | One scene catalog, a physics binary, a picker, a reset key, screenshot and metrics. |
+| Networking | No gameplay net. The loopback MCP endpoint edits the live scene. [Architecture](../../architecture.md) says gameplay networking waits. | Server authority, owned-body prediction and rollback, quantized replication, vehicle snapshots, fracture asset id plus bond-break events. |
+| Debug | `genos-stress` is the lighting binary: one command set over MCP, HTTP, and Rhai; scripts; knobs; screenshots; `report.md`. | The same shape for rigid bodies, the view body, vehicles, and fracture, plus a shared scene catalog and a reset. |
 
 ## Principles
 
@@ -101,6 +105,97 @@ The character controller (`crates/input/src/action.rs`, `character_controller`) 
 - Work is gated by need. Asleep islands are absent from narrowphase and the solver. Intact chunks are not simulated. A sleeping debris chunk is a cull candidate. CCD runs on bodies marked swept or speculative, not on the whole world.
 - GPU-resident where it pays. Awake poses and spawned chunk meshes live in a buffer the renderer can read. The CPU writes a delta when the awake set changes. The solver stays on the CPU until the gate at the end of this plan.
 - No fixed per-frame floor. Variable frame `dt`, fixed physics step only when time has accumulated, zero solver iterations when nothing is awake.
+- The server tick is that same `1/60` s step. A client renders between snapshots. It does not invent a second physics rate.
+
+## Networking
+
+[core-networking/plan.md](../core-networking/plan.md) owns the session, the UDP socket, `NetId`, `InputFrame`, the snapshot ring, interest, bandwidth, and the session debug binary (one server world and N client worlds in one process, with latency, loss, and jitter). This section is the physics contract that file calls. Physics stores `NetId` on a body and reads `InputFrame`. It does not define the codec and it does not resend packets.
+
+The co-design this section matches: the server is the only state authority; the sim tick is `1/60` s; snapshots go out at 20 Hz; the owning client predicts only its view body; everyone else is interpolated; same-process determinism is required; cross-platform bit identity of `f32` physics is not.
+
+### Authority
+
+The headless server runs `step` with no window, no Vulkan device, and no audio device. Clients do not accept one another's body state. An owning client has input authority for one view body, or for one vehicle it drives: it sends `InputFrame` samples. The server applies those samples and the resulting pose is the authority.
+
+A client does not predict a push against a dynamic body. On the predicting client that body stays on the latest snapshot. The server is the first place the push exists.
+
+### What replicates
+
+Replication is dirty tracking on the P25 pose buffer. An asleep body with an unchanged sleep bit sends nothing. Static geometry comes from the scene script on each peer, the same way the camera scene loads `scene.rhai`. Shape bytes, manifolds, warm-start impulses, island ids, and broadphase nodes stay local.
+
+| Piece | On the wire | Stays local |
+| --- | --- | --- |
+| Dynamic or kinematic body | `NetId`, millimetre position relative to `World::origin` (`i32`), smallest-three quaternion (`3 × i16`), linear velocity in cm/s (`i16`), angular velocity in milliradians/s (`i16`), sleep bit, `Motion` | `f32` pose, contact cache, inertia |
+| Origin | The `f64` origin, sent on the step that shifts it | The shifted `f32` working set |
+| View body input | `InputFrame` for that owner (tick, actions, sequence), defined by the core-networking plan | The wish after it is decoded |
+| Foot plant | Nothing | Casts, two-bone solve, pelvis lift. It runs on the rendered pose |
+| Vehicle | Chassis quantized pose and velocity, engine rpm (`u16`), gear (`i8`), steer (`i16`), each wheel's omega and suspension length (`i16`) | Suspension contact cache, tyre slip scratch, the torque table (content) |
+| Vehicle input | Throttle, brake, steer, gear request inside the owner's `InputFrame` | The solved wheel forces |
+| Destruction spawn | The pre-fracture seeds, child counts, interior material, support flags, and spawn pose. A content hash of the `.gfract` file replaces that payload when the client already has the file | Generated vertices and interior faces. The client rebuilds them from the seeds |
+| Destruction break | `BondBreak { breakable, bond, amount_milli, tick }` | The chunk meshes. Clients rebuild them from the asset |
+| Slice | `Slice { breakable, chunk, normal_i16, offset_mm, tick }` when `allow_slice` is set | The clip result, rebuilt from the plane |
+| Debris | Awake debris poses, under the same interest budget the core-networking plan applies | Asleep debris. Cull stays local |
+
+Quantized fields are what reconciliation compares. The solver keeps `f32`.
+
+`break_baseline(breakable)` returns the set of broken bond ids and the quantized poses of awake chunks. The core-networking plan sends that when a client has no prior snapshot. Physics does not invent a second reliable channel.
+
+### Prediction and rollback
+
+The owned view body is the only predicted body.
+
+Each client tick samples the character-controller action map once into an `InputFrame` and stores it. The client steps the view body ahead of the server and keeps a ring of 128 predicted poses, keyed by tick. Remote bodies and vehicles are interpolated between the two snapshots that bracket render time (the core-networking plan uses a 100 ms delay). They are not resimulated.
+
+When a snapshot arrives for tick `T`, the client compares the quantized server pose of the owned body with the stored prediction at `T`. On a mismatch it restores the owned body to the server pose at `T`, then replays `InputFrame`s `T+1 … now` through `step` for that body only. Other islands are not rolled back. Rhai does not run inside the replay. Codimation on a remote solid is server state, not a predicted wish.
+
+Foot plant runs after the replay, on the pose that will be drawn. A correction can move the hips. The feet recast. The plant is not part of the replicated checksum.
+
+A driven vehicle in v1 is server-authoritative and interpolated, including wheel spin and suspension length. Predicting a chassis would roll back contacts with the world. That waits until the owned-body test is green, and even then the predicted set is the chassis only, with the same ring and the same rule that other dynamics stay interpolated.
+
+### Determinism
+
+P14's hash is the replay gate. Two worlds in one process, given the same spawns, the same `.gfract` bytes, the same `InputFrame` sequence, and `step` at `1/60`, produce the same hash. That is what makes the owned-body replay match the server.
+
+The server tick uses `step`, not `step_parallel`. Hull face order on the solver path does not call `atan2`. Cross-platform bit identity is not a gate: `genos-math` is `f32`, and this plan does not add a `libm` crate. A Windows server and a Linux client compare quantized poses, not raw `f32` bits.
+
+Body storage order for the hash and for the snapshot is `NetId` order once bodies live on entities. `BodyId` remains the in-world handle. The map is one `NetId` per replicated body, assigned by the server.
+
+### Vehicles and destruction on the wire
+
+A car replicates as one chassis body plus the small wheel block above. Clients do not run the tyre solver. They draw the wheels from the replicated omega and suspension length. A missed snapshot interpolates those scalars the same way it interpolates position.
+
+A breakable replicates as seeds plus events. The spawn message carries the Voronoi seeds, the child counts, the interior material, and the support flags. Both peers run the same fracture build, so the chunk meshes match and the vertices are not sent. When the client already has that `.gfract` file, the spawn sends the content hash instead of the seeds. The server simulates contacts and emits a `BondBreak` when `apply_damage` crosses zero. The client applies that event through the same `apply_damage`, in tick order. Chunk transforms of the spawned branch then replicate as ordinary awake bodies. A client that sees a pose for a chunk it has not spawned yet applies the baseline bond set first, then the pose.
+
+A health event and an impulse event are the same `BondBreak`. The amount is the damage in milli-units. The client does not need to know which caller crossed the threshold.
+
+Slicing replicates the plane, not the new triangles. Both peers run `slice_chunk` from that plane. A peer with `allow_slice: false` ignores the event.
+
+### Observability
+
+The model is [Debugging](../debugging.md): one command set, the same JSON over MCP `tools/call`, `POST /cmd/<name>`, and a Rhai script; `genos-debug` in the frame loop; a script that writes `report.md`, `result.json`, and images; knobs; a reset; a screenshot. `genos-stress` is the lighting binary that already does this. Each physics system gets its own binary with that shape. They share `genos-scenes` and the command names below. They do not mount the lighting reference tracer.
+
+| System | Binary | Default scenes | Knobs | View modes |
+| --- | --- | --- | --- | --- |
+| Rigid bodies, CCD, islands | `genos-physics-view` | `stack`, `pile_4k`, `asleep_grid`, `ship_impact` | `dt_scale`, `solver` (`soft` or `sequential`), `substeps`, `sleep` | `bodies`, `contacts`, `islands`, `sleep`, `sweeps` |
+| View body and foot plant | `genos-character-view` | `view_stairs`, `foot_slope` | `step_height`, `stick`, `wish_speed` | `bodies`, `casts`, `feet`, `prediction` |
+| Vehicles | `genos-vehicle-view` | `car_flat`, `car_bump`, `orbit`, `ship_impact` | `throttle`, `gear`, `mu`, `anti_roll` | `bodies`, `wheels`, `sweeps` |
+| Fracture | `genos-fracture-view` | `destruction_wall`, `ship_station` | `debris_budget`, `bond_health`, `allow_slice` | `bodies`, `bonds`, `chunks` |
+
+Shared commands, same arguments on every binary: `physics_metrics`, `take_screenshot`, `time` (pause, step, fixed step), `knob`, `reset`, `scene`, `view`. `reset` restores the catalog start, including bond health, gear, and the prediction ring. `key_r` calls that command. It is not added to `character_controller()`.
+
+Headless: `binary --headless --scene NAME --frames N --metrics PATH` and `binary --script FILE --report DIR`. The script functions match the lighting shorts that apply here: `step(n)`, `shot(name)`, `knob(name, value)`, `check`, `require`. Exit code 1 when a check fails.
+
+The session binary from the core-networking plan is the multi-client view. Physics publishes `replicated_checksum` (FNV of the quantized replicated fields in `NetId` order) and the prediction error (server quantized position minus the rendered position). That binary draws the error. Physics does not open a second session window.
+
+### Headless tests the contract adds
+
+These tests are in-process. They do not bind a UDP socket. The session binary calls the same functions later.
+
+- `owned_body_reconciles_after_a_dropped_input`
+- `a_predicted_capsule_does_not_move_a_dynamic_box`
+- `vehicle_bytes_are_the_chassis_and_the_wheels`
+- `bond_breaks_replicate_without_the_mesh`
+- `replicated_checksum_ignores_foot_plant`
 
 ## Locked names
 
@@ -157,6 +252,8 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 | `crates/physics/src/origin.rs` | Wide position, origin shift. From step 21. |
 | `crates/physics/src/color.rs` | Constraint colors. From step 22. |
 | `crates/physics/src/upload.rs` | Awake pose buffer. From step 25. |
+| `crates/physics/src/replicate.rs` | Quantized poses, bond events, checksum. From step 42. |
+| `crates/physics/src/predict.rs` | Owned-body ring and rollback. From step 43. |
 | `crates/physics/src/vehicle.rs` | Wheeled vehicle and thrusters. From step 27. |
 | `crates/physics/src/destruction.rs` | Runtime breakable, hot-swap, debris. From step 36. |
 | `crates/physics/src/contact.rs` | Stays until step 9. Analytic oracles stay in tests. |
@@ -165,6 +262,9 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 | `crates/anim/` | Skeleton and foot plant. Package `genos-anim`. From step 16. |
 | `crates/scenes/` | Shared scene catalog. Package `genos-scenes`. From step 40. |
 | `examples/physics-view/` | Debug binary `genos-physics-view`. From step 41. |
+| `examples/character-view/` | Debug binary `genos-character-view`. From step 46. |
+| `examples/vehicle-view/` | Debug binary `genos-vehicle-view`. From step 46. |
+| `examples/fracture-view/` | Debug binary `genos-fracture-view`. From step 46. |
 
 `genos-bake` is not the fracture tool. GI bakes and fracture assets stay apart.
 
@@ -549,14 +649,19 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 ### P41. Physics debug binary
 
 - [ ] **Files:** `examples/physics-view` (`src/main.rs`, `src/lib.rs`), package `genos-physics-view`, binary name `genos-physics-view`. Depend on `genos-scenes`, `genos-window`, `genos-input`, `genos-render`, `genos-ui`, `genos-debug`, `genos-mcp`, `genos-json`. Modify `examples/stress` and `examples/camera` to depend on `genos-scenes` and to honor `--list-scenes` by printing `SceneCatalog::all()` and exiting. Document the binary in `docs/systems/debugging.md` and `docs/architecture.md`.
-- **Behavior:**
+- **Behavior:** This binary is the rigid-body system. Character, vehicle, and fracture binaries are P46 and use this same host shape.
   - `--list-scenes` prints `name kind description` and exits 0.
-  - `--scene NAME` selects one scene. Unknown name exits 1.
+  - `--scene NAME` selects one scene. Unknown name exits 1. The scene is the preset, the way a lighting knob selects a setup.
   - With no `--scene` and a terminal on stdin, print the numbered catalog and read one line. The window, on its first frame, shows the same list with `genos-ui`. `key_up` / `key_down` move, `key_enter` starts, `key_1` through `key_9` jump. This list is the human picker.
-  - `key_r` calls `PhysicsScene::reset`. Bind it on a debug action map in this binary. Do not add it to `character_controller()`.
+  - Commands match [Debugging](../debugging.md): the same JSON over MCP `tools/call`, `POST /cmd/<name>`, and Rhai. Names: `physics_metrics`, `take_screenshot`, `time`, `knob`, `reset`, `scene`, `view`. `genos-debug`'s `Tools` runs in the frame loop (`before_draw` / `after_draw`). Do not mount the lighting reference tracer.
+  - `reset` and `key_r` restore the catalog start. Bind `key_r` on a debug action map in this binary. Do not add it to `character_controller()`.
   - `--headless --metrics PATH --frames N` steps without a window and writes the `genos-json` report. Exit 1 when `passed` is false.
-  - `--shot PATH` writes one PNG through `genos_debug::png::write_png` after the last frame. The MCP command queue exposes `physics_metrics` and `take_screenshot` only. Do not mount the lighting reference tracer.
-  - The picture draws bodies, wheel casts, bond lines, and interior faces with a flat color so a break is visible. Poses come from the P25 buffer.
+  - `--script FILE --report DIR` runs a Rhai script (`step`, `shot`, `knob`, `check`, `require`) and writes `report.md`, `result.json`, and images, as `genos-stress` does.
+  - `--shot PATH` writes one PNG through `genos_debug::png::write_png` after the last frame.
+  - `view` modes for this binary: `bodies`, `contacts`, `islands`, `sleep`, `sweeps`.
+  - Knobs: `dt_scale`, `solver`, `substeps`, `sleep`.
+  - One script ships in this commit: `examples/physics-view/scripts/stack.rhai`. It pauses, steps 60 frames, shots `stack`, and `require`s `physics_metrics.passed`.
+  - The picture draws bodies, contacts, and island colors. Poses come from the P25 buffer.
   - Frame `dt` is measured. A hitch still clamps the accumulator to 0.25 s. Headless mode steps exactly `--frames` steps of `1/60` and ignores the wall clock.
 - **Test:** `crates/scenes/tests/catalog.rs` already covers metrics. Add `examples/physics-view/tests/args.rs`:
   - `parse` of `--headless --scene ship_impact --metrics out.json --frames 5` yields that scene and does not open a window type (the parse result has `headless: true`).
@@ -564,9 +669,50 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - The stress and camera `--list-scenes` paths are the same string function `SceneCatalog::list_text()`, tested once in `genos-scenes`.
 - **Commit:** `physics-view: pick a scene, reset, write metrics and a screenshot`
 
+### P42. Quantized replication
+
+- [ ] **Files:** `crates/physics/src/replicate.rs`. Test `crates/physics/tests/replicate.rs`. Copy the five networking lines into `docs/systems/physics.md`.
+- **Behavior:** `replicate(world) -> Vec<ReplicatedBody>` writes one record per dirty awake body, or per body whose sleep bit changed, in `NetId` order. Positions are millimetres relative to the origin. A fully asleep unchanged world returns an empty vec. `pose_at_tick` stores the last 32 quantized poses per body for the session's hit rewind. `replicated_checksum` hashes those records. Foot-plant output is not an input to the hash.
+- **Test:** `an_asleep_world_replicates_nothing_and_a_shift_sends_the_origin`
+  - Stack from P12 after it sleeps: `replicate` is empty. Wake one body: the vec is that island only. Shift the origin: the next record includes the `f64` origin and the body's millimetre position matches the unshifted case within 1 mm.
+- **Commit:** `physics: publish quantized poses for awake bodies`
+
+### P43. Owned-body prediction and rollback
+
+- [ ] **Files:** `crates/physics/src/predict.rs`. Test `crates/physics/tests/predict.rs`. Update the prediction line in `docs/systems/physics.md`.
+- **Behavior:** `predict(view, input)` stores the `InputFrame` and steps only the owned view body. `reconcile(server_pose_at_T)` restores that body when the quantized pose differs, then replays later inputs. Other bodies are left where `apply_snapshot` put them. `apply_snapshot` copies quantized poses onto remote bodies and does not call the solver.
+- **Test:** `owned_body_reconciles_after_a_dropped_input`
+  - Two worlds, same start, 30 ticks. The client predicts with `forward = 1` on every tick. Tick 10's input is dropped on the server (`forward = 0` for that tick only). The client's quantized position at tick 10 differs from the server. `reconcile` then replay leaves the client owned body within 1 mm of the server. A dynamic box in front of the capsule is moved on the server and, on the client, stays on the snapshot pose from before the local prediction (`a_predicted_capsule_does_not_move_a_dynamic_box`).
+- **Test:** `replicated_checksum_ignores_foot_plant`
+  - Run `plant_foot` on a copy of the world. The checksum equals the copy that did not plant.
+- **Commit:** `physics: roll back the owned view body`
+
+### P44. Vehicle replication
+
+- [ ] **Files:** `replicate.rs`, `vehicle.rs`. Test `crates/physics/tests/replicate.rs`. Vehicle networking lines in `docs/systems/physics.md`.
+- **Behavior:** `replicate_vehicle` writes the chassis quantized pose, rpm, gear, steer, and each wheel's omega and suspension length. It does not write the contact cache or the torque-curve samples. `apply_vehicle_snapshot` sets those fields and does not call the wheel solver. Throttle, brake, steer, and gear request are read from the owner's `InputFrame` on the server only.
+- **Test:** `vehicle_bytes_are_the_chassis_and_the_wheels`
+  - One car, one step of throttle on the server. The serialized record is at most 64 bytes plus 8 bytes per wheel. A client world that only calls `apply_vehicle_snapshot` between two samples has a chassis position on the segment between them, and its `wheel_cast_count` stays 0.
+- **Commit:** `physics: replicate a vehicle as a snapshot`
+
+### P45. Destruction events
+
+- [ ] **Files:** `replicate.rs`, `destruction.rs`. Test `crates/physics/tests/replicate.rs`. Fracture networking lines in `docs/systems/fracture.md` and `docs/systems/physics.md`.
+- **Behavior:** Spawn replication is the seed list, child counts, interior material, and support flags, plus the spawn pose. A client that already has the file accepts the content hash in place of the seeds and loads that file. A bond that breaks appends a `BondBreak`. A slice appends a `Slice`. `apply_events` feeds those through `apply_damage` and `slice_chunk`. `break_baseline` lists broken bond ids and awake chunk poses.
+- **Test:** `bond_breaks_replicate_without_the_mesh`
+  - Server and client build from the same seed list. The server's sphere breaks the top bond. The event list contains that bond id and no vertex. The client applies the events. Broken bond ids match. Spawned chunk count matches. A second client that only receives `break_baseline` reaches the same bond set. One break event is at most 32 bytes. A spawn that sends seeds is smaller than the generated vertex buffer.
+- **Commit:** `physics: replicate fracture as seeds and bond events`
+
+### P46. Character, vehicle, and fracture debug binaries
+
+- [ ] **Files:** `examples/character-view`, `examples/vehicle-view`, `examples/fracture-view`, each a thin binary on the P41 host. Scripts: `examples/character-view/scripts/foot_slope.rhai`, `examples/vehicle-view/scripts/ship_impact.rhai`, `examples/fracture-view/scripts/destruction_wall.rhai`. Document the four binaries and their commands in `docs/systems/debugging.md`.
+- **Behavior:** Each binary defaults to its row in the observability table, exposes that row's knobs and view modes, and supports the shared commands, `--headless`, `--script`, `--report`, the picker, and `key_r`. The session binary is not created here. `replicated_checksum` and the owned-body error are fields on `physics_metrics` so the core-networking session view can read them.
+- **Test:** `examples/character-view/tests/args.rs` (and the same parse test in the vehicle and fracture packages): `--script scripts/foot_slope.rhai --report out` sets `script` and `report`. `crates/scenes/tests/catalog.rs` asserts `physics_metrics` for `foot_slope`, `ship_impact`, and `destruction_wall` still carry `passed`.
+- **Commit:** `debug: add character, vehicle, and fracture view binaries`
+
 ## GPU solver gate
 
-Do not implement a GPU rigid solver in P1–P41.
+Do not implement a GPU rigid solver in P1–P46.
 
 Open that work only after all of these are true:
 
@@ -591,7 +737,7 @@ Until that profile exists, the Vulkan use in this plan is the debug picture and 
 | `destruction_wall` | Two pre-fractured columns. A ball hits the left. The right loses the same bond from health. | Both columns break that bond, only the hit branch spawns, debris ≤ budget. |
 | `ship_station` | A swept ship hits a supported wall. | No tunnel, at least one bond breaks. |
 
-`key_r` returns any of these to the start pose, including bond health and orbit state. `--shot` is the picture an agent attaches. `--metrics` is the pass or fail an agent reads without a GPU.
+Which binary opens which scene is the observability table in the networking section. `key_r` and the `reset` command return any of these to the start pose, including bond health, gear, and the prediction ring. `--shot` is the picture an agent attaches. `--metrics` and the script report are the pass or fail an agent reads without a GPU. The session binary from the core-networking plan is where latency, loss, jitter, and the server-versus-client error are shown.
 
 ## Records each step touches
 
@@ -604,6 +750,8 @@ Until that profile exists, the Vulkan use in this plan is the debug picture and 
 | P33 | `docs/systems/fracture.md` (new), `docs/systems/README.md` |
 | P36–P39 | `docs/systems/physics.md`, `docs/systems/fracture.md`, `CONTEXT.md` (bond, fracture asset) |
 | P40–P41 | `docs/architecture.md`, `docs/systems/debugging.md` |
+| P42–P45 | `docs/systems/physics.md` networking lines, `docs/systems/fracture.md` for P45 |
+| P46 | `docs/systems/debugging.md` |
 
 ## Coverage
 
@@ -623,3 +771,8 @@ Until that profile exists, the Vulkan use in this plan is the debug picture and 
 | Thousands of bodies, origin shift, awake-only poses, GPU solver only after a profile | P21, P25, P26, GPU gate |
 | Voronoi pre-fracture, interior faces, hierarchy, bonds, hot-swap, one damage API, debris cull, optional slice | P33–P39, `destruction_wall` |
 | Shared scene library, picker, reset, screenshot, metrics | P40, P41 |
+| Server authority, quantized snapshots, origin on the wire | P42 |
+| Owned-body prediction and rollback; other bodies stay interpolated | P43 |
+| Vehicle snapshot without the contact cache | P44, `car_flat` |
+| Pre-fracture seeds plus bond-break events, no mesh on the wire | P45, `destruction_wall` |
+| One debug binary per system, lighting-style commands, scripts, knobs, reset | P41, P46 |
