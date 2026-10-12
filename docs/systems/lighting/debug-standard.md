@@ -13,6 +13,7 @@ Isolate toggles attribute a change to one component: `GENOS_LIGHTING_TOGGLES`, o
 ## Stats counters
 
 - `GENOS_LIGHTING_SC_TRACE=1` prints one `lightingchg frame N c [...]` line per frame from `gstats.chg` (slots `CHG_*` in `crates/render/shaders/lighting_cache.glsl`). `tools/lighting/chg.py RUN_DIR` labels the mean over frames 300–600. The same readback prints `lightingdg` diag words.
+- `GENOS_LIGHTING_DEBUG` or `GENOS_LIGHTING_SC_TRACE` prints `lightingatrous` (dirty fraction, mode `list` or `dense`, threshold, filtered texels) for the a-trous fallback. `GENOS_LIGHTING_ATROUS_DIRTY` is the fraction (default 0.25; `0` always dense, `1` lists up to the cap). `Renderer::lighting_atrous_stats` reads the same words.
 - `GENOS_LIGHTING_DEBUG=1` prints `lighting probes rays … per_probe …`. It reads GPU counters back, so it stays off fps runs.
 - `GENOS_LIGHTING_SC_TRACE` also prints `lightingsc` (surface-cache claims and relights).
 - `GENOS_GPU_TIMES=1` prints `GPU_MS`. `GENOS_GPU_DISPATCH=1` with it prints `LIGHTING_DISPATCH`.
@@ -53,4 +54,4 @@ One catalogue, three doors: MCP `tools/call`, `POST /cmd/<name>`, and the Rhai s
 
 Stress knobs in `examples/stress/src/knobs.rs`: time of day, sun speed, sun freeze, sky, boxes, lamps, lamp clock, box clock, and the lamp and scale controls the panel shows. The same knobs are MCP `knobs` and Rhai `knob`.
 
-Env knobs for an A/B, listed in [Lighting](README.md): `GENOS_LIGHTING_WORLD`, `GENOS_LIGHTING_SC_FLAGS`, `GENOS_LIGHTING_SC_LOCAL`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`, `GENOS_LIGHTING_TILE`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_FILL`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_ASYNC`.
+Env knobs for an A/B, listed in [Lighting](README.md): `GENOS_LIGHTING_WORLD`, `GENOS_LIGHTING_SC_FLAGS`, `GENOS_LIGHTING_SC_LOCAL`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`, `GENOS_LIGHTING_TILE`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_FILL`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_ASYNC`, `GENOS_LIGHTING_ATROUS_DIRTY`.

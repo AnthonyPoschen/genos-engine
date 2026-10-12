@@ -73,6 +73,15 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     // host sets): which writers changed what, and by how much. lightingchg lines,
     // perf/chg.py; the slots are listed at LIGHTING_CHG_*.
     uint chg[32];
+    // S78X dense fallback (lightingatrous lines). Fraction is millionths of the
+    // filtered texels, the fullest of levels 1-5. Mode is 1 (work list), 2
+    // (dense full-frame sweep), or 0 (the levels did not run). ppm is the
+    // threshold in force (GENOS_LIGHTING_ATROUS_DIRTY). active is the filtered
+    // texel count that fraction divided by.
+    uint atrous_frac;
+    uint atrous_mode;
+    uint atrous_ppm;
+    uint atrous_active;
 } gstats;
 // Kept-hit light writes (light pass): all, changed, by relative luminance delta
 // (<0.2 %, 0.2-1 %, 1-5 %, >5 %), and changed by source of the hit's direct light
@@ -2717,27 +2726,106 @@ bool lighting_svgf_is_dirty(uint s, uint k) {
 // that level's list once a frame (atomic exchange on a per-slot, per-level
 // stamp); the level's dispatch then runs only the listed slots (one uniform
 // count read for the rest), instead of every thread of 1M slots reading its
-// stamps. Still scene: ~5-18k dirty slots a level against 1M. A list past
-// LIGHTING_ATROUS_LIST_CAP falls back to the full sweep (stamps as before).
+// stamps. Still scene: ~5-18k dirty slots a level against ~108k filtered.
+//
+// That list is slower once most of the filtered set is dirty. Building it is
+// a contended atomicAdd on one counter (plus a scattered slot id) inside the
+// filter, and the dispatch then walks slots in append order, so the 5x5 taps
+// miss the coalescing of a dense slot sweep. S78A was rejected for the same
+// locality cost. The moving scene paid both and got the dense sweep anyway
+// once a list passed LIGHTING_ATROUS_LIST_CAP.
+//
+// The fallback uses last frame's fullest level (LIGHTING_ATROUS_PREV_AT,
+// millionths of the filtered texels). Above the threshold the level does not
+// build a list and every thread keeps its own slot, skipping clean stamps as
+// before. A list that still overflows the cap does the same. Threshold 0 is
+// always dense; a threshold of 1 keeps the lists up to the cap.
 const bool LIGHTING_ATROUS_LISTS = true;
 const uint LIGHTING_ATROUS_LIST_CAP = 65536u;
 const uint LIGHTING_ATROUS_MARK_AT = LIGHTING_CHECK_P_AT + 16u;
 const uint LIGHTING_ATROUS_LIST_AT = LIGHTING_ATROUS_MARK_AT + 5u * LIGHTING_CACHE_SLOTS;
+// Past the S78Z verify/wake reservation. Host writes the threshold; the rest
+// is this frame's list decision and the dense-path recount.
+const uint LIGHTING_ATROUS_PPM_AT = LIGHTING_ATROUS_LIST_AT + 5u * (LIGHTING_ATROUS_LIST_CAP + 1u) + 6u * 65536u + 16u;
+const uint LIGHTING_ATROUS_PREV_AT = LIGHTING_ATROUS_PPM_AT + 1u;
+const uint LIGHTING_ATROUS_BIN_AT = LIGHTING_ATROUS_PREV_AT + 1u;
+const uint LIGHTING_ATROUS_MODE_AT = LIGHTING_ATROUS_BIN_AT + 64u;
+const uint LIGHTING_ATROUS_DBIN_AT = LIGHTING_ATROUS_MODE_AT + 5u;
 uint lighting_atrous_list(uint k) {
     return LIGHTING_ATROUS_LIST_AT + (k - 1u) * (LIGHTING_ATROUS_LIST_CAP + 1u);
+}
+// True when this frame's levels 1-5 should append work lists. Last frame's
+// fraction is what decides: the mark that would cross the threshold is already
+// inside the filter, so this frame cannot both count it cheaply and avoid the
+// atomic. The next frame then takes the dense sweep.
+bool lighting_atrous_listing() {
+    if (!LIGHTING_ATROUS_LISTS) {
+        return false;
+    }
+    uint ppm = ckeys.key[LIGHTING_ATROUS_PPM_AT];
+    if (ppm == 0u) {
+        return false;
+    }
+    return ckeys.key[LIGHTING_ATROUS_PREV_AT] <= ppm;
 }
 void lighting_svgf_mark(uint s, uint k) {
     if (s == ~0u) {
         return;
     }
-    if (LIGHTING_ATROUS_LISTS && atomicExchange(ckeys.key[LIGHTING_ATROUS_MARK_AT + (k - 1u) * LIGHTING_CACHE_SLOTS + s], lighting_frame()) != lighting_frame()) {
-        uint at = atomicAdd(ckeys.key[lighting_atrous_list(k)], 1u);
-        if (at < LIGHTING_ATROUS_LIST_CAP) {
-            ckeys.key[lighting_atrous_list(k) + 1u + at] = s;
+    if (LIGHTING_ATROUS_LISTS && lighting_atrous_listing()) {
+        uint list = lighting_atrous_list(k);
+        // Past the cap the dispatch falls back; stop adding to the one counter.
+        if (ckeys.key[list] <= LIGHTING_ATROUS_LIST_CAP && atomicExchange(ckeys.key[LIGHTING_ATROUS_MARK_AT + (k - 1u) * LIGHTING_CACHE_SLOTS + s], lighting_frame()) != lighting_frame()) {
+            uint at = atomicAdd(ckeys.key[list], 1u);
+            if (at < LIGHTING_ATROUS_LIST_CAP) {
+                ckeys.key[list + 1u + at] = s;
+            }
         }
     }
     uint w = k - 1u;
     cache.v[LIGHTING_SC_DIRTY_AT + (w >> 2u) * LIGHTING_CACHE_SLOTS + s][w & 3u] = uintBitsToFloat(lighting_frame());
+}
+// Stage 6, one thread: the fullest level's fraction, the mode the levels
+// actually ran, and the fraction the next frame's list decision reads.
+void lighting_atrous_publish() {
+    uint nlive = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < 64u; i++) {
+        nlive += ckeys.key[LIGHTING_ATROUS_BIN_AT + i];
+    }
+    uint frac = 0u;
+    uint mode = 0u;
+    [[dont_unroll]] for (uint k = 1u; k <= 5u; k++) {
+        uint m = ckeys.key[LIGHTING_ATROUS_MODE_AT + k - 1u];
+        if (m == 0u) {
+            continue;
+        }
+        uint cnt = 0u;
+        if (m == 2u) {
+            mode = 2u;
+            [[dont_unroll]] for (uint i = 0u; i < 64u; i++) {
+                cnt += ckeys.key[LIGHTING_ATROUS_DBIN_AT + (k - 1u) * 64u + i];
+            }
+        } else {
+            cnt = ckeys.key[lighting_atrous_list(k)];
+            if (mode == 0u) {
+                mode = 1u;
+            }
+        }
+        uint f = 0u;
+        if (nlive > 0u) {
+            f = uint(min(1000000.0, 1000000.0 * float(cnt) / float(nlive)));
+        } else if (cnt > 0u) {
+            f = 1000000u;
+        }
+        if (f > frac) {
+            frac = f;
+        }
+    }
+    ckeys.key[LIGHTING_ATROUS_PREV_AT] = frac;
+    gstats.atrous_frac = frac;
+    gstats.atrous_mode = mode;
+    gstats.atrous_ppm = ckeys.key[LIGHTING_ATROUS_PPM_AT];
+    gstats.atrous_active = nlive;
 }
 bool lighting_svgf_moved(vec4 a, float va, vec4 b, float vb) {
     float la = dot(a.rgb, vec3(0.2126, 0.7152, 0.0722));

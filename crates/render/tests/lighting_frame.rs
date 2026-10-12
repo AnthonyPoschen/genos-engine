@@ -416,3 +416,93 @@ fn lighting_moving_camera_keeps_its_brightness() {
         );
     }
 }
+
+/// Mean absolute difference of two pictures' RGB bytes (0..255).
+fn mean_abs(a: &[u8], b: &[u8]) -> f64 {
+    let n = (a.len().min(b.len()) / 4).max(1);
+    let mut sum = 0u64;
+    for i in 0..n {
+        let p = i * 4;
+        sum += u64::from(a[p].abs_diff(b[p]));
+        sum += u64::from(a[p + 1].abs_diff(b[p + 1]));
+        sum += u64::from(a[p + 2].abs_diff(b[p + 2]));
+    }
+    sum as f64 / (3 * n) as f64
+}
+
+/// S78X dense fallback: a still hall stays on the work lists at threshold 1 and
+/// switches to the dense sweep at threshold 0. The two pictures match, and the
+/// stats report the fraction, the mode and the threshold.
+#[test]
+fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
+    let (_gpu, mut window, mut renderer) = open();
+    let world = shipped_hall();
+    let camera = Camera::opening();
+    renderer.set_lighting_atrous_dirty(1.0);
+    let mut previous = Vec::new();
+    let mut listed = Vec::new();
+    for _ in 0..6 {
+        previous = listed;
+        listed = draw(&mut window, &mut renderer, &world, &camera);
+    }
+    let list_stats = renderer.lighting_atrous_stats();
+    let temporal = mean_abs(&previous, &listed);
+    eprintln!(
+        "list dirty {:.4} mode {} threshold {:.4} filtered {} ran {} temporal {temporal:.3}",
+        list_stats.dirty_fraction,
+        list_stats.mode,
+        list_stats.threshold,
+        list_stats.filtered,
+        list_stats.ran
+    );
+    assert!(list_stats.ran, "the a-trous levels ran");
+    assert_eq!(list_stats.mode, 1, "threshold 1 keeps the work lists");
+    assert!(
+        (list_stats.threshold - 1.0).abs() < 1.0e-4,
+        "threshold {}",
+        list_stats.threshold
+    );
+    assert!(
+        (0.0..=1.0).contains(&list_stats.dirty_fraction),
+        "dirty fraction {}",
+        list_stats.dirty_fraction
+    );
+    assert!(list_stats.filtered > 0, "filtered texels are the denominator");
+
+    renderer.set_lighting_atrous_dirty(0.0);
+    let dense = draw(&mut window, &mut renderer, &world, &camera);
+    let dense_stats = renderer.lighting_atrous_stats();
+    let cross = mean_abs(&listed, &dense);
+    eprintln!(
+        "dense dirty {:.4} mode {} threshold {:.4} filtered {} cross {cross:.3}",
+        dense_stats.dirty_fraction, dense_stats.mode, dense_stats.threshold, dense_stats.filtered
+    );
+    assert!(dense_stats.ran, "the dense frame ran the levels");
+    assert_eq!(dense_stats.mode, 0, "threshold 0 is the dense sweep");
+    assert!(
+        dense_stats.threshold.abs() < 1.0e-4,
+        "threshold {}",
+        dense_stats.threshold
+    );
+    assert!(
+        (0.0..=1.0).contains(&dense_stats.dirty_fraction),
+        "dirty fraction {}",
+        dense_stats.dirty_fraction
+    );
+    assert!(
+        (list_stats.dirty_fraction - dense_stats.dirty_fraction).abs() < 0.35,
+        "dirty fraction list {} dense {}",
+        list_stats.dirty_fraction,
+        dense_stats.dirty_fraction
+    );
+    assert!(
+        cross <= temporal + 2.0,
+        "list and dense pictures diverged: cross {cross:.3} same-mode step {temporal:.3}"
+    );
+
+    renderer.set_lighting_atrous_dirty(1.0);
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let back = renderer.lighting_atrous_stats();
+    assert_eq!(back.mode, 1, "raising the threshold returns to the work lists");
+    assert!(back.ran, "the levels ran after the switch back");
+}
