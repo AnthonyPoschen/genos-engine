@@ -649,6 +649,9 @@ void lighting_sc_offer(uint slot, vec3 at, vec3 centre) {
     }
 }
 
+// S73B/S73C: set while a scout hit claims texels as Lumen surface cache
+// feedback (lighting_direct.comp).
+bool lighting_sc_feedback = false;
 // Surface cache: the lit texel twice the size holding pos (the first fill of a
 // texel not lit yet); w 0 when there is none.
 vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
@@ -660,7 +663,9 @@ vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
         uint s = lighting_cache_find_sized(pos, n, seed, size, pos);
         if (s != ~0u && seed) {
             cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
-            cache.v[LIGHTING_WORLD_AT + s].z = uintBitsToFloat(lighting_frame());
+            if (!lighting_sc_feedback) {
+                cache.v[LIGHTING_WORLD_AT + s].z = uintBitsToFloat(lighting_frame());
+            }
         }
         if (s != ~0u) {
             vec4 v = cache.v[3u * s + 2u];
@@ -768,14 +773,17 @@ bool lighting_sc_light_quiet();
 float lighting_seed_sunfrac = 0.0;
 // S72N: first fill from the coarser sizes (2x, then 4x), bilinear over the lit
 // coplanar cells there (any coverage), so it has no cell-shaped steps. The 25 cm
-// cell holding pos is still claimed as a seed a pixel needs (reveal burst).
+// cell holding pos is still claimed as a seed a pixel needs (reveal burst); a
+// feedback claim (S73C) is no pixel's need and only marks it used.
 vec4 lighting_sc_parent_bilerp(vec3 pos, vec3 n, float size) {
     float s2 = size * 2.0;
     if (s2 > 0.2) {
         uint c = lighting_cache_find_sized(pos, n, true, s2, pos);
         if (c != ~0u) {
             cache.v[3u * c].w = uintBitsToFloat(lighting_frame());
-            cache.v[LIGHTING_WORLD_AT + c].z = uintBitsToFloat(lighting_frame());
+            if (!lighting_sc_feedback) {
+                cache.v[LIGHTING_WORLD_AT + c].z = uintBitsToFloat(lighting_frame());
+            }
         }
     }
     [[dont_unroll]] for (uint l = 0u; l < 2u; l++) {
@@ -2408,9 +2416,9 @@ void lighting_world_add(vec3 pos, vec3 n, vec3 e, bool changed) {
 // the surface cache and relights it; no method swap to the probes, whose
 // difference from the texels was the bright contact strip of the spin check).
 const bool LIGHTING_SC_KEEP_NEAR = true;
-// S73B Lumen surface cache GPU feedback (Wright et al. 2022): set while an
-// off-screen scout hit claims texels; they are stamped used, not shown.
-bool lighting_sc_feedback = false;
+// S73B Lumen surface cache GPU feedback (Wright et al. 2022): set while a scout
+// hit claims texels (lighting_sc_feedback, above); they are stamped used, not
+// shown, and their seeds mark no 25 cm cell as a pixel's need (S73C).
 vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj);
 // S72M: the pixel's screen-probe irradiance (lighting_compose.comp), -1 when none.
 vec3 lighting_px_probes = vec3(-1.0);
