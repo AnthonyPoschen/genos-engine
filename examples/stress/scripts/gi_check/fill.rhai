@@ -1,10 +1,10 @@
-// gi-check (docs/systems/debugging.md): convergence pop. Light filling in after a
-// reveal and after a light change, camera and scene still, must ramp smoothly, not
-// step texel by texel as relight sets commit. The turn pose settled; then the
-// camera cuts to the other way (surfaces never seen) and holds for 120 frames
-// (reveal/); then, settled again, the sun moves (12:00 -> 15:00, frozen) and 120
-// frames are saved (light/). gi-check scores, per pixel, the gap between the
-// frame and its 9-frame moving average (steps; a ramp scores ~0). Filled in: __DIR__.
+// gi-check (docs/systems/debugging.md): time to fill. How fast the picture gets to
+// its settled light after a reveal and after a light change, camera and scene
+// still (Anthony 2026-10-12: pop-in is fine if the screen fills near-immediately).
+// The turn pose settled; then the camera cuts to the other way (surfaces never
+// seen) and holds for 120 frames (reveal/), then settles (reveal_end/); then the
+// sun moves (12:00 -> 15:00, frozen): 120 frames (light/), settled (light_end/).
+// Filled in: __DIR__.
 time(#{ fixed_dt: 0.0166667 });
 knob("time_of_day", 12.0);
 knob("sun", "freeze");
@@ -22,5 +22,8 @@ settle();
 camera(#{ position: P, yaw: y0 + 3.14159, pitch: pitch });
 flicker(#{ frames: 120, threshold: 1.0, frames_dir: "__DIR__/reveal" });
 settle();
+flicker(#{ frames: 1, threshold: 1.0, frames_dir: "__DIR__/reveal_end" });
 knob("time_of_day", 15.0);
 flicker(#{ frames: 120, threshold: 1.0, frames_dir: "__DIR__/light" });
+settle();
+flicker(#{ frames: 1, threshold: 1.0, frames_dir: "__DIR__/light_end" });

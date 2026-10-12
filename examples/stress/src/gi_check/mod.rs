@@ -24,11 +24,13 @@ const ROOM_SCRIPT: &str = include_str!("../../scripts/gi_check/room.rhai");
 const APPROACH_SCRIPT: &str = include_str!("../../scripts/gi_check/approach.rhai");
 const DNOUT_SCRIPT: &str = include_str!("../../scripts/gi_check/dnout.rhai");
 const FILL_SCRIPT: &str = include_str!("../../scripts/gi_check/fill.rhai");
-/// Fill run (convergence pop, Anthony 2026-10-12: light fills in with many small
-/// visible steps): mean |frame - its 9-frame moving average|, linear luminance at
-/// 320 x 180, while light fills in with camera and scene still. Provisional limit.
-const FILL_POP_LIMIT: f64 = 0.0020;
-/// A pixel-frame further than this from its moving average is a visible pop.
+/// Fill run (time to fill, Anthony 2026-10-12): frames until the picture stays
+/// within FILL_GAP (mean |L - settled|, linear luminance at 320 x 180) of its
+/// settled light after a reveal or a sun move. A target, not a gate (provisional).
+const FILL_FRAMES_TARGET: f64 = 30.0;
+const FILL_GAP: f64 = 0.005;
+/// A pixel-frame further than this from its 9-frame moving average is a visible
+/// step (reported only: pop-in is fine when the fill is fast).
 const FILL_POP_STEP: f64 = 0.01;
 /// Day to night on open ground: first frame after the pan against the night pose
 /// settled (4eb10b86 1.43 before the cache kept its sun/sky share, 0f288334
@@ -553,6 +555,8 @@ const TARGET_CHECKS: &[&str] = &[
     "room turn swim, large scale (48 px)",
     "room light structure (smoothed 8 px)",
     "day to night pan: frames to < 2 % (target)",
+    "fill: frames to settled after a reveal",
+    "fill: frames to settled after a sun move",
 ];
 
 struct Row {
@@ -1016,61 +1020,50 @@ fn repro_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Fill run (fill.rhai): convergence pop while light fills in, camera and scene
-/// still, after a reveal (reveal/) and a sun move (light/). Per pixel and frame,
-/// |L - mean of L over the 9 frames around it| (a smooth ramp scores ~0, a step
-/// scores about half its size for 4 frames); the share of pixel-frames over
-/// FILL_POP_STEP; and the frames until the picture stays within 0.005 of its last
-/// frame (fill speed, so holding the old light does not pass).
+/// Fill run (fill.rhai): time to fill after a reveal (reveal/) and a sun move
+/// (light/), camera and scene still: frames until the mean |L - settled| stays
+/// under FILL_GAP (settled: reveal_end/, light_end/, after wait_settled). Also
+/// reported: the first frame's gap, and the share of pixel-frames stepping more
+/// than FILL_POP_STEP from their 9-frame moving average (pop-in, not graded).
 fn fill_rows(rows: &mut Vec<Row>, dir: &Path) -> Result<(), String> {
-    for (sub, what) in [("reveal", "after a reveal"), ("light", "after a sun move")] {
+    for (sub, what) in [("reveal", "a reveal"), ("light", "a sun move")] {
         let mut f = Vec::new();
         while frame(dir, sub, f.len()).exists() {
             f.push(metrics::lum320(&frame(dir, sub, f.len()))?);
         }
-        if f.len() < 20 {
+        let end_path = frame(dir, &format!("{sub}_end"), 0);
+        if f.len() < 20 || !end_path.exists() {
             continue;
         }
+        let end = metrics::lum320(&end_path)?;
         let n = f.len();
         let px = f[0].v.len();
-        let (mut sum, mut count, mut over) = (0.0f64, 0usize, 0usize);
-        let mut worst = (0.0f64, 0usize);
+        let gap = |p: &metrics::Plane| p.v.iter().zip(&end.v).map(|(a, b)| (a - b).abs()).sum::<f64>() / px as f64;
+        let gaps: Vec<f64> = f.iter().map(gap).collect();
+        let filled = (0..n).rev().take_while(|&t| gaps[t] < FILL_GAP).last().unwrap_or(n);
+        let (mut over, mut count) = (0usize, 0usize);
         for t in 4..n - 4 {
-            let mut fs = 0.0;
             for i in 0..px {
                 let ma: f64 = (t - 4..=t + 4).map(|k| f[k].v[i]).sum::<f64>() / 9.0;
-                let d = (f[t].v[i] - ma).abs();
-                fs += d;
-                over += usize::from(d > FILL_POP_STEP);
+                over += usize::from((f[t].v[i] - ma).abs() > FILL_POP_STEP);
+                count += 1;
             }
-            let m = fs / px as f64;
-            if m > worst.0 {
-                worst = (m, t);
-            }
-            sum += fs;
-            count += px;
         }
-        let pop = sum / count as f64;
-        let share = over as f64 / count as f64;
-        let last = &f[n - 1];
-        let gap = |p: &metrics::Plane| p.v.iter().zip(&last.v).map(|(a, b)| (a - b).abs()).sum::<f64>() / px as f64;
-        let settle = (0..n).rev().take_while(|&t| gap(&f[t]) < 0.005).last().unwrap_or(n - 1);
+        let share = over as f64 / count.max(1) as f64;
+        let at = |t: usize| gaps.get(t).copied().unwrap_or(f64::NAN);
         println!(
-            "fill     {sub}: pop {pop:.6} (worst frame {} at {}), pop share {share:.5}, filled by frame {settle}",
-            format_args!("{:.6}", worst.0),
-            worst.1
+            "fill     {sub}: frames to settled {filled} (of {n}); gap f0 {:.4} f10 {:.4} f30 {:.4} f60 {:.4}; pop share {share:.5}",
+            at(0), at(10), at(30), at(60)
         );
         rows.push(Row {
-            check: format!("fill pop {what}"),
-            value: pop,
-            limit: FILL_POP_LIMIT,
+            check: format!("fill: frames to settled after {what}"),
+            value: filled as f64,
+            limit: FILL_FRAMES_TARGET,
             note: format!(
-                "provisional; {:.3}% pixel-frames over {FILL_POP_STEP}; worst frame {} ({:.6}); filled by frame {settle}",
-                share * 100.0,
-                worst.1,
-                worst.0
+                "gap to settled f0 {:.4} f10 {:.4} f30 {:.4} f60 {:.4} (< {FILL_GAP}); {:.3}% pixel-frames step > {FILL_POP_STEP}",
+                at(0), at(10), at(30), at(60), share * 100.0
             ),
-            image: frame(dir, sub, worst.1),
+            image: frame(dir, sub, filled.min(n - 1)),
         });
     }
     Ok(())
