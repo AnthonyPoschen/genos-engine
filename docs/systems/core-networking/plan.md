@@ -1,8 +1,8 @@
 # Entity and networking co-design
 
-> **For agentic workers:** Do not start N1. D1–D29 are unanswered. The datagram bytes are the replay file and the agent's control path, so building N7 before those decisions are answered locks both. When they are answered, implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
+> **For agentic workers:** Do not start N1. D1–D36 are unanswered. The datagram bytes are the replay file and the live-edit path, so building N7 before those decisions are answered locks both. When they are answered, implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
 
-**Goal:** An agent can name an entity, query it, read its full state and why it changed, subscribe to it, and spawn, edit, or despawn it under the same authority rules as any other connection. Player replication, prediction, and the replay are that same stream. The agent reads the authority, or one tick of a replay, so a packet budget never hides an entity the agent asked for.
+**Goal:** While a game is running, an author or an agent can inspect any entity and change it. The authority applies the change, the entity log records it, undo sends the inverse through that same path, and a save can write the result back to a sidecar or a prefab file. Player replication, prediction, and the replay are that same stream. The agent reads the authority, or one tick of a replay, so a packet budget never hides an entity the agent asked for.
 
 **Architecture:** The simulation store is an entity id, a human-readable name, and plain components, updated by ordered tick passes. That store is what an agent queries and what the authority replicates. The authority runtime (the process Genos hosts) is the only writer of replicated state. A tool does not write a column. It sends a notice on an agent connection, and the authority applies it on a tick boundary. A player runtime predicts only the entity it has input authority for, and reconciles by restoring that entity and replaying its commands. Remote entities interpolate. Snapshots are unreliable deltas against the last acknowledged snapshot. A spatial grid and a byte budget decide who is in a player packet. They do not decide what an agent can read. A replay stores that stream. Seeking it is how an agent time-travels.
 
@@ -32,11 +32,26 @@ The owner said an agent is another client or tool, with the same authority rules
 
 **Control.** Spawn, edit, and despawn go through an MCP or CLI API. The API enqueues a notice. It does not call `set_pose` on the store. The authority applies the notice at the end of the tick, the same place queued spawns already land, and the datagram is in the replay. A player connection's spawn request is refused. Whether an agent connection's spawn request is accepted is D29. The recommendation is that the authority accepts it from an agent connection and still refuses it from a player connection. That is the same rule for both: the connection does not write state, and the authority decides who may request a spawn. D27 is whether this API is bolted onto the camera endpoint or is a separate session tool.
 
-**Time-travel.** The agent seeks a replay to a tick and then uses the same query, inspect, and log calls. Seek is the keyframe-then-forward path in D4. The picture is the applied stream (D2), so time-travel works when this binary's sim would not resim the file. `--resim` remains the check. D28 is whether the agent may also edit that tick and fork a new session. The recommendation is read-only. Forking is a second authority.
+**Time-travel.** The agent seeks a replay to a tick and then uses the same query, inspect, and log calls. Seek is the keyframe-then-forward path in D4. The picture is the applied stream (D2), so time-travel works when this binary's sim would not resim the file. `--resim` remains the check. D28 is whether the agent may also edit that tick and fork a new session. The recommendation is read-only. Forking is a second authority. Live undo is not a seek. It is an inverse notice, below.
+
+### Live edit and save-back
+
+This is the gameplay-development workflow. The session keeps ticking. An author (the person making the game) and an agent both use the tool connection. Neither writes a column. Inspect reads the authority columns for one name: every component, the pin, and the entity log. A change is a notice. The authority queues it to the end of the tick, checks the generation, applies it or refuses it, and replicates the result. A stale id changes nothing and the log records the refusal. A predicted pawn reconciles the way it reconciles any other correction.
+
+**Undo** is one stack of inverse notices on the authority, shared by every tool connection. Undo enqueues the inverse. Redo enqueues the forward notice again. Both are logged. The stack stores tool notices only. A tick pass and a player command are not undone by this stack, because undoing them would rewind the running game. That rewind is the replay seek, which stays read-only (D28). Depth and despawn identity are D31.
+
+**A pin** is how a live tweak survives the next tick. Without it, the motion pass writes the pose again and the prop snaps back. The pin is a component, so the predicting runtime skips the same fields and does not false-correct every tick. Which fields pin by default is D30.
+
+**Save-back** is optional and explicit. The edit is already live before anyone saves. Save copies the chosen columns at that tick and writes a file from the authority process. A failed write leaves the sim as it was. Players do not receive a file-write datagram, because only the authority has the disk. Undo reverts the live entity and does not, by recommendation, delete the file. D32–D35 are the open choices.
+
+The scene file today is a Rhai script (`examples/camera/scene.rhai`, loaded by `crates/scene/src/script.rs`) of `floor`, `wall`, `solid`, and `light` calls, comments included. There is no prefab in the tree. The recommendation does not rewrite that script. A sidecar JSON, written with `genos-json` and loaded after the script, overlays entities by name. A prefab is the same schema for one template. Spawning it is a notice. The file is data. A tick pass does not eval Rhai to apply it. ADR 0009 stays: a script does not own the network, and a spawn does not run a script.
+
+`examples/camera` still does not join a session. The author talks to the authority process through the session tool. The camera endpoint keeps editing scene handles and does not gain this save path.
 
 ### Settled by this direction
 
-- The agent test above is how the choices in this file are judged.
+- The agent test above is how the choices in this file are judged. Live edit, undo, and save-back are part of that test.
+- The session keeps ticking during an edit. Inspect, change, log, undo, and save do not pause the tick and do not rewind player commands.
 - A tool does not write a column. Spawn, edit, and despawn are notices. The authority accepts or refuses them, and it is the only writer. The bytes are the session stream, so a replay can show the request and the result. Who may spawn is D29.
 - An agent reads the authority store, or one applied replay tick. Interest and `POSE_BUDGET` limit player packets. They do not limit that read.
 - Scene handles stay scene handles. The camera agent endpoint stays the scene editor. The session tool is a different API, even though both are loopback tools an agent can call.
@@ -62,9 +77,15 @@ The owner said an agent is another client or tool, with the same authority rules
 | Cause stored on the authority stream | Seek can answer why without resim, which is what a sim-epoch mismatch still allows. | Recommend. D25. |
 | Cause on every player packet | Players pay bytes so a tool can read a reason. The tool can read the authority instead. | Refuse. |
 | Camera MCP gains entity spawn | The scene handle and the entity name become the same string. | Refuse. D27. |
-| Edit a replay and resume | Time-travel becomes a second simulation. | Refuse until the owner asks. D28. |
+| Edit a replay and resume | Time-travel becomes a second simulation. | Refuse until the owner asks. D28. Live undo is a separate path. |
+| Edit applied once, then the tick pass overwrites it | A moved prop snaps back. The author cannot trust the tweak. | Refuse as the default. D30. |
+| Pin the edited component | The tweak sticks on the authority and on the predictor. | Recommend. D30. |
+| Undo by seeking backward | Rewinds the running game and every player. | Refuse. D28 stays read-only. |
+| Undo by an inverse notice | The live entity returns to the previous tool value. The tick continues. | Recommend. D31. |
+| Rewrite `scene.rhai` on save | The hand-written room and its comments are replaced. | Refuse. D33. |
+| Sidecar plus a data prefab | The script stays. Save overlays by name. Spawn-from-prefab is a notice. | Recommend. D32–D35. |
 
-D20–D29, below, are the questions this section opens. D1–D19 stay open. Where the agent test adds weight to one of them, the line is in that decision.
+D20–D36, below, are the questions this section opens. D1–D19 stay open. Where the agent test adds weight to one of them, the line is in that decision.
 
 ## Open decisions
 
@@ -327,7 +348,7 @@ Region is an AABB in millimeters, tested with the same cell size as interest (`C
 - **B. On every player snapshot**, beside each dirty component. Every player pays for tick-pass names.
 - **C. On the authority recording and on agent-connection datagrams.** Player snapshots leave the cause flag clear. The format has the flag. Players do not spend the bytes. Seek on the authority file rebuilds the log by apply, with no resim.
 
-**Recommendation.** C. It matches the agent read path. A proposed flag bit is `128` on the entity record in [Locked names](#locked-names), followed by a `u16` cause kind and a `u32` cause word (pass id, notice seq, command tick, or snapshot tick). That bit stays out of the locked layout until D25 is accepted. Kind `1` tick pass, `2` command, `3` notice, `4` reconcile.
+**Recommendation.** C. It matches the agent read path. The working flag field in [Locked names](#locked-names) is a `u8`, and bits `1` through `64` are already named. Bit `128` would be the last one, and D30's pin needs a bit too. Accepting D25 or D30 widens that field to `u16` in the same commit that first writes the bit. Cause is bit `128`. Pin is bit `256`. After the flags, a cause writes a `u16` kind and a `u32` word (pass id, notice seq, command tick, or snapshot tick). Kind `1` tick pass, `2` command, `3` notice, `4` reconcile. Neither bit is in the locked layout until its decision is accepted.
 
 ### D26. Subscribe or poll
 
@@ -356,7 +377,7 @@ Region is an AABB in millimeters, tested with the same cell size as interest (`C
 - **A. Read only.** Query, inspect, and the entity log at that tick. A write returns an error. The live session is untouched.
 - **B. Fork.** Edit the sought tick and start a new authority session from there.
 
-**Recommendation.** A. The owner asked to time-travel through replays, which is seek and read. Fork is a second simulation and a second recording. It can be a later plan.
+**Recommendation.** A. The owner asked to time-travel through replays, which is seek and read. Fork is a second simulation and a second recording. It can be a later plan. Live undo of an author edit is D31. It does not seek.
 
 ### D29. Who may request a spawn
 
@@ -365,7 +386,76 @@ Region is an AABB in millimeters, tested with the same cell size as interest (`C
 - **A. An agent connection is no stronger than a player connection.** Players cannot spawn in this plan, so the agent cannot either. Spawn stays an internal authority call. The tool can edit and despawn only what already exists, and even that is a notice.
 - **B. Neither connection writes state.** The authority applies notices. A player connection's spawn notice is refused. An agent connection's spawn, edit, and despawn notices are applied at the tick boundary. Edit of a predicted pawn still replicates back and reconciles, like any other correction.
 
-**Recommendation.** B. A reads "same rules" as "same privileges" and leaves the agent unable to manage entities, which fails the test that opened this plan. B reads "same rules" as one path: request, authority applies, the datagram is recorded. The agent is not a backdoor. The player still cannot mint an id. Join already uses notice name `1`. The recommended payload adds a `u8` role: `1` player, `2` agent. That byte is how the authority tells the two requests apart. It is part of this decision, not a separate channel.
+**Recommendation.** B. A reads "same rules" as "same privileges" and leaves the agent unable to manage entities, which fails the test that opened this plan. B reads "same rules" as one path: request, authority applies, the datagram is recorded. The agent is not a backdoor. The player still cannot mint an id. Join already uses notice name `1`. The recommended payload adds a `u8` role: `1` player, `2` tool. That byte is how the authority tells the two requests apart. It is part of this decision, not a separate channel. An author at the CLI and an agent on MCP both use role `2`.
+
+### D30. Does a live edit stick
+
+**Question.** The motion pass writes pose every tick it has a command. An author sets a new pose. What happens on the next tick?
+
+- **A. The edit is applied once.** The pass may overwrite it. The log shows the edit, then the pass. A moved prop snaps back when something owns that pose.
+- **B. The edit pins that component.** Tick passes skip pinned components until an unpin notice. The pin replicates. The predicting runtime skips the same fields, so it does not correct every tick. Pose, name, type, and tags pin by default. `Health`, `StunUntil`, and input authority stay unpinned unless the notice says pin.
+- **C. The pass always wins on the following tick.** The edit is visible for one tick.
+
+**Recommendation.** B. A and C make a live tweak look like it worked and then take it away. The pin is a component, not a pause. On the wire it is flag bit `256` in the `u16` flag field from D25, so it does not take the last `u8` bit from the cause.
+
+### D31. What undo covers
+
+**Question.** Undo has to be safe in a running game.
+
+- **A. Seek the replay backward.** Players and tick passes rewind. That is D28's fork.
+- **B. Inverse of the last tool notice.** The authority keeps one stack, shared by every tool connection, depth 64. Undo enqueues the inverse notice. Redo enqueues the forward notice. A tick-pass write and a player command are not on the stack. Despawn undo spawns a new generation under the reserved name and the log links the old id to the new one. D21 still refuses a different spawn of that name.
+- **C. Snapshot the whole entity on every change, including simulation, and restore that blob.**
+
+**Recommendation.** B. The tick continues. Other machines see the undo as a new applied notice, not as a rewind. C would undo a player's movement and a hit.
+
+### D32. Which entities and components a save includes
+
+**Question.** Save-back should not dump the whole fight onto disk.
+
+- **A. Every component of every entity**, including health and projectiles.
+- **B. Entities marked authored**, plus any entity named in the save request. Components are name, type, tags, pose, and pins. Map entities from N18 are authored. A tool spawn is authored. A gameplay spawn is not, until a save names it. Combat fields stay out unless the request says full.
+- **C. A checksum blob**, with no fields an author can read.
+
+**Recommendation.** B.
+
+### D33. Scene file, sidecar, or prefab script
+
+**Question.** Where the saved fields go. The room today is `examples/camera/scene.rhai`: `floor`, `wall`, `solid`, and `light`, with comments. Nothing in the tree is a prefab.
+
+- **A. Rewrite the Rhai script** from the live entities. Comments and hand layout go away. Rhai has no source map back to those calls.
+- **B. A sidecar JSON next to the script**, loaded after `load_path`. Names in the sidecar overlay those entities. A prefab is that same schema for one template, in its own file. Spawn-from-prefab is a notice. The authority reads the file and spawns. The tick does not eval the file.
+- **C. A prefab is a Rhai fragment** eval'd on spawn.
+
+**Recommendation.** B. The hand-written script stays the room. C runs a script on the spawn path. ADR 0009 keeps the script off the socket and this plan keeps it off the tick. `genos-sim` does not open the file. The session tool does, with `genos-json`.
+
+### D34. When save runs
+
+**Question.** How a live edit becomes a file.
+
+- **A. Every applied edit writes the file.**
+- **B. An explicit save, on the authority process only.** The edit is already applied and replicated. The save copies columns at that tick and writes after the tick returns. Players are not asked to write the file. A failed write is reported. The sim is unchanged by the failure.
+- **C. Save when the process exits.**
+
+**Recommendation.** B. A and C write the disk on a cadence the author did not ask for, and they race a hand-edited script.
+
+### D35. Undo against the file
+
+**Question.** After a save, an undo of the live edit.
+
+- **A. Undo also reverts the file** to the previous sidecar bytes.
+- **B. Undo reverts the live entity only.** The file changes on the next explicit save.
+
+**Recommendation.** B. Disk revert surprises an author who saved on purpose. The live game and the file are two steps.
+
+### D36. What the author uses
+
+**Question.** The human and the agent need the same edits.
+
+- **A. The author uses the session CLI and the same JSON handler as the agent.** A later window calls those functions. It is not a step in this plan.
+- **B. This plan adds an inspector window.**
+- **C. The camera MCP gains the inspector and the save.**
+
+**Recommendation.** A. One path, two callers. C puts entity names into the scene-handle endpoint and saves from the camera process, which is not the authority.
 
 ## Global constraints
 
@@ -379,7 +469,7 @@ Region is an AABB in millimeters, tested with the same cell size as interest (`C
 - The agent endpoint stays loopback MCP on `127.0.0.1`. It is not the game session. `CONTEXT.md` says to avoid calling that endpoint a game network.
 - The person is the player. Sources say "client" for the program that person runs. In this repo that program is the player runtime. Sources say "server" for the authoritative program. In this repo that program is the authority runtime, and it is still a runtime. The game is not a server. Genos, the other repository, starts the authority process.
 - "System" in this repo is a system record. The ECS behavior is a tick pass.
-- New public words (`EntityId`, entity name, entity log, cause, agent connection, tick pass, authority runtime, player runtime, connection, snapshot, command, notice, replay, keyframe, spectator) are added to `CONTEXT.md` in the commit that first publishes them (step N1). N1 waits until D1–D29 are answered. The camera agent endpoint and the scene handle keep the definitions they already have.
+- New public words (`EntityId`, entity name, entity log, cause, agent connection, pin, prefab, tick pass, authority runtime, player runtime, connection, snapshot, command, notice, replay, keyframe, spectator) are added to `CONTEXT.md` in the commit that first publishes them (step N1). N1 waits until D1–D36 are answered. The camera agent endpoint and the scene handle keep the definitions they already have. Prefab is a new word. It is not a scene handle.
 - A new crate sets `[lints] workspace = true`, joins the workspace `Cargo.toml`, and is named in `docs/architecture.md` in that same commit.
 - `examples/camera` does not open a game socket in any step of this plan. The first proof stays the lit scene.
 - Headless tests use a fixed command list, a fixed tick, a seeded link, and no window. Two runs in one process match on the integers the step names. Do not check wall-clock time, thread scheduling, or a hash from another operating system.
@@ -447,8 +537,16 @@ The tick pass, command, notice, or reconcile snapshot that wrote a component.
 _Avoid_: System record.
 
 **Agent connection**:
-A connection with no player. A tool uses it to request spawn, edit, despawn, query, and subscribe. The authority applies those requests. The connection does not write a column.
+A connection with no player. A tool uses it to request spawn, edit, despawn, query, and subscribe. An author at the CLI uses this same connection. The authority applies those requests. The connection does not write a column.
 _Avoid_: The player (the person), the camera's agent endpoint, a game network.
+
+**Pin**:
+A replicated mark on a component. Tick passes skip a pinned component until an unpin notice. The predicting runtime honors the same mark.
+_Avoid_: A pause of the session, a lock file.
+
+**Prefab**:
+A data file of components the authority can spawn as a new entity. The spawn is a notice. The file is not executed.
+_Avoid_: Scene handle, a Rhai script, a second entity store.
 
 ## Current state
 
@@ -536,6 +634,8 @@ Nothing in the tree sends a pose, a command, or a delta. Nothing records that st
 | Debug view | Lighting and MCP screenshots. | One process, authority plus player runtimes, seeded loss, desync rows. |
 | Replay | None. No file, no spectator stream, no per-tick hash on the wire. | The session datagram stream, to a file or to a spectator connection, with keyframes and per-tick hashes. An agent seeks that file. D1–D19 are open. |
 | Agent control | The camera endpoint edits scene handles and can subscribe to `genos://scene`. It does not see a simulation entity, a cause, or a replay tick. | An agent connection. Query, inspect, entity log, subscribe, and spawn, edit, despawn as notices. D20–D29 are open. |
+| Live edit | The camera endpoint mutates the `Scene` in the camera process. There is no pin, no undo stack, and no save of entity components. | Tool notices applied at a tick boundary, pinned so the next pass does not erase them, undo by inverse notice. D30–D31, D36. |
+| Save-back | A `.rhai` scene is hand-written and loaded once. Nothing writes it back. There is no prefab. | An explicit authority-side sidecar and a data prefab. The script stays. D32–D35. |
 
 ## Decision
 
@@ -792,7 +892,7 @@ N28 adds replay controls to this same binary. The scrub control is a tick intege
 
 ## Replay
 
-D1–D19 are the recording decisions. D20–D29 are the agent decisions. This section is the argument, the sources, and the way the recommendations sit on the datagram layout above. An agent seeks this same file. Nothing here is built.
+D1–D19 are the recording decisions. D20–D36 are the agent and live-edit decisions. This section is the argument, the sources, and the way the recommendations sit on the datagram layout above. An agent seeks this same file. Nothing here is built.
 
 ### One stream
 
@@ -926,6 +1026,7 @@ Datagram, authority to player, little-endian:
 - if stun: `u32` `stun_until`
 - if health: `i32`
 - if origin: `i32` sector_x, `i32` sector_z (flag `64` on the origin entity)
+- The flag field stays `u8` until D25 or D30 is accepted. Those decisions widen it to `u16`, with cause at bit `128` and pin at bit `256`. Do not spend bit `128` on both.
 - `u16` notice count, then each notice: `u32` seq, `u16` name, `u32` entity index, `u32` generation, `u16` len, `len` bytes
 
 Player to authority:
@@ -956,8 +1057,10 @@ Spawn and despawn records are written even when the pose budget is spent. Pose r
 | `crates/net/src/lib.rs` | `Link`, datagram codec, notices. Package `genos-net`. From N8. |
 | `crates/net/src/udp.rs` | `UdpSocket` edge. From N20. |
 | `crates/net/src/replay.rs` | File header, length-prefixed frames, keyframe trailer. From N25. The datagram slice is the session codec. |
-| `crates/net/src/agent.rs` | Agent-connection notices: spawn, edit, despawn, subscribe. From N32. |
+| `crates/net/src/agent.rs` | Agent-connection notices: spawn, edit, despawn, subscribe, undo. From N32. |
+| `crates/sim/src/pin.rs` | Pinned components. From N36. |
 | `examples/session/src/tool.rs` | Query, inspect, seek, CLI parse, one JSON handler. From N34. |
+| `examples/session/src/save.rs` | Sidecar and prefab files. From N38. |
 | `examples/session/` | Headless authority. Package `genos-session`. From N21. |
 | `examples/net-view/` | Debug binary. Package `genos-net-view`. From N22. |
 
@@ -965,7 +1068,7 @@ Spawn and despawn records are written even when the pose budget is spent. Pose r
 
 ## Steps
 
-Do not start N1. D1–D29 are unanswered. The datagram layout, the replay file, and the agent notices are the same bytes, so N7 is the commit that would lock the recording and the tool. N25–N28 describe the recommended replay answers. N29–N35 describe the recommended agent answers. If a decision above moves, edit that step before implementing it. The steps stay in order: N25 follows N24, and N29 follows N28.
+Do not start N1. D1–D36 are unanswered. The datagram layout, the replay file, and the live-edit notices are the same bytes, so N7 is the commit that would lock the recording and the tool. N25–N28 describe the recommended replay answers. N29–N39 describe the recommended author and agent answers. If a decision above moves, edit that step before implementing it. The steps stay in order: N25 follows N24, and N29 follows N28.
 
 ### N1. Entity id
 
@@ -1224,7 +1327,7 @@ Do not start N1. D1–D29 are unanswered. The datagram layout, the replay file, 
 ### N31. Entity log and cause
 
 - [ ] **Files:** `crates/sim/src/log.rs`. Test `crates/sim/tests/log.rs`.
-- **Behavior:** A component write appends a log line: tick, cause kind, cause word, component id. The ring keeps 120 ticks and drops older lines. Kind `1` is a tick pass id, kind `3` is a notice sequence, kind `4` is a reconcile snapshot tick. `log(id)` returns the lines still in the ring, oldest first. A reconcile write's cause is the snapshot tick, not the motion pass. If D25.C is the accepted answer, the authority datagram sets flag bit `128` and writes the cause; a player snapshot leaves the bit clear. Do not put the cause on the player packet in this step.
+- **Behavior:** A component write appends a log line: tick, cause kind, cause word, component id. The ring keeps 120 ticks and drops older lines. Kind `1` is a tick pass id, kind `3` is a notice sequence, kind `4` is a reconcile snapshot tick. `log(id)` returns the lines still in the ring, oldest first. A reconcile write's cause is the snapshot tick, not the motion pass. If D25.C is the accepted answer, the flag field is the `u16` from that decision, the authority datagram sets bit `128`, and writes the cause. A player snapshot leaves the bit clear. Do not put the cause on the player packet in this step. Bit `128` is not also the pin.
 - **Test:** `a_write_records_the_tick_pass_and_a_reconcile_records_the_snapshot`
   - A motion pass writes `x_mm`. The log line names that pass and the tick. A notice write to `Health` names the notice sequence. A reconcile from snapshot tick 11 writes the pose and the log kind is reconcile with word 11. Line 121 of a one-line-per-tick run drops the oldest.
 - **Commit:** `sim: record why a component changed`
@@ -1261,6 +1364,38 @@ Do not start N1. D1–D29 are unanswered. The datagram layout, the replay file, 
   - `parse_tool_line("query tag red")` and `handle_json` of a query for tag `red` return the same id list. A spawn JSON body followed by one `run_tick` makes `find` return the new name. The camera crate name `genos-mcp` does not appear in `genos-session`'s `Cargo.toml`.
 - **Commit:** `session: query entities from a cli line and a json body`
 
+### N36. Pin an edited component
+
+- [ ] **Files:** `crates/sim/src/pin.rs`. Test `crates/sim/tests/pin.rs`.
+- **Behavior:** A tool edit of pose, name, type, or tags sets a pin on that component. `Health` does not pin unless the notice says so. The motion pass skips a pinned pose. Unpin is a notice. The pin is included in the snapshot when it changes. A predicting runtime that applies the pin also skips the pose, and the checksums match.
+- **Test:** `a_pinned_pose_stays_while_strafe_continues`
+  - Pose at `x_mm = 0`. A tool edit sets `x_mm` to 10 and pins pose. Ten ticks of strafe 127 leave `x_mm` at 10. Unpin. One tick of strafe 127 leaves `x_mm` at 77. A second sim that only applied the snapshot, including the pin, matches the checksum after those ticks.
+- **Commit:** `sim: pin a component an author edited`
+
+### N37. Undo the last tool notice
+
+- [ ] **Files:** `crates/net/src/agent.rs`. Test `crates/net/tests/undo.rs`.
+- **Behavior:** Each applied tool notice pushes an inverse, up to 64. `undo` enqueues that inverse and pushes the forward notice onto a redo stack. `redo` enqueues it again. A player command and a motion-pass write do not push. Undo of despawn spawns a new generation, reuses the reserved name, copies the stored components, and appends a log line that names the old id. A different spawn of that name is still refused. The tick count advances. Player poses that the undo did not name stay on their own motion.
+- **Test:** `undo_restores_the_tool_edit_and_not_the_player_motion`
+  - Tool edit sets `x_mm` from 0 to 10. `undo` then one `run_tick` leaves `x_mm` at 0. The log contains both notices. A bystander already at 67, with a zero command on the undo tick, is still at 67. Despawn of `door` then undo: `find("door")` is a new generation, and the log names the old id. The 65th tool edit drops the oldest inverse: undoing 64 times does not restore that first edit.
+- **Commit:** `net: undo a tool edit with an inverse notice`
+
+### N38. Save a sidecar
+
+- [ ] **Files:** `examples/session/src/save.rs`. Test `examples/session/tests/save.rs`. The same commit adds one sentence to `docs/systems/scripting.md` limits: a sidecar may overlay a loaded scene, and the script file is not rewritten.
+- **Behavior:** `save(path)` copies authored entities at the current tick: name, type, tags, pose, pins. It writes that list with `genos-json` after `run_tick` returns. It does not open the `.rhai` file for write. A gameplay-spawned entity is absent unless the request names it. `load_sidecar` on a fresh sim, after the same map spawn, overlays those poses. A failed write returns an error and leaves the sim checksum unchanged. `genos-sim` does not reference `std::fs`.
+- **Test:** `a_save_overlays_by_name_and_leaves_the_script_bytes`
+  - An authored entity `door` at `x_mm` 10. A second entity spawned by a test pass with no authored mark, at `x_mm` 99. Save. The JSON contains `door` and 10, and does not contain 99. The bytes of a fixture script file are equal before and after. Load the sidecar onto a fresh sim that already spawned `door` at 0. `door` is at 10. Point the writer at a path that cannot be created. The function returns an error and the checksum is the pre-call checksum.
+- **Commit:** `session: save authored entities to a sidecar`
+
+### N39. Spawn from a prefab
+
+- [ ] **Files:** `save.rs`, `agent.rs`. Test `examples/session/tests/save.rs`.
+- **Behavior:** `save_prefab(entity, path)` writes one entity's authored components. `request_spawn_prefab(path)` enqueues a notice. After the tick the authority reads the file and spawns a new id with a minted name, the prefab pose, and the authored mark. The source entity is unchanged. A player connection's prefab spawn is refused. The new name is session-unique.
+- **Test:** `a_prefab_spawn_copies_components_under_a_new_name`
+  - `door` at `x_mm` 10, saved as a prefab. Spawn it. The new id's pose is 10, its name is not `door`, and `door` is still at 10. A player connection's request leaves the spawned count unchanged.
+- **Commit:** `session: spawn an entity from a prefab file`
+
 ## Limits
 
 - The authority runtime is the only state authority. Input authority can move. A player runtime does not keep the true state of a pawn after it loses input authority.
@@ -1282,15 +1417,16 @@ Do not start N1. D1–D29 are unanswered. The datagram layout, the replay file, 
 - There is no replay-only component. A value in the file is a value in the live datagram, or a frame field from D14 (tick, hashes, length).
 - Public spectators are delayed. The authority file is written immediately.
 - `examples/camera` does not write a replay.
-- D1–D29 are open. The recommendations are not a decision record.
+- D1–D36 are open. The recommendations are not a decision record.
 - The camera agent endpoint does not spawn, edit, or despawn simulation entities. Scene handles stay on that endpoint.
-- A tool does not write a column. Time-travel does not fork a session.
+- A tool does not write a column. Time-travel does not fork a session. Live undo does not seek backward and does not undo a player command.
+- Save does not rewrite the Rhai scene. A prefab is data. A failed save does not change the sim. Undo does not revert the file.
 - The first query has no field predicates. The cause stores one hop, not a graph walk.
 - Genos's process supervisor, matchmaking, and account system are out of this repository. The contract is the binary, the bind address, the scene path, and stdin.
 
 ## Records each step touches
 
-N1 is the one that edits `CONTEXT.md`, `docs/architecture.md`, and the new ADR. N8 and N21 edit `docs/architecture.md` again for the new crate and the binary. No step edits `docs/systems/scene.md` or `docs/systems/physics.md` until N24, and N24 adds one sentence to each: the pawn's `BodyId` is its `EntityId`, and the net checksum is the quantized pose. The system records stay otherwise as they are, because the camera loop does not change.
+N1 is the one that edits `CONTEXT.md`, `docs/architecture.md`, and the new ADR. N8 and N21 edit `docs/architecture.md` again for the new crate and the binary. No step edits `docs/systems/scene.md` or `docs/systems/physics.md` until N24, and N24 adds one sentence to each: the pawn's `BodyId` is its `EntityId`, and the net checksum is the quantized pose. N38 adds one sentence to `docs/systems/scripting.md`: a sidecar may overlay a loaded scene. The camera loop does not change.
 
 ## Coverage
 
@@ -1327,7 +1463,10 @@ N1 is the one that edits `CONTEXT.md`, `docs/architecture.md`, and the new ADR. 
 | Spawn, edit, despawn as a connection | D27, D29 | N32, N35 |
 | Subscribe | D26 | N33 |
 | Time-travel through a replay | D4, D28 | N34 |
+| Live edit that sticks | D30, D36 | N36 |
+| Undo a tool edit | D31, D35 | N37 |
+| Save back to a sidecar and a prefab | D32, D33, D34 | N38, N39 |
 
 ## What this plan does not do
 
-It does not implement the steps. It does not settle D1–D29. It does not change `step`, the camera loop, or the camera MCP endpoint. It does not merge the physics plan. N24 is the seam, and it waits for that plan's `BodyId` and `hash_world`. N1 waits until the open decisions are answered, because the datagram layout is the replay file and the agent's control path.
+It does not implement the steps. It does not settle D1–D36. It does not change `step`, the camera loop, or the camera MCP endpoint. It does not rewrite a scene script. It does not merge the physics plan. N24 is the seam, and it waits for that plan's `BodyId` and `hash_world`. N1 waits until the open decisions are answered, because the datagram layout is the replay file and the live-edit path.

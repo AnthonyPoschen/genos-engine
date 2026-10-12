@@ -29,7 +29,7 @@ Each record uses these headings:
 - [Loading](loading.md) owns images, textures, texture maps, meshes, animations, PCM samples, and fonts.
 - [Audio](audio.md) owns playback, Doppler, stereo image, and direct-path transmission.
 - [Scripting](scripting.md) owns Rhai for games and mods.
-- [Core networking plan](core-networking/plan.md) is the entity and replication plan. Agent observability is the test at the top of that plan. Replay stays an open question there too. It is a plan, not a system record yet.
+- [Core networking plan](core-networking/plan.md) is the entity and replication plan. Agent observability is the test at the top of that plan, including live edit, undo, and save-back. Replay stays an open question there too. It is a plan, not a system record yet.
 - [Debugging](debugging.md) owns the debug commands, scripts, captures and the ground-truth reference.
 
 The crate map and the frame loop are in [Architecture](../architecture.md). The words are in `CONTEXT.md`.
