@@ -282,3 +282,13 @@ than 1 %, or a mover nearby (as before). Still 12.5 -> 11.55 ms (light 4.57 ->
 3.62), moving unchanged (18.3 -> 18.6, the lamps move everywhere there); pop
 0.074 / 0.107 %. No new memory. [deviation: the bounce part of a kept hit now
 refreshes with its re-trace, every LIGHTING_STRATA frames, unless lit above.]
+
+### S78E: texel direct light past its age is checked, not recomputed
+
+An entry of the texel direct-light cache past LIGHTING_TDL_STALE (600 frames)
+with its signature unchanged was recomputed in full (all lamps, shadow rays)
+from the budget. It now takes the S76C check (picked lamps at the texel
+centre): within 10 % it is kept and its age restarts, else it is dropped and
+recomputed. A confirming check also restarts the age of a signature-changed
+entry. Timing unchanged at 600 frames (still 11.52, moving 18.7 ms); it removes
+an age-only recompute wave every 600 frames. No new memory.
