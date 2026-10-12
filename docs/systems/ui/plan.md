@@ -386,6 +386,8 @@ Each step is one commit. Do them in order. The test is the spec. Run it and expe
 
 A step marked **requires #5** reads `DamageTracker` or `Frame::damage`. Skip that assertion until #5 has merged. The rest of the step runs on `gi-v2`. After #5, an unchanged second `frame` returns `damage: []`, and the first `begin` on a new viewport dirties the whole viewport.
 
+Each step has a `Deviation:` line. `Deviation: none.` means the step follows the cited source. Sources are in [References](#references).
+
 ### Task 1: Paint snapshot
 
 The still-panel test reads `Frame::damage`. **requires #5.** `paint_snapshot` does not.
@@ -441,6 +443,7 @@ Expected: fail to compile, `paint_snapshot` is missing.
 
 Expected: the two new tests pass, and the existing UI tests pass.
 
+- **Deviation:** the snapshot is a sorted text of rectangles for the headless tests. Dear ImGui rebuilds its draw list every frame. This string is what a still panel compares, and it does not call the renderer.
 - [ ] **Step 5: Commit** `ui: canonical paint snapshot for headless checks`
 
 ### Task 2: Shared frame pass
@@ -495,6 +498,7 @@ Make `State.focus` public in this step. The test reads it.
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** Flutter splits a widget, an element, and a render object. Here `Node` stays the data and `frame` is the pass that lays out, hits, and paints. `lighting_frame` and `button_panel` keep building their trees, then call `frame`. An immediate-mode call beside the tree stays out.
 - [ ] **Step 5: Commit** `ui: one frame pass for hit testing, looks, and damage`
 
 Update `docs/systems/ui.md` Game use: a game can call `frame` on its own tree.
@@ -518,6 +522,7 @@ Built-in dark: surface `[0.16, 0.16, 0.18]`, surface_raised `[0.22, 0.22, 0.25]`
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass, including `omarchy`.
 
+- **Deviation:** `theme_dark` and `theme_light` are the built-ins. `theme_from_palette` copies the Omarchy background, foreground, and accent. The lighting panel keeps the looks it builds today. New elements call `looks(&theme)`.
 - [ ] **Step 5: Commit** `ui: theme roles beside the Omarchy palette`
 
 ### Task 4: Label
@@ -538,6 +543,7 @@ A label lays out with `text::measure`. A press on it does not push `Action` or `
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** a label measures with the bitmap and ignores a press. It emits neither `Action` nor `Event`. `Kind::Box` with `action: Some` still fires.
 - [ ] **Step 5: Commit** `ui: a label paints text and ignores a press`
 
 ### Task 5: Main-axis justify
@@ -556,6 +562,7 @@ A label lays out with `text::measure`. A press on it does not push `Action` or `
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** `Start` is today's cursor. Grow still consumes leftover first. Justify places what remains: center, end, or space-between. Yoga stays out (ADR 0007).
 - [ ] **Step 5: Commit** `ui: main-axis justify on the flow`
 
 Document in `ui.md` Intent: the main axis can start, center, end, or split the leftover. The default is start.
@@ -576,6 +583,7 @@ Three 100×10 children in a left-to-right node of width 250, gap 0, `wrap: true`
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** wrap defaults to false, and that row still overflows, which is today's flow. A child wider than the content box sits alone on a row.
 - [ ] **Step 5: Commit** `ui: optional wrap on a row or a column`
 
 ### Task 7: Grid
@@ -594,6 +602,7 @@ Three 100×10 children in a left-to-right node of width 250, gap 0, `wrap: true`
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** `columns` is a fixed count, the same idea as a Slint or Flutter grid. `columns: 0` keeps the flow. Placement ignores `Direction`. Yoga and Taffy stay out.
 - [ ] **Step 5: Commit** `ui: fixed-column grid`
 
 ### Task 8: Clip
@@ -614,6 +623,7 @@ A clip node at `(0, 0, 50, 20)` with a child placed at `(40, 0)` sized `30×10` 
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** children paint only inside the parent's padding box. Damage uses the clipped bounds, so a row outside the clip does not dirty.
 - [ ] **Step 5: Commit** `ui: clip children to the parent and damage the visible part`
 
 ### Task 9: Button
@@ -634,6 +644,7 @@ The empty-damage frame and the third-frame dirty rect **require #5.**
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** Dear ImGui's `Button` returns true on the click frame. This button is a retained `Kind` and emits `Event::Press` once on the press edge. A held pointer emits nothing. `enabled: false` uses the muted text and emits nothing.
 - [ ] **Step 5: Commit** `ui: button press, hover, and disabled`
 
 ### Task 10: Toggle
@@ -654,6 +665,7 @@ The stable second frame and the dirty track **require #5.**
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** a press emits `Event::Toggle` with the next `on` value and leaves the caller's `Kind` unchanged. The game writes the next frame. The thumb sits on the right half when `on` is true.
 - [ ] **Step 5: Commit** `ui: toggle reports the next on state`
 
 ### Task 11: Checkbox
@@ -672,6 +684,7 @@ The stable second frame and the dirty track **require #5.**
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** a press emits `Event::Toggle` with the inverted flag. The checked box paints an accent mark inset by 4 px. The unchecked snapshot has no mark.
 - [ ] **Step 5: Commit** `ui: checkbox mark and toggle event`
 
 ### Task 12: Radio
@@ -690,6 +703,7 @@ Three `Kind::Radio { group: 1, selected }` in one column, ids 1, 2, 3. Pressing 
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** a press emits one `Event::Select` for that radio's place in its group, in tree order. A radio in another group stays as it is. A press on the already selected radio emits `Select` again.
 - [ ] **Step 5: Commit** `ui: radio group selection`
 
 ### Task 13: Slider
@@ -710,6 +724,7 @@ The damage assertion **requires #5.** The value tests do not.
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass, including `slider`.
 
+- **Deviation:** the element is horizontal or vertical, with an optional step. `PanelSlider` and the lamp notches stay on the lighting panel. Damage covers the track.
 - [ ] **Step 5: Commit** `ui: horizontal and vertical slider element`
 
 ### Task 14: Dial
@@ -733,6 +748,7 @@ The second-frame empty-damage assertion **requires #5.**
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** turns run clockwise from the top. `knob: true` adds a radial segment on the same arc. `genos-debug`'s `Knob` stays a named number in a script.
 - [ ] **Step 5: Commit** `ui: dial and knob with a shared arc`
 
 ### Task 15: Progress
@@ -753,6 +769,7 @@ Dirtying the element when the value changes **requires #5.**
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** linear fill is `value` times the track width. Radial fill is `arc_segments` over `value` turns. A press emits no event. Value clamps to `0.0..=1.0`.
 - [ ] **Step 5: Commit** `ui: linear and radial progress`
 
 ### Task 16: Spinner
@@ -771,6 +788,7 @@ Dirtying the element when the value changes **requires #5.**
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** one id covers the down button, the readout, and the up button. A press on a half emits `Change` clamped to `min` and `max`. `genos-debug`'s `Knob::number` stays data.
 - [ ] **Step 5: Commit** `ui: number spinner`
 
 ### Task 17: UI focus and navigation
@@ -808,6 +826,7 @@ UI test: two enabled buttons, ids 1 and 2, stacked. `set_key(key_down, true)` af
 
 - [ ] **Step 4: Run** `cargo test -p genos-input` and `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** Dear ImGui's navigation is direction, activate, and back. This step puts those on `ui_actions()` in the input system. `key_a` stays on the camera `move` action. WASD is not a UI direction. `GamepadDevice::pressed` is the edge, matching the keyboard.
 - [ ] **Step 5: Commit** `ui: keyboard and gamepad focus through the input system`
 
 Update `docs/systems/ui.md` and `docs/systems/input.md` Game use: UI navigation reads `ui_actions()` on the same `InputSystem` as the camera map.
@@ -831,6 +850,7 @@ Including the layer's old bounds in `Frame.damage`, and dirtying both layers on 
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** one layer sits in front of the root and is hit first. A press outside emits `Event::Dismiss` and closes it. Slint's popup is the model. A second simultaneous popup stays out.
 - [ ] **Step 5: Commit** `ui: one popup layer in front of the root`
 
 ### Task 19: Scroll
@@ -853,6 +873,7 @@ Dirtying the scroll rect **requires #5.** Clipping and the wheel offset do not.
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` and `cargo build -p genos-camera -p genos-stress` — expected: pass.
 
+- **Deviation:** the view clips, a drag moves `offset`, and `Pointer.wheel_y` scrolls, clamped so content cannot pass its end. A child outside the clip produces no paints.
 - [ ] **Step 5: Commit** `ui: scroll view clips and follows drag and wheel`
 
 ### Task 20: Wayland wheel
@@ -871,6 +892,7 @@ Dirtying the scroll rect **requires #5.** Clipping and the wheel offset do not.
 
 - [ ] **Step 4: Run** `cargo test -p genos-window` — expected: pass.
 
+- **Deviation:** vertical `pointer_axis` accumulates into `Window::Frame.wheel_y`. Horizontal axis is ignored. `pointer_axis_value120` is used when the continuous event did not already arrive for that frame.
 - [ ] **Step 5: Commit** `window: report vertical pointer-axis wheel on the frame`
 
 The gallery copies `frame.wheel_y` onto `Pointer.wheel_y`. The camera and the stress example pass `0.0` until someone scrolls a panel there.
@@ -897,6 +919,7 @@ pub struct ListRow { pub id: u32, pub text: String }
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** Unity's `ListView` virtualizes rows. This list builds nodes for the visible range only. A thousand rows do not allocate a thousand `Node`s. Row ids stay stable and differ from the list id.
 - [ ] **Step 5: Commit** `ui: virtualized list`
 
 ### Task 22: Tree
@@ -921,6 +944,7 @@ A closed parent paints its label and hides its children. A press on the disclosu
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** the visible rows are a flattened list of `(depth, node)`. A press on the disclosure emits `Toggle` and does not select. A press on the label emits `Select`. Children indent by 16 px.
 - [ ] **Step 5: Commit** `ui: tree expand and collapse`
 
 ### Task 23: Table
@@ -948,6 +972,7 @@ Three columns, five rows, viewport shows the header plus two rows. Header press 
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** Dear ImGui tables sort, resize, and scroll. A header press emits `Sort`, and the game reorders `rows` on the next frame. A drag on the header's right 4 px emits `Change` for the width and does not emit `Sort`. Frozen columns and docking stay out.
 - [ ] **Step 5: Commit** `ui: table columns, sort, and row select`
 
 ### Task 24: Tabs
@@ -968,6 +993,7 @@ The page-rect damage assertion **requires #5.**
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** one child paints: the child at `selected`. A press on a title emits `Select`. Switching pages replaces that child's paints.
 - [ ] **Step 5: Commit** `ui: tabs show the selected page`
 
 ### Task 25: Dropdown
@@ -986,6 +1012,7 @@ The page-rect damage assertion **requires #5.**
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** the closed box paints the selected choice. Opening uses Task 18's layer. A choice press emits `Select` and `Dismiss`. A radio group stays the always-visible selector.
 - [ ] **Step 5: Commit** `ui: dropdown list on the popup layer`
 
 This is the selector. A radio group remains the always-visible selector.
@@ -1015,6 +1042,7 @@ Keys, with UI focus on the field: `key_a` inserts `"a"` at the head and emits `E
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** egui's `TextEdit` moves a caret by grapheme clusters. This step indexes ASCII bytes on the bitmap cell and ignores a non-ASCII scalar. The outline step lifts that. Selection is `anchor` and `head`. The game replaces `text` from `Event::Text` on the next frame.
 - [ ] **Step 5: Commit** `ui: single-line text field with selection`
 
 ### Task 27: Multiline
@@ -1033,6 +1061,7 @@ Keys, with UI focus on the field: `key_a` inserts `"a"` at the head and emits `E
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** `key_enter` inserts a newline. `key_up` and `key_down` move by one visual line and keep the column. A line past the clip scrolls by one cell height.
 - [ ] **Step 5: Commit** `ui: multiline text field`
 
 ### Task 28: IME model
@@ -1055,6 +1084,7 @@ pub struct TextInput { pub commit: String, pub preedit: String }
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** a commit inserts at the caret and clears the preedit in the event text. A preedit paints in the accent color and emits no `Text`. The preedit is not stored on `Kind::TextField.text`. The headless test injects the strings. It does not open a seat.
 - [ ] **Step 5: Commit** `ui: text commit and preedit`
 
 ### Task 29: Wayland text input
@@ -1075,6 +1105,7 @@ The headless test covers `apply_text_event`: a preedit op sets the preedit, a co
 
 - [ ] **Step 4: Run** `cargo test -p genos-window` — expected: pass.
 
+- **Deviation:** the window binds `zwp_text_input_v3` when the global exists and copies commit and preedit onto `Window::Frame`. A missing global leaves both strings empty. The protocol is a native call (ADR 0007). No IME crate.
 - [ ] **Step 5: Commit** `window: Wayland text-input commit and preedit`
 
 The gallery calls `set_text_input(true)` while a text field has UI focus, and copies the frame strings into `TextInput`.
@@ -1095,6 +1126,7 @@ The gallery calls `set_text_input(true)` while a text field has UI focus, and co
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** copy, cut, and paste use one `String` on `State`. A Wayland data-device paste stays out of this plan. The limit is recorded in `ui.md`.
 - [ ] **Step 5: Commit** `ui: in-process copy and paste for text fields`
 
 ### Task 31: Tooltip
@@ -1115,6 +1147,7 @@ A node with `tooltip: Option<String>` (add the field, default `None`). Hover for
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** hover for `0.4` s opens a layer under the pointer, clamped to the viewport. The tip is not a press target. A tooltip does not open while a dialog owns the layer.
 - [ ] **Step 5: Commit** `ui: tooltip after a hover delay`
 
 ### Task 32: Context menu
@@ -1137,6 +1170,7 @@ pub struct MenuItem { pub id: u32, pub text: String, pub enabled: bool }
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` and `cargo build -p genos-camera -p genos-stress` — expected: pass.
 
+- **Deviation:** a right press opens the layer at the pointer. An enabled item emits `Press` and `Dismiss`. A disabled item emits nothing. A left press outside dismisses.
 - [ ] **Step 5: Commit** `ui: context menu on right press`
 
 ### Task 33: Modal
@@ -1155,6 +1189,7 @@ pub struct MenuItem { pub id: u32, pub text: String, pub enabled: bool }
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** an outside press does not dismiss and does not reach the root. `ui_back` emits `Dismiss` and closes. Focus moves to the first focusable child and returns to the previous id on close. Tab wraps inside the dialog. The scrim is opaque until Task 34.
 - [ ] **Step 5: Commit** `ui: modal dialog traps focus`
 
 ### Task 34: Overlay alpha
@@ -1179,6 +1214,7 @@ pub struct MenuItem { pub id: u32, pub text: String, pub enabled: bool }
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` and `cargo test -p genos-render overlay_blend` — expected: pass. Do not run the GPU frame tests.
 
+- **Deviation:** `GpuVertex` stays 48 bytes. Alpha `1.0` still writes `uv.y < 0`. A lower alpha writes `uv.y` and the overlay pipeline blends. The scene pipeline stays as it is. The modal scrim uses alpha `0.6`.
 - [ ] **Step 5: Commit** `ui, render: overlay rectangles carry alpha`
 
 ### Task 35: Image element
@@ -1203,6 +1239,7 @@ pub struct ImagePaint { pub source: u32, pub x: f32, pub y: f32, pub w: f32, pub
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** the element emits one `ImagePaint` and one muted placeholder `Paint`. A press emits nothing. The atlas upload is Task 36.
 - [ ] **Step 5: Commit** `ui: image element describes a textured rect`
 
 ### Task 36: Overlay atlas
@@ -1225,6 +1262,7 @@ Update `docs/systems/renderer.md` Game use.
 
 - [ ] **Step 4: Run** `cargo test -p genos-render pack_atlas` and `cargo build -p genos-render` — expected: pass. Do not run GPU tests.
 
+- **Deviation:** images pack on shelves 256 px tall in an atlas 512 px wide. UI quads sample that buffer when `shade` is `0.25`, with no ember blur. Binding 2 stays the particle image. A missing source draws the placeholder.
 - [ ] **Step 5: Commit** `render: one atlas for overlay images`
 
 ### Task 37: Icon
@@ -1247,6 +1285,7 @@ Each name has a 5×7 bitmask next to `glyph`. `Kind::Icon` paints those blots in
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** `Close`, `Check`, and `Chevron` are 5×7 bitmasks beside the bitmap glyph. `Check` uses the checkbox mark's bits. A press emits nothing.
 - [ ] **Step 5: Commit** `ui: built-in icons`
 
 ### Task 38: Color picker
@@ -1267,6 +1306,7 @@ Keeping the paints in one damage group **requires #5.**
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** the square and the hue bar are quads, at most 8×8 plus 8, so they stay one damage group. HSV converts in `controls.rs`. The field allocates no texture.
 - [ ] **Step 5: Commit** `ui: color picker square and hue bar`
 
 ### Task 39: Chart
@@ -1291,6 +1331,7 @@ pub struct Series { pub name: String, pub color: [f32; 3], pub points: Vec<[f32;
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass, including `profile`.
 
+- **Deviation:** points map into the plot with a 10% pad. Hover paints the nearest point's values and emits no event. `profile.rs` stays on its own painter. `Kind::Chart` does not replace `ProfileGraph`.
 - [ ] **Step 5: Commit** `ui: chart series for debug tools`
 
 ### Task 40: Motion
@@ -1312,6 +1353,7 @@ The following-frame empty-damage assertion **requires #5.**
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** a non-zero `motion` lerps the painted rect and the background toward the layout result. `State.reduced_motion` snaps on the first frame, which is the WCAG reduced-motion allowance. A value `Event` still reports the logical value on the press frame.
 - [ ] **Step 5: Commit** `ui: lerp rect and color, with reduced motion`
 
 Document in `ui.md`: motion is cosmetic. A value `Event` still reports the logical value on the press frame, not the lerped paint.
@@ -1341,6 +1383,7 @@ impl StringTable {
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** Slint translations use gettext. This table is a map from `(locale, key)` to a string. A missing key paints the key. Layout measures the resolved text, so a longer translation grows a fit label. No gettext crate.
 - [ ] **Step 5: Commit** `ui: locale string table for labels`
 
 ### Task 42: Semantics
@@ -1360,6 +1403,7 @@ impl StringTable {
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** Flutter keeps a semantics tree beside the render tree, and WAI-ARIA names the roles. `Frame.semantics` is that list, in paint order, for the headless check. A clipped-away row is absent. AccessKit and AT-SPI stay out (ADR 0007). A platform bridge is a later native call.
 - [ ] **Step 5: Commit** `ui: semantic tree for accessibility checks`
 
 Update `ui.md`: the accessibility surface is this list. A platform bridge is a later native call, not a crate.
@@ -1380,6 +1424,7 @@ Update `ui.md`: the accessibility surface is this list. A platform bridge is a l
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** Unity's world-space panel is a scene object. This root stays an overlay projection. Width and height scale by `near / distance`, clamped to `0.25..=1.5`, with `near` at 4 world units. A screen root keeps its rect. The scene does not occlude the overlay.
 - [ ] **Step 5: Commit** `ui: world roots shrink with distance`
 
 Update `ui.md` Limits: a world root is an overlay. The scene does not occlude it.
@@ -1404,6 +1449,7 @@ pub struct Run { pub text: String, pub color: [f32; 3] }
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** runs paint in order on the bitmap baseline, each in its color. Wrap can break between runs and inside a run on whitespace. Plain text stays one run. A label still ignores a press. HarfBuzz stays out.
 - [ ] **Step 5: Commit** `ui: rich text runs on the bitmap`
 
 ### Task 45: Outline face
@@ -1430,6 +1476,7 @@ Coverage raster: even-odd fill on a grid of `px` by `px`. Off-curve points becom
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** `TextFace::Outline` rasterizes `genos_load::Glyph` contours on the CPU. Advances come from the glyph. The bitmap stays the default, so the lighting panel's snapshot still matches. Shaping is left to right. No kerning, no bidi, and no HarfBuzz. A composite glyph still fails in the loader.
 - [ ] **Step 5: Commit** `ui: optional outline face from a loaded glyph`
 
 Update `ui.md` Limits: shaping is left to right. No kerning and no bidi.
@@ -1459,6 +1506,7 @@ A node built without `replica` reports one local row with empty predicted, snaps
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
+- **Deviation:** the thumb or readout uses `predicted` when it is set, and otherwise `snapshot`. `Health` and `StunUntil` clear `predicted` and show the snapshot. A diverged pose draws a muted mark on the snapshot value. The crate does not open a socket, quantize, or build `InputCommand`. The caller copies component values in.
 - [ ] **Step 5: Commit** `ui: show predicted and snapshot values on bound elements`
 
 Update `ui.md` Limits: a replicated element shows the snapshot value, and the owned pose can also show the predicted value. The crate still does not open a socket.
@@ -1518,6 +1566,7 @@ Pages in `pages.rs`, selected by the tab element and by `--page`:
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui-gallery` and `cargo build -p genos-ui-gallery` — expected: pass. Do not launch the window and do not run `make verify`.
 
+- **Deviation:** the binary is the gallery and the state inspector, on the lighting command shape (`genos-debug` tools, a script, a shot). It loads `examples/camera/scene.rhai`. It does not open a socket. `genos-net-view` stays the multi-runtime view. The folder stays `examples/ui` until the shared `debug/scenes` library exists.
 - [ ] **Step 5: Commit** `examples: UI gallery with a state inspector`
 
 ---
@@ -1599,3 +1648,25 @@ The state inspector is a column of `inspect` rows for the current page. Each row
 | Predicted and confirmed (snapshot) values | 46 |
 | State inspector | 46, gallery column at 47 |
 | Gallery binary | 47 |
+
+## References
+
+Design sources for the steps. The code stays in this repository (ADR 0007). A step that leaves a source says so on its `Deviation:` line.
+
+The session, the codec, and the socket stay in [core-networking/plan.md](../core-networking/plan.md). `make lint-docs` allowlists that path until the file lands.
+
+### Retained and immediate mode
+
+- Casey Muratori, [Immediate-Mode Graphical User Interfaces](https://caseymuratori.com/blog_0001), 2005. The widget is a function the frame calls again. Genos keeps a retained `Node` tree instead.
+- Omar Cornut, [Dear ImGui](https://github.com/ocornut/imgui). Immediate mode, keyboard and gamepad navigation, tables, and text input. The [immediate-mode paradigm](https://github.com/ocornut/imgui/wiki/About-the-IMGUI-paradigm) is the call style this plan leaves.
+- Emil Ernerfeldt, [egui](https://github.com/emilk/egui). Immediate mode with id-keyed memory, `TextEdit`, and an AccessKit export. Genos keeps the id-keyed `State`. The AccessKit crate stays out.
+- [Flutter architectural overview](https://docs.flutter.dev/resources/architectural-overview). A widget description, a retained element, a render object, flex and grid layout, repaint boundaries, a semantics tree, and platform IME. `Node` plus `frame` is the smaller form of that split.
+- [Slint](https://github.com/slint-ui/slint). A retained tree, grid layout, dirty-region repaint, and gettext translations. Genos takes the widget set and the dirty region. The `.slint` language and Parley stay out.
+- Nic Barker, [Clay](https://github.com/nicbarker/clay). Fit, grow, fixed, and percent sizing, which `layout.rs` already implements. This plan extends that file. It does not add the Clay crate.
+
+### Accessibility
+
+- W3C, [Accessible Rich Internet Applications (WAI-ARIA) 1.2](https://www.w3.org/TR/wai-aria-1.2/). Roles, names, and values. `Frame.semantics` is that list for the headless check.
+- W3C, [Web Content Accessibility Guidelines (WCAG) 2.2](https://www.w3.org/TR/WCAG22/). [Animation from interactions](https://www.w3.org/WAI/WCAG22/Understanding/animation-from-interactions.html) is the reduced-motion rule Task 40 follows.
+- [AccessKit](https://github.com/AccessKit/accesskit). The usual Rust bridge from a semantic tree to the platform. ADR 0007 keeps the crate out. A later native call can read `Frame.semantics`.
+
