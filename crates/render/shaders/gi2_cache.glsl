@@ -323,6 +323,18 @@ float gi2_global_light() {
 }
 void gi2_ls_note() {
     uint f = gi2_frame();
+    // S69B: a rise (more than twice the lowest of the last 16 frames logged).
+    float cur = gi2_global_light();
+    float low = 1.0e30;
+    [[dont_unroll]] for (uint k = 1u; k <= 16u && k < f; k++) {
+        uint at = GI2_LS_AT + 2u * ((f - k) % GI2_LS_RING);
+        if (ckeys.key[at] == f - k) {
+            low = min(low, uintBitsToFloat(ckeys.key[at + 1u]));
+        }
+    }
+    if (low < 1.0e29 && cur + GI2_LS_EPS > 2.0 * (low + GI2_LS_EPS)) {
+        ckeys.key[GI2_LS_AT + 2u * GI2_LS_RING + 1u] = f;
+    }
     uint at = GI2_LS_AT + 2u * (f % GI2_LS_RING);
     ckeys.key[at] = f;
     ckeys.key[at + 1u] = floatBitsToUint(gi2_global_light());
@@ -383,12 +395,32 @@ uint gi2_sc_updated(uint slot) {
 // by that change, whole sets, and not shown (the pixel takes the probes, which
 // carry this frame's light) until it is relit.
 const float GI2_SC_STALE_UP = 2.0;
+bool gi2_sc_stale(uint slot);
 float gi2_sc_global_change(uint slot) {
     float r = gi2_ls_ratio(gi2_sc_updated(slot));
-    return max(r, 1.0 / max(r, 1.0e-3)) - 1.0;
+    float d = max(r, 1.0 / max(r, 1.0e-3)) - 1.0;
+    return gi2_sc_stale(slot) ? max(d, GI2_SC_STALE_UP - 1.0) : d;
 }
+// S69B (Anthony: after S69A the black squares stayed only where the camera
+// looked at the change): those texels were relit within frames of the jump,
+// with rays lit before the new sun reached them, and their stamp said "day".
+// gi2_ls_note marks a rise (the global light over twice the lowest of the 16
+// frames before); a texel relit within GI2_SC_STALE_WINDOW frames after a
+// rise stays stale (due, not shown) and is relit again once the light held.
+const uint GI2_SC_STALE_WINDOW = 16u;
+// Frame of the last rise (gi2_ls_note): the global light more than
+// GI2_SC_STALE_UP times the lowest of the window before it.
+const uint GI2_LS_RISE_AT = GI2_LS_AT + 2u * GI2_LS_RING + 1u;
 bool gi2_sc_stale(uint slot) {
-    return gi2_world_mode() == 3u && gi2_sc_updated(slot) != 0u && gi2_ls_ratio(gi2_sc_updated(slot)) > GI2_SC_STALE_UP;
+    uint u = gi2_sc_updated(slot);
+    if (gi2_world_mode() != 3u || u == 0u) {
+        return false;
+    }
+    uint rise = ckeys.key[GI2_LS_RISE_AT];
+    if (rise != 0u && int(u - rise) >= 0 && int(u - rise) <= int(GI2_SC_STALE_WINDOW)) {
+        return true;
+    }
+    return gi2_ls_ratio(u) > GI2_SC_STALE_UP;
 }
 // Set while a lookup runs in a mover's frame: id + 1 salts the key.
 float gi2_obj_salt = 0.0;
