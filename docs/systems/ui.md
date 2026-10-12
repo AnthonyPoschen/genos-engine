@@ -102,7 +102,7 @@ The graph has no pan, no zoom, and no free scroll. Pause holds the current windo
 
 The graph draws one point per 250 ms average, joined by 2 px lines (`ProfileView.segments`, drawn as thin quads in the overlay draw). It does not draw one point per frame.
 
-The expansion into a full set of UI elements is planned in [plan.md](ui/plan.md). This record stays the behavior that is in the crate today.
+The expansion into a full set of UI elements, including elements bound to replicated state, is planned in [plan.md](ui/plan.md). This record stays the behavior that is in the crate today. The crate does not open a socket.
 
 ## Decisions
 

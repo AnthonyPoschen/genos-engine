@@ -21,6 +21,7 @@ This plan starts from `cursor/frame-output-reuse-6556` (PR #5). That branch adds
 - Lighting-panel ids stay in `genos_ui::id` (1 through 15). `button_panel` chrome stays at `u32::MAX - 4095` and above. Every other id in one `frame` call is unique. The same id in one frame joins one damage group.
 - `Action` stays the lighting-panel enum. New elements emit `Event`. Existing `match` arms in `examples/camera` and `examples/stress` keep compiling.
 - Do not route `ProfileGraph` through the chart element. The profile tests stay on `profile.rs`.
+- Every new system is designed with networking in mind. This plan states the UI's replicated state, authority, prediction, determinism, and headless authority behavior in [Networking](#networking). `genos-ui` does not open a socket. The session, the codec, and the socket stay in [core-networking/plan.md](../core-networking/plan.md). When a name there differs from this plan, that file wins.
 
 ---
 
@@ -279,6 +280,84 @@ pub struct Semantic {
 
 `Role` is `Label`, `Button`, `Toggle`, `Checkbox`, `Radio`, `Slider`, `Dial`, `Progress`, `Spinner`, `TextField`, `List`, `Tree`, `Table`, `Tab`, `Dropdown`, `Dialog`, `Menu`, `Image`, `Chart`. The tree is paint order, back to front, so a dialog is last. No AT-SPI socket in this plan. The semantic list is the headless accessibility surface.
 
+### Networking
+
+The name source is [core-networking/plan.md](../core-networking/plan.md). This section uses the words that file locks.
+
+An **entity** is the stable simulation id and the components stored under it. `EntityId` is `{ index: u32, generation: u32 }`. The **authority runtime** writes replicated components and is headless. A **player runtime** predicts the one entity its `InputAuthority` names and interpolates the rest. A **connection** is one player runtime joined to an authority runtime (`ConnectionId`). A **snapshot** is the replicated components one connection needs for one tick, delta-compressed against an earlier snapshot. A **command** is one tick of sampled actions. `InputCommand` carries `tick`, `forward`, `strafe`, `look_x`, `look_y`, `buttons`, and `aim_tick`. A **notice** is a reliable ordered message. The result of a notice comes back as a component on a later snapshot.
+
+The sim tick is 60 Hz. A snapshot goes out every 3rd tick. Remote entities render at `newest_snapshot_tick` minus 6 ticks. The owned entity renders its predicted pose. `Health` changes only on the authority runtime, and the player runtime displays the snapshot value. The same rule covers `StunUntil`. The player runtime may be wrong about the owned pose. The snapshot corrects it.
+
+`genos-ui` keeps `index` and `generation` as two `u32` fields with that `EntityId` layout. It does not depend on `genos-sim` or `genos-net`. It does not call `std::net`. `genos-session` does not link this crate. The caller copies component values into the tree once per UI frame. `frame` does not read a snapshot ring.
+
+| | Local element | Replicated element |
+| --- | --- | --- |
+| Examples | UI focus, caret, scroll offset, popup layer, tooltip delay, theme, locale, the lighting panel, the profile graph | A readout or a slider bound to `Pose`, `Health`, or `StunUntil` on one entity |
+| Where the value lives | `State`, or the caller's own model | A component the authority runtime writes |
+| Snapshot | Absent | Present when the component is dirty and in interest |
+| Who writes the shown number | This player runtime | The authority runtime. The player runtime supplies a predicted pose only for the entity it has input authority for |
+
+```rust
+pub enum ReplicaField {
+    PoseX,
+    PoseY,
+    PoseZ,
+    Yaw,
+    Health,
+    StunUntil,
+}
+
+pub struct ReplicaView {
+    pub index: u32,
+    pub generation: u32,
+    pub field: ReplicaField,
+    /// Owned pose, in the element's display unit. Empty for health, stun, and every entity this connection lacks input authority for.
+    pub predicted: Option<f64>,
+    /// Authority value on the newest applied snapshot, in the same display unit. This is the confirmed value.
+    pub snapshot: f64,
+    /// A local request waiting on a command or a notice. Empty once the snapshot has caught up.
+    pub pending: Option<f64>,
+}
+```
+
+`Node.replica` defaults to `None`, which marks a local element. The lighting panel and the profile graph leave it empty. The caller fills `ReplicaView` for a replicated element. Pose values are already quantized to the snapshot's millimetres and `u16` yaw, then converted into the display unit, so sub-millimetre noise does not move a mark. The UI does not quantize.
+
+Paint, for a slider, a dial, a progress bar, a spinner, or a label that carries `ReplicaView`:
+
+- The thumb, fill, or readout uses `predicted` when it is `Some`.
+- Otherwise it uses `snapshot`.
+- `Health` and `StunUntil` clear `predicted` before paint. Those fields show the snapshot value.
+- When a kept `predicted` differs from `snapshot`, a 2 px mark in `theme.muted` sits on the snapshot value. That mark is the confirmed value.
+- When `pending` differs from the shown value, a 2 px mark in `theme.accent` sits on the pending value.
+- A label has no track. Its readout is the shown number. A predicted pose that differs from the snapshot adds the snapshot number as a second run in `theme.muted`. A pending value adds a second run in `theme.accent`.
+- A local element paints the value inside `Kind` and draws neither mark.
+
+A press still emits `Event` on that frame, with the logical value. The thumb stays on the predicted pose or on the snapshot. It does not jump to `pending`. The caller copies a pawn button into `InputCommand.buttons`. The caller sends any other request as a notice. The UI crate builds neither. The next snapshot the caller copies is what moves `snapshot`.
+
+`inspect` walks the tree in paint order and returns one row per element.
+
+```rust
+pub struct InspectRow {
+    pub id: u32,
+    pub local: bool,
+    pub index: Option<u32>,
+    pub generation: Option<u32>,
+    pub field: Option<ReplicaField>,
+    pub predicted: Option<f64>,
+    pub snapshot: Option<f64>,
+    pub pending: Option<f64>,
+    pub diverged: bool,
+}
+
+pub fn inspect(root: &Node) -> Vec<InspectRow>
+```
+
+`diverged` is true when the row kept a predicted value and that value differs from `snapshot`. A health row whose caller passed `predicted` still reports `predicted: None` and `diverged: false`.
+
+`frame` and `inspect` read the tree, `State`, and `FrameArgs`. The same inputs produce the same paints and the same rows. The authority runtime draws no UI. Gallery tests stay in-process and do not bind a UDP socket.
+
+`genos-net-view` is the debug view of one authority runtime and N player runtimes, with link latency, loss, and jitter. This plan does not build that binary. The gallery inspector is the view of one UI tree: local rows beside replicated rows, predicted beside snapshot.
+
 ### Files
 
 | Path | Responsibility |
@@ -295,8 +374,9 @@ pub struct Semantic {
 | `crates/ui/src/damage.rs` | Unchanged contract. Callers group by id. |
 | `crates/ui/src/panel.rs` | Lighting panel and `button_panel`, calling `frame`. |
 | `crates/ui/src/profile.rs` | Unchanged. |
+| `crates/ui/src/replica.rs` | `ReplicaView`, `inspect`, predicted and snapshot marks. |
 | `crates/ui/tests/*.rs` | One integration test file per step that adds behavior. |
-| `examples/ui/` | Gallery binary, last step. |
+| `examples/ui/` | Gallery binary and its state inspector, last step. |
 
 ---
 
@@ -1316,7 +1396,34 @@ Coverage raster: even-odd fill on a grid of `px` by `px`. Off-curve points becom
 
 Update `ui.md` Limits: shaping is left to right. No kerning and no bidi.
 
-### Task 46: Gallery binary
+### Task 46: Replicated binding
+
+**Files:**
+- Create: `crates/ui/src/replica.rs`
+- Test: `crates/ui/tests/replica.rs`
+- Modify: `crates/ui/src/lib.rs`, `crates/ui/src/layout.rs`, `crates/ui/src/interact.rs`, `docs/systems/ui.md`
+
+`Node.replica` defaults to `None`. `inspect` and the paint rule are the ones in [Networking](#networking). A local slider still emits `Change` from its `Kind` value.
+
+The pose test uses a 100×24 slider, min `0.0`, max `10.0`, entity `{ index: 1, generation: 1 }`, field `PoseX`, `predicted: Some(8.0)`, `snapshot: 2.0`. The thumb center is to the right of the muted mark. `inspect` reports `local: false`, that index and generation, `predicted: Some(8.0)`, `snapshot: Some(2.0)`, and `diverged: true`. A second identical frame has empty damage. Setting `snapshot` to `8.0` clears the mark and dirties the track.
+
+The health test uses a label, entity `{ index: 2, generation: 1 }`, `predicted: Some(0.0)`, `snapshot: 40.0`, `pending: Some(100.0)`. The readout paints `40`. A second run paints `100` in `theme.accent`. `inspect` reports `predicted: None`, `snapshot: Some(40.0)`, `pending: Some(100.0)`, and `diverged: false`. A press emits `Event` and the readout stays `40`. `StunUntil` with `predicted: Some(9.0)` and `snapshot: 3.0` follows that same clear-predicted rule and paints `3`.
+
+A node built without `replica` reports one local row with empty predicted, snapshot, and pending fields.
+
+- [ ] **Step 1: Test** the local row, the diverged pose mark, the health snapshot readout, and the empty second-frame damage.
+
+- [ ] **Step 2: Run** `cargo test -p genos-ui --test replica` — expected: fail.
+
+- [ ] **Step 3: Implement** `replica.rs` and the paint branch. Existing trees stay local, so the lighting snapshot stays valid.
+
+- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
+
+- [ ] **Step 5: Commit** `ui: show predicted and snapshot values on bound elements`
+
+Update `ui.md` Limits: a replicated element shows the snapshot value, and the owned pose can also show the predicted value. The crate still does not open a socket.
+
+### Task 47: Gallery binary
 
 **Files:**
 - Create: `examples/ui/Cargo.toml`, `examples/ui/src/main.rs`, `examples/ui/src/pages.rs`
@@ -1332,8 +1439,8 @@ The gallery does:
 2. Load `examples/camera/scene.rhai` with `genos_scene::load_path`. That is the shared scene.
 3. Open `Window::open_proof` when `--proof` is set, otherwise `Window::open`.
 4. Open `Renderer`, `InputSystem`, `FocusGate`, and `genos_debug::Tools`.
-5. Implement `genos_debug::Host` for the loaded scene. Knobs: `theme` (`dark` or `light`), `locale` (`en` or `fr`), `motion` (`on` or `off`), `damage` (`off` or `on`).
-6. Each frame: `tools.scene_dt`, `pump`, `begin_frame`, apply keys and the mouse, `poll_gamepads`, build the page tree, call `frame` with the input system, `dt`, the string table, and the text input. Copy `wheel_y` from the window. Call `set_text_input` while a text field has UI focus.
+5. Implement `genos_debug::Host` for the loaded scene. Knobs: `theme` (`dark` or `light`), `locale` (`en` or `fr`), `motion` (`on` or `off`), `damage` (`off` or `on`), `diverge` (`on` or `off`).
+6. Each frame: `tools.scene_dt`, `pump`, `begin_frame`, apply keys and the mouse, `poll_gamepads`, build the page tree, call `inspect`, and place `inspector_column` to the right of the page in one root. Call `frame` on that root with the input system, `dt`, the string table, and the text input. Copy `wheel_y` from the window. Call `set_text_input` while a text field has UI focus.
 7. If `look_capture && !keys_captured`, feed `character_controller` so the camera still moves when the pointer misses the UI.
 8. Draw paints as `ScreenRect` with alpha. Draw segments with `set_overlay_lines`. Upload image paints when the page has an image.
 9. When `Renderer::report_overlay_damage` exists, pass `Frame::damage`. Until the renderer plan lands, still compute damage. The `damage` knob strokes those rectangles so a person can see them.
@@ -1355,18 +1462,21 @@ Pages in `pages.rs`, selected by the tab element and by `--page`:
 | `motion` | A button whose `motion` is 0.2 s, the reduced-motion knob |
 | `chart` | Two series |
 | `world` | A screen-root frame rate label and a world root on the first lamp |
+| `inspector` | A local button, an owned `PoseX` slider, and a `Health` label |
 
-`pages.rs` is pure: `fn page(name: &str, model: &Model) -> Node`. The test lives in `examples/ui/src/pages.rs` behind `#[cfg(test)]` and does not open a window.
+`pages.rs` is pure: `fn page(name: &str, model: &Model) -> Node`. The window draws `inspector_column(&inspect(&page))` beside that page, so every page carries the state inspector. The test lives in `examples/ui/src/pages.rs` behind `#[cfg(test)]` and does not open a window. The binary does not bind a UDP socket and does not link `genos-net`.
 
-- [ ] **Step 1: Test** `page("buttons", &Model::demo())` contains a `Kind::Button`, a `Kind::Toggle`, a `Kind::Checkbox`, and two `Kind::Radio` of the same group. `page("world", &Model::demo())` returns a root whose child has `Space` applied by the caller: the function returns the world node separately as `Model::world_label() -> Node` with a fixed size. `frame` on the buttons page with a press over the first button emits `Press`.
+`Model::demo()` with `diverge: true` builds the inspector page as: a local button; a `PoseX` slider on entity `{ index: 1, generation: 1 }` with `predicted: Some(8.0)` and `snapshot: 2.0`; a `Health` label on entity `{ index: 2, generation: 1 }` with `snapshot: 40.0` and `predicted: None`. `diverge: false` sets that pose `predicted` equal to `snapshot`.
+
+- [ ] **Step 1: Test** `page("buttons", &Model::demo())` contains a `Kind::Button`, a `Kind::Toggle`, a `Kind::Checkbox`, and two `Kind::Radio` of the same group. `page("world", &Model::demo())` returns a root whose child has `Space` applied by the caller: the function returns the world node separately as `Model::world_label() -> Node` with a fixed size. `frame` on the buttons page with a press over the first button emits `Press`. `inspect(&page("inspector", &Model::demo()))` returns a local row, a diverged `PoseX` row (`predicted` 8, `snapshot` 2), and a `Health` row whose `predicted` is empty and whose `snapshot` is 40. `inspector_column` of those rows is a label list that includes the entity index `1` and the word `snapshot`. `Model::demo()` with `diverge: false` reports `diverged: false` on the pose row.
 
 - [ ] **Step 2: Run** `cargo test -p genos-ui-gallery` — expected: the package is missing.
 
-- [ ] **Step 3: Implement** the pages and the binary. Add the workspace member and a `ui` Makefile target: `cargo run -p genos-ui-gallery`. Document the binary in `docs/systems/debugging.md` next to the stress commands, including `--proof --frames 2`. Document the game use in `docs/systems/ui.md`: build a `Node`, call `frame`, draw `paints` and `segments`, honor `look_capture` and `keys_captured`.
+- [ ] **Step 3: Implement** the pages and the binary. Add the workspace member and a `ui` Makefile target: `cargo run -p genos-ui-gallery`. Document the binary in `docs/systems/debugging.md` next to the stress commands, including `--proof --frames 2`, `--page inspector`, and the `diverge` knob. Document the game use in `docs/systems/ui.md`: build a `Node`, call `frame`, draw `paints` and `segments`, honor `look_capture` and `keys_captured`. A replicated element copies `ReplicaView` from the caller.
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui-gallery` and `cargo build -p genos-ui-gallery` — expected: pass. Do not launch the window and do not run `make verify`.
 
-- [ ] **Step 5: Commit** `examples: UI gallery on the camera scene`
+- [ ] **Step 5: Commit** `examples: UI gallery with a state inspector`
 
 ---
 
@@ -1383,6 +1493,8 @@ cargo run -p genos-ui-gallery -- --proof --size 320x180 --frames 2
 
 The `damage` knob draws the dirty rectangles from `Frame::damage`. That is how a person checks the reuse contract from PR #5 against a live control. The profile graph stays on the camera and the stress example. The gallery's chart page is the general graph.
 
+The state inspector is a column of `inspect` rows for the current page. Each row shows the element id, `local` or the entity index and generation, the field, the predicted value, the snapshot value, any pending request, and whether the row diverged. The snapshot column is the confirmed value. The `diverge` knob moves the inspector page's owned pose away from its snapshot so the muted mark is visible. `diverge` off copies the snapshot into `predicted`. The inspector page is also `--page inspector`. The gallery does not open a socket. `genos-net-view` remains the view of many player runtimes.
+
 ## Not in this plan
 
 - The renderer frame-reuse sequence in `docs/frame-reuse-plan.md`.
@@ -1395,6 +1507,9 @@ The `damage` knob draws the dirty rectangles from `Frame::damage`. That is how a
 - A Rhai builder for the tree. Constructors stay in Rust until a later change registers them on a host.
 - Rewriting `ProfileGraph` onto `Kind::Chart`.
 - Editing `examples/camera` or `examples/stress` beyond the `Pointer` fields this plan adds.
+- The snapshot codec, the UDP socket, `InputCommand` sampling, and `genos-session`. Those stay in the core-networking plan.
+- `genos-net-view`. That binary is the multi-runtime desync view. The gallery inspector reads one UI tree.
+- A dependency from `genos-ui` on `genos-sim` or `genos-net`.
 
 ## Coverage
 
@@ -1428,13 +1543,17 @@ The `damage` knob draws the dirty rectangles from `Frame::damage`. That is how a
 | Stack | 5, existing `Direction` |
 | Grid | 7 |
 | Flex | 5, 6 |
-| Anchors | existing `Place`, gallery page at 46 |
+| Anchors | existing `Place`, gallery page at 47 |
 | Theming and styling | 3, 40 |
 | Animation and transitions | 40 |
 | Focus, keyboard, gamepad | 17 |
 | Localisation | 41 |
 | Accessibility | 42 |
-| World root and screen root | existing `Space`, scale at 43, gallery at 46 |
+| World root and screen root | existing `Space`, scale at 43, gallery at 47 |
 | Charts | 39 |
 | Dirty-region reuse | existing `DamageTracker`, every step's second-frame assertion |
-| Gallery binary | 46 |
+| UI bound to replicated state | 46 |
+| Local and replicated elements | 46 |
+| Predicted and confirmed (snapshot) values | 46 |
+| State inspector | 46, gallery column at 47 |
+| Gallery binary | 47 |
