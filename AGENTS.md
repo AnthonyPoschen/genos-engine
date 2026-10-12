@@ -2,6 +2,10 @@
 
 Genos Engine is the runtime and the Linux editor. The hosting service is `../genos`. Keep those products apart.
 
+## Rubric
+
+Every coding agent and every planning agent follows `docs/agent-rubric.md`. A reviewer scores the change on that checklist. The pull request includes the self-scored table (`pass`, `fail`, or `n/a`, with evidence).
+
 ## Domain
 
 This repository has one context. Before you add a term or a decision, read `docs/agents/domain.md`.

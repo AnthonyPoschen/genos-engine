@@ -17,6 +17,7 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
 ├── README.md
 └── docs/
     ├── adr/
+    ├── agent-rubric.md
     ├── agents/
     │   └── domain.md
     ├── architecture.md

@@ -1,0 +1,18 @@
+---
+description: Agent rubric for every coding and planning agent. Reviewers score pull requests against it.
+alwaysApply: true
+---
+
+Before planning or changing code, read `docs/agent-rubric.md` and follow it. Score the pull request with that file's checklist (`pass`, `fail`, or `n/a`, with evidence). `docs/agent-rubric.md` is the scored text.
+
+1. Networking: for every new component or system, state what state replicates, who has authority, whether it needs prediction or rollback, determinism needs, and headless-server behaviour.
+2. Follow the cited paper exactly. Name every departure in the pull request.
+3. One change per commit. Normal push only. Never force-push.
+4. Ship a fast deterministic test. GPU work uses lavapipe. Visual and real performance proof is a script or binary the owner's PC runs, writing screenshots and metrics.
+5. Inventory existing code first and build on it.
+6. Performance: gate work by need; a budget is a ceiling; verify with a cheap check; no hard freezes; a steady scene approaches the non-GI frame-time floor.
+7. GI quality: refinement is even inside a region, with no pop and no patchwork.
+8. Reports include numbers, screenshots when the change is visual, and a five-line postmortem for a rollback or a false pass.
+9. Keep the task small. Leave long builds and benchmarks as commands.
+10. Hook debug into `genos-debug`, `genos-stress`, and the shared scenes, with a preset and a reset.
+11. Put the self-scored checklist from `docs/agent-rubric.md` in the pull request.
