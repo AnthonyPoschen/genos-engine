@@ -405,6 +405,23 @@ bool lighting_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     }
     uint r = ray - lighting_probe_rays();
     uint entry = r / LIGHTING_CACHE_RAYS;
+    if (lighting_world_mode() == 3u && entry >= lighting_grad_first() && entry < LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) {
+        // S74A gradient check: the stored ray of the texel, same seed.
+        uint ci = r - lighting_grad_first() * LIGHTING_CACHE_RAYS;
+        if (ci >= lighting_grad_count()) {
+            return false;
+        }
+        uint gs = ckeys.key[LIGHTING_GRAD_LIST_AT + ci];
+        vec3 gp;
+        if (ckeys.key[gs] == 0u || !lighting_sc_texel_world(gs, gp, n)) {
+            return false;
+        }
+        vec4 gg = cache.v[LIGHTING_SC_GRAD_AT + gs];
+        uint grk = floatBitsToUint(gg.z);
+        origin = gp + n * 0.02;
+        dir = lighting_dir(grk, n, lighting_sc_stratum(grk, floatBitsToUint(gg.w), LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
+        return true;
+    }
     if (lighting_world_mode() == 3u && entry >= LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) {
         // A WRC scout ray: its hit claims and reads the WRC cell there.
         if (!lighting_wrc_scout_due()) {

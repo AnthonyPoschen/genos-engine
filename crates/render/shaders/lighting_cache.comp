@@ -54,6 +54,23 @@ void main() {
     if (j >= LIGHTING_CACHE_BATCH) {
         return;
     }
+    if (lighting_world_mode() == 3u && j >= lighting_grad_first() && j < LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) {
+        // S74A: 16 gradient checks, one ray each.
+        uint n = lighting_grad_count();
+        [[dont_unroll]] for (uint i = 0u; i < LIGHTING_CACHE_RAYS; i++) {
+            uint ci = (j - lighting_grad_first()) * LIGHTING_CACHE_RAYS + i;
+            if (ci >= n) {
+                break;
+            }
+            uint gs = ckeys.key[LIGHTING_GRAD_LIST_AT + ci];
+            vec4 v = work.v[lighting_rad_at(lighting_probe_rays() + ci + lighting_grad_first() * LIGHTING_CACHE_RAYS)];
+            if (ckeys.key[gs] == 0u || lighting_ray_none(v)) {
+                continue;
+            }
+            lighting_sc_grad_take(gs, dot(lighting_ray_light(v), vec3(0.2126, 0.7152, 0.0722)));
+        }
+        return;
+    }
     uint slot = lighting_cache_batch_slot(j);
     if (slot == ~0u) {
         return;
@@ -101,6 +118,12 @@ void main() {
         vec3 dir = lighting_dir(rkey, n, lighting_sc_stratum(rkey, q0 * LIGHTING_CACHE_RAYS + k, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
         float c = max(dot(dir, n), 0.0);
         vec3 lk = lighting_ray_light(v);
+        // S74A: the ray a later gradient check re-traces (same seed): one of
+        // the last quarter's, turning with the rounds.
+        if (LIGHTING_SC_ASVGF && !wrc_cell && lighting_world_mode() == 3u && k == (run - 1u) * LIGHTING_CACHE_RAYS + lighting_round() % LIGHTING_CACHE_RAYS) {
+            uint qk = (q0 + run - 1u) * LIGHTING_CACHE_RAYS + lighting_round() % LIGHTING_CACHE_RAYS;
+            cache.v[LIGHTING_SC_GRAD_AT + slot].yzw = vec3(dot(lk, vec3(0.2126, 0.7152, 0.0722)), uintBitsToFloat(rkey), uintBitsToFloat(qk));
+        }
         e += lk * c;
         el += dot(lk, vec3(0.2126, 0.7152, 0.0722)) * c;
         es += min(max(v.w, 0.0), dot(lk, vec3(0.2126, 0.7152, 0.0722))) * c;
@@ -271,7 +294,14 @@ void main() {
                 if (t < 16.0) {
                     k = min(k, 1.0 / (t + 1.0));
                 }
-                k = max(k, min(hint, 0.9));
+                if (LIGHTING_SC_ASVGF) {
+                    // S74A: alpha' = (1 - lambda) alpha + lambda (A-SVGF); the
+                    // hints only nominate checks (lighting_compact.comp).
+                    float lam = lighting_sc_lambda(slot);
+                    k = (1.0 - lam) * k + lam;
+                } else {
+                    k = max(k, min(hint, 0.9));
+                }
                 vec3 m = mix(old.rgb, y, clamp(k, 0.0, 1.0));
                 cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);
                 cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(vb, inc, k, min(t + 1.0, 256.0));

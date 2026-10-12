@@ -126,10 +126,17 @@ void main() {
     if (pick) {
         if (cache_pick) {
             uint r = ray - lighting_probe_rays();
-            uint slot = lighting_cache_batch_slot(r / LIGHTING_CACHE_RAYS);
+            uint ent = r / LIGHTING_CACHE_RAYS;
+            if (lighting_world_mode() == 3u && ent >= lighting_grad_first() && ent < LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) {
+                // S74A gradient check: the stored ray's lamp pick (same seed).
+                uint gs = ckeys.key[LIGHTING_GRAD_LIST_AT + r - lighting_grad_first() * LIGHTING_CACHE_RAYS];
+                u = lighting_unit(ckeys.key[gs] ^ (floatBitsToUint(cache.v[LIGHTING_SC_GRAD_AT + gs].w) * 0x85ebca6bu + 0x5bd1e995u));
+            } else {
+            uint slot = lighting_cache_batch_slot(ent);
             uint key = slot == ~0u ? 0u : ckeys.key[slot];
-            uint q = slot == ~0u ? 0u : lighting_cache_entry_quarter(r / LIGHTING_CACHE_RAYS, slot);
+            uint q = slot == ~0u ? 0u : lighting_cache_entry_quarter(ent, slot);
             u = lighting_unit(key ^ ((q * LIGHTING_CACHE_RAYS + r % LIGHTING_CACHE_RAYS) * 0x85ebca6bu + 0x5bd1e995u));
+            }
         } else {
             // A probe hit: the offset hangs on the hit's 25 cm cell and its index,
             // so a still hit relights to the same value (no crawl).
@@ -161,7 +168,21 @@ void main() {
             run += w;
             times = ceil(run / step - u) - before;
         }
-        if (times > 0.0 && !trace_occluded(origin, target)) {
+        // S74A: hits (not pixels) reuse a static lamp's shadow (lighting_cache.glsl).
+        bool shadow_lit = false;
+        if (times > 0.0) {
+            uint li = idx >= pixels ? lamp_list_index(list, k) : LAMP_ALL;
+            float sc = lighting_world_mode() == 3u && li < LAMP_ALL - 1u ? lighting_shadow_get(origin, n, li) : -1.0;
+            if (sc >= 0.0) {
+                shadow_lit = sc > 0.5;
+            } else {
+                shadow_lit = !trace_occluded(origin, target);
+                if (li < LAMP_ALL - 1u && lighting_world_mode() == 3u) {
+                    lighting_shadow_put(origin, n, li, shadow_lit);
+                }
+            }
+        }
+        if (shadow_lit) {
             vec3 add = exact ? light : light * (times * step / w);
             e += add;
             if (k < list.suns.y) {

@@ -166,8 +166,11 @@ const uint LIGHTING_SC_TRICKLE = 4096u;
 const uint LIGHTING_SC_TRICKLE_COUNT_AT = LIGHTING_SC_HIST_AT + 71u;
 const uint LIGHTING_SC_TRICKLE_AT = LIGHTING_SC_HIST_AT + 13200u;
 // Batch entries before the trickle, WRC refresh and scout regions.
+// S74A A-SVGF gradient checks (Schied et al. 2018, 2019): batch entries
+// before the scouts, one check per ray (LIGHTING_GRAD_ENTRIES x 16 checks).
+const uint LIGHTING_GRAD_ENTRIES = 2048u;
 uint lighting_sc_room() {
-    return LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES - LIGHTING_WRC_REFRESH - LIGHTING_SC_TRICKLE;
+    return LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES - LIGHTING_GRAD_ENTRIES - LIGHTING_WRC_REFRESH - LIGHTING_SC_TRICKLE;
 }
 // S66A budget boost (Anthony): the texels' share of a round is normally
 // LIGHTING_SC_BASE_BATCH entries' worth (the 1M-ray ceiling); while more is due than
@@ -179,7 +182,7 @@ const uint LIGHTING_SC_BASE_BATCH = 65536u;
 const uint LIGHTING_SC_BOOST_ROUNDS = 30u;
 const uint LIGHTING_SC_BOOST_AT = LIGHTING_SC_HIST_AT + 65u;
 uint lighting_sc_base_room() {
-    return LIGHTING_SC_BASE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES - LIGHTING_WRC_REFRESH - LIGHTING_SC_TRICKLE;
+    return LIGHTING_SC_BASE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES - LIGHTING_GRAD_ENTRIES - LIGHTING_WRC_REFRESH - LIGHTING_SC_TRICKLE;
 }
 const uint LIGHTING_WRC_RING_HEAD_AT = LIGHTING_SC_HIST_AT + 69u;
 const uint LIGHTING_WRC_RING = 16u;
@@ -1914,6 +1917,11 @@ void lighting_sc_page_clear(uint slot) {
         ckeys.key[LIGHTING_SC_PAGE_AT + ((lighting_round() + 1u) % 3u) * LIGHTING_SC_PAGES + slot] = 0u;
     }
 }
+uint lighting_grad_first() {
+    return LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES - LIGHTING_GRAD_ENTRIES;
+}
+uint lighting_grad_count();
+void lighting_shadow_epochs();
 bool lighting_dense() {
     return ((pc.params.z >> 4u) & 1u) != 0u;
 }
@@ -1934,13 +1942,18 @@ uint lighting_dense_entry(uint d) {
     if (d < c) {
         return room + LIGHTING_SC_TRICKLE + (d - b);
     }
-    return LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES + (d - c);
+    uint g = ckeys.key[LIGHTING_ARGS_AT + 10u];
+    if (d < g) {
+        return lighting_grad_first() + (d - c);
+    }
+    return LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES + (d - g);
 }
 void lighting_write_args() {
     uint a;
     uint b = 0u;
     uint c = 0u;
     uint s = 0u;
+    uint g = 0u;
     if (lighting_world_mode() == 3u) {
         uint sh = lighting_sc_budget_shift();
         uint room = lighting_sc_room() >> sh;
@@ -1950,11 +1963,14 @@ void lighting_write_args() {
         c = min(4u * (min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh)
             + min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh)), LIGHTING_WRC_REFRESH >> sh);
         s = lighting_wrc_scout_due() ? LIGHTING_WRC_SCOUT_ENTRIES >> sh : 0u;
+        g = (lighting_grad_count() + LIGHTING_CACHE_RAYS - 1u) / LIGHTING_CACHE_RAYS;
+        lighting_shadow_epochs();
     } else {
         uint first = min(lighting_young_count(), LIGHTING_CACHE_BATCH);
         a = lighting_young_only() ? first : min(LIGHTING_CACHE_BATCH, first + lighting_mature_count());
     }
-    uint e = a + b + c + s;
+    uint e = a + b + c + g + s;
+    ckeys.key[LIGHTING_ARGS_AT + 10u] = a + b + c + g;
     ckeys.key[LIGHTING_ARGS_AT + 0u] = max((e * LIGHTING_CACHE_RAYS + 63u) / 64u, 1u);
     ckeys.key[LIGHTING_ARGS_AT + 1u] = 1u;
     ckeys.key[LIGHTING_ARGS_AT + 2u] = 1u;
@@ -1976,7 +1992,7 @@ uint lighting_live_count() {
 uint lighting_cache_batch_slot(uint j) {
     uint room = LIGHTING_CACHE_BATCH;
     if (lighting_world_mode() == 3u) {
-        if (j >= LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) {
+        if (j >= LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES - LIGHTING_GRAD_ENTRIES) {
             return ~0u;
         }
         room = lighting_sc_room();
@@ -2760,4 +2776,159 @@ void lighting_svgf_push(uint slot) {
         }
         cache.v[LIGHTING_SC_SPARSE_AT + slot].w = max(r, 0.5);
     }
+}
+
+// ---------------------------------------------------------------------------
+// S74A A-SVGF change-adaptive rays (Schied, Peters & Dachsbacher 2018,
+// "Gradient Estimation for Real-Time Adaptive Temporal Filtering"; Schied et
+// al. 2019) on the surface-cache texels, with GIBS's MSME as the history.
+// Every round: in each 3 x 3 block of texels one (by hash of block and round,
+// A-SVGF's random pick per stratum) that is resolved re-traces ONE ray of its
+// last relight with the same seed (direction, lamp pick, quarter): what that ray
+// brings now against what it brought then is the temporal gradient (a still
+// scene gives exactly 0: same ray, same hit, same light). lambda = min(1,
+// |delta| / max(L_now, L_then)) (A-SVGF eq. 6), written to the 9 texels of the
+// block; alpha' = (1 - lambda) alpha + lambda (A-SVGF eq. 7) in the MSME
+// update. A texel is resolved while lambda < LIGHTING_ASVGF_EPS and its mean's
+// standard error sqrt(var / n) is under LIGHTING_ASVGF_SE of its mean (ReBLUR-
+// style convergence); a resolved texel takes no rays besides its checks. One
+// with lambda >= eps is relit with probability min(1, lambda / FULL) a round.
+// Lamp and mover hints only nominate: every resolved texel there is checked,
+// not just its block's pick. Age floor (Lumen: oldest pages refreshed slowly):
+// a texel not relit for LIGHTING_ASVGF_AGE frames is scheduled as before.
+const bool LIGHTING_SC_ASVGF = true;
+const bool LIGHTING_GRAD_CHECKS_ON = true;
+const uint LIGHTING_SC_GRAD_AT = 11u * LIGHTING_CACHE_SLOTS;
+const uint LIGHTING_SC_GRAD2_AT = 12u * LIGHTING_CACHE_SLOTS;
+const uint LIGHTING_GRAD_COUNT_AT = LIGHTING_SC_HIST_AT + 72u;
+const uint LIGHTING_EXT_AT = LIGHTING_ARGS_AT + 16u + 3u * 65536u;
+const uint LIGHTING_SHADOW_EPOCH_AT = LIGHTING_EXT_AT;
+const uint LIGHTING_GRAD_LIST_AT = LIGHTING_EXT_AT + 1024u;
+const float LIGHTING_ASVGF_EPS = 0.05;
+const float LIGHTING_ASVGF_SE = 0.03;
+const float LIGHTING_ASVGF_FULL = 0.25;
+const uint LIGHTING_ASVGF_KEEP = 8u;
+const uint LIGHTING_ASVGF_AGE = 900u;
+uint lighting_grad_count() {
+    uint cap = (LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift();
+    return LIGHTING_GRAD_CHECKS_ON ? min(ckeys.key[LIGHTING_GRAD_COUNT_AT], cap) : 0u;
+}
+bool lighting_sc_grad_stored(uint slot) {
+    return floatBitsToUint(cache.v[LIGHTING_SC_GRAD_AT + slot].z) != 0u;
+}
+float lighting_sc_lambda(uint slot) {
+    uint f = floatBitsToUint(cache.v[LIGHTING_SC_GRAD2_AT + slot].x);
+    if (f == 0u || int(lighting_frame() - f) > int(LIGHTING_ASVGF_KEEP)) {
+        return 0.0;
+    }
+    return cache.v[LIGHTING_SC_GRAD_AT + slot].x;
+}
+bool lighting_sc_resolved(uint slot, float t, float lam) {
+    if (lam >= LIGHTING_ASVGF_EPS || !lighting_sc_grad_stored(slot)) {
+        return false;
+    }
+    vec4 a = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
+    vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
+    if (!(b.x > 0.0) || t < LIGHTING_DN_MIN_SETS - 0.5) {
+        return false;
+    }
+    float mean = dot(cache.v[3u * slot + 2u].rgb, vec3(0.2126, 0.7152, 0.0722));
+    float se = sqrt(max(a.w, 0.0) / max(t, 1.0));
+    return se < LIGHTING_ASVGF_SE * mean + 1.0e-4;
+}
+// This round's pick of the texel's 3 x 3 block.
+bool lighting_sc_grad_rep(uint slot) {
+    vec2 c = lighting_sc_true_cell(slot);
+    ivec2 b = ivec2(floor(c / 3.0));
+    ivec2 m = ivec2(c) - 3 * b;
+    uint h = lighting_hash(uint(b.x) * 0x8da6b343u ^ uint(b.y) * 0xd8163841u ^ lighting_round() * 0x9e3779b9u);
+    return uint(m.y * 3 + m.x) == h % 9u;
+}
+void lighting_sc_grad_put(uint s, float lam) {
+    if (s == ~0u) {
+        return;
+    }
+    float old = lighting_sc_lambda(s);
+    cache.v[LIGHTING_SC_GRAD_AT + s].x = max(lam, old);
+    cache.v[LIGHTING_SC_GRAD2_AT + s].x = uintBitsToFloat(lighting_frame());
+}
+// Check i's result: lambda at its texel, spread over its 3 x 3 block.
+void lighting_sc_grad_take(uint slot, float l_now) {
+    vec4 g = cache.v[LIGHTING_SC_GRAD_AT + slot];
+    float mean = dot(cache.v[3u * slot + 2u].rgb, vec3(0.2126, 0.7152, 0.0722));
+    float lam = min(1.0, abs(l_now - g.y) / max(max(l_now, g.y), 0.1 * mean + 1.0e-4));
+    atomicAdd(gstats.pad4, 1u);
+    if (lam < 0.5 * LIGHTING_ASVGF_EPS) {
+        // Unchanged: nothing to spread (a still scene costs the check only).
+        return;
+    }
+    atomicAdd(gstats.pad5, 1u);
+    vec2 c = lighting_sc_true_cell(slot);
+    ivec2 b = ivec2(floor(c / 3.0)) * 3 - ivec2(c);
+    [[dont_unroll]] for (int k = 0; k < 9; k++) {
+        ivec2 off = b + ivec2(k % 3, k / 3);
+        lighting_sc_grad_put(off == ivec2(0) ? slot : lighting_sc_cell_slot(slot, off), lam);
+    }
+}
+// Shadow reuse for static lamps (S74A, Anthony 16:11): a light-cache or probe
+// hit's shadow ray to a lamp is kept per 12.5 cm cell, facing axis and lamp, with
+// the lamp's epoch; the epoch moves when the lamp moves or changes, or when a
+// change of the traced world (this frame's change list, old and new bounds, or
+// a whole-world change) falls within its range (suns: anywhere). A moving lamp
+// moves its epoch every frame, so it re-shadows as before.
+const bool LIGHTING_SHADOW_CACHE = true;
+const uint LIGHTING_SHADOW_AT = 13u * LIGHTING_CACHE_SLOTS;
+void lighting_shadow_epochs() {
+    if (!LIGHTING_SHADOW_CACHE) {
+        return;
+    }
+    uint n = min(scene.lamp_count, LIGHTING_WRC_SNAP_LAMPS);
+    vec4 head = work.v[lighting_change_at()];
+    bool all = head.y > 0.5;
+    uint changes = all ? 0u : min(uint(head.x + 0.5), LIGHTING_CHANGES);
+    for (uint i = 0u; i < n; i++) {
+        Lamp l = scene_lamp(i);
+        uint at = LIGHTING_SHADOW_EPOCH_AT + 8u * i;
+        vec4 last = vec4(uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]), uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]));
+        vec4 now = vec4(l.pos.xyz, l.color.w);
+        bool bump = all || any(notEqual(last, now));
+        for (uint c = 0u; c < changes && !bump; c++) {
+            vec4 b = work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + c];
+            bump = l.color.w <= 0.0 || length(b.xyz - l.pos.xyz) < l.color.w + b.w;
+        }
+        if (bump) {
+            ckeys.key[at] += 1u;
+            ckeys.key[at + 1u] = floatBitsToUint(now.x);
+            ckeys.key[at + 2u] = floatBitsToUint(now.y);
+            ckeys.key[at + 3u] = floatBitsToUint(now.z);
+            ckeys.key[at + 4u] = floatBitsToUint(now.w);
+        }
+    }
+}
+// The cached entry for (o, n, lamp li): 1 lit, 0 occluded, -1 none (trace it).
+uint lighting_shadow_cell(vec3 o, vec3 n, uint li, out uint tag) {
+    ivec3 c = ivec3(floor(o / LIGHTING_SC_TEXEL));
+    uint h = lighting_hash(uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u ^ lighting_axis(n) * 0x27d4eb2fu ^ (li + 1u) * 0x9e3779b9u);
+    tag = h | 1u;
+    return LIGHTING_SHADOW_AT + (lighting_hash(h ^ 0x5bd1e995u) % LIGHTING_CACHE_SLOTS);
+}
+float lighting_shadow_get(vec3 o, vec3 n, uint li) {
+    if (!LIGHTING_SHADOW_CACHE || li >= LIGHTING_WRC_SNAP_LAMPS || li >= scene.lamp_count) {
+        return -1.0;
+    }
+    uint tag;
+    uint at = lighting_shadow_cell(o, n, li, tag);
+    vec4 e = cache.v[at];
+    if (floatBitsToUint(e.x) == tag && floatBitsToUint(e.z) == ckeys.key[LIGHTING_SHADOW_EPOCH_AT + 8u * li]) {
+        return e.y;
+    }
+    return -1.0;
+}
+void lighting_shadow_put(vec3 o, vec3 n, uint li, bool lit) {
+    if (!LIGHTING_SHADOW_CACHE || li >= LIGHTING_WRC_SNAP_LAMPS || li >= scene.lamp_count) {
+        return;
+    }
+    uint tag;
+    uint at = lighting_shadow_cell(o, n, li, tag);
+    cache.v[at] = vec4(uintBitsToFloat(tag), lit ? 1.0 : 0.0, uintBitsToFloat(ckeys.key[LIGHTING_SHADOW_EPOCH_AT + 8u * li]), 0.0);
 }
