@@ -62,7 +62,7 @@ const LIGHTING_SETTLE_CHANGE: u32 = 2000;
 const LIGHTING_COMPOSE_CAP: u64 = 65535;
 
 /// First key-buffer word of the quiet-compose list. Matches LIGHTING_COMPOSE_AT.
-fn lighting_compose_at() -> u64 {
+const fn lighting_compose_at() -> u64 {
     2 * LIGHTING_CACHE_SLOTS
         + 2
         + 17600
@@ -77,12 +77,12 @@ fn lighting_compose_at() -> u64 {
         + 16
 }
 
-fn lighting_ckeys_words() -> u64 {
+const fn lighting_ckeys_words() -> u64 {
     // count, y, z, full flag, stamps, list, field packs, four rect words.
     lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + 5 * LIGHTING_CACHE_SLOTS
 }
 
-fn lighting_compose_minx() -> u64 {
+const fn lighting_compose_minx() -> u64 {
     lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + LIGHTING_CACHE_SLOTS
 }
 
@@ -323,11 +323,20 @@ const LIGHTING_ATROUS_MARK_AT: u64 = LIGHTING_CHECK_P_AT + 16;
 const LIGHTING_ATROUS_LIST_AT: u64 = LIGHTING_ATROUS_MARK_AT + 5 * LIGHTING_CACHE_SLOTS;
 /// Sits after the compose words (`lighting_ckeys_words`); it used to start where
 /// `LIGHTING_COMPOSE_AT` starts, so the two regions aliased.
-fn lighting_atrous_ppm_at() -> u64 {
+const fn lighting_atrous_ppm_at() -> u64 {
     lighting_ckeys_words()
 }
 /// ppm, previous fraction, 64 filtered-texel bins, 5 level modes, 5 * 64 dense recount bins.
 const LIGHTING_ATROUS_META_WORDS: u64 = 1 + 1 + 64 + 5 + 5 * 64;
+/// Hit-light queue: 2^21 uvec2 entries (16 MiB), a counter, then indirect args
+/// (x, y, z) and the frozen entry count. Nothing reads them until later steps.
+/// The old key-buffer tail is now `lighting_compose_at` (compose stamps). The
+/// queue starts after the a-trous meta that follows those stamps.
+const LIGHTING_HIT_QUEUE_CAP: u64 = 1 << 21;
+const LIGHTING_HIT_QUEUE_AT: u64 = lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS;
+const LIGHTING_HIT_QUEUE_COUNT_AT: u64 = LIGHTING_HIT_QUEUE_AT + 2 * LIGHTING_HIT_QUEUE_CAP;
+const LIGHTING_HIT_ARGS_AT: u64 = LIGHTING_HIT_QUEUE_COUNT_AT + 1;
+const LIGHTING_CKEYS_WORDS: u64 = LIGHTING_HIT_ARGS_AT + 4;
 const LIGHTING_PASS_NAMES: [&str; 9] = [
     "lighting compact",
     "lighting place",
@@ -687,10 +696,14 @@ impl Gpu {
         let share = self.light_families();
         if self.lighting.cache_keys.buffer.is_null() {
             // The compose words and the a-trous meta must not alias the a-trous lists.
+            // The hit-light queue starts after that meta; the old tail is compose.
             assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
             assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
+            assert!(LIGHTING_HIT_QUEUE_AT >= lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS);
+            // The descriptor range is the whole buffer (u64::MAX), so growing this
+            // allocation grows what the shaders can address.
             self.lighting.cache_keys = self.make_buffer_queues(
-                (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS) * 4, // a-trous meta after the S67/PR11 compose words // S78X: a-trous threshold, fraction, bins // S78Z: verify / wake words sit just before that // S78X lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
+                LIGHTING_CKEYS_WORDS * 4, // compose words, a-trous meta, then the hit-light queue // S78X lists // S76D checks // S74A epochs // S70A args // S72J pages
                 0x20 | 0x2 | 0x100 | 0x1,
                 Memory::Device,
                 &share,
