@@ -252,6 +252,10 @@ const LIGHTING_ARGS: u32 = 1 << 30;
 const LIGHTING_MODE1: u32 = LIGHTING_ARGS + 1;
 const LIGHTING_DENSE_RAYS: u32 = LIGHTING_ARGS + 2;
 const LIGHTING_DENSE_ENTRIES: u32 = LIGHTING_ARGS + 3;
+/// Hit-light args: compact writes the queue's indirect dispatch (params.y bit 16).
+const LIGHTING_HIT_ARGS: u32 = LIGHTING_ARGS + 4;
+/// Hit-light pass: indirect dispatch over the frozen queue length. Pass id 9.
+const LIGHTING_HIT_LIGHT: u32 = LIGHTING_ARGS + 5;
 /// Word of the dispatch args in the cache keys (lighting_cache.glsl LIGHTING_ARGS_AT).
 const LIGHTING_ARGS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 17600;
 /// Words in cache_keys before the hit-light queue. Same formula as
@@ -269,14 +273,14 @@ const LIGHTING_CKEYS_TAIL: u64 = 2 * LIGHTING_CACHE_SLOTS
     + 6 * 65536
     + 16;
 /// Hit-light queue: 2^21 uvec2 entries (16 MiB), a counter, then indirect args
-/// (x, y, z) and the frozen entry count. Nothing reads them until later steps.
+/// (x, y, z) and the frozen entry count. Read when GENOS_LIGHTING_HIT_QUEUE=1.
 const LIGHTING_HIT_QUEUE_CAP: u64 = 1 << 21;
 const LIGHTING_HIT_QUEUE_AT: u64 = LIGHTING_CKEYS_TAIL;
 const LIGHTING_HIT_QUEUE_COUNT_AT: u64 = LIGHTING_HIT_QUEUE_AT + 2 * LIGHTING_HIT_QUEUE_CAP;
 const LIGHTING_HIT_ARGS_AT: u64 = LIGHTING_HIT_QUEUE_COUNT_AT + 1;
 const LIGHTING_CKEYS_WORDS: u64 = LIGHTING_HIT_ARGS_AT + 4;
 /// Compute pipelines. Index 9 is the hit-light variant of the direct pass
-/// (`-DLIGHTING_HIT_QUEUE`). It is created here and not dispatched yet.
+/// (`-DLIGHTING_HIT_QUEUE`), dispatched when GENOS_LIGHTING_HIT_QUEUE=1.
 const LIGHTING_PIPES: usize = 10;
 const LIGHTING_PASS_NAMES: [&str; LIGHTING_PIPES] = [
     "lighting compact",
@@ -1449,7 +1453,11 @@ impl Gpu {
             pc[6] |= 1 << 8;
         }
         let kept = probe_rays * LIGHTING_STRATA;
-        let groups: Vec<(usize, u32, u32)> = if frozen {
+        // Item A. Off (the default) is today's dispatch list. On inserts the
+        // queue's args step and the hit-light pass after the last direct
+        // dispatch. Frozen frames have no GI hits to queue.
+        let hit_queue = !frozen && std::env::var("GENOS_LIGHTING_HIT_QUEUE").is_ok_and(|v| v == "1");
+        let mut groups: Vec<(usize, u32, u32)> = if frozen {
             vec![(3, (w * h).div_ceil(64), 1), (7, w.div_ceil(8), h.div_ceil(8))]
         } else if !round {
             vec![
@@ -1495,6 +1503,19 @@ impl Gpu {
                 (7, w.div_ceil(8), h.div_ceil(8)),
             ]
         };
+        if hit_queue {
+            if let Some(i) = groups.iter().rposition(|g| g.0 == 3) {
+                groups.insert(i + 1, (0, 1, LIGHTING_HIT_ARGS));
+                groups.insert(i + 2, (9, 0, LIGHTING_HIT_LIGHT));
+            }
+        }
+        // One stamp before the dispatches and one after each. A round with the
+        // hit-light pair is 23 dispatches; 24 would overflow the query pool.
+        assert!(
+            groups.len() + 1 <= LIGHTING_STAMPS as usize,
+            "lighting dispatches ({}) exceed the timestamp pool",
+            groups.len()
+        );
         unsafe {
             (self.fns.cmd_bind_set)(
                 self.cmd,
@@ -1589,6 +1610,14 @@ impl Gpu {
                         k_pc[6] = (cur_pc[6] & !0x310) | 1 << 8;
                     } else if kind == LIGHTING_DENSE_RAYS {
                         k_pc[6] = (k_pc[6] & !0x300) | 2 << 8;
+                    } else if kind == LIGHTING_HIT_ARGS {
+                        // Compact's args early-out. Bit 16 selects the queue's
+                        // args, so this step does not rewrite the dense dispatch
+                        // or bump shadow epochs.
+                        k_pc[5] |= 1 << 16;
+                    } else if kind == LIGHTING_HIT_LIGHT {
+                        // Not a dense dispatch. The consumer reads mode-0 indices.
+                        k_pc[6] &= !(1 << 4);
                     }
                     (self.fns.cmd_push)(
                         self.cmd,
@@ -1603,6 +1632,10 @@ impl Gpu {
                 match kind {
                     LIGHTING_DENSE_RAYS | LIGHTING_DENSE_ENTRIES => {
                         let at = (LIGHTING_ARGS_AT + if kind == LIGHTING_DENSE_RAYS { 0 } else { 3 }) * 4;
+                        (self.fns.cmd_dispatch_indirect)(self.cmd, self.lighting.cache_keys.buffer, at);
+                    }
+                    LIGHTING_HIT_LIGHT => {
+                        let at = LIGHTING_HIT_ARGS_AT * 4;
                         (self.fns.cmd_dispatch_indirect)(self.cmd, self.lighting.cache_keys.buffer, at);
                     }
                     _ => (self.fns.cmd_dispatch)(self.cmd, gx.max(1), if kind != 0 { 1 } else { gy.max(1) }, 1),

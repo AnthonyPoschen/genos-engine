@@ -2084,12 +2084,13 @@ impl Gpu {
         if times.lighting_frames > 0 {
             let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
-                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3}",
+                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} hit={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3}",
                 times.lighting_frames,
                 g[0],
                 g[1],
                 g[2],
                 g[3],
+                g[9],
                 g[4],
                 g[5],
                 g[6],
@@ -5114,7 +5115,7 @@ struct GpuTimes {
     // GENOS_GPU_DISPATCH: per-dispatch ms (pass id, summed ms) in dispatch order.
     lighting_disp: Vec<(usize, f64)>,
     lighting_frames: u32,
-    lighting: [f64; 9],
+    lighting: [f64; 10],
     /// Async light cache rounds (GI v2) and their GPU time.
     world_runs: u32,
     world_ms: f64,
@@ -5126,8 +5127,9 @@ struct GpuTimes {
     light_spans: Vec<(u64, u64)>,
 }
 
-/// Stamps per frame for the GI v2 passes: one before, one after each of the 10
-/// dispatches (the filter runs three rounds).
+/// Stamps per frame for the GI v2 passes: one before the dispatches and one
+/// after each. A round plus the hit-light args and pass is 23 dispatches, so
+/// this stays 24. A further dispatch would overflow the query pool.
 const LIGHTING_STAMPS: u32 = 24;
 
 /// Milliseconds of `spans` that fall inside any of `within` (ticks, `period` ns each).
@@ -5167,7 +5169,7 @@ impl Default for GpuTimes {
             world_ms: 0.0,
             world_pass: [0.0; 4],
             lighting_frames: 0,
-            lighting: [0.0; 9],
+            lighting: [0.0; 10],
             frame_spans: Vec::new(),
             light_spans: Vec::new(),
         }

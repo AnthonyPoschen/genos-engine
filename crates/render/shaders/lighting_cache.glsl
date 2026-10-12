@@ -2755,12 +2755,27 @@ const uint LIGHTING_DP_TILES = 65536u;
 // Hit-light queue (dynamic-perf-plan item A). 2^21 uvec2 entries, then the
 // counter, then indirect args x, y, z and the frozen entry count. The host
 // allocation (lighting_gpu.rs LIGHTING_CKEYS_WORDS) ends at ARGS_AT + 4.
-// Nothing reads these until the hit-light pass is dispatched.
+// The hit-light pass reads them when GENOS_LIGHTING_HIT_QUEUE=1.
 const uint LIGHTING_CKEYS_TAIL = LIGHTING_ATROUS_LIST_AT + 5u * (LIGHTING_ATROUS_LIST_CAP + 1u) + 6u * 65536u + 16u;
 const uint LIGHTING_HIT_QUEUE_CAP = 1u << 21u;
 const uint LIGHTING_HIT_QUEUE_AT = LIGHTING_CKEYS_TAIL;
 const uint LIGHTING_HIT_QUEUE_COUNT_AT = LIGHTING_HIT_QUEUE_AT + 2u * LIGHTING_HIT_QUEUE_CAP;
 const uint LIGHTING_HIT_ARGS_AT = LIGHTING_HIT_QUEUE_COUNT_AT + 1u;
+// One thread, after the direct passes. n is how many misses were appended;
+// the dispatch runs the first CAP of them. The rest lit inline. dp[19] and
+// dp[20] are plain stores from this thread, so they show up without
+// LIGHTING_DIAG. The counter is cleared for the next frame.
+void lighting_write_hit_args() {
+    uint n = ckeys.key[LIGHTING_HIT_QUEUE_COUNT_AT];
+    uint capped = min(n, LIGHTING_HIT_QUEUE_CAP);
+    ckeys.key[LIGHTING_HIT_ARGS_AT + 0u] = max((capped + 63u) / 64u, 1u);
+    ckeys.key[LIGHTING_HIT_ARGS_AT + 1u] = 1u;
+    ckeys.key[LIGHTING_HIT_ARGS_AT + 2u] = 1u;
+    ckeys.key[LIGHTING_HIT_ARGS_AT + 3u] = capped;
+    gstats.dp[19] = n;
+    gstats.dp[20] = n > LIGHTING_HIT_QUEUE_CAP ? n - LIGHTING_HIT_QUEUE_CAP : 0u;
+    ckeys.key[LIGHTING_HIT_QUEUE_COUNT_AT] = 0u;
+}
 void lighting_dp_tile(uvec2 p) {
     if (LIGHTING_DIAG == 0) {
         return;
