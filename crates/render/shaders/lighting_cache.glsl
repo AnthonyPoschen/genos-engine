@@ -218,7 +218,14 @@ float lighting_hit_size(vec3 pos);
 // its sets.
 uint lighting_sc_flags() {
     // S72K: bits 23 and up ride in head 3.w (head z is a float, exact to 2^24).
-    return (uint(work.v[lighting_change_at()].z + 0.5) >> 1u) | (uint(work.v[lighting_change_at() + 3u].w + 0.5) << 23u);
+    return (uint(work.v[lighting_change_at()].z + 0.5) >> 1u) | ((uint(work.v[lighting_change_at() + 3u].w + 0.5) & 511u) << 23u);
+}
+// S72S budget scale (Anthony 14:03: scale down to a weak GPU, nothing may need a
+// minimum ray count): every per-round ray budget (texels, trickle, WRC refresh,
+// scouts, bursts) is divided by 2^shift (GENOS_LIGHTING_SC_BUDGET_SHIFT, head 3.w
+// bits 9-11); the lists keep their layout.
+uint lighting_sc_budget_shift() {
+    return (uint(work.v[lighting_change_at() + 3u].w + 0.5) >> 9u) & 7u;
 }
 // S72O (Anthony: squares still build up; a page must never shift as a unit):
 // per-texel commit timing and ray strata, and the stored means rectified
@@ -1868,13 +1875,14 @@ void lighting_write_args() {
     uint c = 0u;
     uint s = 0u;
     if (lighting_world_mode() == 3u) {
-        uint room = lighting_sc_room();
-        uint first = min(lighting_young_count(), lighting_sc_base_room());
+        uint sh = lighting_sc_budget_shift();
+        uint room = lighting_sc_room() >> sh;
+        uint first = min(lighting_young_count(), lighting_sc_base_room() >> sh);
         a = min(room, first + lighting_mature_count());
-        b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE);
-        c = min(4u * (min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS)
-            + min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS)), LIGHTING_WRC_REFRESH);
-        s = lighting_wrc_scout_due() ? LIGHTING_WRC_SCOUT_ENTRIES : 0u;
+        b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> sh);
+        c = min(4u * (min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh)
+            + min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh)), LIGHTING_WRC_REFRESH >> sh);
+        s = lighting_wrc_scout_due() ? LIGHTING_WRC_SCOUT_ENTRIES >> sh : 0u;
     } else {
         uint first = min(lighting_young_count(), LIGHTING_CACHE_BATCH);
         a = lighting_young_only() ? first : min(LIGHTING_CACHE_BATCH, first + lighting_mature_count());
@@ -1908,24 +1916,25 @@ uint lighting_cache_batch_slot(uint j) {
         if (j >= room && j < room + LIGHTING_SC_TRICKLE) {
             // S65A trickle entries: one a texel.
             uint k = j - room;
-            return k < min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE) ? ckeys.key[LIGHTING_SC_TRICKLE_AT + k] : ~0u;
+            return k < min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> lighting_sc_budget_shift()) ? ckeys.key[LIGHTING_SC_TRICKLE_AT + k] : ~0u;
         }
         if (j >= room) {
             // The WRC refresh entries: change-driven, then background, each
             // cell a whole set (4 consecutive entries).
             uint k = (j - room - LIGHTING_SC_TRICKLE) / 4u;
-            uint c = min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS);
+            uint rc = LIGHTING_WRC_REFRESH_CELLS >> lighting_sc_budget_shift();
+            uint c = min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], rc);
             if (k < c) {
                 return ckeys.key[LIGHTING_WRC_CHG_AT + k];
             }
             k -= c;
-            if (k < min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS)) {
+            if (k < min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], rc)) {
                 return ckeys.key[LIGHTING_WRC_BG_AT + k];
             }
             return ~0u;
         }
     }
-    uint first = min(lighting_young_count(), lighting_world_mode() == 3u ? lighting_sc_base_room() : room);
+    uint first = min(lighting_young_count(), lighting_world_mode() == 3u ? lighting_sc_base_room() >> lighting_sc_budget_shift() : room);
     if (j < first) {
         return ckeys.key[2u * LIGHTING_CACHE_SLOTS - j];
     }

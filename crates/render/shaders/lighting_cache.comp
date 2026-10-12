@@ -26,8 +26,8 @@ void main() {
                 atomicAdd(gstats.scouts, LIGHTING_WRC_SCOUT_ENTRIES * LIGHTING_CACHE_RAYS);
             }
             lighting_ls_note();
-            uint room = lighting_sc_room();
-            uint base = lighting_sc_base_room();
+            uint room = lighting_sc_room() >> lighting_sc_budget_shift();
+            uint base = lighting_sc_base_room() >> lighting_sc_budget_shift();
             uint young = min(lighting_young_count(), base);
             uint total = 0u;
             for (uint b = 0u; b < LIGHTING_SC_BUCKETS; b++) {
@@ -245,7 +245,11 @@ void main() {
                 // at least that delta, at most 0.9 (MaxFastUpdateModeAmount).
                 // Scalar variance and luminance (Rec. 709 weights), as before.
                 if (b.x <= 0.0) {
-                    a = vec4(old.rgb, 0.0);
+                    // S72T: the variance starts at (0.15 luminance)^2, not 0
+                    // (S72R, verbatim: sigma ~0 made rho huge, k ~1, and a
+                    // young texel's mean jumped to each new set: fill pops
+                    // 2.8 % against 0.15 %).
+                    a = vec4(old.rgb, pow(0.15 * dot(old.rgb, lw), 2.0) + 1.0e-8);
                     b = vec4(1.0, 1.0, 0.0, t);
                 }
                 float dev0 = sqrt(max(1.0e-5, a.w));
@@ -261,6 +265,12 @@ void main() {
                 float vb = mix(b.x, clamp(0.5 * dot(sm, lw) / dev, 1.0 / 32.0, 1.0), 0.1);
                 float hint = mover2 ? 0.5 : 0.0;
                 hint = max(hint, LIGHTING_SC_LAMP_K * lighting_sc_lamp_change(slot));
+                // S72T: while young (under 16 sets) never faster than the plain
+                // mean 1 / (n + 1), the least-noise estimate of a still signal
+                // (the hint still overrides it).
+                if (t < 16.0) {
+                    k = min(k, 1.0 / (t + 1.0));
+                }
                 k = max(k, min(hint, 0.9));
                 vec3 m = mix(old.rgb, y, clamp(k, 0.0, 1.0));
                 cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);

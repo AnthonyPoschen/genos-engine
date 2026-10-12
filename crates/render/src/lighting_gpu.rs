@@ -1264,7 +1264,14 @@ impl Gpu {
             block[4 + 3] = 1.0;
         }
         // The camera up's w (head 3.w) is unread: the flags' high bits.
-        block[4 * 3 + 3] = (flags_all >> 23) as f32;
+        // S72S: the budget shift (GENOS_LIGHTING_SC_BUDGET_SHIFT, 0-7: every
+        // per-round ray budget / 2^shift) rides in bits 9-11 above the high flags.
+        let budget_shift = std::env::var("GENOS_LIGHTING_SC_BUDGET_SHIFT")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0)
+            .min(7);
+        block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9)) as f32;
         // A frame drawn from held light runs no probes: what it saw is still what
         // the probes last ran on.
         if !frozen {

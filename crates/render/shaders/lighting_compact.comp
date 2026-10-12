@@ -86,7 +86,7 @@ void main() {
         // S62C: near a mover the count stays short; those cells refresh from the
         // change list, not as bursts.
         bool burst = wrc && !near && t < LIGHTING_WRC_YOUNG - 0.5 && int(lighting_frame() - floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z)) <= 2;
-        if (burst && atomicAdd(ckeys.key[LIGHTING_WRC_BURST_COUNT_AT], 1u) >= LIGHTING_WRC_BURST_MAX) {
+        if (burst && atomicAdd(ckeys.key[LIGHTING_WRC_BURST_COUNT_AT], 1u) >= (LIGHTING_WRC_BURST_MAX >> lighting_sc_budget_shift())) {
             burst = false;
         }
         if (wrc && !burst && LIGHTING_SC_SCHED) {
