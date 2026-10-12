@@ -1,7 +1,7 @@
 # S73K: scout feedback claims without the irradiance read
 
 - **Date:** 2026-10-12
-- **Result:** lavapipe runs the claim. A short settle lists never-shown texels and takes spare quarters. Finished sets need the still settle, not the turn.
+- **Result:** lavapipe passes the turn assertion. After 96 still frames, 18335 never-shown fine texels held a finished set. A half-radian turn showed 4547 of those keys.
 - **Commit:** d4a666f
 - **Deviation:** a scout hit does not seed an empty texel. Seeds stay on the pixel path.
 
@@ -17,4 +17,8 @@ Inlining that function into the direct shader faults lavapipe. The fault is the 
 
 Settle 8, turn 4, 320×180, small hall, no fault. Frame 3: `prefill_listed` 5651, `prefill_taken` 0, `prefill_sets` 0. Frames 7 and 8, still, spare open: taken 1552 then 3132, sets still 0, 5651 fine texels never shown and none with a finished set, 4682 on a partial quarter. Turn frames 9–16: taken 0, listed grew to 12278.
 
-That is S73I's first gate on a run, not only in the source. The turn spends the base ceiling on texels that just became shown, so pre-fill claims during the turn and does not trace them. A finished set has to accumulate while the camera is still and spare entries exist. The ignored test settles 96 frames before the half-radian turn for that reason. Two spare frames are one or two quarters of a four-quarter set, so settle 8 cannot pass the assertion.
+That is S73I's first gate on a short run, not only in the source. Two spare frames are one or two quarters of a four-quarter set, so settle 8 cannot pass the assertion.
+
+The default test (settle 96, turn 24, yaw 0.5 rad, 320×180) passed on lavapipe in 246 s. The frame-96 dump: 37008 fine texels, 19515 never shown, 18335 of those with a finished set, 1180 still on a partial quarter. Sets 0..4+ were `[1180, 9776, 3826, 3765, 968]`. After the turn, 4547 of those 18335 keys were shown, 13788 were still hidden, and none had been freed.
+
+Spare is not gone for the whole turn once the hall has settled. Frames 99–114 (the turn) still took 9k–16k pre-fill entries and finished thousands of sets a frame. By frame 119 the new on-screen texels had filled the ceiling again: `prefill_listed` stayed near 16k and `prefill_taken` was 0. A settled turn fills the guard band at the start. A turn that keeps revealing unsettled texels stops tracing pre-fill, which is the spare-budget rule.
