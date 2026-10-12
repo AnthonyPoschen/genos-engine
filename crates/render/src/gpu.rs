@@ -332,8 +332,7 @@ impl Renderer {
         let live = crate::mesh_field::live_instances(world);
         self.gpu.note_field_movers(&live);
         let key = crate::mesh_field::field_key(&live);
-        self.gpu
-            .sync_fields(key, || crate::mesh_field::field_bytes(&live))
+        self.gpu.sync_fields(key, &live)
     }
 
     /// Write the world into the resident scene buffer. This does not present.
@@ -600,9 +599,15 @@ struct Gpu {
     scene_shadow: Vec<u8>,
     particle_buf: Buffer,
     /// Mesh SDF instances for the software tracer (mesh_field.rs; binding 5).
+    /// Device-local and resident: what it holds is `mesh_field_shadow`, and a frame
+    /// records only `mesh_field_dirty` (byte ranges) with vkCmdUpdateBuffer, so a
+    /// moving instance costs its 128-byte record and no device wait.
     mesh_field: Buffer,
     mesh_field_cap: u64,
     mesh_field_key: u64,
+    mesh_field_layout: u64,
+    mesh_field_shadow: Vec<u8>,
+    mesh_field_dirty: Vec<(usize, usize)>,
     /// GI v2 frame path (gi2_gpu.rs).
     gi2: Gi2,
     /// Fragment shader for the next raster pipeline built, instead of overlay.frag.
@@ -1229,6 +1234,9 @@ impl Gpu {
                 mesh_field: Buffer::empty(),
                 mesh_field_cap: 0,
                 mesh_field_key: 0,
+                mesh_field_layout: 0,
+                mesh_field_shadow: Vec::new(),
+                mesh_field_dirty: Vec::new(),
                 gi2: Gi2::default(),
                 frag_override: None,
                 vert_override: None,
@@ -1833,6 +1841,7 @@ impl Gpu {
             }
             self.frame_stamp(slot, FrameStamp::Start);
             self.update_resident_scene();
+            self.update_resident_fields();
             let swap = self.swap_images[index as usize];
             self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
             let filtering = self.antialias != Antialias::Off;
@@ -2508,8 +2517,11 @@ impl Gpu {
         self.write_buffer(&self.particle_buf, &vec![0u8; 16])?;
         self.mesh_field_cap = 1 << 16;
         self.mesh_field =
-            self.make_buffer_queues(self.mesh_field_cap, 0x20, Memory::Upload, &share)?;
-        self.write_buffer(&self.mesh_field, &[0u8; 16])?;
+            self.make_buffer_queues(self.mesh_field_cap, 0x20 | 0x2, Memory::Device, &share)?;
+        // The empty set, recorded by the first frame.
+        self.mesh_field_layout = 0;
+        self.mesh_field_shadow = vec![0u8; 16];
+        self.mesh_field_dirty = vec![(0, 16)];
         #[repr(C)]
         struct Size {
             kind: u32,
@@ -3228,29 +3240,123 @@ impl Gpu {
 
     /// Write the traced mesh instances when they changed (`key`). Waits for the GPU
     /// first: every pass in flight reads the buffer.
-    fn sync_fields(&mut self, key: u64, bytes: impl FnOnce() -> Vec<u8>) -> Result<(), String> {
+    /// Bring the resident mesh field up to `live`. Same layout (only poses, albedo or
+    /// emission changed): the changed records are marked for the next frame, no wait.
+    /// A new layout repacks everything; only growing the buffer waits for the device.
+    fn sync_fields(
+        &mut self,
+        key: u64,
+        live: &[&crate::mesh_field::FieldInstance],
+    ) -> Result<(), String> {
         if key == self.mesh_field_key {
             return Ok(());
         }
-        let bytes = bytes();
-        unsafe {
-            (self.fns.device_wait)(self.device);
+        let quick = crate::mesh_field::field_parts(live, false);
+        let head = crate::mesh_field::words_bytes(&quick.head);
+        let tail_at = (quick.head.len() + quick.data_len) * 4;
+        let tail = crate::mesh_field::words_bytes(&quick.emission);
+        if quick.layout == self.mesh_field_layout && self.mesh_field_shadow.len() == tail_at + tail.len() {
+            self.mark_field(0, &head);
+            self.mark_field(tail_at, &tail);
+            self.mesh_field_key = key;
+            return Ok(());
         }
+        let bytes = crate::mesh_field::words_bytes(&crate::mesh_field::field_words(live));
         if bytes.len() as u64 > self.mesh_field_cap {
+            // The old buffer may be in use by frames in flight.
+            unsafe {
+                (self.fns.device_wait)(self.device);
+            }
             let share = self.light_families();
             let cap = (bytes.len() as u64).next_power_of_two();
             let mut old = std::mem::replace(&mut self.mesh_field, Buffer::empty());
             self.destroy_buffer(&mut old);
-            self.mesh_field = self.make_buffer_queues(cap, 0x20, Memory::Upload, &share)?;
+            self.mesh_field = self.make_buffer_queues(cap, 0x20 | 0x2, Memory::Device, &share)?;
             self.mesh_field_cap = cap;
             self.write_raster_sets()?;
             if self.gi2.ready {
                 self.write_gi2_sets()?;
             }
+            self.mesh_field_shadow.clear();
         }
-        self.write_buffer(&self.mesh_field, &bytes)?;
+        self.mark_field(0, &bytes);
+        self.mesh_field_shadow.truncate(bytes.len());
+        self.mesh_field_layout = quick.layout;
         self.mesh_field_key = key;
         Ok(())
+    }
+
+    /// Put `bytes` at `at` in the field's shadow and mark the 128-byte records that
+    /// changed for the next frame.
+    fn mark_field(&mut self, at: usize, bytes: &[u8]) {
+        const BLOCK: usize = 128;
+        let end = at + bytes.len();
+        if self.mesh_field_shadow.len() < end {
+            self.mesh_field_shadow.resize(end, 0);
+            self.mesh_field_dirty.push((at, end));
+            self.mesh_field_shadow[at..end].copy_from_slice(bytes);
+            return;
+        }
+        let mut b = at;
+        while b < end {
+            let e = (b + BLOCK).min(end);
+            if self.mesh_field_shadow[b..e] != bytes[b - at..e - at] {
+                self.mesh_field_shadow[b..e].copy_from_slice(&bytes[b - at..e - at]);
+                match self.mesh_field_dirty.last_mut() {
+                    Some((_, stop)) if *stop == b => *stop = e,
+                    _ => self.mesh_field_dirty.push((b, e)),
+                }
+            }
+            b = e;
+        }
+    }
+
+    /// Record the field's marked ranges into this frame (before any pass reads it).
+    fn update_resident_fields(&mut self) {
+        const RUN: usize = 65536;
+        if self.mesh_field_dirty.is_empty() || self.mesh_field.buffer.is_null() {
+            return;
+        }
+        if self.gi2.async_on {
+            // The async light cache reads the field too: let its round finish, and
+            // hold the next one until this frame is done.
+            self.wait_gi2_world();
+            self.gi2.world_hold = self.gi2.world_hold.max(2);
+        }
+        let mut ranges = std::mem::take(&mut self.mesh_field_dirty);
+        ranges.sort_unstable();
+        self.memory_barrier(0x10000, 0x1000, 0x20 | 0x8, 0x1000);
+        let mut sent = 0usize;
+        for &(start, stop) in &ranges {
+            let stop = stop.min(self.mesh_field_shadow.len());
+            let mut at = start & !3;
+            while at < stop {
+                let end = (at + RUN).min(stop + 3 & !3).min(self.mesh_field_shadow.len());
+                if end <= at {
+                    break;
+                }
+                unsafe {
+                    (self.fns.cmd_update_buffer)(
+                        self.cmd,
+                        self.mesh_field.buffer,
+                        at as u64,
+                        (end - at) as u64,
+                        self.mesh_field_shadow[at..end].as_ptr() as *const c_void,
+                    );
+                }
+                sent += end - at;
+                at = end;
+            }
+        }
+        self.memory_barrier(0x1000, 0x10000, 0x1000, 0x20 | 0x8);
+        if crate::scene_delta_trace() {
+            eprintln!(
+                "field delta runs {} bytes {} of {}",
+                ranges.len(),
+                sent,
+                self.mesh_field_shadow.len()
+            );
+        }
     }
 
     fn upload_scene(&mut self, pack: &Pack) -> Result<(), String> {

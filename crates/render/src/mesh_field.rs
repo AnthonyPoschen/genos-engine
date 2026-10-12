@@ -130,20 +130,45 @@ pub fn live_instances(world: &crate::world::World) -> Vec<&FieldInstance> {
         .collect()
 }
 
-/// Pack the instances (and the SDFs they use, once each) into the word buffer.
-pub fn field_words(instances: &[&FieldInstance]) -> Vec<u32> {
+/// The packed field in its three parts: the header and instance records (they
+/// change when an instance moves), the shared SDF data (it changes only when the set
+/// of SDFs or their order does), and the emission table (one word per instance).
+pub struct FieldParts {
+    /// Header and records, words `0..FIELD_HEADER + n * FIELD_RECORD`.
+    pub head: Vec<u32>,
+    /// Brick tables, coarse words and bricks; empty unless asked for.
+    pub data: Vec<u32>,
+    /// Length of `data` in words, filled or not.
+    pub data_len: usize,
+    /// Emission table, after the data (empty when nothing emits).
+    pub emission: Vec<u32>,
+    /// Changes when the buffer's layout changes: the instance count, the SDFs and
+    /// their order, and whether an emission table exists. Equal layouts differ only
+    /// in `head` and `emission`, so a move is a few records, not the whole buffer.
+    pub layout: u64,
+}
+
+/// Pack the instances (and the SDFs they use, once each). Without `with_data` the
+/// brick data is only measured, for a pose update of an unchanged layout.
+pub fn field_parts(instances: &[&FieldInstance], with_data: bool) -> FieldParts {
     let f = |v: f32| v.to_bits();
-    let mut words = vec![0u32; FIELD_HEADER];
-    let mut records: Vec<[u32; FIELD_RECORD]> = Vec::new();
+    let mut head = vec![0u32; FIELD_HEADER];
     // Shared SDFs: (pointer, table word, coarse word)
     let mut placed: Vec<(*const MeshSdf, u32, u32)> = Vec::new();
     let mut data: Vec<u32> = Vec::new();
+    let mut data_len = 0usize;
     let mut kept: Vec<(&FieldInstance, [[f32; 4]; 3])> = Vec::new();
     for inst in instances {
         if let Some(rows) = inverse_rows(&inst.pose) {
             kept.push((inst, rows));
         }
     }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |v: u64| {
+        h ^= v;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    };
+    eat(kept.len() as u64);
     let data_at = FIELD_HEADER + kept.len() * FIELD_RECORD;
     for (inst, rows) in &kept {
         let ptr = Arc::as_ptr(&inst.sdf);
@@ -151,25 +176,44 @@ pub fn field_words(instances: &[&FieldInstance]) -> Vec<u32> {
             Some(p) => (p.1, p.2),
             None => {
                 let s = &inst.sdf;
-                let cells = (s.bricks_dims[0] * s.bricks_dims[1] * s.bricks_dims[2]) as usize;
-                let table_at = (data_at + data.len()) as u32;
-                let table_start = data.len();
-                data.resize(data.len() + cells, 0);
-                let coarse_at = (data_at + data.len()) as u32;
-                for chunk in s.coarse.chunks(4) {
-                    let mut w = 0u32;
-                    for (k, b) in chunk.iter().enumerate() {
-                        w |= (*b as u32) << (8 * k);
-                    }
-                    data.push(w);
+                eat(ptr as usize as u64);
+                eat(s.bricks.len() as u64);
+                for a in 0..3 {
+                    eat(u64::from(s.bricks_dims[a]));
+                    eat(u64::from(s.origin[a].to_bits()));
                 }
-                for brick in &s.bricks {
-                    let d = s.bricks_dims;
-                    let cell = ((brick.at[2] * d[1] + brick.at[1]) * d[0] + brick.at[0]) as usize;
-                    data[table_start + cell] = (data_at + data.len()) as u32 + 1;
-                    for chunk in brick.distances.chunks(4) {
-                        data.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                eat(u64::from(s.voxel.to_bits()));
+                let cells = (s.bricks_dims[0] * s.bricks_dims[1] * s.bricks_dims[2]) as usize;
+                let table_at = (data_at + data_len) as u32;
+                let table_start = data_len;
+                data_len += cells;
+                let coarse_at = (data_at + data_len) as u32;
+                let coarse_words = s.coarse.len().div_ceil(4);
+                if with_data {
+                    data.resize(table_start + cells, 0);
+                    for chunk in s.coarse.chunks(4) {
+                        let mut w = 0u32;
+                        for (k, b) in chunk.iter().enumerate() {
+                            w |= (*b as u32) << (8 * k);
+                        }
+                        data.push(w);
                     }
+                }
+                data_len += coarse_words;
+                for brick in &s.bricks {
+                    let words = brick.distances.len().div_ceil(4);
+                    if with_data {
+                        let d = s.bricks_dims;
+                        let cell =
+                            ((brick.at[2] * d[1] + brick.at[1]) * d[0] + brick.at[0]) as usize;
+                        data[table_start + cell] = (data_at + data_len) as u32 + 1;
+                        for chunk in brick.distances.chunks(4) {
+                            let mut b = [0u8; 4];
+                            b[..chunk.len()].copy_from_slice(chunk);
+                            data.push(u32::from_le_bytes(b));
+                        }
+                    }
+                    data_len += words;
                 }
                 placed.push((ptr, table_at, coarse_at));
                 (table_at, coarse_at)
@@ -199,22 +243,41 @@ pub fn field_words(instances: &[&FieldInstance]) -> Vec<u32> {
         r[29] = f(s.coarse_band);
         r[30] = coarse;
         r[31] = u32::from(s.thin);
-        records.push(r);
+        head.extend_from_slice(&r);
     }
-    words[0] = records.len() as u32;
-    words[1] = FIELD_STEPS;
-    for r in &records {
-        words.extend_from_slice(r);
-    }
-    words.extend_from_slice(&data);
+    debug_assert!(!with_data || data.len() == data_len);
+    head[0] = kept.len() as u32;
+    head[1] = FIELD_STEPS;
+    let mut emission = Vec::new();
     if kept
         .iter()
         .any(|(inst, _)| inst.emission.iter().any(|&e| e > 0.0))
     {
-        words[2] = words.len() as u32;
-        words.extend(kept.iter().map(|(inst, _)| pack_rgb9e5(inst.emission)));
+        head[2] = (data_at + data_len) as u32;
+        emission.extend(kept.iter().map(|(inst, _)| pack_rgb9e5(inst.emission)));
     }
+    eat(emission.len() as u64);
+    FieldParts {
+        head,
+        data,
+        data_len,
+        emission,
+        layout: h | 1,
+    }
+}
+
+/// Pack the instances (and the SDFs they use, once each) into the word buffer.
+pub fn field_words(instances: &[&FieldInstance]) -> Vec<u32> {
+    let parts = field_parts(instances, true);
+    let mut words = parts.head;
+    words.extend_from_slice(&parts.data);
+    words.extend_from_slice(&parts.emission);
     words
+}
+
+/// Words as little-endian bytes.
+pub fn words_bytes(words: &[u32]) -> Vec<u8> {
+    words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
 /// Shared-exponent RGB, 9 bits each and a 5-bit exponent (the GLSL
@@ -238,14 +301,6 @@ pub fn pack_rgb9e5(rgb: [f32; 3]) -> u32 {
     }
     let q = c.map(|v| ((v * scale + 0.5).floor()).min(511.0) as u32);
     q[0] | q[1] << 9 | q[2] << 18 | ((e + 15) as u32) << 27
-}
-
-/// Byte view of [`field_words`].
-pub fn field_bytes(instances: &[&FieldInstance]) -> Vec<u8> {
-    field_words(instances)
-        .into_iter()
-        .flat_map(u32::to_le_bytes)
-        .collect()
 }
 
 /// A CPU twin of the shader's distance lookup, for tests: world-space distance to
@@ -452,5 +507,54 @@ mod tests {
             assert!((back[a] - p[a]).abs() < 1e-5, "{back:?}");
         }
         assert!((distance_scale(&rows) - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_moved_instance_keeps_the_layout_and_changes_only_its_record() {
+        let ident = |x: f32| {
+            let mut p = [0.0f32; 16];
+            p[0] = 1.0;
+            p[5] = 1.0;
+            p[10] = 1.0;
+            p[15] = 1.0;
+            p[12] = x;
+            p
+        };
+        let a = cube_instance(ident(0.0));
+        let mut b = a.clone();
+        b.pose = ident(2.0);
+        let mut c = a.clone();
+        c.pose = ident(4.0);
+        let before = field_parts(&[&a, &b], true);
+        let quick = field_parts(&[&a, &b], false);
+        assert_eq!(quick.head, before.head);
+        assert_eq!(quick.data_len, before.data.len());
+        assert_eq!(quick.layout, before.layout);
+        let moved = field_parts(&[&a, &c], false);
+        assert_eq!(moved.layout, before.layout, "a move keeps the layout");
+        assert_eq!(
+            moved.head[..FIELD_HEADER + FIELD_RECORD],
+            before.head[..FIELD_HEADER + FIELD_RECORD]
+        );
+        assert_ne!(
+            moved.head[FIELD_HEADER + FIELD_RECORD..],
+            before.head[FIELD_HEADER + FIELD_RECORD..]
+        );
+        // The full words of the moved set are the old data with the new records.
+        let mut patched = moved.head.clone();
+        patched.extend_from_slice(&before.data);
+        assert_eq!(patched, field_words(&[&a, &c]));
+        let one = field_parts(&[&a], false);
+        assert_ne!(
+            one.layout, before.layout,
+            "a removed instance changes the layout"
+        );
+        let mut lit = c.clone();
+        lit.emission = [1.0, 0.5, 0.0];
+        assert_ne!(
+            field_parts(&[&a, &lit], false).layout,
+            before.layout,
+            "an emission table changes the layout"
+        );
     }
 }
