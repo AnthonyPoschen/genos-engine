@@ -29,6 +29,6 @@ Each record uses these headings:
 - [Loading](loading.md) owns images, textures, texture maps, meshes, animations, PCM samples, and fonts.
 - [Audio](audio.md) owns playback, Doppler, stereo image, and direct-path transmission.
 - [Scripting](scripting.md) owns Rhai for games and mods.
-- [Debugging](debugging.md) owns the debug commands, scripts, captures and the ground-truth reference.
+- [Debugging](debugging.md) owns the shared debug scaffolding, the per-system binaries under `debug/<system>/`, the commands, the scripts, the captures, and the ground-truth reference.
 
 The crate map and the frame loop are in [Architecture](../architecture.md). The words are in `CONTEXT.md`.

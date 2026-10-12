@@ -6,12 +6,25 @@ An agent or a person can see, change and measure any running engine system from
 outside, the same way every time: over the MCP port, from a script file, or headless
 on a box. Lighting quality is judged against ground truth, not by eye alone.
 
+Every engine system ships a dedicated debug binary under `debug/<system>/`
+(`debug/lighting`, `debug/physics`, `debug/networking`, `debug/ui`,
+`debug/assets`, and the same folder for any other system). The binary covers
+that system's features. The agent rubric scores this.
+
 ## Intent
 
 - One set of commands. MCP tools, `POST /cmd/<name>`, and Rhai functions are the
   same commands with the same JSON arguments and replies.
 - Engine-generic. `genos-debug` knows the renderer, the scene and the camera; an
   example adds only its own knobs (the `Host` trait) and four calls in its frame loop.
+- One debug binary per system, under `debug/<system>/`, all on that same
+  scaffolding. Scenes are data files in `debug/scenes/`, loaded by every binary.
+  Each binary opens on a scene picker, switches scenes with a hotkey, and offers
+  preset test locations and checkpoints, one-key reset, loop back to start,
+  deterministic replay, screenshot and metrics output, live tuning sliders, and
+  a guided-review panel that tells a person what to look at and what to test.
+  An agent drives the same binary headlessly, over the CLI or MCP. A system is
+  done when its binary covers its features.
 - Deterministic when asked. A script runs scene time on a fixed step from frame 0.
   For repeatable light, `wait_settled` before reading (it waits for the lighting's
   `SettleStats.settled` and a held picture).
@@ -427,6 +440,11 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
 
 ## Limits
 
+- Dedicated binaries under `debug/<system>/`, and the shared scene library
+  `debug/scenes/`, are not in the tree yet. `genos-stress` is the lighting
+  harness that moves into `debug/lighting`. `examples/camera/scene.rhai` and
+  `examples/stress/scenes/` are the scene files that move into `debug/scenes/`.
+  `crates/debug` stays the shared command, knob, capture, and script code.
 - The reference knows floors, ceilings, walls and solids. It does not trace fog,
   particle cards, textures or per-material reflectance and colour mix (the stress
   scene uses the defaults). It does not cut lamps at their range as the engine does.
