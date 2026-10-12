@@ -105,6 +105,30 @@ void main() {
     vec3 origin = pos + n * 0.02;
     LampList list = lamps_at(origin);
     uint count = lamp_list_size(list);
+    // S75 Lumen surface-cache direct lighting for hits (lighting_cache.glsl).
+    uint tdl = ~0u;
+    uint tdl_sig = 0u;
+    vec3 n_hit = n;
+    if (LIGHTING_TDL && idx >= pixels && lighting_world_mode() == 3u) {
+        uint ts = lighting_cache_find_sized(pos, n, false, LIGHTING_SC_TEXEL, pos);
+        vec3 tp;
+        vec3 tn;
+        if (ts != ~0u && lighting_sc_texel_world(ts, tp, tn)) {
+            LampList tl = lamps_at(tp + tn * 0.02);
+            tdl_sig = lighting_tdl_sig(ts, tl);
+            vec4 d = cache.v[LIGHTING_TDL_AT + ts];
+            if (tdl_sig != 0u && floatBitsToUint(d.z) == tdl_sig && lighting_frame() - floatBitsToUint(d.w) < LIGHTING_TDL_STALE) {
+                count = 0u;
+                tdl = ts | 0x80000000u;
+            } else if (tdl_sig != 0u && atomicAdd(ckeys.key[LIGHTING_TDL_COUNT_AT], 1u) < LIGHTING_TDL_BUDGET) {
+                tdl = ts;
+                origin = tp + tn * 0.02;
+                n = tn;
+                list = tl;
+                count = lamp_list_size(list);
+            }
+        }
+    }
     // Light cache rays (params.z bit 11): at most LIGHTING_CACHE_PICKS shadow rays,
     // lamps picked systematically in proportion to their unshadowed light, each
     // weighted by how often it is expected to be picked (unbiased, as
@@ -119,7 +143,7 @@ void main() {
     // the step that keeps our per-hit direct light.
     bool cache_pick = idx >= pixels + kept && !fill_hit && ((pc.params.z >> 11u) & 1u) != 0u;
     bool probe_pick = LIGHTING_PROBE_PICKS && probe_hit && ((pc.params.z >> 11u) & 1u) != 0u;
-    bool pick = cache_pick || probe_pick;
+    bool pick = (cache_pick || probe_pick) && tdl == ~0u;
     float total = 0.0;
     uint lit = 0u;
     float u = 0.0;
@@ -188,6 +212,19 @@ void main() {
             if (k < list.suns.y) {
                 e_sun += add;
             }
+        }
+    }
+    n = n_hit;
+    if (tdl != ~0u) {
+        uint ts = tdl & 0x7FFFFFFFu;
+        if ((tdl & 0x80000000u) != 0u) {
+            vec4 d = cache.v[LIGHTING_TDL_AT + ts];
+            e = lighting_unpack_rgb9e5(floatBitsToUint(d.x));
+            e_sun = e * d.y;
+        } else {
+            float le = dot(e, vec3(0.2126, 0.7152, 0.0722));
+            float fs = le > 0.0 ? clamp(dot(e_sun, vec3(0.2126, 0.7152, 0.0722)) / le, 0.0, 1.0) : 0.0;
+            cache.v[LIGHTING_TDL_AT + ts] = vec4(uintBitsToFloat(lighting_pack_rgb9e5(e)), fs, uintBitsToFloat(tdl_sig), uintBitsToFloat(lighting_frame()));
         }
     }
     if (idx < pixels) {

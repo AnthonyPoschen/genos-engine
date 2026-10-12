@@ -606,7 +606,7 @@ impl Gpu {
                 &share,
             )?;
             self.lighting.cache =
-                self.make_buffer_queues(LIGHTING_CACHE_SLOTS * 224, 0x20 | 0x2, Memory::Device, &share)?; // S74A: + A-SVGF gradient (2 vec4) // 11 vec4 a slot (S72A: + sparse fill; S72V: + a-trous ping-pong)
+                self.make_buffer_queues(LIGHTING_CACHE_SLOTS * 240, 0x20 | 0x2, Memory::Device, &share)?; // S74A: + A-SVGF gradient (2 vec4) // 11 vec4 a slot (S72A: + sparse fill; S72V: + a-trous ping-pong)
             self.lighting.cache_clear = true;
             for k in 0..2 {
                 self.lighting.stats[k] = self.make_buffer(96, 0x20 | 0x2, Memory::Readback)?;
@@ -841,7 +841,7 @@ impl Gpu {
             self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             // The mature and young patch counts, rebuilt by the compact pass.
             if !world {
-                for at in [LIGHTING_CACHE_SLOTS, 2 * LIGHTING_CACHE_SLOTS + 1, LIGHTING_WRC_COUNTS_AT, LIGHTING_WRC_COUNTS_AT + 1, LIGHTING_WRC_COUNTS_AT + 4, LIGHTING_WRC_COUNTS_AT + 5, LIGHTING_WRC_COUNTS_AT + 6] {
+                for at in [LIGHTING_CACHE_SLOTS, 2 * LIGHTING_CACHE_SLOTS + 1, LIGHTING_WRC_COUNTS_AT, LIGHTING_WRC_COUNTS_AT + 1, LIGHTING_WRC_COUNTS_AT + 4, LIGHTING_WRC_COUNTS_AT + 5, LIGHTING_WRC_COUNTS_AT + 6, LIGHTING_WRC_COUNTS_AT + 7] {
                     (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, at * 4, 4, 0);
                 }
             }

@@ -2805,7 +2805,7 @@ const uint LIGHTING_EXT_AT = LIGHTING_ARGS_AT + 16u + 3u * 65536u;
 const uint LIGHTING_SHADOW_EPOCH_AT = LIGHTING_EXT_AT;
 const uint LIGHTING_GRAD_LIST_AT = LIGHTING_EXT_AT + 1024u;
 const float LIGHTING_ASVGF_EPS = 0.05;
-const float LIGHTING_ASVGF_SE = 0.03;
+const float LIGHTING_ASVGF_SE = 0.05;
 const float LIGHTING_ASVGF_FULL = 0.25;
 const uint LIGHTING_ASVGF_KEEP = 8u;
 const uint LIGHTING_ASVGF_AGE = 900u;
@@ -2891,7 +2891,10 @@ void lighting_shadow_epochs() {
         uint at = LIGHTING_SHADOW_EPOCH_AT + 8u * i;
         vec4 last = vec4(uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]), uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]));
         vec4 now = vec4(l.pos.xyz, l.color.w);
-        bool bump = all || any(notEqual(last, now));
+        // S75: colour too (the texel direct-light cache reads the epoch).
+        uint col = lighting_hash(floatBitsToUint(l.color.x) ^ lighting_hash(floatBitsToUint(l.color.y) ^ lighting_hash(floatBitsToUint(l.color.z))));
+        bool bump = all || any(notEqual(last, now)) || ckeys.key[at + 5u] != col;
+        ckeys.key[at + 5u] = col;
         for (uint c = 0u; c < changes && !bump; c++) {
             vec4 b = work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + c];
             bump = l.color.w <= 0.0 || length(b.xyz - l.pos.xyz) < l.color.w + b.w;
@@ -2931,4 +2934,38 @@ void lighting_shadow_put(vec3 o, vec3 n, uint li, bool lit) {
     uint tag;
     uint at = lighting_shadow_cell(o, n, li, tag);
     cache.v[at] = vec4(uintBitsToFloat(tag), lit ? 1.0 : 0.0, uintBitsToFloat(ckeys.key[LIGHTING_SHADOW_EPOCH_AT + 8u * li]), 0.0);
+}
+
+// S75 Lumen surface-cache direct lighting (Wright et al. 2022, "Lumen: Real-time
+// Global Illumination in Unreal Engine 5", surface cache direct lighting): each fine
+// texel keeps its exact (all lamps, shadow-traced) direct irradiance, read by GI ray
+// hits (light-cache rays, probe hits) instead of their lamp loop. The screen's own
+// direct light stays per pixel. Slot 14: x rgb9e5 irradiance, y sun share, z
+// signature, w frame last updated. Valid while the signature (texel key, its lamp
+// list with each lamp's epoch, the flame) matches and the entry is younger than
+// LIGHTING_TDL_STALE; otherwise the hit relights the texel (at its centre) if this
+// frame's budget LIGHTING_TDL_BUDGET has room, else runs its own lamp loop as before.
+const bool LIGHTING_TDL = true;
+const uint LIGHTING_TDL_AT = 14u * LIGHTING_CACHE_SLOTS;
+const uint LIGHTING_TDL_STALE = 600u;
+const uint LIGHTING_TDL_BUDGET = 32768u;
+const uint LIGHTING_TDL_COUNT_AT = LIGHTING_SC_HIST_AT + 73u;
+uint lighting_tdl_sig(uint slot, LampList list) {
+    uint sig = lighting_hash(ckeys.key[slot] ^ 0x68e31da4u);
+    uint lamps = list.suns.y + list.near.y;
+    uint count = lamp_list_size(list);
+    for (uint k = 0u; k < count; k++) {
+        uint e;
+        if (k >= lamps) {
+            e = lighting_hash(floatBitsToUint(scene.fire_pos.x) ^ lighting_hash(floatBitsToUint(scene.fire_pos.y) ^ lighting_hash(floatBitsToUint(scene.fire_pos.z) ^ lighting_hash(floatBitsToUint(scene.fire_pos.w) ^ lighting_hash(floatBitsToUint(scene.fire_color.x) ^ floatBitsToUint(scene.fire_color.y) * 31u ^ floatBitsToUint(scene.fire_color.z) * 131u)))));
+        } else {
+            uint li = lamp_list_index(list, k);
+            if (li >= LIGHTING_WRC_SNAP_LAMPS || li >= scene.lamp_count) {
+                return 0u;
+            }
+            e = lighting_hash(li * 0x9e3779b9u ^ ckeys.key[LIGHTING_SHADOW_EPOCH_AT + 8u * li]);
+        }
+        sig = lighting_hash(sig ^ e);
+    }
+    return sig | 1u;
 }
