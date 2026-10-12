@@ -15,7 +15,7 @@ Written against `gi-v2` parent `e61b89d`. This file does not change `step`.
 - ADR 0007. No Rapier, Parry, nalgebra, Jolt, PhysX, Blast, or Chaos crate. Those engines are the design source. The code stays in this repository.
 - ADR 0009. Rhai stays the game script. The fracture tool and the headless tests are Rust.
 - `genos-math` stays `f32`. Wide positions live in the physics crate. [Math](../math.md) says there is no `f64` path in that crate.
-- Y is up for the room proof. `World::new(GRAVITY)` keeps the uniform field `(0, -9.81, 0)` so the existing free-fall test stays valid. Space scenes set that field to zero and add gravity sources. Lengths are metres, mass is kilograms, time is seconds.
+- Y is up for the room proof. Each world picks a gravity mode. The default is `GravityMode::Uniform`: the static vector on `World.gravity`, which `World::new(GRAVITY)` sets to `(0, -9.81, 0)`. That path does not call the wells code. Lengths are metres, mass is kilograms, time is seconds.
 - The frame interval is the measured `dt`. The camera already caps one frame at 0.25 s (`crates/scene/src/camera.rs`). Do not add a minimum step count, a minimum active set, or a minimum GPU dispatch. An asleep world does no narrowphase and no solver work.
 - The physics schedule inside an accumulated frame is a fixed `1/60` s step, matching `update` in `crates/scene/src/camera.rs`. Sub-steps divide that step. They do not rerun the broadphase.
 - The character controller is the action map in `crates/input/src/action.rs` (`character_controller`). It is not a body. The simulated capsule is a body. Do not rename one to the other. `CONTEXT.md` defines both.
@@ -107,7 +107,7 @@ The character controller (`crates/input/src/action.rs`, `character_controller`) 
 - GPU-resident where it pays. Awake poses and spawned chunk meshes live in a buffer the renderer can read. The CPU writes a delta when the awake set changes. The solver stays on the CPU until the gate at the end of this plan.
 - No fixed per-frame floor. Variable frame `dt`, fixed physics step only when time has accumulated, zero solver iterations when nothing is awake.
 - The server tick is that same `1/60` s step. A client renders between snapshots. It does not invent a second physics rate.
-- Gravity samples only the sources whose sphere of influence contains the body. No sources and a uniform field is the current step: no tree, no extra pass.
+- Gravity mode is per world. `Uniform` is the default and is the only gravity work a simple game does: add `World.gravity` in the force loop. `Field` is opt-in. A `Uniform` step does not allocate a source list, query a tree, sample a wide position, or enter `gravity.rs`.
 
 ## Networking
 
@@ -203,7 +203,16 @@ These tests are in-process. They do not bind a UDP socket. The session binary ca
 
 ## Gravity
 
-`World.gravity` stays the uniform field. `World::new(GRAVITY)` is the room. A body with no sources in range accelerates by that vector alone, which is what `free_fall_matches_half_gt_squared_and_gt` already checks. Sources and overrides add a per-body field. Kinematic bodies still ignore gravity.
+Gravity mode is chosen per world. Two worlds in one process may differ. The default is the cheap path.
+
+| Mode | What a body gets | What `step` does |
+| --- | --- | --- |
+| `Uniform` (default) | `World.gravity`, a static `Vec3` | The force loop that exists today. `gravity.rs` is not called. |
+| `Field` (opt-in) | `World.gravity` plus sources, then a volume may replace that sum | Sphere query, Barnes-Hut only past 32 unbounded sources, wide Verlet for free bodies. |
+
+`World::new(GRAVITY)` is `Uniform`. `free_fall_matches_half_gt_squared_and_gt` stays on that path. `set_gravity_mode(Field)` is the switch. Adding a source or a volume while the mode is `Uniform` leaves the mode unchanged and does not store the source. The caller sets `Field` first. A simple game never calls that setter, so it pays nothing for the wells feature: no source allocation, no tree, no wide-position sample, no extra branch inside the force loop.
+
+`Field` is the mixed setup. Outside volumes the acceleration is the global vector plus the in-range sources. Inside a volume the override replaces both. A zero-g cabin in a world that still has `GRAVITY` is that: `Field`, the global vector, and a zero volume. A space scene sets the global vector to zero and adds wells. Kinematic bodies still ignore gravity in either mode.
 
 ### Sources
 
@@ -225,7 +234,7 @@ The innermost containing volume wins. Volumes may be attached to a body so a spi
 
 ### Local up
 
-`local_up` is `-normalize(a)` when `|a| > 0.05` m/s². Below that the last up is kept, and the room default is world `+Y`. The character controller stays the action map. The view body turns `move` into a wish on the plane perpendicular to local up: forward is the look direction projected onto that plane. The capsule segment aligns to local up. Foot casts go along `-local_up`. A uniform `GRAVITY` field still has up along `+Y`, so the room camera does not change.
+In `Uniform` mode, up is world `+Y` when `World.gravity` points along `-Y`, and `-normalize(World.gravity)` otherwise. The view body does not call `gravity_at`. In `Field` mode, `local_up` is `-normalize(a)` when `|a| > 0.05` m/s². Below that the last up is kept. The character controller stays the action map. The view body turns `move` into a wish on the plane perpendicular to local up: forward is the look direction projected onto that plane. The capsule segment aligns to local up. Foot casts go along `-local_up`. A uniform `GRAVITY` field still has up along `+Y`, so the room camera does not change.
 
 ### Orbits
 
@@ -239,13 +248,13 @@ A moving source wakes a sleeper when the sampled acceleration differs from the v
 
 ### Many sources
 
-A source with a finite influence radius is stored by that sphere. A body queries the spheres that contain it. Sources outside the query are not evaluated. With no sources in range the query returns the uniform field and builds nothing.
+These queries exist only in `Field`. A source with a finite influence radius is stored by that sphere. A body queries the spheres that contain it. Sources outside the query are not evaluated. A `Field` world with nothing in range returns `World.gravity` and builds no tree. A `Uniform` world does not reach this query.
 
 Sources with infinite influence, and only when more than 32 of them are awake, use a Barnes-Hut octree on their `GM`. A cell is walked into when `size / distance > theta`, with `theta = 0.5`. Otherwise the cell's monopole is one source. Finite-influence sources stay on the sphere query and are not folded into the tree. The tree is rebuilt when a source moves. An asleep body outside every finite sphere is not a query.
 
 ### Replication
 
-Sources are server state. The client does not invent `GM`. The snapshot carries the source parameters in the table above. The client evaluates `gravity_at` from those parameters and from scene-script volumes, the same way it builds static walls locally. During owned-body rollback the field uses the source positions from the snapshot at that tick. Planets are not resimulated inside the replay.
+The mode byte is part of the world snapshot. A `Uniform` snapshot has no source block. The client stays on the vector add and does not evaluate `gravity_at`. A `Field` snapshot carries the source parameters in the table above. The client evaluates `gravity_at` from those parameters, from `World.gravity`, and from scene-script volumes, the same way it builds static walls locally. During owned-body rollback the field uses the source positions from the snapshot at that tick. Planets are not resimulated inside the replay. The server does not invent `GM`.
 
 `replicated_checksum` includes the source parameters. Two worlds with the same sources and the same wide positions produce the same `f64` acceleration in one process.
 
@@ -779,9 +788,12 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 ### P47. Inverse-square sources
 
 - [ ] **Files:** `crates/physics/src/gravity.rs`. Test `crates/physics/tests/gravity.rs`. Record the field in `docs/systems/physics.md`. `CONTEXT.md` gains gravity source in this commit.
-- **Behavior:** `gravity_at(wide) -> Vec3` in the body frame is the uniform field plus each in-range source. `a = GM / max(r, clamp_radius)²` toward the source. Outside `influence`, the source adds nothing. Sources sum in id order. No sources leaves the uniform path untouched, including allocation behavior of `step`.
+- **Behavior:** `GravityMode::Uniform` is the default. `step` adds `World.gravity` and does not call `gravity.rs`. `set_gravity_mode(Field)` opts in. In `Field`, `gravity_at` is `World.gravity` plus each in-range source. `a = GM / max(r, clamp_radius)²` toward the source. Outside `influence`, the source adds nothing. Sources sum in id order. `insert_source` while `Uniform` stores nothing.
+- **Test:** `a_uniform_world_pays_nothing_for_wells`
+  - `World::new(GRAVITY)` reports `Uniform`. After 60 steps, `field_evaluations` is 0 and the source storage has not allocated. `insert_source` leaves the mode `Uniform` and the source count 0. Free fall still matches `½gt²` within 1%. `timed_math_and_physics_batch_does_not_allocate` still passes.
+  - A second world, `set_gravity_mode(Field)`, keeps `World.gravity = GRAVITY` and adds one source. Outside any volume the sample is the vector plus the well. Inside a zero volume the sample is `0`.
 - **Test:** `inverse_square_matches_surface_gravity_and_a_hyperbola`
-  - Planet `GM = 98100`, `clamp_radius = 1`, `influence = 1e6`. At 100 m, `|a|` is `9.81` ± `1e-3`, direction toward the source. At `r = 0`, `|a|` is `GM / clamp_radius²` and finite.
+  - The world is `Field` with `World.gravity = 0`. Planet `GM = 98100`, `clamp_radius = 1`, `influence = 1e6`. At 100 m, `|a|` is `9.81` ± `1e-3`, direction toward the source. At `r = 0`, `|a|` is `GM / clamp_radius²` and finite.
   - Hyperbola: `GM = 10`, impact parameter `20` m, `v_inf = 1` m/s, uniform field `0`, Verlet at `dt = 0.5` s from 200 m out and back out. The deflection from the incoming direction is `2 atan(GM / (b v_inf²))` = `2 atan(0.5)` within `3°`. Speed returns to within 2% of `v_inf`. A second run matches the wide position bitwise.
 - **Commit:** `physics: sample inverse-square gravity per body`
 
@@ -835,9 +847,10 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 ### P53. Replicate gravity sources
 
 - [ ] **Files:** `replicate.rs`, `gravity.rs`. Test `crates/physics/tests/gravity.rs`. Networking lines in `docs/systems/physics.md`.
-- **Behavior:** `replicate_sources` writes id, `GM` bits, clamp, influence, and either an attachment `NetId` or a wide position. Scene-script volumes are omitted. An attached override (spin or uniform on a ship) writes its kind and parameters. The client evaluates the field locally. Rollback samples sources from the snapshot at that tick. The checksum covers the source records.
+- **Behavior:** A `Uniform` world writes its gravity vector and no source block. `replicate_sources` on that world is not called. On a `Field` world it writes id, `GM` bits, clamp, influence, and either an attachment `NetId` or a wide position. Scene-script volumes are omitted. An attached override (spin or uniform on a ship) writes its kind and parameters. The client evaluates the field locally. Rollback samples sources from the snapshot at that tick. The checksum covers the source records only in `Field`.
 - **Test:** `a_client_matches_the_server_field_from_replicated_sources`
-  - Server with one source and one attached spin volume. Client applies the records and no other gravity input. `gravity_at` matches bitwise at three sample points. A scene-script zero-g box is absent from the byte list. Changing `GM` changes the checksum. Replay at tick `T` uses the source position stored for `T`, not the position at `T+5`.
+  - A `Uniform` server snapshot contains the gravity vector and zero source bytes. The client stays in `Uniform` and `field_evaluations` stays 0.
+  - A `Field` server with one source and one attached spin volume. Client applies the records and no other gravity input. `gravity_at` matches bitwise at three sample points. A scene-script zero-g box is absent from the byte list. Changing `GM` changes the checksum. Replay at tick `T` uses the source position stored for `T`, not the position at `T+5`.
 - **Commit:** `physics: replicate gravity sources`
 
 ### P54. Gravity scene and field view
@@ -918,7 +931,8 @@ Which binary opens which scene is the observability table in the networking sect
 | Vehicle snapshot without the contact cache | P44, `car_flat` |
 | Pre-fracture seeds plus bond-break events, no mesh on the wire | P45, `destruction_wall` |
 | One debug binary per system, lighting-style commands, scripts, knobs, reset | P41, P46 |
-| Per-body gravity, inverse-square, clamp, sphere of influence | P47, P48 |
+| Per-world gravity mode. Default `Uniform` is a static vector and pays nothing for wells. `Field` is opt-in and may mix that vector with wells and volumes | P47 |
+| Inverse-square, clamp, sphere of influence | P47, P48 |
 | Zero-g, artificial gravity, spin gravity | P50 |
 | View body and feet align to local up | P51, `gravity_well` |
 | Velocity Verlet, wide orbits, slingshot | P32, P52, `orbit`, `gravity_well` |
