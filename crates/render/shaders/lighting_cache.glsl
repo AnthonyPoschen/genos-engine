@@ -2388,6 +2388,28 @@ uint lighting_sc_entries(uint slot, bool full) {
 // (a quarter from up to 2 m beside it), half over the sphere and half within
 // ~50 degrees of where the camera is heading (forward, plus its motion and turn
 // since the last frame the probes ran).
+// S73A off-screen pre-fill (Anthony 15:50: texels coming on screen when turning
+// or walking backwards must already be filled). Lumen keeps the surface cache
+// resident for what rays hit, on screen or not: GPU feedback marks the pages
+// ray hits use (Wright et al. 2022, "Lumen", Surface Cache GPU Feedback), and
+// its update priority is LastUsed - LastUpdated. Our fine texels were claimed
+// only by the pixels that show them, so a texel had no field the first frames
+// it was on screen. A quarter of the scout rays (s & 3 == 1) are primary rays
+// through a guard band just outside the frustum (Bavoil & Sainz 2009 /
+// Mara et al. 2016 guard band, but ray-traced instead of rastered, so a claim
+// is always on a surface the camera will see, never inside a wall), weighted
+// to the side the camera turns towards. Their hits claim and stamp the fine
+// texels exactly as a pixel does (lighting_world_irradiance), so those texels
+// are scheduled, seeded, filtered (layer 2) and pushed before they show.
+const bool LIGHTING_SC_GUARD = true;
+// Guard band width as a share of the half-extent of the view (0.5: a 90 degree
+// view sees ~11 degrees past each edge) [inferred].
+const float LIGHTING_SC_GUARD_W = 0.5;
+// Guard hits farther than this claim nothing (the WRC covers them) [inferred].
+const float LIGHTING_SC_GUARD_FAR = 40.0;
+bool lighting_sc_guard_ray(uint s) {
+    return LIGHTING_SC_GUARD && lighting_world_mode() == 3u && (s & 3u) == 1u;
+}
 void lighting_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
     uint h = lighting_hash(s * 0x9e3779b9u ^ lighting_round() * 0x85ebca6bu);
     float u1 = lighting_unit(h);
@@ -2402,6 +2424,34 @@ void lighting_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
         ahead = fwd + 8.0 * (eye - last_eye.xyz) + 4.0 * (fwd - normalize(last_fwd));
     }
     ahead = normalize(ahead + vec3(0.0, 1.0e-4, 0.0));
+    origin = eye;
+    if (lighting_sc_guard_ray(s)) {
+        // S73A guard band: a primary ray through the ring just outside the
+        // frustum (LIGHTING_SC_GUARD_W of the half-extent each side), favouring
+        // the side the camera turns towards.
+        float t = scene.view_right.w;
+        float aspect = scene.view_forward.w;
+        vec3 dturn = fwd - normalize(last_fwd + vec3(0.0, 1.0e-6, 0.0));
+        float tx = last_eye.w > 0.5 ? dot(dturn, scene.view_right.xyz) / (t * aspect) : 0.0;
+        float ty = last_eye.w > 0.5 ? dot(dturn, scene.view_up.xyz) / t : 0.0;
+        float tm = abs(tx) + abs(ty);
+        float u3 = lighting_unit(h ^ 0x27d4eb2fu);
+        float u4 = lighting_unit(h ^ 0x165667b1u);
+        float p_side = tm > 1.0e-3 ? clamp(0.5 + 0.4 * (abs(tx) - abs(ty)) / tm, 0.1, 0.9) : 0.5;
+        float gw = LIGHTING_SC_GUARD_W;
+        vec2 ndc;
+        if (u3 < p_side) {
+            float toward = abs(tx) > 1.0e-3 ? 0.85 : 0.5;
+            float sx = (u4 < toward) == (tx >= 0.0) ? 1.0 : -1.0;
+            ndc = vec2(sx * (1.0 + gw * u1), (2.0 * u2 - 1.0) * (1.0 + gw));
+        } else {
+            float toward = abs(ty) > 1.0e-3 ? 0.85 : 0.5;
+            float sy = (u4 < toward) == (ty >= 0.0) ? 1.0 : -1.0;
+            ndc = vec2(2.0 * u2 - 1.0, sy * (1.0 + gw * u1));
+        }
+        dir = normalize(fwd + ndc.x * t * aspect * scene.view_right.xyz + ndc.y * t * scene.view_up.xyz);
+        return;
+    }
     float z = (s & 1u) == 0u ? 1.0 - 2.0 * u1 : 1.0 - u1 * 0.36;
     float r = sqrt(max(1.0 - z * z, 0.0));
     float a = LIGHTING_TAU * u2;
@@ -2413,7 +2463,6 @@ void lighting_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
         vec3 b = cross(ahead, t);
         dir = normalize(t * local.x + b * local.y + ahead * local.z);
     }
-    origin = eye;
     if ((s & 3u) == 3u) {
         float u3 = lighting_unit(h ^ 0x27d4eb2fu);
         float b3 = LIGHTING_TAU * lighting_unit(h ^ 0x165667b1u);
