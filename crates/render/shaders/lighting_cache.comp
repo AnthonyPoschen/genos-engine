@@ -93,6 +93,10 @@ void main() {
     vec3 e = vec3(0.0);
     float es = 0.0;
     float el = 0.0;
+    // S72B: this round's rays stream into a reservoir (uniform hemisphere pdf).
+    bool restir = lighting_sc_restir_on() && !wrc_cell && cache.v[3u * slot + 1u].w > 0.0;
+    LightingRes res = LightingRes(vec3(0.0), n, 0.0, 0.0);
+    uint rh = lighting_hash(slot * 0x9e3779b9u ^ lighting_frame() * 0x85ebca6bu);
     [[dont_unroll]] for (uint k = 0u; k < run * LIGHTING_CACHE_RAYS; k++) {
         vec4 v = work.v[lighting_rad_at(first + k)];
         if (lighting_ray_none(v)) {
@@ -104,6 +108,9 @@ void main() {
         e += lk * c;
         el += dot(lk, vec3(0.2126, 0.7152, 0.0722)) * c;
         es += min(max(v.w, 0.0), dot(lk, vec3(0.2126, 0.7152, 0.0722))) * c;
+        if (restir) {
+            lighting_res_add(res, lk, dir, lighting_res_target(lk, dir, n) * LIGHTING_TAU, 1.0, lighting_unit(rh + k));
+        }
     }
     float rays = float(run * LIGHTING_CACHE_RAYS);
     if (run > 1u) {
@@ -136,6 +143,24 @@ void main() {
     }
     e *= LIGHTING_TAU / rays;
     vec4 old = cache.v[3u * slot + 2u];
+    if (restir) {
+        // Temporal (own history) unless it is invalid now; then spatial.
+        bool mover5;
+        bool valid = old.w > 0.5 && lighting_sc_light_quiet() && !lighting_sc_local_change(slot, mover5);
+        if (valid) {
+            lighting_res_merge(res, slot, n, lighting_unit(rh ^ 0x68e31da4u));
+        }
+        if (lighting_sc_light_quiet()) {
+            lighting_res_spatial(res, slot, n, rh ^ 0xb5297a4du);
+        }
+        float ph = lighting_res_target(res.l, res.d, n);
+        float wr = ph > 0.0 && res.m > 0.0 ? res.wsum / (res.m * ph) : 0.0;
+        cache.v[LIGHTING_SC_RES_AT + slot] = vec4(uintBitsToFloat(lighting_pack_rgb9e5(res.l)), uintBitsToFloat(lighting_pack_normal(res.d)), wr, min(res.m, LIGHTING_SC_RES_MCAP));
+        vec3 er = res.l * max(dot(res.d, n), 0.0) * wr;
+        if (res.m > rays + 0.5 && all(lessThan(er, vec3(1.0e5))) && !any(isnan(er))) {
+            e = mix(e, er, LIGHTING_SC_RES_MIX);
+        }
+    }
     if (lighting_world_mode() == 3u) {
         // S63A: carry the history's sun/sky share to the sun and sky of now,
         // then blend this set's share into it.

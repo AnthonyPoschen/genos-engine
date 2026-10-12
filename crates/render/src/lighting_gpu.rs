@@ -604,7 +604,7 @@ impl Gpu {
                 &share,
             )?;
             self.lighting.cache =
-                self.make_buffer_queues(LIGHTING_CACHE_SLOTS * 144, 0x20 | 0x2, Memory::Device, &share)?; // 9 vec4 a slot (S72A: + sparse fill)
+                self.make_buffer_queues(LIGHTING_CACHE_SLOTS * 160, 0x20 | 0x2, Memory::Device, &share)?; // 10 vec4 a slot (S72A sparse fill, S72B reservoir)
             self.lighting.cache_clear = true;
             for k in 0..2 {
                 self.lighting.stats[k] = self.make_buffer(96, 0x20 | 0x2, Memory::Readback)?;
