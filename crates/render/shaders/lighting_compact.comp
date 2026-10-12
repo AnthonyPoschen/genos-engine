@@ -21,9 +21,18 @@ void main() {
         lighting_sc_page_clear(slot);
     }
     // S78X: this round's a-trous lists start empty (marks come from the
-    // variance stage on).
+    // variance stage on). The filtered-texel bins, the per-level mode and the
+    // dense recount bins start empty too. The threshold and last frame's
+    // fraction stay.
     if (LIGHTING_ATROUS_LISTS && slot < 5u) {
         ckeys.key[lighting_atrous_list(slot + 1u)] = 0u;
+        ckeys.key[LIGHTING_ATROUS_MODE_AT + slot] = 0u;
+    }
+    if (LIGHTING_ATROUS_LISTS && slot < 64u) {
+        ckeys.key[LIGHTING_ATROUS_BIN_AT + slot] = 0u;
+    }
+    if (LIGHTING_ATROUS_LISTS && slot < 320u) {
+        ckeys.key[LIGHTING_ATROUS_DBIN_AT + slot] = 0u;
     }
     if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
         return;

@@ -196,6 +196,35 @@ pub(crate) struct Lighting {
     cache_hz: f64,
     last_round: Option<Instant>,
     stats_round: [bool; 2],
+    /// Overrides `GENOS_LIGHTING_ATROUS_DIRTY` for the a-trous list fallback.
+    /// Fraction of filtered texels; `None` reads the env each frame.
+    atrous_dirty: Option<f32>,
+}
+
+/// A-trous levels 1-5 in the last frame that ran them (S78X dense fallback).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LightingAtrousStats {
+    /// Dirty slots over filtered texels, the fullest of levels 1-5 (0..1).
+    pub dirty_fraction: f32,
+    /// `0` dense full-frame sweep, `1` dirty work list. Meaningful when `ran`.
+    pub mode: u32,
+    /// Threshold the GPU used (`GENOS_LIGHTING_ATROUS_DIRTY`, 0..1).
+    pub threshold: f32,
+    /// Filtered texels `dirty_fraction` divided by.
+    pub filtered: u32,
+    /// Levels 1-5 ran this frame.
+    pub ran: bool,
+}
+
+fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
+    let mode_word = w[LIGHTING_ATROUS_STAT + 1];
+    LightingAtrousStats {
+        dirty_fraction: w[LIGHTING_ATROUS_STAT] as f32 / 1.0e6,
+        mode: u32::from(mode_word == 1),
+        threshold: w[LIGHTING_ATROUS_STAT + 2] as f32 / 1.0e6,
+        filtered: w[LIGHTING_ATROUS_STAT + 3],
+        ran: mode_word != 0,
+    }
 }
 
 /// Whether the lighting has settled: the scene (camera included) has held still
@@ -274,6 +303,7 @@ impl Default for Lighting {
                 .unwrap_or(0.0),
             last_round: None,
             stats_round: [false; 2],
+            atrous_dirty: None,
         }
     }
 }
@@ -285,6 +315,19 @@ const LIGHTING_DENSE_RAYS: u32 = LIGHTING_ARGS + 2;
 const LIGHTING_DENSE_ENTRIES: u32 = LIGHTING_ARGS + 3;
 /// Word of the dispatch args in the cache keys (lighting_cache.glsl LIGHTING_ARGS_AT).
 const LIGHTING_ARGS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 17600;
+/// A-trous list metadata (lighting_cache.glsl LIGHTING_ATROUS_*). The threshold
+/// word is `lighting_atrous_ppm_at()`; the meta words follow it.
+const LIGHTING_CHECK_P_AT: u64 = LIGHTING_ARGS_AT + 16 + 3 * 65536 + 1024 + 32768;
+const LIGHTING_ATROUS_LIST_CAP: u64 = 65536;
+const LIGHTING_ATROUS_MARK_AT: u64 = LIGHTING_CHECK_P_AT + 16;
+const LIGHTING_ATROUS_LIST_AT: u64 = LIGHTING_ATROUS_MARK_AT + 5 * LIGHTING_CACHE_SLOTS;
+/// Sits after the compose words (`lighting_ckeys_words`); it used to start where
+/// `LIGHTING_COMPOSE_AT` starts, so the two regions aliased.
+fn lighting_atrous_ppm_at() -> u64 {
+    lighting_ckeys_words()
+}
+/// ppm, previous fraction, 64 filtered-texel bins, 5 level modes, 5 * 64 dense recount bins.
+const LIGHTING_ATROUS_META_WORDS: u64 = 1 + 1 + 64 + 5 + 5 * 64;
 const LIGHTING_PASS_NAMES: [&str; 9] = [
     "lighting compact",
     "lighting place",
@@ -643,8 +686,11 @@ impl Gpu {
         // Both queues use the light cache and the work buffer's ray slots.
         let share = self.light_families();
         if self.lighting.cache_keys.buffer.is_null() {
+            // The compose words and the a-trous meta must not alias the a-trous lists.
+            assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
+            assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
             self.lighting.cache_keys = self.make_buffer_queues(
-                lighting_ckeys_words() * 4, // quiet compose list and texel rects past the S78Z/S78X words
+                (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS) * 4, // a-trous meta after the S67/PR11 compose words // S78X: a-trous threshold, fraction, bins // S78Z: verify / wake words sit just before that // S78X lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
                 0x20 | 0x2 | 0x100 | 0x1,
                 Memory::Device,
                 &share,
@@ -808,6 +854,18 @@ impl Gpu {
         }
         self.read_lighting_stats(self.lighting.last_slot)
             .map_or(self.lighting.probe_samples, |w| [w[6], w[7]])
+    }
+
+    /// A-trous dirty fraction, mode and threshold for the last frame drawn.
+    /// Waits for that frame. The words are the `lightingatrous` line.
+    pub(crate) fn lighting_atrous_stats(&mut self) -> LightingAtrousStats {
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
+        let slot = self.lighting.last_slot;
+        self.read_stats16(self.lighting.stats[slot].memory)
+            .map(|w| lighting_atrous_from(&w))
+            .unwrap_or_default()
     }
 
     /// The picture has stopped changing: a frame drawn from held light has been
@@ -1176,17 +1234,34 @@ impl Gpu {
 
     /// Surface cache trace (GENOS_LIGHTING_SC_TRACE=1): one line per readback with the
     /// frame, frames still and the claimed / restarted / freed / at-cap counters.
+    /// `GENOS_LIGHTING_DEBUG` prints the a-trous line on its own.
     fn trace_sc(&self, memory: Handle, queue: &str) {
-        if std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_none() {
+        let trace = std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_some();
+        let debug = std::env::var_os("GENOS_LIGHTING_DEBUG").is_some();
+        if !trace && !debug {
             return;
         }
         if let Ok(w) = self.read_stats16(memory) {
+            if trace {
+                eprintln!(
+                    "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {} checks {} changed {}",
+                    self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23]
+                );
+                eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
+                eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
+            }
+            let mode = match w[LIGHTING_ATROUS_STAT + 1] {
+                1 => "list",
+                2 => "dense",
+                _ => "off",
+            };
             eprintln!(
-                "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {} checks {} changed {}",
-                self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23]
+                "lightingatrous {queue} frame {} dirty {:.4} mode {mode} threshold {:.4} filtered {}",
+                self.lighting.frame,
+                w[LIGHTING_ATROUS_STAT] as f64 / 1.0e6,
+                w[LIGHTING_ATROUS_STAT + 2] as f64 / 1.0e6,
+                w[LIGHTING_ATROUS_STAT + 3]
             );
-            eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
-            eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
         }
     }
 
@@ -1374,6 +1449,7 @@ impl Gpu {
         // Movers ride after the changes: upload them too (S49/S50L sent only the
         // head and changes, so every mover read zeros on the GPU).
         let used = 4 * sent;
+        let atrous_ppm = lighting_atrous_ppm(self.lighting.atrous_dirty);
         unsafe {
             // The last frame's passes are done with the block before it is written.
             self.memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000);
@@ -1383,6 +1459,15 @@ impl Gpu {
                 block_at,
                 used as u64 * 4,
                 block.as_ptr() as *const c_void,
+            );
+            // S78X: the a-trous dirty-fraction threshold (millionths). A cache
+            // clear earlier this frame zeroed the word; the levels read it.
+            (self.fns.cmd_update_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                lighting_atrous_ppm_at() * 4,
+                4,
+                &atrous_ppm as *const u32 as *const c_void,
             );
             self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
         }
@@ -1922,13 +2007,31 @@ fn lighting_stats_wanted() -> bool {
 const LIGHTING_DEFAULT_WORLD: u32 = 3;
 const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
 const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
-/// Lighting stats buffer: 24 words, diag[64], chg[32] (lighting_cache.glsl).
-const LIGHTING_STATS_WORDS: usize = 120;
+/// Lighting stats buffer: 24 words, diag[64], chg[32], then the a-trous fallback
+/// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`.
+/// The change-counter enable word stays chg[31] (word 119).
+const LIGHTING_STATS_WORDS: usize = 124;
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
-const LIGHTING_CHG_ENABLE_BYTE: u64 = (LIGHTING_STATS_WORDS as u64 - 1) * 4;
+const LIGHTING_CHG_ENABLE_WORD: u64 = 24 + 64 + 31;
+const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;
+const LIGHTING_ATROUS_STAT: usize = 120;
 /// S78S: the change counters (lighting_chg) run with GENOS_LIGHTING_SC_TRACE.
 fn lighting_chg_on() -> bool {
     std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_some()
+}
+
+/// `GENOS_LIGHTING_ATROUS_DIRTY` in millionths. Default 0.25: levels 1-5 keep
+/// the work lists while the fullest level is at or under a quarter of the
+/// filtered texels, and run the dense sweep above that. `0` is always dense,
+/// `1` keeps the lists up to the storage cap. `override_frac` wins (tests).
+fn lighting_atrous_ppm(override_frac: Option<f32>) -> u32 {
+    let frac = override_frac.unwrap_or_else(|| {
+        std::env::var("GENOS_LIGHTING_ATROUS_DIRTY")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.25)
+    });
+    (frac.clamp(0.0, 1.0) * 1_000_000.0).round() as u32
 }
 
 /// GENOS_LIGHTING_SC_FLAGS, default LIGHTING_DEFAULT_SC_FLAGS.

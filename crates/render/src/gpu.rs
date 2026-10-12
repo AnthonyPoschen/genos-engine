@@ -401,6 +401,19 @@ impl Renderer {
         self.gpu.lighting_probe_samples()
     }
 
+    /// Dirty-fraction threshold for the a-trous work lists. Overrides
+    /// `GENOS_LIGHTING_ATROUS_DIRTY` for later frames. `0` always runs the dense
+    /// sweep, `1` keeps the lists up to the storage cap.
+    pub fn set_lighting_atrous_dirty(&mut self, fraction: f32) {
+        self.gpu.lighting.atrous_dirty = Some(fraction.clamp(0.0, 1.0));
+    }
+
+    /// A-trous dirty fraction, chosen mode and threshold for the last frame
+    /// drawn. Waits for that frame.
+    pub fn lighting_atrous_stats(&mut self) -> LightingAtrousStats {
+        self.gpu.lighting_atrous_stats()
+    }
+
     /// How long each pipeline took to build, in build order.
     pub fn pipeline_times(&self) -> Vec<(String, Duration)> {
         self.gpu.pipeline_times.clone()

@@ -159,6 +159,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78R3](experiments/S78R3-gather-hold-on.md) | 2026-10-12 | Gather hold on (re-test) | pushed (rough; idle A/B 6am) | S78R3 |
 | [S78Y](experiments/S78Y-quiet-filter.md) | 2026-10-12 | Quiet probe filter | pushed (rough; idle A/B 6am) | S78Y |
 | [S78X](experiments/S78X-atrous-work-lists.md) | 2026-10-13 | A-trous levels run dirty work lists | pushed (rough; idle A/B) | S78X |
+| [S78X2](experiments/S78X2-atrous-dense-fallback.md) | 2026-10-12 | Dense a-trous when the dirty fraction is high | pushed | S78X2 |
 | [S78Z](experiments/S78Z-verify-ring-wakes.md) | 2026-10-13 | Probe verification + impact-tested ring wakes | not pushed (no fix; postmortem) | g78/S78Z-verify-ring-wakes.patch |
 | [S78T2](experiments/S78T2-texel-verify.md) | 2026-10-13 | Texel verification: rotating A-SVGF checks + ring wakes | not pushed (no healing; postmortem) | g78/S78T2-texel-verify.patch |
 | [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
@@ -197,7 +198,7 @@ The lighting has one name scheme, `lighting`, everywhere; "GI v2" survives only 
 No environment variable is needed: `make stress` and `make run` run the tuned defaults baked into the code (`LIGHTING_DEFAULT_WORLD` = 3, the surface cache; `LIGHTING_DEFAULT_SC_FLAGS` = 6007050). There is no lighting-selection switch (`GENOS_GI` is gone). The remaining variables are optional debug and tuning knobs:
 
 - Debug and traces: `GENOS_LIGHTING_DEBUG` (per-round counters; reads GPU counters back, so not for fps runs), `GENOS_LIGHTING_SC_TRACE` (surface cache claims and relights per readback), `GENOS_SCENE_DELTA` (resident scene and mesh field delta runs). The dump, the counters, the MCP commands, the stuck and pop checks, the headless path, and the overlays are inventoried in [the debug standard](debug-standard.md). That file is the reference other systems match.
-- Tuning (A/B only): `GENOS_LIGHTING_WORLD` (0 probe path P6, 3 surface cache), `GENOS_LIGHTING_SC_FLAGS`, `GENOS_LIGHTING_SC_LOCAL`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`, `GENOS_LIGHTING_TILE`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_FILL`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_ASYNC` (async compute light cache, off by default).
+- Tuning (A/B only): `GENOS_LIGHTING_WORLD` (0 probe path P6, 3 surface cache), `GENOS_LIGHTING_SC_FLAGS`, `GENOS_LIGHTING_SC_LOCAL`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`, `GENOS_LIGHTING_TILE`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_FILL`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_ASYNC` (async compute light cache, off by default), `GENOS_LIGHTING_ATROUS_DIRTY` (a-trous work-list dirty fraction, default 0.25; `0` dense sweep, `1` lists up to the cap).
 
 Older entries below quote the names of their time (`GENOS_GI2_*`); read them through the table.
 
@@ -510,3 +511,22 @@ read-modify-writes to the cell tables in VRAM. The sums and outputs are the same
 (only the summation order differs). Cell table 1 no longer holds the distance
 sums afterwards (the filter overwrites it). Gather time: 1.25 -> 0.91 ms still,
 1.62 -> 0.95 ms moving. No added VRAM.
+
+### S78X2: dense a-trous when the dirty fraction is high
+
+S78X's work lists help a still scene (~5-18k dirty texels of ~108k filtered:
+the million-thread dispatch returns after one uniform read) and regress a
+moving one. Each mark does a contended `atomicAdd` on that level's single
+counter, and the dispatch then walks slots in append order, so the 5x5 taps
+lose the coalescing of the dense slot sweep. The 65536 cap falls back only
+after that compaction, and only when the list overflows. S78A had already been
+rejected for the same locality cost.
+
+Levels 1-5 now keep the lists while last frame's fullest level was at or under
+`GENOS_LIGHTING_ATROUS_DIRTY` (default 0.25 of the filtered texels) and run the
+dense sweep above it. `0` is always dense, `1` is the S78X lists up to the
+cap. The decision is last frame's fraction: the mark that crosses the line is
+already inside the filter. `GENOS_LIGHTING_DEBUG` or `GENOS_LIGHTING_SC_TRACE`
+prints `lightingatrous` (dirty fraction, mode `list`/`dense`, threshold,
+filtered count). Owner's S78X moving regression, RTX 4070, 1920x1080: a-trous
+6.6 -> 9.4 ms, 42 -> 37 fps. This fallback is not re-timed here.
