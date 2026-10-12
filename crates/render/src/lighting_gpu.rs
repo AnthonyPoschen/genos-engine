@@ -186,10 +186,11 @@ pub(crate) struct Lighting {
     /// the light hash and whether it took young patches only.
     stats_light: [u64; 2],
     stats_young: [bool; 2],
-    /// S78S debug dump (GENOS_LIGHTING_DUMP=N, GENOS_LIGHTING_DUMP_DIR): the raw
-    /// cache, cache keys, work, G-buffer and output buffers copied at frames N and
-    /// N + 1 (one readback set each), written to disk a few frames later. Never
-    /// on in the normal loop; perf/dump.py splits them into per-component files.
+    /// S78S debug dump (GENOS_LIGHTING_DUMP, GENOS_LIGHTING_DUMP_DIR): the raw
+    /// cache, cache keys, work, G-buffer and output buffers. One frame number
+    /// copies that frame and the next; a comma-separated list copies exactly
+    /// those frames. Written to disk a few frames later. Never on in the normal
+    /// loop; perf/dump.py splits a pair into per-component files.
     dump: Vec<(u64, Vec<(&'static str, Buffer)>)>,
     world_light: u64,
     world_young: bool,
@@ -1809,14 +1810,14 @@ impl Gpu {
         self.lighting_dump_copy();
     }
 
-    /// S78S: frames N and N + 1 (GENOS_LIGHTING_DUMP): copy the lighting buffers
-    /// into readback buffers at the end of the frame's passes.
+    /// S78S: copy the lighting buffers into readback buffers at the end of a
+    /// frame GENOS_LIGHTING_DUMP names. One number is that frame and the next
+    /// (the pair dump.py diffs). A comma-separated list is those frames only.
     fn lighting_dump_copy(&mut self) {
-        let Some(n) = std::env::var("GENOS_LIGHTING_DUMP").ok().and_then(|v| v.parse::<u64>().ok()) else {
+        let Ok(spec) = std::env::var("GENOS_LIGHTING_DUMP") else {
             return;
         };
-        let f = self.lighting.frame as u64;
-        if f != n && f != n + 1 {
+        if !lighting_dump_frame(&spec, self.lighting.frame as u64) {
             return;
         }
         let srcs: [(&'static str, Handle, u64); 5] = [
@@ -2274,4 +2275,49 @@ fn lighting_toggles() -> u32 {
         };
     }
     bits
+}
+
+/// True when `spec` (GENOS_LIGHTING_DUMP) names `frame`.
+///
+/// One number names that frame and the next, so a diff still has a pair. A
+/// comma-separated list names those frames and no neighbours.
+fn lighting_dump_frame(spec: &str, frame: u64) -> bool {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return false;
+    }
+    if spec.contains(',') {
+        return spec.split(',').filter_map(|v| v.trim().parse::<u64>().ok()).any(|n| n == frame);
+    }
+    match spec.parse::<u64>() {
+        Ok(n) => frame == n || frame == n + 1,
+        Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod dump_frame_tests {
+    use super::lighting_dump_frame;
+
+    #[test]
+    fn one_number_copies_that_frame_and_the_next() {
+        assert!(lighting_dump_frame("10", 10));
+        assert!(lighting_dump_frame("10", 11));
+        assert!(!lighting_dump_frame("10", 9));
+        assert!(!lighting_dump_frame("10", 12));
+        assert!(lighting_dump_frame("  10 ", 11));
+    }
+
+    #[test]
+    fn a_list_copies_exactly_those_frames() {
+        assert!(lighting_dump_frame("10,20", 10));
+        assert!(lighting_dump_frame("10,20", 20));
+        assert!(!lighting_dump_frame("10,20", 11));
+        assert!(!lighting_dump_frame("10, 21", 20));
+        assert!(lighting_dump_frame("10, 21", 21));
+        assert!(lighting_dump_frame("10,", 10));
+        assert!(!lighting_dump_frame("10,", 11));
+        assert!(!lighting_dump_frame("", 0));
+        assert!(!lighting_dump_frame("nope", 0));
+    }
 }
