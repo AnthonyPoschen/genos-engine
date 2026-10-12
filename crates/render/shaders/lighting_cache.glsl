@@ -2752,6 +2752,15 @@ uint lighting_atrous_list(uint k) {
 // needed probes, so the count needs no clear and no readback.
 const uint LIGHTING_DP_TILE_AT = LIGHTING_ATROUS_LIST_AT + 5u * (LIGHTING_ATROUS_LIST_CAP + 1u);
 const uint LIGHTING_DP_TILES = 65536u;
+// Hit-light queue (dynamic-perf-plan item A). 2^21 uvec2 entries, then the
+// counter, then indirect args x, y, z and the frozen entry count. The host
+// allocation (lighting_gpu.rs LIGHTING_CKEYS_WORDS) ends at ARGS_AT + 4.
+// Nothing reads these until the hit-light pass is dispatched.
+const uint LIGHTING_CKEYS_TAIL = LIGHTING_ATROUS_LIST_AT + 5u * (LIGHTING_ATROUS_LIST_CAP + 1u) + 6u * 65536u + 16u;
+const uint LIGHTING_HIT_QUEUE_CAP = 1u << 21u;
+const uint LIGHTING_HIT_QUEUE_AT = LIGHTING_CKEYS_TAIL;
+const uint LIGHTING_HIT_QUEUE_COUNT_AT = LIGHTING_HIT_QUEUE_AT + 2u * LIGHTING_HIT_QUEUE_CAP;
+const uint LIGHTING_HIT_ARGS_AT = LIGHTING_HIT_QUEUE_COUNT_AT + 1u;
 void lighting_dp_tile(uvec2 p) {
     if (LIGHTING_DIAG == 0) {
         return;

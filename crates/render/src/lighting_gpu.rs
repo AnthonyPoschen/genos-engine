@@ -254,6 +254,27 @@ const LIGHTING_DENSE_RAYS: u32 = LIGHTING_ARGS + 2;
 const LIGHTING_DENSE_ENTRIES: u32 = LIGHTING_ARGS + 3;
 /// Word of the dispatch args in the cache keys (lighting_cache.glsl LIGHTING_ARGS_AT).
 const LIGHTING_ARGS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 17600;
+/// Words in cache_keys before the hit-light queue. Same formula as
+/// lighting_cache.glsl LIGHTING_CKEYS_TAIL (the a-trous lists, then the spare).
+const LIGHTING_CKEYS_TAIL: u64 = 2 * LIGHTING_CACHE_SLOTS
+    + 2
+    + 17600
+    + 16
+    + 3 * 65536
+    + 1024
+    + 32768
+    + 16
+    + 5 * LIGHTING_CACHE_SLOTS
+    + 5 * 65537
+    + 6 * 65536
+    + 16;
+/// Hit-light queue: 2^21 uvec2 entries (16 MiB), a counter, then indirect args
+/// (x, y, z) and the frozen entry count. Nothing reads them until later steps.
+const LIGHTING_HIT_QUEUE_CAP: u64 = 1 << 21;
+const LIGHTING_HIT_QUEUE_AT: u64 = LIGHTING_CKEYS_TAIL;
+const LIGHTING_HIT_QUEUE_COUNT_AT: u64 = LIGHTING_HIT_QUEUE_AT + 2 * LIGHTING_HIT_QUEUE_CAP;
+const LIGHTING_HIT_ARGS_AT: u64 = LIGHTING_HIT_QUEUE_COUNT_AT + 1;
+const LIGHTING_CKEYS_WORDS: u64 = LIGHTING_HIT_ARGS_AT + 4;
 const LIGHTING_PASS_NAMES: [&str; 9] = [
     "lighting compact",
     "lighting place",
@@ -612,8 +633,10 @@ impl Gpu {
         // Both queues use the light cache and the work buffer's ray slots.
         let share = self.light_families();
         if self.lighting.cache_keys.buffer.is_null() {
+            // The descriptor range is the whole buffer (u64::MAX), so growing this
+            // allocation grows what the shaders can address.
             self.lighting.cache_keys = self.make_buffer_queues(
-                (2 * LIGHTING_CACHE_SLOTS + 2 + 17600 + 16 + 3 * 65536 + 1024 + 32768 + 16 + 5 * LIGHTING_CACHE_SLOTS + 5 * 65537 + 6 * 65536 + 16) * 4, // S78Z: + verify / wake words // S78X: + a-trous marks and work lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
+                LIGHTING_CKEYS_WORDS * 4, // S78Z spare, S78X lists, S76D checks, S74A epochs, S70A args, S72J pages, then the hit-light queue
                 0x20 | 0x2 | 0x100 | 0x1,
                 Memory::Device,
                 &share,
