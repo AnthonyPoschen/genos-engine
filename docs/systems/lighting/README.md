@@ -153,6 +153,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78R](experiments/S78R-held-probe-gather-skip.md) | 2026-10-12 | Gather skip for held probes | rejected | g78/S78R.patch |
 | [S78S](experiments/S78S-counters-still-churn.md) | 2026-10-12 | Debug counters: what keeps still probes awake | pushed (debug tooling) + finding | S78S |
 | [S78U](experiments/S78U-check-ray-noise-test.md) | 2026-10-12 | Held check ray is a test, not a rewrite | pushed | S78U |
+| [S78V](experiments/S78V-se-stop-rule.md) | 2026-10-12 | SE stop rule for texels | rejected (noise) | g78/S78V.patch |
 | [WAKE](experiments/WAKE-neighbour-wake-design.md) | 2026-10-12 | Anthony's wake design: no wakes from shared field; real change wakes neighbours by coarse-to-fine ring tests w | planned (approved by Anthony) | none yet |
 | [DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md) | 2026-10-12 | S-curve allowed quality lag for off-screen pages by priority | deferred | none |
 | [DUMP](experiments/DUMP-gpu-dump-tool.md) | 2026-10-12 | Debug dump of GPU data from two consecutive frames per component (direct, bounce, coarse/fine WRC, probe resul | in progress | none yet |
