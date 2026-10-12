@@ -613,7 +613,7 @@ impl Gpu {
         let share = self.light_families();
         if self.lighting.cache_keys.buffer.is_null() {
             self.lighting.cache_keys = self.make_buffer_queues(
-                (2 * LIGHTING_CACHE_SLOTS + 2 + 17600 + 16 + 3 * 65536 + 1024 + 32768 + 16) * 4, // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
+                (2 * LIGHTING_CACHE_SLOTS + 2 + 17600 + 16 + 3 * 65536 + 1024 + 32768 + 16 + 5 * LIGHTING_CACHE_SLOTS + 5 * 65537 + 6 * 65536 + 16) * 4, // S78Z: + verify / wake words // S78X: + a-trous marks and work lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
                 0x20 | 0x2 | 0x100 | 0x1,
                 Memory::Device,
                 &share,

@@ -20,6 +20,11 @@ void main() {
     if (lighting_world_mode() == 3u && lighting_sc_pages_on()) {
         lighting_sc_page_clear(slot);
     }
+    // S78X: this round's a-trous lists start empty (marks come from the
+    // variance stage on).
+    if (LIGHTING_ATROUS_LISTS && slot < 5u) {
+        ckeys.key[lighting_atrous_list(slot + 1u)] = 0u;
+    }
     if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
         return;
     }

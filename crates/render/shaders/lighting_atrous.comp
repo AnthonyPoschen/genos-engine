@@ -7,6 +7,17 @@ layout(local_size_x = 64) in;
 
 void main() {
     uint slot = gl_GlobalInvocationID.x;
+    // S78X: levels 1-5 run their work list (lighting_svgf_mark).
+    uint stage0 = lighting_atrous_stage();
+    if (LIGHTING_DIRTY_ATROUS && LIGHTING_ATROUS_LISTS && stage0 >= 1u && stage0 <= 5u) {
+        uint cnt = ckeys.key[lighting_atrous_list(stage0)];
+        if (cnt <= LIGHTING_ATROUS_LIST_CAP) {
+            if (slot >= cnt) {
+                return;
+            }
+            slot = ckeys.key[lighting_atrous_list(stage0) + 1u + slot];
+        }
+    }
     if (slot >= LIGHTING_CACHE_SLOTS || !lighting_sc_svgf() || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
         return;
     }

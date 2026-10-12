@@ -101,8 +101,17 @@ const uint CHG_TEX_D0 = 17u;
 // Kept-hit light writes by where the hit's bounce came from (lighting_cache_
 // irradiance_at): fine texel, coarse patch lit, none, coarse unlit -> parent,
 // coarse unlit -> neighbours; then changed ones the same.
-const uint CHG_KB_FINE = 21u;
+const uint CHG_KB_FINE = 21u; // S78Z: 21-30 are the verify / wake counters (CHG_V_*)
 const uint CHG_KC_FINE = 26u;
+const uint CHG_V_TESTS = 21u;    // verification probes tested (rotating set)
+const uint CHG_V_FAILS = 22u;    // ... whose surface impact passed their noise bound
+const uint CHG_W_SEEDED = 23u;   // wakes seeded (ring probes stamped)
+const uint CHG_W_CAPPED = 24u;   // wakes dropped by the per-frame cap
+const uint CHG_W_TESTS = 25u;    // woken probes tested
+const uint CHG_W_FAILS = 26u;    // ... that passed the wake on
+const uint CHG_W_DEDUPE = 27u;   // ring probes already woken by this event
+const uint CHG_V_RELIT = 28u;    // kept hits relit by verification / wakes
+const uint CHG_W_HOPS = 29u;     // sum of hop depth of woken probes (chain size)
 uint lighting_bounce_path = 2u;
 // S78S debug isolate toggles (lighting_gpu.rs lighting_toggles): head 3.w bits 12-15.
 uint lighting_toggles() {
@@ -2688,6 +2697,8 @@ const vec3 LIGHTING_SVGF_LW = vec3(0.2126, 0.7152, 0.0722);
 // are held until they add up past it (bounded 1 % lag).
 const bool LIGHTING_DIRTY_ATROUS = true;
 const float LIGHTING_DIRTY_EPS = 0.01;
+const bool LIGHTING_DIRTY_NOISE = false; // S78X: off (lum a 0.348 -> 0.345, a lag toward darker)
+const float LIGHTING_DIRTY_SE = 2.0;
 const uint LIGHTING_SC_LVL_AT = 15u * LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_SC_DIRTY_AT = 21u * LIGHTING_CACHE_SLOTS;
 uint lighting_svgf_lvl(uint k) {
@@ -2702,9 +2713,28 @@ bool lighting_svgf_is_dirty(uint s, uint k) {
     vec4 d = cache.v[LIGHTING_SC_DIRTY_AT + (w >> 2u) * LIGHTING_CACHE_SLOTS + s];
     return floatBitsToUint(d[w & 3u]) == lighting_frame();
 }
+// S78X quiet a-trous: work lists. A mark of level k (1-5) appends the slot to
+// that level's list once a frame (atomic exchange on a per-slot, per-level
+// stamp); the level's dispatch then runs only the listed slots (one uniform
+// count read for the rest), instead of every thread of 1M slots reading its
+// stamps. Still scene: ~5-18k dirty slots a level against 1M. A list past
+// LIGHTING_ATROUS_LIST_CAP falls back to the full sweep (stamps as before).
+const bool LIGHTING_ATROUS_LISTS = true;
+const uint LIGHTING_ATROUS_LIST_CAP = 65536u;
+const uint LIGHTING_ATROUS_MARK_AT = LIGHTING_CHECK_P_AT + 16u;
+const uint LIGHTING_ATROUS_LIST_AT = LIGHTING_ATROUS_MARK_AT + 5u * LIGHTING_CACHE_SLOTS;
+uint lighting_atrous_list(uint k) {
+    return LIGHTING_ATROUS_LIST_AT + (k - 1u) * (LIGHTING_ATROUS_LIST_CAP + 1u);
+}
 void lighting_svgf_mark(uint s, uint k) {
     if (s == ~0u) {
         return;
+    }
+    if (LIGHTING_ATROUS_LISTS && atomicExchange(ckeys.key[LIGHTING_ATROUS_MARK_AT + (k - 1u) * LIGHTING_CACHE_SLOTS + s], lighting_frame()) != lighting_frame()) {
+        uint at = atomicAdd(ckeys.key[lighting_atrous_list(k)], 1u);
+        if (at < LIGHTING_ATROUS_LIST_CAP) {
+            ckeys.key[lighting_atrous_list(k) + 1u + at] = s;
+        }
     }
     uint w = k - 1u;
     cache.v[LIGHTING_SC_DIRTY_AT + (w >> 2u) * LIGHTING_CACHE_SLOTS + s][w & 3u] = uintBitsToFloat(lighting_frame());
@@ -2771,6 +2801,18 @@ void lighting_svgf_variance(uint slot) {
         // 7 x 7 inputs moved (stamp 22.z), not every frame.
         if (spatial ? (!lighting_svgf_moved(v, vo, o, vo) && !lighting_svgf_stamp_recent(slot, 2u)) : !lighting_svgf_moved(v, var, o, vo)) {
             return;
+        }
+        // S78X: noise-aware level 0 (Anthony: rewrite thresholds from the
+        // texel's own noise, not a fixed %): a texel whose new mean is within
+        // LIGHTING_DIRTY_SE standard errors of the stored one, same mask, keeps
+        // the stored value; refinement inside its own noise no longer dirties
+        // the five levels around it.
+        if (LIGHTING_DIRTY_NOISE && !spatial && abs(v.w - o.w) <= LIGHTING_DIRTY_EPS) {
+            vec2 nz = lighting_sc_noise(slot);
+            float dl = abs(dot(v.rgb - o.rgb, vec3(0.2126, 0.7152, 0.0722)));
+            if (nz.x >= 0.0 && dl <= LIGHTING_DIRTY_SE * nz.y * lighting_sc_sun_gain(slot)) {
+                return;
+            }
         }
     }
     if (var < 0.0) {
