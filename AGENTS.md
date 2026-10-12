@@ -44,6 +44,8 @@ Finish a Rust change only after `cargo build --workspace` and the tests for the 
 
 Before you change a system, rewrite a system, or add a game feature that uses one, read `docs/systems/README.md` and the matching system file. When the goal, the intent, the game use, or a limit changes, edit that system file in the same change.
 
+Every new system is designed with networking in mind. Before writing that system's plan, read `docs/systems/core-networking/plan.md` and the networking row in `docs/agent-rubric.md`. The plan states replicated state, authority, prediction or rollback, determinism, and headless server behavior. The implementing commit copies those five lines into the system record.
+
 ## Proof
 
 Before you implement the first scene, read `docs/goals/mvp-scene.md`.

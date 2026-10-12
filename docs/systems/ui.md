@@ -97,6 +97,16 @@ The graph has no pan, no zoom, and no free scroll. Pause holds the current windo
 
 The graph draws one point per 250 ms average, joined by 2 px lines (`ProfileView.segments`, drawn as thin quads in the overlay draw). It does not draw one point per frame.
 
+The expansion into a full set of UI elements is planned in [plan.md](ui/plan.md). This record stays the behavior that is in the crate today. The crate does not open a socket. Dirty rectangles are not in this tree. PR #5 adds `DamageTracker`, and the plan marks every step that reads it with **requires #5**.
+
+The plan's networking contract, stated here for the rubric:
+
+- Replicated state: an element is local, or the caller copies one component field (`Pose`, `Health`, or `StunUntil`) from an entity. Gesture, focus, and theme stay off the snapshot.
+- Authority: the authority runtime writes replicated components. The element emits an event. The caller builds the command or the notice.
+- Prediction / rollback: the owned pose may show a predicted value beside the snapshot value. `Health` and `StunUntil` show the snapshot value. This crate does not roll back a simulation.
+- Determinism: the same tree, state, and frame arguments produce the same paints and the same inspector rows.
+- Headless server: the authority runtime draws no UI. Gallery tests do not bind a UDP socket.
+
 ## Decisions
 
 - [ADR 0006](../adr/0006-editor-is-linux-first.md) fits the editor to Omarchy first.
