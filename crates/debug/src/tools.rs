@@ -322,7 +322,8 @@ impl Tools {
         self.quit = Some(code);
     }
 
-    /// Rectangles the tools draw over the picture (probe markers).
+    /// Rectangles from the `overlay` command. They stay until the next call,
+    /// so the example can draw them and report the change as UI damage.
     pub fn overlay(&self) -> &[ScreenRect] {
         &self.overlay
     }
@@ -387,7 +388,8 @@ impl Tools {
         });
         let look = self.reading.map_or(self.look, |s| s.look);
         ctx.renderer.set_debug_view(look.view);
-        self.overlay.clear();
+        // The overlay command replaces this list. The example reads it after
+        // before_draw returns; clearing it here drops the rectangles before the draw.
         self.reading.is_some()
     }
 
