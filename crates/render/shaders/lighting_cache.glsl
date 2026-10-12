@@ -290,9 +290,6 @@ const uint LIGHTING_SC_OBJ_AT = 6u * LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_SC_SUN_AT = 7u * LIGHTING_CACHE_SLOTS;
 // S72A sparse fill per slot: x non-zero once promoted to its own rays.
 const uint LIGHTING_SC_SPARSE_AT = 8u * LIGHTING_CACHE_SLOTS;
-// S72B ReSTIR GI reservoir per slot: chosen sample's radiance x (rgb9e5) and
-// direction y (oct), its contribution weight z (W), the samples it stands for w (M).
-const uint LIGHTING_SC_RES_AT = 9u * LIGHTING_CACHE_SLOTS;
 // Frame of a texel's last relight (0: never), beside its object id.
 // S62E global light scale (Anthony: day to night, unread texels kept daytime
 // light and faded as rays came in). The pixel's own direct light is already
@@ -512,7 +509,6 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
             cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(0.0);
             cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(0.0);
             cache.v[LIGHTING_SC_SPARSE_AT + slot] = vec4(0.0);
-            cache.v[LIGHTING_SC_RES_AT + slot] = vec4(0.0);
             if (lighting_world_mode() == 3u) {
                 cache.v[LIGHTING_SC_OBJ_AT + slot] = vec4(lighting_obj_salt, 0.0, 0.0, 0.0);
             }
@@ -1246,78 +1242,6 @@ vec4 lighting_sc_sparse(uint slot, float step) {
         return vec4(0.0);
     }
     return vec4(sum / ws, 1.0);
-}
-
-// S72B ReSTIR GI-style reuse (Ouyang et al. 2021) on the surface cache: each
-// fine texel keeps a one-sample reservoir of its rays (target: luminance x
-// cosine). A relight resamples this round's rays, its own reservoir from earlier
-// rounds (temporal) and two same-surface neighbours' (spatial), then blends the
-// resampled estimate into the set's plain mean. Validation: history (own and
-// neighbours') is dropped under a local change or changing light, neighbours
-// must be coplanar, same size, lit; M is capped. Flag 33554432 turns it off.
-const float LIGHTING_SC_RES_MCAP = 64.0;
-const float LIGHTING_SC_RES_MIX = 0.5;
-bool lighting_sc_restir_on() {
-    return lighting_world_mode() == 3u && (lighting_sc_flags() & 33554432u) == 0u;
-}
-struct LightingRes {
-    vec3 l;
-    vec3 d;
-    float wsum;
-    float m;
-};
-float lighting_res_target(vec3 l, vec3 d, vec3 n) {
-    return dot(l, vec3(0.2126, 0.7152, 0.0722)) * max(dot(d, n), 0.0);
-}
-void lighting_res_add(inout LightingRes r, vec3 l, vec3 d, float w, float m, float u) {
-    r.wsum += w;
-    r.m += m;
-    if (w > 0.0 && u * r.wsum < w) {
-        r.l = l;
-        r.d = d;
-    }
-}
-// Merge a stored reservoir (W in z) into r, re-targeted to normal n.
-void lighting_res_merge(inout LightingRes r, uint slot, vec3 n, float u) {
-    vec4 v = cache.v[LIGHTING_SC_RES_AT + slot];
-    float m = min(v.w, LIGHTING_SC_RES_MCAP);
-    if (m < 0.5 || !(v.z > 0.0) || v.z > 1.0e6) {
-        return;
-    }
-    vec3 l = lighting_unpack_rgb9e5(floatBitsToUint(v.x));
-    vec3 d = lighting_unpack_normal(floatBitsToUint(v.y));
-    lighting_res_add(r, l, d, lighting_res_target(l, d, n) * v.z * m, m, u);
-}
-// Two same-surface neighbours (1-2 texels away, random), validated.
-void lighting_res_spatial(inout LightingRes r, uint slot, vec3 n, uint h) {
-    vec3 p = cache.v[3u * slot].xyz;
-    float size = cache.v[3u * slot + 1u].w;
-    if (size <= 0.0 || size > 0.2) {
-        return;
-    }
-    uint ax = lighting_axis(n) >> 1u;
-    uint ua = (ax + 1u) % 3u;
-    uint ub = (ax + 2u) % 3u;
-    float salt = lighting_obj_salt;
-    lighting_obj_salt = cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5 ? cache.v[LIGHTING_SC_OBJ_AT + slot].x : 0.0;
-    [[dont_unroll]] for (uint i = 0u; i < 2u; i++) {
-        uint hi = lighting_hash(h + 101u * i);
-        float a = LIGHTING_TAU * lighting_unit(hi);
-        float rad = (1.0 + lighting_unit(hi ^ 0x5bd1e995u)) * size;
-        vec3 q = p;
-        q[ua] += cos(a) * rad;
-        q[ub] += sin(a) * rad;
-        uint s2 = lighting_cache_find_sized(q, n, false, size, p);
-        if (s2 == ~0u || s2 == slot) {
-            continue;
-        }
-        vec4 nb2 = cache.v[3u * s2 + 1u];
-        if (abs(dot(cache.v[3u * s2].xyz - p, n)) > 0.5 * size || dot(nb2.xyz, n) < 0.95 || cache.v[3u * s2 + 2u].w < 0.5) {
-            continue;
-        }
-        lighting_res_merge(r, s2, n, lighting_unit(hi ^ 0x27d4eb2fu));
-    }
-    lighting_obj_salt = salt;
 }
 
 // Surface cache: what a texel shows (w 0 when it has nothing yet).
