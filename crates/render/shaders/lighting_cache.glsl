@@ -2432,13 +2432,22 @@ bool lighting_ic_site(uint slot) {
     ivec2 c = lighting_sc_cell(slot).xy;
     return (c.x & (g - 1)) == 0 && (c.y & (g - 1)) == 0;
 }
+// The texels layer 2 filters: WRC cells, and fine texels a pixel showed in
+// the last half second (as S72P) [inferred: SVGF filters only the visible pixels].
+bool lighting_svgf_active(uint s) {
+    if (cache.v[3u * s + 1u].w > 0.2) {
+        return true;
+    }
+    uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + s].z);
+    return shown != 0u && int(lighting_frame() - shown) <= 30;
+}
 // Layer-1 input: rgb, luminance variance (-1 unknown), mask weight.
 vec4 lighting_svgf_in(uint s, out float var) {
     vec4 own = cache.v[3u * s + 2u];
     float t = floor(max(own.w, 0.0));
     var = -1.0;
     bool wrc = cache.v[3u * s + 1u].w > 0.2;
-    if (t < 0.5) {
+    if (t < 0.5 || !lighting_svgf_active(s)) {
         return vec4(0.0);
     }
     if (!wrc && !lighting_ic_site(s)) {
@@ -2626,17 +2635,11 @@ void lighting_svgf_push(uint slot) {
         if (grad > 1.0e-6) {
             r = min(r, e / grad);
         }
-        // R_geo: twice the distance to where the surface ends.
-        [[dont_unroll]] for (uint d = 0u; d < 4u; d++) {
-            ivec2 dir = d == 0u ? ivec2(1, 0) : (d == 1u ? ivec2(-1, 0) : (d == 2u ? ivec2(0, 1) : ivec2(0, -1)));
-            [[dont_unroll]] for (uint l = 1u; l <= 4u; l++) {
-                int dist = 1 << l;
-                if (lighting_sc_cell_slot(slot, dir * dist) == ~0u) {
-                    r = min(r, 2.0 * float(dist));
-                    break;
-                }
-            }
-        }
+        // S72V2: no R_geo term. Texels exist only where pixels see the surface,
+        // so a missing neighbour is not where the surface ends; S72V's "twice
+        // the distance to a missing texel" held R at 4-8 cells everywhere and
+        // nothing thinned [deviation: Ward's harmonic mean ray distance would
+        // need the per-ray hit distances kept].
         // Neighbour clamping (Krivanek 2006, 5.2), against the stored R 4 cells away.
         [[dont_unroll]] for (uint d = 0u; d < 4u; d++) {
             ivec2 dir = d == 0u ? ivec2(4, 0) : (d == 1u ? ivec2(-4, 0) : (d == 2u ? ivec2(0, 4) : ivec2(0, -4)));

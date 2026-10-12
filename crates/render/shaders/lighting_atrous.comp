@@ -12,6 +12,14 @@ void main() {
     }
     lighting_obj_salt = cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5 ? cache.v[LIGHTING_SC_OBJ_AT + slot].x : 0.0;
     uint stage = lighting_atrous_stage();
+    if (!lighting_svgf_active(slot)) {
+        if (stage == 0u) {
+            // No data for the levels: mask 0 in both ping-pong buffers.
+            lighting_svgf_store(LIGHTING_SC_ATROUS_A, slot, vec3(0.0), 0.0, 0.0);
+            lighting_svgf_store(LIGHTING_SC_ATROUS_B, slot, vec3(0.0), 0.0, 0.0);
+        }
+        return;
+    }
     if (stage == 0u) {
         lighting_svgf_variance(slot);
     } else if (stage <= 5u) {
