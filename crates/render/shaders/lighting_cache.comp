@@ -34,8 +34,13 @@ void main() {
         // they fill what the young leave of the batch; the histogram restarts.
         if (lighting_world_mode() == 3u && LIGHTING_SC_SCHED) {
             lighting_wrc_note_lamps();
-            if (lighting_wrc_scout_due()) {
-                atomicAdd(gstats.scouts, LIGHTING_WRC_SCOUT_ENTRIES * LIGHTING_CACHE_RAYS);
+            // RAYCEIL: last round's young-cell trickle demand, for fair service
+            // next compact. Cleared here (the CPU does not zero that word). The
+            // async cache round has no args pass, so this lives with the relight.
+            ckeys.key[LIGHTING_CHECK_P_AT + 4u] = ckeys.key[LIGHTING_WRC_TRICKLE_DEMAND_AT];
+            ckeys.key[LIGHTING_WRC_TRICKLE_DEMAND_AT] = 0u;
+            if (lighting_wrc_scout_count() > 0u) {
+                atomicAdd(gstats.scouts, lighting_wrc_scout_count() * LIGHTING_CACHE_RAYS);
             }
             lighting_ls_note();
             uint room = lighting_sc_room() >> lighting_sc_budget_shift();
@@ -132,9 +137,13 @@ void main() {
         vec3 lk = lighting_ray_light(v);
         // S74A: the ray a later gradient check re-traces (same seed): one of
         // the last quarter's, turning with the rounds.
-        if (LIGHTING_SC_ASVGF && !wrc_cell && lighting_world_mode() == 3u && k == (run - 1u) * LIGHTING_CACHE_RAYS + lighting_round() % LIGHTING_CACHE_RAYS) {
+        if (LIGHTING_SC_ASVGF && lighting_world_mode() == 3u && k == (run - 1u) * LIGHTING_CACHE_RAYS + lighting_round() % LIGHTING_CACHE_RAYS) {
             uint qk = (q0 + run - 1u) * LIGHTING_CACHE_RAYS + lighting_round() % LIGHTING_CACHE_RAYS;
             cache.v[LIGHTING_SC_GRAD_AT + slot].yzw = vec3(dot(lk, vec3(0.2126, 0.7152, 0.0722)), uintBitsToFloat(rkey), uintBitsToFloat(qk));
+            // RAYCEIL: this ray is a known baseline for the next same-seed check.
+            if (wrc_cell) {
+                cache.v[LIGHTING_SC_GRAD2_AT + slot].x = uintBitsToFloat(lighting_frame());
+            }
         }
         e += lk * c;
         el += dot(lk, vec3(0.2126, 0.7152, 0.0722)) * c;
@@ -235,10 +244,7 @@ void main() {
         }
         vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * min(wa, 1.0);
         lighting_tex_put(slot, vec4(mean, min(t + add, LIGHTING_WRC_CAP)));
-        // S76B: a refresh is the cell's check (lighting_wrc_check_take).
-        if (old.w >= 0.5) {
-            lighting_wrc_check_take(slot, e, old.rgb);
-        }
+        // RAYCEIL: the check is the separate one-ray retrace, not this sample.
         return;
     }
     if (lighting_world_mode() == 3u) {

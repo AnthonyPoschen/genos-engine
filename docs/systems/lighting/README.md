@@ -53,7 +53,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Pixels read surface-cache texels directly (Lumen reads the cache only at ray hits).
 - Running-mean / MSME texels to a cap instead of Lumen's 4-frame accumulation.
 - IC placement as a trace rate on a power-of-two grid, not records in space; no R_geo; grad E from the filtered field; constants inferred (S72V).
-- A-SVGF lambda drives ray counts (A-SVGF has no ray-count rule); checks are measurement only (S74A, S76).
+- A-SVGF lambda drives ray counts (A-SVGF has no ray-count rule); checks are measurement only (S74A, S76, RAYCEIL on the world cache).
 - Shadow visibility shared per 12.5 cm cell for hits, invalidated per lamp range (S74A).
 - 1-in-16 push refresh floor (S78B); kept-hit bounce refreshed with its re-trace (S78D); held strata keep exact directions (S78K).
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
@@ -166,7 +166,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [WAKE](experiments/WAKE-neighbour-wake-design.md) | 2026-10-12 | Anthony's wake design: no wakes from shared field; real change wakes neighbours by coarse-to-fine ring tests w | planned (approved by Anthony) | none yet |
 | [DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md) | 2026-10-12 | S-curve allowed quality lag for off-screen pages by priority | deferred | none |
 | [DUMP](experiments/DUMP-gpu-dump-tool.md) | 2026-10-12 | Debug dump of GPU data from two consecutive frames per component (direct, bounce, coarse/fine WRC, probe resul | in progress | none yet |
-| [RAYCEIL](experiments/RAYCEIL-world-cache-need-ray-ceilings.md) | 2026-10-12 | World-cache cells stop at IC error bound instead of fixed 128 samples | queued | none |
+| [RAYCEIL](experiments/RAYCEIL-world-cache-need-ray-ceilings.md) | 2026-10-12 | World-cache ray count is a per-cell ceiling from an A-SVGF check | pushed | this change |
 | [QUIET](experiments/QUIET-quiet-paths-compose-filter-compact.md) | 2026-10-12 | Quiet paths for compose, filter, compact (changed tiles + rotating checks) | queued | none |
 | [LSMOOTH](experiments/LSMOOTH-lighter-smoothing.md) | 2026-10-12 | Lighter smoothing | dropped (Anthony) | none |
 
@@ -465,14 +465,38 @@ recomputed. A confirming check also restarts the age of a signature-changed
 entry. Timing unchanged at 600 frames (still 11.52, moving 18.7 ms); it removes
 an age-only recompute wave every 600 frames. No new memory.
 
+### RAYCEIL: world-cache ray count follows the check
+
+A world-cache cell past `LIGHTING_WRC_YOUNG` samples (16) does not keep taking
+64-ray sets until `LIGHTING_WRC_CAP` (128). When its check is due it retraces
+one stored ray (A-SVGF, same seed). Within noise (`lambda < 0.05` after
+subtracting twice the check's own standard deviation, Schied et al. 2019) it
+takes no extra rays and the next check waits twice as long, from 8 frames up
+to 128. Past that, `lambda` is written to the cell and the 3×3 of 25 cm cells
+around it, and the next round's ray ceiling is `ceil(4 * lambda / 0.25)`
+sixteens (one to four entries, 16 to 64 rays). The refresh budget
+(`LIGHTING_WRC_REFRESH` entries) is a ceiling: escalations are listed first and
+the rest of the ceiling stays empty. Cells still under 16 samples that
+something read, and that lost the reveal burst, share 64 sixteen-ray entries a
+round (a trickle, fair across the demand). A still camera shoots 4 scout
+entries a round instead of the full 256 every eighth round. No new buffers and
+no CPU readback in the frame loop. Not measured on this machine.
+
+[deviations: A-SVGF uses lambda for the blend, not the ray count; the check ray
+is not accumulated (A-SVGF reuses it, SHaRC accumulates); the 3×3 is the world
+grid, not screen pixels; the noise test replaces Ward's irradiance-cache error
+bound (cells do not keep per-ray hit distances); Lumen and SHaRC spend a fixed
+world-cache budget every frame.]
+
 ### S78F: stale WRC cells take a check, not a whole set
 
-A WRC cell older than LIGHTING_WRC_REFRESH_FRAMES (180) was given a whole set
+A WRC cell older than 180 frames was given a whole set
 from the background list on age alone (607 cells a frame in the still scene).
-It now takes the S77A 16-ray check when its deferred check is due (confirm
-doubles the deferral, a miss escalates to a set). Growing cells (below their
-cap, read) are unchanged here. Still 11.52 -> 11.20 ms, moving 18.7 ms; pop
-0.073 / 0.110 %. No new memory.
+S78F made that a 16-ray check when its deferred check was due (confirm doubles
+the deferral, a miss escalates to a set). Growing cells (below their cap, read)
+were unchanged here. Still 11.52 -> 11.20 ms, moving 18.7 ms; pop
+0.073 / 0.110 %. No new memory. RAYCEIL replaces both the age check and the
+growth-to-cap: one same-seed ray, extra rays only in proportion to the change.
 
 ### S78J: per-pixel direct light reused in quiet frames
 
