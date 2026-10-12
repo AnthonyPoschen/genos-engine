@@ -31,4 +31,11 @@ Each record uses these headings:
 - [Scripting](scripting.md) owns Rhai for games and mods.
 - [Debugging](debugging.md) owns the debug commands, scripts, captures and the ground-truth reference.
 
+## Plans
+
+These are plans. They are not system records. A step edits the matching record when it changes a goal, an intent, a game use, or a limit.
+
+- [Asset plan](assets/plan.md): import, the cook, the cache, streaming, packaging, and pre-fractured chunks.
+- [Rendering extras plan](rendering/extras-plan.md): materials, shadows outside the lighting pass, particles, post, terrain, foliage, water, sky, decals, and culling.
+
 The crate map and the frame loop are in [Architecture](../architecture.md). The words are in `CONTEXT.md`.
