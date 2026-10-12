@@ -56,6 +56,14 @@ pub(crate) struct FrameReuse {
     pub seen_key: Option<u64>,
     /// This frame's key matches `seen_key` from the frame before.
     pub key_stable: bool,
+    /// The swapchain is already showing this scene and UI.
+    pub screen_ok: bool,
+    /// The last draw did not present.
+    pub skipped: bool,
+    /// The last draw submitted a command buffer.
+    pub submitted: bool,
+    /// Skipped frames that submitted nothing, counted toward the `GPU_MS` print.
+    pub quiet_skips: u32,
     pub stats: ReuseStats,
 }
 
@@ -78,6 +86,10 @@ impl Default for FrameReuse {
             slot_key: [0, 0],
             seen_key: None,
             key_stable: false,
+            screen_ok: false,
+            skipped: false,
+            submitted: false,
+            quiet_skips: 0,
             stats: ReuseStats::default(),
         }
     }

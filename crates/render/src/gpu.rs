@@ -339,6 +339,7 @@ impl Renderer {
             self.gpu.reuse.cached_key = None;
             self.gpu.reuse.verify_ok = false;
             self.gpu.reuse.scene_ready = false;
+            self.gpu.reuse.screen_ok = false;
         }
         self.gpu.reuse.key_stable = self.gpu.reuse.seen_key == Some(next_key);
         self.gpu.reuse.seen_key = Some(next_key);
@@ -356,6 +357,9 @@ impl Renderer {
         self.gpu.wire_on = wireframe;
         self.gpu.copy_picture = readback || self.keep_pictures;
         self.gpu.record_and_submit(&matrix)?;
+        if self.gpu.reuse.skipped {
+            return Ok(None);
+        }
         let pixels = if readback {
             self.gpu.wait_gpu()?;
             Some(self.gpu.read_color()?)
@@ -367,6 +371,8 @@ impl Renderer {
             self.gpu.recreate(self.width, self.height)?;
             self.width = self.gpu.extent_w;
             self.height = self.gpu.extent_h;
+        } else {
+            self.gpu.reuse.screen_ok = true;
         }
         Ok(pixels)
     }
@@ -393,7 +399,13 @@ impl Renderer {
         let cpu = start.elapsed();
         self.gpu.profile_submit = false;
         let pixels = drawn?;
-        let gpu = self.gpu.collect_submitted_if_ready()?;
+        // Verification still submits, so its timestamp span is the GPU time.
+        // Zero is only a frame that submitted nothing.
+        let gpu = if self.gpu.reuse.skipped && !self.gpu.reuse.submitted {
+            Some(Duration::ZERO)
+        } else {
+            self.gpu.collect_submitted_if_ready()?
+        };
         Ok((pixels, DrawProfile { cpu, gpu }))
     }
 
@@ -433,6 +445,16 @@ impl Renderer {
         self.sync_fields(world)?;
         self.gpu.upload_scene(&pack)?;
         Ok(())
+    }
+
+    /// The last draw did not present. Lighting verification may still have been submitted.
+    pub fn frame_skipped(&self) -> bool {
+        self.gpu.reuse.skipped
+    }
+
+    /// Counts since the last `FRAME_REUSE` print, or since the renderer opened.
+    pub fn reuse_stats(&self) -> crate::reuse::ReuseStats {
+        self.gpu.reuse.stats
     }
 
     /// The picture has stopped changing: the lighting holds its light and a frame
@@ -1787,6 +1809,22 @@ impl Gpu {
         self.reuse.scene_layout = 0;
         self.reuse.verify_ok = false;
         self.reuse.slot_verified = [false, false];
+        self.reuse.screen_ok = false;
+    }
+
+    /// A skipped frame submitted nothing. Print `FRAME_REUSE` on the same cadence
+    /// as `GPU_MS` when that timer is on, since this path never reaches it.
+    fn note_quiet_skip(&mut self) {
+        let every = self.gpu_times.as_ref().map(|times| times.every).unwrap_or(0);
+        if every == 0 {
+            return;
+        }
+        self.reuse.quiet_skips = self.reuse.quiet_skips.saturating_add(1);
+        if self.reuse.quiet_skips < every {
+            return;
+        }
+        self.reuse.quiet_skips = 0;
+        emit_frame_reuse(&mut self.reuse.stats);
     }
 
     /// This flight's fence has been waited, so its capture of the scene picture is done.
@@ -1820,6 +1858,7 @@ impl Gpu {
             self.reuse.cached_key = None;
             self.reuse.generation = self.reuse.generation.wrapping_add(1);
             self.reuse.scene_ready = false;
+            self.reuse.screen_ok = false;
             return;
         }
         if !same || !ran {
@@ -2051,24 +2090,43 @@ impl Gpu {
                 self.reuse.cached_key = None;
                 self.reuse.verify_ok = false;
             }
+            let keep = self.reuse_scene();
+            // The swapchain already shows this picture. Present is skipped; lighting
+            // verification still runs when the passes are on.
+            let skip_present = keep
+                && self.reuse.screen_ok
+                && self.reuse.frame_damage.is_empty()
+                && !self.copy_picture;
+            self.reuse.skipped = false;
+            self.reuse.submitted = false;
             self.desc_set = self.raster_sets[slot];
+            if skip_present && !self.lighting_active() {
+                self.reuse.stats.skipped = self.reuse.stats.skipped.wrapping_add(1);
+                self.reuse.skipped = true;
+                self.note_quiet_skip();
+                return Ok(());
+            }
             check(
                 (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
                 "reset fence",
             )?;
             let mut index = 0u32;
-            let acquire = (self.fns.acquire)(
-                self.device,
-                self.swapchain,
-                u64::MAX,
-                self.image_ready,
-                std::ptr::null_mut(),
-                &mut index,
-            );
-            if acquire == OUT_OF_DATE {
-                return Err("out of date".into());
+            if !skip_present {
+                let acquire = (self.fns.acquire)(
+                    self.device,
+                    self.swapchain,
+                    u64::MAX,
+                    self.image_ready,
+                    std::ptr::null_mut(),
+                    &mut index,
+                );
+                if acquire == OUT_OF_DATE {
+                    return Err("out of date".into());
+                }
+                check(acquire, "acquire")?;
+                // The new image is not on screen until present succeeds.
+                self.reuse.screen_ok = false;
             }
-            check(acquire, "acquire")?;
             check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
             #[repr(C)]
             struct BeginInfo {
@@ -2095,16 +2153,20 @@ impl Gpu {
             self.frame_stamp(slot, FrameStamp::Start);
             self.update_resident_scene();
             self.update_resident_fields();
-            let swap = self.swap_images[index as usize];
-            self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
-            if self.reuse_scene() {
+            if !skip_present {
+                let swap = self.swap_images[index as usize];
+                self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
+            }
+            if keep {
                 if self.lighting_active() {
                     self.lighting_begin(slot);
                     self.lighting_passes(slot, true);
                 }
                 self.frame_stamp(slot, FrameStamp::Raster);
                 self.frame_stamp(slot, FrameStamp::Resolve);
-                self.repair_reused_color(slot);
+                if !skip_present {
+                    self.repair_reused_color(slot);
+                }
             } else {
                 let lighting = self.lighting_active();
                 if lighting {
@@ -2134,12 +2196,15 @@ impl Gpu {
                 }
             }
             self.frame_stamp(slot, FrameStamp::Overlay);
-            self.copy_color_to_swapchain(swap);
-            // The host copy is a whole picture over the bus; only a readback pays it.
-            if self.copy_picture {
-                self.copy_color_to_buffer();
+            if !skip_present {
+                let swap = self.swap_images[index as usize];
+                self.copy_color_to_swapchain(swap);
+                // The host copy is a whole picture over the bus; only a readback pays it.
+                if self.copy_picture {
+                    self.copy_color_to_buffer();
+                }
+                self.image_barrier(swap, 7, 1000001002, 0x1000, 0x2000, 0x1000, 0);
             }
-            self.image_barrier(swap, 7, 1000001002, 0x1000, 0x2000, 0x1000, 0);
             self.frame_stamp(slot, FrameStamp::Copy);
             if profiled {
                 // Bottom of pipe, after the draw and the copies.
@@ -2162,19 +2227,33 @@ impl Gpu {
                 signals: *const Handle,
             }
             let wait_sem = [self.image_ready];
-            let wait_count = 1u32;
             let signal_sem = [self.render_done];
             let cmd = [self.cmd];
+            // A skipped present did not acquire, so it must not wait on image_ready
+            // or signal render_done. The fence still covers the verification work.
+            let wait_count = u32::from(!skip_present);
             let submit = Submit {
                 s_type: 4,
                 next: std::ptr::null(),
                 wait_count,
-                waits: wait_sem.as_ptr(),
-                stages: wait_stage.as_ptr(),
+                waits: if skip_present {
+                    std::ptr::null()
+                } else {
+                    wait_sem.as_ptr()
+                },
+                stages: if skip_present {
+                    std::ptr::null()
+                } else {
+                    wait_stage.as_ptr()
+                },
                 cmd_count: 1,
                 cmds: cmd.as_ptr(),
-                signal_count: 1,
-                signals: signal_sem.as_ptr(),
+                signal_count: wait_count,
+                signals: if skip_present {
+                    std::ptr::null()
+                } else {
+                    signal_sem.as_ptr()
+                },
             };
             check(
                 (self.fns.queue_submit)(
@@ -2185,7 +2264,13 @@ impl Gpu {
                 ),
                 "submit",
             )?;
-            self.present_index = index;
+            self.reuse.submitted = true;
+            if skip_present {
+                self.reuse.skipped = true;
+                self.reuse.stats.skipped = self.reuse.stats.skipped.wrapping_add(1);
+            } else {
+                self.present_index = index;
+            }
             let status = (self.fns.fence_status)(self.device, self.fence);
             self.submit_pending = status == 1;
             if profiled {
@@ -2335,6 +2420,8 @@ impl Gpu {
             f.iter().sum::<f64>(),
             n / seconds,
         );
+        emit_frame_reuse(&mut self.reuse.stats);
+        self.reuse.quiet_skips = 0;
         if times.lighting_frames > 0 && std::env::var_os("GENOS_GPU_DISPATCH").is_some() {
             let lf = f64::from(times.lighting_frames);
             let parts: Vec<String> = times.lighting_disp.iter().enumerate().map(|(i, (p, ms))| format!("{i}:{p}={:.3}", ms / lf)).collect();
@@ -5042,6 +5129,19 @@ impl Gpu {
         }
         *buffer = Buffer::empty();
     }
+}
+
+fn emit_frame_reuse(stats: &mut crate::reuse::ReuseStats) {
+    let stats_now = *stats;
+    eprintln!(
+        "FRAME_REUSE scene_drawn={} ui_repaired={} full_restore={} skipped={} rects={}",
+        stats_now.scene_drawn,
+        stats_now.ui_repaired,
+        stats_now.full_restore,
+        stats_now.skipped,
+        stats_now.rects
+    );
+    *stats = crate::reuse::ReuseStats::default();
 }
 
 fn copy_image(image: &Image) -> Image {
