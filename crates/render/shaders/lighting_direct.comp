@@ -115,7 +115,7 @@ bool lighting_dp_diverge_skip(uint idx) {
 
 // The default compilation is the shipped direct pass. -DLIGHTING_HIT_QUEUE is
 // the hit-light pass. -DLIGHTING_HIT_ENQUEUE is the direct pass that queues
-// light-cache-ray misses and lights everything else inline. Each compilation
+// GI-hit misses and lights cache hits and pixels inline. Each compilation
 // has one trace_occluded call.
 #if defined(LIGHTING_HIT_QUEUE) || defined(LIGHTING_HIT_ENQUEUE)
 void lighting_direct_shade(
@@ -245,12 +245,12 @@ void main() {
 #elif defined(LIGHTING_HIT_ENQUEUE)
 void main() {
 #include "lighting_direct_classify.glsl"
-    // Light-cache rays only. Kept hits and fills still finish in this pass.
-    bool cache_ray = idx >= pixels && !probe_hit;
-    if (((pc.params.y >> 16u) & 1u) != 0u && cache_ray
+    // Every GI hit. Pixels stay in this pass.
+    if (((pc.params.y >> 16u) & 1u) != 0u && idx >= pixels
         && lighting_hit_needs_queue(origin, n, list, count, two_sided, tdl)) {
         // The consumer reads mode-0 indices: pixels, kept, cache rays, fills.
-        // Mode 1's fill range overlaps the cache rays; cache rays are not fills.
+        // Mode 1 numbers fills where mode 0 numbers cache rays, so a fill is
+        // stored past the cache-ray range.
         uint qidx = idx;
         if (lighting_mode() == 1u && fill_hit) {
             qidx += LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS;

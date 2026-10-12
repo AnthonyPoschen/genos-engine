@@ -28,7 +28,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 
 `gi-v2` at 8c763bb2 (S78P): still 8.21 ms / 105 fps, moving 18.7 ms / 51 fps (RTX 4070, stress scene). Pipeline: two-layer surface cache (layer 1 traced texels with MSME accumulator; layer 2 SVGF a-trous + pull-push, never fed back), world radiance cache (25 cm cells) for ray hits, sparse screen probes with held strata and check rays, Lumen-style texel direct-light cache for GI hits, per-pixel traced direct light reused in quiet frames, A-SVGF same-seed checks gating rays.
 
-Plan for moving lamps and moving assets (not yet built; measurement first): [dynamic-perf-plan.md](dynamic-perf-plan.md).
+Plan for moving lamps and moving assets: [dynamic-perf-plan.md](dynamic-perf-plan.md). Phase 0 instrumentation and item A (hit-light queue, off unless `GENOS_LIGHTING_HIT_QUEUE=1`) are in. Measure on the 4070 before the rest.
 
 ## Principles and rules (Anthony)
 
@@ -165,6 +165,8 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
 | [S78B2](experiments/S78B2-msme-time-floor.md) | 2026-10-13 | Time-based MSME catch-up floor | not pushed (no healing; postmortem) | g78/S78B2-msme-time-floor.patch |
 | [S78H2](experiments/S78H2-sharc-read-16.md) | 2026-10-13 | SHaRC read rule 16 sets for fine short hits | not pushed (no effect; postmortem) | g78/S78H2-sharc-read-16.patch |
+| [DP0](experiments/DP0-instrumentation.md) | 2026-10-12 | Dynamic-scene counters and the GI-hit divergence test | measurement build, not run here | DP0 |
+| [DP-A](experiments/DP-A-hit-light-queue.md) | 2026-10-12 | GI-hit shadow misses in their own dispatch (`GENOS_LIGHTING_HIT_QUEUE`) | built, not measured | DP-A |
 | [WAKE](experiments/WAKE-neighbour-wake-design.md) | 2026-10-12 | Anthony's wake design: no wakes from shared field; real change wakes neighbours by coarse-to-fine ring tests w | planned (approved by Anthony) | none yet |
 | [DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md) | 2026-10-12 | S-curve allowed quality lag for off-screen pages by priority | deferred | none |
 | [DUMP](experiments/DUMP-gpu-dump-tool.md) | 2026-10-12 | Debug dump of GPU data from two consecutive frames per component (direct, bounce, coarse/fine WRC, probe resul | in progress | none yet |

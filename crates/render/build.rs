@@ -40,7 +40,7 @@ fn main() {
         &out.join("lighting_direct_queue.comp.spv"),
         &["LIGHTING_HIT_QUEUE=1"],
     );
-    // Direct pass that queues light-cache-ray misses. Bound only when the
+    // Direct pass that queues GI-hit misses. Bound only when the
     // hit-light toggle is on, so the shipped pipeline stays the variant above.
     let direct_enqueue = compile_with(
         "shaders/lighting_direct.comp",
