@@ -51,7 +51,7 @@ The next pipeline is [physics/plan.md](physics/plan.md). That file is a plan. It
 
 The step does not replicate. Gameplay networking waits ([Architecture](../architecture.md)). The contract the pipeline will meet:
 
-- Replicated state: awake poses and the sleep bit, vehicle chassis and wheel speeds, pre-fracture seeds (or the asset hash when the file is already local), bond-break events.
+- Replicated state: awake poses and the sleep bit, vehicle chassis and wheel speeds, pre-fracture seeds (or the asset hash when the file is already local), bond-break events, gravity sources (`GM`, clamp, influence, attachment). Scene-script gravity volumes stay local, like walls.
 - Authority: the server owns body state. The owning client sends input for the view body.
 - Prediction / rollback: the owned view body only. Vehicles, other dynamics, and destruction interpolate.
 - Determinism: one process, the fixed `1/60` step, single-thread `step`. Cross-platform bit identity is not required.

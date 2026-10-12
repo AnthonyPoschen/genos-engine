@@ -2,7 +2,7 @@
 
 > **For agentic workers:** Implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
 
-**Goal:** Replace the single discrete contact pass with a physics pipeline that can run a large world, a person, a vehicle, a fast ship, and a pre-fractured breakable, with work gated by what is awake, and with a server-authoritative replication contract for each of those systems.
+**Goal:** Replace the single discrete contact pass with a physics pipeline that can run a large world, a person, a vehicle, a fast ship, a pre-fractured breakable, and a space scene with moving gravity wells, with work gated by what is awake, and with a server-authoritative replication contract for each of those systems.
 
 **Architecture:** Rigid bodies stay on the CPU. A layered AABB tree feeds GJK/EPA manifolds into a soft-step solver. Islands sleep. Characters, vehicles, CCD, and destruction are opt-in on that pipeline. Poses of awake bodies are the only per-frame upload. A GPU solver waits on a profile. Offline Voronoi fracture builds the chunk asset; the step only swaps and simulates the broken branch. The server owns body state. The owning client predicts the view body and rolls that body back. Vehicles and destruction replicate as snapshots and events. Each of those systems has a debug binary with the lighting command, script, screenshot, and metrics path.
 
@@ -15,7 +15,7 @@ Written against `gi-v2` parent `e61b89d`. This file does not change `step`.
 - ADR 0007. No Rapier, Parry, nalgebra, Jolt, PhysX, Blast, or Chaos crate. Those engines are the design source. The code stays in this repository.
 - ADR 0009. Rhai stays the game script. The fracture tool and the headless tests are Rust.
 - `genos-math` stays `f32`. Wide positions live in the physics crate. [Math](../math.md) says there is no `f64` path in that crate.
-- Y is up. Gravity defaults to `GRAVITY` = `(0, -9.81, 0)`. Lengths are metres, mass is kilograms, time is seconds.
+- Y is up for the room proof. `World::new(GRAVITY)` keeps the uniform field `(0, -9.81, 0)` so the existing free-fall test stays valid. Space scenes set that field to zero and add gravity sources. Lengths are metres, mass is kilograms, time is seconds.
 - The frame interval is the measured `dt`. The camera already caps one frame at 0.25 s (`crates/scene/src/camera.rs`). Do not add a minimum step count, a minimum active set, or a minimum GPU dispatch. An asleep world does no narrowphase and no solver work.
 - The physics schedule inside an accumulated frame is a fixed `1/60` s step, matching `update` in `crates/scene/src/camera.rs`. Sub-steps divide that step. They do not rerun the broadphase.
 - The character controller is the action map in `crates/input/src/action.rs` (`character_controller`). It is not a body. The simulated capsule is a body. Do not rename one to the other. `CONTEXT.md` defines both.
@@ -95,6 +95,7 @@ The character controller (`crates/input/src/action.rs`, `character_controller`) 
 | Foot plant | No skeleton. | Ray or shape cast, two-bone IK, pelvis offset, slope alignment, wired to the view body and the action map. |
 | Vehicles | The push spring is the only suspension-like force. | Ray or shape-cast wheels, spring-damper, slip friction, torque curve, gearbox, differential, anti-roll bar. Separate 6-DOF thrusters, zero gravity, large-orbit precision. |
 | Scale | Hundreds of static pillars in one test. `f32` world positions. | Thousands of active bodies, origin shift, awake-only GPU poses, a CPU solver that does not touch the asleep set. |
+| Gravity | One uniform vector on the world. | Per-body field from moving sources, inverse-square with a clamp and a sphere of influence, volume overrides, local up, wide-orbit integration, source replication. |
 | Destruction | A mesh collider is a few convex pieces. | Offline Voronoi chunks, interior faces, hierarchy, bond graph, hot-swap, one damage API, debris sleep and cull. Runtime slicing only when asked. |
 | Networking | No gameplay net. The loopback MCP endpoint edits the live scene. [Architecture](../../architecture.md) says gameplay networking waits. | Server authority, owned-body prediction and rollback, quantized replication, vehicle snapshots, fracture asset id plus bond-break events. |
 | Debug | `genos-stress` is the lighting binary: one command set over MCP, HTTP, and Rhai; scripts; knobs; screenshots; `report.md`. | The same shape for rigid bodies, the view body, vehicles, and fracture, plus a shared scene catalog and a reset. |
@@ -106,6 +107,7 @@ The character controller (`crates/input/src/action.rs`, `character_controller`) 
 - GPU-resident where it pays. Awake poses and spawned chunk meshes live in a buffer the renderer can read. The CPU writes a delta when the awake set changes. The solver stays on the CPU until the gate at the end of this plan.
 - No fixed per-frame floor. Variable frame `dt`, fixed physics step only when time has accumulated, zero solver iterations when nothing is awake.
 - The server tick is that same `1/60` s step. A client renders between snapshots. It does not invent a second physics rate.
+- Gravity samples only the sources whose sphere of influence contains the body. No sources and a uniform field is the current step: no tree, no extra pass.
 
 ## Networking
 
@@ -135,6 +137,8 @@ Replication is dirty tracking on the P25 pose buffer. An asleep body with an unc
 | Destruction break | `BondBreak { breakable, bond, amount_milli, tick }` | The chunk meshes. Clients rebuild them from the asset |
 | Slice | `Slice { breakable, chunk, normal_i16, offset_mm, tick }` when `allow_slice` is set | The clip result, rebuilt from the plane |
 | Debris | Awake debris poses, under the same interest budget the core-networking plan applies | Asleep debris. Cull stays local |
+| Gravity source | `GravitySourceId`, `GM` as `f64` bits, clamp radius, influence radius, attachment `NetId` or a wide position. Clients recompute acceleration from these | Per-body acceleration, the octree, contact gravity scratch |
+| Gravity override | A volume attached to a body: kind, uniform vector or spin rate. A volume placed by the scene script is content, like a wall | The sampled field |
 
 Quantized fields are what reconciliation compares. The solver keeps `f32`.
 
@@ -176,9 +180,9 @@ The model is [Debugging](../debugging.md): one command set, the same JSON over M
 
 | System | Binary | Default scenes | Knobs | View modes |
 | --- | --- | --- | --- | --- |
-| Rigid bodies, CCD, islands | `genos-physics-view` | `stack`, `pile_4k`, `asleep_grid`, `ship_impact` | `dt_scale`, `solver` (`soft` or `sequential`), `substeps`, `sleep` | `bodies`, `contacts`, `islands`, `sleep`, `sweeps` |
-| View body and foot plant | `genos-character-view` | `view_stairs`, `foot_slope` | `step_height`, `stick`, `wish_speed` | `bodies`, `casts`, `feet`, `prediction` |
-| Vehicles | `genos-vehicle-view` | `car_flat`, `car_bump`, `orbit`, `ship_impact` | `throttle`, `gear`, `mu`, `anti_roll` | `bodies`, `wheels`, `sweeps` |
+| Rigid bodies, CCD, islands, gravity | `genos-physics-view` | `stack`, `pile_4k`, `asleep_grid`, `ship_impact`, `gravity_well` | `dt_scale`, `solver` (`soft` or `sequential`), `substeps`, `sleep`, `gravity_scale` | `bodies`, `contacts`, `islands`, `sleep`, `sweeps`, `gravity` |
+| View body and foot plant | `genos-character-view` | `view_stairs`, `foot_slope`, `gravity_well` | `step_height`, `stick`, `wish_speed` | `bodies`, `casts`, `feet`, `prediction` |
+| Vehicles | `genos-vehicle-view` | `car_flat`, `car_bump`, `orbit`, `ship_impact` | `throttle`, `gear`, `mu`, `anti_roll` | `bodies`, `wheels`, `sweeps`, `gravity` |
 | Fracture | `genos-fracture-view` | `destruction_wall`, `ship_station` | `debris_budget`, `bond_health`, `allow_slice` | `bodies`, `bonds`, `chunks` |
 
 Shared commands, same arguments on every binary: `physics_metrics`, `take_screenshot`, `time` (pause, step, fixed step), `knob`, `reset`, `scene`, `view`. `reset` restores the catalog start, including bond health, gear, and the prediction ring. `key_r` calls that command. It is not added to `character_controller()`.
@@ -196,6 +200,64 @@ These tests are in-process. They do not bind a UDP socket. The session binary ca
 - `vehicle_bytes_are_the_chassis_and_the_wheels`
 - `bond_breaks_replicate_without_the_mesh`
 - `replicated_checksum_ignores_foot_plant`
+
+## Gravity
+
+`World.gravity` stays the uniform field. `World::new(GRAVITY)` is the room. A body with no sources in range accelerates by that vector alone, which is what `free_fall_matches_half_gt_squared_and_gt` already checks. Sources and overrides add a per-body field. Kinematic bodies still ignore gravity.
+
+### Sources
+
+A source is a planet, a moon, a ship, or a black hole. It has a wide position, or it is attached to a `BodyId` and reads that body's wide position every step. `GM` is m³/s². The acceleration at a wide point is toward the source:
+
+`a = GM / r_eff²`, `r_eff = max(distance, clamp_radius)`.
+
+`clamp_radius` keeps the center finite. A black hole is this same falloff with a small clamp and a large `GM`. There is no event horizon and no relativity. Past `influence` (the sphere of influence) the contribution is zero. Overlapping spheres add, in `GravitySourceId` order, so the sum is deterministic. An override volume replaces that sum inside itself. It does not add to it.
+
+### Overrides
+
+| Kind | Acceleration inside the volume |
+| --- | --- |
+| Zero | `0`. A cabin, a hollow moon, a zero-g bay. |
+| Uniform | A fixed vector in the volume's local frame. Artificial gravity on a ship. |
+| Spin | Centrifugal acceleration in the rotating frame: `ω²` times the distance from the axis, pointing away from the axis. The floor is the outer hull. Local up points toward the axis. |
+
+The innermost containing volume wins. Volumes may be attached to a body so a spinning station and a ship's deck move with it.
+
+### Local up
+
+`local_up` is `-normalize(a)` when `|a| > 0.05` m/s². Below that the last up is kept, and the room default is world `+Y`. The character controller stays the action map. The view body turns `move` into a wish on the plane perpendicular to local up: forward is the look direction projected onto that plane. The capsule segment aligns to local up. Foot casts go along `-local_up`. A uniform `GRAVITY` field still has up along `+Y`, so the room camera does not change.
+
+### Orbits
+
+Free bodies (no contact) integrate in `f64` with velocity Verlet, which is the symplectic kick-drift for this field:
+
+`v += a(x) * dt / 2`, `x += v * dt`, `a = field(x)`, `v += a * dt / 2`.
+
+The `f32` pose is that wide position minus `World::origin`. Bodies in contact take one sample of `a` per sub-step and feed it to the existing semi-implicit solver as their gravity vector. P32's private orbit helper becomes this path. Its `1e7` m circular-orbit test stays.
+
+A moving source wakes a sleeper when the sampled acceleration differs from the value stored at sleep by more than `0.05` m/s².
+
+### Many sources
+
+A source with a finite influence radius is stored by that sphere. A body queries the spheres that contain it. Sources outside the query are not evaluated. With no sources in range the query returns the uniform field and builds nothing.
+
+Sources with infinite influence, and only when more than 32 of them are awake, use a Barnes-Hut octree on their `GM`. A cell is walked into when `size / distance > theta`, with `theta = 0.5`. Otherwise the cell's monopole is one source. Finite-influence sources stay on the sphere query and are not folded into the tree. The tree is rebuilt when a source moves. An asleep body outside every finite sphere is not a query.
+
+### Replication
+
+Sources are server state. The client does not invent `GM`. The snapshot carries the source parameters in the table above. The client evaluates `gravity_at` from those parameters and from scene-script volumes, the same way it builds static walls locally. During owned-body rollback the field uses the source positions from the snapshot at that tick. Planets are not resimulated inside the replay.
+
+`replicated_checksum` includes the source parameters. Two worlds with the same sources and the same wide positions produce the same `f64` acceleration in one process.
+
+### Scene and the field view
+
+`gravity_well` is one catalog scene with three lanes:
+
+- A circular orbit at `1e4` m around a fixed source, uniform field `0`.
+- A slingshot past a kinematic moon.
+- A small planet, radius `100` m, surface gravity `9.81` (`GM = 98100`), a view body walking on the side of the sphere, a zero-g box just off the surface, and a spin habitat.
+
+`genos-physics-view` view mode `gravity` draws a grid of arrows on the view plane (length from `gravity_scale` and the log of `|a|`), a wire sphere for each influence radius, and the override volumes. `examples/physics-view/scripts/gravity_well.rhai` selects that view, shots the frame, and checks the metrics. `genos-character-view` loads the same scene for the walk. `genos-vehicle-view` keeps `orbit` and can select `gravity` too.
 
 ## Locked names
 
@@ -254,6 +316,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 | `crates/physics/src/upload.rs` | Awake pose buffer. From step 25. |
 | `crates/physics/src/replicate.rs` | Quantized poses, bond events, checksum. From step 42. |
 | `crates/physics/src/predict.rs` | Owned-body ring and rollback. From step 43. |
+| `crates/physics/src/gravity.rs` | Sources, overrides, field query, wide Verlet. From step 47. |
 | `crates/physics/src/vehicle.rs` | Wheeled vehicle and thrusters. From step 27. |
 | `crates/physics/src/destruction.rs` | Runtime breakable, hot-swap, debris. From step 36. |
 | `crates/physics/src/contact.rs` | Stays until step 9. Analytic oracles stay in tests. |
@@ -546,7 +609,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 ### P32. Thrusters and a large orbit
 
 - [ ] **Files:** `vehicle.rs`. Test `crates/physics/tests/vehicle.rs`.
-- **Behavior:** A thruster is a local position, a local direction, and a max force. Throttle is 0 to 1. Force and torque (`r × F`) are applied to the chassis. Gravity may be zero. The orbit helper integrates `WidePos` with `f64` and `GM` (m³/s²): acceleration `-GM * r / |r|³`. It does not use `Body.position` for the integration state. After each physics step the body pose is the orbit state minus `World::origin`.
+- **Behavior:** A thruster is a local position, a local direction, and a max force. Throttle is 0 to 1. Force and torque (`r × F`) are applied to the chassis. Gravity may be zero. The orbit helper integrates `WidePos` with `f64` and `GM` (m³/s²): acceleration `-GM * r / |r|³`, velocity Verlet as in the gravity section. It does not use `Body.position` for the integration state. After each physics step the body pose is the orbit state minus `World::origin`. P52 turns this helper into a gravity source. This test stays green after that.
 - **Test:** `a_thruster_in_zero_gravity_matches_force_and_torque`
   - Mass 1 000 kg, force 1 000 N through the center, 1 second, gravity 0. Velocity equals `(1, 0, 0)` ± `1e-3`. A second thruster at local `(0, 2, 0)` pushing +X produces angular velocity about Z of `torque / inertia` within 1% (inertia is the box inertia from P1).
 - **Test:** `a_circular_orbit_at_1e7_metres_keeps_its_radius`
@@ -629,11 +692,14 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 | `car_flat` | Physics | P29 car, throttle 1, gear 0. |
 | `car_bump` | Physics | P30 one-side step. |
 | `orbit` | Physics | P32 orbit, gravity 0, a second ship at a nearby wide position. |
+| `gravity_well` | Physics | A fixed source with a circular orbit, a kinematic moon for a slingshot, a 100 m planet with a walker, a zero-g box, and a spin habitat. |
 | `ship_impact` | Physics | Four lanes of P19, speeds 30, 120, 600, 3 000. |
 | `destruction_wall` | Physics | Two columns of the P35 asset. Left column is struck by a sphere. Right column takes `apply_damage` on the matching bond at frame 30. `debris_budget` 8. |
 | `ship_station` | Physics | One swept ship at 600 m/s and a supported wall of chunks. |
 | `camera_room` | Room | `examples/camera/scene.rhai`. |
 | `stress_room` | Room | `examples/stress/scenes/room.rhai`. |
+
+`gravity_well` is registered in P54. The P40 order test covers the rows that exist in that commit. P54 extends the list.
 
 - **Test:** `every_physics_scene_steps_and_the_named_gates_hold`
   - Catalog names are unique and in the table order. `run("drop", 10)` is finite and a second `run` hashes equal.
@@ -710,9 +776,82 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Test:** `examples/character-view/tests/args.rs` (and the same parse test in the vehicle and fracture packages): `--script scripts/foot_slope.rhai --report out` sets `script` and `report`. `crates/scenes/tests/catalog.rs` asserts `physics_metrics` for `foot_slope`, `ship_impact`, and `destruction_wall` still carry `passed`.
 - **Commit:** `debug: add character, vehicle, and fracture view binaries`
 
+### P47. Inverse-square sources
+
+- [ ] **Files:** `crates/physics/src/gravity.rs`. Test `crates/physics/tests/gravity.rs`. Record the field in `docs/systems/physics.md`. `CONTEXT.md` gains gravity source in this commit.
+- **Behavior:** `gravity_at(wide) -> Vec3` in the body frame is the uniform field plus each in-range source. `a = GM / max(r, clamp_radius)²` toward the source. Outside `influence`, the source adds nothing. Sources sum in id order. No sources leaves the uniform path untouched, including allocation behavior of `step`.
+- **Test:** `inverse_square_matches_surface_gravity_and_a_hyperbola`
+  - Planet `GM = 98100`, `clamp_radius = 1`, `influence = 1e6`. At 100 m, `|a|` is `9.81` ± `1e-3`, direction toward the source. At `r = 0`, `|a|` is `GM / clamp_radius²` and finite.
+  - Hyperbola: `GM = 10`, impact parameter `20` m, `v_inf = 1` m/s, uniform field `0`, Verlet at `dt = 0.5` s from 200 m out and back out. The deflection from the incoming direction is `2 atan(GM / (b v_inf²))` = `2 atan(0.5)` within `3°`. Speed returns to within 2% of `v_inf`. A second run matches the wide position bitwise.
+- **Commit:** `physics: sample inverse-square gravity per body`
+
+### P48. Moving sources and influence cutoff
+
+- [ ] **Files:** `gravity.rs`. Test `crates/physics/tests/gravity.rs`.
+- **Behavior:** A source attached to a body uses that body's wide position. Finite-influence sources live in a sphere index. The query visits containing spheres only. A source that moves rebuilds its sphere. An asleep body whose new sample differs by more than `0.05` m/s² wakes.
+- **Test:** `a_ship_source_pulls_from_its_new_position_and_distant_sources_are_skipped`
+  - A dynamic ship with an attached source moves 30 m. A test mass 10 m from the new position accelerates toward the new position, not the start.
+  - 1 000 sources on a grid, influence radius 1 m, one of them containing the sample point. The evaluation count is at most 8. The acceleration matches that one source.
+  - A sleeper inside a source that then moves closer wakes on the next step.
+- **Commit:** `physics: attach gravity sources and cut off by influence`
+
+### P49. Barnes-Hut for unbounded sources
+
+- [ ] **Files:** `gravity.rs`. Test `crates/physics/tests/gravity.rs`.
+- **Behavior:** More than 32 sources with infinite influence build an octree. `theta = 0.5`. A cell is walked into when `size / distance > theta`. Otherwise it contributes its monopole. Finite-influence sources stay on the sphere query. The tree is skipped when every unbounded source is asleep and unmoved.
+- **Test:** `a_distant_cluster_matches_the_direct_sum_within_one_percent`
+  - 64 sources of `GM = 1` packed in a 10 m cube, sample point 1 000 m away. Barnes-Hut acceleration is within 1% of the direct sum. A second build matches bitwise. With 32 or fewer unbounded sources the direct sum is used (`tree_builds == 0`).
+- **Commit:** `physics: approximate distant gravity with barnes-hut`
+
+### P50. Volume overrides
+
+- [ ] **Files:** `gravity.rs`. Test `crates/physics/tests/gravity.rs`.
+- **Behavior:** Zero, uniform, and spin volumes. Innermost volume replaces the field. Spin acceleration is `ω² * r_axis` away from the axis. Attached volumes move with their body.
+- **Test:** `overrides_replace_the_field`
+  - Inside a zero-g box next to the 100 m planet, `|a| < 1e-4`. Just outside that box, `|a|` is the planet's inverse-square value within `1e-3`.
+  - A uniform override `(0, -9.81, 0)` in empty space samples that vector inside and `0` outside.
+  - Spin: axis `+Y`, `ω = sqrt(9.81 / 20)`, point `(20, 0, 0)`. Acceleration is `+X * 9.81` within `1e-3`. Local up is `-X` (toward the axis).
+- **Commit:** `physics: override gravity inside a volume`
+
+### P51. Local up for the view body
+
+- [ ] **Files:** `gravity.rs`, `character.rs`, `crates/scene/src/camera.rs`, `crates/anim` foot cast direction. Test `crates/physics/tests/gravity.rs` and `crates/scene/tests/gravity_walk.rs`.
+- **Behavior:** The view body reads `local_up` each step. The wish from the character-controller `move` axis lies in the tangent plane. The capsule aligns to local up. Foot casts use `-local_up`. Uniform `GRAVITY` still reports up `+Y`. The room tests stay on that path.
+- **Test:** `a_walker_stands_on_the_side_of_a_small_planet`
+  - Planet radius 100 m, `GM = 98100`, uniform field `0`, static sphere collider. View capsule placed at `(100, 0, 0)` plus its radius. After 2 s with a zero wish, the feet stay within `0.05` m of the surface and `up · radial > cos(5°)`.
+  - A forward wish in the tangent plane moves the capsule along the surface. Radius stays within `0.05` m. World `+Y` is not the up axis (`up · Y < 0.2`).
+  - The same scene's room-style uniform field, no sources, still has `up = +Y` and the existing eye-height assertion in `crates/scene/tests/camera_controls.rs` passes.
+- **Commit:** `physics: align the view body to local gravity`
+
+### P52. Wide Verlet and the slingshot
+
+- [ ] **Files:** `gravity.rs`, `vehicle.rs` (P32 helper calls the field). Test `crates/physics/tests/gravity.rs`. Re-run `a_circular_orbit_at_1e7_metres_keeps_its_radius`.
+- **Behavior:** Free bodies use velocity Verlet in `f64`. Contacting bodies receive the sampled acceleration as their solver gravity. Origin shift still rebases the `f32` pose.
+- **Test:** `a_slingshot_gains_speed_and_the_wide_orbit_stays_round`
+  - Kinematic moon, `GM = 10`, velocity `(1, 0, 0)`, influence 500 m. Probe enters on a trailing flyby with `v_inf = 1` in the moon frame. After it leaves the sphere, its world speed exceeds its entry speed by at least `0.2` m/s. A second run matches bitwise.
+  - The P32 circular orbit at `1e7` m, now a source plus a free body, still stays within `0.05` m of that radius over 200 steps of 1 s.
+- **Commit:** `physics: integrate free bodies with velocity verlet`
+
+### P53. Replicate gravity sources
+
+- [ ] **Files:** `replicate.rs`, `gravity.rs`. Test `crates/physics/tests/gravity.rs`. Networking lines in `docs/systems/physics.md`.
+- **Behavior:** `replicate_sources` writes id, `GM` bits, clamp, influence, and either an attachment `NetId` or a wide position. Scene-script volumes are omitted. An attached override (spin or uniform on a ship) writes its kind and parameters. The client evaluates the field locally. Rollback samples sources from the snapshot at that tick. The checksum covers the source records.
+- **Test:** `a_client_matches_the_server_field_from_replicated_sources`
+  - Server with one source and one attached spin volume. Client applies the records and no other gravity input. `gravity_at` matches bitwise at three sample points. A scene-script zero-g box is absent from the byte list. Changing `GM` changes the checksum. Replay at tick `T` uses the source position stored for `T`, not the position at `T+5`.
+- **Commit:** `physics: replicate gravity sources`
+
+### P54. Gravity scene and field view
+
+- [ ] **Files:** `crates/scenes` scene `gravity_well`. `examples/physics-view` view mode `gravity`, knob `gravity_scale`, script `examples/physics-view/scripts/gravity_well.rhai`. `genos-character-view` lists the scene. Document the view in `docs/systems/debugging.md`.
+- **Behavior:** The scene builds the three lanes from the gravity section. Metrics: `orbit_radius_error`, `slingshot_speed_gain`, `surface_up_dot`, `zero_g_accel`, `passed`. View `gravity` draws the arrow grid, influence wires, and override volumes. The script sets that view, shots `gravity-field`, and `require`s `passed`.
+- **Test:** `gravity_well_metrics_cover_orbit_slingshot_and_the_walk` in `crates/scenes/tests/catalog.rs`.
+  - After the lane durations above, `orbit_radius_error < 0.05` at the scene's orbit radius (`1e4` m, not the `1e7` m P32 case), `slingshot_speed_gain > 0.2`, `surface_up_dot > cos(5°)`, `zero_g_accel < 1e-4`, `passed == true`.
+  - `examples/physics-view/tests/args.rs`: `--scene gravity_well --view gravity` selects that mode.
+- **Commit:** `physics-view: show the gravity field`
+
 ## GPU solver gate
 
-Do not implement a GPU rigid solver in P1–P46.
+Do not implement a GPU rigid solver in P1–P54.
 
 Open that work only after all of these are true:
 
@@ -733,6 +872,7 @@ Until that profile exists, the Vulkan use in this plan is the debug picture and 
 | `car_flat` | A car that pulls away. | Chassis speed &gt; 1 m/s after 2 s of throttle. |
 | `car_bump` | One side on a step. | Roll with the anti-roll bar under half the roll without it. |
 | `orbit` | A ship with the origin on the hull, gravity off. | Radius error &lt; 0.05 m at `1e7` m. |
+| `gravity_well` | Orbits, a slingshot, a walk around a small planet. View `gravity` draws the field, the influence spheres, and the override volumes. | Orbit radius error &lt; 0.05 m, slingshot speed gain &gt; 0.2 m/s, surface up aligned, zero-g volume near 0. |
 | `ship_impact` | Four head-on lanes at 30, 120, 600, and 3 000 m/s. | `tunneled == false` and `contacted == true` on every lane. |
 | `destruction_wall` | Two pre-fractured columns. A ball hits the left. The right loses the same bond from health. | Both columns break that bond, only the hit branch spawns, debris ≤ budget. |
 | `ship_station` | A swept ship hits a supported wall. | No tunnel, at least one bond breaks. |
@@ -752,6 +892,8 @@ Which binary opens which scene is the observability table in the networking sect
 | P40–P41 | `docs/architecture.md`, `docs/systems/debugging.md` |
 | P42–P45 | `docs/systems/physics.md` networking lines, `docs/systems/fracture.md` for P45 |
 | P46 | `docs/systems/debugging.md` |
+| P47–P53 | `docs/systems/physics.md` gravity game use and networking lines, `CONTEXT.md` (gravity source) at P47 |
+| P54 | `docs/systems/debugging.md` |
 
 ## Coverage
 
@@ -776,3 +918,10 @@ Which binary opens which scene is the observability table in the networking sect
 | Vehicle snapshot without the contact cache | P44, `car_flat` |
 | Pre-fracture seeds plus bond-break events, no mesh on the wire | P45, `destruction_wall` |
 | One debug binary per system, lighting-style commands, scripts, knobs, reset | P41, P46 |
+| Per-body gravity, inverse-square, clamp, sphere of influence | P47, P48 |
+| Zero-g, artificial gravity, spin gravity | P50 |
+| View body and feet align to local up | P51, `gravity_well` |
+| Velocity Verlet, wide orbits, slingshot | P32, P52, `orbit`, `gravity_well` |
+| Many sources: influence cutoff, Barnes-Hut past 32 unbounded sources | P48, P49 |
+| Deterministic gravity sources on the wire | P53 |
+| Gravity-field view in the physics debug binary | P54 |
