@@ -22,6 +22,18 @@ void main() {
     if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
         return;
     }
+    // S77C compact only what needs it: a fine texel nobody read in the last 60
+    // frames and with no check due (nominated or deferred) has only bookkeeping
+    // here (freeing after LIGHTING_CACHE_LIFE, the global-light refresh list), so
+    // it is visited one round in LIGHTING_COMPACT_IDLE, by hash. Read texels, due
+    // checks and WRC cells are visited every round as before.
+    if (LIGHTING_COMPACT_LIST && lighting_world_mode() == 3u && !(cache.v[3u * slot + 1u].w > 0.2)) {
+        uint last0 = floatBitsToUint(cache.v[3u * slot].w);
+        bool due0 = lighting_sc_check_next(slot) != 0u && lighting_sc_check_due(slot);
+        if (int(lighting_frame() - last0) > 60 && !due0 && ((lighting_hash(slot ^ 0x2545f491u) + lighting_round()) % LIGHTING_COMPACT_IDLE) != 0u) {
+            return;
+        }
+    }
     // Near a change (params.z bit 5): a patch on or around an object that moved,
     // came or went sees a different scene, so it is relit with the young (first),
     // not when the sweep comes round (every live / batch rounds).

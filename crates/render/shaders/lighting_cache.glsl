@@ -3048,6 +3048,9 @@ float lighting_shadow_get(vec3 o, vec3 n, uint li) {
 // warp-coherent); a disagreement marks the cell mixed (escalates). The lamp epoch
 // (the lamp moved or changed, a change in its range) drops every entry of the lamp.
 const bool LIGHTING_SHADOW_PX = true;
+// S77C (lighting_compact.comp).
+const bool LIGHTING_COMPACT_LIST = true;
+const uint LIGHTING_COMPACT_IDLE = 8u;
 const float LIGHTING_SHADOW_TRUST = 4.0;
 const uint LIGHTING_SHADOW_PX_CHECK = 8u;
 float lighting_shadow_px_get(vec3 o, vec3 n, uint li, bool check) {
