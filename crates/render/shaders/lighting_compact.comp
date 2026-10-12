@@ -16,6 +16,9 @@ void main() {
         }
         return;
     }
+    if (lighting_world_mode() == 3u && lighting_sc_pages_on()) {
+        lighting_sc_page_clear(slot);
+    }
     if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
         return;
     }
@@ -157,6 +160,19 @@ void main() {
                     }
                 }
                 return;
+            }
+            // S72J: a page's texels refine together: note this one's sets, and
+            // wait while more than LIGHTING_SC_PAGE_LEAD sets ahead of the page's
+            // fewest (last round). Near a change goes first as before.
+            if (!wrc && lighting_sc_pages_on()) {
+                uint page = lighting_sc_page(slot);
+                float tf = floor(max(t, 0.0));
+                lighting_sc_page_note(page, tf);
+                float pm = lighting_sc_page_min(page);
+                if (pm >= 0.0 && tf > pm + LIGHTING_SC_PAGE_LEAD && tf < LIGHTING_SC_FULL_SETS) {
+                    atomicAdd(gstats.waiting, 1u);
+                    return;
+                }
             }
             // S64A: relit only once due (the budget is a ceiling).
             if (int(lighting_frame() - updated) < int(lighting_sc_interval(slot, t))) {

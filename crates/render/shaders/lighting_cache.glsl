@@ -1392,6 +1392,49 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
 // to the entry (lighting_dense_entry). Nothing past the live entries is dispatched.
 bool lighting_wrc_scout_due();
 const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
+// S72J region refinement (Anthony: uniform within a region, no sharp islands in
+// blotchy surroundings; Lumen refines surface cache pages). A page is 8 x 8
+// texels of one size on one plane (axis, plane offset); a hashed table of
+// LIGHTING_SC_PAGES counters per round, three rotating (written this round,
+// read from the last, cleared for the next) holds each page's fewest sets
+// among its read texels (stored 1000 - sets, atomicMax; 0 none). A texel more
+// than LIGHTING_SC_PAGE_LEAD sets ahead of its page waits, so a page's texels
+// refine together and the budget goes to the pages that are behind.
+// Flag 128 turns it off.
+const uint LIGHTING_SC_PAGES = 65536u;
+const uint LIGHTING_SC_PAGE_AT = LIGHTING_ARGS_AT + 16u;
+const float LIGHTING_SC_PAGE_LEAD = 2.0;
+bool lighting_sc_pages_on() {
+    return lighting_world_mode() == 3u && (lighting_sc_flags() & 128u) == 0u;
+}
+uint lighting_sc_page(uint slot) {
+    vec3 p = cache.v[3u * slot].xyz;
+    vec4 nb = cache.v[3u * slot + 1u];
+    float size = max(nb.w, 1.0e-3);
+    uint axd = lighting_axis(nb.xyz);
+    uint ax = axd >> 1u;
+    int a = int(floor(p[(ax + 1u) % 3u] / size)) >> 3;
+    int b = int(floor(p[(ax + 2u) % 3u] / size)) >> 3;
+    int d = int(floor(p[ax] / max(size, 0.0625) + 0.5));
+    uint h = lighting_hash(uint(a) * 73856093u ^ uint(b) * 19349663u ^ uint(d) * 83492791u ^ (axd * 2654435761u) ^ floatBitsToUint(size) ^ floatBitsToUint(cache.v[LIGHTING_SC_OBJ_AT + slot].x));
+    return h % LIGHTING_SC_PAGES;
+}
+// The page's fewest sets last round (-1: none known).
+float lighting_sc_page_min(uint page) {
+    uint r = lighting_round();
+    uint v = ckeys.key[LIGHTING_SC_PAGE_AT + ((r + 2u) % 3u) * LIGHTING_SC_PAGES + page];
+    return v == 0u || v > 1000u ? -1.0 : float(1000u - v);
+}
+void lighting_sc_page_note(uint page, float t) {
+    uint r = lighting_round();
+    atomicMax(ckeys.key[LIGHTING_SC_PAGE_AT + (r % 3u) * LIGHTING_SC_PAGES + page], 1000u - uint(clamp(floor(t), 0.0, 999.0)));
+}
+void lighting_sc_page_clear(uint slot) {
+    // Thread per slot clears the next round's counters (slots outnumber pages).
+    if (slot < LIGHTING_SC_PAGES) {
+        ckeys.key[LIGHTING_SC_PAGE_AT + ((lighting_round() + 1u) % 3u) * LIGHTING_SC_PAGES + slot] = 0u;
+    }
+}
 bool lighting_dense() {
     return ((pc.params.z >> 4u) & 1u) != 0u;
 }
