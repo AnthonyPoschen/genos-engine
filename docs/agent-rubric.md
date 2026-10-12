@@ -33,6 +33,8 @@ These records stay in force. This rubric points at them:
    - A guided-review panel that tells a person what to look at and what to test.
    - A headless drive for agents, over the CLI or MCP.
 
+   Lighting is the reference standard. Other systems match the inventory in `docs/systems/lighting/debug-standard.md`.
+
 2. **Observability.** Every part of a system that can fail, or that needs tuning, exposes its state for inspection. Agents query that state through an API, the CLI, or MCP. A person reads it from an overlay or an inspector. Add the probe to the command catalogue in `crates/debug/src/commands.rs`, so MCP, `POST /cmd`, and Rhai share one JSON form. The overlay path is `Tools::overlay`, `profile_overlay`, and `inspect_region`.
 
    Each system exposes:
@@ -44,6 +46,8 @@ These records stay in force. This rubric points at them:
    - A state snapshot and a restore, so a failure can be reproduced.
 
    Every new feature lists its failure modes and its tunables, and names the probe that exposes each one. A feature with no probe fails the review. The probes live on that system's `debug/<system>` binary (row 1).
+
+   The worked example is the lighting inventory in `docs/systems/lighting/debug-standard.md`: the GI dump, the MCP command catalogue, the stuck and pop checks, the headless `genos-stress` path, the stats counters, and the overlays.
 
 3. **Networking.** A new component or system states, in its system record, these five lines. Local-only work still answers each one. Gameplay networking still waits; the lines are the contract for a later server. The loopback agent endpoint stays the live-scene path.
 

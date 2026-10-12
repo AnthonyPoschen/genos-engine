@@ -24,14 +24,17 @@ that system's features. The agent rubric scores this.
   deterministic replay, screenshot and metrics output, live tuning sliders, and
   a guided-review panel that tells a person what to look at and what to test.
   An agent drives the same binary headlessly, over the CLI or MCP. A system is
-  done when its binary covers its features.
+  done when its binary covers its features. Lighting is the reference.
+  The inventory is [the lighting debug standard](lighting/debug-standard.md).
+  Other systems match that set.
 - Observability. A part that can fail, or that needs tuning, exposes its state
   on the command queue (an agent, over the API, the CLI, or MCP) and in an
   overlay or inspector (a person). That includes a per-entity dump, a
   per-subsystem dump, counters, timings, heatmaps and debug draws, live
   tunables, and a snapshot plus a restore. A new feature lists its failure
   modes and its tunables, and the probe that exposes each one. A feature with
-  no probe fails review.
+  no probe fails review. The worked example is
+  [the lighting debug standard](lighting/debug-standard.md).
 - Deterministic when asked. A script runs scene time on a fixed step from frame 0.
   For repeatable light, `wait_settled` before reading (it waits for the lighting's
   `SettleStats.settled` and a held picture).
@@ -455,8 +458,12 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
 - The command catalogue already answers status, knobs, lights, objects, camera,
   time, view, capture, diff, flicker, compare (with a heatmap), and timing.
   `Tools::overlay`, `profile_overlay`, and `inspect_region` draw for a person.
-  A general per-subsystem dump, and a snapshot plus restore of a whole
-  subsystem, are not shared commands yet. New probes extend the catalogue.
+  Lighting's dump, counters, isolate toggles, and pop checks are the reference
+  set in [the lighting debug standard](lighting/debug-standard.md). A dump and
+  a snapshot plus restore for every other subsystem are not shared commands yet.
+  New probes extend the catalogue. `tools/lighting/headless.sh` and a
+  `gi_headless` test module are not in the tree; the headless path that is
+  in the tree is `genos-stress --proof`.
 - The reference knows floors, ceilings, walls and solids. It does not trace fog,
   particle cards, textures or per-material reflectance and colour mix (the stress
   scene uses the defaults). It does not cut lamps at their range as the engine does.
