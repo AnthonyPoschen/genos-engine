@@ -257,6 +257,12 @@ void main() {
         if (t >= cap - 0.5) {
             atomicAdd(gstats.atcap, 1u);
         }
+        if (lighting_sc_prefill(slot)) {
+            float np = min(t + 1.0, LIGHTING_SC_PREFILL_SETS);
+            vec3 mp = old.w < 0.5 ? e : old.rgb + (e - old.rgb) / np;
+            lighting_tex_put(slot, vec4(mp, np));
+            return;
+        }
         // Flag 1048576: GIBS's estimator (Stachowiak's multi-scale mean, as in
         // kajiya): a short-term mean and variance beside the long-term mean; the
         // long-term blend grows with how far the short-term mean has moved from it

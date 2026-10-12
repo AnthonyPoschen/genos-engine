@@ -1215,6 +1215,14 @@ float lighting_sc_count(uint slot) {
 // (an exponential moving average that keeps up; Lumen's surface cache and
 // radiance cache keep a short temporal accumulation the same way).
 const float LIGHTING_SC_CHANGE_ALPHA = 1.0 / 24.0;
+// S73D: a fine texel no pixel has shown yet (pre-fill) accumulates as Lumen's
+// radiosity does, over at most this many updates
+// (r.LumenScene.Radiosity.TemporalMaxFramesAccumulated).
+const float LIGHTING_SC_PREFILL_SETS = 4.0;
+bool lighting_sc_prefill(uint slot) {
+    return lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w <= 0.2
+        && floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z) == 0u;
+}
 // WRC: per 16-ray sample (a refresh adds 4): 1/32 while the light changes
 // anywhere (1/8 a set), 1/8 near a mover or a moved lamp (1/2 a set).
 const float LIGHTING_WRC_CHANGE_ALPHA = 1.0 / 32.0;
