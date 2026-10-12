@@ -4,6 +4,8 @@ A system record is the living note for one engine system. An ADR records a decis
 
 Read the record before you write a game feature that uses the system. Read it before you change or rewrite the system.
 
+Every new system is designed with networking in mind. Its plan states the replicated state, the authority runtime that writes it, what a player runtime predicts or rolls back, the determinism rule, and the headless authority runtime's behavior. The commit that first implements the system copies those facts into the system record. The session, the socket, and the snapshot codec belong to the [core-networking plan](core-networking/plan.md). When a name in that file differs from another plan, that file wins.
+
 Each record uses these headings:
 
 - **Goal.** The result the system exists to produce.
