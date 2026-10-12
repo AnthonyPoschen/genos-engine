@@ -1,8 +1,8 @@
 # Entity and networking co-design
 
-> **For agentic workers:** Do not start N1. D1–D36 are unanswered. The datagram bytes are the replay file and the live-edit path, so building N7 before those decisions are answered locks both. When they are answered, implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
+> **For agentic workers:** Do not start N1. D1–D42 are unanswered. The datagram bytes are the replay file and the live-edit path, so building N7 before those decisions are answered locks both. When they are answered, implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
 
-**Goal:** While a game is running, an author or an agent can inspect any entity and change it. The authority applies the change, the entity log records it, undo sends the inverse through that same path, and a save can write the result back to a sidecar or a prefab file. Player replication, prediction, and the replay are that same stream. The agent reads the authority, or one tick of a replay, so a packet budget never hides an entity the agent asked for.
+**Goal:** While a game is running in development, an author or an agent can inspect any entity and change it. The authority applies the change, the entity log records it, undo sends the inverse through that same path, and a save can write the result back to a sidecar or a prefab file. A release player build does not contain that tool API. Every call, in every profile, goes through the same capability check. Player replication, prediction, and the replay are that same stream. Interest limits what a player runtime can see.
 
 **Architecture:** The simulation store is an entity id, a human-readable name, and plain components, updated by ordered tick passes. That store is what an agent queries and what the authority replicates. The authority runtime (the process Genos hosts) is the only writer of replicated state. A tool does not write a column. It sends a notice on an agent connection, and the authority applies it on a tick boundary. A player runtime predicts only the entity it has input authority for, and reconciles by restoring that entity and replaying its commands. Remote entities interpolate. Snapshots are unreliable deltas against the last acknowledged snapshot. A spatial grid and a byte budget decide who is in a player packet. They do not decide what an agent can read. A replay stores that stream. Seeking it is how an agent time-travels.
 
@@ -48,6 +48,22 @@ The scene file today is a Rhai script (`examples/camera/scene.rhai`, loaded by `
 
 `examples/camera` still does not join a session. The author talks to the authority process through the session tool. The camera endpoint keeps editing scene handles and does not gain this save path.
 
+### Lockdown
+
+The inspect and edit tools are for development. A shipped multiplayer build has to be able to turn them off. The owner described that as build profiles, and as server-authoritative multiplayer where clients never directly edit authoritative entities. In this repo the authority runtime is the program sources call a server, and the player runtime is the program sources call a client. Genos, the other repository, is a host that starts the authority process. It is not a second writer.
+
+**One surface.** Query, inspect, subscribe, spawn, edit, despawn, pin, undo, save, and seek are the same functions in dev, staging, and release. Each call enters `allow(connection, capability, target)`. The capability is compiled in or absent. The permission is a grant the authority assigned. A player datagram that asks for an edit is the same function a tool calls, and the grant refuses it. There is no second admin protocol and no client-side edit path.
+
+**Profiles.** `dev`, `staging`, and `release`. D37 is whether a profile compiles the tool out of a binary, disables it at run time, or both. The recommendation is both, split by binary. The player binary compiles the tool API out in staging and release, so a patched player has no edit function to call. The authority binary keeps the functions and starts with an empty tool grant, so a host can turn inspect on without shipping a different protocol. Dev compiles the tool in and grants it on loopback.
+
+**Players.** A player connection may send commands for the entity it has input authority for. It does not apply those commands to authoritative state. The authority does. Prediction of the owned pawn stays local and is corrected by the snapshot. A player packet is the interest set and the pose budget, and nothing beyond that: no entity log, no cause, no omniscient checksum, no query of the authority store. That is the anti-cheat exposure. D41 names the bytes. D11's full-sim hash stays on the authority recording. It does not ride the player snapshot.
+
+**Admin.** Optional. Authenticated. Permissioned. Audit-logged. Executed on the authority only. A GM uses this grant. The player runtime does not apply an admin edit locally and then hope the authority agrees. The authority applies it, or refuses it, and the snapshot is what players see. D39 is the credential this repo checks. This repo does not grow an account system. Genos can hold the secret and pass it when it starts the process.
+
+**Operators.** A host such as Genos may be granted inspect, and not edit, unless an admin grant is also configured. Inspect is the same `inspect` function, with that grant. Every inspect and every refusal is an audit line. The audit log is not replicated to players.
+
+**The role byte is a request.** D29's join role does not grant anything by itself. The authority assigns the grant after the check. A player who sends the tool role is still a player.
+
 ### Settled by this direction
 
 - The agent test above is how the choices in this file are judged. Live edit, undo, and save-back are part of that test.
@@ -56,6 +72,8 @@ The scene file today is a Rhai script (`examples/camera/scene.rhai`, loaded by `
 - An agent reads the authority store, or one applied replay tick. Interest and `POSE_BUDGET` limit player packets. They do not limit that read.
 - Scene handles stay scene handles. The camera agent endpoint stays the scene editor. The session tool is a different API, even though both are loopback tools an agent can call.
 - D20 is open. The recommendation is that the numeric id stays the replication id and the physics id, with a human-readable name beside it. A string as the only wire id is the option that recommendation refuses.
+- The tool API is a development surface. A player runtime never writes authoritative state. Admin and operator calls run on the authority, through `allow`, or they do not run.
+- Interest is the player's exposure. The entity log, the cause, and a full-sim checksum are not player datagrams.
 
 ### How the choices score
 
@@ -84,8 +102,14 @@ The scene file today is a Rhai script (`examples/camera/scene.rhai`, loaded by `
 | Undo by an inverse notice | The live entity returns to the previous tool value. The tick continues. | Recommend. D31. |
 | Rewrite `scene.rhai` on save | The hand-written room and its comments are replaced. | Refuse. D33. |
 | Sidecar plus a data prefab | The script stays. Save overlays by name. Spawn-from-prefab is a notice. | Recommend. D32–D35. |
+| Tool API always linked, trust the caller | A release player contains the edit function. A patch can skip the check. | Refuse for the player binary. D37. |
+| Compile the tool out of the player binary, keep it on the authority behind grants | Players have no edit symbol. A host can still grant inspect. | Recommend. D37, D38. |
+| A separate admin protocol | Two surfaces drift, and a check on one misses the other. | Refuse. One `allow` gate. D42. |
+| Trust the join role byte | The player runtime would promote itself to a tool. | Refuse. The authority assigns the grant. |
+| Full-sim checksum on the player snapshot | A far change is visible as a hash change, past the interest set. | Refuse. D41. The authority file still stores it. D11. |
+| Player packet is the interest set only | The anti-cheat exposure is the relevancy cut already in this plan. | Keep. D41. |
 
-D20–D36, below, are the questions this section opens. D1–D19 stay open. Where the agent test adds weight to one of them, the line is in that decision.
+D20–D42, below, are the questions this section opens. D1–D19 stay open. Where this test adds weight to one of them, the line is in that decision.
 
 ## Open decisions
 
@@ -204,9 +228,9 @@ Choices: 0, 3 s (180 ticks), 10 s (600 ticks), 30 s (1800 ticks), 90 s (5400 tic
 
 - **A. Snapshot ticks only** (every 3rd tick), inside the snapshot datagram. Live and file match. A resim can diverge on the two ticks between snapshots and look clean at the next snapshot.
 - **B. Every tick, on the live stream and in the file**, as its own datagram. The diverging tick is visible immediately. Every connection pays for a datagram 60 times a second even when no pose is dirty.
-- **C. Every tick in the file, in the frame beside the datagram.** Live snapshot datagrams carry the checksum of that snapshot tick as a trailing `u64`, and a second `u64` for `hash_world` (zero until N24). A tick that sent nothing stores `len = 0` and still stores the hash. Intra-snapshot divergence is visible in the recording and in a resim. Live players learn the hash when a snapshot arrives.
+- **C. Every tick in the file, in the frame beside the datagram.** Authority and inspect datagrams carry the checksum of that snapshot tick as a trailing `u64`, and a second `u64` for `hash_world` (zero until N24). A tick that sent nothing stores `len = 0` and still stores the hash. Intra-snapshot divergence is visible in the recording and in a resim. A player snapshot omits the hash (D41).
 
-**Recommendation.** C. Accepting it adds those two `u64` words to the end of the authority datagram in [Locked names](#locked-names). The in-memory checksum function stays the one N5 already specifies.
+**Recommendation.** C for the authority recording and for an inspect grant. Accepting it adds those two `u64` words to the end of that datagram in [Locked names](#locked-names). A player snapshot omits them (D41). The in-memory checksum function stays the one N5 already specifies.
 
 ### D12. What a hash mismatch does
 
@@ -386,7 +410,7 @@ Region is an AABB in millimeters, tested with the same cell size as interest (`C
 - **A. An agent connection is no stronger than a player connection.** Players cannot spawn in this plan, so the agent cannot either. Spawn stays an internal authority call. The tool can edit and despawn only what already exists, and even that is a notice.
 - **B. Neither connection writes state.** The authority applies notices. A player connection's spawn notice is refused. An agent connection's spawn, edit, and despawn notices are applied at the tick boundary. Edit of a predicted pawn still replicates back and reconciles, like any other correction.
 
-**Recommendation.** B. A reads "same rules" as "same privileges" and leaves the agent unable to manage entities, which fails the test that opened this plan. B reads "same rules" as one path: request, authority applies, the datagram is recorded. The agent is not a backdoor. The player still cannot mint an id. Join already uses notice name `1`. The recommended payload adds a `u8` role: `1` player, `2` tool. That byte is how the authority tells the two requests apart. It is part of this decision, not a separate channel. An author at the CLI and an agent on MCP both use role `2`.
+**Recommendation.** B. A reads "same rules" as "same privileges" and leaves the agent unable to manage entities, which fails the test that opened this plan. B reads "same rules" as one path: request, authority applies, the datagram is recorded. The agent is not a backdoor. The player still cannot mint an id. Join already uses notice name `1`. The recommended payload adds a `u8` role: `1` player, `2` tool. That byte is how the authority tells the two requests apart. It is part of this decision, not a separate channel. An author at the CLI and an agent on MCP both use role `2` in dev. The byte is a request. [Lockdown](#lockdown) assigns the grant. Sending role `2` does not make a player into a tool.
 
 ### D30. Does a live edit stick
 
@@ -455,7 +479,74 @@ Region is an AABB in millimeters, tested with the same cell size as interest (`C
 - **B. This plan adds an inspector window.**
 - **C. The camera MCP gains the inspector and the save.**
 
-**Recommendation.** A. One path, two callers. C puts entity names into the scene-handle endpoint and saves from the camera process, which is not the authority.
+**Recommendation.** A. One path, two callers. C puts entity names into the scene-handle endpoint and saves from the camera process, which is not the authority. In staging and release the player binary does not contain this handler. D37.
+
+### D37. How a profile removes the tool
+
+**Question.** Dev, staging, and release need a lockdown. The owner asked to compile the debug and agent APIs out, or to disable them.
+
+- **A. Compile out only.** A Cargo feature per profile. Release does not contain the tool functions in any binary. An operator cannot inspect a release authority, because the function is gone.
+- **B. Disable only.** The functions are in every binary. A config flag starts them off. A patched player can skip the flag.
+- **C. Both, split by binary.** Staging and release player binaries compile the tool API out. The authority binary keeps the functions in every profile and starts with an empty tool grant. Dev compiles the tool into the player-side session tool and grants it on `127.0.0.1` with no token. `genos-net-view` is a dev binary. `examples/camera` and its scene MCP are not linked into the player binary.
+
+**Recommendation.** C. Compile-out is what makes a player patch unable to call edit. A grant on the authority is what lets Genos turn inspect on without a second protocol. The feature names are `profile-dev`, `profile-staging`, and `profile-release`. Workspace tests default to `profile-dev`.
+
+### D38. Grants
+
+**Question.** Which capabilities exist, and which profile grants them before anyone configures a host.
+
+Capabilities in the recommendation: `command`, `inspect`, `edit`, `save`, `subscribe`, `undo`, `debug`. `edit` covers spawn, despawn, pin, and component writes. `debug` is the loss sliders, the desync view, and replay resim.
+
+| Profile | Player binary | Authority default grant |
+| --- | --- | --- |
+| dev | Tool API compiled in. Loopback gets every capability. A remote player gets `command` only. | Same process, so the loopback grant is the tool grant. |
+| staging | Tool API compiled out. | `command` for players. `inspect` only if an operator token is configured. `edit` only if an admin token is configured. |
+| release | Tool API compiled out. | `command` for players. Tool grants empty unless the host sets a token. |
+
+- **A. Coarse capabilities, as in that table.** One inspect grant reads any entity. One edit grant writes any entity.
+- **B. A per-entity access list** on top of the capabilities.
+
+**Recommendation.** A. B is a second product. Players still only receive the interest set, which is narrower than the inspect grant. An operator inspect may read entities a player packet omits.
+
+### D39. Who proves an operator or an admin
+
+**Question.** Admin and operator access are authenticated. This repo has no accounts.
+
+- **A. A secret the host passes in when it starts the authority** (`--operator-token`, `--admin-token`, or an environment variable). The join notice carries the secret. The authority compares it and assigns the grant. An empty token means that grant cannot be taken over the network. Dev loopback does not need a token. A mismatch refuses the join.
+- **B. Mutual TLS**, with certificates this repo would have to issue.
+- **C. An account system** in this repo.
+
+**Recommendation.** A. Genos, in the other repository, holds the secret and starts the process. This repo checks the bytes. It does not store users. B and C are later plans. The operator secret and the admin secret are different, so inspect does not imply edit.
+
+### D40. The audit log
+
+**Question.** Admin access is audit-logged. The entity log already records applied writes.
+
+- **A. The entity log is the audit.** Refusals and inspects that change nothing are missing.
+- **B. A separate authority-side audit.** Each line is tick, connection, capability, target id, allow or deny. Inspect, edit, save, undo, subscribe, and a refused player edit all write a line. The audit is not in a player datagram. The entity log still records the applied cause.
+- **C. Audit lines are replicated** to every player.
+
+**Recommendation.** B. A ring of 4096 lines, plus the same lines appended to the authority recording so a replay can show who asked. C would publish the audit to the people it is about. Players do not receive it.
+
+### D41. What a player packet may contain
+
+**Question.** Anti-cheat exposure is the datagram, not a promise in a comment.
+
+- **A. The interest set only.** Relevant entities, the components a remote entity needs to render, and the owned pawn's predicted components. No entity log. No cause word. No full-sim checksum. No name of an entity outside the interest set. Pin replicates only to the runtime that predicts that entity.
+- **B. The full authority snapshot**, and trust the player not to draw it.
+- **C. A plus the world checksum** from D11, so the player can detect its own desync against the whole sim.
+
+**Recommendation.** A. B is the omniscient recording, which is the authority file and an inspect grant. C lets a player watch a far fight by watching the hash change. D11.C stays for the authority file and for agent frames. The player snapshot drops those two trailing `u64`s. Desync of the owned pawn is still the pose compare in N13.
+
+### D42. Where the check sits
+
+**Question.** The same API has to be gated everywhere.
+
+- **A. One function, `allow(connection, capability, target)`.** Tool handlers, the join path, and the command path call it. A deny returns an error, writes the audit line, and does not change the sim. Release player code does not contain the tool handlers, so the call is absent there rather than checked.
+- **B. Each handler has its own if-statement.**
+- **C. The network boundary checks once, and in-process tool calls skip the check.**
+
+**Recommendation.** A. C would make the dev CLI a backdoor around the grant. In-process calls from the session tool use a connection id and the same `allow`.
 
 ## Global constraints
 
@@ -469,7 +560,7 @@ Region is an AABB in millimeters, tested with the same cell size as interest (`C
 - The agent endpoint stays loopback MCP on `127.0.0.1`. It is not the game session. `CONTEXT.md` says to avoid calling that endpoint a game network.
 - The person is the player. Sources say "client" for the program that person runs. In this repo that program is the player runtime. Sources say "server" for the authoritative program. In this repo that program is the authority runtime, and it is still a runtime. The game is not a server. Genos, the other repository, starts the authority process.
 - "System" in this repo is a system record. The ECS behavior is a tick pass.
-- New public words (`EntityId`, entity name, entity log, cause, agent connection, pin, prefab, tick pass, authority runtime, player runtime, connection, snapshot, command, notice, replay, keyframe, spectator) are added to `CONTEXT.md` in the commit that first publishes them (step N1). N1 waits until D1–D36 are answered. The camera agent endpoint and the scene handle keep the definitions they already have. Prefab is a new word. It is not a scene handle.
+- New public words (`EntityId`, entity name, entity log, cause, agent connection, pin, prefab, capability, grant, audit log, profile, tick pass, authority runtime, player runtime, connection, snapshot, command, notice, replay, keyframe, spectator) are added to `CONTEXT.md` in the commit that first publishes them (step N1). N1 waits until D1–D42 are answered. The camera agent endpoint and the scene handle keep the definitions they already have. Prefab is a new word. It is not a scene handle. Admin and operator are grants, not a second kind of player.
 - A new crate sets `[lints] workspace = true`, joins the workspace `Cargo.toml`, and is named in `docs/architecture.md` in that same commit.
 - `examples/camera` does not open a game socket in any step of this plan. The first proof stays the lit scene.
 - Headless tests use a fixed command list, a fixed tick, a seeded link, and no window. Two runs in one process match on the integers the step names. Do not check wall-clock time, thread scheduling, or a hash from another operating system.
@@ -537,8 +628,24 @@ The tick pass, command, notice, or reconcile snapshot that wrote a component.
 _Avoid_: System record.
 
 **Agent connection**:
-A connection with no player. A tool uses it to request spawn, edit, despawn, query, and subscribe. An author at the CLI uses this same connection. The authority applies those requests. The connection does not write a column.
+A connection with no player. A tool uses it to request spawn, edit, despawn, query, and subscribe. An author at the CLI uses this same connection. The authority applies those requests when the grant allows them. The connection does not write a column.
 _Avoid_: The player (the person), the camera's agent endpoint, a game network.
+
+**Capability**:
+One named thing a connection may ask the authority to do, such as `command`, `inspect`, or `edit`. The profile decides whether the function exists in that binary.
+_Avoid_: A second protocol, a role byte the player runtime assigns to itself.
+
+**Grant**:
+The capabilities the authority has assigned to one connection. A join role is a request. The grant is the answer.
+_Avoid_: An account, a scene handle.
+
+**Audit log**:
+The authority's record of tool and admin calls, including refusals. It is not replicated to player runtimes.
+_Avoid_: The entity log, a player datagram.
+
+**Profile**:
+`dev`, `staging`, or `release`. It selects what is compiled into a binary and which grants start empty.
+_Avoid_: A runtime mode the player can switch on.
 
 **Pin**:
 A replicated mark on a component. Tick passes skip a pinned component until an unpin notice. The predicting runtime honors the same mark.
@@ -636,6 +743,7 @@ Nothing in the tree sends a pose, a command, or a delta. Nothing records that st
 | Agent control | The camera endpoint edits scene handles and can subscribe to `genos://scene`. It does not see a simulation entity, a cause, or a replay tick. | An agent connection. Query, inspect, entity log, subscribe, and spawn, edit, despawn as notices. D20–D29 are open. |
 | Live edit | The camera endpoint mutates the `Scene` in the camera process. There is no pin, no undo stack, and no save of entity components. | Tool notices applied at a tick boundary, pinned so the next pass does not erase them, undo by inverse notice. D30–D31, D36. |
 | Save-back | A `.rhai` scene is hand-written and loaded once. Nothing writes it back. There is no prefab. | An explicit authority-side sidecar and a data prefab. The script stays. D32–D35. |
+| Lockdown | No profile, no grant, no audit. Any future tool would be linked into every binary. | Dev, staging, and release. The player binary compiles the tool out. The authority checks a grant. D37–D42. |
 
 ## Decision
 
@@ -760,7 +868,7 @@ Among the relevant entities that are dirty against the baseline, each has a `u32
 
 The pose budget is 1024 bytes per snapshot per connection. Spawns and despawns are outside that budget: a new id is in the packet even when the pose budget is full, and its later pose updates compete normally. Notices are capped at 4 per datagram and do not consume the pose budget.
 
-A far entity, outside the neighborhood and not always-relevant, is absent from the packet even if it is dirty. That is the scale rule. 4096 stored entities are cheap if a connection's packet names the neighborhood. An agent query does not use this cut. It reads the authority columns, or a replay tick, and can ask for a region the player packet would omit.
+A far entity, outside the neighborhood and not always-relevant, is absent from the packet even if it is dirty. That is the scale rule. 4096 stored entities are cheap if a connection's packet names the neighborhood. An agent query does not use this cut. It reads the authority columns, or a replay tick, and can ask for a region the player packet would omit. That read is an `inspect` grant. A player connection does not get the query. The interest set is the anti-cheat boundary for what a player datagram may contain (D41).
 
 ### Authority, prediction, reconciliation, rollback
 
@@ -892,7 +1000,7 @@ N28 adds replay controls to this same binary. The scrub control is a tick intege
 
 ## Replay
 
-D1–D19 are the recording decisions. D20–D36 are the agent and live-edit decisions. This section is the argument, the sources, and the way the recommendations sit on the datagram layout above. An agent seeks this same file. Nothing here is built.
+D1–D19 are the recording decisions. D20–D42 are the agent, live-edit, and lockdown decisions. This section is the argument, the sources, and the way the recommendations sit on the datagram layout above. An agent seeks this same file. Nothing here is built.
 
 ### One stream
 
@@ -1027,6 +1135,7 @@ Datagram, authority to player, little-endian:
 - if health: `i32`
 - if origin: `i32` sector_x, `i32` sector_z (flag `64` on the origin entity)
 - The flag field stays `u8` until D25 or D30 is accepted. Those decisions widen it to `u16`, with cause at bit `128` and pin at bit `256`. Do not spend bit `128` on both.
+- A player snapshot omits the trailing checksum and `physics_hash` (D41). An authority or inspect datagram may include them (D11).
 - `u16` notice count, then each notice: `u32` seq, `u16` name, `u32` entity index, `u32` generation, `u16` len, `len` bytes
 
 Player to authority:
@@ -1058,6 +1167,7 @@ Spawn and despawn records are written even when the pose budget is spent. Pose r
 | `crates/net/src/udp.rs` | `UdpSocket` edge. From N20. |
 | `crates/net/src/replay.rs` | File header, length-prefixed frames, keyframe trailer. From N25. The datagram slice is the session codec. |
 | `crates/net/src/agent.rs` | Agent-connection notices: spawn, edit, despawn, subscribe, undo. From N32. |
+| `crates/net/src/allow.rs` | Capabilities, grants, profiles, audit lines. From N40. |
 | `crates/sim/src/pin.rs` | Pinned components. From N36. |
 | `examples/session/src/tool.rs` | Query, inspect, seek, CLI parse, one JSON handler. From N34. |
 | `examples/session/src/save.rs` | Sidecar and prefab files. From N38. |
@@ -1068,7 +1178,7 @@ Spawn and despawn records are written even when the pose budget is spent. Pose r
 
 ## Steps
 
-Do not start N1. D1–D36 are unanswered. The datagram layout, the replay file, and the live-edit notices are the same bytes, so N7 is the commit that would lock the recording and the tool. N25–N28 describe the recommended replay answers. N29–N39 describe the recommended author and agent answers. If a decision above moves, edit that step before implementing it. The steps stay in order: N25 follows N24, and N29 follows N28.
+Do not start N1. D1–D42 are unanswered. The datagram layout, the replay file, and the live-edit notices are the same bytes, so N7 is the commit that would lock the recording and the tool. N25–N28 describe the recommended replay answers. N29–N42 describe the recommended author, agent, and lockdown answers. If a decision above moves, edit that step before implementing it. The steps stay in order: N25 follows N24, and N29 follows N28.
 
 ### N1. Entity id
 
@@ -1396,6 +1506,30 @@ Do not start N1. D1–D36 are unanswered. The datagram layout, the replay file, 
   - `door` at `x_mm` 10, saved as a prefab. Spawn it. The new id's pose is 10, its name is not `door`, and `door` is still at 10. A player connection's request leaves the spawned count unchanged.
 - **Commit:** `session: spawn an entity from a prefab file`
 
+### N40. One allow gate
+
+- [ ] **Files:** `crates/net/src/allow.rs`, `crates/net/Cargo.toml` features `profile-dev` (default), `profile-staging`, `profile-release`. Test `crates/net/tests/allow.rs`.
+- **Behavior:** `allow(connection, capability, target) -> Result` is the gate from D42. Tool handlers from N32 onward call it, including in-process CLI calls. Under `profile-dev`, a loopback connection is granted every capability, and a remote player connection is granted `command` only. Under `profile-staging` and `profile-release`, the player-tool module is not compiled into the player entry (the test builds `genos-net` with `--no-default-features --features profile-release` and asserts the tool handler symbol's source file is cfg'd out by calling a `tool_api_compiled() -> bool` that is false). The authority entry still has `allow`. A deny writes an audit line and returns an error. The sim is unchanged. Audit lines are not part of a player snapshot.
+- **Test:** `dev_loopback_may_edit_and_a_player_may_not`
+  - Dev grant: an edit notice from the loopback connection changes `x_mm` after the tick. The same notice from a player connection leaves `x_mm` unchanged and appends a deny line with that connection and the `edit` capability. `command` from the player is allowed. Two calls with the same inputs produce the same audit bytes.
+- **Commit:** `net: gate every tool call on a capability`
+
+### N41. Player packets stay inside interest
+
+- [ ] **Files:** `crates/sim/src/snapshot.rs`, `crates/net/src/allow.rs`. Test `crates/net/tests/expose.rs`.
+- **Behavior:** A player snapshot contains only the interest set from N9, inside `POSE_BUDGET`. It has no cause field, no entity-log bytes, and no trailing checksum. An inspect grant's datagram may include the cause and the checksum. Pin is present on a player snapshot only for the entity that connection predicts.
+- **Test:** `a_player_datagram_omits_the_far_entity_and_the_cause`
+  - Two entities, one in the view cell and one 200 m away. The far id is absent from the player datagram. The near entity's record has the cause bit clear. The inspect datagram for the same tick has the cause bit set and the trailing checksum equal to `Sim::checksum`. The player datagram's last bytes are not that checksum.
+- **Commit:** `net: keep the player packet inside interest`
+
+### N42. Operator inspect and admin edit
+
+- [ ] **Files:** `allow.rs`, `examples/session/src/tool.rs`. Test `examples/session/tests/grants.rs`.
+- **Behavior:** `--operator-token` and `--admin-token` store the secrets on the authority. A join that presents the operator secret is granted `inspect` and not `edit`. A join that presents the admin secret is granted `inspect` and `edit`. A wrong secret is refused and audited. An empty configured secret means that grant cannot be taken. Dev loopback still needs no token. Inspect reads a far entity the player packet omitted. Edit from the operator grant is denied. Edit from the admin grant follows N32. Neither grant is applied on a player runtime. The authority applies the admin edit, and the player learns it from the next snapshot.
+- **Test:** `an_operator_can_inspect_and_an_admin_can_edit`
+  - An entity at `x_mm` 200_000. Operator inspect returns 200_000. That id is absent from the player datagram. Operator edit leaves the pose unchanged and writes a deny line. A second entity in the view cell at `x_mm` 5. Admin edit sets it to 8. After the tick, inspect returns 8 and the player snapshot of that relevant entity is 8. A join with the wrong admin token does not receive `edit`. The release-player assertion stays in N40.
+- **Commit:** `session: grant inspect to an operator and edit to an admin`
+
 ## Limits
 
 - The authority runtime is the only state authority. Input authority can move. A player runtime does not keep the true state of a pawn after it loses input authority.
@@ -1417,10 +1551,11 @@ Do not start N1. D1–D36 are unanswered. The datagram layout, the replay file, 
 - There is no replay-only component. A value in the file is a value in the live datagram, or a frame field from D14 (tick, hashes, length).
 - Public spectators are delayed. The authority file is written immediately.
 - `examples/camera` does not write a replay.
-- D1–D36 are open. The recommendations are not a decision record.
+- D1–D42 are open. The recommendations are not a decision record.
 - The camera agent endpoint does not spawn, edit, or despawn simulation entities. Scene handles stay on that endpoint.
 - A tool does not write a column. Time-travel does not fork a session. Live undo does not seek backward and does not undo a player command.
 - Save does not rewrite the Rhai scene. A prefab is data. A failed save does not change the sim. Undo does not revert the file.
+- Staging and release player binaries do not contain the tool API. The authority starts with tool grants empty. A join role byte does not grant a capability. This repo does not store accounts. Admin edits run on the authority. The audit log is not sent to players.
 - The first query has no field predicates. The cause stores one hop, not a graph walk.
 - Genos's process supervisor, matchmaking, and account system are out of this repository. The contract is the binary, the bind address, the scene path, and stdin.
 
@@ -1466,7 +1601,10 @@ N1 is the one that edits `CONTEXT.md`, `docs/architecture.md`, and the new ADR. 
 | Live edit that sticks | D30, D36 | N36 |
 | Undo a tool edit | D31, D35 | N37 |
 | Save back to a sidecar and a prefab | D32, D33, D34 | N38, N39 |
+| Profiles, grants, and the one allow gate | D37, D38, D42 | N40 |
+| Anti-cheat exposure is the interest set | D41 | N41 |
+| Operator inspect and admin edit | D39, D40 | N42 |
 
 ## What this plan does not do
 
-It does not implement the steps. It does not settle D1–D36. It does not change `step`, the camera loop, or the camera MCP endpoint. It does not rewrite a scene script. It does not merge the physics plan. N24 is the seam, and it waits for that plan's `BodyId` and `hash_world`. N1 waits until the open decisions are answered, because the datagram layout is the replay file and the live-edit path.
+It does not implement the steps. It does not settle D1–D42. It does not change `step`, the camera loop, or the camera MCP endpoint. It does not rewrite a scene script. It does not add accounts. It does not merge the physics plan. N24 is the seam, and it waits for that plan's `BodyId` and `hash_world`. N1 waits until the open decisions are answered, because the datagram layout is the replay file and the live-edit path.
