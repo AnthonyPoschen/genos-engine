@@ -75,13 +75,25 @@ fn main() {
     println!("cargo:rerun-if-changed=shaders/dither.glsl");
     println!("cargo:rerun-if-changed=shaders/transmit.comp");
     println!("cargo:rerun-if-changed=shaders/fxaa.comp");
+    println!("cargo:rerun-if-env-changed=GENOS_LIGHTING_DIAG");
 }
 
 fn compile(src: &str, dest: &std::path::Path) -> PathBuf {
-    let status = Command::new("glslc")
-        .args([src, "-o", dest.to_str().unwrap()])
-        .status()
-        .expect("glslc");
+    compile_with(src, dest, &[])
+}
+
+/// `defines` are `-D` names (`NAME` or `NAME=value`), after the measurement defines.
+fn compile_with(src: &str, dest: &std::path::Path, defines: &[&str]) -> PathBuf {
+    let mut cmd = Command::new("glslc");
+    cmd.arg(src).arg("-o").arg(dest.to_str().unwrap());
+    // Phase 0 counters. The default build leaves them compiled out.
+    if std::env::var("GENOS_LIGHTING_DIAG").is_ok_and(|v| v == "1") {
+        cmd.arg("-DLIGHTING_DIAG=1");
+    }
+    for define in defines {
+        cmd.arg(format!("-D{define}"));
+    }
+    let status = cmd.status().expect("glslc");
     if !status.success() {
         panic!("glslc failed for {src}");
     }

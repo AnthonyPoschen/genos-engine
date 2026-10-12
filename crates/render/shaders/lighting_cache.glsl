@@ -77,11 +77,24 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     // filtered texels, the fullest of levels 1-5. Mode is 1 (work list), 2
     // (dense full-frame sweep), or 0 (the levels did not run). ppm is the
     // threshold in force (GENOS_LIGHTING_ATROUS_DIRTY). active is the filtered
-    // texel count that fraction divided by.
+    // texel count that fraction divided by. These four words are 120..124.
     uint atrous_frac;
     uint atrous_mode;
     uint atrous_ppm;
     uint atrous_active;
+    // Dynamic-scene plan, phase 0. The plan's d0-d18 cannot use diag[]: slots
+    // 0-37 and 40-56 are already the S76/S78 counters (lightingdg). These print
+    // as lightingdp. They follow the a-trous words, so the host reads them at
+    // word 124 (lighting_gpu.rs LIGHTING_DP_STAT), not at the old word 120.
+    // Slots: 0 hit shadow rays, 1 pixel shadow rays, 2/3 hit shadow cache
+    // hit/miss, 4 GI hits with no fine texel, 5 GI hits over the TDL budget,
+    // 6/7 pixel-lamp pairs whose lamp epoch held / all pairs, 8-12 a-trous
+    // work-list counts for levels 1-5, 13 variance recomputes, 14 level
+    // outputs that scattered, 15 pixels that read probes, 16 tiles that need
+    // probes, 17/18 hash lookups that miss / hit. 19 is the hit-light queue
+    // length and 20 the entries that overflowed it (written by the args step,
+    // not by lighting_dp). Off unless the build defines LIGHTING_DIAG.
+    uint dp[32];
 } gstats;
 // Kept-hit light writes (light pass): all, changed, by relative luminance delta
 // (<0.2 %, 0.2-1 %, 1-5 %, >5 %), and changed by source of the hit's direct light
@@ -141,8 +154,13 @@ uint lighting_chg_bin(vec3 a, vec3 b) {
     float r = abs(la - lb) / max(max(la, lb), 1.0e-4);
     return r < 0.002 ? 0u : (r < 0.01 ? 1u : (r < 0.05 ? 2u : 3u));
 }
-const bool LIGHTING_DIAG = false;
-void lighting_dg(uint i, uint v) { if (LIGHTING_DIAG) atomicAdd(gstats.diag[i], v); }
+// Measurement build: GENOS_LIGHTING_DIAG=1 at compile time (-DLIGHTING_DIAG=1).
+// The default build compiles every lighting_dg / lighting_dp out.
+#ifndef LIGHTING_DIAG
+#define LIGHTING_DIAG 0
+#endif
+void lighting_dg(uint i, uint v) { if (LIGHTING_DIAG != 0) atomicAdd(gstats.diag[i], v); }
+void lighting_dp(uint i, uint v) { if (LIGHTING_DIAG != 0) atomicAdd(gstats.dp[i], v); }
 
 const float LIGHTING_CACHE_MATURE = 3.0;
 
@@ -723,6 +741,7 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
         if (k == key) {
             uint found = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
             lighting_compose_cover(found);
+            lighting_dp(18u, 1u);
             return found;
         }
         if (k == 0u && free_at == LIGHTING_CACHE_SEARCH) {
@@ -730,6 +749,7 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
         }
     }
     if (!claim) {
+        lighting_dp(17u, 1u);
         return ~0u;
     }
     [[dont_unroll]] for (uint i = free_at; i < LIGHTING_CACHE_SEARCH; i++) {
@@ -756,10 +776,12 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
                 cache.v[LIGHTING_SC_OBJ_AT + slot] = vec4(lighting_obj_salt, 0.0, 0.0, 0.0);
             }
             lighting_compose_cover(slot);
+            lighting_dp(18u, 1u);
             return slot;
         }
         if (prev == key) {
             lighting_compose_cover(slot);
+            lighting_dp(18u, 1u);
             return slot;
         }
     }
@@ -2905,6 +2927,32 @@ const uint LIGHTING_ATROUS_DBIN_AT = LIGHTING_ATROUS_MODE_AT + 5u;
 uint lighting_atrous_list(uint k) {
     return LIGHTING_ATROUS_LIST_AT + (k - 1u) * (LIGHTING_ATROUS_LIST_CAP + 1u);
 }
+// Phase 0 d16: one word per tile in the spare after the a-trous lists. Compose
+// starts after 6 * 65536 + 16 words of that spare, so these 65536 words stay
+// clear of the compose stamps and of the a-trous meta that follows them.
+// A tile records the frame it first needed probes, so the count needs no
+// clear and no readback.
+const uint LIGHTING_DP_TILE_AT = LIGHTING_ATROUS_LIST_AT + 5u * (LIGHTING_ATROUS_LIST_CAP + 1u);
+const uint LIGHTING_DP_TILES = 65536u;
+void lighting_dp_tile(uvec2 p) {
+    if (LIGHTING_DIAG == 0) {
+        return;
+    }
+    uint tile_px = pc.params.y;
+    if (tile_px == 0u) {
+        return;
+    }
+    uint tile = (p.y / tile_px) * pc.dims.z + (p.x / tile_px);
+    if (tile >= LIGHTING_DP_TILES) {
+        return;
+    }
+    uint at = LIGHTING_DP_TILE_AT + tile;
+    uint frame = lighting_frame();
+    uint word = ckeys.key[at];
+    if (word != frame && atomicCompSwap(ckeys.key[at], word, frame) == word) {
+        lighting_dp(16u, 1u);
+    }
+}
 // True when this frame's levels 1-5 should append work lists. Last frame's
 // fraction is what decides: the mark that would cross the threshold is already
 // inside the filter, so this frame cannot both count it cheaply and avoid the
@@ -3054,6 +3102,7 @@ void lighting_svgf_variance(uint slot) {
             }
         }
     }
+    lighting_dp(13u, 1u);
     if (var < 0.0) {
         // Spatial estimate, 7 x 7 moments weighted by w_z w_n.
         float s1 = 0.0;
@@ -3178,6 +3227,7 @@ void lighting_svgf_iter(uint slot, uint it) {
             cache.v[LIGHTING_SC_ATROUS_A + slot] = cache.v[dst + slot];
         }
         if (lighting_svgf_moved(nw, vn, old, vold)) {
+            lighting_dp(14u, 1u);
             lighting_svgf_scatter(slot, it + 1u);
             if (it + 1u == 5u) {
                 // S78B: the push of this texel and of its +-1 neighbours (IC gradient).
@@ -3508,6 +3558,9 @@ void lighting_shadow_epochs() {
     for (uint i = 0u; i < n; i++) {
         Lamp l = scene_lamp(i);
         uint at = LIGHTING_SHADOW_EPOCH_AT + 8u * i;
+        // Phase 0 d6: the epoch before this call. Word +6 of the 8-word lamp
+        // block was unused; +7 stays unused.
+        ckeys.key[at + 6u] = ckeys.key[at];
         vec4 last = vec4(uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]), uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]));
         vec4 now = vec4(l.pos.xyz, l.color.w);
         // S75: colour too (the texel direct-light cache reads the epoch).
@@ -3534,7 +3587,7 @@ uint lighting_shadow_cell(vec3 o, vec3 n, uint li, out uint tag) {
     tag = h | 1u;
     return LIGHTING_SHADOW_AT + (lighting_hash(h ^ 0x5bd1e995u) % LIGHTING_CACHE_SLOTS);
 }
-float lighting_shadow_get(vec3 o, vec3 n, uint li) {
+float lighting_shadow_stored(vec3 o, vec3 n, uint li) {
     if (!LIGHTING_SHADOW_CACHE || li >= LIGHTING_WRC_SNAP_LAMPS || li >= scene.lamp_count) {
         return -1.0;
     }
@@ -3545,6 +3598,14 @@ float lighting_shadow_get(vec3 o, vec3 n, uint li) {
         return e.y;
     }
     return -1.0;
+}
+float lighting_shadow_get(vec3 o, vec3 n, uint li) {
+    float s = lighting_shadow_stored(o, n, li);
+    // Phase 0 d2 / d3: cache hit / miss for a real lamp (the flame is LAMP_ALL - 1).
+    if (li < LAMP_ALL - 1u) {
+        lighting_dp(s >= 0.0 ? 2u : 3u, 1u);
+    }
+    return s;
 }
 // S77C (lighting_compact.comp).
 const bool LIGHTING_COMPACT_LIST = true;

@@ -46,6 +46,10 @@ void main() {
             atomicAdd(ckeys.key[LIGHTING_ATROUS_BIN_AT + (gl_WorkGroupID.x & 63u)], sum);
         }
     }
+    // Phase 0 d8-d12: one thread records the list count (a value past the cap overflowed).
+    if (LIGHTING_DIAG != 0 && stage0 >= 1u && stage0 <= 5u && slot == 0u) {
+        atomicMax(gstats.dp[8u + stage0 - 1u], ckeys.key[lighting_atrous_list(stage0)]);
+    }
     // S78X: levels 1-5 run their work list while last frame stayed under the
     // dirty fraction. Above it, or past the list cap, the dense sweep.
     if (LIGHTING_DIRTY_ATROUS && LIGHTING_ATROUS_LISTS && stage0 >= 1u && stage0 <= 5u) {

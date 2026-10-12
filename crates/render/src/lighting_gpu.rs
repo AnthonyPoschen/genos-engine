@@ -1249,6 +1249,11 @@ impl Gpu {
                 );
                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
                 eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
+                eprintln!(
+                    "lightingdp {queue} frame {} d {:?}",
+                    self.lighting.frame,
+                    &w[LIGHTING_DP_STAT..LIGHTING_DP_STAT + 32]
+                );
             }
             let mode = match w[LIGHTING_ATROUS_STAT + 1] {
                 1 => "list",
@@ -2007,14 +2012,17 @@ fn lighting_stats_wanted() -> bool {
 const LIGHTING_DEFAULT_WORLD: u32 = 3;
 const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
 const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
-/// Lighting stats buffer: 24 words, diag[64], chg[32], then the a-trous fallback
-/// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`.
-/// The change-counter enable word stays chg[31] (word 119).
-const LIGHTING_STATS_WORDS: usize = 124;
+/// Lighting stats buffer: 24 words, diag[64], chg[32], the a-trous fallback
+/// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`,
+/// then `dp[32]` at `LIGHTING_DP_STAT` (lighting_cache.glsl).
+/// The change-counter enable word stays chg[31] (word 119). The a-trous words
+/// took 120..124, so the phase-0 counters start at 124.
+const LIGHTING_STATS_WORDS: usize = 156;
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 const LIGHTING_CHG_ENABLE_WORD: u64 = 24 + 64 + 31;
 const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;
 const LIGHTING_ATROUS_STAT: usize = 120;
+const LIGHTING_DP_STAT: usize = LIGHTING_ATROUS_STAT + 4;
 /// S78S: the change counters (lighting_chg) run with GENOS_LIGHTING_SC_TRACE.
 fn lighting_chg_on() -> bool {
     std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_some()
