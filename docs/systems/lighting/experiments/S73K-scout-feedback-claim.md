@@ -2,6 +2,7 @@
 
 - **Date:** 2026-10-12
 - **Result:** lavapipe runs the claim. A short settle lists never-shown texels and takes spare quarters. Finished sets need the still settle, not the turn.
+- **Commit:** d4a666f
 - **Deviation:** a scout hit does not seed an empty texel. Seeds stay on the pixel path.
 
 ## What changed
