@@ -330,7 +330,10 @@ void main() {
                 float sup = lighting_sc_svgf() ? LIGHTING_SC_L2_FLAT : cache.v[LIGHTING_SC_SPARSE_AT + slot].w;
                 uint lv = lighting_sc_level(slot);
                 uint every = lighting_sc_svgf() ? 4u : (lv == 0u ? 4u : (lv == 1u ? 2u : 1u));
-                if (sup >= LIGHTING_SC_L2_FLAT && every > 1u && ((lighting_hash(slot ^ 0x1b873593u) + lighting_round()) % every) != 0u) {
+                // Same phase as the IC gate: the periods are powers of two, so the
+                // two gates nest and the texel is relit one round in max(per,
+                // every). With independent phases 3 texels in 4 never pass both.
+                if (sup >= LIGHTING_SC_L2_FLAT && every > 1u && ((lighting_hash(slot ^ 0x68e31da4u) + lighting_round()) % every) != 0u) {
                     atomicAdd(gstats.waiting, 1u);
                     return;
                 }
