@@ -43,3 +43,15 @@ Before you change a system, rewrite a system, or add a game feature that uses on
 ## Proof
 
 Before you implement the first scene, read `docs/goals/mvp-scene.md`.
+
+## Cursor Cloud
+
+Proof windows run on lavapipe under a headless Weston compositor. Boot starts Weston on socket `wayland-1`.
+
+Source `/etc/profile.d/genos-cloud.sh` before `make run`, `make verify`, or a test that opens a window. Login shells and interactive bash load that file. It sets `XDG_RUNTIME_DIR` (`/tmp/genos-runtime`), `WAYLAND_DISPLAY` (`wayland-1`), `VK_ICD_FILENAMES`, `VK_DRIVER_FILES`, and `MESA_SHADER_CACHE_DIR`.
+
+`make verify` runs the smoke script `examples/stress/scripts/smoke.rhai`. On lavapipe, `wait_settled` can hit its frame cap while the script checks still pass.
+
+`cargo test --workspace` uses the same compositor. The pointer-lock test `the_first_click_locks_the_pointer_and_escape_releases_it` needs Hyprland. These GPU checks fail on lavapipe: `a_camera_spin_does_not_recolor_the_wall`, `the_outside_lamp_and_the_fire_stop_at_the_corridor_wall`, and `walking_does_not_flip_the_light_between_states` in `crates/render/tests/gpu_frame.rs`, and both tests in `examples/stress/tests/picture.rs`.
+
+The toolchain is Rust 1.99.0. `Cargo.lock` uses edition 2024.
