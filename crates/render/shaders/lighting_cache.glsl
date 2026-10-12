@@ -1615,9 +1615,10 @@ vec4 lighting_sc_shown(uint slot) {
         if (lighting_sc_svgf()) {
             // S72V: the pushed SVGF field covers what it reaches; the seed only
             // where nothing reached yet.
+            // The field is light as of now (S72V7), no gain.
             have = any(greaterThan(field, vec3(0.0)));
             if (have) {
-                return vec4(field * ls, 1.0);
+                return vec4(field, 1.0);
             }
         } else if (have) {
             float f2 = clamp(1.0 - sup / LIGHTING_SC_HANDOVER, 0.0, 1.0);
@@ -2489,17 +2490,22 @@ vec4 lighting_svgf_in(uint s, out float var) {
     if (t < 0.5 || !lighting_svgf_active(s)) {
         return vec4(0.0);
     }
+    // S72V7: each texel's light is carried to now (its sun/sky gain, as the
+    // pixels show it) before the levels mix them: texels relit at different
+    // times under a moving sun held different scales, and the luminance stop
+    // kept those groups apart (camouflage plateaus at dawn).
+    float g = lighting_sc_sun_gain(s);
     if (!wrc) {
         vec4 eb = cache.v[LIGHTING_SC_EST_AT + 2u * s + 1u];
         if (eb.x > 0.0 && t >= 4.0) {
-            var = max(cache.v[LIGHTING_SC_EST_AT + 2u * s].w, 0.0);
+            var = max(cache.v[LIGHTING_SC_EST_AT + 2u * s].w, 0.0) * g * g;
         }
     }
     // S72V5: a texel with samples counts fully, as a pixel does in SVGF (its
     // filter has no count weights); S72V's t / 4 mask weighed the long-settled
     // texels over the ones under changing light (kept short), which darkened
     // lit areas, and left the push to the WRC.
-    return vec4(own.rgb, 1.0);
+    return vec4(own.rgb * g, 1.0);
 }
 float lighting_svgf_wzn(uint p, uint q) {
     vec4 np = cache.v[3u * p + 1u];
