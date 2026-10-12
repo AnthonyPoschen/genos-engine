@@ -1,6 +1,114 @@
 # Lighting
 
-How GI v2, the lighting engine, works: direct light, shadows, global illumination, the reference it is checked against, and the checks. Each component lists our method, the published method it compares to (Lumen and papers, with links), how and why ours differs, current scores and open issues. The plan and budgets are in [GI v2 design](gi-v2-design.md); the gate is in [Debugging](debugging.md). Update this file whenever a method changes, in the same commit as the code.
+Main lighting document. Architecture and component notes are below; every experiment (tried, pushed, reverted, rejected, shelved or planned) has its own file in [experiments/](experiments/), indexed in the table. Before trying an idea, check the index: if it was tried, read how and what we found, and whether it is marked for a retest.
+
+Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and patches in `~/.cache/gi2diag/g78/` (zanven-pc), git history of `gi-v2`, `gi-v2-prefill` (22bcd47f) and tag `gi-v2-checkpoint-2026-10-12` (6b4fe308), the postmortem log, and the GI v2 conversation with Anthony. Figures not in a source are written "not recorded".
+
+## Current state (2026-10-12)
+
+`gi-v2` at 8c763bb2 (S78P): still 8.21 ms / 105 fps, moving 18.7 ms / 51 fps (RTX 4070, stress scene). Pipeline: two-layer surface cache (layer 1 traced texels with MSME accumulator; layer 2 SVGF a-trous + pull-push, never fed back), world radiance cache (25 cm cells) for ray hits, sparse screen probes with held strata and check rays, Lumen-style texel direct-light cache for GI hits, per-pixel traced direct light reused in quiet frames, A-SVGF same-seed checks gating rays.
+
+## Principles and rules (Anthony)
+
+- Quality first; a change that saves no measurable time is not pushed, and no change may add visible noise or tearing.
+- Every step: benchmark still and moving, pop, brightness, VRAM, and a moving-shadow smoke test with screenshots actually looked at (postmortem after S77B).
+- Pop-in is fine if the screen fills near-immediately; no display smoothing (S71E/F). Lighter smoothing is dropped for now.
+- Camera decides residency and update order only, never texel size (S57).
+- Uniform low or uniform high beats a patchwork (S72J); layer 2 never feeds layer 1 (S72P).
+- Must scale down to a GTX 1060-class GPU: nothing depends on a minimum ray count (S72S).
+- Follow the papers; any departure is flagged as a deviation and listed below.
+- Checks run every frame; no "nothing changed" skip without a check (Anthony 16:11, S74A).
+- Always spend some budget on spread-out checks so quiet areas that should not be quiet are found.
+- Probes must not be woken by the shared averaged field; only by real neighbour change, spread by ring tests with group-test splitting ([WAKE](experiments/WAKE-neighbour-wake-design.md)).
+- Off-screen pre-fill and its S-curve lag bound wait until there is spare performance.
+
+## Deviations from the papers (summary)
+
+- Pixels read surface-cache texels directly (Lumen reads the cache only at ray hits).
+- Running-mean / MSME texels to a cap instead of Lumen's 4-frame accumulation.
+- IC placement as a trace rate on a power-of-two grid, not records in space; no R_geo; grad E from the filtered field; constants inferred (S72V).
+- A-SVGF lambda drives ray counts (A-SVGF has no ray-count rule); checks are measurement only (S74A, S76).
+- Shadow visibility shared per 12.5 cm cell for hits, invalidated per lamp range (S74A).
+- 1-in-16 push refresh floor (S78B); kept-hit bounce refreshed with its re-trace (S78D); held strata keep exact directions (S78K).
+- Going fully quiet (DDGI and Lumen always spend a fixed budget).
+- Planned: change-scaled ring-test wakes with group splitting (original combination).
+
+## Experiment index
+
+| ID | Date | Idea | Result | Commit / patch |
+|---|---|---|---|---|
+| [P6](experiments/P6-probe-path.md) | 2026-10-10/11 | Screen probes (16 px tiles, 64 rays/frame in 8 strata), kept hits re-shaded every frame, Lumen-style probe fil | pushed (later default off; `GENOS_LIGHTING_WORLD=0`) | 6ce7fd48 and earlier (ae829f41, a6432375, b5fa8eb7, 1b1101e2) |
+| [S26-S41](experiments/S26-S41-surface-cache-flags.md) | 2026-10-11 | Surface cache: world texels pixels read directly, running mean to cap, flag experiments (239882, 524288 camera | pushed (default from S54K) | 21cb8a41..d8101b09 |
+| [S42-S54K](experiments/S42-S54K-movers-object-texels.md) | 2026-10-11/12 | Movers in the surface cache: mover expiry 240 frames, pixels near movers, object-local texels, mover upload fi | pushed | 1e7573a3, f13d56ba, ba9adca0 |
+| [S56](experiments/S56-band-crossing-inherit.md) | 2026-10-12 | Texels at a new camera-distance size inherit converged light with full count; 10% hysteresis | superseded by S57 same day | 0624ee53 |
+| [S57](experiments/S57-no-camera-distance-sizes.md) | 2026-10-12 | One texel size (12.5 cm pixels, 25 cm hit patches) at every distance | pushed (decision, Anthony) | 1dbbca64 |
+| [S58A](experiments/S58A-lumen-update-priority.md) | 2026-10-12 | Lumen LastUsed - LastUpdated priority replaces round-robin sweep | pushed | a4a7b23d |
+| [S59](experiments/S59-few-rays-gibs-settle.md) | 2026-10-12 | Few rays per relight with GIBS extra rays; higher settle bar (64 sets, 0.15 sd) | pushed | e7803342, eedd6671, c4c787d1 |
+| [S60A](experiments/S60A-probe-hit-lamp-picks.md) | 2026-10-12 | Probe hits take at most 2 shadow rays, lamps picked systematically in proportion to unshadowed light | pushed | a2b41c52 |
+| [S61-S62](experiments/S61-S62-world-radiance-cache.md) | 2026-10-12 | World radiance cache (WRC, 25 cm cells) for hits; variance-guided denoise; WRC refresh budget; global light re | pushed (S62E reverted) | aa1b245e..4eb10b86 |
+| [S63-S65](experiments/S63-S65-sun-share-rate-tiers.md) | 2026-10-12 | Sun/sky share per texel; rate-based scheduling (batch is a ceiling); two tiers (trickle under change 0.173, wh | pushed | 0f288334..b5a72df4 |
+| [S66-S69](experiments/S66-S69-anti-lag-boost-relight.md) | 2026-10-12 | Budget boost after turns (S66A), neighbourhood clamp/anti-lag (S67A), read-since-relight slack (S68A), seed we | pushed (S68B reverted) | 782fe38b..2f35eaa2 |
+| [S70](experiments/S70-gpu-driven-dispatch.md) | 2026-10-12 | Indirect dispatch for cache rays (S70A), no GPU->CPU counter reads in frame loop (S70B), resident scene buffer | pushed | 8758d467, 76245067, b0675659 |
+| [S71E](experiments/S71E-display-ramp.md) | 2026-10-12 | Display ramp to hide convergence pop | reverted (S71F) | 3457f4b2 / revert 4aeeced6 |
+| [S72A](experiments/S72A-sparse-fill.md) | 2026-10-12 | Only key texels get rays; others bilinear from keys | pushed (superseded by S72V) | d38d58ec |
+| [S72B](experiments/S72B-restir-gi-texel-reuse.md) | 2026-10-12 | ReSTIR GI reservoir reuse on texels | reverted (S72H) | b0e76a3b / 43690446 |
+| [S72C](experiments/S72C-denoiser-primary-stop.md) | 2026-10-12 | Denoiser as primary filter + stop on denoised noise | reverted (S72G) | 4c23e3e0 / ca01a371 |
+| [S72D](experiments/S72D-coarse-to-fine-fill.md) | 2026-10-12 | Coarse-to-fine sparse fill levels | pushed (superseded by S72V) | e7de24d8 |
+| [S72E](experiments/S72E-still-pixel-direct-reuse.md) | 2026-10-12 | Still frames reuse per-pixel direct light | reverted (S72F) | c35f8927 / d53603d1 |
+| [S72I](experiments/S72I-confidence-spread.md) | 2026-10-12 | Confidence-weighted sparse spread, edge ratio 1.3 | pushed (superseded) | 597e31dc |
+| [S72J](experiments/S72J-region-uniform-pages.md) | 2026-10-12 | 8x8-texel pages refine together | pushed (superseded by S72V) | 6d055836 |
+| [S72K](experiments/S72K-smooth-page-bar.md) | 2026-10-12 | Smooth cross-page bar, count-based handover | pushed (superseded) | b802fa3b |
+| [S72L](experiments/S72L-wide-anchoring.md) | 2026-10-12 | Wide significance-shrunk anchoring | pushed (superseded) | 2f1123fc |
+| [S72M](experiments/S72M-first-reveal-seed.md) | 2026-10-12 | Seed first-reveal texels from probe light | pushed | 3db494ca |
+| [S72N](experiments/S72N-seeds-apart-dark-fill.md) | 2026-10-12 | Seeds kept apart from own samples; growing WRC ranked by priority | pushed | cf4487e7 |
+| [S72O](experiments/S72O-decorrelation.md) | 2026-10-12 | Per-texel commit timing decorrelated; stored-mean rectification | superseded by S72P | 5cc933d6 |
+| [S72P](experiments/S72P-two-layers.md) | 2026-10-12 | Two layers: traced data (layer 1) never shown; shown field (layer 2) rebuilt per round | pushed (core design; layer 2 later SVGF in S72V) | f582015e |
+| [S72Q](experiments/S72Q-smooth-stops.md) | 2026-10-12 | Layer-2 transmittance stops | pushed (superseded) | 61df885c |
+| [S72R](experiments/S72R-msme-verbatim.md) | 2026-10-12 | GIBS MSME accumulator verbatim | pushed | 6f769a77 |
+| [S72S](experiments/S72S-budget-shift-scaling.md) | 2026-10-12 | Budgets scale by GENOS_LIGHTING_SC_BUDGET_SHIFT; MSME warm-up | pushed | ec3d5e74 |
+| [S72V](experiments/S72V-svgf-layer2-ic-placement.md) | 2026-10-12 | Layer 2 as SVGF a-trous + Gortler pull-push; irradiance-caching placement (V-V11 fixes) | pushed (checkpoint 6b4fe308) | d23a9218..6b4fe308 |
+| [S73A](experiments/S73A-offscreen-prefill-guard-band.md) | 2026-10-12 | Guard-band scout rays claim fine texels just outside the frustum | reverted (11639205); kept on gi-v2-prefill | 097d67de |
+| [S73B](experiments/S73B-lumen-feedback-prefill.md) | 2026-10-12 | All scout hits claim fine texels and stamp LastUsed | reverted (8b62829b); kept on gi-v2-prefill (22bcd47f) | 22bcd47f |
+| [S74A-cam](experiments/S74A-cam-last-camera-offsets.md) | 2026-10-12 | Fix: last-frame camera read from stale scene-block offsets | pushed | 81c00734 |
+| [S74A-asvgf](experiments/S74A-asvgf-asvgf-change-adaptive-rays.md) | 2026-10-12 | A-SVGF same-seed 1-ray checks on 1/9 resolved texels, lambda drives alpha and rays | pushed | 81c00734 |
+| [S74A-shadow](experiments/S74A-shadow-static-lamp-shadow-reuse.md) | 2026-10-12 | Hit shadow rays kept per 12.5 cm cell/lamp, invalidated by lamp epoch | pushed | 81c00734 |
+| [S74B](experiments/S74B-pixel-direct-reuse-segments.md) | 2026-10-12 | Pixel direct light reused when point unchanged and no change bound touches its shadow segments | reverted (6a0debae) | bf0f2d2b |
+| [S75](experiments/S75-lumen-direct-light-cache.md) | 2026-10-12 | Lumen surface-cache direct lighting for GI hits (TDL); A-SVGF SE 0.05 | pushed | d591abfa |
+| [S76](experiments/S76-check-is-the-gate.md) | 2026-10-12 | Variance-aware lambda, deferred checks, lambda-proportional rays, hints only nominate | pushed | 78637784 |
+| [S76B-D](experiments/S76B-D-confirm-escalate-ring-nominations.md) | 2026-10-12 | TDL and WRC confirm-then-escalate; persistent ring nominations, fair service, global check boost | pushed | dbb4777a |
+| [S77A](experiments/S77A-wrc-16ray-check.md) | 2026-10-12 | WRC change refresh as 16-ray check | pushed | c146bf1c |
+| [S77B](experiments/S77B-pixel-shadow-reuse.md) | 2026-10-12 | Per-pixel shadow reuse with check and escalate | reverted (9e242987) | cc0b4726 |
+| [S77C](experiments/S77C-compact-what-changed.md) | 2026-10-12 | Compact visits unread texels with no check due 1 round in 8 | pushed | 14f1b644 |
+| [S77D](experiments/S77D-dirty-page-atrous.md) | 2026-10-12 | Dirty-page a-trous with per-level storage | pushed | bc63443d |
+| [S78A](experiments/S78A-list-driven-atrous.md) | 2026-10-12 | List-driven a-trous (indirect dispatch over active texels) | rejected (stash) | git stash in ge-merge |
+| [S78B](experiments/S78B-atrous-change-driven.md) | 2026-10-12 | A-trous variance and push driven by change | pushed | a6e2c628 |
+| [S78C](experiments/S78C-exact-head-reads.md) | 2026-10-12 | Float +0.5 rounding killed probe reprojection | pushed (bug fix) | c660c0db |
+| [S78D](experiments/S78D-kept-hit-halfway-gated.md) | 2026-10-12 | Kept-hit halfway relight only with a reason | pushed | aaf7bb86 |
+| [S78E](experiments/S78E-tdl-age-check.md) | 2026-10-12 | TDL past age is checked, not recomputed | pushed | 75810842 |
+| [S78F](experiments/S78F-stale-wrc-check.md) | 2026-10-12 | Stale WRC cells take a due check | pushed | 6474a941 |
+| [S78G](experiments/S78G-stop-at-cap-trickle.md) | 2026-10-12 | Stop at cap + 64/round trickle for unconverged (G2: stop at cap only) | rejected | g78/S78G.patch |
+| [S78H](experiments/S78H-wrc-growth-trickle.md) | 2026-10-12 | WRC growth trickle 1024/round | rejected | not saved |
+| [S78I](experiments/S78I-graded-lamp-change.md) | 2026-10-12 | Lamp change graded by its bound vs shown light | rejected | g78/S78I.patch |
+| [S78J](experiments/S78J-pixel-direct-quiet-reuse.md) | 2026-10-12 | Per-pixel direct reuse in quiet frames | pushed | 18894551 |
+| [S78K](experiments/S78K-held-probe-strata.md) | 2026-10-12 | Held probe strata + 1 check ray/probe | pushed | a6559e5e |
+| [S78L](experiments/S78L-noise-aware-tdl-check.md) | 2026-10-12 | Noise-aware TDL check (sigma EMA) | rejected | g78/S78L.patch |
+| [S78M](experiments/S78M-one-tdl-owner.md) | 2026-10-12 | One TDL owner per texel per frame | rejected | not saved |
+| [S78N](experiments/S78N-pixel-reuse-with-changes.md) | 2026-10-12 | Pixel reuse in frames with changes (segment test) + 1/16 verify | rejected | g78/S78N.patch |
+| [S78O](experiments/S78O-kept-hit-texel-index.md) | 2026-10-12 | Kept hits remember their texel | rejected | g78/S78O.patch |
+| [S78P](experiments/S78P-gather-shared-memory.md) | 2026-10-12 | Gather bins in shared memory, one workgroup per probe | pushed | 8c763bb2 |
+| [S78Q](experiments/S78Q-restir-di-pixels.md) | 2026-10-12 | Weighted lamp picking per pixel (ReSTIR DI): Q fused spatial, Q2 temporal-only, Q3 +RIS, Q4 RIS 8 cand + tempo | shelved (Anthony) | g78/S78Q4.patch |
+| [S78R](experiments/S78R-held-probe-gather-skip.md) | 2026-10-12 | Gather skip for held probes | rejected | g78/S78R.patch |
+| [S78S](experiments/S78S-counters-still-churn.md) | 2026-10-12 | Debug counters: what keeps still probes awake | finding (diag WIP, g78/S78T-wip.patch) | g78/S78T-wip.patch |
+| [WAKE](experiments/WAKE-neighbour-wake-design.md) | 2026-10-12 | Anthony's wake design: no wakes from shared field; real change wakes neighbours by coarse-to-fine ring tests w | planned (approved by Anthony) | none yet |
+| [DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md) | 2026-10-12 | S-curve allowed quality lag for off-screen pages by priority | deferred | none |
+| [DUMP](experiments/DUMP-gpu-dump-tool.md) | 2026-10-12 | Debug dump of GPU data from two consecutive frames per component (direct, bounce, coarse/fine WRC, probe resul | in progress | none yet |
+| [RAYCEIL](experiments/RAYCEIL-world-cache-need-ray-ceilings.md) | 2026-10-12 | World-cache cells stop at IC error bound instead of fixed 128 samples | queued | none |
+| [QUIET](experiments/QUIET-quiet-paths-compose-filter-compact.md) | 2026-10-12 | Quiet paths for compose, filter, compact (changed tiles + rotating checks) | queued | none |
+| [LSMOOTH](experiments/LSMOOTH-lighter-smoothing.md) | 2026-10-12 | Lighter smoothing | dropped (Anthony) | none |
+
+# Architecture and component notes (history kept as written)
+
+How GI v2, the lighting engine, works: direct light, shadows, global illumination, the reference it is checked against, and the checks. Each component lists our method, the published method it compares to (Lumen and papers, with links), how and why ours differs, current scores and open issues. The plan and budgets are in [GI v2 design](../gi-v2-design.md); the gate is in [Debugging](../debugging.md). Update this file whenever a method changes, in the same commit as the code.
 
 Scores are gi-check numbers (linear luminance, share of the light) against the GPU path-traced references, at the commit named in each section. "P6" is the probe path (6ce7fd4: screen probes, light cache in push mode, `GENOS_LIGHTING_WORLD=0`); it was the gi-v2 default until S54K. Default now (no env, S54K): GI v2 with the surface cache, `GENOS_LIGHTING_WORLD=3`, `GENOS_LIGHTING_WORLD_CAP=64`, `GENOS_LIGHTING_SC_FLAGS=6007050`, `GENOS_LIGHTING_SC_LOCAL=1`; P6 back with `GENOS_LIGHTING_WORLD=0`. GI v1 was removed on 2026-10-12 and there is no lighting-selection switch: plain `make stress` / `make run` run this lighting with the tuned defaults (see "GI v1 removed" below). "SC" is the surface cache (`GENOS_LIGHTING_WORLD=3`, branch `surface-cache`, flags in `GENOS_LIGHTING_SC_FLAGS`).
 
@@ -175,7 +283,7 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 
 ## gi-check grades
 
-- **Ours:** `genos-stress gi-check` (see [Debugging](debugging.md)): settled views against references (mean, bias, blob, contact, open wall), moving views, repro, camera, trail, flick (moving flicker and still shimmer), turn (arrival, onset, held, return), room (world swim, 48 px swim, grid redraw, blotch, structure, close-up, end), mix, spin, lampret (lights move and return; end against the soaked baseline, limit 0.002). approach (S56: run 9 m at 5 m/s up to a lit wall in the hall across the texel bands; grain of each moving frame against its pose settled, metrics::blotch at 2 px, limit 0.0056; onset 0.0045; frames held until the grain is under 0.003, limit 120; soaked end against the end pose settled fresh, blob limit 0.016; limits provisional, from S56B with ba9adca0 failing grain and end). Window titles name the run, GI mode, flags and test, plus REF while a reference renders. `GENOS_LIGHTING_SC_TRACE=1` prints the surface cache's claims, restarts, frees and relights per readback.
+- **Ours:** `genos-stress gi-check` (see [Debugging](../debugging.md)): settled views against references (mean, bias, blob, contact, open wall), moving views, repro, camera, trail, flick (moving flicker and still shimmer), turn (arrival, onset, held, return), room (world swim, 48 px swim, grid redraw, blotch, structure, close-up, end), mix, spin, lampret (lights move and return; end against the soaked baseline, limit 0.002). approach (S56: run 9 m at 5 m/s up to a lit wall in the hall across the texel bands; grain of each moving frame against its pose settled, metrics::blotch at 2 px, limit 0.0056; onset 0.0045; frames held until the grain is under 0.003, limit 120; soaked end against the end pose settled fresh, blob limit 0.016; limits provisional, from S56B with ba9adca0 failing grain and end). Window titles name the run, GI mode, flags and test, plus REF while a reference renders. `GENOS_LIGHTING_SC_TRACE=1` prints the surface cache's claims, restarts, frees and relights per readback.
 - **Reference:** Lumen is checked visually against the path tracer; we gate numerically.
 - **Fill run (S71D/S71G, time to fill; Anthony 2026-10-12: pop-in is fine when the screen fills near-immediately, smoothing would be lag, so S71E's display ramp was reverted):** `fill.rhai`, the turn pose settled, then a cut to the unseen side held 120 frames (reveal/) and settled (reveal_end/), then a sun move 12:00 -> 15:00 held 120 frames (light/) and settled (light_end/). Score: frames until mean |L - settled| (linear luminance, 320 x 180) stays under 0.005, target 30 (provisional, MISS not FAIL); the note gives the gap at frames 0/10/30/60 and the share of pixel-frames stepping more than 0.01 from their 9-frame average (pop-in, not graded). With turns (turn run) and night->day (dnout frames to 2 %), time to good is the main lighting score. Older builds: run `fill.rhai` with their binary and score with `gi-check --score-only --only fill`.
 - **Open:** the still shimmer row (frame to frame, 60 frames) reads 0 for every build; the drift Anthony sees is slower than 60 frames at 8-bit, so a longer-window row (first vs last of ~600 still frames) is next.
@@ -217,7 +325,7 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 
 GI v1 (radiance cascades, the world probe tier, `stage_tier`, the v1 `kick_light` paths, `light.comp`, `scene.frag`, `tier.glsl`, `ssaa.comp`, `lighting.rs`, `probes.rs`, `probe_tier.rs`, `field.rs`, `shadow.rs`, their tests and bench columns, and the `GENOS_GI` switch and stress `gi` knob) is gone. Removed with it: SSAA (it drew through the v1 fragment shader; panel code 2 now means FXAA), the live-readback switch, `TierStats` (replaced by `SettleStats { settled, still_frames }` from `Renderer::settle_stats()`), and the debug views that showed v1 data (cascade, probes, light field). Debug views now: full, direct, bounce, albedo, normal, depth, light, texels.
 
-Historical v1 numbers (for comparison only; v1 cannot be run any more). Full tables in [GI v2 baseline](gi-v2-baseline.md) (master `0874229d`, tag `gi-v2-baseline`, zanven-pc, RTX 4070, 2026-10-10):
+Historical v1 numbers (for comparison only; v1 cannot be run any more). Full tables in [GI v2 baseline](../gi-v2-baseline.md) (master `0874229d`, tag `gi-v2-baseline`, zanven-pc, RTX 4070, 2026-10-10):
 
 | v1 check (320x180, CPU reference) | mean_rel | bias |
 |---|---|---|

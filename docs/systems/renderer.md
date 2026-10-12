@@ -33,7 +33,7 @@ A profiled draw writes Vulkan timestamp queries around the GPU draw. The GPU tim
 
 Each box face and each cylinder side is lit from a point just outside that face. One sample at the center of a wall lights the back face. Do not return to that sample.
 
-Lighting is described in [Lighting](lighting.md). The raster writes a G-buffer; the lighting passes (`shaders/lighting_*.comp`) light it and compose the colour image.
+Lighting is described in [Lighting](lighting/README.md). The raster writes a G-buffer; the lighting passes (`shaders/lighting_*.comp`) light it and compose the colour image.
 
 ## Code
 
@@ -104,4 +104,4 @@ The picture does not read the tier's probes straight from the light field. Each 
 
 - [ADR 0003](../adr/0003-one-vulkan-renderer-moltenvk-on-macos.md) keeps one Vulkan renderer.
 - [ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) forbids a renderer framework.
-- [Lighting](lighting.md) owns the light pass that this draw calls.
+- [Lighting](lighting/README.md) owns the light pass that this draw calls.

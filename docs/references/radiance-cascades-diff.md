@@ -1,6 +1,6 @@
 # Radiance cascades: paper versus our field
 
-> **Historical (2026-10-12):** this describes GI v1 (radiance cascades and the world probe tier), which was removed on `gi-v2`. The engine has one lighting path, described in [docs/systems/lighting.md](../systems/lighting.md). Kept for the record only.
+> **Historical (2026-10-12):** this describes GI v1 (radiance cascades and the world probe tier), which was removed on `gi-v2`. The engine has one lighting path, described in [docs/systems/lighting/README.md](../systems/lighting/README.md). Kept for the record only.
 
 The gather now follows section 8. This note is the record of the gap before that change.
 

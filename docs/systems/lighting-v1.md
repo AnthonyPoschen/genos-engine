@@ -1,6 +1,6 @@
 # Lighting
 
-> **Historical (2026-10-12):** this describes GI v1 (radiance cascades and the world probe tier), which was removed on `gi-v2`. The engine has one lighting path, described in [docs/systems/lighting.md](lighting.md). Kept for the record only.
+> **Historical (2026-10-12):** this describes GI v1 (radiance cascades and the world probe tier), which was removed on `gi-v2`. The engine has one lighting path, described in [docs/systems/lighting/README.md](lighting/README.md). Kept for the record only.
 
 The renderer lighting engine composes illumination. `Renderer::draw` passes the lights and the objects. The engine decides which lamp reaches which surface. A game does not pair a lamp with an object first.
 

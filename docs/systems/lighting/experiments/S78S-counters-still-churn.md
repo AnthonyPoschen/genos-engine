@@ -1,0 +1,31 @@
+# S78S: Debug counters: what keeps still probes awake
+
+- **Date:** 2026-10-12
+- **Result:** finding (diag WIP, g78/S78T-wip.patch)
+- **Commit / patch:** g78/S78T-wip.patch
+
+## Idea
+Debug counters: what keeps still probes awake
+
+## Motivation
+not recorded
+
+## Paper basis
+not recorded
+
+## What was implemented
+not recorded
+
+## Numbers
+Still scene/frame: ~145k kept hits rewritten, ~4,100 changed (>5%) across ~4,100 of 8,100 probes; ~740 texels written. Disabling the surface-cache read: changed hits ~6,500 -> ~300, quiet probes 7,780/8,093. Ignoring <2% change: quiet 20% -> 49% (timing spoiled by GPU contention).
+
+Still and moving scene: default stress scene (dusk, moving lamps), RTX 4070, 1080p unless noted; ms / fps per frame; pop = share of pixel-frames stepping >1% at frames 20-80 / 80-320; brightness = smoke mean luminance at pose a. Anything not given here was not recorded.
+
+## Screenshots
+not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
+
+## Outcome and why
+Main cause: probe hits read surface-cache texels that keep converging (decays, not a loop, but not settled by 600 frames). Unexplained: ~4,000 hits/frame reading coarse cells jump >5% (coarse-patch flip mystery).
+
+## Lessons / when to revisit
+Fix: per-texel IC-style stop rule; no wakes from the shared field. Dump tool planned to find the coarse flips.

@@ -2,7 +2,7 @@
 
 Status: proposed, 2026-10-10; Anthony's answers to the open questions folded in the same day. No code yet. The decision is [ADR 0012](../adr/0012-gi-v2.md).
 
-This is the plan for the next global illumination (GI) system in Genos Engine. It replaces what is left of radiance cascades ([ADR 0008](../adr/0008-lighting-uses-radiance-cascades.md)) and the analytic occluder grid ([ADR 0011](../adr/0011-occluders-use-a-sparse-camera-box.md)). The v1 system is described in [Lighting v1](lighting-v1.md) and [the handoff](lighting-handoff.md). How v2 works now, component by component against Lumen and the papers, with scores: [Lighting](lighting.md). The quality gate is in [Debugging](debugging.md).
+This is the plan for the next global illumination (GI) system in Genos Engine. It replaces what is left of radiance cascades ([ADR 0008](../adr/0008-lighting-uses-radiance-cascades.md)) and the analytic occluder grid ([ADR 0011](../adr/0011-occluders-use-a-sparse-camera-box.md)). The v1 system is described in [Lighting v1](lighting-v1.md) and [the handoff](lighting-handoff.md). How v2 works now, component by component against Lumen and the papers, with scores: [Lighting](lighting/README.md). The quality gate is in [Debugging](debugging.md).
 
 ## Why change
 
@@ -575,7 +575,7 @@ Each phase keeps `genos-stress` runnable and is gated by the reference views (no
 5. **World probes.** Rays past `R` and card bounce read the world probes. Gate: `world_probe_role.rhai`, far views, toggle latency.
 6. **Hardware tracer.** BLAS and TLAS, ray queries behind the same interface. Gate: both tracers pass the same scripts; RT is faster; forced software on the 4070 still passes.
 7. **Port the layers.** Static, sun and per moving light layers on cards and probes; moving-object proxies; the light tree; emissive region extraction and area lights; switchable and animated emission as layers. Gate adds `emissive_room.rhai`. Gate: toggling a layered light is free and correct against the reference; moving boxes schedule no static work.
-8. **Retire the old paths.** After Anthony accepts the head-to-head: delete the near field, the cascades, the world volume, the occluder grid and the old CPU paths. Mark ADR 0008 and ADR 0011 superseded. Update [Lighting](lighting.md).
+8. **Retire the old paths.** After Anthony accepts the head-to-head: delete the near field, the cascades, the world volume, the occluder grid and the old CPU paths. Mark ADR 0008 and ADR 0011 superseded. Update [Lighting](lighting/README.md).
 9. **Presets and old hardware.** Tune Low to Ultra. Tune Low on the 4070 with the software tracer forced on until a GTX 1060 or RX 580 is available. Run the macOS software path on Anthony's MacBook. Write the presets into the settings doc.
 
 ## Risks

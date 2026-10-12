@@ -30,7 +30,7 @@ The first script is `examples/camera/scene.rhai`. `floor` and `wall` take ground
 
 The floor, each wall, and each square solid are boxes. The circle solid is a cylinder mesh reduced to a convex hull. Lights have no collider.
 
-The scene crate does not call Vulkan. It keeps the lights and the objects. The renderer lighting engine decides which light reaches which surface. See [Lighting](lighting.md).
+The scene crate does not call Vulkan. It keeps the lights and the objects. The renderer lighting engine decides which light reaches which surface. See [Lighting](lighting/README.md).
 
 ## Code
 

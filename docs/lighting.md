@@ -1,6 +1,6 @@
 # Lighting
 
-> **Historical (2026-10-12):** this describes GI v1 (radiance cascades and the world probe tier), which was removed on `gi-v2`. The engine has one lighting path, described in [docs/systems/lighting.md](systems/lighting.md). Kept for the record only.
+> **Historical (2026-10-12):** this describes GI v1 (radiance cascades and the world probe tier), which was removed on `gi-v2`. The engine has one lighting path, described in [docs/systems/lighting.md](systems/lighting/README.md). Kept for the record only.
 
 Genos Engine lights a scene with radiance cascades. The notes here are the working description. The decision is [ADR 0008](adr/0008-lighting-uses-radiance-cascades.md).
 
