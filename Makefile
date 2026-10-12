@@ -1,4 +1,4 @@
-.PHONY: run room stress stress-big stress-bench verify reference
+.PHONY: run room stress stress-big stress-bench verify reference lint-docs
 
 run:
 	cargo run -p genos-camera
@@ -22,3 +22,9 @@ verify:
 # Live lighting against the path-traced ground truth (minutes on first run, cached after).
 reference:
 	cargo run --release -p genos-stress -- --proof --no-panel --size 320x180 --script examples/stress/scripts/reference.rhai
+
+# docs/systems/*/plan.md: a References section, and local links that resolve.
+# docs/systems/core-networking/plan.md is allowlisted until that plan lands.
+lint-docs:
+	python3 scripts/lint-plan-docs.py --self-test
+	python3 scripts/lint-plan-docs.py

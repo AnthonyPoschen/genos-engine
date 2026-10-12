@@ -342,6 +342,8 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 
 ## Steps
 
+Each step is one commit. The `Deviation:` line says where the step leaves a source in [References](#references). `Deviation: none.` means the step follows that source.
+
 ### P1. Motion kinds and angular velocity
 
 - [ ] **Files:** create `crates/physics/src/body.rs`. Modify `lib.rs`. Test `crates/physics/tests/motion.rs`.
@@ -349,6 +351,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Test:** `a_kinematic_box_turns_and_a_dynamic_box_falls`
   - Kinematic box, target angular velocity `(0, π, 0)` rad/s, `dt = 1/60`, 30 steps. Orientation matches `Quat::from_axis_angle(Vec3::Y, π * 0.5)` within `1e-4` on the dot product. Position stays on the start XZ point. Y does not drop.
   - Dynamic sphere, no angular velocity, 400 steps of `dt = 0.001`, still within 1% of `½gt²` (the existing free-fall assertion).
+- **Deviation:** none. Static, kinematic, and dynamic are the three motion types Box2D and Jolt use. An existing body with `inverse_mass == 0` stays static.
 - **Commit:** `physics: integrate kinematic motion and spin`
 
 ### P2. BodyId
@@ -357,6 +360,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** `World::insert` returns `BodyId`. `get` / `get_mut` return `None` after `remove`. Removing one body does not change another id. The scene stores `BodyId` for the view capsule and for solids. `insert` of a fresh body may reuse a slot and must bump the generation.
 - **Test:** `body_id_survives_removal_of_another_body`
   - Insert three spheres with masses 1, 2, 3. Remove the middle id. The other two ids still read masses 1 and 3. The removed id reads `None`. A new insert does not compare equal to the removed id.
+- **Deviation:** none. `BodyId` is an index plus a generation, the same shape as Jolt's body id.
 - **Commit:** `physics: address bodies with generational ids`
 
 ### P3. Shape store and convex margin
@@ -366,6 +370,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Test:** `two_bodies_share_a_hull_and_a_margin_opens_a_gap`
   - Two dynamics share one hull id. Replacing the store's vertices is visible to both. Freeing one body leaves the other's hull intact.
   - A sphere of radius 0.25 and a box with `convex_radius` 0.02 come to rest with a gap of 0.02 ± 0.005 along the contact normal. The same pair with radius 0 rests inside 0.005 of the box face.
+- **Deviation:** `Shape::from_triangles` keeps the 12-vertex reducer in `mesh.rs`. Static triangles are a separate shape. `convex_radius` defaults to 0, so a shape with no margin matches today's contact.
 - **Commit:** `physics: share convex shapes and a convex margin`
 
 ### P4. Layers and pair filters
@@ -374,6 +379,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** Each body has an `ObjectLayer` and a `BroadPhaseLayer`. The world owns a layer pair table. A rejected pair never reaches `collide_pair`. Defaults put statics on layer 0, dynamics on layer 1, and accept 0–1 and 1–1, so existing scenes do not change. Debris is layer 2, and 2–2 is rejected.
 - **Test:** `a_filtered_pair_never_reaches_the_contact_count`
   - Instrument the pair callback with a counter on `World` (test-only `pair_tests: u32`). Overlapping debris spheres: `pair_tests` stays 0 and the spheres keep their overlapping positions after one step. The same spheres on the dynamic layer increment `pair_tests` and separate.
+- **Deviation:** none. Object layers and a broadphase layer follow Jolt's pair filter. Debris-debris pairs are rejected.
 - **Commit:** `physics: filter pairs by object layer`
 
 ### P5. Layered AABB trees
@@ -382,6 +388,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** One tree for static, one for dynamic (debris lives in the dynamic tree with its layer bit). Pair order is `(min id, max id)` sorted by `total_cmp` on the ids, which is the order the solver already used. Static-static pairs are not emitted. The hundreds-of-pillars test stays green.
 - **Test:** `a_dynamic_sphere_among_ten_thousand_statics_tests_a_handful_of_pairs`
   - 100×100 static boxes on a grid, 2 m apart, one dynamic sphere above one box. After one step `pair_tests` is less than 32. A second run reports the same pair id list bitwise.
+- **Deviation:** none. One static tree and one dynamic tree. Debris stays in the dynamic tree. Pair order stays `(min id, max id)`.
 - **Commit:** `physics: query pairs with a layered aabb tree`
 
 ### P6. Batch insert, dirty expand, refit
@@ -391,6 +398,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Test:** `batch_insert_matches_a_rebuild_and_a_move_keeps_the_pair`
   - 1 000 statics via `insert_many` and via one-at-a-time insertion produce the same pair list against one dynamic (the one-at-a-time tree may be fatter: assert its node count is greater than or equal, and the pair lists are equal after `refit`).
   - Move the dynamic by 3 m with `set_position`. The expanded leaf still reports the new overlapping static. After `refit`, the pair list equals a world built at the new pose.
+- **Deviation:** the refit swap finishes before `step` returns. A later parallel step may overlap the rebuild. The pair list after the swap matches a full rebuild. Bepu can refit in the background; this step's swap is synchronous.
 - **Commit:** `physics: refit the aabb tree after a batch insert`
 
 ### P7. GJK distance
@@ -401,6 +409,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - Spheres radius 0.5 at `(0,0,0)` and `(2,0,0)`: distance 1 ± `1e-4`, closest points at x = 0.5 and x = 1.5.
   - Boxes half-extent 0.5, centers 3 m apart on X: distance 2 ± `1e-4`.
   - The same pairs a second time return bitwise-equal points.
+- **Deviation:** GJK reports distance and closest points. Contact response stays on `primitive_contact` until the manifold step.
 - **Commit:** `physics: measure convex distance with gjk`
 
 ### P8. EPA penetration
@@ -410,6 +419,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Test:** `epa_depth_matches_the_box_sat`
   - Two boxes half-extent `(0.5, 0.5, 0.5)`, centers 0.8 apart on X: depth 0.2 ± `1e-3`, normal along ±X.
   - A sphere of radius 0.5 whose center is 0.2 inside a box face: depth 0.2 ± `1e-3`.
+- **Deviation:** EPA depth is checked against the existing box SAT. `solve_contact` stays on the current path in this step.
 - **Commit:** `physics: recover penetration with epa`
 
 ### P9. Manifolds and a contact cache
@@ -418,6 +428,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** Clip the incident face against the reference face (box and hull). At most four points. Persist points across steps by a feature id and reuse the stored impulse as the warm start. The deepest-only path remains available behind `World::single_contact` for the old tests that need one point. Default for new worlds is the manifold. Existing scene tests stay on the single-contact path until P10 flips the default and rechecks them.
 - **Test:** `a_resting_box_keeps_four_contacts_and_its_orientation`
   - Dynamic box half-extent 0.5, identity orientation, dropped from 0.01 m onto a static box. After 120 steps of `1/60`, at least three contact points, orientation dot with identity > `1 - 1e-3`, vertical speed < 0.05.
+- **Deviation:** new worlds clip a manifold of at most four points and warm-start by feature id. `World::single_contact` keeps the deepest-point path for the tests that still use one point.
 - **Commit:** `physics: clip contact manifolds and warm start them`
 
 ### P10. Soft step
@@ -427,6 +438,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Test:** `a_fifty_to_one_stack_stays_up_and_substeps_build_the_tree_once`
   - Five dynamic boxes, mass 1, on one dynamic box of mass 50, on a static plane. `hz = 30`, damping ratio 1, 4 sub-steps, 2 seconds. The bottom dynamic box's center stays within 0.15 m of its rest height. No orientation dot with identity falls below 0.95. `broadphase_builds == 120` for 120 outer steps, not 480.
   - `changing_substep_count_scales_the_cached_impulse`: one warm contact, switch from 4 to 2 sub-steps, the stored impulse is halved ± `1e-5`.
+- **Deviation:** sub-steps integrate and solve. The broadphase runs once per outer step. The bias and impulse coefficients are the mass-independent formulas in Solver2D. `World::solver = Sequential` stays the one-pass path, and Soft becomes the default only after the restitution test still passes on Sequential.
 - **Commit:** `physics: solve contacts with a soft sub-step`
 
 ### P11. Joints
@@ -436,6 +448,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Test:** `a_hinge_stays_in_its_plane_and_a_fixed_joint_holds`
   - Hinge along Y, gravity on, 1 second. The child position's Y equals the anchor Y ± 0.02. The offset on the hinge axis stays within 0.02 of the start.
   - Fixed joint, child mass 1, parent static, 1 second. Child position stays within 0.01 of the anchored pose.
+- **Deviation:** none for the soft-constraint form. The set is fixed, hinge, and distance. A hinge limit is a min and max angle.
 - **Commit:** `physics: add soft fixed and hinge joints`
 
 ### P12. Islands and sleep
@@ -446,6 +459,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - Two separated stacks of two boxes. After 3 seconds both islands are asleep and `solver_bodies` is 0 on the next step.
   - A kinematic sphere overlaps stack A. Stack A wakes (`solver_bodies` includes both of A's boxes) and stack B stays asleep.
   - `remove` of a body that only touched stack B leaves A asleep.
+- **Deviation:** `remove` leaves neighbors asleep. Sleep and wake apply to the whole island. Defaults are 0.1 m/s, 0.1 rad/s, and 0.5 s.
 - **Commit:** `physics: sleep and wake whole islands`
 
 ### P13. Ray cast and shape cast
@@ -455,6 +469,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Test:** `a_ray_hits_the_near_box_and_a_capsule_cast_stops_at_a_wall`
   - Three boxes along X. A ray from the left hits the nearest face point within `1e-4` and reports that `BodyId`. A debris-only filter misses the dynamic boxes.
   - A capsule cast along +X stops with the capsule surface on the wall, fraction in `(0, 1)`, normal along -X.
+- **Deviation:** none. Casts walk the same trees and return the nearest hit.
 - **Commit:** `physics: cast rays and shapes`
 
 ### P14. State hash
@@ -463,6 +478,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** `hash_world` folds body id order (not `Vec` order), motion, pose, velocities, and cached contact impulses with FNV-1a. `atan2` is not used on this path. Two `step` loops in one process match. This is the determinism gate for later steps. A cross-OS golden hash is not claimed: `libm` is not added (ADR 0007), and `std` trig stays off the solver path.
 - **Test:** `the_same_drop_hashes_equal_across_two_runs`
   - Sphere, box, and hinge. Clone the world after setup. Step both clones 60 times at `1/60`. The hashes match.
+- **Deviation:** the hash is in-process. A cross-OS golden file is outside this step. ADR 0007 keeps `libm` out. `atan2` stays off this path.
 - **Commit:** `physics: hash the world for replay`
 
 ### P15. View body
@@ -474,6 +490,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - A 0.2 m step: the capsule ends on top, feet clearance within 0.02 m.
   - A platform moving at `(1, 0, 0)`: after it has carried the capsule, the capsule X matches the platform X ± 0.05 with a zero wish.
   - A downward slope of 20 degrees: with a zero wish the capsule's feet stay within 0.02 m of the surface after 1 second (it does not launch, and it does not sink).
+- **Deviation:** Jolt's `CharacterVirtual` owns the move. This step leaves the action map in `crates/input` as the controller and drives a kinematic capsule.
 - **Commit:** `physics: slide and step the view capsule`
 
 ### P16. Foot plant
@@ -484,6 +501,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - `L1 = L2 = 0.45`. Slope normal `(sin 20°, cos 20°, 0)`. Animated ankles 0.05 m under the plane. After `plant_foot` on both legs, each ankle is within `1e-3` of the plane on the outside (penetration deeper than `-1e-3` fails). Thigh and shin lengths stay within `1e-4`. `foot_up.dot(normal) > cos(1°)`. Pelvis Y is greater than the animated pelvis Y.
 - **Test:** `the_view_body_casts_the_ground_the_planter_uses` (`crates/scene`)
   - Static box rotated 20° about Z. View capsule. One `update` of `1/60` with `forward` taken from the `move` axis above. Downward casts from both animated ankles hit the box. `plant_foot` results pass the same penetration, length, and normal assertions.
+- **Deviation:** two-bone IK is the law of cosines on a cast hit. There is no separate paper. `genos-load` stays as it is, and glTF skins stay ignored.
 - **Commit:** `anim: plant feet on a cast hit`
 
 ### P17. Swept AABBs
@@ -492,6 +510,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** A body with `MotionQuality::Swept` or `Speculative` contributes the AABB of its start pose expanded by linear travel over the step and by a bounding-sphere arc for angular travel (`radius * angle`). Discrete bodies contribute the current AABB. Pair tests use those bounds.
 - **Test:** `two_boxes_that_swap_places_still_form_a_pair`
   - Box A at x = 0, velocity `(+60, 0, 0)`. Box B at x = 10, velocity `(-60, 0, 0)`. Half-extent 0.5. `dt = 1/60`. Start AABBs are disjoint. End AABBs are disjoint from the other start. Swept bounds overlap. The pair list contains `(A, B)`. The same setup with both `Discrete` does not contain the pair.
+- **Deviation:** `Swept` and `Speculative` bodies contribute the start AABB expanded by linear travel and a bounding-sphere arc. Discrete bodies contribute the current AABB.
 - **Commit:** `physics: pair bodies by their swept bounds`
 
 ### P18. Speculative contacts
@@ -501,6 +520,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Test:** `a_bullet_inside_the_margin_does_not_tunnel`
   - Sphere radius 0.05, speed 10 m/s (travel 0.167 m at `1/60`, under the 0.25 m margin), static wall at 0.2 m. After one step the sphere center is on the impact side of the wall.
   - The same sphere at 3 000 m/s is not this test. P19 owns that speed.
+- **Deviation:** the contact distance grows by `min(speed * dt, 0.25 m)`. Bepu's default speculative margin has no upper bound. A closing speed past this cap is the swept path in P19.
 - **Commit:** `physics: stop modest bullets with speculative contacts`
 
 ### P19. Time of impact for two moving convexes
@@ -512,6 +532,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - Assert for each speed: the two centers never exchange X order; the inner-face gap stays `>= -0.01` m; `toi_failed` is false; a contact impulse was stored for the pair; a second run matches positions bitwise.
 - **Test:** `a_spinning_convex_does_not_tunnel_through_a_wall`
   - Box half-extent 1 m, angular velocity `(0, 0, 40)` rad/s, linear velocity 30 m/s into a static wall 2 m away. After one step the box bounds do not pass the wall plane.
+- **Deviation:** time of impact is conservative advancement from GJK distance and the relative velocity of the closest points, including both bodies' linear and angular velocity. The pair advances 0.8 of the remaining time of impact, at least `1e-4` s, and at most 16 times. Other bodies keep the normal sub-step. A missed root sets `toi_failed` and leaves the last safe time.
 - **Commit:** `physics: resolve swept time of impact for both bodies`
 
 ### P20. Fast-pair sub-steps
@@ -520,6 +541,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** If a pair's relative travel over the outer step exceeds that pair's smaller bounding radius, that pair integrates in extra slices (travel per slice ≤ radius). The rest of the world keeps the P10 sub-step count. Counters: `pair_slices(id_a, id_b)` and `body_slices(id)`.
 - **Test:** `only_the_fast_pair_takes_extra_slices`
   - A resting box on a plane, and two swept spheres closing at 600 m/s. After one step the resting box's slice count equals the global sub-step count (4). The fast pair's slice count is greater. The spheres' inner gap stays `>= -0.01`.
+- **Deviation:** extra slices apply to a pair whose relative travel exceeds its smaller bounding radius. The rest of the world keeps the P10 sub-step count.
 - **Commit:** `physics: sub-step a pair that outruns its radius`
 
 ### P21. Wide positions and origin shift
@@ -528,6 +550,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** `WidePos` stores `f64` metres. `World::origin: WidePos` is the frame of every `Body.position`. `shift_origin(new_origin)` subtracts the delta from every body and from the broadphase. Contact runs in `f32` relative to that origin. The renderer, when a caller asks, receives the same `f32` positions plus the origin. `genos-math::Vec3` is unchanged.
 - **Test:** `a_contact_at_1e7_metres_matches_the_origin_after_a_shift`
   - Two boxes, world origin 0, contact gap after 60 steps recorded. The same setup with `WidePos` x = `1e7` and a shift that brings the pair near 0. The gap matches within `1e-4`. Body `f32` positions after the shift are within 10 m of the origin.
+- **Deviation:** `genos-math` stays `f32`. Wide positions and the origin live in the physics crate. Contact runs in `f32` relative to the origin. There is no separate paper.
 - **Commit:** `physics: shift the origin for large worlds`
 
 ### P22. Constraint coloring
@@ -536,6 +559,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** Build colors so two constraints in one color share no body. Edges are sorted by `(body_a, body_b, joint_index)` before coloring, so the colors are a function of the graph. The solver runs color 0 to completion, then color 1, on one thread. Islands still decide who is awake. A sleeping island adds no edges.
 - **Test:** `colors_are_disjoint_and_stable`
   - A pile of 30 boxes. Every color's edges have unique body ids. Two builds produce the same color lists. An asleep second pile adds no edges (`edge_count` equals the awake pile alone).
+- **Deviation:** colors are a function of edges sorted by `(body_a, body_b, joint_index)`. This step solves one color at a time on one thread. A sleeping island adds no edges. Box2D v3 colors the contact graph for a SIMD width; the workers are P23.
 - **Commit:** `physics: color the constraint graph`
 
 ### P23. Parallel color solve
@@ -544,6 +568,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** `std::thread::scope` solves one color across workers. Workers share no body. The main thread joins before the next color. `step` is the one-thread color order. `step_parallel` must hash-equal `step` on the same world.
 - **Test:** `parallel_colors_match_the_serial_hash`
   - 200 dynamic boxes on a plane, 30 steps, `step_parallel(..., 4)` hash equals `step` hash.
+- **Deviation:** workers are `std::thread::scope`. `step_parallel` must hash-equal the one-thread `step`.
 - **Commit:** `physics: solve constraint colors in parallel`
 
 ### P24. Parallel narrowphase
@@ -552,6 +577,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** Pairs are generated on the main thread from the trees (the tree walk stays serial in this step). Narrowphase runs per pair in parallel into pair-indexed slots, then the slots are sorted by body id before the solver. The merged manifold list equals the serial manifold list bitwise.
 - **Test:** `parallel_manifolds_match_the_serial_list`
   - The 200-box pile, one step. Manifold feature ids and points match the serial run.
+- **Deviation:** the tree walk stays on the main thread. Narrowphase fills pair-indexed slots, then sorts by body id so the manifold list matches the serial list.
 - **Commit:** `physics: build manifolds in parallel and sort them`
 
 ### P25. Awake pose upload
@@ -560,6 +586,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** `PoseBuffer` is a `Vec<Pose>` indexed by `BodyId.index`, plus a list of dirty ids. `publish` writes poses of bodies that are awake or that woke, slept, or were removed this step. A fully asleep world publishes an empty dirty list. This buffer is what a Vulkan upload will copy. This step does not call Vulkan. Chunk meshes in P36 reuse the same rule: vertices are written when the chunk spawns, not every step.
 - **Test:** `a_sleeping_world_publishes_no_poses`
   - One stack, step until asleep, `publish`, dirty list empty. Wake one body, `publish`, the dirty list is that island's ids only.
+- **Deviation:** the published buffer is the awake delta. This step writes a `Vec` the renderer can copy later. A fully asleep world publishes an empty dirty list.
 - **Commit:** `physics: publish poses for awake bodies only`
 
 ### P26. Thousands of active bodies
@@ -570,6 +597,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - 64×64 spheres, radius 0.25, spaced 2 m apart, 1 m above a static plane, 30 steps of `1/60`. They stay active (falling or just landed). No position is non-finite. Two runs hash-equal. `pair_tests` is below `4096 * 8` (the plane plus a few neighbors, not the square of the body count).
 - **Test:** `an_asleep_grid_does_not_enter_the_solver`
   - 64×64 statics and 8 dynamics that have already come to rest (place them on the plane with zero velocity and step 2 seconds). The next step has `solver_bodies <= 8` before sleep and `solver_bodies == 0` after the sleep timer. The static count does not appear in `solver_bodies`.
+- **Deviation:** none. This step adds no solver feature. It is the scale gate for the CPU path.
 - **Commit:** `physics: test thousands of active and asleep bodies`
 
 ### P27. Wheel suspension
@@ -578,6 +606,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** A wheeled vehicle is a constraint on one chassis `BodyId`, in the sense of Jolt's `VehicleConstraint` / `WheeledVehicleController`: the wheel is not a body. Each wheel has a local position, a suspension direction, min and max length, frequency, and damping. Each step casts a ray, or a cylinder shape if `WheelCast::Shape` is set, excluding the chassis. The suspension spring uses the P10 soft constraint along the cast. Default cast is the ray.
 - **Test:** `a_chassis_rests_on_four_springs`
   - Chassis mass 1 200 kg, four wheels, rest length 0.4 m, `hz = 4`, damping ratio 0.7, on a static plane. After 3 seconds the chassis height is within 0.02 m of `rest_length - compression`, where compression is `weight/4 / stiffness` and stiffness comes from the frequency and the wheel's suspended mass. Vertical speed < 0.05. `wheel_cast_count` over the last step equals 4.
+- **Deviation:** the wheel is a cast on the chassis constraint, as in `VehicleConstraint`. The default cast is a ray. `WheelCast::Shape` selects a cylinder. Suspension uses the P10 soft constraint. Tracked vehicles and the motorcycle controller stay out of this step.
 - **Commit:** `physics: suspend a chassis on cast wheels`
 
 ### P28. Tyre slip
@@ -587,6 +616,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Test:** `a_locked_wheel_slows_the_car_and_a_free_wheel_rolls`
   - Chassis at 10 m/s, wheel omega 0, `mu_peak` 1. After 1 second speed is below 6 m/s.
   - The same chassis with omega set each step to `speed / radius`. After 1 second speed stays above 9 m/s on a flat plane with no brake.
+- **Deviation:** the default tyre model is a three-point slip curve, rising to `mu_peak` and falling to `mu_slide`. Pacejka stays off until a wheel stores coefficients in P31.
 - **Commit:** `physics: apply a simplified tyre slip curve`
 
 ### P29. Engine, gearbox, differential
@@ -597,6 +627,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - Throttle 1, gear 0, ratio 3, curve `(0 rpm, 200 N·m)` to `(5 000 rpm, 200 N·m)`. After 2 seconds the chassis velocity X is positive and greater than 1 m/s.
   - Gear reverse. After 2 seconds from rest, velocity X is negative.
   - One driven wheel held in the air (no cast hit) and one on the plane. The airborne wheel's omega exceeds the grounded wheel's omega after 1 second of throttle.
+- **Deviation:** the clutch is 0 or 1. The differential is open and writes equal torque to the driven wheels. Jolt also has a limited-slip differential; this step is the open case.
 - **Commit:** `physics: drive wheels through a gearbox and an open diff`
 
 ### P30. Anti-roll bar
@@ -605,6 +636,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** An anti-roll bar is a soft constraint between the suspension compressions of a left and right wheel. Stiffness is N/m of compression difference. It adds equal-and-opposite vertical forces on the chassis at the two wheel positions.
 - **Test:** `an_anti_roll_bar_cuts_the_roll`
   - A 0.1 m step under the left wheels only. Without the bar, after 1 second the roll angle is recorded. With stiffness `20_000`, the roll angle is under half of that recorded angle. The chassis stays finite.
+- **Deviation:** none. The bar is a soft constraint on the left and right suspension compression, as in `VehicleConstraint`'s anti-roll bars.
 - **Commit:** `physics: add an anti-roll bar`
 
 ### P31. Pacejka curve
@@ -613,6 +645,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** Optional longitudinal and lateral curves. `pacejka(slip, b, c, d, e) = d * sin(c * atan(b * slip - e * (b * slip - atan(b * slip))))`. When a wheel has coefficients, that curve replaces the simplified mu. `sin` and `atan` here are `f32` methods used only inside this force, and the vehicle test hashes the resulting speed so a change is visible. The simplified curve remains the default.
 - **Test:** `pacejka_matches_three_known_points`
   - `b = 10`, `c = 1.9`, `d = 1`, `e = 0.97`. Assert `pacejka(0) == 0`, `pacejka` at slip 0.1 is greater than at slip 0.5 (the peak is earlier than the slide), and a second call returns the same bits.
+- **Deviation:** Pacejka replaces the simplified mu on a wheel that stores coefficients. The simplified curve remains the default. `sin` and `atan` run only inside this force.
 - **Commit:** `physics: offer a pacejka slip curve`
 
 ### P32. Thrusters and a large orbit
@@ -623,6 +656,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - Mass 1 000 kg, force 1 000 N through the center, 1 second, gravity 0. Velocity equals `(1, 0, 0)` ± `1e-3`. A second thruster at local `(0, 2, 0)` pushing +X produces angular velocity about Z of `torque / inertia` within 1% (inertia is the box inertia from P1).
 - **Test:** `a_circular_orbit_at_1e7_metres_keeps_its_radius`
   - Radius `1e7` m, `GM = 3.986e14`, circular speed `sqrt(GM / r)`, 200 steps of 1 s in `f64`. Radius stays within 0.05 m of `1e7`. The body `f32` position after an origin shift onto the ship is within 1 m of the origin.
+- **Deviation:** a thruster is a local force and torque on the chassis. The orbit state is `WidePos` integrated with velocity Verlet. `Body.position` is the pose after subtracting `World::origin`. P52 turns this helper into a gravity source.
 - **Commit:** `physics: thrust in zero gravity and integrate a wide orbit`
 
 ### P33. Seeded Voronoi cells
@@ -631,6 +665,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** `voronoi_convex(hull_planes, seeds) -> Vec<Cell>`. Cell `i` is the source hull clipped by the perpendicular-bisector planes against every other seed. Seed order is the cell order. Planes are applied in increasing seed index. No `atan2` and no hashmap iteration. A cell with volume under `1e-8` is dropped and the function returns an error listing the seed, so a bad seed set fails the test instead of disappearing.
 - **Test:** `two_seeds_split_a_cube_into_equal_volumes`
   - Cube from -1 to 1. Seeds `( -0.5, 0, 0 )` and `( 0.5, 0, 0 )`. Two cells. Volumes each 4 ± `1e-3` (cube volume 8). A second call returns bitwise-equal vertices.
+- **Deviation:** each cell is the source hull clipped by perpendicular-bisector planes in increasing seed index. A cell under `1e-8` volume returns an error. Müller's paper also builds an approximate convex decomposition and can fracture at runtime. Runtime fracture is P36. The optional slice is P39.
 - **Commit:** `fracture: clip a convex into seeded voronoi cells`
 
 ### P34. Interior faces
@@ -639,6 +674,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** Clip a closed triangle mesh by the same planes. Triangles keep the source material id. Polygons created on a cut plane are fanned into triangles with `interior_material`. Each chunk is closed: every edge is shared by two triangles. Volume is the sum of signed tetrahedra from the origin.
 - **Test:** `a_cut_box_mesh_gains_an_interior_cap_and_keeps_its_volume`
   - The 12-triangle cube, side 2, two seeds as in P33. Sum of chunk volumes is 8 ± `1e-2`. Interior material area is greater than 0. Exterior area equals 24 ± `1e-2` (six faces of area 4). The second run matches triangle vertices bitwise.
+- **Deviation:** triangles keep the source material id. Polygons on a cut plane are fanned with `interior_material`. Each chunk is closed.
 - **Commit:** `fracture: emit interior faces on the cut`
 
 ### P35. Hierarchy and the support graph
@@ -647,6 +683,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** Level 0 is the coarse seeds. Each coarse cell gets `children_per_chunk` child seeds, placed on a fixed grid inside the cell (not a random source). The asset stores parent, `first_child`, `child_count`. A bond connects two chunks that share a face, with area, centroid, normal, and `health = health_per_area * area`. A chunk flagged support also has a bond whose other end is `WORLD` (`u32::MAX`). `write_gfract` / `read_gfract` use version `1` and little-endian `f32`s. A bad version returns an error.
 - **Test:** `coarse_chunks_contain_their_fine_children`
   - Two coarse seeds, two children each. Asset chunk count is 6 (2 coarse + 4 fine). Each fine chunk's parent is the coarse cell that contains its centroid. Fine volumes inside a coarse cell sum to that cell's volume ± `1e-2`. The world bond count equals the support count. Round-trip bytes load equal.
+- **Deviation:** child seeds sit on a fixed grid inside the parent cell. A support bond's other end is `WORLD`. The file is version 1, little-endian `.gfract`. Blast's hierarchy is the design for coarse and fine chunks. The SDK stays out (ADR 0007).
 - **Commit:** `fracture: store a hierarchy and a bond graph`
 
 ### P36. Hot-swap
@@ -655,6 +692,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** `Breakable` starts as one dynamic or static body (the intact mesh). Chunks are not bodies yet. `activate(chunk)` removes that chunk's body and spawns its children as bodies with the parent's linear and angular velocity, then adds a fixed joint for each remaining child bond (P11). A spawned chunk that can still walk bonds to a support stays `Motion::Static` until that path is gone; a component with no support becomes dynamic. Unbroken coarse chunks stay the parent body. Activation is local: a chunk outside the damaged chunk's neighbor set is not spawned.
 - **Test:** `one_hit_spawns_only_the_damaged_branch`
   - Asset from P35, two coarse chunks, four fine. Intact world has 1 breakable body. `activate` on coarse chunk 0. Body count of the breakable becomes 1 (the untouched coarse chunk) + 2 (its children). Coarse chunk 1 has no child bodies. Child velocities equal the parent velocity within `1e-5`.
+- **Deviation:** `activate` swaps one chunk for its children and adds a fixed joint per remaining child bond. A chunk that can still walk bonds to a support stays static. Chunks outside the damaged neighbor set stay unspawned. The paper rebuilds connectivity at impact. This step spawns the precomputed children.
 - **Commit:** `physics: swap a broken chunk for its children`
 
 ### P37. One damage API
@@ -665,6 +703,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - Column of three chunks, bottom is support. `apply_damage` of the top bond's full health with no collision: the top chunk becomes dynamic and falls for 30 steps; the middle chunk stays static; the bottom stays static.
   - A fresh column. A dynamic sphere strikes the top bond. The reported contact impulse over the hit step is passed through `apply_damage`. When that sum exceeds health, the same top chunk is dynamic and the middle chunk is static.
   - Hashes of the two outcomes are not required to match (the sphere is extra). The bond id that breaks is the top bond in both.
+- **Deviation:** a contact impulse and a game health value both call `apply_damage`. `remove` of an unrelated body leaves this island asleep.
 - **Commit:** `physics: break bonds from impulses and from health`
 
 ### P38. Debris sleep and cull
@@ -674,6 +713,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Test:** `debris_sleeps_fast_and_the_budget_drops_the_smallest`
   - One gameplay box and one debris chunk, both at speed 0.05 m/s. After 6 steps of `1/60` the debris body is asleep and the gameplay box is awake (`sleep_time` 0.5 s has not elapsed).
   - 20 asleep debris, budget 8. After one step, 8 debris remain, and they are the 8 largest volumes. `solver_bodies` for the removed ids is 0. The support island stays asleep.
+- **Deviation:** debris under `debris_volume` uses layer 2, a 0.1 s sleep timer, and a 0.4 m/s speed threshold. Past `debris_budget`, the smallest asleep debris is removed. Awake debris stays.
 - **Commit:** `physics: sleep and cull debris`
 
 ### P39. Optional slice
@@ -682,6 +722,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** `slice_chunk(breakable, chunk, plane_normal, plane_offset) -> Option<(u32, u32)>` clips one leaf chunk into two, writes interior faces, and spawns both as dynamic bodies with a bond that is already broken. It allocates. `step` does not call it. The breakable must be created with `allow_slice: true`. The default is false, and a false breakable returns `None` without changing the world.
 - **Test:** `a_slice_splits_a_box_and_the_step_does_not_slice`
   - Box leaf, plane x = 0, `allow_slice: true`. Two chunks, volumes sum to the box volume ± `1e-2`, each has interior area > 0, both dynamic. They separate under zero gravity when given opposite 0.1 m/s pushes (the test sets the velocities). A second breakable with `allow_slice: false` returns `None` and keeps one body. A world stepped 10 times with no `slice_chunk` call keeps its chunk count.
+- **Deviation:** `slice_chunk` is a call the game makes. `step` leaves the chunk count alone. `allow_slice` defaults to false, and a false breakable returns `None`.
 - **Commit:** `physics: slice one chunk when the game asks`
 
 ### P40. Scene catalog
@@ -719,6 +760,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - `foot_slope` after 30 steps: ankle penetration `>= -1e-3`, bone length error `< 1e-4`.
   - `orbit` after 60 steps: radius error `< 0.05` m.
   - `reset` after `run` restores the start hash.
+- **Deviation:** none. The catalog is engine content. It follows no paper algorithm.
 - **Commit:** `scenes: add the shared physics scene catalog`
 
 ### P41. Physics debug binary
@@ -742,6 +784,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - `parse` of `--headless --scene ship_impact --metrics out.json --frames 5` yields that scene and does not open a window type (the parse result has `headless: true`).
   - `parse` of `--list-scenes` sets `list_only`.
   - The stress and camera `--list-scenes` paths are the same string function `SceneCatalog::list_text()`, tested once in `genos-scenes`.
+- **Deviation:** the binary uses the lighting command shape in Debugging. The reference tracer stays unmounted. `key_r` is bound on this binary's debug action map.
 - **Commit:** `physics-view: pick a scene, reset, write metrics and a screenshot`
 
 ### P42. Quantized replication
@@ -750,6 +793,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** `replicate(world) -> Vec<ReplicatedBody>` writes one record per dirty awake body, or per body whose sleep bit changed, in `NetId` order. Positions are millimetres relative to the origin. A fully asleep unchanged world returns an empty vec. `pose_at_tick` stores the last 32 quantized poses per body for the session's hit rewind. `replicated_checksum` hashes those records. Foot-plant output is not an input to the hash.
 - **Test:** `an_asleep_world_replicates_nothing_and_a_shift_sends_the_origin`
   - Stack from P12 after it sleeps: `replicate` is empty. Wake one body: the vec is that island only. Shift the origin: the next record includes the `f64` origin and the body's millimetre position matches the unshifted case within 1 mm.
+- **Deviation:** a record is written for a dirty awake body and for a sleep-bit change, in `NetId` order, in millimetres relative to the origin. A fully asleep unchanged world returns an empty vec. Foot-plant output stays out of `replicated_checksum`. The codec stays in core-networking.
 - **Commit:** `physics: publish quantized poses for awake bodies`
 
 ### P43. Owned-body prediction and rollback
@@ -760,6 +804,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - Two worlds, same start, 30 ticks. The client predicts with `forward = 1` on every tick. Tick 10's input is dropped on the server (`forward = 0` for that tick only). The client's quantized position at tick 10 differs from the server. `reconcile` then replay leaves the client owned body within 1 mm of the server. A dynamic box in front of the capsule is moved on the server and, on the client, stays on the snapshot pose from before the local prediction (`a_predicted_capsule_does_not_move_a_dynamic_box`).
 - **Test:** `replicated_checksum_ignores_foot_plant`
   - Run `plant_foot` on a copy of the world. The checksum equals the copy that did not plant.
+- **Deviation:** `predict` steps the owned view body. `apply_snapshot` copies remote poses and leaves the solver uncalled. A predicted capsule leaves a dynamic box on its snapshot pose.
 - **Commit:** `physics: roll back the owned view body`
 
 ### P44. Vehicle replication
@@ -768,6 +813,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** `replicate_vehicle` writes the chassis quantized pose, rpm, gear, steer, and each wheel's omega and suspension length. It does not write the contact cache or the torque-curve samples. `apply_vehicle_snapshot` sets those fields and does not call the wheel solver. Throttle, brake, steer, and gear request are read from the owner's `InputFrame` on the server only.
 - **Test:** `vehicle_bytes_are_the_chassis_and_the_wheels`
   - One car, one step of throttle on the server. The serialized record is at most 64 bytes plus 8 bytes per wheel. A client world that only calls `apply_vehicle_snapshot` between two samples has a chassis position on the segment between them, and its `wheel_cast_count` stays 0.
+- **Deviation:** the record is the chassis pose, rpm, gear, steer, wheel omega, and suspension length. The contact cache and the torque-curve samples stay on the simulating side. `apply_vehicle_snapshot` sets those fields and leaves the wheel cast unrun.
 - **Commit:** `physics: replicate a vehicle as a snapshot`
 
 ### P45. Destruction events
@@ -776,6 +822,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** Spawn replication is the seed list, child counts, interior material, and support flags, plus the spawn pose. A client that already has the file accepts the content hash in place of the seeds and loads that file. A bond that breaks appends a `BondBreak`. A slice appends a `Slice`. `apply_events` feeds those through `apply_damage` and `slice_chunk`. `break_baseline` lists broken bond ids and awake chunk poses.
 - **Test:** `bond_breaks_replicate_without_the_mesh`
   - Server and client build from the same seed list. The server's sphere breaks the top bond. The event list contains that bond id and no vertex. The client applies the events. Broken bond ids match. Spawned chunk count matches. A second client that only receives `break_baseline` reaches the same bond set. One break event is at most 32 bytes. A spawn that sends seeds is smaller than the generated vertex buffer.
+- **Deviation:** spawn data is the seed list or the content hash, plus child counts, interior material, and support flags. A break appends `BondBreak`. A slice appends `Slice`. Vertices stay on the simulating side.
 - **Commit:** `physics: replicate fracture as seeds and bond events`
 
 ### P46. Character, vehicle, and fracture debug binaries
@@ -783,6 +830,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - [ ] **Files:** `examples/character-view`, `examples/vehicle-view`, `examples/fracture-view`, each a thin binary on the P41 host. Scripts: `examples/character-view/scripts/foot_slope.rhai`, `examples/vehicle-view/scripts/ship_impact.rhai`, `examples/fracture-view/scripts/destruction_wall.rhai`. Document the four binaries and their commands in `docs/systems/debugging.md`.
 - **Behavior:** Each binary defaults to its row in the observability table, exposes that row's knobs and view modes, and supports the shared commands, `--headless`, `--script`, `--report`, the picker, and `key_r`. The session binary is not created here. `replicated_checksum` and the owned-body error are fields on `physics_metrics` so the core-networking session view can read them.
 - **Test:** `examples/character-view/tests/args.rs` (and the same parse test in the vehicle and fracture packages): `--script scripts/foot_slope.rhai --report out` sets `script` and `report`. `crates/scenes/tests/catalog.rs` asserts `physics_metrics` for `foot_slope`, `ship_impact`, and `destruction_wall` still carry `passed`.
+- **Deviation:** none for the command shape. The session binary stays in the core-networking plan.
 - **Commit:** `debug: add character, vehicle, and fracture view binaries`
 
 ### P47. Inverse-square sources
@@ -795,6 +843,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Test:** `inverse_square_matches_surface_gravity_and_a_hyperbola`
   - The world is `Field` with `World.gravity = 0`. Planet `GM = 98100`, `clamp_radius = 1`, `influence = 1e6`. At 100 m, `|a|` is `9.81` ± `1e-3`, direction toward the source. At `r = 0`, `|a|` is `GM / clamp_radius²` and finite.
   - Hyperbola: `GM = 10`, impact parameter `20` m, `v_inf = 1` m/s, uniform field `0`, Verlet at `dt = 0.5` s from 200 m out and back out. The deflection from the incoming direction is `2 atan(GM / (b v_inf²))` = `2 atan(0.5)` within `3°`. Speed returns to within 2% of `v_inf`. A second run matches the wide position bitwise.
+- **Deviation:** `Uniform` adds `World.gravity` in the force loop and leaves `gravity.rs` uncalled. `Field` adds in-range wells on top of that vector. `insert_source` while `Uniform` stores nothing.
 - **Commit:** `physics: sample inverse-square gravity per body`
 
 ### P48. Moving sources and influence cutoff
@@ -805,6 +854,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - A dynamic ship with an attached source moves 30 m. A test mass 10 m from the new position accelerates toward the new position, not the start.
   - 1 000 sources on a grid, influence radius 1 m, one of them containing the sample point. The evaluation count is at most 8. The acceleration matches that one source.
   - A sleeper inside a source that then moves closer wakes on the next step.
+- **Deviation:** a finite-influence source is stored by its sphere. The query visits containing spheres. An asleep body wakes when the new sample differs by more than `0.05` m/s².
 - **Commit:** `physics: attach gravity sources and cut off by influence`
 
 ### P49. Barnes-Hut for unbounded sources
@@ -813,6 +863,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Behavior:** More than 32 sources with infinite influence build an octree. `theta = 0.5`. A cell is walked into when `size / distance > theta`. Otherwise it contributes its monopole. Finite-influence sources stay on the sphere query. The tree is skipped when every unbounded source is asleep and unmoved.
 - **Test:** `a_distant_cluster_matches_the_direct_sum_within_one_percent`
   - 64 sources of `GM = 1` packed in a 10 m cube, sample point 1 000 m away. Barnes-Hut acceleration is within 1% of the direct sum. A second build matches bitwise. With 32 or fewer unbounded sources the direct sum is used (`tree_builds == 0`).
+- **Deviation:** Barnes-Hut runs when more than 32 unbounded sources are awake, with `theta = 0.5`. Finite-influence sources stay on the sphere query. The tree is skipped when every unbounded source is asleep and unmoved. Barnes and Hut open every cell by the opening-angle test. The 32-source cutoff is this step's gate.
 - **Commit:** `physics: approximate distant gravity with barnes-hut`
 
 ### P50. Volume overrides
@@ -823,6 +874,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - Inside a zero-g box next to the 100 m planet, `|a| < 1e-4`. Just outside that box, `|a|` is the planet's inverse-square value within `1e-3`.
   - A uniform override `(0, -9.81, 0)` in empty space samples that vector inside and `0` outside.
   - Spin: axis `+Y`, `ω = sqrt(9.81 / 20)`, point `(20, 0, 0)`. Acceleration is `+X * 9.81` within `1e-3`. Local up is `-X` (toward the axis).
+- **Deviation:** the innermost volume replaces the summed field, including `World.gravity`. Spin acceleration is `ω² * r_axis` away from the axis.
 - **Commit:** `physics: override gravity inside a volume`
 
 ### P51. Local up for the view body
@@ -833,6 +885,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
   - Planet radius 100 m, `GM = 98100`, uniform field `0`, static sphere collider. View capsule placed at `(100, 0, 0)` plus its radius. After 2 s with a zero wish, the feet stay within `0.05` m of the surface and `up · radial > cos(5°)`.
   - A forward wish in the tangent plane moves the capsule along the surface. Radius stays within `0.05` m. World `+Y` is not the up axis (`up · Y < 0.2`).
   - The same scene's room-style uniform field, no sources, still has `up = +Y` and the existing eye-height assertion in `crates/scene/tests/camera_controls.rs` passes.
+- **Deviation:** `Uniform` with `GRAVITY` keeps up at world `+Y` and leaves `gravity_at` uncalled. `Field` turns the wish into the tangent plane, aligns the capsule to `local_up`, and casts feet along `-local_up`.
 - **Commit:** `physics: align the view body to local gravity`
 
 ### P52. Wide Verlet and the slingshot
@@ -842,6 +895,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Test:** `a_slingshot_gains_speed_and_the_wide_orbit_stays_round`
   - Kinematic moon, `GM = 10`, velocity `(1, 0, 0)`, influence 500 m. Probe enters on a trailing flyby with `v_inf = 1` in the moon frame. After it leaves the sphere, its world speed exceeds its entry speed by at least `0.2` m/s. A second run matches bitwise.
   - The P32 circular orbit at `1e7` m, now a source plus a free body, still stays within `0.05` m of that radius over 200 steps of 1 s.
+- **Deviation:** free bodies integrate with velocity Verlet in `f64`. A body in contact takes one sample of `a` per sub-step into the existing solver. Origin shift still rebases the `f32` pose.
 - **Commit:** `physics: integrate free bodies with velocity verlet`
 
 ### P53. Replicate gravity sources
@@ -851,6 +905,7 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Test:** `a_client_matches_the_server_field_from_replicated_sources`
   - A `Uniform` server snapshot contains the gravity vector and zero source bytes. The client stays in `Uniform` and `field_evaluations` stays 0.
   - A `Field` server with one source and one attached spin volume. Client applies the records and no other gravity input. `gravity_at` matches bitwise at three sample points. A scene-script zero-g box is absent from the byte list. Changing `GM` changes the checksum. Replay at tick `T` uses the source position stored for `T`, not the position at `T+5`.
+- **Deviation:** a `Uniform` snapshot carries the gravity vector and omits the source block. A `Field` snapshot carries source parameters. Scene-script volumes stay local. The client evaluates the field from those parameters.
 - **Commit:** `physics: replicate gravity sources`
 
 ### P54. Gravity scene and field view
@@ -860,11 +915,14 @@ pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
 - **Test:** `gravity_well_metrics_cover_orbit_slingshot_and_the_walk` in `crates/scenes/tests/catalog.rs`.
   - After the lane durations above, `orbit_radius_error < 0.05` at the scene's orbit radius (`1e4` m, not the `1e7` m P32 case), `slingshot_speed_gain > 0.2`, `surface_up_dot > cos(5°)`, `zero_g_accel < 1e-4`, `passed == true`.
   - `examples/physics-view/tests/args.rs`: `--scene gravity_well --view gravity` selects that mode.
+- **Deviation:** none. The `gravity` view draws the field the solver already samples.
 - **Commit:** `physics-view: show the gravity field`
 
 ## GPU solver gate
 
 Do not implement a GPU rigid solver in P1–P54.
+
+Deviation: CCD, queries, vehicles, bonds, and the view body stay on the CPU. A GPU rigid solver waits until a release run of P26's 4 096 active spheres misses the frame budget the game is using.
 
 Open that work only after all of these are true:
 
@@ -939,3 +997,51 @@ Which binary opens which scene is the observability table in the networking sect
 | Many sources: influence cutoff, Barnes-Hut past 32 unbounded sources | P48, P49 |
 | Deterministic gravity sources on the wire | P53 |
 | Gravity-field view in the physics debug binary | P54 |
+
+## References
+
+Design sources for the steps. The code stays in this repository (ADR 0007). A step that leaves a source says so on its `Deviation:` line.
+
+The session, the socket, and the snapshot codec are [core-networking/plan.md](../core-networking/plan.md). `make lint-docs` allowlists that path until the file lands.
+
+### Solver, islands, and the broadphase
+
+- Erin Catto, [Soft Constraints](https://box2d.org/files/ErinCatto_SoftConstraints_GDC2011.pdf), GDC 2011. Frequency and damping ratio for a constraint.
+- Erin Catto, [Solver2D](https://box2d.org/posts/2024/02/solver2d/). The mass-independent soft coefficients (bias rate, mass scale, impulse scale) from Ross Nordby's Bepu form, and sub-stepping.
+- Erin Catto, [Releasing Box2D 3.0](https://box2d.org/posts/2024/08/releasing-box2d-3.0/). Soft Step, and graph coloring of the contact solver.
+- Box2D, [contact_solver.c](https://github.com/erincatto/box2d/blob/main/src/contact_solver.c). Soft contacts, speculative bias, and sub-steps. The file cites Macklin's small steps and the 2011 notes.
+- Box2D, [dynamic_tree.c](https://github.com/erincatto/box2d/blob/main/src/dynamic_tree.c). The incremental AABB tree.
+- Miles Macklin, Matthias Müller, and Nuttapong Chentanez, [Small Steps in Physics Simulation](https://mmacklin.com/smallsteps.pdf), SCA 2019.
+- Ross Nordby, [Bepu Physics 2](https://github.com/bepu/bepuphysics2). Soft-constraint coefficients, [substepping](https://github.com/bepu/bepuphysics2/blob/master/Documentation/Substepping.md), constraint batching, islands, and sleeping. [Continuous collision detection](https://github.com/bepu/bepuphysics2/blob/master/Documentation/ContinuousCollisionDetection.md) is speculative contacts, plus a sweep for a time of impact when the margin is not enough.
+- Gino van den Bergen, [Efficient Collision Detection of Complex Deformable Models using AABB Trees](https://doi.org/10.1080/10867651.1997.10487480), Journal of Graphics Tools, 1997.
+
+### Narrowphase and CCD
+
+- E. G. Gilbert, D. W. Johnson, and S. S. Keerthi, [A fast procedure for computing the distance between complex objects in three-dimensional space](https://doi.org/10.1109/56.2083), IEEE Journal of Robotics and Automation, 1988. GJK.
+- Gino van den Bergen, [A Fast and Robust GJK Implementation for Collision Detection of Convex Objects](https://doi.org/10.1080/10867651.1999.10487502), Journal of Graphics Tools, 1999. A public copy is [jgt98convex.pdf](https://solid.sourceforge.net/jgt98convex.pdf).
+- Gino van den Bergen, [Proximity Queries and Penetration Depth Computation on 3D Game Objects](https://graphics.stanford.edu/courses/cs468-01-fall/Papers/van-den-bergen.pdf), GDC 2001. GJK distance and the expanding polytope algorithm (EPA).
+- Jolt Physics, [MotionQuality.h](https://github.com/jrouwe/JoltPhysics/blob/master/Jolt/Physics/Body/MotionQuality.h). Discrete versus linear-cast continuous collision.
+- Paul Firth, [Speculative Contacts](https://wildbunny.co.uk/blog/2011/03/25/speculative-contacts-an-continuous-collision-engine-approach-part-1/), 2011. A contact generated ahead of a touching pair, solved so a fast body stops inside the margin.
+
+### Vehicles and the character
+
+- Jolt Physics, [VehicleConstraint.h](https://github.com/jrouwe/JoltPhysics/blob/master/Jolt/Physics/Vehicle/VehicleConstraint.h) and [WheeledVehicleController.h](https://github.com/jrouwe/JoltPhysics/blob/master/Jolt/Physics/Vehicle/WheeledVehicleController.h). Cast wheels, suspension, anti-roll bars, engine, transmission, and differential. The controller header cites Marco Monster, [Car Physics for Games](https://www.asawicki.info/Mirror/Car%20Physics%20for%20Games/Car%20Physics%20for%20Games.html).
+- Hans B. Pacejka and Egbert Bakker, [The Magic Formula Tyre Model](https://doi.org/10.1080/00423119208969994), Vehicle System Dynamics, 1992. The curve in P31 is `d * sin(c * atan(b * slip - e * (b * slip - atan(b * slip))))`.
+- Jolt Physics, [CharacterVirtual.h](https://github.com/jrouwe/JoltPhysics/blob/master/Jolt/Physics/Character/CharacterVirtual.h). Slide, step, and stick. P15 leaves the action map as the controller.
+
+### Destruction
+
+- Matthias Müller, Nuttapong Chentanez, and Tae-Yong Kim, [Real Time Dynamic Fracture with Volumetric Approximate Convex Decompositions](https://matthias-research.github.io/pages/publications/fractureSG2013.pdf), ACM SIGGRAPH 2013. Voronoi cells, interior faces, and connectivity. The same paper is the cook's pattern in the [asset plan](../assets/plan.md).
+- NVIDIA Blast, [repository](https://github.com/NVIDIAGameWorks/Blast). Support graph and a chunk hierarchy. The crate is not a dependency (ADR 0007).
+
+### Gravity
+
+- Josh Barnes and Piet Hut, [A hierarchical O(N log N) force-calculation algorithm](https://doi.org/10.1038/324446a0), Nature 324, 1986.
+- William C. Swope, Hans C. Andersen, Peter H. Berens, and Kent R. Wilson, [A computer simulation method for the calculation of equilibrium constants for the formation of physical clusters of molecules](https://doi.org/10.1063/1.442716), Journal of Chemical Physics, 1982. Velocity Verlet.
+
+### No separate paper
+
+- Two-bone IK is the law of cosines on the thigh and the shin (P16).
+- Origin shift stores `f64` metres in the physics crate and leaves `genos-math` on `f32` (P21).
+- Inverse-square gravity is `GM / r²`, with `r` clamped and a finite influence (P47).
+

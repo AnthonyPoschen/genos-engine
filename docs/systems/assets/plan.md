@@ -623,3 +623,18 @@ These stay `loaded, unsupported` until a runtime commit moves them. They are lis
 - A USDC crate reader.
 - Drawing the bond graph as a break. That is the physics plan, reading this cook record.
 - Sending subset bytes on a socket. `missing_subsets` is the list. The session in the core-networking plan sends it.
+
+## References
+
+Published sources named above. A departure in this file is a **Deviation.** sentence next to that source.
+
+- Arseny Kapoulkine, [meshoptimizer](https://meshoptimizer.org/).
+- Brian Karis, "A Deep Dive into Nanite Virtualized Geometry", SIGGRAPH 2021 Advances in Real-Time Rendering. [Slides](https://www.advances.realtimerendering.com/s2021/Karis_Nanite_SIGGRAPH_Advances_2021_final.pdf).
+- Khronos, [KTX 2.0](https://registry.khronos.org/KTX/specs/2.0/ktxspec.v2.html).
+- Khronos, [KTX developer guide](https://github.com/KhronosGroup/3D-Formats-Guidelines/blob/main/KTXDeveloperGuide.md) (Basis Universal UASTC).
+- Martin Mittring, "Advanced Virtual Texture Topics", SIGGRAPH 2008. [Notes](https://advances.realtimerendering.com/s2008/SIGGRAPH%202008%20-%20Advanced%20virtual%20texture%20topics.pdf).
+- Ulrich Haar and Sebastian Aaltonen, "GPU-Driven Rendering Pipelines", SIGGRAPH 2015. [Slides](https://advances.realtimerendering.com/s2015/aaltonenhaar_siggraph2015_combined_final_footer_220dpi.pdf).
+- Matthias Müller, Nuttapong Chentanez, and Tae-Yong Kim, "Real Time Dynamic Fracture with Volumetric Approximate Convex Decompositions", ACM SIGGRAPH 2013. [Paper](https://matthias-research.github.io/pages/publications/fractureSG2013.pdf).
+- Card texel size stays a bake setting ([S57](../lighting/experiments/S57-no-camera-distance-sizes.md)).
+- The session contract is [core-networking/plan.md](../core-networking/plan.md). `make lint-docs` allowlists that path until the file lands.
+- Runtime fracture reads the cook record from the [physics plan](../physics/plan.md).
