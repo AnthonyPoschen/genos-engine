@@ -23,6 +23,7 @@ layout(local_size_x = 64) in;
 const float LIGHTING_FILTER_COS = 0.98481; // cos 10 degrees
 const float LIGHTING_DEPTH_WEIGHT = 1000.0;
 const float LIGHTING_FAR_HIT = 1000.0;
+const bool LIGHTING_FILTER_HOLD = true;
 
 void main() {
     uint probe = gl_GlobalInvocationID.x;
@@ -33,7 +34,12 @@ void main() {
     uint from_table = round == 1u ? 1u : 0u;
     bool last = round == 2u;
     vec4 pp = work.v[lighting_probe_at(probe)];
+    bool fhold = LIGHTING_FILTER_HOLD && LIGHTING_GATHER_HOLD && lighting_world_mode() != 2u;
+    uint gdb = lighting_gdirty_at() + 2u * probe;
     if (pp.w < 0.5) {
+        if (fhold && last) {
+            work.v[gdb + 1u].w = -1.0;
+        }
         if (last) {
             [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
                 work.v[lighting_shf_at(probe) + q] = vec4(0.0);
@@ -71,6 +77,43 @@ void main() {
         nb[count] = other;
         nw[count] = w;
         count++;
+    }
+    // S78Y quiet filter: a round's output is kept (each round has its own
+    // table: graw -> 1 -> 0 -> SH) when none of its inputs changed this frame:
+    // its own and its neighbours' previous-round values (round 0: their gather
+    // ran, lighting_gather.comp stamps gd.x; rounds 1-2: their previous round
+    // was redone, gd.z / gd.w) and the depth weights (each probe's depth from
+    // the eye as of last frame's last round, gp.w; -1 inactive).
+    if (fhold) {
+        uint now = lighting_frame();
+        bool dirty = false;
+        [[dont_unroll]] for (uint k = 0u; k < 9u && !dirty; k++) {
+            ivec2 c = c0 + (2 << int(round)) * ivec2(int(k % 3u) - 1, int(k / 3u) - 1);
+            if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, grid))) {
+                continue;
+            }
+            uint other = uint(c.y) * pc.dims.z + uint(c.x);
+            vec4 og = work.v[lighting_gdirty_at() + 2u * other];
+            float stamp = round == 0u ? og.x : (round == 1u ? og.z : og.w);
+            dirty = floatBitsToUint(stamp) == now;
+            if (round == 0u && !dirty) {
+                vec4 op = work.v[lighting_probe_at(other)];
+                float od = op.w < 0.5 ? -1.0 : max(dot(op.xyz - scene.eye.xyz, fwd), 1.0e-3);
+                dirty = work.v[lighting_gdirty_at() + 2u * other + 1u].w != od;
+            }
+        }
+        if (!dirty) {
+            return;
+        }
+        if (round == 0u) {
+            work.v[gdb].z = uintBitsToFloat(now);
+        } else if (round == 1u) {
+            work.v[gdb].w = uintBitsToFloat(now);
+        }
+    }
+    if (fhold && last) {
+        // Read by the other probes' round 0 next frame only (rounds are dispatches).
+        work.v[gdb + 1u].w = depth;
     }
     float c[27];
     [[dont_unroll]] for (uint f = 0u; f < 27u; f++) {

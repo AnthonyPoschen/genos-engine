@@ -146,6 +146,8 @@ void gather_bin() {
     barrier();
     if (LIGHTING_GATHER_HOLD && k == 0u) {
         work.v[lighting_gdirty_at() + 2u * probe].y = uintBitsToFloat(g_samples);
+        // S78Y: the raw cells were redone: the filter's round 0 reads them.
+        work.v[lighting_gdirty_at() + 2u * probe].x = uintBitsToFloat(lighting_frame());
         work.v[lighting_gdirty_at() + 2u * probe + 1u].xyz = pp.xyz;
     }
     barrier();

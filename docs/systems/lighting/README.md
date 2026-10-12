@@ -156,6 +156,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78V](experiments/S78V-se-stop-rule.md) | 2026-10-12 | SE stop rule for texels | rejected (noise) | g78/S78V.patch |
 | [S78W](experiments/S78W-stats-device-memory.md) | 2026-10-12 | Shader stats in device memory; per-dispatch GPU times | pushed | S78W |
 | [S78R3](experiments/S78R3-gather-hold-on.md) | 2026-10-12 | Gather hold on (re-test) | pushed (rough; idle A/B 6am) | S78R3 |
+| [S78Y](experiments/S78Y-quiet-filter.md) | 2026-10-12 | Quiet probe filter | pushed (rough; idle A/B 6am) | S78Y |
 | [WAKE](experiments/WAKE-neighbour-wake-design.md) | 2026-10-12 | Anthony's wake design: no wakes from shared field; real change wakes neighbours by coarse-to-fine ring tests w | planned (approved by Anthony) | none yet |
 | [DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md) | 2026-10-12 | S-curve allowed quality lag for off-screen pages by priority | deferred | none |
 | [DUMP](experiments/DUMP-gpu-dump-tool.md) | 2026-10-12 | Debug dump of GPU data from two consecutive frames per component (direct, bounce, coarse/fine WRC, probe resul | in progress | none yet |
