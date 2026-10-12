@@ -152,6 +152,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78Q](experiments/S78Q-restir-di-pixels.md) | 2026-10-12 | Weighted lamp picking per pixel (ReSTIR DI): Q fused spatial, Q2 temporal-only, Q3 +RIS, Q4 RIS 8 cand + tempo | shelved (Anthony) | g78/S78Q4.patch |
 | [S78R](experiments/S78R-held-probe-gather-skip.md) | 2026-10-12 | Gather skip for held probes | rejected | g78/S78R.patch |
 | [S78S](experiments/S78S-counters-still-churn.md) | 2026-10-12 | Debug counters: what keeps still probes awake | pushed (debug tooling) + finding | S78S |
+| [S78U](experiments/S78U-check-ray-noise-test.md) | 2026-10-12 | Held check ray is a test, not a rewrite | pushed | S78U |
 | [WAKE](experiments/WAKE-neighbour-wake-design.md) | 2026-10-12 | Anthony's wake design: no wakes from shared field; real change wakes neighbours by coarse-to-fine ring tests w | planned (approved by Anthony) | none yet |
 | [DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md) | 2026-10-12 | S-curve allowed quality lag for off-screen pages by priority | deferred | none |
 | [DUMP](experiments/DUMP-gpu-dump-tool.md) | 2026-10-12 | Debug dump of GPU data from two consecutive frames per component (direct, bounce, coarse/fine WRC, probe resul | in progress | none yet |

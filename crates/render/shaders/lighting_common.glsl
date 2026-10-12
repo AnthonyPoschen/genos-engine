@@ -392,10 +392,15 @@ float lighting_seg_dist2c(vec3 a, vec3 b, vec3 c) {
 }
 // Ray k of a held probe's stratum is traced this frame: the check, or its path
 // (with its kept hit distance t, < 0 a miss) crosses a change.
+bool lighting_held_crosses(vec3 origin, vec3 dir, float t);
 bool lighting_held_traced(uint probe, uint k, vec3 origin, vec3 dir, float t) {
     if (k == lighting_hold_check_k(probe)) {
         return true;
     }
+    return lighting_held_crosses(origin, dir, t);
+}
+// The held ray's path (kept hit distance t, < 0 a miss) crosses a change.
+bool lighting_held_crosses(vec3 origin, vec3 dir, float t) {
     vec4 head = work.v[lighting_change_at()];
     uint changes = min(uint(head.x), LIGHTING_CHANGES);
     if (head.y > 0.5) {

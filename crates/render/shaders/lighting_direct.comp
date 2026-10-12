@@ -49,6 +49,49 @@ void lighting_put_kept_light_d(uint h, vec3 light, uint src) {
     }
     work.v[at][h % 4u] = uintBitsToFloat(v);
 }
+// S78U (root cause from S78S: 100 % of still-scene kept-light changes were
+// the held probe's check ray, relit fresh while its other held hits kept their
+// last light, so the converging surface cache read as a change every frame).
+// The check ray of a held probe whose hit did not move is a test, not a
+// rewrite: its relit light replaces the stored one only when it differs by
+// more than LIGHTING_CHECK_K standard errors of the hit texel's mean (the
+// MSME estimator's per-set variance / sets, lighting_sc_noise), scaled by the
+// hit's reflectance, plus a quantisation floor. Drift of the shared field
+// within its own noise no longer changes a probe (Anthony: probes do not wake
+// from shared-cache convergence). Unknown noise (estimator not running: new
+// texel or light changing) writes as before.
+const bool LIGHTING_CHECK_NOISE = true;
+const float LIGHTING_CHECK_K = 3.0;
+const float LIGHTING_CHECK_FLOOR = 0.01;
+bool lighting_check_within_noise(uint h, vec3 pos, vec3 n, vec3 refl, vec3 light) {
+    if (!LIGHTING_CHECK_NOISE || lighting_world_mode() != 3u) {
+        return false;
+    }
+    uint rays = lighting_rays();
+    uint pk = h / rays / LIGHTING_STRATA;
+    uint s = (h / rays) % LIGHTING_STRATA;
+    if (s != lighting_stratum() || !lighting_stratum_held(pk) || h % rays != lighting_hold_check_k(pk)) {
+        return false;
+    }
+    // The trace's check failed (hit moved): a real change.
+    if (floatBitsToUint(work.v[lighting_probe_at(pk) + 1u].w) == lighting_frame() + LIGHTING_STRATA) {
+        return false;
+    }
+    uint ts = lighting_cache_find_sized(pos, n, false, LIGHTING_SC_TEXEL, pos);
+    if (ts == ~0u) {
+        return false;
+    }
+    vec2 nz = lighting_sc_noise(ts);
+    if (nz.x < 0.0) {
+        return false;
+    }
+    vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+    uint at = lighting_kept_light_at() + h / 4u;
+    float lo = dot(lighting_unpack_rgb9e5(floatBitsToUint(work.v[at][h % 4u])), lw);
+    float ln = dot(light, lw);
+    float bound = LIGHTING_CHECK_K * nz.y * dot(refl, lw) + LIGHTING_CHECK_FLOOR * max(lo, ln);
+    return abs(ln - lo) <= bound;
+}
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     uint pixels = pc.dims.x * pc.dims.y;
@@ -153,6 +196,14 @@ void main() {
             vec3 hnn;
             lighting_stratum_ray(pk, s, h % lighting_rays(), ho, hd, hnn);
             held_old = !lighting_held_traced(pk, h % lighting_rays(), ho, hd, hit_t);
+            // S78U: the check ray whose trace confirmed its hit is relit like
+            // the other held hits (only when a lamp / the sun moved): a drift
+            // of the shared surface cache is no reason to change the probe.
+            if (!held_old && LIGHTING_CHECK_NOISE && h % lighting_rays() == lighting_hold_check_k(pk)
+                && floatBitsToUint(work.v[lighting_probe_at(pk) + 1u].w) != lighting_frame() + LIGHTING_STRATA
+                && !lighting_held_crosses(ho, hd, hit_t)) {
+                held_old = true;
+            }
         }
         if (LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_world_mode() == 3u && !(urgent && lighting_near_change(pos))) {
             uint traced = lighting_frame() - LIGHTING_STRATA / 2u;
@@ -357,6 +408,8 @@ void main() {
         e_sun += lighting_hit_sunfrac * bounce;
         if (fill_hit) {
             lighting_put_fill_light(h, reflectance * e + glow);
+        } else if (probe_hit && lighting_check_within_noise(h, pos, n, reflectance, reflectance * e + glow)) {
+            lighting_chg(CHG_KEPT_HELD, 1u);
         } else if (probe_hit) {
             lighting_put_kept_light_d(h, reflectance * e + glow, tdl == ~0u ? 2u : ((tdl & 0x80000000u) != 0u ? 0u : 1u));
         } else {
