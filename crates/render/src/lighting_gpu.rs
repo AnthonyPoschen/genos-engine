@@ -10,7 +10,7 @@
 //   light    direct light with shadow rays at every pixel and every probe ray hit
 //   gather   ray radiance to irradiance SH per probe
 //   filter   each probe's SH averaged with its matching 3 x 3 neighbours
-//   cache    relight a batch of light cache patches (gi2_cache.glsl): every bounce
+//   cache    relight a batch of light cache patches (lighting_cache.glsl): every bounce
 //            after the first, read where probe and cache rays hit
 //   compose  direct + probe irradiance per pixel, tone curve, dither
 //
@@ -20,46 +20,46 @@
 
 /// Screen probe tile edge in pixels (Medium and above in the design).
 /// Screen probe tile at 720p and up, pixels (Lumen's size).
-pub(crate) const GI2_TILE: u32 = 16;
+pub(crate) const LIGHTING_TILE: u32 = 16;
 
-/// Screen probe tile for a picture `height` pixels tall: GI2_TILE from 720p up;
+/// Screen probe tile for a picture `height` pixels tall: LIGHTING_TILE from 720p up;
 /// below that the tile shrinks with the picture (down to 4 px) so the probes keep
 /// the same spacing on screen, about 45 rows. A small picture would otherwise get
 /// probes a ninth of its height apart and lose detail a 720p picture keeps.
-/// GENOS_GI2_TILE (4..64) overrides it to experiment.
-fn gi2_tile(height: u32) -> u32 {
-    std::env::var("GENOS_GI2_TILE")
+/// GENOS_LIGHTING_TILE (4..64) overrides it to experiment.
+fn lighting_tile(height: u32) -> u32 {
+    std::env::var("GENOS_LIGHTING_TILE")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
-        .map_or((height / 45).clamp(4, GI2_TILE), |t| t.clamp(4, 64))
+        .map_or((height / 45).clamp(4, LIGHTING_TILE), |t| t.clamp(4, 64))
 }
 
 /// Rays per screen probe (Low in the design; a square for the stratified pattern).
-pub(crate) const GI2_RAYS: u32 = 64;
-/// Light cache sizes; gi2_cache_slots.glsl has the same numbers.
-const GI2_CACHE_SLOTS: u64 = 1048576;
-const GI2_CACHE_BATCH: u32 = 98304;
-const GI2_CACHE_RAYS: u32 = 16;
-/// ckeys word of the WRC refresh lists' two counts (gi2_cache.glsl GI2_WRC_CHG_COUNT_AT).
-const GI2_WRC_COUNTS_AT: u64 = 2 * GI2_CACHE_SLOTS + 2 + 66;
+pub(crate) const LIGHTING_RAYS: u32 = 64;
+/// Light cache sizes; lighting_cache_slots.glsl has the same numbers.
+const LIGHTING_CACHE_SLOTS: u64 = 1048576;
+const LIGHTING_CACHE_BATCH: u32 = 98304;
+const LIGHTING_CACHE_RAYS: u32 = 16;
+/// ckeys word of the WRC refresh lists' two counts (lighting_cache.glsl LIGHTING_WRC_CHG_COUNT_AT).
+const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
-/// (gi2_common.glsl GI2_STRATA): the visibility history cap.
-pub(crate) const GI2_STRATA: u32 = 8;
-/// Bounds of moved objects one frame can list (gi2_common.glsl GI2_CHANGES); past
+/// (lighting_common.glsl LIGHTING_STRATA): the visibility history cap.
+pub(crate) const LIGHTING_STRATA: u32 = 8;
+/// Bounds of moved objects one frame can list (lighting_common.glsl LIGHTING_CHANGES); past
 /// that every kept stratum is dropped.
-const GI2_CHANGES: usize = 64;
-/// Vec4s before the bounds in the changes block (gi2_common.glsl GI2_CHANGE_HEAD).
-const GI2_CHANGE_HEAD: usize = 5;
+const LIGHTING_CHANGES: usize = 64;
+/// Vec4s before the bounds in the changes block (lighting_common.glsl LIGHTING_CHANGE_HEAD).
+const LIGHTING_CHANGE_HEAD: usize = 5;
 /// GI v2 counts as settled once the scene block (camera included) has stayed the
 /// same for this many frames (the screen probes average up to 32 frames' rays,
-/// gi2_gather.comp) and a full sweep of the light cache changed no patch
-/// by more than GI2_SETTLE_CHANGE.
-const GI2_SETTLE_FRAMES: u32 = 32;
+/// lighting_gather.comp) and a full sweep of the light cache changed no patch
+/// by more than LIGHTING_SETTLE_CHANGE.
+const LIGHTING_SETTLE_FRAMES: u32 = 32;
 /// Largest relative change of a relit cache patch, in millionths, that counts as
 /// settled (0.2 %, well under a display code).
-const GI2_SETTLE_CHANGE: u32 = 2000;
+const LIGHTING_SETTLE_CHANGE: u32 = 2000;
 
-pub(crate) struct Gi2 {
+pub(crate) struct Lighting {
     ready: bool,
     desc_layout: Handle,
     layout: Handle,
@@ -79,14 +79,14 @@ pub(crate) struct Gi2 {
     /// The work buffer is new: zeroed first, so no probe keeps a stratum.
     work_clear: bool,
     /// The traced world as of the last frame's passes: the scene block (its
-    /// occluder list is compared, gi2_changes) and the key of what else is traced
+    /// occluder list is compared, lighting_changes) and the key of what else is traced
     /// (meshes, floor, roof); a change of the key drops every kept stratum.
     kept_bytes: Vec<u8>,
     kept_key: u64,
     /// Key of the traced world besides the occluders (set with the scene upload).
     pub(crate) trace_key: u64,
     /// Per frame slot, read back: rays the screen probes held and probes placed
-    /// (gi2_gather.comp). The last frame read and its slot.
+    /// (lighting_gather.comp). The last frame read and its slot.
     probe_samples: [u32; 2],
     last_slot: usize,
     /// Frames the probes ran: which views block is last frame's (its parity).
@@ -100,17 +100,17 @@ pub(crate) struct Gi2 {
     pub(crate) draw_key: u64,
     /// Frames in a row drawn from held light (settled): the picture no longer changes.
     held: u32,
-    /// Per frame slot: the cache pass's counters (gi2_cache.glsl `CacheStats`), and
+    /// Per frame slot: the cache pass's counters (lighting_cache.glsl `CacheStats`), and
     /// `still` as it was when that slot's frame ran (0: the scene had just changed).
     stats: [Buffer; 2],
     stats_still: [u32; 2],
-    /// Frames in a row whose relit patches all stayed within GI2_SETTLE_CHANGE, and
+    /// Frames in a row whose relit patches all stayed within LIGHTING_SETTLE_CHANGE, and
     /// the live patch count last read back.
     quiet: u32,
     live: u32,
     dims: [u32; 4],
     /// The light cache's passes (compact, its rays' trace and light, relight) run on
-    /// the async compute queue (GENOS_GI2_ASYNC=0 keeps them in the frame): at most
+    /// the async compute queue (GENOS_LIGHTING_ASYNC=0 keeps them in the frame): at most
     /// one submission in flight, skipped while the last is still running.
     async_on: bool,
     world_cmd: Handle,
@@ -124,7 +124,7 @@ pub(crate) struct Gi2 {
     /// What the submission in flight was built from: scene hash and still frames.
     world_hash: u64,
     world_still: u32,
-    /// Light cache rounds run (gi2_round), and frames to hold off after the cache
+    /// Light cache rounds run (lighting_round), and frames to hold off after the cache
     /// buffers were cleared on the graphics queue.
     world_round: u32,
     world_hold: u32,
@@ -134,14 +134,14 @@ pub(crate) struct Gi2 {
     pub(crate) light_scene: u64,
     light_hash: u64,
     /// Rounds in a row, since that last changed, whose mature patches all stayed
-    /// within GI2_SETTLE_CHANGE: past a full sweep, rounds relight young patches only.
+    /// within LIGHTING_SETTLE_CHANGE: past a full sweep, rounds relight young patches only.
     light_quiet: u32,
     /// Occluders (index in the scene's list) that moved in the last
-    /// GI2_MOVER_KEEP frames, with the frames left: movers. The surface cache leaves
+    /// LIGHTING_MOVER_KEEP frames, with the frames left: movers. The surface cache leaves
     /// their pixels to the probes; once still that long they are scenery again.
     movers: std::collections::BTreeMap<usize, u32>,
     /// Traced mesh instances (mesh_field order): last poses, the ones that moved in
-    /// the last GI2_MOVER_KEEP frames, and every instance's bounding sphere now.
+    /// the last LIGHTING_MOVER_KEEP frames, and every instance's bounding sphere now.
     mesh_poses: Vec<[f32; 16]>,
     mesh_movers: std::collections::BTreeMap<usize, u32>,
     mesh_spheres: Vec<[f32; 4]>,
@@ -152,7 +152,7 @@ pub(crate) struct Gi2 {
     stats_young: [bool; 2],
     world_light: u64,
     world_young: bool,
-    /// Light cache rounds per second of wall time (GENOS_GI2_CACHE_HZ; 0: one every
+    /// Light cache rounds per second of wall time (GENOS_LIGHTING_CACHE_HZ; 0: one every
     /// frame), when the last began, and whether each frame slot ran one.
     cache_hz: f64,
     last_round: Option<Instant>,
@@ -168,7 +168,7 @@ pub struct SettleStats {
     pub still_frames: u32,
 }
 
-impl Default for Gi2 {
+impl Default for Lighting {
     fn default() -> Self {
         Self {
             ready: false,
@@ -202,7 +202,7 @@ impl Default for Gi2 {
             stats_still: [0; 2],
             live: 0,
             dims: [0; 4],
-            async_on: std::env::var("GENOS_GI2_ASYNC").is_ok_and(|v| v == "1"),
+            async_on: std::env::var("GENOS_LIGHTING_ASYNC").is_ok_and(|v| v == "1"),
             world_cmd: std::ptr::null_mut(),
             world_fence: std::ptr::null_mut(),
             world_set: std::ptr::null_mut(),
@@ -221,12 +221,12 @@ impl Default for Gi2 {
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
             mesh_spheres: Vec::new(),
-            young_ok: std::env::var("GENOS_GI2_YOUNG_ONLY").map_or(true, |v| v != "0"),
+            young_ok: std::env::var("GENOS_LIGHTING_YOUNG_ONLY").map_or(true, |v| v != "0"),
             stats_light: [0; 2],
             stats_young: [false; 2],
             world_light: 0,
             world_young: false,
-            cache_hz: std::env::var("GENOS_GI2_CACHE_HZ")
+            cache_hz: std::env::var("GENOS_LIGHTING_CACHE_HZ")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.0),
@@ -237,28 +237,28 @@ impl Default for Gi2 {
 }
 
 /// S70A dispatch kinds in a round's group list (the third field; real heights stay below).
-const GI2_ARGS: u32 = 1 << 30;
-const GI2_MODE1: u32 = GI2_ARGS + 1;
-const GI2_DENSE_RAYS: u32 = GI2_ARGS + 2;
-const GI2_DENSE_ENTRIES: u32 = GI2_ARGS + 3;
-/// Word of the dispatch args in the cache keys (gi2_cache.glsl GI2_ARGS_AT).
-const GI2_ARGS_AT: u64 = 2 * GI2_CACHE_SLOTS + 2 + 17600;
-const GI2_PASS_NAMES: [&str; 8] = [
-    "gi2 compact",
-    "gi2 place",
-    "gi2 trace",
-    "gi2 light",
-    "gi2 gather",
-    "gi2 filter",
-    "gi2 cache",
-    "gi2 compose",
+const LIGHTING_ARGS: u32 = 1 << 30;
+const LIGHTING_MODE1: u32 = LIGHTING_ARGS + 1;
+const LIGHTING_DENSE_RAYS: u32 = LIGHTING_ARGS + 2;
+const LIGHTING_DENSE_ENTRIES: u32 = LIGHTING_ARGS + 3;
+/// Word of the dispatch args in the cache keys (lighting_cache.glsl LIGHTING_ARGS_AT).
+const LIGHTING_ARGS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 17600;
+const LIGHTING_PASS_NAMES: [&str; 8] = [
+    "lighting compact",
+    "lighting place",
+    "lighting trace",
+    "lighting direct",
+    "lighting gather",
+    "lighting filter",
+    "lighting cache",
+    "lighting compose",
 ];
 
 impl Gpu {
     /// Track which traced mesh instances move (surface cache movers).
     pub(crate) fn note_field_movers(&mut self, live: &[&crate::mesh_field::FieldInstance]) {
-        let g = &mut self.gi2;
-        gi2_mesh_movers(live, &mut g.mesh_poses, &mut g.mesh_movers, &mut g.mesh_spheres);
+        let g = &mut self.lighting;
+        lighting_mesh_movers(live, &mut g.mesh_poses, &mut g.mesh_movers, &mut g.mesh_spheres);
     }
 
     /// Note how long a pipeline took to build (tests check it stays short).
@@ -267,7 +267,7 @@ impl Gpu {
             .push((name.to_string(), start.elapsed()));
     }
 
-    fn make_gi2(&mut self) -> Result<(), String> {
+    fn make_lighting(&mut self) -> Result<(), String> {
         #[repr(C)]
         struct Binding {
             binding: u32,
@@ -345,11 +345,11 @@ impl Gpu {
                     self.device,
                     &set_info as *const SetInfo as *const u8,
                     std::ptr::null(),
-                    &mut self.gi2.desc_layout,
+                    &mut self.lighting.desc_layout,
                 ),
-                "gi2 descriptor layout",
+                "lighting descriptor layout",
             )?;
-            let sets = [self.gi2.desc_layout];
+            let sets = [self.lighting.desc_layout];
             let push = Range {
                 stage: 0x20,
                 offset: 0,
@@ -369,9 +369,9 @@ impl Gpu {
                     self.device,
                     &layout as *const LayoutInfo as *const u8,
                     std::ptr::null(),
-                    &mut self.gi2.layout,
+                    &mut self.lighting.layout,
                 ),
-                "gi2 pipeline layout",
+                "lighting pipeline layout",
             )?;
             let size = Size { kind: 7, count: 24 };
             let pool = PoolInfo {
@@ -387,15 +387,15 @@ impl Gpu {
                     self.device,
                     &pool as *const PoolInfo as *const u8,
                     std::ptr::null(),
-                    &mut self.gi2.pool,
+                    &mut self.lighting.pool,
                 ),
-                "gi2 descriptor pool",
+                "lighting descriptor pool",
             )?;
-            let layouts = [self.gi2.desc_layout; 3];
+            let layouts = [self.lighting.desc_layout; 3];
             let alloc = Alloc {
                 s_type: 34,
                 next: std::ptr::null(),
-                pool: self.gi2.pool,
+                pool: self.lighting.pool,
                 count: 3,
                 layouts: layouts.as_ptr(),
             };
@@ -406,26 +406,26 @@ impl Gpu {
                     &alloc as *const Alloc as *const u8,
                     sets.as_mut_ptr(),
                 ),
-                "gi2 descriptor sets",
+                "lighting descriptor sets",
             )?;
-            self.gi2.sets = [sets[0], sets[1]];
-            self.gi2.world_set = sets[2];
+            self.lighting.sets = [sets[0], sets[1]];
+            self.lighting.world_set = sets[2];
         }
-        self.make_gi2_world()?;
+        self.make_lighting_world()?;
         let codes: [&[u8]; 8] = [
-            GI2_COMPACT_SPV,
-            GI2_PLACE_SPV,
-            GI2_TRACE_SPV,
-            GI2_LIGHT_SPV,
-            GI2_GATHER_SPV,
-            GI2_FILTER_SPV,
-            GI2_CACHE_SPV,
-            GI2_COMPOSE_SPV,
+            LIGHTING_COMPACT_SPV,
+            LIGHTING_PLACE_SPV,
+            LIGHTING_TRACE_SPV,
+            LIGHTING_DIRECT_SPV,
+            LIGHTING_GATHER_SPV,
+            LIGHTING_FILTER_SPV,
+            LIGHTING_CACHE_SPV,
+            LIGHTING_COMPOSE_SPV,
         ];
         for (k, code) in codes.iter().enumerate() {
             let start = Instant::now();
-            self.gi2.pipes[k] = self.make_compute_pipe(code, self.gi2.layout, GI2_PASS_NAMES[k])?;
-            self.note_pipeline_time(GI2_PASS_NAMES[k], start);
+            self.lighting.pipes[k] = self.make_compute_pipe(code, self.lighting.layout, LIGHTING_PASS_NAMES[k])?;
+            self.note_pipeline_time(LIGHTING_PASS_NAMES[k], start);
         }
         let start = Instant::now();
         self.frag_override = Some(GBUFFER_FRAG_SPV);
@@ -433,15 +433,15 @@ impl Gpu {
         let made = self.make_pipeline(true, false, false);
         self.frag_override = None;
         self.vert_override = None;
-        self.gi2.gbuffer_pipe = made?;
-        self.note_pipeline_time("gi2 gbuffer", start);
-        self.gi2.ready = true;
+        self.lighting.gbuffer_pipe = made?;
+        self.note_pipeline_time("lighting gbuffer", start);
+        self.lighting.ready = true;
         Ok(())
     }
 
     /// The async light cache submission's command buffer (compute family), its
     /// fence (signalled: nothing in flight) and timestamps.
-    fn make_gi2_world(&mut self) -> Result<(), String> {
+    fn make_lighting_world(&mut self) -> Result<(), String> {
         #[repr(C)]
         struct AllocInfo {
             s_type: i32,
@@ -457,7 +457,7 @@ impl Gpu {
             flags: u32,
         }
         if self.compute_pool.is_null() {
-            self.gi2.async_on = false;
+            self.lighting.async_on = false;
             return Ok(());
         }
         let alloc = AllocInfo {
@@ -477,29 +477,29 @@ impl Gpu {
                 (self.fns.alloc_cmd)(
                     self.device,
                     &alloc as *const AllocInfo as *const u8,
-                    &mut self.gi2.world_cmd,
+                    &mut self.lighting.world_cmd,
                 ),
-                "gi2 world command buffer",
+                "lighting world command buffer",
             )?;
             check(
                 (self.fns.create_fence)(
                     self.device,
                     &fence as *const FenceInfo as *const u8,
                     std::ptr::null(),
-                    &mut self.gi2.world_fence,
+                    &mut self.lighting.world_fence,
                 ),
-                "gi2 world fence",
+                "lighting world fence",
             )?;
         }
         // Stamps 0 and 1: the round's start and end; 2 to 5: after each pass.
-        self.gi2.world_qp = self.make_query_pool_n(6)?;
+        self.lighting.world_qp = self.make_query_pool_n(6)?;
         Ok(())
     }
 
     /// Wait for the async light cache submission in flight, if any.
-    fn wait_gi2_world(&mut self) {
-        if !self.gi2.world_fence.is_null() {
-            let fences = [self.gi2.world_fence];
+    fn wait_lighting_world(&mut self) {
+        if !self.lighting.world_fence.is_null() {
+            let fences = [self.lighting.world_fence];
             unsafe {
                 (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX);
             }
@@ -563,14 +563,14 @@ impl Gpu {
 
     /// Size the G-buffer, work and output buffers for the picture and point every
     /// descriptor at them.
-    fn make_gi2_targets(&mut self) -> Result<(), String> {
-        if !self.gi2.ready {
+    fn make_lighting_targets(&mut self) -> Result<(), String> {
+        if !self.lighting.ready {
             return Ok(());
         }
-        self.wait_gi2_world();
-        self.poll_gi2_world();
+        self.wait_lighting_world();
+        self.poll_lighting_world();
         let (w, h) = (self.extent_w.max(1), self.extent_h.max(1));
-        let tile = gi2_tile(h);
+        let tile = lighting_tile(h);
         let cols = w.div_ceil(tile);
         let rows = h.div_ceil(tile);
         let probes = (cols * rows) as u64;
@@ -579,58 +579,58 @@ impl Gpu {
         // (7), strata (2 per probe and stratum), kept hits and their light (a uint
         // each), the changes block, the views (2 blocks of 2 per probe) and the
         // cells (2 tables of R per probe), then the fills and their light (as the
-        // kept hits) (gi2_common.glsl).
-        let kept = probes * GI2_RAYS as u64 * GI2_STRATA as u64;
-        let cache_rays = (GI2_CACHE_BATCH * GI2_CACHE_RAYS) as u64;
-        let work_vec4 = gi2_change_at(probes, cache_rays, kept)
-            + (GI2_CHANGE_HEAD + GI2_CHANGES) as u64
+        // kept hits) (lighting_common.glsl).
+        let kept = probes * LIGHTING_RAYS as u64 * LIGHTING_STRATA as u64;
+        let cache_rays = (LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS) as u64;
+        let work_vec4 = lighting_change_at(probes, cache_rays, kept)
+            + (LIGHTING_CHANGE_HEAD + LIGHTING_CHANGES) as u64
             + 4 * probes
-            + 2 * GI2_RAYS as u64 * probes
+            + 2 * LIGHTING_RAYS as u64 * probes
             + kept
             + kept / 4;
-        let mut gbuf = std::mem::replace(&mut self.gi2.gbuf, Buffer::empty());
-        let mut work = std::mem::replace(&mut self.gi2.work, Buffer::empty());
-        let mut out = std::mem::replace(&mut self.gi2.out, Buffer::empty());
+        let mut gbuf = std::mem::replace(&mut self.lighting.gbuf, Buffer::empty());
+        let mut work = std::mem::replace(&mut self.lighting.work, Buffer::empty());
+        let mut out = std::mem::replace(&mut self.lighting.out, Buffer::empty());
         self.destroy_buffer(&mut gbuf);
         self.destroy_buffer(&mut work);
         self.destroy_buffer(&mut out);
         // Both queues use the light cache and the work buffer's ray slots.
         let share = self.light_families();
-        if self.gi2.cache_keys.buffer.is_null() {
-            self.gi2.cache_keys = self.make_buffer_queues(
-                (2 * GI2_CACHE_SLOTS + 2 + 17600 + 16) * 4, // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (GI2_ARGS_AT)
+        if self.lighting.cache_keys.buffer.is_null() {
+            self.lighting.cache_keys = self.make_buffer_queues(
+                (2 * LIGHTING_CACHE_SLOTS + 2 + 17600 + 16) * 4, // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT)
                 0x20 | 0x2 | 0x100,
                 Memory::Device,
                 &share,
             )?;
-            self.gi2.cache =
-                self.make_buffer_queues(GI2_CACHE_SLOTS * 128, 0x20 | 0x2, Memory::Device, &share)?;
-            self.gi2.cache_clear = true;
+            self.lighting.cache =
+                self.make_buffer_queues(LIGHTING_CACHE_SLOTS * 128, 0x20 | 0x2, Memory::Device, &share)?;
+            self.lighting.cache_clear = true;
             for k in 0..2 {
-                self.gi2.stats[k] = self.make_buffer(96, 0x20 | 0x2, Memory::Readback)?;
+                self.lighting.stats[k] = self.make_buffer(96, 0x20 | 0x2, Memory::Readback)?;
             }
-            self.gi2.world_stats =
+            self.lighting.world_stats =
                 self.make_buffer_queues(96, 0x20 | 0x2, Memory::Readback, &share)?;
-            self.gi2.world_scene = self.make_buffer_queues(
+            self.lighting.world_scene = self.make_buffer_queues(
                 crate::pack::SCENE_CAPACITY as u64,
                 0x20,
                 Memory::Upload,
                 &share,
             )?;
-            self.write_buffer(&self.gi2.world_scene, &vec![0u8; crate::pack::SCENE_TAIL])?;
+            self.write_buffer(&self.lighting.world_scene, &vec![0u8; crate::pack::SCENE_TAIL])?;
         }
-        self.gi2.gbuf = self.make_buffer(16 + pixels * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
-        self.gi2.work =
+        self.lighting.gbuf = self.make_buffer(16 + pixels * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        self.lighting.work =
             self.make_buffer_queues(work_vec4 * 16, 0x20 | 0x1 | 0x2, Memory::Device, &share)?;
-        self.gi2.out = self.make_buffer(pixels * 4, 0x20 | 0x1 | 0x2, Memory::Device)?;
-        self.gi2.dims = [w, h, cols, rows];
-        self.gi2.gbuf_clear = true;
-        self.gi2.work_clear = true;
+        self.lighting.out = self.make_buffer(pixels * 4, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        self.lighting.dims = [w, h, cols, rows];
+        self.lighting.gbuf_clear = true;
+        self.lighting.work_clear = true;
         self.write_raster_sets()?;
-        self.write_gi2_sets()
+        self.write_lighting_sets()
     }
 
-    fn write_gi2_sets(&self) -> Result<(), String> {
+    fn write_lighting_sets(&self) -> Result<(), String> {
         #[repr(C)]
         struct BufInfo {
             buffer: Handle,
@@ -654,14 +654,14 @@ impl Gpu {
             let (scene, stats, set) = if slot < 2 {
                 (
                     self.frame_scene[slot].buffer,
-                    self.gi2.stats[slot].buffer,
-                    self.gi2.sets[slot],
+                    self.lighting.stats[slot].buffer,
+                    self.lighting.sets[slot],
                 )
             } else {
                 (
-                    self.gi2.world_scene.buffer,
-                    self.gi2.world_stats.buffer,
-                    self.gi2.world_set,
+                    self.lighting.world_scene.buffer,
+                    self.lighting.world_stats.buffer,
+                    self.lighting.world_set,
                 )
             };
             if set.is_null() {
@@ -670,11 +670,11 @@ impl Gpu {
             let buffers = [
                 (0u32, scene),
                 (5, self.mesh_field.buffer),
-                (6, self.gi2.gbuf.buffer),
-                (7, self.gi2.work.buffer),
-                (8, self.gi2.out.buffer),
-                (9, self.gi2.cache_keys.buffer),
-                (10, self.gi2.cache.buffer),
+                (6, self.lighting.gbuf.buffer),
+                (7, self.lighting.work.buffer),
+                (8, self.lighting.out.buffer),
+                (9, self.lighting.cache_keys.buffer),
+                (10, self.lighting.cache.buffer),
                 (11, stats),
             ];
             let infos: Vec<BufInfo> = buffers
@@ -715,137 +715,137 @@ impl Gpu {
     }
 
     /// Settle state for the debug tools, in the tier's terms: one "brick", settled
-    /// once the scene (camera included) has not changed for GI2_SETTLE_FRAMES.
-    pub(crate) fn gi2_stats(&self) -> SettleStats {
-        let sweep = self.gi2.live.div_ceil(GI2_CACHE_BATCH).max(1) + 1;
-        // World cells on (GENOS_GI2_WORLD=2): their running means (cap frames) have
+    /// once the scene (camera included) has not changed for LIGHTING_SETTLE_FRAMES.
+    pub(crate) fn lighting_stats(&self) -> SettleStats {
+        let sweep = self.lighting.live.div_ceil(LIGHTING_CACHE_BATCH).max(1) + 1;
+        // World cells on (GENOS_LIGHTING_WORLD=2): their running means (cap frames) have
         // to forget the poses before this one, so settling waits four caps.
-        let world_wait = match gi2_world_env() {
+        let world_wait = match lighting_world_env() {
             2 => {
-                4 * std::env::var("GENOS_GI2_WORLD_CAP").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(32)
+                4 * std::env::var("GENOS_LIGHTING_WORLD_CAP").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(32)
             }
-            // Surface cache: GENOS_GI2_SC_SETTLE frames still (experiment: how long
+            // Surface cache: GENOS_LIGHTING_SC_SETTLE frames still (experiment: how long
             // its texels take to take in the bounced light).
-            3 => std::env::var("GENOS_GI2_SC_SETTLE").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0),
+            3 => std::env::var("GENOS_LIGHTING_SC_SETTLE").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0),
             _ => 0,
         };
         // Surface cache with flag 8192: texels at the cap keep relighting (their
-        // change never drops under GI2_SETTLE_CHANGE), so it settles on frames still
-        // (GENOS_GI2_SC_SETTLE, default 300) and the light having held.
+        // change never drops under LIGHTING_SETTLE_CHANGE), so it settles on frames still
+        // (GENOS_LIGHTING_SC_SETTLE, default 300) and the light having held.
         let sc_relit = world_wait != 0
-            || (gi2_world_env() == 3
-                && gi2_sc_flags_env() & 8192 != 0);
-        let settled = if gi2_world_env() == 3 && sc_relit {
-            self.gi2.still >= GI2_SETTLE_FRAMES.max(if world_wait != 0 { world_wait } else { 300 }) && self.gi2.light_quiet >= 2
+            || (lighting_world_env() == 3
+                && lighting_sc_flags_env() & 8192 != 0);
+        let settled = if lighting_world_env() == 3 && sc_relit {
+            self.lighting.still >= LIGHTING_SETTLE_FRAMES.max(if world_wait != 0 { world_wait } else { 300 }) && self.lighting.light_quiet >= 2
         } else {
-            self.gi2.still >= GI2_SETTLE_FRAMES.max(world_wait) && self.gi2.quiet >= sweep
+            self.lighting.still >= LIGHTING_SETTLE_FRAMES.max(world_wait) && self.lighting.quiet >= sweep
         };
         SettleStats {
             settled,
-            still_frames: self.gi2.still,
+            still_frames: self.lighting.still,
         }
     }
 
-    fn gi2_still_frames(&self) -> u32 {
-        self.gi2.still
+    fn lighting_still_frames(&self) -> u32 {
+        self.lighting.still
     }
 
     /// Rays the screen probes held in the last frame drawn, and probes placed
-    /// (gi2_gather.comp): waits for that frame.
-    pub(crate) fn gi2_probe_samples(&mut self) -> [u32; 2] {
+    /// (lighting_gather.comp): waits for that frame.
+    pub(crate) fn lighting_probe_samples(&mut self) -> [u32; 2] {
         unsafe {
             (self.fns.device_wait)(self.device);
         }
-        self.read_gi2_stats(self.gi2.last_slot)
-            .map_or(self.gi2.probe_samples, |w| [w[6], w[7]])
+        self.read_lighting_stats(self.lighting.last_slot)
+            .map_or(self.lighting.probe_samples, |w| [w[6], w[7]])
     }
 
     /// The picture has stopped changing: a frame drawn from held light has been
     /// submitted after another, so one is on screen.
-    fn gi2_picture_held(&self) -> bool {
-        self.gi2.held >= 2
+    fn lighting_picture_held(&self) -> bool {
+        self.lighting.held >= 2
     }
 
     /// The lighting runs this frame: built and sized for the picture.
-    fn gi2_active(&self) -> bool {
-        self.gi2.ready
-            && self.gi2.dims[0] == self.extent_w
-            && self.gi2.dims[1] == self.extent_h
+    fn lighting_active(&self) -> bool {
+        self.lighting.ready
+            && self.lighting.dims[0] == self.extent_w
+            && self.lighting.dims[1] == self.extent_h
     }
 
     /// Before the raster: the G-buffer size header, and the last frame's passes done
     /// with the buffers this frame's raster writes.
-    fn gi2_begin(&mut self, slot: usize) {
-        let header = [self.gi2.dims[0], self.gi2.dims[1], 0, 0];
-        let world = self.gi2.async_on;
+    fn lighting_begin(&mut self, slot: usize) {
+        let header = [self.lighting.dims[0], self.lighting.dims[1], 0, 0];
+        let world = self.lighting.async_on;
         if world {
-            self.poll_gi2_world();
+            self.poll_lighting_world();
         }
         // This slot's last frame is done (its fence was waited): read its counters
         // (the async queue's come back with its own submission).
-        self.trace_sc(self.gi2.stats[slot].memory, "frame");
+        self.trace_sc(self.lighting.stats[slot].memory, "frame");
         // S70B (no GPU->CPU reads in the frame loop): the surface cache's settling
         // and young-only rounds come from what the CPU already knows (frames still,
         // rounds since the light changed), so its counters are read only for the
         // debug output or the older world modes that settle on them.
-        let read = gi2_stats_wanted();
+        let read = lighting_stats_wanted();
         if !read {
-        } else if let Ok(words) = self.read_gi2_stats(slot) {
-            self.gi2.probe_samples = [words[6], words[7]];
-            if words[7] > 0 && std::env::var_os("GENOS_GI_DEBUG").is_some() {
+        } else if let Ok(words) = self.read_lighting_stats(slot) {
+            self.lighting.probe_samples = [words[6], words[7]];
+            if words[7] > 0 && std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
                 eprintln!(
-                    "gi2 probes rays {} probes {} per_probe {:.1}",
+                    "lighting probes rays {} probes {} per_probe {:.1}",
                     words[6],
                     words[7],
                     words[6] as f64 / words[7] as f64
                 );
             }
         }
-        if !self.gi2.cache_clear && !world {
-            if !self.gi2.stats_round[slot] {
+        if !self.lighting.cache_clear && !world {
+            if !self.lighting.stats_round[slot] {
                 // No light cache round ran in that frame.
             } else if !read {
-            } else if let Ok(words) = self.read_gi2_stats(slot) {
+            } else if let Ok(words) = self.read_lighting_stats(slot) {
                 // A frame that ran just as the scene changed measured against the
                 // old light; it does not count toward settling.
-                let light = self.gi2.stats_light[slot] == self.gi2.light_hash;
-                self.note_gi2_round(
+                let light = self.lighting.stats_light[slot] == self.lighting.light_hash;
+                self.note_lighting_round(
                     words,
-                    self.gi2.stats_still[slot] != 0,
+                    self.lighting.stats_still[slot] != 0,
                     light,
-                    self.gi2.stats_young[slot],
+                    self.lighting.stats_young[slot],
                 );
             }
         }
         unsafe {
-            (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.stats[slot].buffer, 0, 96, 0);
-            if self.gi2.cache_clear {
-                self.gi2.cache_clear = false;
+            (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.stats[slot].buffer, 0, 96, 0);
+            if self.lighting.cache_clear {
+                self.lighting.cache_clear = false;
                 // The async queue starts once this frame (its slot) is surely done.
-                self.gi2.world_hold = 2;
-                (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache_keys.buffer, 0, u64::MAX, 0);
-                (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache.buffer, 0, u64::MAX, 0);
+                self.lighting.world_hold = 2;
+                (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, 0, u64::MAX, 0);
+                (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache.buffer, 0, u64::MAX, 0);
             }
-            if self.gi2.work_clear {
-                self.gi2.work_clear = false;
-                (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.work.buffer, 0, u64::MAX, 0);
+            if self.lighting.work_clear {
+                self.lighting.work_clear = false;
+                (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.work.buffer, 0, u64::MAX, 0);
             }
-            if self.gi2.gbuf_clear {
-                self.gi2.gbuf_clear = false;
+            if self.lighting.gbuf_clear {
+                self.lighting.gbuf_clear = false;
                 // Every record empty (distance all ones); the header goes in below.
-                (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.gbuf.buffer, 0, u64::MAX, u32::MAX);
+                (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.gbuf.buffer, 0, u64::MAX, u32::MAX);
             }
             // The whole-buffer clears land before the count and header writes.
             self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             // The mature and young patch counts, rebuilt by the compact pass.
             if !world {
-                for at in [GI2_CACHE_SLOTS, 2 * GI2_CACHE_SLOTS + 1, GI2_WRC_COUNTS_AT, GI2_WRC_COUNTS_AT + 1, GI2_WRC_COUNTS_AT + 4, GI2_WRC_COUNTS_AT + 5] {
-                    (self.fns.cmd_fill_buffer)(self.cmd, self.gi2.cache_keys.buffer, at * 4, 4, 0);
+                for at in [LIGHTING_CACHE_SLOTS, 2 * LIGHTING_CACHE_SLOTS + 1, LIGHTING_WRC_COUNTS_AT, LIGHTING_WRC_COUNTS_AT + 1, LIGHTING_WRC_COUNTS_AT + 4, LIGHTING_WRC_COUNTS_AT + 5] {
+                    (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, at * 4, 4, 0);
                 }
             }
             (self.fns.cmd_update_buffer)(
                 self.cmd,
-                self.gi2.gbuf.buffer,
+                self.lighting.gbuf.buffer,
                 0,
                 16,
                 header.as_ptr() as *const c_void,
@@ -865,45 +865,45 @@ impl Gpu {
     /// `current`: built from the scene as it is now (camera included); `light`:
     /// from its light as it is now; `young_only`: the round took young patches only,
     /// so one that relit nothing found nothing left to light.
-    fn note_gi2_round(&mut self, words: [u32; 8], current: bool, light: bool, young_only: bool) {
+    fn note_lighting_round(&mut self, words: [u32; 8], current: bool, light: bool, young_only: bool) {
         if !current {
-            self.gi2.quiet = 0;
+            self.lighting.quiet = 0;
         } else if words[1] > 0 {
-            if words[0] <= GI2_SETTLE_CHANGE {
-                self.gi2.quiet = self.gi2.quiet.saturating_add(1);
+            if words[0] <= LIGHTING_SETTLE_CHANGE {
+                self.lighting.quiet = self.lighting.quiet.saturating_add(1);
             } else {
-                self.gi2.quiet = 0;
+                self.lighting.quiet = 0;
             }
         } else if young_only {
-            self.gi2.quiet = self.gi2.quiet.saturating_add(1);
+            self.lighting.quiet = self.lighting.quiet.saturating_add(1);
         }
         if !light {
-            self.gi2.light_quiet = 0;
-        } else if gi2_world_env() == 3 {
+            self.lighting.light_quiet = 0;
+        } else if lighting_world_env() == 3 {
             // Surface cache: texels keep adding sets, so their change says nothing
             // of the light; rounds since the light last changed.
-            self.gi2.light_quiet = self.gi2.light_quiet.saturating_add(1);
+            self.lighting.light_quiet = self.lighting.light_quiet.saturating_add(1);
         } else if words[5] > 0 {
-            if words[4] <= GI2_SETTLE_CHANGE {
-                self.gi2.light_quiet = self.gi2.light_quiet.saturating_add(1);
+            if words[4] <= LIGHTING_SETTLE_CHANGE {
+                self.lighting.light_quiet = self.lighting.light_quiet.saturating_add(1);
             } else {
-                self.gi2.light_quiet = 0;
+                self.lighting.light_quiet = 0;
             }
         }
-        self.gi2.live = words[2];
-        if std::env::var_os("GENOS_GI_DEBUG").is_some() {
+        self.lighting.live = words[2];
+        if std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
             eprintln!(
-                "gi2 frame {} still {} change {} relit {} live {} missed {} quiet {} mature_change {} mature_relit {} light_quiet {} young_only {}",
-                self.gi2.frame,
-                self.gi2.still,
+                "lighting frame {} still {} change {} relit {} live {} missed {} quiet {} mature_change {} mature_relit {} light_quiet {} young_only {}",
+                self.lighting.frame,
+                self.lighting.still,
                 words[0],
                 words[1],
                 words[2],
                 words[3],
-                self.gi2.quiet,
+                self.lighting.quiet,
                 words[4],
                 words[5],
-                self.gi2.light_quiet,
+                self.lighting.light_quiet,
                 young_only
             );
         }
@@ -911,27 +911,27 @@ impl Gpu {
 
     /// The async light cache round in flight has finished: read its counters and
     /// GPU span.
-    fn poll_gi2_world(&mut self) {
-        if !self.gi2.world_busy {
+    fn poll_lighting_world(&mut self) {
+        if !self.lighting.world_busy {
             return;
         }
-        let status = unsafe { (self.fns.fence_status)(self.device, self.gi2.world_fence) };
+        let status = unsafe { (self.fns.fence_status)(self.device, self.lighting.world_fence) };
         if status != 0 {
             return;
         }
-        self.gi2.world_busy = false;
-        self.trace_sc(self.gi2.world_stats.memory, "round");
-        if let Ok(words) = self.read_stats_memory(self.gi2.world_stats.memory) {
-            let current = self.gi2.world_still > 0 && self.gi2.world_hash == self.gi2.scene_hash;
-            let light = self.gi2.world_light == self.gi2.light_hash;
-            self.note_gi2_round(words, current, light, self.gi2.world_young);
+        self.lighting.world_busy = false;
+        self.trace_sc(self.lighting.world_stats.memory, "round");
+        if let Ok(words) = self.read_stats_memory(self.lighting.world_stats.memory) {
+            let current = self.lighting.world_still > 0 && self.lighting.world_hash == self.lighting.scene_hash;
+            let light = self.lighting.world_light == self.lighting.light_hash;
+            self.note_lighting_round(words, current, light, self.lighting.world_young);
         }
-        if self.gpu_times.is_some() && !self.gi2.world_qp.is_null() {
+        if self.gpu_times.is_some() && !self.lighting.world_qp.is_null() {
             let mut raw = [0u64; 6];
             let got = unsafe {
                 (self.fns.get_query_results)(
                     self.device,
-                    self.gi2.world_qp,
+                    self.lighting.world_qp,
                     0,
                     6,
                     48,
@@ -962,24 +962,24 @@ impl Gpu {
     /// the live patches, trace and light this round's batch of their rays, relight
     /// them. Skipped while the last round still runs, so at most one is in flight
     /// and a slow round never queues up work behind it.
-    fn submit_gi2_world(&mut self, pc: [u32; 8]) -> Result<bool, String> {
-        if self.gi2.world_busy || self.gi2.world_cmd.is_null() {
+    fn submit_lighting_world(&mut self, pc: [u32; 8]) -> Result<bool, String> {
+        if self.lighting.world_busy || self.lighting.world_cmd.is_null() {
             return Ok(false);
         }
-        if self.gi2.world_hold > 0 {
-            self.gi2.world_hold -= 1;
+        if self.lighting.world_hold > 0 {
+            self.lighting.world_hold -= 1;
             return Ok(false);
         }
         if !self.frame_bytes.is_empty() {
-            self.write_buffer(&self.gi2.world_scene, &self.frame_bytes)?;
+            self.write_buffer(&self.lighting.world_scene, &self.frame_bytes)?;
         }
-        let round = self.gi2.world_round;
-        self.gi2.world_round = round.wrapping_add(1);
+        let round = self.lighting.world_round;
+        self.lighting.world_round = round.wrapping_add(1);
         let mut pc = pc;
-        // Light cache rays only (gi2_mode 2) and this round.
+        // Light cache rays only (lighting_mode 2) and this round.
         pc[6] = (pc[6] & 0xcff) | 2 << 8 | (round & 0xf_ffff) << 12;
-        let cmd = self.gi2.world_cmd;
-        let fences = [self.gi2.world_fence];
+        let cmd = self.lighting.world_cmd;
+        let fences = [self.lighting.world_fence];
         #[repr(C)]
         struct BeginInfo {
             s_type: i32,
@@ -999,16 +999,16 @@ impl Gpu {
             signal_count: u32,
             signals: *const Handle,
         }
-        let rays = GI2_CACHE_BATCH * GI2_CACHE_RAYS;
+        let rays = LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS;
         let groups = [
-            (0usize, (GI2_CACHE_SLOTS as u32).div_ceil(64)),
+            (0usize, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64)),
             (2, rays.div_ceil(64)),
             (3, rays.div_ceil(64)),
-            (6, GI2_CACHE_BATCH.div_ceil(64)),
+            (6, LIGHTING_CACHE_BATCH.div_ceil(64)),
         ];
         unsafe {
-            check((self.fns.reset_fences)(self.device, 1, fences.as_ptr()), "reset gi2 world fence")?;
-            check((self.fns.reset_cmd)(cmd, 0), "reset gi2 world cmd")?;
+            check((self.fns.reset_fences)(self.device, 1, fences.as_ptr()), "reset lighting world fence")?;
+            check((self.fns.reset_cmd)(cmd, 0), "reset lighting world cmd")?;
             let begin = BeginInfo {
                 s_type: 42,
                 next: std::ptr::null(),
@@ -1017,32 +1017,32 @@ impl Gpu {
             };
             check(
                 (self.fns.begin_cmd)(cmd, &begin as *const BeginInfo as *const u8),
-                "begin gi2 world",
+                "begin lighting world",
             )?;
-            let qp = self.gi2.world_qp;
+            let qp = self.lighting.world_qp;
             if !qp.is_null() {
                 (self.fns.cmd_reset_query)(cmd, qp, 0, 6);
                 (self.fns.cmd_write_timestamp)(cmd, 0x1, qp, 0);
             }
-            (self.fns.cmd_fill_buffer)(cmd, self.gi2.world_stats.buffer, 0, 96, 0);
+            (self.fns.cmd_fill_buffer)(cmd, self.lighting.world_stats.buffer, 0, 96, 0);
             // The mature and young counts, rebuilt by the compact pass.
-            (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, GI2_CACHE_SLOTS * 4, 4, 0);
-            // The WRC refresh lists' counts (change, background; gi2_cache.glsl).
-            (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, GI2_WRC_COUNTS_AT * 4, 8, 0);
-            (self.fns.cmd_fill_buffer)(cmd, self.gi2.cache_keys.buffer, (GI2_WRC_COUNTS_AT + 4) * 4, 8, 0);
+            (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, LIGHTING_CACHE_SLOTS * 4, 4, 0);
+            // The WRC refresh lists' counts (change, background; lighting_cache.glsl).
+            (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, LIGHTING_WRC_COUNTS_AT * 4, 8, 0);
+            (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, (LIGHTING_WRC_COUNTS_AT + 4) * 4, 8, 0);
             (self.fns.cmd_fill_buffer)(
                 cmd,
-                self.gi2.cache_keys.buffer,
-                (2 * GI2_CACHE_SLOTS + 1) * 4,
+                self.lighting.cache_keys.buffer,
+                (2 * LIGHTING_CACHE_SLOTS + 1) * 4,
                 4,
                 0,
             );
             self.barrier_on(cmd, 0x1000, 0x800, 0x1000, 0x20 | 0x40);
-            let set = self.gi2.world_set;
-            (self.fns.cmd_bind_set)(cmd, 1, self.gi2.layout, 0, 1, &set, 0, std::ptr::null());
-            (self.fns.cmd_push)(cmd, self.gi2.layout, 0x20, 0, 32, pc.as_ptr() as *const c_void);
+            let set = self.lighting.world_set;
+            (self.fns.cmd_bind_set)(cmd, 1, self.lighting.layout, 0, 1, &set, 0, std::ptr::null());
+            (self.fns.cmd_push)(cmd, self.lighting.layout, 0x20, 0, 32, pc.as_ptr() as *const c_void);
             for (k, (pass, gx)) in groups.into_iter().enumerate() {
-                (self.fns.cmd_bind_pipe)(cmd, 1, self.gi2.pipes[pass]);
+                (self.fns.cmd_bind_pipe)(cmd, 1, self.lighting.pipes[pass]);
                 (self.fns.cmd_dispatch)(cmd, gx.max(1), 1, 1);
                 self.barrier_on(cmd, 0x800, 0x800, 0x40, 0x20 | 0x40);
                 if !qp.is_null() {
@@ -1054,7 +1054,7 @@ impl Gpu {
             if !qp.is_null() {
                 (self.fns.cmd_write_timestamp)(cmd, 0x2000, qp, 1);
             }
-            check((self.fns.end_cmd)(cmd), "end gi2 world")?;
+            check((self.fns.end_cmd)(cmd), "end lighting world")?;
             let cmds = [cmd];
             let submit = Submit {
                 s_type: 4,
@@ -1072,21 +1072,21 @@ impl Gpu {
                     self.compute_queue,
                     1,
                     &submit as *const Submit as *const u8,
-                    self.gi2.world_fence,
+                    self.lighting.world_fence,
                 ),
-                "gi2 world submit",
+                "lighting world submit",
             )?;
         }
-        self.gi2.world_busy = true;
-        self.gi2.world_hash = self.gi2.scene_hash;
-        self.gi2.world_still = self.gi2.still;
-        self.gi2.world_light = self.gi2.light_hash;
-        self.gi2.world_young = pc[6] & 1 << 10 != 0;
+        self.lighting.world_busy = true;
+        self.lighting.world_hash = self.lighting.scene_hash;
+        self.lighting.world_still = self.lighting.still;
+        self.lighting.world_light = self.lighting.light_hash;
+        self.lighting.world_young = pc[6] & 1 << 10 != 0;
         Ok(true)
     }
 
-    fn read_gi2_stats(&self, slot: usize) -> Result<[u32; 8], String> {
-        self.read_stats_memory(self.gi2.stats[slot].memory)
+    fn read_lighting_stats(&self, slot: usize) -> Result<[u32; 8], String> {
+        self.read_stats_memory(self.lighting.stats[slot].memory)
     }
 
     fn read_stats_memory(&self, memory: Handle) -> Result<[u32; 8], String> {
@@ -1096,16 +1096,16 @@ impl Gpu {
         Ok(words)
     }
 
-    /// Surface cache trace (GENOS_GI2_SC_TRACE=1): one line per readback with the
+    /// Surface cache trace (GENOS_LIGHTING_SC_TRACE=1): one line per readback with the
     /// frame, frames still and the claimed / restarted / freed / at-cap counters.
     fn trace_sc(&self, memory: Handle, queue: &str) {
-        if std::env::var_os("GENOS_GI2_SC_TRACE").is_none() {
+        if std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_none() {
             return;
         }
         if let Ok(w) = self.read_stats16(memory) {
             eprintln!(
-                "gi2sc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {}",
-                self.gi2.frame, self.gi2.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21]
+                "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {}",
+                self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21]
             );
         }
     }
@@ -1123,7 +1123,7 @@ impl Gpu {
                     0,
                     &mut mapped,
                 ),
-                "map gi2 stats",
+                "map lighting stats",
             )?;
             std::ptr::copy_nonoverlapping(mapped as *const u32, words.as_mut_ptr(), 24);
             (self.fns.unmap_mem)(self.device, memory);
@@ -1132,84 +1132,84 @@ impl Gpu {
     }
 
     /// After the raster: the passes, then the result into the colour image.
-    fn gi2_passes(&mut self, slot: usize) {
-        let [w, h, cols, rows] = self.gi2.dims;
+    fn lighting_passes(&mut self, slot: usize) {
+        let [w, h, cols, rows] = self.lighting.dims;
         let probes = cols * rows;
-        let probe_rays = probes * GI2_RAYS;
+        let probe_rays = probes * LIGHTING_RAYS;
         let bgra = if self.format == 44 { 1u32 } else { 0 };
-        self.gi2.frame = self.gi2.frame.wrapping_add(1);
+        self.lighting.frame = self.lighting.frame.wrapping_add(1);
         let hash = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             // Lamps, occluders and camera; the traced meshes; the drawn ones.
             self.frame_bytes.hash(&mut hasher);
             self.mesh_field_key.hash(&mut hasher);
-            self.gi2.draw_key.hash(&mut hasher);
+            self.lighting.draw_key.hash(&mut hasher);
             hasher.finish()
         };
-        if hash == self.gi2.scene_hash {
-            self.gi2.still = self.gi2.still.saturating_add(1);
+        if hash == self.lighting.scene_hash {
+            self.lighting.still = self.lighting.still.saturating_add(1);
         } else {
-            self.gi2.scene_hash = hash;
-            self.gi2.still = 0;
-            self.gi2.quiet = 0;
+            self.lighting.scene_hash = hash;
+            self.lighting.still = 0;
+            self.lighting.quiet = 0;
         }
-        self.gi2.stats_still[slot] = self.gi2.still;
-        self.gi2.last_slot = slot;
+        self.lighting.stats_still[slot] = self.lighting.still;
+        self.lighting.last_slot = slot;
         // What moved in the traced world since the last frame: the probes drop the
-        // kept rays that cross it (gi2_gather.comp). Light needs nothing here: every
+        // kept rays that cross it (lighting_gather.comp). Light needs nothing here: every
         // kept hit is shaded again each frame.
         let key = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            self.gi2.trace_key.hash(&mut hasher);
+            self.lighting.trace_key.hash(&mut hasher);
             self.mesh_field_key.hash(&mut hasher);
             hasher.finish()
         };
-        let frozen = self.gi2_stats().settled;
-        let had = !self.gi2.kept_bytes.is_empty() && key == self.gi2.kept_key;
+        let frozen = self.lighting_stats().settled;
+        let had = !self.lighting.kept_bytes.is_empty() && key == self.lighting.kept_key;
         let changes = if had {
-            gi2_changes(&self.gi2.kept_bytes, &self.frame_bytes)
+            lighting_changes(&self.lighting.kept_bytes, &self.frame_bytes)
         } else {
             None
         };
-        if std::env::var_os("GENOS_GI_DEBUG").is_some() {
+        if std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
             if frozen {
-                eprintln!("gi2 frozen");
+                eprintln!("lighting frozen");
             } else {
                 eprintln!(
-                    "gi2 kept had {had} changes {}",
+                    "lighting kept had {had} changes {}",
                     changes.as_ref().map_or(-1, |c| c.len() as i64)
                 );
             }
         }
-        let mut block = vec![0f32; 4 * (GI2_CHANGE_HEAD + GI2_CHANGES)];
-        block[2] = (self.gi2.probe_runs & 1) as f32;
-        // World irradiance cells (gi2_cache.glsl, experiment): GENOS_GI2_WORLD mode
+        let mut block = vec![0f32; 4 * (LIGHTING_CHANGE_HEAD + LIGHTING_CHANGES)];
+        block[2] = (self.lighting.probe_runs & 1) as f32;
+        // World irradiance cells (lighting_cache.glsl, experiment): GENOS_LIGHTING_WORLD mode
         // (1: pixels read the light cache, 2: probes average into world cells, 3:
-        // the surface cache) and GENOS_GI2_WORLD_CAP frames (mode 3: ray sets a
+        // the surface cache) and GENOS_LIGHTING_WORLD_CAP frames (mode 3: ray sets a
         // texel averages, default 16).
-        let world = gi2_world_env();
-        let cap = std::env::var("GENOS_GI2_WORLD_CAP")
+        let world = lighting_world_env();
+        let cap = std::env::var("GENOS_LIGHTING_WORLD_CAP")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(if world == 3 { GI2_DEFAULT_SC_CAP } else { 32 })
+            .unwrap_or(if world == 3 { LIGHTING_DEFAULT_SC_CAP } else { 32 })
             .clamp(1, 999);
-        // Surface cache switches (gi2_cache.glsl gi2_sc_flags).
+        // Surface cache switches (lighting_cache.glsl lighting_sc_flags).
         // Flags ride in head z above the probe-run bit (exact to 2^22); w keeps mode
         // * 1000 + cap (flags * 100000 there lost precision past 2^24 and was capped).
-        let flags = gi2_sc_flags_env().min((1 << 23) - 1);
-        block[2] = ((self.gi2.probe_runs & 1) + 2 * flags) as f32;
+        let flags = lighting_sc_flags_env().min((1 << 23) - 1);
+        block[2] = ((self.lighting.probe_runs & 1) + 2 * flags) as f32;
         block[3] = (world * 1000 + cap) as f32;
         let mut used = 0;
         // Vec4s of the block the GPU gets: head, changes and movers.
-        let mut sent = GI2_CHANGE_HEAD;
+        let mut sent = LIGHTING_CHANGE_HEAD;
         match &changes {
             None => block[1] = 1.0,
             Some(list) => {
                 block[0] = list.len() as f32;
                 for (j, b) in list.iter().enumerate() {
-                    let at = 4 * (GI2_CHANGE_HEAD + j);
+                    let at = 4 * (LIGHTING_CHANGE_HEAD + j);
                     block[at..at + 4].copy_from_slice(b);
                 }
                 used = list.len();
@@ -1217,40 +1217,40 @@ impl Gpu {
         }
         sent += used;
         // Movers (surface cache): bounds of every occluder that moved in the
-        // last GI2_MOVER_KEEP frames, after the changes; head w carries their count above mode and cap.
+        // last LIGHTING_MOVER_KEEP frames, after the changes; head w carries their count above mode and cap.
         // Compared whenever there is a last scene (not only when the trace key held:
         // a spinning box can change the key every frame and must stay a mover).
-        if world == 3 && !self.gi2.kept_bytes.is_empty() {
-            let movers = gi2_movers(&self.gi2.kept_bytes, &self.frame_bytes, &mut self.gi2.movers);
+        if world == 3 && !self.lighting.kept_bytes.is_empty() {
+            let movers = lighting_movers(&self.lighting.kept_bytes, &self.frame_bytes, &mut self.lighting.movers);
             let mut movers = movers;
             // Traced mesh instances that moved: id 10001 + instance index (the
             // shader reads their frame from the mesh field).
-            for &i in self.gi2.mesh_movers.keys() {
-                if let Some(sph) = self.gi2.mesh_spheres.get(i) {
+            for &i in self.lighting.mesh_movers.keys() {
+                if let Some(sph) = self.lighting.mesh_spheres.get(i) {
                     movers.push([*sph, [0.0, 0.0, 0.0, (10001 + i) as f32], [0.0; 4], [0.0; 4]]);
                 }
             }
-            let n = movers.len().min((GI2_CHANGES - used) / 4);
+            let n = movers.len().min((LIGHTING_CHANGES - used) / 4);
             for (j, m) in movers.iter().take(n).enumerate() {
                 for (k, b) in m.iter().enumerate() {
-                    let at = 4 * (GI2_CHANGE_HEAD + used + 4 * j + k);
+                    let at = 4 * (LIGHTING_CHANGE_HEAD + used + 4 * j + k);
                     block[at..at + 4].copy_from_slice(b);
                 }
             }
             block[3] += (n * 200000) as f32;
             sent += 4 * n;
-            if std::env::var_os("GENOS_GI_DEBUG").is_some() {
-                eprintln!("gi2 world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(gi2_sc_local_env()), self.gi2.movers.len(), gi2_occs(&self.frame_bytes).len(), self.gi2.mesh_movers.len(), self.gi2.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
+            if std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+                eprintln!("lighting world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(lighting_sc_local_env()), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
             }
-            // Object-local texels for movers (GIBS): GENOS_GI2_SC_LOCAL=1.
-            if gi2_sc_local_env() {
+            // Object-local texels for movers (GIBS): GENOS_LIGHTING_SC_LOCAL=1.
+            if lighting_sc_local_env() {
                 block[3] += 100000.0;
             }
         }
         if had {
             // Last frame's camera (scene_data.glsl): eye at byte 48, the basis at 528.
             let f = |at: usize| {
-                let b = &self.gi2.kept_bytes[at..at + 4];
+                let b = &self.lighting.kept_bytes[at..at + 4];
                 f32::from_le_bytes([b[0], b[1], b[2], b[3]])
             };
             for (v, at) in [(1usize, 48usize), (2, 528), (3, 544), (4, 560)] {
@@ -1263,15 +1263,15 @@ impl Gpu {
         // A frame drawn from held light runs no probes: what it saw is still what
         // the probes last ran on.
         if !frozen {
-            self.gi2.kept_key = key;
-            self.gi2.kept_bytes.clone_from(&self.frame_bytes);
-            self.gi2.probe_runs = self.gi2.probe_runs.wrapping_add(1);
+            self.lighting.kept_key = key;
+            self.lighting.kept_bytes.clone_from(&self.frame_bytes);
+            self.lighting.probe_runs = self.lighting.probe_runs.wrapping_add(1);
         }
         let block_at = 16
-            * gi2_change_at(
+            * lighting_change_at(
                 probes as u64,
-                (GI2_CACHE_BATCH * GI2_CACHE_RAYS) as u64,
-                probe_rays as u64 * GI2_STRATA as u64,
+                (LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS) as u64,
+                probe_rays as u64 * LIGHTING_STRATA as u64,
             );
         // Movers ride after the changes: upload them too (S49/S50L sent only the
         // head and changes, so every mover read zeros on the GPU).
@@ -1281,7 +1281,7 @@ impl Gpu {
             self.memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000);
             (self.fns.cmd_update_buffer)(
                 self.cmd,
-                self.gi2.work.buffer,
+                self.lighting.work.buffer,
                 block_at,
                 used as u64 * 4,
                 block.as_ptr() as *const c_void,
@@ -1294,38 +1294,38 @@ impl Gpu {
         let light = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            self.gi2.light_scene.hash(&mut hasher);
+            self.lighting.light_scene.hash(&mut hasher);
             self.mesh_field_key.hash(&mut hasher);
             // The drawn list follows the camera (culling), so the surface cache
             // (mode 3) leaves it out: a turn is not a light change there.
-            if gi2_world_env() != 3 {
-                self.gi2.draw_key.hash(&mut hasher);
+            if lighting_world_env() != 3 {
+                self.lighting.draw_key.hash(&mut hasher);
             }
             hasher.finish()
         };
-        if light != self.gi2.light_hash {
-            self.gi2.light_hash = light;
-            self.gi2.light_quiet = 0;
+        if light != self.lighting.light_hash {
+            self.lighting.light_hash = light;
+            self.lighting.light_quiet = 0;
         }
-        let sweep = self.gi2.live.div_ceil(GI2_CACHE_BATCH).max(1) + 1;
+        let sweep = self.lighting.live.div_ceil(LIGHTING_CACHE_BATCH).max(1) + 1;
         // Surface cache (mode 3): bit 10 says the light has held two rounds, and a
         // round that relights nothing has nothing left to converge.
-        let sc = gi2_world_env() == 3;
-        let young_only = if sc { self.gi2.light_quiet >= 2 } else { self.gi2.young_ok && self.gi2.light_quiet >= sweep };
-        self.gi2.stats_light[slot] = light;
-        self.gi2.stats_young[slot] = young_only || sc;
-        // z: bgra, fills (bit 6), young-only rounds and lamp picks (gi2_common.glsl);
+        let sc = lighting_world_env() == 3;
+        let young_only = if sc { self.lighting.light_quiet >= 2 } else { self.lighting.young_ok && self.lighting.light_quiet >= sweep };
+        self.lighting.stats_light[slot] = light;
+        self.lighting.stats_young[slot] = young_only || sc;
+        // z: bgra, fills (bit 6), young-only rounds and lamp picks (lighting_common.glsl);
         // the gather and filter passes add their round (bits 1-2) below.
-        let picks = std::env::var("GENOS_GI2_CACHE_PICKS").is_ok_and(|v| v == "1");
-        let fill = std::env::var("GENOS_GI2_FILL").map_or(true, |v| v != "0");
+        let picks = std::env::var("GENOS_LIGHTING_CACHE_PICKS").is_ok_and(|v| v == "1");
+        let fill = std::env::var("GENOS_LIGHTING_FILL").map_or(true, |v| v != "0");
         // Moving objects (debugging.md, spinning boxes): a probe stratum traced from
         // inside a change is filled, not kept (bit 3); patches near a change are
         // relit first (bit 5); a patch not lit yet reads its lit neighbours (bit 7).
         // Each on unless its variable is 0.
         let on = |name: &str| std::env::var(name).map_or(true, |v| v != "0");
-        let moved_drop = on("GENOS_GI2_MOVED_DROP");
-        let urgent = on("GENOS_GI2_URGENT");
-        let borrow = on("GENOS_GI2_BORROW");
+        let moved_drop = on("GENOS_LIGHTING_MOVED_DROP");
+        let urgent = on("GENOS_LIGHTING_URGENT");
+        let borrow = on("GENOS_LIGHTING_BORROW");
         let z = bgra
             | u32::from(moved_drop) << 3
             | u32::from(urgent) << 5
@@ -1333,50 +1333,50 @@ impl Gpu {
             | u32::from(fill) << 6
             | u32::from(young_only) << 10
             | u32::from(picks) << 11;
-        let pc = [w, h, cols, rows, GI2_RAYS, gi2_tile(h), z, self.gi2.frame];
+        let pc = [w, h, cols, rows, LIGHTING_RAYS, lighting_tile(h), z, self.lighting.frame];
         let image = self.color.image;
         // The raster colour as the base: pixels with no surface keep it.
-        self.copy_image_buffer(image, 6, self.gi2.out.buffer, w, h, true);
+        self.copy_image_buffer(image, 6, self.lighting.out.buffer, w, h, true);
         self.memory_barrier(0x80 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
-        let set = self.gi2.sets[slot];
+        let set = self.lighting.sets[slot];
         // Settled (frozen above): the probes and the light cache hold their light,
         // and only the pixels' direct light and the final pass run, so a still
         // scene draws the same picture every frame (no residual cache drift) and
         // idles cheaply.
-        self.gi2.held = if frozen { self.gi2.held.saturating_add(1) } else { 0 };
-        // A light cache round is due (GENOS_GI2_CACHE_HZ caps them per second). On
-        // the async queue (GENOS_GI2_ASYNC=1) it goes there, else into this frame;
-        // a frame without one runs the picture's passes only (gi2_mode 1).
+        self.lighting.held = if frozen { self.lighting.held.saturating_add(1) } else { 0 };
+        // A light cache round is due (GENOS_LIGHTING_CACHE_HZ caps them per second). On
+        // the async queue (GENOS_LIGHTING_ASYNC=1) it goes there, else into this frame;
+        // a frame without one runs the picture's passes only (lighting_mode 1).
         let due = !frozen
-            && (self.gi2.cache_hz <= 0.0
+            && (self.lighting.cache_hz <= 0.0
                 || self
-                    .gi2
+                    .lighting
                     .last_round
-                    .is_none_or(|t| t.elapsed().as_secs_f64() * self.gi2.cache_hz >= 1.0));
+                    .is_none_or(|t| t.elapsed().as_secs_f64() * self.lighting.cache_hz >= 1.0));
         let mut round = false;
-        if due && self.gi2.async_on {
-            match self.submit_gi2_world(pc) {
-                Ok(true) => self.gi2.last_round = Some(Instant::now()),
+        if due && self.lighting.async_on {
+            match self.submit_lighting_world(pc) {
+                Ok(true) => self.lighting.last_round = Some(Instant::now()),
                 Ok(false) => {}
                 Err(e) => {
-                    eprintln!("gi2: async light cache off: {e}");
-                    self.gi2.async_on = false;
+                    eprintln!("lighting: async light cache off: {e}");
+                    self.lighting.async_on = false;
                 }
             }
         } else if due {
             round = true;
-            self.gi2.last_round = Some(Instant::now());
+            self.lighting.last_round = Some(Instant::now());
         }
-        self.gi2.stats_round[slot] = round;
+        self.lighting.stats_round[slot] = round;
         let mut pc = pc;
         if round {
-            let n = self.gi2.world_round;
-            self.gi2.world_round = n.wrapping_add(1);
+            let n = self.lighting.world_round;
+            self.lighting.world_round = n.wrapping_add(1);
             pc[6] |= (n & 0xf_ffff) << 12;
         } else {
             pc[6] |= 1 << 8;
         }
-        let kept = probe_rays * GI2_STRATA;
+        let kept = probe_rays * LIGHTING_STRATA;
         let groups: Vec<(usize, u32, u32)> = if frozen {
             vec![(3, (w * h).div_ceil(64), 1), (7, w.div_ceil(8), h.div_ceil(8))]
         } else if !round {
@@ -1384,7 +1384,7 @@ impl Gpu {
                 (1usize, probes.div_ceil(64), 1u32),
                 // The picks (gather's first round), this frame's rays, then one thread
                 // per kept hit (re-traced where it crossed a change) and per fill slot
-                // (gi2_trace.comp).
+                // (lighting_trace.comp).
                 (4, probes.div_ceil(64), 1),
                 (2, (probe_rays + 2 * kept).div_ceil(64), 1),
                 (3, (w * h + 2 * kept).div_ceil(64), 1),
@@ -1396,22 +1396,22 @@ impl Gpu {
             ]
         } else {
             vec![
-                (0usize, (GI2_CACHE_SLOTS as u32).div_ceil(64), 1u32),
+                (0usize, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1u32),
                 (1, probes.div_ceil(64), 1),
                 (4, probes.div_ceil(64), 1),
                 // S70A: the light cache rays and patches in their own dispatches,
-                // sized on the GPU (the args pass, GI2_DENSE_*), the rest as frames
+                // sized on the GPU (the args pass, LIGHTING_DENSE_*), the rest as frames
                 // without a round (mode 1).
-                (0, 1, GI2_ARGS),
-                (2, (probe_rays + 2 * kept).div_ceil(64), GI2_MODE1),
-                (2, 0, GI2_DENSE_RAYS),
-                (3, (w * h + 2 * kept).div_ceil(64), GI2_MODE1),
-                (3, 0, GI2_DENSE_RAYS),
+                (0, 1, LIGHTING_ARGS),
+                (2, (probe_rays + 2 * kept).div_ceil(64), LIGHTING_MODE1),
+                (2, 0, LIGHTING_DENSE_RAYS),
+                (3, (w * h + 2 * kept).div_ceil(64), LIGHTING_MODE1),
+                (3, 0, LIGHTING_DENSE_RAYS),
                 (4, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
-                (6, 0, GI2_DENSE_ENTRIES),
+                (6, 0, LIGHTING_DENSE_ENTRIES),
                 (7, w.div_ceil(8), h.div_ceil(8)),
             ]
         };
@@ -1419,7 +1419,7 @@ impl Gpu {
             (self.fns.cmd_bind_set)(
                 self.cmd,
                 1,
-                self.gi2.layout,
+                self.lighting.layout,
                 0,
                 1,
                 &set,
@@ -1428,7 +1428,7 @@ impl Gpu {
             );
             (self.fns.cmd_push)(
                 self.cmd,
-                self.gi2.layout,
+                self.lighting.layout,
                 0x20,
                 0,
                 32,
@@ -1438,14 +1438,14 @@ impl Gpu {
             let stamps = self
                 .gpu_times
                 .as_mut()
-                .filter(|t| !t.gi2_pool.is_null())
+                .filter(|t| !t.lighting_pool.is_null())
                 .map(|t| {
-                    t.gi2_ids[slot] = groups.iter().map(|g| g.0).collect();
-                    t.gi2_pool
+                    t.lighting_ids[slot] = groups.iter().map(|g| g.0).collect();
+                    t.lighting_pool
                 });
-            let first = slot as u32 * GI2_STAMPS;
+            let first = slot as u32 * LIGHTING_STAMPS;
             if let Some(pool) = stamps {
-                (self.fns.cmd_reset_query)(self.cmd, pool, first, GI2_STAMPS);
+                (self.fns.cmd_reset_query)(self.cmd, pool, first, LIGHTING_STAMPS);
                 (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first);
             }
             let mut filter_round = 0u32;
@@ -1460,7 +1460,7 @@ impl Gpu {
                     picked = true;
                     (self.fns.cmd_push)(
                         self.cmd,
-                        self.gi2.layout,
+                        self.lighting.layout,
                         0x20,
                         0,
                         32,
@@ -1469,13 +1469,13 @@ impl Gpu {
                     cur_pc = round_pc;
                 }
                 if pass == 5 {
-                    // The spatial filter's three rounds (gi2_filter_round).
+                    // The spatial filter's three rounds (lighting_filter_round).
                     let mut round_pc = pc;
                     round_pc[6] |= filter_round << 1;
                     filter_round += 1;
                     (self.fns.cmd_push)(
                         self.cmd,
-                        self.gi2.layout,
+                        self.lighting.layout,
                         0x20,
                         0,
                         32,
@@ -1485,34 +1485,34 @@ impl Gpu {
                 }
                 // S70A kinds (the third field past 1): the args pass, the dense
                 // indirect dispatches, mode-1 picture parts of a round.
-                let kind = if gy >= GI2_ARGS { gy } else { 0 };
+                let kind = if gy >= LIGHTING_ARGS { gy } else { 0 };
                 if kind != 0 {
                     let mut k_pc = cur_pc;
                     k_pc[6] |= 1 << 4;
-                    if kind == GI2_MODE1 {
+                    if kind == LIGHTING_MODE1 {
                         k_pc[6] = (cur_pc[6] & !0x310) | 1 << 8;
-                    } else if kind == GI2_DENSE_RAYS {
+                    } else if kind == LIGHTING_DENSE_RAYS {
                         k_pc[6] = (k_pc[6] & !0x300) | 2 << 8;
                     }
                     (self.fns.cmd_push)(
                         self.cmd,
-                        self.gi2.layout,
+                        self.lighting.layout,
                         0x20,
                         0,
                         32,
                         k_pc.as_ptr() as *const c_void,
                     );
                 }
-                (self.fns.cmd_bind_pipe)(self.cmd, 1, self.gi2.pipes[pass]);
+                (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.pipes[pass]);
                 match kind {
-                    GI2_DENSE_RAYS | GI2_DENSE_ENTRIES => {
-                        let at = (GI2_ARGS_AT + if kind == GI2_DENSE_RAYS { 0 } else { 3 }) * 4;
-                        (self.fns.cmd_dispatch_indirect)(self.cmd, self.gi2.cache_keys.buffer, at);
+                    LIGHTING_DENSE_RAYS | LIGHTING_DENSE_ENTRIES => {
+                        let at = (LIGHTING_ARGS_AT + if kind == LIGHTING_DENSE_RAYS { 0 } else { 3 }) * 4;
+                        (self.fns.cmd_dispatch_indirect)(self.cmd, self.lighting.cache_keys.buffer, at);
                     }
                     _ => (self.fns.cmd_dispatch)(self.cmd, gx.max(1), if kind != 0 { 1 } else { gy.max(1) }, 1),
                 }
                 if kind != 0 {
-                    (self.fns.cmd_push)(self.cmd, self.gi2.layout, 0x20, 0, 32, cur_pc.as_ptr() as *const c_void);
+                    (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, 32, cur_pc.as_ptr() as *const c_void);
                 }
                 // The args pass's sizes are read as indirect commands (stage 0x2, access 0x1).
                 self.memory_barrier(0x800, 0x800 | 0x1000 | 0x2, 0x40, 0x20 | 0x40 | 0x800 | 0x1);
@@ -1522,7 +1522,7 @@ impl Gpu {
             }
         }
         self.image_barrier(image, 6, 7, 0x1000, 0x1000, 0x800, 0x1000);
-        self.copy_image_buffer(image, 7, self.gi2.out.buffer, w, h, false);
+        self.copy_image_buffer(image, 7, self.lighting.out.buffer, w, h, false);
         self.image_barrier(image, 7, 6, 0x1000, 0x1000 | 0x800, 0x1000, 0x800 | 0x20);
     }
 
@@ -1567,28 +1567,28 @@ impl Gpu {
         }
     }
 
-    fn destroy_gi2(&mut self) {
-        self.wait_gi2_world();
-        self.gi2.world_busy = false;
-        let mut world_stats = std::mem::replace(&mut self.gi2.world_stats, Buffer::empty());
-        let mut world_scene = std::mem::replace(&mut self.gi2.world_scene, Buffer::empty());
+    fn destroy_lighting(&mut self) {
+        self.wait_lighting_world();
+        self.lighting.world_busy = false;
+        let mut world_stats = std::mem::replace(&mut self.lighting.world_stats, Buffer::empty());
+        let mut world_scene = std::mem::replace(&mut self.lighting.world_scene, Buffer::empty());
         self.destroy_buffer(&mut world_stats);
         self.destroy_buffer(&mut world_scene);
         unsafe {
-            if !self.gi2.world_fence.is_null() {
-                (self.fns.destroy_fence)(self.device, self.gi2.world_fence, std::ptr::null());
-                self.gi2.world_fence = std::ptr::null_mut();
+            if !self.lighting.world_fence.is_null() {
+                (self.fns.destroy_fence)(self.device, self.lighting.world_fence, std::ptr::null());
+                self.lighting.world_fence = std::ptr::null_mut();
             }
         }
         // The command buffer goes with the light command pool; the query pool too
         // is left to the device (as the frame's are).
-        let mut gbuf = std::mem::replace(&mut self.gi2.gbuf, Buffer::empty());
-        let mut work = std::mem::replace(&mut self.gi2.work, Buffer::empty());
-        let mut out = std::mem::replace(&mut self.gi2.out, Buffer::empty());
-        let mut keys = std::mem::replace(&mut self.gi2.cache_keys, Buffer::empty());
-        let mut cache = std::mem::replace(&mut self.gi2.cache, Buffer::empty());
+        let mut gbuf = std::mem::replace(&mut self.lighting.gbuf, Buffer::empty());
+        let mut work = std::mem::replace(&mut self.lighting.work, Buffer::empty());
+        let mut out = std::mem::replace(&mut self.lighting.out, Buffer::empty());
+        let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
+        let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
         for k in 0..2 {
-            let mut stats = std::mem::replace(&mut self.gi2.stats[k], Buffer::empty());
+            let mut stats = std::mem::replace(&mut self.lighting.stats[k], Buffer::empty());
             self.destroy_buffer(&mut stats);
         }
         self.destroy_buffer(&mut gbuf);
@@ -1598,76 +1598,76 @@ impl Gpu {
         self.destroy_buffer(&mut cache);
         unsafe {
             for pipe in self
-                .gi2
+                .lighting
                 .pipes
                 .iter_mut()
-                .chain(std::iter::once(&mut self.gi2.gbuffer_pipe))
+                .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))
             {
                 if !pipe.is_null() {
                     (self.fns.destroy_pipeline)(self.device, *pipe, std::ptr::null());
                     *pipe = std::ptr::null_mut();
                 }
             }
-            if !self.gi2.layout.is_null() {
-                (self.fns.destroy_layout)(self.device, self.gi2.layout, std::ptr::null());
-                self.gi2.layout = std::ptr::null_mut();
+            if !self.lighting.layout.is_null() {
+                (self.fns.destroy_layout)(self.device, self.lighting.layout, std::ptr::null());
+                self.lighting.layout = std::ptr::null_mut();
             }
-            if !self.gi2.pool.is_null() {
-                (self.fns.destroy_desc_pool)(self.device, self.gi2.pool, std::ptr::null());
-                self.gi2.pool = std::ptr::null_mut();
+            if !self.lighting.pool.is_null() {
+                (self.fns.destroy_desc_pool)(self.device, self.lighting.pool, std::ptr::null());
+                self.lighting.pool = std::ptr::null_mut();
             }
-            if !self.gi2.desc_layout.is_null() {
-                (self.fns.destroy_desc_layout)(self.device, self.gi2.desc_layout, std::ptr::null());
-                self.gi2.desc_layout = std::ptr::null_mut();
+            if !self.lighting.desc_layout.is_null() {
+                (self.fns.destroy_desc_layout)(self.device, self.lighting.desc_layout, std::ptr::null());
+                self.lighting.desc_layout = std::ptr::null_mut();
             }
         }
-        self.gi2.ready = false;
+        self.lighting.ready = false;
     }
 }
 
-/// GENOS_GI2_WORLD (gi2_cache.glsl world modes): 0 off, 1 pixels read the light
+/// GENOS_LIGHTING_WORLD (lighting_cache.glsl world modes): 0 off, 1 pixels read the light
 /// cache, 2 world irradiance cells, 3 the surface cache.
-/// Default 3 (the surface cache); GENOS_GI2_WORLD=0 is the probe path (P6).
-fn gi2_world_env() -> u32 {
+/// Default 3 (the surface cache); GENOS_LIGHTING_WORLD=0 is the probe path (P6).
+fn lighting_world_env() -> u32 {
     static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
-        std::env::var("GENOS_GI2_WORLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(GI2_DEFAULT_WORLD).min(3)
+        std::env::var("GENOS_LIGHTING_WORLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(LIGHTING_DEFAULT_WORLD).min(3)
     })
 }
 
 /// S70B: the frame's counters are read back only where something uses them.
-fn gi2_stats_wanted() -> bool {
-    std::env::var_os("GENOS_GI_DEBUG").is_some() || !(gi2_world_env() == 3 && gi2_sc_flags_env() & 8192 != 0)
+fn lighting_stats_wanted() -> bool {
+    std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() || !(lighting_world_env() == 3 && lighting_sc_flags_env() & 8192 != 0)
 }
 
 // Defaults with no env set (S54K, gi-v2): GI v2, the surface cache, cap 64, the
 // S49 flag set and object-local texels. Each env var still overrides.
-const GI2_DEFAULT_WORLD: u32 = 3;
-const GI2_DEFAULT_SC_CAP: u32 = 64;
-const GI2_DEFAULT_SC_FLAGS: u32 = 6007050;
+const LIGHTING_DEFAULT_WORLD: u32 = 3;
+const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
+const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
 
-/// GENOS_GI2_SC_FLAGS, default GI2_DEFAULT_SC_FLAGS.
-fn gi2_sc_flags_env() -> u32 {
+/// GENOS_LIGHTING_SC_FLAGS, default LIGHTING_DEFAULT_SC_FLAGS.
+fn lighting_sc_flags_env() -> u32 {
     static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
-        std::env::var("GENOS_GI2_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(GI2_DEFAULT_SC_FLAGS)
+        std::env::var("GENOS_LIGHTING_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(LIGHTING_DEFAULT_SC_FLAGS)
     })
 }
 
-/// GENOS_GI2_SC_LOCAL: object-local texels, on unless 0.
-fn gi2_sc_local_env() -> bool {
-    std::env::var("GENOS_GI2_SC_LOCAL").map_or(true, |v| v != "0")
+/// GENOS_LIGHTING_SC_LOCAL: object-local texels, on unless 0.
+fn lighting_sc_local_env() -> bool {
+    std::env::var("GENOS_LIGHTING_SC_LOCAL").map_or(true, |v| v != "0")
 }
 
-/// Vec4 index of the changes block in the work buffer (gi2_common.glsl
-/// gi2_change_at), for `probes` probes, `cache_rays` light cache rays and `kept`
+/// Vec4 index of the changes block in the work buffer (lighting_common.glsl
+/// lighting_change_at), for `probes` probes, `cache_rays` light cache rays and `kept`
 /// kept hits.
-fn gi2_change_at(probes: u64, cache_rays: u64, kept: u64) -> u64 {
-    2 * probes + cache_rays + 7 * probes + 2 * GI2_STRATA as u64 * probes + kept + kept / 4
+fn lighting_change_at(probes: u64, cache_rays: u64, kept: u64) -> u64 {
+    2 * probes + cache_rays + 7 * probes + 2 * LIGHTING_STRATA as u64 * probes + kept + kept / 4
 }
 
 /// Occluder records of a scene block (`pack::scene_bytes`), 64 bytes each.
-fn gi2_occs(bytes: &[u8]) -> Vec<&[u8]> {
+fn lighting_occs(bytes: &[u8]) -> Vec<&[u8]> {
     let word = |at: usize| {
         bytes
             .get(at * 4..at * 4 + 4)
@@ -1680,7 +1680,7 @@ fn gi2_occs(bytes: &[u8]) -> Vec<&[u8]> {
 }
 
 /// Bounding sphere of an occluder record.
-fn gi2_occ_bounds(rec: &[u8]) -> [f32; 4] {
+fn lighting_occ_bounds(rec: &[u8]) -> [f32; 4] {
     let f = |i: usize| f32::from_le_bytes([rec[i * 4], rec[i * 4 + 1], rec[i * 4 + 2], rec[i * 4 + 3]]);
     let (hx, hy, hz, r) = (f(4).abs(), f(5).abs() * 0.5, f(6).abs(), f(7).abs());
     let (hx, hz) = (hx.max(r), hz.max(r));
@@ -1690,8 +1690,8 @@ fn gi2_occ_bounds(rec: &[u8]) -> [f32; 4] {
 /// Movers: occluders (by index) whose record differs between two scene blocks of
 /// the same length join `set` for good (a list of another length starts it again);
 /// returns their bounds now.
-pub(crate) fn gi2_movers(old: &[u8], new: &[u8], set: &mut std::collections::BTreeMap<usize, u32>) -> Vec<[[f32; 4]; 4]> {
-    let (a, b) = (gi2_occs(old), gi2_occs(new));
+pub(crate) fn lighting_movers(old: &[u8], new: &[u8], set: &mut std::collections::BTreeMap<usize, u32>) -> Vec<[[f32; 4]; 4]> {
+    let (a, b) = (lighting_occs(old), lighting_occs(new));
     set.retain(|_, left| {
         *left = left.saturating_sub(1);
         *left > 0
@@ -1701,7 +1701,7 @@ pub(crate) fn gi2_movers(old: &[u8], new: &[u8], set: &mut std::collections::BTr
     } else {
         for (i, (x, y)) in a.iter().zip(&b).enumerate() {
             if x != y {
-                set.insert(i, GI2_MOVER_KEEP);
+                set.insert(i, LIGHTING_MOVER_KEEP);
             }
         }
     }
@@ -1715,7 +1715,7 @@ pub(crate) fn gi2_movers(old: &[u8], new: &[u8], set: &mut std::collections::BTr
             let (hx, hz) = if f(3) < 0.5 { (f(4).abs(), f(6).abs()) } else { (rad, rad) };
             let (c, s) = if f(3) < 0.5 { (f(14), f(15)) } else { (1.0, 0.0) };
             [
-                gi2_occ_bounds(r),
+                lighting_occ_bounds(r),
                 [f(0), f(1), f(2), (i + 1) as f32],
                 [hx, f(5).abs() * 0.5, hz, 0.0],
                 [c, s, 0.0, 0.0],
@@ -1725,9 +1725,9 @@ pub(crate) fn gi2_movers(old: &[u8], new: &[u8], set: &mut std::collections::BTr
 }
 
 /// Mesh movers: traced instances whose pose changed join `set` for
-/// GI2_MOVER_KEEP frames (another count starts it again); `poses` and `spheres`
+/// LIGHTING_MOVER_KEEP frames (another count starts it again); `poses` and `spheres`
 /// become this frame's.
-pub(crate) fn gi2_mesh_movers(
+pub(crate) fn lighting_mesh_movers(
     live: &[&crate::mesh_field::FieldInstance],
     poses: &mut Vec<[f32; 16]>,
     set: &mut std::collections::BTreeMap<usize, u32>,
@@ -1742,7 +1742,7 @@ pub(crate) fn gi2_mesh_movers(
     } else {
         for (i, (old, inst)) in poses.iter().zip(live).enumerate() {
             if *old != inst.pose {
-                set.insert(i, GI2_MOVER_KEEP);
+                set.insert(i, LIGHTING_MOVER_KEEP);
             }
         }
     }
@@ -1759,14 +1759,14 @@ pub(crate) fn gi2_mesh_movers(
 
 /// Frames an occluder stays a mover after it last moved (Lumen treats a mesh as
 /// dynamic while it moves; once it rests its surroundings are ordinary cache).
-const GI2_MOVER_KEEP: u32 = 240;
+const LIGHTING_MOVER_KEEP: u32 = 240;
 
 /// Spheres (centre, radius) around every occluder that moved, came or went between
 /// two scene blocks (`pack::scene_bytes`): the bounds before and after, so a kept
 /// ray that crosses either sees something else now. None when there are more than
-/// GI2_CHANGES (drop every kept ray instead). Lamps are not compared: kept hits are
+/// LIGHTING_CHANGES (drop every kept ray instead). Lamps are not compared: kept hits are
 /// shaded again every frame, so light needs no change list.
-pub(crate) fn gi2_changes(old: &[u8], new: &[u8]) -> Option<Vec<[f32; 4]>> {
+pub(crate) fn lighting_changes(old: &[u8], new: &[u8]) -> Option<Vec<[f32; 4]>> {
     fn occs(bytes: &[u8]) -> Vec<&[u8]> {
         let word = |at: usize| {
             bytes
@@ -1793,7 +1793,7 @@ pub(crate) fn gi2_changes(old: &[u8], new: &[u8]) -> Option<Vec<[f32; 4]>> {
     let right: std::collections::HashSet<&[u8]> = b.iter().copied().collect();
     let mut out = Vec::new();
     for rec in a.iter().filter(|r| !right.contains(*r)).chain(b.iter().filter(|r| !left.contains(*r))) {
-        if out.len() == GI2_CHANGES {
+        if out.len() == LIGHTING_CHANGES {
             return None;
         }
         out.push(bounds(rec));
@@ -1803,7 +1803,7 @@ pub(crate) fn gi2_changes(old: &[u8], new: &[u8]) -> Option<Vec<[f32; 4]>> {
 
 /// Key of what the probes trace besides the occluders and meshes: the floor and the
 /// roof (their place and colour, which kept hits hold).
-pub(crate) fn gi2_trace_key(pack: &crate::pack::Pack) -> u64 {
+pub(crate) fn lighting_trace_key(pack: &crate::pack::Pack) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let mut floats: Vec<f32> = Vec::new();
@@ -1821,7 +1821,7 @@ pub(crate) fn gi2_trace_key(pack: &crate::pack::Pack) -> u64 {
 /// Hash of what lights the scene, without the camera: the lamp and occluder lists
 /// as uploaded (the tail of `bytes`, `pack::scene_bytes`), fire, smoke, floor, roof
 /// and sky.
-pub(crate) fn gi2_light_scene(pack: &crate::pack::Pack, bytes: &[u8]) -> u64 {
+pub(crate) fn lighting_scene_key(pack: &crate::pack::Pack, bytes: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let word = |at: usize| {
         bytes

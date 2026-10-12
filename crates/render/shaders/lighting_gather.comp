@@ -1,27 +1,27 @@
 #version 450
 // GI v2 screen probes, pass 4: each probe's kept rays binned by direction into the
-// cells of its pattern as it stands now (gi2_common.glsl "cells"): per cell the mean
-// light and hit distance, which the spatial filter (gi2_filter.comp) compares
+// cells of its pattern as it stands now (lighting_common.glsl "cells"): per cell the mean
+// light and hit distance, which the spatial filter (lighting_filter.comp) compares
 // across neighbours and turns into SH.
 //
-// A probe keeps the hits of its last GI2_STRATA strata (gi2_common.glsl), and the
+// A probe keeps the hits of its last LIGHTING_STRATA strata (lighting_common.glsl), and the
 // light pass has shaded every one of them this frame, so the probe sees up to
-// GI2_STRATA x R rays with no light carried over from a past frame: a lamp that
+// LIGHTING_STRATA x R rays with no light carried over from a past frame: a lamp that
 // moves, dims or goes off shows in full on the next frame and never needs a reset.
 // Only visibility is kept, and only while it still holds:
 // - each kept stratum comes from whichever of last frame's probes in the 5 x 5
 //   tiles around this place's old screen tile (reprojected through last frame's
 //   camera) traced it nearest this place, on the same surface: facing the same
-//   way (25 degrees), on its plane, within GI2_REACH probe spacings along it. A
+//   way (25 degrees), on its plane, within LIGHTING_REACH probe spacings along it. A
 //   still probe takes its own; one that slid across its surface (the camera
 //   moved) or was just uncovered (an object moved off it) takes its neighbours'.
 //   Its hits are then seen from the probe's place (parallax), and a hit that
 //   falls behind the probe is not used;
 // - a kept ray whose path crosses the bounds of an object that moved, came or went
-//   since the last frame was traced again this frame (gi2_trace.comp);
+//   since the last frame was traced again this frame (lighting_trace.comp);
 // - every kept stratum is dropped when the traced world changes as a whole;
 // - a stratum no probe near this place traced (a surface the camera just turned
-//   or walked onto) is traced from here this frame (a fill, gi2_fill_ray), so a
+//   or walked onto) is traced from here this frame (a fill, lighting_fill_ray), so a
 //   newly seen surface starts with all its rays, not one stratum: turning the
 //   camera reveals a band of such surfaces at the leading edge every frame, and
 //   with one stratum on the first frame, two on the next, the band was noisy and
@@ -35,45 +35,45 @@
 // mean over solid angle and a dropped ray thins a cell, never darkens it.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
-#include "gi2_common.glsl"
+#include "lighting_common.glsl"
 
-// Hit distance standing in for a miss (gi2_filter.comp's angle test).
-const float GI2_FAR = 1000.0;
+// Hit distance standing in for a miss (lighting_filter.comp's angle test).
+const float LIGHTING_FAR = 1000.0;
 
 void main() {
     uint probe = gl_GlobalInvocationID.x;
-    if (probe >= gi2_probes()) {
+    if (probe >= lighting_probes()) {
         return;
     }
-    vec4 pp = work.v[gi2_probe_at(probe)];
-    vec3 n = work.v[gi2_probe_at(probe) + 1u].xyz;
-    uint rays = gi2_rays();
-    uint now = gi2_stratum();
-    vec4 head = work.v[gi2_change_at()];
+    vec4 pp = work.v[lighting_probe_at(probe)];
+    vec3 n = work.v[lighting_probe_at(probe) + 1u].xyz;
+    uint rays = lighting_rays();
+    uint now = lighting_stratum();
+    vec4 head = work.v[lighting_change_at()];
     bool drop_all = head.y > 0.5;
     uint last = uint(head.z + 0.5) & 1u;
     uint next = 1u - last;
-    uint src[GI2_STRATA];
-    [[dont_unroll]] for (uint s = 0u; s < GI2_STRATA; s++) {
+    uint src[LIGHTING_STRATA];
+    [[dont_unroll]] for (uint s = 0u; s < LIGHTING_STRATA; s++) {
         src[s] = 0u;
     }
     // Round 1 (params.z bit 1, before the trace): the picks. Round 2 (after the
     // light pass): read them back and bin.
     bool pick = ((pc.params.z >> 1u) & 1u) != 0u;
     if (!pick) {
-        [[dont_unroll]] for (uint s = 0u; s < GI2_STRATA; s++) {
-            src[s] = gi2_pick(probe, s);
+        [[dont_unroll]] for (uint s = 0u; s < LIGHTING_STRATA; s++) {
+            src[s] = lighting_pick(probe, s);
         }
     }
     if (pick && pp.w > 0.5) {
         src[now] = probe + 1u;
         // Where this place stood on last frame's screen: its tile there.
-        vec4 eye = work.v[gi2_change_at() + 1u];
+        vec4 eye = work.v[lighting_change_at() + 1u];
         ivec2 t = ivec2(-1000);
         if (!drop_all && eye.w > 0.5) {
-            vec4 right = work.v[gi2_change_at() + 2u];
-            vec3 up = work.v[gi2_change_at() + 3u].xyz;
-            vec4 fwd = work.v[gi2_change_at() + 4u];
+            vec4 right = work.v[lighting_change_at() + 2u];
+            vec3 up = work.v[lighting_change_at() + 3u].xyz;
+            vec4 fwd = work.v[lighting_change_at() + 4u];
             vec3 rel = pp.xyz - eye.xyz;
             float z = dot(rel, fwd.xyz);
             if (z > 1.0e-3) {
@@ -93,16 +93,16 @@ void main() {
         // view, stretched where the surface is seen at a slant).
         float facing = max(abs(dot(n, normalize(scene.eye.xyz - pp.xyz))), 0.2);
         float spacing = float(pc.params.y) * 2.0 * scene.view_right.w * dist / float(pc.dims.y) / facing;
-        float reach = GI2_REACH * spacing + 0.02;
+        float reach = LIGHTING_REACH * spacing + 0.02;
         // The changes this frame (params.z bit 3): a kept stratum traced from inside
         // the bounds of an object that moved, came or went (a probe on a moving box,
         // or right by it) is not picked, so the probe traces it again from where it
         // stands (a fill). Its old origin sits where the surface was, or inside the
-        // box now, and its re-trace (gi2_kept_crossed) would shade from there.
-        vec4 chead = work.v[gi2_change_at()];
-        uint changes = ((pc.params.z >> 3u) & 1u) != 0u ? min(uint(chead.x + 0.5), GI2_CHANGES) : 0u;
-        float best[GI2_STRATA];
-        [[dont_unroll]] for (uint s = 0u; s < GI2_STRATA; s++) {
+        // box now, and its re-trace (lighting_kept_crossed) would shade from there.
+        vec4 chead = work.v[lighting_change_at()];
+        uint changes = ((pc.params.z >> 3u) & 1u) != 0u ? min(uint(chead.x + 0.5), LIGHTING_CHANGES) : 0u;
+        float best[LIGHTING_STRATA];
+        [[dont_unroll]] for (uint s = 0u; s < LIGHTING_STRATA; s++) {
             best[s] = 1.0e9;
         }
         [[dont_unroll]] for (int dy = -2; dy <= 2; dy++) {
@@ -112,22 +112,22 @@ void main() {
                     continue;
                 }
                 uint from_probe = uint(q.y) * pc.dims.z + uint(q.x);
-                uvec4 v0 = floatBitsToUint(work.v[gi2_view_at(last, from_probe)]);
-                uvec4 v1 = floatBitsToUint(work.v[gi2_view_at(last, from_probe) + 1u]);
+                uvec4 v0 = floatBitsToUint(work.v[lighting_view_at(last, from_probe)]);
+                uvec4 v1 = floatBitsToUint(work.v[lighting_view_at(last, from_probe) + 1u]);
                 uint was[8] = uint[8](v0.x, v0.y, v0.z, v0.w, v1.x, v1.y, v1.z, v1.w);
-                [[dont_unroll]] for (uint s = 0u; s < GI2_STRATA; s++) {
+                [[dont_unroll]] for (uint s = 0u; s < LIGHTING_STRATA; s++) {
                     if (s == now || was[s] == 0u) {
                         continue;
                     }
-                    vec4 sp = work.v[gi2_stratum_at(was[s] - 1u, s)];
-                    vec3 sn = work.v[gi2_stratum_at(was[s] - 1u, s) + 1u].xyz;
+                    vec4 sp = work.v[lighting_stratum_at(was[s] - 1u, s)];
+                    vec3 sn = work.v[lighting_stratum_at(was[s] - 1u, s) + 1u].xyz;
                     vec3 d = pp.xyz - sp.xyz;
                     float off = abs(dot(d, n));
                     float side = length(d - n * dot(d, n));
                     float score = side + 4.0 * off;
                     bool moved = false;
                     [[dont_unroll]] for (uint c = 0u; c < changes && !moved; c++) {
-                        vec4 b = work.v[gi2_change_at() + GI2_CHANGE_HEAD + c];
+                        vec4 b = work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + c];
                         vec3 db = sp.xyz - b.xyz;
                         moved = dot(db, db) < b.w * b.w;
                     }
@@ -140,33 +140,33 @@ void main() {
         }
     }
     if (pick) {
-        work.v[gi2_view_at(next, probe)] = uintBitsToFloat(uvec4(src[0], src[1], src[2], src[3]));
-        work.v[gi2_view_at(next, probe) + 1u] = uintBitsToFloat(uvec4(src[4], src[5], src[6], src[7]));
+        work.v[lighting_view_at(next, probe)] = uintBitsToFloat(uvec4(src[0], src[1], src[2], src[3]));
+        work.v[lighting_view_at(next, probe) + 1u] = uintBitsToFloat(uvec4(src[4], src[5], src[6], src[7]));
         return;
     }
     if (pp.w > 0.5) {
         vec3 from = pp.xyz + n * 0.02;
         [[dont_unroll]] for (uint k = 0u; k < rays; k++) {
-            work.v[gi2_cell_at(0u, probe, k)] = vec4(0.0);
-            work.v[gi2_cell_at(1u, probe, k)] = vec4(0.0);
+            work.v[lighting_cell_at(0u, probe, k)] = vec4(0.0);
+            work.v[lighting_cell_at(1u, probe, k)] = vec4(0.0);
         }
         uint samples = 0u;
         [[dont_unroll]] for (uint k = 0u; k < rays; k++) {
-            [[dont_unroll]] for (uint s = 0u; s < GI2_STRATA; s++) {
+            [[dont_unroll]] for (uint s = 0u; s < LIGHTING_STRATA; s++) {
                 vec3 origin;
                 vec3 dir;
                 vec3 sn;
                 bool fill = src[s] == 0u;
-                uint h = ((fill ? probe : src[s] - 1u) * GI2_STRATA + s) * rays + k;
-                if (fill && !gi2_fill_ray(probe, s, k, origin, dir, sn)) {
+                uint h = ((fill ? probe : src[s] - 1u) * LIGHTING_STRATA + s) * rays + k;
+                if (fill && !lighting_fill_ray(probe, s, k, origin, dir, sn)) {
                     continue;
                 }
-                vec4 rec = work.v[fill ? gi2_fill_at(h) : gi2_kept_at(h)];
+                vec4 rec = work.v[fill ? lighting_fill_at(h) : lighting_kept_at(h)];
                 if (rec.x < 0.0 && rec.x > -0.75) {
                     continue;
                 }
                 if (!fill) {
-                    gi2_stratum_ray(src[s] - 1u, s, k, origin, dir, sn);
+                    lighting_stratum_ray(src[s] - 1u, s, k, origin, dir, sn);
                 }
                 bool hit = rec.x >= 0.0;
                 vec3 end = origin + dir * (hit ? rec.x : 200.0);
@@ -178,21 +178,21 @@ void main() {
                     continue;
                 }
                 d /= len;
-                uint cell = gi2_cell_of(pp.xyz, n, d);
+                uint cell = lighting_cell_of(pp.xyz, n, d);
                 if (cell == ~0u) {
                     continue;
                 }
                 float w = 1.0 / max(dot(d, n), 0.05);
-                work.v[gi2_cell_at(0u, probe, cell)] += vec4((fill ? gi2_fill_light(h) : gi2_kept_light(h)) * w, w);
-                work.v[gi2_cell_at(1u, probe, cell)].x += w * (hit ? len : GI2_FAR);
-                // Kept rays only: the counter tells what reprojection held (gi2_frame tests).
+                work.v[lighting_cell_at(0u, probe, cell)] += vec4((fill ? lighting_fill_light(h) : lighting_kept_light(h)) * w, w);
+                work.v[lighting_cell_at(1u, probe, cell)].x += w * (hit ? len : LIGHTING_FAR);
+                // Kept rays only: the counter tells what reprojection held (lighting_frame tests).
                 samples += fill ? 0u : 1u;
             }
         }
         [[dont_unroll]] for (uint k = 0u; k < rays; k++) {
-            vec4 a = work.v[gi2_cell_at(0u, probe, k)];
-            float t = work.v[gi2_cell_at(1u, probe, k)].x;
-            work.v[gi2_cell_at(0u, probe, k)] = a.w > 0.0 ? vec4(a.rgb / a.w, t / a.w) : vec4(0.0, 0.0, 0.0, -1.0);
+            vec4 a = work.v[lighting_cell_at(0u, probe, k)];
+            float t = work.v[lighting_cell_at(1u, probe, k)].x;
+            work.v[lighting_cell_at(0u, probe, k)] = a.w > 0.0 ? vec4(a.rgb / a.w, t / a.w) : vec4(0.0, 0.0, 0.0, -1.0);
         }
         atomicAdd(gstats.pad0, samples);
         atomicAdd(gstats.pad1, 1u);

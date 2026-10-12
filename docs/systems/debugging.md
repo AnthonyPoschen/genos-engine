@@ -187,7 +187,7 @@ a miss prints MISS and fails nothing.
   bounce view): settle at the contact pose, then three 24-frame clips that each end
   on it (a 1e-5 rad wiggle, a 1.2 m slide, a 20° turn), every frame saved. Rows:
   |mean of each clip's last frame / settled mean - 1| (limit 0.03). The same check
-  runs on lavapipe as `gi_v2_moving_camera_keeps_its_brightness` (gi2_frame.rs).
+  runs on lavapipe as `lighting_moving_camera_keeps_its_brightness` (lighting_frame.rs).
 - `walk`: the corner walk at 1280x720, every frame of the bounce view saved, cold then
   warm (`scripts/gi_check/walk.rhai`).
 - `flicker`: `temporal_flicker_aligned.rhai` at 1280x720, with a heatmap per pose.
@@ -214,7 +214,7 @@ a miss prints MISS and fails nothing.
   10 frames, from the depth views, grown 6 px at 320x180, minus where it stands now;
   mean over frames) and trail worst frame.
 
-Probes are spaced as the 16 px tile at 1440p in every run (`GENOS_GI2_TILE` =
+Probes are spaced as the 16 px tile at 1440p in every run (`GENOS_LIGHTING_TILE` =
 height / 90 unless set).
 
 Scores (all in linear luminance, shares of the light; the five-view mean is checked):
@@ -398,9 +398,9 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   off the surface or inside the box), and the light cache around it lagged (new
   patches read 0 until relit). Fix (each on unless its variable is 0): a stratum
   traced from inside a change sphere is filled instead of kept
-  (`GENOS_GI2_MOVED_DROP`); patches within 1 m of a change are relit first
-  (`GENOS_GI2_URGENT`); a patch not lit yet reads its lit neighbours
-  (`GENOS_GI2_BORROW`). Moving a patch to its reader's point was tried and made
+  (`GENOS_LIGHTING_MOVED_DROP`); patches within 1 m of a change are relit first
+  (`GENOS_LIGHTING_URGENT`); a patch not lit yet reads its lit neighbours
+  (`GENOS_LIGHTING_BORROW`). Moving a patch to its reader's point was tried and made
   it worse. edffa81: error 0.0338, flicker 0.0302; fixed 0.0196, 0.0119.
   Limits 0.027, 0.02.
 
@@ -417,7 +417,7 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   1 m from the bounce-lit corridor wall, and how much of the reference's detail
   is kept; limit 0.013: 839d449 0.0106, GI v1 0.0154). The first pose by the red
   box was too dark to converge and was moved.
-- World cells (GENOS_GI2_WORLD, experiment, off): 1, pixels read the light cache's
+- World cells (GENOS_LIGHTING_WORLD, experiment, off): 1, pixels read the light cache's
   patches interpolated: with 64 rays a patch the picture is blotched (structure
   0.0685) but as stable as GI v1; with 1024 rays at 12.5 cm structure 0.0092,
   swim 0.0006 / 0.0002 at 48 px, blotch 0.014, close-up 0.0149 (blocky). 2,

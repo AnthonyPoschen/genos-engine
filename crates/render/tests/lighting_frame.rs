@@ -1,4 +1,4 @@
-//! GI v2's frame path (gi2_gpu.rs): its pipelines build quickly, and its direct light
+//! GI v2's frame path (lighting_gpu.rs): its pipelines build quickly, and its direct light
 //! matches the current frame's direct light.
 
 use std::time::Duration;
@@ -39,19 +39,23 @@ fn pipeline_limit() -> Duration {
 }
 
 #[test]
-fn gi_v2_pipelines_build_quickly() {
+fn lighting_pipelines_build_quickly() {
     let (_gpu, _window, renderer) = open();
     let times = renderer.pipeline_times();
-    let gi2: Vec<_> = times
+    let lighting: Vec<_> = times
         .iter()
-        .filter(|(name, _)| name.starts_with("gi2"))
+        .filter(|(name, _)| name.starts_with("lighting"))
         .collect();
-    assert_eq!(gi2.len(), 9, "every GI v2 pipeline is timed: {times:?}");
+    assert_eq!(
+        lighting.len(),
+        9,
+        "every GI v2 pipeline is timed: {times:?}"
+    );
     let limit = pipeline_limit();
     for (name, took) in &times {
         eprintln!("pipeline {name}: {:.3} s", took.as_secs_f64());
     }
-    for (name, took) in gi2 {
+    for (name, took) in lighting {
         assert!(
             *took < limit,
             "{name} took {took:?} to build (limit {limit:?})"
@@ -87,7 +91,7 @@ fn the_bounce_adds_light_to_the_direct_view() {
 /// A dark room but for one emissive glTF cube: GI v2 draws the cube's own light,
 /// and rays that hit it carry that light onto the floor in front of it.
 #[test]
-fn gi_v2_draws_emitted_light_and_bounces_it() {
+fn lighting_draws_emitted_light_and_bounces_it() {
     let (_gpu, mut window, mut renderer) = open();
     let gltf = genos_load::load_gltf_file(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -96,7 +100,7 @@ fn gi_v2_draws_emitted_light_and_bounces_it() {
     .expect("cube fixture");
     let settings = genos_bake::BakeSettings {
         mode: genos_bake::BakeMode::OnLoad,
-        cache_dir: std::env::temp_dir().join("genos-gi2-emission-test"),
+        cache_dir: std::env::temp_dir().join("genos-lighting-emission-test"),
         ..genos_bake::BakeSettings::default()
     };
     let dark_room = |glow: f32| {
@@ -176,7 +180,7 @@ fn gi_v2_draws_emitted_light_and_bounces_it() {
 
 /// Rays per placed probe GI v2's screen probes held in the last frame drawn.
 fn samples_per_probe(renderer: &mut Renderer) -> f32 {
-    let [rays, probes] = renderer.gi_v2_probe_samples();
+    let [rays, probes] = renderer.lighting_probe_samples();
     assert!(probes > 0, "the probes are placed");
     rays as f32 / probes as f32
 }
@@ -209,7 +213,7 @@ fn changed_pixels(a: &[u8], b: &[u8]) -> usize {
 /// off, and a sun or sky that changes, show in full on the next frame while every
 /// probe keeps all its kept rays, the far ones and the ones the lamp lights alike.
 #[test]
-fn gi_v2_probes_keep_their_rays_when_the_light_changes() {
+fn lighting_probes_keep_their_rays_when_the_light_changes() {
     let (_gpu, mut window, mut renderer) = open();
     let base: Scene = shipped_hall().scene;
     assert!(!base.lights.is_empty());
@@ -261,15 +265,15 @@ fn gi_v2_probes_keep_their_rays_when_the_light_changes() {
 }
 
 /// An object that moves: the kept rays whose paths cross where it was or is are
-/// traced again in the same frame (gi2_trace.comp), so the probes keep almost all
+/// traced again in the same frame (lighting_trace.comp), so the probes keep almost all
 /// 512 rays (about 496 here when they were dropped until their stratum came round,
 /// and which rays a cell held changed every frame: flicker around moving objects).
 /// Strata traced from inside the moved object's bounds are traced again from the
-/// probe's place in the same frame (a fill, GENOS_GI2_MOVED_DROP), which this
+/// probe's place in the same frame (a fill, GENOS_LIGHTING_MOVED_DROP), which this
 /// counter does not count as kept: about 502 here, 512 with it off.
 /// The change shows at once.
 #[test]
-fn gi_v2_moving_object_retraces_the_rays_it_crosses() {
+fn lighting_moving_object_retraces_the_rays_it_crosses() {
     let (_gpu, mut window, mut renderer) = open();
     let base: Scene = shipped_hall().scene;
     assert!(!base.solids.is_empty());
@@ -302,10 +306,10 @@ fn gi_v2_moving_object_retraces_the_rays_it_crosses() {
 
 /// A camera that moves keeps a probe's strata only where reprojection holds: last
 /// frame's probes around the probe's old screen place lend the strata they traced
-/// on the probe's plane, within GI2_REACH spacings of it. A slight turn keeps
+/// on the probe's plane, within LIGHTING_REACH spacings of it. A slight turn keeps
 /// almost all rays; turning round to surfaces last frame never saw keeps few.
 #[test]
-fn gi_v2_camera_keeps_rays_only_where_reprojection_holds() {
+fn lighting_camera_keeps_rays_only_where_reprojection_holds() {
     let (_gpu, mut window, mut renderer) = open();
     let world = shipped_hall();
     let camera = Camera::opening();
@@ -331,7 +335,7 @@ fn gi_v2_camera_keeps_rays_only_where_reprojection_holds() {
 /// hold) drops every kept ray: each probe is back to this frame's 64 rays, then
 /// refills one stratum a frame.
 #[test]
-fn gi_v2_floor_change_drops_all_kept_rays() {
+fn lighting_floor_change_drops_all_kept_rays() {
     let (_gpu, mut window, mut renderer) = open();
     let base: Scene = shipped_hall().scene;
     let camera = Camera::opening();
@@ -371,7 +375,7 @@ fn mean_byte(p: &[u8]) -> f64 {
 /// bends toward the normal once a probe holds strata traced from different world
 /// cells: 1.05, 1.22 and 1.31 here.
 #[test]
-fn gi_v2_moving_camera_keeps_its_brightness() {
+fn lighting_moving_camera_keeps_its_brightness() {
     let (_gpu, mut window, mut renderer) = open();
     renderer.set_debug_view(DebugView {
         mode: ViewMode::Bounce,

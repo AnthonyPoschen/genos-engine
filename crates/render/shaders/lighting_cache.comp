@@ -1,80 +1,80 @@
 #version 450
 // GI v2 light cache, last ray pass: each patch relit this frame sums its rays'
 // light into irradiance (uniform hemisphere: 2 pi / C times the cosine-weighted
-// sum). A patch nobody has read for GI2_CACHE_LIFE frames is freed. No trace.
+// sum). A patch nobody has read for LIGHTING_CACHE_LIFE frames is freed. No trace.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
-#include "gi2_common.glsl"
+#include "lighting_common.glsl"
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-    if (gid >= GI2_CACHE_BATCH) {
+    if (gid >= LIGHTING_CACHE_BATCH) {
         return;
     }
     // S70A: dense (indirect) dispatch over the live entries only.
     uint j = gid;
-    if (gi2_dense()) {
-        j = gid < gi2_dense_count() ? gi2_dense_entry(gid) : GI2_CACHE_BATCH;
+    if (lighting_dense()) {
+        j = gid < lighting_dense_count() ? lighting_dense_entry(gid) : LIGHTING_CACHE_BATCH;
     }
     if (gid == 0u) {
-        gstats.live = gi2_live_count();
+        gstats.live = lighting_live_count();
         // Scheduler: the next round lists the buckets from the top down until
         // they fill what the young leave of the batch; the histogram restarts.
-        if (gi2_world_mode() == 3u && GI2_SC_SCHED) {
-            gi2_wrc_note_lamps();
-            if (gi2_wrc_scout_due()) {
-                atomicAdd(gstats.scouts, GI2_WRC_SCOUT_ENTRIES * GI2_CACHE_RAYS);
+        if (lighting_world_mode() == 3u && LIGHTING_SC_SCHED) {
+            lighting_wrc_note_lamps();
+            if (lighting_wrc_scout_due()) {
+                atomicAdd(gstats.scouts, LIGHTING_WRC_SCOUT_ENTRIES * LIGHTING_CACHE_RAYS);
             }
-            gi2_ls_note();
-            uint room = gi2_sc_room();
-            uint base = gi2_sc_base_room();
-            uint young = min(gi2_young_count(), base);
+            lighting_ls_note();
+            uint room = lighting_sc_room();
+            uint base = lighting_sc_base_room();
+            uint young = min(lighting_young_count(), base);
             uint total = 0u;
-            for (uint b = 0u; b < GI2_SC_BUCKETS; b++) {
-                total += ckeys.key[GI2_SC_HIST_AT + b];
+            for (uint b = 0u; b < LIGHTING_SC_BUCKETS; b++) {
+                total += ckeys.key[LIGHTING_SC_HIST_AT + b];
             }
-            uint c = total > base - young ? min(ckeys.key[GI2_SC_BOOST_AT] + 1u, 100000u) : 0u;
-            ckeys.key[GI2_SC_BOOST_AT] = c;
-            bool boost = c > 0u && c <= GI2_SC_BOOST_ROUNDS;
+            uint c = total > base - young ? min(ckeys.key[LIGHTING_SC_BOOST_AT] + 1u, 100000u) : 0u;
+            ckeys.key[LIGHTING_SC_BOOST_AT] = c;
+            bool boost = c > 0u && c <= LIGHTING_SC_BOOST_ROUNDS;
             gstats.pad3 = boost ? 1u : 0u;
             uint budget = (boost ? room : base) - young;
             uint acc = 0u;
             uint thr = 0u;
-            for (int b = int(GI2_SC_BUCKETS) - 1; b >= 0; b--) {
-                acc += ckeys.key[GI2_SC_HIST_AT + uint(b)];
-                ckeys.key[GI2_SC_HIST_AT + uint(b)] = 0u;
+            for (int b = int(LIGHTING_SC_BUCKETS) - 1; b >= 0; b--) {
+                acc += ckeys.key[LIGHTING_SC_HIST_AT + uint(b)];
+                ckeys.key[LIGHTING_SC_HIST_AT + uint(b)] = 0u;
                 if (acc >= budget && thr == 0u) {
                     thr = uint(b);
                 }
             }
-            ckeys.key[GI2_SC_THR_AT] = thr;
+            ckeys.key[LIGHTING_SC_THR_AT] = thr;
             gstats.sched_thr = thr;
         }
     }
-    if (j >= GI2_CACHE_BATCH) {
+    if (j >= LIGHTING_CACHE_BATCH) {
         return;
     }
-    uint slot = gi2_cache_batch_slot(j);
+    uint slot = lighting_cache_batch_slot(j);
     if (slot == ~0u) {
         return;
     }
     // A texel's entries this round are consecutive; the first sums them all.
-    if (j > 0u && gi2_cache_batch_slot(j - 1u) == slot) {
+    if (j > 0u && lighting_cache_batch_slot(j - 1u) == slot) {
         return;
     }
     uint run = 1u;
-    while (run < GI2_SC_QUARTERS && j + run < GI2_CACHE_BATCH && gi2_cache_batch_slot(j + run) == slot) {
+    while (run < LIGHTING_SC_QUARTERS && j + run < LIGHTING_CACHE_BATCH && lighting_cache_batch_slot(j + run) == slot) {
         run++;
     }
     uint key = ckeys.key[slot];
     if (key == 0u) {
         return;
     }
-    atomicAdd(gstats.rays, run * GI2_CACHE_RAYS);
+    atomicAdd(gstats.rays, run * LIGHTING_CACHE_RAYS);
     uint last = floatBitsToUint(cache.v[3u * slot].w);
     // Signed: on the async queue a frame drawn after this round was built may
     // already have read the patch (last ahead of this round's frame).
-    if (int(gi2_frame() - last) > int(GI2_CACHE_LIFE)) {
+    if (int(lighting_frame() - last) > int(LIGHTING_CACHE_LIFE)) {
         atomicAdd(gstats.freed, 1u);
         ckeys.key[slot] = 0u;
         cache.v[3u * slot + 1u] = vec4(0.0);
@@ -83,79 +83,79 @@ void main() {
     }
     vec3 tp;
     vec3 n;
-    gi2_sc_texel_world(slot, tp, n);
-    uint rkey = gi2_sc_ray_key(slot, key);
-    uint q0 = gi2_sc_quarter0(slot);
-    bool wrc_cell = gi2_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2;
-    uint prev_updated = gi2_sc_updated(slot);
-    gi2_sc_upd_override = prev_updated;
-    uint first = gi2_probe_rays() + j * GI2_CACHE_RAYS;
+    lighting_sc_texel_world(slot, tp, n);
+    uint rkey = lighting_sc_ray_key(slot, key);
+    uint q0 = lighting_sc_quarter0(slot);
+    bool wrc_cell = lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2;
+    uint prev_updated = lighting_sc_updated(slot);
+    lighting_sc_upd_override = prev_updated;
+    uint first = lighting_probe_rays() + j * LIGHTING_CACHE_RAYS;
     vec3 e = vec3(0.0);
     float es = 0.0;
     float el = 0.0;
-    [[dont_unroll]] for (uint k = 0u; k < run * GI2_CACHE_RAYS; k++) {
-        vec4 v = work.v[gi2_rad_at(first + k)];
-        if (gi2_ray_none(v)) {
+    [[dont_unroll]] for (uint k = 0u; k < run * LIGHTING_CACHE_RAYS; k++) {
+        vec4 v = work.v[lighting_rad_at(first + k)];
+        if (lighting_ray_none(v)) {
             return;
         }
-        vec3 dir = gi2_dir(rkey, n, q0 * GI2_CACHE_RAYS + k, GI2_SC_SET_RAYS);
+        vec3 dir = lighting_dir(rkey, n, q0 * LIGHTING_CACHE_RAYS + k, LIGHTING_SC_SET_RAYS);
         float c = max(dot(dir, n), 0.0);
-        vec3 lk = gi2_ray_light(v);
+        vec3 lk = lighting_ray_light(v);
         e += lk * c;
         el += dot(lk, vec3(0.2126, 0.7152, 0.0722)) * c;
         es += min(max(v.w, 0.0), dot(lk, vec3(0.2126, 0.7152, 0.0722))) * c;
     }
-    float rays = float(run * GI2_CACHE_RAYS);
+    float rays = float(run * LIGHTING_CACHE_RAYS);
     if (run > 1u) {
         atomicAdd(gstats.extra, 1u);
     }
-    if (gi2_world_mode() == 3u) {
-        cache.v[GI2_SC_OBJ_AT + slot].y = uintBitsToFloat(gi2_frame());
+    if (lighting_world_mode() == 3u) {
+        cache.v[LIGHTING_SC_OBJ_AT + slot].y = uintBitsToFloat(lighting_frame());
         // Few rays a relight: the set's quarters add up; the mean takes the set
         // once its last quarter is in.
-        if (GI2_SC_QUARTERS > 1u && !wrc_cell) {
+        if (LIGHTING_SC_QUARTERS > 1u && !wrc_cell) {
             uint q = q0 + run;
             if (q0 > 0u) {
-                e += gi2_unpack_rgb9e5(floatBitsToUint(cache.v[GI2_SC_OBJ_AT + slot].z));
+                e += lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_SC_OBJ_AT + slot].z));
                 // S64B: and their sun/sky share (SUN_AT .z share, .w all, luminance).
-                es += cache.v[GI2_SC_SUN_AT + slot].z;
-                el += cache.v[GI2_SC_SUN_AT + slot].w;
+                es += cache.v[LIGHTING_SC_SUN_AT + slot].z;
+                el += cache.v[LIGHTING_SC_SUN_AT + slot].w;
             }
-            if (q < GI2_SC_QUARTERS) {
-                cache.v[GI2_SC_OBJ_AT + slot].z = uintBitsToFloat(gi2_pack_rgb9e5(e));
-                cache.v[GI2_SC_OBJ_AT + slot].w = uintBitsToFloat(q);
-                cache.v[GI2_SC_SUN_AT + slot].zw = vec2(es, el);
+            if (q < LIGHTING_SC_QUARTERS) {
+                cache.v[LIGHTING_SC_OBJ_AT + slot].z = uintBitsToFloat(lighting_pack_rgb9e5(e));
+                cache.v[LIGHTING_SC_OBJ_AT + slot].w = uintBitsToFloat(q);
+                cache.v[LIGHTING_SC_SUN_AT + slot].zw = vec2(es, el);
                 atomicAdd(gstats.partial, 1u);
                 return;
             }
-            cache.v[GI2_SC_OBJ_AT + slot].zw = vec2(0.0);
-            cache.v[GI2_SC_SUN_AT + slot].zw = vec2(0.0);
+            cache.v[LIGHTING_SC_OBJ_AT + slot].zw = vec2(0.0);
+            cache.v[LIGHTING_SC_SUN_AT + slot].zw = vec2(0.0);
             atomicAdd(gstats.sets, 1u);
-            rays = float(GI2_SC_SET_RAYS);
+            rays = float(LIGHTING_SC_SET_RAYS);
         }
     }
-    e *= GI2_TAU / rays;
+    e *= LIGHTING_TAU / rays;
     vec4 old = cache.v[3u * slot + 2u];
-    if (gi2_world_mode() == 3u) {
+    if (lighting_world_mode() == 3u) {
         // S63A: carry the history's sun/sky share to the sun and sky of now,
         // then blend this set's share into it.
         float fe = el > 1.0e-6 ? clamp(es / el, 0.0, 1.0) : 0.0;
         float fnew = fe;
         float ls = 1.0;
         if (old.w > 0.5) {
-            ls = gi2_sc_sun_gain(slot);
-            float fo = gi2_sc_sunfrac_now(slot);
+            ls = lighting_sc_sun_gain(slot);
+            float fo = lighting_sc_sunfrac_now(slot);
             fnew = mix(fo, fe, max(1.0 / (floor(old.w) + 1.0), 1.0 / 16.0));
         }
-        float now = gi2_ls_now();
-        cache.v[GI2_SC_SUN_AT + slot] = vec4(fnew, now < 0.0 ? cache.v[GI2_SC_SUN_AT + slot].y : now, 0.0, 0.0);
+        float now = lighting_ls_now();
+        cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(fnew, now < 0.0 ? cache.v[LIGHTING_SC_SUN_AT + slot].y : now, 0.0, 0.0);
         if (old.w > 0.5 && abs(ls - 1.0) > 1.0e-3) {
             old.rgb *= ls;
             cache.v[3u * slot + 2u].rgb = old.rgb;
-            vec4 ea = cache.v[GI2_SC_EST_AT + 2u * slot];
-            cache.v[GI2_SC_EST_AT + 2u * slot] = vec4(ea.rgb * ls, ea.w * ls * ls);
-            vec3 pl = gi2_unpack_rgb9e5(floatBitsToUint(cache.v[GI2_WORLD_AT + slot].y));
-            cache.v[GI2_WORLD_AT + slot].y = uintBitsToFloat(gi2_pack_rgb9e5(pl * ls));
+            vec4 ea = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
+            cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(ea.rgb * ls, ea.w * ls * ls);
+            vec3 pl = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
+            cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(pl * ls));
         }
     }
     float lo = dot(old.rgb, vec3(0.2126, 0.7152, 0.0722));
@@ -164,46 +164,46 @@ void main() {
     uint millionths = uint(clamp(change, 0.0, 1.0) * 1.0e6);
     atomicMax(gstats.max_change, millionths);
     atomicAdd(gstats.relit, 1u);
-    if (old.w > GI2_CACHE_MATURE - 0.5) {
+    if (old.w > LIGHTING_CACHE_MATURE - 0.5) {
         atomicMax(gstats.mature_change, millionths);
         atomicAdd(gstats.mature_relit, 1u);
     }
     // Flag 131072: hit patches (25 cm and up) take each relight whole, as the
     // light cache of the other modes does (no running mean of sets).
-    if (gi2_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2) {
-        // World space radiance cache (S61A): a running mean to GI2_WRC_CAP sets,
-        // change-aware through gi2_sc_count (short near a change, the light
+    if (lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2) {
+        // World space radiance cache (S61A): a running mean to LIGHTING_WRC_CAP sets,
+        // change-aware through lighting_sc_count (short near a change, the light
         // window while the light changes); later sets weigh more (as the texels).
         // S61B: each entry is one 16-ray sample; a mover nearby or a lamp
         // that reaches it moved since its last relight drops the history to
-        // GI2_WRC_CHANGE_KEEP samples (S62D: no longer; an EMA floor instead).
-        float t = old.w < 0.5 ? 0.0 : gi2_sc_count(slot);
+        // LIGHTING_WRC_CHANGE_KEEP samples (S62D: no longer; an EMA floor instead).
+        float t = old.w < 0.5 ? 0.0 : lighting_sc_count(slot);
         bool urgent3 = ((pc.params.z >> 5u) & 1u) != 0u;
-        vec3 cp = gi2_sc_texel_pos(slot);
+        vec3 cp = lighting_sc_texel_pos(slot);
         // S62D (Anthony): no history drop under a change; an exponential
         // average with a responsive floor tracks it (local change faster).
-        bool local3 = (urgent3 && gi2_near_change(cp)) || gi2_wrc_lamp_changed(cp, prev_updated);
+        bool local3 = (urgent3 && lighting_near_change(cp)) || lighting_wrc_lamp_changed(cp, prev_updated);
         float add = float(run);
         float wa = add / (t + add);
         if (local3) {
-            wa = max(wa, GI2_WRC_LOCAL_ALPHA * add);
-        } else if (!gi2_sc_light_quiet()) {
-            wa = max(wa, GI2_WRC_CHANGE_ALPHA * add);
+            wa = max(wa, LIGHTING_WRC_LOCAL_ALPHA * add);
+        } else if (!lighting_sc_light_quiet()) {
+            wa = max(wa, LIGHTING_WRC_CHANGE_ALPHA * add);
         }
         vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * min(wa, 1.0);
-        cache.v[3u * slot + 2u] = vec4(mean, min(t + add, GI2_WRC_CAP));
+        cache.v[3u * slot + 2u] = vec4(mean, min(t + add, LIGHTING_WRC_CAP));
         return;
     }
-    if (gi2_world_mode() == 3u) {
+    if (lighting_world_mode() == 3u) {
         // Surface cache: the running mean of the sets so far (a short one under
         // change); w counts them, held at the cap once there.
-        float t = old.w < 0.5 ? 0.0 : gi2_sc_count(slot);
+        float t = old.w < 0.5 ? 0.0 : lighting_sc_count(slot);
         // Set k weighs k^2 (later sets read a cache that has converged further, so
         // the first sets' darker second bounce fades as (k / n)^3, not k / n; the
         // noise is that of 0.56 n sets).
         float k = t + 1.0;
-        float w = (gi2_sc_flags() & 1u) != 0u ? 6.0 * k / ((k + 1.0) * (2.0 * k + 1.0)) : 2.0 / (k + 1.0);
-        float cap = gi2_sc_cap(slot);
+        float w = (lighting_sc_flags() & 1u) != 0u ? 6.0 * k / ((k + 1.0) * (2.0 * k + 1.0)) : 2.0 / (k + 1.0);
+        float cap = lighting_sc_cap(slot);
         if (t >= cap - 0.5) {
             atomicAdd(gstats.atcap, 1u);
         }
@@ -211,22 +211,22 @@ void main() {
         // kajiya): a short-term mean and variance beside the long-term mean; the
         // long-term blend grows with how far the short-term mean has moved from it
         // in standard deviations and falls to 1/256 once they agree, so a converged
-        // texel neither drifts nor freezes. The first GI2_SC_EST_WARM sets are a
-        // plain mean (as before); under change gi2_sc_count keeps t short.
-        if ((gi2_sc_flags() & 1048576u) != 0u && old.w > 0.5) {
+        // texel neither drifts nor freezes. The first LIGHTING_SC_EST_WARM sets are a
+        // plain mean (as before); under change lighting_sc_count keeps t short.
+        if ((lighting_sc_flags() & 1048576u) != 0u && old.w > 0.5) {
             const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
             const float SB = 0.08;
             const float WARM = 16.0;
-            vec4 a = cache.v[GI2_SC_EST_AT + 2u * slot];
-            vec4 b = cache.v[GI2_SC_EST_AT + 2u * slot + 1u];
+            vec4 a = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
+            vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
             bool urgent2 = ((pc.params.z >> 5u) & 1u) != 0u;
             bool mover2;
-            bool stale2 = gi2_sc_local_change(slot, mover2);
+            bool stale2 = lighting_sc_local_change(slot, mover2);
             if (stale2) {
                 // Light changing or a change nearby: a short plain mean (t is kept
-                // short by gi2_sc_count) and the estimator starts again once quiet.
+                // short by lighting_sc_count) and the estimator starts again once quiet.
                 vec3 m0 = old.rgb + (e - old.rgb) / (t + 1.0);
-                cache.v[GI2_SC_EST_AT + 2u * slot + 1u] = vec4(0.0);
+                cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(0.0);
                 cache.v[3u * slot + 2u] = vec4(m0, min(t + 1.0, cap) + 0.25);
                 return;
             }
@@ -234,8 +234,8 @@ void main() {
             // changed describe light that is gone; start again from this set
             // (A-SVGF / ReLAX: history dropped where the signal changed).
             if (fract(old.w) > 0.1) {
-                cache.v[GI2_SC_EST_AT + 2u * slot] = vec4(e, pow(0.15 * dot(e, lw), 2.0) + 1.0e-8);
-                cache.v[GI2_SC_EST_AT + 2u * slot + 1u] = vec4(1.0, 1.0, 1.0, 1.0);
+                cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(e, pow(0.15 * dot(e, lw), 2.0) + 1.0e-8);
+                cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(1.0, 1.0, 1.0, 1.0);
                 cache.v[3u * slot + 2u] = vec4(e, 1.0);
                 return;
             }
@@ -263,53 +263,53 @@ void main() {
             // mean has moved away (a change), and n drops to match.
             float n = max(b.w, t);
             float blend = t < WARM ? early : max(1.0 / (n + 1.0), catchup);
-            if (!gi2_sc_light_quiet()) {
-                blend = max(blend, GI2_SC_CHANGE_ALPHA);
+            if (!lighting_sc_light_quiet()) {
+                blend = max(blend, LIGHTING_SC_CHANGE_ALPHA);
             }
             // S68D: a young texel's first sets are dark (the bounce light around
             // a reveal builds up over rounds, hits read cells not lit yet); a
             // plain mean keeps that darkness as 1 / n (turn: -4 % at frame 16,
-            // -1.8 % at 60). Until GI2_SC_YOUNG_SETS, an EMA floor forgets it.
-            if (t >= WARM && t < GI2_SC_YOUNG_SETS) {
-                blend = max(blend, GI2_SC_YOUNG_ALPHA);
+            // -1.8 % at 60). Until LIGHTING_SC_YOUNG_SETS, an EMA floor forgets it.
+            if (t >= WARM && t < LIGHTING_SC_YOUNG_SETS) {
+                blend = max(blend, LIGHTING_SC_YOUNG_ALPHA);
             }
             if (t >= WARM) {
                 float ri = abs(dot(y - old.rgb, lw)) / max(dev0, 0.02 * dot(old.rgb, lw) + 1.0e-4);
-                blend = max(blend, clamp((ri - GI2_SC_ANTILAG_SD) / (3.0 * GI2_SC_ANTILAG_SD), 0.0, 1.0));
+                blend = max(blend, clamp((ri - LIGHTING_SC_ANTILAG_SD) / (3.0 * LIGHTING_SC_ANTILAG_SD), 0.0, 1.0));
             }
             n = min(n + 1.0, min(1.0 / blend, 256.0));
             vec3 m = old.rgb + (y - old.rgb) * blend;
-            if (GI2_SC_NCLAMP && !gi2_sc_light_quiet() && t >= WARM) {
-                m = gi2_sc_nclamp(slot, m, sm, dev);
+            if (LIGHTING_SC_NCLAMP && !lighting_sc_light_quiet() && t >= WARM) {
+                m = lighting_sc_nclamp(slot, m, sm, dev);
             }
-            cache.v[GI2_SC_EST_AT + 2u * slot] = vec4(sm, var);
-            cache.v[GI2_SC_EST_AT + 2u * slot + 1u] = vec4(vb, inc, blend, n);
+            cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);
+            cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(vb, inc, blend, n);
             cache.v[3u * slot + 2u] = vec4(m, min(t + 1.0, cap));
             return;
         }
         // Flag 262144 (with 8192): past the cap a texel keeps a plain mean of its
-        // later sets (weight 1 / (k + 1)) up to GI2_SC_HOLD caps, then holds: its
+        // later sets (weight 1 / (k + 1)) up to LIGHTING_SC_HOLD caps, then holds: its
         // shimmer fades as 1 / k and stops, the bounce that came in late is kept.
-        bool hold = (gi2_sc_flags() & (8192u | 262144u)) == (8192u | 262144u);
+        bool hold = (lighting_sc_flags() & (8192u | 262144u)) == (8192u | 262144u);
         if (hold && t >= cap - 0.5) {
             w = 1.0 / (k + 1.0);
         }
         vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * w;
-        float next = min(t + 1.0, hold ? GI2_SC_HOLD * cap : cap);
+        float next = min(t + 1.0, hold ? LIGHTING_SC_HOLD * cap : cap);
         // Second pass: the first time a texel reaches the cap its sets drop to a
         // quarter (value kept), so the sets taken while the cache around it was
         // still dark weigh less (world slot w marks the pass done).
-        if ((gi2_sc_flags() & 2u) != 0u && next >= cap && cache.v[GI2_WORLD_AT + slot].w < 0.5) {
-            cache.v[GI2_WORLD_AT + slot].w = 1.0;
+        if ((lighting_sc_flags() & 2u) != 0u && next >= cap && cache.v[LIGHTING_WORLD_AT + slot].w < 0.5) {
+            cache.v[LIGHTING_WORLD_AT + slot].w = 1.0;
             next = max(floor(cap * 0.25), 1.0);
         }
         // Lit under changing light or inside a change: stale (w + 0.25) until a
         // relight with everything still; pixels show the probes over it.
         bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
         bool mover3;
-        bool stale = gi2_sc_local_change(slot, mover3);
+        bool stale = lighting_sc_local_change(slot, mover3);
         cache.v[3u * slot + 2u] = vec4(mean, next + (stale ? 0.25 : 0.0));
         return;
     }
-    cache.v[3u * slot + 2u] = vec4(e, min(max(old.w, 0.0) + 1.0, GI2_CACHE_MATURE));
+    cache.v[3u * slot + 2u] = vec4(e, min(max(old.w, 0.0) + 1.0, LIGHTING_CACHE_MATURE));
 }

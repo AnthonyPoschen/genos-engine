@@ -6,7 +6,7 @@
 // inside 2.5 m) on the far wall and the floor.
 // 1. fresh.png: the end pose settled first (bounce view), what the soaked end must
 //    match; then 2000 frames at the start (texels only the end pose read expire,
-//    GI2_CACHE_LIFE 1800) and settle: baseline.png.
+//    LIGHTING_CACHE_LIFE 1800) and settle: baseline.png.
 // 2. Run 9 m at 5 m/s (8.33 cm a frame, 108 frames) toward the wall, every frame
 //    saved (move/frame-i is at path pose i + 1); hold 120 frames (hold/); settle
 //    (end.png).

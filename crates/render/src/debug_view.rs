@@ -27,7 +27,7 @@ pub enum ViewMode {
 }
 
 impl ViewMode {
-    /// In the compose pass's code order (gi2_compose.comp).
+    /// In the compose pass's code order (lighting_compose.comp).
     pub const ALL: [ViewMode; 8] = [
         Self::Full,
         Self::Direct,

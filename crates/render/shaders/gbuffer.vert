@@ -1,5 +1,5 @@
 #version 450
-// GI v2 G-buffer vertices (gi2_gpu.rs): scene.vert's positions, colour and normal,
+// GI v2 G-buffer vertices (lighting_gpu.rs): scene.vert's positions, colour and normal,
 // computed the same way so the depth prepass's depth holds, plus the instance's
 // emitted light (instance colour w, shared-exponent RGB bits; 0 for none).
 layout(location = 0) in vec3 in_pos;

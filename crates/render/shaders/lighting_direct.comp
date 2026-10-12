@@ -9,24 +9,24 @@
 // raster) moves to the output buffer for the final pass.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
-#include "gi2_common.glsl"
+#include "lighting_common.glsl"
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     uint pixels = pc.dims.x * pc.dims.y;
-    uint mode = gi2_mode();
-    uint kept = gi2_kept_hits();
-    uint cache_rays = GI2_CACHE_BATCH * GI2_CACHE_RAYS;
-    if (gi2_dense()) {
+    uint mode = lighting_mode();
+    uint kept = lighting_kept_hits();
+    uint cache_rays = LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS;
+    if (lighting_dense()) {
         // S70A: this round's light cache rays only, live entries only.
-        if (idx >= gi2_dense_count() * GI2_CACHE_RAYS) {
+        if (idx >= lighting_dense_count() * LIGHTING_CACHE_RAYS) {
             return;
         }
-        idx = pixels + kept + gi2_dense_entry(idx / GI2_CACHE_RAYS) * GI2_CACHE_RAYS + idx % GI2_CACHE_RAYS;
+        idx = pixels + kept + lighting_dense_entry(idx / LIGHTING_CACHE_RAYS) * LIGHTING_CACHE_RAYS + idx % LIGHTING_CACHE_RAYS;
     } else if (mode == 2u) {
         idx += pixels + kept;
     }
-    // Then (not on the async queue) one point per fill slot (gi2_fill_ray).
+    // Then (not on the async queue) one point per fill slot (lighting_fill_ray).
     uint fills = pixels + kept + (mode == 1u ? 0u : cache_rays);
     uint points = fills + (mode == 2u ? 0u : kept);
     if (idx >= points) {
@@ -36,7 +36,7 @@ void main() {
     bool fill_hit = idx >= fills;
     bool probe_hit = (idx >= pixels && idx < pixels + kept) || fill_hit;
     uint h = fill_hit ? idx - fills : idx - pixels;
-    uint ray = idx < pixels + kept || fill_hit ? 0u : gi2_probe_rays() + (idx - pixels - kept);
+    uint ray = idx < pixels + kept || fill_hit ? 0u : lighting_probe_rays() + (idx - pixels - kept);
     vec3 pos;
     vec3 n;
     float hit_t = 1.0e9;
@@ -45,7 +45,7 @@ void main() {
     vec3 glow = vec3(0.0);
     if (idx < pixels) {
         vec3 albedo;
-        if (!gi2_surface(uvec2(idx % pc.dims.x, idx / pc.dims.x), pos, n, albedo, two_sided)) {
+        if (!lighting_surface(uvec2(idx % pc.dims.x, idx / pc.dims.x), pos, n, albedo, two_sided)) {
             return;
         }
     } else {
@@ -55,85 +55,85 @@ void main() {
         vec3 from_n;
         bool live;
         if (probe_hit) {
-            uint rays = gi2_rays();
+            uint rays = lighting_rays();
             uint ps = h / rays;
             if (fill_hit) {
-                live = gi2_fill_ray(ps / GI2_STRATA, ps % GI2_STRATA, h % rays, origin, dir, from_n);
+                live = lighting_fill_ray(ps / LIGHTING_STRATA, ps % LIGHTING_STRATA, h % rays, origin, dir, from_n);
                 if (!live) {
                     return;
                 }
-                rec = work.v[gi2_fill_at(h)];
+                rec = work.v[lighting_fill_at(h)];
                 if (rec.x < -0.75) {
-                    gi2_put_fill_light(h, has_sky() ? scene.sky.rgb : vec3(0.0));
+                    lighting_put_fill_light(h, has_sky() ? scene.sky.rgb : vec3(0.0));
                     return;
                 }
             } else {
-                rec = work.v[gi2_kept_at(h)];
-                live = gi2_stratum_ray(ps / GI2_STRATA, ps % GI2_STRATA, h % rays, origin, dir, from_n);
+                rec = work.v[lighting_kept_at(h)];
+                live = lighting_stratum_ray(ps / LIGHTING_STRATA, ps % LIGHTING_STRATA, h % rays, origin, dir, from_n);
                 if (live && rec.x < -0.75) {
-                    gi2_put_kept_light(h, has_sky() ? scene.sky.rgb : vec3(0.0));
+                    lighting_put_kept_light(h, has_sky() ? scene.sky.rgb : vec3(0.0));
                     return;
                 }
             }
         } else {
-            rec = work.v[gi2_hit_at(ray)];
-            live = gi2_ray(ray, origin, dir, from_n);
+            rec = work.v[lighting_hit_at(ray)];
+            live = lighting_ray(ray, origin, dir, from_n);
         }
         if (rec.x < 0.0 || !live) {
             return;
         }
         pos = origin + dir * rec.x;
         hit_t = rec.x;
-        n = gi2_unpack_normal(floatBitsToUint(rec.y));
-        reflectance = unpackUnorm4x8(floatBitsToUint(rec.z)).rgb * (1.0 / GI2_PI);
-        glow = gi2_unpack_rgb9e5(floatBitsToUint(rec.w));
+        n = lighting_unpack_normal(floatBitsToUint(rec.y));
+        reflectance = unpackUnorm4x8(floatBitsToUint(rec.z)).rgb * (1.0 / LIGHTING_PI);
+        glow = lighting_unpack_rgb9e5(floatBitsToUint(rec.w));
     }
     // S69C (Anthony: build-up starved; GENOS_GPU_TIMES, default stress scene at
     // 1920x1080: this pass was 70 % of the frame and the kept hits of all
-    // GI2_STRATA strata, relit every frame, ~10 ms of it). A kept hit is relit
+    // LIGHTING_STRATA strata, relit every frame, ~10 ms of it). A kept hit is relit
     // the frame its stratum is traced and once more halfway round
-    // (GI2_KEPT_RELIGHT), so its light is at most GI2_STRATA / 2 frames old;
+    // (LIGHTING_KEPT_RELIGHT), so its light is at most LIGHTING_STRATA / 2 frames old;
     // near a change (a mover, re-traced kept rays) every frame as before.
-    if (GI2_KEPT_RELIGHT && probe_hit && !fill_hit) {
-        uint s = (h / gi2_rays()) % GI2_STRATA;
-        uint cur = gi2_stratum();
+    if (LIGHTING_KEPT_RELIGHT && probe_hit && !fill_hit) {
+        uint s = (h / lighting_rays()) % LIGHTING_STRATA;
+        uint cur = lighting_stratum();
         bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
-        if (s != cur && s != (cur + GI2_STRATA / 2u) % GI2_STRATA && !(urgent && gi2_near_change(pos))) {
+        if (s != cur && s != (cur + LIGHTING_STRATA / 2u) % LIGHTING_STRATA && !(urgent && lighting_near_change(pos))) {
             return;
         }
     }
     vec3 origin = pos + n * 0.02;
     LampList list = lamps_at(origin);
     uint count = lamp_list_size(list);
-    // Light cache rays (params.z bit 11): at most GI2_CACHE_PICKS shadow rays,
+    // Light cache rays (params.z bit 11): at most LIGHTING_CACHE_PICKS shadow rays,
     // lamps picked systematically in proportion to their unshadowed light, each
     // weighted by how often it is expected to be picked (unbiased, as
     // lamps_light_only). The pick offset hangs on the patch and the ray, so a
     // still scene relights to the same value.
     // S60: the screen probes' hits (kept strata and fills) pick lamps the same way
-    // (GI2_PROBE_PICKS): every kept hit of all GI2_STRATA strata is relit every
+    // (LIGHTING_PROBE_PICKS): every kept hit of all LIGHTING_STRATA strata is relit every
     // frame, so with every lamp shadow-traced the light pass was ~65 % of the
     // frame (GENOS_GPU_TIMES). Lumen's final gather never shadow-traces lamps at
     // probe hits (it reads the surface cache's lit cards); stochastic lamp
     // selection in proportion to unshadowed light (as MegaLights / ReSTIR DI) is
     // the step that keeps our per-hit direct light.
     bool cache_pick = idx >= pixels + kept && !fill_hit && ((pc.params.z >> 11u) & 1u) != 0u;
-    bool probe_pick = GI2_PROBE_PICKS && probe_hit && ((pc.params.z >> 11u) & 1u) != 0u;
+    bool probe_pick = LIGHTING_PROBE_PICKS && probe_hit && ((pc.params.z >> 11u) & 1u) != 0u;
     bool pick = cache_pick || probe_pick;
     float total = 0.0;
     uint lit = 0u;
     float u = 0.0;
     if (pick) {
         if (cache_pick) {
-            uint r = ray - gi2_probe_rays();
-            uint slot = gi2_cache_batch_slot(r / GI2_CACHE_RAYS);
+            uint r = ray - lighting_probe_rays();
+            uint slot = lighting_cache_batch_slot(r / LIGHTING_CACHE_RAYS);
             uint key = slot == ~0u ? 0u : ckeys.key[slot];
-            uint q = slot == ~0u ? 0u : gi2_cache_entry_quarter(r / GI2_CACHE_RAYS, slot);
-            u = gi2_unit(key ^ ((q * GI2_CACHE_RAYS + r % GI2_CACHE_RAYS) * 0x85ebca6bu + 0x5bd1e995u));
+            uint q = slot == ~0u ? 0u : lighting_cache_entry_quarter(r / LIGHTING_CACHE_RAYS, slot);
+            u = lighting_unit(key ^ ((q * LIGHTING_CACHE_RAYS + r % LIGHTING_CACHE_RAYS) * 0x85ebca6bu + 0x5bd1e995u));
         } else {
             // A probe hit: the offset hangs on the hit's 25 cm cell and its index,
             // so a still hit relights to the same value (no crawl).
-            u = gi2_unit(gi2_cell_hash(pos, n) ^ (h * 0x85ebca6bu + 0x27d4eb2fu));
+            u = lighting_unit(lighting_cell_hash(pos, n) ^ (h * 0x85ebca6bu + 0x27d4eb2fu));
         }
         [[dont_unroll]] for (uint k = 0u; k < count; k++) {
             vec3 target;
@@ -143,8 +143,8 @@ void main() {
             lit += w > 0.0 ? 1u : 0u;
         }
     }
-    bool exact = !pick || lit <= GI2_CACHE_PICKS;
-    float step = total / float(GI2_CACHE_PICKS);
+    bool exact = !pick || lit <= LIGHTING_CACHE_PICKS;
+    float step = total / float(LIGHTING_CACHE_PICKS);
     float run = 0.0;
     vec3 e = vec3(0.0);
     vec3 e_sun = vec3(0.0);
@@ -172,19 +172,19 @@ void main() {
     if (idx < pixels) {
         uint emitted = gbuf.px[idx].w;
         outc.px[idx] = emitted == ~0u ? 0u : emitted;
-        gbuf.px[idx].w = gi2_pack_rgb9e5(e);
+        gbuf.px[idx].w = lighting_pack_rgb9e5(e);
     } else {
-        gi2_hit_sunfrac = 0.0;
-        vec3 bounce = gi2_cache_irradiance_at(pos, n, hit_t);
+        lighting_hit_sunfrac = 0.0;
+        vec3 bounce = lighting_cache_irradiance_at(pos, n, hit_t);
         e += bounce;
-        e_sun += gi2_hit_sunfrac * bounce;
+        e_sun += lighting_hit_sunfrac * bounce;
         if (fill_hit) {
-            gi2_put_fill_light(h, reflectance * e + glow);
+            lighting_put_fill_light(h, reflectance * e + glow);
         } else if (probe_hit) {
-            gi2_put_kept_light(h, reflectance * e + glow);
+            lighting_put_kept_light(h, reflectance * e + glow);
         } else {
             // w: its sun/sky share as luminance (S63A).
-            work.v[gi2_rad_at(ray)] = vec4(reflectance * e + glow, dot(reflectance * e_sun, vec3(0.2126, 0.7152, 0.0722)));
+            work.v[lighting_rad_at(ray)] = vec4(reflectance * e + glow, dot(reflectance * e_sun, vec3(0.2126, 0.7152, 0.0722)));
         }
     }
 }

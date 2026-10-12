@@ -353,12 +353,12 @@ impl Renderer {
     /// The picture has stopped changing: the lighting holds its light and a frame
     /// drawn from it is on screen.
     pub fn picture_settled(&self) -> bool {
-        self.gpu.gi2_picture_held()
+        self.gpu.lighting_picture_held()
     }
 
     /// Whether the lighting has settled, for reports and the debug tools.
     pub fn settle_stats(&self) -> SettleStats {
-        self.gpu.gi2_stats()
+        self.gpu.lighting_stats()
     }
 
     /// One compute pass over the resident occluders. This does not present and does not upload them.
@@ -390,15 +390,15 @@ impl Renderer {
     /// Frames in a row GI v2 has seen the same scene (camera, lights, objects): its
     /// screen probes average that many frames' rays (up to 32), and any change
     /// starts the count, and so the average, over at 0.
-    pub fn gi_v2_still_frames(&self) -> u32 {
-        self.gpu.gi2_still_frames()
+    pub fn lighting_still_frames(&self) -> u32 {
+        self.gpu.lighting_still_frames()
     }
 
     /// GI v2's screen probes in the last frame drawn: the rays they held, kept
     /// strata included, and the probes placed. Rays over probes is each probe's
     /// effective sample count (up to 8 strata of 64). Waits for that frame.
-    pub fn gi_v2_probe_samples(&mut self) -> [u32; 2] {
-        self.gpu.gi2_probe_samples()
+    pub fn lighting_probe_samples(&mut self) -> [u32; 2] {
+        self.gpu.lighting_probe_samples()
     }
 
     /// How long each pipeline took to build, in build order.
@@ -608,8 +608,8 @@ struct Gpu {
     mesh_field_layout: u64,
     mesh_field_shadow: Vec<u8>,
     mesh_field_dirty: Vec<(usize, usize)>,
-    /// GI v2 frame path (gi2_gpu.rs).
-    gi2: Gi2,
+    /// GI v2 frame path (lighting_gpu.rs).
+    lighting: Lighting,
     /// Fragment shader for the next raster pipeline built, instead of overlay.frag.
     frag_override: Option<&'static [u8]>,
     /// The vertex shader the next raster pipeline uses instead of scene.vert.
@@ -1237,7 +1237,7 @@ impl Gpu {
                 mesh_field_layout: 0,
                 mesh_field_shadow: Vec::new(),
                 mesh_field_dirty: Vec::new(),
-                gi2: Gi2::default(),
+                lighting: Lighting::default(),
                 frag_override: None,
                 vert_override: None,
                 pipeline_times: Vec::new(),
@@ -1303,8 +1303,8 @@ impl Gpu {
             let _ = (destroy_instance, surface_support);
             gpu.create_static_objects()?;
             gpu.recreate(width, height)?;
-            gpu.make_gi2()?;
-            gpu.make_gi2_targets()?;
+            gpu.make_lighting()?;
+            gpu.make_lighting_targets()?;
             Ok(gpu)
         }
     }
@@ -1398,10 +1398,10 @@ impl Gpu {
                 self.query_pool = self.make_query_pool()?;
                 if self.gpu_times.is_some() {
                     let pool = self.make_query_pool_n(2 * FRAME_STAMPS)?;
-                    let gi2_pool = self.make_query_pool_n(2 * GI2_STAMPS)?;
+                    let lighting_pool = self.make_query_pool_n(2 * LIGHTING_STAMPS)?;
                     if let Some(times) = self.gpu_times.as_mut() {
                         times.pool = pool;
-                        times.gi2_pool = gi2_pool;
+                        times.lighting_pool = lighting_pool;
                     }
                 }
             } else if self.gpu_times.take().is_some() {
@@ -1627,7 +1627,7 @@ impl Gpu {
             self.framebuffer = self.framebuffers[0];
             self.host = copy_buffer(&self.hosts[0]);
             self.make_aa_targets()?;
-            self.make_gi2_targets()?;
+            self.make_lighting_targets()?;
             Ok(())
         }
     }
@@ -1745,8 +1745,8 @@ impl Gpu {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
         }
-        // GI v2 holds its light while nothing it sees changes (gi2_gpu.rs).
-        self.gi2.draw_key = {
+        // GI v2 holds its light while nothing it sees changes (lighting_gpu.rs).
+        self.lighting.draw_key = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             bytes.hash(&mut hasher);
@@ -1846,20 +1846,20 @@ impl Gpu {
             self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
             let filtering = self.antialias != Antialias::Off;
             {
-                let gi2 = self.gi2_active();
-                if gi2 {
-                    self.gi2_begin(slot);
+                let lighting = self.lighting_active();
+                if lighting {
+                    self.lighting_begin(slot);
                 }
                 self.raster_scene(
                     self.framebuffer,
                     self.extent_w,
                     self.extent_h,
                     matrix,
-                    !filtering && !gi2,
+                    !filtering && !lighting,
                 );
                 self.color_layout[slot] = 6;
-                if gi2 {
-                    self.gi2_passes(slot);
+                if lighting {
+                    self.lighting_passes(slot);
                     if !filtering && self.overlay_count > 0 {
                         self.raster_overlay();
                     }
@@ -2029,14 +2029,14 @@ impl Gpu {
         times
             .frame_spans
             .push((raw[0], raw[FRAME_STAMPS as usize - 1]));
-        let ids = std::mem::take(&mut times.gi2_ids[slot]);
-        if ids.len() > 2 && !times.gi2_pool.is_null() {
+        let ids = std::mem::take(&mut times.lighting_ids[slot]);
+        if ids.len() > 2 && !times.lighting_pool.is_null() {
             let mut g = vec![0u64; ids.len() + 1];
             let got = unsafe {
                 (self.fns.get_query_results)(
                     self.device,
-                    times.gi2_pool,
-                    slot as u32 * GI2_STAMPS,
+                    times.lighting_pool,
+                    slot as u32 * LIGHTING_STAMPS,
                     g.len() as u32,
                     8 * g.len(),
                     g.as_mut_ptr() as *mut c_void,
@@ -2046,9 +2046,9 @@ impl Gpu {
             };
             if got == 0 {
                 for (&pass, w) in ids.iter().zip(g.windows(2)) {
-                    times.gi2[pass] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+                    times.lighting[pass] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
                 }
-                times.gi2_frames += 1;
+                times.lighting_frames += 1;
             }
         }
         times.frames += 1;
@@ -2070,11 +2070,11 @@ impl Gpu {
             f.iter().sum::<f64>(),
             n / seconds,
         );
-        if times.gi2_frames > 0 {
-            let g = times.gi2.map(|v| v / f64::from(times.gi2_frames));
+        if times.lighting_frames > 0 {
+            let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
-                "GI2_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3}",
-                times.gi2_frames,
+                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3}",
+                times.lighting_frames,
                 g[0],
                 g[1],
                 g[2],
@@ -2104,10 +2104,10 @@ impl Gpu {
             eprintln!("GPU_MEM upload buffers in device-local memory: {local} of {all}");
         }
         let pool = times.pool;
-        let gi2_pool = times.gi2_pool;
+        let lighting_pool = times.lighting_pool;
         **times = GpuTimes {
             pool,
-            gi2_pool,
+            lighting_pool,
             written: times.written,
             every: times.every,
             placed: true,
@@ -2680,10 +2680,10 @@ impl Gpu {
             },
             BufInfo {
                 // Any buffer until GI v2 sizes its G-buffer; only gbuffer.frag reads it.
-                buffer: if self.gi2.gbuf.buffer.is_null() {
+                buffer: if self.lighting.gbuf.buffer.is_null() {
                     self.mesh_field.buffer
                 } else {
-                    self.gi2.gbuf.buffer
+                    self.lighting.gbuf.buffer
                 },
                 offset: 0,
                 range: u64::MAX,
@@ -3274,8 +3274,8 @@ impl Gpu {
             self.mesh_field = self.make_buffer_queues(cap, 0x20 | 0x2, Memory::Device, &share)?;
             self.mesh_field_cap = cap;
             self.write_raster_sets()?;
-            if self.gi2.ready {
-                self.write_gi2_sets()?;
+            if self.lighting.ready {
+                self.write_lighting_sets()?;
             }
             self.mesh_field_shadow.clear();
         }
@@ -3317,11 +3317,11 @@ impl Gpu {
         if self.mesh_field_dirty.is_empty() || self.mesh_field.buffer.is_null() {
             return;
         }
-        if self.gi2.async_on {
+        if self.lighting.async_on {
             // The async light cache reads the field too: let its round finish, and
             // hold the next one until this frame is done.
-            self.wait_gi2_world();
-            self.gi2.world_hold = self.gi2.world_hold.max(2);
+            self.wait_lighting_world();
+            self.lighting.world_hold = self.lighting.world_hold.max(2);
         }
         let mut ranges = std::mem::take(&mut self.mesh_field_dirty);
         ranges.sort_unstable();
@@ -3362,8 +3362,8 @@ impl Gpu {
     fn upload_scene(&mut self, pack: &Pack) -> Result<(), String> {
         let bytes = pack::scene_bytes(pack);
         self.frame_bytes.clone_from(&bytes);
-        self.gi2.light_scene = gi2_light_scene(pack, &bytes);
-        self.gi2.trace_key = gi2_trace_key(pack);
+        self.lighting.light_scene = lighting_scene_key(pack, &bytes);
+        self.lighting.trace_key = lighting_trace_key(pack);
         self.background = pack.sky.map(crate::mesh::tone);
         Ok(())
     }
@@ -4788,7 +4788,7 @@ impl Drop for Gpu {
                 return;
             }
             (self.fns.device_wait)(self.device);
-            self.destroy_gi2();
+            self.destroy_lighting();
             self.destroy_targets();
             self.vertex = Buffer::empty();
             let mut vertices =
@@ -5050,7 +5050,7 @@ fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {
 }
 
 include!("aa_gpu.rs");
-include!("gi2_gpu.rs");
+include!("lighting_gpu.rs");
 
 extern "C" {
     fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
@@ -5095,12 +5095,12 @@ struct GpuTimes {
     since: Option<std::time::Instant>,
     /// The memory placement line has been printed.
     placed: bool,
-    /// GI v2 pass stamps (2 slots x GI2_STAMPS), whether a slot holds a full frame's
-    /// passes, and the per-pass sums over `gi2_frames`.
-    gi2_pool: Handle,
-    gi2_ids: [Vec<usize>; 2],
-    gi2_frames: u32,
-    gi2: [f64; 8],
+    /// GI v2 pass stamps (2 slots x LIGHTING_STAMPS), whether a slot holds a full frame's
+    /// passes, and the per-pass sums over `lighting_frames`.
+    lighting_pool: Handle,
+    lighting_ids: [Vec<usize>; 2],
+    lighting_frames: u32,
+    lighting: [f64; 8],
     /// Async light cache rounds (GI v2) and their GPU time.
     world_runs: u32,
     world_ms: f64,
@@ -5114,7 +5114,7 @@ struct GpuTimes {
 
 /// Stamps per frame for the GI v2 passes: one before, one after each of the 10
 /// dispatches (the filter runs three rounds).
-const GI2_STAMPS: u32 = 16;
+const LIGHTING_STAMPS: u32 = 16;
 
 /// Milliseconds of `spans` that fall inside any of `within` (ticks, `period` ns each).
 fn overlap_ms(spans: &[(u64, u64)], within: &[(u64, u64)], period: f64) -> (f64, f64) {
@@ -5146,13 +5146,13 @@ impl Default for GpuTimes {
             frame: [0.0; 4],
             since: None,
             placed: false,
-            gi2_pool: std::ptr::null_mut(),
-            gi2_ids: [Vec::new(), Vec::new()],
+            lighting_pool: std::ptr::null_mut(),
+            lighting_ids: [Vec::new(), Vec::new()],
             world_runs: 0,
             world_ms: 0.0,
             world_pass: [0.0; 4],
-            gi2_frames: 0,
-            gi2: [0.0; 8],
+            lighting_frames: 0,
+            lighting: [0.0; 8],
             frame_spans: Vec::new(),
             light_spans: Vec::new(),
         }

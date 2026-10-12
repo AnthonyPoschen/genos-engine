@@ -10,18 +10,21 @@ fn main() {
     let audio = compile("shaders/transmit.comp", &out.join("transmit.comp.spv"));
     let fxaa = compile("shaders/fxaa.comp", &out.join("fxaa.comp.spv"));
     // Not embedded: catches errors in GI v2 shader pieces no pass includes yet.
-    compile("shaders/gi2_check.comp", &out.join("gi2_check.comp.spv"));
-    let gi2: Vec<(&str, PathBuf)> = [
+    compile(
+        "shaders/lighting_check.comp",
+        &out.join("lighting_check.comp.spv"),
+    );
+    let lighting: Vec<(&str, PathBuf)> = [
         ("GBUFFER_VERT_SPV", "gbuffer.vert"),
         ("GBUFFER_FRAG_SPV", "gbuffer.frag"),
-        ("GI2_COMPACT_SPV", "gi2_compact.comp"),
-        ("GI2_PLACE_SPV", "gi2_place.comp"),
-        ("GI2_TRACE_SPV", "gi2_trace.comp"),
-        ("GI2_LIGHT_SPV", "gi2_light.comp"),
-        ("GI2_GATHER_SPV", "gi2_gather.comp"),
-        ("GI2_FILTER_SPV", "gi2_filter.comp"),
-        ("GI2_CACHE_SPV", "gi2_cache.comp"),
-        ("GI2_COMPOSE_SPV", "gi2_compose.comp"),
+        ("LIGHTING_COMPACT_SPV", "lighting_compact.comp"),
+        ("LIGHTING_PLACE_SPV", "lighting_place.comp"),
+        ("LIGHTING_TRACE_SPV", "lighting_trace.comp"),
+        ("LIGHTING_DIRECT_SPV", "lighting_direct.comp"),
+        ("LIGHTING_GATHER_SPV", "lighting_gather.comp"),
+        ("LIGHTING_FILTER_SPV", "lighting_filter.comp"),
+        ("LIGHTING_CACHE_SPV", "lighting_cache.comp"),
+        ("LIGHTING_COMPOSE_SPV", "lighting_compose.comp"),
     ]
     .iter()
     .map(|(name, file)| {
@@ -45,7 +48,7 @@ fn main() {
     )
     .unwrap();
     let mut glue_text = std::fs::read_to_string(&glue).unwrap();
-    for (name, path) in &gi2 {
+    for (name, path) in &lighting {
         glue_text.push_str(&format!(
             "pub static {name}: &[u8] = include_bytes!(\"{}\");\n",
             path.display()
@@ -53,10 +56,10 @@ fn main() {
     }
     std::fs::write(&glue, glue_text).unwrap();
     for piece in [
-        "gi2_common.glsl",
-        "gi2_pack.glsl",
-        "gi2_cache.glsl",
-        "gi2_cache_slots.glsl",
+        "lighting_common.glsl",
+        "lighting_pack.glsl",
+        "lighting_cache.glsl",
+        "lighting_cache_slots.glsl",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }
@@ -66,7 +69,7 @@ fn main() {
     println!("cargo:rerun-if-changed=shaders/wire.frag");
     println!("cargo:rerun-if-changed=shaders/scene_rays.glsl");
     println!("cargo:rerun-if-changed=shaders/mesh_field.glsl");
-    println!("cargo:rerun-if-changed=shaders/gi2_check.comp");
+    println!("cargo:rerun-if-changed=shaders/lighting_check.comp");
     println!("cargo:rerun-if-changed=shaders/scene_data.glsl");
     println!("cargo:rerun-if-changed=shaders/dither.glsl");
     println!("cargo:rerun-if-changed=shaders/transmit.comp");

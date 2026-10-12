@@ -1,5 +1,5 @@
 #version 450
-// GI v2 G-buffer (gi2_gpu.rs): the scene's surfaces, one record per pixel, for the
+// GI v2 G-buffer (lighting_gpu.rs): the scene's surfaces, one record per pixel, for the
 // GI v2 compute passes. Same vertices (gbuffer.vert) and depth prepass as the picture; early
 // depth tests so only the surface the pixel shows writes its record.
 //
@@ -21,7 +21,7 @@ layout(location = 5) flat in uint v_emit;
 layout(location = 0) out vec4 out_color;
 
 #include "scene_data.glsl"
-#include "gi2_pack.glsl"
+#include "lighting_pack.glsl"
 
 layout(std430, set = 0, binding = 6) buffer GBuffer {
     uvec4 header;
@@ -45,7 +45,7 @@ void main() {
     // positive floats order as uints), the same answer every frame.
     uint i = p.y * gbuf.header.x + p.x;
     atomicMin(gbuf.px[i].x, floatBitsToUint(max(length(v_pos - scene.eye.xyz), 1.0e-6)));
-    atomicMin(gbuf.px[i].y, gi2_pack_normal(n));
+    atomicMin(gbuf.px[i].y, lighting_pack_normal(n));
     atomicMin(gbuf.px[i].z, packUnorm4x8(vec4(clamp(v_albedo, 0.0, 1.0), two_sided ? 1.0 / 255.0 : 0.0)));
     if (v_emit != 0u) {
         atomicMin(gbuf.px[i].w, v_emit);

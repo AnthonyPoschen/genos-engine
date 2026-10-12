@@ -4,7 +4,7 @@
 // (nothing moves on screen, but each frame's camera differs), a 1.2 m slide and a
 // 20 degree turn. With nothing to see change, the last frame of each must match the
 // settled picture: a gather that mixes strata badly draws it brighter (2026-10-10:
-// 1.05, 1.22, 1.31 on the gi2_frame hall). Filled in: __DIR__.
+// 1.05, 1.22, 1.31 on the lighting_frame hall). Filled in: __DIR__.
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("time_of_day", 12.0);
 knob("sun", "freeze");

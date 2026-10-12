@@ -439,7 +439,7 @@ fn tier(o: &mut Options, name: &str) -> Result<(), String> {
 const HELP: &str = "genos-stress gi-check [--tier quick|mid|full] [--out DIR] [--only repro,settled,moving,walk,flicker,camera,trail,flick,turn,room,mix,spin,lampret,approach] \
 [--score-only] [--ref-noise 0.05] [--ref-spp 2048] [--ref-seconds 900] [--size 640x360] [--walk-size 1280x720] \
 [--settled-refs DIR] [--views corner,contact] [--stride 1] [--clip N] [--fail-fast] [--keep-going]
-GENOS_GI2_TILE defaults to the 1440p probe spacing (height / 90), references are \
+GENOS_LIGHTING_TILE defaults to the 1440p probe spacing (height / 90), references are \
 cached in $GENOS_REFERENCE_CACHE (default target/reference-cache). Exit status 1 on a FAIL;
 a missed target (MISS: 48 px swim, light structure) is reported but does not fail.";
 
@@ -456,7 +456,7 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
             .replace("__CLIP__", &o.clip.to_string())
             .replace("__DIR__", &dir.display().to_string())
             // GENOS_GI_CHECK_BOUNCES=N: references with at most N bounces (a bounce
-            // split of the error; pair with GENOS_GI2_SC_FLAGS bit 2097152 for a
+            // split of the error; pair with GENOS_LIGHTING_SC_FLAGS bit 2097152 for a
             // one-bounce engine).
             .replace("__BOUNCES__", &std::env::var("GENOS_GI_CHECK_BOUNCES").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(64).to_string())
     };
@@ -504,20 +504,20 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
             let id = exe.file_name().map_or("?".into(), |n| n.to_string_lossy().to_string());
             format!(
                 "{id} | mode {} | flags {} | {run}",
-                var("GENOS_GI2_WORLD", "3"),
-                var("GENOS_GI2_SC_FLAGS", "6007050")
+                var("GENOS_LIGHTING_WORLD", "3"),
+                var("GENOS_LIGHTING_SC_FLAGS", "6007050")
             )
         })
         .stdout(log.try_clone().map_err(|e| e.to_string())?)
         .stderr(log);
     // Probes as far apart on screen as the 16 px tile at 1440p, at every size.
-    if std::env::var_os("GENOS_GI2_TILE").is_none() {
+    if std::env::var_os("GENOS_LIGHTING_TILE").is_none() {
         let rows: u32 = size
             .split('x')
             .nth(1)
             .and_then(|h| h.parse().ok())
             .unwrap_or(720);
-        cmd.env("GENOS_GI2_TILE", (rows / 90).clamp(4, 64).to_string());
+        cmd.env("GENOS_LIGHTING_TILE", (rows / 90).clamp(4, 64).to_string());
     }
     if run == "room" {
         let scene = dir.join("room-scene.rhai");
@@ -525,7 +525,7 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
         cmd.arg("--scene").arg(scene);
     }
     if matches!(run, "moving" | "walk" | "camera" | "trail") {
-        cmd.env("GENOS_GI_DEBUG", "1");
+        cmd.env("GENOS_LIGHTING_DEBUG", "1");
     }
     eprintln!("gi-check: {run} -> {}", dir.display());
     let status = cmd.status().map_err(|e| e.to_string())?;
@@ -605,7 +605,7 @@ fn ref_noise(report: &Path, view: &str) -> f64 {
         .unwrap_or(0.03)
 }
 
-/// Mean of `per_probe` over the GENOS_GI_DEBUG lines of a run log.
+/// Mean of `per_probe` over the GENOS_LIGHTING_DEBUG lines of a run log.
 fn rays_per_probe(log: &Path) -> Option<(f64, f64)> {
     let text = std::fs::read_to_string(log).ok()?;
     let v: Vec<f64> = text
@@ -830,13 +830,13 @@ fn frame(dir: &Path, sub: &str, i: usize) -> PathBuf {
     dir.join(format!("{sub}/frame-{i:04}.png"))
 }
 
-/// `per_probe` (GENOS_GI_DEBUG) of the first `n` probe frames after the scene
+/// `per_probe` (GENOS_LIGHTING_DEBUG) of the first `n` probe frames after the scene
 /// first stood frozen: the camera run's moving pass.
 fn rays_after_frozen(log: &Path, n: usize) -> Option<(f64, f64)> {
     let text = std::fs::read_to_string(log).ok()?;
     let v: Vec<f64> = text
         .lines()
-        .skip_while(|l| !l.starts_with("gi2 frozen"))
+        .skip_while(|l| !l.starts_with("lighting frozen"))
         .filter_map(|l| l.split("per_probe ").nth(1)?.trim().parse().ok())
         .take(n)
         .collect();

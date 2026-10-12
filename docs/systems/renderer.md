@@ -33,7 +33,7 @@ A profiled draw writes Vulkan timestamp queries around the GPU draw. The GPU tim
 
 Each box face and each cylinder side is lit from a point just outside that face. One sample at the center of a wall lights the back face. Do not return to that sample.
 
-Lighting is described in [Lighting](lighting.md). The raster writes a G-buffer; the lighting passes (`shaders/gi2_*.comp`) light it and compose the colour image.
+Lighting is described in [Lighting](lighting.md). The raster writes a G-buffer; the lighting passes (`shaders/lighting_*.comp`) light it and compose the colour image.
 
 ## Code
 
@@ -45,7 +45,7 @@ The crate is `crates/render`, package `genos-render`.
 - Triangle positions are packed in `src/pack.rs`, and shape blocks are in `src/pool.rs`.
 - `FrameMemory` in `src/budget.rs` counts those blocks and the particle image against one byte budget.
 - The particle step and the card builder are in `src/particles.rs`.
-- GPU lighting is `src/gi2_gpu.rs` and `shaders/gi2_*.comp`. `shaders/gbuffer.vert` and `gbuffer.frag` write the G-buffer. `shaders/overlay.frag` draws particle cards and the fallback picture before the lighting targets exist.
+- GPU lighting is `src/lighting_gpu.rs` and `shaders/lighting_*.comp`. `shaders/gbuffer.vert` and `gbuffer.frag` write the G-buffer. `shaders/overlay.frag` draws particle cards and the fallback picture before the lighting targets exist.
 - `mesh::compose` and `mesh::tone` are the CPU direct-light checks the tests compare against.
 
 - The picture clears to the scene's sky through the tone curve (black with no sky), so a pixel that meets nothing shows the light a ray that leaves the scene brings.

@@ -281,7 +281,7 @@ pub fn words_bytes(words: &[u32]) -> Vec<u8> {
 }
 
 /// Shared-exponent RGB, 9 bits each and a 5-bit exponent (the GLSL
-/// `gi2_unpack_rgb9e5` reads it back).
+/// `lighting_unpack_rgb9e5` reads it back).
 pub fn pack_rgb9e5(rgb: [f32; 3]) -> u32 {
     const MAX: f32 = 65408.0;
     let c = rgb.map(|v| {
