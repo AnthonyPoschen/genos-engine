@@ -27,6 +27,9 @@ pub(crate) struct FrameReuse {
     /// lists did not change.
     #[allow(dead_code)] // read when the cached picture is repaired
     pub frame_damage: Vec<Region>,
+    /// Hash of what the raster and the lighting read this frame.
+    #[allow(dead_code)] // compared with the cached picture from step 4
+    pub scene_key: u64,
 }
 
 /// How many frames took each path. Printed beside `GPU_MS` as `FRAME_REUSE`.

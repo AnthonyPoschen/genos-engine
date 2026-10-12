@@ -313,6 +313,7 @@ impl Renderer {
             let bytes = pack::image_bytes(width, height, self.memory.image_pixels());
             self.gpu.wait_flight(1 - slot)?;
             self.gpu.upload_image(&bytes)?;
+            self.gpu.image_gen = self.gpu.image_gen.wrapping_add(1);
             self.memory.clear_image_upload();
         }
         let mut pack = pack;
@@ -320,6 +321,20 @@ impl Renderer {
         self.debug.apply(&mut pack);
         self.sync_fields(world)?;
         self.gpu.upload_scene(&pack)?;
+        self.gpu.lighting.frame_hash = self.gpu.lighting_scene_hash();
+        self.gpu.reuse.scene_key = scene_key(
+            self.gpu.lighting.frame_hash,
+            &dynamic[..world_dynamic as usize],
+            &draws,
+            self.gpu.shape_gen,
+            self.gpu.image_gen,
+            self.gpu.antialias,
+            wireframe,
+            self.gpu.background,
+            self.gpu.extent_w,
+            self.gpu.extent_h,
+            self.gpu.lighting_active(),
+        );
         self.gpu.note_vertex_count(world_dynamic);
         self.gpu.set_draws(draws);
         self.gpu.note_overlay_count(overlay_count);
@@ -565,6 +580,52 @@ fn screen_lines(lines: &[ScreenLine]) -> Vec<GpuVertex> {
     verts
 }
 
+/// One hash of what the raster and the lighting read. The same inputs give the
+/// same key, so an unchanged scene can keep its picture.
+fn scene_key(
+    lighting: u64,
+    dynamic: &[GpuVertex],
+    draws: &[DrawSpan],
+    shape_gen: u64,
+    image_gen: u64,
+    antialias: crate::aa::Antialias,
+    wireframe: bool,
+    background: [f32; 3],
+    width: u32,
+    height: u32,
+    lighting_on: bool,
+) -> u64 {
+    let mut h = crate::reuse::mix_word(0xA11C_E5CE, lighting);
+    // GpuVertex is 12 f32s (48 bytes, no padding). The draw uploads these bytes.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            dynamic.as_ptr() as *const u8,
+            std::mem::size_of_val(dynamic),
+        )
+    };
+    h = crate::reuse::fast_hash(h, bytes);
+    for draw in draws {
+        h = crate::reuse::mix_word(h, u64::from(draw.shapes));
+        h = crate::reuse::mix_word(h, u64::from(draw.first));
+        h = crate::reuse::mix_word(h, u64::from(draw.count));
+        h = crate::reuse::mix_word(h, u64::from(draw.instance));
+    }
+    h = crate::reuse::mix_word(h, shape_gen);
+    h = crate::reuse::mix_word(h, image_gen);
+    let aa = match antialias {
+        crate::aa::Antialias::Off => 0u64,
+        crate::aa::Antialias::Fxaa => 1,
+    };
+    h = crate::reuse::mix_word(h, aa);
+    h = crate::reuse::mix_word(h, u64::from(wireframe));
+    for channel in background {
+        h = crate::reuse::mix_word(h, u64::from(channel.to_bits()));
+    }
+    h = crate::reuse::mix_word(h, u64::from(width));
+    h = crate::reuse::mix_word(h, u64::from(height));
+    crate::reuse::mix_word(h, u64::from(lighting_on))
+}
+
 /// Column-major map from pixel space to Vulkan NDC. (0, 0) is the top-left.
 fn pixel_matrix(width: f32, height: f32) -> [f32; 16] {
     let mut matrix = [0.0; 16];
@@ -610,6 +671,10 @@ struct Gpu {
     shapes: Buffer,
     /// How many shape vertices have been read by a submitted frame.
     shapes_submitted: u32,
+    /// Bumps when the shape pool is written, so a reused scene key sees a new mesh.
+    shape_gen: u64,
+    /// Bumps when the particle image is uploaded.
+    image_gen: u64,
     /// One instance buffer per frame in flight. The vertex shader reads the
     /// buffer for its flight. A moving box can update the idle flight without
     /// waiting for the frame still on the GPU.
@@ -1259,6 +1324,8 @@ impl Gpu {
                 vertices: [Buffer::empty(), Buffer::empty()],
                 shapes: Buffer::empty(),
                 shapes_submitted: 0,
+                shape_gen: 0,
+                image_gen: 0,
                 instance_bufs: [Buffer::empty(), Buffer::empty()],
                 draws: Vec::new(),
                 vertex_count: 0,
@@ -1740,7 +1807,8 @@ impl Gpu {
         if reuse || self.shapes.size < bytes {
             self.wait_all_inflight()?;
         }
-        if self.shapes.size < bytes {
+        let grew = self.shapes.size < bytes;
+        if grew {
             let next = self.make_buffer(
                 bytes.max(self.shapes.size.saturating_mul(2)).max(4096),
                 0x80,
@@ -1758,6 +1826,9 @@ impl Gpu {
             }
         }
         self.shapes_submitted = verts.len() as u32;
+        if grew || !pool.dirty().is_empty() {
+            self.shape_gen = self.shape_gen.wrapping_add(1);
+        }
         Ok(())
     }
 
