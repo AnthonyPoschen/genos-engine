@@ -193,6 +193,20 @@ void main() {
                 atomicAdd(gstats.waiting, 1u);
                 return;
             }
+            // S72P ray density follows the light: where layer 2 found flat light
+            // (no edge within 4 cells) with at least LIGHTING_SC_L2_FLAT sets of
+            // support, a texel past 16 sets is relit one round in 4 (level 0) or
+            // 2 (level 1); keys, edge texels, texels near a change and anything
+            // under changing light keep their rate.
+            if (!wrc && lighting_sc_layer2() && !near && lighting_sc_light_quiet() && t >= 15.5 && !lighting_sc_promoted(slot)) {
+                float sup = cache.v[LIGHTING_SC_SPARSE_AT + slot].w;
+                uint lv = lighting_sc_level(slot);
+                uint every = lv == 0u ? 4u : (lv == 1u ? 2u : 1u);
+                if (sup >= LIGHTING_SC_L2_FLAT && every > 1u && ((lighting_hash(slot ^ 0x1b873593u) + lighting_round()) % every) != 0u) {
+                    atomicAdd(gstats.waiting, 1u);
+                    return;
+                }
+            }
             // S64A: relit only once due (the budget is a ceiling).
             if (int(lighting_frame() - updated) < int(lighting_sc_interval(slot, t))) {
                 atomicAdd(gstats.waiting, 1u);

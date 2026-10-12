@@ -1180,12 +1180,127 @@ void lighting_sc_rectify(uint slot, vec3 reg) {
     }
     cache.v[3u * slot + 2u].rgb = mix(own.rgb, reg, 1.0 / (t + 1.0));
 }
+// S72P two layers (Anthony 13:48): layer 1 is the traced data (each texel's
+// own mean, the WRC), never shown as is; layer 2, shown, is a field rebuilt
+// from layer 1 on each surface (irradiance caching / DDGI-style interpolation in
+// surface space), kept in WORLD_AT .y (rgb9e5) with its support in SPARSE_AT .w
+// (sets, negative when an edge stopped it within 4 cells: detail). Per texel:
+// eight directions (turned 22.5 degrees on half the texels, by hash), each walked
+// out 1, 2, 4, 8, 16 cells (a-trous steps). Only the same plane (the key holds
+// the normal; plane distance under half a texel) and mutually visible: a
+// direction stops at the first cell missing or off the plane (a wall, a gap).
+// It also stops at a real step: from the last tap it took, or from where it
+// started, more than LIGHTING_SC_L2_Z standard errors AND LIGHTING_SC_L2_REL
+// of the light (shadow edges, contacts, creases stay sharp), so the radius
+// shrinks where the light changes steeply and widens on flat light. Taps weigh
+// by their sets (to 64), r (the ring's area, a-trous) and a Gaussian of
+// LIGHTING_SC_L2_SIGMA cells; a stale tap (lit under change) a quarter.
+// Flag 536870912: off (the S62A pool and S72L/O regularisation).
+const float LIGHTING_SC_L2_Z = 3.0;
+const float LIGHTING_SC_L2_REL = 0.12;
+const float LIGHTING_SC_L2_SIGMA = 8.0;
+const float LIGHTING_SC_L2_FLAT = 96.0;
+bool lighting_sc_layer2() {
+    return lighting_world_mode() == 3u && (lighting_sc_flags() & 536870912u) == 0u;
+}
+float lighting_sc_l2_var(uint s, float lum) {
+    vec4 ea = cache.v[LIGHTING_SC_EST_AT + 2u * s];
+    vec4 eb = cache.v[LIGHTING_SC_EST_AT + 2u * s + 1u];
+    return eb.x > 0.0 ? max(ea.w, 1.0e-10) : pow(0.3 * lum, 2.0) + 1.0e-10;
+}
+void lighting_sc_recon(uint slot) {
+    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+    vec4 own = cache.v[3u * slot + 2u];
+    float t = floor(max(own.w, 0.0));
+    vec3 p = cache.v[3u * slot].xyz;
+    vec4 nb = cache.v[3u * slot + 1u];
+    vec3 n = nb.xyz;
+    float size = nb.w;
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 ta = vec3(0.0);
+    vec3 tb = vec3(0.0);
+    ta[(ax + 1u) % 3u] = 1.0;
+    tb[(ax + 2u) % 3u] = 1.0;
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    float support = 0.0;
+    float ref = -1.0;
+    float ref_se2 = 0.0;
+    if (t >= 0.5) {
+        float c0 = min(t, 64.0) * (fract(own.w) > 0.1 ? 0.25 : 1.0);
+        sum = c0 * own.rgb;
+        wsum = c0;
+        support = c0;
+        ref = dot(own.rgb, lw);
+        ref_se2 = lighting_sc_l2_var(slot, ref) / t;
+    }
+    bool edge = false;
+    float rot = 0.3926991 * float(lighting_hash(slot * 0x27d4eb2du) & 1u);
+    [[dont_unroll]] for (uint d = 0u; d < 8u; d++) {
+        float a = 0.7853982 * float(d) + rot;
+        vec3 dir = cos(a) * ta + sin(a) * tb;
+        float prev = ref;
+        float prev_se2 = ref_se2;
+        [[dont_unroll]] for (uint l = 0u; l < 5u; l++) {
+            float r = float(1u << l);
+            vec3 q = p + dir * r * size;
+            uint s2 = lighting_cache_find_sized(q, n, false, size, p);
+            if (s2 == ~0u || abs(dot(cache.v[3u * s2].xyz - p, n)) > 0.5 * size) {
+                break;
+            }
+            vec4 v = cache.v[3u * s2 + 2u];
+            float c = min(floor(max(v.w, 0.0)), 64.0);
+            if (c < 0.5) {
+                continue;
+            }
+            float L = dot(v.rgb, lw);
+            float se2 = lighting_sc_l2_var(s2, L) / c;
+            if (prev >= 0.0) {
+                float dl = L - prev;
+                if (dl * dl > LIGHTING_SC_L2_Z * LIGHTING_SC_L2_Z * (se2 + prev_se2) && abs(dl) > LIGHTING_SC_L2_REL * max(L, prev) + 1.0e-4) {
+                    edge = edge || r <= 4.0;
+                    break;
+                }
+            }
+            if (ref >= 0.0) {
+                float d0 = L - ref;
+                float z = LIGHTING_SC_L2_Z + 1.0;
+                if (d0 * d0 > z * z * (se2 + ref_se2) && abs(d0) > 2.0 * LIGHTING_SC_L2_REL * max(L, ref) + 1.0e-4) {
+                    edge = edge || r <= 4.0;
+                    break;
+                }
+            } else {
+                // A texel with no sets yet: the first tap it reaches is its reference.
+                ref = L;
+                ref_se2 = se2;
+            }
+            prev = L;
+            prev_se2 = se2;
+            float g = exp(-0.5 * r * r / (LIGHTING_SC_L2_SIGMA * LIGHTING_SC_L2_SIGMA));
+            float cw = c * (fract(v.w) > 0.1 ? 0.25 : 1.0) * g;
+            sum += cw * r * v.rgb;
+            wsum += cw * r;
+            support += cw;
+        }
+    }
+    cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(wsum > 0.0 ? sum / wsum : vec3(0.0)));
+    cache.v[LIGHTING_SC_SPARSE_AT + slot].w = edge ? -support : support;
+}
 void lighting_sc_pool(uint slot) {
     vec4 own = cache.v[3u * slot + 2u];
     // A texel in a mover's frame pools with its neighbours in that frame: its
     // position and normal are stored there, and the same salt finds them.
     lighting_obj_salt = cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5 ? cache.v[LIGHTING_SC_OBJ_AT + slot].x : 0.0;
     float t = floor(max(own.w, 0.0));
+    if (lighting_sc_layer2() && cache.v[3u * slot + 1u].w <= 0.2) {
+        // S72P: layer 2 for texels a pixel showed in the last half second.
+        uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z);
+        if (shown != 0u && int(lighting_frame() - shown) <= 30) {
+            lighting_sc_recon(slot);
+        }
+        lighting_obj_salt = 0.0;
+        return;
+    }
     bool floor_on = (lighting_sc_flags() & 8u) != 0u;
     if (t >= LIGHTING_SC_POOL_FULL && !floor_on) {
         vec3 rg = lighting_sc_regularise(slot, own.rgb);
@@ -1463,6 +1578,27 @@ vec4 lighting_sc_shown(uint slot) {
     // confidence, in the same handover.
     vec4 own = cache.v[3u * slot + 2u];
     float n = floor(max(own.w, 0.0));
+    // S72P: layer 2 (the rebuilt field) is what shows; its support (sets around)
+    // is the count in the handover from the texel's seed.
+    if (lighting_sc_layer2() && cache.v[3u * slot + 1u].w <= 0.2) {
+        vec3 field = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
+        float sup = abs(cache.v[LIGHTING_SC_SPARSE_AT + slot].w);
+        bool have = any(greaterThan(field, vec3(0.0))) && sup > 0.0;
+        float ls = lighting_sc_sun_gain(slot);
+        vec4 sd = lighting_sc_seed_split() ? lighting_sc_seed(slot) : vec4(0.0);
+        if (have) {
+            float f2 = clamp(1.0 - sup / LIGHTING_SC_HANDOVER, 0.0, 1.0);
+            float a = sd.w > 0.0 ? sup / max(sup + LIGHTING_SC_HANDOVER_K * sd.w * f2, 1.0e-4) : 1.0;
+            return vec4(mix(sd.rgb, field * ls, a), 1.0);
+        }
+        if (sd.w > 0.0) {
+            return vec4(sd.rgb, 1.0);
+        }
+        if (own.w > 0.5) {
+            return vec4(own.rgb * ls, 1.0);
+        }
+        // Nothing rebuilt yet: the coarse levels (S72D) below.
+    }
     float fade = clamp(1.0 - n / LIGHTING_SC_HANDOVER, 0.0, 1.0);
     if (fade > 0.0) {
         vec3 prior = vec3(0.0);
