@@ -1,20 +1,76 @@
 # Entity and networking co-design
 
-> **For agentic workers:** Do not start N1. D1–D19 are unanswered, and the datagram bytes are the replay file, so building N7 before those decisions are answered locks the recording format. When they are answered, implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
+> **For agentic workers:** Do not start N1. D1–D29 are unanswered. The datagram bytes are the replay file and the agent's control path, so building N7 before those decisions are answered locks both. When they are answered, implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
 
-**Goal:** One entity id space that a headless authority runtime can replicate to player runtimes, with prediction of the owned pawn, interpolation of everyone else, and a packet budget that still works at thousands of entities. The same datagrams are the replay, in a file or on the socket.
+**Goal:** An agent can name an entity, query it, read its full state and why it changed, subscribe to it, and spawn, edit, or despawn it under the same authority rules as any other connection. Player replication, prediction, and the replay are that same stream. The agent reads the authority, or one tick of a replay, so a packet budget never hides an entity the agent asked for.
 
-**Architecture:** The simulation store is an entity id plus plain components, updated by ordered tick passes. That store is the replication model. The authority runtime (the process Genos hosts) is the only writer of replicated state. A player runtime predicts only the entity it has input authority for, and reconciles by restoring that entity and replaying its commands. Remote entities interpolate. Snapshots are unreliable deltas against the last acknowledged snapshot. A spatial grid and a byte budget decide who is in the packet. A replay stores that stream and plays it back through the same apply path.
+**Architecture:** The simulation store is an entity id, a human-readable name, and plain components, updated by ordered tick passes. That store is what an agent queries and what the authority replicates. The authority runtime (the process Genos hosts) is the only writer of replicated state. A tool does not write a column. It sends a notice on an agent connection, and the authority applies it on a tick boundary. A player runtime predicts only the entity it has input authority for, and reconciles by restoring that entity and replaying its commands. Remote entities interpolate. Snapshots are unreliable deltas against the last acknowledged snapshot. A spatial grid and a byte budget decide who is in a player packet. They do not decide what an agent can read. A replay stores that stream. Seeking it is how an agent time-travels.
 
 **Tech stack:** Rust, `std::net::UdpSocket` at the socket edge, no extra networking crate. `genos-math` stays `f32` and stays out of the replicated bytes. ADR 0007 forbids a crate that owns the network. ADR 0009 forbids a script that owns the network.
 
 Written against `gi-v2` at `e61b89d`. This file does not add a crate, does not open a socket, and does not write a replay file.
 
+## Agent observability and control
+
+This is the test for every choice below, including the entity store. An agent has to manage entities and see what they are doing. Replication, prediction, interest, and replay stay, and they earn their place by how well they serve that.
+
+The owner said an agent is another client or tool, with the same authority rules as network clients. In this repo the person is the player, and sources say "client" for the program that person runs. The plan's word is an **agent connection**: a connection with no person. It submits the same notices any connection submits. The authority applies them. The camera's agent endpoint (`crates/mcp`, loopback, scene handles such as `floor` and `wall:<id>`) stays the editor of the live scene. `CONTEXT.md` says to avoid calling a scene handle an entity id, and to avoid calling that endpoint a game network. Both avoids stay. An entity name is not a scene handle. The session tool is not that endpoint. `docs/systems/scene.md` already subscribes an agent to `genos://scene` for scene and camera edits. That subscription is not the entity log.
+
+### What the agent can do
+
+**Name.** The agent refers to an entity by a stable human-readable name, and by the numeric id when it already has one. The numeric id is `{ index: u32, generation: u32 }`, the same bits as the physics plan's `BodyId`, so a stale id cannot resurrect a despawned entity. The name is a component. D20–D22 are the open choices about whether the name is the wire id, how long it stays unique, and what happens when the caller omits it. The recommendation is both: the wire sorts and replicates the numeric id, and the agent may pass either the name or `index.generation`.
+
+**Query.** By type, by tag, by region, and by component. Type and tag are components, so those queries are column scans. Region is an AABB in millimeters. The 32 m cell is only a fast reject inside that box, the same cell size interest uses for packets. D23 is whether the first tool also takes field predicates (`health < 10`) or only presence.
+
+**Inspect.** One entity, every component, at the live tick or at a replay tick. Full state is the columns on that id. It is not a player snapshot, and it is not a scene handle's wall struct.
+
+**Recent history.** An action and event log on the entity. "Action" in `CONTEXT.md` is already the named input intent, so this plan calls the record the **entity log**. A line is a command, a notice, or a component write, with the tick. The live ring is bounded. The replay holds the whole session. D24 is the live length.
+
+**Subscribe.** The agent registers a filter (name, type, tag, region, or component) and receives a notice when a matching entity changes. Polling with query still works. D26 chooses subscribe, poll, or both. The recommendation is both, with subscribe on the reliable notice path, so there is no third channel.
+
+**Causality.** Every write stores a **cause**: the tick pass that wrote it, the command that fed that pass, the notice that requested it, or the snapshot tick that a reconcile copied. The owner said "which system". A system in this repo is a system record. The cause names the tick pass. One hop is stored on the write. When the notice or the command names another entity, the log line names that id too. A general graph walk is not the first tool. D25 is whether the cause is only in authority memory, on every player packet, or on the authority recording and the agent connection.
+
+**Control.** Spawn, edit, and despawn go through an MCP or CLI API. The API enqueues a notice. It does not call `set_pose` on the store. The authority applies the notice at the end of the tick, the same place queued spawns already land, and the datagram is in the replay. A player connection's spawn request is refused. Whether an agent connection's spawn request is accepted is D29. The recommendation is that the authority accepts it from an agent connection and still refuses it from a player connection. That is the same rule for both: the connection does not write state, and the authority decides who may request a spawn. D27 is whether this API is bolted onto the camera endpoint or is a separate session tool.
+
+**Time-travel.** The agent seeks a replay to a tick and then uses the same query, inspect, and log calls. Seek is the keyframe-then-forward path in D4. The picture is the applied stream (D2), so time-travel works when this binary's sim would not resim the file. `--resim` remains the check. D28 is whether the agent may also edit that tick and fork a new session. The recommendation is read-only. Forking is a second authority.
+
+### Settled by this direction
+
+- The agent test above is how the choices in this file are judged.
+- A tool does not write a column. Spawn, edit, and despawn are notices. The authority accepts or refuses them, and it is the only writer. The bytes are the session stream, so a replay can show the request and the result. Who may spawn is D29.
+- An agent reads the authority store, or one applied replay tick. Interest and `POSE_BUDGET` limit player packets. They do not limit that read.
+- Scene handles stay scene handles. The camera agent endpoint stays the scene editor. The session tool is a different API, even though both are loopback tools an agent can call.
+- D20 is open. The recommendation is that the numeric id stays the replication id and the physics id, with a human-readable name beside it. A string as the only wire id is the option that recommendation refuses.
+
+### How the choices score
+
+| Choice | Agent test | Verdict |
+| --- | --- | --- |
+| Numeric id plus a name component | The log and the physics body stay on a stable id. The agent types a name. | Recommend. D20–D22. |
+| String as the only id | Readable. Deltas, sort order, and `BodyId` all get worse. A rename becomes an identity change. | Refuse as the wire id. |
+| `Scene` arrays and scene handles | An index shifts when a neighbor is removed, so a log cannot stay attached. The camera endpoint writes the scene directly, past the authority. | Refuse. |
+| Bevy, lightyear, renet, bevy_replicon | Queries and observers match the agent well. Entity ids are still opaque, so a name is still a component. The stack would own the schedule and the socket, which ADR 0007 rejects, and the agent would talk to that runtime instead of to the session notices. Time-travel would be a second replay. | Refuse. Sources only. |
+| Actors | One named object is easy to point at. Query by component, and a cause that is a tick pass rather than "the object decided", both get harder. | Refuse. |
+| Authority is the only writer. Connections request. | The agent and a player connection follow one rule. | Recommend. D29 sets who may request a spawn. |
+| Interest and the 1024-byte pose budget | A player packet stays small at thousands of entities. The agent does not use that packet as its view. | Keep for players. Refuse as the agent's read path. |
+| Predict only the owned pawn | The authority view the agent reads is the true state. A reconcile writes the pawn and the log's cause is the snapshot tick, so the agent can see the correction. | Keep. |
+| Commands and notices | Commands are the input half of the entity log. Notices are spawn, edit, despawn, and subscribe. | Keep. |
+| Snapshot deltas and keyframes | The agent seeks to a tick and reads state without reverse simulation and without a cross-machine deterministic sim. | Recommend. D1–D4. |
+| Input-only replay | A seek on another machine can show a different world, so the agent cannot trust the picture. | Refuse as the way time-travel looks. |
+| Full-world GGPO | Every peer resims every entity. The agent has no single authority log to ask. | Refuse. The owned-pawn restore stays. |
+| Per-tick state hash | The agent can see the tick that diverged. | Recommend. D11. |
+| Cause stored on the authority stream | Seek can answer why without resim, which is what a sim-epoch mismatch still allows. | Recommend. D25. |
+| Cause on every player packet | Players pay bytes so a tool can read a reason. The tool can read the authority instead. | Refuse. |
+| Camera MCP gains entity spawn | The scene handle and the entity name become the same string. | Refuse. D27. |
+| Edit a replay and resume | Time-travel becomes a second simulation. | Refuse until the owner asks. D28. |
+
+D20–D29, below, are the questions this section opens. D1–D19 stay open. Where the agent test adds weight to one of them, the line is in that decision.
+
 ## Open decisions
 
 These are the questions to settle before any step is built. Each one is **Open**. The recommendation is a proposal for that discussion.
 
-**Settled, and kept out of the list.** A replay is a recorded network stream. Commands, notices, and snapshots in the file are the datagram bytes a `Link` or a `UdpSocket` would carry. The reader feeds those bytes to the same apply path a live player runtime uses. Entity actions are the command (`buttons`, `aim_tick`) and the component results a snapshot already carries (`Health`, `StunUntil`). Inputs are commands. The event stream is notices. There is no second gameplay codec, no dump of `Sim` memory as the file, and no replay-only component. If a value must be in the recording, it is in the live datagram. The entity store in [Decision](#decision) stays the store. Replay does not reopen that choice unless the owner says so.
+**Settled, and kept out of the list.** A replay is a recorded network stream. Commands, notices, and snapshots in the file are the datagram bytes a `Link` or a `UdpSocket` would carry. The reader feeds those bytes to the same apply path a live player runtime uses. Inputs are commands. Notices are the event stream, including the notices an agent connection sends. Component results (`Health`, `StunUntil`, the name, tags) ride the snapshot. There is no second gameplay codec, no dump of `Sim` memory as the file, and no replay-only component. If a value must be in the recording, it is in the live datagram. The agent path is that datagram, not a side door. The store question is judged again in [Agent observability and control](#agent-observability-and-control) and [Decision](#decision). The recommendation is still the small in-repo store. The reason is the agent test, not a closed door.
 
 **Working proposal.** Record the authority's full stream and each player runtime's own stream (D8, D9). Keep commands, notices, snapshot deltas, and a baseline-0 keyframe every 120 ticks (D1, D3). Watching applies those datagrams (D2). A seek jumps to the previous keyframe and applies forward (D4). A debug flag resims from that keyframe and compares per-tick hashes (D11, D12, D15). Public spectators receive the authority stream 10 seconds late (D6, D7). A killcam is the last 10 seconds of the authority stream, played through the same path, with the camera chosen locally (D5, D19). The file adds a header and a length prefix so a datagram boundary survives the disk; the slice inside each frame is the datagram (D14). A protocol mismatch refuses the file. A sim-epoch mismatch still plays snapshots and refuses resim (D13).
 
@@ -28,7 +84,7 @@ D1 and D2 move together. D1.C is what makes D2.C possible. D1.A leaves playback 
 - **B. Snapshots and notices only.** Playback applies datagrams and matches what the network said, including after a sim change that stays inside the same protocol. The command that caused a tick is absent, so a debug resim has nothing to rerun.
 - **C. Commands, notices, snapshot deltas, and periodic baseline-0 keyframes.** The file is the union. A keyframe is a snapshot datagram whose baseline tick is 0, which the codec already defines. Watching applies snapshots. Debugging resims commands and checks them against the stored hashes.
 
-**Recommendation.** C. A cannot show a correct picture when the physics step diverges across machines. B cannot rerun the command that produced a bug. The owner asked for actions, inputs, and the event stream together.
+**Recommendation.** C. A cannot show a correct picture when the physics step diverges across machines. B cannot rerun the command that produced a bug. The owner asked for actions, inputs, and the event stream together. The agent test agrees: time-travel has to show the command and the notice, not only the pose.
 
 ### D2. How playback advances a tick
 
@@ -38,7 +94,7 @@ D1 and D2 move together. D1.C is what makes D2.C possible. D1.A leaves playback 
 - **B. Always apply snapshots and notices.** Commands stay in the file and are ignored during playback. The picture matches the recording inside one protocol. The question "which command diverged" has no run to point at.
 - **C. Apply snapshots to watch.** Resim from the last keyframe only when a debug flag is set, or when a stored hash mismatches. Shipping playback does not depend on input-only resim.
 
-**Recommendation.** C. Input replay is the check. Snapshot apply is the picture.
+**Recommendation.** C. Input replay is the check. Snapshot apply is the picture. An agent seeking a file on a different sim epoch still sees the recorded entities. Resim is available when the epoch matches.
 
 ### D3. Keyframe interval
 
@@ -60,7 +116,7 @@ D1 and D2 move together. D1.C is what makes D2.C possible. D1.A leaves playback 
 - **B. Decoded bracket in memory.** After A, keep the decoded poses for that keyframe bracket. A scrub that stays inside the 120 ticks does not read the file again.
 - **C. Reverse simulation.** Run the tick pass backward from the current tick.
 
-**Recommendation.** A on disk, for a cold seek. B inside `genos-net-view` after the first seek into a bracket, so the scrub control moves inside those 120 ticks without another read. C is a bad fit for this sim.
+**Recommendation.** A on disk, for a cold seek. B inside `genos-net-view` and inside the session tool after the first seek into a bracket, so a scrub or an agent's next query inside those 120 ticks does not read the file again. C is a bad fit for this sim. This is the agent's time-travel.
 
 ### D5. Killcam
 
@@ -109,7 +165,7 @@ Choices: 0, 3 s (180 ticks), 10 s (600 ticks), 30 s (1800 ticks), 90 s (5400 tic
 - **Authority file.** Every replicated entity. Interest and `POSE_BUDGET` do not apply. The datagram layout is unchanged.
 - **Player file.** The datagrams that runtime sent and applied, including loss and the budget.
 
-**Recommendation.** That split. Playing a player file shows the holes that player had. Playing the authority file shows the match. D18 is the budget half of the same split.
+**Recommendation.** That split. Playing a player file shows the holes that player had. Playing the authority file shows the match. D18 is the budget half of the same split. An agent time-travels the authority file. A player file would hide entities the agent might name.
 
 ### D10. The map inside the file
 
@@ -185,7 +241,7 @@ Source demos are the precedent for A. A `dem_packet` wraps raw network packets i
 - **Apply.** Load the keyframe at or before N, apply deltas through N, print the components. The picture is what the network said.
 - **Resim.** Rerun stored commands from that keyframe and print the resim hash next to the stored hash.
 
-**Recommendation.** Apply by default. `--resim` prints both hashes.
+**Recommendation.** Apply by default. `--resim` prints both hashes. The session tool's inspect at a tick is this same path, plus the entity log.
 
 ### D16. Recording with no socket
 
@@ -211,9 +267,105 @@ Source demos are the precedent for A. A `dem_packet` wraps raw network packets i
 
 The view target is an entity that already has a pose in the stream. A free camera during playback is local UI state and is not written back. Choosing which pawn to follow is local and is not a notice. The strike command already identifies the attacking connection, and that connection's pawn is the entity the killcam starts on.
 
-**Recommendation.** Both. Playback can follow any entity with a pose, and it can fly a free camera. The file does not store a camera track.
+**Recommendation.** Both. Playback can follow any entity with a pose, and it can fly a free camera. The file does not store a camera track. An agent's time-travel is a query at a tick, not a camera track.
 
-## Global constraints
+### D20. What the agent types as the id
+
+**Question.** The owner asked for stable human-readable entity ids. The replication id in this plan is `{ index, generation }`. What does the tool accept?
+
+- **A. The numeric id only**, printed `index.generation` (`4.1`). Stable across removal. Opaque to a person and to an agent reading a log.
+- **B. A name string is the only id.** The datagram carries the string. A rename is an identity change. Snapshot sort order follows string bytes. The physics `BodyId` would no longer be these bits.
+- **C. Both.** Snapshots keep the numeric id and sort by index. The name is a component. The tool accepts the name or `index.generation`.
+
+**Recommendation.** C. A fails the readability test. B fails the packet, the sort, and the shared body id. The name is not a scene handle.
+
+### D21. How long a name stays unique
+
+**Question.** After despawn, or after a rename, may a new entity take the string?
+
+- **A. Unique among live entities.** Despawn frees the string. A replay query for `door` at two ticks can mean two ids.
+- **B. Unique for the session and the recording.** Despawn does not free the string. A rename keeps the old string reserved and still resolving to the same numeric id. `find` at a replay tick and `find` live agree on which id owned that string.
+
+**Recommendation.** B. Time-travel is unambiguous. The log stores the numeric id either way, so a renamed entity's history stays one chain. The cost is a name table that grows with every spawn for the life of the session.
+
+### D22. The name when the caller omits one
+
+**Question.** Spawn with no name.
+
+- **A. Refuse.**
+- **B. The authority mints `<type>-<index>` when a type was set, otherwise `e-<index>`.** The string is reserved for the session, same as D21.
+
+**Recommendation.** B. A tool can spawn in one call and then query the minted name.
+
+### D23. The first query
+
+**Question.** Which filters exist on the first tool?
+
+- **A. Type, tag, region, and component presence.**
+- **B. A, plus field predicates** (`health < 10`, `x_mm > 1000`).
+
+Region is an AABB in millimeters, tested with the same cell size as interest (`CELL_MM`). Type and tag are components. Component presence means the column has a value for that id.
+
+**Recommendation.** A. Field predicates are a real parser and a second query language. Presence, type, tag, and region cover "what is in this room" and "what has health". Add predicates after those four have tests.
+
+### D24. How long the live entity log is
+
+**Question.** The replay holds the session. The live authority also keeps a ring so a tool can ask without opening a file.
+
+- **16 ticks**, the hit-rewind window.
+- **120 ticks**, one keyframe interval.
+- **600 ticks**, the killcam window.
+- **Unbounded** until the process exits.
+
+**Recommendation.** 120 ticks. An agent watching a live change sees about two seconds of cause. Older than that, it seeks the replay. Sixteen ticks is shorter than a stun an agent might want to explain. Unbounded growth is the replay file's job.
+
+### D25. Where the cause is stored
+
+**Question.** A cause is a tick-pass id, a command `(connection, tick)`, a notice sequence, or a reconcile snapshot tick. Where does it go?
+
+- **A. Authority memory only**, in the 120-tick ring. A replay seek shows state and not why, unless the agent resims.
+- **B. On every player snapshot**, beside each dirty component. Every player pays for tick-pass names.
+- **C. On the authority recording and on agent-connection datagrams.** Player snapshots leave the cause flag clear. The format has the flag. Players do not spend the bytes. Seek on the authority file rebuilds the log by apply, with no resim.
+
+**Recommendation.** C. It matches the agent read path. A proposed flag bit is `128` on the entity record in [Locked names](#locked-names), followed by a `u16` cause kind and a `u32` cause word (pass id, notice seq, command tick, or snapshot tick). That bit stays out of the locked layout until D25 is accepted. Kind `1` tick pass, `2` command, `3` notice, `4` reconcile.
+
+### D26. Subscribe or poll
+
+**Question.** How an agent tracks changes.
+
+- **A. Poll.** The tool calls query and inspect on its own clock.
+- **B. Subscribe.** A notice registers a filter. A later matching write enqueues a notice to that agent connection: entity id, component, cause. The notice stays small. The tool reads full state with inspect if it wants it.
+- **C. Both.**
+
+**Recommendation.** C. Subscribe is how the agent hears a change without scanning. Poll remains for a one-shot query. Delivery is the reliable ordered notice path. There is no third channel.
+
+### D27. Which process the tool talks to
+
+**Question.** MCP, CLI, or both, and in which binary?
+
+- **A. Add entity tools to the camera agent endpoint** in `crates/mcp`. One URL for scene handles and entities.
+- **B. A session tool.** CLI arguments on `genos-session`, and a loopback MCP in that same process. Both call one set of Rust functions. Those functions enqueue notices. The camera endpoint is unchanged.
+- **C. CLI only.**
+
+**Recommendation.** B. A puts the entity name in the same map as `wall:<id>` and writes from the camera process, which is not the authority runtime. C makes an agent that already speaks MCP grow a second habit. The headless test calls the Rust functions and feeds one JSON body to the handler. It does not need a display.
+
+### D28. Time-travel writes
+
+**Question.** After a seek, may the agent edit and continue?
+
+- **A. Read only.** Query, inspect, and the entity log at that tick. A write returns an error. The live session is untouched.
+- **B. Fork.** Edit the sought tick and start a new authority session from there.
+
+**Recommendation.** A. The owner asked to time-travel through replays, which is seek and read. Fork is a second simulation and a second recording. It can be a later plan.
+
+### D29. Who may request a spawn
+
+**Question.** The owner said the same authority rules as network clients.
+
+- **A. An agent connection is no stronger than a player connection.** Players cannot spawn in this plan, so the agent cannot either. Spawn stays an internal authority call. The tool can edit and despawn only what already exists, and even that is a notice.
+- **B. Neither connection writes state.** The authority applies notices. A player connection's spawn notice is refused. An agent connection's spawn, edit, and despawn notices are applied at the tick boundary. Edit of a predicted pawn still replicates back and reconciles, like any other correction.
+
+**Recommendation.** B. A reads "same rules" as "same privileges" and leaves the agent unable to manage entities, which fails the test that opened this plan. B reads "same rules" as one path: request, authority applies, the datagram is recorded. The agent is not a backdoor. The player still cannot mint an id. Join already uses notice name `1`. The recommended payload adds a `u8` role: `1` player, `2` agent. That byte is how the authority tells the two requests apart. It is part of this decision, not a separate channel.
 
 ## Global constraints
 
@@ -227,7 +379,7 @@ The view target is an entity that already has a pose in the stream. A free camer
 - The agent endpoint stays loopback MCP on `127.0.0.1`. It is not the game session. `CONTEXT.md` says to avoid calling that endpoint a game network.
 - The person is the player. Sources say "client" for the program that person runs. In this repo that program is the player runtime. Sources say "server" for the authoritative program. In this repo that program is the authority runtime, and it is still a runtime. The game is not a server. Genos, the other repository, starts the authority process.
 - "System" in this repo is a system record. The ECS behavior is a tick pass.
-- New public words (`EntityId`, tick pass, authority runtime, player runtime, connection, snapshot, command, notice, replay, keyframe, spectator) are added to `CONTEXT.md` in the commit that first publishes them (step N1). N1 waits until D1–D19 are answered.
+- New public words (`EntityId`, entity name, entity log, cause, agent connection, tick pass, authority runtime, player runtime, connection, snapshot, command, notice, replay, keyframe, spectator) are added to `CONTEXT.md` in the commit that first publishes them (step N1). N1 waits until D1–D29 are answered. The camera agent endpoint and the scene handle keep the definitions they already have.
 - A new crate sets `[lints] workspace = true`, joins the workspace `Cargo.toml`, and is named in `docs/architecture.md` in that same commit.
 - `examples/camera` does not open a game socket in any step of this plan. The first proof stays the lit scene.
 - Headless tests use a fixed command list, a fixed tick, a seeded link, and no window. Two runs in one process match on the integers the step names. Do not check wall-clock time, thread scheduling, or a hash from another operating system.
@@ -281,6 +433,22 @@ _Avoid_: A copy of the whole `Sim`, a checkpoint that skips later datagrams whil
 **Spectator**:
 A connection that receives the session stream and does not hold input authority.
 _Avoid_: A second protocol, the player (the person).
+
+**Entity name**:
+The session-unique human-readable label for one entity. A tool may pass it instead of the numeric id. It is a component. A rename keeps the old label reserved for that same id.
+_Avoid_: Scene handle, a string used as the only replication id.
+
+**Entity log**:
+The recent commands, notices, and component writes for one entity. Each line has a tick and a cause. The live ring is bounded. The replay holds the session.
+_Avoid_: Action (the named input intent), the action map.
+
+**Cause**:
+The tick pass, command, notice, or reconcile snapshot that wrote a component.
+_Avoid_: System record.
+
+**Agent connection**:
+A connection with no player. A tool uses it to request spawn, edit, despawn, query, and subscribe. The authority applies those requests. The connection does not write a column.
+_Avoid_: The player (the person), the camera's agent endpoint, a game network.
 
 ## Current state
 
@@ -351,7 +519,7 @@ Nothing in the tree sends a pose, a command, or a delta. Nothing records that st
 
 | Piece | In the tree today | This plan adds |
 | --- | --- | --- |
-| Identity | `Vec` index in the scene and in physics. MCP handle on the side, process-local. | `EntityId` shared with `BodyId`, assigned only by the authority runtime. |
+| Identity | `Vec` index in the scene and in physics. MCP handle on the side, process-local. | Numeric `EntityId` shared with `BodyId`, plus a session-unique entity name for tools. D20–D22. |
 | Simulation store | `Scene` fields and `Body` fields. Behavior sits on `Camera`. | Components as data. Tick passes as the behavior. |
 | Tick | Accumulator inside `Camera::update`. No tick number. | A `1/60` s command frame with a `u32` tick. |
 | Replication | None. | Dirty tick per component, delta against the last acked snapshot, 32-deep history. |
@@ -366,25 +534,26 @@ Nothing in the tree sends a pose, a command, or a delta. Nothing records that st
 | Headless process | `examples/stress` can render without a visible monitor. It is still a picture tool. | `genos-session`, no window crate, the process Genos starts. |
 | Scale test | Hundreds of static pillars in one physics test. | 4096 entities, 8 connections, a far entity absent from the packet. |
 | Debug view | Lighting and MCP screenshots. | One process, authority plus player runtimes, seeded loss, desync rows. |
-| Replay | None. No file, no spectator stream, no per-tick hash on the wire. | The session datagram stream, to a file or to a spectator connection, with keyframes and per-tick hashes. D1–D19 are open. |
+| Replay | None. No file, no spectator stream, no per-tick hash on the wire. | The session datagram stream, to a file or to a spectator connection, with keyframes and per-tick hashes. An agent seeks that file. D1–D19 are open. |
+| Agent control | The camera endpoint edits scene handles and can subscribe to `genos://scene`. It does not see a simulation entity, a cause, or a replay tick. | An agent connection. Query, inspect, entity log, subscribe, and spawn, edit, despawn as notices. D20–D29 are open. |
 
 ## Decision
 
-Use a small in-repo entity store. An entity is an id. A component is state with no functions. A tick pass is behavior with no stored simulation state. The id in the store is the id in the snapshot. This is an ECS in the sense of the Overwatch talk. It is not a Bevy app, and it is not an actor graph. Replay does not reopen this choice. A recording is the replication stream of this store. Reopen the store only by saying so.
+Use a small in-repo entity store. An entity is an id plus a name. A component is state with no functions. A tick pass is behavior with no stored simulation state. The id in the store is the id in the snapshot. This is an ECS in the sense of the Overwatch talk. It is not a Bevy app, and it is not an actor graph. The owner asked to judge that choice by agent observability. The score is in [How the choices score](#how-the-choices-score). The recommendation stands. A recording is the replication stream of this store, and it is the stream the agent seeks.
 
-Three shapes were compared.
+Three shapes were compared again against that test.
 
-**Typed arrays, replicated as the scene.** `Scene` and `World::bodies` would be the snapshot. Quake and Source also ship a flat entity list, so the packet idea fits. The store does not. Indices change when a wall is removed, MCP handles are a second map that physics does not read, and a prediction replay would have to clone the camera, the script, and every body to correct one pawn. Interest management would be a filter bolted on after the `Vec` exists. The physics plan is already replacing the index with `BodyId`. Building replication on the index would throw that away.
+**Typed arrays, replicated as the scene.** `Scene` and `World::bodies` would be the snapshot. Quake and Source also ship a flat entity list, so the packet idea fits. The store does not. Indices change when a wall is removed, so an entity log and a name cannot stay attached. MCP handles are a second map that physics does not read, and the camera endpoint writes those arrays directly, which skips the authority. A prediction replay would have to clone the camera, the script, and every body to correct one pawn. Interest management would be a filter bolted on after the `Vec` exists. The physics plan is already replacing the index with `BodyId`. Building replication on the index would throw that away. This shape fails the agent test.
 
-**Bevy, with lightyear, renet, and bevy_replicon.** These are the best public Rust references for the same problems, and they are listed below as sources. They do not fit this repository. ADR 0007 says a third-party crate does not own the network, and it rejects `tokio`. Those crates own the socket, the reliability layer, and, in Bevy's case, the schedule, which would become a second runtime beside `examples/camera`. Lightyear 0.28 moved its replication backend onto bevy_replicon, so depending on "the Bevy stack" is one ecosystem, not three small libraries. The engine would inherit Bevy's entity ids and then still have to reconcile them with `BodyId`.
+**Bevy, with lightyear, renet, and bevy_replicon.** Queries and observers are the closest public match to "find entities and hear changes". They are listed below as sources. They do not fit this repository. ADR 0007 says a third-party crate does not own the network, and it rejects `tokio`. Those crates own the socket, the reliability layer, and, in Bevy's case, the schedule, which would become a second runtime beside `examples/camera`. Lightyear 0.28 moved its replication backend onto bevy_replicon, so depending on "the Bevy stack" is one ecosystem, not three small libraries. The engine would inherit Bevy's entity ids, which are still opaque index-and-generation values, and then still have to reconcile them with `BodyId` and still add a name component. An agent would talk to that runtime instead of sending a session notice, so control would not be the same path as a connection, and time-travel would be a second replay. This shape serves the queries and fails the authority path.
 
-**This store.** `EntityId` matches the physics plan's `BodyId` layout so a body and its replicated pose cannot disagree about identity. Components are the unit of dirty state, of a snapshot field, of a rewind, and of an interpolation sample. Tick passes are the unit of prediction: the same function runs on the authority and, for the owned entity, on the player runtime. Overwatch used that split so a rewind of `MovementState` did not have to rewind unrelated behavior. We have the same need at a smaller size: one pawn is predicted, a door that was shot is rewound for the query, and a lamp is neither.
+**This store.** `EntityId` matches the physics plan's `BodyId` layout so a body and its replicated pose cannot disagree about identity. The name is a component on that id, which is what the agent types. Columns are the query: type, tag, pose, health. The entity log and the cause hang off the same id, and a tick pass name is a cause an agent can read. Components are also the unit of dirty state, of a snapshot field, of a rewind, and of an interpolation sample. Tick passes are the unit of prediction: the same function runs on the authority and, for the owned entity, on the player runtime. Overwatch used that split so a rewind of `MovementState` did not have to rewind unrelated behavior. We have the same need at a smaller size: one pawn is predicted, a door that was shot is rewound for the query, and a lamp is neither. The agent reads the authority columns, not the predicted pawn and not the culled packet.
 
 What we refuse inside that choice:
 
 - A general archetype framework and a job scheduler. Thousands of entities need a dense column per component and a grid for interest. They do not need a scheduler before the first session. Overwatch's own store was a map from a 32-bit id to components, and systems scanned for the tuple they required. Columns here are `Vec`s indexed by `EntityId.index`, with the generation checked on every read.
 - Peer-to-peer GGPO of the whole world. GGPO saves the full simulation, predicts remote inputs, and resimulates when the real input arrives. That requires every peer to simulate every entity, bit-identically, across machines. We do not have cross-machine determinism, and a large world should not ship every entity to every player. We take GGPO's restore-and-replay loop and apply it to the owned entity.
-- Client-predicted spawns. The authority is the only caller of `spawn` in this plan. A temporary local id is a later plan.
+- Client-predicted spawns. A player connection's spawn notice is refused. The authority is the only writer. An agent connection may request a spawn, and the authority applies it at the tick boundary (D29). The agent does not mint an id locally. A temporary player-side id is a later plan.
 - Shared-mode state authority, where a player runtime owns the true state of an object. Photon Fusion's dedicated-server mode keeps state authority on the server. That is the mode we copy. Input authority can move. State authority stays on the authority runtime.
 
 ## Sources
@@ -491,7 +660,7 @@ Among the relevant entities that are dirty against the baseline, each has a `u32
 
 The pose budget is 1024 bytes per snapshot per connection. Spawns and despawns are outside that budget: a new id is in the packet even when the pose budget is full, and its later pose updates compete normally. Notices are capped at 4 per datagram and do not consume the pose budget.
 
-A far entity, outside the neighborhood and not always-relevant, is absent from the packet even if it is dirty. That is the scale rule. 4096 stored entities are cheap if a connection's packet names the neighborhood.
+A far entity, outside the neighborhood and not always-relevant, is absent from the packet even if it is dirty. That is the scale rule. 4096 stored entities are cheap if a connection's packet names the neighborhood. An agent query does not use this cut. It reads the authority columns, or a replay tick, and can ask for a region the player packet would omit.
 
 ### Authority, prediction, reconciliation, rollback
 
@@ -623,7 +792,7 @@ N28 adds replay controls to this same binary. The scrub control is a tick intege
 
 ## Replay
 
-D1–D19 are the decisions. This section is the argument, the sources, and the way the recommendations sit on the datagram layout above. Nothing here is built.
+D1–D19 are the recording decisions. D20–D29 are the agent decisions. This section is the argument, the sources, and the way the recommendations sit on the datagram layout above. An agent seeks this same file. Nothing here is built.
 
 ### One stream
 
@@ -774,6 +943,9 @@ Spawn and despawn records are written even when the pose budget is spent. Pose r
 | --- | --- |
 | `docs/adr/0013-entity-id-is-the-replication-id.md` | The decision. From N1. |
 | `crates/sim/src/lib.rs` | `Sim`, `EntityId`, spawn, checksum. Package `genos-sim`. From N1. |
+| `crates/sim/src/name.rs` | Entity name, lookup, reserved strings. From N29. |
+| `crates/sim/src/query.rs` | Type, tag, region, component presence. From N30. |
+| `crates/sim/src/log.rs` | Entity log and cause. From N31. |
 | `crates/sim/src/pose.rs` | `Pose`, sector, millimeters. From N5. |
 | `crates/sim/src/tick.rs` | Accumulator, tick passes, command application. From N3. |
 | `crates/sim/src/snapshot.rs` | Ring, delta, apply. From N7. |
@@ -784,6 +956,8 @@ Spawn and despawn records are written even when the pose budget is spent. Pose r
 | `crates/net/src/lib.rs` | `Link`, datagram codec, notices. Package `genos-net`. From N8. |
 | `crates/net/src/udp.rs` | `UdpSocket` edge. From N20. |
 | `crates/net/src/replay.rs` | File header, length-prefixed frames, keyframe trailer. From N25. The datagram slice is the session codec. |
+| `crates/net/src/agent.rs` | Agent-connection notices: spawn, edit, despawn, subscribe. From N32. |
+| `examples/session/src/tool.rs` | Query, inspect, seek, CLI parse, one JSON handler. From N34. |
 | `examples/session/` | Headless authority. Package `genos-session`. From N21. |
 | `examples/net-view/` | Debug binary. Package `genos-net-view`. From N22. |
 
@@ -791,12 +965,12 @@ Spawn and despawn records are written even when the pose budget is spent. Pose r
 
 ## Steps
 
-Do not start N1. D1–D19 are unanswered. The datagram layout and the replay file are the same bytes, so N7 is the commit that would lock the recording format. N25–N28 describe the recommended answers. If a decision above moves, edit that step before implementing it. The steps stay in order: N25 follows N24.
+Do not start N1. D1–D29 are unanswered. The datagram layout, the replay file, and the agent notices are the same bytes, so N7 is the commit that would lock the recording and the tool. N25–N28 describe the recommended replay answers. N29–N35 describe the recommended agent answers. If a decision above moves, edit that step before implementing it. The steps stay in order: N25 follows N24, and N29 follows N28.
 
 ### N1. Entity id
 
 - [ ] **Files:** `docs/adr/0013-entity-id-is-the-replication-id.md`, `CONTEXT.md`, `docs/architecture.md`, `Cargo.toml`, `crates/sim/Cargo.toml`, `crates/sim/src/lib.rs`. Test `crates/sim/tests/ids.rs`.
-- **Behavior:** The ADR records the decision in this plan: the entity id is the replication id, the authority runtime writes replicated state, tick passes are Rust, sockets stay in `genos-net` on `std::net`, and `examples/camera` does not open a game socket. It names ADR 0007 and ADR 0009 and does not override them. Rejected in the ADR: a Bevy stack, replicating `Scene` indices and MCP handles, peer-to-peer rollback of every entity. `CONTEXT.md` gains the words in [Words](#words). `docs/architecture.md` gains one sentence under the crate list: `genos-sim` stores entities, and the game session is `docs/systems/core-networking/plan.md`. The sentence that gameplay networking waits stays true for `examples/camera`. `spawn` returns an `EntityId` with generation 1. Index 0 is the origin and is already spawned. `despawn` makes `get` return `None`. A new `spawn` may reuse the index and must bump the generation. `set_pose` on a despawned id does nothing.
+- **Behavior:** The ADR records the decision in this plan: the entity id is the replication id, the authority runtime writes replicated state, tick passes are Rust, sockets stay in `genos-net` on `std::net`, and `examples/camera` does not open a game socket. It names ADR 0007 and ADR 0009 and does not override them. Rejected in the ADR: a Bevy stack, replicating `Scene` indices and MCP handles, peer-to-peer rollback of every entity, and a tool that writes a column instead of sending a notice. The ADR also records that an agent connection is a connection, and that the camera agent endpoint is not that connection. `CONTEXT.md` gains the words in [Words](#words). `docs/architecture.md` gains one sentence under the crate list: `genos-sim` stores entities, and the game session is `docs/systems/core-networking/plan.md`. The sentence that gameplay networking waits stays true for `examples/camera`. `spawn` returns an `EntityId` with generation 1. Index 0 is the origin and is already spawned. `despawn` makes `get` return `None`. A new `spawn` may reuse the index and must bump the generation. `set_pose` on a despawned id does nothing.
 - **Test:** `entity_id_survives_removal_of_another_entity`
   - Spawn three entities and set poses with `x_mm` 1, 2, and 3. Despawn the middle id. The other two still read 1 and 3. The despawned id reads `None`. A new spawn does not compare equal to the despawned id.
 - **Commit:** `sim: address entities with generational ids`
@@ -1031,6 +1205,62 @@ Do not start N1. D1–D19 are unanswered. The datagram layout and the replay fil
   - Record 90 ticks, strafe 127, loss 0. `inspect(path, 60, false)` returns `x_mm == 60 * 67` and equal stored and applied hashes. `inspect(path, 60, true)` returns the same pose and a `resim_hash` equal to the stored hash. `step` from that report moves to tick 61 and `x_mm == 61 * 67`. Two calls write identical JSON.
 - **Commit:** `net-view: inspect a replay at a tick`
 
+### N29. Entity name
+
+- [ ] **Files:** `crates/sim/src/name.rs`. Test `crates/sim/tests/name.rs`.
+- **Behavior:** `set_name(id, name)` stores the string when no live or reserved string equals it. `find(name)` returns the id that holds it, including a string reserved by a rename. `rename` keeps the old string resolving to the same id. Spawn with an empty name mints `e-<index>`. A typed mint (`<type>-<index>`) waits until N32, when a spawn notice can carry a type. The checksum fold gains the current name's bytes, so a rename changes the checksum. A scene-handle string is not special here: `wall:1` is only a name if a caller set that name, and this step does not read the camera endpoint.
+- **Test:** `a_name_stays_on_the_same_id_after_rename_and_despawn`
+  - Spawn, name `door`. `find("door")` is that id. Rename to `gate`. `find("door")` and `find("gate")` are that id. A second spawn named `door` is refused and does not allocate. Despawn the first id. A third spawn named `door` is still refused. `find` of that id's `index.generation` text returns the id before despawn and `None` after.
+- **Commit:** `sim: name an entity for tools`
+
+### N30. Query
+
+- [ ] **Files:** `crates/sim/src/query.rs`. Test `crates/sim/tests/query.rs`.
+- **Behavior:** `query_type`, `query_tag`, `query_component`, and `query_region(min_x_mm, min_z_mm, max_x_mm, max_z_mm)` return ids in ascending index order. Region uses `CELL_MM` only as a fast reject; the result is the entities whose world millimeters lie inside the AABB, so a cell edge does not drop an entity that is inside the box. Type and tag are components. Component presence is "the column has a value". No field predicates in this step.
+- **Test:** `queries_select_type_tag_region_and_component`
+  - Two entities with type `pawn`, one tagged `red`, both with `Health`, one at `x_mm = 0` and one at `x_mm = 100_000`. Tag `red` returns one id. Type `pawn` returns both. Component `Health` returns both. A region of 1 m around the origin returns the near id and not the far id. An entity with no `Health` is absent from the component query.
+- **Commit:** `sim: query entities by type tag region and component`
+
+### N31. Entity log and cause
+
+- [ ] **Files:** `crates/sim/src/log.rs`. Test `crates/sim/tests/log.rs`.
+- **Behavior:** A component write appends a log line: tick, cause kind, cause word, component id. The ring keeps 120 ticks and drops older lines. Kind `1` is a tick pass id, kind `3` is a notice sequence, kind `4` is a reconcile snapshot tick. `log(id)` returns the lines still in the ring, oldest first. A reconcile write's cause is the snapshot tick, not the motion pass. If D25.C is the accepted answer, the authority datagram sets flag bit `128` and writes the cause; a player snapshot leaves the bit clear. Do not put the cause on the player packet in this step.
+- **Test:** `a_write_records_the_tick_pass_and_a_reconcile_records_the_snapshot`
+  - A motion pass writes `x_mm`. The log line names that pass and the tick. A notice write to `Health` names the notice sequence. A reconcile from snapshot tick 11 writes the pose and the log kind is reconcile with word 11. Line 121 of a one-line-per-tick run drops the oldest.
+- **Commit:** `sim: record why a component changed`
+
+### N32. Agent notices
+
+- [ ] **Files:** `crates/net/src/agent.rs`. Test `crates/net/tests/agent.rs`.
+- **Behavior:** `request_spawn`, `request_edit`, and `request_despawn` enqueue a notice. They do not change the sim. `run_tick` applies an agent connection's notices and refuses a player connection's spawn notice with no state change. An edit sets the named component and the log cause is that notice. A spawned id uses the requested name. If the notice omits the name and carries a type, the minted name is `<type>-<index>`. If it omits both, the name is `e-<index>` from N29. The datagram that carries the notice is the same notice encoding as N17. Join's payload role byte is the `u8` from D29.
+- **Test:** `an_agent_spawn_applies_and_a_player_spawn_does_not`
+  - A player connection's spawn notice leaves the spawned count unchanged. An agent connection's spawn of `door` adds one id after the tick, `find("door")` returns it, and the log cause is the notice. `request_edit` of `x_mm` to 10 leaves `x_mm` unchanged until `run_tick`. After that tick, `x_mm` is 10.
+- **Commit:** `net: apply agent spawn through a notice`
+
+### N33. Subscribe
+
+- [ ] **Files:** `agent.rs`. Test `crates/net/tests/agent.rs`.
+- **Behavior:** `subscribe(connection, filter)` stores a filter for an agent connection. A matching write enqueues one notice to that connection: entity index, generation, component id, cause kind, cause word. A write that does not match enqueues nothing. The notice uses the N17 resend and order rules. Query still works without a subscription.
+- **Test:** `a_subscription_hears_the_matching_write_only`
+  - Subscribe to tag `red`. A write on the tagged entity enqueues one notice. A write on an untagged entity does not. Dropping the datagram and sending again resends that notice until acked.
+- **Commit:** `net: notify an agent connection of a matching change`
+
+### N34. Inspect and seek from the tool
+
+- [ ] **Files:** `examples/session/src/tool.rs`. Test `examples/session/tests/tool.rs`.
+- **Behavior:** `inspect_live(name) -> Components` reads the authority columns. `inspect_replay(path, tick, name)` seeks with N26 and returns the components and the log lines at that tick. A write function called while a replay inspect is in progress returns an error and does not change the live sim. The report is `genos-json`.
+- **Test:** `a_replay_seek_reads_the_log_and_refuses_a_write`
+  - Record 90 ticks of an agent edit that sets `x_mm` to 50 at tick 40. `inspect_replay(path, 40, name)` returns `x_mm == 50` and a log line whose cause is that notice. `inspect_replay` then `request_edit` returns an error. The live sim's pose is unchanged from before the call.
+- **Commit:** `session: inspect an entity at a replay tick`
+
+### N35. CLI and one JSON handler
+
+- [ ] **Files:** `examples/session/src/tool.rs`, `examples/session/src/main.rs`. Test `examples/session/tests/tool.rs`.
+- **Behavior:** `parse_tool_line("query tag red")` returns the same query N30 runs. `handle_json` accepts one JSON-RPC-shaped body, `method` `query` or `inspect` or `spawn` or `seek`, and calls those functions. The test passes the body as a string. It does not bind a port and does not link the camera `genos-mcp` crate. `genos-session`'s `Cargo.toml` still has no `genos-window` dependency. Spawn through `handle_json` enqueues the same notice as N32.
+- **Test:** `a_cli_line_and_a_json_body_call_the_same_query`
+  - `parse_tool_line("query tag red")` and `handle_json` of a query for tag `red` return the same id list. A spawn JSON body followed by one `run_tick` makes `find` return the new name. The camera crate name `genos-mcp` does not appear in `genos-session`'s `Cargo.toml`.
+- **Commit:** `session: query entities from a cli line and a json body`
+
 ## Limits
 
 - The authority runtime is the only state authority. Input authority can move. A player runtime does not keep the true state of a pawn after it loses input authority.
@@ -1052,7 +1282,10 @@ Do not start N1. D1–D19 are unanswered. The datagram layout and the replay fil
 - There is no replay-only component. A value in the file is a value in the live datagram, or a frame field from D14 (tick, hashes, length).
 - Public spectators are delayed. The authority file is written immediately.
 - `examples/camera` does not write a replay.
-- D1–D19 are open. The recommendations are not a decision record.
+- D1–D29 are open. The recommendations are not a decision record.
+- The camera agent endpoint does not spawn, edit, or despawn simulation entities. Scene handles stay on that endpoint.
+- A tool does not write a column. Time-travel does not fork a session.
+- The first query has no field predicates. The cause stores one hop, not a graph walk.
 - Genos's process supervisor, matchmaking, and account system are out of this repository. The contract is the binary, the bind address, the scene path, and stdin.
 
 ## Records each step touches
@@ -1090,7 +1323,11 @@ N1 is the one that edits `CONTEXT.md`, `docs/architecture.md`, and the new ADR. 
 | Per-tick hashes and desync | D11, D12, D15 | N27, N28 |
 | Recording version and map bytes | D10, D13, D14 | N25 |
 | Record a bug and inspect a tick | D8, D15, D16, D17 | N28 |
+| Agent names, query, log, cause | Agent observability, D20–D26 | N29, N30, N31 |
+| Spawn, edit, despawn as a connection | D27, D29 | N32, N35 |
+| Subscribe | D26 | N33 |
+| Time-travel through a replay | D4, D28 | N34 |
 
 ## What this plan does not do
 
-It does not implement the steps. It does not settle D1–D19. It does not change `step`, the camera loop, or the MCP endpoint. It does not merge the physics plan. N24 is the seam, and it waits for that plan's `BodyId` and `hash_world`. N1 waits until the open decisions are answered, because the datagram layout and the replay file are the same bytes.
+It does not implement the steps. It does not settle D1–D29. It does not change `step`, the camera loop, or the camera MCP endpoint. It does not merge the physics plan. N24 is the seam, and it waits for that plan's `BodyId` and `hash_world`. N1 waits until the open decisions are answered, because the datagram layout is the replay file and the agent's control path.
