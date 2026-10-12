@@ -430,13 +430,20 @@ impl Tools {
                     *wall_ms += frame_wall_ms;
                     *quiet = if settled_now { *quiet + 1 } else { 0 };
                     *left = left.saturating_sub(1);
-                    if *quiet >= *need || *left == 0 {
+                    if *quiet >= *need {
                         Some(Ok(obj(vec![
-                            ("settled", Value::Bool(*quiet >= *need)),
+                            ("settled", Value::Bool(true)),
                             ("frames", num(*frames as f64)),
                             ("wall_ms", num((*wall_ms * 10.0).round() / 10.0)),
                             ("still_frames", num(stats.still_frames as f64)),
                         ])))
+                    } else if *left == 0 {
+                        Some(Err(format!(
+                            "lighting did not settle in {frames} frames ({still} still, {wall:.0} ms)",
+                            frames = *frames,
+                            still = stats.still_frames,
+                            wall = *wall_ms,
+                        )))
                     } else {
                         None
                     }

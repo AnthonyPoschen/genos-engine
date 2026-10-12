@@ -93,12 +93,14 @@ check_lt(c.mean_rel, 0.10, "under 10% of the light is wrong");
 
 ### Settling
 
-`wait_settled` replies once every brick in view has no pass left, the build that
-carried the last one is on screen, and the shown light has blended 95% of the way to
-it (three `TIER_VIEW_SECONDS` of wall time), for `quiet_frames` in a row. The reply
-gives `frames`, `wall_ms` and `light_gpu_ms` (GPU time of the light builds during
-the wait); compare builds on the milliseconds, since frames favour whichever build
-draws faster. `status` reports `picture_settled`.
+`wait_settled` replies when `SettleStats.settled` is true and `picture_settled` has
+held for `quiet_frames` in a row (default 3). The reply gives `settled`, `frames`,
+`wall_ms` and `still_frames`. `status` reports the same `picture_settled`.
+
+The frame budget is `timeout_frames` (default 600). The command budget is
+`timeout_s` (default 120; a software GPU wants more). Running out of frames while
+the picture is not settled is an error. Running out of command time is an error.
+Either one fails the script's check. A reply with `settled: false` is not success.
 
 The yardstick changed at the commit "wait_settled waits for the picture to stop
 changing". Before it, `wait_settled` replied when the last pass was submitted, while

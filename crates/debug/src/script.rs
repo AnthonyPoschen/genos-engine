@@ -321,9 +321,17 @@ fn call(
                 short(&json::encode(value), 200)
             ));
         }
-        Err(err) => rep.steps.push(format!(
-            "| {line} | `{name}` | `{shown}` | **error** | {err} |"
-        )),
+        Err(err) => {
+            rep.steps.push(format!(
+                "| {line} | `{name}` | `{shown}` | **error** | {err} |"
+            ));
+            // A timed-out or unsettled wait is a failed check, including when the
+            // script catches the error and keeps going.
+            if name == "wait_settled" {
+                rep.checks
+                    .push((false, format!("line {line}: {err}")));
+            }
+        }
     }
     drop(rep);
     let value = result.map_err(|err| -> Box<EvalAltResult> { format!("{name}: {err}").into() })?;

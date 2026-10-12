@@ -32,7 +32,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec("wait", "Reply after frames (default 1). Scene time runs unless paused."),
         spec(
             "wait_settled",
-            "Reply when the lighting has settled and a frame drawn from its held light is on screen, for quiet_frames (default 3), or after timeout_frames (default 600). Reply says settled true/false, frames, wall_ms and still_frames.",
+            "Reply when the lighting has settled and a frame drawn from its held light is on screen, for quiet_frames (default 3). timeout_frames (default 600) is the frame budget. timeout_s (default 120) is the command budget. Running out of either is an error, not a settled:false reply. A success reply says settled true, frames, wall_ms and still_frames.",
         ),
         spec(
             "view",
