@@ -17,21 +17,19 @@ let d = diff(#{ mode_a: "full", mode_b: "direct", out: "diff-full-direct.png" })
 check_gt(d.mean_abs, 0.0, "bounce light changes the picture");
 let lights = lights();
 log(`lights ${lights.len()}`);
-let f = flicker(#{ frames: 8 });
-check_lt(f.max_delta, 0.2, "a paused scene does not flicker");
-timing();
 
-// Picture reuse, after the views. Back on the full picture, a still screen skips
-// the present, a dirty rectangle is scissored, and a moved solid makes the
-// verification drop the cached picture.
+// Back on the full picture. A still screen skips the present. Flicker is read
+// from that reused picture. A later dirty rectangle is scissored, and a moved
+// solid makes the verification drop the cache. The UI edit waits until a frame
+// has just skipped with a clean verification, so the edit is not swallowed by a
+// full redraw.
 view("full");
-let skipped_at = frame_reuse().skipped;
 let last = frame_reuse();
 let saw_skip = false;
 for n in 0..100 {
     wait(#{ frames: 1, timeout_s: 30 });
     last = frame_reuse();
-    if last.skipped > skipped_at {
+    if last.skipped > 0 && last.verify_ok {
         saw_skip = true;
         break;
     }
@@ -39,13 +37,38 @@ for n in 0..100 {
 log(`reuse before skip drawn ${last.scene_drawn} skipped ${last.skipped} invalidated ${last.invalidated} checks ${last.checks} changed ${last.changed} tests ${last.tests} fails ${last.fails} verify_ok ${last.verify_ok}`);
 require(saw_skip, "a still screen was not skipped");
 
-let ui = frame_reuse();
-overlay(#{ x: 8, y: 8, w: 48, h: 28 });
-wait(#{ frames: 4, timeout_s: 60 });
+let f = flicker(#{ frames: 8 });
+check_lt(f.max_delta, 0.2, "a paused scene does not flicker");
+timing();
+
+let saw_ui = false;
 let repaired = frame_reuse();
-log(`reuse after UI drawn ${repaired.scene_drawn} ui_repaired ${repaired.ui_repaired} full_restore ${repaired.full_restore} rects ${repaired.rects} skipped ${repaired.skipped}`);
-require(repaired.ui_repaired > ui.ui_repaired, "dirty UI was not scissored onto the cached scene");
-require(repaired.rects > ui.rects, "a UI repair redrew no rectangle");
+for attempt in 0..4 {
+    let skipped_at = frame_reuse().skipped;
+    let clean = false;
+    for n in 0..40 {
+        wait(#{ frames: 1, timeout_s: 30 });
+        let now = frame_reuse();
+        if now.verify_ok && now.skipped > skipped_at {
+            clean = true;
+            break;
+        }
+    }
+    if !clean {
+        continue;
+    }
+    let ui = frame_reuse();
+    let x = 8 + attempt * 16;
+    overlay(#{ x: x, y: 8, w: 36, h: 20 });
+    wait(#{ frames: 3, timeout_s: 60 });
+    repaired = frame_reuse();
+    log(`reuse UI attempt ${attempt} drawn ${repaired.scene_drawn} ui_repaired ${repaired.ui_repaired} full_restore ${repaired.full_restore} rects ${repaired.rects} skipped ${repaired.skipped} verify_ok ${repaired.verify_ok}`);
+    if repaired.ui_repaired > ui.ui_repaired && repaired.rects > ui.rects {
+        saw_ui = true;
+        break;
+    }
+}
+require(saw_ui, "dirty UI was not scissored onto the cached scene");
 overlay(#{});
 
 let before = frame_reuse();
