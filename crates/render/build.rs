@@ -71,6 +71,8 @@ fn main() {
         "lighting_pack.glsl",
         "lighting_cache.glsl",
         "lighting_cache_slots.glsl",
+        "lighting_direct_classify.glsl",
+        "lighting_direct_shade.glsl",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }

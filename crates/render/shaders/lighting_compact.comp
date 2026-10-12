@@ -12,8 +12,15 @@ void main() {
     uint slot = gl_GlobalInvocationID.x;
     if (lighting_dense()) {
         // S70A: the args pass (one group, after the counts are in).
+        // Hit-light args (params.y bit 16) write the queue's indirect dispatch
+        // and reset its counter. They do not call lighting_write_args: that
+        // bumps shadow epochs, and this step runs after the direct passes.
         if (slot == 0u) {
-            lighting_write_args();
+            if (((pc.params.y >> 16u) & 1u) != 0u) {
+                lighting_write_hit_args();
+            } else {
+                lighting_write_args();
+            }
         }
         return;
     }

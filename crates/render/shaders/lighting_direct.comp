@@ -112,373 +112,112 @@ bool lighting_dp_diverge_skip(uint idx) {
     return false;
 }
 #endif
+
+// The default compilation is the shipped direct pass. -DLIGHTING_HIT_QUEUE is
+// the hit-light pass: one thread per queued miss, and the queue is still empty.
+// Each compilation has one trace_occluded call.
+#ifdef LIGHTING_HIT_QUEUE
+void lighting_direct_shade(
+    uint idx, uint pixels, uint kept, bool fill_hit, bool probe_hit, uint h, uint ray,
+    vec3 pos, vec3 n, vec3 n_hit, vec3 origin, float hit_t, vec3 reflectance, bool two_sided,
+    vec3 glow, LampList list, uint count, uint tdl, uint tdl_sig, uint pix_sig) {
+#include "lighting_direct_shade.glsl"
+}
 void main() {
-    uint idx = gl_GlobalInvocationID.x;
-    uint pixels = pc.dims.x * pc.dims.y;
-    uint mode = lighting_mode();
-    uint kept = lighting_kept_hits();
-    uint cache_rays = LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS;
-    if (lighting_dense()) {
-        // S70A: this round's light cache rays only, live entries only.
-        if (idx >= lighting_dense_count() * LIGHTING_CACHE_RAYS) {
-            return;
-        }
-        idx = pixels + kept + lighting_dense_entry(idx / LIGHTING_CACHE_RAYS) * LIGHTING_CACHE_RAYS + idx % LIGHTING_CACHE_RAYS;
-    } else if (mode == 2u) {
-        idx += pixels + kept;
-    }
-    // Then (not on the async queue) one point per fill slot (lighting_fill_ray).
-    uint fills = pixels + kept + (mode == 1u ? 0u : cache_rays);
-    uint points = fills + (mode == 2u ? 0u : kept);
-    if (idx >= points) {
+    // Mode-0 index layout, hardcoded: pixels, kept hits, cache rays, fills.
+    // The entry's tdl is the decision already taken (reuse is not queued).
+    // ~0u is "no texel", not the reuse flag.
+    uint q = gl_GlobalInvocationID.x;
+    uint nqueued = ckeys.key[LIGHTING_HIT_ARGS_AT + 3u];
+    if (q >= nqueued) {
         return;
     }
-    // A kept probe hit (index h), a light cache ray (ray) or a fill (index h).
+    uint idx = ckeys.key[LIGHTING_HIT_QUEUE_AT + 2u * q];
+    uint tdl = ckeys.key[LIGHTING_HIT_QUEUE_AT + 2u * q + 1u];
+    uint pixels = pc.dims.x * pc.dims.y;
+    uint kept = lighting_kept_hits();
+    uint cache_rays = LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS;
+    uint fills = pixels + kept + cache_rays;
+    if (idx < pixels || idx >= fills + kept) {
+        return;
+    }
     bool fill_hit = idx >= fills;
     bool probe_hit = (idx >= pixels && idx < pixels + kept) || fill_hit;
     uint h = fill_hit ? idx - fills : idx - pixels;
-    uint ray = idx < pixels + kept || fill_hit ? 0u : lighting_probe_rays() + (idx - pixels - kept);
-    vec3 pos;
-    vec3 n;
+    uint ray = (idx < pixels + kept || fill_hit) ? 0u : lighting_probe_rays() + (idx - pixels - kept);
+    vec3 pos = vec3(0.0);
+    vec3 n = vec3(0.0, 1.0, 0.0);
     float hit_t = 1.0e9;
     vec3 reflectance = vec3(1.0);
     bool two_sided = false;
     vec3 glow = vec3(0.0);
-    if (idx < pixels) {
-        vec3 albedo;
-        if (!lighting_surface(uvec2(idx % pc.dims.x, idx / pc.dims.x), pos, n, albedo, two_sided)) {
-            return;
-        }
-    } else {
-        vec4 rec;
-        vec3 origin;
-        vec3 dir;
-        vec3 from_n;
-        bool live;
-        if (probe_hit) {
-            uint rays = lighting_rays();
-            uint ps = h / rays;
-            if (fill_hit) {
-                live = lighting_fill_ray(ps / LIGHTING_STRATA, ps % LIGHTING_STRATA, h % rays, origin, dir, from_n);
-                if (!live) {
-                    return;
-                }
-                rec = work.v[lighting_fill_at(h)];
-                if (rec.x < -0.75) {
-                    lighting_put_fill_light(h, has_sky() ? scene.sky.rgb : vec3(0.0));
-                    return;
-                }
-            } else {
-                rec = work.v[lighting_kept_at(h)];
-                live = lighting_stratum_ray(ps / LIGHTING_STRATA, ps % LIGHTING_STRATA, h % rays, origin, dir, from_n);
-                if (live && rec.x < -0.75) {
-                    lighting_put_kept_light_d(h, has_sky() ? scene.sky.rgb : vec3(0.0), 2u);
-                    return;
-                }
+    vec4 rec;
+    vec3 ray_o;
+    vec3 dir;
+    vec3 from_n;
+    bool live;
+    if (probe_hit) {
+        uint rays = lighting_rays();
+        uint ps = h / rays;
+        if (fill_hit) {
+            live = lighting_fill_ray(ps / LIGHTING_STRATA, ps % LIGHTING_STRATA, h % rays, ray_o, dir, from_n);
+            if (!live) {
+                return;
+            }
+            rec = work.v[lighting_fill_at(h)];
+            if (rec.x < -0.75) {
+                lighting_put_fill_light(h, has_sky() ? scene.sky.rgb : vec3(0.0));
+                return;
             }
         } else {
-            rec = work.v[lighting_hit_at(ray)];
-            live = lighting_ray(ray, origin, dir, from_n);
-        }
-        if (rec.x < 0.0 || !live) {
-            return;
-        }
-        pos = origin + dir * rec.x;
-        hit_t = rec.x;
-        n = lighting_unpack_normal(floatBitsToUint(rec.y));
-        reflectance = unpackUnorm4x8(floatBitsToUint(rec.z)).rgb * (1.0 / LIGHTING_PI);
-        glow = lighting_unpack_rgb9e5(floatBitsToUint(rec.w));
-    }
-    // S69C (Anthony: build-up starved; GENOS_GPU_TIMES, default stress scene at
-    // 1920x1080: this pass was 70 % of the frame and the kept hits of all
-    // LIGHTING_STRATA strata, relit every frame, ~10 ms of it). A kept hit is relit
-    // the frame its stratum is traced and once more halfway round
-    // (LIGHTING_KEPT_RELIGHT), so its light is at most LIGHTING_STRATA / 2 frames old;
-    // near a change (a mover, re-traced kept rays) every frame as before.
-    if (LIGHTING_KEPT_RELIGHT && probe_hit && !fill_hit) {
-        uint s = (h / lighting_rays()) % LIGHTING_STRATA;
-        uint cur = lighting_stratum();
-        bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
-        if (s != cur && s != (cur + LIGHTING_STRATA / 2u) % LIGHTING_STRATA && !(urgent && lighting_near_change(pos))) {
-            return;
-        }
-        // S78D: the halfway relight only where the light should have moved: a
-        // lamp that moved reaches the hit since its trace, or the sun / sky
-        // changed by more than 1 % (a change near a mover is relit above).
-        // S78K: a held probe's current stratum: only the rays re-traced this
-        // frame (its check, change crossings) are new hits; the rest are lit
-        // as the halfway relight below.
-        uint pk = h / lighting_rays() / LIGHTING_STRATA;
-        bool held_old = s == cur && lighting_stratum_held(pk);
-        if (held_old) {
-            vec3 ho;
-            vec3 hd;
-            vec3 hnn;
-            lighting_stratum_ray(pk, s, h % lighting_rays(), ho, hd, hnn);
-            held_old = !lighting_held_traced(pk, h % lighting_rays(), ho, hd, hit_t);
-            // S78U: the check ray whose trace confirmed its hit is relit like
-            // the other held hits (only when a lamp / the sun moved): a drift
-            // of the shared surface cache is no reason to change the probe.
-            if (!held_old && LIGHTING_CHECK_NOISE && h % lighting_rays() == lighting_hold_check_k(pk)
-                && floatBitsToUint(work.v[lighting_probe_at(pk) + 1u].w) != lighting_frame() + LIGHTING_STRATA
-                && !lighting_held_crosses(ho, hd, hit_t)) {
-                held_old = true;
-            }
-        }
-        if (LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_world_mode() == 3u && !(urgent && lighting_near_change(pos))) {
-            uint traced = lighting_frame() - LIGHTING_STRATA / 2u;
-            if (!lighting_wrc_lamp_changed(pos, traced) && abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
+            rec = work.v[lighting_kept_at(h)];
+            live = lighting_stratum_ray(ps / LIGHTING_STRATA, ps % LIGHTING_STRATA, h % rays, ray_o, dir, from_n);
+            if (live && rec.x < -0.75) {
+                lighting_put_kept_light_d(h, has_sky() ? scene.sky.rgb : vec3(0.0), 2u);
                 return;
             }
         }
+    } else {
+        rec = work.v[lighting_hit_at(ray)];
+        live = lighting_ray(ray, ray_o, dir, from_n);
     }
+    if (rec.x < 0.0 || !live) {
+        return;
+    }
+    pos = ray_o + dir * rec.x;
+    hit_t = rec.x;
+    n = lighting_unpack_normal(floatBitsToUint(rec.y));
+    reflectance = unpackUnorm4x8(floatBitsToUint(rec.z)).rgb * (1.0 / LIGHTING_PI);
+    glow = lighting_unpack_rgb9e5(floatBitsToUint(rec.w));
     vec3 origin = pos + n * 0.02;
     LampList list = lamps_at(origin);
     uint count = lamp_list_size(list);
-    // S78J: a pixel whose point and lamps match last frame's, in a quiet frame.
-    uint pix_sig = 0u;
-    if (LIGHTING_PIX_REUSE && idx < pixels && lighting_world_mode() == 3u) {
-        pix_sig = lighting_pix_sig(pos, n, two_sided, list);
-        vec4 pv = work.v[lighting_pix_at() + idx / 2u];
-        uint c = (idx & 1u) * 2u;
-        if (pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig && lighting_pix_quiet()) {
-            uint emitted = gbuf.px[idx].w;
-            uint glow = emitted == ~0u ? 0u : emitted;
-            uint prev = outc.px[pixels + idx];
-            // Emitted stays out of the picture buffer; compose reads it here.
-            outc.px[pixels + idx] = glow;
-            gbuf.px[idx].w = floatBitsToUint(pv[c + 1u]);
-            if (glow != prev) {
-                lighting_compose_mark_px(idx);
-            }
-            return;
-        }
-    }
-    // S75 Lumen surface-cache direct lighting for hits (lighting_cache.glsl).
-    uint tdl = ~0u;
     uint tdl_sig = 0u;
     vec3 n_hit = n;
-    if (LIGHTING_TDL && idx >= pixels && lighting_world_mode() == 3u) {
-        uint ts = lighting_cache_find_sized(pos, n, false, LIGHTING_SC_TEXEL, pos);
+    // The texel slot was chosen in the direct pass, including the budget
+    // atomicAdd. Recompute the signature; do not take another budget slot.
+    if (tdl != ~0u) {
+        uint ts = tdl & 0x3FFFFFFFu;
         vec3 tp;
         vec3 tn;
-        if (ts == ~0u) {
-            lighting_dp(4u, 1u);
-        } else if (lighting_sc_texel_world(ts, tp, tn)) {
+        if (lighting_sc_texel_world(ts, tp, tn)) {
             LampList tl = lamps_at(tp + tn * 0.02);
             tdl_sig = lighting_tdl_sig(ts, tl);
-            vec4 d = cache.v[LIGHTING_TDL_AT + ts];
-            if (tdl_sig != 0u && floatBitsToUint(d.z) == tdl_sig && lighting_frame() - floatBitsToUint(d.w) < LIGHTING_TDL_STALE) {
-                count = 0u;
-                tdl = ts | 0x80000000u;
-                lighting_dg(40u, 1u);
-            } else if (LIGHTING_TDL_CHECK && tdl_sig != 0u && floatBitsToUint(d.z) != 0u) {
-                // S78E: an entry past LIGHTING_TDL_STALE (same signature) is checked
-                // like a changed one, not recomputed: age alone is no reason.
-                // S76C: a lamp in range changed (the signature moved): a check,
-                // the texel's light with picked lamps (LIGHTING_CACHE_PICKS shadow
-                // rays) at its centre, against the cached value.
-                lighting_dg(47u, 1u);
-                tdl = ts | 0x40000000u;
-                origin = tp + tn * 0.02;
-                n = tn;
-                list = tl;
-                count = lamp_list_size(list);
-            } else if (tdl_sig != 0u) {
-                if (atomicAdd(ckeys.key[LIGHTING_TDL_COUNT_AT], 1u) < LIGHTING_TDL_BUDGET) {
-                    lighting_dg(41u, 1u);
-                    tdl = ts;
-                    origin = tp + tn * 0.02;
-                    n = tn;
-                    list = tl;
-                    count = lamp_list_size(list);
-                } else {
-                    lighting_dp(5u, 1u);
-                }
-            }
-        }
-    }
-    // Light cache rays (params.z bit 11): at most LIGHTING_CACHE_PICKS shadow rays,
-    // lamps picked systematically in proportion to their unshadowed light, each
-    // weighted by how often it is expected to be picked (unbiased, as
-    // lamps_light_only). The pick offset hangs on the patch and the ray, so a
-    // still scene relights to the same value.
-    // S60: the screen probes' hits (kept strata and fills) pick lamps the same way
-    // (LIGHTING_PROBE_PICKS): every kept hit of all LIGHTING_STRATA strata is relit every
-    // frame, so with every lamp shadow-traced the light pass was ~65 % of the
-    // frame (GENOS_GPU_TIMES). Lumen's final gather never shadow-traces lamps at
-    // probe hits (it reads the surface cache's lit cards); stochastic lamp
-    // selection in proportion to unshadowed light (as MegaLights / ReSTIR DI) is
-    // the step that keeps our per-hit direct light.
-    bool cache_pick = idx >= pixels + kept && !fill_hit && ((pc.params.z >> 11u) & 1u) != 0u;
-    bool probe_pick = LIGHTING_PROBE_PICKS && probe_hit && ((pc.params.z >> 11u) & 1u) != 0u;
-    bool tdl_check = tdl != ~0u && (tdl & 0x40000000u) != 0u;
-    bool pick = ((cache_pick || probe_pick) && tdl == ~0u) || tdl_check;
-    float total = 0.0;
-    uint lit = 0u;
-    float u = 0.0;
-    if (pick) {
-        if (cache_pick) {
-            uint r = ray - lighting_probe_rays();
-            uint ent = r / LIGHTING_CACHE_RAYS;
-            if (lighting_world_mode() == 3u && ent >= lighting_grad_first() && ent < LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) {
-                // S74A gradient check: the stored ray's lamp pick (same seed).
-                uint gs = ckeys.key[LIGHTING_GRAD_LIST_AT + r - lighting_grad_first() * LIGHTING_CACHE_RAYS];
-                u = lighting_unit(ckeys.key[gs] ^ (floatBitsToUint(cache.v[LIGHTING_SC_GRAD_AT + gs].w) * 0x85ebca6bu + 0x5bd1e995u));
-            } else {
-            uint slot = lighting_cache_batch_slot(ent);
-            uint key = slot == ~0u ? 0u : ckeys.key[slot];
-            uint q = slot == ~0u ? 0u : lighting_cache_entry_quarter(ent, slot);
-            u = lighting_unit(key ^ ((q * LIGHTING_CACHE_RAYS + r % LIGHTING_CACHE_RAYS) * 0x85ebca6bu + 0x5bd1e995u));
-            }
-        } else if (tdl_check) {
-            u = lighting_unit(lighting_hash((tdl & 0x3FFFFFFFu) ^ lighting_frame() * 0x9e3779b9u));
+            origin = tp + tn * 0.02;
+            n = tn;
+            list = tl;
+            count = lamp_list_size(list);
         } else {
-            // A probe hit: the offset hangs on the hit's 25 cm cell and its index,
-            // so a still hit relights to the same value (no crawl).
-            u = lighting_unit(lighting_cell_hash(pos, n) ^ (h * 0x85ebca6bu + 0x27d4eb2fu));
-        }
-        [[dont_unroll]] for (uint k = 0u; k < count; k++) {
-            vec3 target;
-            vec3 light = lamp_light(lamp_list_get(list, k), origin, n, two_sided, target);
-            float w = light.r + light.g + light.b;
-            total += w;
-            lit += w > 0.0 ? 1u : 0u;
+            tdl = ~0u;
         }
     }
-    bool exact = !pick || lit <= LIGHTING_CACHE_PICKS;
-    float step = total / float(LIGHTING_CACHE_PICKS);
-    float run = 0.0;
-    vec3 e = vec3(0.0);
-    vec3 e_sun = vec3(0.0);
-    [[dont_unroll]] for (uint k = 0u; k < count; k++) {
-        if (idx < pixels) {
-            lighting_dp(7u, 1u);
-            uint pli = lamp_list_index(list, k);
-            if (pli < LIGHTING_WRC_SNAP_LAMPS && pli < scene.lamp_count) {
-                uint eat = LIGHTING_SHADOW_EPOCH_AT + 8u * pli;
-                if (ckeys.key[eat] == ckeys.key[eat + 6u]) {
-                    lighting_dp(6u, 1u);
-                }
-            }
-        }
-        vec3 target;
-        vec3 light = lamp_light(lamp_list_get(list, k), origin, n, two_sided, target);
-        float w = light.r + light.g + light.b;
-        if (w <= 0.0) {
-            continue;
-        }
-        float times = 1.0;
-        if (!exact) {
-            float before = ceil(run / step - u);
-            run += w;
-            times = ceil(run / step - u) - before;
-        }
-        // S74A: hits (not pixels) reuse a static lamp's shadow (lighting_cache.glsl).
-        bool shadow_lit = false;
-        if (times > 0.0) {
-            uint li = idx >= pixels ? lamp_list_index(list, k) : LAMP_ALL;
-            float sc = lighting_world_mode() == 3u && li < LAMP_ALL - 1u ? lighting_shadow_get(origin, n, li) : -1.0;
-            if (sc >= 0.0) {
-                shadow_lit = sc > 0.5;
-            } else {
-#if DP_DIVERGE != 0
-                if (idx >= pixels && lighting_dp_diverge_skip(idx)) {
-                    shadow_lit = true;
-                } else
-#endif
-                {
-                    lighting_dp(idx >= pixels ? 0u : 1u, 1u);
-                    shadow_lit = !trace_occluded(origin, target);
-                    if (li < LAMP_ALL - 1u && lighting_world_mode() == 3u) {
-                        lighting_shadow_put(origin, n, li, shadow_lit);
-                    }
-                }
-            }
-        }
-        if (shadow_lit) {
-            vec3 add = exact ? light : light * (times * step / w);
-            e += add;
-            if (k < list.suns.y) {
-                e_sun += add;
-            }
-        }
-    }
-    n = n_hit;
-    if ((lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) != 0u) {
-        e = vec3(0.0);
-        e_sun = vec3(0.0);
-    }
-    if (tdl != ~0u && (lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) == 0u) {
-        uint ts = tdl & 0x3FFFFFFFu;
-        if (tdl_check) {
-            // Confirm: within LIGHTING_TDL_TOL of the cached value -> keep it,
-            // nudged towards the check (an unbiased estimate, so drift is
-            // tracked), under the new signature. Else escalate: the entry is
-            // dropped and the next use recomputes it exactly (budget); this
-            // hit takes the check's estimate.
-            vec4 d = cache.v[LIGHTING_TDL_AT + ts];
-            vec3 c = lighting_unpack_rgb9e5(floatBitsToUint(d.x));
-            float lc = dot(c, vec3(0.2126, 0.7152, 0.0722));
-            float le = dot(e, vec3(0.2126, 0.7152, 0.0722));
-            if (abs(le - lc) <= LIGHTING_TDL_TOL * max(max(le, lc), 1.0e-3)) {
-                lighting_dg(48u, 1u);
-                vec3 m = mix(c, e, 0.25);
-                cache.v[LIGHTING_TDL_AT + ts] = vec4(uintBitsToFloat(lighting_pack_rgb9e5(m)), d.y, uintBitsToFloat(tdl_sig), uintBitsToFloat(lighting_frame()));
-                e = m;
-                e_sun = m * d.y;
-            } else {
-                lighting_dg(49u, 1u);
-                cache.v[LIGHTING_TDL_AT + ts].z = 0.0;
-            }
-        } else if ((tdl & 0x80000000u) != 0u) {
-            vec4 d = cache.v[LIGHTING_TDL_AT + ts];
-            e = lighting_unpack_rgb9e5(floatBitsToUint(d.x));
-            e_sun = e * d.y;
-        } else {
-            float le = dot(e, vec3(0.2126, 0.7152, 0.0722));
-            float fs = le > 0.0 ? clamp(dot(e_sun, vec3(0.2126, 0.7152, 0.0722)) / le, 0.0, 1.0) : 0.0;
-            cache.v[LIGHTING_TDL_AT + ts] = vec4(uintBitsToFloat(lighting_pack_rgb9e5(e)), fs, uintBitsToFloat(tdl_sig), uintBitsToFloat(lighting_frame()));
-        }
-    }
-    if (idx < pixels) {
-        uint emitted = gbuf.px[idx].w;
-        uint glow = emitted == ~0u ? 0u : emitted;
-        uint prev_e = outc.px[pixels + idx];
-        uint packed = lighting_pack_rgb9e5(e);
-        uint prev_d = 0u;
-        uint prev_sig = 0u;
-        bool tracked = LIGHTING_PIX_REUSE && lighting_world_mode() == 3u;
-        if (tracked) {
-            uint c = (idx & 1u) * 2u;
-            prev_sig = floatBitsToUint(work.v[lighting_pix_at() + idx / 2u][c]);
-            prev_d = floatBitsToUint(work.v[lighting_pix_at() + idx / 2u][c + 1u]);
-        }
-        outc.px[pixels + idx] = glow;
-        gbuf.px[idx].w = packed;
-        if (tracked) {
-            uint c = (idx & 1u) * 2u;
-            work.v[lighting_pix_at() + idx / 2u][c] = uintBitsToFloat(pix_sig);
-            work.v[lighting_pix_at() + idx / 2u][c + 1u] = uintBitsToFloat(packed);
-            if (glow != prev_e || packed != prev_d || pix_sig != prev_sig) {
-                lighting_compose_mark_px(idx);
-            }
-        }
-    } else {
-        lighting_hit_sunfrac = 0.0;
-        lighting_bounce_path = 2u;
-        vec3 bounce = lighting_cache_irradiance_at(pos, n, hit_t);
-        e += bounce;
-        e_sun += lighting_hit_sunfrac * bounce;
-        if (fill_hit) {
-            lighting_put_fill_light(h, reflectance * e + glow);
-        } else if (probe_hit && lighting_check_within_noise(h, pos, n, reflectance, reflectance * e + glow)) {
-            lighting_chg(CHG_KEPT_HELD, 1u);
-        } else if (probe_hit) {
-            lighting_put_kept_light_d(h, reflectance * e + glow, tdl == ~0u ? 2u : ((tdl & 0x80000000u) != 0u ? 0u : 1u));
-        } else {
-            // w: its sun/sky share as luminance (S63A).
-            work.v[lighting_rad_at(ray)] = vec4(reflectance * e + glow, dot(reflectance * e_sun, vec3(0.2126, 0.7152, 0.0722)));
-        }
-    }
+    lighting_direct_shade(
+        idx, pixels, kept, fill_hit, probe_hit, h, ray, pos, n, n_hit, origin, hit_t,
+        reflectance, two_sided, glow, list, count, tdl, tdl_sig, 0u);
 }
+#else
+void main() {
+#include "lighting_direct_classify.glsl"
+#include "lighting_direct_shade.glsl"
+}
+#endif
