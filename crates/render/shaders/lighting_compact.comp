@@ -169,6 +169,15 @@ void main() {
                 }
                 return;
             }
+            // S72V irradiance-caching placement (lighting_ic_site): a texel off
+            // the grid of spacing a R' takes no rays; layer 2 covers it. Near a
+            // change or a moved lamp every texel is traced [deviation: IC has no
+            // change handling].
+            bool mover_ic;
+            if (!wrc && lighting_sc_svgf() && !near && !lighting_sc_local_change(slot, mover_ic) && !lighting_ic_site(slot)) {
+                atomicAdd(gstats.waiting, 1u);
+                return;
+            }
             // S72J: a page's texels refine together: note this one's sets, and
             // wait while more than LIGHTING_SC_PAGE_LEAD sets ahead of the page's
             // fewest (last round). Near a change goes first as before.
@@ -188,7 +197,7 @@ void main() {
             // a texel sits out one round in four, on its own phase (hash), so
             // the texels of a page commit on different rounds and their counts
             // spread; a page never steps as one.
-            if (!wrc && lighting_sc_decorrelate() && !near && t >= LIGHTING_DN_MIN_SETS - 0.5 && t < LIGHTING_SC_FULL_SETS - 0.5
+            if (!wrc && lighting_sc_decorrelate() && !lighting_sc_svgf() && !near && t >= LIGHTING_DN_MIN_SETS - 0.5 && t < LIGHTING_SC_FULL_SETS - 0.5
                 && ((lighting_hash(slot ^ 0x5bd1e995u) + lighting_round()) & 3u) == 0u) {
                 atomicAdd(gstats.waiting, 1u);
                 return;
@@ -199,7 +208,7 @@ void main() {
             // 2 (level 1); keys, edge texels and texels near a change or a moved
             // lamp keep their rate (S72Q: the sun moving no longer exempts it).
             bool mover_l2;
-            if (!wrc && lighting_sc_layer2() && !near && t >= 15.5 && !lighting_sc_promoted(slot) && !lighting_sc_local_change(slot, mover_l2)) {
+            if (!wrc && lighting_sc_layer2() && !lighting_sc_svgf() && !near && t >= 15.5 && !lighting_sc_promoted(slot) && !lighting_sc_local_change(slot, mover_l2)) {
                 float sup = cache.v[LIGHTING_SC_SPARSE_AT + slot].w;
                 uint lv = lighting_sc_level(slot);
                 uint every = lv == 0u ? 4u : (lv == 1u ? 2u : 1u);

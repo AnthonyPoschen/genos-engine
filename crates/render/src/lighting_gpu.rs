@@ -65,7 +65,7 @@ pub(crate) struct Lighting {
     layout: Handle,
     pool: Handle,
     sets: [Handle; 2],
-    pipes: [Handle; 8],
+    pipes: [Handle; 9],
     gbuffer_pipe: Handle,
     gbuf: Buffer,
     work: Buffer,
@@ -176,7 +176,7 @@ impl Default for Lighting {
             layout: std::ptr::null_mut(),
             pool: std::ptr::null_mut(),
             sets: [std::ptr::null_mut(); 2],
-            pipes: [std::ptr::null_mut(); 8],
+            pipes: [std::ptr::null_mut(); 9],
             gbuffer_pipe: std::ptr::null_mut(),
             gbuf: Buffer::empty(),
             work: Buffer::empty(),
@@ -243,7 +243,7 @@ const LIGHTING_DENSE_RAYS: u32 = LIGHTING_ARGS + 2;
 const LIGHTING_DENSE_ENTRIES: u32 = LIGHTING_ARGS + 3;
 /// Word of the dispatch args in the cache keys (lighting_cache.glsl LIGHTING_ARGS_AT).
 const LIGHTING_ARGS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 17600;
-const LIGHTING_PASS_NAMES: [&str; 8] = [
+const LIGHTING_PASS_NAMES: [&str; 9] = [
     "lighting compact",
     "lighting place",
     "lighting trace",
@@ -252,6 +252,7 @@ const LIGHTING_PASS_NAMES: [&str; 8] = [
     "lighting filter",
     "lighting cache",
     "lighting compose",
+    "lighting atrous",
 ];
 
 impl Gpu {
@@ -412,7 +413,7 @@ impl Gpu {
             self.lighting.world_set = sets[2];
         }
         self.make_lighting_world()?;
-        let codes: [&[u8]; 8] = [
+        let codes: [&[u8]; 9] = [
             LIGHTING_COMPACT_SPV,
             LIGHTING_PLACE_SPV,
             LIGHTING_TRACE_SPV,
@@ -421,6 +422,7 @@ impl Gpu {
             LIGHTING_FILTER_SPV,
             LIGHTING_CACHE_SPV,
             LIGHTING_COMPOSE_SPV,
+            LIGHTING_ATROUS_SPV,
         ];
         for (k, code) in codes.iter().enumerate() {
             let start = Instant::now();
@@ -604,7 +606,7 @@ impl Gpu {
                 &share,
             )?;
             self.lighting.cache =
-                self.make_buffer_queues(LIGHTING_CACHE_SLOTS * 144, 0x20 | 0x2, Memory::Device, &share)?; // 9 vec4 a slot (S72A: + sparse fill)
+                self.make_buffer_queues(LIGHTING_CACHE_SLOTS * 176, 0x20 | 0x2, Memory::Device, &share)?; // 11 vec4 a slot (S72A: + sparse fill; S72V: + a-trous ping-pong)
             self.lighting.cache_clear = true;
             for k in 0..2 {
                 self.lighting.stats[k] = self.make_buffer(96, 0x20 | 0x2, Memory::Readback)?;
@@ -1424,6 +1426,14 @@ impl Gpu {
                 (5, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
                 (6, 0, LIGHTING_DENSE_ENTRIES),
+                // S72V layer 2 (SVGF): variance, five a-trous levels, push.
+                (8, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1),
+                (8, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1),
+                (8, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1),
+                (8, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1),
+                (8, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1),
+                (8, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1),
+                (8, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1),
                 (7, w.div_ceil(8), h.div_ceil(8)),
             ]
         };
@@ -1461,6 +1471,7 @@ impl Gpu {
                 (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first);
             }
             let mut filter_round = 0u32;
+            let mut atrous_stage = 0u32;
             let mut picked = false;
             // The push constants the next pass sees (the gather and filter rounds add bits).
             let mut cur_pc = pc;
@@ -1479,6 +1490,18 @@ impl Gpu {
                         round_pc.as_ptr() as *const c_void,
                     );
                     cur_pc = round_pc;
+                }
+                if pass == 8 {
+                    // S72V: the a-trous stage (lighting_atrous_stage, bits 1-3).
+                    let mut round_pc = pc;
+                    round_pc[6] |= atrous_stage << 1;
+                    atrous_stage += 1;
+                    (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, 32, round_pc.as_ptr() as *const c_void);
+                    cur_pc = round_pc;
+                }
+                if pass == 7 && atrous_stage > 0 {
+                    (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, 32, pc.as_ptr() as *const c_void);
+                    cur_pc = pc;
                 }
                 if pass == 5 {
                     // The spatial filter's three rounds (lighting_filter_round).

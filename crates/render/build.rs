@@ -25,6 +25,7 @@ fn main() {
         ("LIGHTING_FILTER_SPV", "lighting_filter.comp"),
         ("LIGHTING_CACHE_SPV", "lighting_cache.comp"),
         ("LIGHTING_COMPOSE_SPV", "lighting_compose.comp"),
+        ("LIGHTING_ATROUS_SPV", "lighting_atrous.comp"),
     ]
     .iter()
     .map(|(name, file)| {

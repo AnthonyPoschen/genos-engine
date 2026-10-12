@@ -2073,7 +2073,7 @@ impl Gpu {
         if times.lighting_frames > 0 {
             let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
-                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3}",
+                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3}",
                 times.lighting_frames,
                 g[0],
                 g[1],
@@ -2083,6 +2083,7 @@ impl Gpu {
                 g[5],
                 g[6],
                 g[7],
+                g[8],
                 g.iter().sum::<f64>(),
                 times.world_runs,
                 times.world_ms / f64::from(times.world_runs.max(1)),
@@ -5100,7 +5101,7 @@ struct GpuTimes {
     lighting_pool: Handle,
     lighting_ids: [Vec<usize>; 2],
     lighting_frames: u32,
-    lighting: [f64; 8],
+    lighting: [f64; 9],
     /// Async light cache rounds (GI v2) and their GPU time.
     world_runs: u32,
     world_ms: f64,
@@ -5114,7 +5115,7 @@ struct GpuTimes {
 
 /// Stamps per frame for the GI v2 passes: one before, one after each of the 10
 /// dispatches (the filter runs three rounds).
-const LIGHTING_STAMPS: u32 = 16;
+const LIGHTING_STAMPS: u32 = 24;
 
 /// Milliseconds of `spans` that fall inside any of `within` (ticks, `period` ns each).
 fn overlap_ms(spans: &[(u64, u64)], within: &[(u64, u64)], period: f64) -> (f64, f64) {
@@ -5152,7 +5153,7 @@ impl Default for GpuTimes {
             world_ms: 0.0,
             world_pass: [0.0; 4],
             lighting_frames: 0,
-            lighting: [0.0; 8],
+            lighting: [0.0; 9],
             frame_spans: Vec::new(),
             light_spans: Vec::new(),
         }

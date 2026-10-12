@@ -1,0 +1,22 @@
+#version 450
+// GI v2 S72V: layer 2 as SVGF over the surface-cache texels (lighting_cache.glsl,
+// "S72V layer 2 as SVGF"): stage 0 variance, 1-5 a-trous, 6 push + IC placement.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    if (slot >= LIGHTING_CACHE_SLOTS || !lighting_sc_svgf() || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
+        return;
+    }
+    lighting_obj_salt = cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5 ? cache.v[LIGHTING_SC_OBJ_AT + slot].x : 0.0;
+    uint stage = lighting_atrous_stage();
+    if (stage == 0u) {
+        lighting_svgf_variance(slot);
+    } else if (stage <= 5u) {
+        lighting_svgf_iter(slot, stage - 1u);
+    } else {
+        lighting_svgf_push(slot);
+    }
+}

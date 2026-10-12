@@ -1305,12 +1305,18 @@ void lighting_sc_recon(uint slot) {
     cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(wsum > 0.0 ? sum / wsum : vec3(0.0)));
     cache.v[LIGHTING_SC_SPARSE_AT + slot].w = edge ? -support : support;
 }
+bool lighting_sc_svgf();
 void lighting_sc_pool(uint slot) {
     vec4 own = cache.v[3u * slot + 2u];
     // A texel in a mover's frame pools with its neighbours in that frame: its
     // position and normal are stored there, and the same salt finds them.
     lighting_obj_salt = cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5 ? cache.v[LIGHTING_SC_OBJ_AT + slot].x : 0.0;
     float t = floor(max(own.w, 0.0));
+    if (lighting_sc_svgf()) {
+        // S72V: layer 2 is the SVGF stages (lighting_atrous.comp).
+        lighting_obj_salt = 0.0;
+        return;
+    }
     if (lighting_sc_layer2() && cache.v[3u * slot + 1u].w <= 0.2) {
         // S72P: layer 2 for texels a pixel showed in the last half second.
         uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z);
@@ -1451,8 +1457,9 @@ vec3 lighting_sc_nclamp(uint slot, vec3 m, vec3 sm, float dev) {
 // Flag 16777216 turns it off.
 const float LIGHTING_SC_SPARSE_RATIO = 1.3;
 bool lighting_sc_display = false;
+bool lighting_sc_svgf();
 bool lighting_sc_sparse_on() {
-    return lighting_world_mode() == 3u && (lighting_sc_flags() & 16777216u) == 0u;
+    return lighting_world_mode() == 3u && (lighting_sc_flags() & 16777216u) == 0u && !lighting_sc_svgf();
 }
 // S72D levels (coarse to fine): 2 on every 4th cell of both in-plane axes (and
 // texels of 25 cm and up), 1 on every 2nd (the S72A keys), else 0.
@@ -1605,7 +1612,14 @@ vec4 lighting_sc_shown(uint slot) {
         bool have = any(greaterThan(field, vec3(0.0))) && sup > 0.0;
         float ls = lighting_sc_sun_gain(slot);
         vec4 sd = lighting_sc_seed_split() ? lighting_sc_seed(slot) : vec4(0.0);
-        if (have) {
+        if (lighting_sc_svgf()) {
+            // S72V: the pushed SVGF field covers what it reaches; the seed only
+            // where nothing reached yet.
+            have = any(greaterThan(field, vec3(0.0)));
+            if (have) {
+                return vec4(field * ls, 1.0);
+            }
+        } else if (have) {
             float f2 = clamp(1.0 - sup / LIGHTING_SC_HANDOVER, 0.0, 1.0);
             float a = sd.w > 0.0 ? sup / max(sup + LIGHTING_SC_HANDOVER_K * sd.w * f2, 1.0e-4) : 1.0;
             return vec4(mix(sd.rgb, field * ls, a), 1.0);
@@ -1784,7 +1798,7 @@ const uint LIGHTING_SC_PAGES = 65536u;
 const uint LIGHTING_SC_PAGE_AT = LIGHTING_ARGS_AT + 16u;
 const float LIGHTING_SC_PAGE_LEAD = 2.0;
 bool lighting_sc_pages_on() {
-    return lighting_world_mode() == 3u && (lighting_sc_flags() & 128u) == 0u;
+    return lighting_world_mode() == 3u && (lighting_sc_flags() & 128u) == 0u && !lighting_sc_svgf();
 }
 // A texel's cell on its plane (xy), the plane's key (z: offset, w: axis), so
 // pages and their neighbours hash alike.
@@ -2335,4 +2349,305 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         trust = 0.0;
     }
     return vec4(wsum > 0.0 ? sum / wsum : vec3(0.0), trust);
+}
+
+// S72V layer 2 as SVGF (Anthony 14:15: the papers' definitions and structure).
+// Pipeline per round, after the cache pass (layer 1 updated), one dispatch per
+// stage over the slots (lighting_atrous.comp, stage in params.z bits 1-3):
+//   stage 0  variance (Schied et al. 2017, sec. 4.2): a texel's luminance
+//            variance is its MSME per-set variance (moments, Barre-Brisebois
+//            2019); with fewer than 4 sets (or none kept, the WRC) it is
+//            estimated spatially from the luminance moments of a 7 x 7
+//            neighbourhood weighted by w_z w_n, boosted by 4 / sets (Falcor's
+//            SVGF reference). Input value and mask weight m (min(1, sets / 4),
+//            WRC sets / 16 [inferred]; 0 for no sets or a non-site, sec. IC
+//            below) go to buffer B.
+//   stages 1-5  five a-trous iterations (Dammertz et al. 2010), step 2^i
+//            cells, 5 x 5 B3-spline kernel h = (1/16, 1/4, 3/8, 1/4, 1/16),
+//            B -> A -> B -> A -> B -> A; SVGF weights w = h w_z w_n w_l with
+//            w_l = exp(-|l_p - l_q| / (sigma_l sqrt(g3x3(var_p)) + eps)),
+//            sigma_l = 4, g3x3 a 3 x 3 Gaussian of the input variance;
+//            w_n = max(0, n_p . n_q)^sigma_n, sigma_n = 128; w_z = exp(-|z_p -
+//            z_q| / (sigma_z s + eps)), sigma_z = 1, z the plane offset and s
+//            half a texel [deviation: the screen-space depth gradient term has no
+//            surface-space counterpart]. Variance filtered with w^2 / (sum w)^2.
+//            Texels without data take part with their mask m as normalized
+//            convolution (Knutsson & Westin 1993) [deviation: SVGF has a sample
+//            at every pixel]; m carries through the levels.
+//   stage 6  push (Gortler et al. 1996, pull-push): the fine texel's filtered
+//            value with weight W = its mask after the last level, the WRC (25 cm
+//            cells, filtered by the same five levels on their own grid) bilinear
+//            for 1 - W. Written to WORLD_AT .y, what pixels show. Layer 1 is
+//            never written (no SVGF feedback of the first level into history
+//            [deviation, Anthony's rule]).
+//   Also in stage 6, irradiance-caching placement for the next rounds (Ward
+//   et al. 1988; Ward & Heckbert 1992; Krivanek et al. 2006, sec. 5.1-5.2):
+//   R = min(R_geo, E / |grad_t E|) (gradient limit), neighbour clamping
+//   R_i = min(R_i, R_j + |p_i - p_j|) against the stored R of texels 4 cells
+//   away, stored unclamped in SPARSE_AT .w; the scheduler clamps it to
+//   [R_min, R_max] and traces a texel only where its cell lies on the grid of
+//   spacing a R' (record influence radius a R, Krivanek 2006 sec. 5.2),
+//   a power of two from 1 to 8. R_geo is twice the distance to where the
+//   surface ends [deviation: Ward's harmonic mean ray distance is not kept];
+//   grad_t E is the central difference of the filtered field [deviation: Ward &
+//   Heckbert's hemisphere gradient needs per-ray distances].
+// Flag 2147483648: off (S72Q layer 2).
+const uint LIGHTING_SC_ATROUS_A = 9u * LIGHTING_CACHE_SLOTS;
+const uint LIGHTING_SC_ATROUS_B = 10u * LIGHTING_CACHE_SLOTS;
+const float LIGHTING_SVGF_SIGMA_L = 4.0;
+const float LIGHTING_SVGF_SIGMA_N = 128.0;
+const float LIGHTING_SVGF_SIGMA_Z = 1.0;
+const float LIGHTING_IC_A = 0.25;
+const float LIGHTING_IC_RMIN = 1.0;
+const float LIGHTING_IC_RMAX = 64.0;
+bool lighting_sc_svgf() {
+    return lighting_world_mode() == 3u && (lighting_sc_flags() & 2147483648u) == 0u;
+}
+uint lighting_atrous_stage() {
+    return (pc.params.z >> 1u) & 7u;
+}
+// The slot of the texel `off` cells from slot's cell on its plane (same size,
+// same salt), ~0u when none.
+uint lighting_sc_cell_slot(uint slot, ivec2 off) {
+    vec3 p = cache.v[3u * slot].xyz;
+    vec4 nb = cache.v[3u * slot + 1u];
+    float size = nb.w;
+    uint ax = lighting_axis(nb.xyz) >> 1u;
+    uint ua = (ax + 1u) % 3u;
+    uint ub = (ax + 2u) % 3u;
+    vec2 c = floor(vec2(p[ua], p[ub]) / size) + vec2(off);
+    vec3 q = p;
+    q[ua] = (c.x + 0.5) * size;
+    q[ub] = (c.y + 0.5) * size;
+    return lighting_cache_find_sized(q, nb.xyz, false, size, p);
+}
+// IC site: traced this round (the cell on the grid of spacing a R').
+bool lighting_ic_site(uint slot) {
+    float r = cache.v[LIGHTING_SC_SPARSE_AT + slot].w;
+    if (!(r > 0.0)) {
+        return true;
+    }
+    float rc = clamp(r, LIGHTING_IC_RMIN, LIGHTING_IC_RMAX);
+    int g = 1 << uint(clamp(floor(log2(max(LIGHTING_IC_A * rc, 1.0))), 0.0, 3.0));
+    ivec2 c = lighting_sc_cell(slot).xy;
+    return (c.x & (g - 1)) == 0 && (c.y & (g - 1)) == 0;
+}
+// Layer-1 input: rgb, luminance variance (-1 unknown), mask weight.
+vec4 lighting_svgf_in(uint s, out float var) {
+    vec4 own = cache.v[3u * s + 2u];
+    float t = floor(max(own.w, 0.0));
+    var = -1.0;
+    bool wrc = cache.v[3u * s + 1u].w > 0.2;
+    if (t < 0.5) {
+        return vec4(0.0);
+    }
+    if (!wrc && !lighting_ic_site(s)) {
+        return vec4(own.rgb, 0.0);
+    }
+    if (!wrc) {
+        vec4 eb = cache.v[LIGHTING_SC_EST_AT + 2u * s + 1u];
+        if (eb.x > 0.0 && t >= 4.0) {
+            var = max(cache.v[LIGHTING_SC_EST_AT + 2u * s].w, 0.0);
+        }
+    }
+    return vec4(own.rgb, min(1.0, t / (wrc ? 16.0 : 4.0)));
+}
+float lighting_svgf_wzn(uint p, uint q) {
+    vec4 np = cache.v[3u * p + 1u];
+    vec4 nq = cache.v[3u * q + 1u];
+    float dz = abs(dot(cache.v[3u * q].xyz - cache.v[3u * p].xyz, np.xyz));
+    float wz = exp(-dz / (LIGHTING_SVGF_SIGMA_Z * 0.5 * np.w + 1.0e-6));
+    float wn = pow(max(dot(np.xyz, nq.xyz), 0.0), LIGHTING_SVGF_SIGMA_N);
+    return wz * wn;
+}
+void lighting_svgf_store(uint at, uint s, vec3 rgb, float var, float m) {
+    cache.v[at + s] = vec4(uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0)))), var, m, 0.0);
+}
+vec4 lighting_svgf_load(uint at, uint s, out float var) {
+    vec4 v = cache.v[at + s];
+    var = v.y;
+    return vec4(lighting_unpack_rgb9e5(floatBitsToUint(v.x)), v.z);
+}
+const vec3 LIGHTING_SVGF_LW = vec3(0.2126, 0.7152, 0.0722);
+void lighting_svgf_variance(uint slot) {
+    float var;
+    vec4 v = lighting_svgf_in(slot, var);
+    if (var < 0.0) {
+        // Spatial estimate, 7 x 7 moments weighted by w_z w_n.
+        float s1 = 0.0;
+        float s2 = 0.0;
+        float sw = 0.0;
+        [[dont_unroll]] for (int j = -3; j <= 3; j++) {
+            [[dont_unroll]] for (int i = -3; i <= 3; i++) {
+                uint q = (i == 0 && j == 0) ? slot : lighting_sc_cell_slot(slot, ivec2(i, j));
+                if (q == ~0u) {
+                    continue;
+                }
+                float vq;
+                vec4 x = lighting_svgf_in(q, vq);
+                if (x.w <= 0.0) {
+                    continue;
+                }
+                float w = lighting_svgf_wzn(slot, q) * x.w;
+                float l = dot(x.rgb, LIGHTING_SVGF_LW);
+                s1 += w * l;
+                s2 += w * (l * l + max(vq, 0.0));
+                sw += w;
+            }
+        }
+        float t = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+        var = sw > 0.0 ? max(s2 / sw - (s1 / sw) * (s1 / sw), 0.0) * 4.0 / max(t, 1.0) : 0.0;
+    }
+    lighting_svgf_store(LIGHTING_SC_ATROUS_B, slot, v.rgb, var, v.w);
+}
+void lighting_svgf_iter(uint slot, uint it) {
+    uint src = (it & 1u) == 0u ? LIGHTING_SC_ATROUS_B : LIGHTING_SC_ATROUS_A;
+    uint dst = (it & 1u) == 0u ? LIGHTING_SC_ATROUS_A : LIGHTING_SC_ATROUS_B;
+    int step = 1 << it;
+    float varp;
+    vec4 vp = lighting_svgf_load(src, slot, varp);
+    float lp = dot(vp.rgb, LIGHTING_SVGF_LW);
+    // g3x3: 3 x 3 Gaussian of the input variance.
+    float gv = 0.0;
+    float gw = 0.0;
+    [[dont_unroll]] for (int j = -1; j <= 1; j++) {
+        [[dont_unroll]] for (int i = -1; i <= 1; i++) {
+            uint q = (i == 0 && j == 0) ? slot : lighting_sc_cell_slot(slot, ivec2(i, j));
+            if (q == ~0u) {
+                continue;
+            }
+            float vq;
+            vec4 x = lighting_svgf_load(src, q, vq);
+            float k = (i == 0 ? 0.5 : 0.25) * (j == 0 ? 0.5 : 0.25);
+            gv += k * vq;
+            gw += k;
+        }
+    }
+    gv = gw > 0.0 ? gv / gw : varp;
+    float phi = LIGHTING_SVGF_SIGMA_L * sqrt(max(gv, 0.0)) + 1.0e-10;
+    const float h1[5] = float[5](1.0 / 16.0, 0.25, 0.375, 0.25, 1.0 / 16.0);
+    vec3 sum = vec3(0.0);
+    float wm = 0.0;
+    float wall = 0.0;
+    float vsum = 0.0;
+    [[dont_unroll]] for (int j = -2; j <= 2; j++) {
+        [[dont_unroll]] for (int i = -2; i <= 2; i++) {
+            uint q = (i == 0 && j == 0) ? slot : lighting_sc_cell_slot(slot, ivec2(i, j) * step);
+            if (q == ~0u) {
+                continue;
+            }
+            float vq;
+            vec4 x = lighting_svgf_load(src, q, vq);
+            float w = h1[i + 2] * h1[j + 2] * lighting_svgf_wzn(slot, q);
+            if (q != slot && vp.w > 0.0 && x.w > 0.0) {
+                w *= exp(-abs(lp - dot(x.rgb, LIGHTING_SVGF_LW)) / phi);
+            }
+            float a = w * x.w;
+            sum += a * x.rgb;
+            wm += a;
+            wall += w;
+            vsum += a * a * max(vq, 0.0);
+        }
+    }
+    if (wm > 0.0) {
+        lighting_svgf_store(dst, slot, sum / wm, vsum / (wm * wm), wall > 0.0 ? wm / wall : 0.0);
+    } else {
+        lighting_svgf_store(dst, slot, vec3(0.0), 0.0, 0.0);
+    }
+}
+float lighting_svgf_lum_at(uint slot, ivec2 off, out bool ok) {
+    uint q = lighting_sc_cell_slot(slot, off);
+    ok = false;
+    if (q == ~0u) {
+        return 0.0;
+    }
+    float vq;
+    vec4 x = lighting_svgf_load(LIGHTING_SC_ATROUS_A, q, vq);
+    ok = x.w > 0.0;
+    return dot(x.rgb, LIGHTING_SVGF_LW);
+}
+void lighting_svgf_push(uint slot) {
+    vec4 nb = cache.v[3u * slot + 1u];
+    if (nb.w > 0.2) {
+        return;
+    }
+    float varp;
+    vec4 f = lighting_svgf_load(LIGHTING_SC_ATROUS_A, slot, varp);
+    float W = clamp(f.w, 0.0, 1.0);
+    // Coarse: the WRC cells (2x size) bilinear, their filtered values and masks.
+    vec3 p = cache.v[3u * slot].xyz;
+    vec3 n = nb.xyz;
+    float cs = 0.25;
+    uint ax = lighting_axis(n) >> 1u;
+    uint ua = (ax + 1u) % 3u;
+    uint ub = (ax + 2u) % 3u;
+    vec2 uv = vec2(p[ua], p[ub]) / cs - 0.5;
+    vec2 g0 = floor(uv);
+    vec2 fr = uv - g0;
+    vec3 csum = vec3(0.0);
+    float cw = 0.0;
+    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
+        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u));
+        vec3 q = p;
+        q[ua] = (c.x + 0.5) * cs;
+        q[ub] = (c.y + 0.5) * cs;
+        float bil = ((k & 1u) == 1u ? fr.x : 1.0 - fr.x) * ((k >> 1u) == 1u ? fr.y : 1.0 - fr.y);
+        uint s = lighting_cache_find_sized(q, n, false, cs, p);
+        if (s == ~0u || bil <= 0.0 || abs(dot(cache.v[3u * s].xyz - p, n)) > 0.5 * cs) {
+            continue;
+        }
+        float vq;
+        vec4 x = lighting_svgf_load(LIGHTING_SC_ATROUS_A, s, vq);
+        csum += bil * x.w * x.rgb;
+        cw += bil * x.w;
+    }
+    vec3 outc;
+    if (cw > 0.0) {
+        outc = W * f.rgb + (1.0 - W) * (csum / cw);
+    } else if (W > 0.0) {
+        outc = f.rgb;
+    } else {
+        outc = vec3(0.0);
+    }
+    cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(outc));
+    // IC placement for the next rounds.
+    if (W > 0.0 || cw > 0.0) {
+        float e = dot(outc, LIGHTING_SVGF_LW);
+        bool o1, o2, o3, o4;
+        float lx1 = lighting_svgf_lum_at(slot, ivec2(1, 0), o1);
+        float lx0 = lighting_svgf_lum_at(slot, ivec2(-1, 0), o2);
+        float ly1 = lighting_svgf_lum_at(slot, ivec2(0, 1), o3);
+        float ly0 = lighting_svgf_lum_at(slot, ivec2(0, -1), o4);
+        float fl = dot(f.rgb, LIGHTING_SVGF_LW);
+        float gx = (o1 && o2) ? 0.5 * (lx1 - lx0) : (o1 ? lx1 - fl : (o2 ? fl - lx0 : 0.0));
+        float gy = (o3 && o4) ? 0.5 * (ly1 - ly0) : (o3 ? ly1 - fl : (o4 ? fl - ly0 : 0.0));
+        float grad = length(vec2(gx, gy));
+        float r = LIGHTING_IC_RMAX;
+        if (grad > 1.0e-6) {
+            r = min(r, e / grad);
+        }
+        // R_geo: twice the distance to where the surface ends.
+        [[dont_unroll]] for (uint d = 0u; d < 4u; d++) {
+            ivec2 dir = d == 0u ? ivec2(1, 0) : (d == 1u ? ivec2(-1, 0) : (d == 2u ? ivec2(0, 1) : ivec2(0, -1)));
+            [[dont_unroll]] for (uint l = 1u; l <= 4u; l++) {
+                int dist = 1 << l;
+                if (lighting_sc_cell_slot(slot, dir * dist) == ~0u) {
+                    r = min(r, 2.0 * float(dist));
+                    break;
+                }
+            }
+        }
+        // Neighbour clamping (Krivanek 2006, 5.2), against the stored R 4 cells away.
+        [[dont_unroll]] for (uint d = 0u; d < 4u; d++) {
+            ivec2 dir = d == 0u ? ivec2(4, 0) : (d == 1u ? ivec2(-4, 0) : (d == 2u ? ivec2(0, 4) : ivec2(0, -4)));
+            uint q = lighting_sc_cell_slot(slot, dir);
+            if (q != ~0u) {
+                float rq = cache.v[LIGHTING_SC_SPARSE_AT + q].w;
+                if (rq > 0.0) {
+                    r = min(r, rq + 4.0);
+                }
+            }
+        }
+        cache.v[LIGHTING_SC_SPARSE_AT + slot].w = max(r, 0.5);
+    }
 }
