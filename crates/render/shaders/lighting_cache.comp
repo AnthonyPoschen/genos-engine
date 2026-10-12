@@ -101,9 +101,12 @@ void main() {
     }
     atomicAdd(gstats.rays, run * LIGHTING_CACHE_RAYS);
     uint last = floatBitsToUint(cache.v[3u * slot].w);
+    uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z);
     // Signed: on the async queue a frame drawn after this round was built may
     // already have read the patch (last ahead of this round's frame).
-    if (int(lighting_frame() - last) > int(LIGHTING_CACHE_LIFE)) {
+    // A held camera stops compose from restamping last-read; an on-screen texel
+    // stays (lighting_sc_expired).
+    if (lighting_sc_expired(last, shown)) {
         atomicAdd(gstats.freed, 1u);
         ckeys.key[slot] = 0u;
         cache.v[3u * slot + 1u] = vec4(0.0);

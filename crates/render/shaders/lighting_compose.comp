@@ -5,6 +5,11 @@
 // where none matches), through the same
 // tone curve and dither as the picture. Pixels with no surface keep the raster
 // colour already in the output. Clears the G-buffer record for the next frame.
+//
+// Quiet frames dispatch one 8x8 group per block whose inputs changed
+// (LIGHTING_COMPOSE_LIST). A full frame (camera, resize, or a picture bigger
+// than the list) sets LIGHTING_COMPOSE_FULL and covers the image. The picture
+// stays in outc[0..pixels); emitted light for this frame is outc[pixels..).
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 8, local_size_y = 8) in;
 #include "lighting_common.glsl"
@@ -61,6 +66,8 @@ vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
     // Pixels no probe matches well (thin pillars, edges, surfaces no tile centre
     // landed on) blend in the light cache's patch; their lookup keeps it alive.
     const float CACHE_WEIGHT = 0.05;
+    // Cover every cache slot this pixel reads, including the probe fallback.
+    lighting_sc_display = true;
     if (wsum < CACHE_WEIGHT) {
         float w = CACHE_WEIGHT - wsum;
         sum += w * lighting_cache_irradiance(pos, n);
@@ -68,20 +75,29 @@ vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
     }
     vec3 probes = sum / wsum;
     if (lighting_world_mode() != 0u) {
-        lighting_sc_display = true;
         lighting_px_probes = wsum > CACHE_WEIGHT + 1.0e-4 ? probes : vec3(-1.0);
         vec4 world = lighting_world_irradiance(pos, n);
         lighting_sc_display = false;
         return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));
     }
+    lighting_sc_display = false;
     return probes;
 }
 
 void main() {
-    uvec2 p = gl_GlobalInvocationID.xy;
+    uvec2 p;
+    if (ckeys.key[LIGHTING_COMPOSE_FULL] != 0u) {
+        p = gl_GlobalInvocationID.xy;
+    } else {
+        uint bw = (pc.dims.x + 7u) / 8u;
+        uint block = ckeys.key[LIGHTING_COMPOSE_LIST + gl_WorkGroupID.x];
+        uvec2 b = uvec2(block % bw, block / bw);
+        p = b * 8u + gl_LocalInvocationID.xy;
+    }
     if (p.x >= pc.dims.x || p.y >= pc.dims.y) {
         return;
     }
+    lighting_compose_px = p;
     vec3 pos;
     vec3 n;
     vec3 albedo;
@@ -91,8 +107,8 @@ void main() {
         return;
     }
     vec3 direct = lighting_unpack_rgb9e5(gbuf.px[index].w);
-    // The light pass left the pixel's emitted light here.
-    vec3 glow = lighting_unpack_rgb9e5(outc.px[index]);
+    // The light pass left the pixel's emitted light past the picture.
+    vec3 glow = lighting_unpack_rgb9e5(outc.px[pc.dims.x * pc.dims.y + index]);
     gbuf.px[index] = uvec4(~0u);
     if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
         n = -n;

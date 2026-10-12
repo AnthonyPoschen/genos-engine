@@ -57,6 +57,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Shadow visibility shared per 12.5 cm cell for hits, invalidated per lamp range (S74A).
 - 1-in-16 push refresh floor (S78B); kept-hit bounce refreshed with its re-trace (S78D); held strata keep exact directions (S78K).
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
+- Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
 
 ## Experiment index
@@ -167,7 +168,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md) | 2026-10-12 | S-curve allowed quality lag for off-screen pages by priority | deferred | none |
 | [DUMP](experiments/DUMP-gpu-dump-tool.md) | 2026-10-12 | Debug dump of GPU data from two consecutive frames per component (direct, bounce, coarse/fine WRC, probe resul | in progress | none yet |
 | [RAYCEIL](experiments/RAYCEIL-world-cache-need-ray-ceilings.md) | 2026-10-12 | World-cache cells stop at IC error bound instead of fixed 128 samples | queued | none |
-| [QUIET](experiments/QUIET-quiet-paths-compose-filter-compact.md) | 2026-10-12 | Quiet paths for compose, filter, compact (changed tiles + rotating checks) | queued | none |
+| [QUIET](experiments/QUIET-quiet-paths-compose-filter-compact.md) | 2026-10-12 | Compose redraws 8×8 blocks whose direct, probe SH, or filtered field changed | pushed (compose only; perf on the owner GPU) | this commit |
 | [LSMOOTH](experiments/LSMOOTH-lighter-smoothing.md) | 2026-10-12 | Lighter smoothing | dropped (Anthony) | none |
 
 # Architecture and component notes (history kept as written)
@@ -233,7 +234,7 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 4. `lighting_gather`: each probe bins its kept rays by direction.
 5. `lighting_filter`: three probe-space filter rounds, then SH.
 6. `lighting_compact` / `lighting_cache`: the light cache (or surface cache) relights a batch.
-7. `lighting_compose`: pixel = emitted + direct + interpolated probe (or cache) irradiance.
+7. `lighting_compose`: pixel = emitted + direct + interpolated probe (or cache) irradiance. The picture stays in the output buffer. A frame whose camera, meshes and lamps match the last one (surface cache on, picture small enough for the block list) dispatches only the 8×8 blocks a producer marked: the direct pass when the surface point, direct light or emission changed; the probe filter when a probe's SH changed; the surface-cache push when a texel's filtered field changed and that texel was read by a block. The list is an indirect dispatch. Nothing marked means no groups. `GENOS_LIGHTING_COMPOSE_ALL=1` forces a full compose. While that camera holds, a filtered field keeps being shown after S72V10's two-frame stamp would have dropped it (see Deviations).
 
 ## Scene representation and tracer
 
