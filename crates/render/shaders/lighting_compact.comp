@@ -89,6 +89,7 @@ void main() {
         if (burst && atomicAdd(ckeys.key[LIGHTING_WRC_BURST_COUNT_AT], 1u) >= (LIGHTING_WRC_BURST_MAX >> lighting_sc_budget_shift())) {
             burst = false;
         }
+        if (!wrc) { lighting_dg(19u, 1u); if (near) lighting_dg(28u, 1u); if (on_screen) lighting_dg(30u, 1u); }
         if (wrc && !burst && LIGHTING_SC_SCHED) {
             // WRC refresh (fixed budget): change-driven list, else background.
             if (int(lighting_frame() - last) > int(LIGHTING_CACHE_LIFE)) {
@@ -104,6 +105,7 @@ void main() {
                 uint at = atomicAdd(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], 1u);
                 if (at < LIGHTING_WRC_REFRESH_CELLS) {
                     ckeys.key[LIGHTING_WRC_CHG_AT + at] = slot;
+                    lighting_dg(16u, 1u);
                 }
                 return;
             }
@@ -120,6 +122,7 @@ void main() {
                     uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);
                     if (at < LIGHTING_WRC_REFRESH_CELLS) {
                         ckeys.key[LIGHTING_WRC_BG_AT + at] = slot;
+                        lighting_dg(17u, 1u);
                     }
                 }
                 return;
@@ -175,28 +178,44 @@ void main() {
             // the rays of a resolved texel; lambda sets the rate of a changing one.
             if (asvgf) {
                 float lam = lighting_sc_lambda(slot);
+                lighting_dg(20u + (lam < 0.01 ? 0u : lam < 0.02 ? 1u : lam < 0.05 ? 2u : lam < 0.1 ? 3u : lam < 0.25 ? 4u : lam < 0.5 ? 5u : lam < 0.999 ? 6u : 7u), 1u);
+                if (!lighting_sc_grad_stored(slot)) lighting_dg(11u, 1u);
+                else if (lam >= LIGHTING_ASVGF_EPS) lighting_dg(9u, 1u);
+                else if (t < LIGHTING_DN_MIN_SETS - 0.5) lighting_dg(12u, 1u);
+                else if (!lighting_sc_resolved(slot, t, lam)) lighting_dg(10u, 1u);
+                if (lighting_sc_lamp_touched(slot)) lighting_dg(29u, 1u);
                 if (lighting_sc_resolved(slot, t, lam)) {
                     bool aged = int(lighting_frame() - updated) > int(LIGHTING_ASVGF_AGE);
+                    lighting_dg(7u, 1u);
+                    if (aged) lighting_dg(4u, 1u);
                     if (!aged) {
                         bool hinted = near || lighting_sc_lamp_touched(slot);
-                        if (LIGHTING_GRAD_CHECKS_ON && (hinted || lighting_sc_grad_rep(slot))) {
+                        // S76: checked when its deferred check is due, or, near a
+                        // hint, as its block's pick this round (nominated).
+                        if (LIGHTING_GRAD_CHECKS_ON && (lighting_sc_check_due(slot) || (hinted && lighting_sc_grad_rep(slot)))) {
                             uint at = atomicAdd(ckeys.key[LIGHTING_GRAD_COUNT_AT], 1u);
                             if (at < ((LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift())) {
+                                lighting_dg(hinted ? 5u : 6u, 1u);
                                 ckeys.key[LIGHTING_GRAD_LIST_AT + at] = slot;
                             }
                         }
                         atomicAdd(gstats.waiting, 1u);
                         return;
                     }
+                } else if (lam >= LIGHTING_ASVGF_EPS && !lighting_sc_lambda_fresh(slot)) {
+                    // Spent: its rays are out; wait for the next check.
+                    atomicAdd(gstats.waiting, 1u);
+                    return;
                 } else if (lam >= LIGHTING_ASVGF_EPS) {
-                    // Rays in proportion to lambda: relit (a whole set) with
-                    // probability min(1, lambda / FULL) a round [deviation].
-                    float rate = min(1.0, lam / LIGHTING_ASVGF_FULL);
-                    if (lighting_unit(lighting_hash(slot ^ 0x2c1b3c6du) ^ lighting_round() * 0x9e3779b9u) >= rate) {
-                        atomicAdd(gstats.waiting, 1u);
-                        return;
-                    }
-                    uint mm = lighting_sc_entries(slot, true);
+                    // S76: a significant check escalates rays in proportion to
+                    // lambda: ceil(4 lambda / FULL) of the set's 4 sixteen-ray
+                    // quarters (a whole set from lambda >= FULL) [deviation:
+                    // A-SVGF uses lambda for the blend only]. The lambda is spent:
+                    // the next check (next frame) decides whether more follow.
+                    uint mm = min(lighting_sc_entries(slot, true), uint(ceil(clamp(lam / LIGHTING_ASVGF_FULL, 0.0, 1.0) * float(LIGHTING_SC_QUARTERS))));
+                    cache.v[LIGHTING_SC_GRAD_AT + slot].x = -lam;
+                    lighting_sc_check_soon(slot);
+                    lighting_dg(2u, 1u); lighting_dg(3u, mm);
                     uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], mm);
                     for (uint i = 0u; i < mm; i++) {
                         ckeys.key[2u * LIGHTING_CACHE_SLOTS - at - i] = slot;
@@ -221,6 +240,7 @@ void main() {
             if (!wrc && lighting_sc_svgf() && lighting_sc_global_change(slot) < LIGHTING_IC_GLOBAL_STALE && !near && t >= 3.5 && !lighting_sc_local_change(slot, mover_ic)) {
                 uint per = lighting_ic_period(slot);
                 if (per > 1u && ((lighting_hash(slot ^ 0x68e31da4u) + lighting_round()) % per) != 0u) {
+                    lighting_dg(31u, 1u);
                     atomicAdd(gstats.waiting, 1u);
                     return;
                 }
@@ -285,6 +305,7 @@ void main() {
                 if (at < LIGHTING_SC_TRICKLE) {
                     ckeys.key[LIGHTING_SC_TRICKLE_AT + at] = slot;
                     atomicAdd(gstats.pad2, 1u);
+                    lighting_dg(15u, 1u);
                 }
                 return;
             }
@@ -322,6 +343,9 @@ void main() {
                 return;
             }
             uint at = atomicAdd(ckeys.key[LIGHTING_CACHE_SLOTS], m);
+            lighting_dg(wrc ? 36u : (t < LIGHTING_DN_MIN_SETS - 0.5 ? 32u : (on_screen ? 13u : 14u)), m);
+            lighting_dg(wrc ? 37u : 18u, 1u);
+            if (!wrc && int(lighting_frame() - updated) > int(LIGHTING_ASVGF_AGE)) lighting_dg(33u, m);
             for (uint i = 0u; i < m; i++) {
                 ckeys.key[LIGHTING_CACHE_SLOTS + 1u + at + i] = slot;
             }
@@ -340,6 +364,7 @@ void main() {
         }
         bool young = young_now;
         uint m = lighting_sc_entries(slot, true);
+        lighting_dg(burst ? 1u : (near ? 0u : 34u), m); lighting_dg(35u, 1u);
         if (young) {
             uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], m);
             for (uint i = 0u; i < m; i++) {

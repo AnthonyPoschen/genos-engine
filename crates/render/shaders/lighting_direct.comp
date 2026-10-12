@@ -120,7 +120,9 @@ void main() {
             if (tdl_sig != 0u && floatBitsToUint(d.z) == tdl_sig && lighting_frame() - floatBitsToUint(d.w) < LIGHTING_TDL_STALE) {
                 count = 0u;
                 tdl = ts | 0x80000000u;
+                lighting_dg(40u, 1u);
             } else if (tdl_sig != 0u && atomicAdd(ckeys.key[LIGHTING_TDL_COUNT_AT], 1u) < LIGHTING_TDL_BUDGET) {
+                lighting_dg(41u, 1u);
                 tdl = ts;
                 origin = tp + tn * 0.02;
                 n = tn;

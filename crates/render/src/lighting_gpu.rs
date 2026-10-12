@@ -609,10 +609,10 @@ impl Gpu {
                 self.make_buffer_queues(LIGHTING_CACHE_SLOTS * 240, 0x20 | 0x2, Memory::Device, &share)?; // S74A: + A-SVGF gradient (2 vec4) // 11 vec4 a slot (S72A: + sparse fill; S72V: + a-trous ping-pong)
             self.lighting.cache_clear = true;
             for k in 0..2 {
-                self.lighting.stats[k] = self.make_buffer(96, 0x20 | 0x2, Memory::Readback)?;
+                self.lighting.stats[k] = self.make_buffer(352, 0x20 | 0x2, Memory::Readback)?;
             }
             self.lighting.world_stats =
-                self.make_buffer_queues(96, 0x20 | 0x2, Memory::Readback, &share)?;
+                self.make_buffer_queues(352, 0x20 | 0x2, Memory::Readback, &share)?;
             self.lighting.world_scene = self.make_buffer_queues(
                 crate::pack::SCENE_CAPACITY as u64,
                 0x20,
@@ -820,7 +820,7 @@ impl Gpu {
             }
         }
         unsafe {
-            (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.stats[slot].buffer, 0, 96, 0);
+            (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.stats[slot].buffer, 0, 352, 0);
             if self.lighting.cache_clear {
                 self.lighting.cache_clear = false;
                 // The async queue starts once this frame (its slot) is surely done.
@@ -1026,7 +1026,7 @@ impl Gpu {
                 (self.fns.cmd_reset_query)(cmd, qp, 0, 6);
                 (self.fns.cmd_write_timestamp)(cmd, 0x1, qp, 0);
             }
-            (self.fns.cmd_fill_buffer)(cmd, self.lighting.world_stats.buffer, 0, 96, 0);
+            (self.fns.cmd_fill_buffer)(cmd, self.lighting.world_stats.buffer, 0, 352, 0);
             // The mature and young counts, rebuilt by the compact pass.
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, LIGHTING_CACHE_SLOTS * 4, 4, 0);
             // The WRC refresh lists' counts (change, background; lighting_cache.glsl).
@@ -1109,11 +1109,12 @@ impl Gpu {
                 "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {} checks {} changed {}",
                 self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23]
             );
+            eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..72]);
         }
     }
 
-    fn read_stats16(&self, memory: Handle) -> Result<[u32; 24], String> {
-        let mut words = [0u32; 24];
+    fn read_stats16(&self, memory: Handle) -> Result<[u32; 88], String> {
+        let mut words = [0u32; 88];
         unsafe {
             let mut mapped = std::ptr::null_mut();
             check(
@@ -1121,13 +1122,13 @@ impl Gpu {
                     self.device,
                     memory,
                     0,
-                    96,
+                    352,
                     0,
                     &mut mapped,
                 ),
                 "map lighting stats",
             )?;
-            std::ptr::copy_nonoverlapping(mapped as *const u32, words.as_mut_ptr(), 24);
+            std::ptr::copy_nonoverlapping(mapped as *const u32, words.as_mut_ptr(), 88);
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(words)

@@ -67,7 +67,11 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint pad3;
     uint pad4;
     uint pad5;
+    // S76 diagnostics (GENOS_LIGHTING_SC_TRACE): per-round counters, see lighting_gpu.rs.
+    uint diag[64];
 } gstats;
+const bool LIGHTING_DIAG = false;
+void lighting_dg(uint i, uint v) { if (LIGHTING_DIAG) atomicAdd(gstats.diag[i], v); }
 
 const float LIGHTING_CACHE_MATURE = 3.0;
 
@@ -966,6 +970,7 @@ bool lighting_sc_lamp_touched(uint slot) {
     uint upd = lighting_sc_upd_override != ~0u ? lighting_sc_upd_override : lighting_sc_updated(slot);
     return !lighting_sc_light_quiet() && lighting_wrc_lamp_changed(lighting_sc_texel_pos(slot), upd);
 }
+bool lighting_sc_asvgf_on();
 float lighting_sc_count(uint slot) {
     float t = floor(max(cache.v[3u * slot + 2u].w, 0.0));
     if (lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2) {
@@ -974,7 +979,8 @@ float lighting_sc_count(uint slot) {
         return t;
     }
     bool mover;
-    if (lighting_sc_local_change(slot, mover)) {
+    // S76: under A-SVGF a nearby change only nominates a check; the history stays.
+    if (!lighting_sc_asvgf_on() && lighting_sc_local_change(slot, mover)) {
         t = min(t, mover ? LIGHTING_SC_MOVING : lighting_sc_light_window());
     }
     return t;
@@ -2797,6 +2803,7 @@ void lighting_svgf_push(uint slot) {
 // not just its block's pick. Age floor (Lumen: oldest pages refreshed slowly):
 // a texel not relit for LIGHTING_ASVGF_AGE frames is scheduled as before.
 const bool LIGHTING_SC_ASVGF = true;
+bool lighting_sc_asvgf_on() { return LIGHTING_SC_ASVGF && lighting_sc_svgf(); }
 const bool LIGHTING_GRAD_CHECKS_ON = true;
 const uint LIGHTING_SC_GRAD_AT = 11u * LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_SC_GRAD2_AT = 12u * LIGHTING_CACHE_SLOTS;
@@ -2821,7 +2828,11 @@ float lighting_sc_lambda(uint slot) {
     if (f == 0u || int(lighting_frame() - f) > int(LIGHTING_ASVGF_KEEP)) {
         return 0.0;
     }
-    return cache.v[LIGHTING_SC_GRAD_AT + slot].x;
+    return abs(cache.v[LIGHTING_SC_GRAD_AT + slot].x);
+}
+// S76: lambda not yet spent on rays (spent lambda is kept negated for the blend).
+bool lighting_sc_lambda_fresh(uint slot) {
+    return cache.v[LIGHTING_SC_GRAD_AT + slot].x > 0.0;
 }
 bool lighting_sc_resolved(uint slot, float t, float lam) {
     if (lam >= LIGHTING_ASVGF_EPS || !lighting_sc_grad_stored(slot)) {
@@ -2848,20 +2859,51 @@ void lighting_sc_grad_put(uint s, float lam) {
     if (s == ~0u) {
         return;
     }
-    float old = lighting_sc_lambda(s);
+    float old = lighting_sc_lambda_fresh(s) ? lighting_sc_lambda(s) : 0.0;
     cache.v[LIGHTING_SC_GRAD_AT + s].x = max(lam, old);
     cache.v[LIGHTING_SC_GRAD2_AT + s].x = uintBitsToFloat(lighting_frame());
 }
-// Check i's result: lambda at its texel, spread over its 3 x 3 block.
+// S76 the check is the gate (Anthony 16:58). Check i's result: the relative
+// same-seed difference d = |L_now - L_then| / max(L_now, L_then, 0.1 mean)
+// (A-SVGF eq. 6), less twice the texel's own check noise sigma (an EMA of d^2 over
+// its checks, capped at LIGHTING_CHECK_SIGMA_MAX; Schied et al. 2019 normalise
+// the gradient by the sample's own variance so noise is not read as change):
+// lambda = max(0, d - 2 sigma). Under LIGHTING_ASVGF_EPS the check confirms the
+// texel: no rays, and its next check is deferred twice as far (LIGHTING_CHECK_MIN
+// to LIGHTING_CHECK_MAX frames). Otherwise lambda goes to its 3 x 3 block and the
+// scheduler escalates rays in proportion (lighting_compact.comp).
+const uint LIGHTING_CHECK_MIN = 8u;
+const uint LIGHTING_CHECK_MAX = 128u;
+const float LIGHTING_CHECK_SIGMA_MAX = 0.05;
+uint lighting_sc_check_next(uint slot) {
+    return floatBitsToUint(cache.v[LIGHTING_SC_GRAD2_AT + slot].y);
+}
+bool lighting_sc_check_due(uint slot) {
+    uint nx = lighting_sc_check_next(slot);
+    return nx == 0u || int(lighting_frame() - nx) >= 0 || int(nx - lighting_frame()) > int(LIGHTING_CHECK_MAX);
+}
+void lighting_sc_check_soon(uint slot) {
+    cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + 1u);
+    cache.v[LIGHTING_SC_GRAD2_AT + slot].z = uintBitsToFloat(LIGHTING_CHECK_MIN);
+}
 void lighting_sc_grad_take(uint slot, float l_now) {
     vec4 g = cache.v[LIGHTING_SC_GRAD_AT + slot];
+    vec4 g2 = cache.v[LIGHTING_SC_GRAD2_AT + slot];
     float mean = dot(cache.v[3u * slot + 2u].rgb, vec3(0.2126, 0.7152, 0.0722));
-    float lam = min(1.0, abs(l_now - g.y) / max(max(l_now, g.y), 0.1 * mean + 1.0e-4));
+    float d = min(1.0, abs(l_now - g.y) / max(max(l_now, g.y), 0.1 * mean + 1.0e-4));
+    float n2 = clamp(g2.w, 0.0, LIGHTING_CHECK_SIGMA_MAX * LIGHTING_CHECK_SIGMA_MAX);
+    float lam = max(0.0, d - 2.0 * sqrt(n2));
+    cache.v[LIGHTING_SC_GRAD2_AT + slot].w = min(mix(n2, d * d, 0.125), LIGHTING_CHECK_SIGMA_MAX * LIGHTING_CHECK_SIGMA_MAX);
     atomicAdd(gstats.pad4, 1u);
-    if (lam < 0.5 * LIGHTING_ASVGF_EPS) {
-        // Unchanged: nothing to spread (a still scene costs the check only).
+    if (lam < LIGHTING_ASVGF_EPS) {
+        // Confirmed: defer the next check (doubling).
+        uint iv = clamp(floatBitsToUint(g2.z), LIGHTING_CHECK_MIN / 2u, LIGHTING_CHECK_MAX / 2u) * 2u;
+        cache.v[LIGHTING_SC_GRAD2_AT + slot].z = uintBitsToFloat(iv);
+        cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + iv);
+        lighting_dg(42u, 1u);
         return;
     }
+    lighting_dg(43u, 1u);
     atomicAdd(gstats.pad5, 1u);
     vec2 c = lighting_sc_true_cell(slot);
     ivec2 b = ivec2(floor(c / 3.0)) * 3 - ivec2(c);
