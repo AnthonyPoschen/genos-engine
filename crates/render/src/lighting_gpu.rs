@@ -1493,8 +1493,11 @@ impl Gpu {
                 }
                 if pass == 8 {
                     // S72V: the a-trous stage (lighting_atrous_stage, bits 1-3).
+                    // S72V6: bits 1-3 cleared first; bit 3 is the gather's "changes
+                    // this frame", so on frames with a change every stage read 4-7
+                    // and the variance pass and first levels never ran.
                     let mut round_pc = pc;
-                    round_pc[6] |= atrous_stage << 1;
+                    round_pc[6] = (round_pc[6] & !0xe) | atrous_stage << 1;
                     atrous_stage += 1;
                     (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, 32, round_pc.as_ptr() as *const c_void);
                     cur_pc = round_pc;
