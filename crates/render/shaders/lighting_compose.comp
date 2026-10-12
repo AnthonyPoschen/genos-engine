@@ -68,7 +68,9 @@ vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
     }
     vec3 probes = sum / wsum;
     if (lighting_world_mode() != 0u) {
+        lighting_sc_display = true;
         vec4 world = lighting_world_irradiance(pos, n);
+        lighting_sc_display = false;
         return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));
     }
     return probes;

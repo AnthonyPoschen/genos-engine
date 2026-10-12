@@ -114,6 +114,17 @@ void main() {
             }
             return;
         }
+        // S72A sparse fill: a non-key texel not promoted shows its key neighbours'
+        // light and is never relit (it is still freed when unread).
+        if (!wrc && lighting_sc_sparse_on() && !lighting_sc_key(slot) && !lighting_sc_promoted(slot)) {
+            if (int(lighting_frame() - last) > int(LIGHTING_CACHE_LIFE)) {
+                atomicAdd(gstats.freed, 1u);
+                ckeys.key[slot] = 0u;
+                cache.v[3u * slot + 1u] = vec4(0.0);
+                cache.v[3u * slot + 2u] = vec4(0.0);
+            }
+            return;
+        }
         bool young_now = near || burst || (!LIGHTING_SC_SCHED && t < 1.5);
         if (LIGHTING_SC_SCHED && !young_now) {
             uint updated = lighting_sc_updated(slot);

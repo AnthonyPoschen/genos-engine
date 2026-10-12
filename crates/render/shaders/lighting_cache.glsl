@@ -288,6 +288,8 @@ const uint LIGHTING_SC_OBJ_AT = 6u * LIGHTING_CACHE_SLOTS;
 // converge the shape (Lumen relights its surface cache's direct light every
 // frame, the radiosity converges over frames).
 const uint LIGHTING_SC_SUN_AT = 7u * LIGHTING_CACHE_SLOTS;
+// S72A sparse fill per slot: x non-zero once promoted to its own rays.
+const uint LIGHTING_SC_SPARSE_AT = 8u * LIGHTING_CACHE_SLOTS;
 // Frame of a texel's last relight (0: never), beside its object id.
 // S62E global light scale (Anthony: day to night, unread texels kept daytime
 // light and faded as rays came in). The pixel's own direct light is already
@@ -506,6 +508,7 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
             cache.v[LIGHTING_WORLD_AT + slot] = vec4(length(at - lighting_sc_centre(pos, n, size)), 0.0, 0.0, 0.0);
             cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(0.0);
             cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(0.0);
+            cache.v[LIGHTING_SC_SPARSE_AT + slot] = vec4(0.0);
             if (lighting_world_mode() == 3u) {
                 cache.v[LIGHTING_SC_OBJ_AT + slot] = vec4(lighting_obj_salt, 0.0, 0.0, 0.0);
             }
@@ -1139,8 +1142,103 @@ vec3 lighting_sc_nclamp(uint slot, vec3 m, vec3 sm, float dev) {
     return m * (clamp(lm, lo, hi) / lm);
 }
 
+// S72A sparse fill + neighbour propagation (irradiance caching, Ward 1988; Lumen's
+// adaptive screen probes; GIBS surfels). Fine texels on a 2 x 2 lattice per plane:
+// the key texel (even cell on both in-plane axes) traces its own rays; the other
+// three show the bilinear light of the 1-4 key texels around them on the same
+// plane and are never scheduled (lighting_compact.comp), so a reveal traces a
+// quarter of the texels. A texel is promoted to its own rays for good when a key
+// it needs is missing or off its plane (edges, small faces) or the keys disagree
+// by more than LIGHTING_SC_SPARSE_RATIO in luminance (contacts, shadow edges).
+// Flag 16777216 turns it off.
+const float LIGHTING_SC_SPARSE_RATIO = 1.6;
+bool lighting_sc_display = false;
+bool lighting_sc_sparse_on() {
+    return lighting_world_mode() == 3u && (lighting_sc_flags() & 16777216u) == 0u;
+}
+bool lighting_sc_key(uint slot) {
+    vec4 nb = cache.v[3u * slot + 1u];
+    float size = nb.w;
+    if (size <= 0.0 || size > 0.2) {
+        return true;
+    }
+    vec3 p = cache.v[3u * slot].xyz;
+    uint ax = lighting_axis(nb.xyz) >> 1u;
+    int a = int(floor(p[(ax + 1u) % 3u] / size));
+    int b = int(floor(p[(ax + 2u) % 3u] / size));
+    return ((a | b) & 1) == 0;
+}
+bool lighting_sc_promoted(uint slot) {
+    return floatBitsToUint(cache.v[LIGHTING_SC_SPARSE_AT + slot].x) != 0u;
+}
+// Light from the key texels around a non-key texel, sun/sky gain applied: w 1 when
+// interpolated, 0 when a key is not lit yet, -1 when it has to be promoted.
+vec4 lighting_sc_sparse(uint slot) {
+    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+    vec3 p = cache.v[3u * slot].xyz;
+    vec4 nb = cache.v[3u * slot + 1u];
+    vec3 n = nb.xyz;
+    float size = nb.w;
+    uint ax = lighting_axis(n) >> 1u;
+    uint ua = (ax + 1u) % 3u;
+    uint ub = (ax + 2u) % 3u;
+    vec2 c = floor(vec2(p[ua], p[ub]) / size);
+    vec2 base = c - mod(c, 2.0);
+    vec2 f = (c - base) * 0.5;
+    vec3 sum = vec3(0.0);
+    float ws = 0.0;
+    float lo = 1.0e30;
+    float hi = 0.0;
+    float result = 1.0;
+    float salt = lighting_obj_salt;
+    lighting_obj_salt = cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5 ? cache.v[LIGHTING_SC_OBJ_AT + slot].x : 0.0;
+    [[dont_unroll]] for (uint i = 0u; i < 4u; i++) {
+        float w = ((i & 1u) == 1u ? f.x : 1.0 - f.x) * ((i >> 1u) == 1u ? f.y : 1.0 - f.y);
+        if (w <= 0.0) {
+            continue;
+        }
+        vec2 k = base + 2.0 * vec2(float(i & 1u), float(i >> 1u));
+        vec3 q = p;
+        q[ua] = (k.x + 0.5) * size;
+        q[ub] = (k.y + 0.5) * size;
+        uint s2 = lighting_cache_find_sized(q, n, false, size, p);
+        if (s2 == ~0u || abs(dot(cache.v[3u * s2].xyz - p, n)) > 0.5 * size) {
+            result = -1.0;
+            break;
+        }
+        vec4 o = cache.v[3u * s2 + 2u];
+        if (o.w < 0.5) {
+            result = 0.0;
+            continue;
+        }
+        vec3 l = o.rgb * lighting_sc_sun_gain(s2);
+        float y = dot(l, lw);
+        lo = min(lo, y);
+        hi = max(hi, y);
+        sum += w * l;
+        ws += w;
+    }
+    lighting_obj_salt = salt;
+    if (result < 0.0 || (hi > 1.0e-3 && hi > LIGHTING_SC_SPARSE_RATIO * lo)) {
+        return vec4(0.0, 0.0, 0.0, -1.0);
+    }
+    if (result < 0.5 || ws <= 0.0) {
+        return vec4(0.0);
+    }
+    return vec4(sum / ws, 1.0);
+}
+
 // Surface cache: what a texel shows (w 0 when it has nothing yet).
 vec4 lighting_sc_shown(uint slot) {
+    if (lighting_sc_sparse_on() && !lighting_sc_key(slot) && !lighting_sc_promoted(slot)) {
+        vec4 sp = lighting_sc_sparse(slot);
+        if (sp.w > 0.5) {
+            return sp;
+        }
+        if (sp.w < -0.5 && lighting_sc_display) {
+            cache.v[LIGHTING_SC_SPARSE_AT + slot].x = uintBitsToFloat(lighting_frame() | 1u);
+        }
+    }
     vec3 pooled = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
     vec4 own = cache.v[3u * slot + 2u];
     float ls = lighting_world_mode() == 3u ? lighting_sc_sun_gain(slot) : 1.0;
