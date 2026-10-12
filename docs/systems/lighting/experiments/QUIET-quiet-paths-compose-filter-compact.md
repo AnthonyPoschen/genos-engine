@@ -33,7 +33,9 @@ There is no rotating fraction of the image. A steady frame whose producers write
 Filter and compact are not given new quiet paths here. An on-screen texel is kept from being dropped or freed while compose is not restamping it (the camera has not moved, so the same texels are on screen). The cache pass uses that same expiry, so a relit texel is not freed on the last-read timer during a still camera.
 
 ## Numbers
-Not measured here. Still-scene compose time, moving-scene compose time, and the G-buffer clear belong on the owner GPU (RTX 4070, stress, 1920×1080).
+Not measured on the owner GPU. Still-scene compose time, moving-scene compose time, and the G-buffer clear belong on the RTX 4070 (stress, 1920×1080).
+
+A short lavapipe run (`compose_hold.rhai`, 320×180, eight frames then one) logged still mean_abs 0.59 and a camera move at 41.7. The cache was still filling, so that still difference is not a settled identity check. Compose milliseconds were not timed.
 
 ## Screenshots
 not recorded
