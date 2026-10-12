@@ -15,9 +15,13 @@ stress-big:
 stress-bench:
 	cargo run --release -p genos-stress -- --bench 10
 
-# Debug scripts headless; reports land in target/debug-reports/<script>.
+# Headless smoke, sized for lavapipe. Reports land in target/debug-reports/<script>.
+# GENOS_LIGHTING_SC_SETTLE is the still-frame count (the lighting also waits at
+# least 32). smoke.rhai passes timeout_s so the command outlasts those frames,
+# and it checks skip, UI scissor and verification invalidation.
+GENOS_LIGHTING_SC_SETTLE ?= 32
 verify:
-	cargo run --release -p genos-stress -- --proof --no-panel --size 320x180 --script examples/stress/scripts/smoke.rhai
+	GENOS_LIGHTING_SC_SETTLE=$(GENOS_LIGHTING_SC_SETTLE) cargo run --release -p genos-stress -- --proof --no-panel --size 320x180 --script examples/stress/scripts/smoke.rhai
 
 # Live lighting against the path-traced ground truth (minutes on first run, cached after).
 reference:

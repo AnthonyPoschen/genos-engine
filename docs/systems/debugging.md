@@ -102,6 +102,11 @@ The frame budget is `timeout_frames` (default 600). The command budget is
 the picture is not settled is an error. Running out of command time is an error.
 Either one fails the script's check. A reply with `settled: false` is not success.
 
+`make verify` is the lavapipe run of `examples/stress/scripts/smoke.rhai`: 320×180,
+no panel, `GENOS_LIGHTING_SC_SETTLE` (default 32; values under 32 still wait 32
+frames) and `timeout_s` 400. After the picture settles it requires a skipped
+present, a scissored UI rectangle, and a verification drop when a solid moves.
+
 The yardstick changed at the commit "wait_settled waits for the picture to stop
 changing". Before it, `wait_settled` replied when the last pass was submitted, while
 the picture still blended toward it; frame counts from before that commit
