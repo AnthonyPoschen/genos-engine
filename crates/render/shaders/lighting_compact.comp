@@ -107,6 +107,14 @@ void main() {
                     lighting_dg(46u, 1u);
                     return;
                 }
+                if (cache.v[LIGHTING_SC_GRAD_AT + slot].x > 0.5) {
+                    // S77A escalated by its check: a whole set (background list).
+                    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);
+                    if (at < LIGHTING_WRC_REFRESH_CELLS) {
+                        ckeys.key[LIGHTING_WRC_BG_AT + at] = slot;
+                    }
+                    return;
+                }
                 uint at = atomicAdd(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], 1u);
                 if (at < LIGHTING_WRC_REFRESH_CELLS) {
                     ckeys.key[LIGHTING_WRC_CHG_AT + at] = slot;

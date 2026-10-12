@@ -1968,8 +1968,10 @@ void lighting_write_args() {
         uint first = min(lighting_young_count(), lighting_sc_base_room() >> sh);
         a = min(room, first + lighting_mature_count());
         b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> sh);
-        c = min(4u * (min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh)
-            + min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh)), LIGHTING_WRC_REFRESH >> sh);
+        // S77A: change-list cells are checks, one 16-ray entry each; the
+        // background list (and escalated cells) take whole sets.
+        c = min(min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh)
+            + 4u * min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh), LIGHTING_WRC_REFRESH >> sh);
         s = lighting_wrc_scout_due() ? LIGHTING_WRC_SCOUT_ENTRIES >> sh : 0u;
         g = (lighting_grad_count() + LIGHTING_CACHE_RAYS - 1u) / LIGHTING_CACHE_RAYS;
         lighting_shadow_epochs();
@@ -2024,13 +2026,13 @@ uint lighting_cache_batch_slot(uint j) {
         if (j >= room) {
             // The WRC refresh entries: change-driven, then background, each
             // cell a whole set (4 consecutive entries).
-            uint k = (j - room - LIGHTING_SC_TRICKLE) / 4u;
+            uint k = j - room - LIGHTING_SC_TRICKLE;
             uint rc = LIGHTING_WRC_REFRESH_CELLS >> lighting_sc_budget_shift();
             uint c = min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], rc);
             if (k < c) {
                 return ckeys.key[LIGHTING_WRC_CHG_AT + k];
             }
-            k -= c;
+            k = (k - c) / 4u;
             if (k < min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], rc)) {
                 return ckeys.key[LIGHTING_WRC_BG_AT + k];
             }
@@ -3098,6 +3100,8 @@ void lighting_wrc_check_take(uint slot, vec3 e, vec3 old) {
     vec4 g2 = cache.v[LIGHTING_SC_GRAD2_AT + slot];
     float n2 = clamp(g2.w, 0.0, LIGHTING_WRC_SIGMA_MAX * LIGHTING_WRC_SIGMA_MAX);
     cache.v[LIGHTING_SC_GRAD2_AT + slot].w = min(mix(n2, d * d, 0.125), LIGHTING_WRC_SIGMA_MAX * LIGHTING_WRC_SIGMA_MAX);
+    // S77A: escalated (GRAD.x = 1): its next refresh is a whole set.
+    cache.v[LIGHTING_SC_GRAD_AT + slot].x = 0.0;
     if (d < 2.0 * sqrt(n2) + LIGHTING_ASVGF_EPS) {
         uint iv = clamp(floatBitsToUint(g2.z), LIGHTING_CHECK_MIN / 2u, LIGHTING_CHECK_MAX / 2u) * 2u;
         cache.v[LIGHTING_SC_GRAD2_AT + slot].z = uintBitsToFloat(iv);
@@ -3105,6 +3109,7 @@ void lighting_wrc_check_take(uint slot, vec3 e, vec3 old) {
         lighting_dg(44u, 1u);
     } else {
         lighting_sc_check_soon(slot);
+        cache.v[LIGHTING_SC_GRAD_AT + slot].x = 1.0;
         lighting_dg(45u, 1u);
     }
 }
