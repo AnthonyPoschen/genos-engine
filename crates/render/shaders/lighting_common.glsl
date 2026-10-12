@@ -162,7 +162,7 @@ vec3 lighting_fill_light(uint h) {
 }
 // The views block the gather writes this frame (its picks), 0 or 1.
 uint lighting_view_next() {
-    return 1u - (uint(work.v[lighting_change_at()].z + 0.5) & 1u);
+    return 1u - (uint(work.v[lighting_change_at()].z) & 1u);
 }
 // This frame's pick for probe's stratum s: last frame's probe + 1, or 0 for none.
 uint lighting_pick(uint probe, uint s) {

@@ -51,7 +51,7 @@ void main() {
     uint now = lighting_stratum();
     vec4 head = work.v[lighting_change_at()];
     bool drop_all = head.y > 0.5;
-    uint last = uint(head.z + 0.5) & 1u;
+    uint last = uint(head.z) & 1u;
     uint next = 1u - last;
     uint src[LIGHTING_STRATA];
     [[dont_unroll]] for (uint s = 0u; s < LIGHTING_STRATA; s++) {
@@ -100,7 +100,7 @@ void main() {
         // stands (a fill). Its old origin sits where the surface was, or inside the
         // box now, and its re-trace (lighting_kept_crossed) would shade from there.
         vec4 chead = work.v[lighting_change_at()];
-        uint changes = ((pc.params.z >> 3u) & 1u) != 0u ? min(uint(chead.x + 0.5), LIGHTING_CHANGES) : 0u;
+        uint changes = ((pc.params.z >> 3u) & 1u) != 0u ? min(uint(chead.x), LIGHTING_CHANGES) : 0u;
         float best[LIGHTING_STRATA];
         [[dont_unroll]] for (uint s = 0u; s < LIGHTING_STRATA; s++) {
             best[s] = 1.0e9;

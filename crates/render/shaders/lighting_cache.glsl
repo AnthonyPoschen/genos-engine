@@ -206,10 +206,10 @@ const uint LIGHTING_WRC_BG_AT = LIGHTING_WRC_CHG_AT + LIGHTING_WRC_REFRESH;
 // pixels read that, interpolated, so what a pixel shows depends on where it is in
 // the world, not on where the probe grid fell this frame.
 uint lighting_world_mode() {
-    return (uint(work.v[lighting_change_at()].w + 0.5) / 1000u) % 100u;
+    return (uint(work.v[lighting_change_at()].w) / 1000u) % 100u;
 }
 float lighting_world_cap() {
-    return float(uint(work.v[lighting_change_at()].w + 0.5) % 1000u);
+    return float(uint(work.v[lighting_change_at()].w) % 1000u);
 }
 // Sets texel slot grows to.
 float lighting_sc_cap(uint slot);
@@ -225,14 +225,14 @@ float lighting_hit_size(vec3 pos);
 // its sets.
 uint lighting_sc_flags() {
     // S72K: bits 23 and up ride in head 3.w (head z is a float, exact to 2^24).
-    return (uint(work.v[lighting_change_at()].z + 0.5) >> 1u) | ((uint(work.v[lighting_change_at() + 3u].w + 0.5) & 511u) << 23u);
+    return (uint(work.v[lighting_change_at()].z) >> 1u) | ((uint(work.v[lighting_change_at() + 3u].w) & 511u) << 23u);
 }
 // S72S budget scale (Anthony 14:03: scale down to a weak GPU, nothing may need a
 // minimum ray count): every per-round ray budget (texels, trickle, WRC refresh,
 // scouts, bursts) is divided by 2^shift (GENOS_LIGHTING_SC_BUDGET_SHIFT, head 3.w
 // bits 9-11); the lists keep their layout.
 uint lighting_sc_budget_shift() {
-    return (uint(work.v[lighting_change_at() + 3u].w + 0.5) >> 9u) & 7u;
+    return (uint(work.v[lighting_change_at() + 3u].w) >> 9u) & 7u;
 }
 // S72O (Anthony: squares still build up; a page must never shift as a unit):
 // per-texel commit timing and ray strata, and the stored means rectified
@@ -768,7 +768,7 @@ uint lighting_movers_first() {
     return head.y > 0.5 ? 0u : min(uint(head.x + 0.5), LIGHTING_CHANGES);
 }
 uint lighting_movers_count() {
-    uint n = uint(work.v[lighting_change_at()].w + 0.5) / 200000u;
+    uint n = uint(work.v[lighting_change_at()].w) / 200000u;
     return min(n, (LIGHTING_CHANGES - lighting_movers_first()) / LIGHTING_MOVER_VEC4);
 }
 vec4 lighting_mover(uint m, uint k) {
@@ -777,7 +777,7 @@ vec4 lighting_mover(uint m, uint k) {
 // Object-local texels (GIBS 2021: surfels keep a transform id and a local
 // position): GENOS_LIGHTING_SC_LOCAL=1.
 bool lighting_sc_local_on() {
-    return lighting_world_mode() == 3u && ((uint(work.v[lighting_change_at()].w + 0.5) / 100000u) & 1u) != 0u;
+    return lighting_world_mode() == 3u && ((uint(work.v[lighting_change_at()].w) / 100000u) & 1u) != 0u;
 }
 
 // A point inside the bounds of a mover.

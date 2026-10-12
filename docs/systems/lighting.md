@@ -258,3 +258,16 @@ neighbour's moved (stamp 22.w), when it leans on the WRC (W < 1), or one frame
 in 16 by hash. No new memory. Still 21.2 -> 19.6 ms (a-trous 3.46 -> 2.14),
 moving 26.9 -> 25.7 ms (6.14 -> 4.83). [deviation: the 1-in-16 refresh is a
 small fixed floor kept for the +-4 R clamp, which has no reverse links.]
+
+### S78C: probe reprojection was off (float rounding of the head parity)
+
+The change head's z holds `probe_runs & 1 + 2 * flags`; with the default flags
+(6007050) it sits above 2^23, where floats step by 1, and every reader took
+`uint(z + 0.5)`: an odd value + 0.5 rounds to the even one above. The view
+parity read 0 every frame, so the gather's picks always wrote and read
+different blocks, no probe stratum was ever reprojected, and 7 of 8 strata
+were re-traced and re-lit as fills every frame (3.6M fill hits a frame in a
+still scene; GPU counters). The same rounding toggled sc flag 1 every other
+frame. All head reads now take the exact integer (`uint(z)`).
+Still 19.6 -> 12.5 ms (trace 3.9 -> 0.6, light 8.5 -> 4.6; 48 -> 72 fps),
+moving 25.7 -> 18.3 ms (38 -> 52 fps); pictures within 0.002 mean luminance.
