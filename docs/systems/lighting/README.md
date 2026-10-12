@@ -131,7 +131,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S73E](experiments/S73-prefill-root-cause-and-plan.md) | 2026-10-12 | Storage and per-round count for the pre-fill list | pushed | 1071524 |
 | [S73F](experiments/S73-prefill-root-cause-and-plan.md) | 2026-10-12 | Never-shown texels wait on the pre-fill list only | pushed | 8ac033e |
 | [S73G](experiments/S73-prefill-root-cause-and-plan.md) | 2026-10-12 | Pre-fill takes only spare base budget | pushed | 12387cc |
-| [S73I](experiments/S73I-prefill-turn-and-ratios.md) | 2026-10-12 | Turn fill-in: spare budget and an unfinished set; ratio mean is outliers | counters + set completion | ffaba86, 15d3e1e |
+| [S73I](experiments/S73I-prefill-turn-and-ratios.md) | 2026-10-12 | Turn fill-in: spare budget and an unfinished set; ratio mean is outliers | counters + set completion + lavapipe turn | ffaba86, 15d3e1e |
 | [S74A-cam](experiments/S74A-cam-last-camera-offsets.md) | 2026-10-12 | Fix: last-frame camera read from stale scene-block offsets | pushed | 81c00734 |
 | [S74A-asvgf](experiments/S74A-asvgf-asvgf-change-adaptive-rays.md) | 2026-10-12 | A-SVGF same-seed 1-ray checks on 1/9 resolved texels, lambda drives alpha and rays | pushed | 81c00734 |
 | [S74A-shadow](experiments/S74A-shadow-static-lamp-shadow-reuse.md) | 2026-10-12 | Hit shadow rays kept per 12.5 cm cell/lamp, invalidated by lamp epoch | pushed | 81c00734 |

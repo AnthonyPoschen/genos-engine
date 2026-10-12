@@ -28,3 +28,7 @@ The mean of 61.2 with a median of 1.03 is a few enormous ratios, not the picture
 - A pre-fill set skips the MSME firefly cap (that cap runs only on the estimator path, which starts once a pixel has shown the texel). One bright set against a normal one is a large ratio.
 
 p10 0.73 is the dark tail of the ratios that are actually finite. It is not what pulls the mean to 61.
+
+## Lavapipe
+
+`examples/stress/tests/gi_prefill.rs` (ignored; `tools/lighting/headless.sh`) settles the small hall, dumps the cache, turns half a radian, and dumps again. A comma-separated `GENOS_LIGHTING_DUMP` copies those two frames and not their neighbours. The test requires never-shown fine texels with a finished set before the turn, and some of those same keys shown after it. That is the fill the 4070 turn sequence did not show. A miss with `prefill_taken` near 0 is the full ceiling; a miss with quarters stuck under 4 is the set still not finishing.
