@@ -82,6 +82,20 @@ void main() {
         reflectance = unpackUnorm4x8(floatBitsToUint(rec.z)).rgb * (1.0 / GI2_PI);
         glow = gi2_unpack_rgb9e5(floatBitsToUint(rec.w));
     }
+    // S69C (Anthony: build-up starved; GENOS_GPU_TIMES, default stress scene at
+    // 1920x1080: this pass was 70 % of the frame and the kept hits of all
+    // GI2_STRATA strata, relit every frame, ~10 ms of it). A kept hit is relit
+    // the frame its stratum is traced and once more halfway round
+    // (GI2_KEPT_RELIGHT), so its light is at most GI2_STRATA / 2 frames old;
+    // near a change (a mover, re-traced kept rays) every frame as before.
+    if (GI2_KEPT_RELIGHT && probe_hit && !fill_hit) {
+        uint s = (h / gi2_rays()) % GI2_STRATA;
+        uint cur = gi2_stratum();
+        bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
+        if (s != cur && s != (cur + GI2_STRATA / 2u) % GI2_STRATA && !(urgent && gi2_near_change(pos))) {
+            return;
+        }
+    }
     vec3 origin = pos + n * 0.02;
     LampList list = lamps_at(origin);
     uint count = lamp_list_size(list);

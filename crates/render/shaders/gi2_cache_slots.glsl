@@ -14,6 +14,8 @@ const uint GI2_CACHE_RAYS = 16u;
 // Shadow rays per light cache ray hit when lamp picks are on (gi2_light.comp).
 const uint GI2_CACHE_PICKS = 2u;
 // S60: the screen probes' hits pick lamps too (gi2_light.comp).
+// S69C: kept probe hits relit on their stratum's frame and halfway round only.
+const bool GI2_KEPT_RELIGHT = true;
 const bool GI2_PROBE_PICKS = false; // S60A: no gain measured (light pass unchanged)
 // Frames a patch lives without a read (30 s at 60 fps).
 const uint GI2_CACHE_LIFE = 1800u;
