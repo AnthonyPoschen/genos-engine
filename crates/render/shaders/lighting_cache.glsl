@@ -176,8 +176,9 @@ const bool LIGHTING_SC_SCHED = true;
 // entries trace scout rays from the camera (half spread over the sphere, half
 // ahead of the motion and turn, a quarter of them from up to 2 m beside the eye
 // to see round corners); their hits claim and read WRC cells, which the
-// scheduler then relights like any other. A WRC cell keeps a running mean to
-// LIGHTING_WRC_CAP sets (was: each relight replaced it, at most 3 sets). A WRC cell a
+// scheduler then relights like any other. A WRC cell keeps a running mean. Past
+// LIGHTING_WRC_YOUNG samples the ray count is the check's ceiling, not a march to
+// LIGHTING_WRC_CAP (RAYCEIL). A WRC cell a
 // pixel needs as a seed (its fine texel has no light) with fewer than
 // LIGHTING_WRC_YOUNG sets is relit first with whole sets (the reveal burst); new fine
 // texels start from the WRC (bilinear, coplanar cells only) with at most
@@ -192,20 +193,21 @@ const float LIGHTING_WRC_NEAR = 6.0;
 const uint LIGHTING_SC_BUCKETS = 64u;
 const uint LIGHTING_SC_HIST_AT = 2u * LIGHTING_CACHE_SLOTS + 2u;
 const uint LIGHTING_SC_THR_AT = LIGHTING_SC_HIST_AT + LIGHTING_SC_BUCKETS;
-// WRC refresh (S61B, Anthony: a hard, fixed budget): at most LIGHTING_WRC_REFRESH
-// batch entries a round (~6 % of 65536) go to WRC cells outside the reveal
-// burst, from two lists: change-driven first (a mover nearby, or a lamp that
-// reaches the cell moved since its last relight: its history drops to
-// LIGHTING_WRC_CHANGE_KEEP samples), then the steady background (a resident cell not
-// relit for LIGHTING_WRC_REFRESH_FRAMES, or still short of its cap and read since)
-// with what is left. Lumen's world space radiance cache: a fixed budget of probe
-// updates, the changed and the nearest first.
+// WRC refresh ceiling (S61B; Lumen's world cache and SHaRC spend a fixed update
+// budget, changed and nearest first). RAYCEIL: the budget is a ceiling, not a
+// target. A cell past LIGHTING_WRC_YOUNG samples takes rays only from its check
+// (lighting_wrc_schedule): one same-seed ray (A-SVGF), and extra rays in
+// proportion to the change beyond noise. The change list holds those extra
+// entries (a cell repeated once per 16-ray entry). The background list is the
+// low-priority trickle: cells still under YOUNG samples, read, and not in the
+// reveal burst, share LIGHTING_WRC_TRICKLE entries a round. A steady scene
+// dispatches the checks that are due and almost nothing else.
 const uint LIGHTING_WRC_REFRESH = 4096u;
-// S62D (Anthony): a refresh takes a whole 64-ray set (LIGHTING_SC_QUARTERS
-// consecutive entries), so the cap above holds LIGHTING_WRC_REFRESH_CELLS cells a
-// round (1024; same rays as before).
-const uint LIGHTING_WRC_REFRESH_CELLS = LIGHTING_WRC_REFRESH / 4u;
-const uint LIGHTING_WRC_REFRESH_FRAMES = 180u;
+// Low-priority young cells share this many 16-ray entries a round (a ceiling).
+const uint LIGHTING_WRC_TRICKLE = 64u;
+const uint LIGHTING_WRC_TRICKLE_DEMAND_AT = LIGHTING_SC_HIST_AT + 74u;
+// Still camera: a few scout entries a round, not the full pattern one round in 8.
+const uint LIGHTING_WRC_SCOUT_TRICKLE = 4u;
 const uint LIGHTING_WRC_CHANGE_FRAMES = 120u;
 const float LIGHTING_WRC_CHANGE_KEEP = 4.0;
 const uint LIGHTING_WRC_CHG_COUNT_AT = LIGHTING_SC_HIST_AT + 66u;
@@ -1912,6 +1914,7 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
 // dense count; segment ends) and the ray and cache passes map their dense thread
 // to the entry (lighting_dense_entry). Nothing past the live entries is dispatched.
 bool lighting_wrc_scout_due();
+uint lighting_wrc_scout_count();
 const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
 // S72J region refinement (Anthony: uniform within a region, no sharp islands in
 // blotchy surroundings; Lumen refines surface cache pages). A page is 8 x 8
@@ -2034,11 +2037,14 @@ void lighting_write_args() {
         uint first = min(lighting_young_count(), lighting_sc_base_room() >> sh);
         a = min(room, first + lighting_mature_count());
         b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> sh);
-        // S77A: change-list cells are checks, one 16-ray entry each; the
-        // background list (and escalated cells) take whole sets.
-        c = min(min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh)
-            + 4u * min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh), LIGHTING_WRC_REFRESH >> sh);
-        s = lighting_wrc_scout_due() ? LIGHTING_WRC_SCOUT_ENTRIES >> sh : 0u;
+        // RAYCEIL: both WRC lists count 16-ray entries. Escalations (change
+        // list) are served first; the young-cell trickle (background) takes
+        // what the ceiling leaves. Neither list is filled up to the ceiling.
+        uint wcap = LIGHTING_WRC_REFRESH >> sh;
+        uint wchg = min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], wcap);
+        uint wbg = min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], wcap);
+        c = min(wchg + wbg, wcap);
+        s = lighting_wrc_scout_count();
         g = (lighting_grad_count() + LIGHTING_CACHE_RAYS - 1u) / LIGHTING_CACHE_RAYS;
         lighting_shadow_epochs();
         // S76D: last round's demand for fair service, and the global boost when
@@ -2090,17 +2096,18 @@ uint lighting_cache_batch_slot(uint j) {
             return k < min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> lighting_sc_budget_shift()) ? ckeys.key[LIGHTING_SC_TRICKLE_AT + k] : ~0u;
         }
         if (j >= room) {
-            // The WRC refresh entries: change-driven, then background, each
-            // cell a whole set (4 consecutive entries).
+            // WRC entries: escalations, then the young-cell trickle. Each list
+            // slot is one 16-ray entry (a cell is repeated for a longer set).
             uint k = j - room - LIGHTING_SC_TRICKLE;
-            uint rc = LIGHTING_WRC_REFRESH_CELLS >> lighting_sc_budget_shift();
-            uint c = min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], rc);
-            if (k < c) {
-                return ckeys.key[LIGHTING_WRC_CHG_AT + k];
-            }
-            k = (k - c) / 4u;
-            if (k < min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], rc)) {
-                return ckeys.key[LIGHTING_WRC_BG_AT + k];
+            uint cap = LIGHTING_WRC_REFRESH >> lighting_sc_budget_shift();
+            uint c = min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], cap);
+            uint b = min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], cap);
+            uint total = min(c + b, cap);
+            if (k < total) {
+                if (k < c) {
+                    return ckeys.key[LIGHTING_WRC_CHG_AT + k];
+                }
+                return ckeys.key[LIGHTING_WRC_BG_AT + (k - c)];
             }
             return ~0u;
         }
@@ -2206,15 +2213,24 @@ uint lighting_sc_interval(uint slot, float t) {
     }
     return uint(clamp(iv, LIGHTING_SC_RATE_FAST, LIGHTING_SC_RATE_DORMANT));
 }
-// Scouts (WRC pre-seeding) only while the camera moves or turns, else one
-// round in LIGHTING_WRC_SCOUT_STILL.
-const uint LIGHTING_WRC_SCOUT_STILL = 8u;
-bool lighting_wrc_scout_due() {
+// Scouts claim world-cache cells around the camera. A moving camera takes the
+// full pattern (new space). A still camera takes LIGHTING_WRC_SCOUT_TRICKLE
+// entries, a low-priority trickle, not the full pattern one round in eight.
+bool lighting_wrc_camera_moving() {
     vec4 last_eye = work.v[lighting_change_at() + 1u];
     vec3 last_fwd = work.v[lighting_change_at() + 4u].xyz;
-    bool moving = last_eye.w < 0.5 || length(scene.eye.xyz - last_eye.xyz) > 0.01
+    return last_eye.w < 0.5 || length(scene.eye.xyz - last_eye.xyz) > 0.01
         || dot(normalize(scene.view_forward.xyz), normalize(last_fwd + vec3(0.0, 1.0e-6, 0.0))) < 0.9999;
-    return moving || lighting_round() % LIGHTING_WRC_SCOUT_STILL == 0u;
+}
+uint lighting_wrc_scout_count() {
+    uint sh = lighting_sc_budget_shift();
+    if (lighting_wrc_camera_moving()) {
+        return LIGHTING_WRC_SCOUT_ENTRIES >> sh;
+    }
+    return LIGHTING_WRC_SCOUT_TRICKLE >> sh;
+}
+bool lighting_wrc_scout_due() {
+    return lighting_wrc_scout_count() > 0u;
 }
 uint lighting_sc_quarter0(uint slot) {
     if (lighting_world_mode() != 3u) {
@@ -3199,7 +3215,67 @@ void lighting_sc_check_soon(uint slot) {
     cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + 1u);
     cache.v[LIGHTING_SC_GRAD2_AT + slot].z = uintBitsToFloat(LIGHTING_CHECK_MIN);
 }
+// A world-cache neighbour gets this cell's lambda (A-SVGF writes the gradient
+// across the block). Only another world-cache cell: the 3 x 3 is on the 25 cm
+// grid, not the fine texels. [deviation: A-SVGF's neighbourhood is screen pixels.]
+void lighting_wrc_lambda_put(uint s, float lam) {
+    if (s == ~0u || !(cache.v[3u * s + 1u].w > 0.2)) {
+        return;
+    }
+    float old = cache.v[LIGHTING_SC_GRAD_AT + s].x;
+    cache.v[LIGHTING_SC_GRAD_AT + s].x = old > 0.0 ? max(lam, old) : lam;
+}
+// RAYCEIL check (A-SVGF eq. 6; Schied et al. 2019 subtract the sample noise).
+// One same-seed ray against the ray stored on this cell. Within noise: no extra
+// rays, and the next check waits twice as long. Beyond noise: lambda is written
+// to the cell and its 3 x 3, and the scheduler spends it as a ray ceiling.
+// The first time the direction is seen (GRAD2.x == 0) the ray is only recorded.
+// [deviation: the check is not accumulated into the cell mean. A-SVGF reuses the
+// sample; SHaRC accumulates every update. Same deviation as the texel checks.]
+void lighting_wrc_ray_check(uint slot, float l_now) {
+    vec4 g = cache.v[LIGHTING_SC_GRAD_AT + slot];
+    vec4 g2 = cache.v[LIGHTING_SC_GRAD2_AT + slot];
+    if (floatBitsToUint(g2.x) == 0u) {
+        cache.v[LIGHTING_SC_GRAD_AT + slot].y = l_now;
+        cache.v[LIGHTING_SC_GRAD2_AT + slot].x = uintBitsToFloat(lighting_frame());
+        cache.v[LIGHTING_SC_GRAD_AT + slot].x = 0.0;
+        cache.v[LIGHTING_SC_GRAD2_AT + slot].z = uintBitsToFloat(LIGHTING_CHECK_MIN);
+        cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + LIGHTING_CHECK_MIN);
+        lighting_dg(44u, 1u);
+        return;
+    }
+    float mean = dot(cache.v[3u * slot + 2u].rgb, vec3(0.2126, 0.7152, 0.0722));
+    float d = min(1.0, abs(l_now - g.y) / max(max(l_now, g.y), 0.1 * mean + 1.0e-4));
+    float n2 = clamp(g2.w, 0.0, LIGHTING_CHECK_SIGMA_MAX * LIGHTING_CHECK_SIGMA_MAX);
+    float lam = max(0.0, d - 2.0 * sqrt(n2));
+    cache.v[LIGHTING_SC_GRAD2_AT + slot].w = min(mix(n2, d * d, 0.125), LIGHTING_CHECK_SIGMA_MAX * LIGHTING_CHECK_SIGMA_MAX);
+    cache.v[LIGHTING_SC_GRAD_AT + slot].y = l_now;
+    atomicAdd(ckeys.key[LIGHTING_CHECK_P_AT + 1u], 1u);
+    if (lam < LIGHTING_ASVGF_EPS) {
+        uint iv = clamp(floatBitsToUint(g2.z), LIGHTING_CHECK_MIN / 2u, LIGHTING_CHECK_MAX / 2u) * 2u;
+        cache.v[LIGHTING_SC_GRAD2_AT + slot].z = uintBitsToFloat(iv);
+        cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + iv);
+        if (!(g.x > 0.0)) {
+            cache.v[LIGHTING_SC_GRAD_AT + slot].x = 0.0;
+        }
+        lighting_dg(44u, 1u);
+        return;
+    }
+    lighting_dg(45u, 1u);
+    atomicAdd(ckeys.key[LIGHTING_CHECK_P_AT], 1u);
+    vec2 c = lighting_sc_true_cell(slot);
+    ivec2 b = ivec2(floor(c / 3.0)) * 3 - ivec2(c);
+    [[dont_unroll]] for (int k = 0; k < 9; k++) {
+        ivec2 off = b + ivec2(k % 3, k / 3);
+        lighting_wrc_lambda_put(off == ivec2(0) ? slot : lighting_sc_cell_slot(slot, off), lam);
+    }
+    lighting_sc_check_soon(slot);
+}
 void lighting_sc_grad_take(uint slot, float l_now) {
+    if (cache.v[3u * slot + 1u].w > 0.2) {
+        lighting_wrc_ray_check(slot, l_now);
+        return;
+    }
     vec4 g = cache.v[LIGHTING_SC_GRAD_AT + slot];
     vec4 g2 = cache.v[LIGHTING_SC_GRAD2_AT + slot];
     float mean = dot(cache.v[3u * slot + 2u].rgb, vec3(0.2126, 0.7152, 0.0722));
@@ -3346,33 +3422,91 @@ uint lighting_lamps_sig(uint seed, LampList list) {
     return sig | 1u;
 }
 
-// S76B WRC change refresh, confirm then escalate (Anthony 17:06): a change
-// nearby (mover, moved lamp) only nominates a cell; it is refreshed when its
-// check is due. The refresh's sample against the cell's mean is the check: within
-// twice the cell's own sample noise (an EMA of d^2 over its refreshes, capped at
-// LIGHTING_WRC_SIGMA_MAX) plus LIGHTING_ASVGF_EPS confirms, and the next nominated
-// refresh waits twice as long (LIGHTING_CHECK_MIN..MAX frames); otherwise the
-// cell is refreshed again next frame while nominated.
-const float LIGHTING_WRC_SIGMA_MAX = 0.2;
-void lighting_wrc_check_take(uint slot, vec3 e, vec3 old) {
-    float a = dot(e, vec3(0.2126, 0.7152, 0.0722));
-    float b = dot(old, vec3(0.2126, 0.7152, 0.0722));
-    float d = min(1.0, abs(a - b) / max(max(a, b), 1.0e-3));
-    vec4 g2 = cache.v[LIGHTING_SC_GRAD2_AT + slot];
-    float n2 = clamp(g2.w, 0.0, LIGHTING_WRC_SIGMA_MAX * LIGHTING_WRC_SIGMA_MAX);
-    cache.v[LIGHTING_SC_GRAD2_AT + slot].w = min(mix(n2, d * d, 0.125), LIGHTING_WRC_SIGMA_MAX * LIGHTING_WRC_SIGMA_MAX);
-    // S77A: escalated (GRAD.x = 1): its next refresh is a whole set.
-    cache.v[LIGHTING_SC_GRAD_AT + slot].x = 0.0;
-    if (d < 2.0 * sqrt(n2) + LIGHTING_ASVGF_EPS) {
-        uint iv = clamp(floatBitsToUint(g2.z), LIGHTING_CHECK_MIN / 2u, LIGHTING_CHECK_MAX / 2u) * 2u;
-        cache.v[LIGHTING_SC_GRAD2_AT + slot].z = uintBitsToFloat(iv);
-        cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + iv);
-        lighting_dg(44u, 1u);
-    } else {
-        lighting_sc_check_soon(slot);
-        cache.v[LIGHTING_SC_GRAD_AT + slot].x = 1.0;
-        lighting_dg(45u, 1u);
+// Append n 16-ray entries of slot to a WRC list. The count may pass the ceiling;
+// the args pass and the batch walker both clamp, and nothing is written past it.
+void lighting_wrc_list_put(uint count_at, uint list_at, uint slot, uint n) {
+    uint cap = LIGHTING_WRC_REFRESH >> lighting_sc_budget_shift();
+    uint at = atomicAdd(ckeys.key[count_at], n);
+    if (at >= cap || n == 0u) {
+        return;
     }
+    uint m = min(n, cap - at);
+    for (uint i = 0u; i < m; i++) {
+        ckeys.key[list_at + at + i] = slot;
+    }
+}
+// Fair service for the young-cell trickle (S76D's check turn, on its own demand).
+bool lighting_wrc_trickle_turn(uint slot) {
+    uint room = LIGHTING_WRC_TRICKLE >> lighting_sc_budget_shift();
+    if (room == 0u) {
+        return false;
+    }
+    uint dem = ckeys.key[LIGHTING_CHECK_P_AT + 4u];
+    if (dem <= room) {
+        return true;
+    }
+    uint k = (dem + room - 1u) / room;
+    return ((lighting_hash(slot ^ 0x85ebca6bu) + lighting_round()) % k) == 0u;
+}
+// RAYCEIL: rays for one world-cache cell that is not in the reveal burst.
+// A fresh lambda (the last check, or a neighbour's) spends a ray ceiling of
+// ceil(4 * lambda / FULL) sixteens, the texel rule [deviation: A-SVGF uses
+// lambda for the history blend, not the ray count]. Otherwise a cell with a
+// stored mean takes one check ray when that check is due. Cells still under
+// YOUNG samples that something read, and that are not checking this round,
+// share the trickle. A mover or a moved lamp only nominates the check.
+void lighting_wrc_schedule(uint slot, bool near, float t, uint last) {
+    uint updated = lighting_sc_updated(slot);
+    vec3 cp = lighting_sc_texel_pos(slot);
+    bool nominated = near || lighting_wrc_lamp_changed(cp, updated);
+    if (nominated) {
+        lighting_sc_nominate(slot);
+    }
+    float lam = cache.v[LIGHTING_SC_GRAD_AT + slot].x;
+    if (lam >= LIGHTING_ASVGF_EPS) {
+        uint mm = min(LIGHTING_SC_QUARTERS, uint(ceil(clamp(lam / LIGHTING_ASVGF_FULL, 0.0, 1.0) * float(LIGHTING_SC_QUARTERS))));
+        cache.v[LIGHTING_SC_GRAD_AT + slot].x = -lam;
+        lighting_sc_check_soon(slot);
+        lighting_wrc_list_put(LIGHTING_WRC_CHG_COUNT_AT, LIGHTING_WRC_CHG_AT, slot, mm);
+        lighting_dg(36u, mm);
+        lighting_dg(37u, 1u);
+        return;
+    }
+    bool read = int(last - updated) > 0 || int(lighting_frame() - last) <= int(LIGHTING_SC_READ_SLACK);
+    bool young = t < LIGHTING_WRC_YOUNG - 0.5 && read;
+    // A nominated cell that already has a mean takes the check, not the trickle,
+    // so a mover or a moved lamp is measured the same round.
+    if (young && !(nominated && t >= 0.5)) {
+        atomicAdd(ckeys.key[LIGHTING_WRC_TRICKLE_DEMAND_AT], 1u);
+        if (lighting_wrc_trickle_turn(slot)) {
+            lighting_wrc_list_put(LIGHTING_WRC_BG_COUNT_AT, LIGHTING_WRC_BG_AT, slot, 1u);
+            lighting_dg(17u, 1u);
+            return;
+        }
+    }
+    if (t < 0.5) {
+        return;
+    }
+    if (!lighting_sc_check_due(slot) || !lighting_sc_check_turn(slot)) {
+        if (!lighting_sc_check_due(slot)) {
+            lighting_dg(46u, 1u);
+        }
+        return;
+    }
+    if (!lighting_sc_grad_stored(slot)) {
+        uint rk = lighting_sc_ray_key(slot, ckeys.key[slot]);
+        uint qk = lighting_hash(slot ^ lighting_round() * 0x9e3779b9u) % LIGHTING_SC_SET_RAYS;
+        cache.v[LIGHTING_SC_GRAD_AT + slot].yzw = vec3(0.0, uintBitsToFloat(rk), uintBitsToFloat(qk));
+        cache.v[LIGHTING_SC_GRAD2_AT + slot].x = 0.0;
+    }
+    uint room = (LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift();
+    uint at = atomicAdd(ckeys.key[LIGHTING_GRAD_COUNT_AT], 1u);
+    if (at >= room) {
+        lighting_dg(52u, 1u);
+        return;
+    }
+    ckeys.key[LIGHTING_GRAD_LIST_AT + at] = slot;
+    lighting_dg(16u, 1u);
 }
 
 // S78J per-pixel direct light reuse: a pixel whose surface point (1 mm), normal

@@ -7,7 +7,6 @@
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 
-const bool LIGHTING_WRC_STALE_CHECK = true;
 void main() {
     uint slot = gl_GlobalInvocationID.x;
     if (lighting_dense()) {
@@ -101,15 +100,16 @@ void main() {
         // reached LIGHTING_WRC_YOUNG = 16: every needed cell stayed a burst and took
         // the batch from the fine texels), and at most LIGHTING_WRC_BURST_MAX cells a
         // round burst.
-        // S62C: near a mover the count stays short; those cells refresh from the
-        // change list, not as bursts.
+        // S62C: near a mover the count stays short; those cells are not burst.
+        // RAYCEIL: a mover or a moved lamp nominates the check (lighting_wrc_schedule).
         bool burst = wrc && !near && t < LIGHTING_WRC_YOUNG - 0.5 && int(lighting_frame() - floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z)) <= 2;
         if (burst && atomicAdd(ckeys.key[LIGHTING_WRC_BURST_COUNT_AT], 1u) >= (LIGHTING_WRC_BURST_MAX >> lighting_sc_budget_shift())) {
             burst = false;
         }
         if (!wrc) { lighting_dg(19u, 1u); if (near) lighting_dg(28u, 1u); if (on_screen) lighting_dg(30u, 1u); }
         if (wrc && !burst && LIGHTING_SC_SCHED) {
-            // WRC refresh (fixed budget): change-driven list, else background.
+            // RAYCEIL: not the march to LIGHTING_WRC_CAP. The check sets the
+            // ray ceiling; young cells trickle; the rest of the ceiling stays empty.
             if (int(lighting_frame() - last) > int(LIGHTING_CACHE_LIFE)) {
                 atomicAdd(gstats.freed, 1u);
                 ckeys.key[slot] = 0u;
@@ -117,60 +117,8 @@ void main() {
                 cache.v[3u * slot + 2u] = vec4(0.0);
                 return;
             }
-            uint updated = lighting_sc_updated(slot);
-            vec3 cp = lighting_sc_texel_pos(slot);
-            if (near || lighting_wrc_lamp_changed(cp, updated)) {
-                // S76B: nominated; refreshed only when its check is due.
-                if (!lighting_sc_check_due(slot)) {
-                    lighting_dg(46u, 1u);
-                    return;
-                }
-                if (cache.v[LIGHTING_SC_GRAD_AT + slot].x > 0.5) {
-                    // S77A escalated by its check: a whole set (background list).
-                    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);
-                    if (at < LIGHTING_WRC_REFRESH_CELLS) {
-                        ckeys.key[LIGHTING_WRC_BG_AT + at] = slot;
-                    }
-                    return;
-                }
-                uint at = atomicAdd(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], 1u);
-                if (at < LIGHTING_WRC_REFRESH_CELLS) {
-                    ckeys.key[LIGHTING_WRC_CHG_AT + at] = slot;
-                    lighting_dg(16u, 1u);
-                }
-                return;
-            }
-            bool stale = int(lighting_frame() - updated) >= int(LIGHTING_WRC_REFRESH_FRAMES);
-            bool growing_wrc = t < LIGHTING_WRC_CAP - 0.5 && (int(last - updated) > 0 || int(lighting_frame() - last) <= int(LIGHTING_SC_READ_SLACK));
-            // S72N dark fill: a growing cell rays read is ranked with the
-            // texels (priority by frames read since its relight, times cap /
-            // samples), not taken first come from the background list: that
-            // list holds 1024 cells a round in slot (hash) order, so the same
-            // cells won each round and the rest, scattered, waited until they
-            // reached the cap; a room lit only by bounces filled in patches.
-            if (LIGHTING_WRC_STALE_CHECK && stale && !growing_wrc) {
-                // S78F: age alone is no reason for a whole set: a stale cell takes
-                // the S77A check (16 rays, change list) when its deferred check is
-                // due; a confirm doubles the deferral, a miss escalates.
-                if (lighting_sc_check_due(slot)) {
-                    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], 1u);
-                    if (at < LIGHTING_WRC_REFRESH_CELLS) {
-                        ckeys.key[LIGHTING_WRC_CHG_AT + at] = slot;
-                        lighting_dg(17u, 1u);
-                    }
-                }
-                return;
-            }
-            if (!(growing_wrc && lighting_sc_dark_fill())) {
-                if (stale || growing_wrc) {
-                    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);
-                    if (at < LIGHTING_WRC_REFRESH_CELLS) {
-                        ckeys.key[LIGHTING_WRC_BG_AT + at] = slot;
-                        lighting_dg(17u, 1u);
-                    }
-                }
-                return;
-            }
+            lighting_wrc_schedule(slot, near, t, last);
+            return;
         }
         // S72D sparse fill, coarse to fine: every texel is relit, but a young one
         // (short of LIGHTING_DN_MIN_SETS sets) weighs by its level (4-apart keys 4x,
@@ -211,10 +159,8 @@ void main() {
                 // background list (within the WRC refresh cap). Shown rescaled
                 // meanwhile (lighting_ls_ratio).
                 if (abs(lighting_ls_ratio(lighting_sc_updated(slot)) - 1.0) > 0.1) {
-                    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);
-                    if (at < LIGHTING_WRC_REFRESH_CELLS) {
-                        ckeys.key[LIGHTING_WRC_BG_AT + at] = slot;
-                    }
+                    // A whole set: four 16-ray entries (the list counts entries).
+                    lighting_wrc_list_put(LIGHTING_WRC_BG_COUNT_AT, LIGHTING_WRC_BG_AT, slot, LIGHTING_SC_QUARTERS);
                 }
                 return;
             }
