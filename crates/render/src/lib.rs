@@ -16,7 +16,10 @@ mod world;
 pub use aa::Antialias;
 pub use budget::{FrameMemory, ImageAdmit};
 pub use genos_bake as bake;
-pub use gpu::{DebugView, DrawProfile, LampReport, Renderer, ScreenLine, ScreenRect, SettleStats, ViewMode};
+pub use gpu::{
+    DebugView, DrawProfile, LampReport, LightingAtrousStats, Renderer, ScreenLine, ScreenRect,
+    SettleStats, ViewMode,
+};
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};
 pub use pack::{build_grid, lamp_range, pack_frame, Pack, PackedDraw, SceneGrid, LAMP_CUTOFF};
