@@ -60,7 +60,7 @@ void main() {
         // read (the light bounced off them) to LIGHTING_SC_HIT_CAP sets.
         uint last = floatBitsToUint(cache.v[3u * slot].w);
         uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z);
-        bool on_screen = shown != 0u && int(lighting_frame() - shown) <= 60;
+        bool on_screen = lighting_sc_pixel_fresh(shown, 60);
         bool read = int(lighting_frame() - last) <= 60;
         bool growing = (lighting_sc_flags() & 4u) != 0u
             ? (on_screen && t < lighting_sc_cap(slot) - 0.5) || (read && t < LIGHTING_SC_HIT_CAP - 0.5)
@@ -110,7 +110,7 @@ void main() {
         if (!wrc) { lighting_dg(19u, 1u); if (near) lighting_dg(28u, 1u); if (on_screen) lighting_dg(30u, 1u); }
         if (wrc && !burst && LIGHTING_SC_SCHED) {
             // WRC refresh (fixed budget): change-driven list, else background.
-            if (int(lighting_frame() - last) > int(LIGHTING_CACHE_LIFE)) {
+            if (lighting_sc_expired(last, shown)) {
                 atomicAdd(gstats.freed, 1u);
                 ckeys.key[slot] = 0u;
                 cache.v[3u * slot + 1u] = vec4(0.0);
@@ -190,7 +190,7 @@ void main() {
                 // Never relit: as if read for a second since.
                 used = min(used, 60);
             }
-            if (int(lighting_frame() - last) > int(LIGHTING_CACHE_LIFE)) {
+            if (lighting_sc_expired(last, shown)) {
                 atomicAdd(gstats.freed, 1u);
                 ckeys.key[slot] = 0u;
                 cache.v[3u * slot + 1u] = vec4(0.0);
@@ -403,7 +403,7 @@ void main() {
         if (!(near || t < 0.5 || growing || changing)) {
             // Not in this round: a texel nobody has read for LIGHTING_CACHE_LIFE frames
             // is freed here (lighting_cache.comp frees only what a round relights).
-            if (int(lighting_frame() - last) > int(LIGHTING_CACHE_LIFE)) {
+            if (lighting_sc_expired(last, shown)) {
                 atomicAdd(gstats.freed, 1u);
                 ckeys.key[slot] = 0u;
                 cache.v[3u * slot + 1u] = vec4(0.0);
