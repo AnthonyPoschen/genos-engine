@@ -1,8 +1,8 @@
 # Entity and networking co-design
 
-> **For agentic workers:** Do not start N1. D1–D42 are unanswered. The datagram bytes are the replay file and the live-edit path, so building N7 before those decisions are answered locks both. When they are answered, implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
+> **For agentic workers:** Do not start N1. D1–D49 are unanswered. The datagram bytes are the replay file and the live-edit path, so building N7 before those decisions are answered locks both. When they are answered, implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
 
-**Goal:** While a game is running in development, an author or an agent can inspect any entity and change it. The authority applies the change, the entity log records it, undo sends the inverse through that same path, and a save can write the result back to a sidecar or a prefab file. A release player build does not contain that tool API. Every call, in every profile, goes through the same capability check. Player replication, prediction, and the replay are that same stream. Interest limits what a player runtime can see.
+**Goal:** While a game is running in development, an author or an agent can inspect any entity and change it. Mods are a first-class way to change the game: data and sandboxed Rhai on the authority, the same bytes verified on every player runtime. Lockdown removes the debug tool from a release player build and does not remove the mod loader. The authority applies every change, the entity log records it, undo sends the inverse through that same path, and a save can write the result back to a sidecar or a prefab file. Every tool call goes through the same capability check. Interest limits what a player runtime can see.
 
 **Architecture:** The simulation store is an entity id, a human-readable name, and plain components, updated by ordered tick passes. That store is what an agent queries and what the authority replicates. The authority runtime (the process Genos hosts) is the only writer of replicated state. A tool does not write a column. It sends a notice on an agent connection, and the authority applies it on a tick boundary. A player runtime predicts only the entity it has input authority for, and reconciles by restoring that entity and replaying its commands. Remote entities interpolate. Snapshots are unreliable deltas against the last acknowledged snapshot. A spatial grid and a byte budget decide who is in a player packet. They do not decide what an agent can read. A replay stores that stream. Seeking it is how an agent time-travels.
 
@@ -64,6 +64,26 @@ The inspect and edit tools are for development. A shipped multiplayer build has 
 
 **The role byte is a request.** D29's join role does not grant anything by itself. The authority assigns the grant after the check. A player who sends the tool role is still a player.
 
+**Lockdown does not remove mods.** The tool API and the mod loader are different. Staging and release player binaries compile out inspect, edit, undo, and save. They keep the loader that receives the mod manifest, checks hashes, and applies asset and prefab bytes. The authority keeps the loader in every profile, including release, and runs sanctioned scripts there. A mod author gets the tool API by running a dev build. A mod script cannot grant that tool to itself.
+
+### Mods
+
+Modding is a standing goal, not a layer added after the session. `CONTEXT.md` already defines a mod: scripts and data that change a game without a change to the engine. A native library is not a mod. ADR 0009 is the language decision: Rhai, the checked engine, registered functions only. The `unchecked` feature stays rejected. A script does not own the window, the input, the renderer, the audio, or the network.
+
+Cheating and modding are different. Cheating is a player runtime writing authoritative state, calling the tool API, or running bytes that are not in the loaded manifest. Grants, compile-out, and the manifest hash block that. Modding is a change the authority loaded on purpose. Those changes are welcome. They go through the same notice path as a tool edit, so the tick, the log, the snapshot, and the replay see them.
+
+**Data.** Entities, prefabs, and scenes stay data. A prefab is the JSON schema from D33. A scene overlay is a sidecar fragment keyed by entity name. A mod may add a prefab, replace one, or add an entity to the scene. It does not add a Rust component column. Extra fields are a named property map the script can read. Built-in components stay the typed columns. Asset overrides replace the bytes behind a logical path (`meshes/door.obj`, a PNG, a WAV). `genos-load` still decodes those bytes. A network payload and a file already share those decoders (`docs/systems/loading.md`). The mod loader only chooses which bytes.
+
+**Scripts.** A mod script runs in the checked Rhai engine, on the authority, inside one mod pass. It calls registered functions. Those functions enqueue notices. They do not write a column and they do not open a socket. A fuel limit stops a runaway script, which is the checked build ADR 0009 already requires. The player runtime does not run that pass. It renders the snapshot and plays the assets. A client-realm script may drive presentation. It cannot enqueue an authoritative edit. Factorio runs the same mod code on every peer because the simulation is lockstep ([Factorio modding](https://wiki.factorio.com/Tutorial:Modding)). This plan does not copy the lockstep. It copies the rule that a peer with different mod bytes does not enter the session. Garry's Mod splits a server realm from a client realm. The authority pass is the server realm. Presentation is the client realm.
+
+**Order.** A manifest lists mods and their dependencies (`before`, `after`). The loader sorts that list. Two mods that provide the same prefab name, the same scene key, the same asset path, or the same script hook are a conflict. If the later mod declares `overrides` for that key, it wins and the session report names both mods. If neither declares it, loading fails and names both mods and the key. The failure happens before the first tick.
+
+**Distribution.** The authority hashes the canonical manifest and every file. A joining player runtime sends its manifest hash. On a match, the tick may start. On a mismatch, the authority sends the missing files, the player runtime checks each file hash and then the manifest hash, and a failed check never ticks. The gameplay datagram stays the entity stream. File bytes are a separate reliable transfer, still on `std` sockets, still not a crate that owns the network. Genos hosts this by pointing the authority at a directory. `--mods PATH` is the whole integration. The session report includes the manifest hash. This repo does not add a workshop.
+
+**Authors.** A mod author runs the authority as a dev build and uses the same inspect, edit, undo, and save tools as an engine author. A release player build joined to that session still has no tool API. Saving a prefab writes data a mod can ship. The script does not call `allow` and cannot widen its own permissions.
+
+**Replay.** The manifest hash is a header field beside the map hash (D13). A replay whose hash does not match the loaded mods refuses to open. Snapshot playback would otherwise show entities the local scripts do not know.
+
 ### Settled by this direction
 
 - The agent test above is how the choices in this file are judged. Live edit, undo, and save-back are part of that test.
@@ -74,6 +94,7 @@ The inspect and edit tools are for development. A shipped multiplayer build has 
 - D20 is open. The recommendation is that the numeric id stays the replication id and the physics id, with a human-readable name beside it. A string as the only wire id is the option that recommendation refuses.
 - The tool API is a development surface. A player runtime never writes authoritative state. Admin and operator calls run on the authority, through `allow`, or they do not run.
 - Interest is the player's exposure. The entity log, the cause, and a full-sim checksum are not player datagrams.
+- Mods stay in every profile. Lockdown compiles the debug and agent tool out of the release player binary and leaves the mod loader in place. A mod changes the game through data and through authority-side scripts. A player runtime that writes authoritative state is cheating, and it is refused.
 
 ### How the choices score
 
@@ -108,8 +129,14 @@ The inspect and edit tools are for development. A shipped multiplayer build has 
 | Trust the join role byte | The player runtime would promote itself to a tool. | Refuse. The authority assigns the grant. |
 | Full-sim checksum on the player snapshot | A far change is visible as a hash change, past the interest set. | Refuse. D41. The authority file still stores it. D11. |
 | Player packet is the interest set only | The anti-cheat exposure is the relevancy cut already in this plan. | Keep. D41. |
+| Compile mods out of release | Lockdown would remove the first-class mod path. | Refuse. |
+| Mods as native libraries | ADR 0009 rejects that. A native library is not a mod. | Refuse. |
+| Every peer runs mod scripts (lockstep) | Factorio can do this. This sim has no cross-machine deterministic script. | Refuse as the authority model. D43. |
+| Authority runs mod scripts through notices | Sanctioned changes use the same path as a tool edit. Players receive the result. | Recommend. D43, D44. |
+| Data overrides in load order, with a hard conflict | Prefabs, scenes, and assets extend without a silent last-writer. | Recommend. D45, D46. |
+| Join only when the mod hash matches | The player runtime cannot bring a private rule set. | Recommend. D47. |
 
-D20–D42, below, are the questions this section opens. D1–D19 stay open. Where this test adds weight to one of them, the line is in that decision.
+D20–D49, below, are the questions this section opens. D1–D19 stay open. Where this test adds weight to one of them, the line is in that decision.
 
 ## Open decisions
 
@@ -257,6 +284,7 @@ Header fields in the proposal:
 - `spectator_delay_ticks: u32` (0 on an authority file)
 - `map_hash: u64`
 - git hash as `u16` length plus bytes, for a person reading the file
+- `mod_hash`: 32 bytes, SHA-256 of the mod manifest from D47, or 32 zero bytes when no mod is loaded. A replay refuses to open when the loaded manifest hash differs.
 
 A protocol mismatch refuses the open. A sim-epoch mismatch allows snapshot playback and refuses resim. The git hash is not a compatibility check. It changes every commit.
 
@@ -489,7 +517,7 @@ Region is an AABB in millimeters, tested with the same cell size as interest (`C
 - **B. Disable only.** The functions are in every binary. A config flag starts them off. A patched player can skip the flag.
 - **C. Both, split by binary.** Staging and release player binaries compile the tool API out. The authority binary keeps the functions in every profile and starts with an empty tool grant. Dev compiles the tool into the player-side session tool and grants it on `127.0.0.1` with no token. `genos-net-view` is a dev binary. `examples/camera` and its scene MCP are not linked into the player binary.
 
-**Recommendation.** C. Compile-out is what makes a player patch unable to call edit. A grant on the authority is what lets Genos turn inspect on without a second protocol. The feature names are `profile-dev`, `profile-staging`, and `profile-release`. Workspace tests default to `profile-dev`.
+**Recommendation.** C. Compile-out is what makes a player patch unable to call edit. A grant on the authority is what lets Genos turn inspect on without a second protocol. The feature names are `profile-dev`, `profile-staging`, and `profile-release`. Workspace tests default to `profile-dev`. The mod loader and the Rhai host are not behind these features. Release still loads mods.
 
 ### D38. Grants
 
@@ -546,12 +574,82 @@ Capabilities in the recommendation: `command`, `inspect`, `edit`, `save`, `subsc
 - **B. Each handler has its own if-statement.**
 - **C. The network boundary checks once, and in-process tool calls skip the check.**
 
-**Recommendation.** A. C would make the dev CLI a backdoor around the grant. In-process calls from the session tool use a connection id and the same `allow`.
+**Recommendation.** A. C would make the dev CLI a backdoor around the grant. In-process calls from the session tool use a connection id and the same `allow`. A mod script does not call `allow`. Its registered functions are the narrower set in D44.
+
+### D43. Where a mod script runs
+
+**Question.** Multiplayer stays authoritative. Factorio runs mods on every peer. Garry's Mod runs a server realm and a client realm ([realms](https://wiki.facepunch.com/gmod/States)).
+
+- **A. Authority only for anything that changes an entity.** The player runtime applies snapshots and may run a presentation script. That presentation script cannot spawn, edit, or despawn. Custom movement a mod wants is an authority notice, and the pawn reconciles.
+- **B. Every runtime runs every script.** Joining requires the same bytes, and the tick is lockstep. A script that is not deterministic across machines desyncs the session.
+- **C. The player runtime also runs the mod script for the owned pawn**, so prediction stays smooth, and the authority runs every other script.
+
+**Recommendation.** A. B needs the cross-machine determinism the physics plan refuses, and a script with a fuel limit can still diverge if anything outside the engine differs. C is a later plan for one pawn, after A is tested. The manifest hash is required in all three. A does not skip it.
+
+### D44. How a script is allowed to change state
+
+**Question.** ADR 0009 gives a script registered functions and the checked engine. The `unchecked` feature stays rejected.
+
+- **A. The script receives the store and writes columns.**
+- **B. The script calls registered functions that enqueue the same notices as a tool.** The authority applies them at the end of the tick. The mod permission list is the functions actually registered: read a component, enqueue a spawn, enqueue an edit of a property or a built-in component, play a presentation event. No socket, no window, no path outside that mod's directory. Fuel is a fixed operation budget per tick. A script that exceeds it is stopped for that tick and the session report names the mod. The entity log's cause is the mod id and the hook name.
+- **C. The script may also open a socket if the mod permission says so.**
+
+**Recommendation.** B. A skips the authority path. C breaks ADR 0009. The mod permission is not a connection grant. Loading the mod is the operator's choice. The script cannot add permissions while it runs.
+
+### D45. Load order and conflicts
+
+**Question.** Two mods both ship `prefabs/door.json`, or both hook `on_tick`.
+
+- **A. Last file on disk wins.** Silent.
+- **B. A manifest orders mods by `before` and `after`.** The same key from two mods, and neither sets `overrides` for that key, fails the load and names both mod ids and the key. The later mod may set `overrides` and then it wins, and the report records the loser. A cycle in `before` / `after` fails the load.
+- **C. Numeric priorities only**, with equal priorities undefined.
+
+**Recommendation.** B. The host can still append an explicit order in the manifest when two mods do not declare a relation. That explicit order is the tie-break, and an undeclared duplicate key still fails.
+
+### D46. What a mod may override or extend
+
+**Question.** How data-driven the entity is.
+
+- **A. New Rust component columns** from a mod.
+- **B. Prefabs, scene overlays, asset paths, and a property map.** A prefab carries name, type, tags, pose, pins, and string or integer properties. A scene overlay sets those fields on an entity name from the base scene or adds an entity. An asset override replaces the bytes at a logical path. The decoder stays `genos-load`. A mod does not add a column type.
+- **C. A mod may replace `scene.rhai` outright** and also do B.
+
+**Recommendation.** B, plus one map replacement when a single mod declares the `scene` key. Two mods that both declare `scene` are a D45 conflict. C as an unconditional rewrite would drop the base scene without a record. Properties are how a mod extends an entity without a new column. A built-in pass ignores a property it does not know. A script reads it.
+
+### D47. Distributing mods and checking them
+
+**Question.** Players must run the sanctioned set, automatically.
+
+- **A. The operator tells each player where to download, out of band.** A wrong download is a support problem.
+- **B. The authority owns a manifest.** Each file has a SHA-256. The manifest hash is SHA-256 over the canonical listing (mod id, version, path, file hash, load order). The implementation of SHA-256 is in-tree. No new crate. The player sends its manifest hash at join. Equal hashes start the tick. A mismatch transfers the missing files on a reliable stream, then hashes them again. A failed hash refuses the join and never ticks. Gameplay datagrams stay the entity stream. The replay header stores the same manifest hash next to the map hash.
+- **C. Trust the filename.** No hash.
+
+**Recommendation.** B. A is easy to get wrong on a Genos host with many players. C does not stop a swapped file. The reliable stream is file bytes, not a second entity protocol.
+
+### D48. What Genos has to do
+
+**Question.** A hosted authority should run a modded game without a special build.
+
+- **A. `--mods PATH` on `genos-session`.** The directory holds one folder per mod and a `manifest.json`. The process loads it before the tick, prints `mod_hash` in the session report, and serves that set to joiners. Genos, in the other repository, sets the argument. An empty path is the base game.
+- **B. A workshop client inside this repo.**
+- **C. A separate modded binary.**
+
+**Recommendation.** A. B is a product in the hosting repository. C would make modded and unmodded two protocols. The release authority already keeps the loader (D37). No profile compiles it out.
+
+### D49. Mod authors and the dev tool
+
+**Question.** Authors should inspect a running modded game. Lockdown still applies to players.
+
+- **A. The author runs a `profile-dev` authority and uses the same inspect, edit, undo, and save functions.** A release player joined to it has the tool compiled out. A script cannot call those functions. Save writes a prefab or a sidecar the author can put in the mod folder.
+- **B. Every release player gains inspect if a mod is loaded.**
+- **C. A separate mod-debug protocol.**
+
+**Recommendation.** A. B would undo D37 as soon as a server runs mods. C splits the tool the author was promised.
 
 ## Global constraints
 
 - ADR 0007. Network code uses the Rust standard library and BSD sockets or Winsock. `tokio` stays rejected. A third-party crate does not own the network. `renet`, `lightyear`, `bevy_replicon`, and any QUIC or WebTransport crate stay off the dependency list. They are design sources.
-- ADR 0009. Rhai stays the game script. A script does not own a socket. Tick passes are Rust. The checked Rhai build stays the mod evaluator. The Grain VM stays out.
+- ADR 0009. Rhai stays the game script and the mod script. A script does not own a socket. The checked Rhai build stays the mod evaluator. The `unchecked` feature and the Grain VM stay out. A mod script enqueues notices. It does not write a column. The authority's mod pass is the only tick pass that calls Rhai.
 - ADR 0001 and ADR 0004. The input system stays a pull. A tick samples the action map once into a command. The device is not replayed.
 - `genos-math` stays `f32`. There is no `f64` path in that crate. Replicated positions are integer millimeters. Wide worlds use a sector, which is the same shift the physics plan's origin work publishes.
 - Y is up. The ground is the XZ plane. Yaw 0 looks along -Z. Positive yaw turns toward +X. Positive strafe is +X. Lengths are metres. The tick is `1/60` s, the same step `update` already accumulates in `crates/scene/src/camera.rs`.
@@ -560,7 +658,7 @@ Capabilities in the recommendation: `command`, `inspect`, `edit`, `save`, `subsc
 - The agent endpoint stays loopback MCP on `127.0.0.1`. It is not the game session. `CONTEXT.md` says to avoid calling that endpoint a game network.
 - The person is the player. Sources say "client" for the program that person runs. In this repo that program is the player runtime. Sources say "server" for the authoritative program. In this repo that program is the authority runtime, and it is still a runtime. The game is not a server. Genos, the other repository, starts the authority process.
 - "System" in this repo is a system record. The ECS behavior is a tick pass.
-- New public words (`EntityId`, entity name, entity log, cause, agent connection, pin, prefab, capability, grant, audit log, profile, tick pass, authority runtime, player runtime, connection, snapshot, command, notice, replay, keyframe, spectator) are added to `CONTEXT.md` in the commit that first publishes them (step N1). N1 waits until D1–D42 are answered. The camera agent endpoint and the scene handle keep the definitions they already have. Prefab is a new word. It is not a scene handle. Admin and operator are grants, not a second kind of player.
+- New public words (`EntityId`, entity name, entity log, cause, agent connection, pin, prefab, capability, grant, audit log, profile, mod manifest, override, mod permission, tick pass, authority runtime, player runtime, connection, snapshot, command, notice, replay, keyframe, spectator) are added to `CONTEXT.md` in the commit that first publishes them (step N1). N1 waits until D1–D49 are answered. The camera agent endpoint and the scene handle keep the definitions they already have. Prefab is a new word. It is not a scene handle. Admin and operator are grants, not a second kind of player. Mod keeps the definition already in `CONTEXT.md`. A mod permission is not a connection grant.
 - A new crate sets `[lints] workspace = true`, joins the workspace `Cargo.toml`, and is named in `docs/architecture.md` in that same commit.
 - `examples/camera` does not open a game socket in any step of this plan. The first proof stays the lit scene.
 - Headless tests use a fixed command list, a fixed tick, a seeded link, and no window. Two runs in one process match on the integers the step names. Do not check wall-clock time, thread scheduling, or a hash from another operating system.
@@ -647,6 +745,18 @@ _Avoid_: The entity log, a player datagram.
 `dev`, `staging`, or `release`. It selects what is compiled into a binary and which grants start empty.
 _Avoid_: A runtime mode the player can switch on.
 
+**Mod manifest**:
+The ordered list of mods for one session, with a hash of every file. The authority and every player runtime must have the same hash before the tick.
+_Avoid_: A workshop catalog, a native library list.
+
+**Override**:
+A later mod's explicit claim on a prefab name, a scene key, an asset path, or a script hook that an earlier mod also provides. Without that claim, the duplicate is a load error.
+_Avoid_: Last file on disk wins.
+
+**Mod permission**:
+The registered Rhai functions one mod script may call. The list is fixed when the mod loads.
+_Avoid_: A connection grant, a capability the script can add to itself.
+
 **Pin**:
 A replicated mark on a component. Tick passes skip a pinned component until an unpin notice. The predicting runtime honors the same mark.
 _Avoid_: A pause of the session, a lock file.
@@ -695,7 +805,7 @@ That plan does not mention a session, a snapshot, or a player runtime. This plan
 
 The host is `crates/scene/src/script.rs`. `load_path` and `load_str` run Rhai 1.26.0 (`crates/scene/Cargo.toml`, `rhai = "=1.26.0"`) and return a `Scene`. The registered names place a floor, walls, solids, lights, and a sun. `docs/systems/scripting.md` says there is no mod folder, no hot reload, and no gameplay script. ADR 0009: a script calls registered functions and does not own the window, the input, the renderer, the audio, or the network.
 
-A tick pass does not call Rhai. A script that ran inside prediction would have to be deterministic, bounded, and free of side effects on every replay. That is a later decision. This plan does not take it.
+Today a tick pass does not call Rhai. [Mods](#mods) is the decision that changes that for one authority pass: a checked script enqueues notices, and the player runtime does not run it. A script inside prediction is still refused until that pass is proven. The checked engine and the fuel limit are what keep a runaway mod off the tick.
 
 ### Input
 
@@ -743,7 +853,8 @@ Nothing in the tree sends a pose, a command, or a delta. Nothing records that st
 | Agent control | The camera endpoint edits scene handles and can subscribe to `genos://scene`. It does not see a simulation entity, a cause, or a replay tick. | An agent connection. Query, inspect, entity log, subscribe, and spawn, edit, despawn as notices. D20–D29 are open. |
 | Live edit | The camera endpoint mutates the `Scene` in the camera process. There is no pin, no undo stack, and no save of entity components. | Tool notices applied at a tick boundary, pinned so the next pass does not erase them, undo by inverse notice. D30–D31, D36. |
 | Save-back | A `.rhai` scene is hand-written and loaded once. Nothing writes it back. There is no prefab. | An explicit authority-side sidecar and a data prefab. The script stays. D32–D35. |
-| Lockdown | No profile, no grant, no audit. Any future tool would be linked into every binary. | Dev, staging, and release. The player binary compiles the tool out. The authority checks a grant. D37–D42. |
+| Lockdown | No profile, no grant, no audit. Any future tool would be linked into every binary. | Dev, staging, and release. The player binary compiles the tool out. The authority checks a grant. The mod loader stays. D37–D42. |
+| Mods | A scene script places a room. `docs/systems/scripting.md` says there is no mod folder and no gameplay script. | Data overrides, a checked Rhai pass on the authority, load order, hash-checked distribution. D43–D49. |
 
 ## Decision
 
@@ -1000,7 +1111,7 @@ N28 adds replay controls to this same binary. The scrub control is a tick intege
 
 ## Replay
 
-D1–D19 are the recording decisions. D20–D42 are the agent, live-edit, and lockdown decisions. This section is the argument, the sources, and the way the recommendations sit on the datagram layout above. An agent seeks this same file. Nothing here is built.
+D1–D19 are the recording decisions. D20–D49 are the agent, live-edit, lockdown, and mod decisions. This section is the argument, the sources, and the way the recommendations sit on the datagram layout above. An agent seeks this same file. Nothing here is built.
 
 ### One stream
 
@@ -1168,17 +1279,20 @@ Spawn and despawn records are written even when the pose budget is spent. Pose r
 | `crates/net/src/replay.rs` | File header, length-prefixed frames, keyframe trailer. From N25. The datagram slice is the session codec. |
 | `crates/net/src/agent.rs` | Agent-connection notices: spawn, edit, despawn, subscribe, undo. From N32. |
 | `crates/net/src/allow.rs` | Capabilities, grants, profiles, audit lines. From N40. |
+| `crates/mods/src/lib.rs` | Manifest, load order, conflicts, override map. Package `genos-mods`. From N43. No socket. |
+| `crates/mods/src/script.rs` | Checked Rhai host. Registered functions only. From N45. |
+| `crates/net/src/mods_sync.rs` | Manifest hash and missing-file transfer. From N46. |
 | `crates/sim/src/pin.rs` | Pinned components. From N36. |
 | `examples/session/src/tool.rs` | Query, inspect, seek, CLI parse, one JSON handler. From N34. |
 | `examples/session/src/save.rs` | Sidecar and prefab files. From N38. |
 | `examples/session/` | Headless authority. Package `genos-session`. From N21. |
 | `examples/net-view/` | Debug binary. Package `genos-net-view`. From N22. |
 
-`genos-sim` depends on nothing in this workspace at N1. `genos-net` depends on `genos-sim`. `genos-session` depends on `genos-net`, `genos-scene`, and `genos-json`. `genos-net-view` depends on `genos-net` and `genos-ui`. The window is not linked into `genos-session`.
+`genos-sim` depends on nothing in this workspace at N1, and it never depends on `rhai`. `genos-net` depends on `genos-sim`. `genos-mods` depends on `rhai` from N45 and does not depend on `genos-net`. `genos-session` depends on `genos-net`, `genos-scene`, `genos-json`, and, from N47, `genos-mods`. `genos-net-view` depends on `genos-net` and `genos-ui`. The window is not linked into `genos-session`.
 
 ## Steps
 
-Do not start N1. D1–D42 are unanswered. The datagram layout, the replay file, and the live-edit notices are the same bytes, so N7 is the commit that would lock the recording and the tool. N25–N28 describe the recommended replay answers. N29–N42 describe the recommended author, agent, and lockdown answers. If a decision above moves, edit that step before implementing it. The steps stay in order: N25 follows N24, and N29 follows N28.
+Do not start N1. D1–D49 are unanswered. The datagram layout, the replay file, and the live-edit notices are the same bytes, so N7 is the commit that would lock the recording and the tool. N25–N28 describe the recommended replay answers. N29–N47 describe the recommended author, agent, lockdown, and mod answers. If a decision above moves, edit that step before implementing it. The steps stay in order: N25 follows N24, and N29 follows N28.
 
 ### N1. Entity id
 
@@ -1530,6 +1644,46 @@ Do not start N1. D1–D42 are unanswered. The datagram layout, the replay file, 
   - An entity at `x_mm` 200_000. Operator inspect returns 200_000. That id is absent from the player datagram. Operator edit leaves the pose unchanged and writes a deny line. A second entity in the view cell at `x_mm` 5. Admin edit sets it to 8. After the tick, inspect returns 8 and the player snapshot of that relevant entity is 8. A join with the wrong admin token does not receive `edit`. The release-player assertion stays in N40.
 - **Commit:** `session: grant inspect to an operator and edit to an admin`
 
+### N43. Mod load order and conflicts
+
+- [ ] **Files:** `crates/mods/Cargo.toml`, `crates/mods/src/lib.rs`, workspace `Cargo.toml`, `docs/architecture.md`. Test `crates/mods/tests/order.rs`. `[lints] workspace = true`. The crate depends on nothing in the workspace and does not depend on `rhai` yet. The same commit adds one sentence to `docs/systems/scripting.md` limits: mods load from a manifest, and a duplicate key without `overrides` fails the load.
+- **Behavior:** `load_manifest` reads mod ids, versions, `before`, `after`, and provided keys. It returns an ordered list or an error. A cycle is an error. The same key from two mods without `overrides` is an error that names both ids and the key. With `overrides` on the later mod, the order stands and the result records the loser. An explicit host order is the tie-break when two mods declare no relation and no shared key.
+- **Test:** `two_mods_conflict_until_one_overrides`
+  - Mods `base` and `extra` both provide `prefabs/door`. The error names both and that key. `extra` sets `overrides` for that key and `after: base`. The order is `base`, then `extra`, and the loser is `base`. A third mod `loop` with `before` and `after` that cycle returns the cycle error. `genos-sim`'s `Cargo.toml` does not gain a `rhai` dependency.
+- **Commit:** `mods: order a manifest and fail a silent clash`
+
+### N44. Resolve prefabs, scenes, and assets
+
+- [ ] **Files:** `crates/mods/src/resolve.rs`. Test `crates/mods/tests/resolve.rs`.
+- **Behavior:** Given the ordered mods, `resolve(path)` returns the winning bytes for a logical asset path. `scene_overlay` merges entity fragments by name, later override wins. A prefab's property map keeps keys the built-in columns do not use. The function returns bytes and fields. It does not decode PNG or OBJ. The session later passes those bytes to `genos-load`.
+- **Test:** `an_override_replaces_the_asset_and_the_scene_name`
+  - Base provides `meshes/door.obj` bytes `A` and entity `door` at `x_mm` 0. A later mod overrides the mesh with bytes `B` and the entity with `x_mm` 10, plus property `hp` 3. `resolve` returns `B`. The overlay's `door` is at 10 and `hp` is 3. A third mod that provides the mesh without `overrides` is the N43 error, not a silent winner.
+- **Commit:** `mods: resolve overrides for assets and scenes`
+
+### N45. Sandboxed script enqueues a notice
+
+- [ ] **Files:** `crates/mods/src/script.rs`, `crates/mods/Cargo.toml` (`rhai = "=1.26.0"`). Test `crates/mods/tests/script.rs`. `genos-sim` still does not depend on `rhai`.
+- **Behavior:** The engine is the checked Rhai build. The host registers `spawn_named` and `set_prop` only when the mod permission list includes them. A call enqueues a notice and does not touch a store. The session applies the notice in the mod pass, after the other tick passes, with the same end-of-tick rule as a tool spawn. The cause on the new entity is the mod id and the hook name. A script that exceeds the fuel budget contributes no notices for that tick. A presentation engine does not register `spawn_named`. A script has no socket API and no function that writes a column.
+- **Test:** `a_mod_script_spawns_through_a_notice_and_a_presentation_script_cannot`
+  - Script `spawn_named("crate")` with permission. After one tick the entity exists and the log cause names the mod. The same source without the permission fails the call and leaves the spawned count unchanged. A loop past the fuel budget leaves the count unchanged even if the source called `spawn_named` before the loop. A presentation registration of the same source fails the call. Two runs enqueue the same notice bytes.
+- **Commit:** `mods: let a checked script enqueue a spawn`
+
+### N46. Hash the manifest and refuse a mismatch
+
+- [ ] **Files:** `crates/mods/src/hash.rs`, `crates/net/src/mods_sync.rs`. Test `crates/mods/tests/hash.rs` and `crates/net/tests/mods_sync.rs`.
+- **Behavior:** SHA-256 is implemented in `genos-mods`. No new crate. The manifest hash covers mod id, version, path, file hash, and order, in that canonical listing. `join_mods(local_hash)` on the authority returns `Ready` when the hashes match. It returns `Need` plus the missing file ids when they differ. `accept_files` then re-hashes. A bad file hash returns `Refuse` and does not advance the tick. Gameplay datagrams are not used for the file bytes.
+- **Test:** `a_mismatched_mod_hash_never_ticks`
+  - SHA-256 of the empty input is `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`. Two identical one-file manifests produce the same manifest hash. Flip one file byte. `join_mods` returns `Need`. Feeding the original bytes returns `Ready`. Feeding a different byte returns `Refuse`, and a following `run_tick` is not called by the join helper. The helper's tick count stays 0 on `Refuse`.
+- **Commit:** `mods: refuse a session whose mod hash differs`
+
+### N47. A hosted authority loads a mod directory
+
+- [ ] **Files:** `examples/session/src/mods.rs`, `examples/session/src/run.rs`. Test `examples/session/tests/mods.rs`.
+- **Behavior:** `run_session` with `mods: Some(path)` loads that directory before the tick and sets `report.mod_hash`. `mods: None` sets a zero hash and still ticks. The dev tool's inspect from N40 still reads an entity the mod script spawned. This step does not open a socket and does not link `genos-window`.
+- **Test:** `a_mod_directory_sets_the_report_hash_and_spawns`
+  - A temp directory with one mod whose script is the N45 spawn. Thirty ticks. `report.mod_hash` equals `join_mods` on those same files. The entity `crate` exists. A second call with `mods: None` has a zero hash and no `crate`. Inspect of `crate` on the first run returns the entity. The release compile-out check stays in N40.
+- **Commit:** `session: load mods from a directory`
+
 ## Limits
 
 - The authority runtime is the only state authority. Input authority can move. A player runtime does not keep the true state of a pawn after it loses input authority.
@@ -1541,7 +1695,7 @@ Do not start N1. D1–D42 are unanswered. The datagram layout, the replay file, 
 - The command repeat on the authority is at most 4 ticks. There is no clock slew.
 - Snapshots omit unchanged entities. They do not bit-pack, and they do not Huffman-code the datagram.
 - Notices are at most 256 bytes and at most 4 per datagram. They are not a general RPC system for scripts.
-- Rhai does not run in a tick pass.
+- The only tick pass that calls Rhai is the authority mod pass. The player runtime does not run it. A script cannot widen its permissions or open a socket. Lockdown does not compile that pass out of a release authority.
 - There is no job scheduler. Parallel physics, if it lands, is allowed on the authority only when its hash matches `step`.
 - `examples/camera` does not join a session.
 - The debug window shows four player runtimes. The scale test's eight connections are headless.
@@ -1556,6 +1710,7 @@ Do not start N1. D1–D42 are unanswered. The datagram layout, the replay file, 
 - A tool does not write a column. Time-travel does not fork a session. Live undo does not seek backward and does not undo a player command.
 - Save does not rewrite the Rhai scene. A prefab is data. A failed save does not change the sim. Undo does not revert the file.
 - Staging and release player binaries do not contain the tool API. The authority starts with tool grants empty. A join role byte does not grant a capability. This repo does not store accounts. Admin edits run on the authority. The audit log is not sent to players.
+- A mod is data plus a checked script. It is not a native library. A duplicate key without `overrides` does not load. A mismatched manifest hash does not tick. A mod author inspects from a dev build. A release player does not gain that tool because mods are loaded.
 - The first query has no field predicates. The cause stores one hop, not a graph walk.
 - Genos's process supervisor, matchmaking, and account system are out of this repository. The contract is the binary, the bind address, the scene path, and stdin.
 
@@ -1586,7 +1741,7 @@ N1 is the one that edits `CONTEXT.md`, `docs/architecture.md`, and the new ADR. 
 | Debug binary with sliders and desync marks | Debug view | N22, N23 |
 | ECS decision | Decision | N1 (the ADR) |
 | Job system left alone | Jobs, Global constraints | No step adds one |
-| Rhai stays off the socket | ADR 0009, Scripting | No step links Rhai into `genos-sim` |
+| Rhai stays off the socket | ADR 0009, Scripting | No step links Rhai into `genos-sim`. N45 registers no socket function |
 | Replay is the recorded network stream | Open decisions, Replay | N25 |
 | Input replay, snapshot deltas, and keyframes | D1, D2, D3 | N25, N26, N27 |
 | Seek, rewind, scrub | D4, D17 | N26, N28 |
@@ -1604,7 +1759,11 @@ N1 is the one that edits `CONTEXT.md`, `docs/architecture.md`, and the new ADR. 
 | Profiles, grants, and the one allow gate | D37, D38, D42 | N40 |
 | Anti-cheat exposure is the interest set | D41 | N41 |
 | Operator inspect and admin edit | D39, D40 | N42 |
+| Mod load order and conflicts | D45, D46 | N43, N44 |
+| Sandboxed Rhai on the authority | ADR 0009, D43, D44 | N45 |
+| Hash-checked mod distribution | D47, D48 | N46, N47 |
+| Mod authors keep the dev tool | D49 | N47, and N40 still compiles the tool out of a release player |
 
 ## What this plan does not do
 
-It does not implement the steps. It does not settle D1–D42. It does not change `step`, the camera loop, or the camera MCP endpoint. It does not rewrite a scene script. It does not add accounts. It does not merge the physics plan. N24 is the seam, and it waits for that plan's `BodyId` and `hash_world`. N1 waits until the open decisions are answered, because the datagram layout is the replay file and the live-edit path.
+It does not implement the steps. It does not settle D1–D49. It does not change `step`, the camera loop, or the camera MCP endpoint. It does not rewrite a scene script. It does not add accounts or a workshop. It does not merge the physics plan. N24 is the seam, and it waits for that plan's `BodyId` and `hash_world`. N1 waits until the open decisions are answered, because the datagram layout is the replay file and the live-edit path.
