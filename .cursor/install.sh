@@ -31,3 +31,6 @@ rustup toolchain install stable --profile minimal
 rustup default stable
 
 cargo build --workspace --release --tests
+
+# Skill sync is optional. `|| true` keeps setup alive if the helper errors.
+bash "$(dirname "$0")/sync-agent-skills.sh" || true
