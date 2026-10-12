@@ -76,6 +76,7 @@ fn main() {
     println!("cargo:rerun-if-changed=shaders/transmit.comp");
     println!("cargo:rerun-if-changed=shaders/fxaa.comp");
     println!("cargo:rerun-if-env-changed=GENOS_LIGHTING_DIAG");
+    println!("cargo:rerun-if-env-changed=GENOS_DP_DIVERGE");
 }
 
 fn compile(src: &str, dest: &std::path::Path) -> PathBuf {
@@ -89,6 +90,17 @@ fn compile_with(src: &str, dest: &std::path::Path, defines: &[&str]) -> PathBuf 
     // Phase 0 counters. The default build leaves them compiled out.
     if std::env::var("GENOS_LIGHTING_DIAG").is_ok_and(|v| v == "1") {
         cmd.arg("-DLIGHTING_DIAG=1");
+    }
+    // Phase 0.3. 0 is the shipped shader. 1, 2 and 3 skip GI-hit shadow rays
+    // and the picture is wrong; never leave this on.
+    if let Ok(mode) = std::env::var("GENOS_DP_DIVERGE") {
+        match mode.as_str() {
+            "0" | "" => {}
+            "1" | "2" | "3" => {
+                cmd.arg(format!("-DDP_DIVERGE={mode}"));
+            }
+            other => panic!("GENOS_DP_DIVERGE must be 0, 1, 2 or 3, got {other}"),
+        }
     }
     for define in defines {
         cmd.arg(format!("-D{define}"));
