@@ -109,13 +109,21 @@ void main() {
             }
             bool stale = int(lighting_frame() - updated) >= int(LIGHTING_WRC_REFRESH_FRAMES);
             bool growing_wrc = t < LIGHTING_WRC_CAP - 0.5 && (int(last - updated) > 0 || int(lighting_frame() - last) <= int(LIGHTING_SC_READ_SLACK));
-            if (stale || growing_wrc) {
-                uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);
-                if (at < LIGHTING_WRC_REFRESH_CELLS) {
-                    ckeys.key[LIGHTING_WRC_BG_AT + at] = slot;
+            // S72N dark fill: a growing cell rays read is ranked with the
+            // texels (priority by frames read since its relight, times cap /
+            // samples), not taken first come from the background list: that
+            // list holds 1024 cells a round in slot (hash) order, so the same
+            // cells won each round and the rest, scattered, waited until they
+            // reached the cap; a room lit only by bounces filled in patches.
+            if (!(growing_wrc && lighting_sc_dark_fill())) {
+                if (stale || growing_wrc) {
+                    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);
+                    if (at < LIGHTING_WRC_REFRESH_CELLS) {
+                        ckeys.key[LIGHTING_WRC_BG_AT + at] = slot;
+                    }
                 }
+                return;
             }
-            return;
         }
         // S72D sparse fill, coarse to fine: every texel is relit, but a young one
         // (short of LIGHTING_DN_MIN_SETS sets) weighs by its level (4-apart keys 4x,

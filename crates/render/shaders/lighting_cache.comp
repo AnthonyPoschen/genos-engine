@@ -185,6 +185,14 @@ void main() {
         bool local3 = (urgent3 && lighting_near_change(cp)) || lighting_wrc_lamp_changed(cp, prev_updated);
         float add = float(run);
         float wa = add / (t + add);
+        // S72N dark fill (Anthony: dark occluded rooms fill disproportionately
+        // slowly): while a cell grows, sample k weighs k^2 (later samples read a
+        // cache that has taken more bounces; a plain mean kept the first, dark
+        // ones at 1 / n, and every bounce through these cells lagged again), so
+        // the new samples' share is 1 - (t / (t + add))^3. Plain past half the cap.
+        if (lighting_sc_dark_fill() && t < 0.5 * LIGHTING_WRC_CAP) {
+            wa = 1.0 - pow(t / (t + add), 3.0);
+        }
         if (local3) {
             wa = max(wa, LIGHTING_WRC_LOCAL_ALPHA * add);
         } else if (!lighting_sc_light_quiet()) {

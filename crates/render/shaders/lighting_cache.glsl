@@ -610,7 +610,14 @@ vec4 lighting_sc_shown(uint slot);
 bool lighting_sc_sparse_on();
 // S64B: the sun/sky share (as of now) of the last bilerp's sources.
 float lighting_bilerp_sunfrac = 0.0;
+vec4 lighting_sc_bilerp_cover(vec3 pos, vec3 n, float size, float cover);
 vec4 lighting_sc_bilerp_sized(vec3 pos, vec3 n, float size) {
+    vec4 r = lighting_sc_bilerp_cover(pos, n, size, 0.5);
+    return r.w < 0.0 ? vec4(0.0) : r;
+}
+// Bilinear over the lit coplanar cells of one size; w their mean sample count,
+// -1 when they cover less than `cover` of the footprint.
+vec4 lighting_sc_bilerp_cover(vec3 pos, vec3 n, float size, float cover) {
     float fsum = 0.0;
     uint ax = lighting_axis(n) >> 1u;
     vec3 ta = vec3(0.0);
@@ -661,8 +668,8 @@ vec4 lighting_sc_bilerp_sized(vec3 pos, vec3 n, float size) {
     }
     // Most of the footprint lit: a texel at the edge of what was lit keeps the
     // light it has, but one mostly over unlit cells starts as new.
-    if (wsum < 0.5) {
-        return vec4(0.0);
+    if (wsum < cover || wsum <= 0.0) {
+        return vec4(0.0, 0.0, 0.0, -1.0);
     }
     lighting_bilerp_sunfrac = fsum / wsum;
     return vec4(sum / wsum, count / wsum);
@@ -671,6 +678,27 @@ const float LIGHTING_SC_RESAMPLE_SETS = 4.0;
 bool lighting_near_change(vec3 p);
 bool lighting_sc_light_quiet();
 float lighting_seed_sunfrac = 0.0;
+// S72N: first fill from the coarser sizes (2x, then 4x), bilinear over the lit
+// coplanar cells there (any coverage), so it has no cell-shaped steps. The 25 cm
+// cell holding pos is still claimed as a seed a pixel needs (reveal burst).
+vec4 lighting_sc_parent_bilerp(vec3 pos, vec3 n, float size) {
+    float s2 = size * 2.0;
+    if (s2 > 0.2) {
+        uint c = lighting_cache_find_sized(pos, n, true, s2, pos);
+        if (c != ~0u) {
+            cache.v[3u * c].w = uintBitsToFloat(lighting_frame());
+            cache.v[LIGHTING_WORLD_AT + c].z = uintBitsToFloat(lighting_frame());
+        }
+    }
+    [[dont_unroll]] for (uint l = 0u; l < 2u; l++) {
+        vec4 r = lighting_sc_bilerp_cover(pos, n, s2, 1.0e-3);
+        if (r.w > -0.5) {
+            return vec4(r.rgb, 1.0);
+        }
+        s2 *= 2.0;
+    }
+    return vec4(0.0);
+}
 vec4 lighting_sc_resample(vec3 pos, vec3 n, float size, uint slot) {
     lighting_seed_sunfrac = 0.0;
     vec4 best = vec4(0.0);
@@ -1329,6 +1357,39 @@ vec4 lighting_sc_sparse(uint slot, float step) {
 }
 
 // Surface cache: what a texel shows (w 0 when it has nothing yet).
+// S72N (Anthony: seeded light must not count as a texel's own samples): a
+// texel's first light from elsewhere (the resample of the next sizes, the
+// coarser cells, the pixel's probes) is kept apart from its own mean, in
+// SPARSE_AT .y (rgb9e5, light as of the seed) and .z (confidence 0..1, 0 none).
+// Its own sets start from nothing and take over by count, as the coarse-level
+// interpolation does (lighting_sc_shown). Flag 134217728: the old way (the seed
+// is the texel's mean with its sample count).
+// S72N dark fill (lighting_cache.comp, lighting_compact.comp); flag 67108864 off.
+bool lighting_sc_dark_fill() {
+    return lighting_world_mode() == 3u && (lighting_sc_flags() & 67108864u) == 0u;
+}
+bool lighting_sc_seed_split() {
+    return lighting_world_mode() == 3u && (lighting_sc_flags() & 134217728u) == 0u;
+}
+bool lighting_sc_has_seed(uint slot) {
+    return cache.v[LIGHTING_SC_SPARSE_AT + slot].z > 0.0;
+}
+void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
+    if (cache.v[3u * slot + 2u].w < 0.5) {
+        cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(sunfrac, max(lighting_ls_now(), 0.0), 0.0, 0.0);
+    }
+    cache.v[LIGHTING_SC_SPARSE_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0))));
+    cache.v[LIGHTING_SC_SPARSE_AT + slot].z = clamp(conf, 0.05, 1.0);
+}
+vec4 lighting_sc_seed(uint slot) {
+    vec4 sp = cache.v[LIGHTING_SC_SPARSE_AT + slot];
+    if (!(sp.z > 0.0)) {
+        return vec4(0.0);
+    }
+    return vec4(lighting_unpack_rgb9e5(floatBitsToUint(sp.y)) * lighting_sc_sun_gain(slot), sp.z);
+}
+
+// Surface cache: what a texel shows (w 0 when it has nothing yet).
 vec4 lighting_sc_own_shown(uint slot);
 vec4 lighting_sc_shown(uint slot) {
     // S72D coarse to fine: a texel shows the interpolation of the next level up
@@ -1339,12 +1400,16 @@ vec4 lighting_sc_shown(uint slot) {
     // to 0 at LIGHTING_SC_HANDOVER sets, so the value moves continuously. An edge
     // (keys disagree) still promotes the texel to rays of its own (scheduling),
     // but its light fades in the same way.
-    if (lighting_sc_sparse_on()) {
-        vec4 own = cache.v[3u * slot + 2u];
-        float n = floor(max(own.w, 0.0));
-        float fade = clamp(1.0 - n / LIGHTING_SC_HANDOVER, 0.0, 1.0);
+    // S72N: the texel's seed (lighting_sc_seed) joins the prior by its
+    // confidence, in the same handover.
+    vec4 own = cache.v[3u * slot + 2u];
+    float n = floor(max(own.w, 0.0));
+    float fade = clamp(1.0 - n / LIGHTING_SC_HANDOVER, 0.0, 1.0);
+    if (fade > 0.0) {
+        vec3 prior = vec3(0.0);
+        float pc = 0.0;
         uint lvl = lighting_sc_level(slot);
-        if (fade > 0.0 && lvl < 2u) {
+        if (lighting_sc_sparse_on() && lvl < 2u) {
             vec4 sp = vec4(0.0);
             float ck = 0.0;
             if (lvl == 0u) {
@@ -1363,11 +1428,24 @@ vec4 lighting_sc_shown(uint slot) {
                 ck = sp.w < -1.5 ? 0.25 * (-sp.w - 2.0) : 0.5 * (sp.w - 1.0);
             }
             if (abs(sp.w) > 0.5) {
-                vec4 mine = n > 0.5 ? lighting_sc_own_shown(slot) : vec4(0.0);
-                float k = LIGHTING_SC_HANDOVER_K * ck * fade;
-                float a = mine.w > 0.5 ? n / max(n + k, 1.0e-4) : 0.0;
-                return vec4(mix(sp.rgb, mine.rgb, a), 1.0);
+                ck = max(ck, 1.0e-3);
+                prior = sp.rgb * ck;
+                pc = ck;
             }
+        }
+        if (lighting_sc_seed_split()) {
+            vec4 sd = lighting_sc_seed(slot);
+            if (sd.w > 0.0) {
+                prior += sd.rgb * sd.w;
+                pc += sd.w;
+            }
+        }
+        if (pc > 0.0) {
+            prior /= pc;
+            vec4 mine = n > 0.5 ? lighting_sc_own_shown(slot) : vec4(0.0);
+            float k = LIGHTING_SC_HANDOVER_K * min(pc, 1.0) * fade;
+            float a = mine.w > 0.5 ? n / max(n + k, 1.0e-4) : 0.0;
+            return vec4(mix(prior, mine.rgb, a), 1.0);
         }
     }
     return lighting_sc_own_shown(slot);
@@ -1949,9 +2027,14 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             continue;
         }
         cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
-        if (mode == 3u && (lighting_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w < 0.5) {
+        bool split = mode == 3u && lighting_sc_seed_split() && size <= 0.2;
+        if (mode == 3u && (lighting_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w < 0.5 && !(split && lighting_sc_has_seed(slot))) {
             vec4 rs = lighting_sc_resample(q, n, size, slot);
-            if (rs.w > 0.5) {
+            if (rs.w > 0.5 && split) {
+                // S72N: a seed beside the texel's own (empty) mean, confidence
+                // by the samples it came from (8 = whole).
+                lighting_sc_set_seed(slot, rs.rgb, min(rs.w / LIGHTING_WRC_SEED_SETS, 1.0), lighting_seed_sunfrac);
+            } else if (rs.w > 0.5) {
                 // S62E: the seed is light as of now; stored in the slot's scale.
                 // S64B: the seed is light as of now, with its seeds' sun/sky share.
                 cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(lighting_seed_sunfrac, max(lighting_ls_now(), 0.0), 0.0, 0.0);
@@ -1967,7 +2050,16 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             continue;
         }
         if (v.w < 0.5 && mode == 3u) {
-            v = lighting_sc_parent(q, n, size);
+            if (split) {
+                // S72N: the coarser cells bilinear (a nearest parent showed its
+                // 50 cm / 1 m squares), kept as a low-confidence seed.
+                v = lighting_sc_parent_bilerp(q, n, size);
+                if (v.w > 0.5) {
+                    lighting_sc_set_seed(slot, v.rgb, 0.25, lighting_bilerp_sunfrac);
+                }
+            } else {
+                v = lighting_sc_parent(q, n, size);
+            }
         }
         if (v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u) {
             // S72L first fill: no texel, no parent lit yet; the hit-size patch
@@ -1975,6 +2067,13 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             vec3 hc = lighting_cache_irradiance(q, n);
             if (any(greaterThan(hc, vec3(0.0)))) {
                 v = vec4(hc, 1.0);
+                if (split) {
+                    lighting_sc_set_seed(slot, hc, 0.25, lighting_hit_sunfrac);
+                }
+            } else if (split && lighting_px_probes.x >= 0.0 && !obj && cache.v[3u * slot + 2u].w < 0.5) {
+                // S72N: the S72M probe seed, as a seed (not an own set).
+                lighting_sc_set_seed(slot, lighting_px_probes, 0.25, 0.0);
+                v = vec4(lighting_px_probes, 1.0);
             } else if (lighting_px_probes.x >= 0.0 && !obj && cache.v[3u * slot + 1u].w <= 0.2 && cache.v[3u * slot + 2u].w < 0.5) {
                 // S72M (video: first reveal tore along the screen, the new strip
                 // on the probes, the rest on texels): nothing lit here yet, so the
