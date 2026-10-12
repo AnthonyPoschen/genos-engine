@@ -2421,16 +2421,21 @@ uint lighting_sc_cell_slot(uint slot, ivec2 off) {
     q[ub] = (c.y + 0.5) * size;
     return lighting_cache_find_sized(q, nb.xyz, false, size, p);
 }
-// IC site: traced this round (the cell on the grid of spacing a R').
-bool lighting_ic_site(uint slot) {
+// S72V4 IC density as a rate: a texel is relit one round in g^2 (at most 16),
+// g the IC record spacing a R' (a power of two, 1-8 cells), so the rays per area
+// match a site lattice of spacing g but every texel keeps samples of its own.
+// S72V-V3 traced only the lattice and left the rest without data: SVGF has a
+// sample at every pixel, and a-trous over a sparse lattice left the lattice in
+// the picture (Anthony 14:26: regular wavy stripes on floor and ceiling)
+// [deviation: IC places records in space, here their density sets a rate].
+uint lighting_ic_period(uint slot) {
     float r = cache.v[LIGHTING_SC_SPARSE_AT + slot].w;
     if (!(r > 0.0)) {
-        return true;
+        return 1u;
     }
     float rc = clamp(r, LIGHTING_IC_RMIN, LIGHTING_IC_RMAX);
-    int g = 1 << uint(clamp(floor(log2(max(LIGHTING_IC_A * rc, 1.0))), 0.0, 3.0));
-    ivec2 c = lighting_sc_cell(slot).xy;
-    return (c.x & (g - 1)) == 0 && (c.y & (g - 1)) == 0;
+    uint g = 1u << uint(clamp(floor(log2(max(LIGHTING_IC_A * rc, 1.0))), 0.0, 3.0));
+    return min(g * g, 16u);
 }
 // The texels layer 2 filters: WRC cells, and fine texels a pixel showed in
 // the last half second (as S72P) [inferred: SVGF filters only the visible pixels].
@@ -2449,9 +2454,6 @@ vec4 lighting_svgf_in(uint s, out float var) {
     bool wrc = cache.v[3u * s + 1u].w > 0.2;
     if (t < 0.5 || !lighting_svgf_active(s)) {
         return vec4(0.0);
-    }
-    if (!wrc && !lighting_ic_site(s)) {
-        return vec4(own.rgb, 0.0);
     }
     if (!wrc) {
         vec4 eb = cache.v[LIGHTING_SC_EST_AT + 2u * s + 1u];

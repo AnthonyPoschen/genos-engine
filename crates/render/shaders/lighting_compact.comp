@@ -169,14 +169,17 @@ void main() {
                 }
                 return;
             }
-            // S72V irradiance-caching placement (lighting_ic_site): a texel off
+            // S72V irradiance-caching density (lighting_ic_period, S72V4: a rate): a texel off
             // the grid of spacing a R' takes no rays; layer 2 covers it. Near a
             // change or a moved lamp every texel is traced [deviation: IC has no
             // change handling].
             bool mover_ic;
-            if (!wrc && lighting_sc_svgf() && !near && !lighting_sc_local_change(slot, mover_ic) && !lighting_ic_site(slot)) {
-                atomicAdd(gstats.waiting, 1u);
-                return;
+            if (!wrc && lighting_sc_svgf() && !near && t >= 3.5 && !lighting_sc_local_change(slot, mover_ic)) {
+                uint per = lighting_ic_period(slot);
+                if (per > 1u && ((lighting_hash(slot ^ 0x68e31da4u) + lighting_round()) % per) != 0u) {
+                    atomicAdd(gstats.waiting, 1u);
+                    return;
+                }
             }
             // S72J: a page's texels refine together: note this one's sets, and
             // wait while more than LIGHTING_SC_PAGE_LEAD sets ahead of the page's
