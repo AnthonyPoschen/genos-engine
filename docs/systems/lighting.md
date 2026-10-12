@@ -314,3 +314,17 @@ frame's light with no rays. Any mover anywhere relights every pixel: a moving
 object's shadow can reach any pixel, and shadow reuse across movers tore edges
 before (S77B). Still 11.2 -> 9.4 ms (light 3.49 -> 1.56, 80 -> 93 fps);
 moving unchanged (18.8 ms); pop 0.088 / 0.115 %.
+
+### S78K: held probe strata, confirmed by one check ray
+
+A probe standing where it stood when its current stratum was last traced
+(place pass: 1 mm, same normal) holds that stratum's hits: one ray a frame (by
+hash) is re-traced as the check against the kept hit (miss/hit, 2 % of its
+distance, normal), and rays whose path crosses a listed change are re-traced
+as before. A failed check marks the probe for full traces over the next
+LIGHTING_STRATA frames. The held hits are lit as the halfway relight (S78D:
+only for a reason). No new memory (flags in the stratum and probe normal w).
+Still 9.42 -> 8.33 ms (trace 0.61 -> 0.29, light 1.56 -> 0.90; 93 -> 103 fps);
+moving unchanged (18.9 ms: there the moving lamps relight the kept hits);
+pop 0.077 / 0.114 %. [deviation: a static held stratum keeps its rays' exact
+directions instead of being re-traced with the same directions.]

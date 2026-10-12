@@ -371,6 +371,45 @@ uint lighting_cell_of(vec3 pos, vec3 n, vec3 d) {
 
 // Ray k of a probe's stratum, from where the probe stood when the stratum was
 // traced (the strata block, written by lighting_place.comp). False when not kept.
+// S78K held strata (A-SVGF-style confirm, not assume): a probe standing where it
+// stood when this stratum was last traced (place pass: stratum w = 2) keeps its
+// hits; one ray of the stratum a frame (by hash) is re-traced as the check, and
+// rays crossing a change are re-traced as before. A check whose hit moved
+// (miss/hit, 2 % of its distance, its normal) marks the probe for full traces
+// over the next LIGHTING_STRATA frames (probe normal w = until frame).
+const bool LIGHTING_HOLD_STRATA = true;
+bool lighting_stratum_held(uint probe) {
+    return LIGHTING_HOLD_STRATA && work.v[lighting_stratum_at(probe, lighting_stratum())].w > 1.5;
+}
+uint lighting_hold_check_k(uint probe) {
+    return lighting_hash(probe * 0x9e3779b9u ^ pc.params.w * 0x85ebca6bu) % lighting_rays();
+}
+float lighting_seg_dist2c(vec3 a, vec3 b, vec3 c) {
+    vec3 ab = b - a;
+    float t = clamp(dot(c - a, ab) / max(dot(ab, ab), 1.0e-12), 0.0, 1.0);
+    vec3 d = a + ab * t - c;
+    return dot(d, d);
+}
+// Ray k of a held probe's stratum is traced this frame: the check, or its path
+// (with its kept hit distance t, < 0 a miss) crosses a change.
+bool lighting_held_traced(uint probe, uint k, vec3 origin, vec3 dir, float t) {
+    if (k == lighting_hold_check_k(probe)) {
+        return true;
+    }
+    vec4 head = work.v[lighting_change_at()];
+    uint changes = min(uint(head.x), LIGHTING_CHANGES);
+    if (head.y > 0.5) {
+        return true;
+    }
+    vec3 end = origin + dir * (t >= 0.0 ? t : 200.0);
+    [[dont_unroll]] for (uint j = 0u; j < changes; j++) {
+        vec4 b = work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + j];
+        if (lighting_seg_dist2c(origin, end, b.xyz) < b.w * b.w) {
+            return true;
+        }
+    }
+    return false;
+}
 bool lighting_stratum_ray(uint probe, uint s, uint k, out vec3 origin, out vec3 dir, out vec3 n) {
     vec4 sp = work.v[lighting_stratum_at(probe, s)];
     n = work.v[lighting_stratum_at(probe, s) + 1u].xyz;

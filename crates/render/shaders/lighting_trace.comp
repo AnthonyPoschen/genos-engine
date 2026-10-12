@@ -78,7 +78,14 @@ bool lighting_kept_crossed(uint h, out vec3 origin, out vec3 dir) {
     return false;
 }
 
+// S78K: a held stratum's check found its hit moved: full traces for a round.
+void lighting_hold_fail(uint probe) {
+    work.v[lighting_probe_at(probe) + 1u].w = uintBitsToFloat(lighting_frame() + LIGHTING_STRATA);
+}
 void main() {
+    bool hold_check = false;
+    vec4 hold_old = vec4(0.0);
+    uint hold_probe = 0u;
     uint ray = gl_GlobalInvocationID.x;
     uint mode = lighting_mode();
     if (lighting_dense()) {
@@ -122,12 +129,35 @@ void main() {
             work.v[at] = LIGHTING_NO_RAY;
             return;
         }
+        if (probe_ray && lighting_stratum_held(ray / lighting_rays())) {
+            uint pr = ray / lighting_rays();
+            uint k = ray % lighting_rays();
+            vec4 old = work.v[at];
+            if (!lighting_held_traced(pr, k, origin, dir, old.x)) {
+                return;
+            }
+            if (k == lighting_hold_check_k(pr)) {
+                hold_check = true;
+                hold_old = old;
+                hold_probe = pr;
+            }
+        }
     }
     SceneHit hit;
     if (!trace_ray(origin, dir, 1.0e-4, 200.0, hit)) {
         // A probe ray's miss is kept as a miss and takes the sky as it is when shaded.
+        if (hold_check && !(hold_old.x < 0.0)) {
+            lighting_hold_fail(hold_probe);
+        }
         work.v[at] = probe_ray ? LIGHTING_MISS : lighting_miss_slot(has_sky() ? scene.sky.rgb : vec3(0.0));
         return;
+    }
+    if (hold_check) {
+        vec3 hn0 = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
+        if (hold_old.x < 0.0 || abs(hit.t - hold_old.x) > 0.02 * max(hit.t, 0.1)
+            || dot(lighting_unpack_normal(floatBitsToUint(hold_old.y)), hn0) < 0.99) {
+            lighting_hold_fail(hold_probe);
+        }
     }
     vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
     vec3 tint = mix(vec3(1.0), hit.albedo, hit.color_mix);

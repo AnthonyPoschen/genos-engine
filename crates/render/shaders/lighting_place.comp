@@ -42,7 +42,17 @@ void main() {
             break;
         }
     }
-    work.v[lighting_probe_at(i)] = pos_out;
+    // S78K: standing where this stratum was last traced (1 mm, same normal),
+    // and not marked by a failed check: the stratum is held (w = 2).
+    vec4 was = work.v[lighting_stratum_at(i, lighting_stratum())];
+    vec3 wn = work.v[lighting_stratum_at(i, lighting_stratum()) + 1u].xyz;
+    float until = work.v[lighting_probe_at(i) + 1u].w;
+    n_out.w = until;
+    if (LIGHTING_HOLD_STRATA && pos_out.w > 0.5 && was.w > 0.5 && length(was.xyz - pos_out.xyz) < 1.0e-3 && dot(wn, n_out.xyz) > 0.9999
+        && !(until > 0.0 && floatBitsToUint(until) > lighting_frame())) {
+        pos_out.w = 2.0;
+    }
+    work.v[lighting_probe_at(i)] = vec4(pos_out.xyz, min(pos_out.w, 1.0));
     work.v[lighting_probe_at(i) + 1u] = n_out;
     work.v[lighting_stratum_at(i, lighting_stratum())] = pos_out;
     work.v[lighting_stratum_at(i, lighting_stratum()) + 1u] = n_out;
