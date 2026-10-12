@@ -61,6 +61,9 @@ void main() {
             }
             ckeys.key[LIGHTING_SC_THR_AT] = thr;
             gstats.sched_thr = thr;
+            // S79: this round's trickle demand, read next round so an
+            // oversubscribed trickle rotates instead of keeping the low slots.
+            ckeys.key[LIGHTING_WRC_TRICKLE_DEMAND_AT] = ckeys.key[LIGHTING_WRC_BG_COUNT_AT];
         }
     }
     if (j >= LIGHTING_CACHE_BATCH) {
@@ -80,6 +83,11 @@ void main() {
                 continue;
             }
             lighting_sc_grad_take(gs, dot(lighting_ray_light(v), vec3(0.2126, 0.7152, 0.0722)));
+            // S79: a world-cache check is a traced ray. Texel checks stay out
+            // of this counter (they were not in it before).
+            if (cache.v[3u * gs + 1u].w > 0.2) {
+                atomicAdd(gstats.rays, 1u);
+            }
         }
         return;
     }
@@ -130,11 +138,13 @@ void main() {
         vec3 dir = lighting_dir(rkey, n, lighting_sc_stratum(rkey, q0 * LIGHTING_CACHE_RAYS + k, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
         float c = max(dot(dir, n), 0.0);
         vec3 lk = lighting_ray_light(v);
-        // S74A: the ray a later gradient check re-traces (same seed): one of
-        // the last quarter's, turning with the rounds.
-        if (LIGHTING_SC_ASVGF && !wrc_cell && lighting_world_mode() == 3u && k == (run - 1u) * LIGHTING_CACHE_RAYS + lighting_round() % LIGHTING_CACHE_RAYS) {
+        // S74A / S79: the ray a later gradient check re-traces (same seed): one of
+        // the last quarter's, turning with the rounds. WRC cells use the same
+        // stored ray (a zero key would look like "no ray stored").
+        if (LIGHTING_SC_ASVGF && lighting_world_mode() == 3u && k == (run - 1u) * LIGHTING_CACHE_RAYS + lighting_round() % LIGHTING_CACHE_RAYS) {
             uint qk = (q0 + run - 1u) * LIGHTING_CACHE_RAYS + lighting_round() % LIGHTING_CACHE_RAYS;
-            cache.v[LIGHTING_SC_GRAD_AT + slot].yzw = vec3(dot(lk, vec3(0.2126, 0.7152, 0.0722)), uintBitsToFloat(rkey), uintBitsToFloat(qk));
+            uint rk = rkey == 0u ? 1u : rkey;
+            cache.v[LIGHTING_SC_GRAD_AT + slot].yzw = vec3(dot(lk, vec3(0.2126, 0.7152, 0.0722)), uintBitsToFloat(rk), uintBitsToFloat(qk));
         }
         e += lk * c;
         el += dot(lk, vec3(0.2126, 0.7152, 0.0722)) * c;
@@ -235,10 +245,8 @@ void main() {
         }
         vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * min(wa, 1.0);
         lighting_tex_put(slot, vec4(mean, min(t + add, LIGHTING_WRC_CAP)));
-        // S76B: a refresh is the cell's check (lighting_wrc_check_take).
-        if (old.w >= 0.5) {
-            lighting_wrc_check_take(slot, e, old.rgb);
-        }
+        // S79: the check is the one-ray re-trace (lighting_sc_grad_take), not
+        // this hemisphere sample. The sample only stores the next check ray.
         return;
     }
     if (lighting_world_mode() == 3u) {

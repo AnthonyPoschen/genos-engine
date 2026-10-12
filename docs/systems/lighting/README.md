@@ -53,10 +53,11 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Pixels read surface-cache texels directly (Lumen reads the cache only at ray hits).
 - Running-mean / MSME texels to a cap instead of Lumen's 4-frame accumulation.
 - IC placement as a trace rate on a power-of-two grid, not records in space; no R_geo; grad E from the filtered field; constants inferred (S72V).
-- A-SVGF lambda drives ray counts (A-SVGF has no ray-count rule); checks are measurement only (S74A, S76).
+- A-SVGF lambda drives ray counts (A-SVGF has no ray-count rule); checks are measurement only (S74A, S76, S79 on the world cache).
 - Shadow visibility shared per 12.5 cm cell for hits, invalidated per lamp range (S74A).
 - 1-in-16 push refresh floor (S78B); kept-hit bounce refreshed with its re-trace (S78D); held strata keep exact directions (S78K).
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
+- World-cache ray ceilings follow the measured change; a still camera spends no scout rays (S79). Lumen and SHaRC keep a fixed world-cache update budget.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
 
 ## Experiment index
@@ -163,10 +164,11 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
 | [S78B2](experiments/S78B2-msme-time-floor.md) | 2026-10-13 | Time-based MSME catch-up floor | not pushed (no healing; postmortem) | g78/S78B2-msme-time-floor.patch |
 | [S78H2](experiments/S78H2-sharc-read-16.md) | 2026-10-13 | SHaRC read rule 16 sets for fine short hits | not pushed (no effect; postmortem) | g78/S78H2-sharc-read-16.patch |
+| [S79](experiments/S79-wrc-need-ray-ceilings.md) | 2026-10-12 | World-cache ray count follows the measured change | pushed (GPU numbers not yet) | this branch |
 | [WAKE](experiments/WAKE-neighbour-wake-design.md) | 2026-10-12 | Anthony's wake design: no wakes from shared field; real change wakes neighbours by coarse-to-fine ring tests w | planned (approved by Anthony) | none yet |
 | [DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md) | 2026-10-12 | S-curve allowed quality lag for off-screen pages by priority | deferred | none |
 | [DUMP](experiments/DUMP-gpu-dump-tool.md) | 2026-10-12 | Debug dump of GPU data from two consecutive frames per component (direct, bounce, coarse/fine WRC, probe resul | in progress | none yet |
-| [RAYCEIL](experiments/RAYCEIL-world-cache-need-ray-ceilings.md) | 2026-10-12 | World-cache cells stop at IC error bound instead of fixed 128 samples | queued | none |
+| [RAYCEIL](experiments/RAYCEIL-world-cache-need-ray-ceilings.md) | 2026-10-12 | World-cache cells stop at IC error bound instead of fixed 128 samples | queued (S79 is the change-scaled ceiling, not this error bound) | none |
 | [QUIET](experiments/QUIET-quiet-paths-compose-filter-compact.md) | 2026-10-12 | Quiet paths for compose, filter, compact (changed tiles + rotating checks) | queued | none |
 | [LSMOOTH](experiments/LSMOOTH-lighter-smoothing.md) | 2026-10-12 | Lighter smoothing | dropped (Anthony) | none |
 
@@ -509,3 +511,29 @@ read-modify-writes to the cell tables in VRAM. The sums and outputs are the same
 (only the summation order differs). Cell table 1 no longer holds the distance
 sums afterwards (the filter overwrites it). Gather time: 1.25 -> 0.91 ms still,
 1.62 -> 0.95 ms moving. No added VRAM.
+
+### S79: world-cache ray count follows the measured change
+
+A world radiance cache cell no longer takes a 16-ray check or a 64-ray set
+because it is stale, growing, or under a lamp. The texel A-SVGF check is the
+gate (Schied, Peters and Dachsbacher 2018 eq. 6; the 2019 variance
+normalisation). One stored ray is re-traced. Within noise of that stored
+value, the cell takes no further rays and the next check waits twice as long
+(8 to 128 frames). Past noise, the cell's ceiling is
+`ceil(4 * lambda / 0.25)` sixteen-ray entries (a whole set only at
+lambda >= 0.25), and that lambda is written to the 3x3 block. The refresh
+budget of 4096 entries is a ceiling: a round lists only what was measured.
+Cells still short of 128 samples and read in the last 60 frames trickle one
+16-ray entry every 16 frames, at most 64 entries a round, served in rotation
+when that cap is oversubscribed. A still camera fires no scout rays; resident
+cells are verified by the deferred check. No new buffers and no readback in
+the frame loop. The reveal burst (a pixel needs a cell under 16 samples) is
+unchanged.
+
+Deviations, same family as S74A/S76: lambda sets the ray ceiling (A-SVGF uses
+it for the blend); the check ray is not kept as a sample; the gradient is
+copied across the 3x3 block, not a-trous filtered; thresholds 0.05, 0.25, the
+16-frame trickle and the 64-entry trickle cap are the texel constants or
+chosen here; a still camera spends no scout rays (Lumen and SHaRC keep a
+fixed world-cache budget). Not done: stopping at an irradiance-cache error
+bound instead of the 128-sample cap (RAYCEIL, still queued).
