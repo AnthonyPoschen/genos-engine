@@ -1007,17 +1007,6 @@ const float LIGHTING_DN_STOP = 0.015;
 const float LIGHTING_DN_DARK = 0.05;
 const float LIGHTING_DN_SIGMA = 0.6;
 const float LIGHTING_DN_LUM = 3.0;
-// S72C denoiser as the primary filter (flag 67108864 off): the pool runs at every
-// set count (not only below LIGHTING_SC_POOL_FULL), and stores its variance gain
-// (SPARSE_AT.y: (sum k c)^2 / (sum k^2 c) / own sets, 1 = own mean only); the stop
-// rule then takes the pooled noise (noise / sqrt(gain)), so tracing stops once the
-// shown (denoised) value is good enough, not once each texel converges alone.
-bool lighting_sc_dn_primary() {
-    return lighting_world_mode() == 3u && (lighting_sc_flags() & 67108864u) == 0u;
-}
-float lighting_sc_dn_gain(uint slot) {
-    return lighting_sc_dn_primary() ? max(cache.v[LIGHTING_SC_SPARSE_AT + slot].y, 1.0) : 1.0;
-}
 // Pool radius under changing light (cells; under 0.9 the kernel is 3 x 3).
 const float LIGHTING_DN_CHANGE_SIGMA = 0.7;
 // Relative noise of slot's mean, and its luminance noise (w); x < 0 when the
@@ -1043,8 +1032,7 @@ void lighting_sc_pool(uint slot) {
     lighting_obj_salt = cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5 ? cache.v[LIGHTING_SC_OBJ_AT + slot].x : 0.0;
     float t = floor(max(own.w, 0.0));
     bool floor_on = (lighting_sc_flags() & 8u) != 0u;
-    bool primary = lighting_sc_dn_primary();
-    if (t >= LIGHTING_SC_POOL_FULL && !floor_on && !primary) {
+    if (t >= LIGHTING_SC_POOL_FULL && !floor_on) {
         cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(own.rgb));
         lighting_obj_salt = 0.0;
         return;
@@ -1081,7 +1069,6 @@ void lighting_sc_pool(uint slot) {
     int r = sigma > 0.9 ? 2 : 1;
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
-    float w2sum = 0.0;
     [[dont_unroll]] for (int j = -r; j <= r; j++) {
         [[dont_unroll]] for (int i = -r; i <= r; i++) {
             float k = exp(-float(i * i + j * j) / (2.0 * sigma * sigma));
@@ -1106,12 +1093,7 @@ void lighting_sc_pool(uint slot) {
             }
             sum += k * c * v.rgb;
             wsum += k * c;
-            w2sum += k * k * c;
         }
-    }
-    if (primary) {
-        float gain = w2sum > 0.0 && t > 0.5 ? wsum * wsum / (w2sum * t) : 1.0;
-        cache.v[LIGHTING_SC_SPARSE_AT + slot].y = clamp(gain, 1.0, 25.0);
     }
     cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(wsum > 0.0 ? sum / wsum : vec3(0.0)));
     lighting_obj_salt = 0.0;
@@ -1609,7 +1591,7 @@ bool lighting_sc_settled(uint slot, float t) {
     vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
     // S62A perceptual stop: quiet enough to the eye counts as settled.
     vec2 nz = lighting_sc_noise(slot);
-    if (lighting_sc_light_quiet() && floor(t) >= LIGHTING_DN_MIN_SETS && nz.x >= 0.0 && nz.x * inversesqrt(lighting_sc_dn_gain(slot)) < lighting_dn_target(slot) && b.y < LIGHTING_SC_SETTLE_SD) {
+    if (lighting_sc_light_quiet() && floor(t) >= LIGHTING_DN_MIN_SETS && nz.x >= 0.0 && nz.x < lighting_dn_target(slot) && b.y < LIGHTING_SC_SETTLE_SD) {
         return true;
     }
     return floor(t) >= reach - 0.5 && b.x > 0.0 && b.y < LIGHTING_SC_SETTLE_SD;
