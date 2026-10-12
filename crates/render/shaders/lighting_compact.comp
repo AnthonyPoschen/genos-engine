@@ -7,6 +7,7 @@
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 
+const bool LIGHTING_WRC_STALE_CHECK = true;
 void main() {
     uint slot = gl_GlobalInvocationID.x;
     if (lighting_dense()) {
@@ -142,6 +143,19 @@ void main() {
             // list holds 1024 cells a round in slot (hash) order, so the same
             // cells won each round and the rest, scattered, waited until they
             // reached the cap; a room lit only by bounces filled in patches.
+            if (LIGHTING_WRC_STALE_CHECK && stale && !growing_wrc) {
+                // S78F: age alone is no reason for a whole set: a stale cell takes
+                // the S77A check (16 rays, change list) when its deferred check is
+                // due; a confirm doubles the deferral, a miss escalates.
+                if (lighting_sc_check_due(slot)) {
+                    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], 1u);
+                    if (at < LIGHTING_WRC_REFRESH_CELLS) {
+                        ckeys.key[LIGHTING_WRC_CHG_AT + at] = slot;
+                        lighting_dg(17u, 1u);
+                    }
+                }
+                return;
+            }
             if (!(growing_wrc && lighting_sc_dark_fill())) {
                 if (stale || growing_wrc) {
                     uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);

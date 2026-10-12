@@ -292,3 +292,12 @@ centre): within 10 % it is kept and its age restarts, else it is dropped and
 recomputed. A confirming check also restarts the age of a signature-changed
 entry. Timing unchanged at 600 frames (still 11.52, moving 18.7 ms); it removes
 an age-only recompute wave every 600 frames. No new memory.
+
+### S78F: stale WRC cells take a check, not a whole set
+
+A WRC cell older than LIGHTING_WRC_REFRESH_FRAMES (180) was given a whole set
+from the background list on age alone (607 cells a frame in the still scene).
+It now takes the S77A 16-ray check when its deferred check is due (confirm
+doubles the deferral, a miss escalates to a set). Growing cells (below their
+cap, read) are unchanged here. Still 11.52 -> 11.20 ms, moving 18.7 ms; pop
+0.073 / 0.110 %. No new memory.
