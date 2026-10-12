@@ -28,4 +28,4 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 not recorded
 
 ## Lessons / when to revisit
-not recorded
+S79 (2026-10-12) makes the ray count follow the measured change and trickles growth. It does not stop a cell at an irradiance-cache error bound; this item stays queued.

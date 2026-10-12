@@ -192,18 +192,18 @@ const float LIGHTING_WRC_NEAR = 6.0;
 const uint LIGHTING_SC_BUCKETS = 64u;
 const uint LIGHTING_SC_HIST_AT = 2u * LIGHTING_CACHE_SLOTS + 2u;
 const uint LIGHTING_SC_THR_AT = LIGHTING_SC_HIST_AT + LIGHTING_SC_BUCKETS;
-// WRC refresh (S61B, Anthony: a hard, fixed budget): at most LIGHTING_WRC_REFRESH
-// batch entries a round (~6 % of 65536) go to WRC cells outside the reveal
-// burst, from two lists: change-driven first (a mover nearby, or a lamp that
-// reaches the cell moved since its last relight: its history drops to
-// LIGHTING_WRC_CHANGE_KEEP samples), then the steady background (a resident cell not
-// relit for LIGHTING_WRC_REFRESH_FRAMES, or still short of its cap and read since)
-// with what is left. Lumen's world space radiance cache: a fixed budget of probe
-// updates, the changed and the nearest first.
+// WRC rays (S79): LIGHTING_WRC_REFRESH batch entries is a ceiling, not a quota.
+// The change list holds one uint per 16-ray entry. A cell occupies several
+// consecutive entries when its same-seed check measured a real change; the
+// count is proportional to that change and never more than a 64-ray set.
+// The background list is the low-priority trickle: one entry per cell, at
+// most LIGHTING_WRC_TRICKLE_MAX a round. A steady cache that has reached the
+// cap spends neither list; it only re-traces a deferred one-ray check.
+// Lumen and SHaRC spend a fixed world-cache budget every frame [deviation:
+// this ceiling stays empty when nothing measured a change].
 const uint LIGHTING_WRC_REFRESH = 4096u;
-// S62D (Anthony): a refresh takes a whole 64-ray set (LIGHTING_SC_QUARTERS
-// consecutive entries), so the cap above holds LIGHTING_WRC_REFRESH_CELLS cells a
-// round (1024; same rays as before).
+// Kept so a reader of the old whole-set schedule (1024 cells x 64 rays) can
+// see what the ceiling used to mean. S79 does not dispatch that many.
 const uint LIGHTING_WRC_REFRESH_CELLS = LIGHTING_WRC_REFRESH / 4u;
 const uint LIGHTING_WRC_REFRESH_FRAMES = 180u;
 const uint LIGHTING_WRC_CHANGE_FRAMES = 120u;
@@ -260,6 +260,14 @@ const uint LIGHTING_WRC_SNAP_LAMPS = 128u;
 const uint LIGHTING_WRC_SNAP_AT = LIGHTING_SC_HIST_AT + 160u;
 const uint LIGHTING_WRC_CHG_AT = LIGHTING_SC_HIST_AT + 680u;
 const uint LIGHTING_WRC_BG_AT = LIGHTING_WRC_CHG_AT + LIGHTING_WRC_REFRESH;
+// S79 low-priority trickle. One 16-ray entry per cell every
+// LIGHTING_WRC_TRICKLE_EVERY frames, and at most LIGHTING_WRC_TRICKLE_MAX
+// entries a round (a ceiling: a round with nothing growing dispatches none).
+// Last round's trickle demand, so an oversubscribed round rotates who is
+// served instead of always taking the lowest slots (S72N).
+const uint LIGHTING_WRC_TRICKLE_MAX = 64u;
+const uint LIGHTING_WRC_TRICKLE_EVERY = 16u;
+const uint LIGHTING_WRC_TRICKLE_DEMAND_AT = LIGHTING_SC_HIST_AT + 74u;
 
 // World irradiance cells (experiment, GENOS_LIGHTING_WORLD): the change block's head w
 // is mode * 1000 + cap. Mode 1: pixels read the light cache's patches,
@@ -2022,6 +2030,38 @@ uint lighting_dense_entry(uint d) {
     }
     return LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES + (d - g);
 }
+// S79: append `entries` consecutive 16-ray slots for this cell on the change
+// list. The refresh ceiling drops whatever does not fit; the list is not filled
+// up to the ceiling.
+void lighting_wrc_enqueue(uint slot, uint entries) {
+    uint cap = LIGHTING_WRC_REFRESH >> lighting_sc_budget_shift();
+    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], entries);
+    [[dont_unroll]] for (uint i = 0u; i < entries; i++) {
+        if (at + i < cap) {
+            ckeys.key[LIGHTING_WRC_CHG_AT + at + i] = slot;
+        }
+    }
+}
+void lighting_wrc_trickle_enqueue(uint slot) {
+    uint cap = LIGHTING_WRC_TRICKLE_MAX >> lighting_sc_budget_shift();
+    if (cap == 0u) {
+        return;
+    }
+    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);
+    if (at < cap) {
+        ckeys.key[LIGHTING_WRC_BG_AT + at] = slot;
+    }
+}
+uint lighting_wrc_chg_entries() {
+    return min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], LIGHTING_WRC_REFRESH >> lighting_sc_budget_shift());
+}
+uint lighting_wrc_bg_entries() {
+    uint sh = lighting_sc_budget_shift();
+    uint cap = LIGHTING_WRC_REFRESH >> sh;
+    uint chg = lighting_wrc_chg_entries();
+    uint room = cap > chg ? cap - chg : 0u;
+    return min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], min(LIGHTING_WRC_TRICKLE_MAX >> sh, room));
+}
 void lighting_write_args() {
     uint a;
     uint b = 0u;
@@ -2034,10 +2074,9 @@ void lighting_write_args() {
         uint first = min(lighting_young_count(), lighting_sc_base_room() >> sh);
         a = min(room, first + lighting_mature_count());
         b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> sh);
-        // S77A: change-list cells are checks, one 16-ray entry each; the
-        // background list (and escalated cells) take whole sets.
-        c = min(min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh)
-            + 4u * min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh), LIGHTING_WRC_REFRESH >> sh);
+        // S79: WRC entries actually listed (change-scaled, then trickle). The
+        // refresh count is a ceiling inside lighting_wrc_*_entries.
+        c = lighting_wrc_chg_entries() + lighting_wrc_bg_entries();
         s = lighting_wrc_scout_due() ? LIGHTING_WRC_SCOUT_ENTRIES >> sh : 0u;
         g = (lighting_grad_count() + LIGHTING_CACHE_RAYS - 1u) / LIGHTING_CACHE_RAYS;
         lighting_shadow_epochs();
@@ -2090,16 +2129,16 @@ uint lighting_cache_batch_slot(uint j) {
             return k < min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> lighting_sc_budget_shift()) ? ckeys.key[LIGHTING_SC_TRICKLE_AT + k] : ~0u;
         }
         if (j >= room) {
-            // The WRC refresh entries: change-driven, then background, each
-            // cell a whole set (4 consecutive entries).
+            // S79: the change list is one uint per 16-ray entry (a cell that
+            // measured a change occupies several in a row). The background
+            // list is the trickle, one entry per cell.
             uint k = j - room - LIGHTING_SC_TRICKLE;
-            uint rc = LIGHTING_WRC_REFRESH_CELLS >> lighting_sc_budget_shift();
-            uint c = min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], rc);
+            uint c = lighting_wrc_chg_entries();
             if (k < c) {
                 return ckeys.key[LIGHTING_WRC_CHG_AT + k];
             }
-            k = (k - c) / 4u;
-            if (k < min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], rc)) {
+            k -= c;
+            if (k < lighting_wrc_bg_entries()) {
                 return ckeys.key[LIGHTING_WRC_BG_AT + k];
             }
             return ~0u;
@@ -2206,15 +2245,15 @@ uint lighting_sc_interval(uint slot, float t) {
     }
     return uint(clamp(iv, LIGHTING_SC_RATE_FAST, LIGHTING_SC_RATE_DORMANT));
 }
-// Scouts (WRC pre-seeding) only while the camera moves or turns, else one
-// round in LIGHTING_WRC_SCOUT_STILL.
-const uint LIGHTING_WRC_SCOUT_STILL = 8u;
+// Scouts (WRC pre-seeding) only while the camera moves or turns. A still
+// camera does not spend a scout floor: resident cells are verified by their
+// deferred one-ray checks (S79). Lumen and SHaRC keep probing on a fixed
+// budget while the camera is still [deviation].
 bool lighting_wrc_scout_due() {
     vec4 last_eye = work.v[lighting_change_at() + 1u];
     vec3 last_fwd = work.v[lighting_change_at() + 4u].xyz;
-    bool moving = last_eye.w < 0.5 || length(scene.eye.xyz - last_eye.xyz) > 0.01
+    return last_eye.w < 0.5 || length(scene.eye.xyz - last_eye.xyz) > 0.01
         || dot(normalize(scene.view_forward.xyz), normalize(last_fwd + vec3(0.0, 1.0e-6, 0.0))) < 0.9999;
-    return moving || lighting_round() % LIGHTING_WRC_SCOUT_STILL == 0u;
 }
 uint lighting_sc_quarter0(uint slot) {
     if (lighting_world_mode() != 3u) {
@@ -3346,34 +3385,10 @@ uint lighting_lamps_sig(uint seed, LampList list) {
     return sig | 1u;
 }
 
-// S76B WRC change refresh, confirm then escalate (Anthony 17:06): a change
-// nearby (mover, moved lamp) only nominates a cell; it is refreshed when its
-// check is due. The refresh's sample against the cell's mean is the check: within
-// twice the cell's own sample noise (an EMA of d^2 over its refreshes, capped at
-// LIGHTING_WRC_SIGMA_MAX) plus LIGHTING_ASVGF_EPS confirms, and the next nominated
-// refresh waits twice as long (LIGHTING_CHECK_MIN..MAX frames); otherwise the
-// cell is refreshed again next frame while nominated.
-const float LIGHTING_WRC_SIGMA_MAX = 0.2;
-void lighting_wrc_check_take(uint slot, vec3 e, vec3 old) {
-    float a = dot(e, vec3(0.2126, 0.7152, 0.0722));
-    float b = dot(old, vec3(0.2126, 0.7152, 0.0722));
-    float d = min(1.0, abs(a - b) / max(max(a, b), 1.0e-3));
-    vec4 g2 = cache.v[LIGHTING_SC_GRAD2_AT + slot];
-    float n2 = clamp(g2.w, 0.0, LIGHTING_WRC_SIGMA_MAX * LIGHTING_WRC_SIGMA_MAX);
-    cache.v[LIGHTING_SC_GRAD2_AT + slot].w = min(mix(n2, d * d, 0.125), LIGHTING_WRC_SIGMA_MAX * LIGHTING_WRC_SIGMA_MAX);
-    // S77A: escalated (GRAD.x = 1): its next refresh is a whole set.
-    cache.v[LIGHTING_SC_GRAD_AT + slot].x = 0.0;
-    if (d < 2.0 * sqrt(n2) + LIGHTING_ASVGF_EPS) {
-        uint iv = clamp(floatBitsToUint(g2.z), LIGHTING_CHECK_MIN / 2u, LIGHTING_CHECK_MAX / 2u) * 2u;
-        cache.v[LIGHTING_SC_GRAD2_AT + slot].z = uintBitsToFloat(iv);
-        cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + iv);
-        lighting_dg(44u, 1u);
-    } else {
-        lighting_sc_check_soon(slot);
-        cache.v[LIGHTING_SC_GRAD_AT + slot].x = 1.0;
-        lighting_dg(45u, 1u);
-    }
-}
+// S79: a WRC cell's check is the same one-ray same-seed test as a texel
+// (lighting_sc_grad_take). The old 16-ray sample-versus-mean test is gone:
+// a hemisphere sample is not a same-seed check, and it was what turned every
+// refresh into at least 16 rays.
 
 // S78J per-pixel direct light reuse: a pixel whose surface point (1 mm), normal
 // and sidedness and whose lamps' epochs (lighting_lamps_sig) are those of last
