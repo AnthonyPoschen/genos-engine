@@ -1,7 +1,7 @@
 # S73A: Guard-band scout rays claim fine texels just outside the frustum
 
 - **Date:** 2026-10-12
-- **Result:** reverted (11639205); kept on gi-v2-prefill
+- **Result:** ported (0dc6c4b on cursor/gi-prefill-spare-budget-3544). Originally reverted (11639205) and kept on gi-v2-prefill. Darkening cause and the fix: [S73-prefill-root-cause-and-plan](S73-prefill-root-cause-and-plan.md).
 - **Commit / patch:** 097d67de
 
 ## Idea

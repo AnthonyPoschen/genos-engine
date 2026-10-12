@@ -40,7 +40,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Checks run every frame; no "nothing changed" skip without a check (Anthony 16:11, S74A).
 - Always spend some budget on spread-out checks so quiet areas that should not be quiet are found.
 - Probes must not be woken by the shared averaged field; only by real neighbour change, spread by ring tests with group-test splitting ([WAKE](experiments/WAKE-neighbour-wake-design.md)).
-- Off-screen pre-fill and its S-curve lag bound wait until there is spare performance.
+- Pre-fill uses spare base budget only. The S-curve lag bound stays deferred ([DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md)).
 - Test rules (10 Oct): every moving test soaks and records a settled frame first, ends soaked, and returns movers to the start; short tests for one situation; a test must fail on the build that shows the problem before it is trusted; hand-validate new checks, then spot-check ~1%.
 - GI v1 is the stability floor, not the goal; the target is the path-traced reference (11 Oct).
 - GPU-resident design: frequently used data stays on the GPU at fixed locations; the CPU sends only small changes (12 Oct).
@@ -58,6 +58,10 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - 1-in-16 push refresh floor (S78B); kept-hit bounce refreshed with its re-trace (S78D); held strata keep exact directions (S78K).
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
+- Guard band of primary rays just outside the frustum (Lumen has no guard band) (S73A).
+- Pre-fill spends only spare base budget and never enters the priority histogram or the boost (Lumen always spends a fixed budget) (S73G).
+- MSME only once a texel is shown; a never-shown texel accumulates over at most 4 updates, as Lumen radiosity (S73D).
+- Rotating start on the pre-fill list (S73G).
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
 
 ## Experiment index
@@ -121,8 +125,13 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S72R](experiments/S72R-msme-verbatim.md) | 2026-10-12 | GIBS MSME accumulator verbatim | pushed | 6f769a77 |
 | [S72S](experiments/S72S-budget-shift-scaling.md) | 2026-10-12 | Budgets scale by GENOS_LIGHTING_SC_BUDGET_SHIFT; MSME warm-up | pushed | ec3d5e74 |
 | [S72V](experiments/S72V-svgf-layer2-ic-placement.md) | 2026-10-12 | Layer 2 as SVGF a-trous + Gortler pull-push; irradiance-caching placement (V-V11 fixes) | pushed (checkpoint 6b4fe308) | d23a9218..6b4fe308 |
-| [S73A](experiments/S73A-offscreen-prefill-guard-band.md) | 2026-10-12 | Guard-band scout rays claim fine texels just outside the frustum | reverted (11639205); kept on gi-v2-prefill | 097d67de |
-| [S73B](experiments/S73B-lumen-feedback-prefill.md) | 2026-10-12 | All scout hits claim fine texels and stamp LastUsed | reverted (8b62829b); kept on gi-v2-prefill (22bcd47f) | 22bcd47f |
+| [S73A](experiments/S73A-offscreen-prefill-guard-band.md) | 2026-10-12 | Guard-band scout rays claim fine texels just outside the frustum | ported (0dc6c4b); darkening fixed, see [plan](experiments/S73-prefill-root-cause-and-plan.md) | 097d67de, 0dc6c4b |
+| [S73B](experiments/S73B-lumen-feedback-prefill.md) | 2026-10-12 | All scout hits claim fine texels and stamp LastUsed | ported (71547c9); darkening fixed, see [plan](experiments/S73-prefill-root-cause-and-plan.md) | 22bcd47f, 71547c9 |
+| [S73C](experiments/S73-prefill-root-cause-and-plan.md) | 2026-10-12 | Pre-fill claims stamp LastUsed only; no shown stamp, no reveal burst | pushed | af449f6 |
+| [S73D](experiments/S73-prefill-root-cause-and-plan.md) | 2026-10-12 | Never-shown texels accumulate over at most 4 updates; MSME starts once shown | pushed | 6f54914 |
+| [S73E](experiments/S73-prefill-root-cause-and-plan.md) | 2026-10-12 | Storage and per-round count for the pre-fill list | pushed | 1071524 |
+| [S73F](experiments/S73-prefill-root-cause-and-plan.md) | 2026-10-12 | Never-shown texels wait on the pre-fill list only | pushed | 8ac033e |
+| [S73G](experiments/S73-prefill-root-cause-and-plan.md) | 2026-10-12 | Pre-fill takes only spare base budget | pushed | 12387cc |
 | [S74A-cam](experiments/S74A-cam-last-camera-offsets.md) | 2026-10-12 | Fix: last-frame camera read from stale scene-block offsets | pushed | 81c00734 |
 | [S74A-asvgf](experiments/S74A-asvgf-asvgf-change-adaptive-rays.md) | 2026-10-12 | A-SVGF same-seed 1-ray checks on 1/9 resolved texels, lambda drives alpha and rays | pushed | 81c00734 |
 | [S74A-shadow](experiments/S74A-shadow-static-lamp-shadow-reuse.md) | 2026-10-12 | Hit shadow rays kept per 12.5 cm cell/lamp, invalidated by lamp epoch | pushed | 81c00734 |
