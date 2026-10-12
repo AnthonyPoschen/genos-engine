@@ -427,15 +427,13 @@ void main() {
         // Lumen surface-cache feedback: it claims and stamps used (LastUsed)
         // the fine texels there, so the LastUsed - LastUpdated scheduler keeps
         // them lit off screen. S73C: the guard band too is feedback, never
-        // shown: a shown stamp put off-screen texels in layer 2 and in the
-        // on-screen schedule.
+        // shown. The claim does not call lighting_world_irradiance: that read's
+        // value is dropped, and in the direct shader it faults lavapipe.
         if (!probe_hit && lighting_world_mode() == 3u && hit_t < LIGHTING_SC_GUARD_FAR) {
             uint r = ray - lighting_probe_rays();
             uint first_scout = (LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) * LIGHTING_CACHE_RAYS;
             if (r >= first_scout) {
-                lighting_sc_feedback = true;
-                lighting_world_irradiance(pos, n);
-                lighting_sc_feedback = false;
+                lighting_sc_feedback_claim(pos, n);
                 lighting_hit_sunfrac = 0.0;
             }
         }
