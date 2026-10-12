@@ -84,7 +84,7 @@ machine draws the same frames. The GI buffers come from the lighting dump
 (`GENOS_LIGHTING_DUMP`, a comma-separated frame list), taken once near the end.
 
 - `gi_still_frames_are_finite_and_filled`: up to 120 frames at the bench pose; no
-  NaN or infinity in the texels' light or the output, no shown fine texel without
+  NaN or infinity in a live cache slot (position, normal, light, estimator), no shown fine texel without
   a set or black, no black pixel.
 - `gi_moved_camera_matches_never_moved`: a camera that sat at the bench pose
   against one that walked there over 90 frames, then both hold it for

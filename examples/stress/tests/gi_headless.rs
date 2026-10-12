@@ -140,8 +140,7 @@ struct Run {
     /// Frame the dump was taken at (the lighting's frame counter).
     frame: u32,
     texels: Vec<Texel>,
-    /// Every float of the dumped cache, work, G-buffer and output buffers that is
-    /// not finite: (buffer, count).
+    /// Floats of the live cache slots that are not finite: (fields, count).
     non_finite: Vec<(String, usize)>,
 }
 
@@ -205,18 +204,25 @@ fn run(name: &str, frames: u32, pose: impl Fn(u32) -> Pose) -> Run {
     let at = |part: &str| dir.join(format!("f{frame}_{part}.bin"));
     let cache = read_f32(&at("cache"));
     let keys: Vec<u32> = read_f32(&at("keys")).iter().map(|f| f.to_bits()).collect();
-    let mut non_finite = Vec::new();
     let live: Vec<usize> = (0..SLOTS).filter(|&i| keys[i] != 0).collect();
-    let bad = live
-        .iter()
-        .flat_map(|&i| cache[12 * i + 8..12 * i + 12].iter())
-        .filter(|v| !v.is_finite())
-        .count();
-    non_finite.push(("cache texel light".to_string(), bad));
-    for part in ["out"] {
-        let bad = read_f32(&at(part)).iter().filter(|v| !v.is_finite()).count();
-        non_finite.push((part.to_string(), bad));
-    }
+    let count_bad = |range: &dyn Fn(usize) -> std::ops::Range<usize>| {
+        live.iter()
+            .flat_map(|&i| cache[range(i)].iter())
+            .filter(|v| !v.is_finite())
+            .count()
+    };
+    // Position, normal and size, light and sets; the estimator's short mean,
+    // variance, blend and count (EST_AT = 4 S, two vec4 a slot).
+    let non_finite = vec![
+        (
+            "cache texels (position, normal, light)".to_string(),
+            count_bad(&|i| 12 * i..12 * i + 12),
+        ),
+        (
+            "cache estimator".to_string(),
+            count_bad(&|i| 16 * SLOTS + 8 * i..16 * SLOTS + 8 * i + 8),
+        ),
+    ];
     write_png(&dir.join("final.png"), &picture);
     Run {
         picture,
@@ -356,4 +362,32 @@ fn gi_moved_camera_matches_never_moved() {
         screen.abs() < 2.0,
         "the moved picture is {screen:+.2} levels off the never-moved one"
     );
+}
+
+/// Ground truth for the runs above: the CPU path tracer at the bench pose against
+/// each run's last picture under `GENOS_GI_TEST_OUT` (no GPU; the trace is cached
+/// there). Prints the bias and error per run and writes a heatmap beside each.
+#[test]
+#[ignore = "CPU trace of minutes: run after the GPU tests with GENOS_GI_TEST_OUT"]
+fn gi_bench_against_path_traced_reference() {
+    use genos_debug::image::{Image, Region};
+    use genos_debug::reference::{compare, render_cached, RefSetup};
+    let base = PathBuf::from(std::env::var_os("GENOS_GI_TEST_OUT").expect("GENOS_GI_TEST_OUT"));
+    let mut setup = RefSetup::from_camera(&stage().world.scene, &BENCH.camera(), WIDTH, HEIGHT, 16);
+    setup.noise_target = 0.015;
+    setup.max_spp = 1 << 16;
+    setup.seconds = 1200.0;
+    let reference = render_cached(&setup, &base.join("reference"));
+    eprintln!("reference: {} paths a pixel, noise {:.4}", reference.spp, reference.noise);
+    for name in ["still", "never-moved", "moved"] {
+        let Ok(live) = Image::load(&base.join(name).join("final.png")) else {
+            continue;
+        };
+        let (c, heat) = compare(&live, &reference, Region::default(), (3, 3), 2);
+        let _ = heat.save(&base.join(name).join("reference-heatmap.png"));
+        eprintln!(
+            "{name}: bias {:+.3}, mean_rel {:.3}, live {:.4} / reference {:.4}, regions (mean_rel, bias) {:?}",
+            c.bias, c.mean_rel, c.live_mean, c.ref_mean, c.regions
+        );
+    }
 }
