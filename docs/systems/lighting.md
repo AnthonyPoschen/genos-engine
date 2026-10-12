@@ -328,3 +328,12 @@ Still 9.42 -> 8.33 ms (trace 0.61 -> 0.29, light 1.56 -> 0.90; 93 -> 103 fps);
 moving unchanged (18.9 ms: there the moving lamps relight the kept hits);
 pop 0.077 / 0.114 %. [deviation: a static held stratum keeps its rays' exact
 directions instead of being re-traced with the same directions.]
+
+### S78P: gather bins in shared memory
+The gather's binning round runs one workgroup per probe (one thread per ray
+index). Each thread writes its 8 strata's (cell, light x w, w x t) to shared
+memory; thread c then sums cell c and writes it once. Before this, every ray did
+read-modify-writes to the cell tables in VRAM. The sums and outputs are the same
+(only the summation order differs). Cell table 1 no longer holds the distance
+sums afterwards (the filter overwrites it). Gather time: 1.25 -> 0.91 ms still,
+1.62 -> 0.95 ms moving. No added VRAM.

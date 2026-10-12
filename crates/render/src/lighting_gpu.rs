@@ -1408,7 +1408,7 @@ impl Gpu {
                 (4, probes.div_ceil(64), 1),
                 (2, (probe_rays + 2 * kept).div_ceil(64), 1),
                 (3, (w * h + 2 * kept).div_ceil(64), 1),
-                (4, probes.div_ceil(64), 1),
+                (4, probes, 1), // S78P: a workgroup a probe
                 (5, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
@@ -1427,7 +1427,7 @@ impl Gpu {
                 (2, 0, LIGHTING_DENSE_RAYS),
                 (3, (w * h + 2 * kept).div_ceil(64), LIGHTING_MODE1),
                 (3, 0, LIGHTING_DENSE_RAYS),
-                (4, probes.div_ceil(64), 1),
+                (4, probes, 1), // S78P: a workgroup a probe
                 (5, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
