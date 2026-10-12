@@ -25,9 +25,11 @@ Debug only; nothing here runs in the normal frame loop.
   texel, coarse patch, parent, neighbours, none), kept records re-traced,
   surface-cache value writes with the same histogram, and per probe why its gather
   ran (S78R inputs, moved, foreign strata).
-- **Dump** (`GENOS_LIGHTING_DUMP=N`, `GENOS_LIGHTING_DUMP_DIR`): the cache, cache
+- **Dump** (`GENOS_LIGHTING_DUMP`, `GENOS_LIGHTING_DUMP_DIR`): the cache, cache
   keys, work, G-buffer and output buffers are copied into readback buffers at
-  the end of frames N and N + 1 and written to disk a few frames later
+  the end of the named frames and written to disk a few frames later. One
+  number is frames N and N + 1 (what the diff below reads). A comma-separated
+  list is exactly those frames.
   (`f{F}_{name}.bin` plus `f{F}_layout.json`). `perf/dump.py DIR N` splits them
   into one file per component and channel:
   - surface-cache fine and coarse CSVs plus slot atlases (value, sets, variance,
