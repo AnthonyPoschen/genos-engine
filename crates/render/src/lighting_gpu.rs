@@ -1613,14 +1613,18 @@ impl Gpu {
         self.lighting_dump_copy();
     }
 
-    /// S78S: frames N and N + 1 (GENOS_LIGHTING_DUMP): copy the lighting buffers
-    /// into readback buffers at the end of the frame's passes.
+    /// S78S: frames N and N + 1 (GENOS_LIGHTING_DUMP, a comma-separated list of N):
+    /// copy the lighting buffers into readback buffers at the end of the frame's passes.
     fn lighting_dump_copy(&mut self) {
-        let Some(n) = std::env::var("GENOS_LIGHTING_DUMP").ok().and_then(|v| v.parse::<u64>().ok()) else {
+        let Ok(list) = std::env::var("GENOS_LIGHTING_DUMP") else {
             return;
         };
         let f = self.lighting.frame as u64;
-        if f != n && f != n + 1 {
+        let wanted = list
+            .split(',')
+            .filter_map(|v| v.trim().parse::<u64>().ok())
+            .any(|n| f == n || f == n + 1);
+        if !wanted {
             return;
         }
         let srcs: [(&'static str, Handle, u64); 5] = [
