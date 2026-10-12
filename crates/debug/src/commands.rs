@@ -18,6 +18,14 @@ fn spec(name: &str, description: &str) -> CommandSpec {
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         spec("status", "Frame, pause state, view, camera, and whether the lighting has settled (stable, still_frames, picture_settled)."),
+        spec(
+            "frame_reuse",
+            "Picture reuse since the renderer opened (or the last FRAME_REUSE print): scene_drawn, ui_repaired, full_restore, skipped, rects, invalidated, verify_ok, and the last verification words checks, changed, tests, fails.",
+        ),
+        spec(
+            "overlay",
+            "Rectangles the tools draw over the picture until the next overlay call. One rect is x, y, w, h and optional color [r,g,b]. rects is a list of [x,y,w,h] or [x,y,w,h,r,g,b]. No rect clears them. The example reports those pixels as UI damage.",
+        ),
         spec("knobs", "List every knob the example publishes, with range and step. With name and value, set one first."),
         spec("lights", "Every light: position, colour, range, distance, in_view, screen_share, impact (colour luminance x screen share), on."),
         spec(

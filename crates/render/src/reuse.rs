@@ -52,6 +52,12 @@ pub(crate) struct FrameReuse {
     pub slot_verified: [bool; 2],
     /// Scene key those counters were counted for.
     pub slot_key: [u64; 2],
+    /// Last verification words read after a fence: checks, real gradient fails,
+    /// probe rays, probe fails.
+    pub last_checks: u32,
+    pub last_changed: u32,
+    pub last_tests: u32,
+    pub last_fails: u32,
     /// Scene key of the frame before this one. A capture waits until the key repeats.
     pub seen_key: Option<u64>,
     /// This frame's key matches `seen_key` from the frame before.
@@ -86,6 +92,10 @@ impl Default for FrameReuse {
             verify_ok: false,
             slot_verified: [false, false],
             slot_key: [0, 0],
+            last_checks: 0,
+            last_changed: 0,
+            last_tests: 0,
+            last_fails: 0,
             seen_key: None,
             key_stable: false,
             screen_ok: false,
@@ -111,6 +121,29 @@ pub struct ReuseStats {
     pub skipped: u64,
     /// UI rectangles redrawn over a cached scene.
     pub rects: u64,
+    /// A finished verification found a real change and dropped the cached picture.
+    pub invalidated: u64,
+}
+
+/// Frame-reuse counts plus the last verification the CPU read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReuseReport {
+    pub scene_drawn: u64,
+    pub ui_repaired: u64,
+    pub full_restore: u64,
+    pub skipped: u64,
+    pub rects: u64,
+    pub invalidated: u64,
+    /// The last finished checks found no real change.
+    pub verify_ok: bool,
+    /// Gradient checks in that result.
+    pub checks: u32,
+    /// Gradient checks past their epsilon.
+    pub changed: u32,
+    /// Probe check rays in that result.
+    pub tests: u32,
+    /// Probe check rays whose hit moved.
+    pub fails: u32,
 }
 
 /// Clip `r` to the window, drop it when empty, and merge it with any rectangle

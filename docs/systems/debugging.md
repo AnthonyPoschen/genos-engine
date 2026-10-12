@@ -78,7 +78,7 @@ Every command is a function taking a map: `capture(#{ mode: "albedo" })`. Short
 forms: `wait(n)`, `step(n)`, `view("direct")`, `knob(name, value)`, `knob(name)`,
 `shot(name)`, `shot(name, mode)`, `log(text)`, `out_dir()`. Checks: `check(bool,
 msg)`, `require(bool, msg)` (stops the script), `check_lt(a, b, msg)`,
-`check_gt(a, b, msg)`, `check_near(a, b, tol, msg)`.
+`check_gt(a, b, msg)`, `check_near(a, b, tol, msg)`. `frame_reuse()` returns the picture-reuse counts and the last verification words. `overlay(#{ x, y, w, h })` draws one rectangle; a call with no rect clears it. The example reports that change as UI damage.
 
 ```rhai
 time(#{ pause: true });

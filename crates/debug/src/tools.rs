@@ -683,6 +683,26 @@ impl Tools {
                     ("picture_settled", Value::Bool(ctx.renderer.picture_settled())),
                 ]))
             }
+            "frame_reuse" => {
+                let report = ctx.renderer.reuse_report();
+                reply(obj(vec![
+                    ("scene_drawn", num(report.scene_drawn as f64)),
+                    ("ui_repaired", num(report.ui_repaired as f64)),
+                    ("full_restore", num(report.full_restore as f64)),
+                    ("skipped", num(report.skipped as f64)),
+                    ("rects", num(report.rects as f64)),
+                    ("invalidated", num(report.invalidated as f64)),
+                    ("verify_ok", Value::Bool(report.verify_ok)),
+                    ("checks", num(report.checks as f64)),
+                    ("changed", num(report.changed as f64)),
+                    ("tests", num(report.tests as f64)),
+                    ("fails", num(report.fails as f64)),
+                ]))
+            }
+            "overlay" => {
+                self.overlay = overlay_rects(args)?;
+                reply(obj(vec![("rects", num(self.overlay.len() as f64))]))
+            }
             "knobs" => {
                 let all = self.knobs(ctx.host);
                 if let (Some(n), Some(v)) = (args.str("name")?, args.0.get("value")) {
@@ -1377,6 +1397,65 @@ fn crop(img: &Image, region: Region) -> Image {
         height: y1 - y0,
         rgb,
     }
+}
+
+/// One rectangle, or the `rects` list, or nothing (clear the overlay).
+fn overlay_rects(args: &Args) -> Result<Vec<ScreenRect>, String> {
+    let color = args.rgb("color")?.unwrap_or([1.0, 0.25, 0.1]);
+    if let Some(items) = args.0.get("rects").and_then(Value::as_array) {
+        let mut out = Vec::new();
+        for item in items {
+            if let Some(rect) = rect_from_list(item, color)? {
+                out.push(rect);
+            }
+        }
+        return Ok(out);
+    }
+    if args.0.get("x").is_some() || args.0.get("w").is_some() {
+        let rect = ScreenRect {
+            x: args.f32("x")?.unwrap_or(0.0),
+            y: args.f32("y")?.unwrap_or(0.0),
+            w: args.f32("w")?.unwrap_or(0.0),
+            h: args.f32("h")?.unwrap_or(0.0),
+            color,
+        };
+        return Ok(if rect.w > 0.0 && rect.h > 0.0 {
+            vec![rect]
+        } else {
+            Vec::new()
+        });
+    }
+    Ok(Vec::new())
+}
+
+fn rect_from_list(item: &Value, fallback: [f32; 3]) -> Result<Option<ScreenRect>, String> {
+    let nums = item
+        .as_array()
+        .ok_or("rects entries are [x, y, w, h] or [x, y, w, h, r, g, b]")?;
+    if nums.len() != 4 && nums.len() != 7 {
+        return Err("rects entries are [x, y, w, h] or [x, y, w, h, r, g, b]".into());
+    }
+    let mut v = [0.0f32; 7];
+    for (i, n) in nums.iter().enumerate() {
+        v[i] = n
+            .as_f64()
+            .ok_or("rects entries are numbers")? as f32;
+    }
+    if v[2] <= 0.0 || v[3] <= 0.0 {
+        return Ok(None);
+    }
+    let color = if nums.len() == 7 {
+        [v[4], v[5], v[6]]
+    } else {
+        fallback
+    };
+    Ok(Some(ScreenRect {
+        x: v[0],
+        y: v[1],
+        w: v[2],
+        h: v[3],
+        color,
+    }))
 }
 
 fn diff_value(

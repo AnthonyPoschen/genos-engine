@@ -457,6 +457,24 @@ impl Renderer {
         self.gpu.reuse.stats
     }
 
+    /// Counts plus the last verification words. The debug script reads this.
+    pub fn reuse_report(&self) -> crate::reuse::ReuseReport {
+        let stats = self.gpu.reuse.stats;
+        crate::reuse::ReuseReport {
+            scene_drawn: stats.scene_drawn,
+            ui_repaired: stats.ui_repaired,
+            full_restore: stats.full_restore,
+            skipped: stats.skipped,
+            rects: stats.rects,
+            invalidated: stats.invalidated,
+            verify_ok: self.gpu.reuse.verify_ok,
+            checks: self.gpu.reuse.last_checks,
+            changed: self.gpu.reuse.last_changed,
+            tests: self.gpu.reuse.last_tests,
+            fails: self.gpu.reuse.last_fails,
+        }
+    }
+
     /// The picture has stopped changing: the lighting holds its light and a frame
     /// drawn from it is on screen.
     pub fn picture_settled(&self) -> bool {
@@ -1888,6 +1906,10 @@ impl Gpu {
         let changed = words[23];
         let tests = words[109];
         let fails = words[110];
+        self.reuse.last_checks = checks;
+        self.reuse.last_changed = changed;
+        self.reuse.last_tests = tests;
+        self.reuse.last_fails = fails;
         let ran = checks > 0 || tests > 0;
         let same = self.reuse.slot_key[slot] == self.reuse.scene_key;
         if changed > 0 || fails > 0 {
@@ -1896,6 +1918,7 @@ impl Gpu {
             self.reuse.generation = self.reuse.generation.wrapping_add(1);
             self.reuse.scene_ready = false;
             self.reuse.screen_ok = false;
+            self.reuse.stats.invalidated = self.reuse.stats.invalidated.wrapping_add(1);
             return;
         }
         if !same || !ran {
@@ -5239,12 +5262,13 @@ impl Gpu {
 fn emit_frame_reuse(stats: &mut crate::reuse::ReuseStats) {
     let stats_now = *stats;
     eprintln!(
-        "FRAME_REUSE scene_drawn={} ui_repaired={} full_restore={} skipped={} rects={}",
+        "FRAME_REUSE scene_drawn={} ui_repaired={} full_restore={} skipped={} rects={} invalidated={}",
         stats_now.scene_drawn,
         stats_now.ui_repaired,
         stats_now.full_restore,
         stats_now.skipped,
-        stats_now.rects
+        stats_now.rects,
+        stats_now.invalidated
     );
     *stats = crate::reuse::ReuseStats::default();
 }
