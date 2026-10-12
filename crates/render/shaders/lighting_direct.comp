@@ -114,15 +114,42 @@ bool lighting_dp_diverge_skip(uint idx) {
 #endif
 
 // The default compilation is the shipped direct pass. -DLIGHTING_HIT_QUEUE is
-// the hit-light pass: one thread per queued miss, and the queue is still empty.
-// Each compilation has one trace_occluded call.
-#ifdef LIGHTING_HIT_QUEUE
+// the hit-light pass. -DLIGHTING_HIT_ENQUEUE is the direct pass that queues
+// light-cache-ray misses and lights everything else inline. Each compilation
+// has one trace_occluded call.
+#if defined(LIGHTING_HIT_QUEUE) || defined(LIGHTING_HIT_ENQUEUE)
 void lighting_direct_shade(
     uint idx, uint pixels, uint kept, bool fill_hit, bool probe_hit, uint h, uint ray,
     vec3 pos, vec3 n, vec3 n_hit, vec3 origin, float hit_t, vec3 reflectance, bool two_sided,
     vec3 glow, LampList list, uint count, uint tdl, uint tdl_sig, uint pix_sig) {
 #include "lighting_direct_shade.glsl"
 }
+#endif
+#ifdef LIGHTING_HIT_ENQUEUE
+// A GI hit still needs a shadow ray. TDL reuse is already known. Otherwise
+// every lamp with weight above zero must have a stored shadow. The pre-scan
+// uses lighting_shadow_stored so it does not count d2/d3. A sun or the flame
+// has no stored shadow.
+bool lighting_hit_needs_queue(vec3 origin, vec3 n, LampList list, uint count, bool two_sided, uint tdl) {
+    if (tdl != ~0u && (tdl & 0x80000000u) != 0u) {
+        return false;
+    }
+    [[dont_unroll]] for (uint k = 0u; k < count; k++) {
+        vec3 target;
+        vec3 light = lamp_light(lamp_list_get(list, k), origin, n, two_sided, target);
+        float w = light.r + light.g + light.b;
+        if (w <= 0.0) {
+            continue;
+        }
+        uint li = lamp_list_index(list, k);
+        if (li >= LAMP_ALL - 1u || lighting_world_mode() != 3u || lighting_shadow_stored(origin, n, li) < 0.0) {
+            return true;
+        }
+    }
+    return false;
+}
+#endif
+#ifdef LIGHTING_HIT_QUEUE
 void main() {
     // Mode-0 index layout, hardcoded: pixels, kept hits, cache rays, fills.
     // The entry's tdl is the decision already taken (reuse is not queued).
@@ -214,6 +241,30 @@ void main() {
     lighting_direct_shade(
         idx, pixels, kept, fill_hit, probe_hit, h, ray, pos, n, n_hit, origin, hit_t,
         reflectance, two_sided, glow, list, count, tdl, tdl_sig, 0u);
+}
+#elif defined(LIGHTING_HIT_ENQUEUE)
+void main() {
+#include "lighting_direct_classify.glsl"
+    // Light-cache rays only. Kept hits and fills still finish in this pass.
+    bool cache_ray = idx >= pixels && !probe_hit;
+    if (((pc.params.y >> 16u) & 1u) != 0u && cache_ray
+        && lighting_hit_needs_queue(origin, n, list, count, two_sided, tdl)) {
+        // The consumer reads mode-0 indices: pixels, kept, cache rays, fills.
+        // Mode 1's fill range overlaps the cache rays; cache rays are not fills.
+        uint qidx = idx;
+        if (lighting_mode() == 1u && fill_hit) {
+            qidx += LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS;
+        }
+        uint slot = atomicAdd(ckeys.key[LIGHTING_HIT_QUEUE_COUNT_AT], 1u);
+        if (slot < LIGHTING_HIT_QUEUE_CAP) {
+            ckeys.key[LIGHTING_HIT_QUEUE_AT + 2u * slot] = qidx;
+            ckeys.key[LIGHTING_HIT_QUEUE_AT + 2u * slot + 1u] = tdl;
+            return;
+        }
+    }
+    lighting_direct_shade(
+        idx, pixels, kept, fill_hit, probe_hit, h, ray, pos, n, n_hit, origin, hit_t,
+        reflectance, two_sided, glow, list, count, tdl, tdl_sig, pix_sig);
 }
 #else
 void main() {

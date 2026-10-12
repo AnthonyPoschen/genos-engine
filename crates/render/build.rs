@@ -40,6 +40,13 @@ fn main() {
         &out.join("lighting_direct_queue.comp.spv"),
         &["LIGHTING_HIT_QUEUE=1"],
     );
+    // Direct pass that queues light-cache-ray misses. Bound only when the
+    // hit-light toggle is on, so the shipped pipeline stays the variant above.
+    let direct_enqueue = compile_with(
+        "shaders/lighting_direct.comp",
+        &out.join("lighting_direct_enqueue.comp.spv"),
+        &["LIGHTING_HIT_ENQUEUE=1"],
+    );
     let glue = out.join("shaders.rs");
     std::fs::write(
         &glue,
@@ -64,6 +71,10 @@ fn main() {
     glue_text.push_str(&format!(
         "pub static LIGHTING_DIRECT_QUEUE_SPV: &[u8] = include_bytes!(\"{}\");\n",
         direct_queue.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_DIRECT_ENQUEUE_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        direct_enqueue.display()
     ));
     std::fs::write(&glue, glue_text).unwrap();
     for piece in [
