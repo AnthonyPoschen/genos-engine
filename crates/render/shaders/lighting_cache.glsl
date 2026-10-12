@@ -2678,6 +2678,19 @@ bool lighting_svgf_was_active(uint s) {
 void lighting_svgf_set_active(uint s, bool a) {
     cache.v[LIGHTING_SC_DIRTY_AT + LIGHTING_CACHE_SLOTS + s].y = a ? 1.0 : 0.0;
 }
+// S78B stamps (slot 22.z: the spatial variance's 7 x 7 inputs changed; 22.w:
+// level 5 or its +-1 neighbours changed, the push reads them). A stamp holds
+// this frame and the next (a mark made by a neighbour of the same dispatch may
+// land after the texel looked).
+bool lighting_svgf_stamp_recent(uint s, uint c) {
+    float f = cache.v[LIGHTING_SC_DIRTY_AT + LIGHTING_CACHE_SLOTS + s][c];
+    return f != 0.0 && lighting_frame() - floatBitsToUint(f) <= 1u;
+}
+void lighting_svgf_stamp(uint s, uint c) {
+    if (s != ~0u) {
+        cache.v[LIGHTING_SC_DIRTY_AT + LIGHTING_CACHE_SLOTS + s][c] = uintBitsToFloat(lighting_frame());
+    }
+}
 // An inactive texel: mask 0 at every level (a flip marks its readers once).
 void lighting_svgf_inactive(uint slot) {
     bool was = lighting_svgf_was_active(slot);
@@ -2694,10 +2707,12 @@ void lighting_svgf_variance(uint slot) {
     vec4 v = lighting_svgf_in(slot, var);
     bool spatial = var < 0.0;
     bool flip = LIGHTING_DIRTY_ATROUS && !lighting_svgf_was_active(slot);
-    if (LIGHTING_DIRTY_ATROUS && !spatial && !flip) {
+    if (LIGHTING_DIRTY_ATROUS && !flip) {
         float vo;
         vec4 o = lighting_svgf_load(lighting_svgf_lvl(0u), slot, vo);
-        if (!lighting_svgf_moved(v, var, o, vo)) {
+        // S78B: a spatial estimate is redone only when its value or one of its
+        // 7 x 7 inputs moved (stamp 22.z), not every frame.
+        if (spatial ? (!lighting_svgf_moved(v, vo, o, vo) && !lighting_svgf_stamp_recent(slot, 2u)) : !lighting_svgf_moved(v, var, o, vo)) {
             return;
         }
     }
@@ -2742,6 +2757,14 @@ void lighting_svgf_variance(uint slot) {
     vec4 nw = lighting_svgf_load(lighting_svgf_lvl(0u), slot, vn);
     if (flip || lighting_svgf_moved(nw, vn, o, vo)) {
         lighting_svgf_scatter(slot, 0u);
+    }
+    // S78B: the value itself moved: the spatial variances that read it.
+    if (flip || lighting_svgf_moved(vec4(nw.rgb, nw.w), 0.0, vec4(o.rgb, o.w), 0.0)) {
+        [[dont_unroll]] for (int j = -3; j <= 3; j++) {
+            [[dont_unroll]] for (int i = -3; i <= 3; i++) {
+                lighting_svgf_stamp((i == 0 && j == 0) ? slot : lighting_sc_cell_slot(slot, ivec2(i, j)), 2u);
+            }
+        }
     }
 }
 void lighting_svgf_iter(uint slot, uint it) {
@@ -2818,6 +2841,14 @@ void lighting_svgf_iter(uint slot, uint it) {
         }
         if (lighting_svgf_moved(nw, vn, old, vold)) {
             lighting_svgf_scatter(slot, it + 1u);
+            if (it + 1u == 5u) {
+                // S78B: the push of this texel and of its +-1 neighbours (IC gradient).
+                lighting_svgf_stamp(slot, 3u);
+                lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(1, 0)), 3u);
+                lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(-1, 0)), 3u);
+                lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(0, 1)), 3u);
+                lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(0, -1)), 3u);
+            }
         }
     }
 }
@@ -2832,6 +2863,7 @@ float lighting_svgf_lum_at(uint slot, ivec2 off, out bool ok) {
     ok = x.w > 0.0;
     return dot(x.rgb, LIGHTING_SVGF_LW);
 }
+const uint LIGHTING_PUSH_IDLE = 16u;
 void lighting_svgf_push(uint slot) {
     vec4 nb = cache.v[3u * slot + 1u];
     if (nb.w > 0.2) {
@@ -2840,6 +2872,15 @@ void lighting_svgf_push(uint slot) {
     float varp;
     vec4 f = lighting_svgf_load(LIGHTING_SC_ATROUS_A, slot, varp);
     float W = clamp(f.w, 0.0, 1.0);
+    // S78B: the push is redone when this texel's last level (or a +-1
+    // neighbour's) moved, when it leans on the WRC (W < 1: the cells change
+    // without telling their texels), and otherwise one frame in
+    // LIGHTING_PUSH_IDLE by hash (the +-4 R clamp, a texel just shown).
+    if (LIGHTING_DIRTY_ATROUS && W >= 0.999 && !lighting_svgf_stamp_recent(slot, 3u)
+        && cache.v[LIGHTING_SC_ATROUS_B + slot].w != 0.0
+        && ((lighting_hash(slot ^ 0x7f4a7c15u) + lighting_frame()) % LIGHTING_PUSH_IDLE) != 0u) {
+        return;
+    }
     // Coarse: the WRC cells (2x size) bilinear, their filtered values and masks.
     vec3 p = cache.v[3u * slot].xyz;
     vec3 n = nb.xyz;

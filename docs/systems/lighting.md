@@ -245,3 +245,16 @@ Every failing grade of the surface cache, where it first appeared and which plan
 | room 48 px swim (target) | 0.0010 / 0.0006 | P6 itself 0.0025 | item 5 |
 
 Fixed: camera regeneration (settled-per-pose 0.0056 -> 0.0012) and grid redraw (0.0050 -> 0.0008) by the estimator; offer restarts on camera moves (234 -> 0 per readback) by 524288.
+
+### S78B: a-trous variance and push driven by change
+
+Per-level counts (still scene, frames 300-600, of ~110k filtered texels): the
+variance stage recomputed 75k a frame, because a spatial estimate (WRC cells,
+young texels) was redone every frame, and the push (4 WRC lookups, 4 gradient
+reads, 4 R clamps) ran for every filtered texel. Now a spatial estimate is
+redone only when its own value moved or one of its 7 x 7 inputs did (stamp
+slot 22.z, held for 2 frames), and the push only when its level 5 or a +-1
+neighbour's moved (stamp 22.w), when it leans on the WRC (W < 1), or one frame
+in 16 by hash. No new memory. Still 21.2 -> 19.6 ms (a-trous 3.46 -> 2.14),
+moving 26.9 -> 25.7 ms (6.14 -> 4.83). [deviation: the 1-in-16 refresh is a
+small fixed floor kept for the +-4 R clamp, which has no reverse links.]
