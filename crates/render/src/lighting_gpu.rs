@@ -92,7 +92,7 @@ pub(crate) struct Lighting {
     layout: Handle,
     pool: Handle,
     sets: [Handle; 2],
-    pipes: [Handle; 9],
+    pipes: [Handle; LIGHTING_PIPES],
     gbuffer_pipe: Handle,
     gbuf: Buffer,
     work: Buffer,
@@ -244,7 +244,7 @@ impl Default for Lighting {
             layout: std::ptr::null_mut(),
             pool: std::ptr::null_mut(),
             sets: [std::ptr::null_mut(); 2],
-            pipes: [std::ptr::null_mut(); 9],
+            pipes: [std::ptr::null_mut(); LIGHTING_PIPES],
             gbuffer_pipe: std::ptr::null_mut(),
             gbuf: Buffer::empty(),
             work: Buffer::empty(),
@@ -337,7 +337,10 @@ const LIGHTING_HIT_QUEUE_AT: u64 = lighting_atrous_ppm_at() + LIGHTING_ATROUS_ME
 const LIGHTING_HIT_QUEUE_COUNT_AT: u64 = LIGHTING_HIT_QUEUE_AT + 2 * LIGHTING_HIT_QUEUE_CAP;
 const LIGHTING_HIT_ARGS_AT: u64 = LIGHTING_HIT_QUEUE_COUNT_AT + 1;
 const LIGHTING_CKEYS_WORDS: u64 = LIGHTING_HIT_ARGS_AT + 4;
-const LIGHTING_PASS_NAMES: [&str; 9] = [
+/// Compute pipelines. Index 9 is the hit-light variant of the direct pass
+/// (`-DLIGHTING_HIT_QUEUE`). It is created here and not dispatched yet.
+const LIGHTING_PIPES: usize = 10;
+const LIGHTING_PASS_NAMES: [&str; LIGHTING_PIPES] = [
     "lighting compact",
     "lighting place",
     "lighting trace",
@@ -347,6 +350,7 @@ const LIGHTING_PASS_NAMES: [&str; 9] = [
     "lighting cache",
     "lighting compose",
     "lighting atrous",
+    "lighting hit",
 ];
 
 impl Gpu {
@@ -507,7 +511,7 @@ impl Gpu {
             self.lighting.world_set = sets[2];
         }
         self.make_lighting_world()?;
-        let codes: [&[u8]; 9] = [
+        let codes: [&[u8]; LIGHTING_PIPES] = [
             LIGHTING_COMPACT_SPV,
             LIGHTING_PLACE_SPV,
             LIGHTING_TRACE_SPV,
@@ -517,6 +521,7 @@ impl Gpu {
             LIGHTING_CACHE_SPV,
             LIGHTING_COMPOSE_SPV,
             LIGHTING_ATROUS_SPV,
+            LIGHTING_DIRECT_QUEUE_SPV,
         ];
         for (k, code) in codes.iter().enumerate() {
             let start = Instant::now();
