@@ -153,7 +153,7 @@ LOD selection and occlusion run in compute and fill an indirect draw. The source
 
 **Deviation.** The 2015 talk reprojects last frame's depth and accepts a one-frame false negative. The two-pass version in Aaltonen's follow-up is the one to copy, because a missing object for a frame is a pop the lighting tests already treat as a failure. The pyramid build and the cull dispatch run only when the camera or the instance set changed. A reused frame runs neither. The CPU frustum cull in `in_view` stays as the coarse reject before upload, so a mesh behind the camera never enters the instance buffer.
 
-Mesh shaders are not used. The indirect draw uses the hardware rasterizer and the meshlets from the cook.
+Mesh shaders are not used. The indirect draw uses the hardware rasterizer and the meshlets from the cook. The instance list is the relevancy set from the asset plan. A headless server builds no pyramid and uploads no pages.
 
 ## GI and frame reuse, per area
 
@@ -167,11 +167,25 @@ Mesh shaders are not used. The indirect draw uses the hardware rasterizer and th
 | Terrain, foliage meshes, decals | They are triangles. They claim texels. | Their pool generation and poses. | Resident and still: no upload. |
 | Water surface | Transparent pass does not claim. A proxy card does. | Time, only when the displacement is on. | Frozen time: key stable. |
 | Atmosphere | Miss colour replaces `sky.color` for that frame. | Atmosphere parameters. | Parameters unchanged: LUT dispatch skipped. |
-| LOD cull | Does not change stored light. | Camera and the resident cluster set. | Reused frame: no cull. |
+| LOD cull | Does not change stored light. | Camera and the resident cluster set. | Reused frame: no cull. A headless server: no pyramid and no page upload. |
+
+## Networking
+
+Bytes, `AssetId`s, subset hashes, and load profiles are the [asset plan](../assets/plan.md). Interest, `NetId`, the socket, bandwidth, and the session binary are [core-networking/plan.md](../core-networking/plan.md). This plan does not open a socket. That networking file is absent on the remote heads searched on 2026-10-12. The names here are the ones the asset plan and the physics plan already use for it. A later name in that file wins.
+
+The client culls and orders pages for the intersection of the camera residency and the relevant `AssetId`s. A page outside that set is not uploaded. A missing render subset draws the placeholder from the asset plan (the collision mesh, or the bounds).
+
+- **Replicated state.** The G-buffer, the depth pyramid, and the page table stay on the client. A snapshot names the `AssetId`s the asset plan already replicates. This plan adds no picture and no page id to that snapshot.
+- **Authority.** The server lists interest. It does not shade. A client keeps its own page table.
+- **Prediction / rollback.** Post and the cull are not replayed. TAA history drops when the resident set changes, which is already a scene-key change. A view-body rollback leaves resident pages in place.
+- **Determinism.** The picture is local. Two clients with the same relevancy set and the same camera can hold different pages when their bandwidth differed. The sim hash in the asset plan is the shared checksum.
+- **Headless server.** `LoadProfile::Sim`. No depth pyramid, no texture upload, no Vulkan device. `in_view` and the cluster cull run on a client.
+
+`genos-stress` stays the lighting host. The rubric moves that coverage to `debug/lighting`. This plan does not add a second lighting binary. `meshlet`, `residency`, and `placeholder` are view modes on `debug/assets`.
 
 ## Shared scenes
 
-The host is `genos-stress`, as in the asset plan. Scenes live in `examples/stress/scenes/`. Scripts live in `examples/stress/scripts/`. The room the lighting tests already use is `scenes/room.rhai`. New scenes include that room when they need walls and one lamp, so gi-check still has a meaning.
+The lighting host is `genos-stress`. Asset hashes, residency, and relevancy are `genos-assets-view` in the asset plan. Scenes live in `examples/stress/scenes/`. Scripts live in `examples/stress/scripts/`. The room the lighting tests already use is `scenes/room.rhai`. New scenes include that room when they need walls and one lamp, so gi-check still has a meaning.
 
 The owner's GPU command:
 
@@ -319,9 +333,9 @@ Commit: `render: many instances share one shape block`.
 
 Files: `shaders/cull.comp`, `gpu.rs`, `debug_view.rs` (meshlet id view).
 
-This step consumes cook meshlets from the asset plan. The cull shader frustum-culls clusters, tests them against a depth pyramid built from last frame's depth, and fills an indirect draw. A second dispatch draws the clusters the first pass rejected and the updated pyramid accepts. No mesh shaders. The dispatch is skipped when the scene key matches.
+This step consumes cook meshlets from the asset plan. The instance list is the relevancy set from that plan. The cull shader frustum-culls clusters, tests them against a depth pyramid built from last frame's depth, and fills an indirect draw. A second dispatch draws the clusters the first pass rejected and the updated pyramid accepts. No mesh shaders. The dispatch is skipped when the scene key matches. An empty relevancy set builds no pyramid and uploads no pages.
 
-Test: a CPU replica of the frustum half of the cull, in `crates/render/src/cull.rs`, with one cluster inside and one outside. `cargo test -p genos-render cull`. The pyramid test uses a depth buffer of one near pixel and expects the far cluster rejected.
+Test: a CPU replica of the frustum half of the cull, in `crates/render/src/cull.rs`, with one cluster inside and one outside. A third cluster inside the frustum, whose `AssetId` is outside the relevancy set, is absent from the upload. `cargo test -p genos-render cull`. The pyramid test uses a depth buffer of one near pixel and expects the far cluster rejected.
 
 GPU proof: `scenes/lod.rhai`, `scripts/lod.rhai`, meshlet-id view. The owner checks that a camera cut still shows every in-frustum cluster on the second frame (the two-pass guarantee).
 
@@ -401,6 +415,7 @@ Commit: `render: one sun cascade for casters the tracer does not see`.
 |---|---|---|
 | Shadows | Lumen and Fortnite use shadow maps and virtual shadow maps. | Traced rays stay the lamp shadow. One cascade is allowed for untraced casters only. |
 | Virtual geometry | Nanite software-rasterizes clusters. | Indirect hardware draws of meshlets. ADR 0012. |
+| Page priority | Nanite orders clusters from the camera. | The candidate set is the replicated relevancy set. The camera orders inside that set. |
 | TAA | Karis advances history every frame. | A reused frame does not advance history. |
 | Atmosphere | Hillaire can update LUTs every frame. | LUTs update when parameters change. |
 | Terrain | Clipmaps follow the camera. | Pages follow the camera. Triangles stay in world space. |

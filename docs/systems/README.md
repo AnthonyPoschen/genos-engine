@@ -35,7 +35,7 @@ Each record uses these headings:
 
 These are plans. They are not system records. A step edits the matching record when it changes a goal, an intent, a game use, or a limit.
 
-- [Asset plan](assets/plan.md): import, the cook, the cache, streaming, packaging, and pre-fractured chunks.
-- [Rendering extras plan](rendering/extras-plan.md): materials, shadows outside the lighting pass, particles, post, terrain, foliage, water, sky, decals, and culling.
+- [Asset plan](assets/plan.md): import, the cook, the cache, streaming, packaging, pre-fractured chunks, shared asset ids, and the assets debug binary.
+- [Rendering extras plan](rendering/extras-plan.md): materials, shadows outside the lighting pass, particles, post, terrain, foliage, water, sky, decals, and culling. Client culling follows the asset plan's relevancy set.
 
 The crate map and the frame loop are in [Architecture](../architecture.md). The words are in `CONTEXT.md`.

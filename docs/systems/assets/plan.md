@@ -2,7 +2,7 @@
 
 Written 2026-10-12 against `gi-v2` at `e61b89d`. This is a plan. It does not change Loading, Bake, or the renderer. A later commit edits [Loading](../loading.md), [Bake](../bake.md), or [Physics](../physics.md) in the same change that changes those facts.
 
-**Goal.** A game can import a wide set of files, keep every byte the runtime does not use yet, cook the parts the GPU does use, and load the result with no window and no GPU.
+**Goal.** A game can import a wide set of files, keep every byte the runtime does not use yet, cook the parts the GPU does use, and load the result with no window and no GPU. A headless server loads the collision subset of those same files. The client and the server name each file with one hash.
 
 **Architecture.** Loading stays the decoder. A new import document sits in front of the decoders that already work: it stores the source bytes, the runtime projection those decoders already return, and a support note for every feature the projection drops. The cook reads that document and writes GPU-ready meshlets, texture blocks, and the existing `.gbake`. The renderer keeps the shape pool, the particle images, and the mesh SDF upload it has now.
 
@@ -22,8 +22,12 @@ On 2026-10-12, `git branch -r` and `git ls-remote --heads origin` listed:
 | `cursor/dynamic-perf-plan-e94c` | Lighting performance plan. Not this work. |
 | `cursor/gi-prefill-spare-budget-3544`, `cursor/gi-headless-stuck-patch-2bf4`, `cursor/wrc-need-ray-ceilings-3c49` | Lighting. |
 | `cursor/cloud-agent-notes-4faa`, `cursor/cloud-env-notes-d5a7` | Environment notes. |
+| `cursor/physics-architecture-plan-a077` (`cfec5bd`) | [Physics plan](https://github.com/AnthonyPoschen/genos-engine/blob/cursor/physics-architecture-plan-a077/docs/systems/physics/plan.md). `.gfract`, `BondBreak`, `break_baseline`, and the content hash on a destruction spawn. Not merged. |
+| `cursor/agent-rubric-b06d` (`e2f451b`) | Debug binaries under `debug/<system>/`, the observability list, and the five networking lines. Not merged. |
 
-No branch contains a Voronoi, bond-graph, or destruction plan. The physics record on every branch above is [Physics](../physics.md). The cook stores the chunks and the bond graph. The step that breaks a bond stays with that physics work when it lands.
+`docs/systems/core-networking/plan.md` is not on `gi-v2` or on any other remote head listed above, as of this search. The physics plan is the contract that names that file. It assigns the session, the UDP socket, `NetId`, `InputFrame`, the snapshot ring, interest, bandwidth, and the session debug binary to that file. This plan uses those names. When that file lands, a name there wins, and this plan changes in the same commit.
+
+The cook stores the chunks and the bond graph. The step that breaks a bond stays in the physics plan. The live physics record on `gi-v2` remains [Physics](../physics.md).
 
 ## Principles
 
@@ -31,7 +35,7 @@ These bind every step.
 
 - GPU-resident data. The frame loop uploads a new block or a new page. It does not read a buffer back to decide the next draw. A completed frame's feedback may be read after its fence, the same way `poll_gpu_times` reads timestamps. The current submit does not wait on that read.
 - Work is gated by need. A cook, an upload, or a stream runs when a key or a page is missing. A still resident set does not dispatch a streaming pass.
-- Verify cheaply. Each frame the CPU checks the resident set against the camera and the content keys it already holds. A skip without that check is not allowed.
+- Verify cheaply. Each frame the CPU checks the resident set against the relevancy set, the camera, and the hashes it already holds. A skip without that check is not allowed.
 - Follow a published design, and write the deviation in the same commit.
 - New triangles, terrain, foliage, water surfaces, and decals that should bounce light claim surface-cache texels the way a mesh does today. The running cache is the world texel field (12.5 cm, [S57](../lighting/experiments/S57-no-camera-distance-sizes.md)), not a second atlas. Import cards in `.gbake` stay the bake product. See [Bake](../bake.md).
 - A cooked change dirties the scene key in [PR #5](https://github.com/AnthonyPoschen/genos-engine/pull/5) (`docs/frame-reuse.md` on `cursor/frame-output-reuse-6556`). Frame reuse itself is that plan. This plan only names the keys a cooked asset adds: shape-pool generation, image generation, and the mesh-field key. Those generations already exist as the pool and `upload_image`.
@@ -204,17 +208,115 @@ Virtual textures follow Mittring, "Advanced Virtual Texture Topics", SIGGRAPH 20
 
 Mesh streaming follows the same page idea as Nanite's cluster pages (Karis 2021): the hierarchy stays resident, the cluster bytes stream. The cull that fills the indirect draw follows Haar and Aaltonen, "GPU-Driven Rendering Pipelines", SIGGRAPH 2015 ([slides](https://advances.realtimerendering.com/s2015/aaltonenhaar_siggraph2015_combined_final_footer_220dpi.pdf)): instance cull, cluster cull, compact, `multiDrawIndirect`. Occlusion for that cull is the rendering plan.
 
-The CPU decides which pages to upload from the camera and the resident set it already has. The GPU may write a request list. The CPU reads that list only after the frame's fence, and the current frame does not wait. A cheap CPU check still runs every frame so a missed read cannot hide a missing page.
+The candidate pages are the assets in the relevancy set, defined in the Networking section. The CPU orders those pages from the camera and the resident set it already has. The GPU may write a request list. The CPU reads that list only after the frame's fence, and the current frame does not wait. A cheap CPU check still runs every frame so a missed read cannot hide a missing page. A headless server does not build this table.
 
 ### Hot reload
 
-When a source file's SHA-256 changes, the import and the cook for that object are rebuilt. The renderer swaps a shape-pool block or an image when the cook key changes, which is the same generation the pool and `upload_image` already bump. That generation is part of the frame-reuse scene key. A reload does not read the picture back. The pool swap is step 16. The file watch is step 17.
+When a source file's SHA-256 changes, the import and the cook for that object are rebuilt. The new bytes are a new `AssetId`. The previous object stays in the cache under the old id. Relevancy names the id the scene references after the reload. The renderer swaps a shape-pool block or an image when the cook key changes, which is the same generation the pool and `upload_image` already bump. That generation is part of the frame-reuse scene key. A reload does not read the picture back. The pool swap is step 16. The file watch is step 17.
 
 ### Pre-fractured destruction
 
 The cook, not the physics step, builds the chunks. The pattern is a Voronoi decomposition of the mesh bounds, clipped to the mesh, as in Müller, Chentanez, and Kim, "Real Time Dynamic Fracture with Volumetric Approximate Convex Decompositions", ACM SIGGRAPH 2013 ([paper](https://matthias-research.github.io/pages/publications/fractureSG2013.pdf)). Each chunk is a mesh in the import document, with its own bake key so GI cards and the SDF exist per chunk.
 
 The bond graph is the cook's adjacency: one node per chunk, one edge per shared face, with a rest area and a strength. **Deviation.** The paper also fractures at runtime from an impact and rebuilds islands. This cook stores one precomputed pattern. Runtime fracture, island detection, and the solver belong to the physics plan. Today's collider (`Shape::from_triangles`, at most 6 boxes or 12 hull vertices, `crates/physics/src/mesh.rs`) stays the contact shape until that plan says a chunk is a body. The asset step does not call `step`.
+
+The chunk collision and the bond graph are the sim subset. Their bytes are the `.gfract` version 1 payload from the physics plan (`write_gfract`, little-endian `f32`, parent, `first_child`, `child_count`, bond area, centroid, normal, health, and a world bond of `u32::MAX`). The SHA-256 of that payload is the content hash that plan sends on spawn when the client already has the file. SDF cards and texture blocks stay on the render subset, so a BC7 cook and an ASTC cook share one physics hash. `BondBreak`, `break_baseline`, and the snapshot codec stay in the physics plan and in the core-networking plan. When `crates/fracture` lands, the cook calls `write_gfract` and hashes those bytes. It does not grow a second fracture file.
+
+## Networking
+
+[core-networking/plan.md](../core-networking/plan.md) owns the session, the UDP socket, `NetId`, `InputFrame`, the snapshot ring, interest, bandwidth, and the session debug binary (one server world and N client worlds in one process, with latency, loss, and jitter). This section is the asset contract that file calls. Loading and the cook store `AssetId` and the subset hashes. They do not open a socket, resend a packet, or define the codec.
+
+That file is absent on every remote head searched on 2026-10-12. The names here are the ones the [physics plan](https://github.com/AnthonyPoschen/genos-engine/blob/cursor/physics-architecture-plan-a077/docs/systems/physics/plan.md) already assigns to it. A later name in `core-networking/plan.md` wins.
+
+Gameplay networking still waits ([Architecture](../../architecture.md)). The loopback agent endpoint stays the live-scene path. These lines are the contract for the server that file will add.
+
+### Identifiers
+
+`AssetId` is the SHA-256 of the source bytes, the object key from the cache section. The server and the client compute the same id from the same bytes. A path is a byte source on one machine. `NetId` is the server-assigned id of a replicated body. A body keeps its `NetId`. The asset that body uses is named by `AssetId`.
+
+The bake key stays the FNV-1a `content_key` of `.gbake`. Old bake caches stay valid. The wire names the source `AssetId` and the subset hashes below.
+
+A subset hash is the SHA-256 of that subset's canonical bytes. The canonical sim bytes are little-endian, version byte `1`, then bounds, collision positions, and indices, and for a breakable the `.gfract` payload above. The render bytes are the meshlets, then the KTX2 block buffer for one platform, then the bake key stored as bytes. The audio bytes are the WAV PCM when the file has any. Two cooks of the same source and the same cook settings write the same sim bytes and the same sim hash. A BC7 record and an ASTC record share that sim hash and differ in the render hash. If the physics plan or the core-networking plan names a different function for the `.gfract` content hash, that function wins and this paragraph changes with it.
+
+`missing_subsets(asset_id, profile)` returns the subset names whose hash is absent locally. That list is what the session sends, under the bandwidth budget the core-networking plan owns. A snapshot names `AssetId` and the subset hashes for assets referenced by `NetId`s in interest. Once the peer has stored a hash, a later snapshot names the hash and leaves the bytes out.
+
+### Load profiles
+
+| Profile | Who | What it loads |
+|---|---|---|
+| `Sim` | Dedicated server, and any headless sim | Collision the physics record already builds (`Shape::from_triangles`, at most 6 boxes or 12 hull vertices), chunk bounds, the bond graph, asset bounds |
+| `Render` | A client | The sim subset, plus meshlets, the mip blocks for this platform, and the bake key |
+| `Listen` | A server that also draws and plays | The sim subset, the render subset, and the PCM |
+
+`Sim` leaves texture blocks, meshlets, SDF cards, and PCM on disk. It creates no Vulkan device and opens no audio device. `Render` leaves the other platform's blocks on disk. The server loads the sim subset for every asset the sim references, including a body outside one client's interest.
+
+### Relevancy
+
+Interest is the set of `NetId`s a connection may see. The core-networking plan owns that set. Relevancy for assets is the `AssetId`s those `NetId`s reference, plus the view body's asset. The session maps `NetId` to `AssetId` and passes the ids. The cook stores no `NetId`.
+
+The client page table requests pages only from that set. The camera orders the requests inside the set, which is the streaming section. An `AssetId` that leaves interest stays for `relevancy_hold` frames and then becomes an eviction candidate. A page the camera can see, whose asset is outside the set, is not requested.
+
+The server does not upload texture pages and does not build a page table.
+
+### Five lines
+
+- **Replicated state.** `AssetId` and the subset hashes for assets referenced by `NetId`s in interest. Subset bytes travel when `missing_subsets` names them. Texture pages and meshlet pages stay on the client.
+- **Authority.** The server lists the `AssetId`s in a connection's interest set. The client loads those ids. A local sim hash that differs from the hash the snapshot names is a fault `asset_metrics` counts. The sim keeps the server's bytes.
+- **Prediction / rollback.** An asset has no predicted state and no rollback. Until the render subset arrives, the draw is the collision mesh when the sim subset is present, and the asset bounds when it is absent. The view-body rollback in the physics plan uses the sim subset already loaded. A rollback leaves resident pages in place.
+- **Determinism.** The sim hash is stable across processes that share the source bytes and the cook settings. The comparison on the wire is that hash, plus the quantized poses the physics plan already compares. Render blocks may differ by platform and stay outside the sim hash.
+- **Headless server.** `LoadProfile::Sim`. Collision, chunk bounds, and the bond graph are loaded. Texture pixels stay on disk. There is no window, no Vulkan device, and no audio device.
+
+## Assets debug binary
+
+The binary is `debug/assets`, package `genos-assets-view`, `[lints] workspace = true`. The folder is the one the agent rubric names for this system (`debug/assets` on `cursor/agent-rubric-b06d`). `genos-stress` stays the lighting host. This binary is the observability host for import, cook, cache, residency, and relevancy.
+
+It uses `genos-debug` and the MCP command queue in [Debugging](../debugging.md). MCP `tools/call`, `POST /cmd/<name>`, and Rhai share one JSON form. New probes are added to `crates/debug/src/commands.rs`. The binary does not mount `reference` or `compare`, and it does not open the session window. The session binary in the core-networking plan is the multi-client view. This binary publishes `asset_checksum` (the sim hash of each relevant `AssetId`, in `AssetId` order) and the resident-set byte count on `asset_metrics`, so that view can read them.
+
+Scenes are loaded through `genos-scene`, the same files `genos-stress --scene` already accepts. Today those files are `examples/stress/scenes/` and `examples/camera/scene.rhai`. When `debug/scenes/` exists, the files move once and this binary loads that directory. It does not keep a second copy of `room.rhai`.
+
+The scaffolding:
+
+- A scene picker at launch, and a hotkey that switches scenes.
+- Checkpoints `room_hall`, `room_far` (the camera far enough that page priority drops the near pages), and `fracture`.
+- `reset` and `key_r` restore the start: an empty resident set, the scene's starting relevancy, and the default knobs. `key_r` is bound on a debug action map in this binary. It is not added to `character_controller()`.
+- A script runs from frame 0 on a fixed step. The metrics JSON is a function of the scene, the profile, and the frame count.
+- `capture` and `--shot PATH` write a PNG through `genos_debug::png::write_png`. `--metrics PATH` writes the JSON.
+- Live knobs: `cache_budget` (page bytes), `profile` (`sim`, `render`, `listen`), `force_evict` (one `AssetId`, or the oldest page), `relevancy_hold` (frames).
+- The overlay (`Tools::overlay`) lists the failure modes and the probe that exposes each one.
+- Headless drive over the CLI and over MCP.
+
+Commands this binary adds, beside the catalogue's `status`, `time`, `step`, `wait`, `knobs`, `view`, `capture`, and `quit`:
+
+| Command | What it returns |
+|---|---|
+| `scene` | Load one scene file. Returns the `AssetId`s it references. |
+| `reset` | The start state above. |
+| `asset_metrics` | Cache objects, sim subsets loaded, render subsets loaded, pages resident, pages missing, bytes uploaded since the last frame, evictions, `evicted_relevant`, hash mismatches, unsupported notes, `asset_checksum`, resident bytes. |
+| `asset_dump` | One `AssetId`: source hash, subset hashes, profile, byte sizes, resident pages, notes, and `error` when the load failed. |
+| `asset_notes` | `SupportNote` rows (`Used` or `LoadedUnsupported`) for one asset or the whole set. |
+| `resident_set` | Page ids and the byte total. |
+| `relevancy` | `AssetId`s in interest, and the hold list. |
+| `asset_snapshot` | The resident set and the relevancy set, as JSON. |
+| `asset_restore` | Put that JSON back, so a failure can be repeated. |
+
+View modes, selected with `view`: `meshlet` (meshlet id), `residency` (resident and missing pages), `placeholder` (bounds or the collision mesh where the render subset is absent). `albedo` and `depth` stay the modes `debug_view.rs` already has. `--headless` selects `LoadProfile::Sim` and does not create a device.
+
+| Failure | Probe |
+|---|---|
+| A subset the snapshot named is absent locally | `asset_metrics` field `missing`. `asset_dump` names the subset. |
+| The local sim hash differs from the snapshot | `asset_metrics` field `hash_mismatch`. `asset_dump` shows both hashes. |
+| A truncated file | `asset_dump` state `error` with `LoadError::Truncated`. |
+| A feature the draw does not use | `asset_notes` state `LoadedUnsupported`. |
+| A page evicted while its `AssetId` is still relevant | `asset_metrics` field `evicted_relevant`. `resident_set` and `relevancy` together show the page and the set. |
+
+Headless:
+
+```sh
+genos-assets-view --headless --scene examples/stress/scenes/room.rhai --frames 8 --metrics target/assets-metrics.json
+genos-assets-view --script debug/assets/scripts/relevancy.rhai --report target/debug-reports/assets-relevancy
+```
+
+Exit code is 1 when a check fails. Script shorts match [Debugging](../debugging.md): `step(n)`, `shot(name)`, `knob(name, value)`, `check`, `require`.
 
 ## Shared scenes
 
@@ -226,7 +328,7 @@ There is no scene-library crate. The shared set is the stress host:
 - `examples/stress/scenes/room.rhai` is the one shared scene file today.
 - `examples/camera/scene.rhai` and `examples/camera/room.rhai` are the camera proof.
 
-New scenes go in `examples/stress/scenes/`. New checks go in `examples/stress/scripts/`. Do not add a windowed binary per feature. Headless proofs stay `cargo test -p genos-load` and `cargo test -p genos-cook`. The owner's GPU proof is:
+New scenes go in `examples/stress/scenes/` until `debug/scenes/` exists. New checks go in `examples/stress/scripts/` or in `debug/assets/scripts/`. Feature checks share the stress host and the assets binary. They do not add a binary per feature. Headless proofs stay `cargo test -p genos-load`, `cargo test -p genos-cook`, and `genos-assets-view --headless`. The owner's GPU proof on the stress host is:
 
 ```sh
 genos-stress --proof --no-panel --size 1280x720 \
@@ -247,6 +349,7 @@ genos-stress --proof --no-panel --size 1280x720 \
 | Streaming | `scenes/room.rhai` | `scripts/assets-stream.rhai` | Pages fill in as the camera walks. No stall line in `GPU_MS`. |
 | Hot reload | `scenes/room.rhai` | `scripts/assets-reload.rhai` | Replace the file on disk. The next settled frame shows it. |
 | Fracture chunks | `scenes/fracture.rhai` | `scripts/fracture.rhai` | Chunks drawn as meshes. Bonds are a debug overlay. The physics step is unchanged. |
+| Relevancy and the server profile | `scenes/room.rhai` | `debug/assets/scripts/relevancy.rhai` | `genos-assets-view` in `placeholder`, then `residency`. Headless metrics show zero texture bytes. |
 
 ## Priority
 
@@ -263,8 +366,12 @@ genos-stress --proof --no-panel --size 1280x720 \
 11. Page table and cluster streaming on the CPU, then the GPU upload.
 12. Hot reload through the existing pool generation.
 13. Voronoi chunks and the bond graph.
+14. Sim and render subset hashes. The sim hash is the `.gfract` content hash.
+15. Relevancy gates the page request list. A headless server stays on `LoadProfile::Sim`.
+16. A placeholder while the render subset is absent.
+17. `debug/assets`, with the probes in the debug-binary section.
 
-Streaming and fracture wait until the document and the cook exist. They have nothing to stream or break before that.
+Streaming, fracture, the profiles, and the debug binary wait until the document and the cook exist. They have nothing to hash or show before that. Relevancy waits on the page table.
 
 ## Steps
 
@@ -448,13 +555,63 @@ Commit: `load: recook when the source hash changes`.
 
 Files: `crates/cook/src/fracture.rs`, `tests/cook.rs`, `examples/stress/scenes/fracture.rhai`, `examples/stress/scripts/fracture.rhai`.
 
-Given seeds inside the mesh bounds, cut the triangles into one mesh per Voronoi cell. Write a bond for every pair of chunks that share a boundary edge longer than a tolerance, with the rest area and a strength of 1. Each chunk is a mesh in the cook record and gets its own bake key through `load_or_bake`. Do not call `genos_physics::step`. Do not raise `MAX_MESH_PIECES`.
+Given seeds inside the mesh bounds, cut the triangles into one mesh per Voronoi cell. Write a bond for every pair of chunks that share a boundary edge longer than a tolerance, with the rest area and a strength of 1. Store that strength as the bond health in the `.gfract` version 1 payload from the pre-fractured section. Each chunk is a mesh in the cook record and gets its own bake key through `load_or_bake`. Those bake keys stay on the render subset. Do not call `genos_physics::step`. Do not raise `MAX_MESH_PIECES`. The chunk collision and the bond graph are the sim-subset bytes step 19 hashes.
 
 Test: a unit cube and 8 seeds at the octant centers produce 8 chunks. The bond graph connects face-adjacent octants and does not connect opposite octants. The sum of the chunk volumes is the cube volume within 1e-3. The source mesh is still in the import document.
 
 GPU proof, owner: `scenes/fracture.rhai` places the chunks in `room.rhai`'s hall. `scripts/fracture.rhai` captures albedo and depth. The chunks are separate objects. Lighting uses their SDFs because each chunk was baked.
 
 Commit: `cook: pre-fractured Voronoi chunks and a bond graph`.
+
+### Step 19: Load profiles and subset hashes
+
+Files: `crates/cook/src/profile.rs`, `tests/cook.rs`.
+
+`AssetId` is the source SHA-256 from step 3. `subset_hash(doc, Sim)` hashes the canonical sim bytes (version `1`, little-endian bounds, collision, and the `.gfract` payload from step 18 when the cook has chunks). `subset_hash(doc, Render)` hashes meshlets, the platform block buffer, and the bake key. `missing_subsets(id, profile)` lists the names whose hash is absent from a local map the test fills. `LoadProfile::Sim` reports a texture byte length of 0. Two cooks of the same source share the sim hash. A BC7 record and an ASTC record share the sim hash and differ in the render hash.
+
+Test: `cargo test -p genos-cook --test cook profiles`. The cube fixture's sim hash is stable across two calls. After the test inserts the sim hash into the local map, `missing_subsets` for `Sim` is empty and for `Render` still names the render subset.
+
+Commit: `cook: sim and render subsets share one source hash`.
+
+### Step 20: Relevancy gates residency
+
+Files: `crates/cook/src/residency.rs`, `tests/cook.rs`.
+
+`set_relevant(asset_ids)` is the interest projection the session passes in. The page request list is the step 15 camera order, restricted to those ids. A page outside the set is omitted while the camera can see its bounds. An id that leaves the set stays for `relevancy_hold` frames and then is an eviction candidate. The function stores no `NetId` and opens no socket. A `Sim` call returns the sim-subset request and an empty page list.
+
+Test: `cargo test -p genos-cook --test cook relevancy`. Two assets in front of the camera, one id in the set. Only that asset's pages are requested. After the hold expires, a second call drops the id that left. The same camera and the same set request nothing on the next call.
+
+Commit: `cook: residency follows the relevancy set`.
+
+### Step 21: Placeholder while the render subset is missing
+
+Files: `crates/cook/src/profile.rs`, `tests/cook.rs`.
+
+`visible_lod(asset)` returns `Placeholder` when the sim subset is present and the render subset is absent, and `Meshlets` when the render hash is local. The placeholder draw is the collision mesh. With neither subset local, the draw is the bounds. No device is opened and nothing is read back.
+
+Test: `cargo test -p genos-cook --test cook placeholder`.
+
+GPU proof, owner: `debug/assets/scripts/relevancy.rhai` starts with an empty render subset, captures `placeholder`, marks the render hash resident, and captures `residency`. The first image is the collision shape. The second shows pages. The script records both. An agent does not run it.
+
+Commit: `cook: a missing render subset stays a placeholder`.
+
+### Step 22: Assets debug binary
+
+Files: `debug/assets/Cargo.toml`, `debug/assets/src/main.rs`, `debug/assets/src/lib.rs`, `debug/assets/scripts/relevancy.rhai`, `crates/debug/src/commands.rs`. Add the member to the workspace `Cargo.toml`. Document the binary in `docs/systems/debugging.md` in this commit.
+
+The commands, knobs, views, and failure probes are the debug-binary section. `--headless` loads `LoadProfile::Sim` and writes metrics JSON. It does not open a window. The windowed path depends on `genos-window`, `genos-render`, and `genos-ui`. The headless path depends on `genos-load`, `genos-cook`, `genos-debug`, and `genos-scene`.
+
+Test: `cargo test -p genos-assets-view`. `metrics_for(LoadProfile::Sim, cube fixture)` reports one asset, texture bytes 0, and the same sim hash on a second call. A relevant page marked evicted sets `evicted_relevant`. A truncated byte source sets `error` to truncated. A skin note from step 1 is `LoadedUnsupported`.
+
+GPU proof, owner:
+
+```sh
+genos-assets-view --scene examples/stress/scenes/room.rhai \
+  --script debug/assets/scripts/relevancy.rhai \
+  --report target/debug-reports/assets-relevancy
+```
+
+Commit: `debug: assets binary reports hashes, residency, and relevancy`.
 
 ## Later runtime work this plan does not do
 
@@ -465,3 +622,4 @@ These stay `loaded, unsupported` until a runtime commit moves them. They are lis
 - Decoding Opus, MP3, FLAC, or video into the mixer.
 - A USDC crate reader.
 - Drawing the bond graph as a break. That is the physics plan, reading this cook record.
+- Sending subset bytes on a socket. `missing_subsets` is the list. The session in the core-networking plan sends it.
