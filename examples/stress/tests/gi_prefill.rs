@@ -49,7 +49,7 @@ struct Fine {
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| v.parse::<u64>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(default)
 }
@@ -57,7 +57,7 @@ fn env_u64(name: &str, default: u64) -> u64 {
 fn env_f32(name: &str, default: f32) -> f32 {
     std::env::var(name)
         .ok()
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| v.parse::<f32>().ok())
         .filter(|n| n.is_finite() && *n > 0.0)
         .unwrap_or(default)
 }
@@ -65,7 +65,7 @@ fn env_f32(name: &str, default: f32) -> f32 {
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(default)
 }
