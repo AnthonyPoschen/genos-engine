@@ -167,18 +167,11 @@ fn the_panel_press_selects_the_next_picture() {
     let off_ui = draw_overlay(&mut window, &mut renderer, &world, &camera, &overlay);
     renderer.set_antialias(Antialias::from_picture(PictureMode::Fxaa.code()));
     let fxaa_ui = draw_overlay(&mut window, &mut renderer, &world, &camera, &overlay);
-    renderer.set_antialias(Antialias::from_picture(PictureMode::Ssaa.code()));
-    let ssaa_ui = draw_overlay(&mut window, &mut renderer, &world, &camera, &overlay);
     let off_panel = rect_bytes(&off_ui, width, panel);
     assert_eq!(
         rect_bytes(&fxaa_ui, width, panel),
         off_panel,
         "FXAA changed the panel"
-    );
-    assert_eq!(
-        rect_bytes(&ssaa_ui, width, panel),
-        off_panel,
-        "SSAA changed the panel"
     );
     assert!(
         off_panel.iter().any(|byte| *byte != 0),

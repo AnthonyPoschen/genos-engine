@@ -6,7 +6,7 @@ Genos Engine has two programs. The runtime runs a game on Linux, Windows, and ma
 
 Engine code makes each native call to the operating system or to Vulkan. A third-party crate does not own the window, the input, the renderer, the audio, or the network. The Rust standard library stays. See [ADR 0007](adr/0007-native-calls-go-to-the-system-and-vulkan.md).
 
-The first proof uses the window, the input, Vulkan, Rhai, and radiance cascades. Audio follows the same rule. The agent endpoint uses loopback sockets in this repository. Gameplay networking waits.
+The first proof uses the window, the input, Vulkan, Rhai, and the lighting pass. Audio follows the same rule. The agent endpoint uses loopback sockets in this repository. Gameplay networking waits.
 
 ## First proof
 
@@ -91,7 +91,7 @@ A world holds fixed parts, meshes with a pose, particles, and shader draws. A sh
 
 ## Lighting
 
-Lighting is a renderer pass. It uses radiance cascades. Probe spacing is finer beside the player than at the far side of the floor. Far and world ranges keep fewer positions and more directions. World probes sit in the world, past those ranges, and carry material-colored light into empty rays. The engine keeps the field until the player, a light, or an occluder changes. See [Lighting](lighting.md) and [ADR 0008](adr/0008-lighting-uses-radiance-cascades.md).
+Lighting is a renderer pass: a G-buffer, direct light with traced shadows over mesh SDFs, a world-anchored surface cache and screen probes, composed per pixel. Its data stays on the GPU between frames; the CPU uploads small deltas. See [Lighting](systems/lighting.md) and [ADR 0012](adr/0012-gi-v2.md). (The radiance cascades of ADR 0008 were removed on 2026-10-12.)
 
 ## Reference
 

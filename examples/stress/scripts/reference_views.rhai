@@ -5,7 +5,6 @@
 time(#{ pause: true });
 knob("sun", "freeze");
 knob("time_of_day", 12.0);
-lighting(#{ tier_ms: 20.0 });
 
 let views = [
     ["hall", #{ position: [14.5, 1.7, 23.5], yaw: -0.3554, pitch: 0.08 }],

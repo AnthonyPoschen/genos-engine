@@ -294,7 +294,7 @@ const uint GI2_SC_SUN_AT = 7u * GI2_CACHE_SLOTS;
 // separate (G-buffer w, every frame); the cache holds the gathered light, which
 // for sun and sky scales with them. Once a round the cache pass logs the global
 // light (each sun's height times its brightest channel, plus the sky's: as
-// probe_tier.rs up_light) against the frame (a ring, GI2_LS_RING rounds); a
+// the old v1 up_light) against the frame (a ring, GI2_LS_RING rounds); a
 // texel or WRC cell is shown, and its history carried, times
 // (now + eps) / (then + eps), "then" being its last relight. An intensity change
 // is instant everywhere, read or not; only the bounce's shape converges by rays

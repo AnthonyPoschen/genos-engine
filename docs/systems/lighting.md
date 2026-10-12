@@ -2,7 +2,7 @@
 
 How GI v2, the lighting engine, works: direct light, shadows, global illumination, the reference it is checked against, and the checks. Each component lists our method, the published method it compares to (Lumen and papers, with links), how and why ours differs, current scores and open issues. The plan and budgets are in [GI v2 design](gi-v2-design.md); the gate is in [Debugging](debugging.md). Update this file whenever a method changes, in the same commit as the code.
 
-Scores are gi-check numbers (linear luminance, share of the light) against the GPU path-traced references, at the commit named in each section. "P6" is the probe path (6ce7fd4: screen probes, light cache in push mode, `GENOS_GI2_WORLD=0`); it was the gi-v2 default until S54K. Default now (no env, S54K): GI v2 with the surface cache, `GENOS_GI2_WORLD=3`, `GENOS_GI2_WORLD_CAP=64`, `GENOS_GI2_SC_FLAGS=6007050`, `GENOS_GI2_SC_LOCAL=1`; P6 back with `GENOS_GI2_WORLD=0`, GI v1 with `GENOS_GI=v1`. "SC" is the surface cache (`GENOS_GI2_WORLD=3`, branch `surface-cache`, flags in `GENOS_GI2_SC_FLAGS`).
+Scores are gi-check numbers (linear luminance, share of the light) against the GPU path-traced references, at the commit named in each section. "P6" is the probe path (6ce7fd4: screen probes, light cache in push mode, `GENOS_GI2_WORLD=0`); it was the gi-v2 default until S54K. Default now (no env, S54K): GI v2 with the surface cache, `GENOS_GI2_WORLD=3`, `GENOS_GI2_WORLD_CAP=64`, `GENOS_GI2_SC_FLAGS=6007050`, `GENOS_GI2_SC_LOCAL=1`; P6 back with `GENOS_GI2_WORLD=0`. GI v1 was removed on 2026-10-12 and there is no lighting-selection switch: plain `make stress` / `make run` run this lighting with the tuned defaults (see "GI v1 removed" below). "SC" is the surface cache (`GENOS_GI2_WORLD=3`, branch `surface-cache`, flags in `GENOS_GI2_SC_FLAGS`).
 
 ## Sources
 
@@ -154,6 +154,22 @@ One frame, passes in order (`crates/render/src/gi2_gpu.rs`, shaders `gi2_*.comp`
 - **Ours:** `genos-stress gi-check` (see [Debugging](debugging.md)): settled views against references (mean, bias, blob, contact, open wall), moving views, repro, camera, trail, flick (moving flicker and still shimmer), turn (arrival, onset, held, return), room (world swim, 48 px swim, grid redraw, blotch, structure, close-up, end), mix, spin, lampret (lights move and return; end against the soaked baseline, limit 0.002). approach (S56: run 9 m at 5 m/s up to a lit wall in the hall across the texel bands; grain of each moving frame against its pose settled, metrics::blotch at 2 px, limit 0.0056; onset 0.0045; frames held until the grain is under 0.003, limit 120; soaked end against the end pose settled fresh, blob limit 0.016; limits provisional, from S56B with ba9adca0 failing grain and end). Window titles name the run, GI mode, flags and test, plus REF while a reference renders. `GENOS_GI2_SC_TRACE=1` prints the surface cache's claims, restarts, frees and relights per readback.
 - **Reference:** Lumen is checked visually against the path tracer; we gate numerically.
 - **Open:** the still shimmer row (frame to frame, 60 frames) reads 0 for every build; the drift Anthony sees is slower than 60 frames at 8-bit, so a longer-window row (first vs last of ~600 still frames) is next.
+
+## GI v1 removed (2026-10-12)
+
+GI v1 (radiance cascades, the world probe tier, `stage_tier`, the v1 `kick_light` paths, `light.comp`, `scene.frag`, `tier.glsl`, `ssaa.comp`, `lighting.rs`, `probes.rs`, `probe_tier.rs`, `field.rs`, `shadow.rs`, their tests and bench columns, and the `GENOS_GI` switch and stress `gi` knob) is gone. Removed with it: SSAA (it drew through the v1 fragment shader; panel code 2 now means FXAA), the live-readback switch, `TierStats` (replaced by `SettleStats { settled, still_frames }` from `Renderer::settle_stats()`), and the debug views that showed v1 data (cascade, probes, light field). Debug views now: full, direct, bounce, albedo, normal, depth, light, texels.
+
+Historical v1 numbers (for comparison only; v1 cannot be run any more). Full tables in [GI v2 baseline](gi-v2-baseline.md) (master `0874229d`, tag `gi-v2-baseline`, zanven-pc, RTX 4070, 2026-10-10):
+
+| v1 check (320x180, CPU reference) | mean_rel | bias |
+|---|---|---|
+| hall | 0.043 | +0.001 |
+| room-a | 0.198 | +0.107 |
+| doorway | 0.040 | +0.016 |
+| corner | 0.272 | +0.272 |
+| noon / night | 0.055 / 0.058 | -0.026 / +0.049 |
+
+v1 flicker gate (worst frozen max_delta, limit 0.004): 0.046 FAIL (hall). v1 light settle after a lamp colour change: 92 frames. The gi-check v1 comparison columns are dropped; their last values are in SUMMARY.md (work log) under the S5x/S6x rows.
 
 ## Fault ledger (short; the full ledger with first-seen points is in the work log SUMMARY.md)
 

@@ -254,18 +254,11 @@ fn run() -> Result<(), String> {
     let mut drag_origin: Option<Duration> = None;
     let boot = Instant::now();
     let mut wireframe = false;
-    let mut cascade_view = [false; 3];
     let mut frame_clock: Option<Instant> = None;
     let mut bench = Bench::from_env(&world.scene, bench_camera)?;
     if let Some(dir) = bench.as_ref().and_then(|bench| bench.shots.as_ref()) {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("GENOS_BENCH_SHOTS {}: {e}", dir.display()))?;
-    }
-    if bench.is_some() {
-        // A bench reads the picture as it is drawn (shots, the flicker phase): a
-        // readback that settled the light would measure the settled field, not what
-        // a moving lamp shows, and would run every build due inside the frame.
-        renderer.set_live_readback(true);
     }
     loop {
         let now = Instant::now();
@@ -335,7 +328,6 @@ fn run() -> Result<(), String> {
         }
         let view = host.camera();
         wireframe = toggle_wireframe(wireframe, &input, view.captured);
-        cascade_view = toggle_cascade_view(cascade_view, &input);
         let lamp = world
             .scene
             .lights
@@ -478,7 +470,7 @@ fn run() -> Result<(), String> {
         let sim_cpu = sim_at.elapsed();
         let draw_camera = match bench.as_mut() {
             Some(bench) => {
-                if bench.step(&mut world.scene, renderer.tier_stats(), now) {
+                if bench.step(&mut world.scene, renderer.settle_stats(), now) {
                     break;
                 }
                 bench.camera.clone()
@@ -486,7 +478,6 @@ fn run() -> Result<(), String> {
             None => draw_camera,
         };
         // gpu draw/present
-        renderer.set_cascade_view(&world.scene, &draw_camera, cascade_view);
         let shot = bench.as_ref().and_then(|bench| {
             let name = bench.shot.as_ref()?;
             Some(bench.shots.as_ref()?.join(name))
@@ -494,9 +485,6 @@ fn run() -> Result<(), String> {
         let flicker_frame = bench.as_mut().is_some_and(|bench| bench.wants_frame(now));
         // A live client's /shot.png or take_screenshot (genos-mcp) waits for this frame.
         let live_shot = genos_mcp::take_shot_request();
-        if live_shot {
-            renderer.set_live_readback(true);
-        }
         let want_read = readback.is_some() || shot.is_some() || flicker_frame || live_shot;
         if bench.is_some() {
             // The panel and the live graph are not the scene: a bench draws without them.
@@ -512,16 +500,12 @@ fn run() -> Result<(), String> {
                 renderer.draw_with_overlay(&world, &draw_camera, &overlay, want_read, wireframe)?;
             (pixels, None)
         };
-        let stats = renderer.tier_stats();
+        let stats = renderer.settle_stats();
         genos_mcp::publish_lighting(&format!(
-            "stable: {}\npending: {}\nbricks: {}\nfilled: {}\nchanging: {}\nseen: {}\nseen_settled: {}\n",
-            stats.pending_bricks == 0 && stats.changing_bricks == 0,
-            stats.pending_bricks,
-            stats.bricks,
-            stats.filled_bricks,
-            stats.changing_bricks,
-            stats.seen_bricks,
-            stats.seen_settled,
+            "stable: {}\nstill_frames: {}\npicture_settled: {}\n",
+            stats.settled,
+            stats.still_frames,
+            renderer.picture_settled(),
         ));
         let draw_cpu = timing
             .map(|timing| timing.cpu)
@@ -630,12 +614,7 @@ fn run() -> Result<(), String> {
         }
     }
     if let Some(bench) = bench {
-        bench.report(
-            renderer.width(),
-            renderer.height(),
-            renderer.antialias(),
-            renderer.tier_weights(),
-        );
+        bench.report(renderer.width(), renderer.height(), renderer.antialias());
     }
     println!("genos-camera frames={drawn}");
     Ok(())
@@ -644,8 +623,8 @@ fn run() -> Result<(), String> {
 /// `GENOS_BENCH=<seconds>`: an unattended benchmark. The camera stays where it starts
 /// (the opening view, or `--eye`/`--pitch`); input is ignored. After a short warm-up the scene stands still for a third
 /// of the time, then the first lamp circles the boxes for a third, then it drops to
-/// beside the boxes and rises back (the settling clip), each time until the tier has
-/// no work left. Then the lamp orbits for the flicker phase, and the red box (or the
+/// beside the boxes and rises back (the settling clip), each time until the lighting
+/// has settled. Then the lamp orbits for the flicker phase, and the red box (or the
 /// first solid) is dragged across the floor: `Drag` times the frames while it moves,
 /// `Rest` how long its light takes to settle once it stops, and `DragFlicker` reads
 /// back every frame as it moves a fixed step a frame. Last, `Switch` moves every solid
@@ -660,21 +639,12 @@ struct Bench {
     home: Vec3,
     last: Option<Instant>,
     frames: Vec<f32>,
-    /// When a drop or a rise had taken all its change passes: the visible change.
-    visible: Option<Duration>,
-    /// When no brick on screen was still changing (its passes issued), the most bricks
-    /// on screen a batch took at once, and the slowest batch pick in microseconds.
-    view: Option<Duration>,
-    critical: usize,
-    batch_us: u32,
     lines: Vec<String>,
     /// `GENOS_BENCH_SHOTS=<dir>`: live pictures at fixed times into each drop and rise.
     shots: Option<PathBuf>,
     /// The next of `BENCH_SHOT_MS` to take, and the name of the picture due this frame.
     next_shot: usize,
     shot: Option<String>,
-    /// The tier as of the last frame: bricks in it, and those still changing or due.
-    tier: genos_render::TierStats,
     flicker: Flicker,
     /// The solid the drag phases move, and where it started.
     drag: Option<(usize, Vec3)>,
@@ -924,15 +894,10 @@ impl Bench {
             home: scene.lights[0].position,
             last: None,
             frames: Vec::new(),
-            visible: None,
-            view: None,
-            critical: 0,
-            batch_us: 0,
             lines: Vec::new(),
             shots: std::env::var_os("GENOS_BENCH_SHOTS").map(PathBuf::from),
             next_shot: 0,
             shot: None,
-            tier: genos_render::TierStats::default(),
             flicker: Flicker {
                 frames: flicker_frames,
                 ..Flicker::default()
@@ -948,9 +913,8 @@ impl Bench {
     }
 
     /// Set the lamp for this frame and record the last frame's time. True when done.
-    fn step(&mut self, scene: &mut Scene, tier: genos_render::TierStats, now: Instant) -> bool {
-        let pending = tier.pending_bricks;
-        self.tier = tier;
+    fn step(&mut self, scene: &mut Scene, stats: genos_render::SettleStats, now: Instant) -> bool {
+        let pending = usize::from(!stats.settled);
         if let Some(last) = self.last {
             self.frames.push((now - last).as_secs_f32() * 1000.0);
         }
@@ -985,16 +949,6 @@ impl Bench {
             self.phase,
             BenchPhase::Down | BenchPhase::Up | BenchPhase::Rest | BenchPhase::Switch
         );
-        if settle && self.frames.len() > 1 && tier.changing_bricks == 0 && self.visible.is_none() {
-            self.visible = Some(elapsed);
-        }
-        if settle {
-            self.critical = self.critical.max(tier.critical_bricks);
-            self.batch_us = self.batch_us.max(tier.batch_us);
-            if self.frames.len() > 1 && tier.critical_bricks == 0 && self.view.is_none() {
-                self.view = Some(elapsed);
-            }
-        }
         let done = next.is_some() && (!settle || self.frames.len() > 1);
         if done {
             if self.phase != BenchPhase::Warmup {
@@ -1015,10 +969,6 @@ impl Bench {
             }
             self.phase_start = now;
             self.frames.clear();
-            self.visible = None;
-            self.view = None;
-            self.critical = 0;
-            self.batch_us = 0;
             self.next_shot = 0;
             self.converge = Converge::default();
             if self.phase == BenchPhase::DragFlicker && self.drag_flicker.frames == 0 {
@@ -1116,19 +1066,10 @@ impl Bench {
             self.phase,
             BenchPhase::Down | BenchPhase::Up | BenchPhase::Rest | BenchPhase::Switch
         ) {
-            let visible = self.visible.map_or(-1.0, |v| v.as_secs_f32() * 1000.0);
-            let view = self.view.map_or(-1.0, |v| v.as_secs_f32() * 1000.0);
             line.push_str(&format!(
-                " view_ms={view:.0} critical={} batch_us={}",
-                self.critical, self.batch_us
-            ));
-            line.push_str(&format!(
-                " visible_ms={visible:.0} settle_ms={:.0} settled={} bricks={} changing={} pending={}",
+                " settle_ms={:.0} settled={}",
                 elapsed.as_secs_f32() * 1000.0,
                 pending == 0,
-                self.tier.bricks,
-                self.tier.changing_bricks,
-                pending,
             ));
         }
         if self.phase == BenchPhase::Flicker {
@@ -1144,15 +1085,8 @@ impl Bench {
         self.lines.push(line);
     }
 
-    fn report(
-        &self,
-        width: u32,
-        height: u32,
-        antialias: Antialias,
-        weights: genos_render::TierWeights,
-    ) {
+    fn report(&self, width: u32, height: u32, antialias: Antialias) {
         println!("BENCH size={width}x{height} antialias={antialias:?}");
-        println!("BENCH tier_weights {weights}");
         for line in &self.lines {
             println!("{line}");
         }
@@ -1314,25 +1248,6 @@ fn toggle_wireframe(on: bool, input: &InputSystem, pointer_captured: bool) -> bo
     on
 }
 
-/// Control plus 2, 3, or 4 toggles one cascade layer. 2 is near, 3 is far, 4 is world.
-fn toggle_cascade_view(mut show: [bool; 3], input: &InputSystem) -> [bool; 3] {
-    let control = input.keyboard.down(InputCode::key_control_left)
-        || input.keyboard.down(InputCode::key_control_right);
-    if !control {
-        return show;
-    }
-    let digits = [InputCode::key_2, InputCode::key_3, InputCode::key_4];
-    let control_rising = input.keyboard.pressed(InputCode::key_control_left)
-        || input.keyboard.pressed(InputCode::key_control_right);
-    for (index, digit) in digits.iter().enumerate() {
-        let rising = input.keyboard.pressed(*digit) || control_rising;
-        if input.keyboard.down(*digit) && rising {
-            show[index] = !show[index];
-        }
-    }
-    show
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1375,8 +1290,7 @@ mod tests {
     use genos_ui::{FrameSample, OpenFrame, ProfileGraph, STAGE_COUNT};
 
     use super::{
-        hold_ready_frames, parse_profile_mode, toggle_cascade_view, toggle_wireframe,
-        PendingProfile, ProfileMode,
+        hold_ready_frames, parse_profile_mode, toggle_wireframe, PendingProfile, ProfileMode,
     };
 
     const EVDEV_DIGIT_1: usize = 2;
@@ -1504,28 +1418,5 @@ mod tests {
             on,
             "the chord did not turn wireframe on again while captured"
         );
-    }
-
-    #[test]
-    fn control_and_2_toggles_the_near_cascade_only() {
-        let mut input = InputSystem::new();
-        let mut keys = [0u8; 256];
-        let mut show = [false; 3];
-        input.begin_frame();
-        input.apply_evdev_keys(&keys);
-        keys[3] = 1;
-        input.begin_frame();
-        input.apply_evdev_keys(&keys);
-        show = toggle_cascade_view(show, &input);
-        assert_eq!(show, [false, false, false]);
-        keys[EVDEV_CONTROL_LEFT] = 1;
-        input.begin_frame();
-        input.apply_evdev_keys(&keys);
-        show = toggle_cascade_view(show, &input);
-        assert_eq!(show, [true, false, false]);
-        input.begin_frame();
-        input.apply_evdev_keys(&keys);
-        show = toggle_cascade_view(show, &input);
-        assert_eq!(show, [true, false, false]);
     }
 }

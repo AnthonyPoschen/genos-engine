@@ -128,15 +128,15 @@ _Avoid_: Genos Engine, the runtime
 The light that reaches a surface from an emitter or from another surface.
 _Avoid_: Shader, material
 
-**Radiance field**:
+**Radiance field** (historical, GI v1):
 The light traveling through the scene, split into distance ranges.
 _Avoid_: Lightmap, g-buffer
 
-**Radiance cascade**:
+**Radiance cascade** (historical, GI v1, removed 2026-10-12):
 One distance range of the radiance field. A near cascade stores more positions, and a far cascade stores more directions.
 _Avoid_: Cascade shadow map, lightmap
 
-**World probe**:
+**World probe** (historical, GI v1):
 A coarse probe in the world, past the nearer cascades. It carries material-colored light those ranges miss.
 _Avoid_: Light probe, reflection probe, lightmap
 

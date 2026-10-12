@@ -39,7 +39,7 @@ struct Report {
 }
 
 /// Commands that change what the picture shows; `trace` captures after each.
-const CHANGES: [&str; 10] = [
+const CHANGES: [&str; 9] = [
     "light",
     "object",
     "camera",
@@ -49,7 +49,6 @@ const CHANGES: [&str; 10] = [
     "wait_settled",
     "view",
     "knobs",
-    "lighting",
 ];
 
 /// Run the script on a new thread. When it ends it writes the report and asks the

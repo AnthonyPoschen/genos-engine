@@ -16,17 +16,17 @@ pub const STEP_DT: f32 = 1.0 / 60.0;
 const MAX_SLOTS: usize = 40;
 const SEED: u32 = 0xA341_316C;
 
-/// XZ falloff of the fog in-scatter fire term. `shaders/scene.frag` uses the same number.
+/// XZ falloff of the fog in-scatter fire term.
 pub const FIRE_XZ_FALLOFF: f32 = 0.65;
-/// Vertical falloff of the CPU fire helper. The GPU flame is a cascade lamp.
+/// Vertical falloff of the CPU fire helper. The GPU flame is a scene lamp.
 pub const FIRE_Y_FALLOFF: f32 = 0.08;
 /// A small fire lights a few meters of floor when the scene lamp is off.
 pub const FIRE_STRENGTH: f32 = 1.7;
 pub const FIRE_COLOR: [f32; 3] = [1.0, 0.36, 0.06];
-/// Extinction coefficient. `shaders/scene.frag` uses this density on each puff.
+/// Extinction coefficient of each puff.
 pub const SMOKE_DENSITY: f32 = 1.7;
 pub const SMOKE_RADIUS: f32 = 0.42;
-/// Gray single-scatter albedo. `shaders/scene.frag` uses the same value.
+/// Gray single-scatter albedo.
 pub const SMOKE_ALBEDO: f32 = 0.62;
 pub const FIELD_SCATTER: f32 = 0.35;
 pub const LAMP_FALLOFF: f32 = 0.08;
@@ -825,8 +825,8 @@ pub fn fire_radiance(xz: [f32; 2], fire: FireLight) -> [f32; 3] {
 
 /// Optical depth and single-scatter light along one view ray.
 ///
-/// `shaders/scene.frag` integrates the same chord, the same extinction, and the same
-/// lamp, fire, and field terms. Empty puffs leave the ray clear.
+/// Integrates the chord with the puff extinction and the lamp and fire terms.
+/// Empty puffs leave the ray clear.
 pub fn fog_along(
     eye: [f32; 3],
     dir: [f32; 3],

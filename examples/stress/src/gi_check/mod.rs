@@ -319,8 +319,6 @@ struct Options {
     size: String,
     walk_size: String,
     settled_refs: Option<PathBuf>,
-    /// GI v2 (default) or v1, for checking the tool on the old path.
-    v2: bool,
     /// Views to render (all five when empty).
     views: String,
     /// Camera run: settle at every stride-th pose.
@@ -344,7 +342,6 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
         size: "640x360".into(),
         walk_size: "1280x720".into(),
         settled_refs: None,
-        v2: true,
         views: String::new(),
         stride: 1,
         clip: 0,
@@ -370,13 +367,6 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
             "--fail-fast" => o.fail_fast = true,
             "--tier" => tier(&mut o, &value()?)?,
             "--keep-going" => keep_going = true,
-            "--gi" => {
-                o.v2 = match value()?.as_str() {
-                    "v1" => false,
-                    "v2" => true,
-                    other => return Err(format!("gi-check: --gi v1 or v2, not {other}")),
-                }
-            }
             "-h" | "--help" => {
                 println!("{}", HELP);
                 return Ok(());
@@ -448,8 +438,8 @@ fn tier(o: &mut Options, name: &str) -> Result<(), String> {
 
 const HELP: &str = "genos-stress gi-check [--tier quick|mid|full] [--out DIR] [--only repro,settled,moving,walk,flicker,camera,trail,flick,turn,room,mix,spin,lampret,approach] \
 [--score-only] [--ref-noise 0.05] [--ref-spp 2048] [--ref-seconds 900] [--size 640x360] [--walk-size 1280x720] \
-[--settled-refs DIR] [--gi v2|v1] [--views corner,contact] [--stride 1] [--clip N] [--fail-fast] [--keep-going]
-Renders with GENOS_GI=v2 (or v1); GENOS_GI2_TILE defaults to the 1440p probe spacing (height / 90), references are \
+[--settled-refs DIR] [--views corner,contact] [--stride 1] [--clip N] [--fail-fast] [--keep-going]
+GENOS_GI2_TILE defaults to the 1440p probe spacing (height / 90), references are \
 cached in $GENOS_REFERENCE_CACHE (default target/reference-cache). Exit status 1 on a FAIL;
 a missed target (MISS: 48 px swim, light structure) is reported but does not fail.";
 
@@ -462,7 +452,6 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
             .replace("__MAXSPP__", &o.max_spp.to_string())
             .replace("__SECS__", &format!("{:?}", o.seconds))
             .replace("__ONLY__", &o.views)
-            .replace("__GI__", if o.v2 { "1.0" } else { "0.0" })
             .replace("__STRIDE__", &o.stride.max(1).to_string())
             .replace("__CLIP__", &o.clip.to_string())
             .replace("__DIR__", &dir.display().to_string())
@@ -510,13 +499,11 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
         .arg(&path)
         .arg("--report")
         .arg(&dir)
-        .env("GENOS_GI", if o.v2 { "v2" } else { "v1" })
         .env("GENOS_TITLE_TAG", {
             let var = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
             let id = exe.file_name().map_or("?".into(), |n| n.to_string_lossy().to_string());
             format!(
-                "{id} | GI {} | mode {} | flags {} | {run}",
-                if o.v2 { "v2" } else { "v1" },
+                "{id} | mode {} | flags {} | {run}",
                 var("GENOS_GI2_WORLD", "3"),
                 var("GENOS_GI2_SC_FLAGS", "6007050")
             )

@@ -8,8 +8,8 @@
 // (never less than the band, since a brick away from the surface stores nothing).
 //
 // Needs SceneHit and SCENE_LAMBERT declared first (scene_rays.glsl has them).
-// Include it only in the small GI v2 passes, never in scene.frag or light.comp:
-// inlined at their many trace sites it stalled the NVIDIA compiler (4070, over 4
+// Include it only in the small GI v2 passes, never in a shader with many trace
+// sites: inlined at the old v1 light shaders' many trace sites it stalled the NVIDIA compiler (4070, over 4
 // minutes at pipeline creation) and ran lavapipe out of memory.
 //
 // Loops run over data bounds (instance count and step cap from the header) with

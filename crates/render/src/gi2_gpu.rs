@@ -15,8 +15,8 @@
 //   compose  direct + probe irradiance per pixel, tone curve, dither
 //
 // The result goes back into the colour image, so anti-aliasing, overlays, readback
-// and present work as before. The old path (scene.frag, light.comp) is untouched and
-// is what runs with GI v2 off: `GENOS_GI=v2` at start, or `Renderer::set_gi_v2`.
+// and present work as before. This is the only lighting: the radiance cascades and
+// the world probe tier it replaced are gone (docs/systems/lighting.md).
 
 /// Screen probe tile edge in pixels (Medium and above in the design).
 /// Screen probe tile at 720p and up, pixels (Lumen's size).
@@ -60,7 +60,6 @@ const GI2_SETTLE_FRAMES: u32 = 32;
 const GI2_SETTLE_CHANGE: u32 = 2000;
 
 pub(crate) struct Gi2 {
-    pub(crate) on: bool,
     ready: bool,
     desc_layout: Handle,
     layout: Handle,
@@ -160,10 +159,18 @@ pub(crate) struct Gi2 {
     stats_round: [bool; 2],
 }
 
+/// Whether the lighting has settled: the scene (camera included) has held still
+/// long enough and the light cache has stopped changing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SettleStats {
+    pub settled: bool,
+    /// Frames in a row the scene has not changed.
+    pub still_frames: u32,
+}
+
 impl Default for Gi2 {
     fn default() -> Self {
         Self {
-            on: gi2_env_on(),
             ready: false,
             desc_layout: std::ptr::null_mut(),
             layout: std::ptr::null_mut(),
@@ -258,65 +265,6 @@ impl Gpu {
     fn note_pipeline_time(&mut self, name: &str, start: Instant) {
         self.pipeline_times
             .push((name.to_string(), start.elapsed()));
-    }
-
-    /// Turn GI v2 on or off. The first time on builds its pipelines and buffers.
-    /// While on, the current lighting's probe fields shrink to a placeholder (about
-    /// 80 MB back); switching off rebuilds them empty, and the caller resets the tier
-    /// so the current lighting relearns its light.
-    pub(crate) fn set_gi2(&mut self, on: bool) -> Result<(), String> {
-        if on == self.gi2.on && (!on || self.gi2.ready) {
-            return Ok(());
-        }
-        unsafe {
-            (self.fns.device_wait)(self.device);
-        }
-        self.gi2.on = on;
-        if on && !self.gi2.ready {
-            self.make_gi2()?;
-            self.make_gi2_targets()?;
-        }
-        self.size_v1_light(!on)
-    }
-
-    /// Full-size (current lighting runs) or placeholder (GI v2 runs) probe fields.
-    fn size_v1_light(&mut self, full: bool) -> Result<(), String> {
-        let field = if full {
-            crate::probe_tier::TIER_END as u64 * 16
-        } else {
-            256
-        };
-        let view = if full {
-            (crate::probe_tier::TIER_END - crate::probe_tier::TIER_PROBES) as u64 * 16
-        } else {
-            256
-        };
-        if self.light_field[0].size == field && self.tier_view.size == view {
-            return Ok(());
-        }
-        let share = self.light_families();
-        for index in 0..2 {
-            let mut old = std::mem::replace(&mut self.light_field[index], Buffer::empty());
-            self.destroy_buffer(&mut old);
-            self.light_field[index] =
-                self.make_buffer_queues(field, 0x20 | 0x1 | 0x2, Memory::Upload, &share)?;
-            self.write_buffer(&self.light_field[index], &vec![0u8; field as usize])?;
-        }
-        let mut old = std::mem::replace(&mut self.tier_view, Buffer::empty());
-        self.destroy_buffer(&mut old);
-        self.tier_view = self.make_buffer_queues(view, 0x20, Memory::Upload, &share)?;
-        self.write_buffer(&self.tier_view, &vec![0u8; view as usize])?;
-        // Nothing built into the old fields survives.
-        self.pending_light = None;
-        self.tier_batch = None;
-        self.tier_started = None;
-        self.light_busy = false;
-        self.light_building = false;
-        self.light_publish_flight = None;
-        self.read_plan.clear();
-        self.world_stale = true;
-        self.write_light_set(0)?;
-        self.write_light_set(1)
     }
 
     fn make_gi2(&mut self) -> Result<(), String> {
@@ -508,14 +456,14 @@ impl Gpu {
             next: *const c_void,
             flags: u32,
         }
-        if self.light_pool.is_null() {
+        if self.compute_pool.is_null() {
             self.gi2.async_on = false;
             return Ok(());
         }
         let alloc = AllocInfo {
             s_type: 40,
             next: std::ptr::null(),
-            pool: self.light_pool,
+            pool: self.compute_pool,
             level: 0,
             count: 1,
         };
@@ -678,8 +626,7 @@ impl Gpu {
         self.gi2.dims = [w, h, cols, rows];
         self.gi2.gbuf_clear = true;
         self.gi2.work_clear = true;
-        self.write_light_set(0)?;
-        self.write_light_set(1)?;
+        self.write_raster_sets()?;
         self.write_gi2_sets()
     }
 
@@ -769,7 +716,7 @@ impl Gpu {
 
     /// Settle state for the debug tools, in the tier's terms: one "brick", settled
     /// once the scene (camera included) has not changed for GI2_SETTLE_FRAMES.
-    fn gi2_stats(&self) -> crate::probe_tier::TierStats {
+    pub(crate) fn gi2_stats(&self) -> SettleStats {
         let sweep = self.gi2.live.div_ceil(GI2_CACHE_BATCH).max(1) + 1;
         // World cells on (GENOS_GI2_WORLD=2): their running means (cap frames) have
         // to forget the poses before this one, so settling waits four caps.
@@ -793,11 +740,9 @@ impl Gpu {
         } else {
             self.gi2.still >= GI2_SETTLE_FRAMES.max(world_wait) && self.gi2.quiet >= sweep
         };
-        crate::probe_tier::TierStats {
-            seen_bricks: 1,
-            seen_settled: usize::from(settled),
-            pending_bricks: usize::from(!settled),
-            ..Default::default()
+        SettleStats {
+            settled,
+            still_frames: self.gi2.still,
         }
     }
 
@@ -821,11 +766,9 @@ impl Gpu {
         self.gi2.held >= 2
     }
 
-    /// GI v2 runs this frame: on, built, sized for the picture, no supersampling.
+    /// The lighting runs this frame: built and sized for the picture.
     fn gi2_active(&self) -> bool {
-        self.gi2.on
-            && self.gi2.ready
-            && self.antialias != Antialias::Ssaa
+        self.gi2.ready
             && self.gi2.dims[0] == self.extent_w
             && self.gi2.dims[1] == self.extent_h
     }
@@ -1223,7 +1166,7 @@ impl Gpu {
             self.mesh_field_key.hash(&mut hasher);
             hasher.finish()
         };
-        let frozen = self.gi2_stats().seen_settled == 1;
+        let frozen = self.gi2_stats().settled;
         let had = !self.gi2.kept_bytes.is_empty() && key == self.gi2.kept_key;
         let changes = if had {
             gi2_changes(&self.gi2.kept_bytes, &self.frame_bytes)
@@ -1702,11 +1645,6 @@ fn gi2_stats_wanted() -> bool {
 const GI2_DEFAULT_WORLD: u32 = 3;
 const GI2_DEFAULT_SC_CAP: u32 = 64;
 const GI2_DEFAULT_SC_FLAGS: u32 = 6007050;
-
-/// GI v2 on unless GENOS_GI=v1 (default v2).
-fn gi2_env_on() -> bool {
-    std::env::var("GENOS_GI").map_or(true, |v| v != "v1")
-}
 
 /// GENOS_GI2_SC_FLAGS, default GI2_DEFAULT_SC_FLAGS.
 fn gi2_sc_flags_env() -> u32 {

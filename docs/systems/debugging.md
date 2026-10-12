@@ -13,8 +13,8 @@ on a box. Lighting quality is judged against ground truth, not by eye alone.
 - Engine-generic. `genos-debug` knows the renderer, the scene and the camera; an
   example adds only its own knobs (the `Host` trait) and four calls in its frame loop.
 - Deterministic when asked. A script runs scene time on a fixed step from frame 0.
-  The probe budget follows measured GPU time, so for repeatable light set
-  `lighting(#{ tier_ms: ... })` and `wait_settled` before reading.
+  For repeatable light, `wait_settled` before reading (it waits for the lighting's
+  `SettleStats.settled` and a held picture).
 - Ground truth is a CPU path trace of the same frozen scene from the same pose, with
   the picture's lamp unit, paint albedo and tone curve. Until the reference has a
   longer record, look at every reference before using it as a target.
@@ -26,15 +26,14 @@ on a box. Lighting quality is judged against ground truth, not by eye alone.
   with a JSON body, `GET /cmd` for the list. MCP `tools/call` reaches the same queue.
 - `crates/debug` (`genos-debug`):
   - `tools.rs`: `Tools`. `scene_dt` (pause, step, fixed step), `before_draw` (runs
-    commands, puts back light/object/camera edits, sets the view), `overlay` (probe
-    markers), `after_draw` (feeds waits, captures, flicker windows, references).
+    commands, puts back light/object/camera edits, sets the view), `overlay`, `after_draw` (feeds waits, captures, flicker windows, references).
   - `commands.rs`: every command and its arguments (the MCP descriptions).
   - `reference.rs`: the path tracer (`render`, `render_cached`) and `compare`.
   - `image.rs`: captures, resampling, region luminance, diff, flicker.
-  - `knobs.rs`: named knobs (`Knob`) and the `lighting.*` knobs.
+  - `knobs.rs`: named knobs (`Knob`).
   - `script.rs`: the Rhai runner and its report.
-- `crates/render/src/debug_view.rs`: view modes, bounce limit, `LightingConfig`,
-  `probe_report`, `lamp_report`.
+- `crates/render/src/debug_view.rs`: view modes (full, direct, bounce, albedo,
+  normal, depth, light, texels) and `lamp_report`.
 - `crates/render/src/trace.rs`: the CPU surfaces and direct light the reference uses.
 - `examples/stress/src/knobs.rs`: the stress knobs (time of day, sun, lights, ...).
 - `examples/stress/scripts/*.rhai`: regression scripts. `reference.rhai` holds noon
@@ -50,9 +49,8 @@ GENOS_MCP_PORT=8801 cargo run --release -p genos-stress
 curl -s localhost:8801/cmd                                   # list commands
 curl -s -X POST localhost:8801/cmd/time -d '{"pause":true}'
 curl -s -X POST localhost:8801/cmd/camera -d '{"position":[12.5,1.7,20],"look_at":[12.5,1,8]}'
-curl -s -X POST localhost:8801/cmd/view -d '{"mode":"probes:state"}'
+curl -s -X POST localhost:8801/cmd/view -d '{"mode":"texels"}'
 curl -s -X POST localhost:8801/cmd/capture -d '{"mode":"direct","path":"/tmp/direct.png"}'
-curl -s -X POST localhost:8801/cmd/lighting -d '{"bounces":1,"tier_ms":8}'
 curl -s -X POST localhost:8801/cmd/compare -d '{"width":160,"noise":0.03,"prefix":"/tmp/noon"}'
 ```
 
@@ -111,10 +109,9 @@ comparable with later ones. `temporal_flicker` measured that blend tail as flick
 ## Views
 
 `full`, `direct` (lamps and sun, shadowed), `bounce` (indirect only), `nobounce`
-(= `full:0`), `bounce:N` / `full:N` (bounce limit 0, 1, 2 or inf), `near`, `far`
-(near-field rays or far field only), `albedo`, `normal`, `depth`, `light:I` (one
-lamp and its shadow), `probes:state|age|priority|spacing|changing` (screen markers
-at brick centres: unlit grey, changing red, refining yellow, steady green).
+(the same as `direct`), `albedo`, `normal`, `depth`, `light:I` (one lamp and its
+shadow), `texels` (the surface cache texel each pixel reads, dim under 4 sets). The
+v1 views (`bounce:N`, `near`, `far`, `probes:*`) went with GI v1.
 
 ## Ground truth
 

@@ -40,8 +40,7 @@ fn pipeline_limit() -> Duration {
 
 #[test]
 fn gi_v2_pipelines_build_quickly() {
-    let (_gpu, _window, mut renderer) = open();
-    renderer.set_gi_v2(true).expect("GI v2");
+    let (_gpu, _window, renderer) = open();
     let times = renderer.pipeline_times();
     let gi2: Vec<_> = times
         .iter()
@@ -69,7 +68,7 @@ fn draw(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Ca
 }
 
 #[test]
-fn gi_v2_direct_light_matches_the_current_direct_light() {
+fn the_bounce_adds_light_to_the_direct_view() {
     let (_gpu, mut window, mut renderer) = open();
     let world = shipped_hall();
     let camera = Camera::opening();
@@ -77,64 +76,12 @@ fn gi_v2_direct_light_matches_the_current_direct_light() {
         mode: ViewMode::Direct,
         ..DebugView::default()
     });
-    let current = draw(&mut window, &mut renderer, &world, &camera);
-    renderer.set_gi_v2(true).expect("GI v2");
-    let v2 = draw(&mut window, &mut renderer, &world, &camera);
-    assert_eq!(current.len(), v2.len());
-    let mut sum = 0u64;
-    let mut far = 0usize;
-    for (a, b) in current.iter().zip(&v2) {
-        let d = a.abs_diff(*b);
-        sum += u64::from(d);
-        if d > 8 {
-            far += 1;
-        }
-    }
-    let mean = sum as f64 / current.len() as f64;
-    let far_share = far as f64 / current.len() as f64;
-    assert!(mean < 1.0, "mean difference {mean:.3} of 255");
-    assert!(
-        far_share < 0.005,
-        "{:.2}% of channels differ by more than 8",
-        far_share * 100.0
-    );
-
+    let direct = draw(&mut window, &mut renderer, &world, &camera);
     // The full picture has light the direct view does not: the probes' bounce.
     renderer.set_debug_view(DebugView::default());
     let full = draw(&mut window, &mut renderer, &world, &camera);
     let lit = |p: &[u8]| p.iter().map(|&c| u64::from(c)).sum::<u64>();
-    assert!(lit(&full) > lit(&v2), "GI v2's bounce adds light");
-}
-
-/// Switching to GI v2 frees the current lighting's probe fields; switching back
-/// rebuilds them and the current picture comes back.
-#[test]
-fn switching_back_from_gi_v2_restores_the_current_picture() {
-    let (_gpu, mut window, mut renderer) = open();
-    let world = shipped_hall();
-    let camera = Camera::opening();
-    let settle = |window: &mut Window, renderer: &mut Renderer| {
-        let mut last = Vec::new();
-        for _ in 0..40 {
-            last = draw(window, renderer, &world, &camera);
-        }
-        last
-    };
-    let before = settle(&mut window, &mut renderer);
-    renderer.set_gi_v2(true).expect("GI v2 on");
-    let _ = settle(&mut window, &mut renderer);
-    renderer.set_gi_v2(false).expect("GI v2 off");
-    let after = settle(&mut window, &mut renderer);
-    let sum: u64 = before
-        .iter()
-        .zip(&after)
-        .map(|(a, b)| u64::from(a.abs_diff(*b)))
-        .sum();
-    let mean = sum as f64 / before.len() as f64;
-    assert!(
-        mean < 2.0,
-        "the current picture changed by {mean:.2} of 255 after a GI v2 round trip"
-    );
+    assert!(lit(&full) > lit(&direct), "the bounce adds light");
 }
 
 /// A dark room but for one emissive glTF cube: GI v2 draws the cube's own light,
@@ -184,7 +131,6 @@ fn gi_v2_draws_emitted_light_and_bounces_it() {
     };
     let mut camera = Camera::opening();
     camera.set_pose(genos_scene::Vec3::new(0.0, 1.7, 4.0), 0.0, 0.0);
-    renderer.set_gi_v2(true).expect("GI v2");
     let mut shot = |world: &World| {
         let mut last = Vec::new();
         for _ in 0..60 {
@@ -265,7 +211,6 @@ fn changed_pixels(a: &[u8], b: &[u8]) -> usize {
 #[test]
 fn gi_v2_probes_keep_their_rays_when_the_light_changes() {
     let (_gpu, mut window, mut renderer) = open();
-    renderer.set_gi_v2(true).expect("GI v2");
     let base: Scene = shipped_hall().scene;
     assert!(!base.lights.is_empty());
     let camera = Camera::opening();
@@ -326,7 +271,6 @@ fn gi_v2_probes_keep_their_rays_when_the_light_changes() {
 #[test]
 fn gi_v2_moving_object_retraces_the_rays_it_crosses() {
     let (_gpu, mut window, mut renderer) = open();
-    renderer.set_gi_v2(true).expect("GI v2");
     let base: Scene = shipped_hall().scene;
     assert!(!base.solids.is_empty());
     let camera = Camera::opening();
@@ -363,7 +307,6 @@ fn gi_v2_moving_object_retraces_the_rays_it_crosses() {
 #[test]
 fn gi_v2_camera_keeps_rays_only_where_reprojection_holds() {
     let (_gpu, mut window, mut renderer) = open();
-    renderer.set_gi_v2(true).expect("GI v2");
     let world = shipped_hall();
     let camera = Camera::opening();
     let p = camera.position;
@@ -390,7 +333,6 @@ fn gi_v2_camera_keeps_rays_only_where_reprojection_holds() {
 #[test]
 fn gi_v2_floor_change_drops_all_kept_rays() {
     let (_gpu, mut window, mut renderer) = open();
-    renderer.set_gi_v2(true).expect("GI v2");
     let base: Scene = shipped_hall().scene;
     let camera = Camera::opening();
     let mut floor = base.clone();
@@ -431,7 +373,6 @@ fn mean_byte(p: &[u8]) -> f64 {
 #[test]
 fn gi_v2_moving_camera_keeps_its_brightness() {
     let (_gpu, mut window, mut renderer) = open();
-    renderer.set_gi_v2(true).expect("GI v2");
     renderer.set_debug_view(DebugView {
         mode: ViewMode::Bounce,
         ..DebugView::default()

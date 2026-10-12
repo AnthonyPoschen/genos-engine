@@ -2,9 +2,9 @@
 
 use genos_load::{load_texture, load_texture_map, FileSource};
 use genos_render::{
-    build, card_quad, compose_fog, fire_radiance, fog_along, frame_at, illuminate_facing,
-    image_from_map, image_from_texture, medium, object_cards, sample, shade_lit, DrawKind, Emitter,
-    FireLight, FogLamp, Kind, Puff, Simulation, World, FIRE_COLOR, PROOF_STEPS, STEP_DT,
+    card_quad, compose_fog, direct_light, fire_radiance, fog_along, frame_at, image_from_map,
+    image_from_texture, luminance, medium, object_cards, shade_lit, DrawKind, Emitter, FireLight,
+    FogLamp, Kind, Puff, Simulation, World, FIRE_COLOR, PROOF_STEPS, STEP_DT,
 };
 use genos_scene::{load_path, Floor, Light, Scene, Vec3};
 use std::path::PathBuf;
@@ -55,10 +55,10 @@ fn run_sim(steps: u32) -> Simulation {
 
 fn lit_color(scene: &Scene, albedo: [f32; 3]) -> [f32; 3] {
     let normal = [0.0, 1.0, 0.0];
-    let direct = illuminate_facing(scene, 0.0, 1.0, 0.0, normal);
-    let field = build(scene);
-    let bounce = sample(&field, 0.0, 0.0);
-    shade_lit(albedo, direct, bounce, normal)
+    // Direct light only: the CPU reference for the cards (the bounce is the GPU
+    // lighting's; tests of the picture cover it).
+    let direct = luminance(direct_light(scene, [0.0, 1.0, 0.0], normal));
+    shade_lit(albedo, direct, [0.0; 3], normal)
 }
 
 fn brightness(color: [f32; 3]) -> f32 {

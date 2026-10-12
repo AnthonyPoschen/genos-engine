@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use genos_render::{probe_spacing, Renderer, ScreenRect, Simulation, World, FIELD_PLACE};
+use genos_render::{Renderer, ScreenRect, Simulation, World};
 use genos_scene::{load_path, viewport_uv, Camera, Shape, Vec3};
 use genos_ui::{FrameSample, OpenFrame, STAGE_COUNT, STAGE_LABELS};
 use genos_window::Window;
@@ -476,8 +476,6 @@ fn the_orbit_stays_in_the_still_frame_band() {
         before, after
     );
 
-    let home = renderer.field_player();
-    let mut opposite = None;
     let mut lerp = Timed {
         frames: Vec::new(),
         gpus: Vec::new(),
@@ -505,9 +503,6 @@ fn the_orbit_stays_in_the_still_frame_band() {
             &mut lerp,
         )
         .expect("lerp frame");
-        if step + 1 == LERP_STEPS / 2 {
-            opposite = Some((camera, renderer.field_player()));
-        }
     }
     if timestamps {
         finish_gpus(&mut renderer, &mut lerp.gpus);
@@ -527,43 +522,6 @@ fn the_orbit_stays_in_the_still_frame_band() {
     if let Some((index, a, b)) = flicker(&colors) {
         panic!("floor color flickered at sample {index}: {a:.3} then {b:.3}");
     }
-
-    let (opposite_cam, player) = opposite.expect("the orbit reached the far side");
-    let dx = player[0] - home[0];
-    let dz = player[1] - home[1];
-    assert!(
-        dx * dx + dz * dz > FIELD_PLACE * FIELD_PLACE,
-        "the field stayed at the start {:?} instead of {:?}",
-        home,
-        player
-    );
-    let lag_x = player[0] - opposite_cam.position.x;
-    let lag_z = player[1] - opposite_cam.position.z;
-    assert!(
-        lag_x * lag_x + lag_z * lag_z <= FIELD_PLACE * FIELD_PLACE,
-        "the field player {:?} left the camera {:?}",
-        player,
-        opposite_cam.position
-    );
-    let eye = [player[0], opposite_cam.position.y, player[1]];
-    let floor = &world.scene.floor;
-    let far_x = if player[0] >= floor.position.x {
-        floor.position.x - floor.half_x + 0.5
-    } else {
-        floor.position.x + floor.half_x - 0.5
-    };
-    let far_z = if player[1] >= floor.position.z {
-        floor.position.z - floor.half_z + 0.5
-    } else {
-        floor.position.z + floor.half_z - 0.5
-    };
-    let near = probe_spacing(&world, eye, player[0], player[1]);
-    let far = probe_spacing(&world, eye, far_x, far_z);
-    eprintln!("probe spacing near {near:.3} far {far:.3} player {player:?}");
-    assert!(
-        (near - far).abs() < 1.0e-4,
-        "spacing changed across the floor: near {near} far {far}"
-    );
 
     assert!(
         overlay_gap < 0.05,

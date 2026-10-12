@@ -62,10 +62,8 @@ fn draw(
 ) -> Vec<u8> {
     let _ = window.pump();
     if settle {
-        renderer.set_live_readback(false);
         renderer.draw(world, camera, true).expect("draw").expect("pixels")
     } else {
-        renderer.set_live_readback(true);
         renderer.draw(world, camera, false).expect("draw");
         renderer.read_picture().expect("pixels")
     }
@@ -389,7 +387,6 @@ fn the_live_picture_tracks_the_ray_trace_within_100ms() {
     let width = renderer.width();
     let height = renderer.height();
     assert!(width >= 1280 && height >= 720, "{width}x{height}");
-    renderer.set_live_readback(true);
 
     let hall_eye = [14.5, 1.7, 23.5];
     let (face_at, face_n) = box_face(red_box(&stage.world.scene), hall_eye);

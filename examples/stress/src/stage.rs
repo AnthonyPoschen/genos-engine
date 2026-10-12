@@ -77,10 +77,6 @@ pub struct Stage {
     pub boxes_still: bool,
     /// The lamp paths' clock stands (moving lamps hold where they are).
     pub lamps_still: bool,
-    /// Lighting path: false the current one, true GI v2. `gi_v2_set` is a pending
-    /// switch the frame loop hands to the renderer.
-    pub gi_v2: bool,
-    pub gi_v2_set: Option<bool>,
     /// A scene file in place of the building (--scene): its walls, solids and
     /// lights as they are; nothing moves, the sun, sky and lamp knobs do nothing.
     pub room: Option<genos_scene::Scene>,
@@ -113,8 +109,6 @@ impl Stage {
             sky_on: true,
             boxes_still: false,
             lamps_still: false,
-            gi_v2: std::env::var("GENOS_GI").map_or(true, |v| v != "v1"),
-            gi_v2_set: None,
             room: None,
         };
         stage.apply();

@@ -35,11 +35,10 @@ pub struct Segment {
 pub enum PictureMode {
     Off = 0,
     Fxaa = 1,
-    Ssaa = 2,
 }
 
 impl PictureMode {
-    /// Code the renderer reads. `0` is off, `1` is FXAA, and `2` is SSAA.
+    /// Code the renderer reads. `0` is off and `1` is FXAA.
     pub fn code(self) -> u8 {
         self as u8
     }
@@ -92,7 +91,6 @@ pub mod id {
     /// Luminance-edge picture filter.
     pub const AA_FXAA: u32 = 13;
     /// Double-resolution picture, then a tent downsample.
-    pub const AA_SSAA: u32 = 14;
     /// Starts or holds the red box path.
     pub const BOX_RUN: u32 = 15;
 }

@@ -1,14 +1,11 @@
 //! Named numbers a tool, a script or a slider can read and set.
 //!
-//! An example publishes its own (time of day, lamp count, ...) through [`Knobs`];
-//! the lighting knobs come from the renderer and are the same for every example.
-
-use genos_render::{Bounces, LightingConfig, TierWeights};
+//! An example publishes its own (time of day, lamp count, ...) through [`Knobs`].
 
 /// One setting.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Knob {
-    /// Key for scripts and tools, e.g. `day` or `lighting.tier_ms`.
+    /// Key for scripts and tools, e.g. `day` or `lamps`.
     pub name: String,
     /// Label for a panel.
     pub label: String,
@@ -114,140 +111,4 @@ impl Host for genos_scene::Scene {
     fn scene(&mut self) -> &mut genos_scene::Scene {
         self
     }
-}
-
-const BOUNCE_CHOICES: [&str; 4] = ["0", "1", "2", "inf"];
-
-fn bounce_index(b: Bounces) -> usize {
-    match b.limit() {
-        Some(n) => n as usize,
-        None => 3,
-    }
-}
-
-/// The renderer's lighting settings as knobs, named `lighting.*`.
-pub fn lighting_knobs(c: &LightingConfig) -> Vec<Knob> {
-    let w = c.weights;
-    let mut out = vec![
-        Knob::number(
-            "lighting.tier_ms",
-            "Probe budget",
-            c.tier_ms,
-            (0.0, 20.0),
-            0.1,
-            " ms",
-        ),
-        Knob::number(
-            "lighting.near_rays",
-            "Near rays",
-            c.near_rays.map_or(-1.0, f64::from),
-            (-1.0, 32.0),
-            1.0,
-            "",
-        ),
-        Knob::number(
-            "lighting.view_ms",
-            "Blend time",
-            c.view_seconds as f64 * 1000.0,
-            (0.0, 500.0),
-            1.0,
-            " ms",
-        ),
-        Knob::choice(
-            "lighting.bounces",
-            "Bounces",
-            bounce_index(c.bounces),
-            &BOUNCE_CHOICES,
-        ),
-        Knob::number(
-            "lighting.notice_band",
-            "Notice band",
-            c.notice_band as f64,
-            (0.001, 0.2),
-            0.001,
-            "",
-        ),
-        Knob::number(
-            "lighting.spacing",
-            "Probe spacing",
-            c.spacing.unwrap_or(0.0) as f64,
-            (0.0, 4.0),
-            0.25,
-            " m",
-        ),
-        Knob::number(
-            "lighting.near",
-            "Weight near",
-            w.near as f64,
-            (0.1, 32.0),
-            0.1,
-            " m",
-        ),
-        Knob::number(
-            "lighting.feed",
-            "Weight feed",
-            w.feed as f64,
-            (0.0, 2.0),
-            0.05,
-            "",
-        ),
-        Knob::number(
-            "lighting.margin",
-            "Weight margin",
-            w.margin as f64,
-            (0.0, 1.0),
-            0.05,
-            "",
-        ),
-        Knob::number(
-            "lighting.edge",
-            "Weight edge",
-            w.edge as f64,
-            (0.0, 1.0),
-            0.05,
-            "",
-        ),
-        Knob::number(
-            "lighting.stale",
-            "Weight stale",
-            w.stale as f64,
-            (0.01, 10.0),
-            0.01,
-            " s",
-        ),
-    ];
-    if let Some(k) = out.iter_mut().find(|k| k.name == "lighting.near_rays") {
-        if c.near_rays.is_none() {
-            k.text = "shader".into();
-        }
-    }
-    if let Some(k) = out.iter_mut().find(|k| k.name == "lighting.spacing") {
-        if c.spacing.is_none() {
-            k.text = "auto".into();
-        }
-    }
-    out
-}
-
-/// Set one `lighting.*` knob on `c`.
-pub fn set_lighting_knob(c: &mut LightingConfig, name: &str, v: f64) -> Result<(), String> {
-    let w: &mut TierWeights = &mut c.weights;
-    let f = v as f32;
-    match name {
-        "lighting.tier_ms" => c.tier_ms = v.max(0.0),
-        "lighting.near_rays" => c.near_rays = (v >= 0.0).then_some(v as u32),
-        "lighting.view_ms" => c.view_seconds = (f / 1000.0).max(0.0),
-        "lighting.bounces" => {
-            c.bounces = Bounces::from_limit(if v >= 3.0 { None } else { Some(v as u32) })
-        }
-        "lighting.notice_band" => c.notice_band = f,
-        "lighting.spacing" => c.spacing = (f > 0.0).then_some(f),
-        "lighting.near" => w.near = f,
-        "lighting.feed" => w.feed = f,
-        "lighting.margin" => w.margin = f,
-        "lighting.edge" => w.edge = f,
-        "lighting.stale" => w.stale = f,
-        _ => return Err(format!("unknown knob {name}")),
-    }
-    Ok(())
 }

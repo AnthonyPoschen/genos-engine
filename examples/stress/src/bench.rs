@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use genos_render::{in_view, lamp_range, Bounds, LightBuildTimes, Renderer, TierStats};
+use genos_render::{in_view, lamp_range, Bounds, Renderer, SettleStats};
 use genos_scene::{view_proj, Camera};
 use genos_window::{extent_changed, Window};
 
@@ -14,9 +14,6 @@ use crate::stage::{Scale, Stage};
 /// Scene seconds per frame. Every frame of every run sees the same scene, whatever the
 /// frame rate, so two runs (and two machines) draw the same frames.
 pub const STEP: f32 = 1.0 / 60.0;
-
-/// Names of the light build timestamp spans, in order.
-const PASSES: [&str; 4] = ["copy", "world direct", "world bounce", "tier"];
 
 pub struct Plan {
     pub seconds: f32,
@@ -42,12 +39,11 @@ struct Run {
     /// Picture size the run drew at.
     size: (u32, u32),
     frames: usize,
-    seconds: f64,
     frame_ms: Vec<f64>,
     cpu_ms: Vec<f64>,
     gpu_ms: Vec<f64>,
-    builds: Vec<LightBuildTimes>,
-    tier: TierStats,
+    /// The lighting's settle state at the end of the run.
+    settle: SettleStats,
 }
 
 impl Run {
@@ -62,27 +58,6 @@ impl Run {
             .get(((sorted.len() as f64 * 0.95) as usize).min(sorted.len().saturating_sub(1)))
             .copied()
             .unwrap_or(0.0)
-    }
-
-    /// Light build GPU time spread over the frames: what the light costs per frame.
-    fn light_per_frame(&self) -> f64 {
-        self.builds
-            .iter()
-            .map(LightBuildTimes::total_ms)
-            .sum::<f64>()
-            / self.frames.max(1) as f64
-    }
-
-    fn pass_per_frame(&self, pass: usize) -> f64 {
-        self.builds
-            .iter()
-            .map(|b| b.passes_ms.get(pass).copied().unwrap_or(0.0))
-            .sum::<f64>()
-            / self.frames.max(1) as f64
-    }
-
-    fn builds_per_second(&self) -> f64 {
-        self.builds.len() as f64 / self.seconds.max(1.0e-9)
     }
 }
 
@@ -117,7 +92,7 @@ pub fn run(
                 stage.rewind(plan.day);
                 let run = run_one(renderer, window, stage, camera, plan, &mut profiled)?;
                 eprintln!(
-                    "bench {:>5} lights={:>3} in view={:>3} dynamic={:>3}% {}x{} frames={:>4} frame={:.2} ms p95={:.2} raster gpu={:.2} ms light gpu={:.2} ms/frame builds/s={:.1}",
+                    "bench {:>5} lights={:>3} in view={:>3} dynamic={:>3}% {}x{} frames={:>4} frame={:.2} ms p95={:.2} gpu={:.2} ms",
                     scale.label(),
                     run.lamps,
                     run.view_lamps,
@@ -128,8 +103,6 @@ pub fn run(
                     run.frame_mean(),
                     run.frame_p95(),
                     mean(&run.gpu_ms),
-                    run.light_per_frame(),
-                    run.builds_per_second(),
                 );
                 runs.push(run);
             }
@@ -206,13 +179,11 @@ fn run_one(
     if *profiled {
         renderer.finish_gpu_times()?;
     }
-    renderer.take_light_builds();
     let size = (renderer.width(), renderer.height());
     let mut view_lamps = 0usize;
     let mut frame_ms = Vec::new();
     let mut cpu_ms = Vec::new();
     let mut gpu_ms = Vec::new();
-    let mut builds = Vec::new();
     let start = Instant::now();
     let mut last = start;
     while start.elapsed().as_secs_f32() < plan.seconds || frame_ms.is_empty() {
@@ -228,12 +199,10 @@ fn run_one(
                     .map(|d| d.as_secs_f64() * 1.0e3),
             );
         }
-        builds.extend(renderer.take_light_builds());
         let now = Instant::now();
         frame_ms.push(now.duration_since(last).as_secs_f64() * 1.0e3);
         last = now;
     }
-    let seconds = start.elapsed().as_secs_f64();
     if *profiled {
         gpu_ms.extend(
             renderer
@@ -242,7 +211,6 @@ fn run_one(
                 .map(|d| d.as_secs_f64() * 1.0e3),
         );
     }
-    builds.extend(renderer.take_light_builds());
     Ok(Run {
         scale: stage.scale,
         mix: stage.mix,
@@ -251,12 +219,10 @@ fn run_one(
         occluders: stage.occluders(),
         size,
         frames: frame_ms.len(),
-        seconds,
         frame_ms,
         cpu_ms,
         gpu_ms,
-        builds,
-        tier: renderer.tier_stats(),
+        settle: renderer.settle_stats(),
     })
 }
 
@@ -342,16 +308,13 @@ fn report(plan: &Plan, runs: &[Run], profiled: bool) -> String {
         if let Some(run) = runs.iter().find(|r| r.scale == *scale) {
             let _ = writeln!(
                 out,
-                "- {}: {} sections, {:.0} m × {:.0} m, {} occluders (walls and solids), tier window {} bricks, {} resident, {} pending, {} dropped at the end of the last run.",
+                "- {}: {} sections, {:.0} m × {:.0} m, {} occluders (walls and solids), lighting {} at the end of the last run.",
                 scale.label(),
                 scale.sections(),
                 scale.cols as f32 * crate::building::SECTION,
                 scale.rows as f32 * crate::building::SECTION,
                 run.occluders,
-                run.tier.window_bricks,
-                run.tier.bricks,
-                run.tier.pending_bricks,
-                run.tier.dropped_bricks,
+                if run.settle.settled { "settled" } else { "still settling" },
             );
         }
     }
@@ -361,10 +324,6 @@ fn report(plan: &Plan, runs: &[Run], profiled: bool) -> String {
             "\nLayout `spread` puts fewer lamps near the camera at a bigger scale, so a scale delta mixes size with lamp density; see the lamps in view, or use `--layout first`."
         );
     }
-    let _ = writeln!(
-        out,
-        "\nThe light builds run on their own queue beside the picture, so the raster GPU span includes time the two share."
-    );
     table(&mut out, "Point lamps whose range reaches the view", plan, runs, &|r| {
         r.view_lamps as f64
     });
@@ -380,32 +339,9 @@ fn report(plan: &Plan, runs: &[Run], profiled: bool) -> String {
         mean(&r.cpu_ms)
     });
     if profiled {
-        table(&mut out, "Raster GPU, ms per frame", plan, runs, &|r| {
+        table(&mut out, "Frame GPU (raster and lighting), ms per frame", plan, runs, &|r| {
             mean(&r.gpu_ms)
         });
-    }
-    table(
-        &mut out,
-        "Light build GPU, ms per frame",
-        plan,
-        runs,
-        &Run::light_per_frame,
-    );
-    table(
-        &mut out,
-        "Light builds per second",
-        plan,
-        runs,
-        &Run::builds_per_second,
-    );
-    for (pass, name) in PASSES.iter().enumerate() {
-        table(
-            &mut out,
-            &format!("Light pass `{name}`, GPU ms per frame"),
-            plan,
-            runs,
-            &move |r: &Run| r.pass_per_frame(pass),
-        );
     }
     per_lamp(&mut out, plan, runs, profiled);
     out
@@ -426,10 +362,9 @@ fn per_lamp(out: &mut String, plan: &Plan, runs: &[Run], profiled: bool) {
     );
     let mut metrics: Vec<(&str, Metric)> = vec![
         ("frame", Box::new(Run::frame_mean)),
-        ("light GPU", Box::new(Run::light_per_frame)),
     ];
     if profiled {
-        metrics.push(("raster GPU", Box::new(|r: &Run| mean(&r.gpu_ms))));
+        metrics.push(("frame GPU", Box::new(|r: &Run| mean(&r.gpu_ms))));
     }
     for scale in &plan.scales {
         for (name, metric) in &metrics {

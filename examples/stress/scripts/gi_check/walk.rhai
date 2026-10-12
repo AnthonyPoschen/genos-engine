@@ -9,7 +9,6 @@ knob("time_of_day", 12.0);
 knob("sun", "freeze");
 knob("boxes", "still");
 knob("dynamic", 0.0);
-knob("gi", __GI__);
 let pitch = -0.06;
 let path = [];
 let x = 2.0;

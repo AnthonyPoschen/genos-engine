@@ -278,7 +278,6 @@ fn a_turning_box_keeps_its_faces_lit_every_frame() {
     let (_gpu, mut window, mut renderer) = open();
     let width = renderer.width();
     let height = renderer.height();
-    renderer.set_live_readback(true);
     let scene = Scene {
         floor: floor(6.0),
         walls: Vec::new(),

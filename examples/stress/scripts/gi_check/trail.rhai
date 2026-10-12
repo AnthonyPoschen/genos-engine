@@ -6,13 +6,12 @@
 // every STRIDE-th of those poses until the GI settles; the bounce view goes to
 // still/ and the depth view to depth/. gi-check scores each moving frame against
 // the settled one inside the space the box left in the last 10 frames.
-// Filled in: __DIR__, __GI__, __STRIDE__.
+// Filled in: __DIR__, __STRIDE__.
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("time_of_day", 12.0);
 knob("sun", "freeze");
 knob("boxes", "still");
 knob("dynamic", 0.0);
-knob("gi", __GI__);
 const MOVE = 40;
 const HOLD = 30;
 const STRIDE = __STRIDE__;

@@ -4,13 +4,12 @@
 // back to its start (clocks 0, the pose) and held 30 frames (<seg>/hold), soaked
 // (<seg>/end.png); then the scene state and pose of each moving frame, settled
 // (<seg>/still/frame-k, every `stride` frames). Steps of 1/40 s, Anthony's ~40 fps.
-// Filled in: __DIR__, __GI__, __SEGS__ ("mix" or "spin").
+// Filled in: __DIR__, __SEGS__ ("mix" or "spin").
 let dt = 1.0 / 40.0;
 time(#{ fixed_dt: dt });
 knob("time_of_day", 20.0);
 knob("sun", "freeze");
 knob("dynamic", 50.0);
-knob("gi", __GI__);
 fn settle() {
     for k in 0..4 { try { wait_settled(#{ timeout_frames: 900 }); break; } catch (e) { log(`settle ${k}: ${e}`); } }
 }

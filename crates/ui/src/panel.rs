@@ -528,12 +528,6 @@ fn lighting_panel(offset: [f32; 2], palette: Option<Palette>, box_running: bool)
                     Action::SetAntialias(PictureMode::Fxaa),
                     palette,
                 ),
-                control(
-                    id::AA_SSAA,
-                    "SSAA",
-                    Action::SetAntialias(PictureMode::Ssaa),
-                    palette,
-                ),
             ],
             fill,
         ),

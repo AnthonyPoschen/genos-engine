@@ -18,7 +18,7 @@ The lighting frame draws a sun on the first lamp. The sun uses world space. The 
 
 The panel moves that lamp with three sliders. Each slider has notches. Neighbor notches are 1 meter apart. A drag snaps to a notch and sets one axis. The Y slider includes a position below the floor and the height 7. Dim and bright scale the lamp color.
 
-The same panel shows the picture modes `off`, `FXAA`, and `SSAA`. A press selects that mode for the next picture. That press does not start camera look capture.
+The same panel shows the picture modes `off` and `FXAA`. A press selects that mode for the next picture. That press does not start camera look capture.
 
 The same panel shows `Run` or `Stop` for the red box path. `Run` starts the loop. `Stop` holds the box at its current point on that path. The next `Run` continues from that point. That press does not start camera look capture.
 
@@ -87,7 +87,7 @@ P pauses the graph. A drag inspects one interval. L follows live frames again.
 
 ## Limits
 
-There is no scroll, no image, and no font file. Text uses a built-in bitmap. The lighting panel is screen space. The panel controls one lamp. The picture labels are `off`, `FXAA`, and `SSAA`.
+There is no scroll, no image, and no font file. Text uses a built-in bitmap. The lighting panel is screen space. The panel controls one lamp. The picture labels are `off` and `FXAA`.
 
 A sun marker follows the first lamp in world space. The marker is not a handle. Three notched sliders move that lamp. Each notch is 1 meter from the next. Y notches go below the floor.
 

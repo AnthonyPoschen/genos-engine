@@ -1,6 +1,6 @@
 // gi-check (docs/systems/debugging.md): the five GI diagnosis views and the close-up, each compared
 // with a CPU path-traced reference of that exact moment. Filled in by
-// `genos-stress gi-check`: __MOVING__, __NOISE__, __MAXSPP__, __SECS__, __ONLY__, __GI__.
+// `genos-stress gi-check`: __MOVING__, __NOISE__, __MAXSPP__, __SECS__, __ONLY__.
 //
 // Settled: clock paused, the GI settles, then the picture is compared.
 // Moving: the stress scene's real motion. Per view: settle with lamps home and
@@ -12,8 +12,6 @@ let moving = __MOVING__;
 time(#{ fixed_dt: 0.0166667 });
 if !moving { time(#{ pause: true }); }
 knob("sun", "freeze");
-lighting(#{ tier_ms: 20.0 });
-knob("gi", __GI__);
 const PAD = 600;
 const MOVE = 120;
 let views = [

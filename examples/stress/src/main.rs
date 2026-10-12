@@ -19,7 +19,7 @@ mod stage;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use genos_debug::{lighting_knobs, png, set_lighting_knob, Host};
+use genos_debug::{png, Host};
 use genos_input::{character_controller, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenLine, ScreenRect};
 use genos_scene::{look_direction, update, Actions, Camera, Scene, Vec3, PITCH_LIMIT};
@@ -77,17 +77,9 @@ const ID_SUN: u32 = 400;
 const ID_BOXES: u32 = 500;
 const ID_LAYOUT: u32 = 600;
 const ID_SKY: u32 = 700;
-/// Sliders, one per knob: example knobs, then lighting settings.
+/// Sliders, one per knob.
 const ID_KNOB: u32 = 1000;
-const PANEL_KNOBS: [&str; 7] = [
-    "time_of_day",
-    "sun_speed",
-    "lights",
-    "dynamic",
-    "lighting.tier_ms",
-    "lighting.bounces",
-    "lighting.notice_band",
-];
+const PANEL_KNOBS: [&str; 4] = ["time_of_day", "sun_speed", "lights", "dynamic"];
 /// A hitch longer than this does not replay the missed time.
 const MAX_FRAME_SECONDS: f32 = 0.25;
 
@@ -373,23 +365,12 @@ fn settings_text(stage: &Stage) -> String {
 }
 
 fn lighting_text(renderer: &Renderer) -> String {
-    let stats = renderer.tier_stats();
+    let stats = renderer.settle_stats();
     format!(
-        "stable: {}\npending: {}\nbricks: {}\nfilled: {}\nchanging: {}\nseen: {}\nseen_settled: {}\n\
-         settle_focus_ms: {:.0}\nsettle_other_ms: {:.0}\nsettle_shell_ms: {:.0}\ntop_light: {}\n",
-        stats.pending_bricks == 0 && stats.changing_bricks == 0,
-        stats.pending_bricks,
-        stats.bricks,
-        stats.filled_bricks,
-        stats.changing_bricks,
-        stats.seen_bricks,
-        stats.seen_settled,
-        stats.settle_focus_ms,
-        stats.settle_other_ms,
-        stats.settle_shell_ms,
-        stats
-            .top_light
-            .map_or("none".to_string(), |(index, share)| format!("{index} {share:.2}")),
+        "stable: {}\nstill_frames: {}\npicture_settled: {}\n",
+        stats.settled,
+        stats.still_frames,
+        renderer.picture_settled(),
     )
 }
 
@@ -545,13 +526,12 @@ fn run() -> Result<(), String> {
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
 
-        let light_builds = renderer.take_light_builds();
-        fps.note(real_dt, light_builds.iter().map(|b| b.total_ms()).sum());
+        fps.note(real_dt);
         let (paints, look_capture) = if opts.panel {
             let ui_frame = button_panel(
                 &mut ui,
                 &panel_title(&stage, &fps),
-                &[panel_rows(&stage), knob_rows(&stage, &renderer)].concat(),
+                &[panel_rows(&stage), knob_rows(&stage)].concat(),
                 [size.0 as f32, size.1 as f32],
                 &camera,
                 Pointer {
@@ -563,7 +543,7 @@ fn run() -> Result<(), String> {
             for action in &ui_frame.actions {
                 match *action {
                     Action::Press(id) => press(&mut stage, id),
-                    Action::Slide { id, value } => slide(&mut stage, &mut renderer, id, value),
+                    Action::Slide { id, value } => slide(&mut stage, id, value),
                     _ => {}
                 }
             }
@@ -626,14 +606,7 @@ fn run() -> Result<(), String> {
         drawn += 1;
         let last = opts.frames.is_some_and(|limit| drawn >= limit);
         let shot = genos_mcp::take_shot_request();
-        if shot {
-            renderer.set_live_readback(true);
-        }
         let want_read = shot || tools_read || (last && opts.shot.is_some());
-        if let Some(on) = stage.gi_v2_set.take() {
-            renderer.set_gi_v2(on)?;
-            stage.gi_v2 = renderer.gi_v2();
-        }
         let draw_start = Instant::now();
         let pixels =
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;
@@ -644,11 +617,9 @@ fn run() -> Result<(), String> {
                 frame_ms: real_dt as f64 * 1000.0,
                 draw_ms: draw_start.elapsed().as_secs_f64() * 1000.0,
                 gpu_ms: None,
-                light: light_builds,
             },
         );
         if shot {
-            renderer.set_live_readback(false);
             let png = pixels
                 .as_ref()
                 .map(|pixels| png::encode_png(renderer.width(), renderer.height(), pixels))
@@ -746,27 +717,21 @@ impl FrameGraph {
     }
 }
 
-/// Frame rate and light build time over the last half second, for the panel title.
+/// Frame rate over the last half second, for the panel title.
 #[derive(Default)]
 struct FrameRate {
     seconds: f32,
     frames: u32,
-    light_ms: f64,
     fps: f32,
-    light_per_frame: f64,
 }
 
 impl FrameRate {
-    fn note(&mut self, dt: f32, light_ms: f64) {
+    fn note(&mut self, dt: f32) {
         self.seconds += dt;
         self.frames += 1;
-        self.light_ms += light_ms;
         if self.seconds >= 0.5 {
-            self.fps = self.frames as f32 / self.seconds;
-            self.light_per_frame = self.light_ms / self.frames as f64;
             *self = Self {
-                fps: self.fps,
-                light_per_frame: self.light_per_frame,
+                fps: self.frames as f32 / self.seconds,
                 ..Self::default()
             };
         }
@@ -776,10 +741,9 @@ impl FrameRate {
 fn panel_title(stage: &Stage, rate: &FrameRate) -> String {
     let (hh, mm) = building::clock(stage.day);
     format!(
-        "Stress {} {:.0} fps light {:.1} ms {hh:02}:{mm:02}",
+        "Stress {} {:.0} fps {hh:02}:{mm:02}",
         stage.scale.label(),
         rate.fps,
-        rate.light_per_frame
     )
 }
 
@@ -792,9 +756,8 @@ fn row(label: &str, buttons: Vec<PanelButton>) -> PanelRow {
 }
 
 /// A slider row for each panel knob, with its value as the readout.
-fn knob_rows(stage: &Stage, renderer: &Renderer) -> Vec<PanelRow> {
-    let mut all = stage.knobs();
-    all.extend(lighting_knobs(&renderer.lighting_config()));
+fn knob_rows(stage: &Stage) -> Vec<PanelRow> {
+    let all = stage.knobs();
     PANEL_KNOBS
         .iter()
         .enumerate()
@@ -817,21 +780,14 @@ fn knob_rows(stage: &Stage, renderer: &Renderer) -> Vec<PanelRow> {
 }
 
 /// A panel slider moved: set its knob.
-fn slide(stage: &mut Stage, renderer: &mut Renderer, id: u32, value: f64) {
+fn slide(stage: &mut Stage, id: u32, value: f64) {
     let Some(name) = id
         .checked_sub(ID_KNOB)
         .and_then(|i| PANEL_KNOBS.get(i as usize))
     else {
         return;
     };
-    if name.starts_with("lighting.") {
-        let mut config = renderer.lighting_config();
-        if set_lighting_knob(&mut config, name, value).is_ok() {
-            renderer.set_lighting_config(config);
-        }
-    } else {
-        let _ = stage.set_knob(name, value);
-    }
+    let _ = stage.set_knob(name, value);
 }
 
 fn button(id: u32, text: String, selected: bool) -> PanelButton {

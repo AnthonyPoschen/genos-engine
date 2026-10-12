@@ -11,9 +11,8 @@
 // Last, a close-up (close-0): 1.5 m on from the start, toward the bounce-lit
 // corridor wall and its foot on the floor, against a clean reference: whether a
 // near surface keeps its definition (contact, corner gradients) or is blurred.
-// Filled in: __DIR__, __GI__, __SECS__.
+// Filled in: __DIR__, __SECS__.
 time(#{ fixed_dt: 1.0 / 60.0 });
-knob("gi", __GI__);
 let P = [0.664, 1.699, 9.629];
 let y0 = -0.679;
 let pitch = -0.12;

@@ -6,13 +6,11 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use genos_mcp::json::Value;
-use genos_render::{
-    Bounces, BrickReport, BrickState, DebugView, LightBuildTimes, Renderer, ScreenRect, ViewMode,
-};
+use genos_render::{DebugView, Renderer, ScreenRect, ViewMode};
 use genos_scene::{Camera, Light, Scene, Vec3, PITCH_LIMIT};
 
 use crate::image::{Flicker, Image, Region};
-use crate::knobs::{lighting_knobs, set_lighting_knob, Host, Knob};
+use crate::knobs::{Host, Knob};
 use crate::reference::{self, RefSetup, Reference};
 use crate::value::{list, num, obj, text, vec3, Args};
 
@@ -35,117 +33,49 @@ pub struct FrameTiming {
     pub draw_ms: f64,
     /// GPU time of the picture, when the example profiles it.
     pub gpu_ms: Option<f64>,
-    /// Light builds that finished this frame.
-    pub light: Vec<LightBuildTimes>,
 }
 
-/// How probe markers are coloured.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProbeColor {
-    /// Unlit grey, changing red, refining yellow, steady green.
-    State,
-    /// Green when just updated, red at 4 s or older.
-    Age,
-    /// Blue to red by priority, against the highest on screen.
-    Priority,
-    /// Probe spacing: blue fine to red coarse.
-    Spacing,
-    /// Red while changing; everything else dim.
-    Changing,
-}
-
-impl ProbeColor {
-    const ALL: [(&'static str, ProbeColor); 5] = [
-        ("state", Self::State),
-        ("age", Self::Age),
-        ("priority", Self::Priority),
-        ("spacing", Self::Spacing),
-        ("changing", Self::Changing),
-    ];
-
-    fn parse(text: &str) -> Option<Self> {
-        Self::ALL.iter().find(|(n, _)| *n == text).map(|(_, c)| *c)
-    }
-
-    fn name(self) -> &'static str {
-        Self::ALL
-            .iter()
-            .find(|(_, c)| *c == self)
-            .map_or("?", |(n, _)| n)
-    }
-}
-
-/// What a picture shows: a debug view of the faces and, optionally, probe markers.
+/// What a picture shows: a debug view of the faces.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Look {
     pub view: DebugView,
-    pub probes: Option<ProbeColor>,
 }
 
 impl Look {
-    /// `full`, `direct`, `bounce`, `nobounce`, `bounce:N` / `full:N` (bounce limit,
-    /// `inf` for all), `near`, `far`, `albedo`, `normal`, `depth`, `light:I`,
-    /// `probes:<state|age|priority|spacing|changing>`.
-    pub fn parse(spec: &str, base: Bounces) -> Result<Self, String> {
+    /// `full`, `direct`, `bounce`, `nobounce` (the same as `direct`), `albedo`,
+    /// `normal`, `depth`, `light:I`, `texels`.
+    pub fn parse(spec: &str) -> Result<Self, String> {
         let (head, arg) = match spec.split_once(':') {
             Some((h, a)) => (h.trim(), Some(a.trim())),
             None => (spec.trim(), None),
         };
         let mut look = Look {
-            view: DebugView {
-                bounces: base,
-                ..DebugView::default()
-            },
-            probes: None,
+            view: DebugView::default(),
         };
-        let limit = |a: &str| -> Result<Bounces, String> {
-            match a {
-                "inf" | "all" => Ok(Bounces::All),
-                n => n
-                    .parse::<u32>()
-                    .map(|n| Bounces::from_limit(Some(n)))
-                    .map_err(|_| format!("bounce limit is 0, 1, 2 or inf, got {n}")),
-            }
+        look.view.mode = if head == "nobounce" {
+            ViewMode::Direct
+        } else {
+            ViewMode::parse(head).ok_or_else(|| {
+                format!(
+                    "unknown view {head}: use full, direct, bounce, nobounce, albedo, normal, depth, light:I, texels"
+                )
+            })?
         };
-        match head {
-            "nobounce" => look.view.bounces = Bounces::Zero,
-            "probes" => {
-                look.probes = Some(
-                    ProbeColor::parse(arg.unwrap_or("state"))
-                        .ok_or_else(|| format!("unknown probe colouring {}", arg.unwrap_or("")))?,
-                );
-                return Ok(look);
+        if let Some(a) = arg {
+            if look.view.mode != ViewMode::Light {
+                return Err(format!("{head} takes no argument (bounce limits went with the old lighting)"));
             }
-            _ => {
-                look.view.mode = ViewMode::parse(head).ok_or_else(|| {
-                    format!(
-                        "unknown view {head}: use full, direct, bounce, nobounce, near, far, albedo, normal, depth, light:I, probes:COLOR"
-                    )
-                })?;
-                if let Some(a) = arg {
-                    if look.view.mode == ViewMode::Light {
-                        look.view.lamp = a
-                            .parse()
-                            .map_err(|_| format!("light:{a} needs a lamp index"))?;
-                    } else {
-                        look.view.bounces = limit(a)?;
-                    }
-                }
-            }
+            look.view.lamp = a
+                .parse()
+                .map_err(|_| format!("light:{a} needs a lamp index"))?;
         }
         Ok(look)
     }
 
     pub fn name(&self) -> String {
-        if let Some(p) = self.probes {
-            return format!("probes:{}", p.name());
-        }
         match self.view.mode {
             ViewMode::Light => format!("light:{}", self.view.lamp),
-            mode => match self.view.bounces.limit() {
-                None => mode.name().to_string(),
-                Some(n) => format!("{}:{n}", mode.name()),
-            },
+            mode => mode.name().to_string(),
         }
     }
 }
@@ -216,8 +146,6 @@ struct ObjectEdit {
 #[derive(Clone, Copy, Debug)]
 struct Shot {
     look: Look,
-    /// Wait for the light to settle before reading (a picture the screen never shows).
-    settle: bool,
 }
 
 enum Then {
@@ -245,12 +173,9 @@ enum Job {
         left: u32,
         quiet: u32,
         need: u32,
-        strict: bool,
         frames: u32,
-        /// Wall milliseconds and light-build GPU milliseconds the wait took: frames
-        /// alone favour whichever build draws faster.
+        /// Wall milliseconds the wait took.
         wall_ms: f64,
-        light_ms: f64,
     },
     Shots {
         shots: Vec<Shot>,
@@ -309,7 +234,6 @@ pub struct Tools {
     steps_left: u32,
     dt: f32,
     look: Look,
-    probes_visible_only: bool,
     lights: HashMap<usize, LightEdit>,
     added: Vec<(Light, LightEdit)>,
     solo: Option<usize>,
@@ -345,9 +269,7 @@ impl Tools {
             dt: 0.0,
             look: Look {
                 view: DebugView::default(),
-                probes: None,
             },
-            probes_visible_only: true,
             lights: HashMap::new(),
             added: Vec::new(),
             solo: None,
@@ -464,24 +386,8 @@ impl Tools {
             _ => None,
         });
         let look = self.reading.map_or(self.look, |s| s.look);
-        let mut view = look.view;
-        // The bounce limit is a lighting setting; a look keeps it unless it names one.
-        if self.reading.is_none() {
-            view.bounces = ctx.renderer.lighting_config().bounces;
-        }
-        ctx.renderer.set_debug_view(view);
-        ctx.renderer
-            .set_live_readback(!self.reading.is_some_and(|s| s.settle));
-        self.overlay = match look.probes {
-            Some(color) => probe_markers(
-                &ctx.renderer.probe_report(),
-                ctx.camera,
-                (ctx.renderer.width(), ctx.renderer.height()),
-                color,
-                self.probes_visible_only,
-            ),
-            None => Vec::new(),
-        };
+        ctx.renderer.set_debug_view(look.view);
+        self.overlay.clear();
         self.reading.is_some()
     }
 
@@ -497,20 +403,14 @@ impl Tools {
         while self.timing.len() > 240 {
             self.timing.pop_front();
         }
-        let (frame_wall_ms, frame_light_ms) = self.timing.back().map_or((0.0, 0.0), |(_, t)| {
-            (t.frame_ms, t.light.iter().map(LightBuildTimes::total_ms).sum::<f64>())
-        });
+        let frame_wall_ms = self.timing.back().map_or(0.0, |(_, t)| t.frame_ms);
         let image = match (self.reading, pixels) {
             (Some(_), Some(px)) => Some(Image::from_bgra(renderer.width(), renderer.height(), px)),
             _ => None,
         };
-        let stats = renderer.tier_stats();
-        // Every brick in view settled and its light blended in on screen; bricks out of
-        // view wait their turn.
-        let calm = renderer.picture_settled();
-        let settled_now =
-            calm && stats.seen_bricks > 0 && stats.seen_settled == stats.seen_bricks;
-        let idle = calm && stats.pending_bricks == 0;
+        let stats = renderer.settle_stats();
+        // The lighting has settled and a frame drawn from its held light is on screen.
+        let settled_now = renderer.picture_settled() && stats.settled;
         let mut image_used = false;
         let mut done = Vec::new();
         for (index, running) in self.jobs.iter_mut().enumerate() {
@@ -523,27 +423,19 @@ impl Tools {
                     left,
                     quiet,
                     need,
-                    strict,
                     frames,
                     wall_ms,
-                    light_ms,
                 } => {
                     *frames += 1;
                     *wall_ms += frame_wall_ms;
-                    *light_ms += frame_light_ms;
-                    let calm = if *strict { idle } else { settled_now };
-                    *quiet = if calm { *quiet + 1 } else { 0 };
+                    *quiet = if settled_now { *quiet + 1 } else { 0 };
                     *left = left.saturating_sub(1);
                     if *quiet >= *need || *left == 0 {
                         Some(Ok(obj(vec![
                             ("settled", Value::Bool(*quiet >= *need)),
                             ("frames", num(*frames as f64)),
                             ("wall_ms", num((*wall_ms * 10.0).round() / 10.0)),
-                            ("light_gpu_ms", num((*light_ms * 10.0).round() / 10.0)),
-                            ("pending", num(stats.pending_bricks as f64)),
-                            ("changing", num(stats.changing_bricks as f64)),
-                            ("seen", num(stats.seen_bricks as f64)),
-                            ("seen_settled", num(stats.seen_settled as f64)),
+                            ("still_frames", num(stats.still_frames as f64)),
                         ])))
                     } else {
                         None
@@ -645,9 +537,6 @@ impl Tools {
             let running = self.jobs.remove(index);
             genos_mcp::command::reply(running.id, result);
         }
-        if self.reading.is_some() {
-            renderer.set_live_readback(false);
-        }
     }
 
     fn apply_edits(&mut self, scene: &mut Scene) {
@@ -717,47 +606,29 @@ impl Tools {
         }
     }
 
-    /// All knobs: the example's, then the lighting ones.
-    pub fn knobs(&self, renderer: &Renderer, host: &dyn Host) -> Vec<Knob> {
-        let mut out = host.knobs();
-        out.extend(lighting_knobs(&renderer.lighting_config()));
-        out
+    /// All knobs: the example's.
+    pub fn knobs(&self, host: &dyn Host) -> Vec<Knob> {
+        host.knobs()
     }
 
     /// Set one knob by name, snapped to its step.
-    pub fn set_knob(
-        &mut self,
-        renderer: &mut Renderer,
-        host: &mut dyn Host,
-        name: &str,
-        value: f64,
-    ) -> Result<f64, String> {
-        let all = self.knobs(renderer, host);
+    pub fn set_knob(&mut self, host: &mut dyn Host, name: &str, value: f64) -> Result<f64, String> {
+        let all = self.knobs(host);
         let knob = all
             .iter()
             .find(|k| k.name == name)
             .ok_or_else(|| format!("unknown knob {name}"))?;
         let v = knob.snap(value);
-        if name.starts_with("lighting.") {
-            let mut config = renderer.lighting_config();
-            set_lighting_knob(&mut config, name, v)?;
-            renderer.set_lighting_config(config);
-        } else {
-            host.set_knob(name, v)?;
-        }
+        host.set_knob(name, v)?;
         Ok(v)
     }
 
-    fn shot_from(&self, args: &Args, ctx: &Ctx) -> Result<Shot, String> {
-        let base = ctx.renderer.lighting_config().bounces;
+    fn shot_from(&self, args: &Args) -> Result<Shot, String> {
         let look = match args.str("mode")? {
-            Some(m) => Look::parse(&m, base)?,
+            Some(m) => Look::parse(&m)?,
             None => self.look,
         };
-        Ok(Shot {
-            look,
-            settle: args.bool("settle")?.unwrap_or(false),
-        })
+        Ok(Shot { look })
     }
 
     fn path_arg(
@@ -783,7 +654,7 @@ impl Tools {
         let reply = |v: Value| Ok(Step::Reply(v));
         match name {
             "status" => {
-                let stats = ctx.renderer.tier_stats();
+                let stats = ctx.renderer.settle_stats();
                 reply(obj(vec![
                     ("frame", num(self.frame as f64)),
                     ("paused", Value::Bool(self.paused)),
@@ -800,48 +671,13 @@ impl Tools {
                         ]),
                     ),
                     ("camera", camera_value(ctx.camera)),
-                    (
-                        "stable",
-                        Value::Bool(stats.pending_bricks == 0 && stats.changing_bricks == 0),
-                    ),
-                    ("bricks", num(stats.bricks as f64)),
-                    ("changing", num(stats.changing_bricks as f64)),
-                    ("pending", num(stats.pending_bricks as f64)),
-                    ("seen", num(stats.seen_bricks as f64)),
-                    ("seen_settled", num(stats.seen_settled as f64)),
+                    ("stable", Value::Bool(stats.settled)),
+                    ("still_frames", num(stats.still_frames as f64)),
                     ("picture_settled", Value::Bool(ctx.renderer.picture_settled())),
                 ]))
             }
-            "lighting" => {
-                for knob in lighting_knobs(&ctx.renderer.lighting_config()) {
-                    let key = knob.name.trim_start_matches("lighting.").to_string();
-                    if let Some(v) = args.f64(&key)? {
-                        self.set_knob(ctx.renderer, ctx.host, &knob.name, v)?;
-                    } else if let Some(t) = args.str(&key)? {
-                        let v = match (key.as_str(), t.as_str()) {
-                            ("bounces", "inf") => 3.0,
-                            ("spacing", "auto") => 0.0,
-                            ("near_rays", "shader") => -1.0,
-                            _ => knob.parse(&t)?,
-                        };
-                        self.set_knob(ctx.renderer, ctx.host, &knob.name, v)?;
-                    }
-                }
-                let c = ctx.renderer.lighting_config();
-                reply(Value::Object(
-                    lighting_knobs(&c)
-                        .into_iter()
-                        .map(|k| {
-                            (
-                                k.name.trim_start_matches("lighting.").to_string(),
-                                knob_value(&k),
-                            )
-                        })
-                        .collect(),
-                ))
-            }
             "knobs" => {
-                let all = self.knobs(ctx.renderer, ctx.host);
+                let all = self.knobs(ctx.host);
                 if let (Some(n), Some(v)) = (args.str("name")?, args.0.get("value")) {
                     let knob = all
                         .iter()
@@ -851,10 +687,10 @@ impl Tools {
                         Some(f) => f,
                         None => knob.parse(v.as_str().unwrap_or(""))?,
                     };
-                    self.set_knob(ctx.renderer, ctx.host, &n, value)?;
+                    self.set_knob(ctx.host, &n, value)?;
                 }
                 reply(list(
-                    self.knobs(ctx.renderer, ctx.host)
+                    self.knobs(ctx.host)
                         .iter()
                         .map(|k| {
                             obj(vec![
@@ -873,11 +709,6 @@ impl Tools {
                         .collect(),
                 ))
             }
-            "probes" => reply(probes_value(
-                &ctx.renderer.probe_report(),
-                args,
-                ctx.renderer,
-            )?),
             "lights" => {
                 let report = ctx.renderer.lamp_report(ctx.host.scene(), ctx.camera);
                 reply(list(
@@ -1057,35 +888,17 @@ impl Tools {
                 left: args.u32("timeout_frames")?.unwrap_or(600).max(1),
                 quiet: 0,
                 need: args.u32("quiet_frames")?.unwrap_or(3).max(1),
-                strict: args.bool("strict")?.unwrap_or(false),
                 frames: 0,
                 wall_ms: 0.0,
-                light_ms: 0.0,
             })),
             "view" => {
                 if let Some(m) = args.str("mode")? {
-                    self.look = Look::parse(&m, ctx.renderer.lighting_config().bounces)?;
-                    if self.look.view.bounces != ctx.renderer.lighting_config().bounces
-                        && m.contains(':')
-                        && self.look.view.mode != ViewMode::Light
-                    {
-                        let mut c = ctx.renderer.lighting_config();
-                        c.bounces = self.look.view.bounces;
-                        ctx.renderer.set_lighting_config(c);
-                    }
-                    if m == "nobounce" {
-                        let mut c = ctx.renderer.lighting_config();
-                        c.bounces = Bounces::Zero;
-                        ctx.renderer.set_lighting_config(c);
-                    }
-                }
-                if let Some(v) = args.bool("visible_only")? {
-                    self.probes_visible_only = v;
+                    self.look = Look::parse(&m)?;
                 }
                 reply(obj(vec![("view", text(self.look.name()))]))
             }
             "capture" => {
-                let shot = self.shot_from(args, ctx)?;
+                let shot = self.shot_from(args)?;
                 let name = args.str("name")?;
                 let default = format!(
                     "frame-{:05}-{}.png",
@@ -1131,15 +944,12 @@ impl Tools {
                 let prefix = args
                     .str("prefix")?
                     .unwrap_or_else(|| format!("frame-{:05}", self.frame));
-                let settle = args.bool("settle")?.unwrap_or(false);
-                let base = ctx.renderer.lighting_config().bounces;
                 let mut shots = Vec::new();
                 let mut paths = Vec::new();
                 let mut names = Vec::new();
                 for m in &modes {
                     shots.push(Shot {
-                        look: Look::parse(m, base)?,
-                        settle,
+                        look: Look::parse(m)?,
                     });
                     let file = format!("{prefix}-{}.png", m.replace(':', "-"));
                     paths.push(self.path_arg(&Args(&Value::Null), "", Some(&file))?);
@@ -1158,7 +968,7 @@ impl Tools {
                 }))
             }
             "luminance" => {
-                let shot = self.shot_from(args, ctx)?;
+                let shot = self.shot_from(args)?;
                 Ok(Step::Job(Job::Shots {
                     shots: vec![shot],
                     got: Vec::new(),
@@ -1181,17 +991,14 @@ impl Tools {
                     let b = self.image_named(&b)?;
                     return reply(diff_value(&a, &b, out, threshold, gain, region)?);
                 }
-                let base = ctx.renderer.lighting_config().bounces;
-                let settle = args.bool("settle")?.unwrap_or(false);
                 let a = Look::parse(
                     &args
                         .str("mode_a")?
                         .ok_or("diff needs a and b, or mode_a and mode_b")?,
-                    base,
                 )?;
-                let b = Look::parse(&args.str("mode_b")?.ok_or("diff needs mode_b")?, base)?;
+                let b = Look::parse(&args.str("mode_b")?.ok_or("diff needs mode_b")?)?;
                 Ok(Step::Job(Job::Shots {
-                    shots: vec![Shot { look: a, settle }, Shot { look: b, settle }],
+                    shots: vec![Shot { look: a }, Shot { look: b }],
                     got: Vec::new(),
                     then: Then::Diff {
                         out,
@@ -1202,14 +1009,9 @@ impl Tools {
                 }))
             }
             "reference" | "compare" => {
-                let base = ctx.renderer.lighting_config().bounces;
                 let shot = if name == "compare" {
-                    let look =
-                        Look::parse(&args.str("mode")?.unwrap_or_else(|| "full".into()), base)?;
-                    Some(Shot {
-                        look,
-                        settle: args.bool("settle")?.unwrap_or(false),
-                    })
+                    let look = Look::parse(&args.str("mode")?.unwrap_or_else(|| "full".into()))?;
+                    Some(Shot { look })
                 } else {
                     None
                 };
@@ -1277,7 +1079,7 @@ impl Tools {
             }
             "flicker" => {
                 let frames = args.u32("frames")?.unwrap_or(60).max(2);
-                let shot = self.shot_from(args, ctx)?;
+                let shot = self.shot_from(args)?;
                 Ok(Step::Job(Job::Flicker {
                     left: frames,
                     shot,
@@ -1388,20 +1190,7 @@ impl Tools {
             |f: &dyn Fn(&FrameTiming) -> f64| recent.iter().map(|(_, t)| f(t)).sum::<f64>() / n;
         let worst =
             |f: &dyn Fn(&FrameTiming) -> f64| recent.iter().map(|(_, t)| f(t)).fold(0.0, f64::max);
-        let light = |t: &FrameTiming| t.light.iter().map(LightBuildTimes::total_ms).sum::<f64>();
         let gpu: Vec<f64> = recent.iter().filter_map(|(_, t)| t.gpu_ms).collect();
-        let mut passes = [0.0f64; 8];
-        let mut builds = 0usize;
-        let mut rays = 0u64;
-        for (_, t) in &recent {
-            for b in &t.light {
-                builds += 1;
-                rays += b.probe_rays;
-                for (i, ms) in b.passes_ms.iter().enumerate().take(8) {
-                    passes[i] += ms;
-                }
-            }
-        }
         let frame_ms = mean(&|t| t.frame_ms);
         obj(vec![
             ("frames", num(recent.len() as f64)),
@@ -1424,23 +1213,6 @@ impl Tools {
                     num(gpu.iter().sum::<f64>() / gpu.len() as f64)
                 },
             ),
-            ("light_ms_per_frame", num(mean(&light))),
-            ("light_builds", num(builds as f64)),
-            ("probe_rays", num(rays as f64)),
-            (
-                "light_passes_ms_per_build",
-                list(
-                    passes
-                        .iter()
-                        .take_while(|_| builds > 0)
-                        .map(|p| num(p / builds.max(1) as f64))
-                        .collect(),
-                ),
-            ),
-            (
-                "light_pass_names",
-                text("copy, world direct, world bounce, tier (see LightBuildTimes)"),
-            ),
         ])
     }
 }
@@ -1448,14 +1220,6 @@ impl Tools {
 enum Step {
     Reply(Value),
     Job(Job),
-}
-
-fn knob_value(k: &Knob) -> Value {
-    if k.choices.is_empty() && k.text != "auto" && k.text != "shader" {
-        num(k.value)
-    } else {
-        text(k.text.clone())
-    }
 }
 
 fn region_arg(args: &Args) -> Result<Region, String> {
@@ -1636,186 +1400,4 @@ fn diff_value(
             out.map_or(Value::Null, |p| text(p.display().to_string())),
         ),
     ]))
-}
-
-fn brick_value(b: &BrickReport) -> Value {
-    obj(vec![
-        (
-            "brick",
-            list(b.brick.iter().map(|v| num(*v as f64)).collect()),
-        ),
-        ("center", vec3(b.center)),
-        ("state", text(b.state.label())),
-        ("replace", Value::Bool(b.replace)),
-        ("change_left", num(b.change_left as f64)),
-        ("samples", num(b.samples as f64)),
-        ("probes", num(b.probes as f64)),
-        ("age", num(b.age as f64)),
-        ("seen", num(b.seen as f64)),
-        ("depth", num(b.depth as f64)),
-        ("near_term", num(b.near_term as f64)),
-        ("stale_term", num(b.stale_term as f64)),
-        ("priority", num(b.priority as f64)),
-        ("spacing", num(b.spacing as f64)),
-        ("skip", text(b.skip)),
-    ])
-}
-
-fn probes_value(report: &[BrickReport], args: &Args, renderer: &Renderer) -> Result<Value, String> {
-    let count = |s: BrickState| report.iter().filter(|b| b.state == s).count() as f64;
-    let on_screen: Vec<&BrickReport> = report.iter().filter(|b| b.seen > 0.0).collect();
-    let mut pick: Vec<&BrickReport> = report.iter().collect();
-    if let Some(state) = args.str("state")? {
-        pick.retain(|b| b.state.label() == state);
-    }
-    if args.bool("visible")? == Some(true) {
-        pick.retain(|b| b.seen > 0.0);
-    }
-    if let (Some(at), Some(r)) = (args.vec3("near")?, args.f32("radius")?) {
-        pick.retain(|b| {
-            let d = [b.center[0] - at.x, b.center[1] - at.y, b.center[2] - at.z];
-            d.iter().map(|v| v * v).sum::<f32>().sqrt() <= r
-        });
-    }
-    match args.str("sort")?.as_deref().unwrap_or("priority") {
-        "age" => pick.sort_by(|a, b| b.age.total_cmp(&a.age)),
-        "depth" => pick.sort_by(|a, b| a.depth.total_cmp(&b.depth)),
-        _ => pick.sort_by(|a, b| b.priority.total_cmp(&a.priority)),
-    }
-    let limit = args.u32("limit")?.unwrap_or(20) as usize;
-    let values = args.bool("values")? == Some(true);
-    let oldest_seen = on_screen.iter().map(|b| b.age).fold(0.0f32, f32::max);
-    Ok(obj(vec![
-        ("bricks", num(report.len() as f64)),
-        ("unlit", num(count(BrickState::Unlit))),
-        ("changing", num(count(BrickState::Changing))),
-        ("refining", num(count(BrickState::Refining))),
-        ("steady", num(count(BrickState::Steady))),
-        ("on_screen", num(on_screen.len() as f64)),
-        (
-            "on_screen_changing",
-            num(on_screen
-                .iter()
-                .filter(|b| b.state == BrickState::Changing)
-                .count() as f64),
-        ),
-        ("oldest_on_screen_age", num(oldest_seen as f64)),
-        ("matched", num(pick.len() as f64)),
-        (
-            "list",
-            list(
-                pick.into_iter()
-                    .take(limit)
-                    .map(|b| {
-                        let mut v = brick_value(b);
-                        if values {
-                            if let Value::Object(fields) = &mut v {
-                                fields.push(("values".into(), probe_values(renderer, b.brick)));
-                            }
-                        }
-                        v
-                    })
-                    .collect(),
-            ),
-        ),
-    ]))
-}
-
-/// The stored light of each live probe of `brick`: position, samples, and the face
-/// luminances of its top cube (every bounce) and first cube (one bounce).
-fn probe_values(renderer: &Renderer, brick: [i32; 3]) -> Value {
-    let faces = |f: [f32; 6]| list(f.iter().map(|v| num(f64::from(*v))).collect());
-    list(
-        renderer
-            .probe_values(brick)
-            .into_iter()
-            .map(|p| {
-                obj(vec![
-                    (
-                        "position",
-                        list(p.position.iter().map(|v| num(f64::from(*v))).collect()),
-                    ),
-                    ("samples", num(f64::from(p.samples))),
-                    ("top", faces(p.top)),
-                    ("first", faces(p.first)),
-                ])
-            })
-            .collect(),
-    )
-}
-
-/// One square per brick at its projected centre, coloured by `color`.
-fn probe_markers(
-    report: &[BrickReport],
-    camera: &Camera,
-    size: (u32, u32),
-    color: ProbeColor,
-    visible_only: bool,
-) -> Vec<ScreenRect> {
-    let (w, h) = (size.0 as f32, size.1 as f32);
-    let m = genos_scene::view_proj(camera, w / h.max(1.0));
-    let top = report
-        .iter()
-        .filter(|b| b.seen > 0.0)
-        .map(|b| b.priority)
-        .fold(1.0e-6f32, f32::max);
-    let mut out = Vec::new();
-    for b in report {
-        if visible_only && b.seen <= 0.0 {
-            continue;
-        }
-        let p = b.center;
-        let clip =
-            [0usize, 1, 3].map(|r| m[r] * p[0] + m[4 + r] * p[1] + m[8 + r] * p[2] + m[12 + r]);
-        if clip[2] <= 0.05 {
-            continue;
-        }
-        let (x, y) = (clip[0] / clip[2], clip[1] / clip[2]);
-        if x.abs() > 1.0 || y.abs() > 1.0 {
-            continue;
-        }
-        let px = (x * 0.5 + 0.5) * w;
-        let py = (y * 0.5 + 0.5) * h;
-        let s = (h * 0.25 * b.spacing / clip[2].max(0.5)).clamp(3.0, 14.0);
-        let heat = |t: f32| {
-            let t = t.clamp(0.0, 1.0);
-            [t.min(0.5) * 2.0, 1.0 - (t - 0.5).max(0.0) * 2.0, 0.15]
-        };
-        let rgb = match color {
-            ProbeColor::State => match b.state {
-                BrickState::Unlit => [0.5, 0.5, 0.5],
-                BrickState::Changing => [1.0, 0.15, 0.1],
-                BrickState::Refining => [1.0, 0.85, 0.1],
-                BrickState::Steady => [0.1, 0.9, 0.3],
-            },
-            ProbeColor::Age => heat((1.0 + b.age).log2() / 2.3),
-            ProbeColor::Priority => {
-                let t = b.priority / top;
-                [t, 0.2, 1.0 - t]
-            }
-            ProbeColor::Spacing => {
-                let t = (b.spacing.log2() + 2.0) / 4.0;
-                [t.clamp(0.0, 1.0), 0.4, 1.0 - t.clamp(0.0, 1.0)]
-            }
-            ProbeColor::Changing => match b.state {
-                BrickState::Changing | BrickState::Unlit => [1.0, 0.1, 0.1],
-                _ => [0.15, 0.25, 0.15],
-            },
-        };
-        out.push(ScreenRect {
-            x: px - s * 0.5 - 1.0,
-            y: py - s * 0.5 - 1.0,
-            w: s + 2.0,
-            h: s + 2.0,
-            color: [0.0; 3],
-        });
-        out.push(ScreenRect {
-            x: px - s * 0.5,
-            y: py - s * 0.5,
-            w: s,
-            h: s,
-            color: rgb,
-        });
-    }
-    out
 }

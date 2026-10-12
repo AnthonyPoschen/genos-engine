@@ -6,13 +6,12 @@
 // at every STRIDE-th pose until the GI settles and saves that to still/. gi-check
 // scores each moving frame against the still one (error, worst tile) and the
 // frame-to-frame change beyond the still pictures' own change (flicker).
-// Filled in: __DIR__, __GI__, __STRIDE__, __CLIP__ (only the first CLIP poses; 0: all).
+// Filled in: __DIR__, __STRIDE__, __CLIP__ (only the first CLIP poses; 0: all).
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("time_of_day", 12.0);
 knob("sun", "freeze");
 knob("boxes", "still");
 knob("dynamic", 0.0);
-knob("gi", __GI__);
 const STRIDE = __STRIDE__;
 let pitch = -0.06;
 let path = [];

@@ -14,13 +14,12 @@
 //    (onset) and every 6th.
 // gi-check approach_rows: grain of the moving frames against the settled pose
 // (metrics::blotch at 2 px), frames until the held picture is back to settled, and
-// the soaked end against fresh.png. Filled in: __DIR__, __GI__.
+// the soaked end against fresh.png. Filled in: __DIR__.
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("time_of_day", 20.0);
 knob("sun", "freeze");
 knob("boxes", "still");
 knob("dynamic", 0.0);
-knob("gi", __GI__);
 let P = [11.59, 1.7, 23.52];
 let y0 = -1.0;
 let pitch = -0.25;

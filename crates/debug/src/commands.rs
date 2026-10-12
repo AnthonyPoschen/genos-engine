@@ -17,16 +17,8 @@ fn spec(name: &str, description: &str) -> CommandSpec {
 /// Every command [`crate::Tools`] runs. Shared by MCP, `POST /cmd/<name>` and scripts.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        spec("status", "Frame, pause state, view, camera, and the probe counts (stable when no brick is due)."),
-        spec(
-            "lighting",
-            "Read or change the lighting: tier_ms (probe budget), near_rays (-1/shader for the default), view_ms, bounces (0,1,2,inf), notice_band, spacing (m or auto), and the priority weights near, feed, margin, edge, stale.",
-        ),
-        spec("knobs", "List every knob (example and lighting.*) with range and step. With name and value, set one first."),
-        spec(
-            "probes",
-            "Per-brick report: state (unlit/changing/refining/steady), age s, priority and its terms (seen, near_term, stale_term), spacing, skip reason. Filters: state, visible, near [x,y,z] + radius; sort priority|age|depth; limit; values true adds each live probe's face luminances (top and first cube) and samples.",
-        ),
+        spec("status", "Frame, pause state, view, camera, and whether the lighting has settled (stable, still_frames, picture_settled)."),
+        spec("knobs", "List every knob the example publishes, with range and step. With name and value, set one first."),
         spec("lights", "Every light: position, colour, range, distance, in_view, screen_share, impact (colour luminance x screen share), on."),
         spec(
             "light",
@@ -40,17 +32,17 @@ pub fn specs() -> Vec<CommandSpec> {
         spec("wait", "Reply after frames (default 1). Scene time runs unless paused."),
         spec(
             "wait_settled",
-            "Reply when on-screen bricks have no passes left and the picture has blended their light in, for quiet_frames (default 3), or after timeout_frames (default 600). strict waits for every brick. Reply says settled true/false, frames, wall_ms and light_gpu_ms (GPU time of the light builds in the wait).",
+            "Reply when the lighting has settled and a frame drawn from its held light is on screen, for quiet_frames (default 3), or after timeout_frames (default 600). Reply says settled true/false, frames, wall_ms and still_frames.",
         ),
         spec(
             "view",
-            "What the picture shows: mode full, direct, bounce, nobounce, bounce:N/full:N (bounce limit 0,1,2,inf), near, far, albedo, normal, depth, light:I, probes:state|age|priority|spacing|changing. visible_only for probe markers.",
+            "What the picture shows: mode full, direct, bounce, nobounce (direct), albedo, normal, depth, light:I, texels.",
         ),
         spec(
             "capture",
-            "Save the picture: path (relative to the shot dir), mode (a view), width/height (resampled), settle (wait for the light first), name (keep in memory for diff), region [x,y,w,h] in 0..1 for the luminance in the reply.",
+            "Save the picture: path (relative to the shot dir), mode (a view), width/height (resampled), name (keep in memory for diff), region [x,y,w,h] in 0..1 for the luminance in the reply.",
         ),
-        spec("captures", "Save several views in consecutive frames: modes [..], prefix, width, height, settle."),
+        spec("captures", "Save several views in consecutive frames: modes [..], prefix, width, height."),
         spec("luminance", "Mean, min and max linear luminance and black share of region [x,y,w,h] (0..1) in mode."),
         spec(
             "diff",
@@ -66,9 +58,9 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec(
             "compare",
-            "Trace a reference (as `reference`, or reuse a stored one: reference: name), then capture the live picture (mode, default full; frames: N waits N frames after the trace starts; settle; or live: a capture name/PNG) and compare in linear luminance on block x block averages (default 2; the reference's noise falls with the block side). Saves <prefix>-reference.png, -live.png, -heatmap.png (red too bright, blue too dark, full at 50% error). Replies mean_abs, mean_rel (share of the light that is wrong), p95_abs, p95_rel, bias (+ too bright), ref_mean, live_mean and regions (grid, default [3,3], row-major mean_rel and bias). region limits it.",
+            "Trace a reference (as `reference`, or reuse a stored one: reference: name), then capture the live picture (mode, default full; frames: N waits N frames after the trace starts; or live: a capture name/PNG) and compare in linear luminance on block x block averages (default 2; the reference's noise falls with the block side). Saves <prefix>-reference.png, -live.png, -heatmap.png (red too bright, blue too dark, full at 50% error). Replies mean_abs, mean_rel (share of the light that is wrong), p95_abs, p95_rel, bias (+ too bright), ref_mean, live_mean and regions (grid, default [3,3], row-major mean_rel and bias). region limits it.",
         ),
-        spec("timing", "Frame time breakdown over the last frames (default 60): fps, frame, draw CPU, GPU, light build passes, probe rays."),
+        spec("timing", "Frame time breakdown over the last frames (default 60): fps, frame, draw CPU, GPU."),
         spec("quit", "Stop the example with exit code (default 0)."),
     ]
 }

@@ -1,5 +1,7 @@
 # Radiance cascades: paper versus our field
 
+> **Historical (2026-10-12):** this describes GI v1 (radiance cascades and the world probe tier), which was removed on `gi-v2`. The engine has one lighting path, described in [docs/systems/lighting.md](../systems/lighting.md). Kept for the record only.
+
 The gather now follows section 8. This note is the record of the gap before that change.
 
 This note is for the person who will change the gather. The picture is the GPU gather in `crates/render/shaders/light.comp` and the shade in `crates/render/shaders/scene.frag`. The CPU field in `crates/render/src/field.rs` is the older check. It is not the picture.
