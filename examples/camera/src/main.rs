@@ -3,14 +3,14 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use genos_input::{character_controller, InputCode, InputSystem};
-use genos_render::{Antialias, Renderer, ScreenRect, Simulation, World};
+use genos_render::{Antialias, DamageRect, Renderer, ScreenRect, Simulation, World};
 
 /// The flame, the smoke, and the flame lamp stay off while the radiance field is under study.
 const SHOW_PARTICLES: bool = false;
 use genos_scene::{load_path, update, Actions, Camera, Codimation, Easing, Scene, Vec3};
 use genos_ui::{
-    apply_frame_action, lighting_frame, Action, OpenFrame, Pointer, ProfileGraph, ProfileStream,
-    State,
+    apply_frame_action, lighting_frame, Action, DamageTracker, OpenFrame, Paint, Pointer,
+    ProfileGraph, ProfileStream, Segment, State,
 };
 use genos_window::{extent_changed, FocusGate, Window};
 
@@ -251,6 +251,7 @@ fn run() -> Result<(), String> {
     let mut profile_pending: VecDeque<PendingProfile> = VecDeque::new();
     let mut graph_rects: Vec<ScreenRect> = Vec::new();
     let mut graph_lines: Vec<genos_render::ScreenLine> = Vec::new();
+    let mut graph_damage = DamageTracker::default();
     let mut drag_origin: Option<Duration> = None;
     let boot = Instant::now();
     let mut wireframe = false;
@@ -489,6 +490,17 @@ fn run() -> Result<(), String> {
         if bench.is_some() {
             // The panel and the live graph are not the scene: a bench draws without them.
             overlay.clear();
+        } else {
+            let viewport = [size.0 as f32, size.1 as f32];
+            graph_damage.begin(viewport);
+            if readback.is_none() && graph_on {
+                graph_damage.paints(1, &paints_from(&graph_rects));
+                graph_damage.segments(2, &segments_from(&graph_lines));
+            }
+            let mut damage = ui_frame.damage.clone();
+            damage.extend(graph_damage.finish());
+            let rects: Vec<DamageRect> = damage.into_iter().filter_map(damage_rect).collect();
+            renderer.report_overlay_damage(&rects);
         }
         let draw_at = Instant::now();
         let (pixels, timing) = if detailed {
@@ -500,6 +512,9 @@ fn run() -> Result<(), String> {
                 renderer.draw_with_overlay(&world, &draw_camera, &overlay, want_read, wireframe)?;
             (pixels, None)
         };
+        if renderer.frame_skipped() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let stats = renderer.settle_stats();
         genos_mcp::publish_lighting(&format!(
             "stable: {}\nstill_frames: {}\npicture_settled: {}\n",
@@ -1090,6 +1105,51 @@ impl Bench {
         for line in &self.lines {
             println!("{line}");
         }
+    }
+}
+
+fn paints_from(rects: &[ScreenRect]) -> Vec<Paint> {
+    rects
+        .iter()
+        .map(|rect| Paint {
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h,
+            color: rect.color,
+        })
+        .collect()
+}
+
+fn segments_from(lines: &[genos_render::ScreenLine]) -> Vec<Segment> {
+    lines
+        .iter()
+        .map(|line| Segment {
+            a: line.a,
+            b: line.b,
+            width: line.width,
+            color: line.color,
+        })
+        .collect()
+}
+
+/// Whole pixels, origin floored and the far edge ceiled, dropped when it misses the window.
+fn damage_rect(rect: genos_ui::Rect) -> Option<DamageRect> {
+    let x0 = rect.x.floor().max(0.0);
+    let y0 = rect.y.floor().max(0.0);
+    let x1 = (rect.x + rect.w).ceil().max(0.0);
+    let y1 = (rect.y + rect.h).ceil().max(0.0);
+    let w = (x1 - x0) as u32;
+    let h = (y1 - y0) as u32;
+    if w == 0 || h == 0 {
+        None
+    } else {
+        Some(DamageRect {
+            x: x0 as u32,
+            y: y0 as u32,
+            w,
+            h,
+        })
     }
 }
 

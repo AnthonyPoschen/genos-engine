@@ -17,13 +17,16 @@ mod knobs;
 mod stage;
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use genos_debug::{png, Host};
 use genos_input::{character_controller, InputCode, InputSystem};
-use genos_render::{Renderer, ScreenLine, ScreenRect};
+use genos_render::{DamageRect, Renderer, ScreenLine, ScreenRect};
 use genos_scene::{look_direction, update, Actions, Camera, Scene, Vec3, PITCH_LIMIT};
-use genos_ui::{button_panel, Action, PanelButton, PanelRow, PanelSlider, Pointer, State};
+use genos_ui::{
+    button_panel, Action, DamageTracker, Paint, PanelButton, PanelRow, PanelSlider, Pointer,
+    Segment, State,
+};
 use genos_window::{extent_changed, FocusGate, Window};
 
 use building::{Layout, LightMix, View};
@@ -491,6 +494,7 @@ fn run() -> Result<(), String> {
     let mut clock: Option<Instant> = None;
     let mut fps = FrameRate::default();
     let mut graph = FrameGraph::default();
+    let mut overlay_damage = DamageTracker::default();
     loop {
         let now = Instant::now();
         let real_dt = clock
@@ -527,6 +531,7 @@ fn run() -> Result<(), String> {
         let look_axis = controls.axis_2d(&input, "look");
 
         fps.note(real_dt);
+        let mut ui_damage = Vec::new();
         let (paints, look_capture) = if opts.panel {
             let ui_frame = button_panel(
                 &mut ui,
@@ -547,6 +552,7 @@ fn run() -> Result<(), String> {
                     _ => {}
                 }
             }
+            ui_damage = ui_frame.damage;
             (ui_frame.paints, ui_frame.look_capture)
         } else {
             (Vec::new(), true)
@@ -597,11 +603,19 @@ fn run() -> Result<(), String> {
         });
         overlay.extend_from_slice(tools.overlay());
         graph.push(real_dt * 1000.0);
+        let viewport = [size.0 as f32, size.1 as f32];
+        overlay_damage.begin(viewport);
         if opts.panel {
-            let (rects, lines) = graph.draw([size.0 as f32, size.1 as f32]);
+            let (rects, lines) = graph.draw(viewport);
+            overlay_damage.paints(1, &paints_from(&rects));
+            overlay_damage.segments(2, &segments_from(&lines));
             overlay.extend(rects);
             renderer.set_overlay_lines(&lines);
         }
+        overlay_damage.paints(3, &paints_from(tools.overlay()));
+        ui_damage.extend(overlay_damage.finish());
+        let reported: Vec<DamageRect> = ui_damage.into_iter().filter_map(damage_rect).collect();
+        renderer.report_overlay_damage(&reported);
 
         drawn += 1;
         let last = opts.frames.is_some_and(|limit| drawn >= limit);
@@ -610,6 +624,9 @@ fn run() -> Result<(), String> {
         let draw_start = Instant::now();
         let pixels =
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;
+        if renderer.frame_skipped() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
         tools.after_draw(
             &mut renderer,
             pixels.as_deref(),
@@ -856,4 +873,48 @@ fn press(stage: &mut Stage, id: u32) {
         stage.mix.layout = [Layout::Spread, Layout::First][i];
     }
     stage.apply();
+}
+
+fn paints_from(rects: &[ScreenRect]) -> Vec<Paint> {
+    rects
+        .iter()
+        .map(|rect| Paint {
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h,
+            color: rect.color,
+        })
+        .collect()
+}
+
+fn segments_from(lines: &[ScreenLine]) -> Vec<Segment> {
+    lines
+        .iter()
+        .map(|line| Segment {
+            a: line.a,
+            b: line.b,
+            width: line.width,
+            color: line.color,
+        })
+        .collect()
+}
+
+fn damage_rect(rect: genos_ui::Rect) -> Option<DamageRect> {
+    let x0 = rect.x.floor().max(0.0);
+    let y0 = rect.y.floor().max(0.0);
+    let x1 = (rect.x + rect.w).ceil().max(0.0);
+    let y1 = (rect.y + rect.h).ceil().max(0.0);
+    let w = (x1 - x0) as u32;
+    let h = (y1 - y0) as u32;
+    if w == 0 || h == 0 {
+        None
+    } else {
+        Some(DamageRect {
+            x: x0 as u32,
+            y: y0 as u32,
+            w,
+            h,
+        })
+    }
 }
