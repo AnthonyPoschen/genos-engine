@@ -183,11 +183,14 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 ## Fill speed: sparse fill, reuse, denoise (S72, 2026-10-12)
 
 - **S72A sparse fill** (flag 16777216 off): only key texels (even cells on both in-plane axes) of fine texels get rays; the rest show the bilinear mean of their 1-4 keys and are promoted to own rays when a key is missing, off-plane or keys differ by more than `LIGHTING_SC_SPARSE_RATIO` (1.6). Smoke: due backlog 35-50 % lower than S71G at the same per-frame budget; fps unchanged (light pass is per-pixel bound).
-- **S72B ReSTIR GI reuse** (flag 33554432 off): one-sample reservoir per fine texel (`LIGHTING_SC_RES_AT`, slot is 160 B). A relight resamples its rays (target luminance x cosine), its own history (dropped under local change / changing light) and two coplanar same-size lit neighbours; the resampled estimate is blended 50/50 into the set mean. No retrace validation (change flags only); no Jacobian (same plane).
+- **S72B ReSTIR GI reuse** (reverted by S72H: neighbour reuse without visibility spread correlated low-frequency blotches): one-sample reservoir per fine texel (`LIGHTING_SC_RES_AT`, slot is 160 B). A relight resamples its rays (target luminance x cosine), its own history (dropped under local change / changing light) and two coplanar same-size lit neighbours; the resampled estimate is blended 50/50 into the set mean. No retrace validation (change flags only); no Jacobian (same plane).
 
 - **S72C denoiser primary + earlier stop** (flag 67108864 off): the S62A variance-guided, luminance/plane edge-stopped pool now runs at every set count (was: below 24 sets) and records its variance gain; `lighting_sc_settled` stops a texel when its noise / sqrt(gain) is under the perceptual target, so texels stop at "the denoised result is good enough".
 
 - **S72D coarse-to-fine fill** (fixes S72A never refining non-keys when still): texels have levels (4-apart 2, 2-apart 1, rest 0); every level is relit, young texels weigh 4x/2x/1x by level, so a backlog fills the coarse grid first. A texel short of 4 sets shows the next level up's interpolation (2-apart keys, else 4-apart), mixed with its own sets as they come; only a luminance step between keys (an edge) promotes it to its own light at once.
+
+- **S72C** denoiser-primary + stop on pooled noise: reverted by S72G (baked low-frequency blotches, stopped texels while the error was low-frequency). **S72E** still-frame direct reuse: reverted by S72F (no light-pass gain measured).
+- **S72I confidence-weighted spread**: the keys' interpolation carries their confidence (sets / 4, the 4-apart keys at half), weighed against the texel's own sets, so own rays overwrite unconverged spread; `LIGHTING_SC_SPARSE_RATIO` 1.6 -> 1.3 so more edges (penumbras, contacts) get their own rays.
 
 ## GI v1 removed (2026-10-12)
 

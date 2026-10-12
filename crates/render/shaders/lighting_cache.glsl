@@ -1151,7 +1151,7 @@ vec3 lighting_sc_nclamp(uint slot, vec3 m, vec3 sm, float dev) {
 // it needs is missing or off its plane (edges, small faces) or the keys disagree
 // by more than LIGHTING_SC_SPARSE_RATIO in luminance (contacts, shadow edges).
 // Flag 16777216 turns it off.
-const float LIGHTING_SC_SPARSE_RATIO = 1.6;
+const float LIGHTING_SC_SPARSE_RATIO = 1.3;
 bool lighting_sc_display = false;
 bool lighting_sc_sparse_on() {
     return lighting_world_mode() == 3u && (lighting_sc_flags() & 16777216u) == 0u;
@@ -1203,6 +1203,7 @@ vec4 lighting_sc_sparse(uint slot, float step) {
     float lo = 1.0e30;
     float hi = 0.0;
     float result = 1.0;
+    float cs = 0.0;
     float salt = lighting_obj_salt;
     lighting_obj_salt = cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5 ? cache.v[LIGHTING_SC_OBJ_AT + slot].x : 0.0;
     [[dont_unroll]] for (uint i = 0u; i < 4u; i++) {
@@ -1230,6 +1231,7 @@ vec4 lighting_sc_sparse(uint slot, float step) {
         hi = max(hi, y);
         sum += w * l;
         ws += w;
+        cs += w * min(floor(o.w), LIGHTING_SC_SPARSE_OWN) / LIGHTING_SC_SPARSE_OWN;
     }
     lighting_obj_salt = salt;
     if (result < 0.0) {
@@ -1241,7 +1243,8 @@ vec4 lighting_sc_sparse(uint slot, float step) {
     if (result < 0.5 || ws <= 0.0) {
         return vec4(0.0);
     }
-    return vec4(sum / ws, 1.0);
+    // S72I: w is 1 + the keys' confidence (their sets over LIGHTING_SC_SPARSE_OWN).
+    return vec4(sum / ws, 1.0 + cs / ws);
 }
 
 // Surface cache: what a texel shows (w 0 when it has nothing yet).
@@ -1256,8 +1259,10 @@ vec4 lighting_sc_shown(uint slot) {
         uint lvl = lighting_sc_level(slot);
         if (wo < 1.0 && lvl < 2u) {
             vec4 sp = vec4(0.0);
+            float used_step = 4.0;
             if (lvl == 0u) {
                 sp = lighting_sc_sparse(slot, 2.0);
+                used_step = 2.0;
                 if (sp.w < -1.5 && lighting_sc_display) {
                     // A step between the keys (an edge): its own rays, own light.
                     cache.v[LIGHTING_SC_SPARSE_AT + slot].x = uintBitsToFloat(lighting_frame() | 1u);
@@ -1265,10 +1270,16 @@ vec4 lighting_sc_shown(uint slot) {
             }
             if (sp.w > -1.5 && sp.w < 0.5) {
                 sp = lighting_sc_sparse(slot, 4.0);
+                used_step = 4.0;
             }
             if (sp.w > 0.5) {
+                // S72I: confidence-weighted (Anthony: spread must not bake in
+                // unconverged values): the keys' sets against the texel's own,
+                // the 4-apart keys at half weight; own sets overwrite them.
                 vec4 mine = wo > 0.0 ? lighting_sc_own_shown(slot) : vec4(0.0);
-                return vec4(mix(sp.rgb, mine.rgb, mine.w > 0.5 ? wo : 0.0), 1.0);
+                float ck = (sp.w - 1.0) * (used_step == 2.0 ? 1.0 : 0.5);
+                float a = mine.w > 0.5 ? wo / max(wo + ck, 1.0e-4) : 0.0;
+                return vec4(mix(sp.rgb, mine.rgb, a), 1.0);
             }
         }
     }
