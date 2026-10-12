@@ -189,6 +189,8 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 
 - **S72D coarse-to-fine fill** (fixes S72A never refining non-keys when still): texels have levels (4-apart 2, 2-apart 1, rest 0); every level is relit, young texels weigh 4x/2x/1x by level, so a backlog fills the coarse grid first. A texel short of 4 sets shows the next level up's interpolation (2-apart keys, else 4-apart), mixed with its own sets as they come; only a luminance step between keys (an edge) promotes it to its own light at once.
 
+- **S72E still-scene cost**: while the scene hash (camera, lamps, occluders, meshes, drawn list) holds, the direct pass reuses each pixel's direct light from last frame (out buffer second half; head 3.w flag; `GENOS_LIGHTING_DIRECT_REUSE=0` off) instead of shadow-tracing every lamp per pixel. The texel pool (S72C) reruns only after the texel's own relight or one round in 8.
+
 ## GI v1 removed (2026-10-12)
 
 GI v1 (radiance cascades, the world probe tier, `stage_tier`, the v1 `kick_light` paths, `light.comp`, `scene.frag`, `tier.glsl`, `ssaa.comp`, `lighting.rs`, `probes.rs`, `probe_tier.rs`, `field.rs`, `shadow.rs`, their tests and bench columns, and the `GENOS_GI` switch and stress `gi` knob) is gone. Removed with it: SSAA (it drew through the v1 fragment shader; panel code 2 now means FXAA), the live-readback switch, `TierStats` (replaced by `SettleStats { settled, still_frames }` from `Renderer::settle_stats()`), and the debug views that showed v1 data (cascade, probes, light field). Debug views now: full, direct, bounce, albedo, normal, depth, light, texels.

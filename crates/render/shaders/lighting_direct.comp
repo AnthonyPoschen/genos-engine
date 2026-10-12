@@ -48,6 +48,15 @@ void main() {
         if (!lighting_surface(uvec2(idx % pc.dims.x, idx / pc.dims.x), pos, n, albedo, two_sided)) {
             return;
         }
+        // S72E: camera, lamps, occluders and meshes as last frame (the CPU's scene
+        // hash; change head 3.w): last frame's direct light, kept after the
+        // picture in the out buffer, instead of every lamp's shadow ray again.
+        if (work.v[lighting_change_at() + 3u].w > 0.5) {
+            uint emitted0 = gbuf.px[idx].w;
+            outc.px[idx] = emitted0 == ~0u ? 0u : emitted0;
+            gbuf.px[idx].w = outc.px[pixels + idx];
+            return;
+        }
     } else {
         vec4 rec;
         vec3 origin;
@@ -173,6 +182,7 @@ void main() {
         uint emitted = gbuf.px[idx].w;
         outc.px[idx] = emitted == ~0u ? 0u : emitted;
         gbuf.px[idx].w = lighting_pack_rgb9e5(e);
+        outc.px[pixels + idx] = gbuf.px[idx].w;
     } else {
         lighting_hit_sunfrac = 0.0;
         vec3 bounce = lighting_cache_irradiance_at(pos, n, hit_t);

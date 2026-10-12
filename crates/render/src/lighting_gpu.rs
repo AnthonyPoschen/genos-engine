@@ -100,6 +100,8 @@ pub(crate) struct Lighting {
     pub(crate) draw_key: u64,
     /// Frames in a row drawn from held light (settled): the picture no longer changes.
     held: u32,
+    /// S72E: the out buffer's second half holds the direct light of the last frame drawn.
+    direct_ok: bool,
     /// Per frame slot: the cache pass's counters (lighting_cache.glsl `CacheStats`), and
     /// `still` as it was when that slot's frame ran (0: the scene had just changed).
     stats: [Buffer; 2],
@@ -196,6 +198,7 @@ impl Default for Lighting {
             scene_hash: 0,
             draw_key: 0,
             held: 0,
+            direct_ok: false,
             still: 0,
             stats: [Buffer::empty(), Buffer::empty()],
             quiet: 0,
@@ -622,7 +625,9 @@ impl Gpu {
         self.lighting.gbuf = self.make_buffer(16 + pixels * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.work =
             self.make_buffer_queues(work_vec4 * 16, 0x20 | 0x1 | 0x2, Memory::Device, &share)?;
-        self.lighting.out = self.make_buffer(pixels * 4, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        // The picture, then (S72E) each pixel's direct light kept for a still frame.
+        self.lighting.out = self.make_buffer(pixels * 8, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        self.lighting.direct_ok = false;
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.gbuf_clear = true;
         self.lighting.work_clear = true;
@@ -1247,6 +1252,14 @@ impl Gpu {
                 block[3] += 100000.0;
             }
         }
+        // S72E: nothing that lights a pixel directly changed since the last frame
+        // (scene hash held): the direct pass reuses each pixel's kept direct light
+        // (GENOS_LIGHTING_DIRECT_REUSE=0 turns it off). Head 3.w (the camera up's
+        // w, unread).
+        let reuse = self.lighting.still >= 1
+            && self.lighting.direct_ok
+            && std::env::var("GENOS_LIGHTING_DIRECT_REUSE").map_or(true, |v| v != "0");
+        self.lighting.direct_ok = true;
         if had {
             // Last frame's camera (scene_data.glsl): eye at byte 48, the basis at 528.
             let f = |at: usize| {
@@ -1260,6 +1273,7 @@ impl Gpu {
             }
             block[4 + 3] = 1.0;
         }
+        block[4 * 3 + 3] = if reuse { 1.0 } else { 0.0 };
         // A frame drawn from held light runs no probes: what it saw is still what
         // the probes last ran on.
         if !frozen {

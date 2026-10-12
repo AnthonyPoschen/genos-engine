@@ -1038,6 +1038,15 @@ float lighting_dn_target(uint slot) {
 }
 void lighting_sc_pool(uint slot) {
     vec4 own = cache.v[3u * slot + 2u];
+    // S72E: pool again only after the texel's own relight, else one round in 8
+    // (its neighbours' relights); SPARSE_AT.z holds the round it last pooled.
+    if (lighting_sc_dn_primary()) {
+        uint pf = floatBitsToUint(cache.v[LIGHTING_SC_SPARSE_AT + slot].z);
+        if (pf != 0u && int(lighting_sc_updated(slot) - pf) < 0 && ((slot + lighting_frame()) & 7u) != 0u) {
+            return;
+        }
+        cache.v[LIGHTING_SC_SPARSE_AT + slot].z = uintBitsToFloat(lighting_frame() | 1u);
+    }
     // A texel in a mover's frame pools with its neighbours in that frame: its
     // position and normal are stored there, and the same salt finds them.
     lighting_obj_salt = cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5 ? cache.v[LIGHTING_SC_OBJ_AT + slot].x : 0.0;
