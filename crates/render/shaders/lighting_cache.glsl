@@ -2171,6 +2171,17 @@ uint lighting_grad_count();
 void lighting_shadow_epochs();
 // S76D persistent check words, after the gradient check list (LIGHTING_GRAD_LIST_AT + 32768).
 const uint LIGHTING_CHECK_P_AT = LIGHTING_ARGS_AT + 16u + 3u * 65536u + 1024u + 32768u;
+// Declared here, ahead of the pre-fill list: GLSL needs them before
+// lighting_sc_prefill_take and lighting_cache_batch_slot. Same addresses as
+// the S78X work lists below.
+const uint LIGHTING_ATROUS_MARK_AT = LIGHTING_CHECK_P_AT + 16u;
+const uint LIGHTING_ATROUS_LIST_AT = LIGHTING_ATROUS_MARK_AT + 5u * LIGHTING_CACHE_SLOTS;
+// S73E: the pre-fill list (never-shown texels) and its per-round count.
+const uint LIGHTING_SC_PREFILL_COUNT_AT = LIGHTING_SC_HIST_AT + 74u;
+const uint LIGHTING_SC_PREFILL_MAX = 16384u;
+// After the a-trous meta (LIGHTING_ATROUS_PPM_AT + ppm, prev, 64 bins, 5 modes,
+// 5 * 64 recount bins); the old spot aliased LIGHTING_COMPOSE_AT.
+const uint LIGHTING_SC_PREFILL_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS + 1u + 1u + 64u + 5u + 5u * 64u;
 bool lighting_dense() {
     return ((pc.params.z >> 4u) & 1u) != 0u;
 }
@@ -2981,8 +2992,8 @@ bool lighting_svgf_is_dirty(uint s, uint k) {
 // always dense; a threshold of 1 keeps the lists up to the cap.
 const bool LIGHTING_ATROUS_LISTS = true;
 const uint LIGHTING_ATROUS_LIST_CAP = 65536u;
-const uint LIGHTING_ATROUS_MARK_AT = LIGHTING_CHECK_P_AT + 16u;
-const uint LIGHTING_ATROUS_LIST_AT = LIGHTING_ATROUS_MARK_AT + 5u * LIGHTING_CACHE_SLOTS;
+// LIGHTING_ATROUS_MARK_AT and LIGHTING_ATROUS_LIST_AT are declared with the
+// pre-fill list, above lighting_cache_batch_slot.
 // Past the S78Z verify/wake reservation. Host writes the threshold; the rest
 // is this frame's list decision and the dense-path recount.
 // After the compose words (count, y, z, full, stamps, list, packs, rects); this used to alias LIGHTING_COMPOSE_AT.
@@ -3663,11 +3674,6 @@ const uint LIGHTING_TDL_BUDGET = 32768u;
 const bool LIGHTING_TDL_CHECK = true;
 const float LIGHTING_TDL_TOL = 0.1;
 const uint LIGHTING_TDL_COUNT_AT = LIGHTING_SC_HIST_AT + 73u;
-// S73E: the pre-fill list (never-shown texels) and its per-round count.
-const uint LIGHTING_SC_PREFILL_COUNT_AT = LIGHTING_SC_HIST_AT + 74u;
-const uint LIGHTING_SC_PREFILL_MAX = 16384u;
-// After the a-trous meta words (ppm, prev, 64 bins, 5 modes, 5 * 64 recount bins); the old spot aliased LIGHTING_COMPOSE_AT.
-const uint LIGHTING_SC_PREFILL_AT = LIGHTING_ATROUS_PPM_AT + 1u + 1u + 64u + 5u + 5u * 64u;
 uint lighting_lamps_sig(uint seed, LampList list);
 uint lighting_tdl_sig(uint slot, LampList list) {
     return lighting_lamps_sig(lighting_hash(ckeys.key[slot] ^ 0x68e31da4u), list);
