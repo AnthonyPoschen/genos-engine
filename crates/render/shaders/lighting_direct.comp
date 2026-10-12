@@ -422,17 +422,18 @@ void main() {
         }
     } else {
         lighting_hit_sunfrac = 0.0;
-        // S73A: a guard-band scout's hit claims the fine texels there as a
-        // pixel would (lighting_cache.glsl, LIGHTING_SC_GUARD).
-        // S73B: every other scout hit (sphere, ahead of the motion, beside the
-        // eye round corners) is Lumen surface-cache feedback: it claims and
-        // stamps used (LastUsed) the fine texels there, not shown, so the
-        // LastUsed - LastUpdated scheduler keeps them lit off screen.
+        // S73A/S73B: every scout hit (the guard band just outside the frustum,
+        // the sphere, ahead of the motion, beside the eye round corners) is
+        // Lumen surface-cache feedback: it claims and stamps used (LastUsed)
+        // the fine texels there, so the LastUsed - LastUpdated scheduler keeps
+        // them lit off screen. S73C: the guard band too is feedback, never
+        // shown: a shown stamp put off-screen texels in layer 2 and in the
+        // on-screen schedule.
         if (!probe_hit && lighting_world_mode() == 3u && hit_t < LIGHTING_SC_GUARD_FAR) {
             uint r = ray - lighting_probe_rays();
             uint first_scout = (LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) * LIGHTING_CACHE_RAYS;
             if (r >= first_scout) {
-                lighting_sc_feedback = !lighting_sc_guard_ray(r - first_scout);
+                lighting_sc_feedback = true;
                 lighting_world_irradiance(pos, n);
                 lighting_sc_feedback = false;
                 lighting_hit_sunfrac = 0.0;
