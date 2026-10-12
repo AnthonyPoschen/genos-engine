@@ -11,6 +11,7 @@
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 
+const bool LIGHTING_KEPT_SHOULD = true;
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     uint pixels = pc.dims.x * pc.dims.y;
@@ -100,6 +101,15 @@ void main() {
         bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
         if (s != cur && s != (cur + LIGHTING_STRATA / 2u) % LIGHTING_STRATA && !(urgent && lighting_near_change(pos))) {
             return;
+        }
+        // S78D: the halfway relight only where the light should have moved: a
+        // lamp that moved reaches the hit since its trace, or the sun / sky
+        // changed by more than 1 % (a change near a mover is relit above).
+        if (LIGHTING_KEPT_SHOULD && s != cur && lighting_world_mode() == 3u && !(urgent && lighting_near_change(pos))) {
+            uint traced = lighting_frame() - LIGHTING_STRATA / 2u;
+            if (!lighting_wrc_lamp_changed(pos, traced) && abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
+                return;
+            }
         }
     }
     vec3 origin = pos + n * 0.02;

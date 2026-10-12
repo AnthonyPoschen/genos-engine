@@ -271,3 +271,14 @@ still scene; GPU counters). The same rounding toggled sc flag 1 every other
 frame. All head reads now take the exact integer (`uint(z)`).
 Still 19.6 -> 12.5 ms (trace 3.9 -> 0.6, light 8.5 -> 4.6; 48 -> 72 fps),
 moving 25.7 -> 18.3 ms (38 -> 52 fps); pictures within 0.002 mean luminance.
+
+### S78D: kept hits relit halfway only when they should be
+
+A kept probe hit was relit when its stratum was traced and again halfway round
+(LIGHTING_KEPT_RELIGHT), whatever happened: ~1.0M hits a frame in a still
+scene. The halfway relight now needs a reason: a moved lamp reaching the hit
+since its trace (lighting_wrc_lamp_changed), the sun / sky gain moving by more
+than 1 %, or a mover nearby (as before). Still 12.5 -> 11.55 ms (light 4.57 ->
+3.62), moving unchanged (18.3 -> 18.6, the lamps move everywhere there); pop
+0.074 / 0.107 %. No new memory. [deviation: the bounce part of a kept hit now
+refreshes with its re-trace, every LIGHTING_STRATA frames, unless lit above.]
