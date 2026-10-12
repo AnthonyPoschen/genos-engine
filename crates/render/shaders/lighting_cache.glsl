@@ -2626,6 +2626,11 @@ void lighting_svgf_push(uint slot) {
     } else {
         outc = vec3(0.0);
     }
+    if ((lighting_sc_flags() & 8388608u) != 0u) {
+        // Diagnostic: layer 2 is layer 1 (no filtering).
+        vec4 own1 = cache.v[3u * slot + 2u];
+        outc = own1.w > 0.5 ? own1.rgb : outc;
+    }
     cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(outc));
     // IC placement for the next rounds.
     if (W > 0.0 || cw > 0.0) {
