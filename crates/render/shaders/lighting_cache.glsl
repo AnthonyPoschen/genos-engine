@@ -2453,6 +2453,7 @@ const float LIGHTING_SVGF_SIGMA_Z = 1.0;
 const float LIGHTING_IC_A = 0.25;
 const float LIGHTING_IC_RMIN = 1.0;
 const float LIGHTING_IC_RMAX = 64.0;
+const float LIGHTING_IC_GLOBAL_STALE = 0.05;
 bool lighting_sc_svgf() {
     return lighting_world_mode() == 3u && (lighting_sc_flags() & 2147483648u) == 0u;
 }

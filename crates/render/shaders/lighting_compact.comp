@@ -174,12 +174,16 @@ void main() {
             // change or a moved lamp every texel is traced [deviation: IC has no
             // change handling].
             bool mover_ic;
+            // S72V11: per record, while the global light since its relight has
+            // changed by less than LIGHTING_IC_GLOBAL_STALE (S72V9 required the
+            // whole frame quiet, which a running sun never is: the still smoke
+            // traced 744k rays a round settled against 87k) [inferred threshold].
             // S72V9: only while the light is quiet: IC records hold for static
             // light (Ward 1988; Krivanek et al. 2006: records are recomputed when
             // the lighting changes). Under a moving sun texels relit at different
             // rounds held light of different moments and the luminance stop kept
             // those groups apart (dawn camouflage).
-            if (!wrc && lighting_sc_svgf() && lighting_sc_light_quiet() && !near && t >= 3.5 && !lighting_sc_local_change(slot, mover_ic)) {
+            if (!wrc && lighting_sc_svgf() && lighting_sc_global_change(slot) < LIGHTING_IC_GLOBAL_STALE && !near && t >= 3.5 && !lighting_sc_local_change(slot, mover_ic)) {
                 uint per = lighting_ic_period(slot);
                 if (per > 1u && ((lighting_hash(slot ^ 0x68e31da4u) + lighting_round()) % per) != 0u) {
                     atomicAdd(gstats.waiting, 1u);
@@ -218,7 +222,7 @@ void main() {
             bool mover_l2;
             // S72V3: under SVGF a settled IC site (a record, Ward 1988: kept
             // until the light changes) is relit one round in 4 [inferred rate].
-            if (!wrc && lighting_sc_layer2() && (!lighting_sc_svgf() || lighting_sc_light_quiet()) && !near && t >= 15.5 && !lighting_sc_promoted(slot) && !lighting_sc_local_change(slot, mover_l2)) {
+            if (!wrc && lighting_sc_layer2() && (!lighting_sc_svgf() || lighting_sc_global_change(slot) < LIGHTING_IC_GLOBAL_STALE) && !near && t >= 15.5 && !lighting_sc_promoted(slot) && !lighting_sc_local_change(slot, mover_l2)) {
                 float sup = lighting_sc_svgf() ? LIGHTING_SC_L2_FLAT : cache.v[LIGHTING_SC_SPARSE_AT + slot].w;
                 uint lv = lighting_sc_level(slot);
                 uint every = lighting_sc_svgf() ? 4u : (lv == 0u ? 4u : (lv == 1u ? 2u : 1u));
