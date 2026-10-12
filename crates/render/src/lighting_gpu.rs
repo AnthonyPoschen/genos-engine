@@ -1817,7 +1817,8 @@ impl Gpu {
         let Ok(spec) = std::env::var("GENOS_LIGHTING_DUMP") else {
             return;
         };
-        if !lighting_dump_frame(&spec, self.lighting.frame as u64) {
+        let f = self.lighting.frame as u64;
+        if !lighting_dump_frame(&spec, f) {
             return;
         }
         let srcs: [(&'static str, Handle, u64); 5] = [
