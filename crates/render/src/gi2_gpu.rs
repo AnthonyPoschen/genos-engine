@@ -841,7 +841,13 @@ impl Gpu {
         // This slot's last frame is done (its fence was waited): read its counters
         // (the async queue's come back with its own submission).
         self.trace_sc(self.gi2.stats[slot].memory, "frame");
-        if let Ok(words) = self.read_gi2_stats(slot) {
+        // S70B (no GPU->CPU reads in the frame loop): the surface cache's settling
+        // and young-only rounds come from what the CPU already knows (frames still,
+        // rounds since the light changed), so its counters are read only for the
+        // debug output or the older world modes that settle on them.
+        let read = gi2_stats_wanted();
+        if !read {
+        } else if let Ok(words) = self.read_gi2_stats(slot) {
             self.gi2.probe_samples = [words[6], words[7]];
             if words[7] > 0 && std::env::var_os("GENOS_GI_DEBUG").is_some() {
                 eprintln!(
@@ -855,6 +861,7 @@ impl Gpu {
         if !self.gi2.cache_clear && !world {
             if !self.gi2.stats_round[slot] {
                 // No light cache round ran in that frame.
+            } else if !read {
             } else if let Ok(words) = self.read_gi2_stats(slot) {
                 // A frame that ran just as the scene changed measured against the
                 // old light; it does not count toward settling.
@@ -1679,7 +1686,15 @@ impl Gpu {
 /// cache, 2 world irradiance cells, 3 the surface cache.
 /// Default 3 (the surface cache); GENOS_GI2_WORLD=0 is the probe path (P6).
 fn gi2_world_env() -> u32 {
-    std::env::var("GENOS_GI2_WORLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(GI2_DEFAULT_WORLD).min(3)
+    static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("GENOS_GI2_WORLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(GI2_DEFAULT_WORLD).min(3)
+    })
+}
+
+/// S70B: the frame's counters are read back only where something uses them.
+fn gi2_stats_wanted() -> bool {
+    std::env::var_os("GENOS_GI_DEBUG").is_some() || !(gi2_world_env() == 3 && gi2_sc_flags_env() & 8192 != 0)
 }
 
 // Defaults with no env set (S54K, gi-v2): GI v2, the surface cache, cap 64, the
@@ -1695,7 +1710,10 @@ fn gi2_env_on() -> bool {
 
 /// GENOS_GI2_SC_FLAGS, default GI2_DEFAULT_SC_FLAGS.
 fn gi2_sc_flags_env() -> u32 {
-    std::env::var("GENOS_GI2_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(GI2_DEFAULT_SC_FLAGS)
+    static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("GENOS_GI2_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(GI2_DEFAULT_SC_FLAGS)
+    })
 }
 
 /// GENOS_GI2_SC_LOCAL: object-local texels, on unless 0.
