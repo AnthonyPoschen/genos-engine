@@ -1893,6 +1893,8 @@ void lighting_world_add(vec3 pos, vec3 n, vec3 e, bool changed) {
 // difference from the texels was the bright contact strip of the spin check).
 const bool LIGHTING_SC_KEEP_NEAR = true;
 vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj);
+// S72M: the pixel's screen-probe irradiance (lighting_compose.comp), -1 when none.
+vec3 lighting_px_probes = vec3(-1.0);
 vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     uint mode = lighting_world_mode();
     // Object-local texels (GENOS_LIGHTING_SC_LOCAL=1, GIBS): a pixel on a mover's
@@ -1973,6 +1975,14 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             vec3 hc = lighting_cache_irradiance(q, n);
             if (any(greaterThan(hc, vec3(0.0)))) {
                 v = vec4(hc, 1.0);
+            } else if (lighting_px_probes.x >= 0.0 && !obj && cache.v[3u * slot + 1u].w <= 0.2 && cache.v[3u * slot + 2u].w < 0.5) {
+                // S72M (video: first reveal tore along the screen, the new strip
+                // on the probes, the rest on texels): nothing lit here yet, so the
+                // texel starts from the probes' light at this pixel, one set's
+                // worth; its own sets replace it (count-weighted, as any mean).
+                cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(0.0, max(lighting_ls_now(), 0.0), 0.0, 0.0);
+                cache.v[3u * slot + 2u] = vec4(lighting_px_probes, 1.0);
+                v = vec4(lighting_px_probes, 1.0);
             }
         }
         if (v.w < 0.5) {
