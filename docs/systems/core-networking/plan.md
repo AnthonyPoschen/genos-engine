@@ -2,7 +2,7 @@
 
 > **For agentic workers:** Do not start N1. D1–D54 are unanswered. The datagram bytes are the replay file and the live-edit path, so building N7 before those decisions are answered locks both. When they are answered, implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
 
-**Goal:** While a game is running in development, an author or an agent can inspect any entity and change it. Mods are a first-class way to change the game: data and sandboxed Rhai on the authority, the same bytes verified on every player runtime. The game developer sets which session modes are allowed and what the default is. The server owner picks one allowed mode. Lockdown removes the debug tool from a release player build and does not remove the mod loader. The authority applies every change, the entity log records it, undo sends the inverse through that same path, and a save can write the result back to a sidecar or a prefab file. Every tool call goes through the same capability check. Interest limits what a player runtime can see.
+**Goal:** While a game is running in development, an author or an agent can inspect any entity and change it. Mods are a first-class way to change the game: data and sandboxed Rhai on the authority, the same bytes verified on every player runtime. The game developer sets which session modes are allowed and what the default is. The server owner picks one allowed mode. Dev and test builds enable that tool on the player runtime and the authority, with no token. Lockdown removes it from a release player build and does not remove the mod loader. The authority applies every change, the entity log records it, undo sends the inverse through that same path, and a save can write the result back to a sidecar or a prefab file. Every tool call goes through the same capability check. Interest limits what a player runtime can see.
 
 **Architecture:** The simulation store is an entity id, a human-readable name, and plain components, updated by ordered tick passes. That store is what an agent queries and what the authority replicates. The authority runtime (the process Genos hosts) is the only writer of replicated state. A tool does not write a column. It sends a notice on an agent connection, and the authority applies it on a tick boundary. A player runtime predicts only the entity it has input authority for, and reconciles by restoring that entity and replaying its commands. Remote entities interpolate. Snapshots are unreliable deltas against the last acknowledged snapshot. A spatial grid and a byte budget decide who is in a player packet. A competitive session also drops entities the authority's occluders hide. That cut does not decide what an agent can read. A replay stores that stream. Seeking it is how an agent time-travels.
 
@@ -30,7 +30,7 @@ The owner said an agent is another client or tool, with the same authority rules
 
 **Causality.** Every write stores a **cause**: the tick pass that wrote it, the command that fed that pass, the notice that requested it, or the snapshot tick that a reconcile copied. The owner said "which system". A system in this repo is a system record. The cause names the tick pass. One hop is stored on the write. When the notice or the command names another entity, the log line names that id too. A general graph walk is not the first tool. D25 is whether the cause is only in authority memory, on every player packet, or on the authority recording and the agent connection.
 
-**Control.** Spawn, edit, and despawn go through an MCP or CLI API. The API enqueues a notice. It does not call `set_pose` on the store. The authority applies the notice at the end of the tick, the same place queued spawns already land, and the datagram is in the replay. A player connection's spawn request is refused. Whether an agent connection's spawn request is accepted is D29. The recommendation is that the authority accepts it from an agent connection and still refuses it from a player connection. That is the same rule for both: the connection does not write state, and the authority decides who may request a spawn. D27 is whether this API is bolted onto the camera endpoint or is a separate session tool.
+**Control.** Spawn, edit, and despawn go through an MCP or CLI API. The API enqueues a notice. It does not call `set_pose` on the store. The authority applies the notice at the end of the tick, the same place queued spawns already land, and the datagram is in the replay. Dev and test builds accept that notice from a human on the player runtime and from an agent, on both binaries, with no token. A release player connection's spawn request is refused unless an admin grant is present. D29 is that rule. The connection does not write state. The authority decides who may request a spawn. D27 is whether this API is bolted onto the camera endpoint or is a separate session tool.
 
 **Time-travel.** The agent seeks a replay to a tick and then uses the same query, inspect, and log calls. Seek is the keyframe-then-forward path in D4. The picture is the applied stream (D2), so time-travel works when this binary's sim would not resim the file. `--resim` remains the check. D28 is whether the agent may also edit that tick and fork a new session. The recommendation is read-only. Forking is a second authority. Live undo is not a seek. It is an inverse notice, below.
 
@@ -52,9 +52,9 @@ The scene file today is a Rhai script (`examples/camera/scene.rhai`, loaded by `
 
 The inspect and edit tools are for development. A shipped multiplayer build has to be able to turn them off. The owner described that as build profiles, and as server-authoritative multiplayer where clients never directly edit authoritative entities. In this repo the authority runtime is the program sources call a server, and the player runtime is the program sources call a client. Genos, the other repository, is a host that starts the authority process. It is not a second writer.
 
-**One surface.** Query, inspect, subscribe, spawn, edit, despawn, pin, undo, save, and seek are the same functions in dev, staging, and release. Each call enters `allow(connection, capability, target)`. The capability is compiled in or absent. The permission is a grant the authority assigned. A player datagram that asks for an edit is the same function a tool calls, and the grant refuses it. There is no second admin protocol and no client-side edit path.
+**One surface.** Query, inspect, subscribe, spawn, edit, despawn, pin, undo, save, seek, and the debug calls are the same functions in dev, staging, and release. Each call enters `allow(connection, capability, target)`. The capability is compiled in or absent. Dev and staging return allow for every tool capability, on every connection, with no token. Release is the profile that assigns a grant. A release player datagram that asks for an edit is the same function a tool calls, and the empty grant refuses it. There is no second admin protocol. A dev player runtime sends the notice. It does not write the authority store itself.
 
-**Profiles.** `dev`, `staging`, and `release`. D37 is whether a profile compiles the tool out of a binary, disables it at run time, or both. The recommendation is both, split by binary. The player binary compiles the tool API out in staging and release, so a patched player has no edit function to call. The authority binary keeps the functions and starts with an empty tool grant, so a host can turn inspect on without shipping a different protocol. Dev compiles the tool in and grants it on loopback.
+**Profiles.** `dev`, `staging`, and `release`. Staging is the test build. Dev and staging default to unlimited access: inspect, edit, spawn, replay seek, and the debug API are compiled into the player runtime and the authority runtime, for a human and for an agent. No token, no loopback-only grant, no extra confirm. Release is the only lockdown. The release player binary compiles the tool API out. The release authority keeps the functions and starts with an empty tool grant, so a host can turn inspect on with a token without shipping a different protocol.
 
 **Players.** A player connection may send commands for the entity it has input authority for. It does not apply those commands to authoritative state. The authority does. Prediction of the owned pawn stays local and is corrected by the snapshot. A player packet is the interest set and the pose budget, and nothing beyond that: no entity log, no cause, no omniscient checksum, no query of the authority store. That is the anti-cheat exposure. D41 names the bytes. D11's full-sim hash stays on the authority recording. It does not ride the player snapshot.
 
@@ -64,13 +64,13 @@ The inspect and edit tools are for development. A shipped multiplayer build has 
 
 **The role byte is a request.** D29's join role does not grant anything by itself. The authority assigns the grant after the check. A player who sends the tool role is still a player.
 
-**Lockdown does not remove mods.** The tool API and the mod loader are different. Staging and release player binaries compile out inspect, edit, undo, and save. They keep the loader that receives the mod manifest, checks hashes, and applies asset and prefab bytes. The authority keeps the loader in every profile, including release, and runs sanctioned scripts there. A mod author gets the tool API by running a dev build. A mod script cannot grant that tool to itself.
+**Lockdown does not remove mods.** The tool API and the mod loader are different. The release player binary compiles out inspect, edit, undo, save, and the debug replay calls. Dev and staging keep them. Every profile keeps the loader that receives the mod manifest, checks hashes, and applies asset and prefab bytes. The authority runs sanctioned scripts in every profile, including release. A mod author gets the tool API by running a dev or staging build, on the player runtime or the authority. A mod script cannot grant that tool to itself.
 
 ### Mods
 
 Modding is a standing goal, not a layer added after the session. `CONTEXT.md` already defines a mod: scripts and data that change a game without a change to the engine. A native library is not a mod. ADR 0009 is the language decision: Rhai, the checked engine, registered functions only. The `unchecked` feature stays rejected. A script does not own the window, the input, the renderer, the audio, or the network.
 
-Cheating and modding are different. Cheating is a player runtime writing authoritative state, calling the tool API, or running bytes that are not in the loaded manifest. Grants, compile-out, and the manifest hash block that. Modding is a change the authority loaded on purpose. Those changes are welcome. They go through the same notice path as a tool edit, so the tick, the log, the snapshot, and the replay see them.
+Cheating and modding are different. Cheating is a release player runtime writing authoritative state, calling a tool API the release grant did not give it, or running bytes that are not in the loaded manifest. Grants, compile-out, and the manifest hash block that. A dev or staging call to the same API is the authoring workflow. Modding is a change the authority loaded on purpose. Those changes are welcome. They go through the same notice path as a tool edit, so the tick, the log, the snapshot, and the replay see them.
 
 **Data.** Entities, prefabs, and scenes stay data. A prefab is the JSON schema from D33. A scene overlay is a sidecar fragment keyed by entity name. A mod may add a prefab, replace one, or add an entity to the scene. It does not add a Rust component column. Extra fields are a named property map the script can read. Built-in components stay the typed columns. Asset overrides replace the bytes behind a logical path (`meshes/door.obj`, a PNG, a WAV). `genos-load` still decodes those bytes. A network payload and a file already share those decoders (`docs/systems/loading.md`). The mod loader only chooses which bytes.
 
@@ -80,7 +80,7 @@ Cheating and modding are different. Cheating is a player runtime writing authori
 
 **Distribution.** The authority hashes the canonical manifest and every file. A joining player runtime sends its manifest hash. On a match, the tick may start. On a mismatch, the authority sends the missing files, the player runtime checks each file hash and then the manifest hash, and a failed check never ticks. The gameplay datagram stays the entity stream. File bytes are a separate reliable transfer, still on `std` sockets, still not a crate that owns the network. Genos hosts this by pointing the authority at a directory. `--mods PATH` is the mod list. `--mode` is the session mode from [Policy](#policy). The session report includes the manifest hash and the mode. This repo does not add a workshop. Which client files may differ from the authority is the mode, not a property of the loader.
 
-**Authors.** A mod author runs the authority as a dev build and uses the same inspect, edit, undo, and save tools as an engine author. A release player build joined to that session still has no tool API. Saving a prefab writes data a mod can ship. The script does not call `allow` and cannot widen its own permissions.
+**Authors.** A mod author runs a dev or staging build, player runtime or authority, and uses the same inspect, edit, undo, and save tools as an engine author. No token. A release player build joined to that session still has no tool API. Saving a prefab writes data a mod can ship. The script does not call `allow` and cannot widen its own permissions.
 
 **Replay.** The manifest hash is a header field beside the map hash (D13). A replay whose hash does not match the loaded mods refuses to open. Snapshot playback would otherwise show entities the local scripts do not know. The session mode is a header byte beside that hash.
 
@@ -115,9 +115,9 @@ A hash check catches a normal install that replaced a file: grass removed, a bri
 - An agent reads the authority store, or one applied replay tick. Interest and `POSE_BUDGET` limit player packets. They do not limit that read.
 - Scene handles stay scene handles. The camera agent endpoint stays the scene editor. The session tool is a different API, even though both are loopback tools an agent can call.
 - D20 is open. The recommendation is that the numeric id stays the replication id and the physics id, with a human-readable name beside it. A string as the only wire id is the option that recommendation refuses.
-- The tool API is a development surface. A player runtime never writes authoritative state. Admin and operator calls run on the authority, through `allow`, or they do not run.
+- Dev and staging enable the tool API on the player runtime and the authority runtime, for humans and agents, with no grant to configure. Release is the lockdown. A player runtime still does not write the authority store. It sends a notice, and the authority applies it. Admin and operator tokens exist on release.
 - Interest is the player's exposure. The entity log, the cause, and a full-sim checksum are not player datagrams.
-- Mods stay in every profile. Lockdown compiles the debug and agent tool out of the release player binary and leaves the mod loader in place. A mod changes the game through data and through authority-side scripts. A player runtime that writes authoritative state is cheating, and it is refused.
+- Mods stay in every profile. Lockdown compiles the debug and agent tool out of the release player binary and leaves the mod loader in place. Dev and staging leave the tool in both binaries. A mod changes the game through data and through authority-side scripts. A release player runtime that writes authoritative state is refused.
 - The developer chooses the allowed session modes and the default. The operator chooses one allowed mode. `competitive` rejects unsigned visuals and withholds occluded enemies. `sandbox` does not.
 
 ### How the choices score
@@ -148,7 +148,9 @@ A hash check catches a normal install that replaced a file: grass removed, a bri
 | Rewrite `scene.rhai` on save | The hand-written room and its comments are replaced. | Refuse. D33. |
 | Sidecar plus a data prefab | The script stays. Save overlays by name. Spawn-from-prefab is a notice. | Recommend. D32–D35. |
 | Tool API always linked, trust the caller | A release player contains the edit function. A patch can skip the check. | Refuse for the player binary. D37. |
-| Compile the tool out of the player binary, keep it on the authority behind grants | Players have no edit symbol. A host can still grant inspect. | Recommend. D37, D38. |
+| Compile the tool out of the player binary, keep it on the authority behind grants | Release players have no edit symbol. A host can still grant inspect. | Recommend for release. D37, D38. |
+| Dev and staging require a token or a loopback address | A human on a test player runtime cannot inspect without a permission step. | Refuse. |
+| Dev and staging grant every tool capability on both binaries | Agents and humans inspect, edit, spawn, and seek with no token. Release stays locked. | Recommend. D37, D38. |
 | A separate admin protocol | Two surfaces drift, and a check on one misses the other. | Refuse. One `allow` gate. D42. |
 | Trust the join role byte | The player runtime would promote itself to a tool. | Refuse. The authority assigns the grant. |
 | Full-sim checksum on the player snapshot | A far change is visible as a hash change, past the interest set. | Refuse. D41. The authority file still stores it. D11. |
@@ -467,7 +469,7 @@ Region is an AABB in millimeters, tested with the same cell size as interest (`C
 - **A. An agent connection is no stronger than a player connection.** Players cannot spawn in this plan, so the agent cannot either. Spawn stays an internal authority call. The tool can edit and despawn only what already exists, and even that is a notice.
 - **B. Neither connection writes state.** The authority applies notices. A player connection's spawn notice is refused. An agent connection's spawn, edit, and despawn notices are applied at the tick boundary. Edit of a predicted pawn still replicates back and reconciles, like any other correction.
 
-**Recommendation.** B. A reads "same rules" as "same privileges" and leaves the agent unable to manage entities, which fails the test that opened this plan. B reads "same rules" as one path: request, authority applies, the datagram is recorded. The agent is not a backdoor. The player still cannot mint an id. Join already uses notice name `1`. The recommended payload adds a `u8` role: `1` player, `2` tool. That byte is how the authority tells the two requests apart. It is part of this decision, not a separate channel. An author at the CLI and an agent on MCP both use role `2` in dev. The byte is a request. [Lockdown](#lockdown) assigns the grant. Sending role `2` does not make a player into a tool.
+**Recommendation.** B for release. Dev and staging accept the same notices from a player connection and from an agent connection. A reads "same rules" as "same privileges" and, if applied to dev, leaves a human on the player runtime unable to spawn. The path is still one path: request, authority applies, the datagram is recorded. Neither runtime writes the store. Join already uses notice name `1`. The recommended payload adds a `u8` role: `1` player, `2` tool. In release that byte is a request, and [Lockdown](#lockdown) assigns the grant. Sending role `2` does not make a release player into a tool. In dev and staging the grant is already every tool capability, so the byte is recorded and not checked.
 
 ### D30. Does a live edit stick
 
@@ -536,17 +538,17 @@ Region is an AABB in millimeters, tested with the same cell size as interest (`C
 - **B. This plan adds an inspector window.**
 - **C. The camera MCP gains the inspector and the save.**
 
-**Recommendation.** A. One path, two callers. C puts entity names into the scene-handle endpoint and saves from the camera process, which is not the authority. In staging and release the player binary does not contain this handler. D37.
+**Recommendation.** A. One path, two callers. C puts entity names into the scene-handle endpoint and saves from the camera process, which is not the authority. Dev and staging compile this handler into both binaries. Release compiles it out of the player binary. D37.
 
 ### D37. How a profile removes the tool
 
-**Question.** Dev, staging, and release need a lockdown. The owner asked to compile the debug and agent APIs out, or to disable them.
+**Question.** The owner asked for the debug and agent APIs to compile out or disable, and then clarified the scope. Dev and test builds default to unlimited access. Lockdown applies only to release.
 
-- **A. Compile out only.** A Cargo feature per profile. Release does not contain the tool functions in any binary. An operator cannot inspect a release authority, because the function is gone.
-- **B. Disable only.** The functions are in every binary. A config flag starts them off. A patched player can skip the flag.
-- **C. Both, split by binary.** Staging and release player binaries compile the tool API out. The authority binary keeps the functions in every profile and starts with an empty tool grant. Dev compiles the tool into the player-side session tool and grants it on `127.0.0.1` with no token. `genos-net-view` is a dev binary. `examples/camera` and its scene MCP are not linked into the player binary.
+- **A. Compile the tool out of every release binary.** An operator cannot inspect a release authority, because the function is gone.
+- **B. Disable only.** The functions are in every binary. A config flag starts them off. A patched release player can skip the flag.
+- **C. Release compiles the tool out of the player binary and keeps it on the authority behind an empty grant.** Dev and staging compile inspect, edit, spawn, undo, save, replay seek, and the debug API into the player runtime and the authority runtime. Both profiles grant every tool capability to every connection, human or agent, local or remote, with no token. `genos-net-view` ships with the dev profile. `examples/camera` and its scene MCP stay off the session tool.
 
-**Recommendation.** C. Compile-out is what makes a player patch unable to call edit. A grant on the authority is what lets Genos turn inspect on without a second protocol. The feature names are `profile-dev`, `profile-staging`, and `profile-release`. Workspace tests default to `profile-dev`. The mod loader and the Rhai host are not behind these features. Release still loads mods.
+**Recommendation.** C. Compile-out is what makes a patched release player unable to call edit. A grant on the release authority is what lets Genos turn inspect on without a second protocol. Dev and staging do not ask for that grant. The feature names are `profile-dev`, `profile-staging`, and `profile-release`. Staging is the test build. Workspace tests default to `profile-dev`, which is the open table. The mod loader and the Rhai host are not behind these features. Release still loads mods.
 
 ### D38. Grants
 
@@ -554,26 +556,26 @@ Region is an AABB in millimeters, tested with the same cell size as interest (`C
 
 Capabilities in the recommendation: `command`, `inspect`, `edit`, `save`, `subscribe`, `undo`, `debug`. `edit` covers spawn, despawn, pin, and component writes. `debug` is the loss sliders, the desync view, and replay resim.
 
-| Profile | Player binary | Authority default grant |
+| Profile | Player binary | Authority and player default grant |
 | --- | --- | --- |
-| dev | Tool API compiled in. Loopback gets every capability. A remote player gets `command` only. | Same process, so the loopback grant is the tool grant. |
-| staging | Tool API compiled out. | `command` for players. `inspect` only if an operator token is configured. `edit` only if an admin token is configured. |
+| dev | Tool API compiled in. | Every tool capability for every connection. No token. |
+| staging | Tool API compiled in. Same table as dev. | Every tool capability for every connection. No token. |
 | release | Tool API compiled out. | `command` for players. Tool grants empty unless the host sets a token. |
 
 - **A. Coarse capabilities, as in that table.** One inspect grant reads any entity. One edit grant writes any entity.
 - **B. A per-entity access list** on top of the capabilities.
 
-**Recommendation.** A. B is a second product. Players still only receive the interest set, which is narrower than the inspect grant. An operator inspect may read entities a player packet omits.
+**Recommendation.** A. B is a second product. The gameplay snapshot stays the interest set in every profile, which is narrower than an inspect call. In dev and staging, inspect, seek, and the debug API read entities that snapshot omitted, on the player runtime and on the authority. In release, that read is an operator grant.
 
 ### D39. Who proves an operator or an admin
 
 **Question.** Admin and operator access are authenticated. This repo has no accounts.
 
-- **A. A secret the host passes in when it starts the authority** (`--operator-token`, `--admin-token`, or an environment variable). The join notice carries the secret. The authority compares it and assigns the grant. An empty token means that grant cannot be taken over the network. Dev loopback does not need a token. A mismatch refuses the join.
+- **A. A secret the host passes in when it starts the authority** (`--operator-token`, `--admin-token`, or an environment variable). The join notice carries the secret. The release authority compares it and assigns the grant. An empty token means that grant cannot be taken over the network. A mismatch refuses the join. Dev and staging do not read the secret. Their grant is already the full tool set.
 - **B. Mutual TLS**, with certificates this repo would have to issue.
 - **C. An account system** in this repo.
 
-**Recommendation.** A. Genos, in the other repository, holds the secret and starts the process. This repo checks the bytes. It does not store users. B and C are later plans. The operator secret and the admin secret are different, so inspect does not imply edit.
+**Recommendation.** A, on release. Genos, in the other repository, holds the secret and starts the process. This repo checks the bytes. It does not store users. B and C are later plans. The operator secret and the admin secret are different, so inspect does not imply edit. Dev and staging never reach this check.
 
 ### D40. The audit log
 
@@ -669,7 +671,7 @@ Capabilities in the recommendation: `command`, `inspect`, `edit`, `save`, `subsc
 
 **Question.** Authors should inspect a running modded game. Lockdown still applies to players.
 
-- **A. The author runs a `profile-dev` authority and uses the same inspect, edit, undo, and save functions.** A release player joined to it has the tool compiled out. A script cannot call those functions. Save writes a prefab or a sidecar the author can put in the mod folder.
+- **A. The author runs `profile-dev` or `profile-staging`, on the player runtime or the authority, and uses the same inspect, edit, undo, save, and replay functions.** No token. A release player joined to that session has the tool compiled out. A script cannot call those functions. Save writes a prefab or a sidecar the author can put in the mod folder.
 - **B. Every release player gains inspect if a mod is loaded.**
 - **C. A separate mod-debug protocol.**
 
@@ -821,7 +823,7 @@ The authority's record of tool and admin calls, including refusals. It is not re
 _Avoid_: The entity log, a player datagram.
 
 **Profile**:
-`dev`, `staging`, or `release`. It selects what is compiled into a binary and which grants start empty.
+`dev`, `staging`, or `release`. Staging is the test build. Dev and staging start with every tool capability. Release starts with tool grants empty.
 _Avoid_: A runtime mode the player can switch on.
 
 **Mod manifest**:
@@ -940,7 +942,7 @@ Nothing in the tree sends a pose, a command, or a delta. Nothing records that st
 | Agent control | The camera endpoint edits scene handles and can subscribe to `genos://scene`. It does not see a simulation entity, a cause, or a replay tick. | An agent connection. Query, inspect, entity log, subscribe, and spawn, edit, despawn as notices. D20–D29 are open. |
 | Live edit | The camera endpoint mutates the `Scene` in the camera process. There is no pin, no undo stack, and no save of entity components. | Tool notices applied at a tick boundary, pinned so the next pass does not erase them, undo by inverse notice. D30–D31, D36. |
 | Save-back | A `.rhai` scene is hand-written and loaded once. Nothing writes it back. There is no prefab. | An explicit authority-side sidecar and a data prefab. The script stays. D32–D35. |
-| Lockdown | No profile, no grant, no audit. Any future tool would be linked into every binary. | Dev, staging, and release. The player binary compiles the tool out. The authority checks a grant. The mod loader stays. D37–D42. |
+| Lockdown | No profile, no grant, no audit. Any future tool would be linked into every binary. | Dev and staging leave the tool open on both runtimes. Release compiles it out of the player binary and grants it on the authority. The mod loader stays. D37–D42. |
 | Mods | A scene script places a room. `docs/systems/scripting.md` says there is no mod folder and no gameplay script. | Data overrides, a checked Rhai pass on the authority, load order, hash-checked distribution. D43–D49. |
 
 ## Decision
@@ -959,7 +961,7 @@ What we refuse inside that choice:
 
 - A general archetype framework and a job scheduler. Thousands of entities need a dense column per component and a grid for interest. They do not need a scheduler before the first session. Overwatch's own store was a map from a 32-bit id to components, and systems scanned for the tuple they required. Columns here are `Vec`s indexed by `EntityId.index`, with the generation checked on every read.
 - Peer-to-peer GGPO of the whole world. GGPO saves the full simulation, predicts remote inputs, and resimulates when the real input arrives. That requires every peer to simulate every entity, bit-identically, across machines. We do not have cross-machine determinism, and a large world should not ship every entity to every player. We take GGPO's restore-and-replay loop and apply it to the owned entity.
-- Client-predicted spawns. A player connection's spawn notice is refused. The authority is the only writer. An agent connection may request a spawn, and the authority applies it at the tick boundary (D29). The agent does not mint an id locally. A temporary player-side id is a later plan.
+- Client-predicted spawns. The authority is the only writer. Dev and staging apply a spawn notice from a player connection or an agent connection. Release refuses a player connection's spawn notice unless an admin grant is present (D29). Nobody mints an id locally. A temporary player-side id is a later plan.
 - Shared-mode state authority, where a player runtime owns the true state of an object. Photon Fusion's dedicated-server mode keeps state authority on the server. That is the mode we copy. Input authority can move. State authority stays on the authority runtime.
 
 ## Sources
@@ -1650,9 +1652,9 @@ Do not start N1. D1–D54 are unanswered. The datagram layout, the replay file, 
 ### N32. Agent notices
 
 - [ ] **Files:** `crates/net/src/agent.rs`. Test `crates/net/tests/agent.rs`.
-- **Behavior:** `request_spawn`, `request_edit`, and `request_despawn` enqueue a notice. They do not change the sim. `run_tick` applies an agent connection's notices and refuses a player connection's spawn notice with no state change. An edit sets the named component and the log cause is that notice. A spawned id uses the requested name. If the notice omits the name and carries a type, the minted name is `<type>-<index>`. If it omits both, the name is `e-<index>` from N29. The datagram that carries the notice is the same notice encoding as N17. Join's payload role byte is the `u8` from D29.
-- **Test:** `an_agent_spawn_applies_and_a_player_spawn_does_not`
-  - A player connection's spawn notice leaves the spawned count unchanged. An agent connection's spawn of `door` adds one id after the tick, `find("door")` returns it, and the log cause is the notice. `request_edit` of `x_mm` to 10 leaves `x_mm` unchanged until `run_tick`. After that tick, `x_mm` is 10.
+- **Behavior:** `request_spawn`, `request_edit`, and `request_despawn` enqueue a notice. They do not change the sim. Under the default `profile-dev`, `run_tick` applies those notices from a player connection and from an agent connection. An edit sets the named component and the log cause is that notice. A spawned id uses the requested name. If the notice omits the name and carries a type, the minted name is `<type>-<index>`. If it omits both, the name is `e-<index>` from N29. The datagram that carries the notice is the same notice encoding as N17. Join's payload role byte is the `u8` from D29. The release refusal of a player spawn is N40.
+- **Test:** `a_dev_player_spawn_applies_the_same_as_an_agent`
+  - A player connection's spawn of `door` adds one id after the tick, `find("door")` returns it, and the log cause is the notice. An agent connection's spawn of `crate` adds a second id. `request_edit` of `x_mm` to 10 leaves `x_mm` unchanged until `run_tick`. After that tick, `x_mm` is 10. No token is read.
 - **Commit:** `net: apply agent spawn through a notice`
 
 ### N33. Subscribe
@@ -1706,17 +1708,17 @@ Do not start N1. D1–D54 are unanswered. The datagram layout, the replay file, 
 ### N39. Spawn from a prefab
 
 - [ ] **Files:** `save.rs`, `agent.rs`. Test `examples/session/tests/save.rs`.
-- **Behavior:** `save_prefab(entity, path)` writes one entity's authored components. `request_spawn_prefab(path)` enqueues a notice. After the tick the authority reads the file and spawns a new id with a minted name, the prefab pose, and the authored mark. The source entity is unchanged. A player connection's prefab spawn is refused. The new name is session-unique.
+- **Behavior:** `save_prefab(entity, path)` writes one entity's authored components. `request_spawn_prefab(path)` enqueues a notice. After the tick the authority reads the file and spawns a new id with a minted name, the prefab pose, and the authored mark. The source entity is unchanged. Under `profile-dev` a player connection's request spawns. The release refusal is N40. The new name is session-unique.
 - **Test:** `a_prefab_spawn_copies_components_under_a_new_name`
-  - `door` at `x_mm` 10, saved as a prefab. Spawn it. The new id's pose is 10, its name is not `door`, and `door` is still at 10. A player connection's request leaves the spawned count unchanged.
+  - `door` at `x_mm` 10, saved as a prefab. A player connection spawns it. The new id's pose is 10, its name is not `door`, and `door` is still at 10.
 - **Commit:** `session: spawn an entity from a prefab file`
 
 ### N40. One allow gate
 
 - [ ] **Files:** `crates/net/src/allow.rs`, `crates/net/Cargo.toml` features `profile-dev` (default), `profile-staging`, `profile-release`. Test `crates/net/tests/allow.rs`.
-- **Behavior:** `allow(connection, capability, target) -> Result` is the gate from D42. Tool handlers from N32 onward call it, including in-process CLI calls. Under `profile-dev`, a loopback connection is granted every capability, and a remote player connection is granted `command` only. Under `profile-staging` and `profile-release`, the player-tool module is not compiled into the player entry (the test builds `genos-net` with `--no-default-features --features profile-release` and asserts the tool handler symbol's source file is cfg'd out by calling a `tool_api_compiled() -> bool` that is false). The authority entry still has `allow`. A deny writes an audit line and returns an error. The sim is unchanged. Audit lines are not part of a player snapshot.
-- **Test:** `dev_loopback_may_edit_and_a_player_may_not`
-  - Dev grant: an edit notice from the loopback connection changes `x_mm` after the tick. The same notice from a player connection leaves `x_mm` unchanged and appends a deny line with that connection and the `edit` capability. `command` from the player is allowed. Two calls with the same inputs produce the same audit bytes.
+- **Behavior:** `allow(connection, capability, target) -> Result` is the gate from D42. Tool handlers from N32 onward call it, including in-process CLI calls. Under `profile-dev` and `profile-staging`, every connection is granted inspect, edit, spawn, save, undo, subscribe, seek, and debug, on the player entry and the authority entry. No token is consulted. Under `profile-release`, the player entry's `tool_api_compiled()` is false (the test builds `genos-net` with `--no-default-features --features profile-release`). The release authority still has `allow`. A player connection gets `command` only. A tool call without a token returns an error, writes an audit line, and leaves the sim unchanged. Audit lines are not part of a player snapshot.
+- **Test:** `dev_and_staging_allow_a_player_edit_and_release_refuses_it`
+  - Dev: an edit notice from a remote player connection changes `x_mm` after the tick. The same notice from an agent connection changes it again. Staging does the same, with no token in either call. Release authority: the player edit leaves `x_mm` unchanged and appends a deny line with that connection and the `edit` capability. `command` from the player is allowed. `tool_api_compiled()` is true for dev and staging and false for the release player entry. Two release denies with the same inputs produce the same audit bytes.
 - **Commit:** `net: gate every tool call on a capability`
 
 ### N41. Player packets stay inside interest
@@ -1730,7 +1732,7 @@ Do not start N1. D1–D54 are unanswered. The datagram layout, the replay file, 
 ### N42. Operator inspect and admin edit
 
 - [ ] **Files:** `allow.rs`, `examples/session/src/tool.rs`. Test `examples/session/tests/grants.rs`.
-- **Behavior:** `--operator-token` and `--admin-token` store the secrets on the authority. A join that presents the operator secret is granted `inspect` and not `edit`. A join that presents the admin secret is granted `inspect` and `edit`. A wrong secret is refused and audited. An empty configured secret means that grant cannot be taken. Dev loopback still needs no token. Inspect reads a far entity the player packet omitted. Edit from the operator grant is denied. Edit from the admin grant follows N32. Neither grant is applied on a player runtime. The authority applies the admin edit, and the player learns it from the next snapshot.
+- **Behavior:** This step runs under `profile-release`. `--operator-token` and `--admin-token` store the secrets on the authority. A join that presents the operator secret is granted `inspect` and not `edit`. A join that presents the admin secret is granted `inspect` and `edit`. A wrong secret is refused and audited. An empty configured secret means that grant cannot be taken. Dev and staging do not consult the token, which N40 already covers. Inspect reads a far entity the player packet omitted. Edit from the operator grant is denied. Edit from the admin grant follows N32. The release player runtime does not apply the edit. The authority applies the admin edit, and the player learns it from the next snapshot.
 - **Test:** `an_operator_can_inspect_and_an_admin_can_edit`
   - An entity at `x_mm` 200_000. Operator inspect returns 200_000. That id is absent from the player datagram. Operator edit leaves the pose unchanged and writes a deny line. A second entity in the view cell at `x_mm` 5. Admin edit sets it to 8. After the tick, inspect returns 8 and the player snapshot of that relevant entity is 8. A join with the wrong admin token does not receive `edit`. The release-player assertion stays in N40.
 - **Commit:** `session: grant inspect to an operator and edit to an admin`
@@ -1832,7 +1834,7 @@ Do not start N1. D1–D54 are unanswered. The datagram layout, the replay file, 
 - The camera agent endpoint does not spawn, edit, or despawn simulation entities. Scene handles stay on that endpoint.
 - A tool does not write a column. Time-travel does not fork a session. Live undo does not seek backward and does not undo a player command.
 - Save does not rewrite the Rhai scene. A prefab is data. A failed save does not change the sim. Undo does not revert the file.
-- Staging and release player binaries do not contain the tool API. The authority starts with tool grants empty. A join role byte does not grant a capability. This repo does not store accounts. Admin edits run on the authority. The audit log is not sent to players.
+- The release player binary does not contain the tool API. The release authority starts with tool grants empty. Dev and staging compile the tool into both binaries and grant every tool capability with no token. A join role byte does not grant a capability on release. This repo does not store accounts. Release admin edits run on the authority. The audit log is not sent to players.
 - A mod is data plus a checked script. It is not a native library. A duplicate key without `overrides` does not load. In `modded`, a mismatched manifest hash does not tick. A mod author inspects from a dev build. A release player does not gain that tool because mods are loaded.
 - `competitive` rejects a visual hash outside the developer table and omits an occluded enemy from the player datagram. The hash does not detect a renderer that lies about the files, or a driver overlay. `sandbox` does not run those gates. The operator cannot add a mode the game left off the allowed list.
 - The first query has no field predicates. The cause stores one hop, not a graph walk.
