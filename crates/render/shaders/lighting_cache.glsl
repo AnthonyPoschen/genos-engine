@@ -1198,7 +1198,7 @@ void lighting_sc_rectify(uint slot, vec3 reg) {
 // Flag 536870912: off (the S62A pool and S72L/O regularisation).
 const float LIGHTING_SC_L2_Z = 3.0;
 const float LIGHTING_SC_L2_REL = 0.12;
-const float LIGHTING_SC_L2_SIGMA = 8.0;
+const float LIGHTING_SC_L2_SIGMA = 6.0;
 const float LIGHTING_SC_L2_FLAT = 96.0;
 bool lighting_sc_layer2() {
     return lighting_world_mode() == 3u && (lighting_sc_flags() & 536870912u) == 0u;
@@ -1241,6 +1241,7 @@ void lighting_sc_recon(uint slot) {
         vec3 dir = cos(a) * ta + sin(a) * tb;
         float prev = ref;
         float prev_se2 = ref_se2;
+        float trans = 1.0;
         [[dont_unroll]] for (uint l = 0u; l < 5u; l++) {
             float r = float(1u << l);
             vec3 q = p + dir * r * size;
@@ -1255,20 +1256,20 @@ void lighting_sc_recon(uint slot) {
             }
             float L = dot(v.rgb, lw);
             float se2 = lighting_sc_l2_var(s2, L) / c;
+            // S72Q: the stops are smooth (a hard break flipped a far tap's
+            // whole weight in or out as noise crossed the threshold: pops). A
+            // step from the last tap scales what the direction passes on
+            // (transmittance); the difference from the start scales this tap.
+            float w0 = 1.0;
             if (prev >= 0.0) {
                 float dl = L - prev;
-                if (dl * dl > LIGHTING_SC_L2_Z * LIGHTING_SC_L2_Z * (se2 + prev_se2) && abs(dl) > LIGHTING_SC_L2_REL * max(L, prev) + 1.0e-4) {
-                    edge = edge || r <= 4.0;
-                    break;
-                }
+                float x = abs(dl) / max(LIGHTING_SC_L2_Z * sqrt(se2 + prev_se2), LIGHTING_SC_L2_REL * max(L, prev) + 1.0e-4);
+                trans *= exp(-x * x);
             }
             if (ref >= 0.0) {
                 float d0 = L - ref;
-                float z = LIGHTING_SC_L2_Z + 1.0;
-                if (d0 * d0 > z * z * (se2 + ref_se2) && abs(d0) > 2.0 * LIGHTING_SC_L2_REL * max(L, ref) + 1.0e-4) {
-                    edge = edge || r <= 4.0;
-                    break;
-                }
+                float x0 = abs(d0) / max((LIGHTING_SC_L2_Z + 1.0) * sqrt(se2 + ref_se2), 2.0 * LIGHTING_SC_L2_REL * max(L, ref) + 1.0e-4);
+                w0 = exp(-x0 * x0);
             } else {
                 // A texel with no sets yet: the first tap it reaches is its reference.
                 ref = L;
@@ -1276,8 +1277,14 @@ void lighting_sc_recon(uint slot) {
             }
             prev = L;
             prev_se2 = se2;
+            if (r <= 4.0 && trans * w0 < 0.5) {
+                edge = true;
+            }
             float g = exp(-0.5 * r * r / (LIGHTING_SC_L2_SIGMA * LIGHTING_SC_L2_SIGMA));
-            float cw = c * (fract(v.w) > 0.1 ? 0.25 : 1.0) * g;
+            float cw = c * (fract(v.w) > 0.1 ? 0.25 : 1.0) * g * trans * w0;
+            if (trans < 0.01) {
+                break;
+            }
             sum += cw * r * v.rgb;
             wsum += cw * r;
             support += cw;
