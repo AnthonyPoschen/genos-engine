@@ -25,7 +25,10 @@ Numbers context: the scene, GPU and resolution are not recorded for these figure
 not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 
 ## Outcome and why
-Reverted to the checkpoint tree (6b4fe308) before the S74 cost cuts. Reason as relayed by the Engine agent from the chat with Anthony (the transcript page containing it was not available to this write-up): the pre-fill made the picture darker, slower and popped more. Decision: off-screen pre-fill comes back the Lumen way only (surface-cache feedback), once performance is good; kept on branch gi-v2-prefill (22bcd47f).
+Source (Engine report on S73B, 2026-10-12 ~16:05): against the 6b4fe308 checkpoint the S73A+S73B build was darker, slower and popped more; Anthony should not test it as-is. Reverted to the checkpoint (11639205, 8b62829b) and kept on gi-v2-prefill. Per Anthony (t363u), off-screen low-priority areas can only be filled once there is spare capacity, so pre-fill waits for performance.
+
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Anthony (15:51-15:57, t357u-t363u): do off-screen pre-fill for turns and walking backwards next; pre-fill directions not faced and occluded spaces at lower priority (S-curve lag idea); asked for paper basis, then: try the Lumen approach, expecting it to look bad until there is spare performance.
 
 ## Lessons / when to revisit
 Bring back once there's spare budget. Was affected by the scout camera bug (S74A).

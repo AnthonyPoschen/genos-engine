@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 Anthony still saw a ring where quality dropped; band edges follow the camera.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Walk-up test: grain 0.0059 -> 0.0052, worst 0.0087 -> 0.0071, final settled 0.0175 -> 0.0142; trail got worse (0.0372 -> 0.0421). Anthony (t211u): 'better but still noticeable'.
+
 ## Lessons / when to revisit
 Do not key cache cell size to the eye.

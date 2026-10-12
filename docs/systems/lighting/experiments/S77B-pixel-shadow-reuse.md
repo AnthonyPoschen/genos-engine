@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 No speedup measured; re-pushed on request after a smoke test without moving shadows; moving shadow edges tore (staircase). See postmortem.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+First tried and reverted for no gain (light pass stayed 8.6-9 ms); Anthony asked for all four steps on gi-v2 (t394u-t397u) so it was re-applied unchanged. Anthony (t399u/t400u): moving shadows had jittery torn edge artefacts; the rest of the shadow was fine. Reverted in 9e242987.
+
 ## Lessons / when to revisit
 Every step needs a moving-shadow smoke test with screenshots looked at (shad2-S77R/mv-full.png after revert).

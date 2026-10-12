@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 Texels are world-anchored, removing probe swim. 262144 (hold) rejected for blotch.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+See E12 (flag cap bug invalidated S14-S18), E14 (item 1).
+
 ## Lessons / when to revisit
 Holding converged texels stops drift but freezes noise; later work (S72R/MSME, IC stop rule) revisits that trade-off.

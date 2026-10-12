@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 Anthony: uniform low or high beats a patchwork.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+6d055836 still-scene run: every texel >= 4 sets by frame 60; 38 fps; light pass ~16 ms; page gate held 21-30k texels a round. Anthony (t321u/t322u): better on average but the detail pass still pops, even with all movement stopped.
+
 ## Lessons / when to revisit
 not recorded

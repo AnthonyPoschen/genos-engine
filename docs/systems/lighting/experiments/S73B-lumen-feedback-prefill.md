@@ -25,7 +25,10 @@ Numbers context: the scene, GPU and resolution are not recorded for these figure
 not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 
 ## Outcome and why
-Reverted to the checkpoint tree (6b4fe308) before the S74 cost cuts. Reason as relayed by the Engine agent from the chat with Anthony (the transcript page containing it was not available to this write-up): the pre-fill made the picture darker, slower and popped more. Decision: off-screen pre-fill comes back the Lumen way only (surface-cache feedback), once performance is good; kept on branch gi-v2-prefill (22bcd47f).
+Source (Engine report, 2026-10-12 ~16:05): S73B made every metric worse, including a darker image in all five captures; likely the off-screen feedback texels took ray budget; the darkening cause was not found. Suggested retune (fewer marked scout hits, keep marked-used texels out of cache reads until they have samples) was not done. Reverted (8b62829b); kept on gi-v2-prefill (22bcd47f). Lumen-only approach, once performance is good (Anthony t361u-t363u).
+
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Turn strip ~/.cache/gi2diag/perf/turn-S73B/strip.png was not looked at; logs ship-S73A.log, ship-S73B.log.
 
 ## Lessons / when to revisit
 S-curve off-screen lag bound idea (Anthony 15:55) deferred until spare performance.

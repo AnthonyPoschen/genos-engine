@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 Anthony 14:03: must scale down to GTX 1060; nothing may depend on a minimum ray count.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Pop / rays per frame (early -> settled): 3db494ca 0.40/0.22; S72N 0.16/0.26; S72O 0.11/0.19, 676k -> 331k; S72P 0.33/0.72, 847k -> 393k; S72Q 0.15/0.11, 153k -> 54k; S72R 2.83/0.11; S72S 0.095/0.111, 579k -> 49k (-84% settled vs S72O). fps 29-36, light 15.7 ms, total 24.6 ms. Failed the weak-GPU rule: at 1/8 and 1/16 budget still blotchy at frames 60 and 600. Anthony (t337u): better but pages blocky with moving lights.
+
 ## Lessons / when to revisit
 not recorded

@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 not recorded
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+See E16 (built with S59C as one bundle at Anthony's request).
+
 ## Lessons / when to revisit
 not recorded

@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 not recorded
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+See E16. e7803342 ~5% faster; eedd6671 settling fix; c4c787d1 higher settle bar per Anthony (t235u).
+
 ## Lessons / when to revisit
 not recorded

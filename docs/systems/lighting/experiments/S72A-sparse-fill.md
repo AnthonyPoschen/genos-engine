@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 not recorded
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Anthony (t307u): frame rate noticeably up, texels fill faster, but pop-ins are bigger; not spread wide enough; still scene ~40 fps. A video showed static coarse blocks that never refined (-> S72D).
+
 ## Lessons / when to revisit
 not recorded

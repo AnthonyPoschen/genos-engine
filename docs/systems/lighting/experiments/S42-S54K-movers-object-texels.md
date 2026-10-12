@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 S52 found movers never reached the GPU (change block upload stopped after the changes). Swapping pixels to probes under light change (S46/S47) was most of the mix error, so texels stay shown.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+See E15.
+
 ## Lessons / when to revisit
 Check that change data actually reaches the GPU before tuning reactions to it.

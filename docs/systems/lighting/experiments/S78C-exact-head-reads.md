@@ -27,5 +27,8 @@ shad-S78C a/b (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 7 of 8 strata refilled every frame (3.6M fill hits still).
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Anthony (t418u/t419u): his own fps on c660c0db mostly 20-30 with moments at 52; told to keep tests consistent rather than chase it (t420u).
+
 ## Lessons / when to revisit
 Biggest single win; another 'always changed' bug.

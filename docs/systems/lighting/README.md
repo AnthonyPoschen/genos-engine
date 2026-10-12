@@ -6,10 +6,12 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 
 ## Missing history (as of 2026-10-12)
 
-- Only the latest pages of the chat transcripts were available: Engine positions 3324-3359 of 3360 (22:42-22:52) and Chief positions 6641-6672 of 6673 (unrelated launch work). Chat-only reasons and decisions before 22:42 come from the git log, steps.md, the existing doc and a relayed summary; older chat history was not read.
-- S75, S76, S76B-D, S77A, S77C: commit subject and steps.md row only; detail not recorded.
-- Scene, GPU and resolution for most figures: not recorded in the sources.
-- Screenshots are referenced by name only (`~/.cache/gi2diag/perf` on zanven-pc), not copied.
+- Engine chat read from an export covering positions 33-3359 (Sat 10 Oct 11:53 to Mon 12 Oct 22:52). Not read: positions 0-32 and the gaps 80-94, 160-162, 240-248, 320-349, 480-488, 720-728, 800-804, 960-961, 1040-1052, 1200-1208, 1280-1281, 1360-1365, 1440-1447. Tool results were skipped; user messages, messages to Anthony and subagent reports were used. Long reports were read in part, so some figures inside them may be missing.
+- Chief's engine chats: pending a separate summary; only an unrelated recent page was available.
+- Chat from about 05:40 to 10:35 on 12 Oct (S63-S68 work) is mostly absent from the export; those entries rest on git and the doc.
+- S75, S76, S77 detail now comes from the chat reports; S70A-C and S71 have git only.
+- Scene, GPU and resolution are recorded only where an experiment file says so.
+- Screenshots and videos are referenced by name only, not copied.
 
 ## Current state (2026-10-12)
 
@@ -28,6 +30,12 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Always spend some budget on spread-out checks so quiet areas that should not be quiet are found.
 - Probes must not be woken by the shared averaged field; only by real neighbour change, spread by ring tests with group-test splitting ([WAKE](experiments/WAKE-neighbour-wake-design.md)).
 - Off-screen pre-fill and its S-curve lag bound wait until there is spare performance.
+- Test rules (10 Oct): every moving test soaks and records a settled frame first, ends soaked, and returns movers to the start; short tests for one situation; a test must fail on the build that shows the problem before it is trusted; hand-validate new checks, then spot-check ~1%.
+- GI v1 is the stability floor, not the goal; the target is the path-traced reference (11 Oct).
+- GPU-resident design: frequently used data stays on the GPU at fixed locations; the CPU sends only small changes (12 Oct).
+- Whole-image consistency beats local sharpness; quality changes only at logical boundaries (12 Oct).
+- Lighting VRAM may grow if it cuts per-frame compute; total should stay fixed rather than scale with the scene (12 Oct).
+- Never skip lighting on an assumption; verify with an extraordinarily cheap check every frame (12 Oct).
 
 ## Deviations from the papers (summary)
 
@@ -42,8 +50,35 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 
 ## Experiment index
 
+E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-number or chat-only findings and decisions; [history.md](history.md) is the chronological record of Anthony's feedback per build.
+
 | ID | Date | Idea | Result | Commit / patch |
 |---|---|---|---|---|
+| [E01](experiments/E01-splotch-diagnosis.md) | 2026-10-10 | Splotch diagnosis: which cause makes v2 blotchy (cache resolution, per-texel albedo, probe rays, still-scene a | finding | none (throwaway worktree; report /workspace/shots/gi2diag/SUMMARY.md on the box) |
+| [E02](experiments/E02-stored-probe-hits.md) | 2026-10-10 | Probes keep 512 hits (8 rotating strata of 64) and re-light them every frame; no reset on lamp/sun/sky change | pushed | ae829f41 |
+| [E03](experiments/E03-per-ray-projection-neighbour-borrow.md) | 2026-10-10 | Project each kept ray along its own direction; moving/uncovered probes borrow strata from last frame's 5x5 nei | pushed | 52712f9b, 0fb4294e |
+| [E04](experiments/E04-lumen-probe-filter.md) | 2026-10-10 | Lumen-style direction-space probe neighbour filter, plus quick/mid/full gi-check tiers | pushed | 1c3d6d1f, a6432375, 46550f1 |
+| [E05](experiments/E05-kept-ray-retrace-on-movers.md) | 2026-10-10 | When a moving box crosses a kept ray, re-trace it in the same frame instead of dropping it | pushed | defa10af |
+| [E06](experiments/E06-contact-term.md) | 2026-10-10 | Full-resolution short-range contact term (Lumen-style) | rejected | not pushed |
+| [E07](experiments/E07-hex-probe-grid.md) | 2026-10-10 | Hex-offset (triangular lattice) probe grid | parked (Anthony) | none |
+| [E08](experiments/E08-turn-fill-and-cell-offset.md) | 2026-10-10 | Turn swim fix: trace missing strata from the probe in the same frame; pattern cell looked up half a cell in fr | pushed | 7ebb886, e14317f, edffa81 |
+| [E09](experiments/E09-room-swim-spin-fixes.md) | 2026-10-11 | Room swim / spinning boxes: filter rounds 2/4/8 probes apart, 64 rays per light-cache patch; strata traced fro | pushed | b5fa8eb7, 1b1101e2, 839d4495 |
+| [E10](experiments/E10-gpu-reference.md) | 2026-10-11 | GPU path-traced reference on hardware ray queries (independent of the engine) | pushed | 5bb08892, 86e90392, 6ce7fd48 |
+| [E11](experiments/E11-surface-cache-stand-in.md) | 2026-10-11 | Stand-in test: pixels read a converged world light cache (world=1) to decide whether a surface cache is worth  | finding (go) | none (experiment runs W6/W7) |
+| [E12](experiments/E12-flag-transport-cap.md) | 2026-10-11 | Bug: SC flags were capped at 127 on the Rust side (and lost precision in head w) | fixed (S19, 8526e44e) | 8526e44e |
+| [E13](experiments/E13-adaptive-blend.md) | 2026-10-11 | World-pinned adaptive blur sized by noise, capped for near/large surfaces | on hold (Anthony), then judged unnecessary | none |
+| [E14](experiments/E14-item1-change-aware-cells.md) | 2026-10-11 | Survey item 1: GIBS change-aware cells (dormant cells fire few change-detection rays) | pushed (flag 1048576, see S26-S41) | 6ce97ac6..d8101b09 |
+| [E15](experiments/E15-item4-movers-gpu.md) | 2026-10-11 | Item 4: object-local texels for moving/spinning boxes | pushed as default with ba9adca0; targets still failing | f13d56ba, ba9adca0 |
+| [E16](experiments/E16-few-rays-gibs-lumen-bundle.md) | 2026-10-12 | Lumen update order + GIBS extra rays + few rays per relight built together (S58A, S59C), then settle fixes (S5 | pushed | a4a7b23d, e7803342, eedd6671, c4c787d1 |
+| [E17](experiments/E17-wrc-seeding-prefill.md) | 2026-10-12 | World space radiance cache first draft: running average of 32 rounds, scout rays around the camera pre-fill ce | pushed | aa1b245e |
+| [E18](experiments/E18-denoise-perceptual-stop.md) | 2026-10-12 | Variance-guided surface-space denoise plus perceptual stop rule (S62A) | pushed, later superseded (S72C reverted the always-on version) | 052fba94 |
+| [E19](experiments/E19-rate-based-scheduling-design.md) | 2026-10-12 | Rate-based updates: each surface's rate follows how much its light changes; budget is a ceiling, not a target | pushed (S64-S65) | 70d9017f..b5a72df4 |
+| [E20](experiments/E20-sun-sky-share.md) | 2026-10-12 | Cache keeps sun/sky share separate from lamp light; sun/sky change rescales it at once (S63A); night->day blac | pushed | 0f288334, bfdb8900, 27afd41e |
+| [E21](experiments/E21-perf-transfer-audit.md) | 2026-10-12 | Code audit: is CPU<->GPU transfer the bottleneck? | finding (no) | none |
+| [E22](experiments/E22-s69c-kept-hit-relight.md) | 2026-10-12 | Kept probe hits relit only on their stratum's frame plus one rotating stratum (S69C) | pushed | 2f35eaa2 |
+| [E23](experiments/E23-cost-waste-analysis.md) | 2026-10-12 | Profiling at the checkpoint: how much traced work changes the picture | finding | none (worktree ~/.cache/ge-perf at 6b4fe308) |
+| [E24](experiments/E24-s72-fill-speed-direction.md) | 2026-10-12 | Fill-speed direction for S72: sparse fill, reuse, denoise, then regions refine together | decision | S72A-S72S |
+| [E25](experiments/E25-s77-perf-steps-feedback.md) | 2026-10-12 | S76B-S77 one-at-a-time perf steps and Anthony's verdicts | record | dbb4777a..9e242987 |
 | [P6](experiments/P6-probe-path.md) | 2026-10-10/11 | Screen probes (16 px tiles, 64 rays/frame in 8 strata), kept hits re-shaded every frame, Lumen-style probe fil | pushed (later default off; `GENOS_LIGHTING_WORLD=0`) | 6ce7fd48 and earlier (ae829f41, a6432375, b5fa8eb7, 1b1101e2) |
 | [S26-S41](experiments/S26-S41-surface-cache-flags.md) | 2026-10-11 | Surface cache: world texels pixels read directly, running mean to cap, flag experiments (239882, 524288 camera | pushed (default from S54K) | 21cb8a41..d8101b09 |
 | [S42-S54K](experiments/S42-S54K-movers-object-texels.md) | 2026-10-11/12 | Movers in the surface cache: mover expiry 240 frames, pixels near movers, object-local texels, mover upload fi | pushed | 1e7573a3, f13d56ba, ba9adca0 |

@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 S62F: global rescale dimmed lamp-bounced light at night.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+See E17 (WRC seeding) and E18 (denoise). Anthony (t253u/t254u): WRC refresh back to 64 rays and never reset on light change.
+
 ## Lessons / when to revisit
 not recorded

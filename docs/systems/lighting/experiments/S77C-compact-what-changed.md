@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 not recorded
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Only compact was changed (texels unread for 60 frames with no check due visited 1 round in 8); gather unchanged because every probe gets a new stratum every frame (skipping would need ~130 MB per-stratum sums at 1080p). Anthony (t373u-t374u) had doubted 'only changed' smoothing but asked to try it separately.
+
 ## Lessons / when to revisit
 Retest: this was judged before the still-scene churn (surface cache still converging, waking probes every frame; see [counters](S78S-counters-still-churn.md)) was found. Re-run on the build that fixes it.

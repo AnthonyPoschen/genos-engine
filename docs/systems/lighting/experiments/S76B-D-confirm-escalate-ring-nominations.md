@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 not recorded
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+78637784 -> dbb4777a: moving 29.2 -> 28.6 ms (33 -> 34 fps), almost all from the TDL check; cache rays 96k -> 125k per frame (re-scheduled WRC cells ~27k). TDL check: picked lamps shadow-traced; within 10% the value is kept and nudged a quarter toward the check. Sun-sweep gaps: neighbours of a big change were never queued, not dropped.
+
 ## Lessons / when to revisit
 not recorded

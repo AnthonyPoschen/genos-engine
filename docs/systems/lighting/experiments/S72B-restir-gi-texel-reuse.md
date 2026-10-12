@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 Neighbour reuse without visibility spread correlated low-frequency blotches.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Reverted with S72G/S72H in the combined build 6d055836.
+
 ## Lessons / when to revisit
 not recorded

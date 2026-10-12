@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 Baked low-frequency blotches; stopped texels while error was low-frequency.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Smoke: none of A/B/C changed fps (29-35).
+
 ## Lessons / when to revisit
 not recorded

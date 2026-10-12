@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 S66A did not change time to correct; S68B worse.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+See E20 (S69A/B) and E22 (S69C, +15% fps).
+
 ## Lessons / when to revisit
 not recorded

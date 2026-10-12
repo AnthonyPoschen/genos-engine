@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 Screen-aligned tearing on turn side (probe/texel seam).
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Bundle 3db494ca: fps 27-34, still ~37, light pass 16.8 ms, total 26 ms; pop 0.40% vs 0.76% early, 0.22% vs 0.29% later. Anthony (t326u): tearing fixed, squares building up less noticeable.
+
 ## Lessons / when to revisit
 not recorded

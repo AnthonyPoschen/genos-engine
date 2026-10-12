@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 V6 found stage bits ORed into bit 3, so the filter never ran; V5 cell addressing; see README.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Anthony (t338u-t343u): d23a9218 'very very splotchy, big massive patches, don't abandon it'; frame rate down (~4 ms new pass); close-up ripples/streaks; 'have we missed something?'. After V5-V11 he approved; checkpoint gi-v2-checkpoint-2026-10-12 tagged at 6b4fe308.
+
 ## Lessons / when to revisit
 not recorded

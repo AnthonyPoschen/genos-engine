@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 Anthony 12:37: smoothing would be lag; the goal is fast fill.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Anthony (t299u-t301u, 12:27-12:37): pops are fine if the screen fills near-immediately; smoothing becomes the issue.
+
 ## Lessons / when to revisit
 Principle: pop-in is fine if the screen fills near-immediately; no display smoothing.

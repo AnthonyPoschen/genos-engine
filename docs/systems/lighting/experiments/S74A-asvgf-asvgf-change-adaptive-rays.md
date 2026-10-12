@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 not recorded
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Deviations stated: lambda->rays mapping (whole set with probability min(1, lambda/0.25)); 1-ray checks spread as a box over 3x3 with no a-trous of gradients; checks are measurement only; dark-ray normalisation (>= 10% of texel mean); thresholds 0.05, 3%, 0.25, 900-frame age floor chosen by us.
+
 ## Lessons / when to revisit
 not recorded

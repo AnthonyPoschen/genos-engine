@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 Bounce swims while the camera turns because the probe grid slides with the screen (Anthony); replaced as default by the surface cache at S54K.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+See E02-E09 for the Oct 10-11 fixes on this path.
+
 ## Lessons / when to revisit
 Screen-anchored data swims; world-anchored texels fixed that. Probe path still exists as an A/B mode.

@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 not recorded
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Moving 28.4 -> 27.9 ms (34 -> 35 fps); light pass 11.2 -> 10.6 ms; sweep 26.3 -> 26.2 ms; turn/day smoke ~1% brighter (day30 .547 vs .541, turn30 .503 vs .497), counted as no worse (judgment call). Uncontended runs (nvidia-smi checked).
+
 ## Lessons / when to revisit
 not recorded

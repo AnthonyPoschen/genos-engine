@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 Band rings followed the camera and showed coarse grain while running.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Anthony (t194u-t212u): saw a coarse circle looking down and walls/floors dropping to coarse grain when walking closer; with everything frozen saw the ring; first 'don't delete them, make sure they don't remove what existed' (-> S56), then 'it's not in Lumen or the papers, it's causing more issues than it helps' -> removed.
+
 ## Lessons / when to revisit
 Rule: camera decides residency and update order only, never cell size.

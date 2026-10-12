@@ -27,5 +27,8 @@ shad-S78Q4/b (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 Moving scene has ~5 lamps per pixel; probe-ray hits still loop all lamps.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Anthony (t430u/t431u): asked whether it throws lamps away (no: unbiased weighted picking); add the 100-lights small room as a benchmark. Decision (Q t436): 'Shelve Q4 for now'.
+
 ## Lessons / when to revisit
 Follow-up: apply picking to probe hits for many-lamp scenes.

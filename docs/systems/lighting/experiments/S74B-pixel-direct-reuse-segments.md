@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 Reverted for the Lumen direct-light plan; a screen read of texels would blur shadow edges.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Anthony (t376u): cache the direct light only if we can redo exactly the parts movement affects. Then chose (t378 card) 'Follow Lumen exactly: cache feeds bounce-light rays only, screen stays per-pixel', so S74B was reverted for S75.
+
 ## Lessons / when to revisit
 not recorded

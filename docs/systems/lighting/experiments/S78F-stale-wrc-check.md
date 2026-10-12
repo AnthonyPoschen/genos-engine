@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 not recorded
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Anthony (t423u): moving scene showed 0 improvement for him; still scene improved to 80 fps; no visual issues.
+
 ## Lessons / when to revisit
 not recorded

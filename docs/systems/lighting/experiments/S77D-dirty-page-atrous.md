@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 not recorded
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+All six filter levels stored per slot: 240 -> 368 B per slot, +128 MB VRAM; re-filter only when input moved > 1%; a-trous 6.4 -> 3.5 ms still. Single uncontended run. Earlier judged impossible as briefed (seams) without per-level storage (~80 MB estimate).
+
 ## Lessons / when to revisit
 not recorded

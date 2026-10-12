@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 not recorded
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Followed the E21 audit (transfer not the bottleneck). Anthony's design rule: GPU-resident data at deterministic locations.
+
 ## Lessons / when to revisit
 not recorded

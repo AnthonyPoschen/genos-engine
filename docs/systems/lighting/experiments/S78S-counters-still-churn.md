@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 Main cause: probe hits read surface-cache texels that keep converging (decays, not a loop, but not settled by 600 frames). Unexplained: ~4,000 hits/frame reading coarse cells jump >5% (coarse-patch flip mystery).
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Anthony (t445u/t446u): dump GPU data (lighting maps as textures etc.) and make each component separable and isolatable. (t448u-t451u): papers vs our refire logic; always-on spread checks; no wakes from the shared field; ring-test group-split wakes (approved).
+
 ## Lessons / when to revisit
 Fix: per-texel IC-style stop rule; no wakes from the shared field. Dump tool planned to find the coarse flips.

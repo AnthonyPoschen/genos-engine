@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 Video showed 8x8 pages popping as squares.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Pop score could not separate it from 6d055836 (1.64% vs 1.61%); frame differences showed square page pops replaced by per-texel speckle. Anthony (t325u): initial fill fast and good, squares still appear but less; tearing when rounding corners quickly on first fill.
+
 ## Lessons / when to revisit
 not recorded

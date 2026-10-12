@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 not recorded
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Moving scene d591abfa -> S76: cache rays per frame 621k -> 561k (f20-120), 242k -> 154k (f120-300), 232k -> 96k (f300-610); texels relit 3,630 -> 1,486; still 24.5/24.0 ms (39-40 fps); moving 29.8 -> 29.4 ms (33 fps), light 12.7 -> 12.5, trace 5.1 -> 4.8; pop 0.087/0.114 -> 0.079/0.107 %; brightness .350/.498/.504/.537/.529. Confirmations defer the next check 8 -> 128 frames; escalation rays scale 16..64 with lambda. Why fps barely moved: the cached direct light hit its 32,768-texel limit every frame under moving lamps. Anthony (t386u): during the sun sweep some spots between regions were skipped and artefacts lingered until a check landed on them.
+
 ## Lessons / when to revisit
 not recorded

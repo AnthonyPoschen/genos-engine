@@ -27,5 +27,8 @@ not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 ## Outcome and why
 Scouts saw motion every frame (4096 scout rays a round when still); probe reprojection read garbage.
 
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Reported with 50db0f70: 32-38 fps vs 27-30 for the checkpoint, same brightness; pop 0.105% vs 0.084% settled (later shown to be within the checkpoint's own run-to-run range).
+
 ## Lessons / when to revisit
 Bugs that make everything look 'changed' defeat quiet paths; see also S78C and S78S.
