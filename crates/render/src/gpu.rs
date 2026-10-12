@@ -786,7 +786,7 @@ struct Gpu {
     upload_local: std::cell::Cell<[u32; 2]>,
 }
 
-struct Image {
+pub(crate) struct Image {
     image: Handle,
     view: Handle,
     memory: Handle,
@@ -1751,9 +1751,32 @@ impl Gpu {
             self.depth = copy_image(&self.depths[0]);
             self.framebuffer = self.framebuffers[0];
             self.host = copy_buffer(&self.hosts[0]);
+            self.reuse.scene = self.make_image(self.format, 0x1 | 0x2, 1, self.extent_w, self.extent_h)?;
+            self.reuse.scene_layout = 0;
+            self.invalidate_reuse();
             self.make_aa_targets()?;
             self.make_lighting_targets()?;
             Ok(())
+        }
+    }
+
+    /// The scene picture was recreated or is no longer the one on screen.
+    fn invalidate_reuse(&mut self) {
+        self.reuse.cached_key = None;
+        self.reuse.slot_gen = [0, 0];
+        self.reuse.slot_damage[0].clear();
+        self.reuse.slot_damage[1].clear();
+        self.reuse.generation = self.reuse.generation.wrapping_add(1);
+        self.reuse.scene_writer = None;
+        self.reuse.scene_ready = false;
+        self.reuse.scene_layout = 0;
+    }
+
+    /// This flight's fence has been waited, so its capture of the scene picture is done.
+    fn note_scene_writer(&mut self, slot: usize) {
+        if self.reuse.scene_writer == Some(slot) {
+            self.reuse.scene_ready = true;
+            self.reuse.scene_writer = None;
         }
     }
 
@@ -1927,6 +1950,7 @@ impl Gpu {
             )?;
             self.collect_slot_after_wait(slot)?;
             self.collect_frame_times(slot);
+            self.note_scene_writer(slot);
             self.desc_set = self.raster_sets[slot];
             check(
                 (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
@@ -1973,25 +1997,17 @@ impl Gpu {
             self.update_resident_fields();
             let swap = self.swap_images[index as usize];
             self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
-            let filtering = self.antialias != Antialias::Off;
             {
                 let lighting = self.lighting_active();
                 if lighting {
                     self.lighting_begin(slot);
                 }
-                self.raster_scene(
-                    self.framebuffer,
-                    self.extent_w,
-                    self.extent_h,
-                    matrix,
-                    !filtering && !lighting,
-                );
+                // The overlay is its own pass, so the scene picture can be copied
+                // before any UI is drawn on the colour image.
+                self.raster_scene(self.framebuffer, self.extent_w, self.extent_h, matrix, false);
                 self.color_layout[slot] = 6;
                 if lighting {
                     self.lighting_passes(slot);
-                    if !filtering && self.overlay_count > 0 {
-                        self.raster_overlay();
-                    }
                 }
                 self.frame_stamp(slot, FrameStamp::Raster);
                 if self.antialias == Antialias::Fxaa {
@@ -1999,7 +2015,8 @@ impl Gpu {
                 }
             }
             self.frame_stamp(slot, FrameStamp::Resolve);
-            if filtering && self.overlay_count > 0 {
+            self.capture_scene_picture(slot);
+            if self.overlay_count > 0 {
                 self.raster_overlay();
             }
             self.frame_stamp(slot, FrameStamp::Overlay);
@@ -4666,6 +4683,25 @@ impl Gpu {
     }
 
     fn copy_color_to_swapchain(&self, swap: Handle) {
+        self.copy_images(self.color.image, 6, swap, 7, &[self.screen_region()]);
+    }
+
+    fn screen_region(&self) -> crate::reuse::Region {
+        [0, 0, self.extent_w as i32, self.extent_h as i32]
+    }
+
+    /// Copy pixel rectangles. Layouts are the Vulkan image layouts of the two images.
+    fn copy_images(
+        &self,
+        src: Handle,
+        src_layout: i32,
+        dst: Handle,
+        dst_layout: i32,
+        regions: &[crate::reuse::Region],
+    ) {
+        if regions.is_empty() {
+            return;
+        }
         #[repr(C)]
         #[derive(Clone, Copy)]
         struct Layers {
@@ -4700,28 +4736,68 @@ impl Gpu {
             layer: 0,
             count: 1,
         };
-        let region = Region {
-            src_layers: layers,
-            src_offset: Offset { x: 0, y: 0, z: 0 },
-            dst_layers: layers,
-            dst_offset: Offset { x: 0, y: 0, z: 0 },
-            extent: Extent {
-                w: self.extent_w,
-                h: self.extent_h,
-                d: 1,
-            },
-        };
+        let copies: Vec<Region> = regions
+            .iter()
+            .map(|region| Region {
+                src_layers: layers,
+                src_offset: Offset {
+                    x: region[0],
+                    y: region[1],
+                    z: 0,
+                },
+                dst_layers: layers,
+                dst_offset: Offset {
+                    x: region[0],
+                    y: region[1],
+                    z: 0,
+                },
+                extent: Extent {
+                    w: region[2].saturating_sub(region[0]) as u32,
+                    h: region[3].saturating_sub(region[1]) as u32,
+                    d: 1,
+                },
+            })
+            .collect();
         unsafe {
             (self.fns.cmd_copy_image)(
                 self.cmd,
-                self.color.image,
-                6,
-                swap,
-                7,
-                1,
-                &region as *const Region as *const u8,
+                src,
+                src_layout,
+                dst,
+                dst_layout,
+                copies.len() as u32,
+                copies.as_ptr() as *const u8,
             );
         }
+    }
+
+    /// Copy the colour image (layout 6, no UI yet) into the scene picture.
+    ///
+    /// Capture waits until the last writer flight's fence has been waited, so two
+    /// frames never write the same image. A busy async light cache is not captured:
+    /// that picture is still moving.
+    fn capture_scene_picture(&mut self, slot: usize) {
+        let idle = self.reuse.scene_writer.is_none();
+        let capture = self.reuse.enabled && idle && !self.lighting.world_busy;
+        if capture {
+            let image = self.reuse.scene.image;
+            let old = self.reuse.scene_layout;
+            if old == 0 {
+                self.image_barrier(image, 0, 7, 0x1, 0x1000, 0, 0x1000);
+            } else {
+                self.image_barrier(image, old, 7, 0x1000, 0x1000, 0x800, 0x1000);
+            }
+            self.copy_images(self.color.image, 6, image, 7, &[self.screen_region()]);
+            self.image_barrier(image, 7, 6, 0x1000, 0x1000, 0x1000, 0x800);
+            self.reuse.scene_layout = 6;
+            self.reuse.cached_key = Some(self.reuse.scene_key);
+            self.reuse.generation = self.reuse.generation.wrapping_add(1);
+            self.reuse.slot_gen[slot] = self.reuse.generation;
+            self.reuse.scene_writer = Some(slot);
+            self.reuse.scene_ready = false;
+        }
+        self.reuse.slot_damage[slot].clear();
+        self.reuse.stats.scene_drawn = self.reuse.stats.scene_drawn.wrapping_add(1);
     }
 
     fn copy_color_to_buffer(&self) {
@@ -4784,6 +4860,9 @@ impl Gpu {
 
     fn destroy_targets(&mut self) {
         unsafe {
+            let mut scene = std::mem::replace(&mut self.reuse.scene, Image::empty());
+            self.destroy_image(&mut scene);
+            self.reuse.scene_layout = 0;
             if self.framebuffers[0].is_null() && self.framebuffer.is_null() {
                 self.destroy_aa_targets();
                 return;
@@ -4903,7 +4982,7 @@ fn copy_buffer(buffer: &Buffer) -> Buffer {
 }
 
 impl Image {
-    fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
             image: std::ptr::null_mut(),
             view: std::ptr::null_mut(),

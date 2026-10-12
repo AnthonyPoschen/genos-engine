@@ -2,7 +2,7 @@
 //! draw also diffs the overlay lists when no report arrived. See
 //! `docs/frame-reuse.md`.
 
-use crate::gpu::{ScreenLine, ScreenRect};
+use crate::gpu::{Image, ScreenLine, ScreenRect};
 
 /// One dirty rectangle in window pixels. The origin is the top-left.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,17 +19,53 @@ pub(crate) type Region = [i32; 4];
 const MERGE_GAP: i32 = 16;
 const MAX_REGIONS: usize = 8;
 
-/// Per-frame reuse state that is not a Vulkan object. The scene image is added
-/// beside this once the picture can be cached.
-#[derive(Default)]
+/// The cached scene picture and the CPU state that decides whether to reuse it.
 pub(crate) struct FrameReuse {
+    /// False when `GENOS_FRAME_REUSE=0`. The frozen lighting short list stays on
+    /// only while this is false.
+    pub enabled: bool,
+    /// Lit scene without the UI. Device-local; the frame loop never maps it.
+    pub scene: Image,
+    /// Last layout of `scene`. `0` is undefined, `6` is transfer source.
+    pub scene_layout: u32,
+    /// Scene key of `scene`, once a capture has finished recording.
+    pub cached_key: Option<u64>,
+    /// Bumps on each capture and on each resize, so a slot can tell its colour
+    /// image is stale.
+    pub generation: u64,
+    /// `generation` last copied into each flight's colour image.
+    pub slot_gen: [u64; 2],
+    /// UI damage since that flight's colour image was last repaired.
+    pub slot_damage: [Vec<Region>; 2],
     /// Dirty UI rectangles for the frame being drawn. Empty when the overlay
     /// lists did not change.
-    #[allow(dead_code)] // read when the cached picture is repaired
     pub frame_damage: Vec<Region>,
     /// Hash of what the raster and the lighting read this frame.
-    #[allow(dead_code)] // compared with the cached picture from step 4
     pub scene_key: u64,
+    /// Flight that last wrote `scene`, until its fence is waited.
+    pub scene_writer: Option<usize>,
+    /// The last capture's fence has been waited, so another flight may read it.
+    pub scene_ready: bool,
+    pub stats: ReuseStats,
+}
+
+impl Default for FrameReuse {
+    fn default() -> Self {
+        Self {
+            enabled: std::env::var("GENOS_FRAME_REUSE").map_or(true, |value| value != "0"),
+            scene: Image::empty(),
+            scene_layout: 0,
+            cached_key: None,
+            generation: 0,
+            slot_gen: [0, 0],
+            slot_damage: [Vec::new(), Vec::new()],
+            frame_damage: Vec::new(),
+            scene_key: 0,
+            scene_writer: None,
+            scene_ready: false,
+            stats: ReuseStats::default(),
+        }
+    }
 }
 
 /// How many frames took each path. Printed beside `GPU_MS` as `FRAME_REUSE`.
