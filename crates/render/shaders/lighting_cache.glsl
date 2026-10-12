@@ -3154,59 +3154,15 @@ float lighting_shadow_get(vec3 o, vec3 n, uint li) {
     }
     return -1.0;
 }
-// S77B per-pixel shadow reuse, check and escalate: a pixel reads its cell's entry
-// (12.5 cm cell, facing axis, lamp; as the hits' S74A entries) only once
-// LIGHTING_SHADOW_TRUST agreeing samples built it (w) and no sample ever
-// disagreed (w < 0: a shadow edge crosses the cell, traced always). The pixels of
-// one 64-pixel run in LIGHTING_SHADOW_PX_CHECK trace anyway each frame (the check,
-// warp-coherent); a disagreement marks the cell mixed (escalates). The lamp epoch
-// (the lamp moved or changed, a change in its range) drops every entry of the lamp.
-const bool LIGHTING_SHADOW_PX = true;
 // S77C (lighting_compact.comp).
 const bool LIGHTING_COMPACT_LIST = true;
 const uint LIGHTING_COMPACT_IDLE = 8u;
-const float LIGHTING_SHADOW_TRUST = 4.0;
-const uint LIGHTING_SHADOW_PX_CHECK = 8u;
-float lighting_shadow_px_get(vec3 o, vec3 n, uint li, bool check) {
-    if (!LIGHTING_SHADOW_PX || check || !LIGHTING_SHADOW_CACHE || li >= LIGHTING_WRC_SNAP_LAMPS || li >= scene.lamp_count) {
-        return -1.0;
-    }
-    uint tag;
-    uint at = lighting_shadow_cell(o, n, li, tag);
-    vec4 e = cache.v[at];
-    if (floatBitsToUint(e.x) == tag && floatBitsToUint(e.z) == ckeys.key[LIGHTING_SHADOW_EPOCH_AT + 8u * li] && e.w >= LIGHTING_SHADOW_TRUST) {
-        return e.y;
-    }
-    return -1.0;
-}
-void lighting_shadow_px_put(vec3 o, vec3 n, uint li, bool lit) {
-    if (!LIGHTING_SHADOW_PX || !LIGHTING_SHADOW_CACHE || li >= LIGHTING_WRC_SNAP_LAMPS || li >= scene.lamp_count) {
-        return;
-    }
-    uint tag;
-    uint at = lighting_shadow_cell(o, n, li, tag);
-    vec4 e = cache.v[at];
-    uint ep = ckeys.key[LIGHTING_SHADOW_EPOCH_AT + 8u * li];
-    float v = lit ? 1.0 : 0.0;
-    if (floatBitsToUint(e.x) == tag && floatBitsToUint(e.z) == ep) {
-        if (e.w < 0.0) {
-            return;
-        }
-        cache.v[at].w = abs(e.y - v) > 0.5 ? -1.0 : min(e.w + 1.0, 15.0);
-        return;
-    }
-    cache.v[at] = vec4(uintBitsToFloat(tag), v, uintBitsToFloat(ep), 1.0);
-}
 void lighting_shadow_put(vec3 o, vec3 n, uint li, bool lit) {
     if (!LIGHTING_SHADOW_CACHE || li >= LIGHTING_WRC_SNAP_LAMPS || li >= scene.lamp_count) {
         return;
     }
     uint tag;
     uint at = lighting_shadow_cell(o, n, li, tag);
-    vec4 e = cache.v[at];
-    if (floatBitsToUint(e.x) == tag && floatBitsToUint(e.z) == ckeys.key[LIGHTING_SHADOW_EPOCH_AT + 8u * li]) {
-        return; // S77B: a live entry (the pixels' trust count) is kept.
-    }
     cache.v[at] = vec4(uintBitsToFloat(tag), lit ? 1.0 : 0.0, uintBitsToFloat(ckeys.key[LIGHTING_SHADOW_EPOCH_AT + 8u * li]), 0.0);
 }
 

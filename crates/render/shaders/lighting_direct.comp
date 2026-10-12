@@ -212,20 +212,7 @@ void main() {
         if (times > 0.0) {
             uint li = idx >= pixels ? lamp_list_index(list, k) : LAMP_ALL;
             float sc = lighting_world_mode() == 3u && li < LAMP_ALL - 1u ? lighting_shadow_get(origin, n, li) : -1.0;
-            if (idx < pixels && lighting_world_mode() == 3u) {
-                // S77B per-pixel reuse, check and escalate (lighting_cache.glsl).
-                uint pli = lamp_list_index(list, k);
-                bool check = (lighting_hash((idx >> 6u) * 0x9e3779b9u ^ lighting_frame()) % LIGHTING_SHADOW_PX_CHECK) == 0u;
-                sc = pli < LAMP_ALL - 1u ? lighting_shadow_px_get(origin, n, pli, check) : -1.0;
-                if (sc >= 0.0) {
-                    shadow_lit = sc > 0.5;
-                } else {
-                    shadow_lit = !trace_occluded(origin, target);
-                    if (pli < LAMP_ALL - 1u) {
-                        lighting_shadow_px_put(origin, n, pli, shadow_lit);
-                    }
-                }
-            } else if (sc >= 0.0) {
+            if (sc >= 0.0) {
                 shadow_lit = sc > 0.5;
             } else {
                 shadow_lit = !trace_occluded(origin, target);
