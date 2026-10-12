@@ -1249,8 +1249,8 @@ impl Gpu {
         if let Ok(w) = self.read_stats16(memory) {
             if trace {
                 eprintln!(
-                    "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {} checks {} changed {}",
-                    self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23]
+                    "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {} checks {} changed {} prefill_listed {} prefill_taken {} prefill_sets {}",
+                    self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23], w[84], w[85], w[86]
                 );
                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
                 eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
