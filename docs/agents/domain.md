@@ -17,6 +17,7 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
 ├── README.md
 └── docs/
     ├── adr/
+    ├── agent-rubric.md
     ├── agents/
     │   └── domain.md
     ├── architecture.md
@@ -30,7 +31,7 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     │   ├── physics.md
     │   ├── renderer.md
     │   ├── ui.md
-    │   ├── lighting/ (README.md + experiments/)
+    │   ├── lighting/ (README.md, debug-standard.md, experiments/)
     │   ├── loading.md
     │   ├── audio.md
     │   └── scripting.md

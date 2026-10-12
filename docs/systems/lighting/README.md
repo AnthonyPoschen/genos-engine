@@ -195,7 +195,7 @@ The lighting has one name scheme, `lighting`, everywhere; "GI v2" survives only 
 
 No environment variable is needed: `make stress` and `make run` run the tuned defaults baked into the code (`LIGHTING_DEFAULT_WORLD` = 3, the surface cache; `LIGHTING_DEFAULT_SC_FLAGS` = 6007050). There is no lighting-selection switch (`GENOS_GI` is gone). The remaining variables are optional debug and tuning knobs:
 
-- Debug and traces: `GENOS_LIGHTING_DEBUG` (per-round counters; reads GPU counters back, so not for fps runs), `GENOS_LIGHTING_SC_TRACE` (surface cache claims and relights per readback), `GENOS_SCENE_DELTA` (resident scene and mesh field delta runs).
+- Debug and traces: `GENOS_LIGHTING_DEBUG` (per-round counters; reads GPU counters back, so not for fps runs), `GENOS_LIGHTING_SC_TRACE` (surface cache claims and relights per readback), `GENOS_SCENE_DELTA` (resident scene and mesh field delta runs). The dump, the counters, the MCP commands, the stuck and pop checks, the headless path, and the overlays are inventoried in [the debug standard](debug-standard.md). That file is the reference other systems match.
 - Tuning (A/B only): `GENOS_LIGHTING_WORLD` (0 probe path P6, 3 surface cache), `GENOS_LIGHTING_SC_FLAGS`, `GENOS_LIGHTING_SC_LOCAL`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`, `GENOS_LIGHTING_TILE`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_FILL`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_ASYNC` (async compute light cache, off by default).
 
 Older entries below quote the names of their time (`GENOS_GI2_*`); read them through the table.
