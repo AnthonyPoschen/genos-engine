@@ -2408,6 +2408,40 @@ uint lighting_atrous_stage() {
 }
 // The slot of the texel `off` cells from slot's cell on its plane (same size,
 // same salt), ~0u when none.
+// S72V5: the texel's own cell is found from its key. Its stored position is
+// where its claimer stood (a pixel's bilinear corner claims the cell next to
+// the pixel), so floor(position / size) is a cell off for about half the
+// texels and every tap of theirs was shifted: the stripes and smears.
+uint lighting_svgf_memo_slot = ~0u;
+vec2 lighting_svgf_memo_cell = vec2(0.0);
+vec2 lighting_sc_true_cell(uint slot) {
+    if (slot == lighting_svgf_memo_slot) {
+        return lighting_svgf_memo_cell;
+    }
+    vec3 p = cache.v[3u * slot].xyz;
+    vec4 nb = cache.v[3u * slot + 1u];
+    float size = nb.w;
+    uint ax = lighting_axis(nb.xyz) >> 1u;
+    uint ua = (ax + 1u) % 3u;
+    uint ub = (ax + 2u) % 3u;
+    vec2 c0 = floor(vec2(p[ua], p[ub]) / size);
+    uint key = ckeys.key[slot];
+    vec2 c = c0;
+    [[dont_unroll]] for (uint k = 0u; k < 9u; k++) {
+        uint kk = (k + 4u) % 9u;
+        vec2 cc = c0 + vec2(float(kk % 3u) - 1.0, float(kk / 3u) - 1.0);
+        vec3 q = p;
+        q[ua] = (cc.x + 0.5) * size;
+        q[ub] = (cc.y + 0.5) * size;
+        if (lighting_cache_key_sized(q, nb.xyz, size) == key) {
+            c = cc;
+            break;
+        }
+    }
+    lighting_svgf_memo_slot = slot;
+    lighting_svgf_memo_cell = c;
+    return c;
+}
 uint lighting_sc_cell_slot(uint slot, ivec2 off) {
     vec3 p = cache.v[3u * slot].xyz;
     vec4 nb = cache.v[3u * slot + 1u];
@@ -2415,7 +2449,7 @@ uint lighting_sc_cell_slot(uint slot, ivec2 off) {
     uint ax = lighting_axis(nb.xyz) >> 1u;
     uint ua = (ax + 1u) % 3u;
     uint ub = (ax + 2u) % 3u;
-    vec2 c = floor(vec2(p[ua], p[ub]) / size) + vec2(off);
+    vec2 c = lighting_sc_true_cell(slot) + vec2(off);
     vec3 q = p;
     q[ua] = (c.x + 0.5) * size;
     q[ub] = (c.y + 0.5) * size;
@@ -2461,7 +2495,11 @@ vec4 lighting_svgf_in(uint s, out float var) {
             var = max(cache.v[LIGHTING_SC_EST_AT + 2u * s].w, 0.0);
         }
     }
-    return vec4(own.rgb, min(1.0, t / (wrc ? 16.0 : 4.0)));
+    // S72V5: a texel with samples counts fully, as a pixel does in SVGF (its
+    // filter has no count weights); S72V's t / 4 mask weighed the long-settled
+    // texels over the ones under changing light (kept short), which darkened
+    // lit areas, and left the push to the WRC.
+    return vec4(own.rgb, 1.0);
 }
 float lighting_svgf_wzn(uint p, uint q) {
     vec4 np = cache.v[3u * p + 1u];
@@ -2510,10 +2548,6 @@ void lighting_svgf_variance(uint slot) {
         var = sw > 0.0 ? max(s2 / sw - (s1 / sw) * (s1 / sw), 0.0) * 4.0 / max(t, 1.0) : 0.0;
     }
     lighting_svgf_store(LIGHTING_SC_ATROUS_B, slot, v.rgb, var, v.w);
-    if ((lighting_sc_flags() & 8388608u) != 0u) {
-        // Diagnostic: the push takes the input (no levels).
-        lighting_svgf_store(LIGHTING_SC_ATROUS_A, slot, v.rgb, var, v.w);
-    }
 }
 void lighting_svgf_iter(uint slot, uint it) {
     uint src = (it & 1u) == 0u ? LIGHTING_SC_ATROUS_B : LIGHTING_SC_ATROUS_A;
@@ -2602,7 +2636,8 @@ void lighting_svgf_push(uint slot) {
     uint ax = lighting_axis(n) >> 1u;
     uint ua = (ax + 1u) % 3u;
     uint ub = (ax + 2u) % 3u;
-    vec2 uv = vec2(p[ua], p[ub]) / cs - 0.5;
+    vec2 tc = (lighting_sc_true_cell(slot) + 0.5) * nb.w;
+    vec2 uv = tc / cs - 0.5;
     vec2 g0 = floor(uv);
     vec2 fr = uv - g0;
     vec3 csum = vec3(0.0);
