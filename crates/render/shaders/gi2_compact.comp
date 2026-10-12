@@ -9,6 +9,13 @@ layout(local_size_x = 64) in;
 
 void main() {
     uint slot = gl_GlobalInvocationID.x;
+    if (gi2_dense()) {
+        // S70A: the args pass (one group, after the counts are in).
+        if (slot == 0u) {
+            gi2_write_args();
+        }
+        return;
+    }
     if (slot >= GI2_CACHE_SLOTS || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
         return;
     }

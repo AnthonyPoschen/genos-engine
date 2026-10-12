@@ -81,7 +81,13 @@ bool gi2_kept_crossed(uint h, out vec3 origin, out vec3 dir) {
 void main() {
     uint ray = gl_GlobalInvocationID.x;
     uint mode = gi2_mode();
-    if (mode == 2u) {
+    if (gi2_dense()) {
+        // S70A: this round's light cache rays only, live entries only.
+        if (ray >= gi2_dense_count() * GI2_CACHE_RAYS) {
+            return;
+        }
+        ray = gi2_probe_rays() + gi2_dense_entry(ray / GI2_CACHE_RAYS) * GI2_CACHE_RAYS + ray % GI2_CACHE_RAYS;
+    } else if (mode == 2u) {
         ray += gi2_probe_rays();
     }
     uint rays_end = mode == 1u ? gi2_probe_rays() : gi2_all_rays();

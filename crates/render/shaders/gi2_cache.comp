@@ -7,11 +7,16 @@ layout(local_size_x = 64) in;
 #include "gi2_common.glsl"
 
 void main() {
-    uint j = gl_GlobalInvocationID.x;
-    if (j >= GI2_CACHE_BATCH) {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= GI2_CACHE_BATCH) {
         return;
     }
-    if (j == 0u) {
+    // S70A: dense (indirect) dispatch over the live entries only.
+    uint j = gid;
+    if (gi2_dense()) {
+        j = gid < gi2_dense_count() ? gi2_dense_entry(gid) : GI2_CACHE_BATCH;
+    }
+    if (gid == 0u) {
         gstats.live = gi2_live_count();
         // Scheduler: the next round lists the buckets from the top down until
         // they fill what the young leave of the batch; the histogram restarts.
@@ -45,6 +50,9 @@ void main() {
             ckeys.key[GI2_SC_THR_AT] = thr;
             gstats.sched_thr = thr;
         }
+    }
+    if (j >= GI2_CACHE_BATCH) {
+        return;
     }
     uint slot = gi2_cache_batch_slot(j);
     if (slot == ~0u) {

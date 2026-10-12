@@ -1238,6 +1238,67 @@ vec3 gi2_cache_irradiance(vec3 pos, vec3 n) {
     return e.rgb;
 }
 
+// S70A indirect dispatch (Anthony: GPU-resident, no work sized on the CPU): a
+// round's light cache rays run in their own dispatches sized by the GPU. The args
+// pass (gi2_compact.comp, params.z bit 4) counts the batch entries that can hold a
+// texel (scheduled/young, trickle, WRC refresh, scouts when due), writes the
+// dispatch sizes past the WRC lists (GI2_ARGS_AT: rays x,y,z; entries x,y,z;
+// dense count; segment ends) and the ray and cache passes map their dense thread
+// to the entry (gi2_dense_entry). Nothing past the live entries is dispatched.
+bool gi2_wrc_scout_due();
+const uint GI2_ARGS_AT = 2u * GI2_CACHE_SLOTS + 2u + 17600u;
+bool gi2_dense() {
+    return ((pc.params.z >> 4u) & 1u) != 0u;
+}
+uint gi2_dense_count() {
+    return ckeys.key[GI2_ARGS_AT + 6u];
+}
+uint gi2_dense_entry(uint d) {
+    uint a = ckeys.key[GI2_ARGS_AT + 7u];
+    uint b = ckeys.key[GI2_ARGS_AT + 8u];
+    uint c = ckeys.key[GI2_ARGS_AT + 9u];
+    if (d < a) {
+        return d;
+    }
+    uint room = gi2_world_mode() == 3u ? gi2_sc_room() : GI2_CACHE_BATCH;
+    if (d < b) {
+        return room + (d - a);
+    }
+    if (d < c) {
+        return room + GI2_SC_TRICKLE + (d - b);
+    }
+    return GI2_CACHE_BATCH - GI2_WRC_SCOUT_ENTRIES + (d - c);
+}
+void gi2_write_args() {
+    uint a;
+    uint b = 0u;
+    uint c = 0u;
+    uint s = 0u;
+    if (gi2_world_mode() == 3u) {
+        uint room = gi2_sc_room();
+        uint first = min(gi2_young_count(), gi2_sc_base_room());
+        a = min(room, first + gi2_mature_count());
+        b = min(ckeys.key[GI2_SC_TRICKLE_COUNT_AT], GI2_SC_TRICKLE);
+        c = min(4u * (min(ckeys.key[GI2_WRC_CHG_COUNT_AT], GI2_WRC_REFRESH_CELLS)
+            + min(ckeys.key[GI2_WRC_BG_COUNT_AT], GI2_WRC_REFRESH_CELLS)), GI2_WRC_REFRESH);
+        s = gi2_wrc_scout_due() ? GI2_WRC_SCOUT_ENTRIES : 0u;
+    } else {
+        uint first = min(gi2_young_count(), GI2_CACHE_BATCH);
+        a = gi2_young_only() ? first : min(GI2_CACHE_BATCH, first + gi2_mature_count());
+    }
+    uint e = a + b + c + s;
+    ckeys.key[GI2_ARGS_AT + 0u] = max((e * GI2_CACHE_RAYS + 63u) / 64u, 1u);
+    ckeys.key[GI2_ARGS_AT + 1u] = 1u;
+    ckeys.key[GI2_ARGS_AT + 2u] = 1u;
+    ckeys.key[GI2_ARGS_AT + 3u] = max((e + 63u) / 64u, 1u);
+    ckeys.key[GI2_ARGS_AT + 4u] = 1u;
+    ckeys.key[GI2_ARGS_AT + 5u] = 1u;
+    ckeys.key[GI2_ARGS_AT + 6u] = e;
+    ckeys.key[GI2_ARGS_AT + 7u] = a;
+    ckeys.key[GI2_ARGS_AT + 8u] = a + b;
+    ckeys.key[GI2_ARGS_AT + 9u] = a + b + c;
+}
+
 uint gi2_live_count() {
     return min(gi2_young_count() + gi2_mature_count(), GI2_CACHE_SLOTS);
 }

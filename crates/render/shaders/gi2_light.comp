@@ -17,7 +17,13 @@ void main() {
     uint mode = gi2_mode();
     uint kept = gi2_kept_hits();
     uint cache_rays = GI2_CACHE_BATCH * GI2_CACHE_RAYS;
-    if (mode == 2u) {
+    if (gi2_dense()) {
+        // S70A: this round's light cache rays only, live entries only.
+        if (idx >= gi2_dense_count() * GI2_CACHE_RAYS) {
+            return;
+        }
+        idx = pixels + kept + gi2_dense_entry(idx / GI2_CACHE_RAYS) * GI2_CACHE_RAYS + idx % GI2_CACHE_RAYS;
+    } else if (mode == 2u) {
         idx += pixels + kept;
     }
     // Then (not on the async queue) one point per fill slot (gi2_fill_ray).

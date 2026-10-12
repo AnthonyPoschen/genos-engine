@@ -1255,6 +1255,7 @@ struct Fns {
     fence_status: FnFenceStatus,
     cmd_bind_set: FnBindSet,
     cmd_dispatch: FnDispatch,
+    cmd_dispatch_indirect: FnDispatchIndirect,
     cmd_update_buffer: FnUpdateBuffer,
     cmd_fill_buffer: FnFillBuffer,
     update_desc: FnUpdateDesc,
@@ -1369,6 +1370,7 @@ type FnFenceStatus = unsafe extern "system" fn(Handle, Handle) -> VkResult;
 type FnBindSet =
     unsafe extern "system" fn(Handle, u32, Handle, u32, u32, *const Handle, u32, *const u32);
 type FnDispatch = unsafe extern "system" fn(Handle, u32, u32, u32);
+type FnDispatchIndirect = unsafe extern "system" fn(Handle, Handle, u64);
 type FnUpdateDesc = unsafe extern "system" fn(Handle, u32, *const u8, u32, *const u8);
 type FnDescLayout =
     unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
@@ -6478,6 +6480,7 @@ fn load_fns(
             fence_status: d!("vkGetFenceStatus"),
             cmd_bind_set: d!("vkCmdBindDescriptorSets"),
             cmd_dispatch: d!("vkCmdDispatch"),
+            cmd_dispatch_indirect: d!("vkCmdDispatchIndirect"),
             cmd_update_buffer: d!("vkCmdUpdateBuffer"),
             cmd_fill_buffer: d!("vkCmdFillBuffer"),
             update_desc: d!("vkUpdateDescriptorSets"),
@@ -6592,7 +6595,7 @@ struct GpuTimes {
 
 /// Stamps per frame for the GI v2 passes: one before, one after each of the 10
 /// dispatches (the filter runs three rounds).
-const GI2_STAMPS: u32 = 12;
+const GI2_STAMPS: u32 = 16;
 
 /// Milliseconds of `spans` that fall inside any of `within` (ticks, `period` ns each).
 fn overlap_ms(spans: &[(u64, u64)], within: &[(u64, u64)], period: f64) -> (f64, f64) {

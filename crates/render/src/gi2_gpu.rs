@@ -229,6 +229,13 @@ impl Default for Gi2 {
     }
 }
 
+/// S70A dispatch kinds in a round's group list (the third field; real heights stay below).
+const GI2_ARGS: u32 = 1 << 30;
+const GI2_MODE1: u32 = GI2_ARGS + 1;
+const GI2_DENSE_RAYS: u32 = GI2_ARGS + 2;
+const GI2_DENSE_ENTRIES: u32 = GI2_ARGS + 3;
+/// Word of the dispatch args in the cache keys (gi2_cache.glsl GI2_ARGS_AT).
+const GI2_ARGS_AT: u64 = 2 * GI2_CACHE_SLOTS + 2 + 17600;
 const GI2_PASS_NAMES: [&str; 8] = [
     "gi2 compact",
     "gi2 place",
@@ -643,8 +650,8 @@ impl Gpu {
         let share = self.light_families();
         if self.gi2.cache_keys.buffer.is_null() {
             self.gi2.cache_keys = self.make_buffer_queues(
-                (2 * GI2_CACHE_SLOTS + 2 + 17600) * 4, // + the scheduler's histogram and threshold, the WRC refresh lists
-                0x20 | 0x2,
+                (2 * GI2_CACHE_SLOTS + 2 + 17600 + 16) * 4, // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (GI2_ARGS_AT)
+                0x20 | 0x2 | 0x100,
                 Memory::Device,
                 &share,
             )?;
@@ -1179,7 +1186,6 @@ impl Gpu {
         let [w, h, cols, rows] = self.gi2.dims;
         let probes = cols * rows;
         let probe_rays = probes * GI2_RAYS;
-        let rays = probe_rays + GI2_CACHE_BATCH * GI2_CACHE_RAYS;
         let bgra = if self.format == 44 { 1u32 } else { 0 };
         self.gi2.frame = self.gi2.frame.wrapping_add(1);
         let hash = {
@@ -1443,13 +1449,19 @@ impl Gpu {
                 (0usize, (GI2_CACHE_SLOTS as u32).div_ceil(64), 1u32),
                 (1, probes.div_ceil(64), 1),
                 (4, probes.div_ceil(64), 1),
-                (2, (rays + 2 * kept).div_ceil(64), 1),
-                (3, (w * h + 2 * kept + rays - probe_rays).div_ceil(64), 1),
+                // S70A: the light cache rays and patches in their own dispatches,
+                // sized on the GPU (the args pass, GI2_DENSE_*), the rest as frames
+                // without a round (mode 1).
+                (0, 1, GI2_ARGS),
+                (2, (probe_rays + 2 * kept).div_ceil(64), GI2_MODE1),
+                (2, 0, GI2_DENSE_RAYS),
+                (3, (w * h + 2 * kept).div_ceil(64), GI2_MODE1),
+                (3, 0, GI2_DENSE_RAYS),
                 (4, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
                 (5, probes.div_ceil(64), 1),
-                (6, GI2_CACHE_BATCH.div_ceil(64), 1),
+                (6, 0, GI2_DENSE_ENTRIES),
                 (7, w.div_ceil(8), h.div_ceil(8)),
             ]
         };
@@ -1488,6 +1500,8 @@ impl Gpu {
             }
             let mut filter_round = 0u32;
             let mut picked = false;
+            // The push constants the next pass sees (the gather and filter rounds add bits).
+            let mut cur_pc = pc;
             for (k, (pass, gx, gy)) in groups.iter().copied().enumerate() {
                 if pass == 4 {
                     // The gather's two rounds: the picks (bit 1), then the binning.
@@ -1502,6 +1516,7 @@ impl Gpu {
                         32,
                         round_pc.as_ptr() as *const c_void,
                     );
+                    cur_pc = round_pc;
                 }
                 if pass == 5 {
                     // The spatial filter's three rounds (gi2_filter_round).
@@ -1516,10 +1531,41 @@ impl Gpu {
                         32,
                         round_pc.as_ptr() as *const c_void,
                     );
+                    cur_pc = round_pc;
+                }
+                // S70A kinds (the third field past 1): the args pass, the dense
+                // indirect dispatches, mode-1 picture parts of a round.
+                let kind = if gy >= GI2_ARGS { gy } else { 0 };
+                if kind != 0 {
+                    let mut k_pc = cur_pc;
+                    k_pc[6] |= 1 << 4;
+                    if kind == GI2_MODE1 {
+                        k_pc[6] = (cur_pc[6] & !0x310) | 1 << 8;
+                    } else if kind == GI2_DENSE_RAYS {
+                        k_pc[6] = (k_pc[6] & !0x300) | 2 << 8;
+                    }
+                    (self.fns.cmd_push)(
+                        self.cmd,
+                        self.gi2.layout,
+                        0x20,
+                        0,
+                        32,
+                        k_pc.as_ptr() as *const c_void,
+                    );
                 }
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, self.gi2.pipes[pass]);
-                (self.fns.cmd_dispatch)(self.cmd, gx.max(1), gy.max(1), 1);
-                self.memory_barrier(0x800, 0x800 | 0x1000, 0x40, 0x20 | 0x40 | 0x800);
+                match kind {
+                    GI2_DENSE_RAYS | GI2_DENSE_ENTRIES => {
+                        let at = (GI2_ARGS_AT + if kind == GI2_DENSE_RAYS { 0 } else { 3 }) * 4;
+                        (self.fns.cmd_dispatch_indirect)(self.cmd, self.gi2.cache_keys.buffer, at);
+                    }
+                    _ => (self.fns.cmd_dispatch)(self.cmd, gx.max(1), if kind != 0 { 1 } else { gy.max(1) }, 1),
+                }
+                if kind != 0 {
+                    (self.fns.cmd_push)(self.cmd, self.gi2.layout, 0x20, 0, 32, cur_pc.as_ptr() as *const c_void);
+                }
+                // The args pass's sizes are read as indirect commands (stage 0x2, access 0x1).
+                self.memory_barrier(0x800, 0x800 | 0x1000 | 0x2, 0x40, 0x20 | 0x40 | 0x800 | 0x1);
                 if let Some(pool) = stamps {
                     (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first + 1 + k as u32);
                 }
