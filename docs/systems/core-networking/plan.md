@@ -1,10 +1,10 @@
 # Entity and networking co-design
 
-> **For agentic workers:** Do not start N1. D1–D49 are unanswered. The datagram bytes are the replay file and the live-edit path, so building N7 before those decisions are answered locks both. When they are answered, implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
+> **For agentic workers:** Do not start N1. D1–D54 are unanswered. The datagram bytes are the replay file and the live-edit path, so building N7 before those decisions are answered locks both. When they are answered, implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
 
-**Goal:** While a game is running in development, an author or an agent can inspect any entity and change it. Mods are a first-class way to change the game: data and sandboxed Rhai on the authority, the same bytes verified on every player runtime. Lockdown removes the debug tool from a release player build and does not remove the mod loader. The authority applies every change, the entity log records it, undo sends the inverse through that same path, and a save can write the result back to a sidecar or a prefab file. Every tool call goes through the same capability check. Interest limits what a player runtime can see.
+**Goal:** While a game is running in development, an author or an agent can inspect any entity and change it. Mods are a first-class way to change the game: data and sandboxed Rhai on the authority, the same bytes verified on every player runtime. The game developer sets which session modes are allowed and what the default is. The server owner picks one allowed mode. Lockdown removes the debug tool from a release player build and does not remove the mod loader. The authority applies every change, the entity log records it, undo sends the inverse through that same path, and a save can write the result back to a sidecar or a prefab file. Every tool call goes through the same capability check. Interest limits what a player runtime can see.
 
-**Architecture:** The simulation store is an entity id, a human-readable name, and plain components, updated by ordered tick passes. That store is what an agent queries and what the authority replicates. The authority runtime (the process Genos hosts) is the only writer of replicated state. A tool does not write a column. It sends a notice on an agent connection, and the authority applies it on a tick boundary. A player runtime predicts only the entity it has input authority for, and reconciles by restoring that entity and replaying its commands. Remote entities interpolate. Snapshots are unreliable deltas against the last acknowledged snapshot. A spatial grid and a byte budget decide who is in a player packet. They do not decide what an agent can read. A replay stores that stream. Seeking it is how an agent time-travels.
+**Architecture:** The simulation store is an entity id, a human-readable name, and plain components, updated by ordered tick passes. That store is what an agent queries and what the authority replicates. The authority runtime (the process Genos hosts) is the only writer of replicated state. A tool does not write a column. It sends a notice on an agent connection, and the authority applies it on a tick boundary. A player runtime predicts only the entity it has input authority for, and reconciles by restoring that entity and replaying its commands. Remote entities interpolate. Snapshots are unreliable deltas against the last acknowledged snapshot. A spatial grid and a byte budget decide who is in a player packet. A competitive session also drops entities the authority's occluders hide. That cut does not decide what an agent can read. A replay stores that stream. Seeking it is how an agent time-travels.
 
 **Tech stack:** Rust, `std::net::UdpSocket` at the socket edge, no extra networking crate. `genos-math` stays `f32` and stays out of the replicated bytes. ADR 0007 forbids a crate that owns the network. ADR 0009 forbids a script that owns the network.
 
@@ -78,11 +78,34 @@ Cheating and modding are different. Cheating is a player runtime writing authori
 
 **Order.** A manifest lists mods and their dependencies (`before`, `after`). The loader sorts that list. Two mods that provide the same prefab name, the same scene key, the same asset path, or the same script hook are a conflict. If the later mod declares `overrides` for that key, it wins and the session report names both mods. If neither declares it, loading fails and names both mods and the key. The failure happens before the first tick.
 
-**Distribution.** The authority hashes the canonical manifest and every file. A joining player runtime sends its manifest hash. On a match, the tick may start. On a mismatch, the authority sends the missing files, the player runtime checks each file hash and then the manifest hash, and a failed check never ticks. The gameplay datagram stays the entity stream. File bytes are a separate reliable transfer, still on `std` sockets, still not a crate that owns the network. Genos hosts this by pointing the authority at a directory. `--mods PATH` is the whole integration. The session report includes the manifest hash. This repo does not add a workshop.
+**Distribution.** The authority hashes the canonical manifest and every file. A joining player runtime sends its manifest hash. On a match, the tick may start. On a mismatch, the authority sends the missing files, the player runtime checks each file hash and then the manifest hash, and a failed check never ticks. The gameplay datagram stays the entity stream. File bytes are a separate reliable transfer, still on `std` sockets, still not a crate that owns the network. Genos hosts this by pointing the authority at a directory. `--mods PATH` is the mod list. `--mode` is the session mode from [Policy](#policy). The session report includes the manifest hash and the mode. This repo does not add a workshop. Which client files may differ from the authority is the mode, not a property of the loader.
 
 **Authors.** A mod author runs the authority as a dev build and uses the same inspect, edit, undo, and save tools as an engine author. A release player build joined to that session still has no tool API. Saving a prefab writes data a mod can ship. The script does not call `allow` and cannot widen its own permissions.
 
-**Replay.** The manifest hash is a header field beside the map hash (D13). A replay whose hash does not match the loaded mods refuses to open. Snapshot playback would otherwise show entities the local scripts do not know.
+**Replay.** The manifest hash is a header field beside the map hash (D13). A replay whose hash does not match the loaded mods refuses to open. Snapshot playback would otherwise show entities the local scripts do not know. The session mode is a header byte beside that hash.
+
+### Policy
+
+Modding stays available. It is not the same policy on every game or every host. The owner named four session modes. Vanilla and competitive are the locked pair. Modded and sandbox are the open pair.
+
+| Mode | Who loads mods | Client visuals | What a player packet includes |
+| --- | --- | --- | --- |
+| `vanilla` | Nobody. The developer table is the asset set. | A path in that table must hash-match. An extra visual file is rejected. | The spatial neighborhood. |
+| `competitive` | Nobody, same locked table. | Same rejection. Foliage, occluders, and exposure must meet the developer's floors. | The neighborhood, then a visibility cut. An enemy behind an authoritative occluder is absent from the datagram. |
+| `modded` | The operator's manifest, and only that list. | A gameplay-relevant path must match the table after those mods. A cosmetic path the developer left unmarked may differ. | The neighborhood, and the visibility cut when the developer preset asks for it. |
+| `sandbox` | The operator's manifest for the authority sim. The player runtime may load other files. | Hashes are not a join check. | The neighborhood. The visibility cut is off, so a sandbox can reveal. |
+
+The game developer ships the policy: allowed modes, the default mode, the gameplay-relevant paths, the numeric floors, and whether `modded` also culls. The server owner passes `--mode`. A mode that is not in the allowed list refuses to start. The owner does not edit the relevant-path list. A competitive shooter ships `competitive` as the default and can omit `sandbox` from the allowed list. A creative game ships `sandbox` or `modded` and can omit `competitive`.
+
+**Integrity.** At join, the player runtime sends SHA-256 for every gameplay-relevant path, and for every other visual path when the mode is `vanilla` or `competitive`. The authority compares those hashes to the expected table. In `vanilla` and `competitive` the table is the one shipped with the game. An operator cannot swap a grass texture and still be in a locked mode. In `modded` the table is that set with the server manifest's replacements applied in load order. A mismatch names the path and refuses the join. The tick does not start. A file whose hash is not in the table is unsigned, and locked modes reject it. `sandbox` records the hashes in the report and still starts.
+
+A hash check catches a normal install that replaced a file: grass removed, a brighter shader, a lower foliage mesh. It does not catch a player runtime that reports the official hash and then draws something else, and it does not catch a driver overlay or an external injector. Those limits stay. The protection that still works against a lying runtime is the visibility cut, because the occluded pose is not in the packet to draw.
+
+**Floors.** The developer lists the settings a client must not relax. The first two are a minimum foliage density and a minimum occluder LOD. Competitive also carries a maximum exposure, which is the brightness floor. The authority builds occluders from the map at those floors. A client report below a floor refuses the join in `competitive`, and in `modded` when the developer set the same floors. The report does not shrink the authority's occluders. Deleting a client-side grass mesh leaves the grass volume in the cull.
+
+**Visibility.** The 32 m neighborhood is the bandwidth cut. Inside it, `competitive` runs an authority segment test from the view to the entity against the occluder boxes. A blocked entity is left out of that connection's datagram. It is not sent with a hidden flag. Walls and the foliage volumes marked gameplay-relevant are occluders. The owned pawn and always-relevant entities stay in the set. When the segment clears, the entity enters as a normal spawn. A player cannot request this test. The authority runs it while building the snapshot. `sandbox` and, by default, `vanilla` skip it. An agent inspect read still returns the entity the packet omitted.
+
+**Cheating and modding under a mode.** A client file that removes grass on a competitive server is a rejected visual, even though modding as a system still exists. The same grass replacement is a normal mod when the operator selected `modded` and the manifest contains it, or when the mode is `sandbox`. The authority remains the only writer in every mode.
 
 ### Settled by this direction
 
@@ -95,6 +118,7 @@ Cheating and modding are different. Cheating is a player runtime writing authori
 - The tool API is a development surface. A player runtime never writes authoritative state. Admin and operator calls run on the authority, through `allow`, or they do not run.
 - Interest is the player's exposure. The entity log, the cause, and a full-sim checksum are not player datagrams.
 - Mods stay in every profile. Lockdown compiles the debug and agent tool out of the release player binary and leaves the mod loader in place. A mod changes the game through data and through authority-side scripts. A player runtime that writes authoritative state is cheating, and it is refused.
+- The developer chooses the allowed session modes and the default. The operator chooses one allowed mode. `competitive` rejects unsigned visuals and withholds occluded enemies. `sandbox` does not.
 
 ### How the choices score
 
@@ -134,9 +158,13 @@ Cheating and modding are different. Cheating is a player runtime writing authori
 | Every peer runs mod scripts (lockstep) | Factorio can do this. This sim has no cross-machine deterministic script. | Refuse as the authority model. D43. |
 | Authority runs mod scripts through notices | Sanctioned changes use the same path as a tool edit. Players receive the result. | Recommend. D43, D44. |
 | Data overrides in load order, with a hard conflict | Prefabs, scenes, and assets extend without a silent last-writer. | Recommend. D45, D46. |
-| Join only when the mod hash matches | The player runtime cannot bring a private rule set. | Recommend. D47. |
+| Join only when the mod hash matches | The player runtime cannot bring a private rule set. | Recommend for `modded`. D47. `sandbox` does not use this gate. D50. |
+| One mod policy for every game | A shooter and a sandbox need different gates. | Refuse. D50, D54. |
+| Neighborhood is the whole anti-cheat cut | An enemy behind a wall in the same cell is still in the packet. | Not sufficient for `competitive`. D53. |
+| Client hashes of gameplay-relevant assets | A replaced grass mesh or shader fails the join on a locked server. | Recommend. D51, D52. |
+| Trust a client that claims the official hash | A lying runtime can report the right bytes and draw something else. | The hash is not that defense. The visibility cut is. D53. |
 
-D20–D49, below, are the questions this section opens. D1–D19 stay open. Where this test adds weight to one of them, the line is in that decision.
+D20–D54, below, are the questions this section opens. D1–D19 stay open. Where this test adds weight to one of them, the line is in that decision.
 
 ## Open decisions
 
@@ -285,6 +313,7 @@ Header fields in the proposal:
 - `map_hash: u64`
 - git hash as `u16` length plus bytes, for a person reading the file
 - `mod_hash`: 32 bytes, SHA-256 of the mod manifest from D47, or 32 zero bytes when no mod is loaded. A replay refuses to open when the loaded manifest hash differs.
+- `session_mode: u8` (`1` vanilla, `2` competitive, `3` modded, `4` sandbox). Playback uses the visibility rule of that mode.
 
 A protocol mismatch refuses the open. A sim-epoch mismatch allows snapshot playback and refuses resim. The git hash is not a compatibility check. It changes every commit.
 
@@ -564,7 +593,7 @@ Capabilities in the recommendation: `command`, `inspect`, `edit`, `save`, `subsc
 - **B. The full authority snapshot**, and trust the player not to draw it.
 - **C. A plus the world checksum** from D11, so the player can detect its own desync against the whole sim.
 
-**Recommendation.** A. B is the omniscient recording, which is the authority file and an inspect grant. C lets a player watch a far fight by watching the hash change. D11.C stays for the authority file and for agent frames. The player snapshot drops those two trailing `u64`s. Desync of the owned pawn is still the pose compare in N13.
+**Recommendation.** A. B is the omniscient recording, which is the authority file and an inspect grant. C lets a player watch a far fight by watching the hash change. D11.C stays for the authority file and for agent frames. The player snapshot drops those two trailing `u64`s. Desync of the owned pawn is still the pose compare in N13. In `competitive` the interest set is the neighborhood after the visibility cut (D53). An occluded enemy is not in the packet.
 
 ### D42. Where the check sits
 
@@ -624,17 +653,17 @@ Capabilities in the recommendation: `command`, `inspect`, `edit`, `save`, `subsc
 - **B. The authority owns a manifest.** Each file has a SHA-256. The manifest hash is SHA-256 over the canonical listing (mod id, version, path, file hash, load order). The implementation of SHA-256 is in-tree. No new crate. The player sends its manifest hash at join. Equal hashes start the tick. A mismatch transfers the missing files on a reliable stream, then hashes them again. A failed hash refuses the join and never ticks. Gameplay datagrams stay the entity stream. The replay header stores the same manifest hash next to the map hash.
 - **C. Trust the filename.** No hash.
 
-**Recommendation.** B. A is easy to get wrong on a Genos host with many players. C does not stop a swapped file. The reliable stream is file bytes, not a second entity protocol.
+**Recommendation.** B for `modded`. The authority sends the files in its manifest, and the player runtime must end on that hash. `vanilla` and `competitive` do not install a client-supplied visual and do not accept a hash outside the developer table (D51). `sandbox` does not run this gate. A is easy to get wrong on a Genos host with many players. C does not stop a swapped file. The reliable stream is file bytes, not a second entity protocol.
 
 ### D48. What Genos has to do
 
 **Question.** A hosted authority should run a modded game without a special build.
 
-- **A. `--mods PATH` on `genos-session`.** The directory holds one folder per mod and a `manifest.json`. The process loads it before the tick, prints `mod_hash` in the session report, and serves that set to joiners. Genos, in the other repository, sets the argument. An empty path is the base game.
+- **A. `--mods PATH` and `--mode` on `genos-session`.** The directory holds one folder per mod and a `manifest.json`. The process loads it before the tick when the mode is `modded` or `sandbox`, prints `mod_hash` and the mode in the session report, and serves that set to joiners. `locked` modes (`vanilla`, `competitive`) refuse a mod directory. Genos, in the other repository, sets both arguments. An empty path with `vanilla` is the base game.
 - **B. A workshop client inside this repo.**
 - **C. A separate modded binary.**
 
-**Recommendation.** A. B is a product in the hosting repository. C would make modded and unmodded two protocols. The release authority already keeps the loader (D37). No profile compiles it out.
+**Recommendation.** A. B is a product in the hosting repository. C would make modded and unmodded two protocols. The release authority already keeps the loader (D37). No profile compiles it out. The mode has to be one the game's policy allows (D54).
 
 ### D49. Mod authors and the dev tool
 
@@ -644,7 +673,57 @@ Capabilities in the recommendation: `command`, `inspect`, `edit`, `save`, `subsc
 - **B. Every release player gains inspect if a mod is loaded.**
 - **C. A separate mod-debug protocol.**
 
-**Recommendation.** A. B would undo D37 as soon as a server runs mods. C splits the tool the author was promised.
+**Recommendation.** A. B would undo D37 as soon as a server runs mods. C splits the tool the author was promised. The author's dev session may use `sandbox` or `modded`. A `competitive` session still compiles the tool out of the release player.
+
+### D50. Session mode
+
+**Question.** The owner asked for vanilla or competitive (locked), modded (a server-defined list), and sandbox (anything goes). The same binary hosts all of them.
+
+- **A. Four modes: `vanilla`, `competitive`, `modded`, `sandbox`.** `vanilla` and `competitive` load no mods and reject client visuals that differ from the developer table. `competitive` also applies the setting floors and the visibility cut. `modded` loads the operator's manifest and checks gameplay-relevant paths against that result. `sandbox` loads the operator's manifest on the authority and does not check client files. The mode is a `u8` in the join and in the replay header.
+- **B. One global switch, mods on or off.**
+- **C. The player runtime picks the mode at join.**
+
+**Recommendation.** A. B cannot express a shooter and a creative server as the same game. C lets a player weaken a competitive server. The developer lists the allowed modes. The operator's `--mode` has to be on that list (D54).
+
+### D51. Who checks client asset hashes
+
+**Question.** A competitive client can delete grass, flatten a wall texture, or ship an unsigned visual pack. The owner wants the server to verify client asset hashes and reject those.
+
+- **A. The player runtime sends SHA-256 for each path in the check set. The authority compares them to the expected table and refuses the join on any miss.** The check set in `vanilla` and `competitive` is every visual path in the developer table. In `modded` it is the gameplay-relevant paths after the server manifest. A path with no row in the table is unsigned and fails a locked mode. `sandbox` stores the report and continues. The refusal names the path. The tick does not start.
+- **B. The authority trusts the client.**
+- **C. The authority sends a hidden canary mesh and watches whether the client shoots it.**
+
+**Recommendation.** A. B is how a foliage mod joins a ranked match. C is a trick a modified renderer learns. A hash does not prove the pixels. A runtime can report the official digest and draw a cleared scene, and an external injector never touches the files. Say that next to the check. The visibility cut is the control that still applies when the report is a lie (D53).
+
+### D52. Gameplay-relevant assets and settings
+
+**Question.** Some files are cover and lighting. Some are UI skins. Clients should be free to reskin a HUD on a modded server and not free to thin the grass that hides a player.
+
+- **A. The developer marks paths `gameplay-relevant` and publishes floors: minimum foliage density, minimum occluder LOD, and, for `competitive`, maximum exposure.** The authority's occluder list is built from the map at those floors. A client report under a floor refuses the join in `competitive`, and in `modded` when the developer attached the floors to that mode. The report never edits the occluder list. Unmarked paths are cosmetic. `modded` allows a client hash to differ on a cosmetic path. `vanilla` and `competitive` still require the cosmetic hash to match, because those modes reject unsigned visuals wholesale.
+- **B. Every file is gameplay-relevant.**
+- **C. The client slider is replicated and the authority shrinks its occluders to match.**
+
+**Recommendation.** A. B makes a HUD font a ranked-integrity failure on a modded server. C lets the client delete cover by sending a lower density. The floors are server-declared. The client renderer of an honest build clamps to them. A lying renderer is the D51 limit.
+
+### D53. Visibility inside the neighborhood
+
+**Question.** The 32 m grid still delivers every enemy in the cell, including one behind a wall. A wallhack draws that pose. Hiding it with a flag still delivers it.
+
+- **A. Keep the grid only.**
+- **B. After the neighborhood test, the authority runs a segment from the view position to the entity against authoritative occluder boxes.** A hit drops the entity from that connection's datagram. There is no hidden-entity record. The owned pawn and always-relevant entities stay. Occluders are map volumes: walls, and foliage marked gameplay-relevant, at the D52 floors. The test is the integer segment already used for lag compensation, against boxes, and it runs on the authority while building the snapshot. A player command cannot request it. `competitive` enables this. `modded` enables it when the developer preset says so. `vanilla` and `sandbox` leave it off unless the developer turns it on for that mode. An agent inspect still returns the omitted entity.
+- **C. Send the full neighborhood and a visibility bit.**
+
+**Recommendation.** B. A is the current scale rule, and it is not a wallhack defense. C is a wallhack with an extra byte. The segment is a conservative stand-in for a later physics ray against the same volumes. It does not claim to solve sound. A notice that carries a world position for a culled entity is omitted in a mode where the cut is on.
+
+### D54. Who picks the mode
+
+**Question.** The developer and the server owner both have a stake. A ranked shooter should be able to ship without a sandbox switch.
+
+- **A. The game policy lists `allowed` and `default`.** `--mode` must be in `allowed`. Omitted, the process uses `default`. The operator cannot add a mode, change a floor, or rewrite the relevant-path list. `--mods` with `vanilla` or `competitive` refuses to start. Genos sets `--mode` the same way it sets `--mods`. The session report and the replay header store the mode.
+- **B. The operator can override every floor.**
+- **C. The mode is compiled into the binary.**
+
+**Recommendation.** A. B lets a hosted competitive server lower the grass and keep the competitive name. C is a second binary per mode, which D48 already refuses.
 
 ## Global constraints
 
@@ -658,7 +737,7 @@ Capabilities in the recommendation: `command`, `inspect`, `edit`, `save`, `subsc
 - The agent endpoint stays loopback MCP on `127.0.0.1`. It is not the game session. `CONTEXT.md` says to avoid calling that endpoint a game network.
 - The person is the player. Sources say "client" for the program that person runs. In this repo that program is the player runtime. Sources say "server" for the authoritative program. In this repo that program is the authority runtime, and it is still a runtime. The game is not a server. Genos, the other repository, starts the authority process.
 - "System" in this repo is a system record. The ECS behavior is a tick pass.
-- New public words (`EntityId`, entity name, entity log, cause, agent connection, pin, prefab, capability, grant, audit log, profile, mod manifest, override, mod permission, tick pass, authority runtime, player runtime, connection, snapshot, command, notice, replay, keyframe, spectator) are added to `CONTEXT.md` in the commit that first publishes them (step N1). N1 waits until D1–D49 are answered. The camera agent endpoint and the scene handle keep the definitions they already have. Prefab is a new word. It is not a scene handle. Admin and operator are grants, not a second kind of player. Mod keeps the definition already in `CONTEXT.md`. A mod permission is not a connection grant.
+- New public words (`EntityId`, entity name, entity log, cause, agent connection, pin, prefab, capability, grant, audit log, profile, mod manifest, override, mod permission, session mode, gameplay-relevant, tick pass, authority runtime, player runtime, connection, snapshot, command, notice, replay, keyframe, spectator) are added to `CONTEXT.md` in the commit that first publishes them (step N1). N1 waits until D1–D54 are answered. The camera agent endpoint and the scene handle keep the definitions they already have. Prefab is a new word. It is not a scene handle. Admin and operator are grants, not a second kind of player. Mod keeps the definition already in `CONTEXT.md`. A mod permission is not a connection grant.
 - A new crate sets `[lints] workspace = true`, joins the workspace `Cargo.toml`, and is named in `docs/architecture.md` in that same commit.
 - `examples/camera` does not open a game socket in any step of this plan. The first proof stays the lit scene.
 - Headless tests use a fixed command list, a fixed tick, a seeded link, and no window. Two runs in one process match on the integers the step names. Do not check wall-clock time, thread scheduling, or a hash from another operating system.
@@ -746,8 +825,16 @@ _Avoid_: The entity log, a player datagram.
 _Avoid_: A runtime mode the player can switch on.
 
 **Mod manifest**:
-The ordered list of mods for one session, with a hash of every file. The authority and every player runtime must have the same hash before the tick.
+The ordered list of mods for one session, with a hash of every file. In `modded` the player runtime matches that hash before the tick. In `sandbox` the authority loads it and the player runtime may differ.
 _Avoid_: A workshop catalog, a native library list.
+
+**Session mode**:
+`vanilla`, `competitive`, `modded`, or `sandbox`. The game lists the modes a host may select. The host selects one.
+_Avoid_: A profile, a grant, a choice the player runtime sends at join.
+
+**Gameplay-relevant**:
+An asset path or a numeric floor the developer marked as cover, visibility, or exposure. A client override of it fails the join in `competitive` and in `modded`.
+_Avoid_: Every file, a client slider the authority copies.
 
 **Override**:
 A later mod's explicit claim on a prefab name, a scene key, an asset path, or a script hook that an earlier mod also provides. Without that claim, the duplicate is a load error.
@@ -981,6 +1068,8 @@ The pose budget is 1024 bytes per snapshot per connection. Spawns and despawns a
 
 A far entity, outside the neighborhood and not always-relevant, is absent from the packet even if it is dirty. That is the scale rule. 4096 stored entities are cheap if a connection's packet names the neighborhood. An agent query does not use this cut. It reads the authority columns, or a replay tick, and can ask for a region the player packet would omit. That read is an `inspect` grant. A player connection does not get the query. The interest set is the anti-cheat boundary for what a player datagram may contain (D41).
 
+The neighborhood is not a visibility test. An entity behind a wall in the same cell is still relevant. `competitive` adds that test on the authority: a segment from the view to the entity against occluder boxes, and a blocked entity is omitted from the datagram rather than flagged (D53). `sandbox` keeps the grid alone.
+
 ### Authority, prediction, reconciliation, rollback
 
 The authority runtime runs every tick pass on every entity. It applies the command whose connection matches `InputAuthority` at the start of the tick. A missing command repeats the last command for at most 4 ticks, then applies a zero command. The repeat is the small server buffer Ford describes. The bound is so a disconnected player does not walk forever.
@@ -1111,7 +1200,7 @@ N28 adds replay controls to this same binary. The scrub control is a tick intege
 
 ## Replay
 
-D1–D19 are the recording decisions. D20–D49 are the agent, live-edit, lockdown, and mod decisions. This section is the argument, the sources, and the way the recommendations sit on the datagram layout above. An agent seeks this same file. Nothing here is built.
+D1–D19 are the recording decisions. D20–D54 are the agent, live-edit, lockdown, mod, and session-mode decisions. This section is the argument, the sources, and the way the recommendations sit on the datagram layout above. An agent seeks this same file. Nothing here is built.
 
 ### One stream
 
@@ -1281,6 +1370,8 @@ Spawn and despawn records are written even when the pose budget is spent. Pose r
 | `crates/net/src/allow.rs` | Capabilities, grants, profiles, audit lines. From N40. |
 | `crates/mods/src/lib.rs` | Manifest, load order, conflicts, override map. Package `genos-mods`. From N43. No socket. |
 | `crates/mods/src/script.rs` | Checked Rhai host. Registered functions only. From N45. |
+| `crates/mods/src/policy.rs` | Allowed modes, default mode, floors. From N48. |
+| `crates/mods/src/assets.rs` | Client hash check against the mode's table. From N49. |
 | `crates/net/src/mods_sync.rs` | Manifest hash and missing-file transfer. From N46. |
 | `crates/sim/src/pin.rs` | Pinned components. From N36. |
 | `examples/session/src/tool.rs` | Query, inspect, seek, CLI parse, one JSON handler. From N34. |
@@ -1292,7 +1383,7 @@ Spawn and despawn records are written even when the pose budget is spent. Pose r
 
 ## Steps
 
-Do not start N1. D1–D49 are unanswered. The datagram layout, the replay file, and the live-edit notices are the same bytes, so N7 is the commit that would lock the recording and the tool. N25–N28 describe the recommended replay answers. N29–N47 describe the recommended author, agent, lockdown, and mod answers. If a decision above moves, edit that step before implementing it. The steps stay in order: N25 follows N24, and N29 follows N28.
+Do not start N1. D1–D54 are unanswered. The datagram layout, the replay file, and the live-edit notices are the same bytes, so N7 is the commit that would lock the recording and the tool. N25–N28 describe the recommended replay answers. N29–N51 describe the recommended author, agent, lockdown, mod, and session-mode answers. If a decision above moves, edit that step before implementing it. The steps stay in order: N25 follows N24, and N29 follows N28.
 
 ### N1. Entity id
 
@@ -1684,6 +1775,38 @@ Do not start N1. D1–D49 are unanswered. The datagram layout, the replay file, 
   - A temp directory with one mod whose script is the N45 spawn. Thirty ticks. `report.mod_hash` equals `join_mods` on those same files. The entity `crate` exists. A second call with `mods: None` has a zero hash and no `crate`. Inspect of `crate` on the first run returns the entity. The release compile-out check stays in N40.
 - **Commit:** `session: load mods from a directory`
 
+### N48. Select a session mode from the game policy
+
+- [ ] **Files:** `crates/mods/src/policy.rs`. Test `crates/mods/tests/policy.rs`. The same commit adds one sentence to `docs/systems/scripting.md` limits: the session mode decides whether a client file may replace an asset.
+- **Behavior:** `load_policy` reads `allowed`, `default`, and the mode name. An omitted mode returns `default`. A mode outside `allowed` returns an error that names it. `vanilla` and `competitive` return an error when a mod directory is also set. `modded` and `sandbox` accept the directory. The result is the `u8` from D13.
+- **Test:** `a_host_cannot_pick_a_mode_the_game_disallowed`
+  - Policy allows `vanilla` and `competitive`, default `competitive`. Omitted mode selects `competitive`. `sandbox` returns the error. `competitive` plus a mod path returns the error. A second policy that allows `modded` accepts a mod path and returns `3`.
+- **Commit:** `mods: accept only a session mode the game allows`
+
+### N49. Reject a visual hash the mode does not allow
+
+- [ ] **Files:** `crates/mods/src/assets.rs`. Test `crates/mods/tests/assets.rs`.
+- **Behavior:** `check_assets(mode, table, report)` compares path hashes. `vanilla` and `competitive` require every table path, and reject a reported path that has no row. `modded` requires paths marked gameplay-relevant and allows a different hash on an unmarked path. `sandbox` returns ready for any report. A refusal names the path and does not start the tick.
+- **Test:** `a_competitive_join_rejects_a_changed_grass_mesh`
+  - Table path `meshes/grass.obj` is gameplay-relevant with hash `H`, and `ui/font` is unmarked with hash `F`. Competitive report of `H` and `F` is ready. Competitive report of a different grass hash refuses and names `meshes/grass.obj`. Competitive report that adds `meshes/clear.obj` refuses that path. The same extra path in sandbox is ready. Modded report with grass `H` and a different font hash is ready. Modded report with a different grass hash refuses.
+- **Commit:** `mods: reject unsigned visuals in a locked mode`
+
+### N50. Omit an occluded entity from the player packet
+
+- [ ] **Files:** `crates/sim/src/interest.rs`. Test `crates/sim/tests/interest.rs`. `genos-sim` still does not depend on `genos-mods`. The session passes the mode's cull flag and the box list in.
+- **Behavior:** `occluded(eye, target, boxes)` is an integer segment against axis-aligned boxes. `take_snapshot_for` with `cull: true` drops an occluded entity that is not the owned pawn and not always-relevant. The entity stays in the store. With `cull: false` the same entity is in the datagram when it is inside the neighborhood. No packet field means "hidden".
+- **Test:** `a_competitive_packet_omits_the_enemy_behind_the_wall`
+  - Eye `(0, 1600, 0)`. Wall box `x -500..500`, `y 0..3000`, `z 3000..4000`. Enemy at `(0, 1600, 8000)` is inside the origin neighborhood and absent from the culled snapshot. Enemy at `(0, 1600, 2000)` is present. The owned pawn at `(0, 1600, 8000)` is present. The same far enemy with `cull: false` is present. After the culled snapshot the store still contains the far enemy's index.
+- **Commit:** `sim: drop occluded entities from a player snapshot`
+
+### N51. Keep the authority floors when the client reports lower
+
+- [ ] **Files:** `crates/mods/src/policy.rs`. Test `crates/mods/tests/floors.rs`.
+- **Behavior:** The policy carries minimum foliage density, minimum occluder LOD, and maximum exposure. `check_floors(mode, policy, report)` refuses a competitive report below a floor and names the setting. A passing report does not replace the policy numbers. The occluder boxes the caller already built stay the caller's boxes. Sandbox accepts a report of zeros.
+- **Test:** `a_lower_foliage_report_does_not_shrink_cover`
+  - Floors are density 2, lod 1, exposure 3. Competitive report density 1 refuses and names density. Competitive report of exactly the floors is ready, and the box list length the test passed in is unchanged. Sandbox report density 0 is ready.
+- **Commit:** `mods: refuse a client that relaxes a gameplay floor`
+
 ## Limits
 
 - The authority runtime is the only state authority. Input authority can move. A player runtime does not keep the true state of a pawn after it loses input authority.
@@ -1705,14 +1828,15 @@ Do not start N1. D1–D49 are unanswered. The datagram layout, the replay file, 
 - There is no replay-only component. A value in the file is a value in the live datagram, or a frame field from D14 (tick, hashes, length).
 - Public spectators are delayed. The authority file is written immediately.
 - `examples/camera` does not write a replay.
-- D1–D42 are open. The recommendations are not a decision record.
+- D1–D54 are open. The recommendations are not a decision record.
 - The camera agent endpoint does not spawn, edit, or despawn simulation entities. Scene handles stay on that endpoint.
 - A tool does not write a column. Time-travel does not fork a session. Live undo does not seek backward and does not undo a player command.
 - Save does not rewrite the Rhai scene. A prefab is data. A failed save does not change the sim. Undo does not revert the file.
 - Staging and release player binaries do not contain the tool API. The authority starts with tool grants empty. A join role byte does not grant a capability. This repo does not store accounts. Admin edits run on the authority. The audit log is not sent to players.
-- A mod is data plus a checked script. It is not a native library. A duplicate key without `overrides` does not load. A mismatched manifest hash does not tick. A mod author inspects from a dev build. A release player does not gain that tool because mods are loaded.
+- A mod is data plus a checked script. It is not a native library. A duplicate key without `overrides` does not load. In `modded`, a mismatched manifest hash does not tick. A mod author inspects from a dev build. A release player does not gain that tool because mods are loaded.
+- `competitive` rejects a visual hash outside the developer table and omits an occluded enemy from the player datagram. The hash does not detect a renderer that lies about the files, or a driver overlay. `sandbox` does not run those gates. The operator cannot add a mode the game left off the allowed list.
 - The first query has no field predicates. The cause stores one hop, not a graph walk.
-- Genos's process supervisor, matchmaking, and account system are out of this repository. The contract is the binary, the bind address, the scene path, and stdin.
+- Genos's process supervisor, matchmaking, and account system are out of this repository. The contract is the binary, the bind address, the scene path, the mods path, the session mode, and stdin.
 
 ## Records each step touches
 
@@ -1763,7 +1887,10 @@ N1 is the one that edits `CONTEXT.md`, `docs/architecture.md`, and the new ADR. 
 | Sandboxed Rhai on the authority | ADR 0009, D43, D44 | N45 |
 | Hash-checked mod distribution | D47, D48 | N46, N47 |
 | Mod authors keep the dev tool | D49 | N47, and N40 still compiles the tool out of a release player |
+| Session mode is the developer's list and the host's pick | D50, D54 | N48 |
+| Client asset hashes and gameplay floors | D51, D52 | N49, N51 |
+| Occluded enemies stay out of the player packet | D41, D53 | N50 |
 
 ## What this plan does not do
 
-It does not implement the steps. It does not settle D1–D49. It does not change `step`, the camera loop, or the camera MCP endpoint. It does not rewrite a scene script. It does not add accounts or a workshop. It does not merge the physics plan. N24 is the seam, and it waits for that plan's `BodyId` and `hash_world`. N1 waits until the open decisions are answered, because the datagram layout is the replay file and the live-edit path.
+It does not implement the steps. It does not settle D1–D54. It does not change `step`, the camera loop, or the camera MCP endpoint. It does not rewrite a scene script. It does not add accounts, a workshop, or a driver-level anti-cheat. It does not merge the physics plan. N24 is the seam, and it waits for that plan's `BodyId` and `hash_world`. N1 waits until the open decisions are answered, because the datagram layout is the replay file and the live-edit path.
