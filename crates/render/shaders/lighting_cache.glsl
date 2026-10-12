@@ -1178,24 +1178,37 @@ bool lighting_sc_display = false;
 bool lighting_sc_sparse_on() {
     return lighting_world_mode() == 3u && (lighting_sc_flags() & 16777216u) == 0u;
 }
-bool lighting_sc_key(uint slot) {
+// S72D levels (coarse to fine): 2 on every 4th cell of both in-plane axes (and
+// texels of 25 cm and up), 1 on every 2nd (the S72A keys), else 0.
+uint lighting_sc_level(uint slot) {
     vec4 nb = cache.v[3u * slot + 1u];
     float size = nb.w;
     if (size <= 0.0 || size > 0.2) {
-        return true;
+        return 2u;
     }
     vec3 p = cache.v[3u * slot].xyz;
     uint ax = lighting_axis(nb.xyz) >> 1u;
     int a = int(floor(p[(ax + 1u) % 3u] / size));
     int b = int(floor(p[(ax + 2u) % 3u] / size));
-    return ((a | b) & 1) == 0;
+    return ((a | b) & 3) == 0 ? 2u : (((a | b) & 1) == 0 ? 1u : 0u);
+}
+bool lighting_sc_key(uint slot) {
+    return lighting_sc_level(slot) >= 1u;
+}
+// S72D: sets after which a texel shows only its own light; below, its own mean
+// is mixed with the interpolation from the coarser level by sets / this.
+const float LIGHTING_SC_SPARSE_OWN = 4.0;
+// More due than the base budget (the boost counter runs): fine texels wait.
+bool lighting_sc_backlog() {
+    return ckeys.key[LIGHTING_SC_BOOST_AT] > 0u;
 }
 bool lighting_sc_promoted(uint slot) {
     return floatBitsToUint(cache.v[LIGHTING_SC_SPARSE_AT + slot].x) != 0u;
 }
-// Light from the key texels around a non-key texel, sun/sky gain applied: w 1 when
-// interpolated, 0 when a key is not lit yet, -1 when it has to be promoted.
-vec4 lighting_sc_sparse(uint slot) {
+// Light from the keys `step` cells apart around a texel, sun/sky gain applied: w 1
+// when interpolated, 0 when a key is not lit yet, -1 when one is missing or off
+// the plane, -2 when they differ by more than LIGHTING_SC_SPARSE_RATIO (an edge).
+vec4 lighting_sc_sparse(uint slot, float step) {
     const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
     vec3 p = cache.v[3u * slot].xyz;
     vec4 nb = cache.v[3u * slot + 1u];
@@ -1205,8 +1218,8 @@ vec4 lighting_sc_sparse(uint slot) {
     uint ua = (ax + 1u) % 3u;
     uint ub = (ax + 2u) % 3u;
     vec2 c = floor(vec2(p[ua], p[ub]) / size);
-    vec2 base = c - mod(c, 2.0);
-    vec2 f = (c - base) * 0.5;
+    vec2 base = c - mod(c, step);
+    vec2 f = (c - base) / step;
     vec3 sum = vec3(0.0);
     float ws = 0.0;
     float lo = 1.0e30;
@@ -1219,7 +1232,7 @@ vec4 lighting_sc_sparse(uint slot) {
         if (w <= 0.0) {
             continue;
         }
-        vec2 k = base + 2.0 * vec2(float(i & 1u), float(i >> 1u));
+        vec2 k = base + step * vec2(float(i & 1u), float(i >> 1u));
         vec3 q = p;
         q[ua] = (k.x + 0.5) * size;
         q[ub] = (k.y + 0.5) * size;
@@ -1241,8 +1254,11 @@ vec4 lighting_sc_sparse(uint slot) {
         ws += w;
     }
     lighting_obj_salt = salt;
-    if (result < 0.0 || (hi > 1.0e-3 && hi > LIGHTING_SC_SPARSE_RATIO * lo)) {
+    if (result < 0.0) {
         return vec4(0.0, 0.0, 0.0, -1.0);
+    }
+    if (hi > 1.0e-3 && hi > LIGHTING_SC_SPARSE_RATIO * lo) {
+        return vec4(0.0, 0.0, 0.0, -2.0);
     }
     if (result < 0.5 || ws <= 0.0) {
         return vec4(0.0);
@@ -1323,16 +1339,36 @@ void lighting_res_spatial(inout LightingRes r, uint slot, vec3 n, uint h) {
 }
 
 // Surface cache: what a texel shows (w 0 when it has nothing yet).
+vec4 lighting_sc_own_shown(uint slot);
 vec4 lighting_sc_shown(uint slot) {
-    if (lighting_sc_sparse_on() && !lighting_sc_key(slot) && !lighting_sc_promoted(slot)) {
-        vec4 sp = lighting_sc_sparse(slot);
-        if (sp.w > 0.5) {
-            return sp;
-        }
-        if (sp.w < -0.5 && lighting_sc_display) {
-            cache.v[LIGHTING_SC_SPARSE_AT + slot].x = uintBitsToFloat(lighting_frame() | 1u);
+    // S72D coarse to fine: a texel short of LIGHTING_SC_SPARSE_OWN sets shows the
+    // interpolation of the next level up (level 0 from the 2-apart keys, else
+    // the 4-apart ones), its own sets mixed in as they come (refines in place).
+    if (lighting_sc_sparse_on() && !lighting_sc_promoted(slot)) {
+        vec4 own = cache.v[3u * slot + 2u];
+        float wo = clamp(floor(max(own.w, 0.0)) / LIGHTING_SC_SPARSE_OWN, 0.0, 1.0);
+        uint lvl = lighting_sc_level(slot);
+        if (wo < 1.0 && lvl < 2u) {
+            vec4 sp = vec4(0.0);
+            if (lvl == 0u) {
+                sp = lighting_sc_sparse(slot, 2.0);
+                if (sp.w < -1.5 && lighting_sc_display) {
+                    // A step between the keys (an edge): its own rays, own light.
+                    cache.v[LIGHTING_SC_SPARSE_AT + slot].x = uintBitsToFloat(lighting_frame() | 1u);
+                }
+            }
+            if (sp.w > -1.5 && sp.w < 0.5) {
+                sp = lighting_sc_sparse(slot, 4.0);
+            }
+            if (sp.w > 0.5) {
+                vec4 mine = wo > 0.0 ? lighting_sc_own_shown(slot) : vec4(0.0);
+                return vec4(mix(sp.rgb, mine.rgb, mine.w > 0.5 ? wo : 0.0), 1.0);
+            }
         }
     }
+    return lighting_sc_own_shown(slot);
+}
+vec4 lighting_sc_own_shown(uint slot) {
     vec3 pooled = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
     vec4 own = cache.v[3u * slot + 2u];
     float ls = lighting_world_mode() == 3u ? lighting_sc_sun_gain(slot) : 1.0;

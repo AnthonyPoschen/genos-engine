@@ -114,18 +114,15 @@ void main() {
             }
             return;
         }
-        // S72A sparse fill: a non-key texel not promoted shows its key neighbours'
-        // light and is never relit (it is still freed when unread).
-        if (!wrc && lighting_sc_sparse_on() && !lighting_sc_key(slot) && !lighting_sc_promoted(slot)) {
-            if (int(lighting_frame() - last) > int(LIGHTING_CACHE_LIFE)) {
-                atomicAdd(gstats.freed, 1u);
-                ckeys.key[slot] = 0u;
-                cache.v[3u * slot + 1u] = vec4(0.0);
-                cache.v[3u * slot + 2u] = vec4(0.0);
-            }
-            return;
-        }
-        bool young_now = near || burst || (!LIGHTING_SC_SCHED && t < 1.5);
+        // S72D sparse fill, coarse to fine: every texel is relit, but a young one
+        // (short of LIGHTING_DN_MIN_SETS sets) weighs by its level (4-apart keys 4x,
+        // 2-apart 2x), so under a backlog the coarse grid fills first and spreads
+        // (lighting_sc_shown interpolates), the finer ones once the budget allows;
+        // fine ones near a change do not jump the queue while there is a backlog.
+        // (S72A never relit non-keys: a still scene never refined.)
+        bool sparse_c = !wrc && lighting_sc_sparse_on() && !lighting_sc_promoted(slot);
+        uint lvl = sparse_c ? lighting_sc_level(slot) : 2u;
+        bool young_now = ((near || burst) && !(lvl == 0u && lighting_sc_backlog())) || (!LIGHTING_SC_SCHED && t < 1.5);
         if (LIGHTING_SC_SCHED && !young_now) {
             uint updated = lighting_sc_updated(slot);
             int used = int(last - updated);
@@ -203,6 +200,9 @@ void main() {
             }
             if ((lighting_sc_flags() & 1048576u) != 0u && t >= cap - 0.5 && lighting_sc_dormant(slot)) {
                 w /= float(LIGHTING_SC_DORMANT);
+            }
+            if (sparse_c && t < LIGHTING_DN_MIN_SETS - 0.5) {
+                w *= lvl == 2u ? 4.0 : (lvl == 1u ? 2.0 : 1.0);
             }
             uint b = uint(clamp(log2(1.0 + float(used) * w) * 4.0, 0.0, float(LIGHTING_SC_BUCKETS - 1u)));
             // Whole 64-ray sets until settled, and above the trickle threshold.
