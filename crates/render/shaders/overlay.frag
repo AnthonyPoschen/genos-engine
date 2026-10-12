@@ -59,7 +59,7 @@ vec4 particle_texel(vec2 uv) {
 
 // Screen rectangles, lines and textured cards (the HUD and the overlay): their
 // colour as given, through the particle image when they carry one. The scene's
-// surfaces are lit by the lighting passes (lighting.md); they never reach here.
+// surfaces are lit by the lighting passes (docs/systems/lighting/README.md); they never reach here.
 void main() {
     vec4 texel = particle_texel(v_uv);
     if (v_uv.x >= 0.0 && texel.a < 0.04) {

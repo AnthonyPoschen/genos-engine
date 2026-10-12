@@ -19,13 +19,16 @@ Rings at r,2r,4r,8r.. on golden-angle pattern; fill in only behind failed tests;
 ## Numbers
 not recorded
 
-Still and moving scene: default stress scene (dusk, moving lamps), RTX 4070, 1080p unless noted; ms / fps per frame; pop = share of pixel-frames stepping >1% at frames 20-80 / 80-320; brightness = smoke mean luminance at pose a. Anything not given here was not recorded.
+Numbers context: the scene, GPU and resolution are not recorded for these figures unless stated above. For S76B-D onward, still/moving ms and fps are the bisect-log (steps.md) still and moving runs; pop is the share of pixel-frames stepping more than 0.01 from their 9-frame average (definition from the gi-check fill run), at frames 20-80 / 80-320; brightness is smoke mean luminance at pose a ("lum a"). Anything not given here was not recorded.
 
 ## Screenshots
 not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
 
 ## Outcome and why
 not recorded
+
+## Notes from chat
+Anthony (2026-10-12 22:50, t453u) asked whether the constant probe searching plus fan-out technique would be worth publishing if it works and performs well. Answer not in the available transcript.
 
 ## Lessons / when to revisit
 After it lands, retest S77C, S78G, S78H, S78L, S78N, S78R.

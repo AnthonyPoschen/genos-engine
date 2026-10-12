@@ -19,7 +19,7 @@ not recorded
 ## Numbers
 Q4: still 8.62/100, moving 18.9/50 (light 6.38 vs 6.59), pop 0.086/0.122 vs 0.069/0.104, noise 3.67 vs 3.08; 100-lamp room light 47.9 -> 35.2 ms (17 -> 21 fps); +16.6 MiB. Q: washed out shadow wedges; Q2 noise 9.0 vs 3.1.
 
-Still and moving scene: default stress scene (dusk, moving lamps), RTX 4070, 1080p unless noted; ms / fps per frame; pop = share of pixel-frames stepping >1% at frames 20-80 / 80-320; brightness = smoke mean luminance at pose a. Anything not given here was not recorded.
+Numbers context: the scene, GPU and resolution are not recorded for these figures unless stated above. For S76B-D onward, still/moving ms and fps are the bisect-log (steps.md) still and moving runs; pop is the share of pixel-frames stepping more than 0.01 from their 9-frame average (definition from the gi-check fill run), at frames 20-80 / 80-320; brightness is smoke mean luminance at pose a ("lum a"). Anything not given here was not recorded.
 
 ## Screenshots
 shad-S78Q4/b (under ~/.cache/gi2diag/perf on zanven-pc)

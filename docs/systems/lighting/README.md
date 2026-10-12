@@ -4,6 +4,13 @@ Main lighting document. Architecture and component notes are below; every experi
 
 Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and patches in `~/.cache/gi2diag/g78/` (zanven-pc), git history of `gi-v2`, `gi-v2-prefill` (22bcd47f) and tag `gi-v2-checkpoint-2026-10-12` (6b4fe308), the postmortem log, and the GI v2 conversation with Anthony. Figures not in a source are written "not recorded".
 
+## Missing history (as of 2026-10-12)
+
+- Only the latest pages of the chat transcripts were available: Engine positions 3324-3359 of 3360 (22:42-22:52) and Chief positions 6641-6672 of 6673 (unrelated launch work). Chat-only reasons and decisions before 22:42 come from the git log, steps.md, the existing doc and a relayed summary; older chat history was not read.
+- S75, S76, S76B-D, S77A, S77C: commit subject and steps.md row only; detail not recorded.
+- Scene, GPU and resolution for most figures: not recorded in the sources.
+- Screenshots are referenced by name only (`~/.cache/gi2diag/perf` on zanven-pc), not copied.
+
 ## Current state (2026-10-12)
 
 `gi-v2` at 8c763bb2 (S78P): still 8.21 ms / 105 fps, moving 18.7 ms / 51 fps (RTX 4070, stress scene). Pipeline: two-layer surface cache (layer 1 traced texels with MSME accumulator; layer 2 SVGF a-trous + pull-push, never fed back), world radiance cache (25 cm cells) for ray hits, sparse screen probes with held strata and check rays, Lumen-style texel direct-light cache for GI hits, per-pixel traced direct light reused in quiet frames, A-SVGF same-seed checks gating rays.

@@ -19,7 +19,7 @@ not recorded
 ## Numbers
 S41 (flags 1812746): room-a 0.0405, world swim 0.0019 PASS, grid redraw 0.0008 PASS, still drift 0; spin 0.1096 FAIL, mix 0.0116 FAIL. S27 (239882): world swim 0.0042 FAIL. Flag 262144 fixed drift (0.0006) but blotch 0.0207 / close-up 0.0165. Offer restarts 234 -> 0.6 per readback with 524288. fps not recorded.
 
-Still and moving scene: default stress scene (dusk, moving lamps), RTX 4070, 1080p unless noted; ms / fps per frame; pop = share of pixel-frames stepping >1% at frames 20-80 / 80-320; brightness = smoke mean luminance at pose a. Anything not given here was not recorded.
+Numbers context: the scene, GPU and resolution are not recorded for these figures unless stated above. For S76B-D onward, still/moving ms and fps are the bisect-log (steps.md) still and moving runs; pop is the share of pixel-frames stepping more than 0.01 from their 9-frame average (definition from the gi-check fill run), at frames 20-80 / 80-320; brightness is smoke mean luminance at pose a ("lum a"). Anything not given here was not recorded.
 
 ## Screenshots
 not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
