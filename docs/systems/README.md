@@ -18,7 +18,7 @@ Each record uses these headings:
 - [Input](input.md) owns the keyboard, the mouse, the gamepad slots, and the action maps.
 - [Window](window.md) owns the Wayland seat, focus, pointer lock, and fullscreen.
 - [Math](math.md) owns positions, directions, matrices, and quaternions.
-- [Physics](physics.md) owns the collision step, including mass, friction, springs, and capsule, box, and mesh shapes.
+- [Physics](physics.md) owns the collision step, including mass, friction, springs, and capsule, box, and mesh shapes. The next pipeline is [physics/plan.md](physics/plan.md).
 - [Scene](scene.md) owns the camera, the scripted layout, the coordinate frame, and the agent endpoint.
 - [Renderer](renderer.md) owns the Vulkan draw, the world, and culling.
 - [UI](ui.md) owns layout, pointer hits, and the lighting panel.

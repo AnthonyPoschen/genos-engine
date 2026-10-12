@@ -8,7 +8,7 @@ A game can simulate a falling mass, a bounce, a hit between two masses, friction
 
 ## Intent
 
-Gravity is `GRAVITY`, along -Y. There is no air drag. `step` takes a world and a time step and returns the next world. The call does not allocate.
+Gravity is `GRAVITY`, along -Y. There is no air drag. `step` takes a world and a time step and updates that world in place. The first step may size the contact lists. A later step does not allocate.
 
 When `motor` is set, the step copies `wish.x` and `wish.z` into the velocity before contact. Contact then removes the part of that wish that points into a surface.
 
@@ -26,12 +26,12 @@ The crate is `crates/physics`, package `genos-physics`.
 - Contact is in `src/contact.rs`.
 - Mesh build is in `src/mesh.rs`.
 - `GRAVITY` is `(0, -9.81, 0)`.
-- `MAX_BODIES` is 32.
+- `World.bodies` is a `Vec`. The crate does not cap the body count.
 - `MAX_HULL_VERTS` is 12. `MAX_MESH_PIECES` is 6.
 
 ## Game use
 
-Create a world with `World::new(GRAVITY)`. Insert each body with `World::insert`. Call `step(&world, dt)` and keep the returned world. Read `position`, `orientation`, and `velocity` on `bodies[..count]`.
+Create a world with `World::new(GRAVITY)`. Insert each body with `World::insert`. Call `step(&mut world, dt)`. The world is updated in place. Read `position`, `orientation`, and `velocity` on `bodies[..count]`.
 
 For a character, set `motor` and write the desired horizontal velocity in `wish`. Use `Body::capsule`, `Body::cuboid`, or `Body::mesh`. Build a mesh with `Shape::from_triangles` or `Body::mesh`. `contact_faces` reports the reduced face count.
 
@@ -42,6 +42,10 @@ The step does not turn a body. There is no stack solver, no air drag, and no con
 A mesh collider is a few convex pieces, not the source triangles. Two concave meshes do not get a triangle-versus-triangle test. The piece count stops at 6. A very thin sheet can be missed by the voxel sample.
 
 The camera calls this step from the scene crate. Lights have no collider.
+
+## Plan
+
+The next pipeline is [physics/plan.md](physics/plan.md). That file is a plan. It does not change this step.
 
 ## Decisions
 

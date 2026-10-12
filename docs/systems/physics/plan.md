@@ -1,0 +1,625 @@
+# Physics pipeline implementation plan
+
+> **For agentic workers:** Implement one step per commit, in order. Do not start the next step in the same commit. Each step has a deterministic headless test. Check the box when that test passes.
+
+**Goal:** Replace the single discrete contact pass with a physics pipeline that can run a large world, a person, a vehicle, a fast ship, and a pre-fractured breakable, with work gated by what is awake.
+
+**Architecture:** Rigid bodies stay on the CPU. A layered AABB tree feeds GJK/EPA manifolds into a soft-step solver. Islands sleep. Characters, vehicles, CCD, and destruction are opt-in on that pipeline. Poses of awake bodies are the only per-frame upload. A GPU solver waits on a profile. Offline Voronoi fracture builds the chunk asset; the step only swaps and simulates the broken branch.
+
+**Tech stack:** Rust, `genos-math` (`f32` `Vec3` / `Quat`), `std::thread::scope`, Vulkan only for the debug picture and the awake-pose buffer. ADR 0007 forbids a physics middleware crate.
+
+Written against `gi-v2` parent `e61b89d`. This file does not change `step`.
+
+## Global constraints
+
+- ADR 0007. No Rapier, Parry, nalgebra, Jolt, PhysX, Blast, or Chaos crate. Those engines are the design source. The code stays in this repository.
+- ADR 0009. Rhai stays the game script. The fracture tool and the headless tests are Rust.
+- `genos-math` stays `f32`. Wide positions live in the physics crate. [Math](../math.md) says there is no `f64` path in that crate.
+- Y is up. Gravity defaults to `GRAVITY` = `(0, -9.81, 0)`. Lengths are metres, mass is kilograms, time is seconds.
+- The frame interval is the measured `dt`. The camera already caps one frame at 0.25 s (`crates/scene/src/camera.rs`). Do not add a minimum step count, a minimum active set, or a minimum GPU dispatch. An asleep world does no narrowphase and no solver work.
+- The physics schedule inside an accumulated frame is a fixed `1/60` s step, matching `update` in `crates/scene/src/camera.rs`. Sub-steps divide that step. They do not rerun the broadphase.
+- The character controller is the action map in `crates/input/src/action.rs` (`character_controller`). It is not a body. The simulated capsule is a body. Do not rename one to the other. `CONTEXT.md` defines both.
+- Codimation stays the looping solid path in `crates/scene`. It is not a skeletal clip.
+- New public words (`BodyId`, island, bond, fracture asset, foot plant, vehicle) are added to `CONTEXT.md` in the commit that first publishes them.
+- A new crate sets `[lints] workspace = true`, joins the workspace `Cargo.toml`, and is named in `docs/architecture.md` in that same commit.
+- Every step keeps `cargo test -p genos-physics` and `cargo test -p genos-scene` green, plus the tests of any other crate that step touches. `cargo build --workspace` passes. The workspace denies warnings.
+- Headless tests use a fixed `dt`, a fixed call order, and no window. Two runs in one process match bitwise on the values the step names. Do not check thread scheduling or wall-clock time.
+- `step(&mut World, dt)` stays the call the scene crate uses. New behavior has defaults that keep the existing assertions in `crates/physics/tests/scenarios.rs`, `crates/physics/tests/colliders.rs`, and `crates/physics/tests/bench.rs`.
+
+## Current state
+
+The crate is `crates/physics`, package `genos-physics`. The living record is [physics.md](../physics.md). The scene owns the only caller (`crates/scene/src/camera.rs`).
+
+### What the step does
+
+`step` (`crates/physics/src/lib.rs`, `step`) takes a positive `dt` and then:
+
+1. `apply_forces` adds gravity and, while a spring is compressed, a push. A spring does not pull. Rest compression is `mass * -gravity.y / stiffness`.
+2. If `motor` is set, `wish.x` and `wish.z` replace the horizontal velocity.
+3. Dynamic bodies (`inverse_mass != 0`) integrate position with `velocity * dt`. Orientation is not integrated.
+4. `contact::collide` runs four times.
+
+`World` stores `bodies: Vec<Body>` and a reused `contact::Pairs` scratch list. The first `step` can allocate that list. `timed_math_and_physics_batch_does_not_allocate` (`crates/physics/tests/bench.rs`) asserts that a later step of 32 spheres allocates nothing.
+
+`Body` (`lib.rs`) is `Copy`: `position`, `orientation`, `velocity`, `inverse_mass`, `restitution`, `friction`, `shape`, `spring`, `motor`, `wish`. There is no angular velocity, torque, inertia tensor, or body id. `World::insert` returns a `usize` index.
+
+Shapes (`lib.rs`, `Shape`): sphere, capsule (segment along local Y plus radius), oriented box, plane (`normal · point = offset`), and a mesh. A convex triangle mesh becomes one hull of at most `MAX_HULL_VERTS` (12) vertices and `MAX_HULL_FACES` (20) triangles (`mesh.rs`, `hull_from_points`, `fill_faces`). A concave mesh is voxelized into at most `MAX_MESH_PIECES` (6) boxes (`mesh.rs`, `voxel_boxes`). `order_around` sorts face vertices with `atan2`.
+
+### Broadphase
+
+There is no tree. `contact::collide` (`contact.rs`) builds an AABB per body, expands it by `BOUNDS_MARGIN` (0.02), sorts by minimum X with `total_cmp`, and sweeps. Planes have no bounds and pair with every bounded body. Two static bodies are skipped. Pairs are sorted with `sort_unstable` and solved in that order. `a_ball_lands_on_its_own_pillar_among_hundreds` builds 400 static pillars plus one sphere (401 bodies) and the sphere rests on its own pillar.
+
+### Narrowphase and solver
+
+Primitives use closest points (`primitive_contact`). A mesh tests each convex piece and keeps the deepest hit only (`deeper`). Hull versus hull tests one hull's vertices against the other (`hull_hull`); it is not a full convex test. `solve_contact` applies one normal impulse, a friction impulse clamped to `friction * normal_impulse` (friction and restitution are the larger of the two bodies), and a position correction of `PERCENT` (0.8) past `SLOP` (0.001). No manifold, no warm start, no joints, no stacking solver. The record's limit still says there is no stack solver and no continuous collision.
+
+### Scene, view body, animation
+
+`Camera::attach_scene` inserts the floor, every wall, every solid, and one view capsule (`camera.rs`). The capsule is mass 1, radius 0.3, half-height 0.55, with `motor` set. `update` writes a yaw-relative wish at 4 m/s and runs `step` at `1/60` s when the accumulator reaches that step. Codimation writes a wish on a solid and writes the resolved position back.
+
+The character controller (`crates/input/src/action.rs`, `character_controller`) binds `move` and `look`. It does not create a body.
+
+`genos-load` animation (`crates/load/src/animation.rs`) is one transform track (translation, quaternion, scale). [Loading](../loading.md) says glTF skins, morph targets, and glTF animations are ignored, and the text animation does not move a mesh. There is no skeleton, so nothing can plant a foot.
+
+`genos-math` components are `f32` (`crates/math/src/lib.rs`). The camera far plane is 200 m (`CAMERA_FAR` in `camera.rs`).
+
+`genos-mesh` has a triangle BVH (`crates/mesh/src/bvh.rs`) for rays and baking. The physics step does not use it.
+
+`genos-bake` builds GI SDFs and cards. It is not a fracture tool. [Bake](../bake.md) keeps that crate on mesh content for lighting.
+
+### Debug binaries
+
+`examples/camera` (`genos-camera`) and `examples/stress` (`genos-stress`) are the programs. Stress flies with `update(..., 0.0)` so the step does not run (`examples/stress/src/main.rs`, `fly`). Pictures go through `genos_debug::png` and the MCP `take_screenshot` path. There is no shared scene catalog and no physics debug binary.
+
+### Records corrected with this plan
+
+`docs/systems/physics.md`, `docs/systems/scene.md`, and `examples/stress/README.md` used to say the world held `MAX_BODIES` (32) and dropped the rest. The crate has no such cap. Those sentences now match the code. The stress camera still flies because of the zero interval, not because of a cap.
+
+## Gaps
+
+| Pipeline piece | In the tree today | Missing |
+| --- | --- | --- |
+| Body model | Dynamic if `inverse_mass > 0`, else static. Index handles. Inline shapes. | Kinematic motion, `BodyId`, angular motion, shared shape store, convex margin, static triangle mesh that is not the 6-box reducer. |
+| Layers | Every overlapping pair is tested. | Object layers, a static / dynamic / debris broadphase split, pair filters. |
+| Broadphase | One X-sweep over current AABBs. | Layered AABB tree, batch insert, dirty expand, background refit, swept AABBs. |
+| Narrowphase | Analytic closest points, deepest hit, one-sided hull test. | GJK, EPA, clipped manifolds, contact cache. |
+| Solver | Four passes of one impulse plus position correction. One push spring. | Soft constraints (Hz, damping), sub-steps, warm start, joints, a sequential-impulse fallback that stays available. |
+| Sleep and islands | Every dynamic body is integrated. | Islands, island sleep, whole-island wake, solver skipped for the asleep set. |
+| Multithreading | One thread. | Color the constraint graph. Parallel color passes and a sorted parallel narrowphase. Same hash as the one-thread color order. |
+| CCD | Discrete only. A large `dt` tunnels. | Swept AABBs, speculative contacts, conservative-advancement time of impact for two moving convexes, extra sub-steps on a fast pair. |
+| Determinism | X-sort uses `total_cmp`. Hull faces use `atan2`. | A state hash, fixed body and contact order, in-process replay. |
+| Character | Wish overwrites horizontal velocity. Walls cancel the blocked part. | Wall slide, stairs, ground stick, moving platforms, as a kinematic body the action map drives. |
+| Foot plant | No skeleton. | Ray or shape cast, two-bone IK, pelvis offset, slope alignment, wired to the view body and the action map. |
+| Vehicles | The push spring is the only suspension-like force. | Ray or shape-cast wheels, spring-damper, slip friction, torque curve, gearbox, differential, anti-roll bar. Separate 6-DOF thrusters, zero gravity, large-orbit precision. |
+| Scale | Hundreds of static pillars in one test. `f32` world positions. | Thousands of active bodies, origin shift, awake-only GPU poses, a CPU solver that does not touch the asleep set. |
+| Destruction | A mesh collider is a few convex pieces. | Offline Voronoi chunks, interior faces, hierarchy, bond graph, hot-swap, one damage API, debris sleep and cull. Runtime slicing only when asked. |
+| Debug | Lighting binaries and a fly camera. | One scene catalog, a physics binary, a picker, a reset key, screenshot and metrics. |
+
+## Principles
+
+- Performance first. Wheels are casts, not bodies. An intact breakable is one body. Debris-debris pairs are filtered. A large island is colored so one pile can use every core.
+- Work is gated by need. Asleep islands are absent from narrowphase and the solver. Intact chunks are not simulated. A sleeping debris chunk is a cull candidate. CCD runs on bodies marked swept or speculative, not on the whole world.
+- GPU-resident where it pays. Awake poses and spawned chunk meshes live in a buffer the renderer can read. The CPU writes a delta when the awake set changes. The solver stays on the CPU until the gate at the end of this plan.
+- No fixed per-frame floor. Variable frame `dt`, fixed physics step only when time has accumulated, zero solver iterations when nothing is awake.
+
+## Locked names
+
+Later steps use these names. A step that introduces one publishes it and adds the word to `CONTEXT.md` if a game will say it.
+
+```rust
+pub struct BodyId { index: u32, generation: u32 }
+
+pub enum Motion { Static, Kinematic, Dynamic }
+
+pub enum MotionQuality { Discrete, Speculative, Swept }
+
+pub struct ObjectLayer(pub u16);
+pub struct BroadPhaseLayer(pub u8); // 0 static, 1 dynamic, 2 debris
+
+pub fn step(world: &mut World, dt: f32);
+pub fn step_parallel(world: &mut World, dt: f32, workers: usize);
+
+pub struct CastHit {
+    pub body: BodyId,
+    pub point: Vec3,
+    pub normal: Vec3,
+    pub fraction: f32,
+}
+
+pub struct VehicleId(pub u32);
+pub struct WheelId(pub u32);
+pub struct ThrusterId(pub u32);
+
+pub struct BreakableId(pub u32);
+pub struct BondId(pub u32);
+pub fn apply_damage(world: &mut World, breakable: BreakableId, bond: BondId, amount: f32);
+
+pub struct FootHit { pub point: Vec3, pub normal: Vec3 }
+```
+
+`BroadPhaseLayer` 0 collides with 1 and 2. Layer 2 does not collide with layer 2. The pair filter can reject a pair after the layer test.
+
+## File map
+
+| Path | Owns |
+| --- | --- |
+| `crates/physics/src/lib.rs` | `World`, `step`, re-exports. Shrinks as modules land. |
+| `crates/physics/src/body.rs` | `Body`, `BodyId`, `Motion`, `MotionQuality`. From step 1. |
+| `crates/physics/src/broadphase.rs` | Two AABB trees, swept bounds, pair list. From step 5. |
+| `crates/physics/src/narrowphase.rs` | GJK, EPA. From step 7. |
+| `crates/physics/src/manifold.rs` | Clipped contacts and the cache. From step 9. |
+| `crates/physics/src/solver.rs` | Soft step, sub-steps, warm start, sequential-impulse fallback. From step 10. |
+| `crates/physics/src/joint.rs` | Fixed, hinge, distance. From step 11. |
+| `crates/physics/src/island.rs` | Union-find, sleep. From step 12. |
+| `crates/physics/src/query.rs` | Ray cast, shape cast. From step 13. |
+| `crates/physics/src/hash.rs` | State hash. From step 14. |
+| `crates/physics/src/ccd.rs` | Speculative margin, time of impact, fast-pair sub-steps. From step 18. |
+| `crates/physics/src/origin.rs` | Wide position, origin shift. From step 21. |
+| `crates/physics/src/color.rs` | Constraint colors. From step 22. |
+| `crates/physics/src/upload.rs` | Awake pose buffer. From step 25. |
+| `crates/physics/src/vehicle.rs` | Wheeled vehicle and thrusters. From step 27. |
+| `crates/physics/src/destruction.rs` | Runtime breakable, hot-swap, debris. From step 36. |
+| `crates/physics/src/contact.rs` | Stays until step 9. Analytic oracles stay in tests. |
+| `crates/physics/src/mesh.rs` | The 12-vertex / 6-piece reducer stays for `Shape::from_triangles`. |
+| `crates/fracture/` | Offline Voronoi, `.gfract`. Package `genos-fracture`. From step 33. |
+| `crates/anim/` | Skeleton and foot plant. Package `genos-anim`. From step 16. |
+| `crates/scenes/` | Shared scene catalog. Package `genos-scenes`. From step 40. |
+| `examples/physics-view/` | Debug binary `genos-physics-view`. From step 41. |
+
+`genos-bake` is not the fracture tool. GI bakes and fracture assets stay apart.
+
+## Steps
+
+### P1. Motion kinds and angular velocity
+
+- [ ] **Files:** create `crates/physics/src/body.rs`. Modify `lib.rs`. Test `crates/physics/tests/motion.rs`.
+- **Behavior:** `Motion::Static` never integrates. `Motion::Kinematic` integrates a target linear velocity and a target angular velocity and ignores gravity. `Motion::Dynamic` integrates linear and angular velocity. Gravity and the existing spring still run for dynamic bodies. `orientation` changes only from angular velocity. Existing bodies: `inverse_mass == 0` is static, otherwise dynamic. Default angular velocity is zero, so current tests keep their orientations.
+- **Test:** `a_kinematic_box_turns_and_a_dynamic_box_falls`
+  - Kinematic box, target angular velocity `(0, π, 0)` rad/s, `dt = 1/60`, 30 steps. Orientation matches `Quat::from_axis_angle(Vec3::Y, π * 0.5)` within `1e-4` on the dot product. Position stays on the start XZ point. Y does not drop.
+  - Dynamic sphere, no angular velocity, 400 steps of `dt = 0.001`, still within 1% of `½gt²` (the existing free-fall assertion).
+- **Commit:** `physics: integrate kinematic motion and spin`
+
+### P2. BodyId
+
+- [ ] **Files:** `body.rs`, `lib.rs`, `crates/scene/src/camera.rs`. Test `crates/physics/tests/ids.rs` and `crates/scene/tests/room_collision.rs` (update the index checks this commit must keep green).
+- **Behavior:** `World::insert` returns `BodyId`. `get` / `get_mut` return `None` after `remove`. Removing one body does not change another id. The scene stores `BodyId` for the view capsule and for solids. `insert` of a fresh body may reuse a slot and must bump the generation.
+- **Test:** `body_id_survives_removal_of_another_body`
+  - Insert three spheres with masses 1, 2, 3. Remove the middle id. The other two ids still read masses 1 and 3. The removed id reads `None`. A new insert does not compare equal to the removed id.
+- **Commit:** `physics: address bodies with generational ids`
+
+### P3. Shape store and convex margin
+
+- [ ] **Files:** `crates/physics/src/shape.rs`. Test `crates/physics/tests/shapes.rs`.
+- **Behavior:** Primitives can be shared by id from a store on `World`. A convex hull in the store has no 12-vertex cap. `convex_radius` shrinks the core and is added back in queries. Default radius is 0. `Shape::from_triangles` and `Body::mesh` keep today's reducer so `a_dense_concave_mesh_blocks_only_its_volume` and `a_sphere_and_capsule_stop_outside_every_face_of_a_convex_box_mesh` stay as they are. Add `Body::static_triangles` for a static triangle list that is not reduced and is not used as a dynamic collider.
+- **Test:** `two_bodies_share_a_hull_and_a_margin_opens_a_gap`
+  - Two dynamics share one hull id. Replacing the store's vertices is visible to both. Freeing one body leaves the other's hull intact.
+  - A sphere of radius 0.25 and a box with `convex_radius` 0.02 come to rest with a gap of 0.02 ± 0.005 along the contact normal. The same pair with radius 0 rests inside 0.005 of the box face.
+- **Commit:** `physics: share convex shapes and a convex margin`
+
+### P4. Layers and pair filters
+
+- [ ] **Files:** `broadphase.rs` (filter only; the tree is P5), `contact.rs`. Test `crates/physics/tests/layers.rs`.
+- **Behavior:** Each body has an `ObjectLayer` and a `BroadPhaseLayer`. The world owns a layer pair table. A rejected pair never reaches `collide_pair`. Defaults put statics on layer 0, dynamics on layer 1, and accept 0–1 and 1–1, so existing scenes do not change. Debris is layer 2, and 2–2 is rejected.
+- **Test:** `a_filtered_pair_never_reaches_the_contact_count`
+  - Instrument the pair callback with a counter on `World` (test-only `pair_tests: u32`). Overlapping debris spheres: `pair_tests` stays 0 and the spheres keep their overlapping positions after one step. The same spheres on the dynamic layer increment `pair_tests` and separate.
+- **Commit:** `physics: filter pairs by object layer`
+
+### P5. Layered AABB trees
+
+- [ ] **Files:** `broadphase.rs`. `contact.rs` asks the tree for pairs. Test `crates/physics/tests/broadphase.rs`.
+- **Behavior:** One tree for static, one for dynamic (debris lives in the dynamic tree with its layer bit). Pair order is `(min id, max id)` sorted by `total_cmp` on the ids, which is the order the solver already used. Static-static pairs are not emitted. The hundreds-of-pillars test stays green.
+- **Test:** `a_dynamic_sphere_among_ten_thousand_statics_tests_a_handful_of_pairs`
+  - 100×100 static boxes on a grid, 2 m apart, one dynamic sphere above one box. After one step `pair_tests` is less than 32. A second run reports the same pair id list bitwise.
+- **Commit:** `physics: query pairs with a layered aabb tree`
+
+### P6. Batch insert, dirty expand, refit
+
+- [ ] **Files:** `broadphase.rs`. Test `crates/physics/tests/broadphase.rs`.
+- **Behavior:** `insert_many` builds a tree from the whole batch. Single inserts still work and mark the node dirty. A moved body expands its leaf. `refit` rebuilds a tight tree and swaps it in before the step returns. The swap is synchronous in this step. A later parallel step may overlap the rebuild; the pair list after the swap must match a full rebuild.
+- **Test:** `batch_insert_matches_a_rebuild_and_a_move_keeps_the_pair`
+  - 1 000 statics via `insert_many` and via one-at-a-time insertion produce the same pair list against one dynamic (the one-at-a-time tree may be fatter: assert its node count is greater than or equal, and the pair lists are equal after `refit`).
+  - Move the dynamic by 3 m with `set_position`. The expanded leaf still reports the new overlapping static. After `refit`, the pair list equals a world built at the new pose.
+- **Commit:** `physics: refit the aabb tree after a batch insert`
+
+### P7. GJK distance
+
+- [ ] **Files:** `narrowphase.rs`. Test `crates/physics/tests/gjk.rs`.
+- **Behavior:** GJK distance and closest points for two convexes (sphere, capsule, box, hull). No contact response in this step. Analytic `primitive_contact` stays on the response path.
+- **Test:** `gjk_distance_matches_separated_spheres_and_boxes`
+  - Spheres radius 0.5 at `(0,0,0)` and `(2,0,0)`: distance 1 ± `1e-4`, closest points at x = 0.5 and x = 1.5.
+  - Boxes half-extent 0.5, centers 3 m apart on X: distance 2 ± `1e-4`.
+  - The same pairs a second time return bitwise-equal points.
+- **Commit:** `physics: measure convex distance with gjk`
+
+### P8. EPA penetration
+
+- [ ] **Files:** `narrowphase.rs`. Test `crates/physics/tests/gjk.rs`.
+- **Behavior:** When GJK reports overlap, EPA returns depth and normal. A test oracle runs the existing analytic box path (`box_box` in `contact.rs`, made `pub(crate)` for the test or reimplemented as a private test helper that calls the same function). Do not switch `solve_contact` over yet.
+- **Test:** `epa_depth_matches_the_box_sat`
+  - Two boxes half-extent `(0.5, 0.5, 0.5)`, centers 0.8 apart on X: depth 0.2 ± `1e-3`, normal along ±X.
+  - A sphere of radius 0.5 whose center is 0.2 inside a box face: depth 0.2 ± `1e-3`.
+- **Commit:** `physics: recover penetration with epa`
+
+### P9. Manifolds and a contact cache
+
+- [ ] **Files:** `manifold.rs`. `collide` writes the manifold into the solver. Test `crates/physics/tests/manifold.rs`.
+- **Behavior:** Clip the incident face against the reference face (box and hull). At most four points. Persist points across steps by a feature id and reuse the stored impulse as the warm start. The deepest-only path remains available behind `World::single_contact` for the old tests that need one point. Default for new worlds is the manifold. Existing scene tests stay on the single-contact path until P10 flips the default and rechecks them.
+- **Test:** `a_resting_box_keeps_four_contacts_and_its_orientation`
+  - Dynamic box half-extent 0.5, identity orientation, dropped from 0.01 m onto a static box. After 120 steps of `1/60`, at least three contact points, orientation dot with identity > `1 - 1e-3`, vertical speed < 0.05.
+- **Commit:** `physics: clip contact manifolds and warm start them`
+
+### P10. Soft step
+
+- [ ] **Files:** `solver.rs`. Test `crates/physics/tests/solver.rs`.
+- **Behavior:** A contact is a soft constraint: frequency `hz` and damping ratio map to the bias and the impulse coefficient used by Box2D Soft Step and Bepu (spring omega, damping, effective mass). Default 4 sub-steps per `1/60` step, 4 velocity iterations. Sub-steps integrate and solve. They do not call the broadphase (`broadphase_builds` counts once per `step`). Warm-start impulses scale by the ratio of sub-step counts when the count changes. `World::solver = Sequential` keeps one impulse pass and is what the restitution tests use. Default becomes `Soft` only after `a_static_surface_bounce_keeps_restitution` still passes within 1% on `Sequential`, and the soft path has its own assertion below. Do not change `dt` inside an existing test.
+- **Test:** `a_fifty_to_one_stack_stays_up_and_substeps_build_the_tree_once`
+  - Five dynamic boxes, mass 1, on one dynamic box of mass 50, on a static plane. `hz = 30`, damping ratio 1, 4 sub-steps, 2 seconds. The bottom dynamic box's center stays within 0.15 m of its rest height. No orientation dot with identity falls below 0.95. `broadphase_builds == 120` for 120 outer steps, not 480.
+  - `changing_substep_count_scales_the_cached_impulse`: one warm contact, switch from 4 to 2 sub-steps, the stored impulse is halved ± `1e-5`.
+- **Commit:** `physics: solve contacts with a soft sub-step`
+
+### P11. Joints
+
+- [ ] **Files:** `joint.rs`. Test `crates/physics/tests/joints.rs`.
+- **Behavior:** Fixed, hinge, and distance joints are soft constraints on the same solver. A joint connects two `BodyId`s and builds an island edge in P12. Limits are a min and max angle on the hinge.
+- **Test:** `a_hinge_stays_in_its_plane_and_a_fixed_joint_holds`
+  - Hinge along Y, gravity on, 1 second. The child position's Y equals the anchor Y ± 0.02. The offset on the hinge axis stays within 0.02 of the start.
+  - Fixed joint, child mass 1, parent static, 1 second. Child position stays within 0.01 of the anchored pose.
+- **Commit:** `physics: add soft fixed and hinge joints`
+
+### P12. Islands and sleep
+
+- [ ] **Files:** `island.rs`. Test `crates/physics/tests/sleep.rs`.
+- **Behavior:** Union-find over contacts and joints during the narrowphase. An island sleeps when every dynamic member stays under a linear and angular speed for `sleep_time` seconds (defaults 0.1 m/s, 0.1 rad/s, 0.5 s). Wake is the whole island. `wake(id)` and a force or teleport wake it. `remove` does not wake neighbors. Asleep bodies are not integrated and their contacts are not solved (`solver_bodies` counts who the solver touched).
+- **Test:** `two_piles_sleep_on_their_own_and_a_touch_wakes_one`
+  - Two separated stacks of two boxes. After 3 seconds both islands are asleep and `solver_bodies` is 0 on the next step.
+  - A kinematic sphere overlaps stack A. Stack A wakes (`solver_bodies` includes both of A's boxes) and stack B stays asleep.
+  - `remove` of a body that only touched stack B leaves A asleep.
+- **Commit:** `physics: sleep and wake whole islands`
+
+### P13. Ray cast and shape cast
+
+- [ ] **Files:** `query.rs`. Test `crates/physics/tests/query.rs`.
+- **Behavior:** `ray_cast` and `shape_cast` walk the broadphase. The filter can reject a layer or a body. The nearest hit wins. Hits are bitwise-stable for the same world.
+- **Test:** `a_ray_hits_the_near_box_and_a_capsule_cast_stops_at_a_wall`
+  - Three boxes along X. A ray from the left hits the nearest face point within `1e-4` and reports that `BodyId`. A debris-only filter misses the dynamic boxes.
+  - A capsule cast along +X stops with the capsule surface on the wall, fraction in `(0, 1)`, normal along -X.
+- **Commit:** `physics: cast rays and shapes`
+
+### P14. State hash
+
+- [ ] **Files:** `hash.rs`. Test `crates/physics/tests/hash.rs`.
+- **Behavior:** `hash_world` folds body id order (not `Vec` order), motion, pose, velocities, and cached contact impulses with FNV-1a. `atan2` is not used on this path. Two `step` loops in one process match. This is the determinism gate for later steps. A cross-OS golden hash is not claimed: `libm` is not added (ADR 0007), and `std` trig stays off the solver path.
+- **Test:** `the_same_drop_hashes_equal_across_two_runs`
+  - Sphere, box, and hinge. Clone the world after setup. Step both clones 60 times at `1/60`. The hashes match.
+- **Commit:** `physics: hash the world for replay`
+
+### P15. View body
+
+- [ ] **Files:** `crates/physics/src/character.rs`, `crates/scene/src/camera.rs`. Test `crates/physics/tests/character.rs` and the existing `crates/scene/tests/codimation.rs`, `room_collision.rs`.
+- **Behavior:** `ViewBody` is a kinematic capsule driven by a velocity wish. The character controller does not change: `update` still turns the `move` action into a wish. The capsule slides along walls, steps up a rise lower than `step_height` (default 0.3 m), sticks to a floor when the drop is under `stick` (default 0.2 m), and takes the horizontal velocity of the kinematic surface it stands on. Codimation keeps working by writing the solid's target velocity as kinematic motion. The record in `docs/systems/physics.md` and `docs/systems/scene.md` gains this game use in this commit.
+- **Test:** `the_view_capsule_slides_steps_and_rides`
+  - Wish `(2, 0, 0)` into a vertical wall: after 1 second the capsule center's X has not entered the wall, and Z is unchanged.
+  - A 0.2 m step: the capsule ends on top, feet clearance within 0.02 m.
+  - A platform moving at `(1, 0, 0)`: after it has carried the capsule, the capsule X matches the platform X ± 0.05 with a zero wish.
+  - A downward slope of 20 degrees: with a zero wish the capsule's feet stay within 0.02 m of the surface after 1 second (it does not launch, and it does not sink).
+- **Commit:** `physics: slide and step the view capsule`
+
+### P16. Foot plant
+
+- [ ] **Files:** create `crates/anim` (`src/lib.rs`, `src/foot.rs`). Test `crates/anim/tests/foot.rs` and `crates/scene/tests/foot_plant.rs`. Scene dev-dependency on `genos-anim` and `genos-input`. New record `docs/systems/anim.md`.
+- **Behavior:** `Skeleton` is a list of joints (local translation, local rotation). `plant_foot` takes thigh length, shin length, hip position, pole vector, animated ankle, and a `FootHit`. Two-bone IK uses the law of cosines. Reach is clamped to `(abs(L1 - L2) + 1e-4, L1 + L2 - 1e-4)`. The knee bends toward the pole. Pelvis lift is the larger of the two feet's shortfall `(distance - (L1 + L2))` when the hit is farther than the leg, and it is also raised so an ankle that would sit under the hit is moved up onto the hit. Foot rotation's up axis aligns with `FootHit.normal`. The cast stays in physics: the scene test casts downward. `genos-load` is unchanged. GlTF skins stay ignored. The scene test links the action map: `InputSystem::set_key(InputCode::key_w, true)`, then `character_controller().axis_2d(&input, "move").y` is `1` (`key_w` is the up binding). `examples/camera` stores that value in `Actions.forward`. The test passes that forward value into `update`.
+- **Test:** `feet_stay_on_a_slope_and_the_bones_keep_their_length` (`crates/anim`)
+  - `L1 = L2 = 0.45`. Slope normal `(sin 20°, cos 20°, 0)`. Animated ankles 0.05 m under the plane. After `plant_foot` on both legs, each ankle is within `1e-3` of the plane on the outside (penetration deeper than `-1e-3` fails). Thigh and shin lengths stay within `1e-4`. `foot_up.dot(normal) > cos(1°)`. Pelvis Y is greater than the animated pelvis Y.
+- **Test:** `the_view_body_casts_the_ground_the_planter_uses` (`crates/scene`)
+  - Static box rotated 20° about Z. View capsule. One `update` of `1/60` with `forward` taken from the `move` axis above. Downward casts from both animated ankles hit the box. `plant_foot` results pass the same penetration, length, and normal assertions.
+- **Commit:** `anim: plant feet on a cast hit`
+
+### P17. Swept AABBs
+
+- [ ] **Files:** `broadphase.rs`. Test `crates/physics/tests/broadphase.rs`.
+- **Behavior:** A body with `MotionQuality::Swept` or `Speculative` contributes the AABB of its start pose expanded by linear travel over the step and by a bounding-sphere arc for angular travel (`radius * angle`). Discrete bodies contribute the current AABB. Pair tests use those bounds.
+- **Test:** `two_boxes_that_swap_places_still_form_a_pair`
+  - Box A at x = 0, velocity `(+60, 0, 0)`. Box B at x = 10, velocity `(-60, 0, 0)`. Half-extent 0.5. `dt = 1/60`. Start AABBs are disjoint. End AABBs are disjoint from the other start. Swept bounds overlap. The pair list contains `(A, B)`. The same setup with both `Discrete` does not contain the pair.
+- **Commit:** `physics: pair bodies by their swept bounds`
+
+### P18. Speculative contacts
+
+- [ ] **Files:** `ccd.rs`. Test `crates/physics/tests/ccd.rs`.
+- **Behavior:** `MotionQuality::Speculative` grows the contact distance by `min(speed * dt, speculative_margin)` with default margin 0.25 m. The solver stops the motion. This is the bullet path. It is not the ship path.
+- **Test:** `a_bullet_inside_the_margin_does_not_tunnel`
+  - Sphere radius 0.05, speed 10 m/s (travel 0.167 m at `1/60`, under the 0.25 m margin), static wall at 0.2 m. After one step the sphere center is on the impact side of the wall.
+  - The same sphere at 3 000 m/s is not this test. P19 owns that speed.
+- **Commit:** `physics: stop modest bullets with speculative contacts`
+
+### P19. Time of impact for two moving convexes
+
+- [ ] **Files:** `ccd.rs`. Test `crates/physics/tests/ccd.rs`.
+- **Behavior:** `MotionQuality::Swept` uses conservative advancement. GJK distance plus the relative velocity of the closest points, including both linear velocities and both angular velocities, produces a time of impact. Both bodies move. The step advances the pair to a fraction of that time (0.8 of the remaining time of impact, minimum progress `1e-4` s), solves the contact, and repeats until the step is consumed or 16 advances have run. Other bodies keep the normal sub-step. A missed root (no progress) leaves the bodies at the last safe time and flags `toi_failed` on the world for the test to read.
+- **Test:** `two_convex_ships_do_not_tunnel_head_on`
+  - Each ship is a box, half-extents `(2, 1, 1)` (4 m along X). Centers start 40 m apart. Both `Swept`. Each speed in `[30, 120, 600, 3000]` m/s, opposite directions, one `step` of `1/60`. Travel per ship at 3 000 m/s is 50 m, which is more than the body length. Combined closing travel is 100 m.
+  - Assert for each speed: the two centers never exchange X order; the inner-face gap stays `>= -0.01` m; `toi_failed` is false; a contact impulse was stored for the pair; a second run matches positions bitwise.
+- **Test:** `a_spinning_convex_does_not_tunnel_through_a_wall`
+  - Box half-extent 1 m, angular velocity `(0, 0, 40)` rad/s, linear velocity 30 m/s into a static wall 2 m away. After one step the box bounds do not pass the wall plane.
+- **Commit:** `physics: resolve swept time of impact for both bodies`
+
+### P20. Fast-pair sub-steps
+
+- [ ] **Files:** `ccd.rs`, `solver.rs`. Test `crates/physics/tests/ccd.rs`.
+- **Behavior:** If a pair's relative travel over the outer step exceeds that pair's smaller bounding radius, that pair integrates in extra slices (travel per slice ≤ radius). The rest of the world keeps the P10 sub-step count. Counters: `pair_slices(id_a, id_b)` and `body_slices(id)`.
+- **Test:** `only_the_fast_pair_takes_extra_slices`
+  - A resting box on a plane, and two swept spheres closing at 600 m/s. After one step the resting box's slice count equals the global sub-step count (4). The fast pair's slice count is greater. The spheres' inner gap stays `>= -0.01`.
+- **Commit:** `physics: sub-step a pair that outruns its radius`
+
+### P21. Wide positions and origin shift
+
+- [ ] **Files:** `origin.rs`. Test `crates/physics/tests/origin.rs`. `docs/systems/math.md` gains a sentence that physics wide positions are not `genos-math`.
+- **Behavior:** `WidePos` stores `f64` metres. `World::origin: WidePos` is the frame of every `Body.position`. `shift_origin(new_origin)` subtracts the delta from every body and from the broadphase. Contact runs in `f32` relative to that origin. The renderer, when a caller asks, receives the same `f32` positions plus the origin. `genos-math::Vec3` is unchanged.
+- **Test:** `a_contact_at_1e7_metres_matches_the_origin_after_a_shift`
+  - Two boxes, world origin 0, contact gap after 60 steps recorded. The same setup with `WidePos` x = `1e7` and a shift that brings the pair near 0. The gap matches within `1e-4`. Body `f32` positions after the shift are within 10 m of the origin.
+- **Commit:** `physics: shift the origin for large worlds`
+
+### P22. Constraint coloring
+
+- [ ] **Files:** `color.rs`. Test `crates/physics/tests/color.rs`.
+- **Behavior:** Build colors so two constraints in one color share no body. Edges are sorted by `(body_a, body_b, joint_index)` before coloring, so the colors are a function of the graph. The solver runs color 0 to completion, then color 1, on one thread. Islands still decide who is awake. A sleeping island adds no edges.
+- **Test:** `colors_are_disjoint_and_stable`
+  - A pile of 30 boxes. Every color's edges have unique body ids. Two builds produce the same color lists. An asleep second pile adds no edges (`edge_count` equals the awake pile alone).
+- **Commit:** `physics: color the constraint graph`
+
+### P23. Parallel color solve
+
+- [ ] **Files:** `solver.rs`, `lib.rs` (`step_parallel`). Test `crates/physics/tests/parallel.rs`.
+- **Behavior:** `std::thread::scope` solves one color across workers. Workers share no body. The main thread joins before the next color. `step` is the one-thread color order. `step_parallel` must hash-equal `step` on the same world.
+- **Test:** `parallel_colors_match_the_serial_hash`
+  - 200 dynamic boxes on a plane, 30 steps, `step_parallel(..., 4)` hash equals `step` hash.
+- **Commit:** `physics: solve constraint colors in parallel`
+
+### P24. Parallel narrowphase
+
+- [ ] **Files:** `narrowphase.rs`. Test `crates/physics/tests/parallel.rs`.
+- **Behavior:** Pairs are generated on the main thread from the trees (the tree walk stays serial in this step). Narrowphase runs per pair in parallel into pair-indexed slots, then the slots are sorted by body id before the solver. The merged manifold list equals the serial manifold list bitwise.
+- **Test:** `parallel_manifolds_match_the_serial_list`
+  - The 200-box pile, one step. Manifold feature ids and points match the serial run.
+- **Commit:** `physics: build manifolds in parallel and sort them`
+
+### P25. Awake pose upload
+
+- [ ] **Files:** `upload.rs`. Test `crates/physics/tests/upload.rs`.
+- **Behavior:** `PoseBuffer` is a `Vec<Pose>` indexed by `BodyId.index`, plus a list of dirty ids. `publish` writes poses of bodies that are awake or that woke, slept, or were removed this step. A fully asleep world publishes an empty dirty list. This buffer is what a Vulkan upload will copy. This step does not call Vulkan. Chunk meshes in P36 reuse the same rule: vertices are written when the chunk spawns, not every step.
+- **Test:** `a_sleeping_world_publishes_no_poses`
+  - One stack, step until asleep, `publish`, dirty list empty. Wake one body, `publish`, the dirty list is that island's ids only.
+- **Commit:** `physics: publish poses for awake bodies only`
+
+### P26. Thousands of active bodies
+
+- [ ] **Files:** test `crates/physics/tests/stress.rs`. The scene builder moves to `genos-scenes` in P40; until then the builder is a function in the test that P40 calls.
+- **Behavior:** No new solver feature. This is the scale gate for the CPU path.
+- **Test:** `four_thousand_active_spheres_match_across_runs`
+  - 64×64 spheres, radius 0.25, spaced 2 m apart, 1 m above a static plane, 30 steps of `1/60`. They stay active (falling or just landed). No position is non-finite. Two runs hash-equal. `pair_tests` is below `4096 * 8` (the plane plus a few neighbors, not the square of the body count).
+- **Test:** `an_asleep_grid_does_not_enter_the_solver`
+  - 64×64 statics and 8 dynamics that have already come to rest (place them on the plane with zero velocity and step 2 seconds). The next step has `solver_bodies <= 8` before sleep and `solver_bodies == 0` after the sleep timer. The static count does not appear in `solver_bodies`.
+- **Commit:** `physics: test thousands of active and asleep bodies`
+
+### P27. Wheel suspension
+
+- [ ] **Files:** `vehicle.rs`. Test `crates/physics/tests/vehicle.rs`. Record the game use in `docs/systems/physics.md`.
+- **Behavior:** A wheeled vehicle is a constraint on one chassis `BodyId`, in the sense of Jolt's `VehicleConstraint` / `WheeledVehicleController`: the wheel is not a body. Each wheel has a local position, a suspension direction, min and max length, frequency, and damping. Each step casts a ray, or a cylinder shape if `WheelCast::Shape` is set, excluding the chassis. The suspension spring uses the P10 soft constraint along the cast. Default cast is the ray.
+- **Test:** `a_chassis_rests_on_four_springs`
+  - Chassis mass 1 200 kg, four wheels, rest length 0.4 m, `hz = 4`, damping ratio 0.7, on a static plane. After 3 seconds the chassis height is within 0.02 m of `rest_length - compression`, where compression is `weight/4 / stiffness` and stiffness comes from the frequency and the wheel's suspended mass. Vertical speed < 0.05. `wheel_cast_count` over the last step equals 4.
+- **Commit:** `physics: suspend a chassis on cast wheels`
+
+### P28. Tyre slip
+
+- [ ] **Files:** `vehicle.rs`. Test `crates/physics/tests/vehicle.rs`.
+- **Behavior:** Longitudinal slip is `(wheel_omega * radius - contact_speed_forward) / max(|contact_speed|, slip_denom)`. Lateral slip is the angle between the wheel heading and the contact velocity. A simplified curve: friction rises linearly to `mu_peak` at `slip_peak` (defaults 1.0 and 0.1) and falls to `mu_slide` (default 0.7) at slip 1. The impulse is capped by the suspension normal load.
+- **Test:** `a_locked_wheel_slows_the_car_and_a_free_wheel_rolls`
+  - Chassis at 10 m/s, wheel omega 0, `mu_peak` 1. After 1 second speed is below 6 m/s.
+  - The same chassis with omega set each step to `speed / radius`. After 1 second speed stays above 9 m/s on a flat plane with no brake.
+- **Commit:** `physics: apply a simplified tyre slip curve`
+
+### P29. Engine, gearbox, differential
+
+- [ ] **Files:** `vehicle.rs`. Test `crates/physics/tests/vehicle.rs`.
+- **Behavior:** Torque curve is a table of `(rpm, torque)` in N·m, linearly interpolated. Gearbox is a list of ratios, including a negative reverse, plus a final drive. `gear` is an index the game sets. Engine omega comes from the driven wheels through the engaged ratio. An open differential writes equal drive torque to the driven wheels. Clutch is 0 or 1 in this step.
+- **Test:** `first_gear_drives_forward_and_an_open_diff_spins_the_free_wheel`
+  - Throttle 1, gear 0, ratio 3, curve `(0 rpm, 200 N·m)` to `(5 000 rpm, 200 N·m)`. After 2 seconds the chassis velocity X is positive and greater than 1 m/s.
+  - Gear reverse. After 2 seconds from rest, velocity X is negative.
+  - One driven wheel held in the air (no cast hit) and one on the plane. The airborne wheel's omega exceeds the grounded wheel's omega after 1 second of throttle.
+- **Commit:** `physics: drive wheels through a gearbox and an open diff`
+
+### P30. Anti-roll bar
+
+- [ ] **Files:** `vehicle.rs`. Test `crates/physics/tests/vehicle.rs`.
+- **Behavior:** An anti-roll bar is a soft constraint between the suspension compressions of a left and right wheel. Stiffness is N/m of compression difference. It adds equal-and-opposite vertical forces on the chassis at the two wheel positions.
+- **Test:** `an_anti_roll_bar_cuts_the_roll`
+  - A 0.1 m step under the left wheels only. Without the bar, after 1 second the roll angle is recorded. With stiffness `20_000`, the roll angle is under half of that recorded angle. The chassis stays finite.
+- **Commit:** `physics: add an anti-roll bar`
+
+### P31. Pacejka curve
+
+- [ ] **Files:** `vehicle.rs`. Test `crates/physics/tests/vehicle.rs`.
+- **Behavior:** Optional longitudinal and lateral curves. `pacejka(slip, b, c, d, e) = d * sin(c * atan(b * slip - e * (b * slip - atan(b * slip))))`. When a wheel has coefficients, that curve replaces the simplified mu. `sin` and `atan` here are `f32` methods used only inside this force, and the vehicle test hashes the resulting speed so a change is visible. The simplified curve remains the default.
+- **Test:** `pacejka_matches_three_known_points`
+  - `b = 10`, `c = 1.9`, `d = 1`, `e = 0.97`. Assert `pacejka(0) == 0`, `pacejka` at slip 0.1 is greater than at slip 0.5 (the peak is earlier than the slide), and a second call returns the same bits.
+- **Commit:** `physics: offer a pacejka slip curve`
+
+### P32. Thrusters and a large orbit
+
+- [ ] **Files:** `vehicle.rs`. Test `crates/physics/tests/vehicle.rs`.
+- **Behavior:** A thruster is a local position, a local direction, and a max force. Throttle is 0 to 1. Force and torque (`r × F`) are applied to the chassis. Gravity may be zero. The orbit helper integrates `WidePos` with `f64` and `GM` (m³/s²): acceleration `-GM * r / |r|³`. It does not use `Body.position` for the integration state. After each physics step the body pose is the orbit state minus `World::origin`.
+- **Test:** `a_thruster_in_zero_gravity_matches_force_and_torque`
+  - Mass 1 000 kg, force 1 000 N through the center, 1 second, gravity 0. Velocity equals `(1, 0, 0)` ± `1e-3`. A second thruster at local `(0, 2, 0)` pushing +X produces angular velocity about Z of `torque / inertia` within 1% (inertia is the box inertia from P1).
+- **Test:** `a_circular_orbit_at_1e7_metres_keeps_its_radius`
+  - Radius `1e7` m, `GM = 3.986e14`, circular speed `sqrt(GM / r)`, 200 steps of 1 s in `f64`. Radius stays within 0.05 m of `1e7`. The body `f32` position after an origin shift onto the ship is within 1 m of the origin.
+- **Commit:** `physics: thrust in zero gravity and integrate a wide orbit`
+
+### P33. Seeded Voronoi cells
+
+- [ ] **Files:** create `crates/fracture` (`src/lib.rs`, `src/voronoi.rs`). Test `crates/fracture/tests/voronoi.rs`. Record `docs/systems/fracture.md` (goal, intent, code, game use, limits). Do not modify `genos-bake`.
+- **Behavior:** `voronoi_convex(hull_planes, seeds) -> Vec<Cell>`. Cell `i` is the source hull clipped by the perpendicular-bisector planes against every other seed. Seed order is the cell order. Planes are applied in increasing seed index. No `atan2` and no hashmap iteration. A cell with volume under `1e-8` is dropped and the function returns an error listing the seed, so a bad seed set fails the test instead of disappearing.
+- **Test:** `two_seeds_split_a_cube_into_equal_volumes`
+  - Cube from -1 to 1. Seeds `( -0.5, 0, 0 )` and `( 0.5, 0, 0 )`. Two cells. Volumes each 4 ± `1e-3` (cube volume 8). A second call returns bitwise-equal vertices.
+- **Commit:** `fracture: clip a convex into seeded voronoi cells`
+
+### P34. Interior faces
+
+- [ ] **Files:** `crates/fracture/src/clip.rs`. Test `crates/fracture/tests/clip.rs`.
+- **Behavior:** Clip a closed triangle mesh by the same planes. Triangles keep the source material id. Polygons created on a cut plane are fanned into triangles with `interior_material`. Each chunk is closed: every edge is shared by two triangles. Volume is the sum of signed tetrahedra from the origin.
+- **Test:** `a_cut_box_mesh_gains_an_interior_cap_and_keeps_its_volume`
+  - The 12-triangle cube, side 2, two seeds as in P33. Sum of chunk volumes is 8 ± `1e-2`. Interior material area is greater than 0. Exterior area equals 24 ± `1e-2` (six faces of area 4). The second run matches triangle vertices bitwise.
+- **Commit:** `fracture: emit interior faces on the cut`
+
+### P35. Hierarchy and the support graph
+
+- [ ] **Files:** `crates/fracture/src/asset.rs`. Test `crates/fracture/tests/asset.rs`.
+- **Behavior:** Level 0 is the coarse seeds. Each coarse cell gets `children_per_chunk` child seeds, placed on a fixed grid inside the cell (not a random source). The asset stores parent, `first_child`, `child_count`. A bond connects two chunks that share a face, with area, centroid, normal, and `health = health_per_area * area`. A chunk flagged support also has a bond whose other end is `WORLD` (`u32::MAX`). `write_gfract` / `read_gfract` use version `1` and little-endian `f32`s. A bad version returns an error.
+- **Test:** `coarse_chunks_contain_their_fine_children`
+  - Two coarse seeds, two children each. Asset chunk count is 6 (2 coarse + 4 fine). Each fine chunk's parent is the coarse cell that contains its centroid. Fine volumes inside a coarse cell sum to that cell's volume ± `1e-2`. The world bond count equals the support count. Round-trip bytes load equal.
+- **Commit:** `fracture: store a hierarchy and a bond graph`
+
+### P36. Hot-swap
+
+- [ ] **Files:** `crates/physics/src/destruction.rs`. Test `crates/physics/tests/destruction.rs`. `docs/systems/physics.md` gains the runtime game use. `docs/systems/fracture.md` points at it.
+- **Behavior:** `Breakable` starts as one dynamic or static body (the intact mesh). Chunks are not bodies yet. `activate(chunk)` removes that chunk's body and spawns its children as bodies with the parent's linear and angular velocity, then adds a fixed joint for each remaining child bond (P11). A spawned chunk that can still walk bonds to a support stays `Motion::Static` until that path is gone; a component with no support becomes dynamic. Unbroken coarse chunks stay the parent body. Activation is local: a chunk outside the damaged chunk's neighbor set is not spawned.
+- **Test:** `one_hit_spawns_only_the_damaged_branch`
+  - Asset from P35, two coarse chunks, four fine. Intact world has 1 breakable body. `activate` on coarse chunk 0. Body count of the breakable becomes 1 (the untouched coarse chunk) + 2 (its children). Coarse chunk 1 has no child bodies. Child velocities equal the parent velocity within `1e-5`.
+- **Commit:** `physics: swap a broken chunk for its children`
+
+### P37. One damage API
+
+- [ ] **Files:** `destruction.rs`, `solver.rs` (impulse report). Test `crates/physics/tests/destruction.rs`.
+- **Behavior:** `apply_damage(breakable, bond, amount)` subtracts `amount` from bond health. At health `<= 0` the bond and its joint are removed, `activate` runs on the chunks that edge held, and both islands wake. The solver calls `apply_damage` with the normal impulse of a contact whose two bodies are chunks sharing a bond. A game call uses the same function. `remove` of an unrelated body still does not wake this island (P12).
+- **Test:** `an_impulse_and_a_health_event_break_the_same_bond`
+  - Column of three chunks, bottom is support. `apply_damage` of the top bond's full health with no collision: the top chunk becomes dynamic and falls for 30 steps; the middle chunk stays static; the bottom stays static.
+  - A fresh column. A dynamic sphere strikes the top bond. The reported contact impulse over the hit step is passed through `apply_damage`. When that sum exceeds health, the same top chunk is dynamic and the middle chunk is static.
+  - Hashes of the two outcomes are not required to match (the sphere is extra). The bond id that breaks is the top bond in both.
+- **Commit:** `physics: break bonds from impulses and from health`
+
+### P38. Debris sleep and cull
+
+- [ ] **Files:** `destruction.rs`. Test `crates/physics/tests/destruction.rs`.
+- **Behavior:** A spawned chunk with volume under `debris_volume` (default `0.02` m³) is `BroadPhaseLayer` 2 and uses a sleep timer of `0.1` s and a speed threshold of `0.4` m/s. Debris-debris pairs stay filtered (P4). After the step, if that breakable's debris count exceeds `debris_budget`, remove the smallest asleep debris first. Awake debris is kept. Removal of asleep disconnected debris does not wake the parent island. Culled ids publish a removal in the P25 buffer.
+- **Test:** `debris_sleeps_fast_and_the_budget_drops_the_smallest`
+  - One gameplay box and one debris chunk, both at speed 0.05 m/s. After 6 steps of `1/60` the debris body is asleep and the gameplay box is awake (`sleep_time` 0.5 s has not elapsed).
+  - 20 asleep debris, budget 8. After one step, 8 debris remain, and they are the 8 largest volumes. `solver_bodies` for the removed ids is 0. The support island stays asleep.
+- **Commit:** `physics: sleep and cull debris`
+
+### P39. Optional slice
+
+- [ ] **Files:** `destruction.rs`, `genos-fracture` clip used as a library call. Test `crates/physics/tests/destruction.rs`.
+- **Behavior:** `slice_chunk(breakable, chunk, plane_normal, plane_offset) -> Option<(u32, u32)>` clips one leaf chunk into two, writes interior faces, and spawns both as dynamic bodies with a bond that is already broken. It allocates. `step` does not call it. The breakable must be created with `allow_slice: true`. The default is false, and a false breakable returns `None` without changing the world.
+- **Test:** `a_slice_splits_a_box_and_the_step_does_not_slice`
+  - Box leaf, plane x = 0, `allow_slice: true`. Two chunks, volumes sum to the box volume ± `1e-2`, each has interior area > 0, both dynamic. They separate under zero gravity when given opposite 0.1 m/s pushes (the test sets the velocities). A second breakable with `allow_slice: false` returns `None` and keeps one body. A world stepped 10 times with no `slice_chunk` call keeps its chunk count.
+- **Commit:** `physics: slice one chunk when the game asks`
+
+### P40. Scene catalog
+
+- [ ] **Files:** create `crates/scenes` (`src/lib.rs`, `src/report.rs`, one module per scene). Test `crates/scenes/tests/catalog.rs`. Update `docs/architecture.md`.
+- **Behavior:** `SceneCatalog::all()` returns a fixed list. Each entry has a name, a one-line description, a kind (`Physics` or `Room`), and `build() -> PhysicsScene`. `PhysicsScene` holds the start `World`, the extra breakable / vehicle / orbit state, a suggested camera eye and yaw, and `fn metrics(&self) -> Value` using `genos-json`. `run(name, frames) -> Report` clones the start, steps `frames` times at `1/60`, and fills `Report`. `reset` restores that start. Room entries store a path string and do not step. Order is the order in the source match, which is the picker order.
+- **Catalog:**
+
+| Name | Kind | What it builds |
+| --- | --- | --- |
+| `drop` | Physics | One sphere, one plane. |
+| `stack` | Physics | The five-on-one stack from P10. |
+| `asleep_grid` | Physics | P26 asleep grid. |
+| `pile_4k` | Physics | P26 active spheres. |
+| `view_stairs` | Physics | View capsule, a 0.2 m step, a 20° slope. |
+| `foot_slope` | Physics | P16 slope, two legs, the action-map wish. |
+| `car_flat` | Physics | P29 car, throttle 1, gear 0. |
+| `car_bump` | Physics | P30 one-side step. |
+| `orbit` | Physics | P32 orbit, gravity 0, a second ship at a nearby wide position. |
+| `ship_impact` | Physics | Four lanes of P19, speeds 30, 120, 600, 3 000. |
+| `destruction_wall` | Physics | Two columns of the P35 asset. Left column is struck by a sphere. Right column takes `apply_damage` on the matching bond at frame 30. `debris_budget` 8. |
+| `ship_station` | Physics | One swept ship at 600 m/s and a supported wall of chunks. |
+| `camera_room` | Room | `examples/camera/scene.rhai`. |
+| `stress_room` | Room | `examples/stress/scenes/room.rhai`. |
+
+- **Test:** `every_physics_scene_steps_and_the_named_gates_hold`
+  - Catalog names are unique and in the table order. `run("drop", 10)` is finite and a second `run` hashes equal.
+  - `ship_impact` after 5 steps: every lane `tunneled == false`, `contacted == true`, `min_separation >= -0.01`. `passed == true`.
+  - `destruction_wall` after 90 steps: `bonds_broken >= 1` on each column, fine chunks exist only on the struck coarse chunk of each column, `debris_alive <= 8`, no chunk bounds center has `y` below the floor by more than its half-extent, `passed == true`.
+  - `ship_station` after 5 steps: `tunneled == false` and `bonds_broken >= 1`.
+  - `pile_4k` after 5 steps (the catalog test uses 5, not 30): finite, `passed == true`. The 30-step hash remains the P26 test.
+  - `foot_slope` after 30 steps: ankle penetration `>= -1e-3`, bone length error `< 1e-4`.
+  - `orbit` after 60 steps: radius error `< 0.05` m.
+  - `reset` after `run` restores the start hash.
+- **Commit:** `scenes: add the shared physics scene catalog`
+
+### P41. Physics debug binary
+
+- [ ] **Files:** `examples/physics-view` (`src/main.rs`, `src/lib.rs`), package `genos-physics-view`, binary name `genos-physics-view`. Depend on `genos-scenes`, `genos-window`, `genos-input`, `genos-render`, `genos-ui`, `genos-debug`, `genos-mcp`, `genos-json`. Modify `examples/stress` and `examples/camera` to depend on `genos-scenes` and to honor `--list-scenes` by printing `SceneCatalog::all()` and exiting. Document the binary in `docs/systems/debugging.md` and `docs/architecture.md`.
+- **Behavior:**
+  - `--list-scenes` prints `name kind description` and exits 0.
+  - `--scene NAME` selects one scene. Unknown name exits 1.
+  - With no `--scene` and a terminal on stdin, print the numbered catalog and read one line. The window, on its first frame, shows the same list with `genos-ui`. `key_up` / `key_down` move, `key_enter` starts, `key_1` through `key_9` jump. This list is the human picker.
+  - `key_r` calls `PhysicsScene::reset`. Bind it on a debug action map in this binary. Do not add it to `character_controller()`.
+  - `--headless --metrics PATH --frames N` steps without a window and writes the `genos-json` report. Exit 1 when `passed` is false.
+  - `--shot PATH` writes one PNG through `genos_debug::png::write_png` after the last frame. The MCP command queue exposes `physics_metrics` and `take_screenshot` only. Do not mount the lighting reference tracer.
+  - The picture draws bodies, wheel casts, bond lines, and interior faces with a flat color so a break is visible. Poses come from the P25 buffer.
+  - Frame `dt` is measured. A hitch still clamps the accumulator to 0.25 s. Headless mode steps exactly `--frames` steps of `1/60` and ignores the wall clock.
+- **Test:** `crates/scenes/tests/catalog.rs` already covers metrics. Add `examples/physics-view/tests/args.rs`:
+  - `parse` of `--headless --scene ship_impact --metrics out.json --frames 5` yields that scene and does not open a window type (the parse result has `headless: true`).
+  - `parse` of `--list-scenes` sets `list_only`.
+  - The stress and camera `--list-scenes` paths are the same string function `SceneCatalog::list_text()`, tested once in `genos-scenes`.
+- **Commit:** `physics-view: pick a scene, reset, write metrics and a screenshot`
+
+## GPU solver gate
+
+Do not implement a GPU rigid solver in P1–P41.
+
+Open that work only after all of these are true:
+
+1. P26's 4 096 active spheres, in release, miss the frame budget the game is using, with asleep bodies already excluded from the solver.
+2. The pose buffer from P25 is the residency plan: the device keeps the last poses, and the CPU uploads the dirty range only.
+3. CCD, queries, vehicles, bonds, and the view body stay on the CPU. PhysX's GPU path leaves CCD and queries on the CPU; this plan does the same.
+4. The test, when the work exists, is `gpu_active_set_matches_the_cpu_hash` on `pile_4k` for 30 steps. A mismatch stops the feature.
+
+Until that profile exists, the Vulkan use in this plan is the debug picture and the awake pose buffer.
+
+## Debug scenes the binary must show
+
+| Scene | What a person sees | Pass rule in the metrics |
+| --- | --- | --- |
+| `pile_4k` | A field of spheres falling onto a plane. | Finite poses. Pair tests under `4096 * 8` on the first step. |
+| `asleep_grid` | A static field and a few boxes. The metrics counter `solver_bodies` falls to 0. | `solver_bodies == 0` after the sleep time. |
+| `foot_slope` | A leg pair on a ramp. | Ankle penetration `>= -1e-3`, bone lengths, foot up aligned with the hit normal. |
+| `car_flat` | A car that pulls away. | Chassis speed &gt; 1 m/s after 2 s of throttle. |
+| `car_bump` | One side on a step. | Roll with the anti-roll bar under half the roll without it. |
+| `orbit` | A ship with the origin on the hull, gravity off. | Radius error &lt; 0.05 m at `1e7` m. |
+| `ship_impact` | Four head-on lanes at 30, 120, 600, and 3 000 m/s. | `tunneled == false` and `contacted == true` on every lane. |
+| `destruction_wall` | Two pre-fractured columns. A ball hits the left. The right loses the same bond from health. | Both columns break that bond, only the hit branch spawns, debris ≤ budget. |
+| `ship_station` | A swept ship hits a supported wall. | No tunnel, at least one bond breaks. |
+
+`key_r` returns any of these to the start pose, including bond health and orbit state. `--shot` is the picture an agent attaches. `--metrics` is the pass or fail an agent reads without a GPU.
+
+## Records each step touches
+
+| Step | Record |
+| --- | --- |
+| P15 | `docs/systems/physics.md`, `docs/systems/scene.md` |
+| P16 | `docs/systems/anim.md` (new), `docs/systems/README.md`, `CONTEXT.md` (foot plant) |
+| P21 | `docs/systems/math.md` (one sentence) |
+| P27–P32 | `docs/systems/physics.md` vehicle game use, `CONTEXT.md` (vehicle) |
+| P33 | `docs/systems/fracture.md` (new), `docs/systems/README.md` |
+| P36–P39 | `docs/systems/physics.md`, `docs/systems/fracture.md`, `CONTEXT.md` (bond, fracture asset) |
+| P40–P41 | `docs/architecture.md`, `docs/systems/debugging.md` |
+
+## Coverage
+
+| Requirement | Step |
+| --- | --- |
+| Layered broadphase, batch insert, refit | P4, P5, P6 |
+| GJK, EPA, manifolds, warm start | P7, P8, P9 |
+| Soft step, sub-steps, joints, sequential fallback | P10, P11 |
+| Islands, sleep, wake, work gated by the awake set | P12, P25, P26 |
+| Coloring and multithreading, deterministic against the one-thread color order | P22, P23, P24 |
+| Speculative CCD, swept AABBs, two-body time of impact, fast-pair sub-steps, head-on ships | P17, P18, P19, P20, `ship_impact` |
+| In-process determinism | P14, and every later hash test |
+| View body, character-controller action map left as the action map | P15 |
+| Foot plant: cast, two-bone IK, pelvis, slope, linked to the view body | P16, `foot_slope` |
+| Wheeled vehicle: cast wheels, suspension, slip, Pacejka, torque curve, gearbox, differential, anti-roll | P27–P31, `car_flat`, `car_bump` |
+| Thrusters, zero gravity, large-orbit precision | P32, `orbit` |
+| Thousands of bodies, origin shift, awake-only poses, GPU solver only after a profile | P21, P25, P26, GPU gate |
+| Voronoi pre-fracture, interior faces, hierarchy, bonds, hot-swap, one damage API, debris cull, optional slice | P33–P39, `destruction_wall` |
+| Shared scene library, picker, reset, screenshot, metrics | P40, P41 |

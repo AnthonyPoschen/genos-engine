@@ -28,6 +28,8 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     │   ├── scene.md
     │   ├── math.md
     │   ├── physics.md
+    │   ├── physics/
+    │   │   └── plan.md
     │   ├── renderer.md
     │   ├── ui.md
     │   ├── lighting/ (README.md + experiments/)
