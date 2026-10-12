@@ -11,7 +11,6 @@ packages=(
     libvulkan1 mesa-vulkan-drivers vulkan-tools   # lavapipe (software Vulkan)
     weston                                        # headless Wayland compositor
     python3-numpy python3-pil                     # tools/lighting/dump.py
-    libasound2-dev                                # crates/audio (links asound)
 )
 missing=()
 for p in "${packages[@]}"; do
@@ -32,6 +31,3 @@ rustup toolchain install stable --profile minimal
 rustup default stable
 
 cargo build --workspace --release --tests
-
-# Skill sync is optional. `|| true` keeps setup alive if the helper errors.
-bash "$(dirname "$0")/sync-agent-skills.sh" || true
