@@ -230,6 +230,44 @@ void main() {
             bool urgent2 = ((pc.params.z >> 5u) & 1u) != 0u;
             bool mover2;
             bool stale2 = lighting_sc_local_change(slot, mover2);
+            if (lighting_sc_msme()) {
+                // S72R (Anthony, history suppression stage 1): the GIBS / PICA
+                // PICA multi-scale mean estimator verbatim (Barre-Brisebois et
+                // al., Ray Tracing Gems ch. 25, 2019; GIBS, Halen et al. 2021),
+                // one update per set, y the set's irradiance: short mean rate
+                // 0.08, variance 0.04, inconsistency 0.08, k = clamp(smoothstep(
+                // rho max(0.02, iota - 0.2)), 1/256, 1) vbbr, vbbr -> clamp(0.5
+                // mean / sigma, 1/32, 1) at 0.1, spikes capped at 0.1 + short
+                // mean + 8 sigma. Never a hard reset. A newborn starts with
+                // short mean = mean, inconsistency 1 (WickedEngine) and vbbr 1
+                // (webgiya). Hint (Lumen's fast update when traces see a mover):
+                // a mover near or a moved lamp's delta at the texel raises k to
+                // at least that delta, at most 0.9 (MaxFastUpdateModeAmount).
+                // Scalar variance and luminance (Rec. 709 weights), as before.
+                if (b.x <= 0.0) {
+                    a = vec4(old.rgb, 0.0);
+                    b = vec4(1.0, 1.0, 0.0, t);
+                }
+                float dev0 = sqrt(max(1.0e-5, a.w));
+                vec3 y = e - max(e - (0.1 + a.rgb + 8.0 * dev0), vec3(0.0));
+                vec3 d1 = y - a.rgb;
+                vec3 sm = mix(a.rgb, y, 0.08);
+                vec3 d2 = y - sm;
+                float var = mix(a.w, dot(d1 * d2, lw), 0.04);
+                float dev = sqrt(max(1.0e-5, var));
+                float rho = dot(abs(old.rgb - sm), lw) / dev;
+                float inc = mix(b.y, rho, 0.08);
+                float k = clamp(smoothstep(0.0, 1.0, rho * max(0.02, inc - 0.2)), 1.0 / 256.0, 1.0) * b.x;
+                float vb = mix(b.x, clamp(0.5 * dot(sm, lw) / dev, 1.0 / 32.0, 1.0), 0.1);
+                float hint = mover2 ? 0.5 : 0.0;
+                hint = max(hint, LIGHTING_SC_LAMP_K * lighting_sc_lamp_change(slot));
+                k = max(k, min(hint, 0.9));
+                vec3 m = mix(old.rgb, y, clamp(k, 0.0, 1.0));
+                cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);
+                cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(vb, inc, k, min(t + 1.0, 256.0));
+                cache.v[3u * slot + 2u] = vec4(m, min(t + 1.0, cap));
+                return;
+            }
             if (stale2) {
                 // Light changing or a change nearby: a short plain mean (t is kept
                 // short by lighting_sc_count) and the estimator starts again once quiet.

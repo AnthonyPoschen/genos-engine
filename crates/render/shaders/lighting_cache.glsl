@@ -224,6 +224,11 @@ uint lighting_sc_flags() {
 // per-texel commit timing and ray strata, and the stored means rectified
 // against their edge-aware neighbourhood. Flag 268435456 off.
 uint lighting_world_mode();
+// S72R: the GIBS MSME accumulator verbatim (lighting_cache.comp); flag
+// 1073741824 the S59-S68 estimator (plain mean warm-up, young floor, anti-lag).
+bool lighting_sc_msme() {
+    return lighting_world_mode() == 3u && (lighting_sc_flags() & 1073741824u) == 0u;
+}
 bool lighting_sc_decorrelate() {
     return lighting_world_mode() == 3u && (lighting_sc_flags() & 268435456u) == 0u;
 }
