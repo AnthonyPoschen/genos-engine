@@ -649,8 +649,9 @@ void lighting_sc_offer(uint slot, vec3 at, vec3 centre) {
     }
 }
 
-// S73B/S73C: set while a scout hit claims texels as Lumen surface cache
-// feedback (lighting_direct.comp).
+// S73B/S73C: a feedback read skips the shown stamp and the reveal burst.
+// S73K does not set this from the direct shader; the slim claim never reaches
+// these branches. Seeds stay on the pixel path.
 bool lighting_sc_feedback = false;
 // Surface cache: the lit texel twice the size holding pos (the first fill of a
 // texel not lit yet); w 0 when there is none.
@@ -2287,9 +2288,10 @@ uint lighting_sc_entries(uint slot, bool full) {
 // through a guard band just outside the frustum (Bavoil & Sainz 2009 /
 // Mara et al. 2016 guard band, but ray-traced instead of rastered, so a claim
 // is always on a surface the camera will see, never inside a wall), weighted
-// to the side the camera turns towards. Their hits claim and stamp the fine
-// texels exactly as a pixel does (lighting_world_irradiance), so those texels
-// are scheduled, seeded, filtered (layer 2) and pushed before they show.
+// to the side the camera turns towards. Their hits claim the four corners and
+// stamp LastUsed (lighting_sc_feedback_claim, S73K). They do not seed: the
+// irradiance read that used to do that faults lavapipe inside this shader.
+// The scheduler then spends spare budget on them before they show.
 const bool LIGHTING_SC_GUARD = true;
 // Guard band width as a share of the half-extent of the view (0.5: a 90 degree
 // view sees ~11 degrees past each edge) [inferred].
@@ -2462,6 +2464,44 @@ const bool LIGHTING_SC_KEEP_NEAR = true;
 vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj);
 // S72M: the pixel's screen-probe irradiance (lighting_compose.comp), -1 when none.
 vec3 lighting_px_probes = vec3(-1.0);
+// Scout feedback claims the four corners a pixel would, and stamps LastUsed.
+// The direct shader used to call lighting_world_irradiance for that and drop
+// the result. That read, inlined into the direct shader, faults lavapipe's
+// JIT. The claim is the part the scheduler needs; seeds and the blend stay on
+// the pixel path.
+void lighting_sc_feedback_claim_at(vec3 pos, vec3 n, vec3 wpos) {
+    if (lighting_sc_slanted(n)) {
+        return;
+    }
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 ta = vec3(0.0);
+    vec3 tb = vec3(0.0);
+    ta[(ax + 1u) % 3u] = 1.0;
+    tb[(ax + 2u) % 3u] = 1.0;
+    float size = lighting_cell_size(wpos);
+    vec2 uv = vec2(dot(pos, ta), dot(pos, tb)) / size - 0.5;
+    vec2 g0 = floor(uv);
+    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
+        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + 0.5;
+        vec3 q = pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));
+        uint slot = lighting_cache_find_sized(q, n, true, size, pos);
+        if (slot == ~0u) {
+            continue;
+        }
+        cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
+        lighting_sc_offer(slot, pos, lighting_sc_centre(q, n, size));
+    }
+}
+void lighting_sc_feedback_claim(vec3 pos, vec3 n) {
+    uint om = lighting_world_mode() == 3u ? lighting_mover_on(pos, n) : ~0u;
+    if (om != ~0u) {
+        lighting_obj_salt = lighting_mover(om, 1u).w;
+        lighting_sc_feedback_claim_at(lighting_mover_to_local(om, pos, false), lighting_mover_to_local(om, n, true), pos);
+        lighting_obj_salt = 0.0;
+        return;
+    }
+    lighting_sc_feedback_claim_at(pos, n, pos);
+}
 vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     uint mode = lighting_world_mode();
     // Object-local texels (GENOS_LIGHTING_SC_LOCAL=1, GIBS): a pixel on a mover's

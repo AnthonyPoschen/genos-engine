@@ -61,6 +61,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Pre-fill spends only spare base budget and never enters the priority histogram or the boost (Lumen always spends a fixed budget) (S73G).
 - MSME only once a texel is shown; a never-shown texel accumulates over at most 4 updates, as Lumen radiosity (S73D).
 - Rotating start on the pre-fill list (S73G).
+- Scout feedback claims and stamps LastUsed without the irradiance read, so a scout hit does not seed an empty texel (S73K). The pixel path still seeds.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
 
 ## Experiment index
@@ -132,6 +133,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S73F](experiments/S73-prefill-root-cause-and-plan.md) | 2026-10-12 | Never-shown texels wait on the pre-fill list only | pushed | 8ac033e |
 | [S73G](experiments/S73-prefill-root-cause-and-plan.md) | 2026-10-12 | Pre-fill takes only spare base budget | pushed | 12387cc |
 | [S73I](experiments/S73I-prefill-turn-and-ratios.md) | 2026-10-12 | Turn fill-in: spare budget and an unfinished set; ratio mean is outliers | counters + set completion + lavapipe turn | ffaba86, 15d3e1e |
+| [S73K](experiments/S73K-scout-feedback-claim.md) | 2026-10-12 | Scout feedback claims without the irradiance read | lavapipe lists texels; turn takes no spare |  |
 | [S74A-cam](experiments/S74A-cam-last-camera-offsets.md) | 2026-10-12 | Fix: last-frame camera read from stale scene-block offsets | pushed | 81c00734 |
 | [S74A-asvgf](experiments/S74A-asvgf-asvgf-change-adaptive-rays.md) | 2026-10-12 | A-SVGF same-seed 1-ray checks on 1/9 resolved texels, lambda drives alpha and rays | pushed | 81c00734 |
 | [S74A-shadow](experiments/S74A-shadow-static-lamp-shadow-reuse.md) | 2026-10-12 | Hit shadow rays kept per 12.5 cm cell/lamp, invalidated by lamp epoch | pushed | 81c00734 |
