@@ -3394,6 +3394,10 @@ const uint LIGHTING_TDL_BUDGET = 32768u;
 const bool LIGHTING_TDL_CHECK = true;
 const float LIGHTING_TDL_TOL = 0.1;
 const uint LIGHTING_TDL_COUNT_AT = LIGHTING_SC_HIST_AT + 73u;
+// S73E: the pre-fill list (never-shown texels) and its per-round count.
+const uint LIGHTING_SC_PREFILL_COUNT_AT = LIGHTING_SC_HIST_AT + 74u;
+const uint LIGHTING_SC_PREFILL_MAX = 16384u;
+const uint LIGHTING_SC_PREFILL_AT = LIGHTING_ATROUS_LIST_AT + 5u * 65537u + 6u * 65536u + 16u;
 uint lighting_lamps_sig(uint seed, LampList list);
 uint lighting_tdl_sig(uint slot, LampList list) {
     return lighting_lamps_sig(lighting_hash(ckeys.key[slot] ^ 0x68e31da4u), list);

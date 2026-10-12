@@ -42,6 +42,8 @@ const LIGHTING_CACHE_BATCH: u32 = 98304;
 const LIGHTING_CACHE_RAYS: u32 = 16;
 /// ckeys word of the WRC refresh lists' two counts (lighting_cache.glsl LIGHTING_WRC_CHG_COUNT_AT).
 const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
+/// S73E: pre-fill list length (lighting_cache.glsl LIGHTING_SC_PREFILL_MAX).
+const LIGHTING_SC_PREFILL_MAX: u64 = 16384;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
 /// (lighting_common.glsl LIGHTING_STRATA): the visibility history cap.
 pub(crate) const LIGHTING_STRATA: u32 = 8;
@@ -613,7 +615,7 @@ impl Gpu {
         let share = self.light_families();
         if self.lighting.cache_keys.buffer.is_null() {
             self.lighting.cache_keys = self.make_buffer_queues(
-                (2 * LIGHTING_CACHE_SLOTS + 2 + 17600 + 16 + 3 * 65536 + 1024 + 32768 + 16 + 5 * LIGHTING_CACHE_SLOTS + 5 * 65537 + 6 * 65536 + 16) * 4, // S78Z: + verify / wake words // S78X: + a-trous marks and work lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
+                (2 * LIGHTING_CACHE_SLOTS + 2 + 17600 + 16 + 3 * 65536 + 1024 + 32768 + 16 + 5 * LIGHTING_CACHE_SLOTS + 5 * 65537 + 6 * 65536 + 16 + LIGHTING_SC_PREFILL_MAX) * 4, // S73E: + pre-fill list // S78Z: + verify / wake words // S78X: + a-trous marks and work lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
                 0x20 | 0x2 | 0x100 | 0x1,
                 Memory::Device,
                 &share,
@@ -862,7 +864,7 @@ impl Gpu {
             self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             // The mature and young patch counts, rebuilt by the compact pass.
             if !world {
-                for at in [LIGHTING_CACHE_SLOTS, 2 * LIGHTING_CACHE_SLOTS + 1, LIGHTING_WRC_COUNTS_AT, LIGHTING_WRC_COUNTS_AT + 1, LIGHTING_WRC_COUNTS_AT + 4, LIGHTING_WRC_COUNTS_AT + 5, LIGHTING_WRC_COUNTS_AT + 6, LIGHTING_WRC_COUNTS_AT + 7] {
+                for at in [LIGHTING_CACHE_SLOTS, 2 * LIGHTING_CACHE_SLOTS + 1, LIGHTING_WRC_COUNTS_AT, LIGHTING_WRC_COUNTS_AT + 1, LIGHTING_WRC_COUNTS_AT + 4, LIGHTING_WRC_COUNTS_AT + 5, LIGHTING_WRC_COUNTS_AT + 6, LIGHTING_WRC_COUNTS_AT + 7, LIGHTING_WRC_COUNTS_AT + 8] {
                     (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, at * 4, 4, 0);
                 }
             }
@@ -1053,6 +1055,8 @@ impl Gpu {
             // The WRC refresh lists' counts (change, background; lighting_cache.glsl).
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, LIGHTING_WRC_COUNTS_AT * 4, 8, 0);
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, (LIGHTING_WRC_COUNTS_AT + 4) * 4, 8, 0);
+            // S73E: the pre-fill list's count, rebuilt by the compact pass.
+            (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, (LIGHTING_WRC_COUNTS_AT + 8) * 4, 4, 0);
             (self.fns.cmd_fill_buffer)(
                 cmd,
                 self.lighting.cache_keys.buffer,
