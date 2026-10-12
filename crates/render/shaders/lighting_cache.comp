@@ -6,6 +6,18 @@
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 
+// S78S: a texel's value write, counted by its change (lighting_chg).
+void lighting_tex_put(uint slot, vec4 v) {
+    if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) != 0u) {
+        return;
+    }
+    if (gstats.chg[31] != 0u) {
+        vec4 o = cache.v[3u * slot + 2u];
+        lighting_chg(CHG_TEX_WRITE, 1u);
+        lighting_chg(CHG_TEX_D0 + lighting_chg_bin(o.rgb, v.rgb), 1u);
+    }
+    cache.v[3u * slot + 2u] = v;
+}
 void main() {
     uint gid = gl_GlobalInvocationID.x;
     if (gid >= LIGHTING_CACHE_BATCH) {
@@ -222,7 +234,7 @@ void main() {
             wa = max(wa, LIGHTING_WRC_CHANGE_ALPHA * add);
         }
         vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * min(wa, 1.0);
-        cache.v[3u * slot + 2u] = vec4(mean, min(t + add, LIGHTING_WRC_CAP));
+        lighting_tex_put(slot, vec4(mean, min(t + add, LIGHTING_WRC_CAP)));
         // S76B: a refresh is the cell's check (lighting_wrc_check_take).
         if (old.w >= 0.5) {
             lighting_wrc_check_take(slot, e, old.rgb);
@@ -309,7 +321,7 @@ void main() {
                 vec3 m = mix(old.rgb, y, clamp(k, 0.0, 1.0));
                 cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);
                 cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(vb, inc, k, min(t + 1.0, 256.0));
-                cache.v[3u * slot + 2u] = vec4(m, min(t + 1.0, cap));
+                lighting_tex_put(slot, vec4(m, min(t + 1.0, cap)));
                 return;
             }
             if (stale2) {
@@ -317,7 +329,7 @@ void main() {
                 // short by lighting_sc_count) and the estimator starts again once quiet.
                 vec3 m0 = old.rgb + (e - old.rgb) / (t + 1.0);
                 cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(0.0);
-                cache.v[3u * slot + 2u] = vec4(m0, min(t + 1.0, cap) + 0.25);
+                lighting_tex_put(slot, vec4(m0, min(t + 1.0, cap) + 0.25));
                 return;
             }
             // First quiet relight after the light changed: the sets taken while it
@@ -326,7 +338,7 @@ void main() {
             if (fract(old.w) > 0.1) {
                 cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(e, pow(0.15 * dot(e, lw), 2.0) + 1.0e-8);
                 cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(1.0, 1.0, 1.0, 1.0);
-                cache.v[3u * slot + 2u] = vec4(e, 1.0);
+                lighting_tex_put(slot, vec4(e, 1.0));
                 return;
             }
             if (b.x <= 0.0) {
@@ -374,7 +386,7 @@ void main() {
             }
             cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);
             cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(vb, inc, blend, n);
-            cache.v[3u * slot + 2u] = vec4(m, min(t + 1.0, cap));
+            lighting_tex_put(slot, vec4(m, min(t + 1.0, cap)));
             return;
         }
         // Flag 262144 (with 8192): past the cap a texel keeps a plain mean of its
@@ -398,8 +410,8 @@ void main() {
         bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
         bool mover3;
         bool stale = lighting_sc_local_change(slot, mover3);
-        cache.v[3u * slot + 2u] = vec4(mean, next + (stale ? 0.25 : 0.0));
+        lighting_tex_put(slot, vec4(mean, next + (stale ? 0.25 : 0.0)));
         return;
     }
-    cache.v[3u * slot + 2u] = vec4(e, min(max(old.w, 0.0) + 1.0, LIGHTING_CACHE_MATURE));
+    lighting_tex_put(slot, vec4(e, min(max(old.w, 0.0) + 1.0, LIGHTING_CACHE_MATURE)));
 }

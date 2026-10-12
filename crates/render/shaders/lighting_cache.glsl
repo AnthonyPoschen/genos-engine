@@ -69,7 +69,60 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint pad5;
     // S76 diagnostics (GENOS_LIGHTING_SC_TRACE): per-round counters, see lighting_gpu.rs.
     uint diag[64];
+    // S78S change counters (GENOS_LIGHTING_SC_TRACE, chg[31] the enable word the
+    // host sets): which writers changed what, and by how much. lightingchg lines,
+    // perf/chg.py; the slots are listed at LIGHTING_CHG_*.
+    uint chg[32];
 } gstats;
+// Kept-hit light writes (light pass): all, changed, by relative luminance delta
+// (<0.2 %, 0.2-1 %, 1-5 %, >5 %), and changed by source of the hit's direct light
+// (TDL reused, TDL checked / recomputed, lamps traced here).
+const uint CHG_KEPT_WRITE = 0u;
+const uint CHG_KEPT_CHANGED = 1u;
+const uint CHG_KEPT_D0 = 2u;
+const uint CHG_KEPT_TDL_REUSE = 6u;
+// Kept lights held by the S78T hysteresis (within tolerance, not written).
+const uint CHG_KEPT_HELD = 10u;
+const uint CHG_KEPT_TDL_CHECK = 7u;
+const uint CHG_KEPT_LAMPS = 8u;
+// Kept-hit records changed by the trace (new hit).
+const uint CHG_REC = 9u;
+// Gather (S78R): probes gathered, held (skipped), and why not held: inputs
+// changed this frame, moved, reads a neighbour's strata or fills.
+const uint CHG_G_RUN = 11u;
+const uint CHG_G_HELD = 12u;
+const uint CHG_G_DIRTY = 13u;
+const uint CHG_G_MOVED = 14u;
+const uint CHG_G_PICKS = 15u;
+// Surface-cache texel value writes (lighting_cache.comp): all, by relative
+// luminance delta (as above).
+const uint CHG_TEX_WRITE = 16u;
+const uint CHG_TEX_D0 = 17u;
+// Kept-hit light writes by where the hit's bounce came from (lighting_cache_
+// irradiance_at): fine texel, coarse patch lit, none, coarse unlit -> parent,
+// coarse unlit -> neighbours; then changed ones the same.
+const uint CHG_KB_FINE = 21u;
+const uint CHG_KC_FINE = 26u;
+uint lighting_bounce_path = 2u;
+// S78S debug isolate toggles (lighting_gpu.rs lighting_toggles): head 3.w bits 12-15.
+uint lighting_toggles() {
+    return (uint(work.v[lighting_change_at() + 3u].w) >> 12u) & 15u;
+}
+const uint LIGHTING_TOGGLE_FREEZE_CACHE = 1u;
+const uint LIGHTING_TOGGLE_BOUNCE_ONLY = 4u;
+const uint LIGHTING_TOGGLE_FREEZE_PROBES = 8u;
+void lighting_chg(uint i, uint v) {
+    if (gstats.chg[31] != 0u) {
+        atomicAdd(gstats.chg[i], v);
+    }
+}
+// Bin of a relative luminance delta: 0 <0.2 %, 1 <1 %, 2 <5 %, 3 more.
+uint lighting_chg_bin(vec3 a, vec3 b) {
+    float la = dot(a, vec3(0.2126, 0.7152, 0.0722));
+    float lb = dot(b, vec3(0.2126, 0.7152, 0.0722));
+    float r = abs(la - lb) / max(max(la, lb), 1.0e-4);
+    return r < 0.002 ? 0u : (r < 0.01 ? 1u : (r < 0.05 ? 2u : 3u));
+}
 const bool LIGHTING_DIAG = false;
 void lighting_dg(uint i, uint v) { if (LIGHTING_DIAG) atomicAdd(gstats.diag[i], v); }
 
@@ -1769,6 +1822,7 @@ vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
             if (s != ~0u) {
                 vec4 v = cache.v[3u * s + 2u];
                 if (v.w >= LIGHTING_SC_READ_SETS && fract(v.w) < 0.1) {
+                    lighting_bounce_path = 0u;
                     cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
                     lighting_hit_sunfrac = lighting_sc_sunfrac_now(s);
                     return v.rgb * lighting_sc_sun_gain(s);
@@ -1793,6 +1847,7 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
         return vec3(0.0);
     }
     cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
+    lighting_bounce_path = 1u;
     // Flag 65536: hit patches stay lit from where they were claimed (as in the
     // other modes), no offer.
     if (lighting_world_mode() == 3u && !lighting_sc_slanted(n) && (lighting_sc_flags() & 65536u) == 0u) {
@@ -1809,6 +1864,7 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
         if (lighting_world_mode() == 3u) {
             vec4 up = lighting_sc_parent(pos, n, hsize);
             if (up.w > 0.0) {
+                lighting_bounce_path = 3u;
                 return up.rgb;
             }
         }
@@ -1829,6 +1885,7 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
             }
         }
         lighting_hit_sunfrac = sum.w > 0.0 ? fill_f / sum.w : 0.0;
+        lighting_bounce_path = 4u;
         return sum.w > 0.0 ? sum.rgb / sum.w : vec3(0.0);
     }
     if (lighting_world_mode() == 3u) {
@@ -3293,4 +3350,25 @@ uint lighting_pix_sig(vec3 pos, vec3 n, bool two_sided, LampList list) {
     ivec3 q = ivec3(floor(pos * 1000.0));
     uint h = lighting_hash(uint(q.x) * 0x8da6b343u ^ uint(q.y) * 0xd8163841u ^ uint(q.z) * 0xcb1ab31fu ^ lighting_pack_normal(n) ^ (two_sided ? 0x5bd1e995u : 0u));
     return lighting_lamps_sig(h, list);
+}
+
+// S78Q (held-probe gather): per probe two vec4 (x the frame its gather inputs
+// last changed, y its kept samples at its last gather; then its place there), then the gather's raw cell
+// table (R per probe), which the filter's first pass reads.
+const bool LIGHTING_GATHER_HOLD = false; // S78R: off pending re-test (S78S)
+uint lighting_gdirty_at() {
+    return lighting_pix_at() + (pc.dims.x * pc.dims.y + 1u) / 2u;
+}
+uint lighting_graw_at(uint probe, uint k) {
+    return lighting_gdirty_at() + 2u * lighting_probes() + probe * lighting_rays() + k;
+}
+void lighting_gdirty_mark(uint probe) {
+    work.v[lighting_gdirty_at() + 2u * probe].x = uintBitsToFloat(lighting_frame());
+}
+// A write to a kept hit's slot (record or light) that changed it marks its probe.
+void lighting_gdirty_kept_at(uint at) {
+    uint base = lighting_kept_at(0u);
+    if (at >= base && at < base + lighting_kept_hits()) {
+        lighting_gdirty_mark((at - base) / lighting_rays() / LIGHTING_STRATA);
+    }
 }

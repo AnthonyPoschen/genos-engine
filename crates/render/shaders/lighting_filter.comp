@@ -78,7 +78,7 @@ void main() {
     }
     uint rays = lighting_rays();
     [[dont_unroll]] for (uint k = 0u; k < rays; k++) {
-        vec4 own = work.v[lighting_cell_at(from_table, probe, k)];
+        vec4 own = work.v[LIGHTING_GATHER_HOLD && round == 0u ? lighting_graw_at(probe, k) : lighting_cell_at(from_table, probe, k)];
         vec3 d = lighting_cell_dir(pp.xyz, n, k);
         float own_t = own.w >= 0.0 ? own.w : LIGHTING_FAR_HIT;
         vec3 sum = own.w >= 0.0 ? own.rgb : vec3(0.0);
@@ -90,7 +90,7 @@ void main() {
             if (cell == ~0u) {
                 continue;
             }
-            vec4 v = work.v[lighting_cell_at(from_table, nb[j], cell)];
+            vec4 v = work.v[LIGHTING_GATHER_HOLD && round == 0u ? lighting_graw_at(nb[j], cell) : lighting_cell_at(from_table, nb[j], cell)];
             if (v.w < 0.0) {
                 continue;
             }

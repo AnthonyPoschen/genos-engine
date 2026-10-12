@@ -150,6 +150,11 @@ pub(crate) struct Lighting {
     /// the light hash and whether it took young patches only.
     stats_light: [u64; 2],
     stats_young: [bool; 2],
+    /// S78S debug dump (GENOS_LIGHTING_DUMP=N, GENOS_LIGHTING_DUMP_DIR): the raw
+    /// cache, cache keys, work, G-buffer and output buffers copied at frames N and
+    /// N + 1 (one readback set each), written to disk a few frames later. Never
+    /// on in the normal loop; perf/dump.py splits them into per-component files.
+    dump: Vec<(u64, Vec<(&'static str, Buffer)>)>,
     world_light: u64,
     world_young: bool,
     /// Light cache rounds per second of wall time (GENOS_LIGHTING_CACHE_HZ; 0: one every
@@ -224,6 +229,7 @@ impl Default for Lighting {
             young_ok: std::env::var("GENOS_LIGHTING_YOUNG_ONLY").map_or(true, |v| v != "0"),
             stats_light: [0; 2],
             stats_young: [false; 2],
+            dump: Vec::new(),
             world_light: 0,
             world_young: false,
             cache_hz: std::env::var("GENOS_LIGHTING_CACHE_HZ")
@@ -590,7 +596,8 @@ impl Gpu {
             + 2 * LIGHTING_RAYS as u64 * probes
             + kept
             + kept / 4
-            + pixels.div_ceil(2); // S78J: per-pixel direct light reuse (signature, light)
+            + pixels.div_ceil(2) // S78J: per-pixel direct light reuse (signature, light)
+            + 2 * probes + LIGHTING_RAYS as u64 * probes; // S78Q: held-probe gather (stamps, raw cells)
         let mut gbuf = std::mem::replace(&mut self.lighting.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.lighting.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.lighting.out, Buffer::empty());
@@ -602,19 +609,19 @@ impl Gpu {
         if self.lighting.cache_keys.buffer.is_null() {
             self.lighting.cache_keys = self.make_buffer_queues(
                 (2 * LIGHTING_CACHE_SLOTS + 2 + 17600 + 16 + 3 * 65536 + 1024 + 32768 + 16) * 4, // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
-                0x20 | 0x2 | 0x100,
+                0x20 | 0x2 | 0x100 | 0x1,
                 Memory::Device,
                 &share,
             )?;
             self.lighting.cache =
-                self.make_buffer_queues(LIGHTING_CACHE_SLOTS * 368, // S77D: + 6 a-trous levels, 2 dirty-stamp vec4 + activity (23 vec4 a slot)
-                0x20 | 0x2, Memory::Device, &share)?; // S74A: + A-SVGF gradient (2 vec4) // 11 vec4 a slot (S72A: + sparse fill; S72V: + a-trous ping-pong)
+                self.make_buffer_queues(LIGHTING_CACHE_SLOTS * 368, // S78S: + transfer source (dump) // S77D: + 6 a-trous levels, 2 dirty-stamp vec4 + activity (23 vec4 a slot)
+                0x20 | 0x2 | 0x1, Memory::Device, &share)?; // S74A: + A-SVGF gradient (2 vec4) // 11 vec4 a slot (S72A: + sparse fill; S72V: + a-trous ping-pong)
             self.lighting.cache_clear = true;
             for k in 0..2 {
-                self.lighting.stats[k] = self.make_buffer(352, 0x20 | 0x2, Memory::Readback)?;
+                self.lighting.stats[k] = self.make_buffer(LIGHTING_STATS_BYTES, 0x20 | 0x2, Memory::Readback)?;
             }
             self.lighting.world_stats =
-                self.make_buffer_queues(352, 0x20 | 0x2, Memory::Readback, &share)?;
+                self.make_buffer_queues(LIGHTING_STATS_BYTES, 0x20 | 0x2, Memory::Readback, &share)?;
             self.lighting.world_scene = self.make_buffer_queues(
                 crate::pack::SCENE_CAPACITY as u64,
                 0x20,
@@ -788,6 +795,7 @@ impl Gpu {
         // This slot's last frame is done (its fence was waited): read its counters
         // (the async queue's come back with its own submission).
         self.trace_sc(self.lighting.stats[slot].memory, "frame");
+        self.lighting_dump_write();
         // S70B (no GPU->CPU reads in the frame loop): the surface cache's settling
         // and young-only rounds come from what the CPU already knows (frames still,
         // rounds since the light changed), so its counters are read only for the
@@ -822,7 +830,12 @@ impl Gpu {
             }
         }
         unsafe {
-            (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.stats[slot].buffer, 0, 352, 0);
+            (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.stats[slot].buffer, 0, LIGHTING_STATS_BYTES, 0);
+            // S78S change counters on (GENOS_LIGHTING_SC_TRACE): the enable word
+            // (chg[31]) is set on the GPU; the counts are read with the stats (async).
+            if lighting_chg_on() {
+                (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.stats[slot].buffer, LIGHTING_CHG_ENABLE_BYTE, 4, 1);
+            }
             if self.lighting.cache_clear {
                 self.lighting.cache_clear = false;
                 // The async queue starts once this frame (its slot) is surely done.
@@ -1028,7 +1041,7 @@ impl Gpu {
                 (self.fns.cmd_reset_query)(cmd, qp, 0, 6);
                 (self.fns.cmd_write_timestamp)(cmd, 0x1, qp, 0);
             }
-            (self.fns.cmd_fill_buffer)(cmd, self.lighting.world_stats.buffer, 0, 352, 0);
+            (self.fns.cmd_fill_buffer)(cmd, self.lighting.world_stats.buffer, 0, LIGHTING_STATS_BYTES, 0);
             // The mature and young counts, rebuilt by the compact pass.
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, LIGHTING_CACHE_SLOTS * 4, 4, 0);
             // The WRC refresh lists' counts (change, background; lighting_cache.glsl).
@@ -1112,11 +1125,12 @@ impl Gpu {
                 self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23]
             );
             eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
+            eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
         }
     }
 
-    fn read_stats16(&self, memory: Handle) -> Result<[u32; 88], String> {
-        let mut words = [0u32; 88];
+    fn read_stats16(&self, memory: Handle) -> Result<[u32; LIGHTING_STATS_WORDS], String> {
+        let mut words = [0u32; LIGHTING_STATS_WORDS];
         unsafe {
             let mut mapped = std::ptr::null_mut();
             check(
@@ -1124,13 +1138,13 @@ impl Gpu {
                     self.device,
                     memory,
                     0,
-                    352,
+                    LIGHTING_STATS_BYTES,
                     0,
                     &mut mapped,
                 ),
                 "map lighting stats",
             )?;
-            std::ptr::copy_nonoverlapping(mapped as *const u32, words.as_mut_ptr(), 88);
+            std::ptr::copy_nonoverlapping(mapped as *const u32, words.as_mut_ptr(), LIGHTING_STATS_WORDS);
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(words)
@@ -1205,7 +1219,10 @@ impl Gpu {
         // * 1000 + cap (flags * 100000 there lost precision past 2^24 and was capped).
         // S72K: bits 23 and up go in head 3.w (was: capped at 2^23 - 1, so flag
         // 16777216 and up turned every lower flag on instead).
-        let flags_all = lighting_sc_flags_env();
+        // S78S debug isolate toggles (lighting_toggles): direct only rides on
+        // flag 2097152 (no cache light at hits), the rest in head 3.w bits 12-15.
+        let toggles = lighting_toggles();
+        let flags_all = lighting_sc_flags_env() | if toggles & LIGHTING_TOGGLE_DIRECT_ONLY != 0 { 2097152 } else { 0 };
         let flags = flags_all & ((1 << 23) - 1);
         block[2] = ((self.lighting.probe_runs & 1) + 2 * flags) as f32;
         block[3] = (world * 1000 + cap) as f32;
@@ -1279,7 +1296,7 @@ impl Gpu {
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0)
             .min(7);
-        block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9)) as f32;
+        block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 15) << 12)) as f32;
         // A frame drawn from held light runs no probes: what it saw is still what
         // the probes last ran on.
         if !frozen {
@@ -1568,6 +1585,89 @@ impl Gpu {
         self.image_barrier(image, 6, 7, 0x1000, 0x1000, 0x800, 0x1000);
         self.copy_image_buffer(image, 7, self.lighting.out.buffer, w, h, false);
         self.image_barrier(image, 7, 6, 0x1000, 0x1000 | 0x800, 0x1000, 0x800 | 0x20);
+        self.lighting_dump_copy();
+    }
+
+    /// S78S: frames N and N + 1 (GENOS_LIGHTING_DUMP): copy the lighting buffers
+    /// into readback buffers at the end of the frame's passes.
+    fn lighting_dump_copy(&mut self) {
+        let Some(n) = std::env::var("GENOS_LIGHTING_DUMP").ok().and_then(|v| v.parse::<u64>().ok()) else {
+            return;
+        };
+        let f = self.lighting.frame as u64;
+        if f != n && f != n + 1 {
+            return;
+        }
+        let srcs: [(&'static str, Handle, u64); 5] = [
+            ("cache", self.lighting.cache.buffer, self.lighting.cache.size),
+            ("keys", self.lighting.cache_keys.buffer, self.lighting.cache_keys.size),
+            ("work", self.lighting.work.buffer, self.lighting.work.size),
+            ("gbuf", self.lighting.gbuf.buffer, self.lighting.gbuf.size),
+            ("out", self.lighting.out.buffer, self.lighting.out.size),
+        ];
+        self.memory_barrier(0x800 | 0x1000, 0x1000, 0x40 | 0x800, 0x800);
+        let mut set = Vec::new();
+        for (name, src, size) in srcs {
+            let Ok(dst) = self.make_buffer(size, 0x2, Memory::Readback) else {
+                eprintln!("lighting dump: no readback buffer for {name} ({size} bytes)");
+                continue;
+            };
+            #[repr(C)]
+            struct Region {
+                src: u64,
+                dst: u64,
+                size: u64,
+            }
+            let region = Region { src: 0, dst: 0, size };
+            unsafe {
+                (self.fns.cmd_copy_buffer)(self.cmd, src, dst.buffer, 1, &region as *const Region as *const u8);
+            }
+            set.push((name, dst));
+        }
+        self.memory_barrier(0x1000, 0x800 | 0x1000, 0x1000, 0x20 | 0x40 | 0x800);
+        self.lighting.dump.push((f, set));
+    }
+
+    /// S78S: the dumped frames, once surely done (a few frames on): write each
+    /// buffer as dir/f{frame}_{name}.bin and the layout (dims, probes) as JSON.
+    fn lighting_dump_write(&mut self) {
+        if self.lighting.dump.is_empty() {
+            return;
+        }
+        let last = self.lighting.dump.iter().map(|d| d.0).max().unwrap_or(0);
+        if (self.lighting.frame as u64) < last + 3 {
+            return;
+        }
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
+        let dir = std::env::var("GENOS_LIGHTING_DUMP_DIR").unwrap_or_else(|_| "lighting-dump".into());
+        let _ = std::fs::create_dir_all(&dir);
+        let dumps = std::mem::take(&mut self.lighting.dump);
+        for (f, set) in dumps {
+            for (name, mut buf) in set {
+                let mut raw = vec![0u8; buf.size as usize];
+                unsafe {
+                    let mut mapped = std::ptr::null_mut();
+                    if (self.fns.map_mem)(self.device, buf.memory, 0, buf.size, 0, &mut mapped) == 0 {
+                        std::ptr::copy_nonoverlapping(mapped as *const u8, raw.as_mut_ptr(), raw.len());
+                        (self.fns.unmap_mem)(self.device, buf.memory);
+                    }
+                }
+                let path = format!("{dir}/f{f}_{name}.bin");
+                if let Err(e) = std::fs::write(&path, &raw) {
+                    eprintln!("lighting dump: {path}: {e}");
+                }
+                self.destroy_buffer(&mut buf);
+            }
+            let d = self.lighting.dims;
+            let json = format!(
+                "{{\"frame\": {f}, \"width\": {}, \"height\": {}, \"probes_x\": {}, \"probes_y\": {}, \"rays\": {}, \"strata\": {}, \"cache_slots\": {}}}\n",
+                d[0], d[1], d[2], d[3], LIGHTING_RAYS, LIGHTING_STRATA, LIGHTING_CACHE_SLOTS
+            );
+            let _ = std::fs::write(format!("{dir}/f{f}_layout.json"), json);
+            eprintln!("lighting dump: frame {f} written to {dir}");
+        }
     }
 
     fn memory_barrier(&self, src_stage: u32, dst_stage: u32, src_access: u32, dst_access: u32) {
@@ -1689,6 +1789,14 @@ fn lighting_stats_wanted() -> bool {
 const LIGHTING_DEFAULT_WORLD: u32 = 3;
 const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
 const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
+/// Lighting stats buffer: 24 words, diag[64], chg[32] (lighting_cache.glsl).
+const LIGHTING_STATS_WORDS: usize = 120;
+const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
+const LIGHTING_CHG_ENABLE_BYTE: u64 = (LIGHTING_STATS_WORDS as u64 - 1) * 4;
+/// S78S: the change counters (lighting_chg) run with GENOS_LIGHTING_SC_TRACE.
+fn lighting_chg_on() -> bool {
+    std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_some()
+}
 
 /// GENOS_LIGHTING_SC_FLAGS, default LIGHTING_DEFAULT_SC_FLAGS.
 fn lighting_sc_flags_env() -> u32 {
@@ -1895,4 +2003,34 @@ pub(crate) fn lighting_scene_key(pack: &crate::pack::Pack, bytes: &[u8]) -> u64 
         f.to_bits().hash(&mut hasher);
     }
     hasher.finish()
+}
+
+/// S78S debug isolate toggles: attribute a change to exactly one component.
+/// GENOS_LIGHTING_TOGGLES (start) or the file named by GENOS_LIGHTING_TOGGLES_FILE
+/// (re-read every frame, so `echo direct_only > file` switches live), words:
+/// freeze_cache (no surface-cache / world-cache value writes), direct_only (no
+/// cache light at ray hits), bounce_only (no direct light at pixels or hits),
+/// freeze_probes (kept-hit lights not rewritten).
+const LIGHTING_TOGGLE_FREEZE_CACHE: u32 = 1;
+const LIGHTING_TOGGLE_DIRECT_ONLY: u32 = 2;
+const LIGHTING_TOGGLE_BOUNCE_ONLY: u32 = 4;
+const LIGHTING_TOGGLE_FREEZE_PROBES: u32 = 8;
+fn lighting_toggles() -> u32 {
+    let mut text = std::env::var("GENOS_LIGHTING_TOGGLES").unwrap_or_default();
+    if let Ok(path) = std::env::var("GENOS_LIGHTING_TOGGLES_FILE") {
+        if let Ok(t) = std::fs::read_to_string(path) {
+            text = t;
+        }
+    }
+    let mut bits = 0;
+    for w in text.split(|c: char| c == ',' || c.is_whitespace()).filter(|w| !w.is_empty()) {
+        bits |= match w {
+            "freeze_cache" => LIGHTING_TOGGLE_FREEZE_CACHE,
+            "direct_only" => LIGHTING_TOGGLE_DIRECT_ONLY,
+            "bounce_only" => LIGHTING_TOGGLE_BOUNCE_ONLY,
+            "freeze_probes" => LIGHTING_TOGGLE_FREEZE_PROBES,
+            _ => 0,
+        };
+    }
+    bits
 }

@@ -61,6 +61,34 @@ void gather_bin() {
     bool live = probe < lighting_probes() && pp.w > 0.5;
     uint samples = 0u;
     vec3 from = pp.xyz + n * 0.02;
+    // S78Q held probe: its own strata only (no fills, no neighbour's), the same
+    // place as at its last gather and no kept hit or light of it changed since
+    // (lighting_gdirty): the inputs are the same, so its raw cells stand.
+    if (LIGHTING_GATHER_HOLD && live) {
+        vec4 gd = work.v[lighting_gdirty_at() + 2u * probe];
+        vec4 gp = work.v[lighting_gdirty_at() + 2u * probe + 1u];
+        if (k == 0u) {
+            lighting_chg(CHG_G_RUN, 1u);
+            lighting_chg(CHG_G_DIRTY, floatBitsToUint(gd.x) == lighting_frame() ? 1u : 0u);
+            lighting_chg(CHG_G_MOVED, all(equal(floatBitsToUint(gp.xyz), floatBitsToUint(pp.xyz))) ? 0u : 1u);
+            uint own = 0u;
+            for (uint s = 0u; s < LIGHTING_STRATA; s++) { own += lighting_pick(probe, s) == probe + 1u ? 1u : 0u; }
+            lighting_chg(CHG_G_PICKS, own == LIGHTING_STRATA ? 0u : 1u);
+        }
+        bool same = floatBitsToUint(gd.x) != lighting_frame() && all(equal(floatBitsToUint(gp.xyz), floatBitsToUint(pp.xyz)))
+            && work.v[lighting_change_at()].y < 0.5;
+        [[dont_unroll]] for (uint s = 0u; s < LIGHTING_STRATA && same; s++) {
+            same = lighting_pick(probe, s) == probe + 1u;
+        }
+        if (same) {
+            if (k == 0u) {
+                lighting_chg(CHG_G_HELD, 1u);
+                atomicAdd(gstats.pad0, floatBitsToUint(gd.y));
+                atomicAdd(gstats.pad1, 1u);
+            }
+            return;
+        }
+    }
     [[dont_unroll]] for (uint s = 0u; s < LIGHTING_STRATA; s++) {
         uint e = k * LIGHTING_STRATA + s;
         g_cell[e] = ~0u;
@@ -114,8 +142,12 @@ void gather_bin() {
             t += g_t[e];
         }
     }
-    work.v[lighting_cell_at(0u, probe, k)] = a.w > 0.0 ? vec4(a.rgb / a.w, t / a.w) : vec4(0.0, 0.0, 0.0, -1.0);
-    work.v[lighting_cell_at(1u, probe, k)] = vec4(0.0);
+    work.v[LIGHTING_GATHER_HOLD ? lighting_graw_at(probe, k) : lighting_cell_at(0u, probe, k)] = a.w > 0.0 ? vec4(a.rgb / a.w, t / a.w) : vec4(0.0, 0.0, 0.0, -1.0);
+    barrier();
+    if (LIGHTING_GATHER_HOLD && k == 0u) {
+        work.v[lighting_gdirty_at() + 2u * probe].y = uintBitsToFloat(g_samples);
+        work.v[lighting_gdirty_at() + 2u * probe + 1u].xyz = pp.xyz;
+    }
     barrier();
     if (k == 0u) {
         atomicAdd(gstats.pad0, g_samples);

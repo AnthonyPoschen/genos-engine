@@ -12,6 +12,43 @@ layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 
 const bool LIGHTING_KEPT_SHOULD = true;
+// S78Q: a kept light that changed marks its probe's gather (lighting_gdirty).
+const bool LIGHTING_KEPT_HYST = false; // S78T: off pending re-test (S78S)
+const float LIGHTING_KEPT_TOL = 0.02;
+void lighting_put_kept_light_d(uint h, vec3 light, uint src) {
+    uint v = lighting_pack_rgb9e5(light);
+    uint at = lighting_kept_light_at() + h / 4u;
+    uint ov = floatBitsToUint(work.v[at][h % 4u]);
+    if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_PROBES) != 0u) {
+        return;
+    }
+    lighting_chg(CHG_KEPT_WRITE, 1u);
+    lighting_chg(CHG_KB_FINE + lighting_bounce_path, 1u);
+    // S78T: a kept light within LIGHTING_KEPT_TOL of the stored one keeps the
+    // stored value (hysteresis): sub-noise moves of the cache texels under the
+    // hits (still scene: ~740 texel writes a frame, each read by ~9 hits) no
+    // longer change the probes' inputs, so their gathers hold (S78R). The stored
+    // value moves once the light is LIGHTING_KEPT_TOL away from it, so no drift.
+    if (LIGHTING_KEPT_HYST && ov != v) {
+        vec3 o = lighting_unpack_rgb9e5(ov);
+        float lo = dot(o, vec3(0.2126, 0.7152, 0.0722));
+        float ln = dot(light, vec3(0.2126, 0.7152, 0.0722));
+        if (abs(ln - lo) <= LIGHTING_KEPT_TOL * max(max(lo, ln), 1.0e-3)) {
+            lighting_chg(CHG_KEPT_HELD, 1u);
+            return;
+        }
+    }
+    if (ov != v) {
+        lighting_chg(CHG_KC_FINE + lighting_bounce_path, 1u);
+        lighting_chg(CHG_KEPT_CHANGED, 1u);
+        lighting_chg(CHG_KEPT_D0 + lighting_chg_bin(lighting_unpack_rgb9e5(ov), light), 1u);
+        lighting_chg(CHG_KEPT_TDL_REUSE + src, 1u);
+        if (LIGHTING_GATHER_HOLD) {
+            lighting_gdirty_mark(h / lighting_rays() / LIGHTING_STRATA);
+        }
+    }
+    work.v[at][h % 4u] = uintBitsToFloat(v);
+}
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     uint pixels = pc.dims.x * pc.dims.y;
@@ -72,7 +109,7 @@ void main() {
                 rec = work.v[lighting_kept_at(h)];
                 live = lighting_stratum_ray(ps / LIGHTING_STRATA, ps % LIGHTING_STRATA, h % rays, origin, dir, from_n);
                 if (live && rec.x < -0.75) {
-                    lighting_put_kept_light(h, has_sky() ? scene.sky.rgb : vec3(0.0));
+                    lighting_put_kept_light_d(h, has_sky() ? scene.sky.rgb : vec3(0.0), 2u);
                     return;
                 }
             }
@@ -267,7 +304,11 @@ void main() {
         }
     }
     n = n_hit;
-    if (tdl != ~0u) {
+    if ((lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) != 0u) {
+        e = vec3(0.0);
+        e_sun = vec3(0.0);
+    }
+    if (tdl != ~0u && (lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) == 0u) {
         uint ts = tdl & 0x3FFFFFFFu;
         if (tdl_check) {
             // Confirm: within LIGHTING_TDL_TOL of the cached value -> keep it,
@@ -310,13 +351,14 @@ void main() {
         }
     } else {
         lighting_hit_sunfrac = 0.0;
+        lighting_bounce_path = 2u;
         vec3 bounce = lighting_cache_irradiance_at(pos, n, hit_t);
         e += bounce;
         e_sun += lighting_hit_sunfrac * bounce;
         if (fill_hit) {
             lighting_put_fill_light(h, reflectance * e + glow);
         } else if (probe_hit) {
-            lighting_put_kept_light(h, reflectance * e + glow);
+            lighting_put_kept_light_d(h, reflectance * e + glow, tdl == ~0u ? 2u : ((tdl & 0x80000000u) != 0u ? 0u : 1u));
         } else {
             // w: its sun/sky share as luminance (S63A).
             work.v[lighting_rad_at(ray)] = vec4(reflectance * e + glow, dot(reflectance * e_sun, vec3(0.2126, 0.7152, 0.0722)));

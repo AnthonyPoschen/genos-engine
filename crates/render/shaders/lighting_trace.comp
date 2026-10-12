@@ -149,7 +149,11 @@ void main() {
         if (hold_check && !(hold_old.x < 0.0)) {
             lighting_hold_fail(hold_probe);
         }
-        work.v[at] = probe_ray ? LIGHTING_MISS : lighting_miss_slot(has_sky() ? scene.sky.rgb : vec3(0.0));
+        vec4 mv = probe_ray ? LIGHTING_MISS : lighting_miss_slot(has_sky() ? scene.sky.rgb : vec3(0.0));
+        if (LIGHTING_GATHER_HOLD && probe_ray && any(notEqual(floatBitsToUint(work.v[at]), floatBitsToUint(mv)))) {
+            lighting_gdirty_kept_at(at);
+        }
+        work.v[at] = mv;
         return;
     }
     if (hold_check) {
@@ -161,7 +165,15 @@ void main() {
     }
     vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
     vec3 tint = mix(vec3(1.0), hit.albedo, hit.color_mix);
-    work.v[at] = vec4(hit.t, uintBitsToFloat(lighting_pack_normal(hn)),
+    vec4 nv = vec4(hit.t, uintBitsToFloat(lighting_pack_normal(hn)),
                       uintBitsToFloat(packUnorm4x8(vec4(tint * hit.reflect * LIGHTING_PI, 0.0))),
                       uintBitsToFloat(lighting_hit_glow(origin + dir * hit.t)));
+    if (probe_ray && any(notEqual(floatBitsToUint(work.v[at]), floatBitsToUint(nv)))) {
+        vec4 ow = work.v[at];
+        lighting_chg(CHG_REC, 1u);
+    }
+    if (LIGHTING_GATHER_HOLD && probe_ray && any(notEqual(floatBitsToUint(work.v[at]), floatBitsToUint(nv)))) {
+        lighting_gdirty_kept_at(at);
+    }
+    work.v[at] = nv;
 }
