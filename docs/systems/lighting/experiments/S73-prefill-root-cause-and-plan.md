@@ -2,7 +2,7 @@
 
 - **Date:** 2026-10-12
 - **Branch:** `cursor/gi-prefill-spare-budget-3544` (off `gi-v2` e61b89d)
-- **Status:** S73A and S73B ported, S73C (claim side effects) done; S73D-S73G planned below. Nothing is built or run yet: the evidence is from reading the code, not from measurements.
+- **Status:** S73A-S73G implemented (S73D 6f54914, S73E 1071524, S73F 8ac033e, S73G 12387cc). Not run: real GPU tests are on the owner's PC. The root-cause evidence is from reading the code.
 
 ## Done on the branch
 
