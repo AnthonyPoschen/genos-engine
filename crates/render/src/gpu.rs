@@ -2045,8 +2045,13 @@ impl Gpu {
                 )
             };
             if got == 0 {
-                for (&pass, w) in ids.iter().zip(g.windows(2)) {
-                    times.lighting[pass] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+                if times.lighting_disp.len() != ids.len() {
+                    times.lighting_disp = ids.iter().map(|&p| (p, 0.0)).collect();
+                }
+                for (i, (&pass, w)) in ids.iter().zip(g.windows(2)).enumerate() {
+                    let ms = tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+                    times.lighting[pass] += ms;
+                    times.lighting_disp[i].1 += ms;
                 }
                 times.lighting_frames += 1;
             }
@@ -2070,6 +2075,12 @@ impl Gpu {
             f.iter().sum::<f64>(),
             n / seconds,
         );
+        if times.lighting_frames > 0 && std::env::var_os("GENOS_GPU_DISPATCH").is_some() {
+            let lf = f64::from(times.lighting_frames);
+            let parts: Vec<String> = times.lighting_disp.iter().enumerate().map(|(i, (p, ms))| format!("{i}:{p}={:.3}", ms / lf)).collect();
+            eprintln!("LIGHTING_DISPATCH {}", parts.join(" "));
+            times.lighting_disp.clear();
+        }
         if times.lighting_frames > 0 {
             let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
@@ -5100,6 +5111,8 @@ struct GpuTimes {
     /// passes, and the per-pass sums over `lighting_frames`.
     lighting_pool: Handle,
     lighting_ids: [Vec<usize>; 2],
+    // GENOS_GPU_DISPATCH: per-dispatch ms (pass id, summed ms) in dispatch order.
+    lighting_disp: Vec<(usize, f64)>,
     lighting_frames: u32,
     lighting: [f64; 9],
     /// Async light cache rounds (GI v2) and their GPU time.
@@ -5149,6 +5162,7 @@ impl Default for GpuTimes {
             placed: false,
             lighting_pool: std::ptr::null_mut(),
             lighting_ids: [Vec::new(), Vec::new()],
+            lighting_disp: Vec::new(),
             world_runs: 0,
             world_ms: 0.0,
             world_pass: [0.0; 4],

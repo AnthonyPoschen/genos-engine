@@ -103,6 +103,10 @@ pub(crate) struct Lighting {
     /// Per frame slot: the cache pass's counters (lighting_cache.glsl `CacheStats`), and
     /// `still` as it was when that slot's frame ran (0: the scene had just changed).
     stats: [Buffer; 2],
+    // S78W: the shaders' stats live in device memory (atomics on host-visible
+    // memory went over PCIe: the gather's two per-probe atomics cost 0.85 ms);
+    // copied to `stats` at the end of the frame's passes.
+    stats_dev: [Buffer; 2],
     stats_still: [u32; 2],
     /// Frames in a row whose relit patches all stayed within LIGHTING_SETTLE_CHANGE, and
     /// the live patch count last read back.
@@ -203,6 +207,7 @@ impl Default for Lighting {
             held: 0,
             still: 0,
             stats: [Buffer::empty(), Buffer::empty()],
+            stats_dev: [Buffer::empty(), Buffer::empty()],
             quiet: 0,
             stats_still: [0; 2],
             live: 0,
@@ -619,6 +624,7 @@ impl Gpu {
             self.lighting.cache_clear = true;
             for k in 0..2 {
                 self.lighting.stats[k] = self.make_buffer(LIGHTING_STATS_BYTES, 0x20 | 0x2, Memory::Readback)?;
+                self.lighting.stats_dev[k] = self.make_buffer(LIGHTING_STATS_BYTES, 0x20 | 0x2 | 0x1, Memory::Device)?;
             }
             self.lighting.world_stats =
                 self.make_buffer_queues(LIGHTING_STATS_BYTES, 0x20 | 0x2, Memory::Readback, &share)?;
@@ -665,7 +671,7 @@ impl Gpu {
             let (scene, stats, set) = if slot < 2 {
                 (
                     self.frame_scene[slot].buffer,
-                    self.lighting.stats[slot].buffer,
+                    self.lighting.stats_dev[slot].buffer,
                     self.lighting.sets[slot],
                 )
             } else {
@@ -830,11 +836,11 @@ impl Gpu {
             }
         }
         unsafe {
-            (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.stats[slot].buffer, 0, LIGHTING_STATS_BYTES, 0);
+            (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.stats_dev[slot].buffer, 0, LIGHTING_STATS_BYTES, 0);
             // S78S change counters on (GENOS_LIGHTING_SC_TRACE): the enable word
             // (chg[31]) is set on the GPU; the counts are read with the stats (async).
             if lighting_chg_on() {
-                (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.stats[slot].buffer, LIGHTING_CHG_ENABLE_BYTE, 4, 1);
+                (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.stats_dev[slot].buffer, LIGHTING_CHG_ENABLE_BYTE, 4, 1);
             }
             if self.lighting.cache_clear {
                 self.lighting.cache_clear = false;
@@ -1585,6 +1591,25 @@ impl Gpu {
         self.image_barrier(image, 6, 7, 0x1000, 0x1000, 0x800, 0x1000);
         self.copy_image_buffer(image, 7, self.lighting.out.buffer, w, h, false);
         self.image_barrier(image, 7, 6, 0x1000, 0x1000 | 0x800, 0x1000, 0x800 | 0x20);
+        // S78W: the frame's stats to the host-visible copy (read a frame later).
+        self.memory_barrier(0x800 | 0x1000, 0x1000, 0x40 | 0x800, 0x800);
+        unsafe {
+            #[repr(C)]
+            struct Region {
+                src: u64,
+                dst: u64,
+                size: u64,
+            }
+            let region = Region { src: 0, dst: 0, size: LIGHTING_STATS_BYTES };
+            (self.fns.cmd_copy_buffer)(
+                self.cmd,
+                self.lighting.stats_dev[slot].buffer,
+                self.lighting.stats[slot].buffer,
+                1,
+                &region as *const Region as *const u8,
+            );
+        }
+        self.memory_barrier(0x1000, 0x800 | 0x1000 | 0x4000, 0x1000, 0x20 | 0x40 | 0x800 | 0x2000);
         self.lighting_dump_copy();
     }
 
@@ -1732,6 +1757,8 @@ impl Gpu {
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
         for k in 0..2 {
+            let mut stats_dev = std::mem::replace(&mut self.lighting.stats_dev[k], Buffer::empty());
+            self.destroy_buffer(&mut stats_dev);
             let mut stats = std::mem::replace(&mut self.lighting.stats[k], Buffer::empty());
             self.destroy_buffer(&mut stats);
         }
