@@ -1928,6 +1928,8 @@ uint lighting_grad_first() {
 }
 uint lighting_grad_count();
 void lighting_shadow_epochs();
+// S76D persistent check words, after the gradient check list (LIGHTING_GRAD_LIST_AT + 32768).
+const uint LIGHTING_CHECK_P_AT = LIGHTING_ARGS_AT + 16u + 3u * 65536u + 1024u + 32768u;
 bool lighting_dense() {
     return ((pc.params.z >> 4u) & 1u) != 0u;
 }
@@ -1971,6 +1973,18 @@ void lighting_write_args() {
         s = lighting_wrc_scout_due() ? LIGHTING_WRC_SCOUT_ENTRIES >> sh : 0u;
         g = (lighting_grad_count() + LIGHTING_CACHE_RAYS - 1u) / LIGHTING_CACHE_RAYS;
         lighting_shadow_epochs();
+        // S76D: last round's demand for fair service, and the global boost when
+        // a large share of the checks since the last write escalated.
+        ckeys.key[LIGHTING_CHECK_P_AT + 3u] = ckeys.key[LIGHTING_SC_HIST_AT + 72u]; // LIGHTING_GRAD_COUNT_AT
+        uint esc = ckeys.key[LIGHTING_CHECK_P_AT];
+        uint chk = ckeys.key[LIGHTING_CHECK_P_AT + 1u];
+        if (chk >= 64u) {
+            if (float(esc) > 0.2 * float(chk)) { // LIGHTING_BOOST_FRAC
+                ckeys.key[LIGHTING_CHECK_P_AT + 2u] = lighting_frame() + 120u; // LIGHTING_BOOST_FRAMES
+            }
+            ckeys.key[LIGHTING_CHECK_P_AT] = 0u;
+            ckeys.key[LIGHTING_CHECK_P_AT + 1u] = 0u;
+        }
     } else {
         uint first = min(lighting_young_count(), LIGHTING_CACHE_BATCH);
         a = lighting_young_only() ? first : min(LIGHTING_CACHE_BATCH, first + lighting_mature_count());
@@ -2878,9 +2892,52 @@ const float LIGHTING_CHECK_SIGMA_MAX = 0.05;
 uint lighting_sc_check_next(uint slot) {
     return floatBitsToUint(cache.v[LIGHTING_SC_GRAD2_AT + slot].y);
 }
+// S76D persistent words (never cleared per frame): escalations and checks since
+// the last args write, the frame the global boost ends, last round's check demand.
+const float LIGHTING_BOOST_FRAC = 0.2;
+const uint LIGHTING_BOOST_FRAMES = 120u;
+bool lighting_check_boost() {
+    return int(ckeys.key[LIGHTING_CHECK_P_AT + 2u] - lighting_frame()) > 0;
+}
 bool lighting_sc_check_due(uint slot) {
     uint nx = lighting_sc_check_next(slot);
-    return nx == 0u || int(lighting_frame() - nx) >= 0 || int(nx - lighting_frame()) > int(LIGHTING_CHECK_MAX);
+    if (nx == 0u || int(lighting_frame() - nx) >= 0 || int(nx - lighting_frame()) > int(LIGHTING_CHECK_MAX)) {
+        return true;
+    }
+    // S76D: while the boost holds (a scene-wide change), every texel is checked
+    // at least every LIGHTING_CHECK_MIN frames whatever its deferral.
+    if (lighting_check_boost()) {
+        uint iv = floatBitsToUint(cache.v[LIGHTING_SC_GRAD2_AT + slot].z);
+        return int(lighting_frame() - (nx - iv)) >= int(LIGHTING_CHECK_MIN);
+    }
+    return false;
+}
+// Nominate (persistent: the texel stays due until a check runs on it).
+void lighting_sc_nominate(uint slot) {
+    if (slot == ~0u) {
+        return;
+    }
+    uint nx = lighting_sc_check_next(slot);
+    if (nx == 0u || int(nx - lighting_frame()) > 0) {
+        cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame());
+        cache.v[LIGHTING_SC_GRAD2_AT + slot].z = uintBitsToFloat(LIGHTING_CHECK_MIN);
+    }
+}
+// S76D fair service: when last round's checks due exceeded the room, a texel is
+// served on its turn (one round in k, by hash) unless it has waited more than
+// LIGHTING_CHECK_MIN frames, so every nomination runs within ~k rounds.
+bool lighting_sc_check_turn(uint slot) {
+    uint room = (LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift();
+    uint dem = ckeys.key[LIGHTING_CHECK_P_AT + 3u];
+    if (dem <= room) {
+        return true;
+    }
+    uint nx = lighting_sc_check_next(slot);
+    if (nx != 0u && int(lighting_frame() - nx) > int(LIGHTING_CHECK_MIN)) {
+        return true;
+    }
+    uint k = (dem + room - 1u) / room;
+    return ((lighting_hash(slot ^ 0x7feb352du) + lighting_round()) % k) == 0u;
 }
 void lighting_sc_check_soon(uint slot) {
     cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + 1u);
@@ -2895,6 +2952,7 @@ void lighting_sc_grad_take(uint slot, float l_now) {
     float lam = max(0.0, d - 2.0 * sqrt(n2));
     cache.v[LIGHTING_SC_GRAD2_AT + slot].w = min(mix(n2, d * d, 0.125), LIGHTING_CHECK_SIGMA_MAX * LIGHTING_CHECK_SIGMA_MAX);
     atomicAdd(gstats.pad4, 1u);
+    atomicAdd(ckeys.key[LIGHTING_CHECK_P_AT + 1u], 1u);
     if (lam < LIGHTING_ASVGF_EPS) {
         // Confirmed: defer the next check (doubling).
         uint iv = clamp(floatBitsToUint(g2.z), LIGHTING_CHECK_MIN / 2u, LIGHTING_CHECK_MAX / 2u) * 2u;
@@ -2905,11 +2963,22 @@ void lighting_sc_grad_take(uint slot, float l_now) {
     }
     lighting_dg(43u, 1u);
     atomicAdd(gstats.pad5, 1u);
+    atomicAdd(ckeys.key[LIGHTING_CHECK_P_AT], 1u);
     vec2 c = lighting_sc_true_cell(slot);
     ivec2 b = ivec2(floor(c / 3.0)) * 3 - ivec2(c);
     [[dont_unroll]] for (int k = 0; k < 9; k++) {
         ivec2 off = b + ivec2(k % 3, k / 3);
         lighting_sc_grad_put(off == ivec2(0) ? slot : lighting_sc_cell_slot(slot, off), lam);
+    }
+    // S76D: a confirmed change nominates the ring around its block (5 x 5 less
+    // the 3 x 3, same surface) for checks.
+    [[dont_unroll]] for (int k = 0; k < 25; k++) {
+        ivec2 off = b + ivec2(k % 5, k / 5) - ivec2(1);
+        if (off.x >= b.x && off.x < b.x + 3 && off.y >= b.y && off.y < b.y + 3) {
+            continue;
+        }
+        lighting_sc_nominate(lighting_sc_cell_slot(slot, off));
+        lighting_dg(56u, 1u);
     }
 }
 // Shadow reuse for static lamps (S74A, Anthony 16:11): a light-cache or probe
@@ -2991,6 +3060,8 @@ const bool LIGHTING_TDL = true;
 const uint LIGHTING_TDL_AT = 14u * LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_TDL_STALE = 600u;
 const uint LIGHTING_TDL_BUDGET = 32768u;
+const bool LIGHTING_TDL_CHECK = true;
+const float LIGHTING_TDL_TOL = 0.1;
 const uint LIGHTING_TDL_COUNT_AT = LIGHTING_SC_HIST_AT + 73u;
 uint lighting_tdl_sig(uint slot, LampList list) {
     uint sig = lighting_hash(ckeys.key[slot] ^ 0x68e31da4u);
@@ -3010,4 +3081,30 @@ uint lighting_tdl_sig(uint slot, LampList list) {
         sig = lighting_hash(sig ^ e);
     }
     return sig | 1u;
+}
+
+// S76B WRC change refresh, confirm then escalate (Anthony 17:06): a change
+// nearby (mover, moved lamp) only nominates a cell; it is refreshed when its
+// check is due. The refresh's sample against the cell's mean is the check: within
+// twice the cell's own sample noise (an EMA of d^2 over its refreshes, capped at
+// LIGHTING_WRC_SIGMA_MAX) plus LIGHTING_ASVGF_EPS confirms, and the next nominated
+// refresh waits twice as long (LIGHTING_CHECK_MIN..MAX frames); otherwise the
+// cell is refreshed again next frame while nominated.
+const float LIGHTING_WRC_SIGMA_MAX = 0.2;
+void lighting_wrc_check_take(uint slot, vec3 e, vec3 old) {
+    float a = dot(e, vec3(0.2126, 0.7152, 0.0722));
+    float b = dot(old, vec3(0.2126, 0.7152, 0.0722));
+    float d = min(1.0, abs(a - b) / max(max(a, b), 1.0e-3));
+    vec4 g2 = cache.v[LIGHTING_SC_GRAD2_AT + slot];
+    float n2 = clamp(g2.w, 0.0, LIGHTING_WRC_SIGMA_MAX * LIGHTING_WRC_SIGMA_MAX);
+    cache.v[LIGHTING_SC_GRAD2_AT + slot].w = min(mix(n2, d * d, 0.125), LIGHTING_WRC_SIGMA_MAX * LIGHTING_WRC_SIGMA_MAX);
+    if (d < 2.0 * sqrt(n2) + LIGHTING_ASVGF_EPS) {
+        uint iv = clamp(floatBitsToUint(g2.z), LIGHTING_CHECK_MIN / 2u, LIGHTING_CHECK_MAX / 2u) * 2u;
+        cache.v[LIGHTING_SC_GRAD2_AT + slot].z = uintBitsToFloat(iv);
+        cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + iv);
+        lighting_dg(44u, 1u);
+    } else {
+        lighting_sc_check_soon(slot);
+        lighting_dg(45u, 1u);
+    }
 }

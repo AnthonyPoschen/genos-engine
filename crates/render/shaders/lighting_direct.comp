@@ -121,6 +121,16 @@ void main() {
                 count = 0u;
                 tdl = ts | 0x80000000u;
                 lighting_dg(40u, 1u);
+            } else if (LIGHTING_TDL_CHECK && tdl_sig != 0u && floatBitsToUint(d.z) != 0u && lighting_frame() - floatBitsToUint(d.w) < LIGHTING_TDL_STALE) {
+                // S76C: a lamp in range changed (the signature moved): a check,
+                // the texel's light with picked lamps (LIGHTING_CACHE_PICKS shadow
+                // rays) at its centre, against the cached value.
+                lighting_dg(47u, 1u);
+                tdl = ts | 0x40000000u;
+                origin = tp + tn * 0.02;
+                n = tn;
+                list = tl;
+                count = lamp_list_size(list);
             } else if (tdl_sig != 0u && atomicAdd(ckeys.key[LIGHTING_TDL_COUNT_AT], 1u) < LIGHTING_TDL_BUDGET) {
                 lighting_dg(41u, 1u);
                 tdl = ts;
@@ -145,7 +155,8 @@ void main() {
     // the step that keeps our per-hit direct light.
     bool cache_pick = idx >= pixels + kept && !fill_hit && ((pc.params.z >> 11u) & 1u) != 0u;
     bool probe_pick = LIGHTING_PROBE_PICKS && probe_hit && ((pc.params.z >> 11u) & 1u) != 0u;
-    bool pick = (cache_pick || probe_pick) && tdl == ~0u;
+    bool tdl_check = tdl != ~0u && (tdl & 0x40000000u) != 0u;
+    bool pick = ((cache_pick || probe_pick) && tdl == ~0u) || tdl_check;
     float total = 0.0;
     uint lit = 0u;
     float u = 0.0;
@@ -163,6 +174,8 @@ void main() {
             uint q = slot == ~0u ? 0u : lighting_cache_entry_quarter(ent, slot);
             u = lighting_unit(key ^ ((q * LIGHTING_CACHE_RAYS + r % LIGHTING_CACHE_RAYS) * 0x85ebca6bu + 0x5bd1e995u));
             }
+        } else if (tdl_check) {
+            u = lighting_unit(lighting_hash((tdl & 0x3FFFFFFFu) ^ lighting_frame() * 0x9e3779b9u));
         } else {
             // A probe hit: the offset hangs on the hit's 25 cm cell and its index,
             // so a still hit relights to the same value (no crawl).
@@ -218,8 +231,28 @@ void main() {
     }
     n = n_hit;
     if (tdl != ~0u) {
-        uint ts = tdl & 0x7FFFFFFFu;
-        if ((tdl & 0x80000000u) != 0u) {
+        uint ts = tdl & 0x3FFFFFFFu;
+        if (tdl_check) {
+            // Confirm: within LIGHTING_TDL_TOL of the cached value -> keep it,
+            // nudged towards the check (an unbiased estimate, so drift is
+            // tracked), under the new signature. Else escalate: the entry is
+            // dropped and the next use recomputes it exactly (budget); this
+            // hit takes the check's estimate.
+            vec4 d = cache.v[LIGHTING_TDL_AT + ts];
+            vec3 c = lighting_unpack_rgb9e5(floatBitsToUint(d.x));
+            float lc = dot(c, vec3(0.2126, 0.7152, 0.0722));
+            float le = dot(e, vec3(0.2126, 0.7152, 0.0722));
+            if (abs(le - lc) <= LIGHTING_TDL_TOL * max(max(le, lc), 1.0e-3)) {
+                lighting_dg(48u, 1u);
+                vec3 m = mix(c, e, 0.25);
+                cache.v[LIGHTING_TDL_AT + ts] = vec4(uintBitsToFloat(lighting_pack_rgb9e5(m)), d.y, uintBitsToFloat(tdl_sig), d.w);
+                e = m;
+                e_sun = m * d.y;
+            } else {
+                lighting_dg(49u, 1u);
+                cache.v[LIGHTING_TDL_AT + ts].z = 0.0;
+            }
+        } else if ((tdl & 0x80000000u) != 0u) {
             vec4 d = cache.v[LIGHTING_TDL_AT + ts];
             e = lighting_unpack_rgb9e5(floatBitsToUint(d.x));
             e_sun = e * d.y;

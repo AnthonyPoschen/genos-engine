@@ -600,7 +600,7 @@ impl Gpu {
         let share = self.light_families();
         if self.lighting.cache_keys.buffer.is_null() {
             self.lighting.cache_keys = self.make_buffer_queues(
-                (2 * LIGHTING_CACHE_SLOTS + 2 + 17600 + 16 + 3 * 65536 + 1024 + 32768) * 4, // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
+                (2 * LIGHTING_CACHE_SLOTS + 2 + 17600 + 16 + 3 * 65536 + 1024 + 32768 + 16) * 4, // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
                 0x20 | 0x2 | 0x100,
                 Memory::Device,
                 &share,
@@ -1109,7 +1109,7 @@ impl Gpu {
                 "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {} checks {} changed {}",
                 self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23]
             );
-            eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..72]);
+            eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
         }
     }
 

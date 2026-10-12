@@ -223,6 +223,10 @@ void main() {
         }
         vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * min(wa, 1.0);
         cache.v[3u * slot + 2u] = vec4(mean, min(t + add, LIGHTING_WRC_CAP));
+        // S76B: a refresh is the cell's check (lighting_wrc_check_take).
+        if (old.w >= 0.5) {
+            lighting_wrc_check_take(slot, e, old.rgb);
+        }
         return;
     }
     if (lighting_world_mode() == 3u) {

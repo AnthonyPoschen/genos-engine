@@ -102,6 +102,11 @@ void main() {
             uint updated = lighting_sc_updated(slot);
             vec3 cp = lighting_sc_texel_pos(slot);
             if (near || lighting_wrc_lamp_changed(cp, updated)) {
+                // S76B: nominated; refreshed only when its check is due.
+                if (!lighting_sc_check_due(slot)) {
+                    lighting_dg(46u, 1u);
+                    return;
+                }
                 uint at = atomicAdd(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], 1u);
                 if (at < LIGHTING_WRC_REFRESH_CELLS) {
                     ckeys.key[LIGHTING_WRC_CHG_AT + at] = slot;
@@ -192,8 +197,13 @@ void main() {
                         bool hinted = near || lighting_sc_lamp_touched(slot);
                         // S76: checked when its deferred check is due, or, near a
                         // hint, as its block's pick this round (nominated).
-                        if (LIGHTING_GRAD_CHECKS_ON && (lighting_sc_check_due(slot) || (hinted && lighting_sc_grad_rep(slot)))) {
+                        uint od = lighting_frame() - lighting_sc_check_next(slot);
+                        if (lighting_sc_check_next(slot) != 0u && int(od) > 60 && int(od) < 100000) lighting_dg(55u, 1u);
+                        if (LIGHTING_GRAD_CHECKS_ON && (lighting_sc_check_due(slot) || (hinted && lighting_sc_grad_rep(slot))) && lighting_sc_check_turn(slot)) {
                             uint at = atomicAdd(ckeys.key[LIGHTING_GRAD_COUNT_AT], 1u);
+                            lighting_dg(50u, 1u);
+                            if (at >= ((LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift())) lighting_dg(52u, 1u);
+                            else { lighting_dg(51u, 1u); if (lighting_sc_check_next(slot) != 0u && int(od) > 0 && int(od) < 100000) { lighting_dg(53u, od); atomicMax(gstats.diag[54], od); } }
                             if (at < ((LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift())) {
                                 lighting_dg(hinted ? 5u : 6u, 1u);
                                 ckeys.key[LIGHTING_GRAD_LIST_AT + at] = slot;
