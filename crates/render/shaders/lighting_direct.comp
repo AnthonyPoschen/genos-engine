@@ -115,6 +115,19 @@ void main() {
     vec3 origin = pos + n * 0.02;
     LampList list = lamps_at(origin);
     uint count = lamp_list_size(list);
+    // S78J: a pixel whose point and lamps match last frame's, in a quiet frame.
+    uint pix_sig = 0u;
+    if (LIGHTING_PIX_REUSE && idx < pixels && lighting_world_mode() == 3u) {
+        pix_sig = lighting_pix_sig(pos, n, two_sided, list);
+        vec4 pv = work.v[lighting_pix_at() + idx / 2u];
+        uint c = (idx & 1u) * 2u;
+        if (pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig && lighting_pix_quiet()) {
+            uint emitted = gbuf.px[idx].w;
+            outc.px[idx] = emitted == ~0u ? 0u : emitted;
+            gbuf.px[idx].w = floatBitsToUint(pv[c + 1u]);
+            return;
+        }
+    }
     // S75 Lumen surface-cache direct lighting for hits (lighting_cache.glsl).
     uint tdl = ~0u;
     uint tdl_sig = 0u;
@@ -278,6 +291,11 @@ void main() {
         uint emitted = gbuf.px[idx].w;
         outc.px[idx] = emitted == ~0u ? 0u : emitted;
         gbuf.px[idx].w = lighting_pack_rgb9e5(e);
+        if (LIGHTING_PIX_REUSE && lighting_world_mode() == 3u) {
+            uint c = (idx & 1u) * 2u;
+            work.v[lighting_pix_at() + idx / 2u][c] = uintBitsToFloat(pix_sig);
+            work.v[lighting_pix_at() + idx / 2u][c + 1u] = uintBitsToFloat(gbuf.px[idx].w);
+        }
     } else {
         lighting_hit_sunfrac = 0.0;
         vec3 bounce = lighting_cache_irradiance_at(pos, n, hit_t);

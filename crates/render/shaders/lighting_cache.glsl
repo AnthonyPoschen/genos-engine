@@ -3223,8 +3223,12 @@ const uint LIGHTING_TDL_BUDGET = 32768u;
 const bool LIGHTING_TDL_CHECK = true;
 const float LIGHTING_TDL_TOL = 0.1;
 const uint LIGHTING_TDL_COUNT_AT = LIGHTING_SC_HIST_AT + 73u;
+uint lighting_lamps_sig(uint seed, LampList list);
 uint lighting_tdl_sig(uint slot, LampList list) {
-    uint sig = lighting_hash(ckeys.key[slot] ^ 0x68e31da4u);
+    return lighting_lamps_sig(lighting_hash(ckeys.key[slot] ^ 0x68e31da4u), list);
+}
+uint lighting_lamps_sig(uint seed, LampList list) {
+    uint sig = seed;
     uint lamps = list.suns.y + list.near.y;
     uint count = lamp_list_size(list);
     for (uint k = 0u; k < count; k++) {
@@ -3270,4 +3274,23 @@ void lighting_wrc_check_take(uint slot, vec3 e, vec3 old) {
         cache.v[LIGHTING_SC_GRAD_AT + slot].x = 1.0;
         lighting_dg(45u, 1u);
     }
+}
+
+// S78J per-pixel direct light reuse: a pixel whose surface point (1 mm), normal
+// and sidedness and whose lamps' epochs (lighting_lamps_sig) are those of last
+// frame, in a frame with no change and no mover listed, shows last frame's
+// direct light: no lamp loop, no shadow rays. Any mover anywhere relights every
+// pixel (a moving shadow can reach any of them).
+const bool LIGHTING_PIX_REUSE = true;
+uint lighting_pix_at() {
+    return lighting_fill_light_at() + lighting_kept_hits() / 4u;
+}
+bool lighting_pix_quiet() {
+    vec4 head = work.v[lighting_change_at()];
+    return lighting_world_mode() == 3u && !(head.y > 0.5) && uint(head.x) == 0u && lighting_movers_count() == 0u;
+}
+uint lighting_pix_sig(vec3 pos, vec3 n, bool two_sided, LampList list) {
+    ivec3 q = ivec3(floor(pos * 1000.0));
+    uint h = lighting_hash(uint(q.x) * 0x8da6b343u ^ uint(q.y) * 0xd8163841u ^ uint(q.z) * 0xcb1ab31fu ^ lighting_pack_normal(n) ^ (two_sided ? 0x5bd1e995u : 0u));
+    return lighting_lamps_sig(h, list);
 }

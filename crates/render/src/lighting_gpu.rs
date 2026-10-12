@@ -589,7 +589,8 @@ impl Gpu {
             + 4 * probes
             + 2 * LIGHTING_RAYS as u64 * probes
             + kept
-            + kept / 4;
+            + kept / 4
+            + pixels.div_ceil(2); // S78J: per-pixel direct light reuse (signature, light)
         let mut gbuf = std::mem::replace(&mut self.lighting.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.lighting.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.lighting.out, Buffer::empty());

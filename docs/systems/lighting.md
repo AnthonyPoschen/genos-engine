@@ -301,3 +301,16 @@ It now takes the S77A 16-ray check when its deferred check is due (confirm
 doubles the deferral, a miss escalates to a set). Growing cells (below their
 cap, read) are unchanged here. Still 11.52 -> 11.20 ms, moving 18.7 ms; pop
 0.073 / 0.110 %. No new memory.
+
+### S78J: per-pixel direct light reused in quiet frames
+
+Every pixel ran the lamp loop and its shadow rays every frame (2.05M pixels at
+1080p, ~2 ms in a still scene). A pixel now keeps (signature, packed light) in
+the work buffer (+8 B a pixel, 7.9 MiB at 1080p, fixed per resolution); the
+signature hashes its surface point (1 mm), normal, sidedness and the epochs of
+its lamps (lighting_lamps_sig, as the texel direct light). In a frame with no
+change listed and no mover (lighting_pix_quiet) a matching pixel shows last
+frame's light with no rays. Any mover anywhere relights every pixel: a moving
+object's shadow can reach any pixel, and shadow reuse across movers tore edges
+before (S77B). Still 11.2 -> 9.4 ms (light 3.49 -> 1.56, 80 -> 93 fps);
+moving unchanged (18.8 ms); pop 0.088 / 0.115 %.
