@@ -1620,6 +1620,13 @@ vec4 lighting_sc_shown(uint slot) {
             if (have) {
                 return vec4(field, 1.0);
             }
+            // S72V8: no field yet: the texel's own sets before its seed (a seed is
+            // a first-fill guess and must never outlast real samples; S72V-V5
+            // showed seeds wherever the field was missing, frozen from the first
+            // fill).
+            if (own.w > 0.5) {
+                return vec4(own.rgb * ls, 1.0);
+            }
         } else if (have) {
             float f2 = clamp(1.0 - sup / LIGHTING_SC_HANDOVER, 0.0, 1.0);
             float a = sd.w > 0.0 ? sup / max(sup + LIGHTING_SC_HANDOVER_K * sd.w * f2, 1.0e-4) : 1.0;
