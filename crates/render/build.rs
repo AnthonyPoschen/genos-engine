@@ -14,6 +14,12 @@ fn main() {
         "shaders/lighting_check.comp",
         &out.join("lighting_check.comp.spv"),
     );
+    // High's a-trous. Adaptive is compiled out (S79).
+    let atrous_plain = compile_define(
+        "shaders/lighting_atrous.comp",
+        &out.join("lighting_atrous_plain.comp.spv"),
+        "LIGHTING_DENOISE_PLAIN",
+    );
     let lighting: Vec<(&str, PathBuf)> = [
         ("GBUFFER_VERT_SPV", "gbuffer.vert"),
         ("GBUFFER_FRAG_SPV", "gbuffer.frag"),
@@ -26,6 +32,10 @@ fn main() {
         ("LIGHTING_CACHE_SPV", "lighting_cache.comp"),
         ("LIGHTING_COMPOSE_SPV", "lighting_compose.comp"),
         ("LIGHTING_ATROUS_SPV", "lighting_atrous.comp"),
+        // Compiled into the binary. The pipeline is created the first time a
+        // small sun step asks for it, not at startup, so the nine lighting
+        // pipelines and their compile stay the gi-v2 set.
+        ("SUN_COMPOSE_SPV", "lighting_sun_compose.comp"),
     ]
     .iter()
     .map(|(name, file)| {
@@ -55,12 +65,17 @@ fn main() {
             path.display()
         ));
     }
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_ATROUS_PLAIN_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        atrous_plain.display()
+    ));
     std::fs::write(&glue, glue_text).unwrap();
     for piece in [
         "lighting_common.glsl",
         "lighting_pack.glsl",
         "lighting_cache.glsl",
         "lighting_cache_slots.glsl",
+        "lighting_sun_compose.comp",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }
@@ -84,6 +99,26 @@ fn compile(src: &str, dest: &std::path::Path) -> PathBuf {
         .expect("glslc");
     if !status.success() {
         panic!("glslc failed for {src}");
+    }
+    dest.to_path_buf()
+}
+
+/// glslc's wrapper does not forward `-D`. The plain a-trous kernel needs the macro.
+fn compile_define(src: &str, dest: &std::path::Path, define: &str) -> PathBuf {
+    let status = Command::new("glslangValidator")
+        .args([
+            "-V",
+            "--target-env",
+            "vulkan1.3",
+            &format!("-D{define}"),
+            src,
+            "-o",
+            dest.to_str().unwrap(),
+        ])
+        .status()
+        .expect("glslangValidator");
+    if !status.success() {
+        panic!("glslangValidator failed for {src} -D{define}");
     }
     dest.to_path_buf()
 }

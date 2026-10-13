@@ -19,8 +19,9 @@ pub use budget::{FrameMemory, ImageAdmit};
 pub use genos_bake as bake;
 pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
 pub use gpu::{
-    check_gpu_times_arg, gpu_times_flag_needs_value, DebugView, DrawProfile, LampReport,
-    LightingAtrousStats, Renderer, ScreenLine, ScreenRect, SettleStats, UnfilledControl,
+    check_gpu_times_arg, check_lighting_sun_arg, gpu_times_flag_needs_value,
+    lighting_sun_flag_needs_value, DebugView, DrawProfile, LampReport, LightingAtrousStats,
+    LightingSunStats, Renderer, ScreenLine, ScreenRect, SettleStats, UnfilledControl,
     UnfilledStats, ViewMode,
 };
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};

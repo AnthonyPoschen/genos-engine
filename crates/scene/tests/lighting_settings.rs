@@ -82,7 +82,10 @@ fn full_effort_spends_the_maximum_and_rewrites_every_pixel() {
 
 #[test]
 fn day_cycle_and_one_bounce_sit_between_potato_and_low() {
-    let names: Vec<_> = LightingPreset::all().iter().map(|preset| preset.name()).collect();
+    let names: Vec<_> = LightingPreset::all()
+        .iter()
+        .map(|preset| preset.name())
+        .collect();
     assert_eq!(
         names,
         ["potato", "day-cycle", "gi-1bounce", "low", "medium", "high"]
@@ -119,6 +122,17 @@ fn high_is_the_tuned_path() {
     assert_eq!(high.bounce.count, LIGHTING_BOUNCES_UNLIMITED);
     assert_eq!(high.probe_rays(), 64);
     assert_eq!(high.denoiser.iterations, 5);
+    assert!(!high.denoiser.adaptive);
+    assert!(high.denoiser.plain());
+    let medium = LightingSettings::preset(LightingPreset::Medium);
+    assert_eq!(medium.denoiser.iterations, 3);
+    assert!(!medium.denoiser.adaptive);
+    assert!(medium.denoiser.plain());
+    let low = LightingSettings::preset(LightingPreset::Low);
+    assert_eq!(low.denoiser.iterations, 1);
+    assert!(!low.denoiser.adaptive);
+    assert!(low.denoiser.plain());
+    assert!((high.denoiser.variance_threshold - 0.02).abs() < 1.0e-6);
     assert_eq!(high.world_mode(), 3);
     assert!(high.allocates_cache());
     let buckets = high.gpu_buckets(1);
@@ -131,8 +145,14 @@ fn a_partial_line_overlays_a_preset() {
     let mut settings = LightingSettings::preset(LightingPreset::High);
     settings.set_key("bounces", "1").unwrap();
     settings.set_key("denoise_iters", "3").unwrap();
+    settings.set_key("denoise_adaptive", "on").unwrap();
     assert_eq!(settings.bounce.count, 1);
     assert_eq!(settings.denoiser.iterations, 3);
+    assert!(settings.denoiser.adaptive);
+    let text = settings.to_text();
+    assert!(text.contains("denoise_adaptive=1"));
+    let parsed = LightingSettings::parse(&text).unwrap();
+    assert!(parsed.denoiser.adaptive);
     assert!(settings.probes_this_frame(1));
     assert!(!settings.cache_rays_this_frame(1));
     assert!(!settings.atrous_this_frame(1));
@@ -213,13 +233,25 @@ fn the_ambient_curve_interpolates_and_scales_the_sky_from_noon() {
     assert!((mid[2] - 0.5).abs() < 1.0e-5, "{mid:?}");
     assert!((mid_i - 0.5).abs() < 1.0e-5, "{mid_i}");
     let (morning, _, _) = at(9.0);
-    assert!((morning[0] - 1.0).abs() < 1.0e-5 && (morning[1] - 0.5).abs() < 1.0e-5, "{morning:?}");
+    assert!(
+        (morning[0] - 1.0).abs() < 1.0e-5 && (morning[1] - 0.5).abs() < 1.0e-5,
+        "{morning:?}"
+    );
     let (afternoon, _, _) = at(15.0);
-    assert!((afternoon[0] - 0.5).abs() < 1.0e-5 && (afternoon[1] - 1.0).abs() < 1.0e-5, "{afternoon:?}");
+    assert!(
+        (afternoon[0] - 0.5).abs() < 1.0e-5 && (afternoon[1] - 1.0).abs() < 1.0e-5,
+        "{afternoon:?}"
+    );
     let (evening, evening_i, evening_sky) = at(21.0);
-    assert!((evening[1] - 0.5).abs() < 1.0e-5 && (evening[2] - 0.5).abs() < 1.0e-5, "{evening:?}");
+    assert!(
+        (evening[1] - 0.5).abs() < 1.0e-5 && (evening[2] - 0.5).abs() < 1.0e-5,
+        "{evening:?}"
+    );
     assert!((evening_i - 0.5).abs() < 1.0e-5);
-    assert!(evening_sky[1] < 0.6 && evening_sky[2] < 0.6, "{evening_sky:?}");
+    assert!(
+        evening_sky[1] < 0.6 && evening_sky[2] < 0.6,
+        "{evening_sky:?}"
+    );
 
     settings.ambient.mode = AmbientMode::Day;
     settings.time_of_day = 21.0;

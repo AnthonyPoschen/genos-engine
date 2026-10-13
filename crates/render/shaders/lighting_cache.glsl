@@ -126,6 +126,24 @@ uint lighting_denoise_iters() {
     uint n = (gstats.ctrl_bits >> 16u) & 7u;
     return n == 0u ? 5u : n;
 }
+// Bits 22..31, steps of 0.0001. Relative luminance deviation sqrt(var) / mean.
+float lighting_denoise_variance() {
+    return float((gstats.ctrl_bits >> 22u) & 1023u) * 0.0001;
+}
+// LIGHTING_DENOISE_PLAIN is the high pipeline. Adaptive passes are compiled
+// out of it. That branch lives in the other a-trous pipeline. On the 4070 the
+// extra branches dropped occupancy of this kernel (11.7 ms vs the gi-v2 7.5 ms)
+// even with the bits clear. Half-res and tiles were removed after they lost
+// the A/B (S79).
+#ifdef LIGHTING_DENOISE_PLAIN
+bool lighting_denoise_adaptive() { return false; }
+#else
+// Bit 20. Fewer wavelet iterations where history is stable. Off unless the
+// experimental knob is on. See S79.
+bool lighting_denoise_adaptive() {
+    return (gstats.ctrl_bits & 1048576u) != 0u;
+}
+#endif
 // Unlimited (bit 16384) is today's cache. Bounce 0 and 1 do not read it: one
 // bounce is the direct light on a probe hit, and the cache lookup is not run.
 // Bounce 2 and above read it (cache-to-cache).
@@ -654,8 +672,19 @@ void lighting_ls_note() {
     ckeys.key[at + 1u] = floatBitsToUint(lighting_global_light());
     ckeys.key[LIGHTING_LS_AT + 2u * LIGHTING_LS_RING] = f;
 }
+#ifdef GENOS_SUN_SHADER
+bool lighting_sun_small();
+float lighting_sun_committed_light();
+#endif
 // The global sun/sky light as of the last round (-1 when unknown).
+// A small sun step (GENOS_SUN_SHADER only) keeps the committed value, so one
+// tick does not rescale every texel. The default compose does not compile this.
 float lighting_ls_now() {
+#ifdef GENOS_SUN_SHADER
+    if (lighting_sun_small()) {
+        return max(lighting_sun_committed_light(), 0.0);
+    }
+#endif
     uint g = ckeys.key[LIGHTING_LS_AT + 2u * LIGHTING_LS_RING];
     uint ga = LIGHTING_LS_AT + 2u * (g % LIGHTING_LS_RING);
     return (g != 0u && ckeys.key[ga] == g) ? uintBitsToFloat(ckeys.key[ga + 1u]) : -1.0;
@@ -2907,6 +2936,110 @@ bool lighting_svgf_active(uint s) {
     uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + s].z);
     return lighting_sc_pixel_fresh(shown, 30);
 }
+#ifdef GENOS_SUN_SHADER
+// Sun amortise words, after the a-trous meta (391 words). The default compose
+// does not compile this block, so its SPIR-V stays the gi-v2 compose.
+const uint LIGHTING_SUN_META = 391u;
+const uint LIGHTING_SUN_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS + LIGHTING_SUN_META;
+const uint LIGHTING_SUN_SMALL = 1u;
+bool lighting_stratum_held(uint probe);
+
+uint lighting_sun_flags() {
+    return ckeys.key[LIGHTING_SUN_AT + 1u];
+}
+bool lighting_sun_small() {
+    return (lighting_sun_flags() & LIGHTING_SUN_SMALL) != 0u;
+}
+uint lighting_sun_n() {
+    return max((lighting_sun_flags() >> 8u) & 255u, 1u);
+}
+uint lighting_sun_slice_id() {
+    return (lighting_sun_flags() >> 16u) & 255u;
+}
+// This frame's band. The nearest probe row, or the page column of the surface
+// cell (page_x = cell.x >> 3, the same split as lighting_sun_slot_slice, at the
+// one texel size). A pixel on either walks probes. The rest reuse stored bounce.
+bool lighting_sun_pixel_band(uvec2 p, vec3 pos, vec3 n) {
+    uint bands = lighting_sun_n();
+    uint slice = lighting_sun_slice_id();
+    float tile = float(max(pc.params.y, 1u));
+    float gy = (float(p.y) + 0.5) / tile - 0.5;
+    int row = int(floor(gy + 0.5));
+    int rows = int(max(pc.dims.w, 1u));
+    row = clamp(row, 0, rows - 1);
+    if (uint(row) % bands == slice) {
+        return true;
+    }
+    uint axd = lighting_axis(n);
+    uint ax = axd >> 1u;
+    int cell_x = int(floor(pos[(ax + 1u) % 3u] / LIGHTING_SC_TEXEL));
+    uint page_x = uint(cell_x) >> 3u;
+    return page_x % bands == slice;
+}
+vec3 lighting_sun_committed_dir() {
+    return vec3(uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 2u]), uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 3u]), uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 4u]));
+}
+float lighting_sun_committed_light() {
+    return uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 5u]);
+}
+float lighting_sun_live_light() {
+    return uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 6u]);
+}
+bool lighting_catch_up() {
+    return ckeys.key[LIGHTING_SUN_AT + 7u] != 0u;
+}
+bool lighting_sun_probe_slice(uint probe) {
+    uint cols = max(pc.dims.z, 1u);
+    return (probe / cols) % lighting_sun_n() == lighting_sun_slice_id();
+}
+bool lighting_sun_slot_slice(uint slot) {
+    ivec4 c = lighting_sc_cell(slot);
+    uint page_x = uint(c.x) >> 3u;
+    return page_x % lighting_sun_n() == lighting_sun_slice_id();
+}
+bool lighting_sun_hold_kept(uint h) {
+    if (!lighting_sun_small()) {
+        return false;
+    }
+    uint rays = lighting_rays();
+    uint pk = h / rays / LIGHTING_STRATA;
+    if (lighting_sun_probe_slice(pk) || !lighting_stratum_held(pk)) {
+        return false;
+    }
+    if (floatBitsToUint(work.v[lighting_probe_at(pk) + 1u].w) == lighting_frame() + LIGHTING_STRATA) {
+        return false;
+    }
+    return floatBitsToUint(work.v[lighting_kept_light_at() + h / 4u][h % 4u]) != 0u;
+}
+bool lighting_sun_hold_fill(uint h) {
+    if (!lighting_sun_small()) {
+        return false;
+    }
+    uint pk = h / lighting_rays() / LIGHTING_STRATA;
+    if (lighting_sun_probe_slice(pk)) {
+        return false;
+    }
+    return floatBitsToUint(work.v[lighting_fill_light_at() + h / 4u][h % 4u]) != 0u;
+}
+// One thread records that this dispatch took the sun path. Bit 0: a small sun
+// step. Bit 1: the corner catch-up. The slice id is the band this frame shades
+// with the live sun. The pads are otherwise unused (unfilled mask alignment).
+void lighting_sun_mark() {
+    if (gl_GlobalInvocationID.x != 0u || gl_GlobalInvocationID.y != 0u || gl_GlobalInvocationID.z != 0u) {
+        return;
+    }
+    uint mark = 0u;
+    if (lighting_sun_small()) {
+        mark |= 1u;
+    }
+    if (lighting_catch_up()) {
+        mark |= 2u;
+    }
+    gstats.unfilled_pad0 = mark;
+    gstats.unfilled_pad1 = lighting_sun_slice_id();
+}
+#endif
+
 // Layer-1 input: rgb, luminance variance (-1 unknown), mask weight.
 vec4 lighting_svgf_in(uint s, out float var) {
     vec4 own = cache.v[3u * s + 2u];
@@ -2921,6 +3054,13 @@ vec4 lighting_svgf_in(uint s, out float var) {
     // times under a moving sun held different scales, and the luminance stop
     // kept those groups apart (camouflage plateaus at dawn).
     float g = lighting_sc_sun_gain(s);
+#ifdef GENOS_SUN_SHADER
+    // The page column catching up to the live sun. The rest keep the committed scale.
+    if (lighting_sun_small() && lighting_sun_slot_slice(s)) {
+        float c = max(lighting_sun_committed_light(), 1.0e-4);
+        g *= clamp(lighting_sun_live_light() / c, 0.0, LIGHTING_LS_MAX);
+    }
+#endif
     if (!wrc) {
         vec4 eb = cache.v[LIGHTING_SC_EST_AT + 2u * s + 1u];
         if (eb.x > 0.0 && t >= 4.0) {
@@ -3095,12 +3235,14 @@ bool lighting_svgf_moved(vec4 a, float va, vec4 b, float vb) {
         || abs(a.w - b.w) > LIGHTING_DIRTY_EPS
         || abs(va - vb) > 2.0 * LIGHTING_DIRTY_EPS * max(max(abs(va), abs(vb)), 1.0e-8);
 }
+// Kernel step in cells. Defined below the activity stamps.
+int lighting_svgf_step_for(uint it);
 // Level k of slot changed: its readers at level k + 1 are dirty.
 void lighting_svgf_scatter(uint slot, uint k) {
     if (k >= 5u) {
         return;
     }
-    int step = 1 << k;
+    int step = lighting_svgf_step_for(k);
     [[dont_unroll]] for (int j = -2; j <= 2; j++) {
         [[dont_unroll]] for (int i = -2; i <= 2; i++) {
             lighting_svgf_mark((i == 0 && j == 0) ? slot : lighting_sc_cell_slot(slot, ivec2(-i, -j) * step), k + 1u);
@@ -3125,6 +3267,73 @@ bool lighting_svgf_stamp_recent(uint s, uint c) {
 void lighting_svgf_stamp(uint s, uint c) {
     if (s != ~0u) {
         cache.v[LIGHTING_SC_DIRTY_AT + LIGHTING_CACHE_SLOTS + s][c] = uintBitsToFloat(lighting_frame());
+    }
+}
+// Kernel step in cells. Dammertz HPG 2010 doubles the step each iteration.
+int lighting_svgf_step_for(uint it) {
+    return 1 << int(it);
+}
+// How many wavelet iterations this texel still needs.
+//
+// Schied et al. 2017 (SVGF) sec. 4.2 use the variance to set the luminance
+// edge-stop. They still run every iteration. ReLAX (Zhdan, NVIDIA Real-Time
+// Denoisers) reduces the a-trous iteration count as history length grows.
+// This takes the smaller of the two limits, so either a long sample age or a
+// variance under the threshold drops iterations.
+//
+// Deviations: sample age is the surface-cache set count, not a screen-space
+// history length. No previous frame is kept. SVGF's own filter does not drop
+// iterations; the drop is the ReLAX rule, gated by the SVGF variance as well.
+// Bands: 16 sets or variance at the threshold -> 1 iteration; 8 sets or four
+// times the threshold -> 3; otherwise the configured count.
+uint lighting_svgf_pass_limit(uint slot, float var, float lum) {
+    uint full = lighting_denoise_iters();
+    if (!lighting_denoise_adaptive()) {
+        return full;
+    }
+    float sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+    float rel = sqrt(max(var, 0.0)) / max(lum, 1.0e-3);
+    float thr = lighting_denoise_variance();
+    uint by_age = full;
+    if (sets >= 16.0) {
+        by_age = 1u;
+    } else if (sets >= 8.0) {
+        by_age = min(full, 3u);
+    }
+    uint by_var = full;
+    // The knob tops out at 0.1 (1000 steps of 0.0001). That value forces one
+    // iteration. A young texel's relative deviation sits above 0.1, so the
+    // old test never entered the skip the settled cache takes (16 sets).
+    // ReLAX keys the drop off history length; this stop is the short-run
+    // equivalent, flagged as a deviation in S79.
+    uint thr_q = (gstats.ctrl_bits >> 22u) & 1023u;
+    if (thr_q >= 1000u) {
+        by_var = 1u;
+    } else if (thr > 0.0 && rel <= thr) {
+        by_var = 1u;
+    } else if (thr > 0.0 && rel <= thr * 4.0) {
+        by_var = min(full, 3u);
+    }
+    return min(full, min(by_age, by_var));
+}
+// The push reads buffer A. A skipped iteration must publish the last level
+// that actually ran (level `applied`), even when this level is clean. The
+// dirty early-out used to return first, so A kept an older filter or the
+// zeros from allocation, and the push blended that hole toward the 25 cm
+// WRC: darker and blotchy. Lavapipe zeros the cache and the old test warmed
+// up with the full filter, so A was already the reference and the miss was
+// invisible. A driver that does not zero, or a run that starts in the skip,
+// shows it.
+void lighting_svgf_publish_applied(uint slot, uint applied) {
+    vec4 now = cache.v[lighting_svgf_lvl(applied) + slot];
+    vec4 prev = cache.v[LIGHTING_SC_ATROUS_A + slot];
+    cache.v[LIGHTING_SC_ATROUS_A + slot] = now;
+    if (prev.x != now.x || prev.y != now.y || prev.z != now.z) {
+        lighting_svgf_stamp(slot, 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(1, 0)), 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(-1, 0)), 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(0, 1)), 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(0, -1)), 3u);
     }
 }
 // An inactive texel: mask 0 at every level (a flip marks its readers once).
@@ -3216,6 +3425,22 @@ void lighting_svgf_variance(uint slot) {
     }
 }
 void lighting_svgf_iter(uint slot, uint it) {
+#ifndef LIGHTING_DENOISE_PLAIN
+    // Before the dirty early-out. A clean texel still has to publish the last
+    // applied level, or the push keeps a stale or empty A. Not in the plain
+    // kernel: high leaves adaptive off (S79).
+    if (lighting_denoise_adaptive()) {
+        float v0;
+        vec4 s0 = lighting_svgf_load(lighting_svgf_lvl(0u), slot, v0);
+        uint limit = lighting_svgf_pass_limit(slot, v0, dot(s0.rgb, LIGHTING_SVGF_LW));
+        if (it + 1u > limit) {
+            if (it + 1u == lighting_denoise_iters()) {
+                lighting_svgf_publish_applied(slot, limit);
+            }
+            return;
+        }
+    }
+#endif
     if (LIGHTING_DIRTY_ATROUS && !lighting_svgf_is_dirty(slot, it + 1u)) {
         return;
     }
@@ -3223,7 +3448,7 @@ void lighting_svgf_iter(uint slot, uint it) {
     uint dst = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it + 1u) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_A : LIGHTING_SC_ATROUS_B);
     float vold;
     vec4 old = lighting_svgf_load(dst, slot, vold);
-    int step = 1 << it;
+    int step = lighting_svgf_step_for(it);
     float varp;
     vec4 vp = lighting_svgf_load(src, slot, varp);
     float lp = dot(vp.rgb, LIGHTING_SVGF_LW);
@@ -3304,7 +3529,9 @@ void lighting_svgf_iter(uint slot, uint it) {
     }
 }
 float lighting_svgf_lum_at(uint slot, ivec2 off, out bool ok) {
-    uint q = lighting_sc_cell_slot(slot, off);
+    // A zero offset is this slot. cell_slot(0, 0) hashes a point that is a
+    // cell off for about half the texels (S72V), so the center tap would miss.
+    uint q = (off.x == 0 && off.y == 0) ? slot : lighting_sc_cell_slot(slot, off);
     ok = false;
     if (q == ~0u) {
         return 0.0;
@@ -3320,7 +3547,7 @@ void lighting_svgf_push(uint slot) {
     if (nb.w > 0.2) {
         return;
     }
-    float varp;
+    float varp = 0.0;
     vec4 f = lighting_svgf_load(LIGHTING_SC_ATROUS_A, slot, varp);
     float W = clamp(f.w, 0.0, 1.0);
     // S78B: the push is redone when this texel's last level (or a +-1
@@ -3623,6 +3850,12 @@ void lighting_shadow_epochs() {
         uint at = LIGHTING_SHADOW_EPOCH_AT + 8u * i;
         vec4 last = vec4(uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]), uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]));
         vec4 now = vec4(l.pos.xyz, l.color.w);
+#ifdef GENOS_SUN_SHADER
+        // A small sun step keeps this epoch. Pixels still trace the live sun.
+        if (lighting_sun_small() && l.pos.w > 0.5) {
+            continue;
+        }
+#endif
         // S75: colour too (the texel direct-light cache reads the epoch).
         uint col = lighting_hash(floatBitsToUint(l.color.x) ^ lighting_hash(floatBitsToUint(l.color.y) ^ lighting_hash(floatBitsToUint(l.color.z))));
         bool bump = all || any(notEqual(last, now)) || ckeys.key[at + 5u] != col;

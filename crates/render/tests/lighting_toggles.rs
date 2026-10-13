@@ -760,6 +760,7 @@ fn shadow_corner(settings: LightingSettings) -> World {
         }),
         sky: None,
         lighting: settings,
+        debug: genos_scene::DebugSettings::default(),
     })
 }
 
