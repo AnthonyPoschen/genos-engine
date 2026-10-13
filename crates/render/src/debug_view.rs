@@ -62,7 +62,8 @@ impl ViewMode {
 }
 
 /// The compose pass's debug word (scene block `grid_at.w`): mode in bits 0-7, the
-/// lamp in bits 8-23.
+/// lamp in bits 8-23. Bits 24 and 25 are the unfilled detector (count, tint),
+/// written by [`DebugState::apply`], not by [`DebugView::word`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DebugView {
     pub mode: ViewMode,
@@ -79,12 +80,20 @@ impl DebugView {
 #[derive(Default)]
 pub(crate) struct DebugState {
     pub view: DebugView,
+    pub unfilled: crate::unfilled::UnfilledControl,
 }
 
 impl DebugState {
     /// Write the debug word into the scene block.
     pub fn apply(&self, pack: &mut Pack) {
-        pack.debug_view = self.view.word();
+        let mut word = self.view.word();
+        if self.unfilled.count {
+            word |= 1 << 24;
+        }
+        if self.unfilled.tint {
+            word |= 1 << 25;
+        }
+        pack.debug_view = word;
     }
 }
 
@@ -107,6 +116,41 @@ pub struct LampReport {
 }
 
 impl Renderer {
+    /// Count unfilled surface-cache pixels, and optionally tint or dump them.
+    /// Tint or a dump threshold turns counting on.
+    pub fn set_unfilled(&mut self, mut control: crate::unfilled::UnfilledControl) {
+        if control.tint || control.dump_pct.is_some() {
+            control.count = true;
+        }
+        self.debug.unfilled = control;
+        self.gpu.unfilled = control;
+    }
+
+    pub fn unfilled(&self) -> crate::unfilled::UnfilledControl {
+        self.gpu.unfilled
+    }
+
+    /// `--out` when this process was started with that argument.
+    pub fn debug_out_cli(&self) -> Option<&str> {
+        self.gpu.out_cli.as_deref()
+    }
+
+    /// Debug output directory in force: the scene value, then `GENOS_UNFILLED_DIR`
+    /// when `--out` was not passed, then `--out`.
+    pub fn debug_settings(&self, scene: &genos_scene::Scene) -> genos_scene::DebugSettings {
+        scene.debug.effective(self.gpu.out_cli.as_deref())
+    }
+
+    /// Counters from the last submitted frame. Waits until that frame's copy is visible.
+    pub fn unfilled_stats(&mut self) -> crate::unfilled::UnfilledStats {
+        unsafe {
+            (self.gpu.fns.device_wait)(self.gpu.device);
+        }
+        let slot = self.gpu.lighting.last_slot;
+        self.gpu.take_unfilled(slot);
+        self.gpu.last_unfilled.unwrap_or_default()
+    }
+
     /// What the picture shows; the default is the picture.
     pub fn set_debug_view(&mut self, view: DebugView) {
         self.debug.view = view;

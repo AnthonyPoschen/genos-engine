@@ -677,5 +677,6 @@ fn lamp_scene(position: Vec3) -> Scene {
         ceiling: None,
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
     }
 }

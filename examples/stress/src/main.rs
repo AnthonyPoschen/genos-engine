@@ -7,7 +7,10 @@
 //! Every option also reads an environment variable (`GENOS_STRESS_SCALE`,
 //! `GENOS_STRESS_LIGHTS`, `GENOS_STRESS_DYNAMIC`, `GENOS_STRESS_LAYOUT`,
 //! `GENOS_STRESS_DAY_SECONDS`, `GENOS_STRESS_STEP`, `GENOS_STRESS_FIXED_DT`); a flag
-//! wins over the variable. The panel switches lamps, dynamic share, scale and the sun
+//! wins over the variable. Lighting launch flags (`--preset`, `--bounces`,
+//! `--ambient`, `--time-of-day`, `--gpu-times`) win the same way: each
+//! `GENOS_LIGHTING_*` or `GENOS_GPU_TIMES` mirror applies only when that
+//! argument was omitted. The panel switches lamps, dynamic share, scale and the sun
 //! live.
 
 mod bench;
@@ -22,7 +25,9 @@ use std::time::Instant;
 use genos_debug::{png, Host};
 use genos_input::{character_controller, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenLine, ScreenRect};
-use genos_scene::{look_direction, update, Actions, Camera, Scene, Vec3, PITCH_LIMIT};
+use genos_scene::{
+    look_direction, update, Actions, Camera, DebugSettings, Scene, Vec3, PITCH_LIMIT,
+};
 use genos_ui::{button_panel, Action, PanelButton, PanelRow, PanelSlider, Pointer, State};
 use genos_window::{extent_changed, FocusGate, Window};
 
@@ -40,13 +45,19 @@ const USAGE: &str = "genos-stress [options]
   --day-seconds S           seconds per day/night cycle (default 120)
   --time F                  start time as a fraction of a day: 0 sunrise, 0.25 noon,
                             0.5 sunset (default 0.12)
+  --time-of-day H|HH:MM     start the lighting clock in hours: 0 midnight, 6 dawn,
+                            12 noon, 18 dusk (06:00, 18:24). Same start as --time.
+                            GENOS_LIGHTING_TIME holds that hour only when this
+                            argument was omitted
   --sun-speed X             day clock multiplier (default 1)
-  --freeze-sun              hold the sun at --time
+  --freeze-sun              hold the sun at --time or --time-of-day
   --no-sky                  no sky light: only the sun and the lamps
   --scene FILE              a scene file (genos-camera's .rhai) in place of the building; nothing moves
   --still-boxes             hold the coloured boxes
   --seed N                  lamp and box layout seed (default 1)
-  --view hall|roomA         start (and benchmark) viewpoint (default hall)
+  --view hall|roomA|sky     start (and benchmark) viewpoint (default hall).
+                            sky stands in the south yard and looks up, so the
+                            ambient curve can be judged
   --eye X Y Z YAW PITCH     start the camera here instead of --view (free look)
   --size WxH                window size (default 1280x720; 2560x1440 for --bench)
   --proof                   open the proof window (floats, takes no focus; --bench
@@ -70,6 +81,25 @@ const USAGE: &str = "genos-stress [options]
                             steps 1/60 s a frame; exit 0 when every check passes
   --report DIR              where the script writes report.md, result.json and pictures
                             (default target/debug-reports/<script name>)
+  --out DIR                 unfilled events (default ./genos-debug/unfilled)
+  --unfilled[=0|1]          count unfilled pixels (GENOS_LIGHTING_UNFILLED is the mirror)
+  --unfilled-tint[=0|1]     magenta tint; turns the count on (GENOS_LIGHTING_UNFILLED_TINT)
+  --unfilled-dump PERCENT   save when the share exceeds PERCENT; 0 saves any
+                            (GENOS_LIGHTING_UNFILLED_DUMP)
+  --unfilled-max-age-secs N drop event folders older than N seconds (default 172800)
+                            (GENOS_UNFILLED_MAX_AGE_SECS)
+  --unfilled-max-folders N  keep at most N event folders (default 200)
+                            (GENOS_UNFILLED_MAX_FOLDERS)
+  --unfilled-max-bytes N    keep at most N bytes of events (default 524288000)
+                            (GENOS_UNFILLED_MAX_BYTES)
+  --unfilled-session-cap N  saves in one process (default 32)
+                            (GENOS_UNFILLED_SESSION_CAP)
+  --preset NAME             potato, day-cycle, gi-1bounce, low, medium, high
+                            (GENOS_LIGHTING_PRESET is the mirror)
+  --bounces 0|1|2|unlimited bounce count (GENOS_LIGHTING_BOUNCES)
+  --ambient MODE            off, constant, hemisphere, day, or curve
+                            (GENOS_LIGHTING_AMBIENT)
+  --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
   --trace                   capture the picture after every script command that changes it";
 
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];
@@ -79,9 +109,17 @@ const ID_SUN: u32 = 400;
 const ID_BOXES: u32 = 500;
 const ID_LAYOUT: u32 = 600;
 const ID_SKY: u32 = 700;
+const ID_OUT: u32 = 800;
 /// Sliders, one per knob.
 const ID_KNOB: u32 = 1000;
-const PANEL_KNOBS: [&str; 4] = ["time_of_day", "sun_speed", "lights", "dynamic"];
+const PANEL_KNOBS: [&str; 6] = [
+    "time_of_day",
+    "sun_speed",
+    "lights",
+    "dynamic",
+    "unfilled",
+    "unfilled_tint",
+];
 /// A hitch longer than this does not replay the missed time.
 const MAX_FRAME_SECONDS: f32 = 0.25;
 
@@ -287,12 +325,46 @@ fn options() -> Result<Options, String> {
             }
             "--gltf" => opts.gltf.push((PathBuf::from(value()?), gltf_at)),
             "--report" => report = Some(PathBuf::from(value()?)),
+            "--out" => {
+                // The renderer reads this from the process arguments.
+                let _dir = value()?;
+            }
+            arg if arg.starts_with("--out=") => {
+                if arg.trim_start_matches("--out=").trim().is_empty() {
+                    return Err("--out needs a directory".into());
+                }
+            }
             "--trace" => trace = true,
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
             }
-            other => return Err(format!("unknown argument {other}\n{USAGE}")),
+            other => match genos_render::unfilled_flag_needs_value(other) {
+                Some(true) => {
+                    let next = value()?;
+                    genos_render::check_unfilled_arg(other, Some(&next))?;
+                }
+                Some(false) => genos_render::check_unfilled_arg(other, None)?,
+                None => match genos_scene::lighting_flag_needs_value(other) {
+                    Some(needs) => {
+                        let next = needs.then(|| value()).transpose()?;
+                        genos_scene::check_lighting_arg(other, next.as_deref())?;
+                        if let Some(hours) =
+                            genos_scene::lighting_arg_time_of_day(other, next.as_deref())?
+                        {
+                            opts.time = knobs::day_from_hours(f64::from(hours));
+                        }
+                    }
+                    None => match genos_render::gpu_times_flag_needs_value(other) {
+                        Some(true) => {
+                            let next = value()?;
+                            genos_render::check_gpu_times_arg(other, Some(&next))?;
+                        }
+                        Some(false) => genos_render::check_gpu_times_arg(other, None)?,
+                        None => return Err(format!("unknown argument {other}\n{USAGE}")),
+                    },
+                },
+            },
         }
     }
     opts.dynamic = opts.dynamic.min(100);
@@ -514,6 +586,8 @@ fn run() -> Result<(), String> {
     }
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    stage.unfilled_count = renderer.unfilled().count;
+    stage.unfilled_tint = renderer.unfilled().tint;
     let host = genos_mcp::Host::new(stage.world.scene.clone(), camera.clone());
     let _server = genos_mcp::Server::start_on(host, genos_mcp::listen_port())?;
     eprintln!(
@@ -608,6 +682,21 @@ fn run() -> Result<(), String> {
         input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
         input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
         input.poll_gamepads();
+        if input.keyboard.pressed(InputCode::key_f8) {
+            let shift = input.keyboard.down(InputCode::key_shift_left)
+                || input.keyboard.down(InputCode::key_shift_right);
+            if shift {
+                stage.unfilled_tint = !stage.unfilled_tint;
+                if stage.unfilled_tint {
+                    stage.unfilled_count = true;
+                }
+            } else {
+                stage.unfilled_count = !stage.unfilled_count;
+                if !stage.unfilled_count {
+                    stage.unfilled_tint = false;
+                }
+            }
+        }
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
 
@@ -616,7 +705,11 @@ fn run() -> Result<(), String> {
             let ui_frame = button_panel(
                 &mut ui,
                 &panel_title(&stage, &fps),
-                &[panel_rows(&stage), knob_rows(&stage)].concat(),
+                &[
+                    panel_rows(&stage, &renderer.debug_settings(&stage.world.scene).out),
+                    knob_rows(&stage),
+                ]
+                .concat(),
                 [size.0 as f32, size.1 as f32],
                 &camera,
                 Pointer {
@@ -687,6 +780,17 @@ fn run() -> Result<(), String> {
             overlay.extend(rects);
             renderer.set_overlay_lines(&lines);
         }
+
+        let mut unfilled = renderer.unfilled();
+        unfilled.count = stage.unfilled_count;
+        unfilled.tint = stage.unfilled_tint;
+        renderer.set_unfilled(unfilled);
+        let applied = renderer.unfilled();
+        if input.keyboard.pressed(InputCode::key_f8) {
+            eprintln!("unfilled count {} tint {}", applied.count, applied.tint);
+        }
+        stage.unfilled_count = applied.count;
+        stage.unfilled_tint = applied.tint;
 
         drawn += 1;
         if opts.step && dt > 0.0 {
@@ -889,8 +993,19 @@ fn button(id: u32, text: String, selected: bool) -> PanelButton {
     PanelButton { id, text, selected }
 }
 
-fn panel_rows(stage: &Stage) -> Vec<PanelRow> {
+fn panel_rows(stage: &Stage, out_dir: &str) -> Vec<PanelRow> {
     vec![
+        row(
+            "Out",
+            vec![
+                button(ID_OUT, out_dir.into(), false),
+                button(
+                    ID_OUT + 1,
+                    "default".into(),
+                    out_dir == DebugSettings::DEFAULT_OUT,
+                ),
+            ],
+        ),
         row(
             "Lamps in",
             vec![
@@ -949,6 +1064,12 @@ fn press(stage: &mut Stage, id: u32) {
         stage.boxes_still = i == 1;
     } else if let Some(i) = pick(ID_LAYOUT, 2) {
         stage.mix.layout = [Layout::Spread, Layout::First][i];
+    } else if id == ID_OUT + 1 {
+        let _ = stage
+            .world
+            .scene
+            .debug
+            .set_key("out", DebugSettings::DEFAULT_OUT);
     }
     stage.apply();
 }

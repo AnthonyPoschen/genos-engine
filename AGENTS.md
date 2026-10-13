@@ -44,6 +44,14 @@ Finish a Rust change only after `cargo build --workspace` and the tests for the 
 
 Every engine-feature setting follows `docs/engine/settings-principles.md`. It is a public serializable value any system can read and write, it is on the MCP command catalogue, and a person can edit it from the debug menu or UI. Lighting is the reference. A game may map its own player settings onto that value, or show the raw value.
 
+## Arguments
+
+A tool signals intent with command-line arguments. An environment variable is only a secondary mirror of an argument: the argument wins when both are set, and the variable applies only when the argument was omitted. Document every argument in `--help` and in the system record.
+
+## Output
+
+An output-writing command behaves as a Unix tool. It writes into the current working directory by default, under `./genos-debug/<kind>/`. It takes `--out <dir>`, and that argument overrides the default. It does not write under `$HOME` unless that path was passed in. An environment variable is a mirror of the same engine setting, not a second location. The directory is an `EngineSettings` value, on the MCP catalogue, and in the debug menu, as in `docs/engine/settings-principles.md`. Count, size, and age caps stay on that directory.
+
 ## Systems
 
 Before you change a system, rewrite a system, or add a game feature that uses one, read `docs/systems/README.md` and the matching system file. When the goal, the intent, the game use, or a limit changes, edit that system file in the same change.

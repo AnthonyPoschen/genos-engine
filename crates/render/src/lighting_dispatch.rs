@@ -112,10 +112,8 @@ pub(crate) fn pack_lighting_ctrl(
     if settings.shadows.filter == ShadowFilter::Hard {
         bits |= CTRL_SHADOW_HARD;
     }
-    if settings.gi.enabled {
-        bits |= CTRL_GI;
-    }
     if settings.gi.enabled && settings.bounce.count > 0 {
+        bits |= CTRL_GI;
         bits |= CTRL_BOUNCE_READS;
     }
     if settings.bounce.count == LIGHTING_BOUNCES_UNLIMITED {
@@ -143,7 +141,9 @@ pub(crate) fn pack_lighting_ctrl(
         bits |= CTRL_PREFILL;
     }
     bits |= (settings.denoiser.iterations & 7) << CTRL_DENOISE_ITERS_SHIFT;
-    if !settings.gi.enabled && mode != AmbientMode::Off {
+    // Bounce 0 is direct light plus this fill. GI on at one bounce or more
+    // does not add it.
+    if mode != AmbientMode::Off && (settings.bounce.count == 0 || !settings.gi.enabled) {
         bits |= CTRL_AMBIENT;
     }
     if mode == AmbientMode::Hemisphere {
@@ -151,7 +151,7 @@ pub(crate) fn pack_lighting_ctrl(
     }
     let ambient_mode = match mode {
         AmbientMode::Off => 0,
-        AmbientMode::Constant | AmbientMode::Day => 1,
+        AmbientMode::Constant | AmbientMode::Day | AmbientMode::Curve => 1,
         AmbientMode::Hemisphere => 2,
     };
     let ctrl = Ctrl {
@@ -288,7 +288,10 @@ pub(crate) fn light_groups(
 /// GI with screen probes and no surface cache. A still scene settles onto the
 /// pixel-direct idle; the surface cache (mode 3) is not this path.
 fn probe_only(settings: &LightingSettings) -> bool {
-    settings.gi.enabled && settings.probes.enabled && !settings.world_cache.enabled && settings.world_mode() == 0
+    settings.gi.enabled
+        && settings.bounce.count > 0
+        && settings.probes.enabled
+        && settings.world_mode() == 0
 }
 
 fn gated(
@@ -307,7 +310,7 @@ fn gated(
     let k = settings.direct.resolution_scale.max(1);
     let lit = w.div_ceil(k).saturating_mul(h.div_ceil(k));
     let slots = (LIGHTING_CACHE_SLOTS as u32).div_ceil(64);
-    if !settings.gi.enabled || k > 1 {
+    if !settings.gi.enabled || settings.bounce.count == 0 || k > 1 {
         out.pixel_only = 1;
     }
     if !settings.direct.enabled && settings.gi.enabled {
@@ -333,7 +336,7 @@ fn gated(
     if round && buckets.cache_rays {
         out.push(2, 0, LIGHTING_DENSE_RAYS, B_CACHE_RAYS);
     }
-    let combined = buckets.direct && buckets.hit_light && k == 1 && settings.gi.enabled;
+    let combined = buckets.direct && buckets.hit_light && k == 1 && settings.bounce.count > 0;
     if combined {
         let gy = if round { LIGHTING_MODE1 } else { 1 };
         out.push(3, (pixels + 2 * kept).div_ceil(64), gy, B_DIRECT);
@@ -343,9 +346,10 @@ fn gated(
         out.bias = 0;
     }
     // Direct off still lights cache rays and kept hits. The dense dispatch
-    // ignores the pixel bias; the kept-hit dispatch uses it. Both are required,
-    // or bounce has no shaded hits and the picture is only stale emission.
-    if round && buckets.hit_light && buckets.cache_rays {
+    // ignores the pixel bias; the kept-hit dispatch uses it. Cache-ray lighting
+    // is bounce 2 and up: bounce 1 shades kept hits inside the direct dispatch
+    // and does not record this one.
+    if round && buckets.cache_rays {
         out.push(3, 0, LIGHTING_DENSE_RAYS, B_HIT);
     }
     if buckets.hit_light && !buckets.direct && kept > 0 {
@@ -414,6 +418,45 @@ mod probe_still_tests {
         assert_eq!(quiet.counts[B_DIRECT as usize], 1);
         assert_eq!(quiet.counts[B_COMPOSE as usize], 1);
         assert_eq!(quiet.pixel_only, 1);
+    }
+
+    #[test]
+    fn lower_bounce_counts_record_fewer_dispatches() {
+        let counts = |bounce: u32| {
+            let mut settings = LightingSettings::preset(LightingPreset::High);
+            settings.bounce.count = bounce;
+            light_groups(&settings, 1, false, true, 320, 180, 40, 40 * 64, 8).counts
+        };
+        let zero = counts(0);
+        let one = counts(1);
+        let two = counts(2);
+        let sum = |counts: [u32; BUCKETS]| counts.iter().copied().sum::<u32>();
+        assert!(
+            sum(zero) < sum(one),
+            "bounce 0 dispatched {} and bounce 1 dispatched {}",
+            sum(zero),
+            sum(one)
+        );
+        assert!(
+            sum(one) < sum(two),
+            "bounce 1 dispatched {} and bounce 2 dispatched {}",
+            sum(one),
+            sum(two)
+        );
+        assert_eq!(zero[B_PLACE as usize], 0);
+        assert_eq!(zero[B_TRACE as usize], 0);
+        assert_eq!(zero[B_CACHE_RAYS as usize], 0);
+        assert_eq!(zero[B_ATROUS as usize], 0);
+        assert_eq!(zero[B_HIT as usize], 0);
+        assert!(zero[B_DIRECT as usize] > 0);
+        assert!(zero[B_COMPOSE as usize] > 0);
+        assert_eq!(one[B_CACHE_RAYS as usize], 0);
+        assert_eq!(one[B_ATROUS as usize], 0);
+        assert_eq!(one[B_HIT as usize], 0);
+        assert!(one[B_TRACE as usize] > 0);
+        assert!(two[B_CACHE_RAYS as usize] > 0);
+        assert!(two[B_ATROUS as usize] > 0);
+        assert!(two[B_HIT as usize] > 0);
     }
 
     #[test]

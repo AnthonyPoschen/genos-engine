@@ -59,7 +59,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
-- Flat ambient when GI is off is a constant or a classic hemisphere (sky toward the normal, ground away from it). A day curve lerps those colours by sun height on the CPU. No new GI algorithm. The bounce count gates the existing cache read; it does not add a bounce pass.
+- Flat ambient when bounce is 0 or GI is off is a constant, a classic hemisphere (sky toward the normal, ground away from it), a sun-height day lerp, or a time-of-day curve (night, dawn, noon, dusk). The curve also scales sky colour relative to its noon key. No new GI algorithm. Bounce 0 records no GI dispatch. Bounce 1 records the probe passes and not the cache-to-cache passes. Bounce 2 records those passes. The count does not add a bounce algorithm.
 
 ## Experiment index
 
@@ -124,6 +124,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S72V](experiments/S72V-svgf-layer2-ic-placement.md) | 2026-10-12 | Layer 2 as SVGF a-trous + Gortler pull-push; irradiance-caching placement (V-V11 fixes) | pushed (checkpoint 6b4fe308) | d23a9218..6b4fe308 |
 | [S73A](experiments/S73A-offscreen-prefill-guard-band.md) | 2026-10-12 | Guard-band scout rays claim fine texels just outside the frustum | reverted (11639205); kept on gi-v2-prefill | 097d67de |
 | [S73B](experiments/S73B-lumen-feedback-prefill.md) | 2026-10-12 | All scout hits claim fine texels and stamp LastUsed | reverted (8b62829b); kept on gi-v2-prefill (22bcd47f) | 22bcd47f |
+| [S73L](experiments/S73L-unfilled-on-screen.md) | 2026-10-13 | Count composed pixels whose surface-cache texel has no finished set | --unfilled, --unfilled-tint, --unfilled-dump, and the cap flags; GENOS_* mirrors; events in ./genos-debug/unfilled | 8ab2884, 16b4a69, 2058863, 73a49e0 |
 | [S74A-cam](experiments/S74A-cam-last-camera-offsets.md) | 2026-10-12 | Fix: last-frame camera read from stale scene-block offsets | pushed | 81c00734 |
 | [S74A-asvgf](experiments/S74A-asvgf-asvgf-change-adaptive-rays.md) | 2026-10-12 | A-SVGF same-seed 1-ray checks on 1/9 resolved texels, lambda drives alpha and rays | pushed | 81c00734 |
 | [S74A-shadow](experiments/S74A-shadow-static-lamp-shadow-reuse.md) | 2026-10-12 | Hit shadow rays kept per 12.5 cm cell/lamp, invalidated by lamp epoch | pushed | 81c00734 |
@@ -228,7 +229,7 @@ Research notes with the cvar values: `/workspace/research/lumen-digest.md` (agen
 
 ## Settings
 
-Presets, per-feature toggles, quality knobs, the scene text, Rhai, the debug menu, and the MCP commands are in [toggles.md](toggles.md). The struct is `LightingSettings` on the scene. High is the tuned path this document describes. A feature that is off skips its passes and its buffers.
+Presets, per-feature toggles, quality knobs, the scene text, Rhai, the debug menu, the launch arguments (`--preset`, `--bounces`, `--ambient`, `--time-of-day`), and the MCP commands are in [toggles.md](toggles.md). The struct is `LightingSettings` on the scene. High is the tuned path this document describes. A feature that is off skips its passes and its buffers.
 
 ## Frame overview
 
