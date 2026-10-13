@@ -35,20 +35,18 @@ Deviations, on purpose:
 
 - The scheduler is doubling rings, Dorfman group testing (split only a group that changed), and a galloping / hierarchical-radiosity refinement, plus a verification budget that tightens the tolerance. That combination is not DDGI's grid update and not Lumen's per-frame screen probes.
 - DDGI blends a new sample into the probe texel (hysteresis). Here a failed ring fully traces a sparse quarter of the probes inside it, and the existing probe filter (`gdirty`) spreads that to neighbours. Probes inside the first radius are traced in full, which is denser than the outer quarter.
-- A verification miss tightens the tolerance. It does not start a ring.
+- A verification miss tightens the tolerance. It does not start a ring. The check ray is a different direction each frame, so at the default 0.08 a still direct-lit room counts misses without a lamp change (measured above). The tolerance has to sit above that ray-to-ray spread before a miss means the light moved.
 - A big change (the sun, a lamp added or removed, a colour change above 0.75 relative, a change list that overflowed) traces every placed probe once. A 2× colour is a ring, not that full wake.
 - Ring progress is stored per flight slot, so the frontier advances every other frame. A few frames of bounce lag is the point. The frame is never held whole: rings mode keeps place, gather, trace, direct, and the filter after the scene has settled. Legacy still drops those passes when it settles.
 - DDGI's sleeping probes and Lumen's screen probes both spend a fixed budget on whatever is awake. Legacy here can go fully idle. Rings keeps only the verification budget on a still scene (9 traces against 1862 on the held hall frame above).
 
 ## Lavapipe cases
 
-`crates/render/tests/lighting_frame.rs`, 320×180, tile 16 (240 slots), world cache off, bounces 0, one point lamp in a corner:
+`crates/render/tests/lighting_frame.rs`, 320×180, tile 16, world cache off, bounces 0, one point lamp in a corner. Every slot placed: 240 probes. Frames 0–7 trace the stratum (240 probes, 15360 rays). From frame 8 a held probe traces one ray.
 
-- `rings_still_room_wakes_about_zero` — a held frame wakes 0 and tests 0 rings, and traces under 40 probes (budget 8).
-- `rings_corner_lamp_wakes_nearby_probes` — after the lamp steps 0.6 m, woken probes stay within the 2 m cap of the old or new centre, at least one is inside 1 m, a ring is tested, and the unique set is under half the placed probes.
-- `rings_verification_catches_a_missed_change` — ring cap 0, budget 48 (period 5). A 4× colour (relative 0.6, not a full wake) produces a verification miss within 6 frames of a clean frame, with rings and wakes still 0.
-
-The printed `rings still room` / `rings corner` / `rings miss` lines are the counts. They are copied here after the run.
+- `rings_still_room_wakes_about_zero`, budget 8. Frame 13: traced 8, rays 8, rings 0, woken 0. The check ray changes direction every frame, so at tolerance 0.08 those 8 votes were misses. Wakes stayed 0.
+- `rings_corner_lamp_wakes_nearby_probes`, budget 4, ring cap 2 m. The lamp steps from (0.45, 1.2, 0.45) to (1.05, 1.2, 0.45). Each of the next 6 frames: rings 2, woken 10, traced 14, rays 644 (ten full strata of 64, plus the 4 verification rays). Splits were 0, 0, 4, 7, 4, 8: the fail bits are read a frame later, and the slot is double-buffered, so the split count moves on frame 2. The 10 probes are unique. Each is within 0.60 m of the nearer lamp centre (the closest was 0.33 m). The far wall, which is on screen past 2 m, was not in the list.
+- `rings_verification_catches_a_missed_change`, ring cap 0, budget 48. A tolerance of 1 cannot miss a non-negative luminance, so the warm-up leaves the scale alone. The next frame drops to 0.75. Still: 21 hits and 21 misses. The same frame with a 6× colour (relative 5/7 ≈ 0.71, under the 0.75 full-wake cut): 12 hits and 30 misses. Rings 0 and woken 0 either way. The default 0.08 tolerance does not produce a clean frame on this room, because the check ray is a new direction; the comparison above is at 0.75, where a still frame still has hits and the colour change misses more of them.
 
 ## Owner A/B
 

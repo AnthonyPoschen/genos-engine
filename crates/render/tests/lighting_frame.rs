@@ -820,45 +820,75 @@ fn rings_corner_lamp_wakes_nearby_probes() {
     );
 }
 
-/// A 4× colour change is under the full-wake threshold (relative 0.6). With
-/// the ring cap at 0, verification is the only retrace, and a frame that was
-/// clean has to report a miss within one budget period.
-#[test]
-fn rings_verification_catches_a_missed_change() {
-    let (_gpu, mut window, mut renderer) = open();
+/// One frame at the test tolerance, after a held warm-up at tolerance 1.
+/// Tolerance 1 cannot miss a non-negative luminance, so the scale stays put
+/// and this frame is the first one that can.
+fn verification_frame(change_colour: bool) -> LightingWakeStats {
+    let mut window = Window::open_proof(320, 180).expect("proof window");
+    let frame = window.pump();
+    let mut renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+        .expect("renderer");
     clear_wake_env();
     let mut world = corner_room(
-        rings_room_settings(0.0, 48, 0.35),
+        rings_room_settings(0.0, 48, 1.0),
         Vec3::new(0.45, 1.2, 0.45),
         [8.0, 8.0, 8.0],
     );
     let camera = corner_camera();
-    let mut clean = false;
-    for frame in 0..24 {
+    for frame in 0..12 {
         let _ = draw(&mut window, &mut renderer, &world, &camera);
-        let stats = renderer.lighting_wake_stats();
-        eprint_wake("rings miss warm", frame, &stats);
-        if stats.verify_misses == 0 && stats.verify_hits > 0 && stats.probes_traced > 0 {
-            clean = true;
-            break;
-        }
-    }
-    assert!(clean, "no held frame was clean before the colour change");
-    world.scene.lights[0].color = [32.0, 32.0, 32.0];
-    let mut caught = false;
-    for frame in 0..6 {
-        let _ = draw(&mut window, &mut renderer, &world, &camera);
-        let stats = renderer.lighting_wake_stats();
-        eprint_wake("rings miss change", frame, &stats);
-        assert_eq!(stats.rings_tested, 0, "radius 0 tests no ring");
-        assert_eq!(
-            stats.probes_woken, 0,
-            "a colour under 0.75 does not full-wake"
+        eprint_wake(
+            if change_colour {
+                "rings miss warm change"
+            } else {
+                "rings miss warm still"
+            },
+            frame,
+            &renderer.lighting_wake_stats(),
         );
-        if stats.verify_misses > 0 {
-            caught = true;
-            break;
-        }
     }
-    assert!(caught, "verification did not miss within 6 frames");
+    world.scene.lighting.set_key("wake_tol", "0.75").unwrap();
+    if change_colour {
+        // 6× is relative 5/7 ≈ 0.71 on the colour, under the 0.75 full-wake
+        // cut, and about 0.83 on a ray that simply scales.
+        world.scene.lights[0].color = [48.0, 48.0, 48.0];
+    }
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let stats = renderer.lighting_wake_stats();
+    eprint_wake(
+        if change_colour {
+            "rings miss change"
+        } else {
+            "rings miss still"
+        },
+        0,
+        &stats,
+    );
+    stats
+}
+
+/// Check rays change direction every frame, so a tight tolerance misses on a
+/// still room. At 0.75 the still frame still has hits. A 6× colour on that
+/// same first frame, ring cap 0, misses more of them and does not wake.
+#[test]
+fn rings_verification_catches_a_missed_change() {
+    // Same device lock as the other frame tests. The two measurements each
+    // open a renderer after the previous one is dropped.
+    let (gpu, window, renderer) = open();
+    drop(renderer);
+    drop(window);
+    let still = verification_frame(false);
+    let changed = verification_frame(true);
+    drop(gpu);
+    for (name, stats) in [("still", still), ("changed", changed)] {
+        assert_eq!(stats.rings_tested, 0, "{name} tested a ring");
+        assert_eq!(stats.probes_woken, 0, "{name} woke probes");
+        assert!(stats.verify_hits + stats.verify_misses > 0, "{name} cast no vote");
+    }
+    assert!(
+        changed.verify_misses > still.verify_misses,
+        "colour change misses {} against a still frame {}",
+        changed.verify_misses,
+        still.verify_misses
+    );
 }
