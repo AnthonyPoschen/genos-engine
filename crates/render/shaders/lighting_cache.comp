@@ -265,8 +265,16 @@ void main() {
             atomicAdd(gstats.atcap, 1u);
         }
         if (lighting_sc_prefill(slot)) {
+            // S73M: the same firefly cap as MSME, so a spike cannot anchor the
+            // 4-update average. dev is the newborn sigma (0.15 L), floored.
+            vec3 y = e;
+            if (old.w > 0.5) {
+                const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+                float dev = max(0.15 * dot(old.rgb, lw), 1.0e-3);
+                y = e - max(e - (0.1 + old.rgb + 8.0 * dev), vec3(0.0));
+            }
             float np = min(t + 1.0, LIGHTING_SC_PREFILL_SETS);
-            vec3 mp = old.w < 0.5 ? e : old.rgb + (e - old.rgb) / np;
+            vec3 mp = old.w < 0.5 ? y : old.rgb + (y - old.rgb) / np;
             lighting_tex_put(slot, vec4(mp, np));
             atomicAdd(gstats.diag[62], 1u);
             return;
@@ -323,7 +331,9 @@ void main() {
                 hint = max(hint, LIGHTING_SC_LAMP_K * lighting_sc_lamp_change(slot));
                 // S72T: while young (under 16 sets) never faster than the plain
                 // mean 1 / (n + 1), the least-noise estimate of a still signal
-                // (the hint still overrides it).
+                // (the hint still overrides it). S73M reads b.z < 0 below, after
+                // the hint, and forces that plain mean for a former pre-fill.
+                bool handoff = b.z < 0.0;
                 if (t < 16.0) {
                     k = min(k, 1.0 / (t + 1.0));
                 }
@@ -335,9 +345,17 @@ void main() {
                 } else {
                     k = max(k, min(hint, 0.9));
                 }
+                // S73M: a pre-filled texel keeps its colour and one set, then the
+                // next on-screen sets are a plain mean (k = 1/(t+1), not a cap).
+                // The marker stays until this set reaches 16. The normal path
+                // above is unchanged.
+                if (handoff && t < 16.0) {
+                    k = 1.0 / (t + 1.0);
+                }
+                float kz = (handoff && t + 1.0 < 16.0) ? -1.0 : k;
                 vec3 m = mix(old.rgb, y, clamp(k, 0.0, 1.0));
                 cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);
-                cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(vb, inc, k, min(t + 1.0, 256.0));
+                cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(vb, inc, kz, min(t + 1.0, 256.0));
                 lighting_tex_put(slot, vec4(m, min(t + 1.0, cap)));
                 return;
             }

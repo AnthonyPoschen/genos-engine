@@ -60,7 +60,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
 - Guard band of primary rays just outside the frustum (Lumen has no guard band) (S73A).
 - Pre-fill spends only spare base budget and never enters the priority histogram or the boost (Lumen always spends a fixed budget) (S73G).
-- MSME only once a texel is shown; a never-shown texel accumulates over at most 4 updates, as Lumen radiosity (S73D).
+- MSME only once a texel is shown. A never-shown texel accumulates over at most 4 updates, as Lumen radiosity, with the MSME firefly cap (S73D, S73M). On first show the count becomes 1 and the next 15 on-screen sets are a plain mean (`k = 1/(t+1)`), so the pre-fill does not stay anchored. MSME has no such handoff.
 - Rotating start on the pre-fill list (S73G).
 - Scout feedback claims and stamps LastUsed without the irradiance read, so a scout hit does not seed an empty texel (S73K). The pixel path still seeds.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
@@ -135,7 +135,8 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S73G](experiments/S73-prefill-root-cause-and-plan.md) | 2026-10-12 | Pre-fill takes only spare base budget | pushed | 12387cc |
 | [S73I](experiments/S73I-prefill-turn-and-ratios.md) | 2026-10-12 | Turn fill-in: spare budget and an unfinished set; ratio mean is outliers | counters + set completion + lavapipe turn | ffaba86, 15d3e1e |
 | [S73K](experiments/S73K-scout-feedback-claim.md) | 2026-10-12 | Scout feedback claims without the irradiance read | lavapipe turn passed: 18335 prefilled, 4547 shown | d4a666f |
-| [S73L](experiments/S73L-unfilled-on-screen.md) | 2026-10-13 | Count composed pixels whose surface-cache texel has no finished set | lavapipe turn ended at 0.92% unfilled | S73L |
+| [S73L](experiments/S73L-unfilled-on-screen.md) | 2026-10-13 | Count composed pixels whose surface-cache texel has no finished set | lavapipe turn ended at 0.92% unfilled | 8b78df0 |
+| [S73M](experiments/S73M-prefill-handoff.md) | 2026-10-13 | Firefly-cap the pre-fill, then a plain-mean handoff on first show | keeps one set so the texel stays filled | S73M |
 | [S74A-cam](experiments/S74A-cam-last-camera-offsets.md) | 2026-10-12 | Fix: last-frame camera read from stale scene-block offsets | pushed | 81c00734 |
 | [S74A-asvgf](experiments/S74A-asvgf-asvgf-change-adaptive-rays.md) | 2026-10-12 | A-SVGF same-seed 1-ray checks on 1/9 resolved texels, lambda drives alpha and rays | pushed | 81c00734 |
 | [S74A-shadow](experiments/S74A-shadow-static-lamp-shadow-reuse.md) | 2026-10-12 | Hit shadow rays kept per 12.5 cm cell/lamp, invalidated by lamp epoch | pushed | 81c00734 |

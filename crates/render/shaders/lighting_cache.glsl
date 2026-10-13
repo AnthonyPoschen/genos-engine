@@ -1250,6 +1250,17 @@ bool lighting_sc_prefill(uint slot) {
     return lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w <= 0.2
         && floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z) == 0u;
 }
+// S73M: first time a pixel shows a pre-filled fine texel. Keep the colour, drop
+// the count to one set, and mark the estimator (b.z < 0) so the next 15
+// on-screen sets are a plain mean. Idempotent: a later pixel this frame sees
+// the shown stamp and does not write again.
+void lighting_sc_prefill_handoff(uint slot) {
+    vec3 mean = cache.v[3u * slot + 2u].rgb;
+    float lum = dot(mean, vec3(0.2126, 0.7152, 0.0722));
+    cache.v[3u * slot + 2u] = vec4(mean, 1.0);
+    cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(mean, pow(0.15 * lum, 2.0) + 1.0e-8);
+    cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(1.0, 1.0, -1.0, 1.0);
+}
 // WRC: per 16-ray sample (a refresh adds 4): 1/32 while the light changes
 // anywhere (1/8 a set), 1/8 near a mover or a moved lamp (1/2 a set).
 const float LIGHTING_WRC_CHANGE_ALPHA = 1.0 / 32.0;
@@ -2774,6 +2785,10 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             // S73B: a feedback claim (off-screen scout hit) marks the texel used
             // (LastUsed, above) but not shown.
             if (!lighting_sc_feedback) {
+                uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z);
+                if (shown == 0u && cache.v[3u * slot + 1u].w <= 0.2 && cache.v[3u * slot + 2u].w > 0.5) {
+                    lighting_sc_prefill_handoff(slot);
+                }
                 cache.v[LIGHTING_WORLD_AT + slot].z = uintBitsToFloat(lighting_frame());
             }
         }
