@@ -917,6 +917,11 @@ impl Gpu {
             || (world_mode == 3 && lighting_sc_flags_env() & 8192 != 0);
         let settled = if world_mode == 3 && sc_relit {
             self.lighting.still >= LIGHTING_SETTLE_FRAMES.max(if world_wait != 0 { world_wait } else { 300 }) && self.lighting.light_quiet >= 2
+        } else if probe_only(&self.lighting.settings) {
+            // Probe-only keeps relighting its batch, so the change counter never
+            // drops. Settle on frames still and the light having held, the same
+            // idle the surface cache uses once a still scene has gone quiet.
+            self.lighting.still >= LIGHTING_SETTLE_FRAMES && self.lighting.light_quiet >= 2
         } else {
             self.lighting.still >= LIGHTING_SETTLE_FRAMES.max(world_wait) && self.lighting.quiet >= sweep
         };
@@ -1106,7 +1111,9 @@ impl Gpu {
             // Surface cache: texels keep adding sets, so their change says nothing
             // of the light; rounds since the light last changed.
             self.lighting.light_quiet = self.lighting.light_quiet.saturating_add(1);
-        } else if words[5] > 0 {
+        } else if !probe_only(&self.lighting.settings) && words[5] > 0 {
+            // Probe-only is counted on the CPU. Its batch keeps this counter high,
+            // so the counter cannot veto a still scene.
             if words[4] <= LIGHTING_SETTLE_CHANGE {
                 self.lighting.light_quiet = self.lighting.light_quiet.saturating_add(1);
             } else {
@@ -1609,6 +1616,8 @@ impl Gpu {
         if light != self.lighting.light_hash {
             self.lighting.light_hash = light;
             self.lighting.light_quiet = 0;
+        } else if probe_only(&self.lighting.settings) && self.lighting.still > 0 {
+            self.lighting.light_quiet = self.lighting.light_quiet.saturating_add(1);
         }
         let sweep = self.lighting.live.div_ceil(LIGHTING_CACHE_BATCH).max(1) + 1;
         // Surface cache (mode 3): bit 10 says the light has held two rounds, and a

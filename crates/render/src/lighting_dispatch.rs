@@ -235,6 +235,17 @@ pub(crate) fn light_groups(
     if frozen && full {
         out.push(3, pixels.div_ceil(64), 1, B_DIRECT);
         out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
+    } else if frozen && probe_only(settings) {
+        // Still probe-only holds the probes and the cache rays. Pixel direct and
+        // compose remain, the same idle a settled surface-cache frame records.
+        // High is `full` and took the branch above.
+        if settings.direct.enabled {
+            let k = settings.direct.resolution_scale.max(1);
+            let lit = w.div_ceil(k).saturating_mul(h.div_ceil(k));
+            out.push(3, lit.div_ceil(64).max(1), 1, B_DIRECT);
+            out.pixel_only = 1;
+        }
+        out.push(7, w.div_ceil(8).max(1), h.div_ceil(8).max(1), B_COMPOSE);
     } else if !round && full && !settings.cache_round_this_frame(frame) {
         out.push(1, probes.div_ceil(64), 1, B_PLACE);
         out.push(4, probes.div_ceil(64), 1, B_GATHER);
@@ -272,6 +283,12 @@ pub(crate) fn light_groups(
         out.counts[B_SHADOWS as usize] = out.counts[B_DIRECT as usize].saturating_add(out.counts[B_HIT as usize]);
     }
     out
+}
+
+/// GI with screen probes and no surface cache. A still scene settles onto the
+/// pixel-direct idle; the surface cache (mode 3) is not this path.
+fn probe_only(settings: &LightingSettings) -> bool {
+    settings.gi.enabled && settings.probes.enabled && !settings.world_cache.enabled && settings.world_mode() == 0
 }
 
 fn gated(
@@ -371,4 +388,46 @@ pub(crate) fn sun_height(scene: &genos_scene::Scene) -> f32 {
         }
     }
     best
+}
+
+#[cfg(test)]
+mod probe_still_tests {
+    use super::*;
+    use genos_scene::LightingPreset;
+
+    fn groups(settings: &LightingSettings, frozen: bool, round: bool) -> LightGroups {
+        light_groups(settings, 8, frozen, round, 320, 180, 40, 40 * 64, 0)
+    }
+
+    #[test]
+    fn a_settled_probe_only_frame_keeps_pixel_direct_and_compose() {
+        let mut off = LightingSettings::preset(LightingPreset::High);
+        off.world_cache.enabled = false;
+        let busy = groups(&off, false, true);
+        assert!(busy.counts[B_CACHE_RAYS as usize] > 0, "cache rays");
+        assert!(busy.counts[B_HIT as usize] > 0, "hit light");
+        let quiet = groups(&off, true, true);
+        assert_eq!(quiet.counts[B_CACHE_RAYS as usize], 0);
+        assert_eq!(quiet.counts[B_HIT as usize], 0);
+        assert_eq!(quiet.counts[B_TRACE as usize], 0);
+        assert_eq!(quiet.counts[B_ATROUS as usize], 0);
+        assert_eq!(quiet.counts[B_DIRECT as usize], 1);
+        assert_eq!(quiet.counts[B_COMPOSE as usize], 1);
+        assert_eq!(quiet.pixel_only, 1);
+    }
+
+    #[test]
+    fn a_settled_high_frame_stays_on_the_tuned_idle_list() {
+        let high = LightingSettings::preset(LightingPreset::High);
+        let busy = groups(&high, false, true);
+        assert!(busy.counts[B_CACHE_RAYS as usize] > 0);
+        assert!(busy.counts[B_ATROUS as usize] > 0);
+        let quiet = groups(&high, true, false);
+        assert_eq!(quiet.pixel_only, 0);
+        assert_eq!(quiet.counts[B_DIRECT as usize], 1);
+        assert_eq!(quiet.counts[B_COMPOSE as usize], 1);
+        assert_eq!(quiet.counts[B_CACHE_RAYS as usize], 0);
+        assert_eq!(quiet.counts[B_ATROUS as usize], 0);
+        assert_eq!(quiet.groups.len(), 2);
+    }
 }
