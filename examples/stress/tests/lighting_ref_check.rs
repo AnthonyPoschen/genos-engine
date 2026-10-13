@@ -78,3 +78,48 @@ fn a_skipped_capture_fails_and_still_writes_the_self_test() {
     assert!(third.contains("**fail**"), "{third}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_mismatched_reference_is_kept_and_the_check_stops() {
+    let root = std::env::temp_dir().join(format!("lref-mismatch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let references = root.join("references");
+    let picture = genos_lighting_ref::Picture::solid(8, 8, [0.2, 0.1, 0.0]);
+    genos_lighting_ref::write_reference(
+        &references,
+        genos_lighting_ref::ReferenceRecord {
+            scene: "stress-still".into(),
+            checkpoint: "hall".into(),
+            commit: "other-build".into(),
+            method: "path".into(),
+            width: 8,
+            height: 8,
+            spp: 256,
+            sample_cap: 256,
+            noise: 0.08,
+            seconds: 1.0,
+            max_bounces: 8,
+            png_bytes: 0,
+            linear_bytes: 0,
+            note: "planted".into(),
+        },
+        &picture,
+    )
+    .unwrap();
+    let linear = references.join("stress-still/hall/reference.f32");
+    let before = std::fs::read(&linear).unwrap();
+    let err = genos_stress::lighting_ref::run(
+        args(
+            &root.join("report"),
+            &references,
+            &["--checkpoints", "stress-still/hall"],
+        )
+        .into_iter(),
+    )
+    .expect_err("a wrong sample cap must not be retraced");
+    assert!(err.contains("--regen"), "{err}");
+    assert!(err.contains("sample cap"), "{err}");
+    assert!(err.contains("build"), "{err}");
+    assert_eq!(std::fs::read(&linear).unwrap(), before);
+    let _ = std::fs::remove_dir_all(&root);
+}

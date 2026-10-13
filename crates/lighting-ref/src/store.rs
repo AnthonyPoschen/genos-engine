@@ -16,6 +16,9 @@ pub struct ReferenceRecord {
     pub width: u32,
     pub height: u32,
     pub spp: u32,
+    /// Sample cap this picture was traced under. `0` on a trace written
+    /// before the cap was stored.
+    pub sample_cap: u32,
     pub noise: f32,
     pub seconds: f32,
     pub max_bounces: u32,
@@ -83,6 +86,10 @@ pub struct TraceNote {
     pub noise: f32,
     pub seconds: f32,
     pub max_bounces: u32,
+    /// `0` when the file has no `sample_cap` line.
+    pub sample_cap: u32,
+    /// Empty when the file has no `build` line.
+    pub build: String,
 }
 
 pub fn read_trace(root: &Path, scene: &str, checkpoint: &str) -> Result<TraceNote, String> {
@@ -95,6 +102,8 @@ pub fn read_trace(root: &Path, scene: &str, checkpoint: &str) -> Result<TraceNot
         noise: 0.0,
         seconds: 0.0,
         max_bounces: 0,
+        sample_cap: 0,
+        build: String::new(),
     };
     for line in text.lines() {
         let Some((key, value)) = line.split_once(' ') else {
@@ -106,6 +115,8 @@ pub fn read_trace(root: &Path, scene: &str, checkpoint: &str) -> Result<TraceNot
             "noise" => note.noise = parse_line(&path, key, value)?,
             "seconds" => note.seconds = parse_line(&path, key, value)?,
             "max_bounces" => note.max_bounces = parse_line(&path, key, value)?,
+            "sample_cap" => note.sample_cap = parse_line(&path, key, value)?,
+            "build" => note.build = value.trim().to_string(),
             _ => {}
         }
     }
@@ -115,11 +126,93 @@ pub fn read_trace(root: &Path, scene: &str, checkpoint: &str) -> Result<TraceNot
     Ok(note)
 }
 
+/// The linear picture is the reference. A directory that has one is kept
+/// unless the caller passes `--regen`.
+pub fn reference_exists(root: &Path, scene: &str, checkpoint: &str) -> bool {
+    checkpoint_dir(root, scene, checkpoint)
+        .join("reference.f32")
+        .is_file()
+}
+
+/// Every checkpoint directory that holds a linear picture, in scene then
+/// checkpoint order. A trace without `build` or `sample_cap` is still listed.
+pub fn records_on_disk(root: &Path) -> Result<Vec<ReferenceRecord>, String> {
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut scenes = read_child_dirs(root)?;
+    scenes.sort();
+    let mut out = Vec::new();
+    for scene in scenes {
+        let scene_dir = root.join(&scene);
+        let mut checkpoints = read_child_dirs(&scene_dir)?;
+        checkpoints.sort();
+        for checkpoint in checkpoints {
+            let dir = scene_dir.join(&checkpoint);
+            let linear = dir.join("reference.f32");
+            if !linear.is_file() {
+                continue;
+            }
+            let picture = Picture::load_linear(&linear)?;
+            let trace = read_trace(root, &scene, &checkpoint).unwrap_or(TraceNote {
+                method: "path".into(),
+                spp: 0,
+                noise: 0.0,
+                seconds: 0.0,
+                max_bounces: 0,
+                sample_cap: 0,
+                build: String::new(),
+            });
+            let png = dir.join("reference.png");
+            out.push(ReferenceRecord {
+                scene: scene.clone(),
+                checkpoint,
+                commit: trace.build,
+                method: trace.method,
+                width: picture.width,
+                height: picture.height,
+                spp: trace.spp,
+                sample_cap: trace.sample_cap,
+                noise: trace.noise,
+                seconds: trace.seconds,
+                max_bounces: trace.max_bounces,
+                png_bytes: file_len(&png).unwrap_or(0),
+                linear_bytes: file_len(&linear)?,
+                note: String::new(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn read_child_dirs(dir: &Path) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|err| format!("{}: {err}", dir.display()))? {
+        let entry = entry.map_err(|err| format!("{}: {err}", dir.display()))?;
+        if entry
+            .file_type()
+            .map_err(|err| format!("{}: {err}", entry.path().display()))?
+            .is_dir()
+        {
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    Ok(names)
+}
+
 fn write_trace(dir: &Path, record: &ReferenceRecord) -> Result<(), String> {
     let path = dir.join("trace.txt");
     let text = format!(
-        "method {}\nspp {}\nnoise {:.6}\nseconds {:.6}\nmax_bounces {}\n",
-        record.method, record.spp, record.noise, record.seconds, record.max_bounces
+        "method {}\nspp {}\nnoise {:.6}\nseconds {:.6}\nmax_bounces {}\nsample_cap {}\nbuild {}\n",
+        record.method,
+        record.spp,
+        record.noise,
+        record.seconds,
+        record.max_bounces,
+        record.sample_cap,
+        record.commit
     );
     std::fs::write(&path, text).map_err(|err| format!("{}: {err}", path.display()))
 }
@@ -162,12 +255,13 @@ pub fn sizes_text(manifest: &Manifest) -> String {
     );
     for record in &manifest.records {
         out.push_str(&format!(
-            "{} {}  png {}  linear {}  {} spp  noise {:.4}  {}x{}\n",
+            "{} {}  png {}  linear {}  {} spp  cap {}  noise {:.4}  {}x{}\n",
             record.scene,
             record.checkpoint,
             format_bytes(record.png_bytes),
             format_bytes(record.linear_bytes),
             record.spp,
+            record.sample_cap,
             record.noise,
             record.width,
             record.height
@@ -200,7 +294,7 @@ fn manifest_json(manifest: &Manifest) -> String {
         };
         out.push_str(&format!(
             "    {{\"scene\": \"{}\", \"checkpoint\": \"{}\", \"method\": \"{}\", \
-             \"width\": {}, \"height\": {}, \"spp\": {}, \"noise\": {}, \
+             \"width\": {}, \"height\": {}, \"spp\": {}, \"sample_cap\": {}, \"noise\": {}, \
              \"seconds\": {}, \"max_bounces\": {}, \"png_bytes\": {}, \
              \"linear_bytes\": {}, \"note\": \"{}\"}}{comma}\n",
             escape(&record.scene),
@@ -209,6 +303,7 @@ fn manifest_json(manifest: &Manifest) -> String {
             record.width,
             record.height,
             record.spp,
+            record.sample_cap,
             fmt_f32(record.noise),
             fmt_f32(record.seconds),
             record.max_bounces,
@@ -277,6 +372,7 @@ mod tests {
                 width: 0,
                 height: 0,
                 spp: 1,
+                sample_cap: 4,
                 noise: 0.5,
                 seconds: 0.01,
                 max_bounces: 1,
@@ -297,7 +393,20 @@ mod tests {
         assert_eq!(loaded, picture);
         let trace = read_trace(&root, "stress-still", "hall").unwrap();
         assert_eq!(trace.spp, 1);
+        assert_eq!(trace.sample_cap, 4);
+        assert_eq!(trace.build, "abc123");
         assert_eq!(trace.method, "path");
+        let old = root.join("stress-still/room-a");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(
+            old.join("trace.txt"),
+            "method path\nspp 1024\nnoise 0.080000\nseconds 1.000000\nmax_bounces 8\n",
+        )
+        .unwrap();
+        let old_trace = read_trace(&root, "stress-still", "room-a").unwrap();
+        assert_eq!(old_trace.spp, 1024);
+        assert_eq!(old_trace.sample_cap, 0);
+        assert_eq!(old_trace.build, "");
         let manifest = Manifest {
             commit: "abc123".into(),
             profile: "test".into(),

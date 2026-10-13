@@ -45,8 +45,11 @@ pub struct CheckOptions {
     /// Keep lighting caches from one checkpoint to the next. The default
     /// opens a fresh renderer for each checkpoint.
     pub warm: bool,
+    /// Replace reference pictures that are already in the directory.
+    pub regen: bool,
 }
 
+#[derive(Clone)]
 struct Wanted {
     scene: String,
     checkpoint: String,
@@ -71,17 +74,31 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
     if wanted.is_empty() {
         println!("lighting-ref: no checkpoints matched");
     }
-    let reused = references_ready(&opts.reference_dir, &opts.profile, &wanted);
+    let trace_these = if opts.regen {
+        wanted.clone()
+    } else {
+        let (missing, errors) = reference_gaps(&opts.reference_dir, opts, &wanted)?;
+        if !errors.is_empty() {
+            return Err(errors.join("\n"));
+        }
+        missing
+    };
+    let reused = trace_these.is_empty();
     if reused {
         println!("reusing references in {}", opts.reference_dir.display());
     } else {
+        let sequence = trace_these
+            .iter()
+            .map(|item| (item.scene.clone(), item.checkpoint.clone()))
+            .collect();
         generate::generate(&GenerateOptions {
             reference_dir: opts.reference_dir.clone(),
             commit: opts.commit.clone(),
             profile: opts.profile.clone(),
-            only_scene: opts.only_scene.clone(),
-            only_checkpoint: opts.only_checkpoint.clone(),
-            sequence: opts.sequence.clone(),
+            only_scene: None,
+            only_checkpoint: None,
+            sequence,
+            regen: opts.regen,
         })?;
     }
 
@@ -91,9 +108,19 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
             "Reused reference pictures in {}.",
             opts.reference_dir.display()
         ));
-    } else {
+    } else if opts.regen {
+        notes.push(format!(
+            "Replaced references in {} (--regen).",
+            opts.reference_dir.display()
+        ));
+    } else if trace_these.len() == wanted.len() {
         notes.push(format!(
             "Traced references into {}.",
+            opts.reference_dir.display()
+        ));
+    } else {
+        notes.push(format!(
+            "Traced missing references into {}. Existing pictures were kept. Pass --regen to replace them.",
             opts.reference_dir.display()
         ));
     }
@@ -150,6 +177,8 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
                 noise: 0.0,
                 seconds: 0.0,
                 max_bounces: opts.profile.max_bounces,
+                sample_cap: opts.profile.max_spp,
+                build: opts.commit.clone(),
             });
         let candidate = candidate_picture(item, shot);
         let still = (item.still && shot.frames.len() >= 2).then_some(shot.frames.as_slice());
@@ -207,7 +236,7 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
             .map(|(scene, checkpoint, metrics)| (scene.as_str(), checkpoint.as_str(), metrics))
             .collect();
         let path = opts.reference_dir.join("metrics.json");
-        baseline::write_metrics(&path, &opts.commit, &refs)?;
+        baseline::upsert_metrics(&path, &opts.commit, &refs)?;
         notes.push(format!("Wrote candidate metrics to {}.", path.display()));
     }
 
@@ -300,11 +329,76 @@ fn ensure_reference_metrics(opts: &CheckOptions, wanted: &[Wanted]) -> Result<()
     Ok(())
 }
 
-fn references_ready(dir: &Path, profile: &TraceProfile, wanted: &[Wanted]) -> bool {
-    wanted.iter().all(|item| {
-        store::read_reference(dir, &item.scene, &item.checkpoint)
-            .is_ok_and(|picture| picture.width == profile.width && picture.height == profile.height)
-    })
+/// Pictures that are absent, and pictures that are present but do not match
+/// this run. A mismatch is an error. It is not traced over.
+fn reference_gaps(
+    dir: &Path,
+    opts: &CheckOptions,
+    wanted: &[Wanted],
+) -> Result<(Vec<Wanted>, Vec<String>), String> {
+    let mut missing = Vec::new();
+    let mut errors = Vec::new();
+    for item in wanted {
+        let picture = match store::read_reference(dir, &item.scene, &item.checkpoint) {
+            Ok(picture) => picture,
+            Err(_) => {
+                missing.push(item.clone());
+                continue;
+            }
+        };
+        let Some(shot) = super::scenes::shot(&item.scene, &item.checkpoint) else {
+            errors.push(format!(
+                "{} {}: no camera, so the stored reference cannot be checked",
+                item.scene, item.checkpoint
+            ));
+            continue;
+        };
+        let setup = super::scenes::reference_setup(&shot, &opts.profile);
+        let trace = match store::read_trace(dir, &item.scene, &item.checkpoint) {
+            Ok(trace) => trace,
+            Err(err) => {
+                errors.push(format!(
+                    "{}/{} in {} has a picture and no usable trace ({err}). Pass --regen to replace it.",
+                    item.scene,
+                    item.checkpoint,
+                    dir.display()
+                ));
+                continue;
+            }
+        };
+        let mut why = Vec::new();
+        if picture.width != opts.profile.width || picture.height != opts.profile.height {
+            why.push(format!(
+                "size {}x{} vs {}x{}",
+                picture.width, picture.height, opts.profile.width, opts.profile.height
+            ));
+        }
+        if trace.sample_cap != setup.max_spp {
+            why.push(format!(
+                "sample cap {} vs {}",
+                trace.sample_cap, setup.max_spp
+            ));
+        }
+        if trace.build != opts.commit {
+            why.push(format!("build {} vs {}", trace.build, opts.commit));
+        }
+        if trace.max_bounces != setup.max_bounces {
+            why.push(format!(
+                "bounces {} vs {}",
+                trace.max_bounces, setup.max_bounces
+            ));
+        }
+        if !why.is_empty() {
+            errors.push(format!(
+                "{}/{} in {} does not match this run ({}). Pass --regen to replace it.",
+                item.scene,
+                item.checkpoint,
+                dir.display(),
+                why.join(", ")
+            ));
+        }
+    }
+    Ok((missing, errors))
 }
 
 fn plan_note(plan: &FramePlan) -> String {

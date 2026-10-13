@@ -88,6 +88,7 @@ impl Options {
         let mut capture_frames = None;
         let mut bounces: Option<String> = None;
         let mut warm = false;
+        let mut regen = false;
         let mut sequence: Option<String> = None;
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
@@ -115,6 +116,7 @@ impl Options {
                 "--capture-frames" => capture_frames = Some(value()?),
                 "--bounces" => bounces = Some(value()?),
                 "--warm" => warm = true,
+                "--regen" => regen = true,
                 "--checkpoints" => sequence = Some(value()?),
                 other => return Err(format!("unknown argument {other}")),
             }
@@ -187,6 +189,7 @@ impl Options {
             only_scene: only_scene.clone(),
             only_checkpoint: only_checkpoint.clone(),
             sequence: Vec::new(),
+            regen,
         };
         if !check {
             return Ok(Self {
@@ -257,6 +260,7 @@ impl Options {
                 plan,
                 warm,
                 sequence,
+                regen,
             }),
         })
     }
@@ -477,6 +481,24 @@ mod tests {
             Ok(_) => panic!("generate accepted --out"),
         };
         assert!(err.contains("--out"));
+    }
+
+    #[test]
+    fn generate_accepts_regen() {
+        let opts = Options::parse(words("--regen").into_iter()).unwrap();
+        let Command::Generate(generate) = opts.command else {
+            panic!("expected generate");
+        };
+        assert!(generate.regen);
+    }
+
+    #[test]
+    fn check_passes_regen_through() {
+        let opts = Options::parse(words("check --regen").into_iter()).unwrap();
+        let Command::Check(check) = opts.command else {
+            panic!("expected check");
+        };
+        assert!(check.regen);
     }
 
     #[test]
