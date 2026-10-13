@@ -861,16 +861,19 @@ fn adaptive_skip_keeps_the_bounce_bright() {
     eprintln!(
         "adaptive skip vs 1 iter mean {mean:.3} p99 {p99:.3} luma {y_skip:.2} one {y_one:.2}"
     );
+    // The bounce view on this hall is dim (luma about 2.6). A black frame is
+    // not a comparison. Leaving A unpublished measured mean 0.133 p99 1.0
+    // here; the 4070's unpublished A was mean 15.9 p99 41. Both fail below.
     assert!(
-        y_one > 5.0,
-        "one-iteration bounce is too dark to judge the skip ({y_one:.2})"
+        y_one > 1.0,
+        "one-iteration bounce is empty ({y_one:.2})"
     );
     assert!(
-        mean < 4.0,
+        mean < 0.05,
         "adaptive skip mean error {mean:.3} against one wavelet"
     );
     assert!(
-        p99 < 16.0,
+        p99 < 2.0,
         "adaptive skip p99 {p99:.3} (the 4070 p99 was 41)"
     );
     assert!(
