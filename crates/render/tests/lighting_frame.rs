@@ -911,7 +911,7 @@ fn sponza_banner_cells_stay_still_under_the_screen_wavelet() {
         "banner hash edge {hash_edge:.3} flicker {hash_flicker:.3} screen edge {screen_edge:.3} flicker {screen_flicker:.3}"
     );
     assert!(
-        hash_edge >= 2.5 || hash_flicker >= 0.8,
+        hash_edge >= 3.0,
         "the cloth did not show the cell grid (edge {hash_edge:.3} flicker {hash_flicker:.3})"
     );
     assert!(
@@ -948,7 +948,7 @@ fn banner_scores(screen: bool) -> (f64, f64) {
         (0.12, 0.0),
         (0.06, -0.008),
     ];
-    for _ in 0..10 {
+    for _ in 0..24 {
         let mut camera = Camera::opening();
         camera.set_pose(genos_scene::Vec3::new(0.0, 1.7, 3.2), 0.0, 0.0);
         let _ = draw(&mut window, &mut renderer, &world, &camera);
@@ -958,7 +958,9 @@ fn banner_scores(screen: bool) -> (f64, f64) {
         camera.set_pose(genos_scene::Vec3::new(x, 1.7, 3.2), yaw, 0.0);
         frames.push(draw(&mut window, &mut renderer, &world, &camera));
     }
-    let edge = frames.iter().map(|f| cell_edge_ratio(f, 320, 6)).sum::<f64>() / frames.len() as f64;
+    let edge = frames.iter().map(|f| cell_edge_excess(f, 320, 6)).sum::<f64>() / frames.len() as f64;
+    let luma = frames.iter().map(|f| mean_luma(f)).sum::<f64>() / frames.len() as f64;
+    eprintln!("banner screen={screen} edge {edge:.3} luma {luma:.2}");
     (edge, cloth_flicker(&frames, &shots))
 }
 
@@ -975,7 +977,7 @@ fn banner_world() -> World {
     .expect("cube");
     let mut glowing = glow;
     for material in &mut glowing.materials {
-        material.emissive = [8.0, 1.2, 0.4];
+        material.emissive = [40.0, 8.0, 1.5];
         material.emissive_strength = 1.0;
     }
     let settings = genos_bake::BakeSettings {
@@ -996,11 +998,7 @@ fn banner_world() -> World {
             wall_at(3.0, 0.0, 0.2, 6.0),
         ],
         solids: Vec::new(),
-        lights: vec![genos_scene::Light {
-            position: genos_scene::Vec3::new(-1.7, 2.3, 1.4),
-            color: [8.0, 6.4, 4.0],
-            direction: genos_scene::Vec3::ZERO,
-        }],
+        lights: Vec::new(),
         ceiling: Some(genos_scene::Ceiling {
             height: 4.0,
             color: [0.12, 0.12, 0.13],
@@ -1035,9 +1033,9 @@ fn wall_at(x: f32, z: f32, half_x: f32, half_z: f32) -> genos_scene::Wall {
         half_z,
         height: 4.0,
         base: 0.0,
-        color: [0.45, 0.32, 0.22],
+        color: [0.08, 0.07, 0.06],
         absorption: 0.0,
-        reflectance: 0.8,
+        reflectance: 0.15,
         color_mix: 1.0,
     }
 }
@@ -1121,6 +1119,40 @@ fn roi_of(frame: &[u8], width: usize) -> impl Iterator<Item = (usize, usize)> {
 
 fn luma_at(frame: &[u8], width: usize, x: usize, y: usize) -> f64 {
     luma_bgra(&frame[(y * width + x) * 4..])
+}
+
+/// Extra luma on the strongest cell-period phase, in 0..255. A smooth gradient
+/// and dither score near 0. A piecewise-constant 12.5 cm grid scores the step
+/// between cells. The projected cell is about `stride` pixels and is not aligned
+/// to x = 0, so every phase of stride-1, stride, and stride+1 is scored.
+fn cell_edge_excess(frame: &[u8], width: usize, stride: usize) -> f64 {
+    let mut best = 0.0f64;
+    let lo = stride.saturating_sub(1).max(1);
+    for s in lo..=stride + 1 {
+        for phase in 0..s {
+            let mut boundary = 0.0;
+            let mut boundary_n = 0.0;
+            let mut interior = 0.0;
+            let mut interior_n = 0.0;
+            for (x, y) in roi_of(frame, width) {
+                if x + 1 >= width * 3 / 4 {
+                    continue;
+                }
+                let d = (luma_at(frame, width, x + 1, y) - luma_at(frame, width, x, y)).abs();
+                if x % s == phase {
+                    boundary += d;
+                    boundary_n += 1.0;
+                } else {
+                    interior += d;
+                    interior_n += 1.0;
+                }
+            }
+            let b = if boundary_n > 0.0 { boundary / boundary_n } else { 0.0 };
+            let i = if interior_n > 0.0 { interior / interior_n } else { 0.0 };
+            best = best.max(b - i);
+        }
+    }
+    best
 }
 
 /// Strongest period of a cache-cell grid. The projected cell is about `stride`
