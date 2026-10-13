@@ -51,6 +51,12 @@ pub fn scenes() -> &'static [SceneDesc] {
             skip_reason: "",
         },
         SceneDesc {
+            id: "direct-only",
+            title: "Direct light only, the normalisation control",
+            available: true,
+            skip_reason: "",
+        },
+        SceneDesc {
             id: "sponza",
             title: "Sponza",
             available: false,
@@ -111,6 +117,13 @@ pub fn checkpoints() -> &'static [CheckpointDesc] {
             still: true,
         },
         CheckpointDesc {
+            scene: "direct-only",
+            name: "hall",
+            note: "Hall bench. Path trace with zero bounces. Renderer with bounce count 0 and ambient off. The mean luminance ratio is the normalisation control and should sit near 1.",
+            event: None,
+            still: true,
+        },
+        CheckpointDesc {
             scene: "sponza",
             name: "atrium",
             note: "Not traced until a Sponza asset exists.",
@@ -135,7 +148,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_five_scenes_are_listed_and_sponza_is_skipped() {
+    fn the_scenes_are_listed_and_sponza_is_skipped() {
         let ids: Vec<_> = scenes().iter().map(|s| s.id).collect();
         assert_eq!(
             ids,
@@ -144,6 +157,7 @@ mod tests {
                 "stress-moving",
                 "bounce-corner",
                 "hell-100",
+                "direct-only",
                 "sponza"
             ]
         );
@@ -152,6 +166,7 @@ mod tests {
         assert!(sponza.skip_reason.contains("Sponza"));
         assert!(available_checkpoints().all(|cp| cp.scene != "sponza"));
         assert!(available_checkpoints().any(|cp| cp.name == "corner"));
+        assert!(available_checkpoints().any(|cp| cp.scene == "direct-only"));
         assert!(available_checkpoints().any(|cp| cp.event == Some("box-step")));
     }
 }

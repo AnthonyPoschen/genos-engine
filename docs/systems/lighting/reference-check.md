@@ -12,6 +12,7 @@ A lighting change is checked against ground truth for each test scene, instead o
 - The candidate is the current build's lighting. `--candidate full-effort` spends those maximum knobs. `GENOS_LIGHTING_FULL_EFFORT` (any value except `0`, `false`, `off`, `no`) still overlays the scene, and it is applied last.
 - A value inside the band around a fail line does not auto-pass. One sample per pixel does not auto-pass. Two metrics that disagree, neither a clear fail, need a person. A capture that is still over the line when the settle cap is reached stays a fail and is marked for review.
 - The score is the blurred relative error and the mean luminance ratio. Raw per-pixel error at or under the reference's own noise is not a fail. A luminance ratio of 0.66, 0.80, or 1.18 stays a fail.
+- `direct-only/hall` is the normalisation control. The path trace uses zero bounces (direct light at the first hit). The renderer uses bounce count 0 with ambient off, even when the candidate is full effort. The mean luminance ratio should sit near 1. A ratio outside the luminance gate is a direct-light mismatch and stays a fail. Bounce count 0 with ambient left on is a different picture and is not this control.
 - The scene clock is a fixed step, `--fixed-dt`, default 1/60 s. Lamp motion, box motion, and the day clock advance once per frame. Wall time is written in `frames.tsv` and does not choose the pose. Owner mode and lavapipe-small use the same frame indices. Lavapipe-small changes the picture size and the sample count.
 - Reports are written in the current directory. The default is `./genos-debug/refcheck/<timestamp>/`. `--out` overrides it. The tool does not write to `$HOME`.
 - Reference pictures are `./genos-debug/reference/<commit>/`, unless `--reference-dir` is set. `./genos-debug/` is gitignored.
@@ -79,6 +80,7 @@ The report is `summary.md` and `summary.html`, plus `metrics.json` and `frames.t
 | stress-moving | box-step | Hall after the boxes jump and hold. Error at +1, +2, +4, and +8 frames. |
 | bounce-corner | corner | Inside room A, aimed at the corner the opening lights by bounce. |
 | hell-100 | night-hall | Night, 100 lamps, most of them moving. One 25 m section, the stress panel's 100-light case, not the 4×4 building. |
+| direct-only | hall | Hall bench. Path trace with zero bounces. Renderer with bounce count 0 and ambient off. The mean luminance ratio is the normalisation control. |
 | sponza | atrium | Skipped. No Sponza asset in this repository. |
 
 Owner pictures are 320×180. The path trace runs in batches of 16 samples until the noise estimate is 0.05, 256 samples, or 120 seconds, with 8 bounces. The achieved noise is stored beside each picture (`trace.txt`) and the score uses it. Lavapipe-small is 32×18, 1 sample, 2 bounces, 3 seconds. A stored reference is reused when the picture size matches. A different size traces again into the same commit directory.
@@ -120,6 +122,7 @@ Printed in every summary:
 - Lavapipe is a wiring check. Quality is the owner GPU run.
 - GPU frames are not cross-device deterministic. The path trace is deterministic for a given commit, scene, and sample count.
 - A held stale frame on a still scene with no box step matches a converged picture and is not caught.
+- The direct-only hall is the normalisation control: path trace with zero bounces, renderer with bounce count 0 and ambient off. A mean luminance ratio far from 1 is a direct-light mismatch and stays a fail. Bounce count 0 with ambient left on is not this control.
 - Owner mode and lavapipe-small share one frame plan (fixed step, warmup, settle, capture offsets). The settle line is blurred relative luminance, raised by that checkpoint's reference noise. Wall time is logged. The scene pose follows the frame index. `picture_settled` is logged and ignored on the first frame of a pose. The check does not call `wait_settled`. A picture still over the line at the settle cap fails that capture and stays for review.
 
 ## Code

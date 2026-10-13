@@ -108,7 +108,7 @@ pub fn generate(opts: &GenerateOptions) -> Result<Vec<ReferenceRecord>, String> 
                     spp: traced.spp,
                     noise: traced.noise,
                     seconds: traced.seconds,
-                    max_bounces: opts.profile.max_bounces,
+                    max_bounces: setup.max_bounces,
                     png_bytes: 0,
                     linear_bytes: 0,
                     note: cp.note.to_string(),

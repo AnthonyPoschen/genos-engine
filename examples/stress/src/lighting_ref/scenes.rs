@@ -1,7 +1,7 @@
 //! Fixed cameras for the reference scenes. Coordinates match the stress building.
 
 use genos_debug::RefSetup;
-use genos_scene::{Camera, Scene, Vec3, CAMERA_HEIGHT};
+use genos_scene::{AmbientMode, Camera, Scene, Vec3, CAMERA_HEIGHT};
 
 use crate::building::{self, Building, Layout, LightMix, View};
 use crate::stage::{Scale, Stage};
@@ -21,6 +21,9 @@ pub struct Shot {
     pub dynamic_pct: u32,
     pub box_time: f32,
     pub lamp_time: f32,
+    /// Path trace with zero bounces. Live lighting is bounce count 0 and
+    /// ambient off, applied after full effort so the control stays direct.
+    pub direct_only: bool,
 }
 
 pub fn shot(scene: &str, name: &str) -> Option<Shot> {
@@ -35,8 +38,10 @@ pub fn shot(scene: &str, name: &str) -> Option<Shot> {
         ("stress-moving", "box-step") => from_view(View::Hall, 0.25, 5, 0, 0.45, 0.0),
         ("bounce-corner", "corner") => corner(),
         ("hell-100", "night-hall") => from_view(View::Hall, 0.70, 100, 75, 0.8, 0.8),
+        ("direct-only", "hall") => from_view(View::Hall, 0.25, 5, 0, 0.0, 0.0),
         _ => return None,
     };
+    shot.direct_only = scene == "direct-only";
     shot.scene_id = desc.scene;
     shot.name = desc.name;
     shot.note = desc.note;
@@ -68,6 +73,7 @@ fn from_view(
         dynamic_pct,
         box_time,
         lamp_time,
+        direct_only: false,
     }
 }
 
@@ -87,7 +93,17 @@ fn corner() -> Shot {
         dynamic_pct: 0,
         box_time: 0.0,
         lamp_time: 0.0,
+        direct_only: false,
     }
+}
+
+/// Direct light only. Ambient off, so the flat fill is not in the control.
+fn apply_direct_only(scene: &mut Scene) {
+    scene.lighting.bounce.count = 0;
+    scene.lighting.gi.enabled = false;
+    scene.lighting.probes.enabled = false;
+    scene.lighting.world_cache.enabled = false;
+    scene.lighting.ambient.mode = AmbientMode::Off;
 }
 
 fn aim(eye: [f32; 3], at: [f32; 3]) -> (f32, f32) {
@@ -115,6 +131,9 @@ pub fn scene_and_camera(shot: &Shot, full_effort: bool) -> (Scene, Camera) {
     scene.sky = building::sky(shot.day);
     if full_effort {
         scene.lighting.apply_full_effort();
+    }
+    if shot.direct_only {
+        apply_direct_only(&mut scene);
     }
     (scene, camera_for(shot))
 }
@@ -151,6 +170,9 @@ pub fn open_stage(shot: &Shot, full_effort: bool) -> (Stage, Camera) {
     if full_effort {
         stage.world.scene.lighting.apply_full_effort();
     }
+    if shot.direct_only {
+        apply_direct_only(&mut stage.world.scene);
+    }
     (stage, camera_for(shot))
 }
 
@@ -168,6 +190,38 @@ pub fn reference_setup(shot: &Shot, profile: &TraceProfile) -> RefSetup {
     setup.noise_target = profile.noise_target;
     setup.max_spp = profile.max_spp.max(profile.spp);
     setup.seconds = profile.seconds;
-    setup.max_bounces = profile.max_bounces;
+    setup.max_bounces = if shot.direct_only {
+        0
+    } else {
+        profile.max_bounces
+    };
     setup
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lighting_ref::generate::TraceProfile;
+    use genos_scene::AmbientMode;
+
+    #[test]
+    fn the_direct_control_traces_zero_bounces_and_renders_without_ambient() {
+        let control = shot("direct-only", "hall").unwrap();
+        assert!(control.direct_only);
+        let profile = TraceProfile::lavapipe_small();
+        assert_eq!(reference_setup(&control, &profile).max_bounces, 0);
+        let (scene, _) = scene_and_camera(&control, true);
+        assert_eq!(scene.lighting.bounce.count, 0);
+        assert!(!scene.lighting.gi.enabled);
+        assert_eq!(scene.lighting.ambient.mode, AmbientMode::Off);
+        let (stage, _) = open_stage(&control, true);
+        assert_eq!(stage.world.scene.lighting.bounce.count, 0);
+        assert_eq!(stage.world.scene.lighting.ambient.mode, AmbientMode::Off);
+        let hall = shot("stress-still", "hall").unwrap();
+        assert!(!hall.direct_only);
+        assert_eq!(
+            reference_setup(&hall, &profile).max_bounces,
+            profile.max_bounces
+        );
+    }
 }
