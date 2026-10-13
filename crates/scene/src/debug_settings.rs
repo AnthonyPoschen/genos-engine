@@ -24,8 +24,8 @@ impl Default for DebugSettings {
 }
 
 impl DebugSettings {
-    /// `./genos-out/unfilled/<timestamp>/` when the process starts in this directory.
-    pub const DEFAULT_OUT: &'static str = "genos-out/unfilled";
+    /// `./genos-debug/unfilled/<timestamp>/` when the process starts in this directory.
+    pub const DEFAULT_OUT: &'static str = "genos-debug/unfilled";
 
     /// `--out` wins, then `GENOS_UNFILLED_DIR`, then the stored field.
     /// Empty strings are skipped. The result is never empty.
@@ -127,10 +127,10 @@ mod tests {
 
     #[test]
     fn default_out_is_under_the_working_directory() {
-        assert_eq!(DebugSettings::default().out, "genos-out/unfilled");
+        assert_eq!(DebugSettings::default().out, "genos-debug/unfilled");
         assert_eq!(
-            DebugSettings::resolve("genos-out/unfilled", None, None),
-            "genos-out/unfilled"
+            DebugSettings::resolve("genos-debug/unfilled", None, None),
+            "genos-debug/unfilled"
         );
         assert!(
             !DebugSettings::DEFAULT_OUT.contains("HOME")
@@ -143,27 +143,27 @@ mod tests {
     fn cli_overrides_the_env_mirror_and_the_setting() {
         assert_eq!(
             DebugSettings::resolve(
-                "genos-out/unfilled",
+                "genos-debug/unfilled",
                 Some("/home/a/genos-perf/unfilled"),
                 Some("./captures")
             ),
             "./captures"
         );
         assert_eq!(
-            DebugSettings::resolve("genos-out/unfilled", Some("/tmp/events"), None),
+            DebugSettings::resolve("genos-debug/unfilled", Some("/tmp/events"), None),
             "/tmp/events"
         );
         assert_eq!(
             DebugSettings::resolve("custom/dir", Some("  "), Some("")),
             "custom/dir"
         );
-        assert_eq!(DebugSettings::resolve("", None, None), "genos-out/unfilled");
+        assert_eq!(DebugSettings::resolve("", None, None), "genos-debug/unfilled");
     }
 
     #[test]
     fn text_form_round_trips() {
         let mut settings = DebugSettings::default();
-        settings.set_key("out", "genos-out/unfilled").unwrap();
+        settings.set_key("out", "genos-debug/unfilled").unwrap();
         let parsed = DebugSettings::parse(&settings.to_text()).unwrap();
         assert_eq!(parsed, settings);
         settings.set_key("out", "/tmp/a=b").unwrap();

@@ -46,7 +46,7 @@ Every engine-feature setting follows `docs/engine/settings-principles.md`. It is
 
 ## Output
 
-An output-writing command behaves as a Unix tool. It writes into the current working directory by default, under `./genos-out/<name>/`. It takes `--out <dir>`, and that argument overrides the default. It does not write under `$HOME` unless that path was passed in. An environment variable is a mirror of the same engine setting, not a second location. The directory is an `EngineSettings` value, on the MCP catalogue, and in the debug menu, as in `docs/engine/settings-principles.md`. Count, size, and age caps stay on that directory.
+An output-writing command behaves as a Unix tool. It writes into the current working directory by default, under `./genos-debug/<kind>/`. It takes `--out <dir>`, and that argument overrides the default. It does not write under `$HOME` unless that path was passed in. An environment variable is a mirror of the same engine setting, not a second location. The directory is an `EngineSettings` value, on the MCP catalogue, and in the debug menu, as in `docs/engine/settings-principles.md`. Count, size, and age caps stay on that directory.
 
 ## Systems
 

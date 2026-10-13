@@ -70,7 +70,7 @@ const USAGE: &str = "genos-stress [options]
                             steps 1/60 s a frame; exit 0 when every check passes
   --report DIR              where the script writes report.md, result.json and pictures
                             (default target/debug-reports/<script name>)
-  --out DIR                 unfilled events (default ./genos-out/unfilled)
+  --out DIR                 unfilled events (default ./genos-debug/unfilled)
   --trace                   capture the picture after every script command that changes it";
 
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];

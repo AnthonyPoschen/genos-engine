@@ -79,7 +79,7 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec(
             "get_debug_settings",
-            "The debug output directory in force (text form). --out wins over GENOS_UNFILLED_DIR, which wins over the scene value. The default is genos-out/unfilled under the working directory.",
+            "The debug output directory in force (text form). --out wins over GENOS_UNFILLED_DIR, which wins over the scene value. The default is genos-debug/unfilled under the working directory.",
         ),
         spec(
             "set_debug_settings",
