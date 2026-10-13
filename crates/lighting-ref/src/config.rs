@@ -60,6 +60,7 @@ impl Config {
         let mut values = values;
         let params = MetricParams {
             rel_floor: take(&mut values, "rel_floor")?,
+            rel_mean_frac: take(&mut values, "rel_mean_frac")?,
             dark_max: take(&mut values, "dark_max")?,
             unfilled_candidate_max: take(&mut values, "unfilled_candidate_max")?,
             unfilled_reference_min: take(&mut values, "unfilled_reference_min")?,
@@ -122,7 +123,8 @@ mod tests {
         assert!((config.noise_tail - 4.0).abs() < 1.0e-9);
         assert!((config.flip_edge - 0.90).abs() < 1.0e-9);
         assert!((config.fail_of("luma_delta") - 0.10).abs() < 1.0e-9);
-        assert!((config.fail_of("blur_rel") - 0.08).abs() < 1.0e-9);
+        assert!((config.fail_of("blur_rel") - 0.12).abs() < 1.0e-9);
+        assert!((config.params.rel_mean_frac - 0.25).abs() < 1.0e-9);
         assert!((config.params.rel_floor - 0.02).abs() < 1.0e-9);
     }
 

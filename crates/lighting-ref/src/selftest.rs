@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
-use crate::metrics::{measure, MetricParams};
+use crate::metrics::measure;
 use crate::picture::Picture;
 use crate::report::{write_report, CheckpointAudit, RunReport};
 use crate::verdict::{judge, Judge, Judgement, MetricId, Verdict};
@@ -109,12 +109,7 @@ fn score(plant: &Plant, config: &Config) -> (crate::metrics::FrameMetrics, Judge
         &plant.candidate,
         still,
         &after_refs,
-        &MetricParams {
-            rel_floor: config.params.rel_floor,
-            dark_max: config.params.dark_max,
-            unfilled_candidate_max: config.params.unfilled_candidate_max,
-            unfilled_reference_min: config.params.unfilled_reference_min,
-        },
+        &config.params,
     )
     .expect("planted pictures share a size");
     let judgement = judge(Judge {
@@ -337,7 +332,12 @@ mod tests {
         assert_eq!(row(MetricId::MeanRel).verdict, Verdict::Pass);
 
         let bounce = verdict("missing-bounce");
-        assert!(bounce.metrics.mean_rel_dark.unwrap() > 0.5);
+        // The picture-mean floor lowers the dark error. It stays a fail.
+        assert!(
+            bounce.metrics.mean_rel_dark.unwrap() > 0.40,
+            "{}",
+            bounce.metrics.mean_rel_dark.unwrap()
+        );
         assert!(bounce.metrics.mean_rel_lit.unwrap() < 0.02);
         let dark = bounce
             .judgement

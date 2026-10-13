@@ -9,7 +9,9 @@
 use std::path::Path;
 use std::time::Instant;
 
-use genos_lighting_ref::{blur_relative, mean_luma_ratio, mean_relative, settle_line, Picture};
+use genos_lighting_ref::{
+    blur_relative, mean_luma_ratio, mean_relative, settle_line, MetricParams, Picture,
+};
 use genos_render::Renderer;
 use genos_window::Window;
 
@@ -52,7 +54,7 @@ pub struct CaptureOptions {
     pub full_effort: bool,
     pub lavapipe_small: bool,
     pub plan: FramePlan,
-    pub rel_floor: f64,
+    pub params: MetricParams,
     pub jobs: Vec<Job>,
 }
 
@@ -136,11 +138,11 @@ fn capture_one(
         let mean_rel = job
             .reference
             .as_ref()
-            .and_then(|reference| mean_relative(reference, &picture, opts.rel_floor).ok());
+            .and_then(|reference| mean_relative(reference, &picture, &opts.params).ok());
         let blur_rel = job
             .reference
             .as_ref()
-            .and_then(|reference| blur_relative(reference, &picture, opts.rel_floor).ok());
+            .and_then(|reference| blur_relative(reference, &picture, &opts.params).ok());
         let luma_ratio = job
             .reference
             .as_ref()

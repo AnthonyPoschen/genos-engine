@@ -1,14 +1,20 @@
 //! Per-frame error against a reference picture.
 //!
-//! Relative luminance is `|Yc - Yr| / max(Yr, floor)`. The floor keeps a dark
-//! pixel from exploding. FLIP is the second opinion in [`crate::flip`].
+//! Relative luminance is `|Yc - Yr| / max(Yr, rel_floor, rel_mean_frac * mean(Yr))`.
+//! The mean term keeps a noisy shadow from dominating. A uniform brightness
+//! bias on pixels above that floor is unchanged. FLIP is the second opinion
+//! in [`crate::flip`].
 
 use crate::flip::{flip_map, mean_and_p99};
 use crate::picture::Picture;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MetricParams {
+    /// Absolute denominator. `max(Yr, rel_floor, rel_mean_frac * mean(Yr))`.
     pub rel_floor: f64,
+    /// Dark pixels are compared with this share of the picture's mean luminance,
+    /// so a noisy shadow does not dominate the mean.
+    pub rel_mean_frac: f64,
     pub dark_max: f64,
     /// Candidate luminance at or below this can count as unfilled.
     pub unfilled_candidate_max: f64,
@@ -20,6 +26,7 @@ impl Default for MetricParams {
     fn default() -> Self {
         Self {
             rel_floor: 0.02,
+            rel_mean_frac: 0.25,
             dark_max: 0.05,
             unfilled_candidate_max: 0.004,
             unfilled_reference_min: 0.02,
@@ -65,9 +72,13 @@ impl FrameMetrics {
 
 /// Mean relative luminance only. The settle loop calls [`blur_relative`] and
 /// does not run FLIP.
-pub fn mean_relative(reference: &Picture, candidate: &Picture, floor: f64) -> Result<f64, String> {
+pub fn mean_relative(
+    reference: &Picture,
+    candidate: &Picture,
+    params: &MetricParams,
+) -> Result<f64, String> {
     same_size(reference, candidate)?;
-    let rel = relative(reference, candidate, floor);
+    let rel = relative(reference, candidate, params);
     Ok(mean_p99(&rel).0)
 }
 
@@ -92,12 +103,16 @@ pub fn settle_line(threshold: f64, reference_noise: f64, height: u32) -> f64 {
 
 /// Mean relative luminance after the box blur. Pixel noise falls. A brightness
 /// bias does not.
-pub fn blur_relative(reference: &Picture, candidate: &Picture, floor: f64) -> Result<f64, String> {
+pub fn blur_relative(
+    reference: &Picture,
+    candidate: &Picture,
+    params: &MetricParams,
+) -> Result<f64, String> {
     same_size(reference, candidate)?;
     let radius = blur_radius(reference.height);
     let left = box_blur_luma(reference, radius);
     let right = box_blur_luma(candidate, radius);
-    let rel = relative_luma(&left, &right, floor);
+    let rel = relative_luma(&left, &right, params);
     Ok(mean_p99(&rel).0)
 }
 
@@ -131,13 +146,13 @@ pub fn measure(
     params: &MetricParams,
 ) -> Result<FrameMetrics, String> {
     same_size(reference, candidate)?;
-    let rel = relative(reference, candidate, params.rel_floor);
+    let rel = relative(reference, candidate, params);
     let (mean_rel, p99_rel) = mean_p99(&rel);
     let (mean_rel_dark, mean_rel_lit, dark_pixels, lit_pixels) =
         dark_split(reference, &rel, params.dark_max);
     let (flip_mean, flip_p99) = mean_and_p99(&flip_map(reference, candidate)?);
     let unfilled = unfilled_count(reference, candidate, params);
-    let blur_rel = blur_relative(reference, candidate, params.rel_floor)?;
+    let blur_rel = blur_relative(reference, candidate, params)?;
     let luma_ratio = mean_luma_ratio(reference, candidate)?;
     let luma_delta = if luma_ratio.is_finite() {
         (luma_ratio - 1.0).abs()
@@ -154,10 +169,10 @@ pub fn measure(
         flip_mean: Some(flip_mean),
         flip_p99: Some(flip_p99),
         flicker: flicker(still, params.rel_floor)?,
-        converge_1: converge_at(reference, after_event, 1, params.rel_floor)?,
-        converge_2: converge_at(reference, after_event, 2, params.rel_floor)?,
-        converge_4: converge_at(reference, after_event, 4, params.rel_floor)?,
-        converge_8: converge_at(reference, after_event, 8, params.rel_floor)?,
+        converge_1: converge_at(reference, after_event, 1, params)?,
+        converge_2: converge_at(reference, after_event, 2, params)?,
+        converge_4: converge_at(reference, after_event, 4, params)?,
+        converge_8: converge_at(reference, after_event, 8, params)?,
         unfilled: Some(unfilled),
         pixels: reference.pixels() as u32,
         blur_rel: Some(blur_rel),
@@ -176,18 +191,24 @@ fn same_size(reference: &Picture, candidate: &Picture) -> Result<(), String> {
     Ok(())
 }
 
-fn relative(reference: &Picture, candidate: &Picture, floor: f64) -> Vec<f64> {
+fn relative(reference: &Picture, candidate: &Picture, params: &MetricParams) -> Vec<f64> {
     let left: Vec<f32> = (0..reference.pixels())
         .map(|i| reference.luma_at(i))
         .collect();
     let right: Vec<f32> = (0..candidate.pixels())
         .map(|i| candidate.luma_at(i))
         .collect();
-    relative_luma(&left, &right, floor)
+    relative_luma(&left, &right, params)
 }
 
-fn relative_luma(reference: &[f32], candidate: &[f32], floor: f64) -> Vec<f64> {
-    let floor = floor as f32;
+/// `|Yc - Yr| / max(Yr, rel_floor, rel_mean_frac * mean(Yr))`.
+fn relative_luma(reference: &[f32], candidate: &[f32], params: &MetricParams) -> Vec<f64> {
+    let mean = if reference.is_empty() {
+        0.0
+    } else {
+        reference.iter().map(|y| f64::from(*y)).sum::<f64>() / reference.len() as f64
+    };
+    let floor = (params.rel_mean_frac * mean).max(params.rel_floor) as f32;
     reference
         .iter()
         .zip(candidate)
@@ -314,12 +335,12 @@ fn converge_at(
     reference: &Picture,
     frames: &[(u32, &Picture)],
     after: u32,
-    floor: f64,
+    params: &MetricParams,
 ) -> Result<Option<f64>, String> {
     let Some((_, picture)) = frames.iter().find(|(k, _)| *k == after) else {
         return Ok(None);
     };
-    Ok(Some(blur_relative(reference, picture, floor)?))
+    Ok(Some(blur_relative(reference, picture, params)?))
 }
 
 #[cfg(test)]
@@ -358,8 +379,7 @@ mod tests {
         let candidate = reference.scaled(1.4);
         let m = measure(&reference, &candidate, None, &[], &MetricParams::default()).unwrap();
         assert!((m.mean_rel.unwrap() - 0.4).abs() < 1.0e-4);
-        let cheap =
-            mean_relative(&reference, &candidate, MetricParams::default().rel_floor).unwrap();
+        let cheap = mean_relative(&reference, &candidate, &MetricParams::default()).unwrap();
         assert!((cheap - m.mean_rel.unwrap()).abs() < 1.0e-9);
         assert!(m.flip_mean.unwrap() > 0.2);
         assert!(m.flicker.is_none());
@@ -413,7 +433,12 @@ mod tests {
         candidate.fill_rect(16, 0, 16, 8, [0.003, 0.003, 0.003]);
         let m = measure(&reference, &candidate, None, &[], &MetricParams::default()).unwrap();
         assert!(m.mean_rel_lit.unwrap() < 0.02);
-        assert!(m.mean_rel_dark.unwrap() > 0.5);
+        // The picture-mean floor lowers this. It stays past the dark fail band (0.287).
+        assert!(
+            m.mean_rel_dark.unwrap() > 0.40,
+            "{}",
+            m.mean_rel_dark.unwrap()
+        );
         assert!(m.dark_pixels > 0);
     }
 
@@ -454,5 +479,47 @@ mod tests {
         assert!(biased.blur_rel.unwrap() > 0.30);
         assert!((biased.luma_ratio.unwrap() - 0.66).abs() < 1.0e-3);
         assert!((biased.luma_delta.unwrap() - 0.34).abs() < 1.0e-3);
+    }
+
+    #[test]
+    fn dark_noise_is_relative_to_the_picture_mean() {
+        // A lit field that matches, and a dark band whose absolute error is the
+        // reference noise. Dividing by the dark value alone inflates the error.
+        let (w, h) = (32u32, 180u32);
+        let mut reference = Picture::solid(w, h, [0.50, 0.50, 0.50]);
+        let mut candidate = reference.clone();
+        reference.fill_rect(0, 120, w, 60, [0.012, 0.012, 0.012]);
+        candidate.fill_rect(0, 120, w, 60, [0.028, 0.028, 0.028]);
+        let bare = MetricParams {
+            rel_mean_frac: 0.0,
+            ..MetricParams::default()
+        };
+        let floored = MetricParams::default();
+        let open = measure(&reference, &candidate, None, &[], &bare).unwrap();
+        let held = measure(&reference, &candidate, None, &[], &floored).unwrap();
+        assert!(
+            open.blur_rel.unwrap() > 0.14,
+            "unfloored {}",
+            open.blur_rel.unwrap()
+        );
+        assert!(
+            held.blur_rel.unwrap() < 0.10,
+            "floored {}",
+            held.blur_rel.unwrap()
+        );
+        assert!(held.blur_rel.unwrap() < open.blur_rel.unwrap() / 2.0);
+
+        // A uniform field. The dark band above would shrink a scale error, and
+        // hall and corner are a brightness bias on the lit picture.
+        let field = Picture::solid(w, h, [0.40, 0.40, 0.40]);
+        let hall = measure(&field, &field.scaled(0.83), None, &[], &floored).unwrap();
+        assert!(hall.blur_rel.unwrap() > 0.16, "{}", hall.blur_rel.unwrap());
+        assert!((hall.luma_ratio.unwrap() - 0.83).abs() < 1.0e-3);
+        let corner = measure(&field, &field.scaled(1.23), None, &[], &floored).unwrap();
+        assert!(
+            corner.blur_rel.unwrap() > 0.22,
+            "{}",
+            corner.blur_rel.unwrap()
+        );
     }
 }

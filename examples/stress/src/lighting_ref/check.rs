@@ -93,7 +93,7 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
 
     ensure_reference_metrics(opts, &wanted)?;
     let (baselines, baseline_label) = load_baseline(opts, &mut notes)?;
-    let live = capture_live(opts, &wanted, config.params.rel_floor, &mut notes)?;
+    let live = capture_live(opts, &wanted, &config.params, &mut notes)?;
     if live.iter().any(|shot| !shot.log.is_empty()) {
         let rows: Vec<FrameRecord> = live
             .iter()
@@ -325,7 +325,7 @@ fn load_baseline(
 fn capture_live(
     opts: &CheckOptions,
     wanted: &[Wanted],
-    rel_floor: f64,
+    params: &genos_lighting_ref::MetricParams,
     notes: &mut Vec<String>,
 ) -> Result<Vec<LiveShot>, String> {
     if opts.skip_capture {
@@ -352,7 +352,7 @@ fn capture_live(
         full_effort: opts.full_effort,
         lavapipe_small: opts.mode == "lavapipe-small",
         plan: opts.plan.clone(),
-        rel_floor,
+        params: *params,
         jobs,
     }) {
         Ok(outcome) => {

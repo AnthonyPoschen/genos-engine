@@ -548,6 +548,47 @@ mod tests {
     }
 
     #[test]
+    fn the_owner_trial_passes_room_a_and_box_step_and_fails_hall_and_corner() {
+        // 0d16c2b. FLIP p99 0.84 is the edge floor. Box-step blur is 0.075–0.078.
+        // Room-a ratio 1.08; the dark-noise inflation is the metrics test.
+        let mut matched = with_scores(0.20, 0.08, 1.08);
+        matched.flip_mean = Some(0.08);
+        matched.flip_p99 = Some(0.84);
+        assert_eq!(
+            judged(&matched, None, 64, 0.16).verdict,
+            Verdict::Pass,
+            "room-a {:?}",
+            judged(&matched, None, 64, 0.16).reasons
+        );
+
+        for (name, blur, ratio) in [("box-step", 0.078, 0.99), ("box-step-before", 0.075, 0.98)] {
+            let mut metrics = with_scores(0.20, blur, ratio);
+            metrics.flip_mean = Some(0.08);
+            metrics.flip_p99 = Some(0.84);
+            assert_eq!(
+                judged(&metrics, None, 64, 0.10).verdict,
+                Verdict::Pass,
+                "{name} {:?}",
+                judged(&metrics, None, 64, 0.10).reasons
+            );
+        }
+
+        for (name, ratio) in [("hall", 0.83f64), ("hall-moving", 0.81), ("corner", 1.23)] {
+            let delta = (ratio - 1.0).abs();
+            let mut metrics = with_scores(0.20, delta, ratio);
+            metrics.flip_mean = Some(0.08);
+            metrics.flip_p99 = Some(0.84);
+            let result = judged(&metrics, None, 64, 0.16);
+            assert_eq!(result.verdict, Verdict::Fail, "{name} {:?}", result.reasons);
+            assert!(
+                result.reasons.iter().any(|r| r.contains("luminance ratio")),
+                "{name} {:?}",
+                result.reasons
+            );
+        }
+    }
+
+    #[test]
     fn a_luminance_bias_stays_a_fail_when_the_raw_error_is_only_noise() {
         for (name, ratio) in [("hall", 0.66f64), ("hall-moving", 0.80), ("corner", 1.18)] {
             let delta = (ratio - 1.0).abs();
