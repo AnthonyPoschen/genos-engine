@@ -10,6 +10,7 @@ mod particles;
 mod pool;
 mod scene_mesh;
 mod trace;
+mod unfilled;
 mod wire;
 mod world;
 
@@ -19,7 +20,7 @@ pub use genos_bake as bake;
 pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
 pub use gpu::{
     DebugView, DrawProfile, LampReport, LightingAtrousStats, Renderer, ScreenLine, ScreenRect,
-    SettleStats, ViewMode,
+    SettleStats, UnfilledControl, UnfilledStats, ViewMode,
 };
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};

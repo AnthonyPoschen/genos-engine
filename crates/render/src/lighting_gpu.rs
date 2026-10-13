@@ -196,6 +196,8 @@ pub(crate) struct Lighting {
     cache_hz: f64,
     last_round: Option<Instant>,
     stats_round: [bool; 2],
+    /// Last frame this slot counted unfilled pixels. Read at the next begin.
+    unfilled_slot: [UnfilledSlot; 2],
     /// Overrides `GENOS_LIGHTING_ATROUS_DIRTY` for the a-trous list fallback.
     /// Fraction of filtered texels; `None` reads the settings each frame.
     atrous_dirty: Option<f32>,
@@ -324,6 +326,7 @@ impl Default for Lighting {
                 .unwrap_or(0.0),
             last_round: None,
             stats_round: [false; 2],
+            unfilled_slot: [UnfilledSlot::default(); 2],
             atrous_dirty: None,
             settings: genos_scene::LightingSettings::default(),
             override_settings: None,
@@ -749,8 +752,11 @@ impl Gpu {
         let share = self.light_families();
         if self.lighting.stats[0].buffer.is_null() {
             for k in 0..2 {
-                self.lighting.stats[k] = self.make_buffer(LIGHTING_STATS_BYTES, 0x20 | 0x2, Memory::Readback)?;
-                self.lighting.stats_dev[k] = self.make_buffer(LIGHTING_STATS_BYTES, 0x20 | 0x2 | 0x1, Memory::Device)?;
+                // Header plus the unfilled mask. The mask is copied only while the
+                // detector is on; the room stays so a hotkey can turn it on.
+                let stats_bytes = lighting_stats_storage_bytes();
+                self.lighting.stats[k] = self.make_buffer(stats_bytes, 0x20 | 0x2, Memory::Readback)?;
+                self.lighting.stats_dev[k] = self.make_buffer(stats_bytes, 0x20 | 0x2 | 0x1, Memory::Device)?;
             }
             self.lighting.world_stats =
                 self.make_buffer_queues(LIGHTING_STATS_BYTES, 0x20 | 0x2, Memory::Readback, &share)?;
@@ -1017,6 +1023,18 @@ impl Gpu {
         }
         unsafe {
             (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.stats_dev[slot].buffer, 0, LIGHTING_STATS_BYTES, 0);
+            if self.unfilled.count {
+                let mask_bytes = unfilled_mask_bytes(self.lighting.dims[0], self.lighting.dims[1]);
+                if mask_bytes > 0 {
+                    (self.fns.cmd_fill_buffer)(
+                        self.cmd,
+                        self.lighting.stats_dev[slot].buffer,
+                        LIGHTING_STATS_BYTES,
+                        mask_bytes,
+                        0,
+                    );
+                }
+            }
             // S78S change counters on (GENOS_LIGHTING_SC_TRACE): the enable word
             // (chg[31]) is set on the GPU; the counts are read with the stats (async).
             if lighting_chg_on() {
@@ -1386,6 +1404,113 @@ impl Gpu {
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(words)
+    }
+
+    fn read_words(&self, memory: Handle, count: usize) -> Result<Vec<u32>, String> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let mut words = vec![0u32; count];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(
+                    self.device,
+                    memory,
+                    0,
+                    (count * 4) as u64,
+                    0,
+                    &mut mapped,
+                ),
+                "map lighting stats",
+            )?;
+            std::ptr::copy_nonoverlapping(mapped as *const u32, words.as_mut_ptr(), count);
+            (self.fns.unmap_mem)(self.device, memory);
+        }
+        Ok(words)
+    }
+
+    /// The slot fence has been waited. Print the unfilled line and, past the dump
+    /// threshold, write one event. Clears the slot so the next begin does not
+    /// save the same frame again.
+    fn take_unfilled(&mut self, slot: usize) {
+        let rec = self.lighting.unfilled_slot[slot];
+        if !rec.recorded {
+            self.last_unfilled = None;
+            return;
+        }
+        self.lighting.unfilled_slot[slot].recorded = false;
+        let words = unfilled_mask_words(rec.width, rec.height) as usize;
+        let Ok(buf) = self.read_words(self.lighting.stats[slot].memory, LIGHTING_STATS_WORDS + words) else {
+            self.last_unfilled = None;
+            return;
+        };
+        let pixels = *buf.get(LIGHTING_UNFILLED_WORD).unwrap_or(&0);
+        let shaded = *buf.get(LIGHTING_SHADED_WORD).unwrap_or(&0);
+        let max_run = if pixels == 0 {
+            0
+        } else {
+            crate::unfilled::max_unfilled_run(rec.width, rec.height, &buf[LIGHTING_STATS_WORDS..])
+        };
+        let stats = UnfilledStats::from_counts(rec.frame, pixels, shaded, max_run);
+        self.last_unfilled = Some(stats);
+        eprintln!("{}", stats.line());
+        let Some(threshold) = self.unfilled.dump_pct else {
+            return;
+        };
+        if !rec.shot || stats.pct <= threshold {
+            return;
+        }
+        let Some(shot) = self.read_picture_slot(slot, rec.width, rec.height) else {
+            eprintln!("unfilled save: picture was not read back");
+            return;
+        };
+        let dump = crate::unfilled::UnfilledDump {
+            stats,
+            width: rec.width,
+            height: rec.height,
+            eye: rec.eye,
+            yaw: rec.yaw,
+            pitch: rec.pitch,
+            shot,
+            mask: buf[LIGHTING_STATS_WORDS..].to_vec(),
+        };
+        match crate::unfilled::save_unfilled_event(self.unfilled_saved, &dump) {
+            Ok(true) => {
+                self.unfilled_saved = self.unfilled_saved.saturating_add(1);
+                eprintln!(
+                    "unfilled saved frame {} pct {:.2}",
+                    stats.frame, stats.pct
+                );
+            }
+            Ok(false) => {}
+            Err(err) => eprintln!("unfilled save: {err}"),
+        }
+    }
+
+    fn read_picture_slot(&self, slot: usize, width: u32, height: u32) -> Option<Vec<u8>> {
+        let bytes = width as usize * height as usize * 4;
+        if bytes == 0 || self.hosts[slot].size < bytes as u64 {
+            return None;
+        }
+        let mut out = vec![0u8; bytes];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(
+                self.device,
+                self.hosts[slot].memory,
+                0,
+                bytes as u64,
+                0,
+                &mut mapped,
+            ) != 0
+            {
+                return None;
+            }
+            std::ptr::copy_nonoverlapping(mapped as *const u8, out.as_mut_ptr(), bytes);
+            (self.fns.unmap_mem)(self.device, self.hosts[slot].memory);
+        }
+        Some(out)
     }
 
     /// After the raster: the passes, then the result into the colour image.
@@ -1922,7 +2047,26 @@ impl Gpu {
                 dst: u64,
                 size: u64,
             }
-            let region = Region { src: 0, dst: 0, size: LIGHTING_STATS_BYTES };
+            let copy_bytes = if self.unfilled.count {
+                LIGHTING_STATS_BYTES + unfilled_mask_bytes(w, h)
+            } else {
+                LIGHTING_STATS_BYTES
+            };
+            let region = Region { src: 0, dst: 0, size: copy_bytes };
+            self.lighting.unfilled_slot[slot] = if self.unfilled.count {
+                UnfilledSlot {
+                    recorded: true,
+                    frame: self.lighting.frame,
+                    width: w,
+                    height: h,
+                    eye: self.unfilled_eye,
+                    yaw: self.unfilled_yaw,
+                    pitch: self.unfilled_pitch,
+                    shot: self.copy_picture,
+                }
+            } else {
+                UnfilledSlot::default()
+            };
             (self.fns.cmd_copy_buffer)(
                 self.cmd,
                 self.lighting.stats_dev[slot].buffer,
@@ -2127,12 +2271,53 @@ fn lighting_stats_wanted(world: u32) -> bool {
 // S49 flag set and object-local texels. Each env var still overrides.
 const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
 const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
-/// Lighting stats buffer: 24 words, diag[64], chg[32], then the a-trous fallback
-/// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`.
+/// Lighting stats buffer: 24 words, diag[64], chg[32], the a-trous fallback
+/// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`, the
+/// control block at word 124 (16 words), then the unfilled-pixel count and the
+/// shaded-pixel count. Two pad words keep the mask on a 144-word boundary. The
+/// mask follows, one bit per composed pixel, and is not part of this header.
 /// The change-counter enable word stays chg[31] (word 119).
 const LIGHTING_STATS_WORDS: usize = 144;
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
+/// Words 140 and 141. The control block occupies 124..140.
+const LIGHTING_UNFILLED_WORD: usize = 140;
+const LIGHTING_SHADED_WORD: usize = 141;
+/// Word 0 of the mask. Matches lighting_cache.glsl.
+const LIGHTING_UNFILLED_MASK_AT: usize = 144;
+/// (4096/32) * 2160. A larger picture clamps the mask.
+const LIGHTING_UNFILLED_MASK_CAP: u32 = 276480;
+const _: () = assert!(LIGHTING_UNFILLED_MASK_AT == LIGHTING_STATS_WORDS);
+const _: () = assert!(LIGHTING_CTRL_WORD as usize + 16 == LIGHTING_UNFILLED_WORD);
 const LIGHTING_CHG_ENABLE_WORD: u64 = 24 + 64 + 31;
+
+/// One slot's unfilled readback: written at the end of the passes, read after the fence.
+#[derive(Clone, Copy, Default)]
+struct UnfilledSlot {
+    recorded: bool,
+    frame: u32,
+    width: u32,
+    height: u32,
+    eye: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+    shot: bool,
+}
+
+fn unfilled_mask_words(width: u32, height: u32) -> u32 {
+    if width == 0 || height == 0 {
+        return 0;
+    }
+    let stride = width.div_ceil(32);
+    stride.saturating_mul(height).min(LIGHTING_UNFILLED_MASK_CAP)
+}
+
+fn unfilled_mask_bytes(width: u32, height: u32) -> u64 {
+    u64::from(unfilled_mask_words(width, height)) * 4
+}
+
+fn lighting_stats_storage_bytes() -> u64 {
+    LIGHTING_STATS_BYTES + u64::from(LIGHTING_UNFILLED_MASK_CAP) * 4
+}
 const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;
 const LIGHTING_ATROUS_STAT: usize = 120;
 /// S78S: the change counters (lighting_chg) run with GENOS_LIGHTING_SC_TRACE.
