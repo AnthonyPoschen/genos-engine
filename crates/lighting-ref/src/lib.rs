@@ -11,6 +11,7 @@ pub mod flip;
 pub mod metrics;
 pub mod paths;
 pub mod picture;
+pub mod report;
 pub mod store;
 pub mod verdict;
 
