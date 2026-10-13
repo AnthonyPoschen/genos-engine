@@ -591,17 +591,6 @@ float lighting_cell_size_d(float d) {
     return 0.25 * exp2(level);
 }
 
-uint lighting_axis(vec3 n) {
-    vec3 a = abs(n);
-    if (a.x >= a.y && a.x >= a.z) {
-        return n.x >= 0.0 ? 0u : 1u;
-    }
-    if (a.y >= a.z) {
-        return n.y >= 0.0 ? 2u : 3u;
-    }
-    return n.z >= 0.0 ? 4u : 5u;
-}
-
 const uint LIGHTING_WORLD_AT = 3u * LIGHTING_CACHE_SLOTS;
 // Surface cache estimator (flag 1048576), 2 vec4s per slot: short-term mean (rgb)
 // and short-term luminance variance (w); then the variance-based blend reduction
@@ -773,8 +762,19 @@ vec3 lighting_axis_vec(uint a) {
     v[a >> 1u] = (a & 1u) == 0u ? 1.0 : -1.0;
     return v;
 }
+// Compose sets this for the cache lookup only. Probes keep the shading normal.
+// The vector is an axis (max component 1), the geometric side of the pixel.
+vec3 lighting_px_key_n = vec3(0.0, 1.0, 0.0);
+bool lighting_px_key_on = false;
+vec3 lighting_lookup_n(vec3 n) {
+    return lighting_px_key_on ? lighting_px_key_n : n;
+}
 
 // Key of the patch of the given size holding pos facing n; never 0.
+// `n` is the geometric side (lighting_axis). A two-sided back face passes the
+// opposite axis, so it does not share the front's cell. The shading normal
+// (normal map, view flip) is not part of the key: that is what made a thin
+// cloth's cells jump as the camera moved.
 uint lighting_cache_key_sized(vec3 pos, vec3 n, float size) {
     // World cells on: half a cell in from the surface, so a floor or wall on a cell
     // boundary falls in one cell, not either by rounding.
@@ -2116,6 +2116,7 @@ vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
 
 // Irradiance already bounced onto the surface at pos facing n (0 for a new patch).
 vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
+    n = lighting_lookup_n(n);
     if (!lighting_bounce_ok()) {
         return vec3(0.0);
     }
@@ -2660,7 +2661,7 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     if (mode == 3u && !LIGHTING_SC_KEEP_NEAR && (lighting_sc_flags() & 4194304u) != 0u && lighting_in_change(pos)) {
         return vec4(0.0);
     }
-    return lighting_world_irradiance_in(pos, n, pos, false);
+    return lighting_world_irradiance_in(pos, lighting_lookup_n(n), pos, false);
 }
 // Debug view "texels" (lighting_compose.comp mode 9): the size a pixel at pos facing n
 // reads and the sets its texel holds (0 when unclaimed).

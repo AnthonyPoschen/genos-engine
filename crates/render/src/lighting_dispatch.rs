@@ -56,14 +56,17 @@ const CTRL_BOUNCE_UNLIMITED: u32 = 16384;
 const CTRL_DIRECT_FRESH: u32 = 32768;
 /// Denoiser iterations in bits 16..18. 0 in that field means the tuned 5.
 const CTRL_DENOISE_ITERS_SHIFT: u32 = 16;
+/// Screen wavelet over visible fine texels. Bit 19. Bits 19 and 21 were
+/// half-res and tiles (S79); 19 is this filter now. Bit 21 stays free.
+const CTRL_DENOISE_SCREEN: u32 = 1 << 19;
 /// Skip later wavelet iterations on stable texels. Bit 20. Off unless the
-/// experimental knob is on. Bits 19 and 21 were half-res and tiles (S79).
+/// experimental knob is on.
 const CTRL_DENOISE_ADAPTIVE: u32 = 1 << 20;
 /// Relative variance threshold in bits 22..31, in steps of 0.0001.
 const CTRL_DENOISE_VAR_SHIFT: u32 = 22;
 
 /// What a buffer rebuild depends on. Screen size is compared beside this.
-pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32, u32, u32) {
+pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32, u32, u32, u32) {
     let (cache, probes, rays, tile) = settings.buffer_class();
     (
         cache,
@@ -71,6 +74,7 @@ pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32,
         rays,
         tile,
         u32::from(settings.direct.refresh_frames > 1),
+        u32::from(settings.denoiser.enabled && settings.denoiser.screen),
     )
 }
 
@@ -155,6 +159,9 @@ pub(crate) fn pack_lighting_ctrl(
     bits |= (settings.denoiser.iterations & 7) << CTRL_DENOISE_ITERS_SHIFT;
     if settings.denoiser.adaptive {
         bits |= CTRL_DENOISE_ADAPTIVE;
+    }
+    if settings.denoiser.enabled && settings.denoiser.screen {
+        bits |= CTRL_DENOISE_SCREEN;
     }
     let variance_steps = (settings.denoiser.variance_threshold * 10000.0)
         .round()
@@ -304,10 +311,7 @@ pub(crate) fn light_groups(
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(6, 0, LIGHTING_DENSE_ENTRIES, B_CACHE);
-        for stage in 0..=6 {
-            out.push(8, slots, 1, B_ATROUS);
-            out.atrous_stages.push(stage);
-        }
+        push_denoise(settings, w, h, slots, &mut out);
         out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
     } else {
         gated(
@@ -329,6 +333,26 @@ pub(crate) fn light_groups(
             out.counts[B_DIRECT as usize].saturating_add(out.counts[B_HIT as usize]);
     }
     out
+}
+
+/// Screen wavelet: one 8×8 group per picture block. Hash wavelet: one group
+/// per 64 cache slots. Stages are gather (0), the configured iterations, and
+/// scatter (6).
+fn push_denoise(settings: &LightingSettings, w: u32, h: u32, slots: u32, out: &mut LightGroups) {
+    let iters = settings.denoiser.iterations;
+    let (gx, gy) = if settings.denoiser.screen {
+        (w.div_ceil(8).max(1), h.div_ceil(8).max(1))
+    } else {
+        (slots, 1)
+    };
+    out.push(8, gx, gy, B_ATROUS);
+    out.atrous_stages.push(0);
+    for stage in 1..=iters {
+        out.push(8, gx, gy, B_ATROUS);
+        out.atrous_stages.push(stage);
+    }
+    out.push(8, gx, gy, B_ATROUS);
+    out.atrous_stages.push(6);
 }
 
 /// GI with screen probes and no surface cache. A still scene settles onto the
@@ -413,15 +437,7 @@ fn gated(
         out.push(6, 0, LIGHTING_DENSE_ENTRIES, B_CACHE);
     }
     if buckets.atrous {
-        let iters = settings.denoiser.iterations;
-        out.push(8, slots, 1, B_ATROUS);
-        out.atrous_stages.push(0);
-        for stage in 1..=iters {
-            out.push(8, slots, 1, B_ATROUS);
-            out.atrous_stages.push(stage);
-        }
-        out.push(8, slots, 1, B_ATROUS);
-        out.atrous_stages.push(6);
+        push_denoise(settings, w, h, slots, out);
     }
     out.push(7, w.div_ceil(8).max(1), h.div_ceil(8).max(1), B_COMPOSE);
 }
@@ -538,5 +554,43 @@ mod probe_still_tests {
         assert_eq!(quiet.counts[B_CACHE_RAYS as usize], 0);
         assert_eq!(quiet.counts[B_ATROUS as usize], 0);
         assert_eq!(quiet.groups.len(), 2);
+    }
+
+    #[test]
+    fn screen_denoise_launches_the_picture_and_hash_keeps_the_slots() {
+        let slots = (LIGHTING_CACHE_SLOTS as u32).div_ceil(64);
+        let screen = groups(&LightingSettings::preset(LightingPreset::High), false, true);
+        let screen_groups: Vec<_> = screen
+            .groups
+            .iter()
+            .filter(|(pass, _, _)| *pass == 8)
+            .collect();
+        assert_eq!(screen_groups.len(), 7, "gather, five iterations, scatter");
+        assert_eq!(screen.atrous_stages, vec![0, 1, 2, 3, 4, 5, 6]);
+        for (pass, gx, gy) in &screen_groups {
+            assert_eq!(*pass, 8);
+            assert_eq!(*gx, 320u32.div_ceil(8));
+            assert_eq!(*gy, 180u32.div_ceil(8));
+            assert_ne!(*gx, slots);
+        }
+        let mut hash = LightingSettings::preset(LightingPreset::High);
+        hash.denoiser.screen = false;
+        let hash_groups = groups(&hash, false, true);
+        let hash_atrous: Vec<_> = hash_groups
+            .groups
+            .iter()
+            .filter(|(pass, _, _)| *pass == 8)
+            .collect();
+        assert_eq!(hash_atrous.len(), 7);
+        for (_, gx, gy) in hash_atrous {
+            assert_eq!(*gx, slots);
+            assert_eq!(*gy, 1);
+        }
+        let bytes = pack_lighting_ctrl(&LightingSettings::preset(LightingPreset::High), 0, 1.0, 0, 0);
+        let bits = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        assert_ne!(bits & CTRL_DENOISE_SCREEN, 0);
+        let off = pack_lighting_ctrl(&hash, 0, 1.0, 0, 0);
+        let off_bits = u32::from_le_bytes(off[0..4].try_into().unwrap());
+        assert_eq!(off_bits & CTRL_DENOISE_SCREEN, 0);
     }
 }

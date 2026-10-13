@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use genos_render::{DebugView, Renderer, ViewMode, World};
+use genos_render::{DebugView, LightingAtrousStats, Renderer, ViewMode, World};
 use genos_scene::{Camera, LightingPreset, LightingSettings, Scene};
 use genos_window::Window;
 
@@ -57,8 +57,12 @@ fn lighting_pipelines_build_quickly() {
     assert_eq!(
         lighting.len(),
         10,
-        "nine compute pipelines plus the gbuffer; atrous-plain is not prefixed lighting: {times:?}"
+        "nine compute pipelines plus the gbuffer; atrous-plain and screen-denoise are not prefixed lighting: {times:?}"
     );
+    let screen = times
+        .iter()
+        .find(|(name, _)| name == "screen-denoise")
+        .expect("screen-denoise pipeline");
     let limit = pipeline_limit();
     for (name, took) in &times {
         eprintln!("pipeline {name}: {:.3} s", took.as_secs_f64());
@@ -69,6 +73,11 @@ fn lighting_pipelines_build_quickly() {
             "{name} took {took:?} to build (limit {limit:?})"
         );
     }
+    assert!(
+        screen.1 < limit,
+        "screen-denoise took {:?} to build (limit {limit:?})",
+        screen.1
+    );
 }
 
 fn draw(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Camera) -> Vec<u8> {
@@ -448,6 +457,10 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     let (_gpu, mut window, mut renderer) = open();
     let world = shipped_hall();
     let camera = Camera::opening();
+    // The screen wavelet reports mode 3. This check is the hash-slot lists.
+    let mut hash = LightingSettings::preset(LightingPreset::High);
+    hash.denoiser.screen = false;
+    renderer.set_lighting_settings(hash);
     renderer.set_lighting_atrous_dirty(1.0);
     let mut previous = Vec::new();
     let mut listed = Vec::new();
@@ -524,7 +537,10 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
 }
 
 fn denoise_settings() -> LightingSettings {
-    LightingSettings::preset(LightingPreset::High)
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    // The adaptive reference is the hash wavelet, not the screen filter.
+    settings.denoiser.screen = false;
+    settings
 }
 
 fn view_at(renderer: &mut Renderer, mode: ViewMode) {
@@ -630,6 +646,7 @@ fn depth_edge(depth: &[u8], normal: &[u8], index: usize, width: usize) -> bool {
 
 fn adaptive_settings(variance: &str) -> LightingSettings {
     let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.denoiser.screen = false;
     settings
         .set_key("denoise_adaptive", "on")
         .expect("denoise_adaptive");
@@ -763,6 +780,7 @@ fn adaptive_skip_keeps_the_bounce_bright() {
     let one = {
         let (_gpu, mut window, mut renderer) = open();
         let mut settings = LightingSettings::preset(LightingPreset::High);
+        settings.denoiser.screen = false;
         settings
             .set_key("denoise_iters", "1")
             .expect("denoise_iters");
@@ -799,4 +817,426 @@ fn adaptive_skip_keeps_the_bounce_bright() {
         y_skip + 4.0 >= y_one,
         "adaptive skip darkened the bounce: luma {y_skip:.2} one-iter {y_one:.2}"
     );
+}
+
+fn high_bounce(
+    screen: bool,
+    frames: usize,
+    shift: f32,
+) -> (Vec<Vec<u8>>, LightingAtrousStats) {
+    let (_gpu, mut window, mut renderer) = open();
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.denoiser.screen = screen;
+    renderer.set_lighting_settings(settings);
+    view_at(&mut renderer, ViewMode::Bounce);
+    let mut world = shipped_hall();
+    let camera = Camera::opening();
+    let x0 = world.scene.solids[0].position.x;
+    let mut out = Vec::with_capacity(frames);
+    for i in 0..frames {
+        if shift != 0.0 {
+            world.scene.solids[0].position.x = x0 + shift * (i as f32 + 1.0);
+        }
+        out.push(draw(&mut window, &mut renderer, &world, &camera));
+    }
+    let stats = renderer.lighting_atrous_stats();
+    (out, stats)
+}
+
+/// Screen wavelet against the hash wavelet, still and with a moving solid.
+/// Lavapipe run-to-run noise is about zero, so the bar is the 4070 picture
+/// bar directly: mean 1.5, p99 10 on 0..255.
+#[test]
+fn screen_denoise_matches_the_hash_wavelet() {
+    let (hash_still, hash_stats) = high_bounce(false, 6, 0.0);
+    let (screen_still, screen_stats) = high_bounce(true, 6, 0.0);
+    assert_picture("still", &hash_still[5], &screen_still[5]);
+    assert_picture_cost("still", &screen_stats, 320 * 180);
+    assert_eq!(
+        hash_stats.screen_pixels, 0,
+        "the hash wavelet does not count screen pixels"
+    );
+
+    let (hash_move, _) = high_bounce(false, 4, 0.35);
+    let (screen_move, move_stats) = high_bounce(true, 4, 0.35);
+    for i in 0..4 {
+        assert_picture(&format!("move {i}"), &hash_move[i], &screen_move[i]);
+    }
+    assert_picture_cost("moving", &move_stats, 320 * 180);
+}
+
+fn assert_picture(name: &str, hash: &[u8], screen: &[u8]) {
+    let errors = pixel_errors(hash, screen);
+    let mean = mean_of(&errors);
+    let mut sorted = errors.clone();
+    let p99 = percentile(&mut sorted, 0.99);
+    eprintln!("screen vs hash {name} mean {mean:.3} p99 {p99:.3}");
+    assert!(
+        mean <= 1.5,
+        "{name} mean {mean:.3} is past the picture bar 1.5"
+    );
+    assert!(
+        p99 <= 10.0,
+        "{name} p99 {p99:.3} is past the picture bar 10"
+    );
+}
+
+fn assert_picture_cost(name: &str, stats: &LightingAtrousStats, pixels: u32) {
+    eprintln!(
+        "screen {name} pixels {} coarse {} changed {} filtered {} ran {}",
+        stats.screen_pixels, stats.coarse_pixels, stats.changed_pixels, stats.filtered, stats.ran
+    );
+    assert!(stats.ran, "{name} screen wavelet did not publish");
+    assert!(stats.screen_pixels > 0, "{name} filtered no pixels");
+    assert!(
+        stats.screen_pixels <= pixels,
+        "{name} fine count {} exceeds the picture {pixels}",
+        stats.screen_pixels
+    );
+    assert!(
+        stats.filtered <= pixels,
+        "{name} filtered {} is the slot table, not the picture",
+        stats.filtered
+    );
+    assert_ne!(stats.filtered, 1_048_576);
+}
+
+/// Thin two-sided cloth. The hash wavelet leaves 12.5 cm cells that jump when
+/// the camera moves. The screen wavelet has to be less blocky and less flickery.
+#[test]
+fn sponza_banner_cells_stay_still_under_the_screen_wavelet() {
+    let (hash_edge, hash_flicker) = banner_scores(false);
+    let (screen_edge, screen_flicker) = banner_scores(true);
+    eprintln!(
+        "banner hash edge {hash_edge:.3} flicker {hash_flicker:.3} screen edge {screen_edge:.3} flicker {screen_flicker:.3}"
+    );
+    assert!(
+        hash_edge >= 2.5 || hash_flicker >= 0.8,
+        "the cloth did not show the cell grid (edge {hash_edge:.3} flicker {hash_flicker:.3})"
+    );
+    assert!(
+        screen_edge <= hash_edge * 0.85,
+        "screen edge {screen_edge:.3} did not beat hash {hash_edge:.3}"
+    );
+    assert!(
+        screen_flicker <= hash_flicker * 0.85 + 0.15,
+        "screen flicker {screen_flicker:.3} did not beat hash {hash_flicker:.3}"
+    );
+    if sponza_gltf_is_real() {
+        let (hash_edge, hash_flicker) = sponza_curtain_scores(false);
+        let (screen_edge, screen_flicker) = sponza_curtain_scores(true);
+        eprintln!(
+            "sponza curtains hash edge {hash_edge:.3} flicker {hash_flicker:.3} screen edge {screen_edge:.3} flicker {screen_flicker:.3}"
+        );
+        assert!(screen_edge <= hash_edge * 0.85 + 0.25);
+        assert!(screen_flicker <= hash_flicker * 0.85 + 0.25);
+    }
+}
+
+fn banner_scores(screen: bool) -> (f64, f64) {
+    let (_gpu, mut window, mut renderer) = open();
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.denoiser.screen = screen;
+    renderer.set_lighting_settings(settings);
+    view_at(&mut renderer, ViewMode::Bounce);
+    let world = banner_world();
+    let mut frames = Vec::new();
+    let shots = [
+        (0.0, 0.0),
+        (0.04, 0.0),
+        (0.08, 0.008),
+        (0.12, 0.0),
+        (0.06, -0.008),
+    ];
+    for _ in 0..10 {
+        let mut camera = Camera::opening();
+        camera.set_pose(genos_scene::Vec3::new(0.0, 1.7, 3.2), 0.0, 0.0);
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+    }
+    for (x, yaw) in shots {
+        let mut camera = Camera::opening();
+        camera.set_pose(genos_scene::Vec3::new(x, 1.7, 3.2), yaw, 0.0);
+        frames.push(draw(&mut window, &mut renderer, &world, &camera));
+    }
+    let edge = frames.iter().map(|f| cell_edge_ratio(f, 320, 6)).sum::<f64>() / frames.len() as f64;
+    (edge, roi_flicker(&frames, 320))
+}
+
+fn banner_world() -> World {
+    let dir = std::env::temp_dir().join("genos-banner-cell-test");
+    std::fs::create_dir_all(&dir).expect("banner dir");
+    let gltf_path = dir.join("banner.gltf");
+    std::fs::write(&gltf_path, banner_gltf()).expect("banner gltf");
+    let banner = genos_load::load_gltf_file(&gltf_path).expect("banner");
+    let glow = genos_load::load_gltf_file(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../load/fixtures/cube.gltf"
+    ))
+    .expect("cube");
+    let mut glowing = glow;
+    for material in &mut glowing.materials {
+        material.emissive = [8.0, 1.2, 0.4];
+        material.emissive_strength = 1.0;
+    }
+    let settings = genos_bake::BakeSettings {
+        mode: genos_bake::BakeMode::OnLoad,
+        cache_dir: dir.join("bake"),
+        ..genos_bake::BakeSettings::default()
+    };
+    let mut world = World::from_scene(Scene {
+        floor: genos_scene::Floor {
+            position: genos_scene::Vec3::ZERO,
+            half_x: 8.0,
+            half_z: 8.0,
+            color: [0.15, 0.15, 0.16],
+        },
+        walls: vec![
+            wall_at(0.0, -3.0, 6.0, 0.2),
+            wall_at(-3.0, 0.0, 0.2, 6.0),
+            wall_at(3.0, 0.0, 0.2, 6.0),
+        ],
+        solids: Vec::new(),
+        lights: vec![genos_scene::Light {
+            position: genos_scene::Vec3::new(-1.7, 2.3, 1.4),
+            color: [8.0, 6.4, 4.0],
+            direction: genos_scene::Vec3::ZERO,
+        }],
+        ceiling: Some(genos_scene::Ceiling {
+            height: 4.0,
+            color: [0.12, 0.12, 0.13],
+        }),
+        sky: None,
+        lighting: LightingSettings::preset(LightingPreset::High),
+        debug: genos_scene::DebugSettings::default(),
+    });
+    world
+        .add_gltf_traced(&banner, &genos_render::identity_pose(), &settings)
+        .expect("banner mesh");
+    // cube.gltf's parent sits at x = 10 and the child scale is 2. This pose's
+    // 0.35 scale maps that parent to x = 3.5, so the translation lands the
+    // cube just left of the cloth and in front of it (world centre -2.3, 1.6, 0.55).
+    let mut place = genos_render::identity_pose();
+    place[0] = 0.35;
+    place[5] = 0.35;
+    place[10] = 0.35;
+    place[12] = -5.8;
+    place[13] = 1.6;
+    place[14] = 0.55;
+    world
+        .add_gltf_traced(&glowing, &place, &settings)
+        .expect("emitter");
+    world
+}
+
+fn wall_at(x: f32, z: f32, half_x: f32, half_z: f32) -> genos_scene::Wall {
+    genos_scene::Wall {
+        position: genos_scene::Vec3::new(x, 0.0, z),
+        half_x,
+        half_z,
+        height: 4.0,
+        base: 0.0,
+        color: [0.45, 0.32, 0.22],
+        absorption: 0.0,
+        reflectance: 0.8,
+        color_mix: 1.0,
+    }
+}
+
+fn banner_gltf() -> String {
+    let mut bytes = Vec::new();
+    for v in [
+        -1.5f32, 0.2, 0.0, 1.5, 0.2, 0.0, 1.5, 3.2, 0.0, -1.5, 3.2, 0.0,
+    ] {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    for _ in 0..4 {
+        for v in [0.0f32, 0.0, 1.0] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    for v in [0u16, 1, 2, 0, 2, 3] {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    let b64 = base64_encode(&bytes);
+    format!(
+        r#"{{
+  "asset": {{"version": "2.0"}},
+  "scene": 0,
+  "scenes": [{{"nodes": [0]}}],
+  "nodes": [{{"mesh": 0}}],
+  "meshes": [{{"primitives": [{{"attributes": {{"POSITION": 0, "NORMAL": 1}}, "indices": 2, "material": 0}}]}}],
+  "materials": [{{"doubleSided": true, "pbrMetallicRoughness": {{"baseColorFactor": [0.85, 0.82, 0.75, 1], "metallicFactor": 0, "roughnessFactor": 1}}}}],
+  "buffers": [{{"byteLength": {len}, "uri": "data:application/octet-stream;base64,{b64}"}}],
+  "bufferViews": [
+    {{"buffer": 0, "byteOffset": 0, "byteLength": 48, "target": 34962}},
+    {{"buffer": 0, "byteOffset": 48, "byteLength": 48, "target": 34962}},
+    {{"buffer": 0, "byteOffset": 96, "byteLength": 12, "target": 34963}}
+  ],
+  "accessors": [
+    {{"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3", "min": [-1.5, 0.2, 0], "max": [1.5, 3.2, 0]}},
+    {{"bufferView": 1, "componentType": 5126, "count": 4, "type": "VEC3"}},
+    {{"bufferView": 2, "componentType": 5123, "count": 6, "type": "SCALAR"}}
+  ]
+}}"#,
+        len = bytes.len(),
+    )
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let n = (u32::from(bytes[i]) << 16) | (u32::from(bytes[i + 1]) << 8) | u32::from(bytes[i + 2]);
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(T[((n >> 6) & 63) as usize] as char);
+        out.push(T[(n & 63) as usize] as char);
+        i += 3;
+    }
+    if i < bytes.len() {
+        let a = bytes[i];
+        let b = if i + 1 < bytes.len() { bytes[i + 1] } else { 0 };
+        let n = (u32::from(a) << 16) | (u32::from(b) << 8);
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        if i + 1 < bytes.len() {
+            out.push(T[((n >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        out.push('=');
+    }
+    out
+}
+
+fn roi_of(frame: &[u8], width: usize) -> impl Iterator<Item = (usize, usize)> {
+    let height = frame.len() / 4 / width;
+    let x0 = width / 4;
+    let x1 = width * 3 / 4;
+    let y0 = height / 4;
+    let y1 = height * 3 / 4;
+    (y0..y1).flat_map(move |y| (x0..x1).map(move |x| (x, y)))
+}
+
+fn luma_at(frame: &[u8], width: usize, x: usize, y: usize) -> f64 {
+    luma_bgra(&frame[(y * width + x) * 4..])
+}
+
+/// Strongest period of a cache-cell grid. The projected cell is about `stride`
+/// pixels, and the grid phase is not aligned to x = 0, so every phase of
+/// stride-1, stride, and stride+1 is scored. A smooth gradient scores near 1.
+fn cell_edge_ratio(frame: &[u8], width: usize, stride: usize) -> f64 {
+    let mut best = 0.0;
+    let lo = stride.saturating_sub(1).max(1);
+    for s in lo..=stride + 1 {
+        for phase in 0..s {
+            let mut boundary = 0.0;
+            let mut boundary_n = 0.0;
+            let mut interior = 0.0;
+            let mut interior_n = 0.0;
+            for (x, y) in roi_of(frame, width) {
+                if x + 1 >= width * 3 / 4 {
+                    continue;
+                }
+                let d = (luma_at(frame, width, x + 1, y) - luma_at(frame, width, x, y)).abs();
+                if x % s == phase {
+                    boundary += d;
+                    boundary_n += 1.0;
+                } else {
+                    interior += d;
+                    interior_n += 1.0;
+                }
+            }
+            let b = if boundary_n > 0.0 { boundary / boundary_n } else { 0.0 };
+            let i = if interior_n > 0.0 { interior / interior_n } else { 0.0 };
+            best = best.max(b / (i + 0.05));
+        }
+    }
+    best
+}
+
+fn roi_flicker(frames: &[Vec<u8>], width: usize) -> f64 {
+    if frames.len() < 2 {
+        return 0.0;
+    }
+    let mut acc = 0.0;
+    let mut n = 0.0;
+    for pair in frames.windows(2) {
+        for (x, y) in roi_of(&pair[0], width) {
+            acc += (luma_at(&pair[0], width, x, y) - luma_at(&pair[1], width, x, y)).abs();
+            n += 1.0;
+        }
+    }
+    if n == 0.0 { 0.0 } else { acc / n }
+}
+
+fn sponza_gltf_is_real() -> bool {
+    let path = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/built/sponza/sponza.gltf"
+    ));
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    !text.starts_with("version https://git-lfs.github.com/spec/v1")
+}
+
+fn sponza_curtain_scores(screen: bool) -> (f64, f64) {
+    let (_gpu, mut window, mut renderer) = open();
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.denoiser.screen = screen;
+    renderer.set_lighting_settings(settings);
+    view_at(&mut renderer, ViewMode::Bounce);
+    let path = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/built/sponza/sponza.gltf"
+    ));
+    let scene = genos_load::load_gltf_file(path).expect("sponza");
+    let settings_bake = genos_bake::BakeSettings {
+        mode: genos_bake::BakeMode::OnLoad,
+        cache_dir: std::env::temp_dir().join("genos-sponza-banner-test"),
+        ..genos_bake::BakeSettings::default()
+    };
+    let mut world = World::from_scene(Scene {
+        floor: genos_scene::Floor {
+            position: genos_scene::Vec3::ZERO,
+            half_x: 1.0,
+            half_z: 1.0,
+            color: [0.2, 0.2, 0.2],
+        },
+        walls: Vec::new(),
+        solids: Vec::new(),
+        lights: vec![
+            genos_scene::Light {
+                position: genos_scene::Vec3::new(0.0, 6.0, 0.0),
+                color: [6.0, 4.5, 3.0],
+                direction: genos_scene::Vec3::ZERO,
+            },
+            genos_scene::Light {
+                position: genos_scene::Vec3::ZERO,
+                color: [2.0, 1.9, 1.7],
+                direction: genos_scene::Vec3::new(0.25, -1.0, 0.15),
+            },
+        ],
+        ceiling: None,
+        sky: None,
+        lighting: LightingSettings::preset(LightingPreset::High),
+        debug: genos_scene::DebugSettings::default(),
+    });
+    world
+        .add_gltf_traced(&scene, &genos_render::identity_pose(), &settings_bake)
+        .expect("sponza mesh");
+    let mut frames = Vec::new();
+    for x in [0.0f32, 0.05, 0.1] {
+        let mut camera = Camera::opening();
+        camera.set_pose(
+            genos_scene::Vec3::new(x, 1.6, -4.5),
+            std::f32::consts::PI,
+            0.0,
+        );
+        frames.push(draw(&mut window, &mut renderer, &world, &camera));
+    }
+    let edge = frames.iter().map(|f| cell_edge_ratio(f, 320, 6)).sum::<f64>() / frames.len() as f64;
+    (edge, roi_flicker(&frames, 320))
 }

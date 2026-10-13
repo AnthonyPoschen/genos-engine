@@ -165,6 +165,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78X](experiments/S78X-atrous-work-lists.md) | 2026-10-13 | A-trous levels run dirty work lists | pushed (rough; idle A/B) | S78X |
 | [S78X2](experiments/S78X2-atrous-dense-fallback.md) | 2026-10-12 | Dense a-trous when the dirty fraction is high | pushed | S78X2 |
 | [S79](experiments/S79-half-res-atrous.md) | 2026-10-13 | Half-resolution a-trous, adaptive iterations, shared-memory tiles | Tried and failed. Half-res and tiles removed. Plain shader kept. Adaptive is an off-by-default knob | S79 |
+| [S80](experiments/S80-screen-denoise.md) | 2026-10-13 | Screen wavelet of visible fine texels; two-sided cells keyed by the geometric axis | high default. Hash wavelet remains the reference | S80 |
 | [S78Z](experiments/S78Z-verify-ring-wakes.md) | 2026-10-13 | Probe verification + impact-tested ring wakes | not pushed (no fix; postmortem) | g78/S78Z-verify-ring-wakes.patch |
 | [S78T2](experiments/S78T2-texel-verify.md) | 2026-10-13 | Texel verification: rotating A-SVGF checks + ring wakes | not pushed (no healing; postmortem) | g78/S78T2-texel-verify.patch |
 | [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
@@ -564,3 +565,28 @@ the full-resolution scalar wavelet at 3 iterations. The plain pipeline,
 compiled without the adaptive branch, put high back to about 8.0 ms against
 gi-v2's 7.8 ms moving. Numbers and the five-line postmortem are in
 [S79](experiments/S79-half-res-atrous.md).
+
+### S80: screen wavelet
+
+High filters bounce light with a screen-sized B3 à-trous over this frame's
+visible 12.5 cm texels, then writes that field for compose and for rays.
+25 cm cells stay on their running mean and are blended in only where the
+wavelet is uncertain. The launch is one 8×8 group per picture block, not one
+group per 64 slots of the million-slot table. S79's half-resolution pass kept
+that table and got slower; this does not. `denoise_screen=0` and full effort
+bind the hash-slot wavelet, which is the picture reference.
+
+A two-sided surface stores its geometric axis in the G-buffer (flag bits 1..3).
+The back face stores the opposite axis. Cache lookups from a pixel use that
+axis. The shading normal, including a normal map and the view flip compose
+applies for lighting, is not the key. That was the Sponza banner: a thin cloth
+shared 12.5 cm cells between its faces, and the key moved as the camera did,
+so the cells showed up as bright squares that jumped.
+
+The filter still runs on the whole picture every frame. A moving frame does
+not reuse or hold a filtered frame. Papers, the deviations, and the owner GPU
+commands are in [S80](experiments/S80-screen-denoise.md). Expected cost, not
+measured on lavapipe: the 4070 à-trous column from about 11–15 ms on stress
+and 93–98 ms on Sponza toward about 1.4 ms when the filter is a coherent
+image. One hash find per visible pixel remains. If that find dominates, the
+gain is smaller, and the 5×5 is no longer a hash walk.

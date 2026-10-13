@@ -35,6 +35,7 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --unfilled             show the texels view (slots with fewer than 4 sets are dim)
   --full-effort          preset high, unless --preset is set, and compose every frame
                          (GENOS_LIGHTING_COMPOSE_ALL)
+  --denoise-screen on|off screen wavelet (GENOS_LIGHTING_DENOISE_SCREEN). On for high
   --headless             proof window, no panel
   --frames N             quit after N frames
   --out DIR              screenshots, dumps, and logs (default ./genos-debug)
@@ -71,6 +72,7 @@ struct Options {
     lighting_debug: bool,
     unfilled: bool,
     full_effort: bool,
+    denoise_screen: Option<String>,
     headless: bool,
     frames: Option<u32>,
     out: PathBuf,
@@ -925,6 +927,9 @@ fn apply_intent(opts: &Options) -> Result<(), String> {
     if opts.lighting_debug {
         std::env::set_var("GENOS_LIGHTING_DEBUG", "1");
     }
+    if let Some(value) = &opts.denoise_screen {
+        std::env::set_var("GENOS_LIGHTING_DENOISE_SCREEN", value);
+    }
     Ok(())
 }
 
@@ -942,6 +947,7 @@ fn options() -> Result<Options, String> {
     let mut lighting_debug = false;
     let mut unfilled = false;
     let mut full_effort = false;
+    let mut denoise_screen = None;
     let mut headless = false;
     let mut frames = None;
     let mut out = PathBuf::from("genos-debug");
@@ -967,6 +973,7 @@ fn options() -> Result<Options, String> {
             "--lighting-debug" => lighting_debug = true,
             "--unfilled" => unfilled = true,
             "--full-effort" => full_effort = true,
+            "--denoise-screen" => denoise_screen = Some(need_arg(&mut args, "--denoise-screen")?),
             "--headless" => headless = true,
             "--frames" => {
                 frames = Some(
@@ -1005,6 +1012,7 @@ fn options() -> Result<Options, String> {
         lighting_debug,
         unfilled,
         full_effort,
+        denoise_screen,
         headless,
         frames,
         out,

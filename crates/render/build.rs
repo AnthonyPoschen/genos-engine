@@ -16,6 +16,10 @@ fn main() {
         &out.join("lighting_check.comp.spv"),
     );
     // High's a-trous. Adaptive is compiled out (S79).
+    let screen = compile(
+        "shaders/lighting_screen.comp",
+        &out.join("lighting_screen.comp.spv"),
+    );
     let atrous_plain = compile_define(
         "shaders/lighting_atrous.comp",
         &out.join("lighting_atrous_plain.comp.spv"),
@@ -71,6 +75,10 @@ fn main() {
         "pub static LIGHTING_ATROUS_PLAIN_SPV: &[u8] = include_bytes!(\"{}\");\n",
         atrous_plain.display()
     ));
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_SCREEN_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        screen.display()
+    ));
     std::fs::write(&glue, glue_text).unwrap();
     for piece in [
         "lighting_common.glsl",
@@ -78,6 +86,7 @@ fn main() {
         "lighting_cache.glsl",
         "lighting_cache_slots.glsl",
         "lighting_sun_compose.comp",
+        "lighting_screen.comp",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }

@@ -107,6 +107,8 @@ const USAGE: &str = "genos-stress [options]
   --denoise-adaptive on|off experimental: drop settled wavelet iterations
                             (GENOS_LIGHTING_DENOISE_ADAPTIVE). Off on every preset
   --denoise-variance F      relative luminance deviation, 0..0.1 (GENOS_LIGHTING_DENOISE_VARIANCE)
+  --denoise-screen on|off   screen wavelet of visible texels (GENOS_LIGHTING_DENOISE_SCREEN).
+                            On for high. Off keeps the hash-slot wavelet
   --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
   --lighting-full-effort    full refresh every frame (GENOS_LIGHTING_FULL_EFFORT=1)
   --lighting-sun on|off     small sun step (GENOS_LIGHTING_SUN, default on)
@@ -173,6 +175,7 @@ struct Options {
     denoise_iters: Option<String>,
     denoise_adaptive: Option<String>,
     denoise_variance: Option<String>,
+    denoise_screen: Option<String>,
     gpu_times: Option<String>,
 }
 
@@ -271,6 +274,7 @@ fn options() -> Result<Options, String> {
         denoise_iters: None,
         denoise_adaptive: None,
         denoise_variance: None,
+        denoise_screen: None,
         gpu_times: None,
     };
     let mut report: Option<PathBuf> = None;
@@ -367,6 +371,7 @@ fn options() -> Result<Options, String> {
             "--denoise-iters" => opts.denoise_iters = Some(value()?),
             "--denoise-adaptive" => opts.denoise_adaptive = Some(value()?),
             "--denoise-variance" => opts.denoise_variance = Some(value()?),
+            "--denoise-screen" => opts.denoise_screen = Some(value()?),
             "--gpu-times" => opts.gpu_times = Some(value()?),
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -560,6 +565,11 @@ fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
             opts.denoise_variance.as_deref(),
             "denoise_variance",
             "GENOS_LIGHTING_DENOISE_VARIANCE",
+        ),
+        (
+            opts.denoise_screen.as_deref(),
+            "denoise_screen",
+            "GENOS_LIGHTING_DENOISE_SCREEN",
         ),
     ];
     for (value, key, var) in keys {

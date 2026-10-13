@@ -61,6 +61,24 @@ fn potato_is_direct_shadows_and_flat_ambient() {
 }
 
 #[test]
+fn high_filters_on_the_screen_and_full_effort_keeps_the_hash_wavelet() {
+    let high = LightingSettings::preset(LightingPreset::High);
+    assert!(high.denoiser.screen);
+    assert!(!LightingSettings::preset(LightingPreset::Medium).denoiser.screen);
+    assert!(!LightingSettings::preset(LightingPreset::Low).denoiser.screen);
+    let mut off = high;
+    off.set_key("denoise_screen", "off").unwrap();
+    assert!(!off.denoiser.screen);
+    assert!(off.to_text().contains("denoise_screen=0"));
+    let parsed = LightingSettings::parse(&off.to_text()).unwrap();
+    assert!(!parsed.denoiser.screen);
+    off.set_key("full_effort", "on").unwrap();
+    assert!(!off.denoiser.screen);
+    off.set_key("full_effort", "off").unwrap();
+    assert!(off.denoiser.screen);
+}
+
+#[test]
 fn full_effort_spends_the_maximum_and_rewrites_every_pixel() {
     let mut settings = LightingSettings::preset(LightingPreset::Low);
     settings.set_key("full_effort", "on").unwrap();
