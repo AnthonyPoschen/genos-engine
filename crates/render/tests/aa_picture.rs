@@ -34,6 +34,7 @@ fn silhouette_world() -> World {
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
         debug: genos_scene::DebugSettings::default(),
+        fps_counter: genos_scene::FpsCounterSettings::default(),
     });
     world.objects.push(Object {
         hidden: false,
