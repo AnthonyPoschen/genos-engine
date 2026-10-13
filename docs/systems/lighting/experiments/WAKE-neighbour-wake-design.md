@@ -1,8 +1,8 @@
 # WAKE: Anthony's wake design: no wakes from shared field; real change wakes neighbours by coarse-to-fine ring tests with group-test splitting; always-on stratified spread-out checks
 
 - **Date:** 2026-10-12
-- **Result:** planned (approved by Anthony)
-- **Commit / patch:** none yet
+- **Result:** the ring-wake half is still planned. The always-on check half shipped as two budgets in [S80](S80-verify-budgets.md), not as PR #31's direct-light stride.
+- **Commit / patch:** S80 (screen and world budgets). PR #31 keeps the rings.
 
 ## Idea
 Anthony's wake design: no wakes from shared field; real change wakes neighbours by coarse-to-fine ring tests with group-test splitting; always-on stratified spread-out checks

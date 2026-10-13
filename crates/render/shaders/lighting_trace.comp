@@ -82,13 +82,222 @@ bool lighting_kept_crossed(uint h, out vec3 origin, out vec3 dir) {
 void lighting_hold_fail(uint probe) {
     work.v[lighting_probe_at(probe) + 1u].w = uintBitsToFloat(lighting_frame() + LIGHTING_STRATA);
 }
+
+// Two verification budgets (mode 3). Screen: one ray from a visible probe's
+// pixel. World: three quarters just outside the frustum, one quarter a stride
+// over settled world-cache cells. A stored mean near zero that a fresh hit
+// shows as lit is replaced, not blended (one extra set does not move a mean
+// of 64). The budgets live in diag[38] and diag[39]. Words 142 and 143 are the
+// sun mark (lighting_sun_mark), written by the direct pass before this one.
+// diag[56..58] is the host poison record. diag[59] counts those dark misses.
+// diag[60..63] are screen tests, screen fails, world tests, world fails.
+// diag[8] counts screen rays that left the surface.
+struct VerifyJob {
+    uint kind;
+    uint slot;
+    uint probe;
+    float stored;
+};
+const vec3 LIGHTING_VERIFY_LUM = vec3(0.2126, 0.7152, 0.0722);
+
+void lighting_verify_poison_slot(uint slot) {
+    cache.v[3u * slot + 2u] = vec4(0.0, 0.0, 0.0, 64.0);
+    cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(0.0);
+    cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(0.0);
+}
+// The host arms one frame. Every texel a pixel in the rect gathers is zeroed,
+// sample count left at the cap, so the region looks settled and dark.
+void lighting_verify_poison_rect(uint i, uint budget) {
+    uint a = gstats.diag[57];
+    uint b = gstats.diag[58];
+    uint x0 = a & 65535u;
+    uint y0 = a >> 16u;
+    uint x1 = b & 65535u;
+    uint y1 = b >> 16u;
+    if (x1 <= x0 || y1 <= y0 || budget == 0u) {
+        return;
+    }
+    uint span = x1 - x0;
+    uint n = span * (y1 - y0);
+    [[dont_unroll]] for (uint step = 0u; step < 32u; step++) {
+        uint k = i + step * budget;
+        if (k >= n) {
+            return;
+        }
+        uvec2 pix = uvec2(x0 + (k % span), y0 + (k / span));
+        vec3 pos;
+        vec3 nrm;
+        vec3 albedo;
+        bool two_sided;
+        if (!lighting_surface(pix, pos, nrm, albedo, two_sided) || dot(nrm, nrm) < 1.0e-8) {
+            continue;
+        }
+        uint slot = lighting_cache_find_sized(pos, normalize(nrm), false, LIGHTING_SC_TEXEL, pos);
+        if (slot != ~0u) {
+            lighting_verify_poison_slot(slot);
+        }
+    }
+}
+bool lighting_verify_screen_begin(uint i, out vec3 origin, out vec3 dir, out VerifyJob job) {
+    job.kind = 1u;
+    job.slot = ~0u;
+    job.probe = ~0u;
+    job.stored = 0.0;
+    uint budget = gstats.diag[38];
+    uint probes = lighting_probes();
+    if (i >= budget || probes == 0u || pc.dims.x == 0u) {
+        return false;
+    }
+    if (gstats.diag[56] != 0u) {
+        lighting_verify_poison_rect(i, budget);
+        return false;
+    }
+    uint p = (lighting_frame() * budget + i) % probes;
+    uint cols = max(pc.dims.z, 1u);
+    uint col = p % cols;
+    uint row = p / cols;
+    uint tile = max(pc.params.y, 1u);
+    // The probe's center pixel. The same texel is rechecked each visit;
+    // the ray direction still rotates with the frame.
+    uvec2 pix = uvec2(min(col * tile + tile / 2u, pc.dims.x - 1u),
+                      min(row * tile + tile / 2u, pc.dims.y - 1u));
+    job.probe = row * cols + col;
+    vec3 pos;
+    vec3 nrm;
+    vec3 albedo;
+    bool two_sided;
+    if (!lighting_surface(pix, pos, nrm, albedo, two_sided) || dot(nrm, nrm) < 1.0e-8) {
+        return false;
+    }
+    nrm = normalize(nrm);
+    uint slot = lighting_cache_find_sized(pos, nrm, false, LIGHTING_SC_TEXEL, pos);
+    if (slot == ~0u) {
+        return false;
+    }
+    float sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+    if (sets < 8.0) {
+        return false;
+    }
+    job.slot = slot;
+    job.stored = dot(cache.v[3u * slot + 2u].rgb, LIGHTING_VERIFY_LUM);
+    uint hs = lighting_hash(i * 0x9e3779b9u ^ lighting_frame() * 0x85ebca6bu ^ slot);
+    origin = pos + nrm * 0.02;
+    dir = lighting_hemi_dir(hs, nrm, max(lighting_unit(hs), 0.25), lighting_unit(hs ^ 0x68e31da4u));
+    atomicAdd(gstats.diag[8], 1u);
+    return true;
+}
+bool lighting_verify_world_begin(uint i, out vec3 origin, out vec3 dir, out VerifyJob job) {
+    job.kind = 2u;
+    job.slot = ~0u;
+    job.probe = ~0u;
+    job.stored = 0.0;
+    uint budget = gstats.diag[39];
+    if (i >= budget) {
+        return false;
+    }
+    // Three of four rays aim just outside the frustum and claim that cell.
+    if ((i & 3u) != 0u) {
+        origin = scene.eye.xyz;
+        dir = lighting_guard_dir(i ^ (lighting_frame() * 0x9e3779b9u));
+        return true;
+    }
+    uint count = lighting_mature_count();
+    if (count == 0u) {
+        return false;
+    }
+    uint start = (lighting_frame() * budget + i) % count;
+    for (uint k = 0u; k < 24u; k++) {
+        uint slot = ckeys.key[LIGHTING_CACHE_SLOTS + 1u + (start + k) % count];
+        if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u) {
+            continue;
+        }
+        float sz = cache.v[3u * slot + 1u].w;
+        float sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+        if (sz <= 0.2 || sets < 8.0) {
+            continue;
+        }
+        vec3 pos;
+        vec3 nrm;
+        if (!lighting_sc_texel_world(slot, pos, nrm) || dot(nrm, nrm) < 1.0e-8) {
+            continue;
+        }
+        nrm = normalize(nrm);
+        job.kind = 3u;
+        job.slot = slot;
+        job.stored = dot(cache.v[3u * slot + 2u].rgb, LIGHTING_VERIFY_LUM);
+        uint hs = lighting_hash(slot ^ (lighting_frame() * 0x85ebca6bu) ^ i);
+        origin = pos + nrm * 0.02;
+        dir = lighting_hemi_dir(hs, nrm, max(lighting_unit(hs), 0.25), lighting_unit(hs ^ 0x68e31da4u));
+        return true;
+    }
+    return false;
+}
+bool lighting_verify_begin(uint i, out vec3 origin, out vec3 dir, out VerifyJob job) {
+    origin = vec3(0.0);
+    dir = vec3(0.0, 1.0, 0.0);
+    job.kind = 0u;
+    job.slot = ~0u;
+    job.probe = ~0u;
+    job.stored = 0.0;
+    if (((pc.params.z >> 7u) & 1u) != 0u) {
+        return lighting_verify_world_begin(i, origin, dir, job);
+    }
+    return lighting_verify_screen_begin(i, origin, dir, job);
+}
+void lighting_verify_finish(VerifyJob job, vec3 origin, vec3 dir, SceneHit hit) {
+    vec3 hp = origin + dir * hit.t;
+    vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
+    if (job.kind == 2u) {
+        uint slot = lighting_cache_find_sized(hp, hn, true, 0.25, hp);
+        if (slot != ~0u) {
+            cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
+            atomicAdd(gstats.diag[62], 1u);
+        }
+        return;
+    }
+    if (job.slot == ~0u) {
+        return;
+    }
+    vec3 irr = lighting_cache_irradiance(hp, hn);
+    float fl = dot(irr, LIGHTING_VERIFY_LUM);
+    uint tests = job.kind == 1u ? 60u : 62u;
+    uint fails = job.kind == 1u ? 61u : 63u;
+    atomicAdd(gstats.diag[tests], 1u);
+    // Stored black against a clearly lit hit. A dim texel (a real shadow)
+    // stays put: one hemisphere ray often sees a brighter surface than the
+    // mean, and resetting on that flickers. Linear irradiance. Compose is
+    // nearly linear below 0.64, so a display code is about 1/255. Black is
+    // under half a code; the hit has to clear about five.
+    if (job.stored < 0.002 && fl > 0.02) {
+        // The ray's irradiance replaces the mean. A fraction would leave the
+        // texel looking dark; later sets pull a noisy single ray back in.
+        cache.v[3u * job.slot + 2u] = vec4(irr, 4.0);
+        cache.v[LIGHTING_SC_EST_AT + 2u * job.slot] = vec4(0.0);
+        cache.v[LIGHTING_SC_EST_AT + 2u * job.slot + 1u] = vec4(0.0);
+        if (job.probe != ~0u && job.probe < lighting_probes()) {
+            lighting_hold_fail(job.probe);
+        }
+        atomicAdd(gstats.diag[fails], 1u);
+        atomicAdd(gstats.diag[59], 1u);
+    }
+}
+
 void main() {
     bool hold_check = false;
     vec4 hold_old = vec4(0.0);
     uint hold_probe = 0u;
     uint ray = gl_GlobalInvocationID.x;
     uint mode = lighting_mode();
-    if (lighting_dense()) {
+    vec3 origin = vec3(0.0);
+    vec3 dir = vec3(0.0, 1.0, 0.0);
+    vec3 n = vec3(0.0, 1.0, 0.0);
+    VerifyJob vjob = VerifyJob(~0u, ~0u, ~0u, 0.0);
+    bool verify = mode == 3u;
+    if (verify) {
+        if (!lighting_verify_begin(ray, origin, dir, vjob)) {
+            return;
+        }
+    } else if (lighting_dense()) {
         // S70A: this round's light cache rays only, live entries only.
         if (ray >= lighting_dense_count() * LIGHTING_CACHE_RAYS) {
             return;
@@ -97,12 +306,11 @@ void main() {
     } else if (mode == 2u) {
         ray += lighting_probe_rays();
     }
+    uint at = 0u;
+    bool probe_ray = false;
+    if (!verify) {
     uint rays_end = mode == 1u ? lighting_probe_rays() : lighting_all_rays();
-    uint at;
-    vec3 origin;
-    vec3 dir;
-    vec3 n;
-    bool probe_ray = ray < lighting_probe_rays();
+    probe_ray = ray < lighting_probe_rays();
     if (ray >= rays_end + lighting_kept_hits()) {
         // Then one thread per fill slot: a stratum the probe holds from nowhere,
         // traced from its place now (lighting_fill_ray). Not on the async queue.
@@ -143,8 +351,12 @@ void main() {
             }
         }
     }
+    }
     SceneHit hit;
     if (!trace_ray(origin, dir, 1.0e-4, 200.0, hit)) {
+        if (verify) {
+            return;
+        }
         // A probe ray's miss is kept as a miss and takes the sky as it is when shaded.
         if (hold_check && !(hold_old.x < 0.0)) {
             lighting_hold_fail(hold_probe);
@@ -154,6 +366,10 @@ void main() {
             lighting_gdirty_kept_at(at);
         }
         work.v[at] = mv;
+        return;
+    }
+    if (verify) {
+        lighting_verify_finish(vjob, origin, dir, hit);
         return;
     }
     if (hold_check) {

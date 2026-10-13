@@ -468,6 +468,17 @@ impl Renderer {
         self.gpu.lighting_atrous_stats()
     }
 
+    /// Zero settled texels inside this screen rectangle on the next draw.
+    /// Their sample counts stay high. Verification then has to notice.
+    pub fn lighting_poison_rect(&mut self, x0: u32, y0: u32, x1: u32, y1: u32) {
+        self.gpu.lighting_poison_rect(x0, y0, x1, y1);
+    }
+
+    /// Screen and world verification counters for the last draw.
+    pub fn lighting_verify_stats(&mut self) -> LightingVerifyStats {
+        self.gpu.lighting_verify_stats()
+    }
+
     /// Sun-step mark from the last submitted frame. Waits for that frame.
     /// `gpu_sun` is the shader bit. `host_frames` counts frames the CPU took
     /// the small-sun path.

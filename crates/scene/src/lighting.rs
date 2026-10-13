@@ -17,6 +17,20 @@ use std::fmt::Write as _;
 /// Bounce count meaning the cache may feed itself without a cap (today's GI).
 pub const LIGHTING_BOUNCES_UNLIMITED: u32 = u32::MAX;
 
+/// Screen-space verification rays per frame on preset `high`.
+///
+/// One ray per check. The visible probe grid at 1080p is about 8,000 probes
+/// (16 px tiles), so this budget visits each of them about every fourth frame.
+/// `0` turns this budget off without touching the world budget.
+pub const LIGHTING_SCREEN_VERIFY_DEFAULT: u32 = 2048;
+
+/// World-space verification rays per frame on preset `high`.
+///
+/// A trickle over settled world-cache cells. Three quarters of the rays are
+/// aimed just outside the frustum; the rest walk the settled cells. `0` turns
+/// this budget off without touching the screen budget.
+pub const LIGHTING_WORLD_VERIFY_DEFAULT: u32 = 128;
+
 /// Named quality tiers. Each one is a full [`LightingSettings`] value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LightingPreset {
@@ -278,6 +292,14 @@ pub struct LightingSettings {
     pub sky: bool,
     pub emissive: bool,
     pub prefill: bool,
+    /// Screen-space verification rays per frame. Dense: each ray checks the
+    /// surface-cache texel (and its screen probe) at one visible pixel. `0`
+    /// disables this budget. Independent of [`Self::world_verify`].
+    pub screen_verify: u32,
+    /// World-space verification rays per frame. A trickle over settled
+    /// world-cache cells, biased just outside the frustum. `0` disables this
+    /// budget. Independent of [`Self::screen_verify`].
+    pub world_verify: u32,
     pub ambient: AmbientSettings,
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
     /// `0` is midnight, `6` dawn, `12` noon, `18` dusk.
@@ -305,6 +327,8 @@ impl LightingSettings {
                 s.compose_reuse = false;
                 s.prefill = false;
                 s.sky = true;
+                s.screen_verify = 0;
+                s.world_verify = 0;
                 s.ambient.mode = AmbientMode::Curve;
                 s.ambient.night_color = [0.04, 0.05, 0.10];
                 s.ambient.night_intensity = 0.08;
@@ -321,6 +345,7 @@ impl LightingSettings {
                 s.world_cache.enabled = false;
                 s.denoiser.enabled = false;
                 s.prefill = false;
+                s.world_verify = 0;
             }
             LightingPreset::Potato => {
                 s.direct.max_lights = 8;
@@ -333,6 +358,8 @@ impl LightingSettings {
                 s.compose_reuse = false;
                 s.sky = false;
                 s.prefill = false;
+                s.screen_verify = 0;
+                s.world_verify = 0;
                 s.ambient.mode = AmbientMode::Constant;
                 s.ambient.color = [0.42, 0.44, 0.48];
                 s.ambient.intensity = 0.65;
@@ -350,6 +377,8 @@ impl LightingSettings {
                 // the 4070 picture bar (S79), so it stays off.
                 s.denoiser.adaptive = false;
                 s.prefill = false;
+                s.screen_verify = 512;
+                s.world_verify = 0;
                 s.gi.refresh_frames = 2;
                 s.gi.budget_shift = 2;
                 s.ambient.mode = AmbientMode::Day;
@@ -364,6 +393,8 @@ impl LightingSettings {
                 // picture bar (S79), so it stays off.
                 s.denoiser.adaptive = false;
                 s.gi.budget_shift = 1;
+                s.screen_verify = 1024;
+                s.world_verify = 64;
                 s.ambient.mode = AmbientMode::Day;
             }
         }
@@ -419,6 +450,8 @@ impl LightingSettings {
             sky: true,
             emissive: true,
             prefill: true,
+            screen_verify: LIGHTING_SCREEN_VERIFY_DEFAULT,
+            world_verify: LIGHTING_WORLD_VERIFY_DEFAULT,
             ambient: AmbientSettings {
                 mode: AmbientMode::Day,
                 color: [0.42, 0.44, 0.48],
@@ -469,6 +502,8 @@ impl LightingSettings {
         self.denoiser.dirty_fraction = self.denoiser.dirty_fraction.clamp(0.0, 1.0);
         // Ten bits in the control word: 0.0001 steps, up to 0.1023.
         self.denoiser.variance_threshold = self.denoiser.variance_threshold.clamp(0.0, 0.1);
+        self.screen_verify = self.screen_verify.min(65536);
+        self.world_verify = self.world_verify.min(65536);
         self.ambient.intensity = self.ambient.intensity.max(0.0);
         self.ambient.night_intensity = self.ambient.night_intensity.max(0.0);
         self.ambient.day_intensity = self.ambient.day_intensity.max(0.0);
@@ -584,6 +619,8 @@ impl LightingSettings {
         self.sky = true;
         self.emissive = true;
         self.prefill = true;
+        self.screen_verify = LIGHTING_SCREEN_VERIFY_DEFAULT;
+        self.world_verify = LIGHTING_WORLD_VERIFY_DEFAULT;
         self.sanitize();
         self.sync_preset_field();
     }
@@ -767,6 +804,8 @@ impl LightingSettings {
         let _ = writeln!(out, "sky={}", bit(self.sky));
         let _ = writeln!(out, "emissive={}", bit(self.emissive));
         let _ = writeln!(out, "prefill={}", bit(self.prefill));
+        let _ = writeln!(out, "screen_verify={}", self.screen_verify);
+        let _ = writeln!(out, "world_verify={}", self.world_verify);
         let _ = writeln!(out, "ambient={}", self.ambient.mode.name());
         let _ = writeln!(out, "ambient_color={}", rgb(self.ambient.color));
         let _ = writeln!(
@@ -893,6 +932,8 @@ impl LightingSettings {
             "sky" => self.sky = on(value)?,
             "emissive" => self.emissive = on(value)?,
             "prefill" => self.prefill = on(value)?,
+            "screen_verify" => self.screen_verify = num_u32(value)?,
+            "world_verify" => self.world_verify = num_u32(value)?,
             "ambient" => {
                 self.ambient.mode = AmbientMode::parse(value).ok_or_else(|| {
                     format!("ambient is off, constant, hemisphere, day, or curve, got {value}")
@@ -990,6 +1031,8 @@ impl LightingSettings {
             ("GENOS_LIGHTING_SKY", "sky"),
             ("GENOS_LIGHTING_EMISSIVE", "emissive"),
             ("GENOS_LIGHTING_PREFILL", "prefill"),
+            ("GENOS_LIGHTING_SCREEN_VERIFY", "screen_verify"),
+            ("GENOS_LIGHTING_WORLD_VERIFY", "world_verify"),
             ("GENOS_LIGHTING_AMBIENT_COLOR", "ambient_color"),
             ("GENOS_LIGHTING_AMBIENT_INTENSITY", "ambient_intensity"),
             ("GENOS_LIGHTING_AMBIENT_GROUND", "ambient_ground"),

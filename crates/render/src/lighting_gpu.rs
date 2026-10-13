@@ -207,6 +207,10 @@ pub(crate) struct Lighting {
     settings: genos_scene::LightingSettings,
     /// Wins over the scene until cleared.
     override_settings: Option<genos_scene::LightingSettings>,
+    /// One-shot screen rectangle. The next verification dispatch zeros the
+    /// irradiance of settled texels inside it and leaves their sample counts
+    /// high, then clears this. Tests use it to time a wake.
+    poison: Option<[u32; 4]>,
     sun_height: f32,
     /// Camera, occluders, meshes, and point lamps. The directional sun and the
     /// sky are left out, so a small sun step can stay off the full compose.
@@ -281,6 +285,19 @@ fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats 
         filtered: w[LIGHTING_ATROUS_STAT + 3],
         ran: mode_word != 0,
     }
+}
+
+/// Verification counters from the last frame. `dark_fails` counts checks whose
+/// stored luminance was near zero while a fresh ray saw light.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LightingVerifyStats {
+    /// Screen rays that left a surface this frame (diag[8]).
+    pub screen_rays: u32,
+    pub screen_tests: u32,
+    pub screen_fails: u32,
+    pub world_tests: u32,
+    pub world_fails: u32,
+    pub dark_fails: u32,
 }
 
 /// Whether the lighting has settled: the scene (camera included) has held still
@@ -364,6 +381,7 @@ impl Default for Lighting {
             atrous_dirty: None,
             settings: genos_scene::LightingSettings::default(),
             override_settings: None,
+            poison: None,
             sun_height: 0.0,
             view_content_key: 0,
             view_key: 0,
@@ -403,6 +421,10 @@ const LIGHTING_ARGS: u32 = 1 << 30;
 const LIGHTING_MODE1: u32 = LIGHTING_ARGS + 1;
 const LIGHTING_DENSE_RAYS: u32 = LIGHTING_ARGS + 2;
 const LIGHTING_DENSE_ENTRIES: u32 = LIGHTING_ARGS + 3;
+/// Mode-3 verification. Screen checks visible texels. World checks settled
+/// cells, biased just outside the frustum. The group count is the x dispatch.
+const LIGHTING_VERIFY_SCREEN: u32 = LIGHTING_ARGS + 4;
+const LIGHTING_VERIFY_WORLD: u32 = LIGHTING_ARGS + 5;
 /// Word of the dispatch args in the cache keys (lighting_cache.glsl LIGHTING_ARGS_AT).
 const LIGHTING_ARGS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 17600;
 /// A-trous list metadata (lighting_cache.glsl LIGHTING_ATROUS_*). The threshold
@@ -1045,6 +1067,35 @@ impl Gpu {
 
     fn lighting_still_frames(&self) -> u32 {
         self.lighting.still
+    }
+
+    /// Zero settled texels inside this screen rectangle on the next frame.
+    /// Sample counts stay high, so the texel looks converged and dark until a
+    /// verification ray sees light and replaces the mean.
+    pub(crate) fn lighting_poison_rect(&mut self, x0: u32, y0: u32, x1: u32, y1: u32) {
+        self.lighting.poison = Some([x0, y0, x1, y1]);
+    }
+
+    /// Verification counters for the last frame drawn. Waits for that frame.
+    pub(crate) fn lighting_verify_stats(&mut self) -> LightingVerifyStats {
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
+        let slot = self.lighting.last_slot;
+        if self.lighting.stats[slot].memory.is_null() {
+            return LightingVerifyStats::default();
+        }
+        let Ok(words) = self.read_stats16(self.lighting.stats[slot].memory) else {
+            return LightingVerifyStats::default();
+        };
+        LightingVerifyStats {
+            screen_rays: words[24 + 8],
+            screen_tests: words[24 + 60],
+            screen_fails: words[24 + 61],
+            world_tests: words[24 + 62],
+            world_fails: words[24 + 63],
+            dark_fails: words[24 + 59],
+        }
     }
 
     /// Rays the screen probes held in the last frame drawn, and probes placed
@@ -1831,6 +1882,20 @@ impl Gpu {
             self.mesh_field_key.hash(&mut hasher);
             hasher.finish()
         };
+        // A verification miss on the previous use of this slot (its fence has
+        // been waited) drops the settled idle so the cache pass can refill the
+        // reset mean. The two budgets are what found it.
+        if (self.lighting.settings.screen_verify > 0 || self.lighting.settings.world_verify > 0)
+            && !self.lighting.stats[slot].memory.is_null()
+        {
+            if let Ok(words) = self.read_stats16(self.lighting.stats[slot].memory) {
+                let fails = words[24 + 59] + words[24 + 61] + words[24 + 63];
+                if fails > 0 {
+                    self.lighting.light_quiet = 0;
+                    self.lighting.quiet = 0;
+                }
+            }
+        }
         let frozen = self.lighting_stats().settled;
         let had = !self.lighting.kept_bytes.is_empty() && key == self.lighting.kept_key;
         let changes = if had {
@@ -2176,6 +2241,36 @@ impl Gpu {
                 self.lighting.ctrl_bytes.len() as u64,
                 self.lighting.ctrl_bytes.as_ptr() as *const c_void,
             );
+            // diag[38] and diag[39]: the two verification budgets, ray counts.
+            // 0 disables that budget. Words 142 and 143 stay the sun mark; the
+            // direct pass writes them (lighting_sun_mark) before verification.
+            let budgets = [
+                self.lighting.settings.screen_verify,
+                self.lighting.settings.world_verify,
+            ];
+            (self.fns.cmd_update_buffer)(
+                self.cmd,
+                self.lighting.stats_dev[slot].buffer,
+                (24 + 38) * 4,
+                8,
+                budgets.as_ptr() as *const c_void,
+            );
+            if let Some(rect) = self.lighting.poison.take() {
+                // diag[56..58]: armed, x0|y0<<16, x1|y1<<16. The zero-fill
+                // above cleared them. diag[59] stays 0 for the dark-fail count.
+                let poison = [
+                    1u32,
+                    rect[0].min(65535) | (rect[1].min(65535) << 16),
+                    rect[2].min(65535) | (rect[3].min(65535) << 16),
+                ];
+                (self.fns.cmd_update_buffer)(
+                    self.cmd,
+                    self.lighting.stats_dev[slot].buffer,
+                    (24 + 56) * 4,
+                    12,
+                    poison.as_ptr() as *const c_void,
+                );
+            }
             if self.lighting.cache_full {
             (self.fns.cmd_fill_buffer)(
                 self.cmd,
@@ -2310,6 +2405,13 @@ impl Gpu {
                         k_pc[6] = (cur_pc[6] & !0x310) | 1 << 8;
                     } else if kind == LIGHTING_DENSE_RAYS {
                         k_pc[6] = (k_pc[6] & !0x300) | 2 << 8;
+                    } else if kind == LIGHTING_VERIFY_SCREEN || kind == LIGHTING_VERIFY_WORLD {
+                        // Mode 3. Bit 7 distinguishes the world budget. Bit 4
+                        // (dense) stays clear: this dispatch is not the cache list.
+                        k_pc[6] = (cur_pc[6] & !0x380) | (3 << 8);
+                        if kind == LIGHTING_VERIFY_WORLD {
+                            k_pc[6] |= 1 << 7;
+                        }
                     }
                     (self.fns.cmd_push)(
                         self.cmd,

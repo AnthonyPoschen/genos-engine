@@ -800,3 +800,92 @@ fn adaptive_skip_keeps_the_bounce_bright() {
         "adaptive skip darkened the bounce: luma {y_skip:.2} one-iter {y_one:.2}"
     );
 }
+
+fn rect_luma(frame: &[u8], width: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> f64 {
+    let mut sum = 0.0;
+    let mut n = 0u32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let i = ((y * width + x) * 4) as usize;
+            if i + 3 < frame.len() {
+                sum += luma_bgra(&frame[i..]);
+                n += 1;
+            }
+        }
+    }
+    if n == 0 { 0.0 } else { sum / f64::from(n) }
+}
+
+/// A settled-looking texel whose irradiance was zeroed must be noticed by the
+/// screen budget within a few frames, and the bounce in that rectangle must
+/// come back. The old age-gated checks took hundreds of frames.
+#[test]
+fn poisoned_visible_texels_wake_within_sixteen_frames() {
+    const X0: u32 = 40;
+    const Y0: u32 = 100;
+    const X1: u32 = 280;
+    const Y1: u32 = 170;
+    const DETECT: u32 = 16;
+    let (_gpu, mut window, mut renderer) = open();
+    let world = shipped_hall();
+    let camera = Camera::opening();
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.denoiser.enabled = false;
+    settings.compose_reuse = false;
+    renderer.set_lighting_settings(settings);
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Bounce,
+        ..DebugView::default()
+    });
+    // The hall's bounce is still filling for about 24 frames. After that the
+    // screen budget stays quiet until a texel is actually black.
+    for _ in 0..32 {
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+    }
+    let before = draw(&mut window, &mut renderer, &world, &camera);
+    let quiet = renderer.lighting_verify_stats();
+    assert_eq!(
+        quiet.screen_fails, 0,
+        "warmup already reported a screen miss: {quiet:?}"
+    );
+    let before_luma = rect_luma(&before, 320, X0, Y0, X1, Y1);
+    renderer.lighting_poison_rect(X0, Y0, X1, Y1);
+    let poisoned = draw(&mut window, &mut renderer, &world, &camera);
+    let poisoned_luma = rect_luma(&poisoned, 320, X0, Y0, X1, Y1);
+    let mut detected = None;
+    let mut last_stats = quiet;
+    for frame in 1..=DETECT {
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+        last_stats = renderer.lighting_verify_stats();
+        if last_stats.screen_fails > 0 {
+            detected = Some((frame, last_stats));
+            break;
+        }
+    }
+    let (frame, stats) = detected.unwrap_or_else(|| {
+        panic!(
+            "poisoned region was not woken within {DETECT} frames (before luma {before_luma:.2}, poisoned {poisoned_luma:.2}, last {last_stats:?})"
+        )
+    });
+    assert!(
+        frame <= DETECT,
+        "detection frame {frame} stats {stats:?}"
+    );
+    let mut recovered_at = None;
+    let mut after_luma = poisoned_luma;
+    for step in 1..=48 {
+        let picture = draw(&mut window, &mut renderer, &world, &camera);
+        after_luma = rect_luma(&picture, 320, X0, Y0, X1, Y1);
+        if recovered_at.is_none() && after_luma > before_luma * 0.5 {
+            recovered_at = Some(step);
+        }
+    }
+    eprintln!(
+        "poison wake frame {frame} recovered {recovered_at:?} before {before_luma:.2} poisoned {poisoned_luma:.2} after {after_luma:.2} {stats:?}"
+    );
+    let step = recovered_at.unwrap_or(0);
+    assert!(
+        step > 0 && step <= 24,
+        "bounce in the poisoned rect stayed dark: poisoned {poisoned_luma:.2} after {after_luma:.2} before {before_luma:.2} woke at frame {frame} half-back at {step}"
+    );
+}

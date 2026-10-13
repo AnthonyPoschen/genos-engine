@@ -232,6 +232,22 @@ impl Host for Stage {
             ),
             Knob::switch("lighting_sky", "Lighting sky", lighting.sky),
             Knob::switch("lighting_emissive", "Emissive", lighting.emissive),
+            Knob::number(
+                "lighting_screen_verify",
+                "Screen verify",
+                lighting.screen_verify as f64,
+                (0.0, 8192.0),
+                256.0,
+                " rays",
+            ),
+            Knob::number(
+                "lighting_world_verify",
+                "World verify",
+                lighting.world_verify as f64,
+                (0.0, 1024.0),
+                16.0,
+                " rays",
+            ),
             Knob::switch("lighting_prefill", "Prefill", lighting.prefill),
             Knob::switch(
                 "lighting_full_effort",
@@ -387,6 +403,8 @@ fn apply_lighting_knob(
         "lighting_sky" => ("sky", on_off(v)),
         "lighting_emissive" => ("emissive", on_off(v)),
         "lighting_prefill" => ("prefill", on_off(v)),
+        "lighting_screen_verify" => ("screen_verify", whole.to_string()),
+        "lighting_world_verify" => ("world_verify", whole.to_string()),
         "lighting_full_effort" => ("full_effort", on_off(v)),
         "lighting_ambient" => (
             "ambient",

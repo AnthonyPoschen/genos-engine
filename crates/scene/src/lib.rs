@@ -22,7 +22,8 @@ pub use lighting::{
     check_lighting_arg, lighting_arg_time_of_day, lighting_flag_needs_value, AmbientMode,
     AmbientSettings, BounceSettings, DenoiserSettings, DirectSettings, GiSettings, GpuBuckets,
     LightingPreset, LightingSettings, ProbeSettings, ShadowFilter, ShadowSettings,
-    WorldCacheSettings, LIGHTING_BOUNCES_UNLIMITED,
+    WorldCacheSettings, LIGHTING_BOUNCES_UNLIMITED, LIGHTING_SCREEN_VERIFY_DEFAULT,
+    LIGHTING_WORLD_VERIFY_DEFAULT,
 };
 pub use script::{load_path, load_str};
 pub use settings::EngineSettings;

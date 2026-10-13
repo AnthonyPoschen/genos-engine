@@ -34,6 +34,27 @@ fn the_engine_settings_trait_reads_and_writes_lighting() {
 }
 
 #[test]
+fn screen_and_world_verify_are_independent_settings() {
+    let high = LightingSettings::preset(LightingPreset::High);
+    assert_eq!(high.screen_verify, 2048);
+    assert_eq!(high.world_verify, 128);
+    let mut screen_only = high.clone();
+    screen_only.set_key("world_verify", "0").unwrap();
+    assert_eq!(screen_only.screen_verify, 2048);
+    assert_eq!(screen_only.world_verify, 0);
+    let mut world_only = high;
+    world_only.set_key("screen_verify", "0").unwrap();
+    assert_eq!(world_only.screen_verify, 0);
+    assert_eq!(world_only.world_verify, 128);
+    let round = LightingSettings::parse("screen_verify=64\nworld_verify=7").unwrap();
+    assert_eq!(round.screen_verify, 64);
+    assert_eq!(round.world_verify, 7);
+    let potato = LightingSettings::preset(LightingPreset::Potato);
+    assert_eq!(potato.screen_verify, 0);
+    assert_eq!(potato.world_verify, 0);
+}
+
+#[test]
 fn the_text_form_round_trips_every_preset() {
     for preset in LightingPreset::all() {
         let settings = LightingSettings::preset(*preset);
