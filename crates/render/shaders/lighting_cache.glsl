@@ -129,6 +129,9 @@ const uint CHG_W_DEDUPE = 27u;   // ring probes already woken by this event
 const uint CHG_V_RELIT = 28u;    // kept hits relit by verification / wakes
 const uint CHG_W_HOPS = 29u;     // sum of hop depth of woken probes (chain size)
 uint lighting_bounce_path = 2u;
+// S73Q: pre-fill rays read the plain mean of a world-radiance cell. Every other
+// reader keeps the dark-fill value in the cell's irradiance.
+bool lighting_wrc_plain_read = false;
 // S78S debug isolate toggles (lighting_gpu.rs lighting_toggles): head 3.w bits 12-15.
 uint lighting_toggles() {
     return (uint(work.v[lighting_change_at() + 3u].w) >> 12u) & 15u;
@@ -835,6 +838,21 @@ void lighting_sc_offer(uint slot, vec3 at, vec3 centre) {
 // S73K does not set this from the direct shader; the slim claim never reaches
 // these branches. Seeds stay on the pixel path.
 bool lighting_sc_feedback = false;
+// S73Q: plain mean of a world-radiance cell (estimator a.rgb, count in b.w,
+// b.x held at 0 so trickle, dormancy and variance readers skip it). Stored in
+// the same sun scale as the cell's irradiance. False when this read should
+// keep the dark-fill value.
+bool lighting_wrc_plain_rgb(uint slot, out vec3 rgb) {
+    if (!lighting_wrc_plain_read || cache.v[3u * slot + 1u].w <= 0.2) {
+        return false;
+    }
+    vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
+    if (!(b.w > 0.5) || b.x > 0.0) {
+        return false;
+    }
+    rgb = cache.v[LIGHTING_SC_EST_AT + 2u * slot].rgb;
+    return true;
+}
 // Surface cache: the lit texel twice the size holding pos (the first fill of a
 // texel not lit yet); w 0 when there is none.
 vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
@@ -854,6 +872,10 @@ vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
             vec4 v = cache.v[3u * s + 2u];
             if (v.w > 0.5) {
                 cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
+                vec3 plain;
+                if (lighting_wrc_plain_rgb(s, plain)) {
+                    return vec4(plain, 1.0);
+                }
                 return vec4(v.rgb, 1.0);
             }
         }
@@ -2106,7 +2128,12 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
                 vec4 v = cache.v[3u * s2 + 2u];
                 if (v.w > 0.5) {
                     // S64B: scaled to the sun/sky of now, share noted.
-                    sum += vec4(v.rgb * (lighting_world_mode() == 3u ? lighting_sc_sun_gain(s2) : 1.0), 1.0);
+                    vec3 rgb = v.rgb;
+                    vec3 plain;
+                    if (lighting_wrc_plain_rgb(s2, plain)) {
+                        rgb = plain;
+                    }
+                    sum += vec4(rgb * (lighting_world_mode() == 3u ? lighting_sc_sun_gain(s2) : 1.0), 1.0);
                     fill_f += lighting_world_mode() == 3u ? lighting_sc_sunfrac_now(s2) : 0.0;
                 }
             }
@@ -2117,7 +2144,12 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     }
     if (lighting_world_mode() == 3u) {
         lighting_hit_sunfrac = lighting_sc_sunfrac_now(slot);
-        return e.rgb * lighting_sc_sun_gain(slot);
+        vec3 rgb = e.rgb;
+        vec3 plain;
+        if (lighting_wrc_plain_rgb(slot, plain)) {
+            rgb = plain;
+        }
+        return rgb * lighting_sc_sun_gain(slot);
     }
     return e.rgb;
 }
@@ -2228,6 +2260,11 @@ const uint LIGHTING_SC_PREFILL_FLOOR = 1024u;
 // After the a-trous meta (LIGHTING_ATROUS_PPM_AT + ppm, prev, 64 bins, 5 modes,
 // 5 * 64 recount bins); the old spot aliased LIGHTING_COMPOSE_AT.
 const uint LIGHTING_SC_PREFILL_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS + 1u + 1u + 64u + 5u + 5u * 64u;
+// S73Q: one plain-mean sample per batch entry, summed by the direct pass and
+// consumed by the cache pass. Four words: rgb of lk*cos in 1/256, then the ray
+// count. The CPU fill before the direct pass starts each round at zero.
+const uint LIGHTING_WRC_PLAIN_AT = LIGHTING_SC_PREFILL_AT + LIGHTING_SC_PREFILL_MAX;
+const float LIGHTING_WRC_PLAIN_SCALE = 256.0;
 bool lighting_dense() {
     return ((pc.params.z >> 4u) & 1u) != 0u;
 }
@@ -2415,6 +2452,43 @@ uint lighting_cache_batch_slot(uint j) {
 // variance high). The other modes take whole sets.
 const uint LIGHTING_SC_SET_RAYS = 64u;
 const uint LIGHTING_SC_QUARTERS = LIGHTING_SC_SET_RAYS / LIGHTING_CACHE_RAYS;
+void lighting_wrc_plain_add(uint ent, vec3 weighted) {
+    uint b = LIGHTING_WRC_PLAIN_AT + 4u * ent;
+    vec3 c = clamp(weighted, vec3(0.0), vec3(2048.0)) * LIGHTING_WRC_PLAIN_SCALE + vec3(0.5);
+    atomicAdd(ckeys.key[b], uint(c.r));
+    atomicAdd(ckeys.key[b + 1u], uint(c.g));
+    atomicAdd(ckeys.key[b + 2u], uint(c.b));
+    atomicAdd(ckeys.key[b + 3u], 1u);
+}
+void lighting_wrc_plain_clear(uint j, uint run) {
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_SC_QUARTERS; i++) {
+        if (i >= run) {
+            break;
+        }
+        uint b = LIGHTING_WRC_PLAIN_AT + 4u * (j + i);
+        ckeys.key[b] = 0u;
+        ckeys.key[b + 1u] = 0u;
+        ckeys.key[b + 2u] = 0u;
+        ckeys.key[b + 3u] = 0u;
+    }
+}
+// Cosine-weighted plain sample, already multiplied by 2 pi / rays. Clears the
+// scratch either way. False when a ray of the run never reported.
+bool lighting_wrc_plain_sample(uint j, uint run, float rays, out vec3 e) {
+    vec3 sum = vec3(0.0);
+    uint n = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_SC_QUARTERS; i++) {
+        if (i >= run) {
+            break;
+        }
+        uint b = LIGHTING_WRC_PLAIN_AT + 4u * (j + i);
+        sum += vec3(float(ckeys.key[b]), float(ckeys.key[b + 1u]), float(ckeys.key[b + 2u]));
+        n += ckeys.key[b + 3u];
+    }
+    lighting_wrc_plain_clear(j, run);
+    e = sum * (LIGHTING_TAU / LIGHTING_WRC_PLAIN_SCALE) / max(rays, 1.0);
+    return n == uint(rays) && n > 0u;
+}
 // Tunables (S59E, Anthony: "bump up the quality before it settles"): whole sets
 // until LIGHTING_SC_FULL_SETS sets AND agreement within LIGHTING_SC_SETTLE_SD standard
 // deviations; an unsettled texel's priority is at least LIGHTING_SC_UNSETTLED_W times

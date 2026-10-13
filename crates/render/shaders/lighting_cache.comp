@@ -74,6 +74,8 @@ void main() {
         return;
     }
     if (lighting_world_mode() == 3u && j >= lighting_grad_first() && j < LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) {
+        // Gradient entries are not a world-radiance update. Drop any plain sample.
+        lighting_wrc_plain_clear(j, 1u);
         // S74A: 16 gradient checks, one ray each.
         uint n = lighting_grad_count();
         [[dont_unroll]] for (uint i = 0u; i < LIGHTING_CACHE_RAYS; i++) {
@@ -92,6 +94,7 @@ void main() {
     }
     uint slot = lighting_cache_batch_slot(j);
     if (slot == ~0u) {
+        lighting_wrc_plain_clear(j, 1u);
         return;
     }
     // A texel's entries this round are consecutive; the first sums them all.
@@ -104,6 +107,7 @@ void main() {
     }
     uint key = ckeys.key[slot];
     if (key == 0u) {
+        lighting_wrc_plain_clear(j, run);
         return;
     }
     atomicAdd(gstats.rays, run * LIGHTING_CACHE_RAYS);
@@ -118,6 +122,7 @@ void main() {
         ckeys.key[slot] = 0u;
         cache.v[3u * slot + 1u] = vec4(0.0);
         cache.v[3u * slot + 2u] = vec4(0.0);
+        lighting_wrc_plain_clear(j, run);
         return;
     }
     vec3 tp;
@@ -135,6 +140,7 @@ void main() {
     [[dont_unroll]] for (uint k = 0u; k < run * LIGHTING_CACHE_RAYS; k++) {
         vec4 v = work.v[lighting_rad_at(first + k)];
         if (lighting_ray_none(v)) {
+            lighting_wrc_plain_clear(j, run);
             return;
         }
         vec3 dir = lighting_dir(rkey, n, lighting_sc_stratum(rkey, q0 * LIGHTING_CACHE_RAYS + k, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
@@ -255,6 +261,24 @@ void main() {
         // S76B: a refresh is the cell's check (lighting_wrc_check_take).
         if (old.w >= 0.5) {
             lighting_wrc_check_take(slot, e, old.rgb);
+        }
+        // S73Q: plain sample from the second cache read (no k^2 weight). Sun gain
+        // already scaled the stored plain rgb with the dark-fill history above.
+        vec3 ep;
+        if (lighting_wrc_plain_sample(j, run, rays, ep)) {
+            vec4 pb = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
+            float pc = pb.x <= 0.0 ? pb.w : 0.0;
+            float padd = float(run);
+            float pwa = pc < 0.5 ? 1.0 : padd / (pc + padd);
+            if (local3) {
+                pwa = max(pwa, LIGHTING_WRC_LOCAL_ALPHA * padd);
+            } else if (!lighting_sc_light_quiet()) {
+                pwa = max(pwa, LIGHTING_WRC_CHANGE_ALPHA * padd);
+            }
+            vec4 pa = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
+            vec3 pmean = pc < 0.5 ? ep : pa.rgb + (ep - pa.rgb) * min(pwa, 1.0);
+            cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(max(pmean, vec3(0.0)), 0.0);
+            cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(0.0, 0.0, 0.0, min(pc + padd, LIGHTING_WRC_CAP));
         }
         return;
     }

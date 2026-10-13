@@ -437,8 +437,47 @@ void main() {
                 lighting_hit_sunfrac = 0.0;
             }
         }
+        vec3 direct_e = e;
         lighting_bounce_path = 2u;
+        uint src = ~0u;
+        if (!probe_hit && lighting_world_mode() == 3u) {
+            uint r = ray - lighting_probe_rays();
+            src = lighting_cache_batch_slot(r / LIGHTING_CACHE_RAYS);
+        }
+        // S73Q: a never-shown fine texel reads the plain world-radiance mean.
+        // A world-radiance cell's own rays still publish the dark-fill sample,
+        // and a second read of the same hit feeds the plain mean.
+        bool prefill_src = src != ~0u && lighting_sc_prefill(src);
+        bool wrc_src = src != ~0u && cache.v[3u * src + 1u].w > 0.2;
+        if (prefill_src) {
+            lighting_wrc_plain_read = true;
+        }
         vec3 bounce = lighting_cache_irradiance_at(pos, n, hit_t);
+        lighting_wrc_plain_read = false;
+        if (wrc_src) {
+            uint r = ray - lighting_probe_rays();
+            uint ent = r / LIGHTING_CACHE_RAYS;
+            bool grad = ent >= lighting_grad_first() && ent < LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES;
+            if (!grad) {
+                float saved_sf = lighting_hit_sunfrac;
+                uint saved_path = lighting_bounce_path;
+                lighting_wrc_plain_read = true;
+                vec3 bounce_plain = lighting_cache_irradiance_at(pos, n, hit_t);
+                lighting_wrc_plain_read = false;
+                lighting_hit_sunfrac = saved_sf;
+                lighting_bounce_path = saved_path;
+                vec3 tp;
+                vec3 tn;
+                lighting_sc_texel_world(src, tp, tn);
+                uint key = ckeys.key[src];
+                uint rkey = lighting_sc_ray_key(src, key);
+                uint q = lighting_cache_entry_quarter(ent, src);
+                uint k = q * LIGHTING_CACHE_RAYS + r % LIGHTING_CACHE_RAYS;
+                vec3 dir = lighting_dir(rkey, tn, lighting_sc_stratum(rkey, k, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
+                float c = max(dot(dir, tn), 0.0);
+                lighting_wrc_plain_add(ent, (reflectance * (direct_e + bounce_plain) + glow) * c);
+            }
+        }
         e += bounce;
         e_sun += lighting_hit_sunfrac * bounce;
         if (fill_hit) {

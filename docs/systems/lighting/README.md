@@ -40,7 +40,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Checks run every frame; no "nothing changed" skip without a check (Anthony 16:11, S74A).
 - Always spend some budget on spread-out checks so quiet areas that should not be quiet are found.
 - Probes must not be woken by the shared averaged field; only by real neighbour change, spread by ring tests with group-test splitting ([WAKE](experiments/WAKE-neighbour-wake-design.md)).
-- Pre-fill keeps a floor of 1024 entries inside the texel room (S73N). A larger spare under the base ceiling is still spent (S73G). The S-curve lag bound stays deferred ([DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md)).
+- Pre-fill keeps a floor of 1024 entries inside the texel room (S73N). A larger spare under the base ceiling is still spent (S73G). A pre-fill ray reads a plain mean of the world radiance cache; every other reader keeps the dark-fill value (S73Q). The S-curve lag bound stays deferred ([DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md)).
 - Test rules (10 Oct): every moving test soaks and records a settled frame first, ends soaked, and returns movers to the start; short tests for one situation; a test must fail on the build that shows the problem before it is trusted; hand-validate new checks, then spot-check ~1%.
 - GI v1 is the stability floor, not the goal; the target is the path-traced reference (11 Oct).
 - GPU-resident design: frequently used data stays on the GPU at fixed locations; the CPU sends only small changes (12 Oct).
@@ -60,7 +60,8 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
 - Guard band of primary rays just outside the frustum (Lumen has no guard band) (S73A).
 - Pre-fill reserves a floor of 1024 batch entries inside the texel room (scaled by the budget shift), taken from mature entries when that room is full. Spare above the floor is unchanged. It still does not enter the priority histogram. Lumen always spends a fixed budget (S73G, S73N).
-- MSME only once a texel is shown. A never-shown texel accumulates over at most 4 updates, as Lumen radiosity, with the MSME firefly cap (S73D, S73M). On first show the count becomes 1 and the next 15 on-screen sets are a plain mean (`k = 1/(t+1)`). MSME has no such handoff. A lavapipe compare still sees those texels brighter than a pre-fill-off settle (S73O).
+- MSME only once a texel is shown. A never-shown texel accumulates over at most 4 updates, as Lumen radiosity, with the MSME firefly cap (S73D, S73M). On first show the count becomes 1 and the next 15 on-screen sets are a plain mean (`k = 1/(t+1)`). MSME has no such handoff. The handoff alone left those texels brighter than a pre-fill-off settle (S73O).
+- Pre-fill bounce reads a plain mean of each world-radiance cell (no k^2 dark-fill weight). The cell's published irradiance stays the dark-fill mean, and every other consumer reads that (S72N, S73Q). The papers do not keep two means of one cell.
 - Rotating start on the pre-fill list (S73G).
 - Scout feedback claims and stamps LastUsed without the irradiance read, so a scout hit does not seed an empty texel (S73K). The pixel path still seeds.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
@@ -138,7 +139,8 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S73L](experiments/S73L-unfilled-on-screen.md) | 2026-10-13 | Count composed pixels whose surface-cache texel has no finished set | lavapipe turn ended at 0.92% unfilled | 8b78df0 |
 | [S73M](experiments/S73M-prefill-handoff.md) | 2026-10-13 | Firefly-cap the pre-fill, then a plain-mean handoff on first show | keeps one set so the texel stays filled | 60ba22e |
 | [S73N](experiments/S73N-prefill-floor.md) | 2026-10-13 | Pre-fill keeps 1024 entries inside the texel room | floor is carved from mature entries when the room is full | bc8c7c1 |
-| [S73O](experiments/S73O-prefill-bias-check.md) | 2026-10-13 | Lavapipe turn checks coverage and luminance against prefill off | coverage holds; mean relative luminance 0.374 over 3385 keys, cap 0.50 | 77b5fb6 |
+| [S73O](experiments/S73O-prefill-bias-check.md) | 2026-10-13 | Lavapipe turn checks coverage and luminance against prefill off | coverage holds; mean relative luminance 0.374 over 3385 keys, cap 0.50 | cde47e7 |
+| [S73Q](experiments/S73Q-prefill-plain-wrc.md) | 2026-10-13 | Pre-fill bounce reads a plain mean of the world radiance cache | dark-fill value stays for every other reader | |
 | [S74A-cam](experiments/S74A-cam-last-camera-offsets.md) | 2026-10-12 | Fix: last-frame camera read from stale scene-block offsets | pushed | 81c00734 |
 | [S74A-asvgf](experiments/S74A-asvgf-asvgf-change-adaptive-rays.md) | 2026-10-12 | A-SVGF same-seed 1-ray checks on 1/9 resolved texels, lambda drives alpha and rays | pushed | 81c00734 |
 | [S74A-shadow](experiments/S74A-shadow-static-lamp-shadow-reuse.md) | 2026-10-12 | Hit shadow rays kept per 12.5 cm cell/lamp, invalidated by lamp epoch | pushed | 81c00734 |

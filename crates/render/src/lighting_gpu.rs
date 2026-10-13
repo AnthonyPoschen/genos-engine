@@ -351,6 +351,11 @@ const LIGHTING_ATROUS_META_WORDS: u64 = 1 + 1 + 64 + 5 + 5 * 64;
 fn lighting_sc_prefill_at() -> u64 {
     lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + 5 * LIGHTING_CACHE_SLOTS + 1 + 1 + 64 + 5 + 5 * 64
 }
+/// S73Q: plain-mean scratch, four words per batch entry. Matches LIGHTING_WRC_PLAIN_AT.
+fn lighting_wrc_plain_at() -> u64 {
+    lighting_sc_prefill_at() + LIGHTING_SC_PREFILL_MAX
+}
+const LIGHTING_WRC_PLAIN_WORDS: u64 = 4 * LIGHTING_CACHE_BATCH as u64;
 const LIGHTING_PASS_NAMES: [&str; 9] = [
     "lighting compact",
     "lighting place",
@@ -717,7 +722,7 @@ impl Gpu {
             assert!(lighting_sc_prefill_at() >= lighting_ckeys_words());
             assert_eq!(lighting_sc_prefill_at(), lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS);
             self.lighting.cache_keys = self.make_buffer_queues(
-                (lighting_sc_prefill_at() + LIGHTING_SC_PREFILL_MAX) * 4, // S73E: pre-fill list after the a-trous meta // a-trous meta after the S67/PR11 compose words // S78X: a-trous threshold, fraction, bins // S78Z: verify / wake words sit just before that // S78X lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
+                (lighting_wrc_plain_at() + LIGHTING_WRC_PLAIN_WORDS) * 4, // S73Q: plain-mean scratch // S73E: pre-fill list after the a-trous meta // a-trous meta after the S67/PR11 compose words // S78X: a-trous threshold, fraction, bins // S78Z: verify / wake words sit just before that // S78X lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
                 0x20 | 0x2 | 0x100 | 0x1,
                 Memory::Device,
                 &share,
@@ -1203,6 +1208,14 @@ impl Gpu {
                 (self.fns.cmd_write_timestamp)(cmd, 0x1, qp, 0);
             }
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.world_stats.buffer, 0, LIGHTING_STATS_BYTES, 0);
+            // S73Q: the plain-mean scratch starts at zero before this round's rays add into it.
+            (self.fns.cmd_fill_buffer)(
+                cmd,
+                self.lighting.cache_keys.buffer,
+                lighting_wrc_plain_at() * 4,
+                LIGHTING_WRC_PLAIN_WORDS * 4,
+                0,
+            );
             // The mature and young counts, rebuilt by the compact pass.
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, LIGHTING_CACHE_SLOTS * 4, 4, 0);
             // The WRC refresh lists' counts (change, background; lighting_cache.glsl).
@@ -1794,6 +1807,16 @@ impl Gpu {
                     self.lighting.cache_keys.buffer,
                     (minx + words) * 4,
                     words * 4,
+                    0,
+                );
+            }
+            if round {
+                // S73Q: same scratch clear on the inline light-cache round.
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.cache_keys.buffer,
+                    lighting_wrc_plain_at() * 4,
+                    LIGHTING_WRC_PLAIN_WORDS * 4,
                     0,
                 );
             }
