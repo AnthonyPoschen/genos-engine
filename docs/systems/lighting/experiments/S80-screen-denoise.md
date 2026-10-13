@@ -17,10 +17,11 @@ Stage 0 gathers one hash find per pixel. The key is the geometric axis stored
 in the G-buffer, not the shading normal. Empty texels and 25 cm cells are not
 filtered. The input is `lighting_svgf_in` (the texel's own mean times its sun
 gain). Stages 1..N are a B3 à-trous (Dammertz, HPG 2010: 1/16, 1/4, 3/8, 1/4,
-1/16) on a ping-pong in the picture buffer. The step is half the projected
-12.5 cm cell, times 2^i, clamped to 48 px. A full-cell step lands every pixel
-of a cell on the same texels, and the kernel then keeps a ramp as a hard grid.
-Depth, shading normal, and luminance stop
+1/16) on a ping-pong in the picture buffer. The step is 2^i pixels, clamped
+to 48. A step locked to the 12.5 cm cell samples the same texels for every
+pixel of that cell, and the later passes keep the grid. Taps inside one cell
+skip the luminance stop so the texel mixes with its neighbours. Farther taps
+still use it. Depth, shading normal, and luminance stop
 the blur. Compose reads the last iteration (slice 1) per pixel. Stage 6 still
 writes the cell (`LIGHTING_WORLD_AT.y`, freshness in the à-trous stamp) for
 the change test and for pixels the wavelet skipped. Showing that cell is one
@@ -47,15 +48,15 @@ the normal map, so a small camera move on one side of a cloth keeps the key.
 Deviations:
 
 - Taps are screen pixels, not hash cells.
-- The step is half a projected 12.5 cm cell, times 2^i, clamped at 48 px.
-  A full-cell step leaves the texel grid in the picture. It is not a fixed
-  pixel step and not an unclamped world step.
+- The step is 2^i pixels, clamped at 48. A cell-locked step leaves the texel
+  grid in the picture.
+- Taps inside one projected 12.5 cm cell skip the luminance stop. Farther
+  taps use it. A 1 px moment inside a cell is zero and would otherwise keep
+  the grid.
 - 25 cm cells are outside the wavelet. They blend in only when certainty is
   below 1.
-- Variance is this frame's 3×3 spatial moment, at one pixel and at one cell,
-  floored at `(denoise_variance * mean)^2`. The cell-stride moment is what
-  blurs a piecewise-constant texel grid. Without it phi is ~0 inside a cell
-  and the grid never blurs.
+- Variance is this frame's 3×3 spatial moment at one pixel, floored at
+  `(denoise_variance * mean)^2`. The in-cell taps do not use that moment.
 - Every configured iteration runs.
 - The whole picture is filtered every frame. Filtering only the shadow
   boundary would republish last frame. Layer 1 still decides which texels

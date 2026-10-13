@@ -15,16 +15,16 @@
 // Deviations, flagged:
 // - Taps are screen pixels, not hash cells. SVGF §4 walks a pixel image; the
 //   previous filter walked cache slots.
-// - The step is half the projected 12.5 cm cell, times 2^i, clamped to 48 px.
-//   A full-cell step samples the same texels for every pixel of a cell, so
-//   the grid survives a symmetric kernel. It is not a fixed 2^i pixel step.
+// - The step is 2^i pixels, clamped to 48. A step locked to the 12.5 cm cell
+//   samples the same texels for every pixel of that cell, so the grid survives.
+//   Taps inside one cell skip the luminance stop, so a piecewise-constant
+//   texel mixes with its neighbours. Farther taps still use it.
 // - 25 cm cells are not filtered. Scatter blends them in only when the
 //   wavelet's certainty is below 1 (Gortler pull, min(1, 4 wm/wall)).
-// - Variance is this frame's 3x3 spatial moment, at one pixel and at one
-//   cell, floored at (denoise_variance * mean)^2. There is no temporal
-//   variance (ADR 0012: no radiance history). The cell-stride moment is what
-//   lets a piecewise-constant 12.5 cm grid blur; a 1 px moment inside a cell
-//   is zero and phi would reject the neighbouring cell.
+// - Variance is this frame's 3x3 spatial moment at one pixel, floored at
+//   (denoise_variance * mean)^2. There is no temporal variance (ADR 0012: no
+//   radiance history). The 1 px moment inside a cell is zero; the in-cell
+//   taps do not use it, which is what lets the texel grid blur.
 // - Every configured iteration runs. A short filter where variance is low
 //   was rejected (S79). S79 is not evidence against this screen filter: that
 //   trial kept the million-slot launch.
@@ -111,13 +111,10 @@ int screen_cell_px(float dist) {
     return int(clamp(round(px), 1.0, 48.0));
 }
 
-int screen_step_px(float dist, uint iter) {
-    // Half a cell, then doubling. A step equal to the cell lands every pixel
-    // of that cell on the same texels, and a symmetric kernel keeps a linear
-    // ramp as a hard grid. The half-cell tap crosses the edge.
-    int cell = max(screen_cell_px(dist) / 2, 1);
-    float px = float(cell) * exp2(float(iter));
-    return int(clamp(round(px), 1.0, 48.0));
+int screen_step_px(uint iter) {
+    // Pixel steps. A step locked to the 12.5 cm cell samples the same texels
+    // for every pixel of that cell, and the later passes then keep the grid.
+    return int(min(exp2(float(iter)), 48.0));
 }
 
 ivec2 screen_project(vec3 world) {
@@ -232,10 +229,10 @@ void screen_atrous(uvec2 p, uint iter) {
     if (lighting_surface(p, pos, n, albedo, two_sided)) {
         dist = max(length(pos - scene.eye.xyz), 1.0e-3);
     }
-    int step = screen_step_px(dist, iter);
+    int step = screen_step_px(iter);
     ivec2 ip = ivec2(p);
     float mean = max(dot(rgb, LIGHTING_SVGF_LW), 1.0e-4);
-    float moment = max(screen_moment(src, ip, 1), screen_moment(src, ip, screen_cell_px(dist)));
+    float moment = screen_moment(src, ip, 1);
     float floor_v = lighting_denoise_variance() * mean;
     floor_v *= floor_v;
     float use_var = max(max(var, moment), floor_v);
@@ -273,7 +270,8 @@ void screen_atrous(uvec2 p, uint iter) {
             float wz = exp(-dz / (LIGHTING_SVGF_SIGMA_Z * max(step_m, LIGHTING_SC_TEXEL) + 1.0e-4));
             float wn = pow(max(dot(n, qn), 0.0), LIGHTING_SVGF_SIGMA_N);
             float wl = 1.0;
-            if (i != 0 || j != 0) {
+            float reach = length(vec2(float(i), float(j))) * float(step);
+            if ((i != 0 || j != 0) && reach > float(screen_cell_px(dist))) {
                 wl = exp(-abs(dot(qr, LIGHTING_SVGF_LW) - lp) / phi);
             }
             w *= wz * wn * wl;
