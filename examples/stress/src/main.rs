@@ -70,6 +70,8 @@ const USAGE: &str = "genos-stress [options]
                             steps 1/60 s a frame; exit 0 when every check passes
   --report DIR              where the script writes report.md, result.json and pictures
                             (default target/debug-reports/<script name>)
+  --wake legacy|rings        probe wake mode (GENOS_LIGHTING_WAKE is the mirror
+                            and applies only when this flag is omitted)
   --out DIR                 unfilled events (default ./genos-debug/unfilled)
   --unfilled[=0|1]          count unfilled pixels (GENOS_LIGHTING_UNFILLED is the mirror)
   --unfilled-tint[=0|1]     magenta tint; turns the count on (GENOS_LIGHTING_UNFILLED_TINT)
@@ -132,6 +134,8 @@ struct Options {
     script: Option<genos_debug::script::ScriptRun>,
     /// glTF files to place in the building: path, position and uniform scale.
     gltf: Vec<(PathBuf, [f32; 4])>,
+    /// Probe wake mode. Set, this wins over `GENOS_LIGHTING_WAKE`.
+    wake: Option<String>,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, text: &str) -> Result<T, String> {
@@ -184,6 +188,7 @@ fn options() -> Result<Options, String> {
         bench_out: None,
         script: None,
         gltf: Vec::new(),
+        wake: None,
     };
     let mut report: Option<PathBuf> = None;
     let mut trace = false;
@@ -262,6 +267,13 @@ fn options() -> Result<Options, String> {
             }
             "--gltf" => opts.gltf.push((PathBuf::from(value()?), gltf_at)),
             "--report" => report = Some(PathBuf::from(value()?)),
+            "--wake" => {
+                let text = value()?;
+                if genos_scene::WakeMode::parse(&text).is_none() {
+                    return Err(format!("--wake is legacy or rings, got {text}"));
+                }
+                opts.wake = Some(text);
+            }
             "--out" => {
                 // The renderer reads this from the process arguments.
                 let _dir = value()?;
@@ -437,6 +449,17 @@ fn run() -> Result<(), String> {
     stage.boxes_still = opts.still_boxes;
     if let Some(path) = &opts.scene {
         stage.set_room(genos_scene::load_path(path)?);
+    }
+    if let Some(mode) = &opts.wake {
+        // apply_env overlays a set GENOS_LIGHTING_WAKE every frame. Drop it so
+        // the argument is the value the draw keeps.
+        std::env::remove_var("GENOS_LIGHTING_WAKE");
+        stage
+            .world
+            .scene
+            .lighting
+            .set_key("wake", mode)
+            .map_err(|err| format!("--wake: {err}"))?;
     }
     for (path, [x, y, z, scale]) in &opts.gltf {
         let model =

@@ -21,6 +21,57 @@ Legacy baseline, before this scheduler: [WAKE0](WAKE0-legacy-trace-baseline.md).
 
 Rings, same window and hall, budget 16: frames 0–7 still trace the stratum (1862 probes, 119168 rays) because the strata are not held yet. From frame 8, a still frame traces 9 probes and 9 rays, wakes 0, and tests 0 rings. That is the verification budget (16 slots, about half placed). 9 against 1862 is about a 200× cut in traced probes on a held still frame.
 
+A 1080p grid at the 16 px tile is 120×68 = 8160 slots. The 320×180 hall placed 1862/3600 of them. The same fraction is about 4200 placed probes: legacy traces about one check ray each, rings traces about the budget (16). That 1080p figure is an expectation, not a measurement.
+
+## Comparison
+
+[DDGI] (Majercik, Guertin, Nowrouzezahrai, McGuire, "Dynamic Diffuse Global Illumination with Ray-Traced Irradiance Fields", JCGT 8(2), 2019, pp. 1–30, http://jcgt.org/published/0008/02/01/) updates every probe every frame. Section 4.2 calls that the conservative choice: all probes stay active. Section 4.4 blends new irradiance into the probe with hysteresis α in 0.85–0.98 (equation 1), so a change fades in over several frames. Multi-bounce light is the same blend, amortized. The paper discusses turning probes off and does not test rings around a change.
+
+[DDGI-P] (Majercik, Marrs, Spjut, McGuire, "Scaling Probe-Based Real-Time Dynamic Global Illumination for Production", JCGT 10(2), 2021, https://jcgt.org/published/0010/02/01/) adds a probe state machine that sleeps probes which do not affect the image (about 30–50% of the update) and places cascades in camera-locked volumes. A per-frame ray budget is mentioned as future work; the shipped control is rays per probe and how many probes exist. Sleeping probes spend nothing. The probes that stay awake still spend their whole ray budget. There is no change-driven ring.
+
+[Lumen] (Wright, Narkowicz, Kelly, "Lumen: Real-time Global Illumination in Unreal Engine 5", SIGGRAPH 2022 Advances in Real-Time Rendering in Games, https://advances.realtimerendering.com/s2022/SIGGRAPH2022-Advances-Lumen-Wright%20et%20al.pdf) traces a screen probe on every 4×4 tile every frame, jittered. Surface-cache cards are the budgeted part: priority is LastUsed − LastUpdated. World and screen radiance caches are budgeted the same way. Screen probes are not selected by a group test.
+
+Deviations, on purpose:
+
+- The scheduler is doubling rings, Dorfman group testing (split only a group that changed), and a galloping / hierarchical-radiosity refinement, plus a verification budget that tightens the tolerance. That combination is not DDGI's grid update and not Lumen's per-frame screen probes.
+- DDGI blends a new sample into the probe texel (hysteresis). Here a failed ring fully traces a sparse quarter of the probes inside it, and the existing probe filter (`gdirty`) spreads that to neighbours. Probes inside the first radius are traced in full, which is denser than the outer quarter.
+- A verification miss tightens the tolerance. It does not start a ring.
+- A big change (the sun, a lamp added or removed, a colour change above 0.75 relative, a change list that overflowed) traces every placed probe once. A 2× colour is a ring, not that full wake.
+- Ring progress is stored per flight slot, so the frontier advances every other frame. A few frames of bounce lag is the point. The frame is never held whole: rings mode keeps place, gather, trace, direct, and the filter after the scene has settled. Legacy still drops those passes when it settles.
+- DDGI's sleeping probes and Lumen's screen probes both spend a fixed budget on whatever is awake. Legacy here can go fully idle. Rings keeps only the verification budget on a still scene (9 traces against 1862 on the held hall frame above).
+
+## Lavapipe cases
+
+`crates/render/tests/lighting_frame.rs`, 320×180, tile 16 (240 slots), world cache off, bounces 0, one point lamp in a corner:
+
+- `rings_still_room_wakes_about_zero` — a held frame wakes 0 and tests 0 rings, and traces under 40 probes (budget 8).
+- `rings_corner_lamp_wakes_nearby_probes` — after the lamp steps 0.6 m, woken probes stay within the 2 m cap of the old or new centre, at least one is inside 1 m, a ring is tested, and the unique set is under half the placed probes.
+- `rings_verification_catches_a_missed_change` — ring cap 0, budget 48 (period 5). A 4× colour (relative 0.6, not a full wake) produces a verification miss within 6 frames of a clean frame, with rings and wakes still 0.
+
+The printed `rings still room` / `rings corner` / `rings miss` lines are the counts. They are copied here after the run.
+
+## Owner A/B
+
+`genos-stress --wake legacy|rings` writes `wake` and removes `GENOS_LIGHTING_WAKE` for the process, so the flag wins. The variable is the mirror and applies only when the flag is omitted. `GENOS_LIGHTING_DEBUG=1` prints `lightingwake` (traced, rays, rings, splits, woken, hits, misses). `GENOS_GPU_TIMES=30` prints `GPU_MS`. Both go to stderr. The log is the redirect below. `--out` is the unfilled-event directory (`./genos-debug/unfilled` by default) and is not the wake log.
+
+Moving stress scene, default hall view:
+
+```
+mkdir -p ./genos-debug/wake-moving-legacy ./genos-debug/wake-moving-rings
+GENOS_GPU_TIMES=30 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-stress -- --proof --no-panel --size 1920x1080 --frames 180 --dynamic 50 --freeze-sun --still-boxes --wake legacy > ./genos-debug/wake-moving-legacy/run.txt 2>&1
+GENOS_GPU_TIMES=30 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-stress -- --proof --no-panel --size 1920x1080 --frames 180 --dynamic 50 --freeze-sun --still-boxes --wake rings > ./genos-debug/wake-moving-rings/run.txt 2>&1
+```
+
+Bounce corner. The gi-check view is position `[3.5, 1.6, 3.5]`, look-at `[0.2, 0.4, 0.2]` (`examples/stress/scripts/gi_check/views.rhai`). Yaw −π/4 and pitch −0.252 match that look. `--view bounce` is Room A, not this corner.
+
+```
+mkdir -p ./genos-debug/wake-corner-legacy ./genos-debug/wake-corner-rings
+GENOS_GPU_TIMES=30 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-stress -- --proof --no-panel --size 640x360 --frames 180 --dynamic 0 --still-boxes --freeze-sun --time 0.25 --eye 3.5 1.6 3.5 -0.785398 -0.252 --wake legacy > ./genos-debug/wake-corner-legacy/run.txt 2>&1
+GENOS_GPU_TIMES=30 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-stress -- --proof --no-panel --size 640x360 --frames 180 --dynamic 0 --still-boxes --freeze-sun --time 0.25 --eye 3.5 1.6 3.5 -0.785398 -0.252 --wake rings > ./genos-debug/wake-corner-rings/run.txt 2>&1
+```
+
+Grep `lightingwake` in those four `run.txt` files.
+
 Numbers context: the scene, GPU and resolution are not recorded for these figures unless stated above. For S76B-D onward, still/moving ms and fps are the bisect-log (steps.md) still and moving runs; pop is the share of pixel-frames stepping more than 0.01 from their 9-frame average (definition from the gi-check fill run), at frames 20-80 / 80-320; brightness is smoke mean luminance at pose a ("lum a"). Anything not given here was not recorded.
 
 ## Screenshots
