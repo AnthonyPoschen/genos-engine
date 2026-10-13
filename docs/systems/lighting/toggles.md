@@ -83,3 +83,5 @@ GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high make stress
 ```
 
 `make stress` is `cargo run --release -p genos-stress`. The `LIGHTING_MS` line names the passes and appends `cache_rays`, `shadows`, and `prefill`. `prefill` is 1 when the scout was due and 0 when it was not. The scout shares the cache-ray dispatch, so this is not a separate millisecond.
+
+Lavapipe checks the look, not the 1080p cost. `presets_and_toggles_match_their_look` draws each preset and each feature off and rejects an unwritten frame, a saturated field, a flat-colour blowout, blue tiles, and white boxes. A still at 320p is hit-dominated, so it does not reproduce the owner's still-light millisecond.
