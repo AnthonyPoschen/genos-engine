@@ -61,6 +61,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - A small sun step (departure 14, [SUN](experiments/SUN-small-sun-step.md)) amortises indirect over bands. Schied et al., Spatiotemporal Variance-Guided Filtering, HPG 2017, and Wright et al., Lumen, SIGGRAPH 2022, recompute every pixel every frame. One compose dispatch writes direct everywhere and walks probes on the current band. Neighbour blend is the existing compose weights, not a per-lamp irradiance layer. After a point lamp holds, four frames shade every kept stratum. That skips the S69C halfway early-out for those frames.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
 - Flat ambient when bounce is 0 or GI is off is a constant, a classic hemisphere (sky toward the normal, ground away from it), a sun-height day lerp, or a time-of-day curve (night, dawn, noon, dusk). The curve also scales sky colour relative to its noon key. No new GI algorithm. Bounce 0 records no GI dispatch. Bounce 1 records the probe passes and not the cache-to-cache passes. Bounce 2 records those passes. The count does not add a bounce algorithm.
+- The shader GI bit stays off unless probes or the world cache allocated the buffers. Otherwise those buffers are the 4096-byte stand-in, and pixel reuse and bounce reads would index past it. The settings struct still records the request.
 
 ## Experiment index
 
