@@ -515,10 +515,8 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     assert!(back.ran, "the levels ran after the switch back");
 }
 
-fn denoise_settings(res: &str) -> LightingSettings {
-    let mut settings = LightingSettings::preset(LightingPreset::High);
-    settings.set_key("denoise_res", res).expect("denoise_res");
-    settings
+fn denoise_settings() -> LightingSettings {
+    LightingSettings::preset(LightingPreset::High)
 }
 
 fn view_at(renderer: &mut Renderer, mode: ViewMode) {
@@ -602,8 +600,8 @@ fn decode_normal(px: &[u8]) -> [f64; 3] {
     ]
 }
 
-/// A pixel on a depth or normal break. The half-resolution upsample is not
-/// allowed to smear light across that break.
+/// A pixel on a depth or normal break. The adaptive skip is not allowed to
+/// smear light across that break.
 fn depth_edge(depth: &[u8], normal: &[u8], index: usize, width: usize) -> bool {
     let x = (index / 4) % width;
     let y = (index / 4) / width;
@@ -622,91 +620,8 @@ fn depth_edge(depth: &[u8], normal: &[u8], index: usize, width: usize) -> bool {
     dot < 0.85
 }
 
-/// Half-resolution bounce filter against the full-resolution picture.
-///
-/// Mean and p99 are over per-pixel channel error. Edge pixels are depth or
-/// normal breaks. Flicker is the luminance variance of a still camera.
-#[test]
-fn half_res_atrous_matches_the_full_reference() {
-    let (_gpu, mut window, mut renderer) = open();
-    let world = shipped_hall();
-    let camera = Camera::opening();
-    renderer.set_lighting_settings(denoise_settings("full"));
-    view_at(&mut renderer, ViewMode::Bounce);
-    let mut full_frames = Vec::new();
-    for _ in 0..6 {
-        full_frames.push(draw(&mut window, &mut renderer, &world, &camera));
-    }
-    let reference = full_frames.last().expect("reference").clone();
-    let full_flicker = flicker_variance(&full_frames[4..]);
-
-    view_at(&mut renderer, ViewMode::Direct);
-    let direct_full = draw(&mut window, &mut renderer, &world, &camera);
-    view_at(&mut renderer, ViewMode::Depth);
-    let depth = draw(&mut window, &mut renderer, &world, &camera);
-    view_at(&mut renderer, ViewMode::Normal);
-    let normal = draw(&mut window, &mut renderer, &world, &camera);
-
-    renderer.set_lighting_settings(denoise_settings("half"));
-    view_at(&mut renderer, ViewMode::Bounce);
-    let mut half_frames = Vec::new();
-    for _ in 0..4 {
-        half_frames.push(draw(&mut window, &mut renderer, &world, &camera));
-    }
-    // The third half frame has run the lattice for more than one dispatch.
-    let half = &half_frames[2];
-    let errors = pixel_errors(&reference, half);
-    let mean = mean_of(&errors);
-    let mut sorted = errors.clone();
-    let p99 = percentile(&mut sorted, 0.99);
-    let width = 320usize;
-    let mut edge = Vec::new();
-    let mut flat = Vec::new();
-    for (i, e) in errors.iter().copied().enumerate() {
-        let index = i * 4;
-        if index + 4 >= depth.len() || index + width * 4 >= depth.len() {
-            continue;
-        }
-        if depth_edge(&depth, &normal, index, width) {
-            edge.push(e);
-        } else {
-            flat.push(e);
-        }
-    }
-    let edge_mean = mean_of(&edge);
-    let flat_mean = mean_of(&flat);
-    let flicker = flicker_variance(&half_frames);
-    eprintln!(
-        "half vs full mean {mean:.3} p99 {p99:.3} edge {edge_mean:.3} ({}) flat {flat_mean:.3} flicker {flicker:.3} full_flicker {full_flicker:.3}",
-        edge.len()
-    );
-    assert!(
-        mean < 3.0,
-        "half-res mean error {mean:.3} against the full-res bounce"
-    );
-    assert!(p99 < 12.0, "half-res p99 error {p99:.3}");
-    assert!(
-        edge_mean < flat_mean * 6.0 + 2.0,
-        "edge error {edge_mean:.3} smears past the flat error {flat_mean:.3}"
-    );
-    assert!(
-        flicker < full_flicker * 4.0 + 1.0,
-        "still-camera flicker {flicker:.3} full {full_flicker:.3}"
-    );
-
-    view_at(&mut renderer, ViewMode::Direct);
-    let direct_half = draw(&mut window, &mut renderer, &world, &camera);
-    let direct_gap = mean_abs(&direct_full, &direct_half);
-    eprintln!("direct full vs half {direct_gap:.3}");
-    assert!(
-        direct_gap < 1.0,
-        "direct light moved with the bounce filter: {direct_gap:.3}"
-    );
-}
-
-fn adaptive_settings(res: &str, variance: &str) -> LightingSettings {
+fn adaptive_settings(variance: &str) -> LightingSettings {
     let mut settings = LightingSettings::preset(LightingPreset::High);
-    settings.set_key("denoise_res", res).expect("denoise_res");
     settings
         .set_key("denoise_adaptive", "on")
         .expect("denoise_adaptive");
@@ -771,7 +686,7 @@ fn adaptive_atrous_matches_the_full_reference() {
     let (_gpu, mut window, mut renderer) = open();
     let world = shipped_hall();
     let camera = Camera::opening();
-    renderer.set_lighting_settings(denoise_settings("full"));
+    renderer.set_lighting_settings(denoise_settings());
     view_at(&mut renderer, ViewMode::Bounce);
     let mut full_frames = Vec::new();
     for _ in 0..6 {
@@ -787,9 +702,8 @@ fn adaptive_atrous_matches_the_full_reference() {
     let direct_full = draw(&mut window, &mut renderer, &world, &camera);
 
     for (name, settings) in [
-        ("adaptive 0.02", adaptive_settings("full", "0.02")),
-        ("adaptive 0.10", adaptive_settings("full", "0.1")),
-        ("half+adaptive", adaptive_settings("half", "0.02")),
+        ("adaptive 0.02", adaptive_settings("0.02")),
+        ("adaptive 0.10", adaptive_settings("0.1")),
     ] {
         renderer.set_lighting_settings(settings);
         view_at(&mut renderer, ViewMode::Bounce);
@@ -830,7 +744,7 @@ fn adaptive_skip_keeps_the_bounce_bright() {
     let camera = Camera::opening();
     let adaptive = {
         let (_gpu, mut window, mut renderer) = open();
-        renderer.set_lighting_settings(adaptive_settings("full", "0.1"));
+        renderer.set_lighting_settings(adaptive_settings("0.1"));
         view_at(&mut renderer, ViewMode::Bounce);
         let mut frames = Vec::new();
         for _ in 0..4 {
@@ -864,10 +778,7 @@ fn adaptive_skip_keeps_the_bounce_bright() {
     // The bounce view on this hall is dim (luma about 2.6). A black frame is
     // not a comparison. Leaving A unpublished measured mean 0.133 p99 1.0
     // here; the 4070's unpublished A was mean 15.9 p99 41. Both fail below.
-    assert!(
-        y_one > 1.0,
-        "one-iteration bounce is empty ({y_one:.2})"
-    );
+    assert!(y_one > 1.0, "one-iteration bounce is empty ({y_one:.2})");
     assert!(
         mean < 0.05,
         "adaptive skip mean error {mean:.3} against one wavelet"
@@ -880,71 +791,4 @@ fn adaptive_skip_keeps_the_bounce_bright() {
         y_skip + 4.0 >= y_one,
         "adaptive skip darkened the bounce: luma {y_skip:.2} one-iter {y_one:.2}"
     );
-}
-
-fn tile_settings(res: &str, adaptive: bool) -> LightingSettings {
-    let mut settings = LightingSettings::preset(LightingPreset::High);
-    settings.set_key("denoise_res", res).expect("denoise_res");
-    settings
-        .set_key("denoise_tiles", "on")
-        .expect("denoise_tiles");
-    if adaptive {
-        settings
-            .set_key("denoise_adaptive", "on")
-            .expect("denoise_adaptive");
-    }
-    settings
-}
-
-/// Shared-memory tiles against the scalar full-resolution picture.
-///
-/// Tiles are off on every preset. This turns them on for the full wavelet, the
-/// half lattice, and half plus adaptive, which is the combination the 4070
-/// timed and which no preset selects.
-#[test]
-fn tiled_atrous_matches_the_full_reference() {
-    let (_gpu, mut window, mut renderer) = open();
-    let world = shipped_hall();
-    let camera = Camera::opening();
-    renderer.set_lighting_settings(denoise_settings("full"));
-    view_at(&mut renderer, ViewMode::Bounce);
-    let mut full_frames = Vec::new();
-    for _ in 0..6 {
-        full_frames.push(draw(&mut window, &mut renderer, &world, &camera));
-    }
-    let reference = full_frames.last().expect("reference").clone();
-    let full_flicker = flicker_variance(&full_frames[4..]);
-    view_at(&mut renderer, ViewMode::Depth);
-    let depth = draw(&mut window, &mut renderer, &world, &camera);
-    view_at(&mut renderer, ViewMode::Normal);
-    let normal = draw(&mut window, &mut renderer, &world, &camera);
-    view_at(&mut renderer, ViewMode::Direct);
-    let direct_full = draw(&mut window, &mut renderer, &world, &camera);
-
-    for (name, settings) in [
-        ("tiles", tile_settings("full", false)),
-        ("half+tiles", tile_settings("half", false)),
-        ("half+adaptive+tiles", tile_settings("half", true)),
-    ] {
-        renderer.set_lighting_settings(settings);
-        view_at(&mut renderer, ViewMode::Bounce);
-        let mut frames = Vec::new();
-        for _ in 0..4 {
-            frames.push(draw(&mut window, &mut renderer, &world, &camera));
-        }
-        assert_bounce_close(
-            name,
-            &reference,
-            &frames[2],
-            &depth,
-            &normal,
-            &frames,
-            full_flicker,
-        );
-        view_at(&mut renderer, ViewMode::Direct);
-        let direct = draw(&mut window, &mut renderer, &world, &camera);
-        let gap = mean_abs(&direct_full, &direct);
-        eprintln!("{name} direct {gap:.3}");
-        assert!(gap < 1.0, "{name} direct moved: {gap:.3}");
-    }
 }

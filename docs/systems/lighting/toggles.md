@@ -24,7 +24,7 @@ Each feature can be turned off. Off means the pass is not recorded and, where th
 | Bounces | `0` is direct light plus flat ambient: no GI dispatch is recorded and the GI buffers are not allocated. `1` traces screen probes and shades their hits, and does not record the surface-cache, cache-ray, or a-trous dispatches. `2` allows cache-to-cache and records those dispatches. `unlimited` is the tuned path. A lower count omits the dispatches; it does not run them and zero the colour | `bounces` |
 | Probes | Place, trace, gather, filter | `probe_rays` (4..64), `probe_tile` (0 = the picture-height rule), `probe_refresh`, `probe_stale` |
 | World cache | Surface cache, world mode 3. Mode 0 is probe GI. The a-trous filter runs only in mode 3. A still probe-only scene settles once the light has held: probes, cache rays, and hit lighting stop, and only pixel direct and compose run, so off does not cost more than on. A moving frame keeps the probe passes. Before that settle, a still pixel still reuses direct light | `world_cell`, `world_refresh`, `world_stale` |
-| Denoiser | The a-trous dispatches. Compose then shows each texel's own mean, so it does not walk the parent field the push would have filled. The wavelet filters bounce light only; pixel direct is composed afterwards and stays sharp | `denoise_iters` (1, 3, or 5), `denoise_dirty`, `denoise_res` (`full` or `half`), `denoise_adaptive`, `denoise_variance`, `denoise_tiles` |
+| Denoiser | The a-trous dispatches. Compose then shows each texel's own mean, so it does not walk the parent field the push would have filled. The wavelet filters bounce light only; pixel direct is composed afterwards and stays sharp | `denoise_iters` (1, 3, or 5), `denoise_dirty`, `denoise_adaptive` (experimental, off on high), `denoise_variance` |
 | Compose reuse | The indirect block list. The compose pass still runs, over the whole image, and does not read the key table | `compose_reuse` |
 | Sky | Sky radiance on rays that miss. The scene sky colour stays; this bit stops the lighting from reading it | `sky` |
 | Emissive | Emitted light added in the direct pass and in compose | `emissive` |
@@ -46,7 +46,7 @@ The S78S isolate toggles (`GENOS_LIGHTING_TOGGLES`: `freeze_cache`, `direct_only
 | `gi-1bounce` | Screen probes, 64 rays, one bounce. Surface cache, denoiser, and prefill off | Probe passes only. No surface-cache, cache-ray, or a-trous dispatches |
 | `low` | Probe GI, 16 rays, 32 px tile, refresh every 2 frames, one bounce, budget shift 2 (budgets / 4), shadow cell 0.25 m, max 4 lights, 1 full-resolution adaptive a-trous iteration stored but the filter does not run (no surface cache), prefill off, day ambient at 0.35. Gather bins `probe_rays`, not a fixed 64 | Probe GI. One bounce shades probe hits and does not record the surface-cache, cache-ray, or a-trous dispatches. No prefill |
 | `medium` | Surface cache, 32 rays, two bounces, budget shift 1 (budgets / 2), max 8 lights, 3 full-resolution a-trous iterations, adaptive passes at variance 0.02, prefill, day ambient. The push reads the last iteration that ran, copied into buffer A | Surface cache and two bounces, half the ray budget. Adaptive drops settled wavelet iterations |
-| `high` | Every feature on, unlimited bounces, 64 rays, tile from the picture height, refresh every frame, shadow cell 0.125 m, max lights unlimited, 5 full-resolution a-trous iterations, compose reuse, sky, emissive, prefill. Day ambient is the fallback for when GI is turned off. Adaptive passes and the half-resolution and tile knobs stay off | The tuned path. Same dispatches as before this struct existed |
+| `high` | Every feature on, unlimited bounces, 64 rays, tile from the picture height, refresh every frame, shadow cell 0.125 m, max lights unlimited, 5 full-resolution scalar a-trous iterations, compose reuse, sky, emissive, prefill. Day ambient is the fallback for when GI is turned off. Adaptive passes stay off | The tuned path. Same dispatches as before this struct existed |
 
 `high` on a due frame builds the same group list the frame recorded before settings existed. Shader gates load the control block and fall through when the bits match that path. The default shadow cell is 0.125 m and the shader divides by the `LIGHTING_SC_TEXEL` constant, so a still frame stays on the old quantisation. A different `shadow_cell` is the variable division.
 
@@ -60,7 +60,7 @@ The text form is `LightingSettings::to_text` / `parse`. Floats print with their 
 
 `Renderer::set_lighting_settings` holds an override until `clear_lighting_override`. A game that owns the scene writes `scene.lighting` and leaves the override clear. The draw copies the override or the scene, then applies launch locks. `--preset`, `--bounces`, and `--ambient` win every frame. `GENOS_LIGHTING_PRESET`, `GENOS_LIGHTING_BOUNCES`, and `GENOS_LIGHTING_AMBIENT` apply only when that argument was omitted, and then they win every frame. `--preset` or a set `GENOS_LIGHTING_PRESET` replaces the struct, then the other locks overlay one key each. `--time-of-day H` or `--time-of-day HH:MM` sets the stress start clock (0 midnight, 6 dawn, 12 noon, 18 dusk) and keeps `GENOS_LIGHTING_TIME` from replacing it. When that argument was omitted, a set `GENOS_LIGHTING_TIME` holds that hour. The scene clock survives a preset replace unless the time mirror is the lock. Any other `GENOS_LIGHTING_*` variable that is set still wins every frame for the key it names. `GENOS_LIGHTING_COMPOSE_ALL` forces compose reuse off.
 
-The stress debug menu edits `world.scene.lighting` through `set_key`. The knobs are the preset, each feature switch, and the quality knobs (max lights, refresh, resolution scale, shadow filter, GI refresh, budget shift, probe rays, probe and world staleness, denoiser iterations, denoiser resolution, adaptive passes, variance threshold, shared-memory tiles, ambient mode). The next draw picks that up.
+The stress debug menu edits `world.scene.lighting` through `set_key`. The knobs are the preset, each feature switch, and the quality knobs (max lights, refresh, resolution scale, shadow filter, GI refresh, budget shift, probe rays, probe and world staleness, denoiser iterations, adaptive passes, variance threshold, ambient mode). The next draw picks that up.
 
 ## MCP
 
@@ -75,7 +75,7 @@ GPU times need `--gpu-times N` (or `GENOS_GPU_TIMES` when that argument was omit
 
 ## Owner commands
 
-Run these on the owner machine (RTX 4070, 1920×1080, the moving stress scene). They are not the lavapipe check. A flag wins over the matching `GENOS_LIGHTING_*` variable. An omitted flag leaves that variable in effect. `make stress` is `cargo run --release -p genos-stress`. The `atrous` column is the one that should move. Lavapipe does not time the GPU. High stays full-resolution scalar until these are compared.
+Run these on the owner machine (RTX 4070, 1920×1080, the moving stress scene). They are not the lavapipe check. A flag wins over the matching `GENOS_LIGHTING_*` variable. An omitted flag leaves that variable in effect. `make stress` is `cargo run --release -p genos-stress`. The `atrous` column is the one that should move. Lavapipe does not time the GPU. High is the full-resolution scalar wavelet.
 
 ```
 cargo run --release -p genos-stress -- --preset potato --gpu-times 30
@@ -86,21 +86,12 @@ cargo run --release -p genos-stress -- --preset medium --gpu-times 30
 cargo run --release -p genos-stress -- --preset high --gpu-times 30
 ```
 
-A/B the denoiser on the high preset. Full resolution, adaptive off, and tiles off are the default.
+Adaptive passes are experimental and off on high. They drop later wavelet iterations on texels whose sample count is high or whose relative variance `sqrt(var) / mean` is under `denoise_variance` (stored at 0.02). The last stage publishes the level that ran, so a clean skip does not leave the push on an empty buffer. Medium turns adaptive on. A threshold of 0.1 forces one iteration. Half-res and shared-memory tiles were removed after they lost the 4070 A/B (S79).
 
 ```
-cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res full
-cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res half
 cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-adaptive on --denoise-variance 0.02
-cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-tiles on
-cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-tiles off
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-adaptive off
 ```
-
-`denoise_res=half` runs the wavelet on bounce light at the even-even surface-cache lattice and upsamples with depth and normal. `full` is the five-iteration filter. Direct light is not an input. The mode does not allocate or reuse a screen-sized image. On the 4070, half was slower than full (moving 17.8 ms vs 11.7, still 9.5 vs 3.0) and no preset selects it.
-
-Adaptive passes drop later wavelet iterations on texels whose sample count is high or whose relative variance `sqrt(var) / mean` is under `denoise_variance` (default 0.02). The last stage publishes the level that ran, so a clean skip does not leave the push on an empty buffer. High leaves adaptive off. Medium turns it on. A threshold of 0.1 forces one iteration.
-
-`denoise_tiles=on` gathers each 8×8 wavelet footprint once into shared memory. Steps of 8 and 16 cells stay on the scalar kernel. No preset turns tiles on. On the 4070 they were slower (moving 18.3 ms vs 11.6 with tiles off, still 8.9 vs full 3.0): levels 1–5 leave the work lists, and the lavapipe-safe kernel always runs eight barrier pairs.
 
 `make stress` is `cargo run --release -p genos-stress` and does not forward these arguments, so the commands above call cargo directly. `GENOS_GPU_TIMES` and `GENOS_LIGHTING_PRESET` still apply when the matching argument was omitted. The `LIGHTING_MS` line names the passes and appends `cache_rays`, `shadows`, and `prefill`. `prefill` is 1 when the scout was due and 0 when it was not. The scout shares the cache-ray dispatch, so this is not a separate millisecond.
 

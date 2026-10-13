@@ -14,18 +14,12 @@ fn main() {
         "shaders/lighting_check.comp",
         &out.join("lighting_check.comp.spv"),
     );
-    let atrous_tile = compile(
-        "shaders/lighting_atrous_tile.comp",
-        &out.join("lighting_atrous_tile.comp.spv"),
-    );
-    // High's a-trous. Half, adaptive, and tiles are compiled out (S79).
+    // High's a-trous. Adaptive is compiled out (S79).
     let atrous_plain = compile_define(
         "shaders/lighting_atrous.comp",
         &out.join("lighting_atrous_plain.comp.spv"),
         "LIGHTING_DENOISE_PLAIN",
     );
-    println!("cargo:rerun-if-changed=shaders/lighting_atrous_tile.comp");
-    println!("cargo:rerun-if-changed=shaders/lighting_atrous_tile_unroll.glsl");
     let lighting: Vec<(&str, PathBuf)> = [
         ("GBUFFER_VERT_SPV", "gbuffer.vert"),
         ("GBUFFER_FRAG_SPV", "gbuffer.frag"),
@@ -67,10 +61,6 @@ fn main() {
             path.display()
         ));
     }
-    glue_text.push_str(&format!(
-        "pub static LIGHTING_ATROUS_TILE_SPV: &[u8] = include_bytes!(\"{}\");\n",
-        atrous_tile.display()
-    ));
     glue_text.push_str(&format!(
         "pub static LIGHTING_ATROUS_PLAIN_SPV: &[u8] = include_bytes!(\"{}\");\n",
         atrous_plain.display()

@@ -210,33 +210,6 @@ pub struct WorldCacheSettings {
     pub staleness_frames: u32,
 }
 
-/// Where the a-trous wavelet runs.
-///
-/// `Full` filters every surface-cache texel. `Half` filters the bounce field on
-/// the even-even lattice, then upsamples. Direct light is not an input either way.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DenoiseResolution {
-    Full,
-    Half,
-}
-
-impl DenoiseResolution {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Full => "full",
-            Self::Half => "half",
-        }
-    }
-
-    pub fn parse(text: &str) -> Option<Self> {
-        match text {
-            "full" => Some(Self::Full),
-            "half" | "half-res" | "half_res" => Some(Self::Half),
-            _ => None,
-        }
-    }
-}
-
 /// SVGF a-trous filter of the surface cache.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DenoiserSettings {
@@ -245,24 +218,22 @@ pub struct DenoiserSettings {
     pub iterations: u32,
     /// Dirty-list fraction before the dense sweep. 0 is always dense, 1 keeps lists.
     pub dirty_fraction: f32,
-    /// Full-resolution wavelet, or half-resolution bounce filter plus upsample.
-    pub resolution: DenoiseResolution,
     /// Drop later wavelet iterations where the texel's history is stable.
+    /// Off unless the experimental knob is on. See S79.
     pub adaptive: bool,
     /// Relative luminance deviation `sqrt(variance) / mean` under which a texel
-    /// counts as stable. 0 leaves the decision to sample age.
+    /// counts as stable. 0 leaves the decision to sample age. Ignored unless
+    /// adaptive is on.
     pub variance_threshold: f32,
-    /// Shared-memory tiles for wavelet levels 1-5. The scalar kernel stays available.
-    pub tiles: bool,
 }
 
 impl DenoiserSettings {
-    /// Full-resolution scalar wavelet, adaptive off, tiles off.
+    /// Full-resolution scalar wavelet, adaptive off.
     ///
-    /// That is the gi-v2 kernel. It has its own pipeline so the half-res,
-    /// adaptive, and tile branches are not in the shader the 4070 runs for high.
+    /// That is the gi-v2 kernel. It has its own pipeline so the adaptive branch
+    /// is not in the shader the 4070 runs for high.
     pub fn plain(self) -> bool {
-        self.resolution == DenoiseResolution::Full && !self.adaptive && !self.tiles
+        !self.adaptive
     }
 }
 
@@ -375,12 +346,9 @@ impl LightingSettings {
                 s.probes.refresh_frames = 2;
                 s.world_cache.enabled = false;
                 s.denoiser.iterations = 1;
-                // The filter does not run (no surface cache). Half-res and tiles
-                // lost the 4070 A/B (S79), so turning the cache on stays on the
-                // full wavelet and drops settled iterations instead.
-                s.denoiser.resolution = DenoiseResolution::Full;
+                // The filter does not run (no surface cache). Adaptive drops
+                // settled iterations if the cache is turned on. See S79.
                 s.denoiser.adaptive = true;
-                s.denoiser.tiles = false;
                 s.prefill = false;
                 s.gi.refresh_frames = 2;
                 s.gi.budget_shift = 2;
@@ -392,11 +360,9 @@ impl LightingSettings {
                 s.bounce.count = 2;
                 s.probes.rays = 32;
                 s.denoiser.iterations = 3;
-                // Half-res and tiles were slower than this full wavelet on the
-                // 4070 (S79). Adaptive is the cut that got cheaper.
-                s.denoiser.resolution = DenoiseResolution::Full;
+                // Adaptive drops settled wavelet iterations. Half-res and tiles
+                // were removed after they lost the 4070 A/B (S79).
                 s.denoiser.adaptive = true;
-                s.denoiser.tiles = false;
                 s.gi.budget_shift = 1;
                 s.ambient.mode = AmbientMode::Day;
             }
@@ -446,12 +412,8 @@ impl LightingSettings {
                 enabled: true,
                 iterations: 5,
                 dirty_fraction: 0.25,
-                // High stays on the full-resolution wavelet until it is benchmarked.
-                resolution: DenoiseResolution::Full,
                 adaptive: false,
                 variance_threshold: 0.02,
-                // High stays on the scalar kernel until the tiles are benchmarked.
-                tiles: false,
             },
             compose_reuse: true,
             sky: true,
@@ -754,14 +716,12 @@ impl LightingSettings {
             "denoise_dirty={}",
             num_text(self.denoiser.dirty_fraction)
         );
-        let _ = writeln!(out, "denoise_res={}", self.denoiser.resolution.name());
         let _ = writeln!(out, "denoise_adaptive={}", bit(self.denoiser.adaptive));
         let _ = writeln!(
             out,
             "denoise_variance={}",
             num_text(self.denoiser.variance_threshold)
         );
-        let _ = writeln!(out, "denoise_tiles={}", bit(self.denoiser.tiles));
         let _ = writeln!(out, "compose_reuse={}", bit(self.compose_reuse));
         let _ = writeln!(out, "sky={}", bit(self.sky));
         let _ = writeln!(out, "emissive={}", bit(self.emissive));
@@ -886,13 +846,8 @@ impl LightingSettings {
             "denoise" | "denoiser" => self.denoiser.enabled = on(value)?,
             "denoise_iters" => self.denoiser.iterations = num_u32(value)?,
             "denoise_dirty" => self.denoiser.dirty_fraction = num_f32(value)?,
-            "denoise_res" | "denoise_resolution" => {
-                self.denoiser.resolution = DenoiseResolution::parse(value)
-                    .ok_or_else(|| format!("denoise_res is full or half, got {value}"))?
-            }
             "denoise_adaptive" => self.denoiser.adaptive = on(value)?,
             "denoise_variance" => self.denoiser.variance_threshold = num_f32(value)?,
-            "denoise_tiles" => self.denoiser.tiles = on(value)?,
             "compose_reuse" => self.compose_reuse = on(value)?,
             "sky" => self.sky = on(value)?,
             "emissive" => self.emissive = on(value)?,
@@ -981,10 +936,8 @@ impl LightingSettings {
             ("GENOS_LIGHTING_DENOISE", "denoise"),
             ("GENOS_LIGHTING_DENOISE_ITERS", "denoise_iters"),
             ("GENOS_LIGHTING_ATROUS_DIRTY", "denoise_dirty"),
-            ("GENOS_LIGHTING_DENOISE_RES", "denoise_res"),
             ("GENOS_LIGHTING_DENOISE_ADAPTIVE", "denoise_adaptive"),
             ("GENOS_LIGHTING_DENOISE_VARIANCE", "denoise_variance"),
-            ("GENOS_LIGHTING_DENOISE_TILES", "denoise_tiles"),
             ("GENOS_LIGHTING_COMPOSE_REUSE", "compose_reuse"),
             ("GENOS_LIGHTING_SKY", "sky"),
             ("GENOS_LIGHTING_EMISSIVE", "emissive"),

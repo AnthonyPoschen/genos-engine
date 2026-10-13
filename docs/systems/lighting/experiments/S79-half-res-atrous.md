@@ -1,102 +1,44 @@
 # S79: Half-resolution a-trous of bounce light
 
 - **Date:** 2026-10-13
-- **Result:** 4070 fail. High full was a shader regression (7.5 → 11.7 ms), fixed by a plain pipeline. Adaptive was darker because a clean skip left buffer A empty; the last stage now publishes the level that ran. Half-res and tiles are slower (same seven dispatches, parity search, lists off, 16 barriers) and are off every preset. Medium keeps adaptive.
-- **Commit:** half-resolution wavelet and joint-bilateral upsample
+- **Result:** Tried and failed. Half-res and the shared-memory tile path are removed. Adaptive stays an off-by-default experimental knob. The plain shader split stays: high compiles without that branch.
+- **Commit:** remove the half-resolution wavelet and the tiled kernel
 
 ## Idea
 
-Run the a-trous wavelet on indirect light at half the surface-cache resolution, then upsample with depth and normal. Direct light stays sharp. Do not skip work by dirty blocks: the stress scene's sun moves every frame and dirties every block.
+Run the a-trous wavelet on indirect light at half the surface-cache resolution, then upsample with depth and normal. Drop later iterations where the sample age or the variance says the texel has settled. Gather each 8×8 wavelet footprint once into shared memory. Do not skip work by dirty blocks: the stress scene's sun moves every frame and dirties every block.
 
 ## Motivation
 
-On the owner's RTX 4070 at 1920×1080, in the moving stress scene, a-trous is 5.5 ms of an 18 ms lighting frame. The target is about 2 ms. PR #26 skipped unchanged blocks and lost the moving scene, because the day-clock sun changes every texel every frame.
+On the owner's RTX 4070 at 1920×1080, in the moving stress scene, a-trous was 5.5 ms of an 18 ms lighting frame. The target was about 2 ms. PR #26 skipped unchanged blocks and lost the moving scene, because the day-clock sun changes every texel every frame.
 
 ## Papers
 
 - Dammertz, Sewtz, Hanika, Lensch. "Edge-Avoiding À-Trous Wavelet Transform for Fast Global Illumination Filtering." HPG 2010. The B3 kernel `(1/16, 1/4, 3/8, 1/4, 1/16)` and the doubled step per iteration.
-- Schied, Kaplanyan, Wyman, Patney, Lefohn. "Spatiotemporal Variance-Guided Filtering: Real-Time Reconstruction for Path-Traced Global Illumination." HPG 2017. Edge-stopping weights on depth, normal, and luminance. Variance is section 4.2. The adaptive pass below uses that variance, and sample age, to drop iterations. SVGF itself still runs every iteration.
-- Zhdan, ReBLUR, in NVIDIA Real-Time Denoisers. The spatial filter of indirect light runs at half resolution. The upsample is a joint bilateral filter guided by depth and normal.
+- Schied, Kaplanyan, Wyman, Patney, Lefohn. "Spatiotemporal Variance-Guided Filtering: Real-Time Reconstruction for Path-Traced Global Illumination." HPG 2017. Edge-stopping weights on depth, normal, and luminance. Variance is section 4.2. SVGF itself still runs every iteration.
+- Zhdan, ReBLUR, in NVIDIA Real-Time Denoisers. The spatial filter of indirect light runs at half resolution. The upsample is a joint bilateral filter guided by depth and normal. ReLAX runs fewer a-trous iterations as history length grows.
 - Wright et al. "Lumen: Real-Time Global Illumination in Unreal Engine 5." SIGGRAPH 2022. Direct lighting stays in the lighting pass. The denoiser sees indirect light.
 
-## What was implemented
+## What was tried
 
-`denoise_res` is `full` or `half` on `DenoiserSettings`. Every preset is `full` after the 4070 pass below. The knob remains. The key is `denoise_res`, the environment variable is `GENOS_LIGHTING_DENOISE_RES`, and the debug menu knob is `lighting_denoise_res`. MCP `get_lighting_settings` / `set_lighting_settings` read and write it with the rest of the text form.
+The wavelet input was layer-1 bounce irradiance. Pixel direct and the texel direct cache were not read. Half mode replaced an even fine texel's level-0 colour with an edge-aware 2×2, ran the iterations on that even lattice with the cell step doubled, and upsampled odd texels in the push from the four even corners. No screen-sized image was allocated. Shared-memory tiles bound a second pipeline for levels 1–5 (`lighting_atrous_tile.comp`); stages 0 and 6 stayed scalar. Adaptive took the smaller of a sample-age limit and a relative-variance limit, and the last stage published the level that ran into buffer A.
 
-Half mode, in `lighting_cache.glsl`:
+Deviations, which are why the screen-space papers do not transfer:
 
-- The wavelet input is layer-1 bounce irradiance (`lighting_svgf_in`). Pixel direct (the G-buffer term in `lighting_compose.comp`) and the texel direct cache are not read.
-- An even fine texel replaces its level-0 colour with the edge-aware 2×2 of layer-1 bounce (`w_z * w_n`).
-- Iterations run only on that even lattice, with the cell step doubled.
-- An odd fine texel is not a wavelet output. The push upsamples it from the four even corners: bilinear weight times `w_z * w_n`, no luminance term. The display field is written in that same dispatch.
-- World-radiance-cache cells stay on the full filter.
+- The grid is the surface-cache lattice, not a screen framebuffer. Odd and even slots share a warp, so skipping the odd 5×5 does not shrink the dispatch.
+- No screen-sized image and no previous frame. The downsample lived in the even texel's level-0 slot. ReBLUR and Lumen dispatch a quarter as many pixels because they have that image.
+- `w_z` is the plane offset this filter already uses (half a texel, S72V), not a screen depth gradient. Normals are cache normals.
+- Sample age is the surface-cache set count, not a screen history length.
+- The lavapipe-safe tile kernel cannot put `barrier()` in a loop or in an `if`, and shared `atomicAdd` faults, so it always ran eight straight-line barrier pairs.
 
-## Deviations
+## 4070, before the plain pipeline
 
-- The grid is the surface-cache lattice, not a screen framebuffer. SVGF, ReBLUR, and Lumen denoise screen pixels.
-- No screen-sized image is allocated. The half-resolution colour lives in the even texel's existing level-0 slot. The upsample does not sample a previous frame.
-- `w_z` is the plane offset this filter already uses (half a texel, S72V), not ReBLUR's screen-space depth gradient.
-- Normals are the cache normals, not a screen G-buffer sample.
-- The finest full-resolution wavelet (step 1 cell) does not run. The upsample restores edges. It does not replace that high-frequency blur.
-- The downsample's variance is the even texel's own variance, not a variance of the 2×2.
-
-## Adaptive passes
-
-`denoise_adaptive` and `denoise_variance` are the second commit. High leaves adaptive off and stores the threshold at 0.02 so the knob round-trips. Medium and low turn adaptive on, at full resolution.
-
-Schied et al. 2017 section 4.2 drive the luminance weight from the variance. They still run every iteration. ReLAX (Zhdan, NVIDIA Real-Time Denoisers) runs fewer a-trous iterations as history length grows. A texel takes the smaller of the two limits:
-
-- 16 surface-cache sets, or relative deviation `sqrt(variance) / mean` at or under the threshold: 1 iteration
-- 8 sets, or deviation at or under four times the threshold: 3 iterations
-- otherwise the configured count
-
-The last configured stage publishes the last level that actually ran (`lighting_svgf_lvl(limit)`) into buffer A, including when that stage is clean. It does not copy each skipped level forward. A clean early-out used to return before the copy, so A kept either an older filter or the zeros the cache was cleared to. The push then blended that hole toward the 25 cm world-radiance cache (`W * fine + (1 - W) * WRC` with `W` at 0). That is the darker, blotchy adaptive picture on the 4070 (still mean 15.9 / p99 41, moving 21.9 / 51, against full). Lavapipe reported ~0.04 because the old test drew the full five-iteration filter first, which had already filled A, and a young texel's relative deviation sits above 0.02 so the skip never ran.
-
-A threshold of 0.1 (the top of the knob, 1000 steps of 0.0001) forces one iteration even when the deviation is larger. That is how a four-frame run enters the skip a settled cache (16 sets) takes. The test `adaptive_skip_keeps_the_bounce_bright` starts on that setting, before any full filter, and compares the bounce to one configured iteration, which publishes A from the wavelet it runs. Mean error under 0.05, p99 under 2, and the skip's mean luma within 4 of that reference. With the publish removed, the same run measured mean 0.133 p99 1.0. The 4070's 15.9 / 41 fails the same bounds. The hall's bounce view is dim (luma about 2.6); the floor is 1 so an empty frame is not a pass.
-
-Deviations: sample age is the surface-cache set count, not a screen history length. No frame is kept. SVGF itself does not drop iterations. A threshold of 0 ignores variance and uses age only. The 0.1 stop is not in ReLAX; it exists so the skip can be tested without waiting for 16 sets.
-
-Expected cost: on the moving sun the set count stays high (the history is not reset by a global light change) and the estimator variance stays small, so most fine texels should leave the 5×5 after one iteration. The dispatch still launches; the threads return after a copy. That is the opposite of the dirty-block skip, which saw every block change and did the full kernel. Where the history is young or the variance is high, the configured iteration count still runs.
-
-```
-cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-adaptive on --denoise-variance 0.02
-```
-
-## Shared-memory tiles
-
-`denoise_tiles` is the third commit. Every preset leaves it off after the 4070 pass below. The key is `denoise_tiles`, the environment variable is `GENOS_LIGHTING_DENOISE_TILES`, and the debug menu knob is `lighting_denoise_tiles`.
-
-Levels 1–5 bind `lighting_atrous_tile.comp`. Stages 0 and 6 stay on `lighting_atrous.comp`, so the scalar pipeline does not reserve the tile's shared memory. The variance pass records the first eight 8×8 origins in each workgroup (eight slot ids and a count, nine words in the list-mark region, rewritten every frame, not a colour image). Each of those origins loads its footprint once: slot, packed colour, variance, and mask. The thread for each center then runs the B3 kernel, including the 3×3 variance blur. A clean texel is not rewritten. The last iteration still copies into buffer A. A center the tile does not own runs the scalar kernel.
-
-The footprint is `8 + 4 * step` texels on a side, with a halo of `2 * step`. At steps 1, 2, and 4 that is 12, 16, and 24, and 24×24 entries fit in the 16 KB shared minimum. Steps 8 and 16 run `lighting_svgf_iter` instead. Half-resolution fine texels use a lattice step of 2 cells; world-radiance-cache cells stay on a step of 1. Shared memory dies with the dispatch. No frame is stored.
-
-Tiles replace the S78X work lists for levels 1–5. The moving scene is already the dense sweep, which is the path the tile accelerates. Lists stay when tiles are off. Dirty stamps are still read.
-
-Deviations, besides the ones above:
-
-- The tile is a surface-cache lattice, not a screen tile.
-- Weights call `lighting_svgf_wzn` on the gathered slots. They are not an anchor-plane depth plus a quantized octahedral normal. `sigma_n` is 128, and that quantization would change the picture. The search this removes is the 5×5 hash (`LIGHTING_CACHE_SEARCH` probes per tap).
-- A center whose object salt or texel size differs from the tile origin is not written by the tile. Its own thread runs the scalar kernel, so two workgroups do not write the same slot.
-- A workgroup tiles at most eight origins. Further origins in that workgroup stay on the scalar kernel. Origins are about 1/64 of the slots.
-- Lavapipe faults on a `barrier()` inside a loop and on a `barrier()` inside an `if`, so the eight origins are straight-line code. It also evaluates both sides of `&&`, so a missing origin (`~0`) is rejected with nested `if`s before any slot read. Shared `atomicAdd` faults too; one thread copies the origin list.
-
-Lavapipe, 320×180, still camera, against the full-resolution scalar picture: tiles mean 0.049 p99 0.667 edge 0.056 flicker 0.003; half+tiles mean 0.179 p99 1.667 edge 0.196; half+adaptive+tiles mean 0.191 p99 2.000 edge 0.197. Direct mean_abs 0. The bounds are mean < 3, p99 < 12, edge < flat×6+2, flicker < full×4+1.
-
-Expected cost: the hash probes inside the 5×5 become one cooperative load of the footprint, for the three finest iterations. The two coarsest stay scalar. On the moving scene the lists were already abandoned, so this does not depend on a dirty-block skip.
-
-```
-cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-tiles on
-cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res half --denoise-adaptive on --denoise-tiles on
-```
-
-## 4070: high full is 11.7 ms, gi-v2 default is 7.5
-
-Owner, RTX 4070, 1920×1080, stress scene. The `atrous` column is one bucket: the sum of the seven a-trous dispatches (stage 0 variance, stages 1–5 the B3 wavelet, stage 6 push). Each dispatch is timestamped and added in `gpu.rs`. There is no per-stage split in that column. `GENOS_GPU_DISPATCH=1` prints the seven stamps; the owner did not. Moving is the day-clock sun. Still is the same scene with the camera held; full still stays on the S78X work lists.
+Owner, RTX 4070, 1920×1080, stress scene. The `atrous` column is the sum of the seven a-trous dispatches. Moving is the day-clock sun. Still holds the camera; full still stays on the S78X work lists.
 
 | run | moving ms | still ms |
 |---|---:|---:|
 | gi-v2 / P29 default | 7.5 | |
-| `--preset high --denoise-res full` | 11.7 | 3.0 |
+| `--preset high` full | 11.7 | 3.0 |
 | `--denoise-tiles off` | 11.6 | |
 | `--denoise-adaptive on` | 5.1 | |
 | `--denoise-res half` | 17.8 | 9.5 |
@@ -104,45 +46,36 @@ Owner, RTX 4070, 1920×1080, stress scene. The `atrous` column is one bucket: th
 | half + adaptive | 12.0 | |
 | half + adaptive + tiles | 15.2 | 10.8 |
 
-`--preset high --denoise-res full` is not a different preset from the stress default. `LightingSettings::default()` is preset high: full resolution, five iterations, adaptive off, tiles off, dirty fraction 0.25. The stress scene uses that default. `--preset high` replaces the struct with the same preset and the flag writes `denoise_res=full`, which high already is. gi-v2's high denoiser is those same fields (iterations 5, dirty fraction 0.25). Dispatch count is the same seven stages (`iterations == 5` takes the tuned group list). Tiles-off at 11.6 ms matches full at 11.7, so the tile pipeline is not what the high path binds.
+High full at 11.7 ms was the same seven dispatches as gi-v2's 7.5 ms. Half, adaptive, and the tile-origin recording were compiled into the hot functions, and the live registers were the max of every branch. That is an occupancy drop. High now binds `atrous-plain`, compiled with `LIGHTING_DENOISE_PLAIN`, so those branches are not in that SPIR-V.
 
-The taken path is the gi-v2 filter. The extra cost is the shader the 4070 compiles. Half-res, adaptive, and the tile-origin recording were compiled into `lighting_atrous.comp`. The bits are uniform and clear on high, so the branches are not executed, but the live registers are the max of every branch. That is an occupancy drop, not an extra pass: 7.5 → 11.7 is +4.2 ms (+56%) on the same seven dispatches. A uniform bit test cannot cost 4.2 ms by itself.
+Half, moving 17.8 against full 11.7, still 9.5 against 3.0. The dispatch count does not change (7 × 1,048,576/64 workgroups). `lighting_svgf_half_skip` called `lighting_sc_true_cell` (up to nine key probes) on every slot of every stage, because `floor(position / size)` is a cell off (S72V). The push of an odd texel skipped the S78B idle and did four lookups. An even-only list is past the 65,536 cap on a moving sun.
 
-High now binds `atrous-plain`, compiled with `LIGHTING_DENOISE_PLAIN`. The half-res, adaptive, and tile blocks are not in that shader's hot functions (`lighting_svgf_variance`, `lighting_svgf_iter`, `lighting_svgf_push`), and the unused helpers are dropped from the SPIR-V. The feature pipeline still has the branches, and it is what runs when any of those knobs is on. Not re-timed here.
+Tiles, moving 18.3 against tiles-off 11.6, still 8.9 against full 3.0. Tiles do not append S78X work lists, so levels 1–5 are always the dense sweep. The kernel always runs eight barrier pairs and about 9 KB of shared memory. Steps 8 and 16, and centers the tile does not own, also run the scalar 5×5.
 
-Inferred split of the 11.7 ms moving bucket, from the adaptive number, not from per-stage stamps. Adaptive at 5.1 ms still launches all seven dispatches; a settled texel (16 sets) runs one 5×5 and copies the rest. Four skipped wavelets account for 11.7 − 5.1 = 6.6 ms, about 1.7 ms each. The other 5.1 ms is stage 0 (the 7×7 variance), stage 1 (one B3), and stage 6 (the push). Still full at 3.0 ms is the same seven dispatches with stages 1–5 on the work list (thousands of slots, not the million).
+Adaptive at 5.1 ms still launched all seven dispatches. A clean skip used to return before copying into buffer A, so the push blended toward the 25 cm world-radiance cache. Image diff against full, 0–255: still mean 15.9 / p99 41, moving 21.9 / 51. The publish fix is what the retest below measures.
 
-## Expected cost
+## Retest at 476ec13
 
-The five wavelet dispatches dominate the 5.5 ms. They run on about a quarter of the fine texels, so those dispatches should fall to roughly 1.5–2 ms. The upsample is four taps inside the push, which already runs. This commit alone is not expected to hit 2 ms for the whole bucket; the variance pass still visits the even texels' neighbourhood, and the push still visits every fine texel.
+Owner, RTX 4070, 1920×1080, after the plain pipeline and the buffer-A publish.
 
-Not timed here. The owner runs:
+| run | result |
+|---|---|
+| high full, moving | atrous ~8.0 ms, against gi-v2 7.8 ms |
+| medium (then adaptive on), moving | 22 ms / 43 fps, against 25.2 ms / 38 fps |
+| adaptive, still atrous | 3.13 ms against full 2.7 ms. No total-time gain |
+| adaptive vs full | mean 2.8, p99 11–13. Bar is 1.5 / 10 |
+| full, run to run | mean 1.1–1.4, p99 9.3 |
+| adaptive ×8 diff | broad blotches |
+| half-res and tiles | slower than the scalar wavelet. The first-pass milliseconds above still stand |
 
-```
-cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res full
-cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res half
-```
+## Postmortem
 
-RTX 4070, 1920×1080, the moving stress scene. The `atrous` column is the one that should move. Lavapipe checks mean and p99 error against the full-resolution picture, error at depth discontinuities, and flicker variance on a still camera. Lavapipe does not time the GPU.
+Half-res does not shrink the dispatch on a hashed surface-cache lattice: odd and even slots share a warp, and the parity test pays up to nine cell probes on every slot, so the 4070 measured 17.8 ms moving and 9.5 ms still against full at 11.7 and 3.0.
+Tiles turn the work lists off and the lavapipe-safe kernel always runs eight barrier pairs plus shared memory, so levels 1–5 are a dense sweep: 18.3 ms moving and 8.9 ms still against tiles-off 11.6 and full still 3.0.
+Adaptive's empty buffer A was fixed, but the settled one-iteration picture still misses the bar (mean 2.8 / p99 11–13 against 1.5 / 10; full's own run-to-run noise is 1.1–1.4 / 9.3) with broad blotches in the ×8 diff, and still-atrous got slower (3.13 vs 2.7) with no total-time gain, so it stays an off-by-default experimental knob.
+The plain pipeline, compiled without those branches, is what put high full back to about 8.0 ms against gi-v2's 7.8 ms moving.
+Medium is the full-resolution scalar wavelet at 3 iterations with adaptive off; the 22 ms / 43 fps gain was the adaptive-on medium, and that picture does not pass the bar.
 
-## 4070: half-res and tiles are slower, and they are off the presets
+## What remains
 
-The numbers are in the table above. Dispatch count does not change for either knob. High's tuned path is still seven dispatches of `LIGHTING_CACHE_SLOTS / 64` (1,048,576 slots, 16,384 workgroups). Fewer iterations (`denoise_iters` 1 or 3) drop stages; half-res and adaptive do not. The `atrous` column is the sum of whatever of those dispatches ran.
-
-Half resolution, moving 17.8 ms against full 11.7, still 9.5 against 3.0. The two gaps are about +6 ms. That is not an upsample pass and not an extra dispatch.
-
-- ReBLUR and Lumen dispatch a half-size screen image, so the wavelet touches a quarter of the pixels. This filter's grid is the hashed surface-cache slot array (deviation already listed). Odd and even slots share a warp. The warp runs the 5×5 for the even threads, and the odd threads do not get that time back.
-- Before an odd texel can return, `lighting_svgf_half_skip` calls `lighting_sc_true_cell`: up to nine key probes, because `floor(position / size)` is a cell off for about half the texels (S72V). That runs on every slot of every stage. Nine probes to skip a 25-tap kernel, paid by the whole warp, is slower than the kernel.
-- The push of an odd texel skips the S78B idle and upsamples with four `cell_slot` lookups. Still-full stays on the work lists (3.0 ms: stages 1–5 walk thousands of slots, and stages 0 and 6 walk every slot). Still-half pays the parity search and the upsample on those two dense dispatches.
-
-A compacted list of only the even slots would be the paper's "dispatch a quarter as many". The moving sun dirties every even texel, a few hundred thousand of them, which is past the 65,536 list cap, and S78X already measured that scattered list as slower than the dense sweep. A screen-sized half image would win the way ReBLUR wins, and this filter does not allocate one. Half stays available as `denoise_res=half` and is not on any preset.
-
-Tiles, moving 18.3 ms against tiles-off 11.6, still 8.9 against full 3.0.
-
-- Tiles do not append S78X work lists, so levels 1–5 are the dense sweep on a still scene too. The still scene's 3.0 ms was the list. 8.9 ms is the dense sweep plus the tile kernel.
-- The lavapipe-safe kernel always runs eight straight-line load/barrier/apply/barrier pairs (16 barriers), including a workgroup that owns no anchor, and it reserves 576 × 16 bytes of shared memory. Occupancy falls. Steps of 8 and 16 cells then run the scalar 5×5 as well, and a center the tile does not own runs it too. That is more work than the scalar kernel, not less.
-- The form that could be cheaper on the 4070 is a uniform loop that barriers once per real anchor, usually zero or one. Lavapipe SIGSEGVs on a `barrier()` inside a loop and on a `barrier()` inside an `if`, so that loop cannot be the tested path. An untested NVIDIA-only kernel is not shipped.
-
-Tiles stay available as `denoise_tiles=on` and are not on any preset.
-
-Medium keeps adaptive on, at full resolution, three iterations. That was the only 4070 cut that got cheaper (5.1 ms against 11.7) once the skip publishes the level it ran. Low records the same resolution and tiles-off, with adaptive on and one iteration; its filter does not run, because it has no surface cache. High stays full, adaptive off, tiles off.
+The scalar full-resolution wavelet. High binds `atrous-plain` (adaptive compiled out). The feature pipeline still has the adaptive branch, selected only when `denoise_adaptive` is on. The key is `denoise_adaptive`, the flag is `--denoise-adaptive`, the environment variable is `GENOS_LIGHTING_DENOISE_ADAPTIVE`, and the debug knob is `lighting_denoise_adaptive`. `denoise_variance` is read only then. A threshold of 0.1 forces one iteration so a short run can enter the skip. No preset should turn adaptive on: the retest failed the picture bar.

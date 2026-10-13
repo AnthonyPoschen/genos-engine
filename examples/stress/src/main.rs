@@ -99,11 +99,10 @@ const USAGE: &str = "genos-stress [options]
   --bounces 0|1|2|unlimited bounce count (GENOS_LIGHTING_BOUNCES)
   --ambient MODE            off, constant, hemisphere, day, or curve
                             (GENOS_LIGHTING_AMBIENT)
-  --denoise-res full|half   bounce a-trous resolution (GENOS_LIGHTING_DENOISE_RES)
   --denoise-iters 1|3|5     wavelet iterations (GENOS_LIGHTING_DENOISE_ITERS)
-  --denoise-adaptive on|off drop settled wavelet iterations (GENOS_LIGHTING_DENOISE_ADAPTIVE)
+  --denoise-adaptive on|off experimental: drop settled wavelet iterations
+                            (GENOS_LIGHTING_DENOISE_ADAPTIVE). Off on every preset
   --denoise-variance F      relative luminance deviation, 0..0.1 (GENOS_LIGHTING_DENOISE_VARIANCE)
-  --denoise-tiles on|off    shared-memory a-trous tiles (GENOS_LIGHTING_DENOISE_TILES)
   --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)";
 
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];
@@ -155,11 +154,9 @@ struct Options {
     gltf: Vec<(PathBuf, [f32; 4])>,
     /// Set only when the flag was passed. Each wins over the matching GENOS_* variable.
     preset: Option<String>,
-    denoise_res: Option<String>,
     denoise_iters: Option<String>,
     denoise_adaptive: Option<String>,
     denoise_variance: Option<String>,
-    denoise_tiles: Option<String>,
     gpu_times: Option<String>,
 }
 
@@ -214,11 +211,9 @@ fn options() -> Result<Options, String> {
         script: None,
         gltf: Vec::new(),
         preset: None,
-        denoise_res: None,
         denoise_iters: None,
         denoise_adaptive: None,
         denoise_variance: None,
-        denoise_tiles: None,
         gpu_times: None,
     };
     let mut report: Option<PathBuf> = None;
@@ -309,11 +304,9 @@ fn options() -> Result<Options, String> {
             }
             "--trace" => trace = true,
             "--preset" => opts.preset = Some(value()?),
-            "--denoise-res" => opts.denoise_res = Some(value()?),
             "--denoise-iters" => opts.denoise_iters = Some(value()?),
             "--denoise-adaptive" => opts.denoise_adaptive = Some(value()?),
             "--denoise-variance" => opts.denoise_variance = Some(value()?),
-            "--denoise-tiles" => opts.denoise_tiles = Some(value()?),
             "--gpu-times" => opts.gpu_times = Some(value()?),
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -475,11 +468,21 @@ fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
         std::env::set_var("GENOS_LIGHTING_PRESET", name);
     }
     let keys = [
-        (opts.denoise_res.as_deref(), "denoise_res", "GENOS_LIGHTING_DENOISE_RES"),
-        (opts.denoise_iters.as_deref(), "denoise_iters", "GENOS_LIGHTING_DENOISE_ITERS"),
-        (opts.denoise_adaptive.as_deref(), "denoise_adaptive", "GENOS_LIGHTING_DENOISE_ADAPTIVE"),
-        (opts.denoise_variance.as_deref(), "denoise_variance", "GENOS_LIGHTING_DENOISE_VARIANCE"),
-        (opts.denoise_tiles.as_deref(), "denoise_tiles", "GENOS_LIGHTING_DENOISE_TILES"),
+        (
+            opts.denoise_iters.as_deref(),
+            "denoise_iters",
+            "GENOS_LIGHTING_DENOISE_ITERS",
+        ),
+        (
+            opts.denoise_adaptive.as_deref(),
+            "denoise_adaptive",
+            "GENOS_LIGHTING_DENOISE_ADAPTIVE",
+        ),
+        (
+            opts.denoise_variance.as_deref(),
+            "denoise_variance",
+            "GENOS_LIGHTING_DENOISE_VARIANCE",
+        ),
     ];
     for (value, key, var) in keys {
         if let Some(value) = value {

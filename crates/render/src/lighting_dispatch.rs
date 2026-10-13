@@ -56,12 +56,9 @@ const CTRL_BOUNCE_UNLIMITED: u32 = 16384;
 const CTRL_DIRECT_FRESH: u32 = 32768;
 /// Denoiser iterations in bits 16..18. 0 in that field means the tuned 5.
 const CTRL_DENOISE_ITERS_SHIFT: u32 = 16;
-/// Half-resolution bounce wavelet. Bit 19. Unset is the full-resolution filter.
-const CTRL_DENOISE_HALF: u32 = 1 << 19;
-/// Skip later wavelet iterations on stable texels. Bit 20.
+/// Skip later wavelet iterations on stable texels. Bit 20. Off unless the
+/// experimental knob is on. Bits 19 and 21 were half-res and tiles (S79).
 const CTRL_DENOISE_ADAPTIVE: u32 = 1 << 20;
-/// Shared-memory tiles for wavelet levels 1-5. Bit 21. Unset is the scalar kernel.
-const CTRL_DENOISE_TILES: u32 = 1 << 21;
 /// Relative variance threshold in bits 22..31, in steps of 0.0001.
 const CTRL_DENOISE_VAR_SHIFT: u32 = 22;
 
@@ -149,14 +146,8 @@ pub(crate) fn pack_lighting_ctrl(
         bits |= CTRL_PREFILL;
     }
     bits |= (settings.denoiser.iterations & 7) << CTRL_DENOISE_ITERS_SHIFT;
-    if settings.denoiser.resolution == genos_scene::DenoiseResolution::Half {
-        bits |= CTRL_DENOISE_HALF;
-    }
     if settings.denoiser.adaptive {
         bits |= CTRL_DENOISE_ADAPTIVE;
-    }
-    if settings.denoiser.tiles {
-        bits |= CTRL_DENOISE_TILES;
     }
     let variance_steps = (settings.denoiser.variance_threshold * 10000.0)
         .round()

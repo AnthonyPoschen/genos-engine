@@ -162,7 +162,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78Y](experiments/S78Y-quiet-filter.md) | 2026-10-12 | Quiet probe filter | pushed (rough; idle A/B 6am) | S78Y |
 | [S78X](experiments/S78X-atrous-work-lists.md) | 2026-10-13 | A-trous levels run dirty work lists | pushed (rough; idle A/B) | S78X |
 | [S78X2](experiments/S78X2-atrous-dense-fallback.md) | 2026-10-12 | Dense a-trous when the dirty fraction is high | pushed | S78X2 |
-| [S79](experiments/S79-half-res-atrous.md) | 2026-10-13 | Half-resolution a-trous of bounce light, joint-bilateral upsample | 4070 fail: half and tiles slower, adaptive was dark; presets stay full, tiles off | S79 |
+| [S79](experiments/S79-half-res-atrous.md) | 2026-10-13 | Half-resolution a-trous, adaptive iterations, shared-memory tiles | Tried and failed. Half-res and tiles removed. Plain shader kept. Adaptive is an off-by-default knob | S79 |
 | [S78Z](experiments/S78Z-verify-ring-wakes.md) | 2026-10-13 | Probe verification + impact-tested ring wakes | not pushed (no fix; postmortem) | g78/S78Z-verify-ring-wakes.patch |
 | [S78T2](experiments/S78T2-texel-verify.md) | 2026-10-13 | Texel verification: rotating A-SVGF checks + ring wakes | not pushed (no healing; postmortem) | g78/S78T2-texel-verify.patch |
 | [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
@@ -538,40 +538,18 @@ prints `lightingatrous` (dirty fraction, mode `list`/`dense`, threshold,
 filtered count). Owner's S78X moving regression, RTX 4070, 1920x1080: a-trous
 6.6 -> 9.4 ms, 42 -> 37 fps. This fallback is not re-timed here.
 
-### S79: half-resolution a-trous of the bounce field
+### S79: half-resolution a-trous, adaptive iterations, shared-memory tiles
 
 The moving stress scene's sun changes every frame, so a dirty-block skip of the
-a-trous (tried in PR #26) still filters every block. S79 leaves that skip alone
-and runs the wavelet on the bounce field at half the surface-cache resolution.
+a-trous (tried in PR #26) still filters every block. S79 tried a half-resolution
+bounce wavelet, fewer iterations on stable texels, and shared-memory tiles.
 
-The input is layer-1 bounce irradiance. Pixel direct and the texel direct cache
-are not read. Even texels downsample their 2×2 with the filter's depth and
-normal weights, then take the five B3 iterations at double the cell step. Odd
-texels are filled in the push by a joint bilateral upsample (bilinear times
-depth and normal, no luminance term) and written to the display field in that
-same dispatch. No screen-sized image is allocated, and no previous frame is
-sampled. WRC cells stay on the full filter. Every preset stays
-`denoise_res=full`. The half knob remains for A/B. Papers and deviations are in
-[S79](experiments/S79-half-res-atrous.md).
-
-`denoise_adaptive` drops later wavelet iterations where the surface-cache set
-count is high or the relative luminance variance is under `denoise_variance`
-(0.02). The last stage publishes the last level that ran into buffer A, even
-when that stage is clean. It does not run the 5×5. Leaving A stale blended the
-push toward the 25 cm world-radiance cache, which is the darker adaptive
-picture on the 4070. High leaves adaptive off. The age is the set count, not a
-screen history, so no frame is kept. A threshold of 0.1 forces one iteration.
-
-`denoise_tiles` runs wavelet levels 1–3 from a shared-memory footprint and
-levels 4–5 with the scalar kernel (the step-8 and step-16 footprints do not
-fit in 16 KB). No preset turns it on. On the 4070 it was slower than the scalar
-kernel: it disables the work lists, and the lavapipe-safe form always runs
-eight barrier pairs. The knob remains for A/B. No frame is stored.
-
-The owner timed it on an RTX 4070 at 1920×1080. `--preset high --denoise-res full`
-is the same denoiser as gi-v2's default (full, five iterations, adaptive off,
-tiles off) and the same seven dispatches, but the moving a-trous bucket went
-from 7.5 ms to 11.7 ms. The extra branches were in the shader even with the
-bits clear. High now binds a pipeline compiled without them. The bucket is the
-sum of those seven dispatches; the per-stage split and the A/B commands are in
+Half-res and tiles are removed. On the RTX 4070 at 1920×1080 they were slower
+than the scalar full wavelet (half moving 17.8 ms vs full 11.7, tiles 18.3 vs
+11.6). The hashed lattice does not shrink the dispatch, and the lavapipe-safe
+tile kernel disables the work lists. Adaptive stays an experimental knob, off
+on high: the retest at 476ec13 missed the picture bar (mean 2.8 / p99 11–13
+against 1.5 / 10) and still-atrous got slower (3.13 vs 2.7). The plain
+pipeline, compiled without that branch, put high back to about 8.0 ms against
+gi-v2's 7.8 ms moving. Numbers and the five-line postmortem are in
 [S79](experiments/S79-half-res-atrous.md).
