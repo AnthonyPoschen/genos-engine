@@ -500,6 +500,12 @@ impl Renderer {
         self.gpu.lighting_atrous_stats()
     }
 
+    /// Shadow rays and spatial merges from the last frame. Waits for that frame.
+    /// The counters are zero unless `GENOS_LIGHTING_LAMP_PICK_DIAG` was set.
+    pub fn lighting_lamp_pick_counts(&mut self) -> LampPickCounts {
+        self.gpu.lighting_lamp_pick_counts()
+    }
+
     /// Sun-step mark from the last submitted frame. Waits for that frame.
     /// `gpu_sun` is the shader bit. `host_frames` counts frames the CPU took
     /// the small-sun path.
@@ -2162,6 +2168,21 @@ impl Gpu {
         let bits = self.timestamp_bits;
         let period = f64::from(self.timestamp_period);
         let antialias = self.antialias;
+        // The print below borrows `gpu_times`. Read the diag counters first.
+        let lamp_pick_line = if std::env::var_os("GENOS_LIGHTING_LAMP_PICK_DIAG").is_some()
+            && self
+                .gpu_times
+                .as_ref()
+                .is_some_and(|times| times.written[slot] && times.frames + 1 >= times.every)
+        {
+            let c = self.lighting_lamp_pick_counts();
+            format!(
+                " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} lamp_spatial={}",
+                c.pixels, c.kept, c.fills, c.cache, c.spatial
+            )
+        } else {
+            String::new()
+        };
         let Some(times) = self.gpu_times.as_mut() else {
             return;
         };
@@ -2272,7 +2293,7 @@ impl Gpu {
         if times.lighting_frames > 0 {
             let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
-                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} shadows={:.3} prefill={:.3}{}",
+                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} shadows={:.3} prefill={:.3}{}{}",
                 times.lighting_frames,
                 g[0],
                 g[1],
@@ -2295,7 +2316,8 @@ impl Gpu {
                 times.prefill_frames as f64 / f64::from(times.lighting_frames),
                 self.last_unfilled
                     .map(|stats| format!(" | {}", stats.line()))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                lamp_pick_line
             );
         }
         if !times.light_spans.is_empty() {

@@ -2,6 +2,8 @@ mod aa;
 mod budget;
 mod gltf_draw;
 mod gpu;
+#[cfg(test)]
+mod lamp_pick;
 mod mesh;
 mod mesh_field;
 mod occ_grid;
@@ -20,9 +22,9 @@ pub use genos_bake as bake;
 pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
 pub use gpu::{
     check_gpu_times_arg, check_lighting_sun_arg, gpu_times_flag_needs_value,
-    lighting_sun_flag_needs_value, DebugView, DrawProfile, LampReport, LightingAtrousStats,
-    LightingSunStats, Renderer, ScreenLine, ScreenRect, SettleStats, UnfilledControl,
-    UnfilledStats, ViewMode,
+    lighting_sun_flag_needs_value, DebugView, DrawProfile, LampPickCounts, LampReport,
+    LightingAtrousStats, LightingSunStats, Renderer, ScreenLine, ScreenRect, SettleStats,
+    UnfilledControl, UnfilledStats, ViewMode,
 };
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};

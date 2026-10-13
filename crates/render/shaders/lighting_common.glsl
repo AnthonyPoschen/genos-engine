@@ -74,6 +74,13 @@ layout(push_constant) uniform Push {
     // lighting_mode), young-only rounds (bit 10), lamp picks on cache rays (bit 11)
     // and the light cache round (bits 12-31, lighting_round), w: frame
     uvec4 params;
+    // Lamp picking. Zero keeps today's shade loop (lighting_direct.comp).
+    // x: mode (0 off, 1 hits, 2 pixels, 3 both, 4 reuse)
+    // y: candidates in bits 0-7, shadow rays in bits 8-15, unbiased in bit 16,
+    //    shadow-ray counters in bit 17
+    // z: spatial radius in pixels (0 skips the neighbour merge)
+    // w: M cap for the biased merge
+    uvec4 lamp;
     // Pose seed. Zero is the live game: lighting_hash ignores it. A reference
     // check sets a non-zero seed from the pose, not from the checkpoint name.
     uint seed;

@@ -79,6 +79,10 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_direct_lights",
     "lighting_direct_refresh",
     "lighting_direct_scale",
+    "lighting_lamp_pick_samples",
+    "lighting_lamp_pick_candidates",
+    "lighting_lamp_pick_radius",
+    "lighting_lamp_pick_history",
     "lighting_gi_refresh",
     "lighting_budget_shift",
     "lighting_probe_rays",
@@ -90,7 +94,11 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_world_verify",
 ];
 /// Unordered choices. A long list of scenes uses the same dropdown.
-const DROP_KNOBS: &[&str] = &["lighting_shadow_filter", "lighting_ambient"];
+const DROP_KNOBS: &[&str] = &[
+    "lighting_shadow_filter",
+    "lighting_ambient",
+    "lighting_lamp_pick",
+];
 const VIEWS: [&str; 7] = [
     "full", "direct", "bounce", "albedo", "normal", "depth", "texels",
 ];
@@ -1270,9 +1278,33 @@ mod tests {
             .filter(|row| row.dropdown.is_some())
             .map(|row| row.label.as_str())
             .collect();
-        for label in ["Scene", "Checkpoint", "View", "Shadow filter", "Ambient"] {
+        for label in [
+            "Scene",
+            "Checkpoint",
+            "View",
+            "Shadow filter",
+            "Ambient",
+            "Lamp pick",
+        ] {
             assert!(dropdowns.contains(&label), "missing dropdown {label}");
         }
+        let lamp = rows
+            .iter()
+            .find(|row| row.label == "Lamp pick")
+            .expect("lamp pick dropdown")
+            .dropdown
+            .as_ref()
+            .unwrap();
+        let lamp_names: Vec<&str> = lamp
+            .choices
+            .iter()
+            .map(|choice| choice.name.as_str())
+            .collect();
+        assert_eq!(
+            lamp_names,
+            ["off", "hits", "pixels", "both", "reuse (experimental)"]
+        );
+        assert_eq!(lamp.value, 1.0, "high samples hits");
         let sliders: Vec<&str> = rows
             .iter()
             .filter(|row| row.slider.is_some())

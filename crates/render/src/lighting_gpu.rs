@@ -40,9 +40,10 @@ pub(crate) const LIGHTING_RAYS: u32 = 64;
 const LIGHTING_CACHE_SLOTS: u64 = 1048576;
 const LIGHTING_CACHE_BATCH: u32 = 98304;
 const LIGHTING_CACHE_RAYS: u32 = 16;
-/// Push constants: dims, params, and the pose seed. Zero seed leaves lighting_hash unchanged.
-const LIGHTING_PUSH_WORDS: usize = 9;
-const LIGHTING_PUSH_BYTES: u32 = 36;
+/// `pc.dims` + `pc.params` + `pc.lamp` + the pose seed. Zero seed leaves
+/// lighting_hash unchanged. The seed is the last word, after the lamp block.
+const LIGHTING_PUSH_WORDS: usize = 13;
+const LIGHTING_PC_BYTES: u32 = 52;
 /// ckeys word of the WRC refresh lists' two counts (lighting_cache.glsl LIGHTING_WRC_CHG_COUNT_AT).
 const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
@@ -248,7 +249,11 @@ pub(crate) struct Lighting {
     /// The million-slot cache is allocated. Off, a small dummy stands in.
     cache_full: bool,
     /// Last buffer class. A live edit rebuilds only when this changes.
-    alloc_key: (u32, u32, u32, u32, u32),
+    alloc_key: (u32, u32, u32, u32, u32, u32),
+    /// Ping-pong reservoirs. 64 bytes unless the mode is reuse.
+    lamp_res: Buffer,
+    /// Fill the reservoir with empty lamps once, not every frame.
+    lamp_res_clear: bool,
     /// Per flight slot: bucket tag of each lighting dispatch, in order.
     frame_tags: [Vec<u8>; 2],
     frame_counts: [[u32; BUCKETS]; 2],
@@ -276,6 +281,19 @@ pub struct LightingAtrousStats {
     pub filtered: u32,
     /// Levels 1-5 ran this frame.
     pub ran: bool,
+}
+
+/// Shadow rays traced last frame, and spatial reservoir merges.
+///
+/// `pixels` is primary pixels, `kept` probe hits, `fills` probe fills, `cache`
+/// light-cache rays. Counts stay zero unless the diag push bit was set.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LampPickCounts {
+    pub pixels: u32,
+    pub kept: u32,
+    pub fills: u32,
+    pub cache: u32,
+    pub spatial: u32,
 }
 
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
@@ -393,7 +411,9 @@ impl Default for Lighting {
             lamp_moving: false,
             catch_left: 0,
             cache_full: false,
-            alloc_key: (0, 0, 0, 0, 0),
+            alloc_key: (0, 0, 0, 0, 0, 0),
+            lamp_res: Buffer::empty(),
+            lamp_res_clear: false,
             frame_tags: [Vec::new(), Vec::new()],
             frame_counts: [[0; BUCKETS]; 2],
             frame_shadow: [false; 2],
@@ -500,7 +520,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -569,7 +589,7 @@ impl Gpu {
             let push = Range {
                 stage: 0x20,
                 offset: 0,
-                size: LIGHTING_PUSH_BYTES,
+                size: LIGHTING_PC_BYTES,
             };
             let layout = LayoutInfo {
                 s_type: 30,
@@ -589,7 +609,7 @@ impl Gpu {
                 ),
                 "lighting pipeline layout",
             )?;
-            let size = Size { kind: 7, count: 24 };
+            let size = Size { kind: 7, count: 27 };
             let pool = PoolInfo {
                 s_type: 33,
                 next: std::ptr::null(),
@@ -928,6 +948,13 @@ impl Gpu {
         // default compose does not write it. High (refresh every frame) is
         // picture + glow + that slice.
         self.lighting.out = self.make_buffer(pixels * (12 + 4 * hist), 0x20 | 0x1 | 0x2, Memory::Device)?;
+        let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
+        self.destroy_buffer(&mut lamp_res);
+        let reuse = settings.lamp_pick.reuse();
+        // Two frames of 16-byte records. Off keeps a dummy so binding 12 is valid.
+        let lamp_bytes = if reuse { pixels.saturating_mul(32).max(64) } else { 64 };
+        self.lighting.lamp_res = self.make_buffer_queues(lamp_bytes, 0x20 | 0x2, Memory::Device, &share)?;
+        self.lighting.lamp_res_clear = reuse;
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.alloc_key = lighting_alloc_key(&settings);
         self.lighting.compose_valid = false;
@@ -984,6 +1011,7 @@ impl Gpu {
                 (9, self.lighting.cache_keys.buffer),
                 (10, self.lighting.cache.buffer),
                 (11, stats),
+                (12, self.lighting.lamp_res.buffer),
             ];
             let infos: Vec<BufInfo> = buffers
                 .iter()
@@ -1071,6 +1099,25 @@ impl Gpu {
         }
         self.read_lighting_stats(self.lighting.last_slot)
             .map_or(self.lighting.probe_samples, |w| [w[6], w[7]])
+    }
+
+    /// Shadow rays the last frame actually traced, by consumer, plus spatial
+    /// merges. Zero unless `GENOS_LIGHTING_LAMP_PICK_DIAG` was set for that frame.
+    /// Waits for that frame.
+    pub(crate) fn lighting_lamp_pick_counts(&mut self) -> LampPickCounts {
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
+        let slot = self.lighting.last_slot;
+        self.read_stats16(self.lighting.stats[slot].memory)
+            .map(|w| LampPickCounts {
+                pixels: w[LAMP_PICK_DIAG_WORD],
+                kept: w[LAMP_PICK_DIAG_WORD + 1],
+                fills: w[LAMP_PICK_DIAG_WORD + 2],
+                cache: w[LAMP_PICK_DIAG_WORD + 3],
+                spatial: w[LAMP_PICK_DIAG_WORD + 4],
+            })
+            .unwrap_or_default()
     }
 
     /// A-trous dirty fraction, mode and threshold for the last frame drawn.
@@ -1366,6 +1413,16 @@ impl Gpu {
                 16,
                 header.as_ptr() as *const c_void,
             );
+            if self.lighting.lamp_res_clear && !self.lighting.lamp_res.buffer.is_null() {
+                self.lighting.lamp_res_clear = false;
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.lamp_res.buffer,
+                    0,
+                    self.lighting.lamp_res.size,
+                    u32::MAX,
+                );
+            }
         }
         // Compute reads/writes and the header update before fragment writes.
         self.memory_barrier(
@@ -1565,7 +1622,7 @@ impl Gpu {
             self.barrier_on(cmd, 0x1000, 0x800, 0x1000, 0x20 | 0x40);
             let set = self.lighting.world_set;
             (self.fns.cmd_bind_set)(cmd, 1, self.lighting.layout, 0, 1, &set, 0, std::ptr::null());
-            (self.fns.cmd_push)(cmd, self.lighting.layout, 0x20, 0, LIGHTING_PUSH_BYTES, pc.as_ptr() as *const c_void);
+            (self.fns.cmd_push)(cmd, self.lighting.layout, 0x20, 0, LIGHTING_PC_BYTES, pc.as_ptr() as *const c_void);
             for (k, (pass, gx)) in groups.into_iter().enumerate() {
                 (self.fns.cmd_bind_pipe)(cmd, 1, self.lighting.pipes[pass]);
                 (self.fns.cmd_dispatch)(cmd, gx.max(1), 1, 1);
@@ -2096,6 +2153,7 @@ impl Gpu {
         } else {
             self.lighting.settings.probes.tile
         };
+        let lamp = lamp_pick_push(&self.lighting.settings);
         let pc = [
             w,
             h,
@@ -2105,6 +2163,10 @@ impl Gpu {
             tile,
             z,
             self.lighting.frame,
+            lamp[0],
+            lamp[1],
+            lamp[2],
+            lamp[3],
             self.lighting.seed,
         ];
         let image = self.color.image;
@@ -2296,7 +2358,7 @@ impl Gpu {
                 self.lighting.layout,
                 0x20,
                 0,
-                LIGHTING_PUSH_BYTES,
+                LIGHTING_PC_BYTES,
                 pc.as_ptr() as *const c_void,
             );
             // GENOS_GPU_TIMES: a stamp before the passes and after each (full frames).
@@ -2330,7 +2392,7 @@ impl Gpu {
                         self.lighting.layout,
                         0x20,
                         0,
-                        LIGHTING_PUSH_BYTES,
+                        LIGHTING_PC_BYTES,
                         round_pc.as_ptr() as *const c_void,
                     );
                     cur_pc = round_pc;
@@ -2346,11 +2408,11 @@ impl Gpu {
                     atrous_ran = true;
                     let mut round_pc = pc;
                     round_pc[6] = (round_pc[6] & !0xe) | stage << 1;
-                    (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, LIGHTING_PUSH_BYTES, round_pc.as_ptr() as *const c_void);
+                    (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, LIGHTING_PC_BYTES, round_pc.as_ptr() as *const c_void);
                     cur_pc = round_pc;
                 }
                 if pass == 7 && atrous_ran {
-                    (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, LIGHTING_PUSH_BYTES, pc.as_ptr() as *const c_void);
+                    (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, LIGHTING_PC_BYTES, pc.as_ptr() as *const c_void);
                     cur_pc = pc;
                 }
                 if pass == 5 {
@@ -2363,7 +2425,7 @@ impl Gpu {
                         self.lighting.layout,
                         0x20,
                         0,
-                        LIGHTING_PUSH_BYTES,
+                        LIGHTING_PC_BYTES,
                         round_pc.as_ptr() as *const c_void,
                     );
                     cur_pc = round_pc;
@@ -2384,7 +2446,7 @@ impl Gpu {
                         self.lighting.layout,
                         0x20,
                         0,
-                        LIGHTING_PUSH_BYTES,
+                        LIGHTING_PC_BYTES,
                         k_pc.as_ptr() as *const c_void,
                     );
                 }
@@ -2440,7 +2502,7 @@ impl Gpu {
                     }
                 }
                 if kind != 0 {
-                    (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, LIGHTING_PUSH_BYTES, cur_pc.as_ptr() as *const c_void);
+                    (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, LIGHTING_PC_BYTES, cur_pc.as_ptr() as *const c_void);
                 }
                 // The args pass's sizes are read as indirect commands (stage 0x2, access 0x1).
                 self.memory_barrier(0x800, 0x800 | 0x1000 | 0x2, 0x40, 0x20 | 0x40 | 0x800 | 0x1);
@@ -2637,6 +2699,7 @@ impl Gpu {
         let mut gbuf = std::mem::replace(&mut self.lighting.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.lighting.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.lighting.out, Buffer::empty());
+        let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
         for k in 0..2 {
@@ -2648,6 +2711,7 @@ impl Gpu {
         self.destroy_buffer(&mut gbuf);
         self.destroy_buffer(&mut work);
         self.destroy_buffer(&mut out);
+        self.destroy_buffer(&mut lamp_res);
         self.destroy_buffer(&mut keys);
         self.destroy_buffer(&mut cache);
         unsafe {
@@ -2697,6 +2761,9 @@ const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
 /// mask follows, one bit per composed pixel, and is not part of this header.
 /// The change-counter enable word stays chg[31] (word 119).
 const LIGHTING_STATS_WORDS: usize = 144;
+/// `gstats.diag[48]` (pixel shadow rays). The header is 24 words.
+const LAMP_PICK_DIAG_WORD: usize = 24 + 48;
+const _: () = assert!(LAMP_PICK_DIAG_WORD + 4 < LIGHTING_STATS_WORDS);
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 /// Words 140 and 141. The control block occupies 124..140.
 const LIGHTING_UNFILLED_WORD: usize = 140;
