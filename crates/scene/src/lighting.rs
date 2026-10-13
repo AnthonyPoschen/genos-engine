@@ -189,14 +189,43 @@ pub struct WorldCacheSettings {
     pub staleness_frames: u32,
 }
 
+/// Where the a-trous wavelet runs.
+///
+/// `Full` filters every surface-cache texel. `Half` filters the bounce field on
+/// the even-even lattice, then upsamples. Direct light is not an input either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DenoiseResolution {
+    Full,
+    Half,
+}
+
+impl DenoiseResolution {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Half => "half",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "full" => Some(Self::Full),
+            "half" | "half-res" | "half_res" => Some(Self::Half),
+            _ => None,
+        }
+    }
+}
+
 /// SVGF a-trous filter of the surface cache.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DenoiserSettings {
     pub enabled: bool,
-    /// A-trous iterations. 1, 3, or 5. The push reads the last odd iteration.
+    /// A-trous iterations. 1, 3, or 5. The push reads the last iteration.
     pub iterations: u32,
     /// Dirty-list fraction before the dense sweep. 0 is always dense, 1 keeps lists.
     pub dirty_fraction: f32,
+    /// Full-resolution wavelet, or half-resolution bounce filter plus upsample.
+    pub resolution: DenoiseResolution,
 }
 
 /// Flat or hemisphere fill used when GI is off.
@@ -270,6 +299,9 @@ impl LightingSettings {
                 s.probes.refresh_frames = 2;
                 s.world_cache.enabled = false;
                 s.denoiser.iterations = 1;
+                // The filter does not run (no surface cache). The cheap mode is
+                // recorded so turning the cache on does not jump to full cost.
+                s.denoiser.resolution = DenoiseResolution::Half;
                 s.prefill = false;
                 s.gi.refresh_frames = 2;
                 s.gi.budget_shift = 2;
@@ -281,6 +313,7 @@ impl LightingSettings {
                 s.bounce.count = 2;
                 s.probes.rays = 32;
                 s.denoiser.iterations = 3;
+                s.denoiser.resolution = DenoiseResolution::Half;
                 s.gi.budget_shift = 1;
                 s.ambient.mode = AmbientMode::Day;
             }
@@ -330,6 +363,8 @@ impl LightingSettings {
                 enabled: true,
                 iterations: 5,
                 dirty_fraction: 0.25,
+                // High stays on the full-resolution wavelet until it is benchmarked.
+                resolution: DenoiseResolution::Full,
             },
             compose_reuse: true,
             sky: true,
@@ -398,7 +433,8 @@ impl LightingSettings {
     }
 
     pub fn gi_passes(&self) -> bool {
-        self.gi.enabled && (self.probes.enabled || self.world_cache.enabled || self.bounce.count > 0)
+        self.gi.enabled
+            && (self.probes.enabled || self.world_cache.enabled || self.bounce.count > 0)
     }
 
     /// The million-slot cache and its key table. Freed when GI is off.
@@ -479,8 +515,8 @@ impl LightingSettings {
             ),
             AmbientMode::Day => {
                 let color = lerp3(self.ambient.night_color, self.ambient.day_color, t);
-                let intensity =
-                    self.ambient.night_intensity + (self.ambient.day_intensity - self.ambient.night_intensity) * t;
+                let intensity = self.ambient.night_intensity
+                    + (self.ambient.day_intensity - self.ambient.night_intensity) * t;
                 (color, self.ambient.ground, intensity, AmbientMode::Constant)
             }
         }
@@ -548,19 +584,36 @@ impl LightingSettings {
         let _ = writeln!(out, "world_stale={}", self.world_cache.staleness_frames);
         let _ = writeln!(out, "denoise={}", bit(self.denoiser.enabled));
         let _ = writeln!(out, "denoise_iters={}", self.denoiser.iterations);
-        let _ = writeln!(out, "denoise_dirty={}", num_text(self.denoiser.dirty_fraction));
+        let _ = writeln!(
+            out,
+            "denoise_dirty={}",
+            num_text(self.denoiser.dirty_fraction)
+        );
+        let _ = writeln!(out, "denoise_res={}", self.denoiser.resolution.name());
         let _ = writeln!(out, "compose_reuse={}", bit(self.compose_reuse));
         let _ = writeln!(out, "sky={}", bit(self.sky));
         let _ = writeln!(out, "emissive={}", bit(self.emissive));
         let _ = writeln!(out, "prefill={}", bit(self.prefill));
         let _ = writeln!(out, "ambient={}", self.ambient.mode.name());
         let _ = writeln!(out, "ambient_color={}", rgb(self.ambient.color));
-        let _ = writeln!(out, "ambient_intensity={}", num_text(self.ambient.intensity));
+        let _ = writeln!(
+            out,
+            "ambient_intensity={}",
+            num_text(self.ambient.intensity)
+        );
         let _ = writeln!(out, "ambient_ground={}", rgb(self.ambient.ground));
         let _ = writeln!(out, "night_color={}", rgb(self.ambient.night_color));
-        let _ = writeln!(out, "night_intensity={}", num_text(self.ambient.night_intensity));
+        let _ = writeln!(
+            out,
+            "night_intensity={}",
+            num_text(self.ambient.night_intensity)
+        );
         let _ = writeln!(out, "day_color={}", rgb(self.ambient.day_color));
-        let _ = writeln!(out, "day_intensity={}", num_text(self.ambient.day_intensity));
+        let _ = writeln!(
+            out,
+            "day_intensity={}",
+            num_text(self.ambient.day_intensity)
+        );
         out
     }
 
@@ -583,7 +636,8 @@ impl LightingSettings {
                 // `custom` does not replace the struct. Later lines are the value.
                 if !value.eq_ignore_ascii_case("custom") {
                     preset = Some(
-                        LightingPreset::parse(value).ok_or_else(|| format!("unknown preset {value}"))?,
+                        LightingPreset::parse(value)
+                            .ok_or_else(|| format!("unknown preset {value}"))?,
                     );
                 }
             } else {
@@ -608,7 +662,8 @@ impl LightingSettings {
                 if value.eq_ignore_ascii_case("custom") {
                     // Not a tier. The label is custom only when the knobs match none.
                 } else {
-                    let preset = LightingPreset::parse(value).ok_or_else(|| format!("unknown preset {value}"))?;
+                    let preset = LightingPreset::parse(value)
+                        .ok_or_else(|| format!("unknown preset {value}"))?;
                     *self = Self::preset(preset);
                 }
             }
@@ -618,8 +673,8 @@ impl LightingSettings {
             "direct_scale" => self.direct.resolution_scale = num_u32(value)?.clamp(1, 8),
             "shadows" => self.shadows.enabled = on(value)?,
             "shadow_filter" => {
-                self.shadows.filter =
-                    ShadowFilter::parse(value).ok_or_else(|| format!("shadow_filter is hard or cell, got {value}"))?
+                self.shadows.filter = ShadowFilter::parse(value)
+                    .ok_or_else(|| format!("shadow_filter is hard or cell, got {value}"))?
             }
             "shadow_cell" => self.shadows.cell_metres = num_f32(value)?,
             "shadow_refresh" => self.shadows.refresh_frames = num_u32(value)?.max(1),
@@ -640,13 +695,18 @@ impl LightingSettings {
             "denoise" | "denoiser" => self.denoiser.enabled = on(value)?,
             "denoise_iters" => self.denoiser.iterations = num_u32(value)?,
             "denoise_dirty" => self.denoiser.dirty_fraction = num_f32(value)?,
+            "denoise_res" | "denoise_resolution" => {
+                self.denoiser.resolution = DenoiseResolution::parse(value)
+                    .ok_or_else(|| format!("denoise_res is full or half, got {value}"))?
+            }
             "compose_reuse" => self.compose_reuse = on(value)?,
             "sky" => self.sky = on(value)?,
             "emissive" => self.emissive = on(value)?,
             "prefill" => self.prefill = on(value)?,
             "ambient" => {
-                self.ambient.mode =
-                    AmbientMode::parse(value).ok_or_else(|| format!("ambient is off, constant, hemisphere, or day, got {value}"))?
+                self.ambient.mode = AmbientMode::parse(value).ok_or_else(|| {
+                    format!("ambient is off, constant, hemisphere, or day, got {value}")
+                })?
             }
             "ambient_color" => self.ambient.color = parse_rgb(value)?,
             "ambient_intensity" => self.ambient.intensity = num_f32(value)?,
@@ -700,6 +760,7 @@ impl LightingSettings {
             ("GENOS_LIGHTING_DENOISE", "denoise"),
             ("GENOS_LIGHTING_DENOISE_ITERS", "denoise_iters"),
             ("GENOS_LIGHTING_ATROUS_DIRTY", "denoise_dirty"),
+            ("GENOS_LIGHTING_DENOISE_RES", "denoise_res"),
             ("GENOS_LIGHTING_COMPOSE_REUSE", "compose_reuse"),
             ("GENOS_LIGHTING_SKY", "sky"),
             ("GENOS_LIGHTING_EMISSIVE", "emissive"),
@@ -734,10 +795,12 @@ impl LightingSettings {
             gather: self.probes_this_frame(frame),
             filter: self.probes_this_frame(frame),
             compact: self.cache_round_this_frame(frame),
-            cache: self.cache_round_this_frame(frame) && (self.world_cache.enabled || self.bounce.count > 0),
+            cache: self.cache_round_this_frame(frame)
+                && (self.world_cache.enabled || self.bounce.count > 0),
             cache_rays: self.cache_rays_this_frame(frame),
             atrous: self.atrous_this_frame(frame),
-            hit_light: self.gi_passes() && (self.probes.enabled || self.cache_rays_this_frame(frame)),
+            hit_light: self.gi_passes()
+                && (self.probes.enabled || self.cache_rays_this_frame(frame)),
             compose_indirect: self.compose_reuse && self.world_mode() == 3,
             prefill: self.prefill_this_frame(),
             sky: self.sky && self.gi.enabled,
@@ -793,7 +856,9 @@ fn num_u32(value: &str) -> Result<u32, String> {
 }
 
 fn num_f32(value: &str) -> Result<f32, String> {
-    value.parse::<f32>().map_err(|_| format!("expected a number, got {value}"))
+    value
+        .parse::<f32>()
+        .map_err(|_| format!("expected a number, got {value}"))
 }
 
 fn parse_bounces(value: &str) -> Result<u32, String> {

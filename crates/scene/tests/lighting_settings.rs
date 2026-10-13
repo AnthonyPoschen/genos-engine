@@ -27,7 +27,8 @@ fn the_engine_settings_trait_reads_and_writes_lighting() {
     assert!(edited.direct.enabled);
     assert_eq!(edited.preset_label(), "custom");
     assert!(EngineSettings::to_text(&edited).starts_with("preset=custom\n"));
-    let round = <LightingSettings as EngineSettings>::parse(&EngineSettings::to_text(&edited)).unwrap();
+    let round =
+        <LightingSettings as EngineSettings>::parse(&EngineSettings::to_text(&edited)).unwrap();
     assert_eq!(round.probes.rays, 32);
     assert_eq!(round.preset_label(), "custom");
 }
@@ -67,6 +68,10 @@ fn high_is_the_tuned_path() {
     assert_eq!(high.bounce.count, LIGHTING_BOUNCES_UNLIMITED);
     assert_eq!(high.probe_rays(), 64);
     assert_eq!(high.denoiser.iterations, 5);
+    assert_eq!(
+        high.denoiser.resolution,
+        genos_scene::DenoiseResolution::Full
+    );
     assert_eq!(high.world_mode(), 3);
     assert!(high.allocates_cache());
     let buckets = high.gpu_buckets(1);
@@ -79,8 +84,20 @@ fn a_partial_line_overlays_a_preset() {
     let mut settings = LightingSettings::preset(LightingPreset::High);
     settings.set_key("bounces", "1").unwrap();
     settings.set_key("denoise_iters", "3").unwrap();
+    settings.set_key("denoise_res", "half").unwrap();
     assert_eq!(settings.bounce.count, 1);
     assert_eq!(settings.denoiser.iterations, 3);
+    assert_eq!(
+        settings.denoiser.resolution,
+        genos_scene::DenoiseResolution::Half
+    );
+    let text = settings.to_text();
+    assert!(text.contains("denoise_res=half"));
+    let parsed = LightingSettings::parse(&text).unwrap();
+    assert_eq!(
+        parsed.denoiser.resolution,
+        genos_scene::DenoiseResolution::Half
+    );
     assert!(settings.cache_rays_this_frame(1));
     let mut off = settings;
     off.set_key("bounces", "0").unwrap();

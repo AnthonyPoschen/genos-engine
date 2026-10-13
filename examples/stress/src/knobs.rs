@@ -210,6 +210,12 @@ impl Host for Stage {
                 denoise_index(lighting.denoiser.iterations),
                 &["1", "3", "5"],
             ),
+            Knob::choice(
+                "lighting_denoise_res",
+                "Denoise resolution",
+                usize::from(lighting.denoiser.resolution == genos_scene::DenoiseResolution::Half),
+                &["full", "half"],
+            ),
             Knob::switch(
                 "lighting_compose_reuse",
                 "Compose reuse",
@@ -351,6 +357,10 @@ fn apply_lighting_knob(
                 _ => "5",
             }
             .to_string(),
+        ),
+        "lighting_denoise_res" => (
+            "denoise_res",
+            if v >= 0.5 { "half" } else { "full" }.to_string(),
         ),
         "lighting_compose_reuse" => ("compose_reuse", on_off(v)),
         "lighting_sky" => ("sky", on_off(v)),

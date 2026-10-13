@@ -56,6 +56,8 @@ const CTRL_BOUNCE_UNLIMITED: u32 = 16384;
 const CTRL_DIRECT_FRESH: u32 = 32768;
 /// Denoiser iterations in bits 16..18. 0 in that field means the tuned 5.
 const CTRL_DENOISE_ITERS_SHIFT: u32 = 16;
+/// Half-resolution bounce wavelet. Bit 19. Unset is the full-resolution filter.
+const CTRL_DENOISE_HALF: u32 = 1 << 19;
 
 /// What a buffer rebuild depends on. Screen size is compared beside this.
 pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32, u32, u32) {
@@ -143,6 +145,9 @@ pub(crate) fn pack_lighting_ctrl(
         bits |= CTRL_PREFILL;
     }
     bits |= (settings.denoiser.iterations & 7) << CTRL_DENOISE_ITERS_SHIFT;
+    if settings.denoiser.resolution == genos_scene::DenoiseResolution::Half {
+        bits |= CTRL_DENOISE_HALF;
+    }
     if !settings.gi.enabled && mode != AmbientMode::Off {
         bits |= CTRL_AMBIENT;
     }
@@ -256,15 +261,29 @@ pub(crate) fn light_groups(
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
-    } else if round && full && settings.cache_rays_this_frame(frame) && settings.atrous_this_frame(frame) && settings.denoiser.iterations == 5
+    } else if round
+        && full
+        && settings.cache_rays_this_frame(frame)
+        && settings.atrous_this_frame(frame)
+        && settings.denoiser.iterations == 5
     {
         out.push(0, slots, 1, B_COMPACT);
         out.push(1, probes.div_ceil(64), 1, B_PLACE);
         out.push(4, probes.div_ceil(64), 1, B_GATHER);
         out.push(0, 1, LIGHTING_ARGS, B_COMPACT);
-        out.push(2, (probe_ray_count + 2 * kept).div_ceil(64), LIGHTING_MODE1, B_TRACE);
+        out.push(
+            2,
+            (probe_ray_count + 2 * kept).div_ceil(64),
+            LIGHTING_MODE1,
+            B_TRACE,
+        );
         out.push(2, 0, LIGHTING_DENSE_RAYS, B_CACHE_RAYS);
-        out.push(3, (pixels + 2 * kept).div_ceil(64), LIGHTING_MODE1, B_DIRECT);
+        out.push(
+            3,
+            (pixels + 2 * kept).div_ceil(64),
+            LIGHTING_MODE1,
+            B_DIRECT,
+        );
         out.push(3, 0, LIGHTING_DENSE_RAYS, B_HIT);
         out.push(4, probes, 1, B_GATHER);
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
@@ -277,10 +296,23 @@ pub(crate) fn light_groups(
         }
         out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
     } else {
-        gated(settings, frame, round, w, h, probes, probe_ray_count, kept, &mut out);
+        gated(
+            settings,
+            frame,
+            round,
+            w,
+            h,
+            probes,
+            probe_ray_count,
+            kept,
+            &mut out,
+        );
     }
-    if settings.shadows.enabled && (out.counts[B_DIRECT as usize] > 0 || out.counts[B_HIT as usize] > 0) {
-        out.counts[B_SHADOWS as usize] = out.counts[B_DIRECT as usize].saturating_add(out.counts[B_HIT as usize]);
+    if settings.shadows.enabled
+        && (out.counts[B_DIRECT as usize] > 0 || out.counts[B_HIT as usize] > 0)
+    {
+        out.counts[B_SHADOWS as usize] =
+            out.counts[B_DIRECT as usize].saturating_add(out.counts[B_HIT as usize]);
     }
     out
 }
@@ -288,7 +320,10 @@ pub(crate) fn light_groups(
 /// GI with screen probes and no surface cache. A still scene settles onto the
 /// pixel-direct idle; the surface cache (mode 3) is not this path.
 fn probe_only(settings: &LightingSettings) -> bool {
-    settings.gi.enabled && settings.probes.enabled && !settings.world_cache.enabled && settings.world_mode() == 0
+    settings.gi.enabled
+        && settings.probes.enabled
+        && !settings.world_cache.enabled
+        && settings.world_mode() == 0
 }
 
 fn gated(

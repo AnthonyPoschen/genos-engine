@@ -161,6 +161,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78Y](experiments/S78Y-quiet-filter.md) | 2026-10-12 | Quiet probe filter | pushed (rough; idle A/B 6am) | S78Y |
 | [S78X](experiments/S78X-atrous-work-lists.md) | 2026-10-13 | A-trous levels run dirty work lists | pushed (rough; idle A/B) | S78X |
 | [S78X2](experiments/S78X2-atrous-dense-fallback.md) | 2026-10-12 | Dense a-trous when the dirty fraction is high | pushed | S78X2 |
+| [S79](experiments/S79-half-res-atrous.md) | 2026-10-13 | Half-resolution a-trous of bounce light, joint-bilateral upsample | in progress (owner times the 4070) | S79 |
 | [S78Z](experiments/S78Z-verify-ring-wakes.md) | 2026-10-13 | Probe verification + impact-tested ring wakes | not pushed (no fix; postmortem) | g78/S78Z-verify-ring-wakes.patch |
 | [S78T2](experiments/S78T2-texel-verify.md) | 2026-10-13 | Texel verification: rotating A-SVGF checks + ring wakes | not pushed (no healing; postmortem) | g78/S78T2-texel-verify.patch |
 | [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
@@ -199,7 +200,7 @@ The lighting has one name scheme, `lighting`, everywhere; "GI v2" survives only 
 No environment variable is needed: `make stress` and `make run` run the tuned defaults baked into the code (`LIGHTING_DEFAULT_WORLD` = 3, the surface cache; `LIGHTING_DEFAULT_SC_FLAGS` = 6007050). There is no lighting-selection switch (`GENOS_GI` is gone). The remaining variables are optional debug and tuning knobs:
 
 - Debug and traces: `GENOS_LIGHTING_DEBUG` (per-round counters; reads GPU counters back, so not for fps runs), `GENOS_LIGHTING_SC_TRACE` (surface cache claims and relights per readback), `GENOS_SCENE_DELTA` (resident scene and mesh field delta runs). The dump, the counters, the MCP commands, the stuck and pop checks, the headless path, and the overlays are inventoried in [the debug standard](debug-standard.md). That file is the reference other systems match.
-- Tuning (A/B only): `GENOS_LIGHTING_WORLD` (0 probe path P6, 3 surface cache), `GENOS_LIGHTING_SC_FLAGS`, `GENOS_LIGHTING_SC_LOCAL`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`, `GENOS_LIGHTING_TILE`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_FILL`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_ASYNC` (async compute light cache, off by default), `GENOS_LIGHTING_ATROUS_DIRTY` (a-trous work-list dirty fraction, default 0.25; `0` dense sweep, `1` lists up to the cap).
+- Tuning (A/B only): `GENOS_LIGHTING_WORLD` (0 probe path P6, 3 surface cache), `GENOS_LIGHTING_SC_FLAGS`, `GENOS_LIGHTING_SC_LOCAL`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`, `GENOS_LIGHTING_TILE`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_FILL`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_ASYNC` (async compute light cache, off by default), `GENOS_LIGHTING_ATROUS_DIRTY` (a-trous work-list dirty fraction, default 0.25; `0` dense sweep, `1` lists up to the cap), `GENOS_LIGHTING_DENOISE_RES` (`full` or `half`; high stays `full`).
 
 Older entries below quote the names of their time (`GENOS_GI2_*`); read them through the table.
 
@@ -535,3 +536,27 @@ already inside the filter. `GENOS_LIGHTING_DEBUG` or `GENOS_LIGHTING_SC_TRACE`
 prints `lightingatrous` (dirty fraction, mode `list`/`dense`, threshold,
 filtered count). Owner's S78X moving regression, RTX 4070, 1920x1080: a-trous
 6.6 -> 9.4 ms, 42 -> 37 fps. This fallback is not re-timed here.
+
+### S79: half-resolution a-trous of the bounce field
+
+The moving stress scene's sun changes every frame, so a dirty-block skip of the
+a-trous (tried in PR #26) still filters every block. S79 leaves that skip alone
+and runs the wavelet on the bounce field at half the surface-cache resolution.
+
+The input is layer-1 bounce irradiance. Pixel direct and the texel direct cache
+are not read. Even texels downsample their 2×2 with the filter's depth and
+normal weights, then take the five B3 iterations at double the cell step. Odd
+texels are filled in the push by a joint bilateral upsample (bilinear times
+depth and normal, no luminance term) and written to the display field in that
+same dispatch. No screen-sized image is allocated, and no previous frame is
+sampled. WRC cells stay on the full filter. High stays `denoise_res=full`.
+Medium and low record `half`. Papers and deviations are in
+[S79](experiments/S79-half-res-atrous.md).
+
+Expected cost, not measured here: the five wavelet dispatches are most of the
+5.5 ms. A quarter of the fine texels run them, so those dispatches should land
+near 1.5–2 ms, and the upsample is a few taps inside the push that already
+runs. Target for the whole a-trous bucket after the later passes is about 2 ms.
+The owner times it. `GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high
+GENOS_LIGHTING_DENOISE_RES=half` against `=full`, RTX 4070, 1920×1080, moving
+stress scene.

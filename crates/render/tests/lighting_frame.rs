@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use genos_render::{DebugView, Renderer, ViewMode, World};
-use genos_scene::{Camera, Scene};
+use genos_scene::{Camera, LightingPreset, LightingSettings, Scene};
 use genos_window::Window;
 
 fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
@@ -468,7 +468,10 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
         "dirty fraction {}",
         list_stats.dirty_fraction
     );
-    assert!(list_stats.filtered > 0, "filtered texels are the denominator");
+    assert!(
+        list_stats.filtered > 0,
+        "filtered texels are the denominator"
+    );
 
     renderer.set_lighting_atrous_dirty(0.0);
     let dense = draw(&mut window, &mut renderer, &world, &camera);
@@ -504,6 +507,186 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     renderer.set_lighting_atrous_dirty(1.0);
     let _ = draw(&mut window, &mut renderer, &world, &camera);
     let back = renderer.lighting_atrous_stats();
-    assert_eq!(back.mode, 1, "raising the threshold returns to the work lists");
+    assert_eq!(
+        back.mode, 1,
+        "raising the threshold returns to the work lists"
+    );
     assert!(back.ran, "the levels ran after the switch back");
+}
+
+fn denoise_settings(res: &str) -> LightingSettings {
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.set_key("denoise_res", res).expect("denoise_res");
+    settings
+}
+
+fn view_at(renderer: &mut Renderer, mode: ViewMode) {
+    renderer.set_debug_view(DebugView { mode, lamp: 0 });
+}
+
+/// Per-pixel mean absolute channel error, 0..255.
+fn pixel_errors(reference: &[u8], image: &[u8]) -> Vec<f64> {
+    let n = reference.len().min(image.len()) / 4;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let p = i * 4;
+        let e = (u32::from(reference[p].abs_diff(image[p]))
+            + u32::from(reference[p + 1].abs_diff(image[p + 1]))
+            + u32::from(reference[p + 2].abs_diff(image[p + 2]))) as f64
+            / 3.0;
+        out.push(e);
+    }
+    out
+}
+
+fn mean_of(v: &[f64]) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.iter().sum::<f64>() / v.len() as f64
+}
+
+fn percentile(v: &mut [f64], p: f64) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let i = ((v.len() - 1) as f64 * p).round() as usize;
+    v[i.min(v.len() - 1)]
+}
+
+fn luma_bgra(px: &[u8]) -> f64 {
+    0.2126 * f64::from(px[2]) + 0.7152 * f64::from(px[1]) + 0.0722 * f64::from(px[0])
+}
+
+/// Mean per-pixel luminance variance across still frames.
+fn flicker_variance(frames: &[Vec<u8>]) -> f64 {
+    let n = frames.iter().map(|f| f.len() / 4).min().unwrap_or(0);
+    let k = frames.len() as f64;
+    if n == 0 || k < 2.0 {
+        return 0.0;
+    }
+    let mut acc = 0.0;
+    for p in 0..n {
+        let mut m = 0.0;
+        let mut m2 = 0.0;
+        for frame in frames {
+            let y = luma_bgra(&frame[p * 4..]);
+            m += y;
+            m2 += y * y;
+        }
+        m /= k;
+        acc += (m2 / k - m * m).max(0.0);
+    }
+    acc / n as f64
+}
+
+fn decode_normal(px: &[u8]) -> [f64; 3] {
+    [
+        f64::from(px[2]) / 255.0 * 2.0 - 1.0,
+        f64::from(px[1]) / 255.0 * 2.0 - 1.0,
+        f64::from(px[0]) / 255.0 * 2.0 - 1.0,
+    ]
+}
+
+/// A pixel on a depth or normal break. The half-resolution upsample is not
+/// allowed to smear light across that break.
+fn depth_edge(depth: &[u8], normal: &[u8], index: usize, width: usize) -> bool {
+    let x = (index / 4) % width;
+    let y = (index / 4) / width;
+    let height = depth.len() / 4 / width;
+    if x + 1 >= width || y + 1 >= height {
+        return false;
+    }
+    let right = index + 4;
+    let down = index + width * 4;
+    if depth[index].abs_diff(depth[right]) > 8 || depth[index].abs_diff(depth[down]) > 8 {
+        return true;
+    }
+    let a = decode_normal(&normal[index..]);
+    let b = decode_normal(&normal[right..]);
+    let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    dot < 0.85
+}
+
+/// Half-resolution bounce filter against the full-resolution picture.
+///
+/// Mean and p99 are over per-pixel channel error. Edge pixels are depth or
+/// normal breaks. Flicker is the luminance variance of a still camera.
+#[test]
+fn half_res_atrous_matches_the_full_reference() {
+    let (_gpu, mut window, mut renderer) = open();
+    let world = shipped_hall();
+    let camera = Camera::opening();
+    renderer.set_lighting_settings(denoise_settings("full"));
+    view_at(&mut renderer, ViewMode::Bounce);
+    let mut full_frames = Vec::new();
+    for _ in 0..6 {
+        full_frames.push(draw(&mut window, &mut renderer, &world, &camera));
+    }
+    let reference = full_frames.last().expect("reference").clone();
+    let full_flicker = flicker_variance(&full_frames[4..]);
+
+    view_at(&mut renderer, ViewMode::Direct);
+    let direct_full = draw(&mut window, &mut renderer, &world, &camera);
+    view_at(&mut renderer, ViewMode::Depth);
+    let depth = draw(&mut window, &mut renderer, &world, &camera);
+    view_at(&mut renderer, ViewMode::Normal);
+    let normal = draw(&mut window, &mut renderer, &world, &camera);
+
+    renderer.set_lighting_settings(denoise_settings("half"));
+    view_at(&mut renderer, ViewMode::Bounce);
+    let mut half_frames = Vec::new();
+    for _ in 0..4 {
+        half_frames.push(draw(&mut window, &mut renderer, &world, &camera));
+    }
+    // The third half frame has run the lattice for more than one dispatch.
+    let half = &half_frames[2];
+    let errors = pixel_errors(&reference, half);
+    let mean = mean_of(&errors);
+    let mut sorted = errors.clone();
+    let p99 = percentile(&mut sorted, 0.99);
+    let width = 320usize;
+    let mut edge = Vec::new();
+    let mut flat = Vec::new();
+    for (i, e) in errors.iter().copied().enumerate() {
+        let index = i * 4;
+        if index + 4 >= depth.len() || index + width * 4 >= depth.len() {
+            continue;
+        }
+        if depth_edge(&depth, &normal, index, width) {
+            edge.push(e);
+        } else {
+            flat.push(e);
+        }
+    }
+    let edge_mean = mean_of(&edge);
+    let flat_mean = mean_of(&flat);
+    let flicker = flicker_variance(&half_frames);
+    eprintln!(
+        "half vs full mean {mean:.3} p99 {p99:.3} edge {edge_mean:.3} ({}) flat {flat_mean:.3} flicker {flicker:.3} full_flicker {full_flicker:.3}",
+        edge.len()
+    );
+    assert!(
+        mean < 3.0,
+        "half-res mean error {mean:.3} against the full-res bounce"
+    );
+    assert!(p99 < 12.0, "half-res p99 error {p99:.3}");
+    assert!(
+        edge_mean < flat_mean * 6.0 + 2.0,
+        "edge error {edge_mean:.3} smears past the flat error {flat_mean:.3}"
+    );
+    assert!(
+        flicker < full_flicker * 4.0 + 1.0,
+        "still-camera flicker {flicker:.3} full {full_flicker:.3}"
+    );
+
+    view_at(&mut renderer, ViewMode::Direct);
+    let direct_half = draw(&mut window, &mut renderer, &world, &camera);
+    let direct_gap = mean_abs(&direct_full, &direct_half);
+    eprintln!("direct full vs half {direct_gap:.3}");
+    assert!(
+        direct_gap < 1.0,
+        "direct light moved with the bounce filter: {direct_gap:.3}"
+    );
 }

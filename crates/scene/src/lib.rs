@@ -17,9 +17,9 @@ pub use camera::{
 pub use codimation::{Codimation, Easing};
 pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use lighting::{
-    AmbientMode, AmbientSettings, BounceSettings, DenoiserSettings, DirectSettings, GiSettings,
-    GpuBuckets, LightingPreset, LightingSettings, ProbeSettings, ShadowFilter, ShadowSettings,
-    WorldCacheSettings, LIGHTING_BOUNCES_UNLIMITED,
+    AmbientMode, AmbientSettings, BounceSettings, DenoiseResolution, DenoiserSettings,
+    DirectSettings, GiSettings, GpuBuckets, LightingPreset, LightingSettings, ProbeSettings,
+    ShadowFilter, ShadowSettings, WorldCacheSettings, LIGHTING_BOUNCES_UNLIMITED,
 };
 pub use script::{load_path, load_str};
 pub use settings::EngineSettings;
