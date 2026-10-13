@@ -3405,6 +3405,7 @@ impl Gpu {
         self.frame_bytes.clone_from(&bytes);
         self.lighting.light_scene = lighting_scene_key(pack, &bytes);
         self.lighting.trace_key = lighting_trace_key(pack);
+        self.note_lighting_sun(pack);
         self.background = pack.sky.map(crate::mesh::tone);
         Ok(())
     }

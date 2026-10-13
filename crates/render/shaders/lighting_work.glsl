@@ -5,6 +5,12 @@
 // Control word at LIGHTING_WORK_AT (ckeys, after the a-trous meta):
 //   bit 0     full effort (today's path for every probe and texel)
 //   bits 8-11 phase, 0..7
+// Sun step at LIGHTING_WORK_AT + 1..6 (host, every frame):
+//   1  bit 0 small step (amortise indirect), bit 1 a direct patch follows
+//      the list compose, bit 2 this dispatch is that patch.
+//      Bits 8-15 are N. Bits 16-23 are this frame's slice (frame % N).
+//   2..4 committed sun direction (the direction its rays travel)
+//   5 committed global sun/sky light, 6 the live one
 // Lamp motion sits at LIGHTING_WORK_LAMP_AT, 8 words per lamp, 128 lamps:
 //   0 prev valid, 1..3 previous position, 4..6 latest position, 7 frame noted.
 
@@ -171,4 +177,71 @@ uint lighting_work_count_px(bool surface, vec3 pos, vec3 n) {
         atomicAdd(gstats.work_missing, work_smiss);
     }
     return tag;
+}
+
+// A small directional-sun step. Indirect light catches up over N frames.
+// Direct sun light and its shadows are not on this path.
+const uint LIGHTING_SUN_SMALL = 1u;
+const uint LIGHTING_SUN_FOLLOWS = 2u;
+const uint LIGHTING_SUN_PATCH = 4u;
+
+uint lighting_sun_flags() {
+    return ckeys.key[LIGHTING_WORK_AT + 1u];
+}
+bool lighting_sun_small() {
+    return (lighting_sun_flags() & LIGHTING_SUN_SMALL) != 0u && !lighting_work_full();
+}
+bool lighting_sun_patch_follows() {
+    return (lighting_sun_flags() & LIGHTING_SUN_FOLLOWS) != 0u;
+}
+bool lighting_sun_patch_now() {
+    return (lighting_sun_flags() & LIGHTING_SUN_PATCH) != 0u;
+}
+uint lighting_sun_n() {
+    return max((lighting_sun_flags() >> 8u) & 255u, 1u);
+}
+uint lighting_sun_slice_id() {
+    return (lighting_sun_flags() >> 16u) & 255u;
+}
+vec3 lighting_sun_committed_dir() {
+    return vec3(uintBitsToFloat(ckeys.key[LIGHTING_WORK_AT + 2u]), uintBitsToFloat(ckeys.key[LIGHTING_WORK_AT + 3u]), uintBitsToFloat(ckeys.key[LIGHTING_WORK_AT + 4u]));
+}
+float lighting_sun_committed_light() {
+    return uintBitsToFloat(ckeys.key[LIGHTING_WORK_AT + 5u]);
+}
+float lighting_sun_live_light() {
+    return uintBitsToFloat(ckeys.key[LIGHTING_WORK_AT + 6u]);
+}
+// One band of probe rows, or one band of texel pages, per frame.
+bool lighting_sun_probe_slice(uint probe) {
+    uint cols = max(pc.dims.z, 1u);
+    return (probe / cols) % lighting_sun_n() == lighting_sun_slice_id();
+}
+bool lighting_sun_slot_slice(uint slot) {
+    return lighting_sc_page(slot) % lighting_sun_n() == lighting_sun_slice_id();
+}
+// A held probe outside this frame's slice keeps the light it already has.
+bool lighting_sun_hold_kept(uint h) {
+    if (!lighting_sun_small()) {
+        return false;
+    }
+    uint rays = lighting_rays();
+    uint pk = h / rays / LIGHTING_STRATA;
+    if (lighting_sun_probe_slice(pk) || !lighting_stratum_held(pk)) {
+        return false;
+    }
+    if (floatBitsToUint(work.v[lighting_probe_at(pk) + 1u].w) == lighting_frame() + LIGHTING_STRATA) {
+        return false;
+    }
+    return floatBitsToUint(work.v[lighting_kept_light_at() + h / 4u][h % 4u]) != 0u;
+}
+bool lighting_sun_hold_fill(uint h) {
+    if (!lighting_sun_small()) {
+        return false;
+    }
+    uint pk = h / lighting_rays() / LIGHTING_STRATA;
+    if (lighting_sun_probe_slice(pk)) {
+        return false;
+    }
+    return floatBitsToUint(work.v[lighting_fill_light_at() + h / 4u][h % 4u]) != 0u;
 }

@@ -1,10 +1,12 @@
-//! Phase 0 of the moving-scene work cut: the full-effort picture floor.
+//! Phase 0 of the moving-scene work cut: the full-effort picture floor, the
+//! phase 1 stop rule, and the small-sun compose check.
 //!
 //! Two cold runs of the corner scene, then a third. The floor is the mean
 //! absolute linear-luminance difference of the first pair, for the sum, the
 //! direct view, and the bounce view. The third run has to land inside that
-//! floor. Pop is the fill-run metric on the same frames. Nothing in the
-//! lighting path changes here.
+//! floor. Pop is the fill-run metric on the same frames. A later sun-only
+//! step checks that a small directional change does not dirty the whole
+//! compose list.
 
 use genos_render::{
     linear_from_display, DebugView, Renderer, ViewMode, World,
@@ -469,4 +471,114 @@ fn full_effort_picture_floor_holds_a_third_run() {
     eprintln!("phase1 regime green {green} yellow {yellow} / {pixels}");
     assert!(green * 2 > pixels, "regime view is not mostly settled");
     assert!(yellow > 0, "regime view shows no fringe on the moving frame");
+
+    // Small sun. The camera holds. Eleven still frames, then one 0.2° step.
+    // Frame 12 is slice 4: with 12 probe rows that is a single row, so the
+    // band can stay under half of the 920 blocks. A 40° jump is a full compose.
+    // Direct light on the step matches a full-effort replay of the same step.
+    let blocks = 40 * 23;
+    let base = 0.4_f32;
+    let step = 0.2_f32.to_radians();
+    renderer.set_lighting_work(1, false);
+    renderer.reset_lighting_caches();
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    for _ in 0..11 {
+        let _ = draw_sun(&mut window, &mut renderer, base, &camera);
+    }
+    let reduced = draw_sun(&mut window, &mut renderer, base + step, &camera);
+    let sun_stats = renderer.lighting_work_stats();
+    let atrous = renderer.lighting_atrous_stats();
+    eprintln!(
+        "sun step blocks {} sun {} atrous {:.4} ran {} filtered {}",
+        sun_stats.delta_skip,
+        sun_stats.stochastic,
+        atrous.dirty_fraction,
+        atrous.ran,
+        atrous.filtered
+    );
+    assert_eq!(sun_stats.stochastic, 1, "the small sun path was off");
+    assert_ne!(
+        sun_stats.delta_skip, u32::MAX,
+        "a 0.2° sun step took a full compose"
+    );
+    assert!(
+        sun_stats.delta_skip < blocks / 2,
+        "sun step marked {} of {blocks} compose blocks",
+        sun_stats.delta_skip
+    );
+    assert!(
+        !atrous.ran || atrous.dirty_fraction <= 0.25,
+        "sun step a-trous dirty fraction {:.4}",
+        atrous.dirty_fraction
+    );
+    let jump = draw_sun(&mut window, &mut renderer, base + 40.0_f32.to_radians(), &camera);
+    let _ = jump;
+    let jump_stats = renderer.lighting_work_stats();
+    eprintln!(
+        "sun jump blocks {} sun {}",
+        jump_stats.delta_skip, jump_stats.stochastic
+    );
+    assert_eq!(
+        jump_stats.delta_skip, u32::MAX,
+        "a 40° sun jump stayed on the compose list ({})",
+        jump_stats.delta_skip
+    );
+    assert_eq!(jump_stats.stochastic, 0, "a 40° sun jump took the small path");
+
+    renderer.set_lighting_work(1, true);
+    renderer.reset_lighting_caches();
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    for _ in 0..11 {
+        let _ = draw_sun(&mut window, &mut renderer, base, &camera);
+    }
+    let full = draw_sun(&mut window, &mut renderer, base + step, &camera);
+    let direct = mean_abs(&luma(&reduced), &luma(&full));
+    eprintln!("sun step direct |ΔL| {direct:.6}");
+    assert!(
+        direct <= 5.0e-4,
+        "small sun direct |ΔL| {direct:.6} is outside the phase 0 floor"
+    );
+}
+
+/// Same room as the corner, one directional sun, no point lamp.
+fn sun_world(yaw: f32) -> World {
+    let dir = Vec3::new(yaw.sin(), -0.75, yaw.cos()).normalize();
+    World::from_scene(Scene {
+        floor: Floor {
+            position: Vec3::new(1.5, 0.0, 1.5),
+            half_x: 3.0,
+            half_z: 3.0,
+            color: [1.0, 1.0, 1.0],
+        },
+        walls: vec![wall(1.5, 0.08, 1.5, 0.08), wall(0.08, 1.5, 0.08, 1.5)],
+        solids: vec![
+            pad_solid(Shape::Square, 4.2, 3.4, 0.25),
+            pad_solid(Shape::Square, 3.4, 4.2, 0.25),
+            pad_solid(Shape::Circle, 4.2, 4.2, 0.2),
+        ],
+        lights: vec![Light {
+            position: Vec3::ZERO,
+            color: [6.0, 5.4, 4.2],
+            direction: dir,
+        }],
+        ceiling: Some(Ceiling {
+            height: 2.8,
+            color: [0.12, 0.12, 0.14],
+        }),
+        sky: None,
+    })
+}
+
+fn draw_sun(window: &mut Window, renderer: &mut Renderer, yaw: f32, camera: &Camera) -> Vec<u8> {
+    let _ = window.pump();
+    renderer
+        .draw(&sun_world(yaw), camera, true)
+        .expect("draw")
+        .expect("readback")
 }

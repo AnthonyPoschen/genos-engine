@@ -597,8 +597,17 @@ void lighting_ls_note() {
     ckeys.key[at + 1u] = floatBitsToUint(lighting_global_light());
     ckeys.key[LIGHTING_LS_AT + 2u * LIGHTING_LS_RING] = f;
 }
+// Defined in lighting_work.glsl. A small sun step freezes the light these
+// readers scale by, so a day-clock tick does not move every texel.
+bool lighting_sun_small();
+float lighting_sun_committed_light();
+float lighting_sun_live_light();
+bool lighting_sun_slot_slice(uint slot);
 // The global sun/sky light as of the last round (-1 when unknown).
 float lighting_ls_now() {
+    if (lighting_sun_small()) {
+        return max(lighting_sun_committed_light(), 0.0);
+    }
     uint g = ckeys.key[LIGHTING_LS_AT + 2u * LIGHTING_LS_RING];
     uint ga = LIGHTING_LS_AT + 2u * (g % LIGHTING_LS_RING);
     return (g != 0u && ckeys.key[ga] == g) ? uintBitsToFloat(ckeys.key[ga + 1u]) : -1.0;
@@ -2827,6 +2836,12 @@ vec4 lighting_svgf_in(uint s, out float var) {
     // times under a moving sun held different scales, and the luminance stop
     // kept those groups apart (camouflage plateaus at dawn).
     float g = lighting_sc_sun_gain(s);
+    // The slice of pages catching up to the live sun. Everyone else keeps the
+    // committed scale, so one tick does not dirty the filtered set.
+    if (lighting_sun_small() && lighting_sun_slot_slice(s)) {
+        float c = max(lighting_sun_committed_light(), 1.0e-4);
+        g *= clamp(lighting_sun_live_light() / c, 0.0, LIGHTING_LS_MAX);
+    }
     if (!wrc) {
         vec4 eb = cache.v[LIGHTING_SC_EST_AT + 2u * s + 1u];
         if (eb.x > 0.0 && t >= 4.0) {
@@ -3527,6 +3542,11 @@ void lighting_shadow_epochs() {
         vec4 last = vec4(uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]), uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]));
         vec4 now = vec4(l.pos.xyz, l.color.w);
         // S75: colour too (the texel direct-light cache reads the epoch).
+        // A small sun step keeps this epoch. Pixels still trace the live sun.
+        // Hits keep the visibility from the last committed direction.
+        if (lighting_sun_small() && l.pos.w > 0.5) {
+            continue;
+        }
         uint col = lighting_hash(floatBitsToUint(l.color.x) ^ lighting_hash(floatBitsToUint(l.color.y) ^ lighting_hash(floatBitsToUint(l.color.z))));
         bool bump = all || any(notEqual(last, now)) || ckeys.key[at + 5u] != col;
         ckeys.key[at + 5u] = col;

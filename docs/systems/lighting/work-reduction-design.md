@@ -190,7 +190,7 @@ The stored hit radiances of a propagated probe stay as they were. They are not r
 
 ## Departures
 
-Collected so a phase can copy its row into the lighting record's deviation list when it lands. None of these are in the code.
+Collected so a phase can copy its row into the lighting record's deviation list when it lands. Rows 1–13 are not in the shade. Row 14 is: a small sun step amortises indirect light.
 
 | # | Paper | What this design does |
 |---|---|---|
@@ -207,6 +207,7 @@ Collected so a phase can copy its row into the lighting record's deviation list 
 | 11 | MegaLights / ReSTIR temporal reuse and denoising | Not used. S78Q stays shelved. |
 | 12 | Sannikov radiance cascades, as a tracer | Spacing only. ADR 0008 stays superseded. |
 | 13 | ADR 0012 per-moving-light layer | The layer is the store the delta edits. A shortcut that patches the summed SH and drops the layer conflicts with the ADR and has to be named in that phase. |
+| 14 | SVGF (Schied et al. 2017) and Lumen recompute every pixel every frame. Lumen relights surface-cache direct every frame. | A small directional-sun step is not a full dirty. Indirect light refreshes one band of probe rows and texel pages per frame, over 8 frames, while the step from the last full refresh stays inside 2° or 2% sun/sky irradiance. Direct sun light and its shadows are traced and shown every frame. |
 
 Ward's `R_geo` term stays omitted, which S72V already records. This design does not add it.
 
@@ -254,11 +255,37 @@ Lavapipe, 320×180, measured in the same process as a fresh phase 0 floor: direc
 
 `lighting_moving_camera_keeps_its_brightness` misses its 0.03 gate on this lavapipe at the phase 0 commit (wiggle ratio about 1.04) and with full effort forced. That miss is older than the tag. `lighting_pipelines_build_quickly` counts the pre-existing `lighting gbuffer` timing name along with the nine lighting compute pipelines, so the same assertion fails on gi-v2.
 
+### Sun step — amortise the indirect refresh
+
+This lands before phase 2. PR #26 measured the moving stress scene at 1920×1080: the day-clock sun moves every frame, so every 8×8 compose block (32400/32400) and the a-trous dirty fraction (above 0.25) are dirty. The list is the whole picture. Skipping blocks cannot save the compose or the a-trous pass until a small sun step stops marking all of them.
+
+A step is small when the sun's direction has moved less than 2° from the last full refresh and the global sun/sky light (`lighting_global_light`) has moved less than 2%. The camera, the meshes, and the point lamps have to be holding. A larger step, a sun appearing or disappearing, or a moved point lamp is a full refresh.
+
+While the step is small:
+
+- Every pixel traces the live sun. The direct view and the sun's shadow are this frame's. The compose list does not gain a block only because that packed direct changed.
+- A direct patch, the same compose shader, adds that direct to the bounce stored last time the pixel was fully composed. A clean block does not keep last frame's sun.
+- Indirect light uses the sun from the last full refresh, except one band of probe rows and one band of texel pages (`frame % 8`). That band is shaded with the live sun. Over 8 frames the bands cover the picture.
+- The a-trous input keeps the committed sun/sky scale, so a tick does not move every filtered texel. The band uses the live scale.
+- The sun's shadow epoch does not move. Hit visibility stays on the committed sun. Pixels do not read that cache.
+
+`GENOS_LIGHTING_FULL_EFFORT=1` turns this off. The corner scene has no sun, so phase 1's picture is unchanged. `GENOS_LIGHTING_DEBUG=1` prints `lightingcompose` with the block count (`0xffffffff` is a full compose) and whether the sun path was on.
+
+**Pass:** on a held camera and a sun step inside the tolerance, the compose list is under half the image and the a-trous dirty fraction stays at or under 0.25. The direct view stays inside the phase 0 floor against full effort. A 40° jump is a full compose. **Milliseconds:** not claimed. The owner's 1080p window is the measurement. Lavapipe does not time it.
+
 ### Phase 2 — confirmed-visibility shade
 
 Technique 1. Wide fringe: every segment this frame's lamp motion or a mover bound could flip is traced. Confirmed points are off the light dispatch.
 
 **Pass:** the three diffs and the shadow smoke. **Milliseconds:** light toward 1.5 ms. A list-build that costs more than a few tenths, or a light pass that stays near 4.7 ms, fails the time check the way S77B did.
+
+Tried once and reverted. The list ran, and the analytic shade wrote a 12.5 cm cell bit that does not match a per-pixel shadow.
+
+1. Claim: confirmed pixels can take the cached visibility and leave the trace.
+2. Check: lavapipe 320×180 corner, direct view, mean `|ΔL|` against full effort. The floor is 0. The band is 5e-4.
+3. Fault: the first moving frame's direct `|ΔL|` was 0.42. Traced and analytic counts were both large, so the miss is the shade, not a dead dispatch.
+4. First seen: `lighting_work` on this branch, before the sun step.
+5. Left reverted: the shade is not in the tree. A later attempt does not start from that cell bit.
 
 ### Phase 3 — sparse probes and propagation
 
@@ -327,6 +354,7 @@ Lighting stays a picture on the machine that draws. The five lines, for the syst
 7. **Camera-history bias.** S78Z's surface-cache bias is matched, not fixed. A texel-verify fix is not a precondition.
 8. **Volume pause.** RTXGI's volume-wide pause stays out. A probe goes quiet on its own check.
 9. **Many lights.** MegaLights and S78Q stay out, including the 100-lamp room. That room is a different task.
+10. **Small sun.** A directional sun that moves a little is not a full dirty of compose or a-trous. Indirect light for that step refreshes over 8 frames, inside 2° or 2% irradiance of the last full refresh. Direct sun light and its shadows stay on this frame. Departure 14. A large step is a full refresh.
 
 ## Owner run
 

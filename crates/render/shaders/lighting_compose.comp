@@ -84,9 +84,17 @@ vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
     return probes;
 }
 
+// Picture = albedo * LAMBERT * (direct + bounce) + glow. Bounce is stored as
+// rgb9e5 + 1 past the glow slice so a later direct patch can apply this
+// frame's sun without walking the cache. 0 means the pixel has no bounce yet.
+uint lighting_bounce_word(uint index) {
+    return 2u * pc.dims.x * pc.dims.y + index;
+}
+
 void main() {
+    bool patch = lighting_sun_patch_now();
     uvec2 p;
-    if (ckeys.key[LIGHTING_COMPOSE_FULL] != 0u) {
+    if (patch || ckeys.key[LIGHTING_COMPOSE_FULL] != 0u) {
         p = gl_GlobalInvocationID.xy;
     } else {
         uint bw = (pc.dims.x + 7u) / 8u;
@@ -94,14 +102,17 @@ void main() {
         uvec2 b = uvec2(block % bw, block / bw);
         p = b * 8u + gl_LocalInvocationID.xy;
     }
-    // Every thread reaches the regime count. An early return would stall the
-    // workgroup barrier in lighting_work_count_px.
+    // Every thread of a list or full compose reaches the regime count. The
+    // direct patch is its own dispatch and does not take that barrier.
     bool in_pic = p.x < pc.dims.x && p.y < pc.dims.y;
     vec3 pos = vec3(0.0);
     vec3 n = vec3(0.0, 1.0, 0.0);
     bool surface = false;
     uint mode = scene.grid_at.w & 255u;
-    if (in_pic) {
+    // Albedo, normal, depth, texels, and the regime view are drawn by the
+    // list compose. The patch only refreshes the shaded picture.
+    bool shade = !patch || mode <= 2u || mode == 6u;
+    if (in_pic && shade) {
         lighting_compose_px = p;
         vec3 albedo;
         bool two_sided;
@@ -110,8 +121,11 @@ void main() {
         if (surface) {
             vec3 direct = lighting_unpack_rgb9e5(gbuf.px[index].w);
             // The light pass left the pixel's emitted light past the picture.
-            vec3 glow = lighting_unpack_rgb9e5(outc.px[pc.dims.x * pc.dims.y + index]);
-            gbuf.px[index] = uvec4(~0u);
+            uint pixels = pc.dims.x * pc.dims.y;
+            vec3 glow = lighting_unpack_rgb9e5(outc.px[pixels + index]);
+            if (!lighting_sun_patch_follows() || patch) {
+                gbuf.px[index] = uvec4(~0u);
+            }
             if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
                 n = -n;
             }
@@ -128,7 +142,14 @@ void main() {
                 float lit = 0.55 + 0.45 * abs(dot(n, vec3(0.3, 0.8, 0.5)));
                 outc.px[index] = pack_rgb(col * lit * (ts.y >= 4.0 ? 1.0 : 0.35));
             } else {
-                vec3 bounce = indirect(p, pos, n);
+                vec3 bounce;
+                uint stored = outc.px[lighting_bounce_word(index)];
+                if (patch && stored != 0u) {
+                    bounce = lighting_unpack_rgb9e5(stored - 1u);
+                } else {
+                    bounce = indirect(p, pos, n);
+                    outc.px[lighting_bounce_word(index)] = lighting_pack_rgb9e5(max(bounce, vec3(0.0))) + 1u;
+                }
                 if (mode == 1u || mode == 6u) {
                     bounce = vec3(0.0);
                 }
@@ -141,6 +162,16 @@ void main() {
                 outc.px[index] = pack_rgb(dither8(shown, p));
             }
         }
+    }
+    if (patch) {
+        if (gl_WorkGroupID.x == 0u && gl_WorkGroupID.y == 0u && gl_LocalInvocationIndex == 0u) {
+            gstats.work_stochastic = 1u;
+        }
+        return;
+    }
+    if (gl_WorkGroupID.x == 0u && gl_LocalInvocationIndex == 0u) {
+        gstats.work_delta_skip = ckeys.key[LIGHTING_COMPOSE_FULL] != 0u ? 0xffffffffu : ckeys.key[LIGHTING_COMPOSE_COUNT];
+        gstats.work_stochastic = lighting_sun_small() ? 1u : 0u;
     }
     uint tag = lighting_work_count_px(surface, pos, n);
     if (mode == 8u && surface && in_pic) {
