@@ -51,6 +51,7 @@ The crate is `crates/scene`, package `genos-scene`.
 - `stable` is true when no brick is still updating.
 - `GET /shot.png` and the tool `take_screenshot` return the live picture. The light is not settled first.
 - `POST /settings` and the tool `set_lighting` change the sun, the sky, the boxes, the moving-lamp share, and the time of day.
+- `Scene.lighting` is the lighting settings (`crates/scene/src/lighting.rs`), the reference [engine feature setting](../engine/settings-principles.md). A scene file sets them with `lighting_preset("potato")` and `lighting("bounces=1; direct_lights=4")`. `get_lighting_settings`, `set_lighting_settings`, `list_presets`, and `apply_preset` read and edit that struct over MCP and return the last GPU pass times. The stress knobs write the same struct. The panel tool `set_lighting` is a different patch. The record is [lighting/toggles.md](lighting/toggles.md).
 - `sun` is `freeze` or `run`. `sky` is `on` or `off`. `boxes` is `still` or `move`. `dynamic` is 0 to 100. `day` is 0 to 1.
 - The record path is `$XDG_RUNTIME_DIR/genos/mcp/<pid>.json`.
 - When `XDG_RUNTIME_DIR` is empty, the path is `/tmp/genos-mcp-<uid>/<pid>.json`.

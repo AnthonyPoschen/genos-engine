@@ -110,6 +110,50 @@ impl Renderer {
         Ok(())
     }
 
+    /// Replace the draw's lighting settings until [`Renderer::clear_lighting_override`].
+    ///
+    /// A game that already owns the [`genos_scene::Scene`] writes `scene.lighting`
+    /// instead. The next draw applies either value, then any `GENOS_LIGHTING_*`
+    /// variable that is set.
+    pub fn set_lighting_settings(&mut self, settings: genos_scene::LightingSettings) {
+        self.gpu.lighting.override_settings = Some(settings);
+    }
+
+    /// The scene's lighting settings win again.
+    pub fn clear_lighting_override(&mut self) {
+        self.gpu.lighting.override_settings = None;
+    }
+
+    /// Settings the last draw used, after the scene, the override, and the environment.
+    pub fn lighting_settings(&self) -> genos_scene::LightingSettings {
+        self.gpu.lighting.settings.clone()
+    }
+
+    /// Replace the override with a named preset (`potato`, `low`, `medium`, `high`).
+    pub fn apply_lighting_preset(&mut self, name: &str) -> Result<(), String> {
+        let preset = genos_scene::LightingPreset::parse(name)
+            .ok_or_else(|| format!("unknown lighting preset {name}"))?;
+        self.gpu.lighting.override_settings = Some(genos_scene::LightingSettings::preset(preset));
+        Ok(())
+    }
+
+    /// Dispatches recorded for each lighting bucket on the last collected frame.
+    pub fn lighting_dispatches(&self) -> [u32; 12] {
+        self.gpu.lighting.last_dispatches
+    }
+
+    /// GPU milliseconds of each lighting bucket on the last collected frame.
+    ///
+    /// One frame behind the draw that just returned. Zero when timestamps are off.
+    pub fn lighting_pass_ms(&self) -> [f64; 12] {
+        self.gpu.lighting.last_ms
+    }
+
+    /// Bucket names, in the order of [`Renderer::lighting_dispatches`].
+    pub fn lighting_bucket_names() -> &'static [&'static str] {
+        &LIGHTING_BUCKET_NAMES
+    }
+
     /// Draw one frame: the visible objects, lit by the lighting passes.
     ///
     /// When `readback` is set, return tightly packed BGRA8 pixels.
@@ -270,6 +314,7 @@ impl Renderer {
         self.gpu.note_overlay_count(overlay_count);
         self.gpu.wire_on = wireframe;
         self.gpu.copy_picture = readback || self.keep_pictures;
+        self.gpu.sync_lighting_settings(&world.scene)?;
         self.gpu.record_and_submit(&matrix)?;
         let pixels = if readback {
             self.gpu.wait_gpu()?;
@@ -2043,7 +2088,12 @@ impl Gpu {
             .frame_spans
             .push((raw[0], raw[FRAME_STAMPS as usize - 1]));
         let ids = std::mem::take(&mut times.lighting_ids[slot]);
-        if ids.len() > 2 && !times.lighting_pool.is_null() {
+        let tags = std::mem::take(&mut self.lighting.frame_tags[slot]);
+        let shadow = self.lighting.frame_shadow[slot];
+        let prefill = self.lighting.frame_prefill[slot];
+        let counts = self.lighting.frame_counts[slot];
+        let mut bucket_ms = [0.0f64; BUCKETS];
+        if !ids.is_empty() && !times.lighting_pool.is_null() {
             let mut g = vec![0u64; ids.len() + 1];
             let got = unsafe {
                 (self.fns.get_query_results)(
@@ -2063,10 +2113,26 @@ impl Gpu {
                 }
                 for (i, (&pass, w)) in ids.iter().zip(g.windows(2)).enumerate() {
                     let ms = tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
-                    times.lighting[pass] += ms;
+                    if pass < times.lighting.len() {
+                        times.lighting[pass] += ms;
+                    }
                     times.lighting_disp[i].1 += ms;
+                    let tag = tags.get(i).copied().unwrap_or(pass as u8) as usize;
+                    if tag < BUCKETS {
+                        bucket_ms[tag] += ms;
+                        times.lighting_bucket[tag] += ms;
+                    }
+                    if shadow && (tag == B_DIRECT as usize || tag == B_HIT as usize) {
+                        bucket_ms[B_SHADOWS as usize] += ms;
+                        times.lighting_bucket[B_SHADOWS as usize] += ms;
+                    }
                 }
                 times.lighting_frames += 1;
+                if prefill {
+                    times.prefill_frames += 1;
+                }
+                self.lighting.last_ms = bucket_ms;
+                self.lighting.last_dispatches = counts;
             }
         }
         times.frames += 1;
@@ -2097,7 +2163,7 @@ impl Gpu {
         if times.lighting_frames > 0 {
             let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
-                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3}",
+                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} shadows={:.3} prefill={:.3}",
                 times.lighting_frames,
                 g[0],
                 g[1],
@@ -2114,7 +2180,10 @@ impl Gpu {
                 times.world_pass[0] / f64::from(times.world_runs.max(1)),
                 times.world_pass[1] / f64::from(times.world_runs.max(1)),
                 times.world_pass[2] / f64::from(times.world_runs.max(1)),
-                times.world_pass[3] / f64::from(times.world_runs.max(1))
+                times.world_pass[3] / f64::from(times.world_runs.max(1)),
+                times.lighting_bucket[B_CACHE_RAYS as usize] / f64::from(times.lighting_frames),
+                times.lighting_bucket[B_SHADOWS as usize] / f64::from(times.lighting_frames),
+                times.prefill_frames as f64 / f64::from(times.lighting_frames),
             );
         }
         if !times.light_spans.is_empty() {
@@ -5128,6 +5197,11 @@ struct GpuTimes {
     lighting_disp: Vec<(usize, f64)>,
     lighting_frames: u32,
     lighting: [f64; 9],
+    /// Per-bucket sums, including cache rays, hit light, and shadows.
+    lighting_bucket: [f64; 12],
+    /// Frames in this line whose prefill scout was due. Printed as a fraction,
+    /// not a millisecond: the scout shares the cache-ray dispatch.
+    prefill_frames: u32,
     /// Async light cache rounds (GI v2) and their GPU time.
     world_runs: u32,
     world_ms: f64,
@@ -5181,6 +5255,8 @@ impl Default for GpuTimes {
             world_pass: [0.0; 4],
             lighting_frames: 0,
             lighting: [0.0; 9],
+            lighting_bucket: [0.0; 12],
+            prefill_frames: 0,
             frame_spans: Vec::new(),
             light_spans: Vec::new(),
         }

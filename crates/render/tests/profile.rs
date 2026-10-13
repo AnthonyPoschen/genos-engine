@@ -31,6 +31,7 @@ fn a_profiled_draw_reports_device_time_for_the_draw() {
         lights: Vec::new(),
         ceiling: None,
         sky: None,
+        lighting: genos_scene::LightingSettings::default(),
     });
     let camera = Camera::opening();
     let _ = window.pump();

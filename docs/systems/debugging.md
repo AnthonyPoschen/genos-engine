@@ -27,6 +27,7 @@ that system's features. The agent rubric scores this.
   done when its binary covers its features. Lighting is the reference.
   The inventory is [the lighting debug standard](lighting/debug-standard.md).
   Other systems match that set.
+- Engine-feature settings follow [the settings principles](../engine/settings-principles.md): a public serializable value, the MCP catalogue, and the debug menu. Lighting is the reference.
 - Observability. A part that can fail, or that needs tuning, exposes its state
   on the command queue (an agent, over the API, the CLI, or MCP) and in an
   overlay or inspector (a person). That includes a per-entity dump, a

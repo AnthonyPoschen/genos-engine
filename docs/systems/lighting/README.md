@@ -59,6 +59,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
+- Flat ambient when GI is off is a constant or a classic hemisphere (sky toward the normal, ground away from it). A day curve lerps those colours by sun height on the CPU. No new GI algorithm. The bounce count gates the existing cache read; it does not add a bounce pass.
 
 ## Experiment index
 
@@ -224,6 +225,10 @@ Older entries below quote the names of their time (`GENOS_GI2_*`); read them thr
 - [LT] Conty Estevez, Kulla, "Importance Sampling of Many Lights with Adaptive Tree Splitting", HPG 2018. https://doi.org/10.1145/3233305
 
 Research notes with the cvar values: `/workspace/research/lumen-digest.md` (agent box).
+
+## Settings
+
+Presets, per-feature toggles, quality knobs, the scene text, Rhai, the debug menu, and the MCP commands are in [toggles.md](toggles.md). The struct is `LightingSettings` on the scene. High is the tuned path this document describes. A feature that is off skips its passes and its buffers.
 
 ## Frame overview
 

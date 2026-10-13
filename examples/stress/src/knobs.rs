@@ -2,7 +2,7 @@
 //! sliders all set them through here.
 
 use genos_debug::{Host, Knob};
-use genos_scene::Scene;
+use genos_scene::{AmbientMode, LightingPreset, LightingSettings, Scene, ShadowFilter};
 
 use crate::building::{self, Layout};
 use crate::stage::{Scale, Stage};
@@ -42,6 +42,7 @@ impl Host for Stage {
             "",
         );
         speed.text = format!("x{}", self.sun_speed);
+        let lighting = &self.world.scene.lighting;
         vec![
             time,
             speed,
@@ -116,10 +117,121 @@ impl Host for Stage {
                 usize::from(self.mix.layout == Layout::First),
                 &["spread", "first"],
             ),
+            lighting_preset_knob(&self.world.scene.lighting),
+            Knob::choice(
+                "lighting_bounces",
+                "Bounces",
+                bounce_index(self.world.scene.lighting.bounce.count),
+                &["0", "1", "2", "unlimited"],
+            ),
+            Knob::switch("lighting_direct", "Direct", lighting.direct.enabled),
+            Knob::number(
+                "lighting_direct_lights",
+                "Max lights",
+                lighting.direct.max_lights as f64,
+                (0.0, 64.0),
+                1.0,
+                "",
+            ),
+            Knob::number(
+                "lighting_direct_refresh",
+                "Direct refresh",
+                lighting.direct.refresh_frames as f64,
+                (1.0, 30.0),
+                1.0,
+                " frames",
+            ),
+            Knob::number(
+                "lighting_direct_scale",
+                "Direct scale",
+                lighting.direct.resolution_scale as f64,
+                (1.0, 8.0),
+                1.0,
+                "",
+            ),
+            Knob::switch("lighting_shadows", "Shadows", lighting.shadows.enabled),
+            Knob::choice(
+                "lighting_shadow_filter",
+                "Shadow filter",
+                usize::from(lighting.shadows.filter == ShadowFilter::Cell),
+                &["hard", "cell"],
+            ),
+            Knob::switch("lighting_gi", "GI", lighting.gi.enabled),
+            Knob::number(
+                "lighting_gi_refresh",
+                "GI refresh",
+                lighting.gi.refresh_frames as f64,
+                (1.0, 30.0),
+                1.0,
+                " frames",
+            ),
+            Knob::number(
+                "lighting_budget_shift",
+                "Budget shift",
+                lighting.gi.budget_shift as f64,
+                (0.0, 7.0),
+                1.0,
+                "",
+            ),
+            Knob::switch("lighting_probes", "Probes", lighting.probes.enabled),
+            Knob::number(
+                "lighting_probe_rays",
+                "Probe rays",
+                lighting.probes.rays as f64,
+                (4.0, 64.0),
+                4.0,
+                "",
+            ),
+            Knob::number(
+                "lighting_probe_stale",
+                "Probe stale",
+                lighting.probes.staleness_frames as f64,
+                (1.0, 900.0),
+                1.0,
+                " frames",
+            ),
+            Knob::switch(
+                "lighting_world_cache",
+                "World cache",
+                lighting.world_cache.enabled,
+            ),
+            Knob::number(
+                "lighting_world_stale",
+                "World stale",
+                lighting.world_cache.staleness_frames as f64,
+                (1.0, 1800.0),
+                1.0,
+                " frames",
+            ),
+            Knob::switch("lighting_denoise", "Denoise", lighting.denoiser.enabled),
+            Knob::choice(
+                "lighting_denoise_iters",
+                "Denoise iterations",
+                denoise_index(lighting.denoiser.iterations),
+                &["1", "3", "5"],
+            ),
+            Knob::switch(
+                "lighting_compose_reuse",
+                "Compose reuse",
+                lighting.compose_reuse,
+            ),
+            Knob::switch("lighting_sky", "Lighting sky", lighting.sky),
+            Knob::switch("lighting_emissive", "Emissive", lighting.emissive),
+            Knob::switch("lighting_prefill", "Prefill", lighting.prefill),
+            Knob::choice(
+                "lighting_ambient",
+                "Ambient",
+                ambient_index(lighting.ambient.mode),
+                &["off", "constant", "hemisphere", "day"],
+            ),
         ]
     }
 
     fn set_knob(&mut self, name: &str, v: f64) -> Result<(), String> {
+        if apply_lighting_knob(&mut self.world.scene.lighting, name, v)? {
+            self.apply();
+            return Ok(());
+        }
         match name {
             "time_of_day" => self.day = day_from_hours(v),
             "sun_speed" => self.sun_speed = v as f32,
@@ -145,5 +257,123 @@ impl Host for Stage {
         }
         self.apply();
         Ok(())
+    }
+}
+
+fn lighting_preset_knob(settings: &LightingSettings) -> Knob {
+    let index = LightingPreset::all()
+        .iter()
+        .position(|preset| LightingSettings::preset(*preset) == *settings)
+        .unwrap_or(4);
+    Knob::choice(
+        "lighting_preset",
+        "Lighting",
+        index,
+        &["potato", "low", "medium", "high", "custom"],
+    )
+}
+
+fn bounce_index(count: u32) -> usize {
+    match count {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        _ => 3,
+    }
+}
+
+fn denoise_index(iterations: u32) -> usize {
+    match iterations {
+        0 | 1 => 0,
+        2 | 3 => 1,
+        _ => 2,
+    }
+}
+
+fn ambient_index(mode: AmbientMode) -> usize {
+    match mode {
+        AmbientMode::Off => 0,
+        AmbientMode::Constant => 1,
+        AmbientMode::Hemisphere => 2,
+        AmbientMode::Day => 3,
+    }
+}
+
+/// Write one stress knob through [`LightingSettings::set_key`].
+///
+/// Returns false when `name` is not a lighting knob, so the stage can keep its
+/// own names. A lighting name that is not a key fails.
+fn apply_lighting_knob(
+    settings: &mut LightingSettings,
+    name: &str,
+    v: f64,
+) -> Result<bool, String> {
+    let whole = v.round().max(0.0) as u32;
+    let (key, value) = match name {
+        "lighting_preset" => {
+            return match LightingPreset::all().get(v as usize) {
+                Some(preset) => settings.set_key("preset", preset.name()).map(|()| true),
+                None => Ok(true),
+            };
+        }
+        "lighting_bounces" => (
+            "bounces",
+            match whole {
+                0 => "0".to_string(),
+                1 => "1".to_string(),
+                2 => "2".to_string(),
+                _ => "unlimited".to_string(),
+            },
+        ),
+        "lighting_direct" => ("direct", on_off(v)),
+        "lighting_direct_lights" => ("direct_lights", whole.to_string()),
+        "lighting_direct_refresh" => ("direct_refresh", whole.max(1).to_string()),
+        "lighting_direct_scale" => ("direct_scale", whole.to_string()),
+        "lighting_shadows" => ("shadows", on_off(v)),
+        "lighting_shadow_filter" => (
+            "shadow_filter",
+            if v >= 0.5 { "cell" } else { "hard" }.to_string(),
+        ),
+        "lighting_gi" => ("gi", on_off(v)),
+        "lighting_gi_refresh" => ("gi_refresh", whole.max(1).to_string()),
+        "lighting_budget_shift" => ("budget_shift", whole.to_string()),
+        "lighting_probes" => ("probes", on_off(v)),
+        "lighting_probe_rays" => ("probe_rays", whole.to_string()),
+        "lighting_probe_stale" => ("probe_stale", whole.max(1).to_string()),
+        "lighting_world_cache" => ("world_cache", on_off(v)),
+        "lighting_world_stale" => ("world_stale", whole.max(1).to_string()),
+        "lighting_denoise" => ("denoise", on_off(v)),
+        "lighting_denoise_iters" => (
+            "denoise_iters",
+            match whole {
+                0 => "1",
+                1 => "3",
+                _ => "5",
+            }
+            .to_string(),
+        ),
+        "lighting_compose_reuse" => ("compose_reuse", on_off(v)),
+        "lighting_sky" => ("sky", on_off(v)),
+        "lighting_emissive" => ("emissive", on_off(v)),
+        "lighting_prefill" => ("prefill", on_off(v)),
+        "lighting_ambient" => (
+            "ambient",
+            ["off", "constant", "hemisphere", "day"]
+                .get(v as usize)
+                .copied()
+                .unwrap_or("day")
+                .to_string(),
+        ),
+        _ => return Ok(false),
+    };
+    settings.set_key(key, &value)?;
+    Ok(true)
+}
+
+fn on_off(v: f64) -> String {
+    if v >= 0.5 {
+        "on".into()
+    } else {
+        "off".into()
     }
 }

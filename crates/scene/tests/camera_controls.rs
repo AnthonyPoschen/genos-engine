@@ -1,6 +1,6 @@
 use genos_scene::{
-    transform_point, update, view_proj, viewport_uv, Actions, Camera, Floor, Scene, Vec3,
-    CAMERA_HEIGHT, PITCH_LIMIT,
+    transform_point, update, view_proj, viewport_uv, Actions, Camera, Floor, LightingSettings, Scene,
+    Vec3, CAMERA_HEIGHT, PITCH_LIMIT,
 };
 use std::f32::consts::FRAC_PI_2;
 
@@ -17,6 +17,7 @@ fn tick(camera: &mut Camera, actions: &Actions, dt: f32) {
         lights: Vec::new(),
         ceiling: None,
         sky: None,
+        lighting: LightingSettings::default(),
     };
     update(camera, &mut scene, actions, dt);
 }

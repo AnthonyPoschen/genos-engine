@@ -18,6 +18,7 @@ fn floor_scene() -> Scene {
         lights: Vec::new(),
         ceiling: None,
         sky: None,
+        lighting: genos_scene::LightingSettings::default(),
     }
 }
 

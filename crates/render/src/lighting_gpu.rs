@@ -197,8 +197,29 @@ pub(crate) struct Lighting {
     last_round: Option<Instant>,
     stats_round: [bool; 2],
     /// Overrides `GENOS_LIGHTING_ATROUS_DIRTY` for the a-trous list fallback.
-    /// Fraction of filtered texels; `None` reads the env each frame.
+    /// Fraction of filtered texels; `None` reads the settings each frame.
     atrous_dirty: Option<f32>,
+    /// Settings in force. A draw copies the scene, or the override, then the env.
+    settings: genos_scene::LightingSettings,
+    /// Wins over the scene until cleared.
+    override_settings: Option<genos_scene::LightingSettings>,
+    sun_height: f32,
+    /// The million-slot cache is allocated. Off, a small dummy stands in.
+    cache_full: bool,
+    /// Last buffer class. A live edit rebuilds only when this changes.
+    alloc_key: (u32, u32, u32, u32, u32),
+    /// Per flight slot: bucket tag of each lighting dispatch, in order.
+    frame_tags: [Vec<u8>; 2],
+    frame_counts: [[u32; BUCKETS]; 2],
+    /// Shadows rode on the direct and hit dispatches of that slot.
+    frame_shadow: [bool; 2],
+    /// The prefill scout was due on that slot. It shares the cache-ray dispatch.
+    frame_prefill: [bool; 2],
+    /// Last collected frame (one frame behind the one just submitted).
+    last_ms: [f64; BUCKETS],
+    last_dispatches: [u32; BUCKETS],
+    /// Control block uploaded with the frame, reused by the async queue.
+    ctrl_bytes: [u8; 64],
 }
 
 /// A-trous levels 1-5 in the last frame that ran them (S78X dense fallback).
@@ -304,6 +325,18 @@ impl Default for Lighting {
             last_round: None,
             stats_round: [false; 2],
             atrous_dirty: None,
+            settings: genos_scene::LightingSettings::default(),
+            override_settings: None,
+            sun_height: 0.0,
+            cache_full: false,
+            alloc_key: (0, 0, 0, 0, 0),
+            frame_tags: [Vec::new(), Vec::new()],
+            frame_counts: [[0; BUCKETS]; 2],
+            frame_shadow: [false; 2],
+            frame_prefill: [false; 2],
+            last_ms: [0.0; BUCKETS],
+            last_dispatches: [0; BUCKETS],
+            ctrl_bytes: [0; 64],
         }
     }
 }
@@ -654,29 +687,58 @@ impl Gpu {
         if !self.lighting.ready {
             return Ok(());
         }
+        self.wait_all_inflight()?;
         self.wait_lighting_world();
         self.poll_lighting_world();
         let (w, h) = (self.extent_w.max(1), self.extent_h.max(1));
-        let tile = lighting_tile(h);
-        let cols = w.div_ceil(tile);
-        let rows = h.div_ceil(tile);
-        let probes = (cols * rows) as u64;
+        let settings = self.lighting.settings.clone();
+        let tile = if settings.probes.tile == 0 {
+            lighting_tile(h)
+        } else {
+            settings.probes.tile
+        };
+        let probes_on = settings.allocates_probe_work();
+        let (cols, rows) = if probes_on {
+            (w.div_ceil(tile), h.div_ceil(tile))
+        } else {
+            (0, 0)
+        };
+        let probes = (cols as u64) * (rows as u64);
         let pixels = w as u64 * h as u64;
+        let rays = settings.probe_rays() as u64;
         // Probes (2), one slot per light cache ray (hit, then its light), filtered SH
         // (7), strata (2 per probe and stratum), kept hits and their light (a uint
         // each), the changes block, the views (2 blocks of 2 per probe) and the
         // cells (2 tables of R per probe), then the fills and their light (as the
         // kept hits) (lighting_common.glsl).
-        let kept = probes * LIGHTING_RAYS as u64 * LIGHTING_STRATA as u64;
-        let cache_rays = (LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS) as u64;
-        let work_vec4 = lighting_change_at(probes, cache_rays, kept)
-            + (LIGHTING_CHANGE_HEAD + LIGHTING_CHANGES) as u64
+        let gi = settings.gi.enabled;
+        let kept = if probes_on {
+            probes * rays * LIGHTING_STRATA as u64
+        } else {
+            0
+        };
+        let cache_rays = if gi {
+            (LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS) as u64
+        } else {
+            0
+        };
+        let work_vec4 = if gi {
+            lighting_change_at(probes, cache_rays, kept)
+        } else {
+            256
+        };
+        let work_tail = if gi {
+            (LIGHTING_CHANGE_HEAD + LIGHTING_CHANGES) as u64
             + 4 * probes
-            + 2 * LIGHTING_RAYS as u64 * probes
+            + 2 * rays * probes
             + kept
             + kept / 4
             + pixels.div_ceil(2) // S78J: per-pixel direct light reuse (signature, light)
-            + 2 * probes + LIGHTING_RAYS as u64 * probes; // S78Q: held-probe gather (stamps, raw cells)
+            + 2 * probes + rays * probes // S78Q: held-probe gather (stamps, raw cells)
+        } else {
+            0
+        };
+        let work_vec4 = work_vec4 + work_tail;
         let mut gbuf = std::mem::replace(&mut self.lighting.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.lighting.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.lighting.out, Buffer::empty());
@@ -685,20 +747,7 @@ impl Gpu {
         self.destroy_buffer(&mut out);
         // Both queues use the light cache and the work buffer's ray slots.
         let share = self.light_families();
-        if self.lighting.cache_keys.buffer.is_null() {
-            // The compose words and the a-trous meta must not alias the a-trous lists.
-            assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
-            assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
-            self.lighting.cache_keys = self.make_buffer_queues(
-                (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS) * 4, // a-trous meta after the S67/PR11 compose words // S78X: a-trous threshold, fraction, bins // S78Z: verify / wake words sit just before that // S78X lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
-                0x20 | 0x2 | 0x100 | 0x1,
-                Memory::Device,
-                &share,
-            )?;
-            self.lighting.cache =
-                self.make_buffer_queues(LIGHTING_CACHE_SLOTS * 368, // S78S: + transfer source (dump) // S77D: + 6 a-trous levels, 2 dirty-stamp vec4 + activity (23 vec4 a slot)
-                0x20 | 0x2 | 0x1, Memory::Device, &share)?; // S74A: + A-SVGF gradient (2 vec4) // 11 vec4 a slot (S72A: + sparse fill; S72V: + a-trous ping-pong)
-            self.lighting.cache_clear = true;
+        if self.lighting.stats[0].buffer.is_null() {
             for k in 0..2 {
                 self.lighting.stats[k] = self.make_buffer(LIGHTING_STATS_BYTES, 0x20 | 0x2, Memory::Readback)?;
                 self.lighting.stats_dev[k] = self.make_buffer(LIGHTING_STATS_BYTES, 0x20 | 0x2 | 0x1, Memory::Device)?;
@@ -713,15 +762,50 @@ impl Gpu {
             )?;
             self.write_buffer(&self.lighting.world_scene, &vec![0u8; crate::pack::SCENE_TAIL])?;
         }
+        let want_cache = settings.allocates_cache();
+        if want_cache != self.lighting.cache_full || self.lighting.cache.buffer.is_null() {
+            let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
+            let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
+            self.destroy_buffer(&mut keys);
+            self.destroy_buffer(&mut cache);
+            if want_cache {
+                // The compose words and the a-trous meta must not alias the a-trous lists.
+                assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
+                assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
+                self.lighting.cache_keys = self.make_buffer_queues(
+                    (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS) * 4,
+                    0x20 | 0x2 | 0x100 | 0x1,
+                    Memory::Device,
+                    &share,
+                )?;
+                self.lighting.cache = self.make_buffer_queues(
+                    LIGHTING_CACHE_SLOTS * 368,
+                    0x20 | 0x2 | 0x1,
+                    Memory::Device,
+                    &share,
+                )?;
+                self.lighting.cache_clear = true;
+            } else {
+                // Descriptors stay valid. Shaders do not index these while GI is off.
+                self.lighting.cache_keys =
+                    self.make_buffer_queues(4096, 0x20 | 0x2 | 0x100 | 0x1, Memory::Device, &share)?;
+                self.lighting.cache = self.make_buffer_queues(4096, 0x20 | 0x2 | 0x1, Memory::Device, &share)?;
+                self.lighting.cache_clear = false;
+            }
+            self.lighting.cache_full = want_cache;
+        }
         self.lighting.gbuf = self.make_buffer(16 + pixels * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.work =
-            self.make_buffer_queues(work_vec4 * 16, 0x20 | 0x1 | 0x2, Memory::Device, &share)?;
-        // Picture, then this frame's emitted light (compose reads the second half).
-        self.lighting.out = self.make_buffer(pixels * 8, 0x20 | 0x1 | 0x2, Memory::Device)?;
+            self.make_buffer_queues(work_vec4.max(1) * 16, 0x20 | 0x1 | 0x2, Memory::Device, &share)?;
+        // Picture, emitted light, and (when direct refresh is slower than every
+        // frame) one stored direct value per pixel. High stays at pixels * 8.
+        let hist = u64::from(settings.direct.refresh_frames > 1);
+        self.lighting.out = self.make_buffer(pixels * (8 + 4 * hist), 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.dims = [w, h, cols, rows];
+        self.lighting.alloc_key = lighting_alloc_key(&settings);
         self.lighting.compose_valid = false;
         self.lighting.gbuf_clear = true;
-        self.lighting.work_clear = true;
+        self.lighting.work_clear = gi;
         self.write_raster_sets()?;
         self.write_lighting_sets()
     }
@@ -816,7 +900,8 @@ impl Gpu {
         let sweep = self.lighting.live.div_ceil(LIGHTING_CACHE_BATCH).max(1) + 1;
         // World cells on (GENOS_LIGHTING_WORLD=2): their running means (cap frames) have
         // to forget the poses before this one, so settling waits four caps.
-        let world_wait = match lighting_world_env() {
+        let world_mode = self.lighting.settings.world_mode();
+        let world_wait = match world_mode {
             2 => {
                 4 * std::env::var("GENOS_LIGHTING_WORLD_CAP").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(32)
             }
@@ -829,9 +914,8 @@ impl Gpu {
         // change never drops under LIGHTING_SETTLE_CHANGE), so it settles on frames still
         // (GENOS_LIGHTING_SC_SETTLE, default 300) and the light having held.
         let sc_relit = world_wait != 0
-            || (lighting_world_env() == 3
-                && lighting_sc_flags_env() & 8192 != 0);
-        let settled = if lighting_world_env() == 3 && sc_relit {
+            || (world_mode == 3 && lighting_sc_flags_env() & 8192 != 0);
+        let settled = if world_mode == 3 && sc_relit {
             self.lighting.still >= LIGHTING_SETTLE_FRAMES.max(if world_wait != 0 { world_wait } else { 300 }) && self.lighting.light_quiet >= 2
         } else {
             self.lighting.still >= LIGHTING_SETTLE_FRAMES.max(world_wait) && self.lighting.quiet >= sweep
@@ -897,7 +981,7 @@ impl Gpu {
         // and young-only rounds come from what the CPU already knows (frames still,
         // rounds since the light changed), so its counters are read only for the
         // debug output or the older world modes that settle on them.
-        let read = lighting_stats_wanted();
+        let read = lighting_stats_wanted(self.lighting.settings.world_mode());
         if !read {
         } else if let Ok(words) = self.read_lighting_stats(slot) {
             self.lighting.probe_samples = [words[6], words[7]];
@@ -956,25 +1040,28 @@ impl Gpu {
                 u32::MAX,
             );
             // Quiet-compose indirect args: group count x starts at 0, y and z stay 1.
-            let yz = [1u32, 1u32];
-            (self.fns.cmd_fill_buffer)(
-                self.cmd,
-                self.lighting.cache_keys.buffer,
-                lighting_compose_at() * 4,
-                4,
-                0,
-            );
-            (self.fns.cmd_update_buffer)(
-                self.cmd,
-                self.lighting.cache_keys.buffer,
-                (lighting_compose_at() + 1) * 4,
-                8,
-                yz.as_ptr() as *const c_void,
-            );
+            // The key table is absent while GI is off; those offsets would be past the dummy.
+            if self.lighting.cache_full {
+                let yz = [1u32, 1u32];
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.cache_keys.buffer,
+                    lighting_compose_at() * 4,
+                    4,
+                    0,
+                );
+                (self.fns.cmd_update_buffer)(
+                    self.cmd,
+                    self.lighting.cache_keys.buffer,
+                    (lighting_compose_at() + 1) * 4,
+                    8,
+                    yz.as_ptr() as *const c_void,
+                );
+            }
             // The whole-buffer clears land before the count and header writes.
             self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             // The mature and young patch counts, rebuilt by the compact pass.
-            if !world {
+            if !world && self.lighting.cache_full {
                 for at in [LIGHTING_CACHE_SLOTS, 2 * LIGHTING_CACHE_SLOTS + 1, LIGHTING_WRC_COUNTS_AT, LIGHTING_WRC_COUNTS_AT + 1, LIGHTING_WRC_COUNTS_AT + 4, LIGHTING_WRC_COUNTS_AT + 5, LIGHTING_WRC_COUNTS_AT + 6, LIGHTING_WRC_COUNTS_AT + 7] {
                     (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, at * 4, 4, 0);
                 }
@@ -1015,7 +1102,7 @@ impl Gpu {
         }
         if !light {
             self.lighting.light_quiet = 0;
-        } else if lighting_world_env() == 3 {
+        } else if self.lighting.settings.world_mode() == 3 {
             // Surface cache: texels keep adding sets, so their change says nothing
             // of the light; rounds since the light last changed.
             self.lighting.light_quiet = self.lighting.light_quiet.saturating_add(1);
@@ -1161,6 +1248,14 @@ impl Gpu {
                 (self.fns.cmd_write_timestamp)(cmd, 0x1, qp, 0);
             }
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.world_stats.buffer, 0, LIGHTING_STATS_BYTES, 0);
+            self.barrier_on(cmd, 0x1000, 0x1000, 0x1000, 0x1000);
+            (self.fns.cmd_update_buffer)(
+                cmd,
+                self.lighting.world_stats.buffer,
+                LIGHTING_CTRL_WORD * 4,
+                self.lighting.ctrl_bytes.len() as u64,
+                self.lighting.ctrl_bytes.as_ptr() as *const c_void,
+            );
             // The mature and young counts, rebuilt by the compact pass.
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, LIGHTING_CACHE_SLOTS * 4, 4, 0);
             // The WRC refresh lists' counts (change, background; lighting_cache.glsl).
@@ -1287,10 +1382,31 @@ impl Gpu {
     }
 
     /// After the raster: the passes, then the result into the colour image.
+    /// Copy the scene (or the override), apply env locks, and rebuild buffers
+    /// when a size knob changed.
+    fn sync_lighting_settings(&mut self, scene: &genos_scene::Scene) -> Result<(), String> {
+        let mut desired = self
+            .lighting
+            .override_settings
+            .clone()
+            .unwrap_or_else(|| scene.lighting.clone());
+        desired.apply_env();
+        desired.sanitize();
+        let key = lighting_alloc_key(&desired);
+        let resized = self.lighting.dims[0] != self.extent_w || self.lighting.dims[1] != self.extent_h;
+        let rebuild = key != self.lighting.alloc_key || resized;
+        self.lighting.settings = desired;
+        self.lighting.sun_height = sun_height(scene);
+        if rebuild && self.lighting.ready {
+            self.make_lighting_targets()?;
+        }
+        Ok(())
+    }
+
     fn lighting_passes(&mut self, slot: usize) {
         let [w, h, cols, rows] = self.lighting.dims;
         let probes = cols * rows;
-        let probe_rays = probes * LIGHTING_RAYS;
+        let probe_rays = probes * self.lighting.settings.probe_rays();
         let bgra = if self.format == 44 { 1u32 } else { 0 };
         self.lighting.frame = self.lighting.frame.wrapping_add(1);
         let hash = {
@@ -1344,7 +1460,7 @@ impl Gpu {
         // (1: pixels read the light cache, 2: probes average into world cells, 3:
         // the surface cache) and GENOS_LIGHTING_WORLD_CAP frames (mode 3: ray sets a
         // texel averages, default 16).
-        let world = lighting_world_env();
+        let world = self.lighting.settings.world_mode();
         let cap = std::env::var("GENOS_LIGHTING_WORLD_CAP")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
@@ -1427,11 +1543,7 @@ impl Gpu {
         // The camera up's w (head 3.w) is unread: the flags' high bits.
         // S72S: the budget shift (GENOS_LIGHTING_SC_BUDGET_SHIFT, 0-7: every
         // per-round ray budget / 2^shift) rides in bits 9-11 above the high flags.
-        let budget_shift = std::env::var("GENOS_LIGHTING_SC_BUDGET_SHIFT")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(0)
-            .min(7);
+        let budget_shift = self.lighting.settings.gi.budget_shift.min(7);
         block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 15) << 12)) as f32;
         // A frame drawn from held light runs no probes: what it saw is still what
         // the probes last ran on.
@@ -1449,27 +1561,35 @@ impl Gpu {
         // Movers ride after the changes: upload them too (S49/S50L sent only the
         // head and changes, so every mover read zeros on the GPU).
         let used = 4 * sent;
-        let atrous_ppm = lighting_atrous_ppm(self.lighting.atrous_dirty);
-        unsafe {
-            // The last frame's passes are done with the block before it is written.
-            self.memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000);
-            (self.fns.cmd_update_buffer)(
-                self.cmd,
-                self.lighting.work.buffer,
-                block_at,
-                used as u64 * 4,
-                block.as_ptr() as *const c_void,
-            );
-            // S78X: the a-trous dirty-fraction threshold (millionths). A cache
-            // clear earlier this frame zeroed the word; the levels read it.
-            (self.fns.cmd_update_buffer)(
-                self.cmd,
-                self.lighting.cache_keys.buffer,
-                lighting_atrous_ppm_at() * 4,
-                4,
-                &atrous_ppm as *const u32 as *const c_void,
-            );
-            self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+        let atrous_ppm = lighting_atrous_ppm(Some(
+            self.lighting
+                .atrous_dirty
+                .unwrap_or(self.lighting.settings.denoiser.dirty_fraction),
+        ));
+        if self.lighting.settings.gi.enabled {
+            unsafe {
+                // The last frame's passes are done with the block before it is written.
+                self.memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000);
+                (self.fns.cmd_update_buffer)(
+                    self.cmd,
+                    self.lighting.work.buffer,
+                    block_at,
+                    used as u64 * 4,
+                    block.as_ptr() as *const c_void,
+                );
+                if self.lighting.cache_full {
+                    // S78X: the a-trous dirty-fraction threshold (millionths). A cache
+                    // clear earlier this frame zeroed the word; the levels read it.
+                    (self.fns.cmd_update_buffer)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        lighting_atrous_ppm_at() * 4,
+                        4,
+                        &atrous_ppm as *const u32 as *const c_void,
+                    );
+                }
+                self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+            }
         }
         // The light alone (no camera): while it holds and a full sweep has changed
         // no mature patch, rounds relight young patches only. Any change goes back
@@ -1481,7 +1601,7 @@ impl Gpu {
             self.mesh_field_key.hash(&mut hasher);
             // The drawn list follows the camera (culling), so the surface cache
             // (mode 3) leaves it out: a turn is not a light change there.
-            if lighting_world_env() != 3 {
+            if self.lighting.settings.world_mode() != 3 {
                 self.lighting.draw_key.hash(&mut hasher);
             }
             hasher.finish()
@@ -1493,7 +1613,7 @@ impl Gpu {
         let sweep = self.lighting.live.div_ceil(LIGHTING_CACHE_BATCH).max(1) + 1;
         // Surface cache (mode 3): bit 10 says the light has held two rounds, and a
         // round that relights nothing has nothing left to converge.
-        let sc = lighting_world_env() == 3;
+        let sc = self.lighting.settings.world_mode() == 3;
         let young_only = if sc { self.lighting.light_quiet >= 2 } else { self.lighting.young_ok && self.lighting.light_quiet >= sweep };
         self.lighting.stats_light[slot] = light;
         self.lighting.stats_young[slot] = young_only || sc;
@@ -1516,7 +1636,12 @@ impl Gpu {
             | u32::from(fill) << 6
             | u32::from(young_only) << 10
             | u32::from(picks) << 11;
-        let pc = [w, h, cols, rows, LIGHTING_RAYS, lighting_tile(h), z, self.lighting.frame];
+        let tile = if self.lighting.settings.probes.tile == 0 {
+            lighting_tile(h)
+        } else {
+            self.lighting.settings.probes.tile
+        };
+        let pc = [w, h, cols, rows, self.lighting.settings.probe_rays(), tile, z, self.lighting.frame];
         let image = self.color.image;
         let blocks = (w.div_ceil(8) as u64) * (h.div_ceil(8) as u64);
         // Full compose when the picture has no history yet, the scene moved, the
@@ -1524,7 +1649,9 @@ impl Gpu {
         // GENOS_LIGHTING_COMPOSE_ALL forces it (an A/B against the quiet path).
         let compose_full = !self.lighting.compose_valid
             || self.lighting.still == 0
-            || lighting_world_env() != 3
+            || self.lighting.settings.world_mode() != 3
+            || !self.lighting.settings.compose_reuse
+            || !self.lighting.settings.gi.enabled
             || std::env::var_os("GENOS_LIGHTING_COMPOSE_ALL").is_some()
             || blocks > LIGHTING_COMPOSE_CAP;
         // The raster colour as the base: pixels with no surface keep it. A held
@@ -1548,8 +1675,41 @@ impl Gpu {
                     .lighting
                     .last_round
                     .is_none_or(|t| t.elapsed().as_secs_f64() * self.lighting.cache_hz >= 1.0));
-        let mut round = false;
-        if due && self.lighting.async_on {
+        let try_async = due
+            && self.lighting.async_on
+            && self.lighting.cache_full
+            && self.lighting.settings.cache_rays_this_frame(self.lighting.frame);
+        let round = due && !try_async;
+        self.lighting.stats_round[slot] = round;
+        let mut pc = pc;
+        if round {
+            let n = self.lighting.world_round;
+            self.lighting.world_round = n.wrapping_add(1);
+            pc[6] |= (n & 0xf_ffff) << 12;
+            self.lighting.last_round = Some(Instant::now());
+        } else {
+            pc[6] |= 1 << 8;
+        }
+        let kept = probe_rays * LIGHTING_STRATA;
+        let planned = light_groups(
+            &self.lighting.settings,
+            self.lighting.frame,
+            frozen,
+            round,
+            w,
+            h,
+            probes,
+            probe_rays,
+            kept,
+        );
+        self.lighting.ctrl_bytes = pack_lighting_ctrl(
+            &self.lighting.settings,
+            self.lighting.frame,
+            self.lighting.sun_height,
+            planned.bias,
+            planned.pixel_only,
+        );
+        if try_async {
             match self.submit_lighting_world(pc) {
                 Ok(true) => self.lighting.last_round = Some(Instant::now()),
                 Ok(false) => {}
@@ -1558,67 +1718,24 @@ impl Gpu {
                     self.lighting.async_on = false;
                 }
             }
-        } else if due {
-            round = true;
-            self.lighting.last_round = Some(Instant::now());
         }
-        self.lighting.stats_round[slot] = round;
-        let mut pc = pc;
-        if round {
-            let n = self.lighting.world_round;
-            self.lighting.world_round = n.wrapping_add(1);
-            pc[6] |= (n & 0xf_ffff) << 12;
-        } else {
-            pc[6] |= 1 << 8;
-        }
-        let kept = probe_rays * LIGHTING_STRATA;
-        let groups: Vec<(usize, u32, u32)> = if frozen {
-            vec![(3, (w * h).div_ceil(64), 1), (7, w.div_ceil(8), h.div_ceil(8))]
-        } else if !round {
-            vec![
-                (1usize, probes.div_ceil(64), 1u32),
-                // The picks (gather's first round), this frame's rays, then one thread
-                // per kept hit (re-traced where it crossed a change) and per fill slot
-                // (lighting_trace.comp).
-                (4, probes.div_ceil(64), 1),
-                (2, (probe_rays + 2 * kept).div_ceil(64), 1),
-                (3, (w * h + 2 * kept).div_ceil(64), 1),
-                (4, probes, 1), // S78P: a workgroup a probe
-                (5, probes.div_ceil(64), 1),
-                (5, probes.div_ceil(64), 1),
-                (5, probes.div_ceil(64), 1),
-                (7, w.div_ceil(8), h.div_ceil(8)),
-            ]
-        } else {
-            vec![
-                (0usize, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1u32),
-                (1, probes.div_ceil(64), 1),
-                (4, probes.div_ceil(64), 1),
-                // S70A: the light cache rays and patches in their own dispatches,
-                // sized on the GPU (the args pass, LIGHTING_DENSE_*), the rest as frames
-                // without a round (mode 1).
-                (0, 1, LIGHTING_ARGS),
-                (2, (probe_rays + 2 * kept).div_ceil(64), LIGHTING_MODE1),
-                (2, 0, LIGHTING_DENSE_RAYS),
-                (3, (w * h + 2 * kept).div_ceil(64), LIGHTING_MODE1),
-                (3, 0, LIGHTING_DENSE_RAYS),
-                (4, probes, 1), // S78P: a workgroup a probe
-                (5, probes.div_ceil(64), 1),
-                (5, probes.div_ceil(64), 1),
-                (5, probes.div_ceil(64), 1),
-                (6, 0, LIGHTING_DENSE_ENTRIES),
-                // S72V layer 2 (SVGF): variance, five a-trous levels, push.
-                (8, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1),
-                (8, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1),
-                (8, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1),
-                (8, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1),
-                (8, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1),
-                (8, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1),
-                (8, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64), 1),
-                (7, w.div_ceil(8), h.div_ceil(8)),
-            ]
-        };
+        self.lighting.frame_tags[slot] = planned.tags.clone();
+        self.lighting.frame_counts[slot] = planned.counts;
+        self.lighting.frame_shadow[slot] = self.lighting.settings.shadows.enabled
+            && (planned.counts[B_DIRECT as usize] > 0 || planned.counts[B_HIT as usize] > 0);
+        self.lighting.frame_prefill[slot] = self.lighting.settings.prefill_this_frame();
+        let groups = planned.groups;
+        let atrous_stages = planned.atrous_stages;
+        self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
         unsafe {
+            (self.fns.cmd_update_buffer)(
+                self.cmd,
+                self.lighting.stats_dev[slot].buffer,
+                LIGHTING_CTRL_WORD * 4,
+                self.lighting.ctrl_bytes.len() as u64,
+                self.lighting.ctrl_bytes.as_ptr() as *const c_void,
+            );
+            if self.lighting.cache_full {
             (self.fns.cmd_fill_buffer)(
                 self.cmd,
                 self.lighting.cache_keys.buffer,
@@ -1645,6 +1762,7 @@ impl Gpu {
                     words * 4,
                     0,
                 );
+            }
             }
             self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x1);
             (self.fns.cmd_bind_set)(
@@ -1680,7 +1798,8 @@ impl Gpu {
                 (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first);
             }
             let mut filter_round = 0u32;
-            let mut atrous_stage = 0u32;
+            let mut atrous_i = 0usize;
+            let mut atrous_ran = false;
             let mut picked = false;
             // The push constants the next pass sees (the gather and filter rounds add bits).
             let mut cur_pc = pc;
@@ -1705,13 +1824,16 @@ impl Gpu {
                     // S72V6: bits 1-3 cleared first; bit 3 is the gather's "changes
                     // this frame", so on frames with a change every stage read 4-7
                     // and the variance pass and first levels never ran.
+                    // Five iterations are stages 0..6. Fewer iterations jump to the push.
+                    let stage = atrous_stages.get(atrous_i).copied().unwrap_or(0);
+                    atrous_i += 1;
+                    atrous_ran = true;
                     let mut round_pc = pc;
-                    round_pc[6] = (round_pc[6] & !0xe) | atrous_stage << 1;
-                    atrous_stage += 1;
+                    round_pc[6] = (round_pc[6] & !0xe) | stage << 1;
                     (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, 32, round_pc.as_ptr() as *const c_void);
                     cur_pc = round_pc;
                 }
-                if pass == 7 && atrous_stage > 0 {
+                if pass == 7 && atrous_ran {
                     (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, 32, pc.as_ptr() as *const c_void);
                     cur_pc = pc;
                 }
@@ -1987,30 +2109,19 @@ impl Gpu {
     }
 }
 
-/// GENOS_LIGHTING_WORLD (lighting_cache.glsl world modes): 0 off, 1 pixels read the light
-/// cache, 2 world irradiance cells, 3 the surface cache.
-/// Default 3 (the surface cache); GENOS_LIGHTING_WORLD=0 is the probe path (P6).
-fn lighting_world_env() -> u32 {
-    static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
-        std::env::var("GENOS_LIGHTING_WORLD").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(LIGHTING_DEFAULT_WORLD).min(3)
-    })
-}
-
 /// S70B: the frame's counters are read back only where something uses them.
-fn lighting_stats_wanted() -> bool {
-    std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() || !(lighting_world_env() == 3 && lighting_sc_flags_env() & 8192 != 0)
+fn lighting_stats_wanted(world: u32) -> bool {
+    std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() || !(world == 3 && lighting_sc_flags_env() & 8192 != 0)
 }
 
 // Defaults with no env set (S54K, gi-v2): GI v2, the surface cache, cap 64, the
 // S49 flag set and object-local texels. Each env var still overrides.
-const LIGHTING_DEFAULT_WORLD: u32 = 3;
 const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
 const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
 /// Lighting stats buffer: 24 words, diag[64], chg[32], then the a-trous fallback
 /// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`.
 /// The change-counter enable word stays chg[31] (word 119).
-const LIGHTING_STATS_WORDS: usize = 124;
+const LIGHTING_STATS_WORDS: usize = 144;
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 const LIGHTING_CHG_ENABLE_WORD: u64 = 24 + 64 + 31;
 const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;
@@ -2270,3 +2381,5 @@ fn lighting_toggles() -> u32 {
     }
     bits
 }
+
+include!("lighting_dispatch.rs");

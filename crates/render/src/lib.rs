@@ -16,6 +16,7 @@ mod world;
 pub use aa::Antialias;
 pub use budget::{FrameMemory, ImageAdmit};
 pub use genos_bake as bake;
+pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
 pub use gpu::{
     DebugView, DrawProfile, LampReport, LightingAtrousStats, Renderer, ScreenLine, ScreenRect,
     SettleStats, ViewMode,

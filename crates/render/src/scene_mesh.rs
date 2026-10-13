@@ -261,6 +261,7 @@ mod tests {
                 color: [0.7, 0.7, 0.7],
             }),
             sky: None,
+            lighting: genos_scene::LightingSettings::default(),
         }
     }
 

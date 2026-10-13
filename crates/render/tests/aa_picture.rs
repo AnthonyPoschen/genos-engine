@@ -32,6 +32,7 @@ fn silhouette_world() -> World {
         }],
         ceiling: None,
         sky: None,
+        lighting: genos_scene::LightingSettings::default(),
     });
     world.objects.push(Object {
         hidden: false,

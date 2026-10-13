@@ -82,7 +82,56 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint atrous_mode;
     uint atrous_ppm;
     uint atrous_active;
+    // Control block (lighting_dispatch.rs pack_lighting_ctrl), word 124.
+    // High writes every bit that today's tuned path assumes, so a set bit
+    // falls through and the picture stays the one the passes recorded before.
+    uint ctrl_bits;
+    uint ctrl_max_lights;
+    uint ctrl_bounce;
+    uint ctrl_scale;
+    uint ctrl_bias;
+    uint ctrl_pixel_only;
+    uint ctrl_ambient_mode;
+    uint ctrl_history;
+    float ctrl_shadow_cell;
+    float ctrl_ambient_r;
+    float ctrl_ambient_g;
+    float ctrl_ambient_b;
+    float ctrl_ambient_i;
+    float ctrl_ground_r;
+    float ctrl_ground_g;
+    float ctrl_ground_b;
 } gstats;
+// 0 pixel or probe read, 1 cache-ray hit, 2 probe hit. The direct pass sets it
+// before a cache read. A pixel compose leaves it at 0.
+uint lighting_hit_kind = 0u;
+bool lighting_gi_on() {
+    return (gstats.ctrl_bits & 4u) != 0u;
+}
+bool lighting_sky_enabled() {
+    return (gstats.ctrl_bits & 256u) != 0u;
+}
+// Bits 16..18. High writes 5, which is also the fallback when the field is 0.
+uint lighting_denoise_iters() {
+    uint n = (gstats.ctrl_bits >> 16u) & 7u;
+    return n == 0u ? 5u : n;
+}
+// Unlimited (bit 16384) is today's cache. 0 skips the read. A cache-ray hit
+// (kind 1) needs two bounces; a probe or a pixel needs one.
+bool lighting_bounce_ok() {
+    uint bits = gstats.ctrl_bits;
+    if ((bits & 16384u) != 0u) {
+        return true;
+    }
+    uint count = gstats.ctrl_bounce;
+    if (count == 0u) {
+        return false;
+    }
+    if (lighting_hit_kind == 1u) {
+        return count >= 2u;
+    }
+    return count >= 1u;
+}
 // Kept-hit light writes (light pass): all, changed, by relative luminance delta
 // (<0.2 %, 0.2-1 %, 1-5 %, >5 %), and changed by source of the hit's direct light
 // (TDL reused, TDL checked / recomputed, lamps traced here).
@@ -1860,6 +1909,16 @@ vec4 lighting_sc_shown(uint slot) {
     // S72N: the texel's seed (lighting_sc_seed) joins the prior by its
     // confidence, in the same handover.
     vec4 own = cache.v[3u * slot + 2u];
+    // Denoiser off: the a-trous push never writes the display field, so compose
+    // fell through to parent and world-cache walks on every pixel and got
+    // slower than with the filter on. The texel's own mean is one load.
+    // High sets the denoise bit, so this branch is not taken.
+    if ((gstats.ctrl_bits & 64u) == 0u && lighting_world_mode() == 3u) {
+        if (own.w > 0.5) {
+            return vec4(own.rgb * lighting_sc_sun_gain(slot), 1.0);
+        }
+        return vec4(0.0);
+    }
     float n = floor(max(own.w, 0.0));
     // S72P: layer 2 (the rebuilt field) is what shows; its support (sets around)
     // is the count in the handover from the texel's seed.
@@ -1979,6 +2038,9 @@ vec4 lighting_sc_own_shown(uint slot) {
 const float LIGHTING_SC_READ_SETS = 4.0;
 vec3 lighting_cache_irradiance(vec3 pos, vec3 n);
 vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
+    if (!lighting_bounce_ok()) {
+        return vec3(0.0);
+    }
     if (lighting_world_mode() == 3u && (lighting_sc_flags() & 2097152u) == 0u && !lighting_sc_slanted(n)) {
         float hs = lighting_hit_size_n(pos, n);
         if (t < hs * 1.7320508) {
@@ -2003,6 +2065,9 @@ vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
 
 // Irradiance already bounced onto the surface at pos facing n (0 for a new patch).
 vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
+    if (!lighting_bounce_ok()) {
+        return vec3(0.0);
+    }
     // Flag 2097152 (diagnostic): no light from the cache at ray hits, so the
     // picture has one bounce (compare with GENOS_GI_CHECK_BOUNCES=1 references).
     if ((lighting_sc_flags() & 2097152u) != 0u) {
@@ -2369,6 +2434,9 @@ uint lighting_sc_interval(uint slot, float t) {
 // round in LIGHTING_WRC_SCOUT_STILL.
 const uint LIGHTING_WRC_SCOUT_STILL = 8u;
 bool lighting_wrc_scout_due() {
+    if ((gstats.ctrl_bits & 1024u) == 0u) {
+        return false;
+    }
     vec4 last_eye = work.v[lighting_change_at() + 1u];
     vec3 last_fwd = work.v[lighting_change_at() + 4u].xyz;
     bool moving = last_eye.w < 0.5 || length(scene.eye.xyz - last_eye.xyz) > 0.01
@@ -3173,13 +3241,16 @@ void lighting_svgf_iter(uint slot, uint it) {
     if (LIGHTING_DIRTY_ATROUS) {
         float vn;
         vec4 nw = lighting_svgf_load(dst, slot, vn);
-        if (it + 1u == 5u) {
+        if (it + 1u == lighting_denoise_iters()) {
             // The push and the IC placement read the last level from A.
+            // Five iterations land on level 5. Fewer iterations used to jump
+            // to the push while A still held an earlier level, so compose
+            // showed an unfiltered field (white boxes, noisy surfaces).
             cache.v[LIGHTING_SC_ATROUS_A + slot] = cache.v[dst + slot];
         }
         if (lighting_svgf_moved(nw, vn, old, vold)) {
             lighting_svgf_scatter(slot, it + 1u);
-            if (it + 1u == 5u) {
+            if (it + 1u == lighting_denoise_iters()) {
                 // S78B: the push of this texel and of its +-1 neighbours (IC gradient).
                 lighting_svgf_stamp(slot, 3u);
                 lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(1, 0)), 3u);
@@ -3529,12 +3600,24 @@ void lighting_shadow_epochs() {
 }
 // The cached entry for (o, n, lamp li): 1 lit, 0 occluded, -1 none (trace it).
 uint lighting_shadow_cell(vec3 o, vec3 n, uint li, out uint tag) {
-    ivec3 c = ivec3(floor(o / LIGHTING_SC_TEXEL));
+    ivec3 c;
+    // The tuned cell is the constant. Dividing by a uniform that holds the
+    // same 0.125 quantises boundaries differently: block-shaped differences
+    // and a darker still frame. A custom cell is the only variable division.
+    if (!(gstats.ctrl_shadow_cell > 0.0) || gstats.ctrl_shadow_cell == LIGHTING_SC_TEXEL) {
+        c = ivec3(floor(o / LIGHTING_SC_TEXEL));
+    } else {
+        c = ivec3(floor(o / gstats.ctrl_shadow_cell));
+    }
     uint h = lighting_hash(uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u ^ lighting_axis(n) * 0x27d4eb2fu ^ (li + 1u) * 0x9e3779b9u);
     tag = h | 1u;
     return LIGHTING_SHADOW_AT + (lighting_hash(h ^ 0x5bd1e995u) % LIGHTING_CACHE_SLOTS);
 }
 float lighting_shadow_get(vec3 o, vec3 n, uint li) {
+    // Shadows off, or the hard filter: trace, do not read the cell.
+    if ((gstats.ctrl_bits & 2u) == 0u || (gstats.ctrl_bits & 2048u) != 0u) {
+        return -1.0;
+    }
     if (!LIGHTING_SHADOW_CACHE || li >= LIGHTING_WRC_SNAP_LAMPS || li >= scene.lamp_count) {
         return -1.0;
     }
@@ -3550,6 +3633,9 @@ float lighting_shadow_get(vec3 o, vec3 n, uint li) {
 const bool LIGHTING_COMPACT_LIST = true;
 const uint LIGHTING_COMPACT_IDLE = 8u;
 void lighting_shadow_put(vec3 o, vec3 n, uint li, bool lit) {
+    if ((gstats.ctrl_bits & 2u) == 0u || (gstats.ctrl_bits & 2048u) != 0u) {
+        return;
+    }
     if (!LIGHTING_SHADOW_CACHE || li >= LIGHTING_WRC_SNAP_LAMPS || li >= scene.lamp_count) {
         return;
     }
@@ -3636,9 +3722,18 @@ const bool LIGHTING_PIX_REUSE = true;
 uint lighting_pix_at() {
     return lighting_fill_light_at() + lighting_kept_hits() / 4u;
 }
+// Mode 3 is the surface cache. Probe-only (world cache bit off) used to skip
+// this and relight every pixel every still frame, which costs more than the
+// cache being on. High keeps the mode-3 check: the cache bit is set there.
+bool lighting_pix_cache_ok() {
+    return lighting_world_mode() == 3u || (gstats.ctrl_bits & 32u) == 0u;
+}
+bool lighting_pix_reuse_on() {
+    return LIGHTING_PIX_REUSE && lighting_gi_on() && lighting_pix_cache_ok();
+}
 bool lighting_pix_quiet() {
     vec4 head = work.v[lighting_change_at()];
-    return lighting_world_mode() == 3u && !(head.y > 0.5) && uint(head.x) == 0u && lighting_movers_count() == 0u;
+    return lighting_pix_cache_ok() && !(head.y > 0.5) && uint(head.x) == 0u && lighting_movers_count() == 0u;
 }
 uint lighting_pix_sig(vec3 pos, vec3 n, bool two_sided, LampList list) {
     ivec3 q = ivec3(floor(pos * 1000.0));

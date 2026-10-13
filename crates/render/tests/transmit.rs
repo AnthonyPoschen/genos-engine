@@ -33,6 +33,7 @@ fn world(walls: Vec<Wall>) -> World {
         lights: Vec::new(),
         ceiling: None,
         sky: None,
+        lighting: genos_scene::LightingSettings::default(),
     })
 }
 
