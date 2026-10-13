@@ -2,6 +2,8 @@ mod aa;
 mod budget;
 mod gltf_draw;
 mod gpu;
+#[cfg(test)]
+mod lamp_pick;
 mod mesh;
 mod mesh_field;
 mod occ_grid;
