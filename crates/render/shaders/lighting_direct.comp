@@ -228,7 +228,7 @@ void main() {
                 held_old = true;
             }
         }
-        if (LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_world_mode() == 3u && !(urgent && lighting_near_change(pos))) {
+        if (LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_pix_cache_ok() && !(urgent && lighting_near_change(pos))) {
             uint traced = lighting_frame() - LIGHTING_STRATA / 2u;
             if (!lighting_wrc_lamp_changed(pos, traced) && abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
                 return;
@@ -375,7 +375,13 @@ void main() {
             shadow_lit = times > 0.0;
         } else if (times > 0.0) {
             uint li = idx >= pixels ? lamp_list_index(list, k) : LAMP_ALL;
-            bool cell = (gstats.ctrl_bits & 2048u) == 0u && lighting_gi_on() && lighting_world_mode() == 3u && li < LAMP_ALL - 1u;
+            // Probe-only keeps the real cache buffer, so the cell still applies.
+            // No probes and no world cache is a dummy: do not index it.
+            // High is mode 3, the same branch as before this gate.
+            bool probes_on = (gstats.ctrl_bits & 16u) != 0u;
+            bool cache_on = (gstats.ctrl_bits & 32u) != 0u;
+            bool cell_stored = lighting_world_mode() == 3u || (!cache_on && probes_on);
+            bool cell = (gstats.ctrl_bits & 2048u) == 0u && lighting_gi_on() && cell_stored && li < LAMP_ALL - 1u;
             float sc = cell ? lighting_shadow_get(origin, n, li) : -1.0;
             if (sc >= 0.0) {
                 shadow_lit = sc > 0.5;

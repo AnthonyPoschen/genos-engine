@@ -23,7 +23,7 @@ Each feature can be turned off. Off means the pass is not recorded and, where th
 | GI | Every GI pass and the GI buffers (the million-slot cache and the probe work) | `gi_refresh` (cache round every N frames), `budget_shift` (divide ray budgets by 2^shift), `world_mode` |
 | Bounces | `0` is GI with direct light only: hits do not read the cache, and the cache-ray dispatches are not recorded. `1` lets probes and pixels read the cache. `2` and above allow cache-to-cache. `unlimited` is the tuned path | `bounces` |
 | Probes | Place, trace, gather, filter | `probe_rays` (4..64), `probe_tile` (0 = the picture-height rule), `probe_refresh`, `probe_stale` |
-| World cache | Surface cache, world mode 3. Mode 0 is probe GI. The a-trous filter runs only in mode 3. A still pixel still reuses its direct light, so off is not a per-pixel relight | `world_cell`, `world_refresh`, `world_stale` |
+| World cache | Surface cache, world mode 3. Mode 0 is probe GI. The a-trous filter runs only in mode 3. A still frame still reuses direct light, skips settled kept-hit relights, and keeps the shadow-cell cache, so off does not cost more than on | `world_cell`, `world_refresh`, `world_stale` |
 | Denoiser | The a-trous dispatches. Compose then shows each texel's own mean, so it does not walk the parent field the push would have filled | `denoise_iters` (1, 3, or 5), `denoise_dirty` |
 | Compose reuse | The indirect block list. The compose pass still runs, over the whole image, and does not read the key table | `compose_reuse` |
 | Sky | Sky radiance on rays that miss. The scene sky colour stays; this bit stops the lighting from reading it | `sky` |
