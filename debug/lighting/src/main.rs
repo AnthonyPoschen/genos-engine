@@ -18,7 +18,10 @@ use genos_scene_lib::{Entry, Kind, Lamp, Sun};
 use genos_stress::building::{Layout, LightMix};
 use genos_stress::knobs::{apply_lighting_knob, lighting_knobs};
 use genos_stress::stage::{Scale, Stage};
-use genos_ui::{button_panel, Action, PanelRow, PanelSlider, Pointer, SliderStep, State};
+use genos_ui::{
+    button_panel, Action, PanelCheck, PanelDropdown, PanelRow, PanelSlider, Pointer, SliderStep,
+    State,
+};
 use genos_window::{extent_changed, FocusGate, Window};
 
 const USAGE: &str = "\
@@ -56,15 +59,17 @@ const STEP: f32 = 1.0 / 60.0;
 const ID_SCENE: u32 = 2000;
 const ID_CP: u32 = 2200;
 const ID_VIEW: u32 = 2400;
+const ID_DROP: u32 = 2600;
 const ID_KNOB: u32 = 3000;
-/// Graded lighting knobs, in panel order. An on/off switch is not in this list.
+const ID_SWITCH: u32 = 4000;
+const CHECKS_PER_ROW: usize = 3;
+/// Ordered grades and numeric knobs. An on/off switch is not in this list.
 const SLIDER_KNOBS: &[&str] = &[
     "lighting_preset",
     "lighting_bounces",
     "lighting_direct_lights",
     "lighting_direct_refresh",
     "lighting_direct_scale",
-    "lighting_shadow_filter",
     "lighting_gi_refresh",
     "lighting_budget_shift",
     "lighting_probe_rays",
@@ -72,8 +77,11 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_world_stale",
     "lighting_denoise_iters",
     "lighting_denoise_variance",
-    "lighting_ambient",
+    "lighting_screen_verify",
+    "lighting_world_verify",
 ];
+/// Unordered choices. A long list of scenes uses the same dropdown.
+const DROP_KNOBS: &[&str] = &["lighting_shadow_filter", "lighting_ambient"];
 const VIEWS: [&str; 7] = [
     "full", "direct", "bounce", "albedo", "normal", "depth", "texels",
 ];
@@ -212,11 +220,18 @@ fn run() -> Result<(), String> {
                     key_inc: !camera.captured
                         && (input.keyboard.pressed(InputCode::key_right)
                             || input.keyboard.pressed(InputCode::key_up)),
+                    key_activate: !camera.captured && input.keyboard.pressed(InputCode::key_enter),
+                    key_dismiss: !camera.captured && input.keyboard.pressed(InputCode::key_escape),
                 },
             );
             for action in &ui_frame.actions {
-                if let Action::Slide { id, value } = *action {
-                    slide(&mut app, &mut camera, &mut tools, &mut renderer, id, value)?;
+                match *action {
+                    Action::Slide { id, value } => slide(&mut app, id, value)?,
+                    Action::Select { id, value } => {
+                        select(&mut app, &mut camera, &mut tools, &mut renderer, id, value)?;
+                    }
+                    Action::Toggle { id, on } => toggle(&mut app, id, on)?,
+                    _ => {}
                 }
             }
             (ui_frame.paints, ui_frame.look_capture)
@@ -790,17 +805,47 @@ fn named_slider(id: u32, value: f64, names: Vec<String>) -> PanelSlider {
     slider
 }
 
-fn named_row(label: &str, id: u32, value: f64, names: Vec<String>) -> Option<PanelRow> {
+fn drop_row(label: &str, id: u32, value: f64, names: Vec<String>) -> Option<PanelRow> {
     if names.is_empty() {
         return None;
     }
     Some(PanelRow {
         label: label.into(),
         buttons: Vec::new(),
-        slider: Some(named_slider(id, value, names)),
-        dropdown: None,
+        slider: None,
+        dropdown: Some(PanelDropdown::new(id, value, index_steps(names))),
         checks: Vec::new(),
     })
+}
+
+fn switch_knobs(app: &App) -> Vec<Knob> {
+    app.knobs()
+        .into_iter()
+        .filter(|knob| knob.choices == ["off", "on"])
+        .collect()
+}
+
+fn switch_rows(app: &App) -> Vec<PanelRow> {
+    let switches = switch_knobs(app);
+    switches
+        .chunks(CHECKS_PER_ROW)
+        .enumerate()
+        .map(|(row_index, chunk)| PanelRow {
+            label: String::new(),
+            buttons: Vec::new(),
+            slider: None,
+            dropdown: None,
+            checks: chunk
+                .iter()
+                .enumerate()
+                .map(|(column, knob)| PanelCheck {
+                    id: ID_SWITCH + (row_index * CHECKS_PER_ROW + column) as u32,
+                    text: knob.label.clone(),
+                    on: knob.value >= 0.5,
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 fn knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
@@ -840,7 +885,7 @@ fn panel_rows(app: &App, view: ViewMode) -> Vec<PanelRow> {
         .position(|name| *name == view_name(view))
         .unwrap_or(0) as f64;
     let mut rows = Vec::new();
-    if let Some(row) = named_row(
+    if let Some(row) = drop_row(
         "Scene",
         ID_SCENE,
         app.index as f64,
@@ -848,7 +893,7 @@ fn panel_rows(app: &App, view: ViewMode) -> Vec<PanelRow> {
     ) {
         rows.push(row);
     }
-    if let Some(row) = named_row(
+    if let Some(row) = drop_row(
         "Checkpoint",
         ID_CP,
         app.checkpoint as f64,
@@ -860,7 +905,7 @@ fn panel_rows(app: &App, view: ViewMode) -> Vec<PanelRow> {
     ) {
         rows.push(row);
     }
-    if let Some(row) = named_row(
+    if let Some(row) = drop_row(
         "View",
         ID_VIEW,
         view_value,
@@ -868,15 +913,42 @@ fn panel_rows(app: &App, view: ViewMode) -> Vec<PanelRow> {
     ) {
         rows.push(row);
     }
+    rows.extend(switch_rows(app));
     for (index, name) in SLIDER_KNOBS.iter().enumerate() {
         if let Some(row) = knob_row(app, index, name) {
+            rows.push(row);
+        }
+    }
+    for (index, name) in DROP_KNOBS.iter().enumerate() {
+        if let Some(row) = drop_knob_row(app, index, name) {
             rows.push(row);
         }
     }
     rows
 }
 
-fn slide(
+fn drop_knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
+    let knob = app.knobs().into_iter().find(|knob| knob.name == name)?;
+    if knob.choices.is_empty() || knob.choices == ["off", "on"] {
+        return None;
+    }
+    drop_row(
+        &knob.label,
+        ID_DROP + index as u32,
+        knob.value,
+        knob.choices,
+    )
+}
+
+fn slide(app: &mut App, id: u32, value: f64) -> Result<(), String> {
+    if (ID_KNOB..ID_KNOB + SLIDER_KNOBS.len() as u32).contains(&id) {
+        let name = SLIDER_KNOBS[(id - ID_KNOB) as usize];
+        app.set_knob(name, value)?;
+    }
+    Ok(())
+}
+
+fn select(
     app: &mut App,
     camera: &mut Camera,
     tools: &mut genos_debug::Tools,
@@ -907,9 +979,17 @@ fn slide(
                 tools.set_view(mode);
             }
         }
-    } else if (ID_KNOB..ID_KNOB + SLIDER_KNOBS.len() as u32).contains(&id) {
-        let name = SLIDER_KNOBS[(id - ID_KNOB) as usize];
+    } else if (ID_DROP..ID_DROP + DROP_KNOBS.len() as u32).contains(&id) {
+        let name = DROP_KNOBS[(id - ID_DROP) as usize];
         app.set_knob(name, value)?;
+    }
+    Ok(())
+}
+
+fn toggle(app: &mut App, id: u32, on: bool) -> Result<(), String> {
+    let index = id.wrapping_sub(ID_SWITCH) as usize;
+    if let Some(name) = switch_knobs(app).get(index).map(|knob| knob.name.clone()) {
+        app.set_knob(&name, if on { 1.0 } else { 0.0 })?;
     }
     Ok(())
 }
@@ -1088,7 +1168,7 @@ mod tests {
     }
 
     #[test]
-    fn graded_settings_are_sliders_and_switches_stay_off_the_panel() {
+    fn each_setting_uses_a_dropdown_a_slider_or_a_toggle() {
         use genos_scene::Camera;
         use genos_ui::{button_panel, Pointer, State};
 
@@ -1098,20 +1178,26 @@ mod tests {
             .expect("log");
         let app = super::App::open(entries, root, log).expect("app");
         let rows = super::panel_rows(&app, ViewMode::Full);
-        assert!(rows
+        assert!(rows.iter().all(|row| row.buttons.is_empty()));
+        let dropdowns: Vec<&str> = rows
             .iter()
-            .all(|row| row.buttons.is_empty() && row.slider.is_some()));
-        let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+            .filter(|row| row.dropdown.is_some())
+            .map(|row| row.label.as_str())
+            .collect();
+        for label in ["Scene", "Checkpoint", "View", "Shadow filter", "Ambient"] {
+            assert!(dropdowns.contains(&label), "missing dropdown {label}");
+        }
+        let sliders: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.slider.is_some())
+            .map(|row| row.label.as_str())
+            .collect();
         for label in [
-            "Scene",
-            "Checkpoint",
-            "View",
             "Preset",
             "Bounces",
             "Max lights",
             "Direct refresh",
             "Direct scale",
-            "Shadow filter",
             "GI refresh",
             "Budget shift",
             "Probe rays",
@@ -1119,15 +1205,19 @@ mod tests {
             "World stale",
             "Denoise iterations",
             "Denoise variance",
-            "Ambient",
         ] {
-            assert!(labels.contains(&label), "missing {label}");
+            assert!(sliders.contains(&label), "missing slider {label}");
         }
-        for row in &rows {
-            let steps = &row.slider.as_ref().unwrap().steps;
-            let names: Vec<&str> = steps.iter().map(|step| step.name.as_str()).collect();
-            assert_ne!(names, ["off", "on"]);
+        assert!(!sliders.contains(&"Shadow filter"));
+        assert!(!sliders.contains(&"Ambient"));
+        let checks: Vec<&str> = rows
+            .iter()
+            .flat_map(|row| row.checks.iter().map(|check| check.text.as_str()))
+            .collect();
+        for label in ["Direct", "Shadows", "GI", "Denoise", "Full effort"] {
+            assert!(checks.contains(&label), "missing toggle {label}");
         }
+        assert!(checks.iter().all(|label| !sliders.contains(label)));
         let preset = rows
             .iter()
             .find(|row| row.label == "Preset")
@@ -1181,32 +1271,41 @@ mod tests {
                 ..Pointer::default()
             },
         );
-        let ambient = rows
-            .iter()
-            .find(|row| row.label == "Ambient")
-            .unwrap()
-            .slider
-            .as_ref()
-            .unwrap();
         let hit = idle
             .shown
             .iter()
-            .find(|shown| shown.id == ambient.id)
-            .expect("ambient slider");
+            .find(|shown| shown.id == super::ID_VIEW)
+            .expect("view dropdown");
         let mut ui = State::default();
+        let opened = button_panel(
+            &mut ui,
+            "Menu",
+            &rows,
+            viewport,
+            &camera,
+            Pointer::at(hit.rect.x + hit.rect.w * 0.5, hit.rect.y + 8.0, true),
+        );
+        let choice = opened
+            .shown
+            .iter()
+            .find(|shown| shown.id != super::ID_VIEW && shown.text.as_deref() == Some("direct"))
+            .expect("direct row");
         let frame = button_panel(
             &mut ui,
             "Menu",
             &rows,
             viewport,
             &camera,
-            Pointer {
-                x: hit.rect.x + hit.rect.w * 0.75,
-                y: hit.rect.y + 8.0,
-                ..Pointer::default()
-            },
+            Pointer::at(
+                choice.rect.x + 8.0,
+                choice.rect.y + choice.rect.h * 0.5,
+                false,
+            ),
         );
-        assert_eq!(frame.tooltip.as_deref(), Some(ambient.tip().as_str()));
+        assert!(frame
+            .shown
+            .iter()
+            .any(|shown| shown.id != super::ID_VIEW && shown.text.as_deref() == Some("bounce")));
         let (width, height, rgb) = raster_menu(&frame.paints);
         std::fs::write(path, genos_debug::png::encode_rgb(width, height, &rgb)).expect("png");
     }
