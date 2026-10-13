@@ -15,6 +15,22 @@ assets/built/<name>/     engine-ready files, when conversion is not cheap
 
 A conversion that is one small decode with no third-party archive tool can run at build time instead of landing in `assets/built/`. Say which choice a new asset uses in its `CREDITS.md`.
 
+## Viewing Sponza
+
+The lighting debug binary draws `assets/built/sponza/sponza.gltf`. The scene name is `sponza`. With no `--checkpoint`, it stands at the first checkpoint, the atrium.
+
+```sh
+cargo run --release -p genos-lighting -- --scene sponza
+```
+
+`make lighting SCENE=sponza` runs that same binary and adds `--gpu-times 30`.
+
+The glTF, the PNGs, and the source archives are Git LFS. Pull them when the checkout still has pointer text:
+
+```sh
+git lfs pull --include="assets/built/sponza/**,assets/source/sponza/**"
+```
+
 ## Adding an asset
 
 1. Read the licence. If the terms are missing, or they forbid redistribution, stop. Do not commit the bytes.
