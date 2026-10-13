@@ -17,7 +17,7 @@ A stored luminance under 0.002 (black; half a display code) against a fresh hit 
 
 The budgets are diag[38] and diag[39]. Words 142 and 143 stay the sun mark: the direct pass writes them before verification runs.
 
-`0` disables that budget and leaves the other one running. Preset high is 2048 and 128. Potato and day-cycle are 0. The values are `LightingSettings` keys, `GENOS_LIGHTING_SCREEN_VERIFY` / `GENOS_LIGHTING_WORLD_VERIFY`, the stress knobs, and MCP `set_key`.
+`0` disables that budget and leaves the other one running. Preset high is 2048 and 128. Potato and day-cycle are 0. The values are `LightingSettings` keys. `--screen-verify N` and `--world-verify N` on `genos-stress` and `genos-lighting` win every frame. `GENOS_LIGHTING_SCREEN_VERIFY` and `GENOS_LIGHTING_WORLD_VERIFY` apply only when that argument was omitted. The stress knobs and MCP `set_key` write the same keys.
 
 ## Why not PR #31
 
@@ -40,7 +40,7 @@ cargo run --release -p genos-stress -- --view hall --freeze-sun --still-boxes \
   --time-of-day 10.9 --frames 120 --gpu-times 30 --lighting-debug --no-panel
 ```
 
-The trace bucket on a settled frame is this cost. Set either key to `0` to measure that budget alone.
+The trace bucket on a settled frame is this cost. `--screen-verify 0` or `--world-verify 0` measures that budget alone.
 
 ## Test
 

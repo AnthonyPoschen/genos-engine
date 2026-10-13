@@ -8,10 +8,10 @@
 //! `GENOS_STRESS_LIGHTS`, `GENOS_STRESS_DYNAMIC`, `GENOS_STRESS_LAYOUT`,
 //! `GENOS_STRESS_DAY_SECONDS`, `GENOS_STRESS_STEP`, `GENOS_STRESS_FIXED_DT`); a flag
 //! wins over the variable. Lighting launch flags (`--preset`, `--bounces`,
-//! `--ambient`, `--time-of-day`, `--gpu-times`) win the same way: each
-//! `GENOS_LIGHTING_*` or `GENOS_GPU_TIMES` mirror applies only when that
-//! argument was omitted. The panel switches lamps, dynamic share, scale and the sun
-//! live.
+//! `--ambient`, `--screen-verify`, `--world-verify`, `--time-of-day`,
+//! `--gpu-times`) win the same way: each `GENOS_LIGHTING_*` or `GENOS_GPU_TIMES`
+//! mirror applies only when that argument was omitted. The panel switches lamps,
+//! dynamic share, scale and the sun live.
 
 mod bench;
 mod building;
@@ -103,6 +103,10 @@ const USAGE: &str = "genos-stress [options]
   --bounces 0|1|2|unlimited bounce count (GENOS_LIGHTING_BOUNCES)
   --ambient MODE            off, constant, hemisphere, day, or curve
                             (GENOS_LIGHTING_AMBIENT)
+  --screen-verify N         rays per frame that re-check visible texels; 0 is off
+                            (GENOS_LIGHTING_SCREEN_VERIFY is the mirror)
+  --world-verify N          rays per frame over settled world-cache cells; 0 is off
+                            (GENOS_LIGHTING_WORLD_VERIFY is the mirror)
   --denoise-iters 1|3|5     wavelet iterations (GENOS_LIGHTING_DENOISE_ITERS)
   --denoise-adaptive on|off experimental: drop settled wavelet iterations
                             (GENOS_LIGHTING_DENOISE_ADAPTIVE). Off on every preset
@@ -1162,6 +1166,14 @@ fn press(stage: &mut Stage, id: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_lists_the_verify_budgets() {
+        assert!(USAGE.contains("--screen-verify"));
+        assert!(USAGE.contains("--world-verify"));
+        assert!(USAGE.contains("GENOS_LIGHTING_SCREEN_VERIFY is the mirror"));
+        assert!(USAGE.contains("GENOS_LIGHTING_WORLD_VERIFY is the mirror"));
+    }
 
     #[test]
     fn step_and_fixed_dt_prefer_the_argument() {
