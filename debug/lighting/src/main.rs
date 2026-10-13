@@ -38,8 +38,8 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --frames N             quit after N frames
   --out DIR              screenshots, dumps, and logs (default ./genos-debug)
   --size WxH             window size (default 1280x720; 320x180 for --check)
-  --check                load every scene headless, require a non-black picture,
-                         and write shots/<scene>.png
+  --check                every scene at its check checkpoint, four frames,
+                         mean luma against that scene's own floor
 
 Page Up and Page Down switch scenes. Keys 1-9 jump checkpoints. Home and 0 reset
 to the active checkpoint. WASD fly, Space up, C or Ctrl down, Shift is faster.
@@ -286,6 +286,8 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let mut camera = Camera::opening();
+    let mut passed = Vec::new();
+    let mut skipped = Vec::new();
     let mut failed = Vec::new();
     let names: Vec<String> = app.entries.iter().map(|e| e.name.clone()).collect();
     for name in &names {
@@ -293,14 +295,16 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
         eprintln!("genos-lighting: check {name}");
         if let Err(err) = app.load_scene(name) {
             if gltf_scene(&app.entries, name) && gltf_bytes_absent(&err) {
-                let line = format!("skip {name}: {err}");
+                let line = skip_line(name, &err);
+                skipped.push(name.clone());
                 eprintln!("genos-lighting: {line}");
                 let _ = writeln!(log, "{line}");
                 continue;
             }
             return Err(err);
         }
-        jump_camera(app, None, &mut camera)?;
+        let check = app.entry().check.clone();
+        jump_camera(app, Some(&check.checkpoint), &mut camera)?;
         renderer.reset_lighting_cache();
         let mut pixels = None;
         for frame in 0..4 {
@@ -313,20 +317,57 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
         let (mean, spread) = picture_stats(&pixels);
         let path = opts.out.join("shots").join(format!("{name}.png"));
         png::write_png(&path, renderer.width(), renderer.height(), &pixels)?;
-        let _ = writeln!(
-            log,
-            "check {name} mean {mean:.1} spread {spread:.1} {}",
+        let verdict = if mean >= check.min_mean {
+            passed.push(name.clone());
+            "pass"
+        } else {
+            failed.push(format!(
+                "{name} at {} mean {mean:.1} is under {:.1}",
+                check.checkpoint, check.min_mean
+            ));
+            "fail"
+        };
+        let line = format!(
+            "check {name} {verdict} {} mean {mean:.1} spread {spread:.1} min {:.1} {}",
+            check.checkpoint,
+            check.min_mean,
             path.display()
         );
-        if mean < 8.0 {
-            failed.push(format!("{name} is black (mean {mean:.1})"));
-        }
+        eprintln!("genos-lighting: {line}");
+        let _ = writeln!(log, "{line}");
     }
+    let summary = check_summary(&passed, &skipped, &failed);
+    let _ = writeln!(log, "{summary}");
     if failed.is_empty() {
+        eprintln!("genos-lighting: {summary}");
         Ok(())
     } else {
-        Err(failed.join("; "))
+        Err(summary)
     }
+}
+
+/// A missing glTF is a skip. The tally does not count it as a pass.
+fn skip_line(name: &str, err: &str) -> String {
+    format!("skip {name} (not a pass): {err}")
+}
+
+fn check_summary(passed: &[String], skipped: &[String], failed: &[String]) -> String {
+    let mut line = format!(
+        "{} passed, {} skipped, {} failed",
+        passed.len(),
+        skipped.len(),
+        failed.len()
+    );
+    if !skipped.is_empty() {
+        line.push_str(" (skipped ");
+        line.push_str(&skipped.join(", "));
+        line.push(')');
+    }
+    if !failed.is_empty() {
+        line.push_str(": ");
+        line.push_str(&failed.join("; "));
+    }
+    line
 }
 
 struct App {
@@ -973,8 +1014,8 @@ fn options() -> Result<Options, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{gltf_bytes_absent, gltf_scene};
-    use genos_scene_lib::{Entry, Kind};
+    use super::{check_summary, gltf_bytes_absent, gltf_scene, skip_line};
+    use genos_scene_lib::{Check, Entry, Kind};
 
     #[test]
     fn a_missing_gltf_is_skipped_and_a_bad_scene_is_not() {
@@ -988,6 +1029,10 @@ mod tests {
                 lamps: Vec::new(),
             },
             checkpoints: Vec::new(),
+            check: Check {
+                checkpoint: "atrium".into(),
+                min_mean: 8.0,
+            },
         }];
         assert!(gltf_scene(&entries, "sponza"));
         assert!(!gltf_scene(&entries, "room"));
@@ -995,5 +1040,10 @@ mod tests {
         assert!(gltf_bytes_absent(pointer));
         assert!(gltf_bytes_absent("file not found: assets/built/sponza/sponza.gltf"));
         assert!(!gltf_bytes_absent("sponza.gltf: unrecognized asset"));
+        let line = skip_line("sponza", pointer);
+        assert!(line.contains("not a pass"));
+        let summary = check_summary(&["camera".into(), "hell".into()], &["sponza".into()], &[]);
+        assert_eq!(summary, "2 passed, 1 skipped, 0 failed (skipped sponza)");
+        assert!(!summary.contains("sponza passed"));
     }
 }

@@ -59,12 +59,21 @@ pub enum Kind {
     },
 }
 
+/// What `--check` demands. The named checkpoint is the view. `min_mean` is that
+/// picture's luma floor (0–255). Scenes do not share one floor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Check {
+    pub checkpoint: String,
+    pub min_mean: f32,
+}
+
 /// One scene file.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
     pub name: String,
     pub review: String,
     pub checkpoints: Vec<Checkpoint>,
+    pub check: Check,
     pub kind: Kind,
 }
 
@@ -125,6 +134,7 @@ pub fn parse_str(text: &str) -> Result<Entry, String> {
     let mut sun = None;
     let mut sky = None;
     let mut lamps = Vec::new();
+    let mut check = None;
 
     for (number, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -161,6 +171,12 @@ pub fn parse_str(text: &str) -> Result<Entry, String> {
             "rhai" => rhai = Some(join(&rest)),
             "gltf" => gltf = Some(join(&rest)),
             "checkpoint" => checkpoints.push(parse_checkpoint(number + 1, &rest)?),
+            "check" => {
+                if check.is_some() {
+                    return Err(format!("line {}: check is already set", number + 1));
+                }
+                check = Some(parse_check(number + 1, &rest)?);
+            }
             "sun" => {
                 sun = Some(Sun {
                     direction: [at(0)?, at(1)?, at(2)?],
@@ -204,11 +220,36 @@ pub fn parse_str(text: &str) -> Result<Entry, String> {
     if checkpoints.is_empty() {
         return Err(format!("{name} has no checkpoint"));
     }
+    let check = check.ok_or_else(|| format!("{name} has no check"))?;
+    if !checkpoints.iter().any(|c| c.name == check.checkpoint) {
+        return Err(format!(
+            "{name} check names unknown checkpoint {}",
+            check.checkpoint
+        ));
+    }
     Ok(Entry {
         name,
         review,
         checkpoints,
+        check,
         kind,
+    })
+}
+
+/// `check CHECKPOINT mean MIN`. MIN is the luma floor for that checkpoint.
+fn parse_check(line: usize, rest: &[&str]) -> Result<Check, String> {
+    if rest.len() != 3 || rest[1] != "mean" {
+        return Err(format!(
+            "line {line}: check is 'check CHECKPOINT mean MIN'"
+        ));
+    }
+    let min_mean = num(line, rest[2])?;
+    if min_mean < 0.0 {
+        return Err(format!("line {line}: check mean is negative"));
+    }
+    Ok(Check {
+        checkpoint: rest[0].to_string(),
+        min_mean,
     })
 }
 
@@ -281,7 +322,8 @@ mod tests {
         let entry = parse_str(
             "name stress\nkind stress\nfreeze-sun\nreview Hall bounce.\n\
              checkpoint hall 14.5 1.7 23.5 yaw -0.3554 pitch 0.08\n\
-             checkpoint corner 3.5 1.6 3.5 look 0.2 0.4 0.2\n",
+             checkpoint corner 3.5 1.6 3.5 look 0.2 0.4 0.2\n\
+             check hall mean 40\n",
         )
         .unwrap();
         assert_eq!(entry.name, "stress");
@@ -295,6 +337,23 @@ mod tests {
         let (yaw, pitch) = look_yaw_pitch([3.5, 1.6, 3.5], [0.2, 0.4, 0.2]);
         assert!((entry.checkpoints[1].yaw - yaw).abs() < 1e-5);
         assert!((entry.checkpoints[1].pitch - pitch).abs() < 1e-5);
+        assert_eq!(entry.check.checkpoint, "hall");
+        assert!((entry.check.min_mean - 40.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_scene_needs_a_check_that_names_one_of_its_checkpoints() {
+        let missing = parse_str(
+            "name room\nkind rhai\nrhai examples/stress/scenes/room.rhai\n\
+             checkpoint open 0 1.7 8 look 0 1 0\n",
+        );
+        assert!(missing.unwrap_err().contains("has no check"));
+        let unknown = parse_str(
+            "name room\nkind rhai\nrhai examples/stress/scenes/room.rhai\n\
+             checkpoint open 0 1.7 8 look 0 1 0\n\
+             check corner mean 8\n",
+        );
+        assert!(unknown.unwrap_err().contains("unknown checkpoint corner"));
     }
 
     #[test]
@@ -307,5 +366,16 @@ mod tests {
         let sponza = entries.iter().find(|e| e.name == "sponza").unwrap();
         assert!(sponza.checkpoint("atrium").is_some());
         assert!(sponza.checkpoint("dark-corner").is_some());
+        let bounce = entries.iter().find(|e| e.name == "bounce_corner").unwrap();
+        assert_eq!(bounce.check.checkpoint, "room-a");
+        assert!(bounce.checkpoint("corner").is_some());
+        for entry in &entries {
+            assert!(
+                entry.checkpoint(&entry.check.checkpoint).is_some(),
+                "{} check {}",
+                entry.name,
+                entry.check.checkpoint
+            );
+        }
     }
 }

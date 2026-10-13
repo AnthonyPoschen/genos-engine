@@ -12,3 +12,5 @@ checkpoint corner 3.5 1.6 3.5 look 0.2 0.4 0.2
 checkpoint contact 7.0 1.4 6.8 look 5.0 0.3 3.6
 checkpoint lamp-wall 12.5 1.7 20 look 12.5 1 8
 checkpoint close 3.0 0.9 14 look 3.6 0.2 12.9
+# The corner checkpoint is bounce-only. --check stands in the hall.
+check hall mean 40

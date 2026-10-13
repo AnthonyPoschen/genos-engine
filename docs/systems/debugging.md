@@ -120,12 +120,17 @@ the camera to the active checkpoint. `list_scenes`, `load_scene`,
 `list_checkpoints`, and `jump_checkpoint` are on the same MCP catalogue.
 `load_scene` drops light and object edits and clears the lighting caches.
 
-`--check` loads every scene on a 320×180 proof window, draws four frames at a
-fixed 1/60 s step, writes `shots/<scene>.png`, and fails when the mean luma is
-under 8. A glTF scene whose file is missing or is still a Git LFS pointer is
-skipped with a message, and the other scenes still run. `--scene` for that
-name still returns the error. A recorded replay and a saved setup are not in
-this binary yet.
+`--check` loads every scene on a 320×180 proof window, jumps to the checkpoint
+named by that scene's `check` line, draws four frames at a fixed 1/60 s step,
+and writes `shots/<scene>.png`. The line is `check CHECKPOINT mean MIN`. MIN is
+that picture's mean luma floor on the 0–255 scale. Scenes do not share one
+floor, so a view that is dark by design is not the check view.
+`bounce_corner` checks `room-a` (mean 8); its `corner` checkpoint stays dark.
+A glTF scene whose file is missing or is still a Git LFS pointer prints
+`skip <name> (not a pass): ...` and is not counted as a pass. The other scenes
+still run. The process exits 0 when every scene that drew met its own floor.
+`--scene` for that missing name still returns the error. A recorded replay and
+a saved setup are not in this binary yet.
 
 On a box without a GPU this runs on lavapipe under a headless Weston
 (`XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`). The first run after a shader change spends

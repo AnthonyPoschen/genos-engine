@@ -10,3 +10,4 @@ still-lamps
 review Night, one hundred lamps, frozen, all in the first section. The wall of lamps is the view.
 checkpoint lamp-wall 12.5 1.7 20 look 12.5 1 8
 checkpoint hall 14.5 1.7 23.5 yaw -0.3554 pitch 0.08
+check lamp-wall mean 40
