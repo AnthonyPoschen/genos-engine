@@ -39,6 +39,10 @@ pub struct LiveShot {
     pub event_frames: Vec<(u32, Picture)>,
     pub log: Vec<FrameRecord>,
     pub note: String,
+    /// Frame index where a fresh renderer crossed the settle line.
+    pub cold_frames: Option<f64>,
+    /// `cold_frames` is the cap, and the line was not crossed.
+    pub cold_settled: bool,
 }
 
 pub struct CaptureOutcome {
@@ -57,6 +61,9 @@ pub struct CaptureOptions {
     pub plan: FramePlan,
     pub params: MetricParams,
     pub jobs: Vec<Job>,
+    /// Keep one renderer, and its lighting caches, across checkpoints.
+    /// The default opens a fresh renderer for each checkpoint.
+    pub warm: bool,
 }
 
 pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
@@ -70,20 +77,16 @@ pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
     }
     let mut window = Window::open_proof(opts.width, opts.height)?;
     window.set_title("Genos lighting reference check");
-    let frame = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
-    if renderer.width() != opts.width || renderer.height() != opts.height {
-        return Err(format!(
-            "proof window is {}x{}, the reference is {}x{}",
-            renderer.width(),
-            renderer.height(),
-            opts.width,
-            opts.height
-        ));
-    }
+    let mut renderer = open_renderer(&mut window, opts.width, opts.height)?;
     let mut shots = Vec::new();
     let mut skipped = Vec::new();
-    for job in &opts.jobs {
+    for (index, job) in opts.jobs.iter().enumerate() {
+        if !opts.warm && index > 0 {
+            // Drop the device before the next open. Assignment would keep the
+            // old swapchain alive until the new one had already failed.
+            drop(renderer);
+            renderer = open_renderer(&mut window, opts.width, opts.height)?;
+        }
         let Some(shot) = scenes::shot(&job.scene, &job.checkpoint) else {
             skipped.push((
                 job.scene.clone(),
@@ -98,6 +101,21 @@ pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
         }
     }
     Ok(CaptureOutcome { shots, skipped })
+}
+
+fn open_renderer(window: &mut Window, width: u32, height: u32) -> Result<Renderer, String> {
+    let frame = window.pump();
+    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    if renderer.width() != width || renderer.height() != height {
+        return Err(format!(
+            "proof window is {}x{}, the reference is {}x{}",
+            renderer.width(),
+            renderer.height(),
+            width,
+            height
+        ));
+    }
+    Ok(renderer)
 }
 
 fn capture_one(
@@ -255,6 +273,7 @@ fn capture_one(
         .as_ref()
         .map(|picture| picture.height)
         .unwrap_or(opts.height);
+    let cold = cold_start(opts, &log, job.reference_noise, picture_height, cap_hit);
     Ok(LiveShot {
         scene: job.scene.clone(),
         checkpoint: job.checkpoint.clone(),
@@ -262,6 +281,8 @@ fn capture_one(
         settled,
         event_frames,
         log,
+        cold_frames: cold.frames,
+        cold_settled: cold.settled,
         note: shot_note(
             &opts.plan,
             candidate_frame,
@@ -272,8 +293,56 @@ fn capture_one(
             cap_hit,
             job.event.is_some(),
             job.still && candidate_index + 1 >= settle_pics.len() && settle_pics.len() >= 2,
+            opts.warm,
+            cold,
         ),
     })
+}
+
+struct ColdStart {
+    frames: Option<f64>,
+    settled: bool,
+}
+
+fn cold_start(
+    opts: &CaptureOptions,
+    log: &[FrameRecord],
+    reference_noise: f64,
+    height: u32,
+    cap_hit: bool,
+) -> ColdStart {
+    if opts.warm {
+        return ColdStart {
+            frames: None,
+            settled: false,
+        };
+    }
+    let SettleMode::Metric { threshold, cap } = opts.plan.settle else {
+        return ColdStart {
+            frames: None,
+            settled: false,
+        };
+    };
+    let line = settle_line(threshold, reference_noise, height);
+    if let Some(row) = log
+        .iter()
+        .find(|row| row.phase == Phase::Settle && row.blur_rel.is_some_and(|error| error <= line))
+    {
+        return ColdStart {
+            frames: Some(f64::from(row.frame)),
+            settled: true,
+        };
+    }
+    if cap_hit {
+        return ColdStart {
+            frames: Some(f64::from(cap)),
+            settled: false,
+        };
+    }
+    ColdStart {
+        frames: None,
+        settled: false,
+    }
 }
 
 fn flicker_pair(pics: &[Picture], candidate: usize) -> Vec<Picture> {
@@ -299,6 +368,8 @@ fn shot_note(
     cap_hit: bool,
     event: bool,
     tail_is_previous: bool,
+    warm: bool,
+    cold: ColdStart,
 ) -> String {
     let settle = match plan.settle {
         SettleMode::Frames(n) => format!("{n} settle frames"),
@@ -331,8 +402,30 @@ fn shot_note(
     } else {
         ""
     };
+    let cold_note = if warm {
+        " Warm chain: lighting caches were kept from the previous checkpoint."
+    } else if let Some(frames) = cold.frames {
+        if cold.settled {
+            return format!(
+                "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}. Cold start settled at frame {frames:.0}.{tail}{captures}",
+                schedule::format_dt(plan.fixed_dt),
+                plan.warmup_frames,
+                format_mean(blur_rel),
+                format_mean(luma_ratio),
+            );
+        }
+        return format!(
+            "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}. Renderer issue: cold start did not settle within {frames:.0} frames. The settle cap was not raised.{tail}{captures}",
+            schedule::format_dt(plan.fixed_dt),
+            plan.warmup_frames,
+            format_mean(blur_rel),
+            format_mean(luma_ratio),
+        );
+    } else {
+        ""
+    };
     format!(
-        "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}.{tail}{captures}",
+        "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}.{cold_note}{tail}{captures}",
         schedule::format_dt(plan.fixed_dt),
         plan.warmup_frames,
         format_mean(blur_rel),

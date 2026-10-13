@@ -87,6 +87,7 @@ impl Options {
         let mut settle_cap = None;
         let mut capture_frames = None;
         let mut bounces: Option<String> = None;
+        let mut warm = false;
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
             match arg.as_str() {
@@ -112,6 +113,7 @@ impl Options {
                 "--settle-cap" => settle_cap = Some(value()?),
                 "--capture-frames" => capture_frames = Some(value()?),
                 "--bounces" => bounces = Some(value()?),
+                "--warm" => warm = true,
                 other => return Err(format!("unknown argument {other}")),
             }
         }
@@ -134,6 +136,7 @@ impl Options {
                 || settle_cap.is_some()
                 || capture_frames.is_some()
                 || bounces.is_some()
+                || warm
             {
                 return Err("that flag is for lighting-ref check".into());
             }
@@ -199,6 +202,9 @@ impl Options {
         let env_cap = env_text("GENOS_LIGHTING_REF_SETTLE_CAP");
         let env_capture = env_text("GENOS_LIGHTING_REF_CAPTURE_FRAMES");
         let env_bounces = env_text("GENOS_LIGHTING_REF_BOUNCES");
+        let env_warm = env_text("GENOS_LIGHTING_REF_WARM");
+        let warm = warm
+            || env_warm.is_some_and(|text| !matches!(text.as_str(), "0" | "false" | "off" | "no"));
         let bounces = match (bounces.as_deref(), env_bounces.as_deref()) {
             (Some(text), _) => Some(parse_bounces(text)?),
             (None, Some(text)) => Some(parse_bounces(text)?),
@@ -238,6 +244,7 @@ impl Options {
                 only_scene,
                 only_checkpoint,
                 plan,
+                warm,
             }),
         })
     }
@@ -307,6 +314,26 @@ mod tests {
         assert!(!check.full_effort);
         assert!(!check.skip_capture);
         assert!(check.bounces.is_none());
+        assert!(!check.warm);
+    }
+
+    #[test]
+    fn warm_defaults_off_and_the_argument_turns_it_on() {
+        let cold = Options::parse(words("check").into_iter()).unwrap();
+        let Command::Check(check) = cold.command else {
+            panic!("expected check");
+        };
+        assert!(!check.warm);
+        let chained = Options::parse(words("check --warm").into_iter()).unwrap();
+        let Command::Check(check) = chained.command else {
+            panic!("expected check");
+        };
+        assert!(check.warm);
+        let err = match Options::parse(words("--warm").into_iter()) {
+            Err(err) => err,
+            Ok(_) => panic!("generate accepted --warm"),
+        };
+        assert!(err.contains("check"), "{err}");
     }
 
     #[test]

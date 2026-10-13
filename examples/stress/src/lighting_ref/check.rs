@@ -40,6 +40,9 @@ pub struct CheckOptions {
     pub only_scene: Option<String>,
     pub only_checkpoint: Option<String>,
     pub plan: FramePlan,
+    /// Keep lighting caches from one checkpoint to the next. The default
+    /// opens a fresh renderer for each checkpoint.
+    pub warm: bool,
 }
 
 struct Wanted {
@@ -99,6 +102,13 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
         ));
     }
     notes.push(plan_note(&opts.plan));
+    notes.push(if opts.warm {
+        "Warm chain: one renderer keeps its lighting caches across checkpoints."
+            .to_string()
+    } else {
+        "Each checkpoint opens a fresh renderer, so the verdict does not depend on the checkpoint before it."
+            .to_string()
+    });
 
     ensure_reference_metrics(opts, &wanted)?;
     let (baselines, baseline_label) = load_baseline(opts, &mut notes)?;
@@ -142,13 +152,16 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
         let still = (item.still && shot.frames.len() >= 2).then_some(shot.frames.as_slice());
         let after = after_frames(item, shot);
         let after_refs: Vec<(u32, &Picture)> = after.iter().map(|(k, p)| (*k, *p)).collect();
-        let metrics = match measure(&reference, &candidate, still, &after_refs, &config.params) {
+        let mut metrics = match measure(&reference, &candidate, still, &after_refs, &config.params)
+        {
             Ok(metrics) => metrics,
             Err(err) => {
                 notes.push(format!("{} {}: {err}", item.scene, item.checkpoint));
                 continue;
             }
         };
+        metrics.cold_frames = shot.cold_frames;
+        metrics.cold_settled = shot.cold_settled;
         let require = require_of(item);
         let baseline = baselines.as_ref().and_then(|file| {
             file.rows
@@ -366,6 +379,7 @@ fn capture_live(
         plan: opts.plan.clone(),
         params: *params,
         jobs,
+        warm: opts.warm,
     }) {
         Ok(outcome) => {
             for (scene, checkpoint, reason) in outcome.skipped {

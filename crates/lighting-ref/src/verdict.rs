@@ -29,6 +29,7 @@ pub enum MetricId {
     UnfilledShare,
     BlurRel,
     LumaDelta,
+    ColdFrames,
 }
 
 impl MetricId {
@@ -47,6 +48,7 @@ impl MetricId {
             Self::UnfilledShare,
             Self::BlurRel,
             Self::LumaDelta,
+            Self::ColdFrames,
         ]
     }
 
@@ -65,6 +67,7 @@ impl MetricId {
             Self::UnfilledShare => "unfilled_share",
             Self::BlurRel => "blur_rel",
             Self::LumaDelta => "luma_delta",
+            Self::ColdFrames => "cold_frames",
         }
     }
 
@@ -83,6 +86,7 @@ impl MetricId {
             Self::UnfilledShare => "unfilled-pixel share",
             Self::BlurRel => "blurred relative luminance",
             Self::LumaDelta => "mean luminance ratio error",
+            Self::ColdFrames => "cold-start frames",
         }
     }
 
@@ -213,6 +217,9 @@ pub fn judge(input: Judge<'_>) -> Judgement {
 }
 
 fn judge_one(id: MetricId, input: &Judge<'_>) -> MetricRow {
+    if id == MetricId::ColdFrames {
+        return judge_cold(input);
+    }
     let value = metric_value(input.metrics, id);
     let baseline = input.baseline.and_then(|b| b.get(id));
     let Some(value) = value else {
@@ -310,6 +317,38 @@ fn judge_one(id: MetricId, input: &Judge<'_>) -> MetricRow {
     finish(id, Some(value), baseline, verdict, reason, input)
 }
 
+/// Frames until a fresh renderer crossed the settle line.
+///
+/// A count that is the cap, with `cold_settled` false, is a renderer issue.
+/// The blurred error and the luminance ratio still score the picture at the
+/// cap. The cap is not a knob this metric raises.
+fn judge_cold(input: &Judge<'_>) -> MetricRow {
+    let frames = input.metrics.cold_frames;
+    let (verdict, reason) = match frames {
+        Some(frames) if input.metrics.cold_settled => (
+            Verdict::Pass,
+            format!("cold start settled at frame {frames:.0}. The settle cap was not raised"),
+        ),
+        Some(frames) => (
+            Verdict::NeedsHuman,
+            format!(
+                "renderer issue: cold start did not settle within {frames:.0} frames. The picture at the cap is scored by the blurred error and the luminance ratio. The settle cap was not raised"
+            ),
+        ),
+        None => (Verdict::Pass, "cold start was not measured".to_string()),
+    };
+    MetricRow {
+        id: MetricId::ColdFrames,
+        value: frames,
+        baseline: input
+            .baseline
+            .and_then(|baseline| baseline.get(MetricId::ColdFrames)),
+        verdict,
+        reason,
+        gates: true,
+    }
+}
+
 fn flip_metric(id: MetricId) -> bool {
     matches!(id, MetricId::FlipMean | MetricId::FlipP99)
 }
@@ -393,7 +432,7 @@ fn disagreement(rows: &[MetricRow], delta_min: f64) -> Option<String> {
     let mut improved: Vec<&MetricRow> = Vec::new();
     let mut regressed: Vec<&MetricRow> = Vec::new();
     for row in rows {
-        if !row.gates {
+        if !row.gates || row.id == MetricId::ColdFrames {
             continue;
         }
         let (Some(value), Some(before)) = (row.value, row.baseline) else {
@@ -431,6 +470,7 @@ pub fn metric_value(metrics: &FrameMetrics, id: MetricId) -> Option<f64> {
         MetricId::UnfilledShare => metrics.unfilled_share(),
         MetricId::BlurRel => metrics.blur_rel,
         MetricId::LumaDelta => metrics.luma_delta,
+        MetricId::ColdFrames => metrics.cold_frames,
     }
 }
 
@@ -838,5 +878,65 @@ mod tests {
                 result.reasons
             );
         }
+    }
+
+    #[test]
+    fn a_cold_start_that_settles_stays_a_pass_and_one_that_does_not_is_a_renderer_issue() {
+        // Room-a alone on the 4070: ratio 0.46, 0.61, 0.69, 0.75 at frames
+        // 1, 60, 120, 180. The cap stays 180. The picture at the cap still
+        // fails the luminance gate. The cold-start row names the renderer.
+        let mut settled = with_scores(0.20, 0.04, 1.02);
+        settled.cold_frames = Some(40.0);
+        settled.cold_settled = true;
+        let ok = judged(&settled, None, 64, 0.31);
+        assert_eq!(ok.verdict, Verdict::Pass, "{:?}", ok.reasons);
+        let row = ok
+            .rows
+            .iter()
+            .find(|row| row.id == MetricId::ColdFrames)
+            .unwrap();
+        assert_eq!(row.verdict, Verdict::Pass);
+        assert!(row.reason.contains("settled at frame 40"), "{}", row.reason);
+
+        let mut open = with_scores(0.20, 0.04, 1.02);
+        open.cold_frames = Some(180.0);
+        open.cold_settled = false;
+        let flagged = judged(&open, None, 64, 0.31);
+        assert_eq!(
+            flagged.verdict,
+            Verdict::NeedsHuman,
+            "{:?}",
+            flagged.reasons
+        );
+        assert!(flagged
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("renderer issue")));
+
+        let mut room = with_scores(0.40, 0.25, 0.75);
+        room.cold_frames = Some(180.0);
+        room.cold_settled = false;
+        let failed = judged(&room, None, 64, 0.08);
+        assert_eq!(failed.verdict, Verdict::Fail, "{:?}", failed.reasons);
+        assert!(failed
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("renderer issue")));
+        assert!(failed
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("luminance ratio")));
+
+        let unmeasured = judged(&with_scores(0.20, 0.04, 1.02), None, 64, 0.31);
+        assert_eq!(
+            unmeasured.verdict,
+            Verdict::Pass,
+            "{:?}",
+            unmeasured.reasons
+        );
+        assert!(unmeasured
+            .rows
+            .iter()
+            .any(|row| row.id == MetricId::ColdFrames && row.reason.contains("not measured")));
     }
 }
