@@ -583,7 +583,9 @@ The back face stores the opposite axis. Cache lookups from a pixel use that
 axis. The shading normal, including a normal map and the view flip compose
 applies for lighting, is not the key. That was the Sponza banner: a thin cloth
 shared 12.5 cm cells between its faces, and the key moved as the camera did,
-so the cells showed up as bright squares that jumped.
+so the cells showed up as bright squares that jumped. The banner test fills
+the lamp side, then cuts to the other side. That side stays dark. One shared
+axis makes the far side as bright as the lamp side.
 
 The filter still runs on the whole picture every frame. A moving frame does
 not reuse or hold a filtered frame. Papers, the deviations, and the owner GPU

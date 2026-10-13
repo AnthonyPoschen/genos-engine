@@ -901,23 +901,67 @@ fn assert_picture_cost(name: &str, stats: &LightingAtrousStats, pixels: u32) {
     assert_ne!(stats.filtered, 1_048_576);
 }
 
-/// Thin two-sided cloth. The score is the lit interior (the silhouette is one
-/// step, not a cell). The screen wavelet has to be no blockier and no flickier
-/// than the hash wavelet under a small camera move.
+/// The curtains shot. The central banner is a thin two-sided cloth and the
+/// lamps sit on the far side of it. Bright axis-aligned squares on the side
+/// the camera sees are those lamps' 12.5 cm cells, when the front and the back
+/// share a key. The test fills the lamp side, then cuts to the other side:
+/// that side has to stay dark, and it has to stay free of those squares while
+/// the camera moves. A shared key keeps the lamp's squares on the cut.
 #[test]
 fn sponza_banner_cells_stay_still_under_the_screen_wavelet() {
-    let (hash_edge, hash_flicker) = banner_scores(false);
-    let (screen_edge, screen_flicker) = banner_scores(true);
+    let (hash_lit, hash_far) = banner_cut(false);
+    let (screen_lit, screen_far) = banner_cut(true);
     eprintln!(
-        "banner hash edge {hash_edge:.3} flicker {hash_flicker:.3} screen edge {screen_edge:.3} flicker {screen_flicker:.3}"
+        "banner lamp side hash p95 {:.1} peaks {:.1} screen p95 {:.1} peaks {:.1}",
+        hash_lit.p95, hash_lit.peaks, screen_lit.p95, screen_lit.peaks
+    );
+    eprintln!(
+        "banner far side hash p95 {:.1} peaks {:.1} edge {:.3} flicker {:.3} screen p95 {:.1} peaks {:.1} edge {:.3} flicker {:.3}",
+        hash_far.p95, hash_far.peaks, hash_far.edge, hash_far.flicker,
+        screen_far.p95, screen_far.peaks, screen_far.edge, screen_far.flicker
     );
     assert!(
-        screen_edge <= hash_edge * 0.85 + 0.5,
-        "screen edge {screen_edge:.3} did not beat hash {hash_edge:.3}"
+        hash_lit.p95 >= 12.0,
+        "the lamp did not light the side that faces it ({:.1})",
+        hash_lit.p95
     );
     assert!(
-        screen_flicker <= hash_flicker * 0.85 + 0.35,
-        "screen flicker {screen_flicker:.3} did not beat hash {hash_flicker:.3}"
+        screen_lit.p95 >= 12.0,
+        "the lamp did not light the side that faces it ({:.1})",
+        screen_lit.p95
+    );
+    // The far side reads a different axis. The lamp side's cells, including
+    // their bright squares, stay on that axis.
+    assert!(
+        hash_far.p95 <= hash_lit.p95 * 0.45,
+        "hash shows the far lamp on the camera side: p95 {:.1} lamp side {:.1}",
+        hash_far.p95, hash_lit.p95
+    );
+    assert!(
+        screen_far.p95 <= screen_lit.p95 * 0.45,
+        "screen shows the far lamp on the camera side: p95 {:.1} lamp side {:.1}",
+        screen_far.p95, screen_lit.p95
+    );
+    assert!(
+        hash_far.peaks < 8.0,
+        "hash bright squares on the camera side {:.1}",
+        hash_far.peaks
+    );
+    assert!(
+        screen_far.peaks < 8.0,
+        "screen bright squares on the camera side {:.1}",
+        screen_far.peaks
+    );
+    assert!(
+        screen_far.edge <= hash_far.edge * 0.85 + 0.5,
+        "screen edge {screen_edge:.3} did not beat hash {hash_edge:.3}",
+        screen_edge = screen_far.edge,
+        hash_edge = hash_far.edge
+    );
+    assert!(
+        screen_far.flicker <= hash_far.flicker * 0.85 + 0.35,
+        "screen flicker {:.3} did not beat hash {:.3}",
+        screen_far.flicker, hash_far.flicker
     );
     if sponza_gltf_is_real() {
         let (hash_edge, hash_flicker) = sponza_curtain_scores(false);
@@ -930,42 +974,82 @@ fn sponza_banner_cells_stay_still_under_the_screen_wavelet() {
     }
 }
 
-fn banner_scores(screen: bool) -> (f64, f64) {
+struct BannerView {
+    p95: f64,
+    peaks: f64,
+    edge: f64,
+    flicker: f64,
+}
+
+/// (eye x, yaw, eye z). Yaw 0 looks along -Z. The lamp side is +Z; the far
+/// side is -Z, yaw π, so the cloth sits between the camera and the lamp.
+fn banner_camera(cam: (f32, f32, f32)) -> Camera {
+    let mut camera = Camera::opening();
+    camera.set_pose(genos_scene::Vec3::new(cam.0, 1.7, cam.2), cam.1, 0.0);
+    camera
+}
+
+/// Fill the lamp side, then cut to the far side and score that side's first
+/// frames. The far side is measured in the same cache: a shared 12.5 cm cell
+/// still holds the lamp.
+fn banner_cut(screen: bool) -> (BannerView, BannerView) {
     let (_gpu, mut window, mut renderer) = open();
     let mut settings = LightingSettings::preset(LightingPreset::High);
     settings.denoiser.screen = screen;
     renderer.set_lighting_settings(settings);
     view_at(&mut renderer, ViewMode::Bounce);
-    let world = banner_world();
-    let mut frames = Vec::new();
-    let shots = [
-        (0.0, 0.0),
-        (0.04, 0.0),
-        (0.08, 0.008),
-        (0.12, 0.0),
-        (0.06, -0.008),
-    ];
-    for _ in 0..24 {
-        let mut camera = Camera::opening();
-        camera.set_pose(genos_scene::Vec3::new(0.0, 1.7, 3.2), 0.0, 0.0);
+    // Beside the cloth, on the +Z side, so neither camera's view of the scored
+    // region passes through the emitter.
+    let world = banner_world(2.2, 0.45);
+    let lamp_side = (0.0f32, 0.0f32, 3.2f32);
+    for _ in 0..20 {
+        let camera = banner_camera(lamp_side);
         let _ = draw(&mut window, &mut renderer, &world, &camera);
     }
-    for (x, yaw) in shots {
-        let mut camera = Camera::opening();
-        camera.set_pose(genos_scene::Vec3::new(x, 1.7, 3.2), yaw, 0.0);
-        frames.push(draw(&mut window, &mut renderer, &world, &camera));
-    }
-    let edge = frames.iter().map(|f| cell_edge_excess(f, 320, 6)).sum::<f64>() / frames.len() as f64;
-    let luma = frames.iter().map(|f| mean_luma(f)).sum::<f64>() / frames.len() as f64;
-    let stats = renderer.lighting_atrous_stats();
-    eprintln!(
-        "banner screen={screen} edge {edge:.3} luma {luma:.2} fine {} coarse {} filtered {} ran {}",
-        stats.screen_pixels, stats.coarse_pixels, stats.filtered, stats.ran
+    let lamp_frame = draw(
+        &mut window,
+        &mut renderer,
+        &world,
+        &banner_camera(lamp_side),
     );
-    (edge, cloth_flicker(&frames, &shots))
+    let lit = BannerView {
+        p95: cloth_p95(&lamp_frame, lamp_side),
+        peaks: cloth_square_peaks(&lamp_frame, lamp_side),
+        edge: cell_edge_excess(&lamp_frame, 320, 6),
+        flicker: 0.0,
+    };
+    let yaw = std::f32::consts::PI;
+    let far_shots = [
+        (0.0f32, yaw, -2.8f32),
+        (0.04, yaw, -2.8),
+        (0.08, yaw + 0.008, -2.8),
+        (0.12, yaw, -2.8),
+        (0.06, yaw - 0.008, -2.8),
+    ];
+    let mut frames = Vec::new();
+    for cam in far_shots {
+        frames.push(draw(
+            &mut window,
+            &mut renderer,
+            &world,
+            &banner_camera(cam),
+        ));
+    }
+    let edge = frames
+        .iter()
+        .map(|f| cell_edge_excess(f, 320, 6))
+        .sum::<f64>()
+        / frames.len() as f64;
+    let far = BannerView {
+        p95: cloth_p95(&frames[0], far_shots[0]),
+        peaks: cloth_square_peaks(&frames[0], far_shots[0]),
+        edge,
+        flicker: cloth_flicker(&frames, &far_shots),
+    };
+    (lit, far)
 }
 
-fn banner_world() -> World {
+fn banner_world(lamp_x: f32, lamp_z: f32) -> World {
     let dir = std::env::temp_dir().join("genos-banner-cell-test");
     std::fs::create_dir_all(&dir).expect("banner dir");
     let gltf_path = dir.join("banner.gltf");
@@ -978,12 +1062,12 @@ fn banner_world() -> World {
     .expect("cube");
     let mut glowing = glow;
     for material in &mut glowing.materials {
-        material.emissive = [40.0, 8.0, 1.5];
+        material.emissive = [80.0, 36.0, 8.0];
         material.emissive_strength = 1.0;
     }
     let settings = genos_bake::BakeSettings {
         mode: genos_bake::BakeMode::OnLoad,
-        cache_dir: dir.join("bake"),
+        cache_dir: dir.join(format!("bake-{lamp_x}-{lamp_z}")),
         ..genos_bake::BakeSettings::default()
     };
     let mut world = World::from_scene(Scene {
@@ -991,19 +1075,12 @@ fn banner_world() -> World {
             position: genos_scene::Vec3::ZERO,
             half_x: 8.0,
             half_z: 8.0,
-            color: [0.15, 0.15, 0.16],
+            color: [0.02, 0.02, 0.02],
         },
-        walls: vec![
-            wall_at(0.0, -3.0, 6.0, 0.2),
-            wall_at(-3.0, 0.0, 0.2, 6.0),
-            wall_at(3.0, 0.0, 0.2, 6.0),
-        ],
+        walls: Vec::new(),
         solids: Vec::new(),
         lights: Vec::new(),
-        ceiling: Some(genos_scene::Ceiling {
-            height: 4.0,
-            color: [0.12, 0.12, 0.13],
-        }),
+        ceiling: None,
         sky: None,
         lighting: LightingSettings::preset(LightingPreset::High),
         debug: genos_scene::DebugSettings::default(),
@@ -1011,34 +1088,20 @@ fn banner_world() -> World {
     world
         .add_gltf_traced(&banner, &genos_render::identity_pose(), &settings)
         .expect("banner mesh");
-    // cube.gltf's parent sits at x = 10 and the child scale is 2. This pose's
-    // 0.35 scale maps that parent to x = 3.5, so the translation lands the
-    // cube just left of the cloth and in front of it (world centre -2.3, 1.6, 0.55).
+    // cube.gltf's parent sits at x = 10 and the child scale is 2. Scale 0.1
+    // maps that parent to x = 1 and the cube to about 0.4 m, just off the cloth.
+    let s = 0.1;
     let mut place = genos_render::identity_pose();
-    place[0] = 0.35;
-    place[5] = 0.35;
-    place[10] = 0.35;
-    place[12] = -5.8;
-    place[13] = 1.6;
-    place[14] = 0.55;
+    place[0] = s;
+    place[5] = s;
+    place[10] = s;
+    place[12] = lamp_x - 10.0 * s;
+    place[13] = 1.7;
+    place[14] = lamp_z;
     world
         .add_gltf_traced(&glowing, &place, &settings)
         .expect("emitter");
     world
-}
-
-fn wall_at(x: f32, z: f32, half_x: f32, half_z: f32) -> genos_scene::Wall {
-    genos_scene::Wall {
-        position: genos_scene::Vec3::new(x, 0.0, z),
-        half_x,
-        half_z,
-        height: 4.0,
-        base: 0.0,
-        color: [0.08, 0.07, 0.06],
-        absorption: 0.0,
-        reflectance: 0.15,
-        color_mix: 1.0,
-    }
 }
 
 fn banner_gltf() -> String {
@@ -1196,9 +1259,66 @@ fn cell_edge_ratio(frame: &[u8], width: usize, stride: usize) -> f64 {
     best
 }
 
+fn cloth_lumas(frame: &[u8], cam: (f32, f32, f32)) -> Vec<f64> {
+    let mut v = Vec::new();
+    let mut x = -1.0f32;
+    while x <= 1.001 {
+        let mut y = 0.8f32;
+        while y <= 2.601 {
+            if let Some((px, py)) = banner_project(cam, [x, y, 0.0]) {
+                v.push(luma_at(frame, 320, px, py));
+            }
+            y += 0.1;
+        }
+        x += 0.1;
+    }
+    v
+}
+
+fn cloth_p95(frame: &[u8], cam: (f32, f32, f32)) -> f64 {
+    percentile(&mut cloth_lumas(frame, cam), 0.95)
+}
+
+/// A bright square is a cloth point brighter than the four neighbours one
+/// cache cell away. A smooth falloff is brighter on only one side, so it
+/// scores 0. The curtains shot is these isolated squares.
+fn cloth_square_peaks(frame: &[u8], cam: (f32, f32, f32)) -> f64 {
+    let mut peaks = Vec::new();
+    let mut x = -0.75f32;
+    while x <= 0.751 {
+        let mut y = 1.0f32;
+        while y <= 2.401 {
+            let here = [x, y, 0.0];
+            let left = [x - 0.125, y, 0.0];
+            let right = [x + 0.125, y, 0.0];
+            let down = [x, y - 0.125, 0.0];
+            let up = [x, y + 0.125, 0.0];
+            if let (Some(c), Some(l), Some(r), Some(d), Some(u)) = (
+                banner_project(cam, here),
+                banner_project(cam, left),
+                banner_project(cam, right),
+                banner_project(cam, down),
+                banner_project(cam, up),
+            ) {
+                let c = luma_at(frame, 320, c.0, c.1);
+                let l = luma_at(frame, 320, l.0, l.1);
+                let r = luma_at(frame, 320, r.0, r.1);
+                let d = luma_at(frame, 320, d.0, d.1);
+                let u = luma_at(frame, 320, u.0, u.1);
+                if c > l + 6.0 && c > r + 6.0 && c > d + 6.0 && c > u + 6.0 {
+                    peaks.push(c - 0.25 * (l + r + d + u));
+                }
+            }
+            y += 0.125;
+        }
+        x += 0.125;
+    }
+    mean_of(&peaks)
+}
+
 /// Same points on the cloth (z = 0) across camera moves. A screen-space diff
 /// also counts the picture sliding, which a stable field still does.
-fn cloth_flicker(frames: &[Vec<u8>], cams: &[(f32, f32)]) -> f64 {
+fn cloth_flicker(frames: &[Vec<u8>], cams: &[(f32, f32, f32)]) -> f64 {
     let mut pts = Vec::new();
     let mut x = -1.0f32;
     while x <= 1.001 {
@@ -1226,11 +1346,11 @@ fn cloth_flicker(frames: &[Vec<u8>], cams: &[(f32, f32)]) -> f64 {
     if n == 0.0 { 0.0 } else { acc / n }
 }
 
-fn banner_project(cam: (f32, f32), world: [f32; 3]) -> Option<(usize, usize)> {
+fn banner_project(cam: (f32, f32, f32), world: [f32; 3]) -> Option<(usize, usize)> {
     let (sy, cy) = cam.1.sin_cos();
     let forward = [sy, 0.0, -cy];
     let right = [cy, 0.0, sy];
-    let eye = [cam.0, 1.7, 3.2];
+    let eye = [cam.0, 1.7, cam.2];
     let rel = [world[0] - eye[0], world[1] - eye[1], world[2] - eye[2]];
     let zv = rel[0] * forward[0] + rel[1] * forward[1] + rel[2] * forward[2];
     if zv < 1.0e-3 {

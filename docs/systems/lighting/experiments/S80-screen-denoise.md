@@ -32,6 +32,12 @@ pull, min(1, 4 wm / wall)).
 A two-sided back face (`gl_FrontFacing` false) stores the opposite axis, so
 the front and the back do not share a cell. `gl_FrontFacing` does not follow
 the normal map, so a small camera move on one side of a cloth keeps the key.
+The curtains shot is this: lamps on the far side of the central banner, and
+bright squares on the side the camera sees. Those squares are the far side's
+12.5 cm cells when the two sides share a key. The test fills the lamp side of
+a two-sided quad, then cuts to the other side and moves the camera. That side
+stays dark: its p95 stays under half the lamp side, and it has no cell-sized
+peaks. One shared axis makes the far side as bright as the lamp side.
 
 ## Papers and deviations
 
