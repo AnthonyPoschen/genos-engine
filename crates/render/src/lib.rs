@@ -18,7 +18,8 @@ pub use budget::{FrameMemory, ImageAdmit};
 pub use genos_bake as bake;
 pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
 pub use gpu::{
-    DebugView, DrawProfile, LampReport, LightingAtrousStats, LightingWakeStats, Renderer, ScreenLine,
+    DebugView, DrawProfile, LampReport, LightingAtrousStats, LightingWakeProbe, LightingWakeStats,
+    Renderer, ScreenLine,
     ScreenRect,
     SettleStats, ViewMode,
 };

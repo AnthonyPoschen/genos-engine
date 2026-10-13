@@ -116,6 +116,15 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint wake_misses;
     uint wake_traced;
     uint wake_rays;
+    // Word 152. phase picks which persist slot this flight buffer writes.
+    // Pads keep the ring bits at word 160. The list (32 probes, 4 words) is
+    // cleared every frame. The persist tail (word 296, 8 events × 12 words)
+    // is not: it is the previous ring's frontier.
+    uint wake_phase;
+    uint wake_pad[7];
+    uint wake_ring_bit[8];
+    uint wake_list[128];
+    uint wake_persist[96];
 } gstats;
 // 0 pixel or probe read, 1 cache-ray hit, 2 probe hit. The direct pass sets it
 // before a cache read. A pixel compose leaves it at 0.
@@ -3775,4 +3784,249 @@ void lighting_gdirty_kept_at(uint at) {
     if (at >= base && at < base + lighting_kept_hits()) {
         lighting_gdirty_mark((at - base) / lighting_rays() / LIGHTING_STRATA);
     }
+}
+
+// Ring wakes (GENOS_LIGHTING_WAKE=rings). A real change uploads up to eight
+// events. Place tests a ring of probes around each one, splits the ring when
+// the group changed, and fully traces a sparse subset inside a failed ring.
+// Verification is a separate scattered budget. Legacy (mode 0) does none of this.
+const uint WAKE_TRACE = 1u;
+const uint WAKE_FULL = 2u;
+const uint WAKE_VERIFY = 4u;
+const uint WAKE_TEST = 8u;
+const float WAKE_PI = 3.14159265;
+const float WAKE_TAU = 6.28318530;
+
+uint lighting_wake_probe_at(uint i) {
+    return lighting_graw_at(lighting_probes(), 0u) + i;
+}
+uint lighting_wake_event_at() {
+    return lighting_wake_probe_at(lighting_probes());
+}
+// field: 0 frontier, 1 split, 2 fail, 3 tested, 4 serial. slot 0 or 1.
+uint lighting_wake_word(uint e, uint field, uint slot) {
+    return e * 12u + field * 2u + slot;
+}
+vec3 lighting_wake_sample(vec3 center, float ring_r, uint sector, uint sectors) {
+    float ang = (float(sector) + 0.5) / float(max(sectors, 1u)) * WAKE_TAU;
+    return center + vec3(cos(ang), 0.0, sin(ang)) * ring_r;
+}
+bool lighting_wake_owns(uint probe, vec3 point) {
+    vec3 to = point - scene.eye.xyz;
+    float z = dot(to, scene.view_forward.xyz);
+    float t = scene.view_right.w;
+    float aspect = max(scene.view_forward.w, 1.0e-4);
+    if (!(z > 0.05) || !(t > 1.0e-6)) {
+        return false;
+    }
+    float ndc_x = dot(to, scene.view_right.xyz) / (z * t * aspect);
+    float ndc_y = dot(to, scene.view_up.xyz) / (z * t);
+    float px = (ndc_x * 0.5 + 0.5) * float(pc.dims.x) - 0.5;
+    float py = (0.5 - 0.5 * ndc_y) * float(pc.dims.y) - 0.5;
+    if (px < 0.0 || py < 0.0 || px >= float(pc.dims.x) || py >= float(pc.dims.y)) {
+        return false;
+    }
+    uint tile = max(pc.params.y, 1u);
+    uint col = min(uint(px) / tile, pc.dims.z - 1u);
+    uint row = min(uint(py) / tile, pc.dims.w - 1u);
+    return col + row * pc.dims.z == probe;
+}
+uint lighting_wake_sector(vec3 pos, vec3 center, uint sectors) {
+    vec3 to = pos - center;
+    float ang = atan(to.z, to.x);
+    float u = (ang + WAKE_PI) / WAKE_TAU;
+    return min(uint(u * float(max(sectors, 1u))), sectors - 1u);
+}
+// Shade this hit even when the legacy check would keep its old light.
+bool lighting_wake_relight(uint h) {
+    if (gstats.wake_mode == 0u) {
+        return false;
+    }
+    uint rays = lighting_rays();
+    uint pk = h / rays / LIGHTING_STRATA;
+    uint flags = floatBitsToUint(work.v[lighting_wake_probe_at(pk)].w);
+    if ((flags & WAKE_FULL) != 0u) {
+        return true;
+    }
+    return (h % rays) == lighting_hold_check_k(pk) && (flags & (WAKE_TRACE | WAKE_VERIFY | WAKE_TEST)) != 0u;
+}
+void lighting_wake_report(uint probe, bool changed) {
+    uint n = min(gstats.wake_events, 8u);
+    uint slot_r = (gstats.wake_phase + 1u) & 1u;
+    uint slot_w = gstats.wake_phase & 1u;
+    [[dont_unroll]] for (uint e = 0u; e < n; e++) {
+        vec4 e0 = work.v[lighting_wake_event_at() + e * 2u];
+        float radius = e0.w;
+        if (!(radius > 0.0)) {
+            continue;
+        }
+        uint serial = floatBitsToUint(work.v[lighting_wake_event_at() + e * 2u + 1u].x);
+        uint frontier = 0u;
+        uint split = 0u;
+        if (gstats.wake_persist[lighting_wake_word(e, 4u, slot_r)] == serial) {
+            frontier = gstats.wake_persist[lighting_wake_word(e, 0u, slot_r)];
+            split = min(gstats.wake_persist[lighting_wake_word(e, 1u, slot_r)], 2u);
+        }
+        if (frontier >= 255u) {
+            continue;
+        }
+        if (frontier > 16u) {
+            continue;
+        }
+        float ring_r = radius * exp2(float(frontier));
+        if (gstats.wake_radius > 0.0 && ring_r > gstats.wake_radius) {
+            continue;
+        }
+        uint sectors = 4u << split;
+        uint bits = 0u;
+        [[dont_unroll]] for (uint s = 0u; s < sectors; s++) {
+            if (lighting_wake_owns(probe, lighting_wake_sample(e0.xyz, ring_r, s, sectors))) {
+                bits |= 1u << s;
+            }
+        }
+        if (bits == 0u) {
+            continue;
+        }
+        atomicOr(gstats.wake_persist[lighting_wake_word(e, 3u, slot_w)], bits);
+        if (changed) {
+            atomicOr(gstats.wake_persist[lighting_wake_word(e, 2u, slot_w)], bits);
+        }
+    }
+}
+void lighting_wake_observe(uint h, vec3 light) {
+    if (gstats.wake_mode == 0u) {
+        return;
+    }
+    uint rays = lighting_rays();
+    uint pk = h / rays / LIGHTING_STRATA;
+    if (h % rays != lighting_hold_check_k(pk)) {
+        return;
+    }
+    uint flags = floatBitsToUint(work.v[lighting_wake_probe_at(pk)].w);
+    float lum = dot(light, vec3(0.2126, 0.7152, 0.0722));
+    vec4 rec = work.v[lighting_wake_probe_at(pk)];
+    uint seen = floatBitsToUint(rec.y);
+    bool have = seen != 0u;
+    float bound = gstats.wake_tol * max(max(rec.x, lum), 1.0e-3);
+    bool changed = have && abs(lum - rec.x) > bound;
+    if (have && (flags & WAKE_VERIFY) != 0u) {
+        if (changed) {
+            atomicAdd(gstats.wake_misses, 1u);
+        } else {
+            atomicAdd(gstats.wake_hits, 1u);
+        }
+    }
+    if (have && (flags & WAKE_TEST) != 0u) {
+        lighting_wake_report(pk, changed);
+    }
+    work.v[lighting_wake_probe_at(pk)].x = lum;
+    work.v[lighting_wake_probe_at(pk)].y = uintBitsToFloat(max(lighting_frame(), 1u));
+}
+void lighting_wake_place(uint probe) {
+    if (gstats.wake_mode == 0u) {
+        return;
+    }
+    vec4 pp = work.v[lighting_probe_at(probe)];
+    bool placed = pp.w > 0.5;
+    uint flags = 0u;
+    uint n = min(gstats.wake_events, 8u);
+    uint slot_r = (gstats.wake_phase + 1u) & 1u;
+    uint slot_w = gstats.wake_phase & 1u;
+    [[dont_unroll]] for (uint e = 0u; e < n; e++) {
+        vec4 e0 = work.v[lighting_wake_event_at() + e * 2u];
+        float radius = e0.w;
+        uint serial = floatBitsToUint(work.v[lighting_wake_event_at() + e * 2u + 1u].x);
+        if (serial == 0u) {
+            continue;
+        }
+        if (radius < 0.0) {
+            if (placed) {
+                flags |= WAKE_FULL;
+            }
+            continue;
+        }
+        if (!(gstats.wake_radius > 0.0)) {
+            continue;
+        }
+        uint frontier = 0u;
+        uint split = 0u;
+        uint fail = 0u;
+        uint tested = 0u;
+        if (gstats.wake_persist[lighting_wake_word(e, 4u, slot_r)] == serial) {
+            frontier = gstats.wake_persist[lighting_wake_word(e, 0u, slot_r)];
+            split = min(gstats.wake_persist[lighting_wake_word(e, 1u, slot_r)], 2u);
+            fail = gstats.wake_persist[lighting_wake_word(e, 2u, slot_r)];
+            tested = gstats.wake_persist[lighting_wake_word(e, 3u, slot_r)];
+        }
+        if (frontier > 16u && frontier != 255u) {
+            frontier = 255u;
+        }
+        uint next_f = frontier;
+        uint next_s = split;
+        if (frontier < 255u && tested != 0u) {
+            if (fail == 0u) {
+                next_f = 255u;
+            } else if (split >= 2u) {
+                next_s = 0u;
+                float next_r = radius * exp2(float(frontier + 1u));
+                next_f = next_r > gstats.wake_radius ? 255u : frontier + 1u;
+            } else {
+                next_s = split + 1u;
+            }
+        }
+        if (probe == 0u && tested != 0u && fail != 0u) {
+            atomicAdd(gstats.wake_splits, uint(bitCount(fail)));
+        }
+        atomicExchange(gstats.wake_persist[lighting_wake_word(e, 0u, slot_w)], next_f);
+        atomicExchange(gstats.wake_persist[lighting_wake_word(e, 1u, slot_w)], next_s);
+        atomicExchange(gstats.wake_persist[lighting_wake_word(e, 2u, slot_w)], 0u);
+        atomicExchange(gstats.wake_persist[lighting_wake_word(e, 3u, slot_w)], 0u);
+        atomicExchange(gstats.wake_persist[lighting_wake_word(e, 4u, slot_w)], serial);
+        if (!placed || frontier >= 255u) {
+            continue;
+        }
+        float ring_r = radius * exp2(float(min(frontier, 16u)));
+        if (frontier == 0u && length(pp.xyz - e0.xyz) <= min(radius, gstats.wake_radius)) {
+            flags |= WAKE_FULL;
+        }
+        if (ring_r <= gstats.wake_radius) {
+            uint sectors = 4u << split;
+            bool mine = false;
+            [[dont_unroll]] for (uint s = 0u; s < sectors; s++) {
+                if (lighting_wake_owns(probe, lighting_wake_sample(e0.xyz, ring_r, s, sectors))) {
+                    mine = true;
+                }
+            }
+            if (mine) {
+                flags |= WAKE_TEST;
+                if (atomicOr(gstats.wake_ring_bit[e], 1u) == 0u) {
+                    atomicAdd(gstats.wake_rings, 1u);
+                }
+            }
+            if (tested != 0u && fail != 0u && length(pp.xyz - e0.xyz) < ring_r
+                && (probe & 3u) == (lighting_frame() & 3u)) {
+                uint sec = lighting_wake_sector(pp.xyz, e0.xyz, sectors);
+                if ((fail & (1u << sec)) != 0u) {
+                    flags |= WAKE_FULL;
+                }
+            }
+        }
+    }
+    if (placed && gstats.wake_budget > 0u) {
+        uint period = max(lighting_probes() / gstats.wake_budget, 1u);
+        if ((probe % period) == (lighting_frame() % period)) {
+            flags |= WAKE_VERIFY;
+        }
+    }
+    if (placed && (flags & WAKE_FULL) != 0u) {
+        work.v[lighting_probe_at(probe) + 1u].w = uintBitsToFloat(lighting_frame() + LIGHTING_STRATA);
+        uint slot = atomicAdd(gstats.wake_woken, 1u);
+        if (slot < 32u) {
+            gstats.wake_list[slot * 4u] = probe;
+            gstats.wake_list[slot * 4u + 1u] = floatBitsToUint(pp.x);
+            gstats.wake_list[slot * 4u + 2u] = floatBitsToUint(pp.y);
+            gstats.wake_list[slot * 4u + 3u] = floatBitsToUint(pp.z);
+        }
+    }
+    work.v[lighting_wake_probe_at(probe)].w = uintBitsToFloat(flags);
 }

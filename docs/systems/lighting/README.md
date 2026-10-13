@@ -56,9 +56,9 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - A-SVGF lambda drives ray counts (A-SVGF has no ray-count rule); checks are measurement only (S74A, S76).
 - Shadow visibility shared per 12.5 cm cell for hits, invalidated per lamp range (S74A).
 - 1-in-16 push refresh floor (S78B); kept-hit bounce refreshed with its re-trace (S78D); held strata keep exact directions (S78K).
-- Going fully quiet (DDGI and Lumen always spend a fixed budget).
+- Going fully quiet on the legacy scheduler (DDGI and Lumen always spend a fixed budget). `GENOS_LIGHTING_WAKE=rings` keeps a verification budget and does not hold the probe frame.
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
-- Planned: change-scaled ring-test wakes with group splitting (original combination).
+- Ring wakes (`GENOS_LIGHTING_WAKE=rings`, default legacy): doubling distances, group-test splitting, sparse full traces inside a failed ring, and a verification budget that adapts the tolerance. DDGI time-slices a world-space grid. Lumen retraces screen probes every frame and budgets the radiance cache by last-used. The combination is original. A moving light updates a sparse subset; the probe filter spreads that to neighbours. Bounce light may lag a few frames. The frame is never reused whole.
 - Flat ambient when GI is off is a constant or a classic hemisphere (sky toward the normal, ground away from it). A day curve lerps those colours by sun height on the CPU. No new GI algorithm. The bounce count gates the existing cache read; it does not add a bounce pass.
 
 ## Experiment index
@@ -167,7 +167,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78B2](experiments/S78B2-msme-time-floor.md) | 2026-10-13 | Time-based MSME catch-up floor | not pushed (no healing; postmortem) | g78/S78B2-msme-time-floor.patch |
 | [S78H2](experiments/S78H2-sharc-read-16.md) | 2026-10-13 | SHaRC read rule 16 sets for fine short hits | not pushed (no effect; postmortem) | g78/S78H2-sharc-read-16.patch |
 | [WAKE0](experiments/WAKE0-legacy-trace-baseline.md) | 2026-10-13 | Legacy scheduler: one check ray per held probe, full stratum when the camera moves | measured | this commit |
-| [WAKE](experiments/WAKE-neighbour-wake-design.md) | 2026-10-12 | Anthony's wake design: no wakes from shared field; real change wakes neighbours by coarse-to-fine ring tests w | planned (approved by Anthony) | none yet |
+| [WAKE](experiments/WAKE-neighbour-wake-design.md) | 2026-10-12 | Anthony's wake design: no wakes from shared field; real change wakes neighbours by coarse-to-fine ring tests w | implemented (`GENOS_LIGHTING_WAKE=rings`; default legacy) | this commit |
 | [DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md) | 2026-10-12 | S-curve allowed quality lag for off-screen pages by priority | deferred | none |
 | [DUMP](experiments/DUMP-gpu-dump-tool.md) | 2026-10-12 | Debug dump of GPU data from two consecutive frames per component (direct, bounce, coarse/fine WRC, probe resul | in progress | none yet |
 | [RAYCEIL](experiments/RAYCEIL-world-cache-need-ray-ceilings.md) | 2026-10-12 | World-cache cells stop at IC error bound instead of fixed 128 samples | queued | none |
@@ -262,7 +262,7 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 
 - **Ours:** one probe per 16 px tile (smaller below 720p, about 45 rows), placed on the G-buffer at the tile centre or the first of four inner points that has a surface. 64 rays per frame per probe, in 8 strata (frame f traces stratum f mod 8), so a probe sees 512 directions. Pixels take the 4 nearest probes weighted by plane distance and normal (`lighting_compose`).
 - **Reference:** Lumen places probes on G-buffer pixels on a 16 px grid, refines adaptively down to 4 px where interpolation fails, jitters placement and directions every frame, 8×8 octahedral rays, BRDF-guided product importance sampling (about 4×), and a 10-frame temporal filter [W21 s.33-52]. Irradiance caching [IC] is the origin of the adaptive refinement.
-- **Differences:** fixed strata instead of per-frame jitter (no crawling noise; error is a still pattern). No importance sampling and no adaptive refinement yet.
+- **Differences:** fixed strata instead of per-frame jitter (no crawling noise; error is a still pattern). No importance sampling and no adaptive refinement yet. `GENOS_LIGHTING_WAKE=rings` stops the always-on check ray. A lamp or a moved surface runs ring tests at doubling distances; a group that changed past tolerance splits from 4 to 16 sectors, and a sparse quarter of the probes inside the failed ring are traced in full. Sixteen probes a frame (the default budget) are re-traced wherever they fall, and a miss tightens the tolerance. The default remains the check ray. Rings mode still runs place, trace, direct, gather, filter and compose after the scene has settled, so a whole frame is not held.
 - **Scores (P6):** settled mean 0.033-0.042 per view (limit 0.043 with GPU refs); room 48 px swim 0.0025 (target 0.0006, MISS); light structure 0.0143 (target 0.010, MISS); close-up 0.0106 PASS.
 - **Open:** bounce swims while the camera turns (Anthony, 11:27) because the probe grid slides with the screen; adaptive probes; BRDF importance sampling.
 

@@ -367,6 +367,7 @@ uint lighting_cell_of(vec3 pos, vec3 n, vec3 d) {
     return row + s * col;
 }
 
+uint lighting_hold_check_k(uint probe);
 #include "lighting_cache.glsl"
 
 // Ray k of a probe's stratum, from where the probe stood when the stratum was
@@ -394,6 +395,20 @@ float lighting_seg_dist2c(vec3 a, vec3 b, vec3 c) {
 // (with its kept hit distance t, < 0 a miss) crosses a change.
 bool lighting_held_crosses(vec3 origin, vec3 dir, float t);
 bool lighting_held_traced(uint probe, uint k, vec3 origin, vec3 dir, float t) {
+    // Rings: a held probe traces the check ray only when this frame woke it,
+    // is testing a ring, or drew the verification budget. A full wake traces
+    // the stratum. Geometry crossings stay on either mode. Legacy traces the
+    // check ray every frame.
+    if (gstats.wake_mode != 0u) {
+        uint flags = floatBitsToUint(work.v[lighting_wake_probe_at(probe)].w);
+        if ((flags & 2u) != 0u) {
+            return true;
+        }
+        if ((flags & (1u | 4u | 8u)) != 0u && k == lighting_hold_check_k(probe)) {
+            return true;
+        }
+        return lighting_held_crosses(origin, dir, t);
+    }
     if (k == lighting_hold_check_k(probe)) {
         return true;
     }

@@ -561,3 +561,45 @@ fn legacy_still_traces_one_check_ray_and_moving_traces_more() {
         still.rays_traced
     );
 }
+
+/// Rings on a held still scene trace about the verification budget, not the grid.
+/// The corner, miss, and settled-still cases are separate.
+#[test]
+fn rings_still_traces_the_verification_budget() {
+    let (_gpu, mut window, mut renderer) = open();
+    std::env::set_var("GENOS_LIGHTING_WAKE", "rings");
+    std::env::set_var("GENOS_LIGHTING_WAKE_BUDGET", "16");
+    let world = shipped_hall();
+    let camera = Camera::opening();
+    let mut last = renderer.lighting_wake_stats();
+    for i in 0..16 {
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+        last = renderer.lighting_wake_stats();
+        let [_, probes] = renderer.lighting_probe_samples();
+        eprintln!(
+            "rings still frame {i} placed {probes} traced {} rays {} rings {} splits {} woken {} hits {} misses {}",
+            last.probes_traced,
+            last.rays_traced,
+            last.rings_tested,
+            last.groups_split,
+            last.probes_woken,
+            last.verify_hits,
+            last.verify_misses
+        );
+    }
+    std::env::remove_var("GENOS_LIGHTING_WAKE");
+    std::env::remove_var("GENOS_LIGHTING_WAKE_BUDGET");
+    assert_eq!(last.probes_woken, 0, "a still scene does not wake");
+    assert!(
+        last.probes_traced < 64,
+        "verification budget, not the grid ({})",
+        last.probes_traced
+    );
+    assert!(last.probes_traced > 0, "the budget still traces");
+    assert!(
+        last.rays_traced < last.probes_traced.saturating_mul(4).max(8),
+        "held checks, not a stratum ({} rays / {} probes)",
+        last.rays_traced,
+        last.probes_traced
+    );
+}

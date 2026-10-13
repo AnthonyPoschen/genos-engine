@@ -452,6 +452,11 @@ impl Renderer {
         self.gpu.lighting_wake_stats()
     }
 
+    /// Probes fully traced by the ring scheduler last frame, and where they stood.
+    pub fn lighting_wake_list(&mut self) -> Vec<LightingWakeProbe> {
+        self.gpu.lighting_wake_list()
+    }
+
     /// Dirty-fraction threshold for the a-trous work lists. Overrides
     /// `GENOS_LIGHTING_ATROUS_DIRTY` for later frames. `0` always runs the dense
     /// sweep, `1` keeps the lists up to the storage cap.

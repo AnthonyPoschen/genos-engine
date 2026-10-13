@@ -214,6 +214,7 @@ pub(crate) fn light_groups(
     probes: u32,
     probe_ray_count: u32,
     kept: u32,
+    wake_rings: bool,
 ) -> LightGroups {
     let mut out = LightGroups {
         groups: Vec::new(),
@@ -232,7 +233,19 @@ pub(crate) fn light_groups(
         && settings.probes_this_frame(frame)
         && settings.probe_rays() == LIGHTING_RAYS
         && settings.world_mode() == 3;
-    if frozen && full {
+    // Ring wakes keep the probe passes on a settled frame. The cache can idle.
+    // Legacy still drops to direct and compose.
+    if frozen && wake_rings && settings.gi.enabled && settings.probes.enabled && probes > 0 {
+        out.push(1, probes.div_ceil(64), 1, B_PLACE);
+        out.push(4, probes.div_ceil(64), 1, B_GATHER);
+        out.push(2, (probe_ray_count + 2 * kept).div_ceil(64), 1, B_TRACE);
+        out.push(3, (pixels + 2 * kept).div_ceil(64), 1, B_DIRECT);
+        out.push(4, probes, 1, B_GATHER);
+        out.push(5, probes.div_ceil(64), 1, B_FILTER);
+        out.push(5, probes.div_ceil(64), 1, B_FILTER);
+        out.push(5, probes.div_ceil(64), 1, B_FILTER);
+        out.push(7, w.div_ceil(8).max(1), h.div_ceil(8).max(1), B_COMPOSE);
+    } else if frozen && full {
         out.push(3, pixels.div_ceil(64), 1, B_DIRECT);
         out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
     } else if frozen && probe_only(settings) {
@@ -396,7 +409,7 @@ mod probe_still_tests {
     use genos_scene::LightingPreset;
 
     fn groups(settings: &LightingSettings, frozen: bool, round: bool) -> LightGroups {
-        light_groups(settings, 8, frozen, round, 320, 180, 40, 40 * 64, 0)
+        light_groups(settings, 8, frozen, round, 320, 180, 40, 40 * 64, 0, false)
     }
 
     #[test]
@@ -429,5 +442,20 @@ mod probe_still_tests {
         assert_eq!(quiet.counts[B_CACHE_RAYS as usize], 0);
         assert_eq!(quiet.counts[B_ATROUS as usize], 0);
         assert_eq!(quiet.groups.len(), 2);
+    }
+
+    #[test]
+    fn ring_wakes_keep_the_probe_passes_on_a_settled_frame() {
+        let high = LightingSettings::preset(LightingPreset::High);
+        let quiet = light_groups(&high, 8, true, false, 320, 180, 40, 40 * 64, 40 * 64 * 8, true);
+        assert!(quiet.counts[B_PLACE as usize] > 0, "place");
+        assert!(quiet.counts[B_TRACE as usize] > 0, "trace");
+        assert!(quiet.counts[B_DIRECT as usize] > 0, "direct");
+        assert!(quiet.counts[B_GATHER as usize] > 0, "gather");
+        assert!(quiet.counts[B_FILTER as usize] > 0, "filter");
+        assert_eq!(quiet.counts[B_CACHE_RAYS as usize], 0, "the cache stays idle");
+        assert_eq!(quiet.counts[B_COMPOSE as usize], 1);
+        let legacy = light_groups(&high, 8, true, false, 320, 180, 40, 40 * 64, 0, false);
+        assert_eq!(legacy.groups.len(), 2);
     }
 }

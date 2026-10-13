@@ -227,6 +227,11 @@ void main() {
                 && !lighting_held_crosses(ho, hd, hit_t)) {
                 held_old = true;
             }
+            // A ring test, a verification sample, or a full wake has to shade.
+            // The legacy noise skip would hide the lamp change the ring is scoring.
+            if (lighting_wake_relight(h)) {
+                held_old = false;
+            }
         }
         if (LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_pix_cache_ok() && !(urgent && lighting_near_change(pos))) {
             uint traced = lighting_frame() - LIGHTING_STRATA / 2u;
@@ -473,15 +478,19 @@ void main() {
         vec3 bounce = lighting_gi_on() ? lighting_cache_irradiance_at(pos, n, hit_t) : vec3(0.0);
         e += bounce;
         e_sun += lighting_hit_sunfrac * bounce;
+        vec3 shed = reflectance * e + glow;
+        if (probe_hit) {
+            lighting_wake_observe(h, shed);
+        }
         if (fill_hit) {
-            lighting_put_fill_light(h, reflectance * e + glow);
-        } else if (probe_hit && lighting_check_within_noise(h, pos, n, reflectance, reflectance * e + glow)) {
+            lighting_put_fill_light(h, shed);
+        } else if (probe_hit && !lighting_wake_relight(h) && lighting_check_within_noise(h, pos, n, reflectance, shed)) {
             lighting_chg(CHG_KEPT_HELD, 1u);
         } else if (probe_hit) {
-            lighting_put_kept_light_d(h, reflectance * e + glow, tdl == ~0u ? 2u : ((tdl & 0x80000000u) != 0u ? 0u : 1u));
+            lighting_put_kept_light_d(h, shed, tdl == ~0u ? 2u : ((tdl & 0x80000000u) != 0u ? 0u : 1u));
         } else {
             // w: its sun/sky share as luminance (S63A).
-            work.v[lighting_rad_at(ray)] = vec4(reflectance * e + glow, dot(reflectance * e_sun, vec3(0.2126, 0.7152, 0.0722)));
+            work.v[lighting_rad_at(ray)] = vec4(shed, dot(reflectance * e_sun, vec3(0.2126, 0.7152, 0.0722)));
         }
     }
 }
