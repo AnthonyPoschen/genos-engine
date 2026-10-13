@@ -76,6 +76,8 @@ What changed:
 
 `--wake-log <run>` writes stdout and stderr itself to `./genos-debug/wake/<run>/run.txt`. The file starts with the argv. A value that contains a slash, or `.` or `..`, is the directory. `GENOS_WAKE_LOG` is the mirror and applies only when `--wake-log` was omitted. With neither set, the process keeps the terminal. The log is opened once, after the arguments parse and before the renderer, the same class as `--gpu-times`: a later settings write does not move the descriptors. `--out` stays the unfilled-event directory (`./genos-debug/unfilled` by default).
 
+`--frames 5 --wake-log --shot` does not wait for the picture to settle. It draws five frames, writes the PNG of the last one, and exits. On lavapipe at 320×180 that returned (the log contains `frames=5` and the PNG is written). `--shot` with no `--frames` used to spin until the window closed, and a proof window does not close, so the process never wrote and never returned; it now draws 60 frames. The readback fence wait is two minutes, not forever. A timeout ends the process without `vkDeviceWaitIdle`, which would wait on the same stuck fence. The terminal stays empty for the whole run because the log has stdout, so a hang and a slow first frame look the same until `run.txt` grows.
+
 Moving stress scene, default hall view:
 
 ```

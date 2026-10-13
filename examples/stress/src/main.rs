@@ -65,7 +65,8 @@ const USAGE: &str = "genos-stress [options]
   --proof                   open the proof window (floats, takes no focus; --bench
                             always uses it, so the compositor keeps its size)
   --frames N                quit after N frames; frames step 1/60 s of scene time
-  --shot PATH               settle the light on the last frame and write a PNG
+  --shot PATH               write a PNG of the last frame. With no --frames, runs 60
+                            and then writes (a proof window does not close itself)
   --no-panel                hide the panel
   --bench SECONDS           sweep and print tables; per configuration seconds
   --warmup FRAMES           benchmark warm-up frames per configuration (default 30)
@@ -491,8 +492,9 @@ fn run() -> Result<(), String> {
         return gi_check::run(std::env::args().skip(2));
     }
     let opts = options()?;
-    if let Some(dir) = wake_log_path(opts.wake_log.as_deref())? {
+        if let Some(dir) = wake_log_path(opts.wake_log.as_deref())? {
         redirect_wake_log(&dir)?;
+        eprintln!("genos-stress wake log {}", dir.display());
     }
     let mix = LightMix {
         count: opts.lights,
@@ -767,12 +769,28 @@ fn run() -> Result<(), String> {
         stage.unfilled_tint = applied.tint;
 
         drawn += 1;
-        let last = opts.frames.is_some_and(|limit| drawn >= limit);
+        let last = shot_frame_limit(opts.frames, opts.shot.is_some())
+            .is_some_and(|limit| drawn >= limit);
         let shot = genos_mcp::take_shot_request();
         let want_read = shot || tools_read || (last && opts.shot.is_some());
         let draw_start = Instant::now();
-        let pixels =
-            renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;
+        let pixels = match renderer.draw_with_overlay(
+            &stage.world,
+            &camera,
+            &overlay,
+            want_read,
+            false,
+        ) {
+            Ok(pixels) => pixels,
+            // A stuck readback fence never returns, and --wake-log has already
+            // left the terminal, so the wait has to end the process itself.
+            Err(err) if err.starts_with("frame fence") => {
+                eprintln!("genos-stress: {err}");
+                let _ = std::io::stderr().flush();
+                std::process::exit(1);
+            }
+            Err(err) => return Err(err),
+        };
         tools.after_draw(
             &mut renderer,
             pixels.as_deref(),
@@ -1080,6 +1098,17 @@ fn prepare_wake_log(dir: &Path) -> Result<std::fs::File, String> {
     Ok(file)
 }
 
+/// How many frames a run draws. `--shot` with no `--frames` used to spin until
+/// the window closed, and a proof window does not close, so the process never
+/// wrote the PNG and never returned.
+fn shot_frame_limit(frames: Option<u32>, shot: bool) -> Option<u32> {
+    match frames {
+        Some(limit) => Some(limit),
+        None if shot => Some(60),
+        None => None,
+    }
+}
+
 /// Attach stdout and stderr to `dir/run.txt`. The header is the argv line.
 fn redirect_wake_log(dir: &Path) -> Result<(), String> {
     let _ = std::io::stdout().flush();
@@ -1105,7 +1134,7 @@ extern "C" {
 
 #[cfg(test)]
 mod wake_log_tests {
-    use super::{prepare_wake_log, wake_log_directory, wake_log_path};
+    use super::{prepare_wake_log, shot_frame_limit, wake_log_directory, wake_log_path};
 
     #[test]
     fn a_run_name_lands_under_genos_debug_wake() {
@@ -1136,6 +1165,9 @@ mod wake_log_tests {
             std::path::PathBuf::from("logs/corner")
         );
         assert!(wake_log_path(Some("  ")).is_err());
+        assert_eq!(shot_frame_limit(Some(5), true), Some(5));
+        assert_eq!(shot_frame_limit(None, true), Some(60));
+        assert_eq!(shot_frame_limit(None, false), None);
     }
 
     #[test]

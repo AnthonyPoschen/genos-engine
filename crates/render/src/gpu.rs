@@ -326,7 +326,9 @@ impl Renderer {
         self.gpu.sync_lighting_settings(&world.scene)?;
         self.gpu.record_and_submit(&matrix)?;
         let pixels = if readback {
-            self.gpu.wait_gpu()?;
+            // Unbounded: a stuck fence never returns, and a wake log has already
+            // taken the terminal, so the run looks hung from the first moment.
+            self.gpu.wait_shot_fence()?;
             Some(self.gpu.read_color()?)
         } else {
             None
@@ -2422,12 +2424,29 @@ impl Gpu {
     }
 
     fn wait_gpu(&mut self) -> Result<(), String> {
+        self.wait_fence(u64::MAX, "present wait")
+    }
+
+    /// Readback of one frame. Two minutes is past a slow lavapipe frame and short
+    /// of a stuck device. The error starts with `frame fence` so the stress tool
+    /// can leave without waiting out `vkDeviceWaitIdle` in the renderer drop.
+    fn wait_shot_fence(&mut self) -> Result<(), String> {
+        const TWO_MINUTES_NS: u64 = 120_000_000_000;
+        self.wait_fence(TWO_MINUTES_NS, "frame fence")
+    }
+
+    fn wait_fence(&mut self, timeout_ns: u64, what: &str) -> Result<(), String> {
         unsafe {
             let fences = [self.fence];
-            check(
-                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                "present wait",
-            )?;
+            let result = (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, timeout_ns);
+            // VK_TIMEOUT: the fence did not signal. `check` would hide that name.
+            if result == 2 {
+                return Err(format!(
+                    "{what} timed out after {} ms",
+                    timeout_ns / 1_000_000
+                ));
+            }
+            check(result, what)?;
         }
         Ok(())
     }
