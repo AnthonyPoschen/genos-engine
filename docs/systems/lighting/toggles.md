@@ -46,7 +46,7 @@ The S78S isolate toggles (`GENOS_LIGHTING_TOGGLES`: `freeze_cache`, `direct_only
 | `medium` | Surface cache, 32 rays, two bounces, budget shift 1 (budgets / 2), max 8 lights, 3 a-trous iterations, prefill, day ambient. The push reads the last iteration that ran, copied into buffer A | Surface cache and two bounces, half the ray budget |
 | `high` | Every feature on, unlimited bounces, 64 rays, tile from the picture height, refresh every frame, shadow cell 0.125 m, max lights unlimited, 5 a-trous iterations, compose reuse, sky, emissive, prefill. Day ambient is the fallback for when GI is turned off | The tuned path. Same dispatches as before this struct existed |
 
-`high` on a due frame builds the same group list the frame recorded before settings existed. Shader gates load the control block and fall through when the bits match that path.
+`high` on a due frame builds the same group list the frame recorded before settings existed. Shader gates load the control block and fall through when the bits match that path. The default shadow cell is 0.125 m and the shader divides by the `LIGHTING_SC_TEXEL` constant, so a still frame stays on the old quantisation. A different `shadow_cell` is the variable division.
 
 ## Scene file and Rhai
 

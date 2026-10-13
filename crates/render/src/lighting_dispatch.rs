@@ -163,7 +163,13 @@ pub(crate) fn pack_lighting_ctrl(
         pixel_only,
         ambient_mode,
         history: u32::from(settings.direct.refresh_frames > 1),
-        shadow_cell: settings.shadows.cell_metres,
+        // 0 selects LIGHTING_SC_TEXEL in the shader, the division the tuned
+        // path used before this block existed. 0.125 is that constant.
+        shadow_cell: if settings.shadows.cell_metres == 0.125 {
+            0.0
+        } else {
+            settings.shadows.cell_metres
+        },
         ambient_r: color[0],
         ambient_g: color[1],
         ambient_b: color[2],

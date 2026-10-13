@@ -3600,8 +3600,15 @@ void lighting_shadow_epochs() {
 }
 // The cached entry for (o, n, lamp li): 1 lit, 0 occluded, -1 none (trace it).
 uint lighting_shadow_cell(vec3 o, vec3 n, uint li, out uint tag) {
-    float cell = gstats.ctrl_shadow_cell > 0.0 ? gstats.ctrl_shadow_cell : LIGHTING_SC_TEXEL;
-    ivec3 c = ivec3(floor(o / cell));
+    ivec3 c;
+    // The tuned cell is the constant. Dividing by a uniform that holds the
+    // same 0.125 quantises boundaries differently: block-shaped differences
+    // and a darker still frame. A custom cell is the only variable division.
+    if (!(gstats.ctrl_shadow_cell > 0.0) || gstats.ctrl_shadow_cell == LIGHTING_SC_TEXEL) {
+        c = ivec3(floor(o / LIGHTING_SC_TEXEL));
+    } else {
+        c = ivec3(floor(o / gstats.ctrl_shadow_cell));
+    }
     uint h = lighting_hash(uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u ^ lighting_axis(n) * 0x27d4eb2fu ^ (li + 1u) * 0x9e3779b9u);
     tag = h | 1u;
     return LIGHTING_SHADOW_AT + (lighting_hash(h ^ 0x5bd1e995u) % LIGHTING_CACHE_SLOTS);
