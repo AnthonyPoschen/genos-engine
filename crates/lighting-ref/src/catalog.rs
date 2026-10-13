@@ -22,7 +22,16 @@ pub struct CheckpointDesc {
     pub event: Option<&'static str>,
     /// A fixed camera. Flicker is the temporal variance of a live sequence.
     pub still: bool,
+    /// Owner path-trace sample cap. The tracer also stops when its noise is
+    /// at or under 0.05. The cap is chosen so the stored noise stays under
+    /// [`REFERENCE_NOISE_CEILING`].
+    pub owner_spp: u32,
 }
+
+/// Stored reference noise the owner sample cap is chosen to stay under.
+///
+/// Room-a at 256 samples stored noise 0.161. At 1024 samples it stored 0.084.
+pub const REFERENCE_NOISE_CEILING: f32 = 0.10;
 
 pub fn scenes() -> &'static [SceneDesc] {
     &[
@@ -73,6 +82,7 @@ pub fn checkpoints() -> &'static [CheckpointDesc] {
             note: "Hall bench at noon, boxes held. The still-camera flicker pose.",
             event: None,
             still: true,
+            owner_spp: 256,
         },
         CheckpointDesc {
             scene: "stress-still",
@@ -80,6 +90,7 @@ pub fn checkpoints() -> &'static [CheckpointDesc] {
             note: "Room A at noon, looking out of the bounce opening.",
             event: None,
             still: true,
+            owner_spp: 1024,
         },
         CheckpointDesc {
             scene: "stress-moving",
@@ -87,6 +98,7 @@ pub fn checkpoints() -> &'static [CheckpointDesc] {
             note: "Hall with moving boxes and a share of the lamps moving.",
             event: None,
             still: false,
+            owner_spp: 256,
         },
         CheckpointDesc {
             scene: "stress-moving",
@@ -94,6 +106,7 @@ pub fn checkpoints() -> &'static [CheckpointDesc] {
             note: "Hall just before the box step. A held stale frame looks like this.",
             event: None,
             still: true,
+            owner_spp: 256,
         },
         CheckpointDesc {
             scene: "stress-moving",
@@ -101,6 +114,7 @@ pub fn checkpoints() -> &'static [CheckpointDesc] {
             note: "Hall after the boxes jump and hold. Convergence is scored here.",
             event: Some("box-step"),
             still: false,
+            owner_spp: 256,
         },
         CheckpointDesc {
             scene: "bounce-corner",
@@ -108,6 +122,7 @@ pub fn checkpoints() -> &'static [CheckpointDesc] {
             note: "Inside room A, aimed at the corner the opening lights by bounce.",
             event: None,
             still: true,
+            owner_spp: 256,
         },
         CheckpointDesc {
             scene: "hell-100",
@@ -115,6 +130,7 @@ pub fn checkpoints() -> &'static [CheckpointDesc] {
             note: "Night, 100 lamps, most of them moving. One 25 m section.",
             event: None,
             still: true,
+            owner_spp: 256,
         },
         CheckpointDesc {
             scene: "direct-only",
@@ -122,6 +138,7 @@ pub fn checkpoints() -> &'static [CheckpointDesc] {
             note: "Hall bench. Path trace with zero bounces. Renderer with bounce count 0 and ambient off. The mean luminance ratio is the normalisation control and should sit near 1.",
             event: None,
             still: true,
+            owner_spp: 256,
         },
         CheckpointDesc {
             scene: "sponza",
@@ -129,6 +146,7 @@ pub fn checkpoints() -> &'static [CheckpointDesc] {
             note: "Not traced until a Sponza asset exists.",
             event: None,
             still: true,
+            owner_spp: 256,
         },
     ]
 }
@@ -168,5 +186,15 @@ mod tests {
         assert!(available_checkpoints().any(|cp| cp.name == "corner"));
         assert!(available_checkpoints().any(|cp| cp.scene == "direct-only"));
         assert!(available_checkpoints().any(|cp| cp.event == Some("box-step")));
+        let room = checkpoints()
+            .iter()
+            .find(|cp| cp.scene == "stress-still" && cp.name == "room-a")
+            .unwrap();
+        assert_eq!(room.owner_spp, 1024);
+        assert!(available_checkpoints()
+            .filter(|cp| !(cp.scene == "stress-still" && cp.name == "room-a"))
+            .all(|cp| cp.owner_spp == 256));
+        assert!(0.084 < REFERENCE_NOISE_CEILING);
+        assert!(0.161 > REFERENCE_NOISE_CEILING);
     }
 }

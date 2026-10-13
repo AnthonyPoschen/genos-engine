@@ -191,6 +191,7 @@ pub fn apply_clocks(stage: &mut Stage, box_time: f32, lamp_time: f32, day: f32) 
 }
 
 pub fn reference_setup(shot: &Shot, profile: &TraceProfile) -> RefSetup {
+    let profile = profile.for_checkpoint(shot.scene_id, shot.name);
     let (scene, camera) = scene_and_camera(shot, false);
     let mut setup =
         RefSetup::from_camera(&scene, &camera, profile.width, profile.height, profile.spp);
@@ -252,5 +253,25 @@ mod tests {
         assert_eq!(direct.world.scene.lighting.bounce.count, 0);
         assert!(!direct.world.scene.lighting.gi.enabled);
         assert_eq!(direct.world.scene.lighting.ambient.mode, AmbientMode::Off);
+    }
+
+    #[test]
+    fn room_a_traces_1024_samples_so_its_noise_stays_under_the_ceiling() {
+        let room = shot("stress-still", "room-a").unwrap();
+        let hall = shot("stress-still", "hall").unwrap();
+        let owner = TraceProfile::owner();
+        let room_setup = reference_setup(&room, &owner);
+        let hall_setup = reference_setup(&hall, &owner);
+        assert_eq!(room_setup.max_spp, 1024);
+        assert_eq!(hall_setup.max_spp, 256);
+        assert!((room_setup.seconds - 480.0).abs() < 1.0e-3);
+        assert!((hall_setup.seconds - 120.0).abs() < 1.0e-3);
+        assert!((room_setup.noise_target - 0.05).abs() < 1.0e-6);
+        assert_eq!(
+            reference_setup(&room, &TraceProfile::lavapipe_small()).max_spp,
+            1
+        );
+        assert!(0.084 < genos_lighting_ref::REFERENCE_NOISE_CEILING);
+        assert!(0.161 > genos_lighting_ref::REFERENCE_NOISE_CEILING);
     }
 }

@@ -23,7 +23,10 @@ pub use metrics::{
     MetricParams,
 };
 
-pub use catalog::{available_checkpoints, checkpoints, scene, scenes, CheckpointDesc, SceneDesc};
+pub use catalog::{
+    available_checkpoints, checkpoints, scene, scenes, CheckpointDesc, SceneDesc,
+    REFERENCE_NOISE_CEILING,
+};
 pub use paths::{refcheck_dir, reference_dir, utc_stamp, DEBUG_DIR};
 pub use picture::Picture;
 pub use store::{write_manifest, write_reference, Manifest, ReferenceRecord};

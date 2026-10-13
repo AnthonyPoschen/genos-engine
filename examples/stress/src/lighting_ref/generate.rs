@@ -23,8 +23,10 @@ pub struct TraceProfile {
 
 impl TraceProfile {
     /// Owner GPU machine. Batches of 16 samples until the noise estimate is
-    /// 0.05, 256 samples, or 120 seconds. The achieved noise is stored per
-    /// checkpoint and the score uses it. The path trace is CPU work.
+    /// 0.05, the checkpoint's sample cap, or the time cap. The cap is 256,
+    /// and 1024 for room-a, so stored noise stays under
+    /// [`genos_lighting_ref::REFERENCE_NOISE_CEILING`]. The achieved noise is
+    /// stored per checkpoint and the score uses it. The path trace is CPU work.
     pub fn owner() -> Self {
         Self {
             name: "owner",
@@ -49,6 +51,30 @@ impl TraceProfile {
             max_bounces: 2,
             seconds: 3.0,
             noise_target: 1.0,
+        }
+    }
+
+    /// Owner sample cap for this checkpoint. Lavapipe-small stays one sample.
+    /// A higher cap stretches the time budget by the same factor so the
+    /// sample count is what stops the trace.
+    pub fn for_checkpoint(self, scene: &str, checkpoint: &str) -> Self {
+        if self.name != "owner" {
+            return self;
+        }
+        let Some(desc) = genos_lighting_ref::checkpoints()
+            .iter()
+            .find(|desc| desc.scene == scene && desc.name == checkpoint)
+        else {
+            return self;
+        };
+        if desc.owner_spp <= self.max_spp {
+            return self;
+        }
+        let scale = desc.owner_spp as f32 / self.max_spp.max(1) as f32;
+        Self {
+            max_spp: desc.owner_spp,
+            seconds: self.seconds * scale,
+            ..self
         }
     }
 }

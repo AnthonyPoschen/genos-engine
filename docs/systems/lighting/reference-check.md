@@ -87,7 +87,7 @@ The report is `summary.md` and `summary.html`, plus `metrics.json` and `frames.t
 | direct-only | hall | Hall bench. Path trace with zero bounces. Renderer with bounce count 0 and ambient off. The mean luminance ratio is the normalisation control. |
 | sponza | atrium | Skipped. No Sponza asset in this repository. |
 
-Owner pictures are 320×180. The path trace runs in batches of 16 samples until the noise estimate is 0.05, 256 samples, or 120 seconds, with 8 bounces. The achieved noise is stored beside each picture (`trace.txt`) and the score uses it. Lavapipe-small is 32×18, 1 sample, 2 bounces, 3 seconds. A stored reference is reused when the picture size matches. A different size traces again into the same commit directory.
+Owner pictures are 320×180. The path trace runs in batches of 16 samples until the noise estimate is 0.05, that checkpoint's sample cap, or the time cap, with 8 bounces. The cap is 256 samples and 120 seconds. Room-a is 1024 samples and 480 seconds: at 256 its dark regions stored noise 0.161, and at 1024 they stored 0.084, under the 0.10 ceiling (`REFERENCE_NOISE_CEILING`). The tracer still stops at 0.05 when a checkpoint reaches it. The achieved noise is stored beside each picture (`trace.txt`) and the score uses it. Lavapipe-small is 32×18, 1 sample, 2 bounces, 3 seconds, including room-a. A stored reference is reused when the picture size matches. A different size traces again into the same commit directory.
 
 ## Thresholds
 
