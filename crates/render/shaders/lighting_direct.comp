@@ -475,7 +475,10 @@ void main() {
                     uint kwin = lamp_pick_find(list, count, merged.lamp);
                     if (kwin != ~0u && kwin >= list.suns.y && chosen_n < 4u) {
                         chosen_k[chosen_n] = kwin;
-                        chosen_s[chosen_n] = merged.w_sum / (float(merged.m) * merged.target);
+                        // Algorithm 6's W blends the previous integral, so a moved
+                        // lamp lags. The shade uses this frame's prefix instead.
+                        // The reservoir still stores the merged record.
+                        chosen_s[chosen_n] = point_total / merged.target;
                         chosen_n += 1u;
                     }
                 }

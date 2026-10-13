@@ -68,7 +68,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Spatial neighbours are the previous frame's reservoirs. The shade loop is one pass, so it cannot read a neighbour written this frame. The test uses the current G-buffer (normal dot above 0.9, plane `0.05 + 0.02 * distance`). Radius 0 skips the merge.
 - Hits, fills, and cache rays do not reuse a reservoir. Their sample offset has no frame index, so a still hit does not crawl.
 - A history miss shades with that bumped count and stores the canonical reservoir. Its unshadowed estimate is the point-lamp total.
-- One visible sample of lamps that share a chromaticity reconstructs the sum (`light * total / weight`), not a single lamp's light. Different colours do not.
+- One visible sample of lamps that share a chromaticity reconstructs the sum (`light * total / weight`), not a single lamp's light. Different colours do not. Pixel reuse selects the lamp with Algorithm 6 and stores that merged record, then shades with this frame's `point_total / phat`. Shading with the merged W blends the previous integral and lags a moving lamp.
 - A-trous denoises the surface cache. It does not denoise pixel direct. Pixel noise stays in the picture. Hit and cache estimates that land in the cache are what the denoiser can resolve.
 - ADR 0012's deterministic 16×16 light-tree cut, with no radiance history, is not built here and this does not amend that ADR. A GTX 1060 scales by lowering candidates and rays. There is no minimum candidate count.
 - Mode off binds a 64-byte reservoir. The screen-sized pair allocates only while reuse is on. `direct.max_lights` stays a separate hard cap.
