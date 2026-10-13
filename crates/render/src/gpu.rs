@@ -16,6 +16,7 @@ include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 
 #[path = "debug_view.rs"]
 mod debug_view;
+pub use crate::unfilled::{UnfilledControl, UnfilledStats};
 pub use debug_view::{DebugView, LampReport, ViewMode};
 
 const API_VERSION: u32 = 1 << 22;
@@ -54,6 +55,7 @@ impl Renderer {
         let gpu = Gpu::open(display, surface, width, height)?;
         let width = gpu.extent_w;
         let height = gpu.extent_h;
+        let unfilled = gpu.unfilled;
         Ok(Self {
             gpu,
             width,
@@ -65,7 +67,10 @@ impl Renderer {
             overlay_lines: Vec::new(),
             overlay_verts: Vec::new(),
             keep_pictures: false,
-            debug: debug_view::DebugState::default(),
+            debug: debug_view::DebugState {
+                unfilled,
+                ..debug_view::DebugState::default()
+            },
         })
     }
 
@@ -306,6 +311,9 @@ impl Renderer {
         }
         let mut pack = pack;
         pack::apply_view(&mut pack, camera, aspect);
+        self.gpu.unfilled_eye = [camera.position.x, camera.position.y, camera.position.z];
+        self.gpu.unfilled_yaw = camera.yaw;
+        self.gpu.unfilled_pitch = camera.pitch;
         self.debug.apply(&mut pack);
         self.sync_fields(world)?;
         self.gpu.upload_scene(&pack)?;
@@ -640,6 +648,17 @@ struct Gpu {
     wire_on: bool,
     /// This frame also copies its picture into host memory, for a readback.
     copy_picture: bool,
+    /// Unfilled-on-screen detector. Off does no atomics and no mask copy.
+    unfilled: UnfilledControl,
+    unfilled_saved: u32,
+    last_unfilled: Option<UnfilledStats>,
+    unfilled_eye: [f32; 3],
+    unfilled_yaw: f32,
+    unfilled_pitch: f32,
+    /// `--out` from the process arguments. It wins over the environment mirror.
+    out_cli: Option<String>,
+    /// Directory the next unfilled event is written into.
+    debug_out: String,
     layout: Handle,
     pool: Handle,
     cmd: Handle,
@@ -1282,6 +1301,14 @@ impl Gpu {
                 wire_pipeline: std::ptr::null_mut(),
                 wire_on: false,
                 copy_picture: false,
+                unfilled: UnfilledControl::from_env()?,
+                unfilled_saved: 0,
+                last_unfilled: None,
+                unfilled_eye: [0.0; 3],
+                unfilled_yaw: 0.0,
+                unfilled_pitch: 0.0,
+                out_cli: genos_scene::DebugSettings::cli_out(),
+                debug_out: String::new(),
                 layout: std::ptr::null_mut(),
                 pool: std::ptr::null_mut(),
                 cmd: std::ptr::null_mut(),
@@ -1374,6 +1401,9 @@ impl Gpu {
             gpu.recreate(width, height)?;
             gpu.make_lighting()?;
             gpu.make_lighting_targets()?;
+            let launch = genos_scene::DebugSettings::default().effective(gpu.out_cli.as_deref());
+            gpu.debug_out = launch.out.clone();
+            crate::unfilled::enforce_unfilled_cap(std::path::Path::new(&gpu.debug_out))?;
             Ok(gpu)
         }
     }
@@ -1852,6 +1882,9 @@ impl Gpu {
     }
 
     fn record_and_submit(&mut self, matrix: &[f32; 16]) -> Result<(), String> {
+        if self.unfilled.dump_pct.is_some() {
+            self.copy_picture = true;
+        }
         let profiled = self.profile_submit;
         self.profile_submit = false;
         if profiled && (self.query_pool.is_null() || self.timestamp_period <= 0.0) {
@@ -1866,6 +1899,9 @@ impl Gpu {
                 "wait fence",
             )?;
             self.collect_slot_after_wait(slot)?;
+            if self.lighting_active() {
+                self.take_unfilled(slot);
+            }
             self.collect_frame_times(slot);
             self.desc_set = self.raster_sets[slot];
             check(
@@ -2174,7 +2210,7 @@ impl Gpu {
         if times.lighting_frames > 0 {
             let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
-                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} shadows={:.3} prefill={:.3}",
+                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} shadows={:.3} prefill={:.3}{}",
                 times.lighting_frames,
                 g[0],
                 g[1],
@@ -2195,6 +2231,9 @@ impl Gpu {
                 times.lighting_bucket[B_CACHE_RAYS as usize] / f64::from(times.lighting_frames),
                 times.lighting_bucket[B_SHADOWS as usize] / f64::from(times.lighting_frames),
                 times.prefill_frames as f64 / f64::from(times.lighting_frames),
+                self.last_unfilled
+                    .map(|stats| format!(" | {}", stats.line()))
+                    .unwrap_or_default()
             );
         }
         if !times.light_spans.is_empty() {

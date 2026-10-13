@@ -77,6 +77,10 @@ pub struct Stage {
     pub boxes_still: bool,
     /// The lamp paths' clock stands (moving lamps hold where they are).
     pub lamps_still: bool,
+    /// Count pixels whose surface-cache texel had no finished set. F8 toggles it.
+    pub unfilled_count: bool,
+    /// Magenta tint on those pixels. Shift+F8 toggles it and turns counting on.
+    pub unfilled_tint: bool,
     /// A scene file in place of the building (--scene): its walls, solids and
     /// lights as they are; nothing moves, the sun, sky and lamp knobs do nothing.
     pub room: Option<genos_scene::Scene>,
@@ -109,6 +113,8 @@ impl Stage {
             sky_on: true,
             boxes_still: false,
             lamps_still: false,
+            unfilled_count: false,
+            unfilled_tint: false,
             room: None,
         };
         stage.apply();

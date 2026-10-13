@@ -34,6 +34,7 @@ fn world(walls: Vec<Wall>) -> World {
         ceiling: None,
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
     })
 }
 
