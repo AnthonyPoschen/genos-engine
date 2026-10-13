@@ -8,11 +8,12 @@ use std::path::PathBuf;
 use genos_mcp::json::Value;
 use genos_render::{DebugView, Renderer, ScreenRect, ViewMode};
 use genos_scene::{
-    Camera, DebugSettings, Light, LightingPreset, LightingSettings, Scene, Vec3, PITCH_LIMIT,
+    Camera, DebugSettings, FpsCounterSettings, Light, LightingPreset, LightingSettings, Scene,
+    Vec3, PITCH_LIMIT,
 };
 
 use crate::image::{Flicker, Image, Region};
-use crate::knobs::{Host, Knob};
+use crate::knobs::{CheckpointPose, Host, Knob};
 use crate::reference::{self, RefSetup, Reference};
 use crate::value::{list, num, obj, text, vec3, Args};
 
@@ -294,6 +295,26 @@ impl Tools {
     /// Where captures without a path go.
     pub fn set_out_dir(&mut self, dir: PathBuf) {
         self.out_dir = dir;
+    }
+
+    /// The view the next frame shows, unless a capture job asks for another.
+    pub fn set_view(&mut self, mode: ViewMode) {
+        self.look.view = DebugView { mode, lamp: 0 };
+    }
+
+    /// The view `set_view` stored. A panel uses it to mark the current picture.
+    pub fn view_mode(&self) -> ViewMode {
+        self.look.view.mode
+    }
+
+    /// Forget light, object, and camera-path edits. A scene switch calls this so
+    /// the previous scene's edits do not land on the new one.
+    pub fn drop_scene_edits(&mut self) {
+        self.lights.clear();
+        self.added.clear();
+        self.solo = None;
+        self.objects.clear();
+        self.camera_path = None;
     }
 
     /// Run scene time on a fixed step from the start (a script or a test).
@@ -1154,15 +1175,77 @@ impl Tools {
                 let settings = ctx.host.scene().debug.effective(cli.as_deref());
                 reply(obj(vec![("text", text(settings.to_text()))]))
             }
+            "get_fps_counter" => {
+                reply(fps_counter_value(&ctx.host.scene().fps_counter.effective()))
+            }
+            "set_fps_counter" => {
+                apply_fps_update(&mut ctx.host.scene().fps_counter, args.0)?;
+                reply(fps_counter_value(&ctx.host.scene().fps_counter.effective()))
+            }
             "quit" => {
                 self.quit = Some(args.f64("code")?.unwrap_or(0.0) as i32);
                 reply(obj(vec![("quit", Value::Bool(true))]))
+            }
+            "list_scenes" => reply(list(
+                ctx.host
+                    .list_scenes()
+                    .into_iter()
+                    .map(text)
+                    .collect(),
+            )),
+            "load_scene" => {
+                let name = args.str("name")?.ok_or("load_scene needs name")?;
+                ctx.host.load_scene(&name)?;
+                self.drop_scene_edits();
+                ctx.renderer.reset_lighting_cache();
+                let checkpoint = match args.str("checkpoint")? {
+                    Some(checkpoint) => checkpoint,
+                    None => ctx
+                        .host
+                        .list_checkpoints()
+                        .into_iter()
+                        .next()
+                        .unwrap_or_default(),
+                };
+                if !checkpoint.is_empty() {
+                    let pose = ctx.host.jump_checkpoint(&checkpoint)?;
+                    Self::place_checkpoint(ctx.camera, pose);
+                }
+                reply(obj(vec![
+                    ("scene", text(name)),
+                    ("checkpoint", text(checkpoint)),
+                    ("camera", camera_value(ctx.camera)),
+                ]))
+            }
+            "list_checkpoints" => reply(list(
+                ctx.host
+                    .list_checkpoints()
+                    .into_iter()
+                    .map(text)
+                    .collect(),
+            )),
+            "jump_checkpoint" => {
+                let name = args.str("name")?.ok_or("jump_checkpoint needs name")?;
+                let pose = ctx.host.jump_checkpoint(&name)?;
+                Self::place_checkpoint(ctx.camera, pose);
+                reply(obj(vec![
+                    ("checkpoint", text(name)),
+                    ("camera", camera_value(ctx.camera)),
+                ]))
             }
             _ => Err(format!("unknown command {name}")),
         }
     }
 
-    fn light_cmd(&mut self, args: &Args, ctx: &mut Ctx) -> Result<Value, String> {
+    fn place_checkpoint(camera: &mut Camera, pose: CheckpointPose) {
+        camera.set_pose(
+            Vec3::new(pose.position[0], pose.position[1], pose.position[2]),
+            pose.yaw,
+            pose.pitch,
+        );
+    }
+
+fn light_cmd(&mut self, args: &Args, ctx: &mut Ctx) -> Result<Value, String> {
         if args.bool("solo_off")? == Some(true) {
             self.solo = None;
         }
@@ -1508,6 +1591,55 @@ fn lighting_value_text(value: &Value) -> Result<String, String> {
         return Ok(parts.join(","));
     }
     Err("a lighting value is a string, number, bool, or list".into())
+}
+
+fn fps_counter_value(settings: &FpsCounterSettings) -> Value {
+    obj(vec![
+        ("text", text(settings.to_text())),
+        ("enabled", Value::Bool(settings.enabled)),
+        ("rate_hz", num(settings.rate_hz as f64)),
+    ])
+}
+
+fn apply_fps_update(settings: &mut FpsCounterSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("fps counter settings are an object".into());
+    };
+    if let Some(body) = args.get("text").and_then(|v| v.as_str()) {
+        for line in body.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("fps counter line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &fps_value_text(value)?)?;
+    }
+    Ok(())
+}
+
+fn fps_value_text(value: &Value) -> Result<String, String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(on) = value.as_bool() {
+        return Ok(if on { "on".into() } else { "off".into() });
+    }
+    if let Some(n) = value.as_f64() {
+        if n.fract() == 0.0 && n.abs() < 1.0e15 {
+            return Ok(format!("{}", n as i64));
+        }
+        return Ok(format!("{n:?}"));
+    }
+    Err("an fps counter value is a string, number, or bool".into())
 }
 
 fn apply_debug_update(settings: &mut DebugSettings, args: &Value) -> Result<(), String> {

@@ -5,6 +5,7 @@ fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let vert = compile("shaders/scene.vert", &out.join("scene.vert.spv"));
     let frag = compile("shaders/overlay.frag", &out.join("overlay.frag.spv"));
+    let depth_mask = compile("shaders/depth_mask.frag", &out.join("depth_mask.frag.spv"));
     let wire_vert = compile("shaders/wire.vert", &out.join("wire.vert.spv"));
     let wire = compile("shaders/wire.frag", &out.join("wire.frag.spv"));
     let audio = compile("shaders/transmit.comp", &out.join("transmit.comp.spv"));
@@ -48,9 +49,10 @@ fn main() {
     std::fs::write(
         &glue,
         format!(
-            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\n",
+            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\n",
             vert.display(),
             frag.display(),
+            depth_mask.display(),
             wire_vert.display(),
             wire.display(),
             audio.display(),
@@ -82,6 +84,8 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=shaders/scene.vert");
     println!("cargo:rerun-if-changed=shaders/overlay.frag");
+    println!("cargo:rerun-if-changed=shaders/depth_mask.frag");
+    println!("cargo:rerun-if-changed=shaders/material_atlas.glsl");
     println!("cargo:rerun-if-changed=shaders/wire.vert");
     println!("cargo:rerun-if-changed=shaders/wire.frag");
     println!("cargo:rerun-if-changed=shaders/scene_rays.glsl");

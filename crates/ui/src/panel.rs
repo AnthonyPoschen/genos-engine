@@ -4,8 +4,10 @@ use std::path::PathBuf;
 
 use genos_scene::{Camera, Scene};
 
+use crate::dropdown;
 use crate::layout::{self, Direction, Item, Node, Pad, Place, Rect, Sizing, Space};
 use crate::omarchy::{self, Palette};
+use crate::slider::{self, SliderStep};
 use crate::text::{self, Blot};
 use crate::{id, Action, Look, PictureMode};
 
@@ -39,6 +41,43 @@ pub struct Pointer {
     pub x: f32,
     pub y: f32,
     pub down: bool,
+    /// Vertical wheel this frame. Positive steps a slider toward its maximum.
+    /// Callers pass the pressed edge, not a held repeat, for the keys below.
+    pub wheel_y: f32,
+    /// Decrease key pressed this frame (left or down).
+    pub key_dec: bool,
+    /// Increase key pressed this frame (right or up).
+    pub key_inc: bool,
+    /// Activate key pressed this frame (enter). Opens or picks the highlighted choice.
+    pub key_activate: bool,
+    /// Dismiss key pressed this frame (escape). Closes an open list.
+    pub key_dismiss: bool,
+}
+
+impl Default for Pointer {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            down: false,
+            wheel_y: 0.0,
+            key_dec: false,
+            key_inc: false,
+            key_activate: false,
+            key_dismiss: false,
+        }
+    }
+}
+
+impl Pointer {
+    pub fn at(x: f32, y: f32, down: bool) -> Self {
+        Self {
+            x,
+            y,
+            down,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -55,6 +94,10 @@ pub struct State {
     /// The current press missed the panel, so look capture stays on.
     look_hold: bool,
     focus: Option<u32>,
+    /// Dropdown whose list is open. The list paints over the rest of the panel.
+    open_drop: Option<u32>,
+    drop_highlight: usize,
+    drop_scroll: usize,
     /// True while the red box path is advancing.
     pub box_running: bool,
     /// Omarchy `current` directory. `None` uses the real state path.
@@ -75,6 +118,9 @@ impl Default for State {
             held: None,
             look_hold: false,
             focus: None,
+            open_drop: None,
+            drop_highlight: 0,
+            drop_scroll: 0,
             box_running: false,
             omarchy_current: None,
             palette: None,
@@ -108,6 +154,8 @@ pub struct Frame {
     pub actions: Vec<Action>,
     /// True when this press missed the panel and the camera may capture look.
     pub look_capture: bool,
+    /// Name and exact value while the pointer is on a slider. `None` otherwise.
+    pub tooltip: Option<String>,
 }
 
 /// Lay out the lighting panel and the lamp sun. Apply hover, press, and drag.
@@ -198,6 +246,7 @@ pub fn lighting_frame(
         paints,
         actions,
         look_capture,
+        tooltip: None,
     }
 }
 
@@ -207,10 +256,59 @@ pub struct PanelRow {
     pub label: String,
     pub buttons: Vec<PanelButton>,
     pub slider: Option<PanelSlider>,
+    /// Closed box in the row. The open list is not part of the row's layout.
+    pub dropdown: Option<PanelDropdown>,
+    /// On/off marks laid out left to right. A press reports the next state.
+    pub checks: Vec<PanelCheck>,
+}
+
+/// A compact on/off mark and a label. The panel does not store `on`.
+/// The next frame passes the new value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PanelCheck {
+    pub id: u32,
+    pub text: String,
+    pub on: bool,
+}
+
+/// A closed choice box. A press opens a scrollable list over the panel.
+///
+/// Arrow keys move the highlight. Enter picks it. Escape, or a press outside
+/// the list, closes it without a choice. The wheel scrolls the list. The row
+/// under the pointer is highlighted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PanelDropdown {
+    pub id: u32,
+    /// Selected value. The closed box shows the nearest choice name.
+    pub value: f64,
+    pub choices: Vec<SliderStep>,
+}
+
+impl PanelDropdown {
+    pub fn new(id: u32, value: f64, choices: Vec<SliderStep>) -> Self {
+        Self { id, value, choices }
+    }
+
+    fn selected_index(&self) -> usize {
+        slider::nearest_index(&self.choices, self.value).unwrap_or(0)
+    }
+
+    fn selected_name(&self) -> String {
+        self.choices
+            .get(self.selected_index())
+            .map(|choice| choice.name.clone())
+            .unwrap_or_default()
+    }
 }
 
 /// A slider on a panel row. A press anywhere on the track sets the value there and a
 /// held press follows the pointer, firing [`Action::Slide`] each frame it changes.
+///
+/// `steps` empty is a numeric slider: `step` of 0 is continuous, and a positive
+/// `step` snaps to `min + k * step`. Named `steps` are discrete. The track spaces
+/// them evenly. A click, a drag, the wheel, and the arrow keys snap to a step and
+/// report that step's `value`. The names are drawn small and dim under the ticks.
+/// The current name is brighter. A hover tip shows the name and the exact value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PanelSlider {
     /// Game id, as for a button.
@@ -218,30 +316,89 @@ pub struct PanelSlider {
     pub value: f64,
     pub min: f64,
     pub max: f64,
-    /// Values snap to `min + k * step`; 0 is continuous.
+    /// Values snap to `min + k * step`; 0 is continuous. Ignored when `steps` is set.
     pub step: f64,
     /// Readout beside the track, e.g. `23.9 H`.
     pub text: String,
+    /// Named steps in track order. Empty for a numeric slider.
+    pub steps: Vec<SliderStep>,
 }
 
 impl PanelSlider {
-    fn share(&self) -> f32 {
-        let span = self.max - self.min;
-        if span <= 0.0 {
-            0.0
-        } else {
-            ((self.value - self.min) / span).clamp(0.0, 1.0) as f32
+    /// A numeric slider. `steps` stays empty.
+    pub fn range(
+        id: u32,
+        value: f64,
+        min: f64,
+        max: f64,
+        step: f64,
+        text: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            value,
+            min,
+            max,
+            step,
+            text: text.into(),
+            steps: Vec::new(),
         }
     }
 
+    /// Discrete named steps. `value` selects the nearest step.
+    pub fn named(id: u32, value: f64, steps: Vec<SliderStep>) -> Self {
+        let text = slider::nearest_index(&steps, value)
+            .map(|index| steps[index].name.clone())
+            .unwrap_or_default();
+        let min = steps.first().map(|step| step.value).unwrap_or(0.0);
+        let max = steps.last().map(|step| step.value).unwrap_or(min);
+        Self {
+            id,
+            value,
+            min,
+            max,
+            step: 0.0,
+            text,
+            steps,
+        }
+    }
+
+    fn share(&self) -> f32 {
+        slider::share(self.min, self.max, &self.steps, self.value)
+    }
+
     fn value_at(&self, track: Rect, pointer_x: f32) -> f64 {
-        let (left, right) = track_ends(track);
+        let band = thumb_band(track, !self.steps.is_empty());
+        let (left, right) = track_ends(band);
         let t = ((pointer_x - left) / (right - left).max(1.0)).clamp(0.0, 1.0) as f64;
-        let v = self.min + t * (self.max - self.min);
-        if self.step > 0.0 {
-            (self.min + ((v - self.min) / self.step).round() * self.step).clamp(self.min, self.max)
-        } else {
-            v
+        slider::value_at_fraction(self.min, self.max, self.step, &self.steps, t)
+    }
+
+    /// Move `delta` steps from the current value. Positive moves toward `max`.
+    pub fn step_by(&self, delta: i32) -> f64 {
+        slider::step_by(
+            self.min,
+            self.max,
+            self.step,
+            &self.steps,
+            self.value,
+            delta,
+        )
+    }
+
+    fn step_from(&self, value: f64, delta: i32) -> f64 {
+        slider::step_by(self.min, self.max, self.step, &self.steps, value, delta)
+    }
+
+    /// Hover text: the step name and its exact value, or the exact numeric value.
+    pub fn tip(&self) -> String {
+        slider::tip(&self.steps, self.value)
+    }
+
+    fn at(&self, value: f64) -> Self {
+        Self {
+            value,
+            ..self.clone()
         }
     }
 }
@@ -286,7 +443,10 @@ pub fn button_panel(
     panel.children.push(label(own + 1, title, fill));
     for (index, item) in rows.iter().enumerate() {
         let at = own + 2 + 3 * index as u32;
-        let mut children = vec![label(at + 1, &item.label, fill)];
+        let mut children = Vec::new();
+        if !item.label.is_empty() {
+            children.push(label(at + 1, &item.label, fill));
+        }
         for button in &item.buttons {
             let mut node = control(button.id, &button.text, Action::Press(button.id), palette);
             if button.selected {
@@ -297,26 +457,77 @@ pub fn button_panel(
             children.push(node);
         }
         if let Some(bar) = &item.slider {
-            children.push(slider(bar.id, palette));
+            children.push(sized_slider(
+                bar.id,
+                palette,
+                slider_width(bar),
+                slider_height(bar),
+            ));
             children.push(label(at + 2, &bar.text, fill));
+        }
+        if let Some(drop) = &item.dropdown {
+            children.push(dropdown_box(drop, palette));
+        }
+        for check in &item.checks {
+            children.push(check_node(check, fill, palette));
         }
         panel.children.push(row(at, children, fill));
     }
     let bars: Vec<&PanelSlider> = rows.iter().filter_map(|r| r.slider.as_ref()).collect();
+    let drops: Vec<&PanelDropdown> = rows.iter().filter_map(|r| r.dropdown.as_ref()).collect();
+    let checks: Vec<&PanelCheck> = rows.iter().flat_map(|row| row.checks.iter()).collect();
     let items = layout::layout(&panel, Space::Screen, viewport, Some(camera));
+    if state
+        .open_drop
+        .is_some_and(|id| drops.iter().all(|drop| drop.id != id))
+    {
+        state.open_drop = None;
+    }
     let hit = items
         .iter()
         .rev()
         .find(|item| item.rect.contains(pointer.x, pointer.y));
     let mut actions = Vec::new();
     let mut look_capture = false;
+    let mut consumed = false;
     if press_edge {
+        if let Some((drop, list, _)) = popup_geom(state, &drops, &items, viewport) {
+            if let Some(index) = dropdown::row_at(
+                list,
+                state.drop_scroll,
+                drop.choices.len(),
+                pointer.x,
+                pointer.y,
+            ) {
+                if let Some(choice) = drop.choices.get(index) {
+                    actions.push(Action::Select {
+                        id: drop.id,
+                        value: choice.value,
+                    });
+                }
+                state.open_drop = None;
+            } else if hit.map(|item| item.id) == Some(drop.id) {
+                state.open_drop = None;
+            } else {
+                state.open_drop = None;
+            }
+            state.dragging = false;
+            state.look_hold = false;
+            state.held = None;
+            state.focus = Some(drop.id);
+            consumed = true;
+        }
+    }
+    if !consumed && press_edge {
         if let Some(item) = hit {
             state.focus = Some(item.id);
             state.look_hold = false;
             state.sliding = None;
             state.held = None;
-            if bars.iter().any(|b| b.id == item.id) {
+            if let Some(drop) = drops.iter().find(|drop| drop.id == item.id) {
+                open_dropdown(state, drop);
+                state.dragging = false;
+            } else if bars.iter().any(|b| b.id == item.id) {
                 state.held = Some(item.id);
                 state.dragging = false;
             } else if let Some(action) = item.action {
@@ -327,6 +538,7 @@ pub fn button_panel(
             }
         } else {
             state.focus = None;
+            state.open_drop = None;
             state.dragging = false;
             state.sliding = None;
             state.look_hold = true;
@@ -344,6 +556,37 @@ pub fn button_panel(
                 actions.push(Action::Slide { id: bar.id, value });
             }
         }
+    } else if state.open_drop.is_some() {
+        drive_open_dropdown(state, &drops, &items, viewport, pointer, &mut actions);
+    } else {
+        let hovered = hit.and_then(|item| bars.iter().copied().find(|bar| bar.id == item.id));
+        if let Some(bar) = hovered {
+            let notches = wheel_steps(pointer.wheel_y);
+            if notches != 0 {
+                state.focus = Some(bar.id);
+                push_step(&mut actions, bar, notches);
+            }
+        }
+        if pointer.key_dec || pointer.key_inc {
+            let keyed = hovered.or_else(|| {
+                state
+                    .focus
+                    .and_then(|id| bars.iter().copied().find(|bar| bar.id == id))
+            });
+            if let Some(bar) = keyed {
+                let delta = i32::from(pointer.key_inc) - i32::from(pointer.key_dec);
+                state.focus = Some(bar.id);
+                push_step(&mut actions, bar, delta);
+            }
+        }
+        if pointer.key_activate {
+            if let Some(drop) = state
+                .focus
+                .and_then(|id| drops.iter().find(|drop| drop.id == id))
+            {
+                open_dropdown(state, drop);
+            }
+        }
     }
     let mut shown = Vec::with_capacity(items.len());
     let mut paints = Vec::new();
@@ -359,15 +602,41 @@ pub fn button_panel(
         push_paints(&mut paints, item, look, palette, None, false);
         if let Some(bar) = bars.iter().find(|b| b.id == item.id) {
             // Show where a held slider is going this frame.
-            let value = actions.iter().rev().find_map(|a| match a {
-                Action::Slide { id, value } if *id == bar.id => Some(*value),
-                _ => None,
-            });
-            let shown_bar = PanelSlider {
-                value: value.unwrap_or(bar.value),
-                ..(*bar).clone()
-            };
-            push_bar(&mut paints, item.rect, shown_bar.share(), palette);
+            push_bar(
+                &mut paints,
+                item.rect,
+                &shown_slider(bar, &actions),
+                palette,
+            );
+        }
+        if drops.iter().any(|drop| drop.id == item.id) {
+            push_chevron(&mut paints, item.rect, state.open_drop == Some(item.id));
+        }
+        if let Some(check) = checks.iter().find(|check| check.id == item.id) {
+            push_check(&mut paints, item.rect, check.on);
+        }
+    }
+    if let Some((drop, list, scroll)) = popup_geom(state, &drops, &items, viewport) {
+        state.drop_scroll = scroll;
+        push_popup(
+            &mut paints,
+            &mut shown,
+            drop,
+            list,
+            scroll,
+            state.drop_highlight,
+        );
+    }
+    let mut tooltip = None;
+    if let Some(item) = hit {
+        if let Some(bar) = bars.iter().find(|b| b.id == item.id) {
+            let shown_bar = shown_slider(bar, &actions);
+            let text = shown_bar.tip();
+            let band = thumb_band(item.rect, !shown_bar.steps.is_empty());
+            let (left, right) = track_ends(band);
+            let x = left + (right - left) * shown_bar.share();
+            push_tip(&mut paints, viewport, x, band.y, &text);
+            tooltip = Some(text);
         }
     }
     state.pointer_x = pointer.x;
@@ -383,33 +652,431 @@ pub fn button_panel(
         paints,
         actions,
         look_capture,
+        tooltip,
+    }
+}
+
+const POPUP_ID: u32 = u32::MAX - 8192;
+const LIST_BG: [f32; 3] = [0.10, 0.11, 0.14];
+const LIST_HOVER: [f32; 3] = [0.30, 0.38, 0.48];
+const LIST_BORDER: [f32; 3] = [0.55, 0.62, 0.72];
+
+const CHECK_BOX: f32 = 16.0;
+const CHECK_MARK: [f32; 3] = [0.62, 0.78, 0.42];
+
+fn check_node(check: &PanelCheck, fill: [f32; 3], palette: Option<Palette>) -> Node {
+    let mut node = Node::new(check.id);
+    node.pad = Pad {
+        left: 22.0,
+        right: 8.0,
+        top: 2.0,
+        bottom: 2.0,
+    };
+    node.text = Some(check.text.clone());
+    node.action = Some(Action::Toggle {
+        id: check.id,
+        on: !check.on,
+    });
+    let mut looks = flat_look(fill);
+    let accent = palette
+        .map(|palette| palette.accent)
+        .unwrap_or([0.55, 0.65, 0.75]);
+    looks.hover.border = accent;
+    looks.pressed.border = accent;
+    paint_looks(&mut node, looks);
+    node
+}
+
+fn push_check(out: &mut Vec<Paint>, rect: Rect, on: bool) {
+    let box_rect = Rect {
+        x: rect.x + 2.0,
+        y: rect.y + (rect.h - CHECK_BOX) * 0.5,
+        w: CHECK_BOX,
+        h: CHECK_BOX,
+    };
+    push_border(out, box_rect, LIST_BORDER);
+    if on {
+        push_rect(
+            out,
+            Rect {
+                x: box_rect.x + 4.0,
+                y: box_rect.y + 4.0,
+                w: CHECK_BOX - 8.0,
+                h: CHECK_BOX - 8.0,
+            },
+            CHECK_MARK,
+        );
+    }
+}
+
+fn dropdown_box(drop: &PanelDropdown, palette: Option<Palette>) -> Node {
+    let width = dropdown_width(drop);
+    let mut node = Node::new(drop.id);
+    node.pad = Pad {
+        left: 6.0,
+        right: 16.0,
+        top: 4.0,
+        bottom: 4.0,
+    };
+    node.text = Some(drop.selected_name());
+    node.width = Sizing::fixed(width);
+    paint_looks(&mut node, control_looks(palette));
+    node
+}
+
+fn dropdown_width(drop: &PanelDropdown) -> f32 {
+    let text = drop
+        .choices
+        .iter()
+        .map(|choice| text::measure(&choice.name, None).0)
+        .fold(0.0_f32, f32::max);
+    (text + 22.0).clamp(160.0, 320.0)
+}
+
+fn open_dropdown(state: &mut State, drop: &PanelDropdown) {
+    let index = drop.selected_index();
+    let visible = drop.choices.len().min(dropdown::VISIBLE);
+    state.open_drop = Some(drop.id);
+    state.drop_highlight = index;
+    state.drop_scroll = dropdown::reveal(0, index, visible, drop.choices.len());
+    state.focus = Some(drop.id);
+}
+
+fn popup_geom<'a>(
+    state: &State,
+    drops: &[&'a PanelDropdown],
+    items: &[Item],
+    viewport: [f32; 2],
+) -> Option<(&'a PanelDropdown, Rect, usize)> {
+    let id = state.open_drop?;
+    let drop = drops.iter().find(|drop| drop.id == id)?;
+    let anchor = items.iter().find(|item| item.id == id)?.rect;
+    let (visible, scroll) = dropdown::window(drop.choices.len(), state.drop_scroll);
+    if visible == 0 {
+        return None;
+    }
+    let list = dropdown::place(anchor, visible, viewport[1]);
+    Some((drop, list, scroll))
+}
+
+fn drive_open_dropdown(
+    state: &mut State,
+    drops: &[&PanelDropdown],
+    items: &[Item],
+    viewport: [f32; 2],
+    pointer: Pointer,
+    actions: &mut Vec<Action>,
+) {
+    let Some((drop, list, scroll)) = popup_geom(state, drops, items, viewport) else {
+        return;
+    };
+    state.drop_scroll = scroll;
+    if pointer.key_dismiss {
+        state.open_drop = None;
+        return;
+    }
+    let count = drop.choices.len();
+    let (visible, _) = dropdown::window(count, state.drop_scroll);
+    let delta = i32::from(pointer.key_dec) - i32::from(pointer.key_inc);
+    if delta != 0 {
+        state.drop_highlight = dropdown::move_highlight(state.drop_highlight, delta, count);
+        state.drop_scroll =
+            dropdown::reveal(state.drop_scroll, state.drop_highlight, visible, count);
+    }
+    let on_list = list.contains(pointer.x, pointer.y);
+    let on_box = items
+        .iter()
+        .find(|item| item.id == drop.id)
+        .is_some_and(|item| item.rect.contains(pointer.x, pointer.y));
+    if on_list || on_box {
+        let notches = wheel_steps(pointer.wheel_y);
+        if notches != 0 {
+            state.drop_scroll = dropdown::scroll_by(state.drop_scroll, notches, visible, count);
+        }
+    }
+    if let Some(index) = dropdown::row_at(list, state.drop_scroll, count, pointer.x, pointer.y) {
+        state.drop_highlight = index;
+    }
+    if pointer.key_activate {
+        if let Some(choice) = drop.choices.get(state.drop_highlight) {
+            actions.push(Action::Select {
+                id: drop.id,
+                value: choice.value,
+            });
+            state.open_drop = None;
+        }
+    }
+}
+
+fn push_chevron(out: &mut Vec<Paint>, rect: Rect, open: bool) {
+    let x = rect.x + rect.w - 12.0;
+    let mid = rect.y + rect.h * 0.5;
+    if open {
+        push_rect(
+            out,
+            Rect {
+                x: x + 3.0,
+                y: mid - 5.0,
+                w: 2.0,
+                h: 2.0,
+            },
+            TEXT,
+        );
+        push_rect(
+            out,
+            Rect {
+                x: x + 2.0,
+                y: mid - 3.0,
+                w: 4.0,
+                h: 2.0,
+            },
+            TEXT,
+        );
+        push_rect(
+            out,
+            Rect {
+                x,
+                y: mid - 1.0,
+                w: 8.0,
+                h: 2.0,
+            },
+            TEXT,
+        );
+    } else {
+        push_rect(
+            out,
+            Rect {
+                x,
+                y: mid - 1.0,
+                w: 8.0,
+                h: 2.0,
+            },
+            TEXT,
+        );
+        push_rect(
+            out,
+            Rect {
+                x: x + 2.0,
+                y: mid + 1.0,
+                w: 4.0,
+                h: 2.0,
+            },
+            TEXT,
+        );
+        push_rect(
+            out,
+            Rect {
+                x: x + 3.0,
+                y: mid + 3.0,
+                w: 2.0,
+                h: 2.0,
+            },
+            TEXT,
+        );
+    }
+}
+
+fn push_popup(
+    paints: &mut Vec<Paint>,
+    shown: &mut Vec<Shown>,
+    drop: &PanelDropdown,
+    list: Rect,
+    scroll: usize,
+    highlight: usize,
+) {
+    push_rect(paints, list, LIST_BG);
+    push_border(paints, list, LIST_BORDER);
+    let (visible, scroll) = dropdown::window(drop.choices.len(), scroll);
+    for row in 0..visible {
+        let index = scroll + row;
+        let Some(choice) = drop.choices.get(index) else {
+            break;
+        };
+        let rect = Rect {
+            x: list.x + 1.0,
+            y: list.y + row as f32 * dropdown::ROW_H,
+            w: (list.w - 2.0).max(0.0),
+            h: dropdown::ROW_H,
+        };
+        let hot = index == highlight;
+        let background = if hot { LIST_HOVER } else { LIST_BG };
+        if hot {
+            push_rect(paints, rect, background);
+        }
+        for blot in text::blots(&choice.name, rect.x + 6.0, rect.y + 2.0, rect.w - 8.0) {
+            push_blot(paints, blot, TEXT);
+        }
+        let look = Look {
+            background,
+            border: LIST_BORDER,
+        };
+        shown.push(Shown {
+            id: POPUP_ID + index as u32,
+            rect,
+            look,
+            idle: Look {
+                background: LIST_BG,
+                border: LIST_BORDER,
+            },
+            text: Some(choice.name.clone()),
+        });
+    }
+}
+
+fn shown_slider(bar: &PanelSlider, actions: &[Action]) -> PanelSlider {
+    let value = actions.iter().rev().find_map(|action| match action {
+        Action::Slide { id, value } if *id == bar.id => Some(*value),
+        _ => None,
+    });
+    bar.at(value.unwrap_or(bar.value))
+}
+
+fn push_step(actions: &mut Vec<Action>, bar: &PanelSlider, delta: i32) {
+    if delta == 0 {
+        return;
+    }
+    let current = actions
+        .iter()
+        .rev()
+        .find_map(|action| match action {
+            Action::Slide { id, value } if *id == bar.id => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(bar.value);
+    let value = bar.step_from(current, delta);
+    if value != current {
+        actions.push(Action::Slide { id: bar.id, value });
+    }
+}
+
+fn wheel_steps(wheel_y: f32) -> i32 {
+    if wheel_y.abs() < 1.0e-4 {
+        0
+    } else {
+        let steps = wheel_y.round() as i32;
+        if steps == 0 {
+            if wheel_y > 0.0 {
+                1
+            } else {
+                -1
+            }
+        } else {
+            steps.clamp(-24, 24)
+        }
+    }
+}
+
+fn slider_width(bar: &PanelSlider) -> f32 {
+    if bar.steps.is_empty() {
+        SLIDER_W
+    } else {
+        (bar.steps.len() as f32 * 64.0).clamp(220.0, 480.0)
+    }
+}
+
+fn slider_height(bar: &PanelSlider) -> f32 {
+    if bar.steps.is_empty() {
+        return SLIDER_H;
+    }
+    let width = slider_width(bar);
+    let rows = slider::label_rows(&bar.steps, SLIDER_INSET, width - SLIDER_INSET).max(1);
+    SLIDER_H + rows as f32 * text::SMALL_LINE + 2.0
+}
+
+/// Named sliders keep tick names under the thumb track. The hit target is the whole box.
+fn thumb_band(track: Rect, named: bool) -> Rect {
+    if named {
+        Rect {
+            h: SLIDER_H.min(track.h),
+            ..track
+        }
+    } else {
+        track
     }
 }
 
 /// A game slider: the filled share of the track and a thumb at its end.
-fn push_bar(out: &mut Vec<Paint>, track: Rect, share: f32, palette: Option<Palette>) {
-    let (left, right) = track_ends(track);
-    let x = left + (right - left) * share;
+/// Named steps also draw a tick and a small name under each step.
+fn push_bar(out: &mut Vec<Paint>, track: Rect, bar: &PanelSlider, palette: Option<Palette>) {
+    let band = thumb_band(track, !bar.steps.is_empty());
+    let (left, right) = track_ends(band);
+    let x = left + (right - left) * bar.share();
     push_rect(
         out,
         Rect {
             x: left,
-            y: track.y + (track.h - NOTCH_H) * 0.5,
+            y: band.y + (band.h - NOTCH_H) * 0.5,
             w: (x - left).max(0.0),
             h: NOTCH_H,
         },
         notch_color(palette),
     );
+    if !bar.steps.is_empty() {
+        let tick = [0.34, 0.36, 0.40];
+        for index in 0..bar.steps.len() {
+            let tick_x = slider::notch_x(band, index, bar.steps.len(), SLIDER_INSET);
+            push_rect(
+                out,
+                Rect {
+                    x: tick_x - 1.0,
+                    y: band.y + (band.h - 6.0) * 0.5,
+                    w: 2.0,
+                    h: 6.0,
+                },
+                tick,
+            );
+        }
+    }
     push_rect(
         out,
         Rect {
             x: x - THUMB_W * 0.5,
-            y: track.y + (track.h - THUMB_H) * 0.5,
+            y: band.y + (band.h - THUMB_H) * 0.5,
             w: THUMB_W,
             h: THUMB_H,
         },
         THUMB_COLOR,
     );
+    if bar.steps.is_empty() {
+        return;
+    }
+    let current = slider::nearest_index(&bar.steps, bar.value);
+    let labels = slider::place_labels(&bar.steps, current, left, right, band.y + band.h + 1.0);
+    for label in &labels {
+        let color = if label.current {
+            slider::LABEL_HOT
+        } else {
+            slider::LABEL_DIM
+        };
+        for blot in slider::label_blots(label) {
+            push_blot(out, blot, color);
+        }
+    }
+}
+
+fn push_tip(out: &mut Vec<Paint>, viewport: [f32; 2], anchor_x: f32, anchor_y: f32, text: &str) {
+    let (text_w, text_h) = text::measure(text, None);
+    let pad = 4.0;
+    let box_w = text_w + pad * 2.0;
+    let box_h = text_h + pad * 2.0;
+    let mut x = anchor_x - box_w * 0.5;
+    let mut y = anchor_y - box_h - 6.0;
+    if y < 0.0 {
+        y = anchor_y + SLIDER_H + 4.0;
+    }
+    x = x.clamp(0.0, (viewport[0] - box_w).max(0.0));
+    y = y.clamp(0.0, (viewport[1] - box_h).max(0.0));
+    let rect = Rect {
+        x,
+        y,
+        w: box_w,
+        h: box_h,
+    };
+    push_rect(out, rect, [0.05, 0.06, 0.08]);
+    push_border(out, rect, [0.55, 0.58, 0.64]);
+    for blot in text::blots(text, x + pad, y + pad, text_w.max(1.0)) {
+        push_blot(out, blot, TEXT);
+    }
 }
 
 /// Write one control onto the first lamp. Intensity scales `Light.color`.
@@ -432,7 +1099,9 @@ pub fn apply_lamp(scene: &mut Scene, action: Action) {
         Action::SetAntialias(_)
         | Action::ToggleBoxRun
         | Action::Press(_)
-        | Action::Slide { .. } => {}
+        | Action::Slide { .. }
+        | Action::Select { .. }
+        | Action::Toggle { .. } => {}
     }
 }
 
@@ -563,9 +1232,13 @@ fn row(id: u32, children: Vec<Node>, fill: [f32; 3]) -> Node {
 }
 
 fn slider(id: u32, palette: Option<Palette>) -> Node {
+    sized_slider(id, palette, SLIDER_W, SLIDER_H)
+}
+
+fn sized_slider(id: u32, palette: Option<Palette>, width: f32, height: f32) -> Node {
     let mut node = Node::new(id);
-    node.width = Sizing::fixed(SLIDER_W);
-    node.height = Sizing::fixed(SLIDER_H);
+    node.width = Sizing::fixed(width);
+    node.height = Sizing::fixed(height);
     paint_looks(&mut node, control_looks(palette));
     node
 }

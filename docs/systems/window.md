@@ -43,13 +43,15 @@ The events are:
 
 `Frame` reports `pointer_x` and `pointer_y` in window pixels. The origin is the top-left.
 
+`Frame.wheel_y` is the vertical wheel for this pump, in notches. Positive is wheel up. The horizontal axis is ignored. A continuous axis event wins for that frame. A click wheel's value120 is used when the continuous event did not arrive. A discrete notch is used when neither of those arrived. `pump` clears the wheel after it copies the value out. `FocusGate` passes the wheel only while the window has focus.
+
 Call `lock_cursor` when look capture starts. Call `unlock_cursor` when the pause menu opens. Call `set_mode` to ask for fullscreen.
 
 Give `window.display` and `window.surface` to the renderer. The window does not draw.
 
 ## Limits
 
-The X11 window waits. Windows and macOS windows wait. The editor window is not built.
+The X11 window waits. Windows and macOS windows wait. The editor window is not built. The horizontal wheel is ignored.
 
 A listener cannot pump the window. Fullscreen is a request. The compositor can refuse it.
 

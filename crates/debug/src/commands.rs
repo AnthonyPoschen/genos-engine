@@ -85,6 +85,30 @@ pub fn specs() -> Vec<CommandSpec> {
             "set_debug_settings",
             "Partial debug-output update. Key out is the unfilled directory. A text field overlays key=value lines. Writes the scene. --out and GENOS_UNFILLED_DIR still overlay the value used for the next save.",
         ),
+        spec(
+            "get_fps_counter",
+            "The frame-rate overlay settings in force (text form): enabled and rate_hz. Off by default, 4 Hz. --fps-counter and --fps-hz win over GENOS_FPS_COUNTER and GENOS_FPS_HZ, which win over the scene value.",
+        ),
+        spec(
+            "set_fps_counter",
+            "Partial frame-rate overlay update. Keys are enabled (on/off) and rate_hz (0.25 to 30). A text field overlays key=value lines. Writes the scene. --fps-counter, --fps-hz, and the GENOS_FPS_* mirrors still overlay the value the readout uses.",
+        ),
         spec("quit", "Stop the example with exit code (default 0)."),
+        spec(
+            "list_scenes",
+            "Names of the scenes this binary can load.",
+        ),
+        spec(
+            "load_scene",
+            "Load a scene by name. Drops light and object edits and clears the lighting cache. checkpoint (optional) jumps after the load; otherwise the first checkpoint is used.",
+        ),
+        spec(
+            "list_checkpoints",
+            "Checkpoint names for the scene that is loaded.",
+        ),
+        spec(
+            "jump_checkpoint",
+            "Move the camera to a checkpoint by name. That pose is the one Home resets to.",
+        ),
     ]
 }

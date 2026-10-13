@@ -135,6 +135,15 @@ impl Renderer {
         self.gpu.lighting.settings.clone()
     }
 
+    /// Drop the surface cache and its work list on the next draw.
+    ///
+    /// A scene switch calls this. Recreating the renderer would compile the
+    /// pipelines again; filling the cache buffers is enough.
+    pub fn reset_lighting_cache(&mut self) {
+        self.gpu.lighting.cache_clear = true;
+        self.gpu.lighting.work_clear = true;
+    }
+
     /// Replace the override with a named preset (`potato`, `low`, `medium`, `high`).
     pub fn apply_lighting_preset(&mut self, name: &str) -> Result<(), String> {
         let preset = genos_scene::LightingPreset::parse(name)
@@ -193,6 +202,7 @@ impl Renderer {
         readback: bool,
         wireframe: bool,
     ) -> Result<Option<Vec<u8>>, String> {
+        self.gpu.sync_materials(world)?;
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let matrix = view_proj(camera, aspect);
         let eye = [camera.position.x, camera.position.y, camera.position.z];
@@ -225,6 +235,9 @@ impl Renderer {
                     model,
                     color,
                     emission,
+                    color_rect,
+                    normal_rect,
+                    cutoff,
                     source,
                 } => {
                     if !self.memory.contains_shape(*key) {
@@ -250,6 +263,9 @@ impl Renderer {
                             color[2],
                             f32::from_bits(crate::mesh_field::pack_rgb9e5(*emission)),
                         ],
+                        atlas: *color_rect,
+                        normal_atlas: *normal_rect,
+                        extra: [*cutoff, 0.0, 0.0, 0.0],
                     });
                     draws.push(DrawSpan {
                         shapes: true,
@@ -533,6 +549,11 @@ struct DrawSpan {
 struct InstanceRec {
     model: [f32; 16],
     color: [f32; 4],
+    /// Colour atlas rect (x, y, w, h). `w == 0` means no texture.
+    atlas: [f32; 4],
+    normal_atlas: [f32; 4],
+    /// x is the alpha cutoff. 0 does not discard.
+    extra: [f32; 4],
 }
 
 fn identity_instance() -> InstanceRec {
@@ -540,6 +561,9 @@ fn identity_instance() -> InstanceRec {
         model: crate::world::identity_pose(),
         // w 0: no emitted light (gbuffer.vert).
         color: [1.0, 1.0, 1.0, 0.0],
+        atlas: [0.0; 4],
+        normal_atlas: [0.0; 4],
+        extra: [0.0; 4],
     }
 }
 
@@ -689,6 +713,12 @@ struct Gpu {
     /// differ (vkCmdUpdateBuffer, in the frame's command stream).
     scene_shadow: Vec<u8>,
     particle_buf: Buffer,
+    /// Base-colour atlas (binding 4) and normal atlas (binding 7). Uploaded when
+    /// [`crate::world::MaterialAtlas::key`] changes, not every frame.
+    material_color: Buffer,
+    material_normal: Buffer,
+    material_key: u64,
+    normal_key: u64,
     /// Mesh SDF instances for the software tracer (mesh_field.rs; binding 5).
     /// Device-local and resident: what it holds is `mesh_field_shadow`, and a frame
     /// records only `mesh_field_dirty` (byte ranges) with vkCmdUpdateBuffer, so a
@@ -1331,6 +1361,10 @@ impl Gpu {
                 flight: 0,
                 scene_buf: Buffer::empty(),
                 particle_buf: Buffer::empty(),
+                material_color: Buffer::empty(),
+                material_normal: Buffer::empty(),
+                material_key: 0,
+                normal_key: 0,
                 mesh_field: Buffer::empty(),
                 mesh_field_cap: 0,
                 mesh_field_key: 0,
@@ -1844,12 +1878,16 @@ impl Gpu {
     }
 
     fn write_instances(&mut self, items: &[InstanceRec]) -> Result<(), String> {
-        let mut bytes = Vec::with_capacity(items.len() * 80);
+        let mut bytes = Vec::with_capacity(items.len() * 128);
         for item in items {
-            for value in item.model {
-                bytes.extend_from_slice(&value.to_ne_bytes());
-            }
-            for value in item.color {
+            for value in item
+                .model
+                .into_iter()
+                .chain(item.color)
+                .chain(item.atlas)
+                .chain(item.normal_atlas)
+                .chain(item.extra)
+            {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
         }
@@ -2636,6 +2674,14 @@ impl Gpu {
                 stages: 0x1,
                 samplers: std::ptr::null(),
             },
+            // Material colour atlas. Fragment only: the depth mask and the G-buffer.
+            Binding {
+                binding: 4,
+                kind: 7,
+                count: 1,
+                stages: 0x10,
+                samplers: std::ptr::null(),
+            },
             Binding {
                 binding: 5,
                 kind: 7,
@@ -2646,6 +2692,14 @@ impl Gpu {
             // GI v2 G-buffer (gbuffer.frag writes it).
             Binding {
                 binding: 6,
+                kind: 7,
+                count: 1,
+                stages: 0x10,
+                samplers: std::ptr::null(),
+            },
+            // Tangent-space normal atlas. Same readers as binding 4.
+            Binding {
+                binding: 7,
                 kind: 7,
                 count: 1,
                 stages: 0x10,
@@ -2683,6 +2737,10 @@ impl Gpu {
         ];
         self.particle_buf =
             self.make_buffer_queues(16 + 256 * 256 * 4, 0x20, Memory::Upload, &share)?;
+        self.material_color = self.make_buffer_queues(16, 0x20, Memory::Upload, &share)?;
+        self.material_normal = self.make_buffer_queues(16, 0x20, Memory::Upload, &share)?;
+        self.write_buffer(&self.material_color, &[0u8; 16])?;
+        self.write_buffer(&self.material_normal, &[0u8; 16])?;
         // S70C: one resident scene, written by deltas in the frame's command stream.
         self.frame_scene[0] =
             self.make_buffer(pack::SCENE_CAPACITY as u64, 0x20 | 0x2, Memory::Device)?;
@@ -2710,7 +2768,9 @@ impl Gpu {
             size_count: u32,
             sizes: *const Size,
         }
-        let size = Size { kind: 7, count: 14 };
+        // Two raster sets times seven storage buffers (scene, particles,
+        // instances, material colour, mesh field, G-buffer, material normal).
+        let size = Size { kind: 7, count: 16 };
         let pool = PoolInfo {
             s_type: 33,
             next: std::ptr::null(),
@@ -2871,6 +2931,16 @@ impl Gpu {
                 offset: 0,
                 range: u64::MAX,
             },
+            BufInfo {
+                buffer: self.material_color.buffer,
+                offset: 0,
+                range: u64::MAX,
+            },
+            BufInfo {
+                buffer: self.material_normal.buffer,
+                offset: 0,
+                range: u64::MAX,
+            },
         ];
         let writes = [
             Write {
@@ -2931,6 +3001,30 @@ impl Gpu {
                 kind: 7,
                 image: std::ptr::null(),
                 buffer: &infos[4],
+                texel: std::ptr::null(),
+            },
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set,
+                binding: 4,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: &infos[5],
+                texel: std::ptr::null(),
+            },
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set,
+                binding: 7,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: &infos[6],
                 texel: std::ptr::null(),
             },
         ];
@@ -3624,6 +3718,80 @@ impl Gpu {
         self.frame_bytes = bytes;
     }
 
+    fn sync_materials(&mut self, world: &World) -> Result<(), String> {
+        if self.material_key == world.color_atlas.key && self.normal_key == world.normal_atlas.key {
+            return Ok(());
+        }
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
+        self.store_atlas(true, &world.color_atlas)?;
+        self.store_atlas(false, &world.normal_atlas)?;
+        self.material_key = world.color_atlas.key;
+        self.normal_key = world.normal_atlas.key;
+        self.write_raster_sets()
+    }
+
+    /// `color` selects the base-colour atlas. The other slot is the normal atlas.
+    fn store_atlas(
+        &mut self,
+        color: bool,
+        atlas: &crate::world::MaterialAtlas,
+    ) -> Result<(), String> {
+        let texels = atlas.width as usize * atlas.height as usize;
+        let mut bytes = Vec::with_capacity(16 + texels * 4);
+        bytes.extend_from_slice(&atlas.width.to_ne_bytes());
+        bytes.extend_from_slice(&atlas.height.to_ne_bytes());
+        bytes.extend_from_slice(&0u32.to_ne_bytes());
+        bytes.extend_from_slice(&0u32.to_ne_bytes());
+        let pixels = texels * 4;
+        if atlas.rgba.len() >= pixels {
+            bytes.extend_from_slice(&atlas.rgba[..pixels]);
+        }
+        let size = if color {
+            self.material_color.size
+        } else {
+            self.material_normal.size
+        };
+        if size < bytes.len() as u64 {
+            let share = self.light_families();
+            let next = self.make_buffer_queues(bytes.len() as u64, 0x20, Memory::Upload, &share)?;
+            let slot = if color {
+                &mut self.material_color
+            } else {
+                &mut self.material_normal
+            };
+            let mut old = std::mem::replace(slot, next);
+            self.destroy_buffer(&mut old);
+        }
+        let memory = if color {
+            self.material_color.memory
+        } else {
+            self.material_normal.memory
+        };
+        self.write_memory(memory, &bytes)
+    }
+
+    fn write_memory(&self, memory: Handle, bytes: &[u8]) -> Result<(), String> {
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(
+                    self.device,
+                    memory,
+                    0,
+                    bytes.len() as u64,
+                    0,
+                    &mut mapped,
+                ),
+                "map gpu buffer",
+            )?;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped as *mut u8, bytes.len());
+            (self.fns.unmap_mem)(self.device, memory);
+        }
+        Ok(())
+    }
+
     fn write_buffer(&self, buffer: &Buffer, bytes: &[u8]) -> Result<(), String> {
         self.write_buffer_at(buffer, 0, bytes)
     }
@@ -3879,7 +4047,9 @@ impl Gpu {
             } else {
                 self.vert_override.unwrap_or(VERT_SPV)
             })?;
-            let frag = self.shader(if additive {
+            let frag = self.shader(if depth_only {
+                DEPTH_MASK_SPV
+            } else if additive {
                 WIRE_FRAG_SPV
             } else {
                 self.frag_override.unwrap_or(FRAG_SPV)
@@ -4239,7 +4409,9 @@ impl Gpu {
                 s_type: 28,
                 next: std::ptr::null(),
                 flags: 0,
-                stage_count: if depth_only { 1 } else { 2 },
+                // The depth pass samples masked materials, so it runs a fragment
+                // shader. Colour writes stay masked off.
+                stage_count: 2,
                 stages: stages.as_ptr(),
                 vertex: &vert_info,
                 ia: &ia,
@@ -5001,6 +5173,10 @@ impl Drop for Gpu {
             // [1] names the same buffer as [0] (S70C).
             self.destroy_buffer(&mut frame_scene[0]);
             self.destroy_buffer(&mut particle_buf);
+            let mut material_color = std::mem::replace(&mut self.material_color, Buffer::empty());
+            let mut material_normal = std::mem::replace(&mut self.material_normal, Buffer::empty());
+            self.destroy_buffer(&mut material_color);
+            self.destroy_buffer(&mut material_normal);
             self.destroy_buffer(&mut mesh_field);
             if let Some(times) = self.gpu_times.as_ref() {
                 if !times.pool.is_null() {

@@ -433,6 +433,7 @@ fn run() -> Result<(), String> {
                 y: frame.pointer_y,
                 // A click can press and release before the next pump. The latch still hits the UI.
                 down: !view.captured && (gated.mouse_left || gated.capture_click),
+                ..Pointer::default()
             },
         );
         let mut overlay: Vec<ScreenRect> = ui_frame

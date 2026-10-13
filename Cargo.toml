@@ -21,6 +21,8 @@ members = [
     "crates/audio-check",
     "examples/camera",
     "examples/stress",
+    "debug/scene-lib",
+    "debug/lighting",
 ]
 
 [workspace.lints.rust]

@@ -916,7 +916,8 @@ impl Gpu {
                 )?;
                 self.lighting.cache_clear = true;
             } else {
-                // Descriptors stay valid. Shaders do not index these while GI is off.
+                // Descriptors stay valid. The shader GI bit stays off with these
+                // stand-ins, so the passes do not index them.
                 self.lighting.cache_keys =
                     self.make_buffer_queues(4096, 0x20 | 0x2 | 0x100 | 0x1, Memory::Device, &share)?;
                 self.lighting.cache = self.make_buffer_queues(4096, 0x20 | 0x2 | 0x1, Memory::Device, &share)?;
@@ -2019,7 +2020,15 @@ impl Gpu {
                 .atrous_dirty
                 .unwrap_or(self.lighting.settings.denoiser.dirty_fraction),
         ));
-        if self.lighting.settings.gi.enabled && self.lighting.settings.bounce.count > 0 {
+        // GI can be on while this buffer is still the 4096-byte stand-in. Probes
+        // and the world cache stay off, so the alloc key does not rebuild, and the
+        // changes block would start past the end (the cache-ray offset). Bounce 0
+        // uploads nothing.
+        let bytes = used as u64 * 4;
+        if self.lighting.settings.gi.enabled
+            && self.lighting.settings.bounce.count > 0
+            && block_at + bytes <= self.lighting.work.size
+        {
             unsafe {
                 // The last frame's passes are done with the block before it is written.
                 self.memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000);
@@ -2027,7 +2036,7 @@ impl Gpu {
                     self.cmd,
                     self.lighting.work.buffer,
                     block_at,
-                    used as u64 * 4,
+                    bytes,
                     block.as_ptr() as *const c_void,
                 );
                 if self.lighting.cache_full {
