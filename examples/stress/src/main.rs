@@ -55,7 +55,9 @@ const USAGE: &str = "genos-stress [options]
   --scene FILE              a scene file (genos-camera's .rhai) in place of the building; nothing moves
   --still-boxes             hold the coloured boxes
   --seed N                  lamp and box layout seed (default 1)
-  --view hall|roomA         start (and benchmark) viewpoint (default hall)
+  --view hall|roomA|sky     start (and benchmark) viewpoint (default hall).
+                            sky stands in the south yard and looks up, so the
+                            ambient curve can be judged
   --eye X Y Z YAW PITCH     start the camera here instead of --view (free look)
   --size WxH                window size (default 1280x720; 2560x1440 for --bench)
   --proof                   open the proof window (floats, takes no focus; --bench

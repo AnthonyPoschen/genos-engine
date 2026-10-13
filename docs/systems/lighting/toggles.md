@@ -88,4 +88,12 @@ cargo run --release -p genos-stress -- --preset high --gpu-times 30
 
 `make stress` is `cargo run --release -p genos-stress` and does not forward these arguments, so the commands above call cargo directly. `GENOS_GPU_TIMES` and `GENOS_LIGHTING_PRESET` still apply when the matching argument was omitted. The `LIGHTING_MS` line names the passes and appends `cache_rays`, `shadows`, and `prefill`. `prefill` is 1 when the scout was due and 0 when it was not. The scout shares the cache-ray dispatch, so this is not a separate millisecond.
 
+`hall` and `roomA` sit under the roof, so dawn, dusk, and night look alike there. `--view sky` stands in the south yard and looks up: the sky and the open ground show the curve. `--freeze-sun` holds the sun on that hour.
+
+```
+cargo run --release -p genos-stress -- --preset day-cycle --view sky --time-of-day 06:00 --freeze-sun
+cargo run --release -p genos-stress -- --preset day-cycle --view sky --time-of-day 18:24 --freeze-sun
+cargo run --release -p genos-stress -- --preset day-cycle --view sky --time-of-day 22:00 --freeze-sun
+```
+
 Lavapipe checks the look and the still-frame cost ratio. `presets_and_toggles_match_their_look` draws each preset and each feature off and rejects an unwritten frame, a saturated field, a flat-colour blowout, blue tiles, and white boxes. `world_cache_off_still_is_not_slower` holds a still camera until probe-only has settled, then checks that its lighting milliseconds are at most the surface cache's and that cache rays and hit lighting dispatched nothing.
