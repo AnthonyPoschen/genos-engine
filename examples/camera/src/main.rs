@@ -319,6 +319,25 @@ fn run() -> Result<(), String> {
             profile.reset();
             drag_origin = None;
         }
+        if input.keyboard.pressed(InputCode::key_f8) {
+            let mut unfilled = renderer.unfilled();
+            let shift = input.keyboard.down(InputCode::key_shift_left)
+                || input.keyboard.down(InputCode::key_shift_right);
+            if shift {
+                unfilled.tint = !unfilled.tint;
+                if unfilled.tint {
+                    unfilled.count = true;
+                }
+            } else {
+                unfilled.count = !unfilled.count;
+                if !unfilled.count {
+                    unfilled.tint = false;
+                }
+            }
+            renderer.set_unfilled(unfilled);
+            let unfilled = renderer.unfilled();
+            eprintln!("unfilled count {} tint {}", unfilled.count, unfilled.tint);
+        }
         let paused = graph_on && profile.is_paused();
         // camera/scene update, first half: the panel reads the lamp after a reload
         let scene_at = Instant::now();

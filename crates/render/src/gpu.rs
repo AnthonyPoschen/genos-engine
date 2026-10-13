@@ -16,6 +16,7 @@ include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 
 #[path = "debug_view.rs"]
 mod debug_view;
+pub use crate::unfilled::{UnfilledControl, UnfilledStats};
 pub use debug_view::{DebugView, LampReport, ViewMode};
 
 const API_VERSION: u32 = 1 << 22;
@@ -54,6 +55,8 @@ impl Renderer {
         let gpu = Gpu::open(display, surface, width, height)?;
         let width = gpu.extent_w;
         let height = gpu.extent_h;
+        let unfilled = gpu.unfilled;
+        crate::unfilled::enforce_unfilled_cap();
         Ok(Self {
             gpu,
             width,
@@ -65,7 +68,11 @@ impl Renderer {
             overlay_lines: Vec::new(),
             overlay_verts: Vec::new(),
             keep_pictures: false,
-            debug: debug_view::DebugState::default(),
+            debug: debug_view::DebugState {
+                unfilled,
+                prefill_off: debug_view::prefill_disabled_from_env(),
+                ..debug_view::DebugState::default()
+            },
         })
     }
 
@@ -262,6 +269,9 @@ impl Renderer {
         }
         let mut pack = pack;
         pack::apply_view(&mut pack, camera, aspect);
+        self.gpu.unfilled_eye = eye;
+        self.gpu.unfilled_yaw = camera.yaw;
+        self.gpu.unfilled_pitch = camera.pitch;
         self.debug.apply(&mut pack);
         self.sync_fields(world)?;
         self.gpu.upload_scene(&pack)?;
@@ -675,6 +685,13 @@ struct Gpu {
     memory_props: MemProps,
     /// Upload buffers that went to device-local memory, and all upload buffers.
     upload_local: std::cell::Cell<[u32; 2]>,
+    /// Unfilled-on-screen detector. Off does no atomics and no mask copy.
+    unfilled: UnfilledControl,
+    unfilled_saved: u32,
+    last_unfilled: Option<UnfilledStats>,
+    unfilled_eye: [f32; 3],
+    unfilled_yaw: f32,
+    unfilled_pitch: f32,
 }
 
 struct Image {
@@ -1312,6 +1329,12 @@ impl Gpu {
                 ),
                 memory_props,
                 upload_local: std::cell::Cell::new([0, 0]),
+                unfilled: UnfilledControl::from_env(),
+                unfilled_saved: 0,
+                last_unfilled: None,
+                unfilled_eye: [0.0; 3],
+                unfilled_yaw: 0.0,
+                unfilled_pitch: 0.0,
             };
             let _ = (destroy_instance, surface_support);
             gpu.create_static_objects()?;
@@ -1796,6 +1819,9 @@ impl Gpu {
     }
 
     fn record_and_submit(&mut self, matrix: &[f32; 16]) -> Result<(), String> {
+        if self.unfilled.dump_pct.is_some() {
+            self.copy_picture = true;
+        }
         let profiled = self.profile_submit;
         self.profile_submit = false;
         if profiled && (self.query_pool.is_null() || self.timestamp_period <= 0.0) {
@@ -1810,6 +1836,9 @@ impl Gpu {
                 "wait fence",
             )?;
             self.collect_slot_after_wait(slot)?;
+            if self.lighting_active() {
+                self.take_unfilled(slot);
+            }
             self.collect_frame_times(slot);
             self.desc_set = self.raster_sets[slot];
             check(
@@ -2010,6 +2039,10 @@ impl Gpu {
     /// Read a finished frame's stamps (its fence has been waited) and print the averages
     /// every `every` frames.
     fn collect_frame_times(&mut self, slot: usize) {
+        let unfilled_suffix = self
+            .last_unfilled
+            .map(|stats| format!(" | {}", stats.line()))
+            .unwrap_or_default();
         let bits = self.timestamp_bits;
         let period = f64::from(self.timestamp_period);
         let antialias = self.antialias;
@@ -2090,14 +2123,19 @@ impl Gpu {
         );
         if times.lighting_frames > 0 && std::env::var_os("GENOS_GPU_DISPATCH").is_some() {
             let lf = f64::from(times.lighting_frames);
-            let parts: Vec<String> = times.lighting_disp.iter().enumerate().map(|(i, (p, ms))| format!("{i}:{p}={:.3}", ms / lf)).collect();
+            let parts: Vec<String> = times
+                .lighting_disp
+                .iter()
+                .enumerate()
+                .map(|(i, (p, ms))| format!("{i}:{p}={:.3}", ms / lf))
+                .collect();
             eprintln!("LIGHTING_DISPATCH {}", parts.join(" "));
             times.lighting_disp.clear();
         }
         if times.lighting_frames > 0 {
             let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
-                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3}",
+                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3}{}",
                 times.lighting_frames,
                 g[0],
                 g[1],
@@ -2114,7 +2152,8 @@ impl Gpu {
                 times.world_pass[0] / f64::from(times.world_runs.max(1)),
                 times.world_pass[1] / f64::from(times.world_runs.max(1)),
                 times.world_pass[2] / f64::from(times.world_runs.max(1)),
-                times.world_pass[3] / f64::from(times.world_runs.max(1))
+                times.world_pass[3] / f64::from(times.world_runs.max(1)),
+                unfilled_suffix
             );
         }
         if !times.light_spans.is_empty() {
@@ -2657,12 +2696,21 @@ impl Gpu {
     /// instances, the traced meshes and the G-buffer.
     fn write_raster_sets(&self) -> Result<(), String> {
         for slot in 0..2 {
-            self.write_descriptors(self.raster_sets[slot], &self.frame_scene[slot], &self.instance_bufs[slot])?;
+            self.write_descriptors(
+                self.raster_sets[slot],
+                &self.frame_scene[slot],
+                &self.instance_bufs[slot],
+            )?;
         }
         Ok(())
     }
 
-    fn write_descriptors(&self, set: Handle, scene: &Buffer, instances: &Buffer) -> Result<(), String> {
+    fn write_descriptors(
+        &self,
+        set: Handle,
+        scene: &Buffer,
+        instances: &Buffer,
+    ) -> Result<(), String> {
         #[repr(C)]
         struct BufInfo {
             buffer: Handle,
@@ -3280,7 +3328,9 @@ impl Gpu {
         let head = crate::mesh_field::words_bytes(&quick.head);
         let tail_at = (quick.head.len() + quick.data_len) * 4;
         let tail = crate::mesh_field::words_bytes(&quick.emission);
-        if quick.layout == self.mesh_field_layout && self.mesh_field_shadow.len() == tail_at + tail.len() {
+        if quick.layout == self.mesh_field_layout
+            && self.mesh_field_shadow.len() == tail_at + tail.len()
+        {
             self.mark_field(0, &head);
             self.mark_field(tail_at, &tail);
             self.mesh_field_key = key;
@@ -3356,7 +3406,9 @@ impl Gpu {
             let stop = stop.min(self.mesh_field_shadow.len());
             let mut at = start & !3;
             while at < stop {
-                let end = (at + RUN).min(stop + 3 & !3).min(self.mesh_field_shadow.len());
+                let end = (at + RUN)
+                    .min(stop + 3 & !3)
+                    .min(self.mesh_field_shadow.len());
                 if end <= at {
                     break;
                 }
@@ -3422,7 +3474,8 @@ impl Gpu {
         let mut at = 0;
         while at < len {
             let end = (at + BLOCK).min(len);
-            let same = self.scene_shadow.len() >= end && self.scene_shadow[at..end] == bytes[at..end];
+            let same =
+                self.scene_shadow.len() >= end && self.scene_shadow[at..end] == bytes[at..end];
             if !same {
                 match runs.last_mut() {
                     Some((start, stop)) if *stop == at && end - *start <= RUN => *stop = end,

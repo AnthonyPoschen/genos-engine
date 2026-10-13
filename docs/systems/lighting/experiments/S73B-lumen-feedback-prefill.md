@@ -1,7 +1,7 @@
 # S73B: All scout hits claim fine texels and stamp LastUsed
 
 - **Date:** 2026-10-12
-- **Result:** reverted (8b62829b); kept on gi-v2-prefill (22bcd47f)
+- **Result:** ported (71547c9 on cursor/gi-prefill-spare-budget-3544). Originally reverted (8b62829b) and kept on gi-v2-prefill (22bcd47f). Darkening cause and the fix: [S73-prefill-root-cause-and-plan](S73-prefill-root-cause-and-plan.md).
 - **Commit / patch:** 22bcd47f
 
 ## Idea

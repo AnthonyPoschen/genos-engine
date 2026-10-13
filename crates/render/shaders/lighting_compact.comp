@@ -181,6 +181,30 @@ void main() {
                 return;
             }
         }
+        // S73F: a pre-fill texel (never shown) is due when a ray read it since
+        // its last relight (Lumen LastUsed - LastUpdated); it waits on its own
+        // list. The round keeps a floor of those entries (lighting_sc_prefill_plan).
+        if (LIGHTING_SC_SCHED && !wrc && lighting_sc_prefill(slot)) {
+            if (int(lighting_frame() - last) > int(LIGHTING_CACHE_LIFE)) {
+                atomicAdd(gstats.freed, 1u);
+                ckeys.key[slot] = 0u;
+                cache.v[3u * slot + 1u] = vec4(0.0);
+                cache.v[3u * slot + 2u] = vec4(0.0);
+                return;
+            }
+            // S73O: pre-fill off leaves the texel empty until a pixel shows it.
+            if (lighting_sc_prefill_off()) {
+                return;
+            }
+            uint upd = lighting_sc_updated(slot);
+            if (upd == 0u || int(last - upd) > 0) {
+                uint at = atomicAdd(ckeys.key[LIGHTING_SC_PREFILL_COUNT_AT], 1u);
+                if (at < (LIGHTING_SC_PREFILL_MAX >> lighting_sc_budget_shift())) {
+                    ckeys.key[LIGHTING_SC_PREFILL_AT + at] = slot;
+                }
+            }
+            return;
+        }
         // S72D sparse fill, coarse to fine: every texel is relit, but a young one
         // (short of LIGHTING_DN_MIN_SETS sets) weighs by its level (4-apart keys 4x,
         // 2-apart 2x), so under a backlog the coarse grid fills first and spreads

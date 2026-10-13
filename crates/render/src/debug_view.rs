@@ -62,7 +62,9 @@ impl ViewMode {
 }
 
 /// The compose pass's debug word (scene block `grid_at.w`): mode in bits 0-7, the
-/// lamp in bits 8-23.
+/// lamp in bits 8-23. Bits 24 and 25 are the unfilled detector (count, tint).
+/// Bit 26 turns pre-fill off. Those bits are written by [`DebugState::apply`],
+/// not by [`DebugView::word`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DebugView {
     pub mode: ViewMode,
@@ -79,13 +81,34 @@ impl DebugView {
 #[derive(Default)]
 pub(crate) struct DebugState {
     pub view: DebugView,
+    pub unfilled: crate::unfilled::UnfilledControl,
+    /// Set when `GENOS_LIGHTING_PREFILL` is `0`, `false`, or `off`.
+    pub prefill_off: bool,
 }
 
 impl DebugState {
     /// Write the debug word into the scene block.
     pub fn apply(&self, pack: &mut Pack) {
-        pack.debug_view = self.view.word();
+        let mut word = self.view.word();
+        if self.unfilled.count {
+            word |= 1 << 24;
+        }
+        if self.unfilled.tint {
+            word |= 1 << 25;
+        }
+        if self.prefill_off {
+            word |= 1 << 26;
+        }
+        pack.debug_view = word;
     }
+}
+
+/// `GENOS_LIGHTING_PREFILL=0` (also `false` or `off`) skips off-screen accumulation.
+pub(crate) fn prefill_disabled_from_env() -> bool {
+    matches!(
+        std::env::var("GENOS_LIGHTING_PREFILL").ok().as_deref(),
+        Some("0") | Some("false") | Some("off")
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -107,6 +130,39 @@ pub struct LampReport {
 }
 
 impl Renderer {
+    /// Count unfilled surface-cache pixels, and optionally tint or dump them.
+    /// Tint or a dump threshold turns counting on.
+    pub fn set_unfilled(&mut self, mut control: crate::unfilled::UnfilledControl) {
+        if control.tint || control.dump_pct.is_some() {
+            control.count = true;
+        }
+        self.debug.unfilled = control;
+        self.gpu.unfilled = control;
+    }
+
+    pub fn unfilled(&self) -> crate::unfilled::UnfilledControl {
+        self.gpu.unfilled
+    }
+
+    /// Off-screen pre-fill. Off leaves a never-shown fine texel empty until a pixel shows it.
+    pub fn set_prefill(&mut self, on: bool) {
+        self.debug.prefill_off = !on;
+    }
+
+    pub fn prefill_on(&self) -> bool {
+        !self.debug.prefill_off
+    }
+
+    /// Counters from the last submitted frame. Waits until that frame's copy is visible.
+    pub fn unfilled_stats(&mut self) -> crate::unfilled::UnfilledStats {
+        unsafe {
+            (self.gpu.fns.device_wait)(self.gpu.device);
+        }
+        let slot = self.gpu.lighting.last_slot;
+        self.gpu.take_unfilled(slot);
+        self.gpu.last_unfilled.unwrap_or_default()
+    }
+
     /// What the picture shows; the default is the picture.
     pub fn set_debug_view(&mut self, view: DebugView) {
         self.debug.view = view;

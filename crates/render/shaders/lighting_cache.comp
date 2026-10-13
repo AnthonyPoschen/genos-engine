@@ -50,6 +50,13 @@ void main() {
             bool boost = c > 0u && c <= LIGHTING_SC_BOOST_ROUNDS;
             gstats.pad3 = boost ? 1u : 0u;
             uint budget = (boost ? room : base) - young;
+            // S73N: a boost can fill the whole room. Leave the pre-fill floor
+            // out of next round's mature histogram while the list has texels,
+            // so the dispatch carve is not only a cut off the tail.
+            if (boost && ckeys.key[LIGHTING_SC_PREFILL_COUNT_AT] > 0u) {
+                uint floor_n = LIGHTING_SC_PREFILL_FLOOR >> lighting_sc_budget_shift();
+                budget = budget > floor_n ? budget - floor_n : 0u;
+            }
             uint acc = 0u;
             uint thr = 0u;
             for (int b = int(LIGHTING_SC_BUCKETS) - 1; b >= 0; b--) {
@@ -67,6 +74,8 @@ void main() {
         return;
     }
     if (lighting_world_mode() == 3u && j >= lighting_grad_first() && j < LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) {
+        // Gradient entries are not a world-radiance update. Drop any plain sample.
+        lighting_wrc_plain_clear(j, 1u);
         // S74A: 16 gradient checks, one ray each.
         uint n = lighting_grad_count();
         [[dont_unroll]] for (uint i = 0u; i < LIGHTING_CACHE_RAYS; i++) {
@@ -85,6 +94,7 @@ void main() {
     }
     uint slot = lighting_cache_batch_slot(j);
     if (slot == ~0u) {
+        lighting_wrc_plain_clear(j, 1u);
         return;
     }
     // A texel's entries this round are consecutive; the first sums them all.
@@ -97,6 +107,7 @@ void main() {
     }
     uint key = ckeys.key[slot];
     if (key == 0u) {
+        lighting_wrc_plain_clear(j, run);
         return;
     }
     atomicAdd(gstats.rays, run * LIGHTING_CACHE_RAYS);
@@ -111,6 +122,7 @@ void main() {
         ckeys.key[slot] = 0u;
         cache.v[3u * slot + 1u] = vec4(0.0);
         cache.v[3u * slot + 2u] = vec4(0.0);
+        lighting_wrc_plain_clear(j, run);
         return;
     }
     vec3 tp;
@@ -128,6 +140,7 @@ void main() {
     [[dont_unroll]] for (uint k = 0u; k < run * LIGHTING_CACHE_RAYS; k++) {
         vec4 v = work.v[lighting_rad_at(first + k)];
         if (lighting_ray_none(v)) {
+            lighting_wrc_plain_clear(j, run);
             return;
         }
         vec3 dir = lighting_dir(rkey, n, lighting_sc_stratum(rkey, q0 * LIGHTING_CACHE_RAYS + k, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
@@ -148,7 +161,14 @@ void main() {
         atomicAdd(gstats.extra, 1u);
     }
     if (lighting_world_mode() == 3u) {
-        cache.v[LIGHTING_SC_OBJ_AT + slot].y = uintBitsToFloat(lighting_frame());
+        // A pre-fill relight is one set: four 16-ray quarters. Stamping
+        // LastUpdated on the first quarter made the texel look fresh, so the
+        // other three waited for another scout hit and the set was still empty
+        // when the texel reached the screen (own sets show only once w >= 1).
+        uint q_end = q0 + run;
+        if (!(lighting_sc_prefill(slot) && !lighting_sc_prefill_off() && !wrc_cell && q_end < LIGHTING_SC_QUARTERS)) {
+            cache.v[LIGHTING_SC_OBJ_AT + slot].y = uintBitsToFloat(lighting_frame());
+        }
         // Few rays a relight: the set's quarters add up; the mean takes the set
         // once its last quarter is in.
         if (LIGHTING_SC_QUARTERS > 1u && !wrc_cell) {
@@ -242,6 +262,24 @@ void main() {
         if (old.w >= 0.5) {
             lighting_wrc_check_take(slot, e, old.rgb);
         }
+        // S73Q: plain sample from the second cache read (no k^2 weight). Sun gain
+        // already scaled the stored plain rgb with the dark-fill history above.
+        vec3 ep;
+        if (lighting_wrc_plain_sample(j, run, rays, ep)) {
+            vec4 pb = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
+            float pc = pb.x <= 0.0 ? pb.w : 0.0;
+            float padd = float(run);
+            float pwa = pc < 0.5 ? 1.0 : padd / (pc + padd);
+            if (local3) {
+                pwa = max(pwa, LIGHTING_WRC_LOCAL_ALPHA * padd);
+            } else if (!lighting_sc_light_quiet()) {
+                pwa = max(pwa, LIGHTING_WRC_CHANGE_ALPHA * padd);
+            }
+            vec4 pa = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
+            vec3 pmean = pc < 0.5 ? ep : pa.rgb + (ep - pa.rgb) * min(pwa, 1.0);
+            cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(max(pmean, vec3(0.0)), 0.0);
+            cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(0.0, 0.0, 0.0, min(pc + padd, LIGHTING_WRC_CAP));
+        }
         return;
     }
     if (lighting_world_mode() == 3u) {
@@ -256,6 +294,21 @@ void main() {
         float cap = lighting_sc_cap(slot);
         if (t >= cap - 0.5) {
             atomicAdd(gstats.atcap, 1u);
+        }
+        if (lighting_sc_prefill(slot) && !lighting_sc_prefill_off()) {
+            // S73M: the same firefly cap as MSME, so a spike cannot anchor the
+            // 4-update average. dev is the newborn sigma (0.15 L), floored.
+            vec3 y = e;
+            if (old.w > 0.5) {
+                const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+                float dev = max(0.15 * dot(old.rgb, lw), 1.0e-3);
+                y = e - max(e - (0.1 + old.rgb + 8.0 * dev), vec3(0.0));
+            }
+            float np = min(t + 1.0, LIGHTING_SC_PREFILL_SETS);
+            vec3 mp = old.w < 0.5 ? y : old.rgb + (y - old.rgb) / np;
+            lighting_tex_put(slot, vec4(mp, np));
+            atomicAdd(gstats.diag[62], 1u);
+            return;
         }
         // Flag 1048576: GIBS's estimator (Stachowiak's multi-scale mean, as in
         // kajiya): a short-term mean and variance beside the long-term mean; the
@@ -309,7 +362,9 @@ void main() {
                 hint = max(hint, LIGHTING_SC_LAMP_K * lighting_sc_lamp_change(slot));
                 // S72T: while young (under 16 sets) never faster than the plain
                 // mean 1 / (n + 1), the least-noise estimate of a still signal
-                // (the hint still overrides it).
+                // (the hint still overrides it). S73M reads b.z < 0 below, after
+                // the hint, and forces that plain mean for a former pre-fill.
+                bool handoff = b.z < 0.0;
                 if (t < 16.0) {
                     k = min(k, 1.0 / (t + 1.0));
                 }
@@ -321,9 +376,17 @@ void main() {
                 } else {
                     k = max(k, min(hint, 0.9));
                 }
+                // S73M: a pre-filled texel keeps its colour and one set, then the
+                // next on-screen sets are a plain mean (k = 1/(t+1), not a cap).
+                // The marker stays until this set reaches 16. The normal path
+                // above is unchanged.
+                if (handoff && t < 16.0) {
+                    k = 1.0 / (t + 1.0);
+                }
+                float kz = (handoff && t + 1.0 < 16.0) ? -1.0 : k;
                 vec3 m = mix(old.rgb, y, clamp(k, 0.0, 1.0));
                 cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);
-                cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(vb, inc, k, min(t + 1.0, 256.0));
+                cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(vb, inc, kz, min(t + 1.0, 256.0));
                 lighting_tex_put(slot, vec4(m, min(t + 1.0, cap)));
                 return;
             }

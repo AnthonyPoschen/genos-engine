@@ -82,6 +82,13 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint atrous_mode;
     uint atrous_ppm;
     uint atrous_active;
+    // Unfilled-on-screen detector (compose). pixels with no finished set, and
+    // shaded surface pixels. The mask is one bit per pixel, 32 pixels a word,
+    // row-major, and is written only while the detector is on. Word 0 of the
+    // mask is stats word 126 (lighting_gpu.rs LIGHTING_UNFILLED_MASK_AT).
+    uint unfilled;
+    uint shaded;
+    uint mask[];
 } gstats;
 // Kept-hit light writes (light pass): all, changed, by relative luminance delta
 // (<0.2 %, 0.2-1 %, 1-5 %, >5 %), and changed by source of the hit's direct light
@@ -122,6 +129,9 @@ const uint CHG_W_DEDUPE = 27u;   // ring probes already woken by this event
 const uint CHG_V_RELIT = 28u;    // kept hits relit by verification / wakes
 const uint CHG_W_HOPS = 29u;     // sum of hop depth of woken probes (chain size)
 uint lighting_bounce_path = 2u;
+// S73Q: pre-fill rays read the plain mean of a world-radiance cell. Every other
+// reader keeps the dark-fill value in the cell's irradiance.
+bool lighting_wrc_plain_read = false;
 // S78S debug isolate toggles (lighting_gpu.rs lighting_toggles): head 3.w bits 12-15.
 uint lighting_toggles() {
     return (uint(work.v[lighting_change_at() + 3u].w) >> 12u) & 15u;
@@ -172,6 +182,25 @@ const uint LIGHTING_COMPOSE_MAXY = LIGHTING_COMPOSE_MAXX + LIGHTING_CACHE_SLOTS;
 // Set by the compose pass around the lookups that colour a pixel.
 bool lighting_sc_display = false;
 uvec2 lighting_compose_px = uvec2(0u);
+// Unfilled-on-screen detector. Bits of scene.grid_at.w: 24 count, 25 magenta tint,
+// 26 pre-fill off (debug_view.rs). Off is a uniform test and no atomics. The mask word count is
+// lighting_gpu.rs LIGHTING_UNFILLED_MASK_CAP; word 0 is stats word 126.
+const float LIGHTING_UNFILLED_MIN_SETS = 1.0;
+const uint LIGHTING_UNFILLED_MASK_CAP = 276480u;
+bool lighting_px_unfilled = false;
+bool lighting_unfilled_count() {
+    return (scene.grid_at.w & 0x1000000u) != 0u;
+}
+bool lighting_unfilled_tint() {
+    return (scene.grid_at.w & 0x2000000u) != 0u;
+}
+void lighting_unfilled_mark(uvec2 p) {
+    uint stride = (pc.dims.x + 31u) / 32u;
+    uint at = p.y * stride + (p.x >> 5u);
+    if (at < LIGHTING_UNFILLED_MASK_CAP) {
+        atomicOr(gstats.mask[at], 1u << (p.x & 31u));
+    }
+}
 // The camera matches the one stored for last frame (change block head 1-4).
 // eye.w is the "last camera is valid" flag; up.w is the flag word, not the basis.
 bool lighting_view_held() {
@@ -805,6 +834,25 @@ void lighting_sc_offer(uint slot, vec3 at, vec3 centre) {
     }
 }
 
+// S73B/S73C: a feedback read skips the shown stamp and the reveal burst.
+// S73K does not set this from the direct shader; the slim claim never reaches
+// these branches. Seeds stay on the pixel path.
+bool lighting_sc_feedback = false;
+// S73Q: plain mean of a world-radiance cell (estimator a.rgb, count in b.w,
+// b.x held at 0 so trickle, dormancy and variance readers skip it). Stored in
+// the same sun scale as the cell's irradiance. False when this read should
+// keep the dark-fill value.
+bool lighting_wrc_plain_rgb(uint slot, out vec3 rgb) {
+    if (!lighting_wrc_plain_read || cache.v[3u * slot + 1u].w <= 0.2) {
+        return false;
+    }
+    vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
+    if (!(b.w > 0.5) || b.x > 0.0) {
+        return false;
+    }
+    rgb = cache.v[LIGHTING_SC_EST_AT + 2u * slot].rgb;
+    return true;
+}
 // Surface cache: the lit texel twice the size holding pos (the first fill of a
 // texel not lit yet); w 0 when there is none.
 vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
@@ -816,12 +864,18 @@ vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
         uint s = lighting_cache_find_sized(pos, n, seed, size, pos);
         if (s != ~0u && seed) {
             cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
-            cache.v[LIGHTING_WORLD_AT + s].z = uintBitsToFloat(lighting_frame());
+            if (!lighting_sc_feedback) {
+                cache.v[LIGHTING_WORLD_AT + s].z = uintBitsToFloat(lighting_frame());
+            }
         }
         if (s != ~0u) {
             vec4 v = cache.v[3u * s + 2u];
             if (v.w > 0.5) {
                 cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
+                vec3 plain;
+                if (lighting_wrc_plain_rgb(s, plain)) {
+                    return vec4(plain, 1.0);
+                }
                 return vec4(v.rgb, 1.0);
             }
         }
@@ -924,14 +978,17 @@ bool lighting_sc_light_quiet();
 float lighting_seed_sunfrac = 0.0;
 // S72N: first fill from the coarser sizes (2x, then 4x), bilinear over the lit
 // coplanar cells there (any coverage), so it has no cell-shaped steps. The 25 cm
-// cell holding pos is still claimed as a seed a pixel needs (reveal burst).
+// cell holding pos is still claimed as a seed a pixel needs (reveal burst); a
+// feedback claim (S73C) is no pixel's need and only marks it used.
 vec4 lighting_sc_parent_bilerp(vec3 pos, vec3 n, float size) {
     float s2 = size * 2.0;
     if (s2 > 0.2) {
         uint c = lighting_cache_find_sized(pos, n, true, s2, pos);
         if (c != ~0u) {
             cache.v[3u * c].w = uintBitsToFloat(lighting_frame());
-            cache.v[LIGHTING_WORLD_AT + c].z = uintBitsToFloat(lighting_frame());
+            if (!lighting_sc_feedback) {
+                cache.v[LIGHTING_WORLD_AT + c].z = uintBitsToFloat(lighting_frame());
+            }
         }
     }
     [[dont_unroll]] for (uint l = 0u; l < 2u; l++) {
@@ -1207,6 +1264,30 @@ float lighting_sc_count(uint slot) {
 // (an exponential moving average that keeps up; Lumen's surface cache and
 // radiance cache keep a short temporal accumulation the same way).
 const float LIGHTING_SC_CHANGE_ALPHA = 1.0 / 24.0;
+// S73D: a fine texel no pixel has shown yet (pre-fill) accumulates as Lumen's
+// radiosity does, over at most this many updates
+// (r.LumenScene.Radiosity.TemporalMaxFramesAccumulated).
+const float LIGHTING_SC_PREFILL_SETS = 4.0;
+bool lighting_sc_prefill(uint slot) {
+    return lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w <= 0.2
+        && floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z) == 0u;
+}
+// GENOS_LIGHTING_PREFILL=0 (debug word bit 26). A never-shown fine texel still
+// stays off the normal list; it is just not accumulated until a pixel shows it.
+bool lighting_sc_prefill_off() {
+    return (scene.grid_at.w & 0x4000000u) != 0u;
+}
+// S73M: first time a pixel shows a pre-filled fine texel. Keep the colour, drop
+// the count to one set, and mark the estimator (b.z < 0) so the next 15
+// on-screen sets are a plain mean. Idempotent: a later pixel this frame sees
+// the shown stamp and does not write again.
+void lighting_sc_prefill_handoff(uint slot) {
+    vec3 mean = cache.v[3u * slot + 2u].rgb;
+    float lum = dot(mean, vec3(0.2126, 0.7152, 0.0722));
+    cache.v[3u * slot + 2u] = vec4(mean, 1.0);
+    cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(mean, pow(0.15 * lum, 2.0) + 1.0e-8);
+    cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(1.0, 1.0, -1.0, 1.0);
+}
 // WRC: per 16-ray sample (a refresh adds 4): 1/32 while the light changes
 // anywhere (1/8 a set), 1/8 near a mover or a moved lamp (1/2 a set).
 const float LIGHTING_WRC_CHANGE_ALPHA = 1.0 / 32.0;
@@ -2047,7 +2128,12 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
                 vec4 v = cache.v[3u * s2 + 2u];
                 if (v.w > 0.5) {
                     // S64B: scaled to the sun/sky of now, share noted.
-                    sum += vec4(v.rgb * (lighting_world_mode() == 3u ? lighting_sc_sun_gain(s2) : 1.0), 1.0);
+                    vec3 rgb = v.rgb;
+                    vec3 plain;
+                    if (lighting_wrc_plain_rgb(s2, plain)) {
+                        rgb = plain;
+                    }
+                    sum += vec4(rgb * (lighting_world_mode() == 3u ? lighting_sc_sun_gain(s2) : 1.0), 1.0);
                     fill_f += lighting_world_mode() == 3u ? lighting_sc_sunfrac_now(s2) : 0.0;
                 }
             }
@@ -2058,7 +2144,12 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     }
     if (lighting_world_mode() == 3u) {
         lighting_hit_sunfrac = lighting_sc_sunfrac_now(slot);
-        return e.rgb * lighting_sc_sun_gain(slot);
+        vec3 rgb = e.rgb;
+        vec3 plain;
+        if (lighting_wrc_plain_rgb(slot, plain)) {
+            rgb = plain;
+        }
+        return rgb * lighting_sc_sun_gain(slot);
     }
     return e.rgb;
 }
@@ -2155,6 +2246,25 @@ uint lighting_grad_count();
 void lighting_shadow_epochs();
 // S76D persistent check words, after the gradient check list (LIGHTING_GRAD_LIST_AT + 32768).
 const uint LIGHTING_CHECK_P_AT = LIGHTING_ARGS_AT + 16u + 3u * 65536u + 1024u + 32768u;
+// Declared here, ahead of the pre-fill list: GLSL needs them before
+// lighting_sc_prefill_plan and lighting_cache_batch_slot. Same addresses as
+// the S78X work lists below.
+const uint LIGHTING_ATROUS_MARK_AT = LIGHTING_CHECK_P_AT + 16u;
+const uint LIGHTING_ATROUS_LIST_AT = LIGHTING_ATROUS_MARK_AT + 5u * LIGHTING_CACHE_SLOTS;
+// S73E: the pre-fill list (never-shown texels) and its per-round count.
+const uint LIGHTING_SC_PREFILL_COUNT_AT = LIGHTING_SC_HIST_AT + 74u;
+const uint LIGHTING_SC_PREFILL_MAX = 16384u;
+// S73N: entries kept for that list even when shown texels fill the ceiling.
+// The budget shift scales it (1024, 512, … down to 8). About 1.9% of the base room.
+const uint LIGHTING_SC_PREFILL_FLOOR = 1024u;
+// After the a-trous meta (LIGHTING_ATROUS_PPM_AT + ppm, prev, 64 bins, 5 modes,
+// 5 * 64 recount bins); the old spot aliased LIGHTING_COMPOSE_AT.
+const uint LIGHTING_SC_PREFILL_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS + 1u + 1u + 64u + 5u + 5u * 64u;
+// S73Q: one plain-mean sample per batch entry, summed by the direct pass and
+// consumed by the cache pass. Four words: rgb of lk*cos in 1/256, then the ray
+// count. The CPU fill before the direct pass starts each round at zero.
+const uint LIGHTING_WRC_PLAIN_AT = LIGHTING_SC_PREFILL_AT + LIGHTING_SC_PREFILL_MAX;
+const float LIGHTING_WRC_PLAIN_SCALE = 256.0;
 bool lighting_dense() {
     return ((pc.params.z >> 4u) & 1u) != 0u;
 }
@@ -2181,6 +2291,33 @@ uint lighting_dense_entry(uint d) {
     }
     return LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES + (d - g);
 }
+// S73N: x is the mature entries this round dispatches, y the pre-fill entries.
+// Young is capped at the base room. Spare is what young + mature leave of that
+// base ceiling. Pre-fill takes the spare, or the floor when the spare is
+// smaller, and never more than the list or the room. A full room gives the
+// floor's slots up from the mature entries (S73G is unchanged when the spare
+// is already at least the floor).
+uvec2 lighting_sc_prefill_plan() {
+    uint sh = lighting_sc_budget_shift();
+    uint room = lighting_sc_room() >> sh;
+    uint base = lighting_sc_base_room() >> sh;
+    uint young = min(lighting_young_count(), base);
+    uint mature = lighting_mature_count();
+    uint spare = young + mature < base ? base - (young + mature) : 0u;
+    uint floor_n = LIGHTING_SC_PREFILL_FLOOR >> sh;
+    uint have = min(ckeys.key[LIGHTING_SC_PREFILL_COUNT_AT], LIGHTING_SC_PREFILL_MAX >> sh);
+    if (lighting_sc_prefill_off()) {
+        uint room_left = young < room ? room - young : 0u;
+        return uvec2(min(mature, room_left), 0u);
+    }
+    if (young >= room) {
+        return uvec2(0u, 0u);
+    }
+    uint pf = min(have, max(spare, floor_n));
+    pf = min(pf, room - young);
+    uint mature_kept = min(mature, room - young - pf);
+    return uvec2(mature_kept, pf);
+}
 void lighting_write_args() {
     uint a;
     uint b = 0u;
@@ -2191,7 +2328,14 @@ void lighting_write_args() {
         uint sh = lighting_sc_budget_shift();
         uint room = lighting_sc_room() >> sh;
         uint first = min(lighting_young_count(), lighting_sc_base_room() >> sh);
-        a = min(room, first + lighting_mature_count());
+        // S73I / S73N: listed is the waiting list; taken is what the plan
+        // dispatches (the floor, or the spare when that is larger).
+        uint prefill_listed = ckeys.key[LIGHTING_SC_PREFILL_COUNT_AT];
+        uvec2 plan = lighting_sc_prefill_plan();
+        uint prefill_taken = plan.y;
+        gstats.diag[60] = prefill_listed;
+        gstats.diag[61] = prefill_taken;
+        a = min(room, first + plan.x + prefill_taken);
         b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> sh);
         // S77A: change-list cells are checks, one 16-ray entry each; the
         // background list (and escalated cells) take whole sets.
@@ -2269,9 +2413,26 @@ uint lighting_cache_batch_slot(uint j) {
         return ckeys.key[2u * LIGHTING_CACHE_SLOTS - j];
     }
     uint count = lighting_mature_count();
+    uint kept = count;
+    uint pf = 0u;
+    if (lighting_world_mode() == 3u && LIGHTING_SC_SCHED) {
+        // S73N: pre-fill starts after the mature entries the plan kept, not
+        // after the whole mature list (that list can fill the room).
+        uvec2 plan = lighting_sc_prefill_plan();
+        kept = plan.x;
+        pf = plan.y;
+    }
     uint k = j - first;
-    if ((lighting_young_only() && lighting_world_mode() != 3u) || k >= count) {
+    if (lighting_young_only() && lighting_world_mode() != 3u) {
         return ~0u;
+    }
+    if (k >= kept) {
+        uint p = k - kept;
+        if (p >= pf) {
+            return ~0u;
+        }
+        uint have = min(ckeys.key[LIGHTING_SC_PREFILL_COUNT_AT], LIGHTING_SC_PREFILL_MAX >> lighting_sc_budget_shift());
+        return ckeys.key[LIGHTING_SC_PREFILL_AT + (p + lighting_hash(lighting_round()) % have) % have];
     }
     // The scheduler lists only what this round should take (from the front);
     // otherwise the sweep turns with the rounds.
@@ -2291,6 +2452,79 @@ uint lighting_cache_batch_slot(uint j) {
 // variance high). The other modes take whole sets.
 const uint LIGHTING_SC_SET_RAYS = 64u;
 const uint LIGHTING_SC_QUARTERS = LIGHTING_SC_SET_RAYS / LIGHTING_CACHE_RAYS;
+// Lavapipe faults if this scratch is visited from a rolled constant-bound loop
+// (a null descriptor). Four explicit passes, and no entry at or past the batch.
+void lighting_wrc_plain_add(uint ent, vec3 weighted) {
+    if (ent >= LIGHTING_CACHE_BATCH) {
+        return;
+    }
+    uint b = LIGHTING_WRC_PLAIN_AT + 4u * ent;
+    vec3 c = clamp(weighted, vec3(0.0), vec3(2048.0)) * LIGHTING_WRC_PLAIN_SCALE + vec3(0.5);
+    atomicAdd(ckeys.key[b], uint(c.r));
+    atomicAdd(ckeys.key[b + 1u], uint(c.g));
+    atomicAdd(ckeys.key[b + 2u], uint(c.b));
+    atomicAdd(ckeys.key[b + 3u], 1u);
+}
+void lighting_wrc_plain_clear(uint j, uint run) {
+    if (j >= LIGHTING_CACHE_BATCH) {
+        return;
+    }
+    uint b = LIGHTING_WRC_PLAIN_AT + 4u * j;
+    ckeys.key[b] = 0u;
+    ckeys.key[b + 1u] = 0u;
+    ckeys.key[b + 2u] = 0u;
+    ckeys.key[b + 3u] = 0u;
+    if (run > 1u && j + 1u < LIGHTING_CACHE_BATCH) {
+        b = LIGHTING_WRC_PLAIN_AT + 4u * (j + 1u);
+        ckeys.key[b] = 0u;
+        ckeys.key[b + 1u] = 0u;
+        ckeys.key[b + 2u] = 0u;
+        ckeys.key[b + 3u] = 0u;
+    }
+    if (run > 2u && j + 2u < LIGHTING_CACHE_BATCH) {
+        b = LIGHTING_WRC_PLAIN_AT + 4u * (j + 2u);
+        ckeys.key[b] = 0u;
+        ckeys.key[b + 1u] = 0u;
+        ckeys.key[b + 2u] = 0u;
+        ckeys.key[b + 3u] = 0u;
+    }
+    if (run > 3u && j + 3u < LIGHTING_CACHE_BATCH) {
+        b = LIGHTING_WRC_PLAIN_AT + 4u * (j + 3u);
+        ckeys.key[b] = 0u;
+        ckeys.key[b + 1u] = 0u;
+        ckeys.key[b + 2u] = 0u;
+        ckeys.key[b + 3u] = 0u;
+    }
+}
+// Cosine-weighted plain sample, already multiplied by 2 pi / rays. Clears the
+// scratch either way. False when a ray of the run never reported.
+bool lighting_wrc_plain_sample(uint j, uint run, float rays, out vec3 e) {
+    vec3 sum = vec3(0.0);
+    uint n = 0u;
+    if (j < LIGHTING_CACHE_BATCH) {
+        uint b = LIGHTING_WRC_PLAIN_AT + 4u * j;
+        sum += vec3(float(ckeys.key[b]), float(ckeys.key[b + 1u]), float(ckeys.key[b + 2u]));
+        n += ckeys.key[b + 3u];
+    }
+    if (run > 1u && j + 1u < LIGHTING_CACHE_BATCH) {
+        uint b = LIGHTING_WRC_PLAIN_AT + 4u * (j + 1u);
+        sum += vec3(float(ckeys.key[b]), float(ckeys.key[b + 1u]), float(ckeys.key[b + 2u]));
+        n += ckeys.key[b + 3u];
+    }
+    if (run > 2u && j + 2u < LIGHTING_CACHE_BATCH) {
+        uint b = LIGHTING_WRC_PLAIN_AT + 4u * (j + 2u);
+        sum += vec3(float(ckeys.key[b]), float(ckeys.key[b + 1u]), float(ckeys.key[b + 2u]));
+        n += ckeys.key[b + 3u];
+    }
+    if (run > 3u && j + 3u < LIGHTING_CACHE_BATCH) {
+        uint b = LIGHTING_WRC_PLAIN_AT + 4u * (j + 3u);
+        sum += vec3(float(ckeys.key[b]), float(ckeys.key[b + 1u]), float(ckeys.key[b + 2u]));
+        n += ckeys.key[b + 3u];
+    }
+    lighting_wrc_plain_clear(j, run);
+    e = sum * (LIGHTING_TAU / LIGHTING_WRC_PLAIN_SCALE) / max(rays, 1.0);
+    return n == uint(rays) && n > 0u;
+}
 // Tunables (S59E, Anthony: "bump up the quality before it settles"): whole sets
 // until LIGHTING_SC_FULL_SETS sets AND agreement within LIGHTING_SC_SETTLE_SD standard
 // deviations; an unsettled texel's priority is at least LIGHTING_SC_UNSETTLED_W times
@@ -2388,6 +2622,29 @@ uint lighting_sc_entries(uint slot, bool full) {
 // (a quarter from up to 2 m beside it), half over the sphere and half within
 // ~50 degrees of where the camera is heading (forward, plus its motion and turn
 // since the last frame the probes ran).
+// S73A off-screen pre-fill (Anthony 15:50: texels coming on screen when turning
+// or walking backwards must already be filled). Lumen keeps the surface cache
+// resident for what rays hit, on screen or not: GPU feedback marks the pages
+// ray hits use (Wright et al. 2022, "Lumen", Surface Cache GPU Feedback), and
+// its update priority is LastUsed - LastUpdated. Our fine texels were claimed
+// only by the pixels that show them, so a texel had no field the first frames
+// it was on screen. A quarter of the scout rays (s & 3 == 1) are primary rays
+// through a guard band just outside the frustum (Bavoil & Sainz 2009 /
+// Mara et al. 2016 guard band, but ray-traced instead of rastered, so a claim
+// is always on a surface the camera will see, never inside a wall), weighted
+// to the side the camera turns towards. Their hits claim the four corners and
+// stamp LastUsed (lighting_sc_feedback_claim, S73K). They do not seed: the
+// irradiance read that used to do that faults lavapipe inside this shader.
+// The scheduler then spends spare budget on them before they show.
+const bool LIGHTING_SC_GUARD = true;
+// Guard band width as a share of the half-extent of the view (0.5: a 90 degree
+// view sees ~11 degrees past each edge) [inferred].
+const float LIGHTING_SC_GUARD_W = 0.5;
+// Guard hits farther than this claim nothing (the WRC covers them) [inferred].
+const float LIGHTING_SC_GUARD_FAR = 40.0;
+bool lighting_sc_guard_ray(uint s) {
+    return LIGHTING_SC_GUARD && lighting_world_mode() == 3u && (s & 3u) == 1u;
+}
 void lighting_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
     uint h = lighting_hash(s * 0x9e3779b9u ^ lighting_round() * 0x85ebca6bu);
     float u1 = lighting_unit(h);
@@ -2402,6 +2659,34 @@ void lighting_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
         ahead = fwd + 8.0 * (eye - last_eye.xyz) + 4.0 * (fwd - normalize(last_fwd));
     }
     ahead = normalize(ahead + vec3(0.0, 1.0e-4, 0.0));
+    origin = eye;
+    if (lighting_sc_guard_ray(s)) {
+        // S73A guard band: a primary ray through the ring just outside the
+        // frustum (LIGHTING_SC_GUARD_W of the half-extent each side), favouring
+        // the side the camera turns towards.
+        float t = scene.view_right.w;
+        float aspect = scene.view_forward.w;
+        vec3 dturn = fwd - normalize(last_fwd + vec3(0.0, 1.0e-6, 0.0));
+        float tx = last_eye.w > 0.5 ? dot(dturn, scene.view_right.xyz) / (t * aspect) : 0.0;
+        float ty = last_eye.w > 0.5 ? dot(dturn, scene.view_up.xyz) / t : 0.0;
+        float tm = abs(tx) + abs(ty);
+        float u3 = lighting_unit(h ^ 0x27d4eb2fu);
+        float u4 = lighting_unit(h ^ 0x165667b1u);
+        float p_side = tm > 1.0e-3 ? clamp(0.5 + 0.4 * (abs(tx) - abs(ty)) / tm, 0.1, 0.9) : 0.5;
+        float gw = LIGHTING_SC_GUARD_W;
+        vec2 ndc;
+        if (u3 < p_side) {
+            float toward = abs(tx) > 1.0e-3 ? 0.85 : 0.5;
+            float sx = (u4 < toward) == (tx >= 0.0) ? 1.0 : -1.0;
+            ndc = vec2(sx * (1.0 + gw * u1), (2.0 * u2 - 1.0) * (1.0 + gw));
+        } else {
+            float toward = abs(ty) > 1.0e-3 ? 0.85 : 0.5;
+            float sy = (u4 < toward) == (ty >= 0.0) ? 1.0 : -1.0;
+            ndc = vec2(2.0 * u2 - 1.0, sy * (1.0 + gw * u1));
+        }
+        dir = normalize(fwd + ndc.x * t * aspect * scene.view_right.xyz + ndc.y * t * scene.view_up.xyz);
+        return;
+    }
     float z = (s & 1u) == 0u ? 1.0 - 2.0 * u1 : 1.0 - u1 * 0.36;
     float r = sqrt(max(1.0 - z * z, 0.0));
     float a = LIGHTING_TAU * u2;
@@ -2413,7 +2698,6 @@ void lighting_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
         vec3 b = cross(ahead, t);
         dir = normalize(t * local.x + b * local.y + ahead * local.z);
     }
-    origin = eye;
     if ((s & 3u) == 3u) {
         float u3 = lighting_unit(h ^ 0x27d4eb2fu);
         float b3 = LIGHTING_TAU * lighting_unit(h ^ 0x165667b1u);
@@ -2518,10 +2802,52 @@ void lighting_world_add(vec3 pos, vec3 n, vec3 e, bool changed) {
 // the surface cache and relights it; no method swap to the probes, whose
 // difference from the texels was the bright contact strip of the spin check).
 const bool LIGHTING_SC_KEEP_NEAR = true;
+// S73B Lumen surface cache GPU feedback (Wright et al. 2022): set while a scout
+// hit claims texels (lighting_sc_feedback, above); they are stamped used, not
+// shown, and their seeds mark no 25 cm cell as a pixel's need (S73C).
 vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj);
 // S72M: the pixel's screen-probe irradiance (lighting_compose.comp), -1 when none.
 vec3 lighting_px_probes = vec3(-1.0);
+// Scout feedback claims the four corners a pixel would, and stamps LastUsed.
+// The direct shader used to call lighting_world_irradiance for that and drop
+// the result. That read, inlined into the direct shader, faults lavapipe's
+// JIT. The claim is the part the scheduler needs; seeds and the blend stay on
+// the pixel path.
+void lighting_sc_feedback_claim_at(vec3 pos, vec3 n, vec3 wpos) {
+    if (lighting_sc_slanted(n)) {
+        return;
+    }
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 ta = vec3(0.0);
+    vec3 tb = vec3(0.0);
+    ta[(ax + 1u) % 3u] = 1.0;
+    tb[(ax + 2u) % 3u] = 1.0;
+    float size = lighting_cell_size(wpos);
+    vec2 uv = vec2(dot(pos, ta), dot(pos, tb)) / size - 0.5;
+    vec2 g0 = floor(uv);
+    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
+        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + 0.5;
+        vec3 q = pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));
+        uint slot = lighting_cache_find_sized(q, n, true, size, pos);
+        if (slot == ~0u) {
+            continue;
+        }
+        cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
+        lighting_sc_offer(slot, pos, lighting_sc_centre(q, n, size));
+    }
+}
+void lighting_sc_feedback_claim(vec3 pos, vec3 n) {
+    uint om = lighting_world_mode() == 3u ? lighting_mover_on(pos, n) : ~0u;
+    if (om != ~0u) {
+        lighting_obj_salt = lighting_mover(om, 1u).w;
+        lighting_sc_feedback_claim_at(lighting_mover_to_local(om, pos, false), lighting_mover_to_local(om, n, true), pos);
+        lighting_obj_salt = 0.0;
+        return;
+    }
+    lighting_sc_feedback_claim_at(pos, n, pos);
+}
 vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
+    lighting_px_unfilled = false;
     uint mode = lighting_world_mode();
     // Object-local texels (GENOS_LIGHTING_SC_LOCAL=1, GIBS): a pixel on a mover's
     // surface reads texels keyed in the mover's frame, which move and turn with
@@ -2566,13 +2892,24 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
     float trust = 0.0;
+    // Finished sets, weighted like the bilinear corners. A missing corner counts
+    // as zero finished sets. Only the compose display path tallies.
+    float unfilled_cov = 0.0;
+    float unfilled_sets = 0.0;
+    bool tally = lighting_sc_display && mode == 3u && lighting_unfilled_count();
     [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
         vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + 0.5;
         vec3 q = pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));
         float bil = ((k & 1u) == 1u ? f.x : 1.0 - f.x) * ((k >> 1u) == 1u ? f.y : 1.0 - f.y);
+        if (tally) {
+            unfilled_cov += bil;
+        }
         uint slot = lighting_cache_find_sized(q, n, mode != 2u, size, pos);
         if (slot == ~0u) {
             continue;
+        }
+        if (tally) {
+            unfilled_sets += bil * floor(max(cache.v[3u * slot + 2u].w, 0.0));
         }
         cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
         bool split = mode == 3u && lighting_sc_seed_split() && size <= 0.2;
@@ -2591,7 +2928,15 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         }
         if (mode == 3u) {
             lighting_sc_offer(slot, pos, lighting_sc_centre(q, n, size));
-            cache.v[LIGHTING_WORLD_AT + slot].z = uintBitsToFloat(lighting_frame());
+            // S73B: a feedback claim (off-screen scout hit) marks the texel used
+            // (LastUsed, above) but not shown.
+            if (!lighting_sc_feedback) {
+                uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z);
+                if (shown == 0u && cache.v[3u * slot + 1u].w <= 0.2 && cache.v[3u * slot + 2u].w > 0.5) {
+                    lighting_sc_prefill_handoff(slot);
+                }
+                cache.v[LIGHTING_WORLD_AT + slot].z = uintBitsToFloat(lighting_frame());
+            }
         }
         vec4 v = mode == 3u ? lighting_sc_shown(slot) : (mode != 2u ? cache.v[3u * slot + 2u] : cache.v[LIGHTING_WORLD_AT + slot]);
         if (mode == 3u && lighting_sc_stale(slot)) {
@@ -2663,6 +3008,14 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     bool light_swap = !lighting_sc_light_quiet() && (lighting_sc_flags() & 1048576u) == 0u;
     if (mode == 3u && (light_swap || (!obj && !LIGHTING_SC_KEEP_NEAR && lighting_near_change(pos)) || (lighting_sc_flags() & 512u) != 0u)) {
         trust = 0.0;
+    }
+    if (tally && unfilled_cov > 0.0) {
+        atomicAdd(gstats.shaded, 1u);
+        if (unfilled_sets < unfilled_cov * LIGHTING_UNFILLED_MIN_SETS) {
+            atomicAdd(gstats.unfilled, 1u);
+            lighting_unfilled_mark(lighting_compose_px);
+            lighting_px_unfilled = true;
+        }
     }
     return vec4(wsum > 0.0 ? sum / wsum : vec3(0.0), trust);
 }
@@ -2892,8 +3245,8 @@ bool lighting_svgf_is_dirty(uint s, uint k) {
 // always dense; a threshold of 1 keeps the lists up to the cap.
 const bool LIGHTING_ATROUS_LISTS = true;
 const uint LIGHTING_ATROUS_LIST_CAP = 65536u;
-const uint LIGHTING_ATROUS_MARK_AT = LIGHTING_CHECK_P_AT + 16u;
-const uint LIGHTING_ATROUS_LIST_AT = LIGHTING_ATROUS_MARK_AT + 5u * LIGHTING_CACHE_SLOTS;
+// LIGHTING_ATROUS_MARK_AT and LIGHTING_ATROUS_LIST_AT are declared with the
+// pre-fill list, above lighting_cache_batch_slot.
 // Past the S78Z verify/wake reservation. Host writes the threshold; the rest
 // is this frame's list decision and the dense-path recount.
 // After the compose words (count, y, z, full, stamps, list, packs, rects); this used to alias LIGHTING_COMPOSE_AT.

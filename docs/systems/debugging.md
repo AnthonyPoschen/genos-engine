@@ -92,6 +92,19 @@ On a box without a GPU this runs on lavapipe under a headless Weston
 (`XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`). The first run after a shader change spends
 minutes compiling pipelines.
 
+Surface-cache pre-fill has its own check, ignored so a normal test run does not
+open a window:
+
+```sh
+tools/lighting/headless.sh
+```
+
+It settles the small hall on lavapipe, then turns in place. Fine texels no pixel
+has shown must already hold a finished set, and the turn must bring some of those
+texels on screen. `GENOS_GI_PREFILL_SETTLE` (default 96) and `GENOS_GI_PREFILL_TURN`
+(default 24) set the frame counts. `GENOS_LIGHTING_SC_TRACE=1` (the test sets it)
+prints `prefill_listed`, `prefill_taken` and `prefill_sets` each frame.
+
 The report directory holds `report.md` (checks, log, every step with its reply,
 images), `result.json`, and every image the script saved.
 
