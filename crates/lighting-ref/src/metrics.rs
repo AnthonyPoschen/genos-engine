@@ -57,6 +57,14 @@ impl FrameMetrics {
     }
 }
 
+/// Mean relative luminance only. The settle loop calls this every frame and
+/// does not run FLIP.
+pub fn mean_relative(reference: &Picture, candidate: &Picture, floor: f64) -> Result<f64, String> {
+    same_size(reference, candidate)?;
+    let rel = relative(reference, candidate, floor);
+    Ok(mean_p99(&rel).0)
+}
+
 /// `still` is a fixed camera over time. `after_event` is `(frames after, picture)`
 /// compared with `reference`, which is the settled picture after the change.
 pub fn measure(
@@ -237,6 +245,9 @@ mod tests {
         let candidate = reference.scaled(1.4);
         let m = measure(&reference, &candidate, None, &[], &MetricParams::default()).unwrap();
         assert!((m.mean_rel.unwrap() - 0.4).abs() < 1.0e-4);
+        let cheap =
+            mean_relative(&reference, &candidate, MetricParams::default().rel_floor).unwrap();
+        assert!((cheap - m.mean_rel.unwrap()).abs() < 1.0e-9);
         assert!(m.flip_mean.unwrap() > 0.2);
         assert!(m.flicker.is_none());
     }

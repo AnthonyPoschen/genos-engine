@@ -8,11 +8,12 @@ use genos_lighting_ref::metrics::{measure, FrameMetrics};
 use genos_lighting_ref::policy::{self, ExitFacts};
 use genos_lighting_ref::report::{self, CheckpointAudit, RunReport};
 use genos_lighting_ref::store::{self, TraceNote};
-use genos_lighting_ref::verdict::{judge, Judge, MetricId};
+use genos_lighting_ref::verdict::{judge, Judge, MetricId, Verdict};
 use genos_lighting_ref::Picture;
 
 use super::capture::{self, CaptureOptions, Job, LiveShot};
 use super::generate::{self, GenerateOptions, TraceProfile};
+use super::schedule::{self, FramePlan, FrameRecord};
 
 const STILL_REQUIRE: &[MetricId] = &[MetricId::Flicker];
 const EVENT_REQUIRE: &[MetricId] = &[
@@ -35,6 +36,7 @@ pub struct CheckOptions {
     pub skip_capture: bool,
     pub only_scene: Option<String>,
     pub only_checkpoint: Option<String>,
+    pub plan: FramePlan,
 }
 
 struct Wanted {
@@ -87,9 +89,19 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
         ));
     }
     notes.push(candidate_note(opts.full_effort));
+    notes.push(plan_note(&opts.plan));
 
     let (baselines, baseline_label) = load_baseline(opts, &mut notes)?;
-    let live = capture_live(opts, &wanted, &mut notes)?;
+    let live = capture_live(opts, &wanted, config.params.rel_floor, &mut notes)?;
+    if live.iter().any(|shot| !shot.log.is_empty()) {
+        let rows: Vec<FrameRecord> = live
+            .iter()
+            .flat_map(|shot| shot.log.iter().cloned())
+            .collect();
+        let path = out.join("frames.tsv");
+        schedule::write_frames_tsv(&path, &rows)?;
+        notes.push(format!("Frame log {}.", path.display()));
+    }
     let mut checkpoints = Vec::new();
     let mut saved = Vec::new();
     let mut scored = 0usize;
@@ -133,7 +145,7 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
                 .iter()
                 .find(|row| row.scene == item.scene && row.checkpoint == item.checkpoint)
         });
-        let judgement = judge(Judge {
+        let mut judgement = judge(Judge {
             metrics: &metrics,
             config: &config,
             baseline: baseline.map(|row| &row.baseline),
@@ -141,6 +153,13 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
             reference_noise: f64::from(trace.noise),
             require,
         });
+        if shot.review && judgement.verdict == Verdict::Pass {
+            judgement.verdict = Verdict::NeedsHuman;
+            judgement.reasons.push(
+                "the settle cap was reached before mean relative luminance crossed the threshold; this capture is for review and does not auto-pass"
+                    .into(),
+            );
+        }
         println!(
             "{} {}  {}",
             item.scene,
@@ -221,6 +240,26 @@ fn references_ready(dir: &Path, profile: &TraceProfile, wanted: &[Wanted]) -> bo
     })
 }
 
+fn plan_note(plan: &FramePlan) -> String {
+    let settle = match plan.settle {
+        schedule::SettleMode::Frames(n) => format!("{n} settle frames"),
+        schedule::SettleMode::Metric { threshold, cap } => {
+            format!("settle when mean relative luminance is under {threshold} or {cap} frames")
+        }
+    };
+    let offsets = plan
+        .capture_offsets
+        .iter()
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(",+");
+    format!(
+        "Frame clock {} s, warmup {} frames, {settle}, captures at event+{offsets}. Lavapipe-small and owner mode use this same list. Wall time is logged.",
+        schedule::format_dt(plan.fixed_dt),
+        plan.warmup_frames,
+    )
+}
+
 fn candidate_note(full_effort: bool) -> String {
     if full_effort {
         "Candidate lighting is full effort: maximum knobs, not a second ground truth.".into()
@@ -256,6 +295,7 @@ fn load_baseline(
 fn capture_live(
     opts: &CheckOptions,
     wanted: &[Wanted],
+    rel_floor: f64,
     notes: &mut Vec<String>,
 ) -> Result<Vec<LiveShot>, String> {
     if opts.skip_capture {
@@ -269,6 +309,8 @@ fn capture_live(
             checkpoint: item.checkpoint.clone(),
             still: item.still,
             event: item.event,
+            reference: store::read_reference(&opts.reference_dir, &item.scene, &item.checkpoint)
+                .ok(),
         })
         .collect();
     match capture::capture(&CaptureOptions {
@@ -276,6 +318,8 @@ fn capture_live(
         height: opts.profile.height,
         full_effort: opts.full_effort,
         lavapipe_small: opts.mode == "lavapipe-small",
+        plan: opts.plan.clone(),
+        rel_floor,
         jobs,
     }) {
         Ok(outcome) => {
@@ -314,9 +358,9 @@ fn after_frames<'a>(item: &Wanted, shot: &'a LiveShot) -> Vec<(u32, &'a Picture)
     if item.event.is_none() {
         return Vec::new();
     }
-    [1u32, 2, 4, 8]
-        .into_iter()
-        .filter_map(|k| shot.frames.get(k as usize - 1).map(|picture| (k, picture)))
+    shot.event_frames
+        .iter()
+        .map(|(k, picture)| (*k, picture))
         .collect()
 }
 

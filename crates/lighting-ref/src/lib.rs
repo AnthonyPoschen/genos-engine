@@ -18,7 +18,7 @@ pub mod selftest;
 pub mod store;
 pub mod verdict;
 
-pub use metrics::{measure, FrameMetrics, MetricParams};
+pub use metrics::{mean_relative, measure, FrameMetrics, MetricParams};
 
 pub use catalog::{available_checkpoints, checkpoints, scene, scenes, CheckpointDesc, SceneDesc};
 pub use paths::{refcheck_dir, reference_dir, utc_stamp, DEBUG_DIR};

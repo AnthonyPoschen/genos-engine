@@ -26,7 +26,7 @@ pub const BLIND_SPOTS: &[&str] = &[
     "Lavapipe is a wiring check. Quality judgement is the owner GPU run.",
     "GPU frames are not cross-device deterministic. The path trace is deterministic for a given engine commit, scene, and sample count.",
     "A held stale frame on a still scene with no event matches a converged picture and is not caught. The box-step checkpoint exists so a held frame after a change is caught.",
-    "Owner mode draws until the picture settles or 120 frames, then scores that tail. Lavapipe-small draws a short sequence and does not wait. Neither calls wait_settled. A picture that is still unfilled at the cap fails that capture.",
+    "Owner mode and lavapipe-small share one frame plan: a fixed scene step (default 1/60 s), warmup frames, then a settle-frame count or a mean-relative-luminance threshold with a frame cap, and the same capture offsets (default event+1, +2, +4, +8). Wall time is a column in the frame log. The scene pose follows the frame index. picture_settled is logged and ignored on the first frame of a pose. The check does not call wait_settled. A picture that is still over the line when the settle cap is reached fails that capture and stays for review.",
 ];
 
 #[derive(Clone, Debug)]

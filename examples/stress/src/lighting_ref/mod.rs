@@ -10,6 +10,7 @@ mod capture;
 mod check;
 mod generate;
 mod scenes;
+mod schedule;
 
 use std::path::PathBuf;
 
@@ -79,6 +80,12 @@ impl Options {
         let mut candidate = "default".to_string();
         let mut reference_method = "path".to_string();
         let mut skip_capture = false;
+        let mut fixed_dt = None;
+        let mut warmup_frames = None;
+        let mut settle_frames = None;
+        let mut settle = None;
+        let mut settle_cap = None;
+        let mut capture_frames = None;
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
             match arg.as_str() {
@@ -97,6 +104,12 @@ impl Options {
                 "--candidate" => candidate = value()?,
                 "--reference" => reference_method = value()?,
                 "--skip-capture" => skip_capture = true,
+                "--fixed-dt" => fixed_dt = Some(value()?),
+                "--warmup-frames" => warmup_frames = Some(value()?),
+                "--settle-frames" => settle_frames = Some(value()?),
+                "--settle" => settle = Some(value()?),
+                "--settle-cap" => settle_cap = Some(value()?),
+                "--capture-frames" => capture_frames = Some(value()?),
                 other => return Err(format!("unknown argument {other}")),
             }
         }
@@ -108,7 +121,17 @@ impl Options {
                         .into(),
                 );
             }
-            if base.is_some() || baseline.is_some() || config.is_some() || skip_capture {
+            if base.is_some()
+                || baseline.is_some()
+                || config.is_some()
+                || skip_capture
+                || fixed_dt.is_some()
+                || warmup_frames.is_some()
+                || settle_frames.is_some()
+                || settle.is_some()
+                || settle_cap.is_some()
+                || capture_frames.is_some()
+            {
                 return Err("that flag is for lighting-ref check".into());
             }
             if candidate != "default" || reference_method != "path" {
@@ -166,6 +189,30 @@ impl Options {
         let baseline_path = baseline.or_else(|| {
             base.map(|sha| genos_lighting_ref::reference_dir(&sha).join("metrics.json"))
         });
+        let env_fixed = env_text("GENOS_LIGHTING_REF_FIXED_DT");
+        let env_warmup = env_text("GENOS_LIGHTING_REF_WARMUP_FRAMES");
+        let env_settle_frames = env_text("GENOS_LIGHTING_REF_SETTLE_FRAMES");
+        let env_settle = env_text("GENOS_LIGHTING_REF_SETTLE");
+        let env_cap = env_text("GENOS_LIGHTING_REF_SETTLE_CAP");
+        let env_capture = env_text("GENOS_LIGHTING_REF_CAPTURE_FRAMES");
+        let plan = schedule::resolve_plan(
+            &schedule::PlanText {
+                fixed_dt: fixed_dt.as_deref(),
+                warmup_frames: warmup_frames.as_deref(),
+                settle_frames: settle_frames.as_deref(),
+                settle: settle.as_deref(),
+                settle_cap: settle_cap.as_deref(),
+                capture_frames: capture_frames.as_deref(),
+            },
+            &schedule::PlanText {
+                fixed_dt: env_fixed.as_deref(),
+                warmup_frames: env_warmup.as_deref(),
+                settle_frames: env_settle_frames.as_deref(),
+                settle: env_settle.as_deref(),
+                settle_cap: env_cap.as_deref(),
+                capture_frames: env_capture.as_deref(),
+            },
+        )?;
         Ok(Self {
             command: Command::Check(check::CheckOptions {
                 out,
@@ -180,6 +227,7 @@ impl Options {
                 skip_capture,
                 only_scene,
                 only_checkpoint,
+                plan,
             }),
         })
     }
@@ -188,6 +236,13 @@ impl Options {
 fn parse_u32(text: &str) -> Result<u32, String> {
     text.parse::<u32>()
         .map_err(|_| format!("expected a number, got {text}"))
+}
+
+fn env_text(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 fn git_commit() -> String {
@@ -236,11 +291,60 @@ mod tests {
     }
 
     #[test]
+    fn check_defaults_to_a_fixed_sixtieth() {
+        let opts = Options::parse(words("check").into_iter()).unwrap();
+        let Command::Check(check) = opts.command else {
+            panic!("expected check");
+        };
+        assert!((check.plan.fixed_dt - schedule::DEFAULT_DT).abs() < 1.0e-6);
+        assert_eq!(check.plan.warmup_frames, 0);
+        assert_eq!(check.plan.capture_offsets, vec![1, 2, 4, 8]);
+        assert_eq!(
+            check.plan.settle,
+            schedule::SettleMode::Metric {
+                threshold: schedule::DEFAULT_SETTLE_THRESHOLD,
+                cap: schedule::DEFAULT_SETTLE_CAP,
+            }
+        );
+    }
+
+    #[test]
+    fn capture_frames_accept_the_event_form() {
+        let opts = Options::parse(
+            words("check --capture-frames event+1,+2,+4,+8 --settle-frames 6").into_iter(),
+        )
+        .unwrap();
+        let Command::Check(check) = opts.command else {
+            panic!("expected check");
+        };
+        assert_eq!(check.plan.capture_offsets, vec![1, 2, 4, 8]);
+        assert_eq!(check.plan.settle, schedule::SettleMode::Frames(6));
+    }
+
+    #[test]
+    fn settle_switches_cannot_both_be_set() {
+        let err = match Options::parse(words("check --settle-frames 4 --settle 0.05").into_iter()) {
+            Err(err) => err,
+            Ok(_) => panic!("both settle switches were accepted"),
+        };
+        assert!(err.contains("settle"), "{err}");
+    }
+
+    #[test]
     fn generate_rejects_an_audit_directory() {
         let err = match Options::parse(words("--out reports").into_iter()) {
             Err(err) => err,
             Ok(_) => panic!("generate accepted --out"),
         };
         assert!(err.contains("--out"));
+    }
+
+    #[test]
+    fn generate_rejects_a_frame_flag() {
+        let err = match Options::parse(words("--fixed-dt 0.1").into_iter()) {
+            Err(err) => err,
+            Ok(_) => panic!("generate accepted --fixed-dt"),
+        };
+        assert!(err.contains("check"), "{err}");
     }
 }

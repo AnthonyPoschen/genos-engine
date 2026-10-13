@@ -4,8 +4,10 @@ use genos_debug::RefSetup;
 use genos_scene::{Camera, Scene, Vec3, CAMERA_HEIGHT};
 
 use crate::building::{self, Building, Layout, LightMix, View};
+use crate::stage::{Scale, Stage};
 
 use super::generate::TraceProfile;
+use super::schedule::DAY_SECONDS;
 
 pub struct Shot {
     pub scene_id: &'static str,
@@ -114,13 +116,49 @@ pub fn scene_and_camera(shot: &Shot, full_effort: bool) -> (Scene, Camera) {
     if full_effort {
         scene.lighting.apply_full_effort();
     }
+    (scene, camera_for(shot))
+}
+
+fn camera_for(shot: &Shot) -> Camera {
     let mut camera = Camera::new(shot.eye[0], shot.eye[2], shot.yaw);
     camera.set_pose(
         Vec3::new(shot.eye[0], shot.eye[1], shot.eye[2]),
         shot.yaw,
         shot.pitch,
     );
-    (scene, camera)
+    camera
+}
+
+/// The stress stage at this shot's lamp mix. Clocks are applied per frame so
+/// the live picture and the path trace meet on the scored pose.
+pub fn open_stage(shot: &Shot, full_effort: bool) -> (Stage, Camera) {
+    let mut stage = Stage::new(
+        Scale::SMALL,
+        1,
+        LightMix {
+            count: shot.lights,
+            dynamic_pct: shot.dynamic_pct,
+            layout: Layout::Spread,
+        },
+        1.0,
+        shot.day,
+        DAY_SECONDS,
+    );
+    stage.sun_speed = super::schedule::SUN_SPEED;
+    stage.sun_frozen = true;
+    stage.boxes_still = true;
+    stage.lamps_still = true;
+    if full_effort {
+        stage.world.scene.lighting.apply_full_effort();
+    }
+    (stage, camera_for(shot))
+}
+
+pub fn apply_clocks(stage: &mut Stage, box_time: f32, lamp_time: f32, day: f32) {
+    stage.box_clock = box_time;
+    stage.lamp_clock = lamp_time;
+    stage.day = day;
+    stage.apply();
 }
 
 pub fn reference_setup(shot: &Shot, profile: &TraceProfile) -> RefSetup {

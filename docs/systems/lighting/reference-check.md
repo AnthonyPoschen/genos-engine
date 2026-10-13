@@ -10,7 +10,8 @@ A lighting change is checked against ground truth for each test scene, instead o
 
 - Ground truth is the CPU path tracer in `crates/debug/src/reference.rs`. It does not read the GI caches. Full-effort accumulation is the runtime at its maximum knobs. It is not a second ground truth.
 - The candidate is the current build's lighting. `--candidate full-effort` spends those maximum knobs. `GENOS_LIGHTING_FULL_EFFORT` (any value except `0`, `false`, `off`, `no`) still overlays the scene, and it is applied last.
-- A value inside the band around a fail line does not auto-pass. One sample per pixel does not auto-pass. Two metrics that disagree, neither a clear fail, need a person.
+- A value inside the band around a fail line does not auto-pass. One sample per pixel does not auto-pass. Two metrics that disagree, neither a clear fail, need a person. A capture that is still over the line when the settle cap is reached stays a fail and is marked for review.
+- The scene clock is a fixed step, `--fixed-dt`, default 1/60 s. Lamp motion, box motion, and the day clock advance once per frame. Wall time is written in `frames.tsv` and does not choose the pose. Owner mode and lavapipe-small use the same frame indices. Lavapipe-small changes the picture size and the sample count.
 - Reports are written in the current directory. The default is `./genos-debug/refcheck/<timestamp>/`. `--out` overrides it. The tool does not write to `$HOME`.
 - Reference pictures are `./genos-debug/reference/<commit>/`, unless `--reference-dir` is set. `./genos-debug/` is gitignored.
 
@@ -41,6 +42,21 @@ cargo run --release -p genos-stress -- lighting-ref check \
 
 `--mode lavapipe-small` is the small run. When `VK_ICD_FILENAMES` is unset and `/usr/share/vulkan/icd.d/lvp_icd.json` exists, that mode selects lavapipe. `--skip-capture` scores no live frames (the self-test and the path traces still run). `--config <file>` replaces `crates/lighting-ref/lighting-ref.conf`.
 
+Frame control, arguments first. Each name has an environment mirror (`GENOS_LIGHTING_REF_FIXED_DT`, `GENOS_LIGHTING_REF_WARMUP_FRAMES`, `GENOS_LIGHTING_REF_SETTLE_FRAMES`, `GENOS_LIGHTING_REF_SETTLE`, `GENOS_LIGHTING_REF_SETTLE_CAP`, `GENOS_LIGHTING_REF_CAPTURE_FRAMES`). A flag wins over its variable.
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--fixed-dt SECONDS` | 1/60 | Scene seconds added on each frame. |
+| `--warmup-frames N` | 0 | Frames held on the starting pose before the approach or the event. |
+| `--settle-frames N` |  | Score the Nth frame on the scored pose. |
+| `--settle THRESHOLD` | 0.05 | Keep drawing until mean relative luminance is at or under this, or the cap. |
+| `--settle-cap N` | 180 | Frame cap for `--settle`. |
+| `--capture-frames LIST` | `event+1,+2,+4,+8` | Frames after an event. `1,2,4,8` is the same list. |
+
+`--settle-frames` and `--settle` together are an error. The same is true of the two environment variables when neither flag is set. These flags belong to `lighting-ref check`. They are not lighting settings. The live stress binary's fixed step is `--fixed-dt` and MCP `time`, and manual stepping is `--step` (Space, or MCP `step`).
+
+A still checkpoint warms up, then holds the catalog pose. A moving checkpoint warms up at time 0, steps the lamp and box clocks by `--fixed-dt` until they reach the catalog time, and holds there. The day starts early by that approach and arrives at the catalog day on the scored pose, then holds. An event warms up on the pose before the jump (`box-step-before`'s clocks) and switches on the next frame. `event+1` is that frame. The candidate for mean error and FLIP is the settle frame. Flicker uses that frame and the next held frame. Convergence uses the capture offsets. `frames.tsv` in the report records frame index, sim time, wall time, `picture_settled`, and the mean relative luminance for every frame.
+
 Exit status:
 
 | Code | Meaning |
@@ -49,7 +65,7 @@ Exit status:
 | 1 | Fail. The self-test missed a planted defect, or a scored picture failed. |
 | 2 | Needs a person. Owner mode with no live frames is 2, so a missing window is visible. A one-sample compare does not take the pass path. |
 
-The report is `summary.md` and `summary.html`, plus `metrics.json`, and for each scored checkpoint `reference.png`, `candidate.png`, `side-by-side.png`, and `heatmap.png`. The planted-defect report is `self-test/summary.md`.
+The report is `summary.md` and `summary.html`, plus `metrics.json` and `frames.tsv`, and for each scored checkpoint `reference.png`, `candidate.png`, `side-by-side.png`, and `heatmap.png`. The planted-defect report is `self-test/summary.md`.
 
 ## Scenes
 
@@ -103,7 +119,7 @@ Printed in every summary:
 - Lavapipe is a wiring check. Quality is the owner GPU run.
 - GPU frames are not cross-device deterministic. The path trace is deterministic for a given commit, scene, and sample count.
 - A held stale frame on a still scene with no box step matches a converged picture and is not caught.
-- Owner mode draws until the picture settles or 120 frames. Lavapipe-small does not wait. Neither calls `wait_settled`.
+- Owner mode and lavapipe-small share one frame plan (fixed step, warmup, settle, capture offsets). Wall time is logged. The scene pose follows the frame index. `picture_settled` is logged and ignored on the first frame of a pose. The check does not call `wait_settled`. A picture still over the line at the settle cap fails that capture and stays for review.
 
 ## Code
 
@@ -116,5 +132,5 @@ Printed in every summary:
 - Replicated state: none. Pictures and metrics stay in the directory of the run.
 - Authority: the machine that runs the check.
 - Prediction / rollback: none.
-- Determinism: the path trace is deterministic for a commit, a scene, and a sample count. Live GPU frames are not cross-device deterministic.
+- Determinism: the path trace is deterministic for a commit, a scene, and a sample count. Live frames share one index list and one fixed scene step, so a slow machine reaches the same pose as a fast one. The pixels are not cross-device deterministic.
 - Headless server: it does not run this check. Lavapipe-small is a local wiring run.

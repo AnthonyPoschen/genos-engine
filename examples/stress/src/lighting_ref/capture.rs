@@ -1,26 +1,30 @@
 //! Live frames for one check.
 //!
-//! The path trace is the reference. These frames are the candidate. Owner
-//! mode waits until the picture settles, or 120 frames, then keeps a short
-//! tail. Lavapipe-small keeps a short sequence and does not wait. The box
-//! step is warmed on the pose before the jump, then frames 1 through 8 are
-//! the frames after it.
+//! The path trace is the reference. These frames are the candidate. Every mode
+//! uses the same [`super::schedule::FramePlan`]: warmup, then an approach or an
+//! event jump, then settle. Wall time is logged per frame and does not choose
+//! when to stop. `picture_settled` is logged and ignored on the first frame of
+//! a pose, because that flag can still describe the pose before it.
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use genos_lighting_ref::Picture;
-use genos_render::{Renderer, World};
-use genos_scene::Camera;
+use genos_lighting_ref::{mean_relative, Picture};
+use genos_render::Renderer;
 use genos_window::Window;
 
 use super::scenes::{self, Shot};
+use super::schedule::{
+    self, candidate_settle_index, format_mean, stop_after, FramePlan, FrameRecord, Phase,
+    SettleMode, Target, Timeline,
+};
 
 pub struct Job {
     pub scene: String,
     pub checkpoint: String,
     pub still: bool,
     pub event: Option<&'static str>,
+    pub reference: Option<Picture>,
 }
 
 pub struct LiveShot {
@@ -28,7 +32,11 @@ pub struct LiveShot {
     pub checkpoint: String,
     pub frames: Vec<Picture>,
     pub settled: Option<Picture>,
+    pub event_frames: Vec<(u32, Picture)>,
+    pub log: Vec<FrameRecord>,
     pub note: String,
+    /// The settle cap was reached before the threshold. A passing verdict becomes review.
+    pub review: bool,
 }
 
 pub struct CaptureOutcome {
@@ -41,14 +49,10 @@ pub struct CaptureOptions {
     pub height: u32,
     pub full_effort: bool,
     pub lavapipe_small: bool,
+    pub plan: FramePlan,
+    pub rel_floor: f64,
     pub jobs: Vec<Job>,
 }
-
-const OWNER_SETTLE_CAP: u32 = 120;
-const OWNER_STILL_TAIL: u32 = 4;
-const OWNER_WARM_CAP: u32 = 30;
-const EVENT_FRAMES: u32 = 8;
-const LAVAPIPE_BUDGET: Duration = Duration::from_secs(180);
 
 pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
     if opts.lavapipe_small && std::env::var_os("VK_ICD_FILENAMES").is_none() {
@@ -72,18 +76,9 @@ pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
             opts.height
         ));
     }
-    let started = Instant::now();
     let mut shots = Vec::new();
     let mut skipped = Vec::new();
-    for (index, job) in opts.jobs.iter().enumerate() {
-        if opts.lavapipe_small && index > 0 && started.elapsed() > LAVAPIPE_BUDGET {
-            skipped.push((
-                job.scene.clone(),
-                job.checkpoint.clone(),
-                "lavapipe-small time budget; this checkpoint was not captured".into(),
-            ));
-            continue;
-        }
+    for job in &opts.jobs {
         let Some(shot) = scenes::shot(&job.scene, &job.checkpoint) else {
             skipped.push((
                 job.scene.clone(),
@@ -107,150 +102,210 @@ fn capture_one(
     job: &Job,
     shot: &Shot,
 ) -> Result<LiveShot, String> {
-    if job.event == Some("box-step") {
-        if let Some(before) = scenes::shot("stress-moving", "box-step-before") {
-            let (scene, camera) = scenes::scene_and_camera(&before, opts.full_effort);
-            let world = World::from_scene(scene);
-            warm(window, renderer, &world, &camera, opts.lavapipe_small)?;
+    let mut timeline = Timeline::start(
+        opts.plan.clone(),
+        Target {
+            box_time: shot.box_time,
+            lamp_time: shot.lamp_time,
+            day: shot.day,
+            event: job.event.is_some(),
+        },
+    );
+    let (mut stage, camera) = scenes::open_stage(shot, opts.full_effort);
+    let max_offset = opts.plan.capture_offsets.iter().copied().max().unwrap_or(0);
+    let mut log = Vec::new();
+    let mut settle_pics = Vec::new();
+    let mut settle_frame_ids = Vec::new();
+    let mut crossed: Option<u32> = None;
+    let mut prev_phase: Option<Phase> = None;
+
+    loop {
+        let step = timeline.next();
+        scenes::apply_clocks(&mut stage, step.box_time, step.lamp_time, step.day);
+        let started = Instant::now();
+        let _ = window.pump();
+        let pixels = renderer.draw(&stage.world, &camera, true)?;
+        let wall_s = started.elapsed().as_secs_f64();
+        let pixels = pixels.ok_or_else(|| "readback returned no picture".to_string())?;
+        let picture = Picture::from_bgra(renderer.width(), renderer.height(), &pixels)?;
+        let raw_settled = renderer.picture_settled();
+        let trusted = prev_phase == Some(step.phase);
+        prev_phase = Some(step.phase);
+        let mean_rel = job
+            .reference
+            .as_ref()
+            .and_then(|reference| mean_relative(reference, &picture, opts.rel_floor).ok());
+        if step.phase == Phase::Settle {
+            if crossed.is_none() {
+                if let SettleMode::Metric { threshold, .. } = opts.plan.settle {
+                    if mean_rel.is_some_and(|err| err <= threshold) {
+                        crossed = Some(step.settle_index);
+                    }
+                }
+            }
+            settle_pics.push(picture);
+            settle_frame_ids.push(step.frame);
+        }
+        let settled_text = if trusted && raw_settled {
+            "true"
+        } else if trusted {
+            "false"
+        } else {
+            "false untrusted"
+        };
+        eprintln!(
+            "lighting-ref: {} {} frame {} sim {:.6} wall {:.3}s settled {settled_text} mean_rel {}",
+            job.scene,
+            job.checkpoint,
+            step.frame,
+            step.sim_time,
+            wall_s,
+            format_mean(mean_rel),
+        );
+        log.push(FrameRecord {
+            scene: job.scene.clone(),
+            checkpoint: job.checkpoint.clone(),
+            frame: step.frame,
+            sim_time: step.sim_time,
+            wall_s,
+            picture_settled: raw_settled,
+            trusted,
+            mean_rel,
+            captured: false,
+            phase: step.phase,
+            box_time: step.box_time,
+            lamp_time: step.lamp_time,
+            day: step.day,
+        });
+        let settle_count = settle_pics.len() as u32;
+        if stop_after(
+            opts.plan.settle,
+            settle_count,
+            crossed,
+            job.still,
+            max_offset,
+        ) {
+            break;
         }
     }
-    let (scene, camera) = scenes::scene_and_camera(shot, opts.full_effort);
-    let world = World::from_scene(scene);
-    let (frames, settled, note) = if job.event.is_some() {
-        let frames = read_frames(window, renderer, &world, &camera, EVENT_FRAMES)?;
-        if opts.lavapipe_small {
-            (
-                frames,
-                None,
-                "short sequence after the box step; lavapipe-small does not wait to settle".into(),
-            )
-        } else {
-            let settled = settle_one(window, renderer, &world, &camera, OWNER_SETTLE_CAP)?;
-            let note = if settled.is_some() {
-                "frames 1, 2, 4, and 8 after the box step; the candidate is the settled picture"
-                    .to_string()
-            } else {
-                format!(
-                    "frames 1, 2, 4, and 8 after the box step; the picture had not settled after {OWNER_SETTLE_CAP} frames"
-                )
-            };
-            (frames, settled, note)
+
+    if settle_pics.is_empty() {
+        return Err("the frame plan finished with no settle frame".into());
+    }
+    let settle_count = settle_pics.len() as u32;
+    let candidate_at = candidate_settle_index(opts.plan.settle, settle_count, crossed);
+    let candidate_index = (candidate_at - 1) as usize;
+    let settled = settle_pics.get(candidate_index).cloned();
+    let frames = flicker_pair(&settle_pics, candidate_index);
+    let mut keep = Vec::new();
+    if let Some(frame) = settle_frame_ids.get(candidate_index) {
+        keep.push(*frame);
+    }
+    if let Some(next) = settle_frame_ids.get(candidate_index + 1) {
+        keep.push(*next);
+    } else if candidate_index > 0 {
+        if let Some(prev) = settle_frame_ids.get(candidate_index - 1) {
+            keep.push(*prev);
         }
-    } else if job.still && !opts.lavapipe_small {
-        let settled_ok = draw_until_settled(window, renderer, &world, &camera, OWNER_SETTLE_CAP)?;
-        let frames = read_frames(window, renderer, &world, &camera, OWNER_STILL_TAIL)?;
-        let note = if settled_ok {
-            "picture settled, then a short still tail".into()
-        } else {
-            format!("picture had not settled after {OWNER_SETTLE_CAP} frames; the tail is what was captured")
-        };
-        (frames, None, note)
-    } else if job.still {
-        let frames = read_frames(window, renderer, &world, &camera, 2)?;
-        (
-            frames,
-            None,
-            "two frames; lavapipe-small does not wait to settle".into(),
-        )
-    } else {
-        let n = if opts.lavapipe_small { 1 } else { 2 };
-        let frames = read_frames(window, renderer, &world, &camera, n)?;
-        (frames, None, "one moment of the moving pose".into())
-    };
+    }
+    let mut event_frames = Vec::new();
+    for (index, picture) in settle_pics.iter().enumerate() {
+        let settle_index = (index as u32) + 1;
+        if opts.plan.capture_offsets.contains(&settle_index) {
+            if let Some(frame) = settle_frame_ids.get(index) {
+                keep.push(*frame);
+            }
+            if job.event.is_some() {
+                event_frames.push((settle_index, picture.clone()));
+            }
+        }
+    }
+    for row in &mut log {
+        row.captured = keep.contains(&row.frame);
+    }
+    let cap_hit = matches!(opts.plan.settle, SettleMode::Metric { cap, .. } if crossed.is_none() && settle_count >= cap);
+    let candidate_frame = settle_frame_ids.get(candidate_index).copied().unwrap_or(0);
+    let candidate_error = log
+        .iter()
+        .find(|row| row.frame == candidate_frame)
+        .and_then(|row| row.mean_rel);
     Ok(LiveShot {
         scene: job.scene.clone(),
         checkpoint: job.checkpoint.clone(),
         frames,
         settled,
-        note,
+        event_frames,
+        log,
+        review: cap_hit,
+        note: shot_note(
+            &opts.plan,
+            candidate_frame,
+            candidate_error,
+            cap_hit,
+            job.event.is_some(),
+            job.still && candidate_index + 1 >= settle_pics.len() && settle_pics.len() >= 2,
+        ),
     })
 }
 
-fn warm(
-    window: &mut Window,
-    renderer: &mut Renderer,
-    world: &World,
-    camera: &Camera,
-    lavapipe_small: bool,
-) -> Result<(), String> {
-    if lavapipe_small {
-        let _ = draw(window, renderer, world, camera, false)?;
-        return Ok(());
-    }
-    let _ = draw_until_settled(window, renderer, world, camera, OWNER_WARM_CAP)?;
-    Ok(())
-}
-
-fn draw_until_settled(
-    window: &mut Window,
-    renderer: &mut Renderer,
-    world: &World,
-    camera: &Camera,
-    cap: u32,
-) -> Result<bool, String> {
-    for _ in 0..cap {
-        let _ = draw(window, renderer, world, camera, false)?;
-        if renderer.picture_settled() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn settle_one(
-    window: &mut Window,
-    renderer: &mut Renderer,
-    world: &World,
-    camera: &Camera,
-    cap: u32,
-) -> Result<Option<Picture>, String> {
-    for _ in 0..cap {
-        if renderer.picture_settled() {
-            return draw(window, renderer, world, camera, true);
-        }
-        let _ = draw(window, renderer, world, camera, false)?;
-    }
-    Ok(None)
-}
-
-fn read_frames(
-    window: &mut Window,
-    renderer: &mut Renderer,
-    world: &World,
-    camera: &Camera,
-    count: u32,
-) -> Result<Vec<Picture>, String> {
-    let mut frames = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        let picture = draw(window, renderer, world, camera, true)?
-            .ok_or_else(|| "readback returned no picture".to_string())?;
-        frames.push(picture);
-    }
-    Ok(frames)
-}
-
-fn draw(
-    window: &mut Window,
-    renderer: &mut Renderer,
-    world: &World,
-    camera: &Camera,
-    readback: bool,
-) -> Result<Option<Picture>, String> {
-    let started = Instant::now();
-    let _ = window.pump();
-    let pixels = renderer.draw(world, camera, readback)?;
-    let picture = match pixels {
-        Some(pixels) => Some(Picture::from_bgra(
-            renderer.width(),
-            renderer.height(),
-            &pixels,
-        )?),
-        None => None,
+fn flicker_pair(pics: &[Picture], candidate: usize) -> Vec<Picture> {
+    let Some(chosen) = pics.get(candidate) else {
+        return Vec::new();
     };
-    eprintln!(
-        "lighting-ref: frame {:.2} s{}",
-        started.elapsed().as_secs_f64(),
-        if readback { "" } else { " (no readback)" }
-    );
-    Ok(picture)
+    if let Some(next) = pics.get(candidate + 1) {
+        vec![chosen.clone(), next.clone()]
+    } else if candidate > 0 {
+        vec![pics[candidate - 1].clone(), chosen.clone()]
+    } else {
+        vec![chosen.clone()]
+    }
+}
+
+fn shot_note(
+    plan: &FramePlan,
+    candidate_frame: u32,
+    mean_rel: Option<f64>,
+    cap_hit: bool,
+    event: bool,
+    tail_is_previous: bool,
+) -> String {
+    let settle = match plan.settle {
+        SettleMode::Frames(n) => format!("{n} settle frames"),
+        SettleMode::Metric { threshold, cap } => {
+            if cap_hit {
+                format!(
+                    "settle cap {cap} reached before mean relative luminance was under {threshold}"
+                )
+            } else {
+                format!("settled when mean relative luminance was under {threshold} (cap {cap})")
+            }
+        }
+    };
+    let captures = if event {
+        let list = plan
+            .capture_offsets
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",+");
+        format!(" Captures at event+{list}.")
+    } else {
+        String::new()
+    };
+    let review = if cap_hit {
+        " The settle cap was reached before the threshold. This capture is marked for review."
+    } else {
+        ""
+    };
+    let tail = if tail_is_previous {
+        " Flicker uses the previous held frame because the run ended on the candidate."
+    } else {
+        ""
+    };
+    format!(
+        "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, mean_rel {}.{review}{tail}{captures}",
+        schedule::format_dt(plan.fixed_dt),
+        plan.warmup_frames,
+        format_mean(mean_rel),
+    )
 }
