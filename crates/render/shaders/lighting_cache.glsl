@@ -111,6 +111,11 @@ bool lighting_gi_on() {
 bool lighting_sky_enabled() {
     return (gstats.ctrl_bits & 256u) != 0u;
 }
+// Bits 16..18. High writes 5, which is also the fallback when the field is 0.
+uint lighting_denoise_iters() {
+    uint n = (gstats.ctrl_bits >> 16u) & 7u;
+    return n == 0u ? 5u : n;
+}
 // Unlimited (bit 16384) is today's cache. 0 skips the read. A cache-ray hit
 // (kind 1) needs two bounces; a probe or a pixel needs one.
 bool lighting_bounce_ok() {
@@ -3226,13 +3231,16 @@ void lighting_svgf_iter(uint slot, uint it) {
     if (LIGHTING_DIRTY_ATROUS) {
         float vn;
         vec4 nw = lighting_svgf_load(dst, slot, vn);
-        if (it + 1u == 5u) {
+        if (it + 1u == lighting_denoise_iters()) {
             // The push and the IC placement read the last level from A.
+            // Five iterations land on level 5. Fewer iterations used to jump
+            // to the push while A still held an earlier level, so compose
+            // showed an unfiltered field (white boxes, noisy surfaces).
             cache.v[LIGHTING_SC_ATROUS_A + slot] = cache.v[dst + slot];
         }
         if (lighting_svgf_moved(nw, vn, old, vold)) {
             lighting_svgf_scatter(slot, it + 1u);
-            if (it + 1u == 5u) {
+            if (it + 1u == lighting_denoise_iters()) {
                 // S78B: the push of this texel and of its +-1 neighbours (IC gradient).
                 lighting_svgf_stamp(slot, 3u);
                 lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(1, 0)), 3u);

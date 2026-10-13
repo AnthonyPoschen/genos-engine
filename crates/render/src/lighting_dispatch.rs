@@ -54,6 +54,8 @@ const CTRL_AMBIENT: u32 = 4096;
 const CTRL_HEMISPHERE: u32 = 8192;
 const CTRL_BOUNCE_UNLIMITED: u32 = 16384;
 const CTRL_DIRECT_FRESH: u32 = 32768;
+/// Denoiser iterations in bits 16..18. 0 in that field means the tuned 5.
+const CTRL_DENOISE_ITERS_SHIFT: u32 = 16;
 
 /// What a buffer rebuild depends on. Screen size is compared beside this.
 pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32, u32, u32) {
@@ -140,6 +142,7 @@ pub(crate) fn pack_lighting_ctrl(
     if settings.prefill_this_frame() {
         bits |= CTRL_PREFILL;
     }
+    bits |= (settings.denoiser.iterations & 7) << CTRL_DENOISE_ITERS_SHIFT;
     if !settings.gi.enabled && mode != AmbientMode::Off {
         bits |= CTRL_AMBIENT;
     }
