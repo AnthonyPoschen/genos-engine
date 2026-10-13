@@ -213,6 +213,8 @@ pub(crate) struct Lighting {
     frame_counts: [[u32; BUCKETS]; 2],
     /// Shadows rode on the direct and hit dispatches of that slot.
     frame_shadow: [bool; 2],
+    /// The prefill scout was due on that slot. It shares the cache-ray dispatch.
+    frame_prefill: [bool; 2],
     /// Last collected frame (one frame behind the one just submitted).
     last_ms: [f64; BUCKETS],
     last_dispatches: [u32; BUCKETS],
@@ -331,6 +333,7 @@ impl Default for Lighting {
             frame_tags: [Vec::new(), Vec::new()],
             frame_counts: [[0; BUCKETS]; 2],
             frame_shadow: [false; 2],
+            frame_prefill: [false; 2],
             last_ms: [0.0; BUCKETS],
             last_dispatches: [0; BUCKETS],
             ctrl_bytes: [0; 64],
@@ -1720,6 +1723,7 @@ impl Gpu {
         self.lighting.frame_counts[slot] = planned.counts;
         self.lighting.frame_shadow[slot] = self.lighting.settings.shadows.enabled
             && (planned.counts[B_DIRECT as usize] > 0 || planned.counts[B_HIT as usize] > 0);
+        self.lighting.frame_prefill[slot] = self.lighting.settings.prefill_this_frame();
         let groups = planned.groups;
         let atrous_stages = planned.atrous_stages;
         self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);

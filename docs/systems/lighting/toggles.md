@@ -50,7 +50,7 @@ The S78S isolate toggles (`GENOS_LIGHTING_TOGGLES`: `freeze_cache`, `direct_only
 
 ## Scene file and Rhai
 
-`lighting_preset("low")` replaces the struct. `lighting("direct_lights=3; ambient_intensity=0.4")` overlays lines (`key=value`, split on newlines and `;`). A bad line fails the script. `preset=` inside the text replaces, then later keys overlay.
+`lighting_preset("low")` replaces the struct. `lighting("direct_lights=3; ambient_intensity=0.4")` overlays lines (`key=value`, split on newlines and `;`). A bad line fails the script. `preset=` inside the text replaces, then later keys overlay. After a manual edit the text prints `preset=custom` unless the knobs are exactly a named preset again. `preset=custom` does not replace the struct; the other lines are the value.
 
 The text form is `LightingSettings::to_text` / `parse`. Floats print with their debug form so they round-trip.
 
@@ -82,4 +82,4 @@ GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=medium make stress
 GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high make stress
 ```
 
-`make stress` is `cargo run --release -p genos-stress`. The `LIGHTING_MS` line names the passes and appends `cache_rays` and `shadows`.
+`make stress` is `cargo run --release -p genos-stress`. The `LIGHTING_MS` line names the passes and appends `cache_rays`, `shadows`, and `prefill`. `prefill` is 1 when the scout was due and 0 when it was not. The scout shares the cache-ray dispatch, so this is not a separate millisecond.

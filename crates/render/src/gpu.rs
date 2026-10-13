@@ -2090,6 +2090,7 @@ impl Gpu {
         let ids = std::mem::take(&mut times.lighting_ids[slot]);
         let tags = std::mem::take(&mut self.lighting.frame_tags[slot]);
         let shadow = self.lighting.frame_shadow[slot];
+        let prefill = self.lighting.frame_prefill[slot];
         let counts = self.lighting.frame_counts[slot];
         let mut bucket_ms = [0.0f64; BUCKETS];
         if !ids.is_empty() && !times.lighting_pool.is_null() {
@@ -2127,6 +2128,9 @@ impl Gpu {
                     }
                 }
                 times.lighting_frames += 1;
+                if prefill {
+                    times.prefill_frames += 1;
+                }
                 self.lighting.last_ms = bucket_ms;
                 self.lighting.last_dispatches = counts;
             }
@@ -2159,7 +2163,7 @@ impl Gpu {
         if times.lighting_frames > 0 {
             let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
-                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} shadows={:.3}",
+                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} shadows={:.3} prefill={:.3}",
                 times.lighting_frames,
                 g[0],
                 g[1],
@@ -2179,6 +2183,7 @@ impl Gpu {
                 times.world_pass[3] / f64::from(times.world_runs.max(1)),
                 times.lighting_bucket[B_CACHE_RAYS as usize] / f64::from(times.lighting_frames),
                 times.lighting_bucket[B_SHADOWS as usize] / f64::from(times.lighting_frames),
+                times.prefill_frames as f64 / f64::from(times.lighting_frames),
             );
         }
         if !times.light_spans.is_empty() {
@@ -5194,6 +5199,9 @@ struct GpuTimes {
     lighting: [f64; 9],
     /// Per-bucket sums, including cache rays, hit light, and shadows.
     lighting_bucket: [f64; 12],
+    /// Frames in this line whose prefill scout was due. Printed as a fraction,
+    /// not a millisecond: the scout shares the cache-ray dispatch.
+    prefill_frames: u32,
     /// Async light cache rounds (GI v2) and their GPU time.
     world_runs: u32,
     world_ms: f64,
@@ -5248,6 +5256,7 @@ impl Default for GpuTimes {
             lighting_frames: 0,
             lighting: [0.0; 9],
             lighting_bucket: [0.0; 12],
+            prefill_frames: 0,
             frame_spans: Vec::new(),
             light_spans: Vec::new(),
         }

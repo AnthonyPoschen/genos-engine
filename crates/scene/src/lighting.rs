@@ -486,10 +486,42 @@ impl LightingSettings {
         }
     }
 
+    /// `potato`, `low`, `medium`, `high`, or `custom` when the knobs are not
+    /// exactly one of those presets. A manual edit clears the named label.
+    pub fn preset_label(&self) -> &'static str {
+        for preset in LightingPreset::all() {
+            if self.same_knobs(&Self::preset(*preset)) {
+                return preset.name();
+            }
+        }
+        "custom"
+    }
+
+    fn same_knobs(&self, other: &Self) -> bool {
+        let mut a = self.clone();
+        let mut b = other.clone();
+        a.preset = LightingPreset::High;
+        b.preset = LightingPreset::High;
+        a == b
+    }
+
+    /// If the knobs are exactly a named preset, store that name. A manual edit
+    /// that no longer matches leaves the last name in the field; [`Self::preset_label`]
+    /// is what the text form prints.
+    fn sync_preset_field(&mut self) {
+        if let Some(preset) = LightingPreset::all()
+            .iter()
+            .copied()
+            .find(|preset| self.same_knobs(&Self::preset(*preset)))
+        {
+            self.preset = preset;
+        }
+    }
+
     /// One line per knob. A scene file and a settings file store this text.
     pub fn to_text(&self) -> String {
         let mut out = String::new();
-        let _ = writeln!(out, "preset={}", self.preset.name());
+        let _ = writeln!(out, "preset={}", self.preset_label());
         let _ = writeln!(out, "direct={}", bit(self.direct.enabled));
         let _ = writeln!(out, "direct_lights={}", self.direct.max_lights);
         let _ = writeln!(out, "direct_refresh={}", self.direct.refresh_frames);
@@ -548,9 +580,12 @@ impl LightingSettings {
             let key = key.trim();
             let value = value.trim();
             if key == "preset" {
-                preset = Some(
-                    LightingPreset::parse(value).ok_or_else(|| format!("unknown preset {value}"))?,
-                );
+                // `custom` does not replace the struct. Later lines are the value.
+                if !value.eq_ignore_ascii_case("custom") {
+                    preset = Some(
+                        LightingPreset::parse(value).ok_or_else(|| format!("unknown preset {value}"))?,
+                    );
+                }
             } else {
                 lines.push((key.to_string(), value.to_string()));
             }
@@ -560,6 +595,7 @@ impl LightingSettings {
             settings.set_key(&key, &value)?;
         }
         settings.sanitize();
+        settings.sync_preset_field();
         Ok(settings)
     }
 
@@ -569,8 +605,12 @@ impl LightingSettings {
         let value = value.trim();
         match key {
             "preset" => {
-                let preset = LightingPreset::parse(value).ok_or_else(|| format!("unknown preset {value}"))?;
-                *self = Self::preset(preset);
+                if value.eq_ignore_ascii_case("custom") {
+                    // Not a tier. The label is custom only when the knobs match none.
+                } else {
+                    let preset = LightingPreset::parse(value).ok_or_else(|| format!("unknown preset {value}"))?;
+                    *self = Self::preset(preset);
+                }
             }
             "direct" => self.direct.enabled = on(value)?,
             "direct_lights" => self.direct.max_lights = num_u32(value)?,
@@ -618,6 +658,9 @@ impl LightingSettings {
             _ => return Err(format!("unknown lighting setting {key}")),
         }
         self.sanitize();
+        if key != "preset" || value.eq_ignore_ascii_case("custom") {
+            self.sync_preset_field();
+        }
         Ok(())
     }
 

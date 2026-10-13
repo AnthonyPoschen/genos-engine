@@ -25,6 +25,11 @@ fn the_engine_settings_trait_reads_and_writes_lighting() {
     EngineSettings::set_key(&mut edited, "probe_rays", "32").unwrap();
     assert_eq!(edited.probes.rays, 32);
     assert!(edited.direct.enabled);
+    assert_eq!(edited.preset_label(), "custom");
+    assert!(EngineSettings::to_text(&edited).starts_with("preset=custom\n"));
+    let round = <LightingSettings as EngineSettings>::parse(&EngineSettings::to_text(&edited)).unwrap();
+    assert_eq!(round.probes.rays, 32);
+    assert_eq!(round.preset_label(), "custom");
 }
 
 #[test]
