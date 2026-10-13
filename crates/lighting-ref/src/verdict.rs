@@ -251,11 +251,20 @@ fn judge_one(id: MetricId, input: &Judge<'_>) -> MetricRow {
             if ceiling > 0.0 && value <= ceiling {
                 waived = true;
                 verdict = Verdict::Pass;
-                reason = format!(
-                    "{label} is {value:.4}, within reference noise {noise:.4} (ceiling {ceiling:.4}); blurred error and the luminance ratio are the gate",
-                    label = id.label(),
-                    noise = input.reference_noise,
-                );
+                reason = if id == MetricId::FlipP99 {
+                    format!(
+                        "{label} is {value:.4}, within {ceiling:.4} (reference noise {noise:.4}, edge floor {edge:.4}); blurred error and the luminance ratio are the gate",
+                        label = id.label(),
+                        noise = input.reference_noise,
+                        edge = input.config.flip_edge,
+                    )
+                } else {
+                    format!(
+                        "{label} is {value:.4}, within reference noise {noise:.4} (ceiling {ceiling:.4}); blurred error and the luminance ratio are the gate",
+                        label = id.label(),
+                        noise = input.reference_noise,
+                    )
+                };
             }
         }
     }
@@ -333,15 +342,19 @@ fn band_reason(
 
 fn noise_ceiling(id: MetricId, input: &Judge<'_>) -> f64 {
     let noise = input.reference_noise.max(0.0);
-    if noise == 0.0 || !id.uses_noise() {
-        return 0.0;
+    let mut ceiling = 0.0;
+    if noise > 0.0 && id.uses_noise() {
+        ceiling = noise * input.config.noise_multiple;
+        if id.noise_is_a_tail() {
+            ceiling *= input.config.noise_tail;
+        }
     }
-    let ceiling = noise * input.config.noise_multiple;
-    if id.noise_is_a_tail() {
-        ceiling * input.config.noise_tail
-    } else {
-        ceiling
+    // Silhouette pixels. The reference primary and the renderer already share
+    // the pixel centre, with antialias off. This floor is the direct-only trial.
+    if id == MetricId::FlipP99 {
+        ceiling = ceiling.max(input.config.flip_edge);
     }
+    ceiling
 }
 
 fn disagreement(rows: &[MetricRow], delta_min: f64) -> Option<String> {
@@ -511,6 +524,27 @@ mod tests {
         let metrics = with_scores(0.35, 0.04, 1.03);
         let result = judged(&metrics, None, 64, 0.31);
         assert_eq!(result.verdict, Verdict::Pass, "{:?}", result.reasons);
+    }
+
+    #[test]
+    fn direct_only_flip_p99_passes_at_the_edge_floor() {
+        // 0d16c2b, direct-only hall: ratio 1.016, blur 0.003, FLIP p99 0.84.
+        let mut metrics = with_scores(0.04, 0.003, 1.016);
+        metrics.flip_mean = Some(0.04);
+        metrics.flip_p99 = Some(0.84);
+        let result = judged(&metrics, None, 64, 0.02);
+        assert_eq!(result.verdict, Verdict::Pass, "{:?}", result.reasons);
+        let row = result
+            .rows
+            .iter()
+            .find(|row| row.id == MetricId::FlipP99)
+            .unwrap();
+        assert_eq!(row.verdict, Verdict::Pass);
+        assert!(row.reason.contains("edge floor"), "{}", row.reason);
+
+        metrics.flip_p99 = Some(0.99);
+        let broken = judged(&metrics, None, 64, 0.02);
+        assert_eq!(broken.verdict, Verdict::Fail, "{:?}", broken.reasons);
     }
 
     #[test]

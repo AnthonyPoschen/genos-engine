@@ -20,7 +20,7 @@ pub const BLIND_SPOTS: &[&str] = &[
     "Flicker is temporal variance on a still camera. A moving camera is not scored for flicker. Motion aliasing is not separated from shimmer.",
     "Convergence is only the error at +1, +2, +4, and +8 frames after an event. A defect that heals at frame 3 and returns at frame 16 is missed.",
     "Mean error can hide a speck smaller than the p99. p99 and the unfilled count are the counter, and they still miss a mark on one pixel of a large picture.",
-    "A one-sample reference has no noise estimate, so a small error cannot auto-pass. With two or more samples, raw per-pixel error at or under the stored reference noise is not a fail. The gates are the blurred relative error and the mean luminance ratio. A ratio of 0.66, 0.80, or 1.18 stays a fail.",
+    "A one-sample reference has no noise estimate, so a small error cannot auto-pass. With two or more samples, raw per-pixel error at or under the stored reference noise is not a fail. FLIP p99 at or under the direct-only edge floor (0.90, from a matched picture whose p99 was 0.84) is not a fail: the reference primary and the renderer both sample the pixel centre and antialias is off, so that tail is silhouette pixels. The gates are the blurred relative error and the mean luminance ratio. A ratio of 0.66, 0.80, or 1.18 stays a fail.",
     "Hell-100 is one 25 m section with 100 lamps, the stress panel's 100-light case, not the 4×4 building. The path trace and the live capture use that same scene.",
     "Full-effort accumulation is the engine at its maximum knobs. It is not independent of a lighting change. The path trace is the ground truth this check scores against.",
     "Lavapipe is a wiring check. Quality judgement is the owner GPU run.",

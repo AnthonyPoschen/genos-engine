@@ -14,6 +14,8 @@ pub struct Config {
     pub disagree_delta: f64,
     pub noise_multiple: f64,
     pub noise_tail: f64,
+    /// FLIP p99 of a matched direct-only picture. Edge aliasing, not light.
+    pub flip_edge: f64,
     pub fail: BTreeMap<String, f64>,
     pub regress: BTreeMap<String, f64>,
 }
@@ -66,6 +68,7 @@ impl Config {
         let disagree_delta = take(&mut values, "disagree_delta")?;
         let noise_multiple = take(&mut values, "noise_multiple")?;
         let noise_tail = take(&mut values, "noise_tail")?;
+        let flip_edge = take(&mut values, "flip_edge")?;
         if human_band >= 1.0 {
             return Err("human_band must be under 1".to_string());
         }
@@ -86,6 +89,7 @@ impl Config {
             disagree_delta,
             noise_multiple,
             noise_tail,
+            flip_edge,
             fail,
             regress,
         };
@@ -116,6 +120,7 @@ mod tests {
         assert!((config.fail_of("mean_rel") - 0.08).abs() < 1.0e-9);
         assert!((config.human_band - 0.15).abs() < 1.0e-9);
         assert!((config.noise_tail - 4.0).abs() < 1.0e-9);
+        assert!((config.flip_edge - 0.90).abs() < 1.0e-9);
         assert!((config.fail_of("luma_delta") - 0.10).abs() < 1.0e-9);
         assert!((config.fail_of("blur_rel") - 0.08).abs() < 1.0e-9);
         assert!((config.params.rel_floor - 0.02).abs() < 1.0e-9);
