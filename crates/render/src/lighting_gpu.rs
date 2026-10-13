@@ -1425,7 +1425,10 @@ impl Gpu {
             if debug {
                 let blocks = w[LIGHTING_WORK_STAT + 12];
                 let sun = w[LIGHTING_WORK_STAT + 11];
-                eprintln!("lightingcompose {queue} frame {} blocks {blocks} sun {sun}");
+                eprintln!(
+                    "lightingcompose {queue} frame {} blocks {blocks} sun {sun}",
+                    self.lighting.frame
+                );
             }
         }
     }
@@ -2409,7 +2412,7 @@ pub(crate) fn lighting_changes(old: &[u8], new: &[u8]) -> Option<Vec<[f32; 4]>> 
 }
 
 fn hash_f32(hasher: &mut std::collections::hash_map::DefaultHasher, v: f32) {
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hash;
     v.to_bits().hash(hasher);
 }
 
