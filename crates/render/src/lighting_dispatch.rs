@@ -220,6 +220,23 @@ impl LightGroups {
         self.tags.push(tag);
         self.counts[tag as usize] = self.counts[tag as usize].saturating_add(1);
     }
+
+    /// Screen and world verification, just before compose so a reset is in the
+    /// picture this frame. Each budget dispatches on its own. Zero skips it.
+    fn push_verify(&mut self, settings: &LightingSettings) {
+        if !settings.gi.enabled || settings.bounce.count == 0 {
+            return;
+        }
+        if settings.probes.enabled && settings.screen_verify > 0 {
+            let n = settings.screen_verify.div_ceil(64).max(1);
+            self.push(2, n, LIGHTING_VERIFY_SCREEN, B_TRACE);
+        }
+        if settings.world_cache.enabled && settings.world_mode() == 3 && settings.world_verify > 0
+        {
+            let n = settings.world_verify.div_ceil(64).max(1);
+            self.push(2, n, LIGHTING_VERIFY_WORLD, B_TRACE);
+        }
+    }
 }
 
 /// The group list for this frame. `probe_ray_count` is probes × rays.
@@ -253,6 +270,7 @@ pub(crate) fn light_groups(
         && settings.world_mode() == 3;
     if frozen && full {
         out.push(3, pixels.div_ceil(64), 1, B_DIRECT);
+        out.push_verify(settings);
         out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
     } else if frozen && probe_only(settings) {
         // Still probe-only holds the probes and the cache rays. Pixel direct and
@@ -264,6 +282,7 @@ pub(crate) fn light_groups(
             out.push(3, lit.div_ceil(64).max(1), 1, B_DIRECT);
             out.pixel_only = 1;
         }
+        out.push_verify(settings);
         out.push(7, w.div_ceil(8).max(1), h.div_ceil(8).max(1), B_COMPOSE);
     } else if !round && full && !settings.cache_round_this_frame(frame) {
         out.push(1, probes.div_ceil(64), 1, B_PLACE);
@@ -274,6 +293,7 @@ pub(crate) fn light_groups(
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
+        out.push_verify(settings);
         out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
     } else if round
         && full
@@ -308,6 +328,7 @@ pub(crate) fn light_groups(
             out.push(8, slots, 1, B_ATROUS);
             out.atrous_stages.push(stage);
         }
+        out.push_verify(settings);
         out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
     } else {
         gated(
@@ -423,6 +444,7 @@ fn gated(
         out.push(8, slots, 1, B_ATROUS);
         out.atrous_stages.push(6);
     }
+    out.push_verify(settings);
     out.push(7, w.div_ceil(8).max(1), h.div_ceil(8).max(1), B_COMPOSE);
 }
 
@@ -459,7 +481,7 @@ mod probe_still_tests {
         let quiet = groups(&off, true, true);
         assert_eq!(quiet.counts[B_CACHE_RAYS as usize], 0);
         assert_eq!(quiet.counts[B_HIT as usize], 0);
-        assert_eq!(quiet.counts[B_TRACE as usize], 0);
+        assert_eq!(quiet.counts[B_TRACE as usize], 1, "screen verify stays on");
         assert_eq!(quiet.counts[B_ATROUS as usize], 0);
         assert_eq!(quiet.counts[B_DIRECT as usize], 1);
         assert_eq!(quiet.counts[B_COMPOSE as usize], 1);
@@ -537,6 +559,19 @@ mod probe_still_tests {
         assert_eq!(quiet.counts[B_COMPOSE as usize], 1);
         assert_eq!(quiet.counts[B_CACHE_RAYS as usize], 0);
         assert_eq!(quiet.counts[B_ATROUS as usize], 0);
-        assert_eq!(quiet.groups.len(), 2);
+        assert_eq!(quiet.counts[B_TRACE as usize], 2, "screen and world verify");
+        assert_eq!(quiet.groups.len(), 4);
+        let mut off = high.clone();
+        off.screen_verify = 0;
+        off.world_verify = 0;
+        let idle = groups(&off, true, false);
+        assert_eq!(idle.counts[B_TRACE as usize], 0);
+        assert_eq!(idle.groups.len(), 2);
+        let mut screen = high.clone();
+        screen.world_verify = 0;
+        assert_eq!(groups(&screen, true, false).counts[B_TRACE as usize], 1);
+        let mut world = high;
+        world.screen_verify = 0;
+        assert_eq!(groups(&world, true, false).counts[B_TRACE as usize], 1);
     }
 }

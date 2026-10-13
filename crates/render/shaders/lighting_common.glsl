@@ -210,14 +210,38 @@ vec3 lighting_ray_light(vec4 v) {
 // A kept probe ray that missed: it brings the sky as it is this frame.
 const vec4 LIGHTING_MISS = vec4(-1.0, 0.0, 0.0, 0.0);
 
-// The eye ray through pixel p (picture y down, clip space Y flipped).
-vec3 lighting_eye_dir(uvec2 p) {
-    vec2 ndc = vec2((float(p.x) + 0.5) / float(pc.dims.x) * 2.0 - 1.0,
-                    1.0 - (float(p.y) + 0.5) / float(pc.dims.y) * 2.0);
+// Eye ray through a clip-space point. NDC y is up. Values outside [-1, 1] fall
+// just outside the frustum (the world-verify guard band).
+vec3 lighting_eye_dir_ndc(vec2 ndc) {
     float t = scene.view_right.w;
     float aspect = scene.view_forward.w;
     return normalize(scene.view_forward.xyz + ndc.x * t * aspect * scene.view_right.xyz
                      + ndc.y * t * scene.view_up.xyz);
+}
+
+// The eye ray through pixel p (picture y down, clip space Y flipped).
+vec3 lighting_eye_dir(uvec2 p) {
+    vec2 ndc = vec2((float(p.x) + 0.5) / float(pc.dims.x) * 2.0 - 1.0,
+                    1.0 - (float(p.y) + 0.5) / float(pc.dims.y) * 2.0);
+    return lighting_eye_dir_ndc(ndc);
+}
+
+uint lighting_hash(uint v);
+float lighting_unit(uint v);
+
+// A direction through the shell just outside the current frustum. `salt` picks
+// an edge and how far past it. Used by world verification and by WRC scouts.
+vec3 lighting_guard_dir(uint salt) {
+    uint h = lighting_hash(salt);
+    uint edge = h & 3u;
+    float along = lighting_unit(h ^ 0x68e31da4u) * 2.0 - 1.0;
+    float outv = 1.02 + 0.18 * lighting_unit(h ^ 0x27d4eb2fu);
+    vec2 ndc;
+    if (edge == 0u) ndc = vec2(-outv, along);
+    else if (edge == 1u) ndc = vec2(outv, along);
+    else if (edge == 2u) ndc = vec2(along, -outv);
+    else ndc = vec2(along, outv);
+    return lighting_eye_dir_ndc(ndc);
 }
 
 // G-buffer surface at pixel p: false where the pixel shows nothing.

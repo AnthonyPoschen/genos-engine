@@ -30,6 +30,12 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          then stress
   --checkpoint NAME      jump here at launch
   --preset NAME          potato, low, medium, or high. Sets GENOS_LIGHTING_PRESET
+  --screen-verify N      rays per frame that re-check visible texels; 0 is off.
+                         GENOS_LIGHTING_SCREEN_VERIFY applies only when this
+                         argument was omitted
+  --world-verify N       rays per frame over settled world-cache cells; 0 is off.
+                         GENOS_LIGHTING_WORLD_VERIFY applies only when this
+                         argument was omitted
   --gpu-times N          print GPU_MS every N frames (GENOS_GPU_TIMES)
   --lighting-debug       print the lighting probe line (GENOS_LIGHTING_DEBUG)
   --unfilled             show the texels view (slots with fewer than 4 sets are dim)
@@ -823,21 +829,35 @@ fn panel_rows(app: &App, view: ViewMode) -> Vec<PanelRow> {
             slider: None,
         },
     ];
-    if let Some(knob) = app.knobs().into_iter().find(|k| k.name == "lighting_bounces") {
-        rows.push(PanelRow {
-            label: knob.label,
-            buttons: Vec::new(),
-            slider: Some(PanelSlider {
-                id: ID_KNOB,
-                value: knob.value,
-                min: knob.min,
-                max: knob.max,
-                step: knob.step,
-                text: knob.text,
-            }),
-        });
+    for (offset, name) in [
+        "lighting_bounces",
+        "lighting_screen_verify",
+        "lighting_world_verify",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        push_knob_slider(&mut rows, app, name, ID_KNOB + offset as u32);
     }
     rows
+}
+
+fn push_knob_slider(rows: &mut Vec<PanelRow>, app: &App, name: &str, id: u32) {
+    let Some(knob) = app.knobs().into_iter().find(|k| k.name == name) else {
+        return;
+    };
+    rows.push(PanelRow {
+        label: knob.label,
+        buttons: Vec::new(),
+        slider: Some(PanelSlider {
+            id,
+            value: knob.value,
+            min: knob.min,
+            max: knob.max,
+            step: knob.step,
+            text: knob.text,
+        }),
+    });
 }
 
 fn press(
@@ -884,9 +904,13 @@ fn press(
 }
 
 fn slide(app: &mut App, id: u32, value: f64) {
-    if id == ID_KNOB {
-        let _ = app.set_knob("lighting_bounces", value);
-    }
+    let name = match id.checked_sub(ID_KNOB) {
+        Some(0) => "lighting_bounces",
+        Some(1) => "lighting_screen_verify",
+        Some(2) => "lighting_world_verify",
+        _ => return,
+    };
+    let _ = app.set_knob(name, value);
 }
 
 fn picture_stats(bgra: &[u8]) -> (f32, f32) {
@@ -928,6 +952,24 @@ fn apply_intent(opts: &Options) -> Result<(), String> {
     Ok(())
 }
 
+fn is_verify_flag(arg: &str) -> bool {
+    let name = arg.trim_start_matches("--").split('=').next().unwrap_or("");
+    name == "screen-verify" || name == "world-verify"
+}
+
+fn accept_verify_flag(
+    arg: &str,
+    args: &mut impl Iterator<Item = String>,
+) -> Result<(), String> {
+    let needs = genos_scene::lighting_flag_needs_value(arg).unwrap_or(false);
+    let owned = if needs {
+        Some(need_arg(args, arg.split('=').next().unwrap_or(arg))?)
+    } else {
+        None
+    };
+    genos_scene::check_lighting_arg(arg, owned.as_deref())
+}
+
 fn need_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
     args.next()
         .ok_or_else(|| format!("{flag} needs a value"))
@@ -952,6 +994,10 @@ fn options() -> Result<Options, String> {
         if arg == "--help" || arg == "-h" {
             println!("{USAGE}");
             std::process::exit(0);
+        }
+        if is_verify_flag(&arg) {
+            accept_verify_flag(&arg, &mut args)?;
+            continue;
         }
         match arg.as_str() {
             "--scene" => scene = Some(need_arg(&mut args, "--scene")?),
@@ -1016,8 +1062,31 @@ fn options() -> Result<Options, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_summary, gltf_bytes_absent, gltf_scene, skip_line};
+    use super::{accept_verify_flag, check_summary, gltf_bytes_absent, gltf_scene, skip_line, USAGE};
     use genos_scene_lib::{Check, Entry, Kind};
+
+    #[test]
+    fn help_lists_the_verify_budgets() {
+        assert!(USAGE.contains("--screen-verify"));
+        assert!(USAGE.contains("--world-verify"));
+        assert!(USAGE.contains("GENOS_LIGHTING_SCREEN_VERIFY"));
+        assert!(USAGE.contains("GENOS_LIGHTING_WORLD_VERIFY"));
+    }
+
+    #[test]
+    fn verify_flags_reject_a_missing_count() {
+        let mut none = std::iter::empty();
+        assert_eq!(
+            accept_verify_flag("--screen-verify", &mut none).unwrap_err(),
+            "--screen-verify needs a value"
+        );
+        let mut bad = ["nope".to_string()].into_iter();
+        assert_eq!(
+            accept_verify_flag("--world-verify", &mut bad).unwrap_err(),
+            "--world-verify nope is not a ray count"
+        );
+        assert!(accept_verify_flag("--screen-verify=2048", &mut none).is_ok());
+    }
 
     #[test]
     fn a_missing_gltf_is_skipped_and_a_bad_scene_is_not() {

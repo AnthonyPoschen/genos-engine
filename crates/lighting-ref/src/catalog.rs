@@ -76,6 +76,13 @@ pub fn checkpoints() -> &'static [CheckpointDesc] {
         },
         CheckpointDesc {
             scene: "stress-still",
+            name: "hall-morning",
+            note: "Hall at 10.9 h, boxes held. The sunlit wall whose bounce settled dark.",
+            event: None,
+            still: true,
+        },
+        CheckpointDesc {
+            scene: "stress-still",
             name: "room-a",
             note: "Room A at noon, looking out of the bounce opening.",
             event: None,

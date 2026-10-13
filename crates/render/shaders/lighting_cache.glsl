@@ -2481,18 +2481,11 @@ uint lighting_sc_interval(uint slot, float t) {
     }
     return uint(clamp(iv, LIGHTING_SC_RATE_FAST, LIGHTING_SC_RATE_DORMANT));
 }
-// Scouts (WRC pre-seeding) only while the camera moves or turns, else one
-// round in LIGHTING_WRC_SCOUT_STILL.
-const uint LIGHTING_WRC_SCOUT_STILL = 8u;
+// Scouts run every prefill round, including while the camera is still, so the
+// shell just outside the frustum is warm before a yaw. They stop when prefill
+// is off. A frozen idle does not run this pass.
 bool lighting_wrc_scout_due() {
-    if ((gstats.ctrl_bits & 1024u) == 0u) {
-        return false;
-    }
-    vec4 last_eye = work.v[lighting_change_at() + 1u];
-    vec3 last_fwd = work.v[lighting_change_at() + 4u].xyz;
-    bool moving = last_eye.w < 0.5 || length(scene.eye.xyz - last_eye.xyz) > 0.01
-        || dot(normalize(scene.view_forward.xyz), normalize(last_fwd + vec3(0.0, 1.0e-6, 0.0))) < 0.9999;
-    return moving || lighting_round() % LIGHTING_WRC_SCOUT_STILL == 0u;
+    return (gstats.ctrl_bits & 1024u) != 0u;
 }
 uint lighting_sc_quarter0(uint slot) {
     if (lighting_world_mode() != 3u) {
@@ -2503,12 +2496,18 @@ uint lighting_sc_quarter0(uint slot) {
 uint lighting_sc_entries(uint slot, bool full) {
     return (full || lighting_world_mode() != 3u) ? LIGHTING_SC_QUARTERS - lighting_sc_quarter0(slot) : 1u;
 }
-// WRC scout ray s of this round (entries past the batch's texels): from the eye
-// (a quarter from up to 2 m beside it), half over the sphere and half within
-// ~50 degrees of where the camera is heading (forward, plus its motion and turn
-// since the last frame the probes ran).
+// WRC scout ray s of this round (entries past the batch's texels): from the eye.
+// Half look just outside the frustum (the columns a small yaw reveals). The
+// other half is the hemisphere and a cone within ~50 degrees of where the
+// camera is heading (forward, plus its motion and turn since the last frame
+// the probes ran). The forward cone starts up to 2 m beside the eye.
 void lighting_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
     uint h = lighting_hash(s * 0x9e3779b9u ^ lighting_round() * 0x85ebca6bu);
+    origin = scene.eye.xyz;
+    if ((s & 3u) >= 2u) {
+        dir = lighting_guard_dir(h);
+        return;
+    }
     float u1 = lighting_unit(h);
     float u2 = lighting_unit(h ^ 0x68e31da4u);
     vec4 head_at = vec4(0.0);
@@ -2532,8 +2531,7 @@ void lighting_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
         vec3 b = cross(ahead, t);
         dir = normalize(t * local.x + b * local.y + ahead * local.z);
     }
-    origin = eye;
-    if ((s & 3u) == 3u) {
+    if ((s & 3u) == 1u) {
         float u3 = lighting_unit(h ^ 0x27d4eb2fu);
         float b3 = LIGHTING_TAU * lighting_unit(h ^ 0x165667b1u);
         origin += vec3(cos(b3), 0.0, sin(b3)) * (2.0 * u3);

@@ -17,6 +17,20 @@ use std::fmt::Write as _;
 /// Bounce count meaning the cache may feed itself without a cap (today's GI).
 pub const LIGHTING_BOUNCES_UNLIMITED: u32 = u32::MAX;
 
+/// Screen-space verification rays per frame on preset `high`.
+///
+/// One ray per check. The visible probe grid at 1080p is about 8,000 probes
+/// (16 px tiles), so this budget visits each of them about every fourth frame.
+/// `0` turns this budget off without touching the world budget.
+pub const LIGHTING_SCREEN_VERIFY_DEFAULT: u32 = 2048;
+
+/// World-space verification rays per frame on preset `high`.
+///
+/// A trickle over settled world-cache cells. Three quarters of the rays are
+/// aimed just outside the frustum; the rest walk the settled cells. `0` turns
+/// this budget off without touching the screen budget.
+pub const LIGHTING_WORLD_VERIFY_DEFAULT: u32 = 128;
+
 /// Named quality tiers. Each one is a full [`LightingSettings`] value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LightingPreset {
@@ -278,6 +292,14 @@ pub struct LightingSettings {
     pub sky: bool,
     pub emissive: bool,
     pub prefill: bool,
+    /// Screen-space verification rays per frame. Dense: each ray checks the
+    /// surface-cache texel (and its screen probe) at one visible pixel. `0`
+    /// disables this budget. Independent of [`Self::world_verify`].
+    pub screen_verify: u32,
+    /// World-space verification rays per frame. A trickle over settled
+    /// world-cache cells, biased just outside the frustum. `0` disables this
+    /// budget. Independent of [`Self::screen_verify`].
+    pub world_verify: u32,
     pub ambient: AmbientSettings,
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
     /// `0` is midnight, `6` dawn, `12` noon, `18` dusk.
@@ -305,6 +327,8 @@ impl LightingSettings {
                 s.compose_reuse = false;
                 s.prefill = false;
                 s.sky = true;
+                s.screen_verify = 0;
+                s.world_verify = 0;
                 s.ambient.mode = AmbientMode::Curve;
                 s.ambient.night_color = [0.04, 0.05, 0.10];
                 s.ambient.night_intensity = 0.08;
@@ -321,6 +345,7 @@ impl LightingSettings {
                 s.world_cache.enabled = false;
                 s.denoiser.enabled = false;
                 s.prefill = false;
+                s.world_verify = 0;
             }
             LightingPreset::Potato => {
                 s.direct.max_lights = 8;
@@ -333,6 +358,8 @@ impl LightingSettings {
                 s.compose_reuse = false;
                 s.sky = false;
                 s.prefill = false;
+                s.screen_verify = 0;
+                s.world_verify = 0;
                 s.ambient.mode = AmbientMode::Constant;
                 s.ambient.color = [0.42, 0.44, 0.48];
                 s.ambient.intensity = 0.65;
@@ -350,6 +377,8 @@ impl LightingSettings {
                 // the 4070 picture bar (S79), so it stays off.
                 s.denoiser.adaptive = false;
                 s.prefill = false;
+                s.screen_verify = 512;
+                s.world_verify = 0;
                 s.gi.refresh_frames = 2;
                 s.gi.budget_shift = 2;
                 s.ambient.mode = AmbientMode::Day;
@@ -364,6 +393,8 @@ impl LightingSettings {
                 // picture bar (S79), so it stays off.
                 s.denoiser.adaptive = false;
                 s.gi.budget_shift = 1;
+                s.screen_verify = 1024;
+                s.world_verify = 64;
                 s.ambient.mode = AmbientMode::Day;
             }
         }
@@ -419,6 +450,8 @@ impl LightingSettings {
             sky: true,
             emissive: true,
             prefill: true,
+            screen_verify: LIGHTING_SCREEN_VERIFY_DEFAULT,
+            world_verify: LIGHTING_WORLD_VERIFY_DEFAULT,
             ambient: AmbientSettings {
                 mode: AmbientMode::Day,
                 color: [0.42, 0.44, 0.48],
@@ -469,6 +502,8 @@ impl LightingSettings {
         self.denoiser.dirty_fraction = self.denoiser.dirty_fraction.clamp(0.0, 1.0);
         // Ten bits in the control word: 0.0001 steps, up to 0.1023.
         self.denoiser.variance_threshold = self.denoiser.variance_threshold.clamp(0.0, 0.1);
+        self.screen_verify = self.screen_verify.min(65536);
+        self.world_verify = self.world_verify.min(65536);
         self.ambient.intensity = self.ambient.intensity.max(0.0);
         self.ambient.night_intensity = self.ambient.night_intensity.max(0.0);
         self.ambient.day_intensity = self.ambient.day_intensity.max(0.0);
@@ -584,6 +619,8 @@ impl LightingSettings {
         self.sky = true;
         self.emissive = true;
         self.prefill = true;
+        self.screen_verify = LIGHTING_SCREEN_VERIFY_DEFAULT;
+        self.world_verify = LIGHTING_WORLD_VERIFY_DEFAULT;
         self.sanitize();
         self.sync_preset_field();
     }
@@ -767,6 +804,8 @@ impl LightingSettings {
         let _ = writeln!(out, "sky={}", bit(self.sky));
         let _ = writeln!(out, "emissive={}", bit(self.emissive));
         let _ = writeln!(out, "prefill={}", bit(self.prefill));
+        let _ = writeln!(out, "screen_verify={}", self.screen_verify);
+        let _ = writeln!(out, "world_verify={}", self.world_verify);
         let _ = writeln!(out, "ambient={}", self.ambient.mode.name());
         let _ = writeln!(out, "ambient_color={}", rgb(self.ambient.color));
         let _ = writeln!(
@@ -893,6 +932,8 @@ impl LightingSettings {
             "sky" => self.sky = on(value)?,
             "emissive" => self.emissive = on(value)?,
             "prefill" => self.prefill = on(value)?,
+            "screen_verify" => self.screen_verify = num_u32(value)?,
+            "world_verify" => self.world_verify = num_u32(value)?,
             "ambient" => {
                 self.ambient.mode = AmbientMode::parse(value).ok_or_else(|| {
                     format!("ambient is off, constant, hemisphere, day, or curve, got {value}")
@@ -930,15 +971,17 @@ impl LightingSettings {
 
     /// Launch locks overlay this value.
     ///
-    /// `--preset`, `--bounces`, and `--ambient` win every frame.
-    /// `GENOS_LIGHTING_PRESET`, `GENOS_LIGHTING_BOUNCES`, and
-    /// `GENOS_LIGHTING_AMBIENT` apply only when that argument was omitted, and
-    /// then they win every frame. `--preset` or a set `GENOS_LIGHTING_PRESET`
-    /// replaces the struct, then the other locks overlay one key. `--time-of-day`
-    /// is the program's clock: it keeps `GENOS_LIGHTING_TIME` from replacing
-    /// `time_of_day`. When that argument was omitted, a set `GENOS_LIGHTING_TIME`
-    /// holds that hour. The scene clock survives a preset replace unless the
-    /// time mirror is the lock. The other variables overlay one key each. A set
+    /// `--preset`, `--bounces`, `--ambient`, `--screen-verify`, and
+    /// `--world-verify` win every frame. `GENOS_LIGHTING_PRESET`,
+    /// `GENOS_LIGHTING_BOUNCES`, `GENOS_LIGHTING_AMBIENT`,
+    /// `GENOS_LIGHTING_SCREEN_VERIFY`, and `GENOS_LIGHTING_WORLD_VERIFY` apply
+    /// only when that argument was omitted, and then they win every frame.
+    /// `--preset` or a set `GENOS_LIGHTING_PRESET` replaces the struct, then the
+    /// other locks overlay one key. `--time-of-day` is the program's clock: it
+    /// keeps `GENOS_LIGHTING_TIME` from replacing `time_of_day`. When that
+    /// argument was omitted, a set `GENOS_LIGHTING_TIME` holds that hour. The
+    /// scene clock survives a preset replace unless the time mirror is the lock.
+    /// The other variables overlay one key each. A set
     /// `GENOS_LIGHTING_COMPOSE_ALL` forces compose reuse off.
     pub fn apply_env(&mut self) {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -947,6 +990,8 @@ impl LightingSettings {
         let bounces = std::env::var("GENOS_LIGHTING_BOUNCES").ok();
         let ambient = std::env::var("GENOS_LIGHTING_AMBIENT").ok();
         let time = std::env::var("GENOS_LIGHTING_TIME").ok();
+        let screen_verify = std::env::var("GENOS_LIGHTING_SCREEN_VERIFY").ok();
+        let world_verify = std::env::var("GENOS_LIGHTING_WORLD_VERIFY").ok();
         let Ok(launch) = resolve_lighting_launch(
             &refs,
             &LightingMirrors {
@@ -954,6 +999,8 @@ impl LightingSettings {
                 bounces: bounces.as_deref(),
                 ambient: ambient.as_deref(),
                 time_of_day: time.as_deref(),
+                screen_verify: screen_verify.as_deref(),
+                world_verify: world_verify.as_deref(),
             },
         ) else {
             return;
@@ -1029,6 +1076,12 @@ impl LightingSettings {
         if let Some(mode) = launch.ambient {
             self.ambient.mode = mode;
         }
+        if let Some(rays) = launch.screen_verify {
+            self.screen_verify = rays;
+        }
+        if let Some(rays) = launch.world_verify {
+            self.world_verify = rays;
+        }
         self.time_of_day = launch.time_mirror.unwrap_or(clock);
         self.sanitize();
         self.sync_preset_field();
@@ -1087,12 +1140,16 @@ pub struct GpuBuckets {
 /// Resolved launch locks. `--time-of-day` is not stored: the program that owns
 /// the clock writes that hour, and its presence only clears `time_mirror`.
 /// `time_mirror` is `GENOS_LIGHTING_TIME` when that argument was omitted.
+/// `screen_verify` and `world_verify` are the ray budgets when `--screen-verify`
+/// or `--world-verify` was passed, otherwise the matching environment mirror.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LightingLaunch {
     preset: Option<LightingPreset>,
     bounces: Option<u32>,
     ambient: Option<AmbientMode>,
     time_mirror: Option<f32>,
+    screen_verify: Option<u32>,
+    world_verify: Option<u32>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1101,6 +1158,8 @@ struct LightingMirrors<'a> {
     bounces: Option<&'a str>,
     ambient: Option<&'a str>,
     time_of_day: Option<&'a str>,
+    screen_verify: Option<&'a str>,
+    world_verify: Option<&'a str>,
 }
 
 enum LightingKind {
@@ -1108,6 +1167,8 @@ enum LightingKind {
     Bounces,
     Ambient,
     Time,
+    ScreenVerify,
+    WorldVerify,
 }
 
 enum LightingFlag {
@@ -1115,6 +1176,8 @@ enum LightingFlag {
     Bounces(u32),
     Ambient(AmbientMode),
     Time(f32),
+    ScreenVerify(u32),
+    WorldVerify(u32),
 }
 
 /// `Some(true)` when `arg` is a lighting flag that reads the next argument.
@@ -1167,6 +1230,14 @@ fn resolve_lighting_launch(
         ambient: chosen
             .ambient
             .or_else(|| env.ambient.and_then(AmbientMode::parse)),
+        screen_verify: chosen.screen_verify.or_else(|| {
+            env.screen_verify
+                .and_then(|value| parse_ray_count(value).ok())
+        }),
+        world_verify: chosen.world_verify.or_else(|| {
+            env.world_verify
+                .and_then(|value| parse_ray_count(value).ok())
+        }),
         time_mirror: if chosen.time.is_some() {
             None
         } else {
@@ -1181,6 +1252,8 @@ struct ChosenLighting {
     bounces: Option<u32>,
     ambient: Option<AmbientMode>,
     time: Option<f32>,
+    screen_verify: Option<u32>,
+    world_verify: Option<u32>,
 }
 
 impl ChosenLighting {
@@ -1190,6 +1263,8 @@ impl ChosenLighting {
             LightingFlag::Bounces(count) => self.bounces = Some(count),
             LightingFlag::Ambient(mode) => self.ambient = Some(mode),
             LightingFlag::Time(hours) => self.time = Some(hours),
+            LightingFlag::ScreenVerify(rays) => self.screen_verify = Some(rays),
+            LightingFlag::WorldVerify(rays) => self.world_verify = Some(rays),
         }
     }
 }
@@ -1211,6 +1286,8 @@ fn lighting_kind(name: &str) -> Option<LightingKind> {
         "bounces" => Some(LightingKind::Bounces),
         "ambient" => Some(LightingKind::Ambient),
         "time-of-day" => Some(LightingKind::Time),
+        "screen-verify" => Some(LightingKind::ScreenVerify),
+        "world-verify" => Some(LightingKind::WorldVerify),
         _ => None,
     }
 }
@@ -1247,6 +1324,12 @@ fn parse_lighting_flag(arg: &str, next: Option<&str>) -> Result<Option<LightingF
         LightingKind::Time => LightingFlag::Time(
             parse_clock(value).ok_or_else(|| format!("{flag} {value} is not a time of day"))?,
         ),
+        LightingKind::ScreenVerify => LightingFlag::ScreenVerify(parse_ray_count(value).map_err(
+            |_| format!("{flag} {value} is not a ray count"),
+        )?),
+        LightingKind::WorldVerify => LightingFlag::WorldVerify(parse_ray_count(value).map_err(
+            |_| format!("{flag} {value} is not a ray count"),
+        )?),
     };
     Ok(Some(parsed))
 }
@@ -1304,6 +1387,12 @@ fn num_f32(value: &str) -> Result<f32, String> {
     value
         .parse::<f32>()
         .map_err(|_| format!("expected a number, got {value}"))
+}
+
+fn parse_ray_count(value: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .map_err(|_| format!("expected a ray count, got {value}"))
 }
 
 fn parse_bounces(value: &str) -> Result<u32, String> {
@@ -1365,6 +1454,8 @@ mod launch_tests {
         assert!(launch.bounces.is_none());
         assert!(launch.ambient.is_none());
         assert!(launch.time_mirror.is_none());
+        assert!(launch.screen_verify.is_none());
+        assert!(launch.world_verify.is_none());
         let mut settings = LightingSettings::default();
         settings.time_of_day = 9.5;
         settings.apply_launch(&launch);
@@ -1376,6 +1467,8 @@ mod launch_tests {
         env.bounces = Some("0");
         env.ambient = Some("curve");
         env.time_of_day = Some("18:24");
+        env.screen_verify = Some("99");
+        env.world_verify = Some("7");
         let from_env = resolve_lighting_launch(&[], &env).unwrap();
         let mut settings = LightingSettings::default();
         settings.time_of_day = 9.5;
@@ -1384,6 +1477,8 @@ mod launch_tests {
         assert_eq!(settings.bounce.count, 0);
         assert_eq!(settings.ambient.mode, AmbientMode::Curve);
         hours_near(settings.time_of_day, 18.4);
+        assert_eq!(settings.screen_verify, 99);
+        assert_eq!(settings.world_verify, 7);
 
         let forced = resolve_lighting_launch(
             &[
@@ -1393,6 +1488,9 @@ mod launch_tests {
                 "--ambient",
                 "hemisphere",
                 "--time-of-day=06:00",
+                "--screen-verify",
+                "32",
+                "--world-verify=0",
             ],
             &env,
         )
@@ -1401,6 +1499,8 @@ mod launch_tests {
         assert_eq!(forced.bounces, Some(1));
         assert_eq!(forced.ambient, Some(AmbientMode::Hemisphere));
         assert!(forced.time_mirror.is_none());
+        assert_eq!(forced.screen_verify, Some(32));
+        assert_eq!(forced.world_verify, Some(0));
         let mut settings = LightingSettings::default();
         settings.time_of_day = 9.5;
         settings.apply_launch(&forced);
@@ -1409,6 +1509,18 @@ mod launch_tests {
         assert_eq!(settings.ambient.mode, AmbientMode::Hemisphere);
         hours_near(settings.time_of_day, 9.5);
         assert_eq!(settings.preset_label(), "custom");
+        assert_eq!(settings.screen_verify, 32);
+        assert_eq!(settings.world_verify, 0);
+
+        let over_potato = resolve_lighting_launch(
+            &["--preset", "potato", "--screen-verify", "64"],
+            &env,
+        )
+        .unwrap();
+        let mut settings = LightingSettings::default();
+        settings.apply_launch(&over_potato);
+        assert_eq!(settings.screen_verify, 64);
+        assert_eq!(settings.world_verify, 7);
 
         let held = resolve_lighting_launch(&["--preset=day-cycle"], &empty()).unwrap();
         let mut settings = LightingSettings::default();
@@ -1426,9 +1538,12 @@ mod launch_tests {
         ignored.ambient = Some("nope");
         ignored.time_of_day = Some("nope");
         ignored.preset = Some("nope");
+        ignored.screen_verify = Some("nope");
+        ignored.world_verify = Some("-1");
         let soft = resolve_lighting_launch(&[], &ignored).unwrap();
         assert!(soft.preset.is_none() && soft.bounces.is_none() && soft.ambient.is_none());
         assert!(soft.time_mirror.is_none());
+        assert!(soft.screen_verify.is_none() && soft.world_verify.is_none());
 
         assert!(lighting_flag_needs_value("--bounces").unwrap());
         assert!(lighting_flag_needs_value("--bounces=0").is_some_and(|needs| !needs));
@@ -1471,5 +1586,16 @@ mod launch_tests {
         );
         assert!(check_lighting_arg("--ambient=off", None).is_ok());
         assert!(check_lighting_arg("--time-of-day=18:24", None).is_ok());
+        assert!(lighting_flag_needs_value("--screen-verify").unwrap());
+        assert!(lighting_flag_needs_value("--world-verify=16").is_some_and(|needs| !needs));
+        assert_eq!(
+            check_lighting_arg("--screen-verify", None).unwrap_err(),
+            "--screen-verify needs a value"
+        );
+        assert_eq!(
+            check_lighting_arg("--world-verify", Some("nope")).unwrap_err(),
+            "--world-verify nope is not a ray count"
+        );
+        assert!(check_lighting_arg("--screen-verify=2048", None).is_ok());
     }
 }

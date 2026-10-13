@@ -38,9 +38,9 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Must scale down to a GTX 1060-class GPU: nothing depends on a minimum ray count (S72S).
 - Follow the papers; any departure is flagged as a deviation and listed below.
 - Checks run every frame; no "nothing changed" skip without a check (Anthony 16:11, S74A).
-- Always spend some budget on spread-out checks so quiet areas that should not be quiet are found.
+- Always spend two verification budgets, each its own setting: screen checks of the visible texels, and a world trickle over settled cells biased just outside the frustum. A miss replaces the biased mean.
 - Probes must not be woken by the shared averaged field; only by real neighbour change, spread by ring tests with group-test splitting ([WAKE](experiments/WAKE-neighbour-wake-design.md)).
-- Off-screen pre-fill and its S-curve lag bound wait until there is spare performance.
+- A guard band stays warm just outside the frustum: half the world-cache scouts aim there, every prefill round, until the idle freezes. The heavier off-screen S-curve and its lag bound still wait until there is spare performance.
 - Test rules (10 Oct): every moving test soaks and records a settled frame first, ends soaked, and returns movers to the start; short tests for one situation; a test must fail on the build that shows the problem before it is trusted; hand-validate new checks, then spot-check ~1%.
 - GI v1 is the stability floor, not the goal; the target is the path-traced reference (11 Oct).
 - GPU-resident design: frequently used data stays on the GPU at fixed locations; the CPU sends only small changes (12 Oct).
@@ -56,7 +56,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - A-SVGF lambda drives ray counts (A-SVGF has no ray-count rule); checks are measurement only (S74A, S76).
 - Shadow visibility shared per 12.5 cm cell for hits, invalidated per lamp range (S74A).
 - 1-in-16 push refresh floor (S78B); kept-hit bounce refreshed with its re-trace (S78D); held strata keep exact directions (S78K).
-- Going fully quiet (DDGI and Lumen always spend a fixed budget).
+- The settled idle still spends `screen_verify` and `world_verify` rays (DDGI updates every probe every frame; Lumen keeps a fixed update budget). The budgets are sparse. A black texel whose fresh hit is clearly lit has that hit replace the mean, instead of blending one more set into a mean of 64. `0` turns each budget off on its own.
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
 - A small sun step (departure 14, [SUN](experiments/SUN-small-sun-step.md)) amortises indirect over bands. Schied et al., Spatiotemporal Variance-Guided Filtering, HPG 2017, and Wright et al., Lumen, SIGGRAPH 2022, recompute every pixel every frame. One compose dispatch writes direct everywhere and walks probes on the current band. Neighbour blend is the existing compose weights, not a per-lamp irradiance layer. After a point lamp holds, four frames shade every kept stratum. That skips the S69C halfway early-out for those frames.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
@@ -165,6 +165,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78X](experiments/S78X-atrous-work-lists.md) | 2026-10-13 | A-trous levels run dirty work lists | pushed (rough; idle A/B) | S78X |
 | [S78X2](experiments/S78X2-atrous-dense-fallback.md) | 2026-10-12 | Dense a-trous when the dirty fraction is high | pushed | S78X2 |
 | [S79](experiments/S79-half-res-atrous.md) | 2026-10-13 | Half-resolution a-trous, adaptive iterations, shared-memory tiles | Tried and failed. Half-res and tiles removed. Plain shader kept. Adaptive is an off-by-default knob | S79 |
+| [S80](experiments/S80-verify-budgets.md) | 2026-10-13 | Two verification budgets: dense screen checks and a world trickle | pushed | S80 |
 | [S78Z](experiments/S78Z-verify-ring-wakes.md) | 2026-10-13 | Probe verification + impact-tested ring wakes | not pushed (no fix; postmortem) | g78/S78Z-verify-ring-wakes.patch |
 | [S78T2](experiments/S78T2-texel-verify.md) | 2026-10-13 | Texel verification: rotating A-SVGF checks + ring wakes | not pushed (no healing; postmortem) | g78/S78T2-texel-verify.patch |
 | [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
@@ -233,7 +234,7 @@ Research notes with the cvar values: `/workspace/research/lumen-digest.md` (agen
 
 ## Settings
 
-Presets, per-feature toggles, quality knobs, the scene text, Rhai, the debug menu, the launch arguments (`--preset`, `--bounces`, `--ambient`, `--time-of-day`), and the MCP commands are in [toggles.md](toggles.md). The struct is `LightingSettings` on the scene. High is the tuned path this document describes. A feature that is off skips its passes and its buffers.
+Presets, per-feature toggles, quality knobs, the scene text, Rhai, the debug menu, the launch arguments (`--preset`, `--bounces`, `--ambient`, `--screen-verify`, `--world-verify`, `--time-of-day`), and the MCP commands are in [toggles.md](toggles.md). The struct is `LightingSettings` on the scene. High is the tuned path this document describes. A feature that is off skips its passes and its buffers.
 
 ## Frame overview
 

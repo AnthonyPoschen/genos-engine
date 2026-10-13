@@ -280,6 +280,22 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
         ),
         Knob::switch("lighting_sky", "Lighting sky", lighting.sky),
         Knob::switch("lighting_emissive", "Emissive", lighting.emissive),
+        Knob::number(
+            "lighting_screen_verify",
+            "Screen verify",
+            lighting.screen_verify as f64,
+            (0.0, 8192.0),
+            256.0,
+            " rays",
+        ),
+        Knob::number(
+            "lighting_world_verify",
+            "World verify",
+            lighting.world_verify as f64,
+            (0.0, 1024.0),
+            16.0,
+            " rays",
+        ),
         Knob::switch("lighting_prefill", "Prefill", lighting.prefill),
         Knob::switch(
             "lighting_full_effort",
@@ -395,6 +411,8 @@ pub fn apply_lighting_knob(
         "lighting_sky" => ("sky", on_off(v)),
         "lighting_emissive" => ("emissive", on_off(v)),
         "lighting_prefill" => ("prefill", on_off(v)),
+        "lighting_screen_verify" => ("screen_verify", whole.to_string()),
+        "lighting_world_verify" => ("world_verify", whole.to_string()),
         "lighting_full_effort" => ("full_effort", on_off(v)),
         "lighting_ambient" => (
             "ambient",
@@ -464,6 +482,8 @@ mod tests {
         "lighting_compose_reuse",
         "lighting_sky",
         "lighting_emissive",
+        "lighting_screen_verify",
+        "lighting_world_verify",
         "lighting_prefill",
         "lighting_full_effort",
         "lighting_ambient",
@@ -492,5 +512,26 @@ mod tests {
                 .value;
             stage.set_knob(name, value).expect(name);
         }
+    }
+
+    #[test]
+    fn verify_budgets_are_numeric_sliders() {
+        let knobs = lighting_knobs(&LightingSettings::default());
+        let screen = knobs
+            .iter()
+            .find(|knob| knob.name == "lighting_screen_verify")
+            .expect("screen verify");
+        let world = knobs
+            .iter()
+            .find(|knob| knob.name == "lighting_world_verify")
+            .expect("world verify");
+        assert!(screen.choices.is_empty());
+        assert!(world.choices.is_empty());
+        assert_eq!(screen.step, 256.0);
+        assert_eq!(screen.min, 0.0);
+        assert_eq!(screen.max, 8192.0);
+        assert_eq!(world.step, 16.0);
+        assert_eq!(world.min, 0.0);
+        assert_eq!(world.max, 1024.0);
     }
 }
