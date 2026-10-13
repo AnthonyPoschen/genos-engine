@@ -6,7 +6,7 @@ A composed surface pixel in surface-cache mode is unfilled when the bilinear wei
 
 Off, the compose path tests one uniform and does no atomics. On, each shaded pixel adds to a shaded counter and, when unfilled, to a second counter and a bit of a row-major mask. The CPU scans the mask for the longer of the horizontal and vertical runs.
 
-The counters sit in the spare words after the lighting control block (words 140 and 141). The mask starts at stats word 144, so it does not alias the control block. The device buffer keeps room for a 4096×2160 mask whether or not the detector is on, so a hotkey can enable it without reallocating.
+The counters sit after the probe-wake tail (words 392 and 393). The mask starts at stats word 396, so it does not alias the control block or the wake frontier. The device buffer keeps room for a 4096×2160 mask whether or not the detector is on, so a hotkey can enable it without reallocating.
 
 `--unfilled` turns the count on. `--unfilled-tint` turns the magenta tint on (bit 25 of the debug word) and turns the count on. `--unfilled=0` and `--unfilled-tint=0` force those off. F8 and Shift+F8 still toggle them after launch, and so do the stress knobs `unfilled` and `unfilled_tint` (MCP `knobs` and Rhai `knob`). `GENOS_LIGHTING_UNFILLED` and `GENOS_LIGHTING_UNFILLED_TINT` apply only when the matching argument was omitted.
 

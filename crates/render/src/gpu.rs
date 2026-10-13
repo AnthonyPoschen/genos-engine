@@ -455,6 +455,17 @@ impl Renderer {
         self.gpu.lighting_probe_samples()
     }
 
+    /// Probes and rays traced in the last frame, and the ring-wake counters.
+    /// Waits for that frame. Legacy leaves the ring counters at zero.
+    pub fn lighting_wake_stats(&mut self) -> LightingWakeStats {
+        self.gpu.lighting_wake_stats()
+    }
+
+    /// Probes fully traced by the ring scheduler last frame, and where they stood.
+    pub fn lighting_wake_list(&mut self) -> Vec<LightingWakeProbe> {
+        self.gpu.lighting_wake_list()
+    }
+
     /// Dirty-fraction threshold for the a-trous work lists. Overrides
     /// `GENOS_LIGHTING_ATROUS_DIRTY` for later frames. `0` always runs the dense
     /// sweep, `1` keeps the lists up to the storage cap.
@@ -1353,6 +1364,11 @@ impl Gpu {
                 gpu_times: {
                     let args: Vec<String> = std::env::args().skip(1).collect();
                     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                    // A bad `--lighting-debug` fails open, the same way `--gpu-times` does.
+                    lighting_debug_from(
+                        &refs,
+                        std::env::var_os("GENOS_LIGHTING_DEBUG").is_some(),
+                    )?;
                     let env = std::env::var("GENOS_GPU_TIMES").ok();
                     gpu_times_every(&refs, env.as_deref())?.map(|every| {
                         Box::new(GpuTimes {
@@ -5397,7 +5413,10 @@ impl Default for GpuTimes {
 
 #[cfg(test)]
 mod gpu_times_launch {
-    use super::{check_gpu_times_arg, gpu_times_every, gpu_times_flag_needs_value};
+    use super::{
+        check_gpu_times_arg, check_lighting_debug_arg, gpu_times_every, gpu_times_flag_needs_value,
+        lighting_debug_flag_needs_value, lighting_debug_from,
+    };
 
     #[test]
     fn arguments_win_and_env_is_the_mirror() {
@@ -5436,5 +5455,35 @@ mod gpu_times_launch {
             "--gpu-times needs a value"
         );
         assert!(check_gpu_times_arg("--gpu-times", Some("30")).is_ok());
+    }
+
+    #[test]
+    fn lighting_debug_argument_wins_over_the_mirror() {
+        assert!(!lighting_debug_from(&[], false).unwrap());
+        assert!(lighting_debug_from(&[], true).unwrap());
+        assert!(lighting_debug_from(&["--lighting-debug"], false).unwrap());
+        assert!(!lighting_debug_from(&["--lighting-debug=0"], true).unwrap());
+        assert!(!lighting_debug_from(&["--lighting-debug=off"], true).unwrap());
+        assert!(!lighting_debug_from(&["--lighting-debug=false"], true).unwrap());
+        assert!(lighting_debug_from(&["--lighting-debug=1"], false).unwrap());
+        assert!(lighting_debug_from(&["--lighting-debug=on"], false).unwrap());
+        assert!(lighting_debug_from(&["--lighting-debug=TRUE"], false).unwrap());
+        assert!(lighting_debug_from(&["--scale", "big"], true).unwrap());
+        assert!(!lighting_debug_from(
+            &["--lighting-debug", "--lighting-debug=0"],
+            true
+        )
+        .unwrap());
+        assert!(lighting_debug_flag_needs_value("--lighting-debug").is_some_and(|needs| !needs));
+        assert!(lighting_debug_flag_needs_value("--lighting-debug=0").is_some_and(|needs| !needs));
+        assert!(lighting_debug_flag_needs_value("--gpu-times").is_none());
+        assert_eq!(
+            check_lighting_debug_arg("--lighting-debug=", None).unwrap_err(),
+            "--lighting-debug needs a value"
+        );
+        assert!(check_lighting_debug_arg("--lighting-debug=maybe", None)
+            .unwrap_err()
+            .contains("not 0, 1"));
+        assert!(check_lighting_debug_arg("--lighting-debug", None).is_ok());
     }
 }

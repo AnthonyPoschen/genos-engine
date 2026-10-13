@@ -88,6 +88,18 @@ void main() {
     uint hold_probe = 0u;
     uint ray = gl_GlobalInvocationID.x;
     uint mode = lighting_mode();
+    // Verification stride: thread i traces probe (frame % period + i * period)'s
+    // check ray. The full grid is not launched.
+    if (mode == 3u) {
+        uint budget = gstats.wake_budget;
+        uint nprobes = lighting_probes();
+        uint period = max(nprobes / max(budget, 1u), 1u);
+        uint probe = (pc.params.w % period) + ray * period;
+        if (budget == 0u || probe >= nprobes) {
+            return;
+        }
+        ray = probe * lighting_rays() + lighting_hold_check_k(probe);
+    }
     if (lighting_dense()) {
         // S70A: this round's light cache rays only, live entries only.
         if (ray >= lighting_dense_count() * LIGHTING_CACHE_RAYS) {
@@ -140,6 +152,19 @@ void main() {
                 hold_check = true;
                 hold_old = old;
                 hold_probe = pr;
+            }
+        }
+        // Probes that reach a trace this frame: one count per probe (the check
+        // ray when the stratum is held, ray 0 when the stratum is traced in full)
+        // and one per ray. Crossings and fills are extra rays, not extra probes.
+        if (probe_ray) {
+            uint rays = lighting_rays();
+            uint pr = ray / rays;
+            uint k = ray % rays;
+            bool held = lighting_stratum_held(pr);
+            atomicAdd(gstats.wake_rays, 1u);
+            if ((held && k == lighting_hold_check_k(pr)) || (!held && k == 0u)) {
+                atomicAdd(gstats.wake_traced, 1u);
             }
         }
     }

@@ -1,7 +1,7 @@
 //! Lighting settings: presets, the text form, and a scene file that overrides them.
 
 use genos_scene::{
-    load_str, AmbientMode, EngineSettings, LightingPreset, LightingSettings,
+    load_str, AmbientMode, EngineSettings, LightingPreset, LightingSettings, WakeMode,
     LIGHTING_BOUNCES_UNLIMITED,
 };
 
@@ -57,6 +57,36 @@ fn potato_is_direct_shadows_and_flat_ambient() {
     assert!(!potato.gpu_buckets(1).cache_rays);
     assert!(potato.gpu_buckets(1).direct);
     assert!(potato.gpu_buckets(1).shadows);
+}
+
+#[test]
+fn wake_settings_round_trip_and_the_env_overlay_wins() {
+    let mut settings = LightingSettings::default();
+    assert_eq!(settings.probes.wake, WakeMode::Legacy);
+    assert_eq!(settings.probes.wake_budget, 16);
+    settings.set_key("wake", "rings").unwrap();
+    settings.set_key("wake_tol", "0.05").unwrap();
+    settings.set_key("wake_budget", "4").unwrap();
+    settings.set_key("wake_radius", "2.5").unwrap();
+    assert_eq!(settings.preset_label(), "custom");
+    let mut parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert_eq!(parsed.probes.wake, WakeMode::Rings);
+    assert!((parsed.probes.wake_tol - 0.05).abs() < 1.0e-5);
+    assert_eq!(parsed.probes.wake_budget, 4);
+    assert!((parsed.probes.wake_radius - 2.5).abs() < 1.0e-5);
+    assert!(parsed.set_key("wake", "scatter").is_err());
+    std::env::set_var("GENOS_LIGHTING_WAKE", "legacy");
+    std::env::set_var("GENOS_LIGHTING_WAKE_BUDGET", "32");
+    std::env::set_var("GENOS_LIGHTING_WAKE_RADIUS", "0");
+    let mut live = parsed;
+    live.apply_env();
+    std::env::remove_var("GENOS_LIGHTING_WAKE");
+    std::env::remove_var("GENOS_LIGHTING_WAKE_BUDGET");
+    std::env::remove_var("GENOS_LIGHTING_WAKE_RADIUS");
+    assert_eq!(live.probes.wake, WakeMode::Legacy);
+    assert_eq!(live.probes.wake_budget, 32);
+    assert_eq!(live.probes.wake_radius, 0.0);
+    assert!((live.probes.wake_tol - 0.05).abs() < 1.0e-5);
 }
 
 #[test]

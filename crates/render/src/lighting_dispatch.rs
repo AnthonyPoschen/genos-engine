@@ -203,7 +203,21 @@ impl LightGroups {
     }
 }
 
+/// Threads in the verification stride. Matches the place pass:
+/// `period = max(probes / budget, 1)`, probe `% period == frame % period`.
+pub(crate) fn wake_verify_threads(probes: u32, budget: u32) -> u32 {
+    if budget == 0 || probes == 0 {
+        return 0;
+    }
+    let period = (probes / budget).max(1);
+    probes.div_ceil(period)
+}
+
 /// The group list for this frame. `probe_ray_count` is probes × rays.
+/// `span_kept` is false when no geometry changed, so the trace launch drops the
+/// kept-hit and fill tail. `wake_idle` is a rings frame whose strata are already
+/// filled and whose queue is empty: the picture trace and the kept-hit direct
+/// become the verification stride.
 pub(crate) fn light_groups(
     settings: &LightingSettings,
     frame: u32,
@@ -214,6 +228,9 @@ pub(crate) fn light_groups(
     probes: u32,
     probe_ray_count: u32,
     kept: u32,
+    wake_rings: bool,
+    span_kept: bool,
+    wake_idle: bool,
 ) -> LightGroups {
     let mut out = LightGroups {
         groups: Vec::new(),
@@ -232,7 +249,20 @@ pub(crate) fn light_groups(
         && settings.probes_this_frame(frame)
         && settings.probe_rays() == LIGHTING_RAYS
         && settings.world_mode() == 3;
-    if frozen && full {
+    // Settled rings matches the legacy idle (pixel direct and compose) and adds
+    // the verification stride. The full probe launch was the still/corner cost:
+    // the trace counter had already dropped, but the dispatch had not.
+    let budget = settings.probes.wake_budget;
+    if frozen && wake_rings && settings.gi.enabled && settings.probes.enabled && probes > 0 {
+        let n = wake_verify_threads(probes, budget);
+        if n > 0 {
+            let gx = n.div_ceil(64).max(1);
+            out.push(2, gx, LIGHTING_WAKE_VERIFY, B_TRACE);
+            out.push(3, gx, LIGHTING_WAKE_VERIFY, B_DIRECT);
+        }
+        out.push(3, pixels.div_ceil(64), 1, B_DIRECT);
+        out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
+    } else if frozen && full {
         out.push(3, pixels.div_ceil(64), 1, B_DIRECT);
         out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
     } else if frozen && probe_only(settings) {
@@ -249,8 +279,8 @@ pub(crate) fn light_groups(
     } else if !round && full && !settings.cache_round_this_frame(frame) {
         out.push(1, probes.div_ceil(64), 1, B_PLACE);
         out.push(4, probes.div_ceil(64), 1, B_GATHER);
-        out.push(2, (probe_ray_count + 2 * kept).div_ceil(64), 1, B_TRACE);
-        out.push(3, (pixels + 2 * kept).div_ceil(64), 1, B_DIRECT);
+        push_picture_trace(&mut out, 1, probes, probe_ray_count, kept, budget, wake_rings, span_kept, wake_idle);
+        push_picture_direct(&mut out, 1, pixels, probes, kept, budget, wake_rings, wake_idle);
         out.push(4, probes, 1, B_GATHER);
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
@@ -262,9 +292,28 @@ pub(crate) fn light_groups(
         out.push(1, probes.div_ceil(64), 1, B_PLACE);
         out.push(4, probes.div_ceil(64), 1, B_GATHER);
         out.push(0, 1, LIGHTING_ARGS, B_COMPACT);
-        out.push(2, (probe_ray_count + 2 * kept).div_ceil(64), LIGHTING_MODE1, B_TRACE);
+        push_picture_trace(
+            &mut out,
+            LIGHTING_MODE1,
+            probes,
+            probe_ray_count,
+            kept,
+            budget,
+            wake_rings,
+            span_kept,
+            wake_idle,
+        );
         out.push(2, 0, LIGHTING_DENSE_RAYS, B_CACHE_RAYS);
-        out.push(3, (pixels + 2 * kept).div_ceil(64), LIGHTING_MODE1, B_DIRECT);
+        push_picture_direct(
+            &mut out,
+            LIGHTING_MODE1,
+            pixels,
+            probes,
+            kept,
+            budget,
+            wake_rings,
+            wake_idle,
+        );
         out.push(3, 0, LIGHTING_DENSE_RAYS, B_HIT);
         out.push(4, probes, 1, B_GATHER);
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
@@ -277,7 +326,20 @@ pub(crate) fn light_groups(
         }
         out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
     } else {
-        gated(settings, frame, round, w, h, probes, probe_ray_count, kept, &mut out);
+        gated(
+            settings,
+            frame,
+            round,
+            w,
+            h,
+            probes,
+            probe_ray_count,
+            kept,
+            wake_rings,
+            span_kept,
+            wake_idle,
+            &mut out,
+        );
     }
     if settings.shadows.enabled && (out.counts[B_DIRECT as usize] > 0 || out.counts[B_HIT as usize] > 0) {
         out.counts[B_SHADOWS as usize] = out.counts[B_DIRECT as usize].saturating_add(out.counts[B_HIT as usize]);
@@ -294,6 +356,61 @@ fn probe_only(settings: &LightingSettings) -> bool {
         && settings.world_mode() == 0
 }
 
+fn push_picture_trace(
+    out: &mut LightGroups,
+    gy: u32,
+    probes: u32,
+    probe_ray_count: u32,
+    kept: u32,
+    budget: u32,
+    wake_rings: bool,
+    span_kept: bool,
+    wake_idle: bool,
+) {
+    if probes == 0 {
+        return;
+    }
+    if wake_rings && wake_idle {
+        let n = wake_verify_threads(probes, budget);
+        if n > 0 {
+            out.push(2, n.div_ceil(64).max(1), LIGHTING_WAKE_VERIFY, B_TRACE);
+        }
+        return;
+    }
+    let threads = if wake_rings && !span_kept {
+        probe_ray_count
+    } else {
+        probe_ray_count.saturating_add(kept.saturating_mul(2))
+    };
+    out.push(2, threads.div_ceil(64).max(1), gy, B_TRACE);
+}
+
+fn push_picture_direct(
+    out: &mut LightGroups,
+    gy: u32,
+    pixels: u32,
+    probes: u32,
+    kept: u32,
+    budget: u32,
+    wake_rings: bool,
+    wake_idle: bool,
+) {
+    if wake_rings && wake_idle {
+        out.push(3, pixels.div_ceil(64).max(1), gy, B_DIRECT);
+        let n = wake_verify_threads(probes, budget);
+        if n > 0 {
+            out.push(3, n.div_ceil(64).max(1), LIGHTING_WAKE_VERIFY, B_DIRECT);
+        }
+        return;
+    }
+    out.push(
+        3,
+        pixels.saturating_add(kept.saturating_mul(2)).div_ceil(64).max(1),
+        gy,
+        B_DIRECT,
+    );
+}
+
 fn gated(
     settings: &LightingSettings,
     frame: u32,
@@ -303,6 +420,9 @@ fn gated(
     probes: u32,
     probe_ray_count: u32,
     kept: u32,
+    wake_rings: bool,
+    span_kept: bool,
+    wake_idle: bool,
     out: &mut LightGroups,
 ) {
     let buckets = settings.gpu_buckets(frame);
@@ -331,7 +451,17 @@ fn gated(
     }
     if buckets.probe_trace && probes > 0 {
         let gy = if round { LIGHTING_MODE1 } else { 1 };
-        out.push(2, (probe_ray_count + 2 * kept).div_ceil(64), gy, B_TRACE);
+        push_picture_trace(
+            out,
+            gy,
+            probes,
+            probe_ray_count,
+            kept,
+            settings.probes.wake_budget,
+            wake_rings,
+            span_kept,
+            wake_idle,
+        );
     }
     if round && buckets.cache_rays {
         out.push(2, 0, LIGHTING_DENSE_RAYS, B_CACHE_RAYS);
@@ -339,7 +469,16 @@ fn gated(
     let combined = buckets.direct && buckets.hit_light && k == 1 && settings.bounce.count > 0;
     if combined {
         let gy = if round { LIGHTING_MODE1 } else { 1 };
-        out.push(3, (pixels + 2 * kept).div_ceil(64), gy, B_DIRECT);
+        push_picture_direct(
+            out,
+            gy,
+            pixels,
+            probes,
+            kept,
+            settings.probes.wake_budget,
+            wake_rings,
+            wake_idle,
+        );
     } else if buckets.direct {
         out.push(3, lit.div_ceil(64).max(1), 1, B_DIRECT);
         out.pixel_only = 1;
@@ -400,7 +539,7 @@ mod probe_still_tests {
     use genos_scene::LightingPreset;
 
     fn groups(settings: &LightingSettings, frozen: bool, round: bool) -> LightGroups {
-        light_groups(settings, 8, frozen, round, 320, 180, 40, 40 * 64, 0)
+        light_groups(settings, 8, frozen, round, 320, 180, 40, 40 * 64, 0, false, true, false)
     }
 
     #[test]
@@ -425,7 +564,7 @@ mod probe_still_tests {
         let counts = |bounce: u32| {
             let mut settings = LightingSettings::preset(LightingPreset::High);
             settings.bounce.count = bounce;
-            light_groups(&settings, 1, false, true, 320, 180, 40, 40 * 64, 8).counts
+            light_groups(&settings, 1, false, true, 320, 180, 40, 40 * 64, 8, false, true, false).counts
         };
         let zero = counts(0);
         let one = counts(1);
@@ -472,5 +611,74 @@ mod probe_still_tests {
         assert_eq!(quiet.counts[B_CACHE_RAYS as usize], 0);
         assert_eq!(quiet.counts[B_ATROUS as usize], 0);
         assert_eq!(quiet.groups.len(), 2);
+    }
+
+    #[test]
+    fn settled_rings_frame_matches_legacy_idle_plus_the_budget() {
+        let high = LightingSettings::preset(LightingPreset::High);
+        let probes = 40u32;
+        let quiet = light_groups(
+            &high, 8, true, false, 320, 180, probes, probes * 64, probes * 64 * 8, true, false, false,
+        );
+        let legacy = light_groups(
+            &high, 8, true, false, 320, 180, probes, probes * 64, 0, false, true, false,
+        );
+        assert_eq!(legacy.groups.len(), 2);
+        assert_eq!(quiet.counts[B_PLACE as usize], 0, "place");
+        assert_eq!(quiet.counts[B_GATHER as usize], 0, "gather");
+        assert_eq!(quiet.counts[B_FILTER as usize], 0, "filter");
+        assert_eq!(quiet.counts[B_CACHE_RAYS as usize], 0, "the cache stays idle");
+        assert_eq!(quiet.counts[B_ATROUS as usize], 0, "atrous");
+        assert_eq!(quiet.counts[B_COMPOSE as usize], 1);
+        assert_eq!(quiet.counts[B_TRACE as usize], 1, "one verification trace");
+        assert_eq!(quiet.counts[B_DIRECT as usize], 2, "budget direct plus pixel direct");
+        let verify = wake_verify_threads(probes, high.probes.wake_budget);
+        assert!(verify <= probes / 2, "stride {verify} of {probes}");
+        let trace = quiet.groups.iter().find(|(pass, _, _)| *pass == 2).unwrap();
+        assert_eq!(trace.1, verify.div_ceil(64).max(1));
+        assert_eq!(trace.2, super::LIGHTING_WAKE_VERIFY);
+        // The pixel direct matches legacy's only direct dispatch.
+        assert_eq!(quiet.groups.last().unwrap().0, 7);
+        assert!(quiet
+            .groups
+            .iter()
+            .any(|(pass, gx, gy)| *pass == 3 && *gy == 1 && *gx == legacy.groups[0].1));
+    }
+
+    #[test]
+    fn rings_idle_frame_drops_the_kept_span() {
+        let high = LightingSettings::preset(LightingPreset::High);
+        let probes = 120u32 * 68;
+        let rays = probes * 64;
+        let kept = rays * 8;
+        let full = light_groups(
+            &high, 8, false, true, 1920, 1080, probes, rays, kept, true, true, false,
+        );
+        let slim = light_groups(
+            &high, 8, false, true, 1920, 1080, probes, rays, kept, true, false, false,
+        );
+        let idle = light_groups(
+            &high, 8, false, true, 1920, 1080, probes, rays, kept, true, false, true,
+        );
+        let picture_trace = |g: &LightGroups| -> u32 {
+            g.groups
+                .iter()
+                .find(|(pass, _, gy)| *pass == 2 && *gy == super::LIGHTING_MODE1)
+                .map(|(_, gx, _)| *gx)
+                .unwrap_or(0)
+        };
+        assert_eq!(picture_trace(&full), (rays + 2 * kept).div_ceil(64));
+        assert_eq!(picture_trace(&slim), rays.div_ceil(64));
+        assert!(picture_trace(&slim) * 8 < picture_trace(&full));
+        assert_eq!(picture_trace(&idle), 0, "idle trace is the verification kind");
+        let idle_trace = idle.groups.iter().find(|(pass, _, gy)| *pass == 2 && *gy == super::LIGHTING_WAKE_VERIFY).unwrap();
+        let n = wake_verify_threads(probes, high.probes.wake_budget);
+        assert_eq!(idle_trace.1, n.div_ceil(64).max(1));
+        assert!(n < probes / 8, "stride {n} of {probes}");
+        assert!(idle.counts[B_ATROUS as usize] > 0, "a cache round still filters");
+        assert_eq!(idle.counts[B_CACHE_RAYS as usize], full.counts[B_CACHE_RAYS as usize]);
+        assert!(idle.counts[B_DIRECT as usize] > full.counts[B_DIRECT as usize]);
+        let kept_direct = (1920u32 * 1080 + 2 * kept).div_ceil(64);
+        assert!(idle.groups.iter().all(|(pass, gx, _)| *pass != 3 || *gx < kept_direct));
     }
 }

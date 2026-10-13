@@ -98,6 +98,20 @@ void main() {
     uint mode = lighting_mode();
     uint kept = lighting_kept_hits();
     uint cache_rays = LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS;
+    // Verification stride: thread i shades the check hit of that probe. The
+    // kept-hit span of the grid is not launched.
+    if (mode == 3u) {
+        uint budget = gstats.wake_budget;
+        uint nprobes = lighting_probes();
+        uint period = max(nprobes / max(budget, 1u), 1u);
+        uint probe = (pc.params.w % period) + idx * period;
+        if (budget == 0u || probe >= nprobes) {
+            return;
+        }
+        uint rays = lighting_rays();
+        uint h = (probe * LIGHTING_STRATA + lighting_stratum()) * rays + lighting_hold_check_k(probe);
+        idx = pixels + h;
+    }
     // Pixel-only (GI off, or a coarser direct grid): leave before any work or
     // cache read. Mode 0's point count includes cache-ray slots, and the tail
     // of the last group would index the dummy buffers.
@@ -175,7 +189,9 @@ void main() {
                 rec = work.v[lighting_kept_at(h)];
                 live = lighting_stratum_ray(ps / LIGHTING_STRATA, ps % LIGHTING_STRATA, h % rays, origin, dir, from_n);
                 if (live && rec.x < -0.75) {
-                    lighting_put_kept_light_d(h, has_sky() ? scene.sky.rgb : vec3(0.0), 2u);
+                    vec3 sky_light = has_sky() ? scene.sky.rgb : vec3(0.0);
+                    lighting_put_kept_light_d(h, sky_light, 2u);
+                    lighting_wake_store_direct(h, sky_light);
                     return;
                 }
             }
@@ -227,10 +243,23 @@ void main() {
                 && !lighting_held_crosses(ho, hd, hit_t)) {
                 held_old = true;
             }
+            // A ring test, a verification sample, or a full wake has to shade.
+            // The legacy noise skip would hide the lamp change the ring is scoring.
+            if (lighting_wake_relight(h)) {
+                held_old = false;
+            }
         }
         if (LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_pix_cache_ok() && !(urgent && lighting_near_change(pos))) {
             uint traced = lighting_frame() - LIGHTING_STRATA / 2u;
-            if (!lighting_wrc_lamp_changed(pos, traced) && abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
+            // Rings: a moved lamp does not reshade every kept hit in range.
+            // That was the direct pass (the trace counter had already dropped).
+            // A woken probe and its check ray still shade; the probe filter
+            // spreads them. The sun ratio stays, so a day change still tracks.
+            if (gstats.wake_mode != 0u && !lighting_wake_relight(h)) {
+                if (abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
+                    return;
+                }
+            } else if (gstats.wake_mode == 0u && !lighting_wrc_lamp_changed(pos, traced) && abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
                 return;
             }
         }
@@ -470,18 +499,29 @@ void main() {
         if ((gstats.ctrl_bits & 512u) == 0u) {
             glow = vec3(0.0);
         }
+        // Direct only. Bounce is added below for the picture; the wake vote
+        // must not see it (a still scene's surface cache keeps moving).
+        vec3 direct_shed = reflectance * e + glow;
         vec3 bounce = lighting_gi_on() ? lighting_cache_irradiance_at(pos, n, hit_t) : vec3(0.0);
         e += bounce;
         e_sun += lighting_hit_sunfrac * bounce;
+        vec3 shed = reflectance * e + glow;
+        // Fills are a first trace of a missing stratum. The vote compares a
+        // kept hit's direct light to the direct light stored for that same
+        // direction.
+        if (probe_hit && !fill_hit) {
+            lighting_wake_observe(h, direct_shed);
+        }
         if (fill_hit) {
-            lighting_put_fill_light(h, reflectance * e + glow);
-        } else if (probe_hit && lighting_check_within_noise(h, pos, n, reflectance, reflectance * e + glow)) {
+            lighting_put_fill_light(h, shed);
+        } else if (probe_hit && !lighting_wake_relight(h) && lighting_check_within_noise(h, pos, n, reflectance, shed)) {
             lighting_chg(CHG_KEPT_HELD, 1u);
         } else if (probe_hit) {
-            lighting_put_kept_light_d(h, reflectance * e + glow, tdl == ~0u ? 2u : ((tdl & 0x80000000u) != 0u ? 0u : 1u));
+            lighting_put_kept_light_d(h, shed, tdl == ~0u ? 2u : ((tdl & 0x80000000u) != 0u ? 0u : 1u));
+            lighting_wake_store_direct(h, direct_shed);
         } else {
             // w: its sun/sky share as luminance (S63A).
-            work.v[lighting_rad_at(ray)] = vec4(reflectance * e + glow, dot(reflectance * e_sun, vec3(0.2126, 0.7152, 0.0722)));
+            work.v[lighting_rad_at(ray)] = vec4(shed, dot(reflectance * e_sun, vec3(0.2126, 0.7152, 0.0722)));
         }
     }
 }

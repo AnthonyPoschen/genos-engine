@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use genos_render::{DebugView, Renderer, ViewMode, World};
-use genos_scene::{Camera, Scene};
+use genos_render::{DebugView, LightingWakeProbe, LightingWakeStats, Renderer, ViewMode, World};
+use genos_scene::{Camera, Ceiling, DebugSettings, Floor, Light, LightingSettings, Scene, Vec3, Wall};
 use genos_window::Window;
 
 fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
@@ -507,4 +507,450 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     let back = renderer.lighting_atrous_stats();
     assert_eq!(back.mode, 1, "raising the threshold returns to the work lists");
     assert!(back.ran, "the levels ran after the switch back");
+}
+
+/// Legacy scheduling, measured before ring wakes: a held probe traces one check
+/// ray a frame, so a still frame traces about one ray per placed probe. A moving
+/// camera drops the hold and traces the whole stratum. Ring counters stay zero.
+#[test]
+fn legacy_still_traces_one_check_ray_and_moving_traces_more() {
+    let (_gpu, mut window, mut renderer) = open();
+    let world = shipped_hall();
+    let mut camera = Camera::opening();
+    for _ in 0..12 {
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+    }
+    let still = renderer.lighting_wake_stats();
+    let [still_rays_held, still_probes] = renderer.lighting_probe_samples();
+    eprintln!(
+        "baseline still probes_placed {still_probes} rays_held {still_rays_held} probes_traced {} rays_traced {} rings {} woken {}",
+        still.probes_traced, still.rays_traced, still.rings_tested, still.probes_woken
+    );
+    assert!(still.probes_traced > 50, "still probes traced {}", still.probes_traced);
+    assert!(
+        still.rays_traced >= still.probes_traced,
+        "still rays {} probes {}",
+        still.rays_traced,
+        still.probes_traced
+    );
+    assert!(
+        still.rays_traced < still.probes_traced * 4,
+        "a held still frame is a check ray, not a full stratum ({} rays / {} probes)",
+        still.rays_traced,
+        still.probes_traced
+    );
+    assert_eq!(still.rings_tested, 0);
+    assert_eq!(still.probes_woken, 0);
+    assert_eq!(still.verify_hits, 0);
+    assert_eq!(still.verify_misses, 0);
+    let p = camera.position;
+    for step in 1..=4 {
+        camera.set_pose(p, camera.yaw + 0.04 * step as f32, camera.pitch);
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+    }
+    let moving = renderer.lighting_wake_stats();
+    let [moving_rays_held, moving_probes] = renderer.lighting_probe_samples();
+    eprintln!(
+        "baseline moving probes_placed {moving_probes} rays_held {moving_rays_held} probes_traced {} rays_traced {}",
+        moving.probes_traced, moving.rays_traced
+    );
+    assert!(moving.probes_traced > 50, "moving probes traced {}", moving.probes_traced);
+    assert!(
+        moving.rays_traced > still.rays_traced,
+        "moving traces more rays than the still check ({} vs {})",
+        moving.rays_traced,
+        still.rays_traced
+    );
+}
+
+/// Rings on a held still scene trace about the verification budget, not the grid.
+/// The corner room, the missed colour, and a still room that wakes nothing are
+/// the cases below this one.
+#[test]
+fn rings_still_traces_the_verification_budget() {
+    let (_gpu, mut window, mut renderer) = open();
+    std::env::set_var("GENOS_LIGHTING_WAKE", "rings");
+    std::env::set_var("GENOS_LIGHTING_WAKE_BUDGET", "16");
+    let world = shipped_hall();
+    let camera = Camera::opening();
+    let mut last = renderer.lighting_wake_stats();
+    for i in 0..16 {
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+        last = renderer.lighting_wake_stats();
+        let [_, probes] = renderer.lighting_probe_samples();
+        eprintln!(
+            "rings still frame {i} placed {probes} traced {} rays {} rings {} splits {} woken {} hits {} misses {}",
+            last.probes_traced,
+            last.rays_traced,
+            last.rings_tested,
+            last.groups_split,
+            last.probes_woken,
+            last.verify_hits,
+            last.verify_misses
+        );
+    }
+    std::env::remove_var("GENOS_LIGHTING_WAKE");
+    std::env::remove_var("GENOS_LIGHTING_WAKE_BUDGET");
+    assert_eq!(last.probes_woken, 0, "a still scene does not wake");
+    assert!(
+        last.probes_traced < 64,
+        "verification budget, not the grid ({})",
+        last.probes_traced
+    );
+    assert!(last.probes_traced > 0, "the budget still traces");
+    assert!(
+        last.rays_traced < last.probes_traced.saturating_mul(4).max(8),
+        "held checks, not a stratum ({} rays / {} probes)",
+        last.rays_traced,
+        last.probes_traced
+    );
+}
+
+/// Drop launch locks that would hide the scene settings these cases write.
+fn clear_wake_env() {
+    for key in [
+        "GENOS_LIGHTING_PRESET",
+        "GENOS_LIGHTING_WAKE",
+        "GENOS_LIGHTING_WAKE_TOL",
+        "GENOS_LIGHTING_WAKE_BUDGET",
+        "GENOS_LIGHTING_WAKE_RADIUS",
+        "GENOS_LIGHTING_TILE",
+        "GENOS_LIGHTING_WORLD",
+        "GENOS_LIGHTING_WORLD_CACHE",
+        "GENOS_LIGHTING_BOUNCES",
+        "GENOS_LIGHTING_DENOISE",
+        "GENOS_LIGHTING_SKY",
+        "GENOS_LIGHTING_AMBIENT",
+    ] {
+        std::env::remove_var(key);
+    }
+}
+
+fn rings_room_settings(radius: f32, budget: u32, tol: f32) -> LightingSettings {
+    let mut settings = LightingSettings::default();
+    settings.set_key("world_cache", "0").unwrap();
+    settings.set_key("bounces", "0").unwrap();
+    settings.set_key("probe_tile", "16").unwrap();
+    settings.set_key("wake", "rings").unwrap();
+    settings
+        .set_key("wake_radius", &format!("{radius}"))
+        .unwrap();
+    settings
+        .set_key("wake_budget", &budget.to_string())
+        .unwrap();
+    settings.set_key("wake_tol", &format!("{tol}")).unwrap();
+    settings.set_key("denoise", "0").unwrap();
+    settings.set_key("sky", "0").unwrap();
+    settings.set_key("ambient", "off").unwrap();
+    settings
+}
+
+fn corner_wall(x: f32, z: f32, half_x: f32, half_z: f32) -> Wall {
+    Wall {
+        position: Vec3::new(x, 0.0, z),
+        half_x,
+        half_z,
+        height: 3.0,
+        base: 0.0,
+        color: [0.62, 0.62, 0.64],
+        absorption: 0.0,
+        reflectance: -1.0,
+        color_mix: -1.0,
+    }
+}
+
+/// Two walls meet at the origin. The camera in the +X/+Z quadrant sees the
+/// faces at x = 0.15 and z = 0.15, and wall samples more than 2 m from a lamp
+/// tucked into that corner.
+fn corner_room(settings: LightingSettings, lamp: Vec3, color: [f32; 3]) -> World {
+    World::from_scene(Scene {
+        floor: Floor {
+            position: Vec3::ZERO,
+            half_x: 8.0,
+            half_z: 8.0,
+            color: [0.6, 0.6, 0.6],
+        },
+        walls: vec![
+            corner_wall(0.0, 4.0, 0.15, 4.0),
+            corner_wall(4.0, 0.0, 4.0, 0.15),
+        ],
+        solids: Vec::new(),
+        lights: vec![Light {
+            position: lamp,
+            color,
+            direction: Vec3::ZERO,
+        }],
+        ceiling: Some(Ceiling {
+            height: 3.0,
+            color: [0.7, 0.7, 0.72],
+        }),
+        sky: None,
+        lighting: settings,
+        debug: DebugSettings::default(),
+    })
+}
+
+fn corner_camera() -> Camera {
+    let mut camera = Camera::opening();
+    camera.set_pose(
+        Vec3::new(3.2, 1.5, 3.2),
+        -std::f32::consts::FRAC_PI_4,
+        -0.12,
+    );
+    camera
+}
+
+fn metres(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+}
+
+fn eprint_wake(label: &str, frame: u32, stats: &LightingWakeStats) {
+    eprintln!(
+        "{label} frame {frame} traced {} rays {} rings {} splits {} woken {} hits {} misses {}",
+        stats.probes_traced,
+        stats.rays_traced,
+        stats.rings_tested,
+        stats.groups_split,
+        stats.probes_woken,
+        stats.verify_hits,
+        stats.verify_misses
+    );
+}
+
+/// Direct light only, tile 16 (240 slots at 320×180). A held still frame at the
+/// default tolerance 0.08 wakes nothing and its verification votes are mostly hits.
+/// The check ray is a new index each frame; the vote uses the light stored for
+/// that same direction.
+#[test]
+fn rings_still_room_wakes_about_zero() {
+    let (_gpu, mut window, mut renderer) = open();
+    clear_wake_env();
+    let world = corner_room(
+        rings_room_settings(2.0, 8, 0.08),
+        Vec3::new(0.45, 1.2, 0.45),
+        [8.0, 8.0, 8.0],
+    );
+    let camera = corner_camera();
+    let mut last = LightingWakeStats::default();
+    for frame in 0..14 {
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+        last = renderer.lighting_wake_stats();
+        eprint_wake("rings still room", frame, &last);
+    }
+    assert_eq!(last.probes_woken, 0, "a still room does not wake");
+    assert_eq!(last.rings_tested, 0, "a still room tests no ring");
+    assert!(
+        last.probes_traced > 0 && last.probes_traced < 40,
+        "verification budget, not the grid ({})",
+        last.probes_traced
+    );
+    assert!(
+        last.rays_traced < last.probes_traced.saturating_mul(4).max(8),
+        "held checks, not a stratum ({} rays / {} probes)",
+        last.rays_traced,
+        last.probes_traced
+    );
+    assert!(
+        last.verify_hits > last.verify_misses,
+        "default tolerance 0.08 votes mostly hits on a held still frame (hits {} misses {})",
+        last.verify_hits,
+        last.verify_misses
+    );
+}
+
+/// Same corner, but with the stress defaults the real-GPU A/B actually runs:
+/// surface cache on and bounces left unlimited. Cache convergence must not
+/// count as a scene change. A held frame at 0.08 votes hits, and it does not
+/// wake.
+#[test]
+fn rings_still_room_with_cache_votes_hits() {
+    let (_gpu, mut window, mut renderer) = open();
+    clear_wake_env();
+    let mut settings = LightingSettings::default();
+    settings.set_key("probe_tile", "16").unwrap();
+    settings.set_key("wake", "rings").unwrap();
+    settings.set_key("wake_radius", "2").unwrap();
+    settings.set_key("wake_budget", "8").unwrap();
+    settings.set_key("wake_tol", "0.08").unwrap();
+    settings.set_key("denoise", "0").unwrap();
+    let world = corner_room(
+        settings,
+        Vec3::new(0.45, 1.2, 0.45),
+        [8.0, 8.0, 8.0],
+    );
+    let camera = corner_camera();
+    let mut last = LightingWakeStats::default();
+    let mut late_hits = 0u32;
+    let mut late_misses = 0u32;
+    for frame in 0..24 {
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+        last = renderer.lighting_wake_stats();
+        eprint_wake("rings cache still", frame, &last);
+        if frame >= 16 {
+            late_hits += last.verify_hits;
+            late_misses += last.verify_misses;
+        }
+    }
+    assert_eq!(last.probes_woken, 0, "a cached still room does not wake");
+    assert_eq!(last.rings_tested, 0, "a cached still room tests no ring");
+    let votes = last.verify_hits + last.verify_misses;
+    assert!(votes > 0, "a held frame cast no vote");
+    assert_eq!(
+        last.verify_misses, 0,
+        "cache convergence counted as misses (hits {} misses {} of {votes})",
+        last.verify_hits,
+        last.verify_misses
+    );
+    assert!(
+        late_hits > late_misses.saturating_mul(4),
+        "held frames 16-23 were mostly misses (hits {late_hits} misses {late_misses})"
+    );
+}
+
+/// A lamp that steps 0.6 m wakes probes near the old and new centres, inside
+/// the 2 m ring cap, and leaves the probes on the far wall asleep. The inner
+/// ball is a full trace; the ring testers are the screen tiles that own the
+/// sample points.
+#[test]
+fn rings_corner_lamp_wakes_nearby_probes() {
+    let (_gpu, mut window, mut renderer) = open();
+    clear_wake_env();
+    let old = [0.45_f32, 1.2, 0.45];
+    let mut world = corner_room(
+        rings_room_settings(2.0, 4, 0.08),
+        Vec3::new(old[0], old[1], old[2]),
+        [8.0, 8.0, 8.0],
+    );
+    let camera = corner_camera();
+    for frame in 0..12 {
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+        eprint_wake("rings corner warm", frame, &renderer.lighting_wake_stats());
+    }
+    let moved = [old[0] + 0.6, old[1], old[2]];
+    world.scene.lights[0].position = Vec3::new(moved[0], moved[1], moved[2]);
+    let mut woken: Vec<LightingWakeProbe> = Vec::new();
+    let mut rings = 0u32;
+    let mut peak_woken = 0u32;
+    for frame in 0..6 {
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+        let stats = renderer.lighting_wake_stats();
+        eprint_wake("rings corner move", frame, &stats);
+        rings += stats.rings_tested;
+        peak_woken = peak_woken.max(stats.probes_woken);
+        let list = renderer.lighting_wake_list();
+        for probe in &list {
+            eprintln!(
+                "rings corner probe {} at {:?} near {:.2}/{:.2}",
+                probe.index,
+                probe.position,
+                metres(probe.position, old),
+                metres(probe.position, moved)
+            );
+        }
+        woken.extend(list);
+    }
+    let [_, placed] = renderer.lighting_probe_samples();
+    let mut seen = std::collections::BTreeSet::new();
+    for probe in &woken {
+        seen.insert(probe.index);
+        let near = metres(probe.position, old).min(metres(probe.position, moved));
+        assert!(
+            near <= 2.05,
+            "probe {} at {:?} is {near:.2} m from both lamps (cap 2 m)",
+            probe.index,
+            probe.position
+        );
+    }
+    assert!(!woken.is_empty(), "the move woke no probe");
+    assert!(
+        woken.iter().any(|probe| {
+            metres(probe.position, old).min(metres(probe.position, moved)) <= 1.0
+        }),
+        "no woken probe is in the first metre"
+    );
+    assert!(rings > 0, "the ring samples are on screen and were tested");
+    assert!(
+        peak_woken < placed / 2 && seen.len() < (placed / 2) as usize,
+        "woke {peak_woken} in one frame, {} unique, of {placed} placed",
+        seen.len()
+    );
+}
+
+/// One frame at the test tolerance, after a held warm-up at tolerance 1.
+/// Tolerance 1 cannot miss a non-negative luminance, so the scale stays put
+/// and this frame is the first one that can.
+fn verification_frame(change_colour: bool) -> LightingWakeStats {
+    let mut window = Window::open_proof(320, 180).expect("proof window");
+    let frame = window.pump();
+    let mut renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+        .expect("renderer");
+    clear_wake_env();
+    let mut world = corner_room(
+        rings_room_settings(0.0, 48, 1.0),
+        Vec3::new(0.45, 1.2, 0.45),
+        [8.0, 8.0, 8.0],
+    );
+    let camera = corner_camera();
+    for frame in 0..12 {
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+        eprint_wake(
+            if change_colour {
+                "rings miss warm change"
+            } else {
+                "rings miss warm still"
+            },
+            frame,
+            &renderer.lighting_wake_stats(),
+        );
+    }
+    world.scene.lighting.set_key("wake_tol", "0.75").unwrap();
+    if change_colour {
+        // 6× is relative 5/7 ≈ 0.71 on the colour, under the 0.75 full-wake
+        // cut, and about 0.83 on a ray that simply scales.
+        world.scene.lights[0].color = [48.0, 48.0, 48.0];
+    }
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let stats = renderer.lighting_wake_stats();
+    eprint_wake(
+        if change_colour {
+            "rings miss change"
+        } else {
+            "rings miss still"
+        },
+        0,
+        &stats,
+    );
+    stats
+}
+
+/// The vote compares this check ray to the light stored for that direction.
+/// At 0.75 a still frame keeps hits. A 6× colour on that same first frame,
+/// ring cap 0, misses more of them and does not wake.
+#[test]
+fn rings_verification_catches_a_missed_change() {
+    // Same device lock as the other frame tests. The two measurements each
+    // open a renderer after the previous one is dropped.
+    let (gpu, window, renderer) = open();
+    drop(renderer);
+    drop(window);
+    let still = verification_frame(false);
+    let changed = verification_frame(true);
+    drop(gpu);
+    for (name, stats) in [("still", still), ("changed", changed)] {
+        assert_eq!(stats.rings_tested, 0, "{name} tested a ring");
+        assert_eq!(stats.probes_woken, 0, "{name} woke probes");
+        assert!(stats.verify_hits + stats.verify_misses > 0, "{name} cast no vote");
+    }
+    assert_eq!(
+        still.verify_misses, 0,
+        "a still frame voted misses {}",
+        still.verify_misses
+    );
+    assert!(
+        changed.verify_misses > still.verify_misses,
+        "colour change misses {} against a still frame {}",
+        changed.verify_misses,
+        still.verify_misses
+    );
 }

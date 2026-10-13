@@ -222,6 +222,12 @@ pub(crate) struct Lighting {
     last_dispatches: [u32; BUCKETS],
     /// Control block uploaded with the frame, reused by the async queue.
     ctrl_bytes: [u8; 64],
+    /// Lamp and geometry changes kept for a few frames of ring tests.
+    wake: WakeQueue,
+    /// How many times this flight slot has scheduled rings. Picks the persist slot.
+    wake_phase: [u32; 2],
+    /// The stats tail still holds the previous ring. The first frame clears it.
+    wake_ready: [bool; 2],
 }
 
 /// A-trous levels 1-5 in the last frame that ran them (S78X dense fallback).
@@ -237,6 +243,40 @@ pub struct LightingAtrousStats {
     pub filtered: u32,
     /// Levels 1-5 ran this frame.
     pub ran: bool,
+}
+
+/// Probes and rays that reached a trace in the last frame, plus the ring-wake
+/// counters (zero while the scheduler is the legacy check ray).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LightingWakeStats {
+    pub probes_traced: u32,
+    pub rays_traced: u32,
+    pub rings_tested: u32,
+    pub groups_split: u32,
+    pub probes_woken: u32,
+    pub verify_hits: u32,
+    pub verify_misses: u32,
+}
+
+/// A probe the ring scheduler traced in full last frame, and where it stood.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightingWakeProbe {
+    pub index: u32,
+    pub position: [f32; 3],
+}
+
+impl LightingWakeStats {
+    fn from_words(w: &[u32]) -> Self {
+        Self {
+            probes_traced: *w.get(WAKE_TRACED).unwrap_or(&0),
+            rays_traced: *w.get(WAKE_RAYS).unwrap_or(&0),
+            rings_tested: *w.get(WAKE_RINGS).unwrap_or(&0),
+            groups_split: *w.get(WAKE_SPLITS).unwrap_or(&0),
+            probes_woken: *w.get(WAKE_WOKEN).unwrap_or(&0),
+            verify_hits: *w.get(WAKE_HITS).unwrap_or(&0),
+            verify_misses: *w.get(WAKE_MISSES).unwrap_or(&0),
+        }
+    }
 }
 
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
@@ -340,6 +380,9 @@ impl Default for Lighting {
             last_ms: [0.0; BUCKETS],
             last_dispatches: [0; BUCKETS],
             ctrl_bytes: [0; 64],
+            wake: WakeQueue::new(),
+            wake_phase: [0; 2],
+            wake_ready: [false; 2],
         }
     }
 }
@@ -349,6 +392,8 @@ const LIGHTING_ARGS: u32 = 1 << 30;
 const LIGHTING_MODE1: u32 = LIGHTING_ARGS + 1;
 const LIGHTING_DENSE_RAYS: u32 = LIGHTING_ARGS + 2;
 const LIGHTING_DENSE_ENTRIES: u32 = LIGHTING_ARGS + 3;
+/// Picture trace/direct of the verification stride only (`lighting_mode` 3).
+const LIGHTING_WAKE_VERIFY: u32 = LIGHTING_ARGS + 4;
 /// Word of the dispatch args in the cache keys (lighting_cache.glsl LIGHTING_ARGS_AT).
 const LIGHTING_ARGS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 17600;
 /// A-trous list metadata (lighting_cache.glsl LIGHTING_ATROUS_*). The threshold
@@ -710,10 +755,11 @@ impl Gpu {
         let pixels = w as u64 * h as u64;
         let rays = settings.probe_rays() as u64;
         // Probes (2), one slot per light cache ray (hit, then its light), filtered SH
-        // (7), strata (2 per probe and stratum), kept hits and their light (a uint
-        // each), the changes block, the views (2 blocks of 2 per probe) and the
-        // cells (2 tables of R per probe), then the fills and their light (as the
-        // kept hits) (lighting_common.glsl).
+        // (7), strata (2 per probe and stratum), kept hits, their light (a uint
+        // each) and a direct-luminance baseline (one float each), the changes
+        // block, the views (2 blocks of 2 per probe) and the cells (2 tables of R
+        // per probe), then the fills and their light (as the kept hits)
+        // (lighting_common.glsl).
         // Bounce 0 keeps the GI flag but skips every GI buffer. The alloc key
         // matches GI off, so the work buffer stays the small one and the change
         // block must not be written at the GI offset.
@@ -741,6 +787,8 @@ impl Gpu {
             + kept / 4
             + pixels.div_ceil(2) // S78J: per-pixel direct light reuse (signature, light)
             + 2 * probes + rays * probes // S78Q: held-probe gather (stamps, raw cells)
+            + probes // wake record per probe (luminance, frame, flags)
+            + 16 // eight wake events, two vec4 each
         } else {
             0
         };
@@ -954,7 +1002,42 @@ impl Gpu {
             .map_or(self.lighting.probe_samples, |w| [w[6], w[7]])
     }
 
-    /// A-trous dirty fraction, mode and threshold for the last frame drawn.
+    /// Wake counters for the last frame drawn. Waits for that frame.
+    pub(crate) fn lighting_wake_stats(&mut self) -> LightingWakeStats {
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
+        self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory)
+            .map(|w| LightingWakeStats::from_words(&w))
+            .unwrap_or_default()
+    }
+
+    /// Probes the ring scheduler fully traced last frame, up to 32, with the
+    /// places they stood. Verification samples are not in this list.
+    pub(crate) fn lighting_wake_list(&mut self) -> Vec<LightingWakeProbe> {
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
+        let Some(words) = self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory).ok() else {
+            return Vec::new();
+        };
+        let n = (words.get(WAKE_WOKEN).copied().unwrap_or(0) as usize).min(WAKE_LIST_CAP);
+        (0..n)
+            .map(|i| {
+                let at = WAKE_LIST + i * 4;
+                LightingWakeProbe {
+                    index: words.get(at).copied().unwrap_or(0),
+                    position: [
+                        f32::from_bits(words.get(at + 1).copied().unwrap_or(0)),
+                        f32::from_bits(words.get(at + 2).copied().unwrap_or(0)),
+                        f32::from_bits(words.get(at + 3).copied().unwrap_or(0)),
+                    ],
+                }
+            })
+            .collect()
+    }
+
+/// A-trous dirty fraction, mode and threshold for the last frame drawn.
     /// Waits for that frame. The words are the `lightingatrous` line.
     pub(crate) fn lighting_atrous_stats(&mut self) -> LightingAtrousStats {
         unsafe {
@@ -999,7 +1082,7 @@ impl Gpu {
         if !read {
         } else if let Ok(words) = self.read_lighting_stats(slot) {
             self.lighting.probe_samples = [words[6], words[7]];
-            if words[7] > 0 && std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+            if words[7] > 0 && lighting_debug_enabled() {
                 eprintln!(
                     "lighting probes rays {} probes {} per_probe {:.1}",
                     words[6],
@@ -1024,8 +1107,31 @@ impl Gpu {
                 );
             }
         }
+        if wake_config(&self.lighting.settings).mode == 1 && self.lighting.wake_ready[slot] {
+            if let Ok(words) = self.read_stats16(self.lighting.stats[slot].memory) {
+                self.lighting.wake.adapt(words[WAKE_HITS], words[WAKE_MISSES]);
+            }
+        }
+        let clear_bytes = if self.lighting.wake_ready[slot] {
+            WAKE_CLEAR_WORDS as u64 * 4
+        } else {
+            self.lighting.wake_ready[slot] = true;
+            LIGHTING_STATS_BYTES
+        };
         unsafe {
-            (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.stats_dev[slot].buffer, 0, LIGHTING_STATS_BYTES, 0);
+            (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.stats_dev[slot].buffer, 0, clear_bytes, 0);
+            // The ring frontier lives in the tail of the header. A later frame
+            // clears only the counters, so the unfilled words after that tail
+            // are cleared on their own.
+            if clear_bytes < LIGHTING_STATS_BYTES {
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.stats_dev[slot].buffer,
+                    (LIGHTING_UNFILLED_WORD as u64) * 4,
+                    16,
+                    0,
+                );
+            }
             if self.unfilled.count {
                 let mask_bytes = unfilled_mask_bytes(self.lighting.dims[0], self.lighting.dims[1]);
                 if mask_bytes > 0 {
@@ -1142,7 +1248,7 @@ impl Gpu {
             }
         }
         self.lighting.live = words[2];
-        if std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+        if lighting_debug_enabled() {
             eprintln!(
                 "lighting frame {} still {} change {} relit {} live {} missed {} quiet {} mature_change {} mature_relit {} light_quiet {} young_only {}",
                 self.lighting.frame,
@@ -1360,7 +1466,7 @@ impl Gpu {
     /// `GENOS_LIGHTING_DEBUG` prints the a-trous line on its own.
     fn trace_sc(&self, memory: Handle, queue: &str) {
         let trace = std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_some();
-        let debug = std::env::var_os("GENOS_LIGHTING_DEBUG").is_some();
+        let debug = lighting_debug_enabled();
         if !trace && !debug {
             return;
         }
@@ -1384,6 +1490,18 @@ impl Gpu {
                 w[LIGHTING_ATROUS_STAT] as f64 / 1.0e6,
                 w[LIGHTING_ATROUS_STAT + 2] as f64 / 1.0e6,
                 w[LIGHTING_ATROUS_STAT + 3]
+            );
+            let wake = LightingWakeStats::from_words(&w);
+            eprintln!(
+                "lightingwake {queue} frame {} traced {} rays {} rings {} splits {} woken {} hits {} misses {}",
+                self.lighting.frame,
+                wake.probes_traced,
+                wake.rays_traced,
+                wake.rings_tested,
+                wake.groups_split,
+                wake.probes_woken,
+                wake.verify_hits,
+                wake.verify_misses
             );
         }
     }
@@ -1581,13 +1699,17 @@ impl Gpu {
             hasher.finish()
         };
         let frozen = self.lighting_stats().settled;
+        let wake_cfg = wake_config(&self.lighting.settings);
+        if wake_cfg.mode == 1 {
+            self.lighting.wake.begin_frame();
+        }
         let had = !self.lighting.kept_bytes.is_empty() && key == self.lighting.kept_key;
         let changes = if had {
             lighting_changes(&self.lighting.kept_bytes, &self.frame_bytes)
         } else {
             None
         };
-        if std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+        if lighting_debug_enabled() {
             if frozen {
                 eprintln!("lighting frozen");
             } else {
@@ -1595,6 +1717,24 @@ impl Gpu {
                     "lighting kept had {had} changes {}",
                     changes.as_ref().map_or(-1, |c| c.len() as i64)
                 );
+            }
+        }
+        if wake_cfg.mode == 1 && !self.lighting.kept_bytes.is_empty() {
+            // Diff the occluders even when the trace key changed. `changes` is
+            // None in that case because the shader list was not built, and the
+            // queue would read that as an overflow and wake every probe.
+            let wake_changes = lighting_changes(&self.lighting.kept_bytes, &self.frame_bytes);
+            self.lighting.wake.note(
+                &self.lighting.kept_bytes,
+                &self.frame_bytes,
+                wake_changes.as_deref(),
+            );
+            for (&i, &left) in &self.lighting.mesh_movers {
+                if left == LIGHTING_MOVER_KEEP {
+                    if let Some(sph) = self.lighting.mesh_spheres.get(i) {
+                        self.lighting.wake.note_sphere([sph[0], sph[1], sph[2]], sph[3]);
+                    }
+                }
             }
         }
         let mut block = vec![0f32; 4 * (LIGHTING_CHANGE_HEAD + LIGHTING_CHANGES)];
@@ -1659,7 +1799,7 @@ impl Gpu {
             }
             block[3] += (n * 200000) as f32;
             sent += 4 * n;
-            if std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+            if lighting_debug_enabled() {
                 eprintln!("lighting world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(lighting_sc_local_env()), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
             }
             // Object-local texels for movers (GIBS): GENOS_LIGHTING_SC_LOCAL=1.
@@ -1809,7 +1949,7 @@ impl Gpu {
         // Settled (frozen above): the probes and the light cache hold their light,
         // and only the pixels' direct light and the final pass run, so a still
         // scene draws the same picture every frame (no residual cache drift) and
-        // idles cheaply.
+        // idles cheaply. Rings adds the verification stride on that same idle.
         self.lighting.held = if frozen { self.lighting.held.saturating_add(1) } else { 0 };
         // A light cache round is due (GENOS_LIGHTING_CACHE_HZ caps them per second). On
         // the async queue (GENOS_LIGHTING_ASYNC=1) it goes there, else into this frame;
@@ -1836,6 +1976,19 @@ impl Gpu {
             pc[6] |= 1 << 8;
         }
         let kept = probe_rays * LIGHTING_STRATA;
+        let wake_rings = wake_cfg.mode == 1;
+        // The kept-hit tail of the trace launch only re-traces geometry crossings
+        // and fills. A lamp move is not in that list. Rings with nothing to cross
+        // drops the tail. Once the strata exist and no ring is live, the picture
+        // trace and the kept-hit direct shrink to the verification stride.
+        let span_kept = match &changes {
+            None => true,
+            Some(list) => !list.is_empty(),
+        };
+        let wake_idle = wake_rings
+            && self.lighting.wake.len() == 0
+            && !span_kept
+            && self.lighting.still >= LIGHTING_STRATA;
         let planned = light_groups(
             &self.lighting.settings,
             self.lighting.frame,
@@ -1846,6 +1999,9 @@ impl Gpu {
             probes,
             probe_rays,
             kept,
+            wake_rings,
+            span_kept,
+            wake_idle,
         );
         self.lighting.ctrl_bytes = pack_lighting_ctrl(
             &self.lighting.settings,
@@ -1880,6 +2036,49 @@ impl Gpu {
                 self.lighting.ctrl_bytes.len() as u64,
                 self.lighting.ctrl_bytes.as_ptr() as *const c_void,
             );
+            let phase = self.lighting.wake_phase[slot];
+            self.lighting.wake_phase[slot] = phase.wrapping_add(1);
+            let mut wake_hdr = [0u32; 13];
+            wake_hdr[WAKE_MODE - 140] = wake_cfg.mode;
+            wake_hdr[WAKE_TOL - 140] = self.lighting.wake.tolerance(wake_cfg.tolerance).to_bits();
+            wake_hdr[WAKE_BUDGET - 140] = wake_cfg.budget;
+            wake_hdr[WAKE_RADIUS - 140] = wake_cfg.max_radius.to_bits();
+            wake_hdr[WAKE_EVENTS - 140] = if wake_cfg.mode == 1 {
+                self.lighting.wake.len() as u32
+            } else {
+                0
+            };
+            wake_hdr[WAKE_PHASE - 140] = phase;
+            (self.fns.cmd_update_buffer)(
+                self.cmd,
+                self.lighting.stats_dev[slot].buffer,
+                (WAKE_MODE as u64) * 4,
+                wake_hdr.len() as u64 * 4,
+                wake_hdr.as_ptr() as *const c_void,
+            );
+            if wake_cfg.mode == 1 && self.lighting.settings.gi.enabled && probes > 0 {
+                let packed = self.lighting.wake.pack();
+                let at = lighting_wake_events_at(
+                    probes as u64,
+                    self.lighting.settings.probe_rays() as u64,
+                    w as u64,
+                    h as u64,
+                ) * 16;
+                debug_assert!(
+                    at + 256 <= self.lighting.work.size,
+                    "wake events sit past the work buffer ({at} of {})",
+                    self.lighting.work.size
+                );
+                if at + 256 <= self.lighting.work.size {
+                    (self.fns.cmd_update_buffer)(
+                        self.cmd,
+                        self.lighting.work.buffer,
+                        at,
+                        256,
+                        packed.as_ptr() as *const c_void,
+                    );
+                }
+            }
             if self.lighting.cache_full {
             (self.fns.cmd_fill_buffer)(
                 self.cmd,
@@ -2005,6 +2204,9 @@ impl Gpu {
                     k_pc[6] |= 1 << 4;
                     if kind == LIGHTING_MODE1 {
                         k_pc[6] = (cur_pc[6] & !0x310) | 1 << 8;
+                    } else if kind == LIGHTING_WAKE_VERIFY {
+                        // Mode 3: this dispatch is the verification stride, not the grid.
+                        k_pc[6] = (cur_pc[6] & !0x310) | 3 << 8;
                     } else if kind == LIGHTING_DENSE_RAYS {
                         k_pc[6] = (k_pc[6] & !0x300) | 2 << 8;
                     }
@@ -2275,7 +2477,71 @@ impl Gpu {
 
 /// S70B: the frame's counters are read back only where something uses them.
 fn lighting_stats_wanted(world: u32) -> bool {
-    std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() || !(world == 3 && lighting_sc_flags_env() & 8192 != 0)
+    lighting_debug_enabled() || !(world == 3 && lighting_sc_flags_env() & 8192 != 0)
+}
+
+/// `Some(false)` when `arg` is `--lighting-debug` (the value, if any, is inline).
+/// `None` when `arg` is some other flag.
+pub fn lighting_debug_flag_needs_value(arg: &str) -> Option<bool> {
+    let (name, _) = lighting_debug_dash(arg)?;
+    (name == "lighting-debug").then_some(false)
+}
+
+/// Reject a bad `--lighting-debug` argument. The value is inline
+/// (`--lighting-debug=0`); a bare flag turns the counters on.
+pub fn check_lighting_debug_arg(arg: &str, _next: Option<&str>) -> Result<(), String> {
+    parse_lighting_debug_flag(arg).map(|_| ())
+}
+
+/// `--lighting-debug` wins. `GENOS_LIGHTING_DEBUG` applies only when that
+/// argument was omitted, and any set value turns the counters on.
+fn lighting_debug_enabled() -> bool {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    lighting_debug_from(&refs, std::env::var_os("GENOS_LIGHTING_DEBUG").is_some()).unwrap_or(false)
+}
+
+fn lighting_debug_from(args: &[&str], env_set: bool) -> Result<bool, String> {
+    let mut chosen = None;
+    for arg in args {
+        if let Some(on) = parse_lighting_debug_flag(arg)? {
+            chosen = Some(on);
+        }
+    }
+    Ok(chosen.unwrap_or(env_set))
+}
+
+fn lighting_debug_dash(arg: &str) -> Option<(&str, Option<&str>)> {
+    let rest = arg.strip_prefix("--")?;
+    if rest.is_empty() {
+        return None;
+    }
+    match rest.split_once('=') {
+        Some((name, value)) => Some((name, Some(value))),
+        None => Some((rest, None)),
+    }
+}
+
+fn parse_lighting_debug_flag(arg: &str) -> Result<Option<bool>, String> {
+    let Some((name, inline)) = lighting_debug_dash(arg) else {
+        return Ok(None);
+    };
+    if name != "lighting-debug" {
+        return Ok(None);
+    }
+    let Some(value) = inline else {
+        return Ok(Some(true));
+    };
+    if value.is_empty() {
+        return Err("--lighting-debug needs a value".into());
+    }
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "on" | "true" => Ok(Some(true)),
+        "0" | "off" | "false" => Ok(Some(false)),
+        other => Err(format!(
+            "--lighting-debug {other} is not 0, 1, on, off, true, or false"
+        )),
+    }
 }
 
 // Defaults with no env set (S54K, gi-v2): GI v2, the surface cache, cap 64, the
@@ -2284,21 +2550,44 @@ const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
 const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
 /// Lighting stats buffer: 24 words, diag[64], chg[32], the a-trous fallback
 /// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`, the
-/// control block at word 124 (16 words), then the unfilled-pixel count and the
-/// shaded-pixel count. Two pad words keep the mask on a 144-word boundary. The
-/// mask follows, one bit per composed pixel, and is not part of this header.
+/// control block at word 124 (16 words), the probe-wake block, then the
+/// unfilled-pixel count and the shaded-pixel count. Two pad words keep the
+/// mask on the header boundary. The mask follows, one bit per composed pixel,
+/// and is not part of this header.
 /// The change-counter enable word stays chg[31] (word 119).
-const LIGHTING_STATS_WORDS: usize = 144;
+/// Words 140..151 are the probe-wake counters (lighting_cache.glsl). Word 152
+/// is the persist phase. Words 160..295 (ring bits and the woken list) are
+/// cleared every frame. Words 296..391 are the ring frontier and are not.
+/// Words 392 and 393 are the unfilled and shaded counts. The mask starts at 396.
+const LIGHTING_STATS_WORDS: usize = 396;
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
-/// Words 140 and 141. The control block occupies 124..140.
-const LIGHTING_UNFILLED_WORD: usize = 140;
-const LIGHTING_SHADED_WORD: usize = 141;
+const WAKE_MODE: usize = 140;
+const WAKE_TOL: usize = 141;
+const WAKE_BUDGET: usize = 142;
+const WAKE_RADIUS: usize = 143;
+const WAKE_EVENTS: usize = 144;
+const WAKE_RINGS: usize = 145;
+const WAKE_SPLITS: usize = 146;
+const WAKE_WOKEN: usize = 147;
+const WAKE_HITS: usize = 148;
+const WAKE_MISSES: usize = 149;
+const WAKE_TRACED: usize = 150;
+const WAKE_RAYS: usize = 151;
+const WAKE_PHASE: usize = 152;
+const WAKE_LIST: usize = 168;
+const WAKE_LIST_CAP: usize = 32;
+const WAKE_CLEAR_WORDS: usize = 296;
+/// After the wake tail. The control block occupies 124..140, then the wake block.
+const LIGHTING_UNFILLED_WORD: usize = 392;
+const LIGHTING_SHADED_WORD: usize = 393;
 /// Word 0 of the mask. Matches lighting_cache.glsl.
-const LIGHTING_UNFILLED_MASK_AT: usize = 144;
+const LIGHTING_UNFILLED_MASK_AT: usize = 396;
 /// (4096/32) * 2160. A larger picture clamps the mask.
 const LIGHTING_UNFILLED_MASK_CAP: u32 = 276480;
 const _: () = assert!(LIGHTING_UNFILLED_MASK_AT == LIGHTING_STATS_WORDS);
-const _: () = assert!(LIGHTING_CTRL_WORD as usize + 16 == LIGHTING_UNFILLED_WORD);
+const _: () = assert!(LIGHTING_CTRL_WORD as usize + 16 == WAKE_MODE);
+const _: () = assert!(WAKE_CLEAR_WORDS + 96 == LIGHTING_UNFILLED_WORD);
+const _: () = assert!(LIGHTING_UNFILLED_WORD + 4 == LIGHTING_UNFILLED_MASK_AT);
 const LIGHTING_CHG_ENABLE_WORD: u64 = 24 + 64 + 31;
 
 /// One slot's unfilled readback: written at the end of the passes, read after the fence.
@@ -2365,9 +2654,31 @@ fn lighting_sc_local_env() -> bool {
 
 /// Vec4 index of the changes block in the work buffer (lighting_common.glsl
 /// lighting_change_at), for `probes` probes, `cache_rays` light cache rays and `kept`
-/// kept hits.
+/// kept hits. The two `kept / 4` terms are the rgb9e5 light words and the
+/// direct-luminance baseline, four hits per vec4.
 fn lighting_change_at(probes: u64, cache_rays: u64, kept: u64) -> u64 {
-    2 * probes + cache_rays + 7 * probes + 2 * LIGHTING_STRATA as u64 * probes + kept + kept / 4
+    2 * probes
+        + cache_rays
+        + 7 * probes
+        + 2 * LIGHTING_STRATA as u64 * probes
+        + kept
+        + kept / 4
+        + kept / 4
+}
+
+/// Vec4 index of the first wake event. Matches `lighting_wake_event_at`:
+/// after the gather's raw cells (`lighting_graw_at(probes, 0)`), one vec4 per probe.
+fn lighting_wake_events_at(probes: u64, rays: u64, width: u64, height: u64) -> u64 {
+    let cache_rays = (LIGHTING_CACHE_BATCH as u64) * (LIGHTING_CACHE_RAYS as u64);
+    let kept = probes * rays * LIGHTING_STRATA as u64;
+    let change = lighting_change_at(probes, cache_rays, kept);
+    let view2 = change + (LIGHTING_CHANGE_HEAD + LIGHTING_CHANGES) as u64 + 4 * probes;
+    let fill0 = view2 + 2 * probes * rays;
+    let fill_light = fill0 + kept;
+    let pix = fill_light + kept / 4;
+    let gdirty = pix + (width * height + 1) / 2;
+    let probe0 = gdirty + 2 * probes + probes * rays;
+    probe0 + probes
 }
 
 /// Occluder records of a scene block (`pack::scene_bytes`), 64 bytes each.
@@ -2588,3 +2899,4 @@ fn lighting_toggles() -> u32 {
 }
 
 include!("lighting_dispatch.rs");
+include!("probe_wake.rs");
