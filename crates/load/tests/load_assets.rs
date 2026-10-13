@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use genos_load::{
-    load_animation, load_font, load_image, load_material, load_mesh, load_pcm, load_texture,
-    load_texture_map, FileSource, LoadError, MemorySource, OutlinePoint,
+    load_animation, load_font, load_gltf_file, load_image, load_material, load_mesh, load_pcm,
+    load_texture, load_texture_map, FileSource, LoadError, MemorySource, OutlinePoint,
 };
 
 const QUAD: [u8; 16] = [
@@ -319,6 +319,19 @@ fn missing_truncated_and_unknown_bytes_are_errors() {
     let missing = std::env::temp_dir().join(format!("genos-load-missing-{}", std::process::id()));
     let err = load_image(&FileSource::new(&missing)).expect_err("missing");
     assert!(matches!(err, LoadError::NotFound { .. }));
+
+    let pointer = std::env::temp_dir().join(format!("genos-load-lfs-{}.gltf", std::process::id()));
+    std::fs::write(
+        &pointer,
+        b"version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 1\n",
+    )
+    .expect("write pointer");
+    let err = load_gltf_file(&pointer).expect_err("lfs pointer");
+    let _ = std::fs::remove_file(&pointer);
+    assert!(matches!(err, LoadError::LfsPointer { .. }));
+    let text = err.to_string();
+    assert!(text.contains("Git LFS pointer"), "{text}");
+    assert!(text.contains("not in this checkout"), "{text}");
 
     let png = quad_png();
     let err = load_image(&MemorySource::new(&png[..12])).expect_err("truncated png");

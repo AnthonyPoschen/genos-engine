@@ -25,7 +25,7 @@ Isolate toggles attribute a change to one component: `GENOS_LIGHTING_TOGGLES`, o
 
 One catalogue, three doors: MCP `tools/call`, `POST /cmd/<name>`, and the Rhai script functions. The list is `crates/debug/src/commands.rs`. The running notes are [Debugging](../debugging.md).
 
-`status`, `knobs`, `lights`, `light`, `objects`, `object`, `camera`, `time`, `step`, `wait`, `wait_settled`, `view`, `capture`, `captures`, `luminance`, `diff`, `flicker`, `reference`, `compare`, `timing`, `quit`.
+`status`, `knobs`, `lights`, `light`, `objects`, `object`, `camera`, `time`, `step`, `wait`, `wait_settled`, `view`, `capture`, `captures`, `luminance`, `diff`, `flicker`, `reference`, `compare`, `timing`, `quit`, `list_scenes`, `load_scene`, `list_checkpoints`, `jump_checkpoint`.
 
 `knobs` lists and sets live tunables. `light` and `object` edit one entity, including `reset`. `capture`, `diff`, `flicker`, and `compare` write pictures; `compare` and `flicker` write heatmaps.
 
@@ -38,6 +38,25 @@ One catalogue, three doors: MCP `tools/call`, `POST /cmd/<name>`, and the Rhai s
 - `examples/stress/scripts/sun_fast_pop.rhai`.
 - `a_turn_toward_the_lamp_does_not_pop_the_bounce` and `a_small_step_does_not_flash_a_wall` in `crates/render/tests/gpu_frame.rs`.
 - `a_pop_counts_once_per_pixel_change` in `crates/debug/src/image.rs`.
+
+## Lighting binary
+
+`debug/lighting` (package `genos-lighting`) is the lighting debug binary. Scenes are data files in `debug/scenes/`, parsed by `debug/scene-lib`. The files are `stress`, `bounce_corner`, `hell`, `room`, `camera`, and `sponza`. `room` and `camera` point at the existing Rhai paths; those scripts stay where the tests load them.
+
+```sh
+make lighting SCENE=sponza
+cargo run --release -p genos-lighting -- --scene sponza --gpu-times 30
+```
+
+`make lighting` is the benchmark: release, `--scene` from `SCENE` (default `stress`), and `--gpu-times 30`. The same arguments work on `cargo run`. `GENOS_SCENE`, `GENOS_LIGHTING_PRESET`, `GENOS_GPU_TIMES`, and `GENOS_LIGHTING_DEBUG` apply only when the matching argument was omitted.
+
+`--unfilled` selects the existing texels view (`ViewMode::Texels`). Slots with fewer than four sets are dim. There is no separate unfilled detector.
+
+Screenshots, dumps, and logs go to `./genos-debug/shots/`, `./genos-debug/logs/`, and `./genos-debug/dumps/` unless `--out` is set. When `GENOS_LIGHTING_DUMP` is set, dumps go to `<out>/dumps` if `--out` was passed or if `GENOS_LIGHTING_DUMP_DIR` was not already set. Nothing defaults to `$HOME`.
+
+Page Up and Page Down switch scenes. Keys 1–9 jump checkpoints. Home and 0 reset to the active checkpoint. The panel has the same scene, checkpoint, view, and preset controls, plus the bounce slider.
+
+`load_scene` drops edits and calls `Renderer::reset_lighting_cache`. A deterministic replay and a saved setup are a follow-up. They are not in this binary.
 
 ## Headless harness
 

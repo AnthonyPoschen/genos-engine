@@ -24,7 +24,7 @@ An animation is timed transform keys. Rotation is a quaternion in x, y, z, w ord
 
 PCM is 16-bit, mono or stereo. Samples are interleaved. A font glyph has a horizontal advance and a simple outline in font units.
 
-A missing path, a truncated stream, and unrecognized bytes return `LoadError`. They do not return an asset.
+A missing path, a Git LFS pointer, a truncated stream, and unrecognized bytes return `LoadError`. They do not return an asset. A pointer is the text Git leaves when the checkout skipped LFS smudge; the message names the path and says the asset bytes are not in this checkout.
 
 ## Code
 

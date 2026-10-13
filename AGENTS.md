@@ -36,6 +36,18 @@ Before you write vector math, quaternion math, a camera, or a view-projection, r
 
 Finish a Rust change only after `cargo build --workspace` and the tests for the crates you touched pass. The workspace denies compiler warnings. A new crate sets `[lints] workspace = true`. `InputCode` keeps the input-zig names, so that enum is the one allowed `non_camel_case_types` exception.
 
+## Assets
+
+Art assets live under `assets/` and are tracked with Git LFS. Read `docs/engine/assets.md` before adding an asset, a texture, or a mesh. `assets/source/<name>/` holds the untouched originals and a credits file. `assets/built/<name>/` holds the engine-ready files when conversion is not cheap enough to repeat on every build.
+
+CI and cloud agents clone with `GIT_LFS_SKIP_SMUDGE=1` and do not `git lfs pull` those trees unless the task draws the textured scenes. A normal push still uploads the objects.
+
+## Tools
+
+A new tool signals intent with command-line arguments. An environment variable is only a secondary mirror of an argument: the argument wins when both are set, and the variable applies only when the argument was omitted. Document every argument in `--help` and in the system record.
+
+The lighting debug binary (`debug/lighting`) writes screenshots, dumps, and logs under `./genos-debug/<kind>/` in the current working directory. `--out <dir>` changes that directory. It does not write those files under `$HOME`.
+
 ## Input behavior
 
 `../input-zig` is the behavior source for the input port. Preserve the tested platform calls. The file list is in `docs/architecture.md`.

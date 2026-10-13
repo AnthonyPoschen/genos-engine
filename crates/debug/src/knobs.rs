@@ -90,6 +90,14 @@ impl Knob {
     }
 }
 
+/// A named camera pose a scene file can jump to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CheckpointPose {
+    pub position: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
 /// What an example lets the tools reach: its scene, and settings of its own.
 pub trait Host {
     /// The scene the next draw uses. Edits land after the example's own update.
@@ -103,6 +111,26 @@ pub trait Host {
     /// Set one by name. The value is already snapped to the knob's step.
     fn set_knob(&mut self, name: &str, _value: f64) -> Result<(), String> {
         Err(format!("unknown knob {name}"))
+    }
+
+    /// Scene names this host can load. Empty when the host has one scene.
+    fn list_scenes(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Replace the scene. The tools drop their edits and clear the lighting cache.
+    fn load_scene(&mut self, name: &str) -> Result<(), String> {
+        Err(format!("this host has no scene {name}"))
+    }
+
+    /// Checkpoint names for the scene that is loaded.
+    fn list_checkpoints(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Remember `name` as the reset pose and return it. The tools move the camera.
+    fn jump_checkpoint(&mut self, name: &str) -> Result<CheckpointPose, String> {
+        Err(format!("this host has no checkpoint {name}"))
     }
 }
 

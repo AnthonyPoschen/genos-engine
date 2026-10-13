@@ -164,6 +164,22 @@ name = "genos-json"
 version = "0.1.0"
 
 [[package]]
+name = "genos-lighting"
+version = "0.1.0"
+dependencies = [
+ "genos-debug",
+ "genos-input",
+ "genos-load",
+ "genos-mcp",
+ "genos-render",
+ "genos-scene",
+ "genos-scene-lib",
+ "genos-stress",
+ "genos-ui",
+ "genos-window",
+]
+
+[[package]]
 name = "genos-lighting-ref"
 version = "0.1.0"
 
@@ -227,6 +243,10 @@ dependencies = [
  "genos-physics",
  "rhai",
 ]
+
+[[package]]
+name = "genos-scene-lib"
+version = "0.1.0"
 
 [[package]]
 name = "genos-stress"

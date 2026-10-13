@@ -1,4 +1,4 @@
-.PHONY: run room stress stress-big stress-bench verify reference lighting-ref-check lint-docs
+.PHONY: run room stress stress-big stress-bench lighting verify reference lighting-ref-check lint-docs
 
 run:
 	cargo run -p genos-camera
@@ -14,6 +14,12 @@ stress-big:
 
 stress-bench:
 	cargo run --release -p genos-stress -- --bench 10
+
+# Lighting debug binary. SCENE picks debug/scenes/<name> (default stress).
+# This is the Sponza benchmark: make lighting SCENE=sponza
+SCENE ?= stress
+lighting:
+	cargo run --release -p genos-lighting -- --scene $(SCENE) --gpu-times 30
 
 # Debug scripts headless; reports land in target/debug-reports/<script>.
 verify:

@@ -21,6 +21,7 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     ├── agents/
     │   └── domain.md
     ├── engine/
+    │   ├── assets.md
     │   └── settings-principles.md
     ├── architecture.md
     ├── lighting.md
