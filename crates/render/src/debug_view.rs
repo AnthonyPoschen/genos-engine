@@ -130,6 +130,17 @@ impl Renderer {
         self.gpu.unfilled
     }
 
+    /// `--out` when this process was started with that argument.
+    pub fn debug_out_cli(&self) -> Option<&str> {
+        self.gpu.out_cli.as_deref()
+    }
+
+    /// Debug output directory in force: the scene value, then `GENOS_UNFILLED_DIR`
+    /// when `--out` was not passed, then `--out`.
+    pub fn debug_settings(&self, scene: &genos_scene::Scene) -> genos_scene::DebugSettings {
+        scene.debug.effective(self.gpu.out_cli.as_deref())
+    }
+
     /// Counters from the last submitted frame. Waits until that frame's copy is visible.
     pub fn unfilled_stats(&mut self) -> crate::unfilled::UnfilledStats {
         unsafe {

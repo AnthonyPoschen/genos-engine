@@ -87,7 +87,7 @@ impl UnfilledStats {
     }
 }
 
-/// Disk caps for `~/genos-perf/unfilled`. Age is checked as well as count and size.
+/// Disk caps for the unfilled output directory. Age is checked as well as count and size.
 #[derive(Clone, Copy, Debug)]
 pub struct UnfilledLimits {
     pub max_folders: usize,
@@ -139,15 +139,6 @@ pub fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-/// `GENOS_UNFILLED_DIR`, or `$HOME/genos-perf/unfilled`.
-pub fn unfilled_root() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("GENOS_UNFILLED_DIR") {
-        return Some(PathBuf::from(dir));
-    }
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("genos-perf").join("unfilled"))
 }
 
 /// Drop aged event folders, then the oldest, until both caps hold.
@@ -251,12 +242,9 @@ fn dir_bytes(path: &Path) -> u64 {
     total
 }
 
-/// Startup pass. Missing directories are left alone.
-pub fn enforce_unfilled_cap() {
-    let Some(root) = unfilled_root() else {
-        return;
-    };
-    let _ = rotate_unfilled(&root, now_ms(), &UnfilledLimits::from_env());
+/// Startup pass. A missing directory is left alone.
+pub fn enforce_unfilled_cap(root: &Path) {
+    let _ = rotate_unfilled(root, now_ms(), &UnfilledLimits::from_env());
 }
 
 pub struct UnfilledDump {
@@ -272,20 +260,22 @@ pub struct UnfilledDump {
     pub mask: Vec<u32>,
 }
 
-/// Write one event if this session is under its cap. Rotates before and after.
-/// `session_saved` is how many this process has already kept.
-pub fn save_unfilled_event(session_saved: u32, dump: &UnfilledDump) -> Result<bool, String> {
-    let Some(root) = unfilled_root() else {
-        return Ok(false);
-    };
+/// Write one event under `root` if this session is under its cap. Rotates before
+/// and after. `session_saved` is how many this process has already kept.
+/// Returns the event directory.
+pub fn save_unfilled_event(
+    root: &Path,
+    session_saved: u32,
+    dump: &UnfilledDump,
+) -> Result<Option<PathBuf>, String> {
     let limits = UnfilledLimits::from_env();
     if session_saved >= limits.session_cap {
-        let _ = rotate_unfilled(&root, now_ms(), &limits);
-        return Ok(false);
+        let _ = rotate_unfilled(root, now_ms(), &limits);
+        return Ok(None);
     }
-    std::fs::create_dir_all(&root).map_err(|err| err.to_string())?;
+    std::fs::create_dir_all(root).map_err(|err| err.to_string())?;
     let stamp = now_ms();
-    let _ = rotate_unfilled(&root, stamp, &limits);
+    let _ = rotate_unfilled(root, stamp, &limits);
     let dir = unique_event_dir(&root, stamp);
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     let (sw, sh, shot) = downscale_bgra(dump.width, dump.height, &dump.shot, UNSCALED_EDGE);
@@ -313,8 +303,8 @@ pub fn save_unfilled_event(session_saved: u32, dump: &UnfilledDump) -> Result<bo
     std::fs::write(dir.join("camera.json"), camera).map_err(|err| err.to_string())?;
     std::fs::write(dir.join("frame.txt"), format!("{}\n", dump.stats.frame))
         .map_err(|err| err.to_string())?;
-    let _ = rotate_unfilled(&root, stamp, &limits);
-    Ok(true)
+    let _ = rotate_unfilled(root, stamp, &limits);
+    Ok(Some(dir))
 }
 
 fn unique_event_dir(root: &Path, stamp: u64) -> PathBuf {
@@ -586,6 +576,32 @@ mod tests {
             "one event larger than the byte cap is kept"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn save_writes_into_the_given_directory() {
+        let root = std::env::temp_dir().join(format!("genos-unfilled-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dump = UnfilledDump {
+            stats: UnfilledStats::from_counts(3, 2, 10, 2),
+            width: 1,
+            height: 1,
+            eye: [1.0, 2.0, 3.0],
+            yaw: 0.5,
+            pitch: -0.25,
+            shot: vec![1, 2, 3, 255],
+            mask: Vec::new(),
+        };
+        let dir = save_unfilled_event(&root, 0, &dump)
+            .unwrap()
+            .expect("event directory");
+        assert!(dir.starts_with(&root), "{}", dir.display());
+        assert!(dir.join("counts.json").is_file());
+        assert!(dir.join("shot.png").is_file());
+        assert!(dir.join("camera.json").is_file());
+        let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        assert!(name.bytes().all(|b| b.is_ascii_digit()) && !name.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 

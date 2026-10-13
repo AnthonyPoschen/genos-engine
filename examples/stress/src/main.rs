@@ -22,7 +22,9 @@ use std::time::Instant;
 use genos_debug::{png, Host};
 use genos_input::{character_controller, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenLine, ScreenRect};
-use genos_scene::{look_direction, update, Actions, Camera, Scene, Vec3, PITCH_LIMIT};
+use genos_scene::{
+    look_direction, update, Actions, Camera, DebugSettings, Scene, Vec3, PITCH_LIMIT,
+};
 use genos_ui::{button_panel, Action, PanelButton, PanelRow, PanelSlider, Pointer, State};
 use genos_window::{extent_changed, FocusGate, Window};
 
@@ -68,6 +70,7 @@ const USAGE: &str = "genos-stress [options]
                             steps 1/60 s a frame; exit 0 when every check passes
   --report DIR              where the script writes report.md, result.json and pictures
                             (default target/debug-reports/<script name>)
+  --out DIR                 unfilled events (default ./genos-out/unfilled)
   --trace                   capture the picture after every script command that changes it";
 
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];
@@ -77,6 +80,7 @@ const ID_SUN: u32 = 400;
 const ID_BOXES: u32 = 500;
 const ID_LAYOUT: u32 = 600;
 const ID_SKY: u32 = 700;
+const ID_OUT: u32 = 800;
 /// Sliders, one per knob.
 const ID_KNOB: u32 = 1000;
 const PANEL_KNOBS: [&str; 6] = [
@@ -246,6 +250,15 @@ fn options() -> Result<Options, String> {
             }
             "--gltf" => opts.gltf.push((PathBuf::from(value()?), gltf_at)),
             "--report" => report = Some(PathBuf::from(value()?)),
+            "--out" => {
+                // The renderer reads this from the process arguments.
+                let _dir = value()?;
+            }
+            arg if arg.starts_with("--out=") => {
+                if arg.trim_start_matches("--out=").trim().is_empty() {
+                    return Err("--out needs a directory".into());
+                }
+            }
             "--trace" => trace = true,
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -555,7 +568,11 @@ fn run() -> Result<(), String> {
             let ui_frame = button_panel(
                 &mut ui,
                 &panel_title(&stage, &fps),
-                &[panel_rows(&stage), knob_rows(&stage)].concat(),
+                &[
+                    panel_rows(&stage, &renderer.debug_settings(&stage.world.scene).out),
+                    knob_rows(&stage),
+                ]
+                .concat(),
                 [size.0 as f32, size.1 as f32],
                 &camera,
                 Pointer {
@@ -829,8 +846,19 @@ fn button(id: u32, text: String, selected: bool) -> PanelButton {
     PanelButton { id, text, selected }
 }
 
-fn panel_rows(stage: &Stage) -> Vec<PanelRow> {
+fn panel_rows(stage: &Stage, out_dir: &str) -> Vec<PanelRow> {
     vec![
+        row(
+            "Out",
+            vec![
+                button(ID_OUT, out_dir.into(), false),
+                button(
+                    ID_OUT + 1,
+                    "default".into(),
+                    out_dir == DebugSettings::DEFAULT_OUT,
+                ),
+            ],
+        ),
         row(
             "Lamps in",
             vec![
@@ -889,6 +917,12 @@ fn press(stage: &mut Stage, id: u32) {
         stage.boxes_still = i == 1;
     } else if let Some(i) = pick(ID_LAYOUT, 2) {
         stage.mix.layout = [Layout::Spread, Layout::First][i];
+    } else if id == ID_OUT + 1 {
+        let _ = stage
+            .world
+            .scene
+            .debug
+            .set_key("out", DebugSettings::DEFAULT_OUT);
     }
     stage.apply();
 }

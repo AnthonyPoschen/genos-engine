@@ -165,6 +165,15 @@ fn run() -> Result<(), String> {
             "--scene" => {
                 scene_name = args.next().ok_or("missing scene file")?;
             }
+            "--out" => {
+                // The renderer reads this from the process arguments.
+                let _dir = args.next().ok_or("missing output directory")?;
+            }
+            arg if arg.starts_with("--out=") => {
+                if arg.trim_start_matches("--out=").trim().is_empty() {
+                    return Err("missing output directory".into());
+                }
+            }
             "--size" => {
                 let text = args.next().ok_or("missing size")?;
                 let (w, h) = text

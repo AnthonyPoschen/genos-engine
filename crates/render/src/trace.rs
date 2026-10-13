@@ -613,6 +613,7 @@ mod tests {
             ceiling: None,
             sky: None,
             lighting: genos_scene::LightingSettings::default(),
+            debug: genos_scene::DebugSettings::default(),
         }
     }
 

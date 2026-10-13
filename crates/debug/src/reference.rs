@@ -739,6 +739,7 @@ mod tests {
             ceiling: None,
             sky,
             lighting: genos_scene::LightingSettings::default(),
+            debug: genos_scene::DebugSettings::default(),
         }
     }
 
@@ -766,6 +767,7 @@ mod tests {
             }),
             sky: None,
             lighting: genos_scene::LightingSettings::default(),
+            debug: genos_scene::DebugSettings::default(),
         }
     }
 

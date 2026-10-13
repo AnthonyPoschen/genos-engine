@@ -56,7 +56,6 @@ impl Renderer {
         let width = gpu.extent_w;
         let height = gpu.extent_h;
         let unfilled = gpu.unfilled;
-        crate::unfilled::enforce_unfilled_cap();
         Ok(Self {
             gpu,
             width,
@@ -645,6 +644,10 @@ struct Gpu {
     unfilled_eye: [f32; 3],
     unfilled_yaw: f32,
     unfilled_pitch: f32,
+    /// `--out` from the process arguments. It wins over the environment mirror.
+    out_cli: Option<String>,
+    /// Directory the next unfilled event is written into.
+    debug_out: String,
     layout: Handle,
     pool: Handle,
     cmd: Handle,
@@ -1293,6 +1296,8 @@ impl Gpu {
                 unfilled_eye: [0.0; 3],
                 unfilled_yaw: 0.0,
                 unfilled_pitch: 0.0,
+                out_cli: genos_scene::DebugSettings::cli_out(),
+                debug_out: String::new(),
                 layout: std::ptr::null_mut(),
                 pool: std::ptr::null_mut(),
                 cmd: std::ptr::null_mut(),
@@ -1385,6 +1390,9 @@ impl Gpu {
             gpu.recreate(width, height)?;
             gpu.make_lighting()?;
             gpu.make_lighting_targets()?;
+            let launch = genos_scene::DebugSettings::default().effective(gpu.out_cli.as_deref());
+            gpu.debug_out = launch.out.clone();
+            crate::unfilled::enforce_unfilled_cap(std::path::Path::new(&gpu.debug_out));
             Ok(gpu)
         }
     }

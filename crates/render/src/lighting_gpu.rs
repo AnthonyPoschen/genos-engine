@@ -1475,15 +1475,21 @@ impl Gpu {
             shot,
             mask: buf[LIGHTING_STATS_WORDS..].to_vec(),
         };
-        match crate::unfilled::save_unfilled_event(self.unfilled_saved, &dump) {
-            Ok(true) => {
+        match crate::unfilled::save_unfilled_event(
+            std::path::Path::new(&self.debug_out),
+            self.unfilled_saved,
+            &dump,
+        ) {
+            Ok(Some(dir)) => {
                 self.unfilled_saved = self.unfilled_saved.saturating_add(1);
                 eprintln!(
-                    "unfilled saved frame {} pct {:.2}",
-                    stats.frame, stats.pct
+                    "unfilled saved {} frame {} pct {:.2}",
+                    dir.display(),
+                    stats.frame,
+                    stats.pct
                 );
             }
-            Ok(false) => {}
+            Ok(None) => {}
             Err(err) => eprintln!("unfilled save: {err}"),
         }
     }
@@ -1524,6 +1530,8 @@ impl Gpu {
             .unwrap_or_else(|| scene.lighting.clone());
         desired.apply_env();
         desired.sanitize();
+        let debug = scene.debug.effective(self.out_cli.as_deref());
+        self.debug_out = debug.out;
         let key = lighting_alloc_key(&desired);
         let resized = self.lighting.dims[0] != self.extent_w || self.lighting.dims[1] != self.extent_h;
         let rebuild = key != self.lighting.alloc_key || resized;

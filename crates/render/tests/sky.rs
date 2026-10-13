@@ -27,6 +27,7 @@ fn open_floor(sky: Option<Sky>, walls: Vec<Wall>) -> World {
         ceiling: None,
         sky,
         lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
     })
 }
 

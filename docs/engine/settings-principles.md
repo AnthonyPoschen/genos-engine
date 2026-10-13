@@ -29,3 +29,7 @@ The game owns the words a player sees. The engine owns the struct those words wr
 A new feature adds a public struct that implements `EngineSettings`, stores it where other systems can already reach it, registers MCP commands that read and write that struct, and adds debug-menu controls that call `set_key`. Copy lighting.
 
 `EngineSettings` lives in `genos-scene` because games, the renderer, and the debug tools already share that crate. A feature crate that `genos-scene` itself depends on keeps the same three methods on its own struct until a second implementor needs the trait in a crate both can see.
+
+## Output directories
+
+A command that writes files follows the Output rule in `AGENTS.md`. The directory is a field of a public `EngineSettings` value. Debug output is `DebugSettings` on `Scene`, key `out`. The default is `genos-out/unfilled` under the working directory, so an unfilled event lands in `./genos-out/unfilled/<timestamp>/`. `--out <dir>` overrides that default for the process. `GENOS_UNFILLED_DIR` is the environment mirror of the same field: when it is set, and `--out` was not passed, it wins every frame. The process does not choose `$HOME`.

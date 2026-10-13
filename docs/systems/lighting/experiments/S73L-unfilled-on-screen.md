@@ -8,7 +8,17 @@ Off, the compose path tests one uniform and does no atomics. On, each shaded pix
 
 The counters sit in the spare words after the lighting control block (words 140 and 141). The mask starts at stats word 144, so it does not alias the control block. The device buffer keeps room for a 4096×2160 mask whether or not the detector is on, so a hotkey can enable it without reallocating.
 
-`GENOS_LIGHTING_UNFILLED`, F8, and the stress knob `unfilled` turn the count on. The tint is bit 25 of the debug word (Shift+F8, `GENOS_LIGHTING_UNFILLED_TINT`, knob `unfilled_tint`). Those two knobs are on the stress panel and are MCP `knobs` and Rhai `knob`. Dumps land in `~/genos-perf/unfilled/<timestamp>/` when `GENOS_LIGHTING_UNFILLED_DUMP` is set. Startup and each save drop folders older than two days (`GENOS_UNFILLED_MAX_AGE_SECS`), then the oldest until the folder count and the byte cap both hold.
+`GENOS_LIGHTING_UNFILLED`, F8, and the stress knob `unfilled` turn the count on. The tint is bit 25 of the debug word (Shift+F8, `GENOS_LIGHTING_UNFILLED_TINT`, knob `unfilled_tint`). Those two knobs are on the stress panel and are MCP `knobs` and Rhai `knob`.
+
+Events land in `./genos-out/unfilled/<timestamp>/` when `GENOS_LIGHTING_UNFILLED_DUMP` is set. That directory is `DebugSettings.out` on the scene (`EngineSettings`). `--out <dir>` overrides it for the process. `GENOS_UNFILLED_DIR` mirrors the same field and wins every frame when `--out` was not passed. The stress panel shows the directory in force and a default button writes `genos-out/unfilled`. MCP `get_debug_settings` and `set_debug_settings` read and write the text form. Rhai `debug_settings("out=...")` overlays it while the scene loads. `debug` stays Rhai's printer. The process does not write under `$HOME`. Startup and each save drop folders older than two days (`GENOS_UNFILLED_MAX_AGE_SECS`), then the oldest until the folder count and the byte cap both hold, on whichever directory is in force.
+
+## Networking
+
+- Replicated state: none. The output directory is local to the process that draws.
+- Authority: the client that owns the view.
+- Prediction / rollback: none.
+- Determinism: the directory does not change the picture.
+- Headless server: it does not write unfilled events. It can store the path.
 
 `GENOS_GPU_TIMES` does not enable the detector. Leave `GENOS_LIGHTING_UNFILLED=0` for a `LIGHTING_MS` line with no unfilled sample. With the detector on, that line gains ` | UNFILLED px=N pct=X.XX max_run=M`, and the same line is printed on its own each frame.
 
