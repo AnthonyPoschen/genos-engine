@@ -35,4 +35,36 @@ Dark fill stays on. `DEFAULT_BIAS` stays 0.50 until a measured mean relative err
 
 ## Curve
 
-Lavapipe, 320×180, settle 48, turn 1, hold 8, against the locked 192-frame pre-fill-off reference. The numbers are written here after that run. The display image is compared with a gi-v2 dump at the same bench pose.
+Lavapipe, 320×180, settle 48, one-frame turn of 0.5 rad, hold 8, sun frozen. 13637 fine texels were pre-filled at the settle. 2365 of them were shown on the reveal frame (the just-revealed cohort and the all-revealed cohort are the same set). Compared with the locked 192-frame pre-fill-off dump at the same end yaw (`/tmp/genos-gi-prefill-lock/reference/f192`, reference luminance 1.076 on these keys). The in-test reference of 4 frames (luminance 0.520) is not this number. `diag[63]` was 0 after the turn, after the hold, and on the pre-fill-off run.
+
+Mean relative luminance is `|a-b| / max(a, b, 0.05)` per key.
+
+| Frame | Mean lum | Mean rel | Mean sets | Mean hist | Pop from previous (mean step, share > 0.10) |
+|---|---|---|---|---|---|
+| settle (48) | 1.120 | 0.169 | 1.25 | 0 | |
+| reveal (49) | 1.123 | 0.168 | 1.00 | 0.062 | 0.004, 0.016 |
+| +1 (50) | 1.305 | 0.207 | 1.86 | 0.918 | 0.170, 0.611 |
+| +2 (51) | 1.339 | 0.220 | 2.00 | 1.062 | 0.031, 0.114 |
+| +4 (53) | 1.369 | 0.229 | 3.30 | 2.364 | 0.050, 0.162 |
+| +8 (57) | 1.385 | 0.236 | 4.20 | 3.260 | 0.031, 0.091 |
+
+Every key carried the S73R marker. History 0.062 is 1/16. The reveal mean is 1.123 against 1.076 (about 4% high) and the mean relative error is 0.168. By frame +2 every key had one on-screen set. Solving `1.123/17 + 16/17 y = 1.339` gives a new sample near 1.35. Frame +8 is 1.385 (about 29% high) at mean relative 0.236. The 0.10 target is not met, and the reveal mean is outside 2% of 1.07. The cap stays 0.50.
+
+The texel direct-light cache on the same keys matches the reference: mean luminance 0.539 at the reveal and at frame +8, against 0.547, mean relative 0.045. The gathered irradiance is the biased value. S73R's before curve, on a published dark-fill read, was mean relative 0.313 at the reveal (luminance 0.773) and 0.329 at frame +8 (luminance 1.587).
+
+`k` stays 2. At the settle the hidden fine texels (13637, under 4 sets) had mean luminance 1.134, and the world-radiance plain mean was 0.818 (54898 cells; published mean 0.833). The old 1.65 basin is gone, and the coarser raw mean is the darker of the two. A count of 2 blended with that prior is about 0.98 at k = 2, 1.03 at k = 1, and 0.92 at k = 4. That lookup is already near the 1.076 reference. The texel value is the integral of the hit radiances, and the first on-screen sample is about 1.35. Moving k inside 1–4 cannot close that sample onto 1.08, and a larger k darkens the bounces. No second curve was run.
+
+The fractional history does not help this curve. The seed mean is the closer of the two values, and the 16/17 weight replaces it with the 1.35 sample. It stays in the tree; taking it out is its own change.
+
+## Display image
+
+Frame 48, the settle, same bench pose, against current `gi-v2` (`c58dd5b`). 320×180, tone-mapped 8-bit, Rec.709 luma. The dark quartile is the pixels at or below the gi-v2 25th percentile. S73R's still frame at the same pose is the row before this split.
+
+| Compare | Tone mean | Tone ratio | Tone mean rel | Dark-quartile mean | Dark ratio | Dark rel | Share of pixels over 5% / 10% |
+|---|---|---|---|---|---|---|---|
+| gi-v2 → S73S | 59.62 → 57.47 | 0.964 | 0.053 | 23.00 → 21.08 | 0.916 | 0.085 | 0.510 / 0.075 |
+| gi-v2 → S73R | 59.62 → 60.34 | 1.012 | 0.013 | 23.00 → 23.04 | 1.002 | 0.012 | 0.033 / 0.004 |
+
+Shown fine texels with at least one set, same 17489 keys, linear luminance: gi-v2 0.465, S73S 0.426 (ratio 0.917, mean relative 0.107). Their dark quartile goes from 0.215 to 0.194 (ratio 0.902).
+
+The display path still reads the published cell. The values in that cell moved. At frame 48 the published world-radiance mean is 0.833 on this branch and 1.050 on gi-v2 (S73R 1.049). The samples that write it are now raw-prior bounces, and the shown fine texels accumulate from the same bounces. The picture is 3.6% darker overall and 8.4% darker in the dark quartile. That is the same direction as the rejected 4070 dark-fill-off result (9% overall, 16% in dark areas) and smaller on lavapipe. The 4070 measurement of this split is still the owner's.
