@@ -72,6 +72,7 @@ fn room(blocker: bool) -> Scene {
         ceiling: None,
         sky: None,
         lighting: LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
     }
 }
 

@@ -6,6 +6,7 @@ use rhai::{Dynamic, Engine, EvalAltResult};
 
 use genos_math::Vec3;
 
+use crate::debug_settings::DebugSettings;
 use crate::lighting::LightingSettings;
 use crate::types::{Ceiling, Floor, Light, Scene, Shape, Solid, Wall, MAX_LAMPS, MAX_OCCLUDERS};
 
@@ -262,6 +263,27 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
             Ok(())
         });
     }
+    {
+        let builder = builder.clone();
+        // `debug` is Rhai's string printer, so the settings call cannot use that name.
+        engine.register_fn("debug_settings", move |text: &str| -> Result<(), Box<EvalAltResult>> {
+            let mut settings = builder.borrow().debug.clone();
+            for raw in text.split(['\n', ';']) {
+                let line = raw.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let Some((key, value)) = line.split_once('=') else {
+                    return Err(format!("use key=value, got {line}").into());
+                };
+                settings
+                    .set_key(key.trim(), value.trim())
+                    .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
+            }
+            builder.borrow_mut().debug = settings;
+            Ok(())
+        });
+    }
 
     engine.run(source).map_err(|err| err.to_string())?;
     let built = builder.borrow();
@@ -309,6 +331,7 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
         ceiling: built.ceiling.clone(),
         sky: None,
         lighting: built.lighting.clone(),
+        debug: built.debug.clone(),
     })
 }
 
@@ -330,4 +353,5 @@ struct Builder {
     lights: Vec<Light>,
     ceiling: Option<Ceiling>,
     lighting: LightingSettings,
+    debug: DebugSettings,
 }

@@ -1,6 +1,6 @@
 use genos_math::Vec3;
 
-use crate::LightingSettings;
+use crate::{DebugSettings, LightingSettings};
 
 /// Share of the incoming light a white painted surface sends back out.
 pub const PAINT_ALBEDO: f32 = 0.8;
@@ -169,6 +169,9 @@ pub struct Scene {
     /// Lighting features, quality knobs, and the active preset. A scene file sets
     /// this; the renderer applies it each frame. The default is preset `high`.
     pub lighting: LightingSettings,
+    /// Debug output directory. Relative to the working directory unless the
+    /// path is absolute. `--out` and `GENOS_UNFILLED_DIR` overlay it.
+    pub debug: DebugSettings,
 }
 
 impl Scene {

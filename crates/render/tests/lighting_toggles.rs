@@ -41,6 +41,7 @@ fn room(settings: LightingSettings) -> World {
         ceiling: None,
         sky: None,
         lighting: settings,
+        debug: genos_scene::DebugSettings::default(),
     })
 }
 
@@ -452,6 +453,7 @@ fn interior(settings: LightingSettings) -> World {
             color: [0.11, 0.14, 0.19],
         }),
         lighting: settings,
+        debug: genos_scene::DebugSettings::default(),
     })
 }
 

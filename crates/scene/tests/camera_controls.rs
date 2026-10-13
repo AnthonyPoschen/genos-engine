@@ -18,6 +18,7 @@ fn tick(camera: &mut Camera, actions: &Actions, dt: f32) {
         ceiling: None,
         sky: None,
         lighting: LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
     };
     update(camera, &mut scene, actions, dt);
 }
