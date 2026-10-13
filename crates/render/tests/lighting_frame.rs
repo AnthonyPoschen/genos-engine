@@ -690,3 +690,113 @@ fn half_res_atrous_matches_the_full_reference() {
         "direct light moved with the bounce filter: {direct_gap:.3}"
     );
 }
+
+fn adaptive_settings(res: &str, variance: &str) -> LightingSettings {
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.set_key("denoise_res", res).expect("denoise_res");
+    settings
+        .set_key("denoise_adaptive", "on")
+        .expect("denoise_adaptive");
+    settings
+        .set_key("denoise_variance", variance)
+        .expect("denoise_variance");
+    settings
+}
+
+fn assert_bounce_close(
+    name: &str,
+    reference: &[u8],
+    image: &[u8],
+    depth: &[u8],
+    normal: &[u8],
+    frames: &[Vec<u8>],
+    full_flicker: f64,
+) {
+    let errors = pixel_errors(reference, image);
+    let mean = mean_of(&errors);
+    let mut sorted = errors.clone();
+    let p99 = percentile(&mut sorted, 0.99);
+    let width = 320usize;
+    let mut edge = Vec::new();
+    let mut flat = Vec::new();
+    for (i, e) in errors.iter().copied().enumerate() {
+        let index = i * 4;
+        if index + 4 >= depth.len() || index + width * 4 >= depth.len() {
+            continue;
+        }
+        if depth_edge(depth, normal, index, width) {
+            edge.push(e);
+        } else {
+            flat.push(e);
+        }
+    }
+    let edge_mean = mean_of(&edge);
+    let flat_mean = mean_of(&flat);
+    let flicker = flicker_variance(frames);
+    eprintln!(
+        "{name} mean {mean:.3} p99 {p99:.3} edge {edge_mean:.3} ({}) flat {flat_mean:.3} flicker {flicker:.3} full_flicker {full_flicker:.3}",
+        edge.len()
+    );
+    assert!(mean < 3.0, "{name} mean error {mean:.3}");
+    assert!(p99 < 12.0, "{name} p99 error {p99:.3}");
+    assert!(
+        edge_mean < flat_mean * 6.0 + 2.0,
+        "{name} edge error {edge_mean:.3} smears past flat {flat_mean:.3}"
+    );
+    assert!(
+        flicker < full_flicker * 4.0 + 1.0,
+        "{name} flicker {flicker:.3} full {full_flicker:.3}"
+    );
+}
+
+/// Adaptive iteration count against the full five-iteration picture.
+///
+/// `0.02` is the preset threshold. `0.1` forces the variance band down to one
+/// iteration so the skip is actually taken on a young scene.
+#[test]
+fn adaptive_atrous_matches_the_full_reference() {
+    let (_gpu, mut window, mut renderer) = open();
+    let world = shipped_hall();
+    let camera = Camera::opening();
+    renderer.set_lighting_settings(denoise_settings("full"));
+    view_at(&mut renderer, ViewMode::Bounce);
+    let mut full_frames = Vec::new();
+    for _ in 0..6 {
+        full_frames.push(draw(&mut window, &mut renderer, &world, &camera));
+    }
+    let reference = full_frames.last().expect("reference").clone();
+    let full_flicker = flicker_variance(&full_frames[4..]);
+    view_at(&mut renderer, ViewMode::Depth);
+    let depth = draw(&mut window, &mut renderer, &world, &camera);
+    view_at(&mut renderer, ViewMode::Normal);
+    let normal = draw(&mut window, &mut renderer, &world, &camera);
+    view_at(&mut renderer, ViewMode::Direct);
+    let direct_full = draw(&mut window, &mut renderer, &world, &camera);
+
+    for (name, settings) in [
+        ("adaptive 0.02", adaptive_settings("full", "0.02")),
+        ("adaptive 0.10", adaptive_settings("full", "0.1")),
+        ("half+adaptive", adaptive_settings("half", "0.02")),
+    ] {
+        renderer.set_lighting_settings(settings);
+        view_at(&mut renderer, ViewMode::Bounce);
+        let mut frames = Vec::new();
+        for _ in 0..4 {
+            frames.push(draw(&mut window, &mut renderer, &world, &camera));
+        }
+        assert_bounce_close(
+            name,
+            &reference,
+            &frames[2],
+            &depth,
+            &normal,
+            &frames,
+            full_flicker,
+        );
+        view_at(&mut renderer, ViewMode::Direct);
+        let direct = draw(&mut window, &mut renderer, &world, &camera);
+        let gap = mean_abs(&direct_full, &direct);
+        eprintln!("{name} direct {gap:.3}");
+        assert!(gap < 1.0, "{name} direct moved: {gap:.3}");
+    }
+}

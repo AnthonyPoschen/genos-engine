@@ -226,6 +226,11 @@ pub struct DenoiserSettings {
     pub dirty_fraction: f32,
     /// Full-resolution wavelet, or half-resolution bounce filter plus upsample.
     pub resolution: DenoiseResolution,
+    /// Drop later wavelet iterations where the texel's history is stable.
+    pub adaptive: bool,
+    /// Relative luminance deviation `sqrt(variance) / mean` under which a texel
+    /// counts as stable. 0 leaves the decision to sample age.
+    pub variance_threshold: f32,
 }
 
 /// Flat or hemisphere fill used when GI is off.
@@ -302,6 +307,7 @@ impl LightingSettings {
                 // The filter does not run (no surface cache). The cheap mode is
                 // recorded so turning the cache on does not jump to full cost.
                 s.denoiser.resolution = DenoiseResolution::Half;
+                s.denoiser.adaptive = true;
                 s.prefill = false;
                 s.gi.refresh_frames = 2;
                 s.gi.budget_shift = 2;
@@ -314,6 +320,7 @@ impl LightingSettings {
                 s.probes.rays = 32;
                 s.denoiser.iterations = 3;
                 s.denoiser.resolution = DenoiseResolution::Half;
+                s.denoiser.adaptive = true;
                 s.gi.budget_shift = 1;
                 s.ambient.mode = AmbientMode::Day;
             }
@@ -365,6 +372,8 @@ impl LightingSettings {
                 dirty_fraction: 0.25,
                 // High stays on the full-resolution wavelet until it is benchmarked.
                 resolution: DenoiseResolution::Full,
+                adaptive: false,
+                variance_threshold: 0.02,
             },
             compose_reuse: true,
             sky: true,
@@ -411,6 +420,8 @@ impl LightingSettings {
             _ => 5,
         };
         self.denoiser.dirty_fraction = self.denoiser.dirty_fraction.clamp(0.0, 1.0);
+        // Ten bits in the control word: 0.0001 steps, up to 0.1023.
+        self.denoiser.variance_threshold = self.denoiser.variance_threshold.clamp(0.0, 0.1);
         self.ambient.intensity = self.ambient.intensity.max(0.0);
         self.ambient.night_intensity = self.ambient.night_intensity.max(0.0);
         self.ambient.day_intensity = self.ambient.day_intensity.max(0.0);
@@ -590,6 +601,12 @@ impl LightingSettings {
             num_text(self.denoiser.dirty_fraction)
         );
         let _ = writeln!(out, "denoise_res={}", self.denoiser.resolution.name());
+        let _ = writeln!(out, "denoise_adaptive={}", bit(self.denoiser.adaptive));
+        let _ = writeln!(
+            out,
+            "denoise_variance={}",
+            num_text(self.denoiser.variance_threshold)
+        );
         let _ = writeln!(out, "compose_reuse={}", bit(self.compose_reuse));
         let _ = writeln!(out, "sky={}", bit(self.sky));
         let _ = writeln!(out, "emissive={}", bit(self.emissive));
@@ -699,6 +716,8 @@ impl LightingSettings {
                 self.denoiser.resolution = DenoiseResolution::parse(value)
                     .ok_or_else(|| format!("denoise_res is full or half, got {value}"))?
             }
+            "denoise_adaptive" => self.denoiser.adaptive = on(value)?,
+            "denoise_variance" => self.denoiser.variance_threshold = num_f32(value)?,
             "compose_reuse" => self.compose_reuse = on(value)?,
             "sky" => self.sky = on(value)?,
             "emissive" => self.emissive = on(value)?,
@@ -761,6 +780,8 @@ impl LightingSettings {
             ("GENOS_LIGHTING_DENOISE_ITERS", "denoise_iters"),
             ("GENOS_LIGHTING_ATROUS_DIRTY", "denoise_dirty"),
             ("GENOS_LIGHTING_DENOISE_RES", "denoise_res"),
+            ("GENOS_LIGHTING_DENOISE_ADAPTIVE", "denoise_adaptive"),
+            ("GENOS_LIGHTING_DENOISE_VARIANCE", "denoise_variance"),
             ("GENOS_LIGHTING_COMPOSE_REUSE", "compose_reuse"),
             ("GENOS_LIGHTING_SKY", "sky"),
             ("GENOS_LIGHTING_EMISSIVE", "emissive"),

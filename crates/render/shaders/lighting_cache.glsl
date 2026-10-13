@@ -122,6 +122,14 @@ uint lighting_denoise_iters() {
 bool lighting_denoise_half() {
     return (gstats.ctrl_bits & 524288u) != 0u;
 }
+// Bit 20. Fewer wavelet iterations where history is stable. High leaves it clear.
+bool lighting_denoise_adaptive() {
+    return (gstats.ctrl_bits & 1048576u) != 0u;
+}
+// Bits 22..31, steps of 0.0001. Relative luminance deviation sqrt(var) / mean.
+float lighting_denoise_variance() {
+    return float((gstats.ctrl_bits >> 22u) & 1023u) * 0.0001;
+}
 // Unlimited (bit 16384) is today's cache. 0 skips the read. A cache-ray hit
 // (kind 1) needs two bounces; a probe or a pixel needs one.
 bool lighting_bounce_ok() {
@@ -3156,6 +3164,41 @@ int lighting_svgf_step_for(uint slot, uint it) {
     }
     return step;
 }
+// How many wavelet iterations this texel still needs.
+//
+// Schied et al. 2017 (SVGF) sec. 4.2 use the variance to set the luminance
+// edge-stop. They still run every iteration. ReLAX (Zhdan, NVIDIA Real-Time
+// Denoisers) reduces the a-trous iteration count as history length grows.
+// This takes the smaller of the two limits, so either a long sample age or a
+// variance under the threshold drops iterations.
+//
+// Deviations: sample age is the surface-cache set count, not a screen-space
+// history length. No previous frame is kept. SVGF's own filter does not drop
+// iterations; the drop is the ReLAX rule, gated by the SVGF variance as well.
+// Bands: 16 sets or variance at the threshold -> 1 iteration; 8 sets or four
+// times the threshold -> 3; otherwise the configured count.
+uint lighting_svgf_pass_limit(uint slot, float var, float lum) {
+    uint full = lighting_denoise_iters();
+    if (!lighting_denoise_adaptive()) {
+        return full;
+    }
+    float sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+    float rel = sqrt(max(var, 0.0)) / max(lum, 1.0e-3);
+    float thr = lighting_denoise_variance();
+    uint by_age = full;
+    if (sets >= 16.0) {
+        by_age = 1u;
+    } else if (sets >= 8.0) {
+        by_age = min(full, 3u);
+    }
+    uint by_var = full;
+    if (thr > 0.0 && rel <= thr) {
+        by_var = 1u;
+    } else if (thr > 0.0 && rel <= thr * 4.0) {
+        by_var = min(full, 3u);
+    }
+    return min(full, min(by_age, by_var));
+}
 // Edge-aware 2x2 downsample of layer-1 bounce into the even texel. Self is (0, 0).
 vec3 lighting_svgf_downsample(uint slot, vec3 own) {
     vec3 acc = vec3(0.0);
@@ -3325,6 +3368,22 @@ void lighting_svgf_iter(uint slot, uint it) {
     }
     uint src = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_B : LIGHTING_SC_ATROUS_A);
     uint dst = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it + 1u) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_A : LIGHTING_SC_ATROUS_B);
+    // Stable history: copy the last applied level forward. The 5x5 does not run.
+    // The last configured iteration still publishes buffer A for the push.
+    if (lighting_denoise_adaptive()) {
+        float v0;
+        vec4 s0 = lighting_svgf_load(lighting_svgf_lvl(0u), slot, v0);
+        uint limit = lighting_svgf_pass_limit(slot, v0, dot(s0.rgb, LIGHTING_SVGF_LW));
+        if (it + 1u > limit) {
+            float vs;
+            vec4 s = lighting_svgf_load(src, slot, vs);
+            lighting_svgf_store(dst, slot, s.rgb, vs, s.w);
+            if (LIGHTING_DIRTY_ATROUS && it + 1u == lighting_denoise_iters()) {
+                cache.v[LIGHTING_SC_ATROUS_A + slot] = cache.v[dst + slot];
+            }
+            return;
+        }
+    }
     float vold;
     vec4 old = lighting_svgf_load(dst, slot, vold);
     int step = lighting_svgf_step_for(slot, it);

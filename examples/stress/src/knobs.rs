@@ -217,6 +217,19 @@ impl Host for Stage {
                 &["full", "half"],
             ),
             Knob::switch(
+                "lighting_denoise_adaptive",
+                "Adaptive denoise",
+                lighting.denoiser.adaptive,
+            ),
+            Knob::number(
+                "lighting_denoise_variance",
+                "Denoise variance",
+                lighting.denoiser.variance_threshold as f64,
+                (0.0, 0.1),
+                0.005,
+                "",
+            ),
+            Knob::switch(
                 "lighting_compose_reuse",
                 "Compose reuse",
                 lighting.compose_reuse,
@@ -362,6 +375,8 @@ fn apply_lighting_knob(
             "denoise_res",
             if v >= 0.5 { "half" } else { "full" }.to_string(),
         ),
+        "lighting_denoise_adaptive" => ("denoise_adaptive", on_off(v)),
+        "lighting_denoise_variance" => ("denoise_variance", format!("{v}")),
         "lighting_compose_reuse" => ("compose_reuse", on_off(v)),
         "lighting_sky" => ("sky", on_off(v)),
         "lighting_emissive" => ("emissive", on_off(v)),

@@ -15,7 +15,7 @@ On the owner's RTX 4070 at 1920×1080, in the moving stress scene, a-trous is 5.
 ## Papers
 
 - Dammertz, Sewtz, Hanika, Lensch. "Edge-Avoiding À-Trous Wavelet Transform for Fast Global Illumination Filtering." HPG 2010. The B3 kernel `(1/16, 1/4, 3/8, 1/4, 1/16)` and the doubled step per iteration.
-- Schied, Kaplanyan, Wyman, Patney, Lefohn. "Spatiotemporal Variance-Guided Filtering: Real-Time Reconstruction for Path-Traced Global Illumination." HPG 2017. Edge-stopping weights on depth, normal, and luminance. Variance is section 4.2. This pass still uses those weights. It does not yet drop iterations from the variance; that is the next commit.
+- Schied, Kaplanyan, Wyman, Patney, Lefohn. "Spatiotemporal Variance-Guided Filtering: Real-Time Reconstruction for Path-Traced Global Illumination." HPG 2017. Edge-stopping weights on depth, normal, and luminance. Variance is section 4.2. The adaptive pass below uses that variance, and sample age, to drop iterations. SVGF itself still runs every iteration.
 - Zhdan, ReBLUR, in NVIDIA Real-Time Denoisers. The spatial filter of indirect light runs at half resolution. The upsample is a joint bilateral filter guided by depth and normal.
 - Wright et al. "Lumen: Real-Time Global Illumination in Unreal Engine 5." SIGGRAPH 2022. Direct lighting stays in the lighting pass. The denoiser sees indirect light.
 
@@ -39,6 +39,26 @@ Half mode, in `lighting_cache.glsl`:
 - Normals are the cache normals, not a screen G-buffer sample.
 - The finest full-resolution wavelet (step 1 cell) does not run. The upsample restores edges. It does not replace that high-frequency blur.
 - The downsample's variance is the even texel's own variance, not a variance of the 2×2.
+
+## Adaptive passes
+
+`denoise_adaptive` and `denoise_variance` are the second commit. High leaves adaptive off and stores the threshold at 0.02 so the knob round-trips. Medium and low turn adaptive on.
+
+Schied et al. 2017 section 4.2 drive the luminance weight from the variance. They still run every iteration. ReLAX (Zhdan, NVIDIA Real-Time Denoisers) runs fewer a-trous iterations as history length grows. A texel takes the smaller of the two limits:
+
+- 16 surface-cache sets, or relative deviation `sqrt(variance) / mean` at or under the threshold: 1 iteration
+- 8 sets, or deviation at or under four times the threshold: 3 iterations
+- otherwise the configured count
+
+Later iterations copy the last applied level forward. They do not run the 5×5. The push still reads buffer A.
+
+Deviations: sample age is the surface-cache set count, not a screen history length. No frame is kept. SVGF itself does not drop iterations. A threshold of 0 ignores variance and uses age only.
+
+Expected cost: on the moving sun the set count stays high (the history is not reset by a global light change) and the estimator variance stays small, so most fine texels should leave the 5×5 after one iteration. The dispatch still launches; the threads return after a copy. That is the opposite of the dirty-block skip, which saw every block change and did the full kernel. Where the history is young or the variance is high, the configured iteration count still runs.
+
+```
+GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_ADAPTIVE=on GENOS_LIGHTING_DENOISE_VARIANCE=0.02 make stress
+```
 
 ## Expected cost
 

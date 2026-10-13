@@ -58,6 +58,10 @@ const CTRL_DIRECT_FRESH: u32 = 32768;
 const CTRL_DENOISE_ITERS_SHIFT: u32 = 16;
 /// Half-resolution bounce wavelet. Bit 19. Unset is the full-resolution filter.
 const CTRL_DENOISE_HALF: u32 = 1 << 19;
+/// Skip later wavelet iterations on stable texels. Bit 20.
+const CTRL_DENOISE_ADAPTIVE: u32 = 1 << 20;
+/// Relative variance threshold in bits 22..31, in steps of 0.0001.
+const CTRL_DENOISE_VAR_SHIFT: u32 = 22;
 
 /// What a buffer rebuild depends on. Screen size is compared beside this.
 pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32, u32, u32) {
@@ -148,6 +152,13 @@ pub(crate) fn pack_lighting_ctrl(
     if settings.denoiser.resolution == genos_scene::DenoiseResolution::Half {
         bits |= CTRL_DENOISE_HALF;
     }
+    if settings.denoiser.adaptive {
+        bits |= CTRL_DENOISE_ADAPTIVE;
+    }
+    let variance_steps = (settings.denoiser.variance_threshold * 10000.0)
+        .round()
+        .clamp(0.0, 1023.0) as u32;
+    bits |= variance_steps << CTRL_DENOISE_VAR_SHIFT;
     if !settings.gi.enabled && mode != AmbientMode::Off {
         bits |= CTRL_AMBIENT;
     }
