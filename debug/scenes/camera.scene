@@ -1,0 +1,5 @@
+name camera
+kind rhai
+rhai examples/camera/scene.rhai
+review The camera example scene. The script stays at examples/camera/scene.rhai.
+checkpoint open 0 1.7 6 look 0 1 0

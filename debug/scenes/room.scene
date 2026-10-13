@@ -1,0 +1,6 @@
+name room
+kind rhai
+rhai examples/stress/scenes/room.rhai
+review The scripted room: three solids and one lamp. The file stays where the stress tests load it.
+checkpoint open 0 1.7 8 look 0 1 0
+checkpoint lamp 4 1.7 4 look 7 2 6

@@ -37,7 +37,7 @@ pub use trace::{
 };
 pub use world::{
     fixed_bounds, identity_pose, in_view, solid_reach, Bounds, Displacement, DrawKind, FixedPart,
-    Object, ParticleFrame, ParticleImage, ShaderSpace, World,
+    MaterialAtlas, Object, ParticleFrame, ParticleImage, ShaderSpace, Surface, World,
 };
 
 /// `GENOS_SCENE_DELTA=1`: print each frame's resident scene update (S70C).

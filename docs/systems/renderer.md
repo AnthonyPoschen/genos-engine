@@ -25,7 +25,7 @@ A profiled draw writes Vulkan timestamp queries around the GPU draw. The GPU tim
 `DrawKind` is the set of draws:
 
 - `Fixed` is the floor, a wall, or a solid from the scene.
-- `Mesh` is a triangle list plus a column-major pose. Replace the pose each frame to move the mesh.
+- `Mesh` is a triangle list plus a column-major pose. Optional object-space normals and texture coordinates ride with the vertices. `surface` indexes a material in `World::surfaces` (colour and normal atlas rectangles, and an alpha cutoff). Empty texcoords and `surface: None` keep the vertex albedo. Replace the pose each frame to move the mesh.
 - `Particles` are cards. A card can face the camera or yaw by an angle. `lit` multiplies the base albedo by world light. `emission` adds that card to the one ground fire term. An image is a loaded texture or one texture-map frame chosen from the particle age. Density above zero is still one fog card.
 - `Shader` is `ShaderSpace::Mesh` or `ShaderSpace::Screen`. A mesh-space shader can carry a `Displacement` height map. The map builds a grid. A screen-space shader is recorded and is not drawn over the scene yet.
 
@@ -68,7 +68,7 @@ The draw starts in `off`. That mode is the single-sample picture. `Renderer::set
 
 Set `object.hidden = true` to hide an object and keep its light. Push a `DrawKind::Mesh` and replace `pose` to animate. Push a `DrawKind::Particles` to draw cards. `color` is the base albedo. Also set `lit`, `emission`, `face_camera`, `angle`, and `image`. Push a `DrawKind::Shader` with a `Displacement` to build a grid from a height map.
 
-`World::add_gltf(&scene, &place, affects_light)` places a loaded glTF scene (`genos_load::load_gltf_file`): one `DrawKind::Mesh` per primitive per instance, posed by the node transforms after `place`, coloured by the material's mean diffuse albedo (base colour factor x mean texture colour x (1 - metallic)). Textures per texel come with the GI v2 G-buffer. Lighting still uses the analytic shapes (GI v2 phase 1); with `affects_light` a mesh stands in as its bounding box, which also darkens the mesh itself, so models are usually added with it off. `genos-stress --gltf-at X Y Z SCALE --gltf FILE` does this from the command line. `SceneMesh::from_scene` gives the analytic scene as triangles for the CPU tracers.
+`World::add_gltf(&scene, &place, affects_light)` places a loaded glTF scene (`genos_load::load_gltf_file`): one `DrawKind::Mesh` per primitive per instance, posed by the node transforms after `place`. A textured primitive keeps its normals and texture coordinates. The instance colour is the base-colour factor. The colour atlas stores sRGB of linear(base texture) × (1 − metallic), and the G-buffer multiplies that by the instance colour, so metal is not applied twice. Roughness stays on the asset and is not shaded. There is no specular lobe. An alpha mask, and blend treated as a cutoff of 0.5, discards in the depth prepass and in the G-buffer. A mesh with no texture keeps the mean diffuse albedo from `surface_mean`, and that mean does not darken by metal. A placed mesh whose largest side is over 80 m is refused, so a centimetre import fails instead of blowing the world cache. With `affects_light` a mesh stands in as its bounding box, which also darkens the mesh itself, so models are usually added with it off. `add_gltf_traced` also bakes one SDF per mesh for the GI v2 tracer. `genos-stress --gltf-at X Y Z SCALE --gltf FILE` does this from the command line. `SceneMesh::from_scene` gives the analytic scene as triangles for the CPU tracers.
 
 The camera steps a seeded emitter on the red solid. A stationary flame stays on that solid and animates in place. Embers and a smoke trail leave that flame. The fire light is at the center of the stationary flame. The draw submits those cards.
 
@@ -84,7 +84,7 @@ A particle does not occlude. `affects_light` is not the lit flag and is not the 
 
 A screen-space shader does not run a custom program yet. Custom SPIR-V is not loaded.
 
-The raster draws the opaque shapes' depth first, with no shading, then shades with an equal-or-nearer depth test, so each pixel shades one opaque surface however many faces cover it. Lighting and raster are two GPU stages in one submit. The CPU does not wait between them. A normal draw does not stall on the GPU fence. There are two frames in flight.
+The raster draws the opaque shapes' depth first, then shades with an equal-or-nearer depth test, so each pixel shades one opaque surface however many faces cover it. The depth prepass runs `depth_mask.frag` with colour writes off, so an alpha-tested hole is discarded before the G-buffer. The G-buffer uses early fragment tests, and a discard there would not punch the depth that was already written. Material atlases are storage buffers (binding 4 colour, binding 7 normal). Sampling repeats in 0..1. Clamp and mirrored repeat are not in the shader. A normal map perturbs the vertex normal with a screen-space tangent; the mesh does not store tangents. Lighting and raster are two GPU stages in one submit. The CPU does not wait between them. A normal draw does not stall on the GPU fence. There are two frames in flight.
 
 The picture modes are `off` and FXAA. The draw does not run MSAA, SMAA, or TAA. The filter does not change the lighting. The filter does not change the overlay.
 

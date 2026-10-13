@@ -42,6 +42,8 @@ crates/physics/     package genos-physics
 crates/scene/       package genos-scene
 crates/mcp/         package genos-mcp
 crates/debug/       package genos-debug
+debug/scene-lib/    package genos-scene-lib
+debug/lighting/     package genos-lighting
 crates/window/      package genos-window
 crates/ui/          package genos-ui
 crates/render/      package genos-render
@@ -54,7 +56,7 @@ examples/camera/    package genos-camera
 
 `genos-audio` mixes loaded PCM and submits that stereo buffer to the operating system. Direct-path transmission is one compute pass in `genos-render`. The camera scene does not open a sound device.
 
-`genos-debug` runs the debug commands, scripts, captures and the path-traced ground truth over the MCP command queue. Each engine system adds a binary under `debug/<system>/` on that scaffolding, with scenes in `debug/scenes/`. See [Debugging](systems/debugging.md).
+`genos-debug` runs the debug commands, scripts, captures and the path-traced ground truth over the MCP command queue. Each engine system adds a binary under `debug/<system>/` on that scaffolding, with scenes in `debug/scenes/`. `genos-scene-lib` parses those scene files and does not link the renderer. `genos-lighting` is the lighting debug binary: it builds the scenes and writes screenshots, dumps, and logs under `./genos-debug/`. See [Debugging](systems/debugging.md).
 
 `genos-math` stores positions, directions, and rotations. `genos-physics` steps gravity, a move wish, contact, and springs. The camera capsule calls that step.
 

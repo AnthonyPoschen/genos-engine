@@ -1,0 +1,12 @@
+name bounce_corner
+kind stress
+scale small
+lights 5
+dynamic 0
+time 0.25
+freeze-sun
+still-boxes
+still-lamps
+review The corner at noon with the boxes and lamps held still. The bounce on the two walls is the thing to judge.
+checkpoint corner 3.5 1.6 3.5 look 0.2 0.4 0.2
+checkpoint room-a 7.2 1.7 0.9 yaw -2.556 pitch -0.12

@@ -258,6 +258,12 @@ pub enum PackedDraw {
         color: [f32; 3],
         /// Emitted light (linear); GI v2 only.
         emission: [f32; 3],
+        /// Colour-atlas rect (x, y, w, h) in texels. `w == 0` is the vertex colour.
+        color_rect: [f32; 4],
+        /// Normal-atlas rect. `w == 0` keeps the vertex normal.
+        normal_rect: [f32; 4],
+        /// Alpha cutoff. 0 does not discard.
+        cutoff: f32,
         source: ShapeSource,
     },
     Dynamic(Vec<GpuVertex>),
@@ -284,7 +290,13 @@ pub enum ShapeSource {
         radius: f32,
         height: f32,
     },
-    Mesh(Vec<[f32; 3]>),
+    Mesh {
+        positions: Vec<[f32; 3]>,
+        normals: Vec<[f32; 3]>,
+        uvs: Vec<[f32; 2]>,
+        /// 1 lights the face. Above 1.15 marks it two-sided in the G-buffer.
+        shade: f32,
+    },
     Baked(Vec<GpuVertex>),
 }
 
@@ -304,9 +316,14 @@ pub(crate) fn build_shape(source: &ShapeSource) -> Vec<GpuVertex> {
         ShapeSource::Cylinder { radius, height } => {
             push_cylinder(&mut verts, white, 0.0, 0.0, *radius, *height);
         }
-        ShapeSource::Mesh(positions) => {
+        ShapeSource::Mesh {
+            positions,
+            normals,
+            uvs,
+            shade,
+        } => {
             let pose = crate::world::identity_pose();
-            push_mesh(&mut verts, positions, white, &pose);
+            push_mesh(&mut verts, positions, normals, uvs, *shade, white, &pose);
         }
         ShapeSource::Baked(verts_in) => verts = verts_in.clone(),
     }
@@ -480,6 +497,9 @@ fn pack_draw(
                 model: translation(floor.position.x, 0.0, floor.position.z),
                 color,
                 emission: [0.0; 3],
+                color_rect: [0.0; 4],
+                normal_rect: [0.0; 4],
+                cutoff: 0.0,
                 source: ShapeSource::Floor {
                     half_x: floor.half_x,
                     half_z: floor.half_z,
@@ -495,6 +515,9 @@ fn pack_draw(
                 model: translation(floor.position.x, ceiling.height, floor.position.z),
                 color,
                 emission: [0.0; 3],
+                color_rect: [0.0; 4],
+                normal_rect: [0.0; 4],
+                cutoff: 0.0,
                 source: ShapeSource::Ceiling {
                     half_x: floor.half_x,
                     half_z: floor.half_z,
@@ -520,6 +543,9 @@ fn pack_draw(
                 ),
                 color,
                 emission: [0.0; 3],
+                color_rect: [0.0; 4],
+                normal_rect: [0.0; 4],
+                cutoff: 0.0,
                 source: ShapeSource::Box {
                     half,
                     top: true,
@@ -542,6 +568,9 @@ fn pack_draw(
                         ),
                         color,
                         emission: [0.0; 3],
+                        color_rect: [0.0; 4],
+                        normal_rect: [0.0; 4],
+                        cutoff: 0.0,
                         source: ShapeSource::Box {
                             half: extent,
                             top: true,
@@ -557,6 +586,9 @@ fn pack_draw(
                         model: translation(solid.position.x, 0.0, solid.position.z),
                         color,
                         emission: [0.0; 3],
+                        color_rect: [0.0; 4],
+                        normal_rect: [0.0; 4],
+                        cutoff: 0.0,
                         source: ShapeSource::Cylinder {
                             radius,
                             height: solid.height,
@@ -567,17 +599,45 @@ fn pack_draw(
         }
         DrawKind::Mesh {
             vertices,
+            normals,
+            texcoords,
             pose,
             emission,
+            surface,
             ..
         } => {
-            let key = shape_key_positions(4, vertices);
+            let shade = world
+                .surfaces
+                .get(surface.unwrap_or(usize::MAX))
+                .is_some_and(|s| s.two_sided)
+                .then_some(1.2)
+                .unwrap_or(1.0);
+            let key = shape_key_mesh(4, vertices, texcoords, shade);
+            let (color_rect, normal_rect, cutoff) = world
+                .surfaces
+                .get(surface.unwrap_or(usize::MAX))
+                .map(|s| {
+                    (
+                        s.color.map(|v| v as f32),
+                        s.normal.map(|v| v as f32),
+                        s.cutoff,
+                    )
+                })
+                .unwrap_or(([0.0; 4], [0.0; 4], 0.0));
             Some(PackedDraw::Shape {
                 key,
                 model: *pose,
                 color,
                 emission: *emission,
-                source: ShapeSource::Mesh(vertices.clone()),
+                color_rect,
+                normal_rect,
+                cutoff,
+                source: ShapeSource::Mesh {
+                    positions: vertices.clone(),
+                    normals: normals.clone(),
+                    uvs: texcoords.clone(),
+                    shade,
+                },
             })
         }
         DrawKind::Particles { .. } => {
@@ -605,6 +665,9 @@ fn pack_draw(
                 model: crate::world::identity_pose(),
                 color,
                 emission: [0.0; 3],
+                color_rect: [0.0; 4],
+                normal_rect: [0.0; 4],
+                cutoff: 0.0,
                 source: ShapeSource::Baked(baked),
             })
         }
@@ -623,13 +686,19 @@ fn shape_key(tag: u64, values: &[f32]) -> u64 {
     hasher.finish()
 }
 
-fn shape_key_positions(tag: u64, positions: &[[f32; 3]]) -> u64 {
+fn shape_key_mesh(tag: u64, positions: &[[f32; 3]], uvs: &[[f32; 2]], shade: f32) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     tag.hash(&mut hasher);
+    shade.to_bits().hash(&mut hasher);
     for position in positions {
         for value in position {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    for uv in uvs {
+        for value in uv {
             value.to_bits().hash(&mut hasher);
         }
     }
@@ -1084,10 +1153,21 @@ fn push_object(
         }
         DrawKind::Mesh {
             vertices,
+            normals,
+            texcoords,
             color,
             pose,
+            surface,
             ..
-        } => push_mesh(out, vertices, *color, pose),
+        } => {
+            let shade = world
+                .surfaces
+                .get(surface.unwrap_or(usize::MAX))
+                .is_some_and(|s| s.two_sided)
+                .then_some(1.2)
+                .unwrap_or(1.0);
+            push_mesh(out, vertices, normals, texcoords, shade, *color, pose);
+        }
         DrawKind::Particles {
             density,
             points,
@@ -1234,16 +1314,49 @@ fn push_cylinder(
     }
 }
 
-fn push_mesh(out: &mut Vec<GpuVertex>, vertices: &[[f32; 3]], color: [f32; 3], pose: &[f32; 16]) {
-    for tri in vertices.chunks(3) {
+fn push_mesh(
+    out: &mut Vec<GpuVertex>,
+    vertices: &[[f32; 3]],
+    normals: &[[f32; 3]],
+    uvs: &[[f32; 2]],
+    shade: f32,
+    color: [f32; 3],
+    pose: &[f32; 16],
+) {
+    for (index, tri) in vertices.chunks(3).enumerate() {
         if tri.len() < 3 {
             continue;
         }
         let a = transform_pose(pose, tri[0]);
         let b = transform_pose(pose, tri[1]);
         let c = transform_pose(pose, tri[2]);
-        let n = normal_of(a, b, c);
-        push_tri(out, a, b, c, n, color);
+        let flat = normal_of(a, b, c);
+        let corner = |k: usize| {
+            let Some(n) = normals.get(index * 3 + k).copied() else {
+                return flat;
+            };
+            let spun = [
+                pose[0] * n[0] + pose[4] * n[1] + pose[8] * n[2],
+                pose[1] * n[0] + pose[5] * n[1] + pose[9] * n[2],
+                pose[2] * n[0] + pose[6] * n[1] + pose[10] * n[2],
+            ];
+            let len = (spun[0] * spun[0] + spun[1] * spun[1] + spun[2] * spun[2]).sqrt();
+            if len > 1.0e-6 {
+                [spun[0] / len, spun[1] / len, spun[2] / len]
+            } else {
+                flat
+            }
+        };
+        let uv = |k: usize| uvs.get(index * 3 + k).copied().unwrap_or([-1.0, -1.0]);
+        for (pos, k) in [(a, 0), (b, 1), (c, 2)] {
+            out.push(GpuVertex {
+                pos,
+                albedo: color,
+                normal: corner(k),
+                shade,
+                uv: uv(k),
+            });
+        }
     }
 }
 

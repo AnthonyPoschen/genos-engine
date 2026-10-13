@@ -43,7 +43,7 @@ impl Host for Stage {
         );
         speed.text = format!("x{}", self.sun_speed);
         let lighting = &self.world.scene.lighting;
-        vec![
+        let mut knobs = vec![
             time,
             speed,
             Knob::choice(
@@ -117,114 +117,9 @@ impl Host for Stage {
                 usize::from(self.mix.layout == Layout::First),
                 &["spread", "first"],
             ),
-            lighting_preset_knob(&self.world.scene.lighting),
-            Knob::choice(
-                "lighting_bounces",
-                "Bounces",
-                bounce_index(self.world.scene.lighting.bounce.count),
-                &["0", "1", "2", "unlimited"],
-            ),
-            Knob::switch("lighting_direct", "Direct", lighting.direct.enabled),
-            Knob::number(
-                "lighting_direct_lights",
-                "Max lights",
-                lighting.direct.max_lights as f64,
-                (0.0, 64.0),
-                1.0,
-                "",
-            ),
-            Knob::number(
-                "lighting_direct_refresh",
-                "Direct refresh",
-                lighting.direct.refresh_frames as f64,
-                (1.0, 30.0),
-                1.0,
-                " frames",
-            ),
-            Knob::number(
-                "lighting_direct_scale",
-                "Direct scale",
-                lighting.direct.resolution_scale as f64,
-                (1.0, 8.0),
-                1.0,
-                "",
-            ),
-            Knob::switch("lighting_shadows", "Shadows", lighting.shadows.enabled),
-            Knob::choice(
-                "lighting_shadow_filter",
-                "Shadow filter",
-                usize::from(lighting.shadows.filter == ShadowFilter::Cell),
-                &["hard", "cell"],
-            ),
-            Knob::switch("lighting_gi", "GI", lighting.gi.enabled),
-            Knob::number(
-                "lighting_gi_refresh",
-                "GI refresh",
-                lighting.gi.refresh_frames as f64,
-                (1.0, 30.0),
-                1.0,
-                " frames",
-            ),
-            Knob::number(
-                "lighting_budget_shift",
-                "Budget shift",
-                lighting.gi.budget_shift as f64,
-                (0.0, 7.0),
-                1.0,
-                "",
-            ),
-            Knob::switch("lighting_probes", "Probes", lighting.probes.enabled),
-            Knob::number(
-                "lighting_probe_rays",
-                "Probe rays",
-                lighting.probes.rays as f64,
-                (4.0, 64.0),
-                4.0,
-                "",
-            ),
-            Knob::number(
-                "lighting_probe_stale",
-                "Probe stale",
-                lighting.probes.staleness_frames as f64,
-                (1.0, 900.0),
-                1.0,
-                " frames",
-            ),
-            Knob::switch(
-                "lighting_world_cache",
-                "World cache",
-                lighting.world_cache.enabled,
-            ),
-            Knob::number(
-                "lighting_world_stale",
-                "World stale",
-                lighting.world_cache.staleness_frames as f64,
-                (1.0, 1800.0),
-                1.0,
-                " frames",
-            ),
-            Knob::switch("lighting_denoise", "Denoise", lighting.denoiser.enabled),
-            Knob::choice(
-                "lighting_denoise_iters",
-                "Denoise iterations",
-                denoise_index(lighting.denoiser.iterations),
-                &["1", "3", "5"],
-            ),
-            Knob::switch(
-                "lighting_compose_reuse",
-                "Compose reuse",
-                lighting.compose_reuse,
-            ),
-            Knob::switch("lighting_sky", "Lighting sky", lighting.sky),
-            Knob::switch("lighting_emissive", "Emissive", lighting.emissive),
-            Knob::switch("lighting_prefill", "Prefill", lighting.prefill),
-            Knob::choice(
-                "lighting_ambient",
-                "Ambient",
-                ambient_index(lighting.ambient.mode),
-                &["off", "constant", "hemisphere", "day"],
-            ),
-        ]
+        ];
+        knobs.extend(lighting_knobs(lighting));
+        knobs
     }
 
     fn set_knob(&mut self, name: &str, v: f64) -> Result<(), String> {
@@ -258,6 +153,119 @@ impl Host for Stage {
         self.apply();
         Ok(())
     }
+}
+
+/// The lighting knobs shared with the lighting debug binary.
+pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
+    vec![
+        lighting_preset_knob(lighting),
+        Knob::choice(
+            "lighting_bounces",
+            "Bounces",
+            bounce_index(lighting.bounce.count),
+            &["0", "1", "2", "unlimited"],
+        ),
+        Knob::switch("lighting_direct", "Direct", lighting.direct.enabled),
+        Knob::number(
+            "lighting_direct_lights",
+            "Max lights",
+            lighting.direct.max_lights as f64,
+            (0.0, 64.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_direct_refresh",
+            "Direct refresh",
+            lighting.direct.refresh_frames as f64,
+            (1.0, 30.0),
+            1.0,
+            " frames",
+        ),
+        Knob::number(
+            "lighting_direct_scale",
+            "Direct scale",
+            lighting.direct.resolution_scale as f64,
+            (1.0, 8.0),
+            1.0,
+            "",
+        ),
+        Knob::switch("lighting_shadows", "Shadows", lighting.shadows.enabled),
+        Knob::choice(
+            "lighting_shadow_filter",
+            "Shadow filter",
+            usize::from(lighting.shadows.filter == ShadowFilter::Cell),
+            &["hard", "cell"],
+        ),
+        Knob::switch("lighting_gi", "GI", lighting.gi.enabled),
+        Knob::number(
+            "lighting_gi_refresh",
+            "GI refresh",
+            lighting.gi.refresh_frames as f64,
+            (1.0, 30.0),
+            1.0,
+            " frames",
+        ),
+        Knob::number(
+            "lighting_budget_shift",
+            "Budget shift",
+            lighting.gi.budget_shift as f64,
+            (0.0, 7.0),
+            1.0,
+            "",
+        ),
+        Knob::switch("lighting_probes", "Probes", lighting.probes.enabled),
+        Knob::number(
+            "lighting_probe_rays",
+            "Probe rays",
+            lighting.probes.rays as f64,
+            (4.0, 64.0),
+            4.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_probe_stale",
+            "Probe stale",
+            lighting.probes.staleness_frames as f64,
+            (1.0, 900.0),
+            1.0,
+            " frames",
+        ),
+        Knob::switch(
+            "lighting_world_cache",
+            "World cache",
+            lighting.world_cache.enabled,
+        ),
+        Knob::number(
+            "lighting_world_stale",
+            "World stale",
+            lighting.world_cache.staleness_frames as f64,
+            (1.0, 1800.0),
+            1.0,
+            " frames",
+        ),
+        Knob::switch("lighting_denoise", "Denoise", lighting.denoiser.enabled),
+        Knob::choice(
+            "lighting_denoise_iters",
+            "Denoise iterations",
+            denoise_index(lighting.denoiser.iterations),
+            &["1", "3", "5"],
+        ),
+        Knob::switch(
+            "lighting_compose_reuse",
+            "Compose reuse",
+            lighting.compose_reuse,
+        ),
+        Knob::switch("lighting_sky", "Lighting sky", lighting.sky),
+        Knob::switch("lighting_emissive", "Emissive", lighting.emissive),
+        Knob::switch("lighting_prefill", "Prefill", lighting.prefill),
+        Knob::choice(
+            "lighting_ambient",
+            "Ambient",
+            ambient_index(lighting.ambient.mode),
+            &["off", "constant", "hemisphere", "day"],
+        ),
+    ]
 }
 
 fn lighting_preset_knob(settings: &LightingSettings) -> Knob {
@@ -303,7 +311,7 @@ fn ambient_index(mode: AmbientMode) -> usize {
 ///
 /// Returns false when `name` is not a lighting knob, so the stage can keep its
 /// own names. A lighting name that is not a key fails.
-fn apply_lighting_knob(
+pub fn apply_lighting_knob(
     settings: &mut LightingSettings,
     name: &str,
     v: f64,

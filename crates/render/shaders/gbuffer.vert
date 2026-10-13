@@ -13,6 +13,9 @@ layout(location = 2) out vec3 v_normal;
 layout(location = 3) out float v_shade;
 layout(location = 4) out vec2 v_uv;
 layout(location = 5) flat out uint v_emit;
+layout(location = 6) flat out vec4 v_atlas;
+layout(location = 7) flat out vec4 v_normal_atlas;
+layout(location = 8) flat out float v_cutoff;
 invariant gl_Position;
 layout(push_constant) uniform Push {
     mat4 view_proj;
@@ -20,6 +23,9 @@ layout(push_constant) uniform Push {
 struct Instance {
     mat4 model;
     uvec4 color;
+    vec4 atlas;
+    vec4 normal_atlas;
+    vec4 extra;
 };
 layout(std430, set = 0, binding = 3) readonly buffer Instances {
     Instance items[];
@@ -36,4 +42,7 @@ void main() {
     v_shade = in_shade;
     v_uv = in_uv;
     v_emit = item.color.w;
+    v_atlas = item.atlas;
+    v_normal_atlas = item.normal_atlas;
+    v_cutoff = item.extra.x;
 }

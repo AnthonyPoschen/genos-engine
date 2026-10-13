@@ -10,7 +10,7 @@ use genos_render::{DebugView, Renderer, ScreenRect, ViewMode};
 use genos_scene::{Camera, Light, LightingPreset, LightingSettings, Scene, Vec3, PITCH_LIMIT};
 
 use crate::image::{Flicker, Image, Region};
-use crate::knobs::{Host, Knob};
+use crate::knobs::{CheckpointPose, Host, Knob};
 use crate::reference::{self, RefSetup, Reference};
 use crate::value::{list, num, obj, text, vec3, Args};
 
@@ -290,6 +290,26 @@ impl Tools {
     /// Where captures without a path go.
     pub fn set_out_dir(&mut self, dir: PathBuf) {
         self.out_dir = dir;
+    }
+
+    /// The view the next frame shows, unless a capture job asks for another.
+    pub fn set_view(&mut self, mode: ViewMode) {
+        self.look.view = DebugView { mode, lamp: 0 };
+    }
+
+    /// The view `set_view` stored. A panel uses it to mark the current picture.
+    pub fn view_mode(&self) -> ViewMode {
+        self.look.view.mode
+    }
+
+    /// Forget light, object, and camera-path edits. A scene switch calls this so
+    /// the previous scene's edits do not land on the new one.
+    pub fn drop_scene_edits(&mut self) {
+        self.lights.clear();
+        self.added.clear();
+        self.solo = None;
+        self.objects.clear();
+        self.camera_path = None;
     }
 
     /// Run scene time on a fixed step from the start (a script or a test).
@@ -1127,11 +1147,66 @@ impl Tools {
                 self.quit = Some(args.f64("code")?.unwrap_or(0.0) as i32);
                 reply(obj(vec![("quit", Value::Bool(true))]))
             }
+            "list_scenes" => reply(list(
+                ctx.host
+                    .list_scenes()
+                    .into_iter()
+                    .map(text)
+                    .collect(),
+            )),
+            "load_scene" => {
+                let name = args.str("name")?.ok_or("load_scene needs name")?;
+                ctx.host.load_scene(&name)?;
+                self.drop_scene_edits();
+                ctx.renderer.reset_lighting_cache();
+                let checkpoint = match args.str("checkpoint")? {
+                    Some(checkpoint) => checkpoint,
+                    None => ctx
+                        .host
+                        .list_checkpoints()
+                        .into_iter()
+                        .next()
+                        .unwrap_or_default(),
+                };
+                if !checkpoint.is_empty() {
+                    let pose = ctx.host.jump_checkpoint(&checkpoint)?;
+                    Self::place_checkpoint(ctx.camera, pose);
+                }
+                reply(obj(vec![
+                    ("scene", text(name)),
+                    ("checkpoint", text(checkpoint)),
+                    ("camera", camera_value(ctx.camera)),
+                ]))
+            }
+            "list_checkpoints" => reply(list(
+                ctx.host
+                    .list_checkpoints()
+                    .into_iter()
+                    .map(text)
+                    .collect(),
+            )),
+            "jump_checkpoint" => {
+                let name = args.str("name")?.ok_or("jump_checkpoint needs name")?;
+                let pose = ctx.host.jump_checkpoint(&name)?;
+                Self::place_checkpoint(ctx.camera, pose);
+                reply(obj(vec![
+                    ("checkpoint", text(name)),
+                    ("camera", camera_value(ctx.camera)),
+                ]))
+            }
             _ => Err(format!("unknown command {name}")),
         }
     }
 
-    fn light_cmd(&mut self, args: &Args, ctx: &mut Ctx) -> Result<Value, String> {
+    fn place_checkpoint(camera: &mut Camera, pose: CheckpointPose) {
+        camera.set_pose(
+            Vec3::new(pose.position[0], pose.position[1], pose.position[2]),
+            pose.yaw,
+            pose.pitch,
+        );
+    }
+
+fn light_cmd(&mut self, args: &Args, ctx: &mut Ctx) -> Result<Value, String> {
         if args.bool("solo_off")? == Some(true) {
             self.solo = None;
         }
