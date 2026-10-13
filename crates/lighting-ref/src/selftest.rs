@@ -119,6 +119,7 @@ fn score(plant: &Plant, config: &Config) -> (crate::metrics::FrameMetrics, Judge
         reference_spp: SPP,
         reference_noise: 0.0,
         require: plant.require,
+        flip_gates: false,
     });
     (metrics, judgement)
 }

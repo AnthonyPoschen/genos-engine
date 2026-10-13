@@ -20,7 +20,7 @@ pub const BLIND_SPOTS: &[&str] = &[
     "Flicker is temporal variance on a still camera. A moving camera is not scored for flicker. Motion aliasing is not separated from shimmer.",
     "Convergence is only the error at +1, +2, +4, and +8 frames after an event. A defect that heals at frame 3 and returns at frame 16 is missed.",
     "Mean error can hide a speck smaller than the p99. p99 and the unfilled count are the counter, and they still miss a mark on one pixel of a large picture.",
-    "A one-sample reference has no noise estimate, so a small error cannot auto-pass. With two or more samples, raw per-pixel error at or under the stored reference noise is not a fail. FLIP p99 at or under the direct-only edge floor (0.90, from a matched picture whose p99 was 0.84) is not a fail: the reference primary and the renderer both sample the pixel centre and antialias is off, so that tail is silhouette pixels. The gates are the blurred relative error and the mean luminance ratio. Relative error divides by max(Yr, 0.25 times the picture mean, 0.02), so shadow noise does not dominate and a uniform brightness bias is unchanged. Blurred error at or under 0.102 passes. A luminance ratio of 0.83, 0.81, or 1.23 stays a fail. A ratio of 0.91 is inside the band and needs a person.",
+    "A one-sample reference has no noise estimate, so a small error cannot auto-pass. With two or more samples, raw per-pixel error at or under the stored reference noise is not a fail. FLIP gates only the direct-only picture. On a bounced picture FLIP is reported and does not change the verdict: at 4c6ca67e, box-step and hell failed only on FLIP while blur and luminance were under the line or inside its band, and FLIP's edge term treats a GI silhouette as a large error. The gates there are the blurred relative error and the mean luminance ratio. Direct-only keeps the edge floor (0.90, from a matched picture whose p99 was 0.84): the reference primary and the renderer both sample the pixel centre and antialias is off, so that tail is silhouette pixels, and a p99 above the floor still fails. Relative error divides by max(Yr, 0.25 times the picture mean, 0.02), so shadow noise does not dominate and a uniform brightness bias is unchanged. Blurred error at or under 0.102 passes. A luminance ratio of 0.83, 0.81, or 1.23 stays a fail. A ratio of 0.91 is inside the band and needs a person.",
     "Hell-100 is one 25 m section with 100 lamps, the stress panel's 100-light case, not the 4×4 building. The path trace and the live capture use that same scene.",
     "Full-effort accumulation is the engine at its maximum knobs. It is not independent of a lighting change. The path trace is the ground truth this check scores against.",
     "Lavapipe is a wiring check. Quality judgement is the owner GPU run.",
@@ -209,7 +209,7 @@ fn summary_md(report: &RunReport) -> String {
                 row.id.label(),
                 fmt_opt(row.value),
                 fmt_opt(row.baseline),
-                row.verdict.label(),
+                row_verdict(row),
                 row.reason.replace('|', "/")
             ));
         }
@@ -283,7 +283,7 @@ fn summary_html(report: &RunReport) -> String {
                 fmt_opt(row.value),
                 fmt_opt(row.baseline),
                 verdict_class(row.verdict),
-                escape(row.verdict.label()),
+                escape(&row_verdict(row)),
                 escape(&row.reason)
             ));
         }
@@ -385,6 +385,14 @@ fn checkpoint_json(cp: &CheckpointAudit) -> String {
     )
 }
 
+fn row_verdict(row: &crate::verdict::MetricRow) -> String {
+    if row.gates {
+        row.verdict.label().to_string()
+    } else {
+        format!("{} (not a gate)", row.verdict.label())
+    }
+}
+
 fn verdict_class(verdict: Verdict) -> &'static str {
     match verdict {
         Verdict::Pass => "pass",
@@ -455,6 +463,7 @@ mod tests {
             reference_spp: 8,
             reference_noise: 0.0,
             require: &[],
+            flip_gates: false,
         });
         assert_eq!(judgement.verdict, Verdict::Fail);
         let dir = std::env::temp_dir().join(format!("lref-report-{}", std::process::id()));

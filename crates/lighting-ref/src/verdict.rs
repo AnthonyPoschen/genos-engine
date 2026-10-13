@@ -4,8 +4,10 @@
 //! that improved and a metric that got worse, neither of them a clear fail,
 //! also needs a person. One sample per pixel does not prove a pass: that
 //! trace has no noise estimate. With a noise estimate, raw per-pixel error
-//! inside that noise is not a fail. The blurred error and the luminance
-//! ratio are the gates.
+//! inside that noise is not a fail. On a bounced picture the gates are the
+//! blurred error and the luminance ratio. FLIP is reported there and does
+//! not change the verdict. Direct-only still gates on FLIP: that picture is
+//! the matched footprint.
 
 use std::collections::BTreeMap;
 
@@ -132,6 +134,9 @@ pub struct MetricRow {
     pub baseline: Option<f64>,
     pub verdict: Verdict,
     pub reason: String,
+    /// False for FLIP on a bounced picture: the number is reported, and the
+    /// blurred error and the luminance ratio decide.
+    pub gates: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -172,6 +177,9 @@ pub struct Judge<'a> {
     /// Metrics that must have been measured. A still camera requires flicker.
     /// An event requires the four convergence samples.
     pub require: &'a [MetricId],
+    /// Direct-only gates on FLIP. A bounced picture reports FLIP and decides
+    /// on the blurred error and the luminance ratio.
+    pub flip_gates: bool,
 }
 
 pub fn judge(input: Judge<'_>) -> Judgement {
@@ -186,6 +194,7 @@ pub fn judge(input: Judge<'_>) -> Judgement {
     }
     let mut verdict = rows
         .iter()
+        .filter(|row| row.gates)
         .fold(Verdict::Pass, |acc, row| acc.worse(row.verdict));
     if let Some(text) = disagreement(&rows, input.config.disagree_delta) {
         if verdict == Verdict::Pass {
@@ -208,16 +217,16 @@ fn judge_one(id: MetricId, input: &Judge<'_>) -> MetricRow {
     let baseline = input.baseline.and_then(|b| b.get(id));
     let Some(value) = value else {
         let required = input.require.contains(&id);
-        return MetricRow {
+        return finish(
             id,
-            value: None,
+            None,
             baseline,
-            verdict: if required {
+            if required {
                 Verdict::NeedsHuman
             } else {
                 Verdict::Pass
             },
-            reason: if required {
+            if required {
                 format!("{} was required and was not measured", id.label())
             } else {
                 format!(
@@ -225,7 +234,8 @@ fn judge_one(id: MetricId, input: &Judge<'_>) -> MetricRow {
                     id.label()
                 )
             },
-        };
+            input,
+        );
     };
     let fail_at = input.config.fail_of(id.key());
     let band = input.config.human_band;
@@ -297,12 +307,34 @@ fn judge_one(id: MetricId, input: &Judge<'_>) -> MetricRow {
         }
     }
 
+    finish(id, Some(value), baseline, verdict, reason, input)
+}
+
+fn flip_metric(id: MetricId) -> bool {
+    matches!(id, MetricId::FlipMean | MetricId::FlipP99)
+}
+
+fn finish(
+    id: MetricId,
+    value: Option<f64>,
+    baseline: Option<f64>,
+    verdict: Verdict,
+    reason: String,
+    input: &Judge<'_>,
+) -> MetricRow {
+    let gates = input.flip_gates || !flip_metric(id);
+    let reason = if gates {
+        reason
+    } else {
+        format!("{reason}; reported, not a gate on a bounced picture")
+    };
     MetricRow {
         id,
-        value: Some(value),
+        value,
         baseline,
         verdict,
         reason,
+        gates,
     }
 }
 
@@ -361,6 +393,9 @@ fn disagreement(rows: &[MetricRow], delta_min: f64) -> Option<String> {
     let mut improved: Vec<&MetricRow> = Vec::new();
     let mut regressed: Vec<&MetricRow> = Vec::new();
     for row in rows {
+        if !row.gates {
+            continue;
+        }
         let (Some(value), Some(before)) = (row.value, row.baseline) else {
             continue;
         };
@@ -430,6 +465,24 @@ mod tests {
             reference_spp: spp,
             reference_noise: noise,
             require: &[],
+            flip_gates: false,
+        })
+    }
+
+    fn judged_direct(
+        metrics: &FrameMetrics,
+        baseline: Option<&Baseline>,
+        spp: u32,
+        noise: f64,
+    ) -> Judgement {
+        judge(Judge {
+            metrics,
+            config: &Config::builtin(),
+            baseline,
+            reference_spp: spp,
+            reference_noise: noise,
+            require: &[],
+            flip_gates: true,
         })
     }
 
@@ -480,11 +533,11 @@ mod tests {
     #[test]
     fn disagreement_without_a_hard_fail_needs_a_person() {
         let mut metrics = quiet();
-        metrics.mean_rel = Some(0.03);
-        metrics.flip_mean = Some(0.12);
+        metrics.blur_rel = Some(0.03);
+        metrics.luma_delta = Some(0.04);
         let mut baseline = Baseline::default();
-        baseline.values.insert("mean_rel".into(), 0.05);
-        baseline.values.insert("flip_mean".into(), 0.10);
+        baseline.values.insert("blur_rel".into(), 0.05);
+        baseline.values.insert("luma_delta".into(), 0.02);
         let result = judged(&metrics, Some(&baseline), 16, 0.0);
         assert_eq!(result.verdict, Verdict::NeedsHuman, "{:?}", result.reasons);
         assert!(result.reasons.iter().any(|r| r.contains("disagree")));
@@ -500,6 +553,7 @@ mod tests {
             reference_spp: 16,
             reference_noise: 0.0,
             require: &[MetricId::Converge1],
+            flip_gates: false,
         });
         assert_eq!(result.verdict, Verdict::NeedsHuman);
         assert!(result.reasons.iter().any(|r| r.contains("was required")));
@@ -532,7 +586,7 @@ mod tests {
         let mut metrics = with_scores(0.04, 0.003, 1.016);
         metrics.flip_mean = Some(0.04);
         metrics.flip_p99 = Some(0.84);
-        let result = judged(&metrics, None, 64, 0.02);
+        let result = judged_direct(&metrics, None, 64, 0.02);
         assert_eq!(result.verdict, Verdict::Pass, "{:?}", result.reasons);
         let row = result
             .rows
@@ -543,8 +597,80 @@ mod tests {
         assert!(row.reason.contains("edge floor"), "{}", row.reason);
 
         metrics.flip_p99 = Some(0.99);
-        let broken = judged(&metrics, None, 64, 0.02);
+        let broken = judged_direct(&metrics, None, 64, 0.02);
         assert_eq!(broken.verdict, Verdict::Fail, "{:?}", broken.reasons);
+
+        // The same tail on a bounced picture is reported and does not fail it.
+        let bounced = judged(&metrics, None, 64, 0.02);
+        assert_eq!(bounced.verdict, Verdict::Pass, "{:?}", bounced.reasons);
+        let row = bounced
+            .rows
+            .iter()
+            .find(|row| row.id == MetricId::FlipP99)
+            .unwrap();
+        assert!(!row.gates);
+        assert_eq!(row.verdict, Verdict::Fail);
+        assert!(row.reason.contains("not a gate"), "{}", row.reason);
+    }
+
+    #[test]
+    fn flip_is_advisory_on_bounced_pictures_and_gates_direct_only() {
+        // 4c6ca67e on zanven-pc. Box-step failed only on FLIP mean. Hell failed
+        // only on FLIP. Hall, hall-moving, and corner fail on blur and ratio.
+        for (name, blur, ratio, flip_mean) in [
+            ("box-step-before", 0.075, 0.98, 0.445),
+            ("box-step", 0.078, 0.99, 0.462),
+        ] {
+            let mut metrics = with_scores(0.20, blur, ratio);
+            metrics.flip_mean = Some(flip_mean);
+            metrics.flip_p99 = Some(0.84);
+            let result = judged(&metrics, None, 64, 0.10);
+            assert_eq!(result.verdict, Verdict::Pass, "{name} {:?}", result.reasons);
+            let row = result
+                .rows
+                .iter()
+                .find(|row| row.id == MetricId::FlipMean)
+                .unwrap();
+            assert!(!row.gates);
+            assert_eq!(row.verdict, Verdict::Fail);
+        }
+
+        let mut hell = with_scores(0.20, 0.123, 0.910);
+        hell.flip_mean = Some(0.539);
+        hell.flip_p99 = Some(0.913);
+        let hell_j = judged(&hell, None, 64, 0.16);
+        assert_eq!(hell_j.verdict, Verdict::NeedsHuman, "{:?}", hell_j.reasons);
+        assert!(hell_j.reasons.iter().any(|r| r.contains("not a gate")));
+
+        for (name, blur, ratio) in [
+            ("hall", 0.303, 0.832),
+            ("hall-moving", 0.205, 0.811),
+            ("corner", 0.204, 1.195),
+        ] {
+            let mut metrics = with_scores(0.20, blur, ratio);
+            metrics.flip_mean = Some(0.08);
+            metrics.flip_p99 = Some(0.84);
+            let result = judged(&metrics, None, 64, 0.16);
+            assert_eq!(result.verdict, Verdict::Fail, "{name} {:?}", result.reasons);
+            assert!(
+                result
+                    .reasons
+                    .iter()
+                    .any(|r| r.contains("blurred relative") || r.contains("luminance ratio")),
+                "{name} {:?}",
+                result.reasons
+            );
+        }
+
+        let mut direct = with_scores(0.04, 0.003, 1.016);
+        direct.flip_mean = Some(0.462);
+        direct.flip_p99 = Some(0.84);
+        let gated = judged_direct(&direct, None, 64, 0.02);
+        assert_eq!(gated.verdict, Verdict::Fail, "{:?}", gated.reasons);
+        assert!(gated
+            .rows
+            .iter()
+            .any(|row| row.id == MetricId::FlipMean && row.gates));
     }
 
     #[test]

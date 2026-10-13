@@ -153,6 +153,7 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
             reference_spp: trace.spp,
             reference_noise: f64::from(trace.noise),
             require,
+            flip_gates: item.scene == "direct-only",
         });
         if shot.review && judgement.verdict == Verdict::Pass {
             judgement.verdict = Verdict::NeedsHuman;
