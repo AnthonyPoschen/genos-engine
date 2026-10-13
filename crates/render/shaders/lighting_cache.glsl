@@ -2452,7 +2452,12 @@ uint lighting_cache_batch_slot(uint j) {
 // variance high). The other modes take whole sets.
 const uint LIGHTING_SC_SET_RAYS = 64u;
 const uint LIGHTING_SC_QUARTERS = LIGHTING_SC_SET_RAYS / LIGHTING_CACHE_RAYS;
+// Lavapipe faults if this scratch is visited from a rolled constant-bound loop
+// (a null descriptor). Four explicit passes, and no entry at or past the batch.
 void lighting_wrc_plain_add(uint ent, vec3 weighted) {
+    if (ent >= LIGHTING_CACHE_BATCH) {
+        return;
+    }
     uint b = LIGHTING_WRC_PLAIN_AT + 4u * ent;
     vec3 c = clamp(weighted, vec3(0.0), vec3(2048.0)) * LIGHTING_WRC_PLAIN_SCALE + vec3(0.5);
     atomicAdd(ckeys.key[b], uint(c.r));
@@ -2461,11 +2466,30 @@ void lighting_wrc_plain_add(uint ent, vec3 weighted) {
     atomicAdd(ckeys.key[b + 3u], 1u);
 }
 void lighting_wrc_plain_clear(uint j, uint run) {
-    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_SC_QUARTERS; i++) {
-        if (i >= run) {
-            break;
-        }
-        uint b = LIGHTING_WRC_PLAIN_AT + 4u * (j + i);
+    if (j >= LIGHTING_CACHE_BATCH) {
+        return;
+    }
+    uint b = LIGHTING_WRC_PLAIN_AT + 4u * j;
+    ckeys.key[b] = 0u;
+    ckeys.key[b + 1u] = 0u;
+    ckeys.key[b + 2u] = 0u;
+    ckeys.key[b + 3u] = 0u;
+    if (run > 1u && j + 1u < LIGHTING_CACHE_BATCH) {
+        b = LIGHTING_WRC_PLAIN_AT + 4u * (j + 1u);
+        ckeys.key[b] = 0u;
+        ckeys.key[b + 1u] = 0u;
+        ckeys.key[b + 2u] = 0u;
+        ckeys.key[b + 3u] = 0u;
+    }
+    if (run > 2u && j + 2u < LIGHTING_CACHE_BATCH) {
+        b = LIGHTING_WRC_PLAIN_AT + 4u * (j + 2u);
+        ckeys.key[b] = 0u;
+        ckeys.key[b + 1u] = 0u;
+        ckeys.key[b + 2u] = 0u;
+        ckeys.key[b + 3u] = 0u;
+    }
+    if (run > 3u && j + 3u < LIGHTING_CACHE_BATCH) {
+        b = LIGHTING_WRC_PLAIN_AT + 4u * (j + 3u);
         ckeys.key[b] = 0u;
         ckeys.key[b + 1u] = 0u;
         ckeys.key[b + 2u] = 0u;
@@ -2477,11 +2501,23 @@ void lighting_wrc_plain_clear(uint j, uint run) {
 bool lighting_wrc_plain_sample(uint j, uint run, float rays, out vec3 e) {
     vec3 sum = vec3(0.0);
     uint n = 0u;
-    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_SC_QUARTERS; i++) {
-        if (i >= run) {
-            break;
-        }
-        uint b = LIGHTING_WRC_PLAIN_AT + 4u * (j + i);
+    if (j < LIGHTING_CACHE_BATCH) {
+        uint b = LIGHTING_WRC_PLAIN_AT + 4u * j;
+        sum += vec3(float(ckeys.key[b]), float(ckeys.key[b + 1u]), float(ckeys.key[b + 2u]));
+        n += ckeys.key[b + 3u];
+    }
+    if (run > 1u && j + 1u < LIGHTING_CACHE_BATCH) {
+        uint b = LIGHTING_WRC_PLAIN_AT + 4u * (j + 1u);
+        sum += vec3(float(ckeys.key[b]), float(ckeys.key[b + 1u]), float(ckeys.key[b + 2u]));
+        n += ckeys.key[b + 3u];
+    }
+    if (run > 2u && j + 2u < LIGHTING_CACHE_BATCH) {
+        uint b = LIGHTING_WRC_PLAIN_AT + 4u * (j + 2u);
+        sum += vec3(float(ckeys.key[b]), float(ckeys.key[b + 1u]), float(ckeys.key[b + 2u]));
+        n += ckeys.key[b + 3u];
+    }
+    if (run > 3u && j + 3u < LIGHTING_CACHE_BATCH) {
+        uint b = LIGHTING_WRC_PLAIN_AT + 4u * (j + 3u);
         sum += vec3(float(ckeys.key[b]), float(ckeys.key[b + 1u]), float(ckeys.key[b + 2u]));
         n += ckeys.key[b + 3u];
     }
