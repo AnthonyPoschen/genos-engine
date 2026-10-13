@@ -316,11 +316,12 @@ impl LightingSettings {
                 s.probes.refresh_frames = 2;
                 s.world_cache.enabled = false;
                 s.denoiser.iterations = 1;
-                // The filter does not run (no surface cache). The cheap mode is
-                // recorded so turning the cache on does not jump to full cost.
-                s.denoiser.resolution = DenoiseResolution::Half;
+                // The filter does not run (no surface cache). Half-res and tiles
+                // lost the 4070 A/B (S79), so turning the cache on stays on the
+                // full wavelet and drops settled iterations instead.
+                s.denoiser.resolution = DenoiseResolution::Full;
                 s.denoiser.adaptive = true;
-                s.denoiser.tiles = true;
+                s.denoiser.tiles = false;
                 s.prefill = false;
                 s.gi.refresh_frames = 2;
                 s.gi.budget_shift = 2;
@@ -332,9 +333,11 @@ impl LightingSettings {
                 s.bounce.count = 2;
                 s.probes.rays = 32;
                 s.denoiser.iterations = 3;
-                s.denoiser.resolution = DenoiseResolution::Half;
+                // Half-res and tiles were slower than this full wavelet on the
+                // 4070 (S79). Adaptive is the cut that got cheaper.
+                s.denoiser.resolution = DenoiseResolution::Full;
                 s.denoiser.adaptive = true;
-                s.denoiser.tiles = true;
+                s.denoiser.tiles = false;
                 s.gi.budget_shift = 1;
                 s.ambient.mode = AmbientMode::Day;
             }

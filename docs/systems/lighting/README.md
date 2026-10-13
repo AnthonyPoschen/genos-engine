@@ -162,7 +162,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78Y](experiments/S78Y-quiet-filter.md) | 2026-10-12 | Quiet probe filter | pushed (rough; idle A/B 6am) | S78Y |
 | [S78X](experiments/S78X-atrous-work-lists.md) | 2026-10-13 | A-trous levels run dirty work lists | pushed (rough; idle A/B) | S78X |
 | [S78X2](experiments/S78X2-atrous-dense-fallback.md) | 2026-10-12 | Dense a-trous when the dirty fraction is high | pushed | S78X2 |
-| [S79](experiments/S79-half-res-atrous.md) | 2026-10-13 | Half-resolution a-trous of bounce light, joint-bilateral upsample | 4070: high full 11.7 ms vs gi-v2 7.5 (shader, not preset); plain pipeline | S79 |
+| [S79](experiments/S79-half-res-atrous.md) | 2026-10-13 | Half-resolution a-trous of bounce light, joint-bilateral upsample | 4070 fail: half and tiles slower, adaptive was dark; presets stay full, tiles off | S79 |
 | [S78Z](experiments/S78Z-verify-ring-wakes.md) | 2026-10-13 | Probe verification + impact-tested ring wakes | not pushed (no fix; postmortem) | g78/S78Z-verify-ring-wakes.patch |
 | [S78T2](experiments/S78T2-texel-verify.md) | 2026-10-13 | Texel verification: rotating A-SVGF checks + ring wakes | not pushed (no healing; postmortem) | g78/S78T2-texel-verify.patch |
 | [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
@@ -550,8 +550,8 @@ normal weights, then take the five B3 iterations at double the cell step. Odd
 texels are filled in the push by a joint bilateral upsample (bilinear times
 depth and normal, no luminance term) and written to the display field in that
 same dispatch. No screen-sized image is allocated, and no previous frame is
-sampled. WRC cells stay on the full filter. High stays `denoise_res=full`.
-Medium and low record `half`. Papers and deviations are in
+sampled. WRC cells stay on the full filter. Every preset stays
+`denoise_res=full`. The half knob remains for A/B. Papers and deviations are in
 [S79](experiments/S79-half-res-atrous.md).
 
 `denoise_adaptive` drops later wavelet iterations where the surface-cache set
@@ -564,11 +564,9 @@ screen history, so no frame is kept. A threshold of 0.1 forces one iteration.
 
 `denoise_tiles` runs wavelet levels 1–3 from a shared-memory footprint and
 levels 4–5 with the scalar kernel (the step-8 and step-16 footprints do not
-fit in 16 KB). A workgroup gathers at most eight 8×8 origins. The B3 weights
-are the scalar kernel's `w_z` and `w_n` on those gathered slots. Levels 1–5
-replace the work lists; dirty stamps are still honored. Stages 0 and 6 stay
-on the scalar shader. High leaves tiles off, and that pipeline does not
-reserve the tile's shared memory. No frame is stored.
+fit in 16 KB). No preset turns it on. On the 4070 it was slower than the scalar
+kernel: it disables the work lists, and the lavapipe-safe form always runs
+eight barrier pairs. The knob remains for A/B. No frame is stored.
 
 The owner timed it on an RTX 4070 at 1920×1080. `--preset high --denoise-res full`
 is the same denoiser as gi-v2's default (full, five iterations, adaptive off,

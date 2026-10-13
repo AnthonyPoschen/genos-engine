@@ -74,6 +74,16 @@ fn high_is_the_tuned_path() {
     );
     assert!(!high.denoiser.adaptive);
     assert!(!high.denoiser.tiles);
+    for preset in [LightingPreset::Medium, LightingPreset::Low] {
+        let cheap = LightingSettings::preset(preset);
+        assert_eq!(
+            cheap.denoiser.resolution,
+            genos_scene::DenoiseResolution::Full,
+            "{preset:?} stays on the full wavelet"
+        );
+        assert!(cheap.denoiser.adaptive, "{preset:?} drops settled iterations");
+        assert!(!cheap.denoiser.tiles, "{preset:?} does not enable tiles");
+    }
     assert!((high.denoiser.variance_threshold - 0.02).abs() < 1.0e-6);
     assert_eq!(high.world_mode(), 3);
     assert!(high.allocates_cache());

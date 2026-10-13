@@ -895,8 +895,9 @@ fn tile_settings(res: &str, adaptive: bool) -> LightingSettings {
 
 /// Shared-memory tiles against the scalar full-resolution picture.
 ///
-/// Tiles are off on high. This turns them on for the full wavelet, the half
-/// lattice, and half plus adaptive (the medium preset's denoiser).
+/// Tiles are off on every preset. This turns them on for the full wavelet, the
+/// half lattice, and half plus adaptive, which is the combination the 4070
+/// timed and which no preset selects.
 #[test]
 fn tiled_atrous_matches_the_full_reference() {
     let (_gpu, mut window, mut renderer) = open();

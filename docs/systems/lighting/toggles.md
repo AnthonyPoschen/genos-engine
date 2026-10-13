@@ -99,16 +99,16 @@ cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset 
 cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res half
 ```
 
-`denoise_res=half` runs the wavelet on bounce light at the even-even surface-cache lattice and upsamples with depth and normal. `full` is the five-iteration filter. Direct light is not an input. The mode does not allocate or reuse a screen-sized image.
+`denoise_res=half` runs the wavelet on bounce light at the even-even surface-cache lattice and upsamples with depth and normal. `full` is the five-iteration filter. Direct light is not an input. The mode does not allocate or reuse a screen-sized image. On the 4070, half was slower than full (moving 17.8 ms vs 11.7, still 9.5 vs 3.0) and no preset selects it. The dispatch count does not change; the parity test calls `lighting_sc_true_cell` on every slot.
 
-Adaptive passes drop later wavelet iterations on texels whose sample count is high or whose relative variance `sqrt(var) / mean` is under `denoise_variance` (default 0.02). High leaves adaptive off.
+Adaptive passes drop later wavelet iterations on texels whose sample count is high or whose relative variance `sqrt(var) / mean` is under `denoise_variance` (default 0.02). The last stage publishes the level that ran, so a clean skip does not leave the push on an empty buffer. High leaves adaptive off. Medium turns it on. A threshold of 0.1 forces one iteration.
 
 ```
 cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-adaptive on --denoise-variance 0.02
 cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res half --denoise-adaptive on
 ```
 
-`denoise_tiles=on` gathers each 8×8 wavelet footprint once into shared memory. Steps of 8 and 16 cells stay on the scalar kernel. High leaves tiles off. The tile pipeline is not the scalar shader, so the full-quality path does not reserve that shared memory.
+`denoise_tiles=on` gathers each 8×8 wavelet footprint once into shared memory. Steps of 8 and 16 cells stay on the scalar kernel. No preset turns tiles on. On the 4070 they were slower (moving 18.3 ms vs 11.6 with tiles off, still 8.9 vs full 3.0): levels 1–5 leave the work lists, and the lavapipe-safe kernel always runs eight barrier pairs. The tile pipeline is not the scalar shader, so the full-quality path does not reserve that shared memory.
 
 ```
 cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-tiles on
