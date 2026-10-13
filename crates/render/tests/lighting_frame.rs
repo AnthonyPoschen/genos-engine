@@ -960,7 +960,11 @@ fn banner_scores(screen: bool) -> (f64, f64) {
     }
     let edge = frames.iter().map(|f| cell_edge_excess(f, 320, 6)).sum::<f64>() / frames.len() as f64;
     let luma = frames.iter().map(|f| mean_luma(f)).sum::<f64>() / frames.len() as f64;
-    eprintln!("banner screen={screen} edge {edge:.3} luma {luma:.2}");
+    let stats = renderer.lighting_atrous_stats();
+    eprintln!(
+        "banner screen={screen} edge {edge:.3} luma {luma:.2} fine {} coarse {} filtered {} ran {}",
+        stats.screen_pixels, stats.coarse_pixels, stats.filtered, stats.ran
+    );
     (edge, cloth_flicker(&frames, &shots))
 }
 

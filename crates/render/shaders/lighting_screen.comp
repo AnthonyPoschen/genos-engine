@@ -15,8 +15,9 @@
 // Deviations, flagged:
 // - Taps are screen pixels, not hash cells. SVGF §4 walks a pixel image; the
 //   previous filter walked cache slots.
-// - The step is the projected 12.5 cm cell, times 2^i, clamped to 48 px.
-//   It is not a fixed 2^i pixel step and not an unclamped world step.
+// - The step is half the projected 12.5 cm cell, times 2^i, clamped to 48 px.
+//   A full-cell step samples the same texels for every pixel of a cell, so
+//   the grid survives a symmetric kernel. It is not a fixed 2^i pixel step.
 // - 25 cm cells are not filtered. Scatter blends them in only when the
 //   wavelet's certainty is below 1 (Gortler pull, min(1, 4 wm/wall)).
 // - Variance is this frame's 3x3 spatial moment, at one pixel and at one
@@ -111,7 +112,11 @@ int screen_cell_px(float dist) {
 }
 
 int screen_step_px(float dist, uint iter) {
-    float px = float(screen_cell_px(dist)) * exp2(float(iter));
+    // Half a cell, then doubling. A step equal to the cell lands every pixel
+    // of that cell on the same texels, and a symmetric kernel keeps a linear
+    // ramp as a hard grid. The half-cell tap crosses the edge.
+    int cell = max(screen_cell_px(dist) / 2, 1);
+    float px = float(cell) * exp2(float(iter));
     return int(clamp(round(px), 1.0, 48.0));
 }
 
