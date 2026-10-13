@@ -1,7 +1,7 @@
 //! Lighting settings: presets, the text form, and a scene file that overrides them.
 
 use genos_scene::{
-    load_str, AmbientMode, EngineSettings, LightingPreset, LightingSettings,
+    load_str, AmbientMode, EngineSettings, LampPickMode, LightingPreset, LightingSettings,
     LIGHTING_BOUNCES_UNLIMITED,
 };
 
@@ -31,6 +31,70 @@ fn the_engine_settings_trait_reads_and_writes_lighting() {
         <LightingSettings as EngineSettings>::parse(&EngineSettings::to_text(&edited)).unwrap();
     assert_eq!(round.probes.rays, 32);
     assert_eq!(round.preset_label(), "custom");
+}
+
+#[test]
+fn lamp_pick_round_trips_and_rejects_a_bad_mode() {
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    assert_eq!(settings.lamp_pick.mode, LampPickMode::Hits);
+    assert_eq!(settings.direct.max_lights, 0);
+    settings.set_key("lamp_pick", "hits").unwrap();
+    settings.set_key("lamp_pick_candidates", "8").unwrap();
+    settings.set_key("lamp_pick_rays", "1").unwrap();
+    settings.set_key("lamp_pick_radius", "0").unwrap();
+    settings.set_key("lamp_pick_history", "20").unwrap();
+    settings.set_key("lamp_pick_unbiased", "1").unwrap();
+    settings.set_key("direct_lights", "3").unwrap();
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert_eq!(parsed, settings);
+    assert_eq!(parsed.direct.max_lights, 3);
+    assert_eq!(parsed.lamp_pick.rays, 1);
+    assert!(settings.set_key("lamp_pick", "restir").is_err());
+    settings.set_key("lamp_pick_samples", "2").unwrap();
+    assert_eq!(settings.lamp_pick.rays, 2);
+    assert_eq!(settings.direct.max_lights, 3);
+    settings.set_key("lamp_pick_reuse", "on").unwrap();
+    assert_eq!(settings.lamp_pick.mode, LampPickMode::Reuse);
+    settings.set_key("lamp_pick_reuse", "off").unwrap();
+    assert_eq!(settings.lamp_pick.mode, LampPickMode::Both);
+    assert_eq!(settings.lamp_pick.rays, 2);
+    settings
+        .set_key("lamp_pick", "reuse (experimental)")
+        .unwrap();
+    assert_eq!(settings.lamp_pick.mode, LampPickMode::Reuse);
+}
+
+#[test]
+fn gi_presets_sample_hits_and_reuse_is_not_a_preset() {
+    for preset in [
+        LightingPreset::High,
+        LightingPreset::Gi1Bounce,
+        LightingPreset::Low,
+        LightingPreset::Medium,
+    ] {
+        assert_eq!(
+            LightingSettings::preset(preset).lamp_pick.mode,
+            LampPickMode::Hits,
+            "{}",
+            preset.name()
+        );
+    }
+    for preset in [LightingPreset::Potato, LightingPreset::DayCycle] {
+        assert_eq!(
+            LightingSettings::preset(preset).lamp_pick.mode,
+            LampPickMode::Off,
+            "{}",
+            preset.name()
+        );
+    }
+    for preset in LightingPreset::all() {
+        assert_ne!(
+            LightingSettings::preset(*preset).lamp_pick.mode,
+            LampPickMode::Reuse,
+            "{}",
+            preset.name()
+        );
+    }
 }
 
 #[test]
