@@ -21,16 +21,18 @@ pub struct TraceProfile {
 }
 
 impl TraceProfile {
-    /// Owner GPU machine. The path trace is CPU work with a time cap.
+    /// Owner GPU machine. Batches of 16 samples until the noise estimate is
+    /// 0.05, 256 samples, or 120 seconds. The achieved noise is stored per
+    /// checkpoint and the score uses it. The path trace is CPU work.
     pub fn owner() -> Self {
         Self {
             name: "owner",
             width: 320,
             height: 180,
-            spp: 8,
-            max_spp: 64,
+            spp: 16,
+            max_spp: 256,
             max_bounces: 8,
-            seconds: 20.0,
+            seconds: 120.0,
             noise_target: 0.05,
         }
     }

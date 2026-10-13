@@ -3,7 +3,9 @@
 //! A value inside the band around a threshold does not auto-pass. A metric
 //! that improved and a metric that got worse, neither of them a clear fail,
 //! also needs a person. One sample per pixel does not prove a pass: that
-//! trace has no noise estimate.
+//! trace has no noise estimate. With a noise estimate, raw per-pixel error
+//! inside that noise is not a fail. The blurred error and the luminance
+//! ratio are the gates.
 
 use std::collections::BTreeMap;
 
@@ -23,6 +25,8 @@ pub enum MetricId {
     Converge4,
     Converge8,
     UnfilledShare,
+    BlurRel,
+    LumaDelta,
 }
 
 impl MetricId {
@@ -39,6 +43,8 @@ impl MetricId {
             Self::Converge4,
             Self::Converge8,
             Self::UnfilledShare,
+            Self::BlurRel,
+            Self::LumaDelta,
         ]
     }
 
@@ -55,6 +61,8 @@ impl MetricId {
             Self::Converge4 => "converge_4",
             Self::Converge8 => "converge_8",
             Self::UnfilledShare => "unfilled_share",
+            Self::BlurRel => "blur_rel",
+            Self::LumaDelta => "luma_delta",
         }
     }
 
@@ -71,16 +79,24 @@ impl MetricId {
             Self::Converge4 => "error 4 frames after the event",
             Self::Converge8 => "error 8 frames after the event",
             Self::UnfilledShare => "unfilled-pixel share",
+            Self::BlurRel => "blurred relative luminance",
+            Self::LumaDelta => "mean luminance ratio error",
         }
     }
 
-    /// These are compared with the reference noise. Counts and temporal
-    /// metrics are not.
+    /// Raw per-pixel scores. A value inside the reference noise is not a fail.
+    /// The blurred error and the luminance ratio are not in this set: they are
+    /// the gates, and reference noise does not waive them.
     pub fn uses_noise(self) -> bool {
         matches!(
             self,
             Self::MeanRel | Self::P99Rel | Self::MeanRelDark | Self::FlipMean | Self::FlipP99
         )
+    }
+
+    /// p99 tails sit wider than the mean noise.
+    pub fn noise_is_a_tail(self) -> bool {
+        matches!(self, Self::P99Rel | Self::FlipP99)
     }
 }
 
@@ -218,6 +234,7 @@ fn judge_one(id: MetricId, input: &Judge<'_>) -> MetricRow {
     let mut verdict = band_verdict(value, lo, hi);
     let mut reason = band_reason(id, value, fail_at, lo, hi, verdict);
 
+    let mut waived = false;
     if id.uses_noise() {
         if input.reference_spp < 2 {
             if verdict != Verdict::Fail {
@@ -230,43 +247,43 @@ fn judge_one(id: MetricId, input: &Judge<'_>) -> MetricRow {
                 );
             }
         } else {
-            let floor = input.reference_noise.max(0.0) * input.config.noise_multiple;
-            if floor > 0.0 && value <= floor && verdict != Verdict::Fail {
-                verdict = Verdict::NeedsHuman;
+            let ceiling = noise_ceiling(id, input);
+            if ceiling > 0.0 && value <= ceiling {
+                waived = true;
+                verdict = Verdict::Pass;
                 reason = format!(
-                    "reference noise is {:.4} ({:.1}× is {:.4}) and {} is {:.4}, inside that noise; not a pass",
-                    input.reference_noise,
-                    input.config.noise_multiple,
-                    floor,
-                    id.label(),
-                    value
+                    "{label} is {value:.4}, within reference noise {noise:.4} (ceiling {ceiling:.4}); blurred error and the luminance ratio are the gate",
+                    label = id.label(),
+                    noise = input.reference_noise,
                 );
             }
         }
     }
 
     if let Some(before) = baseline {
-        let delta = value - before;
-        let limit = input.config.regress_of(id.key());
-        let rlo = limit * (1.0 - band);
-        let rhi = limit * (1.0 + band);
-        let regress = if delta > rhi {
-            Verdict::Fail
-        } else if delta > rlo {
-            Verdict::NeedsHuman
-        } else {
-            Verdict::Pass
-        };
-        if regress != Verdict::Pass {
-            let regress_reason = format!(
+        if !waived {
+            let delta = value - before;
+            let limit = input.config.regress_of(id.key());
+            let rlo = limit * (1.0 - band);
+            let rhi = limit * (1.0 + band);
+            let regress = if delta > rhi {
+                Verdict::Fail
+            } else if delta > rlo {
+                Verdict::NeedsHuman
+            } else {
+                Verdict::Pass
+            };
+            if regress != Verdict::Pass {
+                let regress_reason = format!(
                 "{label} moved by {delta:+.4} from the baseline {before:.4} (regression line {limit:.4}, band {rlo:.4}..{rhi:.4})",
                 label = id.label(),
             );
-            verdict = verdict.worse(regress);
-            if reason.is_empty() {
-                reason = regress_reason;
-            } else if regress == Verdict::Fail || verdict == regress {
-                reason = format!("{reason} {regress_reason}");
+                verdict = verdict.worse(regress);
+                if reason.is_empty() {
+                    reason = regress_reason;
+                } else if regress == Verdict::Fail || verdict == regress {
+                    reason = format!("{reason} {regress_reason}");
+                }
             }
         }
     }
@@ -314,6 +331,19 @@ fn band_reason(
     }
 }
 
+fn noise_ceiling(id: MetricId, input: &Judge<'_>) -> f64 {
+    let noise = input.reference_noise.max(0.0);
+    if noise == 0.0 || !id.uses_noise() {
+        return 0.0;
+    }
+    let ceiling = noise * input.config.noise_multiple;
+    if id.noise_is_a_tail() {
+        ceiling * input.config.noise_tail
+    } else {
+        ceiling
+    }
+}
+
 fn disagreement(rows: &[MetricRow], delta_min: f64) -> Option<String> {
     let mut improved: Vec<&MetricRow> = Vec::new();
     let mut regressed: Vec<&MetricRow> = Vec::new();
@@ -351,6 +381,8 @@ pub fn metric_value(metrics: &FrameMetrics, id: MetricId) -> Option<f64> {
         MetricId::Converge4 => metrics.converge_4,
         MetricId::Converge8 => metrics.converge_8,
         MetricId::UnfilledShare => metrics.unfilled_share(),
+        MetricId::BlurRel => metrics.blur_rel,
+        MetricId::LumaDelta => metrics.luma_delta,
     }
 }
 
@@ -458,5 +490,49 @@ mod tests {
         });
         assert_eq!(result.verdict, Verdict::NeedsHuman);
         assert!(result.reasons.iter().any(|r| r.contains("was required")));
+    }
+
+    fn with_scores(raw: f64, blur: f64, ratio: f64) -> FrameMetrics {
+        let mut metrics = quiet();
+        metrics.mean_rel = Some(raw);
+        metrics.p99_rel = Some(raw * 2.5);
+        metrics.mean_rel_dark = Some(raw);
+        metrics.flip_mean = Some(0.40);
+        metrics.flip_p99 = Some(0.70);
+        metrics.blur_rel = Some(blur);
+        metrics.luma_ratio = Some(ratio);
+        metrics.luma_delta = Some((ratio - 1.0).abs());
+        metrics
+    }
+
+    #[test]
+    fn reference_noise_does_not_fail_a_picture_that_matches_after_the_blur() {
+        // Owner trial, room-a: ratio 1.03, 9 px blur 0.04, raw 0.35, noise 0.31.
+        let metrics = with_scores(0.35, 0.04, 1.03);
+        let result = judged(&metrics, None, 64, 0.31);
+        assert_eq!(result.verdict, Verdict::Pass, "{:?}", result.reasons);
+    }
+
+    #[test]
+    fn a_luminance_bias_stays_a_fail_when_the_raw_error_is_only_noise() {
+        for (name, ratio) in [("hall", 0.66f64), ("hall-moving", 0.80), ("corner", 1.18)] {
+            let delta = (ratio - 1.0).abs();
+            let metrics = with_scores(0.35, delta, ratio);
+            let result = judged(&metrics, None, 64, 0.31);
+            assert_eq!(
+                result.verdict,
+                Verdict::Fail,
+                "{name}: {:?}",
+                result.reasons
+            );
+            assert!(
+                result
+                    .reasons
+                    .iter()
+                    .any(|reason| reason.contains("luminance ratio")),
+                "{name}: {:?}",
+                result.reasons
+            );
+        }
     }
 }

@@ -13,6 +13,7 @@ pub struct Config {
     pub human_band: f64,
     pub disagree_delta: f64,
     pub noise_multiple: f64,
+    pub noise_tail: f64,
     pub fail: BTreeMap<String, f64>,
     pub regress: BTreeMap<String, f64>,
 }
@@ -64,6 +65,7 @@ impl Config {
         let human_band = take(&mut values, "human_band")?;
         let disagree_delta = take(&mut values, "disagree_delta")?;
         let noise_multiple = take(&mut values, "noise_multiple")?;
+        let noise_tail = take(&mut values, "noise_tail")?;
         if human_band >= 1.0 {
             return Err("human_band must be under 1".to_string());
         }
@@ -83,6 +85,7 @@ impl Config {
             human_band,
             disagree_delta,
             noise_multiple,
+            noise_tail,
             fail,
             regress,
         };
@@ -112,6 +115,9 @@ mod tests {
         let config = Config::builtin();
         assert!((config.fail_of("mean_rel") - 0.08).abs() < 1.0e-9);
         assert!((config.human_band - 0.15).abs() < 1.0e-9);
+        assert!((config.noise_tail - 4.0).abs() < 1.0e-9);
+        assert!((config.fail_of("luma_delta") - 0.10).abs() < 1.0e-9);
+        assert!((config.fail_of("blur_rel") - 0.08).abs() < 1.0e-9);
         assert!((config.params.rel_floor - 0.02).abs() < 1.0e-9);
     }
 

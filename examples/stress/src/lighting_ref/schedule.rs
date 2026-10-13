@@ -9,7 +9,8 @@ use std::path::Path;
 
 /// Scene seconds per frame. The same step the stress benchmark uses.
 pub const DEFAULT_DT: f32 = 1.0 / 60.0;
-/// Mean relative luminance that ends a metric settle. Under the pass band.
+/// Blurred relative luminance that ends a metric settle, before the
+/// reference-noise floor. Under the pass band of that blurred error.
 pub const DEFAULT_SETTLE_THRESHOLD: f64 = 0.05;
 /// Settle frames before a metric settle stops anyway.
 pub const DEFAULT_SETTLE_CAP: u32 = 180;
@@ -29,7 +30,9 @@ pub struct FramePlan {
 pub enum SettleMode {
     /// Draw this many frames on the scored pose. The candidate is that frame.
     Frames(u32),
-    /// Draw until mean relative luminance is at or under `threshold`, or `cap` frames.
+    /// Draw until blurred relative luminance is at or under the line, or `cap`
+    /// frames. The line is `threshold` raised by this checkpoint's reference
+    /// noise after the blur.
     Metric { threshold: f64, cap: u32 },
 }
 
@@ -425,6 +428,8 @@ pub struct FrameRecord {
     pub picture_settled: bool,
     pub trusted: bool,
     pub mean_rel: Option<f64>,
+    pub blur_rel: Option<f64>,
+    pub luma_ratio: Option<f64>,
     pub captured: bool,
     pub phase: Phase,
     pub box_time: f32,
@@ -434,16 +439,24 @@ pub struct FrameRecord {
 
 pub fn write_frames_tsv(path: &Path, rows: &[FrameRecord]) -> Result<(), String> {
     let mut text = String::from(
-        "scene\tcheckpoint\tframe\tsim_time\twall_s\tpicture_settled\ttrusted\tmean_rel\tcaptured\tphase\tbox_time\tlamp_time\tday\n",
+        "scene\tcheckpoint\tframe\tsim_time\twall_s\tpicture_settled\ttrusted\tmean_rel\tblur_rel\tluma_ratio\tcaptured\tphase\tbox_time\tlamp_time\tday\n",
     );
     for row in rows {
         let mean = row
             .mean_rel
             .map(|value| format!("{value:.6}"))
             .unwrap_or_default();
+        let blur = row
+            .blur_rel
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_default();
+        let ratio = row
+            .luma_ratio
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_default();
         let _ = writeln!(
             text,
-            "{scene}\t{checkpoint}\t{frame}\t{sim:.6}\t{wall:.3}\t{settled}\t{trusted}\t{mean}\t{captured}\t{phase}\t{box:.6}\t{lamp:.6}\t{day:.6}",
+            "{scene}\t{checkpoint}\t{frame}\t{sim:.6}\t{wall:.3}\t{settled}\t{trusted}\t{mean}\t{blur}\t{ratio}\t{captured}\t{phase}\t{box:.6}\t{lamp:.6}\t{day:.6}",
             scene = row.scene,
             checkpoint = row.checkpoint,
             frame = row.frame,
@@ -694,6 +707,8 @@ mod tests {
                 picture_settled: false,
                 trusted: true,
                 mean_rel: Some(0.041),
+                blur_rel: Some(0.02),
+                luma_ratio: Some(1.0),
                 captured: true,
                 phase: Phase::Settle,
                 box_time: 0.0,

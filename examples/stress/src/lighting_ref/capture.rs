@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use genos_lighting_ref::{mean_relative, Picture};
+use genos_lighting_ref::{blur_relative, mean_luma_ratio, mean_relative, settle_line, Picture};
 use genos_render::Renderer;
 use genos_window::Window;
 
@@ -25,6 +25,8 @@ pub struct Job {
     pub still: bool,
     pub event: Option<&'static str>,
     pub reference: Option<Picture>,
+    /// Noise stored beside the reference. The settle line rises with it.
+    pub reference_noise: f64,
 }
 
 pub struct LiveShot {
@@ -135,10 +137,19 @@ fn capture_one(
             .reference
             .as_ref()
             .and_then(|reference| mean_relative(reference, &picture, opts.rel_floor).ok());
+        let blur_rel = job
+            .reference
+            .as_ref()
+            .and_then(|reference| blur_relative(reference, &picture, opts.rel_floor).ok());
+        let luma_ratio = job
+            .reference
+            .as_ref()
+            .and_then(|reference| mean_luma_ratio(reference, &picture).ok());
         if step.phase == Phase::Settle {
             if crossed.is_none() {
                 if let SettleMode::Metric { threshold, .. } = opts.plan.settle {
-                    if mean_rel.is_some_and(|err| err <= threshold) {
+                    let line = settle_line(threshold, job.reference_noise, picture.height);
+                    if blur_rel.is_some_and(|err| err <= line) {
                         crossed = Some(step.settle_index);
                     }
                 }
@@ -154,13 +165,15 @@ fn capture_one(
             "false untrusted"
         };
         eprintln!(
-            "lighting-ref: {} {} frame {} sim {:.6} wall {:.3}s settled {settled_text} mean_rel {}",
+            "lighting-ref: {} {} frame {} sim {:.6} wall {:.3}s settled {settled_text} mean_rel {} blur_rel {} luma_ratio {}",
             job.scene,
             job.checkpoint,
             step.frame,
             step.sim_time,
             wall_s,
             format_mean(mean_rel),
+            format_mean(blur_rel),
+            format_mean(luma_ratio),
         );
         log.push(FrameRecord {
             scene: job.scene.clone(),
@@ -171,6 +184,8 @@ fn capture_one(
             picture_settled: raw_settled,
             trusted,
             mean_rel,
+            blur_rel,
+            luma_ratio,
             captured: false,
             phase: step.phase,
             box_time: step.box_time,
@@ -228,7 +243,15 @@ fn capture_one(
     let candidate_error = log
         .iter()
         .find(|row| row.frame == candidate_frame)
-        .and_then(|row| row.mean_rel);
+        .and_then(|row| row.blur_rel);
+    let candidate_ratio = log
+        .iter()
+        .find(|row| row.frame == candidate_frame)
+        .and_then(|row| row.luma_ratio);
+    let picture_height = settled
+        .as_ref()
+        .map(|picture| picture.height)
+        .unwrap_or(opts.height);
     Ok(LiveShot {
         scene: job.scene.clone(),
         checkpoint: job.checkpoint.clone(),
@@ -241,6 +264,9 @@ fn capture_one(
             &opts.plan,
             candidate_frame,
             candidate_error,
+            candidate_ratio,
+            job.reference_noise,
+            picture_height,
             cap_hit,
             job.event.is_some(),
             job.still && candidate_index + 1 >= settle_pics.len() && settle_pics.len() >= 2,
@@ -264,7 +290,10 @@ fn flicker_pair(pics: &[Picture], candidate: usize) -> Vec<Picture> {
 fn shot_note(
     plan: &FramePlan,
     candidate_frame: u32,
-    mean_rel: Option<f64>,
+    blur_rel: Option<f64>,
+    luma_ratio: Option<f64>,
+    reference_noise: f64,
+    height: u32,
     cap_hit: bool,
     event: bool,
     tail_is_previous: bool,
@@ -272,12 +301,15 @@ fn shot_note(
     let settle = match plan.settle {
         SettleMode::Frames(n) => format!("{n} settle frames"),
         SettleMode::Metric { threshold, cap } => {
+            let line = settle_line(threshold, reference_noise, height);
             if cap_hit {
                 format!(
-                    "settle cap {cap} reached before mean relative luminance was under {threshold}"
+                    "settle cap {cap} reached before blurred relative luminance was under {line:.4} (threshold {threshold}, reference noise {reference_noise:.4})"
                 )
             } else {
-                format!("settled when mean relative luminance was under {threshold} (cap {cap})")
+                format!(
+                    "settled when blurred relative luminance was under {line:.4} (threshold {threshold}, reference noise {reference_noise:.4}, cap {cap})"
+                )
             }
         }
     };
@@ -303,9 +335,10 @@ fn shot_note(
         ""
     };
     format!(
-        "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, mean_rel {}.{review}{tail}{captures}",
+        "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}.{review}{tail}{captures}",
         schedule::format_dt(plan.fixed_dt),
         plan.warmup_frames,
-        format_mean(mean_rel),
+        format_mean(blur_rel),
+        format_mean(luma_ratio),
     )
 }

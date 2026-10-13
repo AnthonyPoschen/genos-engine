@@ -20,13 +20,13 @@ pub const BLIND_SPOTS: &[&str] = &[
     "Flicker is temporal variance on a still camera. A moving camera is not scored for flicker. Motion aliasing is not separated from shimmer.",
     "Convergence is only the error at +1, +2, +4, and +8 frames after an event. A defect that heals at frame 3 and returns at frame 16 is missed.",
     "Mean error can hide a speck smaller than the p99. p99 and the unfilled count are the counter, and they still miss a mark on one pixel of a large picture.",
-    "A one-sample reference has no noise estimate, so a small error cannot auto-pass. Two or more samples can, only when the error is above the reference noise.",
+    "A one-sample reference has no noise estimate, so a small error cannot auto-pass. With two or more samples, raw per-pixel error at or under the stored reference noise is not a fail. The gates are the blurred relative error and the mean luminance ratio. A ratio of 0.66, 0.80, or 1.18 stays a fail.",
     "Hell-100 is one 25 m section with 100 lamps, the stress panel's 100-light case, not the 4×4 building. The path trace and the live capture use that same scene.",
     "Full-effort accumulation is the engine at its maximum knobs. It is not independent of a lighting change. The path trace is the ground truth this check scores against.",
     "Lavapipe is a wiring check. Quality judgement is the owner GPU run.",
     "GPU frames are not cross-device deterministic. The path trace is deterministic for a given engine commit, scene, and sample count.",
     "A held stale frame on a still scene with no event matches a converged picture and is not caught. The box-step checkpoint exists so a held frame after a change is caught.",
-    "Owner mode and lavapipe-small share one frame plan: a fixed scene step (default 1/60 s), warmup frames, then a settle-frame count or a mean-relative-luminance threshold with a frame cap, and the same capture offsets (default event+1, +2, +4, +8). Wall time is a column in the frame log. The scene pose follows the frame index. picture_settled is logged and ignored on the first frame of a pose. The check does not call wait_settled. A picture that is still over the line when the settle cap is reached fails that capture and stays for review.",
+    "Owner mode and lavapipe-small share one frame plan: a fixed scene step (default 1/60 s), warmup frames, then a settle-frame count or a blurred-relative-luminance line with a frame cap, and the same capture offsets (default event+1, +2, +4, +8). The line is the threshold raised by that checkpoint's reference noise after the blur. Wall time is a column in the frame log. The scene pose follows the frame index. picture_settled is logged and ignored on the first frame of a pose. The check does not call wait_settled. A picture that is still over the line when the settle cap is reached fails that capture and stays for review.",
 ];
 
 #[derive(Clone, Debug)]
@@ -185,8 +185,11 @@ fn summary_md(report: &RunReport) -> String {
             cp.note
         ));
         out.push_str(&format!(
-            "Reference: {} , {} spp, noise {:.4}.\n\n",
-            cp.reference_method, cp.reference_spp, cp.reference_noise
+            "Reference: {} , {} spp, noise {:.4}. Mean luminance ratio {}.\n\n",
+            cp.reference_method,
+            cp.reference_spp,
+            cp.reference_noise,
+            fmt_ratio(cp.metrics.luma_ratio)
         ));
         out.push_str("Why:\n\n");
         for reason in &cp.judgement.reasons {
@@ -380,6 +383,14 @@ fn verdict_class(verdict: Verdict) -> &'static str {
         Verdict::Pass => "pass",
         Verdict::Fail => "fail",
         Verdict::NeedsHuman => "human",
+    }
+}
+
+fn fmt_ratio(value: Option<f64>) -> String {
+    match value {
+        Some(v) if v.is_finite() => format!("{v:.3}×"),
+        Some(_) => "infinite".into(),
+        None => "—".into(),
     }
 }
 

@@ -11,6 +11,7 @@ A lighting change is checked against ground truth for each test scene, instead o
 - Ground truth is the CPU path tracer in `crates/debug/src/reference.rs`. It does not read the GI caches. Full-effort accumulation is the runtime at its maximum knobs. It is not a second ground truth.
 - The candidate is the current build's lighting. `--candidate full-effort` spends those maximum knobs. `GENOS_LIGHTING_FULL_EFFORT` (any value except `0`, `false`, `off`, `no`) still overlays the scene, and it is applied last.
 - A value inside the band around a fail line does not auto-pass. One sample per pixel does not auto-pass. Two metrics that disagree, neither a clear fail, need a person. A capture that is still over the line when the settle cap is reached stays a fail and is marked for review.
+- The score is the blurred relative error and the mean luminance ratio. Raw per-pixel error at or under the reference's own noise is not a fail. A luminance ratio of 0.66, 0.80, or 1.18 stays a fail.
 - The scene clock is a fixed step, `--fixed-dt`, default 1/60 s. Lamp motion, box motion, and the day clock advance once per frame. Wall time is written in `frames.tsv` and does not choose the pose. Owner mode and lavapipe-small use the same frame indices. Lavapipe-small changes the picture size and the sample count.
 - Reports are written in the current directory. The default is `./genos-debug/refcheck/<timestamp>/`. `--out` overrides it. The tool does not write to `$HOME`.
 - Reference pictures are `./genos-debug/reference/<commit>/`, unless `--reference-dir` is set. `./genos-debug/` is gitignored.
@@ -49,13 +50,13 @@ Frame control, arguments first. Each name has an environment mirror (`GENOS_LIGH
 | `--fixed-dt SECONDS` | 1/60 | Scene seconds added on each frame. |
 | `--warmup-frames N` | 0 | Frames held on the starting pose before the approach or the event. |
 | `--settle-frames N` |  | Score the Nth frame on the scored pose. |
-| `--settle THRESHOLD` | 0.05 | Keep drawing until mean relative luminance is at or under this, or the cap. |
+| `--settle THRESHOLD` | 0.05 | Keep drawing until blurred relative luminance is at or under the line, or the cap. The line is this threshold raised by the checkpoint's reference noise after the blur. |
 | `--settle-cap N` | 180 | Frame cap for `--settle`. |
 | `--capture-frames LIST` | `event+1,+2,+4,+8` | Frames after an event. `1,2,4,8` is the same list. |
 
 `--settle-frames` and `--settle` together are an error. The same is true of the two environment variables when neither flag is set. These flags belong to `lighting-ref check`. They are not lighting settings. The live stress binary's fixed step is `--fixed-dt` and MCP `time`, and manual stepping is `--step` (Space, or MCP `step`).
 
-A still checkpoint warms up, then holds the catalog pose. A moving checkpoint warms up at time 0, steps the lamp and box clocks by `--fixed-dt` until they reach the catalog time, and holds there. The day starts early by that approach and arrives at the catalog day on the scored pose, then holds. An event warms up on the pose before the jump (`box-step-before`'s clocks) and switches on the next frame. `event+1` is that frame. The candidate for mean error and FLIP is the settle frame. Flicker uses that frame and the next held frame. Convergence uses the capture offsets. `frames.tsv` in the report records frame index, sim time, wall time, `picture_settled`, and the mean relative luminance for every frame.
+A still checkpoint warms up, then holds the catalog pose. A moving checkpoint warms up at time 0, steps the lamp and box clocks by `--fixed-dt` until they reach the catalog time, and holds there. The day starts early by that approach and arrives at the catalog day on the scored pose, then holds. An event warms up on the pose before the jump (`box-step-before`'s clocks) and switches on the next frame. `event+1` is that frame. The candidate for the blurred error, the luminance ratio, and FLIP is the settle frame. Flicker uses that frame and the next held frame. Convergence uses the capture offsets, scored after the same blur. `frames.tsv` in the report records frame index, sim time, wall time, `picture_settled`, the raw mean relative luminance, the blurred error, and the luminance ratio for every frame.
 
 Exit status:
 
@@ -80,7 +81,7 @@ The report is `summary.md` and `summary.html`, plus `metrics.json` and `frames.t
 | hell-100 | night-hall | Night, 100 lamps, most of them moving. One 25 m section, the stress panel's 100-light case, not the 4×4 building. |
 | sponza | atrium | Skipped. No Sponza asset in this repository. |
 
-Owner pictures are 320×180, at least 8 samples per pixel, up to 64, 8 bounces, 20 seconds, noise 0.05. Lavapipe-small is 32×18, 1 sample, 2 bounces, 3 seconds. A stored reference is reused when the picture size matches. A different size traces again into the same commit directory.
+Owner pictures are 320×180. The path trace runs in batches of 16 samples until the noise estimate is 0.05, 256 samples, or 120 seconds, with 8 bounces. The achieved noise is stored beside each picture (`trace.txt`) and the score uses it. Lavapipe-small is 32×18, 1 sample, 2 bounces, 3 seconds. A stored reference is reused when the picture size matches. A different size traces again into the same commit directory.
 
 ## Thresholds
 
@@ -113,13 +114,13 @@ Printed in every summary:
 - Flicker is temporal variance on a still camera. A moving camera is not scored for flicker.
 - Convergence is only +1, +2, +4, and +8 frames. A defect that heals at frame 3 and returns at frame 16 is missed.
 - Mean error can hide a speck smaller than the p99.
-- One sample has no noise estimate, so a small error cannot auto-pass.
+- One sample has no noise estimate, so a small error cannot auto-pass. With two or more samples, raw per-pixel error at or under the stored reference noise is not a fail. The gates are the blurred relative error and the mean luminance ratio. A ratio of 0.66, 0.80, or 1.18 stays a fail.
 - Hell-100 is one 25 m section with 100 lamps.
 - Full effort is not independent of a lighting change.
 - Lavapipe is a wiring check. Quality is the owner GPU run.
 - GPU frames are not cross-device deterministic. The path trace is deterministic for a given commit, scene, and sample count.
 - A held stale frame on a still scene with no box step matches a converged picture and is not caught.
-- Owner mode and lavapipe-small share one frame plan (fixed step, warmup, settle, capture offsets). Wall time is logged. The scene pose follows the frame index. `picture_settled` is logged and ignored on the first frame of a pose. The check does not call `wait_settled`. A picture still over the line at the settle cap fails that capture and stays for review.
+- Owner mode and lavapipe-small share one frame plan (fixed step, warmup, settle, capture offsets). The settle line is blurred relative luminance, raised by that checkpoint's reference noise. Wall time is logged. The scene pose follows the frame index. `picture_settled` is logged and ignored on the first frame of a pose. The check does not call `wait_settled`. A picture still over the line at the settle cap fails that capture and stays for review.
 
 ## Code
 

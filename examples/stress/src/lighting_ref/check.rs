@@ -156,7 +156,7 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
         if shot.review && judgement.verdict == Verdict::Pass {
             judgement.verdict = Verdict::NeedsHuman;
             judgement.reasons.push(
-                "the settle cap was reached before mean relative luminance crossed the threshold; this capture is for review and does not auto-pass"
+                "the settle cap was reached before blurred relative luminance crossed the noise-aware line; this capture is for review and does not auto-pass"
                     .into(),
             );
         }
@@ -244,7 +244,7 @@ fn plan_note(plan: &FramePlan) -> String {
     let settle = match plan.settle {
         schedule::SettleMode::Frames(n) => format!("{n} settle frames"),
         schedule::SettleMode::Metric { threshold, cap } => {
-            format!("settle when mean relative luminance is under {threshold} or {cap} frames")
+            format!("settle when blurred relative luminance is under {threshold}, raised by that checkpoint's reference noise, or {cap} frames")
         }
     };
     let offsets = plan
@@ -311,6 +311,9 @@ fn capture_live(
             event: item.event,
             reference: store::read_reference(&opts.reference_dir, &item.scene, &item.checkpoint)
                 .ok(),
+            reference_noise: store::read_trace(&opts.reference_dir, &item.scene, &item.checkpoint)
+                .map(|trace| f64::from(trace.noise))
+                .unwrap_or(0.0),
         })
         .collect();
     match capture::capture(&CaptureOptions {

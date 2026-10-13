@@ -45,6 +45,12 @@ pub struct FrameMetrics {
     pub converge_8: Option<f64>,
     pub unfilled: Option<u32>,
     pub pixels: u32,
+    /// Mean relative luminance after a box blur. This is the noise-aware error.
+    pub blur_rel: Option<f64>,
+    /// `mean(Y candidate) / mean(Y reference)`.
+    pub luma_ratio: Option<f64>,
+    /// `|luma_ratio - 1|`. The gate for a brightness bias.
+    pub luma_delta: Option<f64>,
 }
 
 impl FrameMetrics {
@@ -57,12 +63,62 @@ impl FrameMetrics {
     }
 }
 
-/// Mean relative luminance only. The settle loop calls this every frame and
+/// Mean relative luminance only. The settle loop calls [`blur_relative`] and
 /// does not run FLIP.
 pub fn mean_relative(reference: &Picture, candidate: &Picture, floor: f64) -> Result<f64, String> {
     same_size(reference, candidate)?;
     let rel = relative(reference, candidate, floor);
     Ok(mean_p99(&rel).0)
+}
+
+/// Radius of the box used by [`blur_relative`].
+///
+/// Owner pictures are 180 px tall, where this is 4: a 9 px kernel, the blur
+/// the owner trial measured. A shorter picture scales the kernel down so a
+/// planted defect on a tiny image is not washed out. Height 18 is radius 0.
+pub fn blur_radius(height: u32) -> u32 {
+    4 * height / 180
+}
+
+/// Line that ends a metric settle: the configured threshold, raised when the
+/// reference's own noise, after the same blur, sits above it.
+///
+/// A box of side `2r+1` averages that many independent samples along each
+/// axis, so the noise falls by about the kernel width.
+pub fn settle_line(threshold: f64, reference_noise: f64, height: u32) -> f64 {
+    let kernel = f64::from(blur_radius(height) * 2 + 1);
+    threshold.max(reference_noise.max(0.0) / kernel)
+}
+
+/// Mean relative luminance after the box blur. Pixel noise falls. A brightness
+/// bias does not.
+pub fn blur_relative(reference: &Picture, candidate: &Picture, floor: f64) -> Result<f64, String> {
+    same_size(reference, candidate)?;
+    let radius = blur_radius(reference.height);
+    let left = box_blur_luma(reference, radius);
+    let right = box_blur_luma(candidate, radius);
+    let rel = relative_luma(&left, &right, floor);
+    Ok(mean_p99(&rel).0)
+}
+
+/// `mean(Y candidate) / mean(Y reference)`. A black reference with a lit
+/// candidate is infinite.
+pub fn mean_luma_ratio(reference: &Picture, candidate: &Picture) -> Result<f64, String> {
+    same_size(reference, candidate)?;
+    let mut reference_sum = 0.0f64;
+    let mut candidate_sum = 0.0f64;
+    for i in 0..reference.pixels() {
+        reference_sum += f64::from(reference.luma_at(i));
+        candidate_sum += f64::from(candidate.luma_at(i));
+    }
+    if reference_sum <= 1.0e-8 {
+        return Ok(if candidate_sum <= 1.0e-8 {
+            1.0
+        } else {
+            f64::INFINITY
+        });
+    }
+    Ok(candidate_sum / reference_sum)
 }
 
 /// `still` is a fixed camera over time. `after_event` is `(frames after, picture)`
@@ -81,6 +137,13 @@ pub fn measure(
         dark_split(reference, &rel, params.dark_max);
     let (flip_mean, flip_p99) = mean_and_p99(&flip_map(reference, candidate)?);
     let unfilled = unfilled_count(reference, candidate, params);
+    let blur_rel = blur_relative(reference, candidate, params.rel_floor)?;
+    let luma_ratio = mean_luma_ratio(reference, candidate)?;
+    let luma_delta = if luma_ratio.is_finite() {
+        (luma_ratio - 1.0).abs()
+    } else {
+        f64::INFINITY
+    };
     Ok(FrameMetrics {
         mean_rel: Some(mean_rel),
         p99_rel: Some(p99_rel),
@@ -97,6 +160,9 @@ pub fn measure(
         converge_8: converge_at(reference, after_event, 8, params.rel_floor)?,
         unfilled: Some(unfilled),
         pixels: reference.pixels() as u32,
+        blur_rel: Some(blur_rel),
+        luma_ratio: Some(luma_ratio),
+        luma_delta: Some(luma_delta),
     })
 }
 
@@ -111,14 +177,60 @@ fn same_size(reference: &Picture, candidate: &Picture) -> Result<(), String> {
 }
 
 fn relative(reference: &Picture, candidate: &Picture, floor: f64) -> Vec<f64> {
+    let left: Vec<f32> = (0..reference.pixels())
+        .map(|i| reference.luma_at(i))
+        .collect();
+    let right: Vec<f32> = (0..candidate.pixels())
+        .map(|i| candidate.luma_at(i))
+        .collect();
+    relative_luma(&left, &right, floor)
+}
+
+fn relative_luma(reference: &[f32], candidate: &[f32], floor: f64) -> Vec<f64> {
     let floor = floor as f32;
-    (0..reference.pixels())
-        .map(|i| {
-            let yr = reference.luma_at(i);
-            let yc = candidate.luma_at(i);
-            f64::from((yc - yr).abs() / yr.max(floor))
-        })
+    reference
+        .iter()
+        .zip(candidate)
+        .map(|(yr, yc)| f64::from((yc - yr).abs() / yr.max(floor)))
         .collect()
+}
+
+/// Separable box blur on luminance. Edges repeat the border pixel.
+fn box_blur_luma(picture: &Picture, radius: u32) -> Vec<f32> {
+    let w = picture.width as usize;
+    let h = picture.height as usize;
+    let src: Vec<f32> = (0..w * h).map(|i| picture.luma_at(i)).collect();
+    if radius == 0 || w == 0 || h == 0 {
+        return src;
+    }
+    let r = radius as i32;
+    let mut horizontal = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0.0f32;
+            let mut n = 0.0f32;
+            for dx in -r..=r {
+                let xx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
+                acc += src[y * w + xx];
+                n += 1.0;
+            }
+            horizontal[y * w + x] = acc / n;
+        }
+    }
+    let mut out = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0.0f32;
+            let mut n = 0.0f32;
+            for dy in -r..=r {
+                let yy = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
+                acc += horizontal[yy * w + x];
+                n += 1.0;
+            }
+            out[y * w + x] = acc / n;
+        }
+    }
+    out
 }
 
 fn mean_p99(values: &[f64]) -> (f64, f64) {
@@ -207,9 +319,7 @@ fn converge_at(
     let Some((_, picture)) = frames.iter().find(|(k, _)| *k == after) else {
         return Ok(None);
     };
-    same_size(reference, picture)?;
-    let rel = relative(reference, picture, floor);
-    Ok(Some(mean_p99(&rel).0))
+    Ok(Some(blur_relative(reference, picture, floor)?))
 }
 
 #[cfg(test)]
@@ -233,6 +343,9 @@ mod tests {
         .unwrap();
         assert!(m.mean_rel.unwrap() < 1.0e-6);
         assert!(m.p99_rel.unwrap() < 1.0e-6);
+        assert!(m.blur_rel.unwrap() < 1.0e-6);
+        assert!((m.luma_ratio.unwrap() - 1.0).abs() < 1.0e-6);
+        assert!(m.luma_delta.unwrap() < 1.0e-6);
         assert!(m.flip_mean.unwrap() < 1.0e-5);
         assert_eq!(m.unfilled, Some(0));
         assert!(m.flicker.unwrap() < 1.0e-6);
@@ -302,5 +415,44 @@ mod tests {
         assert!(m.mean_rel_lit.unwrap() < 0.02);
         assert!(m.mean_rel_dark.unwrap() > 0.5);
         assert!(m.dark_pixels > 0);
+    }
+
+    #[test]
+    fn a_nine_pixel_blur_drops_checker_noise_and_keeps_a_brightness_bias() {
+        let (w, h) = (32u32, 180u32);
+        let reference = Picture::solid(w, h, [0.40, 0.40, 0.40]);
+        let mut noisy = reference.clone();
+        for i in 0..reference.pixels() {
+            let gain = if i % 2 == 0 { 1.35 } else { 0.65 };
+            let v = 0.40 * gain;
+            noisy.set_pixel(i as u32 % w, i as u32 / w, [v, v, v]);
+        }
+        let params = MetricParams::default();
+        let noisy_m = measure(&reference, &noisy, None, &[], &params).unwrap();
+        assert!(
+            noisy_m.mean_rel.unwrap() > 0.30,
+            "{}",
+            noisy_m.mean_rel.unwrap()
+        );
+        assert!(
+            noisy_m.blur_rel.unwrap() < 0.08,
+            "blur {}",
+            noisy_m.blur_rel.unwrap()
+        );
+        assert!(noisy_m.blur_rel.unwrap() < noisy_m.mean_rel.unwrap() / 4.0);
+        let ratio = noisy_m.luma_ratio.unwrap();
+        assert!((ratio - 1.0).abs() < 0.02, "{ratio}");
+        assert_eq!(blur_radius(h), 4);
+        assert_eq!(blur_radius(18), 0);
+        let line = settle_line(0.05, 0.31, h);
+        assert!((line - 0.05).abs() < 1.0e-9, "{line}");
+        let raised = settle_line(0.05, 0.90, h);
+        assert!((raised - 0.10).abs() < 1.0e-9, "{raised}");
+
+        let dark = reference.scaled(0.66);
+        let biased = measure(&reference, &dark, None, &[], &params).unwrap();
+        assert!(biased.blur_rel.unwrap() > 0.30);
+        assert!((biased.luma_ratio.unwrap() - 0.66).abs() < 1.0e-3);
+        assert!((biased.luma_delta.unwrap() - 0.34).abs() < 1.0e-3);
     }
 }
