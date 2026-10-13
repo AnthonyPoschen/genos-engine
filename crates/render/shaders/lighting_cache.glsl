@@ -1296,66 +1296,15 @@ bool lighting_sc_stamp_stale(uint back) {
     }
     return lighting_ls_ratio(back) > LIGHTING_SC_STALE_UP;
 }
-// Clamp the seed's luminance into the range of nearby texels a pixel has
-// already shown, when at least two of them hold 4 sets. No such neighbour
-// leaves the seed alone. The papers do not clamp a pre-fill to that neighbourhood.
-vec3 lighting_sc_prefill_bound(uint slot, vec3 mean) {
-    vec4 nb = cache.v[3u * slot + 1u];
-    float size = nb.w;
-    if (!(size > 1.0e-4) || size > 0.2) {
-        return mean;
-    }
-    vec3 p = cache.v[3u * slot].xyz;
-    vec3 n = nb.xyz;
-    uint ax = lighting_axis(n) >> 1u;
-    vec3 ta = vec3(0.0);
-    vec3 tb = vec3(0.0);
-    ta[(ax + 1u) % 3u] = 1.0;
-    tb[(ax + 2u) % 3u] = 1.0;
-    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
-    float lo = 1.0e9;
-    float hi = 0.0;
-    uint got = 0u;
-    [[dont_unroll]] for (uint i = 0u; i < 49u; i++) {
-        int x = int(i % 7u) - 3;
-        int y = int(i / 7u) - 3;
-        if (x == 0 && y == 0) {
-            continue;
-        }
-        vec3 q = p + ta * (float(x) * size) + tb * (float(y) * size);
-        uint s = lighting_cache_find_sized(q, n, false, size, p);
-        if (s == ~0u || s == slot || cache.v[3u * s + 1u].w > 0.2) {
-            continue;
-        }
-        if (floatBitsToUint(cache.v[LIGHTING_WORLD_AT + s].z) == 0u) {
-            continue;
-        }
-        if (floor(max(cache.v[3u * s + 2u].w, 0.0)) < 4.0) {
-            continue;
-        }
-        float lum = dot(cache.v[3u * s + 2u].rgb, lw);
-        lo = min(lo, lum);
-        hi = max(hi, lum);
-        got += 1u;
-    }
-    if (got < 2u || !(hi > 0.0)) {
-        return mean;
-    }
-    float lum = dot(mean, lw);
-    float bound = clamp(lum, lo, hi);
-    if (lum > 1.0e-4) {
-        mean *= bound / lum;
-    }
-    return max(mean, vec3(0.0));
-}
 // S73M / S73R: first time a pixel shows a pre-filled fine texel. Keep the
-// colour (clamped toward on-screen neighbours when they exist), show it as one
-// finished set, and mark the estimator (b.z < 0, b.w the fractional history)
-// so the next on-screen sets are a plain mean that the seed barely weighs.
+// colour, show it as one finished set, and mark the estimator (b.z < 0, b.w the
+// fractional history) so the next on-screen sets are a plain mean that the seed
+// barely weighs. A 7x7 luminance clamp of on-screen neighbours moved this colour
+// by a mean relative step of 0.021 (2343 keys) and is not used.
 // Idempotent: a later pixel this frame sees the shown stamp and does not write
 // again.
 void lighting_sc_prefill_handoff(uint slot) {
-    vec3 mean = lighting_sc_prefill_bound(slot, cache.v[3u * slot + 2u].rgb);
+    vec3 mean = cache.v[3u * slot + 2u].rgb;
     float lum = dot(mean, vec3(0.2126, 0.7152, 0.0722));
     cache.v[3u * slot + 2u] = vec4(mean, 1.0);
     cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(mean, pow(0.15 * lum, 2.0) + 1.0e-8);
