@@ -251,15 +251,18 @@ void main() {
         }
         if (LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_pix_cache_ok() && !(urgent && lighting_near_change(pos))) {
             uint traced = lighting_frame() - LIGHTING_STRATA / 2u;
-            // Rings: a moved lamp does not reshade every kept hit in range.
-            // That was the direct pass (the trace counter had already dropped).
-            // A woken probe and its check ray still shade; the probe filter
-            // spreads them. The sun ratio stays, so a day change still tracks.
-            if (gstats.wake_mode != 0u && !lighting_wake_relight(h)) {
+            // A live ring does not reshade a kept hit only because a lamp
+            // moved. That shade was the direct pass. A woken probe and its
+            // check ray still shade; the probe filter spreads them. With no
+            // event queued, rings uses the same lamp-range test as legacy, so
+            // a still scene's probes match before the idle freezes them.
+            // The sun ratio stays, so a day change still tracks.
+            bool sparse = gstats.wake_mode != 0u && gstats.wake_events != 0u && !lighting_wake_relight(h);
+            if (sparse) {
                 if (abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
                     return;
                 }
-            } else if (gstats.wake_mode == 0u && !lighting_wrc_lamp_changed(pos, traced) && abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
+            } else if (!lighting_wrc_lamp_changed(pos, traced) && abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
                 return;
             }
         }
@@ -287,6 +290,10 @@ void main() {
         }
     }
     // S75 Lumen surface-cache direct lighting for hits (lighting_cache.glsl).
+    // A still verification check is shaded only so the vote can run. It must
+    // not take a cache budget slot or write the texel: legacy does not shade
+    // this hit, and those writes moved the still picture.
+    bool vote_only = gstats.wake_mode != 0u && gstats.wake_events == 0u && lighting_wake_relight(h);
     uint tdl = ~0u;
     uint tdl_sig = 0u;
     vec3 n_hit = n;
@@ -314,7 +321,7 @@ void main() {
                 n = tn;
                 list = tl;
                 count = lamp_list_size(list);
-            } else if (tdl_sig != 0u && atomicAdd(ckeys.key[LIGHTING_TDL_COUNT_AT], 1u) < LIGHTING_TDL_BUDGET) {
+            } else if (!vote_only && tdl_sig != 0u && atomicAdd(ckeys.key[LIGHTING_TDL_COUNT_AT], 1u) < LIGHTING_TDL_BUDGET) {
                 lighting_dg(41u, 1u);
                 tdl = ts;
                 origin = tp + tn * 0.02;
@@ -416,7 +423,7 @@ void main() {
                 shadow_lit = sc > 0.5;
             } else {
                 shadow_lit = !trace_occluded(origin, target);
-                if (cell) {
+                if (cell && !vote_only) {
                     lighting_shadow_put(origin, n, li, shadow_lit);
                 }
             }
@@ -441,7 +448,8 @@ void main() {
             // nudged towards the check (an unbiased estimate, so drift is
             // tracked), under the new signature. Else escalate: the entry is
             // dropped and the next use recomputes it exactly (budget); this
-            // hit takes the check's estimate.
+            // hit takes the check's estimate. A still verification check reads
+            // the same value and does not write it.
             vec4 d = cache.v[LIGHTING_TDL_AT + ts];
             vec3 c = lighting_unpack_rgb9e5(floatBitsToUint(d.x));
             float lc = dot(c, vec3(0.2126, 0.7152, 0.0722));
@@ -449,10 +457,12 @@ void main() {
             if (abs(le - lc) <= LIGHTING_TDL_TOL * max(max(le, lc), 1.0e-3)) {
                 lighting_dg(48u, 1u);
                 vec3 m = mix(c, e, 0.25);
-                cache.v[LIGHTING_TDL_AT + ts] = vec4(uintBitsToFloat(lighting_pack_rgb9e5(m)), d.y, uintBitsToFloat(tdl_sig), uintBitsToFloat(lighting_frame()));
+                if (!vote_only) {
+                    cache.v[LIGHTING_TDL_AT + ts] = vec4(uintBitsToFloat(lighting_pack_rgb9e5(m)), d.y, uintBitsToFloat(tdl_sig), uintBitsToFloat(lighting_frame()));
+                }
                 e = m;
                 e_sun = m * d.y;
-            } else {
+            } else if (!vote_only) {
                 lighting_dg(49u, 1u);
                 cache.v[LIGHTING_TDL_AT + ts].z = 0.0;
             }
@@ -460,7 +470,7 @@ void main() {
             vec4 d = cache.v[LIGHTING_TDL_AT + ts];
             e = lighting_unpack_rgb9e5(floatBitsToUint(d.x));
             e_sun = e * d.y;
-        } else {
+        } else if (!vote_only) {
             float le = dot(e, vec3(0.2126, 0.7152, 0.0722));
             float fs = le > 0.0 ? clamp(dot(e_sun, vec3(0.2126, 0.7152, 0.0722)) / le, 0.0, 1.0) : 0.0;
             cache.v[LIGHTING_TDL_AT + ts] = vec4(uintBitsToFloat(lighting_pack_rgb9e5(e)), fs, uintBitsToFloat(tdl_sig), uintBitsToFloat(lighting_frame()));
@@ -512,10 +522,18 @@ void main() {
         if (probe_hit && !fill_hit) {
             lighting_wake_observe(h, direct_shed);
         }
+        // No queued event: keep the legacy noise hold, including a verification
+        // check that was shaded so the vote could run. The direct baseline is
+        // still stored. A live ring writes the shade it forced.
+        bool legacy_hold = gstats.wake_events == 0u || !lighting_wake_relight(h);
         if (fill_hit) {
             lighting_put_fill_light(h, shed);
-        } else if (probe_hit && !lighting_wake_relight(h) && lighting_check_within_noise(h, pos, n, reflectance, shed)) {
+        } else if (probe_hit && gstats.wake_events == 0u && lighting_wake_relight(h)) {
+            // Legacy skipped this hit. The vote ran; the kept light stays.
+            lighting_wake_store_direct(h, direct_shed);
+        } else if (probe_hit && legacy_hold && lighting_check_within_noise(h, pos, n, reflectance, shed)) {
             lighting_chg(CHG_KEPT_HELD, 1u);
+            lighting_wake_store_direct(h, direct_shed);
         } else if (probe_hit) {
             lighting_put_kept_light_d(h, shed, tdl == ~0u ? 2u : ((tdl & 0x80000000u) != 0u ? 0u : 1u));
             lighting_wake_store_direct(h, direct_shed);

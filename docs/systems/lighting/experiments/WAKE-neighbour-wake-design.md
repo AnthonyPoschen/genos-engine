@@ -19,9 +19,9 @@ Ward/Krivanek IC error bound; A-SVGF sparse checks; Lumen background budget; pro
 ## Numbers
 Legacy baseline, before this scheduler: [WAKE0](WAKE0-legacy-trace-baseline.md). Lavapipe, 320×180 shipped hall: a held still frame traced 1862 probes and 1862 rays (one check ray each); a moving camera traced 2089 probes and 133696 rays (64 per probe).
 
-Rings, same window and hall, budget 16: frames 0–7 still trace the stratum (1862 probes, 119168 rays) because the strata are not held yet. From frame 8, a still frame traces 9 probes and 9 rays, wakes 0, and tests 0 rings. That is the verification budget (16 slots, about half placed). 9 against 1862 is about a 200× cut in traced probes on a held still frame.
+Rings, same window and hall, budget 16. Frames 0–7 trace the stratum because the strata are not held yet. From frame 8 until the scene settles, a still frame traces one check ray per placed probe, the same as legacy, and wakes 0. The verification stride is only the settled idle. Shrinking to that stride at frame 8 froze a probe field the picture kept.
 
-A 1080p grid at the 16 px tile is 120×68 = 8160 slots. The 320×180 hall placed 1862/3600 of them. The same fraction is about 4200 placed probes: legacy traces about one check ray each, rings traces about the budget (16). That 1080p figure is an expectation, not a measurement.
+A 1080p grid at the 16 px tile is 120×68 = 8160 slots. The 320×180 hall placed 1862/3600 of them. The same fraction is about 4200 placed probes. Until settle, rings traces about one check ray each, matching legacy. After settle, rings traces about the budget (16). That 1080p figure is an expectation, not a measurement.
 
 ## Comparison
 
@@ -37,17 +37,19 @@ Deviations, on purpose:
 - DDGI blends a new sample into the probe texel (hysteresis). Here a failed ring fully traces a sparse quarter of the probes inside it, and the existing probe filter (`gdirty`) spreads that to neighbours. Probes inside the first radius are traced in full, which is denser than the outer quarter.
 - A verification miss tightens the tolerance. It does not start a ring. The check index still changes every frame. The vote compares that ray's direct outgoing luminance (reflectance times irradiance before bounce, plus glow) to a plain float stored for the same kept hit. The rgb9e5 kept-light word is what gather reads, and it includes bounce. Scoring that word counted the surface cache settling as a change: on lavapipe, with the cache left on, a still frame missed 6 of 7 checks. A baseline of 0 has never been shaded and casts no vote. The float is luminance + 1, so a black shade is still a shade. DDGI blends a new sample into the same probe texel (section 4.4, hysteresis α 0.85–0.98). Lumen retraces its screen probes every frame and does not keep a per-direction shade for this vote. Default 0.08 is a change in that direction's direct light. Bounce lag is not a scene change.
 - A big change (the sun, a lamp added or removed, a colour change above 0.75 relative, a change list that overflowed) traces every placed probe once. A 2× colour is a ring, not that full wake.
-- Ring progress is stored per flight slot, so the frontier advances every other frame. A few frames of bounce lag is the point. A settled rings frame does not hold the picture with no work: pixels are lit and the verification stride is retraced. It does not keep place, gather, or the filter. Legacy drops to the same pixel direct and compose, without the stride.
-- DDGI's sleeping probes and Lumen's screen probes both spend a fixed budget on whatever is awake. Legacy here can go fully idle. Rings keeps only the verification budget on a still scene (9 traces against 1862 on the held hall frame above).
+- Ring progress is stored per flight slot, so the frontier advances every other frame. A settled rings frame does not hold the picture with no work: pixels are lit and the verification stride is retraced. It does not keep place, gather, or the filter, so the stride does not move the frozen picture. Legacy drops to the same pixel direct and compose, without the stride. Until that settle, a still rings frame traces the same check ray legacy does.
+- While a lamp event is in the queue, a kept hit is not reshade only because that lamp moved. Woken probes and their check rays still shade, and the probe filter spreads them. DDGI 2019 section 4.2 updates every probe every frame. This sparse relight does not. Owner RTX 4070, head `6cd3cef` vs gi-v2 `917b9f47`: moving mean 0.77 / p99 17.7 against run noise 0.43 / 2.3. The x8 difference sits on the red and white box faces (bounce lag). Still was 1.19 / 3.0 against 0.23 / 1.3 and the corner 0.32 / 1.3 against 0.10 / 1.0, from the stride replacing check rays before settle. Those two paths trace the check rays again. The moving lag is the departure, and it is not within that noise.
+- DDGI's sleeping probes and Lumen's screen probes both spend a fixed budget on whatever is awake. Legacy here can go fully idle. After settle, rings keeps only the verification stride.
 
 ## Lavapipe cases
 
-`crates/render/tests/lighting_frame.rs`, 320×180, tile 16, world cache off, bounces 0, one point lamp in a corner. Every slot placed: 240 probes. Frames 0–7 trace the stratum (240 probes, 15360 rays). From frame 8 a held probe traces one ray.
+`crates/render/tests/lighting_frame.rs`, 320×180, tile 16, world cache off, one bounce (bounce 0 records no probe pass), one point lamp in a corner. Every slot placed: 240 probes. Frames 0–7 trace the stratum. From frame 8 a held probe traces one check ray, the same as legacy, until the scene settles.
 
-- `rings_still_room_wakes_about_zero`, budget 8, tolerance 0.08. Frame 13: traced 8, rays 8, rings 0, woken 0, hits 8, misses 0. Frames 8–12 were 7 or 8 hits and 0 misses. A traced probe whose stored word is still zero does not vote, which is why a frame can trace 8 and hit 7. Frames 0–7 trace the stratum and cast no vote: that direction has no stored shade yet.
+- `rings_still_room_wakes_about_zero`, budget 8, tolerance 0.08. Frame 13: traced 240, rays 240, rings 0, woken 0, hits 8, misses 0. That is one check ray per placed probe, the same count legacy traces. Frames 8–12 were 7 or 8 hits and 0 misses. Frames 0–7 trace the stratum and cast no vote: that direction has no stored shade yet.
 - `rings_corner_lamp_wakes_nearby_probes`, budget 4, ring cap 2 m. The lamp steps from (0.45, 1.2, 0.45) to (1.05, 1.2, 0.45). Each of the next 6 frames: rings 2, woken 10, traced 14, rays 644 (ten full strata of 64, plus the 4 verification rays). Splits were 0, 0, 4, 7, 4, 8: the fail bits are read a frame later, and the slot is double-buffered, so the split count moves on frame 2. The 10 probes are unique. Each is within 0.60 m of the nearer lamp centre (the closest was 0.33 m). The far wall, which is on screen past 2 m, was not in the list.
 - `rings_verification_catches_a_missed_change`, ring cap 0, budget 48. A tolerance of 1 cannot miss a non-negative luminance, so the warm-up leaves the scale alone. The next frame drops to 0.75. Still: 42 hits and 0 misses. The same frame with a 6× colour (relative 5/7 ≈ 0.71, under the 0.75 full-wake cut): 0 hits and 42 misses. Rings 0 and woken 0 either way. The ray luminance scales by about (6−1)/6 ≈ 0.83, which is past 0.75, so every vote that had a stored shade missed.
-- `rings_still_room_with_cache_votes_hits` is the same corner with the surface cache left on and bounces left unlimited (denoise off, budget 8, tolerance 0.08). That is the lighting the stress A/B runs. Scoring the kept-light word, frame 23 was 1 hit and 6 misses, and frames 8–23 stayed in that range. Scoring direct light, frame 23 was 7 hits and 0 misses, woken 0, rings 0, traced 8. Frames 16–23 were 56 hits and 1 miss.
+- `rings_still_room_with_cache_votes_hits` is the same corner with the surface cache left on and bounces left unlimited (denoise off, budget 8, tolerance 0.08). That is the lighting the stress A/B runs. Scoring the kept-light word, frame 23 was 1 hit and 6 misses, and frames 8–23 stayed in that range. Scoring direct light, frame 23 was 7 hits and 0 misses, woken 0, rings 0, traced 240 (one check ray per probe, not the stride). Frames 16–23 were mostly hits.
+- `still_rings_picture_matches_legacy`, same corner, cache on, denoise off, frame 12. Lavapipe max-channel delta of rings against legacy: mean 0.023, p99 1.0 (0–255). The owner still gap at `6cd3cef` was mean 1.19 / p99 3.0.
 
 ## Real-GPU cost (RTX 4070, head e8fe3a39)
 
@@ -63,12 +65,12 @@ Why the trace counter did not move the time:
 
 What changed:
 
-- A settled rings frame is pixel direct and compose, plus one trace and one direct of the verification stride (`wake_budget` probes, one check ray each). Place, gather, filter, cache, and atrous stay off, matching legacy.
-- An unsettled rings frame with no live ring and no geometry change, after the eight strata have been filled, shrinks the picture trace and the kept-hit direct to that stride. Place, gather, filter, and the cache round stay, so the frame is not a held picture.
-- A live ring still launches the probe rays, so a woken probe is traced. The kept-hit and fill tail is omitted when no geometry changed. A kept hit is not shaded only because a lamp moved. A woken probe and its check ray still shade. The probe filter spreads that.
+- A settled rings frame is pixel direct and compose, plus one trace and one direct of the verification stride (`wake_budget` probes, one check ray each). Place, gather, filter, cache, and atrous stay off, matching legacy. The stride does not run gather, so it does not move the frozen picture.
+- An unsettled rings frame with no live ring keeps the probe-ray launch, so the check rays match legacy until settle. The kept-hit and fill tail is omitted when no geometry changed. Shrinking that launch to the stride at frame 8 was the still and corner picture gap at `6cd3cef`.
+- A live ring still launches the probe rays, so a woken probe is traced. The kept-hit and fill tail is omitted when no geometry changed. A kept hit is not shaded only because a lamp moved. A woken probe and its check ray still shade. The probe filter spreads that. That is the moving picture gap (mean 0.77 / p99 17.7).
 - Atrous is unchanged. It remains the cache-round cost, shared by both modes.
 
-`settled_rings_frame_matches_legacy_idle_plus_the_budget` and `rings_idle_frame_drops_the_kept_span` lock the group lists. No new 4070 millisecond is claimed here.
+`settled_rings_frame_matches_legacy_idle_plus_the_budget` and `unsettled_quiet_rings_frame_keeps_the_probe_rays` lock the group lists. `still_rings_picture_matches_legacy` compares the still corner. No new 4070 millisecond is claimed here.
 
 ## Owner A/B
 

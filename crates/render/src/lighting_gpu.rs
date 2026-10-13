@@ -1979,16 +1979,12 @@ impl Gpu {
         let wake_rings = wake_cfg.mode == 1;
         // The kept-hit tail of the trace launch only re-traces geometry crossings
         // and fills. A lamp move is not in that list. Rings with nothing to cross
-        // drops the tail. Once the strata exist and no ring is live, the picture
-        // trace and the kept-hit direct shrink to the verification stride.
+        // drops the tail. The probe rays stay until the frame is frozen: replacing
+        // them with the verification stride froze a field that did not match legacy.
         let span_kept = match &changes {
             None => true,
             Some(list) => !list.is_empty(),
         };
-        let wake_idle = wake_rings
-            && self.lighting.wake.len() == 0
-            && !span_kept
-            && self.lighting.still >= LIGHTING_STRATA;
         let planned = light_groups(
             &self.lighting.settings,
             self.lighting.frame,
@@ -2001,7 +1997,6 @@ impl Gpu {
             kept,
             wake_rings,
             span_kept,
-            wake_idle,
         );
         self.lighting.ctrl_bytes = pack_lighting_ctrl(
             &self.lighting.settings,

@@ -3880,6 +3880,9 @@ uint lighting_wake_sector(vec3 pos, vec3 center, uint sectors) {
     return min(uint(u * float(max(sectors, 1u))), sectors - 1u);
 }
 // Shade this hit even when the legacy check would keep its old light.
+// No queued event: only the verification check is forced, and the kept-light
+// write still uses the legacy noise hold, so a still picture matches. Mode 3
+// is the settled stride (gather does not run).
 bool lighting_wake_relight(uint h) {
     if (lighting_mode() == 3u) {
         uint rays = lighting_rays();
@@ -3887,6 +3890,12 @@ bool lighting_wake_relight(uint h) {
     }
     if (gstats.wake_mode == 0u) {
         return false;
+    }
+    if (gstats.wake_events == 0u) {
+        uint rays = lighting_rays();
+        uint pk = h / rays / LIGHTING_STRATA;
+        uint flags = floatBitsToUint(work.v[lighting_wake_probe_at(pk)].w);
+        return (h % rays) == lighting_hold_check_k(pk) && (flags & WAKE_VERIFY) != 0u;
     }
     uint rays = lighting_rays();
     uint pk = h / rays / LIGHTING_STRATA;

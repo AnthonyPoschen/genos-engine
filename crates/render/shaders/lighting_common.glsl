@@ -406,11 +406,12 @@ bool lighting_held_traced(uint probe, uint k, vec3 origin, vec3 dir, float t) {
     if (lighting_mode() == 3u && k == lighting_hold_check_k(probe)) {
         return true;
     }
-    // Rings: a held probe traces the check ray only when this frame woke it,
-    // is testing a ring, or drew the verification budget. A full wake traces
-    // the stratum. Geometry crossings stay on either mode. Legacy traces the
-    // check ray every frame.
-    if (gstats.wake_mode != 0u) {
+    // A live ring (wake_events > 0) traces the check ray only when this frame
+    // woke the probe, is testing a ring, or drew the verification budget. A
+    // full wake traces the stratum. With no event in the queue, rings traces
+    // the same check ray legacy does, so a still scene's probes converge to
+    // the same field before the idle freezes them. Geometry crossings stay.
+    if (gstats.wake_mode != 0u && gstats.wake_events != 0u) {
         uint flags = floatBitsToUint(work.v[lighting_wake_probe_at(probe)].w);
         if ((flags & 2u) != 0u) {
             return true;

@@ -7,9 +7,13 @@ use genos_render::{DebugView, LightingWakeProbe, LightingWakeStats, Renderer, Vi
 use genos_scene::{Camera, Ceiling, DebugSettings, Floor, Light, LightingSettings, Scene, Vec3, Wall};
 use genos_window::Window;
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
+fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
+    GPU.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
+    let guard = gpu_lock();
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
     let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
@@ -563,11 +567,12 @@ fn legacy_still_traces_one_check_ray_and_moving_traces_more() {
     );
 }
 
-/// Rings on a held still scene trace about the verification budget, not the grid.
-/// The corner room, the missed colour, and a still room that wakes nothing are
-/// the cases below this one.
+/// Rings on a still scene that has not settled yet traces one check ray per
+/// placed probe, the same as legacy. The verification stride is the settled
+/// idle (`settled_rings_frame_matches_legacy_idle_plus_the_budget`), not this
+/// frame: shrinking early froze a probe field the picture kept.
 #[test]
-fn rings_still_traces_the_verification_budget() {
+fn rings_still_traces_one_check_ray_before_settle() {
     let (_gpu, mut window, mut renderer) = open();
     std::env::set_var("GENOS_LIGHTING_WAKE", "rings");
     std::env::set_var("GENOS_LIGHTING_WAKE_BUDGET", "16");
@@ -593,11 +598,10 @@ fn rings_still_traces_the_verification_budget() {
     std::env::remove_var("GENOS_LIGHTING_WAKE_BUDGET");
     assert_eq!(last.probes_woken, 0, "a still scene does not wake");
     assert!(
-        last.probes_traced < 64,
-        "verification budget, not the grid ({})",
+        last.probes_traced > 50,
+        "check rays, not the verification stride ({})",
         last.probes_traced
     );
-    assert!(last.probes_traced > 0, "the budget still traces");
     assert!(
         last.rays_traced < last.probes_traced.saturating_mul(4).max(8),
         "held checks, not a stratum ({} rays / {} probes)",
@@ -629,7 +633,9 @@ fn clear_wake_env() {
 fn rings_room_settings(radius: f32, budget: u32, tol: f32) -> LightingSettings {
     let mut settings = LightingSettings::default();
     settings.set_key("world_cache", "0").unwrap();
-    settings.set_key("bounces", "0").unwrap();
+    // Bounce 0 records no probe pass. One bounce keeps the probes and skips
+    // the cache-to-cache passes.
+    settings.set_key("bounces", "1").unwrap();
     settings.set_key("probe_tile", "16").unwrap();
     settings.set_key("wake", "rings").unwrap();
     settings
@@ -741,8 +747,8 @@ fn rings_still_room_wakes_about_zero() {
     assert_eq!(last.probes_woken, 0, "a still room does not wake");
     assert_eq!(last.rings_tested, 0, "a still room tests no ring");
     assert!(
-        last.probes_traced > 0 && last.probes_traced < 40,
-        "verification budget, not the grid ({})",
+        last.probes_traced > 50,
+        "check rays until settle, not the verification stride ({})",
         last.probes_traced
     );
     assert!(
@@ -805,6 +811,59 @@ fn rings_still_room_with_cache_votes_hits() {
     assert!(
         late_hits > late_misses.saturating_mul(4),
         "held frames 16-23 were mostly misses (hits {late_hits} misses {late_misses})"
+    );
+}
+
+/// Mean and 99th percentile of the per-pixel max channel delta, 0–255.
+fn channel_delta(a: &[u8], b: &[u8]) -> (f64, f64) {
+    assert_eq!(a.len(), b.len());
+    let mut d: Vec<f64> = a
+        .chunks_exact(4)
+        .zip(b.chunks_exact(4))
+        .map(|(p, q)| {
+            (0..3)
+                .map(|c| (p[c] as f64 - q[c] as f64).abs())
+                .fold(0.0, f64::max)
+        })
+        .collect();
+    let mean = d.iter().copied().sum::<f64>() / d.len() as f64;
+    d.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    let p99 = d[(d.len() * 99 / 100).saturating_sub(0).min(d.len() - 1)];
+    (mean, p99)
+}
+
+fn still_corner_picture(wake: &str) -> Vec<u8> {
+    let mut window = Window::open_proof(320, 180).expect("proof window");
+    let frame = window.pump();
+    let mut renderer =
+        Renderer::open(window.display, window.surface, frame.width, frame.height).expect("renderer");
+    clear_wake_env();
+    let mut settings = LightingSettings::default();
+    settings.set_key("probe_tile", "16").unwrap();
+    settings.set_key("wake", wake).unwrap();
+    settings.set_key("denoise", "0").unwrap();
+    let world = corner_room(settings, Vec3::new(0.45, 1.2, 0.45), [8.0, 8.0, 8.0]);
+    let camera = corner_camera();
+    let mut pixels = Vec::new();
+    for _ in 0..12 {
+        pixels = draw(&mut window, &mut renderer, &world, &camera);
+    }
+    pixels
+}
+
+/// A still corner with the cache on matches legacy. Shrinking to the
+/// verification stride before settle froze a different probe field (owner
+/// still mean 1.19 / p99 3.0 against noise 0.23 / 1.3).
+#[test]
+fn still_rings_picture_matches_legacy() {
+    let _gpu = gpu_lock();
+    let legacy = still_corner_picture("legacy");
+    let rings = still_corner_picture("rings");
+    let (mean, p99) = channel_delta(&legacy, &rings);
+    eprintln!("still rings vs legacy mean {mean:.3} p99 {p99:.3}");
+    assert!(
+        mean < 0.15 && p99 < 2.0,
+        "still rings left the legacy picture (mean {mean:.3} p99 {p99:.3})"
     );
 }
 
