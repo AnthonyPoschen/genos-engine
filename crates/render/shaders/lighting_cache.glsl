@@ -2059,29 +2059,7 @@ vec4 lighting_sc_own_shown(uint slot) {
 // as before, which falls back to its lit neighbours, never black.
 const float LIGHTING_SC_READ_SETS = 4.0;
 vec3 lighting_cache_irradiance(vec3 pos, vec3 n);
-// S73Q: the plain-mean sample must not read a fine texel. Pre-fill texels light
-// each other, and that neighbourhood is the bright one. It also must not read
-// the published dark-fill cell: a mean of those samples sits on the same value.
-// Only an existing plain mean counts. Until one exists the bounce is zero, so
-// the mean climbs from the direct light. Read only (no claim, offer, or stamp).
-vec3 lighting_wrc_plain_hit(vec3 pos, vec3 n) {
-    uint s = lighting_cache_find_sized(pos, n, false, LIGHTING_SC_HIT, pos);
-    if (s != ~0u && cache.v[3u * s + 1u].w > 0.2) {
-        vec3 plain;
-        if (lighting_wrc_plain_rgb(s, plain)) {
-            lighting_bounce_path = 1u;
-            lighting_hit_sunfrac = lighting_sc_sunfrac_now(s);
-            return plain * lighting_sc_sun_gain(s);
-        }
-    }
-    lighting_bounce_path = 2u;
-    lighting_hit_sunfrac = 0.0;
-    return vec3(0.0);
-}
 vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
-    if (lighting_wrc_plain_read) {
-        return lighting_wrc_plain_hit(pos, n);
-    }
     if (lighting_world_mode() == 3u && (lighting_sc_flags() & 2097152u) == 0u && !lighting_sc_slanted(n)) {
         float hs = lighting_hit_size_n(pos, n);
         if (t < hs * 1.7320508) {
