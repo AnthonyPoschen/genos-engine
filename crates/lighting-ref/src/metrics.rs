@@ -58,6 +58,12 @@ pub struct FrameMetrics {
     pub luma_ratio: Option<f64>,
     /// `|luma_ratio - 1|`. The gate for a brightness bias.
     pub luma_delta: Option<f64>,
+    /// Frames from a fresh renderer until blurred error crossed the settle
+    /// line. `None` when the run was warm, or it used a fixed frame count.
+    pub cold_frames: Option<f64>,
+    /// Set with [`FrameMetrics::cold_frames`] when that count is the cap and
+    /// the line was not crossed. The picture gates stay as they are.
+    pub cold_settled: bool,
 }
 
 impl FrameMetrics {
@@ -178,6 +184,8 @@ pub fn measure(
         blur_rel: Some(blur_rel),
         luma_ratio: Some(luma_ratio),
         luma_delta: Some(luma_delta),
+        cold_frames: None,
+        cold_settled: false,
     })
 }
 

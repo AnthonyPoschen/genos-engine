@@ -88,6 +88,62 @@ pub fn write_metrics(
     std::fs::write(path, body).map_err(|err| format!("{}: {err}", path.display()))
 }
 
+/// Write `updates` into `path`, keeping every checkpoint the file already
+/// names that this call does not replace.
+pub fn upsert_metrics(
+    path: &Path,
+    commit: &str,
+    updates: &[(&str, &str, &FrameMetrics)],
+) -> Result<(), String> {
+    let mut kept = Vec::new();
+    if path.is_file() {
+        let text =
+            std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+        for object in nested_objects(&text) {
+            let scene = string_field(object, "scene").unwrap_or_default();
+            let checkpoint = string_field(object, "checkpoint").unwrap_or_default();
+            let replaced = updates.iter().any(|(next_scene, next_checkpoint, _)| {
+                *next_scene == scene && *next_checkpoint == checkpoint
+            });
+            if !replaced {
+                kept.push(object.trim().trim_end_matches(',').trim().to_string());
+            }
+        }
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("{}: {err}", parent.display()))?;
+        }
+    }
+    let mut body = String::from("{\n");
+    body.push_str(&format!("  \"commit\": \"{}\",\n", escape(commit)));
+    body.push_str("  \"checkpoints\": [\n");
+    let total = kept.len() + updates.len();
+    for (i, object) in kept.iter().enumerate() {
+        let comma = if i + 1 == total { "" } else { "," };
+        body.push_str("    ");
+        body.push_str(object);
+        body.push_str(comma);
+        body.push('\n');
+    }
+    for (i, (scene, checkpoint, metrics)) in updates.iter().enumerate() {
+        let comma = if kept.len() + i + 1 == total { "" } else { "," };
+        body.push_str("    {\n");
+        body.push_str(&format!("      \"scene\": \"{}\",\n", escape(scene)));
+        body.push_str(&format!("      \"checkpoint\": \"{}\"", escape(checkpoint)));
+        let saved = Baseline::from_metrics(metrics);
+        for id in MetricId::all() {
+            if let Some(value) = saved.get(*id) {
+                body.push_str(&format!(",\n      \"{}\": {}", id.key(), fmt(value)));
+            }
+        }
+        body.push_str(&format!("\n    }}{comma}\n"));
+    }
+    body.push_str("  ]\n}\n");
+    std::fs::write(path, body).map_err(|err| format!("{}: {err}", path.display()))
+}
+
 pub fn read_metrics(path: &Path) -> Result<MetricsFile, String> {
     let text = std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
     let commit = string_field(&text, "commit").unwrap_or_default();

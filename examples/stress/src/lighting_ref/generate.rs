@@ -23,8 +23,10 @@ pub struct TraceProfile {
 
 impl TraceProfile {
     /// Owner GPU machine. Batches of 16 samples until the noise estimate is
-    /// 0.05, 256 samples, or 120 seconds. The achieved noise is stored per
-    /// checkpoint and the score uses it. The path trace is CPU work.
+    /// 0.05, the checkpoint's sample cap, or the time cap. The cap is 256,
+    /// and 1024 for room-a, so stored noise stays under
+    /// [`genos_lighting_ref::REFERENCE_NOISE_CEILING`]. The achieved noise is
+    /// stored per checkpoint and the score uses it. The path trace is CPU work.
     pub fn owner() -> Self {
         Self {
             name: "owner",
@@ -51,6 +53,30 @@ impl TraceProfile {
             noise_target: 1.0,
         }
     }
+
+    /// Owner sample cap for this checkpoint. Lavapipe-small stays one sample.
+    /// A higher cap stretches the time budget by the same factor so the
+    /// sample count is what stops the trace.
+    pub fn for_checkpoint(self, scene: &str, checkpoint: &str) -> Self {
+        if self.name != "owner" {
+            return self;
+        }
+        let Some(desc) = genos_lighting_ref::checkpoints()
+            .iter()
+            .find(|desc| desc.scene == scene && desc.name == checkpoint)
+        else {
+            return self;
+        };
+        if desc.owner_spp <= self.max_spp {
+            return self;
+        }
+        let scale = desc.owner_spp as f32 / self.max_spp.max(1) as f32;
+        Self {
+            max_spp: desc.owner_spp,
+            seconds: self.seconds * scale,
+            ..self
+        }
+    }
 }
 
 pub struct GenerateOptions {
@@ -59,6 +85,11 @@ pub struct GenerateOptions {
     pub profile: TraceProfile,
     pub only_scene: Option<String>,
     pub only_checkpoint: Option<String>,
+    /// Empty keeps the catalog. Otherwise only these checkpoints are traced.
+    pub sequence: Vec<(String, String)>,
+    /// Replace a reference that is already in the directory. Without this, an
+    /// existing linear picture is left where it is.
+    pub regen: bool,
 }
 
 pub fn generate(opts: &GenerateOptions) -> Result<Vec<ReferenceRecord>, String> {
@@ -86,6 +117,21 @@ pub fn generate(opts: &GenerateOptions) -> Result<Vec<ReferenceRecord>, String> 
             {
                 continue;
             }
+            if !opts.sequence.is_empty()
+                && !opts
+                    .sequence
+                    .iter()
+                    .any(|(scene, name)| scene == cp.scene && name == cp.name)
+            {
+                continue;
+            }
+            if !opts.regen && store::reference_exists(&opts.reference_dir, cp.scene, cp.name) {
+                println!(
+                    "keeping {} {}  (pass --regen to replace)",
+                    cp.scene, cp.name
+                );
+                continue;
+            }
             let Some(shot) = shot(cp.scene, cp.name) else {
                 return Err(format!("no camera for {} {}", cp.scene, cp.name));
             };
@@ -107,6 +153,7 @@ pub fn generate(opts: &GenerateOptions) -> Result<Vec<ReferenceRecord>, String> 
                     width: picture.width,
                     height: picture.height,
                     spp: traced.spp,
+                    sample_cap: setup.max_spp,
                     noise: traced.noise,
                     seconds: traced.seconds,
                     max_bounces: setup.max_bounces,
@@ -131,12 +178,21 @@ pub fn generate(opts: &GenerateOptions) -> Result<Vec<ReferenceRecord>, String> 
             records.push(record);
         }
     }
+    let mut on_disk = store::records_on_disk(&opts.reference_dir)?;
+    for record in &mut on_disk {
+        if let Some(cp) = genos_lighting_ref::checkpoints()
+            .iter()
+            .find(|cp| cp.scene == record.scene && cp.name == record.checkpoint)
+        {
+            record.note = cp.note.to_string();
+        }
+    }
     store::write_manifest(
         &opts.reference_dir,
         &Manifest {
             commit: opts.commit.clone(),
             profile: opts.profile.name.to_string(),
-            records: records.clone(),
+            records: on_disk,
             skipped,
         },
     )?;
@@ -145,15 +201,24 @@ pub fn generate(opts: &GenerateOptions) -> Result<Vec<ReferenceRecord>, String> 
 }
 
 /// `metrics.json` beside the pictures, so `--base <commit>` finds a file
-/// before any live capture. A later check that scores pictures replaces it
-/// with those candidate metrics.
+/// before any live capture. Rows this call did not trace stay in the file.
+/// A missing file is filled from every picture in the directory.
 fn write_base_metrics(
     dir: &std::path::Path,
     commit: &str,
-    records: &[ReferenceRecord],
+    traced: &[ReferenceRecord],
 ) -> Result<(), String> {
+    let path = dir.join("metrics.json");
+    let records = if path.is_file() {
+        traced.to_vec()
+    } else {
+        store::records_on_disk(dir)?
+    };
+    if records.is_empty() {
+        return Ok(());
+    }
     let mut owned = Vec::new();
-    for record in records {
+    for record in &records {
         let picture = store::read_reference(dir, &record.scene, &record.checkpoint)?;
         let metrics = baseline::reference_metrics(&picture, f64::from(record.noise))?;
         owned.push((record.scene.clone(), record.checkpoint.clone(), metrics));
@@ -162,8 +227,11 @@ fn write_base_metrics(
         .iter()
         .map(|(scene, checkpoint, metrics)| (scene.as_str(), checkpoint.as_str(), metrics))
         .collect();
-    let path = dir.join("metrics.json");
-    baseline::write_metrics(&path, commit, &refs)?;
+    if path.is_file() {
+        baseline::upsert_metrics(&path, commit, &refs)?;
+    } else {
+        baseline::write_metrics(&path, commit, &refs)?;
+    }
     println!("base metrics {}", path.display());
     Ok(())
 }

@@ -239,6 +239,11 @@ const uint LIGHTING_COMPOSE_MINX = LIGHTING_COMPOSE_PACK + LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_COMPOSE_MINY = LIGHTING_COMPOSE_MINX + LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_COMPOSE_MAXX = LIGHTING_COMPOSE_MINY + LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_COMPOSE_MAXY = LIGHTING_COMPOSE_MAXX + LIGHTING_CACHE_SLOTS;
+// After the a-trous meta (391) and the sun words (8). Same base as
+// LIGHTING_ATROUS_PPM_AT. Seed 0 never reads these. A seeded run keeps one
+// rgb9e5 and one offer score per slot, past every published cache key.
+const uint LIGHTING_SEED_COLOR_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS + 391u + 8u;
+const uint LIGHTING_OFFER_AT = LIGHTING_SEED_COLOR_AT + LIGHTING_CACHE_SLOTS;
 // Set by the compose pass around the lookups that colour a pixel.
 bool lighting_sc_display = false;
 uvec2 lighting_compose_px = uvec2(0u);
@@ -387,6 +392,17 @@ void lighting_compose_note_field(uint slot, uint packed) {
 // their own (lighting_gpu.rs), so a frame without one skips no batch.
 uint lighting_round() {
     return pc.params.z >> 12u;
+}
+
+// Schedule id. Seed 0 is the slot, so a live frame keeps today's phases.
+// A seeded frame uses the cache key: two runs can claim different slots for
+// the same patch, and the key does not follow that race.
+uint lighting_sched(uint slot) {
+    if (pc.seed == 0u) {
+        return slot;
+    }
+    uint key = ckeys.key[slot];
+    return key == 0u ? slot : key;
 }
 
 // This round relights young patches only (params.z bit 10).
@@ -810,6 +826,68 @@ vec3 lighting_sc_centre(vec3 pos, vec3 n, float size) {
     return q;
 }
 
+// Seeded claim. The live game (seed 0) keeps the scan below. The whole window
+// is read before any free slot is taken: a hole in front of a live key must not
+// become a second, empty copy of that key. The payload is the cell centre on
+// the surface through the claim (the axis-aligned depth stays on that plane)
+// and the axis, so every claimer writes one point. A full window drops the
+// patch, the same as the live scan.
+uint lighting_cache_claim_seeded(vec3 pos, vec3 n, bool claim, float size, vec3 at, uint key, uint start) {
+    uint free_at = LIGHTING_CACHE_SEARCH;
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_CACHE_SEARCH; i++) {
+        uint slot = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
+        uint prev = atomicCompSwap(ckeys.key[slot], key, key);
+        if (prev == key) {
+            lighting_compose_cover(slot);
+            return slot;
+        }
+        if (prev == 0u && free_at == LIGHTING_CACHE_SEARCH) {
+            free_at = i;
+        }
+    }
+    if (!claim || free_at == LIGHTING_CACHE_SEARCH) {
+        return ~0u;
+    }
+    [[dont_unroll]] for (uint i = free_at; i < LIGHTING_CACHE_SEARCH; i++) {
+        uint slot = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
+        uint prev = atomicCompSwap(ckeys.key[slot], key, key);
+        if (prev == key) {
+            lighting_compose_cover(slot);
+            return slot;
+        }
+        if (prev != 0u) {
+            continue;
+        }
+        prev = atomicCompSwap(ckeys.key[slot], 0u, key);
+        if (prev == key) {
+            lighting_compose_cover(slot);
+            return slot;
+        }
+        if (prev != 0u) {
+            continue;
+        }
+        atomicAdd(gstats.claimed, 1u);
+        if (lighting_world_mode() == 3u) {
+            vec3 axis = lighting_axis_vec(lighting_axis(n));
+            at = lighting_sc_centre(pos, axis, size);
+            n = axis;
+        }
+        cache.v[3u * slot] = vec4(at, uintBitsToFloat(lighting_frame()));
+        cache.v[3u * slot + 1u] = vec4(n, size);
+        cache.v[3u * slot + 2u] = vec4(0.0);
+        cache.v[LIGHTING_WORLD_AT + slot] = vec4(length(at - lighting_sc_centre(pos, n, size)), 0.0, 0.0, 0.0);
+        cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(0.0);
+        cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(0.0);
+        cache.v[LIGHTING_SC_SPARSE_AT + slot] = vec4(0.0);
+        if (lighting_world_mode() == 3u) {
+            cache.v[LIGHTING_SC_OBJ_AT + slot] = vec4(lighting_obj_salt, 0.0, 0.0, 0.0);
+        }
+        lighting_compose_cover(slot);
+        return slot;
+    }
+    return ~0u;
+}
+
 // Slot of the patch for (pos, n), claiming a free one when `claim`; ~0u if none.
 // The whole search window is checked for the key before anything is claimed: a
 // freed slot can sit in front of a live patch's slot, and claiming it would make a
@@ -817,6 +895,9 @@ vec3 lighting_sc_centre(vec3 pos, vec3 n, float size) {
 uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
     uint key = lighting_cache_key_sized(pos, n, size);
     uint start = lighting_hash(key ^ 0x9e3779b9u);
+    if (pc.seed != 0u) {
+        return lighting_cache_claim_seeded(pos, n, claim, size, at, key, start);
+    }
     uint free_at = LIGHTING_CACHE_SEARCH;
     [[dont_unroll]] for (uint i = 0u; i < LIGHTING_CACHE_SEARCH; i++) {
         uint k = ckeys.key[(start + i) & (LIGHTING_CACHE_SLOTS - 1u)];
@@ -876,6 +957,31 @@ uint lighting_cache_find(vec3 pos, vec3 n, bool claim) {
 // (the centre itself can lie inside a wall at a corner).
 void lighting_sc_offer(uint slot, vec3 at, vec3 centre) {
     if (lighting_world_mode() != 3u) {
+        return;
+    }
+    // A seeded run still moves the point onto the nearest real hit. The score
+    // picks one of those hits. The sample count is not restarted.
+    if (pc.seed != 0u) {
+        if ((lighting_sc_flags() & 16384u) != 0u) {
+            return;
+        }
+        float d = length(at - centre);
+        float near01 = clamp(1.0 - d * 0.25, 0.0, 1.0);
+        uint q = min(uint(near01 * 65535.0), 65535u);
+        uint tie = lighting_hash(floatBitsToUint(at.x) ^ lighting_hash(floatBitsToUint(at.y) ^ floatBitsToUint(at.z)));
+        uint score = (q << 16u) | (tie & 0xffffu);
+        if (score == 0u) {
+            score = 1u;
+        }
+        uint prev = atomicMax(ckeys.key[LIGHTING_OFFER_AT + slot], score);
+        if (score > prev) {
+            cache.v[LIGHTING_WORLD_AT + slot].x = d;
+            cache.v[3u * slot].xyz = at;
+            if (ckeys.key[LIGHTING_OFFER_AT + slot] == score) {
+                cache.v[LIGHTING_WORLD_AT + slot].x = d;
+                cache.v[3u * slot].xyz = at;
+            }
+        }
         return;
     }
     // Flag 524288 (camera only orders updates): the point still moves toward the
@@ -1461,7 +1567,7 @@ vec3 lighting_sc_regularise(uint slot, vec3 value) {
     float vlum = dot(value, lw);
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
-    float rot = edge_aware ? 0.7853982 * float(lighting_hash(slot * 0x27d4eb2du) & 1u) : 0.0;
+    float rot = edge_aware ? 0.7853982 * float(lighting_hash(lighting_sched(slot) * 0x27d4eb2du) & 1u) : 0.0;
     [[dont_unroll]] for (uint d = 0u; d < 4u; d++) {
         [[dont_unroll]] for (uint l = 0u; l < 4u; l++) {
             uint i = l * 4u + d;
@@ -1574,7 +1680,7 @@ void lighting_sc_recon(uint slot) {
         ref_se2 = lighting_sc_l2_var(slot, ref) / t;
     }
     bool edge = false;
-    float rot = 0.3926991 * float(lighting_hash(slot * 0x27d4eb2du) & 1u);
+    float rot = 0.3926991 * float(lighting_hash(lighting_sched(slot) * 0x27d4eb2du) & 1u);
     [[dont_unroll]] for (uint d = 0u; d < 8u; d++) {
         float a = 0.7853982 * float(d) + rot;
         vec3 dir = cos(a) * ta + sin(a) * tb;
@@ -1906,6 +2012,27 @@ void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
     }
     cache.v[LIGHTING_SC_SPARSE_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0))));
     cache.v[LIGHTING_SC_SPARSE_AT + slot].z = clamp(conf, 0.05, 1.0);
+}
+// Probe light differs per pixel. atomicMax keeps one real rgb9e5 of those
+// writes. A late dimmer writer sees the higher word and leaves it. Two stores,
+// not a spin. Seed 0 keeps the last writer.
+void lighting_sc_set_probe_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
+    if (pc.seed == 0u) {
+        lighting_sc_set_seed(slot, rgb, conf, sunfrac);
+        return;
+    }
+    uint packed = lighting_pack_rgb9e5(max(rgb, vec3(0.0)));
+    if (packed == 0u) {
+        packed = 1u;
+    }
+    uint prev = atomicMax(ckeys.key[LIGHTING_SEED_COLOR_AT + slot], packed);
+    if (packed < prev) {
+        return;
+    }
+    lighting_sc_set_seed(slot, lighting_unpack_rgb9e5(packed), conf, sunfrac);
+    if (ckeys.key[LIGHTING_SEED_COLOR_AT + slot] == packed) {
+        lighting_sc_set_seed(slot, lighting_unpack_rgb9e5(packed), conf, sunfrac);
+    }
 }
 vec4 lighting_sc_seed(uint slot) {
     vec4 sp = cache.v[LIGHTING_SC_SPARSE_AT + slot];
@@ -2297,7 +2424,180 @@ uint lighting_dense_entry(uint d) {
     }
     return LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES + (d - g);
 }
+// Seeded admission. The list body is 0xffffffff for an empty bucket. A pack
+// keeps the top bit clear, so atomicMin prefers any real candidate over empty.
+// Low 20 bits are the slot (the cache has 2^20 slots). Seed 0 does not call these.
+// A run pack also stores the copy count: the cache pass sums consecutive copies
+// of one slot on the thread that owns the first copy.
+uint lighting_seed_pack(uint slot, uint salt) {
+    uint rank = lighting_hash(lighting_sched(slot) ^ salt);
+    return (rank & 0x7ff00000u) | (slot & 0x000fffffu);
+}
+uint lighting_seed_run_pack(uint slot, uint n, uint salt) {
+    uint rank = lighting_hash(lighting_sched(slot) ^ salt);
+    uint copies = min(max(n, 1u), 8u);
+    return ((rank >> 24u) << 23u) | ((copies - 1u) << 20u) | (slot & 0x000fffffu);
+}
+uint lighting_seed_run_n(uint pack) {
+    return ((pack >> 20u) & 7u) + 1u;
+}
+uint lighting_wrc_list_cap() {
+    return max(LIGHTING_WRC_REFRESH_CELLS >> lighting_sc_budget_shift(), 1u);
+}
+uint lighting_trickle_list_cap() {
+    return max(LIGHTING_SC_TRICKLE >> lighting_sc_budget_shift(), 1u);
+}
+uint lighting_grad_list_cap() {
+    return max((LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift(), 1u);
+}
+uint lighting_seed_room() {
+    uint sh = lighting_sc_budget_shift();
+    if (lighting_world_mode() == 3u) {
+        return max(lighting_sc_base_room() >> sh, 1u);
+    }
+    return LIGHTING_CACHE_BATCH;
+}
+// Matches LIGHTING_GRAD_LIST_AT, which is declared further down.
+const uint LIGHTING_SEED_GRAD_LIST_AT = LIGHTING_ARGS_AT + 16u + 3u * 65536u + 1024u;
+
+void lighting_put_capped(uint count_at, uint list_at, uint cap, uint seeded_cap, uint slot, uint salt) {
+    if (pc.seed == 0u) {
+        uint at = atomicAdd(ckeys.key[count_at], 1u);
+        if (at < cap) {
+            ckeys.key[list_at + at] = slot;
+        }
+        return;
+    }
+    uint room = max(seeded_cap, 1u);
+    uint pack = lighting_seed_pack(slot, salt);
+    atomicMin(ckeys.key[list_at + (lighting_hash(pack ^ salt) % room)], pack);
+}
+void lighting_put_forward(uint count_at, uint list_at, uint slot, uint n, uint salt) {
+    if (pc.seed == 0u) {
+        uint at = atomicAdd(ckeys.key[count_at], n);
+        for (uint i = 0u; i < n; i++) {
+            ckeys.key[list_at + at + i] = slot;
+        }
+        return;
+    }
+    uint pack = lighting_seed_run_pack(slot, n, salt);
+    uint room = lighting_seed_room();
+    atomicMin(ckeys.key[list_at + (lighting_hash(pack) % room)], pack);
+}
+void lighting_put_backward(uint count_at, uint base, uint slot, uint n, uint salt) {
+    if (pc.seed == 0u) {
+        uint at = atomicAdd(ckeys.key[count_at], n);
+        for (uint i = 0u; i < n; i++) {
+            ckeys.key[base - at - i] = slot;
+        }
+        return;
+    }
+    uint pack = lighting_seed_run_pack(slot, n, salt);
+    uint room = lighting_seed_room();
+    atomicMin(ckeys.key[base - (lighting_hash(pack) % room)], pack);
+}
+void lighting_seal_forward(uint count_at, uint list_at, uint cap) {
+    uint n = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < cap; i++) {
+        uint pack = ckeys.key[list_at + i];
+        if (pack != 0xffffffffu) {
+            ckeys.key[list_at + n] = pack & 0x000fffffu;
+            n++;
+        }
+    }
+    ckeys.key[count_at] = n;
+}
+// Compact rank buckets, then expand each winner into consecutive copies.
+// The cache pass sums a run on one thread, so the copies have to sit together.
+// Expanding from the end keeps an unread pack ahead of the write cursor.
+void lighting_seal_forward_runs(uint count_at, uint list_at, uint cap, uint limit) {
+    uint u = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < cap; i++) {
+        uint pack = ckeys.key[list_at + i];
+        if (pack != 0xffffffffu) {
+            ckeys.key[list_at + u] = pack;
+            u++;
+        }
+    }
+    uint used = 0u;
+    uint covered = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < u && used < limit; i++) {
+        uint pack = ckeys.key[list_at + i];
+        uint n = lighting_seed_run_n(pack);
+        uint take = min(n, limit - used);
+        if (take < n) {
+            pack = (pack & ~0x00700000u) | ((take - 1u) << 20u);
+            ckeys.key[list_at + i] = pack;
+        }
+        used += take;
+        covered++;
+    }
+    uint dst = used;
+    uint i = covered;
+    [[dont_unroll]] while (i > 0u && dst > 0u) {
+        i--;
+        uint pack = ckeys.key[list_at + i];
+        uint slot = pack & 0x000fffffu;
+        uint n = lighting_seed_run_n(pack);
+        [[dont_unroll]] for (uint k = 0u; k < n; k++) {
+            dst--;
+            ckeys.key[list_at + dst] = slot;
+        }
+    }
+    ckeys.key[count_at] = used;
+}
+void lighting_seal_backward_runs(uint count_at, uint base, uint cap, uint limit) {
+    uint u = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < cap; i++) {
+        uint pack = ckeys.key[base - i];
+        if (pack != 0xffffffffu) {
+            ckeys.key[base - u] = pack;
+            u++;
+        }
+    }
+    uint used = 0u;
+    uint covered = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < u && used < limit; i++) {
+        uint pack = ckeys.key[base - i];
+        uint n = lighting_seed_run_n(pack);
+        uint take = min(n, limit - used);
+        if (take < n) {
+            pack = (pack & ~0x00700000u) | ((take - 1u) << 20u);
+            ckeys.key[base - i] = pack;
+        }
+        used += take;
+        covered++;
+    }
+    uint dst = used;
+    uint i = covered;
+    [[dont_unroll]] while (i > 0u && dst > 0u) {
+        i--;
+        uint pack = ckeys.key[base - i];
+        uint slot = pack & 0x000fffffu;
+        uint n = lighting_seed_run_n(pack);
+        [[dont_unroll]] for (uint k = 0u; k < n; k++) {
+            dst--;
+            ckeys.key[base - dst] = slot;
+        }
+    }
+    ckeys.key[count_at] = used;
+}
+void lighting_seal_seeded_lists() {
+    if (pc.seed == 0u) {
+        return;
+    }
+    uint room = lighting_seed_room();
+    uint span = LIGHTING_CACHE_BATCH;
+    lighting_seal_backward_runs(2u * LIGHTING_CACHE_SLOTS + 1u, 2u * LIGHTING_CACHE_SLOTS, room, span);
+    lighting_seal_forward_runs(LIGHTING_CACHE_SLOTS, LIGHTING_CACHE_SLOTS + 1u, room, span);
+    lighting_seal_forward(LIGHTING_WRC_CHG_COUNT_AT, LIGHTING_WRC_CHG_AT, lighting_wrc_list_cap());
+    lighting_seal_forward(LIGHTING_WRC_BG_COUNT_AT, LIGHTING_WRC_BG_AT, lighting_wrc_list_cap());
+    lighting_seal_forward(LIGHTING_SC_TRICKLE_COUNT_AT, LIGHTING_SC_TRICKLE_AT, lighting_trickle_list_cap());
+    lighting_seal_forward(LIGHTING_SC_HIST_AT + 72u, LIGHTING_SEED_GRAD_LIST_AT, lighting_grad_list_cap());
+}
+
 void lighting_write_args() {
+    lighting_seal_seeded_lists();
     uint a;
     uint b = 0u;
     uint c = 0u;
@@ -2716,6 +3016,8 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             } else if (rs.w > 0.5) {
                 // S62E: the seed is light as of now; stored in the slot's scale.
                 // S64B: the seed is light as of now, with its seeds' sun/sky share.
+                // The resample is a function of the cell, so every writer stores
+                // the same bits.
                 cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(lighting_seed_sunfrac, max(lighting_ls_now(), 0.0), 0.0, 0.0);
                 cache.v[3u * slot + 2u] = rs;
             }
@@ -2751,15 +3053,33 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
                 }
             } else if (split && lighting_px_probes.x >= 0.0 && !obj && cache.v[3u * slot + 2u].w < 0.5) {
                 // S72N: the S72M probe seed, as a seed (not an own set).
-                lighting_sc_set_seed(slot, lighting_px_probes, 0.25, 0.0);
+                // A seeded run stores one real probe color. This pixel still
+                // shows its own probes this frame.
+                lighting_sc_set_probe_seed(slot, lighting_px_probes, 0.25, 0.0);
                 v = vec4(lighting_px_probes, 1.0);
             } else if (lighting_px_probes.x >= 0.0 && !obj && cache.v[3u * slot + 1u].w <= 0.2 && cache.v[3u * slot + 2u].w < 0.5) {
                 // S72M (video: first reveal tore along the screen, the new strip
                 // on the probes, the rest on texels): nothing lit here yet, so the
                 // texel starts from the probes' light at this pixel, one set's
                 // worth; its own sets replace it (count-weighted, as any mean).
-                cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(0.0, max(lighting_ls_now(), 0.0), 0.0, 0.0);
-                cache.v[3u * slot + 2u] = vec4(lighting_px_probes, 1.0);
+                if (pc.seed == 0u) {
+                    cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(0.0, max(lighting_ls_now(), 0.0), 0.0, 0.0);
+                    cache.v[3u * slot + 2u] = vec4(lighting_px_probes, 1.0);
+                } else if (cache.v[3u * slot + 2u].w < 0.5) {
+                    uint packed = lighting_pack_rgb9e5(max(lighting_px_probes, vec3(0.0)));
+                    if (packed == 0u) {
+                        packed = 1u;
+                    }
+                    uint prev = atomicMax(ckeys.key[LIGHTING_SEED_COLOR_AT + slot], packed);
+                    if (packed >= prev) {
+                        vec3 won = lighting_unpack_rgb9e5(packed);
+                        cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(0.0, max(lighting_ls_now(), 0.0), 0.0, 0.0);
+                        cache.v[3u * slot + 2u] = vec4(won, 1.0);
+                        if (ckeys.key[LIGHTING_SEED_COLOR_AT + slot] == packed) {
+                            cache.v[3u * slot + 2u] = vec4(won, 1.0);
+                        }
+                    }
+                }
                 v = vec4(lighting_px_probes, 1.0);
             }
         }
@@ -3556,7 +3876,7 @@ void lighting_svgf_push(uint slot) {
     // LIGHTING_PUSH_IDLE by hash (the +-4 R clamp, a texel just shown).
     if (LIGHTING_DIRTY_ATROUS && W >= 0.999 && !lighting_svgf_stamp_recent(slot, 3u)
         && cache.v[LIGHTING_SC_ATROUS_B + slot].w != 0.0
-        && ((lighting_hash(slot ^ 0x7f4a7c15u) + lighting_frame()) % LIGHTING_PUSH_IDLE) != 0u) {
+        && ((lighting_hash(lighting_sched(slot) ^ 0x7f4a7c15u) + lighting_frame()) % LIGHTING_PUSH_IDLE) != 0u) {
         // S72V10 trusts the field for two frames from this stamp. The idle skip
         // does not rewrite the field, so while the camera is held the stamp stays
         // current and compose keeps showing that field instead of dropping it
@@ -3785,7 +4105,7 @@ bool lighting_sc_check_turn(uint slot) {
         return true;
     }
     uint k = (dem + room - 1u) / room;
-    return ((lighting_hash(slot ^ 0x7feb352du) + lighting_round()) % k) == 0u;
+    return ((lighting_hash(lighting_sched(slot) ^ 0x7feb352du) + lighting_round()) % k) == 0u;
 }
 void lighting_sc_check_soon(uint slot) {
     cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + 1u);

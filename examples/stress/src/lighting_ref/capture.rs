@@ -1,8 +1,9 @@
 //! Live frames for one check.
 //!
 //! The path trace is the reference. These frames are the candidate. Every mode
-//! uses the same [`super::schedule::FramePlan`]: warmup, then an approach or an
-//! event jump, then settle. Wall time is logged per frame and does not choose
+//! uses the same [`super::schedule::FramePlan`]: warmup, then an approach or a
+//! held scene, then settle. A metric event holds the pose before the jump for
+//! the settle cap, then jumps. Wall time is logged per frame and does not choose
 //! when to stop. `picture_settled` is logged and ignored on the first frame of
 //! a pose, because that flag can still describe the pose before it.
 
@@ -39,6 +40,10 @@ pub struct LiveShot {
     pub event_frames: Vec<(u32, Picture)>,
     pub log: Vec<FrameRecord>,
     pub note: String,
+    /// Frame index where a fresh renderer crossed the settle line.
+    pub cold_frames: Option<f64>,
+    /// `cold_frames` is the cap, and the line was not crossed.
+    pub cold_settled: bool,
 }
 
 pub struct CaptureOutcome {
@@ -57,6 +62,12 @@ pub struct CaptureOptions {
     pub plan: FramePlan,
     pub params: MetricParams,
     pub jobs: Vec<Job>,
+    /// Keep one renderer, and its lighting caches, across checkpoints.
+    /// The default opens a fresh renderer for each checkpoint.
+    pub warm: bool,
+    /// `None` is the pose seed. `Some(0)` is the live game. A non-zero value
+    /// replaces the pose seed. The check command leaves this unset.
+    pub lighting_seed: Option<u32>,
 }
 
 pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
@@ -70,20 +81,16 @@ pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
     }
     let mut window = Window::open_proof(opts.width, opts.height)?;
     window.set_title("Genos lighting reference check");
-    let frame = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
-    if renderer.width() != opts.width || renderer.height() != opts.height {
-        return Err(format!(
-            "proof window is {}x{}, the reference is {}x{}",
-            renderer.width(),
-            renderer.height(),
-            opts.width,
-            opts.height
-        ));
-    }
+    let mut renderer = open_renderer(&mut window, opts.width, opts.height)?;
     let mut shots = Vec::new();
     let mut skipped = Vec::new();
-    for job in &opts.jobs {
+    for (index, job) in opts.jobs.iter().enumerate() {
+        if !opts.warm && index > 0 {
+            // Drop the device before the next open. Assignment would keep the
+            // old swapchain alive until the new one had already failed.
+            drop(renderer);
+            renderer = open_renderer(&mut window, opts.width, opts.height)?;
+        }
         let Some(shot) = scenes::shot(&job.scene, &job.checkpoint) else {
             skipped.push((
                 job.scene.clone(),
@@ -98,6 +105,21 @@ pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
         }
     }
     Ok(CaptureOutcome { shots, skipped })
+}
+
+fn open_renderer(window: &mut Window, width: u32, height: u32) -> Result<Renderer, String> {
+    let frame = window.pump();
+    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    if renderer.width() != width || renderer.height() != height {
+        return Err(format!(
+            "proof window is {}x{}, the reference is {}x{}",
+            renderer.width(),
+            renderer.height(),
+            width,
+            height
+        ));
+    }
+    Ok(renderer)
 }
 
 fn capture_one(
@@ -117,12 +139,17 @@ fn capture_one(
         },
     );
     let (mut stage, camera) = scenes::open_stage(shot, opts.full_effort, opts.bounces);
+    let seed = opts
+        .lighting_seed
+        .unwrap_or_else(|| scenes::pose_seed(shot, opts.full_effort, opts.bounces));
+    renderer.set_lighting_seed(seed);
     let max_offset = opts.plan.capture_offsets.iter().copied().max().unwrap_or(0);
     let mut log = Vec::new();
     let mut settle_pics = Vec::new();
     let mut settle_frame_ids = Vec::new();
     let mut crossed: Option<u32> = None;
     let mut prev_phase: Option<Phase> = None;
+    let mut scene_frames: u32 = 0;
 
     loop {
         let step = timeline.next();
@@ -159,6 +186,15 @@ fn capture_one(
             }
             settle_pics.push(picture);
             settle_frame_ids.push(step.frame);
+        } else if step.phase == Phase::Scene {
+            // The picture is scored after this pose, on the event. The hold is
+            // the settle cap, the same count for every run of this checkpoint.
+            scene_frames += 1;
+            if let SettleMode::Metric { cap, .. } = opts.plan.settle {
+                if scene_frames >= cap {
+                    timeline.release_event();
+                }
+            }
         }
         let settled_text = if trusted && raw_settled {
             "true"
@@ -196,13 +232,7 @@ fn capture_one(
             day: step.day,
         });
         let settle_count = settle_pics.len() as u32;
-        if stop_after(
-            opts.plan.settle,
-            settle_count,
-            crossed,
-            job.still,
-            max_offset,
-        ) {
+        if stop_after(opts.plan.settle, settle_count, job.still, max_offset) {
             break;
         }
     }
@@ -211,7 +241,7 @@ fn capture_one(
         return Err("the frame plan finished with no settle frame".into());
     }
     let settle_count = settle_pics.len() as u32;
-    let candidate_at = candidate_settle_index(opts.plan.settle, settle_count, crossed);
+    let candidate_at = candidate_settle_index(opts.plan.settle, settle_count);
     let candidate_index = (candidate_at - 1) as usize;
     let settled = settle_pics.get(candidate_index).cloned();
     let frames = flicker_pair(&settle_pics, candidate_index);
@@ -255,6 +285,7 @@ fn capture_one(
         .as_ref()
         .map(|picture| picture.height)
         .unwrap_or(opts.height);
+    let cold = cold_start(opts, &log, job.reference_noise, picture_height, cap_hit);
     Ok(LiveShot {
         scene: job.scene.clone(),
         checkpoint: job.checkpoint.clone(),
@@ -262,6 +293,8 @@ fn capture_one(
         settled,
         event_frames,
         log,
+        cold_frames: cold.frames,
+        cold_settled: cold.settled,
         note: shot_note(
             &opts.plan,
             candidate_frame,
@@ -271,9 +304,58 @@ fn capture_one(
             picture_height,
             cap_hit,
             job.event.is_some(),
+            scene_frames,
             job.still && candidate_index + 1 >= settle_pics.len() && settle_pics.len() >= 2,
+            opts.warm,
+            cold,
         ),
     })
+}
+
+struct ColdStart {
+    frames: Option<f64>,
+    settled: bool,
+}
+
+fn cold_start(
+    opts: &CaptureOptions,
+    log: &[FrameRecord],
+    reference_noise: f64,
+    height: u32,
+    cap_hit: bool,
+) -> ColdStart {
+    if opts.warm {
+        return ColdStart {
+            frames: None,
+            settled: false,
+        };
+    }
+    let SettleMode::Metric { threshold, cap } = opts.plan.settle else {
+        return ColdStart {
+            frames: None,
+            settled: false,
+        };
+    };
+    let line = settle_line(threshold, reference_noise, height);
+    if let Some(row) = log
+        .iter()
+        .find(|row| row.phase == Phase::Settle && row.blur_rel.is_some_and(|error| error <= line))
+    {
+        return ColdStart {
+            frames: Some(f64::from(row.frame)),
+            settled: true,
+        };
+    }
+    if cap_hit {
+        return ColdStart {
+            frames: Some(f64::from(cap)),
+            settled: false,
+        };
+    }
+    ColdStart {
+        frames: None,
+        settled: false,
+    }
 }
 
 fn flicker_pair(pics: &[Picture], candidate: usize) -> Vec<Picture> {
@@ -298,7 +380,10 @@ fn shot_note(
     height: u32,
     cap_hit: bool,
     event: bool,
+    scene_frames: u32,
     tail_is_previous: bool,
+    warm: bool,
+    cold: ColdStart,
 ) -> String {
     let settle = match plan.settle {
         SettleMode::Frames(n) => format!("{n} settle frames"),
@@ -306,11 +391,11 @@ fn shot_note(
             let line = settle_line(threshold, reference_noise, height);
             if cap_hit {
                 format!(
-                    "settle cap {cap} reached before blurred relative luminance was under {line:.4} (threshold {threshold}, reference noise {reference_noise:.4})"
+                    "scored frame {cap} of the {cap} frame budget; blurred relative luminance stayed above {line:.4} (threshold {threshold}, reference noise {reference_noise:.4})"
                 )
             } else {
                 format!(
-                    "settled when blurred relative luminance was under {line:.4} (threshold {threshold}, reference noise {reference_noise:.4}, cap {cap})"
+                    "scored frame {cap} of the {cap} frame budget; the cold-start line {line:.4} was crossed earlier (threshold {threshold}, reference noise {reference_noise:.4})"
                 )
             }
         }
@@ -322,7 +407,9 @@ fn shot_note(
             .map(|n| n.to_string())
             .collect::<Vec<_>>()
             .join(",+");
-        format!(" Captures at event+{list}.")
+        format!(
+            " The event fired after {scene_frames} scene frames on the pose before the jump. Captures at event+{list}."
+        )
     } else {
         String::new()
     };
@@ -331,11 +418,93 @@ fn shot_note(
     } else {
         ""
     };
+    let cold_note = if warm {
+        " Warm chain: lighting caches were kept from the previous checkpoint."
+    } else if let Some(frames) = cold.frames {
+        if cold.settled {
+            return format!(
+                "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}. Cold start settled at frame {frames:.0}. The 180 frame cold-start budget is separate from this picture settle.{tail}{captures}",
+                schedule::format_dt(plan.fixed_dt),
+                plan.warmup_frames,
+                format_mean(blur_rel),
+                format_mean(luma_ratio),
+            );
+        }
+        return format!(
+            "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}. Renderer issue: cold start did not cross the settle line within {frames:.0} frames. The picture is scored on the cap frame. The 180 frame cold-start budget was not raised.{tail}{captures}",
+            schedule::format_dt(plan.fixed_dt),
+            plan.warmup_frames,
+            format_mean(blur_rel),
+            format_mean(luma_ratio),
+        );
+    } else {
+        ""
+    };
     format!(
-        "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}.{tail}{captures}",
+        "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}.{cold_note}{tail}{captures}",
         schedule::format_dt(plan.fixed_dt),
         plan.warmup_frames,
         format_mean(blur_rel),
         format_mean(luma_ratio),
     )
+}
+
+/// Mean linear luminance of one cold checkpoint's cap frame.
+///
+/// `seed` `None` is the pose seed. `Some(0)` is the live game. The two stay
+/// within noise: the seed picks which equivalent write wins and does not drop
+/// light.
+pub fn cold_mean_luminance(
+    scene: &str,
+    checkpoint: &str,
+    seed: Option<u32>,
+    width: u32,
+    height: u32,
+    cap: u32,
+) -> Result<f64, String> {
+    if scenes::shot(scene, checkpoint).is_none() {
+        return Err(format!("no camera for {scene}/{checkpoint}"));
+    }
+    let opts = CaptureOptions {
+        width,
+        height,
+        full_effort: false,
+        bounces: None,
+        lavapipe_small: true,
+        plan: FramePlan {
+            fixed_dt: schedule::DEFAULT_DT,
+            warmup_frames: 0,
+            settle: SettleMode::Metric {
+                threshold: schedule::DEFAULT_SETTLE_THRESHOLD,
+                cap,
+            },
+            capture_offsets: vec![1],
+        },
+        params: genos_lighting_ref::MetricParams::default(),
+        jobs: vec![Job {
+            scene: scene.to_string(),
+            checkpoint: checkpoint.to_string(),
+            still: true,
+            event: None,
+            reference: None,
+            reference_noise: 0.0,
+        }],
+        warm: false,
+        lighting_seed: seed,
+    };
+    let outcome = capture(&opts)?;
+    let picture = outcome
+        .shots
+        .first()
+        .and_then(|shot| shot.settled.as_ref())
+        .ok_or_else(|| "cold capture produced no settled picture".to_string())?;
+    let n = picture.pixels();
+    if n == 0 {
+        return Err("settled picture is empty".into());
+    }
+    let mut sum = 0.0f64;
+    for i in 0..n {
+        sum += f64::from(picture.luma_at(i));
+    }
+    Ok(sum / n as f64)
 }

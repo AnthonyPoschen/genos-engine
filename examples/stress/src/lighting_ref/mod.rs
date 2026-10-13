@@ -14,6 +14,7 @@ mod schedule;
 
 use std::path::PathBuf;
 
+pub use capture::cold_mean_luminance;
 pub use generate::{generate, GenerateOptions, TraceProfile};
 
 /// Every available catalog checkpoint has a camera in this driver.
@@ -87,6 +88,9 @@ impl Options {
         let mut settle_cap = None;
         let mut capture_frames = None;
         let mut bounces: Option<String> = None;
+        let mut warm = false;
+        let mut regen = false;
+        let mut sequence: Option<String> = None;
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
             match arg.as_str() {
@@ -112,6 +116,9 @@ impl Options {
                 "--settle-cap" => settle_cap = Some(value()?),
                 "--capture-frames" => capture_frames = Some(value()?),
                 "--bounces" => bounces = Some(value()?),
+                "--warm" => warm = true,
+                "--regen" => regen = true,
+                "--checkpoints" => sequence = Some(value()?),
                 other => return Err(format!("unknown argument {other}")),
             }
         }
@@ -134,6 +141,8 @@ impl Options {
                 || settle_cap.is_some()
                 || capture_frames.is_some()
                 || bounces.is_some()
+                || warm
+                || sequence.is_some()
             {
                 return Err("that flag is for lighting-ref check".into());
             }
@@ -180,6 +189,8 @@ impl Options {
             profile,
             only_scene: only_scene.clone(),
             only_checkpoint: only_checkpoint.clone(),
+            sequence: Vec::new(),
+            regen,
         };
         if !check {
             return Ok(Self {
@@ -199,6 +210,16 @@ impl Options {
         let env_cap = env_text("GENOS_LIGHTING_REF_SETTLE_CAP");
         let env_capture = env_text("GENOS_LIGHTING_REF_CAPTURE_FRAMES");
         let env_bounces = env_text("GENOS_LIGHTING_REF_BOUNCES");
+        let env_warm = env_text("GENOS_LIGHTING_REF_WARM");
+        let warm = warm
+            || env_warm.is_some_and(|text| !matches!(text.as_str(), "0" | "false" | "off" | "no"));
+        if sequence.is_some() && (only_scene.is_some() || only_checkpoint.is_some()) {
+            return Err("--checkpoints replaces --scene and --checkpoint".into());
+        }
+        let sequence = match sequence {
+            Some(text) => parse_checkpoints(&text)?,
+            None => Vec::new(),
+        };
         let bounces = match (bounces.as_deref(), env_bounces.as_deref()) {
             (Some(text), _) => Some(parse_bounces(text)?),
             (None, Some(text)) => Some(parse_bounces(text)?),
@@ -238,9 +259,35 @@ impl Options {
                 only_scene,
                 only_checkpoint,
                 plan,
+                warm,
+                sequence,
+                regen,
             }),
         })
     }
+}
+
+fn parse_checkpoints(text: &str) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for piece in text.split(',') {
+        let piece = piece.trim();
+        if piece.is_empty() {
+            continue;
+        }
+        let Some((scene, name)) = piece.split_once('/') else {
+            return Err(format!("--checkpoints entries are scene/name, got {piece}"));
+        };
+        let known = genos_lighting_ref::available_checkpoints()
+            .any(|cp| cp.scene == scene && cp.name == name);
+        if !known {
+            return Err(format!("unknown checkpoint {piece}"));
+        }
+        out.push((scene.to_string(), name.to_string()));
+    }
+    if out.is_empty() {
+        return Err("--checkpoints needs a scene/name".into());
+    }
+    Ok(out)
 }
 
 fn parse_bounces(text: &str) -> Result<u32, String> {
@@ -307,6 +354,61 @@ mod tests {
         assert!(!check.full_effort);
         assert!(!check.skip_capture);
         assert!(check.bounces.is_none());
+        assert!(!check.warm);
+    }
+
+    #[test]
+    fn warm_defaults_off_and_the_argument_turns_it_on() {
+        let cold = Options::parse(words("check").into_iter()).unwrap();
+        let Command::Check(check) = cold.command else {
+            panic!("expected check");
+        };
+        assert!(!check.warm);
+        let chained = Options::parse(words("check --warm").into_iter()).unwrap();
+        let Command::Check(check) = chained.command else {
+            panic!("expected check");
+        };
+        assert!(check.warm);
+        let err = match Options::parse(words("--warm").into_iter()) {
+            Err(err) => err,
+            Ok(_) => panic!("generate accepted --warm"),
+        };
+        assert!(err.contains("check"), "{err}");
+    }
+
+    #[test]
+    fn checkpoints_keep_the_requested_order() {
+        let opts = Options::parse(
+            words("check --checkpoints stress-still/room-a,stress-still/hall").into_iter(),
+        )
+        .unwrap();
+        let Command::Check(check) = opts.command else {
+            panic!("expected check");
+        };
+        assert_eq!(
+            check.sequence,
+            vec![
+                ("stress-still".into(), "room-a".into()),
+                ("stress-still".into(), "hall".into()),
+            ]
+        );
+        let err = match Options::parse(words("check --checkpoints hall").into_iter()) {
+            Err(err) => err,
+            Ok(_) => panic!("a bare name was accepted"),
+        };
+        assert!(err.contains("scene/name"), "{err}");
+        let err = match Options::parse(words("check --checkpoints stress-still/nope").into_iter()) {
+            Err(err) => err,
+            Ok(_) => panic!("an unknown checkpoint was accepted"),
+        };
+        assert!(err.contains("unknown"), "{err}");
+        let err = match Options::parse(
+            words("check --scene stress-still --checkpoints stress-still/hall").into_iter(),
+        ) {
+            Err(err) => err,
+            Ok(_) => panic!("scene and checkpoints were both accepted"),
+        };
+        assert!(err.contains("replaces"), "{err}");
     }
 
     #[test]
@@ -380,6 +482,24 @@ mod tests {
             Ok(_) => panic!("generate accepted --out"),
         };
         assert!(err.contains("--out"));
+    }
+
+    #[test]
+    fn generate_accepts_regen() {
+        let opts = Options::parse(words("--regen").into_iter()).unwrap();
+        let Command::Generate(generate) = opts.command else {
+            panic!("expected generate");
+        };
+        assert!(generate.regen);
+    }
+
+    #[test]
+    fn check_passes_regen_through() {
+        let opts = Options::parse(words("check --regen").into_iter()).unwrap();
+        let Command::Check(check) = opts.command else {
+            panic!("expected check");
+        };
+        assert!(check.regen);
     }
 
     #[test]

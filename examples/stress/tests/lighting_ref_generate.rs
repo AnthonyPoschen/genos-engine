@@ -20,6 +20,8 @@ fn tiny(dir: PathBuf) -> GenerateOptions {
         },
         only_scene: None,
         only_checkpoint: None,
+        sequence: Vec::new(),
+        regen: false,
     }
 }
 
@@ -68,5 +70,33 @@ fn a_path_reference_is_deterministic_and_reports_its_size() {
     let sizes = std::fs::read_to_string(a.join("sizes.txt")).unwrap();
     assert!(sizes.contains("stress-still hall"));
     assert!(genos_stress::lighting_ref::scenes_cover_the_catalog());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_second_generate_keeps_the_picture_unless_regen() {
+    let root = std::env::temp_dir().join(format!("genos-lref-keep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let dir = root.join("refs");
+    let mut opts = tiny(dir.clone());
+    opts.only_scene = Some("stress-still".into());
+    opts.only_checkpoint = Some("hall".into());
+    generate(&opts).expect("first trace");
+    let linear = dir.join("stress-still/hall/reference.f32");
+    let mut marked = std::fs::read(&linear).unwrap();
+    marked[20] = marked[20].wrapping_add(1);
+    std::fs::write(&linear, &marked).unwrap();
+    let kept = generate(&opts).expect("second trace keeps the file");
+    assert!(kept.is_empty(), "an existing picture was traced again");
+    assert_eq!(std::fs::read(&linear).unwrap(), marked);
+    let trace = std::fs::read_to_string(dir.join("stress-still/hall/trace.txt")).unwrap();
+    assert!(trace.contains("sample_cap "), "{trace}");
+    assert!(trace.contains("build testcommit"), "{trace}");
+    let manifest = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
+    assert!(manifest.contains("stress-still"), "{manifest}");
+    opts.regen = true;
+    let replaced = generate(&opts).expect("regen");
+    assert_eq!(replaced.len(), 1);
+    assert_ne!(std::fs::read(&linear).unwrap(), marked);
     let _ = std::fs::remove_dir_all(&root);
 }

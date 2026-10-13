@@ -12,8 +12,10 @@ pub const DEFAULT_DT: f32 = 1.0 / 60.0;
 /// Blurred relative luminance that ends a metric settle, before the
 /// reference-noise floor. Under the pass band of that blurred error.
 pub const DEFAULT_SETTLE_THRESHOLD: f64 = 0.05;
-/// Settle frames before a metric settle stops anyway.
-pub const DEFAULT_SETTLE_CAP: u32 = 180;
+/// Picture-settle frames before a metric settle stops anyway.
+/// Cold-start frames use their own budget (`fail.cold_frames`, 180). A slow
+/// cold start does not end the picture settle at that budget.
+pub const DEFAULT_SETTLE_CAP: u32 = 600;
 /// Seconds in one day at sun speed 1. Matches the stress binary's default.
 pub const DAY_SECONDS: f32 = 120.0;
 pub const SUN_SPEED: f32 = 1.0;
@@ -195,8 +197,9 @@ fn parse_u32(name: &str, text: &str) -> Result<u32, String> {
         .map_err(|_| format!("expected a whole number for {name}, got {text}"))
 }
 
-/// Where the scored pose sits. An event jumps there after warmup. Motion
-/// approaches it by `fixed_dt`, then holds.
+/// Where the scored pose sits. An event holds the pose before the jump for the
+/// settle cap, then jumps. A fixed settle count jumps after warmup.
+/// Motion approaches the target by `fixed_dt`, then holds.
 #[derive(Clone, Copy, Debug)]
 pub struct Target {
     pub box_time: f32,
@@ -209,6 +212,8 @@ pub struct Target {
 pub enum Phase {
     Warmup,
     Approach,
+    /// Pose before an event. The picture is not scored here.
+    Scene,
     Settle,
 }
 
@@ -217,6 +222,7 @@ impl Phase {
         match self {
             Self::Warmup => "warmup",
             Self::Approach => "approach",
+            Self::Scene => "scene",
             Self::Settle => "settle",
         }
     }
@@ -252,6 +258,9 @@ enum Kind {
     Event {
         box_after: f32,
         lamp_after: f32,
+        /// Metric settles hold the before-pose until [`Timeline::release_event`].
+        /// A fixed settle count jumps on the first scored frame.
+        hold_scene: bool,
     },
     Approach {
         box_target: f32,
@@ -267,6 +276,7 @@ impl Timeline {
                 Kind::Event {
                     box_after: target.box_time,
                     lamp_after: target.lamp_time,
+                    hold_scene: matches!(plan.settle, SettleMode::Metric { .. }),
                 },
                 0.0,
                 0.0,
@@ -296,6 +306,13 @@ impl Timeline {
             lamp_time,
             day,
             settle_index: 0,
+        }
+    }
+
+    /// The before-pose has settled. The next frame is the event.
+    pub fn release_event(&mut self) {
+        if let Kind::Event { hold_scene, .. } = &mut self.kind {
+            *hold_scene = false;
         }
     }
 
@@ -333,10 +350,15 @@ impl Timeline {
             Kind::Event {
                 box_after,
                 lamp_after,
+                hold_scene,
             } => {
-                self.box_time = box_after;
-                self.lamp_time = lamp_after;
-                Phase::Settle
+                if hold_scene {
+                    Phase::Scene
+                } else {
+                    self.box_time = box_after;
+                    self.lamp_time = lamp_after;
+                    Phase::Settle
+                }
             }
             Kind::Approach {
                 box_target,
@@ -368,53 +390,35 @@ impl Timeline {
     }
 }
 
-/// Stop drawing. `crossed_at` is the 1-based settle frame that met the metric.
-/// A still camera keeps one more held frame after the candidate so flicker has a pair.
-/// Capture offsets are drawn when they fit under the cap.
-pub fn stop_after(
-    settle: SettleMode,
-    settle_count: u32,
-    crossed_at: Option<u32>,
-    still: bool,
-    max_offset: u32,
-) -> bool {
+/// Stop drawing. A metric settle always draws the cap. The blur line is the
+/// cold-start flag, not a reason to score an earlier frame. A still camera
+/// keeps one more held frame after the candidate so flicker has a pair.
+/// Capture offsets are drawn when they extend past the cap.
+pub fn stop_after(settle: SettleMode, settle_count: u32, still: bool, max_offset: u32) -> bool {
     if settle_count == 0 {
         return false;
     }
-    match settle {
+    let (candidate, through) = match settle {
         SettleMode::Frames(n) => {
             let candidate = n.max(1);
-            let through = candidate.max(max_offset);
-            let need = if still {
-                through.max(candidate + 1)
-            } else {
-                through
-            };
-            settle_count >= need
+            (candidate, candidate.max(max_offset))
         }
-        SettleMode::Metric { cap, .. } => {
-            if settle_count >= cap {
-                return true;
-            }
-            let Some(at) = crossed_at else {
-                return false;
-            };
-            let captures_done = settle_count >= max_offset;
-            let tail_done = !still || settle_count > at;
-            captures_done && tail_done
-        }
-    }
+        SettleMode::Metric { cap, .. } => (cap.max(1), cap.max(1).max(max_offset)),
+    };
+    let need = if still {
+        through.max(candidate + 1)
+    } else {
+        through
+    };
+    settle_count >= need
 }
 
 /// 1-based settle index of the picture that is scored for mean error and FLIP.
-pub fn candidate_settle_index(
-    settle: SettleMode,
-    settle_count: u32,
-    crossed_at: Option<u32>,
-) -> u32 {
+/// A metric settle scores the cap frame.
+pub fn candidate_settle_index(settle: SettleMode, settle_count: u32) -> u32 {
     match settle {
         SettleMode::Frames(n) => n.min(settle_count).max(1),
-        SettleMode::Metric { .. } => crossed_at.unwrap_or(settle_count).max(1),
+        SettleMode::Metric { cap, .. } => cap.min(settle_count).max(1),
     }
 }
 
@@ -567,6 +571,13 @@ mod tests {
         assert_eq!(owner, lavapipe);
         assert!((owner.fixed_dt - DEFAULT_DT).abs() < 1.0e-6);
         assert_eq!(owner.capture_offsets, vec![1, 2, 4, 8]);
+        assert_eq!(
+            owner.settle,
+            SettleMode::Metric {
+                threshold: DEFAULT_SETTLE_THRESHOLD,
+                cap: 600,
+            }
+        );
     }
 
     #[test]
@@ -619,6 +630,37 @@ mod tests {
         assert_eq!(last.settle_index, 4);
         assert_eq!(last.capture_offset, Some(4));
         assert!((last.box_time - 0.45).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn a_metric_event_holds_the_before_pose_until_the_scene_is_released() {
+        let mut timeline = Timeline::start(
+            plan(metric(30), 0, DEFAULT_DT),
+            Target {
+                box_time: 0.45,
+                lamp_time: 0.2,
+                day: 0.25,
+                event: true,
+            },
+        );
+        let held = timeline.next();
+        assert_eq!(held.phase, Phase::Scene);
+        assert_eq!(held.settle_index, 0);
+        assert_eq!(held.capture_offset, None);
+        assert_eq!(held.box_time, 0.0);
+        assert_eq!(held.lamp_time, 0.0);
+        assert!((held.day - 0.25).abs() < 1.0e-6);
+        let still = timeline.next();
+        assert_eq!(still.phase, Phase::Scene);
+        assert_eq!(still.box_time, 0.0);
+        timeline.release_event();
+        let jump = timeline.next();
+        assert_eq!(jump.phase, Phase::Settle);
+        assert_eq!(jump.settle_index, 1);
+        assert_eq!(jump.capture_offset, Some(1));
+        assert!((jump.box_time - 0.45).abs() < 1.0e-6);
+        assert!((jump.lamp_time - 0.2).abs() < 1.0e-6);
+        assert!((jump.day - 0.25).abs() < 1.0e-6);
     }
 
     #[test]
@@ -679,18 +721,19 @@ mod tests {
     #[test]
     fn the_cap_stops_and_a_still_tail_waits_for_one_more_frame() {
         let mode = metric(180);
-        assert!(!stop_after(mode, 5, Some(5), true, 8));
-        assert!(stop_after(mode, 8, Some(5), true, 8));
-        assert!(!stop_after(mode, 8, Some(8), true, 8));
-        assert!(stop_after(mode, 9, Some(8), true, 8));
-        assert!(stop_after(mode, 8, Some(8), false, 8));
-        assert!(stop_after(metric(2), 2, None, true, 8));
-        assert_eq!(candidate_settle_index(mode, 8, Some(5)), 5);
-        assert_eq!(candidate_settle_index(mode, 8, None), 8);
-        assert!(!stop_after(SettleMode::Frames(10), 10, None, true, 8));
-        assert!(stop_after(SettleMode::Frames(10), 11, None, true, 8));
-        assert!(stop_after(SettleMode::Frames(4), 8, None, true, 8));
-        assert_eq!(candidate_settle_index(SettleMode::Frames(4), 8, None), 4);
+        // A crossing does not end the run. The scored frame is the cap.
+        assert!(!stop_after(mode, 8, true, 8));
+        assert!(!stop_after(mode, 180, true, 8));
+        assert!(stop_after(mode, 181, true, 8));
+        assert!(stop_after(mode, 180, false, 8));
+        assert!(!stop_after(metric(2), 7, true, 8));
+        assert!(stop_after(metric(2), 8, true, 8));
+        assert_eq!(candidate_settle_index(mode, 181), 180);
+        assert_eq!(candidate_settle_index(metric(2), 8), 2);
+        assert!(!stop_after(SettleMode::Frames(10), 10, true, 8));
+        assert!(stop_after(SettleMode::Frames(10), 11, true, 8));
+        assert!(stop_after(SettleMode::Frames(4), 8, true, 8));
+        assert_eq!(candidate_settle_index(SettleMode::Frames(4), 8), 4);
     }
 
     #[test]

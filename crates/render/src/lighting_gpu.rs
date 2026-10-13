@@ -40,9 +40,10 @@ pub(crate) const LIGHTING_RAYS: u32 = 64;
 const LIGHTING_CACHE_SLOTS: u64 = 1048576;
 const LIGHTING_CACHE_BATCH: u32 = 98304;
 const LIGHTING_CACHE_RAYS: u32 = 16;
-/// `pc.dims` + `pc.params` + `pc.lamp`. A shader that ignores `pc.lamp` still
-/// accepts a 48-byte push.
-const LIGHTING_PC_BYTES: u32 = 48;
+/// `pc.dims` + `pc.params` + `pc.lamp` + the pose seed. Zero seed leaves
+/// lighting_hash unchanged. The seed is the last word, after the lamp block.
+const LIGHTING_PUSH_WORDS: usize = 13;
+const LIGHTING_PC_BYTES: u32 = 52;
 /// ckeys word of the WRC refresh lists' two counts (lighting_cache.glsl LIGHTING_WRC_CHG_COUNT_AT).
 const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
@@ -199,6 +200,9 @@ pub(crate) struct Lighting {
     /// Light cache rounds per second of wall time (GENOS_LIGHTING_CACHE_HZ; 0: one every
     /// frame), when the last began, and whether each frame slot ran one.
     cache_hz: f64,
+    /// Pose seed for `lighting_hash`. Zero is the live game. A non-zero seed
+    /// forces one cache round per frame and rank-ordered work lists.
+    seed: u32,
     last_round: Option<Instant>,
     stats_round: [bool; 2],
     /// Last frame this slot counted unfilled pixels. Read at the next begin.
@@ -378,6 +382,7 @@ impl Default for Lighting {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.0),
+            seed: 0,
             last_round: None,
             stats_round: [false; 2],
             unfilled_slot: [UnfilledSlot::default(); 2],
@@ -444,6 +449,10 @@ const LIGHTING_ATROUS_META_WORDS: u64 = 1 + 1 + 64 + 5 + 5 * 64;
 /// lighting_cache.glsl (8 words: flags, committed direction, both lights, catch-up).
 /// The picture compose does not read them. They are not the regime tube.
 const LIGHTING_SUN_WORDS: u64 = 8;
+/// Seeded rgb9e5 and offer score, one word each per slot, after the sun words.
+/// Matches `LIGHTING_SEED_COLOR_AT` and `LIGHTING_OFFER_AT`. Seed 0 does not
+/// read them. They do not move the a-trous or sun offsets.
+const LIGHTING_SEED_WORDS: u64 = 2 * LIGHTING_CACHE_SLOTS;
 const LIGHTING_SUN_SMALL_BIT: u32 = 1;
 /// Picture compose over the whole grid.
 const COMPOSE_FULL: u8 = 1;
@@ -903,7 +912,11 @@ impl Gpu {
                 assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
                 assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
                 self.lighting.cache_keys = self.make_buffer_queues(
-                    (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS + LIGHTING_SUN_WORDS) * 4,
+                    (lighting_atrous_ppm_at()
+                        + LIGHTING_ATROUS_META_WORDS
+                        + LIGHTING_SUN_WORDS
+                        + LIGHTING_SEED_WORDS)
+                        * 4,
                     0x20 | 0x2 | 0x100 | 0x1,
                     Memory::Device,
                     &share,
@@ -1524,7 +1537,7 @@ impl Gpu {
     /// the live patches, trace and light this round's batch of their rays, relight
     /// them. Skipped while the last round still runs, so at most one is in flight
     /// and a slow round never queues up work behind it.
-    fn submit_lighting_world(&mut self, pc: [u32; 12]) -> Result<bool, String> {
+    fn submit_lighting_world(&mut self, pc: [u32; LIGHTING_PUSH_WORDS]) -> Result<bool, String> {
         if self.lighting.world_busy || self.lighting.world_cmd.is_null() {
             return Ok(false);
         }
@@ -1857,6 +1870,35 @@ impl Gpu {
         Ok(())
     }
 
+    /// Empty the capped work lists so a seeded compact can atomicMin a rank
+    /// into each bucket. Lengths are the unshifted caps in lighting_cache.glsl.
+    /// The shader scans the shifted cap, which is never longer than these.
+    fn fill_seeded_work_lists(&mut self) {
+        let keys = self.lighting.cache_keys.buffer;
+        let slots = LIGHTING_CACHE_SLOTS;
+        let hist = 2 * slots + 2;
+        let wrc_cells = 1024u64;
+        let chg = hist + 680;
+        let bg = chg + 4096;
+        let trickle = hist + 13200;
+        let args = hist + 17600;
+        let grad = args + 16 + 3 * 65536 + 1024;
+        let batch = u64::from(LIGHTING_CACHE_BATCH);
+        let young_base = 2 * slots;
+        self.fill_key_words(keys, young_base - (batch - 1), batch);
+        self.fill_key_words(keys, slots + 1, batch);
+        self.fill_key_words(keys, chg, wrc_cells);
+        self.fill_key_words(keys, bg, wrc_cells);
+        self.fill_key_words(keys, trickle, 4096);
+        self.fill_key_words(keys, grad, 2048 * 16);
+    }
+
+    fn fill_key_words(&mut self, buffer: Handle, word: u64, words: u64) {
+        unsafe {
+            (self.fns.cmd_fill_buffer)(self.cmd, buffer, word * 4, words * 4, u32::MAX);
+        }
+    }
+
     fn lighting_passes(&mut self, slot: usize) {
         let [w, h, cols, rows] = self.lighting.dims;
         let probes = cols * rows;
@@ -1891,7 +1933,9 @@ impl Gpu {
             self.mesh_field_key.hash(&mut hasher);
             hasher.finish()
         };
-        let frozen = self.lighting_stats().settled;
+        // A pose seed keeps every frame on the same pass list. The idle shortcut
+        // starts when a counter settles, and that counter follows list order.
+        let frozen = self.lighting.seed == 0 && self.lighting_stats().settled;
         let had = !self.lighting.kept_bytes.is_empty() && key == self.lighting.kept_key;
         let changes = if had {
             lighting_changes(&self.lighting.kept_bytes, &self.frame_bytes)
@@ -2123,6 +2167,7 @@ impl Gpu {
             lamp[1],
             lamp[2],
             lamp[3],
+            self.lighting.seed,
         ];
         let image = self.color.image;
         let blocks = (w.div_ceil(8) as u64) * (h.div_ceil(8) as u64);
@@ -2248,6 +2293,9 @@ impl Gpu {
         }
         if sun_amortise {
             self.lighting.sun_frames = self.lighting.sun_frames.saturating_add(1);
+        }
+        if self.lighting.seed != 0 && self.lighting.cache_full {
+            self.fill_seeded_work_lists();
         }
         self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
         unsafe {

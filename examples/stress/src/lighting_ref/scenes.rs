@@ -48,6 +48,37 @@ pub fn shot(scene: &str, name: &str) -> Option<Shot> {
     Some(shot)
 }
 
+/// Hash of the pose this checkpoint draws. The checkpoint name and the scene
+/// id are not inputs: hall and box-step-before are one pose and one seed.
+/// Zero is reserved for the live game, so a zero hash becomes 1.
+pub fn pose_seed(shot: &Shot, full_effort: bool, bounces: Option<u32>) -> u32 {
+    let mut hash = 0x811c9dc5u32;
+    let mut mix = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x01000193);
+        }
+    };
+    mix(&shot.eye[0].to_le_bytes());
+    mix(&shot.eye[1].to_le_bytes());
+    mix(&shot.eye[2].to_le_bytes());
+    mix(&shot.yaw.to_le_bytes());
+    mix(&shot.pitch.to_le_bytes());
+    mix(&shot.day.to_le_bytes());
+    mix(&(shot.lights as u32).to_le_bytes());
+    mix(&shot.dynamic_pct.to_le_bytes());
+    mix(&shot.box_time.to_le_bytes());
+    mix(&shot.lamp_time.to_le_bytes());
+    mix(&u32::from(shot.direct_only).to_le_bytes());
+    mix(&u32::from(full_effort).to_le_bytes());
+    mix(&bounces.unwrap_or(u32::MAX).to_le_bytes());
+    if hash == 0 {
+        1
+    } else {
+        hash
+    }
+}
+
 pub fn every_available_shot_has_a_camera() -> bool {
     genos_lighting_ref::available_checkpoints().all(|cp| shot(cp.scene, cp.name).is_some())
 }
@@ -191,6 +222,7 @@ pub fn apply_clocks(stage: &mut Stage, box_time: f32, lamp_time: f32, day: f32) 
 }
 
 pub fn reference_setup(shot: &Shot, profile: &TraceProfile) -> RefSetup {
+    let profile = profile.for_checkpoint(shot.scene_id, shot.name);
     let (scene, camera) = scene_and_camera(shot, false);
     let mut setup =
         RefSetup::from_camera(&scene, &camera, profile.width, profile.height, profile.spp);
@@ -252,5 +284,187 @@ mod tests {
         assert_eq!(direct.world.scene.lighting.bounce.count, 0);
         assert!(!direct.world.scene.lighting.gi.enabled);
         assert_eq!(direct.world.scene.lighting.ambient.mode, AmbientMode::Off);
+    }
+
+    #[test]
+    fn room_a_traces_1024_samples_so_its_noise_stays_under_the_ceiling() {
+        let room = shot("stress-still", "room-a").unwrap();
+        let hall = shot("stress-still", "hall").unwrap();
+        let owner = TraceProfile::owner();
+        let room_setup = reference_setup(&room, &owner);
+        let hall_setup = reference_setup(&hall, &owner);
+        assert_eq!(room_setup.max_spp, 1024);
+        assert_eq!(hall_setup.max_spp, 256);
+        assert!((room_setup.seconds - 480.0).abs() < 1.0e-3);
+        assert!((hall_setup.seconds - 120.0).abs() < 1.0e-3);
+        assert!((room_setup.noise_target - 0.05).abs() < 1.0e-6);
+        assert_eq!(
+            reference_setup(&room, &TraceProfile::lavapipe_small()).max_spp,
+            1
+        );
+        assert!(0.084 < genos_lighting_ref::REFERENCE_NOISE_CEILING);
+        assert!(0.161 > genos_lighting_ref::REFERENCE_NOISE_CEILING);
+    }
+
+    #[test]
+    fn cold_mode_applies_each_checkpoints_camera_and_scene() {
+        use crate::lighting_ref::schedule::{FramePlan, Phase, Target, Timeline};
+
+        // Each checkpoint opens its own stage. A shared stage would keep the
+        // clocks from the checkpoint before it.
+        for cp in genos_lighting_ref::available_checkpoints() {
+            let shot = shot(cp.scene, cp.name).expect(cp.name);
+            let mut timeline = Timeline::start(
+                FramePlan::default_plan(),
+                Target {
+                    box_time: shot.box_time,
+                    lamp_time: shot.lamp_time,
+                    day: shot.day,
+                    event: cp.event.is_some(),
+                },
+            );
+            let (mut stage, camera) = open_stage(&shot, false, None);
+            let (expect_scene, expect_camera) = scene_and_camera(&shot, false);
+            let mut scored = None;
+            for _ in 0..400 {
+                let step = timeline.next();
+                if step.phase == Phase::Scene {
+                    apply_clocks(&mut stage, step.box_time, step.lamp_time, step.day);
+                    assert_eq!(step.box_time, 0.0, "{} scene box", cp.name);
+                    assert_eq!(step.lamp_time, 0.0, "{} scene lamp", cp.name);
+                    assert!(
+                        (step.day - shot.day).abs() < 1.0e-4,
+                        "{} scene day {}",
+                        cp.name,
+                        step.day
+                    );
+                    timeline.release_event();
+                    continue;
+                }
+                if step.phase == Phase::Settle {
+                    apply_clocks(&mut stage, step.box_time, step.lamp_time, step.day);
+                    scored = Some(step);
+                    break;
+                }
+            }
+            let step = scored.unwrap_or_else(|| panic!("{} never reached its pose", cp.name));
+            assert!(
+                (step.box_time - shot.box_time).abs() < 1.0e-4,
+                "{} box {} wanted {}",
+                cp.name,
+                step.box_time,
+                shot.box_time
+            );
+            assert!(
+                (step.lamp_time - shot.lamp_time).abs() < 1.0e-4,
+                "{} lamp {} wanted {}",
+                cp.name,
+                step.lamp_time,
+                shot.lamp_time
+            );
+            assert!(
+                (step.day - shot.day).abs() < 1.0e-4,
+                "{} day {} wanted {}",
+                cp.name,
+                step.day,
+                shot.day
+            );
+            assert!(
+                (camera.position.x - expect_camera.position.x).abs() < 1.0e-4
+                    && (camera.position.y - expect_camera.position.y).abs() < 1.0e-4
+                    && (camera.position.z - expect_camera.position.z).abs() < 1.0e-4,
+                "{} camera eye {:?} wanted {:?}",
+                cp.name,
+                camera.position,
+                expect_camera.position
+            );
+            assert!(
+                (camera.yaw - expect_camera.yaw).abs() < 1.0e-4,
+                "{}",
+                cp.name
+            );
+            assert!(
+                (camera.pitch - expect_camera.pitch).abs() < 1.0e-4,
+                "{}",
+                cp.name
+            );
+            assert_eq!(
+                stage.world.scene.lights.len(),
+                expect_scene.lights.len(),
+                "{}",
+                cp.name
+            );
+            assert_eq!(
+                stage.world.scene.lighting.bounce.count, expect_scene.lighting.bounce.count,
+                "{}",
+                cp.name
+            );
+            assert_eq!(
+                stage.world.scene.lighting.ambient.mode, expect_scene.lighting.ambient.mode,
+                "{}",
+                cp.name
+            );
+            assert_eq!(
+                stage.world.scene.solids.len(),
+                expect_scene.solids.len(),
+                "{}",
+                cp.name
+            );
+            for (got, want) in stage
+                .world
+                .scene
+                .solids
+                .iter()
+                .zip(expect_scene.solids.iter())
+            {
+                assert!(
+                    (got.position.x - want.position.x).abs() < 1.0e-3
+                        && (got.position.y - want.position.y).abs() < 1.0e-3
+                        && (got.position.z - want.position.z).abs() < 1.0e-3
+                        && (got.yaw - want.yaw).abs() < 1.0e-3,
+                    "{} solid {:?} wanted {:?}",
+                    cp.name,
+                    got.position,
+                    want.position
+                );
+            }
+        }
+
+        let hall = shot("stress-still", "hall").unwrap();
+        let before = shot("stress-moving", "box-step-before").unwrap();
+        let stepped = shot("stress-moving", "box-step").unwrap();
+        let hall_scene = scene_and_camera(&hall, false).0;
+        let before_scene = scene_and_camera(&before, false).0;
+        let stepped_scene = scene_and_camera(&stepped, false).0;
+        assert_eq!(hall_scene.solids.len(), before_scene.solids.len());
+        for (hall_solid, before_solid) in hall_scene.solids.iter().zip(before_scene.solids.iter()) {
+            assert!((hall_solid.position.x - before_solid.position.x).abs() < 1.0e-4);
+        }
+        let moved = hall_scene
+            .solids
+            .iter()
+            .zip(stepped_scene.solids.iter())
+            .any(|(hall_solid, stepped_solid)| {
+                (hall_solid.position.x - stepped_solid.position.x).abs() > 0.05
+                    || (hall_solid.position.z - stepped_solid.position.z).abs() > 0.05
+            });
+        assert!(moved, "box-step must move a solid off the hall pose");
+    }
+
+    #[test]
+    fn hall_and_box_step_before_share_a_pose_seed() {
+        let hall = shot("stress-still", "hall").unwrap();
+        let before = shot("stress-moving", "box-step-before").unwrap();
+        let room = shot("stress-still", "room-a").unwrap();
+        let stepped = shot("stress-moving", "box-step").unwrap();
+        let direct = shot("direct-only", "hall").unwrap();
+        let hall_seed = pose_seed(&hall, false, None);
+        assert_eq!(hall_seed, pose_seed(&before, false, None));
+        assert_ne!(hall_seed, pose_seed(&room, false, None));
+        assert_ne!(hall_seed, pose_seed(&stepped, false, None));
+        assert_ne!(hall_seed, pose_seed(&direct, false, None));
+        assert_ne!(hall_seed, pose_seed(&hall, true, None));
+        assert_ne!(hall_seed, pose_seed(&hall, false, Some(0)));
+        assert_ne!(hall_seed, 0);
     }
 }
