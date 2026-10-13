@@ -156,6 +156,10 @@ impl Stage {
 
     /// Write the boxes, lamps, sun and sky for the current clocks into the world.
     pub fn apply(&mut self) {
+        // The stress clock is the scene time of day (same hours as the debug knob).
+        // 0 on the stage clock is sunrise, 06:00.
+        let hours = ((self.day.rem_euclid(1.0) as f64) * 24.0 + 6.0) % 24.0;
+        self.world.scene.lighting.time_of_day = hours as f32;
         if let Some(room) = &self.room {
             self.world.scene.lights = room.lights.clone();
             self.world.scene.sky = room.sky.clone();

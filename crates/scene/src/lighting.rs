@@ -64,6 +64,8 @@ pub enum AmbientMode {
     Hemisphere,
     /// Constant colour and intensity keyed by the sun's height.
     Day,
+    /// Flat colour and intensity keyed by the time of day: night, dawn, noon, dusk.
+    Curve,
 }
 
 impl AmbientMode {
@@ -73,6 +75,7 @@ impl AmbientMode {
             Self::Constant => "constant",
             Self::Hemisphere => "hemisphere",
             Self::Day => "day",
+            Self::Curve => "curve",
         }
     }
 
@@ -81,7 +84,8 @@ impl AmbientMode {
             "off" | "0" => Some(Self::Off),
             "constant" | "flat" => Some(Self::Constant),
             "hemisphere" | "hemi" => Some(Self::Hemisphere),
-            "day" | "day_night" | "curve" => Some(Self::Day),
+            "day" | "day_night" => Some(Self::Day),
+            "curve" => Some(Self::Curve),
             _ => None,
         }
     }
@@ -210,9 +214,18 @@ pub struct AmbientSettings {
     /// Night end of the day curve (sun below the horizon).
     pub night_color: [f32; 3],
     pub night_intensity: f32,
-    /// Day end of the curve (sun overhead).
+    /// Day end of the sun-height lerp (sun overhead).
     pub day_color: [f32; 3],
     pub day_intensity: f32,
+    /// Dawn key of the time-of-day curve (06:00).
+    pub dawn_color: [f32; 3],
+    pub dawn_intensity: f32,
+    /// Noon key (12:00). White at intensity 1 leaves the sky colour unchanged.
+    pub noon_color: [f32; 3],
+    pub noon_intensity: f32,
+    /// Dusk key (18:00).
+    pub dusk_color: [f32; 3],
+    pub dusk_intensity: f32,
 }
 
 /// Everything the lighting frame reads. PartialEq so a live edit reallocates
@@ -232,6 +245,9 @@ pub struct LightingSettings {
     pub emissive: bool,
     pub prefill: bool,
     pub ambient: AmbientSettings,
+    /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
+    /// `0` is midnight, `6` dawn, `12` noon, `18` dusk.
+    pub time_of_day: f32,
 }
 
 impl Default for LightingSettings {
@@ -344,7 +360,14 @@ impl LightingSettings {
                 night_intensity: 0.12,
                 day_color: [0.55, 0.58, 0.62],
                 day_intensity: 0.85,
+                dawn_color: [1.0, 0.55, 0.32],
+                dawn_intensity: 0.45,
+                noon_color: [1.0, 1.0, 1.0],
+                noon_intensity: 1.0,
+                dusk_color: [1.0, 0.42, 0.22],
+                dusk_intensity: 0.40,
             },
+            time_of_day: 12.0,
         }
     }
 
@@ -379,6 +402,14 @@ impl LightingSettings {
         self.ambient.intensity = self.ambient.intensity.max(0.0);
         self.ambient.night_intensity = self.ambient.night_intensity.max(0.0);
         self.ambient.day_intensity = self.ambient.day_intensity.max(0.0);
+        self.ambient.dawn_intensity = self.ambient.dawn_intensity.max(0.0);
+        self.ambient.noon_intensity = self.ambient.noon_intensity.max(0.0);
+        self.ambient.dusk_intensity = self.ambient.dusk_intensity.max(0.0);
+        self.time_of_day = if self.time_of_day.is_finite() {
+            self.time_of_day.rem_euclid(24.0)
+        } else {
+            12.0
+        };
         if self.bounce.count != LIGHTING_BOUNCES_UNLIMITED {
             self.bounce.count = self.bounce.count.min(2);
         }
@@ -491,7 +522,54 @@ impl LightingSettings {
                     self.ambient.night_intensity + (self.ambient.day_intensity - self.ambient.night_intensity) * t;
                 (color, self.ambient.ground, intensity, AmbientMode::Constant)
             }
+            AmbientMode::Curve => {
+                let (color, intensity) = self.curve_sample(self.time_of_day);
+                (color, self.ambient.ground, intensity, AmbientMode::Constant)
+            }
         }
+    }
+
+    /// Time-of-day keys: night at 0 and 24, dawn at 6, noon at 12, dusk at 18.
+    /// The sample is piecewise linear and wraps at midnight.
+    pub fn curve_sample(&self, hours: f32) -> ([f32; 3], f32) {
+        let h = if hours.is_finite() {
+            hours.rem_euclid(24.0)
+        } else {
+            0.0
+        };
+        let keys = [
+            (0.0, self.ambient.night_color, self.ambient.night_intensity),
+            (6.0, self.ambient.dawn_color, self.ambient.dawn_intensity),
+            (12.0, self.ambient.noon_color, self.ambient.noon_intensity),
+            (18.0, self.ambient.dusk_color, self.ambient.dusk_intensity),
+            (24.0, self.ambient.night_color, self.ambient.night_intensity),
+        ];
+        for pair in keys.windows(2) {
+            let (t0, c0, i0) = pair[0];
+            let (t1, c1, i1) = pair[1];
+            if h <= t1 {
+                let u = if t1 > t0 { (h - t0) / (t1 - t0) } else { 0.0 };
+                return (lerp3(c0, c1, u), i0 + (i1 - i0) * u);
+            }
+        }
+        (self.ambient.night_color, self.ambient.night_intensity)
+    }
+
+    /// Sky colour scale for [`AmbientMode::Curve`], relative to the noon key.
+    /// Noon white at intensity 1 is identity. Other modes leave the sky alone.
+    pub fn sky_ambient_scale(&self) -> [f32; 3] {
+        if self.ambient.mode != AmbientMode::Curve {
+            return [1.0, 1.0, 1.0];
+        }
+        let (color, intensity) = self.curve_sample(self.time_of_day);
+        let noon_i = self.ambient.noon_intensity.max(0.0);
+        let mut scale = [1.0; 3];
+        for i in 0..3 {
+            let sample = color[i].max(0.0) * intensity.max(0.0);
+            let noon = self.ambient.noon_color[i].max(0.0) * noon_i;
+            scale[i] = if noon > 1.0e-4 { sample / noon } else { 1.0 };
+        }
+        scale
     }
 
     /// `potato`, `low`, `medium`, `high`, or `custom` when the knobs are not
@@ -510,6 +588,9 @@ impl LightingSettings {
         let mut b = other.clone();
         a.preset = LightingPreset::High;
         b.preset = LightingPreset::High;
+        // The clock is not a preset knob. A moving time of day stays on the named preset.
+        a.time_of_day = 0.0;
+        b.time_of_day = 0.0;
         a == b
     }
 
@@ -569,6 +650,13 @@ impl LightingSettings {
         let _ = writeln!(out, "night_intensity={}", num_text(self.ambient.night_intensity));
         let _ = writeln!(out, "day_color={}", rgb(self.ambient.day_color));
         let _ = writeln!(out, "day_intensity={}", num_text(self.ambient.day_intensity));
+        let _ = writeln!(out, "dawn_color={}", rgb(self.ambient.dawn_color));
+        let _ = writeln!(out, "dawn_intensity={}", num_text(self.ambient.dawn_intensity));
+        let _ = writeln!(out, "noon_color={}", rgb(self.ambient.noon_color));
+        let _ = writeln!(out, "noon_intensity={}", num_text(self.ambient.noon_intensity));
+        let _ = writeln!(out, "dusk_color={}", rgb(self.ambient.dusk_color));
+        let _ = writeln!(out, "dusk_intensity={}", num_text(self.ambient.dusk_intensity));
+        let _ = writeln!(out, "time_of_day={}", num_text(self.time_of_day));
         out
     }
 
@@ -653,8 +741,9 @@ impl LightingSettings {
             "emissive" => self.emissive = on(value)?,
             "prefill" => self.prefill = on(value)?,
             "ambient" => {
-                self.ambient.mode =
-                    AmbientMode::parse(value).ok_or_else(|| format!("ambient is off, constant, hemisphere, or day, got {value}"))?
+                self.ambient.mode = AmbientMode::parse(value).ok_or_else(|| {
+                    format!("ambient is off, constant, hemisphere, day, or curve, got {value}")
+                })?
             }
             "ambient_color" => self.ambient.color = parse_rgb(value)?,
             "ambient_intensity" => self.ambient.intensity = num_f32(value)?,
@@ -663,6 +752,13 @@ impl LightingSettings {
             "night_intensity" => self.ambient.night_intensity = num_f32(value)?,
             "day_color" => self.ambient.day_color = parse_rgb(value)?,
             "day_intensity" => self.ambient.day_intensity = num_f32(value)?,
+            "dawn_color" => self.ambient.dawn_color = parse_rgb(value)?,
+            "dawn_intensity" => self.ambient.dawn_intensity = num_f32(value)?,
+            "noon_color" => self.ambient.noon_color = parse_rgb(value)?,
+            "noon_intensity" => self.ambient.noon_intensity = num_f32(value)?,
+            "dusk_color" => self.ambient.dusk_color = parse_rgb(value)?,
+            "dusk_intensity" => self.ambient.dusk_intensity = num_f32(value)?,
+            "time_of_day" => self.time_of_day = num_f32(value)?,
             _ => return Err(format!("unknown lighting setting {key}")),
         }
         self.sanitize();
@@ -720,6 +816,13 @@ impl LightingSettings {
             ("GENOS_LIGHTING_NIGHT_INTENSITY", "night_intensity"),
             ("GENOS_LIGHTING_DAY_COLOR", "day_color"),
             ("GENOS_LIGHTING_DAY_INTENSITY", "day_intensity"),
+            ("GENOS_LIGHTING_DAWN_COLOR", "dawn_color"),
+            ("GENOS_LIGHTING_DAWN_INTENSITY", "dawn_intensity"),
+            ("GENOS_LIGHTING_NOON_COLOR", "noon_color"),
+            ("GENOS_LIGHTING_NOON_INTENSITY", "noon_intensity"),
+            ("GENOS_LIGHTING_DUSK_COLOR", "dusk_color"),
+            ("GENOS_LIGHTING_DUSK_INTENSITY", "dusk_intensity"),
+            ("GENOS_LIGHTING_TIME", "time_of_day"),
         ];
         for (var, key) in keys {
             if let Ok(value) = std::env::var(var) {

@@ -116,3 +116,83 @@ fn a_scene_file_overrides_the_lighting_defaults() {
     let err = load_str(&format!("{}\nlighting_preset(\"ultra\");\n", room())).unwrap_err();
     assert!(err.contains("unknown lighting preset"), "{err}");
 }
+
+#[test]
+fn the_ambient_curve_interpolates_and_scales_the_sky_from_noon() {
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.ambient.mode = AmbientMode::Curve;
+    settings.ambient.night_color = [0.0, 0.0, 1.0];
+    settings.ambient.night_intensity = 0.0;
+    settings.ambient.dawn_color = [1.0, 0.0, 0.0];
+    settings.ambient.dawn_intensity = 1.0;
+    settings.ambient.noon_color = [1.0, 1.0, 1.0];
+    settings.ambient.noon_intensity = 1.0;
+    settings.ambient.dusk_color = [0.0, 1.0, 0.0];
+    settings.ambient.dusk_intensity = 1.0;
+
+    let at = |hours: f32| {
+        let mut sample = settings.clone();
+        sample.time_of_day = hours;
+        sample.sanitize();
+        let (color, _, intensity, _) = sample.ambient_at(0.2);
+        (color, intensity, sample.sky_ambient_scale())
+    };
+
+    let (night, night_i, _) = at(0.0);
+    assert_eq!(night, [0.0, 0.0, 1.0]);
+    assert_eq!(night_i, 0.0);
+    let (wrap, wrap_i, _) = at(24.0);
+    assert_eq!(wrap, night);
+    assert_eq!(wrap_i, night_i);
+
+    let (dawn, dawn_i, _) = at(6.0);
+    assert_eq!(dawn, [1.0, 0.0, 0.0]);
+    assert_eq!(dawn_i, 1.0);
+    let (noon, noon_i, noon_sky) = at(12.0);
+    assert_eq!(noon, [1.0, 1.0, 1.0]);
+    assert_eq!(noon_i, 1.0);
+    assert_eq!(noon_sky, [1.0, 1.0, 1.0]);
+    let (dusk, dusk_i, _) = at(18.0);
+    assert_eq!(dusk, [0.0, 1.0, 0.0]);
+    assert_eq!(dusk_i, 1.0);
+
+    let (mid, mid_i, _) = at(3.0);
+    assert!((mid[0] - 0.5).abs() < 1.0e-5, "{mid:?}");
+    assert!((mid[2] - 0.5).abs() < 1.0e-5, "{mid:?}");
+    assert!((mid_i - 0.5).abs() < 1.0e-5, "{mid_i}");
+    let (morning, _, _) = at(9.0);
+    assert!((morning[0] - 1.0).abs() < 1.0e-5 && (morning[1] - 0.5).abs() < 1.0e-5, "{morning:?}");
+    let (afternoon, _, _) = at(15.0);
+    assert!((afternoon[0] - 0.5).abs() < 1.0e-5 && (afternoon[1] - 1.0).abs() < 1.0e-5, "{afternoon:?}");
+    let (evening, evening_i, evening_sky) = at(21.0);
+    assert!((evening[1] - 0.5).abs() < 1.0e-5 && (evening[2] - 0.5).abs() < 1.0e-5, "{evening:?}");
+    assert!((evening_i - 0.5).abs() < 1.0e-5);
+    assert!(evening_sky[1] < 0.6 && evening_sky[2] < 0.6, "{evening_sky:?}");
+
+    settings.ambient.mode = AmbientMode::Day;
+    settings.time_of_day = 21.0;
+    assert_eq!(settings.sky_ambient_scale(), [1.0, 1.0, 1.0]);
+
+    let mut clock = LightingSettings::preset(LightingPreset::High);
+    clock.time_of_day = 18.0;
+    assert_eq!(clock.preset_label(), "high");
+
+    settings.set_key("ambient", "curve").unwrap();
+    settings.set_key("time_of_day", "18").unwrap();
+    assert_eq!(settings.ambient.mode, AmbientMode::Curve);
+    assert_eq!(settings.time_of_day, 18.0);
+    assert_eq!(settings.preset_label(), "custom");
+    let text = settings.to_text();
+    let parsed = LightingSettings::parse(&text).unwrap();
+    assert_eq!(parsed.time_of_day, 18.0);
+    assert_eq!(parsed.ambient.mode, AmbientMode::Curve);
+    assert_eq!(parsed.curve_sample(18.0).0, [0.0, 1.0, 0.0]);
+
+    let scene = load_str(&format!(
+        "{}\nlighting(\"ambient=curve; time_of_day=6\");\ntime_of_day(9);\n",
+        room()
+    ))
+    .expect("scene");
+    assert_eq!(scene.lighting.ambient.mode, AmbientMode::Curve);
+    assert!((scene.lighting.time_of_day - 9.0).abs() < 1.0e-5);
+}

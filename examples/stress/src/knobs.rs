@@ -222,7 +222,7 @@ impl Host for Stage {
                 "lighting_ambient",
                 "Ambient",
                 ambient_index(lighting.ambient.mode),
-                &["off", "constant", "hemisphere", "day"],
+                &["off", "constant", "hemisphere", "day", "curve"],
             ),
         ]
     }
@@ -261,10 +261,11 @@ impl Host for Stage {
 }
 
 fn lighting_preset_knob(settings: &LightingSettings) -> Knob {
+    let label = settings.preset_label();
     let index = LightingPreset::all()
         .iter()
-        .position(|preset| LightingSettings::preset(*preset) == *settings)
-        .unwrap_or(4);
+        .position(|preset| preset.name() == label)
+        .unwrap_or(LightingPreset::all().len());
     Knob::choice(
         "lighting_preset",
         "Lighting",
@@ -296,6 +297,7 @@ fn ambient_index(mode: AmbientMode) -> usize {
         AmbientMode::Constant => 1,
         AmbientMode::Hemisphere => 2,
         AmbientMode::Day => 3,
+        AmbientMode::Curve => 4,
     }
 }
 
@@ -358,7 +360,7 @@ fn apply_lighting_knob(
         "lighting_prefill" => ("prefill", on_off(v)),
         "lighting_ambient" => (
             "ambient",
-            ["off", "constant", "hemisphere", "day"]
+            ["off", "constant", "hemisphere", "day", "curve"]
                 .get(v as usize)
                 .copied()
                 .unwrap_or("day")

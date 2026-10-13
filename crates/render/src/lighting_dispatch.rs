@@ -151,7 +151,7 @@ pub(crate) fn pack_lighting_ctrl(
     }
     let ambient_mode = match mode {
         AmbientMode::Off => 0,
-        AmbientMode::Constant | AmbientMode::Day => 1,
+        AmbientMode::Constant | AmbientMode::Day | AmbientMode::Curve => 1,
         AmbientMode::Hemisphere => 2,
     };
     let ctrl = Ctrl {

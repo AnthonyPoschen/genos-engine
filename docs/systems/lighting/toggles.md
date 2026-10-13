@@ -29,9 +29,9 @@ Each feature can be turned off. Off means the pass is not recorded and, where th
 | Sky | Sky radiance on rays that miss. The scene sky colour stays; this bit stops the lighting from reading it | `sky` |
 | Emissive | Emitted light added in the direct pass and in compose | `emissive` |
 | Prefill | WRC scout rays | `prefill` |
-| Ambient | Flat fill when bounce is 0 or GI is off. `off`, `constant`, `hemisphere`, or `day` | `ambient_color`, `ambient_intensity`, `ambient_ground`, `night_color`, `night_intensity`, `day_color`, `day_intensity` |
+| Ambient | Flat fill when bounce is 0 or GI is off. `off`, `constant`, `hemisphere`, `day`, or `curve` | `ambient_color`, `ambient_intensity`, `ambient_ground`, `night_color`, `night_intensity`, `day_color`, `day_intensity`, `dawn_color`, `dawn_intensity`, `noon_color`, `noon_intensity`, `dusk_color`, `dusk_intensity`, `time_of_day` |
 
-`day` lerps night and day colour and intensity by the sun's height. Rays travel along a light's direction; the sun is up when that direction points down. Hemisphere mixes ground colour away from the normal with the sky colour toward it. Bounce 0 adds the flat fill on top of direct light. One bounce or more does not add it.
+`day` lerps night and day colour and intensity by the sun's height. Rays travel along a light's direction; the sun is up when that direction points down. Hemisphere mixes ground colour away from the normal with the sky colour toward it. `curve` samples night, dawn, noon, and dusk by `time_of_day` (hours, `0` midnight, `6` dawn, `12` noon, `18` dusk) and also scales the sky colour by that sample relative to the noon key. Noon white at intensity 1 leaves the sky unchanged. `day` does not scale the sky. Bounce 0 adds the flat fill on top of direct light. One bounce or more does not add it.
 
 Shadows share the direct dispatch. Their GPU time is a separate bucket: when shadows are on, the direct and hit-light milliseconds are also charged to `shadows`. When shadows are off, that bucket stays at 0 dispatches and 0 ms.
 

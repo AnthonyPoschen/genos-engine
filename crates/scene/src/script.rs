@@ -237,6 +237,13 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
     }
     {
         let builder = builder.clone();
+        engine.register_fn("time_of_day", move |hours: Dynamic| {
+            builder.borrow_mut().lighting.time_of_day = num(&hours);
+            builder.borrow_mut().lighting.sanitize();
+        });
+    }
+    {
+        let builder = builder.clone();
         engine.register_fn("lighting", move |text: &str| -> Result<(), Box<EvalAltResult>> {
             let mut settings = builder.borrow().lighting.clone();
             for raw in text.split(['\n', ';']) {
