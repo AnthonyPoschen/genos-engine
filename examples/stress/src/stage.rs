@@ -84,6 +84,28 @@ pub struct Stage {
     /// A scene file in place of the building (--scene): its walls, solids and
     /// lights as they are; nothing moves, the sun, sky and lamp knobs do nothing.
     pub room: Option<genos_scene::Scene>,
+    /// Move the scene's point lamp, then hold it (--lamp-stop). Catch-up starts
+    /// on the first draw that holds.
+    pub lamp_stop: bool,
+    lamp_stop_frame: u32,
+}
+
+/// Draws at the file position before the point lamp steps.
+const LAMP_STOP_SETTLE: u32 = 12;
+/// Draws that step the lamp. The next draw holds the last step.
+const LAMP_STOP_MOVE: u32 = 8;
+const LAMP_STOP_STEP: f32 = 0.08;
+
+/// Metres the point lamp has moved by this draw. `0` through the settle
+/// draws, then one step per draw, then a constant.
+pub fn lamp_stop_shift(frame: u32) -> f32 {
+    if frame <= LAMP_STOP_SETTLE {
+        0.0
+    } else if frame <= LAMP_STOP_SETTLE + LAMP_STOP_MOVE {
+        LAMP_STOP_STEP * (frame - LAMP_STOP_SETTLE) as f32
+    } else {
+        LAMP_STOP_STEP * LAMP_STOP_MOVE as f32
+    }
 }
 
 impl Stage {
@@ -116,6 +138,8 @@ impl Stage {
             unfilled_count: false,
             unfilled_tint: false,
             room: None,
+            lamp_stop: false,
+            lamp_stop_frame: 0,
         };
         stage.apply();
         stage
@@ -150,6 +174,9 @@ impl Stage {
         if !self.sun_frozen {
             self.day = (self.day + dt * self.sun_speed / self.day_seconds).rem_euclid(1.0);
         }
+        if self.lamp_stop {
+            self.lamp_stop_frame = self.lamp_stop_frame.saturating_add(1);
+        }
         self.apply();
     }
 
@@ -169,6 +196,18 @@ impl Stage {
         if let Some(room) = &self.room {
             self.world.scene.lights = room.lights.clone();
             self.world.scene.sky = room.sky.clone();
+            if self.lamp_stop {
+                let shift = lamp_stop_shift(self.lamp_stop_frame);
+                if let Some(lamp) = self
+                    .world
+                    .scene
+                    .lights
+                    .iter_mut()
+                    .find(|lamp| lamp.direction == genos_scene::Vec3::ZERO)
+                {
+                    lamp.position.x += shift;
+                }
+            }
             return;
         }
         self.building
@@ -190,5 +229,21 @@ impl Stage {
 
     pub fn occluders(&self) -> usize {
         self.world.scene.walls.len() + self.world.scene.solids.len()
+    }
+}
+
+#[cfg(test)]
+mod lamp_stop_shift_test {
+    use super::{lamp_stop_shift, LAMP_STOP_MOVE, LAMP_STOP_SETTLE};
+
+    #[test]
+    fn the_lamp_holds_on_the_draw_after_the_last_step() {
+        assert_eq!(lamp_stop_shift(1), 0.0);
+        assert_eq!(lamp_stop_shift(LAMP_STOP_SETTLE), 0.0);
+        assert!(lamp_stop_shift(LAMP_STOP_SETTLE + 1) > lamp_stop_shift(LAMP_STOP_SETTLE));
+        let last = LAMP_STOP_SETTLE + LAMP_STOP_MOVE;
+        assert_ne!(lamp_stop_shift(last), lamp_stop_shift(last - 1));
+        assert_eq!(lamp_stop_shift(last), lamp_stop_shift(last + 1));
+        assert_eq!(lamp_stop_shift(last + 8), lamp_stop_shift(last));
     }
 }

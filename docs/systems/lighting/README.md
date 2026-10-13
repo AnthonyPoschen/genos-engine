@@ -59,6 +59,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Going fully quiet on the legacy scheduler (DDGI and Lumen always spend a fixed budget). `GENOS_LIGHTING_WAKE=rings` keeps a verification budget and does not hold the probe frame.
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
 - Ring wakes (`GENOS_LIGHTING_WAKE=rings`, or `genos-stress --wake rings`; default legacy): doubling distances, group-test splitting, sparse full traces inside a failed ring, and a verification budget that adapts the tolerance. The check index changes every frame. The vote compares that ray's direct outgoing light to a plain float stored for the same direction. The rgb9e5 kept-light word includes bounce, and scoring it treated surface-cache convergence as a change. Default tolerance 0.08 is a change in that direct light. While lamps move, the stored shade is older than the lamp and the vote misses (owner, moving run: 21 of 30 per frame). A miss tightens the tolerance and does not start a ring. The still run averaged 0.3 misses. DDGI updates a world-space probe grid (all probes in the 2019 paper, sleeping and cascades in the 2021 paper) and blends into the same texel. Lumen retraces screen probes every frame and budgets the radiance cache by last-used. The combination is original. A moving light updates a sparse subset; the probe filter spreads that to neighbours. While a lamp event is queued, a kept hit is not reshade only because that lamp moved, so bounce on a moving-lamp picture lags legacy (RTX 4070 at `6cd3cef`: mean 0.77 / p99 17.7 against noise 0.43 / 2.3). DDGI 2019 §4.2 updates every probe. A still scene with no event traces the same check rays as legacy until it settles, then the same pixel-direct and compose idle plus the verification stride. The stride does not run gather or the filter. A settled frame keeps the stats host memory mapped, does not diff a scene the hash already proved still, and does not rewrite an empty wake-event block. The corner gap at `6cd3cef` (112 fps to about 103, GPU time equal) was that host readback. Citations, the deviations, and the owner A/B commands are in [WAKE](experiments/WAKE-neighbour-wake-design.md).
+- A small sun step (departure 14, [SUN](experiments/SUN-small-sun-step.md)) amortises indirect over bands. Schied et al., Spatiotemporal Variance-Guided Filtering, HPG 2017, and Wright et al., Lumen, SIGGRAPH 2022, recompute every pixel every frame. One compose dispatch writes direct everywhere and walks probes on the current band. Neighbour blend is the existing compose weights, not a per-lamp irradiance layer. After a point lamp holds, four frames shade every kept stratum. That skips the S69C halfway early-out for those frames.
 - Flat ambient when bounce is 0 or GI is off is a constant, a classic hemisphere (sky toward the normal, ground away from it), a sun-height day lerp, or a time-of-day curve (night, dawn, noon, dusk). The curve also scales sky colour relative to its noon key. No new GI algorithm. Bounce 0 records no GI dispatch. Bounce 1 records the probe passes and not the cache-to-cache passes. Bounce 2 records those passes. The count does not add a bounce algorithm.
 
 ## Experiment index
@@ -162,6 +163,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78Y](experiments/S78Y-quiet-filter.md) | 2026-10-12 | Quiet probe filter | pushed (rough; idle A/B 6am) | S78Y |
 | [S78X](experiments/S78X-atrous-work-lists.md) | 2026-10-13 | A-trous levels run dirty work lists | pushed (rough; idle A/B) | S78X |
 | [S78X2](experiments/S78X2-atrous-dense-fallback.md) | 2026-10-12 | Dense a-trous when the dirty fraction is high | pushed | S78X2 |
+| [S79](experiments/S79-half-res-atrous.md) | 2026-10-13 | Half-resolution a-trous, adaptive iterations, shared-memory tiles | Tried and failed. Half-res and tiles removed. Plain shader kept. Adaptive is an off-by-default knob | S79 |
 | [S78Z](experiments/S78Z-verify-ring-wakes.md) | 2026-10-13 | Probe verification + impact-tested ring wakes | not pushed (no fix; postmortem) | g78/S78Z-verify-ring-wakes.patch |
 | [S78T2](experiments/S78T2-texel-verify.md) | 2026-10-13 | Texel verification: rotating A-SVGF checks + ring wakes | not pushed (no healing; postmortem) | g78/S78T2-texel-verify.patch |
 | [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
@@ -173,6 +175,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [DUMP](experiments/DUMP-gpu-dump-tool.md) | 2026-10-12 | Debug dump of GPU data from two consecutive frames per component (direct, bounce, coarse/fine WRC, probe resul | in progress | none yet |
 | [RAYCEIL](experiments/RAYCEIL-world-cache-need-ray-ceilings.md) | 2026-10-12 | World-cache cells stop at IC error bound instead of fixed 128 samples | queued | none |
 | [QUIET](experiments/QUIET-quiet-paths-compose-filter-compact.md) | 2026-10-12 | Compose redraws 8×8 blocks whose direct, probe SH, or filtered field changed | pushed (compose only; perf on the owner GPU) | this commit |
+| [SUN](experiments/SUN-small-sun-step.md) | 2026-10-13 | Small sun step: one compose walks the band; direct every frame; four-frame catch-up | 4070 compose rose 2.78 to 3.17 before the single pass; retest decides merge | this change |
 | [LSMOOTH](experiments/LSMOOTH-lighter-smoothing.md) | 2026-10-12 | Lighter smoothing | dropped (Anthony) | none |
 
 # Architecture and component notes (history kept as written)
@@ -201,7 +204,7 @@ The lighting has one name scheme, `lighting`, everywhere; "GI v2" survives only 
 No environment variable is needed: `make stress` and `make run` run the tuned defaults baked into the code (`LIGHTING_DEFAULT_WORLD` = 3, the surface cache; `LIGHTING_DEFAULT_SC_FLAGS` = 6007050). There is no lighting-selection switch (`GENOS_GI` is gone). The remaining variables are optional debug and tuning knobs:
 
 - Debug and traces: `--lighting-debug` (per-round counters; reads GPU counters back, so it stays off fps runs). `GENOS_LIGHTING_DEBUG` applies only when that argument was omitted. `--gpu-times N` prints `GPU_MS`. `--wake-log <run>` writes a stress log under `./genos-debug/wake/<run>/`. `GENOS_LIGHTING_SC_TRACE` (surface cache claims and relights per readback), `GENOS_SCENE_DELTA` (resident scene and mesh field delta runs). The dump, the counters, the MCP commands, the stuck and pop checks, the headless path, and the overlays are inventoried in [the debug standard](debug-standard.md). That file is the reference other systems match.
-- Tuning (A/B only): `GENOS_LIGHTING_WORLD` (0 probe path P6, 3 surface cache), `GENOS_LIGHTING_SC_FLAGS`, `GENOS_LIGHTING_SC_LOCAL`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`, `GENOS_LIGHTING_TILE`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_FILL`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_ASYNC` (async compute light cache, off by default), `GENOS_LIGHTING_ATROUS_DIRTY` (a-trous work-list dirty fraction, default 0.25; `0` dense sweep, `1` lists up to the cap), `GENOS_LIGHTING_WAKE` (`legacy` or `rings`; `genos-stress --wake` wins when it is passed), `GENOS_LIGHTING_WAKE_TOL`, `GENOS_LIGHTING_WAKE_BUDGET`, `GENOS_LIGHTING_WAKE_RADIUS`.
+- Tuning (A/B only): `GENOS_LIGHTING_WORLD` (0 probe path P6, 3 surface cache), `GENOS_LIGHTING_SC_FLAGS`, `GENOS_LIGHTING_SC_LOCAL`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`, `GENOS_LIGHTING_TILE`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_FILL`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_ASYNC` (async compute light cache, off by default), `GENOS_LIGHTING_ATROUS_DIRTY` (a-trous work-list dirty fraction, default 0.25; `0` dense sweep, `1` lists up to the cap), `GENOS_LIGHTING_WAKE` (`legacy` or `rings`; `genos-stress --wake` wins when it is passed), `GENOS_LIGHTING_WAKE_TOL`, `GENOS_LIGHTING_WAKE_BUDGET`, `GENOS_LIGHTING_WAKE_RADIUS`, `GENOS_LIGHTING_DENOISE_RES` (`full` or `half`; high stays `full`), `GENOS_LIGHTING_DENOISE_ADAPTIVE` (off on high), `GENOS_LIGHTING_DENOISE_VARIANCE` (relative luminance deviation, default 0.02), `GENOS_LIGHTING_DENOISE_TILES` (shared-memory wavelet tiles, off on high).
 
 Older entries below quote the names of their time (`GENOS_GI2_*`); read them through the table.
 
@@ -537,3 +540,20 @@ already inside the filter. `GENOS_LIGHTING_DEBUG` or `GENOS_LIGHTING_SC_TRACE`
 prints `lightingatrous` (dirty fraction, mode `list`/`dense`, threshold,
 filtered count). Owner's S78X moving regression, RTX 4070, 1920x1080: a-trous
 6.6 -> 9.4 ms, 42 -> 37 fps. This fallback is not re-timed here.
+
+### S79: half-resolution a-trous, adaptive iterations, shared-memory tiles
+
+The moving stress scene's sun changes every frame, so a dirty-block skip of the
+a-trous (tried in PR #26) still filters every block. S79 tried a half-resolution
+bounce wavelet, fewer iterations on stable texels, and shared-memory tiles.
+
+Half-res and tiles are removed. On the RTX 4070 at 1920×1080 they were slower
+than the scalar full wavelet (half moving 17.8 ms vs full 11.7, tiles 18.3 vs
+11.6). The hashed lattice does not shrink the dispatch, and the lavapipe-safe
+tile kernel disables the work lists. Adaptive stays an experimental knob, off
+on every preset: the retest at 476ec13 missed the picture bar (mean 2.8 / p99
+11–13 against 1.5 / 10) and still-atrous got slower (3.13 vs 2.7). Medium is
+the full-resolution scalar wavelet at 3 iterations. The plain pipeline,
+compiled without the adaptive branch, put high back to about 8.0 ms against
+gi-v2's 7.8 ms moving. Numbers and the five-line postmortem are in
+[S79](experiments/S79-half-res-atrous.md).

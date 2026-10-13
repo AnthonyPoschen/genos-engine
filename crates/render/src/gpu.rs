@@ -481,6 +481,13 @@ impl Renderer {
         self.gpu.lighting_atrous_stats()
     }
 
+    /// Sun-step mark from the last submitted frame. Waits for that frame.
+    /// `gpu_sun` is the shader bit. `host_frames` counts frames the CPU took
+    /// the small-sun path.
+    pub fn lighting_sun_stats(&mut self) -> LightingSunStats {
+        self.gpu.lighting_sun_stats()
+    }
+
     /// How long each pipeline took to build, in build order.
     pub fn pipeline_times(&self) -> Vec<(String, Duration)> {
         self.gpu.pipeline_times.clone()
@@ -3557,6 +3564,7 @@ impl Gpu {
         self.frame_bytes.clone_from(&bytes);
         self.lighting.light_scene = lighting_scene_key(pack, &bytes);
         self.lighting.trace_key = lighting_trace_key(pack);
+        self.note_lighting_sun(pack);
         self.background = pack.sky.map(crate::mesh::tone);
         Ok(())
     }

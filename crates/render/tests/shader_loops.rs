@@ -3,7 +3,7 @@
 //! by 4096 sent the NVIDIA compiler past 17 GB without finishing the pipeline, while
 //! lavapipe compiled it in a moment. Loops run to a bound read from the scene block.
 
-const SHADERS: [&str; 18] = [
+const SHADERS: [&str; 19] = [
     "overlay.frag",
     "transmit.comp",
     "scene_rays.glsl",
@@ -17,6 +17,7 @@ const SHADERS: [&str; 18] = [
     "lighting_direct.comp",
     "lighting_gather.comp",
     "lighting_compose.comp",
+    "lighting_sun_compose.comp",
     "lighting_cache.comp",
     "lighting_filter.comp",
     "lighting_compact.comp",
@@ -84,5 +85,32 @@ fn the_scene_ray_loops_are_kept_rolled() {
             source(name).contains("#extension GL_EXT_control_flow_attributes : require"),
             "{name} includes scene_rays.glsl, which needs GL_EXT_control_flow_attributes"
         );
+    }
+}
+
+/// The picture compose used to compile `scene_candidates_skip` (the occluder
+/// grid, `dont_unroll`) into the pass that shades every pixel. The NVIDIA
+/// compiler did not drop that call. Compose then took tens of milliseconds and
+/// the driver sat in shader compile. The sun compose is a separate pipeline.
+#[test]
+fn picture_compose_does_not_walk_occluders() {
+    for name in [
+        "lighting_compose.comp",
+        "lighting_sun_compose.comp",
+        "lighting_common.glsl",
+    ] {
+        let text = source(name);
+        assert!(
+            !text.contains("lighting_work.glsl"),
+            "{name} includes the work tube"
+        );
+        let calls = text
+            .lines()
+            .filter(|line| {
+                let code = line.split("//").next().unwrap_or(line);
+                code.contains("scene_candidates")
+            })
+            .count();
+        assert_eq!(calls, 0, "{name} calls scene_candidates");
     }
 }

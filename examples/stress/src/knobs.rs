@@ -243,6 +243,19 @@ impl Host for Stage {
                 &["1", "3", "5"],
             ),
             Knob::switch(
+                "lighting_denoise_adaptive",
+                "Adaptive denoise",
+                lighting.denoiser.adaptive,
+            ),
+            Knob::number(
+                "lighting_denoise_variance",
+                "Denoise variance",
+                lighting.denoiser.variance_threshold as f64,
+                (0.0, 0.1),
+                0.005,
+                "",
+            ),
+            Knob::switch(
                 "lighting_compose_reuse",
                 "Compose reuse",
                 lighting.compose_reuse,
@@ -305,7 +318,10 @@ fn lighting_preset_knob(settings: &LightingSettings) -> Knob {
         .iter()
         .position(|preset| preset.name() == label)
         .unwrap_or(LightingPreset::all().len());
-    let mut names: Vec<&str> = LightingPreset::all().iter().map(|preset| preset.name()).collect();
+    let mut names: Vec<&str> = LightingPreset::all()
+        .iter()
+        .map(|preset| preset.name())
+        .collect();
     names.push("custom");
     Knob::choice("lighting_preset", "Lighting", index, &names)
 }
@@ -397,6 +413,8 @@ fn apply_lighting_knob(
             }
             .to_string(),
         ),
+        "lighting_denoise_adaptive" => ("denoise_adaptive", on_off(v)),
+        "lighting_denoise_variance" => ("denoise_variance", format!("{v}")),
         "lighting_compose_reuse" => ("compose_reuse", on_off(v)),
         "lighting_sky" => ("sky", on_off(v)),
         "lighting_emissive" => ("emissive", on_off(v)),

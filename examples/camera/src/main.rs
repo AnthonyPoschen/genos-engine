@@ -235,6 +235,18 @@ fn run() -> Result<(), String> {
                 };
                 genos_render::check_gpu_times_arg(other, next.as_deref())?;
             }
+            other if genos_render::lighting_sun_flag_needs_value(other).is_some() => {
+                let needs = genos_render::lighting_sun_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_render::check_lighting_sun_arg(other, next.as_deref())?;
+            }
             "--size" => {
                 let text = args.next().ok_or("missing size")?;
                 let (w, h) = text

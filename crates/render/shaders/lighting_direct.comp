@@ -1,4 +1,5 @@
 #version 450
+#define GENOS_SUN_SHADER 1
 // GI v2 direct light: every lamp at a surface point, each with a shadow ray through
 // the tracer. The points are the picture's pixels (G-buffer) followed by every kept
 // hit of the screen probes (all strata, so a kept hit always carries this frame's
@@ -93,6 +94,7 @@ bool lighting_check_within_noise(uint h, vec3 pos, vec3 n, vec3 refl, vec3 light
     return abs(ln - lo) <= bound;
 }
 void main() {
+    lighting_sun_mark();
     uint idx = gl_GlobalInvocationID.x;
     uint pixels = pc.dims.x * pc.dims.y;
     uint mode = lighting_mode();
@@ -189,9 +191,11 @@ void main() {
                 rec = work.v[lighting_kept_at(h)];
                 live = lighting_stratum_ray(ps / LIGHTING_STRATA, ps % LIGHTING_STRATA, h % rays, origin, dir, from_n);
                 if (live && rec.x < -0.75) {
-                    vec3 sky_light = has_sky() ? scene.sky.rgb : vec3(0.0);
-                    lighting_put_kept_light_d(h, sky_light, 2u);
-                    lighting_wake_store_direct(h, sky_light);
+                    if (!lighting_sun_hold_kept(h)) {
+                        vec3 sky_light = has_sky() ? scene.sky.rgb : vec3(0.0);
+                        lighting_put_kept_light_d(h, sky_light, 2u);
+                        lighting_wake_store_direct(h, sky_light);
+                    }
                     return;
                 }
             }
@@ -249,7 +253,10 @@ void main() {
                 held_old = false;
             }
         }
-        if (LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_pix_cache_ok() && !(urgent && lighting_near_change(pos))) {
+        // After a point lamp stops, a few frames shade every kept stratum so the
+        // corner is not waiting on the halfway relight. The word is 0 otherwise,
+        // and this is the S69C skip.
+        if (!lighting_catch_up() && LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_pix_cache_ok() && !(urgent && lighting_near_change(pos))) {
             uint traced = lighting_frame() - LIGHTING_STRATA / 2u;
             // A live ring does not reshade a kept hit only because a lamp
             // moved. That shade was the direct pass. A woken probe and its
@@ -267,6 +274,12 @@ void main() {
             }
         }
     }
+    if (probe_hit && !fill_hit && lighting_sun_hold_kept(h)) {
+        return;
+    }
+    if (fill_hit && lighting_sun_hold_fill(h)) {
+        return;
+    }
     vec3 origin = pos + n * 0.02;
     LampList list = lamps_at(origin);
     uint count = lamp_list_size(list);
@@ -276,7 +289,9 @@ void main() {
         pix_sig = lighting_pix_sig(pos, n, two_sided, list);
         vec4 pv = work.v[lighting_pix_at() + idx / 2u];
         uint c = (idx & 1u) * 2u;
-        if (pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig && lighting_pix_quiet()) {
+        // A small sun step still traces. Reusing last frame's direct would
+        // leave the sun and its shadow a frame behind.
+        if (pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig && lighting_pix_quiet() && !lighting_sun_small()) {
             uint emitted = gbuf.px[idx].w;
             uint glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? 0u : emitted;
             uint prev = outc.px[pixels + idx];
@@ -382,6 +397,21 @@ void main() {
             lit += w > 0.0 ? 1u : 0u;
         }
     }
+    // Hits outside this frame's slice keep the committed sun. Pixels use the live sun.
+    bool sun_hold = false;
+    bool sun_slice = false;
+    if (lighting_sun_small() && idx >= pixels) {
+        if (probe_hit) {
+            uint pk = h / lighting_rays() / LIGHTING_STRATA;
+            sun_slice = lighting_sun_probe_slice(pk);
+            sun_hold = !sun_slice;
+        } else {
+            uint ent = (ray - lighting_probe_rays()) / LIGHTING_CACHE_RAYS;
+            uint slot = lighting_cache_batch_slot(ent);
+            sun_slice = slot != ~0u && lighting_sun_slot_slice(slot);
+            sun_hold = slot != ~0u && !sun_slice;
+        }
+    }
     bool exact = !pick || lit <= LIGHTING_CACHE_PICKS;
     float step = total / float(LIGHTING_CACHE_PICKS);
     float run = 0.0;
@@ -391,8 +421,17 @@ void main() {
         if (gstats.ctrl_max_lights != 0u && k >= gstats.ctrl_max_lights) {
             break;
         }
+        Lamp sun_lamp_l = lamp_list_get(list, k);
+        bool sun_lamp = sun_lamp_l.pos.w > 0.5;
+        if (sun_hold && sun_lamp) {
+            vec3 d = lighting_sun_committed_dir();
+            float d2 = dot(d, d);
+            if (d2 > 0.5) {
+                sun_lamp_l.pos.xyz = d * inversesqrt(d2);
+            }
+        }
         vec3 target;
-        vec3 light = lamp_light(lamp_list_get(list, k), origin, n, two_sided, target);
+        vec3 light = lamp_light(sun_lamp_l, origin, n, two_sided, target);
         float w = light.r + light.g + light.b;
         if (w <= 0.0) {
             continue;
@@ -418,12 +457,17 @@ void main() {
             bool cache_on = (gstats.ctrl_bits & 32u) != 0u;
             bool cell_stored = lighting_world_mode() == 3u || (!cache_on && probes_on);
             bool cell = (gstats.ctrl_bits & 2048u) == 0u && lighting_gi_on() && cell_stored && li < LAMP_ALL - 1u;
+            // The slice retraces the live sun and does not write that bit
+            // over the committed epoch. Flag off: the cell is the old path.
             float sc = cell ? lighting_shadow_get(origin, n, li) : -1.0;
+            if (sun_slice && sun_lamp) {
+                sc = -1.0;
+            }
             if (sc >= 0.0) {
                 shadow_lit = sc > 0.5;
             } else {
                 shadow_lit = !trace_occluded(origin, target);
-                if (cell && !vote_only) {
+                if (cell && !vote_only && !(lighting_sun_small() && sun_lamp)) {
                     lighting_shadow_put(origin, n, li, shadow_lit);
                 }
             }
@@ -495,7 +539,11 @@ void main() {
             uint c = (idx & 1u) * 2u;
             work.v[lighting_pix_at() + idx / 2u][c] = uintBitsToFloat(pix_sig);
             work.v[lighting_pix_at() + idx / 2u][c + 1u] = uintBitsToFloat(packed);
-            if (glow != prev_e || packed != prev_d || pix_sig != prev_sig) {
+            // Packed direct moved because the sun did. The sun compose writes
+            // this frame's direct on every pixel. The block is not a GI dirty.
+            // Flag off: same mark.
+            bool sun_only = lighting_sun_small() && glow == prev_e && pix_sig == prev_sig;
+            if (!sun_only && (glow != prev_e || packed != prev_d || pix_sig != prev_sig)) {
                 lighting_compose_mark_px(idx);
             }
         }
