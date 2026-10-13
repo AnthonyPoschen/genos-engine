@@ -98,6 +98,11 @@ const USAGE: &str = "genos-stress [options]
   --ambient MODE            off, constant, hemisphere, day, or curve
                             (GENOS_LIGHTING_AMBIENT)
   --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
+  --lighting-full-effort    full refresh every frame (GENOS_LIGHTING_FULL_EFFORT=1)
+  --lighting-sun on|off     small sun step (GENOS_LIGHTING_SUN, default on)
+  --lighting-sun-bands N    indirect bands, 1..64 (GENOS_LIGHTING_SUN_BANDS, default 8)
+  --lighting-catch-up N     kept-hit frames after a point lamp stops, 0..16
+                            (GENOS_LIGHTING_CATCH_UP, default 4)
   --trace                   capture the picture after every script command that changes it";
 
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];
@@ -313,7 +318,14 @@ fn options() -> Result<Options, String> {
                             genos_render::check_gpu_times_arg(other, Some(&next))?;
                         }
                         Some(false) => genos_render::check_gpu_times_arg(other, None)?,
-                        None => return Err(format!("unknown argument {other}\n{USAGE}")),
+                        None => match genos_render::lighting_sun_flag_needs_value(other) {
+                            Some(true) => {
+                                let next = value()?;
+                                genos_render::check_lighting_sun_arg(other, Some(&next))?;
+                            }
+                            Some(false) => genos_render::check_lighting_sun_arg(other, None)?,
+                            None => return Err(format!("unknown argument {other}\n{USAGE}")),
+                        },
                     },
                 },
             },
