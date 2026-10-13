@@ -636,6 +636,58 @@ fn debug_still_run_matches_full_effort() {
     );
 }
 
+/// Full effort is the base shade: phase 0 with the sun path and the regime
+/// count off. A held corner keeps composing, and the picture stays inside
+/// the phase 0 pair noise.
+#[test]
+fn full_effort_still_matches_the_base_shade() {
+    const N: usize = 48;
+    let (_gpu, mut window, mut renderer) = open();
+    let camera = corner_camera();
+    let mut run = |phase: u32, full: bool| {
+        renderer.set_lighting_work(phase, full);
+        renderer.reset_lighting_caches();
+        renderer.set_debug_view(DebugView {
+            mode: ViewMode::Full,
+            ..DebugView::default()
+        });
+        let mut composed = 0usize;
+        let mut last_blocks = 0u32;
+        let mut last = Vec::new();
+        for _ in 0..N {
+            last = draw_held(&mut window, &mut renderer, &camera);
+            last_blocks = renderer.lighting_work_stats().delta_skip;
+            composed += usize::from(last_blocks != 0);
+        }
+        (last, composed, last_blocks)
+    };
+    let (base_a, base_composed, _) = run(0, false);
+    let (base_b, _, _) = run(0, false);
+    let (picture, composed, last_blocks) = run(1, true);
+    let noise = mean_abs(&luma(&base_a), &luma(&base_b));
+    let diff = mean_abs(&luma(&picture), &luma(&base_a));
+    let ceiling = noise * 3.0 + 5.0e-4;
+    eprintln!(
+        "full effort still composed {composed}/{N} phase0 {base_composed}/{N} last blocks {last_blocks:#x} |ΔL| {diff:.6} noise {noise:.6}"
+    );
+    assert!(
+        base_composed * 2 > N,
+        "phase 0 stopped lighting: {base_composed} of {N} frames composed"
+    );
+    assert!(
+        composed * 2 > N,
+        "full effort stopped lighting: {composed} of {N} frames composed"
+    );
+    assert_ne!(
+        last_blocks, 0,
+        "the last full-effort frame held the previous picture"
+    );
+    assert!(
+        diff <= ceiling,
+        "full effort |ΔL| {diff:.6} is outside the phase 0 noise {ceiling:.6}"
+    );
+}
+
 /// Same room as the corner, one directional sun, no point lamp.
 fn sun_world(yaw: f32) -> World {
     let dir = Vec3::new(yaw.sin(), -0.75, yaw.cos()).normalize();

@@ -86,5 +86,77 @@ fn compile(src: &str, dest: &std::path::Path) -> PathBuf {
     if !status.success() {
         panic!("glslc failed for {src}");
     }
+    // The picture compose returns before the regime count and the sun patch.
+    // Mark those functions so a driver that inlines the entry point does not
+    // fold them into the picture dispatch. A full compose then stays the base shade.
+    if src.ends_with("lighting_compose.comp") {
+        mark_dont_inline(dest);
+    }
     dest.to_path_buf()
+}
+
+/// SPIR-V function control DontInline. Best-effort: a compiler that already
+/// inlined the function leaves no `OpFunction` to mark.
+fn mark_dont_inline(path: &std::path::Path) {
+    const DONT_INLINE: u32 = 2;
+    const OP_NAME: u32 = 5;
+    const OP_FUNCTION: u32 = 54;
+    let prefixes = [
+        "lighting_compose_extra",
+        "lighting_work_count_px",
+        "lighting_work_px_tag",
+    ];
+    let mut bytes = std::fs::read(path).expect("read spir-v");
+    if bytes.len() < 20 || bytes.len() % 4 != 0 {
+        return;
+    }
+    let mut words: Vec<u32> = bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    if words[0] != 0x0723_0203 {
+        return;
+    }
+    let mut names: Vec<(u32, String)> = Vec::new();
+    let mut i = 5;
+    while i < words.len() {
+        let wc = (words[i] >> 16) as usize;
+        let op = words[i] & 0xffff;
+        if wc == 0 || i + wc > words.len() {
+            break;
+        }
+        if op == OP_NAME && wc >= 3 {
+            let mut raw = Vec::with_capacity((wc - 2) * 4);
+            for w in &words[i + 2..i + wc] {
+                raw.extend_from_slice(&w.to_le_bytes());
+            }
+            let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+            if let Ok(name) = std::str::from_utf8(&raw[..end]) {
+                names.push((words[i + 1], name.to_string()));
+            }
+        }
+        i += wc;
+    }
+    i = 5;
+    while i < words.len() {
+        let wc = (words[i] >> 16) as usize;
+        let op = words[i] & 0xffff;
+        if wc == 0 || i + wc > words.len() {
+            break;
+        }
+        if op == OP_FUNCTION && wc >= 5 {
+            let id = words[i + 2];
+            if names.iter().any(|(nid, name)| {
+                *nid == id && prefixes.iter().any(|p| name.starts_with(p))
+            }) {
+                words[i + 3] |= DONT_INLINE;
+            }
+        }
+        i += wc;
+    }
+    bytes.clear();
+    for w in words {
+        bytes.extend_from_slice(&w.to_le_bytes());
+    }
+    std::fs::write(path, bytes).expect("write spir-v");
 }
