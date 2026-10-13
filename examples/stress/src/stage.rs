@@ -77,6 +77,10 @@ pub struct Stage {
     pub boxes_still: bool,
     /// The lamp paths' clock stands (moving lamps hold where they are).
     pub lamps_still: bool,
+    /// Count pixels whose surface-cache texel had no finished set. F8 toggles it.
+    pub unfilled_count: bool,
+    /// Magenta tint on those pixels. Shift+F8 toggles it and turns counting on.
+    pub unfilled_tint: bool,
     /// A scene file in place of the building (--scene): its walls, solids and
     /// lights as they are; nothing moves, the sun, sky and lamp knobs do nothing.
     pub room: Option<genos_scene::Scene>,
@@ -109,6 +113,8 @@ impl Stage {
             sky_on: true,
             boxes_still: false,
             lamps_still: false,
+            unfilled_count: false,
+            unfilled_tint: false,
             room: None,
         };
         stage.apply();
@@ -156,6 +162,10 @@ impl Stage {
 
     /// Write the boxes, lamps, sun and sky for the current clocks into the world.
     pub fn apply(&mut self) {
+        // The stress clock is the scene time of day (same hours as the debug knob).
+        // 0 on the stage clock is sunrise, 06:00.
+        let hours = ((self.day.rem_euclid(1.0) as f64) * 24.0 + 6.0) % 24.0;
+        self.world.scene.lighting.time_of_day = hours as f32;
         if let Some(room) = &self.room {
             self.world.scene.lights = room.lights.clone();
             self.world.scene.sky = room.sky.clone();

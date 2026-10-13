@@ -652,10 +652,14 @@ fn shape_key_verts(tag: u64, verts: &[GpuVertex]) -> u64 {
 /// The roof is a plane like the floor, so the light shaders test it directly and it
 /// takes no occluder slot.
 fn sky_of(scene: &genos_scene::Scene) -> [f32; 3] {
-    scene
-        .sky
-        .as_ref()
-        .map_or([0.0; 3], |sky| sky.color.map(|c| c.max(0.0)))
+    let scale = scene.lighting.sky_ambient_scale();
+    scene.sky.as_ref().map_or([0.0; 3], |sky| {
+        [
+            sky.color[0].max(0.0) * scale[0],
+            sky.color[1].max(0.0) * scale[1],
+            sky.color[2].max(0.0) * scale[2],
+        ]
+    })
 }
 
 fn ceiling_of(scene: &genos_scene::Scene) -> [f32; 4] {
@@ -1759,6 +1763,7 @@ mod tests {
             ceiling: None,
             sky: None,
             lighting: genos_scene::LightingSettings::default(),
+            debug: genos_scene::DebugSettings::default(),
         };
         let world = World::from_scene(scene);
         let camera = Camera::opening();

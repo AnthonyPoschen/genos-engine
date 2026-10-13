@@ -10,7 +10,7 @@ Every feature of the runtime that has a setting follows the three rules below. L
 
 3. **People, in the debug menu or UI.** The same value is editable from the debug menu. The stress knobs in `examples/stress/src/knobs.rs` write `Scene.lighting` through `set_key`. The menu has the preset, the feature switches, and the quality knobs: refresh, rays per probe, resolution scale, max lights, shadow filter, denoiser iterations, staleness, budget shift, and ambient mode.
 
-A scene file, a Rhai call, and a `GENOS_LIGHTING_*` variable are further editors of that same struct. A variable that is set at launch wins every frame for the key it names.
+A scene file, a Rhai call, a launch argument, and a `GENOS_LIGHTING_*` variable are further editors of that same struct. `--preset`, `--bounces`, `--ambient`, and `--time-of-day` win. `GENOS_LIGHTING_PRESET`, `GENOS_LIGHTING_BOUNCES`, `GENOS_LIGHTING_AMBIENT`, and `GENOS_LIGHTING_TIME` apply only when that argument was omitted, and then a variable that is set wins every frame for the key it names. The other `GENOS_LIGHTING_*` variables have no argument and still win every frame when they are set. `--time-of-day` sets the program's clock and leaves that clock in charge; `GENOS_LIGHTING_TIME` holds the hour only when the argument was omitted.
 
 ## Games
 
@@ -29,3 +29,7 @@ The game owns the words a player sees. The engine owns the struct those words wr
 A new feature adds a public struct that implements `EngineSettings`, stores it where other systems can already reach it, registers MCP commands that read and write that struct, and adds debug-menu controls that call `set_key`. Copy lighting.
 
 `EngineSettings` lives in `genos-scene` because games, the renderer, and the debug tools already share that crate. A feature crate that `genos-scene` itself depends on keeps the same three methods on its own struct until a second implementor needs the trait in a crate both can see.
+
+## Output directories
+
+A command that writes files follows the Output rule in `AGENTS.md`. The directory is a field of a public `EngineSettings` value. Debug output is `DebugSettings` on `Scene`, key `out`. The default is `genos-debug/unfilled` under the working directory, so an unfilled event lands in `./genos-debug/unfilled/<timestamp>/`. `--out <dir>` overrides that default for the process. `GENOS_UNFILLED_DIR` is the environment mirror of the same field: when it is set, and `--out` was not passed, it wins every frame. The process does not choose `$HOME`. The unfilled count, tint, dump threshold, and caps are arguments too (`--unfilled`, `--unfilled-tint`, `--unfilled-dump`, `--unfilled-max-age-secs`, `--unfilled-max-folders`, `--unfilled-max-bytes`, `--unfilled-session-cap`). Each matching `GENOS_*` variable applies only when that argument was omitted.
