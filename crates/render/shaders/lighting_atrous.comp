@@ -27,6 +27,24 @@ uint atrous_wg_sum(uint bit) {
     return atrous_red[0];
 }
 
+// 1 work list, 2 dense because last frame's fraction closed the gate, 3 dense
+// because the list passed the cap. The dispatch size does not change.
+uint atrous_how(bool listing, uint cnt) {
+    if (!listing) {
+        return 2u;
+    }
+    if (cnt > LIGHTING_ATROUS_LIST_CAP) {
+        return 3u;
+    }
+    return 1u;
+}
+
+void atrous_note(uint how) {
+    if (how == 3u) {
+        gstats.atrous_fallback += 1u;
+    }
+}
+
 void main() {
     uint slot = gl_GlobalInvocationID.x;
     uint stage0 = lighting_atrous_stage();
@@ -42,9 +60,11 @@ void main() {
     // fraction, or past the list cap, this is the dense slot sweep.
     if (stage0 == 0u && LIGHTING_ATROUS_LISTS && LIGHTING_DIRTY_ATROUS) {
         uint cnt = ckeys.key[LIGHTING_VAR_LIST_AT];
-        bool dense = !listing || cnt > LIGHTING_ATROUS_LIST_CAP;
+        uint how = atrous_how(listing, cnt);
+        bool dense = how != 1u;
         if (slot == 0u) {
-            gstats.atrous_var_mode = dense ? 2u : 1u;
+            gstats.atrous_var_mode = how;
+            atrous_note(how);
         }
         if (!dense) {
             if (slot >= cnt) {
@@ -57,9 +77,12 @@ void main() {
     // dirty fraction. Above it, or past the list cap, the dense sweep.
     if (LIGHTING_DIRTY_ATROUS && LIGHTING_ATROUS_LISTS && stage0 >= 1u && stage0 <= 5u) {
         uint cnt = ckeys.key[lighting_atrous_list(stage0)];
-        bool dense = !listing || cnt > LIGHTING_ATROUS_LIST_CAP;
+        uint how = atrous_how(listing, cnt);
+        bool dense = how != 1u;
         if (slot == 0u) {
             ckeys.key[LIGHTING_ATROUS_MODE_AT + stage0 - 1u] = dense ? 2u : 1u;
+            gstats.atrous_lv_mode[stage0 - 1u] = how;
+            atrous_note(how);
         }
         if (dense) {
             uint bit = 0u;
@@ -80,9 +103,11 @@ void main() {
     // S79B: the push uses the same gate. A thread past the list returns.
     if (stage0 == 6u && LIGHTING_ATROUS_LISTS && LIGHTING_DIRTY_ATROUS) {
         uint cnt = ckeys.key[LIGHTING_PUSH_LIST_AT];
-        bool dense = !listing || cnt > LIGHTING_ATROUS_LIST_CAP;
+        uint how = atrous_how(listing, cnt);
+        bool dense = how != 1u;
         if (slot == 0u) {
-            gstats.atrous_push_mode = dense ? 2u : 1u;
+            gstats.atrous_push_mode = how;
+            atrous_note(how);
         }
         if (!dense) {
             if (slot >= cnt) {

@@ -86,9 +86,18 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     // that dispatch shaded (the dirty list, or the whole image).
     uint compose_full;
     uint compose_blocks;
-    // S79B: variance and push. 1 work list, 2 dense sweep, 0 did not run.
+    // S79B: variance and push. 1 work list, 2 dense because the fraction
+    // gate is closed, 3 dense because the list passed the cap, 0 did not run.
     uint atrous_var_mode;
     uint atrous_push_mode;
+    // Image block count beside compose_blocks, and 1 when an empty or
+    // over-cap list was promoted to the full compose. Levels 1-5 use the same
+    // 0/1/2/3 codes. atrous_fallback counts cap promotions across variance,
+    // the five levels and the push.
+    uint compose_total;
+    uint compose_fallback;
+    uint atrous_lv_mode[5];
+    uint atrous_fallback;
 } gstats;
 // Kept-hit light writes (light pass): all, changed, by relative luminance delta
 // (<0.2 %, 0.2-1 %, 1-5 %, >5 %), and changed by source of the hit's direct light
@@ -313,16 +322,20 @@ void lighting_compose_prepare() {
     uint n = ckeys.key[LIGHTING_COMPOSE_COUNT];
     uint bw = (pc.dims.x + 7u) / 8u;
     uint bh = (pc.dims.y + 7u) / 8u;
+    uint total = bw * bh;
+    gstats.compose_total = total;
     if (n == 0u || n > LIGHTING_COMPOSE_CAP) {
         ckeys.key[LIGHTING_COMPOSE_FULL] = 1u;
         ckeys.key[LIGHTING_COMPOSE_COUNT] = bw;
         ckeys.key[LIGHTING_COMPOSE_AT + 1u] = bh;
         ckeys.key[LIGHTING_COMPOSE_AT + 2u] = 1u;
         gstats.compose_full = 1u;
-        gstats.compose_blocks = bw * bh;
+        gstats.compose_blocks = total;
+        gstats.compose_fallback = 1u;
     } else {
         gstats.compose_full = 0u;
         gstats.compose_blocks = n;
+        gstats.compose_fallback = 0u;
     }
 }
 

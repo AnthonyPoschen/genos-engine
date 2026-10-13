@@ -216,10 +216,15 @@ pub struct LightingAtrousStats {
     pub filtered: u32,
     /// Levels 1-5 ran this frame.
     pub ran: bool,
-    /// Variance pass: `1` work list, `2` dense sweep, `0` did not run.
+    /// Variance pass: `1` work list, `2` dense because the fraction gate is
+    /// closed, `3` dense because the list passed the cap, `0` did not run.
     pub variance_mode: u32,
-    /// Push pass: `1` work list, `2` dense sweep, `0` did not run.
+    /// Push pass. Same codes as `variance_mode`.
     pub push_mode: u32,
+    /// Levels 1–5. Same codes as `variance_mode`.
+    pub levels: [u32; 5],
+    /// Cap promotions this frame across variance, the five levels and the push.
+    pub fallback: u32,
 }
 
 /// Quiet compose for the last frame (S79A). `full` is the image-covering
@@ -227,7 +232,12 @@ pub struct LightingAtrousStats {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LightingComposeStats {
     pub full: bool,
+    /// 8×8 blocks the dispatch shaded.
     pub blocks: u32,
+    /// 8×8 blocks in the image.
+    pub total: u32,
+    /// `1` when an empty or over-cap list was promoted to the full compose.
+    pub fallback: u32,
 }
 
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
@@ -240,6 +250,14 @@ fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats 
         ran: mode_word != 0,
         variance_mode: w[LIGHTING_ATROUS_VAR_STAT],
         push_mode: w[LIGHTING_ATROUS_PUSH_STAT],
+        levels: [
+            w[LIGHTING_ATROUS_LEVEL_STAT],
+            w[LIGHTING_ATROUS_LEVEL_STAT + 1],
+            w[LIGHTING_ATROUS_LEVEL_STAT + 2],
+            w[LIGHTING_ATROUS_LEVEL_STAT + 3],
+            w[LIGHTING_ATROUS_LEVEL_STAT + 4],
+        ],
+        fallback: w[LIGHTING_ATROUS_FALLBACK_STAT],
     }
 }
 
@@ -922,6 +940,8 @@ impl Gpu {
             .map(|w| LightingComposeStats {
                 full: w[LIGHTING_COMPOSE_STAT] != 0,
                 blocks: w[LIGHTING_COMPOSE_STAT + 1],
+                total: w[LIGHTING_COMPOSE_TOTAL_STAT],
+                fallback: w[LIGHTING_COMPOSE_FALLBACK_STAT],
             })
             .unwrap_or_default()
     }
@@ -1334,21 +1354,33 @@ impl Gpu {
             let mode_name = |m: u32| match m {
                 1 => "list",
                 2 => "dense",
+                3 => "cap",
                 _ => "off",
             };
             let mode = mode_name(w[LIGHTING_ATROUS_STAT + 1]);
             let var_mode = mode_name(w[LIGHTING_ATROUS_VAR_STAT]);
             let push_mode = mode_name(w[LIGHTING_ATROUS_PUSH_STAT]);
+            let levels = LIGHTING_ATROUS_LEVEL_STAT;
             eprintln!(
-                "lightingatrous {queue} frame {} dirty {:.4} mode {mode} var {var_mode} push {push_mode} threshold {:.4} filtered {}",
+                "lightingatrous {queue} frame {} dirty {:.4} mode {mode} var {var_mode} push {push_mode} levels {} {} {} {} {} fallback {} threshold {:.4} filtered {}",
                 self.lighting.frame,
                 w[LIGHTING_ATROUS_STAT] as f64 / 1.0e6,
+                mode_name(w[levels]),
+                mode_name(w[levels + 1]),
+                mode_name(w[levels + 2]),
+                mode_name(w[levels + 3]),
+                mode_name(w[levels + 4]),
+                w[LIGHTING_ATROUS_FALLBACK_STAT],
                 w[LIGHTING_ATROUS_STAT + 2] as f64 / 1.0e6,
                 w[LIGHTING_ATROUS_STAT + 3]
             );
             eprintln!(
-                "lightingcompose {queue} frame {} full {} blocks {}",
-                self.lighting.frame, w[LIGHTING_COMPOSE_STAT], w[LIGHTING_COMPOSE_STAT + 1]
+                "lightingcompose {queue} frame {} full {} blocks {}/{} fallback {}",
+                self.lighting.frame,
+                w[LIGHTING_COMPOSE_STAT],
+                w[LIGHTING_COMPOSE_STAT + 1],
+                w[LIGHTING_COMPOSE_TOTAL_STAT],
+                w[LIGHTING_COMPOSE_FALLBACK_STAT]
             );
         }
     }
@@ -1611,6 +1643,10 @@ impl Gpu {
         // off, or the block list cannot cover the image. A moving scene stays on
         // the dirty-block list (S79A): the scene hash is not a compose gate.
         // GENOS_LIGHTING_COMPOSE_ALL, or set_lighting_compose_all, forces the full pass.
+        // The full path also clears each texel's screen rect. The push reads that
+        // rect (lighting_compose_mark_slot) and returns at once when it is empty.
+        // Leaving the rects up on a moving frame makes that walk run inside the
+        // a-trous push stamp.
         let compose_all = self.lighting.compose_all.unwrap_or_else(|| {
             std::env::var_os("GENOS_LIGHTING_COMPOSE_ALL").is_some()
         });
@@ -2114,11 +2150,17 @@ const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
 /// Lighting stats buffer: 24 words, diag[64], chg[32], then the a-trous fallback
 /// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`.
 /// The change-counter enable word stays chg[31] (word 119). Compose follows:
-/// full flag and shaded 8×8 block count at `LIGHTING_COMPOSE_STAT`.
-const LIGHTING_STATS_WORDS: usize = 128;
+/// full flag and shaded 8×8 block count at `LIGHTING_COMPOSE_STAT`, then
+/// variance and push modes. The tail is the image block count, the compose
+/// promotion, five level modes and the cap-promotion count.
+const LIGHTING_STATS_WORDS: usize = 136;
 const LIGHTING_COMPOSE_STAT: usize = 124;
 const LIGHTING_ATROUS_VAR_STAT: usize = 126;
 const LIGHTING_ATROUS_PUSH_STAT: usize = 127;
+const LIGHTING_COMPOSE_TOTAL_STAT: usize = 128;
+const LIGHTING_COMPOSE_FALLBACK_STAT: usize = 129;
+const LIGHTING_ATROUS_LEVEL_STAT: usize = 130;
+const LIGHTING_ATROUS_FALLBACK_STAT: usize = 135;
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 const LIGHTING_CHG_ENABLE_WORD: u64 = 24 + 64 + 31;
 const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;

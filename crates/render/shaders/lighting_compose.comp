@@ -104,6 +104,7 @@ void main() {
             uint bh = (pc.dims.y + 7u) / 8u;
             gstats.compose_full = 1u;
             gstats.compose_blocks = bw * bh;
+            gstats.compose_total = bw * bh;
         }
         p = gl_GlobalInvocationID.xy;
     } else {

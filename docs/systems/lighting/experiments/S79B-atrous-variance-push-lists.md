@@ -1,7 +1,7 @@
 # S79B: Variance and push use the work lists
 
 - **Date:** 2026-10-13
-- **Result:** pushed (not re-timed; the owner measures on the RTX 4070)
+- **Result:** slower on the RTX 4070 (moving a-trous +0.4–0.7 ms, still compact 0.15 → 0.27 ms). Counters below.
 - **Commit / patch:** this commit
 
 ## Idea
@@ -20,7 +20,7 @@ Compact appends the slots the dense pass would recompute. Variance: the S78B ear
 
 The filtered set is about 108k texels in a still scene. That does not fit the cap, so the list is the due set, not every filtered texel. The dispatch is not shortened.
 
-`lightingatrous` prints `var` and `push` (`list`, `dense`, or `off`). `LightingAtrousStats::variance_mode` and `push_mode` are 1, 2, and 0.
+`lightingatrous` prints `var`, `push` and one word per level (`list`, `dense`, `cap`, or `off`) plus `fallback`, the number of those seven passes that hit the cap. `dense` is the fraction gate. `cap` is a list past 65536. `LightingAtrousStats` uses 1, 2, 3 and 0 for the same codes.
 
 ## Deviations
 - SVGF, the à-trous filter, and the pull-push recompute every pixel every frame. A slot the early-out would skip is not visited. A texel that was already inactive keeps the zero masks already stored.
@@ -28,15 +28,17 @@ The filtered set is about 108k texels in a still scene. That does not fit the ca
 - The due test in compact runs before the cache pass writes. The cache pass and the level-5 stamps append what that test could not see yet.
 
 ## Numbers
-Not measured here. Expected on the moving 1920×1080 stress scene: about 0.9 ms when the dirty fraction stays at or under 0.25, and about 0 ms when it does not.
+Owner, RTX 4070, 1920×1080, two runs against `9e08d7d`: moving a-trous rose 0.4–0.7 ms, including on the compose-only commit. Still compact went 0.15 → 0.27 ms with this commit. Still fps dropped 6–7. No visible artifacts.
 
-The 1.7-4.5 ms swing is 2.8 ms across the five level dispatches, about 0.56 ms between a list level and a dense sweep. Variance and push are two dense sweeps on both ends of that range (about 0.55 ms each if the five list levels are about 0.12 ms and the 1.7 ms floor includes them). A list in place of each is the level-list cost. Two of those replacements are about 0.9 ms. A due set larger than 65536, or a fraction above the gate, keeps the dense sweep.
+The moving rise on the compose-only commit is the push walking screen rects, described in S79A. This commit adds a second cost on a still frame: while the fraction stays at or under 0.25, compact tests every live slot for the variance and push due sets and appends them. Variance and push then leave the coalesced early-out sweep for those lists. Levels 1–5 were already lists on a still frame.
+
+A moving stress frame is expected to stay on the dense side of the gate (`dirty` above 0.25, every level `dense`, `var` and `push` `dense`, `fallback` 0). The 0.9 ms estimate applies only when those words say `list`.
 
 ## Screenshots
 not recorded
 
 ## Outcome and why
-The lavapipe test forces threshold 1, then 0, then 1. Variance and push report list, then dense, then list. The list picture and the dense picture stay within the same-mode frame step plus 2 byte levels, the tolerance the level test already used.
+The lavapipe test forces threshold 1, then 0, then 1. Variance, push and each level report list, then dense, then list, and the cap count stays 0. The list picture and the dense picture stay within the same-mode frame step plus 2 byte levels, the tolerance the level test already used.
 
 ## Lessons / when to revisit
-If the due set sits just over 65536 while the fraction is still under 0.25, the pass goes dense and this cut saves nothing. The owner's A/B is `GENOS_LIGHTING_ATROUS_DIRTY=0` against the default.
+Do not extend these lists unless a moving stress frame prints `list` on the levels with `dirty` at or under 0.25 and `fallback` 0. A `dense` line is the fraction gate. A `cap` line is a due set past 65536. Neither has a skip left to take.

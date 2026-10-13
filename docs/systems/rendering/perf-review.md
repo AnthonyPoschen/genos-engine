@@ -112,3 +112,11 @@ GENOS_GPU_TIMES=30 GENOS_GPU_DISPATCH=1 cargo run --release -p genos-stress -- -
 ```
 
 The entries whose pass id is 8 (`N:8=`) are variance, the five levels, and the push, in that order.
+
+## S79A and S79B on the 4070
+
+Two runs at 1920×1080 against `9e08d7d`. Moving compose stayed 1.91–1.95 ms (was 1.89–2.07). Moving a-trous rose 0.4–0.7 ms, including on the compose-only commit. Still compact went 0.15 → 0.27 ms with the a-trous commit, and still fps dropped 6–7. No picture change.
+
+The compose skip does not apply to this scene. 1920×1080 is 32400 blocks. The moving sun changes packed direct light and probe SH, and a changed probe marks the blocks around it, so the list is the image. It stays a list (`full` 0) because 32400 is under the 65535 cap. The a-trous rise on the compose-only commit is the push walking those blocks: a full compose used to clear the screen rects the push reads, and the list path does not. That walk is the last `N:8=` line. Compact's still rise is the variance and push due-test, which runs while the dirty fraction stays under 0.25.
+
+`GENOS_LIGHTING_DEBUG=1` prints `lightingcompose` (`blocks/total`, `fallback`) and `lightingatrous` (dirty fraction, `list`/`dense`/`cap` per level, `fallback`). A moving line near 32400/32400 with every a-trous level `dense` means there is no skip to take. Do not cut either pass further until a moving frame prints otherwise.

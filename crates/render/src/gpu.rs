@@ -419,8 +419,9 @@ impl Renderer {
         self.gpu.lighting.compose_all = Some(on);
     }
 
-    /// Whether the last frame's compose covered the image, and how many 8×8
-    /// blocks it shaded. Waits for that frame.
+    /// Whether the last frame's compose covered the image, how many 8×8 blocks
+    /// it shaded against the image total, and whether an empty or over-cap list
+    /// was promoted. Waits for that frame.
     pub fn lighting_compose_stats(&mut self) -> LightingComposeStats {
         self.gpu.lighting_compose_stats()
     }

@@ -57,7 +57,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Shadow visibility shared per 12.5 cm cell for hits, invalidated per lamp range (S74A).
 - 1-in-16 push refresh floor (S78B); kept-hit bounce refreshed with its re-trace (S78D); held strata keep exact directions (S78K).
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
-- Compose redraws only the 8×8 blocks whose lighting inputs or probes changed, including while boxes or the sun move. The scene hash is not a compose gate. A frame whose list is empty runs the full composite (a whole frame is never held); a clean block keeps the shaded pixel from the last visit. While the camera is held, a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame (Schied et al. 2017; Wright et al. 2022). Lumen's screen-probe composite (4 probes, plane distance and normal) is unchanged.
+- Compose redraws only the 8×8 blocks whose lighting inputs or probes changed, including while boxes or the sun move. The scene hash is not a compose gate. On the moving stress scene that list is the image: the sun and the probe SH mark nearly every block, so the dispatch does not shrink. A frame whose list is empty runs the full composite (a whole frame is never held); a clean block keeps the shaded pixel from the last visit. While the camera is held, a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame (Schied et al. 2017; Wright et al. 2022). Lumen's screen-probe composite (4 probes, plane distance and normal) is unchanged.
 - Variance and push walk a work list when last frame's dirty fraction is at or under `GENOS_LIGHTING_ATROUS_DIRTY` (S79B), the same gate as a-trous levels 1-5. The list is the slots those passes would recompute, not the whole filtered set (that set is ~108k and does not fit the 65536 cap) and not every one of the 1,048,576 slots. Above the fraction, or past the cap, they walk every slot. SVGF (Schied et al., HPG 2017, sec. 4.2), the à-trous filter (Dammertz et al., HPG 2010) and the pull-push (Gortler et al. 1996) recompute every pixel every frame. A texel that was already inactive is not rewritten. The 1-in-16 push floor still runs. The view-held stamp bump inside a clean push does not, for slots left off the list; a held camera is already treated as current by the field's freshness check.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
 
@@ -553,12 +553,12 @@ neighbours do not overflow the cap. The word is not activity `.x`: that
 channel is the level-5 dirty stamp. Past 65536, or when the fraction is over
 the gate, the pass is the dense sweep.
 
-`lightingatrous` prints `var` and `push` as `list`, `dense` or `off`.
-`LightingAtrousStats::variance_mode` and `push_mode` are 1, 2 and 0.
-Not re-timed here. Expected on the moving 1920×1080 stress scene: about 0.9 ms
-on frames whose dirty fraction stays at or under 0.25, and about 0 ms on the
-dense end. The 1.7-4.5 ms swing is levels 1-5, ~0.56 ms a level between a list
-and a dense sweep; variance and push are two of those sweeps on both ends, so
-replacing them with lists is about 0.9 ms when the lists stay on. A filtered
-set of ~108k does not itself go on the list. The due set at a 0.25 fraction
-does.
+`lightingatrous` prints `var`, `push`, one mode per level (`list`, `dense`,
+`cap` or `off`) and `fallback` (cap promotions). The same trace prints
+`lightingcompose` as shaded blocks, the image total and the empty-list
+promotion. On the 4070 moving stress scene neither cut moved its pass: compose
+stayed about 1.9 ms, and a-trous rose 0.4–0.7 ms. The expected moving line is
+compose blocks about 32400/32400 with `fallback` 0, and a-trous `dense` on
+every level because the dirty fraction stays above 0.25. There is nothing to
+skip until a moving frame prints otherwise. The still compact rise (0.15 to
+0.27 ms) is this commit's due-test while the lists are on.

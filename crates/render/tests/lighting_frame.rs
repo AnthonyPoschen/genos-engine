@@ -448,11 +448,13 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     let list_stats = renderer.lighting_atrous_stats();
     let temporal = mean_abs(&previous, &listed);
     eprintln!(
-        "list dirty {:.4} mode {} var {} push {} threshold {:.4} filtered {} ran {} temporal {temporal:.3}",
+        "list dirty {:.4} mode {} var {} push {} levels {:?} fallback {} threshold {:.4} filtered {} ran {} temporal {temporal:.3}",
         list_stats.dirty_fraction,
         list_stats.mode,
         list_stats.variance_mode,
         list_stats.push_mode,
+        list_stats.levels,
+        list_stats.fallback,
         list_stats.threshold,
         list_stats.filtered,
         list_stats.ran
@@ -461,6 +463,8 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     assert_eq!(list_stats.mode, 1, "threshold 1 keeps the work lists");
     assert_eq!(list_stats.variance_mode, 1, "variance uses the work list");
     assert_eq!(list_stats.push_mode, 1, "push uses the work list");
+    assert_eq!(list_stats.levels, [1, 1, 1, 1, 1], "each level uses the work list");
+    assert_eq!(list_stats.fallback, 0, "the hall lists fit the cap");
     assert!(
         (list_stats.threshold - 1.0).abs() < 1.0e-4,
         "threshold {}",
@@ -478,11 +482,13 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     let dense_stats = renderer.lighting_atrous_stats();
     let cross = mean_abs(&listed, &dense);
     eprintln!(
-        "dense dirty {:.4} mode {} var {} push {} threshold {:.4} filtered {} cross {cross:.3}",
+        "dense dirty {:.4} mode {} var {} push {} levels {:?} fallback {} threshold {:.4} filtered {} cross {cross:.3}",
         dense_stats.dirty_fraction,
         dense_stats.mode,
         dense_stats.variance_mode,
         dense_stats.push_mode,
+        dense_stats.levels,
+        dense_stats.fallback,
         dense_stats.threshold,
         dense_stats.filtered
     );
@@ -490,6 +496,8 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     assert_eq!(dense_stats.mode, 0, "threshold 0 is the dense sweep");
     assert_eq!(dense_stats.variance_mode, 2, "variance is the dense sweep");
     assert_eq!(dense_stats.push_mode, 2, "push is the dense sweep");
+    assert_eq!(dense_stats.levels, [2, 2, 2, 2, 2], "each level is the fraction-gate sweep");
+    assert_eq!(dense_stats.fallback, 0, "threshold 0 is not a cap promotion");
     assert!(
         dense_stats.threshold.abs() < 1.0e-4,
         "threshold {}",
@@ -517,6 +525,8 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     assert_eq!(back.mode, 1, "raising the threshold returns to the work lists");
     assert_eq!(back.variance_mode, 1, "variance returns to the work list");
     assert_eq!(back.push_mode, 1, "push returns to the work list");
+    assert_eq!(back.levels, [1, 1, 1, 1, 1], "each level returns to the work list");
+    assert_eq!(back.fallback, 0);
     assert!(back.ran, "the levels ran after the switch back");
 }
 
@@ -568,6 +578,8 @@ fn lighting_compose_lists_dirty_blocks_while_the_scene_moves() {
         "the list skipped unchanged blocks ({}/{})",
         stats.blocks, image_blocks
     );
+    assert_eq!(stats.total, image_blocks, "compose total is the image");
+    assert_eq!(stats.fallback, 0, "a non-empty list under the cap is not promoted");
     assert!(
         changed_pixels(&listed, &after) > 0,
         "the frame is presented, not held"
@@ -589,6 +601,9 @@ fn lighting_compose_lists_dirty_blocks_while_the_scene_moves() {
         full_stats.full, full_stats.blocks
     );
     assert!(full_stats.full, "compose all covers the image");
+    assert_eq!(full_stats.blocks, image_blocks);
+    assert_eq!(full_stats.total, image_blocks);
+    assert_eq!(full_stats.fallback, 0, "compose all is not the empty-list promotion");
     assert!(
         cross <= step.max(temporal) + 2.0,
         "list and full compose diverged: cross {cross:.3} same-mode step {step:.3} temporal {temporal:.3}"
@@ -613,6 +628,8 @@ fn lighting_compose_lists_dirty_blocks_while_the_scene_moves() {
     assert_eq!(renderer.lighting_still_frames(), 0, "the sun changes the scene hash");
     assert!(!sun_stats.full, "a new sun does not force the hash full-compose");
     assert!(sun_stats.blocks > 0, "the sun marked blocks whose light changed");
+    assert_eq!(sun_stats.total, image_blocks);
+    assert_eq!(sun_stats.fallback, 0, "the sun list is under the cap");
     assert!(
         changed_pixels(&full, &lit) > 0,
         "the sun frame is presented"
