@@ -331,6 +331,10 @@ fn lighting_atrous_ppm_at() -> u64 {
 }
 /// ppm, previous fraction, 64 filtered-texel bins, 5 level modes, 5 * 64 dense recount bins.
 const LIGHTING_ATROUS_META_WORDS: u64 = 1 + 1 + 64 + 5 + 5 * 64;
+/// S73E: first word of the pre-fill list. Matches lighting_cache.glsl LIGHTING_SC_PREFILL_AT.
+fn lighting_sc_prefill_at() -> u64 {
+    lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + 5 * LIGHTING_CACHE_SLOTS + 1 + 1 + 64 + 5 + 5 * 64
+}
 const LIGHTING_PASS_NAMES: [&str; 9] = [
     "lighting compact",
     "lighting place",
@@ -693,8 +697,11 @@ impl Gpu {
             assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
             assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
             // S73E: the pre-fill list follows the a-trous meta (lighting_cache.glsl LIGHTING_SC_PREFILL_AT).
+            assert!(lighting_sc_prefill_at() >= lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS);
+            assert!(lighting_sc_prefill_at() >= lighting_ckeys_words());
+            assert_eq!(lighting_sc_prefill_at(), lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS);
             self.lighting.cache_keys = self.make_buffer_queues(
-                (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS + LIGHTING_SC_PREFILL_MAX) * 4, // S73E: pre-fill list after the a-trous meta // a-trous meta after the S67/PR11 compose words // S78X: a-trous threshold, fraction, bins // S78Z: verify / wake words sit just before that // S78X lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
+                (lighting_sc_prefill_at() + LIGHTING_SC_PREFILL_MAX) * 4, // S73E: pre-fill list after the a-trous meta // a-trous meta after the S67/PR11 compose words // S78X: a-trous threshold, fraction, bins // S78Z: verify / wake words sit just before that // S78X lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
                 0x20 | 0x2 | 0x100 | 0x1,
                 Memory::Device,
                 &share,
