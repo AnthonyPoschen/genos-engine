@@ -456,15 +456,24 @@ fn run() -> Result<(), String> {
         "genos-stress lighting http://127.0.0.1:{}/lighting",
         genos_mcp::listen_port()
     );
-    eprintln!(
-        "genos-stress {} ({} sections), {} occluders, {} moving boxes, {} lamps ({} moving)",
-        stage.scale.label(),
-        stage.scale.sections(),
-        stage.occluders(),
-        stage.building.movers(),
-        stage.lamp_count(),
-        stage.mix.dynamic().min(stage.lamp_count()),
-    );
+    if let Some(room) = &stage.room {
+        eprintln!(
+            "genos-stress scene file: {} walls, {} solids, {} lamps",
+            room.walls.len(),
+            room.solids.len(),
+            room.lights.len(),
+        );
+    } else {
+        eprintln!(
+            "genos-stress {} ({} sections), {} occluders, {} moving boxes, {} lamps ({} moving)",
+            stage.scale.label(),
+            stage.scale.sections(),
+            stage.occluders(),
+            stage.building.movers(),
+            stage.lamp_count(),
+            stage.mix.dynamic().min(stage.lamp_count()),
+        );
+    }
 
     if let Some(plan) = &opts.bench {
         let text = bench::run(&mut renderer, &mut window, &mut stage, &camera, plan)?;

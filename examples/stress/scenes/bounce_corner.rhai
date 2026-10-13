@@ -11,4 +11,6 @@ wall(0.08, 1.5, 0.16, 3.0, 2.6, 0.35, 1.0);
 solid("square", 4.2, 3.4, 0.25, 0.02, 0.02, 0.02, 0.02, 0.0);
 solid("square", 3.4, 4.2, 0.25, 0.02, 0.02, 0.02, 0.02, 0.0);
 solid("circle", 4.2, 4.2, 0.2, 0.02, 0.02, 0.02, 0.02, 0.0);
-light(1.6, 1.55, 1.5, 8.0, 7.2, 5.6);
+// Dim enough to stay under the tone shoulder. Color 8 sits near 0.78 everywhere,
+// so the corner, the floor and the shadow read as one grey wall.
+light(1.6, 1.55, 1.5, 0.2, 0.18, 0.14);

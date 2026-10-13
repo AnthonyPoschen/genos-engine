@@ -131,21 +131,27 @@ impl Image {
     pub fn luminance(&self, region: Region) -> Luminance {
         let (x0, y0, x1, y1) = region.pixels(self.width, self.height);
         let mut sum = 0.0f64;
+        let mut sum2 = 0.0f64;
         let mut lo = f32::MAX;
         let mut hi = 0.0f32;
         let mut black = 0u32;
         for y in y0..y1 {
             for x in x0..x1 {
                 let l = pixel_luminance(self.at(x, y));
-                sum += l as f64;
+                let d = l as f64;
+                sum += d;
+                sum2 += d * d;
                 lo = lo.min(l);
                 hi = hi.max(l);
                 black += u32::from(l < 0.002);
             }
         }
-        let n = ((x1 - x0) * (y1 - y0)) as f64;
+        let n = ((x1 - x0) * (y1 - y0)).max(1) as f64;
+        let mean = sum / n;
+        let var = (sum2 / n - mean * mean).max(0.0);
         Luminance {
-            mean: (sum / n) as f32,
+            mean: mean as f32,
+            std: var.sqrt() as f32,
             min: lo,
             max: hi,
             black_share: (black as f64 / n) as f32,
@@ -190,6 +196,8 @@ impl Image {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Luminance {
     pub mean: f32,
+    /// Standard deviation of linear luminance. A flat wall sits near zero.
+    pub std: f32,
     pub min: f32,
     pub max: f32,
     /// Share of pixels that are black (luminance under 0.002).

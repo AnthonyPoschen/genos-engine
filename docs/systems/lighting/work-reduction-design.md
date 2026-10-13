@@ -365,7 +365,7 @@ Lighting stays a picture on the machine that draws. The five lines, for the syst
 
 Lavapipe locks the picture. The milliseconds and the bounce lag are judged on the owner's machine, windowed, 1920×1080.
 
-The corner scene is `examples/stress/scenes/bounce_corner.rhai`: two dark walls, no sun, no sky, one lamp. `examples/stress/scripts/bounce_corner.rhai` lets the picture settle, moves that lamp toward the corner, then stops it. Watch the corner, not the lamp bulb.
+The corner scene is `examples/stress/scenes/bounce_corner.rhai`: two dark walls, no sun, no sky, one lamp. Loading it replaces the stress building. A later frame does not copy the file's lamp back, so the script's path is the lamp the picture uses. The lamp is dim (0.2, 0.18, 0.14): color 8 sits on the tone shoulder and the whole room reads as one grey wall. `examples/stress/scripts/bounce_corner.rhai` lets the picture settle, moves that lamp toward the corner, then stops it. The script rejects a camera that left the corner, a flat picture (linear-luminance standard deviation under 0.02), and a lamp that never left its start or missed the end of the path. Watch the corner, not the lamp bulb.
 
 - The lit side of the wall and the shadow edge move with the lamp, on the same frame. A shadow that slides in a frame late fails the run.
 - The bounce in the corner, the part no lamp reaches directly, may keep the old tint for a few frames after the lamp stops. It should then catch the new lamp. A corner that stays on the old tint fails the run.

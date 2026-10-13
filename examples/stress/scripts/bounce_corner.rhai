@@ -10,27 +10,41 @@
 // new place. A corner that stays on the old tint fails the run.
 //
 // Shots land in the --report directory (use ~/genos-perf/bounce-corner).
+fn dist2(a, b) {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    dx * dx + dy * dy + dz * dz
+}
+
 time(#{ fixed_dt: 0.0166667 });
 knob("sun", "freeze");
 knob("boxes", "still");
 knob("dynamic", 0.0);
 camera(#{ position: [2.4, 1.55, 2.3], look_at: [0.25, 0.55, 0.25] });
 wait(#{ frames: 45 });
+let eye = camera().position;
+check_lt(dist2(eye, [2.4, 1.55, 2.3]), 0.01, "the camera stayed at the corner");
 view("direct");
 shot("before-direct");
 view("bounce");
 shot("before-bounce");
 view("full");
-shot("before-full");
+let before = shot("before-full");
+// A flat grey wall has almost no spread. The corner, the floor and the lamp do.
+check_gt(before.std, 0.02, "the corner picture is not a flat wall");
 let lamps = lights();
-require(lamps.len() > 0, "the corner has a lamp");
+require(lamps.len() == 1, "the corner has one lamp");
 let lamp = lamps[0];
+let start = lamp.position;
 light(#{
     index: lamp.index,
     path: [[1.6, 1.55, 1.5], [0.85, 1.55, 1.15]],
     frames: 20
 });
 wait(#{ frames: 10 });
+let mid = lights()[0].position;
+check_gt(dist2(start, mid), 0.04, "the lamp moved");
 view("direct");
 shot("moving-direct");
 view("bounce");
@@ -50,4 +64,8 @@ shot("settled-bounce");
 view("direct");
 shot("settled-direct");
 view("full");
-shot("settled-full");
+let settled = shot("settled-full");
+check_gt(settled.std, 0.02, "the settled corner is not a flat wall");
+let stopped = lights()[0].position;
+check_lt(dist2(stopped, [0.85, 1.55, 1.15]), 0.0025, "the lamp stopped at the end of the path");
+log(`lamp ${start} -> ${mid} -> ${stopped}`);

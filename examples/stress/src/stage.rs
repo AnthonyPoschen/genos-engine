@@ -77,8 +77,8 @@ pub struct Stage {
     pub boxes_still: bool,
     /// The lamp paths' clock stands (moving lamps hold where they are).
     pub lamps_still: bool,
-    /// A scene file in place of the building (--scene): its walls, solids and
-    /// lights as they are; nothing moves, the sun, sky and lamp knobs do nothing.
+    /// A scene file in place of the building (--scene). The file is the world.
+    /// Later applies do not put its lights back, so a script can move a lamp.
     pub room: Option<genos_scene::Scene>,
 }
 
@@ -155,10 +155,10 @@ impl Stage {
     }
 
     /// Write the boxes, lamps, sun and sky for the current clocks into the world.
+    /// A scene file is already the world. Its lights stay where the script put
+    /// them: copying the file back every frame undoes `light(path)`.
     pub fn apply(&mut self) {
-        if let Some(room) = &self.room {
-            self.world.scene.lights = room.lights.clone();
-            self.world.scene.sky = room.sky.clone();
+        if self.room.is_some() {
             return;
         }
         self.building
@@ -180,5 +180,44 @@ impl Stage {
 
     pub fn occluders(&self) -> usize {
         self.world.scene.walls.len() + self.world.scene.solids.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::building::{Layout, LightMix};
+
+    #[test]
+    fn a_scene_file_keeps_a_moved_lamp() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("scenes/bounce_corner.rhai");
+        let scene = genos_scene::load_path(&path).expect("corner scene");
+        assert_eq!(scene.walls.len(), 2, "two walls");
+        assert_eq!(scene.solids.len(), 3, "three solids");
+        assert_eq!(scene.lights.len(), 1, "one lamp");
+        assert!(scene.sky.is_none(), "no sky");
+        let mut stage = Stage::new(
+            Scale::SMALL,
+            1,
+            LightMix {
+                count: 5,
+                dynamic_pct: 50,
+                layout: Layout::Spread,
+            },
+            1.0,
+            0.25,
+            120.0,
+        );
+        stage.set_room(scene);
+        assert_eq!(stage.occluders(), 5, "the room replaced the building");
+        assert_eq!(stage.world.scene.lights.len(), 1);
+        stage.world.scene.lights[0].position = genos_scene::Vec3::new(0.85, 1.55, 1.15);
+        stage.advance(1.0 / 60.0);
+        let p = stage.world.scene.lights[0].position;
+        assert!(
+            (p.x - 0.85).abs() < 1.0e-4 && (p.z - 1.15).abs() < 1.0e-4,
+            "apply put the scene-file lamp back at {p:?}"
+        );
     }
 }

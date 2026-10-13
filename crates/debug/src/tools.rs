@@ -1337,6 +1337,7 @@ fn finish_shots(
                     ("width", num(img.width as f64)),
                     ("height", num(img.height as f64)),
                     ("luminance", num(lum.mean as f64)),
+                    ("std", num(lum.std as f64)),
                     ("min", num(lum.min as f64)),
                     ("max", num(lum.max as f64)),
                     ("black_share", num(lum.black_share as f64)),
