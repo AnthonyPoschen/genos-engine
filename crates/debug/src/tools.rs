@@ -65,7 +65,9 @@ impl Look {
         };
         if let Some(a) = arg {
             if look.view.mode != ViewMode::Light {
-                return Err(format!("{head} takes no argument (bounce limits went with the old lighting)"));
+                return Err(format!(
+                    "{head} takes no argument (bounce limits went with the old lighting)"
+                ));
             }
             look.view.lamp = a
                 .parse()
@@ -297,6 +299,16 @@ impl Tools {
     /// Run scene time on a fixed step from the start (a script or a test).
     pub fn set_fixed_step(&mut self, dt: Option<f32>) {
         self.fixed_dt = dt;
+    }
+
+    /// Hold the scene clock. MCP `step`, or [`Self::request_steps`], advances it.
+    pub fn pause(&mut self) {
+        self.paused = true;
+    }
+
+    /// Queue scene frames. The next `scene_dt` calls consume them one at a time.
+    pub fn request_steps(&mut self, frames: u32) {
+        self.steps_left = self.steps_left.saturating_add(frames.max(1));
     }
 
     /// Scene seconds this frame should advance: 0 while paused (unless stepping),
@@ -675,7 +687,10 @@ impl Tools {
                     ("camera", camera_value(ctx.camera)),
                     ("stable", Value::Bool(stats.settled)),
                     ("still_frames", num(stats.still_frames as f64)),
-                    ("picture_settled", Value::Bool(ctx.renderer.picture_settled())),
+                    (
+                        "picture_settled",
+                        Value::Bool(ctx.renderer.picture_settled()),
+                    ),
                 ]))
             }
             "knobs" => {
@@ -1032,7 +1047,9 @@ impl Tools {
                 let triangles = match args.str("geometry")?.as_deref() {
                     None | Some("shapes") => false,
                     Some("triangles") => true,
-                    Some(other) => return Err(format!("geometry must be shapes or triangles, not {other}")),
+                    Some(other) => {
+                        return Err(format!("geometry must be shapes or triangles, not {other}"))
+                    }
                 };
                 let grid = args
                     .floats("grid", 2)?
@@ -1095,9 +1112,10 @@ impl Tools {
                 }))
             }
             "timing" => reply(self.timing_value(args.u32("frames")?.unwrap_or(60) as usize)),
-            "get_lighting_settings" => {
-                reply(lighting_report(&ctx.renderer.lighting_settings().to_text(), ctx.renderer))
-            }
+            "get_lighting_settings" => reply(lighting_report(
+                &ctx.renderer.lighting_settings().to_text(),
+                ctx.renderer,
+            )),
             "set_lighting_settings" => {
                 let scene = ctx.host.scene();
                 apply_lighting_update(&mut scene.lighting, args.0)?;
@@ -1119,7 +1137,8 @@ impl Tools {
             }
             "apply_preset" => {
                 let name = args.str("name")?.ok_or("apply_preset needs name")?;
-                let preset = LightingPreset::parse(&name).ok_or_else(|| format!("unknown preset {name}"))?;
+                let preset =
+                    LightingPreset::parse(&name).ok_or_else(|| format!("unknown preset {name}"))?;
                 ctx.host.scene().lighting = LightingSettings::preset(preset);
                 let written = ctx.host.scene().lighting.to_text();
                 ctx.renderer.clear_lighting_override();
@@ -1301,7 +1320,10 @@ fn finish_reference(
         ("reference", text(path("reference").display().to_string())),
         ("spp", num(r.spp as f64)),
         ("bounces", num(job.max_bounces as f64)),
-        ("geometry", text(if job.triangles { "triangles" } else { "shapes" })),
+        (
+            "geometry",
+            text(if job.triangles { "triangles" } else { "shapes" }),
+        ),
         ("width", num(r.image.width as f64)),
         ("height", num(r.image.height as f64)),
         ("trace_seconds", num(r.seconds as f64)),
@@ -1455,7 +1477,10 @@ fn lighting_report(body: &str, renderer: &Renderer) -> Value {
             obj(vec![
                 ("name", text(*name)),
                 ("ms", num(ms.get(i).copied().unwrap_or(0.0))),
-                ("dispatches", num(counts.get(i).copied().unwrap_or(0) as f64)),
+                (
+                    "dispatches",
+                    num(counts.get(i).copied().unwrap_or(0) as f64),
+                ),
             ])
         })
         .collect();
@@ -1537,4 +1562,21 @@ fn apply_lighting_update(settings: &mut LightingSettings, args: &Value) -> Resul
         settings.set_key(key, &lighting_value_text(value)?)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pause_holds_the_clock_until_a_step_is_requested() {
+        let mut tools = Tools::new();
+        tools.set_fixed_step(Some(DEFAULT_STEP));
+        tools.pause();
+        assert_eq!(tools.scene_dt(1.0), 0.0);
+        tools.request_steps(1);
+        let stepped = tools.scene_dt(1.0);
+        assert!((stepped - DEFAULT_STEP).abs() < 1.0e-6);
+        assert_eq!(tools.scene_dt(1.0), 0.0);
+    }
 }

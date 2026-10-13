@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 genos-input = { path = "../../crates/input" }
+genos-lighting-ref = { path = "../../crates/lighting-ref" }
 genos-load = { path = "../../crates/load" }
 genos-debug = { path = "../../crates/debug" }
 genos-mcp = { path = "../../crates/mcp" }

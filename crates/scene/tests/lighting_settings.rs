@@ -61,6 +61,26 @@ fn potato_is_direct_shadows_and_flat_ambient() {
 }
 
 #[test]
+fn full_effort_spends_the_maximum_and_rewrites_every_pixel() {
+    let mut settings = LightingSettings::preset(LightingPreset::Low);
+    settings.set_key("full_effort", "on").unwrap();
+    assert!(settings.is_full_effort());
+    assert_eq!(settings.gi.budget_shift, 0);
+    assert_eq!(settings.probe_rays(), 64);
+    assert_eq!(settings.bounce.count, LIGHTING_BOUNCES_UNLIMITED);
+    assert_eq!(settings.denoiser.iterations, 5);
+    assert_eq!(settings.denoiser.dirty_fraction, 0.0);
+    assert!(!settings.compose_reuse);
+    assert_eq!(settings.direct.resolution_scale, 1);
+    assert_eq!(settings.preset_label(), "custom");
+    let text = settings.to_text();
+    let parsed = LightingSettings::parse(&text).unwrap();
+    assert!(parsed.is_full_effort());
+    settings.set_key("full_effort", "off").unwrap();
+    assert_eq!(settings, LightingSettings::preset(LightingPreset::High));
+}
+
+#[test]
 fn day_cycle_and_one_bounce_sit_between_potato_and_low() {
     let names: Vec<_> = LightingPreset::all()
         .iter()

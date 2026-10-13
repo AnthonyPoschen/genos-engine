@@ -233,6 +233,11 @@ impl Host for Stage {
             Knob::switch("lighting_sky", "Lighting sky", lighting.sky),
             Knob::switch("lighting_emissive", "Emissive", lighting.emissive),
             Knob::switch("lighting_prefill", "Prefill", lighting.prefill),
+            Knob::switch(
+                "lighting_full_effort",
+                "Full effort",
+                lighting.is_full_effort(),
+            ),
             Knob::choice(
                 "lighting_ambient",
                 "Ambient",
@@ -382,6 +387,7 @@ fn apply_lighting_knob(
         "lighting_sky" => ("sky", on_off(v)),
         "lighting_emissive" => ("emissive", on_off(v)),
         "lighting_prefill" => ("prefill", on_off(v)),
+        "lighting_full_effort" => ("full_effort", on_off(v)),
         "lighting_ambient" => (
             "ambient",
             ["off", "constant", "hemisphere", "day", "curve"]
