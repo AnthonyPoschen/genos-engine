@@ -1641,7 +1641,11 @@ impl Gpu {
         }
         // The light alone (no camera): while it holds and a full sweep has changed
         // no mature patch, rounds relight young patches only. Any change goes back
-        // to full sweeps at once.
+        // to full sweeps at once. A small sun step stays on the hash from the last
+        // full refresh: the direction is in the scene hash, and taking the new one
+        // would relight the room as a whole-scene light change.
+        let (phase, full) = self.lighting_work_resolved();
+        let sun_amortise = self.note_sun_amortise(phase, full);
         let light = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1654,8 +1658,9 @@ impl Gpu {
             }
             hasher.finish()
         };
-        if light != self.lighting.light_hash {
-            self.lighting.light_hash = light;
+        let tracked = if sun_amortise { self.lighting.light_hash } else { light };
+        if tracked != self.lighting.light_hash {
+            self.lighting.light_hash = tracked;
             self.lighting.light_quiet = 0;
         }
         let sweep = self.lighting.live.div_ceil(LIGHTING_CACHE_BATCH).max(1) + 1;
@@ -1663,7 +1668,7 @@ impl Gpu {
         // round that relights nothing has nothing left to converge.
         let sc = lighting_world_env() == 3;
         let young_only = if sc { self.lighting.light_quiet >= 2 } else { self.lighting.young_ok && self.lighting.light_quiet >= sweep };
-        self.lighting.stats_light[slot] = light;
+        self.lighting.stats_light[slot] = tracked;
         self.lighting.stats_young[slot] = young_only || sc;
         // z: bgra, fills (bit 6), young-only rounds and lamp picks (lighting_common.glsl);
         // the gather and filter passes add their round (bits 1-2) below.
@@ -1687,8 +1692,6 @@ impl Gpu {
         let pc = [w, h, cols, rows, LIGHTING_RAYS, lighting_tile(h), z, self.lighting.frame];
         let image = self.color.image;
         let blocks = (w.div_ceil(8) as u64) * (h.div_ceil(8) as u64);
-        let (phase, full) = self.lighting_work_resolved();
-        let sun_amortise = self.note_sun_amortise(phase, full);
         // Full compose when the picture has no history yet, the camera or the
         // geometry moved, the surface cache is off, or the block list cannot
         // cover the image. A small sun step, with the camera held, stays on

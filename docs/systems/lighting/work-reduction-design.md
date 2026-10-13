@@ -266,7 +266,8 @@ While the step is small:
 - Every pixel traces the live sun. The direct view and the sun's shadow are this frame's. The compose list does not gain a block only because that packed direct changed.
 - A direct patch, the same compose shader, adds that direct to the bounce stored last time the pixel was fully composed. A clean block does not keep last frame's sun.
 - Indirect light uses the sun from the last full refresh, except one band of probe rows and one band of texel pages (`frame % 8`). That band is shaded with the live sun. Over 8 frames the bands cover the picture.
-- The a-trous input keeps the committed sun/sky scale, so a tick does not move every filtered texel. The band uses the live scale.
+- The a-trous input keeps the committed sun/sky scale, so a tick does not move every filtered texel. The band uses the live scale. The band is a spatial page column. The hashed page id is scattered, and an a-trous neighbourhood of that set would fill the field.
+- The step does not reset the surface cache's light-quiet counter. The sun direction is in the light hash, and taking the new hash would relight the room as a whole-scene light change.
 - The sun's shadow epoch does not move. Hit visibility stays on the committed sun. Pixels do not read that cache.
 
 `GENOS_LIGHTING_FULL_EFFORT=1` turns this off. The corner scene has no sun, so phase 1's picture is unchanged. `GENOS_LIGHTING_DEBUG=1` prints `lightingcompose` with the block count (`0xffffffff` is a full compose) and whether the sun path was on.

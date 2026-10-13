@@ -218,7 +218,11 @@ bool lighting_sun_probe_slice(uint probe) {
     return (probe / cols) % lighting_sun_n() == lighting_sun_slice_id();
 }
 bool lighting_sun_slot_slice(uint slot) {
-    return lighting_sc_page(slot) % lighting_sun_n() == lighting_sun_slice_id();
+    // Spatial page column. The hashed page id is scattered, and an a-trous
+    // 5x5 of that set fills the field.
+    ivec4 c = lighting_sc_cell(slot);
+    uint page_x = uint(c.x) >> 3u;
+    return page_x % lighting_sun_n() == lighting_sun_slice_id();
 }
 // A held probe outside this frame's slice keeps the light it already has.
 bool lighting_sun_hold_kept(uint h) {

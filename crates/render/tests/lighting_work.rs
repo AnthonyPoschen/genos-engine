@@ -471,23 +471,38 @@ fn full_effort_picture_floor_holds_a_third_run() {
     eprintln!("phase1 regime green {green} yellow {yellow} / {pixels}");
     assert!(green * 2 > pixels, "regime view is not mostly settled");
     assert!(yellow > 0, "regime view shows no fringe on the moving frame");
+}
 
-    // Small sun. The camera holds. Eleven still frames, then one 0.2° step.
-    // Frame 12 is slice 4: with 12 probe rows that is a single row, so the
-    // band can stay under half of the 920 blocks. A 40° jump is a full compose.
-    // Direct light on the step matches a full-effort replay of the same step.
+/// A 0.2° sun step stays on the compose list. A 40° jump does not.
+/// Direct light on the step matches a full-effort replay.
+#[test]
+fn small_sun_step_stays_on_the_compose_list() {
     let blocks = 40 * 23;
     let base = 0.4_f32;
     let step = 0.2_f32.to_radians();
+    let (_gpu, mut window, mut renderer) = open();
+    let camera = corner_camera();
     renderer.set_lighting_work(1, false);
     renderer.reset_lighting_caches();
     renderer.set_debug_view(DebugView {
         mode: ViewMode::Direct,
         ..DebugView::default()
     });
-    for _ in 0..11 {
+    // Eleven still frames. Frame 12 is slice 4: one probe row of the twelve.
+    for _ in 0..10 {
         let _ = draw_sun(&mut window, &mut renderer, base, &camera);
     }
+    let _ = draw_sun(&mut window, &mut renderer, base, &camera);
+    let still_stats = renderer.lighting_work_stats();
+    let still_atrous = renderer.lighting_atrous_stats();
+    eprintln!(
+        "sun still blocks {} sun {} atrous {:.4} ran {} filtered {}",
+        still_stats.delta_skip,
+        still_stats.stochastic,
+        still_atrous.dirty_fraction,
+        still_atrous.ran,
+        still_atrous.filtered
+    );
     let reduced = draw_sun(&mut window, &mut renderer, base + step, &camera);
     let sun_stats = renderer.lighting_work_stats();
     let atrous = renderer.lighting_atrous_stats();
@@ -514,8 +529,7 @@ fn full_effort_picture_floor_holds_a_third_run() {
         "sun step a-trous dirty fraction {:.4}",
         atrous.dirty_fraction
     );
-    let jump = draw_sun(&mut window, &mut renderer, base + 40.0_f32.to_radians(), &camera);
-    let _ = jump;
+    let _jump = draw_sun(&mut window, &mut renderer, base + 40.0_f32.to_radians(), &camera);
     let jump_stats = renderer.lighting_work_stats();
     eprintln!(
         "sun jump blocks {} sun {}",
