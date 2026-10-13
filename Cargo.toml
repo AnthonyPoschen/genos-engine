@@ -14,6 +14,7 @@ members = [
     "crates/window",
     "crates/render",
     "crates/ui",
+    "crates/lighting-ref",
     "crates/load",
     "crates/load-check",
     "crates/audio",

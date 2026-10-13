@@ -281,6 +281,11 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
         Knob::switch("lighting_sky", "Lighting sky", lighting.sky),
         Knob::switch("lighting_emissive", "Emissive", lighting.emissive),
         Knob::switch("lighting_prefill", "Prefill", lighting.prefill),
+        Knob::switch(
+            "lighting_full_effort",
+            "Full effort",
+            lighting.is_full_effort(),
+        ),
         Knob::choice(
             "lighting_ambient",
             "Ambient",
@@ -390,6 +395,7 @@ pub fn apply_lighting_knob(
         "lighting_sky" => ("sky", on_off(v)),
         "lighting_emissive" => ("emissive", on_off(v)),
         "lighting_prefill" => ("prefill", on_off(v)),
+        "lighting_full_effort" => ("full_effort", on_off(v)),
         "lighting_ambient" => (
             "ambient",
             ["off", "constant", "hemisphere", "day", "curve"]
@@ -409,5 +415,82 @@ fn on_off(v: f64) -> String {
         "on".into()
     } else {
         "off".into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::building::LightMix;
+
+    /// Every knob `gi-v2` published on the stress stage, including the preset
+    /// and bounce knobs and full effort.
+    const GI_V2_KNOBS: &[&str] = &[
+        "time_of_day",
+        "sun_speed",
+        "sun",
+        "sky",
+        "boxes",
+        "lamps",
+        "unfilled",
+        "unfilled_tint",
+        "lamp_clock",
+        "box_clock",
+        "lights",
+        "dynamic",
+        "power",
+        "scale",
+        "layout",
+        "lighting_preset",
+        "lighting_bounces",
+        "lighting_direct",
+        "lighting_direct_lights",
+        "lighting_direct_refresh",
+        "lighting_direct_scale",
+        "lighting_shadows",
+        "lighting_shadow_filter",
+        "lighting_gi",
+        "lighting_gi_refresh",
+        "lighting_budget_shift",
+        "lighting_probes",
+        "lighting_probe_rays",
+        "lighting_probe_stale",
+        "lighting_world_cache",
+        "lighting_world_stale",
+        "lighting_denoise",
+        "lighting_denoise_iters",
+        "lighting_denoise_adaptive",
+        "lighting_denoise_variance",
+        "lighting_compose_reuse",
+        "lighting_sky",
+        "lighting_emissive",
+        "lighting_prefill",
+        "lighting_full_effort",
+        "lighting_ambient",
+    ];
+
+    #[test]
+    fn the_stage_keeps_every_gi_v2_knob() {
+        let mut stage = Stage::new(
+            Scale::SMALL,
+            1,
+            LightMix {
+                count: 5,
+                dynamic_pct: 50,
+                layout: Layout::Spread,
+            },
+            1.0,
+            0.12,
+            120.0,
+        );
+        for name in GI_V2_KNOBS {
+            let value = stage
+                .knobs()
+                .into_iter()
+                .find(|knob| knob.name == *name)
+                .unwrap_or_else(|| panic!("missing {name}"))
+                .value;
+            stage.set_knob(name, value).expect(name);
+        }
     }
 }

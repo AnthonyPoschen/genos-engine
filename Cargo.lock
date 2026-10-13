@@ -180,6 +180,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-lighting-ref"
+version = "0.1.0"
+
+[[package]]
 name = "genos-load"
 version = "0.1.0"
 dependencies = [
@@ -250,6 +254,7 @@ version = "0.1.0"
 dependencies = [
  "genos-debug",
  "genos-input",
+ "genos-lighting-ref",
  "genos-load",
  "genos-mcp",
  "genos-render",

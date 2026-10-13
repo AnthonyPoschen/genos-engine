@@ -47,6 +47,7 @@ debug/lighting/     package genos-lighting
 crates/window/      package genos-window
 crates/ui/          package genos-ui
 crates/render/      package genos-render
+crates/lighting-ref/ package genos-lighting-ref
 crates/load/        package genos-load
 crates/load-check/  package genos-load-check
 crates/audio/       package genos-audio
@@ -57,6 +58,8 @@ examples/camera/    package genos-camera
 `genos-audio` mixes loaded PCM and submits that stereo buffer to the operating system. Direct-path transmission is one compute pass in `genos-render`. The camera scene does not open a sound device.
 
 `genos-debug` runs the debug commands, scripts, captures and the path-traced ground truth over the MCP command queue. Each engine system adds a binary under `debug/<system>/` on that scaffolding, with scenes in `debug/scenes/`. `genos-scene-lib` parses those scene files and does not link the renderer. `genos-lighting` is the lighting debug binary: it builds the scenes and writes screenshots, dumps, and logs under `./genos-debug/`. See [Debugging](systems/debugging.md).
+
+`genos-lighting-ref` is the CPU checker for lighting pictures. It holds the metrics, the verdicts, and the audit report, and it does not open a window or a Vulkan device. `genos-stress lighting-ref` is the driver: it owns the scenes, calls the path tracer, and on a machine with Vulkan captures live frames. `make lighting-ref-check` runs it. `MODE=lavapipe-small` is the small wiring check. Pictures and reports are written under `./genos-debug/` in the current directory. The metric core is its own crate so the defect self-test can run without the renderer. `gi-check` remains the scripted picture gate inside the stress runner.
 
 `genos-math` stores positions, directions, and rotations. `genos-physics` steps gravity, a move wish, contact, and springs. The camera capsule calls that step.
 

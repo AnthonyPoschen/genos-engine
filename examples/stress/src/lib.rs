@@ -3,4 +3,5 @@
 
 pub mod building;
 pub mod knobs;
+pub mod lighting_ref;
 pub mod stage;

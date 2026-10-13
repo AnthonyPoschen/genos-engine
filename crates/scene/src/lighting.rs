@@ -554,6 +554,47 @@ impl LightingSettings {
         self.prefill && self.gi.enabled && self.world_cache.enabled && self.bounce.count >= 2
     }
 
+    /// The knobs a reference capture spends. Maximum rays, a dense filter,
+    /// every pixel rewritten. The text form stores those knobs, not this
+    /// action. `GENOS_LIGHTING_FULL_EFFORT` applies it after the other
+    /// variables, so it wins.
+    pub fn apply_full_effort(&mut self) {
+        self.direct.enabled = true;
+        self.direct.max_lights = 0;
+        self.direct.refresh_frames = 1;
+        self.direct.resolution_scale = 1;
+        self.shadows.enabled = true;
+        self.shadows.filter = ShadowFilter::Cell;
+        self.shadows.cell_metres = 0.125;
+        self.shadows.refresh_frames = 1;
+        self.gi.enabled = true;
+        self.gi.refresh_frames = 1;
+        self.gi.budget_shift = 0;
+        self.bounce.count = LIGHTING_BOUNCES_UNLIMITED;
+        self.probes.enabled = true;
+        self.probes.rays = 64;
+        self.probes.tile = 0;
+        self.probes.refresh_frames = 1;
+        self.world_cache.enabled = true;
+        self.world_cache.refresh_frames = 1;
+        self.denoiser.enabled = true;
+        self.denoiser.iterations = 5;
+        self.denoiser.dirty_fraction = 0.0;
+        self.compose_reuse = false;
+        self.sky = true;
+        self.emissive = true;
+        self.prefill = true;
+        self.sanitize();
+        self.sync_preset_field();
+    }
+
+    /// True when applying full effort again would not change a knob.
+    pub fn is_full_effort(&self) -> bool {
+        let mut applied = self.clone();
+        applied.apply_full_effort();
+        self.same_knobs(&applied)
+    }
+
     /// Rays the push constant and the work buffer agree on.
     pub fn probe_rays(&self) -> u32 {
         if self.probes.rays == 0 {
@@ -864,6 +905,13 @@ impl LightingSettings {
             "night_intensity" => self.ambient.night_intensity = num_f32(value)?,
             "day_color" => self.ambient.day_color = parse_rgb(value)?,
             "day_intensity" => self.ambient.day_intensity = num_f32(value)?,
+            "full_effort" => {
+                if on(value)? {
+                    self.apply_full_effort();
+                } else {
+                    *self = Self::preset(LightingPreset::High);
+                }
+            }
             "dawn_color" => self.ambient.dawn_color = parse_rgb(value)?,
             "dawn_intensity" => self.ambient.dawn_intensity = num_f32(value)?,
             "noon_color" => self.ambient.noon_color = parse_rgb(value)?,
@@ -963,6 +1011,10 @@ impl LightingSettings {
         }
         if std::env::var_os("GENOS_LIGHTING_COMPOSE_ALL").is_some() {
             self.compose_reuse = false;
+            self.sync_preset_field();
+        }
+        if env_flag("GENOS_LIGHTING_FULL_EFFORT") {
+            self.apply_full_effort();
         }
     }
 
@@ -1223,6 +1275,14 @@ fn frame_due(frame: u32, every: u32) -> bool {
 
 fn bit(v: bool) -> u32 {
     u32::from(v)
+}
+
+/// A set variable turns the flag on, except the explicit off words.
+fn env_flag(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(value) => !matches!(value.trim(), "0" | "false" | "off" | "no"),
+        Err(_) => false,
+    }
 }
 
 fn on(value: &str) -> Result<bool, String> {
