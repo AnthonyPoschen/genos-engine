@@ -3705,9 +3705,18 @@ const bool LIGHTING_PIX_REUSE = true;
 uint lighting_pix_at() {
     return lighting_fill_light_at() + lighting_kept_hits() / 4u;
 }
+// Mode 3 is the surface cache. Probe-only (world cache bit off) used to skip
+// this and relight every pixel every still frame, which costs more than the
+// cache being on. High keeps the mode-3 check: the cache bit is set there.
+bool lighting_pix_cache_ok() {
+    return lighting_world_mode() == 3u || (gstats.ctrl_bits & 32u) == 0u;
+}
+bool lighting_pix_reuse_on() {
+    return LIGHTING_PIX_REUSE && lighting_gi_on() && lighting_pix_cache_ok();
+}
 bool lighting_pix_quiet() {
     vec4 head = work.v[lighting_change_at()];
-    return lighting_world_mode() == 3u && !(head.y > 0.5) && uint(head.x) == 0u && lighting_movers_count() == 0u;
+    return lighting_pix_cache_ok() && !(head.y > 0.5) && uint(head.x) == 0u && lighting_movers_count() == 0u;
 }
 uint lighting_pix_sig(vec3 pos, vec3 n, bool two_sided, LampList list) {
     ivec3 q = ivec3(floor(pos * 1000.0));

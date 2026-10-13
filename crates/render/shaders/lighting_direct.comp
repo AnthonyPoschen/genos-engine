@@ -240,7 +240,7 @@ void main() {
     uint count = lamp_list_size(list);
     // S78J: a pixel whose point and lamps match last frame's, in a quiet frame.
     uint pix_sig = 0u;
-    if (LIGHTING_PIX_REUSE && lighting_gi_on() && idx < pixels && lighting_world_mode() == 3u) {
+    if (lighting_pix_reuse_on() && idx < pixels) {
         pix_sig = lighting_pix_sig(pos, n, two_sided, list);
         vec4 pv = work.v[lighting_pix_at() + idx / 2u];
         uint c = (idx & 1u) * 2u;
@@ -438,7 +438,7 @@ void main() {
         uint packed = lighting_pack_rgb9e5(e);
         uint prev_d = 0u;
         uint prev_sig = 0u;
-        bool tracked = LIGHTING_PIX_REUSE && lighting_gi_on() && lighting_world_mode() == 3u;
+        bool tracked = lighting_pix_reuse_on();
         if (tracked) {
             uint c = (idx & 1u) * 2u;
             prev_sig = floatBitsToUint(work.v[lighting_pix_at() + idx / 2u][c]);
