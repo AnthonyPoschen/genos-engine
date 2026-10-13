@@ -3,8 +3,9 @@
 //! Ignored: a normal `cargo test` does not open a window. `tools/lighting/headless.sh`
 //! runs this on lavapipe under a headless Weston. The scene is the small stress hall,
 //! sun frozen, lamps and boxes still. The camera settles at the bench pose, then turns
-//! in place. The lighting dump (`GENOS_LIGHTING_DUMP`, two exact frames) is the only
-//! read of the cache.
+//! in place. The lighting dump (`GENOS_LIGHTING_DUMP`, the settle frame, the
+//! reveal, and reveal+1/2/4/8 when the hold reaches them) is the only read of
+//! the cache.
 //!
 //! `GENOS_GI_PREFILL_SETTLE` (default 96) is the still frames before the turn.
 //! `GENOS_GI_PREFILL_TURN` (default 24) is the turn, `GENOS_GI_PREFILL_YAW` (default
@@ -55,9 +56,12 @@ const DEFAULT_REF_SETTLE: u64 = 192;
 /// settle at the same pose. `GENOS_GI_PREFILL_BIAS` overrides this.
 ///
 /// The lavapipe defaults (settle 96, turn 24, hold 32, reference settle 192)
-/// measured 0.374 over 3385 keys. The cap sits above that gap. It locks a
+/// measured 0.374 over 3385 keys before the fractional-history handoff. The
+/// cap stays here until a reveal curve measures under 0.10. It locks a
 /// regression. The brightness difference remains.
 const DEFAULT_BIAS: f32 = 0.50;
+/// A step above this relative luminance is counted as a visible pop.
+const POP_STEP: f32 = 0.10;
 /// Draws after the last dumped frame so `lighting_dump_write` runs (it waits
 /// until a later begin sees `frame >= last + 3`).
 const FLUSH: u64 = 5;
@@ -69,6 +73,10 @@ struct Fine {
     shown: u32,
     quarters: u32,
     lum: f32,
+    /// Estimator history (`b.w`). A handed-off seed starts at 1/16.
+    hist: f32,
+    /// Estimator `b.z`. Negative while the fractional-history handoff is open.
+    marker: f32,
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -167,12 +175,16 @@ fn fine_texels(dir: &Path, frame: u64) -> Vec<Fine> {
         let r = f32::from_bits(word(&cache, base));
         let g = f32::from_bits(word(&cache, base + 1));
         let b = f32::from_bits(word(&cache, base + 2));
+        // Estimator b lives at EST_AT + 2*slot + 1 (EST_AT is 4*SLOTS).
+        let est_b = (4 * SLOTS + 2 * i + 1) * 4;
         out.push(Fine {
             key,
             sets: f32::from_bits(word(&cache, base + 3)),
             shown: word(&cache, (3 * SLOTS + i) * 4 + 2),
             quarters: word(&cache, (6 * SLOTS + i) * 4 + 3),
             lum: 0.2126 * r + 0.7152 * g + 0.0722 * b,
+            hist: f32::from_bits(word(&cache, est_b + 3)),
+            marker: f32::from_bits(word(&cache, est_b + 2)),
         });
     }
     out
@@ -203,6 +215,131 @@ fn mean_relative(pairs: &[(f32, f32)]) -> f32 {
         .map(|(a, b)| (a - b).abs() / a.max(*b).max(0.05))
         .sum();
     sum / n as f32
+}
+
+/// Settle, the last turn frame (reveal), reveal+1/2/4/8 when `hold` reaches
+/// them, and the end of the hold.
+fn curve_frames(settle: u64, turn_frame: u64, hold: u64, bias_frame: u64) -> Vec<u64> {
+    let mut frames = vec![settle, turn_frame];
+    for delta in [1u64, 2, 4, 8] {
+        if hold >= delta {
+            frames.push(turn_frame + delta);
+        }
+    }
+    if hold > 0 {
+        frames.push(bias_frame);
+    }
+    frames.sort_unstable();
+    frames.dedup();
+    frames
+}
+
+#[test]
+fn reveal_curve_dumps_the_offsets_the_hold_reaches() {
+    assert_eq!(
+        curve_frames(96, 120, 32, 152),
+        vec![96, 120, 121, 122, 124, 128, 152]
+    );
+    assert_eq!(curve_frames(48, 49, 8, 57), vec![48, 49, 50, 51, 53, 57]);
+    assert_eq!(curve_frames(48, 49, 3, 52), vec![48, 49, 50, 51, 52]);
+    assert_eq!(curve_frames(48, 49, 0, 49), vec![48, 49]);
+}
+
+fn rel(a: f32, b: f32) -> f32 {
+    (a - b).abs() / a.max(b).max(0.05)
+}
+
+/// Mean relative step, and the share of keys whose step exceeds `POP_STEP`.
+fn pop_between(
+    keys: &[u32],
+    from: &HashMap<u32, Fine>,
+    to: &HashMap<u32, Fine>,
+) -> (usize, f32, f32) {
+    let mut steps = Vec::new();
+    for key in keys {
+        let (Some(a), Some(b)) = (from.get(key), to.get(key)) else {
+            continue;
+        };
+        steps.push(rel(a.lum, b.lum));
+    }
+    let n = steps.len();
+    if n == 0 {
+        return (0, 0.0, 0.0);
+    }
+    let mean = steps.iter().copied().sum::<f32>() / n as f32;
+    let hot = steps.iter().filter(|step| **step > POP_STEP).count() as f32 / n as f32;
+    (n, mean, hot)
+}
+
+fn report_curve(
+    name: &str,
+    keys: &[u32],
+    frames: &[u64],
+    turn_frame: u64,
+    dumps: &HashMap<u64, HashMap<u32, Fine>>,
+    reference: &HashMap<u32, Fine>,
+) {
+    if keys.is_empty() {
+        eprintln!("curve {name}: no keys");
+        return;
+    }
+    for (i, frame) in frames.iter().enumerate() {
+        let Some(dump) = dumps.get(frame) else {
+            eprintln!("curve {name}: frame {frame} was not dumped");
+            continue;
+        };
+        let mut pairs = Vec::new();
+        let mut lum_sum = 0.0f32;
+        let mut sets_sum = 0.0f32;
+        let mut hist_sum = 0.0f32;
+        let mut marked = 0usize;
+        let mut n = 0usize;
+        for key in keys {
+            let Some(texel) = dump.get(key) else {
+                continue;
+            };
+            lum_sum += texel.lum;
+            sets_sum += texel.sets;
+            hist_sum += texel.hist;
+            if texel.marker < 0.0 {
+                marked += 1;
+            }
+            n += 1;
+            if let Some(settled) = reference.get(key) {
+                if settled.sets >= 1.0 && settled.shown != 0 {
+                    pairs.push((texel.lum, settled.lum));
+                }
+            }
+        }
+        let mean = mean_relative(&pairs);
+        let denom = n.max(1) as f32;
+        let off = if *frame >= turn_frame {
+            format!("+{}", frame - turn_frame)
+        } else {
+            "settle".to_string()
+        };
+        let ref_lum = if pairs.is_empty() {
+            0.0
+        } else {
+            pairs.iter().map(|(_, b)| *b).sum::<f32>() / pairs.len() as f32
+        };
+        eprintln!(
+            "curve {name} frame {frame} ({off}): keys {n} matched {} mean rel {mean:.3} mean lum {:.3} ref lum {ref_lum:.3} mean sets {:.2} mean hist {:.3} marker {marked}",
+            pairs.len(),
+            lum_sum / denom,
+            sets_sum / denom,
+            hist_sum / denom,
+        );
+        if i > 0 {
+            let prev = frames[i - 1];
+            if let (Some(from), Some(to)) = (dumps.get(&prev), dumps.get(frame)) {
+                let (pn, pmean, phot) = pop_between(keys, from, to);
+                eprintln!(
+                    "curve {name} pop {prev}->{frame}: keys {pn} mean step {pmean:.3} share over {POP_STEP:.2} {phot:.3}"
+                );
+            }
+        }
+    }
 }
 
 fn out_dir() -> PathBuf {
@@ -244,10 +381,12 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
     let _env = DumpEnv;
     let turn_frame = settle + turn;
     let bias_frame = turn_frame + hold;
-    let mut spec = format!("{settle},{turn_frame}");
-    if hold > 0 {
-        spec.push_str(&format!(",{bias_frame}"));
-    }
+    let frames = curve_frames(settle, turn_frame, hold, bias_frame);
+    let spec = frames
+        .iter()
+        .map(|frame| frame.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     std::env::set_var("GENOS_LIGHTING_DUMP", spec);
     std::env::set_var("GENOS_LIGHTING_DUMP_DIR", &dir);
     std::env::set_var("GENOS_LIGHTING_SC_TRACE", "1");
@@ -442,6 +581,62 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
     assert!(
         leaked == 0,
         "pre-fill off still left {leaked} never-shown fine texels with a finished set"
+    );
+
+    let mut dumps: HashMap<u64, HashMap<u32, Fine>> = HashMap::new();
+    dumps.insert(settle, by_key(&settled));
+    dumps.insert(turn_frame, revealed.clone());
+    for frame in &frames {
+        if !dumps.contains_key(frame) {
+            dumps.insert(*frame, by_key(&fine_texels(&dir, *frame)));
+        }
+    }
+    let mut just_revealed = Vec::new();
+    let mut all_revealed = Vec::new();
+    let mut stamp_min = u32::MAX;
+    let mut stamp_max = 0u32;
+    let mut stamped = 0usize;
+    for key in &prefilled {
+        let Some(texel) = revealed.get(key) else {
+            continue;
+        };
+        if texel.shown == 0 {
+            continue;
+        }
+        stamped += 1;
+        stamp_min = stamp_min.min(texel.shown);
+        stamp_max = stamp_max.max(texel.shown);
+        all_revealed.push(*key);
+        if u64::from(texel.shown) == turn_frame {
+            just_revealed.push(*key);
+        }
+    }
+    if just_revealed.is_empty() {
+        if stamped == 0 {
+            eprintln!(
+                "just-revealed cohort empty; no prefilled key was on screen at frame {turn_frame}"
+            );
+        } else {
+            eprintln!(
+                "just-revealed cohort empty ({stamped} prefilled keys on screen, shown stamp {stamp_min}..{stamp_max}, turn frame {turn_frame})"
+            );
+        }
+    }
+    report_curve(
+        "just-revealed",
+        &just_revealed,
+        &frames,
+        turn_frame,
+        &dumps,
+        &reference,
+    );
+    report_curve(
+        "all-revealed",
+        &all_revealed,
+        &frames,
+        turn_frame,
+        &dumps,
+        &reference,
     );
 
     let mut pairs = Vec::new();

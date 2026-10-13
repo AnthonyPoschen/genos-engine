@@ -1277,16 +1277,98 @@ bool lighting_sc_prefill(uint slot) {
 bool lighting_sc_prefill_off() {
     return (scene.grid_at.w & 0x4000000u) != 0u;
 }
-// S73M: first time a pixel shows a pre-filled fine texel. Keep the colour, drop
-// the count to one set, and mark the estimator (b.z < 0) so the next 15
-// on-screen sets are a plain mean. Idempotent: a later pixel this frame sees
-// the shown stamp and does not write again.
+// S73R: the seed is low-confidence history, not one finished set. One on-screen
+// set then weighs 16/17 of the mean. The displayed count stays 1 so the pixel
+// is filled. MSME has no fractional history (deviation).
+const float LIGHTING_SC_PREFILL_HISTORY = 1.0 / 16.0;
+// Ranked as if last relit this long ago, so LastUsed - LastUpdated clears the
+// 8x sample-count cap and the first on-screen set is taken within a few frames.
+// Lumen does not invent that age (deviation). A stamp that would mark the texel
+// stale is not written: a stale texel is dropped from the picture.
+const uint LIGHTING_SC_PREFILL_AGE = 120u;
+bool lighting_sc_stamp_stale(uint back) {
+    if (back == 0u) {
+        return true;
+    }
+    uint rise = ckeys.key[LIGHTING_LS_RISE_AT];
+    if (rise != 0u && int(back - rise) >= 0 && int(back - rise) <= int(LIGHTING_SC_STALE_WINDOW)) {
+        return true;
+    }
+    return lighting_ls_ratio(back) > LIGHTING_SC_STALE_UP;
+}
+// Clamp the seed's luminance into the range of nearby texels a pixel has
+// already shown, when at least two of them hold 4 sets. No such neighbour
+// leaves the seed alone. The papers do not clamp a pre-fill to that neighbourhood.
+vec3 lighting_sc_prefill_bound(uint slot, vec3 mean) {
+    vec4 nb = cache.v[3u * slot + 1u];
+    float size = nb.w;
+    if (!(size > 1.0e-4) || size > 0.2) {
+        return mean;
+    }
+    vec3 p = cache.v[3u * slot].xyz;
+    vec3 n = nb.xyz;
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 ta = vec3(0.0);
+    vec3 tb = vec3(0.0);
+    ta[(ax + 1u) % 3u] = 1.0;
+    tb[(ax + 2u) % 3u] = 1.0;
+    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+    float lo = 1.0e9;
+    float hi = 0.0;
+    uint got = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < 49u; i++) {
+        int x = int(i % 7u) - 3;
+        int y = int(i / 7u) - 3;
+        if (x == 0 && y == 0) {
+            continue;
+        }
+        vec3 q = p + ta * (float(x) * size) + tb * (float(y) * size);
+        uint s = lighting_cache_find_sized(q, n, false, size, p);
+        if (s == ~0u || s == slot || cache.v[3u * s + 1u].w > 0.2) {
+            continue;
+        }
+        if (floatBitsToUint(cache.v[LIGHTING_WORLD_AT + s].z) == 0u) {
+            continue;
+        }
+        if (floor(max(cache.v[3u * s + 2u].w, 0.0)) < 4.0) {
+            continue;
+        }
+        float lum = dot(cache.v[3u * s + 2u].rgb, lw);
+        lo = min(lo, lum);
+        hi = max(hi, lum);
+        got += 1u;
+    }
+    if (got < 2u || !(hi > 0.0)) {
+        return mean;
+    }
+    float lum = dot(mean, lw);
+    float bound = clamp(lum, lo, hi);
+    if (lum > 1.0e-4) {
+        mean *= bound / lum;
+    }
+    return max(mean, vec3(0.0));
+}
+// S73M / S73R: first time a pixel shows a pre-filled fine texel. Keep the
+// colour (clamped toward on-screen neighbours when they exist), show it as one
+// finished set, and mark the estimator (b.z < 0, b.w the fractional history)
+// so the next on-screen sets are a plain mean that the seed barely weighs.
+// Idempotent: a later pixel this frame sees the shown stamp and does not write
+// again.
 void lighting_sc_prefill_handoff(uint slot) {
-    vec3 mean = cache.v[3u * slot + 2u].rgb;
+    vec3 mean = lighting_sc_prefill_bound(slot, cache.v[3u * slot + 2u].rgb);
     float lum = dot(mean, vec3(0.2126, 0.7152, 0.0722));
     cache.v[3u * slot + 2u] = vec4(mean, 1.0);
     cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(mean, pow(0.15 * lum, 2.0) + 1.0e-8);
-    cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(1.0, 1.0, -1.0, 1.0);
+    cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(1.0, 1.0, -1.0, LIGHTING_SC_PREFILL_HISTORY);
+    uint nowf = lighting_frame();
+    uint back = nowf > LIGHTING_SC_PREFILL_AGE ? nowf - LIGHTING_SC_PREFILL_AGE : 1u;
+    if (lighting_sc_stamp_stale(back)) {
+        uint recent = nowf > 1u ? nowf - 1u : 1u;
+        back = lighting_sc_stamp_stale(recent) ? lighting_sc_updated(slot) : recent;
+    }
+    if (back != 0u) {
+        cache.v[LIGHTING_SC_OBJ_AT + slot].y = uintBitsToFloat(back);
+    }
 }
 // WRC: per 16-ray sample (a refresh adds 4): 1/32 while the light changes
 // anywhere (1/8 a set), 1/8 near a mover or a moved lamp (1/2 a set).

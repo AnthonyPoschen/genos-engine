@@ -160,13 +160,19 @@ void main() {
     if (run > 1u) {
         atomicAdd(gstats.extra, 1u);
     }
-    if (lighting_world_mode() == 3u) {
+        if (lighting_world_mode() == 3u) {
         // A pre-fill relight is one set: four 16-ray quarters. Stamping
         // LastUpdated on the first quarter made the texel look fresh, so the
         // other three waited for another scout hit and the set was still empty
         // when the texel reached the screen (own sets show only once w >= 1).
+        // S73R: the same hold while the handoff marker is set. The reveal ages
+        // LastUpdated so this set wins the histogram; the first quarter must
+        // not put that age back.
         uint q_end = q0 + run;
-        if (!(lighting_sc_prefill(slot) && !lighting_sc_prefill_off() && !wrc_cell && q_end < LIGHTING_SC_QUARTERS)) {
+        bool open_handoff = !wrc_cell && cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].z < 0.0
+            && q_end < LIGHTING_SC_QUARTERS;
+        if (!(lighting_sc_prefill(slot) && !lighting_sc_prefill_off() && !wrc_cell && q_end < LIGHTING_SC_QUARTERS)
+            && !open_handoff) {
             cache.v[LIGHTING_SC_OBJ_AT + slot].y = uintBitsToFloat(lighting_frame());
         }
         // Few rays a relight: the set's quarters add up; the mean takes the set
@@ -203,7 +209,11 @@ void main() {
         if (old.w > 0.5) {
             ls = lighting_sc_sun_gain(slot);
             float fo = lighting_sc_sunfrac_now(slot);
-            fnew = mix(fo, fe, max(1.0 / (floor(old.w) + 1.0), 1.0 / 16.0));
+            // S73R: a pre-filled seed's sun share is the same fractional history
+            // as its irradiance (b.z < 0, b.w), not the displayed set count.
+            vec4 pre_b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
+            float hist = pre_b.z < 0.0 ? max(pre_b.w, 0.0) : floor(old.w);
+            fnew = mix(fo, fe, max(1.0 / (hist + 1.0), 1.0 / 16.0));
         }
         float now = lighting_ls_now();
         cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(fnew, now < 0.0 ? cache.v[LIGHTING_SC_SUN_AT + slot].y : now, 0.0, 0.0);
@@ -362,9 +372,10 @@ void main() {
                 hint = max(hint, LIGHTING_SC_LAMP_K * lighting_sc_lamp_change(slot));
                 // S72T: while young (under 16 sets) never faster than the plain
                 // mean 1 / (n + 1), the least-noise estimate of a still signal
-                // (the hint still overrides it). S73M reads b.z < 0 below, after
-                // the hint, and forces that plain mean for a former pre-fill.
+                // (the hint still overrides it). S73R reads b.z < 0 below, after
+                // the hint, and replaces that with the fractional history.
                 bool handoff = b.z < 0.0;
+                float hist = handoff ? max(b.w, 0.0) : t;
                 if (t < 16.0) {
                     k = min(k, 1.0 / (t + 1.0));
                 }
@@ -376,17 +387,21 @@ void main() {
                 } else {
                     k = max(k, min(hint, 0.9));
                 }
-                // S73M: a pre-filled texel keeps its colour and one set, then the
-                // next on-screen sets are a plain mean (k = 1/(t+1), not a cap).
-                // The marker stays until this set reaches 16. The normal path
-                // above is unchanged.
-                if (handoff && t < 16.0) {
-                    k = 1.0 / (t + 1.0);
+                // S73R: the seed weighs hist / (hist + 1). hist starts at 1/16,
+                // so the first on-screen set is 16/17 of the mean. The displayed
+                // set count (t) stays a real count and is not the history.
+                // A-SVGF and the hint do not raise this: the seed must not keep
+                // a vote. The marker stays until 16 on-screen sets have landed.
+                // Deviation: MSME and A-SVGF do not do this.
+                if (handoff && hist < 16.0) {
+                    k = 1.0 / (hist + 1.0);
                 }
-                float kz = (handoff && t + 1.0 < 16.0) ? -1.0 : k;
+                float hist_next = hist + 1.0;
+                float kz = (handoff && hist_next < 16.0) ? -1.0 : k;
+                float bw = handoff ? min(hist_next, 256.0) : min(t + 1.0, 256.0);
                 vec3 m = mix(old.rgb, y, clamp(k, 0.0, 1.0));
                 cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);
-                cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(vb, inc, kz, min(t + 1.0, 256.0));
+                cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(vb, inc, kz, bw);
                 lighting_tex_put(slot, vec4(m, min(t + 1.0, cap)));
                 return;
             }
