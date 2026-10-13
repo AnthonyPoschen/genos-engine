@@ -1127,7 +1127,7 @@ fn luma_at(frame: &[u8], width: usize, x: usize, y: usize) -> f64 {
 /// pixels, and the grid phase is not aligned to x = 0, so every phase of
 /// stride-1, stride, and stride+1 is scored. A smooth gradient scores near 1.
 fn cell_edge_ratio(frame: &[u8], width: usize, stride: usize) -> f64 {
-    let mut best = 0.0;
+    let mut best = 0.0f64;
     let lo = stride.saturating_sub(1).max(1);
     for s in lo..=stride + 1 {
         for phase in 0..s {
