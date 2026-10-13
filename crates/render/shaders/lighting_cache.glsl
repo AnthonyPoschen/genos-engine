@@ -3888,6 +3888,10 @@ uint lighting_wake_sector(vec3 pos, vec3 center, uint sectors) {
 }
 // Shade this hit even when the legacy check would keep its old light.
 bool lighting_wake_relight(uint h) {
+    if (lighting_mode() == 3u) {
+        uint rays = lighting_rays();
+        return (h % rays) == lighting_hold_check_k(h / rays / LIGHTING_STRATA);
+    }
     if (gstats.wake_mode == 0u) {
         return false;
     }
@@ -3965,6 +3969,11 @@ void lighting_wake_observe(uint h, vec3 direct_shed) {
         return;
     }
     uint flags = floatBitsToUint(work.v[lighting_wake_probe_at(pk)].w);
+    // The settled idle does not run place, so the flag word is the previous
+    // frame's. Mode 3 is the verification stride by construction.
+    if (lighting_mode() == 3u) {
+        flags |= WAKE_VERIFY;
+    }
     // Previous direct shade of this exact direction, written before this
     // frame's store. The kept-light word is the full shed (direct plus the
     // surface cache). That cache converges on a still scene, so comparing it

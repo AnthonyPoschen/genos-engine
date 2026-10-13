@@ -401,6 +401,11 @@ float lighting_seg_dist2c(vec3 a, vec3 b, vec3 c) {
 // (with its kept hit distance t, < 0 a miss) crosses a change.
 bool lighting_held_crosses(vec3 origin, vec3 dir, float t);
 bool lighting_held_traced(uint probe, uint k, vec3 origin, vec3 dir, float t) {
+    // Mode 3 is the verification stride: one thread per probe in the stride,
+    // and that thread is already the check ray.
+    if (lighting_mode() == 3u && k == lighting_hold_check_k(probe)) {
+        return true;
+    }
     // Rings: a held probe traces the check ray only when this frame woke it,
     // is testing a ring, or drew the verification budget. A full wake traces
     // the stratum. Geometry crossings stay on either mode. Legacy traces the

@@ -392,6 +392,8 @@ const LIGHTING_ARGS: u32 = 1 << 30;
 const LIGHTING_MODE1: u32 = LIGHTING_ARGS + 1;
 const LIGHTING_DENSE_RAYS: u32 = LIGHTING_ARGS + 2;
 const LIGHTING_DENSE_ENTRIES: u32 = LIGHTING_ARGS + 3;
+/// Picture trace/direct of the verification stride only (`lighting_mode` 3).
+const LIGHTING_WAKE_VERIFY: u32 = LIGHTING_ARGS + 4;
 /// Word of the dispatch args in the cache keys (lighting_cache.glsl LIGHTING_ARGS_AT).
 const LIGHTING_ARGS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 17600;
 /// A-trous list metadata (lighting_cache.glsl LIGHTING_ATROUS_*). The threshold
@@ -1944,7 +1946,7 @@ impl Gpu {
         // Settled (frozen above): the probes and the light cache hold their light,
         // and only the pixels' direct light and the final pass run, so a still
         // scene draws the same picture every frame (no residual cache drift) and
-        // idles cheaply.
+        // idles cheaply. Rings adds the verification stride on that same idle.
         self.lighting.held = if frozen { self.lighting.held.saturating_add(1) } else { 0 };
         // A light cache round is due (GENOS_LIGHTING_CACHE_HZ caps them per second). On
         // the async queue (GENOS_LIGHTING_ASYNC=1) it goes there, else into this frame;
@@ -1972,6 +1974,18 @@ impl Gpu {
         }
         let kept = probe_rays * LIGHTING_STRATA;
         let wake_rings = wake_cfg.mode == 1;
+        // The kept-hit tail of the trace launch only re-traces geometry crossings
+        // and fills. A lamp move is not in that list. Rings with nothing to cross
+        // drops the tail. Once the strata exist and no ring is live, the picture
+        // trace and the kept-hit direct shrink to the verification stride.
+        let span_kept = match &changes {
+            None => true,
+            Some(list) => !list.is_empty(),
+        };
+        let wake_idle = wake_rings
+            && self.lighting.wake.len() == 0
+            && !span_kept
+            && self.lighting.still >= LIGHTING_STRATA;
         let planned = light_groups(
             &self.lighting.settings,
             self.lighting.frame,
@@ -1983,6 +1997,8 @@ impl Gpu {
             probe_rays,
             kept,
             wake_rings,
+            span_kept,
+            wake_idle,
         );
         self.lighting.ctrl_bytes = pack_lighting_ctrl(
             &self.lighting.settings,
@@ -2185,6 +2201,9 @@ impl Gpu {
                     k_pc[6] |= 1 << 4;
                     if kind == LIGHTING_MODE1 {
                         k_pc[6] = (cur_pc[6] & !0x310) | 1 << 8;
+                    } else if kind == LIGHTING_WAKE_VERIFY {
+                        // Mode 3: this dispatch is the verification stride, not the grid.
+                        k_pc[6] = (cur_pc[6] & !0x310) | 3 << 8;
                     } else if kind == LIGHTING_DENSE_RAYS {
                         k_pc[6] = (k_pc[6] & !0x300) | 2 << 8;
                     }

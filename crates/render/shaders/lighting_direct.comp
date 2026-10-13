@@ -98,6 +98,20 @@ void main() {
     uint mode = lighting_mode();
     uint kept = lighting_kept_hits();
     uint cache_rays = LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS;
+    // Verification stride: thread i shades the check hit of that probe. The
+    // kept-hit span of the grid is not launched.
+    if (mode == 3u) {
+        uint budget = gstats.wake_budget;
+        uint nprobes = lighting_probes();
+        uint period = max(nprobes / max(budget, 1u), 1u);
+        uint probe = (pc.params.w % period) + idx * period;
+        if (budget == 0u || probe >= nprobes) {
+            return;
+        }
+        uint rays = lighting_rays();
+        uint h = (probe * LIGHTING_STRATA + lighting_stratum()) * rays + lighting_hold_check_k(probe);
+        idx = pixels + h;
+    }
     // Pixel-only (GI off, or a coarser direct grid): leave before any work or
     // cache read. Mode 0's point count includes cache-ray slots, and the tail
     // of the last group would index the dummy buffers.
@@ -237,7 +251,15 @@ void main() {
         }
         if (LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_pix_cache_ok() && !(urgent && lighting_near_change(pos))) {
             uint traced = lighting_frame() - LIGHTING_STRATA / 2u;
-            if (!lighting_wrc_lamp_changed(pos, traced) && abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
+            // Rings: a moved lamp does not reshade every kept hit in range.
+            // That was the direct pass (the trace counter had already dropped).
+            // A woken probe and its check ray still shade; the probe filter
+            // spreads them. The sun ratio stays, so a day change still tracks.
+            if (gstats.wake_mode != 0u && !lighting_wake_relight(h)) {
+                if (abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
+                    return;
+                }
+            } else if (gstats.wake_mode == 0u && !lighting_wrc_lamp_changed(pos, traced) && abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
                 return;
             }
         }
