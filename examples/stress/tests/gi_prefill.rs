@@ -42,7 +42,7 @@ const DEFAULT_SETTLE: u64 = 96;
 const DEFAULT_TURN: u64 = 24;
 const DEFAULT_YAW: f32 = 0.5;
 /// Unfilled share of shaded pixels after the turn, on lavapipe at 320x180.
-/// A lavapipe run (settle 96, turn 24, yaw 0.5) ended at 0.90% (471 px, max_run 36)
+/// A lavapipe run (settle 96, turn 24, yaw 0.5) ended at 0.95% (499 px, max_run 36)
 /// after the plain-mean handoff. `GENOS_GI_PREFILL_UNFILLED_PCT` overrides this.
 const DEFAULT_UNFILLED_PCT: f32 = 2.0;
 /// Still frames at the end yaw after the turn, before the luminance compare.
@@ -54,10 +54,9 @@ const DEFAULT_REF_SETTLE: u64 = 192;
 /// Mean relative luminance of revealed pre-filled texels against a prefill-off
 /// settle at the same pose. `GENOS_GI_PREFILL_BIAS` overrides this.
 ///
-/// One paired comparison of the handoff dump (frame 152: settle 96, turn 24,
-/// hold 32) against a 192-frame prefill-off dump measured 0.374 over 3419 keys
-/// (luminance 1.690 versus 1.069). The cap sits above that gap. It locks a
-/// regression. It does not say the brightness gap is gone.
+/// The lavapipe defaults (settle 96, turn 24, hold 32, reference settle 192)
+/// measured 0.374 over 3385 keys. The cap sits above that gap. It locks a
+/// regression. The brightness difference remains.
 const DEFAULT_BIAS: f32 = 0.50;
 /// Draws after the last dumped frame so `lighting_dump_write` runs (it waits
 /// until a later begin sees `frame >= last + 3`).
