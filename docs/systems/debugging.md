@@ -96,6 +96,32 @@ minutes compiling pipelines.
 The report directory holds `report.md` (checks, log, every step with its reply,
 images), `result.json`, and every image the script saved.
 
+### Lighting correctness without a GPU
+
+`tools/lighting/headless.sh` starts a headless Weston, pins Mesa's lavapipe
+(`VK_DRIVER_FILES`) and runs the ignored tests in
+`examples/stress/tests/gi_headless.rs` (`still` or `moved` runs one; `-- CMD` runs
+any command in that environment). `.cursor/install.sh` installs what it needs. The
+scene is the small stress building, seed 1, 12:12 with the sun frozen, five still
+lamps, still boxes, at 320x180; one scripted camera pose per frame, so every
+machine draws the same frames. The GI buffers come from the lighting dump
+(`GENOS_LIGHTING_DUMP`, a comma-separated frame list), taken once near the end.
+
+- `gi_still_frames_are_finite_and_filled`: up to 120 frames at the bench pose; no
+  NaN or infinity in a live cache slot (position, normal, light, estimator), no shown fine texel without
+  a set or black, no black pixel.
+- `gi_moved_camera_matches_never_moved`: a camera that sat at the bench pose
+  against one that walked there over 90 frames, then both hold it for
+  `GENOS_GI_TEST_SETTLE` frames (default 300). The fine texels both runs show
+  must match (median ratio within 3 %, under 10 % of them more than 10 % apart)
+  and so must the picture (mean within 2 levels).
+
+`GENOS_GI_TEST_OUT=DIR` keeps each run's dumps and `final.png`;
+`GENOS_GI_TEST_DUMPS=90,200` dumps more frames. A frame takes about 1-2 s on
+lavapipe (the slot-table passes dominate, not the resolution), so the moved test
+takes about 12 minutes. Times on lavapipe mean nothing; these tests check only
+correctness.
+
 ## Scripts
 
 Every command is a function taking a map: `capture(#{ mode: "albedo" })`. Short

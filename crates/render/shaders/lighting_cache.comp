@@ -307,11 +307,14 @@ void main() {
                 float vb = mix(b.x, clamp(0.5 * dot(sm, lw) / dev, 1.0 / 32.0, 1.0), 0.1);
                 float hint = mover2 ? 0.5 : 0.0;
                 hint = max(hint, LIGHTING_SC_LAMP_K * lighting_sc_lamp_change(slot));
-                // S72T: while young (under 16 sets) never faster than the plain
-                // mean 1 / (n + 1), the least-noise estimate of a still signal
-                // (the hint still overrides it).
+                // While young (under 16 sets) the mean of its sets with set k
+                // weighing k^2, as the WRC's dark fill (S72N): the first sets read
+                // a cache whose bounces are still filling and fade as (k / n)^3.
+                // The estimator's own blend starts at the 1/256 floor (short mean
+                // = mean, sigma from the prior), so it kept the first sets.
                 if (t < 16.0) {
-                    k = min(k, 1.0 / (t + 1.0));
+                    float kn = t + 1.0;
+                    k = 6.0 * kn / ((kn + 1.0) * (2.0 * kn + 1.0));
                 }
                 if (LIGHTING_SC_ASVGF) {
                     // S74A: alpha' = (1 - lambda) alpha + lambda (A-SVGF); the
