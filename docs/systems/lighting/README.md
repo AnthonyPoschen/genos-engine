@@ -60,6 +60,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
 - Flat ambient when GI is off is a constant or a classic hemisphere (sky toward the normal, ground away from it). A day curve lerps those colours by sun height on the CPU. No new GI algorithm. The bounce count gates the existing cache read; it does not add a bounce pass.
+- The shader GI bit stays off unless probes or the world cache allocated the buffers. Otherwise those buffers are the 4096-byte stand-in, and pixel reuse and bounce reads would index past it. The settings struct still records the request.
 
 ## Experiment index
 
