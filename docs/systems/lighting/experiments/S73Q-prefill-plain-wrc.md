@@ -42,4 +42,14 @@ Neither read is within 0.10. Turning dark fill off for every reader matched the 
 
 The plain sum is accepted only when every ray of the hemisphere reported (`n == rays`). A miss returns from the direct shader before that add. The trace has already stored the sky in the ray slot, and the published mean counts it. The plain mean did not. One sky ray in the hemisphere dropped the whole sample, so most cells never took a plain count, and the cells that did were the hemispheres with no sky. The cold start then averaged those holes as zero bounce. That is why the plain mean sat near 0.57 while the same weights on the published cache (dark fill off) sat near 1.03.
 
-A miss now adds the stored sky, cosine-weighted from the source texel, the same way the cache pass weights it. The plain read still refuses a fine texel and the published dark-fill cell. A missing cell uses a coarser cell or a neighbour that already has a plain count. Until one of those exists the bounce is zero, so the mean climbs from direct light and sky only.
+A miss now adds the stored sky, cosine-weighted from the source texel, the same way the cache pass weights it. The plain read still refuses a fine texel and the published dark-fill cell. Until the exact cell has a plain count the bounce is zero.
+
+## What counting the sky measured
+
+Lavapipe, 320×180, settle 48, the bench yaw, against the same 192-frame reference. Mean relative luminance is `|a-b| / max(a, b, 0.05)`.
+
+With sky misses in the hemisphere, every lit world-radiance cell had a plain count (64000, median count 25). The plain mean and the published count match, so the sample is no longer dropped. The closed loop does not read the dark-fill cell. At the cells next to the revealed texels the plain mean was 0.91 and the published dark-fill value was 1.48 (reference 1.08). The pre-fill texels were 0.78 against 1.08 (2331 keys, ratio 0.72, mean relative 0.313). High counts do not close it: cells with more than 112 samples still sat near 0.84. A miss of the exact cell is a zero bounce, and that holds the fixed point under the reference.
+
+Filling that miss from a coarser cell or a neighbour, still without reading published light, moved those same cells' plain mean to 1.46 (published there 1.58). The pre-fill texels followed it to 1.33 against 1.08 (2339 keys, ratio 1.23, mean relative 0.229). The side mean joined the dark-fill basin. That fill is not in the tree.
+
+Neither is within 0.10. Dark fill off for every reader remains the closest (ratio 0.996, mean relative 0.146) and it changes the value on screen. The 0.50 cap stays.

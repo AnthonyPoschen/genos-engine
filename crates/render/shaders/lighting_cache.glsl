@@ -2062,57 +2062,19 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n);
 // S73Q: the plain-mean sample must not read a fine texel. Pre-fill texels light
 // each other, and that neighbourhood is the bright one. It also must not read
 // the published dark-fill cell: a mean of those samples sits on the same value.
-// Only an existing plain mean counts. Until one exists the bounce is zero, so
-// the mean climbs from the direct light and the sky. Read only (no claim, offer,
-// or stamp).
-bool lighting_wrc_plain_take(uint s, out vec3 rgb, out float sunfrac) {
-    vec3 plain;
-    if (s == ~0u || !lighting_wrc_plain_rgb(s, plain)) {
-        return false;
-    }
-    rgb = plain * lighting_sc_sun_gain(s);
-    sunfrac = lighting_sc_sunfrac_now(s);
-    return true;
-}
-// The exact 25 cm cell, then the coarser cells, then the four neighbours.
-// Published light is never a stand-in: a hole stays zero, same as an unlit cell.
+// Only the exact cell's existing plain mean counts. A coarser cell or a
+// neighbour was measured: the revealed cells' plain mean went from 0.91 to
+// 1.46 and sat on the dark-fill value. Until the exact cell has a count the
+// bounce is zero. Read only (no claim, offer, or stamp).
 vec3 lighting_wrc_plain_hit(vec3 pos, vec3 n) {
-    vec3 rgb;
-    float sunfrac;
     uint s = lighting_cache_find_sized(pos, n, false, LIGHTING_SC_HIT, pos);
-    if (lighting_wrc_plain_take(s, rgb, sunfrac)) {
-        lighting_bounce_path = 1u;
-        lighting_hit_sunfrac = sunfrac;
-        return rgb;
-    }
-    float size = LIGHTING_SC_HIT;
-    [[dont_unroll]] for (uint l = 0u; l < 2u; l++) {
-        size *= 2.0;
-        uint sp = lighting_cache_find_sized(pos, n, false, size, pos);
-        if (lighting_wrc_plain_take(sp, rgb, sunfrac)) {
-            lighting_bounce_path = 3u;
-            lighting_hit_sunfrac = sunfrac;
-            return rgb;
+    if (s != ~0u && cache.v[3u * s + 1u].w > 0.2) {
+        vec3 plain;
+        if (lighting_wrc_plain_rgb(s, plain)) {
+            lighting_bounce_path = 1u;
+            lighting_hit_sunfrac = lighting_sc_sunfrac_now(s);
+            return plain * lighting_sc_sun_gain(s);
         }
-    }
-    vec3 t1 = normalize(abs(n.x) < 0.9 ? cross(n, vec3(1.0, 0.0, 0.0)) : cross(n, vec3(0.0, 1.0, 0.0)));
-    vec3 t2 = cross(n, t1);
-    vec3 sum = vec3(0.0);
-    float ws = 0.0;
-    float sf = 0.0;
-    [[dont_unroll]] for (uint i = 0u; i < 4u; i++) {
-        vec3 o = (i < 2u ? t1 : t2) * ((i & 1u) == 0u ? LIGHTING_SC_HIT : -LIGHTING_SC_HIT);
-        uint s2 = lighting_cache_find_sized(pos + o, n, false, LIGHTING_SC_HIT, pos + o);
-        if (lighting_wrc_plain_take(s2, rgb, sunfrac)) {
-            sum += rgb;
-            sf += sunfrac;
-            ws += 1.0;
-        }
-    }
-    if (ws > 0.0) {
-        lighting_bounce_path = 4u;
-        lighting_hit_sunfrac = sf / ws;
-        return sum / ws;
     }
     lighting_bounce_path = 2u;
     lighting_hit_sunfrac = 0.0;
