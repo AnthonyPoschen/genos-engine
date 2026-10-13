@@ -40,7 +40,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Checks run every frame; no "nothing changed" skip without a check (Anthony 16:11, S74A).
 - Always spend some budget on spread-out checks so quiet areas that should not be quiet are found.
 - Probes must not be woken by the shared averaged field; only by real neighbour change, spread by ring tests with group-test splitting ([WAKE](experiments/WAKE-neighbour-wake-design.md)).
-- Pre-fill keeps a floor of 1024 entries inside the texel room (S73N). A larger spare under the base ceiling is still spent (S73G). A pre-fill ray reads a plain mean of the world radiance cache; every other reader keeps the dark-fill value (S73Q). The S-curve lag bound stays deferred ([DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md)).
+- Pre-fill keeps a floor of 1024 entries inside the texel room (S73N). A larger spare under the base ceiling is still spent (S73G). A world-radiance cell also stores a plain mean; a pre-fill ray uses it only when the hit is that cell (S73Q). The S-curve lag bound stays deferred ([DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md)).
 - Test rules (10 Oct): every moving test soaks and records a settled frame first, ends soaked, and returns movers to the start; short tests for one situation; a test must fail on the build that shows the problem before it is trusted; hand-validate new checks, then spot-check ~1%.
 - GI v1 is the stability floor, not the goal; the target is the path-traced reference (11 Oct).
 - GPU-resident design: frequently used data stays on the GPU at fixed locations; the CPU sends only small changes (12 Oct).
@@ -140,7 +140,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S73M](experiments/S73M-prefill-handoff.md) | 2026-10-13 | Firefly-cap the pre-fill, then a plain-mean handoff on first show | keeps one set so the texel stays filled | 60ba22e |
 | [S73N](experiments/S73N-prefill-floor.md) | 2026-10-13 | Pre-fill keeps 1024 entries inside the texel room | floor is carved from mature entries when the room is full | bc8c7c1 |
 | [S73O](experiments/S73O-prefill-bias-check.md) | 2026-10-13 | Lavapipe turn checks coverage and luminance against prefill off | coverage holds; mean relative luminance 0.374 over 3385 keys, cap 0.50 | cde47e7 |
-| [S73Q](experiments/S73Q-prefill-plain-wrc.md) | 2026-10-13 | Pre-fill bounce reads a plain mean of the world radiance cache | frame 48 vs the 192-frame reference: mean relative 0.230 still bright; plain-only cold start 0.424 too dark. Cap stays 0.50 | 25e73ff |
+| [S73Q](experiments/S73Q-prefill-plain-wrc.md) | 2026-10-13 | Pre-fill bounce reads a plain mean of the world radiance cache | frame 48 vs the 192-frame reference: mean relative 0.230 still bright; plain-only cold start 0.424 too dark. Cap stays 0.50 | 1900aad |
 | [S74A-cam](experiments/S74A-cam-last-camera-offsets.md) | 2026-10-12 | Fix: last-frame camera read from stale scene-block offsets | pushed | 81c00734 |
 | [S74A-asvgf](experiments/S74A-asvgf-asvgf-change-adaptive-rays.md) | 2026-10-12 | A-SVGF same-seed 1-ray checks on 1/9 resolved texels, lambda drives alpha and rays | pushed | 81c00734 |
 | [S74A-shadow](experiments/S74A-shadow-static-lamp-shadow-reuse.md) | 2026-10-12 | Hit shadow rays kept per 12.5 cm cell/lamp, invalidated by lamp epoch | pushed | 81c00734 |
