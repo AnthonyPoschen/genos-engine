@@ -26,6 +26,7 @@ pub const BLIND_SPOTS: &[&str] = &[
     "Lavapipe is a wiring check. Quality judgement is the owner GPU run.",
     "GPU frames are not cross-device deterministic. The path trace is deterministic for a given engine commit, scene, and sample count.",
     "A held stale frame on a still scene with no event matches a converged picture and is not caught. The box-step checkpoint exists so a held frame after a change is caught.",
+    "Owner mode draws until the picture settles or 120 frames, then scores that tail. Lavapipe-small draws a short sequence and does not wait. Neither calls wait_settled. A picture that is still unfilled at the cap fails that capture.",
 ];
 
 #[derive(Clone, Debug)]

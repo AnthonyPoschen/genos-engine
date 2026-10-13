@@ -1,0 +1,80 @@
+//! Exit status of one check.
+//!
+//! 0 is a pass. 1 is a fail: the self-test missed, or a scored picture failed.
+//! 2 needs a person. Lavapipe-small with no live frames can pass when the
+//! self-test passed; that run did not score a picture. Owner mode with no
+//! live frames is 2, so a missing window is visible. A one-sample compare
+//! does not take the pass path: the verdict is already needs-human.
+
+use crate::verdict::Verdict;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExitFacts {
+    pub lavapipe_small: bool,
+    pub self_test_ok: bool,
+    /// Worst verdict among pictures that were scored. Pass when nothing was.
+    pub scene_verdict: Verdict,
+    /// At least one checkpoint was scored.
+    pub scored: bool,
+    /// Every requested checkpoint was scored.
+    pub complete: bool,
+}
+
+pub fn exit_code(facts: ExitFacts) -> i32 {
+    if !facts.self_test_ok || facts.scene_verdict == Verdict::Fail {
+        return 1;
+    }
+    if facts.scene_verdict == Verdict::NeedsHuman {
+        return 2;
+    }
+    if !facts.scored {
+        return if facts.lavapipe_small { 0 } else { 2 };
+    }
+    if !facts.complete {
+        return 2;
+    }
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn facts() -> ExitFacts {
+        ExitFacts {
+            lavapipe_small: false,
+            self_test_ok: true,
+            scene_verdict: Verdict::Pass,
+            scored: true,
+            complete: true,
+        }
+    }
+
+    #[test]
+    fn exit_codes_match_the_policy() {
+        assert_eq!(exit_code(facts()), 0);
+        let mut miss = facts();
+        miss.self_test_ok = false;
+        assert_eq!(exit_code(miss), 1);
+        let mut fail = facts();
+        fail.scene_verdict = Verdict::Fail;
+        assert_eq!(exit_code(fail), 1);
+        let mut human = facts();
+        human.scene_verdict = Verdict::NeedsHuman;
+        assert_eq!(exit_code(human), 2);
+        let mut owner_dark = facts();
+        owner_dark.scored = false;
+        owner_dark.complete = false;
+        assert_eq!(exit_code(owner_dark), 2);
+        let mut lava = owner_dark;
+        lava.lavapipe_small = true;
+        assert_eq!(exit_code(lava), 0);
+        let mut partial = facts();
+        partial.complete = false;
+        assert_eq!(exit_code(partial), 2);
+        let mut one_sample_fail = lava;
+        one_sample_fail.scored = true;
+        one_sample_fail.scene_verdict = Verdict::Fail;
+        assert_eq!(exit_code(one_sample_fail), 1);
+    }
+}

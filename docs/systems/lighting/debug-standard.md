@@ -39,7 +39,7 @@ One catalogue, three doors: MCP `tools/call`, `POST /cmd/<name>`, and the Rhai s
 
 ## Headless harness
 
-`make verify` and `make reference` run `genos-stress --proof --no-panel`. A script report is `genos-stress --proof --no-panel --size 320x180 --script FILE --report DIR`. `genos-stress gi-check` is the picture gate (`examples/stress/src/gi_check/mod.rs`). On a machine with no GPU this runs on lavapipe under a headless Weston, as [Debugging](../debugging.md) describes.
+`make verify` and `make reference` run `genos-stress --proof --no-panel`. A script report is `genos-stress --proof --no-panel --size 320x180 --script FILE --report DIR`. `genos-stress gi-check` is the picture gate (`examples/stress/src/gi_check/mod.rs`). `make lighting-ref-check` scores the catalog against the CPU path trace and writes `./genos-debug/refcheck/<timestamp>/` ([the reference check](reference-check.md)). `MODE=lavapipe-small` is the small wiring run. On a machine with no GPU this runs on lavapipe under a headless Weston, as [Debugging](../debugging.md) describes.
 
 `tools/lighting/headless.sh` is not in this tree. There is no `gi_headless` test module. The GPU tests that cover lighting headless are `crates/render/tests/lighting_frame.rs` (including `lighting_moving_camera_keeps_its_brightness` on lavapipe), `crates/render/tests/gpu_frame.rs`, and `examples/stress/tests/` (`picture.rs`, `gpu_reference.rs`, `mesh_reference.rs`). Experiment notes name `z10/dump.sh`, `z10/stuck.sh`, and `perf/chg.py` on the owner's machine; those scripts are not in the repository. The decoders that are in the repository are `tools/lighting/dump.py` and `tools/lighting/chg.py`.
 

@@ -94,7 +94,9 @@ fn aim(eye: [f32; 3], at: [f32; 3]) -> (f32, f32) {
     ((d[0]).atan2(-d[2]), (d[1] / len).asin())
 }
 
-pub fn scene_and_camera(shot: &Shot) -> (Scene, Camera) {
+/// `full_effort` spends the maximum lighting knobs. The path trace ignores
+/// those knobs. Live capture uses them only when the candidate asks for it.
+pub fn scene_and_camera(shot: &Shot, full_effort: bool) -> (Scene, Camera) {
     let building = Building::new(1, 1, 1);
     let mut solids = building.scene.solids.clone();
     building.place_movers(&mut solids, shot.box_time);
@@ -109,7 +111,9 @@ pub fn scene_and_camera(shot: &Shot) -> (Scene, Camera) {
     scene.solids = solids;
     scene.lights = lights;
     scene.sky = building::sky(shot.day);
-    scene.lighting.apply_full_effort();
+    if full_effort {
+        scene.lighting.apply_full_effort();
+    }
     let mut camera = Camera::new(shot.eye[0], shot.eye[2], shot.yaw);
     camera.set_pose(
         Vec3::new(shot.eye[0], shot.eye[1], shot.eye[2]),
@@ -120,7 +124,7 @@ pub fn scene_and_camera(shot: &Shot) -> (Scene, Camera) {
 }
 
 pub fn reference_setup(shot: &Shot, profile: &TraceProfile) -> RefSetup {
-    let (scene, camera) = scene_and_camera(shot);
+    let (scene, camera) = scene_and_camera(shot, false);
     let mut setup =
         RefSetup::from_camera(&scene, &camera, profile.width, profile.height, profile.spp);
     setup.noise_target = profile.noise_target;

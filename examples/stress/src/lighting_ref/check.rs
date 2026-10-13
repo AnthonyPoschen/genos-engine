@@ -1,0 +1,340 @@
+//! One check: self-test, path-traced references, live frames, a report.
+
+use std::path::{Path, PathBuf};
+
+use genos_lighting_ref::baseline::{self, MetricsFile};
+use genos_lighting_ref::config::Config;
+use genos_lighting_ref::metrics::{measure, FrameMetrics};
+use genos_lighting_ref::policy::{self, ExitFacts};
+use genos_lighting_ref::report::{self, CheckpointAudit, RunReport};
+use genos_lighting_ref::store::{self, TraceNote};
+use genos_lighting_ref::verdict::{judge, Judge, MetricId};
+use genos_lighting_ref::Picture;
+
+use super::capture::{self, CaptureOptions, Job, LiveShot};
+use super::generate::{self, GenerateOptions, TraceProfile};
+
+const STILL_REQUIRE: &[MetricId] = &[MetricId::Flicker];
+const EVENT_REQUIRE: &[MetricId] = &[
+    MetricId::Converge1,
+    MetricId::Converge2,
+    MetricId::Converge4,
+    MetricId::Converge8,
+];
+
+pub struct CheckOptions {
+    pub out: Option<PathBuf>,
+    pub reference_dir: PathBuf,
+    pub baseline_path: Option<PathBuf>,
+    pub baseline_label: Option<String>,
+    pub commit: String,
+    pub mode: String,
+    pub profile: TraceProfile,
+    pub config_path: Option<PathBuf>,
+    pub full_effort: bool,
+    pub skip_capture: bool,
+    pub only_scene: Option<String>,
+    pub only_checkpoint: Option<String>,
+}
+
+struct Wanted {
+    scene: String,
+    checkpoint: String,
+    note: String,
+    still: bool,
+    event: Option<&'static str>,
+}
+
+pub fn run(opts: &CheckOptions) -> Result<i32, String> {
+    let config = match &opts.config_path {
+        Some(path) => Config::load(path)?,
+        None => Config::builtin(),
+    };
+    let out = opts
+        .out
+        .clone()
+        .unwrap_or_else(|| genos_lighting_ref::refcheck_dir(&genos_lighting_ref::utc_stamp()));
+    let (self_test, _) = genos_lighting_ref::selftest::write(&out.join("self-test"))?;
+    println!("{}", self_test.summary_line());
+
+    let wanted = wanted(opts);
+    if wanted.is_empty() {
+        println!("lighting-ref: no checkpoints matched");
+    }
+    let reused = references_ready(&opts.reference_dir, &opts.profile, &wanted);
+    if reused {
+        println!("reusing references in {}", opts.reference_dir.display());
+    } else {
+        generate::generate(&GenerateOptions {
+            reference_dir: opts.reference_dir.clone(),
+            commit: opts.commit.clone(),
+            profile: opts.profile.clone(),
+            only_scene: opts.only_scene.clone(),
+            only_checkpoint: opts.only_checkpoint.clone(),
+        })?;
+    }
+
+    let mut notes = vec![self_test.summary_line()];
+    if reused {
+        notes.push(format!(
+            "Reused reference pictures in {}.",
+            opts.reference_dir.display()
+        ));
+    } else {
+        notes.push(format!(
+            "Traced references into {}.",
+            opts.reference_dir.display()
+        ));
+    }
+    notes.push(candidate_note(opts.full_effort));
+
+    let (baselines, baseline_label) = load_baseline(opts, &mut notes)?;
+    let live = capture_live(opts, &wanted, &mut notes)?;
+    let mut checkpoints = Vec::new();
+    let mut saved = Vec::new();
+    let mut scored = 0usize;
+    for item in &wanted {
+        let Some(shot) = live
+            .iter()
+            .find(|shot| shot.scene == item.scene && shot.checkpoint == item.checkpoint)
+        else {
+            continue;
+        };
+        if shot.frames.is_empty() && shot.settled.is_none() {
+            notes.push(format!(
+                "{} {}: capture produced no picture",
+                item.scene, item.checkpoint
+            ));
+            continue;
+        }
+        let reference = store::read_reference(&opts.reference_dir, &item.scene, &item.checkpoint)?;
+        let trace = store::read_trace(&opts.reference_dir, &item.scene, &item.checkpoint)
+            .unwrap_or(TraceNote {
+                method: "path".into(),
+                spp: opts.profile.spp,
+                noise: 0.0,
+                seconds: 0.0,
+                max_bounces: opts.profile.max_bounces,
+            });
+        let candidate = candidate_picture(item, shot);
+        let still = (item.still && shot.frames.len() >= 2).then_some(shot.frames.as_slice());
+        let after = after_frames(item, shot);
+        let after_refs: Vec<(u32, &Picture)> = after.iter().map(|(k, p)| (*k, *p)).collect();
+        let metrics = match measure(&reference, &candidate, still, &after_refs, &config.params) {
+            Ok(metrics) => metrics,
+            Err(err) => {
+                notes.push(format!("{} {}: {err}", item.scene, item.checkpoint));
+                continue;
+            }
+        };
+        let require = require_of(item);
+        let baseline = baselines.as_ref().and_then(|file| {
+            file.rows
+                .iter()
+                .find(|row| row.scene == item.scene && row.checkpoint == item.checkpoint)
+        });
+        let judgement = judge(Judge {
+            metrics: &metrics,
+            config: &config,
+            baseline: baseline.map(|row| &row.baseline),
+            reference_spp: trace.spp,
+            reference_noise: f64::from(trace.noise),
+            require,
+        });
+        println!(
+            "{} {}  {}",
+            item.scene,
+            item.checkpoint,
+            judgement.verdict.label()
+        );
+        saved.push((item.scene.clone(), item.checkpoint.clone(), metrics.clone()));
+        checkpoints.push(CheckpointAudit {
+            scene: item.scene.clone(),
+            checkpoint: item.checkpoint.clone(),
+            note: format!("{} {}", item.note, shot.note),
+            judgement,
+            metrics,
+            reference: Some(reference),
+            candidate: Some(candidate),
+            reference_spp: trace.spp,
+            reference_noise: f64::from(trace.noise),
+            reference_method: trace.method,
+        });
+        scored += 1;
+    }
+    if !saved.is_empty() {
+        let refs: Vec<(&str, &str, &FrameMetrics)> = saved
+            .iter()
+            .map(|(scene, checkpoint, metrics)| (scene.as_str(), checkpoint.as_str(), metrics))
+            .collect();
+        let path = opts.reference_dir.join("metrics.json");
+        baseline::write_metrics(&path, &opts.commit, &refs)?;
+        notes.push(format!("Wrote candidate metrics to {}.", path.display()));
+    }
+
+    let skipped = skipped_scenes(opts);
+    let report = RunReport {
+        commit: opts.commit.clone(),
+        baseline: baseline_label,
+        mode: opts.mode.clone(),
+        checkpoints,
+        skipped,
+        notes,
+    };
+    let verdict = report.verdict();
+    report::write_report(&out, &report)?;
+    let code = policy::exit_code(ExitFacts {
+        lavapipe_small: opts.mode == "lavapipe-small",
+        self_test_ok: self_test.ok,
+        scene_verdict: verdict,
+        scored: scored > 0,
+        complete: scored == wanted.len(),
+    });
+    println!("lighting-ref: {} (exit {code})", verdict.label());
+    println!("report {}", out.join("summary.md").display());
+    Ok(code)
+}
+
+fn wanted(opts: &CheckOptions) -> Vec<Wanted> {
+    genos_lighting_ref::available_checkpoints()
+        .filter(|cp| {
+            opts.only_scene.as_ref().is_none_or(|id| id == cp.scene)
+                && opts
+                    .only_checkpoint
+                    .as_ref()
+                    .is_none_or(|name| name == cp.name)
+        })
+        .map(|cp| Wanted {
+            scene: cp.scene.to_string(),
+            checkpoint: cp.name.to_string(),
+            note: cp.note.to_string(),
+            still: cp.still,
+            event: cp.event,
+        })
+        .collect()
+}
+
+fn references_ready(dir: &Path, profile: &TraceProfile, wanted: &[Wanted]) -> bool {
+    wanted.iter().all(|item| {
+        store::read_reference(dir, &item.scene, &item.checkpoint)
+            .is_ok_and(|picture| picture.width == profile.width && picture.height == profile.height)
+    })
+}
+
+fn candidate_note(full_effort: bool) -> String {
+    if full_effort {
+        "Candidate lighting is full effort: maximum knobs, not a second ground truth.".into()
+    } else {
+        "Candidate lighting is the build default. GENOS_LIGHTING_* still overlays it.".into()
+    }
+}
+
+fn load_baseline(
+    opts: &CheckOptions,
+    notes: &mut Vec<String>,
+) -> Result<(Option<MetricsFile>, Option<String>), String> {
+    let Some(path) = &opts.baseline_path else {
+        notes.push("No baseline given, so regressions were not judged.".into());
+        return Ok((None, None));
+    };
+    if !path.exists() {
+        notes.push(format!(
+            "No metrics at {}, so regressions were not judged.",
+            path.display()
+        ));
+        return Ok((None, None));
+    }
+    let file = baseline::read_metrics(path)?;
+    let label = opts
+        .baseline_label
+        .clone()
+        .unwrap_or_else(|| file.commit.clone());
+    notes.push(format!("Regressions use {} ({}).", path.display(), label));
+    Ok((Some(file), Some(label)))
+}
+
+fn capture_live(
+    opts: &CheckOptions,
+    wanted: &[Wanted],
+    notes: &mut Vec<String>,
+) -> Result<Vec<LiveShot>, String> {
+    if opts.skip_capture {
+        notes.push("Live capture skipped (--skip-capture).".into());
+        return Ok(Vec::new());
+    }
+    let jobs = wanted
+        .iter()
+        .map(|item| Job {
+            scene: item.scene.clone(),
+            checkpoint: item.checkpoint.clone(),
+            still: item.still,
+            event: item.event,
+        })
+        .collect();
+    match capture::capture(&CaptureOptions {
+        width: opts.profile.width,
+        height: opts.profile.height,
+        full_effort: opts.full_effort,
+        lavapipe_small: opts.mode == "lavapipe-small",
+        jobs,
+    }) {
+        Ok(outcome) => {
+            for (scene, checkpoint, reason) in outcome.skipped {
+                notes.push(format!("{scene} {checkpoint}: {reason}"));
+            }
+            if outcome.shots.is_empty() {
+                notes.push("Live capture produced no pictures.".into());
+            }
+            Ok(outcome.shots)
+        }
+        Err(err) => {
+            notes.push(format!("Live capture skipped: {err}"));
+            Ok(Vec::new())
+        }
+    }
+}
+
+fn candidate_picture(item: &Wanted, shot: &LiveShot) -> Picture {
+    if let Some(settled) = &shot.settled {
+        return settled.clone();
+    }
+    if item.still && shot.frames.len() >= 2 {
+        if let Ok(average) = Picture::average(&shot.frames) {
+            return average;
+        }
+    }
+    shot.frames
+        .last()
+        .cloned()
+        .or_else(|| shot.settled.clone())
+        .expect("caller checks the shot has a picture")
+}
+
+fn after_frames<'a>(item: &Wanted, shot: &'a LiveShot) -> Vec<(u32, &'a Picture)> {
+    if item.event.is_none() {
+        return Vec::new();
+    }
+    [1u32, 2, 4, 8]
+        .into_iter()
+        .filter_map(|k| shot.frames.get(k as usize - 1).map(|picture| (k, picture)))
+        .collect()
+}
+
+fn require_of(item: &Wanted) -> &'static [MetricId] {
+    if item.event.is_some() {
+        EVENT_REQUIRE
+    } else if item.still {
+        STILL_REQUIRE
+    } else {
+        &[]
+    }
+}
+
+fn skipped_scenes(opts: &CheckOptions) -> Vec<(String, String)> {
+    genos_lighting_ref::scenes()
+        .iter()
+        .filter(|scene| !scene.available)
+        .filter(|scene| opts.only_scene.as_ref().is_none_or(|id| id == scene.id))
+        .map(|scene| (scene.id.to_string(), scene.skip_reason.to_string()))
+        .collect()
+}

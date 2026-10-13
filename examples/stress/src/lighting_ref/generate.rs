@@ -8,6 +8,7 @@ use genos_lighting_ref::Picture;
 
 use super::scenes::{self, shot};
 
+#[derive(Clone, Copy)]
 pub struct TraceProfile {
     pub name: &'static str,
     pub width: u32,

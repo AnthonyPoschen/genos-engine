@@ -64,6 +64,7 @@ pub fn write_reference(
     let linear = dir.join("reference.f32");
     picture.save_png(&png)?;
     picture.save_linear(&linear)?;
+    write_trace(&dir, &record)?;
     record.png_bytes = file_len(&png)?;
     record.linear_bytes = file_len(&linear)?;
     record.width = picture.width;
@@ -73,6 +74,61 @@ pub fn write_reference(
 
 pub fn read_reference(root: &Path, scene: &str, checkpoint: &str) -> Result<Picture, String> {
     Picture::load_linear(&checkpoint_dir(root, scene, checkpoint).join("reference.f32"))
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceNote {
+    pub method: String,
+    pub spp: u32,
+    pub noise: f32,
+    pub seconds: f32,
+    pub max_bounces: u32,
+}
+
+pub fn read_trace(root: &Path, scene: &str, checkpoint: &str) -> Result<TraceNote, String> {
+    let path = checkpoint_dir(root, scene, checkpoint).join("trace.txt");
+    let text =
+        std::fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let mut note = TraceNote {
+        method: "path".into(),
+        spp: 0,
+        noise: 0.0,
+        seconds: 0.0,
+        max_bounces: 0,
+    };
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once(' ') else {
+            continue;
+        };
+        match key {
+            "method" => note.method = value.trim().to_string(),
+            "spp" => note.spp = parse_line(&path, key, value)?,
+            "noise" => note.noise = parse_line(&path, key, value)?,
+            "seconds" => note.seconds = parse_line(&path, key, value)?,
+            "max_bounces" => note.max_bounces = parse_line(&path, key, value)?,
+            _ => {}
+        }
+    }
+    if note.spp == 0 {
+        return Err(format!("{}: missing spp", path.display()));
+    }
+    Ok(note)
+}
+
+fn write_trace(dir: &Path, record: &ReferenceRecord) -> Result<(), String> {
+    let path = dir.join("trace.txt");
+    let text = format!(
+        "method {}\nspp {}\nnoise {:.6}\nseconds {:.6}\nmax_bounces {}\n",
+        record.method, record.spp, record.noise, record.seconds, record.max_bounces
+    );
+    std::fs::write(&path, text).map_err(|err| format!("{}: {err}", path.display()))
+}
+
+fn parse_line<T: std::str::FromStr>(path: &Path, key: &str, value: &str) -> Result<T, String> {
+    value
+        .trim()
+        .parse()
+        .map_err(|_| format!("{}: bad {key}", path.display()))
 }
 
 pub fn write_manifest(root: &Path, manifest: &Manifest) -> Result<PathBuf, String> {
@@ -239,6 +295,9 @@ mod tests {
         assert_eq!(png.len() as u64, record.png_bytes);
         let loaded = read_reference(&root, "stress-still", "hall").unwrap();
         assert_eq!(loaded, picture);
+        let trace = read_trace(&root, "stress-still", "hall").unwrap();
+        assert_eq!(trace.spp, 1);
+        assert_eq!(trace.method, "path");
         let manifest = Manifest {
             commit: "abc123".into(),
             profile: "test".into(),

@@ -141,6 +141,8 @@ v1 views (`bounce:N`, `near`, `far`, `probes:*`) went with GI v1.
 
 `reference` traces; `compare` traces (or reuses `reference: name`) and compares.
 
+`make lighting-ref-check` scores the catalog against that path trace. The report is `./genos-debug/refcheck/<timestamp>/` unless `--out` is set. `MODE=lavapipe-small` is the small run. The note is [the reference check](lighting/reference-check.md).
+
 - Primary rays through each pixel centre from the camera pose (60 degree vertical
   field of view, the picture's aspect). Each sample gathers shadowed direct light
   from every lamp and the sun at each vertex and continues along a cosine-sampled
