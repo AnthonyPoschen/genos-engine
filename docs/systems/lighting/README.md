@@ -47,7 +47,15 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Whole-image consistency beats local sharpness; quality changes only at logical boundaries (12 Oct).
 - Lighting VRAM may grow if it cuts per-frame compute; total should stay fixed rather than scale with the scene (12 Oct).
 - Never skip lighting on an assumption; verify with an extraordinarily cheap check every frame (12 Oct).
-- The moving-scene cut is designed in [work-reduction-design.md](work-reduction-design.md). It is not built.
+- The moving-scene cut is designed in [work-reduction-design.md](work-reduction-design.md). Phase 1 tags each surface pixel and each probe full effort or settled and does not change the shade. Later phases are not in the shaded work yet.
+
+## Networking
+
+- Replicated state: none. Probe SH, visibility bits, layers, and deltas live on the GPU that draws. Lamp poses and meshes are the scene's replicated inputs.
+- Authority: the drawing machine owns the caches. A later server does not simulate irradiance.
+- Prediction / rollback: a rollback restores the scene and drops the caches. The next frame is full effort, the same as a cold start.
+- Determinism: the full-effort path is the reference render. The settled path is allowed to be stale and is not required to match bit for bit across machines. The picture is not a replicated input.
+- Headless server: a headless server runs no lighting passes. The headless debug path still runs them when it is scoring a picture.
 
 ## Deviations from the papers (summary)
 
@@ -60,7 +68,8 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
-- Planned, not built: the moving-scene work reduction in [work-reduction-design.md](work-reduction-design.md). The departures in that file are not in the code.
+- Phase 1 fringe tag (work-reduction design, technique 1): a tube of radius equal to the lamp motion, not the swept triangle of the old and new lamp positions. The tube is wider, so a pixel the triangle would have left settled can be tagged full effort. The tag does not change the shade.
+- Planned, not in the shade yet: the rest of the moving-scene work reduction in [work-reduction-design.md](work-reduction-design.md). The other departures in that file are not in the code.
 
 ## Experiment index
 

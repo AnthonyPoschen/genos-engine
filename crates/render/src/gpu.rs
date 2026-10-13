@@ -419,6 +419,17 @@ impl Renderer {
         self.gpu.reset_lighting_caches();
     }
 
+    /// Work-cut phase 0..7, and the full-effort reference. Overrides
+    /// `GENOS_LIGHTING_WORK_PHASE` and `GENOS_LIGHTING_FULL_EFFORT` for this renderer.
+    pub fn set_lighting_work(&mut self, phase: u32, full_effort: bool) {
+        self.gpu.set_lighting_work(phase, full_effort);
+    }
+
+    /// Settled and full-effort counts for the last frame drawn.
+    pub fn lighting_work_stats(&mut self) -> LightingWorkStats {
+        self.gpu.lighting_work_stats()
+    }
+
     /// How long each pipeline took to build, in build order.
     pub fn pipeline_times(&self) -> Vec<(String, Duration)> {
         self.gpu.pipeline_times.clone()

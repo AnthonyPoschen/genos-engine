@@ -24,11 +24,13 @@ pub enum ViewMode {
     /// 12.5 cm, blue 25 cm, magenta coarser), dimmed where the texel holds fewer
     /// than 4 sets; shaded by the normal so surfaces read.
     Texels,
+    /// Work-cut regime: green settled, yellow fringe, red full effort.
+    Regime,
 }
 
 impl ViewMode {
     /// In the compose pass's code order (lighting_compose.comp).
-    pub const ALL: [ViewMode; 8] = [
+    pub const ALL: [ViewMode; 9] = [
         Self::Full,
         Self::Direct,
         Self::Bounce,
@@ -37,6 +39,7 @@ impl ViewMode {
         Self::Depth,
         Self::Light,
         Self::Texels,
+        Self::Regime,
     ];
 
     pub fn name(self) -> &'static str {
@@ -49,6 +52,7 @@ impl ViewMode {
             Self::Depth => "depth",
             Self::Light => "light",
             Self::Texels => "texels",
+            Self::Regime => "regime",
         }
     }
 

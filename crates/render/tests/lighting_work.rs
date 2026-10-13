@@ -307,6 +307,7 @@ fn full_effort_picture_floor_holds_a_third_run() {
     assert!(scene.ceiling.is_some(), "a roof");
     assert!(scene.solids.len() >= 3, "the loader wants three solids");
     let (_gpu, mut window, mut renderer) = open();
+    renderer.set_lighting_work(1, true);
     let mut floors = [0.0; 3];
     let mut pops = [0.0; 3];
     let mut bounce_a = Vec::new();
@@ -353,6 +354,41 @@ fn full_effort_picture_floor_holds_a_third_run() {
         );
         floors[i] = floor;
         pops[i] = pop_hi;
+        renderer.set_lighting_work(1, false);
+        let (_pics_p, phase) = run(&mut window, &mut renderer, mode);
+        renderer.set_lighting_work(1, true);
+        let phase_pairs = [
+            pair_floor(&phase, &a),
+            pair_floor(&phase, &b),
+            pair_floor(&phase, &c),
+        ];
+        let band = [
+            pairs[0], pairs[1], pairs[2], phase_pairs[0], phase_pairs[1], phase_pairs[2],
+        ];
+        let band_hi = band.into_iter().fold(0.0_f64, f64::max);
+        let band_lo = band.into_iter().fold(band_hi, f64::min);
+        let pop_p = pop_share(&phase);
+        eprintln!(
+            "phase1 {} diffs {:.6} {:.6} {:.6} pop {:.4}",
+            mode.name(),
+            phase_pairs[0],
+            phase_pairs[1],
+            phase_pairs[2],
+            pop_p * 100.0
+        );
+        assert!(
+            band_hi <= band_lo * 3.0 + 5.0e-4,
+            "{} phase 1 leaves the full-effort band ({:.6} vs {:.6})",
+            mode.name(),
+            band_hi,
+            band_lo
+        );
+        assert!(
+            pop_p <= pop_hi + 0.005 && pop_p + 0.005 >= pop_lo,
+            "{} phase 1 pop {:.4}% is outside the full-effort pop",
+            mode.name(),
+            pop_p * 100.0
+        );
         if mode == ViewMode::Bounce {
             bounce_a = pics_a;
             bounce_b = pics_b;
@@ -378,4 +414,59 @@ fn full_effort_picture_floor_holds_a_third_run() {
         pops[1] * 100.0,
         pops[2] * 100.0
     );
+
+    // Stop rule: after a still warmup, a moving frame keeps at least half its
+    // surface pixels settled. Below that, later phases do not start.
+    renderer.set_lighting_work(1, false);
+    renderer.reset_lighting_caches();
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Full,
+        ..DebugView::default()
+    });
+    let camera = corner_camera();
+    for _ in 0..24 {
+        let _ = draw(&mut window, &mut renderer, 0, &camera);
+    }
+    for step in 0..MOVE - 1 {
+        let _ = draw(&mut window, &mut renderer, WARM + step, &camera);
+    }
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Regime,
+        ..DebugView::default()
+    });
+    let regime = draw(&mut window, &mut renderer, WARM + MOVE - 1, &camera);
+    let stats = renderer.lighting_work_stats();
+    let frac = stats.settled_pixels as f64 / stats.pixels.max(1) as f64;
+    eprintln!(
+        "phase1 moving settled {:.3} pixels {}/{} missing {} fringe {} pages {}/{} probes {}/{}",
+        frac,
+        stats.settled_pixels,
+        stats.pixels,
+        stats.missing,
+        stats.fringe,
+        stats.settled_pages,
+        stats.pages,
+        stats.settled_probes,
+        stats.probes
+    );
+    assert!(stats.pixels > 1000, "regime counters saw {} pixels", stats.pixels);
+    assert!(
+        frac >= 0.5,
+        "stop rule: {:.1}% of moving-frame pixels are settled, under half",
+        frac * 100.0
+    );
+    let mut green = 0usize;
+    let mut yellow = 0usize;
+    let mut pixels = 0usize;
+    for p in regime.chunks_exact(4) {
+        pixels += 1;
+        if p[1] > p[0] && p[1] > p[2] && p[1] > 80 {
+            green += 1;
+        } else if p[2] > p[1] && p[1] > p[0] && p[2] > 160 {
+            yellow += 1;
+        }
+    }
+    eprintln!("phase1 regime green {green} yellow {yellow} / {pixels}");
+    assert!(green * 2 > pixels, "regime view is not mostly settled");
+    assert!(yellow > 0, "regime view shows no fringe on the moving frame");
 }

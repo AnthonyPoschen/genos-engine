@@ -199,6 +199,10 @@ pub(crate) struct Lighting {
     /// Overrides `GENOS_LIGHTING_ATROUS_DIRTY` for the a-trous list fallback.
     /// Fraction of filtered texels; `None` reads the env each frame.
     atrous_dirty: Option<f32>,
+    /// Work-cut phase. `None` reads `GENOS_LIGHTING_WORK_PHASE`, else the default.
+    work_phase: Option<u32>,
+    /// With `work_phase` set, every probe and texel stays on today's path.
+    work_full: bool,
 }
 
 /// A-trous levels 1-5 in the last frame that ran them (S78X dense fallback).
@@ -214,6 +218,43 @@ pub struct LightingAtrousStats {
     pub filtered: u32,
     /// Levels 1-5 ran this frame.
     pub ran: bool,
+}
+
+/// Regime counters from the last frame (lighting_work.glsl).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LightingWorkStats {
+    pub pixels: u32,
+    pub settled_pixels: u32,
+    pub pages: u32,
+    pub settled_pages: u32,
+    pub probes: u32,
+    pub settled_probes: u32,
+    pub missing: u32,
+    pub fringe: u32,
+    pub traced: u32,
+    pub analytic: u32,
+    pub propagated: u32,
+    pub stochastic: u32,
+    pub delta_skip: u32,
+}
+
+fn lighting_work_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingWorkStats {
+    let at = LIGHTING_WORK_STAT;
+    LightingWorkStats {
+        pixels: w[at],
+        settled_pixels: w[at + 1],
+        pages: w[at + 2],
+        settled_pages: w[at + 3],
+        probes: w[at + 4],
+        settled_probes: w[at + 5],
+        missing: w[at + 6],
+        fringe: w[at + 7],
+        traced: w[at + 8],
+        analytic: w[at + 9],
+        propagated: w[at + 10],
+        stochastic: w[at + 11],
+        delta_skip: w[at + 12],
+    }
 }
 
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
@@ -304,6 +345,8 @@ impl Default for Lighting {
             last_round: None,
             stats_round: [false; 2],
             atrous_dirty: None,
+            work_phase: None,
+            work_full: false,
         }
     }
 }
@@ -690,7 +733,7 @@ impl Gpu {
             assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
             assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
             self.lighting.cache_keys = self.make_buffer_queues(
-                (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS) * 4, // a-trous meta after the S67/PR11 compose words // S78X: a-trous threshold, fraction, bins // S78Z: verify / wake words sit just before that // S78X lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
+                (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS + LIGHTING_WORK_WORDS) * 4, // a-trous meta after the S67/PR11 compose words // S78X: a-trous threshold, fraction, bins // S78Z: verify / wake words sit just before that // S78X lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT) // work-cut control and lamp motion
                 0x20 | 0x2 | 0x100 | 0x1,
                 Memory::Device,
                 &share,
@@ -891,6 +934,39 @@ impl Gpu {
         let slot = self.lighting.last_slot;
         self.read_stats16(self.lighting.stats[slot].memory)
             .map(|w| lighting_atrous_from(&w))
+            .unwrap_or_default()
+    }
+
+    /// Phase and full-effort for this frame. A call to `set_lighting_work` wins
+    /// over the environment.
+    fn lighting_work_resolved(&self) -> (u32, bool) {
+        if let Some(phase) = self.lighting.work_phase {
+            return (phase.min(7), self.lighting.work_full);
+        }
+        let phase = std::env::var("GENOS_LIGHTING_WORK_PHASE")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(LIGHTING_WORK_PHASE_DEFAULT)
+            .min(7);
+        let full = std::env::var("GENOS_LIGHTING_FULL_EFFORT").ok().as_deref() == Some("1");
+        (phase, full)
+    }
+
+    /// `phase` 0..7 stops after that phase. `full_effort` marks every probe and
+    /// texel for today's path.
+    pub(crate) fn set_lighting_work(&mut self, phase: u32, full_effort: bool) {
+        self.lighting.work_phase = Some(phase.min(7));
+        self.lighting.work_full = full_effort;
+    }
+
+    /// Regime counters for the last frame drawn. Waits for that frame.
+    pub(crate) fn lighting_work_stats(&mut self) -> LightingWorkStats {
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
+        let slot = self.lighting.last_slot;
+        self.read_stats16(self.lighting.stats[slot].memory)
+            .map(|w| lighting_work_from(&w))
             .unwrap_or_default()
     }
 
@@ -1672,6 +1748,15 @@ impl Gpu {
                     0,
                 );
             }
+            let (phase, full) = self.lighting_work_resolved();
+            let control = u32::from(full) | (phase << 8);
+            (self.fns.cmd_update_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                lighting_work_at() * 4,
+                4,
+                &control as *const u32 as *const c_void,
+            );
             self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x1);
             (self.fns.cmd_bind_set)(
                 self.cmd,
@@ -2034,9 +2119,18 @@ const LIGHTING_DEFAULT_WORLD: u32 = 3;
 const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
 const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
 /// Lighting stats buffer: 24 words, diag[64], chg[32], then the a-trous fallback
-/// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`.
+/// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`,
+/// then the work-cut counters at `LIGHTING_WORK_STAT` (13 words).
 /// The change-counter enable word stays chg[31] (word 119).
-const LIGHTING_STATS_WORDS: usize = 124;
+const LIGHTING_STATS_WORDS: usize = 137;
+const LIGHTING_WORK_STAT: usize = 124;
+/// Phase in the code until a later change turns the next one on.
+const LIGHTING_WORK_PHASE_DEFAULT: u32 = 1;
+/// Control word plus 8 words of lamp motion for 128 lamps.
+const LIGHTING_WORK_WORDS: u64 = 8 + 8 * 128;
+fn lighting_work_at() -> u64 {
+    lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS
+}
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 const LIGHTING_CHG_ENABLE_WORD: u64 = 24 + 64 + 31;
 const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;

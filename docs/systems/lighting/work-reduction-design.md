@@ -246,7 +246,13 @@ Direct matched across the three runs. The sum and the bounce stay inside the ban
 
 Mark each probe and each page full effort or settled, from the check and from λ. Keep running today's work for both. Counters: the settled fraction of probes, of pages, and of pixels, on the moving scene and the still scene. A debug view shows the tag.
 
+The tag is read-only. A surface pixel is settled when its 12.5 cm texel already holds at least one set, its λ is under 0.25, and the pixel is outside the fringe. The fringe is a tube of radius equal to this frame's lamp motion around the segment from the point to the lamp. The walk ignores the floor, the roof, and an occluder that contains the point, and it starts 15 cm off the surface. A tube is wider than the swept triangle, so the tag stays full effort on a superset of the pixels whose visibility can flip. A probe is settled when the gather hold already skips it. A moving lamp dirties that hold, so probes stay full effort through the move. The pixel stop rule is the one that gates later phases. The shaded work is today's path for both tags. `GENOS_LIGHTING_FULL_EFFORT=1` forces every count to full effort. The default phase is 1.
+
 **Pass:** picture diff inside the phase 0 floor, pop not up. **Stop rule:** after warmup, if fewer than half the pixels on the moving run are settled, the premise is wrong for this scene and the later phases are not started. **Milliseconds:** about 0.
+
+Lavapipe, 320×180, measured in the same process as a fresh phase 0 floor: direct diff 0 against all three full-effort runs. Sum diffs 0.0205, 0.0243, 0.0173 sit in the pair band (floor 0.0239). Bounce diffs 0.0043, 0.0037, 0.0022 sit in its band (floor 0.0046). Pop stays within half a point. After 24 still frames and a lamp step, 56523 of 57600 pixels are settled (98.1%), 1077 are fringe, none are missing. The regime view matches those counts. The stop rule does not fire, so later phases start.
+
+`lighting_moving_camera_keeps_its_brightness` misses its 0.03 gate on this lavapipe at the phase 0 commit (wiggle ratio about 1.04) and with full effort forced. That miss is older than the tag. `lighting_pipelines_build_quickly` counts the pre-existing `lighting gbuffer` timing name along with the nine lighting compute pipelines, so the same assertion fails on gi-v2.
 
 ### Phase 2 — confirmed-visibility shade
 

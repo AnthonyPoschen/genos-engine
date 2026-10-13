@@ -17,7 +17,7 @@ pub use aa::Antialias;
 pub use budget::{FrameMemory, ImageAdmit};
 pub use genos_bake as bake;
 pub use gpu::{
-    DebugView, DrawProfile, LampReport, LightingAtrousStats, Renderer, ScreenLine, ScreenRect,
+    DebugView, DrawProfile, LampReport, LightingAtrousStats, LightingWorkStats, Renderer, ScreenLine, ScreenRect,
     SettleStats, ViewMode,
 };
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};

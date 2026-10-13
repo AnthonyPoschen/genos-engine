@@ -94,53 +94,57 @@ void main() {
         uvec2 b = uvec2(block % bw, block / bw);
         p = b * 8u + gl_LocalInvocationID.xy;
     }
-    if (p.x >= pc.dims.x || p.y >= pc.dims.y) {
-        return;
-    }
-    lighting_compose_px = p;
-    vec3 pos;
-    vec3 n;
-    vec3 albedo;
-    bool two_sided;
-    uint index = p.y * pc.dims.x + p.x;
-    if (!lighting_surface(p, pos, n, albedo, two_sided)) {
-        return;
-    }
-    vec3 direct = lighting_unpack_rgb9e5(gbuf.px[index].w);
-    // The light pass left the pixel's emitted light past the picture.
-    vec3 glow = lighting_unpack_rgb9e5(outc.px[pc.dims.x * pc.dims.y + index]);
-    gbuf.px[index] = uvec4(~0u);
-    if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
-        n = -n;
-    }
-    // Debug view (debug_view.rs ViewMode): 0 full, 1 direct, 2 bounce, 3 albedo,
-    // 4 normal, 5 depth, 6 light, 7 texels.
+    // Every thread reaches the regime count. An early return would stall the
+    // workgroup barrier in lighting_work_count_px.
+    bool in_pic = p.x < pc.dims.x && p.y < pc.dims.y;
+    vec3 pos = vec3(0.0);
+    vec3 n = vec3(0.0, 1.0, 0.0);
+    bool surface = false;
     uint mode = scene.grid_at.w & 255u;
-    vec3 shown;
-    if (mode == 3u || mode == 4u || mode == 5u) {
-        float depth = clamp(1.0 - length(pos - scene.eye.xyz) / 50.0, 0.0, 1.0);
-        shown = mode == 3u ? albedo : (mode == 4u ? n * 0.5 + 0.5 : vec3(depth));
-        outc.px[index] = pack_rgb(shown);
-        return;
+    if (in_pic) {
+        lighting_compose_px = p;
+        vec3 albedo;
+        bool two_sided;
+        uint index = p.y * pc.dims.x + p.x;
+        surface = lighting_surface(p, pos, n, albedo, two_sided);
+        if (surface) {
+            vec3 direct = lighting_unpack_rgb9e5(gbuf.px[index].w);
+            // The light pass left the pixel's emitted light past the picture.
+            vec3 glow = lighting_unpack_rgb9e5(outc.px[pc.dims.x * pc.dims.y + index]);
+            gbuf.px[index] = uvec4(~0u);
+            if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
+                n = -n;
+            }
+            // Debug view (debug_view.rs ViewMode): 0 full, 1 direct, 2 bounce, 3 albedo,
+            // 4 normal, 5 depth, 6 light, 7 texels, 8 regime.
+            if (mode == 3u || mode == 4u || mode == 5u) {
+                float depth = clamp(1.0 - length(pos - scene.eye.xyz) / 50.0, 0.0, 1.0);
+                vec3 shown = mode == 3u ? albedo : (mode == 4u ? n * 0.5 + 0.5 : vec3(depth));
+                outc.px[index] = pack_rgb(shown);
+            } else if (mode == 7u) {
+                // Texel sizes (debug_view.rs ViewMode::Texels).
+                vec2 ts = lighting_sc_debug_size(pos, n);
+                vec3 col = ts.x < 0.09 ? vec3(1.0, 0.2, 0.2) : (ts.x < 0.2 ? vec3(0.2, 1.0, 0.2) : (ts.x < 0.4 ? vec3(0.25, 0.4, 1.0) : vec3(1.0, 0.3, 1.0)));
+                float lit = 0.55 + 0.45 * abs(dot(n, vec3(0.3, 0.8, 0.5)));
+                outc.px[index] = pack_rgb(col * lit * (ts.y >= 4.0 ? 1.0 : 0.35));
+            } else {
+                vec3 bounce = indirect(p, pos, n);
+                if (mode == 1u || mode == 6u) {
+                    bounce = vec3(0.0);
+                }
+                if (mode == 2u) {
+                    direct = vec3(0.0);
+                    glow = vec3(0.0);
+                }
+                vec3 c = albedo * LAMBERT * (direct + bounce) + glow;
+                vec3 shown = vec3(tone_channel(c.r), tone_channel(c.g), tone_channel(c.b));
+                outc.px[index] = pack_rgb(dither8(shown, p));
+            }
+        }
     }
-    if (mode == 7u) {
-        // Texel sizes (debug_view.rs ViewMode::Texels).
-        vec2 ts = lighting_sc_debug_size(pos, n);
-        vec3 col = ts.x < 0.09 ? vec3(1.0, 0.2, 0.2) : (ts.x < 0.2 ? vec3(0.2, 1.0, 0.2) : (ts.x < 0.4 ? vec3(0.25, 0.4, 1.0) : vec3(1.0, 0.3, 1.0)));
-        float lit = 0.55 + 0.45 * abs(dot(n, vec3(0.3, 0.8, 0.5)));
-        shown = col * lit * (ts.y >= 4.0 ? 1.0 : 0.35);
-        outc.px[index] = pack_rgb(shown);
-        return;
+    uint tag = lighting_work_count_px(surface, pos, n);
+    if (mode == 8u && surface && in_pic) {
+        vec3 col = tag == 3u ? vec3(0.15, 0.85, 0.25) : (tag == 2u ? vec3(0.95, 0.8, 0.15) : vec3(0.9, 0.18, 0.15));
+        outc.px[p.y * pc.dims.x + p.x] = pack_rgb(col);
     }
-    vec3 bounce = indirect(p, pos, n);
-    if (mode == 1u || mode == 6u) {
-        bounce = vec3(0.0);
-    }
-    if (mode == 2u) {
-        direct = vec3(0.0);
-        glow = vec3(0.0);
-    }
-    vec3 c = albedo * LAMBERT * (direct + bounce) + glow;
-    shown = vec3(tone_channel(c.r), tone_channel(c.g), tone_channel(c.b));
-    outc.px[index] = pack_rgb(dither8(shown, p));
 }

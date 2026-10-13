@@ -82,6 +82,20 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint atrous_mode;
     uint atrous_ppm;
     uint atrous_active;
+    // Work-cut counters (lighting_work.glsl). Appended so the words above stay put.
+    uint work_px;
+    uint work_settled_px;
+    uint work_pages;
+    uint work_settled_pages;
+    uint work_probes;
+    uint work_settled_probes;
+    uint work_missing;
+    uint work_fringe;
+    uint work_traced;
+    uint work_analytic;
+    uint work_propagated;
+    uint work_stochastic;
+    uint work_delta_skip;
 } gstats;
 // Kept-hit light writes (light pass): all, changed, by relative luminance delta
 // (<0.2 %, 0.2-1 %, 1-5 %, >5 %), and changed by source of the hit's direct light
@@ -2153,6 +2167,7 @@ uint lighting_grad_first() {
 }
 uint lighting_grad_count();
 void lighting_shadow_epochs();
+void lighting_work_note_lamps();
 // S76D persistent check words, after the gradient check list (LIGHTING_GRAD_LIST_AT + 32768).
 const uint LIGHTING_CHECK_P_AT = LIGHTING_ARGS_AT + 16u + 3u * 65536u + 1024u + 32768u;
 bool lighting_dense() {
@@ -2200,6 +2215,7 @@ void lighting_write_args() {
         s = lighting_wrc_scout_due() ? LIGHTING_WRC_SCOUT_ENTRIES >> sh : 0u;
         g = (lighting_grad_count() + LIGHTING_CACHE_RAYS - 1u) / LIGHTING_CACHE_RAYS;
         lighting_shadow_epochs();
+        lighting_work_note_lamps();
         // S76D: last round's demand for fair service, and the global boost when
         // a large share of the checks since the last write escalated.
         ckeys.key[LIGHTING_CHECK_P_AT + 3u] = ckeys.key[LIGHTING_SC_HIST_AT + 72u]; // LIGHTING_GRAD_COUNT_AT
