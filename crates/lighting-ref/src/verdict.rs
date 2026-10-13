@@ -718,6 +718,22 @@ mod tests {
     }
 
     #[test]
+    fn bounces_zero_hall_against_a_bounced_reference_fails() {
+        // zanven-pc: hall with bounce count 0 against the bounced reference.
+        // Blur 0.550, ratio error 0.333. FLIP is not the gate.
+        let mut metrics = with_scores(0.20, 0.550, 0.667);
+        metrics.flip_mean = Some(0.08);
+        metrics.flip_p99 = Some(0.84);
+        let result = judged(&metrics, None, 64, 0.16);
+        assert_eq!(result.verdict, Verdict::Fail, "{:?}", result.reasons);
+        assert!(result
+            .reasons
+            .iter()
+            .any(|r| r.contains("blurred relative")));
+        assert!(result.reasons.iter().any(|r| r.contains("luminance ratio")));
+    }
+
+    #[test]
     fn a_luminance_bias_stays_a_fail_when_the_raw_error_is_only_noise() {
         for (name, ratio) in [("hall", 0.66f64), ("hall-moving", 0.80), ("corner", 1.18)] {
             let delta = (ratio - 1.0).abs();

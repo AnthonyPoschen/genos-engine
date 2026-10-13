@@ -157,6 +157,7 @@ fn plants() -> Vec<Plant> {
         black_block(),
         flicker(),
         missing_bounce(),
+        bounces_zero(),
     ]
 }
 
@@ -276,6 +277,28 @@ fn flicker() -> Plant {
     }
 }
 
+/// Bounce count 0 against a bounced reference. The trial's hall was blur
+/// 0.550 and ratio error 0.333. This plant is that ratio, uniform, so a
+/// threshold that lets a third of the light go still fails.
+fn bounces_zero() -> Plant {
+    let reference = gray(32, 180, 0.45);
+    let candidate = reference.scaled(0.667);
+    Plant {
+        name: "bounces-zero",
+        note: "Planted: hall at bounce count 0 against a bounced reference. The candidate keeps two thirds of the light (the trial's ratio error was 0.333, and its blurred error was 0.550). Expected verdict: fail on blurred relative luminance and the luminance ratio.",
+        expect: Verdict::Fail,
+        caught_by: &[
+            "blurred relative luminance is",
+            "mean luminance ratio error is",
+        ],
+        require: &[],
+        reference,
+        candidate,
+        still: None,
+        after: Vec::new(),
+    }
+}
+
 fn missing_bounce() -> Plant {
     let mut reference = Picture::solid(32, 8, [0.50, 0.48, 0.45]);
     reference.fill_rect(16, 0, 16, 8, [0.09, 0.015, 0.012]);
@@ -319,6 +342,10 @@ mod tests {
         assert_eq!(verdict("black-block").judgement.verdict, Verdict::Fail);
         assert_eq!(verdict("flicker").judgement.verdict, Verdict::Fail);
         assert_eq!(verdict("missing-bounce").judgement.verdict, Verdict::Fail);
+        assert_eq!(verdict("bounces-zero").judgement.verdict, Verdict::Fail);
+        let dropped = verdict("bounces-zero");
+        assert!(dropped.metrics.blur_rel.unwrap() > 0.30);
+        assert!(dropped.metrics.luma_delta.unwrap() > 0.30);
 
         let flicker = verdict("flicker");
         let row = |id: MetricId| {
