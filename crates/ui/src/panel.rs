@@ -6,6 +6,7 @@ use genos_scene::{Camera, Scene};
 
 use crate::layout::{self, Direction, Item, Node, Pad, Place, Rect, Sizing, Space};
 use crate::omarchy::{self, Palette};
+use crate::slider::{self, SliderStep};
 use crate::text::{self, Blot};
 use crate::{id, Action, Look, PictureMode};
 
@@ -39,6 +40,37 @@ pub struct Pointer {
     pub x: f32,
     pub y: f32,
     pub down: bool,
+    /// Vertical wheel this frame. Positive steps a slider toward its maximum.
+    /// Callers pass the pressed edge, not a held repeat, for the keys below.
+    pub wheel_y: f32,
+    /// Decrease key pressed this frame (left or down).
+    pub key_dec: bool,
+    /// Increase key pressed this frame (right or up).
+    pub key_inc: bool,
+}
+
+impl Default for Pointer {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            down: false,
+            wheel_y: 0.0,
+            key_dec: false,
+            key_inc: false,
+        }
+    }
+}
+
+impl Pointer {
+    pub fn at(x: f32, y: f32, down: bool) -> Self {
+        Self {
+            x,
+            y,
+            down,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -108,6 +140,8 @@ pub struct Frame {
     pub actions: Vec<Action>,
     /// True when this press missed the panel and the camera may capture look.
     pub look_capture: bool,
+    /// Name and exact value while the pointer is on a slider. `None` otherwise.
+    pub tooltip: Option<String>,
 }
 
 /// Lay out the lighting panel and the lamp sun. Apply hover, press, and drag.
@@ -198,6 +232,7 @@ pub fn lighting_frame(
         paints,
         actions,
         look_capture,
+        tooltip: None,
     }
 }
 
@@ -211,6 +246,12 @@ pub struct PanelRow {
 
 /// A slider on a panel row. A press anywhere on the track sets the value there and a
 /// held press follows the pointer, firing [`Action::Slide`] each frame it changes.
+///
+/// `steps` empty is a numeric slider: `step` of 0 is continuous, and a positive
+/// `step` snaps to `min + k * step`. Named `steps` are discrete. The track spaces
+/// them evenly. A click, a drag, the wheel, and the arrow keys snap to a step and
+/// report that step's `value`. The names are drawn small and dim under the ticks.
+/// The current name is brighter. A hover tip shows the name and the exact value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PanelSlider {
     /// Game id, as for a button.
@@ -218,30 +259,89 @@ pub struct PanelSlider {
     pub value: f64,
     pub min: f64,
     pub max: f64,
-    /// Values snap to `min + k * step`; 0 is continuous.
+    /// Values snap to `min + k * step`; 0 is continuous. Ignored when `steps` is set.
     pub step: f64,
     /// Readout beside the track, e.g. `23.9 H`.
     pub text: String,
+    /// Named steps in track order. Empty for a numeric slider.
+    pub steps: Vec<SliderStep>,
 }
 
 impl PanelSlider {
-    fn share(&self) -> f32 {
-        let span = self.max - self.min;
-        if span <= 0.0 {
-            0.0
-        } else {
-            ((self.value - self.min) / span).clamp(0.0, 1.0) as f32
+    /// A numeric slider. `steps` stays empty.
+    pub fn range(
+        id: u32,
+        value: f64,
+        min: f64,
+        max: f64,
+        step: f64,
+        text: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            value,
+            min,
+            max,
+            step,
+            text: text.into(),
+            steps: Vec::new(),
         }
     }
 
+    /// Discrete named steps. `value` selects the nearest step.
+    pub fn named(id: u32, value: f64, steps: Vec<SliderStep>) -> Self {
+        let text = slider::nearest_index(&steps, value)
+            .map(|index| steps[index].name.clone())
+            .unwrap_or_default();
+        let min = steps.first().map(|step| step.value).unwrap_or(0.0);
+        let max = steps.last().map(|step| step.value).unwrap_or(min);
+        Self {
+            id,
+            value,
+            min,
+            max,
+            step: 0.0,
+            text,
+            steps,
+        }
+    }
+
+    fn share(&self) -> f32 {
+        slider::share(self.min, self.max, &self.steps, self.value)
+    }
+
     fn value_at(&self, track: Rect, pointer_x: f32) -> f64 {
-        let (left, right) = track_ends(track);
+        let band = thumb_band(track, !self.steps.is_empty());
+        let (left, right) = track_ends(band);
         let t = ((pointer_x - left) / (right - left).max(1.0)).clamp(0.0, 1.0) as f64;
-        let v = self.min + t * (self.max - self.min);
-        if self.step > 0.0 {
-            (self.min + ((v - self.min) / self.step).round() * self.step).clamp(self.min, self.max)
-        } else {
-            v
+        slider::value_at_fraction(self.min, self.max, self.step, &self.steps, t)
+    }
+
+    /// Move `delta` steps from the current value. Positive moves toward `max`.
+    pub fn step_by(&self, delta: i32) -> f64 {
+        slider::step_by(
+            self.min,
+            self.max,
+            self.step,
+            &self.steps,
+            self.value,
+            delta,
+        )
+    }
+
+    fn step_from(&self, value: f64, delta: i32) -> f64 {
+        slider::step_by(self.min, self.max, self.step, &self.steps, value, delta)
+    }
+
+    /// Hover text: the step name and its exact value, or the exact numeric value.
+    pub fn tip(&self) -> String {
+        slider::tip(&self.steps, self.value)
+    }
+
+    fn at(&self, value: f64) -> Self {
+        Self {
+            value,
+            ..self.clone()
         }
     }
 }
@@ -297,7 +397,12 @@ pub fn button_panel(
             children.push(node);
         }
         if let Some(bar) = &item.slider {
-            children.push(slider(bar.id, palette));
+            children.push(sized_slider(
+                bar.id,
+                palette,
+                slider_width(bar),
+                slider_height(bar),
+            ));
             children.push(label(at + 2, &bar.text, fill));
         }
         panel.children.push(row(at, children, fill));
@@ -344,6 +449,27 @@ pub fn button_panel(
                 actions.push(Action::Slide { id: bar.id, value });
             }
         }
+    } else {
+        let hovered = hit.and_then(|item| bars.iter().copied().find(|bar| bar.id == item.id));
+        if let Some(bar) = hovered {
+            let notches = wheel_steps(pointer.wheel_y);
+            if notches != 0 {
+                state.focus = Some(bar.id);
+                push_step(&mut actions, bar, notches);
+            }
+        }
+        if pointer.key_dec || pointer.key_inc {
+            let keyed = hovered.or_else(|| {
+                state
+                    .focus
+                    .and_then(|id| bars.iter().copied().find(|bar| bar.id == id))
+            });
+            if let Some(bar) = keyed {
+                let delta = i32::from(pointer.key_inc) - i32::from(pointer.key_dec);
+                state.focus = Some(bar.id);
+                push_step(&mut actions, bar, delta);
+            }
+        }
     }
     let mut shown = Vec::with_capacity(items.len());
     let mut paints = Vec::new();
@@ -359,15 +485,24 @@ pub fn button_panel(
         push_paints(&mut paints, item, look, palette, None, false);
         if let Some(bar) = bars.iter().find(|b| b.id == item.id) {
             // Show where a held slider is going this frame.
-            let value = actions.iter().rev().find_map(|a| match a {
-                Action::Slide { id, value } if *id == bar.id => Some(*value),
-                _ => None,
-            });
-            let shown_bar = PanelSlider {
-                value: value.unwrap_or(bar.value),
-                ..(*bar).clone()
-            };
-            push_bar(&mut paints, item.rect, shown_bar.share(), palette);
+            push_bar(
+                &mut paints,
+                item.rect,
+                &shown_slider(bar, &actions),
+                palette,
+            );
+        }
+    }
+    let mut tooltip = None;
+    if let Some(item) = hit {
+        if let Some(bar) = bars.iter().find(|b| b.id == item.id) {
+            let shown_bar = shown_slider(bar, &actions);
+            let text = shown_bar.tip();
+            let band = thumb_band(item.rect, !shown_bar.steps.is_empty());
+            let (left, right) = track_ends(band);
+            let x = left + (right - left) * shown_bar.share();
+            push_tip(&mut paints, viewport, x, band.y, &text);
+            tooltip = Some(text);
         }
     }
     state.pointer_x = pointer.x;
@@ -383,33 +518,164 @@ pub fn button_panel(
         paints,
         actions,
         look_capture,
+        tooltip,
+    }
+}
+
+fn shown_slider(bar: &PanelSlider, actions: &[Action]) -> PanelSlider {
+    let value = actions.iter().rev().find_map(|action| match action {
+        Action::Slide { id, value } if *id == bar.id => Some(*value),
+        _ => None,
+    });
+    bar.at(value.unwrap_or(bar.value))
+}
+
+fn push_step(actions: &mut Vec<Action>, bar: &PanelSlider, delta: i32) {
+    if delta == 0 {
+        return;
+    }
+    let current = actions
+        .iter()
+        .rev()
+        .find_map(|action| match action {
+            Action::Slide { id, value } if *id == bar.id => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(bar.value);
+    let value = bar.step_from(current, delta);
+    if value != current {
+        actions.push(Action::Slide { id: bar.id, value });
+    }
+}
+
+fn wheel_steps(wheel_y: f32) -> i32 {
+    if wheel_y.abs() < 1.0e-4 {
+        0
+    } else {
+        let steps = wheel_y.round() as i32;
+        if steps == 0 {
+            if wheel_y > 0.0 {
+                1
+            } else {
+                -1
+            }
+        } else {
+            steps.clamp(-24, 24)
+        }
+    }
+}
+
+fn slider_width(bar: &PanelSlider) -> f32 {
+    if bar.steps.is_empty() {
+        SLIDER_W
+    } else {
+        (bar.steps.len() as f32 * 64.0).clamp(220.0, 480.0)
+    }
+}
+
+fn slider_height(bar: &PanelSlider) -> f32 {
+    if bar.steps.is_empty() {
+        return SLIDER_H;
+    }
+    let width = slider_width(bar);
+    let rows = slider::label_rows(&bar.steps, SLIDER_INSET, width - SLIDER_INSET).max(1);
+    SLIDER_H + rows as f32 * text::SMALL_LINE + 2.0
+}
+
+/// Named sliders keep tick names under the thumb track. The hit target is the whole box.
+fn thumb_band(track: Rect, named: bool) -> Rect {
+    if named {
+        Rect {
+            h: SLIDER_H.min(track.h),
+            ..track
+        }
+    } else {
+        track
     }
 }
 
 /// A game slider: the filled share of the track and a thumb at its end.
-fn push_bar(out: &mut Vec<Paint>, track: Rect, share: f32, palette: Option<Palette>) {
-    let (left, right) = track_ends(track);
-    let x = left + (right - left) * share;
+/// Named steps also draw a tick and a small name under each step.
+fn push_bar(out: &mut Vec<Paint>, track: Rect, bar: &PanelSlider, palette: Option<Palette>) {
+    let band = thumb_band(track, !bar.steps.is_empty());
+    let (left, right) = track_ends(band);
+    let x = left + (right - left) * bar.share();
     push_rect(
         out,
         Rect {
             x: left,
-            y: track.y + (track.h - NOTCH_H) * 0.5,
+            y: band.y + (band.h - NOTCH_H) * 0.5,
             w: (x - left).max(0.0),
             h: NOTCH_H,
         },
         notch_color(palette),
     );
+    if !bar.steps.is_empty() {
+        let tick = [0.34, 0.36, 0.40];
+        for index in 0..bar.steps.len() {
+            let tick_x = slider::notch_x(band, index, bar.steps.len(), SLIDER_INSET);
+            push_rect(
+                out,
+                Rect {
+                    x: tick_x - 1.0,
+                    y: band.y + (band.h - 6.0) * 0.5,
+                    w: 2.0,
+                    h: 6.0,
+                },
+                tick,
+            );
+        }
+    }
     push_rect(
         out,
         Rect {
             x: x - THUMB_W * 0.5,
-            y: track.y + (track.h - THUMB_H) * 0.5,
+            y: band.y + (band.h - THUMB_H) * 0.5,
             w: THUMB_W,
             h: THUMB_H,
         },
         THUMB_COLOR,
     );
+    if bar.steps.is_empty() {
+        return;
+    }
+    let current = slider::nearest_index(&bar.steps, bar.value);
+    let labels = slider::place_labels(&bar.steps, current, left, right, band.y + band.h + 1.0);
+    for label in &labels {
+        let color = if label.current {
+            slider::LABEL_HOT
+        } else {
+            slider::LABEL_DIM
+        };
+        for blot in slider::label_blots(label) {
+            push_blot(out, blot, color);
+        }
+    }
+}
+
+fn push_tip(out: &mut Vec<Paint>, viewport: [f32; 2], anchor_x: f32, anchor_y: f32, text: &str) {
+    let (text_w, text_h) = text::measure(text, None);
+    let pad = 4.0;
+    let box_w = text_w + pad * 2.0;
+    let box_h = text_h + pad * 2.0;
+    let mut x = anchor_x - box_w * 0.5;
+    let mut y = anchor_y - box_h - 6.0;
+    if y < 0.0 {
+        y = anchor_y + SLIDER_H + 4.0;
+    }
+    x = x.clamp(0.0, (viewport[0] - box_w).max(0.0));
+    y = y.clamp(0.0, (viewport[1] - box_h).max(0.0));
+    let rect = Rect {
+        x,
+        y,
+        w: box_w,
+        h: box_h,
+    };
+    push_rect(out, rect, [0.05, 0.06, 0.08]);
+    push_border(out, rect, [0.55, 0.58, 0.64]);
+    for blot in text::blots(text, x + pad, y + pad, text_w.max(1.0)) {
+        push_blot(out, blot, TEXT);
+    }
 }
 
 /// Write one control onto the first lamp. Intensity scales `Light.color`.
@@ -563,9 +829,13 @@ fn row(id: u32, children: Vec<Node>, fill: [f32; 3]) -> Node {
 }
 
 fn slider(id: u32, palette: Option<Palette>) -> Node {
+    sized_slider(id, palette, SLIDER_W, SLIDER_H)
+}
+
+fn sized_slider(id: u32, palette: Option<Palette>, width: f32, height: f32) -> Node {
     let mut node = Node::new(id);
-    node.width = Sizing::fixed(SLIDER_W);
-    node.height = Sizing::fixed(SLIDER_H);
+    node.width = Sizing::fixed(width);
+    node.height = Sizing::fixed(height);
     paint_looks(&mut node, control_looks(palette));
     node
 }

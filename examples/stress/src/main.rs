@@ -801,6 +801,7 @@ fn run() -> Result<(), String> {
                     x: frame.pointer_x,
                     y: frame.pointer_y,
                     down: !camera.captured && (gated.mouse_left || gated.capture_click),
+                    ..Pointer::default()
                 },
             );
             for action in &ui_frame.actions {
@@ -1057,6 +1058,7 @@ fn knob_rows(stage: &Stage) -> Vec<PanelRow> {
                     max: k.max,
                     step: k.step,
                     text: k.text.clone(),
+                    steps: Vec::new(),
                 }),
             })
         })

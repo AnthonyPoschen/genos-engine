@@ -629,7 +629,7 @@ fn ui(state: &mut State, scene: &Scene, camera: &Camera, pointer: Pointer) -> Fr
 }
 
 fn pointer(x: f32, y: f32, down: bool) -> Pointer {
-    Pointer { x, y, down }
+    Pointer::at(x, y, down)
 }
 
 fn shown(frame: &Frame, id: u32) -> Shown {

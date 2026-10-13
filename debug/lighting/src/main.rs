@@ -193,6 +193,7 @@ fn run() -> Result<(), String> {
                     x: frame.pointer_x,
                     y: frame.pointer_y,
                     down: !camera.captured && (gated.mouse_left || gated.capture_click),
+                    ..Pointer::default()
                 },
             );
             for action in &ui_frame.actions {
@@ -834,6 +835,7 @@ fn panel_rows(app: &App, view: ViewMode) -> Vec<PanelRow> {
                 max: knob.max,
                 step: knob.step,
                 text: knob.text,
+                steps: Vec::new(),
             }),
         });
     }

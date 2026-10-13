@@ -11,6 +11,7 @@ mod layout;
 pub mod omarchy;
 mod panel;
 mod profile;
+mod slider;
 mod text;
 
 /// Idle, hover, and pressed colors. Pointer state picks one.
@@ -71,6 +72,7 @@ pub use profile::{
     ProfileGraph, ProfileLine, ProfilePoint, ProfileStream, ProfileView, RegionHit, StageSample,
     DRAW_STAGE, GRAPH_BUCKET, GRAPH_WINDOW, OVERLAY_PERIOD, STAGE_COUNT, STAGE_LABELS,
 };
+pub use slider::{SliderStep, LABEL_DIM, LABEL_HOT};
 
 /// Ids for the lighting panel the camera frame submits.
 pub mod id {
