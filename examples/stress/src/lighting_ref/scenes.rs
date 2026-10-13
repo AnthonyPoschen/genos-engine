@@ -32,6 +32,10 @@ pub fn shot(scene: &str, name: &str) -> Option<Shot> {
         .find(|cp| cp.scene == scene && cp.name == name)?;
     let mut shot = match (scene, name) {
         ("stress-still", "hall") => from_view(View::Hall, 0.25, 5, 0, 0.0, 0.0),
+        // 10.9 h. The stage fraction is 0 at 06:00, so (10.9 - 6) / 24.
+        ("stress-still", "hall-morning") => {
+            from_view(View::Hall, (10.9_f32 - 6.0) / 24.0, 5, 0, 0.0, 0.0)
+        }
         ("stress-still", "room-a") => from_view(View::RoomA, 0.25, 5, 0, 0.0, 0.0),
         ("stress-moving", "hall-moving") => from_view(View::Hall, 0.25, 25, 50, 1.2, 1.2),
         ("stress-moving", "box-step-before") => from_view(View::Hall, 0.25, 5, 0, 0.0, 0.0),

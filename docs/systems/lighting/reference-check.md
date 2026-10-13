@@ -76,6 +76,7 @@ The report is `summary.md` and `summary.html`, plus `metrics.json` and `frames.t
 | Scene | Checkpoint | What it holds |
 |---|---|---|
 | stress-still | hall | Hall bench at noon, boxes held. Still-camera flicker. |
+| stress-still | hall-morning | Hall at 10.9 h, boxes held. The sunlit wall whose bounce settled dark. |
 | stress-still | room-a | Room A at noon. |
 | stress-moving | hall-moving | Hall, boxes and a share of the lamps at a moment of motion. |
 | stress-moving | box-step-before | Hall just before the boxes jump. |

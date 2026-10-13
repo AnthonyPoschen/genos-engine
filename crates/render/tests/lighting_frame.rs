@@ -889,3 +889,60 @@ fn poisoned_visible_texels_wake_within_sixteen_frames() {
         "bounce in the poisoned rect stayed dark: poisoned {poisoned_luma:.2} after {after_luma:.2} before {before_luma:.2} woke at frame {frame} half-back at {step}"
     );
 }
+
+fn columns_mae(a: &[u8], b: &[u8], width: u32, height: u32, x0: u32, x1: u32) -> f64 {
+    let mut sum = 0.0;
+    let mut n = 0u32;
+    for y in 0..height {
+        for x in x0..x1 {
+            let i = ((y * width + x) * 4) as usize;
+            if i + 3 < a.len() && i + 3 < b.len() {
+                sum += (luma_bgra(&a[i..]) - luma_bgra(&b[i..])).abs();
+                n += 1;
+            }
+        }
+    }
+    if n == 0 { 0.0 } else { sum / f64::from(n) }
+}
+
+/// A small yaw must not pop the newly revealed edge. The right-hand columns
+/// (positive yaw turns toward +X) are compared with a render that settled on
+/// that view. The center columns are the same comparison, so a frame that is
+/// merely unfinished does not fail the edge by itself.
+#[test]
+fn a_small_yaw_keeps_the_revealed_edge_near_the_settled_view() {
+    const W: u32 = 320;
+    const H: u32 = 180;
+    const EDGE: u32 = 16;
+    const YAW: f32 = 0.10;
+    let world = shipped_hall();
+    let reference = {
+        let (_gpu, mut window, mut renderer) = open();
+        let mut camera = Camera::opening();
+        camera.yaw += YAW;
+        for _ in 0..48 {
+            let _ = draw(&mut window, &mut renderer, &world, &camera);
+        }
+        draw(&mut window, &mut renderer, &world, &camera)
+    };
+    let revealed = {
+        let (_gpu, mut window, mut renderer) = open();
+        let mut camera = Camera::opening();
+        for _ in 0..48 {
+            let _ = draw(&mut window, &mut renderer, &world, &camera);
+        }
+        camera.yaw += YAW;
+        draw(&mut window, &mut renderer, &world, &camera)
+    };
+    let right = columns_mae(&revealed, &reference, W, H, W - EDGE, W);
+    let left = columns_mae(&revealed, &reference, W, H, 0, EDGE);
+    let center = columns_mae(&revealed, &reference, W, H, W / 2 - EDGE / 2, W / 2 + EDGE / 2);
+    let edge = right.max(left);
+    eprintln!("yaw right {right:.2} left {left:.2} center {center:.2}");
+    // Lavapipe measured right 0.20, left 0.02, center 0.04. A dark reveal is
+    // several codes, not a fraction.
+    assert!(
+        edge < 1.5 && edge < center + 1.0,
+        "revealed edge luma error {edge:.2} (right {right:.2} left {left:.2}) against a settled view (center {center:.2})"
+    );
+}

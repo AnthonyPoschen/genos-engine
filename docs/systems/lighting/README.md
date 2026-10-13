@@ -40,7 +40,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Checks run every frame; no "nothing changed" skip without a check (Anthony 16:11, S74A).
 - Always spend two verification budgets, each its own setting: screen checks of the visible texels, and a world trickle over settled cells biased just outside the frustum. A miss replaces the biased mean.
 - Probes must not be woken by the shared averaged field; only by real neighbour change, spread by ring tests with group-test splitting ([WAKE](experiments/WAKE-neighbour-wake-design.md)).
-- Off-screen pre-fill and its S-curve lag bound wait until there is spare performance.
+- A guard band stays warm just outside the frustum: half the world-cache scouts aim there, every prefill round, until the idle freezes. The heavier off-screen S-curve and its lag bound still wait until there is spare performance.
 - Test rules (10 Oct): every moving test soaks and records a settled frame first, ends soaked, and returns movers to the start; short tests for one situation; a test must fail on the build that shows the problem before it is trusted; hand-validate new checks, then spot-check ~1%.
 - GI v1 is the stability floor, not the goal; the target is the path-traced reference (11 Oct).
 - GPU-resident design: frequently used data stays on the GPU at fixed locations; the CPU sends only small changes (12 Oct).

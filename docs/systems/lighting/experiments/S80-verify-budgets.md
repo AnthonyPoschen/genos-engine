@@ -28,7 +28,7 @@ gi-v2 had no always-on random verification of settled probe radiance or world-ca
 - DDGI updates every probe every frame. These are two sparse budgets.
 - Lumen keeps a fixed update budget and accumulates about four frames. A miss here replaces the running mean.
 - A-SVGF's check confirms and defers. A dark sample that matches a dark mean confirms. This check treats stored darkness against a lit hit as a miss.
-- The world budget's guard rays are a shell just outside the frustum, not S73A's reverted fine-texel claim and not only the forward scout cone.
+- The world budget's guard rays, and half the world-cache scouts, are a shell just outside the frustum. Scouts run every prefill round until the idle freezes, not only while the camera moves or once every eight still rounds. That is not S73A's reverted fine-texel claim.
 - Verification retraces. It does not reuse or hold a previous frame.
 
 ## Cost
@@ -45,3 +45,5 @@ The trace bucket on a settled frame is this cost. Set either key to `0` to measu
 ## Test
 
 `poisoned_visible_texels_wake_within_sixteen_frames` zeros every settled texel a pixel in a screen rectangle gathers, then requires `screen_fails` within 16 frames and the rectangle's bounce back to half its settled luminance within 24 frames. The gate is the detection latency, not merely that a wake is possible. On lavapipe, after 32 quiet frames, the rectangle (bounce luma 5.58) went to 0.32 when poisoned, the screen budget woke it on the next frame, half the bounce was back by frame 15, and at frame 48 the luma was 4.13.
+
+`a_small_yaw_keeps_the_revealed_edge_near_the_settled_view` settles a view, yaws 0.10 rad, and compares the new edge with a render that settled there. It does not reuse the previous color buffer. On lavapipe the right edge's mean absolute error was 0.20 display codes, the left 0.02, and the center 0.04. The gate is 1.5, and the edge must also stay within 1.0 of the center.
