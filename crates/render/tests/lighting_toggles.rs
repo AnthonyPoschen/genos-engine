@@ -7,8 +7,8 @@
 
 use genos_render::{Renderer, World};
 use genos_scene::{
-    viewport_uv, Camera, Ceiling, Floor, Light, LightingPreset, LightingSettings, Scene, Shape,
-    Sky, Solid, Vec3, Wall,
+    viewport_uv, AmbientMode, Camera, Ceiling, Floor, Light, LightingPreset, LightingSettings,
+    Scene, Shape, Sky, Solid, Vec3, Wall,
 };
 use genos_window::Window;
 
@@ -135,6 +135,21 @@ fn presets_and_feature_off_skip_their_passes() {
             gi.as_slice(),
         ),
         (
+            LightingPreset::DayCycle.name(),
+            LightingSettings::preset(LightingPreset::DayCycle),
+            picture.as_slice(),
+            gi.as_slice(),
+        ),
+        (
+            LightingPreset::Gi1Bounce.name(),
+            LightingSettings::preset(LightingPreset::Gi1Bounce),
+            [
+                "direct", "shadows", "compose", "place", "trace", "gather", "filter",
+            ]
+            .as_slice(),
+            ["compact", "cache", "cache_rays", "atrous", "hit_light"].as_slice(),
+        ),
+        (
             LightingPreset::Low.name(),
             LightingSettings::preset(LightingPreset::Low),
             [
@@ -244,8 +259,47 @@ fn presets_and_feature_off_skip_their_passes() {
         &world,
         &mut camera,
         "bounces 0",
-        &["direct", "compose", "place", "cache"],
-        &["cache_rays", "atrous"],
+        picture.as_slice(),
+        gi.as_slice(),
+    );
+
+    let mut one = LightingSettings::preset(LightingPreset::High);
+    one.bounce.count = 1;
+    let world = room(one);
+    timed |= run_case(
+        &mut window,
+        &mut renderer,
+        &world,
+        &mut camera,
+        "bounces 1",
+        &["direct", "shadows", "compose", "place", "trace", "gather", "filter"],
+        &["compact", "cache", "cache_rays", "atrous", "hit_light"],
+    );
+
+    let mut two = LightingSettings::preset(LightingPreset::High);
+    two.bounce.count = 2;
+    let world = room(two);
+    timed |= run_case(
+        &mut window,
+        &mut renderer,
+        &world,
+        &mut camera,
+        "bounces 2",
+        &[
+            "direct",
+            "shadows",
+            "compose",
+            "compact",
+            "place",
+            "trace",
+            "gather",
+            "filter",
+            "cache",
+            "cache_rays",
+            "atrous",
+            "hit_light",
+        ],
+        &[],
     );
 
     let mut off = LightingSettings::preset(LightingPreset::High);
@@ -620,6 +674,93 @@ fn presets_and_toggles_match_their_look() {
             assert!(!red_field, "direct off is a red field {:?}", look.mean);
         }
     }
+}
+
+/// A floor point the lamp cannot see. Bounce 0 is flat ambient, bounce 1 adds
+/// the probe bounce, bounce 2 adds cache-to-cache. Each step is brighter, and
+/// each lower count records fewer dispatches.
+#[test]
+fn bounce_counts_brighten_the_shadow_and_skip_work() {
+    let (_gpu, mut window, mut renderer) = open();
+    let width = 320u32;
+    let height = 180u32;
+    let sample_at = [1.6, 0.02, 0.0];
+    let mut camera = Camera::new(2.8, 2.2, -0.5);
+    camera.pitch = -0.55;
+    let mut levels = [0.0f32; 3];
+    let mut dispatches = [0u32; 3];
+    for (i, bounce) in [0u32, 1, 2].into_iter().enumerate() {
+        let mut settings = LightingSettings::preset(LightingPreset::High);
+        settings.bounce.count = bounce;
+        settings.sky = false;
+        settings.ambient.mode = AmbientMode::Constant;
+        settings.ambient.color = [1.0, 1.0, 1.0];
+        settings.ambient.intensity = 0.22;
+        let world = shadow_corner(settings);
+        let mut saw = [0u32; 12];
+        let mut picture = Vec::new();
+        for frame in 0..16 {
+            let _ = window.pump();
+            picture = renderer
+                .draw(&world, &camera, true)
+                .expect("draw")
+                .expect("pixels");
+            if frame >= 4 {
+                let counts = renderer.lighting_dispatches();
+                if counts.iter().any(|count| *count > 0) {
+                    for (slot, count) in saw.iter_mut().zip(counts) {
+                        *slot = (*slot).max(count);
+                    }
+                }
+            }
+        }
+        let uv = viewport_uv(&camera, width as f32 / height as f32, sample_at);
+        assert!(uv.is_some(), "shadow sample is off screen");
+        let rgb = sample_rgb(&picture, width, height, &camera, sample_at);
+        levels[i] = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+        dispatches[i] = saw.iter().sum();
+    }
+    assert!(
+        levels[0] + 1.0 < levels[1] && levels[1] + 1.0 < levels[2],
+        "shadow luminance bounce 0/1/2 {:?} dispatches {:?}",
+        levels,
+        dispatches
+    );
+    assert!(
+        dispatches[0] < dispatches[1] && dispatches[1] < dispatches[2],
+        "dispatches bounce 0/1/2 {:?} luminance {:?}",
+        dispatches,
+        levels
+    );
+}
+
+fn shadow_corner(settings: LightingSettings) -> World {
+    World::from_scene(Scene {
+        floor: Floor {
+            position: Vec3::ZERO,
+            half_x: 4.0,
+            half_z: 4.0,
+            color: [0.8, 0.8, 0.8],
+        },
+        walls: vec![
+            wall(0.0, -4.0, 4.0, 0.12),
+            wall(0.0, 4.0, 4.0, 0.12),
+            wall(-4.0, 0.0, 0.12, 4.0),
+            wall(4.0, 0.0, 0.12, 4.0),
+        ],
+        solids: vec![box_at(0.0, 0.0, [0.75, 0.75, 0.75])],
+        lights: vec![Light {
+            position: Vec3::new(-2.2, 1.5, 0.0),
+            color: [10.0, 9.0, 8.0],
+            direction: Vec3::ZERO,
+        }],
+        ceiling: Some(Ceiling {
+            height: 3.0,
+            color: [0.85, 0.85, 0.85],
+        }),
+        sky: None,
+        lighting: settings,
+    })
 }
 
 /// Still probe-only must not cost more than the surface cache. Settle is 32

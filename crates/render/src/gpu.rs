@@ -118,8 +118,9 @@ impl Renderer {
     /// Replace the draw's lighting settings until [`Renderer::clear_lighting_override`].
     ///
     /// A game that already owns the [`genos_scene::Scene`] writes `scene.lighting`
-    /// instead. The next draw applies either value, then any `GENOS_LIGHTING_*`
-    /// variable that is set.
+    /// instead. The next draw applies either value, then the launch locks:
+    /// `--preset`, `--bounces`, and `--ambient` win, and a `GENOS_LIGHTING_*`
+    /// mirror applies only when its argument was omitted.
     pub fn set_lighting_settings(&mut self, settings: genos_scene::LightingSettings) {
         self.gpu.lighting.override_settings = Some(settings);
     }
@@ -728,8 +729,8 @@ struct Gpu {
     timestamp_bits: u32,
     query_pool: Handle,
     /// `--gpu-times N`, or `GENOS_GPU_TIMES` when that argument was omitted:
-    /// per-pass GPU times of every frame and light build, averaged and printed
-    /// every N frames ([`GPU_TIMES_FRAMES`] by default).
+    /// per-pass GPU times of every frame and light build,
+    /// averaged and printed every `frames` frames ([`GPU_TIMES_FRAMES`] by default).
     gpu_times: Option<Box<GpuTimes>>,
     profile_submit: bool,
     stamp_pending: [bool; 2],
@@ -2214,7 +2215,12 @@ impl Gpu {
         );
         if times.lighting_frames > 0 && std::env::var_os("GENOS_GPU_DISPATCH").is_some() {
             let lf = f64::from(times.lighting_frames);
-            let parts: Vec<String> = times.lighting_disp.iter().enumerate().map(|(i, (p, ms))| format!("{i}:{p}={:.3}", ms / lf)).collect();
+            let parts: Vec<String> = times
+                .lighting_disp
+                .iter()
+                .enumerate()
+                .map(|(i, (p, ms))| format!("{i}:{p}={:.3}", ms / lf))
+                .collect();
             eprintln!("LIGHTING_DISPATCH {}", parts.join(" "));
             times.lighting_disp.clear();
         }
@@ -2787,12 +2793,21 @@ impl Gpu {
     /// instances, the traced meshes and the G-buffer.
     fn write_raster_sets(&self) -> Result<(), String> {
         for slot in 0..2 {
-            self.write_descriptors(self.raster_sets[slot], &self.frame_scene[slot], &self.instance_bufs[slot])?;
+            self.write_descriptors(
+                self.raster_sets[slot],
+                &self.frame_scene[slot],
+                &self.instance_bufs[slot],
+            )?;
         }
         Ok(())
     }
 
-    fn write_descriptors(&self, set: Handle, scene: &Buffer, instances: &Buffer) -> Result<(), String> {
+    fn write_descriptors(
+        &self,
+        set: Handle,
+        scene: &Buffer,
+        instances: &Buffer,
+    ) -> Result<(), String> {
         #[repr(C)]
         struct BufInfo {
             buffer: Handle,
@@ -3410,7 +3425,9 @@ impl Gpu {
         let head = crate::mesh_field::words_bytes(&quick.head);
         let tail_at = (quick.head.len() + quick.data_len) * 4;
         let tail = crate::mesh_field::words_bytes(&quick.emission);
-        if quick.layout == self.mesh_field_layout && self.mesh_field_shadow.len() == tail_at + tail.len() {
+        if quick.layout == self.mesh_field_layout
+            && self.mesh_field_shadow.len() == tail_at + tail.len()
+        {
             self.mark_field(0, &head);
             self.mark_field(tail_at, &tail);
             self.mesh_field_key = key;
@@ -3486,7 +3503,9 @@ impl Gpu {
             let stop = stop.min(self.mesh_field_shadow.len());
             let mut at = start & !3;
             while at < stop {
-                let end = (at + RUN).min(stop + 3 & !3).min(self.mesh_field_shadow.len());
+                let end = (at + RUN)
+                    .min(stop + 3 & !3)
+                    .min(self.mesh_field_shadow.len());
                 if end <= at {
                     break;
                 }
@@ -3552,7 +3571,8 @@ impl Gpu {
         let mut at = 0;
         while at < len {
             let end = (at + BLOCK).min(len);
-            let same = self.scene_shadow.len() >= end && self.scene_shadow[at..end] == bytes[at..end];
+            let same =
+                self.scene_shadow.len() >= end && self.scene_shadow[at..end] == bytes[at..end];
             if !same {
                 match runs.last_mut() {
                     Some((start, stop)) if *stop == at && end - *start <= RUN => *stop = end,
@@ -5392,14 +5412,14 @@ impl Default for GpuTimes {
 }
 
 #[cfg(test)]
-mod cli_arg_tests {
+mod gpu_times_launch {
     use super::{
         check_gpu_times_arg, check_lighting_debug_arg, gpu_times_every, gpu_times_flag_needs_value,
         lighting_debug_flag_needs_value, lighting_debug_from,
     };
 
     #[test]
-    fn gpu_times_argument_wins_over_the_mirror() {
+    fn arguments_win_and_env_is_the_mirror() {
         assert_eq!(gpu_times_every(&[], None).unwrap(), None);
         assert_eq!(gpu_times_every(&[], Some("30")).unwrap(), Some(30));
         assert_eq!(gpu_times_every(&[], Some("nope")).unwrap(), Some(120));
@@ -5415,7 +5435,10 @@ mod cli_arg_tests {
             gpu_times_every(&["--scale", "big"], Some("8")).unwrap(),
             Some(8)
         );
-        assert_eq!(gpu_times_every(&["--gpu-times", "0"], None).unwrap(), Some(1));
+        assert_eq!(
+            gpu_times_every(&["--gpu-times", "0"], None).unwrap(),
+            Some(1)
+        );
         assert!(gpu_times_flag_needs_value("--gpu-times").unwrap());
         assert!(gpu_times_flag_needs_value("--gpu-times=3").is_some_and(|needs| !needs));
         assert!(gpu_times_flag_needs_value("--preset").is_none());

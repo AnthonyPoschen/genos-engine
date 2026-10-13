@@ -71,11 +71,11 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec(
             "list_presets",
-            "potato, low, medium, and high, each with the settings text that preset writes.",
+            "potato, day-cycle, gi-1bounce, low, medium, and high, each with the settings text that preset writes.",
         ),
         spec(
             "apply_preset",
-            "Replace the scene lighting with preset name (potato, low, medium, high) and clear a renderer override.",
+            "Replace the scene lighting with preset name (potato, day-cycle, gi-1bounce, low, medium, high) and clear a renderer override.",
         ),
         spec(
             "get_debug_settings",

@@ -59,7 +59,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Going fully quiet on the legacy scheduler (DDGI and Lumen always spend a fixed budget). `GENOS_LIGHTING_WAKE=rings` keeps a verification budget and does not hold the probe frame.
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
 - Ring wakes (`GENOS_LIGHTING_WAKE=rings`, or `genos-stress --wake rings`; default legacy): doubling distances, group-test splitting, sparse full traces inside a failed ring, and a verification budget that adapts the tolerance. The check index changes every frame. The vote compares that ray's direct outgoing light to a plain float stored for the same direction. The rgb9e5 kept-light word includes bounce, and scoring it treated surface-cache convergence as a change. Default tolerance 0.08 is a change in that direct light. DDGI updates a world-space probe grid (all probes in the 2019 paper, sleeping and cascades in the 2021 paper) and blends into the same texel. Lumen retraces screen probes every frame and budgets the radiance cache by last-used. The combination is original. A moving light updates a sparse subset; the probe filter spreads that to neighbours. Bounce light may lag a few frames. A settled rings frame runs the same pixel-direct and compose idle as legacy, plus the verification stride. It does not keep the full probe launch. Citations, the deviations, and the owner A/B commands are in [WAKE](experiments/WAKE-neighbour-wake-design.md).
-- Flat ambient when GI is off is a constant or a classic hemisphere (sky toward the normal, ground away from it). A day curve lerps those colours by sun height on the CPU. No new GI algorithm. The bounce count gates the existing cache read; it does not add a bounce pass.
+- Flat ambient when bounce is 0 or GI is off is a constant, a classic hemisphere (sky toward the normal, ground away from it), a sun-height day lerp, or a time-of-day curve (night, dawn, noon, dusk). The curve also scales sky colour relative to its noon key. No new GI algorithm. Bounce 0 records no GI dispatch. Bounce 1 records the probe passes and not the cache-to-cache passes. Bounce 2 records those passes. The count does not add a bounce algorithm.
 
 ## Experiment index
 
@@ -230,7 +230,7 @@ Research notes with the cvar values: `/workspace/research/lumen-digest.md` (agen
 
 ## Settings
 
-Presets, per-feature toggles, quality knobs, the scene text, Rhai, the debug menu, and the MCP commands are in [toggles.md](toggles.md). The struct is `LightingSettings` on the scene. High is the tuned path this document describes. A feature that is off skips its passes and its buffers.
+Presets, per-feature toggles, quality knobs, the scene text, Rhai, the debug menu, the launch arguments (`--preset`, `--bounces`, `--ambient`, `--time-of-day`), and the MCP commands are in [toggles.md](toggles.md). The struct is `LightingSettings` on the scene. High is the tuned path this document describes. A feature that is off skips its passes and its buffers.
 
 ## Frame overview
 

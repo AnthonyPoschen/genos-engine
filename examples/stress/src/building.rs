@@ -162,6 +162,9 @@ pub enum View {
     /// Inside room A looking out of its opening at the light well, past the red box,
     /// the blue cylinder and the green panel.
     RoomA,
+    /// South yard, looking north and up. The roof is out of the upper frame, so
+    /// the time-of-day ambient curve can be judged on the sky and the open ground.
+    Sky,
 }
 
 impl View {
@@ -169,6 +172,7 @@ impl View {
         match text {
             "hall" => Some(Self::Hall),
             "rooma" | "room-a" | "roomA" | "bounce" => Some(Self::RoomA),
+            "sky" => Some(Self::Sky),
             _ => None,
         }
     }
@@ -178,6 +182,9 @@ impl View {
         match self {
             Self::Hall => (14.5, 23.5, (-6.5f32).atan2(17.5), 0.08),
             Self::RoomA => (7.2, 0.9, (-4.7f32).atan2(-7.1), -0.12),
+            // Six metres into the south yard. Pitch puts the roof below the upper
+            // frame and the open ground in the lower frame (60° vertical field).
+            Self::Sky => (12.5, SECTION + 6.0, 0.0, 0.42),
         }
     }
 }
@@ -983,6 +990,22 @@ fn local_slots(rng: &mut Rng) -> Vec<LampSlot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sky_view_stands_in_the_yard_and_looks_over_the_roof() {
+        let (x, z, yaw, pitch) = View::parse("sky").unwrap().pose();
+        assert!((0.0..=SECTION).contains(&x));
+        assert!(z > SECTION && z < SECTION + YARD);
+        assert!(yaw.abs() < 1.0e-4);
+        let distance = z - SECTION;
+        let roof = ((ROOM_HEIGHT + ROOF_THICK - genos_scene::CAMERA_HEIGHT) / distance).atan();
+        let half_fov = 30.0_f32.to_radians();
+        assert!(pitch + half_fov > roof, "the sky is in the upper frame");
+        assert!(
+            pitch - half_fov < roof,
+            "the open yard is in the lower frame"
+        );
+    }
 
     #[test]
     fn every_lamp_slot_keeps_room_a_bounce_only() {
