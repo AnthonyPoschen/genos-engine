@@ -11,16 +11,16 @@ use genos_debug::{png, CheckpointPose, Host, Knob};
 use genos_input::{character_controller, InputCode, InputSystem};
 use genos_render::{identity_pose, DrawKind, FixedPart, Renderer, ScreenRect, ViewMode, World};
 use genos_scene::{
-    look_direction, update, Actions, Camera, DebugSettings, Floor, Light, Scene, Sky, Vec3,
-    PITCH_LIMIT,
+    look_direction, parse_enabled, parse_rate, update, Actions, Camera, DebugSettings, Floor,
+    FpsCounterSettings, Light, Scene, Sky, Vec3, PITCH_LIMIT,
 };
 use genos_scene_lib::{Entry, Kind, Lamp, Sun};
 use genos_stress::building::{Layout, LightMix};
 use genos_stress::knobs::{apply_lighting_knob, lighting_knobs};
 use genos_stress::stage::{Scale, Stage};
 use genos_ui::{
-    button_panel, Action, PanelCheck, PanelDropdown, PanelRow, PanelSlider, Pointer, SliderStep,
-    State,
+    button_panel, Action, FpsOverlay, PanelCheck, PanelDropdown, PanelRow, PanelSlider, Pointer,
+    SliderStep, State,
 };
 use genos_window::{extent_changed, FocusGate, Window};
 
@@ -38,6 +38,10 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          (GENOS_LIGHTING_COMPOSE_ALL)
   --headless             proof window, no panel
   --frames N             quit after N frames
+  --fps-counter [on|off] frame-rate plate (default off). A bare flag turns it on.
+                         GENOS_FPS_COUNTER applies only when this is omitted
+  --fps-hz N             plate update rate in Hz (default 4, range 0.25 to 30).
+                         GENOS_FPS_HZ applies only when this is omitted
   --out DIR              screenshots, dumps, and logs (default ./genos-debug)
   --size WxH             window size (default 1280x720; 320x180 for --check)
   --check                every scene at its check checkpoint, four frames,
@@ -45,8 +49,11 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
 
 Page Up and Page Down switch scenes. Keys 1-9 jump checkpoints. Home and 0 reset
 to the active checkpoint. Arrow keys and the wheel step the slider under the
-pointer, or the slider that was last pressed. WASD fly, Space up, C or Ctrl
-down, Shift is faster.
+pointer, or move the highlight in an open dropdown. Enter picks the highlighted
+choice. Escape closes the list. F3 toggles the frame-rate plate. WASD fly, Space
+up, C or Ctrl down, Shift is faster. The plate shows FPS and frame ms, averaged
+over each 1/rate window (default 4 Hz). It is off until the checkbox, F3, MCP,
+or --fps-counter turns it on.
 
 Screenshots go to <out>/shots, the log to <out>/logs, lighting dumps to <out>/dumps.
 The binary does not write under $HOME.
@@ -60,6 +67,8 @@ const ID_SCENE: u32 = 2000;
 const ID_CP: u32 = 2200;
 const ID_VIEW: u32 = 2400;
 const ID_DROP: u32 = 2600;
+const ID_FPS: u32 = 2800;
+const ID_FPS_HZ: u32 = 2801;
 const ID_KNOB: u32 = 3000;
 const ID_SWITCH: u32 = 4000;
 const CHECKS_PER_ROW: usize = 3;
@@ -171,6 +180,7 @@ fn run() -> Result<(), String> {
     let controls = character_controller();
     let mut drawn = 0u32;
     let mut clock: Option<Instant> = None;
+    let mut fps_overlay = FpsOverlay::new();
     loop {
         let now = Instant::now();
         let real_dt = clock
@@ -202,7 +212,8 @@ fn run() -> Result<(), String> {
         let (paints, look_capture) = if opts.headless {
             (Vec::new(), true)
         } else {
-            let rows = panel_rows(&app, tools.view_mode());
+            let fps_menu = app.scene().fps_counter.effective();
+            let rows = panel_rows(&app, tools.view_mode(), &fps_menu);
             let ui_frame = button_panel(
                 &mut ui,
                 &panel_title(&app),
@@ -276,6 +287,22 @@ fn run() -> Result<(), String> {
             host: &mut app,
         });
         overlay.extend_from_slice(tools.overlay());
+        let fps_now = app.scene().fps_counter.effective();
+        fps_overlay.note(
+            fps_now.enabled,
+            fps_now.rate_hz,
+            real_dt,
+            [size.0 as f32, size.1 as f32],
+        );
+        if fps_now.enabled {
+            overlay.extend(fps_overlay.paints().iter().map(|paint| ScreenRect {
+                x: paint.x,
+                y: paint.y,
+                w: paint.w,
+                h: paint.h,
+                color: paint.color,
+            }));
+        }
         drawn += 1;
         let last = opts.frames.is_some_and(|limit| drawn >= limit);
         let want_read = tools_read || last;
@@ -595,6 +622,7 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
                 sky: sky.map(|color| Sky { color }),
                 lighting: genos_scene::LightingSettings::default(),
                 debug: DebugSettings::default(),
+                fps_counter: FpsCounterSettings::default(),
             };
             if let Some(sun) = sun {
                 scene.lights.push(sun_light(sun));
@@ -705,6 +733,13 @@ fn hotkeys(
                 );
             }
         }
+    }
+    if input.keyboard.pressed(InputCode::key_f3) {
+        let on = app.scene().fps_counter.effective().enabled;
+        let _ = app
+            .scene()
+            .fps_counter
+            .set_key("enabled", if on { "0" } else { "1" });
     }
     if (input.keyboard.pressed(InputCode::key_home) || input.keyboard.pressed(InputCode::key_0))
         && app.checkpoint < app.entry().checkpoints.len()
@@ -879,7 +914,7 @@ fn knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
     })
 }
 
-fn panel_rows(app: &App, view: ViewMode) -> Vec<PanelRow> {
+fn panel_rows(app: &App, view: ViewMode, fps: &FpsCounterSettings) -> Vec<PanelRow> {
     let view_value = VIEWS
         .iter()
         .position(|name| *name == view_name(view))
@@ -914,6 +949,7 @@ fn panel_rows(app: &App, view: ViewMode) -> Vec<PanelRow> {
         rows.push(row);
     }
     rows.extend(switch_rows(app));
+    rows.push(fps_row(fps));
     for (index, name) in SLIDER_KNOBS.iter().enumerate() {
         if let Some(row) = knob_row(app, index, name) {
             rows.push(row);
@@ -940,8 +976,33 @@ fn drop_knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
     )
 }
 
+fn fps_row(fps: &FpsCounterSettings) -> PanelRow {
+    PanelRow {
+        label: "FPS".into(),
+        buttons: Vec::new(),
+        slider: Some(PanelSlider::range(
+            ID_FPS_HZ,
+            fps.rate_hz as f64,
+            1.0,
+            30.0,
+            1.0,
+            format!("{:.0} Hz", fps.rate_hz),
+        )),
+        dropdown: None,
+        checks: vec![PanelCheck {
+            id: ID_FPS,
+            text: "Show".into(),
+            on: fps.enabled,
+        }],
+    }
+}
+
 fn slide(app: &mut App, id: u32, value: f64) -> Result<(), String> {
-    if (ID_KNOB..ID_KNOB + SLIDER_KNOBS.len() as u32).contains(&id) {
+    if id == ID_FPS_HZ {
+        app.scene()
+            .fps_counter
+            .set_key("rate_hz", &format!("{value}"))?;
+    } else if (ID_KNOB..ID_KNOB + SLIDER_KNOBS.len() as u32).contains(&id) {
         let name = SLIDER_KNOBS[(id - ID_KNOB) as usize];
         app.set_knob(name, value)?;
     }
@@ -987,6 +1048,12 @@ fn select(
 }
 
 fn toggle(app: &mut App, id: u32, on: bool) -> Result<(), String> {
+    if id == ID_FPS {
+        app.scene()
+            .fps_counter
+            .set_key("enabled", if on { "1" } else { "0" })?;
+        return Ok(());
+    }
     let index = id.wrapping_sub(ID_SWITCH) as usize;
     if let Some(name) = switch_knobs(app).get(index).map(|knob| knob.name.clone()) {
         app.set_knob(&name, if on { 1.0 } else { 0.0 })?;
@@ -1050,7 +1117,7 @@ fn need_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Strin
 }
 
 fn options() -> Result<Options, String> {
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
     let mut scene = std::env::var("GENOS_SCENE").ok();
     let mut checkpoint = None;
     let mut preset = None;
@@ -1104,7 +1171,25 @@ fn options() -> Result<Options, String> {
                 );
             }
             "--check" => check = true,
-            other => return Err(format!("unknown argument {other}")),
+            "--fps-counter" => {
+                if args.peek().is_some_and(|next| !next.starts_with('-')) {
+                    let value = args.next().unwrap();
+                    parse_enabled(&value).map_err(|err| format!("bad --fps-counter: {err}"))?;
+                }
+            }
+            "--fps-hz" => {
+                let value = need_arg(&mut args, "--fps-hz")?;
+                parse_rate(&value).map_err(|err| format!("bad --fps-hz: {err}"))?;
+            }
+            other => {
+                if let Some(value) = other.strip_prefix("--fps-counter=") {
+                    parse_enabled(value).map_err(|err| format!("bad --fps-counter: {err}"))?;
+                } else if let Some(value) = other.strip_prefix("--fps-hz=") {
+                    parse_rate(value).map_err(|err| format!("bad --fps-hz: {err}"))?;
+                } else {
+                    return Err(format!("unknown argument {other}"));
+                }
+            }
         }
     }
     if check {
@@ -1177,7 +1262,8 @@ mod tests {
         let log = std::fs::File::create(std::env::temp_dir().join("genos-lighting-menu.log"))
             .expect("log");
         let app = super::App::open(entries, root, log).expect("app");
-        let rows = super::panel_rows(&app, ViewMode::Full);
+        let fps = genos_scene::FpsCounterSettings::default();
+        let rows = super::panel_rows(&app, ViewMode::Full, &fps);
         assert!(rows.iter().all(|row| row.buttons.is_empty()));
         let dropdowns: Vec<&str> = rows
             .iter()
@@ -1214,10 +1300,18 @@ mod tests {
             .iter()
             .flat_map(|row| row.checks.iter().map(|check| check.text.as_str()))
             .collect();
-        for label in ["Direct", "Shadows", "GI", "Denoise", "Full effort"] {
+        for label in ["Direct", "Shadows", "GI", "Denoise", "Full effort", "Show"] {
             assert!(checks.contains(&label), "missing toggle {label}");
         }
         assert!(checks.iter().all(|label| !sliders.contains(label)));
+        assert!(sliders.contains(&"FPS"));
+        let fps_row = rows.iter().find(|row| row.label == "FPS").unwrap();
+        let rate = fps_row.slider.as_ref().unwrap();
+        assert_eq!(rate.id, super::ID_FPS_HZ);
+        assert_eq!(rate.min, 1.0);
+        assert_eq!(rate.max, 30.0);
+        assert_eq!(rate.step, 1.0);
+        assert!(fps_row.checks.iter().any(|check| check.id == super::ID_FPS));
         let preset = rows
             .iter()
             .find(|row| row.label == "Preset")
@@ -1342,4 +1436,15 @@ mod tests {
         }
         (width, height, rgb)
     }
+
+    #[test]
+    fn help_lists_the_fps_counter() {
+        assert!(super::USAGE.contains("--fps-counter"));
+        assert!(super::USAGE.contains("--fps-hz"));
+        assert!(super::USAGE.contains("F3"));
+        assert!(super::USAGE.contains("GENOS_FPS_COUNTER"));
+    }
 }
+
+#[cfg(test)]
+mod fps_overlay;

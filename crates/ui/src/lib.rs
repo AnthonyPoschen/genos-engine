@@ -8,6 +8,7 @@
 //! theme colors.
 
 mod dropdown;
+mod fps;
 mod layout;
 pub mod omarchy;
 mod panel;
@@ -67,6 +68,7 @@ pub enum Action {
     Toggle { id: u32, on: bool },
 }
 
+pub use fps::FpsOverlay;
 pub use layout::{layout, Align, Direction, Node, Pad, Place, Rect, Sizing, Space};
 pub use panel::{
     apply_frame_action, apply_lamp, button_panel, lighting_frame, Frame, Paint, PanelButton,

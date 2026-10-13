@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use genos_mcp::json::Value;
 use genos_render::{DebugView, Renderer, ScreenRect, ViewMode};
 use genos_scene::{
-    Camera, DebugSettings, Light, LightingPreset, LightingSettings, Scene, Vec3, PITCH_LIMIT,
+    Camera, DebugSettings, FpsCounterSettings, Light, LightingPreset, LightingSettings, Scene,
+    Vec3, PITCH_LIMIT,
 };
 
 use crate::image::{Flicker, Image, Region};
@@ -1174,6 +1175,13 @@ impl Tools {
                 let settings = ctx.host.scene().debug.effective(cli.as_deref());
                 reply(obj(vec![("text", text(settings.to_text()))]))
             }
+            "get_fps_counter" => {
+                reply(fps_counter_value(&ctx.host.scene().fps_counter.effective()))
+            }
+            "set_fps_counter" => {
+                apply_fps_update(&mut ctx.host.scene().fps_counter, args.0)?;
+                reply(fps_counter_value(&ctx.host.scene().fps_counter.effective()))
+            }
             "quit" => {
                 self.quit = Some(args.f64("code")?.unwrap_or(0.0) as i32);
                 reply(obj(vec![("quit", Value::Bool(true))]))
@@ -1583,6 +1591,55 @@ fn lighting_value_text(value: &Value) -> Result<String, String> {
         return Ok(parts.join(","));
     }
     Err("a lighting value is a string, number, bool, or list".into())
+}
+
+fn fps_counter_value(settings: &FpsCounterSettings) -> Value {
+    obj(vec![
+        ("text", text(settings.to_text())),
+        ("enabled", Value::Bool(settings.enabled)),
+        ("rate_hz", num(settings.rate_hz as f64)),
+    ])
+}
+
+fn apply_fps_update(settings: &mut FpsCounterSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("fps counter settings are an object".into());
+    };
+    if let Some(body) = args.get("text").and_then(|v| v.as_str()) {
+        for line in body.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("fps counter line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &fps_value_text(value)?)?;
+    }
+    Ok(())
+}
+
+fn fps_value_text(value: &Value) -> Result<String, String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(on) = value.as_bool() {
+        return Ok(if on { "on".into() } else { "off".into() });
+    }
+    if let Some(n) = value.as_f64() {
+        if n.fract() == 0.0 && n.abs() < 1.0e15 {
+            return Ok(format!("{}", n as i64));
+        }
+        return Ok(format!("{n:?}"));
+    }
+    Err("an fps counter value is a string, number, or bool".into())
 }
 
 fn apply_debug_update(settings: &mut DebugSettings, args: &Value) -> Result<(), String> {

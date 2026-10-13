@@ -1,6 +1,6 @@
 use genos_math::Vec3;
 
-use crate::{DebugSettings, LightingSettings};
+use crate::{DebugSettings, FpsCounterSettings, LightingSettings};
 
 /// Share of the incoming light a white painted surface sends back out.
 pub const PAINT_ALBEDO: f32 = 0.8;
@@ -172,6 +172,9 @@ pub struct Scene {
     /// Debug output directory. Relative to the working directory unless the
     /// path is absolute. `--out` and `GENOS_UNFILLED_DIR` overlay it.
     pub debug: DebugSettings,
+    /// Frame-rate overlay. Off until something turns it on. The readout
+    /// averages one window of `1 / rate_hz` seconds. The default rate is 4 Hz.
+    pub fps_counter: FpsCounterSettings,
 }
 
 impl Scene {

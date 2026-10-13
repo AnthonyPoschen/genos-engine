@@ -33,6 +33,7 @@ fn a_profiled_draw_reports_device_time_for_the_draw() {
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
         debug: genos_scene::DebugSettings::default(),
+        fps_counter: genos_scene::FpsCounterSettings::default(),
     });
     let camera = Camera::opening();
     let _ = window.pump();
