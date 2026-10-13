@@ -61,7 +61,6 @@ impl Config {
         let params = MetricParams {
             rel_floor: take(&mut values, "rel_floor")?,
             rel_mean_frac: take(&mut values, "rel_mean_frac")?,
-            reference_noise: 0.0,
             dark_max: take(&mut values, "dark_max")?,
             unfilled_candidate_max: take(&mut values, "unfilled_candidate_max")?,
             unfilled_reference_min: take(&mut values, "unfilled_reference_min")?,

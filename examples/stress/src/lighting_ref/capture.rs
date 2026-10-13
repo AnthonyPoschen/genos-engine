@@ -136,16 +136,14 @@ fn capture_one(
         let raw_settled = renderer.picture_settled();
         let trusted = prev_phase == Some(step.phase);
         prev_phase = Some(step.phase);
-        let mut params = opts.params;
-        params.reference_noise = job.reference_noise;
         let mean_rel = job
             .reference
             .as_ref()
-            .and_then(|reference| mean_relative(reference, &picture, &params).ok());
+            .and_then(|reference| mean_relative(reference, &picture, &opts.params).ok());
         let blur_rel = job
             .reference
             .as_ref()
-            .and_then(|reference| blur_relative(reference, &picture, &params).ok());
+            .and_then(|reference| blur_relative(reference, &picture, &opts.params).ok());
         let luma_ratio = job
             .reference
             .as_ref()
