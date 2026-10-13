@@ -71,6 +71,18 @@ const USAGE: &str = "genos-stress [options]
   --report DIR              where the script writes report.md, result.json and pictures
                             (default target/debug-reports/<script name>)
   --out DIR                 unfilled events (default ./genos-debug/unfilled)
+  --unfilled[=0|1]          count unfilled pixels (GENOS_LIGHTING_UNFILLED is the mirror)
+  --unfilled-tint[=0|1]     magenta tint; turns the count on (GENOS_LIGHTING_UNFILLED_TINT)
+  --unfilled-dump PERCENT   save when the share exceeds PERCENT; 0 saves any
+                            (GENOS_LIGHTING_UNFILLED_DUMP)
+  --unfilled-max-age-secs N drop event folders older than N seconds (default 172800)
+                            (GENOS_UNFILLED_MAX_AGE_SECS)
+  --unfilled-max-folders N  keep at most N event folders (default 200)
+                            (GENOS_UNFILLED_MAX_FOLDERS)
+  --unfilled-max-bytes N    keep at most N bytes of events (default 524288000)
+                            (GENOS_UNFILLED_MAX_BYTES)
+  --unfilled-session-cap N  saves in one process (default 32)
+                            (GENOS_UNFILLED_SESSION_CAP)
   --trace                   capture the picture after every script command that changes it";
 
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];
@@ -264,7 +276,14 @@ fn options() -> Result<Options, String> {
                 println!("{USAGE}");
                 std::process::exit(0);
             }
-            other => return Err(format!("unknown argument {other}\n{USAGE}")),
+            other => match genos_render::unfilled_flag_needs_value(other) {
+                None => return Err(format!("unknown argument {other}\n{USAGE}")),
+                Some(true) => {
+                    let next = value()?;
+                    genos_render::check_unfilled_arg(other, Some(&next))?;
+                }
+                Some(false) => genos_render::check_unfilled_arg(other, None)?,
+            },
         }
     }
     opts.dynamic = opts.dynamic.min(100);

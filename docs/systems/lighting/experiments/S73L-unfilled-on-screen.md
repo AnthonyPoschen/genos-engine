@@ -8,9 +8,9 @@ Off, the compose path tests one uniform and does no atomics. On, each shaded pix
 
 The counters sit in the spare words after the lighting control block (words 140 and 141). The mask starts at stats word 144, so it does not alias the control block. The device buffer keeps room for a 4096×2160 mask whether or not the detector is on, so a hotkey can enable it without reallocating.
 
-`GENOS_LIGHTING_UNFILLED`, F8, and the stress knob `unfilled` turn the count on. The tint is bit 25 of the debug word (Shift+F8, `GENOS_LIGHTING_UNFILLED_TINT`, knob `unfilled_tint`). Those two knobs are on the stress panel and are MCP `knobs` and Rhai `knob`.
+`--unfilled` turns the count on. `--unfilled-tint` turns the magenta tint on (bit 25 of the debug word) and turns the count on. `--unfilled=0` and `--unfilled-tint=0` force those off. F8 and Shift+F8 still toggle them after launch, and so do the stress knobs `unfilled` and `unfilled_tint` (MCP `knobs` and Rhai `knob`). `GENOS_LIGHTING_UNFILLED` and `GENOS_LIGHTING_UNFILLED_TINT` apply only when the matching argument was omitted.
 
-Events land in `./genos-debug/unfilled/<timestamp>/` when `GENOS_LIGHTING_UNFILLED_DUMP` is set. That directory is `DebugSettings.out` on the scene (`EngineSettings`). `--out <dir>` overrides it for the process. `GENOS_UNFILLED_DIR` mirrors the same field and wins every frame when `--out` was not passed. The stress panel shows the directory in force and a default button writes `genos-debug/unfilled`. MCP `get_debug_settings` and `set_debug_settings` read and write the text form. Rhai `debug_settings("out=...")` overlays it while the scene loads. `debug` stays Rhai's printer. The process does not write under `$HOME`. Startup and each save drop folders older than two days (`GENOS_UNFILLED_MAX_AGE_SECS`), then the oldest until the folder count and the byte cap both hold, on whichever directory is in force.
+Events land in `./genos-debug/unfilled/<timestamp>/` when `--unfilled-dump <percent>` is set (`0` saves any positive share). That directory is `DebugSettings.out` on the scene (`EngineSettings`). `--out <dir>` overrides it for the process. `GENOS_UNFILLED_DIR` mirrors the same field and applies only when `--out` was omitted. The stress panel shows the directory in force and a default button writes `genos-debug/unfilled`. MCP `get_debug_settings` and `set_debug_settings` read and write the text form. Rhai `debug_settings("out=...")` overlays it while the scene loads. `debug` stays Rhai's printer. The process does not write under `$HOME`. Startup and each save drop folders older than `--unfilled-max-age-secs` (default two days), then the oldest until `--unfilled-max-folders` and `--unfilled-max-bytes` both hold, on whichever directory is in force. `--unfilled-session-cap` limits one process. `GENOS_LIGHTING_UNFILLED_DUMP`, `GENOS_UNFILLED_MAX_AGE_SECS`, `GENOS_UNFILLED_MAX_FOLDERS`, `GENOS_UNFILLED_MAX_BYTES`, and `GENOS_UNFILLED_SESSION_CAP` mirror those arguments. The flags are listed in `genos-stress --help`.
 
 ## Networking
 
@@ -20,6 +20,6 @@ Events land in `./genos-debug/unfilled/<timestamp>/` when `GENOS_LIGHTING_UNFILL
 - Determinism: the directory does not change the picture.
 - Headless server: it does not write unfilled events. It can store the path.
 
-`GENOS_GPU_TIMES` does not enable the detector. Leave `GENOS_LIGHTING_UNFILLED=0` for a `LIGHTING_MS` line with no unfilled sample. With the detector on, that line gains ` | UNFILLED px=N pct=X.XX max_run=M`, and the same line is printed on its own each frame.
+`GENOS_GPU_TIMES` does not enable the detector. Leave `--unfilled` off for a `LIGHTING_MS` line with no unfilled sample. With the detector on, that line gains ` | UNFILLED px=N pct=X.XX max_run=M`, and the same line is printed on its own each frame.
 
 On the pre-fill branch's lavapipe turn (320×180, settle 96, a 0.5 rad turn of 24 frames) the last turn frame was 0.92% (483 pixels, max run 35). That assertion is not in this change.

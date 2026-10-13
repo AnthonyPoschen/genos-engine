@@ -36,6 +36,7 @@ pub use trace::{
     radiance, radiance_hits, ray_land, samples_toward, sees, trace as trace_ray, Hit as TraceHit,
     Surfaces,
 };
+pub use unfilled::{check_unfilled_arg, unfilled_flag_needs_value};
 pub use world::{
     fixed_bounds, identity_pose, in_view, solid_reach, Bounds, Displacement, DrawKind, FixedPart,
     Object, ParticleFrame, ParticleImage, ShaderSpace, World,

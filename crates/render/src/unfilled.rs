@@ -26,31 +26,37 @@ pub struct UnfilledControl {
 
 impl Default for UnfilledControl {
     fn default() -> Self {
-        Self::from_env()
-    }
-}
-
-impl UnfilledControl {
-    pub fn from_env() -> Self {
-        let count = env_flag("GENOS_LIGHTING_UNFILLED");
-        let tint = env_flag("GENOS_LIGHTING_UNFILLED_TINT");
-        let dump_pct = std::env::var("GENOS_LIGHTING_UNFILLED_DUMP")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .filter(|n| n.is_finite() && *n >= 0.0);
         Self {
-            count: count || tint || dump_pct.is_some(),
-            tint,
-            dump_pct,
+            count: false,
+            tint: false,
+            dump_pct: None,
         }
     }
 }
 
-fn env_flag(name: &str) -> bool {
-    matches!(
-        std::env::var(name).ok().as_deref(),
-        Some("1") | Some("true") | Some("on")
-    )
+impl UnfilledControl {
+    /// Launch control. A command-line argument wins. The `GENOS_*` mirror applies
+    /// only when that argument was omitted.
+    pub fn from_env() -> Result<Self, String> {
+        Ok(launch()?.0)
+    }
+}
+
+/// `Some(true)` when `arg` is an unfilled flag that reads the next argument.
+/// `Some(false)` when the flag is complete. `None` when `arg` is some other flag.
+pub fn unfilled_flag_needs_value(arg: &str) -> Option<bool> {
+    let (name, inline) = dash_name(arg)?;
+    match flag_kind(name) {
+        None => None,
+        Some(Kind::Count | Kind::Tint) => Some(false),
+        Some(_) => Some(inline.is_none()),
+    }
+}
+
+/// Reject a bad unfilled argument. `next` is the following argument when
+/// [`unfilled_flag_needs_value`] is `Some(true)`.
+pub fn check_unfilled_arg(arg: &str, next: Option<&str>) -> Result<(), String> {
+    parse_one(arg, next).map(|_| ())
 }
 
 /// One frame's counters. `pct` is the percent of shaded pixels that were unfilled.
@@ -106,32 +112,245 @@ impl UnfilledLimits {
         }
     }
 
-    pub fn from_env() -> Self {
-        let base = Self::standard();
-        Self {
-            max_folders: env_usize("GENOS_UNFILLED_MAX_FOLDERS", base.max_folders),
-            max_bytes: env_u64("GENOS_UNFILLED_MAX_BYTES", base.max_bytes),
-            max_age: Duration::from_secs(env_u64(
-                "GENOS_UNFILLED_MAX_AGE_SECS",
-                base.max_age.as_secs(),
-            )),
-            session_cap: env_u64("GENOS_UNFILLED_SESSION_CAP", base.session_cap as u64) as u32,
+    /// Caps for this process. An argument wins over its `GENOS_*` mirror.
+    pub fn from_env() -> Result<Self, String> {
+        Ok(launch()?.1)
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct Mirrors<'a> {
+    count: Option<&'a str>,
+    tint: Option<&'a str>,
+    dump: Option<&'a str>,
+    max_folders: Option<&'a str>,
+    max_bytes: Option<&'a str>,
+    max_age_secs: Option<&'a str>,
+    session_cap: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Chosen {
+    count: Option<bool>,
+    tint: Option<bool>,
+    dump: Option<f32>,
+    max_folders: Option<u64>,
+    max_bytes: Option<u64>,
+    max_age_secs: Option<u64>,
+    session_cap: Option<u64>,
+}
+
+enum Kind {
+    Count,
+    Tint,
+    Dump,
+    Age,
+    Folders,
+    Bytes,
+    Session,
+}
+
+enum Flag {
+    Count(bool),
+    Tint(bool),
+    Dump(f32),
+    Age(u64),
+    Folders(u64),
+    Bytes(u64),
+    Session(u64),
+}
+
+fn process_args() -> Vec<String> {
+    std::env::args().skip(1).collect()
+}
+
+fn launch() -> Result<(UnfilledControl, UnfilledLimits), String> {
+    let args = process_args();
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let count = std::env::var("GENOS_LIGHTING_UNFILLED").ok();
+    let tint = std::env::var("GENOS_LIGHTING_UNFILLED_TINT").ok();
+    let dump = std::env::var("GENOS_LIGHTING_UNFILLED_DUMP").ok();
+    let max_folders = std::env::var("GENOS_UNFILLED_MAX_FOLDERS").ok();
+    let max_bytes = std::env::var("GENOS_UNFILLED_MAX_BYTES").ok();
+    let max_age_secs = std::env::var("GENOS_UNFILLED_MAX_AGE_SECS").ok();
+    let session_cap = std::env::var("GENOS_UNFILLED_SESSION_CAP").ok();
+    resolve_launch(
+        &refs,
+        &Mirrors {
+            count: count.as_deref(),
+            tint: tint.as_deref(),
+            dump: dump.as_deref(),
+            max_folders: max_folders.as_deref(),
+            max_bytes: max_bytes.as_deref(),
+            max_age_secs: max_age_secs.as_deref(),
+            session_cap: session_cap.as_deref(),
+        },
+    )
+}
+
+fn resolve_launch(
+    args: &[&str],
+    env: &Mirrors<'_>,
+) -> Result<(UnfilledControl, UnfilledLimits), String> {
+    let mut chosen = Chosen::default();
+    let mut i = 0;
+    while i < args.len() {
+        let next = args.get(i + 1).copied();
+        match parse_one(args[i], next)? {
+            None => i += 1,
+            Some((flag, extra)) => {
+                chosen.set(flag);
+                i += 1 + usize::from(extra);
+            }
+        }
+    }
+    let base = UnfilledLimits::standard();
+    let count = chosen.count.unwrap_or_else(|| switch_on(env.count));
+    let tint = chosen.tint.unwrap_or_else(|| switch_on(env.tint));
+    let dump_pct = match chosen.dump {
+        Some(pct) => Some(pct),
+        None => env
+            .dump
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|n| n.is_finite() && *n >= 0.0),
+    };
+    let control = UnfilledControl {
+        count: count || tint || dump_pct.is_some(),
+        tint,
+        dump_pct,
+    };
+    let limits = UnfilledLimits {
+        max_folders: chosen
+            .max_folders
+            .or_else(|| env.max_folders.and_then(|v| v.parse().ok()))
+            .unwrap_or(base.max_folders as u64) as usize,
+        max_bytes: chosen
+            .max_bytes
+            .or_else(|| env.max_bytes.and_then(|v| v.parse().ok()))
+            .unwrap_or(base.max_bytes),
+        max_age: Duration::from_secs(
+            chosen
+                .max_age_secs
+                .or_else(|| env.max_age_secs.and_then(|v| v.parse().ok()))
+                .unwrap_or(base.max_age.as_secs()),
+        ),
+        session_cap: chosen
+            .session_cap
+            .or_else(|| env.session_cap.and_then(|v| v.parse().ok()))
+            .unwrap_or(u64::from(base.session_cap)) as u32,
+    };
+    Ok((control, limits))
+}
+
+impl Chosen {
+    fn set(&mut self, flag: Flag) {
+        match flag {
+            Flag::Count(on) => self.count = Some(on),
+            Flag::Tint(on) => self.tint = Some(on),
+            Flag::Dump(pct) => self.dump = Some(pct),
+            Flag::Age(secs) => self.max_age_secs = Some(secs),
+            Flag::Folders(n) => self.max_folders = Some(n),
+            Flag::Bytes(n) => self.max_bytes = Some(n),
+            Flag::Session(n) => self.session_cap = Some(n),
         }
     }
 }
 
-fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+fn dash_name(arg: &str) -> Option<(&str, Option<&str>)> {
+    let rest = arg.strip_prefix("--")?;
+    if rest.is_empty() {
+        return None;
+    }
+    match rest.split_once('=') {
+        Some((name, value)) => Some((name, Some(value))),
+        None => Some((rest, None)),
+    }
 }
 
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+fn flag_kind(name: &str) -> Option<Kind> {
+    match name {
+        "unfilled" => Some(Kind::Count),
+        "unfilled-tint" => Some(Kind::Tint),
+        "unfilled-dump" => Some(Kind::Dump),
+        "unfilled-max-age-secs" => Some(Kind::Age),
+        "unfilled-max-folders" => Some(Kind::Folders),
+        "unfilled-max-bytes" => Some(Kind::Bytes),
+        "unfilled-session-cap" => Some(Kind::Session),
+        _ => None,
+    }
+}
+
+fn parse_one(arg: &str, next: Option<&str>) -> Result<Option<(Flag, bool)>, String> {
+    let Some((name, inline)) = dash_name(arg) else {
+        return Ok(None);
+    };
+    let Some(kind) = flag_kind(name) else {
+        return Ok(None);
+    };
+    let flag = format!("--{name}");
+    let (value, extra) = match inline {
+        Some(value) => (Some(value), false),
+        None => match kind {
+            Kind::Count | Kind::Tint => (None, false),
+            Kind::Dump | Kind::Age | Kind::Folders | Kind::Bytes | Kind::Session => {
+                let Some(value) = next else {
+                    return Err(format!("{flag} needs a value"));
+                };
+                (Some(value), true)
+            }
+        },
+    };
+    let parsed = match kind {
+        Kind::Count => Flag::Count(match value {
+            None => true,
+            Some(value) => parse_switch(&flag, value)?,
+        }),
+        Kind::Tint => Flag::Tint(match value {
+            None => true,
+            Some(value) => parse_switch(&flag, value)?,
+        }),
+        Kind::Dump => Flag::Dump(parse_percent(&flag, value.unwrap_or(""))?),
+        Kind::Age => Flag::Age(parse_u64(&flag, value.unwrap_or(""))?),
+        Kind::Folders => Flag::Folders(parse_u64(&flag, value.unwrap_or(""))?),
+        Kind::Bytes => Flag::Bytes(parse_u64(&flag, value.unwrap_or(""))?),
+        Kind::Session => Flag::Session(parse_u64(&flag, value.unwrap_or(""))?),
+    };
+    Ok(Some((parsed, extra)))
+}
+
+fn parse_switch(flag: &str, value: &str) -> Result<bool, String> {
+    match value {
+        "1" | "true" | "on" => Ok(true),
+        "0" | "false" | "off" => Ok(false),
+        "" => Err(format!("{flag} needs a value")),
+        _ => Err(format!("{flag} {value} is not 0 or 1")),
+    }
+}
+
+fn parse_percent(flag: &str, value: &str) -> Result<f32, String> {
+    if value.is_empty() {
+        return Err(format!("{flag} needs a value"));
+    }
+    let n: f32 = value
+        .parse()
+        .map_err(|_| format!("{flag} {value} is not a percent"))?;
+    if !n.is_finite() || n < 0.0 {
+        return Err(format!("{flag} {value} is not a percent"));
+    }
+    Ok(n)
+}
+
+fn parse_u64(flag: &str, value: &str) -> Result<u64, String> {
+    if value.is_empty() {
+        return Err(format!("{flag} needs a value"));
+    }
+    value
+        .parse()
+        .map_err(|_| format!("{flag} {value} is not a number"))
+}
+
+fn switch_on(value: Option<&str>) -> bool {
+    matches!(value, Some("1") | Some("true") | Some("on"))
 }
 
 pub fn now_ms() -> u64 {
@@ -243,8 +462,10 @@ fn dir_bytes(path: &Path) -> u64 {
 }
 
 /// Startup pass. A missing directory is left alone.
-pub fn enforce_unfilled_cap(root: &Path) {
-    let _ = rotate_unfilled(root, now_ms(), &UnfilledLimits::from_env());
+pub fn enforce_unfilled_cap(root: &Path) -> Result<(), String> {
+    let limits = UnfilledLimits::from_env()?;
+    let _ = rotate_unfilled(root, now_ms(), &limits);
+    Ok(())
 }
 
 pub struct UnfilledDump {
@@ -268,7 +489,7 @@ pub fn save_unfilled_event(
     session_saved: u32,
     dump: &UnfilledDump,
 ) -> Result<Option<PathBuf>, String> {
-    let limits = UnfilledLimits::from_env();
+    let limits = UnfilledLimits::from_env()?;
     if session_saved >= limits.session_cap {
         let _ = rotate_unfilled(root, now_ms(), &limits);
         return Ok(None);
@@ -614,5 +835,72 @@ mod tests {
         mask[2] = 0b0000_0001;
         mask[3] = 0b0000_0001;
         assert_eq!(max_unfilled_run(8, 4, &mask), 4);
+    }
+
+    fn empty() -> Mirrors<'static> {
+        Mirrors::default()
+    }
+
+    #[test]
+    fn arguments_win_and_env_is_the_mirror() {
+        let (off, limits) = resolve_launch(&[], &empty()).unwrap();
+        assert!(!off.count && !off.tint && off.dump_pct.is_none());
+        assert_eq!(limits.max_folders, 200);
+        assert_eq!(limits.max_bytes, 500 * 1024 * 1024);
+        assert_eq!(limits.max_age, Duration::from_secs(2 * 24 * 60 * 60));
+        assert_eq!(limits.session_cap, 32);
+
+        let mut env = empty();
+        env.count = Some("1");
+        env.max_age_secs = Some("10");
+        let (from_env, limits) = resolve_launch(&[], &env).unwrap();
+        assert!(from_env.count);
+        assert_eq!(limits.max_age, Duration::from_secs(10));
+
+        let (forced, limits) = resolve_launch(
+            &[
+                "--unfilled=0",
+                "--unfilled-max-age-secs",
+                "3",
+                "--unfilled-max-folders=4",
+                "--unfilled-max-bytes",
+                "9",
+                "--unfilled-session-cap=1",
+            ],
+            &env,
+        )
+        .unwrap();
+        assert!(!forced.count);
+        assert_eq!(limits.max_age, Duration::from_secs(3));
+        assert_eq!(limits.max_folders, 4);
+        assert_eq!(limits.max_bytes, 9);
+        assert_eq!(limits.session_cap, 1);
+
+        let (tinted, _) = resolve_launch(&["--unfilled-tint"], &empty()).unwrap();
+        assert!(tinted.tint && tinted.count);
+        let (dump, _) = resolve_launch(&["--unfilled-dump=0"], &empty()).unwrap();
+        assert_eq!(dump.dump_pct, Some(0.0));
+        assert!(dump.count);
+
+        assert!(unfilled_flag_needs_value("--unfilled").is_some_and(|needs| !needs));
+        assert!(unfilled_flag_needs_value("--unfilled-dump").unwrap());
+        assert!(unfilled_flag_needs_value("--scale").is_none());
+        assert_eq!(
+            check_unfilled_arg("--unfilled-dump", None).unwrap_err(),
+            "--unfilled-dump needs a value"
+        );
+        assert_eq!(
+            check_unfilled_arg("--unfilled-dump", Some("nope")).unwrap_err(),
+            "--unfilled-dump nope is not a percent"
+        );
+        assert_eq!(
+            check_unfilled_arg("--unfilled=", None).unwrap_err(),
+            "--unfilled needs a value"
+        );
+        assert_eq!(
+            check_unfilled_arg("--unfilled-max-age-secs", Some("-2")).unwrap_err(),
+            "--unfilled-max-age-secs -2 is not a number"
+        );
+        assert!(check_unfilled_arg("--unfilled-tint=0", None).is_ok());
     }
 }

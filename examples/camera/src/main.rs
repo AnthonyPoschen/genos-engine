@@ -174,6 +174,15 @@ fn run() -> Result<(), String> {
                     return Err("missing output directory".into());
                 }
             }
+            other if genos_render::unfilled_flag_needs_value(other).is_some() => {
+                let needs = genos_render::unfilled_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(args.next().ok_or_else(|| format!("{other} needs a value"))?)
+                } else {
+                    None
+                };
+                genos_render::check_unfilled_arg(other, next.as_deref())?;
+            }
             "--size" => {
                 let text = args.next().ok_or("missing size")?;
                 let (w, h) = text

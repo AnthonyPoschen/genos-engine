@@ -1290,7 +1290,7 @@ impl Gpu {
                 wire_pipeline: std::ptr::null_mut(),
                 wire_on: false,
                 copy_picture: false,
-                unfilled: UnfilledControl::from_env(),
+                unfilled: UnfilledControl::from_env()?,
                 unfilled_saved: 0,
                 last_unfilled: None,
                 unfilled_eye: [0.0; 3],
@@ -1392,7 +1392,7 @@ impl Gpu {
             gpu.make_lighting_targets()?;
             let launch = genos_scene::DebugSettings::default().effective(gpu.out_cli.as_deref());
             gpu.debug_out = launch.out.clone();
-            crate::unfilled::enforce_unfilled_cap(std::path::Path::new(&gpu.debug_out));
+            crate::unfilled::enforce_unfilled_cap(std::path::Path::new(&gpu.debug_out))?;
             Ok(gpu)
         }
     }
