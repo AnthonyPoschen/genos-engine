@@ -364,11 +364,10 @@ fn full_effort_picture_floor_holds_a_third_run() {
             pair_floor(&phase, &b),
             pair_floor(&phase, &c),
         ];
-        let band = [
-            pairs[0], pairs[1], pairs[2], phase_pairs[0], phase_pairs[1], phase_pairs[2],
-        ];
-        let band_hi = band.into_iter().fold(0.0_f64, f64::max);
-        let band_lo = band.into_iter().fold(band_hi, f64::min);
+        // The ceiling is the full-effort pair rule. A phase that matches one
+        // run more tightly than those pairs match each other still passes.
+        let ceiling = least * 3.0 + 5.0e-4;
+        let phase_hi = phase_pairs.into_iter().fold(0.0_f64, f64::max);
         let pop_p = pop_share(&phase);
         eprintln!(
             "phase1 {} diffs {:.6} {:.6} {:.6} pop {:.4}",
@@ -379,11 +378,9 @@ fn full_effort_picture_floor_holds_a_third_run() {
             pop_p * 100.0
         );
         assert!(
-            band_hi <= band_lo * 3.0 + 5.0e-4,
-            "{} phase 1 leaves the full-effort band ({:.6} vs {:.6})",
-            mode.name(),
-            band_hi,
-            band_lo
+            phase_hi <= ceiling,
+            "{} phase 1 leaves the full-effort band ({phase_hi:.6} vs {ceiling:.6})",
+            mode.name()
         );
         assert!(
             pop_p <= pop_hi + 0.005 && pop_p + 0.005 >= pop_lo,
