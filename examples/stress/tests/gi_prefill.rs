@@ -15,8 +15,8 @@
 //! The camera then holds for `GENOS_GI_PREFILL_HOLD` frames (default 32).
 //! Shown pre-filled texels must still have a finished set, and their luminance
 //! must sit near a second run that never pre-filled and settled at the end yaw
-//! (`GENOS_GI_PREFILL_BIAS`, see `DEFAULT_BIAS`). `GENOS_LIGHTING_PREFILL=0`
-//! is that second run. `GENOS_GI_PREFILL_OUT` keeps the dumps.
+//! (`GENOS_GI_PREFILL_REF_SETTLE`, default 192; `GENOS_GI_PREFILL_BIAS`).
+//! `GENOS_LIGHTING_PREFILL=0` is that second run. `GENOS_GI_PREFILL_OUT` keeps the dumps.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -45,12 +45,20 @@ const DEFAULT_YAW: f32 = 0.5;
 /// A lavapipe run (settle 96, turn 24, yaw 0.5) ended at 0.90% (471 px, max_run 36)
 /// after the plain-mean handoff. `GENOS_GI_PREFILL_UNFILLED_PCT` overrides this.
 const DEFAULT_UNFILLED_PCT: f32 = 2.0;
-/// Still frames at the end yaw after the turn, so the plain-mean handoff can run.
+/// Still frames at the end yaw after the turn, before the luminance compare.
 const DEFAULT_HOLD: u64 = 32;
+/// Pre-fill-off settle at the end yaw. Longer than the turn's settle: at 96
+/// frames the reference mean is still climbing, and texels with 16 sets have
+/// levelled off by 192.
+const DEFAULT_REF_SETTLE: u64 = 192;
 /// Mean relative luminance of revealed pre-filled texels against a prefill-off
 /// settle at the same pose. `GENOS_GI_PREFILL_BIAS` overrides this.
-/// Filled in from the lavapipe run; see the assert message.
-const DEFAULT_BIAS: f32 = 0.20;
+///
+/// One paired comparison of the handoff dump (frame 152: settle 96, turn 24,
+/// hold 32) against a 192-frame prefill-off dump measured 0.374 over 3419 keys
+/// (luminance 1.690 versus 1.069). The cap sits above that gap. It locks a
+/// regression. It does not say the brightness gap is gone.
+const DEFAULT_BIAS: f32 = 0.50;
 /// Draws after the last dumped frame so `lighting_dump_write` runs (it waits
 /// until a later begin sees `frame >= last + 3`).
 const FLUSH: u64 = 5;
@@ -231,6 +239,7 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
     let min_prefilled = env_usize("GENOS_GI_PREFILL_MIN", 64);
     let min_shown = env_usize("GENOS_GI_PREFILL_SHOWN", 8);
     let hold = env_u64_any("GENOS_GI_PREFILL_HOLD", DEFAULT_HOLD);
+    let ref_settle = env_u64("GENOS_GI_PREFILL_REF_SETTLE", DEFAULT_REF_SETTLE);
     let bias_cap = env_f32("GENOS_GI_PREFILL_BIAS", DEFAULT_BIAS);
     let dir = out_dir();
     let _env = DumpEnv;
@@ -392,7 +401,7 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
 
     let ref_dir = dir.join("reference");
     std::fs::create_dir_all(&ref_dir).expect("reference dump directory");
-    std::env::set_var("GENOS_LIGHTING_DUMP", format!("{settle}"));
+    std::env::set_var("GENOS_LIGHTING_DUMP", format!("{ref_settle}"));
     std::env::set_var("GENOS_LIGHTING_DUMP_DIR", &ref_dir);
     let mut ref_window = Window::open_proof(WIDTH, HEIGHT).expect("reference window");
     let ref_size = ref_window.pump();
@@ -406,11 +415,11 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
     .expect("reference renderer");
     ref_renderer.set_prefill(false);
     assert!(!ref_renderer.prefill_on());
-    eprintln!("prefill: reference settle {settle} at yaw {yaw_end}");
-    for i in 1..=settle {
+    eprintln!("prefill: reference settle {ref_settle} at yaw {yaw_end}");
+    for i in 1..=ref_settle {
         draw(&mut ref_window, &mut ref_renderer, &stage.world, yaw_end);
-        if i % 16 == 0 || i == settle {
-            eprintln!("prefill: reference frame {i}/{settle}");
+        if i % 16 == 0 || i == ref_settle {
+            eprintln!("prefill: reference frame {i}/{ref_settle}");
         }
     }
     for _ in 0..FLUSH {
@@ -420,7 +429,7 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
     drop(ref_window);
     drop(_gpu);
 
-    let reference = by_key(&fine_texels(&ref_dir, settle));
+    let reference = by_key(&fine_texels(&ref_dir, ref_settle));
     let mut leaked = 0usize;
     for texel in reference.values() {
         if texel.shown == 0 && texel.sets >= 1.0 {
@@ -428,7 +437,7 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
         }
     }
     eprintln!(
-        "reference frame {settle}: fine {} never-shown finished sets {leaked}",
+        "reference frame {ref_settle}: fine {} never-shown finished sets {leaked}",
         reference.len()
     );
     assert!(
