@@ -3952,12 +3952,15 @@ void lighting_wake_observe(uint h, vec3 light) {
         return;
     }
     uint flags = floatBitsToUint(work.v[lighting_wake_probe_at(pk)].w);
+    // Previous shade of this exact (probe, stratum, ray), packed before this
+    // frame's write. A zero word has no history. A new check direction against
+    // one stored luminance counted as a miss on a still room at tolerance 0.08.
+    uint prev_bits = floatBitsToUint(work.v[lighting_kept_light_at() + h / 4u][h % 4u]);
+    bool have = prev_bits != 0u;
+    float prev = dot(lighting_unpack_rgb9e5(prev_bits), vec3(0.2126, 0.7152, 0.0722));
     float lum = dot(light, vec3(0.2126, 0.7152, 0.0722));
-    vec4 rec = work.v[lighting_wake_probe_at(pk)];
-    uint seen = floatBitsToUint(rec.y);
-    bool have = seen != 0u;
-    float bound = gstats.wake_tol * max(max(rec.x, lum), 1.0e-3);
-    bool changed = have && abs(lum - rec.x) > bound;
+    float bound = gstats.wake_tol * max(max(prev, lum), 1.0e-3);
+    bool changed = have && abs(lum - prev) > bound;
     if (have && (flags & WAKE_VERIFY) != 0u) {
         if (changed) {
             atomicAdd(gstats.wake_misses, 1u);
@@ -3968,8 +3971,6 @@ void lighting_wake_observe(uint h, vec3 light) {
     if (have && (flags & WAKE_TEST) != 0u) {
         lighting_wake_report(pk, changed);
     }
-    work.v[lighting_wake_probe_at(pk)].x = lum;
-    work.v[lighting_wake_probe_at(pk)].y = uintBitsToFloat(max(lighting_frame(), 1u));
 }
 void lighting_wake_place(uint probe) {
     if (gstats.wake_mode == 0u) {

@@ -718,8 +718,10 @@ fn eprint_wake(label: &str, frame: u32, stats: &LightingWakeStats) {
     );
 }
 
-/// Direct light only, tile 16 (240 slots at 320×180). A held still frame wakes
-/// nothing and traces about the verification budget.
+/// Direct light only, tile 16 (240 slots at 320×180). A held still frame at the
+/// default tolerance 0.08 wakes nothing and its verification votes are mostly hits.
+/// The check ray is a new index each frame; the vote uses the light stored for
+/// that same direction.
 #[test]
 fn rings_still_room_wakes_about_zero() {
     let (_gpu, mut window, mut renderer) = open();
@@ -748,6 +750,12 @@ fn rings_still_room_wakes_about_zero() {
         "held checks, not a stratum ({} rays / {} probes)",
         last.rays_traced,
         last.probes_traced
+    );
+    assert!(
+        last.verify_hits > last.verify_misses,
+        "default tolerance 0.08 votes mostly hits on a held still frame (hits {} misses {})",
+        last.verify_hits,
+        last.verify_misses
     );
 }
 
@@ -867,9 +875,9 @@ fn verification_frame(change_colour: bool) -> LightingWakeStats {
     stats
 }
 
-/// Check rays change direction every frame, so a tight tolerance misses on a
-/// still room. At 0.75 the still frame still has hits. A 6× colour on that
-/// same first frame, ring cap 0, misses more of them and does not wake.
+/// The vote compares this check ray to the light stored for that direction.
+/// At 0.75 a still frame keeps hits. A 6× colour on that same first frame,
+/// ring cap 0, misses more of them and does not wake.
 #[test]
 fn rings_verification_catches_a_missed_change() {
     // Same device lock as the other frame tests. The two measurements each
@@ -885,6 +893,11 @@ fn rings_verification_catches_a_missed_change() {
         assert_eq!(stats.probes_woken, 0, "{name} woke probes");
         assert!(stats.verify_hits + stats.verify_misses > 0, "{name} cast no vote");
     }
+    assert_eq!(
+        still.verify_misses, 0,
+        "a still frame voted misses {}",
+        still.verify_misses
+    );
     assert!(
         changed.verify_misses > still.verify_misses,
         "colour change misses {} against a still frame {}",

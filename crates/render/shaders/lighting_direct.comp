@@ -479,7 +479,9 @@ void main() {
         e += bounce;
         e_sun += lighting_hit_sunfrac * bounce;
         vec3 shed = reflectance * e + glow;
-        if (probe_hit) {
+        // Fills are a first trace of a missing stratum. The vote compares a
+        // kept hit to the light stored for that same direction.
+        if (probe_hit && !fill_hit) {
             lighting_wake_observe(h, shed);
         }
         if (fill_hit) {
