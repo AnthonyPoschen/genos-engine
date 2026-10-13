@@ -22,7 +22,9 @@ S69C relights a kept hit on its stratum's frame and once halfway round, so a cor
 
 `lighting_direct.comp` and the sun compose each write one stats word from a single thread. Bit 0 is the small-sun flag. Bit 1 is catch-up. The next word is the band. Those are the unfilled pad words (142 and 143). The read does not touch `light_quiet`.
 
-`./genos-debug/sun/counter.txt` records `frame`, `sun`, `slice`, `catch`, `host_frames`, `catch_left`, and `bands`. `--out DIR` writes `DIR/sun` instead. `GENOS_LIGHTING_DEBUG=1` also prints `lightingsun`. `host_frames` counts frames the CPU took the path. `sun` is the shader bit.
+`./genos-debug/sun/counter.txt` records `frame`, `sun`, `slice`, `catch`, `host_frames`, `catch_left`, `bands`, `full_effort`, `compose` (`full`, `list`, or `sun`), and `dispatches`. `--out DIR` writes `DIR/sun` instead. `GENOS_LIGHTING_DEBUG=1` also prints `lightingsun`. `host_frames` counts frames the CPU took the path. `sun` is the shader bit. `dispatches` is 1 on the sun path: the old path ran two compose dispatches inside one timestamp.
+
+The file is written when the path has run, when full effort is on, or when debug is on. A still or moving bench never takes the sun path, so full effort and the default do the same work there and the file stays unwritten. A full-effort run with a moving sun writes `full_effort 1`, `sun 0`, `compose full`, and `host_frames` does not climb.
 
 ## Controls
 

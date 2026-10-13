@@ -228,6 +228,10 @@ pub(crate) struct Lighting {
     /// The linear-bounce slice was cleared for this sun run. The first frame
     /// walks every pixel; later frames walk the band.
     sun_bounce_live: bool,
+    /// Last compose: 1 full picture, 2 dirty list, 3 sun band. 0 before any.
+    compose_kind: u8,
+    /// Compose dispatches recorded for that frame. The sun path is one.
+    compose_dispatches: u32,
     /// Point lamps only. `None` until the first frame, so a still open does not
     /// look like a lamp that just stopped.
     lamp_key: Option<u64>,
@@ -373,6 +377,8 @@ impl Default for Lighting {
             sun_gpu_slice: 0,
             sun_pipe: std::ptr::null_mut(),
             sun_bounce_live: false,
+            compose_kind: 0,
+            compose_dispatches: 0,
             lamp_key: None,
             lamp_moving: false,
             catch_left: 0,
@@ -414,6 +420,21 @@ const LIGHTING_ATROUS_META_WORDS: u64 = 1 + 1 + 64 + 5 + 5 * 64;
 /// The picture compose does not read them. They are not the regime tube.
 const LIGHTING_SUN_WORDS: u64 = 8;
 const LIGHTING_SUN_SMALL_BIT: u32 = 1;
+/// Picture compose over the whole grid.
+const COMPOSE_FULL: u8 = 1;
+/// Dirty 8×8 list.
+const COMPOSE_LIST: u8 = 2;
+/// One full-grid sun compose. Probes are walked on the band.
+const COMPOSE_SUN: u8 = 3;
+
+fn compose_label(kind: u8) -> &'static str {
+    match kind {
+        COMPOSE_FULL => "full",
+        COMPOSE_LIST => "list",
+        COMPOSE_SUN => "sun",
+        _ => "none",
+    }
+}
 /// A step inside this relative sun/sky irradiance of the last full refresh stays amortised.
 const LIGHTING_SUN_IRR: f32 = 0.02;
 /// Stats words 142 and 143 (the unfilled pads). Bit 0 of the mark is the sun path.
@@ -1122,7 +1143,18 @@ impl Gpu {
             slice: self.lighting.sun_gpu_slice,
             host_frames: self.lighting.sun_frames,
             catch_left: self.lighting.catch_left,
+            full_effort: sun_controls().full_effort,
+            compose: self.lighting.compose_kind,
+            dispatches: self.lighting.compose_dispatches,
         }
+    }
+
+    /// The counter is the proof that full effort changed the work. A still or
+    /// moving bench never takes the sun path, so it does not write this file.
+    fn sun_counter_due(&self) -> bool {
+        self.lighting.sun_frames > 0
+            || sun_controls().full_effort
+            || std::env::var_os("GENOS_LIGHTING_DEBUG").is_some()
     }
 
     fn publish_sun_counter(&self) {
@@ -1130,15 +1162,19 @@ impl Gpu {
         if std::fs::create_dir_all(&dir).is_err() {
             return;
         }
+        let controls = sun_controls();
         let text = format!(
-            "frame {}\nsun {}\nslice {}\ncatch {}\nhost_frames {}\ncatch_left {}\nbands {}\n",
+            "frame {}\nsun {}\nslice {}\ncatch {}\nhost_frames {}\ncatch_left {}\nbands {}\nfull_effort {}\ncompose {}\ndispatches {}\n",
             self.lighting.frame,
             u32::from(self.lighting.sun_gpu_mark & 1 != 0),
             self.lighting.sun_gpu_slice,
             u32::from(self.lighting.sun_gpu_mark & 2 != 0),
             self.lighting.sun_frames,
             self.lighting.catch_left,
-            sun_controls().bands,
+            controls.bands,
+            u32::from(controls.full_effort),
+            compose_label(self.lighting.compose_kind),
+            self.lighting.compose_dispatches,
         );
         let _ = std::fs::write(dir.join("counter.txt"), text);
     }
@@ -1170,7 +1206,7 @@ impl Gpu {
         self.lighting_dump_write();
         // The sun mark is a later read of a copy the frame already made. It does
         // not update light_quiet. That was the debug print that froze a still scene.
-        if self.lighting.sun_frames > 0 || std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+        if self.sun_counter_due() {
             if let Ok(words) = self.read_stats16(self.lighting.stats[slot].memory) {
                 self.lighting.sun_gpu_mark = words[LIGHTING_SUN_MARK];
                 self.lighting.sun_gpu_slice = words[LIGHTING_SUN_SLICE_WORD];
@@ -2087,6 +2123,14 @@ impl Gpu {
         if !sun_compose {
             self.lighting.sun_bounce_live = false;
         }
+        self.lighting.compose_kind = if sun_compose {
+            COMPOSE_SUN
+        } else if compose_full {
+            COMPOSE_FULL
+        } else {
+            COMPOSE_LIST
+        };
+        self.lighting.compose_dispatches = 0;
         let catch_word = u32::from(self.lighting.catch_left > 0);
         let sun_words = [
             0u32,
@@ -2263,6 +2307,9 @@ impl Gpu {
                     self.lighting.pipes[pass]
                 };
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
+                if pass == 7 {
+                    self.lighting.compose_dispatches = 1;
+                }
                 if pass == 7 && sun_compose {
                     // One dispatch. The old path indirect-dispatched the dirty
                     // list (a near-full probe walk under a moving sun) and then
@@ -2863,6 +2910,12 @@ pub struct LightingSunStats {
     pub slice: u32,
     pub host_frames: u32,
     pub catch_left: u32,
+    /// `--lighting-full-effort` or `GENOS_LIGHTING_FULL_EFFORT=1` is on.
+    pub full_effort: bool,
+    /// 1 full picture compose, 2 dirty list, 3 sun band. 0 before any compose.
+    pub compose: u8,
+    /// Compose dispatches in that frame. The sun path is one.
+    pub dispatches: u32,
 }
 
 #[derive(Clone, Copy, Default)]

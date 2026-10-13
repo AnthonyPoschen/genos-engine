@@ -69,7 +69,25 @@ fn a_small_sun_step_sets_the_shader_bit() {
     assert_eq!(frozen.host_frames, 0);
     assert_eq!(lighting_names(&renderer).len(), 10);
 
-    let yaw = 0.2_f32.to_radians();
+    // Full effort with no sun frames yet still writes the counter. The still
+    // and moving benches never enter the path, so this is the proof the flag
+    // changed the compose.
+    std::env::set_var("GENOS_LIGHTING_FULL_EFFORT", "1");
+    world.scene.lights.last_mut().unwrap().direction = sun_at(0.2_f32.to_radians()).direction;
+    draw(&mut window, &mut renderer, &world, &camera);
+    let early = renderer.lighting_sun_stats();
+    assert!(!early.gpu_sun, "full effort stays off before any sun frame: {early:?}");
+    assert_eq!(early.host_frames, 0);
+    assert!(early.full_effort);
+    assert_eq!(early.compose, 1, "picture compose, not the sun band: {early:?}");
+    assert_eq!(early.dispatches, 1);
+    let early_text = std::fs::read_to_string("genos-debug/sun/counter.txt").expect("sun counter");
+    assert!(early_text.contains("full_effort 1\n"), "{early_text}");
+    assert!(early_text.contains("compose full\n"), "{early_text}");
+    assert!(early_text.contains("host_frames 0\n"), "{early_text}");
+    std::env::remove_var("GENOS_LIGHTING_FULL_EFFORT");
+
+    let yaw = 0.4_f32.to_radians();
     world.scene.lights.last_mut().unwrap().direction = sun_at(yaw).direction;
     let mut slices = Vec::new();
     for _ in 0..4 {
@@ -90,6 +108,9 @@ fn a_small_sun_step_sets_the_shader_bit() {
     );
     let counter = std::fs::read_to_string("genos-debug/sun/counter.txt").expect("sun counter");
     assert!(counter.contains("sun 1\n"), "{counter}");
+    assert!(counter.contains("full_effort 0\n"), "{counter}");
+    assert!(counter.contains("compose sun\n"), "{counter}");
+    assert!(counter.contains("dispatches 1\n"), "{counter}");
 
     let host_before = renderer.lighting_sun_stats().host_frames;
     std::env::set_var("GENOS_LIGHTING_FULL_EFFORT", "1");
@@ -97,7 +118,14 @@ fn a_small_sun_step_sets_the_shader_bit() {
     draw(&mut window, &mut renderer, &world, &camera);
     let full = renderer.lighting_sun_stats();
     assert!(!full.gpu_sun, "full effort leaves the sun path: {full:?}");
+    assert!(full.full_effort, "the flag is on: {full:?}");
+    assert_eq!(full.compose, 1, "full effort takes the picture compose: {full:?}");
+    assert_eq!(full.dispatches, 1, "one compose dispatch: {full:?}");
     assert_eq!(full.host_frames, host_before);
+    let forced = std::fs::read_to_string("genos-debug/sun/counter.txt").expect("sun counter");
+    assert!(forced.contains("full_effort 1\n"), "{forced}");
+    assert!(forced.contains("compose full\n"), "{forced}");
+    assert!(forced.contains("sun 0\n"), "{forced}");
     std::env::remove_var("GENOS_LIGHTING_FULL_EFFORT");
 
     let point = world.scene.lights[0].position;
