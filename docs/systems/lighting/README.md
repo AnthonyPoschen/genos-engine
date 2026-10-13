@@ -61,6 +61,18 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - A small sun step (departure 14, [SUN](experiments/SUN-small-sun-step.md)) amortises indirect over bands. Schied et al., Spatiotemporal Variance-Guided Filtering, HPG 2017, and Wright et al., Lumen, SIGGRAPH 2022, recompute every pixel every frame. One compose dispatch writes direct everywhere and walks probes on the current band. Neighbour blend is the existing compose weights, not a per-lamp irradiance layer. After a point lamp holds, four frames shade every kept stratum. That skips the S69C halfway early-out for those frames.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
 - Flat ambient when bounce is 0 or GI is off is a constant, a classic hemisphere (sky toward the normal, ground away from it), a sun-height day lerp, or a time-of-day curve (night, dawn, noon, dusk). The curve also scales sky colour relative to its noon key. No new GI algorithm. Bounce 0 records no GI dispatch. Bounce 1 records the probe passes and not the cache-to-cache passes. Bounce 2 records those passes. The count does not add a bounce algorithm.
+- Lamp picking (Talbot, Cline, and Egbert, EGSR 2005; Bitterli et al., Spatiotemporal reservoir resampling for real-time ray tracing with dynamic direct lighting, TOG 2020). Default off, so preset high still traces every lamp. The sun is not a sample: it is traced on its own. Point lamps and the flame use systematic samples along the unshadowed prefix. Pixel reuse merges reservoirs with Algorithm 6 as printed (Z counts a source only when its target of the selected lamp is positive). That is not the MIS balance heuristic (equation 22). The plan text called Algorithm 6 that heuristic; the code follows the printed algorithm.
+- `lamp_pick_unbiased` off is the section-3 merge (always divide by the sum of M) plus the M clamp from Wyman and Panteleev, Improved Direct Lighting, Ray Tracing Gems II, 2021. The unbiased path does not clamp M.
+- The winning sample's visibility is always retraced. An occluded reservoir is kept. The record stores the lamp index and `lamp_light` runs again this frame, so a moving lamp reconnects. Algorithm 5 can reuse a stored visibility bit; this does not.
+- There are no motion vectors and no history G-buffer. Temporal reuse accepts a point only when it reprojects onto the same pixel, GI is on (the last camera lives in the change block), and no mover bound contains it. A camera move that leaves the pixel is a miss and traces `min(lit, max(rays, 4))` point lamps.
+- Spatial neighbours are the previous frame's reservoirs. The shade loop is one pass, so it cannot read a neighbour written this frame. The test uses the current G-buffer (normal dot above 0.9, plane `0.05 + 0.02 * distance`). Radius 0 skips the merge.
+- Hits, fills, and cache rays do not reuse a reservoir. Their sample offset has no frame index, so a still hit does not crawl.
+- A history miss shades with that bumped count and stores the canonical reservoir. Its unshadowed estimate is the point-lamp total.
+- One visible sample of lamps that share a chromaticity reconstructs the sum (`light * total / weight`), not a single lamp's light. Different colours do not.
+- A-trous denoises the surface cache. It does not denoise pixel direct. Pixel noise stays in the picture. Hit and cache estimates that land in the cache are what the denoiser can resolve.
+- ADR 0012's deterministic 16×16 light-tree cut, with no radiance history, is not built here and this does not amend that ADR. A GTX 1060 scales by lowering candidates and rays. There is no minimum candidate count.
+- Mode off binds a 64-byte reservoir. The screen-sized pair allocates only while reuse is on. `direct.max_lights` stays a separate hard cap.
+- Networking: replicated state is none (the reservoir stays in that frame's GPU buffer). Authority is the machine that shades the picture. Prediction / rollback is none. The pick is deterministic for a mode, a seed, and a frame. A headless server does not shade.
 
 ## Experiment index
 
@@ -175,6 +187,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [RAYCEIL](experiments/RAYCEIL-world-cache-need-ray-ceilings.md) | 2026-10-12 | World-cache cells stop at IC error bound instead of fixed 128 samples | queued | none |
 | [QUIET](experiments/QUIET-quiet-paths-compose-filter-compact.md) | 2026-10-12 | Compose redraws 8×8 blocks whose direct, probe SH, or filtered field changed | pushed (compose only; perf on the owner GPU) | this commit |
 | [SUN](experiments/SUN-small-sun-step.md) | 2026-10-13 | Small sun step: one compose walks the band; direct every frame; four-frame catch-up | 4070 compose rose 2.78 to 3.17 before the single pass; retest decides merge | this change |
+| Lamp pick | 2026-10-13 | Weighted point-lamp samples (Talbot systematic, Bitterli Algorithm 6). The sun stays exact. Default off | lavapipe picture and ray-count tests; milliseconds are the owner GPU's | this change |
 | [LSMOOTH](experiments/LSMOOTH-lighter-smoothing.md) | 2026-10-12 | Lighter smoothing | dropped (Anthony) | none |
 
 # Architecture and component notes (history kept as written)
@@ -255,7 +268,7 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 
 ## Direct light and shadows
 
-- **Ours:** `lighting_direct.comp` lights every lamp at every pixel and at every ray hit with one traced shadow ray each, so pixels, kept probe hits and cache hits share one loop and see this frame's light. No shadow maps, no light history.
+- **Ours:** `lighting_direct.comp` lights every lamp at every pixel and at every ray hit with one traced shadow ray each, so pixels, kept probe hits and cache hits share one loop and see this frame's light. No shadow maps, no light history. `lamp_pick` can sample point lamps instead (default off). The deviations list names where that leaves Bitterli et al. 2020.
 - **Reference:** Lumen uses virtual shadow maps for pixels and shadow-map lookups plus traced rays for surface-cache texels, up to 8 lights per 8×8 card tile [W22]; MegaLights samples many lights stochastically and denoises. Many-light trees [LT].
 - **Differences:** traced shadows match the reference tracer exactly and need no denoiser; cost grows with lamp count (fine for the stress scene, five lamps). The design's deterministic light-tree cut per tile and cached shadow masks are not built.
 - **Scores (P6):** direct view matches a `bounces: 0` trace to about 2 %.

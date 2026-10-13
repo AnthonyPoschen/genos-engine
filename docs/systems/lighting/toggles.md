@@ -104,3 +104,16 @@ cargo run --release -p genos-stress -- --preset day-cycle --view sky --time-of-d
 ```
 
 Lavapipe checks the look and the still-frame cost ratio. `presets_and_toggles_match_their_look` draws each preset and each feature off and rejects an unwritten frame, a saturated field, a flat-colour blowout, blue tiles, and white boxes. `world_cache_off_still_is_not_slower` holds a still camera until probe-only has settled, then checks that its lighting milliseconds are at most the surface cache's and that cache rays and hit lighting dispatched nothing.
+
+Lamp picking is off unless a flag or `GENOS_LIGHTING_LAMP_PICK` says otherwise. A passed flag wins. Lavapipe checks the picture and the shadow-ray counts (`lamp_pick_pixels_match_the_full_sum`, `lamp_pick_shadow_rays_do_not_grow_with_the_lamp_count`, `lamp_pick_reuse_follows_a_moved_lamp`). Milliseconds are the owner's GPU. Compare `off` with `hits` and `reuse` on the moving scene, then the 100-lamp scene. `GENOS_LIGHTING_LAMP_PICK_DIAG=1` appends the last frame's ray counts to `LIGHTING_MS`.
+
+```
+GENOS_GPU_TIMES=30 cargo run --release -p genos-stress -- --proof --no-panel --size 1920x1080 --frames 180 --lights 5 --dynamic 50 --gpu-times 30 --lamp-pick off
+GENOS_GPU_TIMES=30 cargo run --release -p genos-stress -- --proof --no-panel --size 1920x1080 --frames 180 --lights 5 --dynamic 50 --gpu-times 30 --lamp-pick hits
+GENOS_GPU_TIMES=30 cargo run --release -p genos-stress -- --proof --no-panel --size 1920x1080 --frames 180 --lights 5 --dynamic 50 --gpu-times 30 --lamp-pick reuse
+GENOS_GPU_TIMES=30 cargo run --release -p genos-stress -- --proof --no-panel --size 1920x1080 --frames 180 --lights 100 --layout first --dynamic 50 --gpu-times 30 --lamp-pick off
+GENOS_GPU_TIMES=30 cargo run --release -p genos-stress -- --proof --no-panel --size 1920x1080 --frames 180 --lights 100 --layout first --dynamic 50 --gpu-times 30 --lamp-pick hits
+GENOS_GPU_TIMES=30 cargo run --release -p genos-stress -- --proof --no-panel --size 1920x1080 --frames 180 --lights 100 --layout first --dynamic 50 --gpu-times 30 --lamp-pick reuse
+```
+
+Still camera, same flags, with `--dynamic 0 --freeze-sun --still-boxes`. Optional ray counts: prefix `GENOS_LIGHTING_LAMP_PICK_DIAG=1`.

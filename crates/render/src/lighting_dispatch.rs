@@ -63,7 +63,7 @@ const CTRL_DENOISE_ADAPTIVE: u32 = 1 << 20;
 const CTRL_DENOISE_VAR_SHIFT: u32 = 22;
 
 /// What a buffer rebuild depends on. Screen size is compared beside this.
-pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32, u32, u32) {
+pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32, u32, u32, u32) {
     let (cache, probes, rays, tile) = settings.buffer_class();
     (
         cache,
@@ -71,7 +71,30 @@ pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32,
         rays,
         tile,
         u32::from(settings.direct.refresh_frames > 1),
+        u32::from(settings.lamp_pick.reuse()),
     )
+}
+
+/// Push words for `pc.lamp`. Zero keeps the legacy shade loop.
+///
+/// `GENOS_LIGHTING_LAMP_PICK_DIAG` sets bit 17 so the shade loop counts shadow
+/// rays. The mode stays off when the setting is off, and the counters still run.
+pub(crate) fn lamp_pick_push(settings: &LightingSettings) -> [u32; 4] {
+    let diag = u32::from(std::env::var_os("GENOS_LIGHTING_LAMP_PICK_DIAG").is_some());
+    let mode = settings.lamp_pick.mode as u32;
+    if mode == 0 && diag == 0 {
+        return [0; 4];
+    }
+    let y = (settings.lamp_pick.candidates & 0xff)
+        | ((settings.lamp_pick.rays & 0xff) << 8)
+        | (u32::from(settings.lamp_pick.unbiased) << 16)
+        | (diag << 17);
+    [
+        mode,
+        y,
+        settings.lamp_pick.radius,
+        settings.lamp_pick.history,
+    ]
 }
 
 #[repr(C)]
