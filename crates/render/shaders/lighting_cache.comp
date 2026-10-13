@@ -160,7 +160,7 @@ void main() {
         // other three waited for another scout hit and the set was still empty
         // when the texel reached the screen (own sets show only once w >= 1).
         uint q_end = q0 + run;
-        if (!(lighting_sc_prefill(slot) && !wrc_cell && q_end < LIGHTING_SC_QUARTERS)) {
+        if (!(lighting_sc_prefill(slot) && !lighting_sc_prefill_off() && !wrc_cell && q_end < LIGHTING_SC_QUARTERS)) {
             cache.v[LIGHTING_SC_OBJ_AT + slot].y = uintBitsToFloat(lighting_frame());
         }
         // Few rays a relight: the set's quarters add up; the mean takes the set
@@ -271,7 +271,7 @@ void main() {
         if (t >= cap - 0.5) {
             atomicAdd(gstats.atcap, 1u);
         }
-        if (lighting_sc_prefill(slot)) {
+        if (lighting_sc_prefill(slot) && !lighting_sc_prefill_off()) {
             // S73M: the same firefly cap as MSME, so a spike cannot anchor the
             // 4-update average. dev is the newborn sigma (0.15 L), floored.
             vec3 y = e;

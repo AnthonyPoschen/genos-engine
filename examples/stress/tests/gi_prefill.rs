@@ -12,7 +12,11 @@
 //! two asserts (64 pre-filled texels, 8 of them shown after the turn).
 //! After the turn, unfilled shaded pixels must stay under
 //! `GENOS_GI_PREFILL_UNFILLED_PCT` (see `DEFAULT_UNFILLED_PCT`).
-//! `GENOS_GI_PREFILL_OUT` keeps the dumps.
+//! The camera then holds for `GENOS_GI_PREFILL_HOLD` frames (default 32).
+//! Shown pre-filled texels must still have a finished set, and their luminance
+//! must sit near a second run that never pre-filled and settled at the end yaw
+//! (`GENOS_GI_PREFILL_BIAS`, see `DEFAULT_BIAS`). `GENOS_LIGHTING_PREFILL=0`
+//! is that second run. `GENOS_GI_PREFILL_OUT` keeps the dumps.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,18 +42,26 @@ const DEFAULT_SETTLE: u64 = 96;
 const DEFAULT_TURN: u64 = 24;
 const DEFAULT_YAW: f32 = 0.5;
 /// Unfilled share of shaded pixels after the turn, on lavapipe at 320x180.
-/// A lavapipe run (settle 96, turn 24, yaw 0.5) ended at 0.92% (483 px, max_run 35).
-/// `GENOS_GI_PREFILL_UNFILLED_PCT` overrides this.
+/// A lavapipe run (settle 96, turn 24, yaw 0.5) ended at 0.90% (471 px, max_run 36)
+/// after the plain-mean handoff. `GENOS_GI_PREFILL_UNFILLED_PCT` overrides this.
 const DEFAULT_UNFILLED_PCT: f32 = 2.0;
+/// Still frames at the end yaw after the turn, so the plain-mean handoff can run.
+const DEFAULT_HOLD: u64 = 32;
+/// Mean relative luminance of revealed pre-filled texels against a prefill-off
+/// settle at the same pose. `GENOS_GI_PREFILL_BIAS` overrides this.
+/// Filled in from the lavapipe run; see the assert message.
+const DEFAULT_BIAS: f32 = 0.20;
 /// Draws after the last dumped frame so `lighting_dump_write` runs (it waits
 /// until a later begin sees `frame >= last + 3`).
 const FLUSH: u64 = 5;
 
+#[derive(Clone, Copy)]
 struct Fine {
     key: u32,
     sets: f32,
     shown: u32,
     quarters: u32,
+    lum: f32,
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -65,6 +77,13 @@ fn env_f32(name: &str, default: f32) -> f32 {
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
         .filter(|n| n.is_finite() && *n > 0.0)
+        .unwrap_or(default)
+}
+
+fn env_u64_any(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(default)
 }
 
@@ -137,14 +156,46 @@ fn fine_texels(dir: &Path, frame: u64) -> Vec<Fine> {
         if size > FINE {
             continue;
         }
+        let base = (3 * i + 2) * 4;
+        let r = f32::from_bits(word(&cache, base));
+        let g = f32::from_bits(word(&cache, base + 1));
+        let b = f32::from_bits(word(&cache, base + 2));
         out.push(Fine {
             key,
-            sets: f32::from_bits(word(&cache, (3 * i + 2) * 4 + 3)),
+            sets: f32::from_bits(word(&cache, base + 3)),
             shown: word(&cache, (3 * SLOTS + i) * 4 + 2),
             quarters: word(&cache, (6 * SLOTS + i) * 4 + 3),
+            lum: 0.2126 * r + 0.7152 * g + 0.0722 * b,
         });
     }
     out
+}
+
+fn by_key(texels: &[Fine]) -> HashMap<u32, Fine> {
+    let mut map: HashMap<u32, Fine> = HashMap::new();
+    for texel in texels {
+        match map.get_mut(&texel.key) {
+            Some(prev) if texel.sets > prev.sets => *prev = *texel,
+            Some(_) => {}
+            None => {
+                map.insert(texel.key, *texel);
+            }
+        }
+    }
+    map
+}
+
+/// Mean of |a-b| / max(a, b, 0.05). Dark texels do not dominate the ratio.
+fn mean_relative(pairs: &[(f32, f32)]) -> f32 {
+    let n = pairs.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let sum: f32 = pairs
+        .iter()
+        .map(|(a, b)| (a - b).abs() / a.max(*b).max(0.05))
+        .sum();
+    sum / n as f32
 }
 
 fn out_dir() -> PathBuf {
@@ -179,9 +230,17 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
     let yaw_delta = env_f32("GENOS_GI_PREFILL_YAW", DEFAULT_YAW);
     let min_prefilled = env_usize("GENOS_GI_PREFILL_MIN", 64);
     let min_shown = env_usize("GENOS_GI_PREFILL_SHOWN", 8);
+    let hold = env_u64_any("GENOS_GI_PREFILL_HOLD", DEFAULT_HOLD);
+    let bias_cap = env_f32("GENOS_GI_PREFILL_BIAS", DEFAULT_BIAS);
     let dir = out_dir();
     let _env = DumpEnv;
-    std::env::set_var("GENOS_LIGHTING_DUMP", format!("{settle},{}", settle + turn));
+    let turn_frame = settle + turn;
+    let bias_frame = turn_frame + hold;
+    let mut spec = format!("{settle},{turn_frame}");
+    if hold > 0 {
+        spec.push_str(&format!(",{bias_frame}"));
+    }
+    std::env::set_var("GENOS_LIGHTING_DUMP", spec);
     std::env::set_var("GENOS_LIGHTING_DUMP_DIR", &dir);
     std::env::set_var("GENOS_LIGHTING_SC_TRACE", "1");
 
@@ -201,7 +260,7 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
     });
     let stage = stage();
     eprintln!(
-        "prefill: settle {settle} turn {turn} yaw {yaw_delta} dir {}",
+        "prefill: settle {settle} turn {turn} hold {hold} yaw {yaw_delta} dir {}",
         dir.display()
     );
     for i in 1..=settle {
@@ -232,12 +291,17 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
         unfilled.line()
     );
     let yaw_end = BENCH_YAW + yaw_delta;
+    for i in 1..=hold {
+        draw(&mut window, &mut renderer, &stage.world, yaw_end);
+        if i % 16 == 0 || i == hold {
+            eprintln!("prefill: hold frame {i}/{hold}");
+        }
+    }
     for _ in 0..FLUSH {
         draw(&mut window, &mut renderer, &stage.world, yaw_end);
     }
     drop(renderer);
     drop(window);
-    drop(_gpu);
 
     let settle_path = dir.join(format!("f{settle}_cache.bin"));
     let turn_frame = settle + turn;
@@ -307,5 +371,107 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
     assert!(
         on_screen >= min_shown,
         "the {yaw_delta} rad turn brought {on_screen} pre-filled texels on screen (want {min_shown}); {still_hidden} stayed hidden, {gone} left the cache"
+    );
+
+    let revealed = by_key(&arrived);
+    let mut empty_on_show = 0usize;
+    for key in &prefilled {
+        if let Some(texel) = revealed.get(key) {
+            if texel.shown != 0 && texel.sets < 1.0 {
+                empty_on_show += 1;
+            }
+        }
+    }
+    assert!(
+        empty_on_show == 0,
+        "{empty_on_show} pre-filled texels were on screen at frame {turn_frame} with no finished set"
+    );
+
+    let bias_src = if hold > 0 { bias_frame } else { turn_frame };
+    let biased = by_key(&fine_texels(&dir, bias_src));
+
+    let ref_dir = dir.join("reference");
+    std::fs::create_dir_all(&ref_dir).expect("reference dump directory");
+    std::env::set_var("GENOS_LIGHTING_DUMP", format!("{settle}"));
+    std::env::set_var("GENOS_LIGHTING_DUMP_DIR", &ref_dir);
+    let mut ref_window = Window::open_proof(WIDTH, HEIGHT).expect("reference window");
+    let ref_size = ref_window.pump();
+    assert_eq!((ref_size.width, ref_size.height), (WIDTH, HEIGHT));
+    let mut ref_renderer = Renderer::open(
+        ref_window.display,
+        ref_window.surface,
+        ref_size.width,
+        ref_size.height,
+    )
+    .expect("reference renderer");
+    ref_renderer.set_prefill(false);
+    assert!(!ref_renderer.prefill_on());
+    eprintln!("prefill: reference settle {settle} at yaw {yaw_end}");
+    for i in 1..=settle {
+        draw(&mut ref_window, &mut ref_renderer, &stage.world, yaw_end);
+        if i % 16 == 0 || i == settle {
+            eprintln!("prefill: reference frame {i}/{settle}");
+        }
+    }
+    for _ in 0..FLUSH {
+        draw(&mut ref_window, &mut ref_renderer, &stage.world, yaw_end);
+    }
+    drop(ref_renderer);
+    drop(ref_window);
+    drop(_gpu);
+
+    let reference = by_key(&fine_texels(&ref_dir, settle));
+    let mut leaked = 0usize;
+    for texel in reference.values() {
+        if texel.shown == 0 && texel.sets >= 1.0 {
+            leaked += 1;
+        }
+    }
+    eprintln!(
+        "reference frame {settle}: fine {} never-shown finished sets {leaked}",
+        reference.len()
+    );
+    assert!(
+        leaked == 0,
+        "pre-fill off still left {leaked} never-shown fine texels with a finished set"
+    );
+
+    let mut pairs = Vec::new();
+    let mut missing = 0usize;
+    for key in &prefilled {
+        let Some(shown) = revealed.get(key) else {
+            continue;
+        };
+        if shown.shown == 0 {
+            continue;
+        }
+        let Some(after_hold) = biased.get(key) else {
+            missing += 1;
+            continue;
+        };
+        let Some(settled_ref) = reference.get(key) else {
+            missing += 1;
+            continue;
+        };
+        if settled_ref.sets < 1.0 || settled_ref.shown == 0 {
+            missing += 1;
+            continue;
+        }
+        pairs.push((after_hold.lum, settled_ref.lum));
+    }
+    let mean = mean_relative(&pairs);
+    eprintln!(
+        "bias frame {bias_src}: {} matched keys, {missing} skipped, mean relative luminance {mean:.3} (cap {bias_cap})",
+        pairs.len()
+    );
+    assert!(
+        pairs.len() >= min_shown,
+        "only {} revealed pre-filled keys had a lit reference texel (want {min_shown})",
+        pairs.len()
+    );
+    assert!(
+        mean < bias_cap,
+        "revealed pre-fill luminance differs from the prefill-off settle by {mean:.3} (want under {bias_cap}) over {} keys",
+        pairs.len()
     );
 }

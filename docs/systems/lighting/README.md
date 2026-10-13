@@ -137,7 +137,8 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S73K](experiments/S73K-scout-feedback-claim.md) | 2026-10-12 | Scout feedback claims without the irradiance read | lavapipe turn passed: 18335 prefilled, 4547 shown | d4a666f |
 | [S73L](experiments/S73L-unfilled-on-screen.md) | 2026-10-13 | Count composed pixels whose surface-cache texel has no finished set | lavapipe turn ended at 0.92% unfilled | 8b78df0 |
 | [S73M](experiments/S73M-prefill-handoff.md) | 2026-10-13 | Firefly-cap the pre-fill, then a plain-mean handoff on first show | keeps one set so the texel stays filled | 60ba22e |
-| [S73N](experiments/S73N-prefill-floor.md) | 2026-10-13 | Pre-fill keeps 1024 entries inside the texel room | floor is carved from mature entries when the room is full | S73N |
+| [S73N](experiments/S73N-prefill-floor.md) | 2026-10-13 | Pre-fill keeps 1024 entries inside the texel room | floor is carved from mature entries when the room is full | bc8c7c1 |
+| [S73O](experiments/S73O-prefill-bias-check.md) | 2026-10-13 | Lavapipe turn checks coverage and luminance against prefill off | revealed texels stay filled and near the reference | S73O |
 | [S74A-cam](experiments/S74A-cam-last-camera-offsets.md) | 2026-10-12 | Fix: last-frame camera read from stale scene-block offsets | pushed | 81c00734 |
 | [S74A-asvgf](experiments/S74A-asvgf-asvgf-change-adaptive-rays.md) | 2026-10-12 | A-SVGF same-seed 1-ray checks on 1/9 resolved texels, lambda drives alpha and rays | pushed | 81c00734 |
 | [S74A-shadow](experiments/S74A-shadow-static-lamp-shadow-reuse.md) | 2026-10-12 | Hit shadow rays kept per 12.5 cm cell/lamp, invalidated by lamp epoch | pushed | 81c00734 |

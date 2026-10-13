@@ -70,6 +70,7 @@ impl Renderer {
             keep_pictures: false,
             debug: debug_view::DebugState {
                 unfilled,
+                prefill_off: debug_view::prefill_disabled_from_env(),
                 ..debug_view::DebugState::default()
             },
         })

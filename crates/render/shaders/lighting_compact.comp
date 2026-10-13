@@ -192,6 +192,10 @@ void main() {
                 cache.v[3u * slot + 2u] = vec4(0.0);
                 return;
             }
+            // S73O: pre-fill off leaves the texel empty until a pixel shows it.
+            if (lighting_sc_prefill_off()) {
+                return;
+            }
             uint upd = lighting_sc_updated(slot);
             if (upd == 0u || int(last - upd) > 0) {
                 uint at = atomicAdd(ckeys.key[LIGHTING_SC_PREFILL_COUNT_AT], 1u);

@@ -179,8 +179,8 @@ const uint LIGHTING_COMPOSE_MAXY = LIGHTING_COMPOSE_MAXX + LIGHTING_CACHE_SLOTS;
 // Set by the compose pass around the lookups that colour a pixel.
 bool lighting_sc_display = false;
 uvec2 lighting_compose_px = uvec2(0u);
-// Unfilled-on-screen detector. Bits of scene.grid_at.w: 24 count, 25 magenta tint
-// (debug_view.rs). Off is a uniform test and no atomics. The mask word count is
+// Unfilled-on-screen detector. Bits of scene.grid_at.w: 24 count, 25 magenta tint,
+// 26 pre-fill off (debug_view.rs). Off is a uniform test and no atomics. The mask word count is
 // lighting_gpu.rs LIGHTING_UNFILLED_MASK_CAP; word 0 is stats word 126.
 const float LIGHTING_UNFILLED_MIN_SETS = 1.0;
 const uint LIGHTING_UNFILLED_MASK_CAP = 276480u;
@@ -1250,6 +1250,11 @@ bool lighting_sc_prefill(uint slot) {
     return lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w <= 0.2
         && floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z) == 0u;
 }
+// GENOS_LIGHTING_PREFILL=0 (debug word bit 26). A never-shown fine texel still
+// stays off the normal list; it is just not accumulated until a pixel shows it.
+bool lighting_sc_prefill_off() {
+    return (scene.grid_at.w & 0x4000000u) != 0u;
+}
 // S73M: first time a pixel shows a pre-filled fine texel. Keep the colour, drop
 // the count to one set, and mark the estimator (b.z < 0) so the next 15
 // on-screen sets are a plain mean. Idempotent: a later pixel this frame sees
@@ -2264,6 +2269,10 @@ uvec2 lighting_sc_prefill_plan() {
     uint spare = young + mature < base ? base - (young + mature) : 0u;
     uint floor_n = LIGHTING_SC_PREFILL_FLOOR >> sh;
     uint have = min(ckeys.key[LIGHTING_SC_PREFILL_COUNT_AT], LIGHTING_SC_PREFILL_MAX >> sh);
+    if (lighting_sc_prefill_off()) {
+        uint room_left = young < room ? room - young : 0u;
+        return uvec2(min(mature, room_left), 0u);
+    }
     if (young >= room) {
         return uvec2(0u, 0u);
     }
