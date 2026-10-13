@@ -228,6 +228,12 @@ pub(crate) struct Lighting {
     wake_phase: [u32; 2],
     /// The stats tail still holds the previous ring. The first frame clears it.
     wake_ready: [bool; 2],
+    /// Host pointer for `stats`, mapped once. A per-frame map of this cached
+    /// readback was the rings-only read on a settled corner.
+    stats_map: [*mut u8; 2],
+    /// The work buffer's wake-event block is already zero. A settled frame
+    /// does not rewrite it.
+    wake_block_clear: bool,
 }
 
 /// A-trous levels 1-5 in the last frame that ran them (S78X dense fallback).
@@ -383,6 +389,8 @@ impl Default for Lighting {
             wake: WakeQueue::new(),
             wake_phase: [0; 2],
             wake_ready: [false; 2],
+            stats_map: [std::ptr::null_mut(); 2],
+            wake_block_clear: false,
         }
     }
 }
@@ -807,6 +815,7 @@ impl Gpu {
                 // detector is on; the room stays so a hotkey can turn it on.
                 let stats_bytes = lighting_stats_storage_bytes();
                 self.lighting.stats[k] = self.make_buffer(stats_bytes, 0x20 | 0x2, Memory::Readback)?;
+                self.pin_stats(k);
                 self.lighting.stats_dev[k] = self.make_buffer(stats_bytes, 0x20 | 0x2 | 0x1, Memory::Device)?;
             }
             self.lighting.world_stats =
@@ -863,6 +872,7 @@ impl Gpu {
         self.lighting.compose_valid = false;
         self.lighting.gbuf_clear = true;
         self.lighting.work_clear = gi;
+        self.lighting.wake_block_clear = false;
         self.write_raster_sets()?;
         self.write_lighting_sets()
     }
@@ -1071,44 +1081,58 @@ impl Gpu {
             self.poll_lighting_world();
         }
         // This slot's last frame is done (its fence was waited): read its counters
-        // (the async queue's come back with its own submission).
-        self.trace_sc(self.lighting.stats[slot].memory, "frame");
+        // once. Debug, settle, and the ring vote all want the same words. A second
+        // map of the cached readback was rings-only and showed up as CPU time on
+        // the lit corner while the GPU total stayed equal.
+        let trace_on = std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_some();
+        let debug = lighting_debug_enabled();
+        let read = lighting_stats_wanted(self.lighting.settings.world_mode());
+        let adapt = wake_config(&self.lighting.settings).mode == 1 && self.lighting.wake_ready[slot];
+        let words = if trace_on || debug || read || adapt {
+            self.read_stats16(self.lighting.stats[slot].memory).ok()
+        } else {
+            None
+        };
+        if trace_on || debug {
+            if let Some(words) = words.as_ref() {
+                self.emit_trace_sc(words, "frame", trace_on);
+            }
+        }
         self.lighting_dump_write();
         // S70B (no GPU->CPU reads in the frame loop): the surface cache's settling
         // and young-only rounds come from what the CPU already knows (frames still,
         // rounds since the light changed), so its counters are read only for the
         // debug output or the older world modes that settle on them.
-        let read = lighting_stats_wanted(self.lighting.settings.world_mode());
-        if !read {
-        } else if let Ok(words) = self.read_lighting_stats(slot) {
-            self.lighting.probe_samples = [words[6], words[7]];
-            if words[7] > 0 && lighting_debug_enabled() {
-                eprintln!(
-                    "lighting probes rays {} probes {} per_probe {:.1}",
-                    words[6],
-                    words[7],
-                    words[6] as f64 / words[7] as f64
-                );
+        if read {
+            if let Some(words) = words.as_ref() {
+                self.lighting.probe_samples = [words[6], words[7]];
+                if words[7] > 0 && debug {
+                    eprintln!(
+                        "lighting probes rays {} probes {} per_probe {:.1}",
+                        words[6],
+                        words[7],
+                        words[6] as f64 / words[7] as f64
+                    );
+                }
             }
         }
-        if !self.lighting.cache_clear && !world {
-            if !self.lighting.stats_round[slot] {
-                // No light cache round ran in that frame.
-            } else if !read {
-            } else if let Ok(words) = self.read_lighting_stats(slot) {
+        if !self.lighting.cache_clear && !world && self.lighting.stats_round[slot] && read {
+            if let Some(words) = words.as_ref() {
                 // A frame that ran just as the scene changed measured against the
                 // old light; it does not count toward settling.
+                let mut head = [0u32; 8];
+                head.copy_from_slice(&words[..8]);
                 let light = self.lighting.stats_light[slot] == self.lighting.light_hash;
                 self.note_lighting_round(
-                    words,
+                    head,
                     self.lighting.stats_still[slot] != 0,
                     light,
                     self.lighting.stats_young[slot],
                 );
             }
         }
-        if wake_config(&self.lighting.settings).mode == 1 && self.lighting.wake_ready[slot] {
-            if let Ok(words) = self.read_stats16(self.lighting.stats[slot].memory) {
+        if adapt {
+            if let Some(words) = words.as_ref() {
                 self.lighting.wake.adapt(words[WAKE_HITS], words[WAKE_MISSES]);
             }
         }
@@ -1471,7 +1495,12 @@ impl Gpu {
             return;
         }
         if let Ok(w) = self.read_stats16(memory) {
-            if trace {
+            self.emit_trace_sc(&w, queue, trace);
+        }
+    }
+
+    fn emit_trace_sc(&self, w: &[u32; LIGHTING_STATS_WORDS], queue: &str, trace: bool) {
+        if trace {
                 eprintln!(
                     "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {} checks {} changed {}",
                     self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23]
@@ -1491,7 +1520,7 @@ impl Gpu {
                 w[LIGHTING_ATROUS_STAT + 2] as f64 / 1.0e6,
                 w[LIGHTING_ATROUS_STAT + 3]
             );
-            let wake = LightingWakeStats::from_words(&w);
+            let wake = LightingWakeStats::from_words(w);
             eprintln!(
                 "lightingwake {queue} frame {} traced {} rays {} rings {} splits {} woken {} hits {} misses {}",
                 self.lighting.frame,
@@ -1503,11 +1532,49 @@ impl Gpu {
                 wake.verify_hits,
                 wake.verify_misses
             );
+    }
+
+    /// Host pointer kept for the life of the stats readback. `None` for the
+    /// async queue's own buffer, which is mapped on the read.
+    fn stats_host(&self, memory: Handle) -> Option<*const u32> {
+        for k in 0..2 {
+            let ptr = self.lighting.stats_map[k];
+            if !ptr.is_null() && self.lighting.stats[k].memory == memory {
+                return Some(ptr.cast());
+            }
+        }
+        None
+    }
+
+    fn pin_stats(&mut self, k: usize) {
+        let buf = &self.lighting.stats[k];
+        if buf.memory.is_null() || buf.size == 0 {
+            return;
+        }
+        let mut mapped = std::ptr::null_mut();
+        let rc = unsafe { (self.fns.map_mem)(self.device, buf.memory, 0, buf.size, 0, &mut mapped) };
+        if rc == 0 {
+            self.lighting.stats_map[k] = mapped.cast();
+        }
+    }
+
+    fn unpin_stats(&mut self, k: usize) {
+        if self.lighting.stats_map[k].is_null() {
+            return;
+        }
+        self.lighting.stats_map[k] = std::ptr::null_mut();
+        let memory = self.lighting.stats[k].memory;
+        if !memory.is_null() {
+            unsafe { (self.fns.unmap_mem)(self.device, memory) };
         }
     }
 
     fn read_stats16(&self, memory: Handle) -> Result<[u32; LIGHTING_STATS_WORDS], String> {
         let mut words = [0u32; LIGHTING_STATS_WORDS];
+        if let Some(src) = self.stats_host(memory) {
+            unsafe { copy_host_words(src, words.as_mut_ptr(), LIGHTING_STATS_WORDS) };
+            return Ok(words);
+        }
         unsafe {
             let mut mapped = std::ptr::null_mut();
             check(
@@ -1532,6 +1599,19 @@ impl Gpu {
             return Ok(Vec::new());
         }
         let mut words = vec![0u32; count];
+        if let Some(src) = self.stats_host(memory) {
+            let bytes = self
+                .lighting
+                .stats
+                .iter()
+                .find(|b| b.memory == memory)
+                .map(|b| b.size)
+                .unwrap_or(0);
+            if (count as u64) * 4 <= bytes {
+                unsafe { copy_host_words(src, words.as_mut_ptr(), count) };
+                return Ok(words);
+            }
+        }
         unsafe {
             let mut mapped = std::ptr::null_mut();
             check(
@@ -1719,15 +1799,24 @@ impl Gpu {
                 );
             }
         }
-        if wake_cfg.mode == 1 && !self.lighting.kept_bytes.is_empty() {
+        if wake_cfg.mode == 1
+            && !self.lighting.kept_bytes.is_empty()
+            && wake_note_due(self.lighting.still)
+        {
             // Diff the occluders even when the trace key changed. `changes` is
             // None in that case because the shader list was not built, and the
             // queue would read that as an overflow and wake every probe.
-            let wake_changes = lighting_changes(&self.lighting.kept_bytes, &self.frame_bytes);
+            // A still frame already hashed the lamps and the occluders.
+            let extra = if had {
+                None
+            } else {
+                lighting_changes(&self.lighting.kept_bytes, &self.frame_bytes)
+            };
+            let wake_changes = if had { changes.as_deref() } else { extra.as_deref() };
             self.lighting.wake.note(
                 &self.lighting.kept_bytes,
                 &self.frame_bytes,
-                wake_changes.as_deref(),
+                wake_changes,
             );
             for (&i, &left) in &self.lighting.mesh_movers {
                 if left == LIGHTING_MOVER_KEEP {
@@ -2052,26 +2141,30 @@ impl Gpu {
                 wake_hdr.as_ptr() as *const c_void,
             );
             if wake_cfg.mode == 1 && self.lighting.settings.gi.enabled && probes > 0 {
-                let packed = self.lighting.wake.pack();
-                let at = lighting_wake_events_at(
-                    probes as u64,
-                    self.lighting.settings.probe_rays() as u64,
-                    w as u64,
-                    h as u64,
-                ) * 16;
-                debug_assert!(
-                    at + 256 <= self.lighting.work.size,
-                    "wake events sit past the work buffer ({at} of {})",
-                    self.lighting.work.size
-                );
-                if at + 256 <= self.lighting.work.size {
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.lighting.work.buffer,
-                        at,
-                        256,
-                        packed.as_ptr() as *const c_void,
+                let queued = self.lighting.wake.len();
+                if wake_block_due(queued, self.lighting.wake_block_clear) {
+                    let packed = self.lighting.wake.pack();
+                    let at = lighting_wake_events_at(
+                        probes as u64,
+                        self.lighting.settings.probe_rays() as u64,
+                        w as u64,
+                        h as u64,
+                    ) * 16;
+                    debug_assert!(
+                        at + 256 <= self.lighting.work.size,
+                        "wake events sit past the work buffer ({at} of {})",
+                        self.lighting.work.size
                     );
+                    if at + 256 <= self.lighting.work.size {
+                        (self.fns.cmd_update_buffer)(
+                            self.cmd,
+                            self.lighting.work.buffer,
+                            at,
+                            256,
+                            packed.as_ptr() as *const c_void,
+                        );
+                        self.lighting.wake_block_clear = queued == 0;
+                    }
                 }
             }
             if self.lighting.cache_full {
@@ -2431,6 +2524,7 @@ impl Gpu {
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
         for k in 0..2 {
+            self.unpin_stats(k);
             let mut stats_dev = std::mem::replace(&mut self.lighting.stats_dev[k], Buffer::empty());
             self.destroy_buffer(&mut stats_dev);
             let mut stats = std::mem::replace(&mut self.lighting.stats[k], Buffer::empty());
@@ -2467,6 +2561,13 @@ impl Gpu {
             }
         }
         self.lighting.ready = false;
+    }
+}
+
+/// GPU writes this memory. A plain copy can be reused from the last frame.
+unsafe fn copy_host_words(src: *const u32, dst: *mut u32, n: usize) {
+    for i in 0..n {
+        dst.add(i).write(src.add(i).read_volatile());
     }
 }
 

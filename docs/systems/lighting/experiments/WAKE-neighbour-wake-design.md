@@ -69,6 +69,7 @@ What changed:
 - An unsettled rings frame with no live ring keeps the probe-ray launch, so the check rays match legacy until settle. The kept-hit and fill tail is omitted when no geometry changed. Shrinking that launch to the stride at frame 8 was the still and corner picture gap at `6cd3cef`.
 - A live ring still launches the probe rays, so a woken probe is traced. The kept-hit and fill tail is omitted when no geometry changed. A kept hit is not shaded only because a lamp moved. A woken probe and its check ray still shade. The probe filter spreads that. That is the moving picture gap (mean 0.77 / p99 17.7).
 - Atrous is unchanged. It remains the cache-round cost, shared by both modes.
+- The lit corner at 640×360 was 112 fps in legacy and about 103 fps in rings, with the GPU total equal (`6cd3cef`). Rings mapped the stats host buffer a second time each frame to adapt the tolerance, diffed the lamps and occluders on a frame the scene hash had already proved still, and rewrote an empty wake-event block into the work buffer. The stats host memory stays mapped for the life of the buffer, and that one read serves the debug line and the vote. A still frame does not diff the scene. An empty event block is uploaded once. No new fps is claimed.
 
 `settled_rings_frame_matches_legacy_idle_plus_the_budget` and `unsettled_quiet_rings_frame_keeps_the_probe_rays` lock the group lists. `still_rings_picture_matches_legacy` compares the still corner. No new 4070 millisecond is claimed here.
 

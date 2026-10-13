@@ -194,6 +194,18 @@ impl WakeQueue {
     }
 }
 
+/// The scene hash already proved nothing moved. Another lamp and occluder diff
+/// would only repeat that.
+pub(crate) fn wake_note_due(still: u32) -> bool {
+    still == 0
+}
+
+/// An empty event block is uploaded once. Rewriting those zeros every settled
+/// frame updates a work buffer the GPU is still reading.
+pub(crate) fn wake_block_due(queued: usize, already_clear: bool) -> bool {
+    queued > 0 || !already_clear
+}
+
 fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
@@ -346,5 +358,15 @@ mod wake_tests {
         assert!((tol.tol_scale - 0.25).abs() < 1.0e-5);
         tol.adapt(4, 0);
         assert!(tol.tol_scale > 0.25 && tol.tol_scale <= 1.0);
+    }
+
+    #[test]
+    fn a_still_frame_skips_the_diff_and_an_empty_event_block_is_written_once() {
+        assert!(wake_note_due(0));
+        assert!(!wake_note_due(1));
+        assert!(!wake_note_due(32));
+        assert!(wake_block_due(2, true));
+        assert!(wake_block_due(0, false));
+        assert!(!wake_block_due(0, true));
     }
 }
