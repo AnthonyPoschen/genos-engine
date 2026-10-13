@@ -92,9 +92,9 @@ uint lighting_bounce_word(uint index) {
 }
 
 void main() {
-    bool patch = lighting_sun_patch_now();
+    bool direct_patch = lighting_sun_patch_now();
     uvec2 p;
-    if (patch || ckeys.key[LIGHTING_COMPOSE_FULL] != 0u) {
+    if (direct_patch || ckeys.key[LIGHTING_COMPOSE_FULL] != 0u) {
         p = gl_GlobalInvocationID.xy;
     } else {
         uint bw = (pc.dims.x + 7u) / 8u;
@@ -111,7 +111,7 @@ void main() {
     uint mode = scene.grid_at.w & 255u;
     // Albedo, normal, depth, texels, and the regime view are drawn by the
     // list compose. The patch only refreshes the shaded picture.
-    bool shade = !patch || mode <= 2u || mode == 6u;
+    bool shade = !direct_patch || mode <= 2u || mode == 6u;
     if (in_pic && shade) {
         lighting_compose_px = p;
         vec3 albedo;
@@ -123,7 +123,7 @@ void main() {
             // The light pass left the pixel's emitted light past the picture.
             uint pixels = pc.dims.x * pc.dims.y;
             vec3 glow = lighting_unpack_rgb9e5(outc.px[pixels + index]);
-            if (!lighting_sun_patch_follows() || patch) {
+            if (!lighting_sun_patch_follows() || direct_patch) {
                 gbuf.px[index] = uvec4(~0u);
             }
             if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
@@ -144,7 +144,7 @@ void main() {
             } else {
                 vec3 bounce;
                 uint stored = outc.px[lighting_bounce_word(index)];
-                if (patch && stored != 0u) {
+                if (direct_patch && stored != 0u) {
                     bounce = lighting_unpack_rgb9e5(stored - 1u);
                 } else {
                     bounce = indirect(p, pos, n);
@@ -163,7 +163,7 @@ void main() {
             }
         }
     }
-    if (patch) {
+    if (direct_patch) {
         if (gl_WorkGroupID.x == 0u && gl_WorkGroupID.y == 0u && gl_LocalInvocationIndex == 0u) {
             gstats.work_stochastic = 1u;
         }
