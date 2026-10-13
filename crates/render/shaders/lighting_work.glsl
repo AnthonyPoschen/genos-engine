@@ -69,15 +69,33 @@ bool lighting_work_lamp_moved(uint i, out vec3 prev, out vec3 now) {
     return length(now - prev) > 0.01;
 }
 
-// The pixel sits near the segment the lamp just travelled. A distance, not an
-// occluder walk: the walk pulled the scene grid into the compose shader and
-// made a full compose slower than the base shade. Wider than the swept
-// triangle, so a pixel the triangle would leave quiet can still be fringe.
-bool lighting_work_near_segment(vec3 pos, vec3 a, vec3 b, float radius) {
-    vec3 ab = b - a;
-    float len2 = dot(ab, ab);
-    float t = len2 < 1.0e-8 ? 0.0 : clamp(dot(pos - a, ab) / len2, 0.0, 1.0);
-    return length(pos - (a + ab * t)) < max(radius, 0.05) + 0.5;
+// Tube of radius `motion` around the segment from the pixel to the lamp,
+// starting off the surface. Floor and roof bits are ignored. The occluder
+// that contains `from` is skipped. Wider than the swept triangle: a pixel
+// the triangle would leave quiet can still be tagged full effort.
+// A picture compose does not call this. The regime view does.
+bool lighting_work_tube(vec3 from, vec3 to, float radius) {
+    vec3 d = to - from;
+    float len = length(d);
+    if (len < 1.0e-3) {
+        return false;
+    }
+    float start = min(0.15, len * 0.5);
+    float reach = len - start;
+    if (reach < 1.0e-3) {
+        return false;
+    }
+    vec3 dir = d / len;
+    uint n = min(uint(ceil(reach / 0.5)) + 1u, 12u);
+    vec3 e = vec3(max(radius, 0.05));
+    for (uint s = 0u; s < n; s++) {
+        float t = start + reach * (float(s) + 0.5) / float(n);
+        vec3 p = from + dir * t;
+        if ((scene_candidates_skip(p - e, p + e, true, from) & SCENE_OCC_BIT) != 0u) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // 2 fringe, 1 full effort (missing or a big grade), 3 settled.
@@ -99,7 +117,7 @@ uint lighting_work_px_tag(vec3 pos, vec3 n) {
             break;
         }
         float motion = length(now - prev);
-        fringe = lighting_work_near_segment(pos, prev, now, motion);
+        fringe = lighting_work_tube(pos, now, motion);
     }
     if (!fringe) {
         vec4 head = work.v[lighting_change_at()];

@@ -105,6 +105,7 @@ fn mark_dont_inline(path: &std::path::Path) {
         "lighting_compose_extra",
         "lighting_work_count_px",
         "lighting_work_px_tag",
+        "lighting_work_tube",
     ];
     let mut bytes = std::fs::read(path).expect("read spir-v");
     if bytes.len() < 20 || bytes.len() % 4 != 0 {
