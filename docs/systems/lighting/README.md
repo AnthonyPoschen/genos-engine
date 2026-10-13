@@ -47,7 +47,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Whole-image consistency beats local sharpness; quality changes only at logical boundaries (12 Oct).
 - Lighting VRAM may grow if it cuts per-frame compute; total should stay fixed rather than scale with the scene (12 Oct).
 - Never skip lighting on an assumption; verify with an extraordinarily cheap check every frame (12 Oct).
-- The moving-scene cut is designed in [work-reduction-design.md](work-reduction-design.md). Phase 1 tags each surface pixel and each probe full effort or settled and does not change the shade on a scene with no sun. A small directional-sun step amortises the indirect refresh and keeps direct sun light and shadows on this frame. Later phases are not in the shaded work yet.
+- The moving-scene cut is designed in [work-reduction-design.md](work-reduction-design.md). Phase 1 tags each surface pixel on the regime view, and each probe, full effort or settled, and does not change the shade. A picture compose does not walk that tag. A small directional-sun step amortises the indirect refresh and keeps direct sun light and shadows on this frame. Later phases are not in the shaded work yet.
 
 ## Networking
 
