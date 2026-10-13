@@ -619,3 +619,66 @@ fn presets_and_toggles_match_their_look() {
         }
     }
 }
+
+/// Still probe-only must not cost more than the surface cache. Settle is 32
+/// still frames (`LIGHTING_SETTLE_FRAMES`) and the collected counters are one
+/// frame behind, so the sample starts after that.
+#[test]
+fn world_cache_off_still_is_not_slower() {
+    let (_gpu, mut window, mut renderer) = open();
+    let frames = 48u32;
+    let on = still_lighting(
+        &mut window,
+        &mut renderer,
+        &interior(LightingSettings::preset(LightingPreset::High)),
+        frames,
+    );
+    assert!(on.0 > 0.0, "surface cache recorded no lighting time");
+    assert!(
+        on.1[index("cache_rays")] > 0,
+        "surface cache dispatched no cache rays"
+    );
+    let mut off_settings = LightingSettings::preset(LightingPreset::High);
+    off_settings.world_cache.enabled = false;
+    let off = still_lighting(&mut window, &mut renderer, &interior(off_settings), frames);
+    assert_eq!(off.1[index("cache_rays")], 0, "cache rays still dispatched");
+    assert_eq!(off.1[index("hit_light")], 0, "hit light still dispatched");
+    assert_eq!(off.1[index("trace")], 0, "probe trace still dispatched");
+    assert_eq!(off.1[index("atrous")], 0, "atrous still dispatched");
+    assert!(
+        off.0 <= on.0,
+        "world cache off still lighting {:.3} ms exceeds on {:.3} ms",
+        off.0,
+        on.0
+    );
+}
+
+fn still_lighting(
+    window: &mut Window,
+    renderer: &mut Renderer,
+    world: &World,
+    frames: u32,
+) -> (f64, [u32; 12]) {
+    let camera = Camera::new(0.0, 2.4, 0.0);
+    let mut cost = 0.0f64;
+    let mut counts = [0u32; 12];
+    let skip = index("shadows");
+    for frame in 0..frames {
+        let _ = window.pump();
+        renderer.draw(world, &camera, false).expect("draw");
+        if frame < 40 {
+            continue;
+        }
+        let ms = renderer.lighting_pass_ms();
+        if ms.iter().any(|value| *value > 0.0) {
+            cost = ms
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != skip)
+                .map(|(_, value)| *value)
+                .sum();
+            counts = renderer.lighting_dispatches();
+        }
+    }
+    (cost, counts)
+}
