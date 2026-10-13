@@ -7,9 +7,11 @@
 // colour already in the output. Clears the G-buffer record for the next frame.
 //
 // Quiet frames dispatch one 8x8 group per block whose inputs changed
-// (LIGHTING_COMPOSE_LIST). A full frame (camera, resize, or a picture bigger
-// than the list) sets LIGHTING_COMPOSE_FULL and covers the image. The picture
-// stays in outc[0..pixels); emitted light for this frame is outc[pixels..).
+// (LIGHTING_COMPOSE_LIST). A full frame (no history yet, world mode other than
+// the surface cache, COMPOSE_ALL, or a picture bigger than the list) sets
+// LIGHTING_COMPOSE_FULL and covers the image. An empty dirty list is promoted
+// to that full dispatch: a frame is never held. The picture stays in
+// outc[0..pixels); emitted light for this frame is outc[pixels..).
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 8, local_size_y = 8) in;
 #include "lighting_common.glsl"
@@ -85,8 +87,24 @@ vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
 }
 
 void main() {
+    // Every thread loads the prepare flag before thread 0 clears it.
+    uint prep = ckeys.key[LIGHTING_COMPOSE_PREP_AT];
+    memoryBarrierBuffer();
+    barrier();
+    if (prep != 0u) {
+        if (gl_LocalInvocationIndex == 0u) {
+            lighting_compose_prepare();
+        }
+        return;
+    }
     uvec2 p;
     if (ckeys.key[LIGHTING_COMPOSE_FULL] != 0u) {
+        if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) {
+            uint bw = (pc.dims.x + 7u) / 8u;
+            uint bh = (pc.dims.y + 7u) / 8u;
+            gstats.compose_full = 1u;
+            gstats.compose_blocks = bw * bh;
+        }
         p = gl_GlobalInvocationID.xy;
     } else {
         uint bw = (pc.dims.x + 7u) / 8u;
@@ -104,6 +122,14 @@ void main() {
     bool two_sided;
     uint index = p.y * pc.dims.x + p.x;
     if (!lighting_surface(p, pos, n, albedo, two_sided)) {
+        // The full path copied the raster clear (toned sky) into empty pixels.
+        // A dirty block has no copy, so an empty pixel in it writes that sky.
+        // Deviation: Lumen and SVGF shade every pixel from this frame's buffers;
+        // a clean block keeps the shaded result stored from the last visit.
+        if (ckeys.key[LIGHTING_COMPOSE_FULL] == 0u) {
+            vec3 sky = has_sky() ? scene.sky.rgb : vec3(0.0);
+            outc.px[index] = pack_rgb(vec3(tone_channel(sky.r), tone_channel(sky.g), tone_channel(sky.b)));
+        }
         return;
     }
     vec3 direct = lighting_unpack_rgb9e5(gbuf.px[index].w);

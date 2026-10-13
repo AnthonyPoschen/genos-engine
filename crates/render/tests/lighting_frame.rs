@@ -506,3 +506,102 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     assert_eq!(back.mode, 1, "raising the threshold returns to the work lists");
     assert!(back.ran, "the levels ran after the switch back");
 }
+
+/// Moving geometry and a new sun used to flip the scene hash and force a full
+/// 8×8 compose. The dirty list is local: a block is redrawn when its lighting
+/// inputs or a probe it reads changed. An empty list is a full compose (a
+/// whole frame is never held). The list picture matches `compose all`.
+#[test]
+fn lighting_compose_lists_dirty_blocks_while_the_scene_moves() {
+    let (_gpu, mut window, mut renderer) = open();
+    let base = shipped_hall().scene;
+    assert!(!base.solids.is_empty());
+    let camera = Camera::opening();
+    let still_world = World::from_scene(base.clone());
+    let mut previous = Vec::new();
+    let mut listed = Vec::new();
+    for _ in 0..8 {
+        previous = listed;
+        listed = draw(&mut window, &mut renderer, &still_world, &camera);
+    }
+    let temporal = mean_abs(&previous, &listed);
+    let still_stats = renderer.lighting_compose_stats();
+    eprintln!(
+        "still compose full {} blocks {} temporal {temporal:.3}",
+        still_stats.full, still_stats.blocks
+    );
+    let mut moved = base.clone();
+    moved.solids[0].position.x += 0.5;
+    let moved_world = World::from_scene(moved);
+    let after = draw(&mut window, &mut renderer, &moved_world, &camera);
+    assert_eq!(
+        renderer.lighting_still_frames(),
+        0,
+        "the box move changes the scene hash"
+    );
+    let stats = renderer.lighting_compose_stats();
+    let image_blocks = renderer.width().div_ceil(8) * renderer.height().div_ceil(8);
+    eprintln!(
+        "move compose full {} blocks {} of {image_blocks} temporal {temporal:.3}",
+        stats.full, stats.blocks
+    );
+    assert!(
+        !stats.full,
+        "a moving scene stays on the dirty-block list"
+    );
+    assert!(stats.blocks > 0, "the move marked at least one block");
+    assert!(
+        stats.blocks < image_blocks,
+        "the list skipped unchanged blocks ({}/{})",
+        stats.blocks, image_blocks
+    );
+    assert!(
+        changed_pixels(&listed, &after) > 0,
+        "the frame is presented, not held"
+    );
+
+    let mut prev = after;
+    let mut local = Vec::new();
+    for _ in 0..3 {
+        prev = local;
+        local = draw(&mut window, &mut renderer, &moved_world, &camera);
+    }
+    let step = mean_abs(&prev, &local);
+    renderer.set_lighting_compose_all(true);
+    let full = draw(&mut window, &mut renderer, &moved_world, &camera);
+    let full_stats = renderer.lighting_compose_stats();
+    let cross = mean_abs(&local, &full);
+    eprintln!(
+        "compose all full {} blocks {} step {step:.3} cross {cross:.3}",
+        full_stats.full, full_stats.blocks
+    );
+    assert!(full_stats.full, "compose all covers the image");
+    assert!(
+        cross <= step.max(temporal) + 2.0,
+        "list and full compose diverged: cross {cross:.3} same-mode step {step:.3} temporal {temporal:.3}"
+    );
+
+    renderer.set_lighting_compose_all(false);
+    let mut sun = moved_world.scene.clone();
+    sun.lights.push(genos_scene::Light {
+        position: genos_scene::Vec3::new(0.0, 0.0, 0.0),
+        color: [2.0, 1.8, 1.5],
+        direction: genos_scene::Vec3::new(0.3, -1.0, 0.2),
+    });
+    let sun_world = World::from_scene(sun);
+    let lit = draw(&mut window, &mut renderer, &sun_world, &camera);
+    let sun_stats = renderer.lighting_compose_stats();
+    eprintln!(
+        "sun compose full {} blocks {} still {}",
+        sun_stats.full,
+        sun_stats.blocks,
+        renderer.lighting_still_frames()
+    );
+    assert_eq!(renderer.lighting_still_frames(), 0, "the sun changes the scene hash");
+    assert!(!sun_stats.full, "a new sun does not force the hash full-compose");
+    assert!(sun_stats.blocks > 0, "the sun marked blocks whose light changed");
+    assert!(
+        changed_pixels(&full, &lit) > 0,
+        "the sun frame is presented"
+    );
+}

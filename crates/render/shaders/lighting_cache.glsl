@@ -82,6 +82,10 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint atrous_mode;
     uint atrous_ppm;
     uint atrous_active;
+    // S79A: 1 when compose covered the image, else 0. blocks is the 8x8 count
+    // that dispatch shaded (the dirty list, or the whole image).
+    uint compose_full;
+    uint compose_blocks;
 } gstats;
 // Kept-hit light writes (light pass): all, changed, by relative luminance delta
 // (<0.2 %, 0.2-1 %, 1-5 %, >5 %), and changed by source of the hit's direct light
@@ -156,8 +160,9 @@ uint lighting_frame() {
 // value: direct light or the surface point (lighting_direct.comp), a probe's SH
 // (lighting_filter.comp), or the filtered field of a texel that block reads
 // (the push below). The block list is indirect-dispatched, so a frame whose
-// producers write nothing launches no compose groups. Words live at the end of
-// the key buffer; lighting_gpu.rs sizes the same range.
+// producers write nothing used to launch no groups. S79A promotes that empty
+// list to a full compose. Words live at the end of the key buffer;
+// lighting_gpu.rs sizes the same range.
 const uint LIGHTING_COMPOSE_CAP = 65535u;
 const uint LIGHTING_COMPOSE_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u + 16u + 3u * 65536u + 1024u + 32768u + 16u + 5u * LIGHTING_CACHE_SLOTS + 5u * 65537u + 6u * 65536u + 16u;
 const uint LIGHTING_COMPOSE_COUNT = LIGHTING_COMPOSE_AT;
@@ -169,6 +174,9 @@ const uint LIGHTING_COMPOSE_MINX = LIGHTING_COMPOSE_PACK + LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_COMPOSE_MINY = LIGHTING_COMPOSE_MINX + LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_COMPOSE_MAXX = LIGHTING_COMPOSE_MINY + LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_COMPOSE_MAXY = LIGHTING_COMPOSE_MAXX + LIGHTING_CACHE_SLOTS;
+// After the a-trous meta (ppm, prev, 64 bins, 5 modes, 5*64 dense bins).
+const uint LIGHTING_LAMPS_BUMP_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS + 1u + 1u + 64u + 5u + 5u * 64u;
+const uint LIGHTING_COMPOSE_PREP_AT = LIGHTING_LAMPS_BUMP_AT + 1u;
 // Set by the compose pass around the lookups that colour a pixel.
 bool lighting_sc_display = false;
 uvec2 lighting_compose_px = uvec2(0u);
@@ -291,6 +299,27 @@ void lighting_compose_note_field(uint slot, uint packed) {
     ckeys.key[LIGHTING_COMPOSE_PACK + slot] = now;
     if (prev != 0u && prev != now) {
         lighting_compose_mark_slot(slot);
+    }
+}
+// S79A. The CPU sets LIGHTING_COMPOSE_PREP_AT and dispatches one group before
+// the indirect compose. An empty list would launch nothing and hold the
+// previous picture, which is forbidden: promote it to a full 2D compose.
+// A non-empty list keeps the 1D indirect dispatch the CPU already armed.
+void lighting_compose_prepare() {
+    ckeys.key[LIGHTING_COMPOSE_PREP_AT] = 0u;
+    uint n = ckeys.key[LIGHTING_COMPOSE_COUNT];
+    uint bw = (pc.dims.x + 7u) / 8u;
+    uint bh = (pc.dims.y + 7u) / 8u;
+    if (n == 0u || n > LIGHTING_COMPOSE_CAP) {
+        ckeys.key[LIGHTING_COMPOSE_FULL] = 1u;
+        ckeys.key[LIGHTING_COMPOSE_COUNT] = bw;
+        ckeys.key[LIGHTING_COMPOSE_AT + 1u] = bh;
+        ckeys.key[LIGHTING_COMPOSE_AT + 2u] = 1u;
+        gstats.compose_full = 1u;
+        gstats.compose_blocks = bw * bh;
+    } else {
+        gstats.compose_full = 0u;
+        gstats.compose_blocks = n;
     }
 }
 
@@ -3505,6 +3534,7 @@ void lighting_shadow_epochs() {
     vec4 head = work.v[lighting_change_at()];
     bool all = head.y > 0.5;
     uint changes = all ? 0u : min(uint(head.x + 0.5), LIGHTING_CHANGES);
+    bool any_bump = false;
     for (uint i = 0u; i < n; i++) {
         Lamp l = scene_lamp(i);
         uint at = LIGHTING_SHADOW_EPOCH_AT + 8u * i;
@@ -3519,12 +3549,18 @@ void lighting_shadow_epochs() {
             bump = l.color.w <= 0.0 || length(b.xyz - l.pos.xyz) < l.color.w + b.w;
         }
         if (bump) {
+            any_bump = true;
             ckeys.key[at] += 1u;
             ckeys.key[at + 1u] = floatBitsToUint(now.x);
             ckeys.key[at + 2u] = floatBitsToUint(now.y);
             ckeys.key[at + 3u] = floatBitsToUint(now.z);
             ckeys.key[at + 4u] = floatBitsToUint(now.w);
         }
+    }
+    // S79A: a lamp or a sun moved this frame. Pixel reuse must relight. Compose
+    // still marks a block only when its packed light or geometry changed.
+    if (any_bump) {
+        ckeys.key[LIGHTING_LAMPS_BUMP_AT] = lighting_frame();
     }
 }
 // The cached entry for (o, n, lamp li): 1 lit, 0 occluded, -1 none (trace it).
@@ -3644,6 +3680,16 @@ uint lighting_pix_sig(vec3 pos, vec3 n, bool two_sided, LampList list) {
     ivec3 q = ivec3(floor(pos * 1000.0));
     uint h = lighting_hash(uint(q.x) * 0x8da6b343u ^ uint(q.y) * 0xd8163841u ^ uint(q.z) * 0xcb1ab31fu ^ lighting_pack_normal(n) ^ (two_sided ? 0x5bd1e995u : 0u));
     return lighting_lamps_sig(h, list);
+}
+// S79A. What compose reads from the pixel, without the lamp epochs. 0 is empty
+// (no stored surface). A lamp move is LIGHTING_LAMPS_BUMP_AT, not this word:
+// putting the epoch here marked every block whenever a sun or a nearby lamp moved.
+uint lighting_pix_geom(vec3 pos, vec3 n, vec3 albedo, bool two_sided) {
+    ivec3 q = ivec3(floor(pos * 1000.0));
+    uvec3 a = uvec3(clamp(albedo, vec3(0.0), vec3(1.0)) * 255.0 + 0.5);
+    uint h = lighting_hash(uint(q.x) * 0x8da6b343u ^ uint(q.y) * 0xd8163841u ^ uint(q.z) * 0xcb1ab31fu ^ lighting_pack_normal(n) ^ (two_sided ? 0x5bd1e995u : 0u));
+    h = lighting_hash(h ^ (a.x | (a.y << 8u) | (a.z << 16u)));
+    return h | 1u;
 }
 
 // S78Q (held-probe gather): per probe two vec4 (x the frame its gather inputs

@@ -20,7 +20,7 @@ Producers compare the value they write with the value they stored and append the
 - the probe filter, when the SH it writes differs
 - the surface-cache push, when the packed filtered field differs, and only for blocks that read that texel last time they were composed
 
-Compose is an indirect dispatch of that list. A frame with an empty list launches no groups. The picture remains in the first half of the output buffer. Emission for the frame sits in the second half, so the direct pass does not overwrite the picture. The CPU does not read the list.
+Compose is an indirect dispatch of that list. S79A replaced the empty-list hold and the scene-hash full compose: an empty list now runs the full composite, and a moving box or sun stays on the list. The picture remains in the first half of the output buffer. Emission for the frame sits in the second half, so the direct pass does not overwrite the picture. The CPU does not read the list.
 
 The camera, the resize, and a picture with more blocks than the list (65,535, the minimum Vulkan workgroup-count limit) take the full pass, which also clears the texel-to-block rects and records them again. `GENOS_LIGHTING_COMPOSE_ALL=1` forces the full pass. The surface-cache path is the one that skips; other world modes compose the whole picture.
 

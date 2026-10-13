@@ -414,6 +414,17 @@ impl Renderer {
         self.gpu.lighting_atrous_stats()
     }
 
+    /// Force the full-image compose (`GENOS_LIGHTING_COMPOSE_ALL`) for later frames.
+    pub fn set_lighting_compose_all(&mut self, on: bool) {
+        self.gpu.lighting.compose_all = Some(on);
+    }
+
+    /// Whether the last frame's compose covered the image, and how many 8×8
+    /// blocks it shaded. Waits for that frame.
+    pub fn lighting_compose_stats(&mut self) -> LightingComposeStats {
+        self.gpu.lighting_compose_stats()
+    }
+
     /// How long each pipeline took to build, in build order.
     pub fn pipeline_times(&self) -> Vec<(String, Duration)> {
         self.gpu.pipeline_times.clone()

@@ -199,6 +199,8 @@ pub(crate) struct Lighting {
     /// Overrides `GENOS_LIGHTING_ATROUS_DIRTY` for the a-trous list fallback.
     /// Fraction of filtered texels; `None` reads the env each frame.
     atrous_dirty: Option<f32>,
+    /// Overrides `GENOS_LIGHTING_COMPOSE_ALL`. `None` reads the env each frame.
+    compose_all: Option<bool>,
 }
 
 /// A-trous levels 1-5 in the last frame that ran them (S78X dense fallback).
@@ -214,6 +216,14 @@ pub struct LightingAtrousStats {
     pub filtered: u32,
     /// Levels 1-5 ran this frame.
     pub ran: bool,
+}
+
+/// Quiet compose for the last frame (S79A). `full` is the image-covering
+/// dispatch. `blocks` is how many 8×8 blocks that dispatch shaded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LightingComposeStats {
+    pub full: bool,
+    pub blocks: u32,
 }
 
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
@@ -304,6 +314,7 @@ impl Default for Lighting {
             last_round: None,
             stats_round: [false; 2],
             atrous_dirty: None,
+            compose_all: None,
         }
     }
 }
@@ -328,6 +339,12 @@ fn lighting_atrous_ppm_at() -> u64 {
 }
 /// ppm, previous fraction, 64 filtered-texel bins, 5 level modes, 5 * 64 dense recount bins.
 const LIGHTING_ATROUS_META_WORDS: u64 = 1 + 1 + 64 + 5 + 5 * 64;
+/// After the a-trous meta: the lamp-bump frame, then the compose prepare flag.
+const LIGHTING_COMPOSE_TAIL_WORDS: u64 = 2;
+
+fn lighting_compose_prep_at() -> u64 {
+    lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS + 1
+}
 const LIGHTING_PASS_NAMES: [&str; 9] = [
     "lighting compact",
     "lighting place",
@@ -690,7 +707,7 @@ impl Gpu {
             assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
             assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
             self.lighting.cache_keys = self.make_buffer_queues(
-                (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS) * 4, // a-trous meta after the S67/PR11 compose words // S78X: a-trous threshold, fraction, bins // S78Z: verify / wake words sit just before that // S78X lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
+                (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS + LIGHTING_COMPOSE_TAIL_WORDS) * 4, // a-trous meta after the S67/PR11 compose words // S78X: a-trous threshold, fraction, bins // S78Z: verify / wake words sit just before that // S78X lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT) // S79A: lamp-bump word, compose prepare flag
                 0x20 | 0x2 | 0x100 | 0x1,
                 Memory::Device,
                 &share,
@@ -865,6 +882,20 @@ impl Gpu {
         let slot = self.lighting.last_slot;
         self.read_stats16(self.lighting.stats[slot].memory)
             .map(|w| lighting_atrous_from(&w))
+            .unwrap_or_default()
+    }
+
+    /// Waits for that frame. The words are the compose full flag and block count.
+    pub(crate) fn lighting_compose_stats(&mut self) -> LightingComposeStats {
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
+        let slot = self.lighting.last_slot;
+        self.read_stats16(self.lighting.stats[slot].memory)
+            .map(|w| LightingComposeStats {
+                full: w[LIGHTING_COMPOSE_STAT] != 0,
+                blocks: w[LIGHTING_COMPOSE_STAT + 1],
+            })
             .unwrap_or_default()
     }
 
@@ -1262,6 +1293,10 @@ impl Gpu {
                 w[LIGHTING_ATROUS_STAT + 2] as f64 / 1.0e6,
                 w[LIGHTING_ATROUS_STAT + 3]
             );
+            eprintln!(
+                "lightingcompose {queue} frame {} full {} blocks {}",
+                self.lighting.frame, w[LIGHTING_COMPOSE_STAT], w[LIGHTING_COMPOSE_STAT + 1]
+            );
         }
     }
 
@@ -1519,13 +1554,16 @@ impl Gpu {
         let pc = [w, h, cols, rows, LIGHTING_RAYS, lighting_tile(h), z, self.lighting.frame];
         let image = self.color.image;
         let blocks = (w.div_ceil(8) as u64) * (h.div_ceil(8) as u64);
-        // Full compose when the picture has no history yet, the scene moved, the
-        // surface cache is off, or the block list cannot cover the image.
-        // GENOS_LIGHTING_COMPOSE_ALL forces it (an A/B against the quiet path).
+        // Full compose when the picture has no history yet, the surface cache is
+        // off, or the block list cannot cover the image. A moving scene stays on
+        // the dirty-block list (S79A): the scene hash is not a compose gate.
+        // GENOS_LIGHTING_COMPOSE_ALL, or set_lighting_compose_all, forces the full pass.
+        let compose_all = self.lighting.compose_all.unwrap_or_else(|| {
+            std::env::var_os("GENOS_LIGHTING_COMPOSE_ALL").is_some()
+        });
         let compose_full = !self.lighting.compose_valid
-            || self.lighting.still == 0
             || lighting_world_env() != 3
-            || std::env::var_os("GENOS_LIGHTING_COMPOSE_ALL").is_some()
+            || compose_all
             || blocks > LIGHTING_COMPOSE_CAP;
         // The raster colour as the base: pixels with no surface keep it. A held
         // frame keeps last frame's picture in the buffer instead.
@@ -1752,6 +1790,19 @@ impl Gpu {
                 }
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.pipes[pass]);
                 if pass == 7 && !compose_full {
+                    // One group reads the dirty-block count. An empty list would
+                    // hold the previous picture, so it promotes to a full 2D
+                    // compose. A non-empty list stays an indirect 1D dispatch.
+                    (self.fns.cmd_fill_buffer)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        lighting_compose_prep_at() * 4,
+                        4,
+                        1,
+                    );
+                    self.memory_barrier(0x1000, 0x800, 0x1000, 0x20);
+                    (self.fns.cmd_dispatch)(self.cmd, 1, 1, 1);
+                    self.memory_barrier(0x800, 0x800 | 0x2, 0x40, 0x20 | 0x1);
                     (self.fns.cmd_dispatch_indirect)(
                         self.cmd,
                         self.lighting.cache_keys.buffer,
@@ -2009,8 +2060,10 @@ const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
 const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
 /// Lighting stats buffer: 24 words, diag[64], chg[32], then the a-trous fallback
 /// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`.
-/// The change-counter enable word stays chg[31] (word 119).
-const LIGHTING_STATS_WORDS: usize = 124;
+/// The change-counter enable word stays chg[31] (word 119). Compose follows:
+/// full flag and shaded 8×8 block count at `LIGHTING_COMPOSE_STAT`.
+const LIGHTING_STATS_WORDS: usize = 126;
+const LIGHTING_COMPOSE_STAT: usize = 124;
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 const LIGHTING_CHG_ENABLE_WORD: u64 = 24 + 64 + 31;
 const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;

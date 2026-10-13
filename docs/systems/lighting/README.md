@@ -57,7 +57,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Shadow visibility shared per 12.5 cm cell for hits, invalidated per lamp range (S74A).
 - 1-in-16 push refresh floor (S78B); kept-hit bounce refreshed with its re-trace (S78D); held strata keep exact directions (S78K).
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
-- Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
+- Compose redraws only the 8×8 blocks whose lighting inputs or probes changed, including while boxes or the sun move. The scene hash is not a compose gate. A frame whose list is empty runs the full composite (a whole frame is never held); a clean block keeps the shaded pixel from the last visit. While the camera is held, a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame (Schied et al. 2017; Wright et al. 2022). Lumen's screen-probe composite (4 probes, plane distance and normal) is unchanged.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
 
 ## Experiment index
@@ -160,6 +160,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78Y](experiments/S78Y-quiet-filter.md) | 2026-10-12 | Quiet probe filter | pushed (rough; idle A/B 6am) | S78Y |
 | [S78X](experiments/S78X-atrous-work-lists.md) | 2026-10-13 | A-trous levels run dirty work lists | pushed (rough; idle A/B) | S78X |
 | [S78X2](experiments/S78X2-atrous-dense-fallback.md) | 2026-10-12 | Dense a-trous when the dirty fraction is high | pushed | S78X2 |
+| [S79A](experiments/S79A-compose-local-blocks.md) | 2026-10-13 | Compose dirty blocks from local inputs, including while the scene moves | pushed | S79A |
 | [S78Z](experiments/S78Z-verify-ring-wakes.md) | 2026-10-13 | Probe verification + impact-tested ring wakes | not pushed (no fix; postmortem) | g78/S78Z-verify-ring-wakes.patch |
 | [S78T2](experiments/S78T2-texel-verify.md) | 2026-10-13 | Texel verification: rotating A-SVGF checks + ring wakes | not pushed (no healing; postmortem) | g78/S78T2-texel-verify.patch |
 | [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
@@ -235,7 +236,7 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 4. `lighting_gather`: each probe bins its kept rays by direction.
 5. `lighting_filter`: three probe-space filter rounds, then SH.
 6. `lighting_compact` / `lighting_cache`: the light cache (or surface cache) relights a batch.
-7. `lighting_compose`: pixel = emitted + direct + interpolated probe (or cache) irradiance. The picture stays in the output buffer. A frame whose camera, meshes and lamps match the last one (surface cache on, picture small enough for the block list) dispatches only the 8×8 blocks a producer marked: the direct pass when the surface point, direct light or emission changed; the probe filter when a probe's SH changed; the surface-cache push when a texel's filtered field changed and that texel was read by a block. The list is an indirect dispatch. Nothing marked means no groups. `GENOS_LIGHTING_COMPOSE_ALL=1` forces a full compose. While that camera holds, a filtered field keeps being shown after S72V10's two-frame stamp would have dropped it (see Deviations).
+7. `lighting_compose`: pixel = emitted + direct + interpolated probe (or cache) irradiance. The picture stays in the output buffer. With the surface cache on and the picture small enough for the block list, compose dispatches the 8×8 blocks a producer marked: the direct pass when the surface, the packed direct light, or the emission changed; the probe filter when a probe's SH changed; the surface-cache push when a texel's filtered field changed and that texel was read by a block. A moving box or sun does not flip this to a full image; the scene hash is not a compose gate. The list is an indirect dispatch. An empty list is promoted to a full compose, so a frame is never held. The first frame, a resize, a world mode other than the surface cache, and `GENOS_LIGHTING_COMPOSE_ALL=1` also take the full pass. While the camera holds, a filtered field keeps being shown after S72V10's two-frame stamp would have dropped it (see Deviations).
 
 ## Scene representation and tracer
 

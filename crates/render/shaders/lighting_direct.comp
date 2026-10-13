@@ -123,10 +123,20 @@ void main() {
     float hit_t = 1.0e9;
     vec3 reflectance = vec3(1.0);
     bool two_sided = false;
+    vec3 albedo = vec3(1.0);
     vec3 glow = vec3(0.0);
     if (idx < pixels) {
-        vec3 albedo;
         if (!lighting_surface(uvec2(idx % pc.dims.x, idx / pc.dims.x), pos, n, albedo, two_sided)) {
+            // The surface left this pixel. Compose must paint the background
+            // instead of keeping last frame's shaded colour.
+            if (LIGHTING_PIX_REUSE && lighting_world_mode() == 3u) {
+                uint c = (idx & 1u) * 2u;
+                uint prev = floatBitsToUint(work.v[lighting_pix_at() + idx / 2u][c]);
+                if (prev != 0u) {
+                    work.v[lighting_pix_at() + idx / 2u][c] = 0.0;
+                    lighting_compose_mark_px(idx);
+                }
+            }
             return;
         }
     } else {
@@ -215,13 +225,15 @@ void main() {
     vec3 origin = pos + n * 0.02;
     LampList list = lamps_at(origin);
     uint count = lamp_list_size(list);
-    // S78J: a pixel whose point and lamps match last frame's, in a quiet frame.
-    uint pix_sig = 0u;
+    // S78J: a pixel whose geometry matches last frame's, in a quiet frame whose
+    // lamps did not move (S79A: the lamp epoch is not part of the geometry word).
+    uint pix_geom = 0u;
     if (LIGHTING_PIX_REUSE && idx < pixels && lighting_world_mode() == 3u) {
-        pix_sig = lighting_pix_sig(pos, n, two_sided, list);
+        pix_geom = lighting_pix_geom(pos, n, albedo, two_sided);
         vec4 pv = work.v[lighting_pix_at() + idx / 2u];
         uint c = (idx & 1u) * 2u;
-        if (pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig && lighting_pix_quiet()) {
+        if (pix_geom != 0u && floatBitsToUint(pv[c]) == pix_geom
+            && ckeys.key[LIGHTING_LAMPS_BUMP_AT] != lighting_frame() && lighting_pix_quiet()) {
             uint emitted = gbuf.px[idx].w;
             uint glow = emitted == ~0u ? 0u : emitted;
             uint prev = outc.px[pixels + idx];
@@ -403,20 +415,20 @@ void main() {
         uint prev_e = outc.px[pixels + idx];
         uint packed = lighting_pack_rgb9e5(e);
         uint prev_d = 0u;
-        uint prev_sig = 0u;
+        uint prev_geom = 0u;
         bool tracked = LIGHTING_PIX_REUSE && lighting_world_mode() == 3u;
         if (tracked) {
             uint c = (idx & 1u) * 2u;
-            prev_sig = floatBitsToUint(work.v[lighting_pix_at() + idx / 2u][c]);
+            prev_geom = floatBitsToUint(work.v[lighting_pix_at() + idx / 2u][c]);
             prev_d = floatBitsToUint(work.v[lighting_pix_at() + idx / 2u][c + 1u]);
         }
         outc.px[pixels + idx] = glow;
         gbuf.px[idx].w = packed;
         if (tracked) {
             uint c = (idx & 1u) * 2u;
-            work.v[lighting_pix_at() + idx / 2u][c] = uintBitsToFloat(pix_sig);
+            work.v[lighting_pix_at() + idx / 2u][c] = uintBitsToFloat(pix_geom);
             work.v[lighting_pix_at() + idx / 2u][c + 1u] = uintBitsToFloat(packed);
-            if (glow != prev_e || packed != prev_d || pix_sig != prev_sig) {
+            if (glow != prev_e || packed != prev_d || pix_geom != prev_geom) {
                 lighting_compose_mark_px(idx);
             }
         }
