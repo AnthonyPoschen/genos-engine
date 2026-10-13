@@ -20,6 +20,7 @@ pub use gpu::{
     DebugView, DrawProfile, LampReport, LightingAtrousStats, Renderer, ScreenLine, ScreenRect,
     SettleStats, ViewMode,
 };
+pub use genos_scene::{LightingPreset, LightingSettings};
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};
 pub use pack::{build_grid, lamp_range, pack_frame, Pack, PackedDraw, SceneGrid, LAMP_CUTOFF};
