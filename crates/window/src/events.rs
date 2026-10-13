@@ -187,6 +187,7 @@ mod tests {
             mode,
             pointer_x: 0.0,
             pointer_y: 0.0,
+            wheel_y: 0.0,
         }
     }
 
