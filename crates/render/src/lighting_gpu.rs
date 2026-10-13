@@ -223,8 +223,11 @@ pub(crate) struct Lighting {
     /// Last GPU mark (bit 0 sun, bit 1 catch-up) and the band it shaded.
     sun_gpu_mark: u32,
     sun_gpu_slice: u32,
-    /// Direct-patch compose. Built the first time a small sun step needs it.
+    /// Sun compose. Built the first time a small sun step needs it.
     sun_pipe: Handle,
+    /// The linear-bounce slice was cleared for this sun run. The first frame
+    /// walks every pixel; later frames walk the band.
+    sun_bounce_live: bool,
     /// Point lamps only. `None` until the first frame, so a still open does not
     /// look like a lamp that just stopped.
     lamp_key: Option<u64>,
@@ -369,6 +372,7 @@ impl Default for Lighting {
             sun_gpu_mark: 0,
             sun_gpu_slice: 0,
             sun_pipe: std::ptr::null_mut(),
+            sun_bounce_live: false,
             lamp_key: None,
             lamp_moving: false,
             catch_left: 0,
@@ -410,8 +414,6 @@ const LIGHTING_ATROUS_META_WORDS: u64 = 1 + 1 + 64 + 5 + 5 * 64;
 /// The picture compose does not read them. They are not the regime tube.
 const LIGHTING_SUN_WORDS: u64 = 8;
 const LIGHTING_SUN_SMALL_BIT: u32 = 1;
-const LIGHTING_SUN_FOLLOWS: u32 = 2;
-const LIGHTING_SUN_PATCH: u32 = 4;
 /// A step inside this relative sun/sky irradiance of the last full refresh stays amortised.
 const LIGHTING_SUN_IRR: f32 = 0.02;
 /// Stats words 142 and 143 (the unfilled pads). Bit 0 of the mark is the sun path.
@@ -882,6 +884,7 @@ impl Gpu {
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.alloc_key = lighting_alloc_key(&settings);
         self.lighting.compose_valid = false;
+        self.lighting.sun_bounce_live = false;
         self.lighting.gbuf_clear = true;
         self.lighting.work_clear = gi;
         self.write_raster_sets()?;
@@ -1988,8 +1991,9 @@ impl Gpu {
         let blocks = (w.div_ceil(8) as u64) * (h.div_ceil(8) as u64);
         // Full compose when the picture has no history yet, the camera or the
         // geometry moved, the surface cache is off, or the block list cannot
-        // cover the image. A small sun step, with the camera held, stays on
-        // the list. GENOS_LIGHTING_COMPOSE_ALL forces the full picture.
+        // cover the image. A small sun step, with the camera held, takes one
+        // full-grid sun compose instead of that list. GENOS_LIGHTING_COMPOSE_ALL
+        // forces the full picture.
         let compose_full = !self.lighting.compose_valid
             || !(self.lighting.still > 0 || sun_amortise)
             || self.lighting.settings.world_mode() != 3
@@ -2070,17 +2074,18 @@ impl Gpu {
         let groups = planned.groups;
         let atrous_stages = planned.atrous_stages;
         let controls = sun_controls();
-        let mut sun_flags = if sun_amortise { LIGHTING_SUN_SMALL_BIT } else { 0 }
+        let sun_flags = if sun_amortise { LIGHTING_SUN_SMALL_BIT } else { 0 }
             | (controls.bands << 8)
             | ((self.lighting.frame % controls.bands) << 16);
         let mut sun_compose = sun_amortise && !compose_full;
         if sun_compose {
-            sun_flags |= LIGHTING_SUN_FOLLOWS;
             if let Err(err) = self.ensure_sun_pipe() {
                 eprintln!("lighting: sun compose off: {err}");
-                sun_flags &= !LIGHTING_SUN_FOLLOWS;
                 sun_compose = false;
             }
+        }
+        if !sun_compose {
+            self.lighting.sun_bounce_live = false;
         }
         let catch_word = u32::from(self.lighting.catch_left > 0);
         let sun_words = [
@@ -2258,7 +2263,29 @@ impl Gpu {
                     self.lighting.pipes[pass]
                 };
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
-                if pass == 7 && !compose_full {
+                if pass == 7 && sun_compose {
+                    // One dispatch. The old path indirect-dispatched the dirty
+                    // list (a near-full probe walk under a moving sun) and then
+                    // dispatched the whole grid again to paint direct. Both sat
+                    // in this timestamp. The slice is cleared once per run so
+                    // the first frame stores bounce everywhere; later frames
+                    // walk only the band.
+                    if !self.lighting.sun_bounce_live {
+                        let hist = u64::from(self.lighting.settings.direct.refresh_frames > 1);
+                        let pixels = u64::from(w) * u64::from(h);
+                        let at = (2 + hist) * pixels * 4;
+                        (self.fns.cmd_fill_buffer)(
+                            self.cmd,
+                            self.lighting.out.buffer,
+                            at,
+                            pixels * 4,
+                            0,
+                        );
+                        self.lighting.sun_bounce_live = true;
+                        self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+                    }
+                    (self.fns.cmd_dispatch)(self.cmd, w.div_ceil(8).max(1), h.div_ceil(8).max(1), 1);
+                } else if pass == 7 && !compose_full {
                     (self.fns.cmd_dispatch_indirect)(
                         self.cmd,
                         self.lighting.cache_keys.buffer,
@@ -2275,23 +2302,6 @@ impl Gpu {
                 }
                 if kind != 0 {
                     (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, 32, cur_pc.as_ptr() as *const c_void);
-                }
-                if pass == 7 && sun_compose {
-                    // The list compose stored bounce and left the G-buffer direct.
-                    // This patch applies that direct on every pixel. It is the sun
-                    // shader, not the picture compose, so the occluder walk stays out.
-                    self.memory_barrier(0x800, 0x1000, 0x40, 0x1000);
-                    let patch_flags = (sun_flags & !LIGHTING_SUN_FOLLOWS) | LIGHTING_SUN_PATCH;
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.lighting.cache_keys.buffer,
-                        (lighting_sun_at() + 1) * 4,
-                        4,
-                        &patch_flags as *const u32 as *const c_void,
-                    );
-                    self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
-                    (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.sun_pipe);
-                    (self.fns.cmd_dispatch)(self.cmd, w.div_ceil(8).max(1), h.div_ceil(8).max(1), 1);
                 }
                 // The args pass's sizes are read as indirect commands (stage 0x2, access 0x1).
                 self.memory_barrier(0x800, 0x800 | 0x1000 | 0x2, 0x40, 0x20 | 0x40 | 0x800 | 0x1);

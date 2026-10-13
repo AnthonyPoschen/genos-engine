@@ -1,9 +1,10 @@
 #version 450
 #define GENOS_SUN_SHADER 1
 // Sun-step compose. The startup pipeline is lighting_compose.comp and does not
-// compile this file. A list dispatch stores linear bounce. The patch that
-// follows adds this frame's direct and does not walk probes when the bounce
-// is already stored. No occluder walk lives here.
+// compile this file. One full-grid dispatch writes this frame's direct on
+// every pixel. The probe walk runs only for this frame's probe row and page
+// column, and for a pixel whose stored bounce is still empty. No occluder
+// walk lives here. No second pass.
 // GI v2 final pass: per pixel, emitted light, then direct irradiance plus the
 // screen probes' irradiance
 // (the 4 nearest probes, weighted by plane distance and normal; the light cache
@@ -96,20 +97,8 @@ uint lighting_bounce_word(uint index) {
 
 void main() {
     lighting_sun_mark();
-    bool direct_patch = lighting_sun_patch_now();
-    bool follows = lighting_sun_patch_follows();
-    uvec2 p;
-    // GI off, or compose reuse off, covers the image and does not read the key
-    // table. The table is a dummy while GI is off. The direct patch covers it.
-    bool reuse = (gstats.ctrl_bits & 4u) != 0u && (gstats.ctrl_bits & 128u) != 0u && (gstats.ctrl_bits & 32u) != 0u;
-    if (direct_patch || !reuse || ckeys.key[LIGHTING_COMPOSE_FULL] != 0u) {
-        p = gl_GlobalInvocationID.xy;
-    } else {
-        uint bw = (pc.dims.x + 7u) / 8u;
-        uint block = ckeys.key[LIGHTING_COMPOSE_LIST + gl_WorkGroupID.x];
-        uvec2 b = uvec2(block % bw, block / bw);
-        p = b * 8u + gl_LocalInvocationID.xy;
-    }
+    // One group per 8x8 block of the picture. The dirty list is not this pass.
+    uvec2 p = gl_GlobalInvocationID.xy;
     if (p.x >= pc.dims.x || p.y >= pc.dims.y) {
         return;
     }
@@ -145,10 +134,7 @@ void main() {
             glow = vec3(0.0);
         }
     }
-    // The list pass leaves the G-buffer so the patch can read this frame's direct.
-    if (!(follows && !direct_patch)) {
-        gbuf.px[index] = uvec4(~0u);
-    }
+    gbuf.px[index] = uvec4(~0u);
     if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
         n = -n;
     }
@@ -173,16 +159,18 @@ void main() {
     }
     vec3 bounce = vec3(0.0);
     bool gi = (gstats.ctrl_bits & 4u) != 0u;
-    uint stored = 0u;
-    if (direct_patch) {
-        stored = outc.px[lighting_bounce_word(index)];
-    }
-    if (direct_patch && stored != 0u) {
-        bounce = lighting_unpack_rgb9e5(stored - 1u);
-    } else if (gi && ((gstats.ctrl_bits & 16384u) != 0u || gstats.ctrl_bounce > 0u)) {
+    bool want = gi && ((gstats.ctrl_bits & 16384u) != 0u || gstats.ctrl_bounce > 0u);
+    // 0 means the slice has no bounce yet (cleared on entry). A real black
+    // bounce is stored as pack + 1, so it is not walked again.
+    uint stored = outc.px[lighting_bounce_word(index)];
+    bool walk = want && (stored == 0u || lighting_sun_pixel_band(p, pos, n));
+    if (walk) {
         bounce = indirect(p, pos, n);
+    } else if (stored != 0u) {
+        bounce = lighting_unpack_rgb9e5(stored - 1u);
     }
-    if (!(direct_patch && stored != 0u) && (gstats.ctrl_bits & 4096u) != 0u) {
+    bool store = walk;
+    if ((walk || stored == 0u) && (gstats.ctrl_bits & 4096u) != 0u) {
         vec3 sky_fill = vec3(gstats.ctrl_ambient_r, gstats.ctrl_ambient_g, gstats.ctrl_ambient_b);
         vec3 fill = sky_fill;
         if ((gstats.ctrl_bits & 8192u) != 0u) {
@@ -191,10 +179,9 @@ void main() {
             fill = mix(ground, sky_fill, up);
         }
         bounce += fill * gstats.ctrl_ambient_i;
+        store = true;
     }
-    if (follows && !direct_patch) {
-        outc.px[lighting_bounce_word(index)] = lighting_pack_rgb9e5(max(bounce, vec3(0.0))) + 1u;
-    } else if (direct_patch && stored == 0u) {
+    if (store) {
         outc.px[lighting_bounce_word(index)] = lighting_pack_rgb9e5(max(bounce, vec3(0.0))) + 1u;
     }
     if (mode == 1u || mode == 6u) {

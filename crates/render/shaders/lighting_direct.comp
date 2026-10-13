@@ -500,8 +500,9 @@ void main() {
             uint c = (idx & 1u) * 2u;
             work.v[lighting_pix_at() + idx / 2u][c] = uintBitsToFloat(pix_sig);
             work.v[lighting_pix_at() + idx / 2u][c + 1u] = uintBitsToFloat(packed);
-            // Packed direct moved because the sun did. The direct patch writes
-            // this frame's sun. The block is not a GI dirty. Flag off: same mark.
+            // Packed direct moved because the sun did. The sun compose writes
+            // this frame's direct on every pixel. The block is not a GI dirty.
+            // Flag off: same mark.
             bool sun_only = lighting_sun_small() && glow == prev_e && pix_sig == prev_sig;
             if (!sun_only && (glow != prev_e || packed != prev_d || pix_sig != prev_sig)) {
                 lighting_compose_mark_px(idx);

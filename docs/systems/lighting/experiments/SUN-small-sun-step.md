@@ -10,7 +10,7 @@ The step is inside 2° of the last full refresh and inside 2% of that refresh's 
 
 `GENOS_LIGHTING_FULL_EFFORT=1` or `--lighting-full-effort` turns the path off. Moving boxes or moving point lamps turn it off, because the view hash includes them. The default stress scene therefore stays on the full compose. A sun-only hold is `--still-boxes --dynamic 0`.
 
-One probe-row band and one spatial page column (`page_x = cell.x >> 3`) refresh per frame, `frame % N`. The default N is 8. The list compose stores linear bounce. A direct patch adds this frame's direct and does not walk probes when that bounce is stored. The directional lamp's shadow epoch is not bumped. Gather and filter still run.
+One probe-row band and one spatial page column (`page_x = cell.x >> 3`) refresh per frame, `frame % N`. The default N is 8. The sun compose is one full-grid dispatch. It writes this frame's direct on every pixel. It walks probes only for a pixel on that probe row or that page column, and for a pixel whose stored bounce is still empty. The first frame of a run clears that slice, so that frame walks once. There is no second dispatch and the dirty-block list is not used. The directional lamp's shadow epoch is not bumped. Gather and filter still run. Pixel direct reuse stays off for the step, so the shadow is not a frame behind; that cost sits in the direct pass, not in compose.
 
 The neighbour mix is the compose that already exists: bilinear weights over 16 px, a plane-distance term, and normal to the eighth. A slice probe is mixed with neighbours that still hold the committed sun. There is no per-lamp irradiance delta layer, no probe hysteresis, no relocation, and no volume pause.
 
