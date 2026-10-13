@@ -1909,6 +1909,16 @@ vec4 lighting_sc_shown(uint slot) {
     // S72N: the texel's seed (lighting_sc_seed) joins the prior by its
     // confidence, in the same handover.
     vec4 own = cache.v[3u * slot + 2u];
+    // Denoiser off: the a-trous push never writes the display field, so compose
+    // fell through to parent and world-cache walks on every pixel and got
+    // slower than with the filter on. The texel's own mean is one load.
+    // High sets the denoise bit, so this branch is not taken.
+    if ((gstats.ctrl_bits & 64u) == 0u && lighting_world_mode() == 3u) {
+        if (own.w > 0.5) {
+            return vec4(own.rgb * lighting_sc_sun_gain(slot), 1.0);
+        }
+        return vec4(0.0);
+    }
     float n = floor(max(own.w, 0.0));
     // S72P: layer 2 (the rebuilt field) is what shows; its support (sets around)
     // is the count in the handover from the texel's seed.
