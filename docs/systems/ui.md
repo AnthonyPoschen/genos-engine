@@ -70,6 +70,7 @@ The crate is `crates/ui`, package `genos-ui`.
 - `lighting_frame`, `apply_lamp`, and `apply_frame_action` are in `src/panel.rs`.
 - Omarchy theme colors are in `src/omarchy.rs`.
 - `profile_overlay`, `remember_frame`, `ProfileGraph`, and `ProfileStream` are in `src/profile.rs`.
+- `FpsOverlay` is in `src/fps.rs`. It draws one frame-rate line. Off, `note` returns without accumulating time or building glyphs. On, the glyphs are rebuilt at `rate_hz` (default 4, one 250 ms average) and the frames in between reuse those rectangles.
 
 - `button_panel` lays out a draggable panel of labelled button rows (`PanelRow`, `PanelButton`). A press fires `Action::Press(id)` with the game's id. `selected` draws a button in its pressed look. Ids from `u32::MAX - 4095` up belong to the panel. A row may end in a `PanelSlider` (value, min, max, step, readout text): a press anywhere on the track sets the value under the pointer and a held press follows it, firing `Action::Slide { id, value }` (snapped to `step`, 0 for continuous) each frame the value changes. The stress example builds its sliders from `genos-debug` knobs.
 
@@ -82,6 +83,8 @@ The camera frame calls `lighting_frame` each frame. The call passes the first la
 The frame calls `apply_frame_action` for each action. A picture selection returns the mode. The frame sets that mode on the renderer before the draw. A lamp action stays on the lamp path. `ToggleBoxRun` stays with the caller. The caller holds or resumes the red box path. The frame draws every paint in `Frame::paints` with `Renderer::draw_with_overlay`. The sun is one of those paints. The frame starts look capture only when `look_capture` is true.
 
 Basic mode and detailed mode call `profile_overlay` and draw those paints. Detailed mode draws with `Renderer::draw_profiled`. That mode calls `ProfileStream::append` for each live sample. Basic mode draws with `Renderer::draw_with_overlay`.
+
+`genos-lighting` keeps an `FpsOverlay` and calls `note` once a frame with the effective `FpsCounterSettings`. It draws `paints` in the overlay pass. A false `enabled` makes that call return without further work.
 
 P pauses the graph. A drag inspects one interval. L follows live frames again.
 
@@ -96,6 +99,8 @@ The theme colors do not change the lamp, the radiance field, or a non-UI surface
 The graph has no pan, no zoom, and no free scroll. Pause holds the current window. A drag on the held graph chooses one interval. This crate does not read Vulkan timestamps. The profile does not time each Rust function. Timed work stays the frame stages.
 
 The graph draws one point per 250 ms average, joined by 2 px lines (`ProfileView.segments`, drawn as thin quads in the overlay draw). It does not draw one point per frame.
+
+`FpsOverlay` is the small frame-rate plate. `genos-lighting` draws it at the bottom right when `Scene.fps_counter` is on. The plate shows frames per second and the average frame time in milliseconds. The number changes at `rate_hz`. The default is 4 Hz. A disabled overlay does not keep a window and does not build text.
 
 The expansion into a full set of UI elements is planned in [plan.md](ui/plan.md). This record stays the behavior that is in the crate today. The crate does not open a socket. Dirty rectangles are not in this tree. PR #5 adds `DamageTracker`, and the plan marks every step that reads it with **requires #5**.
 
