@@ -17,6 +17,10 @@ void lighting_tex_put(uint slot, vec4 v) {
         lighting_chg(CHG_TEX_D0 + lighting_chg_bin(o.rgb, v.rgb), 1u);
     }
     cache.v[3u * slot + 2u] = v;
+    // S79B: compact queued variance from the pre-write value.
+    if (lighting_atrous_listing()) {
+        lighting_var_add(slot);
+    }
 }
 void main() {
     uint gid = gl_GlobalInvocationID.x;

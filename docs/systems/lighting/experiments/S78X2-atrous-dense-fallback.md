@@ -18,7 +18,7 @@ Levels 1-5 keep S78X's work lists while last frame's fullest level was at or und
 
 The list is built with one contended `atomicAdd` per dirty slot, in the filter, and the dispatch then reads slots in append order. A still scene is ~5-18k dirty of ~108k filtered, so the million threads return after one uniform read. A moving scene dirties most of that set: the atomic compaction stays on the critical path, and the scattered slots lose the coalescing of the dense sweep. The old cap fell back only after the list had already been built, and only past 65536. S78A was rejected for that locality cost.
 
-`GENOS_LIGHTING_DEBUG` or `GENOS_LIGHTING_SC_TRACE` prints `lightingatrous` with the dirty fraction, the mode (`list` or `dense`), the threshold and the filtered count. `Renderer::lighting_atrous_stats` reads the same words. The lavapipe test forces threshold 1 and 0, checks the mode switch and the counters, and checks the two pictures match within the same-mode frame step.
+`GENOS_LIGHTING_DEBUG` or `GENOS_LIGHTING_SC_TRACE` prints `lightingatrous` with the dirty fraction, the mode (`list` or `dense`), the threshold and the filtered count. S79B adds the variance and push modes to that line. `Renderer::lighting_atrous_stats` reads the same words. The lavapipe test forces threshold 1 and 0, checks the mode switch and the counters, and checks the two pictures match within the same-mode frame step. Variance and push stayed full slot walks until S79B.
 
 ## Numbers
 Not re-timed here.

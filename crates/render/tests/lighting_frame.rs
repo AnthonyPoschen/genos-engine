@@ -448,15 +448,19 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     let list_stats = renderer.lighting_atrous_stats();
     let temporal = mean_abs(&previous, &listed);
     eprintln!(
-        "list dirty {:.4} mode {} threshold {:.4} filtered {} ran {} temporal {temporal:.3}",
+        "list dirty {:.4} mode {} var {} push {} threshold {:.4} filtered {} ran {} temporal {temporal:.3}",
         list_stats.dirty_fraction,
         list_stats.mode,
+        list_stats.variance_mode,
+        list_stats.push_mode,
         list_stats.threshold,
         list_stats.filtered,
         list_stats.ran
     );
     assert!(list_stats.ran, "the a-trous levels ran");
     assert_eq!(list_stats.mode, 1, "threshold 1 keeps the work lists");
+    assert_eq!(list_stats.variance_mode, 1, "variance uses the work list");
+    assert_eq!(list_stats.push_mode, 1, "push uses the work list");
     assert!(
         (list_stats.threshold - 1.0).abs() < 1.0e-4,
         "threshold {}",
@@ -474,11 +478,18 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     let dense_stats = renderer.lighting_atrous_stats();
     let cross = mean_abs(&listed, &dense);
     eprintln!(
-        "dense dirty {:.4} mode {} threshold {:.4} filtered {} cross {cross:.3}",
-        dense_stats.dirty_fraction, dense_stats.mode, dense_stats.threshold, dense_stats.filtered
+        "dense dirty {:.4} mode {} var {} push {} threshold {:.4} filtered {} cross {cross:.3}",
+        dense_stats.dirty_fraction,
+        dense_stats.mode,
+        dense_stats.variance_mode,
+        dense_stats.push_mode,
+        dense_stats.threshold,
+        dense_stats.filtered
     );
     assert!(dense_stats.ran, "the dense frame ran the levels");
     assert_eq!(dense_stats.mode, 0, "threshold 0 is the dense sweep");
+    assert_eq!(dense_stats.variance_mode, 2, "variance is the dense sweep");
+    assert_eq!(dense_stats.push_mode, 2, "push is the dense sweep");
     assert!(
         dense_stats.threshold.abs() < 1.0e-4,
         "threshold {}",
@@ -504,6 +515,8 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     let _ = draw(&mut window, &mut renderer, &world, &camera);
     let back = renderer.lighting_atrous_stats();
     assert_eq!(back.mode, 1, "raising the threshold returns to the work lists");
+    assert_eq!(back.variance_mode, 1, "variance returns to the work list");
+    assert_eq!(back.push_mode, 1, "push returns to the work list");
     assert!(back.ran, "the levels ran after the switch back");
 }
 

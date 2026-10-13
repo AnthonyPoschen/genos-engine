@@ -58,6 +58,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - 1-in-16 push refresh floor (S78B); kept-hit bounce refreshed with its re-trace (S78D); held strata keep exact directions (S78K).
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
 - Compose redraws only the 8×8 blocks whose lighting inputs or probes changed, including while boxes or the sun move. The scene hash is not a compose gate. A frame whose list is empty runs the full composite (a whole frame is never held); a clean block keeps the shaded pixel from the last visit. While the camera is held, a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame (Schied et al. 2017; Wright et al. 2022). Lumen's screen-probe composite (4 probes, plane distance and normal) is unchanged.
+- Variance and push walk a work list when last frame's dirty fraction is at or under `GENOS_LIGHTING_ATROUS_DIRTY` (S79B), the same gate as a-trous levels 1-5. The list is the slots those passes would recompute, not the whole filtered set (that set is ~108k and does not fit the 65536 cap) and not every one of the 1,048,576 slots. Above the fraction, or past the cap, they walk every slot. SVGF (Schied et al., HPG 2017, sec. 4.2), the à-trous filter (Dammertz et al., HPG 2010) and the pull-push (Gortler et al. 1996) recompute every pixel every frame. A texel that was already inactive is not rewritten. The 1-in-16 push floor still runs. The view-held stamp bump inside a clean push does not, for slots left off the list; a held camera is already treated as current by the field's freshness check.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
 
 ## Experiment index
@@ -161,6 +162,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78X](experiments/S78X-atrous-work-lists.md) | 2026-10-13 | A-trous levels run dirty work lists | pushed (rough; idle A/B) | S78X |
 | [S78X2](experiments/S78X2-atrous-dense-fallback.md) | 2026-10-12 | Dense a-trous when the dirty fraction is high | pushed | S78X2 |
 | [S79A](experiments/S79A-compose-local-blocks.md) | 2026-10-13 | Compose dirty blocks from local inputs, including while the scene moves | pushed | S79A |
+| [S79B](experiments/S79B-atrous-variance-push-lists.md) | 2026-10-13 | Variance and push use the a-trous work lists under the dirty-fraction gate | pushed | S79B |
 | [S78Z](experiments/S78Z-verify-ring-wakes.md) | 2026-10-13 | Probe verification + impact-tested ring wakes | not pushed (no fix; postmortem) | g78/S78Z-verify-ring-wakes.patch |
 | [S78T2](experiments/S78T2-texel-verify.md) | 2026-10-13 | Texel verification: rotating A-SVGF checks + ring wakes | not pushed (no healing; postmortem) | g78/S78T2-texel-verify.patch |
 | [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
@@ -530,4 +532,33 @@ cap. The decision is last frame's fraction: the mark that crosses the line is
 already inside the filter. `GENOS_LIGHTING_DEBUG` or `GENOS_LIGHTING_SC_TRACE`
 prints `lightingatrous` (dirty fraction, mode `list`/`dense`, threshold,
 filtered count). Owner's S78X moving regression, RTX 4070, 1920x1080: a-trous
-6.6 -> 9.4 ms, 42 -> 37 fps. This fallback is not re-timed here.
+6.6 -> 9.4 ms, 42 -> 37 fps. This fallback is not re-timed here. S79B uses the
+same gate for the variance and push dispatches.
+
+### S79B: variance and push use the work lists
+
+Variance (stage 0) and push (stage 6) walked all 1,048,576 slots on both ends
+of the 1.7-4.5 ms a-trous swing. Levels 1-5 already return after one uniform
+read once `slot` passes the list count. These two passes now do that while
+last frame's fraction is at or under `GENOS_LIGHTING_ATROUS_DIRTY`. The
+dispatch stays 1,048,576/64 groups (S78A's indirect dispatch stays rejected).
+
+Compact appends a slot the dense pass would recompute: variance, the S78B
+early-out inverted, including a texel that just went inactive; push, the push
+early-out inverted, except the view-held stamp bump. The cache pass appends a
+variance slot after it writes irradiance (compact saw the old value). Level 5
+appends the push readers it stamps. One key word a slot (frame in the high
+bits, two tag bits) puts each slot on each list once, so the level-5
+neighbours do not overflow the cap. The word is not activity `.x`: that
+channel is the level-5 dirty stamp. Past 65536, or when the fraction is over
+the gate, the pass is the dense sweep.
+
+`lightingatrous` prints `var` and `push` as `list`, `dense` or `off`.
+`LightingAtrousStats::variance_mode` and `push_mode` are 1, 2 and 0.
+Not re-timed here. Expected on the moving 1920×1080 stress scene: about 0.9 ms
+on frames whose dirty fraction stays at or under 0.25, and about 0 ms on the
+dense end. The 1.7-4.5 ms swing is levels 1-5, ~0.56 ms a level between a list
+and a dense sweep; variance and push are two of those sweeps on both ends, so
+replacing them with lists is about 0.9 ms when the lists stay on. A filtered
+set of ~108k does not itself go on the list. The due set at a 0.25 fraction
+does.

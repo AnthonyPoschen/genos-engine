@@ -86,6 +86,9 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     // that dispatch shaded (the dirty list, or the whole image).
     uint compose_full;
     uint compose_blocks;
+    // S79B: variance and push. 1 work list, 2 dense sweep, 0 did not run.
+    uint atrous_var_mode;
+    uint atrous_push_mode;
 } gstats;
 // Kept-hit light writes (light pass): all, changed, by relative luminance delta
 // (<0.2 %, 0.2-1 %, 1-5 %, >5 %), and changed by source of the hit's direct light
@@ -2880,8 +2883,11 @@ const vec3 LIGHTING_SVGF_LW = vec3(0.2126, 0.7152, 0.0722);
 // LIGHTING_DIRTY_EPS marks every texel that reads it at level k + 1 (its 5 x 5
 // taps at step 2^k, which hold the 3 x 3 variance blur) dirty for that level
 // (scatter: neighbour lookups only around what changed). A dirty texel is
-// recomputed; a clean one keeps its level. The push (stage 6) runs for all, as
-// before. Deviation: SVGF re-filters every pixel every frame; changes under 1 %
+// recomputed; a clean one keeps its level. S79B: while last frame's dirty
+// fraction stays under the list threshold, variance and push walk the slots
+// compact queued (the ones their early-outs would recompute) instead of every
+// slot. A list past the cap falls back to the dense sweep.
+// Deviation: SVGF re-filters every pixel every frame; changes under 1 %
 // are held until they add up past it (bounded 1 % lag).
 const bool LIGHTING_DIRTY_ATROUS = true;
 const float LIGHTING_DIRTY_EPS = 0.01;
@@ -2921,6 +2927,51 @@ bool lighting_svgf_is_dirty(uint s, uint k) {
 // always dense; a threshold of 1 keeps the lists up to the cap.
 const bool LIGHTING_ATROUS_LISTS = true;
 const uint LIGHTING_ATROUS_LIST_CAP = 65536u;
+// S79B. After the compose tail (lamp bump, prepare flag). A count, then the slots.
+const uint LIGHTING_VAR_LIST_AT = LIGHTING_COMPOSE_PREP_AT + 1u;
+const uint LIGHTING_PUSH_LIST_AT = LIGHTING_VAR_LIST_AT + 1u + LIGHTING_ATROUS_LIST_CAP;
+void lighting_work_add(uint list, uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[list] > LIGHTING_ATROUS_LIST_CAP) {
+        return;
+    }
+    uint at = atomicAdd(ckeys.key[list], 1u);
+    if (at < LIGHTING_ATROUS_LIST_CAP) {
+        ckeys.key[list + 1u + at] = slot;
+    }
+}
+// One word a slot, after the push list. Bits 0 variance, 1 push, the rest the
+// frame. Compact, the cache pass and the level-5 stamps all append; the word
+// keeps a slot on each list once. Activity .x is the level-5 dirty stamp.
+const uint LIGHTING_VP_MARK_AT = LIGHTING_PUSH_LIST_AT + 1u + LIGHTING_ATROUS_LIST_CAP;
+void lighting_queue_add(uint list, uint slot, uint tag) {
+    if (slot >= LIGHTING_CACHE_SLOTS || tag == 0u) {
+        return;
+    }
+    uint addr = LIGHTING_VP_MARK_AT + slot;
+    uint frame = lighting_frame();
+    uint cur = ckeys.key[addr];
+    [[dont_unroll]] for (uint n = 0u; n < 4u; n++) {
+        uint bits = cur >> 2u;
+        uint mask = bits == frame ? (cur & 3u) : 0u;
+        if ((mask & tag) != 0u) {
+            return;
+        }
+        uint next = (frame << 2u) | (mask | tag);
+        uint prev = atomicCompSwap(ckeys.key[addr], cur, next);
+        if (prev == cur) {
+            lighting_work_add(list, slot);
+            return;
+        }
+        cur = prev;
+    }
+    lighting_work_add(list, slot);
+}
+void lighting_var_add(uint slot) {
+    lighting_queue_add(LIGHTING_VAR_LIST_AT, slot, 1u);
+}
+void lighting_push_add(uint slot) {
+    lighting_queue_add(LIGHTING_PUSH_LIST_AT, slot, 2u);
+}
 const uint LIGHTING_ATROUS_MARK_AT = LIGHTING_CHECK_P_AT + 16u;
 const uint LIGHTING_ATROUS_LIST_AT = LIGHTING_ATROUS_MARK_AT + 5u * LIGHTING_CACHE_SLOTS;
 // Past the S78Z verify/wake reservation. Host writes the threshold; the rest
@@ -3044,7 +3095,70 @@ bool lighting_svgf_stamp_recent(uint s, uint c) {
 void lighting_svgf_stamp(uint s, uint c) {
     if (s != ~0u) {
         cache.v[LIGHTING_SC_DIRTY_AT + LIGHTING_CACHE_SLOTS + s][c] = uintBitsToFloat(lighting_frame());
+        // Level 5 marks the push readers after compact has already seeded the list.
+        if (c == 3u && lighting_atrous_listing()) {
+            lighting_push_add(s);
+        }
     }
+}
+// Slots the dense variance pass would recompute. Already-inactive slots keep
+// their zero masks; running them again does not change the picture.
+bool lighting_variance_due(uint slot) {
+    if (!lighting_sc_svgf() || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
+        return false;
+    }
+    if (!lighting_svgf_active(slot)) {
+        return lighting_svgf_was_active(slot);
+    }
+    if (!LIGHTING_DIRTY_ATROUS) {
+        return true;
+    }
+    float var;
+    vec4 v = lighting_svgf_in(slot, var);
+    bool spatial = var < 0.0;
+    bool flip = !lighting_svgf_was_active(slot);
+    if (!flip) {
+        float vo;
+        vec4 o = lighting_svgf_load(lighting_svgf_lvl(0u), slot, vo);
+        bool held = spatial
+            ? (!lighting_svgf_moved(v, vo, o, vo) && !lighting_svgf_stamp_recent(slot, 2u))
+            : !lighting_svgf_moved(v, var, o, vo);
+        if (held) {
+            return false;
+        }
+        if (LIGHTING_DIRTY_NOISE && !spatial && abs(v.w - o.w) <= LIGHTING_DIRTY_EPS) {
+            vec2 nz = lighting_sc_noise(slot);
+            float dl = abs(dot(v.rgb - o.rgb, vec3(0.2126, 0.7152, 0.0722)));
+            if (nz.x >= 0.0 && dl <= LIGHTING_DIRTY_SE * nz.y * lighting_sc_sun_gain(slot)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+// Inverse of the push early-out, except the view-held stamp refresh. Slots
+// left off the list do not bump that stamp (S79B). The freshness check treats
+// a held camera as current either way.
+const uint LIGHTING_PUSH_IDLE = 16u;
+bool lighting_push_due(uint slot) {
+    if (!lighting_sc_svgf() || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
+        return false;
+    }
+    if (!lighting_svgf_active(slot)) {
+        return false;
+    }
+    if (cache.v[3u * slot + 1u].w > 0.2) {
+        return false;
+    }
+    float varp;
+    vec4 f = lighting_svgf_load(LIGHTING_SC_ATROUS_A, slot, varp);
+    float w = clamp(f.w, 0.0, 1.0);
+    if (LIGHTING_DIRTY_ATROUS && w >= 0.999 && !lighting_svgf_stamp_recent(slot, 3u)
+        && cache.v[LIGHTING_SC_ATROUS_B + slot].w != 0.0
+        && ((lighting_hash(slot ^ 0x7f4a7c15u) + lighting_frame()) % LIGHTING_PUSH_IDLE) != 0u) {
+        return false;
+    }
+    return true;
 }
 // An inactive texel: mask 0 at every level (a flip marks its readers once).
 void lighting_svgf_inactive(uint slot) {
@@ -3230,7 +3344,6 @@ float lighting_svgf_lum_at(uint slot, ivec2 off, out bool ok) {
     ok = x.w > 0.0;
     return dot(x.rgb, LIGHTING_SVGF_LW);
 }
-const uint LIGHTING_PUSH_IDLE = 16u;
 void lighting_svgf_push(uint slot) {
     vec4 nb = cache.v[3u * slot + 1u];
     if (nb.w > 0.2) {

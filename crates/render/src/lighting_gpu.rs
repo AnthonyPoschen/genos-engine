@@ -203,7 +203,7 @@ pub(crate) struct Lighting {
     compose_all: Option<bool>,
 }
 
-/// A-trous levels 1-5 in the last frame that ran them (S78X dense fallback).
+/// A-trous in the last frame that ran it (S78X dense fallback, S79B variance and push).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LightingAtrousStats {
     /// Dirty slots over filtered texels, the fullest of levels 1-5 (0..1).
@@ -216,6 +216,10 @@ pub struct LightingAtrousStats {
     pub filtered: u32,
     /// Levels 1-5 ran this frame.
     pub ran: bool,
+    /// Variance pass: `1` work list, `2` dense sweep, `0` did not run.
+    pub variance_mode: u32,
+    /// Push pass: `1` work list, `2` dense sweep, `0` did not run.
+    pub push_mode: u32,
 }
 
 /// Quiet compose for the last frame (S79A). `full` is the image-covering
@@ -234,6 +238,8 @@ fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats 
         threshold: w[LIGHTING_ATROUS_STAT + 2] as f32 / 1.0e6,
         filtered: w[LIGHTING_ATROUS_STAT + 3],
         ran: mode_word != 0,
+        variance_mode: w[LIGHTING_ATROUS_VAR_STAT],
+        push_mode: w[LIGHTING_ATROUS_PUSH_STAT],
     }
 }
 
@@ -345,6 +351,19 @@ const LIGHTING_COMPOSE_TAIL_WORDS: u64 = 2;
 fn lighting_compose_prep_at() -> u64 {
     lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS + 1
 }
+/// S79B variance list, then the push list. Each is a count plus `LIGHTING_ATROUS_LIST_CAP` slots.
+fn lighting_var_list_at() -> u64 {
+    lighting_compose_prep_at() + 1
+}
+fn lighting_push_list_at() -> u64 {
+    lighting_var_list_at() + 1 + LIGHTING_ATROUS_LIST_CAP
+}
+/// Per-slot once-a-frame mark for the variance and push lists (S79B).
+fn lighting_vp_mark_at() -> u64 {
+    lighting_push_list_at() + 1 + LIGHTING_ATROUS_LIST_CAP
+}
+const LIGHTING_VAR_PUSH_WORDS: u64 = 2 * (1 + LIGHTING_ATROUS_LIST_CAP);
+const LIGHTING_VP_MARK_WORDS: u64 = LIGHTING_CACHE_SLOTS;
 const LIGHTING_PASS_NAMES: [&str; 9] = [
     "lighting compact",
     "lighting place",
@@ -706,8 +725,16 @@ impl Gpu {
             // The compose words and the a-trous meta must not alias the a-trous lists.
             assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
             assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
+            assert!(
+                lighting_vp_mark_at() + LIGHTING_VP_MARK_WORDS
+                    == lighting_atrous_ppm_at()
+                        + LIGHTING_ATROUS_META_WORDS
+                        + LIGHTING_COMPOSE_TAIL_WORDS
+                        + LIGHTING_VAR_PUSH_WORDS
+                        + LIGHTING_VP_MARK_WORDS
+            );
             self.lighting.cache_keys = self.make_buffer_queues(
-                (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS + LIGHTING_COMPOSE_TAIL_WORDS) * 4, // a-trous meta after the S67/PR11 compose words // S78X: a-trous threshold, fraction, bins // S78Z: verify / wake words sit just before that // S78X lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT) // S79A: lamp-bump word, compose prepare flag
+                (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS + LIGHTING_COMPOSE_TAIL_WORDS + LIGHTING_VAR_PUSH_WORDS + LIGHTING_VP_MARK_WORDS) * 4, // a-trous meta after the S67/PR11 compose words // S78X: a-trous threshold, fraction, bins // S78Z: verify / wake words sit just before that // S78X lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT) // S79A: lamp-bump word, compose prepare flag // S79B: variance and push lists, one dedup mark a slot
                 0x20 | 0x2 | 0x100 | 0x1,
                 Memory::Device,
                 &share,
@@ -1010,6 +1037,29 @@ impl Gpu {
                     (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, at * 4, 4, 0);
                 }
             }
+            // S79B: list counts and filtered-texel bins. Compact appends and
+            // counts in a later dispatch; clearing there would race the adds.
+            (self.fns.cmd_fill_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                lighting_var_list_at() * 4,
+                4,
+                0,
+            );
+            (self.fns.cmd_fill_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                lighting_push_list_at() * 4,
+                4,
+                0,
+            );
+            (self.fns.cmd_fill_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                (lighting_atrous_ppm_at() + 2) * 4,
+                64 * 4,
+                0,
+            );
             (self.fns.cmd_update_buffer)(
                 self.cmd,
                 self.lighting.gbuf.buffer,
@@ -1281,13 +1331,16 @@ impl Gpu {
                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
                 eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
             }
-            let mode = match w[LIGHTING_ATROUS_STAT + 1] {
+            let mode_name = |m: u32| match m {
                 1 => "list",
                 2 => "dense",
                 _ => "off",
             };
+            let mode = mode_name(w[LIGHTING_ATROUS_STAT + 1]);
+            let var_mode = mode_name(w[LIGHTING_ATROUS_VAR_STAT]);
+            let push_mode = mode_name(w[LIGHTING_ATROUS_PUSH_STAT]);
             eprintln!(
-                "lightingatrous {queue} frame {} dirty {:.4} mode {mode} threshold {:.4} filtered {}",
+                "lightingatrous {queue} frame {} dirty {:.4} mode {mode} var {var_mode} push {push_mode} threshold {:.4} filtered {}",
                 self.lighting.frame,
                 w[LIGHTING_ATROUS_STAT] as f64 / 1.0e6,
                 w[LIGHTING_ATROUS_STAT + 2] as f64 / 1.0e6,
@@ -2062,8 +2115,10 @@ const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
 /// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`.
 /// The change-counter enable word stays chg[31] (word 119). Compose follows:
 /// full flag and shaded 8×8 block count at `LIGHTING_COMPOSE_STAT`.
-const LIGHTING_STATS_WORDS: usize = 126;
+const LIGHTING_STATS_WORDS: usize = 128;
 const LIGHTING_COMPOSE_STAT: usize = 124;
+const LIGHTING_ATROUS_VAR_STAT: usize = 126;
+const LIGHTING_ATROUS_PUSH_STAT: usize = 127;
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 const LIGHTING_CHG_ENABLE_WORD: u64 = 24 + 64 + 31;
 const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;

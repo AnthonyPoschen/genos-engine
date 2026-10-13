@@ -8,6 +8,27 @@ layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 
 const bool LIGHTING_WRC_STALE_CHECK = true;
+shared uint compact_red[64];
+
+uint compact_wg_sum(uint bit) {
+    uint lid = gl_LocalInvocationID.x;
+    compact_red[lid] = bit;
+    barrier();
+    if (lid < 32u) compact_red[lid] += compact_red[lid + 32u];
+    barrier();
+    if (lid < 16u) compact_red[lid] += compact_red[lid + 16u];
+    barrier();
+    if (lid < 8u) compact_red[lid] += compact_red[lid + 8u];
+    barrier();
+    if (lid < 4u) compact_red[lid] += compact_red[lid + 4u];
+    barrier();
+    if (lid < 2u) compact_red[lid] += compact_red[lid + 2u];
+    barrier();
+    if (lid == 0u) compact_red[0] += compact_red[1];
+    barrier();
+    return compact_red[0];
+}
+
 void main() {
     uint slot = gl_GlobalInvocationID.x;
     if (lighting_dense()) {
@@ -20,19 +41,39 @@ void main() {
     if (lighting_world_mode() == 3u && lighting_sc_pages_on()) {
         lighting_sc_page_clear(slot);
     }
-    // S78X: this round's a-trous lists start empty (marks come from the
-    // variance stage on). The filtered-texel bins, the per-level mode and the
-    // dense recount bins start empty too. The threshold and last frame's
-    // fraction stay.
+    // S78X: this round's level lists start empty (marks come from the variance
+    // stage on). The per-level mode and the dense recount bins start empty too.
+    // Filtered-texel bins are cleared before this dispatch (S79B counts them here).
+    // The threshold and last frame's fraction stay.
     if (LIGHTING_ATROUS_LISTS && slot < 5u) {
         ckeys.key[lighting_atrous_list(slot + 1u)] = 0u;
         ckeys.key[LIGHTING_ATROUS_MODE_AT + slot] = 0u;
     }
-    if (LIGHTING_ATROUS_LISTS && slot < 64u) {
-        ckeys.key[LIGHTING_ATROUS_BIN_AT + slot] = 0u;
-    }
     if (LIGHTING_ATROUS_LISTS && slot < 320u) {
         ckeys.key[LIGHTING_ATROUS_DBIN_AT + slot] = 0u;
+    }
+    // Every thread of this sweep joins the sum. The idle return is below, so a
+    // skipped slot is still counted and still considered for the lists.
+    uint bit = 0u;
+    if (slot < LIGHTING_CACHE_SLOTS && lighting_sc_svgf() && ckeys.key[slot] != 0u
+        && cache.v[3u * slot + 1u].w > 0.0 && lighting_svgf_active(slot)) {
+        bit = 1u;
+    }
+    uint sum = compact_wg_sum(bit);
+    if (gl_LocalInvocationID.x == 0u && sum != 0u) {
+        atomicAdd(ckeys.key[LIGHTING_ATROUS_BIN_AT + (gl_WorkGroupID.x & 63u)], sum);
+    }
+    // S79B: queue the slots the dense variance and push passes would recompute.
+    // The filtered set itself (~108k) does not fit the list cap; the due set does
+    // while the dirty fraction stays under the gate.
+    if (slot < LIGHTING_CACHE_SLOTS && ckeys.key[slot] != 0u && cache.v[3u * slot + 1u].w > 0.0
+        && lighting_atrous_listing()) {
+        if (lighting_variance_due(slot)) {
+            lighting_var_add(slot);
+        }
+        if (lighting_push_due(slot)) {
+            lighting_push_add(slot);
+        }
     }
     if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
         return;
