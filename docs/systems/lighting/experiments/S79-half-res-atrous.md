@@ -57,7 +57,7 @@ Deviations: sample age is the surface-cache set count, not a screen history leng
 Expected cost: on the moving sun the set count stays high (the history is not reset by a global light change) and the estimator variance stays small, so most fine texels should leave the 5×5 after one iteration. The dispatch still launches; the threads return after a copy. That is the opposite of the dirty-block skip, which saw every block change and did the full kernel. Where the history is young or the variance is high, the configured iteration count still runs.
 
 ```
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_ADAPTIVE=on GENOS_LIGHTING_DENOISE_VARIANCE=0.02 make stress
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-adaptive on --denoise-variance 0.02
 ```
 
 ## Shared-memory tiles
@@ -83,8 +83,8 @@ Lavapipe, 320×180, still camera, against the full-resolution scalar picture: ti
 Expected cost: the hash probes inside the 5×5 become one cooperative load of the footprint, for the three finest iterations. The two coarsest stay scalar. On the moving scene the lists were already abandoned, so this does not depend on a dirty-block skip.
 
 ```
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_TILES=on make stress
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_RES=half GENOS_LIGHTING_DENOISE_ADAPTIVE=on GENOS_LIGHTING_DENOISE_TILES=on make stress
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-tiles on
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res half --denoise-adaptive on --denoise-tiles on
 ```
 
 ## Expected cost
@@ -94,8 +94,8 @@ The five wavelet dispatches dominate the 5.5 ms. They run on about a quarter of 
 Not timed here. The owner runs:
 
 ```
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_RES=full make stress
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_RES=half make stress
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res full
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res half
 ```
 
 RTX 4070, 1920×1080, the moving stress scene. The `atrous` column is the one that should move. Lavapipe checks mean and p99 error against the full-resolution picture, error at depth discontinuities, and flicker variance on a still camera. Lavapipe does not time the GPU.

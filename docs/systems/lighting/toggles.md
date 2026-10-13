@@ -73,20 +73,30 @@ GPU times need `GENOS_GPU_TIMES` set before the renderer opens. The names are `c
 
 ## Owner commands
 
-Run these on the owner machine. They are not the lavapipe check.
+Run these on the owner machine (RTX 4070, 1920×1080, the moving stress scene). They are not the lavapipe check. A flag wins over the matching `GENOS_LIGHTING_*` variable. An omitted flag leaves that variable in effect. `make stress` is `cargo run --release -p genos-stress`. The `atrous` column is the one that should move. Lavapipe does not time the GPU. High stays full-resolution scalar until these are compared.
 
 ```
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=potato make stress
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=low make stress
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=medium make stress
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high make stress
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res full
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res half
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-adaptive on --denoise-variance 0.02
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res half --denoise-adaptive on
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-tiles on
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-tiles off
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res half --denoise-adaptive on --denoise-tiles on
 ```
 
-A/B the denoiser resolution on the high preset (full is the default). Lavapipe does not time this; the owner runs it on the RTX 4070 at 1080p in the moving stress scene.
+```
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset potato
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset low
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset medium
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high
+```
+
+A/B the denoiser resolution on the high preset (full is the default).
 
 ```
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_RES=full make stress
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_RES=half make stress
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res full
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res half
 ```
 
 `denoise_res=half` runs the wavelet on bounce light at the even-even surface-cache lattice and upsamples with depth and normal. `full` is the five-iteration filter. Direct light is not an input. The mode does not allocate or reuse a screen-sized image.
@@ -94,16 +104,16 @@ GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_RES=half ma
 Adaptive passes drop later wavelet iterations on texels whose sample count is high or whose relative variance `sqrt(var) / mean` is under `denoise_variance` (default 0.02). High leaves adaptive off.
 
 ```
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_ADAPTIVE=on GENOS_LIGHTING_DENOISE_VARIANCE=0.02 make stress
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_RES=half GENOS_LIGHTING_DENOISE_ADAPTIVE=on make stress
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-adaptive on --denoise-variance 0.02
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res half --denoise-adaptive on
 ```
 
 `denoise_tiles=on` gathers each 8×8 wavelet footprint once into shared memory. Steps of 8 and 16 cells stay on the scalar kernel. High leaves tiles off. The tile pipeline is not the scalar shader, so the full-quality path does not reserve that shared memory.
 
 ```
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_TILES=on make stress
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_TILES=off make stress
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_RES=half GENOS_LIGHTING_DENOISE_ADAPTIVE=on GENOS_LIGHTING_DENOISE_TILES=on make stress
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-tiles on
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-tiles off
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res half --denoise-adaptive on --denoise-tiles on
 ```
 
 `make stress` is `cargo run --release -p genos-stress`. The `LIGHTING_MS` line names the passes and appends `cache_rays`, `shadows`, and `prefill`. `prefill` is 1 when the scout was due and 0 when it was not. The scout shares the cache-ray dispatch, so this is not a separate millisecond.
