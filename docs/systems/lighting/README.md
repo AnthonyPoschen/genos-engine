@@ -585,7 +585,10 @@ applies for lighting, is not the key. That was the Sponza banner: a thin cloth
 shared 12.5 cm cells between its faces, and the key moved as the camera did,
 so the cells showed up as bright squares that jumped. The banner test fills
 the lamp side, then cuts to the other side. That side stays dark. One shared
-axis makes the far side as bright as the lamp side.
+axis makes the far side as bright as the lamp side. The same cells are the
+bright blotches on a sun-shadowed floor: the hash wavelet keeps a cell
+brighter than its neighbours, and the screen wavelet does not, across a
+small camera move.
 
 The filter still runs on the whole picture every frame. A moving frame does
 not reuse or hold a filtered frame. Papers, the deviations, and the owner GPU

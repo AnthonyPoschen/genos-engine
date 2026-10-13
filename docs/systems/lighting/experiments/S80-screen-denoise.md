@@ -39,6 +39,12 @@ a two-sided quad, then cuts to the other side and moves the camera. That side
 stays dark: its p95 stays under half the lamp side, and it has no cell-sized
 peaks. One shared axis makes the far side as bright as the lamp side.
 
+The same cells show on a sun-shadowed floor, where the direct sun is gone
+and only bounce is left. A wall blocks the sun. The hash wavelet keeps a
+floor cell brighter than the four cells around it. The screen wavelet keeps
+that excess off the picture while the camera moves a few centimetres, and
+the world-locked flicker of those floor points stays with the hash path.
+
 ## Papers and deviations
 
 - Schied et al. "Spatiotemporal Variance-Guided Filtering." HPG 2017. §4.2 is

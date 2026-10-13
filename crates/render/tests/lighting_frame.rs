@@ -974,6 +974,335 @@ fn sponza_banner_cells_stay_still_under_the_screen_wavelet() {
     }
 }
 
+/// Sun-shadowed floor on high. Direct sun is blocked, so the picture there is
+/// bounce. A 12.5 cm cell that is brighter than its neighbours is the blotch
+/// in that shadow. It has to stay gone while the camera moves, and the same
+/// floor points must not flicker harder than the hash wavelet.
+#[test]
+fn shadowed_floor_bounce_stays_smooth_on_high() {
+    let hash = floor_shadow_shot(false);
+    let screen = floor_shadow_shot(true);
+    eprintln!(
+        "shadow floor hash mean {:.1} peaks {:.1}..{:.1} flicker {:.3} screen mean {:.1} peaks {:.1}..{:.1} flicker {:.3}",
+        hash.mean, hash.peaks_min, hash.peaks_max, hash.flicker,
+        screen.mean, screen.peaks_min, screen.peaks_max, screen.flicker
+    );
+    assert!(
+        hash.mean >= 8.0,
+        "the shadowed floor has no bounce to score ({:.1})",
+        hash.mean
+    );
+    assert!(
+        screen.mean >= 8.0,
+        "the shadowed floor has no bounce to score ({:.1})",
+        screen.mean
+    );
+    assert!(
+        hash.peaks_min >= 20.0,
+        "the hash wavelet did not keep a cell blotch ({:.1})",
+        hash.peaks_min
+    );
+    assert!(
+        screen.peaks_max <= 4.0,
+        "screen cell blotches under the move {:.1}",
+        screen.peaks_max
+    );
+    assert!(
+        screen.flicker <= hash.flicker + 0.2,
+        "screen flicker {:.3} is above hash {:.3}",
+        screen.flicker, hash.flicker
+    );
+    assert!(
+        screen.flicker <= 1.5,
+        "screen flicker {:.3} on the shadowed floor",
+        screen.flicker
+    );
+}
+
+struct FloorShadow {
+    mean: f64,
+    peaks_min: f64,
+    peaks_max: f64,
+    flicker: f64,
+}
+
+#[derive(Clone, Copy)]
+struct FloorCam {
+    x: f32,
+    y: f32,
+    z: f32,
+    yaw: f32,
+    pitch: f32,
+}
+
+fn floor_shadow_shot(screen: bool) -> FloorShadow {
+    let (_gpu, mut window, mut renderer) = open();
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.denoiser.screen = screen;
+    renderer.set_lighting_settings(settings);
+    view_at(&mut renderer, ViewMode::Bounce);
+    let world = shadow_floor_world();
+    let still = FloorCam {
+        x: 0.0,
+        y: 1.45,
+        z: -0.4,
+        yaw: 0.0,
+        pitch: -0.85,
+    };
+    let shots = [
+        still,
+        FloorCam { x: 0.05, ..still },
+        FloorCam {
+            x: 0.1,
+            yaw: 0.012,
+            ..still
+        },
+        FloorCam {
+            x: 0.04,
+            z: -0.46,
+            pitch: -0.87,
+            ..still
+        },
+        FloorCam {
+            x: -0.05,
+            yaw: -0.01,
+            ..still
+        },
+    ];
+    for _ in 0..10 {
+        let camera = floor_camera(&shots[0]);
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+    }
+    let mut frames = Vec::new();
+    for cam in &shots {
+        frames.push(draw(
+            &mut window,
+            &mut renderer,
+            &world,
+            &floor_camera(cam),
+        ));
+    }
+    let covered = floor_lumas(&frames[0], &shots[0]).len();
+    assert!(
+        covered >= 40,
+        "the shadow patch left the frame ({covered} samples)"
+    );
+    let mut peaks_min = f64::MAX;
+    let mut peaks_max = 0.0f64;
+    for (frame, cam) in frames.iter().zip(shots.iter()) {
+        let peaks = floor_peaks(frame, cam);
+        peaks_min = peaks_min.min(peaks);
+        peaks_max = peaks_max.max(peaks);
+    }
+    FloorShadow {
+        mean: mean_of(&floor_lumas(&frames[0], &shots[0])),
+        peaks_min,
+        peaks_max,
+        flicker: floor_flicker(&frames, &shots),
+    }
+}
+
+fn floor_camera(cam: &FloorCam) -> Camera {
+    let mut camera = Camera::opening();
+    camera.set_pose(
+        genos_scene::Vec3::new(cam.x, cam.y, cam.z),
+        cam.yaw,
+        cam.pitch,
+    );
+    camera
+}
+
+/// A wall blocks the sun. The floor beyond it is bounce only: sky, the lit
+/// wall, and a small emitter beside the patch.
+fn shadow_floor_world() -> World {
+    let dir = std::env::temp_dir().join("genos-shadow-floor-test");
+    std::fs::create_dir_all(&dir).expect("shadow dir");
+    let glow = genos_load::load_gltf_file(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../load/fixtures/cube.gltf"
+    ))
+    .expect("cube");
+    let mut glowing = glow;
+    for material in &mut glowing.materials {
+        material.emissive = [240.0, 96.0, 28.0];
+        material.emissive_strength = 1.0;
+    }
+    let bake = genos_bake::BakeSettings {
+        mode: genos_bake::BakeMode::OnLoad,
+        cache_dir: dir.join("bake"),
+        ..genos_bake::BakeSettings::default()
+    };
+    let mut world = World::from_scene(Scene {
+        floor: genos_scene::Floor {
+            position: genos_scene::Vec3::ZERO,
+            half_x: 6.0,
+            half_z: 6.0,
+            color: [0.55, 0.42, 0.30],
+        },
+        walls: vec![
+            genos_scene::Wall {
+                position: genos_scene::Vec3::new(0.0, 0.0, -0.15),
+                half_x: 3.0,
+                half_z: 0.12,
+                height: 2.8,
+                base: 0.0,
+                color: [0.4, 0.38, 0.34],
+                absorption: 0.0,
+                reflectance: 0.4,
+                color_mix: -1.0,
+            },
+            genos_scene::Wall {
+                position: genos_scene::Vec3::new(0.0, 0.0, -3.5),
+                half_x: 3.2,
+                half_z: 0.12,
+                height: 3.0,
+                base: 0.0,
+                color: [0.86, 0.78, 0.64],
+                absorption: 0.0,
+                reflectance: 0.85,
+                color_mix: -1.0,
+            },
+        ],
+        solids: Vec::new(),
+        lights: vec![genos_scene::Light {
+            position: genos_scene::Vec3::ZERO,
+            color: [4.0, 3.4, 2.6],
+            direction: genos_scene::Vec3::new(0.08, -0.85, -0.55),
+        }],
+        ceiling: None,
+        sky: Some(genos_scene::Sky {
+            color: [0.02, 0.02, 0.025],
+        }),
+        lighting: LightingSettings::preset(LightingPreset::High),
+        debug: genos_scene::DebugSettings::default(),
+    });
+    // Beside the scored patch, low, so a few cells see it and the rest do not.
+    // A few centimetres off the floor, just beside the scored patch, so the
+    // nearest 12.5 cm cells see it and the cells one step away do not.
+    let s = 0.035f32;
+    let mut place = genos_render::identity_pose();
+    place[0] = s;
+    place[5] = s;
+    place[10] = s;
+    place[13] = 0.12;
+    place[12] = 1.15 - 10.0 * s;
+    place[14] = -1.5;
+    world
+        .add_gltf_traced(&glowing, &place, &bake)
+        .expect("emitter");
+    world
+}
+
+fn floor_points() -> Vec<[f32; 3]> {
+    let mut pts = Vec::new();
+    let mut x = -1.0f32;
+    while x <= 1.001 {
+        let mut z = -2.2f32;
+        while z <= -0.999 {
+            pts.push([x, 0.0, z]);
+            z += 0.125;
+        }
+        x += 0.125;
+    }
+    pts
+}
+
+fn floor_lumas(frame: &[u8], cam: &FloorCam) -> Vec<f64> {
+    floor_points()
+        .into_iter()
+        .filter_map(|p| floor_luma(frame, cam, p))
+        .collect()
+}
+
+fn floor_luma(frame: &[u8], cam: &FloorCam, world: [f32; 3]) -> Option<f64> {
+    let (x, y) = floor_project(cam, world)?;
+    Some(luma_at(frame, 320, x, y))
+}
+
+/// A bright blotch is a floor point brighter than the four points one cache
+/// cell away. The sun-shadow shot is these patches.
+fn floor_peak_excess(frame: &[u8], cam: &FloorCam, p: [f32; 3]) -> f64 {
+    let mut nb = [p; 4];
+    nb[0][0] -= 0.125;
+    nb[1][0] += 0.125;
+    nb[2][2] -= 0.125;
+    nb[3][2] += 0.125;
+    let Some(c) = floor_luma(frame, cam, p) else {
+        return 0.0;
+    };
+    let mut around = Vec::new();
+    for q in nb {
+        if let Some(v) = floor_luma(frame, cam, q) {
+            around.push(v);
+        }
+    }
+    if around.len() < 4 || around.iter().any(|v| c <= *v + 6.0) {
+        return 0.0;
+    }
+    c - mean_of(&around)
+}
+
+fn floor_peaks(frame: &[u8], cam: &FloorCam) -> f64 {
+    let peaks: Vec<f64> = floor_points()
+        .into_iter()
+        .map(|p| floor_peak_excess(frame, cam, p))
+        .filter(|v| *v > 0.0)
+        .collect();
+    mean_of(&peaks)
+}
+
+fn floor_flicker(frames: &[Vec<u8>], cams: &[FloorCam]) -> f64 {
+    let pts = floor_points();
+    let mut acc = 0.0;
+    let mut n = 0.0;
+    for i in 0..frames.len().saturating_sub(1) {
+        for p in &pts {
+            let Some(a) = floor_luma(&frames[i], &cams[i], *p) else {
+                continue;
+            };
+            let Some(b) = floor_luma(&frames[i + 1], &cams[i + 1], *p) else {
+                continue;
+            };
+            acc += (a - b).abs();
+            n += 1.0;
+        }
+    }
+    if n == 0.0 { 0.0 } else { acc / n }
+}
+
+fn floor_project(cam: &FloorCam, world: [f32; 3]) -> Option<(usize, usize)> {
+    let (sy, cy) = cam.yaw.sin_cos();
+    let (sp, cp) = cam.pitch.sin_cos();
+    let forward = [sy * cp, sp, -cy * cp];
+    let right = [cy, 0.0, sy];
+    let up = [
+        right[1] * forward[2] - right[2] * forward[1],
+        right[2] * forward[0] - right[0] * forward[2],
+        right[0] * forward[1] - right[1] * forward[0],
+    ];
+    let rel = [
+        world[0] - cam.x,
+        world[1] - cam.y,
+        world[2] - cam.z,
+    ];
+    let zv = rel[0] * forward[0] + rel[1] * forward[1] + rel[2] * forward[2];
+    if zv < 1.0e-3 {
+        return None;
+    }
+    let t = (30.0f32.to_radians()).tan();
+    let aspect = 320.0f32 / 180.0;
+    let ndc_x = (rel[0] * right[0] + rel[1] * right[1] + rel[2] * right[2]) / (zv * t * aspect);
+    let ndc_y = (rel[0] * up[0] + rel[1] * up[1] + rel[2] * up[2]) / (zv * t);
+    let px = (ndc_x + 1.0) * 0.5 * 320.0 - 0.5;
+    let py = (1.0 - ndc_y) * 0.5 * 180.0 - 0.5;
+    let x = (px + 0.5).floor() as i32;
+    let y = (py + 0.5).floor() as i32;
+    if x < 2 || y < 2 || x >= 318 || y >= 178 {
+        return None;
+    }
+    Some((x as usize, y as usize))
+}
+
 struct BannerView {
     p95: f64,
     peaks: f64,
