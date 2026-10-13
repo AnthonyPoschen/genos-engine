@@ -110,15 +110,47 @@ make lighting SCENE=sponza
 `make lighting` is the benchmark: release, `--scene` from `SCENE` (default
 `stress`), and `--gpu-times 30`. `--preset`, `--lighting-debug`, `--unfilled`
 (the existing texels view: slots with fewer than four sets stay dim),
-`--full-effort`, `--headless`, `--frames N`, `--size WxH`, and `--out DIR` are
-in `--help`. The default output directory is `./genos-debug/` in the current
-working directory (`shots/`, `logs/`, `dumps/`). `--out` overrides it. The
-binary does not write those files under `$HOME`.
+`--full-effort`, `--headless`, `--frames N`, `--size WxH`, `--fps-counter`,
+`--fps-hz`, and `--out DIR` are in `--help`. The default output directory is
+`./genos-debug/` in the current working directory (`shots/`, `logs/`, `dumps/`).
+`--out` overrides it. The binary does not write those files under `$HOME`.
 
 Page Up and Page Down switch scenes. Keys 1–9 jump checkpoints. Home and 0 reset
-the camera to the active checkpoint. `list_scenes`, `load_scene`,
-`list_checkpoints`, and `jump_checkpoint` are on the same MCP catalogue.
-`load_scene` drops light and object edits and clears the lighting caches.
+the camera to the active checkpoint. F3 toggles the frame-rate overlay.
+`list_scenes`, `load_scene`, `list_checkpoints`, and `jump_checkpoint` are on
+the same MCP catalogue. `load_scene` drops light and object edits and clears
+the lighting caches.
+
+### Frame-rate overlay
+
+`FpsCounterSettings` on the scene (`enabled`, `rate_hz`) is the public setting.
+It implements `EngineSettings`. The default is off, at 4 Hz. The debug menu row
+`FPS` has an on/off button and a hertz slider. Both call `set_key`. F3 toggles
+`enabled`. `--fps-counter` (optional `on` or `off`; bare means on) and
+`--fps-hz N` win every frame. `GENOS_FPS_COUNTER` and `GENOS_FPS_HZ` apply only
+when that argument was omitted, and then a set variable wins every frame.
+`get_fps_counter` and `set_fps_counter` are on the MCP catalogue. A `text`
+field overlays `key=value` lines.
+
+`genos-lighting` draws the plate at the bottom right: frames per second and the
+average frame time in milliseconds. The glyphs are rebuilt when a window of
+`1 / rate_hz` seconds closes, and the frames in between reuse those rectangles.
+Off, the frame does not accumulate time and does not build text. The first
+window draws nothing, so the number is an average, not a single frame. Screenshots
+and logs still go to `./genos-debug/<kind>/` (`shots/`, `logs/`, `dumps/`).
+`--out` overrides that directory.
+
+Failure modes: a stuck readout means the window is not closing (the rate is
+too low, or frame time is not advancing). A missing plate means `enabled` is
+off or the first window has not closed. The probes are the plate, the `FPS`
+menu row, F3, `--fps-counter` / `--fps-hz`, and `get_fps_counter` /
+`set_fps_counter`.
+
+- Replicated state: the settings struct. The averaged numbers stay on the client that draws.
+- Authority: the client that owns the view. A server does not time the picture.
+- Prediction / rollback: none. The readout is presentation data.
+- Determinism: the same frame durations and the same rate produce the same plate. Wall time is not a scene clock.
+- Headless server: it does not draw the plate. It can store the struct. `--headless` on this binary still draws when the setting is on.
 
 `--check` loads every scene on a 320×180 proof window, jumps to the checkpoint
 named by that scene's `check` line, draws four frames at a fixed 1/60 s step,
