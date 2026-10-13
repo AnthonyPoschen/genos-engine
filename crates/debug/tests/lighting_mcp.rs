@@ -61,12 +61,14 @@ fn lighting_settings_round_trip_over_mcp() {
     let worker = std::thread::spawn(|| {
         let listed = call("list_presets", json::object([]));
         let applied = call("apply_preset", json::object([("name", json::string("potato"))]));
+        let day = call("apply_preset", json::object([("name", json::string("day-cycle"))]));
+        let bounce = call("apply_preset", json::object([("name", json::string("gi-1bounce"))]));
         let updated = call(
             "set_lighting_settings",
             json::object([("gi", json::bool(true)), ("bounces", json::string("1"))]),
         );
         let read = call("get_lighting_settings", json::object([]));
-        (listed, applied, updated, read)
+        (listed, applied, day, bounce, updated, read)
     });
     while !worker.is_finished() {
         assert!(started.elapsed() < Duration::from_secs(180), "mcp round trip timed out");
@@ -80,7 +82,7 @@ fn lighting_settings_round_trip_over_mcp() {
             renderer.draw(&world, &camera, false).expect("draw");
         }
     }
-    let (listed, applied, updated, read) = worker.join().expect("mcp thread");
+    let (listed, applied, day, bounce, updated, read) = worker.join().expect("mcp thread");
     let names: Vec<_> = listed
         .get("presets")
         .and_then(Value::as_array)
@@ -88,9 +90,23 @@ fn lighting_settings_round_trip_over_mcp() {
         .iter()
         .filter_map(|preset| preset.get("name").and_then(Value::as_str))
         .collect();
-    assert_eq!(names, ["potato", "low", "medium", "high"]);
+    assert_eq!(
+        names,
+        ["potato", "day-cycle", "gi-1bounce", "low", "medium", "high"]
+    );
     assert!(text_of(&applied).contains("preset=potato"), "{}", text_of(&applied));
     assert!(text_of(&applied).contains("gi=0"), "{}", text_of(&applied));
+    let day_text = text_of(&day);
+    assert!(day_text.contains("preset=day-cycle"), "{day_text}");
+    assert!(day_text.contains("gi=0"), "{day_text}");
+    assert!(day_text.contains("ambient=curve"), "{day_text}");
+    assert!(day_text.contains("shadows=1"), "{day_text}");
+    let bounce_text = text_of(&bounce);
+    assert!(bounce_text.contains("preset=gi-1bounce"), "{bounce_text}");
+    assert!(bounce_text.contains("bounces=1"), "{bounce_text}");
+    assert!(bounce_text.contains("world_cache=0"), "{bounce_text}");
+    assert!(bounce_text.contains("denoise=0"), "{bounce_text}");
+    assert!(bounce_text.contains("prefill=0"), "{bounce_text}");
     assert!(text_of(&updated).contains("gi=1"), "{}", text_of(&updated));
     assert!(text_of(&updated).contains("bounces=1"), "{}", text_of(&updated));
     let read_text = text_of(&read);

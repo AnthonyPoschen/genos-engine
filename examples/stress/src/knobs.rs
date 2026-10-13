@@ -266,12 +266,9 @@ fn lighting_preset_knob(settings: &LightingSettings) -> Knob {
         .iter()
         .position(|preset| preset.name() == label)
         .unwrap_or(LightingPreset::all().len());
-    Knob::choice(
-        "lighting_preset",
-        "Lighting",
-        index,
-        &["potato", "low", "medium", "high", "custom"],
-    )
+    let mut names: Vec<&str> = LightingPreset::all().iter().map(|preset| preset.name()).collect();
+    names.push("custom");
+    Knob::choice("lighting_preset", "Lighting", index, &names)
 }
 
 fn bounce_index(count: u32) -> usize {

@@ -20,6 +20,10 @@ pub const LIGHTING_BOUNCES_UNLIMITED: u32 = u32::MAX;
 pub enum LightingPreset {
     /// Direct light, traced shadows, and a flat ambient. No GI buffers.
     Potato,
+    /// Direct light, shadows, and the time-of-day ambient curve. No GI.
+    DayCycle,
+    /// One bounce of screen-probe GI. No surface cache, denoiser, or prefill.
+    Gi1Bounce,
     /// Probe GI, one bounce, coarse tile, refresh every other frame.
     Low,
     /// Surface cache, two bounces, half the ray budget shift.
@@ -32,6 +36,8 @@ impl LightingPreset {
     pub fn name(self) -> &'static str {
         match self {
             Self::Potato => "potato",
+            Self::DayCycle => "day-cycle",
+            Self::Gi1Bounce => "gi-1bounce",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
@@ -41,6 +47,8 @@ impl LightingPreset {
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim().to_ascii_lowercase().as_str() {
             "potato" => Some(Self::Potato),
+            "day-cycle" | "day_cycle" => Some(Self::DayCycle),
+            "gi-1bounce" | "gi_1bounce" => Some(Self::Gi1Bounce),
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
@@ -49,7 +57,14 @@ impl LightingPreset {
     }
 
     pub fn all() -> &'static [LightingPreset] {
-        &[Self::Potato, Self::Low, Self::Medium, Self::High]
+        &[
+            Self::Potato,
+            Self::DayCycle,
+            Self::Gi1Bounce,
+            Self::Low,
+            Self::Medium,
+            Self::High,
+        ]
     }
 }
 
@@ -262,6 +277,32 @@ impl LightingSettings {
         s.preset = preset;
         match preset {
             LightingPreset::High => {}
+            LightingPreset::DayCycle => {
+                s.gi.enabled = false;
+                s.bounce.count = 0;
+                s.probes.enabled = false;
+                s.world_cache.enabled = false;
+                s.denoiser.enabled = false;
+                s.compose_reuse = false;
+                s.prefill = false;
+                s.sky = true;
+                s.ambient.mode = AmbientMode::Curve;
+                s.ambient.night_color = [0.04, 0.05, 0.10];
+                s.ambient.night_intensity = 0.08;
+                s.ambient.dawn_color = [0.95, 0.48, 0.28];
+                s.ambient.dawn_intensity = 0.28;
+                s.ambient.noon_color = [0.62, 0.68, 0.78];
+                s.ambient.noon_intensity = 0.42;
+                s.ambient.dusk_color = [0.90, 0.38, 0.18];
+                s.ambient.dusk_intensity = 0.26;
+            }
+            LightingPreset::Gi1Bounce => {
+                s.bounce.count = 1;
+                s.probes.rays = 64;
+                s.world_cache.enabled = false;
+                s.denoiser.enabled = false;
+                s.prefill = false;
+            }
             LightingPreset::Potato => {
                 s.direct.max_lights = 8;
                 s.shadows.filter = ShadowFilter::Hard;
@@ -572,7 +613,7 @@ impl LightingSettings {
         scale
     }
 
-    /// `potato`, `low`, `medium`, `high`, or `custom` when the knobs are not
+    /// A named preset, or `custom` when the knobs are not
     /// exactly one of those presets. A manual edit clears the named label.
     pub fn preset_label(&self) -> &'static str {
         for preset in LightingPreset::all() {

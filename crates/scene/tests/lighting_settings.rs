@@ -60,6 +60,37 @@ fn potato_is_direct_shadows_and_flat_ambient() {
 }
 
 #[test]
+fn day_cycle_and_one_bounce_sit_between_potato_and_low() {
+    let names: Vec<_> = LightingPreset::all().iter().map(|preset| preset.name()).collect();
+    assert_eq!(
+        names,
+        ["potato", "day-cycle", "gi-1bounce", "low", "medium", "high"]
+    );
+    let day = LightingSettings::preset(LightingPreset::DayCycle);
+    assert!(!day.gi.enabled);
+    assert_eq!(day.bounce.count, 0);
+    assert!(day.shadows.enabled);
+    assert!(day.sky);
+    assert_eq!(day.ambient.mode, AmbientMode::Curve);
+    assert!(!day.allocates_cache());
+    let one = LightingSettings::preset(LightingPreset::Gi1Bounce);
+    assert!(one.gi.enabled);
+    assert_eq!(one.bounce.count, 1);
+    assert!(!one.world_cache.enabled);
+    assert!(!one.denoiser.enabled);
+    assert!(!one.prefill);
+    assert_eq!(one.probe_rays(), 64);
+    assert!(one.probes_this_frame(1));
+    assert!(!one.cache_rays_this_frame(1));
+    let high = LightingSettings::preset(LightingPreset::High);
+    assert_eq!(high.bounce.count, LIGHTING_BOUNCES_UNLIMITED);
+    assert_eq!(high.probe_rays(), 64);
+    assert_eq!(high.denoiser.iterations, 5);
+    assert!(high.world_cache.enabled);
+    assert!(high.prefill);
+}
+
+#[test]
 fn high_is_the_tuned_path() {
     let high = LightingSettings::default();
     assert_eq!(high.preset, LightingPreset::High);

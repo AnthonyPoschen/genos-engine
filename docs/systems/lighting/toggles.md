@@ -42,6 +42,8 @@ The S78S isolate toggles (`GENOS_LIGHTING_TOGGLES`: `freeze_cache`, `direct_only
 | Preset | What it spends | Cost, structural |
 |---|---|---|
 | `potato` | Direct, hard shadows, flat ambient `(0.42, 0.44, 0.48)` at intensity 0.65. No GI. Emissive stays on | Direct and compose only. No ~368 MB cache and no key table. Shadow rays stay inside the direct pass. The hangar look: direct, shadows, ambient fill |
+| `day-cycle` | Direct, cell shadows, sky, and the time-of-day ambient curve. No GI | Direct and compose only. The curve scales the sky from its noon key. No GI buffers |
+| `gi-1bounce` | Screen probes, 64 rays, one bounce. Surface cache, denoiser, and prefill off | Probe passes only. No surface-cache, cache-ray, or a-trous dispatches |
 | `low` | Probe GI, 16 rays, 32 px tile, refresh every 2 frames, one bounce, budget shift 2 (budgets / 4), shadow cell 0.25 m, max 4 lights, 1 a-trous iteration stored but the filter does not run (no surface cache), prefill off, day ambient at 0.35. Gather bins `probe_rays`, not a fixed 64 | Probe GI. One bounce shades probe hits and does not record the surface-cache, cache-ray, or a-trous dispatches. No prefill |
 | `medium` | Surface cache, 32 rays, two bounces, budget shift 1 (budgets / 2), max 8 lights, 3 a-trous iterations, prefill, day ambient. The push reads the last iteration that ran, copied into buffer A | Surface cache and two bounces, half the ray budget |
 | `high` | Every feature on, unlimited bounces, 64 rays, tile from the picture height, refresh every frame, shadow cell 0.125 m, max lights unlimited, 5 a-trous iterations, compose reuse, sky, emissive, prefill. Day ambient is the fallback for when GI is turned off | The tuned path. Same dispatches as before this struct existed |
@@ -66,7 +68,7 @@ On the existing command catalogue (`GENOS_MCP_PORT`):
 
 - `get_lighting_settings` — the settings text and each bucket's last collected milliseconds and dispatch count. One frame behind the draw that just finished.
 - `set_lighting_settings` — partial update. Keys match the text form. A `text` field overlays `key=value` lines. Writes the scene and clears a renderer override.
-- `list_presets` — `potato`, `low`, `medium`, `high`, each with its text.
+- `list_presets` — `potato`, `day-cycle`, `gi-1bounce`, `low`, `medium`, `high`, each with its text.
 - `apply_preset` — `name` replaces the scene lighting and clears the override.
 
 GPU times need `GENOS_GPU_TIMES` set before the renderer opens. The names are `compact`, `place`, `trace`, `direct`, `gather`, `filter`, `cache`, `compose`, `atrous`, `cache_rays`, `hit_light`, `shadows`.
@@ -77,6 +79,8 @@ Run these on the owner machine. They are not the lavapipe check.
 
 ```
 GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=potato make stress
+GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=day-cycle make stress
+GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=gi-1bounce make stress
 GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=low make stress
 GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=medium make stress
 GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high make stress

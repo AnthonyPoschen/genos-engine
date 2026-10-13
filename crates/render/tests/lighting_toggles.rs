@@ -134,6 +134,21 @@ fn presets_and_feature_off_skip_their_passes() {
             gi.as_slice(),
         ),
         (
+            LightingPreset::DayCycle.name(),
+            LightingSettings::preset(LightingPreset::DayCycle),
+            picture.as_slice(),
+            gi.as_slice(),
+        ),
+        (
+            LightingPreset::Gi1Bounce.name(),
+            LightingSettings::preset(LightingPreset::Gi1Bounce),
+            [
+                "direct", "shadows", "compose", "place", "trace", "gather", "filter",
+            ]
+            .as_slice(),
+            ["compact", "cache", "cache_rays", "atrous", "hit_light"].as_slice(),
+        ),
+        (
             LightingPreset::Low.name(),
             LightingSettings::preset(LightingPreset::Low),
             [
