@@ -520,3 +520,5 @@ vec3 lighting_probe_irradiance(uint probe, vec3 n) {
     }
     return max(e, vec3(0.0));
 }
+
+#include "lighting_work.glsl"

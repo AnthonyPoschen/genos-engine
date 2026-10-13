@@ -85,9 +85,16 @@ void gather_bin() {
                 lighting_chg(CHG_G_HELD, 1u);
                 atomicAdd(gstats.pad0, floatBitsToUint(gd.y));
                 atomicAdd(gstats.pad1, 1u);
+                if (lighting_work_counting()) {
+                    atomicAdd(gstats.work_probes, 1u);
+                    atomicAdd(gstats.work_settled_probes, 1u);
+                }
             }
             return;
         }
+    }
+    if (k == 0u && live && lighting_work_counting()) {
+        atomicAdd(gstats.work_probes, 1u);
     }
     [[dont_unroll]] for (uint s = 0u; s < LIGHTING_STRATA; s++) {
         uint e = k * LIGHTING_STRATA + s;

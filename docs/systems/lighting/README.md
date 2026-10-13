@@ -47,6 +47,15 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Whole-image consistency beats local sharpness; quality changes only at logical boundaries (12 Oct).
 - Lighting VRAM may grow if it cuts per-frame compute; total should stay fixed rather than scale with the scene (12 Oct).
 - Never skip lighting on an assumption; verify with an extraordinarily cheap check every frame (12 Oct).
+- The moving-scene cut is designed in [work-reduction-design.md](work-reduction-design.md). Phase 1 tags each surface pixel on the regime view, and each probe, full effort or settled, and does not change the shade. A picture compose does not walk that tag. A small directional-sun step amortises the indirect refresh and keeps direct sun light and shadows on this frame. Later phases are not in the shaded work yet.
+
+## Networking
+
+- Replicated state: none. Probe SH, visibility bits, layers, and deltas live on the GPU that draws. Lamp poses and meshes are the scene's replicated inputs.
+- Authority: the drawing machine owns the caches. A later server does not simulate irradiance.
+- Prediction / rollback: a rollback restores the scene and drops the caches. The next frame is full effort, the same as a cold start.
+- Determinism: the full-effort path is the reference render. The settled path is allowed to be stale and is not required to match bit for bit across machines. A small sun step may leave indirect light up to eight frames behind the live sun. Direct sun light and its shadows are this frame's. The picture is not a replicated input.
+- Headless server: a headless server runs no lighting passes. The headless debug path still runs them when it is scoring a picture.
 
 ## Deviations from the papers (summary)
 
@@ -59,6 +68,9 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
+- Phase 1 fringe tag (work-reduction design, technique 1): a tube of radius equal to the lamp motion, not the swept triangle of the old and new lamp positions. The tube is wider, so a pixel the triangle would have left settled can be tagged full effort. The tag does not change the shade.
+- A small directional-sun step (work-reduction design, departure 14) does not dirty every compose block or the a-trous field. SVGF (Schied et al., HPG 2017) and Lumen recompute every pixel every frame, and Lumen relights surface-cache direct every frame. Here the indirect refresh of a step inside 2° or 2% sun/sky irradiance is one band of probes and texel pages per frame, over 8 frames. Direct sun light and its shadows are traced and shown every frame.
+- Planned, not in the shade yet: the rest of the moving-scene work reduction in [work-reduction-design.md](work-reduction-design.md). Departures 1–13 in that file are not in the code.
 
 ## Experiment index
 
@@ -197,7 +209,7 @@ The lighting has one name scheme, `lighting`, everywhere; "GI v2" survives only 
 
 No environment variable is needed: `make stress` and `make run` run the tuned defaults baked into the code (`LIGHTING_DEFAULT_WORLD` = 3, the surface cache; `LIGHTING_DEFAULT_SC_FLAGS` = 6007050). There is no lighting-selection switch (`GENOS_GI` is gone). The remaining variables are optional debug and tuning knobs:
 
-- Debug and traces: `GENOS_LIGHTING_DEBUG` (per-round counters; reads GPU counters back, so not for fps runs), `GENOS_LIGHTING_SC_TRACE` (surface cache claims and relights per readback), `GENOS_SCENE_DELTA` (resident scene and mesh field delta runs). The dump, the counters, the MCP commands, the stuck and pop checks, the headless path, and the overlays are inventoried in [the debug standard](debug-standard.md). That file is the reference other systems match.
+- Debug and traces: `GENOS_LIGHTING_DEBUG` (per-round counters; reads GPU counters back, so not for fps runs; the read does not raise the light-quiet counter, so young-only rounds and the frozen idle stay as they are without the variable), `GENOS_LIGHTING_SC_TRACE` (surface cache claims and relights per readback), `GENOS_SCENE_DELTA` (resident scene and mesh field delta runs). The dump, the counters, the MCP commands, the stuck and pop checks, the headless path, and the overlays are inventoried in [the debug standard](debug-standard.md). That file is the reference other systems match.
 - Tuning (A/B only): `GENOS_LIGHTING_WORLD` (0 probe path P6, 3 surface cache), `GENOS_LIGHTING_SC_FLAGS`, `GENOS_LIGHTING_SC_LOCAL`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`, `GENOS_LIGHTING_TILE`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_FILL`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_ASYNC` (async compute light cache, off by default), `GENOS_LIGHTING_ATROUS_DIRTY` (a-trous work-list dirty fraction, default 0.25; `0` dense sweep, `1` lists up to the cap).
 
 Older entries below quote the names of their time (`GENOS_GI2_*`); read them through the table.

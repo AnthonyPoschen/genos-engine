@@ -199,6 +199,22 @@ pub(crate) struct Lighting {
     /// Overrides `GENOS_LIGHTING_ATROUS_DIRTY` for the a-trous list fallback.
     /// Fraction of filtered texels; `None` reads the env each frame.
     atrous_dirty: Option<f32>,
+    /// Camera, occluders, meshes, and point lamps. A directional sun and the
+    /// sky are left out, so a small sun step can stay on the compose list.
+    view_content_key: u64,
+    view_key: u64,
+    view_key_valid: bool,
+    sun_live_dir: [f32; 3],
+    sun_live_light: f32,
+    sun_live_n: u32,
+    sun_commit_dir: [f32; 3],
+    sun_commit_light: f32,
+    sun_commit_n: u32,
+    sun_commit_valid: bool,
+    /// Work-cut phase. `None` reads `GENOS_LIGHTING_WORK_PHASE`, else the default.
+    work_phase: Option<u32>,
+    /// With `work_phase` set, every probe and texel stays on today's path.
+    work_full: bool,
 }
 
 /// A-trous levels 1-5 in the last frame that ran them (S78X dense fallback).
@@ -214,6 +230,43 @@ pub struct LightingAtrousStats {
     pub filtered: u32,
     /// Levels 1-5 ran this frame.
     pub ran: bool,
+}
+
+/// Regime counters from the last frame (lighting_work.glsl).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LightingWorkStats {
+    pub pixels: u32,
+    pub settled_pixels: u32,
+    pub pages: u32,
+    pub settled_pages: u32,
+    pub probes: u32,
+    pub settled_probes: u32,
+    pub missing: u32,
+    pub fringe: u32,
+    pub traced: u32,
+    pub analytic: u32,
+    pub propagated: u32,
+    pub stochastic: u32,
+    pub delta_skip: u32,
+}
+
+fn lighting_work_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingWorkStats {
+    let at = LIGHTING_WORK_STAT;
+    LightingWorkStats {
+        pixels: w[at],
+        settled_pixels: w[at + 1],
+        pages: w[at + 2],
+        settled_pages: w[at + 3],
+        probes: w[at + 4],
+        settled_probes: w[at + 5],
+        missing: w[at + 6],
+        fringe: w[at + 7],
+        traced: w[at + 8],
+        analytic: w[at + 9],
+        propagated: w[at + 10],
+        stochastic: w[at + 11],
+        delta_skip: w[at + 12],
+    }
 }
 
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
@@ -304,6 +357,18 @@ impl Default for Lighting {
             last_round: None,
             stats_round: [false; 2],
             atrous_dirty: None,
+            view_content_key: 0,
+            view_key: 0,
+            view_key_valid: false,
+            sun_live_dir: [0.0; 3],
+            sun_live_light: 0.0,
+            sun_live_n: 0,
+            sun_commit_dir: [0.0; 3],
+            sun_commit_light: 0.0,
+            sun_commit_n: 0,
+            sun_commit_valid: false,
+            work_phase: None,
+            work_full: false,
         }
     }
 }
@@ -690,7 +755,7 @@ impl Gpu {
             assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
             assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
             self.lighting.cache_keys = self.make_buffer_queues(
-                (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS) * 4, // a-trous meta after the S67/PR11 compose words // S78X: a-trous threshold, fraction, bins // S78Z: verify / wake words sit just before that // S78X lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT)
+                (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS + LIGHTING_WORK_WORDS) * 4, // a-trous meta after the S67/PR11 compose words // S78X: a-trous threshold, fraction, bins // S78Z: verify / wake words sit just before that // S78X lists // S76D: + check words // S74A: + shadow epochs, gradient check list // + the scheduler's histogram and threshold, the WRC refresh lists, the S70A dispatch args (LIGHTING_ARGS_AT), S72J page counters (LIGHTING_SC_PAGE_AT) // work-cut control and lamp motion
                 0x20 | 0x2 | 0x100 | 0x1,
                 Memory::Device,
                 &share,
@@ -716,8 +781,8 @@ impl Gpu {
         self.lighting.gbuf = self.make_buffer(16 + pixels * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.work =
             self.make_buffer_queues(work_vec4 * 16, 0x20 | 0x1 | 0x2, Memory::Device, &share)?;
-        // Picture, then this frame's emitted light (compose reads the second half).
-        self.lighting.out = self.make_buffer(pixels * 8, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        // Picture, this frame's emitted light, then stored bounce for the sun patch.
+        self.lighting.out = self.make_buffer(pixels * 12, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.compose_valid = false;
         self.lighting.gbuf_clear = true;
@@ -856,6 +921,34 @@ impl Gpu {
             .map_or(self.lighting.probe_samples, |w| [w[6], w[7]])
     }
 
+    /// Drop the light caches so the next frame is a cold start. Pipelines stay.
+    /// Two picture runs on one renderer begin from the same empty tables.
+    pub(crate) fn reset_lighting_caches(&mut self) {
+        self.lighting.cache_clear = true;
+        self.lighting.work_clear = true;
+        self.lighting.gbuf_clear = true;
+        self.lighting.compose_valid = false;
+        self.lighting.frame = 0;
+        self.lighting.still = 0;
+        self.lighting.held = 0;
+        self.lighting.quiet = 0;
+        self.lighting.live = 0;
+        self.lighting.light_quiet = 0;
+        self.lighting.scene_hash = 0;
+        self.lighting.light_hash = 0;
+        self.lighting.view_key_valid = false;
+        self.lighting.sun_commit_valid = false;
+        self.lighting.kept_bytes.clear();
+        self.lighting.kept_key = 0;
+        self.lighting.probe_runs = 0;
+        self.lighting.probe_samples = [0; 2];
+        self.lighting.movers.clear();
+        self.lighting.mesh_movers.clear();
+        self.lighting.world_round = 0;
+        self.lighting.world_hold = 0;
+        self.lighting.last_round = None;
+    }
+
     /// A-trous dirty fraction, mode and threshold for the last frame drawn.
     /// Waits for that frame. The words are the `lightingatrous` line.
     pub(crate) fn lighting_atrous_stats(&mut self) -> LightingAtrousStats {
@@ -865,6 +958,73 @@ impl Gpu {
         let slot = self.lighting.last_slot;
         self.read_stats16(self.lighting.stats[slot].memory)
             .map(|w| lighting_atrous_from(&w))
+            .unwrap_or_default()
+    }
+
+    /// Phase and full-effort for this frame. A call to `set_lighting_work` wins
+    /// over the environment.
+    fn lighting_work_resolved(&self) -> (u32, bool) {
+        if let Some(phase) = self.lighting.work_phase {
+            return (phase.min(7), self.lighting.work_full);
+        }
+        let phase = std::env::var("GENOS_LIGHTING_WORK_PHASE")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(LIGHTING_WORK_PHASE_DEFAULT)
+            .min(7);
+        let full = std::env::var("GENOS_LIGHTING_FULL_EFFORT").ok().as_deref() == Some("1");
+        (phase, full)
+    }
+
+    /// Record the sun and the view, minus the sun and the sky. The pass uses
+    /// both to decide whether a small sun step stays off the full compose.
+    pub(crate) fn note_lighting_sun(&mut self, pack: &crate::pack::Pack) {
+        self.lighting.view_content_key = lighting_view_content_key(pack);
+        let (dir, light, n) = lighting_sun_live(pack);
+        self.lighting.sun_live_dir = dir;
+        self.lighting.sun_live_light = light;
+        self.lighting.sun_live_n = n;
+    }
+
+    /// True when this frame's sun step is inside the staleness budget and the
+    /// camera, meshes, and point lamps held. Updates the committed sun when
+    /// the frame is not amortising, so the next step is measured from it.
+    fn note_sun_amortise(&mut self, phase: u32, full: bool) -> bool {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.lighting.view_content_key.hash(&mut hasher);
+        self.mesh_field_key.hash(&mut hasher);
+        self.lighting.draw_key.hash(&mut hasher);
+        let view_key = hasher.finish();
+        let view_held = self.lighting.view_key_valid && view_key == self.lighting.view_key;
+        self.lighting.view_key = view_key;
+        self.lighting.view_key_valid = true;
+        let step_small = sun_step_small(&self.lighting);
+        let amortise = step_small && view_held && phase >= 1 && !full && self.lighting.sun_live_n > 0;
+        if !amortise {
+            self.lighting.sun_commit_dir = self.lighting.sun_live_dir;
+            self.lighting.sun_commit_light = self.lighting.sun_live_light;
+            self.lighting.sun_commit_n = self.lighting.sun_live_n;
+            self.lighting.sun_commit_valid = true;
+        }
+        amortise
+    }
+
+    /// `phase` 0..7 stops after that phase. `full_effort` marks every probe and
+    /// texel for today's path.
+    pub(crate) fn set_lighting_work(&mut self, phase: u32, full_effort: bool) {
+        self.lighting.work_phase = Some(phase.min(7));
+        self.lighting.work_full = full_effort;
+    }
+
+    /// Regime counters for the last frame drawn. Waits for that frame.
+    pub(crate) fn lighting_work_stats(&mut self) -> LightingWorkStats {
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
+        let slot = self.lighting.last_slot;
+        self.read_stats16(self.lighting.stats[slot].memory)
+            .map(|w| lighting_work_from(&w))
             .unwrap_or_default()
     }
 
@@ -895,8 +1055,8 @@ impl Gpu {
         self.lighting_dump_write();
         // S70B (no GPU->CPU reads in the frame loop): the surface cache's settling
         // and young-only rounds come from what the CPU already knows (frames still,
-        // rounds since the light changed), so its counters are read only for the
-        // debug output or the older world modes that settle on them.
+        // rounds since the light changed). Its counters are read for the debug
+        // print. Only the older world modes fold that read into the settle update.
         let read = lighting_stats_wanted();
         if !read {
         } else if let Ok(words) = self.read_lighting_stats(slot) {
@@ -913,7 +1073,11 @@ impl Gpu {
         if !self.lighting.cache_clear && !world {
             if !self.lighting.stats_round[slot] {
                 // No light cache round ran in that frame.
-            } else if !read {
+            } else if !lighting_counters_settle() {
+                // Surface cache (flag 8192) settles from frames and the light
+                // hash. GENOS_LIGHTING_DEBUG still reads the counters to print
+                // them. That read must not raise light_quiet: young-only rounds
+                // and the frozen idle would start, and the picture would hold.
             } else if let Ok(words) = self.read_lighting_stats(slot) {
                 // A frame that ran just as the scene changed measured against the
                 // old light; it does not count toward settling.
@@ -1262,6 +1426,14 @@ impl Gpu {
                 w[LIGHTING_ATROUS_STAT + 2] as f64 / 1.0e6,
                 w[LIGHTING_ATROUS_STAT + 3]
             );
+            if debug {
+                let blocks = w[LIGHTING_WORK_STAT + 12];
+                let sun = w[LIGHTING_WORK_STAT + 11];
+                eprintln!(
+                    "lightingcompose {queue} frame {} blocks {blocks} sun {sun}",
+                    self.lighting.frame
+                );
+            }
         }
     }
 
@@ -1473,7 +1645,11 @@ impl Gpu {
         }
         // The light alone (no camera): while it holds and a full sweep has changed
         // no mature patch, rounds relight young patches only. Any change goes back
-        // to full sweeps at once.
+        // to full sweeps at once. A small sun step stays on the hash from the last
+        // full refresh: the direction is in the scene hash, and taking the new one
+        // would relight the room as a whole-scene light change.
+        let (phase, full) = self.lighting_work_resolved();
+        let sun_amortise = self.note_sun_amortise(phase, full);
         let light = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1486,8 +1662,9 @@ impl Gpu {
             }
             hasher.finish()
         };
-        if light != self.lighting.light_hash {
-            self.lighting.light_hash = light;
+        let tracked = if sun_amortise { self.lighting.light_hash } else { light };
+        if tracked != self.lighting.light_hash {
+            self.lighting.light_hash = tracked;
             self.lighting.light_quiet = 0;
         }
         let sweep = self.lighting.live.div_ceil(LIGHTING_CACHE_BATCH).max(1) + 1;
@@ -1495,7 +1672,7 @@ impl Gpu {
         // round that relights nothing has nothing left to converge.
         let sc = lighting_world_env() == 3;
         let young_only = if sc { self.lighting.light_quiet >= 2 } else { self.lighting.young_ok && self.lighting.light_quiet >= sweep };
-        self.lighting.stats_light[slot] = light;
+        self.lighting.stats_light[slot] = tracked;
         self.lighting.stats_young[slot] = young_only || sc;
         // z: bgra, fills (bit 6), young-only rounds and lamp picks (lighting_common.glsl);
         // the gather and filter passes add their round (bits 1-2) below.
@@ -1519,11 +1696,12 @@ impl Gpu {
         let pc = [w, h, cols, rows, LIGHTING_RAYS, lighting_tile(h), z, self.lighting.frame];
         let image = self.color.image;
         let blocks = (w.div_ceil(8) as u64) * (h.div_ceil(8) as u64);
-        // Full compose when the picture has no history yet, the scene moved, the
-        // surface cache is off, or the block list cannot cover the image.
-        // GENOS_LIGHTING_COMPOSE_ALL forces it (an A/B against the quiet path).
+        // Full compose when the picture has no history yet, the camera or the
+        // geometry moved, the surface cache is off, or the block list cannot
+        // cover the image. A small sun step, with the camera held, stays on
+        // the list. GENOS_LIGHTING_COMPOSE_ALL forces the full picture.
         let compose_full = !self.lighting.compose_valid
-            || self.lighting.still == 0
+            || !(self.lighting.still > 0 || sun_amortise)
             || lighting_world_env() != 3
             || std::env::var_os("GENOS_LIGHTING_COMPOSE_ALL").is_some()
             || blocks > LIGHTING_COMPOSE_CAP;
@@ -1646,6 +1824,27 @@ impl Gpu {
                     0,
                 );
             }
+            let mut sun_flags = u32::from(sun_amortise) | (LIGHTING_SUN_N << 8) | ((self.lighting.frame % LIGHTING_SUN_N) << 16);
+            if sun_amortise && !compose_full {
+                sun_flags |= LIGHTING_SUN_FOLLOWS;
+            }
+            let sun_words = [
+                u32::from(full) | (phase << 8),
+                sun_flags,
+                self.lighting.sun_commit_dir[0].to_bits(),
+                self.lighting.sun_commit_dir[1].to_bits(),
+                self.lighting.sun_commit_dir[2].to_bits(),
+                self.lighting.sun_commit_light.to_bits(),
+                self.lighting.sun_live_light.to_bits(),
+                0u32,
+            ];
+            (self.fns.cmd_update_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                lighting_work_at() * 4,
+                32,
+                sun_words.as_ptr() as *const c_void,
+            );
             self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x1);
             (self.fns.cmd_bind_set)(
                 self.cmd,
@@ -1768,6 +1967,21 @@ impl Gpu {
                 }
                 if kind != 0 {
                     (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, 32, cur_pc.as_ptr() as *const c_void);
+                }
+                if pass == 7 && sun_amortise && !compose_full {
+                    // The list compose stored bounce and left the G-buffer direct.
+                    // This patch applies that direct on every pixel.
+                    self.memory_barrier(0x800, 0x1000, 0x40, 0x1000);
+                    let patch_flags = (sun_flags & !LIGHTING_SUN_FOLLOWS) | LIGHTING_SUN_PATCH;
+                    (self.fns.cmd_update_buffer)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        (lighting_work_at() + 1) * 4,
+                        4,
+                        &patch_flags as *const u32 as *const c_void,
+                    );
+                    self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+                    (self.fns.cmd_dispatch)(self.cmd, w.div_ceil(8), h.div_ceil(8), 1);
                 }
                 // The args pass's sizes are read as indirect commands (stage 0x2, access 0x1).
                 self.memory_barrier(0x800, 0x800 | 0x1000 | 0x2, 0x40, 0x20 | 0x40 | 0x800 | 0x1);
@@ -1998,8 +2212,15 @@ fn lighting_world_env() -> u32 {
 }
 
 /// S70B: the frame's counters are read back only where something uses them.
+/// The surface cache with flag 8192 does not. A debug print may still map them.
 fn lighting_stats_wanted() -> bool {
-    std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() || !(lighting_world_env() == 3 && lighting_sc_flags_env() & 8192 != 0)
+    std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() || lighting_counters_settle()
+}
+
+/// Older world modes settle from the GPU counters. The surface cache does not,
+/// including when a debug print is what made the read happen.
+fn lighting_counters_settle() -> bool {
+    !(lighting_world_env() == 3 && lighting_sc_flags_env() & 8192 != 0)
 }
 
 // Defaults with no env set (S54K, gi-v2): GI v2, the surface cache, cap 64, the
@@ -2008,9 +2229,24 @@ const LIGHTING_DEFAULT_WORLD: u32 = 3;
 const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
 const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
 /// Lighting stats buffer: 24 words, diag[64], chg[32], then the a-trous fallback
-/// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`.
+/// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`,
+/// then the work-cut counters at `LIGHTING_WORK_STAT` (13 words).
 /// The change-counter enable word stays chg[31] (word 119).
-const LIGHTING_STATS_WORDS: usize = 124;
+const LIGHTING_STATS_WORDS: usize = 137;
+const LIGHTING_WORK_STAT: usize = 124;
+/// Phase in the code until a later change turns the next one on.
+const LIGHTING_WORK_PHASE_DEFAULT: u32 = 1;
+/// Frames a small sun step takes to refresh indirect light. Direct is every frame.
+const LIGHTING_SUN_N: u32 = 8;
+const LIGHTING_SUN_FOLLOWS: u32 = 2;
+const LIGHTING_SUN_PATCH: u32 = 4;
+/// A step inside this angle and this relative sun/sky irradiance stays amortised.
+const LIGHTING_SUN_IRR: f32 = 0.02;
+/// Control word plus 8 words of lamp motion for 128 lamps.
+const LIGHTING_WORK_WORDS: u64 = 8 + 8 * 128;
+fn lighting_work_at() -> u64 {
+    lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS
+}
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 const LIGHTING_CHG_ENABLE_WORD: u64 = 24 + 64 + 31;
 const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;
@@ -2187,6 +2423,116 @@ pub(crate) fn lighting_changes(old: &[u8], new: &[u8]) -> Option<Vec<[f32; 4]>> 
         out.push(bounds(rec));
     }
     Some(out)
+}
+
+fn hash_f32(hasher: &mut std::collections::hash_map::DefaultHasher, v: f32) {
+    use std::hash::Hash;
+    v.to_bits().hash(hasher);
+}
+
+/// First directional lamp, plus the global sun/sky light the shaders scale by.
+fn lighting_sun_live(pack: &crate::pack::Pack) -> ([f32; 3], f32, u32) {
+    let mut dir = [0.0_f32; 3];
+    let mut n = 0u32;
+    let mut light = pack.sky.into_iter().fold(0.0_f32, f32::max);
+    for lamp in &pack.lamps {
+        if !lamp.directional {
+            continue;
+        }
+        if n == 0 {
+            dir = lamp.pos;
+        }
+        n += 1;
+        let up = (-lamp.pos[1]).max(0.0);
+        let peak = lamp.color.into_iter().fold(0.0_f32, f32::max);
+        light += up * peak;
+    }
+    (dir, light, n)
+}
+
+fn sun_step_small(lighting: &Lighting) -> bool {
+    if !lighting.sun_commit_valid || lighting.sun_live_n == 0 || lighting.sun_live_n != lighting.sun_commit_n {
+        return false;
+    }
+    let dot = lighting.sun_live_dir[0] * lighting.sun_commit_dir[0]
+        + lighting.sun_live_dir[1] * lighting.sun_commit_dir[1]
+        + lighting.sun_live_dir[2] * lighting.sun_commit_dir[2];
+    if dot < (2.0_f32.to_radians()).cos() {
+        return false;
+    }
+    let scale = lighting.sun_live_light.max(lighting.sun_commit_light).max(1.0e-3);
+    let irr = (lighting.sun_live_light - lighting.sun_commit_light).abs() / scale;
+    if irr > LIGHTING_SUN_IRR {
+        return false;
+    }
+    // An unchanged sun is not a step. Pixel reuse and the still path stay as they are.
+    dot < 0.999999 || irr > 1.0e-5
+}
+
+/// What a held camera sees, excluding the directional sun and the sky.
+fn lighting_view_content_key(pack: &crate::pack::Pack) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for lamp in &pack.lamps {
+        if lamp.directional {
+            continue;
+        }
+        for v in lamp.pos {
+            hash_f32(&mut hasher, v);
+        }
+        for v in lamp.color {
+            hash_f32(&mut hasher, v);
+        }
+        hash_f32(&mut hasher, lamp.range);
+    }
+    for v in pack.eye {
+        hash_f32(&mut hasher, v);
+    }
+    for v in pack.view_right {
+        hash_f32(&mut hasher, v);
+    }
+    for v in pack.view_up {
+        hash_f32(&mut hasher, v);
+    }
+    for v in pack.view_forward {
+        hash_f32(&mut hasher, v);
+    }
+    hash_f32(&mut hasher, pack.view_tan);
+    hash_f32(&mut hasher, pack.view_aspect);
+    for v in pack.floor_center {
+        hash_f32(&mut hasher, v);
+    }
+    hash_f32(&mut hasher, pack.floor_half_x);
+    hash_f32(&mut hasher, pack.floor_half_z);
+    for v in pack.floor_color {
+        hash_f32(&mut hasher, v);
+    }
+    for v in pack.ceiling {
+        hash_f32(&mut hasher, v);
+    }
+    for v in pack.fire.position {
+        hash_f32(&mut hasher, v);
+    }
+    for v in pack.fire.color {
+        hash_f32(&mut hasher, v);
+    }
+    hash_f32(&mut hasher, pack.fire.strength);
+    pack.occs.len().hash(&mut hasher);
+    for occ in &pack.occs {
+        for v in occ.center {
+            hash_f32(&mut hasher, v);
+        }
+        hash_f32(&mut hasher, occ.shape);
+        hash_f32(&mut hasher, occ.half_x);
+        hash_f32(&mut hasher, occ.height);
+        hash_f32(&mut hasher, occ.half_z);
+        hash_f32(&mut hasher, occ.radius);
+        hash_f32(&mut hasher, occ.yaw);
+        for v in occ.albedo {
+            hash_f32(&mut hasher, v);
+        }
+    }
+    hasher.finish()
 }
 
 /// Key of what the probes trace besides the occluders and meshes: the floor and the

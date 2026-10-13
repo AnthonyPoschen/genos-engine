@@ -36,7 +36,7 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec(
             "view",
-            "What the picture shows: mode full, direct, bounce, nobounce (direct), albedo, normal, depth, light:I, texels.",
+            "What the picture shows: mode full, direct, bounce, nobounce (direct), albedo, normal, depth, light:I, texels, regime (green settled, yellow fringe, red full effort).",
         ),
         spec(
             "capture",

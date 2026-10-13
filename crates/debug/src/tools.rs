@@ -57,7 +57,7 @@ impl Look {
         } else {
             ViewMode::parse(head).ok_or_else(|| {
                 format!(
-                    "unknown view {head}: use full, direct, bounce, nobounce, albedo, normal, depth, light:I, texels"
+                    "unknown view {head}: use full, direct, bounce, nobounce, albedo, normal, depth, light:I, texels, regime"
                 )
             })?
         };
