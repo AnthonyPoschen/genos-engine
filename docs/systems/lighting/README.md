@@ -59,7 +59,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
-- Flat ambient when GI is off is a constant or a classic hemisphere (sky toward the normal, ground away from it). A day curve lerps those colours by sun height on the CPU. No new GI algorithm. The bounce count gates the existing cache read; it does not add a bounce pass.
+- Flat ambient when GI is off is a constant or a classic hemisphere (sky toward the normal, ground away from it). A day curve lerps those colours by sun height on the CPU. No new GI algorithm. Bounce 0 records no GI dispatch. Bounce 1 records the probe passes and not the cache-to-cache passes. Bounce 2 records those passes. The count does not add a bounce algorithm.
 
 ## Experiment index
 

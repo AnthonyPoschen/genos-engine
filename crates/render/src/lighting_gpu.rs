@@ -711,7 +711,10 @@ impl Gpu {
         // each), the changes block, the views (2 blocks of 2 per probe) and the
         // cells (2 tables of R per probe), then the fills and their light (as the
         // kept hits) (lighting_common.glsl).
-        let gi = settings.gi.enabled;
+        // Bounce 0 keeps the GI flag but skips every GI buffer. The alloc key
+        // matches GI off, so the work buffer stays the small one and the change
+        // block must not be written at the GI offset.
+        let gi = settings.gi.enabled && settings.bounce.count > 0;
         let kept = if probes_on {
             probes * rays * LIGHTING_STRATA as u64
         } else {
@@ -1573,7 +1576,7 @@ impl Gpu {
                 .atrous_dirty
                 .unwrap_or(self.lighting.settings.denoiser.dirty_fraction),
         ));
-        if self.lighting.settings.gi.enabled {
+        if self.lighting.settings.gi.enabled && self.lighting.settings.bounce.count > 0 {
             unsafe {
                 // The last frame's passes are done with the block before it is written.
                 self.memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000);

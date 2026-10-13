@@ -21,7 +21,7 @@ Each feature can be turned off. Off means the pass is not recorded and, where th
 | Direct | The pixel direct dispatch. Cache-ray and kept-hit lighting still run, and compose reads emission from the G-buffer instead of the unwritten glow half | `direct_lights` (0 = every lamp), `direct_refresh` (every N frames), `direct_scale` (1 = every pixel) |
 | Shadows | The shadow ray and the shadow-cell cache inside the direct dispatch. GPU time for that bucket is 0 | `shadow_filter` `hard` or `cell`, `shadow_cell` metres, `shadow_refresh` |
 | GI | Every GI pass and the GI buffers (the million-slot cache and the probe work) | `gi_refresh` (cache round every N frames), `budget_shift` (divide ray budgets by 2^shift), `world_mode` |
-| Bounces | `0` is GI with direct light only: hits do not read the cache, and the cache-ray dispatches are not recorded. `1` lets probes and pixels read the cache. `2` and above allow cache-to-cache. `unlimited` is the tuned path | `bounces` |
+| Bounces | `0` is direct light plus flat ambient: no GI dispatch is recorded and the GI buffers are not allocated. `1` traces screen probes and shades their hits, and does not record the surface-cache, cache-ray, or a-trous dispatches. `2` allows cache-to-cache and records those dispatches. `unlimited` is the tuned path. A lower count omits the dispatches; it does not run them and zero the colour | `bounces` |
 | Probes | Place, trace, gather, filter | `probe_rays` (4..64), `probe_tile` (0 = the picture-height rule), `probe_refresh`, `probe_stale` |
 | World cache | Surface cache, world mode 3. Mode 0 is probe GI. The a-trous filter runs only in mode 3. A still probe-only scene settles once the light has held: probes, cache rays, and hit lighting stop, and only pixel direct and compose run, so off does not cost more than on. A moving frame keeps the probe passes. Before that settle, a still pixel still reuses direct light | `world_cell`, `world_refresh`, `world_stale` |
 | Denoiser | The a-trous dispatches. Compose then shows each texel's own mean, so it does not walk the parent field the push would have filled | `denoise_iters` (1, 3, or 5), `denoise_dirty` |
@@ -29,9 +29,9 @@ Each feature can be turned off. Off means the pass is not recorded and, where th
 | Sky | Sky radiance on rays that miss. The scene sky colour stays; this bit stops the lighting from reading it | `sky` |
 | Emissive | Emitted light added in the direct pass and in compose | `emissive` |
 | Prefill | WRC scout rays | `prefill` |
-| Ambient | Used only when GI is off. `off`, `constant`, `hemisphere`, or `day` | `ambient_color`, `ambient_intensity`, `ambient_ground`, `night_color`, `night_intensity`, `day_color`, `day_intensity` |
+| Ambient | Flat fill when bounce is 0 or GI is off. `off`, `constant`, `hemisphere`, or `day` | `ambient_color`, `ambient_intensity`, `ambient_ground`, `night_color`, `night_intensity`, `day_color`, `day_intensity` |
 
-`day` lerps night and day colour and intensity by the sun's height. Rays travel along a light's direction; the sun is up when that direction points down. Hemisphere mixes ground colour away from the normal with the sky colour toward it. GI on does not add the ambient term.
+`day` lerps night and day colour and intensity by the sun's height. Rays travel along a light's direction; the sun is up when that direction points down. Hemisphere mixes ground colour away from the normal with the sky colour toward it. Bounce 0 adds the flat fill on top of direct light. One bounce or more does not add it.
 
 Shadows share the direct dispatch. Their GPU time is a separate bucket: when shadows are on, the direct and hit-light milliseconds are also charged to `shadows`. When shadows are off, that bucket stays at 0 dispatches and 0 ms.
 
@@ -42,7 +42,7 @@ The S78S isolate toggles (`GENOS_LIGHTING_TOGGLES`: `freeze_cache`, `direct_only
 | Preset | What it spends | Cost, structural |
 |---|---|---|
 | `potato` | Direct, hard shadows, flat ambient `(0.42, 0.44, 0.48)` at intensity 0.65. No GI. Emissive stays on | Direct and compose only. No ~368 MB cache and no key table. Shadow rays stay inside the direct pass. The hangar look: direct, shadows, ambient fill |
-| `low` | Probe GI, 16 rays, 32 px tile, refresh every 2 frames, one bounce, budget shift 2 (budgets / 4), shadow cell 0.25 m, max 4 lights, 1 a-trous iteration stored but the filter does not run (no surface cache), prefill off, day ambient at 0.35. Gather bins `probe_rays`, not a fixed 64 | Probe GI. Cache rays do not read the cache (one bounce). No surface cache, no prefill |
+| `low` | Probe GI, 16 rays, 32 px tile, refresh every 2 frames, one bounce, budget shift 2 (budgets / 4), shadow cell 0.25 m, max 4 lights, 1 a-trous iteration stored but the filter does not run (no surface cache), prefill off, day ambient at 0.35. Gather bins `probe_rays`, not a fixed 64 | Probe GI. One bounce shades probe hits and does not record the surface-cache, cache-ray, or a-trous dispatches. No prefill |
 | `medium` | Surface cache, 32 rays, two bounces, budget shift 1 (budgets / 2), max 8 lights, 3 a-trous iterations, prefill, day ambient. The push reads the last iteration that ran, copied into buffer A | Surface cache and two bounces, half the ray budget |
 | `high` | Every feature on, unlimited bounces, 64 rays, tile from the picture height, refresh every frame, shadow cell 0.125 m, max lights unlimited, 5 a-trous iterations, compose reuse, sky, emissive, prefill. Day ambient is the fallback for when GI is turned off | The tuned path. Same dispatches as before this struct existed |
 

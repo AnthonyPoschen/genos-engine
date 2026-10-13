@@ -116,21 +116,14 @@ uint lighting_denoise_iters() {
     uint n = (gstats.ctrl_bits >> 16u) & 7u;
     return n == 0u ? 5u : n;
 }
-// Unlimited (bit 16384) is today's cache. 0 skips the read. A cache-ray hit
-// (kind 1) needs two bounces; a probe or a pixel needs one.
+// Unlimited (bit 16384) is today's cache. Bounce 0 and 1 do not read it: one
+// bounce is the direct light on a probe hit, and the cache lookup is not run.
+// Bounce 2 and above read it (cache-to-cache).
 bool lighting_bounce_ok() {
-    uint bits = gstats.ctrl_bits;
-    if ((bits & 16384u) != 0u) {
+    if ((gstats.ctrl_bits & 16384u) != 0u) {
         return true;
     }
-    uint count = gstats.ctrl_bounce;
-    if (count == 0u) {
-        return false;
-    }
-    if (lighting_hit_kind == 1u) {
-        return count >= 2u;
-    }
-    return count >= 1u;
+    return gstats.ctrl_bounce >= 2u;
 }
 // Kept-hit light writes (light pass): all, changed, by relative luminance delta
 // (<0.2 %, 0.2-1 %, 1-5 %, >5 %), and changed by source of the hit's direct light

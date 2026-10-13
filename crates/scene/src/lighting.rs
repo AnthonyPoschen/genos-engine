@@ -150,12 +150,12 @@ pub struct GiSettings {
     pub world_mode: Option<u32>,
 }
 
-/// Indirect bounces carried by the cache.
+/// Indirect bounces. The count is `0`, `1`, `2`, or [`LIGHTING_BOUNCES_UNLIMITED`].
 ///
-/// 0 is GI with direct light only: ray hits do not read the cache, and the
-/// cache-ray dispatches are not recorded. 1 lets probes and pixels read the
-/// cache, but cache rays themselves do not (one extra bounce). 2 and above allow
-/// cache-to-cache feedback. [`LIGHTING_BOUNCES_UNLIMITED`] is the tuned path.
+/// `0` is direct light plus the flat ambient fill. No GI dispatch is recorded.
+/// `1` is one bounce: screen probes trace and their hits are shaded, and the
+/// surface-cache, cache-ray, and a-trous dispatches are not recorded. `2` allows
+/// cache-to-cache and records those dispatches. Unlimited is the tuned path.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BounceSettings {
     pub count: u32,
@@ -379,12 +379,16 @@ impl LightingSettings {
         self.ambient.intensity = self.ambient.intensity.max(0.0);
         self.ambient.night_intensity = self.ambient.night_intensity.max(0.0);
         self.ambient.day_intensity = self.ambient.day_intensity.max(0.0);
+        if self.bounce.count != LIGHTING_BOUNCES_UNLIMITED {
+            self.bounce.count = self.bounce.count.min(2);
+        }
     }
 
-    /// World mode the shaders see. A forced mode wins. Otherwise the surface
-    /// cache is mode 3 and a probe-only GI is mode 0.
+    /// World mode the shaders see. A forced mode wins once cache-to-cache is
+    /// allowed. Bounce 0 and 1 stay on the probe path (mode 0): the surface
+    /// cache is the extra bounce, so it is not live until bounce 2.
     pub fn world_mode(&self) -> u32 {
-        if !self.gi.enabled {
+        if !self.gi.enabled || self.bounce.count < 2 {
             return 0;
         }
         if let Some(mode) = self.gi.world_mode {
@@ -397,18 +401,20 @@ impl LightingSettings {
         }
     }
 
+    /// GI dispatches. Bounce 0 is direct light and flat ambient, so this is false.
     pub fn gi_passes(&self) -> bool {
-        self.gi.enabled && (self.probes.enabled || self.world_cache.enabled || self.bounce.count > 0)
+        self.gi.enabled && self.bounce.count > 0 && (self.probes.enabled || self.world_cache.enabled)
     }
 
-    /// The million-slot cache and its key table. Freed when GI is off.
+    /// The million-slot cache and its key table. Freed when GI is off or the
+    /// bounce count does not use it.
     pub fn allocates_cache(&self) -> bool {
-        self.gi.enabled && (self.probes.enabled || self.world_cache.enabled)
+        self.gi.enabled && self.bounce.count > 0 && (self.probes.enabled || self.world_cache.enabled)
     }
 
-    /// Probe and cache-ray work buffer. Freed when GI is off.
+    /// Probe and cache-ray work buffer. Freed when bounce 0 skips GI.
     pub fn allocates_probe_work(&self) -> bool {
-        self.gi.enabled && self.probes.enabled
+        self.gi.enabled && self.bounce.count > 0 && self.probes.enabled
     }
 
     pub fn direct_this_frame(&self, frame: u32) -> bool {
@@ -416,29 +422,31 @@ impl LightingSettings {
     }
 
     pub fn probes_this_frame(&self, frame: u32) -> bool {
-        self.gi.enabled && self.probes.enabled && frame_due(frame, self.probes.refresh_frames)
+        self.gi.enabled
+            && self.bounce.count > 0
+            && self.probes.enabled
+            && frame_due(frame, self.probes.refresh_frames)
     }
 
+    /// Surface-cache round. Recorded from bounce 2 up, where cache-to-cache runs.
     pub fn cache_round_this_frame(&self, frame: u32) -> bool {
         self.gi.enabled
+            && self.bounce.count >= 2
             && (self.world_cache.enabled || self.probes.enabled)
             && frame_due(frame, self.gi.refresh_frames)
     }
 
-    /// Cache-ray dispatches (the extra bounce). Skipped at bounce count 0.
+    /// Cache-ray dispatches (cache-to-cache). Not recorded at bounce 0 or 1.
     pub fn cache_rays_this_frame(&self, frame: u32) -> bool {
-        self.cache_round_this_frame(frame) && self.bounce.count > 0
+        self.cache_round_this_frame(frame)
     }
 
     pub fn atrous_this_frame(&self, frame: u32) -> bool {
-        self.denoiser.enabled
-            && self.world_mode() == 3
-            && self.cache_round_this_frame(frame)
-            && self.bounce.count > 0
+        self.denoiser.enabled && self.world_mode() == 3 && self.cache_round_this_frame(frame)
     }
 
     pub fn prefill_this_frame(&self) -> bool {
-        self.prefill && self.gi.enabled && self.world_cache.enabled && self.bounce.count > 0
+        self.prefill && self.gi.enabled && self.world_cache.enabled && self.bounce.count >= 2
     }
 
     /// Rays the push constant and the work buffer agree on.
@@ -734,10 +742,15 @@ impl LightingSettings {
             gather: self.probes_this_frame(frame),
             filter: self.probes_this_frame(frame),
             compact: self.cache_round_this_frame(frame),
-            cache: self.cache_round_this_frame(frame) && (self.world_cache.enabled || self.bounce.count > 0),
+            cache: self.cache_round_this_frame(frame),
             cache_rays: self.cache_rays_this_frame(frame),
             atrous: self.atrous_this_frame(frame),
-            hit_light: self.gi_passes() && (self.probes.enabled || self.cache_rays_this_frame(frame)),
+            // True when hits are shaded. The separate hit-light dispatch is only
+            // recorded for cache rays (bounce 2 and up). One bounce shades kept
+            // hits inside the direct dispatch.
+            hit_light: self.gi.enabled
+                && self.bounce.count > 0
+                && (self.probes.enabled || self.cache_rays_this_frame(frame)),
             compose_indirect: self.compose_reuse && self.world_mode() == 3,
             prefill: self.prefill_this_frame(),
             sky: self.sky && self.gi.enabled,
@@ -797,9 +810,10 @@ fn num_f32(value: &str) -> Result<f32, String> {
 }
 
 fn parse_bounces(value: &str) -> Result<u32, String> {
-    match value {
+    match value.to_ascii_lowercase().as_str() {
         "unlimited" | "inf" | "max" => Ok(LIGHTING_BOUNCES_UNLIMITED),
-        _ => num_u32(value),
+        "0" | "1" | "2" => num_u32(value),
+        _ => Err(format!("bounces is 0, 1, 2, or unlimited, got {value}")),
     }
 }
 

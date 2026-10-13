@@ -81,11 +81,22 @@ fn a_partial_line_overlays_a_preset() {
     settings.set_key("denoise_iters", "3").unwrap();
     assert_eq!(settings.bounce.count, 1);
     assert_eq!(settings.denoiser.iterations, 3);
-    assert!(settings.cache_rays_this_frame(1));
+    assert!(settings.probes_this_frame(1));
+    assert!(!settings.cache_rays_this_frame(1));
+    assert!(!settings.atrous_this_frame(1));
+    let mut two = settings.clone();
+    two.set_key("bounces", "2").unwrap();
+    assert!(two.cache_rays_this_frame(1));
+    assert_eq!(two.world_mode(), 3);
     let mut off = settings;
     off.set_key("bounces", "0").unwrap();
+    assert!(!off.probes_this_frame(1));
     assert!(!off.cache_rays_this_frame(1));
     assert!(!off.atrous_this_frame(1));
+    assert!(!off.allocates_cache());
+    let mut bad = LightingSettings::preset(LightingPreset::High);
+    let err = bad.set_key("bounces", "4").unwrap_err();
+    assert!(err.contains("0, 1, 2"), "{err}");
 }
 
 #[test]
