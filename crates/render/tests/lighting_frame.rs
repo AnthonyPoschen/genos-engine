@@ -117,6 +117,7 @@ fn lighting_draws_emitted_light_and_bounces_it() {
             ceiling: None,
             sky: None,
             lighting: genos_scene::LightingSettings::default(),
+            debug: genos_scene::DebugSettings::default(),
         });
         let mut lit = gltf.clone();
         for m in &mut lit.materials {

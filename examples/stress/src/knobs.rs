@@ -65,6 +65,8 @@ impl Host for Stage {
                 usize::from(self.lamps_still),
                 &["move", "still"],
             ),
+            Knob::switch("unfilled", "Unfilled", self.unfilled_count),
+            Knob::switch("unfilled_tint", "Unfilled tint", self.unfilled_tint),
             Knob::number(
                 "lamp_clock",
                 "Lamp clock",
@@ -263,6 +265,13 @@ impl Host for Stage {
             "sky" => self.sky_on = v >= 0.5,
             "boxes" => self.boxes_still = v >= 0.5,
             "lamps" => self.lamps_still = v >= 0.5,
+            "unfilled" => self.unfilled_count = v >= 0.5,
+            "unfilled_tint" => {
+                self.unfilled_tint = v >= 0.5;
+                if self.unfilled_tint {
+                    self.unfilled_count = true;
+                }
+            }
             // Scripts put the moving lamps and boxes back exactly where they started.
             "lamp_clock" => self.lamp_clock = v as f32,
             "box_clock" => self.box_clock = v as f32,

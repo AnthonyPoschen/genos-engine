@@ -444,6 +444,7 @@ impl Building {
             ceiling: None,
             sky: None,
             lighting: genos_scene::LightingSettings::default(),
+            debug: genos_scene::DebugSettings::default(),
         };
         let mut building = Self {
             scene,

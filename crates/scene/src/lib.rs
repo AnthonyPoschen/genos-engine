@@ -5,6 +5,7 @@
 
 mod camera;
 mod codimation;
+mod debug_settings;
 mod lighting;
 mod script;
 mod settings;
@@ -15,6 +16,7 @@ pub use camera::{
     CAMERA_HEIGHT, CAMERA_NEAR, PITCH_LIMIT,
 };
 pub use codimation::{Codimation, Easing};
+pub use debug_settings::DebugSettings;
 pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use lighting::{
     AmbientMode, AmbientSettings, BounceSettings, DenoiseResolution, DenoiserSettings,
