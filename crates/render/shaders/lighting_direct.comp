@@ -111,17 +111,20 @@ void main() {
         uint sx = (idx % lw) * scale;
         uint sy = (idx / lw) * scale;
         idx = sy * pc.dims.x + sx;
+    } else if (lighting_dense()) {
+        // S70A: this round's light cache rays only, live entries only.
+        // Bias is a pixel skip for the kept-hit dispatch. Applying it here
+        // pushes every dense thread past the live-entry count, so cache rays
+        // never get lit and compose shows whatever was left in the buffers.
+        if (idx >= lighting_dense_count() * LIGHTING_CACHE_RAYS) {
+            return;
+        }
+        idx = pixels + kept + lighting_dense_entry(idx / LIGHTING_CACHE_RAYS) * LIGHTING_CACHE_RAYS + idx % LIGHTING_CACHE_RAYS;
     } else {
         if (gstats.ctrl_bias != 0u) {
             idx += gstats.ctrl_bias;
         }
-        if (lighting_dense()) {
-            // S70A: this round's light cache rays only, live entries only.
-            if (idx >= lighting_dense_count() * LIGHTING_CACHE_RAYS) {
-                return;
-            }
-            idx = pixels + kept + lighting_dense_entry(idx / LIGHTING_CACHE_RAYS) * LIGHTING_CACHE_RAYS + idx % LIGHTING_CACHE_RAYS;
-        } else if (mode == 2u) {
+        if (mode == 2u) {
             idx += pixels + kept;
         }
     }

@@ -113,15 +113,24 @@ void main() {
     uvec2 sp = (p / scale) * scale;
     uint sindex = sp.y * pc.dims.x + sp.x;
     vec3 direct = lighting_unpack_rgb9e5(gbuf.px[sindex].w);
+    vec3 glow;
     if ((gstats.ctrl_bits & 1u) == 0u) {
+        // The pixel direct pass did not run, so gbuf.w is still emission
+        // (~0 when the surface emits nothing) and the glow half of the picture
+        // was never written. Reading that half unpacks uninitialised rgb9e5,
+        // which is a solid red field with bright speckles.
         direct = vec3(0.0);
-    } else if (gstats.ctrl_history != 0u && (gstats.ctrl_bits & 32768u) == 0u) {
-        direct = lighting_unpack_rgb9e5(outc.px[pc.dims.x * pc.dims.y * 2u + sindex]);
-    }
-    // The light pass left the pixel's emitted light past the picture.
-    vec3 glow = lighting_unpack_rgb9e5(outc.px[pc.dims.x * pc.dims.y + index]);
-    if ((gstats.ctrl_bits & 512u) == 0u) {
-        glow = vec3(0.0);
+        uint emitted = gbuf.px[index].w;
+        glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? vec3(0.0) : lighting_unpack_rgb9e5(emitted);
+    } else {
+        if (gstats.ctrl_history != 0u && (gstats.ctrl_bits & 32768u) == 0u) {
+            direct = lighting_unpack_rgb9e5(outc.px[pc.dims.x * pc.dims.y * 2u + sindex]);
+        }
+        // The light pass left the pixel's emitted light past the picture.
+        glow = lighting_unpack_rgb9e5(outc.px[pc.dims.x * pc.dims.y + index]);
+        if ((gstats.ctrl_bits & 512u) == 0u) {
+            glow = vec3(0.0);
+        }
     }
     gbuf.px[index] = uvec4(~0u);
     if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {

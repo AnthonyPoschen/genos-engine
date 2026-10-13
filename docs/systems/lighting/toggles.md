@@ -18,7 +18,7 @@ Each feature can be turned off. Off means the pass is not recorded and, where th
 
 | Feature | What off skips | Quality knobs |
 |---|---|---|
-| Direct | The pixel direct dispatch | `direct_lights` (0 = every lamp), `direct_refresh` (every N frames), `direct_scale` (1 = every pixel) |
+| Direct | The pixel direct dispatch. Cache-ray and kept-hit lighting still run, and compose reads emission from the G-buffer instead of the unwritten glow half | `direct_lights` (0 = every lamp), `direct_refresh` (every N frames), `direct_scale` (1 = every pixel) |
 | Shadows | The shadow ray and the shadow-cell cache inside the direct dispatch. GPU time for that bucket is 0 | `shadow_filter` `hard` or `cell`, `shadow_cell` metres, `shadow_refresh` |
 | GI | Every GI pass and the GI buffers (the million-slot cache and the probe work) | `gi_refresh` (cache round every N frames), `budget_shift` (divide ray budgets by 2^shift), `world_mode` |
 | Bounces | `0` is GI with direct light only: hits do not read the cache, and the cache-ray dispatches are not recorded. `1` lets probes and pixels read the cache. `2` and above allow cache-to-cache. `unlimited` is the tuned path | `bounces` |

@@ -316,9 +316,13 @@ fn gated(
         out.pixel_only = 1;
         out.bias = 0;
     }
+    // Direct off still lights cache rays and kept hits. The dense dispatch
+    // ignores the pixel bias; the kept-hit dispatch uses it. Both are required,
+    // or bounce has no shaded hits and the picture is only stale emission.
     if round && buckets.hit_light && buckets.cache_rays {
         out.push(3, 0, LIGHTING_DENSE_RAYS, B_HIT);
-    } else if buckets.hit_light && !buckets.direct && kept > 0 {
+    }
+    if buckets.hit_light && !buckets.direct && kept > 0 {
         out.push(3, (2 * kept).div_ceil(64).max(1), LIGHTING_MODE1, B_HIT);
     }
     if buckets.gather && probes > 0 {
