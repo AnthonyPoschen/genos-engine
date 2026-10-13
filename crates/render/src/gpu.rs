@@ -128,7 +128,8 @@ impl Renderer {
     /// Hash stream for this renderer. Zero is the live game and leaves every
     /// lighting hash unchanged. A non-zero seed forces one cache round per
     /// frame, turns the async cache queue off, and admits work-list entries by
-    /// rank instead of arrival order.
+    /// rank instead of arrival order. The claim, the reader seeds, the shadow
+    /// cells, and texel-direct admission then ignore which thread arrived first.
     pub fn set_lighting_seed(&mut self, seed: u32) {
         self.gpu.lighting.seed = seed;
         if seed != 0 {

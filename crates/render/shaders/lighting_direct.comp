@@ -300,7 +300,11 @@ void main() {
                 n = tn;
                 list = tl;
                 count = lamp_list_size(list);
-            } else if (tdl_sig != 0u && atomicAdd(ckeys.key[LIGHTING_TDL_COUNT_AT], 1u) < LIGHTING_TDL_BUDGET) {
+            } else if (tdl_sig != 0u && (pc.seed != 0u || atomicAdd(ckeys.key[LIGHTING_TDL_COUNT_AT], 1u) < LIGHTING_TDL_BUDGET)) {
+                // A seeded run admits every texel. The budget counter is arrival
+                // order, and a ray that misses it lights the hit instead of the
+                // centre. The value is stored on the texel, so every writer of
+                // one centre stores the same bits.
                 lighting_dg(41u, 1u);
                 tdl = ts;
                 origin = tp + tn * 0.02;
