@@ -28,6 +28,7 @@ fn scene(lights: Vec<Light>, walls: Vec<Wall>, solids: Vec<Solid>) -> World {
         ceiling: None,
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
     })
 }
 

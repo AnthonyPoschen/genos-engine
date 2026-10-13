@@ -1,0 +1,197 @@
+#version 450
+#define GENOS_SUN_SHADER 1
+// Sun-step compose. The startup pipeline is lighting_compose.comp and does not
+// compile this file. One full-grid dispatch writes this frame's direct on
+// every pixel. The probe walk runs only for this frame's probe row and page
+// column, and for a pixel whose stored bounce is still empty. No occluder
+// walk lives here. No second pass.
+// GI v2 final pass: per pixel, emitted light, then direct irradiance plus the
+// screen probes' irradiance
+// (the 4 nearest probes, weighted by plane distance and normal; the light cache
+// where none matches), through the same
+// tone curve and dither as the picture. Pixels with no surface keep the raster
+// colour already in the output. Clears the G-buffer record for the next frame.
+//
+// Quiet frames dispatch one 8x8 group per block whose inputs changed
+// (LIGHTING_COMPOSE_LIST). A full frame (camera, resize, or a picture bigger
+// than the list) sets LIGHTING_COMPOSE_FULL and covers the image. The picture
+// stays in outc[0..pixels); emitted light for this frame is outc[pixels..).
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "lighting_common.glsl"
+#include "dither.glsl"
+
+const float LAMBERT = 0.254647909;
+
+float tone_channel(float x) {
+    if (x <= 0.64) {
+        return max(x, 0.0);
+    }
+    float extra = x - 0.64;
+    return 0.64 + 0.14 * (extra / (extra + 1.1));
+}
+
+uint pack_rgb(vec3 rgb) {
+    uvec3 c = uvec3(clamp(rgb, 0.0, 1.0) * 255.0 + 0.5);
+    if ((pc.params.z & 1u) == 1u) {
+        return c.b | (c.g << 8u) | (c.r << 16u) | (255u << 24u);
+    }
+    return c.r | (c.g << 8u) | (c.b << 16u) | (255u << 24u);
+}
+
+vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
+    float tile = float(pc.params.y);
+    vec2 g = (vec2(p) + 0.5) / tile - 0.5;
+    ivec2 g0 = ivec2(floor(g));
+    vec2 f = g - vec2(g0);
+    float dist = length(pos - scene.eye.xyz);
+    float plane = 0.03 + 0.01 * dist;
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    ivec2 grid = ivec2(pc.dims.zw);
+    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
+        ivec2 c = g0 + ivec2(int(k & 1u), int(k >> 1u));
+        if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, grid))) {
+            continue;
+        }
+        uint probe = uint(c.y) * pc.dims.z + uint(c.x);
+        vec4 pp = work.v[lighting_probe_at(probe)];
+        if (pp.w < 0.5) {
+            continue;
+        }
+        vec3 pn = work.v[lighting_probe_at(probe) + 1u].xyz;
+        float bil = ((k & 1u) == 1u ? f.x : 1.0 - f.x) * ((k >> 1u) == 1u ? f.y : 1.0 - f.y);
+        float w = (bil + 1.0e-3) * pow(max(dot(pn, n), 0.0), 8.0)
+            * exp(-abs(dot(pp.xyz - pos, n)) / plane);
+        if (w <= 1.0e-6) {
+            continue;
+        }
+        sum += w * lighting_probe_irradiance(probe, n);
+        wsum += w;
+    }
+    // Pixels no probe matches well (thin pillars, edges, surfaces no tile centre
+    // landed on) blend in the light cache's patch; their lookup keeps it alive.
+    const float CACHE_WEIGHT = 0.05;
+    // Cover every cache slot this pixel reads, including the probe fallback.
+    lighting_sc_display = true;
+    if (wsum < CACHE_WEIGHT) {
+        float w = CACHE_WEIGHT - wsum;
+        sum += w * lighting_cache_irradiance(pos, n);
+        wsum += w;
+    }
+    vec3 probes = sum / wsum;
+    if (lighting_world_mode() != 0u) {
+        lighting_px_probes = wsum > CACHE_WEIGHT + 1.0e-4 ? probes : vec3(-1.0);
+        vec4 world = lighting_world_irradiance(pos, n);
+        lighting_sc_display = false;
+        return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));
+    }
+    lighting_sc_display = false;
+    return probes;
+}
+
+uint lighting_bounce_word(uint index) {
+    uint slices = 2u + (gstats.ctrl_history != 0u ? 1u : 0u);
+    return slices * pc.dims.x * pc.dims.y + index;
+}
+
+void main() {
+    lighting_sun_mark();
+    // One group per 8x8 block of the picture. The dirty list is not this pass.
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= pc.dims.x || p.y >= pc.dims.y) {
+        return;
+    }
+    lighting_compose_px = p;
+    vec3 pos;
+    vec3 n;
+    vec3 albedo;
+    bool two_sided;
+    uint index = p.y * pc.dims.x + p.x;
+    if (!lighting_surface(p, pos, n, albedo, two_sided)) {
+        return;
+    }
+    uint scale = max(gstats.ctrl_scale, 1u);
+    uvec2 sp = (p / scale) * scale;
+    uint sindex = sp.y * pc.dims.x + sp.x;
+    vec3 direct = lighting_unpack_rgb9e5(gbuf.px[sindex].w);
+    vec3 glow;
+    if ((gstats.ctrl_bits & 1u) == 0u) {
+        // The pixel direct pass did not run, so gbuf.w is still emission
+        // (~0 when the surface emits nothing) and the glow half of the picture
+        // was never written. Reading that half unpacks uninitialised rgb9e5,
+        // which is a solid red field with bright speckles.
+        direct = vec3(0.0);
+        uint emitted = gbuf.px[index].w;
+        glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? vec3(0.0) : lighting_unpack_rgb9e5(emitted);
+    } else {
+        if (gstats.ctrl_history != 0u && (gstats.ctrl_bits & 32768u) == 0u) {
+            direct = lighting_unpack_rgb9e5(outc.px[pc.dims.x * pc.dims.y * 2u + sindex]);
+        }
+        // The light pass left the pixel's emitted light past the picture.
+        glow = lighting_unpack_rgb9e5(outc.px[pc.dims.x * pc.dims.y + index]);
+        if ((gstats.ctrl_bits & 512u) == 0u) {
+            glow = vec3(0.0);
+        }
+    }
+    gbuf.px[index] = uvec4(~0u);
+    if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
+        n = -n;
+    }
+    // Debug view (debug_view.rs ViewMode): 0 full, 1 direct, 2 bounce, 3 albedo,
+    // 4 normal, 5 depth, 6 light, 7 texels.
+    uint mode = scene.grid_at.w & 255u;
+    vec3 shown;
+    if (mode == 3u || mode == 4u || mode == 5u) {
+        float depth = clamp(1.0 - length(pos - scene.eye.xyz) / 50.0, 0.0, 1.0);
+        shown = mode == 3u ? albedo : (mode == 4u ? n * 0.5 + 0.5 : vec3(depth));
+        outc.px[index] = pack_rgb(shown);
+        return;
+    }
+    if (mode == 7u) {
+        // Texel sizes (debug_view.rs ViewMode::Texels).
+        vec2 ts = lighting_sc_debug_size(pos, n);
+        vec3 col = ts.x < 0.09 ? vec3(1.0, 0.2, 0.2) : (ts.x < 0.2 ? vec3(0.2, 1.0, 0.2) : (ts.x < 0.4 ? vec3(0.25, 0.4, 1.0) : vec3(1.0, 0.3, 1.0)));
+        float lit = 0.55 + 0.45 * abs(dot(n, vec3(0.3, 0.8, 0.5)));
+        shown = col * lit * (ts.y >= 4.0 ? 1.0 : 0.35);
+        outc.px[index] = pack_rgb(shown);
+        return;
+    }
+    vec3 bounce = vec3(0.0);
+    bool gi = (gstats.ctrl_bits & 4u) != 0u;
+    bool want = gi && ((gstats.ctrl_bits & 16384u) != 0u || gstats.ctrl_bounce > 0u);
+    // 0 means the slice has no bounce yet (cleared on entry). A real black
+    // bounce is stored as pack + 1, so it is not walked again.
+    uint stored = outc.px[lighting_bounce_word(index)];
+    bool walk = want && (stored == 0u || lighting_sun_pixel_band(p, pos, n));
+    if (walk) {
+        bounce = indirect(p, pos, n);
+    } else if (stored != 0u) {
+        bounce = lighting_unpack_rgb9e5(stored - 1u);
+    }
+    bool store = walk;
+    if ((walk || stored == 0u) && (gstats.ctrl_bits & 4096u) != 0u) {
+        vec3 sky_fill = vec3(gstats.ctrl_ambient_r, gstats.ctrl_ambient_g, gstats.ctrl_ambient_b);
+        vec3 fill = sky_fill;
+        if ((gstats.ctrl_bits & 8192u) != 0u) {
+            float up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
+            vec3 ground = vec3(gstats.ctrl_ground_r, gstats.ctrl_ground_g, gstats.ctrl_ground_b);
+            fill = mix(ground, sky_fill, up);
+        }
+        bounce += fill * gstats.ctrl_ambient_i;
+        store = true;
+    }
+    if (store) {
+        outc.px[lighting_bounce_word(index)] = lighting_pack_rgb9e5(max(bounce, vec3(0.0))) + 1u;
+    }
+    if (mode == 1u || mode == 6u) {
+        bounce = vec3(0.0);
+    }
+    if (mode == 2u) {
+        direct = vec3(0.0);
+        glow = vec3(0.0);
+    }
+    vec3 c = albedo * LAMBERT * (direct + bounce) + glow;
+    shown = vec3(tone_channel(c.r), tone_channel(c.g), tone_channel(c.b));
+    outc.px[index] = pack_rgb(dither8(shown, p));
+}

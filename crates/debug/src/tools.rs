@@ -7,7 +7,9 @@ use std::path::PathBuf;
 
 use genos_mcp::json::Value;
 use genos_render::{DebugView, Renderer, ScreenRect, ViewMode};
-use genos_scene::{Camera, Light, LightingPreset, LightingSettings, Scene, Vec3, PITCH_LIMIT};
+use genos_scene::{
+    Camera, DebugSettings, Light, LightingPreset, LightingSettings, Scene, Vec3, PITCH_LIMIT,
+};
 
 use crate::image::{Flicker, Image, Region};
 use crate::knobs::{CheckpointPose, Host, Knob};
@@ -1143,6 +1145,16 @@ impl Tools {
                 ctx.renderer.clear_lighting_override();
                 reply(lighting_report(&written, ctx.renderer))
             }
+            "get_debug_settings" => {
+                let settings = ctx.renderer.debug_settings(ctx.host.scene());
+                reply(obj(vec![("text", text(settings.to_text()))]))
+            }
+            "set_debug_settings" => {
+                apply_debug_update(&mut ctx.host.scene().debug, args.0)?;
+                let cli = ctx.renderer.debug_out_cli().map(str::to_string);
+                let settings = ctx.host.scene().debug.effective(cli.as_deref());
+                reply(obj(vec![("text", text(settings.to_text()))]))
+            }
             "quit" => {
                 self.quit = Some(args.f64("code")?.unwrap_or(0.0) as i32);
                 reply(obj(vec![("quit", Value::Bool(true))]))
@@ -1546,6 +1558,35 @@ fn lighting_value_text(value: &Value) -> Result<String, String> {
         return Ok(parts.join(","));
     }
     Err("a lighting value is a string, number, bool, or list".into())
+}
+
+fn apply_debug_update(settings: &mut DebugSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("debug settings are an object".into());
+    };
+    if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
+        for line in text.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("debug line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        let text = value
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| format!("debug setting {key} is a string"))?;
+        settings.set_key(key, &text)?;
+    }
+    Ok(())
 }
 
 fn apply_lighting_update(settings: &mut LightingSettings, args: &Value) -> Result<(), String> {

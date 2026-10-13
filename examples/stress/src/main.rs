@@ -7,7 +7,10 @@
 //! Every option also reads an environment variable (`GENOS_STRESS_SCALE`,
 //! `GENOS_STRESS_LIGHTS`, `GENOS_STRESS_DYNAMIC`, `GENOS_STRESS_LAYOUT`,
 //! `GENOS_STRESS_DAY_SECONDS`); a flag
-//! wins over the variable. The panel switches lamps, dynamic share, scale and the sun
+//! wins over the variable. Lighting launch flags (`--preset`, `--bounces`,
+//! `--ambient`, `--time-of-day`, `--gpu-times`) win the same way: each
+//! `GENOS_LIGHTING_*` or `GENOS_GPU_TIMES` mirror applies only when that
+//! argument was omitted. The panel switches lamps, dynamic share, scale and the sun
 //! live.
 
 mod bench;
@@ -22,7 +25,10 @@ use std::time::Instant;
 use genos_debug::{png, Host};
 use genos_input::{character_controller, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenLine, ScreenRect};
-use genos_scene::{look_direction, update, Actions, Camera, Scene, Vec3, PITCH_LIMIT};
+use genos_scene::{
+    look_direction, update, Actions, Camera, DebugSettings, LightingPreset, LightingSettings,
+    Scene, Vec3, PITCH_LIMIT,
+};
 use genos_ui::{button_panel, Action, PanelButton, PanelRow, PanelSlider, Pointer, State};
 use genos_window::{extent_changed, FocusGate, Window};
 
@@ -40,13 +46,21 @@ const USAGE: &str = "genos-stress [options]
   --day-seconds S           seconds per day/night cycle (default 120)
   --time F                  start time as a fraction of a day: 0 sunrise, 0.25 noon,
                             0.5 sunset (default 0.12)
+  --time-of-day H|HH:MM     start the lighting clock in hours: 0 midnight, 6 dawn,
+                            12 noon, 18 dusk (06:00, 18:24). Same start as --time.
+                            GENOS_LIGHTING_TIME holds that hour only when this
+                            argument was omitted
   --sun-speed X             day clock multiplier (default 1)
-  --freeze-sun              hold the sun at --time
+  --freeze-sun              hold the sun at --time or --time-of-day
   --no-sky                  no sky light: only the sun and the lamps
   --scene FILE              a scene file (genos-camera's .rhai) in place of the building; nothing moves
+  --lamp-stop               with --scene, step the point lamp then hold it
+                            (examples/stress/scenes/bounce_corner.rhai)
   --still-boxes             hold the coloured boxes
   --seed N                  lamp and box layout seed (default 1)
-  --view hall|roomA         start (and benchmark) viewpoint (default hall)
+  --view hall|roomA|sky     start (and benchmark) viewpoint (default hall).
+                            sky stands in the south yard and looks up, so the
+                            ambient curve can be judged
   --eye X Y Z YAW PITCH     start the camera here instead of --view (free look)
   --size WxH                window size (default 1280x720; 2560x1440 for --bench)
   --proof                   open the proof window (floats, takes no focus; --bench
@@ -68,7 +82,37 @@ const USAGE: &str = "genos-stress [options]
                             steps 1/60 s a frame; exit 0 when every check passes
   --report DIR              where the script writes report.md, result.json and pictures
                             (default target/debug-reports/<script name>)
-  --trace                   capture the picture after every script command that changes it";
+  --out DIR                 unfilled events (default ./genos-debug/unfilled)
+  --unfilled[=0|1]          count unfilled pixels (GENOS_LIGHTING_UNFILLED is the mirror)
+  --unfilled-tint[=0|1]     magenta tint; turns the count on (GENOS_LIGHTING_UNFILLED_TINT)
+  --unfilled-dump PERCENT   save when the share exceeds PERCENT; 0 saves any
+                            (GENOS_LIGHTING_UNFILLED_DUMP)
+  --unfilled-max-age-secs N drop event folders older than N seconds (default 172800)
+                            (GENOS_UNFILLED_MAX_AGE_SECS)
+  --unfilled-max-folders N  keep at most N event folders (default 200)
+                            (GENOS_UNFILLED_MAX_FOLDERS)
+  --unfilled-max-bytes N    keep at most N bytes of events (default 524288000)
+                            (GENOS_UNFILLED_MAX_BYTES)
+  --unfilled-session-cap N  saves in one process (default 32)
+                            (GENOS_UNFILLED_SESSION_CAP)
+  --trace                   capture the picture after every script command that changes it
+  --preset NAME             potato, day-cycle, gi-1bounce, low, medium, high
+                            (GENOS_LIGHTING_PRESET is the mirror)
+  --bounces 0|1|2|unlimited bounce count (GENOS_LIGHTING_BOUNCES)
+  --ambient MODE            off, constant, hemisphere, day, or curve
+                            (GENOS_LIGHTING_AMBIENT)
+  --denoise-iters 1|3|5     wavelet iterations (GENOS_LIGHTING_DENOISE_ITERS)
+  --denoise-adaptive on|off experimental: drop settled wavelet iterations
+                            (GENOS_LIGHTING_DENOISE_ADAPTIVE). Off on every preset
+  --denoise-variance F      relative luminance deviation, 0..0.1 (GENOS_LIGHTING_DENOISE_VARIANCE)
+  --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
+  --lighting-full-effort    full refresh every frame (GENOS_LIGHTING_FULL_EFFORT=1)
+  --lighting-sun on|off     small sun step (GENOS_LIGHTING_SUN, default on)
+  --lighting-sun-bands N    indirect bands, 1..64 (GENOS_LIGHTING_SUN_BANDS, default 8)
+  --lighting-catch-up N     kept-hit frames after a point lamp stops, 0..16
+                            (GENOS_LIGHTING_CATCH_UP, default 4)
+  --lighting-debug          read lighting counters (GENOS_LIGHTING_DEBUG).
+                            Not an fps run: it reads the GPU back every frame";
 
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];
 /// Panel ids. Each row's buttons count up from its base.
@@ -77,9 +121,17 @@ const ID_SUN: u32 = 400;
 const ID_BOXES: u32 = 500;
 const ID_LAYOUT: u32 = 600;
 const ID_SKY: u32 = 700;
+const ID_OUT: u32 = 800;
 /// Sliders, one per knob.
 const ID_KNOB: u32 = 1000;
-const PANEL_KNOBS: [&str; 4] = ["time_of_day", "sun_speed", "lights", "dynamic"];
+const PANEL_KNOBS: [&str; 6] = [
+    "time_of_day",
+    "sun_speed",
+    "lights",
+    "dynamic",
+    "unfilled",
+    "unfilled_tint",
+];
 /// A hitch longer than this does not replay the missed time.
 const MAX_FRAME_SECONDS: f32 = 0.25;
 
@@ -95,6 +147,7 @@ struct Options {
     freeze_sun: bool,
     no_sky: bool,
     scene: Option<PathBuf>,
+    lamp_stop: bool,
     still_boxes: bool,
     seed: u64,
     view: View,
@@ -109,6 +162,12 @@ struct Options {
     script: Option<genos_debug::script::ScriptRun>,
     /// glTF files to place in the building: path, position and uniform scale.
     gltf: Vec<(PathBuf, [f32; 4])>,
+    /// Set only when the flag was passed. Each wins over the matching GENOS_* variable.
+    preset: Option<String>,
+    denoise_iters: Option<String>,
+    denoise_adaptive: Option<String>,
+    denoise_variance: Option<String>,
+    gpu_times: Option<String>,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, text: &str) -> Result<T, String> {
@@ -148,6 +207,7 @@ fn options() -> Result<Options, String> {
         freeze_sun: false,
         no_sky: false,
         scene: None,
+        lamp_stop: false,
         still_boxes: false,
         seed: 1,
         view: View::Hall,
@@ -161,6 +221,11 @@ fn options() -> Result<Options, String> {
         bench_out: None,
         script: None,
         gltf: Vec::new(),
+        preset: None,
+        denoise_iters: None,
+        denoise_adaptive: None,
+        denoise_variance: None,
+        gpu_times: None,
     };
     let mut report: Option<PathBuf> = None;
     let mut trace = false;
@@ -191,6 +256,7 @@ fn options() -> Result<Options, String> {
             "--freeze-sun" => opts.freeze_sun = true,
             "--no-sky" => opts.no_sky = true,
             "--scene" => opts.scene = Some(PathBuf::from(value()?)),
+            "--lamp-stop" => opts.lamp_stop = true,
             "--still-boxes" => opts.still_boxes = true,
             "--seed" => opts.seed = parse(&arg, &value()?)?,
             "--view" => {
@@ -239,15 +305,64 @@ fn options() -> Result<Options, String> {
             }
             "--gltf" => opts.gltf.push((PathBuf::from(value()?), gltf_at)),
             "--report" => report = Some(PathBuf::from(value()?)),
+            "--out" => {
+                // The renderer reads this from the process arguments.
+                let _dir = value()?;
+            }
+            arg if arg.starts_with("--out=") => {
+                if arg.trim_start_matches("--out=").trim().is_empty() {
+                    return Err("--out needs a directory".into());
+                }
+            }
             "--trace" => trace = true,
+            "--preset" => opts.preset = Some(value()?),
+            "--denoise-iters" => opts.denoise_iters = Some(value()?),
+            "--denoise-adaptive" => opts.denoise_adaptive = Some(value()?),
+            "--denoise-variance" => opts.denoise_variance = Some(value()?),
+            "--gpu-times" => opts.gpu_times = Some(value()?),
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
             }
-            other => return Err(format!("unknown argument {other}\n{USAGE}")),
+            other => match genos_render::unfilled_flag_needs_value(other) {
+                Some(true) => {
+                    let next = value()?;
+                    genos_render::check_unfilled_arg(other, Some(&next))?;
+                }
+                Some(false) => genos_render::check_unfilled_arg(other, None)?,
+                None => match genos_scene::lighting_flag_needs_value(other) {
+                    Some(needs) => {
+                        let next = needs.then(|| value()).transpose()?;
+                        genos_scene::check_lighting_arg(other, next.as_deref())?;
+                        if let Some(hours) =
+                            genos_scene::lighting_arg_time_of_day(other, next.as_deref())?
+                        {
+                            opts.time = knobs::day_from_hours(f64::from(hours));
+                        }
+                    }
+                    None => match genos_render::gpu_times_flag_needs_value(other) {
+                        Some(true) => {
+                            let next = value()?;
+                            genos_render::check_gpu_times_arg(other, Some(&next))?;
+                        }
+                        Some(false) => genos_render::check_gpu_times_arg(other, None)?,
+                        None => match genos_render::lighting_sun_flag_needs_value(other) {
+                            Some(true) => {
+                                let next = value()?;
+                                genos_render::check_lighting_sun_arg(other, Some(&next))?;
+                            }
+                            Some(false) => genos_render::check_lighting_sun_arg(other, None)?,
+                            None => return Err(format!("unknown argument {other}\n{USAGE}")),
+                        },
+                    },
+                },
+            },
         }
     }
     opts.dynamic = opts.dynamic.min(100);
+    if opts.lamp_stop && opts.scene.is_none() {
+        return Err("--lamp-stop needs --scene examples/stress/scenes/bounce_corner.rhai".into());
+    }
     if let Some(run) = &mut opts.script {
         let stem = run
             .script
@@ -364,6 +479,46 @@ fn settings_text(stage: &Stage) -> String {
     )
 }
 
+/// A passed flag wins over the matching environment variable. An omitted flag
+/// leaves that variable alone, so it still applies.
+fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
+    let mut check = LightingSettings::preset(LightingPreset::High);
+    if let Some(name) = &opts.preset {
+        if LightingPreset::parse(name).is_none() {
+            return Err(format!("unknown preset {name}"));
+        }
+        std::env::set_var("GENOS_LIGHTING_PRESET", name);
+    }
+    let keys = [
+        (
+            opts.denoise_iters.as_deref(),
+            "denoise_iters",
+            "GENOS_LIGHTING_DENOISE_ITERS",
+        ),
+        (
+            opts.denoise_adaptive.as_deref(),
+            "denoise_adaptive",
+            "GENOS_LIGHTING_DENOISE_ADAPTIVE",
+        ),
+        (
+            opts.denoise_variance.as_deref(),
+            "denoise_variance",
+            "GENOS_LIGHTING_DENOISE_VARIANCE",
+        ),
+    ];
+    for (value, key, var) in keys {
+        if let Some(value) = value {
+            check.set_key(key, value)?;
+            std::env::set_var(var, value);
+        }
+    }
+    if let Some(every) = &opts.gpu_times {
+        parse::<u32>("--gpu-times", every)?;
+        std::env::set_var("GENOS_GPU_TIMES", every);
+    }
+    Ok(())
+}
+
 fn lighting_text(renderer: &Renderer) -> String {
     let stats = renderer.settle_stats();
     format!(
@@ -379,6 +534,7 @@ fn run() -> Result<(), String> {
         return gi_check::run(std::env::args().skip(2));
     }
     let opts = options()?;
+    apply_lighting_cli(&opts)?;
     let mix = LightMix {
         count: opts.lights,
         dynamic_pct: opts.dynamic,
@@ -398,6 +554,7 @@ fn run() -> Result<(), String> {
     stage.boxes_still = opts.still_boxes;
     if let Some(path) = &opts.scene {
         stage.set_room(genos_scene::load_path(path)?);
+        stage.lamp_stop = opts.lamp_stop;
     }
     for (path, [x, y, z, scale]) in &opts.gltf {
         let model =
@@ -450,6 +607,8 @@ fn run() -> Result<(), String> {
     }
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    stage.unfilled_count = renderer.unfilled().count;
+    stage.unfilled_tint = renderer.unfilled().tint;
     let host = genos_mcp::Host::new(stage.world.scene.clone(), camera.clone());
     let _server = genos_mcp::Server::start_on(host, genos_mcp::listen_port())?;
     eprintln!(
@@ -504,10 +663,15 @@ fn run() -> Result<(), String> {
         clock = Some(now);
         let frame = window.pump();
         if !title_base.is_empty() {
-            let rendering = genos_debug::reference::RENDERING.load(std::sync::atomic::Ordering::SeqCst) > 0;
+            let rendering =
+                genos_debug::reference::RENDERING.load(std::sync::atomic::Ordering::SeqCst) > 0;
             if rendering != title_ref {
                 title_ref = rendering;
-                window.set_title(&if rendering { format!("{title_base} | REF") } else { title_base.clone() });
+                window.set_title(&if rendering {
+                    format!("{title_base} | REF")
+                } else {
+                    title_base.clone()
+                });
             }
         }
         if frame.closing {
@@ -523,6 +687,21 @@ fn run() -> Result<(), String> {
         input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
         input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
         input.poll_gamepads();
+        if input.keyboard.pressed(InputCode::key_f8) {
+            let shift = input.keyboard.down(InputCode::key_shift_left)
+                || input.keyboard.down(InputCode::key_shift_right);
+            if shift {
+                stage.unfilled_tint = !stage.unfilled_tint;
+                if stage.unfilled_tint {
+                    stage.unfilled_count = true;
+                }
+            } else {
+                stage.unfilled_count = !stage.unfilled_count;
+                if !stage.unfilled_count {
+                    stage.unfilled_tint = false;
+                }
+            }
+        }
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
 
@@ -531,7 +710,11 @@ fn run() -> Result<(), String> {
             let ui_frame = button_panel(
                 &mut ui,
                 &panel_title(&stage, &fps),
-                &[panel_rows(&stage), knob_rows(&stage)].concat(),
+                &[
+                    panel_rows(&stage, &renderer.debug_settings(&stage.world.scene).out),
+                    knob_rows(&stage),
+                ]
+                .concat(),
                 [size.0 as f32, size.1 as f32],
                 &camera,
                 Pointer {
@@ -602,6 +785,17 @@ fn run() -> Result<(), String> {
             overlay.extend(rects);
             renderer.set_overlay_lines(&lines);
         }
+
+        let mut unfilled = renderer.unfilled();
+        unfilled.count = stage.unfilled_count;
+        unfilled.tint = stage.unfilled_tint;
+        renderer.set_unfilled(unfilled);
+        let applied = renderer.unfilled();
+        if input.keyboard.pressed(InputCode::key_f8) {
+            eprintln!("unfilled count {} tint {}", applied.count, applied.tint);
+        }
+        stage.unfilled_count = applied.count;
+        stage.unfilled_tint = applied.tint;
 
         drawn += 1;
         let last = opts.frames.is_some_and(|limit| drawn >= limit);
@@ -794,8 +988,19 @@ fn button(id: u32, text: String, selected: bool) -> PanelButton {
     PanelButton { id, text, selected }
 }
 
-fn panel_rows(stage: &Stage) -> Vec<PanelRow> {
+fn panel_rows(stage: &Stage, out_dir: &str) -> Vec<PanelRow> {
     vec![
+        row(
+            "Out",
+            vec![
+                button(ID_OUT, out_dir.into(), false),
+                button(
+                    ID_OUT + 1,
+                    "default".into(),
+                    out_dir == DebugSettings::DEFAULT_OUT,
+                ),
+            ],
+        ),
         row(
             "Lamps in",
             vec![
@@ -854,6 +1059,12 @@ fn press(stage: &mut Stage, id: u32) {
         stage.boxes_still = i == 1;
     } else if let Some(i) = pick(ID_LAYOUT, 2) {
         stage.mix.layout = [Layout::Spread, Layout::First][i];
+    } else if id == ID_OUT + 1 {
+        let _ = stage
+            .world
+            .scene
+            .debug
+            .set_key("out", DebugSettings::DEFAULT_OUT);
     }
     stage.apply();
 }

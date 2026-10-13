@@ -13,7 +13,8 @@ use genos_render::{
     identity_pose, DrawKind, FixedPart, Renderer, ScreenRect, ViewMode, World,
 };
 use genos_scene::{
-    look_direction, update, Actions, Camera, Floor, Light, Scene, Sky, Vec3, PITCH_LIMIT,
+    look_direction, update, Actions, Camera, DebugSettings, Floor, Light, Scene, Sky, Vec3,
+    PITCH_LIMIT,
 };
 use genos_scene_lib::{Entry, Kind, Lamp, Sun};
 use genos_stress::building::{Layout, LightMix};
@@ -567,6 +568,7 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
                 ceiling: None,
                 sky: sky.map(|color| Sky { color }),
                 lighting: genos_scene::LightingSettings::default(),
+                debug: DebugSettings::default(),
             };
             if let Some(sun) = sun {
                 scene.lights.push(sun_light(sun));

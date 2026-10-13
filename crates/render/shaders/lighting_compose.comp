@@ -1,4 +1,8 @@
 #version 450
+// Picture compose. Do not call scene_candidates_skip or include a work-tube
+// here. That walk, compiled into this dispatch, is what made a moving frame's
+// compose tens of milliseconds and the NVIDIA compiler sit for minutes. A
+// small sun step uses lighting_sun_compose.comp instead.
 // GI v2 final pass: per pixel, emitted light, then direct irradiance plus the
 // screen probes' irradiance
 // (the 4 nearest probes, weighted by plane distance and normal; the light cache
@@ -85,6 +89,7 @@ vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
 }
 
 void main() {
+    lighting_px_unfilled = false;
     uvec2 p;
     // GI off, or compose reuse off, covers the image and does not read the key
     // table. The table is a dummy while GI is off.
@@ -179,5 +184,11 @@ void main() {
     }
     vec3 c = albedo * LAMBERT * (direct + bounce) + glow;
     shown = vec3(tone_channel(c.r), tone_channel(c.g), tone_channel(c.b));
+    // Magenta on pixels whose surface-cache corners had no finished set.
+    // GENOS_LIGHTING_UNFILLED_TINT, or Shift+F8. Quiet compose only tints the
+    // blocks it redrew; a turn composes the whole frame.
+    if (lighting_px_unfilled && lighting_unfilled_tint()) {
+        shown = mix(shown, vec3(1.0, 0.0, 1.0), 0.75);
+    }
     outc.px[index] = pack_rgb(dither8(shown, p));
 }

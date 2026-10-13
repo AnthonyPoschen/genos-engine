@@ -123,6 +123,7 @@ fn run() -> Result<(), String> {
     let mut profile_arg = None;
     let mut scene_name = String::from("scene.rhai");
     let mut size = (1280u32, 720u32);
+    let mut time_of_day = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -165,6 +166,67 @@ fn run() -> Result<(), String> {
             "--scene" => {
                 scene_name = args.next().ok_or("missing scene file")?;
             }
+            "--out" => {
+                // The renderer reads this from the process arguments.
+                let _dir = args.next().ok_or("missing output directory")?;
+            }
+            arg if arg.starts_with("--out=") => {
+                if arg.trim_start_matches("--out=").trim().is_empty() {
+                    return Err("missing output directory".into());
+                }
+            }
+            other if genos_render::unfilled_flag_needs_value(other).is_some() => {
+                let needs = genos_render::unfilled_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_render::check_unfilled_arg(other, next.as_deref())?;
+            }
+            other if genos_scene::lighting_flag_needs_value(other).is_some() => {
+                let needs = genos_scene::lighting_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_scene::check_lighting_arg(other, next.as_deref())?;
+                if let Some(hours) = genos_scene::lighting_arg_time_of_day(other, next.as_deref())?
+                {
+                    time_of_day = Some(hours);
+                }
+            }
+            other if genos_render::gpu_times_flag_needs_value(other).is_some() => {
+                let needs = genos_render::gpu_times_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_render::check_gpu_times_arg(other, next.as_deref())?;
+            }
+            other if genos_render::lighting_sun_flag_needs_value(other).is_some() => {
+                let needs = genos_render::lighting_sun_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_render::check_lighting_sun_arg(other, next.as_deref())?;
+            }
             "--size" => {
                 let text = args.next().ok_or("missing size")?;
                 let (w, h) = text
@@ -196,6 +258,12 @@ fn run() -> Result<(), String> {
     }
     let bench_camera = camera.clone();
     let host = genos_mcp::Host::new(scene, camera);
+    if let Some(hours) = time_of_day {
+        host.with_frame(|scene, _| {
+            scene.lighting.time_of_day = hours;
+            scene.lighting.sanitize();
+        });
+    }
     if let Some((x, y, z)) = lamp {
         host.with_frame(|scene, _| {
             scene.lights = vec![genos_scene::Light {
@@ -318,6 +386,25 @@ fn run() -> Result<(), String> {
         if graph_on && input.keyboard.pressed(InputCode::key_r) {
             profile.reset();
             drag_origin = None;
+        }
+        if input.keyboard.pressed(InputCode::key_f8) {
+            let mut unfilled = renderer.unfilled();
+            let shift = input.keyboard.down(InputCode::key_shift_left)
+                || input.keyboard.down(InputCode::key_shift_right);
+            if shift {
+                unfilled.tint = !unfilled.tint;
+                if unfilled.tint {
+                    unfilled.count = true;
+                }
+            } else {
+                unfilled.count = !unfilled.count;
+                if !unfilled.count {
+                    unfilled.tint = false;
+                }
+            }
+            renderer.set_unfilled(unfilled);
+            let unfilled = renderer.unfilled();
+            eprintln!("unfilled count {} tint {}", unfilled.count, unfilled.tint);
         }
         let paused = graph_on && profile.is_paused();
         // camera/scene update, first half: the panel reads the lamp after a reload

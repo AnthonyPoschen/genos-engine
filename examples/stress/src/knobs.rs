@@ -65,6 +65,8 @@ impl Host for Stage {
                 usize::from(self.lamps_still),
                 &["move", "still"],
             ),
+            Knob::switch("unfilled", "Unfilled", self.unfilled_count),
+            Knob::switch("unfilled_tint", "Unfilled tint", self.unfilled_tint),
             Knob::number(
                 "lamp_clock",
                 "Lamp clock",
@@ -134,6 +136,13 @@ impl Host for Stage {
             "sky" => self.sky_on = v >= 0.5,
             "boxes" => self.boxes_still = v >= 0.5,
             "lamps" => self.lamps_still = v >= 0.5,
+            "unfilled" => self.unfilled_count = v >= 0.5,
+            "unfilled_tint" => {
+                self.unfilled_tint = v >= 0.5;
+                if self.unfilled_tint {
+                    self.unfilled_count = true;
+                }
+            }
             // Scripts put the moving lamps and boxes back exactly where they started.
             "lamp_clock" => self.lamp_clock = v as f32,
             "box_clock" => self.box_clock = v as f32,
@@ -252,6 +261,19 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             &["1", "3", "5"],
         ),
         Knob::switch(
+            "lighting_denoise_adaptive",
+            "Adaptive denoise",
+            lighting.denoiser.adaptive,
+        ),
+        Knob::number(
+            "lighting_denoise_variance",
+            "Denoise variance",
+            lighting.denoiser.variance_threshold as f64,
+            (0.0, 0.1),
+            0.005,
+            "",
+        ),
+        Knob::switch(
             "lighting_compose_reuse",
             "Compose reuse",
             lighting.compose_reuse,
@@ -263,22 +285,23 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             "lighting_ambient",
             "Ambient",
             ambient_index(lighting.ambient.mode),
-            &["off", "constant", "hemisphere", "day"],
+            &["off", "constant", "hemisphere", "day", "curve"],
         ),
     ]
 }
 
 fn lighting_preset_knob(settings: &LightingSettings) -> Knob {
+    let label = settings.preset_label();
     let index = LightingPreset::all()
         .iter()
-        .position(|preset| LightingSettings::preset(*preset) == *settings)
-        .unwrap_or(4);
-    Knob::choice(
-        "lighting_preset",
-        "Lighting",
-        index,
-        &["potato", "low", "medium", "high", "custom"],
-    )
+        .position(|preset| preset.name() == label)
+        .unwrap_or(LightingPreset::all().len());
+    let mut names: Vec<&str> = LightingPreset::all()
+        .iter()
+        .map(|preset| preset.name())
+        .collect();
+    names.push("custom");
+    Knob::choice("lighting_preset", "Lighting", index, &names)
 }
 
 fn bounce_index(count: u32) -> usize {
@@ -304,6 +327,7 @@ fn ambient_index(mode: AmbientMode) -> usize {
         AmbientMode::Constant => 1,
         AmbientMode::Hemisphere => 2,
         AmbientMode::Day => 3,
+        AmbientMode::Curve => 4,
     }
 }
 
@@ -360,13 +384,15 @@ pub fn apply_lighting_knob(
             }
             .to_string(),
         ),
+        "lighting_denoise_adaptive" => ("denoise_adaptive", on_off(v)),
+        "lighting_denoise_variance" => ("denoise_variance", format!("{v}")),
         "lighting_compose_reuse" => ("compose_reuse", on_off(v)),
         "lighting_sky" => ("sky", on_off(v)),
         "lighting_emissive" => ("emissive", on_off(v)),
         "lighting_prefill" => ("prefill", on_off(v)),
         "lighting_ambient" => (
             "ambient",
-            ["off", "constant", "hemisphere", "day"]
+            ["off", "constant", "hemisphere", "day", "curve"]
                 .get(v as usize)
                 .copied()
                 .unwrap_or("day")

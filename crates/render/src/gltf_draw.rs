@@ -668,6 +668,7 @@ mod tests {
             ceiling: None,
             sky: None,
             lighting: genos_scene::LightingSettings::default(),
+            debug: genos_scene::DebugSettings::default(),
         });
         let before = world.objects.len();
         let mut place = identity_pose();
@@ -719,6 +720,7 @@ mod tests {
             ceiling: None,
             sky: None,
             lighting: genos_scene::LightingSettings::default(),
+            debug: genos_scene::DebugSettings::default(),
         })
     }
 

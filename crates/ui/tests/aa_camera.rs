@@ -36,6 +36,7 @@ fn silhouette_world() -> World {
         ceiling: None,
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
     });
     world.objects.push(Object {
         hidden: false,
@@ -117,6 +118,7 @@ fn press_mode(mode_id: u32) -> PictureMode {
         ceiling: None,
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
     };
     apply_frame_action(&mut scene, action).expect("picture mode")
 }

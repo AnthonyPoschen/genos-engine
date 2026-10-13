@@ -22,7 +22,7 @@ A conversion that is one small decode with no third-party archive tool can run a
 3. Put the originals in `assets/source/<name>/` and write `CREDITS.md` before the first commit of those files.
 4. Either commit the engine-ready files under `assets/built/<name>/`, or generate them at build time and say so in the credits.
 5. Keep a fetch script when the originals come from a URL. The script downloads only when the file is missing or the checksum does not match, then checks the checksum again.
-6. Do not `git lfs push` until the owner has checked the GitHub LFS quota. Commit the pointers. Push the branch with `GIT_LFS_SKIP_PUSH=1`.
+6. Commit the files. Git stores the pointers. Push the branch normally so Git LFS uploads the objects. This account is pay-as-you-go and has no quota.
 
 ## Licence and attribution
 
@@ -50,9 +50,11 @@ A clone that smudges LFS replaces each pointer with the bytes. A clone that skip
 
 ## CI and cloud agents
 
-A job that does not draw the textured scenes should not download the LFS bytes.
+A job that does not draw the textured scenes does not download the LFS bytes. That is the default.
 
-Skip every LFS file during fetch and checkout:
+`.lfsconfig` sets `lfs.fetchexclude` to `assets/built/**,assets/source/**`. A normal clone and a plain `git lfs pull` leave those paths as pointer text. Push is not affected: the objects still upload with the branch.
+
+`GIT_LFS_SKIP_SMUDGE=1` is the same skip for a checkout that does not read `.lfsconfig` yet:
 
 ```sh
 GIT_LFS_SKIP_SMUDGE=1 git clone <url>
@@ -60,19 +62,12 @@ GIT_LFS_SKIP_SMUDGE=1 git clone <url>
 git lfs install --skip-smudge
 ```
 
-Pull one asset when a job does need it:
+Pull one asset when a job does need it. `--exclude=` clears the default so the include is not filtered back out:
 
 ```sh
-git lfs pull --include="assets/built/sponza/**,assets/source/sponza/**"
+git lfs pull --include="assets/built/sponza/**,assets/source/sponza/**" --exclude=""
 ```
 
-Or exclude the heavy trees and fetch the rest:
-
-```sh
-git config lfs.fetchexclude "assets/built/**,assets/source/**"
-git lfs pull
-```
-
-`lfs.fetchexclude` is a comma-separated list of patterns. It does not delete pointers already in the working tree. `GIT_LFS_SKIP_SMUDGE=1` leaves pointers in place until a later `git lfs pull` on the paths you name.
+`lfs.fetchexclude` does not delete pointers already in the working tree.
 
 Do not point a checkout at `$HOME` to store these files. The lighting debug binary writes its own screenshots under `./genos-debug/`, which is gitignored and is not an LFS path.
