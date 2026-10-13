@@ -52,6 +52,9 @@ pub struct CaptureOptions {
     pub width: u32,
     pub height: u32,
     pub full_effort: bool,
+    /// Renderer bounce count. `None` leaves the scene. Direct-only still
+    /// forces bounce 0 and ambient off inside `open_stage`.
+    pub bounces: Option<u32>,
     pub lavapipe_small: bool,
     pub plan: FramePlan,
     pub params: MetricParams,
@@ -115,7 +118,7 @@ fn capture_one(
             event: job.event.is_some(),
         },
     );
-    let (mut stage, camera) = scenes::open_stage(shot, opts.full_effort);
+    let (mut stage, camera) = scenes::open_stage(shot, opts.full_effort, opts.bounces);
     let max_offset = opts.plan.capture_offsets.iter().copied().max().unwrap_or(0);
     let mut log = Vec::new();
     let mut settle_pics = Vec::new();

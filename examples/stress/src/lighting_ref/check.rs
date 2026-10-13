@@ -33,6 +33,9 @@ pub struct CheckOptions {
     pub profile: TraceProfile,
     pub config_path: Option<PathBuf>,
     pub full_effort: bool,
+    /// Renderer bounce count from `--bounces` or `GENOS_LIGHTING_REF_BOUNCES`.
+    /// The path trace keeps the profile's bounce count.
+    pub bounces: Option<u32>,
     pub skip_capture: bool,
     pub only_scene: Option<String>,
     pub only_checkpoint: Option<String>,
@@ -89,6 +92,12 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
         ));
     }
     notes.push(candidate_note(opts.full_effort));
+    if let Some(count) = opts.bounces {
+        notes.push(format!(
+            "Renderer bounce count {}. The path trace keeps its own bounce count. direct-only stays bounce 0 with ambient off.",
+            bounce_label(count)
+        ));
+    }
     notes.push(plan_note(&opts.plan));
 
     ensure_reference_metrics(opts, &wanted)?;
@@ -293,6 +302,14 @@ fn plan_note(plan: &FramePlan) -> String {
     )
 }
 
+fn bounce_label(count: u32) -> String {
+    if count == genos_scene::LIGHTING_BOUNCES_UNLIMITED {
+        "unlimited".into()
+    } else {
+        count.to_string()
+    }
+}
+
 fn candidate_note(full_effort: bool) -> String {
     if full_effort {
         "Candidate lighting is full effort: maximum knobs, not a second ground truth.".into()
@@ -353,6 +370,7 @@ fn capture_live(
         width: opts.profile.width,
         height: opts.profile.height,
         full_effort: opts.full_effort,
+        bounces: opts.bounces,
         lavapipe_small: opts.mode == "lavapipe-small",
         plan: opts.plan.clone(),
         params: *params,

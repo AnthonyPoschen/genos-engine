@@ -45,7 +45,7 @@ cargo run --release -p genos-stress -- lighting-ref check \
 
 `--mode lavapipe-small` is the small run. When `VK_ICD_FILENAMES` is unset and `/usr/share/vulkan/icd.d/lvp_icd.json` exists, that mode selects lavapipe. `--skip-capture` scores no live frames (the self-test and the path traces still run) and the check fails. `--config <file>` replaces `crates/lighting-ref/lighting-ref.conf`.
 
-Frame control, arguments first. Each name has an environment mirror (`GENOS_LIGHTING_REF_FIXED_DT`, `GENOS_LIGHTING_REF_WARMUP_FRAMES`, `GENOS_LIGHTING_REF_SETTLE_FRAMES`, `GENOS_LIGHTING_REF_SETTLE`, `GENOS_LIGHTING_REF_SETTLE_CAP`, `GENOS_LIGHTING_REF_CAPTURE_FRAMES`). A flag wins over its variable.
+Frame control, arguments first. Each name has an environment mirror (`GENOS_LIGHTING_REF_FIXED_DT`, `GENOS_LIGHTING_REF_WARMUP_FRAMES`, `GENOS_LIGHTING_REF_SETTLE_FRAMES`, `GENOS_LIGHTING_REF_SETTLE`, `GENOS_LIGHTING_REF_SETTLE_CAP`, `GENOS_LIGHTING_REF_CAPTURE_FRAMES`, `GENOS_LIGHTING_REF_BOUNCES`). A flag wins over its variable.
 
 | Flag | Default | What it does |
 |---|---|---|
@@ -55,6 +55,7 @@ Frame control, arguments first. Each name has an environment mirror (`GENOS_LIGH
 | `--settle THRESHOLD` | 0.05 | Keep drawing until blurred relative luminance is at or under the line, or the cap. The line is this threshold raised by the checkpoint's reference noise after the blur. |
 | `--settle-cap N` | 180 | Frame cap for `--settle`. |
 | `--capture-frames LIST` | `event+1,+2,+4,+8` | Frames after an event. `1,2,4,8` is the same list. |
+| `--bounces N` | scene default | Renderer bounce count: `0`, `1`, `2`, or `unlimited`. The path trace keeps the profile's bounce count. `direct-only` still forces bounce 0 and ambient off. |
 
 `--settle-frames` and `--settle` together are an error. The same is true of the two environment variables when neither flag is set. These flags belong to `lighting-ref check`. They are not lighting settings. The live stress binary's fixed step is `--fixed-dt` and MCP `time`, and manual stepping is `--step` (Space, or MCP `step`).
 

@@ -150,7 +150,11 @@ fn camera_for(shot: &Shot) -> Camera {
 
 /// The stress stage at this shot's lamp mix. Clocks are applied per frame so
 /// the live picture and the path trace meet on the scored pose.
-pub fn open_stage(shot: &Shot, full_effort: bool) -> (Stage, Camera) {
+///
+/// `bounces` sets the renderer's bounce count. `None` leaves the scene's
+/// count. Direct-only is applied after it, so that control stays bounce 0
+/// with ambient off. The path trace does not read this count.
+pub fn open_stage(shot: &Shot, full_effort: bool, bounces: Option<u32>) -> (Stage, Camera) {
     let mut stage = Stage::new(
         Scale::SMALL,
         1,
@@ -169,6 +173,9 @@ pub fn open_stage(shot: &Shot, full_effort: bool) -> (Stage, Camera) {
     stage.lamps_still = true;
     if full_effort {
         stage.world.scene.lighting.apply_full_effort();
+    }
+    if let Some(count) = bounces {
+        stage.world.scene.lighting.bounce.count = count;
     }
     if shot.direct_only {
         apply_direct_only(&mut stage.world.scene);
@@ -214,7 +221,7 @@ mod tests {
         assert_eq!(scene.lighting.bounce.count, 0);
         assert!(!scene.lighting.gi.enabled);
         assert_eq!(scene.lighting.ambient.mode, AmbientMode::Off);
-        let (stage, _) = open_stage(&control, true);
+        let (stage, _) = open_stage(&control, true, None);
         assert_eq!(stage.world.scene.lighting.bounce.count, 0);
         assert_eq!(stage.world.scene.lighting.ambient.mode, AmbientMode::Off);
         let hall = shot("stress-still", "hall").unwrap();
@@ -223,5 +230,27 @@ mod tests {
             reference_setup(&hall, &profile).max_bounces,
             profile.max_bounces
         );
+    }
+
+    #[test]
+    fn a_bounce_override_hits_the_renderer_and_not_the_direct_control() {
+        let hall = shot("stress-still", "hall").unwrap();
+        let (stage, _) = open_stage(&hall, false, Some(0));
+        assert_eq!(stage.world.scene.lighting.bounce.count, 0);
+        assert_ne!(stage.world.scene.lighting.ambient.mode, AmbientMode::Off);
+        let (plain, _) = open_stage(&hall, false, None);
+        assert_eq!(
+            plain.world.scene.lighting.ambient.mode,
+            stage.world.scene.lighting.ambient.mode
+        );
+        assert_eq!(
+            reference_setup(&hall, &TraceProfile::lavapipe_small()).max_bounces,
+            TraceProfile::lavapipe_small().max_bounces
+        );
+        let control = shot("direct-only", "hall").unwrap();
+        let (direct, _) = open_stage(&control, true, Some(2));
+        assert_eq!(direct.world.scene.lighting.bounce.count, 0);
+        assert!(!direct.world.scene.lighting.gi.enabled);
+        assert_eq!(direct.world.scene.lighting.ambient.mode, AmbientMode::Off);
     }
 }

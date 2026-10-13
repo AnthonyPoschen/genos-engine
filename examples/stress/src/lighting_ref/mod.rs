@@ -86,6 +86,7 @@ impl Options {
         let mut settle = None;
         let mut settle_cap = None;
         let mut capture_frames = None;
+        let mut bounces: Option<String> = None;
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
             match arg.as_str() {
@@ -110,6 +111,7 @@ impl Options {
                 "--settle" => settle = Some(value()?),
                 "--settle-cap" => settle_cap = Some(value()?),
                 "--capture-frames" => capture_frames = Some(value()?),
+                "--bounces" => bounces = Some(value()?),
                 other => return Err(format!("unknown argument {other}")),
             }
         }
@@ -131,6 +133,7 @@ impl Options {
                 || settle.is_some()
                 || settle_cap.is_some()
                 || capture_frames.is_some()
+                || bounces.is_some()
             {
                 return Err("that flag is for lighting-ref check".into());
             }
@@ -195,6 +198,12 @@ impl Options {
         let env_settle = env_text("GENOS_LIGHTING_REF_SETTLE");
         let env_cap = env_text("GENOS_LIGHTING_REF_SETTLE_CAP");
         let env_capture = env_text("GENOS_LIGHTING_REF_CAPTURE_FRAMES");
+        let env_bounces = env_text("GENOS_LIGHTING_REF_BOUNCES");
+        let bounces = match (bounces.as_deref(), env_bounces.as_deref()) {
+            (Some(text), _) => Some(parse_bounces(text)?),
+            (None, Some(text)) => Some(parse_bounces(text)?),
+            (None, None) => None,
+        };
         let plan = schedule::resolve_plan(
             &schedule::PlanText {
                 fixed_dt: fixed_dt.as_deref(),
@@ -224,6 +233,7 @@ impl Options {
                 profile,
                 config_path: config,
                 full_effort,
+                bounces,
                 skip_capture,
                 only_scene,
                 only_checkpoint,
@@ -231,6 +241,14 @@ impl Options {
             }),
         })
     }
+}
+
+fn parse_bounces(text: &str) -> Result<u32, String> {
+    let mut lighting = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+    lighting
+        .set_key("bounces", text)
+        .map_err(|err| format!("--bounces: {err}"))?;
+    Ok(lighting.bounce.count)
 }
 
 fn parse_u32(text: &str) -> Result<u32, String> {
@@ -288,6 +306,31 @@ mod tests {
         assert!(baseline.starts_with("genos-debug/reference"));
         assert!(!check.full_effort);
         assert!(!check.skip_capture);
+        assert!(check.bounces.is_none());
+    }
+
+    #[test]
+    fn bounces_prefers_the_argument() {
+        let opts = Options::parse(words("check --bounces 0").into_iter()).unwrap();
+        let Command::Check(check) = opts.command else {
+            panic!("expected check");
+        };
+        assert_eq!(check.bounces, Some(0));
+        let unlimited = Options::parse(words("check --bounces unlimited").into_iter()).unwrap();
+        let Command::Check(check) = unlimited.command else {
+            panic!("expected check");
+        };
+        assert_eq!(check.bounces, Some(genos_scene::LIGHTING_BOUNCES_UNLIMITED));
+        let err = match Options::parse(words("check --bounces 3").into_iter()) {
+            Err(err) => err,
+            Ok(_) => panic!("bounces 3 was accepted"),
+        };
+        assert!(err.contains("bounces"), "{err}");
+        let err = match Options::parse(words("--bounces 0").into_iter()) {
+            Err(err) => err,
+            Ok(_) => panic!("generate accepted --bounces"),
+        };
+        assert!(err.contains("check"), "{err}");
     }
 
     #[test]
