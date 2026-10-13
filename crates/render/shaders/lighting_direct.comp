@@ -175,7 +175,9 @@ void main() {
                 rec = work.v[lighting_kept_at(h)];
                 live = lighting_stratum_ray(ps / LIGHTING_STRATA, ps % LIGHTING_STRATA, h % rays, origin, dir, from_n);
                 if (live && rec.x < -0.75) {
-                    lighting_put_kept_light_d(h, has_sky() ? scene.sky.rgb : vec3(0.0), 2u);
+                    vec3 sky_light = has_sky() ? scene.sky.rgb : vec3(0.0);
+                    lighting_put_kept_light_d(h, sky_light, 2u);
+                    lighting_wake_store_direct(h, sky_light);
                     return;
                 }
             }
@@ -475,14 +477,18 @@ void main() {
         if ((gstats.ctrl_bits & 512u) == 0u) {
             glow = vec3(0.0);
         }
+        // Direct only. Bounce is added below for the picture; the wake vote
+        // must not see it (a still scene's surface cache keeps moving).
+        vec3 direct_shed = reflectance * e + glow;
         vec3 bounce = lighting_gi_on() ? lighting_cache_irradiance_at(pos, n, hit_t) : vec3(0.0);
         e += bounce;
         e_sun += lighting_hit_sunfrac * bounce;
         vec3 shed = reflectance * e + glow;
         // Fills are a first trace of a missing stratum. The vote compares a
-        // kept hit to the light stored for that same direction.
+        // kept hit's direct light to the direct light stored for that same
+        // direction.
         if (probe_hit && !fill_hit) {
-            lighting_wake_observe(h, shed);
+            lighting_wake_observe(h, direct_shed);
         }
         if (fill_hit) {
             lighting_put_fill_light(h, shed);
@@ -490,6 +496,7 @@ void main() {
             lighting_chg(CHG_KEPT_HELD, 1u);
         } else if (probe_hit) {
             lighting_put_kept_light_d(h, shed, tdl == ~0u ? 2u : ((tdl & 0x80000000u) != 0u ? 0u : 1u));
+            lighting_wake_store_direct(h, direct_shed);
         } else {
             // w: its sun/sky share as luminance (S63A).
             work.v[lighting_rad_at(ray)] = vec4(shed, dot(reflectance * e_sun, vec3(0.2126, 0.7152, 0.0722)));

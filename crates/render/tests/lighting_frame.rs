@@ -759,6 +759,55 @@ fn rings_still_room_wakes_about_zero() {
     );
 }
 
+/// Same corner, but with the stress defaults the real-GPU A/B actually runs:
+/// surface cache on and bounces left unlimited. Cache convergence must not
+/// count as a scene change. A held frame at 0.08 votes hits, and it does not
+/// wake.
+#[test]
+fn rings_still_room_with_cache_votes_hits() {
+    let (_gpu, mut window, mut renderer) = open();
+    clear_wake_env();
+    let mut settings = LightingSettings::default();
+    settings.set_key("probe_tile", "16").unwrap();
+    settings.set_key("wake", "rings").unwrap();
+    settings.set_key("wake_radius", "2").unwrap();
+    settings.set_key("wake_budget", "8").unwrap();
+    settings.set_key("wake_tol", "0.08").unwrap();
+    settings.set_key("denoise", "0").unwrap();
+    let world = corner_room(
+        settings,
+        Vec3::new(0.45, 1.2, 0.45),
+        [8.0, 8.0, 8.0],
+    );
+    let camera = corner_camera();
+    let mut last = LightingWakeStats::default();
+    let mut late_hits = 0u32;
+    let mut late_misses = 0u32;
+    for frame in 0..24 {
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+        last = renderer.lighting_wake_stats();
+        eprint_wake("rings cache still", frame, &last);
+        if frame >= 16 {
+            late_hits += last.verify_hits;
+            late_misses += last.verify_misses;
+        }
+    }
+    assert_eq!(last.probes_woken, 0, "a cached still room does not wake");
+    assert_eq!(last.rings_tested, 0, "a cached still room tests no ring");
+    let votes = last.verify_hits + last.verify_misses;
+    assert!(votes > 0, "a held frame cast no vote");
+    assert_eq!(
+        last.verify_misses, 0,
+        "cache convergence counted as misses (hits {} misses {} of {votes})",
+        last.verify_hits,
+        last.verify_misses
+    );
+    assert!(
+        late_hits > late_misses.saturating_mul(4),
+        "held frames 16-23 were mostly misses (hits {late_hits} misses {late_misses})"
+    );
+}
+
 /// A lamp that steps 0.6 m wakes probes near the old and new centres, inside
 /// the 2 m ring cap, and leaves the probes on the far wall asleep. The inner
 /// ball is a full trace; the ring testers are the screen tiles that own the

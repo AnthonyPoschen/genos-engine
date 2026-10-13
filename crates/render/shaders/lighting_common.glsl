@@ -130,8 +130,14 @@ uint lighting_kept_at(uint h) {
 uint lighting_kept_light_at() {
     return lighting_kept_at(lighting_kept_hits());
 }
-uint lighting_change_at() {
+// One float per kept hit: direct outgoing luminance + 1. The wake vote reads
+// this, not the rgb9e5 kept light (that word includes bounce). A zero word
+// has never been shaded. Packed 4 per vec4, same as the light words.
+uint lighting_direct_base_at() {
     return lighting_kept_light_at() + lighting_kept_hits() / 4u;
+}
+uint lighting_change_at() {
+    return lighting_direct_base_at() + lighting_kept_hits() / 4u;
 }
 uint lighting_view_at(uint block, uint probe) {
     return lighting_change_at() + LIGHTING_CHANGE_HEAD + LIGHTING_CHANGES + block * 2u * lighting_probes() + 2u * probe;

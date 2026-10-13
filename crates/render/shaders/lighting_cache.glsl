@@ -3942,7 +3942,20 @@ void lighting_wake_report(uint probe, bool changed) {
         }
     }
 }
-void lighting_wake_observe(uint h, vec3 light) {
+float lighting_wake_lum(vec3 light) {
+    return dot(max(light, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+}
+// Direct outgoing luminance of this hit, biased by 1 so an untouched slot
+// (the work buffer starts at 0) is not a black shade. Plain float: an rgb9e5
+// word stored with uintBitsToFloat is a denormal or a NaN for some colours,
+// and a quieted payload would not match on every GPU.
+void lighting_wake_store_direct(uint h, vec3 direct_shed) {
+    if (gstats.wake_mode == 0u) {
+        return;
+    }
+    work.v[lighting_direct_base_at() + h / 4u][h % 4u] = lighting_wake_lum(direct_shed) + 1.0;
+}
+void lighting_wake_observe(uint h, vec3 direct_shed) {
     if (gstats.wake_mode == 0u) {
         return;
     }
@@ -3952,13 +3965,14 @@ void lighting_wake_observe(uint h, vec3 light) {
         return;
     }
     uint flags = floatBitsToUint(work.v[lighting_wake_probe_at(pk)].w);
-    // Previous shade of this exact (probe, stratum, ray), packed before this
-    // frame's write. A zero word has no history. A new check direction against
-    // one stored luminance counted as a miss on a still room at tolerance 0.08.
-    uint prev_bits = floatBitsToUint(work.v[lighting_kept_light_at() + h / 4u][h % 4u]);
-    bool have = prev_bits != 0u;
-    float prev = dot(lighting_unpack_rgb9e5(prev_bits), vec3(0.2126, 0.7152, 0.0722));
-    float lum = dot(light, vec3(0.2126, 0.7152, 0.0722));
+    // Previous direct shade of this exact direction, written before this
+    // frame's store. The kept-light word is the full shed (direct plus the
+    // surface cache). That cache converges on a still scene, so comparing it
+    // missed most of the budget every frame. Bounce is not a scene change.
+    float stored = work.v[lighting_direct_base_at() + h / 4u][h % 4u];
+    bool have = stored >= 0.5;
+    float prev = have ? stored - 1.0 : 0.0;
+    float lum = lighting_wake_lum(direct_shed);
     float bound = gstats.wake_tol * max(max(prev, lum), 1.0e-3);
     bool changed = have && abs(lum - prev) > bound;
     if (have && (flags & WAKE_VERIFY) != 0u) {

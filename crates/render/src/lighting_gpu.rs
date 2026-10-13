@@ -753,10 +753,11 @@ impl Gpu {
         let pixels = w as u64 * h as u64;
         let rays = settings.probe_rays() as u64;
         // Probes (2), one slot per light cache ray (hit, then its light), filtered SH
-        // (7), strata (2 per probe and stratum), kept hits and their light (a uint
-        // each), the changes block, the views (2 blocks of 2 per probe) and the
-        // cells (2 tables of R per probe), then the fills and their light (as the
-        // kept hits) (lighting_common.glsl).
+        // (7), strata (2 per probe and stratum), kept hits, their light (a uint
+        // each) and a direct-luminance baseline (one float each), the changes
+        // block, the views (2 blocks of 2 per probe) and the cells (2 tables of R
+        // per probe), then the fills and their light (as the kept hits)
+        // (lighting_common.glsl).
         let gi = settings.gi.enabled;
         let kept = if probes_on {
             probes * rays * LIGHTING_STRATA as u64
@@ -2631,9 +2632,16 @@ fn lighting_sc_local_env() -> bool {
 
 /// Vec4 index of the changes block in the work buffer (lighting_common.glsl
 /// lighting_change_at), for `probes` probes, `cache_rays` light cache rays and `kept`
-/// kept hits.
+/// kept hits. The two `kept / 4` terms are the rgb9e5 light words and the
+/// direct-luminance baseline, four hits per vec4.
 fn lighting_change_at(probes: u64, cache_rays: u64, kept: u64) -> u64 {
-    2 * probes + cache_rays + 7 * probes + 2 * LIGHTING_STRATA as u64 * probes + kept + kept / 4
+    2 * probes
+        + cache_rays
+        + 7 * probes
+        + 2 * LIGHTING_STRATA as u64 * probes
+        + kept
+        + kept / 4
+        + kept / 4
 }
 
 /// Vec4 index of the first wake event. Matches `lighting_wake_event_at`:
