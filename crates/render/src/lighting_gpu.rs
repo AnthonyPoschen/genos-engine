@@ -1076,7 +1076,7 @@ impl Gpu {
         if !read {
         } else if let Ok(words) = self.read_lighting_stats(slot) {
             self.lighting.probe_samples = [words[6], words[7]];
-            if words[7] > 0 && std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+            if words[7] > 0 && lighting_debug_enabled() {
                 eprintln!(
                     "lighting probes rays {} probes {} per_probe {:.1}",
                     words[6],
@@ -1242,7 +1242,7 @@ impl Gpu {
             }
         }
         self.lighting.live = words[2];
-        if std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+        if lighting_debug_enabled() {
             eprintln!(
                 "lighting frame {} still {} change {} relit {} live {} missed {} quiet {} mature_change {} mature_relit {} light_quiet {} young_only {}",
                 self.lighting.frame,
@@ -1460,7 +1460,7 @@ impl Gpu {
     /// `GENOS_LIGHTING_DEBUG` prints the a-trous line on its own.
     fn trace_sc(&self, memory: Handle, queue: &str) {
         let trace = std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_some();
-        let debug = std::env::var_os("GENOS_LIGHTING_DEBUG").is_some();
+        let debug = lighting_debug_enabled();
         if !trace && !debug {
             return;
         }
@@ -1703,7 +1703,7 @@ impl Gpu {
         } else {
             None
         };
-        if std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+        if lighting_debug_enabled() {
             if frozen {
                 eprintln!("lighting frozen");
             } else {
@@ -1793,7 +1793,7 @@ impl Gpu {
             }
             block[3] += (n * 200000) as f32;
             sent += 4 * n;
-            if std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+            if lighting_debug_enabled() {
                 eprintln!("lighting world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(lighting_sc_local_env()), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
             }
             // Object-local texels for movers (GIBS): GENOS_LIGHTING_SC_LOCAL=1.
@@ -2454,7 +2454,71 @@ impl Gpu {
 
 /// S70B: the frame's counters are read back only where something uses them.
 fn lighting_stats_wanted(world: u32) -> bool {
-    std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() || !(world == 3 && lighting_sc_flags_env() & 8192 != 0)
+    lighting_debug_enabled() || !(world == 3 && lighting_sc_flags_env() & 8192 != 0)
+}
+
+/// `Some(false)` when `arg` is `--lighting-debug` (the value, if any, is inline).
+/// `None` when `arg` is some other flag.
+pub fn lighting_debug_flag_needs_value(arg: &str) -> Option<bool> {
+    let (name, _) = lighting_debug_dash(arg)?;
+    (name == "lighting-debug").then_some(false)
+}
+
+/// Reject a bad `--lighting-debug` argument. The value is inline
+/// (`--lighting-debug=0`); a bare flag turns the counters on.
+pub fn check_lighting_debug_arg(arg: &str, _next: Option<&str>) -> Result<(), String> {
+    parse_lighting_debug_flag(arg).map(|_| ())
+}
+
+/// `--lighting-debug` wins. `GENOS_LIGHTING_DEBUG` applies only when that
+/// argument was omitted, and any set value turns the counters on.
+fn lighting_debug_enabled() -> bool {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    lighting_debug_from(&refs, std::env::var_os("GENOS_LIGHTING_DEBUG").is_some()).unwrap_or(false)
+}
+
+fn lighting_debug_from(args: &[&str], env_set: bool) -> Result<bool, String> {
+    let mut chosen = None;
+    for arg in args {
+        if let Some(on) = parse_lighting_debug_flag(arg)? {
+            chosen = Some(on);
+        }
+    }
+    Ok(chosen.unwrap_or(env_set))
+}
+
+fn lighting_debug_dash(arg: &str) -> Option<(&str, Option<&str>)> {
+    let rest = arg.strip_prefix("--")?;
+    if rest.is_empty() {
+        return None;
+    }
+    match rest.split_once('=') {
+        Some((name, value)) => Some((name, Some(value))),
+        None => Some((rest, None)),
+    }
+}
+
+fn parse_lighting_debug_flag(arg: &str) -> Result<Option<bool>, String> {
+    let Some((name, inline)) = lighting_debug_dash(arg) else {
+        return Ok(None);
+    };
+    if name != "lighting-debug" {
+        return Ok(None);
+    }
+    let Some(value) = inline else {
+        return Ok(Some(true));
+    };
+    if value.is_empty() {
+        return Err("--lighting-debug needs a value".into());
+    }
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "on" | "true" => Ok(Some(true)),
+        "0" | "off" | "false" => Ok(Some(false)),
+        other => Err(format!(
+            "--lighting-debug {other} is not 0, 1, on, off, true, or false"
+        )),
+    }
 }
 
 // Defaults with no env set (S54K, gi-v2): GI v2, the surface cache, cap 64, the

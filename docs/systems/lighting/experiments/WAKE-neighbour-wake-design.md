@@ -14,7 +14,7 @@ not recorded
 Ward/Krivanek IC error bound; A-SVGF sparse checks; Lumen background budget; progressive radiosity (Cohen 1988); hierarchical radiosity (Hanrahan 1991); group testing (Dorfman 1943); galloping search. Combination is original (documented deviation).
 
 ## What was implemented
-`wake=rings` (default `legacy`), also `GENOS_LIGHTING_WAKE=rings`. The draw copies the settings and the variable wins when it is set. A lamp move or a geometry change queues up to eight events for eight frames. The place pass tests one probe per sector of a ring at r, 2r, 4r, … and splits 4 → 8 → 16 sectors when the group changed by more than the tolerance. A failed ring fully traces a quarter of the probes inside it; probes inside the first radius are traced in full. A negative radius (sun, lamp added or removed, colour change above 0.75 relative, or a change list that overflowed) traces every placed probe once. Verification retraces `wake_budget` probes a frame (default 16) and the CPU tightens the tolerance on a miss, down to a quarter of the setting. `GENOS_LIGHTING_WAKE_TOL` (0.08), `GENOS_LIGHTING_WAKE_BUDGET`, `GENOS_LIGHTING_WAKE_RADIUS` (8 m). Counters: rings tested, groups split, probes woken, verification hits and misses, probes traced, rays traced (`lightingwake` under `GENOS_LIGHTING_DEBUG`). A settled rings frame still runs the probe passes. Legacy is unchanged, including the settled idle.
+`wake=rings` (default `legacy`), also `GENOS_LIGHTING_WAKE=rings`. The draw copies the settings and the variable wins when it is set. A lamp move or a geometry change queues up to eight events for eight frames. The place pass tests one probe per sector of a ring at r, 2r, 4r, … and splits 4 → 8 → 16 sectors when the group changed by more than the tolerance. A failed ring fully traces a quarter of the probes inside it; probes inside the first radius are traced in full. A negative radius (sun, lamp added or removed, colour change above 0.75 relative, or a change list that overflowed) traces every placed probe once. Verification retraces `wake_budget` probes a frame (default 16) and the CPU tightens the tolerance on a miss, down to a quarter of the setting. `GENOS_LIGHTING_WAKE_TOL` (0.08), `GENOS_LIGHTING_WAKE_BUDGET`, `GENOS_LIGHTING_WAKE_RADIUS` (8 m). Counters: rings tested, groups split, probes woken, verification hits and misses, probes traced, rays traced (`lightingwake` under `--lighting-debug`, or `GENOS_LIGHTING_DEBUG` when that argument was omitted). A settled rings frame still runs the probe passes. Legacy is unchanged, including the settled idle.
 
 ## Numbers
 Legacy baseline, before this scheduler: [WAKE0](WAKE0-legacy-trace-baseline.md). Lavapipe, 320×180 shipped hall: a held still frame traced 1862 probes and 1862 rays (one check ray each); a moving camera traced 2089 probes and 133696 rays (64 per probe).
@@ -50,25 +50,25 @@ Deviations, on purpose:
 
 ## Owner A/B
 
-`genos-stress --wake legacy|rings` writes `wake` and removes `GENOS_LIGHTING_WAKE` for the process, so the flag wins. The variable is the mirror and applies only when the flag is omitted. `GENOS_LIGHTING_DEBUG=1` prints `lightingwake` (traced, rays, rings, splits, woken, hits, misses). `GENOS_GPU_TIMES=30` prints `GPU_MS`. Both go to stderr. The log is the redirect below. `--out` is the unfilled-event directory (`./genos-debug/unfilled` by default) and is not the wake log.
+`genos-stress --wake legacy|rings` writes `wake` and removes `GENOS_LIGHTING_WAKE` for the process, so the flag wins. The variable is the mirror and applies only when the flag is omitted. `--lighting-debug` prints `lightingwake` (traced, rays, rings, splits, woken, hits, misses). `--lighting-debug=0` forces that off. `GENOS_LIGHTING_DEBUG` applies only when the argument was omitted, and any set value turns the counters on. `--gpu-times 30` prints `GPU_MS` every 30 frames. `GENOS_GPU_TIMES` applies only when `--gpu-times` was omitted. Both lines go to stderr.
+
+`--wake-log <run>` writes stdout and stderr itself to `./genos-debug/wake/<run>/run.txt`. The file starts with the argv. A value that contains a slash, or `.` or `..`, is the directory. `GENOS_WAKE_LOG` is the mirror and applies only when `--wake-log` was omitted. With neither set, the process keeps the terminal. The log is opened once, after the arguments parse and before the renderer, the same class as `--gpu-times`: a later settings write does not move the descriptors. `--out` stays the unfilled-event directory (`./genos-debug/unfilled` by default).
 
 Moving stress scene, default hall view:
 
 ```
-mkdir -p ./genos-debug/wake-moving-legacy ./genos-debug/wake-moving-rings
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-stress -- --proof --no-panel --size 1920x1080 --frames 180 --dynamic 50 --freeze-sun --still-boxes --wake legacy > ./genos-debug/wake-moving-legacy/run.txt 2>&1
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-stress -- --proof --no-panel --size 1920x1080 --frames 180 --dynamic 50 --freeze-sun --still-boxes --wake rings > ./genos-debug/wake-moving-rings/run.txt 2>&1
+cargo run --release -p genos-stress -- --proof --no-panel --size 1920x1080 --frames 180 --dynamic 50 --freeze-sun --still-boxes --wake legacy --gpu-times 30 --lighting-debug --wake-log moving-legacy
+cargo run --release -p genos-stress -- --proof --no-panel --size 1920x1080 --frames 180 --dynamic 50 --freeze-sun --still-boxes --wake rings --gpu-times 30 --lighting-debug --wake-log moving-rings
 ```
 
 Bounce corner. The gi-check view is position `[3.5, 1.6, 3.5]`, look-at `[0.2, 0.4, 0.2]` (`examples/stress/scripts/gi_check/views.rhai`). Yaw −π/4 and pitch −0.252 match that look. `--view bounce` is Room A, not this corner.
 
 ```
-mkdir -p ./genos-debug/wake-corner-legacy ./genos-debug/wake-corner-rings
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-stress -- --proof --no-panel --size 640x360 --frames 180 --dynamic 0 --still-boxes --freeze-sun --time 0.25 --eye 3.5 1.6 3.5 -0.785398 -0.252 --wake legacy > ./genos-debug/wake-corner-legacy/run.txt 2>&1
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-stress -- --proof --no-panel --size 640x360 --frames 180 --dynamic 0 --still-boxes --freeze-sun --time 0.25 --eye 3.5 1.6 3.5 -0.785398 -0.252 --wake rings > ./genos-debug/wake-corner-rings/run.txt 2>&1
+cargo run --release -p genos-stress -- --proof --no-panel --size 640x360 --frames 180 --dynamic 0 --still-boxes --freeze-sun --time 0.25 --eye 3.5 1.6 3.5 -0.785398 -0.252 --wake legacy --gpu-times 30 --lighting-debug --wake-log corner-legacy
+cargo run --release -p genos-stress -- --proof --no-panel --size 640x360 --frames 180 --dynamic 0 --still-boxes --freeze-sun --time 0.25 --eye 3.5 1.6 3.5 -0.785398 -0.252 --wake rings --gpu-times 30 --lighting-debug --wake-log corner-rings
 ```
 
-Grep `lightingwake` in those four `run.txt` files.
+Grep `lightingwake` in `./genos-debug/wake/moving-legacy/run.txt`, `moving-rings`, `corner-legacy`, and `corner-rings`.
 
 Numbers context: the scene, GPU and resolution are not recorded for these figures unless stated above. For S76B-D onward, still/moving ms and fps are the bisect-log (steps.md) still and moving runs; pop is the share of pixel-frames stepping more than 0.01 from their 9-frame average (definition from the gi-check fill run), at frames 20-80 / 80-320; brightness is smoke mean luminance at pose a ("lum a"). Anything not given here was not recorded.
 

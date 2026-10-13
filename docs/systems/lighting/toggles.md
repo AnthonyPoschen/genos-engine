@@ -69,7 +69,7 @@ On the existing command catalogue (`GENOS_MCP_PORT`):
 - `list_presets` — `potato`, `low`, `medium`, `high`, each with its text.
 - `apply_preset` — `name` replaces the scene lighting and clears the override.
 
-GPU times need `GENOS_GPU_TIMES` set before the renderer opens. The names are `compact`, `place`, `trace`, `direct`, `gather`, `filter`, `cache`, `compose`, `atrous`, `cache_rays`, `hit_light`, `shadows`.
+GPU times need `--gpu-times N` before the renderer opens (`GENOS_GPU_TIMES` applies only when that argument was omitted). The names are `compact`, `place`, `trace`, `direct`, `gather`, `filter`, `cache`, `compose`, `atrous`, `cache_rays`, `hit_light`, `shadows`. `--lighting-debug` prints the lighting counters (`GENOS_LIGHTING_DEBUG` applies only when that argument was omitted). `--wake-log <run>` writes the stress log to `./genos-debug/wake/<run>/run.txt`.
 
 ## Owner commands
 

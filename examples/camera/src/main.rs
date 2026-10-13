@@ -174,6 +174,26 @@ fn run() -> Result<(), String> {
                     return Err("missing output directory".into());
                 }
             }
+            other if genos_render::lighting_debug_flag_needs_value(other).is_some()
+                || genos_render::gpu_times_flag_needs_value(other).is_some() =>
+            {
+                let lighting = genos_render::lighting_debug_flag_needs_value(other).is_some();
+                let needs = if lighting {
+                    genos_render::lighting_debug_flag_needs_value(other).unwrap_or(false)
+                } else {
+                    genos_render::gpu_times_flag_needs_value(other).unwrap_or(false)
+                };
+                let next = if needs {
+                    Some(args.next().ok_or_else(|| format!("{other} needs a value"))?)
+                } else {
+                    None
+                };
+                if lighting {
+                    genos_render::check_lighting_debug_arg(other, next.as_deref())?;
+                } else {
+                    genos_render::check_gpu_times_arg(other, next.as_deref())?;
+                }
+            }
             other if genos_render::unfilled_flag_needs_value(other).is_some() => {
                 let needs = genos_render::unfilled_flag_needs_value(other).unwrap_or(false);
                 let next = if needs {

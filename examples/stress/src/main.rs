@@ -7,8 +7,9 @@
 //! Every option also reads an environment variable (`GENOS_STRESS_SCALE`,
 //! `GENOS_STRESS_LIGHTS`, `GENOS_STRESS_DYNAMIC`, `GENOS_STRESS_LAYOUT`,
 //! `GENOS_STRESS_DAY_SECONDS`); a flag
-//! wins over the variable. The panel switches lamps, dynamic share, scale and the sun
-//! live.
+//! wins over the variable. `--wake`, `--gpu-times`, `--lighting-debug`, and
+//! `--wake-log` follow that rule too. The panel switches lamps, dynamic share,
+//! scale and the sun live.
 
 mod bench;
 mod building;
@@ -16,7 +17,9 @@ mod gi_check;
 mod knobs;
 mod stage;
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::os::fd::IntoRawFd;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use genos_debug::{png, Host};
@@ -72,6 +75,15 @@ const USAGE: &str = "genos-stress [options]
                             (default target/debug-reports/<script name>)
   --wake legacy|rings        probe wake mode (GENOS_LIGHTING_WAKE is the mirror
                             and applies only when this flag is omitted)
+  --gpu-times N             print GPU_MS every N frames (GENOS_GPU_TIMES is the
+                            mirror and applies only when this flag is omitted)
+  --lighting-debug[=0|1]    print lighting counters (GENOS_LIGHTING_DEBUG is the
+                            mirror and applies only when this flag is omitted;
+                            0, off, or false forces them off)
+  --wake-log NAME           write stdout and stderr to ./genos-debug/wake/NAME/run.txt
+                            (a value that contains a slash, or . or .., is that
+                            directory). GENOS_WAKE_LOG is the mirror and applies
+                            only when this flag is omitted
   --out DIR                 unfilled events (default ./genos-debug/unfilled)
   --unfilled[=0|1]          count unfilled pixels (GENOS_LIGHTING_UNFILLED is the mirror)
   --unfilled-tint[=0|1]     magenta tint; turns the count on (GENOS_LIGHTING_UNFILLED_TINT)
@@ -136,6 +148,8 @@ struct Options {
     gltf: Vec<(PathBuf, [f32; 4])>,
     /// Probe wake mode. Set, this wins over `GENOS_LIGHTING_WAKE`.
     wake: Option<String>,
+    /// Wake log run name or directory. Set, this wins over `GENOS_WAKE_LOG`.
+    wake_log: Option<String>,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, text: &str) -> Result<T, String> {
@@ -189,6 +203,7 @@ fn options() -> Result<Options, String> {
         script: None,
         gltf: Vec::new(),
         wake: None,
+        wake_log: None,
     };
     let mut report: Option<PathBuf> = None;
     let mut trace = false;
@@ -274,6 +289,14 @@ fn options() -> Result<Options, String> {
                 }
                 opts.wake = Some(text);
             }
+            "--wake-log" => opts.wake_log = Some(value()?),
+            arg if arg.starts_with("--wake-log=") => {
+                let text = arg.trim_start_matches("--wake-log=").trim();
+                if text.is_empty() {
+                    return Err("--wake-log needs a value".into());
+                }
+                opts.wake_log = Some(text.to_string());
+            }
             "--out" => {
                 // The renderer reads this from the process arguments.
                 let _dir = value()?;
@@ -288,14 +311,24 @@ fn options() -> Result<Options, String> {
                 println!("{USAGE}");
                 std::process::exit(0);
             }
-            other => match genos_render::unfilled_flag_needs_value(other) {
-                None => return Err(format!("unknown argument {other}\n{USAGE}")),
-                Some(true) => {
-                    let next = value()?;
-                    genos_render::check_unfilled_arg(other, Some(&next))?;
+            other => {
+                if let Some(needs) = genos_render::lighting_debug_flag_needs_value(other) {
+                    let next = if needs { Some(value()?) } else { None };
+                    genos_render::check_lighting_debug_arg(other, next.as_deref())?;
+                } else if let Some(needs) = genos_render::gpu_times_flag_needs_value(other) {
+                    let next = if needs { Some(value()?) } else { None };
+                    genos_render::check_gpu_times_arg(other, next.as_deref())?;
+                } else {
+                    match genos_render::unfilled_flag_needs_value(other) {
+                        None => return Err(format!("unknown argument {other}\n{USAGE}")),
+                        Some(true) => {
+                            let next = value()?;
+                            genos_render::check_unfilled_arg(other, Some(&next))?;
+                        }
+                        Some(false) => genos_render::check_unfilled_arg(other, None)?,
+                    }
                 }
-                Some(false) => genos_render::check_unfilled_arg(other, None)?,
-            },
+            }
         }
     }
     opts.dynamic = opts.dynamic.min(100);
@@ -430,6 +463,9 @@ fn run() -> Result<(), String> {
         return gi_check::run(std::env::args().skip(2));
     }
     let opts = options()?;
+    if let Some(dir) = wake_log_path(opts.wake_log.as_deref())? {
+        redirect_wake_log(&dir)?;
+    }
     let mix = LightMix {
         count: opts.lights,
         dynamic_pct: opts.dynamic,
@@ -967,4 +1003,116 @@ fn press(stage: &mut Stage, id: u32) {
             .set_key("out", DebugSettings::DEFAULT_OUT);
     }
     stage.apply();
+}
+
+/// A run name lands in `./genos-debug/wake/<name>/`. A value that already has a
+/// slash, or `.` or `..`, is the directory itself.
+fn wake_log_directory(value: &str) -> PathBuf {
+    let named = !value.contains('/') && !value.contains('\\') && value != "." && value != "..";
+    if named {
+        PathBuf::from("genos-debug").join("wake").join(value)
+    } else {
+        PathBuf::from(value)
+    }
+}
+
+/// `Some` when this process should capture its log. The argument wins.
+/// `GENOS_WAKE_LOG` applies only when `--wake-log` was omitted.
+fn wake_log_path(arg: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let from_env = if arg.is_some() {
+        None
+    } else {
+        std::env::var("GENOS_WAKE_LOG").ok()
+    };
+    let value = arg.map(str::to_string).or(from_env);
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("--wake-log needs a value".into());
+    }
+    Ok(Some(wake_log_directory(value)))
+}
+
+fn prepare_wake_log(dir: &Path) -> Result<std::fs::File, String> {
+    std::fs::create_dir_all(dir).map_err(|err| format!("wake log {}: {err}", dir.display()))?;
+    let path = dir.join("run.txt");
+    let mut file =
+        std::fs::File::create(&path).map_err(|err| format!("wake log {}: {err}", path.display()))?;
+    let argv = std::env::args().collect::<Vec<_>>().join(" ");
+    writeln!(file, "{argv}").map_err(|err| format!("wake log {}: {err}", path.display()))?;
+    file.flush()
+        .map_err(|err| format!("wake log {}: {err}", path.display()))?;
+    Ok(file)
+}
+
+/// Attach stdout and stderr to `dir/run.txt`. The header is the argv line.
+fn redirect_wake_log(dir: &Path) -> Result<(), String> {
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    let file = prepare_wake_log(dir)?;
+    let fd = file.into_raw_fd();
+    let out = unsafe { dup2(fd, 1) };
+    let err = unsafe { dup2(fd, 2) };
+    unsafe { close(fd) };
+    if out < 0 || err < 0 {
+        return Err(format!(
+            "wake log {}: could not attach stdout and stderr",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
+extern "C" {
+    fn dup2(old: i32, new: i32) -> i32;
+    fn close(fd: i32) -> i32;
+}
+
+#[cfg(test)]
+mod wake_log_tests {
+    use super::{prepare_wake_log, wake_log_directory, wake_log_path};
+
+    #[test]
+    fn a_run_name_lands_under_genos_debug_wake() {
+        assert_eq!(
+            wake_log_directory("moving-legacy"),
+            std::path::PathBuf::from("genos-debug/wake/moving-legacy")
+        );
+        assert_eq!(
+            wake_log_directory("genos-debug/custom"),
+            std::path::PathBuf::from("genos-debug/custom")
+        );
+        assert_eq!(
+            wake_log_directory("./out"),
+            std::path::PathBuf::from("./out")
+        );
+        assert_eq!(wake_log_directory("."), std::path::PathBuf::from("."));
+        assert_eq!(wake_log_directory(".."), std::path::PathBuf::from(".."));
+        assert_eq!(
+            wake_log_directory("/tmp/wake-run"),
+            std::path::PathBuf::from("/tmp/wake-run")
+        );
+        assert_eq!(
+            wake_log_path(Some("corner-rings")).unwrap().unwrap(),
+            std::path::PathBuf::from("genos-debug/wake/corner-rings")
+        );
+        assert_eq!(
+            wake_log_path(Some("logs/corner")).unwrap().unwrap(),
+            std::path::PathBuf::from("logs/corner")
+        );
+        assert!(wake_log_path(Some("  ")).is_err());
+    }
+
+    #[test]
+    fn the_run_file_starts_with_the_argv() {
+        let dir = std::env::temp_dir().join(format!("genos-wake-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        prepare_wake_log(&dir).unwrap();
+        let text = std::fs::read_to_string(dir.join("run.txt")).unwrap();
+        assert!(text.contains("genos"), "{text}");
+        assert!(text.ends_with('\n'));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

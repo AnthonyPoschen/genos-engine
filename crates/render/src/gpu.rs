@@ -727,8 +727,9 @@ struct Gpu {
     timestamp_period: f32,
     timestamp_bits: u32,
     query_pool: Handle,
-    /// `GENOS_GPU_TIMES[=frames]`: per-pass GPU times of every frame and light build,
-    /// averaged and printed every `frames` frames ([`GPU_TIMES_FRAMES`] by default).
+    /// `--gpu-times N`, or `GENOS_GPU_TIMES` when that argument was omitted:
+    /// per-pass GPU times of every frame and light build, averaged and printed
+    /// every N frames ([`GPU_TIMES_FRAMES`] by default).
     gpu_times: Option<Box<GpuTimes>>,
     profile_submit: bool,
     stamp_pending: [bool; 2],
@@ -1359,12 +1360,22 @@ impl Gpu {
                 timestamp_period,
                 timestamp_bits,
                 query_pool: std::ptr::null_mut(),
-                gpu_times: std::env::var("GENOS_GPU_TIMES").ok().map(|v| {
-                    Box::new(GpuTimes {
-                        every: v.parse().unwrap_or(GPU_TIMES_FRAMES).max(1),
-                        ..GpuTimes::default()
+                gpu_times: {
+                    let args: Vec<String> = std::env::args().skip(1).collect();
+                    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                    // A bad `--lighting-debug` fails open, the same way `--gpu-times` does.
+                    lighting_debug_from(
+                        &refs,
+                        std::env::var_os("GENOS_LIGHTING_DEBUG").is_some(),
+                    )?;
+                    let env = std::env::var("GENOS_GPU_TIMES").ok();
+                    gpu_times_every(&refs, env.as_deref())?.map(|every| {
+                        Box::new(GpuTimes {
+                            every,
+                            ..GpuTimes::default()
+                        })
                     })
-                }),
+                },
                 profile_submit: false,
                 stamp_pending: [false; 2],
                 inflight: VecDeque::new(),
@@ -5201,6 +5212,73 @@ extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> Pfn;
 }
 
+/// `Some(true)` when `arg` is `--gpu-times` and the count is the next argument.
+/// `Some(false)` when the flag already includes its value. `None` otherwise.
+pub fn gpu_times_flag_needs_value(arg: &str) -> Option<bool> {
+    let (name, inline) = gpu_times_dash(arg)?;
+    (name == "gpu-times").then_some(inline.is_none())
+}
+
+/// Reject a bad `--gpu-times` argument. `next` is the following argument when
+/// [`gpu_times_flag_needs_value`] is `Some(true)`.
+pub fn check_gpu_times_arg(arg: &str, next: Option<&str>) -> Result<(), String> {
+    parse_gpu_times_flag(arg, next).map(|_| ())
+}
+
+/// Frames per printed line. `Some` turns the timestamps on. An argument wins.
+/// `GENOS_GPU_TIMES` applies only when `--gpu-times` was omitted. A mirror that
+/// is not a number uses [`GPU_TIMES_FRAMES`].
+fn gpu_times_every(args: &[&str], env: Option<&str>) -> Result<Option<u32>, String> {
+    let mut chosen = None;
+    let mut i = 0;
+    while i < args.len() {
+        let next = args.get(i + 1).copied();
+        match parse_gpu_times_flag(args[i], next)? {
+            None => i += 1,
+            Some(every) => {
+                let extra = gpu_times_flag_needs_value(args[i]).unwrap_or(false);
+                chosen = Some(every);
+                i += 1 + usize::from(extra);
+            }
+        }
+    }
+    if let Some(every) = chosen {
+        return Ok(Some(every.max(1)));
+    }
+    Ok(env.map(|value| value.parse().unwrap_or(GPU_TIMES_FRAMES).max(1)))
+}
+
+fn gpu_times_dash(arg: &str) -> Option<(&str, Option<&str>)> {
+    let rest = arg.strip_prefix("--")?;
+    if rest.is_empty() {
+        return None;
+    }
+    match rest.split_once('=') {
+        Some((name, value)) => Some((name, Some(value))),
+        None => Some((rest, None)),
+    }
+}
+
+fn parse_gpu_times_flag(arg: &str, next: Option<&str>) -> Result<Option<u32>, String> {
+    let Some((name, inline)) = gpu_times_dash(arg) else {
+        return Ok(None);
+    };
+    if name != "gpu-times" {
+        return Ok(None);
+    }
+    let value = match inline {
+        Some(value) => value,
+        None => next.ok_or_else(|| "--gpu-times needs a value".to_string())?,
+    };
+    if value.is_empty() {
+        return Err("--gpu-times needs a value".into());
+    }
+    let every = value
+        .parse::<u32>()
+        .map_err(|_| format!("--gpu-times {value} is not a number"))?;
+    Ok(Some(every))
+}
+
 /// Frame timestamps per flight slot for `GENOS_GPU_TIMES`.
 const FRAME_STAMPS: u32 = 5;
 /// Frames averaged per `GENOS_GPU_TIMES` line unless it gives a number.
@@ -5310,5 +5388,79 @@ impl Default for GpuTimes {
             frame_spans: Vec::new(),
             light_spans: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod cli_arg_tests {
+    use super::{
+        check_gpu_times_arg, check_lighting_debug_arg, gpu_times_every, gpu_times_flag_needs_value,
+        lighting_debug_flag_needs_value, lighting_debug_from,
+    };
+
+    #[test]
+    fn gpu_times_argument_wins_over_the_mirror() {
+        assert_eq!(gpu_times_every(&[], None).unwrap(), None);
+        assert_eq!(gpu_times_every(&[], Some("30")).unwrap(), Some(30));
+        assert_eq!(gpu_times_every(&[], Some("nope")).unwrap(), Some(120));
+        assert_eq!(
+            gpu_times_every(&["--gpu-times", "10"], Some("30")).unwrap(),
+            Some(10)
+        );
+        assert_eq!(
+            gpu_times_every(&["--gpu-times=4"], Some("30")).unwrap(),
+            Some(4)
+        );
+        assert_eq!(
+            gpu_times_every(&["--scale", "big"], Some("8")).unwrap(),
+            Some(8)
+        );
+        assert_eq!(gpu_times_every(&["--gpu-times", "0"], None).unwrap(), Some(1));
+        assert!(gpu_times_flag_needs_value("--gpu-times").unwrap());
+        assert!(gpu_times_flag_needs_value("--gpu-times=3").is_some_and(|needs| !needs));
+        assert!(gpu_times_flag_needs_value("--preset").is_none());
+        assert_eq!(
+            check_gpu_times_arg("--gpu-times", None).unwrap_err(),
+            "--gpu-times needs a value"
+        );
+        assert_eq!(
+            check_gpu_times_arg("--gpu-times", Some("nope")).unwrap_err(),
+            "--gpu-times nope is not a number"
+        );
+        assert_eq!(
+            check_gpu_times_arg("--gpu-times=", None).unwrap_err(),
+            "--gpu-times needs a value"
+        );
+        assert!(check_gpu_times_arg("--gpu-times", Some("30")).is_ok());
+    }
+
+    #[test]
+    fn lighting_debug_argument_wins_over_the_mirror() {
+        assert!(!lighting_debug_from(&[], false).unwrap());
+        assert!(lighting_debug_from(&[], true).unwrap());
+        assert!(lighting_debug_from(&["--lighting-debug"], false).unwrap());
+        assert!(!lighting_debug_from(&["--lighting-debug=0"], true).unwrap());
+        assert!(!lighting_debug_from(&["--lighting-debug=off"], true).unwrap());
+        assert!(!lighting_debug_from(&["--lighting-debug=false"], true).unwrap());
+        assert!(lighting_debug_from(&["--lighting-debug=1"], false).unwrap());
+        assert!(lighting_debug_from(&["--lighting-debug=on"], false).unwrap());
+        assert!(lighting_debug_from(&["--lighting-debug=TRUE"], false).unwrap());
+        assert!(lighting_debug_from(&["--scale", "big"], true).unwrap());
+        assert!(!lighting_debug_from(
+            &["--lighting-debug", "--lighting-debug=0"],
+            true
+        )
+        .unwrap());
+        assert!(lighting_debug_flag_needs_value("--lighting-debug").is_some_and(|needs| !needs));
+        assert!(lighting_debug_flag_needs_value("--lighting-debug=0").is_some_and(|needs| !needs));
+        assert!(lighting_debug_flag_needs_value("--gpu-times").is_none());
+        assert_eq!(
+            check_lighting_debug_arg("--lighting-debug=", None).unwrap_err(),
+            "--lighting-debug needs a value"
+        );
+        assert!(check_lighting_debug_arg("--lighting-debug=maybe", None)
+            .unwrap_err()
+            .contains("not 0, 1"));
+        assert!(check_lighting_debug_arg("--lighting-debug", None).is_ok());
     }
 }

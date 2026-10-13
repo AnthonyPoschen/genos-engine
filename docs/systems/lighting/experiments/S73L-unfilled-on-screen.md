@@ -20,6 +20,6 @@ Events land in `./genos-debug/unfilled/<timestamp>/` when `--unfilled-dump <perc
 - Determinism: the directory does not change the picture.
 - Headless server: it does not write unfilled events. It can store the path.
 
-`GENOS_GPU_TIMES` does not enable the detector. Leave `--unfilled` off for a `LIGHTING_MS` line with no unfilled sample. With the detector on, that line gains ` | UNFILLED px=N pct=X.XX max_run=M`, and the same line is printed on its own each frame.
+`--gpu-times` and `GENOS_GPU_TIMES` do not enable the detector. Leave `--unfilled` off for a `LIGHTING_MS` line with no unfilled sample. With the detector on, that line gains ` | UNFILLED px=N pct=X.XX max_run=M`, and the same line is printed on its own each frame.
 
 On the pre-fill branch's lavapipe turn (320×180, settle 96, a 0.5 rad turn of 24 frames) the last turn frame was 0.92% (483 pixels, max run 35). That assertion is not in this change.
