@@ -47,6 +47,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Whole-image consistency beats local sharpness; quality changes only at logical boundaries (12 Oct).
 - Lighting VRAM may grow if it cuts per-frame compute; total should stay fixed rather than scale with the scene (12 Oct).
 - Never skip lighting on an assumption; verify with an extraordinarily cheap check every frame (12 Oct).
+- The moving-scene cut is designed in [work-reduction-design.md](work-reduction-design.md). It is not built.
 
 ## Deviations from the papers (summary)
 
@@ -59,6 +60,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
+- Planned, not built: the moving-scene work reduction in [work-reduction-design.md](work-reduction-design.md). The departures in that file are not in the code.
 
 ## Experiment index
 
