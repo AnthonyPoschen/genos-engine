@@ -1021,3 +1021,106 @@ fn lamp_pick_reuse_follows_a_moved_lamp() {
         "reuse left the old lamp shadow"
     );
 }
+
+/// A box around the centre lamp. The side lamps still reach the floor. The
+/// centre lamp's unshadowed weight stays in the prefix, and its shadow ray does not.
+fn shadowed_lamps() -> World {
+    let mut world = white_lamps(3);
+    world.scene.solids.push(genos_scene::Solid {
+        shape: genos_scene::Shape::Square,
+        position: genos_scene::Vec3::new(0.0, 0.0, -1.0),
+        size: 0.8,
+        height: 4.0,
+        yaw: 0.0,
+        color: [0.35, 0.35, 0.35],
+        absorption: 0.0,
+        reflectance: -1.0,
+        color_mix: -1.0,
+    });
+    // from_scene is what registers the solid with the tracer.
+    World::from_scene(world.scene)
+}
+
+/// GI on so a still pixel can accept history. Bounce 1 and the world-cache bit
+/// keep the quiet-frame pixel skip off, and the direct view drops the bounce.
+fn history_pick(mode: LampPickMode, rays: u32) -> LightingSettings {
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.direct.max_lights = 0;
+    settings.sky = false;
+    settings.ambient.mode = AmbientMode::Off;
+    settings.shadows.enabled = true;
+    settings.gi.enabled = true;
+    settings.bounce.count = 1;
+    settings.probes.enabled = false;
+    settings.world_cache.enabled = true;
+    settings.denoiser.enabled = false;
+    settings.prefill = false;
+    settings.compose_reuse = false;
+    settings.lamp_pick.mode = mode;
+    settings.lamp_pick.rays = rays;
+    settings.lamp_pick.radius = 0;
+    settings.lamp_pick.unbiased = true;
+    settings
+}
+
+/// Each mode against off, direct view, one lamp shadowed.
+///
+/// Hits, pixels, and both match off when the shadow-ray count covers the lamps,
+/// because pixels stay on the full sum. Reuse does not. Radius 0, so the miss
+/// is one visibility bit times the unshadowed sum, not a neighbour reservoir.
+#[test]
+fn lamp_pick_each_mode_against_off() {
+    let (_gpu, mut window, mut renderer) = open();
+    let _diag = LampDiag;
+    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+    let world = shadowed_lamps();
+    let camera = lamp_camera();
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    renderer.set_lighting_settings(history_pick(LampPickMode::Off, 1));
+    let open = draw(&mut window, &mut renderer, &white_lamps(3), &camera);
+    let off = draw(&mut window, &mut renderer, &world, &camera);
+    let boxed = mean_abs(&open, &off);
+    let off_rays = renderer.lighting_lamp_pick_counts().pixels;
+    assert!(
+        boxed > 2.0,
+        "the centre lamp is not shadowed ({boxed:.4})"
+    );
+    assert!(
+        mean_byte(&off) > 1.0,
+        "the shadowed full sum is black ({})",
+        mean_byte(&off)
+    );
+    let matches = |renderer: &mut Renderer, window: &mut Window, mode, rays| {
+        renderer.set_lighting_settings(history_pick(mode, rays));
+        let picture = draw(window, renderer, &world, &camera);
+        max_channel(&off, &picture)
+    };
+    let hits = matches(&mut renderer, &mut window, LampPickMode::Hits, 1);
+    let pixels = matches(&mut renderer, &mut window, LampPickMode::Pixels, 4);
+    let both = matches(&mut renderer, &mut window, LampPickMode::Both, 4);
+    assert!(hits <= 1, "hits changed a pixel by {hits}");
+    assert!(pixels <= 1, "covering pixel samples differ by {pixels}");
+    assert!(both <= 1, "covering both samples differ by {both}");
+    renderer.set_lighting_settings(history_pick(LampPickMode::Reuse, 1));
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let reused = draw(&mut window, &mut renderer, &world, &camera);
+    let counts = renderer.lighting_lamp_pick_counts();
+    let err = mean_abs(&off, &reused);
+    eprintln!(
+        "lamp pick occluded box {boxed:.4} max hits={hits} pixels={pixels} both={both} reuse {err:.4} rays {} / {off_rays} spatial {}",
+        counts.pixels, counts.spatial
+    );
+    assert_eq!(counts.spatial, 0, "radius 0 merged a neighbour");
+    assert!(
+        counts.pixels * 2 < off_rays,
+        "reuse did not drop to one shadow ray ({} vs {off_rays})",
+        counts.pixels
+    );
+    assert!(
+        err > 10.0,
+        "reuse matched off ({err:.4}); the one-sample visibility error did not show"
+    );
+}
