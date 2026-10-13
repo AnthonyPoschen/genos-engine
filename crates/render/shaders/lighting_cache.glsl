@@ -3029,12 +3029,13 @@ bool lighting_svgf_is_dirty(uint s, uint k) {
 const bool LIGHTING_ATROUS_LISTS = true;
 const uint LIGHTING_ATROUS_LIST_CAP = 65536u;
 const uint LIGHTING_ATROUS_MARK_AT = LIGHTING_CHECK_P_AT + 16u;
-// S79 tiles. Two words per workgroup, written by the variance pass while
-// denoise_tiles is on. That path does not append work lists, so these words
-// are not the per-slot mark stamps. 16384 workgroups, 32768 words, inside the
-// mark region. Not a frame of colour: flags, rewritten every tiled frame.
-uint lighting_tile_bits_at(uint wg) {
-    return LIGHTING_ATROUS_MARK_AT + wg * 2u;
+// S79 tiles. Nine words per workgroup, written by the variance pass while
+// denoise_tiles is on: the first eight 8x8 origins in that workgroup, then the
+// count. That path does not append work lists, so these are not the per-slot
+// mark stamps. 16384 workgroups, 147456 words, inside the mark region. Not a
+// frame of colour: slot ids, rewritten every tiled frame.
+uint lighting_tile_list_at(uint wg) {
+    return LIGHTING_ATROUS_MARK_AT + wg * 9u;
 }
 const uint LIGHTING_ATROUS_LIST_AT = LIGHTING_ATROUS_MARK_AT + 5u * LIGHTING_CACHE_SLOTS;
 // Past the S78Z verify/wake reservation. Host writes the threshold; the rest
@@ -3068,8 +3069,8 @@ void lighting_svgf_mark(uint s, uint k) {
     }
     // Tiles replace the work lists for levels 1-5. Building a list the tile
     // dispatch does not read is the contended atomic the dense path exists to
-    // avoid. The variance pass also stores anchor bits in the low mark words
-    // while tiles are on, so this must not exchange those words on that path.
+    // avoid. The variance pass also stores the tiled origins in the low mark
+    // words while tiles are on, so this must not exchange those words on that path.
     if (LIGHTING_ATROUS_LISTS && lighting_atrous_listing() && !lighting_denoise_tiles()) {
         uint list = lighting_atrous_list(k);
         // Past the cap the dispatch falls back; stop adding to the one counter.

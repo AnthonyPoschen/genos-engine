@@ -26,12 +26,15 @@
 //   1, 2, or 4 texels (iterations 0-2). Steps 8 and 16 run the scalar kernel.
 //   A workgroup tiles at most 8 origins. Anchors are about 1/64 of the slots,
 //   so a workgroup rarely owns more than one; the rest stay on the scalar
-//   kernel. The variance pass records the origins as two words per workgroup.
-//   Those words are flags, not a frame, and they are rewritten every frame.
-//   Lavapipe faults on a barrier inside a loop, and on a shared atomicAdd, so
-//   the origins are compacted by one thread and each of the eight runs as its
-//   own straight-line step. A barrier in an if is uniform: every thread sees
-//   the same count.
+//   kernel. The variance pass records those origins as nine words per
+//   workgroup (eight slot ids and a count). Those words are not a frame, and
+//   they are rewritten every frame.
+//   Lavapipe faults on a barrier inside a loop, on a barrier inside an if, on
+//   a shared atomicAdd, and on a variable bit shift in this fallback. One
+//   thread copies the origin list. Each of the eight then runs as straight-line
+//   code with no branch around the barrier. An unused slot is ~0u and the load
+//   returns before it touches the footprint. A texel asks whether its origin is
+//   in that list by comparing ids.
 //   WRC cells keep a grid of 1. Half-resolution fine texels use a grid of 2.
 //   Weights call lighting_svgf_wzn on the gathered slots. They are not an
 //   anchor-plane depth plus a quantized octahedral normal: sigma_n is 128, and
@@ -47,9 +50,8 @@ shared uint tile_slot[576];
 shared uint tile_rgb[576];
 shared float tile_var[576];
 shared float tile_mask[576];
-// First eight 8x8 origins this workgroup owns, then the count.
+// First eight 8x8 origins this workgroup owns. Unused entries are ~0u.
 shared uint tile_list[8];
-shared uint tile_n;
 shared uint atrous_red[64];
 
 #include "lighting_common.glsl"
@@ -216,25 +218,18 @@ void lighting_tile_filter(uint anchor, int tx, int ty, int kstep, int halo, int 
 
 // A texel the tile did not own: scalar, and only when its origin is missing
 // or was past the eight-origin cap. The origin's workgroup writes the rest.
-// Two writers would race. The cap is the bit rank from the variance pass,
-// which is visible because that pass is an earlier dispatch.
-uint lighting_tile_rank(uint s) {
-    uint lid = s & 63u;
-    uint at = lighting_tile_bits_at(s >> 6u);
-    uint lo = ckeys.key[at];
-    uint hi = ckeys.key[at + 1u];
-    if (lid < 32u) {
-        uint mask = lid == 0u ? 0u : ((1u << lid) - 1u);
-        return bitCount(lo & mask);
-    }
-    uint mask = lid == 32u ? 0u : ((1u << (lid - 32u)) - 1u);
-    return bitCount(lo) + bitCount(hi & mask);
-}
-
+// Two writers would race. The variance pass stored the cap as slot ids.
+// Reads of the origin are nested: lavapipe evaluates both sides of &&, and an
+// empty origin is ~0u.
 bool lighting_tile_chosen(uint s) {
-    uint lid = s & 63u;
-    uint word = ckeys.key[lighting_tile_bits_at(s >> 6u) + (lid >> 5u)];
-    return (word & (1u << (lid & 31u))) != 0u && lighting_tile_rank(s) < 8u;
+    uint at = lighting_tile_list_at(s >> 6u);
+    uint n = min(ckeys.key[at + 8u], 8u);
+    for (uint i = 0u; i < 8u; i++) {
+        if (i < n && ckeys.key[at + i] == s) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void lighting_tile_fallback(uint slot, uint it) {
@@ -252,21 +247,26 @@ void lighting_tile_fallback(uint slot, uint it) {
     int ox = lx & ~7;
     int oy = ly & ~7;
     if (lx == ox && ly == oy) {
+        // Nested, not &&. A logical-and still evaluates the slot read, and an
+        // empty origin is ~0u.
         if (!lighting_tile_chosen(slot)) {
-            lighting_svgf_iter(slot, it);
+            lighting_tile_scalar(slot, it);
         }
         return;
     }
     ivec2 off = ivec2((ox - lx) * grid, (oy - ly) * grid);
     uint origin = lighting_sc_cell_slot(slot, off);
-    bool ok = origin != ~0u && origin < LIGHTING_CACHE_SLOTS && ckeys.key[origin] != 0u
-        && cache.v[3u * origin + 1u].w > 0.0
-        && lighting_svgf_active(origin)
-        && !lighting_svgf_half_skip(origin)
-        && cache.v[3u * origin + 1u].w == cache.v[3u * slot + 1u].w
-        && lighting_tile_salt(origin) == lighting_tile_salt(slot);
-    if (!ok || !lighting_tile_chosen(origin)) {
-        lighting_svgf_iter(slot, it);
+    bool covered = false;
+    if (origin != ~0u && origin < LIGHTING_CACHE_SLOTS) {
+        if (ckeys.key[origin] != 0u) {
+            float ow = cache.v[3u * origin + 1u].w;
+            if (ow > 0.0 && ow == cache.v[3u * slot + 1u].w && lighting_tile_salt(origin) == lighting_obj_salt) {
+                covered = lighting_tile_chosen(origin);
+            }
+        }
+    }
+    if (!covered) {
+        lighting_tile_scalar(slot, it);
     }
 }
 
@@ -345,30 +345,19 @@ void lighting_atrous_tiled() {
     }
     // One thread, no barrier in the loop, no shared atomic. Lavapipe faults on both.
     if (lid == 0u) {
-        uint wg = gl_WorkGroupID.x;
-        uint at = lighting_tile_bits_at(wg);
-        uint lo = ckeys.key[at];
-        uint hi = ckeys.key[at + 1u];
-        uint n = 0u;
-        for (uint i = 0u; i < 32u && n < 8u; i++) {
-            if ((lo & (1u << i)) != 0u) {
-                tile_list[n] = (wg << 6u) + i;
-                n++;
-            }
+        uint at = lighting_tile_list_at(gl_WorkGroupID.x);
+        uint n = min(ckeys.key[at + 8u], 8u);
+        for (uint i = 0u; i < 8u; i++) {
+            tile_list[i] = i < n ? ckeys.key[at + i] : ~0u;
         }
-        for (uint i = 0u; i < 32u && n < 8u; i++) {
-            if ((hi & (1u << i)) != 0u) {
-                tile_list[n] = (wg << 6u) + 32u + i;
-                n++;
-            }
-        }
-        for (uint i = n; i < 8u; i++) {
-            tile_list[i] = ~0u;
-        }
-        tile_n = n;
     }
     barrier();
-    lighting_tile_scalar(slot, it);
+    int halo = 2 * kstep;
+    int stride = 8 + 4 * kstep;
+    int nfoot = stride * stride;
+    uint src = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_B : LIGHTING_SC_ATROUS_A);
+    #include "lighting_atrous_tile_unroll.glsl"
+    lighting_tile_fallback(slot, it);
 }
 
 void main() {

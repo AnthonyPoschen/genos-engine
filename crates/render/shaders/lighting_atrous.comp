@@ -30,27 +30,24 @@ uint atrous_wg_sum(uint bit) {
 void main() {
     uint slot = gl_GlobalInvocationID.x;
     uint stage0 = lighting_atrous_stage();
-    // S79: which slots in this workgroup are 8x8 origins. Levels 1-3 read the
-    // bits. Every thread participates; the barriers are not inside a loop.
+    // S79: the first eight 8x8 origins in this workgroup. Levels 1-3 read the
+    // ids. Every thread participates; the barriers are not inside a loop.
     // High (tiles off) does not take this path.
     if (stage0 == 0u && lighting_denoise_tiles()) {
         uint lid = gl_LocalInvocationID.x;
         atrous_red[lid] = lighting_svgf_tile_anchor(slot) ? 1u : 0u;
         barrier();
         if (lid == 0u) {
-            uint lo = 0u;
-            uint hi = 0u;
-            for (uint i = 0u; i < 32u; i++) {
-                if (atrous_red[i] != 0u) {
-                    lo |= 1u << i;
-                }
-                if (atrous_red[32u + i] != 0u) {
-                    hi |= 1u << i;
+            uint at = lighting_tile_list_at(gl_WorkGroupID.x);
+            uint n = 0u;
+            uint base = gl_WorkGroupID.x << 6u;
+            for (uint i = 0u; i < 64u; i++) {
+                if (atrous_red[i] != 0u && n < 8u) {
+                    ckeys.key[at + n] = base + i;
+                    n++;
                 }
             }
-            uint at = lighting_tile_bits_at(gl_WorkGroupID.x);
-            ckeys.key[at] = lo;
-            ckeys.key[at + 1u] = hi;
+            ckeys.key[at + 8u] = n;
         }
         barrier();
     }

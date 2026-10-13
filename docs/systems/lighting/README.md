@@ -560,10 +560,10 @@ count is high or the relative luminance variance is under `denoise_variance`
 the 5×5, and it does not consult the dirty-block list. High leaves adaptive
 off. The age is the set count, not a screen history, so no frame is kept.
 
-`denoise_tiles` runs wavelet levels 1–5 from a shared-memory footprint. Each
-8×8 lattice tile is gathered once. The B3 weights are the scalar kernel's
-`w_z` and `w_n` on those gathered slots. Steps of 8 and 16 cells stay scalar,
-because the footprint would pass the 16 KB shared minimum. Levels 1–5 then
+`denoise_tiles` runs wavelet levels 1–3 from a shared-memory footprint and
+levels 4–5 with the scalar kernel (the step-8 and step-16 footprints do not
+fit in 16 KB). A workgroup gathers at most eight 8×8 origins. The B3 weights
+are the scalar kernel's `w_z` and `w_n` on those gathered slots. Levels 1–5
 replace the work lists; dirty stamps are still honored. Stages 0 and 6 stay
 on the scalar shader. High leaves tiles off, and that pipeline does not
 reserve the tile's shared memory. No frame is stored.

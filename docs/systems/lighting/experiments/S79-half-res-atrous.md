@@ -64,7 +64,7 @@ GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_ADAPTIVE=on
 
 `denoise_tiles` is the third commit. High leaves it off. Medium and low turn it on (low still does not run the filter). The key is `denoise_tiles`, the environment variable is `GENOS_LIGHTING_DENOISE_TILES`, and the debug menu knob is `lighting_denoise_tiles`.
 
-Levels 1–5 bind `lighting_atrous_tile.comp`. Stages 0 and 6 stay on `lighting_atrous.comp`, so the scalar pipeline does not reserve the tile's shared memory. Each workgroup finds the 8×8 lattice origins it owns and loads that footprint once: slot, packed colour, variance, and mask. The thread for each center then runs the B3 kernel, including the 3×3 variance blur. A clean texel is not rewritten. The last iteration still copies into buffer A.
+Levels 1–5 bind `lighting_atrous_tile.comp`. Stages 0 and 6 stay on `lighting_atrous.comp`, so the scalar pipeline does not reserve the tile's shared memory. The variance pass records the first eight 8×8 origins in each workgroup (eight slot ids and a count, nine words in the list-mark region, rewritten every frame, not a colour image). Each of those origins loads its footprint once: slot, packed colour, variance, and mask. The thread for each center then runs the B3 kernel, including the 3×3 variance blur. A clean texel is not rewritten. The last iteration still copies into buffer A. A center the tile does not own runs the scalar kernel.
 
 The footprint is `8 + 4 * step` texels on a side, with a halo of `2 * step`. At steps 1, 2, and 4 that is 12, 16, and 24, and 24×24 entries fit in the 16 KB shared minimum. Steps 8 and 16 run `lighting_svgf_iter` instead. Half-resolution fine texels use a lattice step of 2 cells; world-radiance-cache cells stay on a step of 1. Shared memory dies with the dispatch. No frame is stored.
 
@@ -75,6 +75,10 @@ Deviations, besides the ones above:
 - The tile is a surface-cache lattice, not a screen tile.
 - Weights call `lighting_svgf_wzn` on the gathered slots. They are not an anchor-plane depth plus a quantized octahedral normal. `sigma_n` is 128, and that quantization would change the picture. The search this removes is the 5×5 hash (`LIGHTING_CACHE_SEARCH` probes per tap).
 - A center whose object salt or texel size differs from the tile origin is not written by the tile. Its own thread runs the scalar kernel, so two workgroups do not write the same slot.
+- A workgroup tiles at most eight origins. Further origins in that workgroup stay on the scalar kernel. Origins are about 1/64 of the slots.
+- Lavapipe faults on a `barrier()` inside a loop and on a `barrier()` inside an `if`, so the eight origins are straight-line code. It also evaluates both sides of `&&`, so a missing origin (`~0`) is rejected with nested `if`s before any slot read. Shared `atomicAdd` faults too; one thread copies the origin list.
+
+Lavapipe, 320×180, still camera, against the full-resolution scalar picture: tiles mean 0.049 p99 0.667 edge 0.056 flicker 0.003; half+tiles mean 0.179 p99 1.667 edge 0.196; half+adaptive+tiles mean 0.191 p99 2.000 edge 0.197. Direct mean_abs 0. The bounds are mean < 3, p99 < 12, edge < flat×6+2, flicker < full×4+1.
 
 Expected cost: the hash probes inside the 5×5 become one cooperative load of the footprint, for the three finest iterations. The two coarsest stay scalar. On the moving scene the lists were already abandoned, so this does not depend on a dirty-block skip.
 
