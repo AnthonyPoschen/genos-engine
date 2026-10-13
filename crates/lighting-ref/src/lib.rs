@@ -6,9 +6,13 @@
 //! `./genos-debug/` in the current directory.
 
 pub mod catalog;
+pub mod flip;
+pub mod metrics;
 pub mod paths;
 pub mod picture;
 pub mod store;
+
+pub use metrics::{measure, FrameMetrics, MetricParams};
 
 pub use catalog::{available_checkpoints, checkpoints, scene, scenes, CheckpointDesc, SceneDesc};
 pub use paths::{refcheck_dir, reference_dir, utc_stamp, DEBUG_DIR};
