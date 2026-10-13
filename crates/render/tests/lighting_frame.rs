@@ -800,3 +800,69 @@ fn adaptive_atrous_matches_the_full_reference() {
         assert!(gap < 1.0, "{name} direct moved: {gap:.3}");
     }
 }
+
+fn tile_settings(res: &str, adaptive: bool) -> LightingSettings {
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.set_key("denoise_res", res).expect("denoise_res");
+    settings
+        .set_key("denoise_tiles", "on")
+        .expect("denoise_tiles");
+    if adaptive {
+        settings
+            .set_key("denoise_adaptive", "on")
+            .expect("denoise_adaptive");
+    }
+    settings
+}
+
+/// Shared-memory tiles against the scalar full-resolution picture.
+///
+/// Tiles are off on high. This turns them on for the full wavelet, the half
+/// lattice, and half plus adaptive (the medium preset's denoiser).
+#[test]
+fn tiled_atrous_matches_the_full_reference() {
+    let (_gpu, mut window, mut renderer) = open();
+    let world = shipped_hall();
+    let camera = Camera::opening();
+    renderer.set_lighting_settings(denoise_settings("full"));
+    view_at(&mut renderer, ViewMode::Bounce);
+    let mut full_frames = Vec::new();
+    for _ in 0..6 {
+        full_frames.push(draw(&mut window, &mut renderer, &world, &camera));
+    }
+    let reference = full_frames.last().expect("reference").clone();
+    let full_flicker = flicker_variance(&full_frames[4..]);
+    view_at(&mut renderer, ViewMode::Depth);
+    let depth = draw(&mut window, &mut renderer, &world, &camera);
+    view_at(&mut renderer, ViewMode::Normal);
+    let normal = draw(&mut window, &mut renderer, &world, &camera);
+    view_at(&mut renderer, ViewMode::Direct);
+    let direct_full = draw(&mut window, &mut renderer, &world, &camera);
+
+    for (name, settings) in [
+        ("tiles", tile_settings("full", false)),
+        ("half+tiles", tile_settings("half", false)),
+        ("half+adaptive+tiles", tile_settings("half", true)),
+    ] {
+        renderer.set_lighting_settings(settings);
+        view_at(&mut renderer, ViewMode::Bounce);
+        let mut frames = Vec::new();
+        for _ in 0..4 {
+            frames.push(draw(&mut window, &mut renderer, &world, &camera));
+        }
+        assert_bounce_close(
+            name,
+            &reference,
+            &frames[2],
+            &depth,
+            &normal,
+            &frames,
+            full_flicker,
+        );
+        view_at(&mut renderer, ViewMode::Direct);
+        let direct = draw(&mut window, &mut renderer, &world, &camera);
+        let gap = mean_abs(&direct_full, &direct);
+        eprintln!("{name} direct {gap:.3}");
+        assert!(gap < 1.0, "{name} direct moved: {gap:.3}");
+    }
+}

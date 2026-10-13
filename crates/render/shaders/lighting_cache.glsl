@@ -130,6 +130,11 @@ bool lighting_denoise_adaptive() {
 float lighting_denoise_variance() {
     return float((gstats.ctrl_bits >> 22u) & 1023u) * 0.0001;
 }
+// Bit 21. Wavelet levels 1-5 run from shared-memory tiles (lighting_atrous_tile.comp).
+// High leaves it clear, and the scalar kernel in this file is the one that runs.
+bool lighting_denoise_tiles() {
+    return (gstats.ctrl_bits & 2097152u) != 0u;
+}
 // Unlimited (bit 16384) is today's cache. 0 skips the read. A cache-ray hit
 // (kind 1) needs two bounces; a probe or a pixel needs one.
 bool lighting_bounce_ok() {
@@ -2975,6 +2980,13 @@ bool lighting_svgf_is_dirty(uint s, uint k) {
 const bool LIGHTING_ATROUS_LISTS = true;
 const uint LIGHTING_ATROUS_LIST_CAP = 65536u;
 const uint LIGHTING_ATROUS_MARK_AT = LIGHTING_CHECK_P_AT + 16u;
+// S79 tiles. Two words per workgroup, written by the variance pass while
+// denoise_tiles is on. That path does not append work lists, so these words
+// are not the per-slot mark stamps. 16384 workgroups, 32768 words, inside the
+// mark region. Not a frame of colour: flags, rewritten every tiled frame.
+uint lighting_tile_bits_at(uint wg) {
+    return LIGHTING_ATROUS_MARK_AT + wg * 2u;
+}
 const uint LIGHTING_ATROUS_LIST_AT = LIGHTING_ATROUS_MARK_AT + 5u * LIGHTING_CACHE_SLOTS;
 // Past the S78Z verify/wake reservation. Host writes the threshold; the rest
 // is this frame's list decision and the dense-path recount.
@@ -3005,7 +3017,11 @@ void lighting_svgf_mark(uint s, uint k) {
     if (s == ~0u) {
         return;
     }
-    if (LIGHTING_ATROUS_LISTS && lighting_atrous_listing()) {
+    // Tiles replace the work lists for levels 1-5. Building a list the tile
+    // dispatch does not read is the contended atomic the dense path exists to
+    // avoid. The variance pass also stores anchor bits in the low mark words
+    // while tiles are on, so this must not exchange those words on that path.
+    if (LIGHTING_ATROUS_LISTS && lighting_atrous_listing() && !lighting_denoise_tiles()) {
         uint list = lighting_atrous_list(k);
         // Past the cap the dispatch falls back; stop adding to the one counter.
         if (ckeys.key[list] <= LIGHTING_ATROUS_LIST_CAP && atomicExchange(ckeys.key[LIGHTING_ATROUS_MARK_AT + (k - 1u) * LIGHTING_CACHE_SLOTS + s], lighting_frame()) != lighting_frame()) {
@@ -3163,6 +3179,22 @@ int lighting_svgf_step_for(uint slot, uint it) {
         step <<= 1;
     }
     return step;
+}
+// 8x8 lattice origin. The variance pass records one bit per slot; levels 1-3
+// tile the first eight origins in each workgroup from those bits.
+bool lighting_svgf_tile_anchor(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS || !lighting_sc_svgf() || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
+        return false;
+    }
+    lighting_obj_salt = cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5 ? cache.v[LIGHTING_SC_OBJ_AT + slot].x : 0.0;
+    if (!lighting_svgf_active(slot) || lighting_svgf_half_skip(slot)) {
+        return false;
+    }
+    int grid = lighting_svgf_half_fine(slot) ? 2 : 1;
+    vec2 cell = lighting_sc_true_cell(slot);
+    int lx = grid == 2 ? (int(cell.x) >> 1) : int(cell.x);
+    int ly = grid == 2 ? (int(cell.y) >> 1) : int(cell.y);
+    return (lx & 7) == 0 && (ly & 7) == 0;
 }
 // How many wavelet iterations this texel still needs.
 //

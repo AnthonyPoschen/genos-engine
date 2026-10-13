@@ -230,6 +230,11 @@ impl Host for Stage {
                 "",
             ),
             Knob::switch(
+                "lighting_denoise_tiles",
+                "Denoise tiles",
+                lighting.denoiser.tiles,
+            ),
+            Knob::switch(
                 "lighting_compose_reuse",
                 "Compose reuse",
                 lighting.compose_reuse,
@@ -377,6 +382,7 @@ fn apply_lighting_knob(
         ),
         "lighting_denoise_adaptive" => ("denoise_adaptive", on_off(v)),
         "lighting_denoise_variance" => ("denoise_variance", format!("{v}")),
+        "lighting_denoise_tiles" => ("denoise_tiles", on_off(v)),
         "lighting_compose_reuse" => ("compose_reuse", on_off(v)),
         "lighting_sky" => ("sky", on_off(v)),
         "lighting_emissive" => ("emissive", on_off(v)),

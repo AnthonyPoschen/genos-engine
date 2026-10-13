@@ -14,6 +14,12 @@ fn main() {
         "shaders/lighting_check.comp",
         &out.join("lighting_check.comp.spv"),
     );
+    let atrous_tile = compile(
+        "shaders/lighting_atrous_tile.comp",
+        &out.join("lighting_atrous_tile.comp.spv"),
+    );
+    println!("cargo:rerun-if-changed=shaders/lighting_atrous_tile.comp");
+    println!("cargo:rerun-if-changed=shaders/lighting_atrous_tile_unroll.glsl");
     let lighting: Vec<(&str, PathBuf)> = [
         ("GBUFFER_VERT_SPV", "gbuffer.vert"),
         ("GBUFFER_FRAG_SPV", "gbuffer.frag"),
@@ -55,6 +61,10 @@ fn main() {
             path.display()
         ));
     }
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_ATROUS_TILE_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        atrous_tile.display()
+    ));
     std::fs::write(&glue, glue_text).unwrap();
     for piece in [
         "lighting_common.glsl",

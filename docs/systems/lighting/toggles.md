@@ -24,7 +24,7 @@ Each feature can be turned off. Off means the pass is not recorded and, where th
 | Bounces | `0` is GI with direct light only: hits do not read the cache, and the cache-ray dispatches are not recorded. `1` lets probes and pixels read the cache. `2` and above allow cache-to-cache. `unlimited` is the tuned path | `bounces` |
 | Probes | Place, trace, gather, filter | `probe_rays` (4..64), `probe_tile` (0 = the picture-height rule), `probe_refresh`, `probe_stale` |
 | World cache | Surface cache, world mode 3. Mode 0 is probe GI. The a-trous filter runs only in mode 3. A still probe-only scene settles once the light has held: probes, cache rays, and hit lighting stop, and only pixel direct and compose run, so off does not cost more than on. A moving frame keeps the probe passes. Before that settle, a still pixel still reuses direct light | `world_cell`, `world_refresh`, `world_stale` |
-| Denoiser | The a-trous dispatches. Compose then shows each texel's own mean, so it does not walk the parent field the push would have filled. The wavelet filters bounce light only; pixel direct is composed afterwards and stays sharp | `denoise_iters` (1, 3, or 5), `denoise_dirty`, `denoise_res` (`full` or `half`), `denoise_adaptive`, `denoise_variance` |
+| Denoiser | The a-trous dispatches. Compose then shows each texel's own mean, so it does not walk the parent field the push would have filled. The wavelet filters bounce light only; pixel direct is composed afterwards and stays sharp | `denoise_iters` (1, 3, or 5), `denoise_dirty`, `denoise_res` (`full` or `half`), `denoise_adaptive`, `denoise_variance`, `denoise_tiles` |
 | Compose reuse | The indirect block list. The compose pass still runs, over the whole image, and does not read the key table | `compose_reuse` |
 | Sky | Sky radiance on rays that miss. The scene sky colour stays; this bit stops the lighting from reading it | `sky` |
 | Emissive | Emitted light added in the direct pass and in compose | `emissive` |
@@ -42,9 +42,9 @@ The S78S isolate toggles (`GENOS_LIGHTING_TOGGLES`: `freeze_cache`, `direct_only
 | Preset | What it spends | Cost, structural |
 |---|---|---|
 | `potato` | Direct, hard shadows, flat ambient `(0.42, 0.44, 0.48)` at intensity 0.65. No GI. Emissive stays on | Direct and compose only. No ~368 MB cache and no key table. Shadow rays stay inside the direct pass. The hangar look: direct, shadows, ambient fill |
-| `low` | Probe GI, 16 rays, 32 px tile, refresh every 2 frames, one bounce, budget shift 2 (budgets / 4), shadow cell 0.25 m, max 4 lights, 1 a-trous iteration stored but the filter does not run (no surface cache), prefill off, day ambient at 0.35. Gather bins `probe_rays`, not a fixed 64 | Probe GI. Cache rays do not read the cache (one bounce). No surface cache, no prefill |
-| `medium` | Surface cache, 32 rays, two bounces, budget shift 1 (budgets / 2), max 8 lights, 3 half-resolution a-trous iterations, adaptive passes at variance 0.02, prefill, day ambient. The push reads the last iteration that ran, copied into buffer A, and odd texels are a joint-bilateral upsample | Surface cache and two bounces, half the ray budget, wavelet on a quarter of the fine texels, fewer iterations where history is stable |
-| `high` | Every feature on, unlimited bounces, 64 rays, tile from the picture height, refresh every frame, shadow cell 0.125 m, max lights unlimited, 5 full-resolution a-trous iterations, compose reuse, sky, emissive, prefill. Day ambient is the fallback for when GI is turned off. Half resolution stays off until the owner benchmarks it | The tuned path. Same dispatches as before this struct existed |
+| `low` | Probe GI, 16 rays, 32 px tile, refresh every 2 frames, one bounce, budget shift 2 (budgets / 4), shadow cell 0.25 m, max 4 lights, 1 half-resolution adaptive tiled a-trous iteration stored but the filter does not run (no surface cache), prefill off, day ambient at 0.35. Gather bins `probe_rays`, not a fixed 64 | Probe GI. Cache rays do not read the cache (one bounce). No surface cache, no prefill |
+| `medium` | Surface cache, 32 rays, two bounces, budget shift 1 (budgets / 2), max 8 lights, 3 half-resolution a-trous iterations, adaptive passes at variance 0.02, shared-memory tiles, prefill, day ambient. The push reads the last iteration that ran, copied into buffer A, and odd texels are a joint-bilateral upsample | Surface cache and two bounces, half the ray budget, wavelet on a quarter of the fine texels, fewer iterations where history is stable, the 5×5 gathered once per tile |
+| `high` | Every feature on, unlimited bounces, 64 rays, tile from the picture height, refresh every frame, shadow cell 0.125 m, max lights unlimited, 5 full-resolution a-trous iterations, compose reuse, sky, emissive, prefill. Day ambient is the fallback for when GI is turned off. Half resolution, adaptive passes, and shared-memory tiles stay off until the owner benchmarks them | The tuned path. Same dispatches as before this struct existed |
 
 `high` on a due frame builds the same group list the frame recorded before settings existed. Shader gates load the control block and fall through when the bits match that path. The default shadow cell is 0.125 m and the shader divides by the `LIGHTING_SC_TEXEL` constant, so a still frame stays on the old quantisation. A different `shadow_cell` is the variable division.
 
@@ -58,7 +58,7 @@ The text form is `LightingSettings::to_text` / `parse`. Floats print with their 
 
 `Renderer::set_lighting_settings` holds an override until `clear_lighting_override`. A game that owns the scene writes `scene.lighting` and leaves the override clear. The draw copies the override or the scene, then applies environment variables that are set. A variable that is set wins every frame (a launch lock). `GENOS_LIGHTING_PRESET` replaces the struct, then the other variables overlay one key each. `GENOS_LIGHTING_COMPOSE_ALL` forces compose reuse off.
 
-The stress debug menu edits `world.scene.lighting` through `set_key`. The knobs are the preset, each feature switch, and the quality knobs (max lights, refresh, resolution scale, shadow filter, GI refresh, budget shift, probe rays, probe and world staleness, denoiser iterations, denoiser resolution, ambient mode). The next draw picks that up.
+The stress debug menu edits `world.scene.lighting` through `set_key`. The knobs are the preset, each feature switch, and the quality knobs (max lights, refresh, resolution scale, shadow filter, GI refresh, budget shift, probe rays, probe and world staleness, denoiser iterations, denoiser resolution, adaptive passes, variance threshold, shared-memory tiles, ambient mode). The next draw picks that up.
 
 ## MCP
 
@@ -96,6 +96,14 @@ Adaptive passes drop later wavelet iterations on texels whose sample count is hi
 ```
 GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_ADAPTIVE=on GENOS_LIGHTING_DENOISE_VARIANCE=0.02 make stress
 GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_RES=half GENOS_LIGHTING_DENOISE_ADAPTIVE=on make stress
+```
+
+`denoise_tiles=on` gathers each 8×8 wavelet footprint once into shared memory. Steps of 8 and 16 cells stay on the scalar kernel. High leaves tiles off. The tile pipeline is not the scalar shader, so the full-quality path does not reserve that shared memory.
+
+```
+GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_TILES=on make stress
+GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_TILES=off make stress
+GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_RES=half GENOS_LIGHTING_DENOISE_ADAPTIVE=on GENOS_LIGHTING_DENOISE_TILES=on make stress
 ```
 
 `make stress` is `cargo run --release -p genos-stress`. The `LIGHTING_MS` line names the passes and appends `cache_rays`, `shadows`, and `prefill`. `prefill` is 1 when the scout was due and 0 when it was not. The scout shares the cache-ray dispatch, so this is not a separate millisecond.

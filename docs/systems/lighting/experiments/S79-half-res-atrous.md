@@ -60,6 +60,29 @@ Expected cost: on the moving sun the set count stays high (the history is not re
 GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_ADAPTIVE=on GENOS_LIGHTING_DENOISE_VARIANCE=0.02 make stress
 ```
 
+## Shared-memory tiles
+
+`denoise_tiles` is the third commit. High leaves it off. Medium and low turn it on (low still does not run the filter). The key is `denoise_tiles`, the environment variable is `GENOS_LIGHTING_DENOISE_TILES`, and the debug menu knob is `lighting_denoise_tiles`.
+
+Levels 1–5 bind `lighting_atrous_tile.comp`. Stages 0 and 6 stay on `lighting_atrous.comp`, so the scalar pipeline does not reserve the tile's shared memory. Each workgroup finds the 8×8 lattice origins it owns and loads that footprint once: slot, packed colour, variance, and mask. The thread for each center then runs the B3 kernel, including the 3×3 variance blur. A clean texel is not rewritten. The last iteration still copies into buffer A.
+
+The footprint is `8 + 4 * step` texels on a side, with a halo of `2 * step`. At steps 1, 2, and 4 that is 12, 16, and 24, and 24×24 entries fit in the 16 KB shared minimum. Steps 8 and 16 run `lighting_svgf_iter` instead. Half-resolution fine texels use a lattice step of 2 cells; world-radiance-cache cells stay on a step of 1. Shared memory dies with the dispatch. No frame is stored.
+
+Tiles replace the S78X work lists for levels 1–5. The moving scene is already the dense sweep, which is the path the tile accelerates. Lists stay when tiles are off. Dirty stamps are still read.
+
+Deviations, besides the ones above:
+
+- The tile is a surface-cache lattice, not a screen tile.
+- Weights call `lighting_svgf_wzn` on the gathered slots. They are not an anchor-plane depth plus a quantized octahedral normal. `sigma_n` is 128, and that quantization would change the picture. The search this removes is the 5×5 hash (`LIGHTING_CACHE_SEARCH` probes per tap).
+- A center whose object salt or texel size differs from the tile origin is not written by the tile. Its own thread runs the scalar kernel, so two workgroups do not write the same slot.
+
+Expected cost: the hash probes inside the 5×5 become one cooperative load of the footprint, for the three finest iterations. The two coarsest stay scalar. On the moving scene the lists were already abandoned, so this does not depend on a dirty-block skip.
+
+```
+GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_TILES=on make stress
+GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_RES=half GENOS_LIGHTING_DENOISE_ADAPTIVE=on GENOS_LIGHTING_DENOISE_TILES=on make stress
+```
+
 ## Expected cost
 
 The five wavelet dispatches dominate the 5.5 ms. They run on about a quarter of the fine texels, so those dispatches should fall to roughly 1.5–2 ms. The upsample is four taps inside the push, which already runs. This commit alone is not expected to hit 2 ms for the whole bucket; the variance pass still visits the even texels' neighbourhood, and the push still visits every fine texel.
@@ -71,4 +94,6 @@ GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_RES=full ma
 GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high GENOS_LIGHTING_DENOISE_RES=half make stress
 ```
 
-RTX 4070, 1920×1080, the moving stress scene. The `atrous` column is the one that should move. Lavapipe checks mean and p99 error against the full-resolution picture, error at depth discontinuities, and flicker variance on a still camera.
+RTX 4070, 1920×1080, the moving stress scene. The `atrous` column is the one that should move. Lavapipe checks mean and p99 error against the full-resolution picture, error at depth discontinuities, and flicker variance on a still camera. Lavapipe does not time the GPU.
+
+Half resolution, adaptive passes, and tiles together should bring the whole bucket near 2 ms. None of the three is timed here. High stays on the full-resolution scalar wavelet until the owner runs the A/B above.

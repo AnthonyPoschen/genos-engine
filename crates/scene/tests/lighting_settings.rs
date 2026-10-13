@@ -73,6 +73,7 @@ fn high_is_the_tuned_path() {
         genos_scene::DenoiseResolution::Full
     );
     assert!(!high.denoiser.adaptive);
+    assert!(!high.denoiser.tiles);
     assert!((high.denoiser.variance_threshold - 0.02).abs() < 1.0e-6);
     assert_eq!(high.world_mode(), 3);
     assert!(high.allocates_cache());

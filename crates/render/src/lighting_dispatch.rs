@@ -60,6 +60,8 @@ const CTRL_DENOISE_ITERS_SHIFT: u32 = 16;
 const CTRL_DENOISE_HALF: u32 = 1 << 19;
 /// Skip later wavelet iterations on stable texels. Bit 20.
 const CTRL_DENOISE_ADAPTIVE: u32 = 1 << 20;
+/// Shared-memory tiles for wavelet levels 1-5. Bit 21. Unset is the scalar kernel.
+const CTRL_DENOISE_TILES: u32 = 1 << 21;
 /// Relative variance threshold in bits 22..31, in steps of 0.0001.
 const CTRL_DENOISE_VAR_SHIFT: u32 = 22;
 
@@ -154,6 +156,9 @@ pub(crate) fn pack_lighting_ctrl(
     }
     if settings.denoiser.adaptive {
         bits |= CTRL_DENOISE_ADAPTIVE;
+    }
+    if settings.denoiser.tiles {
+        bits |= CTRL_DENOISE_TILES;
     }
     let variance_steps = (settings.denoiser.variance_threshold * 10000.0)
         .round()

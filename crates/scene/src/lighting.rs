@@ -231,6 +231,8 @@ pub struct DenoiserSettings {
     /// Relative luminance deviation `sqrt(variance) / mean` under which a texel
     /// counts as stable. 0 leaves the decision to sample age.
     pub variance_threshold: f32,
+    /// Shared-memory tiles for wavelet levels 1-5. The scalar kernel stays available.
+    pub tiles: bool,
 }
 
 /// Flat or hemisphere fill used when GI is off.
@@ -308,6 +310,7 @@ impl LightingSettings {
                 // recorded so turning the cache on does not jump to full cost.
                 s.denoiser.resolution = DenoiseResolution::Half;
                 s.denoiser.adaptive = true;
+                s.denoiser.tiles = true;
                 s.prefill = false;
                 s.gi.refresh_frames = 2;
                 s.gi.budget_shift = 2;
@@ -321,6 +324,7 @@ impl LightingSettings {
                 s.denoiser.iterations = 3;
                 s.denoiser.resolution = DenoiseResolution::Half;
                 s.denoiser.adaptive = true;
+                s.denoiser.tiles = true;
                 s.gi.budget_shift = 1;
                 s.ambient.mode = AmbientMode::Day;
             }
@@ -374,6 +378,8 @@ impl LightingSettings {
                 resolution: DenoiseResolution::Full,
                 adaptive: false,
                 variance_threshold: 0.02,
+                // High stays on the scalar kernel until the tiles are benchmarked.
+                tiles: false,
             },
             compose_reuse: true,
             sky: true,
@@ -607,6 +613,7 @@ impl LightingSettings {
             "denoise_variance={}",
             num_text(self.denoiser.variance_threshold)
         );
+        let _ = writeln!(out, "denoise_tiles={}", bit(self.denoiser.tiles));
         let _ = writeln!(out, "compose_reuse={}", bit(self.compose_reuse));
         let _ = writeln!(out, "sky={}", bit(self.sky));
         let _ = writeln!(out, "emissive={}", bit(self.emissive));
@@ -718,6 +725,7 @@ impl LightingSettings {
             }
             "denoise_adaptive" => self.denoiser.adaptive = on(value)?,
             "denoise_variance" => self.denoiser.variance_threshold = num_f32(value)?,
+            "denoise_tiles" => self.denoiser.tiles = on(value)?,
             "compose_reuse" => self.compose_reuse = on(value)?,
             "sky" => self.sky = on(value)?,
             "emissive" => self.emissive = on(value)?,
@@ -782,6 +790,7 @@ impl LightingSettings {
             ("GENOS_LIGHTING_DENOISE_RES", "denoise_res"),
             ("GENOS_LIGHTING_DENOISE_ADAPTIVE", "denoise_adaptive"),
             ("GENOS_LIGHTING_DENOISE_VARIANCE", "denoise_variance"),
+            ("GENOS_LIGHTING_DENOISE_TILES", "denoise_tiles"),
             ("GENOS_LIGHTING_COMPOSE_REUSE", "compose_reuse"),
             ("GENOS_LIGHTING_SKY", "sky"),
             ("GENOS_LIGHTING_EMISSIVE", "emissive"),

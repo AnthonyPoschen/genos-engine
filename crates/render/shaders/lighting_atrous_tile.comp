@@ -1,0 +1,376 @@
+#version 450
+// S79: shared-memory tiles for a-trous levels 1-5.
+//
+// The scalar kernel stays in lighting_atrous.comp. This shader is bound only
+// when denoise_tiles is on, so the full-quality pipeline does not reserve the
+// tile's shared memory. Stages 0 and 6 stay on the scalar shader.
+//
+// Papers: Dammertz et al., HPG 2010 (B3 a-trous). Schied et al., HPG 2017
+// (SVGF edge weights and sec. 4.2 variance). Zhdan, ReBLUR / ReLAX (NVIDIA
+// Real-Time Denoisers): half-resolution indirect and fewer iterations as
+// history grows. Wright et al., SIGGRAPH 2022 (Lumen): direct stays sharp.
+//
+// What this matches. One workgroup gathers the footprint of every 8x8 lattice
+// tile whose origin it owns, once, into shared memory. Each thread then runs
+// the same B3 kernel the scalar path runs, including the 3x3 variance blur.
+// Shared memory dies with the dispatch. No image is allocated and no frame is
+// kept.
+//
+// Deviations:
+//   The grid is the surface-cache lattice, not a screen tile.
+//   Tiles replace the S78X work lists for levels 1-5. Dirty stamps are still
+//   honored: a clean texel is not rewritten. The moving scene is already the
+//   dense sweep, which is the path this accelerates. Lists stay when tiles
+//   are off.
+//   The footprint fits in the 16 KB minimum only while the kernel step is
+//   1, 2, or 4 texels (iterations 0-2). Steps 8 and 16 run the scalar kernel.
+//   A workgroup tiles at most 8 origins. Anchors are about 1/64 of the slots,
+//   so a workgroup rarely owns more than one; the rest stay on the scalar
+//   kernel. The variance pass records the origins as two words per workgroup.
+//   Those words are flags, not a frame, and they are rewritten every frame.
+//   Lavapipe faults on a barrier inside a loop, and on a shared atomicAdd, so
+//   the origins are compacted by one thread and each of the eight runs as its
+//   own straight-line step. A barrier in an if is uniform: every thread sees
+//   the same count.
+//   WRC cells keep a grid of 1. Half-resolution fine texels use a grid of 2.
+//   Weights call lighting_svgf_wzn on the gathered slots. They are not an
+//   anchor-plane depth plus a quantized octahedral normal: sigma_n is 128, and
+//   that quantization would move the picture. The cost this removes is the
+//   5x5 hash search (LIGHTING_CACHE_SEARCH probes per tap), not the read of a
+//   slot whose index is already known.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+
+// 24*24 footprint, the iteration-2 (step 4) tile with a 2-tap halo.
+// 576 * 16 bytes, plus the anchor list and the reduction, stays under 16 KB.
+shared uint tile_slot[576];
+shared uint tile_rgb[576];
+shared float tile_var[576];
+shared float tile_mask[576];
+// First eight 8x8 origins this workgroup owns, then the count.
+shared uint tile_list[8];
+shared uint tile_n;
+shared uint atrous_red[64];
+
+#include "lighting_common.glsl"
+
+uint atrous_wg_sum(uint bit) {
+    uint lid = gl_LocalInvocationID.x;
+    atrous_red[lid] = bit;
+    barrier();
+    if (lid < 32u) atrous_red[lid] += atrous_red[lid + 32u];
+    barrier();
+    if (lid < 16u) atrous_red[lid] += atrous_red[lid + 16u];
+    barrier();
+    if (lid < 8u) atrous_red[lid] += atrous_red[lid + 8u];
+    barrier();
+    if (lid < 4u) atrous_red[lid] += atrous_red[lid + 4u];
+    barrier();
+    if (lid < 2u) atrous_red[lid] += atrous_red[lid + 2u];
+    barrier();
+    if (lid == 0u) atrous_red[0] += atrous_red[1];
+    barrier();
+    return atrous_red[0];
+}
+
+float lighting_tile_salt(uint s) {
+    float v = cache.v[LIGHTING_SC_OBJ_AT + s].x;
+    return v > 0.5 ? v : 0.0;
+}
+
+int lighting_tile_grid(uint s) {
+    return lighting_svgf_half_fine(s) ? 2 : 1;
+}
+
+int lighting_tile_lattice(float cell, int grid) {
+    int c = int(cell);
+    return grid == 2 ? (c >> 1) : c;
+}
+
+void lighting_tile_scalar(uint slot, uint it) {
+    if (slot >= LIGHTING_CACHE_SLOTS || !lighting_sc_svgf() || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
+        return;
+    }
+    lighting_obj_salt = lighting_tile_salt(slot);
+    if (!lighting_svgf_active(slot)) {
+        return;
+    }
+    lighting_svgf_iter(slot, it);
+}
+
+bool lighting_tile_ix(int e);
+
+// One center of the anchor's 8x8. Matches lighting_svgf_iter, reading the
+// footprint from shared memory. A center that is not this anchor's object
+// is left to its own thread.
+void lighting_tile_filter(uint anchor, int tx, int ty, int kstep, int halo, int stride, uint it) {
+    int center = (tx + halo) + (ty + halo) * stride;
+    if (!lighting_tile_ix(center)) {
+        return;
+    }
+    uint cs = tile_slot[center];
+    if (cs == ~0u || cs >= LIGHTING_CACHE_SLOTS || ckeys.key[cs] == 0u || !(cache.v[3u * cs + 1u].w > 0.0)) {
+        return;
+    }
+    if (!lighting_svgf_active(cs) || lighting_svgf_half_skip(cs)) {
+        return;
+    }
+    if (lighting_tile_salt(cs) != lighting_tile_salt(anchor)
+        || cache.v[3u * cs + 1u].w != cache.v[3u * anchor + 1u].w
+        || lighting_tile_grid(cs) != lighting_tile_grid(anchor)) {
+        return;
+    }
+    if (LIGHTING_DIRTY_ATROUS && !lighting_svgf_is_dirty(cs, it + 1u)) {
+        return;
+    }
+    lighting_obj_salt = lighting_tile_salt(cs);
+    uint dst = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it + 1u) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_A : LIGHTING_SC_ATROUS_B);
+    if (lighting_denoise_adaptive()) {
+        float v0;
+        vec4 s0 = lighting_svgf_load(lighting_svgf_lvl(0u), cs, v0);
+        uint limit = lighting_svgf_pass_limit(cs, v0, dot(s0.rgb, LIGHTING_SVGF_LW));
+        if (it + 1u > limit) {
+            lighting_svgf_store(dst, cs, lighting_unpack_rgb9e5(tile_rgb[center]), tile_var[center], tile_mask[center]);
+            if (LIGHTING_DIRTY_ATROUS && it + 1u == lighting_denoise_iters()) {
+                cache.v[LIGHTING_SC_ATROUS_A + cs] = cache.v[dst + cs];
+            }
+            return;
+        }
+    }
+    float vold;
+    vec4 old = lighting_svgf_load(dst, cs, vold);
+    float varp = tile_var[center];
+    vec3 cp = lighting_unpack_rgb9e5(tile_rgb[center]);
+    float mp = tile_mask[center];
+    float lp = dot(cp, LIGHTING_SVGF_LW);
+    float gv = 0.0;
+    float gw = 0.0;
+    [[dont_unroll]] for (int j = -1; j <= 1; j++) {
+        [[dont_unroll]] for (int i = -1; i <= 1; i++) {
+            int e = (tx + i + halo) + (ty + j + halo) * stride;
+            if (!lighting_tile_ix(e)) {
+                continue;
+            }
+            uint q = tile_slot[e];
+            if (q == ~0u) {
+                continue;
+            }
+            float k = (i == 0 ? 0.5 : 0.25) * (j == 0 ? 0.5 : 0.25);
+            gv += k * tile_var[e];
+            gw += k;
+        }
+    }
+    gv = gw > 0.0 ? gv / gw : varp;
+    float phi = LIGHTING_SVGF_SIGMA_L * sqrt(max(gv, 0.0)) + 1.0e-10;
+    const float h1[5] = float[5](1.0 / 16.0, 0.25, 0.375, 0.25, 1.0 / 16.0);
+    vec3 sum = vec3(0.0);
+    float wm = 0.0;
+    float wall = 0.0;
+    float vsum = 0.0;
+    [[dont_unroll]] for (int j = -2; j <= 2; j++) {
+        [[dont_unroll]] for (int i = -2; i <= 2; i++) {
+            int e = (tx + i * kstep + halo) + (ty + j * kstep + halo) * stride;
+            if (!lighting_tile_ix(e)) {
+                continue;
+            }
+            uint q = tile_slot[e];
+            if (q == ~0u) {
+                continue;
+            }
+            vec3 rgb = lighting_unpack_rgb9e5(tile_rgb[e]);
+            float mw = tile_mask[e];
+            float w = h1[i + 2] * h1[j + 2] * lighting_svgf_wzn(cs, q);
+            if (q != cs && mp > 0.0 && mw > 0.0) {
+                w *= exp(-abs(lp - dot(rgb, LIGHTING_SVGF_LW)) / phi);
+            }
+            float a = w * mw;
+            sum += a * rgb;
+            wm += a;
+            wall += w;
+            vsum += a * a * max(tile_var[e], 0.0);
+        }
+    }
+    if (wm > 0.0) {
+        lighting_svgf_store(dst, cs, sum / wm, vsum / (wm * wm), wall > 0.0 ? min(1.0, 4.0 * wm / wall) : 0.0);
+    } else {
+        lighting_svgf_store(dst, cs, vec3(0.0), 0.0, 0.0);
+    }
+    if (LIGHTING_DIRTY_ATROUS) {
+        float vn;
+        vec4 nw = lighting_svgf_load(dst, cs, vn);
+        if (it + 1u == lighting_denoise_iters()) {
+            cache.v[LIGHTING_SC_ATROUS_A + cs] = cache.v[dst + cs];
+        }
+        if (lighting_svgf_moved(nw, vn, old, vold)) {
+            lighting_svgf_scatter(cs, it + 1u);
+            if (it + 1u == lighting_denoise_iters()) {
+                lighting_svgf_stamp(cs, 3u);
+                lighting_svgf_stamp(lighting_sc_cell_slot(cs, ivec2(1, 0)), 3u);
+                lighting_svgf_stamp(lighting_sc_cell_slot(cs, ivec2(-1, 0)), 3u);
+                lighting_svgf_stamp(lighting_sc_cell_slot(cs, ivec2(0, 1)), 3u);
+                lighting_svgf_stamp(lighting_sc_cell_slot(cs, ivec2(0, -1)), 3u);
+            }
+        }
+    }
+}
+
+// A texel the tile did not own: scalar, and only when its origin is missing
+// or was past the eight-origin cap. The origin's workgroup writes the rest.
+// Two writers would race. The cap is the bit rank from the variance pass,
+// which is visible because that pass is an earlier dispatch.
+uint lighting_tile_rank(uint s) {
+    uint lid = s & 63u;
+    uint at = lighting_tile_bits_at(s >> 6u);
+    uint lo = ckeys.key[at];
+    uint hi = ckeys.key[at + 1u];
+    if (lid < 32u) {
+        uint mask = lid == 0u ? 0u : ((1u << lid) - 1u);
+        return bitCount(lo & mask);
+    }
+    uint mask = lid == 32u ? 0u : ((1u << (lid - 32u)) - 1u);
+    return bitCount(lo) + bitCount(hi & mask);
+}
+
+bool lighting_tile_chosen(uint s) {
+    uint lid = s & 63u;
+    uint word = ckeys.key[lighting_tile_bits_at(s >> 6u) + (lid >> 5u)];
+    return (word & (1u << (lid & 31u))) != 0u && lighting_tile_rank(s) < 8u;
+}
+
+void lighting_tile_fallback(uint slot, uint it) {
+    if (slot >= LIGHTING_CACHE_SLOTS || !lighting_sc_svgf() || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
+        return;
+    }
+    lighting_obj_salt = lighting_tile_salt(slot);
+    if (!lighting_svgf_active(slot) || lighting_svgf_half_skip(slot)) {
+        return;
+    }
+    int grid = lighting_tile_grid(slot);
+    vec2 cell = lighting_sc_true_cell(slot);
+    int lx = lighting_tile_lattice(cell.x, grid);
+    int ly = lighting_tile_lattice(cell.y, grid);
+    int ox = lx & ~7;
+    int oy = ly & ~7;
+    if (lx == ox && ly == oy) {
+        if (!lighting_tile_chosen(slot)) {
+            lighting_svgf_iter(slot, it);
+        }
+        return;
+    }
+    ivec2 off = ivec2((ox - lx) * grid, (oy - ly) * grid);
+    uint origin = lighting_sc_cell_slot(slot, off);
+    bool ok = origin != ~0u && origin < LIGHTING_CACHE_SLOTS && ckeys.key[origin] != 0u
+        && cache.v[3u * origin + 1u].w > 0.0
+        && lighting_svgf_active(origin)
+        && !lighting_svgf_half_skip(origin)
+        && cache.v[3u * origin + 1u].w == cache.v[3u * slot + 1u].w
+        && lighting_tile_salt(origin) == lighting_tile_salt(slot);
+    if (!ok || !lighting_tile_chosen(origin)) {
+        lighting_svgf_iter(slot, it);
+    }
+}
+
+bool lighting_tile_ix(int e) {
+    return e >= 0 && e < 576;
+}
+
+void lighting_tile_load(uint index, int halo, int stride, int nfoot, uint src) {
+    uint anchor = tile_list[index];
+    if (anchor == ~0u) {
+        return;
+    }
+    lighting_obj_salt = lighting_tile_salt(anchor);
+    int agrid = lighting_tile_grid(anchor);
+    for (int e = int(gl_LocalInvocationID.x); e < nfoot; e += 64) {
+        if (!lighting_tile_ix(e)) {
+            continue;
+        }
+        int du = (e % stride) - halo;
+        int dv = (e / stride) - halo;
+        uint q = (du == 0 && dv == 0) ? anchor : lighting_sc_cell_slot(anchor, ivec2(du, dv) * agrid);
+        if (q == ~0u || q >= LIGHTING_CACHE_SLOTS) {
+            tile_slot[e] = ~0u;
+            tile_rgb[e] = 0u;
+            tile_var[e] = 0.0;
+            tile_mask[e] = 0.0;
+        } else {
+            vec4 packed = cache.v[src + q];
+            tile_slot[e] = q;
+            tile_rgb[e] = floatBitsToUint(packed.x);
+            tile_var[e] = packed.y;
+            tile_mask[e] = packed.z;
+        }
+    }
+}
+
+void lighting_tile_apply(uint index, int kstep, int halo, int stride, uint it) {
+    uint anchor = tile_list[index];
+    if (anchor == ~0u) {
+        return;
+    }
+    uint lid = gl_LocalInvocationID.x;
+    lighting_tile_filter(anchor, int(lid & 7u), int(lid >> 3u), kstep, halo, stride, it);
+}
+
+void lighting_atrous_tiled() {
+    uint slot = gl_GlobalInvocationID.x;
+    uint lid = gl_LocalInvocationID.x;
+    uint stage = lighting_atrous_stage();
+    // Host binds this shader for levels 1-5 only. A wrong stage must not barrier.
+    if (stage < 1u || stage > 5u) {
+        return;
+    }
+    uint it = stage - 1u;
+    int kstep = 1 << int(it);
+    // Uniform: every workgroup tiles, or every workgroup stays scalar.
+    bool small = kstep <= 4;
+    if (slot == 0u) {
+        ckeys.key[LIGHTING_ATROUS_MODE_AT + stage - 1u] = 2u;
+    }
+    if (LIGHTING_DIRTY_ATROUS && LIGHTING_ATROUS_LISTS) {
+        uint bit = 0u;
+        if (slot < LIGHTING_CACHE_SLOTS && lighting_svgf_is_dirty(slot, stage)) {
+            bit = 1u;
+        }
+        uint sum = atrous_wg_sum(bit);
+        if (lid == 0u && sum != 0u) {
+            atomicAdd(ckeys.key[LIGHTING_ATROUS_DBIN_AT + (stage - 1u) * 64u + (gl_WorkGroupID.x & 63u)], sum);
+        }
+    }
+    // Steps 8 and 16 do not fit the 576-entry footprint. Every thread takes the
+    // scalar kernel. The branch is uniform, and it is before the tile barriers.
+    if (!small) {
+        lighting_tile_scalar(slot, it);
+        return;
+    }
+    // One thread, no barrier in the loop, no shared atomic. Lavapipe faults on both.
+    if (lid == 0u) {
+        uint wg = gl_WorkGroupID.x;
+        uint at = lighting_tile_bits_at(wg);
+        uint lo = ckeys.key[at];
+        uint hi = ckeys.key[at + 1u];
+        uint n = 0u;
+        for (uint i = 0u; i < 32u && n < 8u; i++) {
+            if ((lo & (1u << i)) != 0u) {
+                tile_list[n] = (wg << 6u) + i;
+                n++;
+            }
+        }
+        for (uint i = 0u; i < 32u && n < 8u; i++) {
+            if ((hi & (1u << i)) != 0u) {
+                tile_list[n] = (wg << 6u) + 32u + i;
+                n++;
+            }
+        }
+        for (uint i = n; i < 8u; i++) {
+            tile_list[i] = ~0u;
+        }
+        tile_n = n;
+    }
+    barrier();
+    lighting_tile_scalar(slot, it);
+}
+
+void main() {
+    lighting_atrous_tiled();
+}

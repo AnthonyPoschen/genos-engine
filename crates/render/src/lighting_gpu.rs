@@ -93,6 +93,8 @@ pub(crate) struct Lighting {
     pool: Handle,
     sets: [Handle; 2],
     pipes: [Handle; 9],
+    /// Levels 1-5 when `denoise_tiles` is on. The scalar a-trous pipe stays `pipes[8]`.
+    atrous_tile: Handle,
     gbuffer_pipe: Handle,
     gbuf: Buffer,
     work: Buffer,
@@ -266,6 +268,7 @@ impl Default for Lighting {
             pool: std::ptr::null_mut(),
             sets: [std::ptr::null_mut(); 2],
             pipes: [std::ptr::null_mut(); 9],
+            atrous_tile: std::ptr::null_mut(),
             gbuffer_pipe: std::ptr::null_mut(),
             gbuf: Buffer::empty(),
             work: Buffer::empty(),
@@ -547,6 +550,13 @@ impl Gpu {
             self.lighting.pipes[k] = self.make_compute_pipe(code, self.lighting.layout, LIGHTING_PASS_NAMES[k])?;
             self.note_pipeline_time(LIGHTING_PASS_NAMES[k], start);
         }
+        let start = Instant::now();
+        self.lighting.atrous_tile = self.make_compute_pipe(
+            LIGHTING_ATROUS_TILE_SPV,
+            self.lighting.layout,
+            "atrous-tile",
+        )?;
+        self.note_pipeline_time("atrous-tile", start);
         let start = Instant::now();
         self.frag_override = Some(GBUFFER_FRAG_SPV);
         self.vert_override = Some(GBUFFER_VERT_SPV);
@@ -1808,6 +1818,7 @@ impl Gpu {
             }
             let mut filter_round = 0u32;
             let mut atrous_i = 0usize;
+            let mut atrous_stage = 0u32;
             let mut atrous_ran = false;
             let mut picked = false;
             // The push constants the next pass sees (the gather and filter rounds add bits).
@@ -1834,7 +1845,8 @@ impl Gpu {
                     // this frame", so on frames with a change every stage read 4-7
                     // and the variance pass and first levels never ran.
                     // Five iterations are stages 0..6. Fewer iterations jump to the push.
-                    let stage = atrous_stages.get(atrous_i).copied().unwrap_or(0);
+                    atrous_stage = atrous_stages.get(atrous_i).copied().unwrap_or(0);
+                    let stage = atrous_stage;
                     atrous_i += 1;
                     atrous_ran = true;
                     let mut round_pc = pc;
@@ -1881,7 +1893,17 @@ impl Gpu {
                         k_pc.as_ptr() as *const c_void,
                     );
                 }
-                (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.pipes[pass]);
+                // Tiles bind their own pipeline for levels 1-5. Stages 0 and 6, and
+                // high (tiles off), stay on the scalar a-trous shader.
+                let pipe = if pass == 8
+                    && self.lighting.settings.denoiser.tiles
+                    && (1..=5).contains(&atrous_stage)
+                {
+                    self.lighting.atrous_tile
+                } else {
+                    self.lighting.pipes[pass]
+                };
+                (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
                 if pass == 7 && !compose_full {
                     (self.fns.cmd_dispatch_indirect)(
                         self.cmd,
@@ -2094,6 +2116,7 @@ impl Gpu {
                 .lighting
                 .pipes
                 .iter_mut()
+                .chain(std::iter::once(&mut self.lighting.atrous_tile))
                 .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))
             {
                 if !pipe.is_null() {
