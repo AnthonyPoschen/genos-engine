@@ -33,12 +33,12 @@ The crate is `crates/ui`, package `genos-ui`. It depends on `genos-scene` only (
 | --- | --- | --- |
 | Tree and layout | `crates/ui/src/layout.rs` | `Node`, `Sizing` (`Fit`, `Grow`, `Fixed`, `Percent`), `Direction`, `Align`, `Pad`, `Place`, `Space::{Screen, World}`, `layout`. Grow siblings share leftover space until they match. A sibling that is already larger stays there. A child with `Place` leaves the flow. A screen root ignores the camera. A world root projects with `viewport_uv`. |
 | Text | `crates/ui/src/text.rs` | `CELL_W` 12, `CELL_H` 16. Whitespace wrap. A 5×7 bitmap, ASCII, uppercased. `measure` and `blots` share the cell. |
-| Pointer panels | `crates/ui/src/panel.rs` | `lighting_frame`, `button_panel`, `Pointer`, `State`, `Paint`, `Frame`. Hit test walks items in reverse. `choose` picks pressed, hover, or idle. `State.focus` is the id of the last press. A miss sets `look_capture`. `PanelSlider` snaps to a step. Named steps live in `src/slider.rs`: even ticks, the step's own value, small names, a hover tip, wheel and arrow-key steps. Lamp sliders are notched at 1 meter. |
+| Pointer panels | `crates/ui/src/panel.rs` | `lighting_frame`, `button_panel`, `Pointer`, `State`, `Paint`, `Frame`. Hit test walks items in reverse. `choose` picks pressed, hover, or idle. `State.focus` is the id of the last press. A miss sets `look_capture`. `PanelSlider` snaps to a step. Named steps live in `src/slider.rs`: even ticks, the step's own value, small names, a hover tip, wheel and arrow-key steps. `PanelDropdown` (`src/dropdown.rs`) opens a six-row list over the panel. The wheel scrolls it. Arrow keys and Enter pick a choice. Lamp sliders are notched at 1 meter. |
 | Theme | `crates/ui/src/omarchy.rs` | `Palette` from `colors.toml` when the Omarchy `current` directory exists. A missing file keeps the previous palette. |
 | Profile graph | `crates/ui/src/profile.rs` | `profile_overlay` paints a readout and `Segment` lines. Pause, drag a 250 ms bucket, reset. This is the only chart. |
 | Damage | not on `gi-v2` | PR #5 adds `crates/ui/src/damage.rs`: `DamageTracker`, `MAX_DAMAGE` 8, merge gap 16 px, bounds outset to whole pixels, and `crates/ui/tests/damage.rs`. **requires #5.** |
 | Public API | `crates/ui/src/lib.rs` | `Look`, `Segment`, `Action`, `PictureMode`, and the re-exports above. `Frame` has no `damage` field until #5. |
-| Tests | `crates/ui/tests/` | `panel.rs`, `slider.rs`, `omarchy.rs`, `profile.rs`, `aa_camera.rs`. Layout tests live at the bottom of `layout.rs`. |
+| Tests | `crates/ui/tests/` | `panel.rs`, `slider.rs`, `dropdown.rs`, `omarchy.rs`, `profile.rs`, `aa_camera.rs`. Layout tests live at the bottom of `layout.rs`. |
 
 The frame that uses it:
 
@@ -65,7 +65,7 @@ What is missing, against the toolkits below:
 | Dial and knob | Absent. `genos-debug` `Knob` is a number in a script. |
 | Progress, linear and radial | Absent. The sun is a decorative disc, not a value. |
 | Text field | Absent. No caret, selection, multiline, or IME. The window has no commit string. |
-| Dropdown and selector | The picture mode is two buttons. No popup list. |
+| Dropdown and selector | `PanelDropdown` is a closed box and a scrollable list over the panel, with hover, the wheel, and arrow keys. `Kind::Dropdown` is still absent. |
 | List, tree, table | Absent. No virtualization. |
 | Tabs | Absent. |
 | Scroll | Absent. The Wayland axis event is discarded. |
@@ -1012,7 +1012,7 @@ The page-rect damage assertion **requires #5.**
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
-- **Deviation:** the closed box paints the selected choice. Opening uses Task 18's layer. A choice press emits `Select` and `Dismiss`. A radio group stays the always-visible selector.
+- **Deviation:** the closed box paints the selected choice. Opening uses Task 18's layer. A choice press emits `Select` and `Dismiss`. A radio group stays the always-visible selector. `PanelDropdown` is the list in use now: six visible rows, wheel scroll, hover, arrow keys, Enter, and Escape. It paints over the panel. `Kind::Dropdown` reuses that list. It does not grow a second one.
 - [ ] **Step 5: Commit** `ui: dropdown list on the popup layer`
 
 This is the selector. A radio group remains the always-visible selector.

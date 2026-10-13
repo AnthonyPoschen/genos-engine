@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use genos_scene::{Camera, Scene};
 
+use crate::dropdown;
 use crate::layout::{self, Direction, Item, Node, Pad, Place, Rect, Sizing, Space};
 use crate::omarchy::{self, Palette};
 use crate::slider::{self, SliderStep};
@@ -47,6 +48,10 @@ pub struct Pointer {
     pub key_dec: bool,
     /// Increase key pressed this frame (right or up).
     pub key_inc: bool,
+    /// Activate key pressed this frame (enter). Opens or picks the highlighted choice.
+    pub key_activate: bool,
+    /// Dismiss key pressed this frame (escape). Closes an open list.
+    pub key_dismiss: bool,
 }
 
 impl Default for Pointer {
@@ -58,6 +63,8 @@ impl Default for Pointer {
             wheel_y: 0.0,
             key_dec: false,
             key_inc: false,
+            key_activate: false,
+            key_dismiss: false,
         }
     }
 }
@@ -87,6 +94,10 @@ pub struct State {
     /// The current press missed the panel, so look capture stays on.
     look_hold: bool,
     focus: Option<u32>,
+    /// Dropdown whose list is open. The list paints over the rest of the panel.
+    open_drop: Option<u32>,
+    drop_highlight: usize,
+    drop_scroll: usize,
     /// True while the red box path is advancing.
     pub box_running: bool,
     /// Omarchy `current` directory. `None` uses the real state path.
@@ -107,6 +118,9 @@ impl Default for State {
             held: None,
             look_hold: false,
             focus: None,
+            open_drop: None,
+            drop_highlight: 0,
+            drop_scroll: 0,
             box_running: false,
             omarchy_current: None,
             palette: None,
@@ -242,6 +256,38 @@ pub struct PanelRow {
     pub label: String,
     pub buttons: Vec<PanelButton>,
     pub slider: Option<PanelSlider>,
+    /// Closed box in the row. The open list is not part of the row's layout.
+    pub dropdown: Option<PanelDropdown>,
+}
+
+/// A closed choice box. A press opens a scrollable list over the panel.
+///
+/// Arrow keys move the highlight. Enter picks it. Escape, or a press outside
+/// the list, closes it without a choice. The wheel scrolls the list. The row
+/// under the pointer is highlighted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PanelDropdown {
+    pub id: u32,
+    /// Selected value. The closed box shows the nearest choice name.
+    pub value: f64,
+    pub choices: Vec<SliderStep>,
+}
+
+impl PanelDropdown {
+    pub fn new(id: u32, value: f64, choices: Vec<SliderStep>) -> Self {
+        Self { id, value, choices }
+    }
+
+    fn selected_index(&self) -> usize {
+        slider::nearest_index(&self.choices, self.value).unwrap_or(0)
+    }
+
+    fn selected_name(&self) -> String {
+        self.choices
+            .get(self.selected_index())
+            .map(|choice| choice.name.clone())
+            .unwrap_or_default()
+    }
 }
 
 /// A slider on a panel row. A press anywhere on the track sets the value there and a
@@ -405,23 +451,65 @@ pub fn button_panel(
             ));
             children.push(label(at + 2, &bar.text, fill));
         }
+        if let Some(drop) = &item.dropdown {
+            children.push(dropdown_box(drop, palette));
+        }
         panel.children.push(row(at, children, fill));
     }
     let bars: Vec<&PanelSlider> = rows.iter().filter_map(|r| r.slider.as_ref()).collect();
+    let drops: Vec<&PanelDropdown> = rows.iter().filter_map(|r| r.dropdown.as_ref()).collect();
     let items = layout::layout(&panel, Space::Screen, viewport, Some(camera));
+    if state
+        .open_drop
+        .is_some_and(|id| drops.iter().all(|drop| drop.id != id))
+    {
+        state.open_drop = None;
+    }
     let hit = items
         .iter()
         .rev()
         .find(|item| item.rect.contains(pointer.x, pointer.y));
     let mut actions = Vec::new();
     let mut look_capture = false;
+    let mut consumed = false;
     if press_edge {
+        if let Some((drop, list, _)) = popup_geom(state, &drops, &items, viewport) {
+            if let Some(index) = dropdown::row_at(
+                list,
+                state.drop_scroll,
+                drop.choices.len(),
+                pointer.x,
+                pointer.y,
+            ) {
+                if let Some(choice) = drop.choices.get(index) {
+                    actions.push(Action::Select {
+                        id: drop.id,
+                        value: choice.value,
+                    });
+                }
+                state.open_drop = None;
+            } else if hit.map(|item| item.id) == Some(drop.id) {
+                state.open_drop = None;
+            } else {
+                state.open_drop = None;
+            }
+            state.dragging = false;
+            state.look_hold = false;
+            state.held = None;
+            state.focus = Some(drop.id);
+            consumed = true;
+        }
+    }
+    if !consumed && press_edge {
         if let Some(item) = hit {
             state.focus = Some(item.id);
             state.look_hold = false;
             state.sliding = None;
             state.held = None;
-            if bars.iter().any(|b| b.id == item.id) {
+            if let Some(drop) = drops.iter().find(|drop| drop.id == item.id) {
+                open_dropdown(state, drop);
+                state.dragging = false;
+            } else if bars.iter().any(|b| b.id == item.id) {
                 state.held = Some(item.id);
                 state.dragging = false;
             } else if let Some(action) = item.action {
@@ -432,6 +520,7 @@ pub fn button_panel(
             }
         } else {
             state.focus = None;
+            state.open_drop = None;
             state.dragging = false;
             state.sliding = None;
             state.look_hold = true;
@@ -449,6 +538,8 @@ pub fn button_panel(
                 actions.push(Action::Slide { id: bar.id, value });
             }
         }
+    } else if state.open_drop.is_some() {
+        drive_open_dropdown(state, &drops, &items, viewport, pointer, &mut actions);
     } else {
         let hovered = hit.and_then(|item| bars.iter().copied().find(|bar| bar.id == item.id));
         if let Some(bar) = hovered {
@@ -468,6 +559,14 @@ pub fn button_panel(
                 let delta = i32::from(pointer.key_inc) - i32::from(pointer.key_dec);
                 state.focus = Some(bar.id);
                 push_step(&mut actions, bar, delta);
+            }
+        }
+        if pointer.key_activate {
+            if let Some(drop) = state
+                .focus
+                .and_then(|id| drops.iter().find(|drop| drop.id == id))
+            {
+                open_dropdown(state, drop);
             }
         }
     }
@@ -492,6 +591,20 @@ pub fn button_panel(
                 palette,
             );
         }
+        if drops.iter().any(|drop| drop.id == item.id) {
+            push_chevron(&mut paints, item.rect, state.open_drop == Some(item.id));
+        }
+    }
+    if let Some((drop, list, scroll)) = popup_geom(state, &drops, &items, viewport) {
+        state.drop_scroll = scroll;
+        push_popup(
+            &mut paints,
+            &mut shown,
+            drop,
+            list,
+            scroll,
+            state.drop_highlight,
+        );
     }
     let mut tooltip = None;
     if let Some(item) = hit {
@@ -519,6 +632,225 @@ pub fn button_panel(
         actions,
         look_capture,
         tooltip,
+    }
+}
+
+const POPUP_ID: u32 = u32::MAX - 8192;
+const LIST_BG: [f32; 3] = [0.10, 0.11, 0.14];
+const LIST_HOVER: [f32; 3] = [0.30, 0.38, 0.48];
+const LIST_BORDER: [f32; 3] = [0.55, 0.62, 0.72];
+
+fn dropdown_box(drop: &PanelDropdown, palette: Option<Palette>) -> Node {
+    let width = dropdown_width(drop);
+    let mut node = Node::new(drop.id);
+    node.pad = Pad {
+        left: 6.0,
+        right: 16.0,
+        top: 4.0,
+        bottom: 4.0,
+    };
+    node.text = Some(drop.selected_name());
+    node.width = Sizing::fixed(width);
+    paint_looks(&mut node, control_looks(palette));
+    node
+}
+
+fn dropdown_width(drop: &PanelDropdown) -> f32 {
+    let text = drop
+        .choices
+        .iter()
+        .map(|choice| text::measure(&choice.name, None).0)
+        .fold(0.0_f32, f32::max);
+    (text + 22.0).clamp(160.0, 320.0)
+}
+
+fn open_dropdown(state: &mut State, drop: &PanelDropdown) {
+    let index = drop.selected_index();
+    let visible = drop.choices.len().min(dropdown::VISIBLE);
+    state.open_drop = Some(drop.id);
+    state.drop_highlight = index;
+    state.drop_scroll = dropdown::reveal(0, index, visible, drop.choices.len());
+    state.focus = Some(drop.id);
+}
+
+fn popup_geom<'a>(
+    state: &State,
+    drops: &[&'a PanelDropdown],
+    items: &[Item],
+    viewport: [f32; 2],
+) -> Option<(&'a PanelDropdown, Rect, usize)> {
+    let id = state.open_drop?;
+    let drop = drops.iter().find(|drop| drop.id == id)?;
+    let anchor = items.iter().find(|item| item.id == id)?.rect;
+    let (visible, scroll) = dropdown::window(drop.choices.len(), state.drop_scroll);
+    if visible == 0 {
+        return None;
+    }
+    let list = dropdown::place(anchor, visible, viewport[1]);
+    Some((drop, list, scroll))
+}
+
+fn drive_open_dropdown(
+    state: &mut State,
+    drops: &[&PanelDropdown],
+    items: &[Item],
+    viewport: [f32; 2],
+    pointer: Pointer,
+    actions: &mut Vec<Action>,
+) {
+    let Some((drop, list, scroll)) = popup_geom(state, drops, items, viewport) else {
+        return;
+    };
+    state.drop_scroll = scroll;
+    if pointer.key_dismiss {
+        state.open_drop = None;
+        return;
+    }
+    let count = drop.choices.len();
+    let (visible, _) = dropdown::window(count, state.drop_scroll);
+    let delta = i32::from(pointer.key_dec) - i32::from(pointer.key_inc);
+    if delta != 0 {
+        state.drop_highlight = dropdown::move_highlight(state.drop_highlight, delta, count);
+        state.drop_scroll =
+            dropdown::reveal(state.drop_scroll, state.drop_highlight, visible, count);
+    }
+    let on_list = list.contains(pointer.x, pointer.y);
+    let on_box = items
+        .iter()
+        .find(|item| item.id == drop.id)
+        .is_some_and(|item| item.rect.contains(pointer.x, pointer.y));
+    if on_list || on_box {
+        let notches = wheel_steps(pointer.wheel_y);
+        if notches != 0 {
+            state.drop_scroll = dropdown::scroll_by(state.drop_scroll, notches, visible, count);
+        }
+    }
+    if let Some(index) = dropdown::row_at(list, state.drop_scroll, count, pointer.x, pointer.y) {
+        state.drop_highlight = index;
+    }
+    if pointer.key_activate {
+        if let Some(choice) = drop.choices.get(state.drop_highlight) {
+            actions.push(Action::Select {
+                id: drop.id,
+                value: choice.value,
+            });
+            state.open_drop = None;
+        }
+    }
+}
+
+fn push_chevron(out: &mut Vec<Paint>, rect: Rect, open: bool) {
+    let x = rect.x + rect.w - 12.0;
+    let mid = rect.y + rect.h * 0.5;
+    if open {
+        push_rect(
+            out,
+            Rect {
+                x: x + 3.0,
+                y: mid - 5.0,
+                w: 2.0,
+                h: 2.0,
+            },
+            TEXT,
+        );
+        push_rect(
+            out,
+            Rect {
+                x: x + 2.0,
+                y: mid - 3.0,
+                w: 4.0,
+                h: 2.0,
+            },
+            TEXT,
+        );
+        push_rect(
+            out,
+            Rect {
+                x,
+                y: mid - 1.0,
+                w: 8.0,
+                h: 2.0,
+            },
+            TEXT,
+        );
+    } else {
+        push_rect(
+            out,
+            Rect {
+                x,
+                y: mid - 1.0,
+                w: 8.0,
+                h: 2.0,
+            },
+            TEXT,
+        );
+        push_rect(
+            out,
+            Rect {
+                x: x + 2.0,
+                y: mid + 1.0,
+                w: 4.0,
+                h: 2.0,
+            },
+            TEXT,
+        );
+        push_rect(
+            out,
+            Rect {
+                x: x + 3.0,
+                y: mid + 3.0,
+                w: 2.0,
+                h: 2.0,
+            },
+            TEXT,
+        );
+    }
+}
+
+fn push_popup(
+    paints: &mut Vec<Paint>,
+    shown: &mut Vec<Shown>,
+    drop: &PanelDropdown,
+    list: Rect,
+    scroll: usize,
+    highlight: usize,
+) {
+    push_rect(paints, list, LIST_BG);
+    push_border(paints, list, LIST_BORDER);
+    let (visible, scroll) = dropdown::window(drop.choices.len(), scroll);
+    for row in 0..visible {
+        let index = scroll + row;
+        let Some(choice) = drop.choices.get(index) else {
+            break;
+        };
+        let rect = Rect {
+            x: list.x + 1.0,
+            y: list.y + row as f32 * dropdown::ROW_H,
+            w: (list.w - 2.0).max(0.0),
+            h: dropdown::ROW_H,
+        };
+        let hot = index == highlight;
+        let background = if hot { LIST_HOVER } else { LIST_BG };
+        if hot {
+            push_rect(paints, rect, background);
+        }
+        for blot in text::blots(&choice.name, rect.x + 6.0, rect.y + 2.0, rect.w - 8.0) {
+            push_blot(paints, blot, TEXT);
+        }
+        let look = Look {
+            background,
+            border: LIST_BORDER,
+        };
+        shown.push(Shown {
+            id: POPUP_ID + index as u32,
+            rect,
+            look,
+            idle: Look {
+                background: LIST_BG,
+                border: LIST_BORDER,
+            },
+            text: Some(choice.name.clone()),
+        });
     }
 }
 
@@ -698,7 +1030,8 @@ pub fn apply_lamp(scene: &mut Scene, action: Action) {
         Action::SetAntialias(_)
         | Action::ToggleBoxRun
         | Action::Press(_)
-        | Action::Slide { .. } => {}
+        | Action::Slide { .. }
+        | Action::Select { .. } => {}
     }
 }
 

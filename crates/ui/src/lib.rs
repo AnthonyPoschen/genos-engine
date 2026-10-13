@@ -7,6 +7,7 @@
 //! lamp with notched sliders. On Omarchy, the lighting panel uses the current
 //! theme colors.
 
+mod dropdown;
 mod layout;
 pub mod omarchy;
 mod panel;
@@ -60,12 +61,14 @@ pub enum Action {
     Press(u32),
     /// A [`PanelSlider`] held or clicked to `value` (already snapped to its step).
     Slide { id: u32, value: f64 },
+    /// A choice picked from an open [`crate::PanelDropdown`].
+    Select { id: u32, value: f64 },
 }
 
 pub use layout::{layout, Align, Direction, Node, Pad, Place, Rect, Sizing, Space};
 pub use panel::{
     apply_frame_action, apply_lamp, button_panel, lighting_frame, Frame, Paint, PanelButton,
-    PanelRow, PanelSlider, Pointer, Shown, State,
+    PanelDropdown, PanelRow, PanelSlider, Pointer, Shown, State,
 };
 pub use profile::{
     inspect_region, profile_overlay, remember_frame, FrameSample, OpenFrame, PlotScale,

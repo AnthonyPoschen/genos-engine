@@ -20,6 +20,7 @@ fn rows(value: f64, step: f64) -> Vec<PanelRow> {
             text: format!("{value:.1} H"),
             steps: Vec::new(),
         }),
+        dropdown: None,
     }]
 }
 
@@ -115,6 +116,7 @@ fn named_rows(bar: PanelSlider) -> Vec<PanelRow> {
         label: "Quality".into(),
         buttons: Vec::new(),
         slider: Some(bar),
+        dropdown: None,
     }]
 }
 

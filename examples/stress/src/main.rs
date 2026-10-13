@@ -1037,6 +1037,7 @@ fn row(label: &str, buttons: Vec<PanelButton>) -> PanelRow {
         label: label.into(),
         buttons,
         slider: None,
+        dropdown: None,
     }
 }
 
@@ -1060,6 +1061,7 @@ fn knob_rows(stage: &Stage) -> Vec<PanelRow> {
                     text: k.text.clone(),
                     steps: Vec::new(),
                 }),
+                dropdown: None,
             })
         })
         .collect()
