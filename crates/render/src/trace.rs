@@ -612,6 +612,7 @@ mod tests {
             lights,
             ceiling: None,
             sky: None,
+            lighting: genos_scene::LightingSettings::default(),
         }
     }
 

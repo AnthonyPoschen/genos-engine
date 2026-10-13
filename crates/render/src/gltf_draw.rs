@@ -382,6 +382,7 @@ mod tests {
             lights: Vec::new(),
             ceiling: None,
             sky: None,
+            lighting: genos_scene::LightingSettings::default(),
         });
         let before = world.objects.len();
         let mut place = identity_pose();

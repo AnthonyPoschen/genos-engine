@@ -2,10 +2,11 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-use rhai::{Dynamic, Engine};
+use rhai::{Dynamic, Engine, EvalAltResult};
 
 use genos_math::Vec3;
 
+use crate::lighting::LightingSettings;
 use crate::types::{Ceiling, Floor, Light, Scene, Shape, Solid, Wall, MAX_LAMPS, MAX_OCCLUDERS};
 
 /// Load the shipped scene file through the Rhai host.
@@ -222,6 +223,39 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
         );
     }
 
+    {
+        let builder = builder.clone();
+        engine.register_fn(
+            "lighting_preset",
+            move |name: &str| -> Result<(), Box<EvalAltResult>> {
+                let preset = crate::LightingPreset::parse(name)
+                    .ok_or_else(|| format!("unknown lighting preset {name}"))?;
+                builder.borrow_mut().lighting = LightingSettings::preset(preset);
+                Ok(())
+            },
+        );
+    }
+    {
+        let builder = builder.clone();
+        engine.register_fn("lighting", move |text: &str| -> Result<(), Box<EvalAltResult>> {
+            let mut settings = builder.borrow().lighting.clone();
+            for raw in text.split(['\n', ';']) {
+                let line = raw.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let Some((key, value)) = line.split_once('=') else {
+                    return Err(format!("use key=value, got {line}").into());
+                };
+                settings
+                    .set_key(key.trim(), value.trim())
+                    .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
+            }
+            builder.borrow_mut().lighting = settings;
+            Ok(())
+        });
+    }
+
     engine.run(source).map_err(|err| err.to_string())?;
     let built = builder.borrow();
     let floor = built.floor.clone().ok_or("script placed no floor")?;
@@ -267,6 +301,7 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
         lights: built.lights.clone(),
         ceiling: built.ceiling.clone(),
         sky: None,
+        lighting: built.lighting.clone(),
     })
 }
 
@@ -287,4 +322,5 @@ struct Builder {
     solids: Vec<Solid>,
     lights: Vec<Light>,
     ceiling: Option<Ceiling>,
+    lighting: LightingSettings,
 }

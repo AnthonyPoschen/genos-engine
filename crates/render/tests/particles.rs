@@ -38,6 +38,7 @@ fn room(lamp: [f32; 3]) -> Scene {
         }],
         ceiling: None,
         sky: None,
+        lighting: genos_scene::LightingSettings::default(),
     }
 }
 

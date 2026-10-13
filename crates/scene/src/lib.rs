@@ -5,9 +5,15 @@
 
 mod camera;
 mod codimation;
+mod lighting;
 mod script;
 mod types;
 
+pub use lighting::{
+    AmbientMode, AmbientSettings, BounceSettings, DenoiserSettings, DirectSettings, GiSettings,
+    GpuBuckets, LightingPreset, LightingSettings, ProbeSettings, ShadowFilter, ShadowSettings,
+    WorldCacheSettings, LIGHTING_BOUNCES_UNLIMITED,
+};
 pub use camera::{
     look_direction, transform_point, update, view_proj, viewport_uv, Actions, Camera,
     CAMERA_FAR, CAMERA_HEIGHT, CAMERA_NEAR, PITCH_LIMIT,

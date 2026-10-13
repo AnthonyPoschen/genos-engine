@@ -443,6 +443,7 @@ impl Building {
             lights: Vec::new(),
             ceiling: None,
             sky: None,
+            lighting: genos_scene::LightingSettings::default(),
         };
         let mut building = Self {
             scene,

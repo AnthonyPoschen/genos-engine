@@ -1,6 +1,7 @@
 use genos_physics::Body;
 use genos_scene::{
-    update, Actions, Camera, Codimation, Easing, Floor, Light, Scene, Shape, Solid, Vec3, Wall,
+    update, Actions, Camera, Codimation, Easing, Floor, Light, LightingSettings, Scene, Shape, Solid,
+    Vec3, Wall,
 };
 
 const SEGMENT_SECONDS: f32 = 1.0;
@@ -70,6 +71,7 @@ fn room(blocker: bool) -> Scene {
         }],
         ceiling: None,
         sky: None,
+        lighting: LightingSettings::default(),
     }
 }
 

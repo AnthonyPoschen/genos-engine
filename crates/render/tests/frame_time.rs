@@ -81,6 +81,7 @@ fn equal_elapsed_time_matches_across_frame_schedules() {
         lights: Vec::new(),
         ceiling: None,
         sky: None,
+        lighting: genos_scene::LightingSettings::default(),
     };
     let mouse = Actions {
         capture_click: true,

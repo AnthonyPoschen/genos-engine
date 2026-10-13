@@ -1,5 +1,7 @@
 use genos_math::Vec3;
 
+use crate::LightingSettings;
+
 /// Share of the incoming light a white painted surface sends back out.
 pub const PAINT_ALBEDO: f32 = 0.8;
 /// Reflectance used when a material does not set one: white paint.
@@ -164,6 +166,9 @@ pub struct Scene {
     pub ceiling: Option<Ceiling>,
     /// None: a ray that leaves the scene brings nothing back, and the background is black.
     pub sky: Option<Sky>,
+    /// Lighting features, quality knobs, and the active preset. A scene file sets
+    /// this; the renderer applies it each frame. The default is preset `high`.
+    pub lighting: LightingSettings,
 }
 
 impl Scene {

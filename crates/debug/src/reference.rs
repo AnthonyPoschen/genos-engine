@@ -738,6 +738,7 @@ mod tests {
             lights,
             ceiling: None,
             sky,
+            lighting: genos_scene::LightingSettings::default(),
         }
     }
 
@@ -764,6 +765,7 @@ mod tests {
                 color: w,
             }),
             sky: None,
+            lighting: genos_scene::LightingSettings::default(),
         }
     }
 
