@@ -58,6 +58,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - 1-in-16 push refresh floor (S78B); kept-hit bounce refreshed with its re-trace (S78D); held strata keep exact directions (S78K).
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
+- A small sun step (departure 14, [SUN](experiments/SUN-small-sun-step.md)) amortises indirect over bands. Schied et al., Spatiotemporal Variance-Guided Filtering, HPG 2017, and Wright et al., Lumen, SIGGRAPH 2022, recompute every pixel every frame. One compose dispatch writes direct everywhere and walks probes on the current band. Neighbour blend is the existing compose weights, not a per-lamp irradiance layer. After a point lamp holds, four frames shade every kept stratum. That skips the S69C halfway early-out for those frames.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
 - Flat ambient when bounce is 0 or GI is off is a constant, a classic hemisphere (sky toward the normal, ground away from it), a sun-height day lerp, or a time-of-day curve (night, dawn, noon, dusk). The curve also scales sky colour relative to its noon key. No new GI algorithm. Bounce 0 records no GI dispatch. Bounce 1 records the probe passes and not the cache-to-cache passes. Bounce 2 records those passes. The count does not add a bounce algorithm.
 
@@ -173,6 +174,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [DUMP](experiments/DUMP-gpu-dump-tool.md) | 2026-10-12 | Debug dump of GPU data from two consecutive frames per component (direct, bounce, coarse/fine WRC, probe resul | in progress | none yet |
 | [RAYCEIL](experiments/RAYCEIL-world-cache-need-ray-ceilings.md) | 2026-10-12 | World-cache cells stop at IC error bound instead of fixed 128 samples | queued | none |
 | [QUIET](experiments/QUIET-quiet-paths-compose-filter-compact.md) | 2026-10-12 | Compose redraws 8×8 blocks whose direct, probe SH, or filtered field changed | pushed (compose only; perf on the owner GPU) | this commit |
+| [SUN](experiments/SUN-small-sun-step.md) | 2026-10-13 | Small sun step: one compose walks the band; direct every frame; four-frame catch-up | 4070 compose rose 2.78 to 3.17 before the single pass; retest decides merge | this change |
 | [LSMOOTH](experiments/LSMOOTH-lighter-smoothing.md) | 2026-10-12 | Lighter smoothing | dropped (Anthony) | none |
 
 # Architecture and component notes (history kept as written)

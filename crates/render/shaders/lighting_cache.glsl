@@ -672,8 +672,19 @@ void lighting_ls_note() {
     ckeys.key[at + 1u] = floatBitsToUint(lighting_global_light());
     ckeys.key[LIGHTING_LS_AT + 2u * LIGHTING_LS_RING] = f;
 }
+#ifdef GENOS_SUN_SHADER
+bool lighting_sun_small();
+float lighting_sun_committed_light();
+#endif
 // The global sun/sky light as of the last round (-1 when unknown).
+// A small sun step (GENOS_SUN_SHADER only) keeps the committed value, so one
+// tick does not rescale every texel. The default compose does not compile this.
 float lighting_ls_now() {
+#ifdef GENOS_SUN_SHADER
+    if (lighting_sun_small()) {
+        return max(lighting_sun_committed_light(), 0.0);
+    }
+#endif
     uint g = ckeys.key[LIGHTING_LS_AT + 2u * LIGHTING_LS_RING];
     uint ga = LIGHTING_LS_AT + 2u * (g % LIGHTING_LS_RING);
     return (g != 0u && ckeys.key[ga] == g) ? uintBitsToFloat(ckeys.key[ga + 1u]) : -1.0;
@@ -2925,6 +2936,110 @@ bool lighting_svgf_active(uint s) {
     uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + s].z);
     return lighting_sc_pixel_fresh(shown, 30);
 }
+#ifdef GENOS_SUN_SHADER
+// Sun amortise words, after the a-trous meta (391 words). The default compose
+// does not compile this block, so its SPIR-V stays the gi-v2 compose.
+const uint LIGHTING_SUN_META = 391u;
+const uint LIGHTING_SUN_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS + LIGHTING_SUN_META;
+const uint LIGHTING_SUN_SMALL = 1u;
+bool lighting_stratum_held(uint probe);
+
+uint lighting_sun_flags() {
+    return ckeys.key[LIGHTING_SUN_AT + 1u];
+}
+bool lighting_sun_small() {
+    return (lighting_sun_flags() & LIGHTING_SUN_SMALL) != 0u;
+}
+uint lighting_sun_n() {
+    return max((lighting_sun_flags() >> 8u) & 255u, 1u);
+}
+uint lighting_sun_slice_id() {
+    return (lighting_sun_flags() >> 16u) & 255u;
+}
+// This frame's band. The nearest probe row, or the page column of the surface
+// cell (page_x = cell.x >> 3, the same split as lighting_sun_slot_slice, at the
+// one texel size). A pixel on either walks probes. The rest reuse stored bounce.
+bool lighting_sun_pixel_band(uvec2 p, vec3 pos, vec3 n) {
+    uint bands = lighting_sun_n();
+    uint slice = lighting_sun_slice_id();
+    float tile = float(max(pc.params.y, 1u));
+    float gy = (float(p.y) + 0.5) / tile - 0.5;
+    int row = int(floor(gy + 0.5));
+    int rows = int(max(pc.dims.w, 1u));
+    row = clamp(row, 0, rows - 1);
+    if (uint(row) % bands == slice) {
+        return true;
+    }
+    uint axd = lighting_axis(n);
+    uint ax = axd >> 1u;
+    int cell_x = int(floor(pos[(ax + 1u) % 3u] / LIGHTING_SC_TEXEL));
+    uint page_x = uint(cell_x) >> 3u;
+    return page_x % bands == slice;
+}
+vec3 lighting_sun_committed_dir() {
+    return vec3(uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 2u]), uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 3u]), uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 4u]));
+}
+float lighting_sun_committed_light() {
+    return uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 5u]);
+}
+float lighting_sun_live_light() {
+    return uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 6u]);
+}
+bool lighting_catch_up() {
+    return ckeys.key[LIGHTING_SUN_AT + 7u] != 0u;
+}
+bool lighting_sun_probe_slice(uint probe) {
+    uint cols = max(pc.dims.z, 1u);
+    return (probe / cols) % lighting_sun_n() == lighting_sun_slice_id();
+}
+bool lighting_sun_slot_slice(uint slot) {
+    ivec4 c = lighting_sc_cell(slot);
+    uint page_x = uint(c.x) >> 3u;
+    return page_x % lighting_sun_n() == lighting_sun_slice_id();
+}
+bool lighting_sun_hold_kept(uint h) {
+    if (!lighting_sun_small()) {
+        return false;
+    }
+    uint rays = lighting_rays();
+    uint pk = h / rays / LIGHTING_STRATA;
+    if (lighting_sun_probe_slice(pk) || !lighting_stratum_held(pk)) {
+        return false;
+    }
+    if (floatBitsToUint(work.v[lighting_probe_at(pk) + 1u].w) == lighting_frame() + LIGHTING_STRATA) {
+        return false;
+    }
+    return floatBitsToUint(work.v[lighting_kept_light_at() + h / 4u][h % 4u]) != 0u;
+}
+bool lighting_sun_hold_fill(uint h) {
+    if (!lighting_sun_small()) {
+        return false;
+    }
+    uint pk = h / lighting_rays() / LIGHTING_STRATA;
+    if (lighting_sun_probe_slice(pk)) {
+        return false;
+    }
+    return floatBitsToUint(work.v[lighting_fill_light_at() + h / 4u][h % 4u]) != 0u;
+}
+// One thread records that this dispatch took the sun path. Bit 0: a small sun
+// step. Bit 1: the corner catch-up. The slice id is the band this frame shades
+// with the live sun. The pads are otherwise unused (unfilled mask alignment).
+void lighting_sun_mark() {
+    if (gl_GlobalInvocationID.x != 0u || gl_GlobalInvocationID.y != 0u || gl_GlobalInvocationID.z != 0u) {
+        return;
+    }
+    uint mark = 0u;
+    if (lighting_sun_small()) {
+        mark |= 1u;
+    }
+    if (lighting_catch_up()) {
+        mark |= 2u;
+    }
+    gstats.unfilled_pad0 = mark;
+    gstats.unfilled_pad1 = lighting_sun_slice_id();
+}
+#endif
+
 // Layer-1 input: rgb, luminance variance (-1 unknown), mask weight.
 vec4 lighting_svgf_in(uint s, out float var) {
     vec4 own = cache.v[3u * s + 2u];
@@ -2939,6 +3054,13 @@ vec4 lighting_svgf_in(uint s, out float var) {
     // times under a moving sun held different scales, and the luminance stop
     // kept those groups apart (camouflage plateaus at dawn).
     float g = lighting_sc_sun_gain(s);
+#ifdef GENOS_SUN_SHADER
+    // The page column catching up to the live sun. The rest keep the committed scale.
+    if (lighting_sun_small() && lighting_sun_slot_slice(s)) {
+        float c = max(lighting_sun_committed_light(), 1.0e-4);
+        g *= clamp(lighting_sun_live_light() / c, 0.0, LIGHTING_LS_MAX);
+    }
+#endif
     if (!wrc) {
         vec4 eb = cache.v[LIGHTING_SC_EST_AT + 2u * s + 1u];
         if (eb.x > 0.0 && t >= 4.0) {
@@ -3728,6 +3850,12 @@ void lighting_shadow_epochs() {
         uint at = LIGHTING_SHADOW_EPOCH_AT + 8u * i;
         vec4 last = vec4(uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]), uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]));
         vec4 now = vec4(l.pos.xyz, l.color.w);
+#ifdef GENOS_SUN_SHADER
+        // A small sun step keeps this epoch. Pixels still trace the live sun.
+        if (lighting_sun_small() && l.pos.w > 0.5) {
+            continue;
+        }
+#endif
         // S75: colour too (the texel direct-light cache reads the epoch).
         uint col = lighting_hash(floatBitsToUint(l.color.x) ^ lighting_hash(floatBitsToUint(l.color.y) ^ lighting_hash(floatBitsToUint(l.color.z))));
         bool bump = all || any(notEqual(last, now)) || ckeys.key[at + 5u] != col;

@@ -46,10 +46,18 @@ fn lighting_pipelines_build_quickly() {
         .iter()
         .filter(|(name, _)| name.starts_with("lighting"))
         .collect();
+    assert!(
+        lighting.iter().all(|(name, _)| *name != "lighting sun compose"),
+        "the sun compose is built on the first small step, not at startup: {times:?}"
+    );
+    // Nine compute names in LIGHTING_PASS_NAMES, plus "lighting gbuffer".
+    // "atrous-plain" is timed, but its name does not start with "lighting",
+    // so it is outside this count. "lighting sun compose" is built on the
+    // first small sun step and is excluded by the assert above.
     assert_eq!(
         lighting.len(),
         10,
-        "every GI v2 pipeline is timed: {times:?}"
+        "nine compute pipelines plus the gbuffer; atrous-plain is not prefixed lighting: {times:?}"
     );
     let limit = pipeline_limit();
     for (name, took) in &times {
