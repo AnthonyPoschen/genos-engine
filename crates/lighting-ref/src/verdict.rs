@@ -209,6 +209,13 @@ pub fn judge(input: Judge<'_>) -> Judgement {
     if verdict == Verdict::Pass {
         reasons.push("every gated metric is under its band".to_string());
     }
+    // Cold-start past its budget is reported. It does not change the picture verdict.
+    if let Some(row) = rows
+        .iter()
+        .find(|row| row.id == MetricId::ColdFrames && row.verdict != Verdict::Pass)
+    {
+        reasons.push(row.reason.clone());
+    }
     Judgement {
         verdict,
         rows,
@@ -319,20 +326,29 @@ fn judge_one(id: MetricId, input: &Judge<'_>) -> MetricRow {
 
 /// Frames until a fresh renderer crossed the settle line.
 ///
-/// A count that is the cap, with `cold_settled` false, is a renderer issue.
-/// The blurred error and the luminance ratio still score the picture at the
-/// cap. The cap is not a knob this metric raises.
+/// The budget is `fail.cold_frames` (180). The picture settle cap is longer.
+/// Crossing after the budget, or missing the line, is a renderer-issue flag.
+/// That flag does not change the picture verdict.
 fn judge_cold(input: &Judge<'_>) -> MetricRow {
+    let budget = input.config.fail_of(MetricId::ColdFrames.key());
     let frames = input.metrics.cold_frames;
     let (verdict, reason) = match frames {
-        Some(frames) if input.metrics.cold_settled => (
+        Some(frames) if input.metrics.cold_settled && frames <= budget => (
             Verdict::Pass,
-            format!("cold start settled at frame {frames:.0}. The settle cap was not raised"),
+            format!(
+                "cold start settled at frame {frames:.0}, inside the {budget:.0} frame budget. The picture settle cap is separate"
+            ),
+        ),
+        Some(frames) if input.metrics.cold_settled => (
+            Verdict::NeedsHuman,
+            format!(
+                "renderer issue: cold start settled at frame {frames:.0}, past the {budget:.0} frame budget. The picture is scored on its own settle"
+            ),
         ),
         Some(frames) => (
             Verdict::NeedsHuman,
             format!(
-                "renderer issue: cold start did not settle within {frames:.0} frames. The picture at the cap is scored by the blurred error and the luminance ratio. The settle cap was not raised"
+                "renderer issue: cold start did not settle within {frames:.0} frames (budget {budget:.0}). The picture is scored on its own settle, not at this budget"
             ),
         ),
         None => (Verdict::Pass, "cold start was not measured".to_string()),
@@ -345,7 +361,7 @@ fn judge_cold(input: &Judge<'_>) -> MetricRow {
             .and_then(|baseline| baseline.get(MetricId::ColdFrames)),
         verdict,
         reason,
-        gates: true,
+        gates: false,
     }
 }
 
@@ -882,9 +898,9 @@ mod tests {
 
     #[test]
     fn a_cold_start_that_settles_stays_a_pass_and_one_that_does_not_is_a_renderer_issue() {
-        // Room-a alone on the 4070: ratio 0.46, 0.61, 0.69, 0.75 at frames
-        // 1, 60, 120, 180. The cap stays 180. The picture at the cap still
-        // fails the luminance gate. The cold-start row names the renderer.
+        // Hell on the 4070 cold run moved from ratio 0.49 at frame 1 to 0.76
+        // at frame 227. The picture keeps settling past the 180 frame budget.
+        // The cold-start row names the renderer and does not change the picture.
         let mut settled = with_scores(0.20, 0.04, 1.02);
         settled.cold_frames = Some(40.0);
         settled.cold_settled = true;
@@ -895,26 +911,71 @@ mod tests {
             .iter()
             .find(|row| row.id == MetricId::ColdFrames)
             .unwrap();
+        assert!(!row.gates);
         assert_eq!(row.verdict, Verdict::Pass);
         assert!(row.reason.contains("settled at frame 40"), "{}", row.reason);
+        assert!(
+            !ok.reasons
+                .iter()
+                .any(|reason| reason.contains("renderer issue")),
+            "{:?}",
+            ok.reasons
+        );
+
+        let mut slow = with_scores(0.20, 0.04, 1.02);
+        slow.cold_frames = Some(227.0);
+        slow.cold_settled = true;
+        let slow_picture = judged(&slow, None, 64, 0.31);
+        assert_eq!(
+            slow_picture.verdict,
+            Verdict::Pass,
+            "{:?}",
+            slow_picture.reasons
+        );
+        assert!(slow_picture
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("renderer issue") && reason.contains("227")));
 
         let mut open = with_scores(0.20, 0.04, 1.02);
-        open.cold_frames = Some(180.0);
+        open.cold_frames = Some(600.0);
         open.cold_settled = false;
         let flagged = judged(&open, None, 64, 0.31);
-        assert_eq!(
-            flagged.verdict,
-            Verdict::NeedsHuman,
-            "{:?}",
-            flagged.reasons
-        );
+        assert_eq!(flagged.verdict, Verdict::Pass, "{:?}", flagged.reasons);
         assert!(flagged
             .reasons
             .iter()
             .any(|reason| reason.contains("renderer issue")));
+        let cold_row = flagged
+            .rows
+            .iter()
+            .find(|row| row.id == MetricId::ColdFrames)
+            .unwrap();
+        assert_eq!(cold_row.verdict, Verdict::NeedsHuman);
+        assert!(!cold_row.gates);
+
+        // Hell's settled picture sits in the band. A slow cold start stays a flag.
+        let mut hell = with_scores(0.02, 0.123, 0.91);
+        hell.cold_frames = Some(227.0);
+        hell.cold_settled = true;
+        let hell_picture = judged(&hell, None, 64, 0.04);
+        assert_eq!(
+            hell_picture.verdict,
+            Verdict::NeedsHuman,
+            "{:?}",
+            hell_picture.reasons
+        );
+        assert!(hell_picture
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("renderer issue")));
+        assert!(hell_picture
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("blurred relative") || reason.contains("luminance")));
 
         let mut room = with_scores(0.40, 0.25, 0.75);
-        room.cold_frames = Some(180.0);
+        room.cold_frames = Some(600.0);
         room.cold_settled = false;
         let failed = judged(&room, None, 64, 0.08);
         assert_eq!(failed.verdict, Verdict::Fail, "{:?}", failed.reasons);

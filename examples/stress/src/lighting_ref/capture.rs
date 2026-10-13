@@ -433,7 +433,7 @@ fn shot_note(
     } else if let Some(frames) = cold.frames {
         if cold.settled {
             return format!(
-                "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}. Cold start settled at frame {frames:.0}.{tail}{captures}",
+                "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}. Cold start settled at frame {frames:.0}. The 180 frame cold-start budget is separate from this picture settle.{tail}{captures}",
                 schedule::format_dt(plan.fixed_dt),
                 plan.warmup_frames,
                 format_mean(blur_rel),
@@ -441,7 +441,7 @@ fn shot_note(
             );
         }
         return format!(
-            "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}. Renderer issue: cold start did not settle within {frames:.0} frames. The settle cap was not raised.{tail}{captures}",
+            "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}. Renderer issue: cold start did not cross the settle line within {frames:.0} frames. The picture is scored on its own settle. The 180 frame cold-start budget was not raised.{tail}{captures}",
             schedule::format_dt(plan.fixed_dt),
             plan.warmup_frames,
             format_mean(blur_rel),

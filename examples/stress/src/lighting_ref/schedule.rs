@@ -12,8 +12,10 @@ pub const DEFAULT_DT: f32 = 1.0 / 60.0;
 /// Blurred relative luminance that ends a metric settle, before the
 /// reference-noise floor. Under the pass band of that blurred error.
 pub const DEFAULT_SETTLE_THRESHOLD: f64 = 0.05;
-/// Settle frames before a metric settle stops anyway.
-pub const DEFAULT_SETTLE_CAP: u32 = 180;
+/// Picture-settle frames before a metric settle stops anyway.
+/// Cold-start frames use their own budget (`fail.cold_frames`, 180). A slow
+/// cold start does not end the picture settle at that budget.
+pub const DEFAULT_SETTLE_CAP: u32 = 600;
 /// Seconds in one day at sun speed 1. Matches the stress binary's default.
 pub const DAY_SECONDS: f32 = 120.0;
 pub const SUN_SPEED: f32 = 1.0;
@@ -587,6 +589,13 @@ mod tests {
         assert_eq!(owner, lavapipe);
         assert!((owner.fixed_dt - DEFAULT_DT).abs() < 1.0e-6);
         assert_eq!(owner.capture_offsets, vec![1, 2, 4, 8]);
+        assert_eq!(
+            owner.settle,
+            SettleMode::Metric {
+                threshold: DEFAULT_SETTLE_THRESHOLD,
+                cap: 600,
+            }
+        );
     }
 
     #[test]
