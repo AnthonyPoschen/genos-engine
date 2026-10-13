@@ -42,7 +42,7 @@ The S78S isolate toggles (`GENOS_LIGHTING_TOGGLES`: `freeze_cache`, `direct_only
 | Preset | What it spends | Cost, structural |
 |---|---|---|
 | `potato` | Direct, hard shadows, flat ambient `(0.42, 0.44, 0.48)` at intensity 0.65. No GI. Emissive stays on | Direct and compose only. No ~368 MB cache and no key table. Shadow rays stay inside the direct pass. The hangar look: direct, shadows, ambient fill |
-| `low` | Probe GI, 16 rays, 32 px tile, refresh every 2 frames, one bounce, budget shift 2 (budgets / 4), shadow cell 0.25 m, max 4 lights, 1 a-trous iteration stored but the filter does not run (no surface cache), prefill off, day ambient at 0.35 | Probe GI. Cache rays do not read the cache (one bounce). No surface cache, no prefill |
+| `low` | Probe GI, 16 rays, 32 px tile, refresh every 2 frames, one bounce, budget shift 2 (budgets / 4), shadow cell 0.25 m, max 4 lights, 1 a-trous iteration stored but the filter does not run (no surface cache), prefill off, day ambient at 0.35. Gather bins `probe_rays`, not a fixed 64 | Probe GI. Cache rays do not read the cache (one bounce). No surface cache, no prefill |
 | `medium` | Surface cache, 32 rays, two bounces, budget shift 1 (budgets / 2), max 8 lights, 3 a-trous iterations, prefill, day ambient | Surface cache and two bounces, half the ray budget |
 | `high` | Every feature on, unlimited bounces, 64 rays, tile from the picture height, refresh every frame, shadow cell 0.125 m, max lights unlimited, 5 a-trous iterations, compose reuse, sky, emissive, prefill. Day ambient is the fallback for when GI is turned off | The tuned path. Same dispatches as before this struct existed |
 
