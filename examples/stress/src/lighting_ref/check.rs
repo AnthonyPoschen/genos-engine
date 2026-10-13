@@ -199,11 +199,11 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
         checkpoints,
         skipped,
         notes,
+        unscored_fails: true,
     };
     let verdict = report.verdict();
     report::write_report(&out, &report)?;
     let code = policy::exit_code(ExitFacts {
-        lavapipe_small: opts.mode == "lavapipe-small",
         self_test_ok: self_test.ok,
         scene_verdict: verdict,
         scored: scored > 0,

@@ -1,16 +1,14 @@
 //! Exit status of one check.
 //!
-//! 0 is a pass. 1 is a fail: the self-test missed, or a scored picture failed.
-//! 2 needs a person. Lavapipe-small with no live frames can pass when the
-//! self-test passed; that run did not score a picture. Owner mode with no
-//! live frames is 2, so a missing window is visible. A one-sample compare
-//! does not take the pass path: the verdict is already needs-human.
+//! 0 is a pass. 1 is a fail: the self-test missed, a scored picture failed,
+//! or nothing was scored. `--skip-capture` and a missing window are empty
+//! comparisons and fail. 2 needs a person. A one-sample compare does not
+//! take the pass path: the verdict is already needs-human.
 
 use crate::verdict::Verdict;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExitFacts {
-    pub lavapipe_small: bool,
     pub self_test_ok: bool,
     /// Worst verdict among pictures that were scored. Pass when nothing was.
     pub scene_verdict: Verdict,
@@ -28,7 +26,7 @@ pub fn exit_code(facts: ExitFacts) -> i32 {
         return 2;
     }
     if !facts.scored {
-        return if facts.lavapipe_small { 0 } else { 2 };
+        return 1;
     }
     if !facts.complete {
         return 2;
@@ -42,7 +40,6 @@ mod tests {
 
     fn facts() -> ExitFacts {
         ExitFacts {
-            lavapipe_small: false,
             self_test_ok: true,
             scene_verdict: Verdict::Pass,
             scored: true,
@@ -62,17 +59,14 @@ mod tests {
         let mut human = facts();
         human.scene_verdict = Verdict::NeedsHuman;
         assert_eq!(exit_code(human), 2);
-        let mut owner_dark = facts();
-        owner_dark.scored = false;
-        owner_dark.complete = false;
-        assert_eq!(exit_code(owner_dark), 2);
-        let mut lava = owner_dark;
-        lava.lavapipe_small = true;
-        assert_eq!(exit_code(lava), 0);
+        let mut empty = facts();
+        empty.scored = false;
+        empty.complete = false;
+        assert_eq!(exit_code(empty), 1);
         let mut partial = facts();
         partial.complete = false;
         assert_eq!(exit_code(partial), 2);
-        let mut one_sample_fail = lava;
+        let mut one_sample_fail = empty;
         one_sample_fail.scored = true;
         one_sample_fail.scene_verdict = Verdict::Fail;
         assert_eq!(exit_code(one_sample_fail), 1);

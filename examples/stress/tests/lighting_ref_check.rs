@@ -28,15 +28,15 @@ fn args(out: &PathBuf, references: &PathBuf, extra: &[&str]) -> Vec<String> {
 }
 
 #[test]
-fn a_lavapipe_check_without_a_window_passes_the_self_test_and_writes_the_report() {
+fn a_skipped_capture_fails_and_still_writes_the_self_test() {
     let root = std::env::temp_dir().join(format!("lref-check-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let out = root.join("report");
     let references = root.join("references");
     let code = genos_stress::lighting_ref::run(args(&out, &references, &[]).into_iter()).unwrap();
-    assert_eq!(code, 0);
+    assert_eq!(code, 1);
     let summary = std::fs::read_to_string(out.join("summary.md")).unwrap();
-    assert!(summary.contains("**pass**"), "{summary}");
+    assert!(summary.contains("**fail**"), "{summary}");
     assert!(summary.contains("self-test passed"), "{summary}");
     assert!(summary.contains("capture skipped"), "{summary}");
     assert!(summary.contains("Sponza"), "{summary}");
@@ -54,7 +54,7 @@ fn a_lavapipe_check_without_a_window_passes_the_self_test_and_writes_the_report(
     assert!(!references.join("metrics.json").exists());
 
     let again = genos_stress::lighting_ref::run(args(&out, &references, &[]).into_iter()).unwrap();
-    assert_eq!(again, 0);
+    assert_eq!(again, 1);
     let second = std::fs::read_to_string(out.join("summary.md")).unwrap();
     assert!(second.contains("Reused reference pictures"), "{second}");
     let _ = std::fs::remove_dir_all(&root);

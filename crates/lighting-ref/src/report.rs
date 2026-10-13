@@ -52,10 +52,16 @@ pub struct RunReport {
     pub checkpoints: Vec<CheckpointAudit>,
     pub skipped: Vec<(String, String)>,
     pub notes: Vec<String>,
+    /// A check that scored no checkpoint is a fail. The planted self-test
+    /// leaves this false; it always has pictures.
+    pub unscored_fails: bool,
 }
 
 impl RunReport {
     pub fn verdict(&self) -> Verdict {
+        if self.unscored_fails && self.checkpoints.is_empty() {
+            return Verdict::Fail;
+        }
         self.checkpoints
             .iter()
             .fold(Verdict::Pass, |acc, cp| match (acc, cp.judgement.verdict) {
@@ -471,6 +477,7 @@ mod tests {
             }],
             skipped: vec![("sponza".into(), "no asset".into())],
             notes: vec!["live capture skipped".into()],
+            unscored_fails: false,
         };
         write_report(&dir, &report).unwrap();
         let md = std::fs::read_to_string(dir.join("summary.md")).unwrap();

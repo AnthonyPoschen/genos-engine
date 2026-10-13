@@ -42,7 +42,7 @@ cargo run --release -p genos-stress -- lighting-ref check \
   --out <dir>
 ```
 
-`--mode lavapipe-small` is the small run. When `VK_ICD_FILENAMES` is unset and `/usr/share/vulkan/icd.d/lvp_icd.json` exists, that mode selects lavapipe. `--skip-capture` scores no live frames (the self-test and the path traces still run). `--config <file>` replaces `crates/lighting-ref/lighting-ref.conf`.
+`--mode lavapipe-small` is the small run. When `VK_ICD_FILENAMES` is unset and `/usr/share/vulkan/icd.d/lvp_icd.json` exists, that mode selects lavapipe. `--skip-capture` scores no live frames (the self-test and the path traces still run) and the check fails. `--config <file>` replaces `crates/lighting-ref/lighting-ref.conf`.
 
 Frame control, arguments first. Each name has an environment mirror (`GENOS_LIGHTING_REF_FIXED_DT`, `GENOS_LIGHTING_REF_WARMUP_FRAMES`, `GENOS_LIGHTING_REF_SETTLE_FRAMES`, `GENOS_LIGHTING_REF_SETTLE`, `GENOS_LIGHTING_REF_SETTLE_CAP`, `GENOS_LIGHTING_REF_CAPTURE_FRAMES`). A flag wins over its variable.
 
@@ -63,9 +63,9 @@ Exit status:
 
 | Code | Meaning |
 |---|---|
-| 0 | Pass. Lavapipe-small with no live frames also exits 0 when the self-test passed. That run did not score a picture. |
-| 1 | Fail. The self-test missed a planted defect, or a scored picture failed. |
-| 2 | Needs a person. Owner mode with no live frames is 2, so a missing window is visible. A one-sample compare does not take the pass path. |
+| 0 | Pass. Every requested checkpoint was scored and passed. |
+| 1 | Fail. The self-test missed a planted defect, a scored picture failed, or no picture was scored. `--skip-capture` and a missing window exit 1. |
+| 2 | Needs a person. A one-sample compare does not take the pass path. A run that scored some checkpoints and missed others is 2 when those scored pictures did not fail. |
 
 The report is `summary.md` and `summary.html`, plus `metrics.json` and `frames.tsv`, and for each scored checkpoint `reference.png`, `candidate.png`, `side-by-side.png`, and `heatmap.png`. The planted-defect report is `self-test/summary.md`.
 

@@ -90,6 +90,7 @@ pub fn run() -> SelfTest {
             checkpoints,
             skipped: Vec::new(),
             notes,
+            unscored_fails: false,
         },
     }
 }
