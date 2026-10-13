@@ -183,6 +183,7 @@ fn a_lamp_sealed_in_walls_under_a_roof_lights_nothing_outside() {
         }),
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
     };
     let mut camera = Camera::new(0.4, -4.5, std::f32::consts::PI);
     camera.pitch = 0.1;
@@ -214,6 +215,7 @@ fn a_lamp_above_the_roof_lights_nothing_under_it() {
         }),
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
     };
     let mut camera = Camera::new(0.0, -3.0, std::f32::consts::PI);
     camera.pitch = 0.05;
@@ -237,6 +239,7 @@ fn a_lamp_inside_a_box_lights_nothing_outside() {
         ceiling: None,
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
     };
     let mut camera = Camera::new(0.0, -4.0, std::f32::consts::PI);
     camera.pitch = -0.2;
@@ -260,6 +263,7 @@ fn a_lamp_inside_a_cylinder_lights_nothing_outside_even_over_its_cap() {
         ceiling: None,
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
     };
     let mut camera = Camera::new(-0.5, -4.0, 2.7);
     camera.pitch = 0.0;
@@ -294,6 +298,7 @@ fn a_turning_box_keeps_its_faces_lit_every_frame() {
         ceiling: None,
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
     };
     let mut world = World::from_scene(scene);
     let mut camera = Camera::new(0.0, -4.0, std::f32::consts::PI);

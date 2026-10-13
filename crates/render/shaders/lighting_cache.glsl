@@ -101,6 +101,16 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     float ctrl_ground_r;
     float ctrl_ground_g;
     float ctrl_ground_b;
+    // Unfilled-on-screen detector (compose). Pixels with no finished set, and
+    // shaded surface pixels. The two pads keep the mask at stats word 144
+    // (lighting_gpu.rs LIGHTING_UNFILLED_MASK_AT), after the 144-word header.
+    // The mask is one bit per pixel, 32 pixels a word, row-major, and is
+    // written only while the detector is on.
+    uint unfilled;
+    uint shaded;
+    uint unfilled_pad0;
+    uint unfilled_pad1;
+    uint mask[];
 } gstats;
 // 0 pixel or probe read, 1 cache-ray hit, 2 probe hit. The direct pass sets it
 // before a cache read. A pixel compose leaves it at 0.
@@ -221,6 +231,25 @@ const uint LIGHTING_COMPOSE_MAXY = LIGHTING_COMPOSE_MAXX + LIGHTING_CACHE_SLOTS;
 // Set by the compose pass around the lookups that colour a pixel.
 bool lighting_sc_display = false;
 uvec2 lighting_compose_px = uvec2(0u);
+// Unfilled-on-screen detector. Bits of scene.grid_at.w: 24 count, 25 magenta tint
+// (debug_view.rs). Off is a uniform test and no atomics. The mask word count is
+// lighting_gpu.rs LIGHTING_UNFILLED_MASK_CAP; word 0 is stats word 144.
+const float LIGHTING_UNFILLED_MIN_SETS = 1.0;
+const uint LIGHTING_UNFILLED_MASK_CAP = 276480u;
+bool lighting_px_unfilled = false;
+bool lighting_unfilled_count() {
+    return (scene.grid_at.w & 0x1000000u) != 0u;
+}
+bool lighting_unfilled_tint() {
+    return (scene.grid_at.w & 0x2000000u) != 0u;
+}
+void lighting_unfilled_mark(uvec2 p) {
+    uint stride = (pc.dims.x + 31u) / 32u;
+    uint at = p.y * stride + (p.x >> 5u);
+    if (at < LIGHTING_UNFILLED_MASK_CAP) {
+        atomicOr(gstats.mask[at], 1u << (p.x & 31u));
+    }
+}
 // The camera matches the one stored for last frame (change block head 1-4).
 // eye.w is the "last camera is valid" flag; up.w is the flag word, not the basis.
 bool lighting_view_held() {
@@ -2590,6 +2619,7 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj);
 // S72M: the pixel's screen-probe irradiance (lighting_compose.comp), -1 when none.
 vec3 lighting_px_probes = vec3(-1.0);
 vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
+    lighting_px_unfilled = false;
     uint mode = lighting_world_mode();
     // Object-local texels (GENOS_LIGHTING_SC_LOCAL=1, GIBS): a pixel on a mover's
     // surface reads texels keyed in the mover's frame, which move and turn with
@@ -2634,13 +2664,24 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
     float trust = 0.0;
+    // Finished sets, weighted like the bilinear corners. A missing corner counts
+    // as zero finished sets. Only the compose display path tallies.
+    float unfilled_cov = 0.0;
+    float unfilled_sets = 0.0;
+    bool tally = lighting_sc_display && mode == 3u && lighting_unfilled_count();
     [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
         vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + 0.5;
         vec3 q = pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));
         float bil = ((k & 1u) == 1u ? f.x : 1.0 - f.x) * ((k >> 1u) == 1u ? f.y : 1.0 - f.y);
+        if (tally) {
+            unfilled_cov += bil;
+        }
         uint slot = lighting_cache_find_sized(q, n, mode != 2u, size, pos);
         if (slot == ~0u) {
             continue;
+        }
+        if (tally) {
+            unfilled_sets += bil * floor(max(cache.v[3u * slot + 2u].w, 0.0));
         }
         cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
         bool split = mode == 3u && lighting_sc_seed_split() && size <= 0.2;
@@ -2731,6 +2772,14 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     bool light_swap = !lighting_sc_light_quiet() && (lighting_sc_flags() & 1048576u) == 0u;
     if (mode == 3u && (light_swap || (!obj && !LIGHTING_SC_KEEP_NEAR && lighting_near_change(pos)) || (lighting_sc_flags() & 512u) != 0u)) {
         trust = 0.0;
+    }
+    if (tally && unfilled_cov > 0.0) {
+        atomicAdd(gstats.shaded, 1u);
+        if (unfilled_sets < unfilled_cov * LIGHTING_UNFILLED_MIN_SETS) {
+            atomicAdd(gstats.unfilled, 1u);
+            lighting_unfilled_mark(lighting_compose_px);
+            lighting_px_unfilled = true;
+        }
     }
     return vec4(wsum > 0.0 ? sum / wsum : vec3(0.0), trust);
 }

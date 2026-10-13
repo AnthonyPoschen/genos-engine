@@ -77,6 +77,14 @@ pub fn specs() -> Vec<CommandSpec> {
             "apply_preset",
             "Replace the scene lighting with preset name (potato, low, medium, high) and clear a renderer override.",
         ),
+        spec(
+            "get_debug_settings",
+            "The debug output directory in force (text form). --out wins over GENOS_UNFILLED_DIR, which wins over the scene value. The default is genos-debug/unfilled under the working directory.",
+        ),
+        spec(
+            "set_debug_settings",
+            "Partial debug-output update. Key out is the unfilled directory. A text field overlays key=value lines. Writes the scene. --out and GENOS_UNFILLED_DIR still overlay the value used for the next save.",
+        ),
         spec("quit", "Stop the example with exit code (default 0)."),
     ]
 }

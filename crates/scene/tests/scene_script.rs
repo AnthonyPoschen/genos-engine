@@ -89,6 +89,24 @@ fn base_script(extra_walls: usize, lights: usize) -> String {
 }
 
 #[test]
+fn a_script_sets_the_debug_output_directory() {
+    let plain = load_str(&base_script(0, 1)).unwrap();
+    assert_eq!(plain.debug.out, genos_scene::DebugSettings::DEFAULT_OUT);
+    let scene = load_str(&format!(
+        "{}\ndebug_settings(\"out=captures/unfilled\");\n",
+        base_script(0, 1)
+    ))
+    .unwrap();
+    assert_eq!(scene.debug.out, "captures/unfilled");
+    let err = load_str(&format!(
+        "{}\ndebug_settings(\"nope=1\");\n",
+        base_script(0, 1)
+    ))
+    .unwrap_err();
+    assert!(err.contains("unknown debug setting"), "{err}");
+}
+
+#[test]
 fn a_script_past_the_light_limits_is_rejected() {
     let room = genos_scene::MAX_OCCLUDERS - 5;
     let (occluders, lamps) = (genos_scene::MAX_OCCLUDERS, genos_scene::MAX_LAMPS);

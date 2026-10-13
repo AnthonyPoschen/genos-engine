@@ -82,6 +82,7 @@ fn equal_elapsed_time_matches_across_frame_schedules() {
         ceiling: None,
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
     };
     let mouse = Actions {
         capture_click: true,

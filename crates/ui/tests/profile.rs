@@ -582,6 +582,7 @@ fn the_graph_paint_is_a_different_color_from_its_background() {
         ceiling: None,
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
     });
     let camera = Camera::opening();
     let mut spiked = calm();
