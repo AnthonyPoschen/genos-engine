@@ -235,6 +235,16 @@ pub struct DenoiserSettings {
     pub tiles: bool,
 }
 
+impl DenoiserSettings {
+    /// Full-resolution scalar wavelet, adaptive off, tiles off.
+    ///
+    /// That is the gi-v2 kernel. It has its own pipeline so the half-res,
+    /// adaptive, and tile branches are not in the shader the 4070 runs for high.
+    pub fn plain(self) -> bool {
+        self.resolution == DenoiseResolution::Full && !self.adaptive && !self.tiles
+    }
+}
+
 /// Flat or hemisphere fill used when GI is off.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AmbientSettings {

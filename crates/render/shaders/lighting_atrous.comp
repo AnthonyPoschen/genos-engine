@@ -32,7 +32,8 @@ void main() {
     uint stage0 = lighting_atrous_stage();
     // S79: the first eight 8x8 origins in this workgroup. Levels 1-3 read the
     // ids. Every thread participates; the barriers are not inside a loop.
-    // High (tiles off) does not take this path.
+    // The plain (high) pipeline compiles this block out.
+#ifndef LIGHTING_DENOISE_PLAIN
     if (stage0 == 0u && lighting_denoise_tiles()) {
         uint lid = gl_LocalInvocationID.x;
         atrous_red[lid] = lighting_svgf_tile_anchor(slot) ? 1u : 0u;
@@ -51,6 +52,7 @@ void main() {
         }
         barrier();
     }
+#endif
     // One thread, after levels 1-5: fraction, mode, threshold, filtered count.
     if (stage0 == 6u && slot == 0u) {
         lighting_atrous_publish();

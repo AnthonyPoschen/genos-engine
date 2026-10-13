@@ -1,7 +1,7 @@
 # S79: Half-resolution a-trous of bounce light
 
 - **Date:** 2026-10-13
-- **Result:** in progress (owner times the RTX 4070; lavapipe checks the picture)
+- **Result:** 4070 fail on the first cut. High full is a shader regression (7.5 → 11.7 ms), not a preset change. The high pipeline is the gi-v2 kernel again.
 - **Commit:** half-resolution wavelet and joint-bilateral upsample
 
 ## Idea
@@ -86,6 +86,29 @@ Expected cost: the hash probes inside the 5×5 become one cooperative load of th
 cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-tiles on
 cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-res half --denoise-adaptive on --denoise-tiles on
 ```
+
+## 4070: high full is 11.7 ms, gi-v2 default is 7.5
+
+Owner, RTX 4070, 1920×1080, stress scene. The `atrous` column is one bucket: the sum of the seven a-trous dispatches (stage 0 variance, stages 1–5 the B3 wavelet, stage 6 push). Each dispatch is timestamped and added in `gpu.rs`. There is no per-stage split in that column. `GENOS_GPU_DISPATCH=1` prints the seven stamps; the owner did not. Moving is the day-clock sun. Still is the same scene with the camera held; full still stays on the S78X work lists.
+
+| run | moving ms | still ms |
+|---|---:|---:|
+| gi-v2 / P29 default | 7.5 | |
+| `--preset high --denoise-res full` | 11.7 | 3.0 |
+| `--denoise-tiles off` | 11.6 | |
+| `--denoise-adaptive on` | 5.1 | |
+| `--denoise-res half` | 17.8 | 9.5 |
+| `--denoise-tiles on` | 18.3 | 8.9 |
+| half + adaptive | 12.0 | |
+| half + adaptive + tiles | 15.2 | 10.8 |
+
+`--preset high --denoise-res full` is not a different preset from the stress default. `LightingSettings::default()` is preset high: full resolution, five iterations, adaptive off, tiles off, dirty fraction 0.25. The stress scene uses that default. `--preset high` replaces the struct with the same preset and the flag writes `denoise_res=full`, which high already is. gi-v2's high denoiser is those same fields (iterations 5, dirty fraction 0.25). Dispatch count is the same seven stages (`iterations == 5` takes the tuned group list). Tiles-off at 11.6 ms matches full at 11.7, so the tile pipeline is not what the high path binds.
+
+The taken path is the gi-v2 filter. The extra cost is the shader the 4070 compiles. Half-res, adaptive, and the tile-origin recording were compiled into `lighting_atrous.comp`. The bits are uniform and clear on high, so the branches are not executed, but the live registers are the max of every branch. That is an occupancy drop, not an extra pass: 7.5 → 11.7 is +4.2 ms (+56%) on the same seven dispatches. A uniform bit test cannot cost 4.2 ms by itself.
+
+High now binds `atrous-plain`, compiled with `LIGHTING_DENOISE_PLAIN`. The half-res, adaptive, and tile blocks are not in that shader's hot functions (`lighting_svgf_variance`, `lighting_svgf_iter`, `lighting_svgf_push`), and the unused helpers are dropped from the SPIR-V. The feature pipeline still has the branches, and it is what runs when any of those knobs is on. Not re-timed here.
+
+Inferred split of the 11.7 ms moving bucket, from the adaptive number, not from per-stage stamps. Adaptive at 5.1 ms still launches all seven dispatches; a settled texel (16 sets) runs one 5×5 and copies the rest. Four skipped wavelets account for 11.7 − 5.1 = 6.6 ms, about 1.7 ms each. The other 5.1 ms is stage 0 (the 7×7 variance), stage 1 (one B3), and stage 6 (the push). Still full at 3.0 ms is the same seven dispatches with stages 1–5 on the work list (thousands of slots, not the million).
 
 ## Expected cost
 

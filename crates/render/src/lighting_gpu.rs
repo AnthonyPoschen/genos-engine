@@ -95,6 +95,8 @@ pub(crate) struct Lighting {
     pipes: [Handle; 9],
     /// Levels 1-5 when `denoise_tiles` is on. The scalar a-trous pipe stays `pipes[8]`.
     atrous_tile: Handle,
+    /// High: full resolution, adaptive off, tiles off. The feature branches are not in this SPIR-V.
+    atrous_plain: Handle,
     gbuffer_pipe: Handle,
     gbuf: Buffer,
     work: Buffer,
@@ -271,6 +273,7 @@ impl Default for Lighting {
             sets: [std::ptr::null_mut(); 2],
             pipes: [std::ptr::null_mut(); 9],
             atrous_tile: std::ptr::null_mut(),
+            atrous_plain: std::ptr::null_mut(),
             gbuffer_pipe: std::ptr::null_mut(),
             gbuf: Buffer::empty(),
             work: Buffer::empty(),
@@ -560,6 +563,13 @@ impl Gpu {
             "atrous-tile",
         )?;
         self.note_pipeline_time("atrous-tile", start);
+        let start = Instant::now();
+        self.lighting.atrous_plain = self.make_compute_pipe(
+            LIGHTING_ATROUS_PLAIN_SPV,
+            self.lighting.layout,
+            "atrous-plain",
+        )?;
+        self.note_pipeline_time("atrous-plain", start);
         let start = Instant::now();
         self.frag_override = Some(GBUFFER_FRAG_SPV);
         self.vert_override = Some(GBUFFER_VERT_SPV);
@@ -2026,13 +2036,16 @@ impl Gpu {
                         k_pc.as_ptr() as *const c_void,
                     );
                 }
-                // Tiles bind their own pipeline for levels 1-5. Stages 0 and 6, and
-                // high (tiles off), stay on the scalar a-trous shader.
-                let pipe = if pass == 8
-                    && self.lighting.settings.denoiser.tiles
-                    && (1..=5).contains(&atrous_stage)
+                // High binds the plain kernel (gi-v2's a-trous, no half/adaptive/tile
+                // branches). Tiles bind their own pipeline for levels 1-5. Anything
+                // else uses the scalar shader that still reads the control bits.
+                let pipe = if pass != 8 {
+                    self.lighting.pipes[pass]
+                } else if self.lighting.settings.denoiser.tiles && (1..=5).contains(&atrous_stage)
                 {
                     self.lighting.atrous_tile
+                } else if self.lighting.settings.denoiser.plain() {
+                    self.lighting.atrous_plain
                 } else {
                     self.lighting.pipes[pass]
                 };
@@ -2269,6 +2282,7 @@ impl Gpu {
                 .pipes
                 .iter_mut()
                 .chain(std::iter::once(&mut self.lighting.atrous_tile))
+                .chain(std::iter::once(&mut self.lighting.atrous_plain))
                 .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))
             {
                 if !pipe.is_null() {

@@ -126,6 +126,19 @@ uint lighting_denoise_iters() {
     uint n = (gstats.ctrl_bits >> 16u) & 7u;
     return n == 0u ? 5u : n;
 }
+// Bits 22..31, steps of 0.0001. Relative luminance deviation sqrt(var) / mean.
+float lighting_denoise_variance() {
+    return float((gstats.ctrl_bits >> 22u) & 1023u) * 0.0001;
+}
+// LIGHTING_DENOISE_PLAIN is the high pipeline. Half-res, adaptive, and tiles
+// are compiled out of it. Those branches live in the other a-trous pipeline,
+// and on the 4070 they dropped occupancy of this kernel (11.7 ms vs the gi-v2
+// 7.5 ms) even with the bits clear. See S79.
+#ifdef LIGHTING_DENOISE_PLAIN
+bool lighting_denoise_half() { return false; }
+bool lighting_denoise_adaptive() { return false; }
+bool lighting_denoise_tiles() { return false; }
+#else
 // Bit 19. Half-resolution a-trous of the bounce field (see S79 in the SVGF
 // block). High leaves it clear, and every full-resolution path below is the
 // one this bit skips.
@@ -136,15 +149,12 @@ bool lighting_denoise_half() {
 bool lighting_denoise_adaptive() {
     return (gstats.ctrl_bits & 1048576u) != 0u;
 }
-// Bits 22..31, steps of 0.0001. Relative luminance deviation sqrt(var) / mean.
-float lighting_denoise_variance() {
-    return float((gstats.ctrl_bits >> 22u) & 1023u) * 0.0001;
-}
 // Bit 21. Wavelet levels 1-5 run from shared-memory tiles (lighting_atrous_tile.comp).
 // High leaves it clear, and the scalar kernel in this file is the one that runs.
 bool lighting_denoise_tiles() {
     return (gstats.ctrl_bits & 2097152u) != 0u;
 }
+#endif
 // Unlimited (bit 16384) is today's cache. 0 skips the read. A cache-ray hit
 // (kind 1) needs two bounces; a probe or a pixel needs one.
 bool lighting_bounce_ok() {
@@ -3212,22 +3222,32 @@ void lighting_svgf_stamp(uint s, uint c) {
 //   The finest full-resolution wavelet (step 1) does not run. The upsample
 //   puts edges back; it does not replace that high-frequency blur.
 bool lighting_svgf_half_fine(uint slot) {
+#ifdef LIGHTING_DENOISE_PLAIN
+    return false;
+#else
     return lighting_denoise_half() && cache.v[3u * slot + 1u].w <= 0.2;
+#endif
 }
 // Odd texels of a half-resolution fine grid. The wavelet does not write them.
 bool lighting_svgf_half_skip(uint slot) {
+#ifdef LIGHTING_DENOISE_PLAIN
+    return false;
+#else
     if (!lighting_svgf_half_fine(slot)) {
         return false;
     }
     vec2 c = lighting_sc_true_cell(slot);
     return (int(c.x) & 1) != 0 || (int(c.y) & 1) != 0;
+#endif
 }
 // Kernel step in cells. Half-resolution fine texels take steps on the even lattice.
 int lighting_svgf_step_for(uint slot, uint it) {
     int step = 1 << int(it);
+#ifndef LIGHTING_DENOISE_PLAIN
     if (lighting_svgf_half_fine(slot)) {
         step <<= 1;
     }
+#endif
     return step;
 }
 // 8x8 lattice origin. The variance pass records one bit per slot; levels 1-3
@@ -3357,15 +3377,19 @@ void lighting_svgf_inactive(uint slot) {
     }
 }
 void lighting_svgf_variance(uint slot) {
+#ifndef LIGHTING_DENOISE_PLAIN
     if (lighting_svgf_half_skip(slot)) {
         return;
     }
+#endif
     float var;
     vec4 v = lighting_svgf_in(slot, var);
     // Even texel: the level-0 colour is the edge-aware 2x2, not the texel alone.
+#ifndef LIGHTING_DENOISE_PLAIN
     if (lighting_svgf_half_fine(slot)) {
         v.rgb = lighting_svgf_downsample(slot, v.rgb);
     }
+#endif
     bool spatial = var < 0.0;
     bool flip = LIGHTING_DIRTY_ATROUS && !lighting_svgf_was_active(slot);
     if (LIGHTING_DIRTY_ATROUS && !flip) {
@@ -3394,7 +3418,11 @@ void lighting_svgf_variance(uint slot) {
         float s1 = 0.0;
         float s2 = 0.0;
         float sw = 0.0;
+#ifdef LIGHTING_DENOISE_PLAIN
+        int vstep = 1;
+#else
         int vstep = lighting_svgf_half_fine(slot) ? 2 : 1;
+#endif
         [[dont_unroll]] for (int j = -3; j <= 3; j++) {
             [[dont_unroll]] for (int i = -3; i <= 3; i++) {
                 uint q = (i == 0 && j == 0) ? slot : lighting_sc_cell_slot(slot, ivec2(i, j) * vstep);
@@ -3442,9 +3470,11 @@ void lighting_svgf_variance(uint slot) {
     }
 }
 void lighting_svgf_iter(uint slot, uint it) {
+#ifndef LIGHTING_DENOISE_PLAIN
     if (lighting_svgf_half_skip(slot)) {
         return;
     }
+#endif
     if (LIGHTING_DIRTY_ATROUS && !lighting_svgf_is_dirty(slot, it + 1u)) {
         return;
     }
@@ -3452,6 +3482,9 @@ void lighting_svgf_iter(uint slot, uint it) {
     uint dst = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it + 1u) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_A : LIGHTING_SC_ATROUS_B);
     // Stable history: copy the last applied level forward. The 5x5 does not run.
     // The last configured iteration still publishes buffer A for the push.
+    // Not in the plain kernel: high leaves adaptive off, and the branch was
+    // costing registers on that path (S79).
+#ifndef LIGHTING_DENOISE_PLAIN
     if (lighting_denoise_adaptive()) {
         float v0;
         vec4 s0 = lighting_svgf_load(lighting_svgf_lvl(0u), slot, v0);
@@ -3466,6 +3499,7 @@ void lighting_svgf_iter(uint slot, uint it) {
             return;
         }
     }
+#endif
     float vold;
     vec4 old = lighting_svgf_load(dst, slot, vold);
     int step = lighting_svgf_step_for(slot, it);
@@ -3475,7 +3509,11 @@ void lighting_svgf_iter(uint slot, uint it) {
     // g3x3: 3 x 3 Gaussian of the input variance.
     float gv = 0.0;
     float gw = 0.0;
+#ifdef LIGHTING_DENOISE_PLAIN
+    int gstep = 1;
+#else
     int gstep = lighting_svgf_half_fine(slot) ? 2 : 1;
+#endif
     [[dont_unroll]] for (int j = -1; j <= 1; j++) {
         [[dont_unroll]] for (int i = -1; i <= 1; i++) {
             uint q = (i == 0 && j == 0) ? slot : lighting_sc_cell_slot(slot, ivec2(i, j) * gstep);
@@ -3557,11 +3595,13 @@ float lighting_svgf_lum_at(uint slot, ivec2 off, out bool ok) {
     }
     // Half mode does not write the wavelet onto odd texels. Their light is the
     // upsample, so a gradient tap there must not read an empty level buffer.
+#ifndef LIGHTING_DENOISE_PLAIN
     if (lighting_svgf_half_skip(q)) {
         vec4 u = lighting_svgf_upsample(q);
         ok = u.w > 0.0;
         return dot(u.rgb, LIGHTING_SVGF_LW);
     }
+#endif
     float vq;
     vec4 x = lighting_svgf_load(LIGHTING_SC_ATROUS_A, q, vq);
     ok = x.w > 0.0;
@@ -3577,13 +3617,17 @@ void lighting_svgf_push(uint slot) {
     // Odd fine texels take the joint-bilateral upsample. Their level buffer was
     // not written by the wavelet. Coarse texels and the full-resolution path
     // read buffer A, as before. The upsample is this dispatch: no frame is kept.
-    bool half_fine = lighting_svgf_half_skip(slot);
     vec4 f;
+#ifdef LIGHTING_DENOISE_PLAIN
+    f = lighting_svgf_load(LIGHTING_SC_ATROUS_A, slot, varp);
+#else
+    bool half_fine = lighting_svgf_half_skip(slot);
     if (half_fine) {
         f = lighting_svgf_upsample(slot);
     } else {
         f = lighting_svgf_load(LIGHTING_SC_ATROUS_A, slot, varp);
     }
+#endif
     float W = clamp(f.w, 0.0, 1.0);
     // S78B: the push is redone when this texel's last level (or a +-1
     // neighbour's) moved, when it leans on the WRC (W < 1: the cells change
@@ -3591,7 +3635,11 @@ void lighting_svgf_push(uint slot) {
     // LIGHTING_PUSH_IDLE by hash (the +-4 R clamp, a texel just shown).
     // Half-resolution fine texels skip the idle: the coarse lattice can move
     // without stamping the diagonal texel, and the upsample is four taps.
+#ifdef LIGHTING_DENOISE_PLAIN
+    if (LIGHTING_DIRTY_ATROUS && W >= 0.999 && !lighting_svgf_stamp_recent(slot, 3u)
+#else
     if (!half_fine && LIGHTING_DIRTY_ATROUS && W >= 0.999 && !lighting_svgf_stamp_recent(slot, 3u)
+#endif
         && cache.v[LIGHTING_SC_ATROUS_B + slot].w != 0.0
         && ((lighting_hash(slot ^ 0x7f4a7c15u) + lighting_frame()) % LIGHTING_PUSH_IDLE) != 0u) {
         // S72V10 trusts the field for two frames from this stamp. The idle skip

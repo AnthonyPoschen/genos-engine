@@ -162,7 +162,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78Y](experiments/S78Y-quiet-filter.md) | 2026-10-12 | Quiet probe filter | pushed (rough; idle A/B 6am) | S78Y |
 | [S78X](experiments/S78X-atrous-work-lists.md) | 2026-10-13 | A-trous levels run dirty work lists | pushed (rough; idle A/B) | S78X |
 | [S78X2](experiments/S78X2-atrous-dense-fallback.md) | 2026-10-12 | Dense a-trous when the dirty fraction is high | pushed | S78X2 |
-| [S79](experiments/S79-half-res-atrous.md) | 2026-10-13 | Half-resolution a-trous of bounce light, joint-bilateral upsample | in progress (owner times the 4070) | S79 |
+| [S79](experiments/S79-half-res-atrous.md) | 2026-10-13 | Half-resolution a-trous of bounce light, joint-bilateral upsample | 4070: high full 11.7 ms vs gi-v2 7.5 (shader, not preset); plain pipeline | S79 |
 | [S78Z](experiments/S78Z-verify-ring-wakes.md) | 2026-10-13 | Probe verification + impact-tested ring wakes | not pushed (no fix; postmortem) | g78/S78Z-verify-ring-wakes.patch |
 | [S78T2](experiments/S78T2-texel-verify.md) | 2026-10-13 | Texel verification: rotating A-SVGF checks + ring wakes | not pushed (no healing; postmortem) | g78/S78T2-texel-verify.patch |
 | [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
@@ -568,11 +568,10 @@ replace the work lists; dirty stamps are still honored. Stages 0 and 6 stay
 on the scalar shader. High leaves tiles off, and that pipeline does not
 reserve the tile's shared memory. No frame is stored.
 
-Expected cost, not measured here: the five wavelet dispatches are most of the
-5.5 ms. Half resolution runs them on about a quarter of the fine texels, so
-those dispatches should land near 1.5–2 ms. Adaptive then leaves a stable
-texel after one iteration (the dispatch still launches; the thread copies).
-Tiles turn the remaining 5×5 hash searches into one cooperative load of the
-footprint. Together the a-trous bucket should land near 2 ms. The owner times
-it on an RTX 4070 at 1920×1080 in the moving stress scene. A/B commands are
-in [toggles.md](toggles.md).
+The owner timed it on an RTX 4070 at 1920×1080. `--preset high --denoise-res full`
+is the same denoiser as gi-v2's default (full, five iterations, adaptive off,
+tiles off) and the same seven dispatches, but the moving a-trous bucket went
+from 7.5 ms to 11.7 ms. The extra branches were in the shader even with the
+bits clear. High now binds a pipeline compiled without them. The bucket is the
+sum of those seven dispatches; the per-stage split and the A/B commands are in
+[S79](experiments/S79-half-res-atrous.md).
