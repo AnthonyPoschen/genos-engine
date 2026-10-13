@@ -49,9 +49,14 @@ impl FileSource {
     }
 }
 
+const LFS_POINTER: &[u8] = b"version https://git-lfs.github.com/spec/v1";
+
 impl ByteSource for FileSource {
     fn read_bytes(&self) -> Result<Vec<u8>, LoadError> {
         match std::fs::read(&self.path) {
+            Ok(bytes) if bytes.starts_with(LFS_POINTER) => Err(LoadError::LfsPointer {
+                path: self.path.clone(),
+            }),
             Ok(bytes) => Ok(bytes),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(LoadError::NotFound {
                 path: self.path.clone(),

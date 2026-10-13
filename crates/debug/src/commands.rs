@@ -86,5 +86,21 @@ pub fn specs() -> Vec<CommandSpec> {
             "Partial debug-output update. Key out is the unfilled directory. A text field overlays key=value lines. Writes the scene. --out and GENOS_UNFILLED_DIR still overlay the value used for the next save.",
         ),
         spec("quit", "Stop the example with exit code (default 0)."),
+        spec(
+            "list_scenes",
+            "Names of the scenes this binary can load.",
+        ),
+        spec(
+            "load_scene",
+            "Load a scene by name. Drops light and object edits and clears the lighting cache. checkpoint (optional) jumps after the load; otherwise the first checkpoint is used.",
+        ),
+        spec(
+            "list_checkpoints",
+            "Checkpoint names for the scene that is loaded.",
+        ),
+        spec(
+            "jump_checkpoint",
+            "Move the camera to a checkpoint by name. That pose is the one Home resets to.",
+        ),
     ]
 }

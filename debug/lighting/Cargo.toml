@@ -1,0 +1,24 @@
+[package]
+name = "genos-lighting"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "genos-lighting"
+path = "src/main.rs"
+
+[dependencies]
+genos-debug = { path = "../../crates/debug" }
+genos-input = { path = "../../crates/input" }
+genos-load = { path = "../../crates/load" }
+genos-mcp = { path = "../../crates/mcp" }
+genos-render = { path = "../../crates/render" }
+genos-scene = { path = "../../crates/scene" }
+genos-scene-lib = { path = "../scene-lib" }
+genos-stress = { path = "../../examples/stress" }
+genos-ui = { path = "../../crates/ui" }
+genos-window = { path = "../../crates/window" }

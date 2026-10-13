@@ -117,11 +117,18 @@ pub(crate) fn pack_lighting_ctrl(
     if settings.shadows.filter == ShadowFilter::Hard {
         bits |= CTRL_SHADOW_HARD;
     }
-    if settings.gi.enabled && settings.bounce.count > 0 {
+    // The cache and the work buffer stay 4096-byte stand-ins unless probes or
+    // the world cache allocated them. The GI bit turns on pixel reuse, which
+    // indexes the work buffer at the cache-ray offset, and bounce reads index
+    // the cache. Lavapipe faults on either read, so both stay off until the
+    // buffers exist. Bounce 0 records no GI dispatch. The settings struct
+    // still records the request.
+    let cache = settings.allocates_cache();
+    if settings.gi.enabled && settings.bounce.count > 0 && cache {
         bits |= CTRL_GI;
         bits |= CTRL_BOUNCE_READS;
     }
-    if settings.bounce.count == LIGHTING_BOUNCES_UNLIMITED {
+    if settings.bounce.count == LIGHTING_BOUNCES_UNLIMITED && cache {
         bits |= CTRL_BOUNCE_UNLIMITED;
     }
     if settings.probes.enabled {
@@ -169,7 +176,7 @@ pub(crate) fn pack_lighting_ctrl(
     let ctrl = Ctrl {
         bits,
         max_lights: settings.direct.max_lights,
-        bounce: settings.bounce.count,
+        bounce: if cache { settings.bounce.count } else { 0 },
         scale: settings.direct.resolution_scale.max(1),
         bias,
         pixel_only,
@@ -517,6 +524,26 @@ mod probe_still_tests {
         assert_eq!(quiet.counts[B_DIRECT as usize], 1);
         assert_eq!(quiet.counts[B_COMPOSE as usize], 1);
         assert_eq!(quiet.pixel_only, 1);
+    }
+
+    #[test]
+    fn gi_without_a_cache_does_not_ask_the_shader_to_read_one() {
+        let mut settings = LightingSettings::preset(LightingPreset::Potato);
+        settings.gi.enabled = true;
+        settings.bounce.count = u32::MAX;
+        let bytes = pack_lighting_ctrl(&settings, 0, 1.0, 0, 0);
+        let bits = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let bounce = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        assert_eq!(bounce, 0, "no cache, so the shader must not look one up");
+        assert_eq!(bits & CTRL_GI, 0, "no cache, so the shader must not index one");
+        assert_eq!(bits & CTRL_BOUNCE_UNLIMITED, 0);
+        assert_eq!(bits & CTRL_BOUNCE_READS, 0);
+        let high = pack_lighting_ctrl(&LightingSettings::preset(LightingPreset::High), 0, 1.0, 0, 0);
+        let high_bits = u32::from_le_bytes(high[0..4].try_into().unwrap());
+        let high_bounce = u32::from_le_bytes(high[8..12].try_into().unwrap());
+        assert_eq!(high_bounce, u32::MAX);
+        assert_ne!(high_bits & CTRL_GI, 0);
+        assert_ne!(high_bits & CTRL_BOUNCE_UNLIMITED, 0);
     }
 
     #[test]
