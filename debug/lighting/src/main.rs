@@ -9,9 +9,7 @@ use std::time::Instant;
 
 use genos_debug::{png, CheckpointPose, Host, Knob};
 use genos_input::{character_controller, InputCode, InputSystem};
-use genos_render::{
-    identity_pose, DrawKind, FixedPart, Renderer, ScreenRect, ViewMode, World,
-};
+use genos_render::{identity_pose, DrawKind, FixedPart, Renderer, ScreenRect, ViewMode, World};
 use genos_scene::{
     look_direction, update, Actions, Camera, DebugSettings, Floor, Light, Scene, Sky, Vec3,
     PITCH_LIMIT,
@@ -20,7 +18,7 @@ use genos_scene_lib::{Entry, Kind, Lamp, Sun};
 use genos_stress::building::{Layout, LightMix};
 use genos_stress::knobs::{apply_lighting_knob, lighting_knobs};
 use genos_stress::stage::{Scale, Stage};
-use genos_ui::{button_panel, Action, PanelButton, PanelRow, PanelSlider, Pointer, State};
+use genos_ui::{button_panel, Action, PanelRow, PanelSlider, Pointer, SliderStep, State};
 use genos_window::{extent_changed, FocusGate, Window};
 
 const USAGE: &str = "\
@@ -43,7 +41,9 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          mean luma against that scene's own floor
 
 Page Up and Page Down switch scenes. Keys 1-9 jump checkpoints. Home and 0 reset
-to the active checkpoint. WASD fly, Space up, C or Ctrl down, Shift is faster.
+to the active checkpoint. Arrow keys and the wheel step the slider under the
+pointer, or the slider that was last pressed. WASD fly, Space up, C or Ctrl
+down, Shift is faster.
 
 Screenshots go to <out>/shots, the log to <out>/logs, lighting dumps to <out>/dumps.
 The binary does not write under $HOME.
@@ -56,8 +56,24 @@ const STEP: f32 = 1.0 / 60.0;
 const ID_SCENE: u32 = 2000;
 const ID_CP: u32 = 2200;
 const ID_VIEW: u32 = 2400;
-const ID_PRESET: u32 = 2600;
-const ID_KNOB: u32 = 1000;
+const ID_KNOB: u32 = 3000;
+/// Graded lighting knobs, in panel order. An on/off switch is not in this list.
+const SLIDER_KNOBS: &[&str] = &[
+    "lighting_preset",
+    "lighting_bounces",
+    "lighting_direct_lights",
+    "lighting_direct_refresh",
+    "lighting_direct_scale",
+    "lighting_shadow_filter",
+    "lighting_gi_refresh",
+    "lighting_budget_shift",
+    "lighting_probe_rays",
+    "lighting_probe_stale",
+    "lighting_world_stale",
+    "lighting_denoise_iters",
+    "lighting_denoise_variance",
+    "lighting_ambient",
+];
 const VIEWS: [&str; 7] = [
     "full", "direct", "bounce", "albedo", "normal", "depth", "texels",
 ];
@@ -105,7 +121,11 @@ fn run() -> Result<(), String> {
     if entries.is_empty() {
         return Err("no scenes in debug/scenes".into());
     }
-    let mut app = App::open(entries, root, log.try_clone().map_err(|err| err.to_string())?)?;
+    let mut app = App::open(
+        entries,
+        root,
+        log.try_clone().map_err(|err| err.to_string())?,
+    )?;
     if opts.check {
         return check_all(&mut app, &opts, &mut log);
     }
@@ -116,11 +136,7 @@ fn run() -> Result<(), String> {
         .ok_or_else(|| format!("unknown scene {}", opts.scene))?;
     app.load_scene(&app.entries[index].name.clone())?;
     let mut camera = Camera::opening();
-    jump_camera(
-        &mut app,
-        opts.checkpoint.as_deref(),
-        &mut camera,
-    )?;
+    jump_camera(&mut app, opts.checkpoint.as_deref(), &mut camera)?;
     let (width, height) = opts.size;
     let mut window = if opts.headless {
         Window::open_proof(width, height)?
@@ -131,11 +147,7 @@ fn run() -> Result<(), String> {
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let mcp_host = genos_mcp::Host::new(app.scene().clone(), camera.clone());
     let _server = genos_mcp::Server::start_on(mcp_host, genos_mcp::listen_port())?;
-    let _ = writeln!(
-        log,
-        "mcp http://127.0.0.1:{}/",
-        genos_mcp::listen_port()
-    );
+    let _ = writeln!(log, "mcp http://127.0.0.1:{}/", genos_mcp::listen_port());
     let mut tools = genos_debug::Tools::new();
     tools.set_out_dir(opts.out.join("shots"));
     if opts.unfilled {
@@ -193,15 +205,18 @@ fn run() -> Result<(), String> {
                     x: frame.pointer_x,
                     y: frame.pointer_y,
                     down: !camera.captured && (gated.mouse_left || gated.capture_click),
-                    ..Pointer::default()
+                    wheel_y: if camera.captured { 0.0 } else { gated.wheel_y },
+                    key_dec: !camera.captured
+                        && (input.keyboard.pressed(InputCode::key_left)
+                            || input.keyboard.pressed(InputCode::key_down)),
+                    key_inc: !camera.captured
+                        && (input.keyboard.pressed(InputCode::key_right)
+                            || input.keyboard.pressed(InputCode::key_up)),
                 },
             );
             for action in &ui_frame.actions {
-                if let Action::Press(id) = *action {
-                    press(&mut app, &mut camera, &mut tools, &mut renderer, id)?;
-                }
                 if let Action::Slide { id, value } = *action {
-                    slide(&mut app, id, value);
+                    slide(&mut app, &mut camera, &mut tools, &mut renderer, id, value)?;
                 }
             }
             (ui_frame.paints, ui_frame.look_capture)
@@ -263,7 +278,10 @@ fn run() -> Result<(), String> {
         );
         if last {
             if let Some(pixels) = pixels {
-                let path = opts.out.join("shots").join(format!("{}.png", app.entry().name));
+                let path = opts
+                    .out
+                    .join("shots")
+                    .join(format!("{}.png", app.entry().name));
                 png::write_png(&path, renderer.width(), renderer.height(), &pixels)?;
                 let (mean, spread) = picture_stats(&pixels);
                 let _ = writeln!(
@@ -416,13 +434,6 @@ impl App {
         }
     }
 
-    fn preset_label(&self) -> &'static str {
-        match &self.show {
-            Show::Stress(stage) => stage.world.scene.lighting.preset_label(),
-            Show::Still(world) => world.scene.lighting.preset_label(),
-        }
-    }
-
     fn note(&mut self, line: &str) {
         eprintln!("genos-lighting: {line}");
         let _ = writeln!(self.log, "{line}");
@@ -551,9 +562,8 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
             let full = root.join(path);
             eprintln!("genos-lighting: loading {}", full.display());
             let model = genos_load::load_gltf_file(&full).map_err(|err| match &err {
-                genos_load::LoadError::LfsPointer { .. } | genos_load::LoadError::NotFound { .. } => {
-                    err.to_string()
-                }
+                genos_load::LoadError::LfsPointer { .. }
+                | genos_load::LoadError::NotFound { .. } => err.to_string(),
                 _ => format!("{}: {err}", full.display()),
             })?;
             let mut scene = Scene {
@@ -713,7 +723,8 @@ fn switch_to(
 fn fly(camera: &mut Camera, scene: &mut Scene, input: &InputSystem, actions: &Actions, dt: f32) {
     update(camera, scene, actions, 0.0);
     camera.yaw += actions.look_x * STICK_LOOK * dt;
-    camera.pitch = (camera.pitch + actions.look_y * STICK_LOOK * dt).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    camera.pitch =
+        (camera.pitch + actions.look_y * STICK_LOOK * dt).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     let forward = look_direction(camera.yaw, 0.0);
     let right = look_direction(camera.yaw + std::f32::consts::FRAC_PI_2, 0.0);
     let mut lift = 0.0;
@@ -761,133 +772,153 @@ fn panel_title(app: &App) -> String {
     format!("{} — {review}", app.entry().name)
 }
 
+fn index_steps(names: impl IntoIterator<Item = impl Into<String>>) -> Vec<SliderStep> {
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| SliderStep {
+            name: name.into(),
+            value: index as f64,
+        })
+        .collect()
+}
+
+fn named_slider(id: u32, value: f64, names: Vec<String>) -> PanelSlider {
+    let mut slider = PanelSlider::named(id, value, index_steps(names));
+    // Tick names carry the step. The side readout would repeat that name.
+    slider.text.clear();
+    slider
+}
+
+fn named_row(label: &str, id: u32, value: f64, names: Vec<String>) -> Option<PanelRow> {
+    if names.is_empty() {
+        return None;
+    }
+    Some(PanelRow {
+        label: label.into(),
+        buttons: Vec::new(),
+        slider: Some(named_slider(id, value, names)),
+    })
+}
+
+fn knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
+    let knob = app.knobs().into_iter().find(|knob| knob.name == name)?;
+    if knob.choices == ["off", "on"] {
+        return None;
+    }
+    let label = if name == "lighting_preset" {
+        "Preset".to_string()
+    } else {
+        knob.label.clone()
+    };
+    let slider = if knob.choices.is_empty() {
+        PanelSlider::range(
+            ID_KNOB + index as u32,
+            knob.value,
+            knob.min,
+            knob.max,
+            knob.step,
+            knob.text,
+        )
+    } else {
+        named_slider(ID_KNOB + index as u32, knob.value, knob.choices)
+    };
+    Some(PanelRow {
+        label,
+        buttons: Vec::new(),
+        slider: Some(slider),
+    })
+}
+
 fn panel_rows(app: &App, view: ViewMode) -> Vec<PanelRow> {
-    let scene_buttons = app
-        .entries
+    let view_value = VIEWS
         .iter()
-        .enumerate()
-        .map(|(i, e)| PanelButton {
-            id: ID_SCENE + i as u32,
-            text: e.name.clone(),
-            selected: i == app.index,
-        })
-        .collect();
-    let cp_buttons = app
-        .entry()
-        .checkpoints
-        .iter()
-        .enumerate()
-        .map(|(i, c)| PanelButton {
-            id: ID_CP + i as u32,
-            text: c.name.clone(),
-            selected: i == app.checkpoint,
-        })
-        .collect();
-    let view_buttons = VIEWS
-        .iter()
-        .enumerate()
-        .map(|(i, name)| PanelButton {
-            id: ID_VIEW + i as u32,
-            text: (*name).to_string(),
-            selected: view_name(view) == *name,
-        })
-        .collect();
-    let preset = app.preset_label();
-    let preset_buttons = PRESETS
-        .iter()
-        .enumerate()
-        .map(|(i, name)| PanelButton {
-            id: ID_PRESET + i as u32,
-            text: (*name).to_string(),
-            selected: preset == *name,
-        })
-        .collect();
-    let mut rows = vec![
-        PanelRow {
-            label: "Scene".into(),
-            buttons: scene_buttons,
-            slider: None,
-        },
-        PanelRow {
-            label: "Checkpoint".into(),
-            buttons: cp_buttons,
-            slider: None,
-        },
-        PanelRow {
-            label: "View".into(),
-            buttons: view_buttons,
-            slider: None,
-        },
-        PanelRow {
-            label: "Preset".into(),
-            buttons: preset_buttons,
-            slider: None,
-        },
-    ];
-    if let Some(knob) = app.knobs().into_iter().find(|k| k.name == "lighting_bounces") {
-        rows.push(PanelRow {
-            label: knob.label,
-            buttons: Vec::new(),
-            slider: Some(PanelSlider {
-                id: ID_KNOB,
-                value: knob.value,
-                min: knob.min,
-                max: knob.max,
-                step: knob.step,
-                text: knob.text,
-                steps: Vec::new(),
-            }),
-        });
+        .position(|name| *name == view_name(view))
+        .unwrap_or(0) as f64;
+    let mut rows = Vec::new();
+    if let Some(row) = named_row(
+        "Scene",
+        ID_SCENE,
+        app.index as f64,
+        app.entries.iter().map(|entry| entry.name.clone()).collect(),
+    ) {
+        rows.push(row);
+    }
+    if let Some(row) = named_row(
+        "Checkpoint",
+        ID_CP,
+        app.checkpoint as f64,
+        app.entry()
+            .checkpoints
+            .iter()
+            .map(|checkpoint| checkpoint.name.clone())
+            .collect(),
+    ) {
+        rows.push(row);
+    }
+    if let Some(row) = named_row(
+        "View",
+        ID_VIEW,
+        view_value,
+        VIEWS.iter().map(|name| (*name).to_string()).collect(),
+    ) {
+        rows.push(row);
+    }
+    for (index, name) in SLIDER_KNOBS.iter().enumerate() {
+        if let Some(row) = knob_row(app, index, name) {
+            rows.push(row);
+        }
     }
     rows
 }
 
-fn press(
+fn slide(
     app: &mut App,
     camera: &mut Camera,
     tools: &mut genos_debug::Tools,
     renderer: &mut Renderer,
     id: u32,
+    value: f64,
 ) -> Result<(), String> {
-    if (ID_SCENE..ID_SCENE + app.entries.len() as u32).contains(&id) {
-        switch_to(
-            app,
-            (id - ID_SCENE) as usize,
-            None,
-            camera,
-            tools,
-            renderer,
-        )?;
-    } else if (ID_CP..ID_CP + 64).contains(&id) {
-        let i = (id - ID_CP) as usize;
-        if let Some(name) = app.entry().checkpoints.get(i).map(|c| c.name.clone()) {
-            let pose = app.jump_checkpoint(&name)?;
-            camera.set_pose(
-                Vec3::new(pose.position[0], pose.position[1], pose.position[2]),
-                pose.yaw,
-                pose.pitch,
-            );
+    let index = value.round().max(0.0) as usize;
+    if id == ID_SCENE {
+        if index != app.index && index < app.entries.len() {
+            switch_to(app, index, None, camera, tools, renderer)?;
         }
-    } else if (ID_VIEW..ID_VIEW + VIEWS.len() as u32).contains(&id) {
-        let mode = match VIEWS[(id - ID_VIEW) as usize] {
-            "direct" => ViewMode::Direct,
-            "bounce" => ViewMode::Bounce,
-            "albedo" => ViewMode::Albedo,
-            "normal" => ViewMode::Normal,
-            "depth" => ViewMode::Depth,
-            "texels" => ViewMode::Texels,
-            _ => ViewMode::Full,
-        };
-        tools.set_view(mode);
-    } else if (ID_PRESET..ID_PRESET + PRESETS.len() as u32).contains(&id) {
-        let _ = app.set_knob("lighting_preset", (id - ID_PRESET) as f64);
+    } else if id == ID_CP {
+        if index != app.checkpoint {
+            if let Some(name) = app.entry().checkpoints.get(index).map(|c| c.name.clone()) {
+                let pose = app.jump_checkpoint(&name)?;
+                camera.set_pose(
+                    Vec3::new(pose.position[0], pose.position[1], pose.position[2]),
+                    pose.yaw,
+                    pose.pitch,
+                );
+            }
+        }
+    } else if id == ID_VIEW {
+        if let Some(name) = VIEWS.get(index) {
+            let mode = view_from_name(name);
+            if tools.view_mode() != mode {
+                tools.set_view(mode);
+            }
+        }
+    } else if (ID_KNOB..ID_KNOB + SLIDER_KNOBS.len() as u32).contains(&id) {
+        let name = SLIDER_KNOBS[(id - ID_KNOB) as usize];
+        app.set_knob(name, value)?;
     }
     Ok(())
 }
 
-fn slide(app: &mut App, id: u32, value: f64) {
-    if id == ID_KNOB {
-        let _ = app.set_knob("lighting_bounces", value);
+fn view_from_name(name: &str) -> ViewMode {
+    match name {
+        "direct" => ViewMode::Direct,
+        "bounce" => ViewMode::Bounce,
+        "albedo" => ViewMode::Albedo,
+        "normal" => ViewMode::Normal,
+        "depth" => ViewMode::Depth,
+        "texels" => ViewMode::Texels,
+        _ => ViewMode::Full,
     }
 }
 
@@ -931,8 +962,7 @@ fn apply_intent(opts: &Options) -> Result<(), String> {
 }
 
 fn need_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
-    args.next()
-        .ok_or_else(|| format!("{flag} needs a value"))
+    args.next().ok_or_else(|| format!("{flag} needs a value"))
 }
 
 fn options() -> Result<Options, String> {
@@ -983,9 +1013,7 @@ fn options() -> Result<Options, String> {
             }
             "--size" => {
                 let text = need_arg(&mut args, "--size")?;
-                let (w, h) = text
-                    .split_once('x')
-                    .ok_or("size is WxH")?;
+                let (w, h) = text.split_once('x').ok_or("size is WxH")?;
                 size = (
                     w.parse().map_err(|_| "bad width".to_string())?,
                     h.parse().map_err(|_| "bad height".to_string())?,
@@ -1019,7 +1047,9 @@ fn options() -> Result<Options, String> {
 #[cfg(test)]
 mod tests {
     use super::{check_summary, gltf_bytes_absent, gltf_scene, skip_line};
+    use genos_render::ViewMode;
     use genos_scene_lib::{Check, Entry, Kind};
+    use genos_ui::Paint;
 
     #[test]
     fn a_missing_gltf_is_skipped_and_a_bad_scene_is_not() {
@@ -1042,12 +1072,171 @@ mod tests {
         assert!(!gltf_scene(&entries, "room"));
         let pointer = "assets/built/sponza/sponza.gltf is a Git LFS pointer; the asset bytes are not in this checkout";
         assert!(gltf_bytes_absent(pointer));
-        assert!(gltf_bytes_absent("file not found: assets/built/sponza/sponza.gltf"));
+        assert!(gltf_bytes_absent(
+            "file not found: assets/built/sponza/sponza.gltf"
+        ));
         assert!(!gltf_bytes_absent("sponza.gltf: unrecognized asset"));
         let line = skip_line("sponza", pointer);
         assert!(line.contains("not a pass"));
         let summary = check_summary(&["camera".into(), "hell".into()], &["sponza".into()], &[]);
         assert_eq!(summary, "2 passed, 1 skipped, 0 failed (skipped sponza)");
         assert!(!summary.contains("sponza passed"));
+    }
+
+    #[test]
+    fn graded_settings_are_sliders_and_switches_stay_off_the_panel() {
+        use genos_scene::Camera;
+        use genos_ui::{button_panel, Pointer, State};
+
+        let root = genos_scene_lib::repo_root();
+        let entries = genos_scene_lib::load_dir(&genos_scene_lib::scenes_dir()).expect("scenes");
+        let log = std::fs::File::create(std::env::temp_dir().join("genos-lighting-menu.log"))
+            .expect("log");
+        let app = super::App::open(entries, root, log).expect("app");
+        let rows = super::panel_rows(&app, ViewMode::Full);
+        assert!(rows
+            .iter()
+            .all(|row| row.buttons.is_empty() && row.slider.is_some()));
+        let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+        for label in [
+            "Scene",
+            "Checkpoint",
+            "View",
+            "Preset",
+            "Bounces",
+            "Max lights",
+            "Direct refresh",
+            "Direct scale",
+            "Shadow filter",
+            "GI refresh",
+            "Budget shift",
+            "Probe rays",
+            "Probe stale",
+            "World stale",
+            "Denoise iterations",
+            "Denoise variance",
+            "Ambient",
+        ] {
+            assert!(labels.contains(&label), "missing {label}");
+        }
+        for row in &rows {
+            let steps = &row.slider.as_ref().unwrap().steps;
+            let names: Vec<&str> = steps.iter().map(|step| step.name.as_str()).collect();
+            assert_ne!(names, ["off", "on"]);
+        }
+        let preset = rows
+            .iter()
+            .find(|row| row.label == "Preset")
+            .unwrap()
+            .slider
+            .as_ref()
+            .unwrap();
+        let names: Vec<&str> = preset.steps.iter().map(|step| step.name.as_str()).collect();
+        assert!(names.contains(&"potato"));
+        assert!(names.contains(&"day-cycle"));
+        assert!(names.contains(&"gi-1bounce"));
+        assert!(names.contains(&"high"));
+        let rays = rows
+            .iter()
+            .find(|row| row.label == "Probe rays")
+            .unwrap()
+            .slider
+            .as_ref()
+            .unwrap();
+        assert!(rays.steps.is_empty());
+        assert_eq!(rays.step, 4.0);
+        let denoise = rows
+            .iter()
+            .find(|row| row.label == "Denoise iterations")
+            .unwrap()
+            .slider
+            .as_ref()
+            .unwrap();
+        let denoise_names: Vec<&str> = denoise
+            .steps
+            .iter()
+            .map(|step| step.name.as_str())
+            .collect();
+        assert_eq!(denoise_names, ["1", "3", "5"]);
+
+        let Some(path) = std::env::var_os("GENOS_MENU_SHOT") else {
+            return;
+        };
+        let mut ui = State::default();
+        let camera = Camera::opening();
+        let viewport = [1280.0, 720.0];
+        let idle = button_panel(
+            &mut ui,
+            "Menu",
+            &rows,
+            viewport,
+            &camera,
+            Pointer {
+                x: -1.0,
+                y: -1.0,
+                ..Pointer::default()
+            },
+        );
+        let ambient = rows
+            .iter()
+            .find(|row| row.label == "Ambient")
+            .unwrap()
+            .slider
+            .as_ref()
+            .unwrap();
+        let hit = idle
+            .shown
+            .iter()
+            .find(|shown| shown.id == ambient.id)
+            .expect("ambient slider");
+        let mut ui = State::default();
+        let frame = button_panel(
+            &mut ui,
+            "Menu",
+            &rows,
+            viewport,
+            &camera,
+            Pointer {
+                x: hit.rect.x + hit.rect.w * 0.75,
+                y: hit.rect.y + 8.0,
+                ..Pointer::default()
+            },
+        );
+        assert_eq!(frame.tooltip.as_deref(), Some(ambient.tip().as_str()));
+        let (width, height, rgb) = raster_menu(&frame.paints);
+        std::fs::write(path, genos_debug::png::encode_rgb(width, height, &rgb)).expect("png");
+    }
+
+    fn raster_menu(paints: &[Paint]) -> (u32, u32, Vec<u8>) {
+        let mut max_x = 8.0f32;
+        let mut max_y = 8.0f32;
+        for paint in paints {
+            max_x = max_x.max(paint.x + paint.w);
+            max_y = max_y.max(paint.y + paint.h);
+        }
+        let margin = 12.0;
+        let width = (max_x + margin).ceil() as u32;
+        let height = (max_y + margin).ceil() as u32;
+        let mut rgb = vec![8u8; (width * height * 3) as usize];
+        for paint in paints {
+            let color = [
+                (paint.color[0].clamp(0.0, 1.0) * 255.0) as u8,
+                (paint.color[1].clamp(0.0, 1.0) * 255.0) as u8,
+                (paint.color[2].clamp(0.0, 1.0) * 255.0) as u8,
+            ];
+            let x0 = paint.x.floor().max(0.0) as u32;
+            let y0 = paint.y.floor().max(0.0) as u32;
+            let x1 = ((paint.x + paint.w).ceil() as u32).min(width);
+            let y1 = ((paint.y + paint.h).ceil() as u32).min(height);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = ((y * width + x) * 3) as usize;
+                    rgb[i] = color[0];
+                    rgb[i + 1] = color[1];
+                    rgb[i + 2] = color[2];
+                }
+            }
+        }
+        (width, height, rgb)
     }
 }

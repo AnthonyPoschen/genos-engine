@@ -54,7 +54,7 @@ cargo run --release -p genos-lighting -- --scene sponza --gpu-times 30
 
 Screenshots, dumps, and logs go to `./genos-debug/shots/`, `./genos-debug/logs/`, and `./genos-debug/dumps/` unless `--out` is set. When `GENOS_LIGHTING_DUMP` is set, dumps go to `<out>/dumps` if `--out` was passed or if `GENOS_LIGHTING_DUMP_DIR` was not already set. Nothing defaults to `$HOME`.
 
-Page Up and Page Down switch scenes. Keys 1–9 jump checkpoints. Home and 0 reset to the active checkpoint. The panel has the same scene, checkpoint, view, and preset controls, plus the bounce slider.
+Page Up and Page Down switch scenes. Keys 1–9 jump checkpoints. Home and 0 reset to the active checkpoint. The panel draws scene, checkpoint, and view as named-step sliders. The graded lighting settings on that panel are sliders too: preset, bounces, max lights, direct refresh, direct scale, shadow filter, GI refresh, budget shift, probe rays, probe staleness, world staleness, denoiser iterations, denoiser variance, and ambient. A choice uses the knob's names. A number uses the knob's range and step. An on/off feature switch stays on the knob list for MCP and Rhai. The panel does not draw it. Arrow keys and the wheel step the slider under the pointer, or the slider that was last pressed.
 
 `load_scene` drops edits and calls `Renderer::reset_lighting_cache`. A deterministic replay and a saved setup are a follow-up. They are not in this binary.
 
