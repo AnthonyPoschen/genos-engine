@@ -6,7 +6,7 @@
 //!
 //! Every option also reads an environment variable (`GENOS_STRESS_SCALE`,
 //! `GENOS_STRESS_LIGHTS`, `GENOS_STRESS_DYNAMIC`, `GENOS_STRESS_LAYOUT`,
-//! `GENOS_STRESS_DAY_SECONDS`); a flag
+//! `GENOS_STRESS_DAY_SECONDS`, `GENOS_STRESS_STEP`, `GENOS_STRESS_FIXED_DT`); a flag
 //! wins over the variable. Lighting launch flags (`--preset`, `--bounces`,
 //! `--ambient`, `--time-of-day`, `--gpu-times`) and `--wake`, `--lighting-debug`,
 //! and `--wake-log` win the same way: each mirror applies only when that
@@ -68,6 +68,8 @@ const USAGE: &str = "genos-stress [options]
   --proof                   open the proof window (floats, takes no focus; --bench
                             always uses it, so the compositor keeps its size)
   --frames N                quit after N frames; frames step 1/60 s of scene time
+  --fixed-dt SECONDS        scene step per frame (wall clock otherwise; 1/60 with --step)
+  --step                    pause; Space or the MCP step command advances one fixed step
   --shot PATH               write a PNG of the last frame. With no --frames, runs 60
                             and then writes (a proof window does not close itself)
   --no-panel                hide the panel
@@ -166,6 +168,10 @@ struct Options {
     size: (u32, u32),
     proof: bool,
     frames: Option<u32>,
+    /// Pause and advance one fixed step on Space or MCP `step`.
+    step: bool,
+    /// Scene seconds per frame. Unset keeps wall-clock time, except `--frames` and `--shot`.
+    fixed_dt: Option<f32>,
     shot: Option<PathBuf>,
     panel: bool,
     bench: Option<bench::Plan>,
@@ -194,6 +200,44 @@ fn list<T: std::str::FromStr>(name: &str, text: &str) -> Result<Vec<T>, String> 
     text.split(',')
         .map(|item| parse(name, item.trim()))
         .collect()
+}
+
+fn off_word(text: &str) -> bool {
+    matches!(
+        text.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "off" | "no"
+    )
+}
+
+/// `--step` and `--fixed-dt` win over `GENOS_STRESS_STEP` and `GENOS_STRESS_FIXED_DT`.
+fn time_control(
+    step_arg: bool,
+    fixed_arg: Option<f32>,
+    step_env: Option<&str>,
+    fixed_env: Option<&str>,
+) -> Result<(bool, Option<f32>), String> {
+    let step = if step_arg {
+        true
+    } else {
+        match step_env.map(str::trim).filter(|text| !text.is_empty()) {
+            Some(text) if off_word(text) => false,
+            Some(_) => true,
+            None => false,
+        }
+    };
+    let fixed_dt = if let Some(dt) = fixed_arg {
+        Some(dt)
+    } else if let Some(text) = fixed_env.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(parse("--fixed-dt", text)?)
+    } else {
+        None
+    };
+    if let Some(dt) = fixed_dt {
+        if !dt.is_finite() || dt <= 0.0 {
+            return Err(format!("--fixed-dt must be greater than 0, got {dt}"));
+        }
+    }
+    Ok((step, fixed_dt))
 }
 
 fn env<T: std::str::FromStr>(name: &str) -> Result<Option<T>, String> {
@@ -230,6 +274,8 @@ fn options() -> Result<Options, String> {
         size: (1280, 720),
         proof: false,
         frames: None,
+        step: false,
+        fixed_dt: None,
         shot: None,
         panel: true,
         bench: None,
@@ -295,6 +341,8 @@ fn options() -> Result<Options, String> {
             }
             "--proof" => opts.proof = true,
             "--frames" => opts.frames = Some(parse(&arg, &value()?)?),
+            "--fixed-dt" => opts.fixed_dt = Some(parse(&arg, &value()?)?),
+            "--step" => opts.step = true,
             "--shot" => opts.shot = Some(PathBuf::from(value()?)),
             "--no-panel" => opts.panel = false,
             "--bench" => seconds = Some(parse::<f32>(&arg, &value()?)?),
@@ -403,6 +451,14 @@ fn options() -> Result<Options, String> {
         }
     }
     opts.dynamic = opts.dynamic.min(100);
+    let (step, fixed_dt) = time_control(
+        opts.step,
+        opts.fixed_dt,
+        std::env::var("GENOS_STRESS_STEP").ok().as_deref(),
+        std::env::var("GENOS_STRESS_FIXED_DT").ok().as_deref(),
+    )?;
+    opts.step = step;
+    opts.fixed_dt = fixed_dt;
     if opts.lamp_stop && opts.scene.is_none() {
         return Err("--lamp-stop needs --scene examples/stress/scenes/bounce_corner.rhai".into());
     }
@@ -576,6 +632,14 @@ fn run() -> Result<(), String> {
     if std::env::args().nth(1).as_deref() == Some("gi-check") {
         return gi_check::run(std::env::args().skip(2));
     }
+    if std::env::args().nth(1).as_deref() == Some("lighting-ref") {
+        return match genos_stress::lighting_ref::run(std::env::args().skip(2)) {
+            Ok(code) => {
+                std::process::exit(code);
+            }
+            Err(err) => Err(err),
+        };
+    }
     let opts = options()?;
     if let Some(dir) = wake_log_path(opts.wake_log.as_deref())? {
         redirect_wake_log(&dir)?;
@@ -698,6 +762,16 @@ fn run() -> Result<(), String> {
         tools.set_out_dir(run.report_dir.clone());
         genos_debug::script::spawn(run)
     });
+    if opts.step || opts.fixed_dt.is_some() {
+        tools.set_fixed_step(Some(opts.fixed_dt.unwrap_or(bench::STEP)));
+    }
+    if opts.step {
+        tools.pause();
+        eprintln!(
+            "genos-stress: stepped at {} s; Space or MCP step advances one frame",
+            opts.fixed_dt.unwrap_or(bench::STEP)
+        );
+    }
     let fixed_step = opts.frames.is_some() || opts.shot.is_some();
     let mut size = (renderer.width(), renderer.height());
     let mut focus = FocusGate::default();
@@ -706,6 +780,8 @@ fn run() -> Result<(), String> {
     let controls = character_controller();
     let mut drawn = 0u32;
     let mut clock: Option<Instant> = None;
+    let mut sim_time = 0.0f32;
+    let run_started = Instant::now();
     let mut fps = FrameRate::default();
     let mut graph = FrameGraph::default();
     loop {
@@ -713,7 +789,7 @@ fn run() -> Result<(), String> {
         let real_dt = clock
             .map(|then| now.saturating_duration_since(then).as_secs_f32())
             .unwrap_or(bench::STEP);
-        let dt = tools.scene_dt(if fixed_step {
+        let mut dt = tools.scene_dt(if fixed_step {
             bench::STEP
         } else {
             real_dt.min(MAX_FRAME_SECONDS)
@@ -742,6 +818,10 @@ fn run() -> Result<(), String> {
         let gated = focus.gate(&frame);
         input.begin_frame();
         input.apply_evdev_keys(&gated.keys_down);
+        if opts.step && input.keyboard.pressed(InputCode::key_space) {
+            tools.request_steps(1);
+            dt = tools.scene_dt(bench::STEP);
+        }
         input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
         input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
         input.poll_gamepads();
@@ -856,6 +936,9 @@ fn run() -> Result<(), String> {
         stage.unfilled_tint = applied.tint;
 
         drawn += 1;
+        if opts.step && dt > 0.0 {
+            sim_time += dt;
+        }
         let last = shot_frame_limit(opts.frames, opts.shot.is_some())
             .is_some_and(|limit| drawn >= limit);
         let shot = genos_mcp::take_shot_request();
@@ -878,6 +961,13 @@ fn run() -> Result<(), String> {
             }
             Err(err) => return Err(err),
         };
+        if opts.step && dt > 0.0 {
+            eprintln!(
+                "genos-stress: frame {drawn} sim {sim_time:.4} wall {:.3}s settled {}",
+                run_started.elapsed().as_secs_f64(),
+                renderer.picture_settled()
+            );
+        }
         tools.after_draw(
             &mut renderer,
             pixels.as_deref(),
@@ -1266,5 +1356,24 @@ mod wake_log_tests {
         assert!(text.contains("genos"), "{text}");
         assert!(text.ends_with('\n'));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn step_and_fixed_dt_prefer_the_argument() {
+        let (step, dt) = time_control(true, Some(0.05), Some("off"), Some("0.2")).unwrap();
+        assert!(step);
+        assert!((dt.unwrap() - 0.05).abs() < 1.0e-6);
+        let (step, dt) = time_control(false, None, Some("1"), Some("0.2")).unwrap();
+        assert!(step);
+        assert!((dt.unwrap() - 0.2).abs() < 1.0e-6);
+        let (step, dt) = time_control(false, None, Some("off"), None).unwrap();
+        assert!(!step);
+        assert!(dt.is_none());
+        assert!(time_control(false, Some(0.0), None, None).is_err());
     }
 }
