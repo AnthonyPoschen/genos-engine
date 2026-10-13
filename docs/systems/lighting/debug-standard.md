@@ -16,7 +16,7 @@ Isolate toggles attribute a change to one component: `GENOS_LIGHTING_TOGGLES`, o
 - `GENOS_LIGHTING_DEBUG` or `GENOS_LIGHTING_SC_TRACE` prints `lightingatrous` (dirty fraction, mode `list` or `dense`, threshold, filtered texels) for the a-trous fallback. `GENOS_LIGHTING_ATROUS_DIRTY` is the fraction (default 0.25; `0` always dense, `1` lists up to the cap). `Renderer::lighting_atrous_stats` reads the same words.
 - `GENOS_LIGHTING_DEBUG=1` prints `lighting probes rays … per_probe …`. It reads GPU counters back, so it stays off fps runs.
 - `GENOS_LIGHTING_SC_TRACE` also prints `lightingsc` (surface-cache claims and relights).
-- `GENOS_GPU_TIMES=1` prints `GPU_MS`. `GENOS_GPU_DISPATCH=1` with it prints `LIGHTING_DISPATCH`.
+- `GENOS_GPU_TIMES=1` prints `GPU_MS` with the picture size, the present mode, and separate `nonlight` and `lighting` times (`setup`, `gbuffer`, `aa`, `overlay`, `copy`). `GENOS_GPU_DISPATCH=1` with it prints `LIGHTING_DISPATCH`.
 - `Renderer::settle_stats` returns `SettleStats { settled, still_frames }`. The MCP `timing` command returns fps, frame, draw CPU, and GPU.
 
 ## MCP debug endpoints
