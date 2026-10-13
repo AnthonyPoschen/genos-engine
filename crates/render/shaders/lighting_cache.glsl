@@ -3407,6 +3407,8 @@ void lighting_svgf_iter(uint slot, uint it) {
     }
 }
 float lighting_svgf_lum_at(uint slot, ivec2 off, out bool ok) {
+    // A zero offset is this slot. cell_slot(0, 0) hashes a point that is a
+    // cell off for about half the texels (S72V), so the center tap would miss.
     uint q = (off.x == 0 && off.y == 0) ? slot : lighting_sc_cell_slot(slot, off);
     ok = false;
     if (q == ~0u) {

@@ -48,7 +48,7 @@ fn lighting_pipelines_build_quickly() {
         .collect();
     assert_eq!(
         lighting.len(),
-        9,
+        10,
         "every GI v2 pipeline is timed: {times:?}"
     );
     let limit = pipeline_limit();
