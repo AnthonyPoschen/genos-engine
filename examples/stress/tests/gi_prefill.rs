@@ -10,12 +10,14 @@
 //! `GENOS_GI_PREFILL_TURN` (default 24) is the turn, `GENOS_GI_PREFILL_YAW` (default
 //! 0.5 rad) how far it goes. `GENOS_GI_PREFILL_MIN` / `GENOS_GI_PREFILL_SHOWN` are the
 //! two asserts (64 pre-filled texels, 8 of them shown after the turn).
+//! After the turn, unfilled shaded pixels must stay under
+//! `GENOS_GI_PREFILL_UNFILLED_PCT` (see `DEFAULT_UNFILLED_PCT`).
 //! `GENOS_GI_PREFILL_OUT` keeps the dumps.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use genos_render::Renderer;
+use genos_render::{Renderer, UnfilledControl};
 use genos_scene::{Camera, Vec3};
 use genos_stress::building::{Layout, LightMix};
 use genos_stress::stage::{Scale, Stage};
@@ -35,6 +37,10 @@ const BENCH_PITCH: f32 = -0.25;
 const DEFAULT_SETTLE: u64 = 96;
 const DEFAULT_TURN: u64 = 24;
 const DEFAULT_YAW: f32 = 0.5;
+/// Unfilled share of shaded pixels after the turn, on lavapipe at 320x180.
+/// A lavapipe run (settle 96, turn 24, yaw 0.5) ended at 0.92% (483 px, max_run 35).
+/// `GENOS_GI_PREFILL_UNFILLED_PCT` overrides this.
+const DEFAULT_UNFILLED_PCT: f32 = 2.0;
 /// Draws after the last dumped frame so `lighting_dump_write` runs (it waits
 /// until a later begin sees `frame >= last + 3`).
 const FLUSH: u64 = 5;
@@ -188,6 +194,11 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
     );
     let mut renderer =
         Renderer::open(window.display, window.surface, size.width, size.height).expect("renderer");
+    renderer.set_unfilled(UnfilledControl {
+        count: true,
+        tint: false,
+        dump_pct: None,
+    });
     let stage = stage();
     eprintln!(
         "prefill: settle {settle} turn {turn} yaw {yaw_delta} dir {}",
@@ -206,6 +217,20 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
             eprintln!("prefill: turn frame {i}/{turn}");
         }
     }
+    let unfilled = renderer.unfilled_stats();
+    eprintln!("prefill: {}", unfilled.line());
+    let unfilled_cap = std::env::var("GENOS_GI_PREFILL_UNFILLED_PCT")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|n| n.is_finite() && *n >= 0.0)
+        .unwrap_or(DEFAULT_UNFILLED_PCT);
+    assert!(
+        unfilled.shaded > 0 && unfilled.pct < unfilled_cap,
+        "unfilled after the turn is {:.2}% of {} shaded pixels (want under {unfilled_cap}); {}",
+        unfilled.pct,
+        unfilled.shaded,
+        unfilled.line()
+    );
     let yaw_end = BENCH_YAW + yaw_delta;
     for _ in 0..FLUSH {
         draw(&mut window, &mut renderer, &stage.world, yaw_end);

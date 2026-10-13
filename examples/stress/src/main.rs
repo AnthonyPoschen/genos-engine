@@ -79,7 +79,14 @@ const ID_LAYOUT: u32 = 600;
 const ID_SKY: u32 = 700;
 /// Sliders, one per knob.
 const ID_KNOB: u32 = 1000;
-const PANEL_KNOBS: [&str; 4] = ["time_of_day", "sun_speed", "lights", "dynamic"];
+const PANEL_KNOBS: [&str; 6] = [
+    "time_of_day",
+    "sun_speed",
+    "lights",
+    "dynamic",
+    "unfilled",
+    "unfilled_tint",
+];
 /// A hitch longer than this does not replay the missed time.
 const MAX_FRAME_SECONDS: f32 = 0.25;
 
@@ -450,6 +457,8 @@ fn run() -> Result<(), String> {
     }
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    stage.unfilled_count = renderer.unfilled().count;
+    stage.unfilled_tint = renderer.unfilled().tint;
     let host = genos_mcp::Host::new(stage.world.scene.clone(), camera.clone());
     let _server = genos_mcp::Server::start_on(host, genos_mcp::listen_port())?;
     eprintln!(
@@ -504,10 +513,15 @@ fn run() -> Result<(), String> {
         clock = Some(now);
         let frame = window.pump();
         if !title_base.is_empty() {
-            let rendering = genos_debug::reference::RENDERING.load(std::sync::atomic::Ordering::SeqCst) > 0;
+            let rendering =
+                genos_debug::reference::RENDERING.load(std::sync::atomic::Ordering::SeqCst) > 0;
             if rendering != title_ref {
                 title_ref = rendering;
-                window.set_title(&if rendering { format!("{title_base} | REF") } else { title_base.clone() });
+                window.set_title(&if rendering {
+                    format!("{title_base} | REF")
+                } else {
+                    title_base.clone()
+                });
             }
         }
         if frame.closing {
@@ -602,6 +616,32 @@ fn run() -> Result<(), String> {
             overlay.extend(rects);
             renderer.set_overlay_lines(&lines);
         }
+
+        if input.keyboard.pressed(InputCode::key_f8) {
+            let shift = input.keyboard.down(InputCode::key_shift_left)
+                || input.keyboard.down(InputCode::key_shift_right);
+            if shift {
+                stage.unfilled_tint = !stage.unfilled_tint;
+                if stage.unfilled_tint {
+                    stage.unfilled_count = true;
+                }
+            } else {
+                stage.unfilled_count = !stage.unfilled_count;
+                if !stage.unfilled_count {
+                    stage.unfilled_tint = false;
+                }
+            }
+        }
+        let mut unfilled = renderer.unfilled();
+        unfilled.count = stage.unfilled_count;
+        unfilled.tint = stage.unfilled_tint;
+        renderer.set_unfilled(unfilled);
+        let applied = renderer.unfilled();
+        if input.keyboard.pressed(InputCode::key_f8) {
+            eprintln!("unfilled count {} tint {}", applied.count, applied.tint);
+        }
+        stage.unfilled_count = applied.count;
+        stage.unfilled_tint = applied.tint;
 
         drawn += 1;
         let last = opts.frames.is_some_and(|limit| drawn >= limit);
