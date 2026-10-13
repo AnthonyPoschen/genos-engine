@@ -1954,7 +1954,6 @@ impl Gpu {
             }
             let mut filter_round = 0u32;
             let mut atrous_i = 0usize;
-            let mut atrous_stage = 0u32;
             let mut atrous_ran = false;
             let mut picked = false;
             // The push constants the next pass sees (the gather and filter rounds add bits).
@@ -1981,8 +1980,7 @@ impl Gpu {
                     // this frame", so on frames with a change every stage read 4-7
                     // and the variance pass and first levels never ran.
                     // Five iterations are stages 0..6. Fewer iterations jump to the push.
-                    atrous_stage = atrous_stages.get(atrous_i).copied().unwrap_or(0);
-                    let stage = atrous_stage;
+                    let stage = atrous_stages.get(atrous_i).copied().unwrap_or(0);
                     atrous_i += 1;
                     atrous_ran = true;
                     let mut round_pc = pc;
