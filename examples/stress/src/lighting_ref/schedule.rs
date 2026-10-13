@@ -195,8 +195,9 @@ fn parse_u32(name: &str, text: &str) -> Result<u32, String> {
         .map_err(|_| format!("expected a whole number for {name}, got {text}"))
 }
 
-/// Where the scored pose sits. An event jumps there after warmup. Motion
-/// approaches it by `fixed_dt`, then holds.
+/// Where the scored pose sits. An event holds the pose before the jump until
+/// the scene is released, then jumps. A fixed settle count jumps after warmup.
+/// Motion approaches the target by `fixed_dt`, then holds.
 #[derive(Clone, Copy, Debug)]
 pub struct Target {
     pub box_time: f32,
@@ -209,6 +210,8 @@ pub struct Target {
 pub enum Phase {
     Warmup,
     Approach,
+    /// Pose before an event. The picture is not scored here.
+    Scene,
     Settle,
 }
 
@@ -217,6 +220,7 @@ impl Phase {
         match self {
             Self::Warmup => "warmup",
             Self::Approach => "approach",
+            Self::Scene => "scene",
             Self::Settle => "settle",
         }
     }
@@ -252,6 +256,9 @@ enum Kind {
     Event {
         box_after: f32,
         lamp_after: f32,
+        /// Metric settles hold the before-pose until [`Timeline::release_event`].
+        /// A fixed settle count jumps on the first scored frame.
+        hold_scene: bool,
     },
     Approach {
         box_target: f32,
@@ -267,6 +274,7 @@ impl Timeline {
                 Kind::Event {
                     box_after: target.box_time,
                     lamp_after: target.lamp_time,
+                    hold_scene: matches!(plan.settle, SettleMode::Metric { .. }),
                 },
                 0.0,
                 0.0,
@@ -296,6 +304,13 @@ impl Timeline {
             lamp_time,
             day,
             settle_index: 0,
+        }
+    }
+
+    /// The before-pose has settled. The next frame is the event.
+    pub fn release_event(&mut self) {
+        if let Kind::Event { hold_scene, .. } = &mut self.kind {
+            *hold_scene = false;
         }
     }
 
@@ -333,10 +348,15 @@ impl Timeline {
             Kind::Event {
                 box_after,
                 lamp_after,
+                hold_scene,
             } => {
-                self.box_time = box_after;
-                self.lamp_time = lamp_after;
-                Phase::Settle
+                if hold_scene {
+                    Phase::Scene
+                } else {
+                    self.box_time = box_after;
+                    self.lamp_time = lamp_after;
+                    Phase::Settle
+                }
             }
             Kind::Approach {
                 box_target,
@@ -619,6 +639,37 @@ mod tests {
         assert_eq!(last.settle_index, 4);
         assert_eq!(last.capture_offset, Some(4));
         assert!((last.box_time - 0.45).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn a_metric_event_holds_the_before_pose_until_the_scene_is_released() {
+        let mut timeline = Timeline::start(
+            plan(metric(30), 0, DEFAULT_DT),
+            Target {
+                box_time: 0.45,
+                lamp_time: 0.2,
+                day: 0.25,
+                event: true,
+            },
+        );
+        let held = timeline.next();
+        assert_eq!(held.phase, Phase::Scene);
+        assert_eq!(held.settle_index, 0);
+        assert_eq!(held.capture_offset, None);
+        assert_eq!(held.box_time, 0.0);
+        assert_eq!(held.lamp_time, 0.0);
+        assert!((held.day - 0.25).abs() < 1.0e-6);
+        let still = timeline.next();
+        assert_eq!(still.phase, Phase::Scene);
+        assert_eq!(still.box_time, 0.0);
+        timeline.release_event();
+        let jump = timeline.next();
+        assert_eq!(jump.phase, Phase::Settle);
+        assert_eq!(jump.settle_index, 1);
+        assert_eq!(jump.capture_offset, Some(1));
+        assert!((jump.box_time - 0.45).abs() < 1.0e-6);
+        assert!((jump.lamp_time - 0.2).abs() < 1.0e-6);
+        assert!((jump.day - 0.25).abs() < 1.0e-6);
     }
 
     #[test]

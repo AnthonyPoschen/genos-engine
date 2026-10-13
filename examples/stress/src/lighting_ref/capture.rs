@@ -1,8 +1,9 @@
 //! Live frames for one check.
 //!
 //! The path trace is the reference. These frames are the candidate. Every mode
-//! uses the same [`super::schedule::FramePlan`]: warmup, then an approach or an
-//! event jump, then settle. Wall time is logged per frame and does not choose
+//! uses the same [`super::schedule::FramePlan`]: warmup, then an approach or a
+//! held scene, then settle. A metric event holds the pose before the jump until
+//! that scene settles, then jumps. Wall time is logged per frame and does not choose
 //! when to stop. `picture_settled` is logged and ignored on the first frame of
 //! a pose, because that flag can still describe the pose before it.
 
@@ -141,6 +142,8 @@ fn capture_one(
     let mut settle_frame_ids = Vec::new();
     let mut crossed: Option<u32> = None;
     let mut prev_phase: Option<Phase> = None;
+    let mut scene_prev: Option<Picture> = None;
+    let mut scene_frames: u32 = 0;
 
     loop {
         let step = timeline.next();
@@ -177,6 +180,25 @@ fn capture_one(
             }
             settle_pics.push(picture);
             settle_frame_ids.push(step.frame);
+        } else if step.phase == Phase::Scene {
+            // The picture is scored after this pose, on the event. Consecutive
+            // frames under the settle line, with the renderer holding its light,
+            // release the jump. The cap releases it anyway.
+            scene_frames += 1;
+            if let SettleMode::Metric { threshold, cap } = opts.plan.settle {
+                let line = settle_line(threshold, 0.0, picture.height);
+                let stable = match &scene_prev {
+                    Some(prev) => blur_relative(prev, &picture, &opts.params)
+                        .map(|error| error <= line)
+                        .unwrap_or(false),
+                    None => false,
+                };
+                let held = scene_frames > 1 && raw_settled && stable;
+                if held || scene_frames >= cap {
+                    timeline.release_event();
+                }
+            }
+            scene_prev = Some(picture.clone());
         }
         let settled_text = if trusted && raw_settled {
             "true"
@@ -292,6 +314,7 @@ fn capture_one(
             picture_height,
             cap_hit,
             job.event.is_some(),
+            scene_frames,
             job.still && candidate_index + 1 >= settle_pics.len() && settle_pics.len() >= 2,
             opts.warm,
             cold,
@@ -367,6 +390,7 @@ fn shot_note(
     height: u32,
     cap_hit: bool,
     event: bool,
+    scene_frames: u32,
     tail_is_previous: bool,
     warm: bool,
     cold: ColdStart,
@@ -393,7 +417,9 @@ fn shot_note(
             .map(|n| n.to_string())
             .collect::<Vec<_>>()
             .join(",+");
-        format!(" Captures at event+{list}.")
+        format!(
+            " The event fired after {scene_frames} scene frames on the pose before the jump. Captures at event+{list}."
+        )
     } else {
         String::new()
     };

@@ -274,4 +274,149 @@ mod tests {
         assert!(0.084 < genos_lighting_ref::REFERENCE_NOISE_CEILING);
         assert!(0.161 > genos_lighting_ref::REFERENCE_NOISE_CEILING);
     }
+
+    #[test]
+    fn cold_mode_applies_each_checkpoints_camera_and_scene() {
+        use crate::lighting_ref::schedule::{FramePlan, Phase, Target, Timeline};
+
+        // Each checkpoint opens its own stage. A shared stage would keep the
+        // clocks from the checkpoint before it.
+        for cp in genos_lighting_ref::available_checkpoints() {
+            let shot = shot(cp.scene, cp.name).expect(cp.name);
+            let mut timeline = Timeline::start(
+                FramePlan::default_plan(),
+                Target {
+                    box_time: shot.box_time,
+                    lamp_time: shot.lamp_time,
+                    day: shot.day,
+                    event: cp.event.is_some(),
+                },
+            );
+            let (mut stage, camera) = open_stage(&shot, false, None);
+            let (expect_scene, expect_camera) = scene_and_camera(&shot, false);
+            let mut scored = None;
+            for _ in 0..400 {
+                let step = timeline.next();
+                if step.phase == Phase::Scene {
+                    apply_clocks(&mut stage, step.box_time, step.lamp_time, step.day);
+                    assert_eq!(step.box_time, 0.0, "{} scene box", cp.name);
+                    assert_eq!(step.lamp_time, 0.0, "{} scene lamp", cp.name);
+                    assert!(
+                        (step.day - shot.day).abs() < 1.0e-4,
+                        "{} scene day {}",
+                        cp.name,
+                        step.day
+                    );
+                    timeline.release_event();
+                    continue;
+                }
+                if step.phase == Phase::Settle {
+                    apply_clocks(&mut stage, step.box_time, step.lamp_time, step.day);
+                    scored = Some(step);
+                    break;
+                }
+            }
+            let step = scored.unwrap_or_else(|| panic!("{} never reached its pose", cp.name));
+            assert!(
+                (step.box_time - shot.box_time).abs() < 1.0e-4,
+                "{} box {} wanted {}",
+                cp.name,
+                step.box_time,
+                shot.box_time
+            );
+            assert!(
+                (step.lamp_time - shot.lamp_time).abs() < 1.0e-4,
+                "{} lamp {} wanted {}",
+                cp.name,
+                step.lamp_time,
+                shot.lamp_time
+            );
+            assert!(
+                (step.day - shot.day).abs() < 1.0e-4,
+                "{} day {} wanted {}",
+                cp.name,
+                step.day,
+                shot.day
+            );
+            assert!(
+                (camera.position.x - expect_camera.position.x).abs() < 1.0e-4
+                    && (camera.position.y - expect_camera.position.y).abs() < 1.0e-4
+                    && (camera.position.z - expect_camera.position.z).abs() < 1.0e-4,
+                "{} camera eye {:?} wanted {:?}",
+                cp.name,
+                camera.position,
+                expect_camera.position
+            );
+            assert!(
+                (camera.yaw - expect_camera.yaw).abs() < 1.0e-4,
+                "{}",
+                cp.name
+            );
+            assert!(
+                (camera.pitch - expect_camera.pitch).abs() < 1.0e-4,
+                "{}",
+                cp.name
+            );
+            assert_eq!(
+                stage.world.scene.lights.len(),
+                expect_scene.lights.len(),
+                "{}",
+                cp.name
+            );
+            assert_eq!(
+                stage.world.scene.lighting.bounce.count, expect_scene.lighting.bounce.count,
+                "{}",
+                cp.name
+            );
+            assert_eq!(
+                stage.world.scene.lighting.ambient.mode, expect_scene.lighting.ambient.mode,
+                "{}",
+                cp.name
+            );
+            assert_eq!(
+                stage.world.scene.solids.len(),
+                expect_scene.solids.len(),
+                "{}",
+                cp.name
+            );
+            for (got, want) in stage
+                .world
+                .scene
+                .solids
+                .iter()
+                .zip(expect_scene.solids.iter())
+            {
+                assert!(
+                    (got.position.x - want.position.x).abs() < 1.0e-3
+                        && (got.position.y - want.position.y).abs() < 1.0e-3
+                        && (got.position.z - want.position.z).abs() < 1.0e-3
+                        && (got.yaw - want.yaw).abs() < 1.0e-3,
+                    "{} solid {:?} wanted {:?}",
+                    cp.name,
+                    got.position,
+                    want.position
+                );
+            }
+        }
+
+        let hall = shot("stress-still", "hall").unwrap();
+        let before = shot("stress-moving", "box-step-before").unwrap();
+        let stepped = shot("stress-moving", "box-step").unwrap();
+        let hall_scene = scene_and_camera(&hall, false).0;
+        let before_scene = scene_and_camera(&before, false).0;
+        let stepped_scene = scene_and_camera(&stepped, false).0;
+        assert_eq!(hall_scene.solids.len(), before_scene.solids.len());
+        for (hall_solid, before_solid) in hall_scene.solids.iter().zip(before_scene.solids.iter()) {
+            assert!((hall_solid.position.x - before_solid.position.x).abs() < 1.0e-4);
+        }
+        let moved = hall_scene
+            .solids
+            .iter()
+            .zip(stepped_scene.solids.iter())
+            .any(|(hall_solid, stepped_solid)| {
+                (hall_solid.position.x - stepped_solid.position.x).abs() > 0.05
+                    || (hall_solid.position.z - stepped_solid.position.z).abs() > 0.05
+            });
+        assert!(moved, "box-step must move a solid off the hall pose");
+    }
 }

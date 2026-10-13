@@ -321,7 +321,7 @@ fn plan_note(plan: &FramePlan) -> String {
         .collect::<Vec<_>>()
         .join(",+");
     format!(
-        "Frame clock {} s, warmup {} frames, {settle}, captures at event+{offsets}. Lavapipe-small and owner mode use this same list. Wall time is logged.",
+        "Frame clock {} s, warmup {} frames, {settle}, captures at event+{offsets}. A metric event holds the pose before the jump until that scene settles, then jumps. Lavapipe-small and owner mode use this same list. Wall time is logged.",
         schedule::format_dt(plan.fixed_dt),
         plan.warmup_frames,
     )
