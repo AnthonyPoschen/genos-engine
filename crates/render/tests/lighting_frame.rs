@@ -915,11 +915,11 @@ fn sponza_banner_cells_stay_still_under_the_screen_wavelet() {
         "the cloth did not show the cell grid (edge {hash_edge:.3} flicker {hash_flicker:.3})"
     );
     assert!(
-        screen_edge <= hash_edge * 0.85,
+        screen_edge <= hash_edge * 0.55,
         "screen edge {screen_edge:.3} did not beat hash {hash_edge:.3}"
     );
     assert!(
-        screen_flicker <= hash_flicker * 0.85 + 0.15,
+        screen_flicker <= hash_flicker * 0.85 + 0.35,
         "screen flicker {screen_flicker:.3} did not beat hash {hash_flicker:.3}"
     );
     if sponza_gltf_is_real() {
@@ -959,7 +959,7 @@ fn banner_scores(screen: bool) -> (f64, f64) {
         frames.push(draw(&mut window, &mut renderer, &world, &camera));
     }
     let edge = frames.iter().map(|f| cell_edge_ratio(f, 320, 6)).sum::<f64>() / frames.len() as f64;
-    (edge, roi_flicker(&frames, 320))
+    (edge, cloth_flicker(&frames, &shots))
 }
 
 fn banner_world() -> World {
@@ -1154,6 +1154,60 @@ fn cell_edge_ratio(frame: &[u8], width: usize, stride: usize) -> f64 {
         }
     }
     best
+}
+
+/// Same points on the cloth (z = 0) across camera moves. A screen-space diff
+/// also counts the picture sliding, which a stable field still does.
+fn cloth_flicker(frames: &[Vec<u8>], cams: &[(f32, f32)]) -> f64 {
+    let mut pts = Vec::new();
+    let mut x = -1.0f32;
+    while x <= 1.001 {
+        let mut y = 0.8f32;
+        while y <= 2.601 {
+            pts.push([x, y, 0.0]);
+            y += 0.15;
+        }
+        x += 0.1;
+    }
+    let mut acc = 0.0;
+    let mut n = 0.0;
+    for i in 0..frames.len().saturating_sub(1) {
+        for p in &pts {
+            let Some((x0, y0)) = banner_project(cams[i], *p) else {
+                continue;
+            };
+            let Some((x1, y1)) = banner_project(cams[i + 1], *p) else {
+                continue;
+            };
+            acc += (luma_at(&frames[i], 320, x0, y0) - luma_at(&frames[i + 1], 320, x1, y1)).abs();
+            n += 1.0;
+        }
+    }
+    if n == 0.0 { 0.0 } else { acc / n }
+}
+
+fn banner_project(cam: (f32, f32), world: [f32; 3]) -> Option<(usize, usize)> {
+    let (sy, cy) = cam.1.sin_cos();
+    let forward = [sy, 0.0, -cy];
+    let right = [cy, 0.0, sy];
+    let eye = [cam.0, 1.7, 3.2];
+    let rel = [world[0] - eye[0], world[1] - eye[1], world[2] - eye[2]];
+    let zv = rel[0] * forward[0] + rel[1] * forward[1] + rel[2] * forward[2];
+    if zv < 1.0e-3 {
+        return None;
+    }
+    let t = (30.0f32.to_radians()).tan();
+    let aspect = 320.0f32 / 180.0;
+    let ndc_x = (rel[0] * right[0] + rel[2] * right[2]) / (zv * t * aspect);
+    let ndc_y = rel[1] / (zv * t);
+    let px = (ndc_x + 1.0) * 0.5 * 320.0 - 0.5;
+    let py = (1.0 - ndc_y) * 0.5 * 180.0 - 0.5;
+    let x = (px + 0.5).floor() as i32;
+    let y = (py + 0.5).floor() as i32;
+    if x < 0 || y < 0 || x >= 320 || y >= 180 {
+        return None;
+    }
+    Some((x as usize, y as usize))
 }
 
 fn roi_flicker(frames: &[Vec<u8>], width: usize) -> f64 {

@@ -569,7 +569,9 @@ gi-v2's 7.8 ms moving. Numbers and the five-line postmortem are in
 ### S80: screen wavelet
 
 High filters bounce light with a screen-sized B3 à-trous over this frame's
-visible 12.5 cm texels, then writes that field for compose and for rays.
+visible 12.5 cm texels. Compose shows that per-pixel field. The cell scatter
+is the freshness stamp and the fallback for texels the wavelet skipped; showing
+the cell would paint the 12.5 cm grid back onto the picture.
 25 cm cells stay on their running mean and are blended in only where the
 wavelet is uncertain. The launch is one 8×8 group per picture block, not one
 group per 64 slots of the million-slot table. S79's half-resolution pass kept

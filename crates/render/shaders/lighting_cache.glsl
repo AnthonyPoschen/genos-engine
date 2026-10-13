@@ -2641,6 +2641,21 @@ const bool LIGHTING_SC_KEEP_NEAR = true;
 vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj);
 // S72M: the pixel's screen-probe irradiance (lighting_compose.comp), -1 when none.
 vec3 lighting_px_probes = vec3(-1.0);
+// Screen wavelet (control bit 19). The last à-trous write is slice 1 (the
+// iteration count is 1, 3, or 5). Compose shows that pixel. Scattering the
+// same color into the 12.5 cm cell and showing the cell paints the grid back
+// onto a thin cloth. A pixel the wavelet skipped (mask 0) keeps `fallback`.
+vec3 lighting_screen_field(uint index, vec3 fallback) {
+    if ((gstats.ctrl_bits & 524288u) == 0u) {
+        return fallback;
+    }
+    uint hist = gstats.ctrl_history != 0u ? 1u : 0u;
+    uint at = ((3u + hist) + 4u) * pc.dims.x * pc.dims.y + index * 4u;
+    if (uintBitsToFloat(outc.px[at + 2u]) <= 0.0) {
+        return fallback;
+    }
+    return lighting_unpack_rgb9e5(outc.px[at]);
+}
 vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     lighting_px_unfilled = false;
     uint mode = lighting_world_mode();

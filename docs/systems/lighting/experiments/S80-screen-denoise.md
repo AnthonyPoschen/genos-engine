@@ -19,10 +19,12 @@ filtered. The input is `lighting_svgf_in` (the texel's own mean times its sun
 gain). Stages 1..N are a B3 à-trous (Dammertz, HPG 2010: 1/16, 1/4, 3/8, 1/4,
 1/16) on a ping-pong in the picture buffer. The step is the projected 12.5 cm
 cell, times 2^i, clamped to 48 px. Depth, shading normal, and luminance stop
-the blur. Stage 6 writes the field compose already shows (`LIGHTING_WORLD_AT.y`,
-freshness in the à-trous stamp) for pixels within half a cell of the cell
-centre. Certainty below 1 blends the 25 cm running mean (Gortler pull,
-min(1, 4 wm / wall)).
+the blur. Compose reads the last iteration (slice 1) per pixel. Stage 6 still
+writes the cell (`LIGHTING_WORLD_AT.y`, freshness in the à-trous stamp) for
+the change test and for pixels the wavelet skipped. Showing that cell is one
+color per 12.5 cm, which is the banner's block, so the picture does not.
+Certainty below 1 blends the 25 cm running mean into the cell write (Gortler
+pull, min(1, 4 wm / wall)).
 
 A two-sided back face (`gl_FrontFacing` false) stores the opposite axis, so
 the front and the back do not share a cell. `gl_FrontFacing` does not follow
@@ -59,6 +61,7 @@ Deviations:
   takes period 1.
 - Two-sided keys use the raster geometric axis. Back faces use the opposite
   axis. The shading normal is not the key.
+- Compose shows the per-pixel wavelet. The cell scatter is not the picture.
 - S79 is not evidence against a screen filter. That trial kept the
   million-slot launch.
 

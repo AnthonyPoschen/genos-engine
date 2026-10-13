@@ -83,6 +83,7 @@ vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
     if (lighting_world_mode() != 0u) {
         lighting_px_probes = wsum > CACHE_WEIGHT + 1.0e-4 ? probes : vec3(-1.0);
         vec4 world = lighting_world_irradiance(pos, n);
+        world.rgb = lighting_screen_field(p.y * pc.dims.x + p.x, world.rgb);
         lighting_sc_display = false;
         return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));
     }

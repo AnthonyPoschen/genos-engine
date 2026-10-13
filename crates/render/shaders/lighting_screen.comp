@@ -2,8 +2,10 @@
 // Screen wavelet for this frame's visible fine texels (S80).
 //
 // One 8x8 group per picture block. Stage 0 gathers one hash find per pixel.
-// Stages 1..iters are à-trous on a ping-pong in `out`. Stage 6 scatters the
-// displayed field. The hash-slot wavelet does not run.
+// Stages 1..iters are à-trous on a ping-pong in `out`. Stage 6 writes the
+// cell (freshness, and the fallback for pixels this filter skipped). Compose
+// shows slice 1, the per-pixel field. Showing the cell would paint the
+// 12.5 cm grid back on. The hash-slot wavelet does not run.
 //
 // Papers: Schied et al., SVGF, HPG 2017, §4.2 (variance-guided luminance
 // weight). Dammertz et al., HPG 2010, B3 à-trous. Zhdan, ReBLUR/ReLAX (the
@@ -34,6 +36,9 @@
 // - The cache key is the raster geometric axis (gbuffer flag bits 1..3).
 //   A two-sided back face stores the opposite axis. The shading normal and
 //   the view flip are not the key. Edge weights still use the shading normal.
+// - Compose reads this pixel's filtered indirect. The cell scatter is not
+//   what the picture shows: that write is one color per 12.5 cm cell, which
+//   is the banner's block.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 8, local_size_y = 8) in;
 #include "lighting_common.glsl"
