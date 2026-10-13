@@ -446,8 +446,8 @@ void main() {
         }
         // S73Q: a never-shown fine texel reads the plain world-radiance mean.
         // A world-radiance cell's own rays still publish the dark-fill sample.
-        // The plain sample is a second pass over the same hit. One rolled call:
-        // two inlined copies of this read overflow lavapipe's stack.
+        // The plain sample is a second pass over the same hit. One call, rolled:
+        // a constant trip of two inlines the read twice and lavapipe faults.
         bool prefill_src = src != ~0u && lighting_sc_prefill(src);
         bool wrc_src = src != ~0u && cache.v[3u * src + 1u].w > 0.2;
         uint ent = 0u;
@@ -462,7 +462,12 @@ void main() {
         vec3 bounce_plain = vec3(0.0);
         float saved_sf = 0.0;
         uint saved_path = 2u;
-        [[dont_unroll]] for (uint pass = 0u; pass < 2u; pass++) {
+        // A constant trip of 2 is unrolled, and each copy of the irradiance read
+        // is inlined. Lavapipe then faults on a null descriptor. The eye is a
+        // uniform, so this bound stays rolled; the break keeps it to one or two
+        // passes.
+        uint roll = 2u + uint(abs(scene.eye.x));
+        [[dont_unroll]] for (uint pass = 0u; pass < roll; pass++) {
             if (pass >= nread) {
                 break;
             }
