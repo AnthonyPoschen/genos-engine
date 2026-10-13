@@ -901,8 +901,10 @@ fn moving_lamp_picture(wake: &str) -> (Vec<u8>, u32, u32) {
     settings.set_key("sky", "0").unwrap();
     settings.set_key("ambient", "off").unwrap();
     let lamp = Vec3::new(0.85, 1.15, 0.85);
-    let mut world = corner_room(settings, lamp, [1.4, 1.1, 0.8]);
-    world.scene.solids.push(Solid {
+    // The box has to be in the scene before `World::from_scene`. A solid pushed
+    // afterwards is not an object, so the tracer never sees it.
+    let mut scene = corner_room(settings, lamp, [1.4, 1.1, 0.8]).scene;
+    scene.solids.push(Solid {
         shape: Shape::Square,
         position: Vec3::new(1.7, 0.0, 1.55),
         size: 0.7,
@@ -913,6 +915,7 @@ fn moving_lamp_picture(wake: &str) -> (Vec<u8>, u32, u32) {
         reflectance: -1.0,
         color_mix: -1.0,
     });
+    let mut world = World::from_scene(scene);
     let camera = corner_camera();
     for _ in 0..16 {
         let _ = draw(&mut window, &mut renderer, &world, &camera);
@@ -966,6 +969,119 @@ fn moving_lamp_rings_picture_matches_legacy() {
     assert!(
         mean < 0.5 && p99 < 2.3,
         "moving lamp rings left the legacy picture (mean {mean:.3} p99 {p99:.3}; noise mean 0.43 p99 2.3)"
+    );
+}
+
+fn coloured_box(position: Vec3, size: f32, height: f32, color: [f32; 3]) -> Solid {
+    Solid {
+        shape: Shape::Square,
+        position,
+        size,
+        height,
+        yaw: 0.0,
+        color,
+        absorption: 0.0,
+        reflectance: -1.0,
+        color_mix: -1.0,
+    }
+}
+
+/// Two coloured boxes slide across the corner. They have to be in the scene
+/// before `World::from_scene`: a solid pushed afterwards is not an object, so
+/// the tracer never sees it. The lamp also walks, so a live ring is queued the
+/// way the stress hall is. Sixteen still frames, then both boxes and the lamp
+/// move every frame. A single step would arm the corner catch-up and shade
+/// every stratum.
+fn moving_box_picture(wake: &str) -> (Vec<u8>, u32, u32, u32, u32, u32) {
+    let mut window = Window::open_proof(320, 180).expect("proof window");
+    let frame = window.pump();
+    let mut renderer =
+        Renderer::open(window.display, window.surface, frame.width, frame.height).expect("renderer");
+    clear_wake_env();
+    let mut settings = LightingSettings::default();
+    settings.set_key("probe_tile", "16").unwrap();
+    settings.set_key("wake", wake).unwrap();
+    settings.set_key("denoise", "0").unwrap();
+    settings.set_key("sky", "0").unwrap();
+    settings.set_key("ambient", "off").unwrap();
+    let lamp = Vec3::new(1.35, 1.45, 1.35);
+    let red = Vec3::new(1.35, 0.0, 1.55);
+    let green = Vec3::new(2.05, 0.0, 2.15);
+    let mut scene = corner_room(settings, lamp, [0.7, 0.6, 0.45]).scene;
+    scene.solids.push(coloured_box(red, 0.9, 1.15, [0.85, 0.12, 0.10]));
+    scene.solids.push(coloured_box(green, 0.7, 0.95, [0.12, 0.75, 0.18]));
+    let mut world = World::from_scene(scene);
+    let camera = corner_camera();
+    for _ in 0..16 {
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+    }
+    let mut due = 0u32;
+    let mut reach = 0u32;
+    let mut geom = 0u32;
+    let mut misses = 0u32;
+    let mut hits = 0u32;
+    let mut light_sum = 0.0f64;
+    let mut light_n = 0u32;
+    let mut pixels = Vec::new();
+    for frame in 0..12 {
+        let step = 0.06 * (frame + 1) as f32;
+        world.scene.solids[0].position = Vec3::new(red.x + step, 0.0, red.z);
+        world.scene.solids[1].position = Vec3::new(green.x, 0.0, green.z + step * 0.7);
+        world.scene.lights[0].position = Vec3::new(lamp.x + 0.03 * (frame + 1) as f32, lamp.y, lamp.z);
+        pixels = draw(&mut window, &mut renderer, &world, &camera);
+        let stats = renderer.lighting_wake_stats();
+        due += stats.lamp_due;
+        reach += stats.lamp_reach;
+        geom += stats.geom_due;
+        misses += stats.verify_misses;
+        hits += stats.verify_hits;
+        let ms = renderer.lighting_pass_ms();
+        let light = ms[3] + ms[10];
+        if light > 0.0 {
+            light_sum += light;
+            light_n += 1;
+        }
+        eprintln!(
+            "moving box {wake} step {frame} lamp_due {} lamp_reach {} geom_due {} geom_probes {} hits {} misses {} traced {} rays {} woken {} light_ms {:.3}",
+            stats.lamp_due,
+            stats.lamp_reach,
+            stats.geom_due,
+            stats.geom_probes,
+            stats.verify_hits,
+            stats.verify_misses,
+            stats.probes_traced,
+            stats.rays_traced,
+            stats.probes_woken,
+            light
+        );
+    }
+    if light_n > 0 {
+        eprintln!("moving box {wake} light_ms avg {:.3} over {light_n}", light_sum / f64::from(light_n));
+    }
+    (pixels, due, reach, hits, misses, geom)
+}
+
+/// Moving boxes have to keep the same picture as legacy. The owner's 4070
+/// moving view at `fc1a3b8e` was mean 0.6 / p99 6.0 against a noise floor of
+/// 2.3: whole faces of both boxes, the rest of the room at noise.
+#[test]
+fn moving_box_rings_picture_matches_legacy() {
+    let _gpu = gpu_lock();
+    let (legacy, _, _, _, _, _) = moving_box_picture("legacy");
+    let (rings, due, reach, hits, misses, geom) = moving_box_picture("rings");
+    let (mean, p99) = channel_delta(&legacy, &rings);
+    let lit = mean_channel(&legacy);
+    eprintln!(
+        "moving box rings vs legacy mean {mean:.3} p99 {p99:.3} lamp_due {due} lamp_reach {reach} geom_due {geom} hits {hits} misses {misses} legacy luma {lit:.2}"
+    );
+    assert!(lit > 8.0, "the room was dark (mean channel {lit:.2})");
+    assert!(
+        geom > 0,
+        "rings never reshaded a kept hit for the moved boxes (lamp_due {due} lamp_reach {reach})"
+    );
+    assert!(
+        mean < 0.5 && p99 < 2.3,
+        "moving boxes left the legacy picture (mean {mean:.3} p99 {p99:.3}; noise p99 2.3)"
     );
 }
 

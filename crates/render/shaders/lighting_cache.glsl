@@ -1259,6 +1259,30 @@ bool lighting_near_change(vec3 p) {
     }
     return false;
 }
+// The probe stands on a moved surface: inside that change's own sphere, plus a
+// small pad so a probe placed just off the face still counts. Overflow (more
+// changes than the list holds) counts as on a mover. lighting_near_change is
+// the other test: it adds a metre and returns false on overflow, and the cache
+// scheduler still uses that one.
+bool lighting_probe_on_change(vec3 p) {
+    vec4 head = work.v[lighting_change_at()];
+    if (head.y > 0.5) {
+        return true;
+    }
+    uint changes = min(uint(head.x + 0.5), LIGHTING_CHANGES);
+    [[dont_unroll]] for (uint c = 0u; c < changes; c++) {
+        vec4 b = work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + c];
+        vec3 d = p - b.xyz;
+        float r = b.w + 0.02;
+        if (dot(d, d) < r * r) {
+            return true;
+        }
+    }
+    return false;
+}
+// Defined after the stratum helpers. True when a kept hit of this probe
+// lands on or passes through a change.
+bool lighting_probe_ray_hits_change(uint probe);
 
 // Surface cache: the light has held still long enough (params.z bit 10, which
 // means young-only rounds in the other modes).
@@ -4129,6 +4153,11 @@ const uint WAKE_TRACE = 1u;
 const uint WAKE_FULL = 2u;
 const uint WAKE_VERIFY = 4u;
 const uint WAKE_TEST = 8u;
+// The probe stands on moved geometry, stands within a metre of it, or one of
+// its kept rays hits it. Its check ray is traced, and its kept hits take the
+// legacy lamp test instead of the 2 percent skip. A probe standing on the
+// mover is also WAKE_FULL, so that stratum is traced.
+const uint WAKE_GEOM = 16u;
 const float WAKE_PI = 3.14159265;
 const float WAKE_TAU = 6.28318530;
 
@@ -4193,7 +4222,10 @@ bool lighting_wake_relight(uint h) {
     uint rays = lighting_rays();
     uint pk = h / rays / LIGHTING_STRATA;
     uint flags = floatBitsToUint(work.v[lighting_wake_probe_at(pk)].w);
-    if ((flags & WAKE_FULL) != 0u) {
+    // A full wake, or a probe that sees moved geometry: every hit of this
+    // probe is eligible. The kept-hit early-out still limits which strata run.
+    // Seeing the mover is what drops the 2 percent skip (sparse is false).
+    if ((flags & (WAKE_FULL | WAKE_GEOM)) != 0u) {
         return true;
     }
     return (h % rays) == lighting_hold_check_k(pk) && (flags & (WAKE_TRACE | WAKE_VERIFY | WAKE_TEST)) != 0u;
@@ -4378,6 +4410,19 @@ void lighting_wake_place(uint probe) {
                     flags |= WAKE_FULL;
                 }
             }
+        }
+    }
+    // Moved geometry is not a lamp. A probe on the mover is traced in full.
+    // A probe within a metre, or one whose kept ray hits the mover, is marked
+    // so its kept hits are reshaded. The scan stops at the first crossing.
+    if (placed) {
+        if (lighting_probe_on_change(pp.xyz)) {
+            flags |= WAKE_FULL | WAKE_GEOM;
+        } else if (lighting_near_change(pp.xyz) || lighting_probe_ray_hits_change(probe)) {
+            flags |= WAKE_GEOM;
+        }
+        if ((flags & WAKE_GEOM) != 0u) {
+            atomicAdd(gstats.wake_pad[3], 1u);
         }
     }
     if (placed && gstats.wake_budget > 0u) {

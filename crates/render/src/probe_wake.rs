@@ -94,9 +94,20 @@ impl WakeQueue {
 
     /// Fold this frame's lamp diff and geometry spheres into the queue.
     /// `changes == None` is more geometry than the change list holds: one full wake.
+    /// Geometry goes in first. The queue holds eight events, and a moved lamp
+    /// takes two of them. Noting lamps first dropped the movers once a few
+    /// lamps were walking.
     pub(crate) fn note(&mut self, old: &[u8], new: &[u8], changes: Option<&[[f32; 4]]>) {
         if old.is_empty() || new.is_empty() {
             return;
+        }
+        match changes {
+            None => self.push([0.0; 3], -1.0, 1),
+            Some(list) => {
+                for sphere in list {
+                    self.push([sphere[0], sphere[1], sphere[2]], sphere[3].max(0.5), WAKE_AGE);
+                }
+            }
         }
         let (a, b) = (lamps_of(old), lamps_of(new));
         if a.len() != b.len() {
@@ -106,14 +117,6 @@ impl WakeQueue {
         } else {
             for (prev, next) in a.iter().zip(b.iter()) {
                 self.note_lamp(prev, next);
-            }
-        }
-        match changes {
-            None => self.push([0.0; 3], -1.0, 1),
-            Some(list) => {
-                for sphere in list {
-                    self.push([sphere[0], sphere[1], sphere[2]], sphere[3].max(0.5), WAKE_AGE);
-                }
             }
         }
     }
@@ -368,5 +371,28 @@ mod wake_tests {
         assert!(wake_block_due(2, true));
         assert!(wake_block_due(0, false));
         assert!(!wake_block_due(0, true));
+    }
+
+    #[test]
+    fn geometry_is_queued_ahead_of_a_full_lamp_list() {
+        let mut lamps = Vec::new();
+        for i in 0..6 {
+            lamps.push(point([i as f32, 1.0, 0.0], [1.0, 1.0, 1.0]));
+        }
+        let old = scene_with(&lamps);
+        for lamp in &mut lamps {
+            lamp.pos[0] += 0.4;
+        }
+        let moved = scene_with(&lamps);
+        let mut q = WakeQueue::new();
+        q.note(&old, &moved, Some(&[[3.0, 0.5, 2.0, 1.2]]));
+        assert_eq!(q.len(), WAKE_EVENT_CAP);
+        assert!(
+            q.events()
+                .iter()
+                .any(|e| (e.center[2] - 2.0).abs() < 1.0e-4 && e.radius > 0.0),
+            "the mover was dropped behind the lamps: {:?}",
+            q.events()
+        );
     }
 }

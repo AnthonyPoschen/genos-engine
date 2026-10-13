@@ -416,7 +416,7 @@ bool lighting_held_traced(uint probe, uint k, vec3 origin, vec3 dir, float t) {
         if ((flags & 2u) != 0u) {
             return true;
         }
-        if ((flags & (1u | 4u | 8u)) != 0u && k == lighting_hold_check_k(probe)) {
+        if ((flags & (WAKE_TRACE | WAKE_VERIFY | WAKE_TEST | WAKE_GEOM)) != 0u && k == lighting_hold_check_k(probe)) {
             return true;
         }
         return lighting_held_crosses(origin, dir, t);
@@ -448,6 +448,39 @@ bool lighting_stratum_ray(uint probe, uint s, uint k, out vec3 origin, out vec3 
     origin = sp.xyz + n * 0.02;
     dir = lighting_stratum_dir(sp.xyz, n, k, s);
     return sp.w > 0.5;
+}
+// A kept hit of this probe lands on or passes through a moved surface.
+// Absent rays and misses are skipped: a miss out to the trace limit crosses
+// most of the room and would mark every probe. The trace still retraces a
+// miss that crosses; this mark is only about who must reshade.
+bool lighting_probe_ray_hits_change(uint probe) {
+    vec4 head = work.v[lighting_change_at()];
+    if (head.y > 0.5) {
+        return true;
+    }
+    if (uint(head.x + 0.5) == 0u) {
+        return false;
+    }
+    uint rays = lighting_rays();
+    [[dont_unroll]] for (uint s = 0u; s < LIGHTING_STRATA; s++) {
+        [[dont_unroll]] for (uint k = 0u; k < rays; k++) {
+            uint h = (probe * LIGHTING_STRATA + s) * rays + k;
+            float t = work.v[lighting_kept_at(h)].x;
+            if (t < 0.0) {
+                continue;
+            }
+            vec3 origin;
+            vec3 dir;
+            vec3 n;
+            if (!lighting_stratum_ray(probe, s, k, origin, dir, n)) {
+                continue;
+            }
+            if (lighting_held_crosses(origin, dir, t)) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 // Ray k of probe's stratum s traced from its place now (a fill), when that stratum

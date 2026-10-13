@@ -222,7 +222,14 @@ void main() {
         uint s = (h / lighting_rays()) % LIGHTING_STRATA;
         uint cur = lighting_stratum();
         bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
-        if (s != cur && s != (cur + LIGHTING_STRATA / 2u) % LIGHTING_STRATA && !(urgent && lighting_near_change(pos))) {
+        uint pk = h / lighting_rays() / LIGHTING_STRATA;
+        // Rings only. A probe standing on the mover shades every stratum. The
+        // surface moved, so the halfway schedule would leave its bounce behind.
+        // Overflow is the same: the change list could not name the mover.
+        // Legacy keeps its own early-out.
+        bool on_mover = gstats.wake_mode != 0u && gstats.wake_events != 0u
+            && lighting_probe_on_change(work.v[lighting_probe_at(pk)].xyz);
+        if (s != cur && s != (cur + LIGHTING_STRATA / 2u) % LIGHTING_STRATA && !(urgent && lighting_near_change(pos)) && !on_mover) {
             return;
         }
         // S78D: the halfway relight only where the light should have moved: a
@@ -231,7 +238,6 @@ void main() {
         // S78K: a held probe's current stratum: only the rays re-traced this
         // frame (its check, change crossings) are new hits; the rest are lit
         // as the halfway relight below.
-        uint pk = h / lighting_rays() / LIGHTING_STRATA;
         bool held_old = s == cur && lighting_stratum_held(pk);
         if (held_old) {
             vec3 ho;
@@ -261,13 +267,20 @@ void main() {
             // A live ring reshades a kept hit when a moved lamp's record says
             // the hit is inside that lamp's range and the lamp's unshadowed
             // contribution moved past LIGHTING_LAMP_DUE. Other kept hits stay
-            // put: that was the direct-pass win. A woken probe and its check
-            // ray still shade. With no event queued, rings uses the same
-            // lamp-range test as legacy. The sun ratio stays, so a day change
-            // still tracks.
+            // put: that was the direct-pass win. A probe that sees moved
+            // geometry (WAKE_GEOM) takes the legacy lamp test instead, and a
+            // probe standing on the mover is shaded outright. A woken probe
+            // and its check ray still shade. With no event queued, rings uses
+            // the same lamp-range test as legacy. The sun ratio stays, so a
+            // day change still tracks.
             bool sparse = gstats.wake_mode != 0u && gstats.wake_events != 0u && !lighting_wake_relight(h);
             bool sun_quiet = abs(lighting_ls_ratio(traced) - 1.0) <= 0.01;
-            if (sparse) {
+            bool geom = (floatBitsToUint(work.v[lighting_wake_probe_at(pk)].w) & WAKE_GEOM) != 0u;
+            if (on_mover) {
+                // Bounce moved with the surface. Count it and shade it even
+                // when no lamp's unshadowed contribution crossed the line.
+                atomicAdd(gstats.wake_pad[2], 1u);
+            } else if (sparse) {
                 uint region = lighting_lamp_region(pos, n, traced);
                 if (region >= 1u) {
                     atomicAdd(gstats.wake_pad[1], 1u);
@@ -280,6 +293,10 @@ void main() {
                 }
             } else if (!lighting_wrc_lamp_changed(pos, traced) && sun_quiet) {
                 return;
+            } else if (geom && gstats.wake_events != 0u && lighting_lamp_region(pos, n, traced) < 2u) {
+                // The 2 percent skip would have kept this hit. The probe sees
+                // the mover, so the legacy lamp test shades it instead.
+                atomicAdd(gstats.wake_pad[2], 1u);
             }
         }
     }
