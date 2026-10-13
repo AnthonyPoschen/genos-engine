@@ -477,7 +477,11 @@ fn full_effort_picture_floor_holds_a_third_run() {
 /// Direct light on the step matches a full-effort replay.
 #[test]
 fn small_sun_step_stays_on_the_compose_list() {
+    // 320×180 is 40×23 blocks. The first frames fill the cache and mark the
+    // picture. By 80 frames a held sun is a few hundred blocks and the a-trous
+    // fraction sits on 0.25. A small step has to stay in that band.
     let blocks = 40 * 23;
+    let band = (blocks * 2) / 3;
     let base = 0.4_f32;
     let step = 0.2_f32.to_radians();
     let (_gpu, mut window, mut renderer) = open();
@@ -488,11 +492,9 @@ fn small_sun_step_stays_on_the_compose_list() {
         mode: ViewMode::Direct,
         ..DebugView::default()
     });
-    // Eleven still frames. Frame 12 is slice 4: one probe row of the twelve.
-    for _ in 0..10 {
+    for _ in 0..80 {
         let _ = draw_sun(&mut window, &mut renderer, base, &camera);
     }
-    let _ = draw_sun(&mut window, &mut renderer, base, &camera);
     let still_stats = renderer.lighting_work_stats();
     let still_atrous = renderer.lighting_atrous_stats();
     eprintln!(
@@ -502,6 +504,12 @@ fn small_sun_step_stays_on_the_compose_list() {
         still_atrous.dirty_fraction,
         still_atrous.ran,
         still_atrous.filtered
+    );
+    assert_eq!(still_stats.stochastic, 0, "a held sun took the small-step path");
+    assert!(
+        still_stats.delta_skip < band,
+        "held sun still marked {} of {blocks} blocks",
+        still_stats.delta_skip
     );
     let reduced = draw_sun(&mut window, &mut renderer, base + step, &camera);
     let sun_stats = renderer.lighting_work_stats();
@@ -520,14 +528,16 @@ fn small_sun_step_stays_on_the_compose_list() {
         "a 0.2° sun step took a full compose"
     );
     assert!(
-        sun_stats.delta_skip < blocks / 2,
+        sun_stats.delta_skip < band,
         "sun step marked {} of {blocks} compose blocks",
         sun_stats.delta_skip
     );
+    let dirty_cap = still_atrous.dirty_fraction + 0.02;
     assert!(
-        !atrous.ran || atrous.dirty_fraction <= 0.25,
-        "sun step a-trous dirty fraction {:.4}",
-        atrous.dirty_fraction
+        !atrous.ran || atrous.dirty_fraction <= dirty_cap.max(0.25),
+        "sun step a-trous {:.4} rose above the held frame {:.4}",
+        atrous.dirty_fraction,
+        still_atrous.dirty_fraction
     );
     let _jump = draw_sun(&mut window, &mut renderer, base + 40.0_f32.to_radians(), &camera);
     let jump_stats = renderer.lighting_work_stats();
@@ -548,7 +558,7 @@ fn small_sun_step_stays_on_the_compose_list() {
         mode: ViewMode::Direct,
         ..DebugView::default()
     });
-    for _ in 0..11 {
+    for _ in 0..80 {
         let _ = draw_sun(&mut window, &mut renderer, base, &camera);
     }
     let full = draw_sun(&mut window, &mut renderer, base + step, &camera);

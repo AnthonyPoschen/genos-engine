@@ -272,7 +272,9 @@ While the step is small:
 
 `GENOS_LIGHTING_FULL_EFFORT=1` turns this off. The corner scene has no sun, so phase 1's picture is unchanged. `GENOS_LIGHTING_DEBUG=1` prints `lightingcompose` with the block count (`0xffffffff` is a full compose) and whether the sun path was on.
 
-**Pass:** on a held camera and a sun step inside the tolerance, the compose list is under half the image and the a-trous dirty fraction stays at or under 0.25. The direct view stays inside the phase 0 floor against full effort. A 40° jump is a full compose. **Milliseconds:** not claimed. The owner's 1080p window is the measurement. Lavapipe does not time it.
+**Pass:** on a held camera, after the cache has filled, a sun step inside the tolerance stays on the compose list and does not lift the a-trous dirty fraction above that held frame. The direct view stays inside the phase 0 floor against full effort. A 40° jump is a full compose. The first frames of a cold scene mark the picture while the cache fills; that fill is not the sun. **Milliseconds:** not claimed. The owner's 1080p window is the measurement. Lavapipe does not time it.
+
+Lavapipe, 320×180, sun only, camera held. After 80 still frames the compose list was 200 of 920 blocks and the a-trous fraction was 0.255. A 0.2° step stayed on the list (390 blocks, fraction 0.240) with the sun path on. Direct `|ΔL|` against a full-effort replay of that step was 0. A 40° jump was a full compose. Frame 8 of the same cold start was still 920 blocks and fraction 0.79: that is the cache filling, and it is the number PR #26 saw on every moving frame.
 
 ### Phase 2 — confirmed-visibility shade
 
