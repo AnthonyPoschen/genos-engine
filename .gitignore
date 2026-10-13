@@ -1,2 +1,4 @@
 /target/
 /genos-camera.profile
+# Reference pictures and check reports. Large, and not for git.
+/genos-debug/

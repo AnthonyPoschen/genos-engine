@@ -378,6 +378,14 @@ fn run() -> Result<(), String> {
     if std::env::args().nth(1).as_deref() == Some("gi-check") {
         return gi_check::run(std::env::args().skip(2));
     }
+    if std::env::args().nth(1).as_deref() == Some("lighting-ref") {
+        return match genos_stress::lighting_ref::run(std::env::args().skip(2)) {
+            Ok(code) => {
+                std::process::exit(code);
+            }
+            Err(err) => Err(err),
+        };
+    }
     let opts = options()?;
     let mix = LightMix {
         count: opts.lights,
@@ -504,10 +512,15 @@ fn run() -> Result<(), String> {
         clock = Some(now);
         let frame = window.pump();
         if !title_base.is_empty() {
-            let rendering = genos_debug::reference::RENDERING.load(std::sync::atomic::Ordering::SeqCst) > 0;
+            let rendering =
+                genos_debug::reference::RENDERING.load(std::sync::atomic::Ordering::SeqCst) > 0;
             if rendering != title_ref {
                 title_ref = rendering;
-                window.set_title(&if rendering { format!("{title_base} | REF") } else { title_base.clone() });
+                window.set_title(&if rendering {
+                    format!("{title_base} | REF")
+                } else {
+                    title_base.clone()
+                });
             }
         }
         if frame.closing {

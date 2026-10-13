@@ -398,7 +398,8 @@ impl LightingSettings {
     }
 
     pub fn gi_passes(&self) -> bool {
-        self.gi.enabled && (self.probes.enabled || self.world_cache.enabled || self.bounce.count > 0)
+        self.gi.enabled
+            && (self.probes.enabled || self.world_cache.enabled || self.bounce.count > 0)
     }
 
     /// The million-slot cache and its key table. Freed when GI is off.
@@ -441,6 +442,47 @@ impl LightingSettings {
         self.prefill && self.gi.enabled && self.world_cache.enabled && self.bounce.count > 0
     }
 
+    /// The knobs a reference capture spends. Maximum rays, a dense filter,
+    /// every pixel rewritten. The text form stores those knobs, not this
+    /// action. `GENOS_LIGHTING_FULL_EFFORT` applies it after the other
+    /// variables, so it wins.
+    pub fn apply_full_effort(&mut self) {
+        self.direct.enabled = true;
+        self.direct.max_lights = 0;
+        self.direct.refresh_frames = 1;
+        self.direct.resolution_scale = 1;
+        self.shadows.enabled = true;
+        self.shadows.filter = ShadowFilter::Cell;
+        self.shadows.cell_metres = 0.125;
+        self.shadows.refresh_frames = 1;
+        self.gi.enabled = true;
+        self.gi.refresh_frames = 1;
+        self.gi.budget_shift = 0;
+        self.bounce.count = LIGHTING_BOUNCES_UNLIMITED;
+        self.probes.enabled = true;
+        self.probes.rays = 64;
+        self.probes.tile = 0;
+        self.probes.refresh_frames = 1;
+        self.world_cache.enabled = true;
+        self.world_cache.refresh_frames = 1;
+        self.denoiser.enabled = true;
+        self.denoiser.iterations = 5;
+        self.denoiser.dirty_fraction = 0.0;
+        self.compose_reuse = false;
+        self.sky = true;
+        self.emissive = true;
+        self.prefill = true;
+        self.sanitize();
+        self.sync_preset_field();
+    }
+
+    /// True when applying full effort again would not change a knob.
+    pub fn is_full_effort(&self) -> bool {
+        let mut applied = self.clone();
+        applied.apply_full_effort();
+        self.same_knobs(&applied)
+    }
+
     /// Rays the push constant and the work buffer agree on.
     pub fn probe_rays(&self) -> u32 {
         if self.probes.rays == 0 {
@@ -479,8 +521,8 @@ impl LightingSettings {
             ),
             AmbientMode::Day => {
                 let color = lerp3(self.ambient.night_color, self.ambient.day_color, t);
-                let intensity =
-                    self.ambient.night_intensity + (self.ambient.day_intensity - self.ambient.night_intensity) * t;
+                let intensity = self.ambient.night_intensity
+                    + (self.ambient.day_intensity - self.ambient.night_intensity) * t;
                 (color, self.ambient.ground, intensity, AmbientMode::Constant)
             }
         }
@@ -548,19 +590,35 @@ impl LightingSettings {
         let _ = writeln!(out, "world_stale={}", self.world_cache.staleness_frames);
         let _ = writeln!(out, "denoise={}", bit(self.denoiser.enabled));
         let _ = writeln!(out, "denoise_iters={}", self.denoiser.iterations);
-        let _ = writeln!(out, "denoise_dirty={}", num_text(self.denoiser.dirty_fraction));
+        let _ = writeln!(
+            out,
+            "denoise_dirty={}",
+            num_text(self.denoiser.dirty_fraction)
+        );
         let _ = writeln!(out, "compose_reuse={}", bit(self.compose_reuse));
         let _ = writeln!(out, "sky={}", bit(self.sky));
         let _ = writeln!(out, "emissive={}", bit(self.emissive));
         let _ = writeln!(out, "prefill={}", bit(self.prefill));
         let _ = writeln!(out, "ambient={}", self.ambient.mode.name());
         let _ = writeln!(out, "ambient_color={}", rgb(self.ambient.color));
-        let _ = writeln!(out, "ambient_intensity={}", num_text(self.ambient.intensity));
+        let _ = writeln!(
+            out,
+            "ambient_intensity={}",
+            num_text(self.ambient.intensity)
+        );
         let _ = writeln!(out, "ambient_ground={}", rgb(self.ambient.ground));
         let _ = writeln!(out, "night_color={}", rgb(self.ambient.night_color));
-        let _ = writeln!(out, "night_intensity={}", num_text(self.ambient.night_intensity));
+        let _ = writeln!(
+            out,
+            "night_intensity={}",
+            num_text(self.ambient.night_intensity)
+        );
         let _ = writeln!(out, "day_color={}", rgb(self.ambient.day_color));
-        let _ = writeln!(out, "day_intensity={}", num_text(self.ambient.day_intensity));
+        let _ = writeln!(
+            out,
+            "day_intensity={}",
+            num_text(self.ambient.day_intensity)
+        );
         out
     }
 
@@ -583,7 +641,8 @@ impl LightingSettings {
                 // `custom` does not replace the struct. Later lines are the value.
                 if !value.eq_ignore_ascii_case("custom") {
                     preset = Some(
-                        LightingPreset::parse(value).ok_or_else(|| format!("unknown preset {value}"))?,
+                        LightingPreset::parse(value)
+                            .ok_or_else(|| format!("unknown preset {value}"))?,
                     );
                 }
             } else {
@@ -608,7 +667,8 @@ impl LightingSettings {
                 if value.eq_ignore_ascii_case("custom") {
                     // Not a tier. The label is custom only when the knobs match none.
                 } else {
-                    let preset = LightingPreset::parse(value).ok_or_else(|| format!("unknown preset {value}"))?;
+                    let preset = LightingPreset::parse(value)
+                        .ok_or_else(|| format!("unknown preset {value}"))?;
                     *self = Self::preset(preset);
                 }
             }
@@ -618,8 +678,8 @@ impl LightingSettings {
             "direct_scale" => self.direct.resolution_scale = num_u32(value)?.clamp(1, 8),
             "shadows" => self.shadows.enabled = on(value)?,
             "shadow_filter" => {
-                self.shadows.filter =
-                    ShadowFilter::parse(value).ok_or_else(|| format!("shadow_filter is hard or cell, got {value}"))?
+                self.shadows.filter = ShadowFilter::parse(value)
+                    .ok_or_else(|| format!("shadow_filter is hard or cell, got {value}"))?
             }
             "shadow_cell" => self.shadows.cell_metres = num_f32(value)?,
             "shadow_refresh" => self.shadows.refresh_frames = num_u32(value)?.max(1),
@@ -645,8 +705,9 @@ impl LightingSettings {
             "emissive" => self.emissive = on(value)?,
             "prefill" => self.prefill = on(value)?,
             "ambient" => {
-                self.ambient.mode =
-                    AmbientMode::parse(value).ok_or_else(|| format!("ambient is off, constant, hemisphere, or day, got {value}"))?
+                self.ambient.mode = AmbientMode::parse(value).ok_or_else(|| {
+                    format!("ambient is off, constant, hemisphere, or day, got {value}")
+                })?
             }
             "ambient_color" => self.ambient.color = parse_rgb(value)?,
             "ambient_intensity" => self.ambient.intensity = num_f32(value)?,
@@ -655,6 +716,13 @@ impl LightingSettings {
             "night_intensity" => self.ambient.night_intensity = num_f32(value)?,
             "day_color" => self.ambient.day_color = parse_rgb(value)?,
             "day_intensity" => self.ambient.day_intensity = num_f32(value)?,
+            "full_effort" => {
+                if on(value)? {
+                    self.apply_full_effort();
+                } else {
+                    *self = Self::preset(LightingPreset::High);
+                }
+            }
             _ => return Err(format!("unknown lighting setting {key}")),
         }
         self.sanitize();
@@ -720,6 +788,10 @@ impl LightingSettings {
         }
         if std::env::var_os("GENOS_LIGHTING_COMPOSE_ALL").is_some() {
             self.compose_reuse = false;
+            self.sync_preset_field();
+        }
+        if env_flag("GENOS_LIGHTING_FULL_EFFORT") {
+            self.apply_full_effort();
         }
     }
 
@@ -734,10 +806,12 @@ impl LightingSettings {
             gather: self.probes_this_frame(frame),
             filter: self.probes_this_frame(frame),
             compact: self.cache_round_this_frame(frame),
-            cache: self.cache_round_this_frame(frame) && (self.world_cache.enabled || self.bounce.count > 0),
+            cache: self.cache_round_this_frame(frame)
+                && (self.world_cache.enabled || self.bounce.count > 0),
             cache_rays: self.cache_rays_this_frame(frame),
             atrous: self.atrous_this_frame(frame),
-            hit_light: self.gi_passes() && (self.probes.enabled || self.cache_rays_this_frame(frame)),
+            hit_light: self.gi_passes()
+                && (self.probes.enabled || self.cache_rays_this_frame(frame)),
             compose_indirect: self.compose_reuse && self.world_mode() == 3,
             prefill: self.prefill_this_frame(),
             sky: self.sky && self.gi.enabled,
@@ -777,6 +851,14 @@ fn bit(v: bool) -> u32 {
     u32::from(v)
 }
 
+/// A set variable turns the flag on, except the explicit off words.
+fn env_flag(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(value) => !matches!(value.trim(), "0" | "false" | "off" | "no"),
+        Err(_) => false,
+    }
+}
+
 fn on(value: &str) -> Result<bool, String> {
     match value {
         "1" | "true" | "on" | "yes" => Ok(true),
@@ -793,7 +875,9 @@ fn num_u32(value: &str) -> Result<u32, String> {
 }
 
 fn num_f32(value: &str) -> Result<f32, String> {
-    value.parse::<f32>().map_err(|_| format!("expected a number, got {value}"))
+    value
+        .parse::<f32>()
+        .map_err(|_| format!("expected a number, got {value}"))
 }
 
 fn parse_bounces(value: &str) -> Result<u32, String> {
