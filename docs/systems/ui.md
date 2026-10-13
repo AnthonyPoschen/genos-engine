@@ -66,13 +66,14 @@ Detailed mode appends each completed live frame to `genos-camera.profile`. That 
 The crate is `crates/ui`, package `genos-ui`.
 
 - `layout` is in `src/layout.rs`.
-- Text measure is in `src/text.rs`.
+- Text measure is in `src/text.rs`. The small bitmap for tick names is there too.
+- Named and numeric slider values are in `src/slider.rs`.
 - `lighting_frame`, `apply_lamp`, and `apply_frame_action` are in `src/panel.rs`.
 - Omarchy theme colors are in `src/omarchy.rs`.
 - `profile_overlay`, `remember_frame`, `ProfileGraph`, and `ProfileStream` are in `src/profile.rs`.
 - `FpsOverlay` is in `src/fps.rs`. It draws one frame-rate line. Off, `note` returns without accumulating time or building glyphs. On, the glyphs are rebuilt at `rate_hz` (default 4, one 250 ms average) and the frames in between reuse those rectangles.
 
-- `button_panel` lays out a draggable panel of labelled button rows (`PanelRow`, `PanelButton`). A press fires `Action::Press(id)` with the game's id. `selected` draws a button in its pressed look. Ids from `u32::MAX - 4095` up belong to the panel. A row may end in a `PanelSlider` (value, min, max, step, readout text): a press anywhere on the track sets the value under the pointer and a held press follows it, firing `Action::Slide { id, value }` (snapped to `step`, 0 for continuous) each frame the value changes. The stress example builds its sliders from `genos-debug` knobs.
+- `button_panel` lays out a draggable panel of labelled button rows (`PanelRow`, `PanelButton`). A press fires `Action::Press(id)` with the game's id. `selected` draws a button in its pressed look. Ids from `u32::MAX - 4095` up belong to the panel. A row may end in a `PanelSlider`. A press anywhere on the track sets the value under the pointer and a held press follows it, firing `Action::Slide { id, value }` each frame the value changes. With `steps` empty, the value snaps to `step` (`0` is continuous). Named `steps` (`SliderStep`, in `src/slider.rs`) space the names evenly on the track and report each step's own value, so the values need not be evenly spaced. Small dim names sit at the ticks. The current name is brighter. While the pointer is on the slider, `Frame.tooltip` is the name and the exact value, and the same text is painted above the thumb. `Pointer.wheel_y` positive steps toward the maximum. `Pointer.key_dec` and `Pointer.key_inc` are press edges: they step the slider under the pointer, or the slider that has UI focus. The stress example builds its numeric sliders from `genos-debug` knobs. The lighting debug binary uses a dropdown for scene, checkpoint, view, shadow filter, and ambient, a slider for each ordered lighting grade, and a checkbox for each on/off switch. The frame-rate plate is a checkbox on the FPS row, and its update rate is the numeric slider on that row. A row may hold a `PanelDropdown`. The closed box shows the selected choice. A press opens a list over the rest of the panel. The list shows six rows and scrolls. The row under the pointer is highlighted. Arrow keys move that highlight, Enter picks it, and Escape or a press outside closes the list without a choice. The wheel scrolls the list and does not step a slider while it is open. A row may also hold `PanelCheck` marks. A press fires `Action::Toggle` with the next on state. The mark is a filled square inside the box. The caller passes `on` on the next frame.
 
 ## Game use
 
@@ -90,7 +91,9 @@ P pauses the graph. A drag inspects one interval. L follows live frames again.
 
 ## Limits
 
-There is no scroll, no image, and no font file. Text uses a built-in bitmap. The lighting panel is screen space. The panel controls one lamp. The picture labels are `off` and `FXAA`.
+There is no scroll, no image, and no font file. Text uses a built-in bitmap. Tick names use the same bitmap at one pixel. The lighting panel is screen space. The panel controls one lamp. The picture labels are `off` and `FXAA`.
+
+A slider draws its own tip while the pointer is on it. There is no general popup, and the tip is not a press target. The plan's tooltip layer is still absent. One dropdown list can be open. It has no scrollbar. It is not a general layer.
 
 A sun marker follows the first lamp in world space. The marker is not a handle. Three notched sliders move that lamp. Each notch is 1 meter from the next. Y notches go below the floor.
 

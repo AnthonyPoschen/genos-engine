@@ -33,12 +33,12 @@ The crate is `crates/ui`, package `genos-ui`. It depends on `genos-scene` only (
 | --- | --- | --- |
 | Tree and layout | `crates/ui/src/layout.rs` | `Node`, `Sizing` (`Fit`, `Grow`, `Fixed`, `Percent`), `Direction`, `Align`, `Pad`, `Place`, `Space::{Screen, World}`, `layout`. Grow siblings share leftover space until they match. A sibling that is already larger stays there. A child with `Place` leaves the flow. A screen root ignores the camera. A world root projects with `viewport_uv`. |
 | Text | `crates/ui/src/text.rs` | `CELL_W` 12, `CELL_H` 16. Whitespace wrap. A 5×7 bitmap, ASCII, uppercased. `measure` and `blots` share the cell. |
-| Pointer panels | `crates/ui/src/panel.rs` | `lighting_frame`, `button_panel`, `Pointer`, `State`, `Paint`, `Frame`. Hit test walks items in reverse. `choose` picks pressed, hover, or idle. `State.focus` is the id of the last press. A miss sets `look_capture`. `PanelSlider` snaps to a step. Lamp sliders are notched at 1 meter. |
+| Pointer panels | `crates/ui/src/panel.rs` | `lighting_frame`, `button_panel`, `Pointer`, `State`, `Paint`, `Frame`. Hit test walks items in reverse. `choose` picks pressed, hover, or idle. `State.focus` is the id of the last press. A miss sets `look_capture`. `PanelSlider` snaps to a step. Named steps live in `src/slider.rs`: even ticks, the step's own value, small names, a hover tip, wheel and arrow-key steps. `PanelDropdown` (`src/dropdown.rs`) opens a six-row list over the panel. The wheel scrolls it. Arrow keys and Enter pick a choice. Lamp sliders are notched at 1 meter. |
 | Theme | `crates/ui/src/omarchy.rs` | `Palette` from `colors.toml` when the Omarchy `current` directory exists. A missing file keeps the previous palette. |
 | Profile graph | `crates/ui/src/profile.rs` | `profile_overlay` paints a readout and `Segment` lines. Pause, drag a 250 ms bucket, reset. This is the only chart. |
 | Damage | not on `gi-v2` | PR #5 adds `crates/ui/src/damage.rs`: `DamageTracker`, `MAX_DAMAGE` 8, merge gap 16 px, bounds outset to whole pixels, and `crates/ui/tests/damage.rs`. **requires #5.** |
 | Public API | `crates/ui/src/lib.rs` | `Look`, `Segment`, `Action`, `PictureMode`, and the re-exports above. `Frame` has no `damage` field until #5. |
-| Tests | `crates/ui/tests/` | `panel.rs`, `slider.rs`, `omarchy.rs`, `profile.rs`, `aa_camera.rs`. Layout tests live at the bottom of `layout.rs`. |
+| Tests | `crates/ui/tests/` | `panel.rs`, `slider.rs`, `dropdown.rs`, `checkbox.rs`, `omarchy.rs`, `profile.rs`, `aa_camera.rs`. Layout tests live at the bottom of `layout.rs`. |
 
 The frame that uses it:
 
@@ -60,12 +60,12 @@ What is missing, against the toolkits below:
 | Need | Today |
 | --- | --- |
 | Labels and rich text | One bitmap style. No spans, no font file, no shaping. |
-| Button, toggle, checkbox, radio | `button_panel` has a labelled button and a selected look. No toggle, checkbox, or radio group. A focused box uses the pressed look (`choose` in `panel.rs`). |
-| Slider | `PanelSlider` and the lamp notches. No vertical slider, no general element. |
+| Button, toggle, checkbox, radio | `button_panel` has a labelled button and a `PanelCheck` mark. A press on the mark emits `Action::Toggle` with the next on state. No radio group. `Kind::Checkbox` is still absent. |
+| Slider | `PanelSlider` is numeric or named steps. No vertical slider, no general element. |
 | Dial and knob | Absent. `genos-debug` `Knob` is a number in a script. |
 | Progress, linear and radial | Absent. The sun is a decorative disc, not a value. |
 | Text field | Absent. No caret, selection, multiline, or IME. The window has no commit string. |
-| Dropdown and selector | The picture mode is two buttons. No popup list. |
+| Dropdown and selector | `PanelDropdown` is a closed box and a scrollable list over the panel, with hover, the wheel, and arrow keys. `Kind::Dropdown` is still absent. |
 | List, tree, table | Absent. No virtualization. |
 | Tabs | Absent. |
 | Scroll | Absent. The Wayland axis event is discarded. |
@@ -684,7 +684,7 @@ The stable second frame and the dirty track **require #5.**
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
-- **Deviation:** a press emits `Event::Toggle` with the inverted flag. The checked box paints an accent mark inset by 4 px. The unchecked snapshot has no mark.
+- **Deviation:** a press emits `Event::Toggle` with the inverted flag. The checked box paints an accent mark inset by 4 px. The unchecked snapshot has no mark. `PanelCheck` is the mark in use now: a 16 px box, a label, and `Action::Toggle` with the next on state. `Kind::Checkbox` reuses that mark. It does not grow a second one.
 - [ ] **Step 5: Commit** `ui: checkbox mark and toggle event`
 
 ### Task 12: Radio
@@ -714,7 +714,7 @@ The damage assertion **requires #5.** The value tests do not.
 - Test: `crates/ui/tests/slider_element.rs`
 - Modify: `crates/ui/src/interact.rs`
 
-`Kind::Slider { value: 0.0, min: 0.0, max: 10.0, step: 1.0, vertical: false }` on a fixed 100×24 track placed at `(0, 0)`. A press at the track's midpoint emits `Event::Change { id, value: 5.0 }`. A press at the left end emits `0.0`. `step: 0.0` emits a continuous value within `1e-3` of the fraction. `vertical: true` uses pointer y, top of the track as `max`. The lamp notches and `PanelSlider` stay. Damage on a value change covers the track and not a sibling label placed 200 px to the right.
+`Kind::Slider { value: 0.0, min: 0.0, max: 10.0, step: 1.0, vertical: false }` on a fixed 100×24 track placed at `(0, 0)`. A press at the track's midpoint emits `Event::Change { id, value: 5.0 }`. A press at the left end emits `0.0`. `step: 0.0` emits a continuous value within `1e-3` of the fraction. `vertical: true` uses pointer y, top of the track as `max`. The lamp notches and `PanelSlider` stay. Named steps already snap in `slider.rs` (`value_at_fraction`, `step_by`): even positions, the step's own value, wheel and arrow keys. `Kind::Slider` uses that snap. It does not grow a second one. Damage on a value change covers the track and not a sibling label placed 200 px to the right.
 
 - [ ] **Step 1: Test** horizontal snap, continuous, vertical, and damage.
 
@@ -1012,7 +1012,7 @@ The page-rect damage assertion **requires #5.**
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
-- **Deviation:** the closed box paints the selected choice. Opening uses Task 18's layer. A choice press emits `Select` and `Dismiss`. A radio group stays the always-visible selector.
+- **Deviation:** the closed box paints the selected choice. Opening uses Task 18's layer. A choice press emits `Select` and `Dismiss`. A radio group stays the always-visible selector. `PanelDropdown` is the list in use now: six visible rows, wheel scroll, hover, arrow keys, Enter, and Escape. It paints over the panel. `Kind::Dropdown` reuses that list. It does not grow a second one.
 - [ ] **Step 5: Commit** `ui: dropdown list on the popup layer`
 
 This is the selector. A radio group remains the always-visible selector.

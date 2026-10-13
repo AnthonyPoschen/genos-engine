@@ -76,11 +76,7 @@ fn press_mode(mode_id: u32) -> PictureMode {
         [1280.0, 720.0],
         &camera,
         lamp,
-        Pointer {
-            x: 0.0,
-            y: 0.0,
-            down: false,
-        },
+        Pointer::at(0.0, 0.0, false),
     );
     let button = idle
         .shown
@@ -93,11 +89,11 @@ fn press_mode(mode_id: u32) -> PictureMode {
         [1280.0, 720.0],
         &camera,
         lamp,
-        Pointer {
-            x: button.rect.x + button.rect.w * 0.5,
-            y: button.rect.y + button.rect.h * 0.5,
-            down: true,
-        },
+        Pointer::at(
+            button.rect.x + button.rect.w * 0.5,
+            button.rect.y + button.rect.h * 0.5,
+            true,
+        ),
     );
     assert!(!press.look_capture, "a picture press captured look");
     let action = press.actions.first().copied().expect("picture action");
@@ -196,11 +192,7 @@ fn panel_overlay(width: f32, height: f32) -> (Vec<ScreenRect>, genos_ui::Rect) {
         [width, height],
         &Camera::opening(),
         Some([0.0, 4.0, 0.0]),
-        Pointer {
-            x: 0.0,
-            y: 0.0,
-            down: false,
-        },
+        Pointer::at(0.0, 0.0, false),
     );
     let panel = frame
         .shown

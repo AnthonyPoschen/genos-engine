@@ -32,6 +32,7 @@ struct RawPump {
     pointer_y: i32,
     display: *mut c_void,
     surface: *mut c_void,
+    wheel_y: f64,
 }
 
 extern "C" {
@@ -73,6 +74,8 @@ pub struct Frame {
     /// Pointer position in window pixels. The origin is the top-left.
     pub pointer_x: f32,
     pub pointer_y: f32,
+    /// Vertical wheel this pump, in notches. Positive is wheel up. Cleared each pump.
+    pub wheel_y: f32,
 }
 
 pub struct Window {
@@ -237,6 +240,7 @@ fn decode(raw: &RawPump) -> Frame {
         clicked_while_focused: raw.clicked_while_focused != 0,
         pointer_x: raw.pointer_x as f32,
         pointer_y: raw.pointer_y as f32,
+        wheel_y: raw.wheel_y as f32,
         mode: if raw.fullscreen != 0 {
             WindowMode::Fullscreen
         } else {
@@ -272,6 +276,7 @@ pub struct GatedInput {
     pub capture_click: bool,
     pub mouse_left: bool,
     pub keys_down: [u8; 256],
+    pub wheel_y: f32,
 }
 
 impl Default for GatedInput {
@@ -287,6 +292,7 @@ impl Default for GatedInput {
             capture_click: false,
             mouse_left: false,
             keys_down: [0; 256],
+            wheel_y: 0.0,
         }
     }
 }
@@ -312,6 +318,7 @@ impl FocusGate {
             capture_click,
             mouse_left: focused && frame.mouse_left,
             keys_down: if focused { frame.keys_down } else { [0; 256] },
+            wheel_y: if focused { frame.wheel_y } else { 0.0 },
         }
     }
 }
@@ -373,6 +380,7 @@ mod tests {
             mode: WindowMode::Windowed,
             pointer_x: 0.0,
             pointer_y: 0.0,
+            wheel_y: 0.0,
         }
     }
 

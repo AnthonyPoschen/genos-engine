@@ -125,7 +125,7 @@ the lighting caches.
 
 `FpsCounterSettings` on the scene (`enabled`, `rate_hz`) is the public setting.
 It implements `EngineSettings`. The default is off, at 4 Hz. The debug menu row
-`FPS` has an on/off button and a hertz slider. Both call `set_key`. F3 toggles
+`FPS` has a checkbox and a hertz slider. Both call `set_key`. F3 toggles
 `enabled`. `--fps-counter` (optional `on` or `off`; bare means on) and
 `--fps-hz N` win every frame. `GENOS_FPS_COUNTER` and `GENOS_FPS_HZ` apply only
 when that argument was omitted, and then a set variable wins every frame.
