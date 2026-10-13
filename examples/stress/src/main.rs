@@ -7,7 +7,10 @@
 //! Every option also reads an environment variable (`GENOS_STRESS_SCALE`,
 //! `GENOS_STRESS_LIGHTS`, `GENOS_STRESS_DYNAMIC`, `GENOS_STRESS_LAYOUT`,
 //! `GENOS_STRESS_DAY_SECONDS`); a flag
-//! wins over the variable. The panel switches lamps, dynamic share, scale and the sun
+//! wins over the variable. Lighting launch flags (`--preset`, `--bounces`,
+//! `--ambient`, `--time-of-day`, `--gpu-times`) win the same way: each
+//! `GENOS_LIGHTING_*` or `GENOS_GPU_TIMES` mirror applies only when that
+//! argument was omitted. The panel switches lamps, dynamic share, scale and the sun
 //! live.
 
 mod bench;
@@ -42,13 +45,19 @@ const USAGE: &str = "genos-stress [options]
   --day-seconds S           seconds per day/night cycle (default 120)
   --time F                  start time as a fraction of a day: 0 sunrise, 0.25 noon,
                             0.5 sunset (default 0.12)
+  --time-of-day H|HH:MM     start the lighting clock in hours: 0 midnight, 6 dawn,
+                            12 noon, 18 dusk (06:00, 18:24). Same start as --time.
+                            GENOS_LIGHTING_TIME holds that hour only when this
+                            argument was omitted
   --sun-speed X             day clock multiplier (default 1)
-  --freeze-sun              hold the sun at --time
+  --freeze-sun              hold the sun at --time or --time-of-day
   --no-sky                  no sky light: only the sun and the lamps
   --scene FILE              a scene file (genos-camera's .rhai) in place of the building; nothing moves
   --still-boxes             hold the coloured boxes
   --seed N                  lamp and box layout seed (default 1)
-  --view hall|roomA         start (and benchmark) viewpoint (default hall)
+  --view hall|roomA|sky     start (and benchmark) viewpoint (default hall).
+                            sky stands in the south yard and looks up, so the
+                            ambient curve can be judged
   --eye X Y Z YAW PITCH     start the camera here instead of --view (free look)
   --size WxH                window size (default 1280x720; 2560x1440 for --bench)
   --proof                   open the proof window (floats, takes no focus; --bench
@@ -83,6 +92,12 @@ const USAGE: &str = "genos-stress [options]
                             (GENOS_UNFILLED_MAX_BYTES)
   --unfilled-session-cap N  saves in one process (default 32)
                             (GENOS_UNFILLED_SESSION_CAP)
+  --preset NAME             potato, day-cycle, gi-1bounce, low, medium, high
+                            (GENOS_LIGHTING_PRESET is the mirror)
+  --bounces 0|1|2|unlimited bounce count (GENOS_LIGHTING_BOUNCES)
+  --ambient MODE            off, constant, hemisphere, day, or curve
+                            (GENOS_LIGHTING_AMBIENT)
+  --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
   --trace                   capture the picture after every script command that changes it";
 
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];
@@ -277,12 +292,30 @@ fn options() -> Result<Options, String> {
                 std::process::exit(0);
             }
             other => match genos_render::unfilled_flag_needs_value(other) {
-                None => return Err(format!("unknown argument {other}\n{USAGE}")),
                 Some(true) => {
                     let next = value()?;
                     genos_render::check_unfilled_arg(other, Some(&next))?;
                 }
                 Some(false) => genos_render::check_unfilled_arg(other, None)?,
+                None => match genos_scene::lighting_flag_needs_value(other) {
+                    Some(needs) => {
+                        let next = needs.then(|| value()).transpose()?;
+                        genos_scene::check_lighting_arg(other, next.as_deref())?;
+                        if let Some(hours) =
+                            genos_scene::lighting_arg_time_of_day(other, next.as_deref())?
+                        {
+                            opts.time = knobs::day_from_hours(f64::from(hours));
+                        }
+                    }
+                    None => match genos_render::gpu_times_flag_needs_value(other) {
+                        Some(true) => {
+                            let next = value()?;
+                            genos_render::check_gpu_times_arg(other, Some(&next))?;
+                        }
+                        Some(false) => genos_render::check_gpu_times_arg(other, None)?,
+                        None => return Err(format!("unknown argument {other}\n{USAGE}")),
+                    },
+                },
             },
         }
     }
@@ -545,10 +578,15 @@ fn run() -> Result<(), String> {
         clock = Some(now);
         let frame = window.pump();
         if !title_base.is_empty() {
-            let rendering = genos_debug::reference::RENDERING.load(std::sync::atomic::Ordering::SeqCst) > 0;
+            let rendering =
+                genos_debug::reference::RENDERING.load(std::sync::atomic::Ordering::SeqCst) > 0;
             if rendering != title_ref {
                 title_ref = rendering;
-                window.set_title(&if rendering { format!("{title_base} | REF") } else { title_base.clone() });
+                window.set_title(&if rendering {
+                    format!("{title_base} | REF")
+                } else {
+                    title_base.clone()
+                });
             }
         }
         if frame.closing {
