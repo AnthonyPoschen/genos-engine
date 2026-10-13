@@ -28,6 +28,8 @@ The game owns the words a player sees. The engine owns the struct those words wr
 
 A new feature adds a public struct that implements `EngineSettings`, stores it where other systems can already reach it, registers MCP commands that read and write that struct, and adds debug-menu controls that call `set_key`. Copy lighting.
 
+`FpsCounterSettings` on `Scene` is the frame-rate overlay (`enabled`, `rate_hz`). It is off at 4 Hz until `--fps-counter`, the debug menu, or MCP turns it on. `GENOS_FPS_COUNTER` and `GENOS_FPS_HZ` are the environment mirrors. The overlay itself is drawn by `genos-lighting`.
+
 `EngineSettings` lives in `genos-scene` because games, the renderer, and the debug tools already share that crate. A feature crate that `genos-scene` itself depends on keeps the same three methods on its own struct until a second implementor needs the trait in a crate both can see.
 
 ## Output directories
