@@ -204,6 +204,28 @@ pub(crate) struct Lighting {
     /// Wins over the scene until cleared.
     override_settings: Option<genos_scene::LightingSettings>,
     sun_height: f32,
+    /// Camera, occluders, meshes, and point lamps. The directional sun and the
+    /// sky are left out, so a small sun step can stay off the full compose.
+    view_content_key: u64,
+    view_key: u64,
+    view_key_valid: bool,
+    sun_live_dir: [f32; 3],
+    sun_live_light: f32,
+    sun_live_n: u32,
+    sun_commit_dir: [f32; 3],
+    sun_commit_light: f32,
+    sun_commit_n: u32,
+    sun_commit_valid: bool,
+    /// Frames that took the small-sun path. Printed, and read by the sun test.
+    sun_frames: u32,
+    /// Direct-patch compose. Built the first time a small sun step needs it.
+    sun_pipe: Handle,
+    /// Point lamps only. `None` until the first frame, so a still open does not
+    /// look like a lamp that just stopped.
+    lamp_key: Option<u64>,
+    lamp_moving: bool,
+    catch_base: u32,
+    catch_left: u32,
     /// The million-slot cache is allocated. Off, a small dummy stands in.
     cache_full: bool,
     /// Last buffer class. A live edit rebuilds only when this changes.
@@ -328,6 +350,22 @@ impl Default for Lighting {
             settings: genos_scene::LightingSettings::default(),
             override_settings: None,
             sun_height: 0.0,
+            view_content_key: 0,
+            view_key: 0,
+            view_key_valid: false,
+            sun_live_dir: [0.0; 3],
+            sun_live_light: 0.0,
+            sun_live_n: 0,
+            sun_commit_dir: [0.0; 3],
+            sun_commit_light: 0.0,
+            sun_commit_n: 0,
+            sun_commit_valid: false,
+            sun_frames: 0,
+            sun_pipe: std::ptr::null_mut(),
+            lamp_key: None,
+            lamp_moving: false,
+            catch_base: 0,
+            catch_left: 0,
             cache_full: false,
             alloc_key: (0, 0, 0, 0, 0),
             frame_tags: [Vec::new(), Vec::new()],
@@ -773,7 +811,7 @@ impl Gpu {
                 assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
                 assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
                 self.lighting.cache_keys = self.make_buffer_queues(
-                    (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS) * 4,
+                    (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS + LIGHTING_SUN_WORDS) * 4,
                     0x20 | 0x2 | 0x100 | 0x1,
                     Memory::Device,
                     &share,
@@ -800,7 +838,10 @@ impl Gpu {
         // Picture, emitted light, and (when direct refresh is slower than every
         // frame) one stored direct value per pixel. High stays at pixels * 8.
         let hist = u64::from(settings.direct.refresh_frames > 1);
-        self.lighting.out = self.make_buffer(pixels * (8 + 4 * hist), 0x20 | 0x1 | 0x2, Memory::Device)?;
+        // One extra slice holds linear bounce for a sun direct-patch. The
+        // default compose does not write it. High (refresh every frame) is
+        // picture + glow + that slice.
+        self.lighting.out = self.make_buffer(pixels * (12 + 4 * hist), 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.alloc_key = lighting_alloc_key(&settings);
         self.lighting.compose_valid = false;
