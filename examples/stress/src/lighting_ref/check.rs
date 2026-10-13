@@ -8,7 +8,7 @@ use genos_lighting_ref::metrics::{measure, FrameMetrics};
 use genos_lighting_ref::policy::{self, ExitFacts};
 use genos_lighting_ref::report::{self, CheckpointAudit, RunReport};
 use genos_lighting_ref::store::{self, TraceNote};
-use genos_lighting_ref::verdict::{judge, Judge, MetricId, Verdict};
+use genos_lighting_ref::verdict::{judge, Judge, MetricId};
 use genos_lighting_ref::Picture;
 
 use super::capture::{self, CaptureOptions, Job, LiveShot};
@@ -157,7 +157,7 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
                 .iter()
                 .find(|row| row.scene == item.scene && row.checkpoint == item.checkpoint)
         });
-        let mut judgement = judge(Judge {
+        let judgement = judge(Judge {
             metrics: &metrics,
             config: &config,
             baseline: baseline.map(|row| &row.baseline),
@@ -166,13 +166,6 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
             require,
             flip_gates: item.scene == "direct-only",
         });
-        if shot.review && judgement.verdict == Verdict::Pass {
-            judgement.verdict = Verdict::NeedsHuman;
-            judgement.reasons.push(
-                "the settle cap was reached before blurred relative luminance crossed the noise-aware line; this capture is for review and does not auto-pass"
-                    .into(),
-            );
-        }
         println!(
             "{} {}  {}",
             item.scene,

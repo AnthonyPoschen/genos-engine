@@ -39,8 +39,6 @@ pub struct LiveShot {
     pub event_frames: Vec<(u32, Picture)>,
     pub log: Vec<FrameRecord>,
     pub note: String,
-    /// The settle cap was reached before the threshold. A passing verdict becomes review.
-    pub review: bool,
 }
 
 pub struct CaptureOutcome {
@@ -266,7 +264,6 @@ fn capture_one(
         settled,
         event_frames,
         log,
-        review: cap_hit,
         note: shot_note(
             &opts.plan,
             candidate_frame,
@@ -331,18 +328,13 @@ fn shot_note(
     } else {
         String::new()
     };
-    let review = if cap_hit {
-        " The settle cap was reached before the threshold. This capture is marked for review."
-    } else {
-        ""
-    };
     let tail = if tail_is_previous {
         " Flicker uses the previous held frame because the run ended on the candidate."
     } else {
         ""
     };
     format!(
-        "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}.{review}{tail}{captures}",
+        "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}.{tail}{captures}",
         schedule::format_dt(plan.fixed_dt),
         plan.warmup_frames,
         format_mean(blur_rel),

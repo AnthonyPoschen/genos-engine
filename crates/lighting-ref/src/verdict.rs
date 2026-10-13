@@ -6,8 +6,8 @@
 //! trace has no noise estimate. With a noise estimate, raw per-pixel error
 //! inside that noise is not a fail. On a bounced picture the gates are the
 //! blurred error and the luminance ratio. FLIP is reported there and does
-//! not change the verdict. Direct-only still gates on FLIP: that picture is
-//! the matched footprint.
+//! not change the verdict, and it is left out of the verdict reasons. Direct-only
+//! still gates on FLIP: that picture is the matched footprint.
 
 use std::collections::BTreeMap;
 
@@ -187,7 +187,7 @@ pub fn judge(input: Judge<'_>) -> Judgement {
     let mut reasons = Vec::new();
     for id in MetricId::all() {
         let row = judge_one(*id, &input);
-        if row.verdict != Verdict::Pass {
+        if row.gates && row.verdict != Verdict::Pass {
             reasons.push(row.reason.clone());
         }
         rows.push(row);
@@ -640,7 +640,17 @@ mod tests {
         hell.flip_p99 = Some(0.913);
         let hell_j = judged(&hell, None, 64, 0.16);
         assert_eq!(hell_j.verdict, Verdict::NeedsHuman, "{:?}", hell_j.reasons);
-        assert!(hell_j.reasons.iter().any(|r| r.contains("not a gate")));
+        assert!(hell_j
+            .reasons
+            .iter()
+            .all(|r| !r.contains("FLIP") && !r.contains("not a gate")));
+        let flip = hell_j
+            .rows
+            .iter()
+            .find(|row| row.id == MetricId::FlipMean)
+            .unwrap();
+        assert!(!flip.gates);
+        assert!(flip.reason.contains("not a gate"), "{}", flip.reason);
 
         for (name, blur, ratio) in [
             ("hall", 0.303, 0.832),
@@ -671,6 +681,80 @@ mod tests {
             .rows
             .iter()
             .any(|row| row.id == MetricId::FlipMean && row.gates));
+    }
+
+    #[test]
+    fn advisory_flip_never_changes_a_bounced_verdict() {
+        // 1f8b1bcf box-step came out needs-a-person with FLIP mean 0.462 and
+        // 0.445. Those rows fail. An in-band FLIP mean, a failing p99, and a
+        // FLIP regression against a baseline leave the same verdict as the
+        // picture with FLIP cleared.
+        let mut cleared = with_scores(0.20, 0.078, 0.99);
+        cleared.flip_mean = Some(0.05);
+        cleared.flip_p99 = Some(0.20);
+        let base = judged(&cleared, None, 64, 0.10);
+        assert_eq!(base.verdict, Verdict::Pass, "{:?}", base.reasons);
+
+        let mut baseline = Baseline::default();
+        baseline.values.insert("flip_mean".into(), 0.05);
+        baseline.values.insert("flip_p99".into(), 0.20);
+
+        for (flip_mean, flip_p99) in [(0.462, 0.84), (0.445, 0.84), (0.30, 0.50), (0.05, 0.99)] {
+            let mut metrics = cleared.clone();
+            metrics.flip_mean = Some(flip_mean);
+            metrics.flip_p99 = Some(flip_p99);
+            let plain = judged(&metrics, None, 64, 0.10);
+            let regressed = judged(&metrics, Some(&baseline), 64, 0.10);
+            assert_eq!(
+                plain.verdict, base.verdict,
+                "flip {flip_mean}/{flip_p99} {:?}",
+                plain.reasons
+            );
+            assert_eq!(
+                regressed.verdict, base.verdict,
+                "flip regression {flip_mean}/{flip_p99} {:?}",
+                regressed.reasons
+            );
+            assert!(
+                plain.reasons.iter().all(|r| !r.contains("FLIP")),
+                "{:?}",
+                plain.reasons
+            );
+            assert!(
+                regressed.reasons.iter().all(|r| !r.contains("FLIP")),
+                "{:?}",
+                regressed.reasons
+            );
+            let row = plain
+                .rows
+                .iter()
+                .find(|row| row.id == MetricId::FlipMean)
+                .unwrap();
+            assert!(!row.gates);
+        }
+
+        let mut band = with_scores(0.20, 0.123, 0.910);
+        band.flip_mean = Some(0.05);
+        band.flip_p99 = Some(0.20);
+        let band_clear = judged(&band, None, 64, 0.16);
+        band.flip_mean = Some(0.462);
+        band.flip_p99 = Some(0.99);
+        assert_eq!(band_clear.verdict, Verdict::NeedsHuman);
+        assert_eq!(
+            judged(&band, None, 64, 0.16).verdict,
+            band_clear.verdict,
+            "{:?}",
+            judged(&band, None, 64, 0.16).reasons
+        );
+
+        let mut fail = with_scores(0.20, 0.303, 0.832);
+        fail.flip_mean = Some(0.05);
+        fail.flip_p99 = Some(0.20);
+        let fail_clear = judged(&fail, None, 64, 0.16);
+        fail.flip_mean = Some(0.462);
+        fail.flip_p99 = Some(0.99);
+        assert_eq!(fail_clear.verdict, Verdict::Fail);
+        assert_eq!(judged(&fail, None, 64, 0.16).verdict, fail_clear.verdict);
     }
 
     #[test]
