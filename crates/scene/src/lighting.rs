@@ -346,9 +346,9 @@ impl LightingSettings {
                 s.probes.refresh_frames = 2;
                 s.world_cache.enabled = false;
                 s.denoiser.iterations = 1;
-                // The filter does not run (no surface cache). Adaptive drops
-                // settled iterations if the cache is turned on. See S79.
-                s.denoiser.adaptive = true;
+                // The filter does not run (no surface cache). Adaptive failed
+                // the 4070 picture bar (S79), so it stays off.
+                s.denoiser.adaptive = false;
                 s.prefill = false;
                 s.gi.refresh_frames = 2;
                 s.gi.budget_shift = 2;
@@ -360,9 +360,9 @@ impl LightingSettings {
                 s.bounce.count = 2;
                 s.probes.rays = 32;
                 s.denoiser.iterations = 3;
-                // Adaptive drops settled wavelet iterations. Half-res and tiles
-                // were removed after they lost the 4070 A/B (S79).
-                s.denoiser.adaptive = true;
+                // Full-resolution scalar wavelet. Adaptive failed the 4070
+                // picture bar (S79), so it stays off.
+                s.denoiser.adaptive = false;
                 s.gi.budget_shift = 1;
                 s.ambient.mode = AmbientMode::Day;
             }

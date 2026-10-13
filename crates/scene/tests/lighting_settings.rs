@@ -104,17 +104,14 @@ fn high_is_the_tuned_path() {
     assert_eq!(high.denoiser.iterations, 5);
     assert!(!high.denoiser.adaptive);
     assert!(high.denoiser.plain());
-    for preset in [LightingPreset::Medium, LightingPreset::Low] {
-        let cheap = LightingSettings::preset(preset);
-        assert!(
-            cheap.denoiser.adaptive,
-            "{preset:?} drops settled iterations"
-        );
-        assert!(
-            !cheap.denoiser.plain(),
-            "{preset:?} keeps the adaptive shader"
-        );
-    }
+    let medium = LightingSettings::preset(LightingPreset::Medium);
+    assert_eq!(medium.denoiser.iterations, 3);
+    assert!(!medium.denoiser.adaptive);
+    assert!(medium.denoiser.plain());
+    let low = LightingSettings::preset(LightingPreset::Low);
+    assert_eq!(low.denoiser.iterations, 1);
+    assert!(!low.denoiser.adaptive);
+    assert!(low.denoiser.plain());
     assert!((high.denoiser.variance_threshold - 0.02).abs() < 1.0e-6);
     assert_eq!(high.world_mode(), 3);
     assert!(high.allocates_cache());

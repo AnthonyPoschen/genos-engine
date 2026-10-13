@@ -548,8 +548,9 @@ Half-res and tiles are removed. On the RTX 4070 at 1920×1080 they were slower
 than the scalar full wavelet (half moving 17.8 ms vs full 11.7, tiles 18.3 vs
 11.6). The hashed lattice does not shrink the dispatch, and the lavapipe-safe
 tile kernel disables the work lists. Adaptive stays an experimental knob, off
-on high: the retest at 476ec13 missed the picture bar (mean 2.8 / p99 11–13
-against 1.5 / 10) and still-atrous got slower (3.13 vs 2.7). The plain
-pipeline, compiled without that branch, put high back to about 8.0 ms against
+on every preset: the retest at 476ec13 missed the picture bar (mean 2.8 / p99
+11–13 against 1.5 / 10) and still-atrous got slower (3.13 vs 2.7). Medium is
+the full-resolution scalar wavelet at 3 iterations. The plain pipeline,
+compiled without the adaptive branch, put high back to about 8.0 ms against
 gi-v2's 7.8 ms moving. Numbers and the five-line postmortem are in
 [S79](experiments/S79-half-res-atrous.md).
