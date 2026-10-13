@@ -295,6 +295,10 @@ pub struct LightingWakeStats {
     pub probes_woken: u32,
     pub verify_hits: u32,
     pub verify_misses: u32,
+    /// Kept hits a moved lamp's contribution pushed over the shade threshold.
+    pub lamp_due: u32,
+    /// Kept hits inside a moved lamp's range, including those under the threshold.
+    pub lamp_reach: u32,
 }
 
 /// A probe the ring scheduler traced in full last frame, and where it stood.
@@ -314,6 +318,8 @@ impl LightingWakeStats {
             probes_woken: *w.get(WAKE_WOKEN).unwrap_or(&0),
             verify_hits: *w.get(WAKE_HITS).unwrap_or(&0),
             verify_misses: *w.get(WAKE_MISSES).unwrap_or(&0),
+            lamp_due: *w.get(WAKE_LAMP_DUE).unwrap_or(&0),
+            lamp_reach: *w.get(WAKE_LAMP_REACH).unwrap_or(&0),
         }
     }
 }
@@ -1774,7 +1780,7 @@ impl Gpu {
             );
             let wake = LightingWakeStats::from_words(w);
             eprintln!(
-                "lightingwake {queue} frame {} traced {} rays {} rings {} splits {} woken {} hits {} misses {}",
+                "lightingwake {queue} frame {} traced {} rays {} rings {} splits {} woken {} hits {} misses {} lamp_due {} lamp_reach {}",
                 self.lighting.frame,
                 wake.probes_traced,
                 wake.rays_traced,
@@ -1782,7 +1788,9 @@ impl Gpu {
                 wake.groups_split,
                 wake.probes_woken,
                 wake.verify_hits,
-                wake.verify_misses
+                wake.verify_misses,
+                wake.lamp_due,
+                wake.lamp_reach
             );
     }
 
@@ -3011,6 +3019,10 @@ const WAKE_MISSES: usize = 149;
 const WAKE_TRACED: usize = 150;
 const WAKE_RAYS: usize = 151;
 const WAKE_PHASE: usize = 152;
+/// Kept hits inside a moved lamp's range whose contribution crossed the shade
+/// threshold, and kept hits the range reached at all. `wake_pad` words 0 and 1.
+const WAKE_LAMP_DUE: usize = 153;
+const WAKE_LAMP_REACH: usize = 154;
 const WAKE_LIST: usize = 168;
 const WAKE_LIST_CAP: usize = 32;
 const WAKE_CLEAR_WORDS: usize = 296;
@@ -3023,6 +3035,8 @@ const LIGHTING_UNFILLED_MASK_AT: usize = 396;
 const LIGHTING_UNFILLED_MASK_CAP: u32 = 276480;
 const _: () = assert!(LIGHTING_UNFILLED_MASK_AT == LIGHTING_STATS_WORDS);
 const _: () = assert!(LIGHTING_CTRL_WORD as usize + 16 == WAKE_MODE);
+const _: () = assert!(WAKE_PHASE + 1 == WAKE_LAMP_DUE);
+const _: () = assert!(WAKE_LAMP_DUE + 1 == WAKE_LAMP_REACH);
 const _: () = assert!(WAKE_CLEAR_WORDS + 96 == LIGHTING_UNFILLED_WORD);
 const _: () = assert!(LIGHTING_UNFILLED_WORD + 4 == LIGHTING_UNFILLED_MASK_AT);
 const _: () = assert!(LIGHTING_SUN_MARK == LIGHTING_UNFILLED_WORD + 2);

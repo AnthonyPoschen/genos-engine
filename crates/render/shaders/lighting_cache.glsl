@@ -2596,6 +2596,66 @@ float lighting_lamp_delta(vec3 p, uint updated) {
     }
     return delta;
 }
+// Unshadowed contribution of one ring record at distance `dist` (0 outside the
+// range). Peak channel times the same inverse square `lamp_light` uses, times
+// how face-on the hit is. A point lamp has no spotlight cone: the range sphere
+// is the influence, and the facing hemisphere is which side of the hit it shades.
+float lighting_lamp_contrib(vec3 p, vec3 n, vec3 lamp, float range, float peak) {
+    vec3 toward = lamp - p;
+    float dist2 = dot(toward, toward);
+    if (dist2 >= range * range || peak <= 0.0) {
+        return 0.0;
+    }
+    float dist = max(sqrt(dist2), 1.0e-4);
+    float nd = dot(toward / dist, n);
+    if (nd <= 0.0) {
+        return 0.0;
+    }
+    return peak * nd * LAMP_UNIT / max(dist2, LAMP_RADIUS * LAMP_RADIUS);
+}
+// The ring is one record per moved lamp (old place, new place, range, peak).
+// 0: no record reaches the hit. 1: a lamp's range sphere reaches it, and the
+// unshadowed contribution since the hit was traced moved by at most
+// LIGHTING_LAMP_DUE. 2: that contribution moved by more, so the hit's shade
+// depends on the lamp and has to be redone. Summing each record's change is
+// an upper bound on the net move, which reshades a little early rather than late.
+const float LIGHTING_LAMP_DUE = 0.02;
+uint lighting_lamp_region(vec3 p, vec3 n, uint updated) {
+    float change = 0.0;
+    float peak = 0.0;
+    bool reach = false;
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
+        uint at = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i;
+        uint f = ckeys.key[at + 8u];
+        if (f == 0u || int(lighting_frame() - f) > int(LIGHTING_WRC_CHANGE_FRAMES) || int(updated - f) >= 0) {
+            continue;
+        }
+        vec3 a = vec3(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]));
+        vec3 b = vec3(uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]), uintBitsToFloat(ckeys.key[at + 5u]));
+        float range = uintBitsToFloat(ckeys.key[at + 6u]);
+        float pw = uintBitsToFloat(ckeys.key[at + 7u]);
+        float da = length(p - a);
+        float db = length(p - b);
+        if (min(da, db) >= range) {
+            continue;
+        }
+        float ca = lighting_lamp_contrib(p, n, a, range, pw);
+        float cb = lighting_lamp_contrib(p, n, b, range, pw);
+        if (ca <= 0.0 && cb <= 0.0) {
+            continue;
+        }
+        reach = true;
+        change += abs(cb - ca);
+        peak = max(peak, max(ca, cb));
+    }
+    if (!reach) {
+        return 0u;
+    }
+    if (change > LIGHTING_LAMP_DUE * max(peak, 1.0e-4)) {
+        return 2u;
+    }
+    return 1u;
+}
 // Once a round (cache pass, thread 0): lamps that moved or changed range since
 // the last round go into the ring (suns are left to the light-change rule).
 void lighting_wrc_note_lamps() {

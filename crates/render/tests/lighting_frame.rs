@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use genos_render::{DebugView, LightingWakeProbe, LightingWakeStats, Renderer, ViewMode, World};
 use genos_scene::{
-    Camera, Ceiling, DebugSettings, Floor, Light, LightingPreset, LightingSettings, Scene, Vec3, Wall,
+    Camera, Ceiling, DebugSettings, Floor, Light, LightingPreset, LightingSettings, Scene, Shape,
+    Solid, Vec3, Wall,
 };
 use genos_window::Window;
 
@@ -880,6 +881,91 @@ fn still_rings_picture_matches_legacy() {
     assert!(
         mean < 0.15 && p99 < 2.0,
         "still rings left the legacy picture (mean {mean:.3} p99 {p99:.3})"
+    );
+}
+
+/// Same corner, cache on and bounces unlimited so the per-lamp ring is written,
+/// plus one red box beside the lamp. Sixteen still frames, then the lamp walks
+/// toward the box. It has to keep moving: one step and a hold arms the corner
+/// catch-up, which shades every kept stratum and never asks the ring.
+fn moving_lamp_picture(wake: &str) -> (Vec<u8>, u32, u32) {
+    let mut window = Window::open_proof(320, 180).expect("proof window");
+    let frame = window.pump();
+    let mut renderer =
+        Renderer::open(window.display, window.surface, frame.width, frame.height).expect("renderer");
+    clear_wake_env();
+    let mut settings = LightingSettings::default();
+    settings.set_key("probe_tile", "16").unwrap();
+    settings.set_key("wake", wake).unwrap();
+    settings.set_key("denoise", "0").unwrap();
+    settings.set_key("sky", "0").unwrap();
+    settings.set_key("ambient", "off").unwrap();
+    let lamp = Vec3::new(0.85, 1.15, 0.85);
+    let mut world = corner_room(settings, lamp, [1.4, 1.1, 0.8]);
+    world.scene.solids.push(Solid {
+        shape: Shape::Square,
+        position: Vec3::new(1.7, 0.0, 1.55),
+        size: 0.7,
+        height: 1.15,
+        yaw: 0.0,
+        color: [0.85, 0.12, 0.10],
+        absorption: 0.0,
+        reflectance: -1.0,
+        color_mix: -1.0,
+    });
+    let camera = corner_camera();
+    for _ in 0..16 {
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+    }
+    let mut due = 0u32;
+    let mut reach = 0u32;
+    let mut pixels = Vec::new();
+    for frame in 0..12 {
+        world.scene.lights[0].position = Vec3::new(lamp.x + 0.05 * (frame + 1) as f32, lamp.y, lamp.z);
+        pixels = draw(&mut window, &mut renderer, &world, &camera);
+        let stats = renderer.lighting_wake_stats();
+        due += stats.lamp_due;
+        reach += stats.lamp_reach;
+        eprintln!(
+            "moving {wake} step {frame} lamp_due {} lamp_reach {}",
+            stats.lamp_due, stats.lamp_reach
+        );
+    }
+    (pixels, due, reach)
+}
+
+fn mean_channel(pixels: &[u8]) -> f64 {
+    let n = pixels.len() / 4;
+    let sum: f64 = pixels
+        .chunks_exact(4)
+        .map(|p| p[0] as f64 + p[1] as f64 + p[2] as f64)
+        .sum();
+    sum / (n as f64 * 3.0)
+}
+
+/// A lamp walking toward a nearby box has to reshade the kept hits its
+/// contribution actually changes. Owner moving noise is mean 0.43 / p99 2.3.
+/// The skip at `6cd3cef` left p99 17.7 on those box faces. `lamp_due` is the
+/// rings count of kept hits over the 2 percent threshold, so an empty ring
+/// cannot match by leaving both pictures stale.
+#[test]
+fn moving_lamp_rings_picture_matches_legacy() {
+    let _gpu = gpu_lock();
+    let (legacy, _, _) = moving_lamp_picture("legacy");
+    let (rings, due, reach) = moving_lamp_picture("rings");
+    let (mean, p99) = channel_delta(&legacy, &rings);
+    let lit = mean_channel(&legacy);
+    eprintln!(
+        "moving lamp rings vs legacy mean {mean:.3} p99 {p99:.3} lamp_due {due} lamp_reach {reach} legacy luma {lit:.2}"
+    );
+    assert!(lit > 8.0, "the lamp did not light the room (mean channel {lit:.2})");
+    assert!(
+        due > 0,
+        "rings never reshaded a kept hit for the moved lamp (reach {reach})"
+    );
+    assert!(
+        mean < 0.5 && p99 < 2.3,
+        "moving lamp rings left the legacy picture (mean {mean:.3} p99 {p99:.3}; noise mean 0.43 p99 2.3)"
     );
 }
 

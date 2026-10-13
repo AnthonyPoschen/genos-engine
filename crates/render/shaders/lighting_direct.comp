@@ -258,18 +258,27 @@ void main() {
         // and this is the S69C skip.
         if (!lighting_catch_up() && LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_pix_cache_ok() && !(urgent && lighting_near_change(pos))) {
             uint traced = lighting_frame() - LIGHTING_STRATA / 2u;
-            // A live ring does not reshade a kept hit only because a lamp
-            // moved. That shade was the direct pass. A woken probe and its
-            // check ray still shade; the probe filter spreads them. With no
-            // event queued, rings uses the same lamp-range test as legacy, so
-            // a still scene's probes match before the idle freezes them.
-            // The sun ratio stays, so a day change still tracks.
+            // A live ring reshades a kept hit when a moved lamp's record says
+            // the hit is inside that lamp's range and the lamp's unshadowed
+            // contribution moved past LIGHTING_LAMP_DUE. Other kept hits stay
+            // put: that was the direct-pass win. A woken probe and its check
+            // ray still shade. With no event queued, rings uses the same
+            // lamp-range test as legacy. The sun ratio stays, so a day change
+            // still tracks.
             bool sparse = gstats.wake_mode != 0u && gstats.wake_events != 0u && !lighting_wake_relight(h);
+            bool sun_quiet = abs(lighting_ls_ratio(traced) - 1.0) <= 0.01;
             if (sparse) {
-                if (abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
+                uint region = lighting_lamp_region(pos, n, traced);
+                if (region >= 1u) {
+                    atomicAdd(gstats.wake_pad[1], 1u);
+                }
+                if (region == 2u) {
+                    atomicAdd(gstats.wake_pad[0], 1u);
+                }
+                if (sun_quiet && region < 2u) {
                     return;
                 }
-            } else if (!lighting_wrc_lamp_changed(pos, traced) && abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
+            } else if (!lighting_wrc_lamp_changed(pos, traced) && sun_quiet) {
                 return;
             }
         }
