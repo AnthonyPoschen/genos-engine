@@ -205,7 +205,7 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             "lighting_lamp_pick",
             "Lamp pick",
             lamp_pick_index(lighting.lamp_pick.mode),
-            &["off", "hits", "pixels", "both", "reuse"],
+            &["off", "hits", "pixels", "both", "reuse (experimental)"],
         ),
         Knob::number(
             "lighting_lamp_pick_samples",
@@ -428,7 +428,7 @@ pub fn apply_lighting_knob(
         "lighting_direct_scale" => ("direct_scale", whole.to_string()),
         "lighting_lamp_pick" => (
             "lamp_pick",
-            ["off", "hits", "pixels", "both", "reuse"]
+            ["off", "hits", "pixels", "both", "reuse (experimental)"]
                 .get(whole as usize)
                 .copied()
                 .unwrap_or("off")

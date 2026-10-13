@@ -136,12 +136,13 @@ impl ShadowFilter {
 
 /// Which points sample point lamps instead of tracing every one.
 ///
-/// `Off` is preset `high`: every lamp, no reservoir. The sun is never a
-/// sample. It is traced on its own.
+/// The sun is never a sample. It is traced on its own. GI presets use
+/// [`Hits`](Self::Hits). Potato and day-cycle stay [`Off`](Self::Off).
+/// [`Reuse`](Self::Reuse) is experimental and is not a preset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum LampPickMode {
-    /// Today's shade loop.
+    /// Every lamp. Potato and day-cycle.
     Off = 0,
     /// Bounce hits, probe fills, and cache-ray hits. Pixels stay exact.
     Hits = 1,
@@ -149,7 +150,8 @@ pub enum LampPickMode {
     Pixels = 2,
     /// Hits and pixels, no reservoir.
     Both = 3,
-    /// Hits, plus pixels with a temporal reservoir. Spatial only if the radius is above 0.
+    /// Experimental. Hits, plus pixels with a temporal reservoir.
+    /// Spatial only if the radius is above 0. Not used by a preset.
     Reuse = 4,
 }
 
@@ -160,7 +162,7 @@ impl LampPickMode {
             Self::Hits => "hits",
             Self::Pixels => "pixels",
             Self::Both => "both",
-            Self::Reuse => "reuse",
+            Self::Reuse => "reuse (experimental)",
         }
     }
 
@@ -170,7 +172,7 @@ impl LampPickMode {
             "hits" | "1" => Some(Self::Hits),
             "pixels" | "2" => Some(Self::Pixels),
             "both" | "3" => Some(Self::Both),
-            "reuse" | "4" => Some(Self::Reuse),
+            "reuse" | "4" | "reuse (experimental)" => Some(Self::Reuse),
             _ => None,
         }
     }
@@ -361,7 +363,8 @@ pub struct LightingSettings {
     pub emissive: bool,
     pub prefill: bool,
     pub ambient: AmbientSettings,
-    /// Weighted lamp picking. Off on every preset, so today's picture stays.
+    /// Weighted lamp picking. GI presets sample hits, and pixels stay on the full
+    /// sum. `reuse (experimental)` is not a preset.
     pub lamp_pick: LampPickSettings,
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
     /// `0` is midnight, `6` dawn, `12` noon, `18` dusk.
@@ -379,7 +382,9 @@ impl LightingSettings {
         let mut s = Self::high_defaults();
         s.preset = preset;
         match preset {
-            LightingPreset::High => {}
+            LightingPreset::High => {
+                s.lamp_pick.mode = LampPickMode::Hits;
+            }
             LightingPreset::DayCycle => {
                 s.gi.enabled = false;
                 s.bounce.count = 0;
@@ -405,6 +410,7 @@ impl LightingSettings {
                 s.world_cache.enabled = false;
                 s.denoiser.enabled = false;
                 s.prefill = false;
+                s.lamp_pick.mode = LampPickMode::Hits;
             }
             LightingPreset::Potato => {
                 s.direct.max_lights = 8;
@@ -438,6 +444,7 @@ impl LightingSettings {
                 s.gi.budget_shift = 2;
                 s.ambient.mode = AmbientMode::Day;
                 s.ambient.intensity = 0.35;
+                s.lamp_pick.mode = LampPickMode::Hits;
             }
             LightingPreset::Medium => {
                 s.direct.max_lights = 8;
@@ -449,6 +456,7 @@ impl LightingSettings {
                 s.denoiser.adaptive = false;
                 s.gi.budget_shift = 1;
                 s.ambient.mode = AmbientMode::Day;
+                s.lamp_pick.mode = LampPickMode::Hits;
             }
         }
         s.sanitize();
@@ -1018,7 +1026,9 @@ impl LightingSettings {
             "time_of_day" => self.time_of_day = num_f32(value)?,
             "lamp_pick" => {
                 self.lamp_pick.mode = LampPickMode::parse(value).ok_or_else(|| {
-                    format!("lamp_pick is off, hits, pixels, both, or reuse, got {value}")
+                    format!(
+                        "lamp_pick is off, hits, pixels, both, or reuse (experimental), got {value}"
+                    )
                 })?
             }
             "lamp_pick_candidates" => self.lamp_pick.candidates = num_u32(value)?,

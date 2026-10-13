@@ -108,7 +108,8 @@ const USAGE: &str = "genos-stress [options]
                             (GENOS_LIGHTING_DENOISE_ADAPTIVE). Off on every preset
   --denoise-variance F      relative luminance deviation, 0..0.1 (GENOS_LIGHTING_DENOISE_VARIANCE)
   --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
-  --lamp-pick MODE          off, hits, pixels, both, or reuse (GENOS_LIGHTING_LAMP_PICK)
+  --lamp-pick MODE          off, hits, pixels, both, or reuse (experimental)
+                            (GENOS_LIGHTING_LAMP_PICK; reuse is the same mode)
   --lamp-pick-samples N     shadow rays per shaded point, 1..4 (GENOS_LIGHTING_LAMP_PICK_SAMPLES)
   --lamp-pick-rays N        same knob as --lamp-pick-samples
   --lamp-pick-reuse on|off  temporal reservoir (GENOS_LIGHTING_LAMP_PICK_REUSE)
