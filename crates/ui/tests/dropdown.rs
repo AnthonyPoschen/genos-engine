@@ -24,6 +24,7 @@ fn rows(names: &[&str], value: f64) -> Vec<PanelRow> {
         buttons: Vec::new(),
         slider: None,
         dropdown: Some(PanelDropdown::new(ID, value, choices(names))),
+        checks: Vec::new(),
     }]
 }
 

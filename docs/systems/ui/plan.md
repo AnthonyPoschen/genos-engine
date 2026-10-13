@@ -38,7 +38,7 @@ The crate is `crates/ui`, package `genos-ui`. It depends on `genos-scene` only (
 | Profile graph | `crates/ui/src/profile.rs` | `profile_overlay` paints a readout and `Segment` lines. Pause, drag a 250 ms bucket, reset. This is the only chart. |
 | Damage | not on `gi-v2` | PR #5 adds `crates/ui/src/damage.rs`: `DamageTracker`, `MAX_DAMAGE` 8, merge gap 16 px, bounds outset to whole pixels, and `crates/ui/tests/damage.rs`. **requires #5.** |
 | Public API | `crates/ui/src/lib.rs` | `Look`, `Segment`, `Action`, `PictureMode`, and the re-exports above. `Frame` has no `damage` field until #5. |
-| Tests | `crates/ui/tests/` | `panel.rs`, `slider.rs`, `dropdown.rs`, `omarchy.rs`, `profile.rs`, `aa_camera.rs`. Layout tests live at the bottom of `layout.rs`. |
+| Tests | `crates/ui/tests/` | `panel.rs`, `slider.rs`, `dropdown.rs`, `checkbox.rs`, `omarchy.rs`, `profile.rs`, `aa_camera.rs`. Layout tests live at the bottom of `layout.rs`. |
 
 The frame that uses it:
 
@@ -60,7 +60,7 @@ What is missing, against the toolkits below:
 | Need | Today |
 | --- | --- |
 | Labels and rich text | One bitmap style. No spans, no font file, no shaping. |
-| Button, toggle, checkbox, radio | `button_panel` has a labelled button and a selected look. No toggle, checkbox, or radio group. A focused box uses the pressed look (`choose` in `panel.rs`). |
+| Button, toggle, checkbox, radio | `button_panel` has a labelled button and a `PanelCheck` mark. A press on the mark emits `Action::Toggle` with the next on state. No radio group. `Kind::Checkbox` is still absent. |
 | Slider | `PanelSlider` is numeric or named steps. No vertical slider, no general element. |
 | Dial and knob | Absent. `genos-debug` `Knob` is a number in a script. |
 | Progress, linear and radial | Absent. The sun is a decorative disc, not a value. |
@@ -684,7 +684,7 @@ The stable second frame and the dirty track **require #5.**
 
 - [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
-- **Deviation:** a press emits `Event::Toggle` with the inverted flag. The checked box paints an accent mark inset by 4 px. The unchecked snapshot has no mark.
+- **Deviation:** a press emits `Event::Toggle` with the inverted flag. The checked box paints an accent mark inset by 4 px. The unchecked snapshot has no mark. `PanelCheck` is the mark in use now: a 16 px box, a label, and `Action::Toggle` with the next on state. `Kind::Checkbox` reuses that mark. It does not grow a second one.
 - [ ] **Step 5: Commit** `ui: checkbox mark and toggle event`
 
 ### Task 12: Radio

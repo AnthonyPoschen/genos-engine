@@ -63,12 +63,14 @@ pub enum Action {
     Slide { id: u32, value: f64 },
     /// A choice picked from an open [`crate::PanelDropdown`].
     Select { id: u32, value: f64 },
+    /// A press on a [`crate::PanelCheck`]. `on` is the state after the press.
+    Toggle { id: u32, on: bool },
 }
 
 pub use layout::{layout, Align, Direction, Node, Pad, Place, Rect, Sizing, Space};
 pub use panel::{
     apply_frame_action, apply_lamp, button_panel, lighting_frame, Frame, Paint, PanelButton,
-    PanelDropdown, PanelRow, PanelSlider, Pointer, Shown, State,
+    PanelCheck, PanelDropdown, PanelRow, PanelSlider, Pointer, Shown, State,
 };
 pub use profile::{
     inspect_region, profile_overlay, remember_frame, FrameSample, OpenFrame, PlotScale,

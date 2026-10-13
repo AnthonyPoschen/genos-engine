@@ -258,6 +258,17 @@ pub struct PanelRow {
     pub slider: Option<PanelSlider>,
     /// Closed box in the row. The open list is not part of the row's layout.
     pub dropdown: Option<PanelDropdown>,
+    /// On/off marks laid out left to right. A press reports the next state.
+    pub checks: Vec<PanelCheck>,
+}
+
+/// A compact on/off mark and a label. The panel does not store `on`.
+/// The next frame passes the new value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PanelCheck {
+    pub id: u32,
+    pub text: String,
+    pub on: bool,
 }
 
 /// A closed choice box. A press opens a scrollable list over the panel.
@@ -432,7 +443,10 @@ pub fn button_panel(
     panel.children.push(label(own + 1, title, fill));
     for (index, item) in rows.iter().enumerate() {
         let at = own + 2 + 3 * index as u32;
-        let mut children = vec![label(at + 1, &item.label, fill)];
+        let mut children = Vec::new();
+        if !item.label.is_empty() {
+            children.push(label(at + 1, &item.label, fill));
+        }
         for button in &item.buttons {
             let mut node = control(button.id, &button.text, Action::Press(button.id), palette);
             if button.selected {
@@ -454,10 +468,14 @@ pub fn button_panel(
         if let Some(drop) = &item.dropdown {
             children.push(dropdown_box(drop, palette));
         }
+        for check in &item.checks {
+            children.push(check_node(check, fill, palette));
+        }
         panel.children.push(row(at, children, fill));
     }
     let bars: Vec<&PanelSlider> = rows.iter().filter_map(|r| r.slider.as_ref()).collect();
     let drops: Vec<&PanelDropdown> = rows.iter().filter_map(|r| r.dropdown.as_ref()).collect();
+    let checks: Vec<&PanelCheck> = rows.iter().flat_map(|row| row.checks.iter()).collect();
     let items = layout::layout(&panel, Space::Screen, viewport, Some(camera));
     if state
         .open_drop
@@ -594,6 +612,9 @@ pub fn button_panel(
         if drops.iter().any(|drop| drop.id == item.id) {
             push_chevron(&mut paints, item.rect, state.open_drop == Some(item.id));
         }
+        if let Some(check) = checks.iter().find(|check| check.id == item.id) {
+            push_check(&mut paints, item.rect, check.on);
+        }
     }
     if let Some((drop, list, scroll)) = popup_geom(state, &drops, &items, viewport) {
         state.drop_scroll = scroll;
@@ -639,6 +660,54 @@ const POPUP_ID: u32 = u32::MAX - 8192;
 const LIST_BG: [f32; 3] = [0.10, 0.11, 0.14];
 const LIST_HOVER: [f32; 3] = [0.30, 0.38, 0.48];
 const LIST_BORDER: [f32; 3] = [0.55, 0.62, 0.72];
+
+const CHECK_BOX: f32 = 16.0;
+const CHECK_MARK: [f32; 3] = [0.62, 0.78, 0.42];
+
+fn check_node(check: &PanelCheck, fill: [f32; 3], palette: Option<Palette>) -> Node {
+    let mut node = Node::new(check.id);
+    node.pad = Pad {
+        left: 22.0,
+        right: 8.0,
+        top: 2.0,
+        bottom: 2.0,
+    };
+    node.text = Some(check.text.clone());
+    node.action = Some(Action::Toggle {
+        id: check.id,
+        on: !check.on,
+    });
+    let mut looks = flat_look(fill);
+    let accent = palette
+        .map(|palette| palette.accent)
+        .unwrap_or([0.55, 0.65, 0.75]);
+    looks.hover.border = accent;
+    looks.pressed.border = accent;
+    paint_looks(&mut node, looks);
+    node
+}
+
+fn push_check(out: &mut Vec<Paint>, rect: Rect, on: bool) {
+    let box_rect = Rect {
+        x: rect.x + 2.0,
+        y: rect.y + (rect.h - CHECK_BOX) * 0.5,
+        w: CHECK_BOX,
+        h: CHECK_BOX,
+    };
+    push_border(out, box_rect, LIST_BORDER);
+    if on {
+        push_rect(
+            out,
+            Rect {
+                x: box_rect.x + 4.0,
+                y: box_rect.y + 4.0,
+                w: CHECK_BOX - 8.0,
+                h: CHECK_BOX - 8.0,
+            },
+            CHECK_MARK,
+        );
+    }
+}
 
 fn dropdown_box(drop: &PanelDropdown, palette: Option<Palette>) -> Node {
     let width = dropdown_width(drop);
@@ -1031,7 +1100,8 @@ pub fn apply_lamp(scene: &mut Scene, action: Action) {
         | Action::ToggleBoxRun
         | Action::Press(_)
         | Action::Slide { .. }
-        | Action::Select { .. } => {}
+        | Action::Select { .. }
+        | Action::Toggle { .. } => {}
     }
 }
 

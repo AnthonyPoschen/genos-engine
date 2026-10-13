@@ -799,6 +799,7 @@ fn named_row(label: &str, id: u32, value: f64, names: Vec<String>) -> Option<Pan
         buttons: Vec::new(),
         slider: Some(named_slider(id, value, names)),
         dropdown: None,
+        checks: Vec::new(),
     })
 }
 
@@ -829,6 +830,7 @@ fn knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
         buttons: Vec::new(),
         slider: Some(slider),
         dropdown: None,
+        checks: Vec::new(),
     })
 }
 

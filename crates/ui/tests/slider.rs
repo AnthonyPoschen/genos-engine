@@ -21,6 +21,7 @@ fn rows(value: f64, step: f64) -> Vec<PanelRow> {
             steps: Vec::new(),
         }),
         dropdown: None,
+        checks: Vec::new(),
     }]
 }
 
@@ -117,6 +118,7 @@ fn named_rows(bar: PanelSlider) -> Vec<PanelRow> {
         buttons: Vec::new(),
         slider: Some(bar),
         dropdown: None,
+        checks: Vec::new(),
     }]
 }
 
