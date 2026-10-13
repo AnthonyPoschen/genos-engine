@@ -1,8 +1,8 @@
 # Work reduction
 
-Design only. Nothing here is built. The current lighting record stays the description of the code until a phase lands and edits that record in the same change.
+The decisions below are the owner's answers and the judgments that close the open questions. Each phase lands in its own change and edits the lighting record in that same change. Until a phase lands, the current lighting record stays the description of the code.
 
-The moving stress scene spends about 14.5 ms on a frame, and lighting is about 93% of it (about 13.5 ms). The goal is 200 fps or better while that scene is moving: a 5.0 ms frame. A 3× cut of the 13.5 ms lighting share is about 4.5 ms of lighting. With the other 1.0 ms of the frame left as it is, 200 fps needs lighting at or under 4.0 ms. The planning sum below lands near 4.3 ms of lighting, about 190 fps. The phase measurements decide the rest. A cut that the picture can see fails, even if the frame is faster.
+The baseline is the owner's 1080p windowed moving run, about 14.5 ms a frame. Lighting is about 93% of it (about 13.5 ms). 200 fps (a 5.0 ms frame) is aspirational, not a gate. A measured cut of several times, with the picture inside the noise floor, is the result that counts. The planning sum below lands near 4.3 ms of lighting. With the other 1.0 ms left as it is, that is about 5.3 ms, about 190 fps, about 3.1× on the lighting share. The phase measurements on his RTX 4070 decide the rest. A cut that the picture can see fails, even if the frame is faster. Indirect light in a dark corner may lag a few frames after a lamp moves. Direct light and shadows stay on the same frame.
 
 Every millisecond below that is not a measurement. It is the given pass split, with a-trous set to 3.0 ms so the passes add up to the stated lighting share. The a-trous pass on the moving scene is reported as 1.7–4.5 ms. Phases report the pass they touch, including a frame where a-trous is at the high end.
 
@@ -22,7 +22,7 @@ Planning split of the moving stress scene:
 | Rest of the frame | 1.0 | Raster and present. Not a lighting pass. |
 | Frame | 14.5 | About 69 fps. |
 
-200 fps is 5.0 ms. The planning target for lighting is 4.0 ms. The techniques below plan to about 4.3 ms.
+200 fps is 5.0 ms and is not the gate. The techniques below plan to about 4.3 ms of lighting.
 
 ## Rules this design keeps
 
@@ -64,7 +64,7 @@ Handover from a propagated value to a traced mean happens for the whole region i
 
 The [grade](#6-one-grade-for-the-region) does not have its own remainder. On a large move λ saturates and the frame honestly spends the full-effort path. The 4.3 ms sum is the moving stress scene with a fringe and a sparse set, not a scene that has gone quiet.
 
-4.3 ms of lighting plus the 1.0 ms residual is a 5.3 ms frame, about 190 fps, a 3.1× cut of lighting. Clearing 5.0 ms needs the measured light pass and the measured compose to land on the low side of these figures (light ≤ 1.2 and compose ≤ 1.2), or the residual to be under 1.0 ms. That is an open question, not a claim.
+4.3 ms of lighting plus the 1.0 ms residual is a 5.3 ms frame, about 190 fps, a 3.1× cut of lighting. That measured cut is the result that counts. Clearing 5.0 ms would need the measured light pass and the measured compose on the low side of these figures, and it is not required.
 
 ## Ranked techniques
 
@@ -156,7 +156,7 @@ The stored hit radiances of a propagated probe stay as they were. They are not r
 
 **What changes.** A kept hit's direct contribution from a lamp is the first bounce. Where the hit's visibility cell confirms, that contribution is the analytic `E` times the hit albedo, written as the same SH delta. The texel direct-light cache (S75) is the store it writes. Higher bounces are the hit reading the surface cache's indirect. They are not rewritten analytically. The sparse set traces them with a ray count scaled by λ, and every texel in the region uses that same count.
 
-**Quality risk.** The lighting record's corner view is mostly bounce 2 and later (about 87% of that picture in the S35 split). A lamp that moves in a dark corner will look late if only the first bounce tracks and the higher bounces wait on λ. The bounce-only diff is the gate for this phase. If it misses the noise floor, the sparse set's higher-bounce ray count comes up, and the 0.4 ms is given back, before any other cut is touched.
+**Quality risk.** The lighting record's corner view is mostly bounce 2 and later (about 87% of that picture in the S35 split). A lamp that moves in a dark corner may show the higher bounces a few frames late. That lag is accepted. Direct light and the shadow stay on the same frame, so this phase does not spend the trace remainder to force the higher bounces onto the same frame. The bounce-only diff is still recorded. If the lag is more than a few frames after the lamp stops, the sparse set's higher-bounce ray count comes up, and the 0.4 ms is given back, before any other cut is touched.
 
 **Wake and verify.** A higher-bounce change that passes the noise bound is quiet. One that exceeds it fails the check and wakes the region. The shared field is not a wake source (S78U, WAKE).
 
@@ -266,7 +266,7 @@ Technique 4. Every pixel is still shaded. A settled corner reads the published v
 
 Techniques 5 and 6. The fringe may shrink only inside the phase 0 floor. Higher-bounce rays on the sparse set scale with λ, one count for the region.
 
-**Pass:** the bounce view is the one that matters. If it misses the floor, raise the residual ray count and spend the 0.4 ms back. **Milliseconds:** trace toward 0.5 ms. Still scene at or under the phase 0 still split.
+**Pass:** direct light and the shadow stay inside the phase 0 floor on the same frame. The bounce view may miss that floor while the lamp moves and for a few frames after it stops. If the bounce is still outside the floor once those frames have passed, raise the residual ray count and spend the 0.4 ms back. **Milliseconds:** trace toward 0.5 ms. Still scene at or under the phase 0 still split.
 
 ### Phase 7 — still collapse
 
@@ -300,17 +300,38 @@ Lighting stays a picture on the machine that draws. The five lines, for the syst
 - Determinism: the full-effort path is the reference render. The settled path is allowed to be stale and is not required to match bit for bit across machines. The picture is not a replicated input.
 - Headless server: a headless server runs no lighting passes. The headless debug path still runs them when it is scoring a picture.
 
-## Open questions
+## Decisions
 
-1. Is 14.5 ms, with this pass split, the moving stress scene to beat, and at which resolution and on which GPU? The lighting record's later moving rows are older and slower (about 18 ms at 1920×1080 on the RTX 4070). 200 fps means 5.0 ms on that same run. Confirm the line.
-2. The planning sum is about 4.3 ms of lighting plus about 1.0 ms of residual, about 190 fps. Clearing 200 fps needs light and compose on the low side of the estimates, or a residual under 1.0 ms. Is 200 fps a hard gate for this work, or is a measured 3× with the picture inside the noise floor the gate, with the last tenths as a follow-up?
-3. Dark corners are mostly bounce past the first. Is a same-frame analytic first bounce enough, with higher bounces following λ on the sparse set? If the bounce view must match full effort in the same frame for those corners, phase 6 spends the trace remainder and the target moves.
-4. How many lamps move in one frame of the stress scene? ADR 0012's layer is the store the delta edits. A layer cap below the moving set pushes the extra lamps down the full-effort path and can erase the light-pass cut.
-5. Is a shadow edge outside the traced fringe a failure even when the pop metric holds? Phase 2 starts with every segment that could flip. Later shrinking is allowed only inside the phase 0 floor. Say if a one-frame lag on that edge is already a fail.
-6. The scheduling atom is the 8×8 page. The visible grade is constant across the pages one blend connects. Say if the atom should be a whole mesh or a room instead.
-7. S78Z's camera-history bias in the surface cache is matched, not fixed. Is a texel-verify fix a precondition, or does matching full effort close this work?
-8. RTXGI can pause a whole volume. This design refuses that. Confirm a volume-wide pause is out.
-9. MegaLights and S78Q stay out, including the 100-lamp room. Confirm that room is a different task.
+1. **Baseline.** The line to beat is the owner's 1080p windowed moving run, about 14.5 ms. The older 18 ms row at 1920×1080 is not the line. Lavapipe does not time it. `GENOS_GPU_TIMES=1` on that window is the measurement.
+2. **200 fps is aspirational.** A measured cut of several times, with the picture inside the phase 0 floor, counts. The planning sum, about 5.3 ms and 190 fps, is an acceptable result if the owner's run measures it. It is not claimed here.
+3. **Bounce lag.** Indirect light in a dark corner may lag a few frames after a lamp moves. Direct light and shadows stay on the same frame. Phase 6 does not spend the trace remainder to pull the higher bounces onto that same frame. The owner judges the lag on `examples/stress/scripts/bounce_corner.rhai`.
+4. **Moving lamps and layers.** The stress scene's default mix is 5 lamps with half of them moving, and a pixel sees about 5 lamps (S78Q). That moving set fits the Low layer cap. ADR 0012 and the GI v2 design give each moving light its own layer, with a cap of 8 at Low and 32 at Ultra (`docs/systems/gi-v2-design.md`, Light layers). This cut stores a layer for lamps that move this frame, up to 8. A lamp past that cap stays on the full-effort path. There is no per-lamp layer buffer in the tree today. Phase 3 keeps the delta in an 8-wide layer next to the probe SH and adds it back with a replace, so the summed SH is not patched in place and then left as the only store. Departure 13 names that the layer is this buffer, not the unbuilt card-atlas layer.
+5. **Shadow edge.** A one-frame-late shadow outside the traced fringe is a failure even when the pop metric holds. Phase 2 traces every segment this frame's lamp motion or a mover bound could flip. Phase 6 may shrink that fringe only while the direct view stays inside the phase 0 floor.
+6. **Atom.** The scheduling atom stays the 8×8 texel page. Pages one blend connects, in one λ bucket, show one grade. The atom is not a mesh and not a room.
+7. **Camera-history bias.** S78Z's surface-cache bias is matched, not fixed. A texel-verify fix is not a precondition.
+8. **Volume pause.** RTXGI's volume-wide pause stays out. A probe goes quiet on its own check.
+9. **Many lights.** MegaLights and S78Q stay out, including the 100-lamp room. That room is a different task.
+
+## Owner run
+
+Lavapipe locks the picture. The milliseconds and the bounce lag are judged on the owner's machine, windowed, 1920×1080.
+
+The corner scene is `examples/stress/scenes/bounce_corner.rhai`: two dark walls, no sun, no sky, one lamp. `examples/stress/scripts/bounce_corner.rhai` lets the picture settle, moves that lamp toward the corner, then stops it. Watch the corner, not the lamp bulb.
+
+- The lit side of the wall and the shadow edge move with the lamp, on the same frame. A shadow that slides in a frame late fails the run.
+- The bounce in the corner, the part no lamp reaches directly, may keep the old tint for a few frames after the lamp stops. It should then catch the new lamp. A corner that stays on the old tint fails the run.
+
+```text
+mkdir -p ~/genos-perf
+cargo run --release -p genos-stress -- --scene examples/stress/scenes/bounce_corner.rhai --script examples/stress/scripts/bounce_corner.rhai --size 1920x1080 --no-panel --report ~/genos-perf/bounce-corner
+GENOS_LIGHTING_FULL_EFFORT=1 cargo run --release -p genos-stress -- --scene examples/stress/scenes/bounce_corner.rhai --script examples/stress/scripts/bounce_corner.rhai --size 1920x1080 --no-panel --report ~/genos-perf/bounce-corner-full
+GENOS_GPU_TIMES=1 cargo run --release -p genos-stress -- --size 1920x1080 --frames 120
+GENOS_LIGHTING_FULL_EFFORT=1 GENOS_GPU_TIMES=1 cargo run --release -p genos-stress -- --size 1920x1080 --frames 120
+```
+
+The first command is the reduced path once the phases are on. The second is the full-effort picture. The last two are the moving stress scene, reduced and full effort. Shots from the script land in the report directory. The lavapipe check also writes a contact sheet under `~/genos-perf/bounce-corner/`.
+
+`GENOS_LIGHTING_WORK_PHASE` (0–7) stops after that phase. Unset, the phase in the code is the one the last landed change turned on. `GENOS_LIGHTING_FULL_EFFORT=1` marks every probe and every texel full effort.
 
 ## Sources
 
