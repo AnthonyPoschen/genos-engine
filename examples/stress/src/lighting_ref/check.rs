@@ -91,6 +91,7 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
     notes.push(candidate_note(opts.full_effort));
     notes.push(plan_note(&opts.plan));
 
+    ensure_reference_metrics(opts, &wanted)?;
     let (baselines, baseline_label) = load_baseline(opts, &mut notes)?;
     let live = capture_live(opts, &wanted, config.params.rel_floor, &mut notes)?;
     if live.iter().any(|shot| !shot.log.is_empty()) {
@@ -231,6 +232,35 @@ fn wanted(opts: &CheckOptions) -> Vec<Wanted> {
             event: cp.event,
         })
         .collect()
+}
+
+/// A reused reference directory from before base metrics were stored still
+/// grows a `metrics.json`. A file already there is left alone: it may be a
+/// previous candidate baseline.
+fn ensure_reference_metrics(opts: &CheckOptions, wanted: &[Wanted]) -> Result<(), String> {
+    let path = opts.reference_dir.join("metrics.json");
+    if path.exists() {
+        return Ok(());
+    }
+    let mut owned = Vec::new();
+    for item in wanted {
+        let Ok(picture) = store::read_reference(&opts.reference_dir, &item.scene, &item.checkpoint)
+        else {
+            continue;
+        };
+        let noise = store::read_trace(&opts.reference_dir, &item.scene, &item.checkpoint)
+            .map(|trace| f64::from(trace.noise))
+            .unwrap_or(0.0);
+        let metrics = baseline::reference_metrics(&picture, noise)?;
+        owned.push((item.scene.clone(), item.checkpoint.clone(), metrics));
+    }
+    let refs: Vec<(&str, &str, &FrameMetrics)> = owned
+        .iter()
+        .map(|(scene, checkpoint, metrics)| (scene.as_str(), checkpoint.as_str(), metrics))
+        .collect();
+    baseline::write_metrics(&path, &opts.commit, &refs)?;
+    println!("base metrics {}", path.display());
+    Ok(())
 }
 
 fn references_ready(dir: &Path, profile: &TraceProfile, wanted: &[Wanted]) -> bool {

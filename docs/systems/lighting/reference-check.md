@@ -25,7 +25,7 @@ On the owner's GPU:
 make lighting-ref-check BASE=<sha>
 ```
 
-`BASE` is a commit that already has `./genos-debug/reference/<sha>/metrics.json` from an earlier run. The absolute gate still runs when that file is missing. Regressions are not judged in that case.
+`BASE` is a commit. The file is `./genos-debug/reference/<sha>/metrics.json`. `lighting-ref generate`, and a check that traces references, writes it from the reference noise: raw error at that noise, blurred error after the same box, luminance ratio error 0. A later check judges regressions against it. A check that scores live pictures replaces the file with those candidate metrics. The absolute gate still runs when the file is missing. Regressions are not judged in that case.
 
 Cloud wiring check, small pictures, one sample per pixel:
 

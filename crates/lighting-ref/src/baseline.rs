@@ -6,7 +6,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::metrics::FrameMetrics;
+use crate::metrics::{measure, FrameMetrics, MetricParams};
+use crate::picture::Picture;
 use crate::verdict::{Baseline, MetricId};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -20,6 +21,40 @@ pub struct MetricRow {
     pub scene: String,
     pub checkpoint: String,
     pub baseline: Baseline,
+}
+
+/// Metrics a later `--base` can regress against before any live picture exists.
+///
+/// Raw error is the reference's own noise. Blurred error is that noise after
+/// the same box the score uses. The luminance ratio error is 0: a matching
+/// picture has the reference's mean brightness. Flicker and convergence are
+/// omitted; a still reference has no live sequence.
+pub fn reference_metrics(picture: &Picture, noise: f64) -> Result<FrameMetrics, String> {
+    let mut metrics = measure(picture, picture, None, &[], &MetricParams::default())?;
+    let noise = if noise.is_finite() {
+        noise.max(0.0)
+    } else {
+        0.0
+    };
+    let tail = crate::config::Config::builtin().noise_tail;
+    let kernel = f64::from(crate::metrics::blur_radius(picture.height) * 2 + 1);
+    metrics.mean_rel = Some(noise);
+    metrics.p99_rel = Some(noise * tail);
+    if metrics.mean_rel_dark.is_some() {
+        metrics.mean_rel_dark = Some(noise);
+    }
+    metrics.flip_mean = Some(noise.min(1.0));
+    metrics.flip_p99 = Some((noise * tail).min(1.0));
+    metrics.blur_rel = Some(noise / kernel);
+    metrics.luma_ratio = Some(1.0);
+    metrics.luma_delta = Some(0.0);
+    metrics.flicker = None;
+    metrics.converge_1 = None;
+    metrics.converge_2 = None;
+    metrics.converge_4 = None;
+    metrics.converge_8 = None;
+    metrics.unfilled = Some(0);
+    Ok(metrics)
 }
 
 pub fn write_metrics(
@@ -180,9 +215,6 @@ fn after_key<'a>(object: &'a str, key: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::{measure, MetricParams};
-    use crate::picture::Picture;
-
     #[test]
     fn metrics_round_trip_and_a_missing_value_stays_missing() {
         let picture = Picture::solid(4, 2, [0.4, 0.4, 0.4]);
@@ -205,6 +237,34 @@ mod tests {
         assert_eq!(file.rows[0].checkpoint, "hall");
         let mean = file.rows[0].baseline.get(MetricId::MeanRel).unwrap();
         assert!((mean - 0.2).abs() < 1.0e-4, "{mean}");
+        assert!(file.rows[0].baseline.get(MetricId::Flicker).is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_reference_floor_stores_the_noise_and_a_ratio_of_one() {
+        let picture = Picture::solid(4, 180, [0.4, 0.4, 0.4]);
+        let metrics = reference_metrics(&picture, 0.31).unwrap();
+        assert!((metrics.mean_rel.unwrap() - 0.31).abs() < 1.0e-9);
+        assert!((metrics.p99_rel.unwrap() - 1.24).abs() < 1.0e-9);
+        assert!((metrics.blur_rel.unwrap() - 0.31 / 9.0).abs() < 1.0e-9);
+        assert!((metrics.luma_delta.unwrap()).abs() < 1.0e-9);
+        assert!(metrics.flicker.is_none());
+        let path = std::env::temp_dir().join(format!("lref-floor-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        write_metrics(&path, "abc", &[("direct-only", "hall", &metrics)]).unwrap();
+        let file = read_metrics(&path).unwrap();
+        assert_eq!(file.rows[0].checkpoint, "hall");
+        let blur = file.rows[0].baseline.get(MetricId::BlurRel).unwrap();
+        assert!((blur - 0.31 / 9.0).abs() < 1.0e-4, "{blur}");
+        assert!(
+            file.rows[0]
+                .baseline
+                .get(MetricId::LumaDelta)
+                .unwrap()
+                .abs()
+                < 1.0e-9
+        );
         assert!(file.rows[0].baseline.get(MetricId::Flicker).is_none());
         let _ = std::fs::remove_file(&path);
     }

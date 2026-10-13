@@ -45,6 +45,13 @@ fn a_path_reference_is_deterministic_and_reports_its_size() {
     assert!(first.iter().any(|r| r.scene == "bounce-corner"));
     assert!(first
         .iter()
+        .any(|r| r.scene == "direct-only" && r.checkpoint == "hall" && r.max_bounces == 0));
+    let metrics = std::fs::read_to_string(a.join("metrics.json")).unwrap();
+    assert!(metrics.contains("\"commit\": \"testcommit\""), "{metrics}");
+    assert!(metrics.contains("direct-only"), "{metrics}");
+    assert!(metrics.contains("luma_delta"), "{metrics}");
+    assert!(first
+        .iter()
         .all(|r| r.method == "path" && r.commit == "testcommit"));
     assert!(first.iter().all(|r| r.png_bytes > 0 && r.linear_bytes > 0));
     for record in &first {

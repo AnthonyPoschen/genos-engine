@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use genos_debug::render_reference;
+use genos_lighting_ref::baseline;
 use genos_lighting_ref::store::{self, Manifest, ReferenceRecord, SkippedScene};
 use genos_lighting_ref::Picture;
 
@@ -139,5 +140,30 @@ pub fn generate(opts: &GenerateOptions) -> Result<Vec<ReferenceRecord>, String> 
             skipped,
         },
     )?;
+    write_base_metrics(&opts.reference_dir, &opts.commit, &records)?;
     Ok(records)
+}
+
+/// `metrics.json` beside the pictures, so `--base <commit>` finds a file
+/// before any live capture. A later check that scores pictures replaces it
+/// with those candidate metrics.
+fn write_base_metrics(
+    dir: &std::path::Path,
+    commit: &str,
+    records: &[ReferenceRecord],
+) -> Result<(), String> {
+    let mut owned = Vec::new();
+    for record in records {
+        let picture = store::read_reference(dir, &record.scene, &record.checkpoint)?;
+        let metrics = baseline::reference_metrics(&picture, f64::from(record.noise))?;
+        owned.push((record.scene.clone(), record.checkpoint.clone(), metrics));
+    }
+    let refs: Vec<(&str, &str, &genos_lighting_ref::FrameMetrics)> = owned
+        .iter()
+        .map(|(scene, checkpoint, metrics)| (scene.as_str(), checkpoint.as_str(), metrics))
+        .collect();
+    let path = dir.join("metrics.json");
+    baseline::write_metrics(&path, commit, &refs)?;
+    println!("base metrics {}", path.display());
+    Ok(())
 }

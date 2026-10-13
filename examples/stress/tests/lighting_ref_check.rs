@@ -51,11 +51,30 @@ fn a_skipped_capture_fails_and_still_writes_the_self_test() {
     assert!(planted.contains("needs human"));
     let linear = references.join("stress-still/hall/reference.f32");
     assert!(linear.exists(), "{}", linear.display());
-    assert!(!references.join("metrics.json").exists());
+    let stored = references.join("metrics.json");
+    let metrics = std::fs::read_to_string(&stored).unwrap();
+    assert!(metrics.contains("\"checkpoint\": \"hall\""), "{metrics}");
+    assert!(metrics.contains("direct-only"), "{metrics}");
+    assert!(metrics.contains("luma_delta"), "{metrics}");
+    assert!(metrics.contains("blur_rel"), "{metrics}");
 
     let again = genos_stress::lighting_ref::run(args(&out, &references, &[]).into_iter()).unwrap();
     assert_eq!(again, 1);
     let second = std::fs::read_to_string(out.join("summary.md")).unwrap();
     assert!(second.contains("Reused reference pictures"), "{second}");
+
+    let judged = genos_stress::lighting_ref::run(
+        args(
+            &out,
+            &references,
+            &["--baseline", stored.to_str().expect("utf-8 path")],
+        )
+        .into_iter(),
+    )
+    .unwrap();
+    assert_eq!(judged, 1);
+    let third = std::fs::read_to_string(out.join("summary.md")).unwrap();
+    assert!(third.contains("Regressions use"), "{third}");
+    assert!(third.contains("**fail**"), "{third}");
     let _ = std::fs::remove_dir_all(&root);
 }
