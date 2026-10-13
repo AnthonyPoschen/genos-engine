@@ -50,9 +50,11 @@ Schied et al. 2017 section 4.2 drive the luminance weight from the variance. The
 - 8 sets, or deviation at or under four times the threshold: 3 iterations
 - otherwise the configured count
 
-Later iterations copy the last applied level forward. They do not run the 5×5. The push still reads buffer A.
+The last configured stage publishes the last level that actually ran (`lighting_svgf_lvl(limit)`) into buffer A, including when that stage is clean. It does not copy each skipped level forward. A clean early-out used to return before the copy, so A kept either an older filter or the zeros the cache was cleared to. The push then blended that hole toward the 25 cm world-radiance cache (`W * fine + (1 - W) * WRC` with `W` at 0). That is the darker, blotchy adaptive picture on the 4070 (still mean 15.9 / p99 41, moving 21.9 / 51, against full). Lavapipe reported ~0.04 because the old test drew the full five-iteration filter first, which had already filled A, and a young texel's relative deviation sits above 0.02 so the skip never ran.
 
-Deviations: sample age is the surface-cache set count, not a screen history length. No frame is kept. SVGF itself does not drop iterations. A threshold of 0 ignores variance and uses age only.
+A threshold of 0.1 (the top of the knob, 1000 steps of 0.0001) forces one iteration even when the deviation is larger. That is how a four-frame run enters the skip a settled cache (16 sets) takes. The test `adaptive_skip_keeps_the_bounce_bright` starts on that setting, before any full filter, and compares the bounce to one configured iteration, which publishes A from the wavelet it runs. Mean error under 4, p99 under 16, and the skip's mean luma within 4 of that reference. The 4070's 15.9 / 41 fails those.
+
+Deviations: sample age is the surface-cache set count, not a screen history length. No frame is kept. SVGF itself does not drop iterations. A threshold of 0 ignores variance and uses age only. The 0.1 stop is not in ReLAX; it exists so the skip can be tested without waiting for 16 sets.
 
 Expected cost: on the moving sun the set count stays high (the history is not reset by a global light change) and the estimator variance stays small, so most fine texels should leave the 5×5 after one iteration. The dispatch still launches; the threads return after a copy. That is the opposite of the dirty-block skip, which saw every block change and did the full kernel. Where the history is young or the variance is high, the configured iteration count still runs.
 

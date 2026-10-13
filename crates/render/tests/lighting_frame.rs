@@ -560,6 +560,18 @@ fn luma_bgra(px: &[u8]) -> f64 {
     0.2126 * f64::from(px[2]) + 0.7152 * f64::from(px[1]) + 0.0722 * f64::from(px[0])
 }
 
+fn mean_luma(frame: &[u8]) -> f64 {
+    let n = frame.len() / 4;
+    if n == 0 {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    for i in 0..n {
+        sum += luma_bgra(&frame[i * 4..]);
+    }
+    sum / n as f64
+}
+
 /// Mean per-pixel luminance variance across still frames.
 fn flicker_variance(frames: &[Vec<u8>]) -> f64 {
     let n = frames.iter().map(|f| f.len() / 4).min().unwrap_or(0);
@@ -800,6 +812,71 @@ fn adaptive_atrous_matches_the_full_reference() {
         eprintln!("{name} direct {gap:.3}");
         assert!(gap < 1.0, "{name} direct moved: {gap:.3}");
     }
+}
+
+/// The settled-cache skip, from a cold cache, against one real wavelet.
+///
+/// The 4070 adaptive picture was darker and blotchy (still mean 15.9, p99 41)
+/// while lavapipe's old check reported ~0.04. That check warmed up with the
+/// full five-iteration filter, so buffer A already held the reference, and a
+/// young texel's variance sat above 0.02 so the skip never ran. A threshold of
+/// 0.1 forces one iteration. This run starts there, before any full filter has
+/// published A. One configured iteration publishes A from the wavelet it
+/// actually runs. The skip has to match that picture, not the 25 cm WRC the
+/// push blends in when A is empty.
+#[test]
+fn adaptive_skip_keeps_the_bounce_bright() {
+    let world = shipped_hall();
+    let camera = Camera::opening();
+    let adaptive = {
+        let (_gpu, mut window, mut renderer) = open();
+        renderer.set_lighting_settings(adaptive_settings("full", "0.1"));
+        view_at(&mut renderer, ViewMode::Bounce);
+        let mut frames = Vec::new();
+        for _ in 0..4 {
+            frames.push(draw(&mut window, &mut renderer, &world, &camera));
+        }
+        frames.pop().expect("adaptive frame")
+    };
+    let one = {
+        let (_gpu, mut window, mut renderer) = open();
+        let mut settings = LightingSettings::preset(LightingPreset::High);
+        settings
+            .set_key("denoise_iters", "1")
+            .expect("denoise_iters");
+        renderer.set_lighting_settings(settings);
+        view_at(&mut renderer, ViewMode::Bounce);
+        let mut frames = Vec::new();
+        for _ in 0..4 {
+            frames.push(draw(&mut window, &mut renderer, &world, &camera));
+        }
+        frames.pop().expect("one-iter frame")
+    };
+    let errors = pixel_errors(&one, &adaptive);
+    let mean = mean_of(&errors);
+    let mut sorted = errors.clone();
+    let p99 = percentile(&mut sorted, 0.99);
+    let y_skip = mean_luma(&adaptive);
+    let y_one = mean_luma(&one);
+    eprintln!(
+        "adaptive skip vs 1 iter mean {mean:.3} p99 {p99:.3} luma {y_skip:.2} one {y_one:.2}"
+    );
+    assert!(
+        y_one > 5.0,
+        "one-iteration bounce is too dark to judge the skip ({y_one:.2})"
+    );
+    assert!(
+        mean < 4.0,
+        "adaptive skip mean error {mean:.3} against one wavelet"
+    );
+    assert!(
+        p99 < 16.0,
+        "adaptive skip p99 {p99:.3} (the 4070 p99 was 41)"
+    );
+    assert!(
+        y_skip + 4.0 >= y_one,
+        "adaptive skip darkened the bounce: luma {y_skip:.2} one-iter {y_one:.2}"
+    );
 }
 
 fn tile_settings(res: &str, adaptive: bool) -> LightingSettings {

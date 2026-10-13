@@ -556,9 +556,11 @@ Medium and low record `half`. Papers and deviations are in
 
 `denoise_adaptive` drops later wavelet iterations where the surface-cache set
 count is high or the relative luminance variance is under `denoise_variance`
-(0.02). The skipped iteration copies the last level forward. It does not run
-the 5×5, and it does not consult the dirty-block list. High leaves adaptive
-off. The age is the set count, not a screen history, so no frame is kept.
+(0.02). The last stage publishes the last level that ran into buffer A, even
+when that stage is clean. It does not run the 5×5. Leaving A stale blended the
+push toward the 25 cm world-radiance cache, which is the darker adaptive
+picture on the 4070. High leaves adaptive off. The age is the set count, not a
+screen history, so no frame is kept. A threshold of 0.1 forces one iteration.
 
 `denoise_tiles` runs wavelet levels 1–3 from a shared-memory footprint and
 levels 4–5 with the scalar kernel (the step-8 and step-16 footprints do not

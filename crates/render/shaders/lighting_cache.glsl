@@ -3294,12 +3294,40 @@ uint lighting_svgf_pass_limit(uint slot, float var, float lum) {
         by_age = min(full, 3u);
     }
     uint by_var = full;
-    if (thr > 0.0 && rel <= thr) {
+    // The knob tops out at 0.1 (1000 steps of 0.0001). That value forces one
+    // iteration. A young texel's relative deviation sits above 0.1, so the
+    // old test never entered the skip the settled cache takes (16 sets).
+    // ReLAX keys the drop off history length; this stop is the short-run
+    // equivalent, flagged as a deviation in S79.
+    uint thr_q = (gstats.ctrl_bits >> 22u) & 1023u;
+    if (thr_q >= 1000u) {
+        by_var = 1u;
+    } else if (thr > 0.0 && rel <= thr) {
         by_var = 1u;
     } else if (thr > 0.0 && rel <= thr * 4.0) {
         by_var = min(full, 3u);
     }
     return min(full, min(by_age, by_var));
+}
+// The push reads buffer A. A skipped iteration must publish the last level
+// that actually ran (level `applied`), even when this level is clean. The
+// dirty early-out used to return first, so A kept an older filter or the
+// zeros from allocation, and the push blended that hole toward the 25 cm
+// WRC: darker and blotchy. Lavapipe zeros the cache and the old test warmed
+// up with the full filter, so A was already the reference and the miss was
+// invisible. A driver that does not zero, or a run that starts in the skip,
+// shows it.
+void lighting_svgf_publish_applied(uint slot, uint applied) {
+    vec4 now = cache.v[lighting_svgf_lvl(applied) + slot];
+    vec4 prev = cache.v[LIGHTING_SC_ATROUS_A + slot];
+    cache.v[LIGHTING_SC_ATROUS_A + slot] = now;
+    if (prev.x != now.x || prev.y != now.y || prev.z != now.z) {
+        lighting_svgf_stamp(slot, 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(1, 0)), 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(-1, 0)), 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(0, 1)), 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(0, -1)), 3u);
+    }
 }
 // Edge-aware 2x2 downsample of layer-1 bounce into the even texel. Self is (0, 0).
 vec3 lighting_svgf_downsample(uint slot, vec3 own) {
@@ -3474,32 +3502,26 @@ void lighting_svgf_iter(uint slot, uint it) {
     if (lighting_svgf_half_skip(slot)) {
         return;
     }
+    // Before the dirty early-out. A clean texel still has to publish the last
+    // applied level, or the push keeps a stale or empty A. Not in the plain
+    // kernel: high leaves adaptive off (S79).
+    if (lighting_denoise_adaptive()) {
+        float v0;
+        vec4 s0 = lighting_svgf_load(lighting_svgf_lvl(0u), slot, v0);
+        uint limit = lighting_svgf_pass_limit(slot, v0, dot(s0.rgb, LIGHTING_SVGF_LW));
+        if (it + 1u > limit) {
+            if (it + 1u == lighting_denoise_iters()) {
+                lighting_svgf_publish_applied(slot, limit);
+            }
+            return;
+        }
+    }
 #endif
     if (LIGHTING_DIRTY_ATROUS && !lighting_svgf_is_dirty(slot, it + 1u)) {
         return;
     }
     uint src = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_B : LIGHTING_SC_ATROUS_A);
     uint dst = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it + 1u) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_A : LIGHTING_SC_ATROUS_B);
-    // Stable history: copy the last applied level forward. The 5x5 does not run.
-    // The last configured iteration still publishes buffer A for the push.
-    // Not in the plain kernel: high leaves adaptive off, and the branch was
-    // costing registers on that path (S79).
-#ifndef LIGHTING_DENOISE_PLAIN
-    if (lighting_denoise_adaptive()) {
-        float v0;
-        vec4 s0 = lighting_svgf_load(lighting_svgf_lvl(0u), slot, v0);
-        uint limit = lighting_svgf_pass_limit(slot, v0, dot(s0.rgb, LIGHTING_SVGF_LW));
-        if (it + 1u > limit) {
-            float vs;
-            vec4 s = lighting_svgf_load(src, slot, vs);
-            lighting_svgf_store(dst, slot, s.rgb, vs, s.w);
-            if (LIGHTING_DIRTY_ATROUS && it + 1u == lighting_denoise_iters()) {
-                cache.v[LIGHTING_SC_ATROUS_A + slot] = cache.v[dst + slot];
-            }
-            return;
-        }
-    }
-#endif
     float vold;
     vec4 old = lighting_svgf_load(dst, slot, vold);
     int step = lighting_svgf_step_for(slot, it);

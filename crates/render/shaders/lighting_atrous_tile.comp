@@ -122,23 +122,25 @@ void lighting_tile_filter(uint anchor, int tx, int ty, int kstep, int halo, int 
         || lighting_tile_grid(cs) != lighting_tile_grid(anchor)) {
         return;
     }
-    if (LIGHTING_DIRTY_ATROUS && !lighting_svgf_is_dirty(cs, it + 1u)) {
-        return;
-    }
-    lighting_obj_salt = lighting_tile_salt(cs);
-    uint dst = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it + 1u) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_A : LIGHTING_SC_ATROUS_B);
+    // Same publish as lighting_svgf_iter: a skipped level must not leave A
+    // stale, and the tile's loaded level is the current step, not the last
+    // applied one. Publishing that load wrote zeros into A.
     if (lighting_denoise_adaptive()) {
         float v0;
         vec4 s0 = lighting_svgf_load(lighting_svgf_lvl(0u), cs, v0);
         uint limit = lighting_svgf_pass_limit(cs, v0, dot(s0.rgb, LIGHTING_SVGF_LW));
         if (it + 1u > limit) {
-            lighting_svgf_store(dst, cs, lighting_unpack_rgb9e5(tile_rgb[center]), tile_var[center], tile_mask[center]);
-            if (LIGHTING_DIRTY_ATROUS && it + 1u == lighting_denoise_iters()) {
-                cache.v[LIGHTING_SC_ATROUS_A + cs] = cache.v[dst + cs];
+            if (it + 1u == lighting_denoise_iters()) {
+                lighting_svgf_publish_applied(cs, limit);
             }
             return;
         }
     }
+    if (LIGHTING_DIRTY_ATROUS && !lighting_svgf_is_dirty(cs, it + 1u)) {
+        return;
+    }
+    lighting_obj_salt = lighting_tile_salt(cs);
+    uint dst = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it + 1u) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_A : LIGHTING_SC_ATROUS_B);
     float vold;
     vec4 old = lighting_svgf_load(dst, cs, vold);
     float varp = tile_var[center];
