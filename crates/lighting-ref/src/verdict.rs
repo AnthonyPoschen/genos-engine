@@ -674,18 +674,21 @@ mod tests {
     }
 
     #[test]
-    fn the_owner_trial_passes_room_a_and_box_step_and_fails_hall_and_corner() {
-        // 0d16c2b. FLIP p99 0.84 is the edge floor. Box-step blur is 0.075–0.078.
-        // Room-a ratio 1.08; the dark-noise inflation is the metrics test.
-        let mut matched = with_scores(0.20, 0.08, 1.08);
+    fn the_owner_trial_holds_room_a_for_a_person_and_fails_hall_and_corner() {
+        // 4c6ca67e room-a: blurred error 0.134, inside 0.102–0.138. The fail
+        // line stays 0.12. Ratio 1.08 is under the luminance band.
+        let mut matched = with_scores(0.20, 0.134, 1.08);
         matched.flip_mean = Some(0.08);
         matched.flip_p99 = Some(0.84);
+        let room = judged(&matched, None, 64, 0.16);
         assert_eq!(
-            judged(&matched, None, 64, 0.16).verdict,
-            Verdict::Pass,
+            room.verdict,
+            Verdict::NeedsHuman,
             "room-a {:?}",
-            judged(&matched, None, 64, 0.16).reasons
+            room.reasons
         );
+        assert_ne!(room.verdict, Verdict::Pass);
+        assert!(room.reasons.iter().any(|r| r.contains("blurred relative")));
 
         for (name, blur, ratio) in [("box-step", 0.078, 0.99), ("box-step-before", 0.075, 0.98)] {
             let mut metrics = with_scores(0.20, blur, ratio);

@@ -133,7 +133,9 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
         let still = (item.still && shot.frames.len() >= 2).then_some(shot.frames.as_slice());
         let after = after_frames(item, shot);
         let after_refs: Vec<(u32, &Picture)> = after.iter().map(|(k, p)| (*k, *p)).collect();
-        let metrics = match measure(&reference, &candidate, still, &after_refs, &config.params) {
+        let mut params = config.params;
+        params.reference_noise = f64::from(trace.noise);
+        let metrics = match measure(&reference, &candidate, still, &after_refs, &params) {
             Ok(metrics) => metrics,
             Err(err) => {
                 notes.push(format!("{} {}: {err}", item.scene, item.checkpoint));

@@ -1,6 +1,7 @@
 //! Per-frame error against a reference picture.
 //!
-//! Relative luminance is `|Yc - Yr| / max(Yr, rel_floor, rel_mean_frac * mean(Yr))`.
+//! Relative luminance is `|Yc - Yr| / max(Yr, rel_floor, frac * mean(Yr))`.
+//! `frac` is the larger of `rel_mean_frac` and the reference's stored noise.
 //! The mean term keeps a noisy shadow from dominating. A uniform brightness
 //! bias on pixels above that floor is unchanged. FLIP is the second opinion
 //! in [`crate::flip`].
@@ -13,8 +14,14 @@ pub struct MetricParams {
     /// Absolute denominator. `max(Yr, rel_floor, rel_mean_frac * mean(Yr))`.
     pub rel_floor: f64,
     /// Dark pixels are compared with this share of the picture's mean luminance,
-    /// so a noisy shadow does not dominate the mean.
+    /// so a noisy shadow does not dominate the mean. The score uses the larger
+    /// of this and [`MetricParams::reference_noise`].
     pub rel_mean_frac: f64,
+    /// Mean relative standard error stored with the reference. Zero when the
+    /// picture has no noise estimate. The path tracer's own noise divides by
+    /// `max(Y, 1e-4)`, which inflates dark pixels; this number is applied to
+    /// the picture mean instead.
+    pub reference_noise: f64,
     pub dark_max: f64,
     /// Candidate luminance at or below this can count as unfilled.
     pub unfilled_candidate_max: f64,
@@ -27,6 +34,7 @@ impl Default for MetricParams {
         Self {
             rel_floor: 0.02,
             rel_mean_frac: 0.25,
+            reference_noise: 0.0,
             dark_max: 0.05,
             unfilled_candidate_max: 0.004,
             unfilled_reference_min: 0.02,
@@ -201,14 +209,20 @@ fn relative(reference: &Picture, candidate: &Picture, params: &MetricParams) -> 
     relative_luma(&left, &right, params)
 }
 
-/// `|Yc - Yr| / max(Yr, rel_floor, rel_mean_frac * mean(Yr))`.
+/// `|Yc - Yr| / max(Yr, rel_floor, frac * mean(Yr))`.
+///
+/// `frac` is the larger of `rel_mean_frac` and the reference's stored noise.
+/// The noise term is that picture's data. `rel_mean_frac` stays when the noise
+/// is smaller or unknown, so a missing bounce still fails and room-a is not
+/// given its own constant.
 fn relative_luma(reference: &[f32], candidate: &[f32], params: &MetricParams) -> Vec<f64> {
     let mean = if reference.is_empty() {
         0.0
     } else {
         reference.iter().map(|y| f64::from(*y)).sum::<f64>() / reference.len() as f64
     };
-    let floor = (params.rel_mean_frac * mean).max(params.rel_floor) as f32;
+    let frac = params.rel_mean_frac.max(params.reference_noise.max(0.0));
+    let floor = (frac * mean).max(params.rel_floor) as f32;
     reference
         .iter()
         .zip(candidate)
@@ -520,6 +534,41 @@ mod tests {
             corner.blur_rel.unwrap() > 0.22,
             "{}",
             corner.blur_rel.unwrap()
+        );
+    }
+
+    #[test]
+    fn the_dark_floor_follows_reference_noise_and_does_not_single_out_room_a() {
+        // Room-a's stored noise is 0.16, under rel_mean_frac 0.25, so the
+        // floor does not move. A noisier reference does raise it.
+        let (w, h) = (32u32, 180u32);
+        let mut reference = Picture::solid(w, h, [0.50, 0.50, 0.50]);
+        let mut candidate = reference.clone();
+        reference.fill_rect(0, 120, w, 60, [0.012, 0.012, 0.012]);
+        candidate.fill_rect(0, 120, w, 60, [0.028, 0.028, 0.028]);
+        let quiet = MetricParams::default();
+        let room = MetricParams {
+            reference_noise: 0.16,
+            ..MetricParams::default()
+        };
+        let loud = MetricParams {
+            reference_noise: 0.80,
+            ..MetricParams::default()
+        };
+        let quiet_m = measure(&reference, &candidate, None, &[], &quiet).unwrap();
+        let room_m = measure(&reference, &candidate, None, &[], &room).unwrap();
+        let loud_m = measure(&reference, &candidate, None, &[], &loud).unwrap();
+        assert!(
+            (quiet_m.blur_rel.unwrap() - room_m.blur_rel.unwrap()).abs() < 1.0e-12,
+            "noise 0.16 must not retune the 0.25 floor: {} vs {}",
+            quiet_m.blur_rel.unwrap(),
+            room_m.blur_rel.unwrap()
+        );
+        assert!(
+            loud_m.blur_rel.unwrap() < quiet_m.blur_rel.unwrap(),
+            "a noisier reference raises the floor: {} vs {}",
+            loud_m.blur_rel.unwrap(),
+            quiet_m.blur_rel.unwrap()
         );
     }
 }
