@@ -1,6 +1,6 @@
-# Path to 200 fps on the moving stress scene
+# Path to 200 fps
 
-Research note for `gi-v2` at `5b38ca20` (2026-10-13). No lighting code changes. The target is a moving stress frame at 1920×1080 in 5 ms or less on an RTX 4070, which is 200 fps. The owner measurement this note starts from is about 30 ms, about 34 fps, with the card shared: other GPU work was using about 35% of it.
+Research note for `gi-v2`. The stress-scene model is `5b38ca20`. Sponza is the mesh that landed in `fd533d5e` (`genos-lighting --scene sponza`). No lighting code changes. The target is a moving frame at 1920×1080 in 5 ms or less on an RTX 4070, which is 200 fps. The owner measurement the stress model starts from is about 30 ms, about 34 fps, with the card shared: other GPU work was using about 35% of it. Sponza on that same card is about 150 ms. The 5 ms budget below is the stress frame. Sponza is the test that a cut still has to pass when the geometry is a real mesh.
 
 That 30 ms is the number to beat. It is not an idle-card time. If the other work is concurrent and this frame is bandwidth-bound, an idle card is faster, and the gap is not something this note divides out. The still-scene wavelet times already on file (about 1.8–3 ms) sit in the same direction as a contended 11–15 ms moving wavelet. An exclusive run is a profiling experiment below, not a corrected baseline.
 
@@ -119,6 +119,56 @@ The 6 ms that remains is the pixel shadow work, plus probes the rings actually w
 
 **The 0.9 ms residual.** Compact touches a million keys and is the scheduler. Place, the three filter rounds, and the cache update are thousands of threads. The G-buffer raster of one section, the AA resolve, and the copy sit in the same residual. None of them is the 5 ms problem. The profiling section checks that claim.
 
+## Why Sponza is about ten times the stress scene
+
+Owner, same contended 4070, 1920×1080, `genos-lighting --scene sponza` at `fd533d5e`. The atrium and the colonnade agree.
+
+| | Stress, moving | Sponza | Ratio |
+|---|---:|---:|---:|
+| Frame | ~30 ms | ~150 ms | 5× |
+| `atrous` | 11–15 ms | 93–98 ms | about 7–9× |
+| `light` | 11.5 ms | ~40 ms | about 3.5× |
+
+The frame is five times the stress frame. The wavelet is the term that reaches the owner's "~10×": it is most of the 150 ms. Pixel count is identical (2.07 M). Probe count is identical (the 120×68 screen grid). Lamp count goes the other way: Sponza is a sun and three lamps (`debug/scenes/sponza.scene`); the stress scene is a sun and five. The extra time is geometry.
+
+Sponza here is the Crytek atrium in metres (OBJ centimetres times 0.01), with Pestana's textures, one glTF mesh per material. Curtains and chains stay opaque; the thorn and the vase plant discard. There is no specular lobe. The world texel stays 12.5 cm. The checkout stores the glTF as Git LFS, so this note does not count triangles. The scaling below does not need that count.
+
+### The wavelet scales with occupied cache slots
+
+The launch does not change: seven dispatches over 1,048,576 slots. Empty slots are still cheap. What changes is how many slots are live, and how long `lighting_cache_find_sized` walks to find each one (`LIGHTING_CACHE_SEARCH` is 16).
+
+The stress model put about 108 k filtered texels in a table that is 10% full, short hash walks, about 1.5 GB, 11–15 ms. Sponza's surface is the floor plus arches, fluted columns, double-sided curtains, chains, and vases, all at the same 12.5 cm. A 7–9× wavelet, if it were only more texels, is on the order of 800 k filtered slots. That is most of the million-slot table. At that occupancy a 5×5 tap walks a long probe chain. A model with the cap of 16 key loads, 34 taps, five iterations, and 800 k texels is about 9 GB of key traffic before the color records. At the same ~100 GB/s of useful random bandwidth used for the stress wavelet, that is about 90 ms. It matches 93–98 ms. It is a model: `lightingatrous`'s filtered count is the measurement that confirms or cuts it.
+
+Three rules make a real mesh pay this and a box room not:
+
+- Texel size is fixed (S57). A chain link and a floor tile are the same 12.5 cm cell. Detail under that size still claims a cell wherever a ray hits a new normal. Ornaments do not get a cheaper tier.
+- Every slot wider than 0.2 m is in the filter (`lighting_svgf_active`). Hit cells and world-radiance cells are 0.25 m, including the colonnade behind the camera and the roof. The wavelet filters the palace, not the picture.
+- Curtains and chains are thin and two-sided, and columns are not axis-aligned floors. A neighbour tap misses more often, and the miss still pays the hash walk.
+
+The million-slot table is the cliff. Past it, new claims fail and the picture stays unfilled (S73L). The stress building does not walk up to that cliff. Sponza does. A screen-sized filter (idea 2) costs the same on both scenes, because it scales with pixels. The hash filter cannot: the next mesh after Sponza is another multiple of 90 ms, until the table is simply full.
+
+### Direct light scales with the march, not the lamp list
+
+The launch is the same 10.43 M threads and the same 2.07 M pixels. Sponza has fewer lamps and costs 40 ms against 11.5 ms. The stress shadow ray walks a short list of analytic boxes. A Sponza ray also calls `mf_trace`, which loops every material instance. Each instance the ray's slab test enters sphere-traces up to `FIELD_STEPS` (96). A step is a trilinear read, eight voxels. A material whose bounds are the atrium gets voxels of `min(side / 64, 0.25)` metres, so a palace-sized material is a 0.25 m distance field.
+
+The atrium and the colonnade look down the hall, so one shadow ray crosses many overlapping bounds: columns, curtains, arches. Those two checkpoints both sitting near 40 ms is that long ray. A view into a short wall would be the cheap one, and it is not the number above.
+
+Ring wakes still remove the kept-hit tail, on this scene as on the stress scene. They do not turn a mesh march into a box test. After that cut, Sponza's direct pass stays a multiple of the stress pixel term. Lamp picking (idea 5) is the wrong first lever here: three lamps plus the sun is already a short list, which is why the hell room (100 lamps, analytic boxes) and Sponza (4 lights, a real mesh) are different problems. The lever is a shorter ray: a coarse field for the empty span and a fine field only near the hit, or the hardware BVH on this card (idea 9). Lumen's two-level SDF and ADR 0012's far field are that split. Today the shader has one march cap and a linear scan of the materials.
+
+Probe gather, the probe filter, and place stay on the screen grid, so they should stay near the stress numbers. Compose can grow when the four probes miss and the pixel takes the hash find. That is a measurement, not a claimed 150 ms term. Trace was not in the owner's Sponza split; it uses the same march as direct, so it should move with `light` and the dispatch dump will say so.
+
+### Cold start: the ratio is still climbing after 180 frames
+
+The owner reports the mean-luminance ratio of the live picture to a settled picture, which they called the hell ratio: 0.49 at frame 1, 0.76 at frame 227. Bounce light has not converged. A quarter of the settled brightness is still missing after more than 180 frames.
+
+Two loops set that pace. Both scale with surface area, and the ray budget does not.
+
+The budget is a ceiling. About 55,000 of the 65,536 batch entries are texels (the rest are scouts, gradient checks, the world-radiance refresh, and the trickle). A young texel takes a whole 64-ray set, which is four entries. That is about 14,000 texels receiving one set in a frame. The perceptual stop, when the scene is quiet, is 8 sets (`LIGHTING_DN_MIN_SETS`). The cap the tuned path stores is 64 sets on a fine texel and 128 samples on a world-radiance cell. A visible set several times 14,000 texels, which an atrium is, needs many frames for every shown texel to hold one set, and most of 180 frames to hold eight. The stress building is near one batch wide, so the same ceiling covers it in a handful of frames.
+
+The second loop is the bounce itself. A new texel's rays read other texels that are also young, so more samples of a dark field stay dark. The ratio moves only as the neighbours fill. That is why frame 227 is 0.76 and still climbing, rather than done once each texel has had a set. Frame 1 at 0.49 is the screen probes plus the scout seed. The scout is 4,096 rays. That fills a room. It does not fill an atrium, and pre-fill is required, so the scout has to grow with the visible surface. It stays a ceiling. It does not become a bake.
+
+Wall time makes the two problems stack. 227 frames at 150 ms is about half a minute. The same 227 frames at 5 ms is still over a second, and the picture is still at 0.76. Cutting the frame time does not cut the frame count. Ideas 22–24 are the frame count.
+
 ## A 5 ms budget
 
 The budget is one moving frame at 1080p, pre-fill included, a check still running, the whole picture still produced this frame. It sums to 5.00 ms.
@@ -140,6 +190,8 @@ The budget is one moving frame at 1080p, pre-fill included, a check still runnin
 | **Frame** | **30.0** | **5.00** | |
 
 The two structural cuts are the wavelet (13.0 → 1.40, save 11.6) and the light pass (11.5 → 1.25, save 10.25). Together with gather (save 0.75), compose (save 1.5), and the trace split (1.5 → 0.65, save 0.85), the frame lands on 5 ms. Each of those saves is the same milliseconds as several ideas below. Adding the idea column over-counts.
+
+That budget is the stress frame. On Sponza the same screen-sized passes (compose, gather, place, the probe filter) can keep these numbers, because they follow the picture. The wavelet and the shadow march do not: they are 93–98 ms and ~40 ms until ideas 2 and 21 replace them with work that follows pixels and ray length, not the mesh's surface area. A hash wavelet cannot be budgeted at 1.40 ms on Sponza.
 
 ## Ranked ideas
 
@@ -166,6 +218,11 @@ Expected milliseconds are off the contended 30 ms moving frame at 1080p, five la
 | 17 | SHaRC's 16-sample read, or a neural radiance cache | about 0 on this frame (S78H2 measured no effect) | high for NRC | a trained field lags | SHaRC; Müller et al., NRC. NRC was ruled out as the core on 1060-class cards. A trained field is a hold. The world-radiance cache is already the hash. |
 | 18 | AMD GI-1.0 / Brixelizer as a reference for the brick budget and the screen denoise | no separate millisecond until the filter moves | — | — | AMD FidelityFX GI 1.0 and Brixelizer. The piece to take is idea 2 plus a fixed update budget, not a second GI. |
 | 19 | Replace the cache filter with a DDGI probe volume | would delete the 13 ms and add a probe update of unknown size | high | a different picture | Majercik et al., DDGI. Probes would still trace every frame. Not the next step. |
+| 20 | Idea 2, scored on Sponza: the wavelet is a screen image, so a palace costs the same as the stress room | about 90 ms on Sponza (93–98 → ~1.4); the same 8–10 ms on the stress scene | high | bounce can be softer; direct stays full resolution | Same papers as idea 2. This is the cut that makes the 5 ms budget survive real geometry. |
+| 21 | A shadow ray skips empty space in one coarse field and marches fine bricks only near a hit. On this card, the hardware BVH is the other implementation | most of Sponza's ~40 ms after the kept-hit tail is gone; idea 9's 2–4 ms was the stress-scene march | medium | must match today's hit | Lumen's two-level SDF; ADR 0012's far field; `VK_KHR_ray_query`. Three lamps are already a short list, so idea 5 is not this saving. |
+| 22 | Opening frames spread the budget: one 16-ray entry on every visible texel before any texel takes a 64-ray set | the cold-start frame count, not the stress 30 ms. A visible set of a few hundred thousand texels gets a first sample in a handful of frames instead of tens | medium | grain until the sets arrive; idea 20 is what makes a one-sample field showable | Lumen's few rays per update; GIBS; S59. The check still runs. This is not a bake. |
+| 23 | Size the required scout to the visible surface. 4,096 rays seed a room; an atrium needs a larger ceiling on frame 1 | frame-1 ratio up from 0.49 | medium | a thin seed that is wrong in a corner shows until the sets replace it | E17; Lumen's world radiance cache. Pre-fill stays. The current scout is the stress-scene size. |
+| 24 | A bounce ray whose hit has no sets reads the coarse seed at full weight, and the texel's own sets replace that seed by count | the climb from 0.49 to the settled picture follows sample count, instead of resampling a dark neighbour for hundreds of frames | medium | a hard switch pops; the count handover is the existing S72K rule | S72M first-reveal seed; S72K. |
 
 ### How the top of the list becomes 5 ms
 
@@ -175,7 +232,9 @@ Take the light pass in order. Idea 4 removes the kept-hit launch the owner alrea
 
 Then the small columns: idea 6 on compose, idea 7 on gather, idea 8 so the stride looks where the picture is, idea 11 if the probe grid is still above 0.25 ms, idea 13 so the required scouts overlap the raster. The 0.40 ms cache-ray line is where pre-fill lives.
 
-What this ordering refuses, because of the constraints: baking the bounce, replaying last frame's picture, dropping the scouts, and treating S79's half-resolution hash as evidence that a screen-space filter cannot work. S79 showed that a million-slot hash does not get cheaper when half the slots return early.
+Sponza uses the same order and two extra cuts. Idea 20 is idea 2 with the palace's 90 ms attached: once the filter is a screen image, Sponza's wavelet falls to the 1.40 ms line instead of another multiple of the stress wavelet. Idea 21 is what makes Sponza's 40 ms shadow march fit the 1.00 ms direct line; ring wakes and lamp picking do not, because the lamp list is already short. Ideas 22–24 are the cold start. They do not change the 5 ms sum. They change how many frames the ratio takes to leave 0.49 and reach the settled picture. The aim is a few dozen frames, not 227.
+
+What this ordering refuses, because of the constraints: baking the bounce, replaying last frame's picture, dropping the scouts, and treating S79's half-resolution hash as evidence that a screen-space filter cannot work. S79 showed that a million-slot hash does not get cheaper when half the slots return early. Sponza shows the same hash getting more expensive as the mesh grows.
 
 ## Profiling experiments
 
@@ -280,3 +339,33 @@ cargo run --release -p genos-stress -- \
 - Potato `light` near 6 ms, and high `light` near 11.5 ms, matches "pixels remain after the kept tail." Potato `light` near 11.5 ms means the kept tail was never the 5.5 ms.
 - `trace` staying near 1.5 ms with `--dynamic 0 --freeze-sun --still-boxes` means the 1.5 ms is the standing probe stratum, not crossings.
 - `cache_rays` under a few tenths of a millisecond means pre-fill is already inside the trace budget and the 0.40 ms line is slack. `cache_rays` near 1.5 ms means the owner "trace" number is the cache-ray batch and the probe stratum is the small one.
+- Sponza `atrous` near 90 ms with a filtered count near 800 k confirms the table is filling. The same 90 ms with a count near the stress scene's ~108 k means each tap got more expensive, and the 800 k estimate is high.
+- Sponza potato `light` near 40 ms means the mesh march is the direct cost. A potato time of a few milliseconds means the 40 ms was cache-ray and kept-hit shading. Dark-corner `light` well below the atrium means the long hall is the march.
+
+### 6. Sponza, atrium and colonnade
+
+Confirms 93–98 ms of à-trous and ~40 ms of `light` at 1080p, and splits trace from cache rays. `lightingatrous` (set `GENOS_LIGHTING_DEBUG=1`) is the filtered count the wavelet model needs. A filtered count near 100 k means the 90 ms is a longer hash walk, not more texels. A count near 800 k means the table is filling and the model holds. The dark corner is the short-ray control: if its `light` time drops well below the atrium, the 40 ms is the long march down the hall.
+
+```
+GENOS_GPU_DISPATCH=1 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-lighting -- \
+  --scene sponza --checkpoint atrium --size 1920x1080 --frames 180 \
+  --preset high --gpu-times 30
+
+GENOS_GPU_DISPATCH=1 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-lighting -- \
+  --scene sponza --checkpoint colonnade --size 1920x1080 --frames 180 \
+  --preset high --gpu-times 30
+
+GENOS_GPU_DISPATCH=1 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-lighting -- \
+  --scene sponza --checkpoint dark-corner --size 1920x1080 --frames 180 \
+  --preset high --gpu-times 30
+```
+
+Potato on the same checkpoints is the pixel march without the kept-hit tail and without the wavelet. If potato `light` stays near 40 ms, the mesh march is the whole direct cost. If it falls to a few milliseconds, the 40 ms was the cache-ray and kept-hit shading of a large surface.
+
+```
+cargo run --release -p genos-lighting -- \
+  --scene sponza --checkpoint atrium --size 1920x1080 --frames 180 \
+  --preset potato --gpu-times 30
+```
+
+The cold-start ratio is the picture mean against a settled run of the same checkpoint. The owner has 0.49 at frame 1 and 0.76 at frame 227. A repeat is a long atrium run whose per-frame mean is recorded the same way; this binary prints a mean when it writes a shot, and it does not print that ratio itself. What the GPU line adds is whether those 227 frames are 150 ms each.
