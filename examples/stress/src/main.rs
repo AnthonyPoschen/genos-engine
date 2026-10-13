@@ -26,7 +26,8 @@ use genos_debug::{png, Host};
 use genos_input::{character_controller, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenLine, ScreenRect};
 use genos_scene::{
-    look_direction, update, Actions, Camera, DebugSettings, Scene, Vec3, PITCH_LIMIT,
+    look_direction, update, Actions, Camera, DebugSettings, LightingPreset, LightingSettings,
+    Scene, Vec3, PITCH_LIMIT,
 };
 use genos_ui::{button_panel, Action, PanelButton, PanelRow, PanelSlider, Pointer, State};
 use genos_window::{extent_changed, FocusGate, Window};
@@ -94,11 +95,16 @@ const USAGE: &str = "genos-stress [options]
                             (GENOS_UNFILLED_MAX_BYTES)
   --unfilled-session-cap N  saves in one process (default 32)
                             (GENOS_UNFILLED_SESSION_CAP)
+  --trace                   capture the picture after every script command that changes it
   --preset NAME             potato, day-cycle, gi-1bounce, low, medium, high
                             (GENOS_LIGHTING_PRESET is the mirror)
   --bounces 0|1|2|unlimited bounce count (GENOS_LIGHTING_BOUNCES)
   --ambient MODE            off, constant, hemisphere, day, or curve
                             (GENOS_LIGHTING_AMBIENT)
+  --denoise-iters 1|3|5     wavelet iterations (GENOS_LIGHTING_DENOISE_ITERS)
+  --denoise-adaptive on|off experimental: drop settled wavelet iterations
+                            (GENOS_LIGHTING_DENOISE_ADAPTIVE). Off on every preset
+  --denoise-variance F      relative luminance deviation, 0..0.1 (GENOS_LIGHTING_DENOISE_VARIANCE)
   --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
   --lighting-full-effort    full refresh every frame (GENOS_LIGHTING_FULL_EFFORT=1)
   --lighting-sun on|off     small sun step (GENOS_LIGHTING_SUN, default on)
@@ -106,8 +112,7 @@ const USAGE: &str = "genos-stress [options]
   --lighting-catch-up N     kept-hit frames after a point lamp stops, 0..16
                             (GENOS_LIGHTING_CATCH_UP, default 4)
   --lighting-debug          read lighting counters (GENOS_LIGHTING_DEBUG).
-                            Not an fps run: it reads the GPU back every frame
-  --trace                   capture the picture after every script command that changes it";
+                            Not an fps run: it reads the GPU back every frame";
 
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];
 /// Panel ids. Each row's buttons count up from its base.
@@ -157,6 +162,12 @@ struct Options {
     script: Option<genos_debug::script::ScriptRun>,
     /// glTF files to place in the building: path, position and uniform scale.
     gltf: Vec<(PathBuf, [f32; 4])>,
+    /// Set only when the flag was passed. Each wins over the matching GENOS_* variable.
+    preset: Option<String>,
+    denoise_iters: Option<String>,
+    denoise_adaptive: Option<String>,
+    denoise_variance: Option<String>,
+    gpu_times: Option<String>,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, text: &str) -> Result<T, String> {
@@ -210,6 +221,11 @@ fn options() -> Result<Options, String> {
         bench_out: None,
         script: None,
         gltf: Vec::new(),
+        preset: None,
+        denoise_iters: None,
+        denoise_adaptive: None,
+        denoise_variance: None,
+        gpu_times: None,
     };
     let mut report: Option<PathBuf> = None;
     let mut trace = false;
@@ -299,6 +315,11 @@ fn options() -> Result<Options, String> {
                 }
             }
             "--trace" => trace = true,
+            "--preset" => opts.preset = Some(value()?),
+            "--denoise-iters" => opts.denoise_iters = Some(value()?),
+            "--denoise-adaptive" => opts.denoise_adaptive = Some(value()?),
+            "--denoise-variance" => opts.denoise_variance = Some(value()?),
+            "--gpu-times" => opts.gpu_times = Some(value()?),
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -458,6 +479,46 @@ fn settings_text(stage: &Stage) -> String {
     )
 }
 
+/// A passed flag wins over the matching environment variable. An omitted flag
+/// leaves that variable alone, so it still applies.
+fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
+    let mut check = LightingSettings::preset(LightingPreset::High);
+    if let Some(name) = &opts.preset {
+        if LightingPreset::parse(name).is_none() {
+            return Err(format!("unknown preset {name}"));
+        }
+        std::env::set_var("GENOS_LIGHTING_PRESET", name);
+    }
+    let keys = [
+        (
+            opts.denoise_iters.as_deref(),
+            "denoise_iters",
+            "GENOS_LIGHTING_DENOISE_ITERS",
+        ),
+        (
+            opts.denoise_adaptive.as_deref(),
+            "denoise_adaptive",
+            "GENOS_LIGHTING_DENOISE_ADAPTIVE",
+        ),
+        (
+            opts.denoise_variance.as_deref(),
+            "denoise_variance",
+            "GENOS_LIGHTING_DENOISE_VARIANCE",
+        ),
+    ];
+    for (value, key, var) in keys {
+        if let Some(value) = value {
+            check.set_key(key, value)?;
+            std::env::set_var(var, value);
+        }
+    }
+    if let Some(every) = &opts.gpu_times {
+        parse::<u32>("--gpu-times", every)?;
+        std::env::set_var("GENOS_GPU_TIMES", every);
+    }
+    Ok(())
+}
+
 fn lighting_text(renderer: &Renderer) -> String {
     let stats = renderer.settle_stats();
     format!(
@@ -473,6 +534,7 @@ fn run() -> Result<(), String> {
         return gi_check::run(std::env::args().skip(2));
     }
     let opts = options()?;
+    apply_lighting_cli(&opts)?;
     let mix = LightMix {
         count: opts.lights,
         dynamic_pct: opts.dynamic,

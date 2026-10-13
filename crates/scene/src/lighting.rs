@@ -214,10 +214,27 @@ pub struct WorldCacheSettings {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DenoiserSettings {
     pub enabled: bool,
-    /// A-trous iterations. 1, 3, or 5. The push reads the last odd iteration.
+    /// A-trous iterations. 1, 3, or 5. The push reads the last iteration.
     pub iterations: u32,
     /// Dirty-list fraction before the dense sweep. 0 is always dense, 1 keeps lists.
     pub dirty_fraction: f32,
+    /// Drop later wavelet iterations where the texel's history is stable.
+    /// Off unless the experimental knob is on. See S79.
+    pub adaptive: bool,
+    /// Relative luminance deviation `sqrt(variance) / mean` under which a texel
+    /// counts as stable. 0 leaves the decision to sample age. Ignored unless
+    /// adaptive is on.
+    pub variance_threshold: f32,
+}
+
+impl DenoiserSettings {
+    /// Full-resolution scalar wavelet, adaptive off.
+    ///
+    /// That is the gi-v2 kernel. It has its own pipeline so the adaptive branch
+    /// is not in the shader the 4070 runs for high.
+    pub fn plain(self) -> bool {
+        !self.adaptive
+    }
 }
 
 /// Flat or hemisphere fill used when GI is off.
@@ -329,6 +346,9 @@ impl LightingSettings {
                 s.probes.refresh_frames = 2;
                 s.world_cache.enabled = false;
                 s.denoiser.iterations = 1;
+                // The filter does not run (no surface cache). Adaptive failed
+                // the 4070 picture bar (S79), so it stays off.
+                s.denoiser.adaptive = false;
                 s.prefill = false;
                 s.gi.refresh_frames = 2;
                 s.gi.budget_shift = 2;
@@ -340,6 +360,9 @@ impl LightingSettings {
                 s.bounce.count = 2;
                 s.probes.rays = 32;
                 s.denoiser.iterations = 3;
+                // Full-resolution scalar wavelet. Adaptive failed the 4070
+                // picture bar (S79), so it stays off.
+                s.denoiser.adaptive = false;
                 s.gi.budget_shift = 1;
                 s.ambient.mode = AmbientMode::Day;
             }
@@ -389,6 +412,8 @@ impl LightingSettings {
                 enabled: true,
                 iterations: 5,
                 dirty_fraction: 0.25,
+                adaptive: false,
+                variance_threshold: 0.02,
             },
             compose_reuse: true,
             sky: true,
@@ -442,6 +467,8 @@ impl LightingSettings {
             _ => 5,
         };
         self.denoiser.dirty_fraction = self.denoiser.dirty_fraction.clamp(0.0, 1.0);
+        // Ten bits in the control word: 0.0001 steps, up to 0.1023.
+        self.denoiser.variance_threshold = self.denoiser.variance_threshold.clamp(0.0, 0.1);
         self.ambient.intensity = self.ambient.intensity.max(0.0);
         self.ambient.night_intensity = self.ambient.night_intensity.max(0.0);
         self.ambient.day_intensity = self.ambient.day_intensity.max(0.0);
@@ -689,6 +716,12 @@ impl LightingSettings {
             "denoise_dirty={}",
             num_text(self.denoiser.dirty_fraction)
         );
+        let _ = writeln!(out, "denoise_adaptive={}", bit(self.denoiser.adaptive));
+        let _ = writeln!(
+            out,
+            "denoise_variance={}",
+            num_text(self.denoiser.variance_threshold)
+        );
         let _ = writeln!(out, "compose_reuse={}", bit(self.compose_reuse));
         let _ = writeln!(out, "sky={}", bit(self.sky));
         let _ = writeln!(out, "emissive={}", bit(self.emissive));
@@ -813,6 +846,8 @@ impl LightingSettings {
             "denoise" | "denoiser" => self.denoiser.enabled = on(value)?,
             "denoise_iters" => self.denoiser.iterations = num_u32(value)?,
             "denoise_dirty" => self.denoiser.dirty_fraction = num_f32(value)?,
+            "denoise_adaptive" => self.denoiser.adaptive = on(value)?,
+            "denoise_variance" => self.denoiser.variance_threshold = num_f32(value)?,
             "compose_reuse" => self.compose_reuse = on(value)?,
             "sky" => self.sky = on(value)?,
             "emissive" => self.emissive = on(value)?,
@@ -901,6 +936,8 @@ impl LightingSettings {
             ("GENOS_LIGHTING_DENOISE", "denoise"),
             ("GENOS_LIGHTING_DENOISE_ITERS", "denoise_iters"),
             ("GENOS_LIGHTING_ATROUS_DIRTY", "denoise_dirty"),
+            ("GENOS_LIGHTING_DENOISE_ADAPTIVE", "denoise_adaptive"),
+            ("GENOS_LIGHTING_DENOISE_VARIANCE", "denoise_variance"),
             ("GENOS_LIGHTING_COMPOSE_REUSE", "compose_reuse"),
             ("GENOS_LIGHTING_SKY", "sky"),
             ("GENOS_LIGHTING_EMISSIVE", "emissive"),

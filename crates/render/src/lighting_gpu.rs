@@ -93,6 +93,8 @@ pub(crate) struct Lighting {
     pool: Handle,
     sets: [Handle; 2],
     pipes: [Handle; 9],
+    /// High: full resolution, adaptive off. The adaptive branch is not in this SPIR-V.
+    atrous_plain: Handle,
     gbuffer_pipe: Handle,
     gbuf: Buffer,
     work: Buffer,
@@ -299,6 +301,7 @@ impl Default for Lighting {
             pool: std::ptr::null_mut(),
             sets: [std::ptr::null_mut(); 2],
             pipes: [std::ptr::null_mut(); 9],
+            atrous_plain: std::ptr::null_mut(),
             gbuffer_pipe: std::ptr::null_mut(),
             gbuf: Buffer::empty(),
             work: Buffer::empty(),
@@ -630,6 +633,13 @@ impl Gpu {
             self.lighting.pipes[k] = self.make_compute_pipe(code, self.lighting.layout, LIGHTING_PASS_NAMES[k])?;
             self.note_pipeline_time(LIGHTING_PASS_NAMES[k], start);
         }
+        let start = Instant::now();
+        self.lighting.atrous_plain = self.make_compute_pipe(
+            LIGHTING_ATROUS_PLAIN_SPV,
+            self.lighting.layout,
+            "atrous-plain",
+        )?;
+        self.note_pipeline_time("atrous-plain", start);
         let start = Instant::now();
         self.frag_override = Some(GBUFFER_FRAG_SPV);
         self.vert_override = Some(GBUFFER_VERT_SPV);
@@ -2310,8 +2320,13 @@ impl Gpu {
                         k_pc.as_ptr() as *const c_void,
                     );
                 }
+                // Pass 7 is compose: the sun path binds its own pipeline.
+                // Pass 8 is a-trous: the plain kernel has no adaptive branch.
+                // Adaptive uses the scalar shader that still reads the bit.
                 let pipe = if pass == 7 && sun_compose {
                     self.lighting.sun_pipe
+                } else if pass == 8 && self.lighting.settings.denoiser.plain() {
+                    self.lighting.atrous_plain
                 } else {
                     self.lighting.pipes[pass]
                 };
@@ -2572,6 +2587,7 @@ impl Gpu {
                 .lighting
                 .pipes
                 .iter_mut()
+                .chain(std::iter::once(&mut self.lighting.atrous_plain))
                 .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_pipe))
             {

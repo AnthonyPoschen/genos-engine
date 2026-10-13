@@ -126,6 +126,24 @@ uint lighting_denoise_iters() {
     uint n = (gstats.ctrl_bits >> 16u) & 7u;
     return n == 0u ? 5u : n;
 }
+// Bits 22..31, steps of 0.0001. Relative luminance deviation sqrt(var) / mean.
+float lighting_denoise_variance() {
+    return float((gstats.ctrl_bits >> 22u) & 1023u) * 0.0001;
+}
+// LIGHTING_DENOISE_PLAIN is the high pipeline. Adaptive passes are compiled
+// out of it. That branch lives in the other a-trous pipeline. On the 4070 the
+// extra branches dropped occupancy of this kernel (11.7 ms vs the gi-v2 7.5 ms)
+// even with the bits clear. Half-res and tiles were removed after they lost
+// the A/B (S79).
+#ifdef LIGHTING_DENOISE_PLAIN
+bool lighting_denoise_adaptive() { return false; }
+#else
+// Bit 20. Fewer wavelet iterations where history is stable. Off unless the
+// experimental knob is on. See S79.
+bool lighting_denoise_adaptive() {
+    return (gstats.ctrl_bits & 1048576u) != 0u;
+}
+#endif
 // Unlimited (bit 16384) is today's cache. Bounce 0 and 1 do not read it: one
 // bounce is the direct light on a probe hit, and the cache lookup is not run.
 // Bounce 2 and above read it (cache-to-cache).
@@ -3217,12 +3235,14 @@ bool lighting_svgf_moved(vec4 a, float va, vec4 b, float vb) {
         || abs(a.w - b.w) > LIGHTING_DIRTY_EPS
         || abs(va - vb) > 2.0 * LIGHTING_DIRTY_EPS * max(max(abs(va), abs(vb)), 1.0e-8);
 }
+// Kernel step in cells. Defined below the activity stamps.
+int lighting_svgf_step_for(uint it);
 // Level k of slot changed: its readers at level k + 1 are dirty.
 void lighting_svgf_scatter(uint slot, uint k) {
     if (k >= 5u) {
         return;
     }
-    int step = 1 << k;
+    int step = lighting_svgf_step_for(k);
     [[dont_unroll]] for (int j = -2; j <= 2; j++) {
         [[dont_unroll]] for (int i = -2; i <= 2; i++) {
             lighting_svgf_mark((i == 0 && j == 0) ? slot : lighting_sc_cell_slot(slot, ivec2(-i, -j) * step), k + 1u);
@@ -3247,6 +3267,73 @@ bool lighting_svgf_stamp_recent(uint s, uint c) {
 void lighting_svgf_stamp(uint s, uint c) {
     if (s != ~0u) {
         cache.v[LIGHTING_SC_DIRTY_AT + LIGHTING_CACHE_SLOTS + s][c] = uintBitsToFloat(lighting_frame());
+    }
+}
+// Kernel step in cells. Dammertz HPG 2010 doubles the step each iteration.
+int lighting_svgf_step_for(uint it) {
+    return 1 << int(it);
+}
+// How many wavelet iterations this texel still needs.
+//
+// Schied et al. 2017 (SVGF) sec. 4.2 use the variance to set the luminance
+// edge-stop. They still run every iteration. ReLAX (Zhdan, NVIDIA Real-Time
+// Denoisers) reduces the a-trous iteration count as history length grows.
+// This takes the smaller of the two limits, so either a long sample age or a
+// variance under the threshold drops iterations.
+//
+// Deviations: sample age is the surface-cache set count, not a screen-space
+// history length. No previous frame is kept. SVGF's own filter does not drop
+// iterations; the drop is the ReLAX rule, gated by the SVGF variance as well.
+// Bands: 16 sets or variance at the threshold -> 1 iteration; 8 sets or four
+// times the threshold -> 3; otherwise the configured count.
+uint lighting_svgf_pass_limit(uint slot, float var, float lum) {
+    uint full = lighting_denoise_iters();
+    if (!lighting_denoise_adaptive()) {
+        return full;
+    }
+    float sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+    float rel = sqrt(max(var, 0.0)) / max(lum, 1.0e-3);
+    float thr = lighting_denoise_variance();
+    uint by_age = full;
+    if (sets >= 16.0) {
+        by_age = 1u;
+    } else if (sets >= 8.0) {
+        by_age = min(full, 3u);
+    }
+    uint by_var = full;
+    // The knob tops out at 0.1 (1000 steps of 0.0001). That value forces one
+    // iteration. A young texel's relative deviation sits above 0.1, so the
+    // old test never entered the skip the settled cache takes (16 sets).
+    // ReLAX keys the drop off history length; this stop is the short-run
+    // equivalent, flagged as a deviation in S79.
+    uint thr_q = (gstats.ctrl_bits >> 22u) & 1023u;
+    if (thr_q >= 1000u) {
+        by_var = 1u;
+    } else if (thr > 0.0 && rel <= thr) {
+        by_var = 1u;
+    } else if (thr > 0.0 && rel <= thr * 4.0) {
+        by_var = min(full, 3u);
+    }
+    return min(full, min(by_age, by_var));
+}
+// The push reads buffer A. A skipped iteration must publish the last level
+// that actually ran (level `applied`), even when this level is clean. The
+// dirty early-out used to return first, so A kept an older filter or the
+// zeros from allocation, and the push blended that hole toward the 25 cm
+// WRC: darker and blotchy. Lavapipe zeros the cache and the old test warmed
+// up with the full filter, so A was already the reference and the miss was
+// invisible. A driver that does not zero, or a run that starts in the skip,
+// shows it.
+void lighting_svgf_publish_applied(uint slot, uint applied) {
+    vec4 now = cache.v[lighting_svgf_lvl(applied) + slot];
+    vec4 prev = cache.v[LIGHTING_SC_ATROUS_A + slot];
+    cache.v[LIGHTING_SC_ATROUS_A + slot] = now;
+    if (prev.x != now.x || prev.y != now.y || prev.z != now.z) {
+        lighting_svgf_stamp(slot, 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(1, 0)), 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(-1, 0)), 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(0, 1)), 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(0, -1)), 3u);
     }
 }
 // An inactive texel: mask 0 at every level (a flip marks its readers once).
@@ -3338,6 +3425,22 @@ void lighting_svgf_variance(uint slot) {
     }
 }
 void lighting_svgf_iter(uint slot, uint it) {
+#ifndef LIGHTING_DENOISE_PLAIN
+    // Before the dirty early-out. A clean texel still has to publish the last
+    // applied level, or the push keeps a stale or empty A. Not in the plain
+    // kernel: high leaves adaptive off (S79).
+    if (lighting_denoise_adaptive()) {
+        float v0;
+        vec4 s0 = lighting_svgf_load(lighting_svgf_lvl(0u), slot, v0);
+        uint limit = lighting_svgf_pass_limit(slot, v0, dot(s0.rgb, LIGHTING_SVGF_LW));
+        if (it + 1u > limit) {
+            if (it + 1u == lighting_denoise_iters()) {
+                lighting_svgf_publish_applied(slot, limit);
+            }
+            return;
+        }
+    }
+#endif
     if (LIGHTING_DIRTY_ATROUS && !lighting_svgf_is_dirty(slot, it + 1u)) {
         return;
     }
@@ -3345,7 +3448,7 @@ void lighting_svgf_iter(uint slot, uint it) {
     uint dst = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it + 1u) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_A : LIGHTING_SC_ATROUS_B);
     float vold;
     vec4 old = lighting_svgf_load(dst, slot, vold);
-    int step = 1 << it;
+    int step = lighting_svgf_step_for(it);
     float varp;
     vec4 vp = lighting_svgf_load(src, slot, varp);
     float lp = dot(vp.rgb, LIGHTING_SVGF_LW);
@@ -3426,7 +3529,9 @@ void lighting_svgf_iter(uint slot, uint it) {
     }
 }
 float lighting_svgf_lum_at(uint slot, ivec2 off, out bool ok) {
-    uint q = lighting_sc_cell_slot(slot, off);
+    // A zero offset is this slot. cell_slot(0, 0) hashes a point that is a
+    // cell off for about half the texels (S72V), so the center tap would miss.
+    uint q = (off.x == 0 && off.y == 0) ? slot : lighting_sc_cell_slot(slot, off);
     ok = false;
     if (q == ~0u) {
         return 0.0;
@@ -3442,7 +3547,7 @@ void lighting_svgf_push(uint slot) {
     if (nb.w > 0.2) {
         return;
     }
-    float varp;
+    float varp = 0.0;
     vec4 f = lighting_svgf_load(LIGHTING_SC_ATROUS_A, slot, varp);
     float W = clamp(f.w, 0.0, 1.0);
     // S78B: the push is redone when this texel's last level (or a +-1
