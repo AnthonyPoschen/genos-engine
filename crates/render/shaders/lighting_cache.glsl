@@ -132,6 +132,16 @@ uint lighting_bounce_path = 2u;
 // S73Q: pre-fill rays read the plain mean of a world-radiance cell. Every other
 // reader keeps the dark-fill value in the cell's irradiance.
 bool lighting_wrc_plain_read = false;
+// S73S: set while a read feeds accumulation (a bounce, a pre-fill seed, the
+// plain mean). Returning that read from a world-radiance cell's published
+// irradiance counts in diag[63]. The display resolve does not set this.
+bool lighting_feedback_read = false;
+const float LIGHTING_FEEDBACK_K = 2.0;
+void lighting_feedback_published(uint slot) {
+    if (lighting_feedback_read && cache.v[3u * slot + 1u].w > 0.2) {
+        atomicAdd(gstats.diag[63], 1u);
+    }
+}
 // S78S debug isolate toggles (lighting_gpu.rs lighting_toggles): head 3.w bits 12-15.
 uint lighting_toggles() {
     return (uint(work.v[lighting_change_at() + 3u].w) >> 12u) & 15u;
@@ -876,6 +886,7 @@ vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
                 if (lighting_wrc_plain_rgb(s, plain)) {
                     return vec4(plain, 1.0);
                 }
+                lighting_feedback_published(s);
                 return vec4(v.rgb, 1.0);
             }
         }
@@ -1955,6 +1966,7 @@ vec4 lighting_sc_wrc_now(vec3 p, vec3 n) {
         if (v.w < 0.5) {
             continue;
         }
+        lighting_feedback_published(s);
         sum += bil * v.rgb * lighting_sc_sun_gain(s);
         ws += bil;
     }
@@ -2088,7 +2100,137 @@ vec4 lighting_sc_own_shown(uint slot) {
 // and holds enough samples): a near hit reads the finest lit texel with
 // t > size sqrt 3 and at least LIGHTING_SC_READ_SETS sets; otherwise the 25 cm patch
 // as before, which falls back to its lit neighbours, never black.
+// S73S: accumulation does not take that patch's published irradiance. It reads
+// raw means and, on a miss or a low count, one coarser raw mean as a prior.
 const float LIGHTING_SC_READ_SETS = 4.0;
+// Raw mean before the k^2 dark-fill weight. A world-radiance cell is the plain
+// estimator (a.rgb, count b.w). A fine texel is its stored irradiance. The
+// published world-radiance rgb is never read here.
+bool lighting_raw_mean(uint slot, out vec3 rgb, out float n, out float sunfrac) {
+    float size = cache.v[3u * slot + 1u].w;
+    if (size > 0.2) {
+        vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
+        if (!(b.w > 0.5) || b.x > 0.0) {
+            return false;
+        }
+        n = b.w;
+        rgb = cache.v[LIGHTING_SC_EST_AT + 2u * slot].rgb * lighting_sc_sun_gain(slot);
+        sunfrac = lighting_sc_sunfrac_now(slot);
+        return true;
+    }
+    vec4 v = cache.v[3u * slot + 2u];
+    if (v.w < 0.5 || fract(v.w) >= 0.1) {
+        return false;
+    }
+    n = floor(v.w);
+    rgb = v.rgb * lighting_sc_sun_gain(slot);
+    sunfrac = lighting_sc_sunfrac_now(slot);
+    return true;
+}
+void lighting_feedback_stamp(uint slot) {
+    cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
+}
+// Feedback radiance at a hit. Display keeps reading the published dark-fill
+// cell (lighting_sc_wrc_now, lighting_sc_shown, probes). This read does not.
+// The finest eligible cell with at least LIGHTING_SC_READ_SETS raw samples is
+// the whole answer. A miss (n_f = 0) or a lower count blends the next coarser
+// raw mean that exists: L = (n_f * L_f + k * L_c) / (n_f + k). An empty coarser
+// level is skipped. 0 only when every level is empty. A low-count fine cell
+// with no coarser mean is returned as itself.
+// The hit-size cell is claimed when this would have fallen through to
+// lighting_cache_irradiance, so the cell stays resident. The claim does not
+// read or return the published irradiance. Deviation from SHaRC: a low count
+// blends a coarser raw mean instead of continuing the path.
+vec3 lighting_feedback_radiance(vec3 pos, vec3 n, float t) {
+    bool prev = lighting_feedback_read;
+    lighting_feedback_read = true;
+    lighting_hit_sunfrac = 0.0;
+    lighting_bounce_path = 2u;
+    vec3 result = vec3(0.0);
+    if ((lighting_sc_flags() & 2097152u) == 0u) {
+        float hs = lighting_hit_size_n(pos, n);
+        float fs = hs;
+        if (lighting_world_mode() == 3u && !lighting_sc_slanted(n) && t < hs * 1.7320508) {
+            fs = LIGHTING_SC_TEXEL;
+            while (fs * 2.0 < hs && t >= fs * 2.0 * 1.7320508) {
+                fs *= 2.0;
+            }
+        }
+        bool claim_hit = true;
+        bool have_f = false;
+        bool past_fine = false;
+        vec3 lf = vec3(0.0);
+        float nf = 0.0;
+        float sf = 0.0;
+        uint slot_f = ~0u;
+        bool found = false;
+        float size = fs;
+        [[dont_unroll]] for (uint level = 0u; level < 4u; level++) {
+            if (size > 4.0) {
+                break;
+            }
+            uint s = lighting_cache_find_sized(pos, n, false, size, pos);
+            vec3 rgb = vec3(0.0);
+            float cnt = 0.0;
+            float sun = 0.0;
+            bool hit = false;
+            if (s != ~0u) {
+                hit = lighting_raw_mean(s, rgb, cnt, sun);
+            }
+            if (!past_fine) {
+                past_fine = true;
+                if (hit) {
+                    have_f = true;
+                    lf = rgb;
+                    nf = cnt;
+                    sf = sun;
+                    slot_f = s;
+                    if (cnt >= LIGHTING_SC_READ_SETS) {
+                        lighting_feedback_stamp(s);
+                        lighting_hit_sunfrac = sun;
+                        lighting_bounce_path = size <= 0.2 ? 0u : 1u;
+                        result = rgb;
+                        found = true;
+                        if (size <= 0.2) {
+                            claim_hit = false;
+                        }
+                        break;
+                    }
+                }
+            } else if (hit) {
+                float k = LIGHTING_FEEDBACK_K;
+                float w = nf + k;
+                result = (nf * lf + k * rgb) / w;
+                lighting_hit_sunfrac = (nf * sf + k * sun) / w;
+                lighting_bounce_path = 3u;
+                if (have_f) {
+                    lighting_feedback_stamp(slot_f);
+                }
+                lighting_feedback_stamp(s);
+                found = true;
+                break;
+            }
+            size *= 2.0;
+        }
+        if (!found && have_f) {
+            lighting_feedback_stamp(slot_f);
+            lighting_hit_sunfrac = sf;
+            lighting_bounce_path = 0u;
+            result = lf;
+        }
+        if (claim_hit) {
+            uint slot = lighting_cache_find_sized(pos, n, true, hs, pos);
+            if (slot != ~0u) {
+                lighting_feedback_stamp(slot);
+                if (lighting_world_mode() == 3u && !lighting_sc_slanted(n) && (lighting_sc_flags() & 65536u) == 0u) {
+                    lighting_sc_offer(slot, pos, lighting_sc_centre(pos, n, hs));
+                }
+            }
+        }
+    }
+    lighting_feedback_read = prev;
+    return result;
+}
 vec3 lighting_cache_irradiance(vec3 pos, vec3 n);
 // S73Q: the plain-mean sample must not read a fine texel. Pre-fill texels light
 // each other, and that neighbourhood is the bright one. It also must not read
@@ -2129,6 +2271,7 @@ vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
                     lighting_bounce_path = 0u;
                     cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
                     lighting_hit_sunfrac = lighting_sc_sunfrac_now(s);
+                    lighting_feedback_published(s);
                     return v.rgb * lighting_sc_sun_gain(s);
                 }
             }
@@ -2183,10 +2326,12 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
                 vec4 v = cache.v[3u * s2 + 2u];
                 if (v.w > 0.5) {
                     // S64B: scaled to the sun/sky of now, share noted.
-                    vec3 rgb = v.rgb;
                     vec3 plain;
+                    vec3 rgb = v.rgb;
                     if (lighting_wrc_plain_rgb(s2, plain)) {
                         rgb = plain;
+                    } else {
+                        lighting_feedback_published(s2);
                     }
                     sum += vec4(rgb * (lighting_world_mode() == 3u ? lighting_sc_sun_gain(s2) : 1.0), 1.0);
                     fill_f += lighting_world_mode() == 3u ? lighting_sc_sunfrac_now(s2) : 0.0;
@@ -2199,12 +2344,12 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     }
     if (lighting_world_mode() == 3u) {
         lighting_hit_sunfrac = lighting_sc_sunfrac_now(slot);
-        vec3 rgb = e.rgb;
         vec3 plain;
         if (lighting_wrc_plain_rgb(slot, plain)) {
-            rgb = plain;
+            return plain * lighting_sc_sun_gain(slot);
         }
-        return rgb * lighting_sc_sun_gain(slot);
+        lighting_feedback_published(slot);
+        return e.rgb * lighting_sc_sun_gain(slot);
     }
     return e.rgb;
 }

@@ -153,6 +153,16 @@ impl Renderer {
         !self.debug.prefill_off
     }
 
+    /// Times the last submitted frame's feedback read returned a published
+    /// dark-fill value. Waits until that frame's stats copy is visible.
+    /// `u32::MAX` when the stats could not be read.
+    pub fn feedback_dark_writes(&mut self) -> u32 {
+        unsafe {
+            (self.gpu.fns.device_wait)(self.gpu.device);
+        }
+        self.gpu.feedback_dark_writes(self.gpu.lighting.last_slot)
+    }
+
     /// Counters from the last submitted frame. Waits until that frame's copy is visible.
     pub fn unfilled_stats(&mut self) -> crate::unfilled::UnfilledStats {
         unsafe {

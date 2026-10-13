@@ -1301,8 +1301,8 @@ impl Gpu {
         if let Ok(w) = self.read_stats16(memory) {
             if trace {
                 eprintln!(
-                    "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {} checks {} changed {} prefill_listed {} prefill_taken {} prefill_sets {}",
-                    self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23], w[84], w[85], w[86]
+                    "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {} checks {} changed {} prefill_listed {} prefill_taken {} prefill_sets {} feedback_dark {}",
+                    self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23], w[84], w[85], w[86], w[87]
                 );
                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
                 eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
@@ -1365,6 +1365,14 @@ impl Gpu {
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(words)
+    }
+
+    /// diag[63] from a stats copy that is already visible. `u32::MAX` if the map fails.
+    fn feedback_dark_writes(&self, slot: usize) -> u32 {
+        match self.read_words(self.lighting.stats[slot].memory, LIGHTING_FEEDBACK_DARK_WORD + 1) {
+            Ok(words) => words.get(LIGHTING_FEEDBACK_DARK_WORD).copied().unwrap_or(u32::MAX),
+            Err(_) => u32::MAX,
+        }
     }
 
     /// The slot fence has been waited. Print the unfilled line and, past the dump
@@ -2210,6 +2218,8 @@ const LIGHTING_STATS_WORDS: usize = 126;
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 const LIGHTING_UNFILLED_WORD: usize = 124;
 const LIGHTING_SHADED_WORD: usize = 125;
+/// diag[63]. A feedback read that returned a published dark-fill value.
+const LIGHTING_FEEDBACK_DARK_WORD: usize = 24 + 63;
 /// Word 0 of the mask. Matches lighting_cache.glsl.
 const LIGHTING_UNFILLED_MASK_AT: usize = 126;
 /// (4096/32) * 2160. A larger picture clamps the mask.

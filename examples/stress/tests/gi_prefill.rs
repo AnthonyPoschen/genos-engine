@@ -425,6 +425,12 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
     }
     let unfilled = renderer.unfilled_stats();
     eprintln!("prefill: {}", unfilled.line());
+    let dark_at_turn = renderer.feedback_dark_writes();
+    eprintln!("prefill: feedback dark-fill writes at the turn {dark_at_turn}");
+    assert_eq!(
+        dark_at_turn, 0,
+        "a feedback read returned a published dark-fill value ({dark_at_turn})"
+    );
     let unfilled_cap = std::env::var("GENOS_GI_PREFILL_UNFILLED_PCT")
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
@@ -447,6 +453,12 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
     for _ in 0..FLUSH {
         draw(&mut window, &mut renderer, &stage.world, yaw_end);
     }
+    let dark_at_hold = renderer.feedback_dark_writes();
+    eprintln!("prefill: feedback dark-fill writes at the hold {dark_at_hold}");
+    assert_eq!(
+        dark_at_hold, 0,
+        "a feedback read returned a published dark-fill value ({dark_at_hold})"
+    );
     drop(renderer);
     drop(window);
 
@@ -563,6 +575,12 @@ fn never_shown_texels_are_prefilled_before_a_turn() {
     for _ in 0..FLUSH {
         draw(&mut ref_window, &mut ref_renderer, &stage.world, yaw_end);
     }
+    let dark_ref = ref_renderer.feedback_dark_writes();
+    eprintln!("prefill: feedback dark-fill writes on the reference {dark_ref}");
+    assert_eq!(
+        dark_ref, 0,
+        "a feedback read returned a published dark-fill value on the prefill-off run ({dark_ref})"
+    );
     drop(ref_renderer);
     drop(ref_window);
     drop(_gpu);

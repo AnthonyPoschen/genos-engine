@@ -272,8 +272,9 @@ void main() {
         if (old.w >= 0.5) {
             lighting_wrc_check_take(slot, e, old.rgb);
         }
-        // S73Q: plain sample from the second cache read (no k^2 weight). Sun gain
-        // already scaled the stored plain rgb with the dark-fill history above.
+        // S73S: plain sample from the same raw bounce as the published mean.
+        // The k^2 weight stays on the published mean only. Sun gain already
+        // scaled the stored plain rgb with that history above.
         vec3 ep;
         if (lighting_wrc_plain_sample(j, run, rays, ep)) {
             vec4 pb = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
