@@ -276,6 +276,8 @@ While the step is small:
 
 Lavapipe, 320×180, sun only, camera held. After 80 still frames the list is a few hundred of the 920 blocks and the a-trous fraction sits on 0.25 (one run: 442 blocks, fraction 0.254). A 0.2° step stayed on the list (337 blocks, fraction 0.246) with the sun path on. Direct `|ΔL|` against a full-effort replay of that step was 0. A 40° jump was a full compose. Frame 8 of a cold start was 920 blocks and fraction 0.79: that is the cache filling, and it is the number PR #26 saw on every moving frame.
 
+**Debug readback.** `GENOS_LIGHTING_DEBUG=1` maps the counters to print `lightingcompose`. On the surface cache (flag 8192) that map was also the only caller of the settle update. `light_quiet` climbed, young-only rounds started, and once the scene had been still long enough the frozen idle ran direct plus an empty compose list. The picture on screen was an earlier frame. Most of those frames printed `blocks 0`, and the lighting timestamp window stopped once a frame had only those two passes. The print still reads the counters. It does not update `light_quiet` or the frozen idle. A still run with the variable set keeps composing, and its picture matches full effort.
+
 ### Phase 2 — confirmed-visibility shade
 
 Technique 1. Wide fringe: every segment this frame's lamp motion or a mover bound could flip is traced. Confirmed points are off the light dispatch.

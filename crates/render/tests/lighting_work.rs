@@ -567,6 +567,75 @@ fn small_sun_step_stays_on_the_compose_list() {
     );
 }
 
+/// A held corner, lamp included. `draw` walks the lamp; this does not.
+fn draw_held(window: &mut Window, renderer: &mut Renderer, camera: &Camera) -> Vec<u8> {
+    let _ = window.pump();
+    renderer
+        .draw(&corner_world(0), camera, true)
+        .expect("draw")
+        .expect("readback")
+}
+
+struct RestoreDebug(Option<std::ffi::OsString>);
+
+impl Drop for RestoreDebug {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(value) => std::env::set_var("GENOS_LIGHTING_DEBUG", value),
+            None => std::env::remove_var("GENOS_LIGHTING_DEBUG"),
+        }
+    }
+}
+
+/// Still frames with the debug print on. The read used to raise light_quiet,
+/// switch to young-only rounds, and leave an earlier picture on screen.
+#[test]
+fn debug_still_run_matches_full_effort() {
+    const N: usize = 32;
+    let (_gpu, mut window, mut renderer) = open();
+    let camera = corner_camera();
+    let mut run = |full: bool| {
+        renderer.set_lighting_work(1, full);
+        renderer.reset_lighting_caches();
+        renderer.set_debug_view(DebugView {
+            mode: ViewMode::Full,
+            ..DebugView::default()
+        });
+        let mut composed = 0usize;
+        let mut last_blocks = 0u32;
+        let mut last = Vec::new();
+        for _ in 0..N {
+            last = draw_held(&mut window, &mut renderer, &camera);
+            last_blocks = renderer.lighting_work_stats().delta_skip;
+            composed += usize::from(last_blocks != 0);
+        }
+        (last, composed, last_blocks)
+    };
+    let (full_a, _, _) = run(true);
+    let (full_b, _, _) = run(true);
+    let _debug = RestoreDebug(std::env::var_os("GENOS_LIGHTING_DEBUG"));
+    std::env::set_var("GENOS_LIGHTING_DEBUG", "1");
+    let (picture, composed, last_blocks) = run(false);
+    let noise = mean_abs(&luma(&full_a), &luma(&full_b));
+    let diff = mean_abs(&luma(&picture), &luma(&full_a));
+    let ceiling = noise * 3.0 + 5.0e-4;
+    eprintln!(
+        "still debug composed {composed}/{N} last blocks {last_blocks:#x} |ΔL| {diff:.6} noise {noise:.6}"
+    );
+    assert!(
+        composed * 2 > N,
+        "lighting stopped on the still run: {composed} of {N} frames composed"
+    );
+    assert_ne!(
+        last_blocks, 0,
+        "the last still frame held the previous picture"
+    );
+    assert!(
+        diff <= ceiling,
+        "still debug |ΔL| {diff:.6} is outside the full-effort noise {ceiling:.6}"
+    );
+}
+
 /// Same room as the corner, one directional sun, no point lamp.
 fn sun_world(yaw: f32) -> World {
     let dir = Vec3::new(yaw.sin(), -0.75, yaw.cos()).normalize();

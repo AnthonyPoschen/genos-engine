@@ -1055,8 +1055,8 @@ impl Gpu {
         self.lighting_dump_write();
         // S70B (no GPU->CPU reads in the frame loop): the surface cache's settling
         // and young-only rounds come from what the CPU already knows (frames still,
-        // rounds since the light changed), so its counters are read only for the
-        // debug output or the older world modes that settle on them.
+        // rounds since the light changed). Its counters are read for the debug
+        // print. Only the older world modes fold that read into the settle update.
         let read = lighting_stats_wanted();
         if !read {
         } else if let Ok(words) = self.read_lighting_stats(slot) {
@@ -1073,7 +1073,11 @@ impl Gpu {
         if !self.lighting.cache_clear && !world {
             if !self.lighting.stats_round[slot] {
                 // No light cache round ran in that frame.
-            } else if !read {
+            } else if !lighting_counters_settle() {
+                // Surface cache (flag 8192) settles from frames and the light
+                // hash. GENOS_LIGHTING_DEBUG still reads the counters to print
+                // them. That read must not raise light_quiet: young-only rounds
+                // and the frozen idle would start, and the picture would hold.
             } else if let Ok(words) = self.read_lighting_stats(slot) {
                 // A frame that ran just as the scene changed measured against the
                 // old light; it does not count toward settling.
@@ -2208,8 +2212,15 @@ fn lighting_world_env() -> u32 {
 }
 
 /// S70B: the frame's counters are read back only where something uses them.
+/// The surface cache with flag 8192 does not. A debug print may still map them.
 fn lighting_stats_wanted() -> bool {
-    std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() || !(lighting_world_env() == 3 && lighting_sc_flags_env() & 8192 != 0)
+    std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() || lighting_counters_settle()
+}
+
+/// Older world modes settle from the GPU counters. The surface cache does not,
+/// including when a debug print is what made the read happen.
+fn lighting_counters_settle() -> bool {
+    !(lighting_world_env() == 3 && lighting_sc_flags_env() & 8192 != 0)
 }
 
 // Defaults with no env set (S54K, gi-v2): GI v2, the surface cache, cap 64, the
