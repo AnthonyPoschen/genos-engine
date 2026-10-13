@@ -4002,7 +4002,10 @@ bool lighting_pix_cache_ok() {
     return lighting_world_mode() == 3u || (gstats.ctrl_bits & 32u) == 0u;
 }
 bool lighting_pix_reuse_on() {
-    return LIGHTING_PIX_REUSE && lighting_gi_on() && lighting_pix_cache_ok();
+    // No probes and no world cache is a 4096-byte stand-in. Pixel reuse indexes
+    // the work buffer past that (the same rule as the shadow cells).
+    bool stored = (gstats.ctrl_bits & 16u) != 0u || (gstats.ctrl_bits & 32u) != 0u;
+    return LIGHTING_PIX_REUSE && lighting_gi_on() && stored && lighting_pix_cache_ok();
 }
 bool lighting_pix_quiet() {
     vec4 head = work.v[lighting_change_at()];

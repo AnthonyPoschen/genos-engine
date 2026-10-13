@@ -43,6 +43,14 @@ that system's features. The agent rubric scores this.
   the picture's lamp unit, paint albedo and tone curve. Until the reference has a
   longer record, look at every reference before using it as a target.
 
+## Networking
+
+- Replicated state: none. The scene list, the checkpoint, and the pictures stay in the process that opened the binary. Lighting settings stay the struct in [Lighting settings](lighting/toggles.md).
+- Authority: that process. The MCP listener is loopback. A load replaces the world in that process.
+- Prediction / rollback: none. There is no predicted camera and no rollback of a scene switch.
+- Determinism: a script and `--frames` step scene time on a fixed step. A recorded replay of a session is not implemented yet.
+- Headless server: `--headless` and `--check` still open a proof window and draw. A gameplay server does not run this binary and does not bind its MCP port.
+
 ## Code
 
 - `crates/mcp/src/command.rs`: the command queue. `register` lists tools, `call`
@@ -88,6 +96,41 @@ genos-stress --proof --no-panel --size 320x180 \
   --script examples/stress/scripts/smoke.rhai --report target/debug-reports/smoke
 genos-stress ... --script FILE --trace   # also a screenshot after every changing step
 ```
+
+The lighting binary is `debug/lighting`, package `genos-lighting`. It loads
+`debug/scenes/` (parsed by `debug/scene-lib`, package `genos-scene-lib`).
+Arguments choose the run. An environment variable applies only when the matching
+argument was omitted.
+
+```sh
+cargo run --release -p genos-lighting -- --scene sponza --checkpoint atrium --gpu-times 30
+make lighting SCENE=sponza
+```
+
+`make lighting` is the benchmark: release, `--scene` from `SCENE` (default
+`stress`), and `--gpu-times 30`. `--preset`, `--lighting-debug`, `--unfilled`
+(the existing texels view: slots with fewer than four sets stay dim),
+`--full-effort`, `--headless`, `--frames N`, `--size WxH`, and `--out DIR` are
+in `--help`. The default output directory is `./genos-debug/` in the current
+working directory (`shots/`, `logs/`, `dumps/`). `--out` overrides it. The
+binary does not write those files under `$HOME`.
+
+Page Up and Page Down switch scenes. Keys 1–9 jump checkpoints. Home and 0 reset
+the camera to the active checkpoint. `list_scenes`, `load_scene`,
+`list_checkpoints`, and `jump_checkpoint` are on the same MCP catalogue.
+`load_scene` drops light and object edits and clears the lighting caches.
+
+`--check` loads every scene on a 320×180 proof window, jumps to the checkpoint
+named by that scene's `check` line, draws four frames at a fixed 1/60 s step,
+and writes `shots/<scene>.png`. The line is `check CHECKPOINT mean MIN`. MIN is
+that picture's mean luma floor on the 0–255 scale. Scenes do not share one
+floor, so a view that is dark by design is not the check view.
+`bounce_corner` checks `room-a` (mean 8); its `corner` checkpoint stays dark.
+A glTF scene whose file is missing or is still a Git LFS pointer prints
+`skip <name> (not a pass): ...` and is not counted as a pass. The other scenes
+still run. The process exits 0 when every scene that drew met its own floor.
+`--scene` for that missing name still returns the error. A recorded replay and
+a saved setup are not in this binary yet.
 
 On a box without a GPU this runs on lavapipe under a headless Weston
 (`XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`). The first run after a shader change spends
@@ -455,11 +498,13 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
 
 ## Limits
 
-- Dedicated binaries under `debug/<system>/`, and the shared scene library
-  `debug/scenes/`, are not in the tree yet. `genos-stress` is the lighting
-  harness that moves into `debug/lighting`. `examples/camera/scene.rhai` and
-  `examples/stress/scenes/` are the scene files that move into `debug/scenes/`.
-  `crates/debug` stays the shared command, knob, capture, and script code.
+- `debug/lighting` (`genos-lighting`) and `debug/scenes/` are in the tree.
+  `debug/scene-lib` parses the scene files. `examples/camera/scene.rhai` and
+  `examples/stress/scenes/room.rhai` stay where the tests load them; the scene
+  library points at those paths. Other systems do not have a `debug/<system>/`
+  binary yet. `crates/debug` stays the shared command, knob, capture, and
+  script code. A recorded replay and a saved setup are not in the lighting
+  binary yet.
 - The command catalogue already answers status, knobs, lights, objects, camera,
   time, view, capture, diff, flicker, compare (with a heatmap), and timing.
   `Tools::overlay`, `profile_overlay`, and `inspect_region` draw for a person.
@@ -467,8 +512,8 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   set in [the lighting debug standard](lighting/debug-standard.md). A dump and
   a snapshot plus restore for every other subsystem are not shared commands yet.
   New probes extend the catalogue. `tools/lighting/headless.sh` and a
-  `gi_headless` test module are not in the tree; the headless path that is
-  in the tree is `genos-stress --proof`.
+  `gi_headless` test module are not in the tree; the headless paths that are
+  in the tree are `genos-stress --proof` and `genos-lighting --headless`.
 - The reference knows floors, ceilings, walls and solids. It does not trace fog,
   particle cards, textures or per-material reflectance and colour mix (the stress
   scene uses the defaults). It does not cut lamps at their range as the engine does.
