@@ -1136,7 +1136,7 @@ impl Gpu {
             self.lighting.sun_gpu_mark = words[LIGHTING_SUN_MARK];
             self.lighting.sun_gpu_slice = words[LIGHTING_SUN_SLICE_WORD];
         }
-        self.publish_sun_counter();
+        self.publish_sun_counter(false);
         LightingSunStats {
             gpu_sun: self.lighting.sun_gpu_mark & 1 != 0,
             gpu_catch: self.lighting.sun_gpu_mark & 2 != 0,
@@ -1154,21 +1154,22 @@ impl Gpu {
     fn sun_counter_due(&self) -> bool {
         self.lighting.sun_frames > 0
             || sun_controls().full_effort
-            || std::env::var_os("GENOS_LIGHTING_DEBUG").is_some()
+            || lighting_debug_on()
     }
 
-    fn publish_sun_counter(&self) {
+    fn publish_sun_counter(&self, catch_log: bool) {
         let dir = sun_out_dir();
         if std::fs::create_dir_all(&dir).is_err() {
             return;
         }
         let controls = sun_controls();
+        let catch = u32::from(self.lighting.sun_gpu_mark & 2 != 0);
         let text = format!(
             "frame {}\nsun {}\nslice {}\ncatch {}\nhost_frames {}\ncatch_left {}\nbands {}\nfull_effort {}\ncompose {}\ndispatches {}\n",
             self.lighting.frame,
             u32::from(self.lighting.sun_gpu_mark & 1 != 0),
             self.lighting.sun_gpu_slice,
-            u32::from(self.lighting.sun_gpu_mark & 2 != 0),
+            catch,
             self.lighting.sun_frames,
             self.lighting.catch_left,
             controls.bands,
@@ -1177,6 +1178,14 @@ impl Gpu {
             self.lighting.compose_dispatches,
         );
         let _ = std::fs::write(dir.join("counter.txt"), text);
+        if catch_log && controls.debug {
+            append_catch_log(
+                &dir,
+                self.lighting.frame,
+                catch,
+                self.lighting.catch_left,
+            );
+        }
     }
 
     /// The picture has stopped changing: a frame drawn from held light has been
@@ -1210,7 +1219,7 @@ impl Gpu {
             if let Ok(words) = self.read_stats16(self.lighting.stats[slot].memory) {
                 self.lighting.sun_gpu_mark = words[LIGHTING_SUN_MARK];
                 self.lighting.sun_gpu_slice = words[LIGHTING_SUN_SLICE_WORD];
-                if std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+                if lighting_debug_on() {
                     eprintln!(
                         "lightingsun frame {} sun {} slice {} catch {} host_frames {}",
                         self.lighting.frame,
@@ -1220,7 +1229,7 @@ impl Gpu {
                         self.lighting.sun_frames,
                     );
                 }
-                self.publish_sun_counter();
+                self.publish_sun_counter(true);
             }
         }
         // S70B (no GPU->CPU reads in the frame loop): the surface cache's settling
@@ -1231,7 +1240,7 @@ impl Gpu {
         if !read {
         } else if let Ok(words) = self.read_lighting_stats(slot) {
             self.lighting.probe_samples = [words[6], words[7]];
-            if words[7] > 0 && std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+            if words[7] > 0 && lighting_debug_on() {
                 eprintln!(
                     "lighting probes rays {} probes {} per_probe {:.1}",
                     words[6],
@@ -1374,7 +1383,7 @@ impl Gpu {
             }
         }
         self.lighting.live = words[2];
-        if std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+        if lighting_debug_on() {
             eprintln!(
                 "lighting frame {} still {} change {} relit {} live {} missed {} quiet {} mature_change {} mature_relit {} light_quiet {} young_only {}",
                 self.lighting.frame,
@@ -1592,7 +1601,7 @@ impl Gpu {
     /// `GENOS_LIGHTING_DEBUG` prints the a-trous line on its own.
     fn trace_sc(&self, memory: Handle, queue: &str) {
         let trace = std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_some();
-        let debug = std::env::var_os("GENOS_LIGHTING_DEBUG").is_some();
+        let debug = lighting_debug_on();
         if !trace && !debug {
             return;
         }
@@ -1819,7 +1828,7 @@ impl Gpu {
         } else {
             None
         };
-        if std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+        if lighting_debug_on() {
             if frozen {
                 eprintln!("lighting frozen");
             } else {
@@ -1891,7 +1900,7 @@ impl Gpu {
             }
             block[3] += (n * 200000) as f32;
             sent += 4 * n;
-            if std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+            if lighting_debug_on() {
                 eprintln!("lighting world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(lighting_sc_local_env()), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
             }
             // Object-local texels for movers (GIBS): GENOS_LIGHTING_SC_LOCAL=1.
@@ -2590,7 +2599,7 @@ impl Gpu {
 
 /// S70B: the frame's counters are read back only where something uses them.
 fn lighting_stats_wanted(world: u32) -> bool {
-    std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() || !(world == 3 && lighting_sc_flags_env() & 8192 != 0)
+    lighting_debug_on() || !(world == 3 && lighting_sc_flags_env() & 8192 != 0)
 }
 
 // Defaults with no env set (S54K, gi-v2): GI v2, the surface cache, cap 64, the
@@ -2924,6 +2933,7 @@ struct SunCli {
     full_effort: Option<bool>,
     bands: Option<u32>,
     catch_frames: Option<u32>,
+    debug: Option<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -2932,6 +2942,11 @@ struct SunControls {
     full_effort: bool,
     bands: u32,
     catch_frames: u32,
+    debug: bool,
+}
+
+fn lighting_debug_on() -> bool {
+    sun_controls().debug
 }
 
 fn sun_controls() -> SunControls {
@@ -2949,11 +2964,15 @@ fn sun_controls() -> SunControls {
         .catch_frames
         .unwrap_or_else(|| sun_env_u32("GENOS_LIGHTING_CATCH_UP", 4))
         .min(16);
+    let debug = cli
+        .debug
+        .unwrap_or_else(|| std::env::var_os("GENOS_LIGHTING_DEBUG").is_some());
     SunControls {
         enabled,
         full_effort,
         bands,
         catch_frames,
+        debug,
     }
 }
 
@@ -2966,6 +2985,21 @@ fn sun_env_bool(name: &str, default: bool) -> bool {
 
 fn sun_env_u32(name: &str, default: u32) -> u32 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// One line per debug frame, so a lamp-stop run can be counted. The first
+/// write of the process truncates the file.
+fn append_catch_log(dir: &std::path::Path, frame: u32, catch: u32, catch_left: u32) {
+    use std::io::Write;
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let path = dir.join("catch.log");
+    if STARTED.set(()).is_ok() {
+        let _ = std::fs::write(&path, "");
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let _ = writeln!(file, "frame {frame} catch {catch} catch_left {catch_left}");
 }
 
 fn sun_out_dir() -> std::path::PathBuf {
@@ -2987,6 +3021,7 @@ fn sun_cli_from_args() -> SunCli {
                 SunFlag::FullEffort => cli.full_effort = Some(true),
                 SunFlag::Bands(v) => cli.bands = Some(v),
                 SunFlag::Catch(v) => cli.catch_frames = Some(v),
+                SunFlag::Debug => cli.debug = Some(true),
             }
             if lighting_sun_flag_needs_value(&args[i]) == Some(true) {
                 i += 1;
@@ -3002,6 +3037,7 @@ enum SunFlag {
     FullEffort,
     Bands(u32),
     Catch(u32),
+    Debug,
 }
 
 fn sun_dash(arg: &str) -> Option<(&str, Option<&str>)> {
@@ -3017,7 +3053,7 @@ fn sun_dash(arg: &str) -> Option<(&str, Option<&str>)> {
 pub fn lighting_sun_flag_needs_value(arg: &str) -> Option<bool> {
     let (name, inline) = sun_dash(arg)?;
     match name {
-        "lighting-full-effort" => Some(false),
+        "lighting-full-effort" | "lighting-debug" => Some(false),
         "lighting-sun" | "lighting-sun-bands" | "lighting-catch-up" => Some(inline.is_none()),
         _ => None,
     }
@@ -3041,6 +3077,12 @@ fn parse_sun_flag(arg: &str, next: Option<&str>) -> Option<Result<SunFlag, Strin
                 return Some(Err("--lighting-full-effort takes no value".into()));
             }
             SunFlag::FullEffort
+        }
+        "lighting-debug" => {
+            if inline.is_some() {
+                return Some(Err("--lighting-debug takes no value".into()));
+            }
+            SunFlag::Debug
         }
         "lighting-sun" => {
             let Some(text) = value else {
@@ -3267,6 +3309,9 @@ mod sun_step {
         assert!(check_lighting_sun_arg("--lighting-sun-bands", None).is_err());
         assert!(check_lighting_sun_arg("--lighting-catch-up", Some("17")).is_err());
         assert!(check_lighting_sun_arg("--lighting-full-effort=1", None).is_err());
+        assert!(lighting_sun_flag_needs_value("--lighting-debug").is_some_and(|v| !v));
+        assert!(check_lighting_sun_arg("--lighting-debug", None).is_ok());
+        assert!(check_lighting_sun_arg("--lighting-debug=1", None).is_err());
         assert!(check_lighting_sun_arg("--scale", None).is_ok());
     }
 

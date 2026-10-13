@@ -103,6 +103,8 @@ const USAGE: &str = "genos-stress [options]
   --lighting-sun-bands N    indirect bands, 1..64 (GENOS_LIGHTING_SUN_BANDS, default 8)
   --lighting-catch-up N     kept-hit frames after a point lamp stops, 0..16
                             (GENOS_LIGHTING_CATCH_UP, default 4)
+  --lighting-debug          read lighting counters (GENOS_LIGHTING_DEBUG).
+                            Not an fps run: it reads the GPU back every frame
   --trace                   capture the picture after every script command that changes it";
 
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];

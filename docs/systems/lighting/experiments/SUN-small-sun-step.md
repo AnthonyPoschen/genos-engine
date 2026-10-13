@@ -36,6 +36,9 @@ The argument wins. The environment variable applies only when that argument was 
 | `--lighting-sun on\|off` | `GENOS_LIGHTING_SUN` | on |
 | `--lighting-sun-bands N` (1..64) | `GENOS_LIGHTING_SUN_BANDS` | 8 |
 | `--lighting-catch-up N` (0..16) | `GENOS_LIGHTING_CATCH_UP` | 4 |
+| `--lighting-debug` | `GENOS_LIGHTING_DEBUG` | off |
+
+`--lighting-debug` reads the GPU counters. It is not an fps run. While it is on, `./genos-debug/sun/catch.log` appends `frame N catch C catch_left L` for each frame, and the first write of the process truncates that file.
 
 `genos-stress` and `genos-camera` accept the same flags. Preset, bounces, ambient, gpu times, and the unfilled flags are unchanged.
 
