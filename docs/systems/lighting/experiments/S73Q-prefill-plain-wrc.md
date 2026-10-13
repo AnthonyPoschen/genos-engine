@@ -24,7 +24,7 @@ Turning dark fill off (`GENOS_LIGHTING_SC_FLAGS=73115914`) drops the hidden-cell
 
 The published world-radiance irradiance is unchanged: dark fill, the change floor, and every existing reader. Beside it, the estimator slot keeps a second mean with the dark-fill weight left out (`a.rgb` the mean, `b.w` the count, `b.x` held at 0 so trickle, dormancy, and variance readers skip it). Sun gain scales that rgb with the rest of the estimator.
 
-A world-radiance cell's own rays still publish the dark-fill sample. A second cache read of the same hit, taken only for those rays, feeds the plain mean, so that mean is its own loop only when the read hits a cell that already has a plain count. A pre-fill ray uses the plain rgb in that same case. A fine hit still returns the fine texel. Pixels, probes, and shown texels do not ask for the plain mean.
+A world-radiance cell's own rays still publish the dark-fill sample. A second cache read of the same hit, taken only for those rays, feeds the plain mean. That read, and a pre-fill ray, take an existing plain mean only: a fine texel and the published dark-fill cell are both refused, and a sky miss is part of the hemisphere (see below). Pixels, probes, and shown texels do not ask for the plain mean.
 
 Deviation: Lumen and the world-radiance notes have one value per cell. This keeps two, and only a read that asks for the plain mean can see the second. The second read is a cache lookup, not a second trace.
 
@@ -37,3 +37,9 @@ The second mean is real. At frame 48 about 28 000 world-radiance cells had a pla
 Forcing that bounce to the plain mean only, and returning no bounce until a plain count exists, moved the same compare to 0.66 against 1.08 (2328 keys, ratio 0.61, mean relative 0.424). The plain mean itself was 0.57. Only about 43 % of lit world-radiance cells had a plain count, and a pre-fill texel keeps about two sets, so it snapshots the climb. Shown fine texels at that frame were 0.47. A pre-fill-off settle at the end yaw is 0.60 at frame 48 and the start-yaw picture at frame 96 was 0.59, so that 0.47 is the same climb, not a second darkening.
 
 Neither read is within 0.10. Turning dark fill off for every reader matched the means (ratio 0.996) at mean relative 0.146 over 2494 keys, and that changes the value on screen. Pooling the pre-fill texels in a 25 cm cell moved 0.146 to 0.132. The 0.50 test cap stays. It is not a claim that the texels match.
+
+## Sky misses were dropped
+
+The plain sum is accepted only when every ray of the hemisphere reported (`n == rays`). A miss returns from the direct shader before that add. The trace has already stored the sky in the ray slot, and the published mean counts it. The plain mean did not. One sky ray in the hemisphere dropped the whole sample, so most cells never took a plain count, and the cells that did were the hemispheres with no sky. The cold start then averaged those holes as zero bounce. That is why the plain mean sat near 0.57 while the same weights on the published cache (dark fill off) sat near 1.03.
+
+A miss now adds the stored sky, cosine-weighted from the source texel, the same way the cache pass weights it. The plain read still refuses a fine texel and the published dark-fill cell. Until a plain count exists the bounce is zero, so the mean climbs from direct light and sky only.

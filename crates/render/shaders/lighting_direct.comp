@@ -161,6 +161,12 @@ void main() {
             live = lighting_ray(ray, origin, dir, from_n);
         }
         if (rec.x < 0.0 || !live) {
+            // S73Q: a world-radiance miss still owes its sky to the plain mean.
+            // Leaving it out dropped every hemisphere that saw the sky.
+            if (!probe_hit && live && lighting_world_mode() == 3u) {
+                uint r = ray - lighting_probe_rays();
+                lighting_wrc_plain_sky(r / LIGHTING_CACHE_RAYS, r % LIGHTING_CACHE_RAYS, rec);
+            }
             return;
         }
         pos = origin + dir * rec.x;
@@ -444,10 +450,12 @@ void main() {
             uint r = ray - lighting_probe_rays();
             src = lighting_cache_batch_slot(r / LIGHTING_CACHE_RAYS);
         }
-        // S73Q: a never-shown fine texel reads the plain world-radiance mean.
+        // S73Q: a never-shown fine texel reads only an existing plain mean.
         // A world-radiance cell's own rays still publish the dark-fill sample.
-        // The plain sample is a second pass over the same hit. One call, rolled:
-        // a constant trip of two inlines the read twice and lavapipe faults.
+        // The plain sample is a second pass over the same hit, and it reads that
+        // same plain mean (never the dark-fill cell, never a fine texel). One
+        // call, rolled: a constant trip of two inlines the read twice and
+        // lavapipe faults.
         bool prefill_src = src != ~0u && lighting_sc_prefill(src);
         bool wrc_src = src != ~0u && cache.v[3u * src + 1u].w > 0.2;
         uint ent = 0u;

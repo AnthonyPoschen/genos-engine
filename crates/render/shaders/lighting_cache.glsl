@@ -2059,7 +2059,30 @@ vec4 lighting_sc_own_shown(uint slot) {
 // as before, which falls back to its lit neighbours, never black.
 const float LIGHTING_SC_READ_SETS = 4.0;
 vec3 lighting_cache_irradiance(vec3 pos, vec3 n);
+// S73Q: the plain-mean sample must not read a fine texel. Pre-fill texels light
+// each other, and that neighbourhood is the bright one. It also must not read
+// the published dark-fill cell: a mean of those samples sits on the same value.
+// Only an existing plain mean counts. Until one exists the bounce is zero, so
+// the mean climbs from the direct light and the sky. Read only (no claim, offer,
+// or stamp).
+vec3 lighting_wrc_plain_hit(vec3 pos, vec3 n) {
+    uint s = lighting_cache_find_sized(pos, n, false, LIGHTING_SC_HIT, pos);
+    if (s != ~0u && cache.v[3u * s + 1u].w > 0.2) {
+        vec3 plain;
+        if (lighting_wrc_plain_rgb(s, plain)) {
+            lighting_bounce_path = 1u;
+            lighting_hit_sunfrac = lighting_sc_sunfrac_now(s);
+            return plain * lighting_sc_sun_gain(s);
+        }
+    }
+    lighting_bounce_path = 2u;
+    lighting_hit_sunfrac = 0.0;
+    return vec3(0.0);
+}
 vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
+    if (lighting_wrc_plain_read) {
+        return lighting_wrc_plain_hit(pos, n);
+    }
     if (lighting_world_mode() == 3u && (lighting_sc_flags() & 2097152u) == 0u && !lighting_sc_slanted(n)) {
         float hs = lighting_hit_size_n(pos, n);
         if (t < hs * 1.7320508) {
@@ -2779,6 +2802,34 @@ uint lighting_cache_entry_quarter(uint j, uint slot) {
         i++;
     }
     return min(lighting_sc_quarter0(slot) + i, LIGHTING_SC_QUARTERS - 1u);
+}
+// A cache ray that missed never reached the hit path, so its sky was left out of
+// the plain sum. The sample then failed the full-hemisphere count and the mean
+// stayed on the direct light. The sky is the same record the trace stored
+// (lighting_miss_slot); the cosine is the source texel's, as the cache pass.
+void lighting_wrc_plain_sky(uint ent, uint sub, vec4 rec) {
+    if (ent >= LIGHTING_CACHE_BATCH || rec.x >= -0.75) {
+        return;
+    }
+    if (ent >= lighting_grad_first() && ent < LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) {
+        return;
+    }
+    uint src = lighting_cache_batch_slot(ent);
+    if (src == ~0u || !(cache.v[3u * src + 1u].w > 0.2)) {
+        return;
+    }
+    vec3 tp;
+    vec3 tn;
+    if (!lighting_sc_texel_world(src, tp, tn)) {
+        return;
+    }
+    uint key = ckeys.key[src];
+    uint q = lighting_cache_entry_quarter(ent, src);
+    uint rkey = lighting_sc_ray_key(src, key);
+    uint k = q * LIGHTING_CACHE_RAYS + sub;
+    vec3 dir = lighting_dir(rkey, tn, lighting_sc_stratum(rkey, k, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
+    vec3 sky = vec3(-1.0 - rec.x, rec.y, rec.z);
+    lighting_wrc_plain_add(ent, sky * max(dot(dir, tn), 0.0));
 }
 
 // Mode 2: a screen probe at pos facing n adds its irradiance e to its world cell.
