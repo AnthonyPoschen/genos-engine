@@ -50,11 +50,9 @@ A clone that smudges LFS replaces each pointer with the bytes. A clone that skip
 
 ## CI and cloud agents
 
-A job that does not draw the textured scenes does not download the LFS bytes. That is the default.
+A job that does not draw the textured scenes does not download the LFS bytes. That is the default for CI and for cloud agents.
 
-`.lfsconfig` sets `lfs.fetchexclude` to `assets/built/**,assets/source/**`. A normal clone and a plain `git lfs pull` leave those paths as pointer text. Push is not affected: the objects still upload with the branch.
-
-`GIT_LFS_SKIP_SMUDGE=1` is the same skip for a checkout that does not read `.lfsconfig` yet:
+Clone and checkout with smudge skipped:
 
 ```sh
 GIT_LFS_SKIP_SMUDGE=1 git clone <url>
@@ -62,12 +60,12 @@ GIT_LFS_SKIP_SMUDGE=1 git clone <url>
 git lfs install --skip-smudge
 ```
 
-Pull one asset when a job does need it. `--exclude=` clears the default so the include is not filtered back out:
+Do not `git lfs pull` the asset trees unless the task draws those scenes. Pull one asset when a job does need it:
 
 ```sh
-git lfs pull --include="assets/built/sponza/**,assets/source/sponza/**" --exclude=""
+git lfs pull --include="assets/built/sponza/**,assets/source/sponza/**"
 ```
 
-`lfs.fetchexclude` does not delete pointers already in the working tree.
+Do not commit `lfs.fetchexclude`. Git LFS 3.8 applies that list to `git lfs push` as well as fetch, so a committed exclude would stop the objects from uploading. A normal `git push` uploads them. `GIT_LFS_SKIP_SMUDGE=1` does not.
 
 Do not point a checkout at `$HOME` to store these files. The lighting debug binary writes its own screenshots under `./genos-debug/`, which is gitignored and is not an LFS path.
