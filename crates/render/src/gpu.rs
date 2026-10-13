@@ -446,6 +446,12 @@ impl Renderer {
         self.gpu.lighting_probe_samples()
     }
 
+    /// Probes and rays traced in the last frame, and the ring-wake counters.
+    /// Waits for that frame. Legacy leaves the ring counters at zero.
+    pub fn lighting_wake_stats(&mut self) -> LightingWakeStats {
+        self.gpu.lighting_wake_stats()
+    }
+
     /// Dirty-fraction threshold for the a-trous work lists. Overrides
     /// `GENOS_LIGHTING_ATROUS_DIRTY` for later frames. `0` always runs the dense
     /// sweep, `1` keeps the lists up to the storage cap.

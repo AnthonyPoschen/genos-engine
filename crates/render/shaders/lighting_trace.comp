@@ -142,6 +142,19 @@ void main() {
                 hold_probe = pr;
             }
         }
+        // Probes that reach a trace this frame: one count per probe (the check
+        // ray when the stratum is held, ray 0 when the stratum is traced in full)
+        // and one per ray. Crossings and fills are extra rays, not extra probes.
+        if (probe_ray) {
+            uint rays = lighting_rays();
+            uint pr = ray / rays;
+            uint k = ray % rays;
+            bool held = lighting_stratum_held(pr);
+            atomicAdd(gstats.wake_rays, 1u);
+            if ((held && k == lighting_hold_check_k(pr)) || (!held && k == 0u)) {
+                atomicAdd(gstats.wake_traced, 1u);
+            }
+        }
     }
     SceneHit hit;
     if (!trace_ray(origin, dir, 1.0e-4, 200.0, hit)) {

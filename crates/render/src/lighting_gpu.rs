@@ -237,6 +237,33 @@ pub struct LightingAtrousStats {
     pub ran: bool,
 }
 
+/// Probes and rays that reached a trace in the last frame, plus the ring-wake
+/// counters (zero while the scheduler is the legacy check ray).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LightingWakeStats {
+    pub probes_traced: u32,
+    pub rays_traced: u32,
+    pub rings_tested: u32,
+    pub groups_split: u32,
+    pub probes_woken: u32,
+    pub verify_hits: u32,
+    pub verify_misses: u32,
+}
+
+impl LightingWakeStats {
+    fn from_words(w: &[u32]) -> Self {
+        Self {
+            probes_traced: *w.get(WAKE_TRACED).unwrap_or(&0),
+            rays_traced: *w.get(WAKE_RAYS).unwrap_or(&0),
+            rings_tested: *w.get(WAKE_RINGS).unwrap_or(&0),
+            groups_split: *w.get(WAKE_SPLITS).unwrap_or(&0),
+            probes_woken: *w.get(WAKE_WOKEN).unwrap_or(&0),
+            verify_hits: *w.get(WAKE_HITS).unwrap_or(&0),
+            verify_misses: *w.get(WAKE_MISSES).unwrap_or(&0),
+        }
+    }
+}
+
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
     let mode_word = w[LIGHTING_ATROUS_STAT + 1];
     LightingAtrousStats {
@@ -945,7 +972,17 @@ impl Gpu {
             .map_or(self.lighting.probe_samples, |w| [w[6], w[7]])
     }
 
-    /// A-trous dirty fraction, mode and threshold for the last frame drawn.
+    /// Wake counters for the last frame drawn. Waits for that frame.
+    pub(crate) fn lighting_wake_stats(&mut self) -> LightingWakeStats {
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
+        self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory)
+            .map(|w| LightingWakeStats::from_words(&w))
+            .unwrap_or_default()
+    }
+
+/// A-trous dirty fraction, mode and threshold for the last frame drawn.
     /// Waits for that frame. The words are the `lightingatrous` line.
     pub(crate) fn lighting_atrous_stats(&mut self) -> LightingAtrousStats {
         unsafe {
@@ -1363,6 +1400,18 @@ impl Gpu {
                 w[LIGHTING_ATROUS_STAT] as f64 / 1.0e6,
                 w[LIGHTING_ATROUS_STAT + 2] as f64 / 1.0e6,
                 w[LIGHTING_ATROUS_STAT + 3]
+            );
+            let wake = LightingWakeStats::from_words(&w);
+            eprintln!(
+                "lightingwake {queue} frame {} traced {} rays {} rings {} splits {} woken {} hits {} misses {}",
+                self.lighting.frame,
+                wake.probes_traced,
+                wake.rays_traced,
+                wake.rings_tested,
+                wake.groups_split,
+                wake.probes_woken,
+                wake.verify_hits,
+                wake.verify_misses
             );
         }
     }
@@ -2130,8 +2179,18 @@ const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
 /// Lighting stats buffer: 24 words, diag[64], chg[32], then the a-trous fallback
 /// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`.
 /// The change-counter enable word stays chg[31] (word 119).
-const LIGHTING_STATS_WORDS: usize = 144;
+/// Words 140..151 are the probe-wake block (lighting_cache.glsl, after the
+/// control block). 160 leaves the block aligned and room for the list added
+/// with the ring scheduler.
+const LIGHTING_STATS_WORDS: usize = 160;
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
+const WAKE_RINGS: usize = 145;
+const WAKE_SPLITS: usize = 146;
+const WAKE_WOKEN: usize = 147;
+const WAKE_HITS: usize = 148;
+const WAKE_MISSES: usize = 149;
+const WAKE_TRACED: usize = 150;
+const WAKE_RAYS: usize = 151;
 const LIGHTING_CHG_ENABLE_WORD: u64 = 24 + 64 + 31;
 const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;
 const LIGHTING_ATROUS_STAT: usize = 120;

@@ -101,6 +101,21 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     float ctrl_ground_r;
     float ctrl_ground_g;
     float ctrl_ground_b;
+    // Probe wake counters (word 140). The host writes mode, tolerance, budget,
+    // radius and the event count; the passes add the rest. Legacy leaves mode 0
+    // and only the trace totals move.
+    uint wake_mode;
+    float wake_tol;
+    uint wake_budget;
+    float wake_radius;
+    uint wake_events;
+    uint wake_rings;
+    uint wake_splits;
+    uint wake_woken;
+    uint wake_hits;
+    uint wake_misses;
+    uint wake_traced;
+    uint wake_rays;
 } gstats;
 // 0 pixel or probe read, 1 cache-ray hit, 2 probe hit. The direct pass sets it
 // before a cache read. A pixel compose leaves it at 0.

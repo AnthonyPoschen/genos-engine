@@ -507,3 +507,57 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     assert_eq!(back.mode, 1, "raising the threshold returns to the work lists");
     assert!(back.ran, "the levels ran after the switch back");
 }
+
+/// Legacy scheduling, measured before ring wakes: a held probe traces one check
+/// ray a frame, so a still frame traces about one ray per placed probe. A moving
+/// camera drops the hold and traces the whole stratum. Ring counters stay zero.
+#[test]
+fn legacy_still_traces_one_check_ray_and_moving_traces_more() {
+    let (_gpu, mut window, mut renderer) = open();
+    let world = shipped_hall();
+    let mut camera = Camera::opening();
+    for _ in 0..12 {
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+    }
+    let still = renderer.lighting_wake_stats();
+    let [still_rays_held, still_probes] = renderer.lighting_probe_samples();
+    eprintln!(
+        "baseline still probes_placed {still_probes} rays_held {still_rays_held} probes_traced {} rays_traced {} rings {} woken {}",
+        still.probes_traced, still.rays_traced, still.rings_tested, still.probes_woken
+    );
+    assert!(still.probes_traced > 50, "still probes traced {}", still.probes_traced);
+    assert!(
+        still.rays_traced >= still.probes_traced,
+        "still rays {} probes {}",
+        still.rays_traced,
+        still.probes_traced
+    );
+    assert!(
+        still.rays_traced < still.probes_traced * 4,
+        "a held still frame is a check ray, not a full stratum ({} rays / {} probes)",
+        still.rays_traced,
+        still.probes_traced
+    );
+    assert_eq!(still.rings_tested, 0);
+    assert_eq!(still.probes_woken, 0);
+    assert_eq!(still.verify_hits, 0);
+    assert_eq!(still.verify_misses, 0);
+    let p = camera.position;
+    for step in 1..=4 {
+        camera.set_pose(p, camera.yaw + 0.04 * step as f32, camera.pitch);
+        let _ = draw(&mut window, &mut renderer, &world, &camera);
+    }
+    let moving = renderer.lighting_wake_stats();
+    let [moving_rays_held, moving_probes] = renderer.lighting_probe_samples();
+    eprintln!(
+        "baseline moving probes_placed {moving_probes} rays_held {moving_rays_held} probes_traced {} rays_traced {}",
+        moving.probes_traced, moving.rays_traced
+    );
+    assert!(moving.probes_traced > 50, "moving probes traced {}", moving.probes_traced);
+    assert!(
+        moving.rays_traced > still.rays_traced,
+        "moving traces more rays than the still check ({} vs {})",
+        moving.rays_traced,
+        still.rays_traced
+    );
+}

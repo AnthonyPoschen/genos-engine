@@ -17,7 +17,7 @@ Ward/Krivanek IC error bound; A-SVGF sparse checks; Lumen background budget; pro
 Rings at r,2r,4r,8r.. on golden-angle pattern; fill in only behind failed tests; failure only beyond noise bound; max radius scales with change.
 
 ## Numbers
-not recorded
+Legacy baseline, before this scheduler: [WAKE0](WAKE0-legacy-trace-baseline.md). Lavapipe, 320×180 shipped hall: a held still frame traced 1862 probes and 1862 rays (one check ray each); a moving camera traced 2089 probes and 133696 rays (64 per probe).
 
 Numbers context: the scene, GPU and resolution are not recorded for these figures unless stated above. For S76B-D onward, still/moving ms and fps are the bisect-log (steps.md) still and moving runs; pop is the share of pixel-frames stepping more than 0.01 from their 9-frame average (definition from the gi-check fill run), at frames 20-80 / 80-320; brightness is smoke mean luminance at pose a ("lum a"). Anything not given here was not recorded.
 
