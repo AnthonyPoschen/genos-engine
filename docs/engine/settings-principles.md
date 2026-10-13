@@ -8,7 +8,7 @@ Every feature of the runtime that has a setting follows the three rules below. L
 
 2. **Agents, over MCP.** The same value is on the command catalogue (`GENOS_MCP_PORT`). Lighting's commands are `get_lighting_settings`, `set_lighting_settings` (a partial update through `set_key`), `list_presets`, and `apply_preset`. A read returns the text form and the measurements that show what the change did. For lighting, those measurements are the GPU pass times and dispatch counts.
 
-3. **People, in the debug menu or UI.** The same value is editable from the debug menu. The stress knobs in `examples/stress/src/knobs.rs` write `Scene.lighting` through `set_key`. The menu has the preset, the feature switches, and the quality knobs: refresh, rays per probe, resolution scale, max lights, shadow filter, denoiser iterations, staleness, budget shift, and ambient mode.
+3. **People, in the debug menu or UI.** The same value is editable from the debug menu. The stress knobs in `examples/stress/src/knobs.rs` write `Scene.lighting` through `set_key`. The lighting debug panel draws an ordered grade as a slider (preset, bounces, refresh, rays per probe, resolution scale, max lights, denoiser iterations, staleness, budget shift) and an unordered choice as a dropdown (scene, checkpoint, view, shadow filter, ambient mode). An on/off feature switch is a checkbox on that panel.
 
 A scene file, a Rhai call, a launch argument, and a `GENOS_LIGHTING_*` variable are further editors of that same struct. `--preset`, `--bounces`, `--ambient`, and `--time-of-day` win. `GENOS_LIGHTING_PRESET`, `GENOS_LIGHTING_BOUNCES`, `GENOS_LIGHTING_AMBIENT`, and `GENOS_LIGHTING_TIME` apply only when that argument was omitted, and then a variable that is set wins every frame for the key it names. The other `GENOS_LIGHTING_*` variables have no argument and still win every frame when they are set. `--time-of-day` sets the program's clock and leaves that clock in charge; `GENOS_LIGHTING_TIME` holds the hour only when the argument was omitted.
 
@@ -27,6 +27,8 @@ The game owns the words a player sees. The engine owns the struct those words wr
 ## A later feature
 
 A new feature adds a public struct that implements `EngineSettings`, stores it where other systems can already reach it, registers MCP commands that read and write that struct, and adds debug-menu controls that call `set_key`. Copy lighting.
+
+`FpsCounterSettings` on `Scene` is the frame-rate overlay (`enabled`, `rate_hz`). It is off at 4 Hz until `--fps-counter`, the debug menu, or MCP turns it on. The debug menu draws `enabled` as a checkbox and `rate_hz` as a numeric slider. Both call `set_key`. `GENOS_FPS_COUNTER` and `GENOS_FPS_HZ` are the environment mirrors. The overlay itself is drawn by `genos-lighting`.
 
 `EngineSettings` lives in `genos-scene` because games, the renderer, and the debug tools already share that crate. A feature crate that `genos-scene` itself depends on keeps the same three methods on its own struct until a second implementor needs the trait in a crate both can see.
 

@@ -6,6 +6,7 @@
 mod camera;
 mod codimation;
 mod debug_settings;
+mod fps_counter;
 mod lighting;
 mod script;
 mod settings;
@@ -17,6 +18,7 @@ pub use camera::{
 };
 pub use codimation::{Codimation, Easing};
 pub use debug_settings::DebugSettings;
+pub use fps_counter::{parse_enabled, parse_rate, FpsCli, FpsCounterSettings};
 pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use lighting::{
     check_lighting_arg, lighting_arg_time_of_day, lighting_flag_needs_value, AmbientMode,

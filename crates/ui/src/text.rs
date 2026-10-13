@@ -4,6 +4,10 @@
 pub(crate) const CELL_W: f32 = 12.0;
 pub(crate) const CELL_H: f32 = 16.0;
 const PIXEL: f32 = 2.0;
+/// One-pixel bitmap. Tick names use this so a row of steps stays quiet.
+pub(crate) const SMALL_PIXEL: f32 = 1.0;
+pub(crate) const SMALL_ADVANCE: f32 = 6.0;
+pub(crate) const SMALL_LINE: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Blot {
@@ -31,8 +35,24 @@ pub(crate) fn blots(text: &str, x: f32, y: f32, max_width: f32) -> Vec<Blot> {
         let top = y + row as f32 * CELL_H;
         for (col, ch) in line.chars().enumerate() {
             let left = x + col as f32 * CELL_W;
-            stamp(&mut out, ch, left, top);
+            stamp(&mut out, ch, left, top, PIXEL);
         }
+    }
+    out
+}
+
+pub(crate) fn measure_small(text: &str) -> (f32, f32) {
+    if text.is_empty() {
+        return (0.0, 0.0);
+    }
+    (text.chars().count() as f32 * SMALL_ADVANCE, SMALL_LINE)
+}
+
+pub(crate) fn blots_small(text: &str, x: f32, y: f32) -> Vec<Blot> {
+    let mut out = Vec::new();
+    for (col, ch) in text.chars().enumerate() {
+        let left = x + col as f32 * SMALL_ADVANCE;
+        stamp(&mut out, ch, left, y, SMALL_PIXEL);
     }
     out
 }
@@ -65,17 +85,17 @@ fn wrap(text: &str, max_width: Option<f32>) -> Vec<String> {
     lines
 }
 
-fn stamp(out: &mut Vec<Blot>, ch: char, x: f32, y: f32) {
+fn stamp(out: &mut Vec<Blot>, ch: char, x: f32, y: f32, pixel: f32) {
     for (row, bits) in glyph(ch).into_iter().enumerate() {
         for col in 0..5 {
             if bits & (0x10 >> col) == 0 {
                 continue;
             }
             out.push(Blot {
-                x: x + col as f32 * PIXEL,
-                y: y + row as f32 * PIXEL,
-                w: PIXEL,
-                h: PIXEL,
+                x: x + col as f32 * pixel,
+                y: y + row as f32 * pixel,
+                w: pixel,
+                h: pixel,
             });
         }
     }
