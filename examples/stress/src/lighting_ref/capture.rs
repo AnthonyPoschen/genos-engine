@@ -2,8 +2,8 @@
 //!
 //! The path trace is the reference. These frames are the candidate. Every mode
 //! uses the same [`super::schedule::FramePlan`]: warmup, then an approach or a
-//! held scene, then settle. A metric event holds the pose before the jump until
-//! that scene settles, then jumps. Wall time is logged per frame and does not choose
+//! held scene, then settle. A metric event holds the pose before the jump for
+//! the settle cap, then jumps. Wall time is logged per frame and does not choose
 //! when to stop. `picture_settled` is logged and ignored on the first frame of
 //! a pose, because that flag can still describe the pose before it.
 
@@ -136,13 +136,13 @@ fn capture_one(
         },
     );
     let (mut stage, camera) = scenes::open_stage(shot, opts.full_effort, opts.bounces);
+    renderer.set_lighting_seed(scenes::pose_seed(shot, opts.full_effort, opts.bounces));
     let max_offset = opts.plan.capture_offsets.iter().copied().max().unwrap_or(0);
     let mut log = Vec::new();
     let mut settle_pics = Vec::new();
     let mut settle_frame_ids = Vec::new();
     let mut crossed: Option<u32> = None;
     let mut prev_phase: Option<Phase> = None;
-    let mut scene_prev: Option<Picture> = None;
     let mut scene_frames: u32 = 0;
 
     loop {
@@ -181,24 +181,14 @@ fn capture_one(
             settle_pics.push(picture);
             settle_frame_ids.push(step.frame);
         } else if step.phase == Phase::Scene {
-            // The picture is scored after this pose, on the event. Consecutive
-            // frames under the settle line, with the renderer holding its light,
-            // release the jump. The cap releases it anyway.
+            // The picture is scored after this pose, on the event. The hold is
+            // the settle cap, the same count for every run of this checkpoint.
             scene_frames += 1;
-            if let SettleMode::Metric { threshold, cap } = opts.plan.settle {
-                let line = settle_line(threshold, 0.0, picture.height);
-                let stable = match &scene_prev {
-                    Some(prev) => blur_relative(prev, &picture, &opts.params)
-                        .map(|error| error <= line)
-                        .unwrap_or(false),
-                    None => false,
-                };
-                let held = scene_frames > 1 && raw_settled && stable;
-                if held || scene_frames >= cap {
+            if let SettleMode::Metric { cap, .. } = opts.plan.settle {
+                if scene_frames >= cap {
                     timeline.release_event();
                 }
             }
-            scene_prev = Some(picture.clone());
         }
         let settled_text = if trusted && raw_settled {
             "true"
@@ -236,13 +226,7 @@ fn capture_one(
             day: step.day,
         });
         let settle_count = settle_pics.len() as u32;
-        if stop_after(
-            opts.plan.settle,
-            settle_count,
-            crossed,
-            job.still,
-            max_offset,
-        ) {
+        if stop_after(opts.plan.settle, settle_count, job.still, max_offset) {
             break;
         }
     }
@@ -251,7 +235,7 @@ fn capture_one(
         return Err("the frame plan finished with no settle frame".into());
     }
     let settle_count = settle_pics.len() as u32;
-    let candidate_at = candidate_settle_index(opts.plan.settle, settle_count, crossed);
+    let candidate_at = candidate_settle_index(opts.plan.settle, settle_count);
     let candidate_index = (candidate_at - 1) as usize;
     let settled = settle_pics.get(candidate_index).cloned();
     let frames = flicker_pair(&settle_pics, candidate_index);
@@ -401,11 +385,11 @@ fn shot_note(
             let line = settle_line(threshold, reference_noise, height);
             if cap_hit {
                 format!(
-                    "settle cap {cap} reached before blurred relative luminance was under {line:.4} (threshold {threshold}, reference noise {reference_noise:.4})"
+                    "scored frame {cap} of the {cap} frame budget; blurred relative luminance stayed above {line:.4} (threshold {threshold}, reference noise {reference_noise:.4})"
                 )
             } else {
                 format!(
-                    "settled when blurred relative luminance was under {line:.4} (threshold {threshold}, reference noise {reference_noise:.4}, cap {cap})"
+                    "scored frame {cap} of the {cap} frame budget; the cold-start line {line:.4} was crossed earlier (threshold {threshold}, reference noise {reference_noise:.4})"
                 )
             }
         }
@@ -441,7 +425,7 @@ fn shot_note(
             );
         }
         return format!(
-            "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}. Renderer issue: cold start did not cross the settle line within {frames:.0} frames. The picture is scored on its own settle. The 180 frame cold-start budget was not raised.{tail}{captures}",
+            "fixed dt {} s, warmup {} frames, {settle}, candidate frame {candidate_frame}, blur_rel {}, luma_ratio {}. Renderer issue: cold start did not cross the settle line within {frames:.0} frames. The picture is scored on the cap frame. The 180 frame cold-start budget was not raised.{tail}{captures}",
             schedule::format_dt(plan.fixed_dt),
             plan.warmup_frames,
             format_mean(blur_rel),

@@ -197,8 +197,8 @@ fn parse_u32(name: &str, text: &str) -> Result<u32, String> {
         .map_err(|_| format!("expected a whole number for {name}, got {text}"))
 }
 
-/// Where the scored pose sits. An event holds the pose before the jump until
-/// the scene is released, then jumps. A fixed settle count jumps after warmup.
+/// Where the scored pose sits. An event holds the pose before the jump for the
+/// settle cap, then jumps. A fixed settle count jumps after warmup.
 /// Motion approaches the target by `fixed_dt`, then holds.
 #[derive(Clone, Copy, Debug)]
 pub struct Target {
@@ -390,53 +390,35 @@ impl Timeline {
     }
 }
 
-/// Stop drawing. `crossed_at` is the 1-based settle frame that met the metric.
-/// A still camera keeps one more held frame after the candidate so flicker has a pair.
-/// Capture offsets are drawn when they fit under the cap.
-pub fn stop_after(
-    settle: SettleMode,
-    settle_count: u32,
-    crossed_at: Option<u32>,
-    still: bool,
-    max_offset: u32,
-) -> bool {
+/// Stop drawing. A metric settle always draws the cap. The blur line is the
+/// cold-start flag, not a reason to score an earlier frame. A still camera
+/// keeps one more held frame after the candidate so flicker has a pair.
+/// Capture offsets are drawn when they extend past the cap.
+pub fn stop_after(settle: SettleMode, settle_count: u32, still: bool, max_offset: u32) -> bool {
     if settle_count == 0 {
         return false;
     }
-    match settle {
+    let (candidate, through) = match settle {
         SettleMode::Frames(n) => {
             let candidate = n.max(1);
-            let through = candidate.max(max_offset);
-            let need = if still {
-                through.max(candidate + 1)
-            } else {
-                through
-            };
-            settle_count >= need
+            (candidate, candidate.max(max_offset))
         }
-        SettleMode::Metric { cap, .. } => {
-            if settle_count >= cap {
-                return true;
-            }
-            let Some(at) = crossed_at else {
-                return false;
-            };
-            let captures_done = settle_count >= max_offset;
-            let tail_done = !still || settle_count > at;
-            captures_done && tail_done
-        }
-    }
+        SettleMode::Metric { cap, .. } => (cap.max(1), cap.max(1).max(max_offset)),
+    };
+    let need = if still {
+        through.max(candidate + 1)
+    } else {
+        through
+    };
+    settle_count >= need
 }
 
 /// 1-based settle index of the picture that is scored for mean error and FLIP.
-pub fn candidate_settle_index(
-    settle: SettleMode,
-    settle_count: u32,
-    crossed_at: Option<u32>,
-) -> u32 {
+/// A metric settle scores the cap frame.
+pub fn candidate_settle_index(settle: SettleMode, settle_count: u32) -> u32 {
     match settle {
         SettleMode::Frames(n) => n.min(settle_count).max(1),
-        SettleMode::Metric { .. } => crossed_at.unwrap_or(settle_count).max(1),
+        SettleMode::Metric { cap, .. } => cap.min(settle_count).max(1),
     }
 }
 
@@ -739,18 +721,19 @@ mod tests {
     #[test]
     fn the_cap_stops_and_a_still_tail_waits_for_one_more_frame() {
         let mode = metric(180);
-        assert!(!stop_after(mode, 5, Some(5), true, 8));
-        assert!(stop_after(mode, 8, Some(5), true, 8));
-        assert!(!stop_after(mode, 8, Some(8), true, 8));
-        assert!(stop_after(mode, 9, Some(8), true, 8));
-        assert!(stop_after(mode, 8, Some(8), false, 8));
-        assert!(stop_after(metric(2), 2, None, true, 8));
-        assert_eq!(candidate_settle_index(mode, 8, Some(5)), 5);
-        assert_eq!(candidate_settle_index(mode, 8, None), 8);
-        assert!(!stop_after(SettleMode::Frames(10), 10, None, true, 8));
-        assert!(stop_after(SettleMode::Frames(10), 11, None, true, 8));
-        assert!(stop_after(SettleMode::Frames(4), 8, None, true, 8));
-        assert_eq!(candidate_settle_index(SettleMode::Frames(4), 8, None), 4);
+        // A crossing does not end the run. The scored frame is the cap.
+        assert!(!stop_after(mode, 8, true, 8));
+        assert!(!stop_after(mode, 180, true, 8));
+        assert!(stop_after(mode, 181, true, 8));
+        assert!(stop_after(mode, 180, false, 8));
+        assert!(!stop_after(metric(2), 7, true, 8));
+        assert!(stop_after(metric(2), 8, true, 8));
+        assert_eq!(candidate_settle_index(mode, 181), 180);
+        assert_eq!(candidate_settle_index(metric(2), 8), 2);
+        assert!(!stop_after(SettleMode::Frames(10), 10, true, 8));
+        assert!(stop_after(SettleMode::Frames(10), 11, true, 8));
+        assert!(stop_after(SettleMode::Frames(4), 8, true, 8));
+        assert_eq!(candidate_settle_index(SettleMode::Frames(4), 8), 4);
     }
 
     #[test]

@@ -311,7 +311,7 @@ fn plan_note(plan: &FramePlan) -> String {
     let settle = match plan.settle {
         schedule::SettleMode::Frames(n) => format!("{n} settle frames"),
         schedule::SettleMode::Metric { threshold, cap } => {
-            format!("settle when blurred relative luminance is under {threshold}, raised by that checkpoint's reference noise, or {cap} frames")
+            format!("score frame {cap} of {cap}; blurred relative luminance under {threshold}, raised by that checkpoint's reference noise, is the cold-start line")
         }
     };
     let offsets = plan
@@ -321,7 +321,7 @@ fn plan_note(plan: &FramePlan) -> String {
         .collect::<Vec<_>>()
         .join(",+");
     format!(
-        "Frame clock {} s, warmup {} frames, {settle}, captures at event+{offsets}. A metric event holds the pose before the jump until that scene settles, then jumps. Lavapipe-small and owner mode use this same list. Wall time is logged.",
+        "Frame clock {} s, warmup {} frames, {settle}, captures at event+{offsets}. A metric event holds the pose before the jump for the settle cap, then jumps. Lavapipe-small and owner mode use this same list. Wall time is logged.",
         schedule::format_dt(plan.fixed_dt),
         plan.warmup_frames,
     )

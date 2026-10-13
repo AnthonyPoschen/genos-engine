@@ -74,6 +74,9 @@ layout(push_constant) uniform Push {
     // lighting_mode), young-only rounds (bit 10), lamp picks on cache rays (bit 11)
     // and the light cache round (bits 12-31, lighting_round), w: frame
     uvec4 params;
+    // Pose seed. Zero is the live game: lighting_hash ignores it. A reference
+    // check sets a non-zero seed from the pose, not from the checkpoint name.
+    uint seed;
 } pc;
 
 #include "lighting_cache_slots.glsl"
@@ -262,6 +265,7 @@ bool trace_occluded(vec3 a, vec3 b) {
 }
 
 uint lighting_hash(uint v) {
+    v ^= pc.seed;
     v ^= v >> 16u;
     v *= 0x7feb352du;
     v ^= v >> 15u;

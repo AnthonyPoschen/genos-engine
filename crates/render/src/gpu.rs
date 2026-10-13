@@ -125,6 +125,19 @@ impl Renderer {
         self.gpu.lighting.override_settings = Some(settings);
     }
 
+    /// Hash stream for this renderer. Zero is the live game and leaves every
+    /// lighting hash unchanged. A non-zero seed forces one cache round per
+    /// frame, turns the async cache queue off, and admits work-list entries by
+    /// rank instead of arrival order.
+    pub fn set_lighting_seed(&mut self, seed: u32) {
+        self.gpu.lighting.seed = seed;
+        if seed != 0 {
+            self.gpu.lighting.cache_hz = 0.0;
+            self.gpu.lighting.async_on = false;
+            self.gpu.lighting.last_round = None;
+        }
+    }
+
     /// The scene's lighting settings win again.
     pub fn clear_lighting_override(&mut self) {
         self.gpu.lighting.override_settings = None;

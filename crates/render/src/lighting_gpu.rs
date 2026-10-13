@@ -40,6 +40,9 @@ pub(crate) const LIGHTING_RAYS: u32 = 64;
 const LIGHTING_CACHE_SLOTS: u64 = 1048576;
 const LIGHTING_CACHE_BATCH: u32 = 98304;
 const LIGHTING_CACHE_RAYS: u32 = 16;
+/// Push constants: dims, params, and the pose seed. Zero seed leaves lighting_hash unchanged.
+const LIGHTING_PUSH_WORDS: usize = 9;
+const LIGHTING_PUSH_BYTES: u32 = 36;
 /// ckeys word of the WRC refresh lists' two counts (lighting_cache.glsl LIGHTING_WRC_CHG_COUNT_AT).
 const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
@@ -196,6 +199,9 @@ pub(crate) struct Lighting {
     /// Light cache rounds per second of wall time (GENOS_LIGHTING_CACHE_HZ; 0: one every
     /// frame), when the last began, and whether each frame slot ran one.
     cache_hz: f64,
+    /// Pose seed for `lighting_hash`. Zero is the live game. A non-zero seed
+    /// forces one cache round per frame and rank-ordered work lists.
+    seed: u32,
     last_round: Option<Instant>,
     stats_round: [bool; 2],
     /// Last frame this slot counted unfilled pixels. Read at the next begin.
@@ -358,6 +364,7 @@ impl Default for Lighting {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.0),
+            seed: 0,
             last_round: None,
             stats_round: [false; 2],
             unfilled_slot: [UnfilledSlot::default(); 2],
@@ -558,7 +565,7 @@ impl Gpu {
             let push = Range {
                 stage: 0x20,
                 offset: 0,
-                size: 32,
+                size: LIGHTING_PUSH_BYTES,
             };
             let layout = LayoutInfo {
                 s_type: 30,
@@ -1465,7 +1472,7 @@ impl Gpu {
     /// the live patches, trace and light this round's batch of their rays, relight
     /// them. Skipped while the last round still runs, so at most one is in flight
     /// and a slow round never queues up work behind it.
-    fn submit_lighting_world(&mut self, pc: [u32; 8]) -> Result<bool, String> {
+    fn submit_lighting_world(&mut self, pc: [u32; LIGHTING_PUSH_WORDS]) -> Result<bool, String> {
         if self.lighting.world_busy || self.lighting.world_cmd.is_null() {
             return Ok(false);
         }
@@ -1550,7 +1557,7 @@ impl Gpu {
             self.barrier_on(cmd, 0x1000, 0x800, 0x1000, 0x20 | 0x40);
             let set = self.lighting.world_set;
             (self.fns.cmd_bind_set)(cmd, 1, self.lighting.layout, 0, 1, &set, 0, std::ptr::null());
-            (self.fns.cmd_push)(cmd, self.lighting.layout, 0x20, 0, 32, pc.as_ptr() as *const c_void);
+            (self.fns.cmd_push)(cmd, self.lighting.layout, 0x20, 0, LIGHTING_PUSH_BYTES, pc.as_ptr() as *const c_void);
             for (k, (pass, gx)) in groups.into_iter().enumerate() {
                 (self.fns.cmd_bind_pipe)(cmd, 1, self.lighting.pipes[pass]);
                 (self.fns.cmd_dispatch)(cmd, gx.max(1), 1, 1);
@@ -1798,6 +1805,35 @@ impl Gpu {
         Ok(())
     }
 
+    /// Empty the capped work lists so a seeded compact can atomicMin a rank
+    /// into each bucket. Lengths are the unshifted caps in lighting_cache.glsl.
+    /// The shader scans the shifted cap, which is never longer than these.
+    fn fill_seeded_work_lists(&mut self) {
+        let keys = self.lighting.cache_keys.buffer;
+        let slots = LIGHTING_CACHE_SLOTS;
+        let hist = 2 * slots + 2;
+        let wrc_cells = 1024u64;
+        let chg = hist + 680;
+        let bg = chg + 4096;
+        let trickle = hist + 13200;
+        let args = hist + 17600;
+        let grad = args + 16 + 3 * 65536 + 1024;
+        let batch = u64::from(LIGHTING_CACHE_BATCH);
+        let young_base = 2 * slots;
+        self.fill_key_words(keys, young_base - (batch - 1), batch);
+        self.fill_key_words(keys, slots + 1, batch);
+        self.fill_key_words(keys, chg, wrc_cells);
+        self.fill_key_words(keys, bg, wrc_cells);
+        self.fill_key_words(keys, trickle, 4096);
+        self.fill_key_words(keys, grad, 2048 * 16);
+    }
+
+    fn fill_key_words(&mut self, buffer: Handle, word: u64, words: u64) {
+        unsafe {
+            (self.fns.cmd_fill_buffer)(self.cmd, buffer, word * 4, words * 4, u32::MAX);
+        }
+    }
+
     fn lighting_passes(&mut self, slot: usize) {
         let [w, h, cols, rows] = self.lighting.dims;
         let probes = cols * rows;
@@ -1832,7 +1868,9 @@ impl Gpu {
             self.mesh_field_key.hash(&mut hasher);
             hasher.finish()
         };
-        let frozen = self.lighting_stats().settled;
+        // A pose seed keeps every frame on the same pass list. The idle shortcut
+        // starts when a counter settles, and that counter follows list order.
+        let frozen = self.lighting.seed == 0 && self.lighting_stats().settled;
         let had = !self.lighting.kept_bytes.is_empty() && key == self.lighting.kept_key;
         let changes = if had {
             lighting_changes(&self.lighting.kept_bytes, &self.frame_bytes)
@@ -2050,7 +2088,17 @@ impl Gpu {
         } else {
             self.lighting.settings.probes.tile
         };
-        let pc = [w, h, cols, rows, self.lighting.settings.probe_rays(), tile, z, self.lighting.frame];
+        let pc = [
+            w,
+            h,
+            cols,
+            rows,
+            self.lighting.settings.probe_rays(),
+            tile,
+            z,
+            self.lighting.frame,
+            self.lighting.seed,
+        ];
         let image = self.color.image;
         let blocks = (w.div_ceil(8) as u64) * (h.div_ceil(8) as u64);
         // Full compose when the picture has no history yet, the camera or the
@@ -2176,6 +2224,9 @@ impl Gpu {
         if sun_amortise {
             self.lighting.sun_frames = self.lighting.sun_frames.saturating_add(1);
         }
+        if self.lighting.seed != 0 && self.lighting.cache_full {
+            self.fill_seeded_work_lists();
+        }
         self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
         unsafe {
             (self.fns.cmd_update_buffer)(
@@ -2237,7 +2288,7 @@ impl Gpu {
                 self.lighting.layout,
                 0x20,
                 0,
-                32,
+                LIGHTING_PUSH_BYTES,
                 pc.as_ptr() as *const c_void,
             );
             // GENOS_GPU_TIMES: a stamp before the passes and after each (full frames).
@@ -2271,7 +2322,7 @@ impl Gpu {
                         self.lighting.layout,
                         0x20,
                         0,
-                        32,
+                        LIGHTING_PUSH_BYTES,
                         round_pc.as_ptr() as *const c_void,
                     );
                     cur_pc = round_pc;
@@ -2287,11 +2338,11 @@ impl Gpu {
                     atrous_ran = true;
                     let mut round_pc = pc;
                     round_pc[6] = (round_pc[6] & !0xe) | stage << 1;
-                    (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, 32, round_pc.as_ptr() as *const c_void);
+                    (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, LIGHTING_PUSH_BYTES, round_pc.as_ptr() as *const c_void);
                     cur_pc = round_pc;
                 }
                 if pass == 7 && atrous_ran {
-                    (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, 32, pc.as_ptr() as *const c_void);
+                    (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, LIGHTING_PUSH_BYTES, pc.as_ptr() as *const c_void);
                     cur_pc = pc;
                 }
                 if pass == 5 {
@@ -2304,7 +2355,7 @@ impl Gpu {
                         self.lighting.layout,
                         0x20,
                         0,
-                        32,
+                        LIGHTING_PUSH_BYTES,
                         round_pc.as_ptr() as *const c_void,
                     );
                     cur_pc = round_pc;
@@ -2325,7 +2376,7 @@ impl Gpu {
                         self.lighting.layout,
                         0x20,
                         0,
-                        32,
+                        LIGHTING_PUSH_BYTES,
                         k_pc.as_ptr() as *const c_void,
                     );
                 }
@@ -2381,7 +2432,7 @@ impl Gpu {
                     }
                 }
                 if kind != 0 {
-                    (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, 32, cur_pc.as_ptr() as *const c_void);
+                    (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, LIGHTING_PUSH_BYTES, cur_pc.as_ptr() as *const c_void);
                 }
                 // The args pass's sizes are read as indirect commands (stage 0x2, access 0x1).
                 self.memory_barrier(0x800, 0x800 | 0x1000 | 0x2, 0x40, 0x20 | 0x40 | 0x800 | 0x1);

@@ -389,6 +389,17 @@ uint lighting_round() {
     return pc.params.z >> 12u;
 }
 
+// Schedule id. Seed 0 is the slot, so a live frame keeps today's phases.
+// A seeded frame uses the cache key: two runs can claim different slots for
+// the same patch, and the key does not follow that race.
+uint lighting_sched(uint slot) {
+    if (pc.seed == 0u) {
+        return slot;
+    }
+    uint key = ckeys.key[slot];
+    return key == 0u ? slot : key;
+}
+
 // This round relights young patches only (params.z bit 10).
 bool lighting_young_only() {
     return ((pc.params.z >> 10u) & 1u) != 0u;
@@ -1461,7 +1472,7 @@ vec3 lighting_sc_regularise(uint slot, vec3 value) {
     float vlum = dot(value, lw);
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
-    float rot = edge_aware ? 0.7853982 * float(lighting_hash(slot * 0x27d4eb2du) & 1u) : 0.0;
+    float rot = edge_aware ? 0.7853982 * float(lighting_hash(lighting_sched(slot) * 0x27d4eb2du) & 1u) : 0.0;
     [[dont_unroll]] for (uint d = 0u; d < 4u; d++) {
         [[dont_unroll]] for (uint l = 0u; l < 4u; l++) {
             uint i = l * 4u + d;
@@ -1574,7 +1585,7 @@ void lighting_sc_recon(uint slot) {
         ref_se2 = lighting_sc_l2_var(slot, ref) / t;
     }
     bool edge = false;
-    float rot = 0.3926991 * float(lighting_hash(slot * 0x27d4eb2du) & 1u);
+    float rot = 0.3926991 * float(lighting_hash(lighting_sched(slot) * 0x27d4eb2du) & 1u);
     [[dont_unroll]] for (uint d = 0u; d < 8u; d++) {
         float a = 0.7853982 * float(d) + rot;
         vec3 dir = cos(a) * ta + sin(a) * tb;
@@ -2297,7 +2308,180 @@ uint lighting_dense_entry(uint d) {
     }
     return LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES + (d - g);
 }
+// Seeded admission. The list body is 0xffffffff for an empty bucket. A pack
+// keeps the top bit clear, so atomicMin prefers any real candidate over empty.
+// Low 20 bits are the slot (the cache has 2^20 slots). Seed 0 does not call these.
+// A run pack also stores the copy count: the cache pass sums consecutive copies
+// of one slot on the thread that owns the first copy.
+uint lighting_seed_pack(uint slot, uint salt) {
+    uint rank = lighting_hash(lighting_sched(slot) ^ salt);
+    return (rank & 0x7ff00000u) | (slot & 0x000fffffu);
+}
+uint lighting_seed_run_pack(uint slot, uint n, uint salt) {
+    uint rank = lighting_hash(lighting_sched(slot) ^ salt);
+    uint copies = min(max(n, 1u), 8u);
+    return ((rank >> 24u) << 23u) | ((copies - 1u) << 20u) | (slot & 0x000fffffu);
+}
+uint lighting_seed_run_n(uint pack) {
+    return ((pack >> 20u) & 7u) + 1u;
+}
+uint lighting_wrc_list_cap() {
+    return max(LIGHTING_WRC_REFRESH_CELLS >> lighting_sc_budget_shift(), 1u);
+}
+uint lighting_trickle_list_cap() {
+    return max(LIGHTING_SC_TRICKLE >> lighting_sc_budget_shift(), 1u);
+}
+uint lighting_grad_list_cap() {
+    return max((LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift(), 1u);
+}
+uint lighting_seed_room() {
+    uint sh = lighting_sc_budget_shift();
+    if (lighting_world_mode() == 3u) {
+        return max(lighting_sc_base_room() >> sh, 1u);
+    }
+    return LIGHTING_CACHE_BATCH;
+}
+// Matches LIGHTING_GRAD_LIST_AT, which is declared further down.
+const uint LIGHTING_SEED_GRAD_LIST_AT = LIGHTING_ARGS_AT + 16u + 3u * 65536u + 1024u;
+
+void lighting_put_capped(uint count_at, uint list_at, uint cap, uint seeded_cap, uint slot, uint salt) {
+    if (pc.seed == 0u) {
+        uint at = atomicAdd(ckeys.key[count_at], 1u);
+        if (at < cap) {
+            ckeys.key[list_at + at] = slot;
+        }
+        return;
+    }
+    uint room = max(seeded_cap, 1u);
+    uint pack = lighting_seed_pack(slot, salt);
+    atomicMin(ckeys.key[list_at + (lighting_hash(pack ^ salt) % room)], pack);
+}
+void lighting_put_forward(uint count_at, uint list_at, uint slot, uint n, uint salt) {
+    if (pc.seed == 0u) {
+        uint at = atomicAdd(ckeys.key[count_at], n);
+        for (uint i = 0u; i < n; i++) {
+            ckeys.key[list_at + at + i] = slot;
+        }
+        return;
+    }
+    uint pack = lighting_seed_run_pack(slot, n, salt);
+    uint room = lighting_seed_room();
+    atomicMin(ckeys.key[list_at + (lighting_hash(pack) % room)], pack);
+}
+void lighting_put_backward(uint count_at, uint base, uint slot, uint n, uint salt) {
+    if (pc.seed == 0u) {
+        uint at = atomicAdd(ckeys.key[count_at], n);
+        for (uint i = 0u; i < n; i++) {
+            ckeys.key[base - at - i] = slot;
+        }
+        return;
+    }
+    uint pack = lighting_seed_run_pack(slot, n, salt);
+    uint room = lighting_seed_room();
+    atomicMin(ckeys.key[base - (lighting_hash(pack) % room)], pack);
+}
+void lighting_seal_forward(uint count_at, uint list_at, uint cap) {
+    uint n = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < cap; i++) {
+        uint pack = ckeys.key[list_at + i];
+        if (pack != 0xffffffffu) {
+            ckeys.key[list_at + n] = pack & 0x000fffffu;
+            n++;
+        }
+    }
+    ckeys.key[count_at] = n;
+}
+// Compact rank buckets, then expand each winner into consecutive copies.
+// The cache pass sums a run on one thread, so the copies have to sit together.
+// Expanding from the end keeps an unread pack ahead of the write cursor.
+void lighting_seal_forward_runs(uint count_at, uint list_at, uint cap, uint limit) {
+    uint u = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < cap; i++) {
+        uint pack = ckeys.key[list_at + i];
+        if (pack != 0xffffffffu) {
+            ckeys.key[list_at + u] = pack;
+            u++;
+        }
+    }
+    uint used = 0u;
+    uint covered = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < u && used < limit; i++) {
+        uint pack = ckeys.key[list_at + i];
+        uint n = lighting_seed_run_n(pack);
+        uint take = min(n, limit - used);
+        if (take < n) {
+            pack = (pack & ~0x00700000u) | ((take - 1u) << 20u);
+            ckeys.key[list_at + i] = pack;
+        }
+        used += take;
+        covered++;
+    }
+    uint dst = used;
+    uint i = covered;
+    [[dont_unroll]] while (i > 0u && dst > 0u) {
+        i--;
+        uint pack = ckeys.key[list_at + i];
+        uint slot = pack & 0x000fffffu;
+        uint n = lighting_seed_run_n(pack);
+        [[dont_unroll]] for (uint k = 0u; k < n; k++) {
+            dst--;
+            ckeys.key[list_at + dst] = slot;
+        }
+    }
+    ckeys.key[count_at] = used;
+}
+void lighting_seal_backward_runs(uint count_at, uint base, uint cap, uint limit) {
+    uint u = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < cap; i++) {
+        uint pack = ckeys.key[base - i];
+        if (pack != 0xffffffffu) {
+            ckeys.key[base - u] = pack;
+            u++;
+        }
+    }
+    uint used = 0u;
+    uint covered = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < u && used < limit; i++) {
+        uint pack = ckeys.key[base - i];
+        uint n = lighting_seed_run_n(pack);
+        uint take = min(n, limit - used);
+        if (take < n) {
+            pack = (pack & ~0x00700000u) | ((take - 1u) << 20u);
+            ckeys.key[base - i] = pack;
+        }
+        used += take;
+        covered++;
+    }
+    uint dst = used;
+    uint i = covered;
+    [[dont_unroll]] while (i > 0u && dst > 0u) {
+        i--;
+        uint pack = ckeys.key[base - i];
+        uint slot = pack & 0x000fffffu;
+        uint n = lighting_seed_run_n(pack);
+        [[dont_unroll]] for (uint k = 0u; k < n; k++) {
+            dst--;
+            ckeys.key[base - dst] = slot;
+        }
+    }
+    ckeys.key[count_at] = used;
+}
+void lighting_seal_seeded_lists() {
+    if (pc.seed == 0u) {
+        return;
+    }
+    uint room = lighting_seed_room();
+    uint span = LIGHTING_CACHE_BATCH;
+    lighting_seal_backward_runs(2u * LIGHTING_CACHE_SLOTS + 1u, 2u * LIGHTING_CACHE_SLOTS, room, span);
+    lighting_seal_forward_runs(LIGHTING_CACHE_SLOTS, LIGHTING_CACHE_SLOTS + 1u, room, span);
+    lighting_seal_forward(LIGHTING_WRC_CHG_COUNT_AT, LIGHTING_WRC_CHG_AT, lighting_wrc_list_cap());
+    lighting_seal_forward(LIGHTING_WRC_BG_COUNT_AT, LIGHTING_WRC_BG_AT, lighting_wrc_list_cap());
+    lighting_seal_forward(LIGHTING_SC_TRICKLE_COUNT_AT, LIGHTING_SC_TRICKLE_AT, lighting_trickle_list_cap());
+    lighting_seal_forward(LIGHTING_SC_HIST_AT + 72u, LIGHTING_SEED_GRAD_LIST_AT, lighting_grad_list_cap());
+}
+
 void lighting_write_args() {
+    lighting_seal_seeded_lists();
     uint a;
     uint b = 0u;
     uint c = 0u;
@@ -3556,7 +3740,7 @@ void lighting_svgf_push(uint slot) {
     // LIGHTING_PUSH_IDLE by hash (the +-4 R clamp, a texel just shown).
     if (LIGHTING_DIRTY_ATROUS && W >= 0.999 && !lighting_svgf_stamp_recent(slot, 3u)
         && cache.v[LIGHTING_SC_ATROUS_B + slot].w != 0.0
-        && ((lighting_hash(slot ^ 0x7f4a7c15u) + lighting_frame()) % LIGHTING_PUSH_IDLE) != 0u) {
+        && ((lighting_hash(lighting_sched(slot) ^ 0x7f4a7c15u) + lighting_frame()) % LIGHTING_PUSH_IDLE) != 0u) {
         // S72V10 trusts the field for two frames from this stamp. The idle skip
         // does not rewrite the field, so while the camera is held the stamp stays
         // current and compose keeps showing that field instead of dropping it
@@ -3785,7 +3969,7 @@ bool lighting_sc_check_turn(uint slot) {
         return true;
     }
     uint k = (dem + room - 1u) / room;
-    return ((lighting_hash(slot ^ 0x7feb352du) + lighting_round()) % k) == 0u;
+    return ((lighting_hash(lighting_sched(slot) ^ 0x7feb352du) + lighting_round()) % k) == 0u;
 }
 void lighting_sc_check_soon(uint slot) {
     cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + 1u);

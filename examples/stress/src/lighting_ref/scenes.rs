@@ -48,6 +48,37 @@ pub fn shot(scene: &str, name: &str) -> Option<Shot> {
     Some(shot)
 }
 
+/// Hash of the pose this checkpoint draws. The checkpoint name and the scene
+/// id are not inputs: hall and box-step-before are one pose and one seed.
+/// Zero is reserved for the live game, so a zero hash becomes 1.
+pub fn pose_seed(shot: &Shot, full_effort: bool, bounces: Option<u32>) -> u32 {
+    let mut hash = 0x811c9dc5u32;
+    let mut mix = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x01000193);
+        }
+    };
+    mix(&shot.eye[0].to_le_bytes());
+    mix(&shot.eye[1].to_le_bytes());
+    mix(&shot.eye[2].to_le_bytes());
+    mix(&shot.yaw.to_le_bytes());
+    mix(&shot.pitch.to_le_bytes());
+    mix(&shot.day.to_le_bytes());
+    mix(&(shot.lights as u32).to_le_bytes());
+    mix(&shot.dynamic_pct.to_le_bytes());
+    mix(&shot.box_time.to_le_bytes());
+    mix(&shot.lamp_time.to_le_bytes());
+    mix(&u32::from(shot.direct_only).to_le_bytes());
+    mix(&u32::from(full_effort).to_le_bytes());
+    mix(&bounces.unwrap_or(u32::MAX).to_le_bytes());
+    if hash == 0 {
+        1
+    } else {
+        hash
+    }
+}
+
 pub fn every_available_shot_has_a_camera() -> bool {
     genos_lighting_ref::available_checkpoints().all(|cp| shot(cp.scene, cp.name).is_some())
 }
@@ -418,5 +449,22 @@ mod tests {
                     || (hall_solid.position.z - stepped_solid.position.z).abs() > 0.05
             });
         assert!(moved, "box-step must move a solid off the hall pose");
+    }
+
+    #[test]
+    fn hall_and_box_step_before_share_a_pose_seed() {
+        let hall = shot("stress-still", "hall").unwrap();
+        let before = shot("stress-moving", "box-step-before").unwrap();
+        let room = shot("stress-still", "room-a").unwrap();
+        let stepped = shot("stress-moving", "box-step").unwrap();
+        let direct = shot("direct-only", "hall").unwrap();
+        let hall_seed = pose_seed(&hall, false, None);
+        assert_eq!(hall_seed, pose_seed(&before, false, None));
+        assert_ne!(hall_seed, pose_seed(&room, false, None));
+        assert_ne!(hall_seed, pose_seed(&stepped, false, None));
+        assert_ne!(hall_seed, pose_seed(&direct, false, None));
+        assert_ne!(hall_seed, pose_seed(&hall, true, None));
+        assert_ne!(hall_seed, pose_seed(&hall, false, Some(0)));
+        assert_ne!(hall_seed, 0);
     }
 }

@@ -45,7 +45,7 @@ void main() {
     if (LIGHTING_COMPACT_LIST && lighting_world_mode() == 3u && !(cache.v[3u * slot + 1u].w > 0.2)) {
         uint last0 = floatBitsToUint(cache.v[3u * slot].w);
         bool due0 = lighting_sc_check_next(slot) != 0u && lighting_sc_check_due(slot);
-        if (int(lighting_frame() - last0) > 60 && !due0 && ((lighting_hash(slot ^ 0x2545f491u) + lighting_round()) % LIGHTING_COMPACT_IDLE) != 0u) {
+        if (int(lighting_frame() - last0) > 60 && !due0 && ((lighting_hash(lighting_sched(slot) ^ 0x2545f491u) + lighting_round()) % LIGHTING_COMPACT_IDLE) != 0u) {
             return;
         }
     }
@@ -84,7 +84,7 @@ void main() {
         // Flag 1048576: a dormant texel (converged, its sets agree with its mean)
         // is relit one sweep in LIGHTING_SC_DORMANT, by slot, to notice change.
         if ((lighting_sc_flags() & 1048576u) != 0u && growing && t >= lighting_sc_cap(slot) - 0.5 && lighting_sc_dormant(slot)) {
-            growing = ((lighting_hash(slot) + lighting_round()) % LIGHTING_SC_DORMANT) == 0u;
+            growing = ((lighting_hash(lighting_sched(slot)) + lighting_round()) % LIGHTING_SC_DORMANT) == 0u;
         }
         // Flag 1024: while the light changes only the patches ray hits read (25 cm
         // and up, flag 256) are relit, as in the other modes; pixels show the probes.
@@ -113,7 +113,10 @@ void main() {
         // S62C: near a mover the count stays short; those cells refresh from the
         // change list, not as bursts.
         bool burst = wrc && !near && t < LIGHTING_WRC_YOUNG - 0.5 && int(lighting_frame() - floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z)) <= 2;
-        if (burst && atomicAdd(ckeys.key[LIGHTING_WRC_BURST_COUNT_AT], 1u) >= (LIGHTING_WRC_BURST_MAX >> lighting_sc_budget_shift())) {
+        if (burst && pc.seed != 0u) {
+            uint cap = LIGHTING_WRC_BURST_MAX >> lighting_sc_budget_shift();
+            burst = cap > 0u && (lighting_hash(lighting_sched(slot) ^ 0xb0027u) % (cap * 4u)) < cap;
+        } else if (burst && atomicAdd(ckeys.key[LIGHTING_WRC_BURST_COUNT_AT], 1u) >= (LIGHTING_WRC_BURST_MAX >> lighting_sc_budget_shift())) {
             burst = false;
         }
         if (!wrc) { lighting_dg(19u, 1u); if (near) lighting_dg(28u, 1u); if (on_screen) lighting_dg(30u, 1u); }
@@ -136,17 +139,11 @@ void main() {
                 }
                 if (cache.v[LIGHTING_SC_GRAD_AT + slot].x > 0.5) {
                     // S77A escalated by its check: a whole set (background list).
-                    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);
-                    if (at < LIGHTING_WRC_REFRESH_CELLS) {
-                        ckeys.key[LIGHTING_WRC_BG_AT + at] = slot;
-                    }
+                    lighting_put_capped(LIGHTING_WRC_BG_COUNT_AT, LIGHTING_WRC_BG_AT, LIGHTING_WRC_REFRESH_CELLS, lighting_wrc_list_cap(), slot, 0x71000011u);
                     return;
                 }
-                uint at = atomicAdd(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], 1u);
-                if (at < LIGHTING_WRC_REFRESH_CELLS) {
-                    ckeys.key[LIGHTING_WRC_CHG_AT + at] = slot;
-                    lighting_dg(16u, 1u);
-                }
+                lighting_put_capped(LIGHTING_WRC_CHG_COUNT_AT, LIGHTING_WRC_CHG_AT, LIGHTING_WRC_REFRESH_CELLS, lighting_wrc_list_cap(), slot, 0x71000012u);
+                lighting_dg(16u, 1u);
                 return;
             }
             bool stale = int(lighting_frame() - updated) >= int(LIGHTING_WRC_REFRESH_FRAMES);
@@ -162,21 +159,15 @@ void main() {
                 // the S77A check (16 rays, change list) when its deferred check is
                 // due; a confirm doubles the deferral, a miss escalates.
                 if (lighting_sc_check_due(slot)) {
-                    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], 1u);
-                    if (at < LIGHTING_WRC_REFRESH_CELLS) {
-                        ckeys.key[LIGHTING_WRC_CHG_AT + at] = slot;
-                        lighting_dg(17u, 1u);
-                    }
+                    lighting_put_capped(LIGHTING_WRC_CHG_COUNT_AT, LIGHTING_WRC_CHG_AT, LIGHTING_WRC_REFRESH_CELLS, lighting_wrc_list_cap(), slot, 0x71000013u);
+                    lighting_dg(17u, 1u);
                 }
                 return;
             }
             if (!(growing_wrc && lighting_sc_dark_fill())) {
                 if (stale || growing_wrc) {
-                    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);
-                    if (at < LIGHTING_WRC_REFRESH_CELLS) {
-                        ckeys.key[LIGHTING_WRC_BG_AT + at] = slot;
-                        lighting_dg(17u, 1u);
-                    }
+                    lighting_put_capped(LIGHTING_WRC_BG_COUNT_AT, LIGHTING_WRC_BG_AT, LIGHTING_WRC_REFRESH_CELLS, lighting_wrc_list_cap(), slot, 0x71000014u);
+                    lighting_dg(17u, 1u);
                 }
                 return;
             }
@@ -220,10 +211,7 @@ void main() {
                 // background list (within the WRC refresh cap). Shown rescaled
                 // meanwhile (lighting_ls_ratio).
                 if (abs(lighting_ls_ratio(lighting_sc_updated(slot)) - 1.0) > 0.1) {
-                    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);
-                    if (at < LIGHTING_WRC_REFRESH_CELLS) {
-                        ckeys.key[LIGHTING_WRC_BG_AT + at] = slot;
-                    }
+                    lighting_put_capped(LIGHTING_WRC_BG_COUNT_AT, LIGHTING_WRC_BG_AT, LIGHTING_WRC_REFRESH_CELLS, lighting_wrc_list_cap(), slot, 0x71000015u);
                 }
                 return;
             }
@@ -248,13 +236,17 @@ void main() {
                         uint od = lighting_frame() - lighting_sc_check_next(slot);
                         if (lighting_sc_check_next(slot) != 0u && int(od) > 60 && int(od) < 100000) lighting_dg(55u, 1u);
                         if (LIGHTING_GRAD_CHECKS_ON && (lighting_sc_check_due(slot) || (hinted && lighting_sc_grad_rep(slot))) && lighting_sc_check_turn(slot)) {
-                            uint at = atomicAdd(ckeys.key[LIGHTING_GRAD_COUNT_AT], 1u);
-                            lighting_dg(50u, 1u);
-                            if (at >= ((LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift())) lighting_dg(52u, 1u);
-                            else { lighting_dg(51u, 1u); if (lighting_sc_check_next(slot) != 0u && int(od) > 0 && int(od) < 100000) { lighting_dg(53u, od); atomicMax(gstats.diag[54], od); } }
-                            if (at < ((LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift())) {
-                                lighting_dg(hinted ? 5u : 6u, 1u);
-                                ckeys.key[LIGHTING_GRAD_LIST_AT + at] = slot;
+                            if (pc.seed != 0u) {
+                                lighting_put_capped(LIGHTING_GRAD_COUNT_AT, LIGHTING_GRAD_LIST_AT, lighting_grad_list_cap(), lighting_grad_list_cap(), slot, 0x71000021u);
+                            } else {
+                                uint at = atomicAdd(ckeys.key[LIGHTING_GRAD_COUNT_AT], 1u);
+                                lighting_dg(50u, 1u);
+                                if (at >= ((LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift())) lighting_dg(52u, 1u);
+                                else { lighting_dg(51u, 1u); if (lighting_sc_check_next(slot) != 0u && int(od) > 0 && int(od) < 100000) { lighting_dg(53u, od); atomicMax(gstats.diag[54], od); } }
+                                if (at < ((LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift())) {
+                                    lighting_dg(hinted ? 5u : 6u, 1u);
+                                    ckeys.key[LIGHTING_GRAD_LIST_AT + at] = slot;
+                                }
                             }
                         }
                         atomicAdd(gstats.waiting, 1u);
@@ -274,10 +266,7 @@ void main() {
                     cache.v[LIGHTING_SC_GRAD_AT + slot].x = -lam;
                     lighting_sc_check_soon(slot);
                     lighting_dg(2u, 1u); lighting_dg(3u, mm);
-                    uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], mm);
-                    for (uint i = 0u; i < mm; i++) {
-                        ckeys.key[2u * LIGHTING_CACHE_SLOTS - at - i] = slot;
-                    }
+                    lighting_put_backward(2u * LIGHTING_CACHE_SLOTS + 1u, 2u * LIGHTING_CACHE_SLOTS, slot, mm, 0x71000031u);
                     return;
                 }
             }
@@ -297,7 +286,7 @@ void main() {
             // those groups apart (dawn camouflage).
             if (!wrc && lighting_sc_svgf() && lighting_sc_global_change(slot) < LIGHTING_IC_GLOBAL_STALE && !near && t >= 3.5 && !lighting_sc_local_change(slot, mover_ic)) {
                 uint per = lighting_ic_period(slot);
-                if (per > 1u && ((lighting_hash(slot ^ 0x68e31da4u) + lighting_round()) % per) != 0u) {
+                if (per > 1u && ((lighting_hash(lighting_sched(slot) ^ 0x68e31da4u) + lighting_round()) % per) != 0u) {
                     lighting_dg(31u, 1u);
                     atomicAdd(gstats.waiting, 1u);
                     return;
@@ -323,7 +312,7 @@ void main() {
             // the texels of a page commit on different rounds and their counts
             // spread; a page never steps as one.
             if (!wrc && lighting_sc_decorrelate() && !lighting_sc_svgf() && !near && t >= LIGHTING_DN_MIN_SETS - 0.5 && t < LIGHTING_SC_FULL_SETS - 0.5
-                && ((lighting_hash(slot ^ 0x5bd1e995u) + lighting_round()) & 3u) == 0u) {
+                && ((lighting_hash(lighting_sched(slot) ^ 0x5bd1e995u) + lighting_round()) & 3u) == 0u) {
                 atomicAdd(gstats.waiting, 1u);
                 return;
             }
@@ -342,7 +331,7 @@ void main() {
                 // Same phase as the IC gate: the periods are powers of two, so the
                 // two gates nest and the texel is relit one round in max(per,
                 // every). With independent phases 3 texels in 4 never pass both.
-                if (sup >= LIGHTING_SC_L2_FLAT && every > 1u && ((lighting_hash(slot ^ 0x68e31da4u) + lighting_round()) % every) != 0u) {
+                if (sup >= LIGHTING_SC_L2_FLAT && every > 1u && ((lighting_hash(lighting_sched(slot) ^ 0x68e31da4u) + lighting_round()) % every) != 0u) {
                     atomicAdd(gstats.waiting, 1u);
                     return;
                 }
@@ -362,11 +351,15 @@ void main() {
             // estimator running), settled or not: the threshold alone splits.
             if (est.x > 0.0 && t >= LIGHTING_DN_MIN_SETS - 0.5 && chg < LIGHTING_SC_TRICKLE_THR && !lighting_sc_local_change(slot, mover_t)) {
                 // S65A trickle tier.
-                uint at = atomicAdd(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], 1u);
-                if (at < LIGHTING_SC_TRICKLE) {
-                    ckeys.key[LIGHTING_SC_TRICKLE_AT + at] = slot;
-                    atomicAdd(gstats.pad2, 1u);
-                    lighting_dg(15u, 1u);
+                if (pc.seed != 0u) {
+                    lighting_put_capped(LIGHTING_SC_TRICKLE_COUNT_AT, LIGHTING_SC_TRICKLE_AT, LIGHTING_SC_TRICKLE, lighting_trickle_list_cap(), slot, 0x71000041u);
+                } else {
+                    uint at = atomicAdd(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], 1u);
+                    if (at < LIGHTING_SC_TRICKLE) {
+                        ckeys.key[LIGHTING_SC_TRICKLE_AT + at] = slot;
+                        atomicAdd(gstats.pad2, 1u);
+                        lighting_dg(15u, 1u);
+                    }
                 }
                 return;
             }
@@ -403,13 +396,10 @@ void main() {
             if (b < ckeys.key[LIGHTING_SC_THR_AT]) {
                 return;
             }
-            uint at = atomicAdd(ckeys.key[LIGHTING_CACHE_SLOTS], m);
             lighting_dg(wrc ? 36u : (t < LIGHTING_DN_MIN_SETS - 0.5 ? 32u : (on_screen ? 13u : 14u)), m);
             lighting_dg(wrc ? 37u : 18u, 1u);
             if (!wrc && int(lighting_frame() - updated) > int(LIGHTING_ASVGF_AGE)) lighting_dg(33u, m);
-            for (uint i = 0u; i < m; i++) {
-                ckeys.key[LIGHTING_CACHE_SLOTS + 1u + at + i] = slot;
-            }
+            lighting_put_forward(LIGHTING_CACHE_SLOTS, LIGHTING_CACHE_SLOTS + 1u, slot, m, 0x71000051u);
             return;
         }
         if (!(near || t < 0.5 || growing || changing)) {
@@ -427,28 +417,16 @@ void main() {
         uint m = lighting_sc_entries(slot, true);
         lighting_dg(burst ? 1u : (near ? 0u : 34u), m); lighting_dg(35u, 1u);
         if (young) {
-            uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], m);
-            for (uint i = 0u; i < m; i++) {
-                ckeys.key[2u * LIGHTING_CACHE_SLOTS - at - i] = slot;
-            }
+            lighting_put_backward(2u * LIGHTING_CACHE_SLOTS + 1u, 2u * LIGHTING_CACHE_SLOTS, slot, m, 0x71000061u);
         } else {
-            uint at = atomicAdd(ckeys.key[LIGHTING_CACHE_SLOTS], m);
-            for (uint i = 0u; i < m; i++) {
-                ckeys.key[LIGHTING_CACHE_SLOTS + 1u + at + i] = slot;
-            }
+            lighting_put_forward(LIGHTING_CACHE_SLOTS, LIGHTING_CACHE_SLOTS + 1u, slot, m, 0x71000062u);
         }
         return;
     }
     uint m = lighting_sc_entries(slot, true);
     if (near || t < LIGHTING_CACHE_MATURE - 0.5) {
-        uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], m);
-        for (uint i = 0u; i < m; i++) {
-            ckeys.key[2u * LIGHTING_CACHE_SLOTS - at - i] = slot;
-        }
+        lighting_put_backward(2u * LIGHTING_CACHE_SLOTS + 1u, 2u * LIGHTING_CACHE_SLOTS, slot, m, 0x71000071u);
     } else {
-        uint at = atomicAdd(ckeys.key[LIGHTING_CACHE_SLOTS], m);
-        for (uint i = 0u; i < m; i++) {
-            ckeys.key[LIGHTING_CACHE_SLOTS + 1u + at + i] = slot;
-        }
+        lighting_put_forward(LIGHTING_CACHE_SLOTS, LIGHTING_CACHE_SLOTS + 1u, slot, m, 0x71000072u);
     }
 }
