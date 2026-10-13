@@ -291,7 +291,15 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
     for name in &names {
         let _ = writeln!(log, "check {name}");
         eprintln!("genos-lighting: check {name}");
-        app.load_scene(name)?;
+        if let Err(err) = app.load_scene(name) {
+            if gltf_scene(&app.entries, name) && gltf_bytes_absent(&err) {
+                let line = format!("skip {name}: {err}");
+                eprintln!("genos-lighting: {line}");
+                let _ = writeln!(log, "{line}");
+                continue;
+            }
+            return Err(err);
+        }
         jump_camera(app, None, &mut camera)?;
         renderer.reset_lighting_cache();
         let mut pixels = None;
@@ -449,6 +457,18 @@ impl Host for App {
     }
 }
 
+fn gltf_scene(entries: &[Entry], name: &str) -> bool {
+    entries
+        .iter()
+        .any(|entry| entry.name == name && matches!(entry.kind, Kind::Gltf { .. }))
+}
+
+/// A glTF scene whose bytes are not in this checkout. `--check` skips it.
+/// `--scene` still returns the error.
+fn gltf_bytes_absent(err: &str) -> bool {
+    err.contains("Git LFS pointer") || err.contains("file not found")
+}
+
 fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
     match &entry.kind {
         Kind::Stress(spec) => {
@@ -487,8 +507,12 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
         } => {
             let full = root.join(path);
             eprintln!("genos-lighting: loading {}", full.display());
-            let model = genos_load::load_gltf_file(&full)
-                .map_err(|err| format!("{}: {err}", full.display()))?;
+            let model = genos_load::load_gltf_file(&full).map_err(|err| match &err {
+                genos_load::LoadError::LfsPointer { .. } | genos_load::LoadError::NotFound { .. } => {
+                    err.to_string()
+                }
+                _ => format!("{}: {err}", full.display()),
+            })?;
             let mut scene = Scene {
                 floor: Floor {
                     position: Vec3::new(1000.0, 0.0, 0.0),
@@ -945,4 +969,31 @@ fn options() -> Result<Options, String> {
         size,
         check,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{gltf_bytes_absent, gltf_scene};
+    use genos_scene_lib::{Entry, Kind};
+
+    #[test]
+    fn a_missing_gltf_is_skipped_and_a_bad_scene_is_not() {
+        let entries = vec![Entry {
+            name: "sponza".into(),
+            review: String::new(),
+            kind: Kind::Gltf {
+                path: "assets/built/sponza/sponza.gltf".into(),
+                sun: None,
+                sky: None,
+                lamps: Vec::new(),
+            },
+            checkpoints: Vec::new(),
+        }];
+        assert!(gltf_scene(&entries, "sponza"));
+        assert!(!gltf_scene(&entries, "room"));
+        let pointer = "assets/built/sponza/sponza.gltf is a Git LFS pointer; the asset bytes are not in this checkout";
+        assert!(gltf_bytes_absent(pointer));
+        assert!(gltf_bytes_absent("file not found: assets/built/sponza/sponza.gltf"));
+        assert!(!gltf_bytes_absent("sponza.gltf: unrecognized asset"));
+    }
 }
