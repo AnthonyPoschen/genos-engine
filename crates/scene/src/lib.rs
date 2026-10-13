@@ -7,21 +7,24 @@ mod camera;
 mod codimation;
 mod lighting;
 mod script;
+mod settings;
 mod types;
 
+pub use camera::{
+    look_direction, transform_point, update, view_proj, viewport_uv, Actions, Camera, CAMERA_FAR,
+    CAMERA_HEIGHT, CAMERA_NEAR, PITCH_LIMIT,
+};
+pub use codimation::{Codimation, Easing};
+pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use lighting::{
     AmbientMode, AmbientSettings, BounceSettings, DenoiserSettings, DirectSettings, GiSettings,
     GpuBuckets, LightingPreset, LightingSettings, ProbeSettings, ShadowFilter, ShadowSettings,
     WorldCacheSettings, LIGHTING_BOUNCES_UNLIMITED,
 };
-pub use camera::{
-    look_direction, transform_point, update, view_proj, viewport_uv, Actions, Camera,
-    CAMERA_FAR, CAMERA_HEIGHT, CAMERA_NEAR, PITCH_LIMIT,
-};
-pub use codimation::{Codimation, Easing};
-pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use script::{load_path, load_str};
+pub use settings::EngineSettings;
 pub use types::{
-    bounce_radiance, color_mix_of, diffuse_brdf, reflectance_of, Ceiling, Floor, Light, Scene, Shape, Sky, Solid, Wall,
-    DEFAULT_BRDF, DEFAULT_REFLECTANCE, MAX_LAMPS, MAX_OCCLUDERS, PAINT_ALBEDO,
+    bounce_radiance, color_mix_of, diffuse_brdf, reflectance_of, Ceiling, Floor, Light, Scene,
+    Shape, Sky, Solid, Wall, DEFAULT_BRDF, DEFAULT_REFLECTANCE, MAX_LAMPS, MAX_OCCLUDERS,
+    PAINT_ALBEDO,
 };

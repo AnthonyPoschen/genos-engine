@@ -20,6 +20,8 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     ├── agent-rubric.md
     ├── agents/
     │   └── domain.md
+    ├── engine/
+    │   └── settings-principles.md
     ├── architecture.md
     ├── lighting.md
     ├── systems/

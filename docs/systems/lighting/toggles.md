@@ -1,6 +1,6 @@
 # Lighting settings
 
-One struct, `LightingSettings` (`crates/scene/src/lighting.rs`), decides which lighting features run and how much work each one does. A game sets it at startup, from a scene file, from Rhai, or at runtime. The debug menu and `GENOS_LIGHTING_*` environment variables edit that same struct. The next draw applies the change. A knob that changes a buffer size rebuilds the buffers after the frames in flight finish.
+`LightingSettings` (`crates/scene/src/lighting.rs`) is the reference [engine feature setting](../../engine/settings-principles.md). It implements `EngineSettings`. A game, a scene file, Rhai, MCP, and the debug menu read and write that one struct. The next draw applies the change. A knob that changes a buffer size rebuilds the buffers after the frames in flight finish.
 
 The default is preset `high`: the tuned GI path. Pictures taken with today's defaults stay on that path.
 
@@ -58,7 +58,7 @@ The text form is `LightingSettings::to_text` / `parse`. Floats print with their 
 
 `Renderer::set_lighting_settings` holds an override until `clear_lighting_override`. A game that owns the scene writes `scene.lighting` and leaves the override clear. The draw copies the override or the scene, then applies environment variables that are set. A variable that is set wins every frame (a launch lock). `GENOS_LIGHTING_PRESET` replaces the struct, then the other variables overlay one key each. `GENOS_LIGHTING_COMPOSE_ALL` forces compose reuse off.
 
-The stress debug menu edits `world.scene.lighting`. The next draw picks that up.
+The stress debug menu edits `world.scene.lighting` through `set_key`. The knobs are the preset, each feature switch, and the quality knobs (max lights, refresh, resolution scale, shadow filter, GI refresh, budget shift, probe rays, probe and world staleness, denoiser iterations, ambient mode). The next draw picks that up.
 
 ## MCP
 

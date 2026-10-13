@@ -1,4 +1,6 @@
-//! Lighting settings: one struct a game, a scene file, a script, or a tool edits.
+//! Lighting settings: the reference [`crate::EngineSettings`] value.
+//!
+//! A game, a scene file, a script, MCP, and the debug menu edit this one struct.
 //!
 //! The renderer reads this and skips the GPU passes and allocations a disabled
 //! feature owns. A quality knob changes how much work a feature does when it is

@@ -40,6 +40,10 @@ Finish a Rust change only after `cargo build --workspace` and the tests for the 
 
 `../input-zig` is the behavior source for the input port. Preserve the tested platform calls. The file list is in `docs/architecture.md`.
 
+## Settings
+
+Every engine-feature setting follows `docs/engine/settings-principles.md`. It is a public serializable value any system can read and write, it is on the MCP command catalogue, and a person can edit it from the debug menu or UI. Lighting is the reference. A game may map its own player settings onto that value, or show the raw value.
+
 ## Systems
 
 Before you change a system, rewrite a system, or add a game feature that uses one, read `docs/systems/README.md` and the matching system file. When the goal, the intent, the game use, or a limit changes, edit that system file in the same change.

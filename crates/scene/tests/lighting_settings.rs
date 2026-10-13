@@ -1,7 +1,8 @@
 //! Lighting settings: presets, the text form, and a scene file that overrides them.
 
 use genos_scene::{
-    load_str, AmbientMode, LightingPreset, LightingSettings, LIGHTING_BOUNCES_UNLIMITED,
+    load_str, AmbientMode, EngineSettings, LightingPreset, LightingSettings,
+    LIGHTING_BOUNCES_UNLIMITED,
 };
 
 fn room() -> &'static str {
@@ -12,6 +13,18 @@ fn room() -> &'static str {
      solid(\"circle\", -3.0, 2.0, 1.4, 0.0, 0.0, 1.0);\n\
      solid(\"square\", 2.5, -2.0, 1.4, 0.0, 1.0, 0.0);\n\
      light(0.0, 4.0, 2.0, 1.0, 1.0, 1.0);\n"
+}
+
+#[test]
+fn the_engine_settings_trait_reads_and_writes_lighting() {
+    let settings = LightingSettings::preset(LightingPreset::Low);
+    let text = EngineSettings::to_text(&settings);
+    let parsed = <LightingSettings as EngineSettings>::parse(&text).expect("parse");
+    assert_eq!(parsed, settings);
+    let mut edited = parsed;
+    EngineSettings::set_key(&mut edited, "probe_rays", "32").unwrap();
+    assert_eq!(edited.probes.rays, 32);
+    assert!(edited.direct.enabled);
 }
 
 #[test]
