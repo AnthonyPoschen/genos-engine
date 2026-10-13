@@ -130,13 +130,15 @@ const ID_SKY: u32 = 700;
 const ID_OUT: u32 = 800;
 /// Sliders, one per knob.
 const ID_KNOB: u32 = 1000;
-const PANEL_KNOBS: [&str; 6] = [
+const PANEL_KNOBS: [&str; 8] = [
     "time_of_day",
     "sun_speed",
     "lights",
     "dynamic",
     "unfilled",
     "unfilled_tint",
+    "lighting_screen_verify",
+    "lighting_world_verify",
 ];
 /// A hitch longer than this does not replay the missed time.
 const MAX_FRAME_SECONDS: f32 = 0.25;

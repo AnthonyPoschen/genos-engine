@@ -829,21 +829,35 @@ fn panel_rows(app: &App, view: ViewMode) -> Vec<PanelRow> {
             slider: None,
         },
     ];
-    if let Some(knob) = app.knobs().into_iter().find(|k| k.name == "lighting_bounces") {
-        rows.push(PanelRow {
-            label: knob.label,
-            buttons: Vec::new(),
-            slider: Some(PanelSlider {
-                id: ID_KNOB,
-                value: knob.value,
-                min: knob.min,
-                max: knob.max,
-                step: knob.step,
-                text: knob.text,
-            }),
-        });
+    for (offset, name) in [
+        "lighting_bounces",
+        "lighting_screen_verify",
+        "lighting_world_verify",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        push_knob_slider(&mut rows, app, name, ID_KNOB + offset as u32);
     }
     rows
+}
+
+fn push_knob_slider(rows: &mut Vec<PanelRow>, app: &App, name: &str, id: u32) {
+    let Some(knob) = app.knobs().into_iter().find(|k| k.name == name) else {
+        return;
+    };
+    rows.push(PanelRow {
+        label: knob.label,
+        buttons: Vec::new(),
+        slider: Some(PanelSlider {
+            id,
+            value: knob.value,
+            min: knob.min,
+            max: knob.max,
+            step: knob.step,
+            text: knob.text,
+        }),
+    });
 }
 
 fn press(
@@ -890,9 +904,13 @@ fn press(
 }
 
 fn slide(app: &mut App, id: u32, value: f64) {
-    if id == ID_KNOB {
-        let _ = app.set_knob("lighting_bounces", value);
-    }
+    let name = match id.checked_sub(ID_KNOB) {
+        Some(0) => "lighting_bounces",
+        Some(1) => "lighting_screen_verify",
+        Some(2) => "lighting_world_verify",
+        _ => return,
+    };
+    let _ = app.set_knob(name, value);
 }
 
 fn picture_stats(bgra: &[u8]) -> (f32, f32) {

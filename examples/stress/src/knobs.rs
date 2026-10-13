@@ -482,6 +482,8 @@ mod tests {
         "lighting_compose_reuse",
         "lighting_sky",
         "lighting_emissive",
+        "lighting_screen_verify",
+        "lighting_world_verify",
         "lighting_prefill",
         "lighting_full_effort",
         "lighting_ambient",
@@ -510,5 +512,26 @@ mod tests {
                 .value;
             stage.set_knob(name, value).expect(name);
         }
+    }
+
+    #[test]
+    fn verify_budgets_are_numeric_sliders() {
+        let knobs = lighting_knobs(&LightingSettings::default());
+        let screen = knobs
+            .iter()
+            .find(|knob| knob.name == "lighting_screen_verify")
+            .expect("screen verify");
+        let world = knobs
+            .iter()
+            .find(|knob| knob.name == "lighting_world_verify")
+            .expect("world verify");
+        assert!(screen.choices.is_empty());
+        assert!(world.choices.is_empty());
+        assert_eq!(screen.step, 256.0);
+        assert_eq!(screen.min, 0.0);
+        assert_eq!(screen.max, 8192.0);
+        assert_eq!(world.step, 16.0);
+        assert_eq!(world.min, 0.0);
+        assert_eq!(world.max, 1024.0);
     }
 }
