@@ -85,6 +85,8 @@ pub struct GenerateOptions {
     pub profile: TraceProfile,
     pub only_scene: Option<String>,
     pub only_checkpoint: Option<String>,
+    /// Empty keeps the catalog. Otherwise only these checkpoints are traced.
+    pub sequence: Vec<(String, String)>,
 }
 
 pub fn generate(opts: &GenerateOptions) -> Result<Vec<ReferenceRecord>, String> {
@@ -109,6 +111,14 @@ pub fn generate(opts: &GenerateOptions) -> Result<Vec<ReferenceRecord>, String> 
                 .only_checkpoint
                 .as_ref()
                 .is_some_and(|name| name != cp.name)
+            {
+                continue;
+            }
+            if !opts.sequence.is_empty()
+                && !opts
+                    .sequence
+                    .iter()
+                    .any(|(scene, name)| scene == cp.scene && name == cp.name)
             {
                 continue;
             }

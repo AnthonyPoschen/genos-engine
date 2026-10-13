@@ -58,6 +58,7 @@ Frame control, arguments first. Each name has an environment mirror (`GENOS_LIGH
 | `--capture-frames LIST` | `event+1,+2,+4,+8` | Frames after an event. `1,2,4,8` is the same list. |
 | `--bounces N` | scene default | Renderer bounce count: `0`, `1`, `2`, or `unlimited`. The path trace keeps the profile's bounce count. `direct-only` still forces bounce 0 and ambient off. |
 | `--warm` | off | Keep one renderer, and its lighting caches, across checkpoints. The default opens a fresh renderer for each checkpoint. |
+| `--checkpoints LIST` | catalog order | Comma-separated `scene/name` entries, scored in that order. Replaces `--scene` and `--checkpoint`. |
 
 `--settle-frames` and `--settle` together are an error. The same is true of the two environment variables when neither flag is set. These flags belong to `lighting-ref check`. They are not lighting settings. The live stress binary's fixed step is `--fixed-dt` and MCP `time`, and manual stepping is `--step` (Space, or MCP `step`).
 

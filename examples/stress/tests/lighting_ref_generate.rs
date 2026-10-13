@@ -20,6 +20,7 @@ fn tiny(dir: PathBuf) -> GenerateOptions {
         },
         only_scene: None,
         only_checkpoint: None,
+        sequence: Vec::new(),
     }
 }
 

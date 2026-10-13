@@ -39,6 +39,8 @@ pub struct CheckOptions {
     pub skip_capture: bool,
     pub only_scene: Option<String>,
     pub only_checkpoint: Option<String>,
+    /// Catalog order when empty. Otherwise these checkpoints, in this order.
+    pub sequence: Vec<(String, String)>,
     pub plan: FramePlan,
     /// Keep lighting caches from one checkpoint to the next. The default
     /// opens a fresh renderer for each checkpoint.
@@ -79,6 +81,7 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
             profile: opts.profile.clone(),
             only_scene: opts.only_scene.clone(),
             only_checkpoint: opts.only_checkpoint.clone(),
+            sequence: opts.sequence.clone(),
         })?;
     }
 
@@ -232,6 +235,24 @@ pub fn run(opts: &CheckOptions) -> Result<i32, String> {
 }
 
 fn wanted(opts: &CheckOptions) -> Vec<Wanted> {
+    if !opts.sequence.is_empty() {
+        return opts
+            .sequence
+            .iter()
+            .filter_map(|(scene, name)| {
+                genos_lighting_ref::checkpoints()
+                    .iter()
+                    .find(|cp| cp.scene == scene && cp.name == name)
+                    .map(|cp| Wanted {
+                        scene: cp.scene.to_string(),
+                        checkpoint: cp.name.to_string(),
+                        note: cp.note.to_string(),
+                        still: cp.still,
+                        event: cp.event,
+                    })
+            })
+            .collect();
+    }
     genos_lighting_ref::available_checkpoints()
         .filter(|cp| {
             opts.only_scene.as_ref().is_none_or(|id| id == cp.scene)
