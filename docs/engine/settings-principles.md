@@ -8,7 +8,7 @@ Every feature of the runtime that has a setting follows the three rules below. L
 
 2. **Agents, over MCP.** The same value is on the command catalogue (`GENOS_MCP_PORT`). Lighting's commands are `get_lighting_settings`, `set_lighting_settings` (a partial update through `set_key`), `list_presets`, and `apply_preset`. A read returns the text form and the measurements that show what the change did. For lighting, those measurements are the GPU pass times and dispatch counts.
 
-3. **People, in the debug menu or UI.** The same value is editable from the debug menu. The stress knobs in `examples/stress/src/knobs.rs` write `Scene.lighting` through `set_key`. The menu has the preset, the feature switches, and the quality knobs: refresh, rays per probe, resolution scale, max lights, shadow filter, denoiser iterations, staleness, budget shift, and ambient mode.
+3. **People, in the debug menu or UI.** The same value is editable from the debug menu. The stress knobs in `examples/stress/src/knobs.rs` write `Scene.lighting` through `set_key`. The menu has the preset, the feature switches, and the quality knobs: refresh, rays per probe, resolution scale, max lights, shadow filter, denoiser iterations, staleness, budget shift, probe wake (mode, tolerance, verification budget, max ring radius), and ambient mode.
 
 A scene file, a Rhai call, and a `GENOS_LIGHTING_*` variable are further editors of that same struct. A variable that is set at launch wins every frame for the key it names.
 

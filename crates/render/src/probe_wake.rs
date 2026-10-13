@@ -16,32 +16,14 @@ pub(crate) struct WakeConfig {
     pub max_radius: f32,
 }
 
-/// `GENOS_LIGHTING_WAKE=rings` selects the ring scheduler. Legacy is the default
-/// and leaves the check-ray path alone. The other variables are the tolerance,
-/// the verification budget and the furthest ring, in metres.
-pub(crate) fn lighting_wake_config() -> WakeConfig {
-    let mode = match std::env::var("GENOS_LIGHTING_WAKE").ok().as_deref() {
-        Some("rings") | Some("1") => 1,
-        _ => 0,
-    };
-    let tolerance = std::env::var("GENOS_LIGHTING_WAKE_TOL")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.08_f32)
-        .clamp(1.0e-4, 1.0);
-    let budget = std::env::var("GENOS_LIGHTING_WAKE_BUDGET")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(16);
-    let max_radius = std::env::var("GENOS_LIGHTING_WAKE_RADIUS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(8.0);
+/// The frame already ran `LightingSettings::apply_env`, so a set
+/// `GENOS_LIGHTING_WAKE*` variable is in the struct and wins over a scene edit.
+pub(crate) fn wake_config(settings: &genos_scene::LightingSettings) -> WakeConfig {
     WakeConfig {
-        mode,
-        tolerance,
-        budget,
-        max_radius,
+        mode: u32::from(settings.probes.wake == genos_scene::WakeMode::Rings),
+        tolerance: settings.probes.wake_tol,
+        budget: settings.probes.wake_budget,
+        max_radius: settings.probes.wake_radius,
     }
 }
 

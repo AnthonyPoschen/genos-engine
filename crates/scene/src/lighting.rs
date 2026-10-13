@@ -161,6 +161,32 @@ pub struct BounceSettings {
     pub count: u32,
 }
 
+/// How a held probe is traced again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WakeMode {
+    /// One check ray per held probe every frame. A settled scene drops the probe passes.
+    Legacy,
+    /// Ring tests around a real change, plus a verification budget. A settled scene keeps the probe passes.
+    Rings,
+}
+
+impl WakeMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            WakeMode::Legacy => "legacy",
+            WakeMode::Rings => "rings",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "legacy" | "0" => Some(WakeMode::Legacy),
+            "rings" | "1" => Some(WakeMode::Rings),
+            _ => None,
+        }
+    }
+}
+
 /// Screen probes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProbeSettings {
@@ -173,6 +199,14 @@ pub struct ProbeSettings {
     pub refresh_frames: u32,
     /// Frames a kept hit may stand before it is treated as stale.
     pub staleness_frames: u32,
+    /// Legacy check ray, or ring tests around a lamp or geometry change.
+    pub wake: WakeMode,
+    /// Relative luminance a ring group or a verification sample may move.
+    pub wake_tol: f32,
+    /// Probes re-traced each frame to catch a change the rings missed. 0 turns that off.
+    pub wake_budget: u32,
+    /// Furthest ring, in metres. 0 tests no rings (verification only).
+    pub wake_radius: f32,
 }
 
 /// Surface cache and world radiance cache (world mode 3).
@@ -319,6 +353,10 @@ impl LightingSettings {
                 tile: 0,
                 refresh_frames: 1,
                 staleness_frames: 8,
+                wake: WakeMode::Legacy,
+                wake_tol: 0.08,
+                wake_budget: 16,
+                wake_radius: 8.0,
             },
             world_cache: WorldCacheSettings {
                 enabled: true,
@@ -367,6 +405,9 @@ impl LightingSettings {
         }
         self.probes.refresh_frames = self.probes.refresh_frames.max(1);
         self.probes.staleness_frames = self.probes.staleness_frames.max(1);
+        self.probes.wake_tol = self.probes.wake_tol.clamp(1.0e-4, 1.0);
+        self.probes.wake_budget = self.probes.wake_budget.min(1_048_576);
+        self.probes.wake_radius = self.probes.wake_radius.clamp(0.0, 256.0);
         self.world_cache.cell_metres = self.world_cache.cell_metres.clamp(0.05, 4.0);
         self.world_cache.refresh_frames = self.world_cache.refresh_frames.max(1);
         self.world_cache.staleness_frames = self.world_cache.staleness_frames.max(1);
@@ -542,6 +583,10 @@ impl LightingSettings {
         let _ = writeln!(out, "probe_tile={}", self.probes.tile);
         let _ = writeln!(out, "probe_refresh={}", self.probes.refresh_frames);
         let _ = writeln!(out, "probe_stale={}", self.probes.staleness_frames);
+        let _ = writeln!(out, "wake={}", self.probes.wake.name());
+        let _ = writeln!(out, "wake_tol={}", num_text(self.probes.wake_tol));
+        let _ = writeln!(out, "wake_budget={}", self.probes.wake_budget);
+        let _ = writeln!(out, "wake_radius={}", num_text(self.probes.wake_radius));
         let _ = writeln!(out, "world_cache={}", bit(self.world_cache.enabled));
         let _ = writeln!(out, "world_cell={}", num_text(self.world_cache.cell_metres));
         let _ = writeln!(out, "world_refresh={}", self.world_cache.refresh_frames);
@@ -633,6 +678,13 @@ impl LightingSettings {
             "probe_tile" => self.probes.tile = num_u32(value)?,
             "probe_refresh" => self.probes.refresh_frames = num_u32(value)?.max(1),
             "probe_stale" => self.probes.staleness_frames = num_u32(value)?.max(1),
+            "wake" => {
+                self.probes.wake = WakeMode::parse(value)
+                    .ok_or_else(|| format!("wake is legacy or rings, got {value}"))?
+            }
+            "wake_tol" => self.probes.wake_tol = num_f32(value)?,
+            "wake_budget" => self.probes.wake_budget = num_u32(value)?,
+            "wake_radius" => self.probes.wake_radius = num_f32(value)?,
             "world_cache" => self.world_cache.enabled = on(value)?,
             "world_cell" => self.world_cache.cell_metres = num_f32(value)?,
             "world_refresh" => self.world_cache.refresh_frames = num_u32(value)?.max(1),
@@ -693,6 +745,10 @@ impl LightingSettings {
             ("GENOS_LIGHTING_TILE", "probe_tile"),
             ("GENOS_LIGHTING_PROBE_REFRESH", "probe_refresh"),
             ("GENOS_LIGHTING_PROBE_STALE", "probe_stale"),
+            ("GENOS_LIGHTING_WAKE", "wake"),
+            ("GENOS_LIGHTING_WAKE_TOL", "wake_tol"),
+            ("GENOS_LIGHTING_WAKE_BUDGET", "wake_budget"),
+            ("GENOS_LIGHTING_WAKE_RADIUS", "wake_radius"),
             ("GENOS_LIGHTING_WORLD_CACHE", "world_cache"),
             ("GENOS_LIGHTING_WORLD_CELL", "world_cell"),
             ("GENOS_LIGHTING_WORLD_REFRESH", "world_refresh"),

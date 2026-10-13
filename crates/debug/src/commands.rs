@@ -67,7 +67,7 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec(
             "set_lighting_settings",
-            "Partial lighting update. Keys match the settings text (direct, shadows, gi, bounces, probes, …). A text field overlays key=value lines. The scene keeps the result; a renderer override is cleared. Applies on the next draw.",
+            "Partial lighting update. Keys match the settings text (direct, shadows, gi, bounces, probes, wake, wake_tol, wake_budget, wake_radius, …). A text field overlays key=value lines. The scene keeps the result; a renderer override is cleared. Applies on the next draw.",
         ),
         spec(
             "list_presets",

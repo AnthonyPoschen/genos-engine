@@ -1095,7 +1095,7 @@ impl Gpu {
                 );
             }
         }
-        if lighting_wake_config().mode == 1 && self.lighting.wake_ready[slot] {
+        if wake_config(&self.lighting.settings).mode == 1 && self.lighting.wake_ready[slot] {
             if let Ok(words) = self.read_stats16(self.lighting.stats[slot].memory) {
                 self.lighting.wake.adapt(words[WAKE_HITS], words[WAKE_MISSES]);
             }
@@ -1548,7 +1548,7 @@ impl Gpu {
             hasher.finish()
         };
         let frozen = self.lighting_stats().settled;
-        let wake_cfg = lighting_wake_config();
+        let wake_cfg = wake_config(&self.lighting.settings);
         if wake_cfg.mode == 1 {
             self.lighting.wake.begin_frame();
         }
