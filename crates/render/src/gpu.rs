@@ -414,6 +414,11 @@ impl Renderer {
         self.gpu.lighting_atrous_stats()
     }
 
+    /// Drop GI caches so the next draw is a cold start. Pipelines stay built.
+    pub fn reset_lighting_caches(&mut self) {
+        self.gpu.reset_lighting_caches();
+    }
+
     /// How long each pipeline took to build, in build order.
     pub fn pipeline_times(&self) -> Vec<(String, Duration)> {
         self.gpu.pipeline_times.clone()

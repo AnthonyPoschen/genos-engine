@@ -856,6 +856,32 @@ impl Gpu {
             .map_or(self.lighting.probe_samples, |w| [w[6], w[7]])
     }
 
+    /// Drop the light caches so the next frame is a cold start. Pipelines stay.
+    /// Two picture runs on one renderer begin from the same empty tables.
+    pub(crate) fn reset_lighting_caches(&mut self) {
+        self.lighting.cache_clear = true;
+        self.lighting.work_clear = true;
+        self.lighting.gbuf_clear = true;
+        self.lighting.compose_valid = false;
+        self.lighting.frame = 0;
+        self.lighting.still = 0;
+        self.lighting.held = 0;
+        self.lighting.quiet = 0;
+        self.lighting.live = 0;
+        self.lighting.light_quiet = 0;
+        self.lighting.scene_hash = 0;
+        self.lighting.light_hash = 0;
+        self.lighting.kept_bytes.clear();
+        self.lighting.kept_key = 0;
+        self.lighting.probe_runs = 0;
+        self.lighting.probe_samples = [0; 2];
+        self.lighting.movers.clear();
+        self.lighting.mesh_movers.clear();
+        self.lighting.world_round = 0;
+        self.lighting.world_hold = 0;
+        self.lighting.last_round = None;
+    }
+
     /// A-trous dirty fraction, mode and threshold for the last frame drawn.
     /// Waits for that frame. The words are the `lightingatrous` line.
     pub(crate) fn lighting_atrous_stats(&mut self) -> LightingAtrousStats {

@@ -230,7 +230,17 @@ A phase that misses its picture check is reverted. A phase that passes the pictu
 
 No behavior change. Record the moving-scene pass split and the still-scene pass split, and write the full-effort sum, direct, and bounce frames for the lamp move and the shadow walk. Diff two full-effort runs and store the three mean `|ΔL|` floors and the two pop percents.
 
-**Pass:** the floors exist, and a third full-effort run lands inside them. **Milliseconds:** none expected.
+**Pass:** the floors exist, and the three full-effort runs agree. The floor for a view is the largest of the three pairwise mean `|ΔL|` values. Each pair stays within three times the smallest pair, plus 5e-4. A later phase passes when its diffs against the full-effort runs sit in that same band, and its pop stays within half a percentage point of the full-effort pop. **Milliseconds:** none expected. The lavapipe harness is `crates/render/tests/lighting_work.rs`. It draws the corner scene at 320×180, records the three floors and the pop shares, and writes a contact sheet under `~/genos-perf/bounce-corner/`. The stress-building milliseconds stay on the owner's machine.
+
+Lavapipe, 320×180, one prime run then three cold runs of the corner scene:
+
+| View | Floor | Pop |
+|---|---:|---:|
+| Sum | 0.021431 | 46.8% |
+| Direct | 0.000000 | 61.4% |
+| Bounce | 0.004051 | 46.0% |
+
+Direct matched across the three runs. The sum and the bounce stay inside the band above. The pop is the share of pixel-frames that step by more than 0.01 during the lamp move, so it is high on this short clip. The owner's 1080p window measures its own floor.
 
 ### Phase 1 — tag regimes, change no work
 
