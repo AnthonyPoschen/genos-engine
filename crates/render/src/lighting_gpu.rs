@@ -325,6 +325,10 @@ const LIGHTING_CHECK_P_AT: u64 = LIGHTING_ARGS_AT + 16 + 3 * 65536 + 1024 + 3276
 const LIGHTING_ATROUS_LIST_CAP: u64 = 65536;
 const LIGHTING_ATROUS_MARK_AT: u64 = LIGHTING_CHECK_P_AT + 16;
 const LIGHTING_ATROUS_LIST_AT: u64 = LIGHTING_ATROUS_MARK_AT + 5 * LIGHTING_CACHE_SLOTS;
+/// Phase 0 tile stamps in the spare after the a-trous lists
+/// (lighting_cache.glsl `LIGHTING_DP_TILE_AT`). Compose starts after that spare.
+const LIGHTING_DP_TILES: u64 = 65536;
+const LIGHTING_DP_TILE_AT: u64 = LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1);
 /// Sits after the compose words (`lighting_ckeys_words`); it used to start where
 /// `LIGHTING_COMPOSE_AT` starts, so the two regions aliased.
 const fn lighting_atrous_ppm_at() -> u64 {
@@ -709,11 +713,12 @@ impl Gpu {
         // Both queues use the light cache and the work buffer's ray slots.
         let share = self.light_families();
         if self.lighting.cache_keys.buffer.is_null() {
-            // The compose words and the a-trous meta must not alias the a-trous lists.
-            // The hit-light queue starts after that meta; the old tail is compose.
-            assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
-            assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
-            assert!(LIGHTING_HIT_QUEUE_AT >= lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS);
+            // Lists, tile stamps, compose blocks, a-trous meta, and the hit-light
+            // queue are disjoint. The same check is a const assert below.
+            assert!(
+                lighting_regions_disjoint(),
+                "lighting key or stats regions overlap"
+            );
             // The descriptor range is the whole buffer (u64::MAX), so growing this
             // allocation grows what the shaders can address.
             self.lighting.cache_keys = self.make_buffer_queues(
@@ -2098,6 +2103,34 @@ const LIGHTING_CHG_ENABLE_WORD: u64 = 24 + 64 + 31;
 const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;
 const LIGHTING_ATROUS_STAT: usize = 120;
 const LIGHTING_DP_STAT: usize = LIGHTING_ATROUS_STAT + 4;
+
+/// Key-buffer and stats-buffer ranges stay disjoint. The shader uses the same
+/// formulas (`LIGHTING_DP_TILE_AT`, `LIGHTING_HIT_QUEUE_AT`, `gstats.dp` after
+/// the four a-trous words). A false result fails this const assert and the
+/// startup assert in `make_lighting`.
+const fn lighting_regions_disjoint() -> bool {
+    let lists_end = LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1);
+    let tiles_end = LIGHTING_DP_TILE_AT + LIGHTING_DP_TILES;
+    let compose = lighting_compose_at();
+    let compose_end = lighting_ckeys_words();
+    let meta = lighting_atrous_ppm_at();
+    let meta_end = meta + LIGHTING_ATROUS_META_WORDS;
+    let queue = LIGHTING_HIT_QUEUE_AT;
+    let stats_ok = LIGHTING_CHG_ENABLE_WORD + 1 == LIGHTING_ATROUS_STAT as u64
+        && LIGHTING_ATROUS_STAT + 4 == LIGHTING_DP_STAT
+        && LIGHTING_DP_STAT + 32 == LIGHTING_STATS_WORDS;
+    stats_ok
+        && LIGHTING_DP_TILE_AT == lists_end
+        && tiles_end <= compose
+        && compose >= lists_end + 6 * 65536 + 16
+        && compose_end == meta
+        && meta >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS
+        && queue == meta_end
+        && queue > compose
+        && LIGHTING_CKEYS_WORDS > queue
+}
+
+const _: () = assert!(lighting_regions_disjoint());
 /// S78S: the change counters (lighting_chg) run with GENOS_LIGHTING_SC_TRACE.
 fn lighting_chg_on() -> bool {
     std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_some()

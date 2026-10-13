@@ -2,7 +2,7 @@
 
 Phase 0 of `dynamic-perf-plan.md`. No picture change in the default build. The numbers are filled on the owner's RTX 4070; this file only says where they come from.
 
-The plan's `diag[0..18]` are not free. Compact already writes slots 0-37 and 40-56, and the light pass writes 40, 41 and 47-49. The new counts are `gstats.dp[32]`, printed by `GENOS_LIGHTING_SC_TRACE=1` as `lightingdp`. Slots 0-18 are compiled out unless the build is `GENOS_LIGHTING_DIAG=1`. Slots 19 and 20 are written by the hit-light args step whenever `GENOS_LIGHTING_HIT_QUEUE=1`. `lightingdg` and `lightingchg` are unchanged.
+The plan's `diag[0..18]` are not free. Compact already writes slots 0-37 and 40-56, and the light pass writes 40, 41 and 47-49. The new counts are `gstats.dp[32]`, printed by `GENOS_LIGHTING_SC_TRACE=1` as `lightingdp`. They follow the four a-trous words, so the host reads them at stats words 124..156, not at the old word 120. Slots 0-18 are compiled out unless the build is `GENOS_LIGHTING_DIAG=1`. Slots 19 and 20 are written by the hit-light args step whenever `GENOS_LIGHTING_HIT_QUEUE=1`. `lightingdg` and `lightingchg` are unchanged.
 
 | `dp` | Meaning |
 |---|---|

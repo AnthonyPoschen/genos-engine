@@ -69,6 +69,30 @@ fn no_shader_loop_has_a_large_constant_bound() {
 }
 
 #[test]
+fn hit_light_regions_stay_past_compose_and_atrous() {
+    let cache = source("lighting_cache.glsl");
+    assert!(
+        cache.contains(
+            "const uint LIGHTING_DP_TILE_AT = LIGHTING_ATROUS_LIST_AT + 5u * (LIGHTING_ATROUS_LIST_CAP + 1u);"
+        ),
+        "tile stamps must start at the end of the a-trous lists"
+    );
+    assert!(
+        cache.contains(
+            "const uint LIGHTING_HIT_QUEUE_AT = LIGHTING_ATROUS_PPM_AT + LIGHTING_ATROUS_META_WORDS;"
+        ),
+        "the hit-light queue must start after the a-trous meta, not at the old key tail"
+    );
+    assert!(
+        cache.contains("uint atrous_active;") && cache.contains("uint dp[32];"),
+        "dp counters follow the a-trous stats words"
+    );
+    let atrous = cache.find("uint atrous_frac;").expect("atrous stats");
+    let dp = cache.find("uint dp[32];").expect("dp stats");
+    assert!(atrous < dp, "atrous words occupy the range before dp");
+}
+
+#[test]
 fn the_scene_ray_loops_are_kept_rolled() {
     let rays = source("scene_rays.glsl");
     // A loop over list entries or cells carries [[dont_unroll]]; a loop over the two or
