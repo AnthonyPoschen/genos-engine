@@ -26,6 +26,10 @@ fn main() {
         ("LIGHTING_CACHE_SPV", "lighting_cache.comp"),
         ("LIGHTING_COMPOSE_SPV", "lighting_compose.comp"),
         ("LIGHTING_ATROUS_SPV", "lighting_atrous.comp"),
+        // Compiled into the binary. The pipeline is created the first time a
+        // small sun step asks for it, not at startup, so the nine lighting
+        // pipelines and their compile stay the gi-v2 set.
+        ("SUN_COMPOSE_SPV", "lighting_sun_compose.comp"),
     ]
     .iter()
     .map(|(name, file)| {
@@ -61,6 +65,7 @@ fn main() {
         "lighting_pack.glsl",
         "lighting_cache.glsl",
         "lighting_cache_slots.glsl",
+        "lighting_sun_compose.comp",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }

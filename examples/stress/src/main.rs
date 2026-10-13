@@ -53,6 +53,8 @@ const USAGE: &str = "genos-stress [options]
   --freeze-sun              hold the sun at --time or --time-of-day
   --no-sky                  no sky light: only the sun and the lamps
   --scene FILE              a scene file (genos-camera's .rhai) in place of the building; nothing moves
+  --lamp-stop               with --scene, step the point lamp then hold it
+                            (examples/stress/scenes/bounce_corner.rhai)
   --still-boxes             hold the coloured boxes
   --seed N                  lamp and box layout seed (default 1)
   --view hall|roomA|sky     start (and benchmark) viewpoint (default hall).
@@ -98,6 +100,13 @@ const USAGE: &str = "genos-stress [options]
   --ambient MODE            off, constant, hemisphere, day, or curve
                             (GENOS_LIGHTING_AMBIENT)
   --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
+  --lighting-full-effort    full refresh every frame (GENOS_LIGHTING_FULL_EFFORT=1)
+  --lighting-sun on|off     small sun step (GENOS_LIGHTING_SUN, default on)
+  --lighting-sun-bands N    indirect bands, 1..64 (GENOS_LIGHTING_SUN_BANDS, default 8)
+  --lighting-catch-up N     kept-hit frames after a point lamp stops, 0..16
+                            (GENOS_LIGHTING_CATCH_UP, default 4)
+  --lighting-debug          read lighting counters (GENOS_LIGHTING_DEBUG).
+                            Not an fps run: it reads the GPU back every frame
   --trace                   capture the picture after every script command that changes it";
 
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];
@@ -133,6 +142,7 @@ struct Options {
     freeze_sun: bool,
     no_sky: bool,
     scene: Option<PathBuf>,
+    lamp_stop: bool,
     still_boxes: bool,
     seed: u64,
     view: View,
@@ -186,6 +196,7 @@ fn options() -> Result<Options, String> {
         freeze_sun: false,
         no_sky: false,
         scene: None,
+        lamp_stop: false,
         still_boxes: false,
         seed: 1,
         view: View::Hall,
@@ -229,6 +240,7 @@ fn options() -> Result<Options, String> {
             "--freeze-sun" => opts.freeze_sun = true,
             "--no-sky" => opts.no_sky = true,
             "--scene" => opts.scene = Some(PathBuf::from(value()?)),
+            "--lamp-stop" => opts.lamp_stop = true,
             "--still-boxes" => opts.still_boxes = true,
             "--seed" => opts.seed = parse(&arg, &value()?)?,
             "--view" => {
@@ -313,13 +325,23 @@ fn options() -> Result<Options, String> {
                             genos_render::check_gpu_times_arg(other, Some(&next))?;
                         }
                         Some(false) => genos_render::check_gpu_times_arg(other, None)?,
-                        None => return Err(format!("unknown argument {other}\n{USAGE}")),
+                        None => match genos_render::lighting_sun_flag_needs_value(other) {
+                            Some(true) => {
+                                let next = value()?;
+                                genos_render::check_lighting_sun_arg(other, Some(&next))?;
+                            }
+                            Some(false) => genos_render::check_lighting_sun_arg(other, None)?,
+                            None => return Err(format!("unknown argument {other}\n{USAGE}")),
+                        },
                     },
                 },
             },
         }
     }
     opts.dynamic = opts.dynamic.min(100);
+    if opts.lamp_stop && opts.scene.is_none() {
+        return Err("--lamp-stop needs --scene examples/stress/scenes/bounce_corner.rhai".into());
+    }
     if let Some(run) = &mut opts.script {
         let stem = run
             .script
@@ -470,6 +492,7 @@ fn run() -> Result<(), String> {
     stage.boxes_still = opts.still_boxes;
     if let Some(path) = &opts.scene {
         stage.set_room(genos_scene::load_path(path)?);
+        stage.lamp_stop = opts.lamp_stop;
     }
     for (path, [x, y, z, scale]) in &opts.gltf {
         let model =

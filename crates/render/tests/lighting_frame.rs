@@ -46,10 +46,14 @@ fn lighting_pipelines_build_quickly() {
         .iter()
         .filter(|(name, _)| name.starts_with("lighting"))
         .collect();
+    assert!(
+        lighting.iter().all(|(name, _)| *name != "lighting sun compose"),
+        "the sun compose is built on the first small step, not at startup: {times:?}"
+    );
     assert_eq!(
         lighting.len(),
-        9,
-        "every GI v2 pipeline is timed: {times:?}"
+        10,
+        "nine compute pipelines plus the gbuffer: {times:?}"
     );
     let limit = pipeline_limit();
     for (name, took) in &times {
