@@ -62,11 +62,25 @@ The check is that the shader bit turns on for a small step, stays off for a froz
 
 ## Owner GPU
 
-Windowed 1920×1080. Sun on, then the same scene at full effort. Compose should stay near the gi-v2 figure, not tens of milliseconds. The nine pipelines should compile as they do on gi-v2. The sun compose compiles on the first small step. Watch `genos-debug/sun/counter.txt` and the `lightingsun` line. Do not read a time off lavapipe.
+Windowed 1920×1080, measured on a 4070-class GPU at 17dc9cd1. Compile and exit were clean. Moving compose was already about 3.0 ms on gi-v2; this branch did not buy that, and the 55.7 ms compose is not this cut's to claim. Still and moving times matched the default because those scenes move boxes or point lamps, so they never take the sun path. Full effort costs the same there for the same reason.
+
+With GI and a moving sun the path did engage (`host_frames` 269/300, `bands` 8) and compose rose 2.78 ms to 3.17 ms, total 20.2 ms to 20.85 ms. The extra 0.39 ms was a second full-grid dispatch inside the compose timestamp. The first dispatch was the dirty-block list. A moving sun's probe row and page column mark most of that list, so it was already close to a full probe walk, and the second dispatch wrote every pixel again. A full compose that walks every pixel was the cheaper of the two.
+
+That second dispatch is gone. One dispatch writes this frame's direct on every pixel and walks probes on the band: one probe row in eight, plus one page column. On the split above, the full walk is about 2.4 ms and a full write without the walk is about 0.39 ms. A quarter of the pixels still walking is about 1 ms if that split holds. That is an estimate from those two numbers, not a new measurement. Lavapipe cannot confirm it. Direct still retraces every pixel while the step is on, so the shadow is not a frame behind. That cost is outside the compose timestamp.
+
+If the retest's compose time is not under the full-effort compose time, the sun step is slower than the pass it replaces and it should not merge.
+
+`--lighting-full-effort` does turn the path off. The counter is written on that run even when `host_frames` stays 0. Expect `full_effort 1`, `compose full`, `sun 0`, `dispatches 1`. The sun-on run expects `compose sun`, `sun 1`, `dispatches 1`. Do not read a time off lavapipe.
 
 ```
-GENOS_GPU_TIMES=1 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-stress -- --still-boxes --dynamic 0 --size 1920x1080 --frames 120 --no-panel
-GENOS_GPU_TIMES=1 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-stress -- --still-boxes --dynamic 0 --size 1920x1080 --frames 120 --no-panel --lighting-full-effort
+GENOS_GPU_TIMES=1 cargo run --release -p genos-stress -- --still-boxes --dynamic 0 --size 1920x1080 --frames 120 --no-panel
+GENOS_GPU_TIMES=1 cargo run --release -p genos-stress -- --still-boxes --dynamic 0 --size 1920x1080 --frames 120 --no-panel --lighting-full-effort
+```
+
+The corner lamp stops after 12 settle draws and 8 steps (`--lamp-stop`). Catch-up is the next four held draws. `catch.log` is truncated at the start of the process. Count the `catch 1` lines. There should be four.
+
+```
+GENOS_GPU_TIMES=1 cargo run --release -p genos-stress -- --scene examples/stress/scenes/bounce_corner.rhai --lamp-stop --lighting-debug --freeze-sun --eye 0.8 1.6 0.8 -0.785 0.1 --size 1920x1080 --frames 40 --no-panel
 ```
 
 Moving boxes or point lamps force the full compose. That run is the control, not the sun-on case.

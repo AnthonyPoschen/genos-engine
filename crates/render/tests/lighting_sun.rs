@@ -154,3 +154,40 @@ fn a_small_sun_step_sets_the_shader_bit() {
     assert!(!off.gpu_catch, "catch-up 0 stays off: {off:?}");
     std::env::remove_var("GENOS_LIGHTING_CATCH_UP");
 }
+
+#[test]
+fn a_corner_lamp_that_stops_catches_up_for_four_frames() {
+    let (_gpu, mut window, mut renderer) = open();
+    let mut world = World::from_scene(
+        genos_scene::load_path(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/stress/scenes/bounce_corner.rhai"
+        )))
+        .expect("bounce corner"),
+    );
+    let lamp = world
+        .scene
+        .lights
+        .iter()
+        .position(|light| light.direction == genos_scene::Vec3::ZERO)
+        .expect("point lamp");
+    let home = world.scene.lights[lamp].position;
+    let camera = Camera::new(0.8, 0.8, -0.785);
+    for _ in 0..3 {
+        draw(&mut window, &mut renderer, &world, &camera);
+    }
+    for step in 1..=8 {
+        world.scene.lights[lamp].position.x = home.x + 0.08 * step as f32;
+        draw(&mut window, &mut renderer, &world, &camera);
+    }
+    let mut catch = Vec::new();
+    for _ in 0..6 {
+        draw(&mut window, &mut renderer, &world, &camera);
+        catch.push(renderer.lighting_sun_stats().gpu_catch);
+    }
+    assert_eq!(
+        catch,
+        vec![true, true, true, true, false, false],
+        "the corner lamp's catch-up is four held frames"
+    );
+}

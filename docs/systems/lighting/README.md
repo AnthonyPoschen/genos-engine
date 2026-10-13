@@ -173,7 +173,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [DUMP](experiments/DUMP-gpu-dump-tool.md) | 2026-10-12 | Debug dump of GPU data from two consecutive frames per component (direct, bounce, coarse/fine WRC, probe resul | in progress | none yet |
 | [RAYCEIL](experiments/RAYCEIL-world-cache-need-ray-ceilings.md) | 2026-10-12 | World-cache cells stop at IC error bound instead of fixed 128 samples | queued | none |
 | [QUIET](experiments/QUIET-quiet-paths-compose-filter-compact.md) | 2026-10-12 | Compose redraws 8×8 blocks whose direct, probe SH, or filtered field changed | pushed (compose only; perf on the owner GPU) | this commit |
-| [SUN](experiments/SUN-small-sun-step.md) | 2026-10-13 | Small sun step: indirect over bands, direct every frame, four-frame catch-up | lavapipe bit only; owner GPU A/B not run | this change |
+| [SUN](experiments/SUN-small-sun-step.md) | 2026-10-13 | Small sun step: one compose walks the band; direct every frame; four-frame catch-up | 4070 compose rose 2.78 to 3.17 before the single pass; retest decides merge | this change |
 | [LSMOOTH](experiments/LSMOOTH-lighter-smoothing.md) | 2026-10-12 | Lighter smoothing | dropped (Anthony) | none |
 
 # Architecture and component notes (history kept as written)
