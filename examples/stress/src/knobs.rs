@@ -2,7 +2,7 @@
 //! sliders all set them through here.
 
 use genos_debug::{Host, Knob};
-use genos_scene::Scene;
+use genos_scene::{LightingPreset, LightingSettings, Scene};
 
 use crate::building::{self, Layout};
 use crate::stage::{Scale, Stage};
@@ -116,6 +116,31 @@ impl Host for Stage {
                 usize::from(self.mix.layout == Layout::First),
                 &["spread", "first"],
             ),
+            lighting_preset_knob(&self.world.scene.lighting),
+            Knob::choice(
+                "lighting_bounces",
+                "Bounces",
+                bounce_index(self.world.scene.lighting.bounce.count),
+                &["0", "1", "2", "unlimited"],
+            ),
+            Knob::switch("lighting_direct", "Direct", self.world.scene.lighting.direct.enabled),
+            Knob::switch("lighting_shadows", "Shadows", self.world.scene.lighting.shadows.enabled),
+            Knob::switch("lighting_gi", "GI", self.world.scene.lighting.gi.enabled),
+            Knob::switch("lighting_probes", "Probes", self.world.scene.lighting.probes.enabled),
+            Knob::switch(
+                "lighting_world_cache",
+                "World cache",
+                self.world.scene.lighting.world_cache.enabled,
+            ),
+            Knob::switch("lighting_denoise", "Denoise", self.world.scene.lighting.denoiser.enabled),
+            Knob::switch(
+                "lighting_compose_reuse",
+                "Compose reuse",
+                self.world.scene.lighting.compose_reuse,
+            ),
+            Knob::switch("lighting_sky", "Lighting sky", self.world.scene.lighting.sky),
+            Knob::switch("lighting_emissive", "Emissive", self.world.scene.lighting.emissive),
+            Knob::switch("lighting_prefill", "Prefill", self.world.scene.lighting.prefill),
         ]
     }
 
@@ -141,9 +166,54 @@ impl Host for Stage {
                     Layout::Spread
                 }
             }
+            "lighting_preset" => {
+                if let Some(preset) = LightingPreset::all().get(v as usize) {
+                    self.world.scene.lighting = LightingSettings::preset(*preset);
+                }
+            }
+            "lighting_bounces" => {
+                self.world.scene.lighting.bounce.count = match v.round() as u32 {
+                    0 => 0,
+                    1 => 1,
+                    2 => 2,
+                    _ => genos_scene::LIGHTING_BOUNCES_UNLIMITED,
+                };
+            }
+            "lighting_direct" => self.world.scene.lighting.direct.enabled = v >= 0.5,
+            "lighting_shadows" => self.world.scene.lighting.shadows.enabled = v >= 0.5,
+            "lighting_gi" => self.world.scene.lighting.gi.enabled = v >= 0.5,
+            "lighting_probes" => self.world.scene.lighting.probes.enabled = v >= 0.5,
+            "lighting_world_cache" => self.world.scene.lighting.world_cache.enabled = v >= 0.5,
+            "lighting_denoise" => self.world.scene.lighting.denoiser.enabled = v >= 0.5,
+            "lighting_compose_reuse" => self.world.scene.lighting.compose_reuse = v >= 0.5,
+            "lighting_sky" => self.world.scene.lighting.sky = v >= 0.5,
+            "lighting_emissive" => self.world.scene.lighting.emissive = v >= 0.5,
+            "lighting_prefill" => self.world.scene.lighting.prefill = v >= 0.5,
             _ => return Err(format!("unknown knob {name}")),
         }
         self.apply();
         Ok(())
+    }
+}
+
+fn lighting_preset_knob(settings: &LightingSettings) -> Knob {
+    let index = LightingPreset::all()
+        .iter()
+        .position(|preset| LightingSettings::preset(*preset) == *settings)
+        .unwrap_or(4);
+    Knob::choice(
+        "lighting_preset",
+        "Lighting",
+        index,
+        &["potato", "low", "medium", "high", "custom"],
+    )
+}
+
+fn bounce_index(count: u32) -> usize {
+    match count {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        _ => 3,
     }
 }
