@@ -94,6 +94,7 @@ bool lighting_check_within_noise(uint h, vec3 pos, vec3 n, vec3 refl, vec3 light
     return abs(ln - lo) <= bound;
 }
 void main() {
+    lighting_sun_mark();
     uint idx = gl_GlobalInvocationID.x;
     uint pixels = pc.dims.x * pc.dims.y;
     uint mode = lighting_mode();

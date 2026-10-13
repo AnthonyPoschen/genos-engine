@@ -218,15 +218,17 @@ pub(crate) struct Lighting {
     sun_commit_light: f32,
     sun_commit_n: u32,
     sun_commit_valid: bool,
-    /// Frames that took the small-sun path. Printed, and read by the sun test.
+    /// Frames whose shader reported the small-sun bit. The test reads this.
     sun_frames: u32,
+    /// Last GPU mark (bit 0 sun, bit 1 catch-up) and the band it shaded.
+    sun_gpu_mark: u32,
+    sun_gpu_slice: u32,
     /// Direct-patch compose. Built the first time a small sun step needs it.
     sun_pipe: Handle,
     /// Point lamps only. `None` until the first frame, so a still open does not
     /// look like a lamp that just stopped.
     lamp_key: Option<u64>,
     lamp_moving: bool,
-    catch_base: u32,
     catch_left: u32,
     /// The million-slot cache is allocated. Off, a small dummy stands in.
     cache_full: bool,
@@ -364,10 +366,11 @@ impl Default for Lighting {
             sun_commit_n: 0,
             sun_commit_valid: false,
             sun_frames: 0,
+            sun_gpu_mark: 0,
+            sun_gpu_slice: 0,
             sun_pipe: std::ptr::null_mut(),
             lamp_key: None,
             lamp_moving: false,
-            catch_base: 0,
             catch_left: 0,
             cache_full: false,
             alloc_key: (0, 0, 0, 0, 0),
@@ -402,6 +405,22 @@ fn lighting_atrous_ppm_at() -> u64 {
 }
 /// ppm, previous fraction, 64 filtered-texel bins, 5 level modes, 5 * 64 dense recount bins.
 const LIGHTING_ATROUS_META_WORDS: u64 = 1 + 1 + 64 + 5 + 5 * 64;
+/// Sun-step words after the a-trous meta. Matches `LIGHTING_SUN_AT` in
+/// lighting_cache.glsl (8 words: flags, committed direction, both lights, catch-up).
+/// The picture compose does not read them. They are not the regime tube.
+const LIGHTING_SUN_WORDS: u64 = 8;
+const LIGHTING_SUN_SMALL_BIT: u32 = 1;
+const LIGHTING_SUN_FOLLOWS: u32 = 2;
+const LIGHTING_SUN_PATCH: u32 = 4;
+/// A step inside this relative sun/sky irradiance of the last full refresh stays amortised.
+const LIGHTING_SUN_IRR: f32 = 0.02;
+/// Stats words 142 and 143 (the unfilled pads). Bit 0 of the mark is the sun path.
+const LIGHTING_SUN_MARK: usize = 142;
+const LIGHTING_SUN_SLICE_WORD: usize = 143;
+
+fn lighting_sun_at() -> u64 {
+    lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS
+}
 const LIGHTING_PASS_NAMES: [&str; 9] = [
     "lighting compact",
     "lighting place",
@@ -658,13 +677,22 @@ impl Gpu {
     }
 
     /// Wait for the async light cache submission in flight, if any.
+    ///
+    /// The fence is created signalled. `submit_lighting_world` resets it only
+    /// once the command buffer is ready to submit. Waiting here when nothing
+    /// was submitted blocks exit forever: a failed record leaves the fence
+    /// unsignalled, and `u64::MAX` never returns. A hung compose is a different
+    /// wait (`vkDeviceWaitIdle` in `Drop`); that one ends when the picture
+    /// shader does not walk the occluder grid.
     fn wait_lighting_world(&mut self) {
-        if !self.lighting.world_fence.is_null() {
-            let fences = [self.lighting.world_fence];
-            unsafe {
-                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX);
-            }
+        if !self.lighting.world_busy || self.lighting.world_fence.is_null() {
+            return;
         }
+        let fences = [self.lighting.world_fence];
+        unsafe {
+            (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX);
+        }
+        self.lighting.world_busy = false;
     }
 
     fn make_compute_pipe(&self, code: &[u8], layout: Handle, what: &str) -> Result<Handle, String> {
@@ -1007,6 +1035,111 @@ impl Gpu {
             .unwrap_or_default()
     }
 
+    /// Build the sun compose pipeline the first time a small step needs it.
+    /// Startup still compiles the nine gi-v2 pipelines only.
+    fn ensure_sun_pipe(&mut self) -> Result<(), String> {
+        if !self.lighting.sun_pipe.is_null() {
+            return Ok(());
+        }
+        let start = Instant::now();
+        self.lighting.sun_pipe =
+            self.make_compute_pipe(SUN_COMPOSE_SPV, self.lighting.layout, "lighting sun compose")?;
+        self.note_pipeline_time("lighting sun compose", start);
+        Ok(())
+    }
+
+    /// Record the sun and the view, minus the sun and the sky. Point-lamp motion
+    /// arms the corner catch-up for the frame the lamps stop.
+    pub(crate) fn note_lighting_sun(&mut self, pack: &crate::pack::Pack) {
+        self.lighting.view_content_key = lighting_view_content_key(pack);
+        let (dir, light, n) = lighting_sun_live(pack);
+        self.lighting.sun_live_dir = dir;
+        self.lighting.sun_live_light = light;
+        self.lighting.sun_live_n = n;
+        let key = lighting_point_lamp_key(pack);
+        match self.lighting.lamp_key {
+            None => self.lighting.lamp_key = Some(key),
+            Some(prev) if prev != key => {
+                self.lighting.lamp_key = Some(key);
+                self.lighting.lamp_moving = true;
+                self.lighting.catch_left = 0;
+            }
+            Some(_) if self.lighting.lamp_moving => {
+                self.lighting.lamp_moving = false;
+                self.lighting.catch_left = sun_controls().catch_frames;
+            }
+            _ => {}
+        }
+    }
+
+    /// True when this frame's sun step is inside the staleness budget and the
+    /// camera, meshes, and point lamps held. The committed sun stays put while
+    /// amortising, so the next tick is measured from the last full refresh.
+    fn note_sun_amortise(&mut self) -> bool {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.lighting.view_content_key.hash(&mut hasher);
+        self.mesh_field_key.hash(&mut hasher);
+        self.lighting.draw_key.hash(&mut hasher);
+        let view_key = hasher.finish();
+        let view_held = self.lighting.view_key_valid && view_key == self.lighting.view_key;
+        self.lighting.view_key = view_key;
+        self.lighting.view_key_valid = true;
+        let controls = sun_controls();
+        let amortise = controls.enabled
+            && !controls.full_effort
+            && sun_step_small(&self.lighting)
+            && view_held
+            && self.lighting.sun_live_n > 0
+            && self.lighting.settings.gi.enabled
+            && self.lighting.settings.world_mode() == 3;
+        if !amortise {
+            self.lighting.sun_commit_dir = self.lighting.sun_live_dir;
+            self.lighting.sun_commit_light = self.lighting.sun_live_light;
+            self.lighting.sun_commit_n = self.lighting.sun_live_n;
+            self.lighting.sun_commit_valid = true;
+        }
+        amortise
+    }
+
+    /// GPU mark from the last submitted frame. Waits for that frame.
+    pub(crate) fn lighting_sun_stats(&mut self) -> LightingSunStats {
+        unsafe {
+            (self.fns.device_wait)(self.device);
+        }
+        let slot = self.lighting.last_slot;
+        if let Ok(words) = self.read_stats16(self.lighting.stats[slot].memory) {
+            self.lighting.sun_gpu_mark = words[LIGHTING_SUN_MARK];
+            self.lighting.sun_gpu_slice = words[LIGHTING_SUN_SLICE_WORD];
+        }
+        self.publish_sun_counter();
+        LightingSunStats {
+            gpu_sun: self.lighting.sun_gpu_mark & 1 != 0,
+            gpu_catch: self.lighting.sun_gpu_mark & 2 != 0,
+            slice: self.lighting.sun_gpu_slice,
+            host_frames: self.lighting.sun_frames,
+            catch_left: self.lighting.catch_left,
+        }
+    }
+
+    fn publish_sun_counter(&self) {
+        let dir = sun_out_dir();
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let text = format!(
+            "frame {}\nsun {}\nslice {}\ncatch {}\nhost_frames {}\ncatch_left {}\nbands {}\n",
+            self.lighting.frame,
+            u32::from(self.lighting.sun_gpu_mark & 1 != 0),
+            self.lighting.sun_gpu_slice,
+            u32::from(self.lighting.sun_gpu_mark & 2 != 0),
+            self.lighting.sun_frames,
+            self.lighting.catch_left,
+            sun_controls().bands,
+        );
+        let _ = std::fs::write(dir.join("counter.txt"), text);
+    }
+
     /// The picture has stopped changing: a frame drawn from held light has been
     /// submitted after another, so one is on screen.
     fn lighting_picture_held(&self) -> bool {
@@ -1032,6 +1165,25 @@ impl Gpu {
         // (the async queue's come back with its own submission).
         self.trace_sc(self.lighting.stats[slot].memory, "frame");
         self.lighting_dump_write();
+        // The sun mark is a later read of a copy the frame already made. It does
+        // not update light_quiet. That was the debug print that froze a still scene.
+        if self.lighting.sun_frames > 0 || std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+            if let Ok(words) = self.read_stats16(self.lighting.stats[slot].memory) {
+                self.lighting.sun_gpu_mark = words[LIGHTING_SUN_MARK];
+                self.lighting.sun_gpu_slice = words[LIGHTING_SUN_SLICE_WORD];
+                if std::env::var_os("GENOS_LIGHTING_DEBUG").is_some() {
+                    eprintln!(
+                        "lightingsun frame {} sun {} slice {} catch {} host_frames {}",
+                        self.lighting.frame,
+                        u32::from(self.lighting.sun_gpu_mark & 1 != 0),
+                        self.lighting.sun_gpu_slice,
+                        u32::from(self.lighting.sun_gpu_mark & 2 != 0),
+                        self.lighting.sun_frames,
+                    );
+                }
+                self.publish_sun_counter();
+            }
+        }
         // S70B (no GPU->CPU reads in the frame loop): the surface cache's settling
         // and young-only rounds come from what the CPU already knows (frames still,
         // rounds since the light changed), so its counters are read only for the
@@ -1299,7 +1451,6 @@ impl Gpu {
             (6, LIGHTING_CACHE_BATCH.div_ceil(64)),
         ];
         unsafe {
-            check((self.fns.reset_fences)(self.device, 1, fences.as_ptr()), "reset lighting world fence")?;
             check((self.fns.reset_cmd)(cmd, 0), "reset lighting world cmd")?;
             let begin = BeginInfo {
                 s_type: 42,
@@ -1367,6 +1518,7 @@ impl Gpu {
                 signal_count: 0,
                 signals: std::ptr::null(),
             };
+            check((self.fns.reset_fences)(self.device, 1, fences.as_ptr()), "reset lighting world fence")?;
             check(
                 (self.fns.queue_submit)(
                     self.compute_queue,
@@ -1777,7 +1929,10 @@ impl Gpu {
         }
         // The light alone (no camera): while it holds and a full sweep has changed
         // no mature patch, rounds relight young patches only. Any change goes back
-        // to full sweeps at once.
+        // to full sweeps at once. A small sun step stays on the hash from the last
+        // full refresh: the direction is in the scene hash, and taking the new one
+        // would relight the room as a whole-scene light change.
+        let sun_amortise = self.note_sun_amortise();
         let light = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1790,8 +1945,9 @@ impl Gpu {
             }
             hasher.finish()
         };
-        if light != self.lighting.light_hash {
-            self.lighting.light_hash = light;
+        let tracked = if sun_amortise { self.lighting.light_hash } else { light };
+        if tracked != self.lighting.light_hash {
+            self.lighting.light_hash = tracked;
             self.lighting.light_quiet = 0;
         } else if probe_only(&self.lighting.settings) && self.lighting.still > 0 {
             self.lighting.light_quiet = self.lighting.light_quiet.saturating_add(1);
@@ -1801,7 +1957,7 @@ impl Gpu {
         // round that relights nothing has nothing left to converge.
         let sc = self.lighting.settings.world_mode() == 3;
         let young_only = if sc { self.lighting.light_quiet >= 2 } else { self.lighting.young_ok && self.lighting.light_quiet >= sweep };
-        self.lighting.stats_light[slot] = light;
+        self.lighting.stats_light[slot] = tracked;
         self.lighting.stats_young[slot] = young_only || sc;
         // z: bgra, fills (bit 6), young-only rounds and lamp picks (lighting_common.glsl);
         // the gather and filter passes add their round (bits 1-2) below.
@@ -1830,11 +1986,12 @@ impl Gpu {
         let pc = [w, h, cols, rows, self.lighting.settings.probe_rays(), tile, z, self.lighting.frame];
         let image = self.color.image;
         let blocks = (w.div_ceil(8) as u64) * (h.div_ceil(8) as u64);
-        // Full compose when the picture has no history yet, the scene moved, the
-        // surface cache is off, or the block list cannot cover the image.
-        // GENOS_LIGHTING_COMPOSE_ALL forces it (an A/B against the quiet path).
+        // Full compose when the picture has no history yet, the camera or the
+        // geometry moved, the surface cache is off, or the block list cannot
+        // cover the image. A small sun step, with the camera held, stays on
+        // the list. GENOS_LIGHTING_COMPOSE_ALL forces the full picture.
         let compose_full = !self.lighting.compose_valid
-            || self.lighting.still == 0
+            || !(self.lighting.still > 0 || sun_amortise)
             || self.lighting.settings.world_mode() != 3
             || !self.lighting.settings.compose_reuse
             || !self.lighting.settings.gi.enabled
@@ -1912,6 +2069,36 @@ impl Gpu {
         self.lighting.frame_prefill[slot] = self.lighting.settings.prefill_this_frame();
         let groups = planned.groups;
         let atrous_stages = planned.atrous_stages;
+        let controls = sun_controls();
+        let mut sun_flags = if sun_amortise { LIGHTING_SUN_SMALL_BIT } else { 0 }
+            | (controls.bands << 8)
+            | ((self.lighting.frame % controls.bands) << 16);
+        let mut sun_compose = sun_amortise && !compose_full;
+        if sun_compose {
+            sun_flags |= LIGHTING_SUN_FOLLOWS;
+            if let Err(err) = self.ensure_sun_pipe() {
+                eprintln!("lighting: sun compose off: {err}");
+                sun_flags &= !LIGHTING_SUN_FOLLOWS;
+                sun_compose = false;
+            }
+        }
+        let catch_word = u32::from(self.lighting.catch_left > 0);
+        let sun_words = [
+            0u32,
+            sun_flags,
+            self.lighting.sun_commit_dir[0].to_bits(),
+            self.lighting.sun_commit_dir[1].to_bits(),
+            self.lighting.sun_commit_dir[2].to_bits(),
+            self.lighting.sun_commit_light.to_bits(),
+            self.lighting.sun_live_light.to_bits(),
+            catch_word,
+        ];
+        if catch_word != 0 {
+            self.lighting.catch_left -= 1;
+        }
+        if sun_amortise {
+            self.lighting.sun_frames = self.lighting.sun_frames.saturating_add(1);
+        }
         self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
         unsafe {
             (self.fns.cmd_update_buffer)(
@@ -1949,6 +2136,13 @@ impl Gpu {
                     0,
                 );
             }
+                (self.fns.cmd_update_buffer)(
+                    self.cmd,
+                    self.lighting.cache_keys.buffer,
+                    lighting_sun_at() * 4,
+                    32,
+                    sun_words.as_ptr() as *const c_void,
+                );
             }
             self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x1);
             (self.fns.cmd_bind_set)(
@@ -2058,7 +2252,12 @@ impl Gpu {
                         k_pc.as_ptr() as *const c_void,
                     );
                 }
-                (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.pipes[pass]);
+                let pipe = if pass == 7 && sun_compose {
+                    self.lighting.sun_pipe
+                } else {
+                    self.lighting.pipes[pass]
+                };
+                (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
                 if pass == 7 && !compose_full {
                     (self.fns.cmd_dispatch_indirect)(
                         self.cmd,
@@ -2076,6 +2275,23 @@ impl Gpu {
                 }
                 if kind != 0 {
                     (self.fns.cmd_push)(self.cmd, self.lighting.layout, 0x20, 0, 32, cur_pc.as_ptr() as *const c_void);
+                }
+                if pass == 7 && sun_compose {
+                    // The list compose stored bounce and left the G-buffer direct.
+                    // This patch applies that direct on every pixel. It is the sun
+                    // shader, not the picture compose, so the occluder walk stays out.
+                    self.memory_barrier(0x800, 0x1000, 0x40, 0x1000);
+                    let patch_flags = (sun_flags & !LIGHTING_SUN_FOLLOWS) | LIGHTING_SUN_PATCH;
+                    (self.fns.cmd_update_buffer)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        (lighting_sun_at() + 1) * 4,
+                        4,
+                        &patch_flags as *const u32 as *const c_void,
+                    );
+                    self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+                    (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.sun_pipe);
+                    (self.fns.cmd_dispatch)(self.cmd, w.div_ceil(8).max(1), h.div_ceil(8).max(1), 1);
                 }
                 // The args pass's sizes are read as indirect commands (stage 0x2, access 0x1).
                 self.memory_barrier(0x800, 0x800 | 0x1000 | 0x2, 0x40, 0x20 | 0x40 | 0x800 | 0x1);
@@ -2291,6 +2507,7 @@ impl Gpu {
                 .pipes
                 .iter_mut()
                 .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))
+                .chain(std::iter::once(&mut self.lighting.sun_pipe))
             {
                 if !pipe.is_null() {
                     (self.fns.destroy_pipeline)(self.device, *pipe, std::ptr::null());
@@ -2626,6 +2843,387 @@ fn lighting_toggles() -> u32 {
         };
     }
     bits
+}
+
+/// Last submitted frame's sun-path proof. `gpu_sun` is the shader's own bit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LightingSunStats {
+    pub gpu_sun: bool,
+    pub gpu_catch: bool,
+    pub slice: u32,
+    pub host_frames: u32,
+    pub catch_left: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SunCli {
+    enabled: Option<bool>,
+    full_effort: Option<bool>,
+    bands: Option<u32>,
+    catch_frames: Option<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct SunControls {
+    enabled: bool,
+    full_effort: bool,
+    bands: u32,
+    catch_frames: u32,
+}
+
+fn sun_controls() -> SunControls {
+    static CLI: std::sync::OnceLock<SunCli> = std::sync::OnceLock::new();
+    let cli = CLI.get_or_init(sun_cli_from_args);
+    let enabled = cli.enabled.unwrap_or_else(|| sun_env_bool("GENOS_LIGHTING_SUN", true));
+    let full_effort = cli
+        .full_effort
+        .unwrap_or_else(|| std::env::var("GENOS_LIGHTING_FULL_EFFORT").ok().as_deref() == Some("1"));
+    let bands = cli
+        .bands
+        .unwrap_or_else(|| sun_env_u32("GENOS_LIGHTING_SUN_BANDS", 8))
+        .clamp(1, 64);
+    let catch_frames = cli
+        .catch_frames
+        .unwrap_or_else(|| sun_env_u32("GENOS_LIGHTING_CATCH_UP", 4))
+        .min(16);
+    SunControls {
+        enabled,
+        full_effort,
+        bands,
+        catch_frames,
+    }
+}
+
+fn sun_env_bool(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(text) => !matches!(text.trim(), "0" | "off" | "false"),
+        Err(_) => default,
+    }
+}
+
+fn sun_env_u32(name: &str, default: u32) -> u32 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+fn sun_out_dir() -> std::path::PathBuf {
+    if let Some(dir) = genos_scene::DebugSettings::cli_out() {
+        return std::path::PathBuf::from(dir).join("sun");
+    }
+    std::path::PathBuf::from("genos-debug/sun")
+}
+
+fn sun_cli_from_args() -> SunCli {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut cli = SunCli::default();
+    let mut i = 0;
+    while i < args.len() {
+        let next = args.get(i + 1).map(String::as_str);
+        if let Some(Ok(flag)) = parse_sun_flag(&args[i], next) {
+            match flag {
+                SunFlag::Enabled(v) => cli.enabled = Some(v),
+                SunFlag::FullEffort => cli.full_effort = Some(true),
+                SunFlag::Bands(v) => cli.bands = Some(v),
+                SunFlag::Catch(v) => cli.catch_frames = Some(v),
+            }
+            if lighting_sun_flag_needs_value(&args[i]) == Some(true) {
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+    cli
+}
+
+enum SunFlag {
+    Enabled(bool),
+    FullEffort,
+    Bands(u32),
+    Catch(u32),
+}
+
+fn sun_dash(arg: &str) -> Option<(&str, Option<&str>)> {
+    let rest = arg.strip_prefix("--")?;
+    match rest.split_once('=') {
+        Some((name, value)) => Some((name, Some(value))),
+        None => Some((rest, None)),
+    }
+}
+
+/// `Some(true)` when `arg` is a sun-path flag that reads the next argument.
+/// `Some(false)` when the flag already includes its value. `None` otherwise.
+pub fn lighting_sun_flag_needs_value(arg: &str) -> Option<bool> {
+    let (name, inline) = sun_dash(arg)?;
+    match name {
+        "lighting-full-effort" => Some(false),
+        "lighting-sun" | "lighting-sun-bands" | "lighting-catch-up" => Some(inline.is_none()),
+        _ => None,
+    }
+}
+
+/// Reject a bad sun-path argument. `next` is the following argument when
+/// [`lighting_sun_flag_needs_value`] is `Some(true)`.
+pub fn check_lighting_sun_arg(arg: &str, next: Option<&str>) -> Result<(), String> {
+    match parse_sun_flag(arg, next) {
+        Some(result) => result.map(|_| ()),
+        None => Ok(()),
+    }
+}
+
+fn parse_sun_flag(arg: &str, next: Option<&str>) -> Option<Result<SunFlag, String>> {
+    let (name, inline) = sun_dash(arg)?;
+    let value = inline.or(next);
+    let flag = match name {
+        "lighting-full-effort" => {
+            if inline.is_some() {
+                return Some(Err("--lighting-full-effort takes no value".into()));
+            }
+            SunFlag::FullEffort
+        }
+        "lighting-sun" => {
+            let Some(text) = value else {
+                return Some(Err("--lighting-sun needs on or off".into()));
+            };
+            let on = match text {
+                "on" | "1" => true,
+                "off" | "0" => false,
+                _ => return Some(Err(format!("--lighting-sun is on or off, got {text}"))),
+            };
+            SunFlag::Enabled(on)
+        }
+        "lighting-sun-bands" => {
+            let Some(text) = value else {
+                return Some(Err("--lighting-sun-bands needs 1..64".into()));
+            };
+            let n: u32 = match text.parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    return Some(Err(format!("--lighting-sun-bands needs 1..64, got {text}")));
+                }
+            };
+            if !(1..=64).contains(&n) {
+                return Some(Err(format!("--lighting-sun-bands needs 1..64, got {text}")));
+            }
+            SunFlag::Bands(n)
+        }
+        "lighting-catch-up" => {
+            let Some(text) = value else {
+                return Some(Err("--lighting-catch-up needs 0..16".into()));
+            };
+            let n: u32 = match text.parse() {
+                Ok(n) => n,
+                Err(_) => return Some(Err(format!("--lighting-catch-up needs 0..16, got {text}"))),
+            };
+            if n > 16 {
+                return Some(Err(format!("--lighting-catch-up needs 0..16, got {text}")));
+            }
+            SunFlag::Catch(n)
+        }
+        _ => return None,
+    };
+    Some(Ok(flag))
+}
+
+fn lighting_sun_live(pack: &crate::pack::Pack) -> ([f32; 3], f32, u32) {
+    let mut dir = [0.0_f32; 3];
+    let mut n = 0u32;
+    let mut light = pack.sky.into_iter().fold(0.0_f32, f32::max);
+    for lamp in &pack.lamps {
+        if !lamp.directional {
+            continue;
+        }
+        if n == 0 {
+            dir = lamp.pos;
+        }
+        n += 1;
+        let up = (-lamp.pos[1]).max(0.0);
+        let peak = lamp.color.into_iter().fold(0.0_f32, f32::max);
+        light += up * peak;
+    }
+    (dir, light, n)
+}
+
+fn sun_step_small(lighting: &Lighting) -> bool {
+    if !lighting.sun_commit_valid || lighting.sun_live_n == 0 || lighting.sun_live_n != lighting.sun_commit_n {
+        return false;
+    }
+    let dot = lighting.sun_live_dir[0] * lighting.sun_commit_dir[0]
+        + lighting.sun_live_dir[1] * lighting.sun_commit_dir[1]
+        + lighting.sun_live_dir[2] * lighting.sun_commit_dir[2];
+    if dot < (2.0_f32.to_radians()).cos() {
+        return false;
+    }
+    let scale = lighting.sun_live_light.max(lighting.sun_commit_light).max(1.0e-3);
+    let irr = (lighting.sun_live_light - lighting.sun_commit_light).abs() / scale;
+    if irr > LIGHTING_SUN_IRR {
+        return false;
+    }
+    // A day-clock tick is about 0.05 degrees. Treating that as "unchanged" and
+    // then moving the commit forward meant the step never accumulated, so the
+    // path never engaged. Any change of the stored direction, still inside the
+    // budget, is a small step. A frozen sun compares equal and stays off.
+    lighting.sun_live_dir != lighting.sun_commit_dir || irr > 1.0e-6
+}
+
+fn hash_f32(hasher: &mut std::collections::hash_map::DefaultHasher, v: f32) {
+    use std::hash::Hash;
+    v.to_bits().hash(hasher);
+}
+
+fn lighting_point_lamp_key(pack: &crate::pack::Pack) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for lamp in &pack.lamps {
+        if lamp.directional {
+            continue;
+        }
+        for v in lamp.pos {
+            hash_f32(&mut hasher, v);
+        }
+        for v in lamp.color {
+            hash_f32(&mut hasher, v);
+        }
+    }
+    hasher.finish()
+}
+
+/// What a held camera sees, excluding the directional sun and the sky.
+fn lighting_view_content_key(pack: &crate::pack::Pack) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for lamp in &pack.lamps {
+        if lamp.directional {
+            continue;
+        }
+        for v in lamp.pos {
+            hash_f32(&mut hasher, v);
+        }
+        for v in lamp.color {
+            hash_f32(&mut hasher, v);
+        }
+        hash_f32(&mut hasher, lamp.range);
+    }
+    for v in pack.eye {
+        hash_f32(&mut hasher, v);
+    }
+    for v in pack.view_right {
+        hash_f32(&mut hasher, v);
+    }
+    for v in pack.view_up {
+        hash_f32(&mut hasher, v);
+    }
+    for v in pack.view_forward {
+        hash_f32(&mut hasher, v);
+    }
+    hash_f32(&mut hasher, pack.view_tan);
+    hash_f32(&mut hasher, pack.view_aspect);
+    for v in pack.floor_center {
+        hash_f32(&mut hasher, v);
+    }
+    hash_f32(&mut hasher, pack.floor_half_x);
+    hash_f32(&mut hasher, pack.floor_half_z);
+    for v in pack.floor_color {
+        hash_f32(&mut hasher, v);
+    }
+    for v in pack.ceiling {
+        hash_f32(&mut hasher, v);
+    }
+    for v in pack.fire.position {
+        hash_f32(&mut hasher, v);
+    }
+    for v in pack.fire.color {
+        hash_f32(&mut hasher, v);
+    }
+    hash_f32(&mut hasher, pack.fire.strength);
+    pack.occs.len().hash(&mut hasher);
+    for occ in &pack.occs {
+        for v in occ.center {
+            hash_f32(&mut hasher, v);
+        }
+        hash_f32(&mut hasher, occ.shape);
+        hash_f32(&mut hasher, occ.half_x);
+        hash_f32(&mut hasher, occ.height);
+        hash_f32(&mut hasher, occ.half_z);
+        hash_f32(&mut hasher, occ.radius);
+        hash_f32(&mut hasher, occ.yaw);
+        for v in occ.albedo {
+            hash_f32(&mut hasher, v);
+        }
+    }
+    hasher.finish()
+}
+
+#[cfg(test)]
+mod sun_step {
+    use super::{
+        check_lighting_sun_arg, lighting_sun_flag_needs_value, sun_step_small, Lighting,
+        LIGHTING_COMPOSE_SPV, SUN_COMPOSE_SPV,
+    };
+
+    fn lighting_at(dir: [f32; 3], light: f32) -> Lighting {
+        let mut lighting = Lighting::default();
+        lighting.sun_commit_valid = true;
+        lighting.sun_commit_n = 1;
+        lighting.sun_live_n = 1;
+        lighting.sun_commit_dir = [0.0, -1.0, 0.0];
+        lighting.sun_commit_light = 1.0;
+        lighting.sun_live_dir = dir;
+        lighting.sun_live_light = light;
+        lighting
+    }
+
+    #[test]
+    fn a_frozen_sun_is_not_a_small_step() {
+        assert!(!sun_step_small(&lighting_at([0.0, -1.0, 0.0], 1.0)));
+    }
+
+    #[test]
+    fn a_day_tick_inside_two_degrees_is_a_small_step() {
+        let rad = 0.2_f32.to_radians();
+        let dir = [rad.sin(), -rad.cos(), 0.0];
+        assert!(sun_step_small(&lighting_at(dir, 1.0)));
+    }
+
+    #[test]
+    fn a_step_past_two_degrees_or_two_percent_is_a_full_refresh() {
+        let rad = 3.0_f32.to_radians();
+        assert!(!sun_step_small(&lighting_at([rad.sin(), -rad.cos(), 0.0], 1.0)));
+        assert!(!sun_step_small(&lighting_at([0.0, -1.0, 0.0], 1.03)));
+    }
+
+    #[test]
+    fn sun_arguments_reject_a_bad_value() {
+        assert!(lighting_sun_flag_needs_value("--lighting-full-effort").is_some_and(|v| !v));
+        assert!(lighting_sun_flag_needs_value("--lighting-sun").unwrap());
+        assert!(lighting_sun_flag_needs_value("--lighting-sun=off").is_some_and(|v| !v));
+        assert!(lighting_sun_flag_needs_value("--preset").is_none());
+        assert!(check_lighting_sun_arg("--lighting-sun", Some("on")).is_ok());
+        assert!(check_lighting_sun_arg("--lighting-sun-bands", Some("8")).is_ok());
+        assert!(check_lighting_sun_arg("--lighting-catch-up", Some("0")).is_ok());
+        assert!(check_lighting_sun_arg("--lighting-sun-bands", Some("0")).is_err());
+        assert!(check_lighting_sun_arg("--lighting-sun-bands", Some("nope")).is_err());
+        assert!(check_lighting_sun_arg("--lighting-sun-bands", None).is_err());
+        assert!(check_lighting_sun_arg("--lighting-catch-up", Some("17")).is_err());
+        assert!(check_lighting_sun_arg("--lighting-full-effort=1", None).is_err());
+        assert!(check_lighting_sun_arg("--scale", None).is_ok());
+    }
+
+    /// The picture compose stays the gi-v2 shader. The sun compose is that pass
+    /// plus the sun words, not an occluder walk copied into both.
+    #[test]
+    fn compose_spirv_stays_near_the_picture_pass() {
+        assert!(
+            LIGHTING_COMPOSE_SPV.len() < 220_000,
+            "compose SPIR-V is {} bytes",
+            LIGHTING_COMPOSE_SPV.len()
+        );
+        let extra = SUN_COMPOSE_SPV.len().saturating_sub(LIGHTING_COMPOSE_SPV.len());
+        assert!(
+            extra < 32_000,
+            "sun compose grew by {extra} bytes (compose {}, sun {})",
+            LIGHTING_COMPOSE_SPV.len(),
+            SUN_COMPOSE_SPV.len()
+        );
+    }
 }
 
 include!("lighting_dispatch.rs");

@@ -95,6 +95,7 @@ uint lighting_bounce_word(uint index) {
 }
 
 void main() {
+    lighting_sun_mark();
     bool direct_patch = lighting_sun_patch_now();
     bool follows = lighting_sun_patch_follows();
     uvec2 p;

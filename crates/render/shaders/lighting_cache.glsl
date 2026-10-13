@@ -2991,6 +2991,23 @@ bool lighting_sun_hold_fill(uint h) {
     }
     return floatBitsToUint(work.v[lighting_fill_light_at() + h / 4u][h % 4u]) != 0u;
 }
+// One thread records that this dispatch took the sun path. Bit 0: a small sun
+// step. Bit 1: the corner catch-up. The slice id is the band this frame shades
+// with the live sun. The pads are otherwise unused (unfilled mask alignment).
+void lighting_sun_mark() {
+    if (gl_GlobalInvocationID.x != 0u || gl_GlobalInvocationID.y != 0u || gl_GlobalInvocationID.z != 0u) {
+        return;
+    }
+    uint mark = 0u;
+    if (lighting_sun_small()) {
+        mark |= 1u;
+    }
+    if (lighting_catch_up()) {
+        mark |= 2u;
+    }
+    gstats.unfilled_pad0 = mark;
+    gstats.unfilled_pad1 = lighting_sun_slice_id();
+}
 #endif
 
 // Layer-1 input: rgb, luminance variance (-1 unknown), mask weight.
