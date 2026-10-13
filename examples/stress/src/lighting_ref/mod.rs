@@ -14,6 +14,7 @@ mod schedule;
 
 use std::path::PathBuf;
 
+pub use capture::cold_mean_luminance;
 pub use generate::{generate, GenerateOptions, TraceProfile};
 
 /// Every available catalog checkpoint has a camera in this driver.

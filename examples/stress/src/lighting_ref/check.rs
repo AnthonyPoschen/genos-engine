@@ -495,6 +495,7 @@ fn capture_live(
         params: *params,
         jobs,
         warm: opts.warm,
+        lighting_seed: None,
     }) {
         Ok(outcome) => {
             for (scene, checkpoint, reason) in outcome.skipped {

@@ -65,6 +65,9 @@ pub struct CaptureOptions {
     /// Keep one renderer, and its lighting caches, across checkpoints.
     /// The default opens a fresh renderer for each checkpoint.
     pub warm: bool,
+    /// `None` is the pose seed. `Some(0)` is the live game. A non-zero value
+    /// replaces the pose seed. The check command leaves this unset.
+    pub lighting_seed: Option<u32>,
 }
 
 pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
@@ -136,7 +139,10 @@ fn capture_one(
         },
     );
     let (mut stage, camera) = scenes::open_stage(shot, opts.full_effort, opts.bounces);
-    renderer.set_lighting_seed(scenes::pose_seed(shot, opts.full_effort, opts.bounces));
+    let seed = opts
+        .lighting_seed
+        .unwrap_or_else(|| scenes::pose_seed(shot, opts.full_effort, opts.bounces));
+    renderer.set_lighting_seed(seed);
     let max_offset = opts.plan.capture_offsets.iter().copied().max().unwrap_or(0);
     let mut log = Vec::new();
     let mut settle_pics = Vec::new();
@@ -441,4 +447,64 @@ fn shot_note(
         format_mean(blur_rel),
         format_mean(luma_ratio),
     )
+}
+
+/// Mean linear luminance of one cold checkpoint's cap frame.
+///
+/// `seed` `None` is the pose seed. `Some(0)` is the live game. The two stay
+/// within noise: the seed picks which equivalent write wins and does not drop
+/// light.
+pub fn cold_mean_luminance(
+    scene: &str,
+    checkpoint: &str,
+    seed: Option<u32>,
+    width: u32,
+    height: u32,
+    cap: u32,
+) -> Result<f64, String> {
+    if scenes::shot(scene, checkpoint).is_none() {
+        return Err(format!("no camera for {scene}/{checkpoint}"));
+    }
+    let opts = CaptureOptions {
+        width,
+        height,
+        full_effort: false,
+        bounces: None,
+        lavapipe_small: true,
+        plan: FramePlan {
+            fixed_dt: schedule::DEFAULT_DT,
+            warmup_frames: 0,
+            settle: SettleMode::Metric {
+                threshold: schedule::DEFAULT_SETTLE_THRESHOLD,
+                cap,
+            },
+            capture_offsets: vec![1],
+        },
+        params: genos_lighting_ref::MetricParams::default(),
+        jobs: vec![Job {
+            scene: scene.to_string(),
+            checkpoint: checkpoint.to_string(),
+            still: true,
+            event: None,
+            reference: None,
+            reference_noise: 0.0,
+        }],
+        warm: false,
+        lighting_seed: seed,
+    };
+    let outcome = capture(&opts)?;
+    let picture = outcome
+        .shots
+        .first()
+        .and_then(|shot| shot.settled.as_ref())
+        .ok_or_else(|| "cold capture produced no settled picture".to_string())?;
+    let n = picture.pixels();
+    if n == 0 {
+        return Err("settled picture is empty".into());
+    }
+    let mut sum = 0.0f64;
+    for i in 0..n {
+        sum += f64::from(picture.luma_at(i));
+    }
+    Ok(sum / n as f64)
 }

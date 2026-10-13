@@ -429,6 +429,10 @@ const LIGHTING_ATROUS_META_WORDS: u64 = 1 + 1 + 64 + 5 + 5 * 64;
 /// lighting_cache.glsl (8 words: flags, committed direction, both lights, catch-up).
 /// The picture compose does not read them. They are not the regime tube.
 const LIGHTING_SUN_WORDS: u64 = 8;
+/// Seeded rgb9e5 and offer score, one word each per slot, after the sun words.
+/// Matches `LIGHTING_SEED_COLOR_AT` and `LIGHTING_OFFER_AT`. Seed 0 does not
+/// read them. They do not move the a-trous or sun offsets.
+const LIGHTING_SEED_WORDS: u64 = 2 * LIGHTING_CACHE_SLOTS;
 const LIGHTING_SUN_SMALL_BIT: u32 = 1;
 /// Picture compose over the whole grid.
 const COMPOSE_FULL: u8 = 1;
@@ -888,7 +892,11 @@ impl Gpu {
                 assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
                 assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
                 self.lighting.cache_keys = self.make_buffer_queues(
-                    (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS + LIGHTING_SUN_WORDS) * 4,
+                    (lighting_atrous_ppm_at()
+                        + LIGHTING_ATROUS_META_WORDS
+                        + LIGHTING_SUN_WORDS
+                        + LIGHTING_SEED_WORDS)
+                        * 4,
                     0x20 | 0x2 | 0x100 | 0x1,
                     Memory::Device,
                     &share,

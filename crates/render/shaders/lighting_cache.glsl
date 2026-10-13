@@ -239,6 +239,11 @@ const uint LIGHTING_COMPOSE_MINX = LIGHTING_COMPOSE_PACK + LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_COMPOSE_MINY = LIGHTING_COMPOSE_MINX + LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_COMPOSE_MAXX = LIGHTING_COMPOSE_MINY + LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_COMPOSE_MAXY = LIGHTING_COMPOSE_MAXX + LIGHTING_CACHE_SLOTS;
+// After the a-trous meta (391) and the sun words (8). Same base as
+// LIGHTING_ATROUS_PPM_AT. Seed 0 never reads these. A seeded run keeps one
+// rgb9e5 and one offer score per slot, past every published cache key.
+const uint LIGHTING_SEED_COLOR_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS + 391u + 8u;
+const uint LIGHTING_OFFER_AT = LIGHTING_SEED_COLOR_AT + LIGHTING_CACHE_SLOTS;
 // Set by the compose pass around the lookups that colour a pixel.
 bool lighting_sc_display = false;
 uvec2 lighting_compose_px = uvec2(0u);
@@ -821,12 +826,14 @@ vec3 lighting_sc_centre(vec3 pos, vec3 n, float size) {
     return q;
 }
 
-// Seeded claim. The live game (seed 0) keeps the scan below. A non-zero seed
-// publishes one payload for the key: the cell centre and the axis, not the hit
-// that won the race. The slot is taken with an atomic read of the window, so two
-// threads cannot each miss the other's key and leave two copies. A full window
-// drops the patch. The same keys drop it every run.
-uint lighting_cache_claim_seeded(vec3 pos, vec3 n, bool claim, float size, uint key, uint start) {
+// Seeded claim. The live game (seed 0) keeps the scan below. The whole window
+// is read before any free slot is taken: a hole in front of a live key must not
+// become a second, empty copy of that key. The payload is the cell centre on
+// the surface through the claim (the axis-aligned depth stays on that plane)
+// and the axis, so every claimer writes one point. A full window drops the
+// patch, the same as the live scan.
+uint lighting_cache_claim_seeded(vec3 pos, vec3 n, bool claim, float size, vec3 at, uint key, uint start) {
+    uint free_at = LIGHTING_CACHE_SEARCH;
     [[dont_unroll]] for (uint i = 0u; i < LIGHTING_CACHE_SEARCH; i++) {
         uint slot = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
         uint prev = atomicCompSwap(ckeys.key[slot], key, key);
@@ -834,7 +841,21 @@ uint lighting_cache_claim_seeded(vec3 pos, vec3 n, bool claim, float size, uint 
             lighting_compose_cover(slot);
             return slot;
         }
-        if (prev != 0u || !claim) {
+        if (prev == 0u && free_at == LIGHTING_CACHE_SEARCH) {
+            free_at = i;
+        }
+    }
+    if (!claim || free_at == LIGHTING_CACHE_SEARCH) {
+        return ~0u;
+    }
+    [[dont_unroll]] for (uint i = free_at; i < LIGHTING_CACHE_SEARCH; i++) {
+        uint slot = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
+        uint prev = atomicCompSwap(ckeys.key[slot], key, key);
+        if (prev == key) {
+            lighting_compose_cover(slot);
+            return slot;
+        }
+        if (prev != 0u) {
             continue;
         }
         prev = atomicCompSwap(ckeys.key[slot], 0u, key);
@@ -846,13 +867,15 @@ uint lighting_cache_claim_seeded(vec3 pos, vec3 n, bool claim, float size, uint 
             continue;
         }
         atomicAdd(gstats.claimed, 1u);
-        vec3 inset = lighting_world_mode() != 0u ? 0.5 * lighting_axis_vec(lighting_axis(n)) : vec3(0.0);
-        vec3 centre = (floor(pos / size - inset) + 0.5 + inset) * size;
-        vec3 axis = lighting_axis_vec(lighting_axis(n));
-        cache.v[3u * slot] = vec4(centre, uintBitsToFloat(lighting_frame()));
-        cache.v[3u * slot + 1u] = vec4(axis, size);
+        if (lighting_world_mode() == 3u) {
+            vec3 axis = lighting_axis_vec(lighting_axis(n));
+            at = lighting_sc_centre(pos, axis, size);
+            n = axis;
+        }
+        cache.v[3u * slot] = vec4(at, uintBitsToFloat(lighting_frame()));
+        cache.v[3u * slot + 1u] = vec4(n, size);
         cache.v[3u * slot + 2u] = vec4(0.0);
-        cache.v[LIGHTING_WORLD_AT + slot] = vec4(0.0);
+        cache.v[LIGHTING_WORLD_AT + slot] = vec4(length(at - lighting_sc_centre(pos, n, size)), 0.0, 0.0, 0.0);
         cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(0.0);
         cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(0.0);
         cache.v[LIGHTING_SC_SPARSE_AT + slot] = vec4(0.0);
@@ -873,7 +896,7 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
     uint key = lighting_cache_key_sized(pos, n, size);
     uint start = lighting_hash(key ^ 0x9e3779b9u);
     if (pc.seed != 0u) {
-        return lighting_cache_claim_seeded(pos, n, claim, size, key, start);
+        return lighting_cache_claim_seeded(pos, n, claim, size, at, key, start);
     }
     uint free_at = LIGHTING_CACHE_SEARCH;
     [[dont_unroll]] for (uint i = 0u; i < LIGHTING_CACHE_SEARCH; i++) {
@@ -933,9 +956,32 @@ uint lighting_cache_find(vec3 pos, vec3 n, bool claim) {
 // ends up lit from the surface point nearest its centre whoever claimed it first
 // (the centre itself can lie inside a wall at a corner).
 void lighting_sc_offer(uint slot, vec3 at, vec3 centre) {
-    // A seeded run keeps the claim's cell centre. Moving it to whichever reader
-    // is nearer, and maybe restarting the sample count, follows arrival order.
-    if (pc.seed != 0u || lighting_world_mode() != 3u) {
+    if (lighting_world_mode() != 3u) {
+        return;
+    }
+    // A seeded run still moves the point onto the nearest real hit. The score
+    // picks one of those hits. The sample count is not restarted.
+    if (pc.seed != 0u) {
+        if ((lighting_sc_flags() & 16384u) != 0u) {
+            return;
+        }
+        float d = length(at - centre);
+        float near01 = clamp(1.0 - d * 0.25, 0.0, 1.0);
+        uint q = min(uint(near01 * 65535.0), 65535u);
+        uint tie = lighting_hash(floatBitsToUint(at.x) ^ lighting_hash(floatBitsToUint(at.y) ^ floatBitsToUint(at.z)));
+        uint score = (q << 16u) | (tie & 0xffffu);
+        if (score == 0u) {
+            score = 1u;
+        }
+        uint prev = atomicMax(ckeys.key[LIGHTING_OFFER_AT + slot], score);
+        if (score > prev) {
+            cache.v[LIGHTING_WORLD_AT + slot].x = d;
+            cache.v[3u * slot].xyz = at;
+            if (ckeys.key[LIGHTING_OFFER_AT + slot] == score) {
+                cache.v[LIGHTING_WORLD_AT + slot].x = d;
+                cache.v[3u * slot].xyz = at;
+            }
+        }
         return;
     }
     // Flag 524288 (camera only orders updates): the point still moves toward the
@@ -1961,17 +2007,32 @@ bool lighting_sc_has_seed(uint slot) {
     return cache.v[LIGHTING_SC_SPARSE_AT + slot].z > 0.0;
 }
 void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
-    // The seed is this pixel's probes or this pixel's resample. Publishing it
-    // lets the last writer pick the texel's first light. A seeded run shows
-    // that value and leaves the texel empty until its own rays fill it.
-    if (pc.seed != 0u) {
-        return;
-    }
     if (cache.v[3u * slot + 2u].w < 0.5) {
         cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(sunfrac, max(lighting_ls_now(), 0.0), 0.0, 0.0);
     }
     cache.v[LIGHTING_SC_SPARSE_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0))));
     cache.v[LIGHTING_SC_SPARSE_AT + slot].z = clamp(conf, 0.05, 1.0);
+}
+// Probe light differs per pixel. atomicMax keeps one real rgb9e5 of those
+// writes. A late dimmer writer sees the higher word and leaves it. Two stores,
+// not a spin. Seed 0 keeps the last writer.
+void lighting_sc_set_probe_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
+    if (pc.seed == 0u) {
+        lighting_sc_set_seed(slot, rgb, conf, sunfrac);
+        return;
+    }
+    uint packed = lighting_pack_rgb9e5(max(rgb, vec3(0.0)));
+    if (packed == 0u) {
+        packed = 1u;
+    }
+    uint prev = atomicMax(ckeys.key[LIGHTING_SEED_COLOR_AT + slot], packed);
+    if (packed < prev) {
+        return;
+    }
+    lighting_sc_set_seed(slot, lighting_unpack_rgb9e5(packed), conf, sunfrac);
+    if (ckeys.key[LIGHTING_SEED_COLOR_AT + slot] == packed) {
+        lighting_sc_set_seed(slot, lighting_unpack_rgb9e5(packed), conf, sunfrac);
+    }
 }
 vec4 lighting_sc_seed(uint slot) {
     vec4 sp = cache.v[LIGHTING_SC_SPARSE_AT + slot];
@@ -2952,10 +3013,11 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
                 // S72N: a seed beside the texel's own (empty) mean, confidence
                 // by the samples it came from (8 = whole).
                 lighting_sc_set_seed(slot, rs.rgb, min(rs.w / LIGHTING_WRC_SEED_SETS, 1.0), lighting_seed_sunfrac);
-            } else if (rs.w > 0.5 && pc.seed == 0u) {
+            } else if (rs.w > 0.5) {
                 // S62E: the seed is light as of now; stored in the slot's scale.
                 // S64B: the seed is light as of now, with its seeds' sun/sky share.
-                // A seeded run does not store it: the resample is this pixel's.
+                // The resample is a function of the cell, so every writer stores
+                // the same bits.
                 cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(lighting_seed_sunfrac, max(lighting_ls_now(), 0.0), 0.0, 0.0);
                 cache.v[3u * slot + 2u] = rs;
             }
@@ -2991,17 +3053,32 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
                 }
             } else if (split && lighting_px_probes.x >= 0.0 && !obj && cache.v[3u * slot + 2u].w < 0.5) {
                 // S72N: the S72M probe seed, as a seed (not an own set).
-                lighting_sc_set_seed(slot, lighting_px_probes, 0.25, 0.0);
+                // A seeded run stores one real probe color. This pixel still
+                // shows its own probes this frame.
+                lighting_sc_set_probe_seed(slot, lighting_px_probes, 0.25, 0.0);
                 v = vec4(lighting_px_probes, 1.0);
             } else if (lighting_px_probes.x >= 0.0 && !obj && cache.v[3u * slot + 1u].w <= 0.2 && cache.v[3u * slot + 2u].w < 0.5) {
                 // S72M (video: first reveal tore along the screen, the new strip
                 // on the probes, the rest on texels): nothing lit here yet, so the
                 // texel starts from the probes' light at this pixel, one set's
                 // worth; its own sets replace it (count-weighted, as any mean).
-                // A seeded run shows that light and does not store it.
                 if (pc.seed == 0u) {
                     cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(0.0, max(lighting_ls_now(), 0.0), 0.0, 0.0);
                     cache.v[3u * slot + 2u] = vec4(lighting_px_probes, 1.0);
+                } else if (cache.v[3u * slot + 2u].w < 0.5) {
+                    uint packed = lighting_pack_rgb9e5(max(lighting_px_probes, vec3(0.0)));
+                    if (packed == 0u) {
+                        packed = 1u;
+                    }
+                    uint prev = atomicMax(ckeys.key[LIGHTING_SEED_COLOR_AT + slot], packed);
+                    if (packed >= prev) {
+                        vec3 won = lighting_unpack_rgb9e5(packed);
+                        cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(0.0, max(lighting_ls_now(), 0.0), 0.0, 0.0);
+                        cache.v[3u * slot + 2u] = vec4(won, 1.0);
+                        if (ckeys.key[LIGHTING_SEED_COLOR_AT + slot] == packed) {
+                            cache.v[3u * slot + 2u] = vec4(won, 1.0);
+                        }
+                    }
                 }
                 v = vec4(lighting_px_probes, 1.0);
             }
@@ -4132,11 +4209,6 @@ uint lighting_shadow_cell(vec3 o, vec3 n, uint li, out uint tag) {
     return LIGHTING_SHADOW_AT + (lighting_hash(h ^ 0x5bd1e995u) % LIGHTING_CACHE_SLOTS);
 }
 float lighting_shadow_get(vec3 o, vec3 n, uint li) {
-    // A seeded run traces every shadow. The cell is shared by every hit in it,
-    // and the last writer would keep whichever hit finished last.
-    if (pc.seed != 0u) {
-        return -1.0;
-    }
     // Shadows off, or the hard filter: trace, do not read the cell.
     if ((gstats.ctrl_bits & 2u) == 0u || (gstats.ctrl_bits & 2048u) != 0u) {
         return -1.0;
@@ -4156,9 +4228,6 @@ float lighting_shadow_get(vec3 o, vec3 n, uint li) {
 const bool LIGHTING_COMPACT_LIST = true;
 const uint LIGHTING_COMPACT_IDLE = 8u;
 void lighting_shadow_put(vec3 o, vec3 n, uint li, bool lit) {
-    if (pc.seed != 0u) {
-        return;
-    }
     if ((gstats.ctrl_bits & 2u) == 0u || (gstats.ctrl_bits & 2048u) != 0u) {
         return;
     }

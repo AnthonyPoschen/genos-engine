@@ -301,10 +301,10 @@ void main() {
                 list = tl;
                 count = lamp_list_size(list);
             } else if (tdl_sig != 0u && (pc.seed != 0u || atomicAdd(ckeys.key[LIGHTING_TDL_COUNT_AT], 1u) < LIGHTING_TDL_BUDGET)) {
-                // A seeded run admits every texel. The budget counter is arrival
-                // order, and a ray that misses it lights the hit instead of the
-                // centre. The value is stored on the texel, so every writer of
-                // one centre stores the same bits.
+                // A seeded run admits every texel. The stored point is the cell
+                // centre on the surface, so that light is the hit's light. The
+                // budget counter is arrival order; rejecting a texel with it
+                // would drop a ray the live path still lights.
                 lighting_dg(41u, 1u);
                 tdl = ts;
                 origin = tp + tn * 0.02;
@@ -427,16 +427,24 @@ void main() {
             bool cell = (gstats.ctrl_bits & 2048u) == 0u && lighting_gi_on() && cell_stored && li < LAMP_ALL - 1u;
             // The slice retraces the live sun and does not write that bit
             // over the committed epoch. Flag off: the cell is the old path.
-            float sc = cell ? lighting_shadow_get(origin, n, li) : -1.0;
+            // A seeded cell traces from its centre, so every hit in the cell
+            // stores the same bit. Seed 0 traces the hit.
+            vec3 shadow_o = origin;
+            vec3 shadow_n = n;
+            if (pc.seed != 0u && cell) {
+                shadow_n = lighting_axis_vec(lighting_axis(n));
+                shadow_o = lighting_sc_centre(origin, shadow_n, LIGHTING_SC_TEXEL) + shadow_n * 0.01;
+            }
+            float sc = cell ? lighting_shadow_get(shadow_o, shadow_n, li) : -1.0;
             if (sun_slice && sun_lamp) {
                 sc = -1.0;
             }
             if (sc >= 0.0) {
                 shadow_lit = sc > 0.5;
             } else {
-                shadow_lit = !trace_occluded(origin, target);
+                shadow_lit = !trace_occluded(shadow_o, target);
                 if (cell && !(lighting_sun_small() && sun_lamp)) {
-                    lighting_shadow_put(origin, n, li, shadow_lit);
+                    lighting_shadow_put(shadow_o, shadow_n, li, shadow_lit);
                 }
             }
         }
