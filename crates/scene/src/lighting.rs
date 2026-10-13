@@ -4,8 +4,10 @@
 //!
 //! The renderer reads this and skips the GPU passes and allocations a disabled
 //! feature owns. A quality knob changes how much work a feature does when it is
-//! on. Presets fill the struct. The text form is what scene files and
-//! `GENOS_LIGHTING_*` environment variables share with the debug menu.
+//! on. Presets fill the struct. The text form is what scene files, launch
+//! arguments, and `GENOS_LIGHTING_*` environment variables share with the debug
+//! menu. `--preset`, `--bounces`, `--ambient`, and `--time-of-day` win. Each
+//! matching variable applies only when that argument was omitted.
 //!
 //! Defaults match the tuned GI path (preset `high`): every feature on, unlimited
 //! bounces, 64 rays per probe, the surface cache, five a-trous iterations.
@@ -475,13 +477,17 @@ impl LightingSettings {
 
     /// GI dispatches. Bounce 0 is direct light and flat ambient, so this is false.
     pub fn gi_passes(&self) -> bool {
-        self.gi.enabled && self.bounce.count > 0 && (self.probes.enabled || self.world_cache.enabled)
+        self.gi.enabled
+            && self.bounce.count > 0
+            && (self.probes.enabled || self.world_cache.enabled)
     }
 
     /// The million-slot cache and its key table. Freed when GI is off or the
     /// bounce count does not use it.
     pub fn allocates_cache(&self) -> bool {
-        self.gi.enabled && self.bounce.count > 0 && (self.probes.enabled || self.world_cache.enabled)
+        self.gi.enabled
+            && self.bounce.count > 0
+            && (self.probes.enabled || self.world_cache.enabled)
     }
 
     /// Probe and cache-ray work buffer. Freed when bounce 0 skips GI.
@@ -559,8 +565,8 @@ impl LightingSettings {
             ),
             AmbientMode::Day => {
                 let color = lerp3(self.ambient.night_color, self.ambient.day_color, t);
-                let intensity =
-                    self.ambient.night_intensity + (self.ambient.day_intensity - self.ambient.night_intensity) * t;
+                let intensity = self.ambient.night_intensity
+                    + (self.ambient.day_intensity - self.ambient.night_intensity) * t;
                 (color, self.ambient.ground, intensity, AmbientMode::Constant)
             }
             AmbientMode::Curve => {
@@ -678,25 +684,53 @@ impl LightingSettings {
         let _ = writeln!(out, "world_stale={}", self.world_cache.staleness_frames);
         let _ = writeln!(out, "denoise={}", bit(self.denoiser.enabled));
         let _ = writeln!(out, "denoise_iters={}", self.denoiser.iterations);
-        let _ = writeln!(out, "denoise_dirty={}", num_text(self.denoiser.dirty_fraction));
+        let _ = writeln!(
+            out,
+            "denoise_dirty={}",
+            num_text(self.denoiser.dirty_fraction)
+        );
         let _ = writeln!(out, "compose_reuse={}", bit(self.compose_reuse));
         let _ = writeln!(out, "sky={}", bit(self.sky));
         let _ = writeln!(out, "emissive={}", bit(self.emissive));
         let _ = writeln!(out, "prefill={}", bit(self.prefill));
         let _ = writeln!(out, "ambient={}", self.ambient.mode.name());
         let _ = writeln!(out, "ambient_color={}", rgb(self.ambient.color));
-        let _ = writeln!(out, "ambient_intensity={}", num_text(self.ambient.intensity));
+        let _ = writeln!(
+            out,
+            "ambient_intensity={}",
+            num_text(self.ambient.intensity)
+        );
         let _ = writeln!(out, "ambient_ground={}", rgb(self.ambient.ground));
         let _ = writeln!(out, "night_color={}", rgb(self.ambient.night_color));
-        let _ = writeln!(out, "night_intensity={}", num_text(self.ambient.night_intensity));
+        let _ = writeln!(
+            out,
+            "night_intensity={}",
+            num_text(self.ambient.night_intensity)
+        );
         let _ = writeln!(out, "day_color={}", rgb(self.ambient.day_color));
-        let _ = writeln!(out, "day_intensity={}", num_text(self.ambient.day_intensity));
+        let _ = writeln!(
+            out,
+            "day_intensity={}",
+            num_text(self.ambient.day_intensity)
+        );
         let _ = writeln!(out, "dawn_color={}", rgb(self.ambient.dawn_color));
-        let _ = writeln!(out, "dawn_intensity={}", num_text(self.ambient.dawn_intensity));
+        let _ = writeln!(
+            out,
+            "dawn_intensity={}",
+            num_text(self.ambient.dawn_intensity)
+        );
         let _ = writeln!(out, "noon_color={}", rgb(self.ambient.noon_color));
-        let _ = writeln!(out, "noon_intensity={}", num_text(self.ambient.noon_intensity));
+        let _ = writeln!(
+            out,
+            "noon_intensity={}",
+            num_text(self.ambient.noon_intensity)
+        );
         let _ = writeln!(out, "dusk_color={}", rgb(self.ambient.dusk_color));
-        let _ = writeln!(out, "dusk_intensity={}", num_text(self.ambient.dusk_intensity));
+        let _ = writeln!(
+            out,
+            "dusk_intensity={}",
+            num_text(self.ambient.dusk_intensity)
+        );
         let _ = writeln!(out, "time_of_day={}", num_text(self.time_of_day));
         out
     }
@@ -720,7 +754,8 @@ impl LightingSettings {
                 // `custom` does not replace the struct. Later lines are the value.
                 if !value.eq_ignore_ascii_case("custom") {
                     preset = Some(
-                        LightingPreset::parse(value).ok_or_else(|| format!("unknown preset {value}"))?,
+                        LightingPreset::parse(value)
+                            .ok_or_else(|| format!("unknown preset {value}"))?,
                     );
                 }
             } else {
@@ -745,7 +780,8 @@ impl LightingSettings {
                 if value.eq_ignore_ascii_case("custom") {
                     // Not a tier. The label is custom only when the knobs match none.
                 } else {
-                    let preset = LightingPreset::parse(value).ok_or_else(|| format!("unknown preset {value}"))?;
+                    let preset = LightingPreset::parse(value)
+                        .ok_or_else(|| format!("unknown preset {value}"))?;
                     *self = Self::preset(preset);
                 }
             }
@@ -755,8 +791,8 @@ impl LightingSettings {
             "direct_scale" => self.direct.resolution_scale = num_u32(value)?.clamp(1, 8),
             "shadows" => self.shadows.enabled = on(value)?,
             "shadow_filter" => {
-                self.shadows.filter =
-                    ShadowFilter::parse(value).ok_or_else(|| format!("shadow_filter is hard or cell, got {value}"))?
+                self.shadows.filter = ShadowFilter::parse(value)
+                    .ok_or_else(|| format!("shadow_filter is hard or cell, got {value}"))?
             }
             "shadow_cell" => self.shadows.cell_metres = num_f32(value)?,
             "shadow_refresh" => self.shadows.refresh_frames = num_u32(value)?.max(1),
@@ -809,16 +845,37 @@ impl LightingSettings {
         Ok(())
     }
 
-    /// Environment variables overlay this value. A set `GENOS_LIGHTING_PRESET`
-    /// replaces the struct, then each other variable overlays one knob.
-    /// Unset variables leave the struct alone, so a scene file and a live edit
-    /// survive. This is the launch lock: a variable that is set wins every frame.
+    /// Launch locks overlay this value.
+    ///
+    /// `--preset`, `--bounces`, and `--ambient` win every frame.
+    /// `GENOS_LIGHTING_PRESET`, `GENOS_LIGHTING_BOUNCES`, and
+    /// `GENOS_LIGHTING_AMBIENT` apply only when that argument was omitted, and
+    /// then they win every frame. `--preset` or a set `GENOS_LIGHTING_PRESET`
+    /// replaces the struct, then the other locks overlay one key. `--time-of-day`
+    /// is the program's clock: it keeps `GENOS_LIGHTING_TIME` from replacing
+    /// `time_of_day`. When that argument was omitted, a set `GENOS_LIGHTING_TIME`
+    /// holds that hour. The scene clock survives a preset replace unless the
+    /// time mirror is the lock. The other variables overlay one key each. A set
+    /// `GENOS_LIGHTING_COMPOSE_ALL` forces compose reuse off.
     pub fn apply_env(&mut self) {
-        if let Ok(value) = std::env::var("GENOS_LIGHTING_PRESET") {
-            if let Some(preset) = LightingPreset::parse(&value) {
-                *self = Self::preset(preset);
-            }
-        }
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let preset = std::env::var("GENOS_LIGHTING_PRESET").ok();
+        let bounces = std::env::var("GENOS_LIGHTING_BOUNCES").ok();
+        let ambient = std::env::var("GENOS_LIGHTING_AMBIENT").ok();
+        let time = std::env::var("GENOS_LIGHTING_TIME").ok();
+        let Ok(launch) = resolve_lighting_launch(
+            &refs,
+            &LightingMirrors {
+                preset: preset.as_deref(),
+                bounces: bounces.as_deref(),
+                ambient: ambient.as_deref(),
+                time_of_day: time.as_deref(),
+            },
+        ) else {
+            return;
+        };
+        self.apply_launch(&launch);
         let keys = [
             ("GENOS_LIGHTING_DIRECT", "direct"),
             ("GENOS_LIGHTING_DIRECT_LIGHTS", "direct_lights"),
@@ -832,7 +889,6 @@ impl LightingSettings {
             ("GENOS_LIGHTING_GI_REFRESH", "gi_refresh"),
             ("GENOS_LIGHTING_SC_BUDGET_SHIFT", "budget_shift"),
             ("GENOS_LIGHTING_WORLD", "world_mode"),
-            ("GENOS_LIGHTING_BOUNCES", "bounces"),
             ("GENOS_LIGHTING_PROBES", "probes"),
             ("GENOS_LIGHTING_PROBE_RAYS", "probe_rays"),
             ("GENOS_LIGHTING_TILE", "probe_tile"),
@@ -849,7 +905,6 @@ impl LightingSettings {
             ("GENOS_LIGHTING_SKY", "sky"),
             ("GENOS_LIGHTING_EMISSIVE", "emissive"),
             ("GENOS_LIGHTING_PREFILL", "prefill"),
-            ("GENOS_LIGHTING_AMBIENT", "ambient"),
             ("GENOS_LIGHTING_AMBIENT_COLOR", "ambient_color"),
             ("GENOS_LIGHTING_AMBIENT_INTENSITY", "ambient_intensity"),
             ("GENOS_LIGHTING_AMBIENT_GROUND", "ambient_ground"),
@@ -863,7 +918,6 @@ impl LightingSettings {
             ("GENOS_LIGHTING_NOON_INTENSITY", "noon_intensity"),
             ("GENOS_LIGHTING_DUSK_COLOR", "dusk_color"),
             ("GENOS_LIGHTING_DUSK_INTENSITY", "dusk_intensity"),
-            ("GENOS_LIGHTING_TIME", "time_of_day"),
         ];
         for (var, key) in keys {
             if let Ok(value) = std::env::var(var) {
@@ -873,6 +927,22 @@ impl LightingSettings {
         if std::env::var_os("GENOS_LIGHTING_COMPOSE_ALL").is_some() {
             self.compose_reuse = false;
         }
+    }
+
+    fn apply_launch(&mut self, launch: &LightingLaunch) {
+        let clock = self.time_of_day;
+        if let Some(preset) = launch.preset {
+            *self = Self::preset(preset);
+        }
+        if let Some(count) = launch.bounces {
+            self.bounce.count = count;
+        }
+        if let Some(mode) = launch.ambient {
+            self.ambient.mode = mode;
+        }
+        self.time_of_day = launch.time_mirror.unwrap_or(clock);
+        self.sanitize();
+        self.sync_preset_field();
     }
 
     /// Which named GPU buckets this value records. A bucket left out is not
@@ -925,6 +995,190 @@ pub struct GpuBuckets {
     pub bounce_reads: bool,
 }
 
+/// Resolved launch locks. `--time-of-day` is not stored: the program that owns
+/// the clock writes that hour, and its presence only clears `time_mirror`.
+/// `time_mirror` is `GENOS_LIGHTING_TIME` when that argument was omitted.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LightingLaunch {
+    preset: Option<LightingPreset>,
+    bounces: Option<u32>,
+    ambient: Option<AmbientMode>,
+    time_mirror: Option<f32>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct LightingMirrors<'a> {
+    preset: Option<&'a str>,
+    bounces: Option<&'a str>,
+    ambient: Option<&'a str>,
+    time_of_day: Option<&'a str>,
+}
+
+enum LightingKind {
+    Preset,
+    Bounces,
+    Ambient,
+    Time,
+}
+
+enum LightingFlag {
+    Preset(LightingPreset),
+    Bounces(u32),
+    Ambient(AmbientMode),
+    Time(f32),
+}
+
+/// `Some(true)` when `arg` is a lighting flag that reads the next argument.
+/// `Some(false)` when the flag already includes its value. `None` for any other flag.
+pub fn lighting_flag_needs_value(arg: &str) -> Option<bool> {
+    let (name, inline) = lighting_dash(arg)?;
+    lighting_kind(name)?;
+    Some(inline.is_none())
+}
+
+/// Reject a bad lighting argument. `next` is the following argument when
+/// [`lighting_flag_needs_value`] is `Some(true)`.
+pub fn check_lighting_arg(arg: &str, next: Option<&str>) -> Result<(), String> {
+    parse_lighting_flag(arg, next).map(|_| ())
+}
+
+/// Clock hours from `--time-of-day`, when `arg` is that flag.
+/// `Ok(None)` when `arg` is some other lighting flag or not a lighting flag.
+pub fn lighting_arg_time_of_day(arg: &str, next: Option<&str>) -> Result<Option<f32>, String> {
+    match parse_lighting_flag(arg, next)? {
+        Some(LightingFlag::Time(hours)) => Ok(Some(hours)),
+        _ => Ok(None),
+    }
+}
+
+fn resolve_lighting_launch(
+    args: &[&str],
+    env: &LightingMirrors<'_>,
+) -> Result<LightingLaunch, String> {
+    let mut chosen = ChosenLighting::default();
+    let mut i = 0;
+    while i < args.len() {
+        let next = args.get(i + 1).copied();
+        match parse_lighting_flag(args[i], next)? {
+            None => i += 1,
+            Some(flag) => {
+                let extra = lighting_flag_needs_value(args[i]).unwrap_or(false);
+                chosen.set(flag);
+                i += 1 + usize::from(extra);
+            }
+        }
+    }
+    Ok(LightingLaunch {
+        preset: chosen
+            .preset
+            .or_else(|| env.preset.and_then(LightingPreset::parse)),
+        bounces: chosen
+            .bounces
+            .or_else(|| env.bounces.and_then(|value| parse_bounces(value).ok())),
+        ambient: chosen
+            .ambient
+            .or_else(|| env.ambient.and_then(AmbientMode::parse)),
+        time_mirror: if chosen.time.is_some() {
+            None
+        } else {
+            env.time_of_day.and_then(parse_clock)
+        },
+    })
+}
+
+#[derive(Default)]
+struct ChosenLighting {
+    preset: Option<LightingPreset>,
+    bounces: Option<u32>,
+    ambient: Option<AmbientMode>,
+    time: Option<f32>,
+}
+
+impl ChosenLighting {
+    fn set(&mut self, flag: LightingFlag) {
+        match flag {
+            LightingFlag::Preset(preset) => self.preset = Some(preset),
+            LightingFlag::Bounces(count) => self.bounces = Some(count),
+            LightingFlag::Ambient(mode) => self.ambient = Some(mode),
+            LightingFlag::Time(hours) => self.time = Some(hours),
+        }
+    }
+}
+
+fn lighting_dash(arg: &str) -> Option<(&str, Option<&str>)> {
+    let rest = arg.strip_prefix("--")?;
+    if rest.is_empty() {
+        return None;
+    }
+    match rest.split_once('=') {
+        Some((name, value)) => Some((name, Some(value))),
+        None => Some((rest, None)),
+    }
+}
+
+fn lighting_kind(name: &str) -> Option<LightingKind> {
+    match name {
+        "preset" => Some(LightingKind::Preset),
+        "bounces" => Some(LightingKind::Bounces),
+        "ambient" => Some(LightingKind::Ambient),
+        "time-of-day" => Some(LightingKind::Time),
+        _ => None,
+    }
+}
+
+fn parse_lighting_flag(arg: &str, next: Option<&str>) -> Result<Option<LightingFlag>, String> {
+    let Some((name, inline)) = lighting_dash(arg) else {
+        return Ok(None);
+    };
+    let Some(kind) = lighting_kind(name) else {
+        return Ok(None);
+    };
+    let flag = format!("--{name}");
+    let value = match inline {
+        Some(value) => value,
+        None => next.ok_or_else(|| format!("{flag} needs a value"))?,
+    };
+    if value.is_empty() {
+        return Err(format!("{flag} needs a value"));
+    }
+    let parsed = match kind {
+        LightingKind::Preset => LightingFlag::Preset(
+            LightingPreset::parse(value)
+                .ok_or_else(|| format!("{flag} {value} is not a preset"))?,
+        ),
+        LightingKind::Bounces => LightingFlag::Bounces(
+            parse_bounces(value)
+                .map_err(|_| format!("{flag} {value} is not 0, 1, 2, or unlimited"))?,
+        ),
+        LightingKind::Ambient => {
+            LightingFlag::Ambient(AmbientMode::parse(value).ok_or_else(|| {
+                format!("{flag} {value} is not off, constant, hemisphere, day, or curve")
+            })?)
+        }
+        LightingKind::Time => LightingFlag::Time(
+            parse_clock(value).ok_or_else(|| format!("{flag} {value} is not a time of day"))?,
+        ),
+    };
+    Ok(Some(parsed))
+}
+
+/// Hours, or `HH:MM` (minutes in `0..60`).
+fn parse_clock(value: &str) -> Option<f32> {
+    if value.is_empty() {
+        return None;
+    }
+    if let Some((hours, minutes)) = value.split_once(':') {
+        let hours: f32 = hours.parse().ok()?;
+        let minutes: f32 = minutes.parse().ok()?;
+        if !hours.is_finite() || !minutes.is_finite() || !(0.0..60.0).contains(&minutes) {
+            return None;
+        }
+        return Some(hours + minutes / 60.0);
+    }
+    let hours: f32 = value.parse().ok()?;
+    hours.is_finite().then_some(hours)
+}
+
 fn frame_due(frame: u32, every: u32) -> bool {
     let every = every.max(1);
     frame.saturating_sub(1) % every == 0
@@ -950,7 +1204,9 @@ fn num_u32(value: &str) -> Result<u32, String> {
 }
 
 fn num_f32(value: &str) -> Result<f32, String> {
-    value.parse::<f32>().map_err(|_| format!("expected a number, got {value}"))
+    value
+        .parse::<f32>()
+        .map_err(|_| format!("expected a number, got {value}"))
 }
 
 fn parse_bounces(value: &str) -> Result<u32, String> {
@@ -991,4 +1247,132 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
         a[1] + (b[1] - a[1]) * t,
         a[2] + (b[2] - a[2]) * t,
     ]
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    fn empty() -> LightingMirrors<'static> {
+        LightingMirrors::default()
+    }
+
+    fn hours_near(value: f32, hours: f32) {
+        assert!((value - hours).abs() < 1.0e-4, "{value} is not {hours}");
+    }
+
+    #[test]
+    fn arguments_win_and_env_is_the_mirror() {
+        let launch = resolve_lighting_launch(&[], &empty()).unwrap();
+        assert!(launch.preset.is_none());
+        assert!(launch.bounces.is_none());
+        assert!(launch.ambient.is_none());
+        assert!(launch.time_mirror.is_none());
+        let mut settings = LightingSettings::default();
+        settings.time_of_day = 9.5;
+        settings.apply_launch(&launch);
+        assert_eq!(settings.preset_label(), "high");
+        hours_near(settings.time_of_day, 9.5);
+
+        let mut env = empty();
+        env.preset = Some("potato");
+        env.bounces = Some("0");
+        env.ambient = Some("curve");
+        env.time_of_day = Some("18:24");
+        let from_env = resolve_lighting_launch(&[], &env).unwrap();
+        let mut settings = LightingSettings::default();
+        settings.time_of_day = 9.5;
+        settings.apply_launch(&from_env);
+        assert!(!settings.gi.enabled);
+        assert_eq!(settings.bounce.count, 0);
+        assert_eq!(settings.ambient.mode, AmbientMode::Curve);
+        hours_near(settings.time_of_day, 18.4);
+
+        let forced = resolve_lighting_launch(
+            &[
+                "--preset",
+                "day-cycle",
+                "--bounces=1",
+                "--ambient",
+                "hemisphere",
+                "--time-of-day=06:00",
+            ],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(forced.preset, Some(LightingPreset::DayCycle));
+        assert_eq!(forced.bounces, Some(1));
+        assert_eq!(forced.ambient, Some(AmbientMode::Hemisphere));
+        assert!(forced.time_mirror.is_none());
+        let mut settings = LightingSettings::default();
+        settings.time_of_day = 9.5;
+        settings.apply_launch(&forced);
+        assert!(!settings.gi.enabled);
+        assert_eq!(settings.bounce.count, 1);
+        assert_eq!(settings.ambient.mode, AmbientMode::Hemisphere);
+        hours_near(settings.time_of_day, 9.5);
+        assert_eq!(settings.preset_label(), "custom");
+
+        let held = resolve_lighting_launch(&["--preset=day-cycle"], &empty()).unwrap();
+        let mut settings = LightingSettings::default();
+        settings.time_of_day = 9.5;
+        settings.apply_launch(&held);
+        assert_eq!(settings.preset_label(), "day-cycle");
+        hours_near(settings.time_of_day, 9.5);
+
+        let unlimited = resolve_lighting_launch(&["--bounces", "unlimited"], &env).unwrap();
+        assert_eq!(unlimited.bounces, Some(LIGHTING_BOUNCES_UNLIMITED));
+        assert_eq!(unlimited.preset, Some(LightingPreset::Potato));
+
+        let mut ignored = empty();
+        ignored.bounces = Some("4");
+        ignored.ambient = Some("nope");
+        ignored.time_of_day = Some("nope");
+        ignored.preset = Some("nope");
+        let soft = resolve_lighting_launch(&[], &ignored).unwrap();
+        assert!(soft.preset.is_none() && soft.bounces.is_none() && soft.ambient.is_none());
+        assert!(soft.time_mirror.is_none());
+
+        assert!(lighting_flag_needs_value("--bounces").unwrap());
+        assert!(lighting_flag_needs_value("--bounces=0").is_some_and(|needs| !needs));
+        assert!(lighting_flag_needs_value("--scale").is_none());
+        assert_eq!(
+            check_lighting_arg("--bounces", None).unwrap_err(),
+            "--bounces needs a value"
+        );
+        assert_eq!(
+            check_lighting_arg("--bounces", Some("4")).unwrap_err(),
+            "--bounces 4 is not 0, 1, 2, or unlimited"
+        );
+        assert_eq!(
+            check_lighting_arg("--ambient", Some("nope")).unwrap_err(),
+            "--ambient nope is not off, constant, hemisphere, day, or curve"
+        );
+        assert_eq!(
+            check_lighting_arg("--preset=", None).unwrap_err(),
+            "--preset needs a value"
+        );
+        assert_eq!(
+            check_lighting_arg("--preset", Some("nope")).unwrap_err(),
+            "--preset nope is not a preset"
+        );
+        assert_eq!(
+            check_lighting_arg("--time-of-day", Some("nope")).unwrap_err(),
+            "--time-of-day nope is not a time of day"
+        );
+        assert_eq!(
+            check_lighting_arg("--time-of-day", Some("18:60")).unwrap_err(),
+            "--time-of-day 18:60 is not a time of day"
+        );
+        assert_eq!(
+            lighting_arg_time_of_day("--time-of-day", Some("22:00")).unwrap(),
+            Some(22.0)
+        );
+        assert_eq!(
+            lighting_arg_time_of_day("--ambient=off", None).unwrap(),
+            None
+        );
+        assert!(check_lighting_arg("--ambient=off", None).is_ok());
+        assert!(check_lighting_arg("--time-of-day=18:24", None).is_ok());
+    }
 }

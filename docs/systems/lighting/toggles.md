@@ -58,7 +58,7 @@ The text form is `LightingSettings::to_text` / `parse`. Floats print with their 
 
 ## Runtime
 
-`Renderer::set_lighting_settings` holds an override until `clear_lighting_override`. A game that owns the scene writes `scene.lighting` and leaves the override clear. The draw copies the override or the scene, then applies environment variables that are set. A variable that is set wins every frame (a launch lock). `GENOS_LIGHTING_PRESET` replaces the struct, then the other variables overlay one key each. `GENOS_LIGHTING_COMPOSE_ALL` forces compose reuse off.
+`Renderer::set_lighting_settings` holds an override until `clear_lighting_override`. A game that owns the scene writes `scene.lighting` and leaves the override clear. The draw copies the override or the scene, then applies launch locks. `--preset`, `--bounces`, and `--ambient` win every frame. `GENOS_LIGHTING_PRESET`, `GENOS_LIGHTING_BOUNCES`, and `GENOS_LIGHTING_AMBIENT` apply only when that argument was omitted, and then they win every frame. `--preset` or a set `GENOS_LIGHTING_PRESET` replaces the struct, then the other locks overlay one key each. `--time-of-day H` or `--time-of-day HH:MM` sets the stress start clock (0 midnight, 6 dawn, 12 noon, 18 dusk) and keeps `GENOS_LIGHTING_TIME` from replacing it. When that argument was omitted, a set `GENOS_LIGHTING_TIME` holds that hour. The scene clock survives a preset replace unless the time mirror is the lock. Any other `GENOS_LIGHTING_*` variable that is set still wins every frame for the key it names. `GENOS_LIGHTING_COMPOSE_ALL` forces compose reuse off.
 
 The stress debug menu edits `world.scene.lighting` through `set_key`. The knobs are the preset, each feature switch, and the quality knobs (max lights, refresh, resolution scale, shadow filter, GI refresh, budget shift, probe rays, probe and world staleness, denoiser iterations, ambient mode). The next draw picks that up.
 
@@ -71,21 +71,21 @@ On the existing command catalogue (`GENOS_MCP_PORT`):
 - `list_presets` — `potato`, `day-cycle`, `gi-1bounce`, `low`, `medium`, `high`, each with its text.
 - `apply_preset` — `name` replaces the scene lighting and clears the override.
 
-GPU times need `GENOS_GPU_TIMES` set before the renderer opens. The names are `compact`, `place`, `trace`, `direct`, `gather`, `filter`, `cache`, `compose`, `atrous`, `cache_rays`, `hit_light`, `shadows`.
+GPU times need `--gpu-times N` (or `GENOS_GPU_TIMES` when that argument was omitted) before the renderer opens. The names are `compact`, `place`, `trace`, `direct`, `gather`, `filter`, `cache`, `compose`, `atrous`, `cache_rays`, `hit_light`, `shadows`.
 
 ## Owner commands
 
 Run these on the owner machine. They are not the lavapipe check.
 
 ```
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=potato make stress
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=day-cycle make stress
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=gi-1bounce make stress
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=low make stress
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=medium make stress
-GENOS_GPU_TIMES=30 GENOS_LIGHTING_PRESET=high make stress
+cargo run --release -p genos-stress -- --preset potato --gpu-times 30
+cargo run --release -p genos-stress -- --preset day-cycle --gpu-times 30
+cargo run --release -p genos-stress -- --preset gi-1bounce --gpu-times 30
+cargo run --release -p genos-stress -- --preset low --gpu-times 30
+cargo run --release -p genos-stress -- --preset medium --gpu-times 30
+cargo run --release -p genos-stress -- --preset high --gpu-times 30
 ```
 
-`make stress` is `cargo run --release -p genos-stress`. The `LIGHTING_MS` line names the passes and appends `cache_rays`, `shadows`, and `prefill`. `prefill` is 1 when the scout was due and 0 when it was not. The scout shares the cache-ray dispatch, so this is not a separate millisecond.
+`make stress` is `cargo run --release -p genos-stress` and does not forward these arguments, so the commands above call cargo directly. `GENOS_GPU_TIMES` and `GENOS_LIGHTING_PRESET` still apply when the matching argument was omitted. The `LIGHTING_MS` line names the passes and appends `cache_rays`, `shadows`, and `prefill`. `prefill` is 1 when the scout was due and 0 when it was not. The scout shares the cache-ray dispatch, so this is not a separate millisecond.
 
 Lavapipe checks the look and the still-frame cost ratio. `presets_and_toggles_match_their_look` draws each preset and each feature off and rejects an unwritten frame, a saturated field, a flat-colour blowout, blue tiles, and white boxes. `world_cache_off_still_is_not_slower` holds a still camera until probe-only has settled, then checks that its lighting milliseconds are at most the surface cache's and that cache rays and hit lighting dispatched nothing.

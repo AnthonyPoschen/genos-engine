@@ -123,6 +123,7 @@ fn run() -> Result<(), String> {
     let mut profile_arg = None;
     let mut scene_name = String::from("scene.rhai");
     let mut size = (1280u32, 720u32);
+    let mut time_of_day = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -177,11 +178,42 @@ fn run() -> Result<(), String> {
             other if genos_render::unfilled_flag_needs_value(other).is_some() => {
                 let needs = genos_render::unfilled_flag_needs_value(other).unwrap_or(false);
                 let next = if needs {
-                    Some(args.next().ok_or_else(|| format!("{other} needs a value"))?)
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
                 } else {
                     None
                 };
                 genos_render::check_unfilled_arg(other, next.as_deref())?;
+            }
+            other if genos_scene::lighting_flag_needs_value(other).is_some() => {
+                let needs = genos_scene::lighting_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_scene::check_lighting_arg(other, next.as_deref())?;
+                if let Some(hours) = genos_scene::lighting_arg_time_of_day(other, next.as_deref())?
+                {
+                    time_of_day = Some(hours);
+                }
+            }
+            other if genos_render::gpu_times_flag_needs_value(other).is_some() => {
+                let needs = genos_render::gpu_times_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_render::check_gpu_times_arg(other, next.as_deref())?;
             }
             "--size" => {
                 let text = args.next().ok_or("missing size")?;
@@ -214,6 +246,12 @@ fn run() -> Result<(), String> {
     }
     let bench_camera = camera.clone();
     let host = genos_mcp::Host::new(scene, camera);
+    if let Some(hours) = time_of_day {
+        host.with_frame(|scene, _| {
+            scene.lighting.time_of_day = hours;
+            scene.lighting.sanitize();
+        });
+    }
     if let Some((x, y, z)) = lamp {
         host.with_frame(|scene, _| {
             scene.lights = vec![genos_scene::Light {

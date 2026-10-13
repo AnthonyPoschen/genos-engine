@@ -229,7 +229,7 @@ Research notes with the cvar values: `/workspace/research/lumen-digest.md` (agen
 
 ## Settings
 
-Presets, per-feature toggles, quality knobs, the scene text, Rhai, the debug menu, and the MCP commands are in [toggles.md](toggles.md). The struct is `LightingSettings` on the scene. High is the tuned path this document describes. A feature that is off skips its passes and its buffers.
+Presets, per-feature toggles, quality knobs, the scene text, Rhai, the debug menu, the launch arguments (`--preset`, `--bounces`, `--ambient`, `--time-of-day`), and the MCP commands are in [toggles.md](toggles.md). The struct is `LightingSettings` on the scene. High is the tuned path this document describes. A feature that is off skips its passes and its buffers.
 
 ## Frame overview
 
