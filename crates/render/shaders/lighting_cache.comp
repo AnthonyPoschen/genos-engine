@@ -50,6 +50,13 @@ void main() {
             bool boost = c > 0u && c <= LIGHTING_SC_BOOST_ROUNDS;
             gstats.pad3 = boost ? 1u : 0u;
             uint budget = (boost ? room : base) - young;
+            // S73N: a boost can fill the whole room. Leave the pre-fill floor
+            // out of next round's mature histogram while the list has texels,
+            // so the dispatch carve is not only a cut off the tail.
+            if (boost && ckeys.key[LIGHTING_SC_PREFILL_COUNT_AT] > 0u) {
+                uint floor_n = LIGHTING_SC_PREFILL_FLOOR >> lighting_sc_budget_shift();
+                budget = budget > floor_n ? budget - floor_n : 0u;
+            }
             uint acc = 0u;
             uint thr = 0u;
             for (int b = int(LIGHTING_SC_BUCKETS) - 1; b >= 0; b--) {

@@ -2210,13 +2210,16 @@ void lighting_shadow_epochs();
 // S76D persistent check words, after the gradient check list (LIGHTING_GRAD_LIST_AT + 32768).
 const uint LIGHTING_CHECK_P_AT = LIGHTING_ARGS_AT + 16u + 3u * 65536u + 1024u + 32768u;
 // Declared here, ahead of the pre-fill list: GLSL needs them before
-// lighting_sc_prefill_take and lighting_cache_batch_slot. Same addresses as
+// lighting_sc_prefill_plan and lighting_cache_batch_slot. Same addresses as
 // the S78X work lists below.
 const uint LIGHTING_ATROUS_MARK_AT = LIGHTING_CHECK_P_AT + 16u;
 const uint LIGHTING_ATROUS_LIST_AT = LIGHTING_ATROUS_MARK_AT + 5u * LIGHTING_CACHE_SLOTS;
 // S73E: the pre-fill list (never-shown texels) and its per-round count.
 const uint LIGHTING_SC_PREFILL_COUNT_AT = LIGHTING_SC_HIST_AT + 74u;
 const uint LIGHTING_SC_PREFILL_MAX = 16384u;
+// S73N: entries kept for that list even when shown texels fill the ceiling.
+// The budget shift scales it (1024, 512, … down to 8). About 1.9% of the base room.
+const uint LIGHTING_SC_PREFILL_FLOOR = 1024u;
 // After the a-trous meta (LIGHTING_ATROUS_PPM_AT + ppm, prev, 64 bins, 5 modes,
 // 5 * 64 recount bins); the old spot aliased LIGHTING_COMPOSE_AT.
 const uint LIGHTING_SC_PREFILL_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS + 1u + 1u + 64u + 5u + 5u * 64u;
@@ -2246,13 +2249,28 @@ uint lighting_dense_entry(uint d) {
     }
     return LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES + (d - g);
 }
-// S73G: pre-fill entries this round: what young + mature leave of the base
-// ceiling (never the boost headroom).
-uint lighting_sc_prefill_take(uint first, uint mature) {
-    uint base = lighting_sc_base_room() >> lighting_sc_budget_shift();
-    uint used = first + mature;
-    uint have = min(ckeys.key[LIGHTING_SC_PREFILL_COUNT_AT], LIGHTING_SC_PREFILL_MAX >> lighting_sc_budget_shift());
-    return used < base ? min(have, base - used) : 0u;
+// S73N: x is the mature entries this round dispatches, y the pre-fill entries.
+// Young is capped at the base room. Spare is what young + mature leave of that
+// base ceiling. Pre-fill takes the spare, or the floor when the spare is
+// smaller, and never more than the list or the room. A full room gives the
+// floor's slots up from the mature entries (S73G is unchanged when the spare
+// is already at least the floor).
+uvec2 lighting_sc_prefill_plan() {
+    uint sh = lighting_sc_budget_shift();
+    uint room = lighting_sc_room() >> sh;
+    uint base = lighting_sc_base_room() >> sh;
+    uint young = min(lighting_young_count(), base);
+    uint mature = lighting_mature_count();
+    uint spare = young + mature < base ? base - (young + mature) : 0u;
+    uint floor_n = LIGHTING_SC_PREFILL_FLOOR >> sh;
+    uint have = min(ckeys.key[LIGHTING_SC_PREFILL_COUNT_AT], LIGHTING_SC_PREFILL_MAX >> sh);
+    if (young >= room) {
+        return uvec2(0u, 0u);
+    }
+    uint pf = min(have, max(spare, floor_n));
+    pf = min(pf, room - young);
+    uint mature_kept = min(mature, room - young - pf);
+    return uvec2(mature_kept, pf);
 }
 void lighting_write_args() {
     uint a;
@@ -2264,13 +2282,14 @@ void lighting_write_args() {
         uint sh = lighting_sc_budget_shift();
         uint room = lighting_sc_room() >> sh;
         uint first = min(lighting_young_count(), lighting_sc_base_room() >> sh);
-        // S73I: how many never-shown texels are waiting, and how many entries
-        // the base ceiling actually leaves them (0 while the screen fills it).
+        // S73I / S73N: listed is the waiting list; taken is what the plan
+        // dispatches (the floor, or the spare when that is larger).
         uint prefill_listed = ckeys.key[LIGHTING_SC_PREFILL_COUNT_AT];
-        uint prefill_taken = lighting_sc_prefill_take(first, lighting_mature_count());
+        uvec2 plan = lighting_sc_prefill_plan();
+        uint prefill_taken = plan.y;
         gstats.diag[60] = prefill_listed;
         gstats.diag[61] = prefill_taken;
-        a = min(room, first + lighting_mature_count() + prefill_taken);
+        a = min(room, first + plan.x + prefill_taken);
         b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> sh);
         // S77A: change-list cells are checks, one 16-ray entry each; the
         // background list (and escalated cells) take whole sets.
@@ -2348,13 +2367,21 @@ uint lighting_cache_batch_slot(uint j) {
         return ckeys.key[2u * LIGHTING_CACHE_SLOTS - j];
     }
     uint count = lighting_mature_count();
+    uint kept = count;
+    uint pf = 0u;
+    if (lighting_world_mode() == 3u && LIGHTING_SC_SCHED) {
+        // S73N: pre-fill starts after the mature entries the plan kept, not
+        // after the whole mature list (that list can fill the room).
+        uvec2 plan = lighting_sc_prefill_plan();
+        kept = plan.x;
+        pf = plan.y;
+    }
     uint k = j - first;
     if (lighting_young_only() && lighting_world_mode() != 3u) {
         return ~0u;
     }
-    if (k >= count) {
-        uint p = k - count;
-        uint pf = lighting_world_mode() == 3u && LIGHTING_SC_SCHED ? lighting_sc_prefill_take(first, count) : 0u;
+    if (k >= kept) {
+        uint p = k - kept;
         if (p >= pf) {
             return ~0u;
         }

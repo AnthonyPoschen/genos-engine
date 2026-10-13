@@ -183,7 +183,7 @@ void main() {
         }
         // S73F: a pre-fill texel (never shown) is due when a ray read it since
         // its last relight (Lumen LastUsed - LastUpdated); it waits on its own
-        // list, which takes only what the round leaves (lighting_cache_batch_slot).
+        // list. The round keeps a floor of those entries (lighting_sc_prefill_plan).
         if (LIGHTING_SC_SCHED && !wrc && lighting_sc_prefill(slot)) {
             if (int(lighting_frame() - last) > int(LIGHTING_CACHE_LIFE)) {
                 atomicAdd(gstats.freed, 1u);

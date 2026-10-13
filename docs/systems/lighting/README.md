@@ -40,7 +40,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Checks run every frame; no "nothing changed" skip without a check (Anthony 16:11, S74A).
 - Always spend some budget on spread-out checks so quiet areas that should not be quiet are found.
 - Probes must not be woken by the shared averaged field; only by real neighbour change, spread by ring tests with group-test splitting ([WAKE](experiments/WAKE-neighbour-wake-design.md)).
-- Pre-fill uses spare base budget only. The S-curve lag bound stays deferred ([DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md)).
+- Pre-fill keeps a floor of 1024 entries inside the texel room (S73N). A larger spare under the base ceiling is still spent (S73G). The S-curve lag bound stays deferred ([DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md)).
 - Test rules (10 Oct): every moving test soaks and records a settled frame first, ends soaked, and returns movers to the start; short tests for one situation; a test must fail on the build that shows the problem before it is trusted; hand-validate new checks, then spot-check ~1%.
 - GI v1 is the stability floor, not the goal; the target is the path-traced reference (11 Oct).
 - GPU-resident design: frequently used data stays on the GPU at fixed locations; the CPU sends only small changes (12 Oct).
@@ -59,7 +59,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
 - Guard band of primary rays just outside the frustum (Lumen has no guard band) (S73A).
-- Pre-fill spends only spare base budget and never enters the priority histogram or the boost (Lumen always spends a fixed budget) (S73G).
+- Pre-fill reserves a floor of 1024 batch entries inside the texel room (scaled by the budget shift), taken from mature entries when that room is full. Spare above the floor is unchanged. It still does not enter the priority histogram. Lumen always spends a fixed budget (S73G, S73N).
 - MSME only once a texel is shown. A never-shown texel accumulates over at most 4 updates, as Lumen radiosity, with the MSME firefly cap (S73D, S73M). On first show the count becomes 1 and the next 15 on-screen sets are a plain mean (`k = 1/(t+1)`), so the pre-fill does not stay anchored. MSME has no such handoff.
 - Rotating start on the pre-fill list (S73G).
 - Scout feedback claims and stamps LastUsed without the irradiance read, so a scout hit does not seed an empty texel (S73K). The pixel path still seeds.
@@ -136,7 +136,8 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S73I](experiments/S73I-prefill-turn-and-ratios.md) | 2026-10-12 | Turn fill-in: spare budget and an unfinished set; ratio mean is outliers | counters + set completion + lavapipe turn | ffaba86, 15d3e1e |
 | [S73K](experiments/S73K-scout-feedback-claim.md) | 2026-10-12 | Scout feedback claims without the irradiance read | lavapipe turn passed: 18335 prefilled, 4547 shown | d4a666f |
 | [S73L](experiments/S73L-unfilled-on-screen.md) | 2026-10-13 | Count composed pixels whose surface-cache texel has no finished set | lavapipe turn ended at 0.92% unfilled | 8b78df0 |
-| [S73M](experiments/S73M-prefill-handoff.md) | 2026-10-13 | Firefly-cap the pre-fill, then a plain-mean handoff on first show | keeps one set so the texel stays filled | S73M |
+| [S73M](experiments/S73M-prefill-handoff.md) | 2026-10-13 | Firefly-cap the pre-fill, then a plain-mean handoff on first show | keeps one set so the texel stays filled | 60ba22e |
+| [S73N](experiments/S73N-prefill-floor.md) | 2026-10-13 | Pre-fill keeps 1024 entries inside the texel room | floor is carved from mature entries when the room is full | S73N |
 | [S74A-cam](experiments/S74A-cam-last-camera-offsets.md) | 2026-10-12 | Fix: last-frame camera read from stale scene-block offsets | pushed | 81c00734 |
 | [S74A-asvgf](experiments/S74A-asvgf-asvgf-change-adaptive-rays.md) | 2026-10-12 | A-SVGF same-seed 1-ray checks on 1/9 resolved texels, lambda drives alpha and rays | pushed | 81c00734 |
 | [S74A-shadow](experiments/S74A-shadow-static-lamp-shadow-reuse.md) | 2026-10-12 | Hit shadow rays kept per 12.5 cm cell/lamp, invalidated by lamp epoch | pushed | 81c00734 |
