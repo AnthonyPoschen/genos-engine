@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use genos_mcp::json::Value;
 use genos_render::{DebugView, Renderer, ScreenRect, ViewMode};
-use genos_scene::{Camera, Light, Scene, Vec3, PITCH_LIMIT};
+use genos_scene::{Camera, Light, LightingPreset, LightingSettings, Scene, Vec3, PITCH_LIMIT};
 
 use crate::image::{Flicker, Image, Region};
 use crate::knobs::{Host, Knob};
@@ -1093,6 +1093,36 @@ impl Tools {
                 }))
             }
             "timing" => reply(self.timing_value(args.u32("frames")?.unwrap_or(60) as usize)),
+            "get_lighting_settings" => {
+                reply(lighting_report(&ctx.renderer.lighting_settings().to_text(), ctx.renderer))
+            }
+            "set_lighting_settings" => {
+                let scene = ctx.host.scene();
+                apply_lighting_update(&mut scene.lighting, args.0)?;
+                let written = scene.lighting.to_text();
+                ctx.renderer.clear_lighting_override();
+                reply(lighting_report(&written, ctx.renderer))
+            }
+            "list_presets" => {
+                let presets = LightingPreset::all()
+                    .iter()
+                    .map(|preset| {
+                        obj(vec![
+                            ("name", text(preset.name())),
+                            ("text", text(LightingSettings::preset(*preset).to_text())),
+                        ])
+                    })
+                    .collect();
+                reply(obj(vec![("presets", list(presets))]))
+            }
+            "apply_preset" => {
+                let name = args.str("name")?.ok_or("apply_preset needs name")?;
+                let preset = LightingPreset::parse(&name).ok_or_else(|| format!("unknown preset {name}"))?;
+                ctx.host.scene().lighting = LightingSettings::preset(preset);
+                let written = ctx.host.scene().lighting.to_text();
+                ctx.renderer.clear_lighting_override();
+                reply(lighting_report(&written, ctx.renderer))
+            }
             "quit" => {
                 self.quit = Some(args.f64("code")?.unwrap_or(0.0) as i32);
                 reply(obj(vec![("quit", Value::Bool(true))]))
@@ -1400,4 +1430,70 @@ fn diff_value(
             out.map_or(Value::Null, |p| text(p.display().to_string())),
         ),
     ]))
+}
+
+fn lighting_report(body: &str, renderer: &Renderer) -> Value {
+    let ms = renderer.lighting_pass_ms();
+    let counts = renderer.lighting_dispatches();
+    let names = Renderer::lighting_bucket_names();
+    let passes = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            obj(vec![
+                ("name", text(*name)),
+                ("ms", num(ms.get(i).copied().unwrap_or(0.0))),
+                ("dispatches", num(counts.get(i).copied().unwrap_or(0) as f64)),
+            ])
+        })
+        .collect();
+    obj(vec![("text", text(body)), ("passes", list(passes))])
+}
+
+fn lighting_value_text(value: &Value) -> Result<String, String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(on) = value.as_bool() {
+        return Ok(if on { "on".into() } else { "off".into() });
+    }
+    if let Some(n) = value.as_f64() {
+        if n.fract() == 0.0 && n.abs() < 1.0e15 {
+            return Ok(format!("{}", n as i64));
+        }
+        return Ok(format!("{n:?}"));
+    }
+    if let Some(items) = value.as_array() {
+        let parts = items
+            .iter()
+            .map(lighting_value_text)
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(parts.join(","));
+    }
+    Err("a lighting value is a string, number, bool, or list".into())
+}
+
+fn apply_lighting_update(settings: &mut LightingSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("lighting settings are an object".into());
+    };
+    if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
+        for line in text.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("lighting line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &lighting_value_text(value)?)?;
+    }
+    Ok(())
 }

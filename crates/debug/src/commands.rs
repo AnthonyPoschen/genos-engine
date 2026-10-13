@@ -61,6 +61,22 @@ pub fn specs() -> Vec<CommandSpec> {
             "Trace a reference (as `reference`, or reuse a stored one: reference: name), then capture the live picture (mode, default full; frames: N waits N frames after the trace starts; or live: a capture name/PNG) and compare in linear luminance on block x block averages (default 2; the reference's noise falls with the block side). Saves <prefix>-reference.png, -live.png, -heatmap.png (red too bright, blue too dark, full at 50% error). Replies mean_abs, mean_rel (share of the light that is wrong), p95_abs, p95_rel, bias (+ too bright), ref_mean, live_mean and regions (grid, default [3,3], row-major mean_rel and bias). region limits it.",
         ),
         spec("timing", "Frame time breakdown over the last frames (default 60): fps, frame, draw CPU, GPU."),
+        spec(
+            "get_lighting_settings",
+            "The lighting settings in force (text form) and the last collected GPU pass: name, milliseconds, and dispatch count. One frame behind the draw that just finished.",
+        ),
+        spec(
+            "set_lighting_settings",
+            "Partial lighting update. Keys match the settings text (direct, shadows, gi, bounces, probes, …). A text field overlays key=value lines. The scene keeps the result; a renderer override is cleared. Applies on the next draw.",
+        ),
+        spec(
+            "list_presets",
+            "potato, low, medium, and high, each with the settings text that preset writes.",
+        ),
+        spec(
+            "apply_preset",
+            "Replace the scene lighting with preset name (potato, low, medium, high) and clear a renderer override.",
+        ),
         spec("quit", "Stop the example with exit code (default 0)."),
     ]
 }
