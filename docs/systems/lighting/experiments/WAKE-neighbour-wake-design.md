@@ -51,7 +51,7 @@ Deviations, on purpose:
 
 ## Real-GPU cost (RTX 4070, head e8fe3a39)
 
-Owner measurement, not a lavapipe number. Probes traced fell about 70× (8093 to about 115 at 1080p, 3600 to 58 on the corner). Lighting time did not: moving 28.1 vs 28.2 ms, still 20.8 to 21.6 ms, corner 12.25 to 13.3 ms (125 to 101 fps). Atrous was about 11 ms in every config. The picture difference was inside run-to-run noise.
+Owner measurement, not a lavapipe number, at head e8fe3a39. Probes traced fell about 70× (8093 to about 115 at 1080p, 3600 to 58 on the corner). Lighting time did not: moving 28.1 vs 28.2 ms, still 20.8 to 21.6 ms, corner 12.25 to 13.3 ms (125 to 101 fps). Atrous was about 11 ms in every config. The picture difference was inside run-to-run noise. That corner eye was room A's dark corner; the command below looks at room B's lit corner instead.
 
 Why the trace counter did not move the time:
 
@@ -83,11 +83,11 @@ cargo run --release -p genos-stress -- --proof --no-panel --size 1920x1080 --fra
 cargo run --release -p genos-stress -- --proof --no-panel --size 1920x1080 --frames 180 --dynamic 50 --freeze-sun --still-boxes --wake rings --gpu-times 30 --lighting-debug --wake-log moving-rings
 ```
 
-Bounce corner. The gi-check view is position `[3.5, 1.6, 3.5]`, look-at `[0.2, 0.4, 0.2]` (`examples/stress/scripts/gi_check/views.rhai`). Yaw −π/4 and pitch −0.252 match that look. `--view bounce` is Room A, not this corner.
+Lit corner. The gi-check corner is position `[3.5, 1.6, 3.5]`, look-at `[0.2, 0.4, 0.2]` (`examples/stress/scripts/gi_check/views.rhai`, yaw −π/4, pitch −0.252). That is room A's northwest corner. Room A has no window and no roof hole, so noon leaves it near black. On lavapipe at 320×180 that picture's mean luminance was 1.6 (0–255) at frame 3, and every pixel was under 30. The pose below stands under room B's skylight and looks into the southeast corner, where the south and east windows meet. Eye `[21.5, 1.6, 21.2]`, look-at `[24.6, 0.45, 24.6]` (yaw 2.402316, pitch −0.244923). The same lavapipe setup at frame 30 had mean luminance 65 (0–255), and no pixel was under 15. `--view bounce` is room A looking out of its opening, not this corner.
 
 ```
-cargo run --release -p genos-stress -- --proof --no-panel --size 640x360 --frames 180 --dynamic 0 --still-boxes --freeze-sun --time 0.25 --eye 3.5 1.6 3.5 -0.785398 -0.252 --wake legacy --gpu-times 30 --lighting-debug --wake-log corner-legacy
-cargo run --release -p genos-stress -- --proof --no-panel --size 640x360 --frames 180 --dynamic 0 --still-boxes --freeze-sun --time 0.25 --eye 3.5 1.6 3.5 -0.785398 -0.252 --wake rings --gpu-times 30 --lighting-debug --wake-log corner-rings
+cargo run --release -p genos-stress -- --proof --no-panel --size 640x360 --frames 180 --dynamic 0 --still-boxes --freeze-sun --time 0.25 --eye 21.5 1.6 21.2 2.402316 -0.244923 --wake legacy --gpu-times 30 --lighting-debug --wake-log corner-legacy
+cargo run --release -p genos-stress -- --proof --no-panel --size 640x360 --frames 180 --dynamic 0 --still-boxes --freeze-sun --time 0.25 --eye 21.5 1.6 21.2 2.402316 -0.244923 --wake rings --gpu-times 30 --lighting-debug --wake-log corner-rings
 ```
 
 Grep `lightingwake` in `./genos-debug/wake/moving-legacy/run.txt`, `moving-rings`, `corner-legacy`, and `corner-rings`.
