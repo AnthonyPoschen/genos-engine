@@ -95,7 +95,7 @@ P pauses the graph. A drag inspects one interval. L follows live frames again.
 
 ## Limits
 
-The settings panel scrolls when its page is taller than the window. The title and the tab bar stay put. The wheel moves the page while the pointer is over the panel and not over a slider. An open dropdown keeps the wheel. There is no image and no font file. Text uses a built-in bitmap. Tick names use the same bitmap at one pixel. The lighting panel is screen space. The panel controls one lamp. The picture labels are `off` and `FXAA`.
+The settings panel scrolls when its page is taller than the window. The title and the tab bar stay put. The wheel moves the page while the pointer is over the panel and not over a slider. An open dropdown keeps the wheel. There is no image and no font file. Text uses a built-in bitmap. Every printable ASCII character has its own glyph, including the apostrophe, the comma, and the semicolon. A character outside that set is a box. Tick names use the same bitmap at one pixel. The lighting panel is screen space. The panel controls one lamp. The picture labels are `off` and `FXAA`.
 
 A slider draws its own tip while the pointer is on it. There is no general popup, and the tip is not a press target. The plan's tooltip layer is still absent. One dropdown list can be open. It has no scrollbar. It is not a general layer.
 
