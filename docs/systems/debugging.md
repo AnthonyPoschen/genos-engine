@@ -198,6 +198,10 @@ On a box without a GPU this runs on lavapipe under a headless Weston
 (`XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`). The first run after a shader change spends
 minutes compiling pipelines.
 
+Scripted verdicts (`docs/VERIFY.md`) judge a repeat of the same picture or
+frame time. They print one PASS, FAIL, or UNSURE line and leave the evidence
+under `./genos-debug/verdict/`. They are on probation.
+
 The report directory holds `report.md` (checks, log, every step with its reply,
 images), `result.json`, and every image the script saved.
 
