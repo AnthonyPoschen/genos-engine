@@ -71,6 +71,9 @@ const USAGE: &str = "genos-stress [options]
                             U toggles the unfilled count. Shift-U toggles the tint.
                             F8 and shift-F8 are the same keys. GENOS_DEBUG_KEYS replaces them.
   --shot PATH               settle the light on the last frame and write a PNG
+                            without the panel, the menu tab, the frame graph,
+                            or tool overlays
+  --ui                      keep those overlays in that PNG and in an MCP shot
   --no-panel                hide the panel
   --bench SECONDS           sweep and print tables; per configuration seconds
   --warmup FRAMES           benchmark warm-up frames per configuration (default 30)
@@ -179,6 +182,8 @@ struct Options {
     /// Scene seconds per frame. Unset keeps wall-clock time, except `--frames` and `--shot`.
     fixed_dt: Option<f32>,
     shot: Option<PathBuf>,
+    /// Keep the panel, menu tab, frame graph, and tool overlays in a shot.
+    ui: bool,
     panel: bool,
     bench: Option<bench::Plan>,
     bench_out: Option<PathBuf>,
@@ -289,6 +294,7 @@ fn options() -> Result<Options, String> {
         step: false,
         fixed_dt: None,
         shot: None,
+        ui: false,
         panel: true,
         bench: None,
         bench_out: None,
@@ -364,6 +370,7 @@ fn options() -> Result<Options, String> {
             "--fixed-dt" => opts.fixed_dt = Some(parse(&arg, &value()?)?),
             "--step" => opts.step = true,
             "--shot" => opts.shot = Some(PathBuf::from(value()?)),
+            "--ui" => opts.ui = true,
             "--no-panel" => opts.panel = false,
             "--bench" => seconds = Some(parse::<f32>(&arg, &value()?)?),
             "--warmup" => warmup = parse(&arg, &value()?)?,
@@ -948,6 +955,10 @@ fn run() -> Result<(), String> {
             }
         }
 
+        if opts.ui {
+            stage.world.scene.debug.ui = true;
+        }
+        let capture_ui = stage.world.scene.debug.ui;
         let tools_read = tools.before_draw(&mut genos_debug::Ctx {
             renderer: &mut renderer,
             camera: &mut camera,
@@ -979,6 +990,10 @@ fn run() -> Result<(), String> {
         let last = opts.frames.is_some_and(|limit| drawn >= limit);
         let shot = genos_mcp::take_shot_request();
         let want_read = shot || tools_read || (last && opts.shot.is_some());
+        if want_read && !tools.show_capture_overlay(capture_ui) {
+            overlay.clear();
+            renderer.set_overlay_lines(&[]);
+        }
         let draw_start = Instant::now();
         let pixels =
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;

@@ -47,7 +47,10 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          screen is the opt-in speed path
   --denoise-screen on|off alias of --denoise-launch (GENOS_LIGHTING_DENOISE_SCREEN)
   --headless             proof window, no panel
-  --frames N             quit after N frames
+  --frames N             quit after N frames. The last frame PNG leaves out
+                         the debug menu, the menu tab, the frame-rate plate,
+                         and tool overlays
+  --ui                   keep those overlays in that PNG
   --fps-counter [on|off] frame-rate plate (default off). A bare flag turns it on.
                          GENOS_FPS_COUNTER applies only when this is omitted
   --fps-hz N             plate update rate in Hz (default 4, range 0.25 to 30).
@@ -157,6 +160,9 @@ struct Options {
     denoise_screen: Option<String>,
     headless: bool,
     frames: Option<u32>,
+    /// Keep the debug menu, menu tab, frame-rate plate, and tool overlays
+    /// in a `--frames` PNG. A capture leaves them out unless this is set.
+    ui: bool,
     out: PathBuf,
     out_set: bool,
     size: (u32, u32),
@@ -414,6 +420,10 @@ fn run() -> Result<(), String> {
                 camera.captured = false;
             }
         }
+        if opts.ui {
+            app.scene().debug.ui = true;
+        }
+        let capture_ui = app.scene().debug.ui;
         let tools_read = tools.before_draw(&mut genos_debug::Ctx {
             renderer: &mut renderer,
             camera: &mut camera,
@@ -439,6 +449,10 @@ fn run() -> Result<(), String> {
         drawn += 1;
         let last = opts.frames.is_some_and(|limit| drawn >= limit);
         let want_read = tools_read || last;
+        if want_read && !tools.show_capture_overlay(capture_ui) {
+            overlay.clear();
+            renderer.set_overlay_lines(&[]);
+        }
         let draw_start = Instant::now();
         let pixels =
             renderer.draw_with_overlay(app.world(), &camera, &overlay, want_read, false)?;
@@ -1668,6 +1682,7 @@ fn options() -> Result<Options, String> {
     let mut denoise_screen = None;
     let mut headless = false;
     let mut frames = None;
+    let mut ui = false;
     let mut out = PathBuf::from("genos-debug");
     let mut out_set = false;
     let mut size = (1280u32, 720u32);
@@ -1704,6 +1719,7 @@ fn options() -> Result<Options, String> {
                         .map_err(|_| "bad --frames".to_string())?,
                 );
             }
+            "--ui" => ui = true,
             "--out" => {
                 out = PathBuf::from(need_arg(&mut args, "--out")?);
                 out_set = true;
@@ -1778,6 +1794,7 @@ fn options() -> Result<Options, String> {
         denoise_screen,
         headless,
         frames,
+        ui,
         out,
         out_set,
         size,
@@ -1860,6 +1877,7 @@ mod tests {
             denoise_screen: None,
             headless: true,
             frames: None,
+            ui: false,
             out: std::path::PathBuf::from("genos-debug"),
             out_set: false,
             size: (320, 180),
@@ -2223,6 +2241,7 @@ mod tests {
         assert!(super::USAGE.contains("GENOS_MENU"));
         assert!(super::USAGE.contains("get_menu_settings"));
         assert!(super::USAGE.contains("--mcp-port"));
+        assert!(super::USAGE.contains("--ui"));
         assert!(super::USAGE.contains("8766"));
     }
 

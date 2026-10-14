@@ -148,9 +148,13 @@ struct ObjectEdit {
 }
 
 /// A picture a job wants this frame.
+///
+/// `ui` keeps the debug menu, the menu tab, the frame-rate plate, and tool
+/// overlays in the readback. It is false unless the command set it.
 #[derive(Clone, Copy, Debug)]
 struct Shot {
     look: Look,
+    ui: bool,
 }
 
 enum Then {
@@ -305,6 +309,15 @@ impl Tools {
     /// The view `set_view` stored. A panel uses it to mark the current picture.
     pub fn view_mode(&self) -> ViewMode {
         self.look.view.mode
+    }
+
+    /// Whether the capture being read this frame keeps debug overlays.
+    /// A frame with no capture job uses `cli_ui` (`--ui`).
+    pub fn show_capture_overlay(&self, cli_ui: bool) -> bool {
+        match self.reading {
+            Some(shot) => shot.ui,
+            None => cli_ui,
+        }
     }
 
     /// Forget light, object, and camera-path edits. A scene switch calls this so
@@ -658,12 +671,19 @@ impl Tools {
         Ok(v)
     }
 
-    fn shot_from(&self, args: &Args) -> Result<Shot, String> {
+    fn shot_from(&self, args: &Args, ui_default: bool) -> Result<Shot, String> {
         let look = match args.str("mode")? {
             Some(m) => Look::parse(&m)?,
             None => self.look,
         };
-        Ok(Shot { look })
+        Ok(Shot {
+            look,
+            ui: Self::shot_ui(args, ui_default)?,
+        })
+    }
+
+    fn shot_ui(args: &Args, ui_default: bool) -> Result<bool, String> {
+        Ok(args.bool("ui")?.unwrap_or(ui_default))
     }
 
     fn path_arg(
@@ -686,6 +706,7 @@ impl Tools {
     }
 
     fn run(&mut self, name: &str, args: &Args, ctx: &mut Ctx) -> Result<Step, String> {
+        let ui_default = ctx.host.scene().debug.ui;
         let reply = |v: Value| Ok(Step::Reply(v));
         match name {
             "status" => {
@@ -936,7 +957,7 @@ impl Tools {
                 reply(obj(vec![("view", text(self.look.name()))]))
             }
             "capture" => {
-                let shot = self.shot_from(args)?;
+                let shot = self.shot_from(args, ui_default)?;
                 let name = args.str("name")?;
                 let default = format!(
                     "frame-{:05}-{}.png",
@@ -985,9 +1006,11 @@ impl Tools {
                 let mut shots = Vec::new();
                 let mut paths = Vec::new();
                 let mut names = Vec::new();
+                let ui = Self::shot_ui(args, ui_default)?;
                 for m in &modes {
                     shots.push(Shot {
                         look: Look::parse(m)?,
+                        ui,
                     });
                     let file = format!("{prefix}-{}.png", m.replace(':', "-"));
                     paths.push(self.path_arg(&Args(&Value::Null), "", Some(&file))?);
@@ -1006,7 +1029,7 @@ impl Tools {
                 }))
             }
             "luminance" => {
-                let shot = self.shot_from(args)?;
+                let shot = self.shot_from(args, ui_default)?;
                 Ok(Step::Job(Job::Shots {
                     shots: vec![shot],
                     got: Vec::new(),
@@ -1035,8 +1058,9 @@ impl Tools {
                         .ok_or("diff needs a and b, or mode_a and mode_b")?,
                 )?;
                 let b = Look::parse(&args.str("mode_b")?.ok_or("diff needs mode_b")?)?;
+                let ui = Self::shot_ui(args, ui_default)?;
                 Ok(Step::Job(Job::Shots {
-                    shots: vec![Shot { look: a }, Shot { look: b }],
+                    shots: vec![Shot { look: a, ui }, Shot { look: b, ui }],
                     got: Vec::new(),
                     then: Then::Diff {
                         out,
@@ -1049,7 +1073,10 @@ impl Tools {
             "reference" | "compare" => {
                 let shot = if name == "compare" {
                     let look = Look::parse(&args.str("mode")?.unwrap_or_else(|| "full".into()))?;
-                    Some(Shot { look })
+                    Some(Shot {
+                        look,
+                        ui: Self::shot_ui(args, ui_default)?,
+                    })
                 } else {
                     None
                 };
@@ -1119,7 +1146,7 @@ impl Tools {
             }
             "flicker" => {
                 let frames = args.u32("frames")?.unwrap_or(60).max(2);
-                let shot = self.shot_from(args)?;
+                let shot = self.shot_from(args, ui_default)?;
                 Ok(Step::Job(Job::Flicker {
                     left: frames,
                     shot,
@@ -1731,10 +1758,13 @@ fn apply_debug_update(settings: &mut DebugSettings, args: &Value) -> Result<(), 
         if key == "text" {
             continue;
         }
-        let text = value
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| format!("debug setting {key} is a string"))?;
+        let text = if let Some(text) = value.as_str() {
+            text.to_string()
+        } else if let Some(on) = value.as_bool() {
+            if on { "1".into() } else { "0".into() }
+        } else {
+            return Err(format!("debug setting {key} is a string or a bool"));
+        };
         settings.set_key(key, &text)?;
     }
     Ok(())
@@ -1779,5 +1809,65 @@ mod tests {
         let stepped = tools.scene_dt(1.0);
         assert!((stepped - DEFAULT_STEP).abs() < 1.0e-6);
         assert_eq!(tools.scene_dt(1.0), 0.0);
+    }
+
+    #[test]
+    fn a_capture_leaves_the_ui_out_unless_asked() {
+        let tools = Tools::new();
+        let plain = tools
+            .shot_from(&Args(&genos_mcp::json::object([])), false)
+            .unwrap();
+        assert!(!plain.ui);
+        assert!(tools
+            .shot_from(&Args(&genos_mcp::json::object([])), true)
+            .unwrap()
+            .ui);
+        let asked = tools
+            .shot_from(
+                &Args(&genos_mcp::json::object([("ui", genos_mcp::json::bool(true))])),
+                false,
+            )
+            .unwrap();
+        assert!(asked.ui);
+        assert!(!tools
+            .shot_from(
+                &Args(&genos_mcp::json::object([("ui", genos_mcp::json::bool(false))])),
+                true,
+            )
+            .unwrap()
+            .ui);
+        assert!(Tools::shot_ui(
+            &Args(&genos_mcp::json::object([(
+                "ui",
+                genos_mcp::json::string("nope"),
+            )])),
+            false,
+        )
+        .is_err());
+        assert!(!tools.show_capture_overlay(false));
+        assert!(tools.show_capture_overlay(true));
+        let mut tools = tools;
+        tools.reading = Some(Shot {
+            look: tools.look,
+            ui: false,
+        });
+        assert!(!tools.show_capture_overlay(true));
+        tools.reading = Some(Shot {
+            look: tools.look,
+            ui: true,
+        });
+        assert!(tools.show_capture_overlay(false));
+        let capture = crate::commands::specs()
+            .into_iter()
+            .find(|spec| spec.name == "capture")
+            .unwrap();
+        assert!(capture.description.contains("ui"));
+        assert!(capture.description.contains("default false"));
+        let captures = crate::commands::specs()
+            .into_iter()
+            .find(|spec| spec.name == "captures")
+            .unwrap();
+        assert!(captures.description.contains("ui"));
+        assert!(captures.description.contains("default false"));
     }
 }

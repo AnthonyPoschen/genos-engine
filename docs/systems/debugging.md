@@ -86,6 +86,8 @@ curl -s -X POST localhost:8801/cmd/capture -d '{"mode":"direct","path":"/tmp/dir
 curl -s -X POST localhost:8801/cmd/compare -d '{"width":160,"noise":0.03,"prefix":"/tmp/noon"}'
 ```
 
+`capture` and `captures` take `ui` (default false). The same default is `DebugSettings.ui`, read and written by `get_debug_settings` and `set_debug_settings`. A false value leaves the debug menu, the menu tab, the frame-rate plate, and tool overlays out of the PNG. `ui: true` on the command keeps them for that shot. `--ui` forces the setting on for `genos-lighting --frames` and `genos-stress --shot`.
+
 Do not stop a `genos-stress` someone else bound to port 8765; pick another
 port with `GENOS_MCP_PORT`. `genos-lighting` listens on 8766 unless
 `--mcp-port` is set. `GENOS_MCP_PORT` applies to that binary only when
@@ -265,7 +267,9 @@ v1 views (`bounce:N`, `near`, `far`, `probes:*`) went with GI v1.
   `cache: "off"`) by scene, pose, size and bounce limit.
 - `compare` captures the live picture after the trace (`frames: N` waits at least N
   frames after the trace starts; `mode` picks the view; `live:` uses a saved
-  capture), resamples it to the reference size and compares linear luminance (the
+  capture). `ui` defaults to false, so that live picture leaves out the debug
+  menu, the menu tab, the frame-rate plate, and tool overlays. It resamples
+  the picture to the reference size and compares linear luminance (the
   tone curve undone) on `block` x `block` averages (default 2). Pixels where the
   primary ray met nothing are left out.
 - Reply: `mean_rel` (sum of |live - ref| over sum of ref: the share of light that is
