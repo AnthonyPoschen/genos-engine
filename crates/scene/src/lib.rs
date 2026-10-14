@@ -6,6 +6,7 @@
 mod camera;
 mod codimation;
 mod debug_settings;
+mod event_loop;
 mod fps_counter;
 mod lighting;
 mod menu;
@@ -19,6 +20,7 @@ pub use camera::{
 };
 pub use codimation::{Codimation, Easing};
 pub use debug_settings::DebugSettings;
+pub use event_loop::EventLoopSettings;
 pub use fps_counter::{parse_enabled, parse_rate, FpsCli, FpsCounterSettings};
 pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use lighting::{

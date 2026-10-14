@@ -597,6 +597,7 @@ fn the_graph_paint_is_a_different_color_from_its_background() {
         lighting: genos_scene::LightingSettings::default(),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        event_loop: genos_scene::EventLoopSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     });
     let camera = Camera::opening();

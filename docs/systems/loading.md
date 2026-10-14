@@ -10,6 +10,8 @@ A game can load an image, a texture, a texture map, a mesh, a material, an anima
 
 Decoders read bytes only. They do not open a window, an audio device, a GPU, or a socket.
 
+A mapped window does not decode a scene on the frame thread. The frame shows a loading picture and keeps pumping. The read runs on `genos-scene-load`. See [window](window.md).
+
 A file path and a memory block are byte sources. A network payload and a disc payload use the same decoders after the bytes arrive.
 
 An image is RGBA8. The origin is the top-left. A texture keeps a name and that image.

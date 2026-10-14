@@ -14,6 +14,7 @@ use rhai::{Dynamic, Engine, EvalAltResult};
 use genos_math::Vec3;
 
 use crate::debug_settings::DebugSettings;
+use crate::event_loop::EventLoopSettings;
 use crate::fps_counter::FpsCounterSettings;
 use crate::lighting::LightingSettings;
 use crate::menu::MenuSettings;
@@ -383,6 +384,7 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
         debug: built.debug.clone(),
         fps_counter: built.fps_counter,
         menu: built.menu.clone(),
+        event_loop: built.event_loop,
     })
 }
 
@@ -407,4 +409,5 @@ struct Builder {
     debug: DebugSettings,
     fps_counter: FpsCounterSettings,
     menu: MenuSettings,
+    event_loop: EventLoopSettings,
 }

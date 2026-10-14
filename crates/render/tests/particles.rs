@@ -47,6 +47,7 @@ fn room(lamp: [f32; 3]) -> Scene {
         lighting: genos_scene::LightingSettings::default(),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        event_loop: genos_scene::EventLoopSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     }
 }

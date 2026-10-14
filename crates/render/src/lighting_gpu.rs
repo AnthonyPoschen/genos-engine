@@ -770,10 +770,7 @@ impl Gpu {
         if !self.lighting.world_busy || self.lighting.world_fence.is_null() {
             return;
         }
-        let fences = [self.lighting.world_fence];
-        unsafe {
-            (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX);
-        }
+        let _ = self.wait_fence(self.lighting.world_fence, "lighting world");
         self.lighting.world_busy = false;
     }
 
@@ -1128,9 +1125,7 @@ impl Gpu {
     /// Rays the screen probes held in the last frame drawn, and probes placed
     /// (lighting_gather.comp): waits for that frame.
     pub(crate) fn lighting_probe_samples(&mut self) -> [u32; 2] {
-        unsafe {
-            (self.fns.device_wait)(self.device);
-        }
+        self.idle_device();
         self.read_lighting_stats(self.lighting.last_slot)
             .map_or(self.lighting.probe_samples, |w| [w[6], w[7]])
     }
@@ -1139,9 +1134,7 @@ impl Gpu {
     /// merges. Zero unless `GENOS_LIGHTING_LAMP_PICK_DIAG` was set for that frame.
     /// Waits for that frame.
     pub(crate) fn lighting_lamp_pick_counts(&mut self) -> LampPickCounts {
-        unsafe {
-            (self.fns.device_wait)(self.device);
-        }
+        self.idle_device();
         let slot = self.lighting.last_slot;
         self.read_stats16(self.lighting.stats[slot].memory)
             .map(|w| LampPickCounts {
@@ -1157,9 +1150,7 @@ impl Gpu {
     /// A-trous dirty fraction, mode and threshold for the last frame drawn.
     /// Waits for that frame. The words are the `lightingatrous` line.
     pub(crate) fn lighting_atrous_stats(&mut self) -> LightingAtrousStats {
-        unsafe {
-            (self.fns.device_wait)(self.device);
-        }
+        self.idle_device();
         let slot = self.lighting.last_slot;
         self.read_stats16(self.lighting.stats[slot].memory)
             .map(|w| lighting_atrous_from(&w))
@@ -1235,9 +1226,7 @@ impl Gpu {
 
     /// GPU mark from the last submitted frame. Waits for that frame.
     pub(crate) fn lighting_sun_stats(&mut self) -> LightingSunStats {
-        unsafe {
-            (self.fns.device_wait)(self.device);
-        }
+        self.idle_device();
         let slot = self.lighting.last_slot;
         if let Ok(words) = self.read_stats16(self.lighting.stats[slot].memory) {
             self.lighting.sun_gpu_mark = words[LIGHTING_SUN_MARK];
@@ -2716,9 +2705,7 @@ impl Gpu {
         if (self.lighting.frame as u64) < last + 3 {
             return;
         }
-        unsafe {
-            (self.fns.device_wait)(self.device);
-        }
+        self.idle_device();
         let dir = genos_scene::lighting_env("GENOS_LIGHTING_DUMP_DIR").unwrap_or_else(|_| "lighting-dump".into());
         let _ = std::fs::create_dir_all(&dir);
         let dumps = std::mem::take(&mut self.lighting.dump);
