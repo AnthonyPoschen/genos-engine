@@ -37,7 +37,7 @@ from lib.contract import (
 from lib.gitcheck import head_sha, rev_parse
 from lib.images import diff_image, flip_mean_p99, load_image, mean_abs, write_png
 from lib.images import blur_relative
-from lib.launch import child_env, hold_lock, lighting_argv, release_lock, stop
+from lib.launch import child_env, hold_lock, lighting_launch, release_lock, stop
 from lib.mcp import post, quit, wait_ready
 from lib.noise import SETTLE_FRAMES, summarize, write_repeats, write_spread
 import noise_floor
@@ -342,12 +342,15 @@ def _capture(binary: Path, display: str, scene: str, checkpoint: str, run_dir: P
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = int(sock.getsockname()[1])
-    argv = lighting_argv(str(binary), display, scene, checkpoint, port, run_dir)
+    argv, extra = lighting_launch(str(binary), display, scene, checkpoint, port, run_dir)
     (run_dir / "argv.txt").write_text("\n".join(argv) + "\n", encoding="utf-8")
+    env_lines = [f"WAYLAND_DISPLAY={display}"]
+    env_lines.extend(f"{key}={value}" for key, value in sorted(extra.items()))
+    (run_dir / "launch-env.txt").write_text("\n".join(env_lines) + "\n", encoding="utf-8")
     (run_dir / "capture.json").write_text('{"ui": false, "name": "pose"}\n', encoding="utf-8")
     proc = subprocess.Popen(
         argv,
-        env=child_env(dict(**__import__("os").environ), display),
+        env=child_env(dict(**__import__("os").environ), display, extra),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

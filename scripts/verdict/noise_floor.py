@@ -31,7 +31,7 @@ from lib.contract import (
     write_args,
 )
 from lib.gitcheck import head_sha
-from lib.launch import child_env, hold_lock, lighting_argv, release_lock, stop
+from lib.launch import child_env, hold_lock, lighting_launch, release_lock, stop
 from lib.mcp import post, quit, wait_ready
 from lib.noise import SETTLE_FRAMES, read_repeats, summarize, write_repeats, write_spread
 import precheck
@@ -176,12 +176,13 @@ def _live(ns: argparse.Namespace, evidence: Path) -> list[dict[str, str]]:
             with socket.socket() as sock:
                 sock.bind(("127.0.0.1", 0))
                 port = sock.getsockname()[1]
-            argv = lighting_argv(binary, display, ns.scene, ns.checkpoint, port, run_dir)
+            argv, extra = lighting_launch(binary, display, ns.scene, ns.checkpoint, port, run_dir)
             (run_dir / "argv.txt").write_text("\n".join(argv) + "\n", encoding="utf-8")
+            (run_dir / "launch-env.txt").write_text(_env_text(display, extra), encoding="utf-8")
             (run_dir / "capture.json").write_text('{"ui": false, "name": "pose"}\n', encoding="utf-8")
             proc = subprocess.Popen(
                 argv,
-                env=child_env(os_environ(), display),
+                env=child_env(os_environ(), display, extra),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -200,6 +201,12 @@ def os_environ() -> dict[str, str]:
     import os
 
     return dict(os.environ)
+
+
+def _env_text(display: str, extra: dict[str, str]) -> str:
+    lines = [f"WAYLAND_DISPLAY={display}"]
+    lines.extend(f"{key}={value}" for key, value in sorted(extra.items()))
+    return "\n".join(lines) + "\n"
 
 
 def _measure(proc, port: int, settle_limit: int, run_dir: Path, index: int) -> dict[str, str]:

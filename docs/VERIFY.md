@@ -42,12 +42,18 @@ A flag wins when both are set.
 A window is never placed on the session compositor. A script that draws
 requires `--display` (a Wayland display name). It sets the child
 `WAYLAND_DISPLAY` to that name and drops the inherited session display.
-`--display` is added to the argument list only when `binary --help` documents
-the flag. A base from before that flag, including gi-v2, rejects it, so the
-display stays in the environment and the caller places the window. The binary
-opens with `--proof` or `--headless` (the proof window floats and does not
-take focus). Quit is MCP `quit`, then SIGTERM and a wait. The scripts do not
-send SIGKILL.
+A flag is added only when `binary --help` lists it. That covers `--display`,
+`--headless`, `--scene`, `--checkpoint`, `--mcp-port`, `--out`, `--size`, and
+`--menu`. gi-v2 lists `--mcp-port`, `--scene`, `--checkpoint`, `--out`,
+`--size`, `--menu`, and `--headless`. It does not list `--display`, so the
+display stays in the child `WAYLAND_DISPLAY` and the caller places the window.
+When help lists `GENOS_SCENE`, `GENOS_CHECKPOINT`, or `GENOS_MENU` and not the
+flag, that variable is set instead. A binary that rejects `--mcp-port` gets
+`GENOS_MCP_PORT`, which is the override `listen_port` reads. `--ui` is not
+passed: help says that flag keeps overlays in the picture. The capture command
+sends `"ui": false`. The binary opens with `--proof` or `--headless` when help
+lists that flag (the proof window floats and does not take focus). Quit is MCP
+`quit`, then SIGTERM and a wait. The scripts do not send SIGKILL.
 
 `./genos-debug/` is gitignored. Nothing is written under `$HOME`.
 
@@ -88,10 +94,12 @@ python3 scripts/verdict/noise-floor.py \
   --display wayland-1
 ```
 
-A live run calls precheck first. It launches `genos-lighting --headless`.
-The Wayland display is `WAYLAND_DISPLAY`, and `--display` is passed only when
-that binary's help lists it. It posts `wait_settled`, `timing`, and `capture`
-with `"ui": false`, then MCP `quit` or SIGTERM. `--fixture DIR` scores a saved
+A live run calls precheck first. It launches `genos-lighting`. The Wayland
+display is `WAYLAND_DISPLAY`. `--display`, `--mcp-port`, `--scene`,
+`--checkpoint`, and `--menu` are passed only when that binary's help lists
+them; otherwise the documented env mirror is set (`GENOS_MCP_PORT` when the
+port flag is absent). It posts `wait_settled`, `timing`, and `capture` with
+`"ui": false`, then MCP `quit` or SIGTERM. `--fixture DIR` scores a saved
 `repeats.csv` and does not open a window.
 
 Picture error is mean absolute channel error, blurred relative luminance, and

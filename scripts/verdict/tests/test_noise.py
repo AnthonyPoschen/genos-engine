@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from lib.contract import Broken, capture_file
 from lib.images import flip_mean_p99, load_image, solid, write_png
-from lib.launch import child_env, help_lists_display, lighting_argv, stop, stress_argv
+from lib.launch import child_env, help_lists_display, lighting_argv, lighting_launch, stop, stress_argv
 from lib.noise import summarize
 
 
@@ -144,7 +144,12 @@ class NoiseTests(unittest.TestCase):
                 os.chdir(caller)
                 shot = capture_file(Path("rel/out") / "run-1")
                 argv = lighting_argv(
-                    str(_help_binary(caller / "lighting", "--display NAME\n")),
+                    str(
+                        _help_binary(
+                            caller / "lighting",
+                            "--display NAME --headless --scene NAME --checkpoint NAME --mcp-port N --out DIR\n",
+                        )
+                    ),
                     "wayland-9",
                     "stress",
                     "hall",
@@ -181,17 +186,33 @@ class NoiseTests(unittest.TestCase):
         self.assertFalse(help_lists_display("  --headless             proof window, no panel\n"))
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            new = _help_binary(root / "new-lighting", "--display NAME\n")
-            old = _help_binary(root / "old-lighting", "--headless proof window\n")
+            new = _help_binary(
+                root / "new-lighting",
+                "--headless --display NAME --scene NAME --checkpoint NAME --mcp-port N --out DIR\n",
+            )
+            old = _help_binary(
+                root / "old-lighting",
+                "--headless proof window --scene NAME --checkpoint NAME --out DIR GENOS_MCP_PORT\n",
+            )
             argv = lighting_argv(str(new), "wayland-9", "stress", "hall", 9, Path("out"))
-            self.assertEqual(argv[1:3], ["--display", "wayland-9"])
-            self.assertIn("--headless", argv)
+            self.assertEqual(argv[1:3], ["--headless", "--display"])
+            self.assertEqual(argv[3], "wayland-9")
+            self.assertIn("--mcp-port", argv)
             self.assertNotIn("HDMI-A-1", argv)
             self.assertNotIn("DP-1", argv)
-            old_argv = lighting_argv(str(old), "wayland-9", "stress", "hall", 9, Path("out"))
+            old_argv, old_env = lighting_launch(str(old), "wayland-9", "stress", "hall", 9, Path("out"))
             self.assertNotIn("--display", old_argv)
+            self.assertNotIn("--mcp-port", old_argv)
             self.assertNotIn("wayland-9", old_argv)
             self.assertIn("--headless", old_argv)
+            self.assertEqual(old_env["GENOS_MCP_PORT"], "9")
+            bare = _help_binary(
+                root / "bare-lighting",
+                "--headless --scene NAME --checkpoint NAME\n",
+            )
+            bare_argv, bare_env = lighting_launch(str(bare), "wayland-9", "stress", "hall", 9, Path("out"))
+            self.assertNotIn("--mcp-port", bare_argv)
+            self.assertEqual(bare_env.get("GENOS_MCP_PORT"), "9")
             old_stress = stress_argv(str(old), "wayland-9", 30, Path("out"))
             self.assertNotIn("--display", old_stress)
             self.assertIn("--proof", old_stress)
