@@ -1,5 +1,6 @@
 //! The lighting panel, the lamp sun, and the pointer step the camera frame uses.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use genos_scene::{Camera, Scene};
@@ -104,6 +105,10 @@ pub struct State {
     pub omarchy_current: Option<PathBuf>,
     palette: Option<Palette>,
     palette_from: Option<PathBuf>,
+    /// Section ids that have already taken their first-frame fold.
+    section_seen: BTreeSet<u32>,
+    /// Section ids that are folded. Later frames keep this set.
+    collapsed_sections: BTreeSet<u32>,
 }
 
 impl Default for State {
@@ -125,7 +130,42 @@ impl Default for State {
             omarchy_current: None,
             palette: None,
             palette_from: None,
+            section_seen: BTreeSet::new(),
+            collapsed_sections: BTreeSet::new(),
         }
+    }
+}
+
+impl State {
+    /// Remember a fold before the first frame. A later frame keeps this choice
+    /// instead of the section's starting fold.
+    pub fn fold_section(&mut self, id: u32, collapsed: bool) {
+        self.section_seen.insert(id);
+        if collapsed {
+            self.collapsed_sections.insert(id);
+        } else {
+            self.collapsed_sections.remove(&id);
+        }
+    }
+
+    /// True when this section is folded.
+    pub fn section_collapsed(&self, id: u32) -> bool {
+        self.collapsed_sections.contains(&id)
+    }
+
+    fn toggle_section(&mut self, id: u32) {
+        self.section_seen.insert(id);
+        if !self.collapsed_sections.remove(&id) {
+            self.collapsed_sections.insert(id);
+        }
+    }
+
+    /// First sight uses `start_collapsed`. After that, the remembered fold wins.
+    fn section_is_open(&mut self, id: u32, start_collapsed: bool) -> bool {
+        if self.section_seen.insert(id) && start_collapsed {
+            self.collapsed_sections.insert(id);
+        }
+        !self.collapsed_sections.contains(&id)
     }
 }
 
@@ -260,6 +300,30 @@ pub struct PanelRow {
     pub dropdown: Option<PanelDropdown>,
     /// On/off marks laid out left to right. A press reports the next state.
     pub checks: Vec<PanelCheck>,
+}
+
+/// A named group of rows. A press on the title folds the rows.
+///
+/// `collapsed` applies the first time this id is shown. [`State`] remembers the
+/// fold after that, including across later calls with the same id.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PanelSection {
+    pub id: u32,
+    pub title: String,
+    /// Folded on the first frame this id is seen.
+    pub collapsed: bool,
+    pub rows: Vec<PanelRow>,
+}
+
+impl PanelSection {
+    pub fn new(id: u32, title: impl Into<String>, collapsed: bool, rows: Vec<PanelRow>) -> Self {
+        Self {
+            id,
+            title: title.into(),
+            collapsed,
+            rows,
+        }
+    }
 }
 
 /// A compact on/off mark and a label. The panel does not store `on`.
@@ -424,12 +488,53 @@ pub fn button_panel(
     camera: &Camera,
     pointer: Pointer,
 ) -> Frame {
+    drag_panel(state, pointer);
+    refresh_palette(state);
+    let panel = panel_tree(state, title, rows, &[], None);
+    finish_panel(state, panel, rows, &[], viewport, camera, pointer)
+}
+
+/// Lay out the same panel as [`button_panel`], grouped under folding section titles.
+///
+/// A press on a title fires [`Action::Press`] with the section id and folds the
+/// rows under it. The next call keeps that fold.
+pub fn button_panel_sections(
+    state: &mut State,
+    title: &str,
+    sections: &[PanelSection],
+    viewport: [f32; 2],
+    camera: &Camera,
+    pointer: Pointer,
+) -> Frame {
+    drag_panel(state, pointer);
+    refresh_palette(state);
+    let mut visible = Vec::new();
+    let mut ids = Vec::new();
+    for section in sections {
+        ids.push(section.id);
+        if state.section_is_open(section.id, section.collapsed) {
+            visible.extend(section.rows.iter().cloned());
+        }
+    }
+    let panel = panel_tree(state, title, &visible, sections, None);
+    finish_panel(state, panel, &visible, &ids, viewport, camera, pointer)
+}
+
+fn drag_panel(state: &mut State, pointer: Pointer) {
     let press_edge = pointer.down && !state.down;
     if state.dragging && pointer.down && !press_edge {
         state.panel_offset[0] += pointer.x - state.pointer_x;
         state.panel_offset[1] += pointer.y - state.pointer_y;
     }
-    refresh_palette(state);
+}
+
+fn panel_tree(
+    state: &State,
+    title: &str,
+    rows: &[PanelRow],
+    sections: &[PanelSection],
+    max_width: Option<f32>,
+) -> Node {
     let palette = state.palette;
     let fill = surface(palette);
     let own = u32::MAX - 4095;
@@ -440,39 +545,114 @@ pub fn button_panel(
     panel.place = Some(Place::point([0.0, 0.0], [0.0, 0.0], state.panel_offset));
     panel.draggable = true;
     paint_looks(&mut panel, chrome_looks(palette));
-    panel.children.push(label(own + 1, title, fill));
-    for (index, item) in rows.iter().enumerate() {
-        let at = own + 2 + 3 * index as u32;
-        let mut children = Vec::new();
-        if !item.label.is_empty() {
-            children.push(label(at + 1, &item.label, fill));
-        }
-        for button in &item.buttons {
-            let mut node = control(button.id, &button.text, Action::Press(button.id), palette);
-            if button.selected {
-                let looks = control_looks(palette);
-                node.idle = looks.pressed;
-                node.hover = looks.pressed;
-            }
-            children.push(node);
-        }
-        if let Some(bar) = &item.slider {
-            children.push(sized_slider(
-                bar.id,
-                palette,
-                slider_width(bar),
-                slider_height(bar),
-            ));
-            children.push(label(at + 2, &bar.text, fill));
-        }
-        if let Some(drop) = &item.dropdown {
-            children.push(dropdown_box(drop, palette));
-        }
-        for check in &item.checks {
-            children.push(check_node(check, fill, palette));
-        }
-        panel.children.push(row(at, children, fill));
+    if let Some(max_width) = max_width {
+        panel.width = Sizing::Fit {
+            min: 0.0,
+            max: max_width,
+        };
     }
+    panel
+        .children
+        .push(capped_label(own + 1, title, fill, max_width));
+    if sections.is_empty() {
+        for (index, item) in rows.iter().enumerate() {
+            panel.children.push(row_node(
+                own + 2 + 3 * index as u32,
+                item,
+                fill,
+                palette,
+                None,
+            ));
+        }
+        return panel;
+    }
+    let mut row_index = 0usize;
+    for section in sections {
+        panel.children.push(section_header(section, state, palette));
+        if state.section_collapsed(section.id) {
+            continue;
+        }
+        for item in &section.rows {
+            panel.children.push(row_node(
+                own + 2 + 3 * row_index as u32,
+                item,
+                fill,
+                palette,
+                None,
+            ));
+            row_index += 1;
+        }
+    }
+    panel
+}
+
+fn section_header(section: &PanelSection, state: &State, palette: Option<Palette>) -> Node {
+    let mark = if state.section_collapsed(section.id) {
+        "+"
+    } else {
+        "-"
+    };
+    control(
+        section.id,
+        &format!("{mark} {}", section.title),
+        Action::Press(section.id),
+        palette,
+    )
+}
+
+fn row_node(
+    at: u32,
+    item: &PanelRow,
+    fill: [f32; 3],
+    palette: Option<Palette>,
+    _budget: Option<f32>,
+) -> Node {
+    let mut children = Vec::new();
+    if !item.label.is_empty() {
+        children.push(label(at + 1, &item.label, fill));
+    }
+    for button in &item.buttons {
+        let mut node = control(button.id, &button.text, Action::Press(button.id), palette);
+        if button.selected {
+            let looks = control_looks(palette);
+            node.idle = looks.pressed;
+            node.hover = looks.pressed;
+        }
+        children.push(node);
+    }
+    if let Some(bar) = &item.slider {
+        children.push(sized_slider(
+            bar.id,
+            palette,
+            slider_width(bar),
+            slider_height(bar),
+        ));
+        children.push(label(at + 2, &bar.text, fill));
+    }
+    if let Some(drop) = &item.dropdown {
+        children.push(dropdown_box(drop, palette));
+    }
+    for check in &item.checks {
+        children.push(check_node(check, fill, palette));
+    }
+    row(at, children, fill)
+}
+
+fn capped_label(id: u32, text: &str, fill: [f32; 3], _max_width: Option<f32>) -> Node {
+    label(id, text, fill)
+}
+
+fn finish_panel(
+    state: &mut State,
+    panel: Node,
+    rows: &[PanelRow],
+    section_ids: &[u32],
+    viewport: [f32; 2],
+    camera: &Camera,
+    pointer: Pointer,
+) -> Frame {
+    let press_edge = pointer.down && !state.down;
+    let palette = state.palette;
     let bars: Vec<&PanelSlider> = rows.iter().filter_map(|r| r.slider.as_ref()).collect();
     let drops: Vec<&PanelDropdown> = rows.iter().filter_map(|r| r.dropdown.as_ref()).collect();
     let checks: Vec<&PanelCheck> = rows.iter().flat_map(|row| row.checks.iter()).collect();
@@ -531,6 +711,11 @@ pub fn button_panel(
                 state.held = Some(item.id);
                 state.dragging = false;
             } else if let Some(action) = item.action {
+                if let Action::Press(id) = action {
+                    if section_ids.contains(&id) {
+                        state.toggle_section(id);
+                    }
+                }
                 actions.push(action);
                 state.dragging = false;
             } else {
