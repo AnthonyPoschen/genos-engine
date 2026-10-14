@@ -82,39 +82,49 @@ These files already `expect` `disallowed_methods` for `set_var`, so a new `env::
 
 ### TODO: renderer tuning reads
 
-The renderer still reads 36 environment names itself. Each one should move onto the lighting config struct. Thirteen already have a CLI flag; the read should use the struct the flag writes. Twenty-three have no flag yet. Do not add a new `kind = "todo"` row while moving them: add the flag, then mark the name `mirror`.
+The renderer still reads 35 environment names itself. Each one should move onto the lighting config struct. Thirteen already have a CLI flag; the read should use the struct the flag writes. Twenty-two have no flag yet. Do not add a new `kind = "todo"` row while moving them: add the flag, then mark the name `mirror`.
+
+`GENOS_LIGHTING_SC_LOCAL` left the renderer when PR #45 moved mover attachment onto `surface_cache.attach_movers`. `apply_env` still reads it, and it reads the five new mirrors below. That function already allows `disallowed_methods`. The new names are mirrors, not a new todo:
+
+| Variable | Where | CLI |
+|---|---|---|
+| `GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS` | `crates/scene/src/lighting.rs:1244` | `--surface-cache-attach-movers` |
+| `GENOS_LIGHTING_SC_LOCAL` | `crates/scene/src/lighting.rs:1245` | `--surface-cache-attach-movers` (previous name) |
+| `GENOS_LIGHTING_SURFACE_CACHE_BLEND` | `crates/scene/src/lighting.rs:1246` | `--surface-cache-blend` |
+| `GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA` | `crates/scene/src/lighting.rs:1247` | `--surface-cache-firefly-sigma` |
+| `GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET` | `crates/scene/src/lighting.rs:1248` | `--surface-cache-ray-budget` |
+| `GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS` | `crates/scene/src/lighting.rs:1249` | `--surface-cache-dormant-rays` |
 
 | Variable | Where | CLI today |
 |---|---|---|
 | `GENOS_GPU_DISPATCH` | `crates/render/src/gpu.rs:2315` | none |
 | `GENOS_GPU_TIMES` | `crates/render/src/gpu.rs:1448` | `--gpu-times` |
 | `GENOS_LIGHTING_ASYNC` | `crates/render/src/lighting_gpu.rs:373` | none |
-| `GENOS_LIGHTING_ATROUS_DIRTY` | `crates/render/src/lighting_gpu.rs:2883` | none |
-| `GENOS_LIGHTING_BORROW` | `crates/render/src/lighting_gpu.rs:2191` | none |
+| `GENOS_LIGHTING_ATROUS_DIRTY` | `crates/render/src/lighting_gpu.rs:2947` | none |
+| `GENOS_LIGHTING_BORROW` | `crates/render/src/lighting_gpu.rs:2246` | none |
 | `GENOS_LIGHTING_CACHE_HZ` | `crates/render/src/lighting_gpu.rs:398` | none |
-| `GENOS_LIGHTING_CACHE_PICKS` | `crates/render/src/lighting_gpu.rs:2182` | none |
-| `GENOS_LIGHTING_CATCH_UP` | `crates/render/src/lighting_gpu.rs:3195` | none |
-| `GENOS_LIGHTING_COMPOSE_ALL` | `crates/render/src/lighting_gpu.rs:2231` | `--full-effort` |
-| `GENOS_LIGHTING_DEBUG` | `crates/render/src/lighting_gpu.rs:3199` | `--lighting-debug` |
-| `GENOS_LIGHTING_DUMP` | `crates/render/src/lighting_gpu.rs:2614` | none |
-| `GENOS_LIGHTING_DUMP_DIR` | `crates/render/src/lighting_gpu.rs:2668` | none |
-| `GENOS_LIGHTING_FILL` | `crates/render/src/lighting_gpu.rs:2183` | none |
-| `GENOS_LIGHTING_FULL_EFFORT` | `crates/render/src/lighting_gpu.rs:3188` | `--lighting-full-effort` |
+| `GENOS_LIGHTING_CACHE_PICKS` | `crates/render/src/lighting_gpu.rs:2237` | none |
+| `GENOS_LIGHTING_CATCH_UP` | `crates/render/src/lighting_gpu.rs:3250` | none |
+| `GENOS_LIGHTING_COMPOSE_ALL` | `crates/render/src/lighting_gpu.rs:2286` | `--full-effort` |
+| `GENOS_LIGHTING_DEBUG` | `crates/render/src/lighting_gpu.rs:3254` | `--lighting-debug` |
+| `GENOS_LIGHTING_DUMP` | `crates/render/src/lighting_gpu.rs:2669` | none |
+| `GENOS_LIGHTING_DUMP_DIR` | `crates/render/src/lighting_gpu.rs:2723` | none |
+| `GENOS_LIGHTING_FILL` | `crates/render/src/lighting_gpu.rs:2238` | none |
+| `GENOS_LIGHTING_FULL_EFFORT` | `crates/render/src/lighting_gpu.rs:3243` | `--lighting-full-effort` |
 | `GENOS_LIGHTING_LAMP_PICK_DIAG` | `crates/render/src/lighting_dispatch.rs:91`, `crates/render/src/gpu.rs:2205` | none |
-| `GENOS_LIGHTING_MOVED_DROP` | `crates/render/src/lighting_gpu.rs:2189` | none |
-| `GENOS_LIGHTING_SC_FLAGS` | `crates/render/src/lighting_gpu.rs:2899` | none |
-| `GENOS_LIGHTING_SC_LOCAL` | `crates/render/src/lighting_gpu.rs:2909` | none |
+| `GENOS_LIGHTING_MOVED_DROP` | `crates/render/src/lighting_gpu.rs:2244` | none |
+| `GENOS_LIGHTING_SC_FLAGS` | `crates/render/src/lighting_gpu.rs:2963` | none |
 | `GENOS_LIGHTING_SC_SETTLE` | `crates/render/src/lighting_gpu.rs:1101` | none |
-| `GENOS_LIGHTING_SC_TRACE` | `crates/render/src/lighting_gpu.rs:1725`, `crates/render/src/lighting_gpu.rs:2870` | none |
-| `GENOS_LIGHTING_SUN` | `crates/render/src/lighting_gpu.rs:3185` | `--lighting-sun` |
-| `GENOS_LIGHTING_SUN_BANDS` | `crates/render/src/lighting_gpu.rs:3191` | `--lighting-sun-bands` |
+| `GENOS_LIGHTING_SC_TRACE` | `crates/render/src/lighting_gpu.rs:1725`, `crates/render/src/lighting_gpu.rs:2934` | none |
+| `GENOS_LIGHTING_SUN` | `crates/render/src/lighting_gpu.rs:3240` | `--lighting-sun` |
+| `GENOS_LIGHTING_SUN_BANDS` | `crates/render/src/lighting_gpu.rs:3246` | `--lighting-sun-bands` |
 | `GENOS_LIGHTING_TILE` | `crates/render/src/lighting_gpu.rs:35` | none |
-| `GENOS_LIGHTING_TOGGLES` | `crates/render/src/lighting_gpu.rs:3121` | none |
-| `GENOS_LIGHTING_TOGGLES_FILE` | `crates/render/src/lighting_gpu.rs:3122` | none |
+| `GENOS_LIGHTING_TOGGLES` | `crates/render/src/lighting_gpu.rs:3176` | none |
+| `GENOS_LIGHTING_TOGGLES_FILE` | `crates/render/src/lighting_gpu.rs:3177` | none |
 | `GENOS_LIGHTING_UNFILLED` | `crates/render/src/unfilled.rs:193` | `--unfilled` |
 | `GENOS_LIGHTING_UNFILLED_DUMP` | `crates/render/src/unfilled.rs:195` | `--unfilled-dump` |
 | `GENOS_LIGHTING_UNFILLED_TINT` | `crates/render/src/unfilled.rs:194` | `--unfilled-tint` |
-| `GENOS_LIGHTING_URGENT` | `crates/render/src/lighting_gpu.rs:2190` | none |
+| `GENOS_LIGHTING_URGENT` | `crates/render/src/lighting_gpu.rs:2245` | none |
 | `GENOS_LIGHTING_WORLD_CAP` | `crates/render/src/lighting_gpu.rs:1097`, `crates/render/src/lighting_gpu.rs:2010` | none |
 | `GENOS_LIGHTING_YOUNG_ONLY` | `crates/render/src/lighting_gpu.rs:392` | none |
 | `GENOS_SCENE_DELTA` | `crates/render/src/lib.rs:56` | none |
@@ -193,18 +203,18 @@ Delete the casts, then lower that file's count in `lint/lossy-cast-baseline.txt`
 
 `scripts/lint-shader-constants.py`, added 2026-10-14. In `*.glsl`, `*.comp`, `*.vert`, and `*.frag`, a fractional literal that is not exactly `0` or `1` must sit on a `const` or `#define` line. `0.0`, `1.0`, and `-1.0` stay allowed. Integers stay allowed. `lint/fail/shader_magic.comp` is the bad example. `lint/pass/shader_named.glsl` is the shape that stays clean.
 
-`lint/shader-magic-baseline.txt` is the per-file count. A higher count fails. Measured 2026-10-14: **867** literals, 26 files.
+`lint/shader-magic-baseline.txt` is the per-file count. A higher count fails. Measured 2026-10-14, after merging gi-v2: **891** literals, 26 files.
 
 | File | Literals |
 |---|---:|
-| `crates/render/shaders/lighting_cache.glsl` | 334 |
-| `crates/render/shaders/lighting_cache.comp` | 88 |
+| `crates/render/shaders/lighting_cache.glsl` | 338 |
+| `crates/render/shaders/lighting_cache.comp` | 89 |
 | `crates/render/shaders/lighting_common.glsl` | 46 |
 | `crates/render/shaders/scene_rays.glsl` | 46 |
 | `crates/render/shaders/lighting_direct.comp` | 42 |
-| `crates/render/shaders/lighting_compact.comp` | 40 |
-| `crates/render/shaders/lighting_compose.comp` | 39 |
-| `crates/render/shaders/lighting_sun_compose.comp` | 38 |
+| `crates/render/shaders/lighting_compact.comp` | 41 |
+| `crates/render/shaders/lighting_compose.comp` | 48 |
+| `crates/render/shaders/lighting_sun_compose.comp` | 47 |
 | `crates/render/shaders/fxaa.comp` | 30 |
 | `crates/render/shaders/lighting_gather.comp` | 28 |
 | `crates/gpuref/shaders/path.comp` | 19 |
@@ -259,8 +269,8 @@ A `GENOS_*` or `OCC_*` string in Rust must be listed. Kinds:
 
 | Kind | Count | Meaning |
 |---|---|---|
-| `mirror` | 23 | A CLI argument exists and wins when both are set. `detail` is the flag. |
-| `todo` | 95 | Read today, and still has no argument. |
+| `mirror` | 29 | A CLI argument exists and wins when both are set. `detail` is the flag. |
+| `todo` | 94 | Read today, and still has no argument. |
 | `override` | 2 | `GENOS_MCP_PORT` (discovery directory is primary) and `GENOS_ENGINE_COMMIT` (stamp when git is missing). |
 | `test` | 14 | Harness only. |
 | `os` | 5 | `HOME`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, `WAYLAND_DISPLAY`, `VK_ICD_FILENAMES`. |
@@ -276,7 +286,7 @@ let _ = std::env::var("GENOS_NOT_A_MIRROR");
 
 ### TODO: env switches without an argument
 
-The 95 `kind = "todo"` rows are the list. The cluster called out in `docs/lighting/RENAMES.md` item 14 is still env-only: `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`. Promote the live ones onto the settings value, the debug menu, and MCP, or delete them.
+The 94 `kind = "todo"` rows are the list. The cluster called out in `docs/lighting/RENAMES.md` item 14 is still env-only: `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`. Promote the live ones onto the settings value, the debug menu, and MCP, or delete them.
 
 ## Semgrep
 

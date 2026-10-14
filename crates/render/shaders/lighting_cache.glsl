@@ -1092,8 +1092,9 @@ uint lighting_movers_count() {
 vec4 lighting_mover(uint m, uint k) {
     return work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + lighting_movers_first() + LIGHTING_MOVER_VEC4 * m + k];
 }
-// Object-local texels (GIBS 2021: surfels keep a transform id and a local
-// position): GENOS_LIGHTING_SC_LOCAL=1.
+// Object-local cache entries (GIBS 2021 §1.5: a surfel stores a transform id
+// and an object-relative position). Movers only; static geometry stays
+// world-lattice (ADR 0012). The bit is surface_cache.attach_movers, head w / 100000.
 bool lighting_sc_local_on() {
     return lighting_world_mode() == 3u && ((uint(work.v[lighting_change_at()].w) / 100000u) & 1u) != 0u;
 }
@@ -2188,6 +2189,31 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
 // to the entry (lighting_dense_entry). Nothing past the live entries is dispatched.
 bool lighting_wrc_scout_due();
 const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
+// Surface-cache firefly clamp (`surface_cache.firefly_sigma`). Barré-Brisebois
+// et al., MultiscaleMeanEstimator.hlsl, uses 8. The clamp is biased. 0 keeps
+// the listing's 0.1 floor and still clamps. The hold path does not read this.
+float lighting_sc_firefly_sigma() {
+    return uintBitsToFloat(ckeys.key[LIGHTING_ARGS_AT + 13u]);
+}
+// surface_cache.ray_budget. 0 keeps the existing dispatch lists. A total under
+// the budget is unchanged (lighting_sc_cap_lists).
+uint lighting_sc_ray_budget() {
+    return ckeys.key[LIGHTING_ARGS_AT + 11u];
+}
+// surface_cache.dormant_rays: whole rays per frame, 0 through 16.
+// 0 keeps one sweep in LIGHTING_SC_DORMANT.
+uint lighting_sc_dormant_rays() {
+    return ckeys.key[LIGHTING_ARGS_AT + 12u];
+}
+// Frames between fresh 16-ray traces of a dormant cache entry.
+// A non-zero floor uses ceil(16 / rays). The traces are new; nothing is reused.
+uint lighting_sc_dormant_period() {
+    uint rays = lighting_sc_dormant_rays();
+    if (rays == 0u) {
+        return LIGHTING_SC_DORMANT;
+    }
+    return max(1u, (LIGHTING_CACHE_RAYS + rays - 1u) / rays);
+}
 // S72J region refinement (Anthony: uniform within a region, no sharp islands in
 // blotchy surroundings; Lumen refines surface cache pages). A page is 8 x 8
 // texels of one size on one plane (axis, plane offset); a hashed table of
@@ -2297,6 +2323,101 @@ uint lighting_dense_entry(uint d) {
     }
     return LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES + (d - g);
 }
+// Ceiling for one cache round (surface_cache.ray_budget). 0, or a total already
+// under the budget, leaves the lists alone. Each list slot is LIGHTING_CACHE_RAYS
+// rays. The floor's leftover entries go to the largest fractional share, and no
+// list grows past the count it already had. When the ceiling can hold one entry
+// per non-empty list, none of those lists drops to zero. A tighter ceiling keeps
+// the largest lists: it cannot hold one entry for every list.
+void lighting_sc_cap_lists(inout uint a, inout uint b, inout uint c, inout uint g, inout uint s) {
+    uint budget = lighting_sc_ray_budget();
+    uint rays = (a + b + c + g + s) * LIGHTING_CACHE_RAYS;
+    if (budget == 0u || rays <= budget) {
+        return;
+    }
+    uint cap = budget / LIGHTING_CACHE_RAYS;
+    uint orig[5] = uint[5](a, b, c, g, s);
+    uint outv[5] = uint[5](0u, 0u, 0u, 0u, 0u);
+    if (cap == 0u) {
+        a = 0u;
+        b = 0u;
+        c = 0u;
+        g = 0u;
+        s = 0u;
+        return;
+    }
+    uint n = 0u;
+    for (uint i = 0u; i < 5u; i++) {
+        n += uint(orig[i] > 0u);
+    }
+    if (cap < n) {
+        uint left = cap;
+        while (left > 0u) {
+            uint best = 5u;
+            uint bestn = 0u;
+            for (uint i = 0u; i < 5u; i++) {
+                if (outv[i] == 0u && orig[i] > bestn) {
+                    best = i;
+                    bestn = orig[i];
+                }
+            }
+            if (best == 5u) {
+                break;
+            }
+            outv[best] = 1u;
+            left--;
+        }
+    } else {
+        uint give = cap;
+        for (uint i = 0u; i < 5u; i++) {
+            if (orig[i] > 0u) {
+                outv[i] = 1u;
+                give--;
+            }
+        }
+        uint sumw = 0u;
+        for (uint i = 0u; i < 5u; i++) {
+            sumw += orig[i] - outv[i];
+        }
+        float frac[5] = float[5](0.0, 0.0, 0.0, 0.0, 0.0);
+        if (sumw > 0u && give > 0u) {
+            uint used = 0u;
+            for (uint i = 0u; i < 5u; i++) {
+                uint w = orig[i] - outv[i];
+                float share = float(give) * float(w) / float(sumw);
+                uint add = min(w, uint(floor(share)));
+                if (used + add > give) {
+                    add = give - used;
+                }
+                outv[i] += add;
+                used += add;
+                frac[i] = share - float(add);
+            }
+            uint left = give - used;
+            while (left > 0u) {
+                uint best = 5u;
+                float bestf = -1.0;
+                for (uint i = 0u; i < 5u; i++) {
+                    if (outv[i] < orig[i] && frac[i] > bestf) {
+                        best = i;
+                        bestf = frac[i];
+                    }
+                }
+                if (best == 5u) {
+                    break;
+                }
+                outv[best] += 1u;
+                frac[best] = -1.0;
+                left--;
+            }
+        }
+    }
+    a = outv[0];
+    b = outv[1];
+    c = outv[2];
+    g = outv[3];
+    s = outv[4];
+}
 void lighting_write_args() {
     uint a;
     uint b = 0u;
@@ -2332,6 +2453,11 @@ void lighting_write_args() {
         uint first = min(lighting_young_count(), LIGHTING_CACHE_BATCH);
         a = lighting_young_only() ? first : min(LIGHTING_CACHE_BATCH, first + lighting_mature_count());
     }
+    // surface_cache.ray_budget is a ceiling. Under budget the lists stay as
+    // they are. Over budget, leftover entries after the floor go back to the
+    // lists, and a list that had work stays non-empty when the ceiling can
+    // hold one 16-ray entry for every non-empty list.
+    lighting_sc_cap_lists(a, b, c, g, s);
     uint e = a + b + c + g + s;
     ckeys.key[LIGHTING_ARGS_AT + 10u] = a + b + c + g;
     ckeys.key[LIGHTING_ARGS_AT + 0u] = max((e * LIGHTING_CACHE_RAYS + 63u) / 64u, 1u);
@@ -2474,7 +2600,7 @@ uint lighting_sc_interval(uint slot, float t) {
     }
     float iv = LIGHTING_SC_RATE_SLOW / (1.0 + LIGHTING_SC_RATE_K * max(b.y, 0.0));
     if ((lighting_sc_flags() & 1048576u) != 0u && t >= lighting_sc_cap(slot) - 0.5 && lighting_sc_dormant(slot)) {
-        iv = LIGHTING_SC_RATE_DORMANT;
+        iv = lighting_sc_dormant_rays() == 0u ? LIGHTING_SC_RATE_DORMANT : float(lighting_sc_dormant_period());
     }
     if (!lighting_sc_light_quiet()) {
         iv = min(iv, LIGHTING_SC_RATE_CHANGING);
@@ -2501,6 +2627,8 @@ uint lighting_sc_quarter0(uint slot) {
     return min(floatBitsToUint(cache.v[LIGHTING_SC_OBJ_AT + slot].w), LIGHTING_SC_QUARTERS - 1u);
 }
 uint lighting_sc_entries(uint slot, bool full) {
+    // The ray budget is a ceiling on the dispatch lists (lighting_sc_cap_lists),
+    // not a per-entry scale. Under budget this count is the fixed quarter count.
     return (full || lighting_world_mode() != 3u) ? LIGHTING_SC_QUARTERS - lighting_sc_quarter0(slot) : 1u;
 }
 // WRC scout ray s of this round (entries past the batch's texels): from the eye
@@ -2668,6 +2796,19 @@ vec2 lighting_sc_debug_size(vec3 pos, vec3 n) {
     float size = lighting_cell_size(pos);
     uint s = lighting_cache_find_sized(pos, n, false, size, pos);
     return vec2(size, s == ~0u ? 0.0 : floor(max(cache.v[3u * s + 2u].w, 0.0)));
+}
+// Debug view "variance": short-term relative standard deviation of the cache
+// entry under the pixel. -1 is a missing or unallocated entry. 0 is quiet.
+float lighting_sc_debug_variance(vec3 pos, vec3 n) {
+    float size = lighting_cell_size(pos);
+    uint s = lighting_cache_find_sized(pos, n, false, size, pos);
+    if (s == ~0u) {
+        return -1.0;
+    }
+    vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * s];
+    float dev = sqrt(max(est.w, 0.0));
+    float lum = max(dot(max(est.rgb, vec3(0.0)), vec3(0.299, 0.587, 0.114)), 1.0e-3);
+    return clamp(dev / lum, 0.0, 1.0);
 }
 vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     uint mode = lighting_world_mode();

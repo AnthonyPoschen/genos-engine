@@ -53,6 +53,22 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --look X,Y,Z           world point to aim at. --look=X,Y,Z is the same flag.
                          Yaw 0 looks down -Z
   --preset NAME          potato, low, medium, or high. Sets GENOS_LIGHTING_PRESET
+  --surface-cache-attach-movers on|off
+                         mover cache entries follow the object
+                         (GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS)
+  --surface-cache-blend msme|hold
+                         published blend (GENOS_LIGHTING_SURFACE_CACHE_BLEND)
+  --surface-cache-firefly-sigma F
+                         MSME firefly clamp, default 8, biased
+                         (GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA)
+  --surface-cache-ray-budget N
+                         cache-round ray cap; 0 keeps the existing lists
+                         (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET)
+  --surface-cache-dormant-rays N
+                         fresh rays per frame for a dormant cache entry, 0..16.
+                         0 keeps one sweep in eight. 1..16 traces one new
+                         16-ray entry every ceil(16 / N) frames
+                         (GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS)
   --gpu-times N          print GPU_MS every N frames (GENOS_GPU_TIMES)
   --lighting-debug       print the lighting probe line (GENOS_LIGHTING_DEBUG)
   --unfilled             show the texels view (slots with fewer than 4 sets are dim)
@@ -112,6 +128,9 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_lamp_pick_history",
     "lighting_gi_refresh",
     "lighting_budget_shift",
+    "lighting_surface_cache_firefly_sigma",
+    "lighting_surface_cache_ray_budget",
+    "lighting_surface_cache_dormant_rays",
     "lighting_probe_rays",
     "lighting_probe_stale",
     "lighting_world_stale",
@@ -125,9 +144,10 @@ const DROP_KNOBS: &[&str] = &[
     "lighting_shadow_filter",
     "lighting_ambient",
     "lighting_lamp_pick",
+    "lighting_surface_cache_blend",
 ];
-const VIEWS: [&str; 7] = [
-    "full", "direct", "bounce", "albedo", "normal", "depth", "texels",
+const VIEWS: [&str; 8] = [
+    "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance",
 ];
 const PRESETS: [&str; 4] = ["potato", "low", "medium", "high"];
 
@@ -890,6 +910,7 @@ fn view_name(mode: ViewMode) -> &'static str {
         ViewMode::Normal => "normal",
         ViewMode::Depth => "depth",
         ViewMode::Texels => "texels",
+        ViewMode::Variance => "variance",
         ViewMode::Light => "light",
         ViewMode::Full => "full",
     }
@@ -1152,6 +1173,7 @@ fn view_from_name(name: &str) -> ViewMode {
         "normal" => ViewMode::Normal,
         "depth" => ViewMode::Depth,
         "texels" => ViewMode::Texels,
+        "variance" => ViewMode::Variance,
         _ => ViewMode::Full,
     }
 }
@@ -1290,6 +1312,10 @@ fn options() -> Result<Options, String> {
                     parse_enabled(value).map_err(|err| format!("bad --fps-counter: {err}"))?;
                 } else if let Some(value) = other.strip_prefix("--fps-hz=") {
                     parse_rate(value).map_err(|err| format!("bad --fps-hz: {err}"))?;
+                } else if genos_scene::lighting_flag_needs_value(other).is_some() {
+                    let needs = genos_scene::lighting_flag_needs_value(other).unwrap_or(false);
+                    let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
+                    genos_scene::check_lighting_arg(other, next.as_deref())?;
                 } else {
                     return Err(format!("unknown argument {other}"));
                 }
@@ -1429,6 +1455,7 @@ mod tests {
             "Shadow filter",
             "Ambient",
             "Lamp pick",
+            "Surface cache blend",
         ] {
             assert!(dropdowns.contains(&label), "missing dropdown {label}");
         }
@@ -1462,6 +1489,9 @@ mod tests {
             "Direct scale",
             "GI refresh",
             "Budget shift",
+            "Firefly sigma",
+            "Ray budget",
+            "Dormant rays",
             "Probe rays",
             "Probe stale",
             "World stale",

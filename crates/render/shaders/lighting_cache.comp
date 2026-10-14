@@ -273,38 +273,43 @@ void main() {
             bool mover2;
             bool stale2 = lighting_sc_local_change(slot, mover2);
             if (lighting_sc_msme()) {
-                // S72R (Anthony, history suppression stage 1): the GIBS / PICA
-                // PICA multi-scale mean estimator verbatim (Barre-Brisebois et
-                // al., Ray Tracing Gems ch. 25, 2019; GIBS, Halen et al. 2021),
-                // one update per set, y the set's irradiance: short mean rate
-                // 0.08, variance 0.04, inconsistency 0.08, k = clamp(smoothstep(
-                // rho max(0.02, iota - 0.2)), 1/256, 1) vbbr, vbbr -> clamp(0.5
-                // mean / sigma, 1/32, 1) at 0.1, spikes capped at 0.1 + short
-                // mean + 8 sigma. Never a hard reset. A newborn starts with
-                // short mean = mean, inconsistency 1 (WickedEngine) and vbbr 1
-                // (webgiya). Hint (Lumen's fast update when traces see a mover):
-                // a mover near or a moved lamp's delta at the texel raises k to
-                // at least that delta, at most 0.9 (MaxFastUpdateModeAmount).
-                // Scalar variance and luminance (Rec. 709 weights), as before.
+                // Barré-Brisebois et al., Ray Tracing Gems ch. 25,
+                // MultiscaleMeanEstimator.hlsl (one update per set, y the set):
+                // https://github.com/Apress/ray-tracing-gems/blob/master/Ch_25_Hybrid_Rendering_for_Real-Time_Ray_Tracing/MultiscaleMeanEstimator.hlsl
+                // short mean 0.08, variance 0.04, inconsistency 0.08,
+                // catchUp = clamp(smoothstep(rho * max(0.02, iota - 0.2)), 1/256, 1) * vbbr,
+                // vbbr -> clamp(dot(w, 0.5 * short / dev), 1/32, 1) at 0.1.
+                // Fireflies: y -= max(0, y - (0.1 + short + sigma * dev)).
+                // sigma is lighting_sc_firefly_sigma() (the listing's 8). The
+                // clamp is biased. The 0.1 floor stays when sigma is 0.
+                // Deviations from that listing, kept on purpose:
+                // variance is one luminance scalar, not float3 (SVGF reads .w).
+                // The weights are the listing's Rec. 601 (0.299, 0.587, 0.114).
+                // The hold path below uses Rec. 709 (0.2126, 0.7152, 0.0722)
+                // and its own clamp of 8; it does not read
+                // surface_cache.firefly_sigma. A newborn starts at short = mean,
+                // inconsistency 1, vbbr 1, variance (0.15 * luma)^2 (S72T; the
+                // listing has no init, and variance 0 makes catch-up 1); while
+                // t < 16, k is at most 1/(t+1); a mover raises k to at least
+                // 0.5 and a lamp delta is capped at 0.9; A-SVGF mixes lambda
+                // when that path is on.
+                const vec3 msmel = vec3(0.299, 0.587, 0.114);
                 if (b.x <= 0.0) {
-                    // S72T: the variance starts at (0.15 luminance)^2, not 0
-                    // (S72R, verbatim: sigma ~0 made rho huge, k ~1, and a
-                    // young texel's mean jumped to each new set: fill pops
-                    // 2.8 % against 0.15 %).
-                    a = vec4(old.rgb, pow(0.15 * dot(old.rgb, lw), 2.0) + 1.0e-8);
+                    a = vec4(old.rgb, pow(0.15 * dot(old.rgb, msmel), 2.0) + 1.0e-8);
                     b = vec4(1.0, 1.0, 0.0, t);
                 }
                 float dev0 = sqrt(max(1.0e-5, a.w));
-                vec3 y = e - max(e - (0.1 + a.rgb + 8.0 * dev0), vec3(0.0));
+                float sigma = lighting_sc_firefly_sigma();
+                vec3 y = e - max(e - (0.1 + a.rgb + sigma * dev0), vec3(0.0));
                 vec3 d1 = y - a.rgb;
                 vec3 sm = mix(a.rgb, y, 0.08);
                 vec3 d2 = y - sm;
-                float var = mix(a.w, dot(d1 * d2, lw), 0.04);
+                float var = mix(a.w, dot(d1 * d2, msmel), 0.04);
                 float dev = sqrt(max(1.0e-5, var));
-                float rho = dot(abs(old.rgb - sm), lw) / dev;
+                float rho = dot(abs(old.rgb - sm), msmel) / max(1.0e-5, dev);
                 float inc = mix(b.y, rho, 0.08);
                 float k = clamp(smoothstep(0.0, 1.0, rho * max(0.02, inc - 0.2)), 1.0 / 256.0, 1.0) * b.x;
-                float vb = mix(b.x, clamp(0.5 * dot(sm, lw) / dev, 1.0 / 32.0, 1.0), 0.1);
+                float vb = mix(b.x, clamp(dot(msmel, 0.5 * sm / vec3(max(1.0e-5, dev))), 1.0 / 32.0, 1.0), 0.1);
                 float hint = mover2 ? 0.5 : 0.0;
                 hint = max(hint, LIGHTING_SC_LAMP_K * lighting_sc_lamp_change(slot));
                 // S72T: while young (under 16 sets) never faster than the plain

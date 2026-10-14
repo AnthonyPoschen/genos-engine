@@ -549,8 +549,33 @@ detail = "no CLI argument yet"
 
 [[var]]
 name = "GENOS_LIGHTING_SC_LOCAL"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--surface-cache-attach-movers (previous name; used only when GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS is omitted)"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS"
+kind = "mirror"
+detail = "--surface-cache-attach-movers"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_BLEND"
+kind = "mirror"
+detail = "--surface-cache-blend"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS"
+kind = "mirror"
+detail = "--surface-cache-dormant-rays"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA"
+kind = "mirror"
+detail = "--surface-cache-firefly-sigma"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET"
+kind = "mirror"
+detail = "--surface-cache-ray-budget"
 
 [[var]]
 name = "GENOS_LIGHTING_SC_SETTLE"
