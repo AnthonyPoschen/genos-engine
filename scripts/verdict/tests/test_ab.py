@@ -101,4 +101,101 @@ class AbTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 2, proc.stdout)
             self.assertTrue(proc.stdout.startswith("UNSURE "))
 
+    def test_a_live_conflict_stops_before_a_build(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            _git_repo(repo, conflict=True)
+            (root / "spread.json").write_text('{"frame_ms":{"spread":1}}\n', encoding="utf-8")
+            out = root / "out"
+            proc = run(
+                "ab-verdict.py",
+                [
+                    "main",
+                    "feature",
+                    "--live",
+                    "--display",
+                    "wayland-1",
+                    "--noise-floor",
+                    str(root / "spread.json"),
+                    "--repo",
+                    str(repo),
+                    "--out",
+                    str(out),
+                    "--cache-dir",
+                    str(root / "cache"),
+                ],
+            )
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertIn("merge conflict", proc.stdout)
+            self.assertFalse((out / "build-base.log").exists())
+            self.assertFalse((out / "build-head.log").exists())
+
+    def test_a_cached_comparison_skips_the_build(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            _git_repo(repo, conflict=False)
+            sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            from lib.cache import cache_root, store
+            from lib.contract import input_hash
+
+            digest = input_hash(sha, ["ab:main", "ab:feature"], [])
+            cache = root / "cache"
+            store(cache_root(str(cache)), sha, digest, "FAIL", "stress-still slower", root / "old")
+            (root / "spread.json").write_text('{"frame_ms":{"spread":1}}\n', encoding="utf-8")
+            out = root / "out"
+            proc = run(
+                "ab-verdict.py",
+                [
+                    "main",
+                    "feature",
+                    "--live",
+                    "--display",
+                    "wayland-1",
+                    "--noise-floor",
+                    str(root / "spread.json"),
+                    "--repo",
+                    str(repo),
+                    "--out",
+                    str(out),
+                    "--cache-dir",
+                    str(cache),
+                ],
+            )
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertIn("FAIL cached stress-still slower", proc.stdout)
+            self.assertFalse((out / "build-base.log").exists())
+
+
+def _git(repo: Path, args: list[str]) -> None:
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+
+def _git_repo(root: Path, conflict: bool) -> None:
+    _git(root, ["init", "-b", "main"])
+    _git(root, ["config", "user.email", "verdict@example.com"])
+    _git(root, ["config", "user.name", "verdict"])
+    (root / "file.txt").write_text("base\n", encoding="utf-8")
+    _git(root, ["add", "file.txt"])
+    _git(root, ["commit", "-m", "base"])
+    _git(root, ["checkout", "-b", "feature"])
+    (root / "file.txt").write_text("feature\n" if conflict else "base\nmore\n", encoding="utf-8")
+    _git(root, ["add", "file.txt"])
+    _git(root, ["commit", "-m", "feature"])
+    if conflict:
+        _git(root, ["checkout", "main"])
+        (root / "file.txt").write_text("main\n", encoding="utf-8")
+        _git(root, ["add", "file.txt"])
+        _git(root, ["commit", "-m", "main"])
+        _git(root, ["checkout", "feature"])
+
 

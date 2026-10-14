@@ -37,6 +37,7 @@ from lib.images import diff_image, flip_mean_p99, load_image, mean_abs, write_pn
 from lib.images import blur_relative
 from lib.launch import child_env, hold_lock, lighting_argv, release_lock, stop
 from lib.mcp import post, quit, wait_ready
+import precheck
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -100,6 +101,9 @@ def decide(ns: argparse.Namespace, argv: list[str], holder: list[Path]) -> Verdi
         _diff_fixtures(root, rows, evidence)
     else:
         floor_path = Path(ns.noise_floor)
+        pre = _precheck(ns, sha, repo)
+        if pre.status != "PASS" or pre.reason.startswith("cached "):
+            return Verdict(pre.status, pre.reason, pre.evidence, pre.code)
         rows = _live(ns, repo, evidence)
     floor = load_floor(floor_path)
     status, reason, views, scenes = score_views(rows, floor)
@@ -114,9 +118,40 @@ def decide(ns: argparse.Namespace, argv: list[str], holder: list[Path]) -> Verdi
         encoding="utf-8",
     )
     if not ns.fixture and status != "UNSURE":
-        digest = input_hash(sha, [ns.base, ns.head, *ns.key], ns.input)
+        digest = input_hash(sha, _cache_keys(ns), ns.input)
         store(cache_root(ns.cache_dir), sha, digest, status, reason, evidence)
     return Verdict(status, reason, evidence)
+
+
+def _cache_keys(ns: argparse.Namespace) -> list[str]:
+    """Same text precheck hashes, so a later precheck skips this comparison."""
+    return [f"ab:{ns.base}", f"ab:{ns.head}", *ns.key]
+
+
+def _precheck(ns: argparse.Namespace, sha: str, repo: Path) -> Verdict:
+    argv = [
+        "--base",
+        ns.base,
+        "--head",
+        sha,
+        "--sha",
+        sha,
+        "--repo",
+        str(repo),
+        "--display",
+        ns.display,
+    ]
+    for key in _cache_keys(ns):
+        argv.extend(["--key", key])
+    for item in ns.input:
+        argv.extend(["--input", item])
+    if ns.cache_dir:
+        argv.extend(["--cache-dir", ns.cache_dir])
+    if ns.out:
+        argv.extend(["--out", str(Path(ns.out) / "precheck")])
+    parsed = precheck.parse(argv)
+    precheck.validate(parsed)
+    return precheck.decide(parsed, argv, [Path("genos-debug/verdict/precheck/unknown")])
 
 
 def _diff_fixtures(root: Path, rows: list[dict[str, str]], evidence: Path) -> None:
@@ -162,7 +197,16 @@ def _live(ns: argparse.Namespace, repo: Path, evidence: Path) -> list[dict[str, 
         if proc.returncode != 0:
             raise Broken((proc.stderr or proc.stdout).strip() or "worktree add failed")
         build = subprocess.run(
-            ["cargo", "build", "--release", "-p", "genos-lighting", "--manifest-path", str(dest / "Cargo.toml")],
+            [
+                "cargo",
+                "build",
+                "--locked",
+                "--release",
+                "-p",
+                "genos-lighting",
+                "--manifest-path",
+                str(dest / "Cargo.toml"),
+            ],
             cwd=dest,
             check=False,
             text=True,

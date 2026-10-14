@@ -94,10 +94,12 @@ the in-tree FLIP (the same departures as `genos-lighting-ref`, not NVIDIA's
 ## A/B verdict
 
 `scripts/verdict/ab-verdict.py BASE HEAD` builds both commits when `--live`
-is set, runs the scene and checkpoint catalog, and compares each view with
-the noise floor. Frame time uses `head - base`. A delta at or under the
-spread passes. A delta under twice the spread (`noise_multiple` in
-`crates/lighting-ref/lighting-ref.conf`) is `UNSURE`. Past that is `FAIL`.
+is set. A live run calls precheck first, so a merge conflict, a busy GPU, or
+a cache hit never starts a build. It then runs the scene and checkpoint
+catalog, and compares each view with the noise floor. Frame time uses
+`head - base`. A delta at or under the spread passes. A delta under twice
+the spread (`noise_multiple` in `crates/lighting-ref/lighting-ref.conf`) is
+`UNSURE`. Past that is `FAIL`.
 Picture mean absolute error, FLIP, and blurred relative luminance use the
 same rule against their spreads. `PASS` means no view is slower beyond the
 noise and the pictures match.
