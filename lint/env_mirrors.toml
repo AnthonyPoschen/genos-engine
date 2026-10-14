@@ -18,6 +18,11 @@ kind = "mirror"
 detail = "--fps-hz"
 
 [[var]]
+name = "GENOS_MENU"
+kind = "mirror"
+detail = "--menu"
+
+[[var]]
 name = "GENOS_GPU_TIMES"
 kind = "mirror"
 detail = "--gpu-times"
@@ -131,6 +136,16 @@ detail = "report stamp when git rev-parse is unavailable"
 name = "GENOS_MCP_PORT"
 kind = "override"
 detail = "discovery directory is the primary path; this forces one port"
+
+[[var]]
+name = "GENOS_DEBUG_KEYS"
+kind = "override"
+detail = "built-in chords are primary; this file replaces the listed actions"
+
+[[var]]
+name = "GENOS_MENU_LAYOUT"
+kind = "override"
+detail = "debug/lighting/menu.txt is primary; this path replaces that table"
 
 [[var]]
 name = "HOME"

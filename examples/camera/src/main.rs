@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use genos_input::{character_controller, InputCode, InputSystem};
+use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
 use genos_render::{Antialias, Renderer, ScreenRect, Simulation, World};
 
 /// The flame, the smoke, and the flame lamp stay off.
@@ -312,6 +312,7 @@ fn run() -> Result<(), String> {
     let mut ui = State::default();
     let mut input = InputSystem::new();
     let controls = character_controller();
+    let keys = debug_keys()?;
     let profile_mode = parse_profile_mode(profile_arg.as_deref(), proof)?;
     let mut profile_stream = match profile_mode {
         ProfileMode::Detailed => {
@@ -403,11 +404,9 @@ fn run() -> Result<(), String> {
             profile.reset();
             drag_origin = None;
         }
-        if input.keyboard.pressed(InputCode::key_f8) {
+        if keys.pressed(&input, "unfilled_tint") || keys.pressed(&input, "unfilled") {
             let mut unfilled = renderer.unfilled();
-            let shift = input.keyboard.down(InputCode::key_shift_left)
-                || input.keyboard.down(InputCode::key_shift_right);
-            if shift {
+            if keys.pressed(&input, "unfilled_tint") {
                 unfilled.tint = !unfilled.tint;
                 if unfilled.tint {
                     unfilled.count = true;

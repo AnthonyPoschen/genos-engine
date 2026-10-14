@@ -15,11 +15,13 @@
 
 //! The lighting panel, the lamp sun, and the pointer step the camera frame uses.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use genos_scene::{Camera, Scene};
+use genos_scene::{Camera, FocusPolicy, Scene};
 
 use crate::dropdown;
+use crate::focus::{Consumed, FocusManager, InputKind, InputPolicy};
 use crate::layout::{self, Direction, Item, Node, Pad, Place, Rect, Sizing, Space};
 use crate::omarchy::{self, Palette};
 use crate::slider::{self, SliderStep};
@@ -41,6 +43,13 @@ const SUN_DIAMETER: f32 = 32.0;
 const SUN_BANDS: usize = 9;
 const SUN_COLOR: [f32; 3] = [1.0, 0.92, 0.35];
 const THUMB_COLOR: [f32; 3] = [0.95, 0.86, 0.40];
+/// Press on the panel title bar. The caller hides the menu.
+pub const MENU_HIDE: u32 = u32::MAX - 5000;
+/// Press on the corner tab while the menu is hidden. The caller shows the menu.
+pub const MENU_SHOW: u32 = u32::MAX - 5001;
+const TITLE_ROW: u32 = u32::MAX - 5002;
+/// The settings panel. A game sets this id's [`InputPolicy`].
+pub const PANEL_ID: u32 = u32::MAX - 4095;
 
 /// X and Z reach both edges of the 16 by 16 floor. Neighbor notches are 1 meter apart.
 const XZ_NOTCHES: [f32; 17] = [
@@ -67,6 +76,12 @@ pub struct Pointer {
     pub key_activate: bool,
     /// Dismiss key pressed this frame (escape). Closes an open list.
     pub key_dismiss: bool,
+    /// Grave pressed this frame. Click-to-focus releases on this key.
+    pub key_blur: bool,
+    /// Previous page of the tab strip. A press edge, not a held key.
+    pub tab_prev: bool,
+    /// Next page of the tab strip. A press edge, not a held key.
+    pub tab_next: bool,
 }
 
 impl Default for Pointer {
@@ -80,6 +95,9 @@ impl Default for Pointer {
             key_inc: false,
             key_activate: false,
             key_dismiss: false,
+            key_blur: false,
+            tab_prev: false,
+            tab_next: false,
         }
     }
 }
@@ -119,6 +137,21 @@ pub struct State {
     pub omarchy_current: Option<PathBuf>,
     palette: Option<Palette>,
     palette_from: Option<PathBuf>,
+    /// Section ids that have already taken their first-frame fold.
+    section_seen: BTreeSet<u32>,
+    /// Section ids laid out on this frame. A fold on another page is not here.
+    section_frame: BTreeSet<u32>,
+    /// Section ids that are folded. Later frames keep this set.
+    collapsed_sections: BTreeSet<u32>,
+    /// Selected tab id for each tab strip.
+    selected_tabs: BTreeMap<u32, u32>,
+    /// The pointer was over the panel on the last frame.
+    panel_hover: bool,
+    /// Pixels the page has moved up under the tab bar. The bar stays put.
+    scroll: f32,
+    /// Per-panel wheel and key policy. Empty means the older path, which takes
+    /// keys and the pointer the way it did before policies existed.
+    pub input: FocusManager,
 }
 
 impl Default for State {
@@ -140,7 +173,103 @@ impl Default for State {
             omarchy_current: None,
             palette: None,
             palette_from: None,
+            section_seen: BTreeSet::new(),
+            section_frame: BTreeSet::new(),
+            collapsed_sections: BTreeSet::new(),
+            selected_tabs: BTreeMap::new(),
+            panel_hover: false,
+            scroll: 0.0,
+            input: FocusManager::default(),
         }
+    }
+}
+
+impl State {
+    /// Remember a fold before the first frame. A later frame keeps this choice
+    /// instead of the section's starting fold.
+    pub fn fold_section(&mut self, id: u32, collapsed: bool) {
+        self.section_seen.insert(id);
+        if collapsed {
+            self.collapsed_sections.insert(id);
+        } else {
+            self.collapsed_sections.remove(&id);
+        }
+    }
+
+    /// True when this section is folded.
+    pub fn section_collapsed(&self, id: u32) -> bool {
+        self.collapsed_sections.contains(&id)
+    }
+
+    /// True after this section has been laid out or folded from outside.
+    /// A fold that has not been seen yet keeps its layout default.
+    pub fn section_known(&self, id: u32) -> bool {
+        self.section_seen.contains(&id)
+    }
+
+    /// True when this frame laid the section out. A section on another page is not.
+    pub fn section_shown(&self, id: u32) -> bool {
+        self.section_frame.contains(&id)
+    }
+
+    fn begin_sections(&mut self) {
+        self.section_frame.clear();
+    }
+
+    /// The tab this strip is showing. `None` until the first frame picks one.
+    pub fn selected_tab(&self, group: u32) -> Option<u32> {
+        self.selected_tabs.get(&group).copied()
+    }
+
+    /// Show this tab before the first frame. A later press keeps the new choice.
+    pub fn select_tab(&mut self, group: u32, tab: u32) {
+        self.selected_tabs.insert(group, tab);
+    }
+
+    /// True when the pointer was over the panel on the last frame.
+    pub fn panel_hovered(&self) -> bool {
+        self.panel_hover
+    }
+
+    /// Replace how this panel takes the wheel and the keys. The next frame uses it.
+    pub fn set_input_policy(&mut self, panel: u32, policy: InputPolicy) {
+        self.input.set_policy(panel, policy);
+    }
+
+    /// The policy last set for this panel.
+    pub fn input_policy(&self, panel: u32) -> Option<InputPolicy> {
+        self.input.policy(panel)
+    }
+
+    /// The panel click-to-focus is holding.
+    pub fn focused_panel(&self) -> Option<u32> {
+        self.input.focused()
+    }
+
+    /// Arm click-to-focus, or pass `None` to release it.
+    pub fn set_focused_panel(&mut self, panel: Option<u32>) {
+        self.input.set_focus(panel);
+    }
+
+    /// The control inside the focused panel that arrows move.
+    pub fn focused_control(&self) -> Option<u32> {
+        self.focus
+    }
+
+    fn toggle_section(&mut self, id: u32) {
+        self.section_seen.insert(id);
+        if !self.collapsed_sections.remove(&id) {
+            self.collapsed_sections.insert(id);
+        }
+    }
+
+    /// First sight uses `start_collapsed`. After that, the remembered fold wins.
+    fn section_is_open(&mut self, id: u32, start_collapsed: bool) -> bool {
+        self.section_frame.insert(id);
+        if self.section_seen.insert(id) && start_collapsed {
+            self.collapsed_sections.insert(id);
+        }
+        !self.collapsed_sections.contains(&id)
     }
 }
 
@@ -171,6 +300,8 @@ pub struct Frame {
     pub look_capture: bool,
     /// Name and exact value while the pointer is on a slider. `None` otherwise.
     pub tooltip: Option<String>,
+    /// Events the panel took. A false field belongs to the game.
+    pub consumed: Consumed,
 }
 
 /// Lay out the lighting panel and the lamp sun. Apply hover, press, and drag.
@@ -262,6 +393,7 @@ pub fn lighting_frame(
         actions,
         look_capture,
         tooltip: None,
+        consumed: Consumed::default(),
     }
 }
 
@@ -275,6 +407,64 @@ pub struct PanelRow {
     pub dropdown: Option<PanelDropdown>,
     /// On/off marks laid out left to right. A press reports the next state.
     pub checks: Vec<PanelCheck>,
+}
+
+/// A named group of rows. A press on the title folds the rows.
+///
+/// `collapsed` applies the first time this id is shown. [`State`] remembers the
+/// fold after that, including across later calls with the same id.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PanelSection {
+    pub id: u32,
+    pub title: String,
+    /// Folded on the first frame this id is seen.
+    pub collapsed: bool,
+    pub rows: Vec<PanelRow>,
+    /// Folded with the rows. A fold can hold tabs, and a tab can hold folds.
+    pub blocks: Vec<PanelBlock>,
+}
+
+impl PanelSection {
+    pub fn new(id: u32, title: impl Into<String>, collapsed: bool, rows: Vec<PanelRow>) -> Self {
+        Self {
+            id,
+            title: title.into(),
+            collapsed,
+            rows,
+            blocks: Vec::new(),
+        }
+    }
+
+    /// Put tabs or more folds inside this fold.
+    #[must_use]
+    pub fn with_blocks(mut self, blocks: Vec<PanelBlock>) -> Self {
+        self.blocks = blocks;
+        self
+    }
+}
+
+/// One page in a [`PanelTabs`] strip. Its blocks are folds, rows are not required.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PanelTab {
+    pub id: u32,
+    pub title: String,
+    pub blocks: Vec<PanelBlock>,
+}
+
+/// A row of tabs. Only the selected tab's blocks are laid out.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PanelTabs {
+    pub id: u32,
+    pub tabs: Vec<PanelTab>,
+}
+
+/// A fold, a tab strip, or rows with no fold header. Either container can hold the others.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PanelBlock {
+    Section(PanelSection),
+    Tabs(PanelTabs),
+    /// Controls on a tab, or outside one, with no title to fold.
+    Rows(Vec<PanelRow>),
 }
 
 /// A compact on/off mark and a label. The panel does not store `on`.
@@ -439,15 +629,121 @@ pub fn button_panel(
     camera: &Camera,
     pointer: Pointer,
 ) -> Frame {
+    drag_panel(state, pointer);
+    refresh_palette(state);
+    let panel = panel_tree(state, title, rows, &[], None, false);
+    finish_panel(
+        state,
+        panel,
+        rows,
+        PanelTargets {
+            sections: &[],
+            tabs: &[],
+        },
+        viewport,
+        camera,
+        pointer,
+    )
+}
+
+/// Lay out the same panel as [`button_panel`], grouped under folding section titles.
+///
+/// A press on a title fires [`Action::Press`] with the section id and folds the
+/// rows under it. The next call keeps that fold.
+pub fn button_panel_sections(
+    state: &mut State,
+    title: &str,
+    sections: &[PanelSection],
+    viewport: [f32; 2],
+    camera: &Camera,
+    pointer: Pointer,
+) -> Frame {
+    drag_panel(state, pointer);
+    refresh_palette(state);
+    state.begin_sections();
+    let mut visible = Vec::new();
+    let mut ids = Vec::new();
+    for section in sections {
+        ids.push(section.id);
+        if state.section_is_open(section.id, section.collapsed) {
+            visible.extend(section.rows.iter().cloned());
+        }
+    }
+    let max_width = viewport[0] / 3.0;
+    let panel = panel_tree(state, title, &visible, sections, Some(max_width), true);
+    finish_panel(
+        state,
+        panel,
+        &visible,
+        PanelTargets {
+            sections: &ids,
+            tabs: &[],
+        },
+        viewport,
+        camera,
+        pointer,
+    )
+}
+
+/// Lay out folds and tab strips. A tab's blocks can be folds. A fold's blocks
+/// can be a tab strip. A fold can also sit outside every tab.
+///
+/// A press on a tab fires [`Action::Press`] with the tab id and shows that tab
+/// on the next frame. [`Pointer::tab_next`] and [`Pointer::tab_prev`] do the
+/// same for the strip. A press on a fold title still folds that fold. Each tab
+/// is one line tall and as wide as its label. Tabs that fit share a row. A tab
+/// that does not fit starts another row, so a label is never cut off. Switching
+/// pages does not move the bar.
+pub fn button_panel_blocks(
+    state: &mut State,
+    title: &str,
+    blocks: &[PanelBlock],
+    viewport: [f32; 2],
+    camera: &Camera,
+    pointer: Pointer,
+) -> Frame {
+    drag_panel(state, pointer);
+    refresh_palette(state);
+    state.begin_sections();
+    let mut visible = Vec::new();
+    let mut section_ids = Vec::new();
+    let mut tab_ids = Vec::new();
+    collect_blocks(state, blocks, &mut visible, &mut section_ids, &mut tab_ids);
+    let max_width = viewport[0] / 3.0;
+    let panel = block_panel(state, title, blocks, Some(max_width));
+    finish_panel(
+        state,
+        panel,
+        &visible,
+        PanelTargets {
+            sections: &section_ids,
+            tabs: &tab_ids,
+        },
+        viewport,
+        camera,
+        pointer,
+    )
+}
+
+fn drag_panel(state: &mut State, pointer: Pointer) {
     let press_edge = pointer.down && !state.down;
     if state.dragging && pointer.down && !press_edge {
         state.panel_offset[0] += pointer.x - state.pointer_x;
         state.panel_offset[1] += pointer.y - state.pointer_y;
     }
-    refresh_palette(state);
+}
+
+fn panel_tree(
+    state: &State,
+    title: &str,
+    rows: &[PanelRow],
+    sections: &[PanelSection],
+    max_width: Option<f32>,
+    hide: bool,
+) -> Node {
     let palette = state.palette;
     let fill = surface(palette);
-    let own = u32::MAX - 4095;
+    let own = PANEL_ID;
     let mut panel = Node::new(own);
     panel.direction = Direction::TopToBottom;
     panel.pad = Pad::all(8.0);
@@ -455,43 +751,1006 @@ pub fn button_panel(
     panel.place = Some(Place::point([0.0, 0.0], [0.0, 0.0], state.panel_offset));
     panel.draggable = true;
     paint_looks(&mut panel, chrome_looks(palette));
-    panel.children.push(label(own + 1, title, fill));
-    for (index, item) in rows.iter().enumerate() {
-        let at = own + 2 + 3 * index as u32;
-        let mut children = Vec::new();
-        if !item.label.is_empty() {
-            children.push(label(at + 1, &item.label, fill));
-        }
-        for button in &item.buttons {
-            let mut node = control(button.id, &button.text, Action::Press(button.id), palette);
-            if button.selected {
-                let looks = control_looks(palette);
-                node.idle = looks.pressed;
-                node.hover = looks.pressed;
-            }
-            children.push(node);
-        }
-        if let Some(bar) = &item.slider {
-            children.push(sized_slider(
-                bar.id,
-                palette,
-                slider_width(bar),
-                slider_height(bar),
-            ));
-            children.push(label(at + 2, &bar.text, fill));
-        }
-        if let Some(drop) = &item.dropdown {
-            children.push(dropdown_box(drop, palette));
-        }
-        for check in &item.checks {
-            children.push(check_node(check, fill, palette));
-        }
-        panel.children.push(row(at, children, fill));
+    if let Some(max_width) = max_width {
+        panel.width = Sizing::Fit {
+            min: 0.0,
+            max: max_width,
+        };
     }
+    let inner = max_width.map(|width| (width - 16.0).max(text::CELL_W));
+    panel
+        .children
+        .push(title_bar(own + 1, title, fill, inner, palette, hide));
+    if sections.is_empty() {
+        for (index, item) in rows.iter().enumerate() {
+            panel.children.push(row_node(
+                own + 2 + 3 * index as u32,
+                item,
+                fill,
+                palette,
+                None,
+                None,
+            ));
+        }
+        return panel;
+    }
+    let columns = inner.map(check_columns).unwrap_or(CHECK_COLUMNS);
+    let cell = inner
+        .map(|width| check_cell(width, columns))
+        .unwrap_or(CHECK_CELL);
+    let mut row_index = 0usize;
+    for section in sections {
+        panel
+            .children
+            .push(section_header(section, state, palette, inner));
+        if state.section_collapsed(section.id) {
+            continue;
+        }
+        for item in &section.rows {
+            if check_grid(item) {
+                for chunk in item.checks.chunks(columns) {
+                    let mut part = item.clone();
+                    part.checks = chunk.to_vec();
+                    panel.children.push(row_node(
+                        own + 2 + 3 * u32_from_usize(row_index),
+                        &part,
+                        fill,
+                        palette,
+                        Some(cell),
+                        inner,
+                    ));
+                    row_index += 1;
+                }
+            } else {
+                panel.children.push(row_node(
+                    own + 2 + 3 * u32_from_usize(row_index),
+                    item,
+                    fill,
+                    palette,
+                    None,
+                    inner,
+                ));
+                row_index += 1;
+            }
+        }
+    }
+    panel
+}
+
+fn block_panel(state: &State, title: &str, blocks: &[PanelBlock], max_width: Option<f32>) -> Node {
+    let palette = state.palette;
+    let fill = surface(palette);
+    let own = PANEL_ID;
+    let mut panel = Node::new(own);
+    panel.direction = Direction::TopToBottom;
+    panel.pad = Pad::all(8.0);
+    panel.gap = 6.0;
+    panel.place = Some(Place::point([0.0, 0.0], [0.0, 0.0], state.panel_offset));
+    panel.draggable = true;
+    paint_looks(&mut panel, chrome_looks(palette));
+    if let Some(max_width) = max_width {
+        panel.width = Sizing::Fit {
+            min: 0.0,
+            max: max_width,
+        };
+    }
+    let inner = max_width.map(|width| (width - 16.0).max(text::CELL_W));
+    panel
+        .children
+        .push(title_bar(own + 1, title, fill, inner, palette, true));
+    let columns = inner.map(check_columns).unwrap_or(CHECK_COLUMNS);
+    let cell = inner
+        .map(|width| check_cell(width, columns))
+        .unwrap_or(CHECK_CELL);
+    let mut lay = BlockLay {
+        row_index: 0,
+        columns,
+        cell,
+        inner,
+        fill,
+        palette,
+        own,
+    };
+    push_blocks(&mut panel, state, blocks, &mut lay);
+    panel
+}
+
+struct BlockLay {
+    row_index: usize,
+    columns: usize,
+    cell: f32,
+    inner: Option<f32>,
+    fill: [f32; 3],
+    palette: Option<Palette>,
+    own: u32,
+}
+
+fn collect_blocks(
+    state: &mut State,
+    blocks: &[PanelBlock],
+    visible: &mut Vec<PanelRow>,
+    section_ids: &mut Vec<u32>,
+    tab_ids: &mut Vec<(u32, u32)>,
+) {
+    for block in blocks {
+        match block {
+            PanelBlock::Section(section) => {
+                section_ids.push(section.id);
+                if state.section_is_open(section.id, section.collapsed) {
+                    visible.extend(section.rows.iter().cloned());
+                    collect_blocks(state, &section.blocks, visible, section_ids, tab_ids);
+                }
+            }
+            PanelBlock::Tabs(tabs) => {
+                for tab in &tabs.tabs {
+                    tab_ids.push((tabs.id, tab.id));
+                }
+                let selected = state
+                    .selected_tab(tabs.id)
+                    .filter(|id| tabs.tabs.iter().any(|tab| tab.id == *id))
+                    .or_else(|| tabs.tabs.first().map(|tab| tab.id));
+                if let Some(id) = selected {
+                    state.select_tab(tabs.id, id);
+                    if let Some(tab) = tabs.tabs.iter().find(|tab| tab.id == id) {
+                        collect_blocks(state, &tab.blocks, visible, section_ids, tab_ids);
+                    }
+                }
+            }
+            PanelBlock::Rows(rows) => visible.extend(rows.iter().cloned()),
+        }
+    }
+}
+
+fn push_blocks(panel: &mut Node, state: &State, blocks: &[PanelBlock], lay: &mut BlockLay) {
+    for block in blocks {
+        match block {
+            PanelBlock::Section(section) => push_section(panel, state, section, lay),
+            PanelBlock::Tabs(tabs) => {
+                panel
+                    .children
+                    .push(tab_strip(tabs, state, lay.palette, lay.inner));
+                let selected = state.selected_tab(tabs.id);
+                if let Some(tab) = tabs.tabs.iter().find(|tab| Some(tab.id) == selected) {
+                    push_blocks(panel, state, &tab.blocks, lay);
+                }
+            }
+            PanelBlock::Rows(rows) => {
+                for item in rows {
+                    push_row(panel, item, lay);
+                }
+            }
+        }
+    }
+}
+
+fn push_section(panel: &mut Node, state: &State, section: &PanelSection, lay: &mut BlockLay) {
+    panel
+        .children
+        .push(section_header(section, state, lay.palette, lay.inner));
+    if state.section_collapsed(section.id) {
+        return;
+    }
+    for item in &section.rows {
+        push_row(panel, item, lay);
+    }
+    push_blocks(panel, state, &section.blocks, lay);
+}
+
+fn push_row(panel: &mut Node, item: &PanelRow, lay: &mut BlockLay) {
+    if check_grid(item) {
+        for chunk in item.checks.chunks(lay.columns) {
+            let mut part = item.clone();
+            part.checks = chunk.to_vec();
+            panel.children.push(row_node(
+                lay.own + 2 + 3 * u32_from_usize(lay.row_index),
+                &part,
+                lay.fill,
+                lay.palette,
+                Some(lay.cell),
+                lay.inner,
+            ));
+            lay.row_index += 1;
+        }
+    } else {
+        panel.children.push(row_node(
+            lay.own + 2 + 3 * u32_from_usize(lay.row_index),
+            item,
+            lay.fill,
+            lay.palette,
+            None,
+            lay.inner,
+        ));
+        lay.row_index += 1;
+    }
+}
+
+const TAB_GAP: f32 = 4.0;
+
+/// Button width for one tab label: the text cells plus the control padding.
+fn tab_label_width(title: &str) -> f32 {
+    title.chars().count() as f32 * text::CELL_W + 8.0
+}
+
+/// Pack labels onto rows that fit `limit`. A label wider than the limit keeps
+/// its own row at full width, so the text is never cut.
+fn tab_rows(tabs: &[PanelTab], limit: f32) -> Vec<Vec<&PanelTab>> {
+    let mut rows: Vec<Vec<&PanelTab>> = Vec::new();
+    let mut used = 0.0_f32;
+    for tab in tabs {
+        let width = tab_label_width(&tab.title);
+        let open = rows.last().is_some_and(|row| !row.is_empty());
+        let gap = if open { TAB_GAP } else { 0.0 };
+        if open && used + gap + width > limit + 0.5 {
+            rows.push(Vec::new());
+            used = 0.0;
+        }
+        if rows.is_empty() {
+            rows.push(Vec::new());
+        }
+        let gap = if rows.last().is_some_and(|row| !row.is_empty()) {
+            TAB_GAP
+        } else {
+            0.0
+        };
+        used += gap + width;
+        if let Some(row) = rows.last_mut() {
+            row.push(tab);
+        }
+    }
+    rows
+}
+
+fn tab_row_id(strip: u32, index: usize) -> u32 {
+    strip
+        .wrapping_mul(16)
+        .wrapping_add(u32_from_usize(index))
+        .wrapping_add(3)
+}
+
+fn u32_from_usize(index: usize) -> u32 {
+    u32::try_from(index).unwrap_or(u32::MAX)
+}
+
+fn tab_strip(
+    tabs: &PanelTabs,
+    state: &State,
+    palette: Option<Palette>,
+    inner: Option<f32>,
+) -> Node {
+    let selected = state.selected_tab(tabs.id);
+    let limit = inner.unwrap_or(f32::INFINITY);
+    let packed = tab_rows(&tabs.tabs, limit);
+    let mut strip = Node::new(tabs.id);
+    strip.direction = Direction::TopToBottom;
+    strip.gap = TAB_GAP;
+    if let Some(inner) = inner {
+        let widest = tabs
+            .tabs
+            .iter()
+            .map(|tab| tab_label_width(&tab.title))
+            .fold(0.0_f32, f32::max);
+        strip.width = Sizing::Fit {
+            min: 0.0,
+            max: inner.max(widest),
+        };
+    }
+    let fill = surface(palette);
+    paint_looks(&mut strip, flat_look(fill));
+    for (index, row_tabs) in packed.iter().enumerate() {
+        let mut row = Node::new(tab_row_id(tabs.id, index));
+        row.direction = Direction::LeftToRight;
+        row.gap = TAB_GAP;
+        paint_looks(&mut row, flat_look(fill));
+        for tab in row_tabs {
+            row.children
+                .push(tab_button(tab, Some(tab.id) == selected, palette));
+        }
+        strip.children.push(row);
+    }
+    strip
+}
+
+fn tab_button(tab: &PanelTab, selected: bool, palette: Option<Palette>) -> Node {
+    let mut node = control(tab.id, &tab.title, Action::Press(tab.id), palette);
+    if selected {
+        let looks = control_looks(palette);
+        node.idle = looks.pressed;
+        node.hover = looks.pressed;
+        node.pressed = looks.pressed;
+    }
+    node
+}
+
+/// Arrow keys step a focused slider. Otherwise they walk checks, sliders,
+/// dropdowns, and press targets from top to bottom, then left to right.
+struct FocusWidgets<'a> {
+    bars: &'a [&'a PanelSlider],
+    drops: &'a [&'a PanelDropdown],
+    checks: &'a [&'a PanelCheck],
+}
+
+fn step_or_move_focus(
+    state: &mut State,
+    items: &[Item],
+    page: &PageScroll,
+    widgets: &FocusWidgets<'_>,
+    pointer: Pointer,
+    actions: &mut Vec<Action>,
+) -> bool {
+    if !(pointer.key_dec || pointer.key_inc) || pointer.key_dec == pointer.key_inc {
+        return false;
+    }
+    if let Some(bar) = state
+        .focus
+        .and_then(|id| widgets.bars.iter().copied().find(|bar| bar.id == id))
+    {
+        let delta = i32::from(pointer.key_inc) - i32::from(pointer.key_dec);
+        push_step(actions, bar, delta);
+        return true;
+    }
+    let ids = focusable_ids(items, page, widgets.bars, widgets.drops, widgets.checks);
+    if ids.is_empty() {
+        return false;
+    }
+    let forward = pointer.key_inc;
+    let next = match state
+        .focus
+        .and_then(|id| ids.iter().position(|item| *item == id))
+    {
+        Some(index) if forward => ids[(index + 1) % ids.len()],
+        Some(index) => ids[(index + ids.len() - 1) % ids.len()],
+        None if forward => ids[0],
+        None => ids[ids.len() - 1],
+    };
+    state.focus = Some(next);
+    true
+}
+
+fn focusable_ids(
+    items: &[Item],
+    page: &PageScroll,
+    bars: &[&PanelSlider],
+    drops: &[&PanelDropdown],
+    checks: &[&PanelCheck],
+) -> Vec<u32> {
+    let mut ranked = Vec::new();
+    for item in items {
+        let rect = page.hit_rect(item);
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            continue;
+        }
+        let widget = bars.iter().any(|bar| bar.id == item.id)
+            || drops.iter().any(|drop| drop.id == item.id)
+            || checks.iter().any(|check| check.id == item.id)
+            || matches!(
+                item.action,
+                Some(Action::Press(_) | Action::Toggle { .. })
+            );
+        if widget {
+            ranked.push((rect.y, rect.x, item.id));
+        }
+    }
+    ranked.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then(a.1.total_cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
+    ranked.into_iter().map(|(_, _, id)| id).collect()
+}
+
+/// Enter opens a focused dropdown or fires the focused control's action.
+fn activate_focused(
+    state: &mut State,
+    items: &[Item],
+    tab_ids: &[(u32, u32)],
+    section_ids: &[u32],
+    drops: &[&PanelDropdown],
+    actions: &mut Vec<Action>,
+) -> bool {
+    let Some(id) = state.focus else {
+        return false;
+    };
+    if let Some(drop) = drops.iter().find(|drop| drop.id == id) {
+        open_dropdown(state, drop);
+        return true;
+    }
+    let Some(item) = items.iter().find(|item| item.id == id) else {
+        return false;
+    };
+    let Some(action) = item.action else {
+        return false;
+    };
+    if let Action::Press(press_id) = action {
+        if let Some((group, _)) = tab_ids.iter().find(|(_, tab)| *tab == press_id) {
+            state.select_tab(*group, press_id);
+        } else if section_ids.contains(&press_id) {
+            state.toggle_section(press_id);
+        }
+    }
+    actions.push(action);
+    true
+}
+
+/// Escape or grave leaves click-to-focus. Escape that just closed a list does not.
+fn release_click_focus(
+    state: &mut State,
+    panel_id: u32,
+    policy: Option<InputPolicy>,
+    keys_open: bool,
+    pointer: Pointer,
+    list_closed: bool,
+    consumed: &mut Consumed,
+) {
+    let click = policy.is_some_and(|policy| policy.keys == FocusPolicy::ClickToFocus);
+    if !(keys_open && click && state.input.focused() == Some(panel_id)) {
+        return;
+    }
+    let grave = pointer.key_blur;
+    let escape = pointer.key_dismiss && !list_closed && state.open_drop.is_none();
+    if !(grave || escape) {
+        return;
+    }
+    if grave {
+        state.open_drop = None;
+    }
+    state.input.set_focus(None);
+    state.focus = None;
+    consumed.blur = true;
+    consumed.keys = true;
+}
+
+fn cycle_tab(
+    state: &mut State,
+    tab_ids: &[(u32, u32)],
+    items: &[Item],
+    pointer: &Pointer,
+) -> Option<Action> {
+    let dir = if pointer.tab_next {
+        1isize
+    } else if pointer.tab_prev {
+        -1
+    } else {
+        return None;
+    };
+    let mut groups: Vec<(u32, Vec<u32>)> = Vec::new();
+    for (group, tab) in tab_ids {
+        if let Some((_, tabs)) = groups.iter_mut().find(|(id, _)| id == group) {
+            if !tabs.contains(tab) {
+                tabs.push(*tab);
+            }
+        } else {
+            groups.push((*group, vec![*tab]));
+        }
+    }
+    let hit = items
+        .iter()
+        .rev()
+        .find(|item| item.rect.contains(pointer.x, pointer.y));
+    let over_header = hit.and_then(|item| tab_ids.iter().find(|(_, tab)| *tab == item.id));
+    let (group, tabs) = if let Some((group, _)) = over_header {
+        groups.into_iter().find(|(id, _)| id == group)?
+    } else {
+        groups.into_iter().next()?
+    };
+    if tabs.len() < 2 {
+        return None;
+    }
+    let current = state.selected_tab(group).unwrap_or(tabs[0]);
+    let index = tabs.iter().position(|id| *id == current).unwrap_or(0);
+    let next = if dir > 0 {
+        tabs[(index + 1) % tabs.len()]
+    } else {
+        tabs[(index + tabs.len() - 1) % tabs.len()]
+    };
+    state.select_tab(group, next);
+    Some(Action::Press(next))
+}
+
+fn check_columns(inner: f32) -> usize {
+    if inner + 4.0 >= (CHECK_CELL + 4.0) * (CHECK_COLUMNS as f32) {
+        CHECK_COLUMNS
+    } else {
+        2
+    }
+}
+
+fn check_cell(inner: f32, columns: usize) -> f32 {
+    let gaps = 4.0 * columns.saturating_sub(1) as f32;
+    ((inner - gaps) / columns as f32).max(text::CELL_W)
+}
+
+fn title_bar(
+    label_id: u32,
+    title: &str,
+    fill: [f32; 3],
+    inner: Option<f32>,
+    palette: Option<Palette>,
+    hide: bool,
+) -> Node {
+    if !hide {
+        return capped_label(label_id, title, fill, inner);
+    }
+    let mut row = Node::new(TITLE_ROW);
+    row.direction = Direction::LeftToRight;
+    row.gap = 4.0;
+    if let Some(inner) = inner {
+        row.width = Sizing::Fit {
+            min: 0.0,
+            max: inner,
+        };
+    }
+    let label_max = inner.map(|width| (width - 64.0).max(text::CELL_W));
+    row.children
+        .push(capped_label(label_id, title, fill, label_max));
+    row.children.push(control(
+        MENU_HIDE,
+        "hide",
+        Action::Press(MENU_HIDE),
+        palette,
+    ));
+    row
+}
+
+/// A small tab in the top-left corner. A press fires [`Action::Press`] with [`MENU_SHOW`].
+pub fn show_menu_tab(state: &mut State, viewport: [f32; 2], pointer: Pointer) -> Frame {
+    refresh_palette(state);
+    let mut tab = control(MENU_SHOW, "menu", Action::Press(MENU_SHOW), state.palette);
+    tab.place = Some(Place::point([0.0, 0.0], [0.0, 0.0], [8.0, 8.0]));
+    let items = layout::layout(&tab, Space::Screen, viewport, None);
+    let press_edge = pointer.down && !state.down;
+    let hit = items
+        .iter()
+        .rev()
+        .find(|item| item.rect.contains(pointer.x, pointer.y));
+    let mut actions = Vec::new();
+    let mut look_capture = false;
+    if press_edge {
+        if let Some(item) = hit {
+            state.look_hold = false;
+            if let Some(action) = item.action {
+                actions.push(action);
+            }
+        } else {
+            state.look_hold = true;
+            look_capture = true;
+        }
+    } else if pointer.down && state.look_hold {
+        look_capture = true;
+    }
+    let mut shown = Vec::new();
+    let mut paints = Vec::new();
+    for item in &items {
+        let look = choose(item, pointer.down, hit.map(|hit| hit.id), None);
+        shown.push(Shown {
+            id: item.id,
+            rect: item.rect,
+            look,
+            idle: item.idle,
+            text: item.text.clone(),
+        });
+        push_paints(&mut paints, item, look, state.palette, None, false);
+    }
+    state.pointer_x = pointer.x;
+    state.pointer_y = pointer.y;
+    state.down = pointer.down;
+    state.panel_hover = false;
+    if !pointer.down {
+        state.look_hold = false;
+    }
+    Frame {
+        shown,
+        paints,
+        actions,
+        look_capture,
+        tooltip: None,
+        consumed: Consumed::default(),
+    }
+}
+
+fn section_header(
+    section: &PanelSection,
+    state: &State,
+    palette: Option<Palette>,
+    max_width: Option<f32>,
+) -> Node {
+    let mark = if state.section_collapsed(section.id) {
+        "+"
+    } else {
+        "-"
+    };
+    let mut node = control(
+        section.id,
+        &format!("{mark} {}", section.title),
+        Action::Press(section.id),
+        palette,
+    );
+    if let Some(max_width) = max_width {
+        node.width = Sizing::Fit {
+            min: 0.0,
+            max: max_width,
+        };
+    }
+    node
+}
+
+fn row_node(
+    at: u32,
+    item: &PanelRow,
+    fill: [f32; 3],
+    palette: Option<Palette>,
+    cell: Option<f32>,
+    inner: Option<f32>,
+) -> Node {
+    let fit = inner.map(|inner| fit_row(item, inner));
+    let mut children = Vec::new();
+    if !item.label.is_empty() {
+        children.push(capped_label(
+            at + 1,
+            &item.label,
+            fill,
+            fit.as_ref().map(|fit| fit.label_max),
+        ));
+    }
+    for button in &item.buttons {
+        let mut node = control(button.id, &button.text, Action::Press(button.id), palette);
+        if button.selected {
+            let looks = control_looks(palette);
+            node.idle = looks.pressed;
+            node.hover = looks.pressed;
+        }
+        children.push(node);
+    }
+    if let Some(bar) = &item.slider {
+        let width = fit
+            .as_ref()
+            .map(|fit| fit.slider_w)
+            .unwrap_or(slider_width(bar));
+        children.push(sized_slider(
+            bar.id,
+            palette,
+            width,
+            slider_height_at(bar, width),
+        ));
+        children.push(capped_label(
+            at + 2,
+            &bar.text,
+            fill,
+            fit.as_ref().map(|fit| fit.value_max),
+        ));
+    }
+    if let Some(drop) = &item.dropdown {
+        children.push(dropdown_box(
+            drop,
+            palette,
+            fit.as_ref().map(|fit| fit.drop_w),
+        ));
+    }
+    for check in &item.checks {
+        children.push(check_node(check, fill, palette, cell));
+    }
+    let mut node = row(at, children, fill);
+    if let Some(inner) = inner {
+        node.width = Sizing::Fit {
+            min: 0.0,
+            max: inner,
+        };
+    }
+    node
+}
+
+struct RowFit {
+    label_max: f32,
+    slider_w: f32,
+    value_max: f32,
+    drop_w: f32,
+}
+
+fn fit_row(item: &PanelRow, inner: f32) -> RowFit {
+    let gap = 4.0;
+    let has_label = !item.label.is_empty();
+    let has_value = item.slider.as_ref().is_some_and(|bar| !bar.text.is_empty());
+    let parts = usize::from(has_label)
+        + usize::from(item.slider.is_some())
+        + usize::from(has_value)
+        + usize::from(item.dropdown.is_some())
+        + item.buttons.len()
+        + item.checks.len();
+    let gaps = gap * parts.saturating_sub(1) as f32;
+    let value_natural = item
+        .slider
+        .as_ref()
+        .map(|bar| text::measure(&bar.text, None).0)
+        .unwrap_or(0.0);
+    let value_max = if has_value {
+        value_natural.min(inner * 0.4).max(text::CELL_W)
+    } else {
+        0.0
+    };
+    let mut slider_w = item.slider.as_ref().map(slider_width).unwrap_or(0.0);
+    let mut drop_w = item.dropdown.as_ref().map(dropdown_width).unwrap_or(0.0);
+    let label_natural = if has_label {
+        text::measure(&item.label, None).0
+    } else {
+        0.0
+    };
+    let checks_w: f32 = item
+        .checks
+        .iter()
+        .map(|check| text::measure(&check.text, None).0 + 30.0)
+        .sum();
+    let buttons_w: f32 = item
+        .buttons
+        .iter()
+        .map(|button| text::measure(&button.text, None).0 + 8.0)
+        .sum();
+    let used = label_natural + slider_w + drop_w + value_max + checks_w + buttons_w + gaps;
+    if used <= inner {
+        return RowFit {
+            label_max: label_natural.max(text::CELL_W),
+            slider_w,
+            value_max: value_natural.max(if has_value { text::CELL_W } else { 0.0 }),
+            drop_w,
+        };
+    }
+    let label_floor = if has_label {
+        (text::CELL_W * 8.0).min(inner * 0.45)
+    } else {
+        0.0
+    };
+    let controls = (inner - label_floor - value_max - checks_w - buttons_w - gaps).max(72.0);
+    if item.slider.is_some() && item.dropdown.is_some() {
+        slider_w = (controls * 0.55).clamp(72.0, slider_w.max(72.0));
+        drop_w = (controls - slider_w).max(96.0);
+    } else if item.slider.is_some() {
+        slider_w = controls.min(slider_w).max(72.0);
+    } else if item.dropdown.is_some() {
+        drop_w = controls.min(drop_w.max(96.0)).max(96.0);
+    }
+    let mut label_max =
+        (inner - slider_w - drop_w - value_max - checks_w - buttons_w - gaps).max(text::CELL_W);
+    let mut sum = label_max + slider_w + drop_w + value_max + checks_w + buttons_w + gaps;
+    if sum > inner && slider_w > 48.0 {
+        let cut = (sum - inner).min(slider_w - 48.0);
+        slider_w -= cut;
+        sum -= cut;
+    }
+    if sum > inner && drop_w > 96.0 {
+        let cut = (sum - inner).min(drop_w - 96.0);
+        drop_w -= cut;
+        sum -= cut;
+    }
+    if sum > inner {
+        label_max = (label_max - (sum - inner)).max(text::CELL_W);
+    }
+    RowFit {
+        label_max,
+        slider_w,
+        value_max,
+        drop_w,
+    }
+}
+
+fn check_grid(item: &PanelRow) -> bool {
+    !item.checks.is_empty()
+        && item.buttons.is_empty()
+        && item.slider.is_none()
+        && item.dropdown.is_none()
+        && item.label.is_empty()
+}
+
+fn capped_label(id: u32, text: &str, fill: [f32; 3], max_width: Option<f32>) -> Node {
+    let mut node = label(id, text, fill);
+    if let Some(max_width) = max_width {
+        node.width = Sizing::Fit {
+            min: 0.0,
+            max: max_width,
+        };
+    }
+    node
+}
+
+struct PageScroll {
+    clip: Option<Rect>,
+    body: BTreeSet<u32>,
+    /// The page moved under the wheel this frame.
+    wheeled: bool,
+}
+
+impl PageScroll {
+    fn hit_rect(&self, item: &Item) -> Rect {
+        let mut rect = item.rect;
+        if let Some(clip) = self.clip {
+            if self.body.contains(&item.id) {
+                rect = intersect(rect, clip).unwrap_or(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.0,
+                    h: 0.0,
+                });
+            }
+        }
+        rect
+    }
+}
+
+/// One wheel notch moves the page by this many pixels.
+const SCROLL_STEP: f32 = 48.0;
+
+fn scroll_page(
+    state: &mut State,
+    items: &mut [Item],
+    panel_id: u32,
+    tab_ids: &[(u32, u32)],
+    bar_ids: &[u32],
+    viewport_h: f32,
+    pointer: Pointer,
+) -> PageScroll {
+    let mut strips = Vec::new();
+    for (group, _) in tab_ids {
+        if !strips.contains(group) {
+            strips.push(*group);
+        }
+    }
+    let mut wheeled = false;
+    let Some(panel_index) = items.iter().position(|item| item.id == panel_id) else {
+        return PageScroll {
+            clip: None,
+            body: BTreeSet::new(),
+            wheeled,
+        };
+    };
+    let panel_rect = items[panel_index].rect;
+    let view_bottom = viewport_h - 8.0;
+    if panel_rect.y + panel_rect.h <= view_bottom + 0.5 {
+        state.scroll = 0.0;
+        return PageScroll {
+            clip: None,
+            body: BTreeSet::new(),
+            wheeled,
+        };
+    }
+    let mut body = BTreeSet::new();
+    let mut sticky_bottom = panel_rect.y;
+    let mut content_top = f32::MAX;
+    let mut content_bottom = panel_rect.y;
+    for item in items.iter() {
+        if item.id == panel_id {
+            continue;
+        }
+        if sticky_item(items, item.id, panel_id, &strips) {
+            sticky_bottom = sticky_bottom.max(item.rect.y + item.rect.h);
+        } else {
+            body.insert(item.id);
+            content_top = content_top.min(item.rect.y);
+            content_bottom = content_bottom.max(item.rect.y + item.rect.h);
+        }
+    }
+    if body.is_empty() || content_top == f32::MAX {
+        state.scroll = 0.0;
+        return PageScroll {
+            clip: None,
+            body: BTreeSet::new(),
+            wheeled,
+        };
+    }
+    let clip = Rect {
+        x: panel_rect.x,
+        y: content_top,
+        w: panel_rect.w,
+        h: (view_bottom - content_top).max(32.0),
+    };
+    let max_scroll = (content_bottom - content_top - clip.h).max(0.0);
+    let over_panel = panel_rect.contains(pointer.x, pointer.y);
+    let over_slider = items
+        .iter()
+        .any(|item| bar_ids.contains(&item.id) && item.rect.contains(pointer.x, pointer.y));
+    let take_wheel = match state.input.policy(panel_id) {
+        None => over_panel,
+        Some(_) => state.input.allows(panel_id, InputKind::Wheel, over_panel),
+    };
+    if !wheeled
+        && max_scroll > 0.0
+        && take_wheel
+        && !over_slider
+        && state.open_drop.is_none()
+        && pointer.wheel_y != 0.0
+    {
+        state.scroll -= pointer.wheel_y * SCROLL_STEP;
+        wheeled = true;
+    }
+    state.scroll = state.scroll.clamp(0.0, max_scroll);
+    let scroll = state.scroll;
+    for item in items.iter_mut() {
+        if !body.contains(&item.id) {
+            continue;
+        }
+        item.rect.y -= scroll;
+        item.content.y -= scroll;
+    }
+    if let Some(panel) = items.iter_mut().find(|item| item.id == panel_id) {
+        let bottom = view_bottom.max(clip.y + clip.h);
+        panel.rect.h = (bottom - panel.rect.y).max(0.0);
+    }
+    PageScroll {
+        clip: Some(clip),
+        body,
+        wheeled,
+    }
+}
+
+fn sticky_item(items: &[Item], id: u32, panel_id: u32, strips: &[u32]) -> bool {
+    if id == panel_id {
+        return true;
+    }
+    let mut current = Some(id);
+    for _ in 0..64 {
+        let Some(now) = current else {
+            return false;
+        };
+        if now == panel_id {
+            return false;
+        }
+        if strips.contains(&now) || now == TITLE_ROW || now == panel_id.wrapping_add(1) {
+            return true;
+        }
+        current = items
+            .iter()
+            .find(|item| item.id == now)
+            .and_then(|item| item.parent);
+    }
+    false
+}
+
+fn intersect(a: Rect, b: Rect) -> Option<Rect> {
+    let x0 = a.x.max(b.x);
+    let y0 = a.y.max(b.y);
+    let x1 = (a.x + a.w).min(b.x + b.w);
+    let y1 = (a.y + a.h).min(b.y + b.h);
+    if x1 <= x0 || y1 <= y0 {
+        None
+    } else {
+        Some(Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        })
+    }
+}
+
+struct PanelTargets<'a> {
+    sections: &'a [u32],
+    tabs: &'a [(u32, u32)],
+}
+
+fn finish_panel(
+    state: &mut State,
+    panel: Node,
+    rows: &[PanelRow],
+    targets: PanelTargets<'_>,
+    viewport: [f32; 2],
+    camera: &Camera,
+    pointer: Pointer,
+) -> Frame {
+    let section_ids = targets.sections;
+    let tab_ids = targets.tabs;
+    let panel_id = panel.id;
+    let press_edge = pointer.down && !state.down;
+    let palette = state.palette;
     let bars: Vec<&PanelSlider> = rows.iter().filter_map(|r| r.slider.as_ref()).collect();
     let drops: Vec<&PanelDropdown> = rows.iter().filter_map(|r| r.dropdown.as_ref()).collect();
     let checks: Vec<&PanelCheck> = rows.iter().flat_map(|row| row.checks.iter()).collect();
-    let items = layout::layout(&panel, Space::Screen, viewport, Some(camera));
+    let mut items = layout::layout(&panel, Space::Screen, viewport, Some(camera));
+    let bar_ids: Vec<u32> = bars.iter().map(|bar| bar.id).collect();
+    let page = scroll_page(
+        state,
+        &mut items,
+        panel_id,
+        tab_ids,
+        &bar_ids,
+        viewport[1],
+        pointer,
+    );
     if state
         .open_drop
         .is_some_and(|id| drops.iter().all(|drop| drop.id != id))
@@ -501,11 +1760,45 @@ pub fn button_panel(
     let hit = items
         .iter()
         .rev()
-        .find(|item| item.rect.contains(pointer.x, pointer.y));
+        .find(|item| page.hit_rect(item).contains(pointer.x, pointer.y));
     let mut actions = Vec::new();
     let mut look_capture = false;
-    let mut consumed = false;
+    let mut took_press = false;
+    let mut consumed = Consumed::default();
+    if page.wheeled {
+        consumed.wheel = true;
+    }
+    let over = hit.is_some();
+    let policy = state.input.policy(panel_id);
+    let legacy = policy.is_none();
+    let keys_open = legacy || state.input.allows(panel_id, InputKind::Keys, over);
+    let wheel_open = legacy || state.input.allows(panel_id, InputKind::Wheel, over);
     if press_edge {
+        if let Some(policy) = policy {
+            if policy.keys == FocusPolicy::ClickToFocus {
+                if over {
+                    state.input.set_focus(Some(panel_id));
+                } else if state.input.focused() == Some(panel_id) {
+                    state.input.set_focus(None);
+                    state.focus = None;
+                }
+            }
+        }
+    }
+    let pointer_open = legacy
+        || match policy.map(|policy| policy.keys) {
+            Some(FocusPolicy::Passive) => false,
+            Some(FocusPolicy::Hover) => over,
+            Some(FocusPolicy::Modal | FocusPolicy::ClickToFocus) | None => true,
+        };
+    if press_edge && !pointer_open {
+        look_capture = true;
+        state.look_hold = true;
+    } else if press_edge && policy.is_some_and(|policy| policy.keys == FocusPolicy::Modal) && !over
+    {
+        consumed.pointer = true;
+        took_press = true;
+    } else if press_edge {
         if let Some((drop, list, _)) = popup_geom(state, &drops, &items, viewport) {
             if let Some(index) = dropdown::row_at(
                 list,
@@ -530,11 +1823,17 @@ pub fn button_panel(
             state.look_hold = false;
             state.held = None;
             state.focus = Some(drop.id);
-            consumed = true;
+            took_press = true;
+            if !legacy {
+                consumed.pointer = true;
+            }
         }
     }
-    if !consumed && press_edge {
+    if !took_press && press_edge && pointer_open {
         if let Some(item) = hit {
+            if !legacy {
+                consumed.pointer = true;
+            }
             state.focus = Some(item.id);
             state.look_hold = false;
             state.sliding = None;
@@ -546,6 +1845,13 @@ pub fn button_panel(
                 state.held = Some(item.id);
                 state.dragging = false;
             } else if let Some(action) = item.action {
+                if let Action::Press(id) = action {
+                    if let Some((group, _)) = tab_ids.iter().find(|(_, tab)| *tab == id) {
+                        state.select_tab(*group, id);
+                    } else if section_ids.contains(&id) {
+                        state.toggle_section(id);
+                    }
+                }
                 actions.push(action);
                 state.dragging = false;
             } else {
@@ -562,6 +1868,7 @@ pub fn button_panel(
     } else if pointer.down && state.look_hold {
         look_capture = true;
     }
+    let mut list_closed = false;
     if pointer.down {
         let held = state.held.and_then(|id| bars.iter().find(|b| b.id == id));
         let track = held.and_then(|b| items.iter().find(|i| i.id == b.id));
@@ -572,64 +1879,167 @@ pub fn button_panel(
             }
         }
     } else if state.open_drop.is_some() {
-        drive_open_dropdown(state, &drops, &items, viewport, pointer, &mut actions);
+        let mut drive = pointer;
+        if !keys_open {
+            drive.key_dec = false;
+            drive.key_inc = false;
+            drive.key_activate = false;
+            drive.key_dismiss = false;
+        }
+        if !wheel_open {
+            drive.wheel_y = 0.0;
+        }
+        let was_open = state.open_drop;
+        if drive_open_dropdown(state, &drops, &items, viewport, drive, &mut actions) {
+            consumed.wheel = true;
+        }
+        list_closed = was_open.is_some() && state.open_drop.is_none() && pointer.key_dismiss;
+        if keys_open && !legacy && (pointer.key_dec || pointer.key_inc || pointer.key_activate || list_closed)
+        {
+            consumed.keys = true;
+        }
     } else {
         let hovered = hit.and_then(|item| bars.iter().copied().find(|bar| bar.id == item.id));
-        if let Some(bar) = hovered {
-            let notches = wheel_steps(pointer.wheel_y);
-            if notches != 0 {
-                state.focus = Some(bar.id);
-                push_step(&mut actions, bar, notches);
+        if wheel_open {
+            if let Some(bar) = hovered {
+                let notches = wheel_steps(pointer.wheel_y);
+                if notches != 0 {
+                    state.focus = Some(bar.id);
+                    push_step(&mut actions, bar, notches);
+                    consumed.wheel = true;
+                }
             }
         }
-        if pointer.key_dec || pointer.key_inc {
-            let keyed = hovered.or_else(|| {
-                state
+        if keys_open && legacy {
+            if let Some(action) = cycle_tab(state, tab_ids, &items, &pointer) {
+                actions.push(action);
+            }
+            if pointer.key_dec || pointer.key_inc {
+                let keyed = hovered.or_else(|| {
+                    state
+                        .focus
+                        .and_then(|id| bars.iter().copied().find(|bar| bar.id == id))
+                });
+                if let Some(bar) = keyed {
+                    let delta = i32::from(pointer.key_inc) - i32::from(pointer.key_dec);
+                    state.focus = Some(bar.id);
+                    push_step(&mut actions, bar, delta);
+                }
+            }
+            if pointer.key_activate {
+                if let Some(drop) = state
                     .focus
-                    .and_then(|id| bars.iter().copied().find(|bar| bar.id == id))
-            });
-            if let Some(bar) = keyed {
-                let delta = i32::from(pointer.key_inc) - i32::from(pointer.key_dec);
-                state.focus = Some(bar.id);
-                push_step(&mut actions, bar, delta);
+                    .and_then(|id| drops.iter().find(|drop| drop.id == id))
+                {
+                    open_dropdown(state, drop);
+                }
             }
-        }
-        if pointer.key_activate {
-            if let Some(drop) = state
-                .focus
-                .and_then(|id| drops.iter().find(|drop| drop.id == id))
+        } else if keys_open {
+            if let Some(action) = cycle_tab(state, tab_ids, &items, &pointer) {
+                actions.push(action);
+                consumed.keys = true;
+            }
+            let widgets = FocusWidgets {
+                bars: &bars,
+                drops: &drops,
+                checks: &checks,
+            };
+            if step_or_move_focus(state, &items, &page, &widgets, pointer, &mut actions)
             {
-                open_dropdown(state, drop);
+                consumed.keys = true;
+            }
+            if pointer.key_activate
+                && activate_focused(state, &items, tab_ids, section_ids, &drops, &mut actions)
+            {
+                consumed.keys = true;
             }
         }
+    }
+    release_click_focus(
+        state,
+        panel_id,
+        policy,
+        keys_open,
+        pointer,
+        list_closed,
+        &mut consumed,
+    );
+    if keys_open && policy.is_some_and(|policy| policy.keys == FocusPolicy::Modal) {
+        let key_edge = pointer.key_dec
+            || pointer.key_inc
+            || pointer.key_activate
+            || pointer.key_dismiss
+            || pointer.key_blur
+            || pointer.tab_prev
+            || pointer.tab_next;
+        if key_edge {
+            consumed.keys = true;
+            if pointer.key_blur {
+                consumed.blur = true;
+            }
+        }
+    }
+    if policy.is_some_and(|policy| policy.wheel == FocusPolicy::Modal) && pointer.wheel_y.abs() >= 1.0e-4
+    {
+        consumed.wheel = true;
     }
     let mut shown = Vec::with_capacity(items.len());
     let mut paints = Vec::new();
     for item in &items {
+        let visible = page.hit_rect(item);
+        if visible.h <= 0.0 || visible.w <= 0.0 {
+            continue;
+        }
         let look = choose(item, pointer.down, hit.map(|hit| hit.id), state.focus);
         shown.push(Shown {
             id: item.id,
-            rect: item.rect,
+            rect: visible,
             look,
             idle: item.idle,
             text: item.text.clone(),
         });
-        push_paints(&mut paints, item, look, palette, None, false);
+        let mut part = Vec::new();
+        push_paints(&mut part, item, look, palette, None, false);
         if let Some(bar) = bars.iter().find(|b| b.id == item.id) {
             // Show where a held slider is going this frame.
-            push_bar(
-                &mut paints,
-                item.rect,
-                &shown_slider(bar, &actions),
-                palette,
-            );
+            push_bar(&mut part, item.rect, &shown_slider(bar, &actions), palette);
         }
         if drops.iter().any(|drop| drop.id == item.id) {
-            push_chevron(&mut paints, item.rect, state.open_drop == Some(item.id));
+            push_chevron(&mut part, item.rect, state.open_drop == Some(item.id));
         }
         if let Some(check) = checks.iter().find(|check| check.id == item.id) {
-            push_check(&mut paints, item.rect, check.on);
+            push_check(&mut part, item.rect, check.on);
         }
+        let clip = if page.body.contains(&item.id) {
+            page.clip
+        } else {
+            None
+        };
+        if let Some(clip) = clip {
+            for paint in &mut part {
+                if let Some(rect) = intersect(
+                    Rect {
+                        x: paint.x,
+                        y: paint.y,
+                        w: paint.w,
+                        h: paint.h,
+                    },
+                    clip,
+                ) {
+                    paint.x = rect.x;
+                    paint.y = rect.y;
+                    paint.w = rect.w;
+                    paint.h = rect.h;
+                } else {
+                    paint.w = 0.0;
+                    paint.h = 0.0;
+                }
+            }
+        }
+        paints.extend(
+            part.into_iter()
+                .filter(|paint| paint.w > 0.0 && paint.h > 0.0),
+        );
     }
     if let Some((drop, list, scroll)) = popup_geom(state, &drops, &items, viewport) {
         state.drop_scroll = scroll;
@@ -657,6 +2067,7 @@ pub fn button_panel(
     state.pointer_x = pointer.x;
     state.pointer_y = pointer.y;
     state.down = pointer.down;
+    state.panel_hover = hit.is_some();
     if !pointer.down {
         state.dragging = false;
         state.look_hold = false;
@@ -668,6 +2079,7 @@ pub fn button_panel(
         actions,
         look_capture,
         tooltip,
+        consumed,
     }
 }
 
@@ -676,10 +2088,18 @@ const LIST_BG: [f32; 3] = [0.10, 0.11, 0.14];
 const LIST_HOVER: [f32; 3] = [0.30, 0.38, 0.48];
 const LIST_BORDER: [f32; 3] = [0.55, 0.62, 0.72];
 
+/// Equal column width for on/off marks in a section. The label wraps inside it.
+const CHECK_CELL: f32 = 156.0;
+const CHECK_COLUMNS: usize = 3;
 const CHECK_BOX: f32 = 16.0;
 const CHECK_MARK: [f32; 3] = [0.62, 0.78, 0.42];
 
-fn check_node(check: &PanelCheck, fill: [f32; 3], palette: Option<Palette>) -> Node {
+fn check_node(
+    check: &PanelCheck,
+    fill: [f32; 3],
+    palette: Option<Palette>,
+    cell: Option<f32>,
+) -> Node {
     let mut node = Node::new(check.id);
     node.pad = Pad {
         left: 22.0,
@@ -687,6 +2107,9 @@ fn check_node(check: &PanelCheck, fill: [f32; 3], palette: Option<Palette>) -> N
         top: 2.0,
         bottom: 2.0,
     };
+    if let Some(cell) = cell {
+        node.width = Sizing::fixed(cell);
+    }
     node.text = Some(check.text.clone());
     node.action = Some(Action::Toggle {
         id: check.id,
@@ -724,8 +2147,11 @@ fn push_check(out: &mut Vec<Paint>, rect: Rect, on: bool) {
     }
 }
 
-fn dropdown_box(drop: &PanelDropdown, palette: Option<Palette>) -> Node {
-    let width = dropdown_width(drop);
+fn dropdown_box(drop: &PanelDropdown, palette: Option<Palette>, max_width: Option<f32>) -> Node {
+    let mut width = dropdown_width(drop);
+    if let Some(max_width) = max_width {
+        width = width.min(max_width).max(96.0);
+    }
     let mut node = Node::new(drop.id);
     node.pad = Pad {
         left: 6.0,
@@ -781,14 +2207,14 @@ fn drive_open_dropdown(
     viewport: [f32; 2],
     pointer: Pointer,
     actions: &mut Vec<Action>,
-) {
+) -> bool {
     let Some((drop, list, scroll)) = popup_geom(state, drops, items, viewport) else {
-        return;
+        return false;
     };
     state.drop_scroll = scroll;
     if pointer.key_dismiss {
         state.open_drop = None;
-        return;
+        return false;
     }
     let count = drop.choices.len();
     let (visible, _) = dropdown::window(count, state.drop_scroll);
@@ -803,10 +2229,12 @@ fn drive_open_dropdown(
         .iter()
         .find(|item| item.id == drop.id)
         .is_some_and(|item| item.rect.contains(pointer.x, pointer.y));
+    let mut used_wheel = false;
     if on_list || on_box {
         let notches = wheel_steps(pointer.wheel_y);
         if notches != 0 {
             state.drop_scroll = dropdown::scroll_by(state.drop_scroll, notches, visible, count);
+            used_wheel = true;
         }
     }
     if let Some(index) = dropdown::row_at(list, state.drop_scroll, count, pointer.x, pointer.y) {
@@ -821,6 +2249,7 @@ fn drive_open_dropdown(
             state.open_drop = None;
         }
     }
+    used_wheel
 }
 
 fn push_chevron(out: &mut Vec<Paint>, rect: Rect, open: bool) {
@@ -989,11 +2418,10 @@ fn slider_width(bar: &PanelSlider) -> f32 {
     }
 }
 
-fn slider_height(bar: &PanelSlider) -> f32 {
+fn slider_height_at(bar: &PanelSlider, width: f32) -> f32 {
     if bar.steps.is_empty() {
         return SLIDER_H;
     }
-    let width = slider_width(bar);
     let rows = slider::label_rows(&bar.steps, SLIDER_INSET, width - SLIDER_INSET).max(1);
     SLIDER_H + rows as f32 * text::SMALL_LINE + 2.0
 }

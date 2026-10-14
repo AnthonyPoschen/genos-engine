@@ -1,6 +1,6 @@
 # Sponza
 
-Engine-ready files are `assets/built/sponza/`. They are not regenerated on every build: the OBJ is about 22 MB and the textures are TGA, so `scripts/fetch-sponza.py` does the conversion once and writes the glTF. The built positions are metres (OBJ centimetres times 0.01). The world-cache texel is 0.125 m, which matches a building of this size and does not match the raw centimetre coordinates.
+Engine-ready files are `assets/built/sponza/`. They are not regenerated on every build: the OBJ is about 22 MB and the textures are TGA, so `scripts/fetch-sponza.py` does the conversion once and writes the glTF. The built positions are metres (OBJ centimetres times 0.01). The cache cell size is 0.125 m, which matches a building of this size and does not match the raw centimetre coordinates.
 
 ## Mesh
 

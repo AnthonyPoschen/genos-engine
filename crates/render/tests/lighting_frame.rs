@@ -149,6 +149,7 @@ fn lighting_draws_emitted_light_and_bounces_it() {
             lighting: genos_scene::LightingSettings::default(),
             debug: genos_scene::DebugSettings::default(),
             fps_counter: genos_scene::FpsCounterSettings::default(),
+            menu: genos_scene::MenuSettings::default(),
         });
         let mut lit = gltf.clone();
         for m in &mut lit.materials {
@@ -1212,6 +1213,7 @@ fn shadow_floor_world() -> World {
         lighting: LightingSettings::preset(LightingPreset::High),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     });
     // Beside the scored patch, low, so a few cells see it and the rest do not.
     // A few centimetres off the floor, just beside the scored patch, so the
@@ -1451,6 +1453,7 @@ fn banner_world(lamp_x: f32, lamp_z: f32) -> World {
         lighting: LightingSettings::preset(LightingPreset::High),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     });
     world
         .add_gltf_traced(&banner, &genos_render::identity_pose(), &settings)
@@ -1805,6 +1808,7 @@ fn sponza_curtain_scores(screen: bool) -> (f64, f64) {
         lighting: LightingSettings::preset(LightingPreset::High),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     });
     world
         .add_gltf_traced(&scene, &genos_render::identity_pose(), &settings_bake)
@@ -1862,6 +1866,7 @@ fn white_lamps(n: usize) -> World {
         lighting: LightingSettings::preset(LightingPreset::Potato),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     })
 }
 

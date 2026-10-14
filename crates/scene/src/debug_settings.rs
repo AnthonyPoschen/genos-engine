@@ -19,12 +19,17 @@ use crate::EngineSettings;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DebugSettings {
     pub out: String,
+    /// Keep the debug menu, the menu tab, the frame-rate plate, and tool
+    /// overlays in a capture. False leaves them out. A capture command's
+    /// `ui` argument overrides this for that shot.
+    pub ui: bool,
 }
 
 impl Default for DebugSettings {
     fn default() -> Self {
         Self {
             out: Self::DEFAULT_OUT.into(),
+            ui: false,
         }
     }
 }
@@ -55,6 +60,7 @@ impl DebugSettings {
         let env = std::env::var("GENOS_UNFILLED_DIR").ok();
         Self {
             out: Self::resolve(&self.out, env.as_deref(), cli),
+            ui: self.ui,
         }
     }
 
@@ -83,7 +89,7 @@ impl DebugSettings {
     }
 
     pub fn to_text(&self) -> String {
-        format!("out={}\n", self.out)
+        format!("out={}\nui={}\n", self.out, u8::from(self.ui))
     }
 
     pub fn parse(text: &str) -> Result<Self, String> {
@@ -110,6 +116,14 @@ impl DebugSettings {
                     return Err("out needs a directory".into());
                 }
                 self.out = value.to_string();
+                Ok(())
+            }
+            "ui" => {
+                self.ui = match value.to_ascii_lowercase().as_str() {
+                    "1" | "true" | "on" | "yes" => true,
+                    "0" | "false" | "off" | "no" => false,
+                    _ => return Err(format!("ui is on or off, got {value}")),
+                };
                 Ok(())
             }
             _ => Err(format!("unknown debug setting {key}")),
@@ -183,5 +197,12 @@ mod tests {
         );
         assert!(DebugSettings::default().set_key("out", "").is_err());
         assert!(DebugSettings::default().set_key("home", "/tmp").is_err());
+        assert!(!DebugSettings::default().ui);
+        let mut settings = DebugSettings::default();
+        settings.set_key("ui", "on").unwrap();
+        assert!(settings.ui);
+        assert!(settings.to_text().contains("ui=1"));
+        assert!(!DebugSettings::parse("ui=off\n").unwrap().ui);
+        assert!(DebugSettings::default().set_key("ui", "maybe").is_err());
     }
 }

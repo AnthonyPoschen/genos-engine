@@ -9,11 +9,13 @@
 //! Callers read those devices or an [`ActionMap`]. The camera is not part of this crate.
 
 mod action;
+mod bindings;
 mod code;
 mod device;
 mod system;
 
 pub use action::{character_controller, Action2dBinding, ActionMap, BoundInput};
+pub use bindings::{debug_keys, Chord, KeyBindings};
 pub use code::{name, parse, InputCode};
 pub use device::{Axis2d, DeviceKind, DeviceView, DEFAULT_STICK_DEADZONE, FIRST_GAMEPAD_ID};
 pub use system::InputSystem;
@@ -31,6 +33,16 @@ mod tests {
         assert_eq!(parse("key_a"), Some(InputCode::key_a));
         assert_eq!(name(InputCode::key_d), "key_d");
         assert_eq!(from_letter_evdev(), InputCode::key_w);
+        assert_eq!(InputCode::key_grave as u16, 192);
+        assert_eq!(parse("key_grave"), Some(InputCode::key_grave));
+        assert_eq!(name(InputCode::key_grave), "key_grave");
+        assert_eq!(device::from_evdev(41), Some(InputCode::key_grave));
+        assert_eq!(InputCode::key_left_bracket as u16, 219);
+        assert_eq!(InputCode::key_right_bracket as u16, 221);
+        assert_eq!(parse("key_left_bracket"), Some(InputCode::key_left_bracket));
+        assert_eq!(name(InputCode::key_right_bracket), "key_right_bracket");
+        assert_eq!(device::from_evdev(26), Some(InputCode::key_left_bracket));
+        assert_eq!(device::from_evdev(27), Some(InputCode::key_right_bracket));
     }
 
     fn from_letter_evdev() -> InputCode {

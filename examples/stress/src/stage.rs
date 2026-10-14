@@ -86,9 +86,9 @@ pub struct Stage {
     pub boxes_still: bool,
     /// The lamp paths' clock stands (moving lamps hold where they are).
     pub lamps_still: bool,
-    /// Count pixels whose surface-cache texel had no finished set. F8 toggles it.
+    /// Count pixels whose surface-cache texel had no finished set. U toggles it. F8 is the alias.
     pub unfilled_count: bool,
-    /// Magenta tint on those pixels. Shift+F8 toggles it and turns counting on.
+    /// Magenta tint on those pixels. Shift-U toggles it and turns counting on. Shift-F8 is the alias.
     pub unfilled_tint: bool,
     /// A scene file in place of the building (--scene): its walls, solids and
     /// lights as they are; nothing moves, the sun, sky and lamp knobs do nothing.

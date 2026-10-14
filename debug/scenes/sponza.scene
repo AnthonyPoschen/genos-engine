@@ -1,7 +1,7 @@
 name sponza
 kind gltf
 gltf assets/built/sponza/sponza.gltf
-review Crytek Sponza in metres with Pestana's PBR textures. The world-cache texel is 0.125 m. Look down the atrium, along the colonnade, at the curtains, and into the dark corner. Curtain and chain alpha is opaque; only the thorn and the vase plant discard. There is no specular lobe.
+review Crytek Sponza in metres with Pestana's PBR textures. The cache cell size is 0.125 m. Look down the atrium, along the colonnade, at the curtains, and into the dark corner. Curtain and chain alpha is opaque; only the thorn and the vase plant discard. There is no specular lobe.
 checkpoint atrium -13 1.8 0 yaw 1.570796
 checkpoint colonnade -12 1.7 4.5 yaw 1.570796
 checkpoint curtains 0 1.6 -4.5 yaw 3.141593

@@ -86,8 +86,12 @@ curl -s -X POST localhost:8801/cmd/capture -d '{"mode":"direct","path":"/tmp/dir
 curl -s -X POST localhost:8801/cmd/compare -d '{"width":160,"noise":0.03,"prefix":"/tmp/noon"}'
 ```
 
+`capture` and `captures` take `ui` (default false). The same default is `DebugSettings.ui`, read and written by `get_debug_settings` and `set_debug_settings`. A false value leaves the debug menu, the menu tab, the frame-rate plate, and tool overlays out of the PNG. `ui: true` on the command keeps them for that shot. `--ui` forces the setting on for `genos-lighting --frames` and `genos-stress --shot`.
+
 Do not stop a `genos-stress` someone else bound to port 8765; pick another
-`GENOS_MCP_PORT`.
+port with `GENOS_MCP_PORT`. `genos-lighting` listens on 8766 unless
+`--mcp-port` is set. `GENOS_MCP_PORT` applies to that binary only when
+`--mcp-port` was omitted.
 
 Headless, a script with a report (exit code 1 when a check fails):
 
@@ -111,12 +115,19 @@ make lighting SCENE=sponza
 `stress`), and `--gpu-times 30`. `--preset`, `--lighting-debug`, `--unfilled`
 (the existing texels view: slots with fewer than four sets stay dim),
 `--full-effort`, `--headless`, `--frames N`, `--size WxH`, `--fps-counter`,
-`--fps-hz`, and `--out DIR` are in `--help`. The default output directory is
+`--fps-hz`, `--menu shown|hidden`, and `--out DIR` are in `--help`. The default output directory is
 `./genos-debug/` in the current working directory (`shots/`, `logs/`, `dumps/`).
 `--out` overrides it. The binary does not write those files under `$HOME`.
 
 Page Up and Page Down switch scenes. Keys 1–9 jump checkpoints. Home and 0 reset
-the camera to the active checkpoint. F3 toggles the frame-rate overlay.
+the camera to the active checkpoint. Grave hides the settings menu and grave shows
+it again. F1 is the same key. `--menu hidden` starts it hidden. `GENOS_MENU`
+applies only when that argument was omitted. `]` and `[` change the menu page. Tab and shift-Tab
+do that while the pointer is over the menu. The pages and folds are
+`debug/lighting/menu.txt`. F toggles the frame-rate overlay. F3 is the same key.
+U toggles the unfilled count in the stress and camera programs. Shift-U toggles
+the tint. F8 and shift-F8 are the same keys. `GENOS_DEBUG_KEYS` is a text file
+that replaces any of those chords (`menu key_grave key_f1`).
 `list_scenes`, `load_scene`, `list_checkpoints`, and `jump_checkpoint` are on
 the same MCP catalogue. `load_scene` drops light and object edits and clears
 the lighting caches.
@@ -125,7 +136,7 @@ the lighting caches.
 
 `FpsCounterSettings` on the scene (`enabled`, `rate_hz`) is the public setting.
 It implements `EngineSettings`. The default is off, at 4 Hz. The debug menu row
-`FPS` has a checkbox and a hertz slider. Both call `set_key`. F3 toggles
+`FPS` has a checkbox and a hertz slider. Both call `set_key`. F, or F3, toggles
 `enabled`. `--fps-counter` (optional `on` or `off`; bare means on) and
 `--fps-hz N` win every frame. `GENOS_FPS_COUNTER` and `GENOS_FPS_HZ` apply only
 when that argument was omitted, and then a set variable wins every frame.
@@ -143,8 +154,27 @@ and logs still go to `./genos-debug/<kind>/` (`shots/`, `logs/`, `dumps/`).
 Failure modes: a stuck readout means the window is not closing (the rate is
 too low, or frame time is not advancing). A missing plate means `enabled` is
 off or the first window has not closed. The probes are the plate, the `FPS`
-menu row, F3, `--fps-counter` / `--fps-hz`, and `get_fps_counter` /
+menu row, F or F3, `--fps-counter` / `--fps-hz`, and `get_fps_counter` /
 `set_fps_counter`.
+
+### Debug menu
+
+`MenuSettings` on the scene (`visible`, `tab`, `collapsed`, `wheel`, `keys`)
+is the public setting. It implements `EngineSettings`. The default is shown,
+on the first page, with no stored folds, `wheel=hover`, and `keys=click`.
+Grave, F1, the title-bar hide button, and the corner tab write `visible`.
+The first grave while click-to-focus is held releases the keys and leaves the
+menu up. The next grave hides it. F1 hides it either way. `--menu shown|hidden`
+wins every frame for `visible`. `GENOS_MENU` applies only when that argument
+was omitted. `tab` is the page title. `collapsed` is a comma-separated list of
+folded section keys. `fold` adds one key and `open` removes one, so a test can
+move one section without a pointer. `fold` together with `tab` keeps the
+fold. A section that is not on the open page stays in the list. `wheel` and `keys` are `hover`, `modal`,
+`click`, or `passive`. `focus_wheel` and `focus_keys` are the same keys.
+`get_menu_settings` and `set_menu_settings` are on the MCP catalogue. A `text`
+field overlays `key=value` lines. The lighting binary also writes
+`<out>/menu/collapsed.txt` and `<out>/menu/tab.txt`. The Perf page dropdowns
+write `wheel` and `keys`.
 
 - Replicated state: the settings struct. The averaged numbers stay on the client that draws.
 - Authority: the client that owns the view. A server does not time the picture.
@@ -238,7 +268,9 @@ v1 views (`bounce:N`, `near`, `far`, `probes:*`) went with GI v1.
   `cache: "off"`) by scene, pose, size and bounce limit.
 - `compare` captures the live picture after the trace (`frames: N` waits at least N
   frames after the trace starts; `mode` picks the view; `live:` uses a saved
-  capture), resamples it to the reference size and compares linear luminance (the
+  capture). `ui` defaults to false, so that live picture leaves out the debug
+  menu, the menu tab, the frame-rate plate, and tool overlays. It resamples
+  the picture to the reference size and compares linear luminance (the
   tone curve undone) on `block` x `block` averages (default 2). Pixels where the
   primary ray met nothing are left out.
 - Reply: `mean_rel` (sum of |live - ref| over sum of ref: the share of light that is

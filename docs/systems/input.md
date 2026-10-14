@@ -10,7 +10,7 @@ A player can move and look with a keyboard, a mouse, or a gamepad. The same acti
 
 The model is a pull. Each frame calls `begin_frame`, then writes fresh device state, then reads the action map.
 
-`InputCode` names and numeric values match `input-zig`. The names stay snake case. That enum is the one allowed `non_camel_case_types` exception.
+`InputCode` names and numeric values match `input-zig`. The names stay snake case. That enum is the one allowed `non_camel_case_types` exception. `key_grave` is the key left of `1` (`~). Its value is 192, the Windows OEM 3 virtual key, and Linux evdev code 41. `key_left_bracket` is `[` (219, evdev 26). `key_right_bracket` is `]` (221, evdev 27).
 
 One keyboard, one mouse, and stable gamepad slots stay. A disconnected pad keeps its slot.
 
@@ -47,6 +47,8 @@ Read the axes with `axis_2d`. Read buttons with `down`. Change the deadzone befo
 Windows, macOS, and X11 device reads are not in this crate yet. The behavior source for those reads is `input-zig`, listed in [Architecture](../architecture.md).
 
 The action map does not load a player-authored JSON file at runtime yet. `to_json` and the parser exist for the map shape.
+
+`KeyBindings` names the debug keys. `builtin` is grave or F1 for the menu, F or F3 for the frame-rate plate, U or F8 for the unfilled count, and shift-U or shift-F8 for the tint. `tab_next` is `]`. `tab_prev` is `[`. `tab_focus_next` is Tab and `tab_focus_prev` is shift-Tab, for when the pointer is over the menu. The first key is the one a board without function keys uses. `apply_text` replaces chords from `action key [key...]` lines. `+key_u` means shift. `debug_keys` reads `GENOS_DEBUG_KEYS` when that path is set, then those lines win. A game calls `pressed` with the action name. It does not test `key_f1` itself.
 
 ## Decisions
 

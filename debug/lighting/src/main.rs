@@ -7,6 +7,7 @@
 #![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::disallowed_methods, reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md")]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
 #![expect(clippy::large_enum_variant, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
@@ -26,19 +27,21 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use genos_debug::{png, CheckpointPose, Host, Knob};
-use genos_input::{character_controller, InputCode, InputSystem};
+use genos_input::{character_controller, debug_keys, InputCode, InputSystem, KeyBindings};
 use genos_render::{identity_pose, DrawKind, FixedPart, Renderer, ScreenRect, ViewMode, World};
 use genos_scene::{
-    look_direction, parse_enabled, parse_rate, update, Actions, Camera, DebugSettings, Floor,
-    FpsCounterSettings, Light, Scene, Sky, Vec3, PITCH_LIMIT,
+    look_direction, parse_enabled, parse_menu_visible, parse_rate, update, Actions, Camera,
+    DebugSettings, Floor, FocusPolicy, FpsCounterSettings, Light, MenuSettings, Scene, Sky, Vec3,
+    PITCH_LIMIT,
 };
 use genos_scene_lib::{Entry, Kind, Lamp, Sun};
 use genos_stress::building::{Layout, LightMix};
 use genos_stress::knobs::{apply_lighting_knob, lighting_knobs};
 use genos_stress::stage::{Scale, Stage};
 use genos_ui::{
-    button_panel, Action, FpsOverlay, PanelCheck, PanelDropdown, PanelRow, PanelSlider, Pointer,
-    SliderStep, State,
+    button_panel_blocks, show_menu_tab, Action, FpsOverlay, InputPolicy, PanelBlock, PanelCheck,
+    PanelDropdown, PanelRow, PanelSection, PanelSlider, PanelTab, PanelTabs, Pointer, SliderStep,
+    State, MENU_HIDE, MENU_SHOW, PANEL_ID,
 };
 use genos_window::{extent_changed, FocusGate, Window};
 
@@ -80,23 +83,50 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          variable override the preset
   --denoise-screen on|off alias of --denoise-launch (GENOS_LIGHTING_DENOISE_SCREEN)
   --headless             proof window, no panel
-  --frames N             quit after N frames
+  --frames N             quit after N frames. The last frame PNG leaves out
+                         the debug menu, the menu tab, the frame-rate plate,
+                         and tool overlays
+  --ui                   keep those overlays in that PNG
   --fps-counter [on|off] frame-rate plate (default off). A bare flag turns it on.
                          GENOS_FPS_COUNTER applies only when this is omitted
   --fps-hz N             plate update rate in Hz (default 4, range 0.25 to 30).
                          GENOS_FPS_HZ applies only when this is omitted
+  --menu shown|hidden    debug menu (default shown). GENOS_MENU applies only
+                         when this is omitted
+  --mcp-port N           loopback MCP port (default 8766). GENOS_MCP_PORT applies
+                         only when this is omitted. genos-stress stays on 8765
   --out DIR              screenshots, dumps, and logs (default ./genos-debug)
   --size WxH             window size (default 1280x720; 320x180 for --check)
   --check                every scene at its check checkpoint, four frames,
                          mean luma against that scene's own floor
 
 Page Up and Page Down switch scenes. Keys 1-9 jump checkpoints. Home and 0 reset
-to the active checkpoint. Arrow keys and the wheel step the slider under the
-pointer, or move the highlight in an open dropdown. Enter picks the highlighted
-choice. Escape closes the list. F3 toggles the frame-rate plate. WASD fly, Space
+to the active checkpoint. The wheel scrolls the menu while the pointer is over
+it. Perf can set that wheel policy to hover, modal, click, or passive. A click
+gives the menu the keys. Arrow keys then move the focused control,
+and a focused slider steps. Enter picks the highlighted choice or presses the
+focused control. Escape closes an open list, then releases the keys. A click
+outside releases them too. Grave releases the keys on the first press and
+leaves the menu up. The next grave hides it. F1 hides it either way. Perf sets
+Wheel focus
+and Key focus to hover, modal, click, or passive. The title bar hide button
+hides it. A menu tab in the top-left corner shows it. --menu hidden starts it
+hidden. GENOS_MENU applies only when that argument was omitted.
+get_menu_settings and set_menu_settings read and write shown or hidden, the
+page, the folds, and those two focus policies. ] and [ change the page while
+the menu has the keys. Tab and shift-Tab do that too. F toggles the frame-rate
+plate. F3 is the same key. A section title folds that group.
+The fold is remembered in <out>/menu/collapsed.txt. The open page is remembered
+in <out>/menu/tab.txt.
+The groups are debug/lighting/menu.txt. A section key of - has no fold.
+GENOS_MENU_LAYOUT points at another file. The panel stays within a third of
+the window. The pages are Scene, Pipeline, Lamps, GI, Denoise,
+Shadows, Perf, and Info. Lamps and GI keep folds because those pages
+are tall.
+WASD fly, Space
 up, C or Ctrl down, Shift is faster. The plate shows FPS and frame ms, averaged
-over each 1/rate window (default 4 Hz). It is off until the checkbox, F3, MCP,
-or --fps-counter turns it on.
+over each 1/rate window (default 4 Hz). It is off until the checkbox, F or F3, MCP,
+or --fps-counter turns it on. GENOS_DEBUG_KEYS replaces those keys.
 
 Screenshots go to <out>/shots, the log to <out>/logs, lighting dumps to <out>/dumps.
 The binary does not write under $HOME.
@@ -112,9 +142,14 @@ const ID_VIEW: u32 = 2400;
 const ID_DROP: u32 = 2600;
 const ID_FPS: u32 = 2800;
 const ID_FPS_HZ: u32 = 2801;
+const ID_MENU_WHEEL: u32 = 2820;
+const ID_MENU_KEYS: u32 = 2821;
 const ID_KNOB: u32 = 3000;
 const ID_SWITCH: u32 = 4000;
-const CHECKS_PER_ROW: usize = 3;
+
+mod menu_layout;
+
+use menu_layout::{load_menu_layout, menu_folds, section_id, strip_id, tab_id, MenuFold, MenuLine};
 /// Ordered grades and numeric knobs. An on/off switch is not in this list.
 const SLIDER_KNOBS: &[&str] = &[
     "lighting_preset",
@@ -165,11 +200,19 @@ struct Options {
     denoise_screen: Option<String>,
     headless: bool,
     frames: Option<u32>,
+    /// Keep the debug menu, menu tab, frame-rate plate, and tool overlays
+    /// in a `--frames` PNG. A capture leaves them out unless this is set.
+    ui: bool,
     out: PathBuf,
     out_set: bool,
     size: (u32, u32),
     check: bool,
+    /// Set by `--mcp-port`. Empty means `GENOS_MCP_PORT`, then [`MCP_PORT`].
+    mcp_port: Option<u16>,
 }
+
+/// Loopback port for this binary. `genos-stress` and `genos-camera` stay on 8765.
+const MCP_PORT: u16 = 8766;
 
 fn main() {
     if let Err(err) = run() {
@@ -223,8 +266,9 @@ fn run() -> Result<(), String> {
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let mcp_host = genos_mcp::Host::new(app.scene().clone(), camera.clone());
-    let _server = genos_mcp::Server::start_on(mcp_host, genos_mcp::listen_port())?;
-    let _ = writeln!(log, "mcp http://127.0.0.1:{}/", genos_mcp::listen_port());
+    let mcp_port = opts.mcp_port.unwrap_or_else(mcp_port_from_env);
+    let _server = genos_mcp::Server::start_on(mcp_host, mcp_port)?;
+    let _ = writeln!(log, "mcp http://127.0.0.1:{mcp_port}/");
     let mut tools = genos_debug::Tools::new();
     tools.set_out_dir(opts.out.join("shots"));
     if opts.unfilled {
@@ -235,9 +279,25 @@ fn run() -> Result<(), String> {
     }
     let mut size = (renderer.width(), renderer.height());
     let mut focus = FocusGate::default();
+    let menu = load_menu_layout()?;
+    let folds = menu_folds(&menu);
     let mut ui = State::default();
+    let mut tracked_collapsed = app.scene().menu.collapsed.clone();
+    let mut tracked_tab = app.scene().menu.tab.clone();
+    if let Some(names) = load_menu_folds(&opts.out) {
+        app.scene().menu.collapsed.clone_from(&names);
+        tracked_collapsed.clone_from(&names);
+        apply_collapsed(&mut ui, &folds, &names);
+    }
+    if let Some(name) = load_menu_tab(&opts.out) {
+        app.scene().menu.tab.clone_from(&name);
+        tracked_tab.clone_from(&name);
+        ui.select_tab(strip_id(0), tab_id(&name));
+    }
     let mut input = InputSystem::new();
     let controls = character_controller();
+    let keys = debug_keys()?;
+    let mut menu_open = app.scene().menu.effective().visible;
     let mut drawn = 0u32;
     let mut clock: Option<Instant> = None;
     let mut fps_overlay = FpsOverlay::new();
@@ -266,34 +326,69 @@ fn run() -> Result<(), String> {
         input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
         input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
         input.poll_gamepads();
-        hotkeys(&mut app, &input, &mut camera, &mut tools, &mut renderer)?;
+        pull_menu(
+            &mut app,
+            &mut ui,
+            &folds,
+            &mut menu_open,
+            &mut tracked_collapsed,
+            &mut tracked_tab,
+        );
+        hotkeys(
+            &mut app,
+            &input,
+            &keys,
+            &mut camera,
+            &mut tools,
+            &mut renderer,
+        )?;
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
+        let page_keys = !camera.captured && menu_open;
+        let pointer = Pointer {
+            x: frame.pointer_x,
+            y: frame.pointer_y,
+            down: !camera.captured && (gated.mouse_left || gated.capture_click),
+            wheel_y: if camera.captured { 0.0 } else { gated.wheel_y },
+            key_dec: !camera.captured
+                && (input.keyboard.pressed(InputCode::key_left)
+                    || input.keyboard.pressed(InputCode::key_down)),
+            key_inc: !camera.captured
+                && (input.keyboard.pressed(InputCode::key_right)
+                    || input.keyboard.pressed(InputCode::key_up)),
+            key_activate: !camera.captured && input.keyboard.pressed(InputCode::key_enter),
+            key_dismiss: !camera.captured && input.keyboard.pressed(InputCode::key_escape),
+            key_blur: !camera.captured && input.keyboard.pressed(InputCode::key_grave),
+            tab_prev: page_keys
+                && (keys.pressed(&input, "tab_prev") || keys.pressed(&input, "tab_focus_prev")),
+            tab_next: page_keys
+                && (keys.pressed(&input, "tab_next") || keys.pressed(&input, "tab_focus_next")),
+        };
+        let mut drew_panel = false;
+        let mut menu_blur = false;
         let (paints, look_capture) = if opts.headless {
             (Vec::new(), true)
+        } else if !menu_open {
+            let ui_frame = show_menu_tab(&mut ui, [size.0 as f32, size.1 as f32], pointer);
+            if ui_frame
+                .actions
+                .iter()
+                .any(|action| matches!(action, Action::Press(id) if *id == MENU_SHOW))
+            {
+                menu_open = true;
+            }
+            (ui_frame.paints, ui_frame.look_capture)
         } else {
+            drew_panel = true;
             let fps_menu = app.scene().fps_counter.effective();
-            let rows = panel_rows(&app, tools.view_mode(), &fps_menu);
-            let ui_frame = button_panel(
+            let blocks = panel_blocks(&app, tools.view_mode(), &fps_menu, &menu);
+            let ui_frame = button_panel_blocks(
                 &mut ui,
                 &panel_title(&app),
-                &rows,
+                &blocks,
                 [size.0 as f32, size.1 as f32],
                 &camera,
-                Pointer {
-                    x: frame.pointer_x,
-                    y: frame.pointer_y,
-                    down: !camera.captured && (gated.mouse_left || gated.capture_click),
-                    wheel_y: if camera.captured { 0.0 } else { gated.wheel_y },
-                    key_dec: !camera.captured
-                        && (input.keyboard.pressed(InputCode::key_left)
-                            || input.keyboard.pressed(InputCode::key_down)),
-                    key_inc: !camera.captured
-                        && (input.keyboard.pressed(InputCode::key_right)
-                            || input.keyboard.pressed(InputCode::key_up)),
-                    key_activate: !camera.captured && input.keyboard.pressed(InputCode::key_enter),
-                    key_dismiss: !camera.captured && input.keyboard.pressed(InputCode::key_escape),
-                },
+                pointer,
             );
             for action in &ui_frame.actions {
                 match *action {
@@ -302,11 +397,37 @@ fn run() -> Result<(), String> {
                         select(&mut app, &mut camera, &mut tools, &mut renderer, id, value)?;
                     }
                     Action::Toggle { id, on } => toggle(&mut app, id, on)?,
+                    Action::Press(id) => {
+                        if id == MENU_HIDE {
+                            menu_open = false;
+                        } else if folds.iter().any(|fold| fold.id == id) {
+                            save_menu_folds(&opts.out, &ui, &folds)?;
+                        } else if let Some(name) = tab_title(&menu, id) {
+                            save_menu_tab(&opts.out, name)?;
+                        }
+                    }
                     _ => {}
                 }
             }
+            menu_blur = ui_frame.consumed.blur;
             (ui_frame.paints, ui_frame.look_capture)
         };
+        if keys.pressed(&input, "menu") && !menu_blur {
+            menu_open = !menu_open;
+        }
+        push_menu(
+            &mut app,
+            &ui,
+            &folds,
+            &menu,
+            menu_open,
+            drew_panel,
+            &mut MenuWrite {
+                out: &opts.out,
+                collapsed: &mut tracked_collapsed,
+                tab: &mut tracked_tab,
+            },
+        )?;
         let mut overlay: Vec<ScreenRect> = paints
             .iter()
             .map(|p| ScreenRect {
@@ -341,6 +462,10 @@ fn run() -> Result<(), String> {
                 camera.captured = false;
             }
         }
+        if opts.ui {
+            app.scene().debug.ui = true;
+        }
+        let capture_ui = app.scene().debug.ui;
         let tools_read = tools.before_draw(&mut genos_debug::Ctx {
             renderer: &mut renderer,
             camera: &mut camera,
@@ -366,6 +491,10 @@ fn run() -> Result<(), String> {
         drawn += 1;
         let last = opts.frames.is_some_and(|limit| drawn >= limit);
         let want_read = tools_read || last;
+        if want_read && !tools.show_capture_overlay(capture_ui) {
+            overlay.clear();
+            renderer.set_overlay_lines(&[]);
+        }
         let draw_start = Instant::now();
         let pixels =
             renderer.draw_with_overlay(app.world(), &camera, &overlay, want_read, false)?;
@@ -575,6 +704,7 @@ impl Host for App {
     }
 
     fn load_scene(&mut self, name: &str) -> Result<(), String> {
+        let menu = self.scene().menu.clone();
         let index = self
             .entries
             .iter()
@@ -584,6 +714,7 @@ impl Host for App {
         self.index = index;
         self.checkpoint = 0;
         self.show = show;
+        self.scene().menu = menu;
         self.note(&format!("loaded {name}"));
         Ok(())
     }
@@ -683,6 +814,7 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
                 lighting: genos_scene::LightingSettings::default(),
                 debug: DebugSettings::default(),
                 fps_counter: FpsCounterSettings::default(),
+                menu: MenuSettings::default(),
             };
             if let Some(sun) = sun {
                 scene.lights.push(sun_light(sun));
@@ -803,6 +935,7 @@ fn jump_camera(app: &mut App, name: Option<&str>, camera: &mut Camera) -> Result
 fn hotkeys(
     app: &mut App,
     input: &InputSystem,
+    keys: &KeyBindings,
     camera: &mut Camera,
     tools: &mut genos_debug::Tools,
     renderer: &mut Renderer,
@@ -814,7 +947,7 @@ fn hotkeys(
         let index = if app.index == 0 { n - 1 } else { app.index - 1 };
         switch_to(app, index, None, camera, tools, renderer)?;
     }
-    let keys = [
+    let digits = [
         InputCode::key_1,
         InputCode::key_2,
         InputCode::key_3,
@@ -825,7 +958,7 @@ fn hotkeys(
         InputCode::key_8,
         InputCode::key_9,
     ];
-    for (i, code) in keys.iter().enumerate() {
+    for (i, code) in digits.iter().enumerate() {
         if input.keyboard.pressed(*code) {
             if let Some(name) = app.entry().checkpoints.get(i).map(|c| c.name.clone()) {
                 let pose = app.jump_checkpoint(&name)?;
@@ -837,7 +970,7 @@ fn hotkeys(
             }
         }
     }
-    if input.keyboard.pressed(InputCode::key_f3) {
+    if keys.pressed(input, "fps") {
         let on = app.scene().fps_counter.effective().enabled;
         let _ = app
             .scene()
@@ -917,13 +1050,7 @@ fn view_name(mode: ViewMode) -> &'static str {
 }
 
 fn panel_title(app: &App) -> String {
-    let review = app.entry().review.as_str();
-    let review = if review.len() > 140 {
-        format!("{}…", &review[..140])
-    } else {
-        review.to_string()
-    };
-    format!("{} — {review}", app.entry().name)
+    app.entry().name.clone()
 }
 
 fn index_steps(names: impl IntoIterator<Item = impl Into<String>>) -> Vec<SliderStep> {
@@ -964,39 +1091,12 @@ fn switch_knobs(app: &App) -> Vec<Knob> {
         .collect()
 }
 
-fn switch_rows(app: &App) -> Vec<PanelRow> {
-    let switches = switch_knobs(app);
-    switches
-        .chunks(CHECKS_PER_ROW)
-        .enumerate()
-        .map(|(row_index, chunk)| PanelRow {
-            label: String::new(),
-            buttons: Vec::new(),
-            slider: None,
-            dropdown: None,
-            checks: chunk
-                .iter()
-                .enumerate()
-                .map(|(column, knob)| PanelCheck {
-                    id: ID_SWITCH + (row_index * CHECKS_PER_ROW + column) as u32,
-                    text: knob.label.clone(),
-                    on: knob.value >= 0.5,
-                })
-                .collect(),
-        })
-        .collect()
-}
-
 fn knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
     let knob = app.knobs().into_iter().find(|knob| knob.name == name)?;
     if knob.choices == ["off", "on"] {
         return None;
     }
-    let label = if name == "lighting_preset" {
-        "Preset".to_string()
-    } else {
-        knob.label.clone()
-    };
+    let label = menu_label(name, &knob.label);
     let slider = if knob.choices.is_empty() {
         PanelSlider::range(
             ID_KNOB + index as u32,
@@ -1018,53 +1118,377 @@ fn knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
     })
 }
 
+#[cfg(test)]
 fn panel_rows(app: &App, view: ViewMode, fps: &FpsCounterSettings) -> Vec<PanelRow> {
+    let menu = load_menu_layout().expect("layout");
+    flatten_blocks(&panel_blocks(app, view, fps, &menu))
+}
+
+#[cfg(test)]
+fn flatten_blocks(blocks: &[PanelBlock]) -> Vec<PanelRow> {
+    let mut rows = Vec::new();
+    for block in blocks {
+        match block {
+            PanelBlock::Section(section) => {
+                rows.extend(section.rows.clone());
+                rows.extend(flatten_blocks(&section.blocks));
+            }
+            PanelBlock::Tabs(tabs) => {
+                for tab in &tabs.tabs {
+                    rows.extend(flatten_blocks(&tab.blocks));
+                }
+            }
+            PanelBlock::Rows(page) => rows.extend(page.clone()),
+        }
+    }
+    rows
+}
+
+enum Piece {
+    Row(PanelRow),
+    Check(PanelCheck),
+}
+
+struct SectionAcc {
+    tab: Option<String>,
+    key: String,
+    title: String,
+    collapsed: bool,
+    rows: Vec<PanelRow>,
+    checks: Vec<PanelCheck>,
+}
+
+fn flush_checks(section: &mut SectionAcc) {
+    if section.checks.is_empty() {
+        return;
+    }
+    section.rows.push(PanelRow {
+        label: String::new(),
+        buttons: Vec::new(),
+        slider: None,
+        dropdown: None,
+        checks: std::mem::take(&mut section.checks),
+    });
+}
+
+fn panel_blocks(
+    app: &App,
+    view: ViewMode,
+    fps: &FpsCounterSettings,
+    lines: &[MenuLine],
+) -> Vec<PanelBlock> {
+    let mut sections = Vec::new();
+    for line in lines {
+        let same = sections.last().is_some_and(|section: &SectionAcc| {
+            section.tab == line.tab && section.key == line.section
+        });
+        if !same {
+            if let Some(section) = sections.last_mut() {
+                flush_checks(section);
+            }
+            sections.push(SectionAcc {
+                tab: line.tab.clone(),
+                key: line.section.clone(),
+                title: line.title.clone(),
+                collapsed: line.collapsed,
+                rows: Vec::new(),
+                checks: Vec::new(),
+            });
+        }
+        let Some(piece) = setting_piece(app, view, fps, &line.setting) else {
+            continue;
+        };
+        let Some(section) = sections.last_mut() else {
+            continue;
+        };
+        match piece {
+            Piece::Row(row) => {
+                flush_checks(section);
+                section.rows.push(row);
+            }
+            Piece::Check(check) => section.checks.push(check),
+        }
+    }
+    if let Some(section) = sections.last_mut() {
+        flush_checks(section);
+    }
+    let mut blocks = Vec::new();
+    let mut strip: Option<PanelTabs> = None;
+    let mut strip_index = 0usize;
+    for section in sections {
+        let block = if section.key == "-" {
+            PanelBlock::Rows(section.rows)
+        } else {
+            PanelBlock::Section(PanelSection::new(
+                section_id(&section.key),
+                section.title,
+                section.collapsed,
+                section.rows,
+            ))
+        };
+        match section.tab {
+            None => {
+                if let Some(tabs) = strip.take() {
+                    blocks.push(PanelBlock::Tabs(tabs));
+                }
+                blocks.push(block);
+            }
+            Some(name) => {
+                if strip.is_none() {
+                    strip = Some(PanelTabs {
+                        id: strip_id(strip_index),
+                        tabs: Vec::new(),
+                    });
+                    strip_index += 1;
+                }
+                let Some(tabs) = strip.as_mut() else {
+                    continue;
+                };
+                if let Some(tab) = tabs.tabs.iter_mut().find(|tab| tab.title == name) {
+                    tab.blocks.push(block);
+                } else {
+                    tabs.tabs.push(PanelTab {
+                        id: tab_id(&name),
+                        title: name,
+                        blocks: vec![block],
+                    });
+                }
+            }
+        }
+    }
+    if let Some(tabs) = strip {
+        blocks.push(PanelBlock::Tabs(tabs));
+    }
+    blocks
+}
+
+fn setting_piece(
+    app: &App,
+    view: ViewMode,
+    fps: &FpsCounterSettings,
+    setting: &str,
+) -> Option<Piece> {
     let view_value = VIEWS
         .iter()
         .position(|name| *name == view_name(view))
         .unwrap_or(0) as f64;
-    let mut rows = Vec::new();
-    if let Some(row) = drop_row(
-        "Scene",
-        ID_SCENE,
-        app.index as f64,
-        app.entries.iter().map(|entry| entry.name.clone()).collect(),
-    ) {
-        rows.push(row);
+    match setting {
+        "review" => Some(Piece::Row(PanelRow {
+            label: app.entry().review.clone(),
+            buttons: Vec::new(),
+            slider: None,
+            dropdown: None,
+            checks: Vec::new(),
+        })),
+        "scene" => drop_row(
+            "Scene",
+            ID_SCENE,
+            app.index as f64,
+            app.entries.iter().map(|entry| entry.name.clone()).collect(),
+        )
+        .map(Piece::Row),
+        "checkpoint" => drop_row(
+            "Checkpoint",
+            ID_CP,
+            app.checkpoint as f64,
+            app.entry()
+                .checkpoints
+                .iter()
+                .map(|checkpoint| checkpoint.name.clone())
+                .collect(),
+        )
+        .map(Piece::Row),
+        "view" => drop_row(
+            "View",
+            ID_VIEW,
+            view_value,
+            VIEWS.iter().map(|name| (*name).to_string()).collect(),
+        )
+        .map(Piece::Row),
+        "fps" => Some(Piece::Row(fps_row(fps))),
+        "menu_wheel" => focus_row("Wheel focus", ID_MENU_WHEEL, menu_settings(app).wheel).map(Piece::Row),
+        "menu_keys" => focus_row("Key focus", ID_MENU_KEYS, menu_settings(app).keys).map(Piece::Row),
+        name => {
+            let knob = app.knobs().into_iter().find(|knob| knob.name == name)?;
+            if knob.choices == ["off", "on"] {
+                let index = switch_knobs(app)
+                    .iter()
+                    .position(|item| item.name == name)?;
+                Some(Piece::Check(PanelCheck {
+                    id: ID_SWITCH + index as u32,
+                    text: menu_label(name, &knob.label),
+                    on: knob.value >= 0.5,
+                }))
+            } else if let Some(index) = SLIDER_KNOBS.iter().position(|item| *item == name) {
+                knob_row(app, index, name).map(Piece::Row)
+            } else if let Some(index) = DROP_KNOBS.iter().position(|item| *item == name) {
+                drop_knob_row(app, index, name).map(Piece::Row)
+            } else {
+                None
+            }
+        }
     }
-    if let Some(row) = drop_row(
-        "Checkpoint",
-        ID_CP,
-        app.checkpoint as f64,
-        app.entry()
-            .checkpoints
-            .iter()
-            .map(|checkpoint| checkpoint.name.clone())
+}
+
+fn menu_fold_path(out: &Path) -> PathBuf {
+    out.join("menu").join("collapsed.txt")
+}
+
+fn menu_tab_path(out: &Path) -> PathBuf {
+    out.join("menu").join("tab.txt")
+}
+
+fn tab_title(lines: &[MenuLine], id: u32) -> Option<&str> {
+    lines.iter().find_map(|line| {
+        let name = line.tab.as_deref()?;
+        (tab_id(name) == id).then_some(name)
+    })
+}
+
+fn load_menu_folds(out: &Path) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(menu_fold_path(out)).ok()?;
+    Some(
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_string)
             .collect(),
-    ) {
-        rows.push(row);
+    )
+}
+
+fn save_menu_folds(out: &Path, ui: &State, folds: &[MenuFold]) -> Result<(), String> {
+    let names = folds
+        .iter()
+        .filter(|fold| ui.section_collapsed(fold.id))
+        .map(|fold| fold.key.clone())
+        .collect::<Vec<_>>();
+    write_fold_names(out, &names)
+}
+
+fn write_fold_names(out: &Path, names: &[String]) -> Result<(), String> {
+    let path = menu_fold_path(out);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
-    if let Some(row) = drop_row(
-        "View",
-        ID_VIEW,
-        view_value,
-        VIEWS.iter().map(|name| (*name).to_string()).collect(),
-    ) {
-        rows.push(row);
+    let mut body = String::from("# collapsed menu sections\n");
+    for name in names {
+        body.push_str(name);
+        body.push('\n');
     }
-    rows.extend(switch_rows(app));
-    rows.push(fps_row(fps));
-    for (index, name) in SLIDER_KNOBS.iter().enumerate() {
-        if let Some(row) = knob_row(app, index, name) {
-            rows.push(row);
+    std::fs::write(path, body).map_err(|err| err.to_string())
+}
+
+fn apply_collapsed(ui: &mut State, folds: &[MenuFold], names: &[String]) {
+    for fold in folds {
+        ui.fold_section(fold.id, names.iter().any(|name| name == &fold.key));
+    }
+}
+
+/// A fold stays when this frame did not lay that section out. The open page
+/// can change without dropping a fold that lives on another page.
+fn merge_collapsed(previous: &[String], ui: &State, folds: &[MenuFold]) -> Vec<String> {
+    let mut names = previous.to_vec();
+    for fold in folds {
+        if !ui.section_shown(fold.id) {
+            continue;
+        }
+        if ui.section_collapsed(fold.id) {
+            if !names.iter().any(|name| name == &fold.key) {
+                names.push(fold.key.clone());
+            }
+        } else {
+            names.retain(|name| name != &fold.key);
         }
     }
-    for (index, name) in DROP_KNOBS.iter().enumerate() {
-        if let Some(row) = drop_knob_row(app, index, name) {
-            rows.push(row);
+    names
+}
+
+fn pull_menu(
+    app: &mut App,
+    ui: &mut State,
+    folds: &[MenuFold],
+    menu_open: &mut bool,
+    tracked_collapsed: &mut Vec<String>,
+    tracked_tab: &mut String,
+) {
+    let menu = app.scene().menu.clone();
+    if menu.collapsed != *tracked_collapsed {
+        apply_collapsed(ui, folds, &menu.collapsed);
+        *tracked_collapsed = menu.collapsed;
+    }
+    if menu.tab != *tracked_tab {
+        if !menu.tab.is_empty() {
+            ui.select_tab(strip_id(0), tab_id(&menu.tab));
+        }
+        *tracked_tab = menu.tab;
+    }
+    *menu_open = app.scene().menu.effective().visible;
+    if !*menu_open {
+        ui.set_focused_panel(None);
+    }
+    let menu = app.scene().menu.clone();
+    ui.set_input_policy(
+        PANEL_ID,
+        InputPolicy {
+            wheel: menu.wheel,
+            keys: menu.keys,
+        },
+    );
+}
+
+struct MenuWrite<'a> {
+    out: &'a Path,
+    collapsed: &'a mut Vec<String>,
+    tab: &'a mut String,
+}
+
+fn push_menu(
+    app: &mut App,
+    ui: &State,
+    folds: &[MenuFold],
+    lines: &[MenuLine],
+    menu_open: bool,
+    drew_panel: bool,
+    write: &mut MenuWrite<'_>,
+) -> Result<(), String> {
+    if drew_panel {
+        let merged = merge_collapsed(write.collapsed, ui, folds);
+        let on_disk = load_menu_folds(write.out).unwrap_or_default();
+        if merged != app.scene().menu.collapsed || merged != on_disk {
+            app.scene().menu.collapsed.clone_from(&merged);
+            write_fold_names(write.out, &merged)?;
+        }
+        write.collapsed.clone_from(&app.scene().menu.collapsed);
+        if let Some(id) = ui.selected_tab(strip_id(0)) {
+            if let Some(name) = tab_title(lines, id) {
+                if app.scene().menu.tab != name {
+                    app.scene().menu.tab = name.to_string();
+                    save_menu_tab(write.out, name)?;
+                }
+                write.tab.clone_from(&app.scene().menu.tab);
+            }
         }
     }
-    rows
+    if app.scene().menu.visible != menu_open {
+        app.scene().menu.visible = menu_open;
+    }
+    Ok(())
+}
+
+fn load_menu_tab(out: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(menu_tab_path(out)).ok()?;
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+}
+
+fn save_menu_tab(out: &Path, name: &str) -> Result<(), String> {
+    let path = menu_tab_path(out);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    std::fs::write(path, format!("# selected menu tab\n{name}\n")).map_err(|err| err.to_string())
 }
 
 fn drop_knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
@@ -1073,11 +1497,46 @@ fn drop_knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
         return None;
     }
     drop_row(
-        &knob.label,
+        &menu_label(name, &knob.label),
         ID_DROP + index as u32,
         knob.value,
         knob.choices,
     )
+}
+
+/// Panel text from `docs/lighting/GLOSSARY.md`. The knob name stays the config key.
+fn menu_label(name: &str, fallback: &str) -> String {
+    match name {
+        "lighting_preset" => "Preset",
+        "lighting_bounces" => "Bounce count",
+        "lighting_direct" => "Direct light",
+        "lighting_direct_refresh" => "Direct refresh frames",
+        "lighting_gi_refresh" => "GI refresh frames",
+        "lighting_budget_shift" => "Ray budget shift",
+        "lighting_lamp_pick" => "Lamp pick",
+        "lighting_lamp_pick_samples" => "Samples",
+        "lighting_lamp_pick_candidates" => "Candidates",
+        "lighting_probe_rays" => "Screen probe rays",
+        "lighting_probe_stale" => "Probe stale frames",
+        "lighting_probes" => "Screen probes",
+        "lighting_world_cache" => "Surface light cache",
+        "lighting_world_stale" => "Cache stale frames",
+        "lighting_denoise" => "Denoiser",
+        "lighting_denoise_iters" => "Denoiser iterations",
+        "lighting_denoise_variance" => "Denoiser variance",
+        "lighting_denoise_launch" => "Denoiser launch",
+        "lighting_denoise_adaptive" => "Adaptive denoise",
+        "lighting_sky" => "Sky light",
+        "lighting_prefill" => "Pre-fill",
+        "lighting_ambient" => "Ambient fill",
+        "lighting_shadow_filter" => "Shadow cell cache",
+        "lighting_gi" => "GI",
+        "lighting_emissive" => "Emissive",
+        "lighting_compose_reuse" => "Compose reuse",
+        "lighting_full_effort" => "Full effort",
+        _ => fallback,
+    }
+    .to_string()
 }
 
 fn fps_row(fps: &FpsCounterSettings) -> PanelRow {
@@ -1144,11 +1603,46 @@ fn select(
                 tools.set_view(mode);
             }
         }
+    } else if id == ID_MENU_WHEEL || id == ID_MENU_KEYS {
+        let name = ["hover", "modal", "click", "passive"]
+            .get(index)
+            .copied()
+            .unwrap_or("hover");
+        let key = if id == ID_MENU_WHEEL { "wheel" } else { "keys" };
+        app.scene().menu.set_key(key, name)?;
     } else if (ID_DROP..ID_DROP + DROP_KNOBS.len() as u32).contains(&id) {
         let name = DROP_KNOBS[(id - ID_DROP) as usize];
         app.set_knob(name, value)?;
     }
     Ok(())
+}
+
+fn menu_settings(app: &App) -> MenuSettings {
+    match &app.show {
+        Show::Stress(stage) => stage.world.scene.menu.clone(),
+        Show::Still(world) => world.scene.menu.clone(),
+    }
+}
+
+fn focus_index(policy: FocusPolicy) -> f64 {
+    match policy {
+        FocusPolicy::Hover => 0.0,
+        FocusPolicy::Modal => 1.0,
+        FocusPolicy::ClickToFocus => 2.0,
+        FocusPolicy::Passive => 3.0,
+    }
+}
+
+fn focus_row(label: &str, id: u32, policy: FocusPolicy) -> Option<PanelRow> {
+    drop_row(
+        label,
+        id,
+        focus_index(policy),
+        ["hover", "modal", "click", "passive"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 fn toggle(app: &mut App, id: u32, on: bool) -> Result<(), String> {
@@ -1242,10 +1736,12 @@ fn options() -> Result<Options, String> {
     let mut denoise_screen = None;
     let mut headless = false;
     let mut frames = None;
+    let mut ui = false;
     let mut out = PathBuf::from("genos-debug");
     let mut out_set = false;
     let mut size = (1280u32, 720u32);
     let mut check = false;
+    let mut mcp_port = None;
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
             println!("{USAGE}");
@@ -1277,6 +1773,7 @@ fn options() -> Result<Options, String> {
                         .map_err(|_| "bad --frames".to_string())?,
                 );
             }
+            "--ui" => ui = true,
             "--out" => {
                 out = PathBuf::from(need_arg(&mut args, "--out")?);
                 out_set = true;
@@ -1300,6 +1797,17 @@ fn options() -> Result<Options, String> {
                 let value = need_arg(&mut args, "--fps-hz")?;
                 parse_rate(&value).map_err(|err| format!("bad --fps-hz: {err}"))?;
             }
+            "--menu" => {
+                let value = if args.peek().is_some_and(|next| !next.starts_with('-')) {
+                    args.next().unwrap()
+                } else {
+                    return Err("--menu needs shown or hidden".into());
+                };
+                parse_menu_visible(&value).map_err(|err| format!("bad --menu: {err}"))?;
+            }
+            "--mcp-port" => {
+                mcp_port = Some(parse_mcp_port(&need_arg(&mut args, "--mcp-port")?)?);
+            }
             other => {
                 if let Some((flag, value)) = placed_flag(other) {
                     let parsed = parse_vec3(flag, value)?;
@@ -1312,6 +1820,10 @@ fn options() -> Result<Options, String> {
                     parse_enabled(value).map_err(|err| format!("bad --fps-counter: {err}"))?;
                 } else if let Some(value) = other.strip_prefix("--fps-hz=") {
                     parse_rate(value).map_err(|err| format!("bad --fps-hz: {err}"))?;
+                } else if let Some(value) = other.strip_prefix("--menu=") {
+                    parse_menu_visible(value).map_err(|err| format!("bad --menu: {err}"))?;
+                } else if let Some(value) = other.strip_prefix("--mcp-port=") {
+                    mcp_port = Some(parse_mcp_port(value)?);
                 } else if genos_scene::lighting_flag_needs_value(other).is_some() {
                     let needs = genos_scene::lighting_flag_needs_value(other).unwrap_or(false);
                     let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
@@ -1340,11 +1852,32 @@ fn options() -> Result<Options, String> {
         denoise_screen,
         headless,
         frames,
+        ui,
         out,
         out_set,
         size,
         check,
+        mcp_port,
     })
+}
+
+fn parse_mcp_port(value: &str) -> Result<u16, String> {
+    let port: u16 = value
+        .trim()
+        .parse()
+        .map_err(|_| format!("--mcp-port needs 1 to 65535, got {value}"))?;
+    if port == 0 {
+        return Err("--mcp-port needs 1 to 65535, got 0".into());
+    }
+    Ok(port)
+}
+
+/// `GENOS_MCP_PORT` when it is a port, otherwise this binary's default.
+fn mcp_port_from_env() -> u16 {
+    std::env::var("GENOS_MCP_PORT")
+        .ok()
+        .and_then(|text| parse_mcp_port(&text).ok())
+        .unwrap_or(MCP_PORT)
 }
 
 #[cfg(test)]
@@ -1402,10 +1935,12 @@ mod tests {
             denoise_screen: None,
             headless: true,
             frames: None,
+            ui: false,
             out: std::path::PathBuf::from("genos-debug"),
             out_set: false,
             size: (320, 180),
             check: false,
+            mcp_port: None,
         };
         let mut camera = genos_scene::Camera::opening();
         super::place_camera(&opts, &mut camera).unwrap();
@@ -1432,6 +1967,7 @@ mod tests {
 
     #[test]
     fn each_setting_uses_a_dropdown_a_slider_or_a_toggle() {
+        use genos_debug::Host;
         use genos_scene::Camera;
         use genos_ui::{button_panel, Pointer, State};
 
@@ -1452,8 +1988,8 @@ mod tests {
             "Scene",
             "Checkpoint",
             "View",
-            "Shadow filter",
-            "Ambient",
+            "Shadow cell cache",
+            "Ambient fill",
             "Lamp pick",
             "Surface cache blend",
         ] {
@@ -1483,31 +2019,57 @@ mod tests {
             .collect();
         for label in [
             "Preset",
-            "Bounces",
+            "Bounce count",
             "Max lights",
-            "Direct refresh",
+            "Direct refresh frames",
             "Direct scale",
-            "GI refresh",
-            "Budget shift",
+            "GI refresh frames",
+            "Ray budget shift",
             "Firefly sigma",
             "Ray budget",
             "Dormant rays",
-            "Probe rays",
-            "Probe stale",
-            "World stale",
-            "Denoise iterations",
-            "Denoise variance",
+            "Screen probe rays",
+            "Probe stale frames",
+            "Cache stale frames",
+            "Denoiser iterations",
+            "Denoiser variance",
         ] {
             assert!(sliders.contains(&label), "missing slider {label}");
         }
-        assert!(!sliders.contains(&"Shadow filter"));
-        assert!(!sliders.contains(&"Ambient"));
+        assert!(!sliders.contains(&"Shadow cell cache"));
+        assert!(!sliders.contains(&"Ambient fill"));
         let checks: Vec<&str> = rows
             .iter()
             .flat_map(|row| row.checks.iter().map(|check| check.text.as_str()))
             .collect();
-        for label in ["Direct", "Shadows", "GI", "Denoise", "Full effort", "Show"] {
+        for label in [
+            "Direct light",
+            "Shadows",
+            "GI",
+            "Denoiser",
+            "Screen probes",
+            "Surface light cache",
+            "Attach movers",
+            "Sky light",
+            "Pre-fill",
+            "Full effort",
+            "Show",
+        ] {
             assert!(checks.contains(&label), "missing toggle {label}");
+        }
+        let names: Vec<String> = app.knobs().into_iter().map(|knob| knob.name).collect();
+        for name in [
+            "lighting_bounces",
+            "lighting_direct",
+            "lighting_probes",
+            "lighting_world_cache",
+            "lighting_denoise",
+            "lighting_sky",
+            "lighting_prefill",
+            "lighting_ambient",
+            "lighting_shadow_filter",
+        ] {
+            assert!(names.iter().any(|knob| knob == name), "config name {name}");
         }
         assert!(checks.iter().all(|label| !sliders.contains(label)));
         assert!(sliders.contains(&"FPS"));
@@ -1532,7 +2094,7 @@ mod tests {
         assert!(names.contains(&"high"));
         let rays = rows
             .iter()
-            .find(|row| row.label == "Probe rays")
+            .find(|row| row.label == "Screen probe rays")
             .unwrap()
             .slider
             .as_ref()
@@ -1541,7 +2103,7 @@ mod tests {
         assert_eq!(rays.step, 4.0);
         let denoise = rows
             .iter()
-            .find(|row| row.label == "Denoise iterations")
+            .find(|row| row.label == "Denoiser iterations")
             .unwrap()
             .slider
             .as_ref()
@@ -1644,11 +2206,267 @@ mod tests {
     }
 
     #[test]
+    fn sections_group_every_control_and_the_fold_file_round_trips() {
+        let root = genos_scene_lib::repo_root();
+        let entries = genos_scene_lib::load_dir(&genos_scene_lib::scenes_dir()).expect("scenes");
+        let log = std::fs::File::create(std::env::temp_dir().join("genos-lighting-folds.log"))
+            .expect("log");
+        let app = super::App::open(entries, root, log).expect("app");
+        let fps = genos_scene::FpsCounterSettings::default();
+        let menu = super::load_menu_layout().expect("layout");
+        let blocks = super::panel_blocks(&app, ViewMode::Full, &fps, &menu);
+        let tabs = match &blocks[0] {
+            genos_ui::PanelBlock::Tabs(tabs) => tabs,
+            genos_ui::PanelBlock::Section(_) | genos_ui::PanelBlock::Rows(_) => {
+                panic!("the menu is one tab strip")
+            }
+        };
+        let titles: Vec<&str> = tabs.tabs.iter().map(|tab| tab.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Scene",
+                "Pipeline",
+                "Lamps",
+                "GI",
+                "Denoise",
+                "Shadows",
+                "Perf",
+                "Info"
+            ]
+        );
+        let scene = tabs
+            .tabs
+            .iter()
+            .find(|tab| tab.title == "Scene")
+            .unwrap();
+        assert!(matches!(scene.blocks[0], genos_ui::PanelBlock::Rows(_)));
+        let direct = tabs
+            .tabs
+            .iter()
+            .find(|tab| tab.title == "Lamps")
+            .unwrap();
+        assert!(direct.blocks.iter().any(|block| matches!(
+            block,
+            genos_ui::PanelBlock::Section(section)
+                if section.title == "Lamps"
+                    && !section.collapsed
+                    && section.rows.iter().any(|row| row.label == "Max lights")
+        )));
+        let gi = tabs.tabs.iter().find(|tab| tab.title == "GI").unwrap();
+        assert!(gi.blocks.iter().any(|block| matches!(
+            block,
+            genos_ui::PanelBlock::Section(section) if section.title == "Probes" && !section.collapsed
+        )));
+        assert!(gi.blocks.iter().any(|block| matches!(
+            block,
+            genos_ui::PanelBlock::Section(section)
+                if section.title == "World cache" && section.collapsed
+        )));
+        let info = tabs.tabs.iter().find(|tab| tab.title == "Info").unwrap();
+        assert!(matches!(
+            &info.blocks[0],
+            genos_ui::PanelBlock::Rows(rows) if rows[0].label == app.entry().review
+        ));
+        let flat = super::panel_rows(&app, ViewMode::Full, &fps);
+        assert!(flat.iter().any(|row| row.label == "Bounce count"));
+        assert!(flat.iter().any(|row| row.label == "Shadow cell cache"));
+        assert!(flat.iter().all(|row| !row.label.contains("hides.")));
+        let folds = super::menu_folds(&menu);
+        assert!(folds.iter().all(|fold| fold.key != "-"));
+        let mut ui = genos_ui::State::default();
+        for fold in &folds {
+            ui.fold_section(fold.id, fold.collapsed);
+        }
+        let dir = std::env::temp_dir().join(format!("genos-menu-{}", std::process::id()));
+        super::save_menu_folds(&dir, &ui, &folds).expect("save");
+        let names = super::load_menu_folds(&dir).expect("load");
+        assert!(names.iter().any(|name| name == "world"));
+        assert!(names.iter().all(|name| name != "direct" && name != "gi"));
+        super::save_menu_tab(&dir, "GI").expect("tab");
+        assert_eq!(super::load_menu_tab(&dir).as_deref(), Some("GI"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn help_lists_the_fps_counter() {
         assert!(super::USAGE.contains("--fps-counter"));
         assert!(super::USAGE.contains("--fps-hz"));
+        assert!(super::USAGE.contains("Grave"));
+        assert!(super::USAGE.contains("F1"));
+        assert!(super::USAGE.contains("F toggles"));
         assert!(super::USAGE.contains("F3"));
+        assert!(super::USAGE.contains("GENOS_DEBUG_KEYS"));
+        assert!(super::USAGE.contains("] and ["));
+        assert!(super::USAGE.contains("tab.txt"));
         assert!(super::USAGE.contains("GENOS_FPS_COUNTER"));
+        assert!(super::USAGE.contains("--menu"));
+        assert!(super::USAGE.contains("GENOS_MENU"));
+        assert!(super::USAGE.contains("get_menu_settings"));
+        assert!(super::USAGE.contains("--mcp-port"));
+        assert!(super::USAGE.contains("--ui"));
+        assert!(super::USAGE.contains("8766"));
+    }
+
+    #[test]
+    fn the_lighting_mcp_port_is_not_the_stress_port() {
+        assert_eq!(super::MCP_PORT, 8766);
+        assert_ne!(super::MCP_PORT, genos_mcp::PORT);
+        assert_eq!(super::parse_mcp_port("8770").unwrap(), 8770);
+        assert!(super::parse_mcp_port("0").is_err());
+        assert!(super::parse_mcp_port("nope").is_err());
+    }
+
+    #[test]
+    fn a_fold_sent_with_a_tab_survives_the_next_frame() {
+        use genos_debug::Host;
+        let root = genos_scene_lib::repo_root();
+        let entries = genos_scene_lib::load_dir(&genos_scene_lib::scenes_dir()).expect("scenes");
+        let log = std::fs::File::create(std::env::temp_dir().join("genos-lighting-fold-tab.log"))
+            .expect("log");
+        let mut app = super::App::open(entries, root, log).expect("app");
+        let fps = genos_scene::FpsCounterSettings::default();
+        let menu = super::load_menu_layout().expect("layout");
+        let folds = super::menu_folds(&menu);
+        let blocks = super::panel_blocks(&app, ViewMode::Full, &fps, &menu);
+        let mut ui = genos_ui::State::default();
+        ui.select_tab(super::strip_id(0), super::tab_id("Lamps"));
+        let _ = genos_ui::button_panel_blocks(
+            &mut ui,
+            "stress",
+            &blocks,
+            [1024.0, 832.0],
+            &genos_scene::Camera::opening(),
+            genos_ui::Pointer::default(),
+        );
+        assert!(ui.section_known(super::section_id("direct")));
+        assert!(!ui.section_collapsed(super::section_id("direct")));
+        let mut tracked_collapsed = super::merge_collapsed(&[], &ui, &folds);
+        let mut tracked_tab = "Lamps".to_string();
+        app.scene().menu.tab = "Lamps".into();
+        app.scene().menu.collapsed = tracked_collapsed.clone();
+        app.scene().menu.set_key("fold", "direct").expect("fold");
+        app.scene().menu.set_key("tab", "GI").expect("tab");
+        assert_eq!(app.scene().menu.collapsed, vec!["direct".to_string()]);
+        let mut menu_open = true;
+        let dir = std::env::temp_dir().join(format!("genos-fold-tab-{}", std::process::id()));
+        super::pull_menu(
+            &mut app,
+            &mut ui,
+            &folds,
+            &mut menu_open,
+            &mut tracked_collapsed,
+            &mut tracked_tab,
+        );
+        let _ = genos_ui::button_panel_blocks(
+            &mut ui,
+            "stress",
+            &blocks,
+            [1024.0, 832.0],
+            &genos_scene::Camera::opening(),
+            genos_ui::Pointer::default(),
+        );
+        super::push_menu(
+            &mut app,
+            &ui,
+            &folds,
+            &menu,
+            menu_open,
+            true,
+            &mut super::MenuWrite {
+                out: &dir,
+                collapsed: &mut tracked_collapsed,
+                tab: &mut tracked_tab,
+            },
+        )
+        .expect("push");
+        assert_eq!(app.scene().menu.tab, "GI");
+        assert!(
+            app.scene().menu.collapsed.iter().any(|name| name == "direct"),
+            "collapsed={:?}",
+            app.scene().menu.collapsed
+        );
+        let saved = super::load_menu_folds(&dir).expect("fold file");
+        assert!(
+            saved.iter().any(|name| name == "direct"),
+            "fold file={saved:?}"
+        );
+
+        // The lamps page left the section open, and the stored list already
+        // names it. Showing GI must not drop that fold.
+        ui.fold_section(super::section_id("direct"), false);
+        app.scene().menu.collapsed = vec!["direct".to_string()];
+        tracked_collapsed = vec!["direct".to_string()];
+        app.scene().menu.tab = "GI".into();
+        tracked_tab = "GI".into();
+        ui.select_tab(super::strip_id(0), super::tab_id("GI"));
+        let _ = genos_ui::button_panel_blocks(
+            &mut ui,
+            "stress",
+            &blocks,
+            [1024.0, 832.0],
+            &genos_scene::Camera::opening(),
+            genos_ui::Pointer::default(),
+        );
+        super::push_menu(
+            &mut app,
+            &ui,
+            &folds,
+            &menu,
+            menu_open,
+            true,
+            &mut super::MenuWrite {
+                out: &dir,
+                collapsed: &mut tracked_collapsed,
+                tab: &mut tracked_tab,
+            },
+        )
+        .expect("push again");
+        assert_eq!(app.scene().menu.tab, "GI");
+        assert_eq!(
+            app.scene().menu.collapsed,
+            vec!["direct".to_string()],
+            "a fold on another page was dropped"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unseen_fold_stays_in_the_collapsed_list() {
+        let mut ui = genos_ui::State::default();
+        ui.fold_section(1, true);
+        let folds = vec![
+            super::MenuFold {
+                id: 1,
+                key: "direct".into(),
+                collapsed: false,
+            },
+            super::MenuFold {
+                id: 2,
+                key: "world".into(),
+                collapsed: true,
+            },
+        ];
+        let merged = super::merge_collapsed(&["world".into(), "direct".into()], &ui, &folds);
+        assert_eq!(merged, vec!["world".to_string(), "direct".to_string()]);
+        ui.fold_section(1, false);
+        let still = super::merge_collapsed(&merged, &ui, &folds);
+        assert_eq!(
+            still,
+            vec!["world".to_string(), "direct".to_string()],
+            "an open fold stays until that section is on screen"
+        );
+        let section = genos_ui::PanelSection::new(1, "Lamps", false, vec![]);
+        let _ = genos_ui::button_panel_sections(
+            &mut ui,
+            "stress",
+            &[section],
+            [800.0, 600.0],
+            &genos_scene::Camera::opening(),
+            genos_ui::Pointer::default(),
+        );
+        let merged = super::merge_collapsed(&still, &ui, &folds);
+        assert_eq!(merged, vec!["world".to_string()]);
     }
 }
 
