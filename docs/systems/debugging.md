@@ -116,7 +116,11 @@ make lighting SCENE=sponza
 `--out` overrides it. The binary does not write those files under `$HOME`.
 
 Page Up and Page Down switch scenes. Keys 1–9 jump checkpoints. Home and 0 reset
-the camera to the active checkpoint. F3 toggles the frame-rate overlay.
+the camera to the active checkpoint. Grave hides the settings menu and grave shows
+it again. F1 is the same key. F toggles the frame-rate overlay. F3 is the same key.
+U toggles the unfilled count in the stress and camera programs. Shift-U toggles
+the tint. F8 and shift-F8 are the same keys. `GENOS_DEBUG_KEYS` is a text file
+that replaces any of those chords (`menu key_grave key_f1`).
 `list_scenes`, `load_scene`, `list_checkpoints`, and `jump_checkpoint` are on
 the same MCP catalogue. `load_scene` drops light and object edits and clears
 the lighting caches.
@@ -125,7 +129,7 @@ the lighting caches.
 
 `FpsCounterSettings` on the scene (`enabled`, `rate_hz`) is the public setting.
 It implements `EngineSettings`. The default is off, at 4 Hz. The debug menu row
-`FPS` has a checkbox and a hertz slider. Both call `set_key`. F3 toggles
+`FPS` has a checkbox and a hertz slider. Both call `set_key`. F, or F3, toggles
 `enabled`. `--fps-counter` (optional `on` or `off`; bare means on) and
 `--fps-hz N` win every frame. `GENOS_FPS_COUNTER` and `GENOS_FPS_HZ` apply only
 when that argument was omitted, and then a set variable wins every frame.
@@ -143,7 +147,7 @@ and logs still go to `./genos-debug/<kind>/` (`shots/`, `logs/`, `dumps/`).
 Failure modes: a stuck readout means the window is not closing (the rate is
 too low, or frame time is not advancing). A missing plate means `enabled` is
 off or the first window has not closed. The probes are the plate, the `FPS`
-menu row, F3, `--fps-counter` / `--fps-hz`, and `get_fps_counter` /
+menu row, F or F3, `--fps-counter` / `--fps-hz`, and `get_fps_counter` /
 `set_fps_counter`.
 
 - Replicated state: the settings struct. The averaged numbers stay on the client that draws.

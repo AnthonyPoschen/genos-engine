@@ -48,6 +48,8 @@ Windows, macOS, and X11 device reads are not in this crate yet. The behavior sou
 
 The action map does not load a player-authored JSON file at runtime yet. `to_json` and the parser exist for the map shape.
 
+`KeyBindings` names the debug keys. `builtin` is grave or F1 for the menu, F or F3 for the frame-rate plate, U or F8 for the unfilled count, and shift-U or shift-F8 for the tint. The first key is the one a board without function keys uses. `apply_text` replaces chords from `action key [key...]` lines. `+key_u` means shift. `debug_keys` reads `GENOS_DEBUG_KEYS` when that path is set, then those lines win. A game calls `pressed` with the action name. It does not test `key_f1` itself.
+
 ## Decisions
 
 - [ADR 0001](../adr/0001-rust-port-of-input-zig.md) keeps the pull model, the codes, and the action maps.

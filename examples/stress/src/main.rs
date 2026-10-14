@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use genos_debug::{png, Host};
-use genos_input::{character_controller, InputCode, InputSystem};
+use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenLine, ScreenRect};
 use genos_scene::{
     look_direction, update, Actions, Camera, DebugSettings, LightingPreset, LightingSettings,
@@ -68,6 +68,8 @@ const USAGE: &str = "genos-stress [options]
   --frames N                quit after N frames; frames step 1/60 s of scene time
   --fixed-dt SECONDS        scene step per frame (wall clock otherwise; 1/60 with --step)
   --step                    pause; Space or the MCP step command advances one fixed step
+                            U toggles the unfilled count. Shift-U toggles the tint.
+                            F8 and shift-F8 are the same keys. GENOS_DEBUG_KEYS replaces them.
   --shot PATH               settle the light on the last frame and write a PNG
   --no-panel                hide the panel
   --bench SECONDS           sweep and print tables; per configuration seconds
@@ -814,6 +816,7 @@ fn run() -> Result<(), String> {
     let mut focus = FocusGate::default();
     let mut ui = State::default();
     let mut input = InputSystem::new();
+    let keys = debug_keys()?;
     let controls = character_controller();
     let mut drawn = 0u32;
     let mut clock: Option<Instant> = None;
@@ -862,19 +865,15 @@ fn run() -> Result<(), String> {
         input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
         input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
         input.poll_gamepads();
-        if input.keyboard.pressed(InputCode::key_f8) {
-            let shift = input.keyboard.down(InputCode::key_shift_left)
-                || input.keyboard.down(InputCode::key_shift_right);
-            if shift {
-                stage.unfilled_tint = !stage.unfilled_tint;
-                if stage.unfilled_tint {
-                    stage.unfilled_count = true;
-                }
-            } else {
-                stage.unfilled_count = !stage.unfilled_count;
-                if !stage.unfilled_count {
-                    stage.unfilled_tint = false;
-                }
+        if keys.pressed(&input, "unfilled_tint") {
+            stage.unfilled_tint = !stage.unfilled_tint;
+            if stage.unfilled_tint {
+                stage.unfilled_count = true;
+            }
+        } else if keys.pressed(&input, "unfilled") {
+            stage.unfilled_count = !stage.unfilled_count;
+            if !stage.unfilled_count {
+                stage.unfilled_tint = false;
             }
         }
         let move_axis = controls.axis_2d(&input, "move");
@@ -967,7 +966,7 @@ fn run() -> Result<(), String> {
         unfilled.tint = stage.unfilled_tint;
         renderer.set_unfilled(unfilled);
         let applied = renderer.unfilled();
-        if input.keyboard.pressed(InputCode::key_f8) {
+        if keys.pressed(&input, "unfilled") || keys.pressed(&input, "unfilled_tint") {
             eprintln!("unfilled count {} tint {}", applied.count, applied.tint);
         }
         stage.unfilled_count = applied.count;

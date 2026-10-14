@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use genos_debug::{png, CheckpointPose, Host, Knob};
-use genos_input::{character_controller, InputCode, InputSystem};
+use genos_input::{character_controller, debug_keys, InputCode, InputSystem, KeyBindings};
 use genos_render::{identity_pose, DrawKind, FixedPart, Renderer, ScreenRect, ViewMode, World};
 use genos_scene::{
     look_direction, parse_enabled, parse_rate, update, Actions, Camera, DebugSettings, Floor,
@@ -58,14 +58,14 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
 Page Up and Page Down switch scenes. Keys 1-9 jump checkpoints. Home and 0 reset
 to the active checkpoint. Arrow keys and the wheel step the slider under the
 pointer, or move the highlight in an open dropdown. Enter picks the highlighted
-choice. Escape closes the list. F1 hides the menu. F1 again shows it. F3 toggles
-the frame-rate plate. A section title
+choice. Escape closes the list. Grave hides the menu. Grave again shows it.
+F1 is the same key. F toggles the frame-rate plate. F3 is the same key. A section title
 folds that group. The fold is remembered in <out>/menu/collapsed.txt. The panel
 stays within a third of the window. The scene description is the Info section.
 WASD fly, Space
 up, C or Ctrl down, Shift is faster. The plate shows FPS and frame ms, averaged
-over each 1/rate window (default 4 Hz). It is off until the checkbox, F3, MCP,
-or --fps-counter turns it on.
+over each 1/rate window (default 4 Hz). It is off until the checkbox, F or F3, MCP,
+or --fps-counter turns it on. GENOS_DEBUG_KEYS replaces those keys.
 
 Screenshots go to <out>/shots, the log to <out>/logs, lighting dumps to <out>/dumps.
 The binary does not write under $HOME.
@@ -274,6 +274,7 @@ fn run() -> Result<(), String> {
     }
     let mut input = InputSystem::new();
     let controls = character_controller();
+    let keys = debug_keys()?;
     let mut menu_open = true;
     let mut drawn = 0u32;
     let mut clock: Option<Instant> = None;
@@ -306,6 +307,7 @@ fn run() -> Result<(), String> {
         hotkeys(
             &mut app,
             &input,
+            &keys,
             &mut camera,
             &mut tools,
             &mut renderer,
@@ -852,12 +854,13 @@ fn jump_camera(app: &mut App, name: Option<&str>, camera: &mut Camera) -> Result
 fn hotkeys(
     app: &mut App,
     input: &InputSystem,
+    keys: &KeyBindings,
     camera: &mut Camera,
     tools: &mut genos_debug::Tools,
     renderer: &mut Renderer,
     menu_open: &mut bool,
 ) -> Result<(), String> {
-    if input.keyboard.pressed(InputCode::key_f1) {
+    if keys.pressed(input, "menu") {
         *menu_open = !*menu_open;
     }
     let n = app.entries.len();
@@ -867,7 +870,7 @@ fn hotkeys(
         let index = if app.index == 0 { n - 1 } else { app.index - 1 };
         switch_to(app, index, None, camera, tools, renderer)?;
     }
-    let keys = [
+    let digits = [
         InputCode::key_1,
         InputCode::key_2,
         InputCode::key_3,
@@ -878,7 +881,7 @@ fn hotkeys(
         InputCode::key_8,
         InputCode::key_9,
     ];
-    for (i, code) in keys.iter().enumerate() {
+    for (i, code) in digits.iter().enumerate() {
         if input.keyboard.pressed(*code) {
             if let Some(name) = app.entry().checkpoints.get(i).map(|c| c.name.clone()) {
                 let pose = app.jump_checkpoint(&name)?;
@@ -890,7 +893,7 @@ fn hotkeys(
             }
         }
     }
-    if input.keyboard.pressed(InputCode::key_f3) {
+    if keys.pressed(input, "fps") {
         let on = app.scene().fps_counter.effective().enabled;
         let _ = app
             .scene()
@@ -1913,8 +1916,11 @@ mod tests {
     fn help_lists_the_fps_counter() {
         assert!(super::USAGE.contains("--fps-counter"));
         assert!(super::USAGE.contains("--fps-hz"));
+        assert!(super::USAGE.contains("Grave"));
         assert!(super::USAGE.contains("F1"));
+        assert!(super::USAGE.contains("F toggles"));
         assert!(super::USAGE.contains("F3"));
+        assert!(super::USAGE.contains("GENOS_DEBUG_KEYS"));
         assert!(super::USAGE.contains("GENOS_FPS_COUNTER"));
     }
 }
