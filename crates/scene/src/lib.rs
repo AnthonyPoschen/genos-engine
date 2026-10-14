@@ -21,11 +21,11 @@ pub use debug_settings::DebugSettings;
 pub use fps_counter::{parse_enabled, parse_rate, FpsCli, FpsCounterSettings};
 pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use lighting::{
-    check_lighting_arg, lighting_arg_time_of_day, lighting_flag_needs_value, AmbientMode,
-    AmbientSettings, BounceSettings, DenoiserSettings, DirectSettings, GiSettings, GpuBuckets,
-    LampPickMode, LampPickSettings, LightingPreset, LightingSettings, ProbeSettings, ShadowFilter,
-    ShadowSettings, SurfaceCacheBlend, SurfaceCacheSettings, WorldCacheSettings,
-    LIGHTING_BOUNCES_UNLIMITED,
+    check_lighting_arg, lighting_arg_time_of_day, lighting_env, lighting_env_flag, lighting_env_os,
+    lighting_flag_needs_value, AmbientMode, AmbientSettings, BounceSettings, DenoiserSettings,
+    DirectSettings, GiSettings, GpuBuckets, LampPickMode, LampPickSettings, LightingPreset,
+    LightingSettings, ProbeSettings, ShadowFilter, ShadowSettings, SurfaceCacheBlend,
+    SurfaceCacheSettings, WorldCacheSettings, LIGHTING_BOUNCES_UNLIMITED,
 };
 pub use script::{load_path, load_str};
 pub use settings::EngineSettings;

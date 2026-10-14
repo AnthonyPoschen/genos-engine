@@ -219,7 +219,7 @@ The lighting has one name scheme, `lighting`, everywhere; "GI v2" survives only 
 | Renderer API | `lighting_still_frames`, `lighting_probe_samples`, `settle_stats`, `picture_settled` | `gi_v2_*`, `tier_stats` |
 | Log lines | `LIGHTING_MS`, `lightingsc` (surface cache trace), `lighting:` | `GI2_MS`, `gi2sc`, `gi2:` |
 | Test | `crates/render/tests/lighting_frame.rs` | `gi2_frame.rs` |
-| Env | `GENOS_LIGHTING_*` | `GENOS_GI2_*`; `GENOS_LIGHTING_DEBUG` was `GENOS_GI_DEBUG` |
+| Env | `GENOS_LIGHTING_*` | `GENOS_GI2_*` (deprecated aliases, one warning per name for one release); `GENOS_LIGHTING_DEBUG` also accepts `GENOS_GI_DEBUG` |
 
 `gi-check` keeps its name (it is the tool), as does `GENOS_GI_CHECK_BOUNCES`.
 

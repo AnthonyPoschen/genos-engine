@@ -2202,7 +2202,7 @@ impl Gpu {
         let period = f64::from(self.timestamp_period);
         let antialias = self.antialias;
         // The print below borrows `gpu_times`. Read the diag counters first.
-        let lamp_pick_line = if std::env::var_os("GENOS_LIGHTING_LAMP_PICK_DIAG").is_some()
+        let lamp_pick_line = if genos_scene::lighting_env_os("GENOS_LIGHTING_LAMP_PICK_DIAG").is_some()
             && self
                 .gpu_times
                 .as_ref()
