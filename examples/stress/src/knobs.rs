@@ -4,6 +4,7 @@
 use genos_debug::{Host, Knob};
 use genos_scene::{
     AmbientMode, LampPickMode, LightingPreset, LightingSettings, Scene, ShadowFilter,
+    SurfaceCacheBlend,
 };
 
 use crate::building::{self, Layout};
@@ -274,9 +275,23 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             "",
         ),
         Knob::switch(
-            "lighting_gi_attach_movers",
+            "lighting_surface_cache_attach_movers",
             "Attach movers",
-            lighting.gi.attach_movers,
+            lighting.surface_cache.attach_movers,
+        ),
+        Knob::choice(
+            "lighting_surface_cache_blend",
+            "Surface cache blend",
+            usize::from(lighting.surface_cache.blend == SurfaceCacheBlend::Hold),
+            &["msme", "hold"],
+        ),
+        Knob::number(
+            "lighting_surface_cache_firefly_sigma",
+            "Firefly sigma",
+            lighting.surface_cache.firefly_sigma as f64,
+            (0.0, 32.0),
+            0.5,
+            " σ",
         ),
         Knob::switch("lighting_probes", "Probes", lighting.probes.enabled),
         Knob::number(
@@ -453,7 +468,12 @@ pub fn apply_lighting_knob(
         "lighting_gi" => ("gi", on_off(v)),
         "lighting_gi_refresh" => ("gi_refresh", whole.max(1).to_string()),
         "lighting_budget_shift" => ("budget_shift", whole.to_string()),
-        "lighting_gi_attach_movers" => ("gi_attach_movers", on_off(v)),
+        "lighting_surface_cache_attach_movers" => ("surface_cache.attach_movers", on_off(v)),
+        "lighting_surface_cache_blend" => (
+            "surface_cache.blend",
+            if v >= 0.5 { "hold" } else { "msme" }.to_string(),
+        ),
+        "lighting_surface_cache_firefly_sigma" => ("surface_cache.firefly_sigma", format!("{v}")),
         "lighting_probes" => ("probes", on_off(v)),
         "lighting_probe_rays" => ("probe_rays", whole.to_string()),
         "lighting_probe_stale" => ("probe_stale", whole.max(1).to_string()),
@@ -532,7 +552,9 @@ mod tests {
         "lighting_gi",
         "lighting_gi_refresh",
         "lighting_budget_shift",
-        "lighting_gi_attach_movers",
+        "lighting_surface_cache_attach_movers",
+        "lighting_surface_cache_blend",
+        "lighting_surface_cache_firefly_sigma",
         "lighting_probes",
         "lighting_probe_rays",
         "lighting_probe_stale",

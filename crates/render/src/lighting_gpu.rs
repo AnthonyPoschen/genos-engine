@@ -1928,7 +1928,22 @@ impl Gpu {
         // S78S debug isolate toggles (lighting_toggles): direct only rides on
         // flag 2097152 (no cache light at hits), the rest in head 3.w bits 12-15.
         let toggles = lighting_toggles();
-        let flags_all = lighting_sc_flags_env() | if toggles & LIGHTING_TOGGLE_DIRECT_ONLY != 0 { 2097152 } else { 0 };
+        // Bit 20 is the estimator. Bit 30 selects the older hold path.
+        // `surface_cache.blend` forces both, so GENOS_LIGHTING_SC_FLAGS cannot
+        // override them.
+        const GI_ESTIMATOR: u32 = 1 << 20;
+        const SURFACE_CACHE_HOLD: u32 = 1 << 30;
+        let mut flags_all = lighting_sc_flags_env()
+            | if toggles & LIGHTING_TOGGLE_DIRECT_ONLY != 0 {
+                2097152
+            } else {
+                0
+            };
+        flags_all |= GI_ESTIMATOR;
+        match self.lighting.settings.surface_cache.blend {
+            genos_scene::SurfaceCacheBlend::Msme => flags_all &= !SURFACE_CACHE_HOLD,
+            genos_scene::SurfaceCacheBlend::Hold => flags_all |= SURFACE_CACHE_HOLD,
+        }
         let flags = flags_all & ((1 << 23) - 1);
         block[2] = ((self.lighting.probe_runs & 1) + 2 * flags) as f32;
         block[3] = (world * 1000 + cap) as f32;
@@ -1971,11 +1986,12 @@ impl Gpu {
             block[3] += (n * 200000) as f32;
             sent += 4 * n;
             if lighting_debug_on() {
-                eprintln!("lighting world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(self.lighting.settings.gi.attach_movers), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
+                eprintln!("lighting world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(self.lighting.settings.surface_cache.attach_movers), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
             }
-            // Object-local texels for movers (GIBS §1.5). The public knob is
-            // gi_attach_movers. Static texels stay on the world lattice.
-            if self.lighting.settings.gi.attach_movers {
+            // Object-local cache entries for movers (GIBS §1.5). The public
+            // knob is surface_cache.attach_movers. Static geometry stays on
+            // the world lattice.
+            if self.lighting.settings.surface_cache.attach_movers {
                 block[3] += 100000.0;
             }
         }
@@ -2049,6 +2065,17 @@ impl Gpu {
                         lighting_atrous_ppm_at() * 4,
                         4,
                         &atrous_ppm as *const u32 as *const c_void,
+                    );
+                    // MSME firefly sigma (MultiscaleMeanEstimator.hlsl, default 8).
+                    // Word 13 of the dispatch args. A zero word is sigma 0, which
+                    // tightens the clamp, so this is written every full-cache frame.
+                    let firefly_sigma = self.lighting.settings.surface_cache.firefly_sigma.to_bits();
+                    (self.fns.cmd_update_buffer)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        (LIGHTING_ARGS_AT + 13) * 4,
+                        4,
+                        &firefly_sigma as *const u32 as *const c_void,
                     );
                 }
                 self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);

@@ -1092,9 +1092,9 @@ uint lighting_movers_count() {
 vec4 lighting_mover(uint m, uint k) {
     return work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + lighting_movers_first() + LIGHTING_MOVER_VEC4 * m + k];
 }
-// Object-local texels (GIBS 2021 §1.5: a surfel stores a transform id and an
-// object-relative position). Movers only; static geometry stays world-lattice
-// (ADR 0012). The bit is gi_attach_movers, head w / 100000.
+// Object-local cache entries (GIBS 2021 §1.5: a surfel stores a transform id
+// and an object-relative position). Movers only; static geometry stays
+// world-lattice (ADR 0012). The bit is surface_cache.attach_movers, head w / 100000.
 bool lighting_sc_local_on() {
     return lighting_world_mode() == 3u && ((uint(work.v[lighting_change_at()].w) / 100000u) & 1u) != 0u;
 }
@@ -2189,6 +2189,12 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
 // to the entry (lighting_dense_entry). Nothing past the live entries is dispatched.
 bool lighting_wrc_scout_due();
 const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
+// Surface-cache firefly clamp (`surface_cache.firefly_sigma`). Barré-Brisebois
+// et al., MultiscaleMeanEstimator.hlsl, uses 8. The clamp is biased. 0 keeps
+// the listing's 0.1 floor and still clamps. The hold path does not read this.
+float lighting_sc_firefly_sigma() {
+    return uintBitsToFloat(ckeys.key[LIGHTING_ARGS_AT + 13u]);
+}
 // S72J region refinement (Anthony: uniform within a region, no sharp islands in
 // blotchy surroundings; Lumen refines surface cache pages). A page is 8 x 8
 // texels of one size on one plane (axis, plane offset); a hashed table of

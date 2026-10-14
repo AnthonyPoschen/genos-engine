@@ -31,7 +31,14 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          then stress
   --checkpoint NAME      jump here at launch
   --preset NAME          potato, low, medium, or high. Sets GENOS_LIGHTING_PRESET
-  --gi-attach-movers on|off  mover texels follow the object (GENOS_LIGHTING_GI_ATTACH_MOVERS)
+  --surface-cache-attach-movers on|off
+                         mover cache entries follow the object
+                         (GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS)
+  --surface-cache-blend msme|hold
+                         published blend (GENOS_LIGHTING_SURFACE_CACHE_BLEND)
+  --surface-cache-firefly-sigma F
+                         MSME firefly clamp, default 8, biased
+                         (GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA)
   --gpu-times N          print GPU_MS every N frames (GENOS_GPU_TIMES)
   --lighting-debug       print the lighting probe line (GENOS_LIGHTING_DEBUG)
   --unfilled             show the texels view (slots with fewer than 4 sets are dim)
@@ -86,6 +93,7 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_lamp_pick_history",
     "lighting_gi_refresh",
     "lighting_budget_shift",
+    "lighting_surface_cache_firefly_sigma",
     "lighting_probe_rays",
     "lighting_probe_stale",
     "lighting_world_stale",
@@ -99,6 +107,7 @@ const DROP_KNOBS: &[&str] = &[
     "lighting_shadow_filter",
     "lighting_ambient",
     "lighting_lamp_pick",
+    "lighting_surface_cache_blend",
 ];
 const VIEWS: [&str; 7] = [
     "full", "direct", "bounce", "albedo", "normal", "depth", "texels",
@@ -1290,6 +1299,7 @@ mod tests {
             "Shadow filter",
             "Ambient",
             "Lamp pick",
+            "Surface cache blend",
         ] {
             assert!(dropdowns.contains(&label), "missing dropdown {label}");
         }
@@ -1323,6 +1333,7 @@ mod tests {
             "Direct scale",
             "GI refresh",
             "Budget shift",
+            "Firefly sigma",
             "Probe rays",
             "Probe stale",
             "World stale",

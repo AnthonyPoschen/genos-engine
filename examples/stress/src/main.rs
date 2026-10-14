@@ -100,9 +100,19 @@ const USAGE: &str = "genos-stress [options]
   --trace                   capture the picture after every script command that changes it
   --preset NAME             potato, day-cycle, gi-1bounce, low, medium, high
                             (GENOS_LIGHTING_PRESET is the mirror)
-  --gi-attach-movers on|off store mover cache entries in the object's frame
-                            (GENOS_LIGHTING_GI_ATTACH_MOVERS; GENOS_LIGHTING_SC_LOCAL
-                            is the previous mirror, used only when this is omitted)
+  --surface-cache-attach-movers on|off
+                            store mover cache entries in the object's frame
+                            (GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS;
+                            GENOS_LIGHTING_SC_LOCAL is the previous mirror,
+                            used only when this is omitted)
+  --surface-cache-blend msme|hold
+                            published blend (GENOS_LIGHTING_SURFACE_CACHE_BLEND).
+                            msme is MultiscaleMeanEstimator.hlsl; hold is the
+                            older snap path
+  --surface-cache-firefly-sigma F
+                            MSME firefly clamp in sigmas, default 8, biased
+                            (GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA).
+                            0 keeps the 0.1 floor
   --bounces 0|1|2|unlimited bounce count (GENOS_LIGHTING_BOUNCES)
   --ambient MODE            off, constant, hemisphere, day, or curve
                             (GENOS_LIGHTING_AMBIENT)

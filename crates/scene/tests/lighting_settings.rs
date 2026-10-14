@@ -2,7 +2,7 @@
 
 use genos_scene::{
     load_str, AmbientMode, EngineSettings, LampPickMode, LightingPreset, LightingSettings,
-    LIGHTING_BOUNCES_UNLIMITED,
+    SurfaceCacheBlend, LIGHTING_BOUNCES_UNLIMITED,
 };
 
 fn room() -> &'static str {
@@ -16,17 +16,47 @@ fn room() -> &'static str {
 }
 
 #[test]
-fn gi_attach_movers_round_trips() {
+fn surface_cache_attach_movers_round_trips() {
     let mut settings = LightingSettings::default();
-    assert!(settings.gi.attach_movers);
-    settings.set_key("gi_attach_movers", "off").unwrap();
-    assert!(!settings.gi.attach_movers);
+    assert!(settings.surface_cache.attach_movers);
+    settings
+        .set_key("surface_cache.attach_movers", "off")
+        .unwrap();
+    assert!(!settings.surface_cache.attach_movers);
     let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
-    assert!(!parsed.gi.attach_movers);
+    assert!(!parsed.surface_cache.attach_movers);
     assert_eq!(parsed.preset_label(), "custom");
-    settings.set_key("gi_attach_movers", "on").unwrap();
-    assert!(settings.gi.attach_movers);
-    assert!(settings.set_key("gi_attach_movers", "maybe").is_err());
+    settings
+        .set_key("surface_cache.attach_movers", "on")
+        .unwrap();
+    assert!(settings.surface_cache.attach_movers);
+    assert!(settings
+        .set_key("surface_cache.attach_movers", "maybe")
+        .is_err());
+}
+
+#[test]
+fn surface_cache_blend_and_firefly_sigma_round_trip() {
+    let mut settings = LightingSettings::default();
+    assert_eq!(settings.surface_cache.blend, SurfaceCacheBlend::Msme);
+    assert!((settings.surface_cache.firefly_sigma - 8.0).abs() < 1.0e-6);
+    settings.set_key("surface_cache.blend", "hold").unwrap();
+    settings
+        .set_key("surface_cache.firefly_sigma", "0")
+        .unwrap();
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert_eq!(parsed.surface_cache.blend, SurfaceCacheBlend::Hold);
+    assert_eq!(parsed.surface_cache.firefly_sigma, 0.0);
+    assert_eq!(parsed.preset_label(), "custom");
+    assert!(settings.set_key("surface_cache.blend", "snap").is_err());
+    assert!(settings
+        .set_key("surface_cache.firefly_sigma", "-2")
+        .is_err());
+    settings.set_key("surface_cache.blend", "msme").unwrap();
+    settings
+        .set_key("surface_cache.firefly_sigma", "8")
+        .unwrap();
+    assert_eq!(settings.preset_label(), "high");
 }
 
 #[test]
