@@ -90,3 +90,24 @@ does not open a window.
 Picture error is mean absolute channel error, blurred relative luminance, and
 the in-tree FLIP (the same departures as `genos-lighting-ref`, not NVIDIA's
 `flip` tool).
+
+## A/B verdict
+
+`scripts/verdict/ab-verdict.py BASE HEAD` builds both commits when `--live`
+is set, runs the scene and checkpoint catalog, and compares each view with
+the noise floor. Frame time uses `head - base`. A delta at or under the
+spread passes. A delta under twice the spread (`noise_multiple` in
+`crates/lighting-ref/lighting-ref.conf`) is `UNSURE`. Past that is `FAIL`.
+Picture mean absolute error, FLIP, and blurred relative luminance use the
+same rule against their spreads. `PASS` means no view is slower beyond the
+noise and the pictures match.
+
+Stdout is the overall line. `scenes.csv` is one verdict per scene.
+`views.csv` is one verdict per checkpoint. `--fixture` scores a saved
+`views.csv` and `spread.json` and does not build.
+
+```sh
+python3 scripts/verdict/ab-verdict.py gi-v2 HEAD \
+  --noise-floor genos-debug/verdict/noise-floor/<sha>/spread.json \
+  --display wayland-1 --live
+```
