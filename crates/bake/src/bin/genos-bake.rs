@@ -1,7 +1,7 @@
 #![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
 #![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 
-//! Build the GI v2 import data (mesh SDFs and cards) for glTF files ahead of time.
+//! Build the GI import data (mesh SDFs and cards) for glTF files ahead of time.
 //!
 //! `genos-bake [--out DIR] [--texel METRES] [--voxels-per-side N] [--force] FILE.gltf|FILE.glb ...`
 //!

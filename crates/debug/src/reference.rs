@@ -992,7 +992,7 @@ mod tests {
         }
     }
 
-    /// The triangle form of the scene (GI v2 phase 1) traces the same picture as the
+    /// The triangle form of the scene (GI phase 1) traces the same picture as the
     /// analytic shapes, within the trace's own noise.
     #[test]
     fn triangles_match_the_analytic_reference() {

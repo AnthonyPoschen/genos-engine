@@ -26,9 +26,8 @@ Each record uses these headings:
 - [Scene](scene.md) owns the camera, the scripted layout, the coordinate frame, and the agent endpoint.
 - [Renderer](renderer.md) owns the Vulkan draw, the world, and culling.
 - [UI](ui.md) owns layout, pointer hits, and the lighting panel.
-- [Lighting](lighting/README.md): how GI v2 lights the picture (direct, shadows, GI, references, checks), each component against Lumen and the papers. Its debug tooling is the reference standard, inventoried in [the debug standard](lighting/debug-standard.md). The path-trace picture check is [the reference check](lighting/reference-check.md).
-- [Lighting v1](lighting-v1.md): historical. The radiance cascades path (GI v1), removed on 2026-10-12.
-- [GI v2 design](gi-v2-design.md) is the proposed next lighting architecture: meshes, two tracers, a surface cache and screen probes.
+- [Lighting](lighting/README.md): how GI lights the picture (direct, shadows, GI, references, checks), each component against Lumen and the papers. Its debug tooling is the reference standard, inventoried in [the debug standard](lighting/debug-standard.md). The path-trace picture check is [the reference check](lighting/reference-check.md).
+- [GI design](gi-design.md): meshes, two tracers, a surface cache and screen probes ([ADR 0012](../adr/0012-gi.md)).
 - [Bake](bake.md) owns the import-time GI data per mesh: sparse SDFs, surface cache cards and their cache.
 - [Loading](loading.md) owns images, textures, texture maps, meshes, animations, PCM samples, and fonts.
 - [Audio](audio.md) owns playback, Doppler, stereo image, and direct-path transmission.

@@ -1,5 +1,5 @@
 #version 450
-// GI v2 screen probes, pass 4: each probe's kept rays binned by direction into the
+// GI screen probes, pass 4: each probe's kept rays binned by direction into the
 // cells of its pattern as it stands now (lighting_common.glsl "cells"): per cell the mean
 // light and hit distance, which the spatial filter (lighting_filter.comp) compares
 // across neighbours and turns into SH.

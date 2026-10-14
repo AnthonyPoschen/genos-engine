@@ -2,11 +2,11 @@
 
 Written 2026-10-12 against `gi-v2` at `e61b89d`. This is a plan. It does not change the renderer. A later commit edits [Renderer](../renderer.md) in the same change that changes a game use or a limit.
 
-**Goal.** Materials, shadows, particles, post, terrain, foliage, water, sky, decals, and culling land on the draw that already exists, and each one feeds GI v2 and frame reuse.
+**Goal.** Materials, shadows, particles, post, terrain, foliage, water, sky, decals, and culling land on the draw that already exists, and each one feeds GI and frame reuse.
 
 **Architecture.** The G-buffer, the traced shadows, the surface-cache texels, the shape pool, the particle cards, FXAA, and the display curve stay. A new pass is a compute or a raster that runs only when its inputs changed, writes GPU memory, and does not read it back in the frame. New surfaces claim the same world texels a mesh claims. They do not grow a second light cache.
 
-**Bindings.** [ADR 0003](../../adr/0003-one-vulkan-renderer-moltenvk-on-macos.md) is one Vulkan renderer. [ADR 0007](../../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps a third-party crate off that renderer. [ADR 0012](../../adr/0012-gi-v2.md) and [GI v2 design](../gi-v2-design.md) are the lighting design. The non-goals there include mesh shaders and Nanite-style virtual geometry. [PR #5](https://github.com/AnthonyPoschen/genos-engine/pull/5) (`docs/frame-reuse.md` on `cursor/frame-output-reuse-6556`, not merged) is the frame-reuse design. The asset cook is [the asset plan](../assets/plan.md). This plan consumes its meshlets, pages, and chunks. It does not cook them.
+**Bindings.** [ADR 0003](../../adr/0003-one-vulkan-renderer-moltenvk-on-macos.md) is one Vulkan renderer. [ADR 0007](../../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps a third-party crate off that renderer. [ADR 0012](../../adr/0012-gi.md) and [GI design](../gi-design.md) are the lighting design. The non-goals there include mesh shaders and Nanite-style virtual geometry. [PR #5](https://github.com/AnthonyPoschen/genos-engine/pull/5) (`docs/frame-reuse.md` on `cursor/frame-output-reuse-6556`, not merged) is the frame-reuse design. The asset cook is [the asset plan](../assets/plan.md). This plan consumes its meshlets, pages, and chunks. It does not cook them.
 
 ## What was searched
 
@@ -66,14 +66,14 @@ The branch list is in the asset plan. For this plan the extra findings are:
 | Water | missing | |
 | Atmosphere and weather | missing | The sky is one radiance in every direction, including below the horizon (`scene/src/types.rs`). No sun disc, no aerial perspective. The stress sky colour follows the sun in `building.rs`. That is a game-side colour, not a scattering model. |
 | Decals | missing | |
-| Mesh LOD | missing | Designed as up to 4 LODs in `gi-v2-design.md`. The cook plan builds the clusters. The draw does not select them. |
+| Mesh LOD | missing | Designed as up to 4 LODs in `gi-design.md`. The cook plan builds the clusters. The draw does not select them. |
 | GPU occlusion culling of draws | missing | Frustum cull is on the CPU. |
 
 ## Architecture
 
 ### Materials
 
-The raster samples `baseColorTexture`, the metallic-roughness texture, and the normal texture into the G-buffer. Albedo in the G-buffer becomes the texture's diffuse albedo (base colour times one minus metallic), which is what `BakeMesh::surface` already computes on the CPU. Metallic and roughness go in a new G-buffer channel when a specular step exists. Until then they are stored and the lighting BRDF stays the Lambert term in `lighting_compose.comp` (`LAMBERT`). That matches the GI v2 non-goal: specular and mirrors wait, and roughness and metallic are stored so they can come later.
+The raster samples `baseColorTexture`, the metallic-roughness texture, and the normal texture into the G-buffer. Albedo in the G-buffer becomes the texture's diffuse albedo (base colour times one minus metallic), which is what `BakeMesh::surface` already computes on the CPU. Metallic and roughness go in a new G-buffer channel when a specular step exists. Until then they are stored and the lighting BRDF stays the Lambert term in `lighting_compose.comp` (`LAMBERT`). That matches the GI non-goal: specular and mirrors wait, and roughness and metallic are stored so they can come later.
 
 **Deviation.** glTF PBR is the Khronos metallic-roughness model ([glTF 2.0](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html)). The picture stays Lambert until a specular commit. The support note for the specular extensions stays `loaded, unsupported` in the asset plan.
 
@@ -83,7 +83,7 @@ A material file is not a new language. The glTF material and the text `Material`
 
 ### Shadows
 
-Lamps and the sun that hit a G-buffer surface keep the traced ray and the cached visibility they have. GI v2 design already records the deviation from Lumen: Lumen uses shadow maps, and this renderer traces a ray per light through the same tracer as the bounce.
+Lamps and the sun that hit a G-buffer surface keep the traced ray and the cached visibility they have. GI design already records the deviation from Lumen: Lumen uses shadow maps, and this renderer traces a ray per light through the same tracer as the bounce.
 
 Cascaded shadow maps are the older directional-light method (parallel-split cascades). Virtual shadow maps are the paged shadow atlas in Unreal, described for Fortnite Chapter 4 ([Virtual Shadow Maps in Fortnite](https://www.unrealengine.com/tech-blog/virtual-shadow-maps-in-fortnite-battle-royale-chapter-4)): 128×128 pages, cached until a caster's bounds invalidate them, marked with the same cluster cull as Nanite. **Deviation, and it stays.** Virtual shadow maps want the cluster rasterizer ADR 0012 does not require, and they add a per-frame page-marking cost. Cascades add a second shadow of the same lamp the ray already computes. Neither replaces the traced shadow.
 
@@ -93,7 +93,7 @@ A later map is allowed only for a caster that is not in the tracer. The first ca
 
 The CPU emitter, the card builder, the resident image, and the single fire term stay (`particles.rs`). A GPU particle step is a compute dispatch that writes the positions and ages the dynamic vertex buffer already uploads. The dispatch runs when an emitter is enabled and its count is non-zero. A disabled emitter does not dispatch. The CPU keeps the emitter record so the scene key can hash it without a readback. Ages advance on the GPU. The CPU does not read the positions back.
 
-Cards stay out of the G-buffer. An emitter that must bounce uses a proxy mesh (a baked SDF and texels), which is the GI v2 rule for anything that is not a stable surface. The fire term stays one lamp, as `renderer.md` says. One lamp per ember is not added.
+Cards stay out of the G-buffer. An emitter that must bounce uses a proxy mesh (a baked SDF and texels), which is the GI rule for anything that is not a stable surface. The fire term stays one lamp, as `renderer.md` says. One lamp per ember is not added.
 
 The published reference for the GPU step is a persistent particle buffer updated in compute, the same structure as the crowd and particle sections of the SIGGRAPH 2015 GPU-driven pipelines talk (Haar and Aaltonen). **Deviation.** That talk also expands particles into the GPU-driven index buffer. Here the existing card builder remains the expander until the meshlet draw exists. The simulation moves first. The expansion moves with the indirect-draw step.
 
@@ -133,7 +133,7 @@ Foliage cards that are not in the tracer do not bounce until they have a proxy, 
 
 ### Water
 
-A water surface is a mesh with a material the support matrix already keeps (`KHR_materials_transmission`, `loaded, unsupported`). The first water commit draws it as a transparent pass after the opaque G-buffer, samples the lit colour behind it, and does not write the G-buffer. It therefore does not bounce. A planar proxy card, baked like any mesh, is what the surface cache reads if the water must tint the room. Reflections reuse the screen probes' hit directions. **Deviation.** A screen-space reflection pass of the kind games add on top of GI is not added. The probes are the reflection. A mirror is still a GI v2 non-goal.
+A water surface is a mesh with a material the support matrix already keeps (`KHR_materials_transmission`, `loaded, unsupported`). The first water commit draws it as a transparent pass after the opaque G-buffer, samples the lit colour behind it, and does not write the G-buffer. It therefore does not bounce. A planar proxy card, baked like any mesh, is what the surface cache reads if the water must tint the room. Reflections reuse the screen probes' hit directions. **Deviation.** A screen-space reflection pass of the kind games add on top of GI is not added. The probes are the reflection. A mirror is still a GI non-goal.
 
 The surface motion is a small vertex displacement from time. When time is frozen, the scene key is stable and frame reuse holds.
 
@@ -141,7 +141,7 @@ The surface motion is a small vertex displacement from time. When time is frozen
 
 The sky colour in `Scene::sky` stays the value a miss returns, so the lighting and the background keep agreeing (`types.rs`). Atmosphere is a function that fills that colour, and an aerial-perspective term on the compose pass, from Hillaire, "A Scalable and Production Ready Sky and Atmosphere Rendering Technique", EGSR 2020 ([paper](https://sebh.github.io/publications/egsr2020.pdf)). The LUTs are small and rebuilt when the atmosphere parameters change, not every frame. Bruneton and Neyret, "Precomputed Atmospheric Scattering", 2008, is the model Hillaire replaces. **Deviation.** Hillaire's LUTs can update in one frame. This renderer rebuilds them only when the parameters change, and a still sky is a stable scene key. The sun disc is a smooth function of the existing sun direction in `building.rs`, drawn as the sky miss, not as a new lamp.
 
-Weather is a parameter block on that atmosphere (cloud cover, fog density). Fog that fills a volume is the GI v2 non-goal for volumetrics. A height fog that only tints the miss and the aerial term is allowed, because it does not trace. A froxel volume is out of this plan.
+Weather is a parameter block on that atmosphere (cloud cover, fog density). Fog that fills a volume is the GI non-goal for volumetrics. A height fog that only tints the miss and the aerial term is allowed, because it does not trace. A froxel volume is out of this plan.
 
 ### Decals
 
@@ -419,6 +419,6 @@ Commit: `render: one sun cascade for casters the tracer does not see`.
 | TAA | Karis advances history every frame. | A reused frame does not advance history. |
 | Atmosphere | Hillaire can update LUTs every frame. | LUTs update when parameters change. |
 | Terrain | Clipmaps follow the camera. | Pages follow the camera. Triangles stay in world space. |
-| Specular | glTF PBR evaluates it. | Stored, not shaded, until a lighting commit. GI v2 non-goal. |
+| Specular | glTF PBR evaluates it. | Stored, not shaded, until a lighting commit. GI non-goal. |
 | Water reflections | A screen-space pass. | Screen probes. A mirror stays out. |
 | Particles in GI | Some engines inject them into the light cache. | Out of the G-buffer unless the caller bakes a proxy. |

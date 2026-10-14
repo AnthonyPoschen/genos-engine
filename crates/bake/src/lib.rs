@@ -2,12 +2,12 @@
 #![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::unnested_or_patterns, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 
-//! Import-time data for GI v2: a sparse signed distance field and surface cache
+//! Import-time data for GI: a sparse signed distance field and surface cache
 //! cards per mesh, cached on disk by content hash.
 //!
 //! When the bake runs is a setting ([`BakeMode`]): ahead of time by the
 //! `genos-bake` tool (prebuilt, the editor default) or at first load (cached on
-//! the player's disk). See `docs/systems/gi-v2-design.md`, "Scene representation".
+//! the player's disk). See `docs/systems/gi-design.md`, "Scene representation".
 
 mod cards;
 mod format;

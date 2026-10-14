@@ -276,7 +276,7 @@ pub enum PackedDraw {
         key: u64,
         model: [f32; 16],
         color: [f32; 3],
-        /// Emitted light (linear); GI v2 only.
+        /// Emitted light (linear); GI only.
         emission: [f32; 3],
         /// Colour-atlas rect (x, y, w, h) in texels. `w == 0` is the vertex colour.
         color_rect: [f32; 4],

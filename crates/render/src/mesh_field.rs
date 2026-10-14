@@ -12,7 +12,7 @@
 #![expect(clippy::unnecessary_cast, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
 
-//! Mesh SDF instances for the GPU software tracer (GI v2 phase 2).
+//! Mesh SDF instances for the GPU software tracer (GI phase 2).
 //!
 //! A traced mesh carries its baked signed distance field (genos-bake); every placed
 //! instance of it is one [`FieldInstance`] in `World::fields`. Each frame the
@@ -34,7 +34,7 @@
 //! brick table: one word per brick cell, 0 for none, else 1 + the brick's first word
 //! brick: 128 words, 512 distances as bytes, x fastest
 //! coarse: one byte per brick cell, four per word
-//! emission table (GI v2): one word per instance, shared-exponent RGB (9e5)
+//! emission table (GI): one word per instance, shared-exponent RGB (9e5)
 //! ```
 
 use std::sync::Arc;
@@ -56,7 +56,7 @@ pub struct FieldInstance {
     pub pose: [f32; 16],
     /// Mean diffuse albedo, linear.
     pub albedo: [f32; 3],
-    /// Mean emitted light, linear (GI v2 only).
+    /// Mean emitted light, linear (GI only).
     pub emission: [f32; 3],
     /// The world object whose `hidden` flag this instance follows, if any.
     pub object: Option<usize>,

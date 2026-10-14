@@ -1,5 +1,5 @@
 #version 450
-// GI v2 light cache, first pass: list the live patch slots, mature from the front
+// GI light cache, first pass: list the live patch slots, mature from the front
 // and young from the back (both counts were zeroed before the round), so the
 // round's batch relights live patches only, the young first. A slot claimed but
 // not yet written (normal w 0) waits for the next round. No trace.

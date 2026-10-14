@@ -360,7 +360,7 @@ pub struct DenoiserSettings {
     /// adaptive is on.
     pub variance_threshold: f32,
     /// `denoise_launch=screen`: picture-sized wavelet over this frame's visible
-    /// fine texels. False is `hash`, the gi-v2 slot launch. Preset high uses
+    /// fine texels. False is `hash`, the baseline GI slot launch. Preset high uses
     /// screen. The other presets use hash. `--denoise-launch` and
     /// `GENOS_LIGHTING_DENOISE_LAUNCH` override the preset.
     pub screen: bool,
@@ -369,7 +369,7 @@ pub struct DenoiserSettings {
 impl DenoiserSettings {
     /// Full-resolution scalar wavelet, adaptive off.
     ///
-    /// That is the gi-v2 kernel. It has its own pipeline so the adaptive branch
+    /// That is the baseline GI kernel. It has its own pipeline so the adaptive branch
     /// is not in the shader the 4070 runs for high.
     pub fn plain(self) -> bool {
         !self.adaptive
@@ -1237,16 +1237,16 @@ impl LightingSettings {
     pub fn apply_env(&mut self) {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let preset = std::env::var("GENOS_LIGHTING_PRESET").ok();
-        let bounces = std::env::var("GENOS_LIGHTING_BOUNCES").ok();
-        let ambient = std::env::var("GENOS_LIGHTING_AMBIENT").ok();
-        let time = std::env::var("GENOS_LIGHTING_TIME").ok();
-        let attach = std::env::var("GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS").ok();
-        let sc_local = std::env::var("GENOS_LIGHTING_SC_LOCAL").ok();
-        let blend = std::env::var("GENOS_LIGHTING_SURFACE_CACHE_BLEND").ok();
-        let firefly = std::env::var("GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA").ok();
-        let ray_budget = std::env::var("GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET").ok();
-        let dormant_rays = std::env::var("GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS").ok();
+        let preset = lighting_env("GENOS_LIGHTING_PRESET").ok();
+        let bounces = lighting_env("GENOS_LIGHTING_BOUNCES").ok();
+        let ambient = lighting_env("GENOS_LIGHTING_AMBIENT").ok();
+        let time = lighting_env("GENOS_LIGHTING_TIME").ok();
+        let attach = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS").ok();
+        let sc_local = lighting_env("GENOS_LIGHTING_SC_LOCAL").ok();
+        let blend = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_BLEND").ok();
+        let firefly = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA").ok();
+        let ray_budget = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET").ok();
+        let dormant_rays = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS").ok();
         let Ok(launch) = resolve_lighting_launch(
             &refs,
             &LightingMirrors {
@@ -1324,15 +1324,15 @@ impl LightingSettings {
             ("GENOS_LIGHTING_LAMP_PICK_REUSE", "lamp_pick_reuse"),
         ];
         for (var, key) in keys {
-            if let Ok(value) = std::env::var(var) {
+            if let Ok(value) = lighting_env(var) {
                 let _ = self.set_key(key, &value);
             }
         }
-        if std::env::var_os("GENOS_LIGHTING_COMPOSE_ALL").is_some() {
+        if lighting_env_os("GENOS_LIGHTING_COMPOSE_ALL").is_some() {
             self.compose_reuse = false;
             self.sync_preset_field();
         }
-        if env_flag("GENOS_LIGHTING_FULL_EFFORT") {
+        if lighting_env_flag("GENOS_LIGHTING_FULL_EFFORT") {
             self.apply_full_effort();
         }
     }
@@ -1681,13 +1681,169 @@ fn bit(v: bool) -> u32 {
     u32::from(v)
 }
 
-/// A set variable turns the flag on, except the explicit off words.
+
+/// Deprecated `GENOS_GI2_*` (and historical `GENOS_GI_DEBUG`) aliases.
+///
+/// Canonical names are `GENOS_LIGHTING_*`. Old names still apply for one release
+/// and print one warning each the first time they are used in a process.
+const GI2_ENV_ALIASES: &[(&str, &str)] = &[
+    ("GENOS_GI2_AMBIENT", "GENOS_LIGHTING_AMBIENT"),
+    ("GENOS_GI2_AMBIENT_COLOR", "GENOS_LIGHTING_AMBIENT_COLOR"),
+    ("GENOS_GI2_AMBIENT_GROUND", "GENOS_LIGHTING_AMBIENT_GROUND"),
+    ("GENOS_GI2_AMBIENT_INTENSITY", "GENOS_LIGHTING_AMBIENT_INTENSITY"),
+    ("GENOS_GI2_ASYNC", "GENOS_LIGHTING_ASYNC"),
+    ("GENOS_GI2_ATROUS_DIRTY", "GENOS_LIGHTING_ATROUS_DIRTY"),
+    ("GENOS_GI2_BORROW", "GENOS_LIGHTING_BORROW"),
+    ("GENOS_GI2_BOUNCES", "GENOS_LIGHTING_BOUNCES"),
+    ("GENOS_GI2_CACHE_HZ", "GENOS_LIGHTING_CACHE_HZ"),
+    ("GENOS_GI2_CACHE_PICKS", "GENOS_LIGHTING_CACHE_PICKS"),
+    ("GENOS_GI2_CATCH_UP", "GENOS_LIGHTING_CATCH_UP"),
+    ("GENOS_GI2_COMPOSE_ALL", "GENOS_LIGHTING_COMPOSE_ALL"),
+    ("GENOS_GI2_COMPOSE_REUSE", "GENOS_LIGHTING_COMPOSE_REUSE"),
+    ("GENOS_GI2_DAWN_COLOR", "GENOS_LIGHTING_DAWN_COLOR"),
+    ("GENOS_GI2_DAWN_INTENSITY", "GENOS_LIGHTING_DAWN_INTENSITY"),
+    ("GENOS_GI2_DAY_COLOR", "GENOS_LIGHTING_DAY_COLOR"),
+    ("GENOS_GI2_DAY_INTENSITY", "GENOS_LIGHTING_DAY_INTENSITY"),
+    ("GENOS_GI2_DEBUG", "GENOS_LIGHTING_DEBUG"),
+    ("GENOS_GI2_DENOISE", "GENOS_LIGHTING_DENOISE"),
+    ("GENOS_GI2_DENOISE_ADAPTIVE", "GENOS_LIGHTING_DENOISE_ADAPTIVE"),
+    ("GENOS_GI2_DENOISE_ITERS", "GENOS_LIGHTING_DENOISE_ITERS"),
+    ("GENOS_GI2_DENOISE_LAUNCH", "GENOS_LIGHTING_DENOISE_LAUNCH"),
+    ("GENOS_GI2_DENOISE_SCREEN", "GENOS_LIGHTING_DENOISE_SCREEN"),
+    ("GENOS_GI2_DENOISE_VARIANCE", "GENOS_LIGHTING_DENOISE_VARIANCE"),
+    ("GENOS_GI2_DIRECT", "GENOS_LIGHTING_DIRECT"),
+    ("GENOS_GI2_DIRECT_LIGHTS", "GENOS_LIGHTING_DIRECT_LIGHTS"),
+    ("GENOS_GI2_DIRECT_REFRESH", "GENOS_LIGHTING_DIRECT_REFRESH"),
+    ("GENOS_GI2_DIRECT_SCALE", "GENOS_LIGHTING_DIRECT_SCALE"),
+    ("GENOS_GI2_DUMP", "GENOS_LIGHTING_DUMP"),
+    ("GENOS_GI2_DUMP_DIR", "GENOS_LIGHTING_DUMP_DIR"),
+    ("GENOS_GI2_DUSK_COLOR", "GENOS_LIGHTING_DUSK_COLOR"),
+    ("GENOS_GI2_DUSK_INTENSITY", "GENOS_LIGHTING_DUSK_INTENSITY"),
+    ("GENOS_GI2_EMISSIVE", "GENOS_LIGHTING_EMISSIVE"),
+    ("GENOS_GI2_FILL", "GENOS_LIGHTING_FILL"),
+    ("GENOS_GI2_FULL_EFFORT", "GENOS_LIGHTING_FULL_EFFORT"),
+    ("GENOS_GI2_GI", "GENOS_LIGHTING_GI"),
+    ("GENOS_GI2_GI_REFRESH", "GENOS_LIGHTING_GI_REFRESH"),
+    ("GENOS_GI2_LAMP_PICK", "GENOS_LIGHTING_LAMP_PICK"),
+    ("GENOS_GI2_LAMP_PICK_CANDIDATES", "GENOS_LIGHTING_LAMP_PICK_CANDIDATES"),
+    ("GENOS_GI2_LAMP_PICK_DIAG", "GENOS_LIGHTING_LAMP_PICK_DIAG"),
+    ("GENOS_GI2_LAMP_PICK_HISTORY", "GENOS_LIGHTING_LAMP_PICK_HISTORY"),
+    ("GENOS_GI2_LAMP_PICK_RADIUS", "GENOS_LIGHTING_LAMP_PICK_RADIUS"),
+    ("GENOS_GI2_LAMP_PICK_RAYS", "GENOS_LIGHTING_LAMP_PICK_RAYS"),
+    ("GENOS_GI2_LAMP_PICK_REUSE", "GENOS_LIGHTING_LAMP_PICK_REUSE"),
+    ("GENOS_GI2_LAMP_PICK_SAMPLES", "GENOS_LIGHTING_LAMP_PICK_SAMPLES"),
+    ("GENOS_GI2_LAMP_PICK_UNBIASED", "GENOS_LIGHTING_LAMP_PICK_UNBIASED"),
+    ("GENOS_GI2_MOVED_DROP", "GENOS_LIGHTING_MOVED_DROP"),
+    ("GENOS_GI2_NIGHT_COLOR", "GENOS_LIGHTING_NIGHT_COLOR"),
+    ("GENOS_GI2_NIGHT_INTENSITY", "GENOS_LIGHTING_NIGHT_INTENSITY"),
+    ("GENOS_GI2_NOON_COLOR", "GENOS_LIGHTING_NOON_COLOR"),
+    ("GENOS_GI2_NOON_INTENSITY", "GENOS_LIGHTING_NOON_INTENSITY"),
+    ("GENOS_GI2_PREFILL", "GENOS_LIGHTING_PREFILL"),
+    ("GENOS_GI2_PRESET", "GENOS_LIGHTING_PRESET"),
+    ("GENOS_GI2_PROBE_RAYS", "GENOS_LIGHTING_PROBE_RAYS"),
+    ("GENOS_GI2_PROBE_REFRESH", "GENOS_LIGHTING_PROBE_REFRESH"),
+    ("GENOS_GI2_PROBES", "GENOS_LIGHTING_PROBES"),
+    ("GENOS_GI2_PROBE_STALE", "GENOS_LIGHTING_PROBE_STALE"),
+    ("GENOS_GI2_SC_BUDGET_SHIFT", "GENOS_LIGHTING_SC_BUDGET_SHIFT"),
+    ("GENOS_GI2_SC_FLAGS", "GENOS_LIGHTING_SC_FLAGS"),
+    ("GENOS_GI2_SC_LOCAL", "GENOS_LIGHTING_SC_LOCAL"),
+    ("GENOS_GI2_SC_SETTLE", "GENOS_LIGHTING_SC_SETTLE"),
+    ("GENOS_GI2_SC_TRACE", "GENOS_LIGHTING_SC_TRACE"),
+    ("GENOS_GI2_SHADOW_CELL", "GENOS_LIGHTING_SHADOW_CELL"),
+    ("GENOS_GI2_SHADOW_FILTER", "GENOS_LIGHTING_SHADOW_FILTER"),
+    ("GENOS_GI2_SHADOW_REFRESH", "GENOS_LIGHTING_SHADOW_REFRESH"),
+    ("GENOS_GI2_SHADOWS", "GENOS_LIGHTING_SHADOWS"),
+    ("GENOS_GI2_SKY", "GENOS_LIGHTING_SKY"),
+    ("GENOS_GI2_SUN", "GENOS_LIGHTING_SUN"),
+    ("GENOS_GI2_SUN_BANDS", "GENOS_LIGHTING_SUN_BANDS"),
+    ("GENOS_GI2_SURFACE_CACHE_ATTACH_MOVERS", "GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS"),
+    ("GENOS_GI2_SURFACE_CACHE_BLEND", "GENOS_LIGHTING_SURFACE_CACHE_BLEND"),
+    ("GENOS_GI2_SURFACE_CACHE_DORMANT_RAYS", "GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS"),
+    ("GENOS_GI2_SURFACE_CACHE_FIREFLY_SIGMA", "GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA"),
+    ("GENOS_GI2_SURFACE_CACHE_RAY_BUDGET", "GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET"),
+    ("GENOS_GI2_TILE", "GENOS_LIGHTING_TILE"),
+    ("GENOS_GI2_TIME", "GENOS_LIGHTING_TIME"),
+    ("GENOS_GI2_TOGGLES", "GENOS_LIGHTING_TOGGLES"),
+    ("GENOS_GI2_TOGGLES_FILE", "GENOS_LIGHTING_TOGGLES_FILE"),
+    ("GENOS_GI2_UNFILLED", "GENOS_LIGHTING_UNFILLED"),
+    ("GENOS_GI2_UNFILLED_DUMP", "GENOS_LIGHTING_UNFILLED_DUMP"),
+    ("GENOS_GI2_UNFILLED_TINT", "GENOS_LIGHTING_UNFILLED_TINT"),
+    ("GENOS_GI2_URGENT", "GENOS_LIGHTING_URGENT"),
+    ("GENOS_GI2_WORLD", "GENOS_LIGHTING_WORLD"),
+    ("GENOS_GI2_WORLD_CACHE", "GENOS_LIGHTING_WORLD_CACHE"),
+    ("GENOS_GI2_WORLD_CAP", "GENOS_LIGHTING_WORLD_CAP"),
+    ("GENOS_GI2_WORLD_CELL", "GENOS_LIGHTING_WORLD_CELL"),
+    ("GENOS_GI2_WORLD_REFRESH", "GENOS_LIGHTING_WORLD_REFRESH"),
+    ("GENOS_GI2_WORLD_STALE", "GENOS_LIGHTING_WORLD_STALE"),
+    ("GENOS_GI2_YOUNG_ONLY", "GENOS_LIGHTING_YOUNG_ONLY"),
+    ("GENOS_GI_DEBUG", "GENOS_LIGHTING_DEBUG"),
+];
+
+fn warn_gi2_alias(old: &'static str, neu: &'static str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = warned.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.insert(old) {
+        eprintln!(
+            "warning: {old} is deprecated; use {neu} (alias kept for one release)"
+        );
+    }
+}
+
+/// Read `GENOS_LIGHTING_*`, or the matching deprecated `GENOS_GI2_*` alias.
 #[allow(
     clippy::disallowed_methods,
     reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
 )]
-fn env_flag(name: &str) -> bool {
+pub fn lighting_env(name: &str) -> Result<String, std::env::VarError> {
     match std::env::var(name) {
+        Ok(value) => Ok(value),
+        Err(std::env::VarError::NotPresent) => {
+            for &(old, neu) in GI2_ENV_ALIASES {
+                if neu != name {
+                    continue;
+                }
+                match std::env::var(old) {
+                    Ok(value) => {
+                        warn_gi2_alias(old, neu);
+                        return Ok(value);
+                    }
+                    Err(std::env::VarError::NotPresent) => {}
+                    Err(err) => return Err(err),
+                }
+            }
+            Err(std::env::VarError::NotPresent)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Like [`lighting_env`], for presence checks (`var_os`).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+)]
+pub fn lighting_env_os(name: &str) -> Option<std::ffi::OsString> {
+    if let Some(value) = std::env::var_os(name) {
+        return Some(value);
+    }
+    for &(old, neu) in GI2_ENV_ALIASES {
+        if neu != name {
+            continue;
+        }
+        if let Some(value) = std::env::var_os(old) {
+            warn_gi2_alias(old, neu);
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// True when the lighting env (or its GI2 alias) is set to an on value.
+pub fn lighting_env_flag(name: &str) -> bool {
+    match lighting_env(name) {
         Ok(value) => !matches!(value.trim(), "0" | "false" | "off" | "no"),
         Err(_) => false,
     }
@@ -1966,5 +2122,83 @@ mod launch_tests {
         settings.apply_launch(&clamped);
         assert_eq!(settings.surface_cache.dormant_rays, 16);
         assert_eq!(settings.surface_cache.blend, SurfaceCacheBlend::Msme);
+    }
+
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this test is the alias contract for process env mirrors"
+    )]
+    fn genos_gi2_env_is_a_deprecated_alias() {
+        std::env::remove_var("GENOS_LIGHTING_WORLD_CACHE");
+        std::env::remove_var("GENOS_GI2_WORLD_CACHE");
+        std::env::remove_var("GENOS_LIGHTING_DEBUG");
+        std::env::remove_var("GENOS_GI_DEBUG");
+        std::env::remove_var("GENOS_GI2_DEBUG");
+
+        assert!(lighting_env("GENOS_LIGHTING_WORLD_CACHE").is_err());
+        std::env::set_var("GENOS_GI2_WORLD_CACHE", "0");
+        assert_eq!(
+            lighting_env("GENOS_LIGHTING_WORLD_CACHE").unwrap(),
+            "0"
+        );
+        std::env::set_var("GENOS_LIGHTING_WORLD_CACHE", "1");
+        assert_eq!(
+            lighting_env("GENOS_LIGHTING_WORLD_CACHE").unwrap(),
+            "1"
+        );
+
+        std::env::set_var("GENOS_GI_DEBUG", "1");
+        assert!(lighting_env_os("GENOS_LIGHTING_DEBUG").is_some());
+        std::env::set_var("GENOS_LIGHTING_DEBUG", "1");
+        assert!(lighting_env_os("GENOS_LIGHTING_DEBUG").is_some());
+
+        std::env::remove_var("GENOS_LIGHTING_WORLD_CACHE");
+        std::env::remove_var("GENOS_GI2_WORLD_CACHE");
+        std::env::remove_var("GENOS_LIGHTING_DEBUG");
+        std::env::remove_var("GENOS_GI_DEBUG");
+        std::env::remove_var("GENOS_GI2_DEBUG");
+    }
+
+    #[test]
+    fn gi2_alias_table_covers_every_lighting_env_and_gi_debug() {
+        assert!(GI2_ENV_ALIASES
+            .iter()
+            .any(|&(old, neu)| old == "GENOS_GI2_WORLD_CACHE" && neu == "GENOS_LIGHTING_WORLD_CACHE"));
+        assert!(GI2_ENV_ALIASES
+            .iter()
+            .any(|&(old, neu)| old == "GENOS_GI_DEBUG" && neu == "GENOS_LIGHTING_DEBUG"));
+        assert!(GI2_ENV_ALIASES
+            .iter()
+            .any(|&(old, neu)| old == "GENOS_GI2_DEBUG" && neu == "GENOS_LIGHTING_DEBUG"));
+    }
+
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this test is the alias contract for process env mirrors"
+    )]
+    fn cli_flag_beats_deprecated_genos_gi2_env_alias() {
+        std::env::remove_var("GENOS_LIGHTING_PRESET");
+        std::env::remove_var("GENOS_GI2_PRESET");
+        std::env::set_var("GENOS_GI2_PRESET", "potato");
+
+        let alias = lighting_env("GENOS_LIGHTING_PRESET").unwrap();
+        assert_eq!(alias, "potato");
+        let mut env = empty();
+        env.preset = Some(alias.as_str());
+
+        let from_alias = resolve_lighting_launch(&[], &env).unwrap();
+        assert_eq!(from_alias.preset, Some(LightingPreset::Potato));
+
+        let from_cli = resolve_lighting_launch(&["--preset", "high"], &env).unwrap();
+        assert_eq!(from_cli.preset, Some(LightingPreset::High));
+        let mut settings = LightingSettings::default();
+        settings.apply_launch(&from_cli);
+        assert_eq!(settings.preset_label(), "high");
+        assert!(settings.gi.enabled);
+
+        std::env::remove_var("GENOS_LIGHTING_PRESET");
+        std::env::remove_var("GENOS_GI2_PRESET");
     }
 }

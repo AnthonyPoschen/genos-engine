@@ -203,12 +203,12 @@ kind = "test"
 detail = "harness only"
 
 [[var]]
-name = "GENOS_GI_V2_A"
+name = "GENOS_GI_FLOOR_A"
 kind = "test"
 detail = "harness only"
 
 [[var]]
-name = "GENOS_GI_V2_B"
+name = "GENOS_GI_FLOOR_B"
 kind = "test"
 detail = "harness only"
 
@@ -751,4 +751,456 @@ detail = "no CLI argument yet"
 name = "GENOS_TITLE_TAG"
 kind = "todo"
 detail = "no CLI argument yet"
+
+# Deprecated GI2 aliases (one release).
+
+[[var]]
+name = "GENOS_GI2_AMBIENT"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_AMBIENT; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_AMBIENT_COLOR"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_AMBIENT_COLOR; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_AMBIENT_GROUND"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_AMBIENT_GROUND; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_AMBIENT_INTENSITY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_AMBIENT_INTENSITY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_ASYNC"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_ASYNC; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_ATROUS_DIRTY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_ATROUS_DIRTY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_BORROW"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_BORROW; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_BOUNCES"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_BOUNCES; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_CACHE_HZ"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_CACHE_HZ; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_CACHE_PICKS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_CACHE_PICKS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_CATCH_UP"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_CATCH_UP; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_COMPOSE_ALL"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_COMPOSE_ALL; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_COMPOSE_REUSE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_COMPOSE_REUSE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DAWN_COLOR"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DAWN_COLOR; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DAWN_INTENSITY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DAWN_INTENSITY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DAY_COLOR"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DAY_COLOR; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DAY_INTENSITY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DAY_INTENSITY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DEBUG"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DEBUG; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DENOISE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DENOISE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DENOISE_ADAPTIVE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DENOISE_ADAPTIVE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DENOISE_ITERS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DENOISE_ITERS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DENOISE_LAUNCH"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DENOISE_LAUNCH; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DENOISE_SCREEN"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DENOISE_SCREEN; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DENOISE_VARIANCE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DENOISE_VARIANCE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DIRECT"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DIRECT; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DIRECT_LIGHTS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DIRECT_LIGHTS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DIRECT_REFRESH"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DIRECT_REFRESH; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DIRECT_SCALE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DIRECT_SCALE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DUMP"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DUMP; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DUMP_DIR"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DUMP_DIR; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DUSK_COLOR"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DUSK_COLOR; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DUSK_INTENSITY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DUSK_INTENSITY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_EMISSIVE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_EMISSIVE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_FILL"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_FILL; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_FULL_EFFORT"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_FULL_EFFORT; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_GI"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_GI; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_GI_REFRESH"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_GI_REFRESH; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_CANDIDATES"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_CANDIDATES; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_DIAG"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_DIAG; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_HISTORY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_HISTORY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_RADIUS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_RADIUS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_RAYS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_RAYS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_REUSE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_REUSE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_SAMPLES"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_SAMPLES; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_UNBIASED"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_UNBIASED; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_MOVED_DROP"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_MOVED_DROP; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_NIGHT_COLOR"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_NIGHT_COLOR; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_NIGHT_INTENSITY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_NIGHT_INTENSITY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_NOON_COLOR"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_NOON_COLOR; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_NOON_INTENSITY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_NOON_INTENSITY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_PREFILL"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_PREFILL; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_PRESET"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_PRESET; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_PROBE_RAYS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_PROBE_RAYS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_PROBE_REFRESH"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_PROBE_REFRESH; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_PROBES"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_PROBES; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_PROBE_STALE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_PROBE_STALE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SC_BUDGET_SHIFT"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SC_BUDGET_SHIFT; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SC_FLAGS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SC_FLAGS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SC_LOCAL"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SC_LOCAL; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SC_SETTLE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SC_SETTLE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SC_TRACE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SC_TRACE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SHADOW_CELL"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SHADOW_CELL; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SHADOW_FILTER"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SHADOW_FILTER; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SHADOW_REFRESH"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SHADOW_REFRESH; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SHADOWS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SHADOWS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SKY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SKY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SUN"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SUN; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SUN_BANDS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SUN_BANDS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SURFACE_CACHE_ATTACH_MOVERS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SURFACE_CACHE_BLEND"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SURFACE_CACHE_BLEND; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SURFACE_CACHE_DORMANT_RAYS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SURFACE_CACHE_FIREFLY_SIGMA"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SURFACE_CACHE_RAY_BUDGET"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_TILE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_TILE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_TIME"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_TIME; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_TOGGLES"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_TOGGLES; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_TOGGLES_FILE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_TOGGLES_FILE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_UNFILLED"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_UNFILLED; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_UNFILLED_DUMP"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_UNFILLED_DUMP; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_UNFILLED_TINT"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_UNFILLED_TINT; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_URGENT"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_URGENT; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_WORLD"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_WORLD; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_WORLD_CACHE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_WORLD_CACHE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_WORLD_CAP"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_WORLD_CAP; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_WORLD_CELL"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_WORLD_CELL; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_WORLD_REFRESH"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_WORLD_REFRESH; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_WORLD_STALE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_WORLD_STALE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_YOUNG_ONLY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_YOUNG_ONLY; one-release warning"
+
+[[var]]
+name = "GENOS_GI_DEBUG"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DEBUG; one-release warning"
 

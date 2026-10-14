@@ -1,6 +1,6 @@
 #version 450
 #define GENOS_SUN_SHADER 1
-// GI v2 direct light: every lamp at a surface point, each with a shadow ray through
+// GI direct light: every lamp at a surface point, each with a shadow ray through
 // the tracer. The points are the picture's pixels (G-buffer) followed by every kept
 // hit of the screen probes (all strata, so a kept hit always carries this frame's
 // light: no light history), the light cache's ray hits and the probes' fills, so all share this loop

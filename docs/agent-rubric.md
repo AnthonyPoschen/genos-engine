@@ -8,7 +8,7 @@ These records stay in force. This rubric points at them:
 
 - Words and decisions: `docs/agents/domain.md`, `CONTEXT.md`, `docs/adr/`.
 - Architecture, native calls, scripting: `docs/architecture.md`, `docs/adr/0007-native-calls-go-to-the-system-and-vulkan.md`, `docs/adr/0009-rhai-is-the-scripting-language.md`.
-- Lighting: `docs/systems/lighting/README.md`, `docs/adr/0012-gi-v2.md`. GI v1 stays removed.
+- Lighting: `docs/systems/lighting/README.md`, `docs/adr/0012-gi.md`. GI v1 stays removed.
 - Math and camera: `docs/references/breaking-point.md`.
 - Systems: `docs/systems/README.md` and the matching record, edited in the same change when the goal, the intent, the game use, or a limit changes.
 - Rust: `cargo build --workspace` and the tests for the crates you touched. Warnings are denied. A new crate sets `[lints] workspace = true`.

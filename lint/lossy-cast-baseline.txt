@@ -91,7 +91,7 @@ examples/stress/src/knobs.rs 10
 examples/stress/src/lighting_ref/capture.rs 3
 examples/stress/src/main.rs 2
 examples/stress/src/stage.rs 1
-examples/stress/tests/gi_v2_floor.rs 1
+examples/stress/tests/gi_floor.rs 1
 examples/stress/tests/gpu_reference.rs 2
 examples/stress/tests/mesh_reference.rs 2
 examples/stress/tests/picture.rs 4

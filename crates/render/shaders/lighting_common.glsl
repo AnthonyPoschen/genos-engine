@@ -1,8 +1,8 @@
-// GI v2 compute passes (lighting_gpu.rs): shared bindings, push constants and layout of
+// GI compute passes (lighting_gpu.rs): shared bindings, push constants and layout of
 // the work buffer. Every pass that includes this has at most one trace site
 // (trace_ray or trace_occluded, once): these functions are inlined wherever they
 // are called, and many sites stalled the NVIDIA compiler and ran lavapipe out of
-// memory (docs/systems/gi-v2-design.md, Migration plan).
+// memory (docs/systems/gi-design.md, Migration plan).
 //
 // Work buffer (vec4s), for P probes of R rays in S strata (LIGHTING_STRATA), a W x H
 // picture and the light cache's B patches of C rays relit this frame
@@ -93,7 +93,7 @@ uint lighting_rays() {
 }
 // Strata of the probe ray directions: frame f traces stratum f % LIGHTING_STRATA, and
 // a probe keeps the hits of the last LIGHTING_STRATA frames (the visibility history
-// cap in gi-v2-design.md), so it sees LIGHTING_STRATA x R directions.
+// cap in gi-design.md), so it sees LIGHTING_STRATA x R directions.
 // How far (in probe spacings on the surface) a probe reaches for last frame's
 // kept strata (lighting_gather.comp).
 const float LIGHTING_REACH = 2.5;
@@ -246,7 +246,7 @@ bool lighting_surface(uvec2 p, out vec3 pos, out vec3 n, out vec3 albedo, out bo
     return true;
 }
 
-// ---- Tracer interface (gi-v2-design.md "Tracer interface") ---------------------
+// ---- Tracer interface (gi-design.md "Tracer interface") ---------------------
 // Software tracer: the analytic shapes (exact, scene_rays.glsl) and the mesh SDF
 // instances (mesh_field.glsl). Call one of these at most once per shader.
 

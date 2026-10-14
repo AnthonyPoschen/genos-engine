@@ -1,8 +1,7 @@
-// GI v2 frame path (docs/systems/gi-v2-design.md), included into gpu.rs.
+// GI frame path (docs/systems/gi-design.md), included into gpu.rs.
 //
-// With GI v2 on, the frame rasters a G-buffer (gbuffer.frag, same vertices and
-// depth prepass) instead of the old shading, then runs small compute passes, each
-// with at most one trace site:
+// The frame rasters a G-buffer (gbuffer.frag, same vertices and depth prepass),
+// then runs small compute passes, each with at most one trace site:
 //
 //   compact  list the light cache's live patches
 //   place    one screen probe per tile on the G-buffer surface
@@ -32,7 +31,7 @@ pub(crate) const LIGHTING_TILE: u32 = 16;
     reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
 )]
 fn lighting_tile(height: u32) -> u32 {
-    std::env::var("GENOS_LIGHTING_TILE")
+    genos_scene::lighting_env("GENOS_LIGHTING_TILE")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
         .map_or((height / 45).clamp(4, LIGHTING_TILE), |t| t.clamp(4, 64))
@@ -57,7 +56,7 @@ pub(crate) const LIGHTING_STRATA: u32 = 8;
 const LIGHTING_CHANGES: usize = 64;
 /// Vec4s before the bounds in the changes block (lighting_common.glsl LIGHTING_CHANGE_HEAD).
 const LIGHTING_CHANGE_HEAD: usize = 5;
-/// GI v2 counts as settled once the scene block (camera included) has stayed the
+/// GI counts as settled once the scene block (camera included) has stayed the
 /// same for this many frames (the screen probes average up to 32 frames' rays,
 /// lighting_gather.comp) and a full sweep of the light cache changed no patch
 /// by more than LIGHTING_SETTLE_CHANGE.
@@ -132,7 +131,7 @@ pub(crate) struct Lighting {
     /// Frames the probes ran: which views block is last frame's (its parity).
     probe_runs: u32,
     frame: u32,
-    /// Hash of what GI v2 sees (scene block, traced and drawn meshes), and frames
+    /// Hash of what GI sees (scene block, traced and drawn meshes), and frames
     /// it has stayed the same.
     scene_hash: u64,
     still: u32,
@@ -370,7 +369,7 @@ impl Default for Lighting {
             stats_still: [0; 2],
             live: 0,
             dims: [0; 4],
-            async_on: std::env::var("GENOS_LIGHTING_ASYNC").is_ok_and(|v| v == "1"),
+            async_on: genos_scene::lighting_env("GENOS_LIGHTING_ASYNC").is_ok_and(|v| v == "1"),
             world_cmd: std::ptr::null_mut(),
             world_fence: std::ptr::null_mut(),
             world_set: std::ptr::null_mut(),
@@ -389,13 +388,13 @@ impl Default for Lighting {
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
             mesh_spheres: Vec::new(),
-            young_ok: std::env::var("GENOS_LIGHTING_YOUNG_ONLY").map_or(true, |v| v != "0"),
+            young_ok: genos_scene::lighting_env("GENOS_LIGHTING_YOUNG_ONLY").map_or(true, |v| v != "0"),
             stats_light: [0; 2],
             stats_young: [false; 2],
             dump: Vec::new(),
             world_light: 0,
             world_young: false,
-            cache_hz: std::env::var("GENOS_LIGHTING_CACHE_HZ")
+            cache_hz: genos_scene::lighting_env("GENOS_LIGHTING_CACHE_HZ")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.0),
@@ -969,7 +968,7 @@ impl Gpu {
         // default compose does not write it. High (refresh every frame) is
         // picture + glow + that slice. The screen wavelet appends two vec4
         // slices (32 bytes a pixel) after that, so it does not alias the bounce.
-        // Hash keeps the gi-v2 buffer. Preset high uses the screen slices.
+        // Hash keeps the GI buffer. Preset high uses the screen slices.
         let screen = u64::from(settings.denoiser.enabled && settings.denoiser.screen);
         self.lighting.out = self.make_buffer(
             pixels * (12 + 4 * hist + 32 * screen),
@@ -1091,11 +1090,11 @@ impl Gpu {
         let world_mode = self.lighting.settings.world_mode();
         let world_wait = match world_mode {
             2 => {
-                4 * std::env::var("GENOS_LIGHTING_WORLD_CAP").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(32)
+                4 * genos_scene::lighting_env("GENOS_LIGHTING_WORLD_CAP").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(32)
             }
             // Surface cache: GENOS_LIGHTING_SC_SETTLE frames still (experiment: how long
             // its texels take to take in the bounced light).
-            3 => std::env::var("GENOS_LIGHTING_SC_SETTLE").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0),
+            3 => genos_scene::lighting_env("GENOS_LIGHTING_SC_SETTLE").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0),
             _ => 0,
         };
         // Surface cache with flag 8192: texels at the cap keep relighting (their
@@ -1159,7 +1158,7 @@ impl Gpu {
     }
 
     /// Build the sun compose pipeline the first time a small step needs it.
-    /// Startup still compiles the nine gi-v2 pipelines only.
+    /// Startup still compiles the nine lighting pipelines only.
     fn ensure_sun_pipe(&mut self) -> Result<(), String> {
         if !self.lighting.sun_pipe.is_null() {
             return Ok(());
@@ -1711,7 +1710,7 @@ impl Gpu {
         reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
     )]
     fn trace_sc(&self, memory: Handle, queue: &str) {
-        let trace = std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_some();
+        let trace = genos_scene::lighting_env_os("GENOS_LIGHTING_SC_TRACE").is_some();
         let debug = lighting_debug_on();
         if !trace && !debug {
             return;
@@ -1996,7 +1995,7 @@ impl Gpu {
         // the surface cache) and GENOS_LIGHTING_WORLD_CAP frames (mode 3: ray sets a
         // texel averages, default 16).
         let world = self.lighting.settings.world_mode();
-        let cap = std::env::var("GENOS_LIGHTING_WORLD_CAP")
+        let cap = genos_scene::lighting_env("GENOS_LIGHTING_WORLD_CAP")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(if world == 3 { LIGHTING_DEFAULT_SC_CAP } else { 32 })
@@ -2223,13 +2222,13 @@ impl Gpu {
         self.lighting.stats_young[slot] = young_only || sc;
         // z: bgra, fills (bit 6), young-only rounds and lamp picks (lighting_common.glsl);
         // the gather and filter passes add their round (bits 1-2) below.
-        let picks = std::env::var("GENOS_LIGHTING_CACHE_PICKS").is_ok_and(|v| v == "1");
-        let fill = std::env::var("GENOS_LIGHTING_FILL").map_or(true, |v| v != "0");
+        let picks = genos_scene::lighting_env("GENOS_LIGHTING_CACHE_PICKS").is_ok_and(|v| v == "1");
+        let fill = genos_scene::lighting_env("GENOS_LIGHTING_FILL").map_or(true, |v| v != "0");
         // Moving objects (debugging.md, spinning boxes): a probe stratum traced from
         // inside a change is filled, not kept (bit 3); patches near a change are
         // relit first (bit 5); a patch not lit yet reads its lit neighbours (bit 7).
         // Each on unless its variable is 0.
-        let on = |name: &str| std::env::var(name).map_or(true, |v| v != "0");
+        let on = |name: &str| genos_scene::lighting_env(name).map_or(true, |v| v != "0");
         let moved_drop = on("GENOS_LIGHTING_MOVED_DROP");
         let urgent = on("GENOS_LIGHTING_URGENT");
         let borrow = on("GENOS_LIGHTING_BORROW");
@@ -2272,7 +2271,7 @@ impl Gpu {
             || self.lighting.settings.world_mode() != 3
             || !self.lighting.settings.compose_reuse
             || !self.lighting.settings.gi.enabled
-            || std::env::var_os("GENOS_LIGHTING_COMPOSE_ALL").is_some()
+            || genos_scene::lighting_env_os("GENOS_LIGHTING_COMPOSE_ALL").is_some()
             || blocks > LIGHTING_COMPOSE_CAP;
         // The raster colour as the base: pixels with no surface keep it. A held
         // frame keeps last frame's picture in the buffer instead.
@@ -2655,7 +2654,7 @@ impl Gpu {
         reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
     )]
     fn lighting_dump_copy(&mut self) {
-        let Some(n) = std::env::var("GENOS_LIGHTING_DUMP").ok().and_then(|v| v.parse::<u64>().ok()) else {
+        let Some(n) = genos_scene::lighting_env("GENOS_LIGHTING_DUMP").ok().and_then(|v| v.parse::<u64>().ok()) else {
             return;
         };
         let f = self.lighting.frame as u64;
@@ -2707,7 +2706,7 @@ impl Gpu {
             return;
         }
         self.idle_device();
-        let dir = std::env::var("GENOS_LIGHTING_DUMP_DIR").unwrap_or_else(|_| "lighting-dump".into());
+        let dir = genos_scene::lighting_env("GENOS_LIGHTING_DUMP_DIR").unwrap_or_else(|_| "lighting-dump".into());
         let _ = std::fs::create_dir_all(&dir);
         let dumps = std::mem::take(&mut self.lighting.dump);
         for (f, set) in dumps {
@@ -2856,7 +2855,7 @@ fn lighting_counts_light_on_cpu(world_mode: u32, probe_only: bool, counters_read
     probe_only || (world_mode == 3 && !counters_read)
 }
 
-// Defaults with no env set (S54K, gi-v2): GI v2, the surface cache, cap 64, the
+// Defaults with no env set (S54K): GI, the surface cache, cap 64, the
 // S49 flag set and object-local texels. Each env var still overrides.
 const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
 const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
@@ -2918,7 +2917,7 @@ const LIGHTING_ATROUS_STAT: usize = 120;
     reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
 )]
 fn lighting_chg_on() -> bool {
-    std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_some()
+    genos_scene::lighting_env_os("GENOS_LIGHTING_SC_TRACE").is_some()
 }
 
 /// `GENOS_LIGHTING_ATROUS_DIRTY` in millionths. Default 0.25: levels 1-5 keep
@@ -2931,7 +2930,7 @@ fn lighting_chg_on() -> bool {
 )]
 fn lighting_atrous_ppm(override_frac: Option<f32>) -> u32 {
     let frac = override_frac.unwrap_or_else(|| {
-        std::env::var("GENOS_LIGHTING_ATROUS_DIRTY")
+        genos_scene::lighting_env("GENOS_LIGHTING_ATROUS_DIRTY")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.25)
@@ -2947,7 +2946,7 @@ fn lighting_atrous_ppm(override_frac: Option<f32>) -> u32 {
 fn lighting_sc_flags_env() -> u32 {
     static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
-        std::env::var("GENOS_LIGHTING_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(LIGHTING_DEFAULT_SC_FLAGS)
+        genos_scene::lighting_env("GENOS_LIGHTING_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(LIGHTING_DEFAULT_SC_FLAGS)
     })
 }
 
@@ -3160,8 +3159,8 @@ const LIGHTING_TOGGLE_FREEZE_PROBES: u32 = 8;
     reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
 )]
 fn lighting_toggles() -> u32 {
-    let mut text = std::env::var("GENOS_LIGHTING_TOGGLES").unwrap_or_default();
-    if let Ok(path) = std::env::var("GENOS_LIGHTING_TOGGLES_FILE") {
+    let mut text = genos_scene::lighting_env("GENOS_LIGHTING_TOGGLES").unwrap_or_default();
+    if let Ok(path) = genos_scene::lighting_env("GENOS_LIGHTING_TOGGLES_FILE") {
         if let Ok(t) = std::fs::read_to_string(path) {
             text = t;
         }
@@ -3227,7 +3226,7 @@ fn sun_controls() -> SunControls {
     let enabled = cli.enabled.unwrap_or_else(|| sun_env_bool("GENOS_LIGHTING_SUN", true));
     let full_effort = cli
         .full_effort
-        .unwrap_or_else(|| std::env::var("GENOS_LIGHTING_FULL_EFFORT").ok().as_deref() == Some("1"));
+        .unwrap_or_else(|| genos_scene::lighting_env("GENOS_LIGHTING_FULL_EFFORT").ok().as_deref() == Some("1"));
     let bands = cli
         .bands
         .unwrap_or_else(|| sun_env_u32("GENOS_LIGHTING_SUN_BANDS", 8))
@@ -3238,7 +3237,7 @@ fn sun_controls() -> SunControls {
         .min(16);
     let debug = cli
         .debug
-        .unwrap_or_else(|| std::env::var_os("GENOS_LIGHTING_DEBUG").is_some());
+        .unwrap_or_else(|| genos_scene::lighting_env_os("GENOS_LIGHTING_DEBUG").is_some());
     SunControls {
         enabled,
         full_effort,
@@ -3253,18 +3252,17 @@ fn sun_controls() -> SunControls {
     reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
 )]
 fn sun_env_bool(name: &str, default: bool) -> bool {
-    match std::env::var(name) {
+    match genos_scene::lighting_env(name) {
         Ok(text) => !matches!(text.trim(), "0" | "off" | "false"),
         Err(_) => default,
     }
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
-)]
 fn sun_env_u32(name: &str, default: u32) -> u32 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    genos_scene::lighting_env(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// One line per debug frame, so a lamp-stop run can be counted. The first
@@ -3603,7 +3601,7 @@ mod sun_step {
         assert!(check_lighting_sun_arg("--scale", None).is_ok());
     }
 
-    /// The picture compose stays the gi-v2 shader. The sun compose is that pass
+    /// The picture compose stays the GI shader. The sun compose is that pass
     /// plus the sun words, not an occluder walk copied into both.
     #[test]
     fn compose_spirv_stays_near_the_picture_pass() {
