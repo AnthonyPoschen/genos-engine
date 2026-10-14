@@ -629,7 +629,7 @@ fn ui(state: &mut State, scene: &Scene, camera: &Camera, pointer: Pointer) -> Fr
 }
 
 fn pointer(x: f32, y: f32, down: bool) -> Pointer {
-    Pointer { x, y, down }
+    Pointer::at(x, y, down)
 }
 
 fn shown(frame: &Frame, id: u32) -> Shown {
@@ -678,5 +678,6 @@ fn lamp_scene(position: Vec3) -> Scene {
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
         debug: genos_scene::DebugSettings::default(),
+        fps_counter: genos_scene::FpsCounterSettings::default(),
     }
 }

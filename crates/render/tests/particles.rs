@@ -40,6 +40,7 @@ fn room(lamp: [f32; 3]) -> Scene {
         sky: None,
         lighting: genos_scene::LightingSettings::default(),
         debug: genos_scene::DebugSettings::default(),
+        fps_counter: genos_scene::FpsCounterSettings::default(),
     }
 }
 

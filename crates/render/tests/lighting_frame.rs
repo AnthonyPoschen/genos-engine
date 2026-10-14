@@ -135,6 +135,7 @@ fn lighting_draws_emitted_light_and_bounces_it() {
             sky: None,
             lighting: genos_scene::LightingSettings::default(),
             debug: genos_scene::DebugSettings::default(),
+            fps_counter: genos_scene::FpsCounterSettings::default(),
         });
         let mut lit = gltf.clone();
         for m in &mut lit.materials {

@@ -19,6 +19,7 @@ fn tick(camera: &mut Camera, actions: &Actions, dt: f32) {
         sky: None,
         lighting: LightingSettings::default(),
         debug: genos_scene::DebugSettings::default(),
+        fps_counter: genos_scene::FpsCounterSettings::default(),
     };
     update(camera, &mut scene, actions, dt);
 }
