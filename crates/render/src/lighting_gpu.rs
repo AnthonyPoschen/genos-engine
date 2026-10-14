@@ -2116,10 +2116,21 @@ impl Gpu {
             hasher.finish()
         };
         let tracked = if sun_amortise { self.lighting.light_hash } else { light };
+        let counters_read = self.lighting.async_on
+            || lighting_stats_wanted(self.lighting.settings.world_mode());
         if tracked != self.lighting.light_hash {
             self.lighting.light_hash = tracked;
             self.lighting.light_quiet = 0;
-        } else if probe_only(&self.lighting.settings) && self.lighting.still > 0 {
+        } else if self.lighting.still > 0
+            && lighting_counts_light_on_cpu(
+                self.lighting.settings.world_mode(),
+                probe_only(&self.lighting.settings),
+                counters_read,
+            )
+        {
+            // S70B skips the cache-counter read on the default surface cache, and
+            // note_lighting_round is what used to raise light_quiet. Settled needs
+            // that count. Probe-only has always counted here.
             self.lighting.light_quiet = self.lighting.light_quiet.saturating_add(1);
         }
         let sweep = self.lighting.live.div_ceil(LIGHTING_CACHE_BATCH).max(1) + 1;
@@ -2744,6 +2755,15 @@ impl Gpu {
 /// S70B: the frame's counters are read back only where something uses them.
 fn lighting_stats_wanted(world: u32) -> bool {
     lighting_debug_on() || !(world == 3 && lighting_sc_flags_env() & 8192 != 0)
+}
+
+/// Frames since the light last changed, counted on the CPU. The default surface
+/// cache (world mode 3, flag 8192) does not read the cache counters, so
+/// `note_lighting_round` never runs and `light_quiet` would stay 0. `settled`
+/// and the young-only bit both need it. Probe-only does not take the count
+/// from the counters either.
+fn lighting_counts_light_on_cpu(world_mode: u32, probe_only: bool, counters_read: bool) -> bool {
+    probe_only || (world_mode == 3 && !counters_read)
 }
 
 // Defaults with no env set (S54K, gi-v2): GI v2, the surface cache, cap 64, the
@@ -3417,6 +3437,14 @@ mod sun_step {
         lighting.sun_live_dir = dir;
         lighting.sun_live_light = light;
         lighting
+    }
+
+    #[test]
+    fn the_surface_cache_counts_quiet_light_without_the_counter_read() {
+        assert!(super::lighting_counts_light_on_cpu(3, false, false));
+        assert!(!super::lighting_counts_light_on_cpu(3, false, true));
+        assert!(super::lighting_counts_light_on_cpu(0, true, true));
+        assert!(!super::lighting_counts_light_on_cpu(0, false, true));
     }
 
     #[test]
