@@ -127,3 +127,18 @@ next run into noise. The rows are the repeats of this run, not a file under
 ```sh
 python3 scripts/verdict/checkpoint-catalog.py --fixture run/ --repeats 3
 ```
+
+## Fixed pose
+
+`scripts/verdict/pose-diff.py` compares two captures of one checkpoint. The
+capture command is `{"ui": false}`: the debug menu, the menu tab, the
+frame-rate plate, and tool overlays stay out of the picture. A diff image and
+`numbers.csv` (mean absolute error, FLIP, blurred relative luminance) are the
+evidence. The blur and FLIP fail lines decide. The band is `UNSURE`. The first
+capture, with no previous picture, is `UNSURE`. The previous picture is not a
+locked golden.
+
+```sh
+python3 scripts/verdict/pose-diff.py --scene stress --checkpoint hall \
+  --display wayland-1 --before previous.png --after pose.png
+```
