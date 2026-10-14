@@ -1,3 +1,6 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Fixed-cell labels. Measure and draw use the same cell, so a wrapped line
 //! changes the fit size the layout sees.
 
@@ -26,7 +29,7 @@ pub(crate) fn measure(text: &str, max_width: Option<f32>) -> (f32, f32) {
         .iter()
         .map(|line| line.chars().count() as f32 * CELL_W)
         .fold(0.0_f32, f32::max);
-    let width = max_width.map(|limit| width.min(limit)).unwrap_or(width);
+    let width = max_width.map_or(width, |limit| width.min(limit));
     (width, lines.len() as f32 * CELL_H)
 }
 
@@ -189,7 +192,7 @@ mod tests {
     #[test]
     fn printable_ascii_has_its_own_glyph() {
         for code in 32u8..=126 {
-            let ch = code as char;
+            let ch = char::from(code);
             assert_ne!(glyph(ch), BOX, "U+{code:02X} {ch:?} fell through to the box");
             assert_eq!(glyph(ch.to_ascii_lowercase()), glyph(ch.to_ascii_uppercase()));
         }
@@ -209,10 +212,12 @@ mod tests {
         assert_eq!(height, super::CELL_H);
         let marks = super::blots(long, 0.0, 0.0, 24.0);
         assert!(marks.iter().all(|blot| blot.x + blot.w <= 24.0 + 0.01));
-        let columns = marks
+        let mut columns = marks
             .iter()
-            .map(|blot| (blot.x / super::CELL_W).floor() as i32)
-            .collect::<std::collections::BTreeSet<_>>();
+            .map(|blot| (blot.x / super::CELL_W).floor())
+            .collect::<Vec<_>>();
+        columns.sort_by(f32::total_cmp);
+        columns.dedup_by(|a, b| (*a - *b).abs() < 0.5);
         assert_eq!(columns.len(), 2);
         let phrase = super::wrap("Adaptive denoise", Some(8.0 * super::CELL_W));
         assert_eq!(phrase, vec!["Adaptive".to_string(), "denoise".to_string()]);

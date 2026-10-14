@@ -47,6 +47,10 @@ pub use world::{
 };
 
 /// `GENOS_SCENE_DELTA=1`: print each frame's resident scene update (S70C).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+)]
 pub(crate) fn scene_delta_trace() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var_os("GENOS_SCENE_DELTA").is_some())

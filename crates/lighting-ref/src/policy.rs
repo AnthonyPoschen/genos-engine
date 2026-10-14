@@ -1,3 +1,5 @@
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Exit status of one check.
 //!
 //! 0 is a pass. 1 is a fail: the self-test missed, a scored picture failed,

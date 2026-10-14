@@ -1,3 +1,6 @@
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! The title bar hides the menu. A corner tab shows it again.
 
 use genos_scene::Camera;

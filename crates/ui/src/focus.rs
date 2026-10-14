@@ -34,6 +34,11 @@ pub enum InputKind {
 }
 
 /// Events this frame that the UI took. A false field falls through to the game.
+/// Each flag is independent, so a frame can take the wheel and still leave the keys.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "pointer, wheel, keys, and blur are independent fall-through bits"
+)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Consumed {
     pub pointer: bool,
@@ -86,9 +91,8 @@ impl FocusManager {
             FocusPolicy::Modal => true,
             FocusPolicy::Hover => over,
             FocusPolicy::ClickToFocus => match kind {
-                InputKind::Keys => self.focused == Some(panel),
                 InputKind::Pointer => true,
-                InputKind::Wheel => self.focused == Some(panel),
+                InputKind::Keys | InputKind::Wheel => self.focused == Some(panel),
             },
         }
     }

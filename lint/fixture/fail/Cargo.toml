@@ -1,0 +1,13 @@
+[package]
+name = "genos-lint-fail"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+disallowed_methods = "deny"

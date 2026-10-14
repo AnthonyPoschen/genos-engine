@@ -1,3 +1,6 @@
+#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! Tabs and folds are separate. A tab can hold a fold, and a fold can sit outside the tabs.
 
 use genos_scene::Camera;
@@ -145,8 +148,10 @@ fn brackets_change_the_page_and_the_choice_is_remembered() {
     assert!(shows(&kept, 3), "a saved tab wins over the first page");
     assert!(!shows(&kept, 2));
 
-    let mut next = Pointer::default();
-    next.tab_next = true;
+    let next = Pointer {
+        tab_next: true,
+        ..Pointer::default()
+    };
     let press = draw(&mut state, &blocks, next);
     assert!(press.actions.contains(&Action::Press(101)));
     let shown = draw(&mut state, &blocks, Pointer::default());
@@ -154,8 +159,10 @@ fn brackets_change_the_page_and_the_choice_is_remembered() {
     assert!(!shows(&shown, 3));
     assert_eq!(state.selected_tab(100), Some(101));
 
-    let mut prev = Pointer::default();
-    prev.tab_prev = true;
+    let prev = Pointer {
+        tab_prev: true,
+        ..Pointer::default()
+    };
     let _ = draw(&mut state, &blocks, prev);
     let back = draw(&mut state, &blocks, Pointer::default());
     assert!(shows(&back, 3));
@@ -194,7 +201,7 @@ fn a_tab_word_stays_one_line_and_the_bar_does_not_move() {
     assert!((gi.rect.h - shade.rect.h).abs() < 0.5);
     assert!((gi.rect.w - (2.0 * 12.0 + 8.0)).abs() < 1.0);
     assert!(
-        (shade.rect.w - ("Shadows/Ambient".chars().count() as f32 * 12.0 + 8.0)).abs() < 1.0,
+        (shade.rect.w - label_width("Shadows/Ambient")).abs() < 1.0,
         "a tab wider than the row keeps its whole label"
     );
     assert!(panel.rect.w <= 400.0 / 3.0 + 0.5);
@@ -210,8 +217,10 @@ fn a_tab_word_stays_one_line_and_the_bar_does_not_move() {
         shade.rect.h,
     );
 
-    let mut next = Pointer::default();
-    next.tab_next = true;
+    let next = Pointer {
+        tab_next: true,
+        ..Pointer::default()
+    };
     let _ = button_panel_blocks(
         &mut state,
         "stress",
@@ -279,17 +288,17 @@ fn the_selected_tab_uses_the_theme_accent() {
     assert_eq!(
         direct.idle.background,
         [
-            0x33 as f32 / 255.0,
-            0x66 as f32 / 255.0,
-            0x99 as f32 / 255.0
+            f32::from(0x33_u8) / 255.0,
+            f32::from(0x66_u8) / 255.0,
+            f32::from(0x99_u8) / 255.0
         ]
     );
     assert_eq!(
         gi.idle.background,
         [
-            0x11 as f32 / 255.0,
-            0x11 as f32 / 255.0,
-            0x11 as f32 / 255.0
+            f32::from(0x11_u8) / 255.0,
+            f32::from(0x11_u8) / 255.0,
+            f32::from(0x11_u8) / 255.0
         ]
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -323,18 +332,27 @@ fn tab_line() -> f32 {
     16.0 + 8.0
 }
 
+fn label_width(title: &str) -> f32 {
+    let chars = u16::try_from(title.chars().count()).unwrap_or(u16::MAX);
+    f32::from(chars) * 12.0 + 8.0
+}
+
+fn id_at(index: usize) -> u32 {
+    1000 + u32::try_from(index).unwrap_or(0)
+}
+
 fn assert_tabs_fully_visible(frame: &genos_ui::Frame, titles: &[&str], panel: genos_ui::Rect) {
     let line = tab_line();
     for (index, title) in titles.iter().enumerate() {
         let tab = frame
             .shown
             .iter()
-            .find(|shown| shown.id == 1000 + index as u32)
+            .find(|shown| shown.id == id_at(index))
             .unwrap_or_else(|| panic!("{title} is missing"));
         assert_eq!(tab.text.as_deref(), Some(*title));
         assert!((tab.rect.h - line).abs() < 0.5, "{title} is one line");
         assert!(
-            (tab.rect.w - (title.chars().count() as f32 * 12.0 + 8.0)).abs() < 1.0,
+            (tab.rect.w - label_width(title)).abs() < 1.0,
             "{title} keeps its whole label"
         );
         assert!(tab.rect.x >= panel.x - 0.5);
@@ -355,7 +373,7 @@ fn tabs_wrap_onto_another_compact_row_when_the_strip_overflows() {
         tabs: titles
             .iter()
             .enumerate()
-            .map(|(index, title)| titled(1000 + index as u32, title))
+            .map(|(index, title)| titled(id_at(index), title))
             .collect(),
     })];
     let viewport = [1024.0, 400.0];
@@ -402,11 +420,15 @@ fn tabs_wrap_onto_another_compact_row_when_the_strip_overflows() {
         }),
         "no empty filler cell beside the tabs"
     );
+    assert_wide_window_is_one_row(&blocks, &titles, line);
+    assert_the_bar_stays_and_the_page_still_scrolls(&mut state, &blocks, &frame, panel, strip, viewport);
+}
 
+fn assert_wide_window_is_one_row(blocks: &[PanelBlock], titles: &[&str], line: f32) {
     let wide = button_panel_blocks(
         &mut State::default(),
         "stress",
-        &blocks,
+        blocks,
         [1920.0, 1080.0],
         &Camera::opening(),
         Pointer::default(),
@@ -419,34 +441,45 @@ fn tabs_wrap_onto_another_compact_row_when_the_strip_overflows() {
         .rect;
     let wide_strip = wide.shown.iter().find(|shown| shown.id == 100).unwrap().rect;
     assert!(wide_strip.h <= line + 0.5, "a wide panel keeps one row");
-    assert_tabs_fully_visible(&wide, &titles, wide_panel);
+    assert_tabs_fully_visible(&wide, titles, wide_panel);
     let y = wide.shown.iter().find(|shown| shown.id == 1000).unwrap().rect.y;
     assert!(wide
         .shown
         .iter()
         .filter(|shown| (1000..1008).contains(&shown.id))
         .all(|shown| (shown.rect.y - y).abs() < 0.5));
+}
 
+fn assert_the_bar_stays_and_the_page_still_scrolls(
+    state: &mut State,
+    blocks: &[PanelBlock],
+    frame: &genos_ui::Frame,
+    panel: genos_ui::Rect,
+    strip: genos_ui::Rect,
+    viewport: [f32; 2],
+) {
     let bar = frame
         .shown
         .iter()
         .filter(|shown| (1000..1008).contains(&shown.id))
         .map(|shown| (shown.id, shown.rect.x, shown.rect.y, shown.rect.w))
         .collect::<Vec<_>>();
-    let mut next = Pointer::default();
-    next.tab_next = true;
+    let next = Pointer {
+        tab_next: true,
+        ..Pointer::default()
+    };
     let _ = button_panel_blocks(
-        &mut state,
+        state,
         "stress",
-        &blocks,
+        blocks,
         viewport,
         &Camera::opening(),
         next,
     );
     let second = button_panel_blocks(
-        &mut state,
+        state,
         "stress",
-        &blocks,
+        blocks,
         viewport,
         &Camera::opening(),
         Pointer::default(),
@@ -459,7 +492,7 @@ fn tabs_wrap_onto_another_compact_row_when_the_strip_overflows() {
         .collect::<Vec<_>>();
     assert_eq!(after, bar, "changing page does not move the bar");
 
-    let row_y = frame.shown.iter().find(|shown| shown.id == 100001).unwrap().rect.y;
+    let row_y = frame.shown.iter().find(|shown| shown.id == 100_001).unwrap().rect.y;
     let below = Pointer {
         x: panel.x + 8.0,
         y: strip.y + strip.h + 30.0,
@@ -467,9 +500,9 @@ fn tabs_wrap_onto_another_compact_row_when_the_strip_overflows() {
         ..Pointer::default()
     };
     let page = button_panel_blocks(
-        &mut state,
+        state,
         "stress",
-        &blocks,
+        blocks,
         viewport,
         &Camera::opening(),
         below,
@@ -477,7 +510,7 @@ fn tabs_wrap_onto_another_compact_row_when_the_strip_overflows() {
     assert_ne!(
         page.shown
             .iter()
-            .find(|shown| shown.id == 100001)
+            .find(|shown| shown.id == 100_001)
             .map(|shown| shown.rect.y),
         Some(row_y)
     );

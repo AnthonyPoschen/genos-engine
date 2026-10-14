@@ -7,15 +7,18 @@
 //! keys. `--menu` wins for `visible`. `GENOS_MENU` applies only when that
 //! argument was omitted, and then a set variable wins every frame.
 
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 use crate::EngineSettings;
 
 /// How one panel claims one kind of input. The game picks this per panel and can
 /// change it while the frame loop is running.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FocusPolicy {
     /// While the panel is shown it owns this input. A click outside does not escape.
     Modal,
     /// This input arrives only while the pointer is over the panel.
+    #[default]
     Hover,
     /// A click on the panel takes this input. A click outside, Escape, or grave releases it.
     ClickToFocus,
@@ -24,6 +27,7 @@ pub enum FocusPolicy {
 }
 
 impl FocusPolicy {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Modal => "modal",
@@ -34,13 +38,11 @@ impl FocusPolicy {
     }
 }
 
-impl Default for FocusPolicy {
-    fn default() -> Self {
-        Self::Hover
-    }
-}
-
 /// `hover`, `modal`, `click`, or `passive`. `exclusive` is modal.
+///
+/// # Errors
+///
+/// Returns an error when `value` is not one of those words.
 pub fn parse_focus_policy(value: &str) -> Result<FocusPolicy, String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "modal" | "exclusive" => Ok(FocusPolicy::Modal),
@@ -90,6 +92,10 @@ impl Default for MenuSettings {
 impl MenuSettings {
     /// `--menu shown` or `--menu hidden`. `--menu=hidden` is the same flag.
     /// A bare `--menu` is an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `--menu` has no value, or that value is not shown or hidden.
     pub fn cli_from(args: &[String]) -> Result<MenuCli, String> {
         let mut visible = None;
         let mut index = 0;
@@ -115,6 +121,10 @@ impl MenuSettings {
     }
 
     /// The process arguments. A bad flag is an error so the binary can exit at startup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `--menu` is present and its value is not shown or hidden.
     pub fn cli() -> Result<MenuCli, String> {
         let args: Vec<String> = std::env::args().skip(1).collect();
         Self::cli_from(&args)
@@ -124,6 +134,11 @@ impl MenuSettings {
     ///
     /// A CLI slot wins for `visible`. When that slot is empty, `GENOS_MENU` wins.
     /// Otherwise the field is used. `tab` and `collapsed` stay on the struct.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+    )]
+    #[must_use]
     pub fn effective(&self) -> Self {
         let cli = Self::cli().unwrap_or(MenuCli { visible: None });
         let env_visible = if cli.visible.is_none() {
@@ -136,6 +151,7 @@ impl MenuSettings {
 
     /// Same rule as [`Self::effective`], with the CLI and environment supplied.
     /// An environment string that is empty or not a value is ignored.
+    #[must_use]
     pub fn resolve(&self, cli_visible: Option<bool>, env_visible: Option<&str>) -> Self {
         let mut settings = self.clone();
         if let Some(on) = cli_visible {
@@ -146,6 +162,8 @@ impl MenuSettings {
         settings
     }
 
+    /// Text form: `visible`, `tab`, `collapsed`, `wheel`, and `keys`.
+    #[must_use]
     pub fn to_text(&self) -> String {
         format!(
             "visible={}\ntab={}\ncollapsed={}\nwheel={}\nkeys={}\n",
@@ -157,6 +175,11 @@ impl MenuSettings {
         )
     }
 
+    /// Parse the text form.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a line is not `key=value`, or a value is not valid for its key.
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut settings = Self::default();
         for raw in text.split(['\n', ';']) {
@@ -172,6 +195,11 @@ impl MenuSettings {
         Ok(settings)
     }
 
+    /// Set one key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `key` is unknown, or `value` is not valid for that key.
     pub fn set_key(&mut self, key: &str, value: &str) -> Result<(), String> {
         let key = key.trim();
         let value = value.trim();
@@ -226,6 +254,10 @@ impl EngineSettings for MenuSettings {
 }
 
 /// `shown` and `hidden` are the menu words. `on` and `off` are accepted too.
+///
+/// # Errors
+///
+/// Returns an error when `value` is not a shown or hidden word.
 pub fn parse_menu_visible(value: &str) -> Result<bool, String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "on" | "yes" | "shown" | "show" => Ok(true),
@@ -256,8 +288,8 @@ mod tests {
     fn default_is_shown_on_the_first_page() {
         let settings = MenuSettings::default();
         assert!(settings.visible);
-        assert!(settings.tab.is_empty());
-        assert!(settings.collapsed.is_empty());
+        assert_eq!(settings.tab, "");
+        assert_eq!(settings.collapsed, Vec::<String>::new());
         let text = EngineSettings::to_text(&settings);
         assert_eq!(
             text,
@@ -293,7 +325,7 @@ mod tests {
             vec!["gi".to_string(), "direct".to_string()]
         );
         settings.set_key("collapsed", "").unwrap();
-        assert!(settings.collapsed.is_empty());
+        assert_eq!(settings.collapsed, Vec::<String>::new());
         settings.set_key("wheel", "passive").unwrap();
         settings.set_key("focus_keys", "modal").unwrap();
         assert_eq!(settings.wheel, FocusPolicy::Passive);
@@ -358,11 +390,11 @@ mod tests {
         assert!(!scene.menu.visible);
         assert_eq!(scene.menu.tab, "GI");
         assert_eq!(scene.menu.collapsed, vec!["world".to_string()]);
-        assert!(!crate::load_str(&{
+        assert!(crate::load_str(&{
             let mut off = std::fs::read_to_string(path).unwrap();
             off.push_str("\nmenu(\"visible=maybe\")\n");
             off
         })
-        .is_ok());
+        .is_err());
     }
 }

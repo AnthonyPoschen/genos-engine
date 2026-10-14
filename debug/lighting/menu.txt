@@ -38,6 +38,11 @@ GI | gi | Probes | open | lighting_budget_shift
 GI | gi | Probes | open | lighting_probe_rays
 GI | gi | Probes | open | lighting_probe_stale
 GI | world | World cache | closed | lighting_world_stale
+GI | world | World cache | closed | lighting_surface_cache_attach_movers
+GI | world | World cache | closed | lighting_surface_cache_blend
+GI | world | World cache | closed | lighting_surface_cache_firefly_sigma
+GI | world | World cache | closed | lighting_surface_cache_ray_budget
+GI | world | World cache | closed | lighting_surface_cache_dormant_rays
 GI | world | World cache | closed | lighting_screen_verify
 GI | world | World cache | closed | lighting_world_verify
 Denoise | - | - | open | lighting_denoise_iters

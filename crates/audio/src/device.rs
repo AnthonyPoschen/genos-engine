@@ -1,3 +1,11 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::manual_is_multiple_of, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::needless_return, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::undocumented_unsafe_blocks, reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md")]
+
 //! Device backends. Each one writes an already mixed stereo buffer.
 
 /// Submit interleaved 16-bit stereo PCM. The return value is frames the device consumed.
@@ -298,6 +306,10 @@ mod wasapi {
         Ok(written)
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): fixed sleep. Wait on an event or a deadline. docs/LINT_RULES.md"
+    )]
     unsafe fn fill(
         client: *mut c_void,
         render: *mut c_void,
@@ -338,6 +350,10 @@ mod wasapi {
         Ok(done as u64)
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): fixed sleep. Wait on an event or a deadline. docs/LINT_RULES.md"
+    )]
     unsafe fn wait_until_empty(client: *mut c_void, capacity: u32) -> Result<(), String> {
         let padding: unsafe extern "system" fn(*mut c_void, *mut u32) -> i32 = vcall(client, 6);
         for _ in 0..400 {
@@ -435,6 +451,10 @@ mod core_audio {
         }
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): fixed sleep. Wait on an event or a deadline. docs/LINT_RULES.md"
+    )]
     pub fn play(interleaved: &[i16], device_rate: u32) -> Result<u64, String> {
         unsafe {
             let format = StreamDesc {

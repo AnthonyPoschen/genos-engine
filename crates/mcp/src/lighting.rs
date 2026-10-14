@@ -1,3 +1,5 @@
+#![expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! The latest lighting report from the running picture.
 //!
 //! The renderer writes it. `GET /lighting` and the `lighting_status` tool read it.

@@ -1,8 +1,12 @@
+#![cfg_attr(test, expect(clippy::expect_fun_call, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! Lighting settings: presets, the text form, and a scene file that overrides them.
 
 use genos_scene::{
     load_str, AmbientMode, EngineSettings, LampPickMode, LightingPreset, LightingSettings,
-    LIGHTING_BOUNCES_UNLIMITED,
+    SurfaceCacheBlend, LIGHTING_BOUNCES_UNLIMITED,
 };
 
 fn room() -> &'static str {
@@ -13,6 +17,58 @@ fn room() -> &'static str {
      solid(\"circle\", -3.0, 2.0, 1.4, 0.0, 0.0, 1.0);\n\
      solid(\"square\", 2.5, -2.0, 1.4, 0.0, 1.0, 0.0);\n\
      light(0.0, 4.0, 2.0, 1.0, 1.0, 1.0);\n"
+}
+
+#[test]
+fn surface_cache_attach_movers_round_trips() {
+    let mut settings = LightingSettings::default();
+    assert!(settings.surface_cache.attach_movers);
+    settings
+        .set_key("surface_cache.attach_movers", "off")
+        .unwrap();
+    assert!(!settings.surface_cache.attach_movers);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!(!parsed.surface_cache.attach_movers);
+    assert_eq!(parsed.preset_label(), "custom");
+    settings
+        .set_key("surface_cache.attach_movers", "on")
+        .unwrap();
+    assert!(settings.surface_cache.attach_movers);
+    assert!(settings
+        .set_key("surface_cache.attach_movers", "maybe")
+        .is_err());
+}
+
+#[test]
+fn surface_cache_blend_and_firefly_sigma_round_trip() {
+    let mut settings = LightingSettings::default();
+    assert_eq!(settings.surface_cache.blend, SurfaceCacheBlend::Msme);
+    assert!((settings.surface_cache.firefly_sigma - 8.0).abs() < 1.0e-6);
+    settings.set_key("surface_cache.blend", "hold").unwrap();
+    settings
+        .set_key("surface_cache.firefly_sigma", "0")
+        .unwrap();
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert_eq!(parsed.surface_cache.blend, SurfaceCacheBlend::Hold);
+    assert_eq!(parsed.surface_cache.firefly_sigma, 0.0);
+    assert_eq!(parsed.preset_label(), "custom");
+    assert!(settings.set_key("surface_cache.blend", "snap").is_err());
+    assert!(settings
+        .set_key("surface_cache.firefly_sigma", "-2")
+        .is_err());
+    settings.set_key("surface_cache.blend", "msme").unwrap();
+    settings
+        .set_key("surface_cache.firefly_sigma", "8")
+        .unwrap();
+    assert_eq!(settings.preset_label(), "high");
+    settings.set_key("surface_cache.ray_budget", "2048").unwrap();
+    settings.set_key("surface_cache.dormant_rays", "4").unwrap();
+    let budget = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert_eq!(budget.surface_cache.ray_budget, 2048);
+    assert_eq!(budget.surface_cache.dormant_rays, 4);
+    settings.set_key("surface_cache.dormant_rays", "20").unwrap();
+    assert_eq!(settings.surface_cache.dormant_rays, 16);
+    assert_eq!(budget.preset_label(), "custom");
 }
 
 #[test]
@@ -125,31 +181,48 @@ fn potato_is_direct_shadows_and_flat_ambient() {
 }
 
 #[test]
-fn every_preset_launches_the_hash_wavelet_and_screen_is_opt_in() {
+fn high_launches_the_screen_wavelet_and_the_key_overrides_it() {
+    let high = LightingSettings::preset(LightingPreset::High);
+    assert!(high.denoiser.screen);
+    assert!(high.to_text().contains("denoise_launch=screen"));
+    assert_eq!(high.preset_label(), "high");
     for preset in LightingPreset::all() {
+        if *preset == LightingPreset::High {
+            continue;
+        }
         let settings = LightingSettings::preset(*preset);
         assert!(
             !settings.denoiser.screen,
-            "{} defaults to the hash launch",
+            "{} keeps the hash launch",
+            preset.name()
+        );
+        assert!(
+            settings.to_text().contains("denoise_launch=hash"),
+            "{}",
             preset.name()
         );
     }
-    let mut high = LightingSettings::preset(LightingPreset::High);
-    assert!(high.to_text().contains("denoise_launch=hash"));
-    high.set_key("denoise_launch", "screen").unwrap();
-    assert!(high.denoiser.screen);
-    assert!(high.to_text().contains("denoise_launch=screen"));
-    let parsed = LightingSettings::parse(&high.to_text()).unwrap();
+    // `--denoise-launch` and `GENOS_LIGHTING_DENOISE_LAUNCH` overlay this key
+    // after the preset, the same path `set_key` uses.
+    let mut over = high.clone();
+    over.set_key("denoise_launch", "hash").unwrap();
+    assert!(!over.denoiser.screen);
+    assert!(over.to_text().contains("denoise_launch=hash"));
+    assert_eq!(over.preset_label(), "custom");
+    over.set_key("denoise_launch", "screen").unwrap();
+    assert!(over.denoiser.screen);
+    assert_eq!(over.preset_label(), "high");
+    over.set_key("denoise_screen", "off").unwrap();
+    assert!(!over.denoiser.screen);
+    over.set_key("denoise_screen", "on").unwrap();
+    assert!(over.denoiser.screen);
+    let parsed = LightingSettings::parse(&over.to_text()).unwrap();
     assert!(parsed.denoiser.screen);
-    high.set_key("denoise_screen", "off").unwrap();
-    assert!(!high.denoiser.screen);
-    high.set_key("denoise_launch", "hash").unwrap();
-    assert!(!high.denoiser.screen);
-    high.set_key("full_effort", "on").unwrap();
-    assert!(!high.denoiser.screen);
-    high.set_key("full_effort", "off").unwrap();
-    assert!(!high.denoiser.screen);
-    assert_eq!(high, LightingSettings::preset(LightingPreset::High));
+    over.set_key("full_effort", "on").unwrap();
+    assert!(!over.denoiser.screen);
+    over.set_key("full_effort", "off").unwrap();
+    assert!(over.denoiser.screen);
+    assert_eq!(over, LightingSettings::preset(LightingPreset::High));
 }
 
 #[test]
@@ -214,10 +287,12 @@ fn high_is_the_tuned_path() {
     assert_eq!(high.bounce.count, LIGHTING_BOUNCES_UNLIMITED);
     assert_eq!(high.probe_rays(), 64);
     assert_eq!(high.denoiser.iterations, 5);
+    assert!(high.denoiser.screen);
     assert!(!high.denoiser.adaptive);
     assert!(high.denoiser.plain());
     let medium = LightingSettings::preset(LightingPreset::Medium);
     assert_eq!(medium.denoiser.iterations, 3);
+    assert!(!medium.denoiser.screen);
     assert!(!medium.denoiser.adaptive);
     assert!(medium.denoiser.plain());
     let low = LightingSettings::preset(LightingPreset::Low);

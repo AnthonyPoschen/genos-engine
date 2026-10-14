@@ -1,3 +1,5 @@
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 use genos_scene::{
     transform_point, update, view_proj, viewport_uv, Actions, Camera, Floor, LightingSettings, Scene,
     Vec3, CAMERA_HEIGHT, PITCH_LIMIT,

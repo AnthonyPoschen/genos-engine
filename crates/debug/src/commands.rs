@@ -1,3 +1,5 @@
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! The command catalogue the MCP port lists. Each command takes one JSON object.
 
 use genos_mcp::command::CommandSpec;
@@ -93,6 +95,14 @@ pub fn specs() -> Vec<CommandSpec> {
             "set_fps_counter",
             "Partial frame-rate overlay update. Keys are enabled (on/off) and rate_hz (0.25 to 30). A text field overlays key=value lines. Writes the scene. --fps-counter, --fps-hz, and the GENOS_FPS_* mirrors still overlay the value the readout uses.",
         ),
+    ]
+    .into_iter()
+    .chain(host_specs())
+    .collect()
+}
+
+fn host_specs() -> Vec<CommandSpec> {
+    vec![
         spec(
             "get_menu_settings",
             "The debug menu in force (text form): visible (shown or hidden), tab (page title), collapsed (folded section keys), wheel, and keys. wheel and keys are hover, modal, click, or passive. Shown by default, with hover for the wheel and click for keys. --menu wins over GENOS_MENU, which wins over the scene value. tab, collapsed, wheel, and keys are the stored fields.",

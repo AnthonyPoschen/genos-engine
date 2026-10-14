@@ -123,8 +123,8 @@ Role: SCHED · Literature: — (closest: ReSTIR visibility reuse validation) · 
 **Hold** (*hysteresis*): keeps the stored value when the new one differs by less than its noise.
 Role: TEMPORAL · Literature: different from DDGI "hysteresis", which means a blend weight (naming collision) · More detail: [`lighting_direct.comp`](../../crates/render/shaders/lighting_direct.comp) ~L30; S78T
 
-**Denoiser**: the SVGF à-trous wavelet filter over the surface light cache (1, 3 or 5 iterations).
-Role: DENOISE · Literature: SVGF (Schied 2017); GIBS also denoises (§1.19); Lumen screen-space denoise · More detail: [`lighting_atrous.comp`](../../crates/render/shaders/lighting_atrous.comp); S77D, S78X
+**Denoiser**: the SVGF à-trous wavelet filter over the surface light cache (1, 3 or 5 iterations). Preset high launches it over the picture. The other presets launch it over hash slots.
+Role: DENOISE · Literature: SVGF (Schied 2017); GIBS also denoises (§1.19); Lumen screen-space denoise · More detail: [`lighting_atrous.comp`](../../crates/render/shaders/lighting_atrous.comp), [`lighting_screen.comp`](../../crates/render/shaders/lighting_screen.comp); S77D, S78X, S80
 
 **Dirty list**: the pages that changed this round. The denoiser runs only on them until they pass `dirty_fraction`.
 Role: SCHED · Literature: —
@@ -132,8 +132,8 @@ Role: SCHED · Literature: —
 **Adaptive denoise**: skips later à-trous iterations where variance is already low.
 Role: DENOISE · Literature: variance-guided SVGF · More detail: `denoise_variance`; S79
 
-**Screen denoise** (PR #40, in flight): a change-scaled denoise in screen space.
-Role: DENOISE · Literature: Lumen/GIBS screen denoise · More detail: PR #40, [`lighting_screen.comp`](../../crates/render/shaders/lighting_screen.comp)
+**Screen denoise**: the picture-sized launch of the denoiser (`denoise_launch=screen`). Preset high uses it. The other presets keep `hash`. `--denoise-launch` and `GENOS_LIGHTING_DENOISE_LAUNCH` override the preset.
+Role: DENOISE · Literature: Lumen/GIBS screen denoise; the kernel is still SVGF (Schied 2017) · More detail: [`lighting_screen.comp`](../../crates/render/shaders/lighting_screen.comp); S80
 
 **Visibility / leak test**: stops light passing through thin walls. Today it is handled by the facing axis and the cell size. Depth moments are not used.
 Role: VIS · Literature: GIBS depth moments + Chebyshev (§1.10); DDGI Chebyshev visibility · More detail: [GIBS.md §1.10](research/GIBS.md)

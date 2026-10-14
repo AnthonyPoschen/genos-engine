@@ -1,3 +1,17 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::disallowed_methods, reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md")]
+#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::redundant_closure, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::semicolon_if_nothing_returned, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::similar_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+
 //! Lighting stress test: a big, fairly open building with windows, skylights and wide
 //! doorways, still and moving lamps, a sun on a day/night cycle, and coloured boxes
 //! that slide and spin. `--scale small|big` tiles one 25 m section 1 or 16 times so the
@@ -105,6 +119,27 @@ const USAGE: &str = "genos-stress [options]
   --trace                   capture the picture after every script command that changes it
   --preset NAME             potato, day-cycle, gi-1bounce, low, medium, high
                             (GENOS_LIGHTING_PRESET is the mirror)
+  --surface-cache-attach-movers on|off
+                            store mover cache entries in the object's frame
+                            (GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS;
+                            GENOS_LIGHTING_SC_LOCAL is the previous mirror,
+                            used only when this is omitted)
+  --surface-cache-blend msme|hold
+                            published blend (GENOS_LIGHTING_SURFACE_CACHE_BLEND).
+                            msme is MultiscaleMeanEstimator.hlsl; hold is the
+                            older snap path
+  --surface-cache-firefly-sigma F
+                            MSME firefly clamp in sigmas, default 8, biased
+                            (GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA).
+                            0 keeps the 0.1 floor
+  --surface-cache-ray-budget N
+                            cap on cache-round rays; 0 keeps the existing lists
+                            (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET)
+  --surface-cache-dormant-rays N
+                            fresh rays per frame for a dormant cache entry, 0..16.
+                            0 keeps one sweep in eight. 1..16 traces one new
+                            16-ray entry every ceil(16 / N) frames
+                            (GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS)
   --bounces 0|1|2|unlimited bounce count (GENOS_LIGHTING_BOUNCES)
   --ambient MODE            off, constant, hemisphere, day, or curve
                             (GENOS_LIGHTING_AMBIENT)
@@ -113,8 +148,9 @@ const USAGE: &str = "genos-stress [options]
                             (GENOS_LIGHTING_DENOISE_ADAPTIVE). Off on every preset
   --denoise-variance F      relative luminance deviation, 0..0.1 (GENOS_LIGHTING_DENOISE_VARIANCE)
   --denoise-launch hash|screen
-                            picture wavelet (GENOS_LIGHTING_DENOISE_LAUNCH). Default hash
-                            on every preset. screen is the opt-in speed path
+                            picture wavelet (GENOS_LIGHTING_DENOISE_LAUNCH). Preset high
+                            uses screen. The other presets keep hash. This flag and the
+                            variable override the preset
   --denoise-screen on|off   alias of --denoise-launch (on is screen, off is hash)
   --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
   --lamp-pick MODE          off, hits, pixels, both, or reuse (experimental)

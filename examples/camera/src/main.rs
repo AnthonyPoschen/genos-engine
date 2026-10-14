@@ -1,3 +1,19 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::bool_to_int_with_if, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![expect(clippy::format_push_string, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::similar_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::unwrap_used, reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md")]
+#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -5,7 +21,7 @@ use std::time::{Duration, Instant};
 use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
 use genos_render::{Antialias, Renderer, ScreenRect, Simulation, World};
 
-/// The flame, the smoke, and the flame lamp stay off while the radiance field is under study.
+/// The flame, the smoke, and the flame lamp stay off.
 const SHOW_PARTICLES: bool = false;
 use genos_scene::{load_path, update, Actions, Camera, Codimation, Easing, Scene, Vec3};
 use genos_ui::{
@@ -953,6 +969,10 @@ const BENCH_SETTLE_LIMIT: Duration = Duration::from_secs(10);
 const BENCH_WARMUP: Duration = Duration::from_secs(3);
 
 impl Bench {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a binary or harness reads the environment and passes the value down. docs/LINT_RULES.md"
+    )]
     fn from_env(scene: &Scene, camera: Camera) -> Result<Option<Self>, String> {
         let Ok(value) = std::env::var("GENOS_BENCH") else {
             return Ok(None);

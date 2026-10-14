@@ -1,3 +1,17 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::field_reassign_with_default, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![expect(clippy::manual_is_multiple_of, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::needless_pass_by_value, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::semicolon_if_nothing_returned, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! Lighting settings: the reference [`crate::EngineSettings`] value.
 //!
 //! A game, a scene file, a script, MCP, and the debug menu edit this one struct.
@@ -10,7 +24,9 @@
 //! matching variable applies only when that argument was omitted.
 //!
 //! Defaults match the tuned GI path (preset `high`): every feature on, unlimited
-//! bounces, 64 rays per probe, the surface cache, five a-trous iterations.
+//! bounces, 64 rays per probe, the surface cache, five a-trous iterations on
+//! the picture wavelet. The other presets keep the hash-slot launch.
+//! `--denoise-launch` and `GENOS_LIGHTING_DENOISE_LAUNCH` override the preset.
 
 use std::fmt::Write as _;
 
@@ -30,7 +46,8 @@ pub enum LightingPreset {
     Low,
     /// Surface cache, two bounces, half the ray budget shift.
     Medium,
-    /// The tuned default: unlimited bounces, 64 rays, five denoiser iterations.
+    /// The tuned default: unlimited bounces, 64 rays, five denoiser iterations
+    /// on the picture wavelet.
     High,
 }
 
@@ -242,6 +259,35 @@ pub struct ShadowSettings {
     pub refresh_frames: u32,
 }
 
+/// How a surface-cache entry blends a finished set into its published mean.
+///
+/// `Msme` is the multi-scale mean estimator in Barré-Brisebois et al.,
+/// Ray Tracing Gems ch. 25, `MultiscaleMeanEstimator.hlsl` (short mean, short
+/// variance, long mean). `Hold` is the older path: a short window while the
+/// light changes, then a snap back to the new set once it is quiet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceCacheBlend {
+    Msme,
+    Hold,
+}
+
+impl SurfaceCacheBlend {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Msme => "msme",
+            Self::Hold => "hold",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "msme" => Some(Self::Msme),
+            "hold" => Some(Self::Hold),
+            _ => None,
+        }
+    }
+}
+
 /// Global illumination as a whole. Off skips every GI pass and the GI buffers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GiSettings {
@@ -280,9 +326,13 @@ pub struct ProbeSettings {
     pub staleness_frames: u32,
 }
 
-/// Surface cache and world radiance cache (world mode 3).
-/// Off selects the probe path (world mode 0) and skips the a-trous filter,
-/// which only filters the surface cache.
+/// The surface light cache (world mode 3). The glossary's world cache is this
+/// cache. Off selects the probe path (world mode 0) and skips the a-trous
+/// filter, which only filters this cache.
+///
+/// `world_cache`, `world_cell`, `world_refresh`, and `world_stale` are the
+/// current keys. Moving them under `surface_cache.*`, and keeping the old keys
+/// as deprecated aliases, is step 1 of `docs/lighting/RENAMES.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldCacheSettings {
     pub enabled: bool,
@@ -310,9 +360,9 @@ pub struct DenoiserSettings {
     /// adaptive is on.
     pub variance_threshold: f32,
     /// `denoise_launch=screen`: picture-sized wavelet over this frame's visible
-    /// fine texels. False is `hash`, the gi-v2 slot launch. Every preset
-    /// defaults to hash. The screen launch is opt-in and is not the picture
-    /// reference.
+    /// fine texels. False is `hash`, the gi-v2 slot launch. Preset high uses
+    /// screen. The other presets use hash. `--denoise-launch` and
+    /// `GENOS_LIGHTING_DENOISE_LAUNCH` override the preset.
     pub screen: bool,
 }
 
@@ -351,6 +401,36 @@ pub struct AmbientSettings {
     pub dusk_intensity: f32,
 }
 
+/// Knobs of the surface light cache. The world cache is this same cache.
+///
+/// A cache entry is one hashed surface patch. `slot` is only its storage index.
+/// `world_cache`, `world_cell`, `world_refresh`, and `world_stale` are the
+/// current keys for the switch, the cell, the refresh, and the stale time.
+/// Moving those keys under `surface_cache.*`, and keeping the old keys as
+/// deprecated aliases, is step 1 of `docs/lighting/RENAMES.md`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceCacheSettings {
+    /// Cache entries on a moving object are stored in that object's frame and
+    /// transformed each frame. Static geometry stays on the world lattice.
+    /// Off keeps those entries world-anchored.
+    pub attach_movers: bool,
+    /// Published blend. Only a finished long-term mean is shown.
+    pub blend: SurfaceCacheBlend,
+    /// Firefly clamp in standard deviations of the short-term mean.
+    ///
+    /// The listing uses 8. The clamp is biased: a sample above
+    /// `0.1 + short mean + sigma * deviation` is pulled down before the means
+    /// update. `0` leaves that `0.1` floor and still clamps. The hold path
+    /// does not read this.
+    pub firefly_sigma: f32,
+    /// Cap on rays dispatched in one cache round. `0` keeps the existing lists.
+    pub ray_budget: u32,
+    /// Fresh rays per frame for a dormant cache entry, a whole number from 0 to 16.
+    /// `0` keeps one sweep in eight. `1` through `16` trace one new 16-ray entry
+    /// every `ceil(16 / rays)` frames, which is that many rays per frame.
+    pub dormant_rays: u32,
+}
+
 /// Everything the lighting frame reads. PartialEq so a live edit reallocates
 /// only when a size knob changes.
 #[derive(Clone, Debug, PartialEq)]
@@ -359,6 +439,7 @@ pub struct LightingSettings {
     pub direct: DirectSettings,
     pub shadows: ShadowSettings,
     pub gi: GiSettings,
+    pub surface_cache: SurfaceCacheSettings,
     pub bounce: BounceSettings,
     pub probes: ProbeSettings,
     pub world_cache: WorldCacheSettings,
@@ -389,6 +470,9 @@ impl LightingSettings {
         match preset {
             LightingPreset::High => {
                 s.lamp_pick.mode = LampPickMode::Hits;
+                // Picture wavelet. The other presets keep the hash launch
+                // stored in `high_defaults`.
+                s.denoiser.screen = true;
             }
             LightingPreset::DayCycle => {
                 s.gi.enabled = false;
@@ -489,6 +573,13 @@ impl LightingSettings {
                 budget_shift: 0,
                 world_mode: None,
             },
+            surface_cache: SurfaceCacheSettings {
+                attach_movers: true,
+                blend: SurfaceCacheBlend::Msme,
+                firefly_sigma: 8.0,
+                ray_budget: 0,
+                dormant_rays: 0,
+            },
             bounce: BounceSettings {
                 count: LIGHTING_BOUNCES_UNLIMITED,
             },
@@ -546,6 +637,12 @@ impl LightingSettings {
         self.shadows.cell_metres = self.shadows.cell_metres.clamp(0.05, 2.0);
         self.gi.refresh_frames = self.gi.refresh_frames.max(1);
         self.gi.budget_shift = self.gi.budget_shift.min(7);
+        self.surface_cache.firefly_sigma = if self.surface_cache.firefly_sigma.is_finite() {
+            self.surface_cache.firefly_sigma.max(0.0)
+        } else {
+            8.0
+        };
+        self.surface_cache.dormant_rays = self.surface_cache.dormant_rays.min(16);
         if let Some(mode) = self.gi.world_mode {
             self.gi.world_mode = Some(mode.min(3));
         }
@@ -683,7 +780,8 @@ impl LightingSettings {
         self.denoiser.enabled = true;
         self.denoiser.iterations = 5;
         self.denoiser.dirty_fraction = 0.0;
-        // Full effort is the dense hash wavelet, the same launch as every preset.
+        // Full effort stays the dense hash wavelet. High's preset uses the
+        // screen launch; this action does not.
         self.denoiser.screen = false;
         self.compose_reuse = false;
         self.sky = true;
@@ -842,6 +940,31 @@ impl LightingSettings {
         let _ = writeln!(out, "gi={}", bit(self.gi.enabled));
         let _ = writeln!(out, "gi_refresh={}", self.gi.refresh_frames);
         let _ = writeln!(out, "budget_shift={}", self.gi.budget_shift);
+        let _ = writeln!(
+            out,
+            "surface_cache.attach_movers={}",
+            bit(self.surface_cache.attach_movers)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.blend={}",
+            self.surface_cache.blend.name()
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.firefly_sigma={}",
+            num_text(self.surface_cache.firefly_sigma)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.ray_budget={}",
+            self.surface_cache.ray_budget
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.dormant_rays={}",
+            self.surface_cache.dormant_rays
+        );
         if let Some(mode) = self.gi.world_mode {
             let _ = writeln!(out, "world_mode={mode}");
         }
@@ -995,6 +1118,23 @@ impl LightingSettings {
             "gi" => self.gi.enabled = on(value)?,
             "gi_refresh" => self.gi.refresh_frames = num_u32(value)?.max(1),
             "budget_shift" => self.gi.budget_shift = num_u32(value)?.min(7),
+            "surface_cache.attach_movers" => self.surface_cache.attach_movers = on(value)?,
+            "surface_cache.blend" => {
+                self.surface_cache.blend = SurfaceCacheBlend::parse(value).ok_or_else(|| {
+                    format!("surface_cache.blend is msme or hold, got {value}")
+                })?
+            }
+            "surface_cache.firefly_sigma" => {
+                let sigma = num_f32(value)?;
+                if !sigma.is_finite() || sigma < 0.0 {
+                    return Err(format!(
+                        "surface_cache.firefly_sigma is a non-negative number, got {value}"
+                    ));
+                }
+                self.surface_cache.firefly_sigma = sigma;
+            }
+            "surface_cache.ray_budget" => self.surface_cache.ray_budget = num_u32(value)?,
+            "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
             "world_mode" => self.gi.world_mode = Some(num_u32(value)?.min(3)),
             "bounces" => self.bounce.count = parse_bounces(value)?,
             "probes" => self.probes.enabled = on(value)?,
@@ -1090,6 +1230,10 @@ impl LightingSettings {
     /// holds that hour. The scene clock survives a preset replace unless the
     /// time mirror is the lock. The other variables overlay one key each. A set
     /// `GENOS_LIGHTING_COMPOSE_ALL` forces compose reuse off.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+    )]
     pub fn apply_env(&mut self) {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -1097,6 +1241,12 @@ impl LightingSettings {
         let bounces = std::env::var("GENOS_LIGHTING_BOUNCES").ok();
         let ambient = std::env::var("GENOS_LIGHTING_AMBIENT").ok();
         let time = std::env::var("GENOS_LIGHTING_TIME").ok();
+        let attach = std::env::var("GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS").ok();
+        let sc_local = std::env::var("GENOS_LIGHTING_SC_LOCAL").ok();
+        let blend = std::env::var("GENOS_LIGHTING_SURFACE_CACHE_BLEND").ok();
+        let firefly = std::env::var("GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA").ok();
+        let ray_budget = std::env::var("GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET").ok();
+        let dormant_rays = std::env::var("GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS").ok();
         let Ok(launch) = resolve_lighting_launch(
             &refs,
             &LightingMirrors {
@@ -1104,6 +1254,12 @@ impl LightingSettings {
                 bounces: bounces.as_deref(),
                 ambient: ambient.as_deref(),
                 time_of_day: time.as_deref(),
+                attach_movers: attach.as_deref(),
+                sc_local: sc_local.as_deref(),
+                blend: blend.as_deref(),
+                firefly_sigma: firefly.as_deref(),
+                ray_budget: ray_budget.as_deref(),
+                dormant_rays: dormant_rays.as_deref(),
             },
         ) else {
             return;
@@ -1192,6 +1348,21 @@ impl LightingSettings {
         if let Some(mode) = launch.ambient {
             self.ambient.mode = mode;
         }
+        if let Some(attach) = launch.attach_movers {
+            self.surface_cache.attach_movers = attach;
+        }
+        if let Some(blend) = launch.blend {
+            self.surface_cache.blend = blend;
+        }
+        if let Some(sigma) = launch.firefly_sigma {
+            self.surface_cache.firefly_sigma = sigma;
+        }
+        if let Some(budget) = launch.ray_budget {
+            self.surface_cache.ray_budget = budget;
+        }
+        if let Some(rays) = launch.dormant_rays {
+            self.surface_cache.dormant_rays = rays;
+        }
         self.time_of_day = launch.time_mirror.unwrap_or(clock);
         self.sanitize();
         self.sync_preset_field();
@@ -1256,6 +1427,11 @@ struct LightingLaunch {
     bounces: Option<u32>,
     ambient: Option<AmbientMode>,
     time_mirror: Option<f32>,
+    attach_movers: Option<bool>,
+    blend: Option<SurfaceCacheBlend>,
+    firefly_sigma: Option<f32>,
+    ray_budget: Option<u32>,
+    dormant_rays: Option<u32>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1264,6 +1440,13 @@ struct LightingMirrors<'a> {
     bounces: Option<&'a str>,
     ambient: Option<&'a str>,
     time_of_day: Option<&'a str>,
+    attach_movers: Option<&'a str>,
+    /// Previous name of [`Self::attach_movers`]. Used only when that mirror is unset.
+    sc_local: Option<&'a str>,
+    blend: Option<&'a str>,
+    firefly_sigma: Option<&'a str>,
+    ray_budget: Option<&'a str>,
+    dormant_rays: Option<&'a str>,
 }
 
 enum LightingKind {
@@ -1271,6 +1454,11 @@ enum LightingKind {
     Bounces,
     Ambient,
     Time,
+    AttachMovers,
+    Blend,
+    FireflySigma,
+    RayBudget,
+    DormantRays,
 }
 
 enum LightingFlag {
@@ -1278,6 +1466,11 @@ enum LightingFlag {
     Bounces(u32),
     Ambient(AmbientMode),
     Time(f32),
+    AttachMovers(bool),
+    Blend(SurfaceCacheBlend),
+    FireflySigma(f32),
+    RayBudget(u32),
+    DormantRays(u32),
 }
 
 /// `Some(true)` when `arg` is a lighting flag that reads the next argument.
@@ -1335,6 +1528,23 @@ fn resolve_lighting_launch(
         } else {
             env.time_of_day.and_then(parse_clock)
         },
+        attach_movers: chosen.attach_movers.or_else(|| {
+            env.attach_movers
+                .and_then(|value| on(value).ok())
+                .or_else(|| env.sc_local.and_then(|value| on(value).ok()))
+        }),
+        blend: chosen
+            .blend
+            .or_else(|| env.blend.and_then(SurfaceCacheBlend::parse)),
+        firefly_sigma: chosen.firefly_sigma.or_else(|| {
+            env.firefly_sigma.and_then(|value| parse_firefly_sigma(value).ok())
+        }),
+        ray_budget: chosen
+            .ray_budget
+            .or_else(|| env.ray_budget.and_then(|value| num_u32(value).ok())),
+        dormant_rays: chosen
+            .dormant_rays
+            .or_else(|| env.dormant_rays.and_then(|value| num_u32(value).ok())),
     })
 }
 
@@ -1344,6 +1554,11 @@ struct ChosenLighting {
     bounces: Option<u32>,
     ambient: Option<AmbientMode>,
     time: Option<f32>,
+    attach_movers: Option<bool>,
+    blend: Option<SurfaceCacheBlend>,
+    firefly_sigma: Option<f32>,
+    ray_budget: Option<u32>,
+    dormant_rays: Option<u32>,
 }
 
 impl ChosenLighting {
@@ -1353,6 +1568,11 @@ impl ChosenLighting {
             LightingFlag::Bounces(count) => self.bounces = Some(count),
             LightingFlag::Ambient(mode) => self.ambient = Some(mode),
             LightingFlag::Time(hours) => self.time = Some(hours),
+            LightingFlag::AttachMovers(on) => self.attach_movers = Some(on),
+            LightingFlag::Blend(blend) => self.blend = Some(blend),
+            LightingFlag::FireflySigma(sigma) => self.firefly_sigma = Some(sigma),
+            LightingFlag::RayBudget(count) => self.ray_budget = Some(count),
+            LightingFlag::DormantRays(count) => self.dormant_rays = Some(count),
         }
     }
 }
@@ -1374,6 +1594,11 @@ fn lighting_kind(name: &str) -> Option<LightingKind> {
         "bounces" => Some(LightingKind::Bounces),
         "ambient" => Some(LightingKind::Ambient),
         "time-of-day" => Some(LightingKind::Time),
+        "surface-cache-attach-movers" => Some(LightingKind::AttachMovers),
+        "surface-cache-blend" => Some(LightingKind::Blend),
+        "surface-cache-firefly-sigma" => Some(LightingKind::FireflySigma),
+        "surface-cache-ray-budget" => Some(LightingKind::RayBudget),
+        "surface-cache-dormant-rays" => Some(LightingKind::DormantRays),
         _ => None,
     }
 }
@@ -1410,6 +1635,22 @@ fn parse_lighting_flag(arg: &str, next: Option<&str>) -> Result<Option<LightingF
         LightingKind::Time => LightingFlag::Time(
             parse_clock(value).ok_or_else(|| format!("{flag} {value} is not a time of day"))?,
         ),
+        LightingKind::AttachMovers => LightingFlag::AttachMovers(
+            on(value).map_err(|_| format!("{flag} {value} is not on or off"))?,
+        ),
+        LightingKind::Blend => LightingFlag::Blend(
+            SurfaceCacheBlend::parse(value)
+                .ok_or_else(|| format!("{flag} {value} is not msme or hold"))?,
+        ),
+        LightingKind::FireflySigma => LightingFlag::FireflySigma(parse_firefly_sigma(value).map_err(
+            |_| format!("{flag} {value} is not a non-negative number"),
+        )?),
+        LightingKind::RayBudget => LightingFlag::RayBudget(
+            num_u32(value).map_err(|_| format!("{flag} {value} is not a number"))?,
+        ),
+        LightingKind::DormantRays => LightingFlag::DormantRays(
+            num_u32(value).map_err(|_| format!("{flag} {value} is not a number"))?,
+        ),
     };
     Ok(Some(parsed))
 }
@@ -1441,6 +1682,10 @@ fn bit(v: bool) -> u32 {
 }
 
 /// A set variable turns the flag on, except the explicit off words.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+)]
 fn env_flag(name: &str) -> bool {
     match std::env::var(name) {
         Ok(value) => !matches!(value.trim(), "0" | "false" | "off" | "no"),
@@ -1461,6 +1706,15 @@ fn num_u32(value: &str) -> Result<u32, String> {
         .parse::<u32>()
         .or_else(|_| value.parse::<f32>().map(|v| v.round().max(0.0) as u32))
         .map_err(|_| format!("expected a number, got {value}"))
+}
+
+fn parse_firefly_sigma(value: &str) -> Result<f32, String> {
+    let sigma = num_f32(value)?;
+    if sigma.is_finite() && sigma >= 0.0 {
+        Ok(sigma)
+    } else {
+        Err(format!("expected a non-negative number, got {value}"))
+    }
 }
 
 fn num_f32(value: &str) -> Result<f32, String> {
@@ -1634,5 +1888,83 @@ mod launch_tests {
         );
         assert!(check_lighting_arg("--ambient=off", None).is_ok());
         assert!(check_lighting_arg("--time-of-day=18:24", None).is_ok());
+    }
+
+    #[test]
+    fn attach_movers_argument_wins_over_both_mirrors() {
+        let mut settings = LightingSettings::default();
+        assert!(settings.surface_cache.attach_movers);
+        let off =
+            resolve_lighting_launch(&["--surface-cache-attach-movers", "off"], &empty()).unwrap();
+        settings.apply_launch(&off);
+        assert!(!settings.surface_cache.attach_movers);
+
+        let mut env = empty();
+        env.attach_movers = Some("off");
+        env.sc_local = Some("1");
+        let from_new = resolve_lighting_launch(&[], &env).unwrap();
+        settings = LightingSettings::default();
+        settings.apply_launch(&from_new);
+        assert!(!settings.surface_cache.attach_movers);
+
+        env.attach_movers = None;
+        env.sc_local = Some("0");
+        let from_old = resolve_lighting_launch(&[], &env).unwrap();
+        settings = LightingSettings::default();
+        settings.apply_launch(&from_old);
+        assert!(!settings.surface_cache.attach_movers);
+
+        let cli =
+            resolve_lighting_launch(&["--surface-cache-attach-movers=on"], &env).unwrap();
+        settings.apply_launch(&cli);
+        assert!(settings.surface_cache.attach_movers);
+        assert!(check_lighting_arg("--surface-cache-attach-movers", Some("maybe")).is_err());
+    }
+
+    #[test]
+    fn blend_and_firefly_arguments_win_over_the_mirrors() {
+        let mut settings = LightingSettings::default();
+        assert_eq!(settings.surface_cache.blend, SurfaceCacheBlend::Msme);
+        assert!((settings.surface_cache.firefly_sigma - 8.0).abs() < 1.0e-6);
+
+        let mut env = empty();
+        env.blend = Some("hold");
+        env.firefly_sigma = Some("4");
+        let from_env = resolve_lighting_launch(&[], &env).unwrap();
+        settings.apply_launch(&from_env);
+        assert_eq!(settings.surface_cache.blend, SurfaceCacheBlend::Hold);
+        assert!((settings.surface_cache.firefly_sigma - 4.0).abs() < 1.0e-6);
+
+        let cli = resolve_lighting_launch(
+            &[
+                "--surface-cache-blend",
+                "msme",
+                "--surface-cache-firefly-sigma=12",
+            ],
+            &env,
+        )
+        .unwrap();
+        settings.apply_launch(&cli);
+        assert_eq!(settings.surface_cache.blend, SurfaceCacheBlend::Msme);
+        assert!((settings.surface_cache.firefly_sigma - 12.0).abs() < 1.0e-6);
+
+        assert!(check_lighting_arg("--surface-cache-blend", Some("snap")).is_err());
+        assert!(check_lighting_arg("--surface-cache-firefly-sigma", Some("-1")).is_err());
+        assert!(check_lighting_arg("--surface-cache-firefly-sigma", Some("0")).is_ok());
+
+        let rays = resolve_lighting_launch(
+            &["--surface-cache-ray-budget", "4096", "--surface-cache-dormant-rays=4"],
+            &empty(),
+        )
+        .unwrap();
+        settings = LightingSettings::default();
+        settings.apply_launch(&rays);
+        assert_eq!(settings.surface_cache.ray_budget, 4096);
+        assert_eq!(settings.surface_cache.dormant_rays, 4);
+        let clamped = resolve_lighting_launch(&["--surface-cache-dormant-rays=20"], &empty()).unwrap();
+        settings = LightingSettings::default();
+        settings.apply_launch(&clamped);
+        assert_eq!(settings.surface_cache.dormant_rays, 16);
+        assert_eq!(settings.surface_cache.blend, SurfaceCacheBlend::Msme);
     }
 }

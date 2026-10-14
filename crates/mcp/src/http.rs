@@ -1,3 +1,9 @@
+#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::needless_pass_by_value, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::while_let_loop, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Loopback Streamable HTTP for one MCP session.
 //!
 //! `POST /mcp` carries JSON-RPC. `GET /mcp` is the server-sent event stream
@@ -83,6 +89,10 @@ impl Drop for Server {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): fixed sleep. Wait on an event or a deadline. docs/LINT_RULES.md"
+)]
 fn accept_loop(
     listener: TcpListener,
     host: Host,

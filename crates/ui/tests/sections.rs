@@ -1,3 +1,6 @@
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! A section title folds the rows under it, and the next frame keeps that fold.
 
 use genos_scene::Camera;
@@ -49,7 +52,7 @@ fn a_section_stays_folded_on_the_next_frame() {
         Pointer::at(header.rect.x + 8.0, header.rect.y + 4.0, true),
     );
     assert_eq!(press.actions, vec![Action::Press(11)]);
-    assert!(state.section_collapsed(11) == false);
+    assert!(!state.section_collapsed(11));
     let open = draw(&mut state, &sections, Pointer::default());
     assert!(open.shown.iter().any(|shown| shown.id == 2));
     assert!(open

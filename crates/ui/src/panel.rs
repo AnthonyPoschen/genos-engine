@@ -1,3 +1,18 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::float_cmp, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::if_same_then_else, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::needless_pass_by_value, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+
 //! The lighting panel, the lamp sun, and the pointer step the camera frame uses.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -421,6 +436,7 @@ impl PanelSection {
     }
 
     /// Put tabs or more folds inside this fold.
+    #[must_use]
     pub fn with_blocks(mut self, blocks: Vec<PanelBlock>) -> Self {
         self.blocks = blocks;
         self
@@ -616,7 +632,18 @@ pub fn button_panel(
     drag_panel(state, pointer);
     refresh_palette(state);
     let panel = panel_tree(state, title, rows, &[], None, false);
-    finish_panel(state, panel, rows, &[], &[], viewport, camera, pointer)
+    finish_panel(
+        state,
+        panel,
+        rows,
+        PanelTargets {
+            sections: &[],
+            tabs: &[],
+        },
+        viewport,
+        camera,
+        pointer,
+    )
 }
 
 /// Lay out the same panel as [`button_panel`], grouped under folding section titles.
@@ -644,7 +671,18 @@ pub fn button_panel_sections(
     }
     let max_width = viewport[0] / 3.0;
     let panel = panel_tree(state, title, &visible, sections, Some(max_width), true);
-    finish_panel(state, panel, &visible, &ids, &[], viewport, camera, pointer)
+    finish_panel(
+        state,
+        panel,
+        &visible,
+        PanelTargets {
+            sections: &ids,
+            tabs: &[],
+        },
+        viewport,
+        camera,
+        pointer,
+    )
 }
 
 /// Lay out folds and tab strips. A tab's blocks can be folds. A fold's blocks
@@ -677,8 +715,10 @@ pub fn button_panel_blocks(
         state,
         panel,
         &visible,
-        &section_ids,
-        &tab_ids,
+        PanelTargets {
+            sections: &section_ids,
+            tabs: &tab_ids,
+        },
         viewport,
         camera,
         pointer,
@@ -752,7 +792,7 @@ fn panel_tree(
                     let mut part = item.clone();
                     part.checks = chunk.to_vec();
                     panel.children.push(row_node(
-                        own + 2 + 3 * row_index as u32,
+                        own + 2 + 3 * u32_from_usize(row_index),
                         &part,
                         fill,
                         palette,
@@ -763,7 +803,7 @@ fn panel_tree(
                 }
             } else {
                 panel.children.push(row_node(
-                    own + 2 + 3 * row_index as u32,
+                    own + 2 + 3 * u32_from_usize(row_index),
                     item,
                     fill,
                     palette,
@@ -902,7 +942,7 @@ fn push_row(panel: &mut Node, item: &PanelRow, lay: &mut BlockLay) {
             let mut part = item.clone();
             part.checks = chunk.to_vec();
             panel.children.push(row_node(
-                lay.own + 2 + 3 * lay.row_index as u32,
+                lay.own + 2 + 3 * u32_from_usize(lay.row_index),
                 &part,
                 lay.fill,
                 lay.palette,
@@ -913,7 +953,7 @@ fn push_row(panel: &mut Node, item: &PanelRow, lay: &mut BlockLay) {
         }
     } else {
         panel.children.push(row_node(
-            lay.own + 2 + 3 * lay.row_index as u32,
+            lay.own + 2 + 3 * u32_from_usize(lay.row_index),
             item,
             lay.fill,
             lay.palette,
@@ -953,13 +993,22 @@ fn tab_rows(tabs: &[PanelTab], limit: f32) -> Vec<Vec<&PanelTab>> {
             0.0
         };
         used += gap + width;
-        rows.last_mut().expect("row").push(tab);
+        if let Some(row) = rows.last_mut() {
+            row.push(tab);
+        }
     }
     rows
 }
 
 fn tab_row_id(strip: u32, index: usize) -> u32 {
-    strip.wrapping_mul(16).wrapping_add(index as u32).wrapping_add(3)
+    strip
+        .wrapping_mul(16)
+        .wrapping_add(u32_from_usize(index))
+        .wrapping_add(3)
+}
+
+fn u32_from_usize(index: usize) -> u32 {
+    u32::try_from(index).unwrap_or(u32::MAX)
 }
 
 fn tab_strip(
@@ -1014,13 +1063,17 @@ fn tab_button(tab: &PanelTab, selected: bool, palette: Option<Palette>) -> Node 
 
 /// Arrow keys step a focused slider. Otherwise they walk checks, sliders,
 /// dropdowns, and press targets from top to bottom, then left to right.
+struct FocusWidgets<'a> {
+    bars: &'a [&'a PanelSlider],
+    drops: &'a [&'a PanelDropdown],
+    checks: &'a [&'a PanelCheck],
+}
+
 fn step_or_move_focus(
     state: &mut State,
     items: &[Item],
     page: &PageScroll,
-    bars: &[&PanelSlider],
-    drops: &[&PanelDropdown],
-    checks: &[&PanelCheck],
+    widgets: &FocusWidgets<'_>,
     pointer: Pointer,
     actions: &mut Vec<Action>,
 ) -> bool {
@@ -1029,13 +1082,13 @@ fn step_or_move_focus(
     }
     if let Some(bar) = state
         .focus
-        .and_then(|id| bars.iter().copied().find(|bar| bar.id == id))
+        .and_then(|id| widgets.bars.iter().copied().find(|bar| bar.id == id))
     {
         let delta = i32::from(pointer.key_inc) - i32::from(pointer.key_dec);
         push_step(actions, bar, delta);
         return true;
     }
-    let ids = focusable_ids(items, page, bars, drops, checks);
+    let ids = focusable_ids(items, page, widgets.bars, widgets.drops, widgets.checks);
     if ids.is_empty() {
         return false;
     }
@@ -1071,7 +1124,7 @@ fn focusable_ids(
             || checks.iter().any(|check| check.id == item.id)
             || matches!(
                 item.action,
-                Some(Action::Press(_)) | Some(Action::Toggle { .. })
+                Some(Action::Press(_) | Action::Toggle { .. })
             );
         if widget {
             ranked.push((rect.y, rect.x, item.id));
@@ -1194,8 +1247,11 @@ fn cycle_tab(
 }
 
 fn check_columns(inner: f32) -> usize {
-    let cols = ((inner + 4.0) / (CHECK_CELL + 4.0)).floor() as usize;
-    cols.clamp(2, CHECK_COLUMNS)
+    if inner + 4.0 >= (CHECK_CELL + 4.0) * (CHECK_COLUMNS as f32) {
+        CHECK_COLUMNS
+    } else {
+        2
+    }
 }
 
 fn check_cell(inner: f32, columns: usize) -> f32 {
@@ -1662,16 +1718,22 @@ fn intersect(a: Rect, b: Rect) -> Option<Rect> {
     }
 }
 
+struct PanelTargets<'a> {
+    sections: &'a [u32],
+    tabs: &'a [(u32, u32)],
+}
+
 fn finish_panel(
     state: &mut State,
     panel: Node,
     rows: &[PanelRow],
-    section_ids: &[u32],
-    tab_ids: &[(u32, u32)],
+    targets: PanelTargets<'_>,
     viewport: [f32; 2],
     camera: &Camera,
     pointer: Pointer,
 ) -> Frame {
+    let section_ids = targets.sections;
+    let tab_ids = targets.tabs;
     let panel_id = panel.id;
     let press_edge = pointer.down && !state.down;
     let palette = state.palette;
@@ -1727,8 +1789,7 @@ fn finish_panel(
         || match policy.map(|policy| policy.keys) {
             Some(FocusPolicy::Passive) => false,
             Some(FocusPolicy::Hover) => over,
-            Some(FocusPolicy::Modal) | Some(FocusPolicy::ClickToFocus) => true,
-            None => true,
+            Some(FocusPolicy::Modal | FocusPolicy::ClickToFocus) | None => true,
         };
     if press_edge && !pointer_open {
         look_capture = true;
@@ -1878,7 +1939,12 @@ fn finish_panel(
                 actions.push(action);
                 consumed.keys = true;
             }
-            if step_or_move_focus(state, &items, &page, &bars, &drops, &checks, pointer, &mut actions)
+            let widgets = FocusWidgets {
+                bars: &bars,
+                drops: &drops,
+                checks: &checks,
+            };
+            if step_or_move_focus(state, &items, &page, &widgets, pointer, &mut actions)
             {
                 consumed.keys = true;
             }
@@ -1951,7 +2017,7 @@ fn finish_panel(
         };
         if let Some(clip) = clip {
             for paint in &mut part {
-                match intersect(
+                if let Some(rect) = intersect(
                     Rect {
                         x: paint.x,
                         y: paint.y,
@@ -1960,16 +2026,13 @@ fn finish_panel(
                     },
                     clip,
                 ) {
-                    Some(rect) => {
-                        paint.x = rect.x;
-                        paint.y = rect.y;
-                        paint.w = rect.w;
-                        paint.h = rect.h;
-                    }
-                    None => {
-                        paint.w = 0.0;
-                        paint.h = 0.0;
-                    }
+                    paint.x = rect.x;
+                    paint.y = rect.y;
+                    paint.w = rect.w;
+                    paint.h = rect.h;
+                } else {
+                    paint.w = 0.0;
+                    paint.h = 0.0;
                 }
             }
         }

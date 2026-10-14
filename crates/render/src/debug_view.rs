@@ -1,3 +1,10 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::undocumented_unsafe_blocks, reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md")]
+
 //! Debug switches for the picture: what the lighting's compose pass shows, and
 //! per-lamp reports. The tools crate drives these; a game frame leaves them at
 //! their defaults, which change nothing.
@@ -24,11 +31,14 @@ pub enum ViewMode {
     /// 12.5 cm, blue 25 cm, magenta coarser), dimmed where the texel holds fewer
     /// than 4 sets; shaded by the normal so surfaces read.
     Texels,
+    /// Short-term relative standard deviation of the cache entry under each
+    /// pixel. Grey is a missing or unallocated entry. Blue is quiet, red is noisy.
+    Variance,
 }
 
 impl ViewMode {
     /// In the compose pass's code order (lighting_compose.comp).
-    pub const ALL: [ViewMode; 8] = [
+    pub const ALL: [ViewMode; 9] = [
         Self::Full,
         Self::Direct,
         Self::Bounce,
@@ -37,6 +47,7 @@ impl ViewMode {
         Self::Depth,
         Self::Light,
         Self::Texels,
+        Self::Variance,
     ];
 
     pub fn name(self) -> &'static str {
@@ -49,6 +60,7 @@ impl ViewMode {
             Self::Depth => "depth",
             Self::Light => "light",
             Self::Texels => "texels",
+            Self::Variance => "variance",
         }
     }
 

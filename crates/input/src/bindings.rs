@@ -28,6 +28,7 @@ pub struct KeyBindings {
 
 impl KeyBindings {
     /// Menu, frame-rate plate, and unfilled count. Function keys stay as aliases.
+    #[must_use]
     pub fn builtin() -> Self {
         Self {
             actions: vec![
@@ -119,6 +120,7 @@ impl KeyBindings {
     ///
     /// A chord with `shift` matches only while shift is down. A chord without
     /// shift matches only while shift is up, so shift-U does not also fire `unfilled`.
+    #[must_use]
     pub fn pressed(&self, input: &InputSystem, action: &str) -> bool {
         let Some(action) = self.actions.iter().find(|item| item.name == action) else {
             return false;
@@ -144,6 +146,10 @@ impl KeyBindings {
     }
 
     /// Apply a config file. Each listed action replaces its chords.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a line has no action, names an unknown key, or lists no keys.
     pub fn apply_text(&mut self, text: &str) -> Result<(), String> {
         for (index, raw) in text.lines().enumerate() {
             let line = raw.split('#').next().unwrap_or("").trim();
@@ -158,8 +164,7 @@ impl KeyBindings {
             for token in parts {
                 let (shift, code_name) = token
                     .strip_prefix('+')
-                    .map(|rest| (true, rest))
-                    .unwrap_or((false, token));
+                    .map_or((false, token), |rest| (true, rest));
                 let code = parse(code_name)
                     .ok_or_else(|| format!("line {}: unknown key {code_name}", index + 1))?;
                 chords.push(Chord { code, shift });
@@ -173,6 +178,7 @@ impl KeyBindings {
     }
 
     /// Words for the help line. The primary key is first.
+    #[must_use]
     pub fn hint(&self, action: &str) -> String {
         let Some(action) = self.actions.iter().find(|item| item.name == action) else {
             return String::new();
@@ -180,6 +186,7 @@ impl KeyBindings {
         action
             .chords
             .iter()
+            .copied()
             .map(chord_label)
             .collect::<Vec<_>>()
             .join(" or ")
@@ -187,6 +194,14 @@ impl KeyBindings {
 }
 
 /// Built-in debug keys, then `GENOS_DEBUG_KEYS` when that path is set.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or a line is not `action key [key...]`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+)]
 pub fn debug_keys() -> Result<KeyBindings, String> {
     let mut keys = KeyBindings::builtin();
     if let Ok(path) = std::env::var("GENOS_DEBUG_KEYS") {
@@ -204,26 +219,42 @@ fn action(name: &str, chords: &[Chord]) -> ActionKeys {
     }
 }
 
-fn chord_label(chord: &Chord) -> String {
-    let word = match chord.code {
-        InputCode::key_grave => "grave".to_string(),
-        InputCode::key_left_bracket => "left bracket".to_string(),
-        InputCode::key_right_bracket => "right bracket".to_string(),
-        InputCode::key_tab => "tab".to_string(),
-        InputCode::key_f => "F".to_string(),
-        InputCode::key_u => "U".to_string(),
-        InputCode::key_f1 => "F1".to_string(),
-        InputCode::key_f3 => "F3".to_string(),
-        InputCode::key_f8 => "F8".to_string(),
-        other => {
-            let raw = name(other);
+fn chord_label(chord: Chord) -> String {
+    let word = special_label(chord.code).map_or_else(
+        || {
+            let raw = name(chord.code);
             raw.strip_prefix("key_").unwrap_or(raw).to_string()
-        }
-    };
+        },
+        str::to_string,
+    );
     if chord.shift {
         format!("shift-{word}")
     } else {
         word
+    }
+}
+
+fn special_label(code: InputCode) -> Option<&'static str> {
+    if code == InputCode::key_grave {
+        Some("grave")
+    } else if code == InputCode::key_left_bracket {
+        Some("left bracket")
+    } else if code == InputCode::key_right_bracket {
+        Some("right bracket")
+    } else if code == InputCode::key_tab {
+        Some("tab")
+    } else if code == InputCode::key_f {
+        Some("F")
+    } else if code == InputCode::key_u {
+        Some("U")
+    } else if code == InputCode::key_f1 {
+        Some("F1")
+    } else if code == InputCode::key_f3 {
+        Some("F3")
+    } else if code == InputCode::key_f8 {
+        Some("F8")
+    } else {
+        None
     }
 }
 

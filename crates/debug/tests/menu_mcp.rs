@@ -1,3 +1,7 @@
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! Menu visibility, page, and folds round-trip through the settings text and MCP.
 //!
 //! Config checks run before the window opens. The command thread then blocks in

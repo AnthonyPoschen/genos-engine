@@ -1,3 +1,5 @@
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! A page taller than the window scrolls. The tab bar stays where it was.
 //! The wheel follows the panel's wheel policy.
 
@@ -58,8 +60,7 @@ fn y_of(frame: &genos_ui::Frame, id: u32) -> f32 {
         .shown
         .iter()
         .find(|shown| shown.id == id)
-        .map(|shown| shown.rect.y)
-        .unwrap_or(-1.0)
+        .map_or(-1.0, |shown| shown.rect.y)
 }
 
 #[test]
@@ -87,10 +88,12 @@ fn the_page_scrolls_and_the_tab_bar_stays() {
         "the panel stays inside the window"
     );
 
-    let mut wheel = Pointer::default();
-    wheel.x = panel_bottom.x + 8.0;
-    wheel.y = panel_bottom.y + 8.0;
-    wheel.wheel_y = -6.0;
+    let wheel = Pointer {
+        x: panel_bottom.x + 8.0,
+        y: panel_bottom.y + 8.0,
+        wheel_y: -6.0,
+        ..Pointer::default()
+    };
     let scrolled = draw(&mut state, wheel);
     assert_eq!(y_of(&scrolled, 101), tab_y, "the tab bar moved");
     assert!(
@@ -220,6 +223,6 @@ fn a_slider_wheel_follows_the_same_policy() {
         &Camera::opening(),
         wheel,
     );
-    assert!(held.actions.is_empty());
+    assert_eq!(held.actions, Vec::new());
     assert!(!held.consumed.wheel);
 }

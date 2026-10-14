@@ -1,3 +1,22 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::assert_is_empty, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::disallowed_methods, reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
+#![expect(clippy::large_enum_variant, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::trivially_copy_pass_by_ref, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::unnecessary_wraps, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::unwrap_used, reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md")]
+#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+
 //! Lighting debug binary. Scenes come from `debug/scenes/`. Arguments choose the
 //! scene, the checkpoint, the lighting preset, and where pictures land.
 //! `./genos-debug/<kind>/` is the default output. `--out` overrides it.
@@ -37,14 +56,31 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --look X,Y,Z           world point to aim at. --look=X,Y,Z is the same flag.
                          Yaw 0 looks down -Z
   --preset NAME          potato, low, medium, or high. Sets GENOS_LIGHTING_PRESET
+  --surface-cache-attach-movers on|off
+                         mover cache entries follow the object
+                         (GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS)
+  --surface-cache-blend msme|hold
+                         published blend (GENOS_LIGHTING_SURFACE_CACHE_BLEND)
+  --surface-cache-firefly-sigma F
+                         MSME firefly clamp, default 8, biased
+                         (GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA)
+  --surface-cache-ray-budget N
+                         cache-round ray cap; 0 keeps the existing lists
+                         (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET)
+  --surface-cache-dormant-rays N
+                         fresh rays per frame for a dormant cache entry, 0..16.
+                         0 keeps one sweep in eight. 1..16 traces one new
+                         16-ray entry every ceil(16 / N) frames
+                         (GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS)
   --gpu-times N          print GPU_MS every N frames (GENOS_GPU_TIMES)
   --lighting-debug       print the lighting probe line (GENOS_LIGHTING_DEBUG)
   --unfilled             show the texels view (slots with fewer than 4 sets are dim)
   --full-effort          preset high, unless --preset is set, and compose every frame
                          (GENOS_LIGHTING_COMPOSE_ALL)
   --denoise-launch hash|screen
-                         picture wavelet (GENOS_LIGHTING_DENOISE_LAUNCH). Default hash.
-                         screen is the opt-in speed path
+                         picture wavelet (GENOS_LIGHTING_DENOISE_LAUNCH). Preset high
+                         uses screen. The other presets keep hash. This flag and the
+                         variable override the preset
   --denoise-screen on|off alias of --denoise-launch (GENOS_LIGHTING_DENOISE_SCREEN)
   --headless             proof window, no panel
   --frames N             quit after N frames. The last frame PNG leaves out
@@ -127,6 +163,9 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_lamp_pick_history",
     "lighting_gi_refresh",
     "lighting_budget_shift",
+    "lighting_surface_cache_firefly_sigma",
+    "lighting_surface_cache_ray_budget",
+    "lighting_surface_cache_dormant_rays",
     "lighting_probe_rays",
     "lighting_probe_stale",
     "lighting_world_stale",
@@ -140,9 +179,10 @@ const DROP_KNOBS: &[&str] = &[
     "lighting_shadow_filter",
     "lighting_ambient",
     "lighting_lamp_pick",
+    "lighting_surface_cache_blend",
 ];
-const VIEWS: [&str; 7] = [
-    "full", "direct", "bounce", "albedo", "normal", "depth", "texels",
+const VIEWS: [&str; 8] = [
+    "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance",
 ];
 const PRESETS: [&str; 4] = ["potato", "low", "medium", "high"];
 
@@ -245,13 +285,13 @@ fn run() -> Result<(), String> {
     let mut tracked_collapsed = app.scene().menu.collapsed.clone();
     let mut tracked_tab = app.scene().menu.tab.clone();
     if let Some(names) = load_menu_folds(&opts.out) {
-        app.scene().menu.collapsed = names.clone();
-        tracked_collapsed = names.clone();
+        app.scene().menu.collapsed.clone_from(&names);
+        tracked_collapsed.clone_from(&names);
         apply_collapsed(&mut ui, &folds, &names);
     }
     if let Some(name) = load_menu_tab(&opts.out) {
-        app.scene().menu.tab = name.clone();
-        tracked_tab = name.clone();
+        app.scene().menu.tab.clone_from(&name);
+        tracked_tab.clone_from(&name);
         ui.select_tab(strip_id(0), tab_id(&name));
     }
     let mut input = InputSystem::new();
@@ -382,9 +422,11 @@ fn run() -> Result<(), String> {
             &menu,
             menu_open,
             drew_panel,
-            &opts.out,
-            &mut tracked_collapsed,
-            &mut tracked_tab,
+            &mut MenuWrite {
+                out: &opts.out,
+                collapsed: &mut tracked_collapsed,
+                tab: &mut tracked_tab,
+            },
         )?;
         let mut overlay: Vec<ScreenRect> = paints
             .iter()
@@ -1001,6 +1043,7 @@ fn view_name(mode: ViewMode) -> &'static str {
         ViewMode::Normal => "normal",
         ViewMode::Depth => "depth",
         ViewMode::Texels => "texels",
+        ViewMode::Variance => "variance",
         ViewMode::Light => "light",
         ViewMode::Full => "full",
     }
@@ -1155,7 +1198,9 @@ fn panel_blocks(
         let Some(piece) = setting_piece(app, view, fps, &line.setting) else {
             continue;
         };
-        let section = sections.last_mut().expect("section");
+        let Some(section) = sections.last_mut() else {
+            continue;
+        };
         match piece {
             Piece::Row(row) => {
                 flush_checks(section);
@@ -1196,7 +1241,9 @@ fn panel_blocks(
                     });
                     strip_index += 1;
                 }
-                let tabs = strip.as_mut().expect("strip");
+                let Some(tabs) = strip.as_mut() else {
+                    continue;
+                };
                 if let Some(tab) = tabs.tabs.iter_mut().find(|tab| tab.title == name) {
                     tab.blocks.push(block);
                 } else {
@@ -1291,7 +1338,7 @@ fn menu_tab_path(out: &Path) -> PathBuf {
     out.join("menu").join("tab.txt")
 }
 
-fn tab_title<'a>(lines: &'a [MenuLine], id: u32) -> Option<&'a str> {
+fn tab_title(lines: &[MenuLine], id: u32) -> Option<&str> {
     lines.iter().find_map(|line| {
         let name = line.tab.as_deref()?;
         (tab_id(name) == id).then_some(name)
@@ -1389,6 +1436,12 @@ fn pull_menu(
     );
 }
 
+struct MenuWrite<'a> {
+    out: &'a Path,
+    collapsed: &'a mut Vec<String>,
+    tab: &'a mut String,
+}
+
 fn push_menu(
     app: &mut App,
     ui: &State,
@@ -1396,25 +1449,23 @@ fn push_menu(
     lines: &[MenuLine],
     menu_open: bool,
     drew_panel: bool,
-    out: &Path,
-    tracked_collapsed: &mut Vec<String>,
-    tracked_tab: &mut String,
+    write: &mut MenuWrite<'_>,
 ) -> Result<(), String> {
     if drew_panel {
-        let merged = merge_collapsed(tracked_collapsed, ui, folds);
-        let on_disk = load_menu_folds(out).unwrap_or_default();
+        let merged = merge_collapsed(write.collapsed, ui, folds);
+        let on_disk = load_menu_folds(write.out).unwrap_or_default();
         if merged != app.scene().menu.collapsed || merged != on_disk {
-            app.scene().menu.collapsed = merged.clone();
-            write_fold_names(out, &merged)?;
+            app.scene().menu.collapsed.clone_from(&merged);
+            write_fold_names(write.out, &merged)?;
         }
-        *tracked_collapsed = app.scene().menu.collapsed.clone();
+        write.collapsed.clone_from(&app.scene().menu.collapsed);
         if let Some(id) = ui.selected_tab(strip_id(0)) {
             if let Some(name) = tab_title(lines, id) {
                 if app.scene().menu.tab != name {
                     app.scene().menu.tab = name.to_string();
-                    save_menu_tab(out, name)?;
+                    save_menu_tab(write.out, name)?;
                 }
-                *tracked_tab = app.scene().menu.tab.clone();
+                write.tab.clone_from(&app.scene().menu.tab);
             }
         }
     }
@@ -1616,6 +1667,7 @@ fn view_from_name(name: &str) -> ViewMode {
         "normal" => ViewMode::Normal,
         "depth" => ViewMode::Depth,
         "texels" => ViewMode::Texels,
+        "variance" => ViewMode::Variance,
         _ => ViewMode::Full,
     }
 }
@@ -1772,6 +1824,10 @@ fn options() -> Result<Options, String> {
                     parse_menu_visible(value).map_err(|err| format!("bad --menu: {err}"))?;
                 } else if let Some(value) = other.strip_prefix("--mcp-port=") {
                     mcp_port = Some(parse_mcp_port(value)?);
+                } else if genos_scene::lighting_flag_needs_value(other).is_some() {
+                    let needs = genos_scene::lighting_flag_needs_value(other).unwrap_or(false);
+                    let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
+                    genos_scene::check_lighting_arg(other, next.as_deref())?;
                 } else {
                     return Err(format!("unknown argument {other}"));
                 }
@@ -1935,6 +1991,7 @@ mod tests {
             "Shadow cell cache",
             "Ambient fill",
             "Lamp pick",
+            "Surface cache blend",
         ] {
             assert!(dropdowns.contains(&label), "missing dropdown {label}");
         }
@@ -1968,6 +2025,9 @@ mod tests {
             "Direct scale",
             "GI refresh frames",
             "Ray budget shift",
+            "Firefly sigma",
+            "Ray budget",
+            "Dormant rays",
             "Screen probe rays",
             "Probe stale frames",
             "Cache stale frames",
@@ -1989,6 +2049,7 @@ mod tests {
             "Denoiser",
             "Screen probes",
             "Surface light cache",
+            "Attach movers",
             "Sky light",
             "Pre-fill",
             "Full effort",
@@ -2258,11 +2319,11 @@ mod tests {
 
     #[test]
     fn a_fold_sent_with_a_tab_survives_the_next_frame() {
+        use genos_debug::Host;
         let root = genos_scene_lib::repo_root();
         let entries = genos_scene_lib::load_dir(&genos_scene_lib::scenes_dir()).expect("scenes");
         let log = std::fs::File::create(std::env::temp_dir().join("genos-lighting-fold-tab.log"))
             .expect("log");
-        use genos_debug::Host;
         let mut app = super::App::open(entries, root, log).expect("app");
         let fps = genos_scene::FpsCounterSettings::default();
         let menu = super::load_menu_layout().expect("layout");
@@ -2312,9 +2373,11 @@ mod tests {
             &menu,
             menu_open,
             true,
-            &dir,
-            &mut tracked_collapsed,
-            &mut tracked_tab,
+            &mut super::MenuWrite {
+                out: &dir,
+                collapsed: &mut tracked_collapsed,
+                tab: &mut tracked_tab,
+            },
         )
         .expect("push");
         assert_eq!(app.scene().menu.tab, "GI");
@@ -2352,9 +2415,11 @@ mod tests {
             &menu,
             menu_open,
             true,
-            &dir,
-            &mut tracked_collapsed,
-            &mut tracked_tab,
+            &mut super::MenuWrite {
+                out: &dir,
+                collapsed: &mut tracked_collapsed,
+                tab: &mut tracked_tab,
+            },
         )
         .expect("push again");
         assert_eq!(app.scene().menu.tab, "GI");

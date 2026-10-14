@@ -15,8 +15,8 @@
 //   compose  direct + probe irradiance per pixel, tone curve, dither
 //
 // The result goes back into the colour image, so anti-aliasing, overlays, readback
-// and present work as before. This is the only lighting: the radiance cascades and
-// the world probe tier it replaced are gone (docs/systems/lighting/README.md).
+// and present work as before. This is the only lighting path. The GI v1 path it
+// replaced is gone (docs/systems/lighting/README.md).
 
 /// Screen probe tile edge in pixels (Medium and above in the design).
 /// Screen probe tile at 720p and up, pixels (Lumen's size).
@@ -27,6 +27,10 @@ pub(crate) const LIGHTING_TILE: u32 = 16;
 /// the same spacing on screen, about 45 rows. A small picture would otherwise get
 /// probes a ninth of its height apart and lose detail a 720p picture keeps.
 /// GENOS_LIGHTING_TILE (4..64) overrides it to experiment.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+)]
 fn lighting_tile(height: u32) -> u32 {
     std::env::var("GENOS_LIGHTING_TILE")
         .ok()
@@ -325,6 +329,10 @@ pub struct SettleStats {
 }
 
 impl Default for Lighting {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+    )]
     fn default() -> Self {
         Self {
             ready: false,
@@ -964,7 +972,7 @@ impl Gpu {
         // default compose does not write it. High (refresh every frame) is
         // picture + glow + that slice. The screen wavelet appends two vec4
         // slices (32 bytes a pixel) after that, so it does not alias the bounce.
-        // Hash (the default on every preset) keeps the gi-v2 buffer.
+        // Hash keeps the gi-v2 buffer. Preset high uses the screen slices.
         let screen = u64::from(settings.denoiser.enabled && settings.denoiser.screen);
         self.lighting.out = self.make_buffer(
             pixels * (12 + 4 * hist + 32 * screen),
@@ -1075,6 +1083,10 @@ impl Gpu {
 
     /// Settle state for the debug tools, in the tier's terms: one "brick", settled
     /// once the scene (camera included) has not changed for LIGHTING_SETTLE_FRAMES.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+    )]
     pub(crate) fn lighting_stats(&self) -> SettleStats {
         let sweep = self.lighting.live.div_ceil(LIGHTING_CACHE_BATCH).max(1) + 1;
         // World cells on (GENOS_LIGHTING_WORLD=2): their running means (cap frames) have
@@ -1705,6 +1717,10 @@ impl Gpu {
     /// Surface cache trace (GENOS_LIGHTING_SC_TRACE=1): one line per readback with the
     /// frame, frames still and the claimed / restarted / freed / at-cap counters.
     /// `GENOS_LIGHTING_DEBUG` prints the a-trous line on its own.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+    )]
     fn trace_sc(&self, memory: Handle, queue: &str) {
         let trace = std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_some();
         let debug = lighting_debug_on();
@@ -1929,6 +1945,10 @@ impl Gpu {
         Ok(())
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+    )]
     fn lighting_passes(&mut self, slot: usize) {
         let [w, h, cols, rows] = self.lighting.dims;
         let probes = cols * rows;
@@ -2000,7 +2020,22 @@ impl Gpu {
         // S78S debug isolate toggles (lighting_toggles): direct only rides on
         // flag 2097152 (no cache light at hits), the rest in head 3.w bits 12-15.
         let toggles = lighting_toggles();
-        let flags_all = lighting_sc_flags_env() | if toggles & LIGHTING_TOGGLE_DIRECT_ONLY != 0 { 2097152 } else { 0 };
+        // Bit 20 is the estimator. Bit 30 selects the older hold path.
+        // `surface_cache.blend` forces both, so GENOS_LIGHTING_SC_FLAGS cannot
+        // override them.
+        const GI_ESTIMATOR: u32 = 1 << 20;
+        const SURFACE_CACHE_HOLD: u32 = 1 << 30;
+        let mut flags_all = lighting_sc_flags_env()
+            | if toggles & LIGHTING_TOGGLE_DIRECT_ONLY != 0 {
+                2097152
+            } else {
+                0
+            };
+        flags_all |= GI_ESTIMATOR;
+        match self.lighting.settings.surface_cache.blend {
+            genos_scene::SurfaceCacheBlend::Msme => flags_all &= !SURFACE_CACHE_HOLD,
+            genos_scene::SurfaceCacheBlend::Hold => flags_all |= SURFACE_CACHE_HOLD,
+        }
         let flags = flags_all & ((1 << 23) - 1);
         block[2] = ((self.lighting.probe_runs & 1) + 2 * flags) as f32;
         block[3] = (world * 1000 + cap) as f32;
@@ -2043,10 +2078,12 @@ impl Gpu {
             block[3] += (n * 200000) as f32;
             sent += 4 * n;
             if lighting_debug_on() {
-                eprintln!("lighting world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(lighting_sc_local_env()), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
+                eprintln!("lighting world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(self.lighting.settings.surface_cache.attach_movers), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
             }
-            // Object-local texels for movers (GIBS): GENOS_LIGHTING_SC_LOCAL=1.
-            if lighting_sc_local_env() {
+            // Object-local cache entries for movers (GIBS §1.5). The public
+            // knob is surface_cache.attach_movers. Static geometry stays on
+            // the world lattice.
+            if self.lighting.settings.surface_cache.attach_movers {
                 block[3] += 100000.0;
             }
         }
@@ -2121,6 +2158,33 @@ impl Gpu {
                         4,
                         &atrous_ppm as *const u32 as *const c_void,
                     );
+                    // MSME firefly sigma (MultiscaleMeanEstimator.hlsl, default 8).
+                    // Word 13 of the dispatch args. A zero word is sigma 0, which
+                    // tightens the clamp, so this is written every full-cache frame.
+                    let firefly_sigma = self.lighting.settings.surface_cache.firefly_sigma.to_bits();
+                    let ray_budget = self.lighting.settings.surface_cache.ray_budget;
+                    let dormant_rays = self.lighting.settings.surface_cache.dormant_rays;
+                    (self.fns.cmd_update_buffer)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        (LIGHTING_ARGS_AT + 11) * 4,
+                        4,
+                        &ray_budget as *const u32 as *const c_void,
+                    );
+                    (self.fns.cmd_update_buffer)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        (LIGHTING_ARGS_AT + 12) * 4,
+                        4,
+                        &dormant_rays as *const u32 as *const c_void,
+                    );
+                    (self.fns.cmd_update_buffer)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        (LIGHTING_ARGS_AT + 13) * 4,
+                        4,
+                        &firefly_sigma as *const u32 as *const c_void,
+                    );
                 }
                 self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
             }
@@ -2144,10 +2208,21 @@ impl Gpu {
             hasher.finish()
         };
         let tracked = if sun_amortise { self.lighting.light_hash } else { light };
+        let counters_read = self.lighting.async_on
+            || lighting_stats_wanted(self.lighting.settings.world_mode());
         if tracked != self.lighting.light_hash {
             self.lighting.light_hash = tracked;
             self.lighting.light_quiet = 0;
-        } else if probe_only(&self.lighting.settings) && self.lighting.still > 0 {
+        } else if self.lighting.still > 0
+            && lighting_counts_light_on_cpu(
+                self.lighting.settings.world_mode(),
+                probe_only(&self.lighting.settings),
+                counters_read,
+            )
+        {
+            // S70B skips the cache-counter read on the default surface cache, and
+            // note_lighting_round is what used to raise light_quiet. Settled needs
+            // that count. Probe-only has always counted here.
             self.lighting.light_quiet = self.lighting.light_quiet.saturating_add(1);
         }
         let sweep = self.lighting.live.div_ceil(LIGHTING_CACHE_BATCH).max(1) + 1;
@@ -2586,6 +2661,10 @@ impl Gpu {
 
     /// S78S: frames N and N + 1 (GENOS_LIGHTING_DUMP): copy the lighting buffers
     /// into readback buffers at the end of the frame's passes.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+    )]
     fn lighting_dump_copy(&mut self) {
         let Some(n) = std::env::var("GENOS_LIGHTING_DUMP").ok().and_then(|v| v.parse::<u64>().ok()) else {
             return;
@@ -2626,6 +2705,10 @@ impl Gpu {
 
     /// S78S: the dumped frames, once surely done (a few frames on): write each
     /// buffer as dir/f{frame}_{name}.bin and the layout (dims, probes) as JSON.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+    )]
     fn lighting_dump_write(&mut self) {
         if self.lighting.dump.is_empty() {
             return;
@@ -2777,6 +2860,15 @@ fn lighting_stats_wanted(world: u32) -> bool {
     lighting_debug_on() || !(world == 3 && lighting_sc_flags_env() & 8192 != 0)
 }
 
+/// Frames since the light last changed, counted on the CPU. The default surface
+/// cache (world mode 3, flag 8192) does not read the cache counters, so
+/// `note_lighting_round` never runs and `light_quiet` would stay 0. `settled`
+/// and the young-only bit both need it. Probe-only does not take the count
+/// from the counters either.
+fn lighting_counts_light_on_cpu(world_mode: u32, probe_only: bool, counters_read: bool) -> bool {
+    probe_only || (world_mode == 3 && !counters_read)
+}
+
 // Defaults with no env set (S54K, gi-v2): GI v2, the surface cache, cap 64, the
 // S49 flag set and object-local texels. Each env var still overrides.
 const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
@@ -2834,6 +2926,10 @@ fn lighting_stats_storage_bytes() -> u64 {
 const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;
 const LIGHTING_ATROUS_STAT: usize = 120;
 /// S78S: the change counters (lighting_chg) run with GENOS_LIGHTING_SC_TRACE.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+)]
 fn lighting_chg_on() -> bool {
     std::env::var_os("GENOS_LIGHTING_SC_TRACE").is_some()
 }
@@ -2842,6 +2938,10 @@ fn lighting_chg_on() -> bool {
 /// the work lists while the fullest level is at or under a quarter of the
 /// filtered texels, and run the dense sweep above that. `0` is always dense,
 /// `1` keeps the lists up to the storage cap. `override_frac` wins (tests).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+)]
 fn lighting_atrous_ppm(override_frac: Option<f32>) -> u32 {
     let frac = override_frac.unwrap_or_else(|| {
         std::env::var("GENOS_LIGHTING_ATROUS_DIRTY")
@@ -2853,16 +2953,15 @@ fn lighting_atrous_ppm(override_frac: Option<f32>) -> u32 {
 }
 
 /// GENOS_LIGHTING_SC_FLAGS, default LIGHTING_DEFAULT_SC_FLAGS.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+)]
 fn lighting_sc_flags_env() -> u32 {
     static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
         std::env::var("GENOS_LIGHTING_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(LIGHTING_DEFAULT_SC_FLAGS)
     })
-}
-
-/// GENOS_LIGHTING_SC_LOCAL: object-local texels, on unless 0.
-fn lighting_sc_local_env() -> bool {
-    std::env::var("GENOS_LIGHTING_SC_LOCAL").map_or(true, |v| v != "0")
 }
 
 /// Vec4 index of the changes block in the work buffer (lighting_common.glsl
@@ -3069,6 +3168,10 @@ const LIGHTING_TOGGLE_FREEZE_CACHE: u32 = 1;
 const LIGHTING_TOGGLE_DIRECT_ONLY: u32 = 2;
 const LIGHTING_TOGGLE_BOUNCE_ONLY: u32 = 4;
 const LIGHTING_TOGGLE_FREEZE_PROBES: u32 = 8;
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+)]
 fn lighting_toggles() -> u32 {
     let mut text = std::env::var("GENOS_LIGHTING_TOGGLES").unwrap_or_default();
     if let Ok(path) = std::env::var("GENOS_LIGHTING_TOGGLES_FILE") {
@@ -3127,6 +3230,10 @@ fn lighting_debug_on() -> bool {
     sun_controls().debug
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+)]
 fn sun_controls() -> SunControls {
     static CLI: std::sync::OnceLock<SunCli> = std::sync::OnceLock::new();
     let cli = CLI.get_or_init(sun_cli_from_args);
@@ -3154,6 +3261,10 @@ fn sun_controls() -> SunControls {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+)]
 fn sun_env_bool(name: &str, default: bool) -> bool {
     match std::env::var(name) {
         Ok(text) => !matches!(text.trim(), "0" | "off" | "false"),
@@ -3161,6 +3272,10 @@ fn sun_env_bool(name: &str, default: bool) -> bool {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+)]
 fn sun_env_u32(name: &str, default: u32) -> u32 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -3452,6 +3567,14 @@ mod sun_step {
         lighting.sun_live_dir = dir;
         lighting.sun_live_light = light;
         lighting
+    }
+
+    #[test]
+    fn the_surface_cache_counts_quiet_light_without_the_counter_read() {
+        assert!(super::lighting_counts_light_on_cpu(3, false, false));
+        assert!(!super::lighting_counts_light_on_cpu(3, false, true));
+        assert!(super::lighting_counts_light_on_cpu(0, true, true));
+        assert!(!super::lighting_counts_light_on_cpu(0, false, true));
     }
 
     #[test]

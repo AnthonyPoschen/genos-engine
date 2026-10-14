@@ -1,3 +1,6 @@
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! Scenes the checker knows. The stress driver builds the geometry.
 //!
 //! Sponza is listed so a run records that it was skipped. It is not traced

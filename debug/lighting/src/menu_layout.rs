@@ -25,6 +25,10 @@ pub struct MenuFold {
 
 /// Read `GENOS_MENU_LAYOUT`, then `debug/lighting/menu.txt` in the repo, then the
 /// copy compiled into the binary.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or a line is not the table shape.
 pub fn load_menu_layout() -> Result<Vec<MenuLine>, String> {
     let text = if let Ok(path) = std::env::var("GENOS_MENU_LAYOUT") {
         std::fs::read_to_string(&path).map_err(|err| format!("GENOS_MENU_LAYOUT {path}: {err}"))?
@@ -39,6 +43,12 @@ pub fn load_menu_layout() -> Result<Vec<MenuLine>, String> {
     parse_menu_layout(&text)
 }
 
+/// Parse the table text.
+///
+/// # Errors
+///
+/// Returns an error when a line is not five fields, a fold state is not open or closed,
+/// a field is empty, or the table has no settings.
 pub fn parse_menu_layout(text: &str) -> Result<Vec<MenuLine>, String> {
     let mut lines = Vec::new();
     for (index, raw) in text.lines().enumerate() {
@@ -87,6 +97,7 @@ pub fn parse_menu_layout(text: &str) -> Result<Vec<MenuLine>, String> {
 
 /// One fold per section key, in first-seen order. The id stays stable for the
 /// keys the fold file already uses.
+#[must_use]
 pub fn menu_folds(lines: &[MenuLine]) -> Vec<MenuFold> {
     let mut folds = Vec::new();
     for line in lines {
@@ -105,6 +116,7 @@ pub fn menu_folds(lines: &[MenuLine]) -> Vec<MenuFold> {
     folds
 }
 
+#[must_use]
 pub fn section_id(key: &str) -> u32 {
     match key {
         "scene" => 5100,
@@ -119,19 +131,24 @@ pub fn section_id(key: &str) -> u32 {
     }
 }
 
+#[must_use]
 pub fn tab_id(name: &str) -> u32 {
     9000 + (hash(name) % 500)
 }
 
+#[must_use]
 pub fn strip_id(index: usize) -> u32 {
-    7000 + index as u32
+    match u32::try_from(index) {
+        Ok(index) => 7000_u32.saturating_add(index),
+        Err(_) => u32::MAX,
+    }
 }
 
 fn hash(text: &str) -> u32 {
-    let mut value = 2166136261u32;
+    let mut value = 2_166_136_261_u32;
     for byte in text.bytes() {
         value ^= u32::from(byte);
-        value = value.wrapping_mul(16777619);
+        value = value.wrapping_mul(16_777_619);
     }
     value
 }

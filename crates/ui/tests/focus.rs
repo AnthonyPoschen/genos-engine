@@ -1,3 +1,5 @@
+#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
+
 //! Each focus policy, and the events that fall through when the panel does not take them.
 
 use genos_scene::{Camera, FocusPolicy};
@@ -122,8 +124,10 @@ fn a_panel_without_a_policy_keeps_the_old_path() {
     assert!(!pressed.consumed.wheel);
     assert!(!pressed.consumed.blur);
     assert_eq!(state.focused_panel(), None);
-    let mut key = Pointer::default();
-    key.key_inc = true;
+    let key = Pointer {
+        key_inc: true,
+        ..Pointer::default()
+    };
     let moved = draw(&mut state, &rows, key);
     assert!(!moved.consumed.keys);
     assert_eq!(state.focused_control(), Some(1));
@@ -134,12 +138,14 @@ fn click_to_focus_takes_keys_after_a_click_and_arrows_move() {
     let rows = checks();
     let mut state = State::default();
     arm(&mut state, FocusPolicy::Hover, FocusPolicy::ClickToFocus);
-    let mut early = Pointer::default();
-    early.key_inc = true;
+    let early = Pointer {
+        key_inc: true,
+        ..Pointer::default()
+    };
     let before = draw(&mut state, &rows, early);
     assert!(!before.consumed.keys, "keys fall through before the click");
     assert_eq!(state.focused_panel(), None);
-    assert!(before.actions.is_empty());
+    assert_eq!(before.actions, Vec::new());
 
     let (x, y) = place(&mut state, &rows, 1);
     let pressed = click(&mut state, &rows, x, y);
@@ -148,15 +154,19 @@ fn click_to_focus_takes_keys_after_a_click_and_arrows_move() {
     assert_eq!(state.focused_panel(), Some(PANEL_ID));
     assert_eq!(state.focused_control(), Some(1));
 
-    let mut key = Pointer::default();
-    key.key_inc = true;
+    let key = Pointer {
+        key_inc: true,
+        ..Pointer::default()
+    };
     let moved = draw(&mut state, &rows, key);
     assert!(moved.consumed.keys);
-    assert!(moved.actions.is_empty());
+    assert_eq!(moved.actions, Vec::new());
     assert_eq!(state.focused_control(), Some(2));
 
-    let mut enter = Pointer::default();
-    enter.key_activate = true;
+    let enter = Pointer {
+        key_activate: true,
+        ..Pointer::default()
+    };
     let picked = draw(&mut state, &rows, enter);
     assert_eq!(
         picked.actions,
@@ -173,8 +183,10 @@ fn a_focused_slider_steps_instead_of_moving() {
     let (x, y) = place(&mut state, &rows, 9);
     let _ = click(&mut state, &rows, x, y);
     assert_eq!(state.focused_control(), Some(9));
-    let mut key = Pointer::default();
-    key.key_inc = true;
+    let key = Pointer {
+        key_inc: true,
+        ..Pointer::default()
+    };
     let stepped = draw(&mut state, &rows, key);
     assert!(
         stepped.actions.iter().any(|action| matches!(
@@ -197,8 +209,10 @@ fn escape_closes_a_list_before_it_blurs_click_to_focus() {
     let opened = click(&mut state, &rows, x, y);
     assert!(list_open(&opened));
     assert_eq!(state.focused_panel(), Some(PANEL_ID));
-    let mut escape = Pointer::default();
-    escape.key_dismiss = true;
+    let escape = Pointer {
+        key_dismiss: true,
+        ..Pointer::default()
+    };
     let closed = draw(&mut state, &rows, escape);
     assert!(closed.consumed.keys);
     assert!(!closed.consumed.blur, "the list took Escape");
@@ -217,8 +231,10 @@ fn grave_releases_click_to_focus_and_reports_blur() {
     arm(&mut state, FocusPolicy::Hover, FocusPolicy::ClickToFocus);
     let (x, y) = place(&mut state, &rows, 1);
     let _ = click(&mut state, &rows, x, y);
-    let mut grave = Pointer::default();
-    grave.key_blur = true;
+    let grave = Pointer {
+        key_blur: true,
+        ..Pointer::default()
+    };
     let frame = draw(&mut state, &rows, grave);
     assert!(frame.consumed.blur);
     assert!(frame.consumed.keys);
@@ -237,7 +253,7 @@ fn a_click_outside_releases_click_to_focus_and_falls_through() {
     assert_eq!(state.focused_panel(), None);
     assert!(!outside.consumed.pointer);
     assert!(outside.look_capture);
-    assert!(outside.actions.is_empty());
+    assert_eq!(outside.actions, Vec::new());
 }
 
 #[test]
@@ -246,13 +262,21 @@ fn hover_delivers_keys_only_while_the_pointer_is_over_the_panel() {
     let mut state = State::default();
     arm(&mut state, FocusPolicy::Hover, FocusPolicy::Hover);
     let (x, y) = place(&mut state, &rows, 1);
-    let mut over = Pointer::at(x, y, false);
-    over.key_inc = true;
+    let over = Pointer {
+        x,
+        y,
+        key_inc: true,
+        ..Pointer::default()
+    };
     let on = draw(&mut state, &rows, over);
     assert!(on.consumed.keys);
     assert_eq!(state.focused_control(), Some(1));
-    let mut away = Pointer::at(OUTSIDE[0], OUTSIDE[1], false);
-    away.key_inc = true;
+    let away = Pointer {
+        x: OUTSIDE[0],
+        y: OUTSIDE[1],
+        key_inc: true,
+        ..Pointer::default()
+    };
     let off = draw(&mut state, &rows, away);
     assert!(!off.consumed.keys, "keys fall through off the panel");
 }
@@ -264,14 +288,18 @@ fn passive_never_takes_the_pointer_or_the_keys() {
     arm(&mut state, FocusPolicy::Passive, FocusPolicy::Passive);
     let (x, y) = place(&mut state, &rows, 1);
     let pressed = draw(&mut state, &rows, Pointer::at(x, y, true));
-    assert!(pressed.actions.is_empty());
+    assert_eq!(pressed.actions, Vec::new());
     assert!(pressed.look_capture);
     assert!(!pressed.consumed.pointer);
-    let mut key = Pointer::at(x, y, false);
-    key.key_inc = true;
+    let key = Pointer {
+        x,
+        y,
+        key_inc: true,
+        ..Pointer::default()
+    };
     let keyed = draw(&mut state, &rows, key);
     assert!(!keyed.consumed.keys);
-    assert!(keyed.actions.is_empty());
+    assert_eq!(keyed.actions, Vec::new());
 }
 
 #[test]
@@ -282,9 +310,11 @@ fn modal_owns_a_click_outside_and_an_unused_key() {
     let outside = draw(&mut state, &rows, Pointer::at(OUTSIDE[0], OUTSIDE[1], true));
     assert!(outside.consumed.pointer);
     assert!(!outside.look_capture);
-    assert!(outside.actions.is_empty());
-    let mut grave = Pointer::default();
-    grave.key_blur = true;
+    assert_eq!(outside.actions, Vec::new());
+    let grave = Pointer {
+        key_blur: true,
+        ..Pointer::default()
+    };
     let keyed = draw(&mut state, &rows, grave);
     assert!(keyed.consumed.keys);
     assert!(keyed.consumed.blur);
@@ -303,22 +333,28 @@ fn set_policy_and_set_focus_change_the_next_frame() {
         })
     );
     let (x, y) = place(&mut state, &rows, 1);
-    let mut key = Pointer::at(x, y, false);
-    key.key_inc = true;
+    let key = Pointer {
+        x,
+        y,
+        key_inc: true,
+        ..Pointer::default()
+    };
     assert!(draw(&mut state, &rows, key).consumed.keys);
 
     arm(&mut state, FocusPolicy::Passive, FocusPolicy::Passive);
     let after = draw(&mut state, &rows, key);
     assert!(!after.consumed.keys);
     let pressed = draw(&mut state, &rows, Pointer::at(x, y, true));
-    assert!(pressed.actions.is_empty());
+    assert_eq!(pressed.actions, Vec::new());
     assert!(!pressed.consumed.pointer);
 
     arm(&mut state, FocusPolicy::Hover, FocusPolicy::ClickToFocus);
     state.set_focused_panel(Some(PANEL_ID));
     assert_eq!(state.focused_panel(), Some(PANEL_ID));
-    let mut bare = Pointer::default();
-    bare.key_inc = true;
+    let bare = Pointer {
+        key_inc: true,
+        ..Pointer::default()
+    };
     let armed = draw(&mut state, &rows, bare);
     assert!(armed.consumed.keys);
     state.set_focused_panel(None);
