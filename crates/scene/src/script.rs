@@ -9,6 +9,7 @@ use genos_math::Vec3;
 use crate::debug_settings::DebugSettings;
 use crate::fps_counter::FpsCounterSettings;
 use crate::lighting::LightingSettings;
+use crate::menu::MenuSettings;
 use crate::types::{Ceiling, Floor, Light, Scene, Shape, Solid, Wall, MAX_LAMPS, MAX_OCCLUDERS};
 
 /// Load the shipped scene file through the Rhai host.
@@ -305,6 +306,26 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
             Ok(())
         });
     }
+    {
+        let builder = builder.clone();
+        engine.register_fn("menu", move |text: &str| -> Result<(), Box<EvalAltResult>> {
+            let mut settings = builder.borrow().menu.clone();
+            for raw in text.split(['\n', ';']) {
+                let line = raw.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let Some((key, value)) = line.split_once('=') else {
+                    return Err(format!("use key=value, got {line}").into());
+                };
+                settings
+                    .set_key(key.trim(), value.trim())
+                    .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
+            }
+            builder.borrow_mut().menu = settings;
+            Ok(())
+        });
+    }
 
     engine.run(source).map_err(|err| err.to_string())?;
     let built = builder.borrow();
@@ -354,6 +375,7 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
         lighting: built.lighting.clone(),
         debug: built.debug.clone(),
         fps_counter: built.fps_counter,
+        menu: built.menu.clone(),
     })
 }
 
@@ -377,4 +399,5 @@ struct Builder {
     lighting: LightingSettings,
     debug: DebugSettings,
     fps_counter: FpsCounterSettings,
+    menu: MenuSettings,
 }

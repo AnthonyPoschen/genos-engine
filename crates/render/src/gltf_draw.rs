@@ -670,6 +670,7 @@ mod tests {
             lighting: genos_scene::LightingSettings::default(),
             debug: genos_scene::DebugSettings::default(),
             fps_counter: genos_scene::FpsCounterSettings::default(),
+            menu: genos_scene::MenuSettings::default(),
         });
         let before = world.objects.len();
         let mut place = identity_pose();
@@ -723,6 +724,7 @@ mod tests {
             lighting: genos_scene::LightingSettings::default(),
             debug: genos_scene::DebugSettings::default(),
             fps_counter: genos_scene::FpsCounterSettings::default(),
+            menu: genos_scene::MenuSettings::default(),
         })
     }
 

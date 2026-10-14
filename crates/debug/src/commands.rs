@@ -93,6 +93,14 @@ pub fn specs() -> Vec<CommandSpec> {
             "set_fps_counter",
             "Partial frame-rate overlay update. Keys are enabled (on/off) and rate_hz (0.25 to 30). A text field overlays key=value lines. Writes the scene. --fps-counter, --fps-hz, and the GENOS_FPS_* mirrors still overlay the value the readout uses.",
         ),
+        spec(
+            "get_menu_settings",
+            "The debug menu in force (text form): visible (shown or hidden), tab (page title), and collapsed (folded section keys). Shown by default. --menu wins over GENOS_MENU, which wins over the scene value. tab and collapsed are the stored fields.",
+        ),
+        spec(
+            "set_menu_settings",
+            "Partial debug-menu update. Keys are visible (shown or hidden), tab, collapsed (comma-separated section keys), fold (add one key), and open (remove one key). A text field overlays key=value lines. Writes the scene. --menu and GENOS_MENU still overlay visible.",
+        ),
         spec("quit", "Stop the example with exit code (default 0)."),
         spec(
             "list_scenes",

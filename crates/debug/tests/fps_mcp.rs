@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use genos_debug::{Ctx, Tools};
 use genos_mcp::json::{self, Value};
 use genos_render::{Renderer, World};
-use genos_scene::{Camera, EngineSettings, Floor, FpsCounterSettings, Light, Scene, Vec3};
+use genos_scene::{
+    Camera, EngineSettings, Floor, FpsCounterSettings, Light, MenuSettings, Scene, Vec3,
+};
 use genos_window::Window;
 
 fn open() -> (Window, Renderer) {
@@ -39,6 +41,7 @@ fn room() -> World {
         lighting: genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
+        menu: MenuSettings::default(),
     })
 }
 

@@ -1,6 +1,6 @@
 use genos_math::Vec3;
 
-use crate::{DebugSettings, FpsCounterSettings, LightingSettings};
+use crate::{DebugSettings, FpsCounterSettings, LightingSettings, MenuSettings};
 
 /// Share of the incoming light a white painted surface sends back out.
 pub const PAINT_ALBEDO: f32 = 0.8;
@@ -175,6 +175,10 @@ pub struct Scene {
     /// Frame-rate overlay. Off until something turns it on. The readout
     /// averages one window of `1 / rate_hz` seconds. The default rate is 4 Hz.
     pub fps_counter: FpsCounterSettings,
+    /// Debug menu. Shown until `--menu hidden`, the hide control, or MCP
+    /// sets `visible` to hidden. `tab` is the open page. `collapsed` lists
+    /// the folded section keys.
+    pub menu: MenuSettings,
 }
 
 impl Scene {

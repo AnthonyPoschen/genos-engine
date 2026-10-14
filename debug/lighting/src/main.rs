@@ -11,8 +11,8 @@ use genos_debug::{png, CheckpointPose, Host, Knob};
 use genos_input::{character_controller, debug_keys, InputCode, InputSystem, KeyBindings};
 use genos_render::{identity_pose, DrawKind, FixedPart, Renderer, ScreenRect, ViewMode, World};
 use genos_scene::{
-    look_direction, parse_enabled, parse_rate, update, Actions, Camera, DebugSettings, Floor,
-    FpsCounterSettings, Light, Scene, Sky, Vec3, PITCH_LIMIT,
+    look_direction, parse_enabled, parse_menu_visible, parse_rate, update, Actions, Camera,
+    DebugSettings, Floor, FpsCounterSettings, Light, MenuSettings, Scene, Sky, Vec3, PITCH_LIMIT,
 };
 use genos_scene_lib::{Entry, Kind, Lamp, Sun};
 use genos_stress::building::{Layout, LightMix};
@@ -51,6 +51,8 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          GENOS_FPS_COUNTER applies only when this is omitted
   --fps-hz N             plate update rate in Hz (default 4, range 0.25 to 30).
                          GENOS_FPS_HZ applies only when this is omitted
+  --menu shown|hidden    debug menu (default shown). GENOS_MENU applies only
+                         when this is omitted
   --out DIR              screenshots, dumps, and logs (default ./genos-debug)
   --size WxH             window size (default 1280x720; 320x180 for --check)
   --check                every scene at its check checkpoint, four frames,
@@ -61,10 +63,13 @@ to the active checkpoint. Arrow keys and the wheel step the slider under the
 pointer, or move the highlight in an open dropdown. Enter picks the highlighted
 choice. Escape closes the list. Grave hides the menu. Grave again shows it.
 F1 is the same key. The title bar hide button hides it. A menu tab in the
-top-left corner shows it. ] and [ change the page. Tab and shift-Tab do that
-while the pointer is over the menu. F toggles the frame-rate plate. F3 is the
-same key. A section title folds that group. The fold is remembered in
-<out>/menu/collapsed.txt. The open page is remembered in <out>/menu/tab.txt.
+top-left corner shows it. --menu hidden starts it hidden. GENOS_MENU applies
+only when that argument was omitted. get_menu_settings and set_menu_settings
+read and write shown or hidden, the page, and the folds. ] and [ change the
+page. Tab and shift-Tab do that while the pointer is over the menu. F toggles
+the frame-rate plate. F3 is the same key. A section title folds that group.
+The fold is remembered in <out>/menu/collapsed.txt. The open page is remembered
+in <out>/menu/tab.txt.
 The groups are debug/lighting/menu.txt. A section key of - has no fold.
 GENOS_MENU_LAYOUT points at another file. The panel stays within a third of
 the window. The pages are Scene/View, Pipeline, Direct/Lamps, GI, Denoise,
@@ -214,18 +219,22 @@ fn run() -> Result<(), String> {
     let menu = load_menu_layout()?;
     let folds = menu_folds(&menu);
     let mut ui = State::default();
+    let mut tracked_collapsed = app.scene().menu.collapsed.clone();
+    let mut tracked_tab = app.scene().menu.tab.clone();
     if let Some(names) = load_menu_folds(&opts.out) {
-        for fold in &folds {
-            ui.fold_section(fold.id, names.iter().any(|name| name == &fold.key));
-        }
+        app.scene().menu.collapsed = names.clone();
+        tracked_collapsed = names.clone();
+        apply_collapsed(&mut ui, &folds, &names);
     }
     if let Some(name) = load_menu_tab(&opts.out) {
+        app.scene().menu.tab = name.clone();
+        tracked_tab = name.clone();
         ui.select_tab(strip_id(0), tab_id(&name));
     }
     let mut input = InputSystem::new();
     let controls = character_controller();
     let keys = debug_keys()?;
-    let mut menu_open = true;
+    let mut menu_open = app.scene().menu.effective().visible;
     let mut drawn = 0u32;
     let mut clock: Option<Instant> = None;
     let mut fps_overlay = FpsOverlay::new();
@@ -254,6 +263,14 @@ fn run() -> Result<(), String> {
         input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
         input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
         input.poll_gamepads();
+        pull_menu(
+            &mut app,
+            &mut ui,
+            &folds,
+            &mut menu_open,
+            &mut tracked_collapsed,
+            &mut tracked_tab,
+        );
         hotkeys(
             &mut app,
             &input,
@@ -287,6 +304,7 @@ fn run() -> Result<(), String> {
                 && (keys.pressed(&input, "tab_next")
                     || (over_menu && keys.pressed(&input, "tab_focus_next"))),
         };
+        let mut drew_panel = false;
         let (paints, look_capture) = if opts.headless {
             (Vec::new(), true)
         } else if !menu_open {
@@ -300,6 +318,7 @@ fn run() -> Result<(), String> {
             }
             (ui_frame.paints, ui_frame.look_capture)
         } else {
+            drew_panel = true;
             let fps_menu = app.scene().fps_counter.effective();
             let blocks = panel_blocks(&app, tools.view_mode(), &fps_menu, &menu, &keys);
             let ui_frame = button_panel_blocks(
@@ -331,6 +350,17 @@ fn run() -> Result<(), String> {
             }
             (ui_frame.paints, ui_frame.look_capture)
         };
+        push_menu(
+            &mut app,
+            &ui,
+            &folds,
+            &menu,
+            menu_open,
+            drew_panel,
+            &opts.out,
+            &mut tracked_collapsed,
+            &mut tracked_tab,
+        )?;
         let mut overlay: Vec<ScreenRect> = paints
             .iter()
             .map(|p| ScreenRect {
@@ -599,6 +629,7 @@ impl Host for App {
     }
 
     fn load_scene(&mut self, name: &str) -> Result<(), String> {
+        let menu = self.scene().menu.clone();
         let index = self
             .entries
             .iter()
@@ -608,6 +639,7 @@ impl Host for App {
         self.index = index;
         self.checkpoint = 0;
         self.show = show;
+        self.scene().menu = menu;
         self.note(&format!("loaded {name}"));
         Ok(())
     }
@@ -707,6 +739,7 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
                 lighting: genos_scene::LightingSettings::default(),
                 debug: DebugSettings::default(),
                 fps_counter: FpsCounterSettings::default(),
+                menu: MenuSettings::default(),
             };
             if let Some(sun) = sun {
                 scene.lights.push(sun_light(sun));
@@ -1266,18 +1299,105 @@ fn load_menu_folds(out: &Path) -> Option<Vec<String>> {
 }
 
 fn save_menu_folds(out: &Path, ui: &State, folds: &[MenuFold]) -> Result<(), String> {
+    let names = folds
+        .iter()
+        .filter(|fold| ui.section_collapsed(fold.id))
+        .map(|fold| fold.key.clone())
+        .collect::<Vec<_>>();
+    write_fold_names(out, &names)
+}
+
+fn write_fold_names(out: &Path, names: &[String]) -> Result<(), String> {
     let path = menu_fold_path(out);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     let mut body = String::from("# collapsed menu sections\n");
-    for fold in folds {
-        if ui.section_collapsed(fold.id) {
-            body.push_str(&fold.key);
-            body.push('\n');
-        }
+    for name in names {
+        body.push_str(name);
+        body.push('\n');
     }
     std::fs::write(path, body).map_err(|err| err.to_string())
+}
+
+fn apply_collapsed(ui: &mut State, folds: &[MenuFold], names: &[String]) {
+    for fold in folds {
+        ui.fold_section(fold.id, names.iter().any(|name| name == &fold.key));
+    }
+}
+
+/// Folds the panel has not laid out keep the names already stored.
+fn merge_collapsed(previous: &[String], ui: &State, folds: &[MenuFold]) -> Vec<String> {
+    let mut names = previous.to_vec();
+    for fold in folds {
+        if !ui.section_known(fold.id) {
+            continue;
+        }
+        if ui.section_collapsed(fold.id) {
+            if !names.iter().any(|name| name == &fold.key) {
+                names.push(fold.key.clone());
+            }
+        } else {
+            names.retain(|name| name != &fold.key);
+        }
+    }
+    names
+}
+
+fn pull_menu(
+    app: &mut App,
+    ui: &mut State,
+    folds: &[MenuFold],
+    menu_open: &mut bool,
+    tracked_collapsed: &mut Vec<String>,
+    tracked_tab: &mut String,
+) {
+    let menu = app.scene().menu.clone();
+    if menu.collapsed != *tracked_collapsed {
+        apply_collapsed(ui, folds, &menu.collapsed);
+        *tracked_collapsed = menu.collapsed;
+    }
+    if menu.tab != *tracked_tab {
+        if !menu.tab.is_empty() {
+            ui.select_tab(strip_id(0), tab_id(&menu.tab));
+        }
+        *tracked_tab = menu.tab;
+    }
+    *menu_open = app.scene().menu.effective().visible;
+}
+
+fn push_menu(
+    app: &mut App,
+    ui: &State,
+    folds: &[MenuFold],
+    lines: &[MenuLine],
+    menu_open: bool,
+    drew_panel: bool,
+    out: &Path,
+    tracked_collapsed: &mut Vec<String>,
+    tracked_tab: &mut String,
+) -> Result<(), String> {
+    if drew_panel {
+        let merged = merge_collapsed(tracked_collapsed, ui, folds);
+        if merged != app.scene().menu.collapsed {
+            app.scene().menu.collapsed = merged.clone();
+            write_fold_names(out, &merged)?;
+        }
+        *tracked_collapsed = app.scene().menu.collapsed.clone();
+        if let Some(id) = ui.selected_tab(strip_id(0)) {
+            if let Some(name) = tab_title(lines, id) {
+                if app.scene().menu.tab != name {
+                    app.scene().menu.tab = name.to_string();
+                    save_menu_tab(out, name)?;
+                }
+                *tracked_tab = app.scene().menu.tab.clone();
+            }
+        }
+    }
+    if app.scene().menu.visible != menu_open {
+        app.scene().menu.visible = menu_open;
+    }
+    Ok(())
 }
 
 fn load_menu_tab(out: &Path) -> Option<String> {
@@ -1563,6 +1683,14 @@ fn options() -> Result<Options, String> {
                 let value = need_arg(&mut args, "--fps-hz")?;
                 parse_rate(&value).map_err(|err| format!("bad --fps-hz: {err}"))?;
             }
+            "--menu" => {
+                let value = if args.peek().is_some_and(|next| !next.starts_with('-')) {
+                    args.next().unwrap()
+                } else {
+                    return Err("--menu needs shown or hidden".into());
+                };
+                parse_menu_visible(&value).map_err(|err| format!("bad --menu: {err}"))?;
+            }
             other => {
                 if let Some((flag, value)) = placed_flag(other) {
                     let parsed = parse_vec3(flag, value)?;
@@ -1575,6 +1703,8 @@ fn options() -> Result<Options, String> {
                     parse_enabled(value).map_err(|err| format!("bad --fps-counter: {err}"))?;
                 } else if let Some(value) = other.strip_prefix("--fps-hz=") {
                     parse_rate(value).map_err(|err| format!("bad --fps-hz: {err}"))?;
+                } else if let Some(value) = other.strip_prefix("--menu=") {
+                    parse_menu_visible(value).map_err(|err| format!("bad --menu: {err}"))?;
                 } else {
                     return Err(format!("unknown argument {other}"));
                 }
@@ -2019,6 +2149,32 @@ mod tests {
         assert!(super::USAGE.contains("] and ["));
         assert!(super::USAGE.contains("tab.txt"));
         assert!(super::USAGE.contains("GENOS_FPS_COUNTER"));
+        assert!(super::USAGE.contains("--menu"));
+        assert!(super::USAGE.contains("GENOS_MENU"));
+        assert!(super::USAGE.contains("get_menu_settings"));
+    }
+
+    #[test]
+    fn an_unseen_fold_stays_in_the_collapsed_list() {
+        let mut ui = genos_ui::State::default();
+        ui.fold_section(1, true);
+        let folds = vec![
+            super::MenuFold {
+                id: 1,
+                key: "direct".into(),
+                collapsed: false,
+            },
+            super::MenuFold {
+                id: 2,
+                key: "world".into(),
+                collapsed: true,
+            },
+        ];
+        let merged = super::merge_collapsed(&["world".into(), "direct".into()], &ui, &folds);
+        assert_eq!(merged, vec!["world".to_string(), "direct".to_string()]);
+        ui.fold_section(1, false);
+        let merged = super::merge_collapsed(&merged, &ui, &folds);
+        assert_eq!(merged, vec!["world".to_string()]);
     }
 }
 

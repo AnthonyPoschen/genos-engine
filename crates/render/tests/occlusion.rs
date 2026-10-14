@@ -185,6 +185,7 @@ fn a_lamp_sealed_in_walls_under_a_roof_lights_nothing_outside() {
         lighting: genos_scene::LightingSettings::default(),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     };
     let mut camera = Camera::new(0.4, -4.5, std::f32::consts::PI);
     camera.pitch = 0.1;
@@ -218,6 +219,7 @@ fn a_lamp_above_the_roof_lights_nothing_under_it() {
         lighting: genos_scene::LightingSettings::default(),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     };
     let mut camera = Camera::new(0.0, -3.0, std::f32::consts::PI);
     camera.pitch = 0.05;
@@ -243,6 +245,7 @@ fn a_lamp_inside_a_box_lights_nothing_outside() {
         lighting: genos_scene::LightingSettings::default(),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     };
     let mut camera = Camera::new(0.0, -4.0, std::f32::consts::PI);
     camera.pitch = -0.2;
@@ -268,6 +271,7 @@ fn a_lamp_inside_a_cylinder_lights_nothing_outside_even_over_its_cap() {
         lighting: genos_scene::LightingSettings::default(),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     };
     let mut camera = Camera::new(-0.5, -4.0, 2.7);
     camera.pitch = 0.0;
@@ -304,6 +308,7 @@ fn a_turning_box_keeps_its_faces_lit_every_frame() {
         lighting: genos_scene::LightingSettings::default(),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     };
     let mut world = World::from_scene(scene);
     let mut camera = Camera::new(0.0, -4.0, std::f32::consts::PI);

@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use genos_mcp::json::Value;
 use genos_render::{DebugView, Renderer, ScreenRect, ViewMode};
 use genos_scene::{
-    Camera, DebugSettings, FpsCounterSettings, Light, LightingPreset, LightingSettings, Scene,
-    Vec3, PITCH_LIMIT,
+    Camera, DebugSettings, FpsCounterSettings, Light, LightingPreset, LightingSettings,
+    MenuSettings, Scene, Vec3, PITCH_LIMIT,
 };
 
 use crate::image::{Flicker, Image, Region};
@@ -1182,6 +1182,13 @@ impl Tools {
                 apply_fps_update(&mut ctx.host.scene().fps_counter, args.0)?;
                 reply(fps_counter_value(&ctx.host.scene().fps_counter.effective()))
             }
+            "get_menu_settings" => {
+                reply(menu_value(&ctx.host.scene().menu.effective()))
+            }
+            "set_menu_settings" => {
+                apply_menu_update(&mut ctx.host.scene().menu, args.0)?;
+                reply(menu_value(&ctx.host.scene().menu.effective()))
+            }
             "quit" => {
                 self.quit = Some(args.f64("code")?.unwrap_or(0.0) as i32);
                 reply(obj(vec![("quit", Value::Bool(true))]))
@@ -1599,6 +1606,66 @@ fn fps_counter_value(settings: &FpsCounterSettings) -> Value {
         ("enabled", Value::Bool(settings.enabled)),
         ("rate_hz", num(settings.rate_hz as f64)),
     ])
+}
+
+fn menu_value(settings: &MenuSettings) -> Value {
+    obj(vec![
+        ("text", text(settings.to_text())),
+        ("visible", Value::Bool(settings.visible)),
+        ("tab", text(settings.tab.clone())),
+        (
+            "collapsed",
+            list(settings.collapsed.iter().cloned().map(text).collect()),
+        ),
+    ])
+}
+
+fn apply_menu_update(settings: &mut MenuSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("menu settings are an object".into());
+    };
+    if let Some(body) = args.get("text").and_then(|v| v.as_str()) {
+        for line in body.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("menu line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &menu_value_text(value)?)?;
+    }
+    Ok(())
+}
+
+fn menu_value_text(value: &Value) -> Result<String, String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(on) = value.as_bool() {
+        return Ok(if on { "shown".into() } else { "hidden".into() });
+    }
+    if let Some(items) = value.as_array() {
+        let parts = items
+            .iter()
+            .map(menu_value_text)
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(parts.join(","));
+    }
+    if let Some(n) = value.as_f64() {
+        if n.fract() == 0.0 && n.abs() < 1.0e15 {
+            return Ok(format!("{}", n as i64));
+        }
+        return Ok(format!("{n:?}"));
+    }
+    Err("a menu value is a string, number, bool, or list".into())
 }
 
 fn apply_fps_update(settings: &mut FpsCounterSettings, args: &Value) -> Result<(), String> {

@@ -111,13 +111,14 @@ make lighting SCENE=sponza
 `stress`), and `--gpu-times 30`. `--preset`, `--lighting-debug`, `--unfilled`
 (the existing texels view: slots with fewer than four sets stay dim),
 `--full-effort`, `--headless`, `--frames N`, `--size WxH`, `--fps-counter`,
-`--fps-hz`, and `--out DIR` are in `--help`. The default output directory is
+`--fps-hz`, `--menu shown|hidden`, and `--out DIR` are in `--help`. The default output directory is
 `./genos-debug/` in the current working directory (`shots/`, `logs/`, `dumps/`).
 `--out` overrides it. The binary does not write those files under `$HOME`.
 
 Page Up and Page Down switch scenes. Keys 1–9 jump checkpoints. Home and 0 reset
 the camera to the active checkpoint. Grave hides the settings menu and grave shows
-it again. F1 is the same key. `]` and `[` change the menu page. Tab and shift-Tab
+it again. F1 is the same key. `--menu hidden` starts it hidden. `GENOS_MENU`
+applies only when that argument was omitted. `]` and `[` change the menu page. Tab and shift-Tab
 do that while the pointer is over the menu. The pages and folds are
 `debug/lighting/menu.txt`. F toggles the frame-rate overlay. F3 is the same key.
 U toggles the unfilled count in the stress and camera programs. Shift-U toggles
@@ -151,6 +152,19 @@ too low, or frame time is not advancing). A missing plate means `enabled` is
 off or the first window has not closed. The probes are the plate, the `FPS`
 menu row, F or F3, `--fps-counter` / `--fps-hz`, and `get_fps_counter` /
 `set_fps_counter`.
+
+### Debug menu
+
+`MenuSettings` on the scene (`visible`, `tab`, `collapsed`) is the public
+setting. It implements `EngineSettings`. The default is shown, on the first
+page, with no stored folds. Grave, F1, the title-bar hide button, and the
+corner tab write `visible`. `--menu shown|hidden` wins every frame.
+`GENOS_MENU` applies only when that argument was omitted. `tab` is the page
+title. `collapsed` is a comma-separated list of folded section keys. `fold`
+adds one key and `open` removes one, so a test can move one section without
+a pointer. `get_menu_settings` and `set_menu_settings` are on the MCP
+catalogue. A `text` field overlays `key=value` lines. The lighting binary
+also writes `<out>/menu/collapsed.txt` and `<out>/menu/tab.txt`.
 
 - Replicated state: the settings struct. The averaged numbers stay on the client that draws.
 - Authority: the client that owns the view. A server does not time the picture.

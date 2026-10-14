@@ -30,6 +30,8 @@ A new feature adds a public struct that implements `EngineSettings`, stores it w
 
 `FpsCounterSettings` on `Scene` is the frame-rate overlay (`enabled`, `rate_hz`). It is off at 4 Hz until `--fps-counter`, the debug menu, or MCP turns it on. The debug menu draws `enabled` as a checkbox and `rate_hz` as a numeric slider. Both call `set_key`. `GENOS_FPS_COUNTER` and `GENOS_FPS_HZ` are the environment mirrors. The overlay itself is drawn by `genos-lighting`.
 
+`MenuSettings` on `Scene` is the debug menu (`visible`, `tab`, `collapsed`). It is shown until `--menu hidden`, the hide control, or MCP sets `visible` to hidden. `tab` is the page title. `collapsed` is the folded section keys. `fold` adds one key and `open` removes one. The lighting panel writes those fields. `--menu shown|hidden` wins every frame. `GENOS_MENU` applies only when that argument was omitted. `get_menu_settings` and `set_menu_settings` are the MCP commands.
+
 `EngineSettings` lives in `genos-scene` because games, the renderer, and the debug tools already share that crate. A feature crate that `genos-scene` itself depends on keeps the same three methods on its own struct until a second implementor needs the trait in a crate both can see.
 
 ## Output directories

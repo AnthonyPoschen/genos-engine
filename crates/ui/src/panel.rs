@@ -173,6 +173,12 @@ impl State {
         self.collapsed_sections.contains(&id)
     }
 
+    /// True after this section has been laid out or folded from outside.
+    /// A fold that has not been seen yet keeps its layout default.
+    pub fn section_known(&self, id: u32) -> bool {
+        self.section_seen.contains(&id)
+    }
+
     /// The tab this strip is showing. `None` until the first frame picks one.
     pub fn selected_tab(&self, group: u32) -> Option<u32> {
         self.selected_tabs.get(&group).copied()
