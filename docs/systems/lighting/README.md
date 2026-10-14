@@ -122,7 +122,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S58A](experiments/S58A-lumen-update-priority.md) | 2026-10-12 | Lumen LastUsed - LastUpdated priority replaces round-robin sweep | pushed | a4a7b23d |
 | [S59](experiments/S59-few-rays-gibs-settle.md) | 2026-10-12 | Few rays per relight with GIBS extra rays; higher settle bar (64 sets, 0.15 sd) | pushed | e7803342, eedd6671, c4c787d1 |
 | [S60A](experiments/S60A-probe-hit-lamp-picks.md) | 2026-10-12 | Probe hits take at most 2 shadow rays, lamps picked systematically in proportion to unshadowed light | pushed | a2b41c52 |
-| [S61-S62](experiments/S61-S62-world-radiance-cache.md) | 2026-10-12 | World radiance cache (WRC, 25 cm cells) for hits; variance-guided denoise; WRC refresh budget; global light re | pushed (S62E reverted) | aa1b245e..4eb10b86 |
+| S61-S62 (deleted; see git history) | 2026-10-12 | World radiance cache (WRC, 25 cm cells) for hits; variance-guided denoise; WRC refresh budget; global light re | pushed (S62E reverted) | aa1b245e..4eb10b86 |
 | [S63-S65](experiments/S63-S65-sun-share-rate-tiers.md) | 2026-10-12 | Sun/sky share per texel; rate-based scheduling (batch is a ceiling); two tiers (trickle under change 0.173, wh | pushed | 0f288334..b5a72df4 |
 | [S66-S69](experiments/S66-S69-anti-lag-boost-relight.md) | 2026-10-12 | Budget boost after turns (S66A), neighbourhood clamp/anti-lag (S67A), read-since-relight slack (S68A), seed we | pushed (S68B reverted) | 782fe38b..2f35eaa2 |
 | [S70](experiments/S70-gpu-driven-dispatch.md) | 2026-10-12 | Indirect dispatch for cache rays (S70A), no GPU->CPU counter reads in frame loop (S70B), resident scene buffer | pushed | 8758d467, 76245067, b0675659 |
@@ -430,7 +430,7 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 
 GI v1 (radiance cascades, the world probe tier, `stage_tier`, the v1 `kick_light` paths, `light.comp`, `scene.frag`, `tier.glsl`, `ssaa.comp`, `lighting.rs`, `probes.rs`, `probe_tier.rs`, `field.rs`, `shadow.rs`, their tests and bench columns, and the `GENOS_GI` switch and stress `gi` knob) is gone. Removed with it: SSAA (it drew through the v1 fragment shader; panel code 2 now means FXAA), the live-readback switch, `TierStats` (replaced by `SettleStats { settled, still_frames }` from `Renderer::settle_stats()`), and the debug views that showed v1 data (cascade, probes, light field). Debug views now: full, direct, bounce, albedo, normal, depth, light, texels.
 
-Historical v1 numbers (for comparison only; v1 cannot be run any more). Full tables in [GI v1 archive](archive-v1.md) (master `0874229d`, tag `gi-v2-baseline`, zanven-pc, RTX 4070, 2026-10-10):
+Historical v1 numbers (for comparison only; v1 cannot be run any more). Full tables were in the deleted baseline doc (master `0874229d`, tag `gi-v2-baseline`, zanven-pc, RTX 4070, 2026-10-10); recover from git history:
 
 | v1 check (320x180, CPU reference) | mean_rel | bias |
 |---|---|---|

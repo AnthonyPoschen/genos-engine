@@ -36,7 +36,7 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     │   │   └── plan.md
     │   ├── renderer.md
     │   ├── ui.md
-    │   ├── lighting/ (README.md, archive-v1.md, debug-standard.md, experiments/)
+    │   ├── lighting/ (README.md, debug-standard.md, experiments/)
     │   ├── gi-design.md
     │   ├── loading.md
     │   ├── audio.md

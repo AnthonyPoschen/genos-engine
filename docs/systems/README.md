@@ -27,7 +27,6 @@ Each record uses these headings:
 - [Renderer](renderer.md) owns the Vulkan draw, the world, and culling.
 - [UI](ui.md) owns layout, pointer hits, and the lighting panel.
 - [Lighting](lighting/README.md): how GI lights the picture (direct, shadows, GI, references, checks), each component against Lumen and the papers. Its debug tooling is the reference standard, inventoried in [the debug standard](lighting/debug-standard.md). The path-trace picture check is [the reference check](lighting/reference-check.md).
-- [GI v1 archive](lighting/archive-v1.md): stub for the removed radiance-cascades path; full notes are in git history.
 - [GI design](gi-design.md): meshes, two tracers, a surface cache and screen probes ([ADR 0012](../adr/0012-gi.md)).
 - [Bake](bake.md) owns the import-time GI data per mesh: sparse SDFs, surface cache cards and their cache.
 - [Loading](loading.md) owns images, textures, texture maps, meshes, animations, PCM samples, and fonts.

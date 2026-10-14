@@ -26,7 +26,7 @@ Before you add a script, a mod API, or the `rhai` crate, read `docs/adr/0009-rha
 
 ## Lighting
 
-Before you add lights, shadows, or global illumination, read `docs/systems/lighting/README.md` and `docs/adr/0012-gi.md`. GI v1 (radiance cascades, ADR 0008) was removed; do not bring it back. See `docs/systems/lighting/archive-v1.md` for the archive stub.
+Before you add lights, shadows, or global illumination, read `docs/systems/lighting/README.md` and `docs/adr/0012-gi.md`. GI v1 (radiance cascades) was removed; do not bring it back.
 
 ## Breaking Point
 

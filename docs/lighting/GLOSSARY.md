@@ -175,7 +175,7 @@ Role: SCHED · Literature: — · More detail: S63–S65, SUN-small-sun-step; [`
 **Reference tester**: [`crates/lighting-ref`](../../crates/lighting-ref): CPU references and picture verdicts. Role: TOOL
 
 ### Historical (do not reuse)
-Radiance cascade, radiance field, v1 world probe, tier, notice band, prominence spacing: GI v1, removed on 2026-10-12. ADR [0008](../adr/0008-lighting-uses-radiance-cascades.md) is superseded by [ADR 0012](../adr/0012-gi.md). See [archive-v1.md](../systems/lighting/archive-v1.md).
+Radiance cascade, radiance field, v1 world probe, tier, notice band, prominence spacing: GI v1, removed on 2026-10-12. The radiance-cascades ADR (0008) was deleted; [ADR 0012](../adr/0012-gi.md) is the live decision.
 
 ---
 ## How to compare a new technique
