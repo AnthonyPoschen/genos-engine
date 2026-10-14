@@ -10,7 +10,7 @@ A player can move and look with a keyboard, a mouse, or a gamepad. The same acti
 
 The model is a pull. Each frame calls `begin_frame`, then writes fresh device state, then reads the action map.
 
-`InputCode` names and numeric values match `input-zig`. The names stay snake case. That enum is the one allowed `non_camel_case_types` exception.
+`InputCode` names and numeric values match `input-zig`. The names stay snake case. That enum is the one allowed `non_camel_case_types` exception. `key_grave` is the key left of `1` (`~). Its value is 192, the Windows OEM 3 virtual key, and Linux evdev code 41.
 
 One keyboard, one mouse, and stable gamepad slots stay. A disconnected pad keeps its slot.
 

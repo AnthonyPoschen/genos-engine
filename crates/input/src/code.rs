@@ -152,6 +152,8 @@ pub enum InputCode {
     key_control_right = 163,
     key_alt_left = 164,
     key_alt_right = 165,
+    /// The key left of 1 on a US keyboard. Windows virtual key OEM 3.
+    key_grave = 192,
 }
 
 pub fn name(code: InputCode) -> &'static str {
@@ -304,6 +306,7 @@ pub fn name(code: InputCode) -> &'static str {
         InputCode::key_control_right => "key_control_right",
         InputCode::key_alt_left => "key_alt_left",
         InputCode::key_alt_right => "key_alt_right",
+        InputCode::key_grave => "key_grave",
     }
 }
 
@@ -457,6 +460,7 @@ pub fn parse(name: &str) -> Option<InputCode> {
         "key_control_right" => InputCode::key_control_right,
         "key_alt_left" => InputCode::key_alt_left,
         "key_alt_right" => InputCode::key_alt_right,
+        "key_grave" => InputCode::key_grave,
         _ => return None,
     })
 }

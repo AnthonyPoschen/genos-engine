@@ -26,6 +26,10 @@ mod tests {
         assert_eq!(parse("key_a"), Some(InputCode::key_a));
         assert_eq!(name(InputCode::key_d), "key_d");
         assert_eq!(from_letter_evdev(), InputCode::key_w);
+        assert_eq!(InputCode::key_grave as u16, 192);
+        assert_eq!(parse("key_grave"), Some(InputCode::key_grave));
+        assert_eq!(name(InputCode::key_grave), "key_grave");
+        assert_eq!(device::from_evdev(41), Some(InputCode::key_grave));
     }
 
     fn from_letter_evdev() -> InputCode {
