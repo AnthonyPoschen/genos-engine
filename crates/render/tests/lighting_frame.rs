@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use genos_render::{DebugView, LightingAtrousStats, Renderer, ViewMode, World};
-use genos_scene::{Camera, LightingPreset, LightingSettings, Scene};
+use genos_render::{DebugView, LampPickCounts, LightingAtrousStats, Renderer, ViewMode, World};
+use genos_scene::{AmbientMode, Camera, LampPickMode, LightingPreset, LightingSettings, Scene};
 use genos_window::Window;
 
 fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
@@ -1808,4 +1808,326 @@ fn sponza_curtain_scores(screen: bool) -> (f64, f64) {
     }
     let edge = frames.iter().map(|f| cell_edge_ratio(f, 320, 6)).sum::<f64>() / frames.len() as f64;
     (edge, roi_flicker(&frames, 320))
+}
+
+struct LampDiag;
+
+impl Drop for LampDiag {
+    fn drop(&mut self) {
+        std::env::remove_var("GENOS_LIGHTING_LAMP_PICK_DIAG");
+    }
+}
+
+fn lamp_camera() -> Camera {
+    let mut camera = Camera::opening();
+    camera.set_pose(genos_scene::Vec3::new(0.0, 1.7, 4.0), 0.0, 0.0);
+    camera
+}
+
+fn white_lamps(n: usize) -> World {
+    let mut lights = Vec::new();
+    for i in 0..n {
+        let x = (i as f32 - (n as f32 - 1.0) * 0.5) * 1.2;
+        lights.push(genos_scene::Light {
+            position: genos_scene::Vec3::new(x, 2.4, -1.0),
+            color: [1.0, 1.0, 1.0],
+            direction: genos_scene::Vec3::ZERO,
+        });
+    }
+    World::from_scene(Scene {
+        floor: genos_scene::Floor {
+            position: genos_scene::Vec3::ZERO,
+            half_x: 20.0,
+            half_z: 20.0,
+            color: [0.8, 0.8, 0.8],
+        },
+        walls: Vec::new(),
+        solids: Vec::new(),
+        lights,
+        ceiling: None,
+        sky: None,
+        lighting: LightingSettings::preset(LightingPreset::Potato),
+        debug: genos_scene::DebugSettings::default(),
+        fps_counter: genos_scene::FpsCounterSettings::default(),
+    })
+}
+
+fn direct_pick(mode: LampPickMode, rays: u32) -> LightingSettings {
+    let mut settings = LightingSettings::preset(LightingPreset::Potato);
+    settings.direct.max_lights = 0;
+    settings.sky = false;
+    settings.ambient.mode = AmbientMode::Off;
+    settings.shadows.enabled = true;
+    settings.gi.enabled = false;
+    settings.bounce.count = 0;
+    settings.probes.enabled = false;
+    settings.world_cache.enabled = false;
+    settings.lamp_pick.mode = mode;
+    settings.lamp_pick.rays = rays;
+    settings.lamp_pick.radius = 0;
+    settings.lamp_pick.unbiased = true;
+    settings
+}
+
+fn max_channel(a: &[u8], b: &[u8]) -> u8 {
+    let n = a.len().min(b.len()) / 4;
+    let mut worst = 0u8;
+    for i in 0..n {
+        let p = i * 4;
+        worst = worst
+            .max(a[p].abs_diff(b[p]))
+            .max(a[p + 1].abs_diff(b[p + 1]))
+            .max(a[p + 2].abs_diff(b[p + 2]));
+    }
+    worst
+}
+
+fn traced_rays(counts: LampPickCounts) -> u32 {
+    counts
+        .pixels
+        .saturating_add(counts.kept)
+        .saturating_add(counts.fills)
+        .saturating_add(counts.cache)
+}
+
+/// Direct view, white lamps, no sun. Covering every lamp matches the full sum.
+/// One sample per pixel reconstructs that sum and does not flicker.
+#[test]
+fn lamp_pick_pixels_match_the_full_sum() {
+    let (_gpu, mut window, mut renderer) = open();
+    let world = white_lamps(3);
+    let camera = lamp_camera();
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    renderer.set_lighting_settings(direct_pick(LampPickMode::Off, 1));
+    let off = draw(&mut window, &mut renderer, &world, &camera);
+    assert!(
+        mean_byte(&off) > 1.0,
+        "the full sum is black ({})",
+        mean_byte(&off)
+    );
+    renderer.set_lighting_settings(direct_pick(LampPickMode::Hits, 1));
+    let hits = draw(&mut window, &mut renderer, &world, &camera);
+    assert!(
+        max_channel(&off, &hits) <= 1,
+        "hits on bounce 0 changed a pixel by {}",
+        max_channel(&off, &hits)
+    );
+    renderer.set_lighting_settings(direct_pick(LampPickMode::Pixels, 4));
+    let covered = draw(&mut window, &mut renderer, &world, &camera);
+    assert!(
+        max_channel(&off, &covered) <= 1,
+        "rays that cover the lamps differ by {}",
+        max_channel(&off, &covered)
+    );
+    renderer.set_lighting_settings(direct_pick(LampPickMode::Pixels, 1));
+    let once = draw(&mut window, &mut renderer, &world, &camera);
+    let again = draw(&mut window, &mut renderer, &world, &camera);
+    eprintln!(
+        "lamp pick rays=1 mean_abs {:.4} stable {:.4}",
+        mean_abs(&off, &once),
+        mean_abs(&once, &again)
+    );
+    assert!(
+        mean_abs(&once, &again) < 0.05,
+        "a still pixel sample flickered"
+    );
+    assert!(
+        mean_abs(&off, &once) < 1.5,
+        "one visible sample left the full sum"
+    );
+}
+
+/// Off traces a ray per lamp. One sample per pixel does not.
+#[test]
+fn lamp_pick_shadow_rays_do_not_grow_with_the_lamp_count() {
+    let (_gpu, mut window, mut renderer) = open();
+    let _diag = LampDiag;
+    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+    let camera = lamp_camera();
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    let count_of = |renderer: &mut Renderer,
+                    window: &mut Window,
+                    lights: usize,
+                    mode: LampPickMode,
+                    rays: u32| {
+        let world = white_lamps(lights);
+        renderer.set_lighting_settings(direct_pick(mode, rays));
+        let _ = draw(window, renderer, &world, &camera);
+        traced_rays(renderer.lighting_lamp_pick_counts())
+    };
+    let off3 = count_of(&mut renderer, &mut window, 3, LampPickMode::Off, 1);
+    let off9 = count_of(&mut renderer, &mut window, 9, LampPickMode::Off, 1);
+    eprintln!("lamp pick off rays 3={off3} 9={off9}");
+    assert!(off3 > 0, "off traced nothing");
+    assert!(
+        off9 > off3 * 2,
+        "off did not grow with the lamps ({off3} -> {off9})"
+    );
+    let one3 = count_of(&mut renderer, &mut window, 3, LampPickMode::Pixels, 1);
+    let one9 = count_of(&mut renderer, &mut window, 9, LampPickMode::Pixels, 1);
+    eprintln!("lamp pick pixels rays 3={one3} 9={one9}");
+    assert!(one3 > 0 && one9 > 0, "pixels traced nothing");
+    assert!(
+        one9 < one3 + one3 / 2,
+        "one sample per pixel grew with the lamps ({one3} -> {one9})"
+    );
+}
+
+/// Reuse reconnects a moved lamp. Radius 0 merges no neighbour. Radius 8 does.
+#[test]
+fn lamp_pick_reuse_follows_a_moved_lamp() {
+    let (_gpu, mut window, mut renderer) = open();
+    let _diag = LampDiag;
+    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+    let mut world = white_lamps(3);
+    let camera = lamp_camera();
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.direct.max_lights = 0;
+    settings.sky = false;
+    settings.ambient.mode = AmbientMode::Off;
+    settings.shadows.enabled = true;
+    settings.gi.enabled = true;
+    settings.bounce.count = 1;
+    settings.probes.enabled = false;
+    settings.world_cache.enabled = true;
+    settings.denoiser.enabled = false;
+    settings.prefill = false;
+    settings.compose_reuse = false;
+    settings.lamp_pick.mode = LampPickMode::Reuse;
+    settings.lamp_pick.rays = 1;
+    settings.lamp_pick.radius = 0;
+    settings.lamp_pick.unbiased = true;
+    renderer.set_lighting_settings(settings.clone());
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    world.scene.lights[0].position.x += 3.0;
+    let moved = draw(&mut window, &mut renderer, &world, &camera);
+    let spatial = renderer.lighting_lamp_pick_counts().spatial;
+    assert_eq!(spatial, 0, "radius 0 merged a neighbour");
+    settings.lamp_pick.radius = 8;
+    renderer.set_lighting_settings(settings.clone());
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let spatial = renderer.lighting_lamp_pick_counts().spatial;
+    assert!(spatial > 0, "radius 8 merged no neighbour");
+    settings.lamp_pick.mode = LampPickMode::Off;
+    renderer.set_lighting_settings(settings);
+    let full = draw(&mut window, &mut renderer, &world, &camera);
+    eprintln!("lamp pick reuse mean_abs {:.4}", mean_abs(&moved, &full));
+    assert!(mean_byte(&full) > 1.0, "the moved lamps are black");
+    assert!(
+        mean_abs(&moved, &full) < 1.5,
+        "reuse left the old lamp shadow"
+    );
+}
+
+/// A box around the centre lamp. The side lamps still reach the floor. The
+/// centre lamp's unshadowed weight stays in the prefix, and its shadow ray does not.
+fn shadowed_lamps() -> World {
+    let mut world = white_lamps(3);
+    world.scene.solids.push(genos_scene::Solid {
+        shape: genos_scene::Shape::Square,
+        position: genos_scene::Vec3::new(0.0, 0.0, -1.0),
+        size: 0.8,
+        height: 4.0,
+        yaw: 0.0,
+        color: [0.35, 0.35, 0.35],
+        absorption: 0.0,
+        reflectance: -1.0,
+        color_mix: -1.0,
+    });
+    // from_scene is what registers the solid with the tracer.
+    World::from_scene(world.scene)
+}
+
+/// GI on so a still pixel can accept history. Bounce 1 and the world-cache bit
+/// keep the quiet-frame pixel skip off, and the direct view drops the bounce.
+fn history_pick(mode: LampPickMode, rays: u32) -> LightingSettings {
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.direct.max_lights = 0;
+    settings.sky = false;
+    settings.ambient.mode = AmbientMode::Off;
+    settings.shadows.enabled = true;
+    settings.gi.enabled = true;
+    settings.bounce.count = 1;
+    settings.probes.enabled = false;
+    settings.world_cache.enabled = true;
+    settings.denoiser.enabled = false;
+    settings.prefill = false;
+    settings.compose_reuse = false;
+    settings.lamp_pick.mode = mode;
+    settings.lamp_pick.rays = rays;
+    settings.lamp_pick.radius = 0;
+    settings.lamp_pick.unbiased = true;
+    settings
+}
+
+/// Each mode against off, direct view, one lamp shadowed.
+///
+/// Hits, pixels, and both match off when the shadow-ray count covers the lamps,
+/// because pixels stay on the full sum. Reuse does not. Radius 0, so the miss
+/// is one visibility bit times the unshadowed sum, not a neighbour reservoir.
+#[test]
+fn lamp_pick_each_mode_against_off() {
+    let (_gpu, mut window, mut renderer) = open();
+    let _diag = LampDiag;
+    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+    let world = shadowed_lamps();
+    let camera = lamp_camera();
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    renderer.set_lighting_settings(history_pick(LampPickMode::Off, 1));
+    let open = draw(&mut window, &mut renderer, &white_lamps(3), &camera);
+    let off = draw(&mut window, &mut renderer, &world, &camera);
+    let boxed = mean_abs(&open, &off);
+    let off_rays = renderer.lighting_lamp_pick_counts().pixels;
+    assert!(
+        boxed > 2.0,
+        "the centre lamp is not shadowed ({boxed:.4})"
+    );
+    assert!(
+        mean_byte(&off) > 1.0,
+        "the shadowed full sum is black ({})",
+        mean_byte(&off)
+    );
+    let matches = |renderer: &mut Renderer, window: &mut Window, mode, rays| {
+        renderer.set_lighting_settings(history_pick(mode, rays));
+        let picture = draw(window, renderer, &world, &camera);
+        max_channel(&off, &picture)
+    };
+    let hits = matches(&mut renderer, &mut window, LampPickMode::Hits, 1);
+    let pixels = matches(&mut renderer, &mut window, LampPickMode::Pixels, 4);
+    let both = matches(&mut renderer, &mut window, LampPickMode::Both, 4);
+    assert!(hits <= 1, "hits changed a pixel by {hits}");
+    assert!(pixels <= 1, "covering pixel samples differ by {pixels}");
+    assert!(both <= 1, "covering both samples differ by {both}");
+    renderer.set_lighting_settings(history_pick(LampPickMode::Reuse, 1));
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let reused = draw(&mut window, &mut renderer, &world, &camera);
+    let counts = renderer.lighting_lamp_pick_counts();
+    let err = mean_abs(&off, &reused);
+    eprintln!(
+        "lamp pick occluded box {boxed:.4} max hits={hits} pixels={pixels} both={both} reuse {err:.4} rays {} / {off_rays} spatial {}",
+        counts.pixels, counts.spatial
+    );
+    assert_eq!(counts.spatial, 0, "radius 0 merged a neighbour");
+    assert!(
+        counts.pixels * 2 < off_rays,
+        "reuse did not drop to one shadow ray ({} vs {off_rays})",
+        counts.pixels
+    );
+    assert!(
+        err > 10.0,
+        "reuse matched off ({err:.4}); the one-sample visibility error did not show"
+    );
 }

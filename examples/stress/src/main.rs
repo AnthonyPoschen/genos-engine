@@ -110,6 +110,17 @@ const USAGE: &str = "genos-stress [options]
   --denoise-screen on|off   screen wavelet of visible texels (GENOS_LIGHTING_DENOISE_SCREEN).
                             On for high. Off keeps the hash-slot wavelet
   --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
+  --lamp-pick MODE          off, hits, pixels, both, or reuse (experimental)
+                            (GENOS_LIGHTING_LAMP_PICK; reuse is the same mode)
+  --lamp-pick-samples N     shadow rays per shaded point, 1..4 (GENOS_LIGHTING_LAMP_PICK_SAMPLES)
+  --lamp-pick-rays N        same knob as --lamp-pick-samples
+  --lamp-pick-reuse on|off  temporal reservoir (GENOS_LIGHTING_LAMP_PICK_REUSE)
+  --lamp-pick-candidates N  unshadowed reservoir candidates, 1..32
+                            (GENOS_LIGHTING_LAMP_PICK_CANDIDATES)
+  --lamp-pick-radius N      spatial radius in pixels, 0..64; 0 is temporal only
+                            (GENOS_LIGHTING_LAMP_PICK_RADIUS)
+  --lamp-pick-history N     biased-merge M cap, 1..64 (GENOS_LIGHTING_LAMP_PICK_HISTORY)
+  --lamp-pick-unbiased on|off  Algorithm 6 when on (GENOS_LIGHTING_LAMP_PICK_UNBIASED)
   --lighting-full-effort    full refresh every frame (GENOS_LIGHTING_FULL_EFFORT=1)
   --lighting-sun on|off     small sun step (GENOS_LIGHTING_SUN, default on)
   --lighting-sun-bands N    indirect bands, 1..64 (GENOS_LIGHTING_SUN_BANDS, default 8)
@@ -177,6 +188,14 @@ struct Options {
     denoise_variance: Option<String>,
     denoise_screen: Option<String>,
     gpu_times: Option<String>,
+    lamp_pick: Option<String>,
+    lamp_pick_samples: Option<String>,
+    lamp_pick_rays: Option<String>,
+    lamp_pick_reuse: Option<String>,
+    lamp_pick_candidates: Option<String>,
+    lamp_pick_radius: Option<String>,
+    lamp_pick_history: Option<String>,
+    lamp_pick_unbiased: Option<String>,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, text: &str) -> Result<T, String> {
@@ -276,6 +295,14 @@ fn options() -> Result<Options, String> {
         denoise_variance: None,
         denoise_screen: None,
         gpu_times: None,
+        lamp_pick: None,
+        lamp_pick_samples: None,
+        lamp_pick_rays: None,
+        lamp_pick_reuse: None,
+        lamp_pick_candidates: None,
+        lamp_pick_radius: None,
+        lamp_pick_history: None,
+        lamp_pick_unbiased: None,
     };
     let mut report: Option<PathBuf> = None;
     let mut trace = false;
@@ -373,6 +400,14 @@ fn options() -> Result<Options, String> {
             "--denoise-variance" => opts.denoise_variance = Some(value()?),
             "--denoise-screen" => opts.denoise_screen = Some(value()?),
             "--gpu-times" => opts.gpu_times = Some(value()?),
+            "--lamp-pick" => opts.lamp_pick = Some(value()?),
+            "--lamp-pick-samples" => opts.lamp_pick_samples = Some(value()?),
+            "--lamp-pick-rays" => opts.lamp_pick_rays = Some(value()?),
+            "--lamp-pick-reuse" => opts.lamp_pick_reuse = Some(value()?),
+            "--lamp-pick-candidates" => opts.lamp_pick_candidates = Some(value()?),
+            "--lamp-pick-radius" => opts.lamp_pick_radius = Some(value()?),
+            "--lamp-pick-history" => opts.lamp_pick_history = Some(value()?),
+            "--lamp-pick-unbiased" => opts.lamp_pick_unbiased = Some(value()?),
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -570,6 +605,46 @@ fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
             opts.denoise_screen.as_deref(),
             "denoise_screen",
             "GENOS_LIGHTING_DENOISE_SCREEN",
+        ),
+        (
+            opts.lamp_pick.as_deref(),
+            "lamp_pick",
+            "GENOS_LIGHTING_LAMP_PICK",
+        ),
+        (
+            opts.lamp_pick_samples.as_deref(),
+            "lamp_pick_samples",
+            "GENOS_LIGHTING_LAMP_PICK_SAMPLES",
+        ),
+        (
+            opts.lamp_pick_rays.as_deref(),
+            "lamp_pick_rays",
+            "GENOS_LIGHTING_LAMP_PICK_RAYS",
+        ),
+        (
+            opts.lamp_pick_reuse.as_deref(),
+            "lamp_pick_reuse",
+            "GENOS_LIGHTING_LAMP_PICK_REUSE",
+        ),
+        (
+            opts.lamp_pick_candidates.as_deref(),
+            "lamp_pick_candidates",
+            "GENOS_LIGHTING_LAMP_PICK_CANDIDATES",
+        ),
+        (
+            opts.lamp_pick_radius.as_deref(),
+            "lamp_pick_radius",
+            "GENOS_LIGHTING_LAMP_PICK_RADIUS",
+        ),
+        (
+            opts.lamp_pick_history.as_deref(),
+            "lamp_pick_history",
+            "GENOS_LIGHTING_LAMP_PICK_HISTORY",
+        ),
+        (
+            opts.lamp_pick_unbiased.as_deref(),
+            "lamp_pick_unbiased",
+            "GENOS_LIGHTING_LAMP_PICK_UNBIASED",
         ),
     ];
     for (value, key, var) in keys {

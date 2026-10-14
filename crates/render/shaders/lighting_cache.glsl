@@ -2641,21 +2641,6 @@ const bool LIGHTING_SC_KEEP_NEAR = true;
 vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj);
 // S72M: the pixel's screen-probe irradiance (lighting_compose.comp), -1 when none.
 vec3 lighting_px_probes = vec3(-1.0);
-// Screen wavelet (control bit 19). The last à-trous write is slice 1 (the
-// iteration count is 1, 3, or 5). Compose shows that pixel. Scattering the
-// same color into the 12.5 cm cell and showing the cell paints the grid back
-// onto a thin cloth. A pixel the wavelet skipped (mask 0) keeps `fallback`.
-vec3 lighting_screen_field(uint index, vec3 fallback) {
-    if ((gstats.ctrl_bits & 524288u) == 0u) {
-        return fallback;
-    }
-    uint hist = gstats.ctrl_history != 0u ? 1u : 0u;
-    uint at = ((3u + hist) + 4u) * pc.dims.x * pc.dims.y + index * 4u;
-    if (uintBitsToFloat(outc.px[at + 2u]) <= 0.0) {
-        return fallback;
-    }
-    return lighting_unpack_rgb9e5(outc.px[at]);
-}
 vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     lighting_px_unfilled = false;
     uint mode = lighting_world_mode();
@@ -2782,8 +2767,9 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (v.w < 0.5) {
             continue;
         }
-        sum += bil * v.rgb;
-        wsum += bil;
+        float w = bil;
+        sum += w * v.rgb;
+        wsum += w;
         float own_w = cache.v[3u * slot + 2u].w;
         // With the estimator (flag 1048576) a texel lit under changing light is
         // still shown (its short mean lags a little, as Lumen's surface cache does);
@@ -2797,7 +2783,7 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             float c = floor(max(own_w, 0.0));
             sc_trust *= c / (c + LIGHTING_SC_TRUST_SETS);
         }
-        trust += bil * (mode == 3u ? sc_trust : (mode != 2u ? 1.0 : min(v.w / 4.0, 1.0)));
+        trust += w * (mode == 3u ? sc_trust : (mode != 2u ? 1.0 : min(v.w / 4.0, 1.0)));
     }
     // Surface cache: while the light changes or around an object that moves, the
     // probes (no history) show it.
@@ -3167,6 +3153,15 @@ const uint LIGHTING_ATROUS_PPM_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COM
 // One word per slot, past the a-trous meta (391) and the sun block (8). The
 // screen launch elects a single kernel thread here. Nothing else reads it.
 const uint LIGHTING_SCREEN_OWNER_AT = LIGHTING_ATROUS_PPM_AT + 391u + 8u;
+// List dedup for the screen launch, one word per slot, after the owner words.
+// Stamp and the two ping-pong counts sit in front of that array
+// (lighting_screen.comp). The count this frame reads is the other frame's
+// word, so committing this frame's count does not race the readers.
+const uint LIGHTING_SCREEN_LIST_HDR = LIGHTING_SCREEN_OWNER_AT + LIGHTING_CACHE_SLOTS;
+const uint LIGHTING_SCREEN_LIST_STAMP = LIGHTING_SCREEN_LIST_HDR;
+const uint LIGHTING_SCREEN_LIST_BASE0 = LIGHTING_SCREEN_LIST_HDR + 1u;
+const uint LIGHTING_SCREEN_LIST_BASE1 = LIGHTING_SCREEN_LIST_HDR + 2u;
+const uint LIGHTING_SCREEN_LIST_AT = LIGHTING_SCREEN_LIST_HDR + 3u;
 const uint LIGHTING_ATROUS_PREV_AT = LIGHTING_ATROUS_PPM_AT + 1u;
 const uint LIGHTING_ATROUS_BIN_AT = LIGHTING_ATROUS_PREV_AT + 1u;
 const uint LIGHTING_ATROUS_MODE_AT = LIGHTING_ATROUS_BIN_AT + 64u;

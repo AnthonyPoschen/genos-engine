@@ -30,9 +30,10 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --scene NAME           scene file name (debug/scenes). Falls back to GENOS_SCENE,
                          then stress
   --checkpoint NAME      jump here at launch
-  --eye X,Y,Z            camera position, metres. Keeps the checkpoint aim unless
-                         --look is set
-  --look X,Y,Z           world point to aim at. Yaw 0 looks down -Z
+  --eye X,Y,Z            camera position, metres. --eye=X,Y,Z is the same flag.
+                         Keeps the checkpoint aim unless --look is set
+  --look X,Y,Z           world point to aim at. --look=X,Y,Z is the same flag.
+                         Yaw 0 looks down -Z
   --preset NAME          potato, low, medium, or high. Sets GENOS_LIGHTING_PRESET
   --gpu-times N          print GPU_MS every N frames (GENOS_GPU_TIMES)
   --lighting-debug       print the lighting probe line (GENOS_LIGHTING_DEBUG)
@@ -83,6 +84,10 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_direct_lights",
     "lighting_direct_refresh",
     "lighting_direct_scale",
+    "lighting_lamp_pick_samples",
+    "lighting_lamp_pick_candidates",
+    "lighting_lamp_pick_radius",
+    "lighting_lamp_pick_history",
     "lighting_gi_refresh",
     "lighting_budget_shift",
     "lighting_probe_rays",
@@ -94,7 +99,11 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_world_verify",
 ];
 /// Unordered choices. A long list of scenes uses the same dropdown.
-const DROP_KNOBS: &[&str] = &["lighting_shadow_filter", "lighting_ambient"];
+const DROP_KNOBS: &[&str] = &[
+    "lighting_shadow_filter",
+    "lighting_ambient",
+    "lighting_lamp_pick",
+];
 const VIEWS: [&str; 7] = [
     "full", "direct", "bounce", "albedo", "normal", "depth", "texels",
 ];
@@ -683,6 +692,17 @@ fn unit(v: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// `--eye=X,Y,Z` and `--look=X,Y,Z`. The spaced form is a separate argument.
+fn placed_flag(arg: &str) -> Option<(&'static str, &str)> {
+    if let Some(value) = arg.strip_prefix("--eye=") {
+        Some(("--eye", value))
+    } else if let Some(value) = arg.strip_prefix("--look=") {
+        Some(("--look", value))
+    } else {
+        None
+    }
+}
+
 fn parse_vec3(flag: &str, text: &str) -> Result<[f32; 3], String> {
     let parts: Vec<&str> = text.split(',').collect();
     if parts.len() != 3 {
@@ -1231,7 +1251,14 @@ fn options() -> Result<Options, String> {
                 parse_rate(&value).map_err(|err| format!("bad --fps-hz: {err}"))?;
             }
             other => {
-                if let Some(value) = other.strip_prefix("--fps-counter=") {
+                if let Some((flag, value)) = placed_flag(other) {
+                    let parsed = parse_vec3(flag, value)?;
+                    if flag == "--eye" {
+                        eye = Some(parsed);
+                    } else {
+                        look = Some(parsed);
+                    }
+                } else if let Some(value) = other.strip_prefix("--fps-counter=") {
                     parse_enabled(value).map_err(|err| format!("bad --fps-counter: {err}"))?;
                 } else if let Some(value) = other.strip_prefix("--fps-hz=") {
                     parse_rate(value).map_err(|err| format!("bad --fps-hz: {err}"))?;
@@ -1340,6 +1367,11 @@ mod tests {
         assert!((camera.pitch + 0.2).abs() < 1.0e-5);
         assert!(super::parse_vec3("--eye", "1, 2, 3").is_ok());
         assert!(super::parse_vec3("--eye", "1,2").is_err());
+        let (flag, value) = super::placed_flag("--eye=4,5,6").unwrap();
+        assert_eq!(super::parse_vec3(flag, value).unwrap(), [4.0, 5.0, 6.0]);
+        let (flag, value) = super::placed_flag("--look=7,8,9").unwrap();
+        assert_eq!(super::parse_vec3(flag, value).unwrap(), [7.0, 8.0, 9.0]);
+        assert!(super::placed_flag("--eye").is_none());
     }
 
     #[test]
@@ -1360,9 +1392,33 @@ mod tests {
             .filter(|row| row.dropdown.is_some())
             .map(|row| row.label.as_str())
             .collect();
-        for label in ["Scene", "Checkpoint", "View", "Shadow filter", "Ambient"] {
+        for label in [
+            "Scene",
+            "Checkpoint",
+            "View",
+            "Shadow filter",
+            "Ambient",
+            "Lamp pick",
+        ] {
             assert!(dropdowns.contains(&label), "missing dropdown {label}");
         }
+        let lamp = rows
+            .iter()
+            .find(|row| row.label == "Lamp pick")
+            .expect("lamp pick dropdown")
+            .dropdown
+            .as_ref()
+            .unwrap();
+        let lamp_names: Vec<&str> = lamp
+            .choices
+            .iter()
+            .map(|choice| choice.name.as_str())
+            .collect();
+        assert_eq!(
+            lamp_names,
+            ["off", "hits", "pixels", "both", "reuse (experimental)"]
+        );
+        assert_eq!(lamp.value, 1.0, "high samples hits");
         let sliders: Vec<&str> = rows
             .iter()
             .filter(|row| row.slider.is_some())

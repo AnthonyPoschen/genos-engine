@@ -89,6 +89,7 @@ fn main() {
         "lighting_pack.glsl",
         "lighting_cache.glsl",
         "lighting_cache_slots.glsl",
+        "lighting_lamp_pick.glsl",
         "lighting_sun_compose.comp",
         "lighting_screen.comp",
     ] {

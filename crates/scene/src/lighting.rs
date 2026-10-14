@@ -134,6 +134,90 @@ impl ShadowFilter {
     }
 }
 
+/// Which points sample point lamps instead of tracing every one.
+///
+/// The sun is never a sample. It is traced on its own. GI presets use
+/// [`Hits`](Self::Hits). Potato and day-cycle stay [`Off`](Self::Off).
+/// [`Reuse`](Self::Reuse) is experimental and is not a preset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum LampPickMode {
+    /// Every lamp. Potato and day-cycle.
+    Off = 0,
+    /// Bounce hits, probe fills, and cache-ray hits. Pixels stay exact.
+    Hits = 1,
+    /// Primary pixels only. No previous frame. Diagnostic.
+    Pixels = 2,
+    /// Hits and pixels, no reservoir.
+    Both = 3,
+    /// Experimental. Hits, plus pixels with a temporal reservoir.
+    /// Spatial only if the radius is above 0. Not used by a preset.
+    Reuse = 4,
+}
+
+impl LampPickMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Hits => "hits",
+            Self::Pixels => "pixels",
+            Self::Both => "both",
+            Self::Reuse => "reuse (experimental)",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "off" | "0" => Some(Self::Off),
+            "hits" | "1" => Some(Self::Hits),
+            "pixels" | "2" => Some(Self::Pixels),
+            "both" | "3" => Some(Self::Both),
+            "reuse" | "4" | "reuse (experimental)" => Some(Self::Reuse),
+            _ => None,
+        }
+    }
+}
+
+/// Weighted lamp picking (Bitterli et al. 2020, Talbot et al. 2005).
+///
+/// `rays` is the shadow-ray count (samples per shaded point). `candidates` is
+/// the unshadowed reservoir fill. They are not the same knob: a candidate is
+/// not a ray. `direct.max_lights` stays a hard cap and does not read these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LampPickSettings {
+    pub mode: LampPickMode,
+    /// Unshadowed candidates feeding a pixel reservoir. 1..=32. Default 8.
+    pub candidates: u32,
+    /// Shadow rays per shaded point. 1..=4. Default 1. Also `lamp_pick_samples`.
+    pub rays: u32,
+    /// Spatial neighbour radius in pixels. 0..=64. Default 0 (no spatial merge).
+    pub radius: u32,
+    /// Cap on reservoir `M` for the biased merge. 1..=64. Default 20.
+    /// The unbiased path does not apply it.
+    pub history: u32,
+    /// Algorithm 6 when true. The section-3 merge and the `M` clamp when false.
+    pub unbiased: bool,
+}
+
+impl Default for LampPickSettings {
+    fn default() -> Self {
+        Self {
+            mode: LampPickMode::Off,
+            candidates: 8,
+            rays: 1,
+            radius: 0,
+            history: 20,
+            unbiased: true,
+        }
+    }
+}
+
+impl LampPickSettings {
+    pub fn reuse(self) -> bool {
+        self.mode == LampPickMode::Reuse
+    }
+}
+
 /// Direct lighting of pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DirectSettings {
@@ -283,6 +367,9 @@ pub struct LightingSettings {
     pub emissive: bool,
     pub prefill: bool,
     pub ambient: AmbientSettings,
+    /// Weighted lamp picking. GI presets sample hits, and pixels stay on the full
+    /// sum. `reuse (experimental)` is not a preset.
+    pub lamp_pick: LampPickSettings,
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
     /// `0` is midnight, `6` dawn, `12` noon, `18` dusk.
     pub time_of_day: f32,
@@ -304,7 +391,9 @@ impl LightingSettings {
             s.denoiser.screen = false;
         }
         match preset {
-            LightingPreset::High => {}
+            LightingPreset::High => {
+                s.lamp_pick.mode = LampPickMode::Hits;
+            }
             LightingPreset::DayCycle => {
                 s.gi.enabled = false;
                 s.bounce.count = 0;
@@ -330,6 +419,7 @@ impl LightingSettings {
                 s.world_cache.enabled = false;
                 s.denoiser.enabled = false;
                 s.prefill = false;
+                s.lamp_pick.mode = LampPickMode::Hits;
             }
             LightingPreset::Potato => {
                 s.direct.max_lights = 8;
@@ -363,6 +453,7 @@ impl LightingSettings {
                 s.gi.budget_shift = 2;
                 s.ambient.mode = AmbientMode::Day;
                 s.ambient.intensity = 0.35;
+                s.lamp_pick.mode = LampPickMode::Hits;
             }
             LightingPreset::Medium => {
                 s.direct.max_lights = 8;
@@ -374,6 +465,7 @@ impl LightingSettings {
                 s.denoiser.adaptive = false;
                 s.gi.budget_shift = 1;
                 s.ambient.mode = AmbientMode::Day;
+                s.lamp_pick.mode = LampPickMode::Hits;
             }
         }
         s.sanitize();
@@ -445,6 +537,7 @@ impl LightingSettings {
                 dusk_color: [1.0, 0.42, 0.22],
                 dusk_intensity: 0.40,
             },
+            lamp_pick: LampPickSettings::default(),
             time_of_day: 12.0,
         }
     }
@@ -493,6 +586,10 @@ impl LightingSettings {
         if self.bounce.count != LIGHTING_BOUNCES_UNLIMITED {
             self.bounce.count = self.bounce.count.min(2);
         }
+        self.lamp_pick.candidates = self.lamp_pick.candidates.clamp(1, 32);
+        self.lamp_pick.rays = self.lamp_pick.rays.clamp(1, 4);
+        self.lamp_pick.radius = self.lamp_pick.radius.min(64);
+        self.lamp_pick.history = self.lamp_pick.history.clamp(1, 64);
     }
 
     /// World mode the shaders see. A forced mode wins once cache-to-cache is
@@ -818,6 +915,14 @@ impl LightingSettings {
             "dusk_intensity={}",
             num_text(self.ambient.dusk_intensity)
         );
+        let _ = writeln!(out, "lamp_pick={}", self.lamp_pick.mode.name());
+        let _ = writeln!(out, "lamp_pick_candidates={}", self.lamp_pick.candidates);
+        let _ = writeln!(out, "lamp_pick_rays={}", self.lamp_pick.rays);
+        let _ = writeln!(out, "lamp_pick_samples={}", self.lamp_pick.rays);
+        let _ = writeln!(out, "lamp_pick_radius={}", self.lamp_pick.radius);
+        let _ = writeln!(out, "lamp_pick_history={}", self.lamp_pick.history);
+        let _ = writeln!(out, "lamp_pick_unbiased={}", bit(self.lamp_pick.unbiased));
+        let _ = writeln!(out, "lamp_pick_reuse={}", bit(self.lamp_pick.reuse()));
         let _ = writeln!(out, "time_of_day={}", num_text(self.time_of_day));
         out
     }
@@ -933,6 +1038,25 @@ impl LightingSettings {
             "dusk_color" => self.ambient.dusk_color = parse_rgb(value)?,
             "dusk_intensity" => self.ambient.dusk_intensity = num_f32(value)?,
             "time_of_day" => self.time_of_day = num_f32(value)?,
+            "lamp_pick" => {
+                self.lamp_pick.mode = LampPickMode::parse(value).ok_or_else(|| {
+                    format!(
+                        "lamp_pick is off, hits, pixels, both, or reuse (experimental), got {value}"
+                    )
+                })?
+            }
+            "lamp_pick_candidates" => self.lamp_pick.candidates = num_u32(value)?,
+            "lamp_pick_rays" | "lamp_pick_samples" => self.lamp_pick.rays = num_u32(value)?,
+            "lamp_pick_radius" => self.lamp_pick.radius = num_u32(value)?,
+            "lamp_pick_history" => self.lamp_pick.history = num_u32(value)?,
+            "lamp_pick_unbiased" => self.lamp_pick.unbiased = on(value)?,
+            "lamp_pick_reuse" => {
+                if on(value)? {
+                    self.lamp_pick.mode = LampPickMode::Reuse;
+                } else if self.lamp_pick.mode == LampPickMode::Reuse {
+                    self.lamp_pick.mode = LampPickMode::Both;
+                }
+            }
             _ => return Err(format!("unknown lighting setting {key}")),
         }
         self.sanitize();
@@ -1018,6 +1142,17 @@ impl LightingSettings {
             ("GENOS_LIGHTING_NOON_INTENSITY", "noon_intensity"),
             ("GENOS_LIGHTING_DUSK_COLOR", "dusk_color"),
             ("GENOS_LIGHTING_DUSK_INTENSITY", "dusk_intensity"),
+            ("GENOS_LIGHTING_LAMP_PICK", "lamp_pick"),
+            (
+                "GENOS_LIGHTING_LAMP_PICK_CANDIDATES",
+                "lamp_pick_candidates",
+            ),
+            ("GENOS_LIGHTING_LAMP_PICK_RAYS", "lamp_pick_rays"),
+            ("GENOS_LIGHTING_LAMP_PICK_SAMPLES", "lamp_pick_samples"),
+            ("GENOS_LIGHTING_LAMP_PICK_RADIUS", "lamp_pick_radius"),
+            ("GENOS_LIGHTING_LAMP_PICK_HISTORY", "lamp_pick_history"),
+            ("GENOS_LIGHTING_LAMP_PICK_UNBIASED", "lamp_pick_unbiased"),
+            ("GENOS_LIGHTING_LAMP_PICK_REUSE", "lamp_pick_reuse"),
         ];
         for (var, key) in keys {
             if let Ok(value) = std::env::var(var) {

@@ -2,7 +2,9 @@
 //! sliders all set them through here.
 
 use genos_debug::{Host, Knob};
-use genos_scene::{AmbientMode, LightingPreset, LightingSettings, Scene, ShadowFilter};
+use genos_scene::{
+    AmbientMode, LampPickMode, LightingPreset, LightingSettings, Scene, ShadowFilter,
+};
 
 use crate::building::{self, Layout};
 use crate::stage::{Scale, Stage};
@@ -199,6 +201,54 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             1.0,
             "",
         ),
+        Knob::choice(
+            "lighting_lamp_pick",
+            "Lamp pick",
+            lamp_pick_index(lighting.lamp_pick.mode),
+            &["off", "hits", "pixels", "both", "reuse (experimental)"],
+        ),
+        Knob::number(
+            "lighting_lamp_pick_samples",
+            "Lamp samples",
+            lighting.lamp_pick.rays as f64,
+            (1.0, 4.0),
+            1.0,
+            "",
+        ),
+        Knob::switch(
+            "lighting_lamp_pick_reuse",
+            "Lamp reuse",
+            lighting.lamp_pick.reuse(),
+        ),
+        Knob::number(
+            "lighting_lamp_pick_candidates",
+            "Lamp candidates",
+            lighting.lamp_pick.candidates as f64,
+            (1.0, 32.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_lamp_pick_radius",
+            "Lamp radius",
+            lighting.lamp_pick.radius as f64,
+            (0.0, 64.0),
+            1.0,
+            " px",
+        ),
+        Knob::number(
+            "lighting_lamp_pick_history",
+            "Lamp history",
+            lighting.lamp_pick.history as f64,
+            (1.0, 64.0),
+            1.0,
+            "",
+        ),
+        Knob::switch(
+            "lighting_lamp_pick_unbiased",
+            "Lamp unbiased",
+            lighting.lamp_pick.unbiased,
+        ),
         Knob::switch("lighting_shadows", "Shadows", lighting.shadows.enabled),
         Knob::choice(
             "lighting_shadow_filter",
@@ -314,6 +364,16 @@ fn lighting_preset_knob(settings: &LightingSettings) -> Knob {
     Knob::choice("lighting_preset", "Lighting", index, &names)
 }
 
+fn lamp_pick_index(mode: LampPickMode) -> usize {
+    match mode {
+        LampPickMode::Off => 0,
+        LampPickMode::Hits => 1,
+        LampPickMode::Pixels => 2,
+        LampPickMode::Both => 3,
+        LampPickMode::Reuse => 4,
+    }
+}
+
 fn bounce_index(count: u32) -> usize {
     match count {
         0 => 0,
@@ -371,6 +431,20 @@ pub fn apply_lighting_knob(
         "lighting_direct_lights" => ("direct_lights", whole.to_string()),
         "lighting_direct_refresh" => ("direct_refresh", whole.max(1).to_string()),
         "lighting_direct_scale" => ("direct_scale", whole.to_string()),
+        "lighting_lamp_pick" => (
+            "lamp_pick",
+            ["off", "hits", "pixels", "both", "reuse (experimental)"]
+                .get(whole as usize)
+                .copied()
+                .unwrap_or("off")
+                .to_string(),
+        ),
+        "lighting_lamp_pick_samples" => ("lamp_pick_samples", whole.max(1).to_string()),
+        "lighting_lamp_pick_reuse" => ("lamp_pick_reuse", on_off(v)),
+        "lighting_lamp_pick_candidates" => ("lamp_pick_candidates", whole.max(1).to_string()),
+        "lighting_lamp_pick_radius" => ("lamp_pick_radius", whole.to_string()),
+        "lighting_lamp_pick_history" => ("lamp_pick_history", whole.max(1).to_string()),
+        "lighting_lamp_pick_unbiased" => ("lamp_pick_unbiased", on_off(v)),
         "lighting_shadows" => ("shadows", on_off(v)),
         "lighting_shadow_filter" => (
             "shadow_filter",

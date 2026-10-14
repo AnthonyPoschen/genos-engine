@@ -25,15 +25,31 @@ That was the ceiling, wall, and floor blotch, including the 1920×1080 x8
 diffs.
 
 The launch is the picture. Stage 0 stores the fine slot under each pixel, one
-hash find, keyed by the geometric axis in the G-buffer. Stage 1 picks one
-pixel per visible cell, the visible hit closest to the cell centre, and runs
-variance there. The pixel the centre projects to is the wrong owner once the
-surface is edge-on: that ray hits a nearer cell, the texel has no thread, and
-its raw mean shows through as grain. The next stages are the five hash
-iterations and the push, on that same pixel. Compose bilerps the pushed field
-(`lighting_sc_shown`), which is the hash picture. Slice 1 stays empty so the
-per-pixel buffer does not replace that bilinear. 25 cm cells are not given a
-screen thread. The push reads whatever the hash kernel last wrote for them.
+hash find, keyed by the geometric axis in the G-buffer. One pixel claims the
+cell and lists the cells the hash wavelet reads from it: the 5×5 taps at
+each of the five steps. A cell between pixel centres, or just past an edge,
+is in that list when the hash launch would filter it. Leaving its level
+empty changes the normalised convolution and the push certainty, and the
+face shifts. The next stages are the hash variance, the five iterations, and
+the push, on that list. A still camera with nothing moving reuses the list
+and appends cells that become active after that build (a bilinear corner
+claimed on a later frame). Freezing the first build left those taps empty
+and the face shifted by about one luma. The push idle refreshes the field
+stamp only while the camera is held. A one-bit yaw twitch failed that
+compare and compose showed the unfiltered 25 cm mean, about 3% brighter.
+Cells this launch still pushes keep the stamp.
+Compose bilerps the pushed field (`lighting_sc_shown`) with the same
+weights as the hash launch. The cache key already carries the axis, so a
+perpendicular face is a different cell and the find misses it. A plane or
+normal weight on top of that blend was tried: soft, and a hard half-texel
+cut. Both moved the stress hall off the hash picture (still p99 2 against
+the hash path's own frame-to-frame p99 of about 1.3). The face shift was the
+empty tap, not the bilinear. Compose does not read the per-pixel slice.
+That load was a full-frame cost on the compose pass (stress still 76 to 69
+fps, moving 50.5 to 47, with the denoise column unchanged).
+25 cm cells stay on the running mean the hash push reads. Filtering them
+from this launch moved the still hall off the hash picture. Medium leaves
+this launch off.
 
 A two-sided back face (`gl_FrontFacing` false) stores the opposite axis, so
 the front and the back do not share a cell. `gl_FrontFacing` does not follow
@@ -52,9 +68,14 @@ The screen wavelet keeps the same peak: erasing it was the pixel-step blur.
 The world-locked flicker of those floor points stays with the hash path.
 The stress hall, still and moving, is the full-picture gate at 960×540, where
 a foreground cell is wider than a pixel kernel. Eight warmup frames, then the
-scored pair. Mean and p99 against the hash wavelet stay inside the picture
-bar (1.5 / 10), and the screen path's own frame-to-frame change stays with
-the hash path. The synthetic floor did not see the 1920×1080 miss. A longer
+scored pair. Two processes do not share slot ids: the cache claims with
+`atomicCompSwap`, and a ray's rotation is a hash of the slot, so two hash
+runs of the same scene differ by more than one frame of noise inside one
+run (lavapipe still hall, about mean 0.73 / p99 3.3 against frame noise
+p99 1.3). The picture's p99 against the hash wavelet stays under that
+cross-process floor, so a face that sits a few luma off fails.
+The screen path's own frame-to-frame change stays with the hash path. The
+synthetic floor did not see the 1920×1080 miss. A longer
 lavapipe settle (16 warmup frames) leaves a far-wall tail around p99 11:
 an input step after the variance has collapsed rewrites the held blur. The
 hash launch's filtered level stays inside 1% across that step.
@@ -73,19 +94,18 @@ hash launch's filtered level stays inside 1% across that step.
 
 Deviations:
 
-- The dispatch visits cells a pixel of this frame can see. The hash pipeline
-  also filters a fine texel for 30 frames after it leaves the picture, and
-  every 25 cm cell. This launch does not.
-- The owner is the visible hit closest to the cell centre, not a projected
-  centre whose ray hits a nearer cell. A cell split by a nearer surface has
-  two such hits. One exchange on a word past the sun block
-  (`LIGHTING_SCREEN_OWNER_AT`, one per slot) keeps a single kernel thread.
-  The kernel reads the slot, so which hit wins does not change the colour.
-- The spatial stamp (a neighbour's 7×7 inputs moved) is cleared before
-  variance. On the full hash launch that redo stays inside the held blur.
-  Neighbours this frame cannot see have an empty level, so the same redo
-  rebuilds from the settled mean and the 12.5 cm grid returns. A texel whose
-  own input moved still recomputes.
+- The dispatch visits cells a pixel of this frame hits, plus the active cells
+  in their five a-trous footprints. The hash pipeline also filters a fine
+  texel for 30 frames after it leaves that footprint, and every 25 cm cell.
+  This launch does not.
+- One pixel claims each hit cell (`LIGHTING_SCREEN_OWNER_AT`) and walks the
+  taps. A second word per slot (`LIGHTING_SCREEN_LIST_AT`) keeps the list
+  unique. The kernel reads the slot, so which hit wins does not change the
+  colour. A still camera with nothing moving reuses the list and appends
+  cells claimed after the build.
+- The spatial stamp is the hash kernel's. The old screen path cleared it,
+  because a neighbour this frame could not see had an empty level and the
+  redo rebuilt from the settled mean. Those neighbours are in the list now.
 - Phi, the luminance weight, the depth and normal weights, and the pull are
   the hash kernel's. `denoise_variance` does not floor them, and there is no
   screen-space moment standing in for the spatial estimate.
@@ -94,8 +114,10 @@ Deviations:
   (ADR 0012).
 - Two-sided keys use the raster geometric axis. Back faces use the opposite
   axis. The shading normal is not the key.
-- Compose shows the bilinear of the pushed cells. It does not show a
-  per-pixel filter.
+- Compose shows the bilinear of the pushed cells, the same blend as the
+  hash launch. A plane or normal weight on the screen blend alone moved the
+  hall off that picture. It does not show a per-pixel filter, and it does
+  not read that slice.
 - S79 is not evidence against a screen launch. That trial kept the
   million-slot dispatch.
 

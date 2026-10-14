@@ -3,9 +3,11 @@
 //! The 320×180 bounce check stays inside a cell of a few pixels, so a wavelet
 //! that steps in pixels still crosses several cells and matches. At this size
 //! the foreground 12.5 cm cell is wider than that pixel kernel. Eight warmup
-//! frames, then the scored pair: mean and p99 against the hash path stay
-//! inside the picture bar, still and moving, and the screen path's own
-//! frame-to-frame change stays with the hash path.
+//! frames, then the scored pair. The picture's p99 against the hash path stays
+//! under that path's own cross-process error (slot claims race, so two hash
+//! runs differ by more than one frame of noise), still and moving. A whole
+//! face a few luma off fails. The screen path's own flicker stays with the
+//! hash path.
 
 use std::sync::Mutex;
 
@@ -126,17 +128,36 @@ fn mean_p99(reference: &[u8], image: &[u8]) -> (f64, f64) {
     (mean, p99)
 }
 
-fn assert_bar(name: &str, hash: &[u8], screen: &[u8]) {
-    let (mean, p99) = mean_p99(hash, screen);
-    eprintln!("hall {name} mean {mean:.3} p99 {p99:.3}");
-    assert!(mean <= 1.5, "{name} mean {mean:.3} is past the picture bar 1.5");
-    assert!(p99 <= 10.0, "{name} p99 {p99:.3} is past the picture bar 10");
+fn closer_bar(name: &str, hash_a: &[u8], hash_b: &[u8], screen: &[u8], floor_p99: f64, cross_mean: f64) {
+    let (mean_a, p99_a) = mean_p99(hash_a, screen);
+    let (mean_b, p99_b) = mean_p99(hash_b, screen);
+    let (mean, p99) = if p99_a <= p99_b {
+        (mean_a, p99_a)
+    } else {
+        (mean_b, p99_b)
+    };
+    // Pixel error is the mean of three channel diffs, so p99 lands on k/3.
+    // One pair estimates that step: a moving hash pair at p99 2.000 and a
+    // screen pair with the same mean landed on 2.333. A face several luma
+    // off still fails both bars.
+    let limit = floor_p99 + 1.0 / 3.0;
+    eprintln!(
+        "hall {name} vs A {mean_a:.3}/{p99_a:.3} vs B {mean_b:.3}/{p99_b:.3} closer {mean:.3}/{p99:.3} floor {floor_p99:.3} limit {limit:.3}"
+    );
+    assert!(
+        p99 <= limit + 1.0e-9,
+        "{name} p99 {p99:.3} is above the hash path noise {floor_p99:.3}"
+    );
+    assert!(
+        mean <= cross_mean + 0.25,
+        "{name} mean {mean:.3} is above the hash path cross-process mean {cross_mean:.3}"
+    );
 }
 
 fn assert_screen_launch(name: &str, stats: &LightingAtrousStats) {
     eprintln!(
-        "hall {name} screen pixels {} coarse {} filtered {} ran {}",
-        stats.screen_pixels, stats.coarse_pixels, stats.filtered, stats.ran
+        "hall {name} screen pixels {} coarse {} filtered {} ran {} movers {}",
+        stats.screen_pixels, stats.coarse_pixels, stats.filtered, stats.ran, stats.changed_pixels
     );
     assert!(stats.ran, "{name} screen wavelet did not publish");
     assert!(stats.screen_pixels > 0, "{name} filtered no pixels");
@@ -152,14 +173,34 @@ fn assert_screen_launch(name: &str, stats: &LightingAtrousStats) {
 /// Full picture of the stress hall. Still is a frozen stage. Moving advances
 /// the boxes and the lamps. Both are the hash wavelet's picture, plus the
 /// screen path's own flicker against that path.
+///
+/// Two processes do not share slot ids. `lighting_cache_find_sized` claims
+/// with `atomicCompSwap`, and a ray's rotation is a hash of the slot, so two
+/// hash runs of the same scene differ by more than one frame of noise inside
+/// one run. The picture bar is that cross-process floor (or the frame noise,
+/// when the claims happen to land the same way).
 #[test]
 fn screen_hall_matches_the_hash_wavelet_still_and_moving() {
-    let (hash_still, hash_stats) = hall_frames(false, true, 8, 2);
-    let (screen_still, screen_stats) = hall_frames(true, true, 8, 2);
+    let (hash_a, hash_stats) = hall_frames(false, true, 8, 2);
+    let (hash_b, _) = hall_frames(false, true, 8, 2);
+    let (cross_mean, cross_p99) = mean_p99(&hash_a[1], &hash_b[1]);
+    let (noise_mean, noise_p99) = mean_p99(&hash_a[0], &hash_a[1]);
+    let still_floor = cross_p99.max(noise_p99);
+    eprintln!(
+        "hash still cross-process mean {cross_mean:.3} p99 {cross_p99:.3} same-process {noise_mean:.3}/{noise_p99:.3} floor {still_floor:.3}"
+    );
     assert_eq!(hash_stats.screen_pixels, 0, "hash path counts no screen pixels");
+    let (screen_still, screen_stats) = hall_frames(true, true, 8, 2);
     assert_screen_launch("still", &screen_stats);
-    assert_bar("still", &hash_still[1], &screen_still[1]);
-    let (hash_flicker, hash_flicker_p99) = mean_p99(&hash_still[0], &hash_still[1]);
+    closer_bar(
+        "still",
+        &hash_a[1],
+        &hash_b[1],
+        &screen_still[1],
+        still_floor,
+        cross_mean,
+    );
+    let (hash_flicker, hash_flicker_p99) = (noise_mean, noise_p99);
     let (screen_flicker, screen_flicker_p99) = mean_p99(&screen_still[0], &screen_still[1]);
     eprintln!(
         "hall still flicker hash {hash_flicker:.3}/{hash_flicker_p99:.3} screen {screen_flicker:.3}/{screen_flicker_p99:.3}"
@@ -177,12 +218,27 @@ fn screen_hall_matches_the_hash_wavelet_still_and_moving() {
         "still flicker {screen_flicker:.3}/{screen_flicker_p99:.3} is past the picture noise"
     );
 
-    let (hash_move, _) = hall_frames(false, false, 3, 3);
-    let (screen_move, move_stats) = hall_frames(true, false, 3, 3);
-    assert_screen_launch("moving", &move_stats);
+    // Moving boxes and lamps. A second hash run is the cross-process floor:
+    // the same claim race as still, on a scene that keeps changing.
+    let (hash_move, _) = hall_frames(false, false, 8, 3);
+    let (hash_move_b, _) = hall_frames(false, false, 8, 3);
     let last = hash_move.len() - 1;
-    assert_bar("moving", &hash_move[last], &screen_move[last]);
+    let (move_cross_mean, move_cross_p99) = mean_p99(&hash_move[last], &hash_move_b[last]);
     let (hash_step, hash_step_p99) = mean_p99(&hash_move[last - 1], &hash_move[last]);
+    let move_floor = move_cross_p99.max(hash_step_p99);
+    eprintln!(
+        "hash moving cross-process mean {move_cross_mean:.3} p99 {move_cross_p99:.3} step {hash_step:.3}/{hash_step_p99:.3} floor {move_floor:.3}"
+    );
+    let (screen_move, move_stats) = hall_frames(true, false, 8, 3);
+    assert_screen_launch("moving", &move_stats);
+    closer_bar(
+        "moving",
+        &hash_move[last],
+        &hash_move_b[last],
+        &screen_move[last],
+        move_floor,
+        move_cross_mean,
+    );
     let (screen_step, screen_step_p99) = mean_p99(&screen_move[last - 1], &screen_move[last]);
     eprintln!(
         "hall moving step hash {hash_step:.3}/{hash_step_p99:.3} screen {screen_step:.3}/{screen_step_p99:.3}"
