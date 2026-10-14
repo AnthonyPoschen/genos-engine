@@ -2070,6 +2070,22 @@ impl Gpu {
                     // Word 13 of the dispatch args. A zero word is sigma 0, which
                     // tightens the clamp, so this is written every full-cache frame.
                     let firefly_sigma = self.lighting.settings.surface_cache.firefly_sigma.to_bits();
+                    let ray_budget = self.lighting.settings.surface_cache.ray_budget;
+                    let dormant_rays = self.lighting.settings.surface_cache.dormant_rays;
+                    (self.fns.cmd_update_buffer)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        (LIGHTING_ARGS_AT + 11) * 4,
+                        4,
+                        &ray_budget as *const u32 as *const c_void,
+                    );
+                    (self.fns.cmd_update_buffer)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        (LIGHTING_ARGS_AT + 12) * 4,
+                        4,
+                        &dormant_rays as *const u32 as *const c_void,
+                    );
                     (self.fns.cmd_update_buffer)(
                         self.cmd,
                         self.lighting.cache_keys.buffer,

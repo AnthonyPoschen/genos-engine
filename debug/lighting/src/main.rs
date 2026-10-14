@@ -39,6 +39,12 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --surface-cache-firefly-sigma F
                          MSME firefly clamp, default 8, biased
                          (GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA)
+  --surface-cache-ray-budget N
+                         cache-round ray cap; 0 keeps the existing lists
+                         (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET)
+  --surface-cache-dormant-rays F
+                         dormant floor in rays per frame; 0 is one sweep in eight
+                         (GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS)
   --gpu-times N          print GPU_MS every N frames (GENOS_GPU_TIMES)
   --lighting-debug       print the lighting probe line (GENOS_LIGHTING_DEBUG)
   --unfilled             show the texels view (slots with fewer than 4 sets are dim)
@@ -94,6 +100,8 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_gi_refresh",
     "lighting_budget_shift",
     "lighting_surface_cache_firefly_sigma",
+    "lighting_surface_cache_ray_budget",
+    "lighting_surface_cache_dormant_rays",
     "lighting_probe_rays",
     "lighting_probe_stale",
     "lighting_world_stale",
@@ -109,8 +117,8 @@ const DROP_KNOBS: &[&str] = &[
     "lighting_lamp_pick",
     "lighting_surface_cache_blend",
 ];
-const VIEWS: [&str; 7] = [
-    "full", "direct", "bounce", "albedo", "normal", "depth", "texels",
+const VIEWS: [&str; 8] = [
+    "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance",
 ];
 const PRESETS: [&str; 4] = ["potato", "low", "medium", "high"];
 
@@ -825,6 +833,7 @@ fn view_name(mode: ViewMode) -> &'static str {
         ViewMode::Normal => "normal",
         ViewMode::Depth => "depth",
         ViewMode::Texels => "texels",
+        ViewMode::Variance => "variance",
         ViewMode::Light => "light",
         ViewMode::Full => "full",
     }
@@ -1087,6 +1096,7 @@ fn view_from_name(name: &str) -> ViewMode {
         "normal" => ViewMode::Normal,
         "depth" => ViewMode::Depth,
         "texels" => ViewMode::Texels,
+        "variance" => ViewMode::Variance,
         _ => ViewMode::Full,
     }
 }
@@ -1334,6 +1344,8 @@ mod tests {
             "GI refresh",
             "Budget shift",
             "Firefly sigma",
+            "Ray budget",
+            "Dormant rays",
             "Probe rays",
             "Probe stale",
             "World stale",

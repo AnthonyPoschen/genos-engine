@@ -113,6 +113,13 @@ const USAGE: &str = "genos-stress [options]
                             MSME firefly clamp in sigmas, default 8, biased
                             (GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA).
                             0 keeps the 0.1 floor
+  --surface-cache-ray-budget N
+                            cap on cache-round rays; 0 keeps the existing lists
+                            (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET)
+  --surface-cache-dormant-rays F
+                            fresh rays a dormant cache entry keeps per frame;
+                            0 keeps one sweep in eight
+                            (GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS)
   --bounces 0|1|2|unlimited bounce count (GENOS_LIGHTING_BOUNCES)
   --ambient MODE            off, constant, hemisphere, day, or curve
                             (GENOS_LIGHTING_AMBIENT)

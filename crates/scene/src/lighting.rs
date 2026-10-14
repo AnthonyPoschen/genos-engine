@@ -393,6 +393,11 @@ pub struct SurfaceCacheSettings {
     /// update. `0` leaves that `0.1` floor and still clamps. The hold path
     /// does not read this.
     pub firefly_sigma: f32,
+    /// Cap on rays dispatched in one cache round. `0` keeps the existing lists.
+    pub ray_budget: u32,
+    /// Fresh rays a dormant cache entry keeps per frame, in steps of 16.
+    /// `0` keeps the existing one-sweep-in-eight schedule.
+    pub dormant_rays: u32,
 }
 
 /// Everything the lighting frame reads. PartialEq so a live edit reallocates
@@ -538,6 +543,8 @@ impl LightingSettings {
                 attach_movers: true,
                 blend: SurfaceCacheBlend::Msme,
                 firefly_sigma: 8.0,
+                ray_budget: 0,
+                dormant_rays: 0,
             },
             bounce: BounceSettings {
                 count: LIGHTING_BOUNCES_UNLIMITED,
@@ -909,6 +916,16 @@ impl LightingSettings {
             "surface_cache.firefly_sigma={}",
             num_text(self.surface_cache.firefly_sigma)
         );
+        let _ = writeln!(
+            out,
+            "surface_cache.ray_budget={}",
+            self.surface_cache.ray_budget
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.dormant_rays={}",
+            self.surface_cache.dormant_rays
+        );
         if let Some(mode) = self.gi.world_mode {
             let _ = writeln!(out, "world_mode={mode}");
         }
@@ -1068,6 +1085,8 @@ impl LightingSettings {
                 }
                 self.surface_cache.firefly_sigma = sigma;
             }
+            "surface_cache.ray_budget" => self.surface_cache.ray_budget = num_u32(value)?,
+            "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
             "world_mode" => self.gi.world_mode = Some(num_u32(value)?.min(3)),
             "bounces" => self.bounce.count = parse_bounces(value)?,
             "probes" => self.probes.enabled = on(value)?,
@@ -1165,6 +1184,8 @@ impl LightingSettings {
         let sc_local = std::env::var("GENOS_LIGHTING_SC_LOCAL").ok();
         let blend = std::env::var("GENOS_LIGHTING_SURFACE_CACHE_BLEND").ok();
         let firefly = std::env::var("GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA").ok();
+        let ray_budget = std::env::var("GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET").ok();
+        let dormant_rays = std::env::var("GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS").ok();
         let Ok(launch) = resolve_lighting_launch(
             &refs,
             &LightingMirrors {
@@ -1176,6 +1197,8 @@ impl LightingSettings {
                 sc_local: sc_local.as_deref(),
                 blend: blend.as_deref(),
                 firefly_sigma: firefly.as_deref(),
+                ray_budget: ray_budget.as_deref(),
+                dormant_rays: dormant_rays.as_deref(),
             },
         ) else {
             return;
@@ -1271,6 +1294,12 @@ impl LightingSettings {
         if let Some(sigma) = launch.firefly_sigma {
             self.surface_cache.firefly_sigma = sigma;
         }
+        if let Some(budget) = launch.ray_budget {
+            self.surface_cache.ray_budget = budget;
+        }
+        if let Some(rays) = launch.dormant_rays {
+            self.surface_cache.dormant_rays = rays;
+        }
         self.time_of_day = launch.time_mirror.unwrap_or(clock);
         self.sanitize();
         self.sync_preset_field();
@@ -1338,6 +1367,8 @@ struct LightingLaunch {
     attach_movers: Option<bool>,
     blend: Option<SurfaceCacheBlend>,
     firefly_sigma: Option<f32>,
+    ray_budget: Option<u32>,
+    dormant_rays: Option<u32>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1351,6 +1382,8 @@ struct LightingMirrors<'a> {
     sc_local: Option<&'a str>,
     blend: Option<&'a str>,
     firefly_sigma: Option<&'a str>,
+    ray_budget: Option<&'a str>,
+    dormant_rays: Option<&'a str>,
 }
 
 enum LightingKind {
@@ -1361,6 +1394,8 @@ enum LightingKind {
     AttachMovers,
     Blend,
     FireflySigma,
+    RayBudget,
+    DormantRays,
 }
 
 enum LightingFlag {
@@ -1371,6 +1406,8 @@ enum LightingFlag {
     AttachMovers(bool),
     Blend(SurfaceCacheBlend),
     FireflySigma(f32),
+    RayBudget(u32),
+    DormantRays(u32),
 }
 
 /// `Some(true)` when `arg` is a lighting flag that reads the next argument.
@@ -1439,6 +1476,12 @@ fn resolve_lighting_launch(
         firefly_sigma: chosen.firefly_sigma.or_else(|| {
             env.firefly_sigma.and_then(|value| parse_firefly_sigma(value).ok())
         }),
+        ray_budget: chosen
+            .ray_budget
+            .or_else(|| env.ray_budget.and_then(|value| num_u32(value).ok())),
+        dormant_rays: chosen
+            .dormant_rays
+            .or_else(|| env.dormant_rays.and_then(|value| num_u32(value).ok())),
     })
 }
 
@@ -1451,6 +1494,8 @@ struct ChosenLighting {
     attach_movers: Option<bool>,
     blend: Option<SurfaceCacheBlend>,
     firefly_sigma: Option<f32>,
+    ray_budget: Option<u32>,
+    dormant_rays: Option<u32>,
 }
 
 impl ChosenLighting {
@@ -1463,6 +1508,8 @@ impl ChosenLighting {
             LightingFlag::AttachMovers(on) => self.attach_movers = Some(on),
             LightingFlag::Blend(blend) => self.blend = Some(blend),
             LightingFlag::FireflySigma(sigma) => self.firefly_sigma = Some(sigma),
+            LightingFlag::RayBudget(count) => self.ray_budget = Some(count),
+            LightingFlag::DormantRays(count) => self.dormant_rays = Some(count),
         }
     }
 }
@@ -1487,6 +1534,8 @@ fn lighting_kind(name: &str) -> Option<LightingKind> {
         "surface-cache-attach-movers" => Some(LightingKind::AttachMovers),
         "surface-cache-blend" => Some(LightingKind::Blend),
         "surface-cache-firefly-sigma" => Some(LightingKind::FireflySigma),
+        "surface-cache-ray-budget" => Some(LightingKind::RayBudget),
+        "surface-cache-dormant-rays" => Some(LightingKind::DormantRays),
         _ => None,
     }
 }
@@ -1533,6 +1582,12 @@ fn parse_lighting_flag(arg: &str, next: Option<&str>) -> Result<Option<LightingF
         LightingKind::FireflySigma => LightingFlag::FireflySigma(parse_firefly_sigma(value).map_err(
             |_| format!("{flag} {value} is not a non-negative number"),
         )?),
+        LightingKind::RayBudget => LightingFlag::RayBudget(
+            num_u32(value).map_err(|_| format!("{flag} {value} is not a number"))?,
+        ),
+        LightingKind::DormantRays => LightingFlag::DormantRays(
+            num_u32(value).map_err(|_| format!("{flag} {value} is not a number"))?,
+        ),
     };
     Ok(Some(parsed))
 }
@@ -1829,5 +1884,16 @@ mod launch_tests {
         assert!(check_lighting_arg("--surface-cache-blend", Some("snap")).is_err());
         assert!(check_lighting_arg("--surface-cache-firefly-sigma", Some("-1")).is_err());
         assert!(check_lighting_arg("--surface-cache-firefly-sigma", Some("0")).is_ok());
+
+        let rays = resolve_lighting_launch(
+            &["--surface-cache-ray-budget", "4096", "--surface-cache-dormant-rays=4"],
+            &empty(),
+        )
+        .unwrap();
+        settings = LightingSettings::default();
+        settings.apply_launch(&rays);
+        assert_eq!(settings.surface_cache.ray_budget, 4096);
+        assert_eq!(settings.surface_cache.dormant_rays, 4);
+        assert_eq!(settings.surface_cache.blend, SurfaceCacheBlend::Msme);
     }
 }

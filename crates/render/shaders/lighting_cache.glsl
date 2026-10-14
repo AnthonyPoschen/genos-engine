@@ -2195,6 +2195,23 @@ const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
 float lighting_sc_firefly_sigma() {
     return uintBitsToFloat(ckeys.key[LIGHTING_ARGS_AT + 13u]);
 }
+// surface_cache.ray_budget. 0 keeps the existing dispatch lists.
+uint lighting_sc_ray_budget() {
+    return ckeys.key[LIGHTING_ARGS_AT + 11u];
+}
+// surface_cache.dormant_rays. 0 keeps one sweep in LIGHTING_SC_DORMANT.
+uint lighting_sc_dormant_rays() {
+    return ckeys.key[LIGHTING_ARGS_AT + 12u];
+}
+// Frames between fresh 16-ray traces of a dormant cache entry.
+// A non-zero floor uses ceil(16 / rays). The traces are new; nothing is reused.
+uint lighting_sc_dormant_period() {
+    uint rays = lighting_sc_dormant_rays();
+    if (rays == 0u) {
+        return LIGHTING_SC_DORMANT;
+    }
+    return max(1u, (LIGHTING_CACHE_RAYS + rays - 1u) / rays);
+}
 // S72J region refinement (Anthony: uniform within a region, no sharp islands in
 // blotchy surroundings; Lumen refines surface cache pages). A page is 8 x 8
 // texels of one size on one plane (axis, plane offset); a hashed table of
@@ -2339,6 +2356,17 @@ void lighting_write_args() {
         uint first = min(lighting_young_count(), LIGHTING_CACHE_BATCH);
         a = lighting_young_only() ? first : min(LIGHTING_CACHE_BATCH, first + lighting_mature_count());
     }
+    // surface_cache.ray_budget is a ceiling on the lists after the variance
+    // scale. Integer lists round toward zero, so a short list can disappear.
+    uint budget = lighting_sc_ray_budget();
+    uint rays = (a + b + c + g + s) * LIGHTING_CACHE_RAYS;
+    if (budget > 0u && rays > budget) {
+        a = uint(float(a) * float(budget) / float(rays));
+        b = uint(float(b) * float(budget) / float(rays));
+        c = uint(float(c) * float(budget) / float(rays));
+        g = uint(float(g) * float(budget) / float(rays));
+        s = uint(float(s) * float(budget) / float(rays));
+    }
     uint e = a + b + c + g + s;
     ckeys.key[LIGHTING_ARGS_AT + 10u] = a + b + c + g;
     ckeys.key[LIGHTING_ARGS_AT + 0u] = max((e * LIGHTING_CACHE_RAYS + 63u) / 64u, 1u);
@@ -2481,7 +2509,7 @@ uint lighting_sc_interval(uint slot, float t) {
     }
     float iv = LIGHTING_SC_RATE_SLOW / (1.0 + LIGHTING_SC_RATE_K * max(b.y, 0.0));
     if ((lighting_sc_flags() & 1048576u) != 0u && t >= lighting_sc_cap(slot) - 0.5 && lighting_sc_dormant(slot)) {
-        iv = LIGHTING_SC_RATE_DORMANT;
+        iv = lighting_sc_dormant_rays() == 0u ? LIGHTING_SC_RATE_DORMANT : float(lighting_sc_dormant_period());
     }
     if (!lighting_sc_light_quiet()) {
         iv = min(iv, LIGHTING_SC_RATE_CHANGING);
@@ -2508,7 +2536,18 @@ uint lighting_sc_quarter0(uint slot) {
     return min(floatBitsToUint(cache.v[LIGHTING_SC_OBJ_AT + slot].w), LIGHTING_SC_QUARTERS - 1u);
 }
 uint lighting_sc_entries(uint slot, bool full) {
-    return (full || lighting_world_mode() != 3u) ? LIGHTING_SC_QUARTERS - lighting_sc_quarter0(slot) : 1u;
+    uint n = (full || lighting_world_mode() != 3u) ? LIGHTING_SC_QUARTERS - lighting_sc_quarter0(slot) : 1u;
+    // surface_cache.ray_budget 0 keeps the fixed quarter count. A set budget
+    // scales that count by the short-term relative standard deviation, and
+    // keeps at least one 16-ray entry.
+    if (lighting_sc_ray_budget() == 0u || lighting_world_mode() != 3u || n <= 1u) {
+        return n;
+    }
+    vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
+    float dev = sqrt(max(est.w, 0.0));
+    float lum = max(dot(max(est.rgb, vec3(0.0)), vec3(0.299, 0.587, 0.114)), 1.0e-3);
+    float rel = clamp(dev / lum, 0.0, 1.0);
+    return min(n, max(1u, uint(ceil(rel * float(n)))));
 }
 // WRC scout ray s of this round (entries past the batch's texels): from the eye
 // (a quarter from up to 2 m beside it), half over the sphere and half within
@@ -2675,6 +2714,19 @@ vec2 lighting_sc_debug_size(vec3 pos, vec3 n) {
     float size = lighting_cell_size(pos);
     uint s = lighting_cache_find_sized(pos, n, false, size, pos);
     return vec2(size, s == ~0u ? 0.0 : floor(max(cache.v[3u * s + 2u].w, 0.0)));
+}
+// Debug view "variance": short-term relative standard deviation of the cache
+// entry under the pixel. 0 is a missing entry. Blue is quiet, red is noisy.
+float lighting_sc_debug_variance(vec3 pos, vec3 n) {
+    float size = lighting_cell_size(pos);
+    uint s = lighting_cache_find_sized(pos, n, false, size, pos);
+    if (s == ~0u) {
+        return 0.0;
+    }
+    vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * s];
+    float dev = sqrt(max(est.w, 0.0));
+    float lum = max(dot(max(est.rgb, vec3(0.0)), vec3(0.299, 0.587, 0.114)), 1.0e-3);
+    return clamp(dev / lum, 0.0, 1.0);
 }
 vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     uint mode = lighting_world_mode();

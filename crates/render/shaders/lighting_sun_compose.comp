@@ -148,6 +148,12 @@ void main() {
         outc.px[index] = pack_rgb(shown);
         return;
     }
+    if (mode == 8u) {
+        float rel = lighting_sc_debug_variance(pos, n);
+        shown = mix(vec3(0.15, 0.25, 0.9), vec3(0.9, 0.15, 0.1), rel);
+        outc.px[index] = pack_rgb(shown);
+        return;
+    }
     if (mode == 7u) {
         // Texel sizes (debug_view.rs ViewMode::Texels).
         vec2 ts = lighting_sc_debug_size(pos, n);
