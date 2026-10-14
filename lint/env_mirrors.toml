@@ -1,0 +1,714 @@
+# Environment names the engine reads.
+# A Rust string GENOS_* or OCC_* that is not listed here fails scripts/lint-env-mirrors.py.
+# kind = mirror: a CLI argument exists and wins when both are set.
+# kind = todo: read today, and still needs an argument. Do not add new todos.
+# kind = override: a documented secondary of a non-CLI mechanism.
+# kind = os / build: the operating system or Cargo, not an engine switch.
+# kind = test: a harness variable, not a shipping switch.
+# Date added: 2026-10-14.
+
+[[var]]
+name = "GENOS_FPS_COUNTER"
+kind = "mirror"
+detail = "--fps-counter"
+
+[[var]]
+name = "GENOS_FPS_HZ"
+kind = "mirror"
+detail = "--fps-hz"
+
+[[var]]
+name = "GENOS_GPU_TIMES"
+kind = "mirror"
+detail = "--gpu-times"
+
+[[var]]
+name = "GENOS_LIGHTING_AMBIENT"
+kind = "mirror"
+detail = "--ambient"
+
+[[var]]
+name = "GENOS_LIGHTING_BOUNCES"
+kind = "mirror"
+detail = "--bounces"
+
+[[var]]
+name = "GENOS_LIGHTING_COMPOSE_ALL"
+kind = "mirror"
+detail = "--full-effort"
+
+[[var]]
+name = "GENOS_LIGHTING_DEBUG"
+kind = "mirror"
+detail = "--lighting-debug"
+
+[[var]]
+name = "GENOS_LIGHTING_DENOISE_LAUNCH"
+kind = "mirror"
+detail = "--denoise-launch"
+
+[[var]]
+name = "GENOS_LIGHTING_DENOISE_SCREEN"
+kind = "mirror"
+detail = "--denoise-screen"
+
+[[var]]
+name = "GENOS_LIGHTING_FULL_EFFORT"
+kind = "mirror"
+detail = "--lighting-full-effort"
+
+[[var]]
+name = "GENOS_LIGHTING_PRESET"
+kind = "mirror"
+detail = "--preset"
+
+[[var]]
+name = "GENOS_LIGHTING_SUN"
+kind = "mirror"
+detail = "--lighting-sun"
+
+[[var]]
+name = "GENOS_LIGHTING_SUN_BANDS"
+kind = "mirror"
+detail = "--lighting-sun-bands"
+
+[[var]]
+name = "GENOS_LIGHTING_TIME"
+kind = "mirror"
+detail = "--time-of-day"
+
+[[var]]
+name = "GENOS_LIGHTING_UNFILLED"
+kind = "mirror"
+detail = "--unfilled"
+
+[[var]]
+name = "GENOS_LIGHTING_UNFILLED_DUMP"
+kind = "mirror"
+detail = "--unfilled-dump"
+
+[[var]]
+name = "GENOS_LIGHTING_UNFILLED_TINT"
+kind = "mirror"
+detail = "--unfilled-tint"
+
+[[var]]
+name = "GENOS_SCENE"
+kind = "mirror"
+detail = "--scene"
+
+[[var]]
+name = "GENOS_UNFILLED_DIR"
+kind = "mirror"
+detail = "--out"
+
+[[var]]
+name = "GENOS_UNFILLED_MAX_AGE_SECS"
+kind = "mirror"
+detail = "--unfilled-max-age-secs"
+
+[[var]]
+name = "GENOS_UNFILLED_MAX_BYTES"
+kind = "mirror"
+detail = "--unfilled-max-bytes"
+
+[[var]]
+name = "GENOS_UNFILLED_MAX_FOLDERS"
+kind = "mirror"
+detail = "--unfilled-max-folders"
+
+[[var]]
+name = "GENOS_UNFILLED_SESSION_CAP"
+kind = "mirror"
+detail = "--unfilled-session-cap"
+
+[[var]]
+name = "GENOS_ENGINE_COMMIT"
+kind = "override"
+detail = "report stamp when git rev-parse is unavailable"
+
+[[var]]
+name = "GENOS_MCP_PORT"
+kind = "override"
+detail = "discovery directory is the primary path; this forces one port"
+
+[[var]]
+name = "HOME"
+kind = "os"
+detail = "Omarchy theme path only. Never an output root."
+
+[[var]]
+name = "VK_ICD_FILENAMES"
+kind = "os"
+detail = "lavapipe selection for the reference capture"
+
+[[var]]
+name = "WAYLAND_DISPLAY"
+kind = "os"
+detail = "present when the window tests run on Wayland"
+
+[[var]]
+name = "XDG_RUNTIME_DIR"
+kind = "os"
+detail = "MCP discovery directory"
+
+[[var]]
+name = "XDG_STATE_HOME"
+kind = "os"
+detail = "Omarchy theme path"
+
+[[var]]
+name = "CARGO_CFG_TARGET_OS"
+kind = "build"
+detail = "Cargo sets this for build scripts"
+
+[[var]]
+name = "OUT_DIR"
+kind = "build"
+detail = "Cargo sets this for build scripts"
+
+[[var]]
+name = "GENOS_BENCH"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_BENCH_FLICKER"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_BENCH_SHOTS"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_GI_CHECK_BOUNCES"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_GI_V2_A"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_GI_V2_B"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_GPUREF_CPU_SPP"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_GPUREF_CPU_TRIANGLES"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_GPUREF_OUT"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_GPUREF_VIEWS"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_PICTURE_DUMP"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_PICTURE_PRESET"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_PIPELINE_LIMIT"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "OCC_DUMP"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_BAKE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_BAKE_CACHE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_GPUREF_FLIP"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_GPU_DISPATCH"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_AMBIENT_COLOR"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_AMBIENT_GROUND"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_AMBIENT_INTENSITY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_ASYNC"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_ATROUS_DIRTY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_BORROW"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_CACHE_HZ"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_CACHE_PICKS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_CATCH_UP"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_COMPOSE_REUSE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DAWN_COLOR"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DAWN_INTENSITY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DAY_COLOR"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DAY_INTENSITY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DENOISE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DENOISE_ADAPTIVE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DENOISE_ITERS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DENOISE_VARIANCE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DIRECT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DIRECT_LIGHTS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DIRECT_REFRESH"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DIRECT_SCALE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DUMP"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DUMP_DIR"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DUSK_COLOR"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DUSK_INTENSITY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_EMISSIVE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_GI"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_GI_REFRESH"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_CANDIDATES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_DIAG"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_HISTORY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_RADIUS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_RAYS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_REUSE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_SAMPLES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_UNBIASED"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_MOVED_DROP"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_NIGHT_COLOR"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_NIGHT_INTENSITY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_NOON_COLOR"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_NOON_INTENSITY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_PREFILL"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_PROBES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_PROBE_RAYS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_PROBE_REFRESH"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_PROBE_STALE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_REF_BOUNCES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_REF_CAPTURE_FRAMES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_REF_FIXED_DT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_REF_SETTLE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_REF_SETTLE_CAP"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_REF_SETTLE_FRAMES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_REF_WARMUP_FRAMES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SC_BUDGET_SHIFT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SC_FLAGS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SC_LOCAL"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SC_SETTLE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SC_TRACE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SHADOWS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SHADOW_CELL"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SHADOW_FILTER"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SHADOW_REFRESH"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SKY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_TILE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_TOGGLES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_TOGGLES_FILE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_URGENT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_WORLD"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_WORLD_CACHE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_WORLD_CAP"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_WORLD_CELL"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_WORLD_REFRESH"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_WORLD_STALE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_YOUNG_ONLY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_MENU_SHOT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_REFERENCE_CACHE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_REFERENCE_GPU"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_REFERENCE_OUT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_REFERENCE_THREADS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_SCENE_DELTA"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_STRESS_DAY_SECONDS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_STRESS_DYNAMIC"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_STRESS_FIXED_DT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_STRESS_LAYOUT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_STRESS_LIGHTS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_STRESS_SCALE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_STRESS_STEP"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_TITLE_TAG"
+kind = "todo"
+detail = "no CLI argument yet"
+
