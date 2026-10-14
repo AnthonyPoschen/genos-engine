@@ -1,3 +1,6 @@
+#![expect(clippy::derivable_impls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::type_complexity, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Window facts a game or a widget can subscribe to.
 //!
 //! The compositor still arrives through [`crate::Window::pump`]. These events are the edges in that stream.

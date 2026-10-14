@@ -1,0 +1,14 @@
+# Structural bans. The catalog is docs/LINT_RULES.md.
+# Clippy matches the definition path, so a renamed import still fires.
+
+disallowed-methods = [
+    { path = "std::env::set_var", reason = "a tool publishes intent with a command-line argument that writes the settings value. Mutating the process environment is not that argument (AGENTS.md, Arguments).", replacement = "a CLI argument, then EngineSettings" },
+    { path = "std::env::remove_var", reason = "a tool publishes intent with a command-line argument. Clearing the process environment is not that argument.", replacement = "a CLI argument, then EngineSettings" },
+    { path = "std::env::home_dir", reason = "output lives under ./genos-debug/<kind>/ in the working directory. Do not ask the process for a home directory.", replacement = "a relative genos-debug path, or --out" },
+]
+
+disallowed-types = [
+    { path = "ash::Entry", reason = "ADR 0007: the renderer loads libvulkan itself. ash is only the offline ray-query reference in genos-gpuref." },
+    { path = "ash::Instance", reason = "ADR 0007: the renderer loads libvulkan itself. ash is only the offline ray-query reference in genos-gpuref." },
+    { path = "ash::Device", reason = "ADR 0007: the renderer loads libvulkan itself. ash is only the offline ray-query reference in genos-gpuref." },
+]

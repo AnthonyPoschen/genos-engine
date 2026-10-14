@@ -1,3 +1,6 @@
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Names and numeric values copied from input-zig `InputCode`.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

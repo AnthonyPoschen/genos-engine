@@ -1,3 +1,5 @@
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Loopback MCP session for the live scene.
 //!
 //! The camera process binds `127.0.0.1` and writes a discovery record for its

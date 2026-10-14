@@ -1,3 +1,5 @@
+#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Load images, textures, meshes, animations, audio samples, and fonts.
 //!
 //! Decoders read bytes. They do not open a window, an audio device, or a socket.

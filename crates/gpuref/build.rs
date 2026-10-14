@@ -1,3 +1,7 @@
+#![expect(clippy::expect_used, reason = "the build stops when a host tool or OUT_DIR is missing")]
+#![expect(clippy::manual_assert, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::panic, reason = "the build stops when a host tool or OUT_DIR is missing")]
+
 use std::process::Command;
 
 fn main() {

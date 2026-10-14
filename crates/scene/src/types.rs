@@ -1,3 +1,5 @@
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 use genos_math::Vec3;
 
 use crate::{DebugSettings, FpsCounterSettings, LightingSettings};

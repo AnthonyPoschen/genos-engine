@@ -1,3 +1,6 @@
+#![expect(clippy::match_same_arms, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! Fixed cameras for the reference scenes. Coordinates match the stress building.
 
 use genos_debug::RefSetup;

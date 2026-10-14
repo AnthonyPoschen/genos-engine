@@ -1,3 +1,7 @@
+#![cfg_attr(test, expect(clippy::disallowed_methods, reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
+
 //! MCP round trip for the lighting settings: list, apply, partial set, read back.
 //!
 //! The command thread blocks in `command::call`. The test thread drains the

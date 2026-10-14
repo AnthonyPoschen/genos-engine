@@ -1,3 +1,6 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Fixed-cell labels. Measure and draw use the same cell, so a wrapped line
 //! changes the fit size the layout sees.
 

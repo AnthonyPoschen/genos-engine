@@ -27,3 +27,18 @@ members = [
 
 [workspace.lints.rust]
 warnings = "deny"
+
+# Pedantic stays a warning so a direct deny on one of its lints wins.
+# `cargo clippy --workspace --all-targets -- -D warnings` promotes that warning.
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+wildcard_enum_match_arm = "deny"
+as_conversions = "deny"
+undocumented_unsafe_blocks = "deny"
+disallowed_methods = "deny"
+disallowed_types = "deny"

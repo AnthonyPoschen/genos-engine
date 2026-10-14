@@ -15,8 +15,8 @@
 //   compose  direct + probe irradiance per pixel, tone curve, dither
 //
 // The result goes back into the colour image, so anti-aliasing, overlays, readback
-// and present work as before. This is the only lighting: the radiance cascades and
-// the world probe tier it replaced are gone (docs/systems/lighting/README.md).
+// and present work as before. This is the only lighting path. The GI v1 path it
+// replaced is gone (docs/systems/lighting/README.md).
 
 /// Screen probe tile edge in pixels (Medium and above in the design).
 /// Screen probe tile at 720p and up, pixels (Lumen's size).

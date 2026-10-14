@@ -1,3 +1,6 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! UI layout and pointer behavior.
 //!
 //! A tree resolves to rectangles with no window and no Vulkan. A screen root
