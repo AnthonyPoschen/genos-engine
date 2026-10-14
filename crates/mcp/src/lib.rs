@@ -1,3 +1,5 @@
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Loopback MCP session for the live scene.
 //!
 //! The camera process binds `127.0.0.1` and writes a discovery record for its
@@ -28,6 +30,10 @@ pub use rpc::command_timeout as rpc_timeout;
 pub const PORT: u16 = 8765;
 
 /// Port for [`Server::start_on`]. The environment wins when it is a number.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "GENOS_MCP_PORT is the documented port override. docs/LINT_RULES.md"
+)]
 pub fn listen_port() -> u16 {
     std::env::var("GENOS_MCP_PORT")
         .ok()

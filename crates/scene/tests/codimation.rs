@@ -1,3 +1,5 @@
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+
 use genos_physics::Body;
 use genos_scene::{
     update, Actions, Camera, Codimation, Easing, Floor, Light, LightingSettings, Scene, Shape, Solid,

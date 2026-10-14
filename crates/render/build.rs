@@ -1,3 +1,13 @@
+#![expect(clippy::expect_used, reason = "the build stops when a host tool or OUT_DIR is missing")]
+#![expect(clippy::format_push_string, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::manual_assert, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::panic, reason = "the build stops when a host tool or OUT_DIR is missing")]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "the build reads OUT_DIR from Cargo"
+)]
+#![expect(clippy::unwrap_used, reason = "the build stops when a host tool or OUT_DIR is missing")]
+
 use std::path::PathBuf;
 use std::process::Command;
 

@@ -1,4 +1,4 @@
-.PHONY: run room stress stress-big stress-bench lighting verify reference lighting-ref-check lint-docs
+.PHONY: run room stress stress-big stress-bench lighting verify reference lighting-ref-check lint-docs lint
 
 run:
 	cargo run -p genos-camera
@@ -40,3 +40,7 @@ lighting-ref-check:
 lint-docs:
 	python3 scripts/lint-plan-docs.py --self-test
 	python3 scripts/lint-plan-docs.py
+
+# Clippy, cargo-deny, semgrep, and the env-mirror registry.
+lint:
+	./scripts/lint.sh

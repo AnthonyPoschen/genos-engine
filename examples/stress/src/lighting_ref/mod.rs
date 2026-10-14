@@ -1,3 +1,11 @@
+#![cfg_attr(test, expect(clippy::manual_let_else, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![expect(clippy::match_same_arms, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
+#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! Driver for the lighting reference-image checker.
 //!
 //! Scenes live here. The metric core is `genos-lighting-ref`, which does not
@@ -256,6 +264,10 @@ fn parse_u32(text: &str) -> Result<u32, String> {
         .map_err(|_| format!("expected a number, got {text}"))
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a binary or harness reads the environment and passes the value down. docs/LINT_RULES.md"
+)]
 fn env_text(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -263,6 +275,10 @@ fn env_text(name: &str) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a binary or harness reads the environment and passes the value down. docs/LINT_RULES.md"
+)]
 fn git_commit() -> String {
     if let Ok(value) = std::env::var("GENOS_ENGINE_COMMIT") {
         let value = value.trim();

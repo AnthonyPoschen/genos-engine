@@ -1,3 +1,5 @@
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+
 //! A checkbox reports the next on state and paints a mark only while it is on.
 
 use genos_scene::Camera;

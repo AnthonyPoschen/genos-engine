@@ -1,3 +1,9 @@
+#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::question_mark, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::return_self_not_must_use, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! Where a debug tool writes its files.
 //!
 //! The default is a directory under the process working directory. `--out`
@@ -41,6 +47,10 @@ impl DebugSettings {
 
     /// The directory this process will write. `--out` on the command line wins
     /// over the environment mirror, which wins over `self.out`.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+    )]
     pub fn effective(&self, cli: Option<&str>) -> Self {
         let env = std::env::var("GENOS_UNFILLED_DIR").ok();
         Self {

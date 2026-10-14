@@ -1,3 +1,7 @@
+#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::single_element_loop, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+
 //! The ray and shadow helpers are inlined at every call site. A loop with a large
 //! constant bound in them invites the driver to unroll it into each copy: a DDA bounded
 //! by 4096 sent the NVIDIA compiler past 17 GB without finishing the pipeline, while

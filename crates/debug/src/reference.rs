@@ -1,3 +1,21 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::excessive_precision, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::ignore_without_reason, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![expect(clippy::ignored_unit_patterns, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::unreadable_literal, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! Ground truth: a brute-force path trace of the frozen scene from the picture's
 //! pose, and the comparison of a live picture against it.
 //!
@@ -209,6 +227,10 @@ fn path_from(
 /// Trace the whole picture on every core in passes of `spp` paths per pixel until
 /// the noise is at most `noise_target`, `max_spp` is reached or `seconds` run out
 /// (after at least one pass). Blocks until done.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+)]
 pub fn render(setup: &RefSetup) -> Reference {
     let started = std::time::Instant::now();
     let (w, h) = (setup.width.max(1) as usize, setup.height.max(1) as usize);
@@ -366,6 +388,10 @@ pub fn render(setup: &RefSetup) -> Reference {
 pub static RENDERING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Whether references trace on the GPU (GENOS_REFERENCE_GPU=1, genos-gpuref).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+)]
 pub fn gpu_wanted() -> bool {
     std::env::var("GENOS_REFERENCE_GPU").is_ok_and(|v| v == "1")
 }
@@ -881,6 +907,10 @@ mod tests {
     /// -p genos-debug --release known_scenes -- --ignored`.
     #[test]
     #[ignore]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+    )]
     fn known_scenes() {
         let dir = std::path::PathBuf::from(
             std::env::var("GENOS_REFERENCE_OUT").unwrap_or("target/reference-known".into()),

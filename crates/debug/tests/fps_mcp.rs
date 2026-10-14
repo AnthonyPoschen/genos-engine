@@ -1,3 +1,8 @@
+#![cfg_attr(test, expect(clippy::bool_assert_comparison, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! The frame-rate toggle round-trips through the settings text and through MCP.
 //!
 //! Config checks run before the window opens. The command thread then blocks in

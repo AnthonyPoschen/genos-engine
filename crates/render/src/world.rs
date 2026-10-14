@@ -1,3 +1,7 @@
+#![cfg_attr(test, expect(clippy::items_after_test_module, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+
 //! What the renderer can draw, and what it may skip on screen.
 //!
 //! Fixed parts are the authored floor, walls, and solids. A mesh can move by

@@ -1,3 +1,5 @@
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! The command catalogue the MCP port lists. Each command takes one JSON object.
 
 use genos_mcp::command::CommandSpec;
