@@ -4,6 +4,7 @@
 use genos_debug::{Host, Knob};
 use genos_scene::{
     AmbientMode, LampPickMode, LightingPreset, LightingSettings, Scene, ShadowFilter,
+    SurfaceCacheBlend,
 };
 
 use crate::building::{self, Layout};
@@ -273,6 +274,41 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             1.0,
             "",
         ),
+        Knob::switch(
+            "lighting_surface_cache_attach_movers",
+            "Attach movers",
+            lighting.surface_cache.attach_movers,
+        ),
+        Knob::choice(
+            "lighting_surface_cache_blend",
+            "Surface cache blend",
+            usize::from(lighting.surface_cache.blend == SurfaceCacheBlend::Hold),
+            &["msme", "hold"],
+        ),
+        Knob::number(
+            "lighting_surface_cache_firefly_sigma",
+            "Firefly sigma",
+            lighting.surface_cache.firefly_sigma as f64,
+            (0.0, 32.0),
+            0.5,
+            " σ",
+        ),
+        Knob::number(
+            "lighting_surface_cache_ray_budget",
+            "Ray budget",
+            lighting.surface_cache.ray_budget as f64,
+            (0.0, 1_048_576.0),
+            1024.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_surface_cache_dormant_rays",
+            "Dormant rays",
+            lighting.surface_cache.dormant_rays as f64,
+            (0.0, 16.0),
+            1.0,
+            "",
+        ),
         Knob::switch("lighting_probes", "Probes", lighting.probes.enabled),
         Knob::number(
             "lighting_probe_rays",
@@ -454,6 +490,14 @@ pub fn apply_lighting_knob(
         "lighting_gi" => ("gi", on_off(v)),
         "lighting_gi_refresh" => ("gi_refresh", whole.max(1).to_string()),
         "lighting_budget_shift" => ("budget_shift", whole.to_string()),
+        "lighting_surface_cache_attach_movers" => ("surface_cache.attach_movers", on_off(v)),
+        "lighting_surface_cache_blend" => (
+            "surface_cache.blend",
+            if v >= 0.5 { "hold" } else { "msme" }.to_string(),
+        ),
+        "lighting_surface_cache_firefly_sigma" => ("surface_cache.firefly_sigma", format!("{v}")),
+        "lighting_surface_cache_ray_budget" => ("surface_cache.ray_budget", whole.to_string()),
+        "lighting_surface_cache_dormant_rays" => ("surface_cache.dormant_rays", whole.to_string()),
         "lighting_probes" => ("probes", on_off(v)),
         "lighting_probe_rays" => ("probe_rays", whole.to_string()),
         "lighting_probe_stale" => ("probe_stale", whole.max(1).to_string()),
@@ -537,6 +581,11 @@ mod tests {
         "lighting_gi",
         "lighting_gi_refresh",
         "lighting_budget_shift",
+        "lighting_surface_cache_attach_movers",
+        "lighting_surface_cache_blend",
+        "lighting_surface_cache_firefly_sigma",
+        "lighting_surface_cache_ray_budget",
+        "lighting_surface_cache_dormant_rays",
         "lighting_probes",
         "lighting_probe_rays",
         "lighting_probe_stale",

@@ -2,7 +2,7 @@
 
 use genos_scene::{
     load_str, AmbientMode, EngineSettings, LampPickMode, LightingPreset, LightingSettings,
-    LIGHTING_BOUNCES_UNLIMITED,
+    SurfaceCacheBlend, LIGHTING_BOUNCES_UNLIMITED,
 };
 
 fn room() -> &'static str {
@@ -13,6 +13,58 @@ fn room() -> &'static str {
      solid(\"circle\", -3.0, 2.0, 1.4, 0.0, 0.0, 1.0);\n\
      solid(\"square\", 2.5, -2.0, 1.4, 0.0, 1.0, 0.0);\n\
      light(0.0, 4.0, 2.0, 1.0, 1.0, 1.0);\n"
+}
+
+#[test]
+fn surface_cache_attach_movers_round_trips() {
+    let mut settings = LightingSettings::default();
+    assert!(settings.surface_cache.attach_movers);
+    settings
+        .set_key("surface_cache.attach_movers", "off")
+        .unwrap();
+    assert!(!settings.surface_cache.attach_movers);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!(!parsed.surface_cache.attach_movers);
+    assert_eq!(parsed.preset_label(), "custom");
+    settings
+        .set_key("surface_cache.attach_movers", "on")
+        .unwrap();
+    assert!(settings.surface_cache.attach_movers);
+    assert!(settings
+        .set_key("surface_cache.attach_movers", "maybe")
+        .is_err());
+}
+
+#[test]
+fn surface_cache_blend_and_firefly_sigma_round_trip() {
+    let mut settings = LightingSettings::default();
+    assert_eq!(settings.surface_cache.blend, SurfaceCacheBlend::Msme);
+    assert!((settings.surface_cache.firefly_sigma - 8.0).abs() < 1.0e-6);
+    settings.set_key("surface_cache.blend", "hold").unwrap();
+    settings
+        .set_key("surface_cache.firefly_sigma", "0")
+        .unwrap();
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert_eq!(parsed.surface_cache.blend, SurfaceCacheBlend::Hold);
+    assert_eq!(parsed.surface_cache.firefly_sigma, 0.0);
+    assert_eq!(parsed.preset_label(), "custom");
+    assert!(settings.set_key("surface_cache.blend", "snap").is_err());
+    assert!(settings
+        .set_key("surface_cache.firefly_sigma", "-2")
+        .is_err());
+    settings.set_key("surface_cache.blend", "msme").unwrap();
+    settings
+        .set_key("surface_cache.firefly_sigma", "8")
+        .unwrap();
+    assert_eq!(settings.preset_label(), "high");
+    settings.set_key("surface_cache.ray_budget", "2048").unwrap();
+    settings.set_key("surface_cache.dormant_rays", "4").unwrap();
+    let budget = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert_eq!(budget.surface_cache.ray_budget, 2048);
+    assert_eq!(budget.surface_cache.dormant_rays, 4);
+    settings.set_key("surface_cache.dormant_rays", "20").unwrap();
+    assert_eq!(settings.surface_cache.dormant_rays, 16);
+    assert_eq!(budget.preset_label(), "custom");
 }
 
 #[test]

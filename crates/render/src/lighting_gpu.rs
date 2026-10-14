@@ -2000,7 +2000,22 @@ impl Gpu {
         // S78S debug isolate toggles (lighting_toggles): direct only rides on
         // flag 2097152 (no cache light at hits), the rest in head 3.w bits 12-15.
         let toggles = lighting_toggles();
-        let flags_all = lighting_sc_flags_env() | if toggles & LIGHTING_TOGGLE_DIRECT_ONLY != 0 { 2097152 } else { 0 };
+        // Bit 20 is the estimator. Bit 30 selects the older hold path.
+        // `surface_cache.blend` forces both, so GENOS_LIGHTING_SC_FLAGS cannot
+        // override them.
+        const GI_ESTIMATOR: u32 = 1 << 20;
+        const SURFACE_CACHE_HOLD: u32 = 1 << 30;
+        let mut flags_all = lighting_sc_flags_env()
+            | if toggles & LIGHTING_TOGGLE_DIRECT_ONLY != 0 {
+                2097152
+            } else {
+                0
+            };
+        flags_all |= GI_ESTIMATOR;
+        match self.lighting.settings.surface_cache.blend {
+            genos_scene::SurfaceCacheBlend::Msme => flags_all &= !SURFACE_CACHE_HOLD,
+            genos_scene::SurfaceCacheBlend::Hold => flags_all |= SURFACE_CACHE_HOLD,
+        }
         let flags = flags_all & ((1 << 23) - 1);
         block[2] = ((self.lighting.probe_runs & 1) + 2 * flags) as f32;
         block[3] = (world * 1000 + cap) as f32;
@@ -2043,10 +2058,12 @@ impl Gpu {
             block[3] += (n * 200000) as f32;
             sent += 4 * n;
             if lighting_debug_on() {
-                eprintln!("lighting world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(lighting_sc_local_env()), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
+                eprintln!("lighting world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(self.lighting.settings.surface_cache.attach_movers), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
             }
-            // Object-local texels for movers (GIBS): GENOS_LIGHTING_SC_LOCAL=1.
-            if lighting_sc_local_env() {
+            // Object-local cache entries for movers (GIBS §1.5). The public
+            // knob is surface_cache.attach_movers. Static geometry stays on
+            // the world lattice.
+            if self.lighting.settings.surface_cache.attach_movers {
                 block[3] += 100000.0;
             }
         }
@@ -2121,6 +2138,33 @@ impl Gpu {
                         4,
                         &atrous_ppm as *const u32 as *const c_void,
                     );
+                    // MSME firefly sigma (MultiscaleMeanEstimator.hlsl, default 8).
+                    // Word 13 of the dispatch args. A zero word is sigma 0, which
+                    // tightens the clamp, so this is written every full-cache frame.
+                    let firefly_sigma = self.lighting.settings.surface_cache.firefly_sigma.to_bits();
+                    let ray_budget = self.lighting.settings.surface_cache.ray_budget;
+                    let dormant_rays = self.lighting.settings.surface_cache.dormant_rays;
+                    (self.fns.cmd_update_buffer)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        (LIGHTING_ARGS_AT + 11) * 4,
+                        4,
+                        &ray_budget as *const u32 as *const c_void,
+                    );
+                    (self.fns.cmd_update_buffer)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        (LIGHTING_ARGS_AT + 12) * 4,
+                        4,
+                        &dormant_rays as *const u32 as *const c_void,
+                    );
+                    (self.fns.cmd_update_buffer)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        (LIGHTING_ARGS_AT + 13) * 4,
+                        4,
+                        &firefly_sigma as *const u32 as *const c_void,
+                    );
                 }
                 self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
             }
@@ -2144,10 +2188,21 @@ impl Gpu {
             hasher.finish()
         };
         let tracked = if sun_amortise { self.lighting.light_hash } else { light };
+        let counters_read = self.lighting.async_on
+            || lighting_stats_wanted(self.lighting.settings.world_mode());
         if tracked != self.lighting.light_hash {
             self.lighting.light_hash = tracked;
             self.lighting.light_quiet = 0;
-        } else if probe_only(&self.lighting.settings) && self.lighting.still > 0 {
+        } else if self.lighting.still > 0
+            && lighting_counts_light_on_cpu(
+                self.lighting.settings.world_mode(),
+                probe_only(&self.lighting.settings),
+                counters_read,
+            )
+        {
+            // S70B skips the cache-counter read on the default surface cache, and
+            // note_lighting_round is what used to raise light_quiet. Settled needs
+            // that count. Probe-only has always counted here.
             self.lighting.light_quiet = self.lighting.light_quiet.saturating_add(1);
         }
         let sweep = self.lighting.live.div_ceil(LIGHTING_CACHE_BATCH).max(1) + 1;
@@ -2777,6 +2832,15 @@ fn lighting_stats_wanted(world: u32) -> bool {
     lighting_debug_on() || !(world == 3 && lighting_sc_flags_env() & 8192 != 0)
 }
 
+/// Frames since the light last changed, counted on the CPU. The default surface
+/// cache (world mode 3, flag 8192) does not read the cache counters, so
+/// `note_lighting_round` never runs and `light_quiet` would stay 0. `settled`
+/// and the young-only bit both need it. Probe-only does not take the count
+/// from the counters either.
+fn lighting_counts_light_on_cpu(world_mode: u32, probe_only: bool, counters_read: bool) -> bool {
+    probe_only || (world_mode == 3 && !counters_read)
+}
+
 // Defaults with no env set (S54K, gi-v2): GI v2, the surface cache, cap 64, the
 // S49 flag set and object-local texels. Each env var still overrides.
 const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
@@ -2860,10 +2924,6 @@ fn lighting_sc_flags_env() -> u32 {
     })
 }
 
-/// GENOS_LIGHTING_SC_LOCAL: object-local texels, on unless 0.
-fn lighting_sc_local_env() -> bool {
-    std::env::var("GENOS_LIGHTING_SC_LOCAL").map_or(true, |v| v != "0")
-}
 
 /// Vec4 index of the changes block in the work buffer (lighting_common.glsl
 /// lighting_change_at), for `probes` probes, `cache_rays` light cache rays and `kept`
@@ -3452,6 +3512,14 @@ mod sun_step {
         lighting.sun_live_dir = dir;
         lighting.sun_live_light = light;
         lighting
+    }
+
+    #[test]
+    fn the_surface_cache_counts_quiet_light_without_the_counter_read() {
+        assert!(super::lighting_counts_light_on_cpu(3, false, false));
+        assert!(!super::lighting_counts_light_on_cpu(3, false, true));
+        assert!(super::lighting_counts_light_on_cpu(0, true, true));
+        assert!(!super::lighting_counts_light_on_cpu(0, false, true));
     }
 
     #[test]
