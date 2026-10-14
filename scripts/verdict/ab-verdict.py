@@ -40,6 +40,7 @@ from lib.images import blur_relative
 from lib.launch import child_env, hold_lock, lighting_argv, release_lock, stop
 from lib.mcp import post, quit, wait_ready
 from lib.noise import SETTLE_FRAMES, summarize, write_repeats, write_spread
+import noise_floor
 import precheck
 
 
@@ -276,8 +277,6 @@ def _build(repo: Path, sha: str, evidence: Path, label: str, binary_name: str) -
 
 def _measure_base_floor(ns: argparse.Namespace, binary: Path, evidence: Path) -> tuple[str, str, Path]:
     """Run noise-floor on the BASE binary before HEAD is built."""
-    import noise_floor
-
     scene, checkpoint, repeats, settle = floor_job(ns)
     floor_dir = evidence / "noise-floor"
     floor_dir.mkdir(parents=True, exist_ok=True)
