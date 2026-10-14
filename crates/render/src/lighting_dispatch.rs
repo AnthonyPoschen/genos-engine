@@ -336,8 +336,11 @@ pub(crate) fn light_groups(
 }
 
 /// Screen wavelet: one 8×8 group per picture block. Hash wavelet: one group
-/// per 64 cache slots. Stages are gather (0), the configured iterations, and
-/// scatter (6).
+/// per 64 cache slots.
+///
+/// Screen stages: 0 stores the visible slot, 1 picks one pixel per cell and
+/// runs the hash variance, then one stage per wavelet iteration, then the
+/// push. The hash stages stay 0, the iterations, and 6.
 fn push_denoise(settings: &LightingSettings, w: u32, h: u32, slots: u32, out: &mut LightGroups) {
     let iters = settings.denoiser.iterations;
     let (gx, gy) = if settings.denoiser.screen {
@@ -345,6 +348,19 @@ fn push_denoise(settings: &LightingSettings, w: u32, h: u32, slots: u32, out: &m
     } else {
         (slots, 1)
     };
+    if settings.denoiser.screen {
+        out.push(8, gx, gy, B_ATROUS);
+        out.atrous_stages.push(0);
+        out.push(8, gx, gy, B_ATROUS);
+        out.atrous_stages.push(1);
+        for i in 0..iters {
+            out.push(8, gx, gy, B_ATROUS);
+            out.atrous_stages.push(2 + i);
+        }
+        out.push(8, gx, gy, B_ATROUS);
+        out.atrous_stages.push(2 + iters);
+        return;
+    }
     out.push(8, gx, gy, B_ATROUS);
     out.atrous_stages.push(0);
     for stage in 1..=iters {
@@ -565,8 +581,8 @@ mod probe_still_tests {
             .iter()
             .filter(|(pass, _, _)| *pass == 8)
             .collect();
-        assert_eq!(screen_groups.len(), 7, "gather, five iterations, scatter");
-        assert_eq!(screen.atrous_stages, vec![0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(screen_groups.len(), 8, "gather, variance, five iterations, push");
+        assert_eq!(screen.atrous_stages, vec![0, 1, 2, 3, 4, 5, 6, 7]);
         for (pass, gx, gy) in &screen_groups {
             assert_eq!(*pass, 8);
             assert_eq!(*gx, 320u32.div_ceil(8));

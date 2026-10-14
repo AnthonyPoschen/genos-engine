@@ -975,15 +975,18 @@ fn sponza_banner_cells_stay_still_under_the_screen_wavelet() {
 }
 
 /// Sun-shadowed floor on high. Direct sun is blocked, so the picture there is
-/// bounce. A 12.5 cm cell that is brighter than its neighbours is the blotch
-/// in that shadow. It has to stay gone while the camera moves, and the same
-/// floor points must not flicker harder than the hash wavelet.
+/// bounce. A small emitter lights one cell. The hash wavelet keeps that cell
+/// brighter than its neighbours. The screen wavelet walks the same cells, so
+/// the peak stays (erasing it was the pixel-step blur) and the floor points
+/// stay inside the picture bar. The same points must not flicker harder than
+/// the hash wavelet.
 #[test]
 fn shadowed_floor_bounce_stays_smooth_on_high() {
     let hash = floor_shadow_shot(false);
     let screen = floor_shadow_shot(true);
+    let (err_mean, err_p99) = paired_luma(&hash.lumas, &screen.lumas);
     eprintln!(
-        "shadow floor hash mean {:.1} peaks {:.1}..{:.1} flicker {:.3} screen mean {:.1} peaks {:.1}..{:.1} flicker {:.3}",
+        "shadow floor hash mean {:.1} peaks {:.1}..{:.1} flicker {:.3} screen mean {:.1} peaks {:.1}..{:.1} flicker {:.3} luma mean {err_mean:.3} p99 {err_p99:.3}",
         hash.mean, hash.peaks_min, hash.peaks_max, hash.flicker,
         screen.mean, screen.peaks_min, screen.peaks_max, screen.flicker
     );
@@ -1003,9 +1006,17 @@ fn shadowed_floor_bounce_stays_smooth_on_high() {
         hash.peaks_min
     );
     assert!(
-        screen.peaks_max <= 4.0,
-        "screen cell blotches under the move {:.1}",
-        screen.peaks_max
+        screen.peaks_max <= hash.peaks_max + 8.0,
+        "screen cell excess {:.1} is above the hash {:.1}",
+        screen.peaks_max, hash.peaks_max
+    );
+    assert!(
+        err_mean <= 1.5,
+        "shadow floor mean {err_mean:.3} is past the picture bar 1.5"
+    );
+    assert!(
+        err_p99 <= 10.0,
+        "shadow floor p99 {err_p99:.3} is past the picture bar 10"
     );
     assert!(
         screen.flicker <= hash.flicker + 0.2,
@@ -1024,6 +1035,15 @@ struct FloorShadow {
     peaks_min: f64,
     peaks_max: f64,
     flicker: f64,
+    lumas: Vec<f64>,
+}
+
+fn paired_luma(hash: &[f64], screen: &[f64]) -> (f64, f64) {
+    let n = hash.len().min(screen.len());
+    let mut err: Vec<f64> = (0..n).map(|i| (hash[i] - screen[i]).abs()).collect();
+    let mean = mean_of(&err);
+    let p99 = percentile(&mut err, 0.99);
+    (mean, p99)
 }
 
 #[derive(Clone, Copy)]
@@ -1082,7 +1102,8 @@ fn floor_shadow_shot(screen: bool) -> FloorShadow {
             &floor_camera(cam),
         ));
     }
-    let covered = floor_lumas(&frames[0], &shots[0]).len();
+    let still_lumas = floor_lumas(&frames[0], &shots[0]);
+    let covered = still_lumas.len();
     assert!(
         covered >= 40,
         "the shadow patch left the frame ({covered} samples)"
@@ -1095,10 +1116,11 @@ fn floor_shadow_shot(screen: bool) -> FloorShadow {
         peaks_max = peaks_max.max(peaks);
     }
     FloorShadow {
-        mean: mean_of(&floor_lumas(&frames[0], &shots[0])),
+        mean: mean_of(&still_lumas),
         peaks_min,
         peaks_max,
         flicker: floor_flicker(&frames, &shots),
+        lumas: still_lumas,
     }
 }
 

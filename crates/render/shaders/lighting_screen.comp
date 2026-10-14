@@ -1,52 +1,35 @@
 #version 450
-// Screen wavelet for this frame's visible fine texels (S80).
+// Screen launch of the hash wavelet (S80).
 //
-// One 8x8 group per picture block. Stage 0 gathers one hash find per pixel.
-// Stages 1..iters are à-trous on a ping-pong in `out`. Stage 6 writes the
-// cell (freshness, and the fallback for pixels this filter skipped). Compose
-// shows slice 1, the per-pixel field. Showing the cell would paint the
-// 12.5 cm grid back on. The hash-slot wavelet does not run.
+// One 8x8 group per picture block. The kernel is lighting_svgf_variance,
+// lighting_svgf_iter, and lighting_svgf_push: the same stages the hash-slot
+// pipeline runs, including its variance, its luminance weight, and the dirty
+// hold. A screen-sized B3 of the bilinear gather is not that kernel. The
+// luminance weight is nonlinear, so it does not commute with the bilinear,
+// and this path has no hold (ADR 0012). The hash blurs a texel while its
+// spatial estimate is still wide and then holds that blur. Rebuilding from
+// the settled mean leaves the 12.5 cm grid, and a wider phi spreads energy
+// the hold never spread. That was the ceiling, wall, and floor blotch.
 //
-// Papers: Schied et al., SVGF, HPG 2017, §4.2 (variance-guided luminance
-// weight). Dammertz et al., HPG 2010, B3 à-trous. Zhdan, ReBLUR/ReLAX (the
-// filter is the indirect signal). Wright, Lumen, SIGGRAPH 2022 (the denoiser
-// sees indirect light; pixel direct is composed after this pass).
+// The launch is the picture, not the million-slot table. Stage 0 stores the
+// fine slot under each pixel. Stage 1 picks one pixel per visible cell: the
+// visible hit closest to the cell centre. The pixel the centre projects to
+// is the wrong one once the surface is edge-on, because that ray hits a
+// nearer cell and the texel then has no thread. The raw mean shows through
+// as grain. Stages after that are the hash iterations and the push, on that
+// one pixel. Compose bilerps the pushed field. Slice 1 stays empty so
+// lighting_screen_field does not replace the bilinear.
 //
-// Deviations, flagged:
-// - Taps are screen pixels, not hash cells. SVGF §4 walks a pixel image; the
-//   previous filter walked cache slots.
-// - The step is 2^i pixels, clamped to 48. A step locked to the 12.5 cm cell
-//   samples the same texels for every pixel of that cell, so the grid survives.
-//   Taps inside one cell skip the luminance stop, so a piecewise-constant
-//   texel mixes with its neighbours. Farther taps still use it.
-// - 25 cm cells are not filtered. Scatter blends them in only when the
-//   wavelet's certainty is below 1 (Gortler pull, min(1, 4 wm/wall)).
-// - Variance is this frame's 3x3 spatial moment at one pixel, floored at
-//   (denoise_variance * mean)^2. There is no temporal variance (ADR 0012: no
-//   radiance history). The 1 px moment inside a cell is zero; the in-cell
-//   taps do not use it, which is what lets the texel grid blur.
-// - Every configured iteration runs. A short filter where variance is low
-//   was rejected (S79). S79 is not evidence against this screen filter: that
-//   trial kept the million-slot launch.
-// - The whole picture is filtered every frame. A shadow-boundary-only filter
-//   would republish last frame's pixels, which ADR 0012 does not allow.
-//   Layer 1 still limits which texels were retraced; the sun gain is already
-//   in lighting_svgf_in.
-// - Irradiance-cache radius is not recomputed. The hash push's gradient
-//   placement does not run. A new texel with R == 0 already takes period 1.
-// - The cache key is the raster geometric axis (gbuffer flag bits 1..3).
-//   A two-sided back face stores the opposite axis. The shading normal and
-//   the view flip are not the key. Edge weights still use the shading normal.
-// - Compose reads this pixel's filtered indirect. The cell scatter is not
-//   what the picture shows: that write is one color per 12.5 cm cell, which
-//   is the banner's block.
+// A fine texel the hash pipeline would still filter (shown in the last 30
+// frames, or the camera held) but that no pixel of this frame can see is
+// not visited. A still view visits the same set. 25 cm cells stay on the
+// running mean the hash push reads when this launch has not filtered them.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 8, local_size_y = 8) in;
 #include "lighting_common.glsl"
 
 shared uint screen_red[64];
 
-// Every thread in the group calls this. The return is the group's total.
 uint screen_wg_sum(uint bit) {
     uint lid = gl_LocalInvocationIndex;
     screen_red[lid] = bit;
@@ -83,260 +66,116 @@ void screen_store(uint slice, uint index, vec3 rgb, float var, float mask, uint 
     outc.px[at + 3u] = slot;
 }
 
-void screen_load(uint slice, uint index, out vec3 rgb, out float var, out float mask, out uint slot) {
-    uint at = screen_at(slice, index);
-    rgb = lighting_unpack_rgb9e5(outc.px[at]);
-    var = uintBitsToFloat(outc.px[at + 1u]);
-    mask = uintBitsToFloat(outc.px[at + 2u]);
-    slot = outc.px[at + 3u];
+bool screen_live(uint slot) {
+    return slot != ~0u && slot < LIGHTING_CACHE_SLOTS && ckeys.key[slot] != 0u && cache.v[3u * slot + 1u].w > 0.0;
 }
 
-float screen_b3(int o) {
-    int a = o < 0 ? -o : o;
-    if (a == 0) {
-        return 0.375;
+// Hash stage: 0 variance, 1..5 an iteration, anything else the push.
+void screen_run(uint slot, uint step) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return;
     }
-    if (a == 1) {
-        return 0.25;
+    if (ckeys.key[slot] == 0u) {
+        return;
     }
-    return 0.0625;
-}
-
-float screen_metres_per_px(float dist) {
-    return 2.0 * scene.view_right.w / float(max(pc.dims.y, 1u)) * max(dist, 1.0e-3);
-}
-
-int screen_cell_px(float dist) {
-    float px = LIGHTING_SC_TEXEL / max(screen_metres_per_px(dist), 1.0e-5);
-    return int(clamp(round(px), 1.0, 48.0));
-}
-
-int screen_step_px(uint iter) {
-    // Pixel steps. A step locked to the 12.5 cm cell samples the same texels
-    // for every pixel of that cell, and the later passes then keep the grid.
-    return int(min(exp2(float(iter)), 48.0));
-}
-
-ivec2 screen_project(vec3 world) {
-    vec3 rel = world - scene.eye.xyz;
-    vec3 forward = scene.view_forward.xyz;
-    float zv = dot(rel, forward);
-    if (zv < 1.0e-3) {
-        return ivec2(-1, -1);
+    if (!(cache.v[3u * slot + 1u].w > 0.0)) {
+        return;
     }
-    float t = max(scene.view_right.w, 1.0e-6);
-    float aspect = max(scene.view_forward.w, 1.0e-6);
-    float ndc_x = dot(rel, scene.view_right.xyz) / (zv * t * aspect);
-    float ndc_y = dot(rel, scene.view_up.xyz) / (zv * t);
-    float px = (ndc_x + 1.0) * 0.5 * float(pc.dims.x) - 0.5;
-    float py = (1.0 - ndc_y) * 0.5 * float(pc.dims.y) - 0.5;
-    return ivec2(int(floor(px + 0.5)), int(floor(py + 0.5)));
-}
-
-float screen_moment(uint slice, ivec2 p, int stride) {
-    float sum = 0.0;
-    float sum2 = 0.0;
-    float n = 0.0;
-    int s = max(stride, 1);
-    for (int j = -1; j <= 1; j++) {
-        for (int i = -1; i <= 1; i++) {
-            ivec2 q = p + ivec2(i, j) * s;
-            if (q.x < 0 || q.y < 0 || q.x >= int(pc.dims.x) || q.y >= int(pc.dims.y)) {
-                continue;
-            }
-            vec3 rgb;
-            float var;
-            float mask;
-            uint slot;
-            screen_load(slice, uint(q.y) * pc.dims.x + uint(q.x), rgb, var, mask, slot);
-            if (mask <= 0.0) {
-                continue;
-            }
-            float lum = dot(rgb, LIGHTING_SVGF_LW);
-            sum += lum;
-            sum2 += lum * lum;
-            n += 1.0;
+    lighting_obj_salt = cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5 ? cache.v[LIGHTING_SC_OBJ_AT + slot].x : 0.0;
+    if (!lighting_svgf_active(slot)) {
+        if (step == 0u) {
+            lighting_svgf_inactive(slot);
         }
+        lighting_obj_salt = 0.0;
+        return;
     }
-    if (n < 1.0) {
-        return 0.0;
+    if (step == 0u) {
+        lighting_svgf_variance(slot);
+    } else if (step <= 5u) {
+        lighting_svgf_iter(slot, step - 1u);
+    } else {
+        lighting_svgf_push(slot);
     }
-    float mean = sum / n;
-    return max(sum2 / n - mean * mean, 0.0);
+    lighting_obj_salt = 0.0;
 }
 
-// Returns fine, coarse, changed. Writes the gathered texel for every pixel.
+float screen_plane(vec3 pos, vec3 centre, vec3 key_n) {
+    vec3 delta = pos - centre;
+    return length(delta - key_n * dot(delta, key_n));
+}
+
+// Stage 0. One hash find per pixel. The slot is kept for the owner test.
 uvec3 screen_gather(uvec2 p) {
     uint index = p.y * pc.dims.x + p.x;
+    uint at = screen_at(0u, index);
+    outc.px[at] = 0u;
+    outc.px[at + 1u] = 0u;
+    outc.px[at + 2u] = 0u;
+    outc.px[at + 3u] = ~0u;
     vec3 pos;
     vec3 n;
     vec3 albedo;
     bool two_sided;
     if (!lighting_sc_svgf() || !lighting_surface(p, pos, n, albedo, two_sided)) {
-        screen_store(0u, index, vec3(0.0), 0.0, 0.0, ~0u);
         return uvec3(0u);
     }
     vec3 key_n = lighting_axis_vec(lighting_geo_axis(p));
     uint slot = lighting_cache_find_sized(pos, key_n, false, LIGHTING_SC_TEXEL, pos);
-    if (slot != ~0u && cache.v[3u * slot + 1u].w > 0.2) {
-        screen_store(0u, index, vec3(0.0), 0.0, 0.0, ~0u);
-        return uvec3(0u, 1u, 0u);
-    }
-    if (slot == ~0u) {
-        uint coarse = lighting_cache_find_sized(pos, key_n, false, 0.25, pos);
-        uint bit = 0u;
-        if (coarse != ~0u && cache.v[3u * coarse + 1u].w > 0.2) {
-            bit = 1u;
-        }
-        screen_store(0u, index, vec3(0.0), 0.0, 0.0, ~0u);
-        return uvec3(0u, bit, 0u);
-    }
-    float var_in;
-    vec4 texel = lighting_svgf_in(slot, var_in);
-    cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
-    cache.v[LIGHTING_WORLD_AT + slot].z = uintBitsToFloat(lighting_frame());
-    if (texel.w <= 0.0) {
-        screen_store(0u, index, vec3(0.0), 0.0, 0.0, slot);
+    // Nested, not `||`: a miss is ~0u, and the other side would index the cache
+    // with it. glslc does not leave that read out.
+    if (slot >= LIGHTING_CACHE_SLOTS) {
         return uvec3(0u);
     }
-    float stored_var = var_in >= 0.0 ? var_in : 0.0;
-    screen_store(0u, index, texel.rgb, stored_var, 1.0, slot);
-    vec3 prev = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
-    float a = dot(texel.rgb, LIGHTING_SVGF_LW);
-    float b = dot(prev, LIGHTING_SVGF_LW);
-    float rel = abs(a - b) / max(max(a, b), 1.0e-4);
-    return uvec3(1u, 0u, rel > 0.02 ? 1u : 0u);
+    if (ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0) || cache.v[3u * slot + 1u].w > 0.2) {
+        return uvec3(0u);
+    }
+    outc.px[at + 3u] = slot;
+    return uvec3(lighting_svgf_active(slot) ? 1u : 0u, 0u, 0u);
 }
 
-void screen_atrous(uvec2 p, uint iter) {
-    uint index = p.y * pc.dims.x + p.x;
-    uint src = iter & 1u;
-    uint dst = src ^ 1u;
-    vec3 rgb;
-    float var;
-    float mask;
-    uint slot;
-    screen_load(src, index, rgb, var, mask, slot);
-    if (mask <= 0.0) {
-        screen_store(dst, index, vec3(0.0), 0.0, 0.0, slot);
-        return;
-    }
-    vec3 pos;
-    vec3 n = vec3(0.0, 1.0, 0.0);
-    vec3 albedo;
-    bool two_sided;
-    float dist = 1.0;
-    if (lighting_surface(p, pos, n, albedo, two_sided)) {
-        dist = max(length(pos - scene.eye.xyz), 1.0e-3);
-    }
-    int step = screen_step_px(iter);
-    ivec2 ip = ivec2(p);
-    float mean = max(dot(rgb, LIGHTING_SVGF_LW), 1.0e-4);
-    float moment = screen_moment(src, ip, 1);
-    float floor_v = lighting_denoise_variance() * mean;
-    floor_v *= floor_v;
-    float use_var = max(max(var, moment), floor_v);
-    float phi = LIGHTING_SVGF_SIGMA_L * sqrt(use_var) + 1.0e-4;
-    float lp = dot(rgb, LIGHTING_SVGF_LW);
-    vec3 sum = vec3(0.0);
-    float wm = 0.0;
-    float wall = 0.0;
-    float vsum = 0.0;
-    for (int j = -2; j <= 2; j++) {
-        for (int i = -2; i <= 2; i++) {
-            ivec2 q = ip + ivec2(i, j) * step;
-            float w = screen_b3(i) * screen_b3(j);
-            if (q.x < 0 || q.y < 0 || q.x >= int(pc.dims.x) || q.y >= int(pc.dims.y)) {
-                continue;
-            }
-            vec3 qr;
-            float qv;
-            float qm;
-            uint qs;
-            screen_load(src, uint(q.y) * pc.dims.x + uint(q.x), qr, qv, qm, qs);
-            if (qm <= 0.0) {
-                continue;
-            }
-            vec3 qpos;
-            vec3 qn;
-            vec3 qalbedo;
-            bool qtwo;
-            float qdist = dist;
-            if (lighting_surface(uvec2(q), qpos, qn, qalbedo, qtwo)) {
-                qdist = length(qpos - scene.eye.xyz);
-            }
-            float dz = abs(qdist - dist);
-            float step_m = float(step) * screen_metres_per_px(dist);
-            float wz = exp(-dz / (LIGHTING_SVGF_SIGMA_Z * max(step_m, LIGHTING_SC_TEXEL) + 1.0e-4));
-            float wn = pow(max(dot(n, qn), 0.0), LIGHTING_SVGF_SIGMA_N);
-            float wl = 1.0;
-            float reach = length(vec2(float(i), float(j))) * float(step);
-            if ((i != 0 || j != 0) && reach > float(screen_cell_px(dist))) {
-                wl = exp(-abs(dot(qr, LIGHTING_SVGF_LW) - lp) / phi);
-            }
-            w *= wz * wn * wl;
-            float a = w * qm;
-            sum += a * qr;
-            wm += a;
-            wall += w;
-            vsum += a * a * max(qv, 0.0);
-        }
-    }
-    if (wm > 0.0) {
-        float certainty = wall > 0.0 ? min(1.0, 4.0 * wm / wall) : 0.0;
-        screen_store(dst, index, sum / wm, vsum / (wm * wm), certainty, slot);
-    } else {
-        screen_store(dst, index, vec3(0.0), 0.0, 0.0, slot);
-    }
-}
-
-void screen_scatter(uvec2 p) {
-    if (!lighting_sc_svgf()) {
-        return;
-    }
-    uint index = p.y * pc.dims.x + p.x;
-    // Iterations are 1, 3, or 5, so the last write landed in slice 1.
-    vec3 rgb;
-    float var;
-    float mask;
-    uint slot;
-    screen_load(1u, index, rgb, var, mask, slot);
-    if (mask <= 0.0 || slot == ~0u || slot >= LIGHTING_CACHE_SLOTS) {
-        return;
-    }
-    if (cache.v[3u * slot + 1u].w > 0.2) {
-        return;
-    }
+// Stage 1. The visible hit closest to the cell centre owns the kernel.
+// Two of those minima happen when a nearer surface splits the cell. The
+// exchange keeps one thread; the kernel reads the slot, not the pixel.
+bool screen_owner(uvec2 p, uint slot) {
     vec3 pos;
     vec3 n;
     vec3 albedo;
     bool two_sided;
     if (!lighting_surface(p, pos, n, albedo, two_sided)) {
-        return;
+        return false;
     }
     vec3 key_n = lighting_axis_vec(lighting_geo_axis(p));
-    float size = LIGHTING_SC_TEXEL;
-    vec3 centre = lighting_sc_centre(pos, key_n, size);
-    vec3 delta = pos - centre;
-    float plane = length(delta - key_n * dot(delta, key_n));
-    if (plane > 0.5 * size) {
-        return;
-    }
-    if (screen_project(centre) != ivec2(p)) {
-        return;
-    }
-    float cover = clamp(mask, 0.0, 1.0);
-    if (cover < 0.999) {
-        vec4 nb = cache.v[3u * slot + 1u];
-        vec4 coarse = lighting_sc_wrc_now(cache.v[3u * slot].xyz, nb.xyz);
-        if (coarse.w > 0.5) {
-            rgb = cover * rgb + (1.0 - cover) * coarse.rgb;
+    vec3 centre = lighting_sc_centre(pos, key_n, LIGHTING_SC_TEXEL);
+    float dist = screen_plane(pos, centre, key_n);
+    uint index = p.y * pc.dims.x + p.x;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            if (i == 0 && j == 0) {
+                continue;
+            }
+            ivec2 q = ivec2(p) + ivec2(i, j);
+            if (q.x < 0 || q.y < 0 || q.x >= int(pc.dims.x) || q.y >= int(pc.dims.y)) {
+                continue;
+            }
+            uint qs = outc.px[screen_at(0u, uint(q.y) * pc.dims.x + uint(q.x)) + 3u];
+            if (qs != slot) {
+                continue;
+            }
+            vec3 qp;
+            vec3 qn;
+            vec3 qa;
+            bool qtwo;
+            if (!lighting_surface(uvec2(q), qp, qn, qa, qtwo)) {
+                continue;
+            }
+            float qd = screen_plane(qp, centre, key_n);
+            uint qi = uint(q.y) * pc.dims.x + uint(q.x);
+            if (qd < dist || (qd == dist && qi < index)) {
+                return false;
+            }
         }
     }
-    uint packed = lighting_pack_rgb9e5(max(rgb, vec3(0.0)));
-    cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(packed);
-    cache.v[LIGHTING_SC_ATROUS_B + slot].w = uintBitsToFloat(lighting_frame());
-    lighting_compose_note_field(slot, packed);
+    return true;
 }
 
 void screen_publish() {
@@ -380,15 +219,50 @@ void main() {
     if (!inside) {
         return;
     }
-    if (stage == 6u) {
+    uint index = p.y * pc.dims.x + p.x;
+    uint at = screen_at(0u, index);
+    uint slot = outc.px[at + 3u];
+    uint iters = lighting_denoise_iters();
+    if (stage == 1u) {
+        // Nested: a miss is ~0u, and glslc will still index the cache on the
+        // other side of `&&`.
+        if (slot < LIGHTING_CACHE_SLOTS) {
+            if (cache.v[3u * slot + 1u].w <= 0.2 && screen_owner(p, slot)) {
+                uint stamp = lighting_frame() + 1u;
+                if (atomicExchange(ckeys.key[LIGHTING_SCREEN_OWNER_AT + slot], stamp) != stamp) {
+                    outc.px[at + 2u] = 1u;
+                    // The spatial stamp (slot 22.z) makes a young texel redo its
+                    // 7x7 while a neighbour moved. On the full hash launch that
+                    // redo stays within the held blur. Here the neighbours this
+                    // frame cannot see stay at an empty level, so the redo is the
+                    // settled mean and the 12.5 cm grid comes back. A texel whose
+                    // own input held keeps the blur it stored while the estimate
+                    // was wide.
+                    cache.v[LIGHTING_SC_DIRTY_AT + LIGHTING_CACHE_SLOTS + slot][2] = 0.0;
+                    screen_run(slot, 0u);
+                }
+            }
+        }
+        return;
+    }
+    if (outc.px[at + 2u] == 0u || !screen_live(slot)) {
+        if (stage == 2u + iters) {
+            screen_store(1u, index, vec3(0.0), 0.0, 0.0, ~0u);
+            if (p.x == 0u && p.y == 0u) {
+                screen_publish();
+            }
+        }
+        return;
+    }
+    if (stage == 2u + iters) {
         if (p.x == 0u && p.y == 0u) {
             screen_publish();
         }
-        screen_scatter(p);
+        screen_run(slot, 6u);
+        screen_store(1u, index, vec3(0.0), 0.0, 0.0, ~0u);
         return;
     }
-    uint iters = lighting_denoise_iters();
-    if (stage >= 1u && stage <= iters) {
-        screen_atrous(p, stage - 1u);
+    if (stage >= 2u && stage < 2u + iters) {
+        screen_run(slot, stage - 1u);
     }
 }

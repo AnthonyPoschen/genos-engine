@@ -24,7 +24,7 @@ Each feature can be turned off. Off means the pass is not recorded and, where th
 | Bounces | `0` is direct light plus flat ambient: no GI dispatch is recorded and the GI buffers are not allocated. `1` traces screen probes and shades their hits, and does not record the surface-cache, cache-ray, or a-trous dispatches. `2` allows cache-to-cache and records those dispatches. `unlimited` is the tuned path. A lower count omits the dispatches; it does not run them and zero the colour | `bounces` |
 | Probes | Place, trace, gather, filter | `probe_rays` (4..64), `probe_tile` (0 = the picture-height rule), `probe_refresh`, `probe_stale` |
 | World cache | Surface cache, world mode 3. Mode 0 is probe GI. The a-trous filter runs only in mode 3. A still probe-only scene settles once the light has held: probes, cache rays, and hit lighting stop, and only pixel direct and compose run, so off does not cost more than on. A moving frame keeps the probe passes. Before that settle, a still pixel still reuses direct light | `world_cell`, `world_refresh`, `world_stale` |
-| Denoiser | The a-trous dispatches. High runs a screen wavelet over this frame's visible 12.5 cm texels and compose shows that per-pixel field. Off (`denoise_screen=0`) keeps the hash-slot wavelet. With the denoiser off, compose shows each texel's own mean. The wavelet filters bounce light only; pixel direct is composed afterwards and stays sharp | `denoise_iters` (1, 3, or 5), `denoise_dirty` (hash wavelet), `denoise_screen`, `denoise_adaptive` (experimental, off on every preset; the hash wavelet only), `denoise_variance` |
+| Denoiser | The a-trous dispatches. High runs the hash wavelet on this frame's visible 12.5 cm cells and compose bilerps the pushed field. Off (`denoise_screen=0`) keeps the hash-slot launch. With the denoiser off, compose shows each texel's own mean. The wavelet filters bounce light only; pixel direct is composed afterwards and stays sharp | `denoise_iters` (1, 3, or 5), `denoise_dirty` (hash wavelet), `denoise_screen`, `denoise_adaptive` (experimental, off on every preset; the hash wavelet only), `denoise_variance` |
 | Compose reuse | The indirect block list. The compose pass still runs, over the whole image, and does not read the key table | `compose_reuse` |
 | Sky | Sky radiance on rays that miss. The scene sky colour stays; this bit stops the lighting from reading it | `sky` |
 | Emissive | Emitted light added in the direct pass and in compose | `emissive` |
@@ -48,7 +48,7 @@ The S78S isolate toggles (`GENOS_LIGHTING_TOGGLES`: `freeze_cache`, `direct_only
 | `medium` | Surface cache, 32 rays, two bounces, budget shift 1 (budgets / 2), max 8 lights, 3 hash-slot a-trous iterations, screen wavelet off, adaptive off, prefill, day ambient | Surface cache and two bounces, half the ray budget. The wavelet is the hash-slot kernel, three iterations |
 | `high` | Every feature on, unlimited bounces, 64 rays, tile from the picture height, refresh every frame, shadow cell 0.125 m, max lights unlimited, 5 screen-wavelet iterations, compose reuse, sky, emissive, prefill. Day ambient is the fallback for when GI is turned off. Adaptive passes stay off. `denoise_screen=0` or full effort restores the hash-slot wavelet | The tuned path, with the à-trous launch sized to the picture |
 
-`high` on a due frame builds the group list the frame recorded before settings existed, except the à-trous launch: that is one 8×8 group per picture block (gather, five iterations, scatter) instead of one group per 64 cache slots. `denoise_screen=0` puts those seven dispatches back on the slot table. Shader gates load the control block and fall through when the bits match that path. The default shadow cell is 0.125 m and the shader divides by the `LIGHTING_SC_TEXEL` constant, so a still frame stays on the old quantisation. A different `shadow_cell` is the variable division.
+`high` on a due frame builds the group list the frame recorded before settings existed, except the à-trous launch: that is one 8×8 group per picture block (gather, variance, five iterations, push) instead of one group per 64 cache slots. `denoise_screen=0` puts those seven dispatches back on the slot table. Shader gates load the control block and fall through when the bits match that path. The default shadow cell is 0.125 m and the shader divides by the `LIGHTING_SC_TEXEL` constant, so a still frame stays on the old quantisation. A different `shadow_cell` is the variable division.
 
 ## Scene file and Rhai
 
@@ -91,8 +91,9 @@ Adaptive passes are experimental and off on every preset. They drop later wavele
 ```
 cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-adaptive on --denoise-variance 0.02
 cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-adaptive off
+```
 
-High's denoiser is the screen wavelet. The hash-slot wavelet is the picture reference (`--denoise-screen off`, or full effort). The `atrous` column is the one that should move. A still frame is `--still-boxes --freeze-sun --dynamic 0`. The moving default is dynamic 50 with the sun running. Lavapipe does not time the GPU. Sponza is `genos-lighting`:
+High's denoiser is the screen wavelet. The hash-slot wavelet is the picture reference (`--denoise-screen off`, or full effort). The `atrous` column is the one that should move. A still frame is `--still-boxes --freeze-sun --dynamic 0`. The moving default is dynamic 50 with the sun running. Lavapipe does not time the GPU. Sponza is `genos-lighting`. `--checkpoint` jumps a named pose. `--eye x,y,z` moves the camera and `--look x,y,z` aims it, so a small move off that pose does not need a new scene line. Yaw 0 looks down -Z.
 
 ```
 cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high
@@ -106,7 +107,6 @@ GENOS_LIGHTING_DENOISE_SCREEN=0 cargo run --release -p genos-lighting -- --scene
 ```
 
 `GENOS_LIGHTING_DEBUG` writes `./genos-debug/denoise/latest.txt` (`--out` puts that under the chosen directory). It reads the counters back, so it is not an fps run. The curtains checkpoint is the central banner.
-```
 
 `make stress` is `cargo run --release -p genos-stress` and does not forward these arguments, so the commands above call cargo directly. `GENOS_GPU_TIMES` and `GENOS_LIGHTING_PRESET` still apply when the matching argument was omitted. The `LIGHTING_MS` line names the passes and appends `cache_rays`, `shadows`, and `prefill`. `prefill` is 1 when the scout was due and 0 when it was not. The scout shares the cache-ray dispatch, so this is not a separate millisecond.
 

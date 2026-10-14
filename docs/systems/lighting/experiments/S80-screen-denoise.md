@@ -13,21 +13,27 @@ does not claim those milliseconds: lavapipe does not time the GPU.
 
 ## Method
 
-Stage 0 gathers one hash find per pixel. The key is the geometric axis stored
-in the G-buffer, not the shading normal. Empty texels and 25 cm cells are not
-filtered. The input is `lighting_svgf_in` (the texel's own mean times its sun
-gain). Stages 1..N are a B3 à-trous (Dammertz, HPG 2010: 1/16, 1/4, 3/8, 1/4,
-1/16) on a ping-pong in the picture buffer. The step is 2^i pixels, clamped
-to 48. A step locked to the 12.5 cm cell samples the same texels for every
-pixel of that cell, and the later passes keep the grid. Taps inside one cell
-skip the luminance stop so the texel mixes with its neighbours. Farther taps
-still use it. Depth, shading normal, and luminance stop
-the blur. Compose reads the last iteration (slice 1) per pixel. Stage 6 still
-writes the cell (`LIGHTING_WORLD_AT.y`, freshness in the à-trous stamp) for
-the change test and for pixels the wavelet skipped. Showing that cell is one
-color per 12.5 cm, which is the banner's block, so the picture does not.
-Certainty below 1 blends the 25 cm running mean into the cell write (Gortler
-pull, min(1, 4 wm / wall)).
+The kernel is the hash wavelet: `lighting_svgf_variance`, `lighting_svgf_iter`,
+and `lighting_svgf_push`. Variance, the luminance weight, the dirty hold, and
+the Gortler pull are those functions. A screen-sized B3 of a gathered bilinear
+is not that kernel. The luminance weight is nonlinear, so it does not commute
+with the bilinear, and a screen filter has no hold (ADR 0012). The hash blurs
+a texel while the spatial estimate is still wide and then holds that blur.
+Rebuilding from the settled mean (variance near zero) leaves the 12.5 cm
+grid. Widening phi to hide the grid spreads energy the hold never spread.
+That was the ceiling, wall, and floor blotch, including the 1920×1080 x8
+diffs.
+
+The launch is the picture. Stage 0 stores the fine slot under each pixel, one
+hash find, keyed by the geometric axis in the G-buffer. Stage 1 picks one
+pixel per visible cell, the visible hit closest to the cell centre, and runs
+variance there. The pixel the centre projects to is the wrong owner once the
+surface is edge-on: that ray hits a nearer cell, the texel has no thread, and
+its raw mean shows through as grain. The next stages are the five hash
+iterations and the push, on that same pixel. Compose bilerps the pushed field
+(`lighting_sc_shown`), which is the hash picture. Slice 1 stays empty so the
+per-pixel buffer does not replace that bilinear. 25 cm cells are not given a
+screen thread. The push reads whatever the hash kernel last wrote for them.
 
 A two-sided back face (`gl_FrontFacing` false) stores the opposite axis, so
 the front and the back do not share a cell. `gl_FrontFacing` does not follow
@@ -40,10 +46,18 @@ stays dark: its p95 stays under half the lamp side, and it has no cell-sized
 peaks. One shared axis makes the far side as bright as the lamp side.
 
 The same cells show on a sun-shadowed floor, where the direct sun is gone
-and only bounce is left. A wall blocks the sun. The hash wavelet keeps a
-floor cell brighter than the four cells around it. The screen wavelet keeps
-that excess off the picture while the camera moves a few centimetres, and
-the world-locked flicker of those floor points stays with the hash path.
+and only bounce is left. A wall blocks the sun. A small emitter lights one
+cell. The hash wavelet keeps that cell brighter than the four around it.
+The screen wavelet keeps the same peak: erasing it was the pixel-step blur.
+The world-locked flicker of those floor points stays with the hash path.
+The stress hall, still and moving, is the full-picture gate at 960×540, where
+a foreground cell is wider than a pixel kernel. Eight warmup frames, then the
+scored pair. Mean and p99 against the hash wavelet stay inside the picture
+bar (1.5 / 10), and the screen path's own frame-to-frame change stays with
+the hash path. The synthetic floor did not see the 1920×1080 miss. A longer
+lavapipe settle (16 warmup frames) leaves a far-wall tail around p99 11:
+an input step after the variance has collapsed rewrites the held blur. The
+hash launch's filtered level stays inside 1% across that step.
 
 ## Papers and deviations
 
@@ -59,27 +73,31 @@ the world-locked flicker of those floor points stays with the hash path.
 
 Deviations:
 
-- Taps are screen pixels, not hash cells.
-- The step is 2^i pixels, clamped at 48. A cell-locked step leaves the texel
-  grid in the picture.
-- Taps inside one projected 12.5 cm cell skip the luminance stop. Farther
-  taps use it. A 1 px moment inside a cell is zero and would otherwise keep
-  the grid.
-- 25 cm cells are outside the wavelet. They blend in only when certainty is
-  below 1.
-- Variance is this frame's 3×3 spatial moment at one pixel, floored at
-  `(denoise_variance * mean)^2`. The in-cell taps do not use that moment.
-- Every configured iteration runs.
-- The whole picture is filtered every frame. Filtering only the shadow
-  boundary would republish last frame. Layer 1 still decides which texels
-  were retraced; the sun gain is applied before the wavelet.
-- Irradiance-cache radius is not recomputed. A new texel with R == 0 already
-  takes period 1.
+- The dispatch visits cells a pixel of this frame can see. The hash pipeline
+  also filters a fine texel for 30 frames after it leaves the picture, and
+  every 25 cm cell. This launch does not.
+- The owner is the visible hit closest to the cell centre, not a projected
+  centre whose ray hits a nearer cell. A cell split by a nearer surface has
+  two such hits. One exchange on a word past the sun block
+  (`LIGHTING_SCREEN_OWNER_AT`, one per slot) keeps a single kernel thread.
+  The kernel reads the slot, so which hit wins does not change the colour.
+- The spatial stamp (a neighbour's 7×7 inputs moved) is cleared before
+  variance. On the full hash launch that redo stays inside the held blur.
+  Neighbours this frame cannot see have an empty level, so the same redo
+  rebuilds from the settled mean and the 12.5 cm grid returns. A texel whose
+  own input moved still recomputes.
+- Phi, the luminance weight, the depth and normal weights, and the pull are
+  the hash kernel's. `denoise_variance` does not floor them, and there is no
+  screen-space moment standing in for the spatial estimate.
+- Every configured iteration runs. The dirty hold is the hash kernel's hold
+  of a texel whose input moved less than 1%. It is not a held picture
+  (ADR 0012).
 - Two-sided keys use the raster geometric axis. Back faces use the opposite
   axis. The shading normal is not the key.
-- Compose shows the per-pixel wavelet. The cell scatter is not the picture.
-- S79 is not evidence against a screen filter. That trial kept the
-  million-slot launch.
+- Compose shows the bilinear of the pushed cells. It does not show a
+  per-pixel filter.
+- S79 is not evidence against a screen launch. That trial kept the
+  million-slot dispatch.
 
 ## Settings
 
@@ -119,3 +137,10 @@ full table that find can dominate, and the gain is smaller than 1.4 ms, but
 the 5×5 is no longer a walk of the hash. A large local change still filters
 the picture, not a dilated dirty set. The picture bar against the hash wavelet
 is mean 1.5 / p99 10 on 0..255, the run-to-run noise of high on the 4070.
+
+The 4070 measurement of the pixel-step wavelet (the launch that filtered in
+screen space) was Sponza high 9.6 to 19.8 fps, denoise 63.6 to 5.6 ms, and
+stress corner 174 to 269 fps. Medium did not move: the screen wavelet is off
+there. Those pictures were outside the bar (stress still mean 15.5 / p99 32,
+moving 9.5 / 27.7, Sponza atrium p99 41 against 2.7). Lavapipe does not time
+the GPU, and it does not stand in for a retest of this hash-kernel launch.

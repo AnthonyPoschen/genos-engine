@@ -900,8 +900,14 @@ impl Gpu {
                 // The compose words and the a-trous meta must not alias the a-trous lists.
                 assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
                 assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
+                // +SLOTS: screen-owner election, past the sun block. See
+                // LIGHTING_SCREEN_OWNER_AT.
                 self.lighting.cache_keys = self.make_buffer_queues(
-                    (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS + LIGHTING_SUN_WORDS) * 4,
+                    (lighting_atrous_ppm_at()
+                        + LIGHTING_ATROUS_META_WORDS
+                        + LIGHTING_SUN_WORDS
+                        + LIGHTING_CACHE_SLOTS)
+                        * 4,
                     0x20 | 0x2 | 0x100 | 0x1,
                     Memory::Device,
                     &share,

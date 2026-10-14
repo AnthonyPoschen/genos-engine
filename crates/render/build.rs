@@ -15,7 +15,11 @@ fn main() {
         "shaders/lighting_check.comp",
         &out.join("lighting_check.comp.spv"),
     );
-    // High's a-trous. Adaptive is compiled out (S79).
+    // High's a-trous. Adaptive is compiled out of the hash pipeline (S79).
+    // The screen launch calls that kernel with the adaptive bit clear: high
+    // does not set it, and the branch is the same test the plain pipeline
+    // compiles out. glslc does not take -D; glslangValidator's SPIR-V for this
+    // shader faulted lavapipe.
     let screen = compile(
         "shaders/lighting_screen.comp",
         &out.join("lighting_screen.comp.spv"),

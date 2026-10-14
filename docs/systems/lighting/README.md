@@ -568,15 +568,16 @@ gi-v2's 7.8 ms moving. Numbers and the five-line postmortem are in
 
 ### S80: screen wavelet
 
-High filters bounce light with a screen-sized B3 à-trous over this frame's
-visible 12.5 cm texels. Compose shows that per-pixel field. The cell scatter
-is the freshness stamp and the fallback for texels the wavelet skipped; showing
-the cell would paint the 12.5 cm grid back onto the picture.
-25 cm cells stay on their running mean and are blended in only where the
-wavelet is uncertain. The launch is one 8×8 group per picture block, not one
-group per 64 slots of the million-slot table. S79's half-resolution pass kept
-that table and got slower; this does not. `denoise_screen=0` and full effort
-bind the hash-slot wavelet, which is the picture reference.
+High filters bounce light by running the hash wavelet (variance, à-trous, and
+the push) on the visible 12.5 cm cells. One pixel per cell owns that work:
+the visible hit closest to the cell centre, and a split cell keeps one of
+those hits. The spatial stamp is cleared first, so a neighbour does not
+rebuild that blur from the settled mean. Compose bilerps the pushed field,
+which is the hash picture. The launch is one 8×8 group per picture block
+(gather, variance, the iterations, and the push), not one group per 64 slots
+of the million-slot table. S79's half-resolution pass kept that table and got
+slower; this does not. `denoise_screen=0` and full effort bind the hash-slot
+wavelet, which is the picture reference.
 
 A two-sided surface stores its geometric axis in the G-buffer (flag bits 1..3).
 The back face stores the opposite axis. Cache lookups from a pixel use that
@@ -585,15 +586,15 @@ applies for lighting, is not the key. That was the Sponza banner: a thin cloth
 shared 12.5 cm cells between its faces, and the key moved as the camera did,
 so the cells showed up as bright squares that jumped. The banner test fills
 the lamp side, then cuts to the other side. That side stays dark. One shared
-axis makes the far side as bright as the lamp side. The same cells are the
-bright blotches on a sun-shadowed floor: the hash wavelet keeps a cell
-brighter than its neighbours, and the screen wavelet does not, across a
-small camera move.
+axis makes the far side as bright as the lamp side. The stress hall is the full-picture check, still and moving, at a size where
+a foreground cell is wider than a pixel kernel: mean and p99 against the hash
+wavelet stay inside 1.5 / 10, and the screen path does not flicker ahead of
+the hash path. The shaded floor keeps the hash wavelet's bright cell.
 
-The filter still runs on the whole picture every frame. A moving frame does
-not reuse or hold a filtered frame. Papers, the deviations, and the owner GPU
-commands are in [S80](experiments/S80-screen-denoise.md). Expected cost, not
-measured on lavapipe: the 4070 à-trous column from about 11–15 ms on stress
-and 93–98 ms on Sponza toward about 1.4 ms when the filter is a coherent
-image. One hash find per visible pixel remains. If that find dominates, the
-gain is smaller, and the 5×5 is no longer a hash walk.
+The gather runs for every pixel. The wavelet runs for one thread per visible
+cell, and the dirty hold is the hash kernel's. A moving frame does not reuse
+a filtered picture. Papers, the deviations, and the owner GPU commands are in
+[S80](experiments/S80-screen-denoise.md). Lavapipe does not time the GPU. The
+4070 à-trous column of the earlier screen-space wavelet was the measured cost
+win; this launch is the hash kernel on the visible cells, which that trial
+did not run.

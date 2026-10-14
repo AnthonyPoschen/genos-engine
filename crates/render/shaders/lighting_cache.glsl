@@ -3164,6 +3164,9 @@ const uint LIGHTING_ATROUS_LIST_AT = LIGHTING_ATROUS_MARK_AT + 5u * LIGHTING_CAC
 // is this frame's list decision and the dense-path recount.
 // After the compose words (count, y, z, full, stamps, list, packs, rects); this used to alias LIGHTING_COMPOSE_AT.
 const uint LIGHTING_ATROUS_PPM_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS;
+// One word per slot, past the a-trous meta (391) and the sun block (8). The
+// screen launch elects a single kernel thread here. Nothing else reads it.
+const uint LIGHTING_SCREEN_OWNER_AT = LIGHTING_ATROUS_PPM_AT + 391u + 8u;
 const uint LIGHTING_ATROUS_PREV_AT = LIGHTING_ATROUS_PPM_AT + 1u;
 const uint LIGHTING_ATROUS_BIN_AT = LIGHTING_ATROUS_PREV_AT + 1u;
 const uint LIGHTING_ATROUS_MODE_AT = LIGHTING_ATROUS_BIN_AT + 64u;
