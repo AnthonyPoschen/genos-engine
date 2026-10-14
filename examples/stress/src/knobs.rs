@@ -273,6 +273,11 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             1.0,
             "",
         ),
+        Knob::switch(
+            "lighting_gi_attach_movers",
+            "Attach movers",
+            lighting.gi.attach_movers,
+        ),
         Knob::switch("lighting_probes", "Probes", lighting.probes.enabled),
         Knob::number(
             "lighting_probe_rays",
@@ -448,6 +453,7 @@ pub fn apply_lighting_knob(
         "lighting_gi" => ("gi", on_off(v)),
         "lighting_gi_refresh" => ("gi_refresh", whole.max(1).to_string()),
         "lighting_budget_shift" => ("budget_shift", whole.to_string()),
+        "lighting_gi_attach_movers" => ("gi_attach_movers", on_off(v)),
         "lighting_probes" => ("probes", on_off(v)),
         "lighting_probe_rays" => ("probe_rays", whole.to_string()),
         "lighting_probe_stale" => ("probe_stale", whole.max(1).to_string()),
@@ -526,6 +532,7 @@ mod tests {
         "lighting_gi",
         "lighting_gi_refresh",
         "lighting_budget_shift",
+        "lighting_gi_attach_movers",
         "lighting_probes",
         "lighting_probe_rays",
         "lighting_probe_stale",

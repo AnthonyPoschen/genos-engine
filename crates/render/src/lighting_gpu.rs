@@ -1971,10 +1971,11 @@ impl Gpu {
             block[3] += (n * 200000) as f32;
             sent += 4 * n;
             if lighting_debug_on() {
-                eprintln!("lighting world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(lighting_sc_local_env()), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
+                eprintln!("lighting world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(self.lighting.settings.gi.attach_movers), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
             }
-            // Object-local texels for movers (GIBS): GENOS_LIGHTING_SC_LOCAL=1.
-            if lighting_sc_local_env() {
+            // Object-local texels for movers (GIBS §1.5). The public knob is
+            // gi_attach_movers. Static texels stay on the world lattice.
+            if self.lighting.settings.gi.attach_movers {
                 block[3] += 100000.0;
             }
         }
@@ -2785,10 +2786,6 @@ fn lighting_sc_flags_env() -> u32 {
     })
 }
 
-/// GENOS_LIGHTING_SC_LOCAL: object-local texels, on unless 0.
-fn lighting_sc_local_env() -> bool {
-    std::env::var("GENOS_LIGHTING_SC_LOCAL").map_or(true, |v| v != "0")
-}
 
 /// Vec4 index of the changes block in the work buffer (lighting_common.glsl
 /// lighting_change_at), for `probes` probes, `cache_rays` light cache rays and `kept`

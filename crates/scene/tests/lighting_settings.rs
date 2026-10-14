@@ -16,6 +16,20 @@ fn room() -> &'static str {
 }
 
 #[test]
+fn gi_attach_movers_round_trips() {
+    let mut settings = LightingSettings::default();
+    assert!(settings.gi.attach_movers);
+    settings.set_key("gi_attach_movers", "off").unwrap();
+    assert!(!settings.gi.attach_movers);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!(!parsed.gi.attach_movers);
+    assert_eq!(parsed.preset_label(), "custom");
+    settings.set_key("gi_attach_movers", "on").unwrap();
+    assert!(settings.gi.attach_movers);
+    assert!(settings.set_key("gi_attach_movers", "maybe").is_err());
+}
+
+#[test]
 fn the_engine_settings_trait_reads_and_writes_lighting() {
     let settings = LightingSettings::preset(LightingPreset::Low);
     let text = EngineSettings::to_text(&settings);

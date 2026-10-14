@@ -31,6 +31,7 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          then stress
   --checkpoint NAME      jump here at launch
   --preset NAME          potato, low, medium, or high. Sets GENOS_LIGHTING_PRESET
+  --gi-attach-movers on|off  mover texels follow the object (GENOS_LIGHTING_GI_ATTACH_MOVERS)
   --gpu-times N          print GPU_MS every N frames (GENOS_GPU_TIMES)
   --lighting-debug       print the lighting probe line (GENOS_LIGHTING_DEBUG)
   --unfilled             show the texels view (slots with fewer than 4 sets are dim)
@@ -1194,6 +1195,10 @@ fn options() -> Result<Options, String> {
                     parse_enabled(value).map_err(|err| format!("bad --fps-counter: {err}"))?;
                 } else if let Some(value) = other.strip_prefix("--fps-hz=") {
                     parse_rate(value).map_err(|err| format!("bad --fps-hz: {err}"))?;
+                } else if genos_scene::lighting_flag_needs_value(other).is_some() {
+                    let needs = genos_scene::lighting_flag_needs_value(other).unwrap_or(false);
+                    let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
+                    genos_scene::check_lighting_arg(other, next.as_deref())?;
                 } else {
                     return Err(format!("unknown argument {other}"));
                 }

@@ -100,6 +100,9 @@ const USAGE: &str = "genos-stress [options]
   --trace                   capture the picture after every script command that changes it
   --preset NAME             potato, day-cycle, gi-1bounce, low, medium, high
                             (GENOS_LIGHTING_PRESET is the mirror)
+  --gi-attach-movers on|off store mover cache entries in the object's frame
+                            (GENOS_LIGHTING_GI_ATTACH_MOVERS; GENOS_LIGHTING_SC_LOCAL
+                            is the previous mirror, used only when this is omitted)
   --bounces 0|1|2|unlimited bounce count (GENOS_LIGHTING_BOUNCES)
   --ambient MODE            off, constant, hemisphere, day, or curve
                             (GENOS_LIGHTING_AMBIENT)

@@ -1092,8 +1092,9 @@ uint lighting_movers_count() {
 vec4 lighting_mover(uint m, uint k) {
     return work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + lighting_movers_first() + LIGHTING_MOVER_VEC4 * m + k];
 }
-// Object-local texels (GIBS 2021: surfels keep a transform id and a local
-// position): GENOS_LIGHTING_SC_LOCAL=1.
+// Object-local texels (GIBS 2021 §1.5: a surfel stores a transform id and an
+// object-relative position). Movers only; static geometry stays world-lattice
+// (ADR 0012). The bit is gi_attach_movers, head w / 100000.
 bool lighting_sc_local_on() {
     return lighting_world_mode() == 3u && ((uint(work.v[lighting_change_at()].w) / 100000u) & 1u) != 0u;
 }

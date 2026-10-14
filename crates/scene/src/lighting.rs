@@ -253,6 +253,10 @@ pub struct GiSettings {
     /// `Some` forces the world mode (0 probes, 3 surface cache). `None` follows
     /// [`WorldCacheSettings::enabled`].
     pub world_mode: Option<u32>,
+    /// Surface-cache texels on a moving object are stored in that object's
+    /// frame and transformed each frame. Static geometry stays on the world
+    /// lattice. Off keeps those texels world-anchored.
+    pub attach_movers: bool,
 }
 
 /// Indirect bounces. The count is `0`, `1`, `2`, or [`LIGHTING_BOUNCES_UNLIMITED`].
@@ -483,6 +487,7 @@ impl LightingSettings {
                 refresh_frames: 1,
                 budget_shift: 0,
                 world_mode: None,
+                attach_movers: true,
             },
             bounce: BounceSettings {
                 count: LIGHTING_BOUNCES_UNLIMITED,
@@ -834,6 +839,7 @@ impl LightingSettings {
         let _ = writeln!(out, "gi={}", bit(self.gi.enabled));
         let _ = writeln!(out, "gi_refresh={}", self.gi.refresh_frames);
         let _ = writeln!(out, "budget_shift={}", self.gi.budget_shift);
+        let _ = writeln!(out, "gi_attach_movers={}", bit(self.gi.attach_movers));
         if let Some(mode) = self.gi.world_mode {
             let _ = writeln!(out, "world_mode={mode}");
         }
@@ -978,6 +984,7 @@ impl LightingSettings {
             "gi" => self.gi.enabled = on(value)?,
             "gi_refresh" => self.gi.refresh_frames = num_u32(value)?.max(1),
             "budget_shift" => self.gi.budget_shift = num_u32(value)?.min(7),
+            "gi_attach_movers" => self.gi.attach_movers = on(value)?,
             "world_mode" => self.gi.world_mode = Some(num_u32(value)?.min(3)),
             "bounces" => self.bounce.count = parse_bounces(value)?,
             "probes" => self.probes.enabled = on(value)?,
@@ -1071,6 +1078,8 @@ impl LightingSettings {
         let bounces = std::env::var("GENOS_LIGHTING_BOUNCES").ok();
         let ambient = std::env::var("GENOS_LIGHTING_AMBIENT").ok();
         let time = std::env::var("GENOS_LIGHTING_TIME").ok();
+        let attach = std::env::var("GENOS_LIGHTING_GI_ATTACH_MOVERS").ok();
+        let sc_local = std::env::var("GENOS_LIGHTING_SC_LOCAL").ok();
         let Ok(launch) = resolve_lighting_launch(
             &refs,
             &LightingMirrors {
@@ -1078,6 +1087,8 @@ impl LightingSettings {
                 bounces: bounces.as_deref(),
                 ambient: ambient.as_deref(),
                 time_of_day: time.as_deref(),
+                attach_movers: attach.as_deref(),
+                sc_local: sc_local.as_deref(),
             },
         ) else {
             return;
@@ -1164,6 +1175,9 @@ impl LightingSettings {
         if let Some(mode) = launch.ambient {
             self.ambient.mode = mode;
         }
+        if let Some(attach) = launch.attach_movers {
+            self.gi.attach_movers = attach;
+        }
         self.time_of_day = launch.time_mirror.unwrap_or(clock);
         self.sanitize();
         self.sync_preset_field();
@@ -1228,6 +1242,7 @@ struct LightingLaunch {
     bounces: Option<u32>,
     ambient: Option<AmbientMode>,
     time_mirror: Option<f32>,
+    attach_movers: Option<bool>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1236,6 +1251,9 @@ struct LightingMirrors<'a> {
     bounces: Option<&'a str>,
     ambient: Option<&'a str>,
     time_of_day: Option<&'a str>,
+    attach_movers: Option<&'a str>,
+    /// Previous name of [`Self::attach_movers`]. Used only when that mirror is unset.
+    sc_local: Option<&'a str>,
 }
 
 enum LightingKind {
@@ -1243,6 +1261,7 @@ enum LightingKind {
     Bounces,
     Ambient,
     Time,
+    AttachMovers,
 }
 
 enum LightingFlag {
@@ -1250,6 +1269,7 @@ enum LightingFlag {
     Bounces(u32),
     Ambient(AmbientMode),
     Time(f32),
+    AttachMovers(bool),
 }
 
 /// `Some(true)` when `arg` is a lighting flag that reads the next argument.
@@ -1307,6 +1327,11 @@ fn resolve_lighting_launch(
         } else {
             env.time_of_day.and_then(parse_clock)
         },
+        attach_movers: chosen.attach_movers.or_else(|| {
+            env.attach_movers
+                .and_then(|value| on(value).ok())
+                .or_else(|| env.sc_local.and_then(|value| on(value).ok()))
+        }),
     })
 }
 
@@ -1316,6 +1341,7 @@ struct ChosenLighting {
     bounces: Option<u32>,
     ambient: Option<AmbientMode>,
     time: Option<f32>,
+    attach_movers: Option<bool>,
 }
 
 impl ChosenLighting {
@@ -1325,6 +1351,7 @@ impl ChosenLighting {
             LightingFlag::Bounces(count) => self.bounces = Some(count),
             LightingFlag::Ambient(mode) => self.ambient = Some(mode),
             LightingFlag::Time(hours) => self.time = Some(hours),
+            LightingFlag::AttachMovers(on) => self.attach_movers = Some(on),
         }
     }
 }
@@ -1346,6 +1373,7 @@ fn lighting_kind(name: &str) -> Option<LightingKind> {
         "bounces" => Some(LightingKind::Bounces),
         "ambient" => Some(LightingKind::Ambient),
         "time-of-day" => Some(LightingKind::Time),
+        "gi-attach-movers" => Some(LightingKind::AttachMovers),
         _ => None,
     }
 }
@@ -1381,6 +1409,9 @@ fn parse_lighting_flag(arg: &str, next: Option<&str>) -> Result<Option<LightingF
         }
         LightingKind::Time => LightingFlag::Time(
             parse_clock(value).ok_or_else(|| format!("{flag} {value} is not a time of day"))?,
+        ),
+        LightingKind::AttachMovers => LightingFlag::AttachMovers(
+            on(value).map_err(|_| format!("{flag} {value} is not on or off"))?,
         ),
     };
     Ok(Some(parsed))
@@ -1606,5 +1637,34 @@ mod launch_tests {
         );
         assert!(check_lighting_arg("--ambient=off", None).is_ok());
         assert!(check_lighting_arg("--time-of-day=18:24", None).is_ok());
+    }
+
+    #[test]
+    fn attach_movers_argument_wins_over_both_mirrors() {
+        let mut settings = LightingSettings::default();
+        assert!(settings.gi.attach_movers);
+        let off = resolve_lighting_launch(&["--gi-attach-movers", "off"], &empty()).unwrap();
+        settings.apply_launch(&off);
+        assert!(!settings.gi.attach_movers);
+
+        let mut env = empty();
+        env.attach_movers = Some("off");
+        env.sc_local = Some("1");
+        let from_new = resolve_lighting_launch(&[], &env).unwrap();
+        settings = LightingSettings::default();
+        settings.apply_launch(&from_new);
+        assert!(!settings.gi.attach_movers);
+
+        env.attach_movers = None;
+        env.sc_local = Some("0");
+        let from_old = resolve_lighting_launch(&[], &env).unwrap();
+        settings = LightingSettings::default();
+        settings.apply_launch(&from_old);
+        assert!(!settings.gi.attach_movers);
+
+        let cli = resolve_lighting_launch(&["--gi-attach-movers=on"], &env).unwrap();
+        settings.apply_launch(&cli);
+        assert!(settings.gi.attach_movers);
+        assert!(check_lighting_arg("--gi-attach-movers", Some("maybe")).is_err());
     }
 }
