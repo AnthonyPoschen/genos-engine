@@ -2200,7 +2200,8 @@ float lighting_sc_firefly_sigma() {
 uint lighting_sc_ray_budget() {
     return ckeys.key[LIGHTING_ARGS_AT + 11u];
 }
-// surface_cache.dormant_rays. 0 keeps one sweep in LIGHTING_SC_DORMANT.
+// surface_cache.dormant_rays: whole rays per frame, 0 through 16.
+// 0 keeps one sweep in LIGHTING_SC_DORMANT.
 uint lighting_sc_dormant_rays() {
     return ckeys.key[LIGHTING_ARGS_AT + 12u];
 }

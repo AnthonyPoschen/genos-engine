@@ -116,9 +116,10 @@ const USAGE: &str = "genos-stress [options]
   --surface-cache-ray-budget N
                             cap on cache-round rays; 0 keeps the existing lists
                             (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET)
-  --surface-cache-dormant-rays F
-                            fresh rays a dormant cache entry keeps per frame;
-                            0 keeps one sweep in eight
+  --surface-cache-dormant-rays N
+                            fresh rays per frame for a dormant cache entry, 0..16.
+                            0 keeps one sweep in eight. 1..16 traces one new
+                            16-ray entry every ceil(16 / N) frames
                             (GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS)
   --bounces 0|1|2|unlimited bounce count (GENOS_LIGHTING_BOUNCES)
   --ambient MODE            off, constant, hemisphere, day, or curve

@@ -305,7 +305,7 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             "lighting_surface_cache_dormant_rays",
             "Dormant rays",
             lighting.surface_cache.dormant_rays as f64,
-            (0.0, 64.0),
+            (0.0, 16.0),
             1.0,
             "",
         ),

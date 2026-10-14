@@ -42,8 +42,10 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --surface-cache-ray-budget N
                          cache-round ray cap; 0 keeps the existing lists
                          (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET)
-  --surface-cache-dormant-rays F
-                         dormant floor in rays per frame; 0 is one sweep in eight
+  --surface-cache-dormant-rays N
+                         fresh rays per frame for a dormant cache entry, 0..16.
+                         0 keeps one sweep in eight. 1..16 traces one new
+                         16-ray entry every ceil(16 / N) frames
                          (GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS)
   --gpu-times N          print GPU_MS every N frames (GENOS_GPU_TIMES)
   --lighting-debug       print the lighting probe line (GENOS_LIGHTING_DEBUG)

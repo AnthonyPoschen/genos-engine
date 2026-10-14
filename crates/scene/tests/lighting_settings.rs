@@ -62,6 +62,8 @@ fn surface_cache_blend_and_firefly_sigma_round_trip() {
     let budget = LightingSettings::parse(&settings.to_text()).unwrap();
     assert_eq!(budget.surface_cache.ray_budget, 2048);
     assert_eq!(budget.surface_cache.dormant_rays, 4);
+    settings.set_key("surface_cache.dormant_rays", "20").unwrap();
+    assert_eq!(settings.surface_cache.dormant_rays, 16);
     assert_eq!(budget.preset_label(), "custom");
 }
 

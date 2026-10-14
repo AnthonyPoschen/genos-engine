@@ -403,8 +403,9 @@ pub struct SurfaceCacheSettings {
     pub firefly_sigma: f32,
     /// Cap on rays dispatched in one cache round. `0` keeps the existing lists.
     pub ray_budget: u32,
-    /// Fresh rays a dormant cache entry keeps per frame, in steps of 16.
-    /// `0` keeps the existing one-sweep-in-eight schedule.
+    /// Fresh rays per frame for a dormant cache entry, a whole number from 0 to 16.
+    /// `0` keeps one sweep in eight. `1` through `16` trace one new 16-ray entry
+    /// every `ceil(16 / rays)` frames, which is that many rays per frame.
     pub dormant_rays: u32,
 }
 
@@ -615,6 +616,7 @@ impl LightingSettings {
         } else {
             8.0
         };
+        self.surface_cache.dormant_rays = self.surface_cache.dormant_rays.min(16);
         if let Some(mode) = self.gi.world_mode {
             self.gi.world_mode = Some(mode.min(3));
         }
@@ -1902,6 +1904,10 @@ mod launch_tests {
         settings.apply_launch(&rays);
         assert_eq!(settings.surface_cache.ray_budget, 4096);
         assert_eq!(settings.surface_cache.dormant_rays, 4);
+        let clamped = resolve_lighting_launch(&["--surface-cache-dormant-rays=20"], &empty()).unwrap();
+        settings = LightingSettings::default();
+        settings.apply_launch(&clamped);
+        assert_eq!(settings.surface_cache.dormant_rays, 16);
         assert_eq!(settings.surface_cache.blend, SurfaceCacheBlend::Msme);
     }
 }
