@@ -59,7 +59,9 @@ Page Up and Page Down switch scenes. Keys 1-9 jump checkpoints. Home and 0 reset
 to the active checkpoint. Arrow keys and the wheel step the slider under the
 pointer, or move the highlight in an open dropdown. Enter picks the highlighted
 choice. Escape closes the list. F3 toggles the frame-rate plate. A section title
-folds that group. The fold is remembered in <out>/menu/collapsed.txt. WASD fly, Space
+folds that group. The fold is remembered in <out>/menu/collapsed.txt. The panel
+stays within a third of the window. The scene description is the Info section.
+WASD fly, Space
 up, C or Ctrl down, Shift is faster. The plate shows FPS and frame ms, averaged
 over each 1/rate window (default 4 Hz). It is off until the checkbox, F3, MCP,
 or --fps-counter turns it on.
@@ -87,6 +89,7 @@ const SEC_GI: u32 = 5103;
 const SEC_DENOISE: u32 = 5104;
 const SEC_SHADOW: u32 = 5105;
 const SEC_PERF: u32 = 5106;
+const SEC_INFO: u32 = 5107;
 const CHECKS_PER_ROW: usize = 3;
 
 struct Fold {
@@ -97,6 +100,12 @@ struct Fold {
 }
 
 const FOLDS: &[Fold] = &[
+    Fold {
+        id: SEC_INFO,
+        key: "info",
+        title: "Info",
+        start_collapsed: true,
+    },
     Fold {
         id: SEC_SCENE,
         key: "scene",
@@ -947,13 +956,7 @@ fn view_name(mode: ViewMode) -> &'static str {
 }
 
 fn panel_title(app: &App) -> String {
-    let review = app.entry().review.as_str();
-    let review = if review.len() > 140 {
-        format!("{}…", &review[..140])
-    } else {
-        review.to_string()
-    };
-    format!("{} — {review}", app.entry().name)
+    app.entry().name.clone()
 }
 
 fn index_steps(names: impl IntoIterator<Item = impl Into<String>>) -> Vec<SliderStep> {
@@ -1037,6 +1040,13 @@ fn panel_sections(app: &App, view: ViewMode, fps: &FpsCounterSettings) -> Vec<Pa
         .iter()
         .position(|name| *name == view_name(view))
         .unwrap_or(0) as f64;
+    let info = vec![PanelRow {
+        label: app.entry().review.clone(),
+        buttons: Vec::new(),
+        slider: None,
+        dropdown: None,
+        checks: Vec::new(),
+    }];
     let mut scene = Vec::new();
     if let Some(row) = drop_row(
         "Scene",
@@ -1095,7 +1105,7 @@ fn panel_sections(app: &App, view: ViewMode, fps: &FpsCounterSettings) -> Vec<Pa
     }
     let mut perf = switch_rows_for(app, SEC_PERF);
     perf.push(fps_row(fps));
-    let grouped = [scene, pipeline, direct, gi, denoise, shadows, perf];
+    let grouped = [info, scene, pipeline, direct, gi, denoise, shadows, perf];
     FOLDS
         .iter()
         .zip(grouped)
@@ -1769,6 +1779,7 @@ mod tests {
         assert_eq!(
             titles,
             [
+                "Info",
                 "Scene/View",
                 "Pipeline toggles",
                 "Direct/Lamps",
@@ -1813,8 +1824,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("genos-menu-{}", std::process::id()));
         super::save_menu_folds(&dir, &ui).expect("save");
         let names = super::load_menu_folds(&dir).expect("load");
+        assert!(names.iter().any(|name| name == "info"));
         assert!(names.iter().any(|name| name == "direct"));
         assert!(names.iter().any(|name| name == "gi"));
+        let info = sections
+            .iter()
+            .find(|section| section.title == "Info")
+            .unwrap();
+        assert!(info.collapsed);
+        assert_eq!(info.rows[0].label, app.entry().review);
         assert!(names.iter().all(|name| name != "scene"));
         assert!(names.iter().all(|name| name != "pipeline"));
         let _ = std::fs::remove_dir_all(&dir);

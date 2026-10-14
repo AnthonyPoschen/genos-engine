@@ -59,6 +59,11 @@ pub(crate) fn blots_small(text: &str, x: f32, y: f32) -> Vec<Blot> {
 
 fn wrap(text: &str, max_width: Option<f32>) -> Vec<String> {
     let limit = max_width.unwrap_or(f32::INFINITY);
+    let max_chars = if limit.is_finite() {
+        ((limit / CELL_W).floor() as usize).max(1)
+    } else {
+        usize::MAX
+    };
     let words: Vec<&str> = text.split_whitespace().collect();
     if words.is_empty() {
         return Vec::new();
@@ -66,23 +71,38 @@ fn wrap(text: &str, max_width: Option<f32>) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
     for word in words {
-        let trial = if current.is_empty() {
-            word.to_string()
-        } else {
-            format!("{current} {word}")
-        };
-        let width = trial.chars().count() as f32 * CELL_W;
-        if width <= limit || current.is_empty() {
-            current = trial;
-        } else {
-            lines.push(std::mem::take(&mut current));
-            current = word.to_string();
+        for piece in break_word(word, max_chars) {
+            let trial = if current.is_empty() {
+                piece.clone()
+            } else {
+                format!("{current} {piece}")
+            };
+            let width = trial.chars().count() as f32 * CELL_W;
+            if width <= limit || current.is_empty() {
+                current = trial;
+            } else {
+                lines.push(std::mem::take(&mut current));
+                current = piece;
+            }
         }
     }
     if !current.is_empty() {
         lines.push(current);
     }
     lines
+}
+
+/// A token longer than the line is split so it cannot widen the line.
+fn break_word(word: &str, max_chars: usize) -> Vec<String> {
+    let count = word.chars().count();
+    if count <= max_chars {
+        return vec![word.to_string()];
+    }
+    let chars: Vec<char> = word.chars().collect();
+    chars
+        .chunks(max_chars)
+        .map(|chunk| chunk.iter().collect())
+        .collect()
 }
 
 fn stamp(out: &mut Vec<Blot>, ch: char, x: f32, y: f32, pixel: f32) {

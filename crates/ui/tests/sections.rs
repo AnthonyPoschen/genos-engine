@@ -69,7 +69,7 @@ fn a_section_stays_folded_on_the_next_frame() {
 
 #[test]
 fn toggles_share_column_width_and_a_long_label_wraps() {
-    let sections = vec![        PanelSection::new(
+    let sections = vec![PanelSection::new(
         10,
         "Pipeline toggles",
         false,
@@ -97,7 +97,14 @@ fn toggles_share_column_width_and_a_long_label_wraps() {
             ],
         }],
     )];
-    let frame = draw(&mut State::default(), &sections, Pointer::default());
+    let frame = button_panel_sections(
+        &mut State::default(),
+        "stress",
+        &sections,
+        [1920.0, 1080.0],
+        &Camera::opening(),
+        Pointer::default(),
+    );
     let rect = |id: u32| {
         frame
             .shown
@@ -114,7 +121,65 @@ fn toggles_share_column_width_and_a_long_label_wraps() {
     assert!(adaptive.x > direct.x + direct.w - 1.0);
     assert!(gi.x > adaptive.x + adaptive.w - 1.0);
     assert!(adaptive.h > direct.h + 8.0);
-    assert!(adaptive.w < 180.0);
+    assert!(adaptive.w < 220.0);
+    let panel = frame
+        .shown
+        .iter()
+        .find(|shown| shown.id == u32::MAX - 4095)
+        .unwrap();
+    assert!(panel.rect.w <= 1920.0 / 3.0 + 0.5);
+}
+
+#[test]
+fn the_panel_stays_within_a_third_and_wraps_every_line() {
+    let sentence = "Crytek Sponza in metres with Pestana PBR textures. The cache cell size is 0.125 m. Look down the atrium along the colonnade.";
+    let sections = vec![PanelSection::new(
+        10,
+        "Info",
+        false,
+        vec![PanelRow {
+            label: sentence.into(),
+            buttons: Vec::new(),
+            slider: None,
+            dropdown: None,
+            checks: Vec::new(),
+        }],
+    )];
+    let viewport = [1024.0, 832.0];
+    let title = "SPONZA-AND-ONE-LONG-WORD-WITHOUT-ANY-SPACES-THAT-MUST-NOT-STRETCH-THE-PANEL";
+    let frame = button_panel_sections(
+        &mut State::default(),
+        title,
+        &sections,
+        viewport,
+        &Camera::opening(),
+        Pointer::default(),
+    );
+    let panel = frame
+        .shown
+        .iter()
+        .find(|shown| shown.id == u32::MAX - 4095)
+        .expect("panel");
+    assert!(panel.rect.w <= viewport[0] / 3.0 + 0.5);
+    let heading = frame
+        .shown
+        .iter()
+        .find(|shown| shown.text.as_deref() == Some(title))
+        .expect("title");
+    assert!(heading.rect.h > 16.0);
+    assert!(heading.rect.w <= panel.rect.w);
+    let body = frame
+        .shown
+        .iter()
+        .find(|shown| {
+            shown
+                .text
+                .as_deref()
+                .is_some_and(|text| text.contains("atrium"))
+        })
+        .expect("description");
+    assert!(body.rect.h > 16.0);
+    assert!(body.rect.x + body.rect.w <= panel.rect.x + panel.rect.w + 0.5);
 }
 
 #[test]

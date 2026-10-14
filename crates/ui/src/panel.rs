@@ -516,7 +516,8 @@ pub fn button_panel_sections(
             visible.extend(section.rows.iter().cloned());
         }
     }
-    let panel = panel_tree(state, title, &visible, sections, None);
+    let max_width = viewport[0] / 3.0;
+    let panel = panel_tree(state, title, &visible, sections, Some(max_width));
     finish_panel(state, panel, &visible, &ids, viewport, camera, pointer)
 }
 
@@ -551,9 +552,10 @@ fn panel_tree(
             max: max_width,
         };
     }
+    let inner = max_width.map(|width| (width - 16.0).max(text::CELL_W));
     panel
         .children
-        .push(capped_label(own + 1, title, fill, max_width));
+        .push(capped_label(own + 1, title, fill, inner));
     if sections.is_empty() {
         for (index, item) in rows.iter().enumerate() {
             panel.children.push(row_node(
@@ -562,19 +564,26 @@ fn panel_tree(
                 fill,
                 palette,
                 None,
+                None,
             ));
         }
         return panel;
     }
+    let columns = inner.map(check_columns).unwrap_or(CHECK_COLUMNS);
+    let cell = inner
+        .map(|width| check_cell(width, columns))
+        .unwrap_or(CHECK_CELL);
     let mut row_index = 0usize;
     for section in sections {
-        panel.children.push(section_header(section, state, palette));
+        panel
+            .children
+            .push(section_header(section, state, palette, inner));
         if state.section_collapsed(section.id) {
             continue;
         }
         for item in &section.rows {
             if check_grid(item) {
-                for chunk in item.checks.chunks(CHECK_COLUMNS) {
+                for chunk in item.checks.chunks(columns) {
                     let mut part = item.clone();
                     part.checks = chunk.to_vec();
                     panel.children.push(row_node(
@@ -582,7 +591,8 @@ fn panel_tree(
                         &part,
                         fill,
                         palette,
-                        Some(CHECK_CELL),
+                        Some(cell),
+                        inner,
                     ));
                     row_index += 1;
                 }
@@ -593,6 +603,7 @@ fn panel_tree(
                     fill,
                     palette,
                     None,
+                    inner,
                 ));
                 row_index += 1;
             }
@@ -601,18 +612,40 @@ fn panel_tree(
     panel
 }
 
-fn section_header(section: &PanelSection, state: &State, palette: Option<Palette>) -> Node {
+fn check_columns(inner: f32) -> usize {
+    let cols = ((inner + 4.0) / (CHECK_CELL + 4.0)).floor() as usize;
+    cols.clamp(2, CHECK_COLUMNS)
+}
+
+fn check_cell(inner: f32, columns: usize) -> f32 {
+    let gaps = 4.0 * columns.saturating_sub(1) as f32;
+    ((inner - gaps) / columns as f32).max(text::CELL_W)
+}
+
+fn section_header(
+    section: &PanelSection,
+    state: &State,
+    palette: Option<Palette>,
+    max_width: Option<f32>,
+) -> Node {
     let mark = if state.section_collapsed(section.id) {
         "+"
     } else {
         "-"
     };
-    control(
+    let mut node = control(
         section.id,
         &format!("{mark} {}", section.title),
         Action::Press(section.id),
         palette,
-    )
+    );
+    if let Some(max_width) = max_width {
+        node.width = Sizing::Fit {
+            min: 0.0,
+            max: max_width,
+        };
+    }
+    node
 }
 
 fn row_node(
@@ -620,11 +653,18 @@ fn row_node(
     item: &PanelRow,
     fill: [f32; 3],
     palette: Option<Palette>,
-    _budget: Option<f32>,
+    cell: Option<f32>,
+    inner: Option<f32>,
 ) -> Node {
+    let fit = inner.map(|inner| fit_row(item, inner));
     let mut children = Vec::new();
     if !item.label.is_empty() {
-        children.push(label(at + 1, &item.label, fill));
+        children.push(capped_label(
+            at + 1,
+            &item.label,
+            fill,
+            fit.as_ref().map(|fit| fit.label_max),
+        ));
     }
     for button in &item.buttons {
         let mut node = control(button.id, &button.text, Action::Press(button.id), palette);
@@ -636,21 +676,133 @@ fn row_node(
         children.push(node);
     }
     if let Some(bar) = &item.slider {
+        let width = fit
+            .as_ref()
+            .map(|fit| fit.slider_w)
+            .unwrap_or(slider_width(bar));
         children.push(sized_slider(
             bar.id,
             palette,
-            slider_width(bar),
-            slider_height(bar),
+            width,
+            slider_height_at(bar, width),
         ));
-        children.push(label(at + 2, &bar.text, fill));
+        children.push(capped_label(
+            at + 2,
+            &bar.text,
+            fill,
+            fit.as_ref().map(|fit| fit.value_max),
+        ));
     }
     if let Some(drop) = &item.dropdown {
-        children.push(dropdown_box(drop, palette));
+        children.push(dropdown_box(
+            drop,
+            palette,
+            fit.as_ref().map(|fit| fit.drop_w),
+        ));
     }
     for check in &item.checks {
-        children.push(check_node(check, fill, palette, _budget));
+        children.push(check_node(check, fill, palette, cell));
     }
-    row(at, children, fill)
+    let mut node = row(at, children, fill);
+    if let Some(inner) = inner {
+        node.width = Sizing::Fit {
+            min: 0.0,
+            max: inner,
+        };
+    }
+    node
+}
+
+struct RowFit {
+    label_max: f32,
+    slider_w: f32,
+    value_max: f32,
+    drop_w: f32,
+}
+
+fn fit_row(item: &PanelRow, inner: f32) -> RowFit {
+    let gap = 4.0;
+    let has_label = !item.label.is_empty();
+    let has_value = item.slider.as_ref().is_some_and(|bar| !bar.text.is_empty());
+    let parts = usize::from(has_label)
+        + usize::from(item.slider.is_some())
+        + usize::from(has_value)
+        + usize::from(item.dropdown.is_some())
+        + item.buttons.len()
+        + item.checks.len();
+    let gaps = gap * parts.saturating_sub(1) as f32;
+    let value_natural = item
+        .slider
+        .as_ref()
+        .map(|bar| text::measure(&bar.text, None).0)
+        .unwrap_or(0.0);
+    let value_max = if has_value {
+        value_natural.min(inner * 0.4).max(text::CELL_W)
+    } else {
+        0.0
+    };
+    let mut slider_w = item.slider.as_ref().map(slider_width).unwrap_or(0.0);
+    let mut drop_w = item.dropdown.as_ref().map(dropdown_width).unwrap_or(0.0);
+    let label_natural = if has_label {
+        text::measure(&item.label, None).0
+    } else {
+        0.0
+    };
+    let checks_w: f32 = item
+        .checks
+        .iter()
+        .map(|check| text::measure(&check.text, None).0 + 30.0)
+        .sum();
+    let buttons_w: f32 = item
+        .buttons
+        .iter()
+        .map(|button| text::measure(&button.text, None).0 + 8.0)
+        .sum();
+    let used = label_natural + slider_w + drop_w + value_max + checks_w + buttons_w + gaps;
+    if used <= inner {
+        return RowFit {
+            label_max: label_natural.max(text::CELL_W),
+            slider_w,
+            value_max: value_natural.max(if has_value { text::CELL_W } else { 0.0 }),
+            drop_w,
+        };
+    }
+    let label_floor = if has_label {
+        (text::CELL_W * 8.0).min(inner * 0.45)
+    } else {
+        0.0
+    };
+    let controls = (inner - label_floor - value_max - checks_w - buttons_w - gaps).max(72.0);
+    if item.slider.is_some() && item.dropdown.is_some() {
+        slider_w = (controls * 0.55).clamp(72.0, slider_w.max(72.0));
+        drop_w = (controls - slider_w).max(96.0);
+    } else if item.slider.is_some() {
+        slider_w = controls.min(slider_w).max(72.0);
+    } else if item.dropdown.is_some() {
+        drop_w = controls.min(drop_w.max(96.0)).max(96.0);
+    }
+    let mut label_max =
+        (inner - slider_w - drop_w - value_max - checks_w - buttons_w - gaps).max(text::CELL_W);
+    let mut sum = label_max + slider_w + drop_w + value_max + checks_w + buttons_w + gaps;
+    if sum > inner && slider_w > 48.0 {
+        let cut = (sum - inner).min(slider_w - 48.0);
+        slider_w -= cut;
+        sum -= cut;
+    }
+    if sum > inner && drop_w > 96.0 {
+        let cut = (sum - inner).min(drop_w - 96.0);
+        drop_w -= cut;
+        sum -= cut;
+    }
+    if sum > inner {
+        label_max = (label_max - (sum - inner)).max(text::CELL_W);
+    }
+    RowFit {
+        label_max,
+        slider_w,
+        value_max,
+        drop_w,
+    }
 }
 
 fn check_grid(item: &PanelRow) -> bool {
@@ -661,8 +813,15 @@ fn check_grid(item: &PanelRow) -> bool {
         && item.label.is_empty()
 }
 
-fn capped_label(id: u32, text: &str, fill: [f32; 3], _max_width: Option<f32>) -> Node {
-    label(id, text, fill)
+fn capped_label(id: u32, text: &str, fill: [f32; 3], max_width: Option<f32>) -> Node {
+    let mut node = label(id, text, fill);
+    if let Some(max_width) = max_width {
+        node.width = Sizing::Fit {
+            min: 0.0,
+            max: max_width,
+        };
+    }
+    node
 }
 
 fn finish_panel(
@@ -928,8 +1087,11 @@ fn push_check(out: &mut Vec<Paint>, rect: Rect, on: bool) {
     }
 }
 
-fn dropdown_box(drop: &PanelDropdown, palette: Option<Palette>) -> Node {
-    let width = dropdown_width(drop);
+fn dropdown_box(drop: &PanelDropdown, palette: Option<Palette>, max_width: Option<f32>) -> Node {
+    let mut width = dropdown_width(drop);
+    if let Some(max_width) = max_width {
+        width = width.min(max_width).max(96.0);
+    }
     let mut node = Node::new(drop.id);
     node.pad = Pad {
         left: 6.0,
@@ -1193,11 +1355,10 @@ fn slider_width(bar: &PanelSlider) -> f32 {
     }
 }
 
-fn slider_height(bar: &PanelSlider) -> f32 {
+fn slider_height_at(bar: &PanelSlider, width: f32) -> f32 {
     if bar.steps.is_empty() {
         return SLIDER_H;
     }
-    let width = slider_width(bar);
     let rows = slider::label_rows(&bar.steps, SLIDER_INSET, width - SLIDER_INSET).max(1);
     SLIDER_H + rows as f32 * text::SMALL_LINE + 2.0
 }
