@@ -154,6 +154,10 @@ pub enum InputCode {
     key_alt_right = 165,
     /// The key left of 1 on a US keyboard. Windows virtual key OEM 3.
     key_grave = 192,
+    /// `[` on a US keyboard. Windows virtual key OEM 4.
+    key_left_bracket = 219,
+    /// `]` on a US keyboard. Windows virtual key OEM 6.
+    key_right_bracket = 221,
 }
 
 pub fn name(code: InputCode) -> &'static str {
@@ -307,6 +311,8 @@ pub fn name(code: InputCode) -> &'static str {
         InputCode::key_alt_left => "key_alt_left",
         InputCode::key_alt_right => "key_alt_right",
         InputCode::key_grave => "key_grave",
+        InputCode::key_left_bracket => "key_left_bracket",
+        InputCode::key_right_bracket => "key_right_bracket",
     }
 }
 
@@ -461,6 +467,8 @@ pub fn parse(name: &str) -> Option<InputCode> {
         "key_alt_left" => InputCode::key_alt_left,
         "key_alt_right" => InputCode::key_alt_right,
         "key_grave" => InputCode::key_grave,
+        "key_left_bracket" => InputCode::key_left_bracket,
+        "key_right_bracket" => InputCode::key_right_bracket,
         _ => return None,
     })
 }

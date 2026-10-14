@@ -83,6 +83,34 @@ impl KeyBindings {
                         },
                     ],
                 ),
+                action(
+                    "tab_next",
+                    &[Chord {
+                        code: InputCode::key_right_bracket,
+                        shift: false,
+                    }],
+                ),
+                action(
+                    "tab_prev",
+                    &[Chord {
+                        code: InputCode::key_left_bracket,
+                        shift: false,
+                    }],
+                ),
+                action(
+                    "tab_focus_next",
+                    &[Chord {
+                        code: InputCode::key_tab,
+                        shift: false,
+                    }],
+                ),
+                action(
+                    "tab_focus_prev",
+                    &[Chord {
+                        code: InputCode::key_tab,
+                        shift: true,
+                    }],
+                ),
             ],
         }
     }
@@ -179,6 +207,9 @@ fn action(name: &str, chords: &[Chord]) -> ActionKeys {
 fn chord_label(chord: &Chord) -> String {
     let word = match chord.code {
         InputCode::key_grave => "grave".to_string(),
+        InputCode::key_left_bracket => "left bracket".to_string(),
+        InputCode::key_right_bracket => "right bracket".to_string(),
+        InputCode::key_tab => "tab".to_string(),
         InputCode::key_f => "F".to_string(),
         InputCode::key_u => "U".to_string(),
         InputCode::key_f1 => "F1".to_string(),
@@ -238,6 +269,12 @@ mod tests {
         assert!(keys.pressed(&press(InputCode::key_f8, true), "unfilled_tint"));
         assert_eq!(keys.hint("unfilled"), "U or F8");
         assert_eq!(keys.hint("unfilled_tint"), "shift-U or shift-F8");
+        assert!(keys.pressed(&press(InputCode::key_right_bracket, false), "tab_next"));
+        assert!(keys.pressed(&press(InputCode::key_left_bracket, false), "tab_prev"));
+        assert!(keys.pressed(&press(InputCode::key_tab, false), "tab_focus_next"));
+        assert!(!keys.pressed(&press(InputCode::key_tab, false), "tab_focus_prev"));
+        assert!(keys.pressed(&press(InputCode::key_tab, true), "tab_focus_prev"));
+        assert!(!keys.pressed(&press(InputCode::key_tab, true), "tab_focus_next"));
     }
 
     #[test]

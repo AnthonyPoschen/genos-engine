@@ -32,6 +32,12 @@ mod tests {
         assert_eq!(parse("key_grave"), Some(InputCode::key_grave));
         assert_eq!(name(InputCode::key_grave), "key_grave");
         assert_eq!(device::from_evdev(41), Some(InputCode::key_grave));
+        assert_eq!(InputCode::key_left_bracket as u16, 219);
+        assert_eq!(InputCode::key_right_bracket as u16, 221);
+        assert_eq!(parse("key_left_bracket"), Some(InputCode::key_left_bracket));
+        assert_eq!(name(InputCode::key_right_bracket), "key_right_bracket");
+        assert_eq!(device::from_evdev(26), Some(InputCode::key_left_bracket));
+        assert_eq!(device::from_evdev(27), Some(InputCode::key_right_bracket));
     }
 
     fn from_letter_evdev() -> InputCode {

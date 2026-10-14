@@ -61,10 +61,15 @@ to the active checkpoint. Arrow keys and the wheel step the slider under the
 pointer, or move the highlight in an open dropdown. Enter picks the highlighted
 choice. Escape closes the list. Grave hides the menu. Grave again shows it.
 F1 is the same key. The title bar hide button hides it. A menu tab in the
-top-left corner shows it. F toggles the frame-rate plate. F3 is the same key. A section title
-folds that group. The fold is remembered in <out>/menu/collapsed.txt. The groups
-are debug/lighting/menu.txt. GENOS_MENU_LAYOUT points at another file. The panel
-stays within a third of the window. The scene description is the Info section.
+top-left corner shows it. ] and [ change the page. Tab and shift-Tab do that
+while the pointer is over the menu. F toggles the frame-rate plate. F3 is the
+same key. A section title folds that group. The fold is remembered in
+<out>/menu/collapsed.txt. The open page is remembered in <out>/menu/tab.txt.
+The groups are debug/lighting/menu.txt. A section key of - has no fold.
+GENOS_MENU_LAYOUT points at another file. The panel stays within a third of
+the window. The pages are Scene/View, Pipeline, Direct/Lamps, GI, Denoise,
+Shadows/Ambient, Perf, and Info. Direct and GI keep folds because those pages
+are tall.
 WASD fly, Space
 up, C or Ctrl down, Shift is faster. The plate shows FPS and frame ms, averaged
 over each 1/rate window (default 4 Hz). It is off until the checkbox, F or F3, MCP,
@@ -214,6 +219,9 @@ fn run() -> Result<(), String> {
             ui.fold_section(fold.id, names.iter().any(|name| name == &fold.key));
         }
     }
+    if let Some(name) = load_menu_tab(&opts.out) {
+        ui.select_tab(strip_id(0), tab_id(&name));
+    }
     let mut input = InputSystem::new();
     let controls = character_controller();
     let keys = debug_keys()?;
@@ -257,6 +265,8 @@ fn run() -> Result<(), String> {
         )?;
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
+        let page_keys = !camera.captured && menu_open;
+        let over_menu = ui.panel_hovered();
         let pointer = Pointer {
             x: frame.pointer_x,
             y: frame.pointer_y,
@@ -270,8 +280,12 @@ fn run() -> Result<(), String> {
                     || input.keyboard.pressed(InputCode::key_up)),
             key_activate: !camera.captured && input.keyboard.pressed(InputCode::key_enter),
             key_dismiss: !camera.captured && input.keyboard.pressed(InputCode::key_escape),
-            tab_prev: false,
-            tab_next: false,
+            tab_prev: page_keys
+                && (keys.pressed(&input, "tab_prev")
+                    || (over_menu && keys.pressed(&input, "tab_focus_prev"))),
+            tab_next: page_keys
+                && (keys.pressed(&input, "tab_next")
+                    || (over_menu && keys.pressed(&input, "tab_focus_next"))),
         };
         let (paints, look_capture) = if opts.headless {
             (Vec::new(), true)
@@ -308,6 +322,8 @@ fn run() -> Result<(), String> {
                             menu_open = false;
                         } else if folds.iter().any(|fold| fold.id == id) {
                             save_menu_folds(&opts.out, &ui, &folds)?;
+                        } else if let Some(name) = tab_title(&menu, id) {
+                            save_menu_tab(&opts.out, name)?;
                         }
                     }
                     _ => {}
@@ -1095,18 +1111,22 @@ fn panel_blocks(
     let mut strip: Option<PanelTabs> = None;
     let mut strip_index = 0usize;
     for section in sections {
-        let built = PanelSection::new(
-            section_id(&section.key),
-            section.title,
-            section.collapsed,
-            section.rows,
-        );
+        let block = if section.key == "-" {
+            PanelBlock::Rows(section.rows)
+        } else {
+            PanelBlock::Section(PanelSection::new(
+                section_id(&section.key),
+                section.title,
+                section.collapsed,
+                section.rows,
+            ))
+        };
         match section.tab {
             None => {
                 if let Some(tabs) = strip.take() {
                     blocks.push(PanelBlock::Tabs(tabs));
                 }
-                blocks.push(PanelBlock::Section(built));
+                blocks.push(block);
             }
             Some(name) => {
                 if strip.is_none() {
@@ -1118,12 +1138,12 @@ fn panel_blocks(
                 }
                 let tabs = strip.as_mut().expect("strip");
                 if let Some(tab) = tabs.tabs.iter_mut().find(|tab| tab.title == name) {
-                    tab.blocks.push(PanelBlock::Section(built));
+                    tab.blocks.push(block);
                 } else {
                     tabs.tabs.push(PanelTab {
                         id: tab_id(&name),
                         title: name,
-                        blocks: vec![PanelBlock::Section(built)],
+                        blocks: vec![block],
                     });
                 }
             }
@@ -1156,11 +1176,15 @@ fn setting_piece(
         })),
         "hint" => Some(Piece::Row(PanelRow {
             label: format!(
-                "{} hides. {} plate. {} count. {} tint.",
+                "{} hides. {} plate. {} count. {} tint. {} or {} next page. {} or {} back.",
                 keys.hint("menu"),
                 keys.hint("fps"),
                 keys.hint("unfilled"),
-                keys.hint("unfilled_tint")
+                keys.hint("unfilled_tint"),
+                keys.hint("tab_next"),
+                keys.hint("tab_focus_next"),
+                keys.hint("tab_prev"),
+                keys.hint("tab_focus_prev")
             ),
             buttons: Vec::new(),
             slider: None,
@@ -1219,6 +1243,17 @@ fn menu_fold_path(out: &Path) -> PathBuf {
     out.join("menu").join("collapsed.txt")
 }
 
+fn menu_tab_path(out: &Path) -> PathBuf {
+    out.join("menu").join("tab.txt")
+}
+
+fn tab_title<'a>(lines: &'a [MenuLine], id: u32) -> Option<&'a str> {
+    lines.iter().find_map(|line| {
+        let name = line.tab.as_deref()?;
+        (tab_id(name) == id).then_some(name)
+    })
+}
+
 fn load_menu_folds(out: &Path) -> Option<Vec<String>> {
     let text = std::fs::read_to_string(menu_fold_path(out)).ok()?;
     Some(
@@ -1243,6 +1278,22 @@ fn save_menu_folds(out: &Path, ui: &State, folds: &[MenuFold]) -> Result<(), Str
         }
     }
     std::fs::write(path, body).map_err(|err| err.to_string())
+}
+
+fn load_menu_tab(out: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(menu_tab_path(out)).ok()?;
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+}
+
+fn save_menu_tab(out: &Path, name: &str) -> Result<(), String> {
+    let path = menu_tab_path(out);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    std::fs::write(path, format!("# selected menu tab\n{name}\n")).map_err(|err| err.to_string())
 }
 
 fn drop_knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
@@ -1884,38 +1935,64 @@ mod tests {
         let menu = super::load_menu_layout().expect("layout");
         let keys = genos_input::KeyBindings::builtin();
         let blocks = super::panel_blocks(&app, ViewMode::Full, &fps, &menu, &keys);
-        match &blocks[0] {
-            genos_ui::PanelBlock::Section(section) => {
-                assert_eq!(section.title, "Info");
-                assert!(section.collapsed);
-                assert_eq!(section.rows[0].label, app.entry().review);
-            }
-            genos_ui::PanelBlock::Tabs(_) => panic!("info sits outside the tabs"),
-            genos_ui::PanelBlock::Rows(_) => panic!("info sits outside the tabs"),
-        }
-        match &blocks[1] {
-            genos_ui::PanelBlock::Section(section) => assert_eq!(section.title, "Scene/View"),
-            genos_ui::PanelBlock::Tabs(_) => panic!("scene sits outside the tabs"),
-            genos_ui::PanelBlock::Rows(_) => panic!("scene sits outside the tabs"),
-        }
-        let tabs = match &blocks[2] {
+        let tabs = match &blocks[0] {
             genos_ui::PanelBlock::Tabs(tabs) => tabs,
-            genos_ui::PanelBlock::Section(_) => panic!("the third block is the tab strip"),
-            genos_ui::PanelBlock::Rows(_) => panic!("the third block is the tab strip"),
+            genos_ui::PanelBlock::Section(_) | genos_ui::PanelBlock::Rows(_) => {
+                panic!("the menu is one tab strip")
+            }
         };
         let titles: Vec<&str> = tabs.tabs.iter().map(|tab| tab.title.as_str()).collect();
-        assert_eq!(titles, ["Direct", "GI", "Denoise", "Shade", "Perf"]);
-        let direct = tabs.tabs.iter().find(|tab| tab.title == "Direct").unwrap();
+        assert_eq!(
+            titles,
+            [
+                "Scene/View",
+                "Pipeline",
+                "Direct/Lamps",
+                "GI",
+                "Denoise",
+                "Shadows/Ambient",
+                "Perf",
+                "Info"
+            ]
+        );
+        let scene = tabs
+            .tabs
+            .iter()
+            .find(|tab| tab.title == "Scene/View")
+            .unwrap();
+        assert!(matches!(scene.blocks[0], genos_ui::PanelBlock::Rows(_)));
+        let direct = tabs
+            .tabs
+            .iter()
+            .find(|tab| tab.title == "Direct/Lamps")
+            .unwrap();
         assert!(direct.blocks.iter().any(|block| matches!(
             block,
-            genos_ui::PanelBlock::Section(section) if section.rows.iter().any(|row| {
-                row.checks.iter().any(|check| check.text == "Direct light")
-            })
+            genos_ui::PanelBlock::Section(section)
+                if section.title == "Lamps"
+                    && !section.collapsed
+                    && section.rows.iter().any(|row| row.label == "Max lights")
         )));
+        let gi = tabs.tabs.iter().find(|tab| tab.title == "GI").unwrap();
+        assert!(gi.blocks.iter().any(|block| matches!(
+            block,
+            genos_ui::PanelBlock::Section(section) if section.title == "Probes" && !section.collapsed
+        )));
+        assert!(gi.blocks.iter().any(|block| matches!(
+            block,
+            genos_ui::PanelBlock::Section(section)
+                if section.title == "World cache" && section.collapsed
+        )));
+        let info = tabs.tabs.iter().find(|tab| tab.title == "Info").unwrap();
+        assert!(matches!(
+            &info.blocks[0],
+            genos_ui::PanelBlock::Rows(rows) if rows[0].label == app.entry().review
+        ));
         let flat = super::panel_rows(&app, ViewMode::Full, &fps);
         assert!(flat.iter().any(|row| row.label == "Bounce count"));
         assert!(flat.iter().any(|row| row.label == "Shadow cell cache"));
         let folds = super::menu_folds(&menu);
+        assert!(folds.iter().all(|fold| fold.key != "-"));
         let mut ui = genos_ui::State::default();
         for fold in &folds {
             ui.fold_section(fold.id, fold.collapsed);
@@ -1923,9 +2000,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("genos-menu-{}", std::process::id()));
         super::save_menu_folds(&dir, &ui, &folds).expect("save");
         let names = super::load_menu_folds(&dir).expect("load");
-        assert!(names.iter().any(|name| name == "info"));
-        assert!(names.iter().all(|name| name != "scene"));
-        assert!(names.iter().all(|name| name != "direct"));
+        assert!(names.iter().any(|name| name == "world"));
+        assert!(names.iter().all(|name| name != "direct" && name != "gi"));
+        super::save_menu_tab(&dir, "GI").expect("tab");
+        assert_eq!(super::load_menu_tab(&dir).as_deref(), Some("GI"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1938,6 +2016,8 @@ mod tests {
         assert!(super::USAGE.contains("F toggles"));
         assert!(super::USAGE.contains("F3"));
         assert!(super::USAGE.contains("GENOS_DEBUG_KEYS"));
+        assert!(super::USAGE.contains("] and ["));
+        assert!(super::USAGE.contains("tab.txt"));
         assert!(super::USAGE.contains("GENOS_FPS_COUNTER"));
     }
 }

@@ -293,6 +293,8 @@ pub fn gamepad_button_index(code: InputCode) -> Option<usize> {
 pub fn from_evdev(code: u32) -> Option<InputCode> {
     Some(match code {
         1 => InputCode::key_escape,
+        26 => InputCode::key_left_bracket,
+        27 => InputCode::key_right_bracket,
         41 => InputCode::key_grave,
         14 => InputCode::key_backspace,
         15 => InputCode::key_tab,

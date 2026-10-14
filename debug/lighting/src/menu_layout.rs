@@ -1,7 +1,8 @@
 //! The debug menu is a table. Tabs and folds come from the lines, not from code.
 //!
 //! A line is `tab | section key | title | open or closed | setting`.
-//! A tab of `-` sits outside the tab strip. Blank lines and `#` comments are skipped.
+//! A tab of `-` sits outside the tab strip. A section key of `-` is rows on
+//! that tab with no fold. Blank lines and `#` comments are skipped.
 
 /// One setting in the menu table.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +90,9 @@ pub fn parse_menu_layout(text: &str) -> Result<Vec<MenuLine>, String> {
 pub fn menu_folds(lines: &[MenuLine]) -> Vec<MenuFold> {
     let mut folds = Vec::new();
     for line in lines {
+        if line.section == "-" {
+            continue;
+        }
         if folds.iter().any(|fold: &MenuFold| fold.key == line.section) {
             continue;
         }
