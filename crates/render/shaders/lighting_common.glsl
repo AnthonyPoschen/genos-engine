@@ -246,15 +246,6 @@ bool lighting_surface(uvec2 p, out vec3 pos, out vec3 n, out vec3 albedo, out bo
     return true;
 }
 
-// Geometric cache axis packed in flag bits 1..3. 0 when the pixel is empty.
-// A two-sided back face stores the opposite axis, so the front and the back
-// do not share a 12.5 cm cell. The shading normal is not this value.
-uint lighting_geo_axis(uvec2 p) {
-    uvec4 g = gbuf.px[p.y * pc.dims.x + p.x];
-    vec4 a = unpackUnorm4x8(g.z);
-    return (uint(a.a * 255.0 + 0.5) >> 1u) & 7u;
-}
-
 // ---- Tracer interface (gi-v2-design.md "Tracer interface") ---------------------
 // Software tracer: the analytic shapes (exact, scene_rays.glsl) and the mesh SDF
 // instances (mesh_field.glsl). Call one of these at most once per shader.

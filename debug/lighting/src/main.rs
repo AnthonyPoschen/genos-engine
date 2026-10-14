@@ -40,7 +40,10 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --unfilled             show the texels view (slots with fewer than 4 sets are dim)
   --full-effort          preset high, unless --preset is set, and compose every frame
                          (GENOS_LIGHTING_COMPOSE_ALL)
-  --denoise-screen on|off screen wavelet (GENOS_LIGHTING_DENOISE_SCREEN). On for high
+  --denoise-launch hash|screen
+                         picture wavelet (GENOS_LIGHTING_DENOISE_LAUNCH). Default hash.
+                         screen is the opt-in speed path
+  --denoise-screen on|off alias of --denoise-launch (GENOS_LIGHTING_DENOISE_SCREEN)
   --headless             proof window, no panel
   --frames N             quit after N frames
   --fps-counter [on|off] frame-rate plate (default off). A bare flag turns it on.
@@ -119,6 +122,7 @@ struct Options {
     lighting_debug: bool,
     unfilled: bool,
     full_effort: bool,
+    denoise_launch: Option<String>,
     denoise_screen: Option<String>,
     headless: bool,
     frames: Option<u32>,
@@ -1172,6 +1176,9 @@ fn apply_intent(opts: &Options) -> Result<(), String> {
     if let Some(value) = &opts.denoise_screen {
         std::env::set_var("GENOS_LIGHTING_DENOISE_SCREEN", value);
     }
+    if let Some(value) = &opts.denoise_launch {
+        std::env::set_var("GENOS_LIGHTING_DENOISE_LAUNCH", value);
+    }
     Ok(())
 }
 
@@ -1190,6 +1197,7 @@ fn options() -> Result<Options, String> {
     let mut lighting_debug = false;
     let mut unfilled = false;
     let mut full_effort = false;
+    let mut denoise_launch = None;
     let mut denoise_screen = None;
     let mut headless = false;
     let mut frames = None;
@@ -1218,6 +1226,7 @@ fn options() -> Result<Options, String> {
             "--lighting-debug" => lighting_debug = true,
             "--unfilled" => unfilled = true,
             "--full-effort" => full_effort = true,
+            "--denoise-launch" => denoise_launch = Some(need_arg(&mut args, "--denoise-launch")?),
             "--denoise-screen" => denoise_screen = Some(need_arg(&mut args, "--denoise-screen")?),
             "--headless" => headless = true,
             "--frames" => {
@@ -1282,6 +1291,7 @@ fn options() -> Result<Options, String> {
         lighting_debug,
         unfilled,
         full_effort,
+        denoise_launch,
         denoise_screen,
         headless,
         frames,
@@ -1343,6 +1353,7 @@ mod tests {
             lighting_debug: false,
             unfilled: false,
             full_effort: false,
+            denoise_launch: None,
             denoise_screen: None,
             headless: true,
             frames: None,

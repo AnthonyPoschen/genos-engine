@@ -178,7 +178,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78X](experiments/S78X-atrous-work-lists.md) | 2026-10-13 | A-trous levels run dirty work lists | pushed (rough; idle A/B) | S78X |
 | [S78X2](experiments/S78X2-atrous-dense-fallback.md) | 2026-10-12 | Dense a-trous when the dirty fraction is high | pushed | S78X2 |
 | [S79](experiments/S79-half-res-atrous.md) | 2026-10-13 | Half-resolution a-trous, adaptive iterations, shared-memory tiles | Tried and failed. Half-res and tiles removed. Plain shader kept. Adaptive is an off-by-default knob | S79 |
-| [S80](experiments/S80-screen-denoise.md) | 2026-10-13 | Screen wavelet of visible fine texels; two-sided cells keyed by the geometric axis | high default. Hash wavelet remains the reference | S80 |
+| [S80](experiments/S80-screen-denoise.md) | 2026-10-13 | Screen wavelet of visible fine texels | opt-in (`denoise_launch=screen`). Every preset defaults to the hash-slot wavelet | S80 |
 | [S78Z](experiments/S78Z-verify-ring-wakes.md) | 2026-10-13 | Probe verification + impact-tested ring wakes | not pushed (no fix; postmortem) | g78/S78Z-verify-ring-wakes.patch |
 | [S78T2](experiments/S78T2-texel-verify.md) | 2026-10-13 | Texel verification: rotating A-SVGF checks + ring wakes | not pushed (no healing; postmortem) | g78/S78T2-texel-verify.patch |
 | [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
@@ -582,37 +582,25 @@ gi-v2's 7.8 ms moving. Numbers and the five-line postmortem are in
 
 ### S80: screen wavelet
 
-High filters bounce light by running the hash wavelet (variance, à-trous, and
-the push) on the visible 12.5 cm cells and on the active cells in their
-à-trous footprints. One pixel claims each hit cell and lists those taps. A
-still camera with nothing moving reuses the list and appends cells claimed
-after that build. Compose bilerps that field with the same weights as the hash launch. A
-plane or normal weight on the screen blend alone moved the hall off the
-hash picture. The launch is one 8×8 group per picture block
-(gather, variance, the iterations, and the push), not one group per 64 slots
-of the million-slot table. S79's half-resolution pass kept that table and got
-slower; this does not. `denoise_screen=0` and full effort bind the hash-slot
-wavelet, which is the picture reference.
+`denoise_launch` is `hash` or `screen`. Every preset, including high, defaults
+to `hash`: the gi-v2 slot wavelet. Nothing else in that launch differs from
+gi-v2. `screen` is opt-in (`--denoise-launch screen`). It runs the same
+variance, à-trous, and push on the visible 12.5 cm cells and on the active
+cells in their à-trous footprints. One pixel claims each hit cell and lists
+those taps. A still camera with nothing moving reuses the list and appends
+cells claimed after that build. Compose bilerps that field with the same
+weights as the hash launch. A plane or normal weight on the screen blend
+alone moved the hall off the hash picture. The launch is one 8×8 group per
+picture block, not one group per 64 slots of the million-slot table.
 
-A two-sided surface stores its geometric axis in the G-buffer (flag bits 1..3).
-The back face stores the opposite axis. Cache lookups from a pixel use that
-axis. The shading normal, including a normal map and the view flip compose
-applies for lighting, is not the key. That was the Sponza banner: a thin cloth
-shared 12.5 cm cells between its faces, and the key moved as the camera did,
-so the cells showed up as bright squares that jumped. The banner test fills
-the lamp side, then cuts to the other side. That side stays dark. One shared
-axis makes the far side as bright as the lamp side. The stress hall is the full-picture check, still and moving, at a size where
-a foreground cell is wider than a pixel kernel. Mean and p99 against the hash
-wavelet stay inside that path's own cross-process error (slot claims race, so
-two hash runs differ by more than one frame of noise), and inside 1.5 / 10.
-The screen path does not flicker ahead of the hash path. Compose does not
-load a per-pixel filter slice; that load was a full-frame cost on the compose
-pass and did not change the denoise time. The shaded floor keeps the hash wavelet's bright cell.
+The G-buffer stays the gi-v2 packing. A geometric axis in the flag byte
+changed medium as well as high (the lookup replaced the shading normal on
+every preset) and did not remove the Sponza banner squares, so it is not
+used. The screen gather keys a cell with the shading normal, the same key
+the hash compose uses. On a 4070 that opt-in picture is outside the gi-v2
+cross-process floor (high still p99 11.2 against 1.3, Sponza atrium 33
+against 2). The speed is the reason to turn it on. The default picture is
+the hash launch.
 
-The gather runs for every pixel. The wavelet runs for one thread per visible
-cell, and the dirty hold is the hash kernel's. A moving frame does not reuse
-a filtered picture. Papers, the deviations, and the owner GPU commands are in
-[S80](experiments/S80-screen-denoise.md). Lavapipe does not time the GPU. The
-4070 à-trous column of the earlier screen-space wavelet was the measured cost
-win; this launch is the hash kernel on the visible cells, which that trial
-did not run.
+Papers, the deviations, and the owner GPU commands are in
+[S80](experiments/S80-screen-denoise.md). Lavapipe does not time the GPU.

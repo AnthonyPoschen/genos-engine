@@ -309,9 +309,10 @@ pub struct DenoiserSettings {
     /// counts as stable. 0 leaves the decision to sample age. Ignored unless
     /// adaptive is on.
     pub variance_threshold: f32,
-    /// Screen-sized wavelet over this frame's visible fine texels. High turns
-    /// it on. Off keeps the hash-slot wavelet (the picture reference, medium,
-    /// low, and full effort).
+    /// `denoise_launch=screen`: picture-sized wavelet over this frame's visible
+    /// fine texels. False is `hash`, the gi-v2 slot launch. Every preset
+    /// defaults to hash. The screen launch is opt-in and is not the picture
+    /// reference.
     pub screen: bool,
 }
 
@@ -385,11 +386,6 @@ impl LightingSettings {
     pub fn preset(preset: LightingPreset) -> Self {
         let mut s = Self::high_defaults();
         s.preset = preset;
-        // The screen wavelet is high's filter. Medium and low keep the hash
-        // wavelet. Presets that disable the denoiser do not launch either.
-        if preset != LightingPreset::High {
-            s.denoiser.screen = false;
-        }
         match preset {
             LightingPreset::High => {
                 s.lamp_pick.mode = LampPickMode::Hits;
@@ -515,7 +511,7 @@ impl LightingSettings {
                 dirty_fraction: 0.25,
                 adaptive: false,
                 variance_threshold: 0.02,
-                screen: true,
+                screen: false,
             },
             compose_reuse: true,
             sky: true,
@@ -687,7 +683,7 @@ impl LightingSettings {
         self.denoiser.enabled = true;
         self.denoiser.iterations = 5;
         self.denoiser.dirty_fraction = 0.0;
-        // Full effort is the dense hash wavelet, the picture reference.
+        // Full effort is the dense hash wavelet, the same launch as every preset.
         self.denoiser.screen = false;
         self.compose_reuse = false;
         self.sky = true;
@@ -872,7 +868,15 @@ impl LightingSettings {
             "denoise_variance={}",
             num_text(self.denoiser.variance_threshold)
         );
-        let _ = writeln!(out, "denoise_screen={}", bit(self.denoiser.screen));
+        let _ = writeln!(
+            out,
+            "denoise_launch={}",
+            if self.denoiser.screen {
+                "screen"
+            } else {
+                "hash"
+            }
+        );
         let _ = writeln!(out, "compose_reuse={}", bit(self.compose_reuse));
         let _ = writeln!(out, "sky={}", bit(self.sky));
         let _ = writeln!(out, "emissive={}", bit(self.emissive));
@@ -1007,6 +1011,14 @@ impl LightingSettings {
             "denoise_dirty" => self.denoiser.dirty_fraction = num_f32(value)?,
             "denoise_adaptive" => self.denoiser.adaptive = on(value)?,
             "denoise_variance" => self.denoiser.variance_threshold = num_f32(value)?,
+            "denoise_launch" => {
+                self.denoiser.screen = match value.trim().to_ascii_lowercase().as_str() {
+                    "hash" | "slot" | "slots" => false,
+                    "screen" => true,
+                    other => return Err(format!("denoise_launch is hash or screen, got {other}")),
+                }
+            }
+            // Alias of denoise_launch. on is screen, off is hash.
             "denoise_screen" => self.denoiser.screen = on(value)?,
             "compose_reuse" => self.compose_reuse = on(value)?,
             "sky" => self.sky = on(value)?,
@@ -1125,6 +1137,7 @@ impl LightingSettings {
             ("GENOS_LIGHTING_DENOISE_ADAPTIVE", "denoise_adaptive"),
             ("GENOS_LIGHTING_DENOISE_VARIANCE", "denoise_variance"),
             ("GENOS_LIGHTING_DENOISE_SCREEN", "denoise_screen"),
+            ("GENOS_LIGHTING_DENOISE_LAUNCH", "denoise_launch"),
             ("GENOS_LIGHTING_COMPOSE_REUSE", "compose_reuse"),
             ("GENOS_LIGHTING_SKY", "sky"),
             ("GENOS_LIGHTING_EMISSIVE", "emissive"),

@@ -4,8 +4,7 @@
 // depth tests so only the surface the pixel shows writes its record.
 //
 // Record (uvec4): x distance from the eye (float bits; all ones = nothing), y the normal
-// (octahedral, snorm 2x16), z albedo rgb and a flags byte (bit 0 two-sided,
-// bits 1..3 the geometric axis), w
+// (octahedral, snorm 2x16), z albedo rgb and a flags byte (bit 0 two-sided), w
 // emitted light (shared-exponent RGB; the light pass moves it out and puts the
 // direct irradiance here).
 //
@@ -82,8 +81,7 @@ void main() {
         discard;
     }
     vec3 albedo = v_albedo;
-    vec3 geo = normalize(v_normal);
-    vec3 n = geo;
+    vec3 n = normalize(v_normal);
     if (v_uv.x >= 0.0 && v_atlas.z > 0.5) {
         vec4 texel = material_fetch(v_atlas, v_uv);
         if (v_cutoff > 0.0 && texel.a < v_cutoff) {
@@ -95,15 +93,6 @@ void main() {
         }
     }
     bool two_sided = v_shade > 1.15;
-    // Geometric side, before the normal map. A two-sided back face takes the
-    // opposite axis so the front and the back do not share a 12.5 cm cell.
-    // gl_FrontFacing does not follow the normal map, so a small camera move
-    // on one side of the cloth keeps the same key.
-    uint axis = lighting_axis(geo);
-    if (two_sided && !gl_FrontFacing) {
-        axis = lighting_axis(-geo);
-    }
-    float flags = float((two_sided ? 1u : 0u) | (axis << 1u)) / 255.0;
     uvec2 p = uvec2(gl_FragCoord.xy);
     if (p.x >= gbuf.header.x || p.y >= gbuf.header.y) {
         return;
@@ -116,7 +105,7 @@ void main() {
     uint i = p.y * gbuf.header.x + p.x;
     atomicMin(gbuf.px[i].x, floatBitsToUint(max(length(v_pos - scene.eye.xyz), 1.0e-6)));
     atomicMin(gbuf.px[i].y, lighting_pack_normal(n));
-    atomicMin(gbuf.px[i].z, packUnorm4x8(vec4(clamp(albedo, 0.0, 1.0), flags)));
+    atomicMin(gbuf.px[i].z, packUnorm4x8(vec4(clamp(albedo, 0.0, 1.0), two_sided ? 1.0 / 255.0 : 0.0)));
     if (v_emit != 0u) {
         atomicMin(gbuf.px[i].w, v_emit);
     }

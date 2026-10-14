@@ -1,8 +1,10 @@
 # S80: Screen wavelet of visible fine texels
 
-High's denoiser is a screen-sized spatial wavelet rebuilt each frame from this
-frame's visible 12.5 cm texels. The hash-slot à-trous stays available
-(`denoise_screen=0`, and full effort) and is the picture reference.
+`denoise_launch=screen` is a screen-sized spatial wavelet rebuilt each frame
+from this frame's visible 12.5 cm texels. Every preset defaults to `hash`,
+the gi-v2 slot à-trous, and that launch is the picture reference. The screen
+launch is opt-in. On a 4070 it is faster and it is outside the gi-v2
+cross-process floor, so it does not ship as a default.
 
 The cost of the hash wavelet follows occupied cache slots and probe-chain
 length, not pixels. Stress filtered about 108k slots (11–15 ms on an RTX 4070
@@ -25,7 +27,7 @@ That was the ceiling, wall, and floor blotch, including the 1920×1080 x8
 diffs.
 
 The launch is the picture. Stage 0 stores the fine slot under each pixel, one
-hash find, keyed by the geometric axis in the G-buffer. One pixel claims the
+hash find, keyed by the shading normal the hash compose uses. One pixel claims the
 cell and lists the cells the hash wavelet reads from it: the 5×5 taps at
 each of the five steps. A cell between pixel centres, or just past an edge,
 is in that list when the hash launch would filter it. Leaving its level
@@ -48,18 +50,16 @@ empty tap, not the bilinear. Compose does not read the per-pixel slice.
 That load was a full-frame cost on the compose pass (stress still 76 to 69
 fps, moving 50.5 to 47, with the denoise column unchanged).
 25 cm cells stay on the running mean the hash push reads. Filtering them
-from this launch moved the still hall off the hash picture. Medium leaves
-this launch off.
+from this launch moved the still hall off the hash picture.
 
-A two-sided back face (`gl_FrontFacing` false) stores the opposite axis, so
-the front and the back do not share a cell. `gl_FrontFacing` does not follow
-the normal map, so a small camera move on one side of a cloth keeps the key.
-The curtains shot is this: lamps on the far side of the central banner, and
-bright squares on the side the camera sees. Those squares are the far side's
-12.5 cm cells when the two sides share a key. The test fills the lamp side of
-a two-sided quad, then cuts to the other side and moves the camera. That side
-stays dark: its p95 stays under half the lamp side, and it has no cell-sized
-peaks. One shared axis makes the far side as bright as the lamp side.
+A geometric axis packed into the G-buffer flag byte was tried so a two-sided
+cloth would not share a cell between its faces. `atomicMin` on the packed
+albedo kept the smaller axis, and compose replaced the shading normal with
+that axis on every preset, including medium. The 4070 still showed the
+banner squares, and medium left the gi-v2 picture (stress still p99 16,
+atrium 37). The G-buffer and the compose lookup are the gi-v2 ones again.
+The screen gather uses the shading normal. The banner test still fills the
+lamp side of a two-sided quad, then cuts to the other side.
 
 The same cells show on a sun-shadowed floor, where the direct sun is gone
 and only bounce is left. A wall blocks the sun. A small emitter lights one
@@ -112,8 +112,8 @@ Deviations:
 - Every configured iteration runs. The dirty hold is the hash kernel's hold
   of a texel whose input moved less than 1%. It is not a held picture
   (ADR 0012).
-- Two-sided keys use the raster geometric axis. Back faces use the opposite
-  axis. The shading normal is not the key.
+- The cache key is the shading normal, the same key the hash compose uses.
+  A geometric axis in the G-buffer changed every preset and is not used.
 - Compose shows the bilinear of the pushed cells, the same blend as the
   hash launch. A plane or normal weight on the screen blend alone moved the
   hall off that picture. It does not show a per-pixel filter, and it does
@@ -123,10 +123,11 @@ Deviations:
 
 ## Settings
 
-`denoise_screen` is on for high and off for every other preset. Full effort
-forces it off so the reference stays the dense hash wavelet. The key is
-`denoise_screen`, the flag is `--denoise-screen`, the variable is
-`GENOS_LIGHTING_DENOISE_SCREEN`, and the debug knob is `lighting_denoise_screen`.
+`denoise_launch` is `hash` or `screen`. Every preset defaults to `hash`,
+including high and full effort. The key is `denoise_launch`, the flag is
+`--denoise-launch`, the variable is `GENOS_LIGHTING_DENOISE_LAUNCH`, and the
+debug knob is `lighting_denoise_launch`. `denoise_screen` / `--denoise-screen`
+/ `GENOS_LIGHTING_DENOISE_SCREEN` remain the on/off alias (`on` is `screen`).
 Control bit 19. The pipeline is `screen-denoise`.
 
 `GENOS_LIGHTING_DEBUG` writes `./genos-debug/denoise/latest.txt` and appends
@@ -140,7 +141,7 @@ The `atrous` column is the measurement. Do not read this as a lavapipe time.
 
 ```
 cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high
-cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-screen off
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-launch screen
 cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --still-boxes --freeze-sun --dynamic 0
 GENOS_GPU_DISPATCH=1 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-lighting -- --scene sponza --checkpoint atrium --size 1920x1080 --frames 180 --preset high --gpu-times 30
 GENOS_GPU_DISPATCH=1 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-lighting -- --scene sponza --checkpoint colonnade --size 1920x1080 --frames 180 --preset high --gpu-times 30
@@ -148,8 +149,9 @@ GENOS_GPU_DISPATCH=1 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-lightin
 GENOS_GPU_DISPATCH=1 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-lighting -- --scene sponza --checkpoint dark-corner --size 1920x1080 --frames 180 --preset high --gpu-times 30
 ```
 
-Potato on the atrium, and `--denoise-screen off` on the curtains checkpoint,
-are the other two rows. The curtains checkpoint is the central banner.
+Potato on the atrium is the other row. The curtains checkpoint is the central
+banner. Default high is the hash launch; `--denoise-launch screen` is the
+opt-in row.
 
 ## Expected gain
 
@@ -162,7 +164,7 @@ is mean 1.5 / p99 10 on 0..255, the run-to-run noise of high on the 4070.
 
 The 4070 measurement of the pixel-step wavelet (the launch that filtered in
 screen space) was Sponza high 9.6 to 19.8 fps, denoise 63.6 to 5.6 ms, and
-stress corner 174 to 269 fps. Medium did not move: the screen wavelet is off
-there. Those pictures were outside the bar (stress still mean 15.5 / p99 32,
+stress corner 174 to 269 fps. Medium stays on the hash launch, so it
+does not move. Those pictures were outside the bar (stress still mean 15.5 / p99 32,
 moving 9.5 / 27.7, Sponza atrium p99 41 against 2.7). Lavapipe does not time
 the GPU, and it does not stand in for a retest of this hash-kernel launch.

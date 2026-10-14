@@ -19,20 +19,6 @@ vec3 lighting_unpack_normal(uint w) {
     return normalize(n);
 }
 
-// Six faces. Even values face +X +Y +Z, odd values the opposite. The cache key
-// uses this, not the shading normal: a normal map or a two-sided view flip
-// must not move the cell.
-uint lighting_axis(vec3 n) {
-    vec3 a = abs(n);
-    if (a.x >= a.y && a.x >= a.z) {
-        return n.x >= 0.0 ? 0u : 1u;
-    }
-    if (a.y >= a.z) {
-        return n.y >= 0.0 ? 2u : 3u;
-    }
-    return n.z >= 0.0 ? 4u : 5u;
-}
-
 // Shared-exponent RGB (9 bits each, 5-bit exponent): non-negative light in a uint.
 uint lighting_pack_rgb9e5(vec3 rgb) {
     const float MAX = 65408.0;

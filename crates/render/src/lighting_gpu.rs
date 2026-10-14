@@ -964,7 +964,7 @@ impl Gpu {
         // default compose does not write it. High (refresh every frame) is
         // picture + glow + that slice. The screen wavelet appends two vec4
         // slices (32 bytes a pixel) after that, so it does not alias the bounce.
-        // Medium leaves `screen` false and keeps the hash-slot buffer.
+        // Hash (the default on every preset) keeps the gi-v2 buffer.
         let screen = u64::from(settings.denoiser.enabled && settings.denoiser.screen);
         self.lighting.out = self.make_buffer(
             pixels * (12 + 4 * hist + 32 * screen),

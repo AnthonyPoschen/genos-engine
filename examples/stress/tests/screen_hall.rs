@@ -1,4 +1,8 @@
-//! Stress hall on high, full picture, against the hash wavelet.
+//! Opt-in screen wavelet against the hash wavelet inside this branch.
+//!
+//! The gi-v2 picture gate is `gi_v2_floor`: medium and default high against
+//! gi-v2 dumps. This test is the screen launch (`denoise_launch=screen`)
+//! against the hash launch, not that gate.
 //!
 //! The 320×180 bounce check stays inside a cell of a few pixels, so a wavelet
 //! that steps in pixels still crosses several cells and matches. At this size

@@ -125,7 +125,9 @@ uvec3 screen_gather(uvec2 p) {
     if (!lighting_sc_svgf() || !lighting_surface(p, pos, n, albedo, two_sided)) {
         return uvec3(0u);
     }
-    vec3 key_n = lighting_axis_vec(lighting_geo_axis(p));
+    // Same key as the hash compose: the shading normal, not a geometric axis
+    // packed in the G-buffer. That packing changed every preset's picture.
+    vec3 key_n = lighting_axis_vec(lighting_axis(n));
     uint slot = lighting_cache_find_sized(pos, key_n, false, LIGHTING_SC_TEXEL, pos);
     // Nested, not `||`: a miss is ~0u, and the other side would index the cache
     // with it. glslc does not leave that read out.

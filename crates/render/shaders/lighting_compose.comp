@@ -81,13 +81,6 @@ vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
     if (lighting_world_mode() != 0u) {
         lighting_px_probes = wsum > CACHE_WEIGHT + 1.0e-4 ? probes : vec3(-1.0);
         vec4 world = lighting_world_irradiance(pos, n);
-        // The screen launch writes the hash kernel into the cells. Compose
-        // bilerps that field with the hash launch's weights (bilinear only).
-        // A plane or normal weight on this blend alone moved the hall off the
-        // hash picture: the cache key is already the geometric axis, so a
-        // perpendicular face is a different cell and the find misses it. The
-        // per-pixel slice stays empty. Reading it here was a full-frame load
-        // on the compose pass.
         lighting_sc_display = false;
         return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));
     }
@@ -144,7 +137,6 @@ void main() {
             glow = vec3(0.0);
         }
     }
-    uint geo_axis = lighting_geo_axis(p);
     gbuf.px[index] = uvec4(~0u);
     if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
         n = -n;
@@ -159,8 +151,6 @@ void main() {
         outc.px[index] = pack_rgb(shown);
         return;
     }
-    lighting_px_key_on = true;
-    lighting_px_key_n = lighting_axis_vec(geo_axis);
     if (mode == 7u) {
         // Texel sizes (debug_view.rs ViewMode::Texels).
         vec2 ts = lighting_sc_debug_size(pos, n);
@@ -168,7 +158,6 @@ void main() {
         float lit = 0.55 + 0.45 * abs(dot(n, vec3(0.3, 0.8, 0.5)));
         shown = col * lit * (ts.y >= 4.0 ? 1.0 : 0.35);
         outc.px[index] = pack_rgb(shown);
-        lighting_px_key_on = false;
         return;
     }
     vec3 bounce = vec3(0.0);
@@ -176,7 +165,6 @@ void main() {
     if (gi && ((gstats.ctrl_bits & 16384u) != 0u || gstats.ctrl_bounce > 0u)) {
         bounce = indirect(p, pos, n);
     }
-    lighting_px_key_on = false;
     if ((gstats.ctrl_bits & 4096u) != 0u) {
         vec3 sky_fill = vec3(gstats.ctrl_ambient_r, gstats.ctrl_ambient_g, gstats.ctrl_ambient_b);
         vec3 fill = sky_fill;
