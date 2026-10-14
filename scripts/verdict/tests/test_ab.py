@@ -148,10 +148,11 @@ class AbTests(unittest.TestCase):
             from lib.cache import cache_root, store
             from lib.contract import input_hash
 
-            digest = input_hash(sha, ["ab:main", "ab:feature"], [])
+            floor = (root / "spread.json").resolve()
+            floor.write_text('{"frame_ms":{"spread":1}}\n', encoding="utf-8")
+            digest = input_hash(sha, ["ab:main", "ab:feature", f"floor:{floor}", "repeats:"], [])
             cache = root / "cache"
             store(cache_root(str(cache)), sha, digest, "FAIL", "stress-still slower", root / "old")
-            (root / "spread.json").write_text('{"frame_ms":{"spread":1}}\n', encoding="utf-8")
             out = root / "out"
             proc = run(
                 "ab-verdict.py",
@@ -162,7 +163,7 @@ class AbTests(unittest.TestCase):
                     "--display",
                     "wayland-1",
                     "--noise-floor",
-                    str(root / "spread.json"),
+                    str(floor),
                     "--repo",
                     str(repo),
                     "--out",
@@ -174,6 +175,102 @@ class AbTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
             self.assertIn("FAIL cached stress-still slower", proc.stdout)
             self.assertFalse((out / "build-base.log").exists())
+
+    def test_omitted_noise_floor_is_measured_on_base_before_head(self) -> None:
+        import importlib.util
+
+        path = Path(__file__).resolve().parents[1] / "ab-verdict.py"
+        spec = importlib.util.spec_from_file_location("ab_verdict_measure", path)
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            _git_repo(repo, conflict=True)
+            proc = run(
+                "ab-verdict.py",
+                [
+                    "main",
+                    "feature",
+                    "--live",
+                    "--display",
+                    "wayland-1",
+                    "--repo",
+                    str(repo),
+                    "--out",
+                    str(root / "conflict"),
+                ],
+            )
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertIn("merge conflict", proc.stdout)
+            self.assertNotIn("missing --noise-floor", proc.stdout)
+
+            repo = root / "clean"
+            repo.mkdir()
+            _git_repo(repo, conflict=False)
+            ns = mod.parse(
+                ["main", "feature", "--live", "--display", "wayland-1", "--repo", str(repo)]
+            )
+            mod.validate(ns)
+            self.assertEqual(mod.floor_job(ns), ("stress", "hall", 3, 180))
+            order: list[str] = []
+
+            def build(repo_path, sha, evidence, label, binary_name):
+                order.append(label)
+                binary = evidence / f"{label}-{binary_name}"
+                binary.parent.mkdir(parents=True, exist_ok=True)
+                binary.write_text("binary\n", encoding="utf-8")
+                return binary
+
+            def measure(parsed, binary, evidence):
+                order.append(f"floor:{binary.name}")
+                self.assertTrue(binary.name.startswith("base-"))
+                floor = evidence / "noise-floor" / "spread.json"
+                floor.parent.mkdir(parents=True, exist_ok=True)
+                floor.write_text('{"frame_ms":{"spread":1}}\n', encoding="utf-8")
+                return "FAIL", "base noise floor cold start did not settle within 180 frames", floor
+
+            def capture_views(parsed, built, evidence):
+                order.append("capture")
+                return []
+
+            out = root / "measured"
+            status, reason, floor_path, rows = mod._live(
+                ns,
+                repo,
+                out,
+                build=build,
+                measure=measure,
+                capture_views=capture_views,
+            )
+            self.assertEqual(status, "FAIL")
+            self.assertIn("base noise floor", reason)
+            self.assertEqual(rows, [])
+            self.assertEqual(order, ["base", "floor:base-genos-lighting"])
+            self.assertTrue(floor_path.is_file())
+
+            def measure_pass(parsed, binary, evidence):
+                order.append(f"floor:{binary.name}")
+                floor = evidence / "noise-floor" / "spread.json"
+                floor.parent.mkdir(parents=True, exist_ok=True)
+                floor.write_text('{"frame_ms":{"spread":1}}\n', encoding="utf-8")
+                return "PASS", "base noise floor spread frame_ms=0.4", floor
+
+            order.clear()
+            status, _reason, floor_path, rows = mod._live(
+                ns,
+                repo,
+                root / "passed-floor",
+                build=build,
+                measure=measure_pass,
+                capture_views=capture_views,
+            )
+            self.assertEqual(status, "PASS")
+            self.assertEqual(rows, [])
+            self.assertEqual(order, ["base", "floor:base-genos-lighting", "head", "capture"])
+            self.assertTrue(str(floor_path).endswith("noise-floor/spread.json"))
 
 
 def _git(repo: Path, args: list[str]) -> None:

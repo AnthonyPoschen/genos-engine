@@ -16,8 +16,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.ab import load_floor, read_views, score_views
-from lib.cache import cache_root, store
 from lib.catalog import available
+from lib.cache import cache_root, store
 from lib.contract import (
     Broken,
     Verdict,
@@ -39,6 +39,7 @@ from lib.images import diff_image, flip_mean_p99, load_image, mean_abs, write_pn
 from lib.images import blur_relative
 from lib.launch import child_env, hold_lock, lighting_argv, release_lock, stop
 from lib.mcp import post, quit, wait_ready
+from lib.noise import SETTLE_FRAMES, summarize, write_repeats, write_spread
 import precheck
 
 
@@ -46,7 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="A/B verdict against the noise floor.")
     parser.add_argument("base", nargs="?", help="base commit")
     parser.add_argument("head", nargs="?", help="head commit")
-    parser.add_argument("--noise-floor", help="spread.json from noise-floor")
+    parser.add_argument("--noise-floor", help="spread.json from noise-floor. Omit it to measure BASE first")
+    parser.add_argument("--repeats", type=int, help="repeats when measuring the noise floor (default 3)")
+    parser.add_argument("--scene", help="scene for the measured noise floor (default stress)")
+    parser.add_argument("--checkpoint", help="checkpoint for the measured noise floor (default hall)")
+    parser.add_argument("--settle-frames", type=int, help=f"settle cap for the measured noise floor (default {SETTLE_FRAMES})")
     parser.add_argument("--fixture", help="directory with views.csv and the noise floor")
     parser.add_argument("--live", action="store_true", help="build both commits and capture")
     parser.add_argument("--repo", help="repository (default: this checkout)")
@@ -61,6 +66,10 @@ def parse(argv: list[str]) -> argparse.Namespace:
     ns.base = mirror(ns.base, "GENOS_VERDICT_BASE")
     ns.head = mirror(ns.head, "GENOS_VERDICT_HEAD")
     ns.noise_floor = mirror(ns.noise_floor, "GENOS_VERDICT_NOISE_FLOOR")
+    ns.scene = mirror(ns.scene, "GENOS_VERDICT_SCENE")
+    ns.checkpoint = mirror(ns.checkpoint, "GENOS_VERDICT_CHECKPOINT")
+    if ns.noise_floor:
+        ns.noise_floor = str(absolute_path(ns.noise_floor))
     return ns
 
 
@@ -75,7 +84,7 @@ def validate(ns: argparse.Namespace) -> None:
         raise Broken("pass --fixture or --live")
     require_display(ns.display)
     if not ns.noise_floor:
-        raise Broken("missing --noise-floor")
+        floor_job(ns)
 
 
 def decide(ns: argparse.Namespace, argv: list[str], holder: list[Path]) -> Verdict:
@@ -102,11 +111,12 @@ def decide(ns: argparse.Namespace, argv: list[str], holder: list[Path]) -> Verdi
         rows = read_views(root / "views.csv")
         _diff_fixtures(root, rows, evidence)
     else:
-        floor_path = Path(ns.noise_floor)
         pre = _precheck(ns, sha, repo)
         if pre.status != "PASS" or pre.reason.startswith("cached "):
             return Verdict(pre.status, pre.reason, pre.evidence, pre.code)
-        rows = _live(ns, repo, evidence)
+        status, reason, floor_path, rows = _live(ns, repo, evidence)
+        if status != "PASS":
+            return Verdict(status, reason, evidence)
     floor = load_floor(floor_path)
     status, reason, views, scenes = score_views(rows, floor)
     _write_csv(evidence / "views.csv", views, ["scene", "checkpoint", "status", "detail", "delta_ms"])
@@ -125,9 +135,32 @@ def decide(ns: argparse.Namespace, argv: list[str], holder: list[Path]) -> Verdi
     return Verdict(status, reason, evidence)
 
 
+def floor_job(ns: argparse.Namespace) -> tuple[str, str, int, int]:
+    """Scene, checkpoint, repeats, and settle cap for a noise floor measured on BASE."""
+    if (ns.scene is None) != (ns.checkpoint is None):
+        raise Broken("pass both --scene and --checkpoint for the measured noise floor")
+    view = available()[0]
+    scene = ns.scene or view.lighting_scene
+    checkpoint = ns.checkpoint or view.lighting_checkpoint
+    repeats = 3 if ns.repeats is None else ns.repeats
+    if repeats < 2:
+        raise Broken("measured noise floor needs at least 2 repeats")
+    settle = SETTLE_FRAMES if ns.settle_frames is None else ns.settle_frames
+    if settle < 1:
+        raise Broken("settle frames must be at least 1")
+    return scene, checkpoint, repeats, settle
+
+
 def _cache_keys(ns: argparse.Namespace) -> list[str]:
     """Same text precheck hashes, so a later precheck skips this comparison."""
-    return [f"ab:{ns.base}", f"ab:{ns.head}", *ns.key]
+    if ns.noise_floor:
+        floor = ns.noise_floor
+        repeats = ""
+    else:
+        _scene, _checkpoint, repeats_n, _settle = floor_job(ns)
+        floor = "measured"
+        repeats = str(repeats_n)
+    return [f"ab:{ns.base}", f"ab:{ns.head}", f"floor:{floor}", f"repeats:{repeats}", *ns.key]
 
 
 def _precheck(ns: argparse.Namespace, sha: str, repo: Path) -> Verdict:
@@ -178,46 +211,100 @@ def _write_csv(path: Path, rows: list[dict[str, str]], fields: list[str]) -> Non
         writer.writerows(rows)
 
 
-def _live(ns: argparse.Namespace, repo: Path, evidence: Path) -> list[dict[str, str]]:
+def _live(
+    ns: argparse.Namespace,
+    repo: Path,
+    evidence: Path,
+    build=None,
+    measure=None,
+    capture_views=None,
+) -> tuple[str, str, Path, list[dict[str, str]]]:
+    """Build BASE, measure its noise floor when none was given, then build HEAD and capture."""
+    build = build or _build
+    measure = measure or _measure_base_floor
+    capture_views = capture_views or _capture_views
+    base_sha = rev_parse(repo, ns.base)
+    head_sha = rev_parse(repo, ns.head)
+    base_bin = build(repo, base_sha, evidence, "base", ns.binary_name)
+    if ns.noise_floor:
+        floor_path = absolute_path(ns.noise_floor)
+    else:
+        status, reason, floor_path = measure(ns, base_bin, evidence)
+        if status != "PASS":
+            return status, reason, floor_path, []
+    head_bin = build(repo, head_sha, evidence, "head", ns.binary_name)
+    rows = capture_views(ns, {"base": base_bin, "head": head_bin}, evidence)
+    return "PASS", "", floor_path, rows
+
+
+def _build(repo: Path, sha: str, evidence: Path, label: str, binary_name: str) -> Path:
     import subprocess
 
-    base = rev_parse(repo, ns.base)
-    head = rev_parse(repo, ns.head)
-    built: dict[str, Path] = {}
-    work = evidence / "work"
-    for label, sha in (("base", base), ("head", head)):
-        dest = work / label
-        if dest.exists():
-            subprocess.run(["git", "worktree", "remove", "--force", str(dest)], cwd=repo, check=False)
-        proc = subprocess.run(
-            ["git", "worktree", "add", "--detach", str(dest), sha],
-            cwd=repo,
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        if proc.returncode != 0:
-            raise Broken((proc.stderr or proc.stdout).strip() or "worktree add failed")
-        build = subprocess.run(
-            [
-                "cargo",
-                "build",
-                "--locked",
-                "--release",
-                "-p",
-                "genos-lighting",
-                "--manifest-path",
-                str(dest / "Cargo.toml"),
-            ],
-            cwd=dest,
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        (evidence / f"build-{label}.log").write_text(build.stdout + build.stderr, encoding="utf-8")
-        if build.returncode != 0:
-            raise Broken(f"build {label} failed")
-        built[label] = dest / "target" / "release" / ns.binary_name
+    dest = evidence / "work" / label
+    if dest.exists():
+        subprocess.run(["git", "worktree", "remove", "--force", str(dest)], cwd=repo, check=False)
+    proc = subprocess.run(
+        ["git", "worktree", "add", "--detach", str(dest), sha],
+        cwd=repo,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise Broken((proc.stderr or proc.stdout).strip() or "worktree add failed")
+    build = subprocess.run(
+        [
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "-p",
+            "genos-lighting",
+            "--manifest-path",
+            str(dest / "Cargo.toml"),
+        ],
+        cwd=dest,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    (evidence / f"build-{label}.log").write_text(build.stdout + build.stderr, encoding="utf-8")
+    if build.returncode != 0:
+        raise Broken(f"build {label} failed")
+    return dest / "target" / "release" / binary_name
+
+
+def _measure_base_floor(ns: argparse.Namespace, binary: Path, evidence: Path) -> tuple[str, str, Path]:
+    """Run noise-floor on the BASE binary before HEAD is built."""
+    import noise_floor
+
+    scene, checkpoint, repeats, settle = floor_job(ns)
+    floor_dir = evidence / "noise-floor"
+    floor_dir.mkdir(parents=True, exist_ok=True)
+    child = argparse.Namespace(
+        binary=str(binary),
+        display=ns.display,
+        scene=scene,
+        checkpoint=checkpoint,
+        repeats=repeats,
+        settle_frames=settle,
+    )
+    rows = noise_floor._live(child, floor_dir)
+    status, reason, payload = summarize(rows, settle)
+    write_repeats(floor_dir / "repeats.csv", rows)
+    write_spread(floor_dir / "spread.json", payload)
+    (floor_dir / "source.txt").write_text(
+        f"base {ns.base}\nscene {scene}\ncheckpoint {checkpoint}\nrepeats {repeats}\n",
+        encoding="utf-8",
+    )
+    return status, f"base noise floor {reason}", floor_dir / "spread.json"
+
+
+def _capture_views(
+    ns: argparse.Namespace,
+    built: dict[str, Path],
+    evidence: Path,
+) -> list[dict[str, str]]:
     display = require_display(ns.display)
     lock = hold_lock()
     rows: list[dict[str, str]] = []

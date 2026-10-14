@@ -102,23 +102,24 @@ the in-tree FLIP (the same departures as `genos-lighting-ref`, not NVIDIA's
 
 `scripts/verdict/ab-verdict.py BASE HEAD` builds both commits when `--live`
 is set. A live run calls precheck first, so a merge conflict, a busy GPU, or
-a cache hit never starts a build. It then runs the scene and checkpoint
-catalog, and compares each view with the noise floor. Frame time uses
-`head - base`. A delta at or under the spread passes. A delta under twice
-the spread (`noise_multiple` in `crates/lighting-ref/lighting-ref.conf`) is
-`UNSURE`. Past that is `FAIL`.
+a cache hit never starts a build. When `--noise-floor` is omitted it then
+runs `noise-floor` on the BASE binary (3 repeats of stress/hall unless
+`--scene`, `--checkpoint`, and `--repeats` say otherwise) and uses that
+spread. HEAD is built after that floor exists. Each catalog view is compared
+with it. Frame time uses `head - base`. A delta at or under the spread
+passes. A delta under twice the spread (`noise_multiple` in
+`crates/lighting-ref/lighting-ref.conf`) is `UNSURE`. Past that is `FAIL`.
 Picture mean absolute error, FLIP, and blurred relative luminance use the
 same rule against their spreads. `PASS` means no view is slower beyond the
 noise and the pictures match.
 
 Stdout is the overall line. `scenes.csv` is one verdict per scene.
-`views.csv` is one verdict per checkpoint. `--fixture` scores a saved
-`views.csv` and `spread.json` and does not build.
+`views.csv` is one verdict per checkpoint. A measured floor is
+`noise-floor/spread.json` in the evidence directory. `--fixture` scores a
+saved `views.csv` and `spread.json` and does not build.
 
 ```sh
-python3 scripts/verdict/ab-verdict.py gi-v2 HEAD \
-  --noise-floor genos-debug/verdict/noise-floor/<sha>/spread.json \
-  --display wayland-1 --live
+python3 scripts/verdict/ab-verdict.py gi-v2 HEAD --display wayland-1 --live
 ```
 
 ## Checkpoint catalog
