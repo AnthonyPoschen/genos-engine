@@ -108,8 +108,9 @@ const USAGE: &str = "genos-stress [options]
                             (GENOS_LIGHTING_DENOISE_ADAPTIVE). Off on every preset
   --denoise-variance F      relative luminance deviation, 0..0.1 (GENOS_LIGHTING_DENOISE_VARIANCE)
   --denoise-launch hash|screen
-                            picture wavelet (GENOS_LIGHTING_DENOISE_LAUNCH). Default hash
-                            on every preset. screen is the opt-in speed path
+                            picture wavelet (GENOS_LIGHTING_DENOISE_LAUNCH). Preset high
+                            uses screen. The other presets keep hash. This flag and the
+                            variable override the preset
   --denoise-screen on|off   alias of --denoise-launch (on is screen, off is hash)
   --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
   --lamp-pick MODE          off, hits, pixels, both, or reuse (experimental)

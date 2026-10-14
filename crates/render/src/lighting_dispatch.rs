@@ -598,17 +598,33 @@ mod probe_still_tests {
     #[test]
     fn screen_denoise_launches_the_picture_and_hash_keeps_the_slots() {
         let slots = (LIGHTING_CACHE_SLOTS as u32).div_ceil(64);
-        let hash = groups(&LightingSettings::preset(LightingPreset::High), false, true);
+        let high = LightingSettings::preset(LightingPreset::High);
+        assert!(high.denoiser.screen, "high defaults to the screen launch");
+        let screen_groups = groups(&high, false, true);
+        let picture: Vec<_> = screen_groups
+            .groups
+            .iter()
+            .filter(|(pass, _, _)| *pass == 8)
+            .collect();
+        assert_eq!(picture.len(), 8, "gather, variance, five iterations, push");
+        assert_eq!(screen_groups.atrous_stages, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        for (pass, gx, gy) in &picture {
+            assert_eq!(*pass, 8);
+            assert_eq!(*gx, 320u32.div_ceil(8));
+            assert_eq!(*gy, 180u32.div_ceil(8));
+            assert_ne!(*gx, slots);
+        }
+        let mut hash_settings = high.clone();
+        hash_settings
+            .set_key("denoise_launch", "hash")
+            .expect("denoise_launch");
+        let hash = groups(&hash_settings, false, true);
         let hash_atrous: Vec<_> = hash
             .groups
             .iter()
             .filter(|(pass, _, _)| *pass == 8)
             .collect();
-        assert_eq!(
-            hash_atrous.len(),
-            7,
-            "high defaults to the hash-slot wavelet"
-        );
+        assert_eq!(hash_atrous.len(), 7, "the launch key returns to hash slots");
         assert_eq!(hash.atrous_stages, vec![0, 1, 2, 3, 4, 5, 6]);
         for (_, gx, gy) in hash_atrous {
             assert_eq!(*gx, slots);
@@ -629,33 +645,11 @@ mod probe_still_tests {
             assert_eq!(*gx, slots);
             assert_eq!(*gy, 1);
         }
-        let mut screen = LightingSettings::preset(LightingPreset::High);
-        screen.denoiser.screen = true;
-        let screen_groups = groups(&screen, false, true);
-        let picture: Vec<_> = screen_groups
-            .groups
-            .iter()
-            .filter(|(pass, _, _)| *pass == 8)
-            .collect();
-        assert_eq!(picture.len(), 8, "gather, variance, five iterations, push");
-        assert_eq!(screen_groups.atrous_stages, vec![0, 1, 2, 3, 4, 5, 6, 7]);
-        for (pass, gx, gy) in &picture {
-            assert_eq!(*pass, 8);
-            assert_eq!(*gx, 320u32.div_ceil(8));
-            assert_eq!(*gy, 180u32.div_ceil(8));
-            assert_ne!(*gx, slots);
-        }
-        let bytes = pack_lighting_ctrl(
-            &LightingSettings::preset(LightingPreset::High),
-            0,
-            1.0,
-            0,
-            0,
-        );
+        let bytes = pack_lighting_ctrl(&high, 0, 1.0, 0, 0);
         let bits = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-        assert_eq!(bits & CTRL_DENOISE_SCREEN, 0);
-        let on = pack_lighting_ctrl(&screen, 0, 1.0, 0, 0);
-        let on_bits = u32::from_le_bytes(on[0..4].try_into().unwrap());
-        assert_ne!(on_bits & CTRL_DENOISE_SCREEN, 0);
+        assert_ne!(bits & CTRL_DENOISE_SCREEN, 0);
+        let off = pack_lighting_ctrl(&hash_settings, 0, 1.0, 0, 0);
+        let off_bits = u32::from_le_bytes(off[0..4].try_into().unwrap());
+        assert_eq!(off_bits & CTRL_DENOISE_SCREEN, 0);
     }
 }

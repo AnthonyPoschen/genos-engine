@@ -1,10 +1,12 @@
 # S80: Screen wavelet of visible fine texels
 
 `denoise_launch=screen` is a screen-sized spatial wavelet rebuilt each frame
-from this frame's visible 12.5 cm texels. Every preset defaults to `hash`,
-the gi-v2 slot à-trous, and that launch is the picture reference. The screen
-launch is opt-in. On a 4070 it is faster and it is outside the gi-v2
-cross-process floor, so it does not ship as a default.
+from this frame's visible 12.5 cm texels. Preset high uses that launch. The
+other presets keep `hash`, the gi-v2 slot à-trous. `--denoise-launch` and
+`GENOS_LIGHTING_DENOISE_LAUNCH` override the preset. On a 4070 the screen
+launch is faster, and a moving-camera check put hash and screen within 0.15%
+on every flicker and speckle measure (Sponza 8.75 fps to 21.3 fps), so high
+ships with it.
 
 The cost of the hash wavelet follows occupied cache slots and probe-chain
 length, not pixels. Stress filtered about 108k slots (11–15 ms on an RTX 4070
@@ -123,12 +125,14 @@ Deviations:
 
 ## Settings
 
-`denoise_launch` is `hash` or `screen`. Every preset defaults to `hash`,
-including high and full effort. The key is `denoise_launch`, the flag is
-`--denoise-launch`, the variable is `GENOS_LIGHTING_DENOISE_LAUNCH`, and the
-debug knob is `lighting_denoise_launch`. `denoise_screen` / `--denoise-screen`
-/ `GENOS_LIGHTING_DENOISE_SCREEN` remain the on/off alias (`on` is `screen`).
-Control bit 19. The pipeline is `screen-denoise`.
+`denoise_launch` is `hash` or `screen`. Preset high defaults to `screen`.
+The other presets, and full effort, default to `hash`. The key is
+`denoise_launch`, the flag is `--denoise-launch`, the variable is
+`GENOS_LIGHTING_DENOISE_LAUNCH`, and the debug knob is
+`lighting_denoise_launch`. The flag and the variable override the preset.
+`denoise_screen` / `--denoise-screen` / `GENOS_LIGHTING_DENOISE_SCREEN`
+remain the on/off alias (`on` is `screen`). Control bit 19. The pipeline is
+`screen-denoise`.
 
 `GENOS_LIGHTING_DEBUG` writes `./genos-debug/denoise/latest.txt` and appends
 `frames.log`: frame, pixels, coarse, changed, filtered, mode, ran. Changed is
@@ -141,7 +145,7 @@ The `atrous` column is the measurement. Do not read this as a lavapipe time.
 
 ```
 cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high
-cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-launch screen
+cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --denoise-launch hash
 cargo run --release -p genos-stress -- --size 1920x1080 --gpu-times 30 --preset high --still-boxes --freeze-sun --dynamic 0
 GENOS_GPU_DISPATCH=1 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-lighting -- --scene sponza --checkpoint atrium --size 1920x1080 --frames 180 --preset high --gpu-times 30
 GENOS_GPU_DISPATCH=1 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-lighting -- --scene sponza --checkpoint colonnade --size 1920x1080 --frames 180 --preset high --gpu-times 30
@@ -150,8 +154,10 @@ GENOS_GPU_DISPATCH=1 GENOS_LIGHTING_DEBUG=1 cargo run --release -p genos-lightin
 ```
 
 Potato on the atrium is the other row. The curtains checkpoint is the central
-banner. Default high is the hash launch; `--denoise-launch screen` is the
-opt-in row.
+banner. Default high is the screen launch; `--denoise-launch hash` is the
+hash row. A 4070 moving-camera check put the two within 0.15% on every
+flicker and speckle measure. Sponza high went from 8.75 fps on hash to
+21.3 fps on screen.
 
 ## Expected gain
 

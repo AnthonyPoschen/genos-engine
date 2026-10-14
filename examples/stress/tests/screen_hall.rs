@@ -1,8 +1,10 @@
-//! Opt-in screen wavelet against the hash wavelet inside this branch.
+//! Screen wavelet against the hash wavelet inside this branch.
 //!
-//! The gi-v2 picture gate is `gi_v2_floor`: medium and default high against
-//! gi-v2 dumps. This test is the screen launch (`denoise_launch=screen`)
-//! against the hash launch, not that gate.
+//! The gi-v2 picture gate is `gi_v2_floor`: it pins the hash launch (medium,
+//! and high with `denoise_launch=hash`) against gi-v2 dumps. This test is the
+//! screen launch (`denoise_launch=screen`) against the hash launch, not that
+//! gate. Preset high already uses the screen launch; this test still sets
+//! the flag both ways.
 //!
 //! The 320×180 bounce check stays inside a cell of a few pixels, so a wavelet
 //! that steps in pixels still crosses several cells and matches. At this size

@@ -6,6 +6,9 @@
 //! this). Set `GENOS_GI_V2_A` and `GENOS_GI_V2_B` to those two dumps, and
 //! `GENOS_PICTURE_PRESET` to `medium` or `high`. Without the variables the
 //! test does not draw.
+//!
+//! Preset high launches the screen wavelet. This gate compares the hash
+//! launch to gi-v2, so it sets `denoise_launch=hash`.
 
 use std::sync::Mutex;
 
@@ -34,10 +37,13 @@ fn hall_frame(preset_name: &str) -> Vec<u8> {
     let preset = LightingPreset::parse(preset_name)
         .unwrap_or_else(|| panic!("preset is medium or high, got {preset_name}"));
     let (_gpu, mut window, mut renderer) = open();
-    let settings = LightingSettings::preset(preset);
+    let mut settings = LightingSettings::preset(preset);
+    settings
+        .set_key("denoise_launch", "hash")
+        .expect("denoise_launch");
     assert!(
         !settings.denoiser.screen,
-        "{preset_name} must stay on the hash launch"
+        "{preset_name} gate stays on the hash launch"
     );
     renderer.set_lighting_settings(settings);
     let mut stage = Stage::new(

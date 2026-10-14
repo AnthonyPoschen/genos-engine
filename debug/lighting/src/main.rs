@@ -41,8 +41,9 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --full-effort          preset high, unless --preset is set, and compose every frame
                          (GENOS_LIGHTING_COMPOSE_ALL)
   --denoise-launch hash|screen
-                         picture wavelet (GENOS_LIGHTING_DENOISE_LAUNCH). Default hash.
-                         screen is the opt-in speed path
+                         picture wavelet (GENOS_LIGHTING_DENOISE_LAUNCH). Preset high
+                         uses screen. The other presets keep hash. This flag and the
+                         variable override the preset
   --denoise-screen on|off alias of --denoise-launch (GENOS_LIGHTING_DENOISE_SCREEN)
   --headless             proof window, no panel
   --frames N             quit after N frames
