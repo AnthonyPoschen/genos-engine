@@ -12,7 +12,7 @@
 //! Slot claims race across processes, so two GI tip runs of the same scene are
 //! the noise floor. This process must land inside that floor. Set
 //! `GENOS_PICTURE_DUMP` to write one RGBA8 frame (the GI tip worktree does
-//! this). Set `GENOS_GI_V2_A` and `GENOS_GI_V2_B` to those two dumps, and
+//! this). Set `GENOS_GI_FLOOR_A` and `GENOS_GI_FLOOR_B` to those two dumps, and
 //! `GENOS_PICTURE_PRESET` to `medium` or `high`. Without the variables the
 //! test does not draw.
 //!
@@ -135,11 +135,11 @@ fn hash_launch_matches_gi_tip_within_cross_process_noise() {
         eprintln!("wrote {} bytes preset {preset} to {path}", frame.len());
         return;
     }
-    let Ok(path_a) = std::env::var("GENOS_GI_V2_A") else {
-        eprintln!("GI floor skipped: set GENOS_GI_V2_A and GENOS_GI_V2_B");
+    let Ok(path_a) = std::env::var("GENOS_GI_FLOOR_A") else {
+        eprintln!("GI floor skipped: set GENOS_GI_FLOOR_A and GENOS_GI_FLOOR_B");
         return;
     };
-    let path_b = std::env::var("GENOS_GI_V2_B").expect("GENOS_GI_V2_B");
+    let path_b = std::env::var("GENOS_GI_FLOOR_B").expect("GENOS_GI_FLOOR_B");
     let a = std::fs::read(&path_a).unwrap_or_else(|err| panic!("read {path_a}: {err}"));
     let b = std::fs::read(&path_b).unwrap_or_else(|err| panic!("read {path_b}: {err}"));
     let ours = hall_frame(&preset);

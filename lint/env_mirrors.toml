@@ -203,12 +203,12 @@ kind = "test"
 detail = "harness only"
 
 [[var]]
-name = "GENOS_GI_V2_A"
+name = "GENOS_GI_FLOOR_A"
 kind = "test"
 detail = "harness only"
 
 [[var]]
-name = "GENOS_GI_V2_B"
+name = "GENOS_GI_FLOOR_B"
 kind = "test"
 detail = "harness only"
 
