@@ -37,11 +37,14 @@ A flag wins when both are set.
 `PASS dry-run`. It does not launch a window.
 
 A window is never placed on the session compositor. A script that draws
-requires `--display` (a Wayland display name). It passes that name to the
-binary, sets the child `WAYLAND_DISPLAY` to it, and drops the inherited
-session display. The binary opens with `--proof` or `--headless` (the proof
-window floats and does not take focus). Quit is MCP `quit`, then SIGTERM and
-a wait. The scripts do not send SIGKILL.
+requires `--display` (a Wayland display name). It sets the child
+`WAYLAND_DISPLAY` to that name and drops the inherited session display.
+`--display` is added to the argument list only when `binary --help` documents
+the flag. A base from before that flag, including gi-v2, rejects it, so the
+display stays in the environment and the caller places the window. The binary
+opens with `--proof` or `--headless` (the proof window floats and does not
+take focus). Quit is MCP `quit`, then SIGTERM and a wait. The scripts do not
+send SIGKILL.
 
 `./genos-debug/` is gitignored. Nothing is written under `$HOME`.
 
@@ -82,10 +85,11 @@ python3 scripts/verdict/noise-floor.py \
   --display wayland-1
 ```
 
-A live run calls precheck first. It launches `genos-lighting --headless
---display …`, posts `wait_settled`, `timing`, and `capture` with `"ui": false`,
-then MCP `quit` or SIGTERM. `--fixture DIR` scores a saved `repeats.csv` and
-does not open a window.
+A live run calls precheck first. It launches `genos-lighting --headless`.
+The Wayland display is `WAYLAND_DISPLAY`, and `--display` is passed only when
+that binary's help lists it. It posts `wait_settled`, `timing`, and `capture`
+with `"ui": false`, then MCP `quit` or SIGTERM. `--fixture DIR` scores a saved
+`repeats.csv` and does not open a window.
 
 Picture error is mean absolute channel error, blurred relative luminance, and
 the in-tree FLIP (the same departures as `genos-lighting-ref`, not NVIDIA's

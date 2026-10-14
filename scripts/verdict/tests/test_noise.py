@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from lib.contract import Broken
 from lib.images import flip_mean_p99, load_image, solid, write_png
-from lib.launch import child_env, lighting_argv, stop
+from lib.launch import child_env, help_lists_display, lighting_argv, stop, stress_argv
 from lib.noise import summarize
 
 
@@ -126,12 +126,24 @@ class NoiseTests(unittest.TestCase):
             self.assertEqual(loaded.at(0, 0), (1.0, 0.0, 0.0))
 
     def test_launch_targets_the_named_display_and_not_sigkill(self) -> None:
-        argv = lighting_argv("genos-lighting", "wayland-9", "stress", "hall", 9, Path("out"))
-        self.assertIn("--display", argv)
-        self.assertIn("wayland-9", argv)
-        self.assertIn("--headless", argv)
-        self.assertNotIn("HDMI-A-1", argv)
-        self.assertNotIn("DP-1", argv)
+        self.assertTrue(help_lists_display("  --display NAME         Wayland display name\n"))
+        self.assertFalse(help_lists_display("  --headless             proof window, no panel\n"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            new = _help_binary(root / "new-lighting", "--display NAME\n")
+            old = _help_binary(root / "old-lighting", "--headless proof window\n")
+            argv = lighting_argv(str(new), "wayland-9", "stress", "hall", 9, Path("out"))
+            self.assertEqual(argv[1:3], ["--display", "wayland-9"])
+            self.assertIn("--headless", argv)
+            self.assertNotIn("HDMI-A-1", argv)
+            self.assertNotIn("DP-1", argv)
+            old_argv = lighting_argv(str(old), "wayland-9", "stress", "hall", 9, Path("out"))
+            self.assertNotIn("--display", old_argv)
+            self.assertNotIn("wayland-9", old_argv)
+            self.assertIn("--headless", old_argv)
+            old_stress = stress_argv(str(old), "wayland-9", 30, Path("out"))
+            self.assertNotIn("--display", old_stress)
+            self.assertIn("--proof", old_stress)
         env = child_env({"WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0", "PATH": "/bin"}, "wayland-9")
         self.assertEqual(env["WAYLAND_DISPLAY"], "wayland-9")
         self.assertNotIn("DISPLAY", env)
@@ -159,6 +171,12 @@ class NoiseTests(unittest.TestCase):
         finally:
             proc.kill()
             proc.wait(timeout=2)
+
+
+def _help_binary(path: Path, text: str) -> Path:
+    path.write_text(f"#!/bin/sh\nprintf '%s' {text!r}\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
 
 
 if __name__ == "__main__":
