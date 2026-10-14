@@ -62,6 +62,49 @@ pub use debug_view::{DebugView, LampReport, ViewMode};
 
 const API_VERSION: u32 = 1 << 22;
 const VK_SUCCESS: i32 = 0;
+const VK_NOT_READY: i32 = 1;
+const VK_TIMEOUT: i32 = 2;
+/// A fence wait on the frame thread before the seat pump takes over.
+const FENCE_BUDGET_NS: u64 = 50_000_000;
+/// A mapped copy above this runs while the seat pump answers pings.
+const COPY_BUDGET: usize = 1_048_576;
+
+thread_local! {
+    static ENTER: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+    static LEAVE: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+}
+
+struct SeatLeave;
+
+impl Drop for SeatLeave {
+    fn drop(&mut self) {
+        if let Some(leave) = LEAVE.with(std::cell::Cell::get) {
+            leave();
+        }
+    }
+}
+
+/// Run `body` while the installed seat pump answers compositor pings.
+fn block<T>(body: impl FnOnce() -> T) -> T {
+    let Some(enter) = ENTER.with(std::cell::Cell::get) else {
+        return body();
+    };
+    enter();
+    let _leave = SeatLeave;
+    body()
+}
+
+/// Copy `len` bytes into a mapped GPU allocation. A large copy yields the seat.
+fn copy_to_mapped(dst: *mut u8, src: *const u8, len: usize) {
+    if dst.is_null() || len == 0 {
+        return;
+    }
+    if len > COPY_BUDGET {
+        block(|| unsafe { std::ptr::copy_nonoverlapping(src, dst, len) });
+    } else {
+        unsafe { std::ptr::copy_nonoverlapping(src, dst, len) };
+    }
+}
 const SUBOPTIMAL: i32 = 1000001003;
 const OUT_OF_DATE: i32 = -1000001004;
 type VkResult = i32;
@@ -113,6 +156,31 @@ impl Renderer {
                 ..debug_view::DebugState::default()
             },
         })
+    }
+
+    /// Answer compositor pings on a side thread during device waits and pipeline compiles.
+    ///
+    /// `enter` and `leave` are `genos_window::seat_enter` and `genos_window::seat_leave`.
+    /// The window must already have installed its seat. Clear them before the window is dropped.
+    pub fn set_blocker(enter: fn(), leave: fn()) {
+        ENTER.with(|cell| cell.set(Some(enter)));
+        LEAVE.with(|cell| cell.set(Some(leave)));
+    }
+
+    /// The next device wait runs on this thread only.
+    pub fn clear_blocker() {
+        ENTER.with(|cell| cell.set(None));
+        LEAVE.with(|cell| cell.set(None));
+    }
+
+    /// Drop the renderer without `vkDeviceWaitIdle`.
+    ///
+    /// Call this after the window is destroyed. The driver reclaims the device
+    /// when the process exits. Waiting here is what makes a quit miss pings
+    /// when the window is still mapped, and what keeps the process alive after
+    /// the window is gone.
+    pub fn abandon(mut self) {
+        self.gpu.abandon = true;
     }
 
     /// Lines drawn over the picture with the next overlay rectangles, in the same
@@ -798,6 +866,8 @@ struct Gpu {
     audio_cmd: Handle,
     audio_fence: Handle,
     submit_pending: bool,
+    /// Drop returns without `vkDeviceWaitIdle`. The process is leaving.
+    abandon: bool,
     timestamp_period: f32,
     timestamp_bits: u32,
     query_pool: Handle,
@@ -1439,6 +1509,7 @@ impl Gpu {
                 audio_cmd: std::ptr::null_mut(),
                 audio_fence: std::ptr::null_mut(),
                 submit_pending: false,
+                abandon: false,
                 timestamp_period,
                 timestamp_bits,
                 query_pool: std::ptr::null_mut(),
@@ -1487,7 +1558,7 @@ impl Gpu {
             let _ = (destroy_instance, surface_support);
             gpu.create_static_objects()?;
             gpu.recreate(width, height)?;
-            gpu.make_lighting()?;
+            block(|| gpu.make_lighting())?;
             gpu.make_lighting_targets()?;
             let launch = genos_scene::DebugSettings::default().effective(gpu.out_cli.as_deref());
             gpu.debug_out = launch.out.clone();
@@ -1503,11 +1574,11 @@ impl Gpu {
             self.desc_layout = self.make_desc_layout()?;
             self.layout = self.make_layout()?;
             let start = Instant::now();
-            self.pipeline = self.make_pipeline(true, true, false)?;
+            self.pipeline = block(|| self.make_pipeline(true, true, false))?;
             self.note_pipeline_time("scene", start);
-            self.depth_pipeline = self.make_depth_pipeline()?;
-            self.overlay_pipeline = self.make_pipeline(false, false, false)?;
-            self.wire_pipeline = self.make_pipeline(false, false, true)?;
+            self.depth_pipeline = block(|| self.make_depth_pipeline())?;
+            self.overlay_pipeline = block(|| self.make_pipeline(false, false, false))?;
+            self.wire_pipeline = block(|| self.make_pipeline(false, false, true))?;
             #[repr(C)]
             struct PoolInfo {
                 s_type: i32,
@@ -1603,9 +1674,7 @@ impl Gpu {
     }
 
     fn recreate(&mut self, width: u32, height: u32) -> Result<(), String> {
-        unsafe {
-            (self.fns.device_wait)(self.device);
-        }
+        self.idle_device();
         self.destroy_targets();
         self.create_targets(width, height)
     }
@@ -1840,11 +1909,7 @@ impl Gpu {
                 (self.fns.map_mem)(self.device, self.vertex.memory, 0, bytes, 0, &mut mapped),
                 "map vertices",
             )?;
-            std::ptr::copy_nonoverlapping(
-                verts.as_ptr() as *const u8,
-                mapped as *mut u8,
-                bytes as usize,
-            );
+            copy_to_mapped(mapped as *mut u8, verts.as_ptr() as *const u8, bytes as usize);
             (self.fns.unmap_mem)(self.device, self.vertex.memory);
         }
         Ok(())
@@ -1912,9 +1977,9 @@ impl Gpu {
                 (self.fns.map_mem)(self.device, buffer.memory, 0, end, 0, &mut mapped),
                 "map shape block",
             )?;
-            std::ptr::copy_nonoverlapping(
-                verts.as_ptr() as *const u8,
+            copy_to_mapped(
                 (mapped as *mut u8).add(offset as usize),
+                verts.as_ptr() as *const u8,
                 bytes as usize,
             );
             (self.fns.unmap_mem)(self.device, buffer.memory);
@@ -1984,12 +2049,9 @@ impl Gpu {
         }
         self.bind_flight();
         let slot = self.flight;
+        self.wait_fence(self.fence, "wait fence")?;
+        let fences = [self.fence];
         unsafe {
-            let fences = [self.fence];
-            check(
-                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                "wait fence",
-            )?;
             self.collect_slot_after_wait(slot)?;
             if self.lighting_active() {
                 self.take_unfilled(slot);
@@ -2434,13 +2496,7 @@ impl Gpu {
             }
             let fence = self.fences[slot];
             if wait {
-                let fences = [fence];
-                unsafe {
-                    check(
-                        (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                        "profile fence",
-                    )?;
-                }
+                self.wait_fence(fence, "profile fence")?;
             } else {
                 let status = unsafe { (self.fns.fence_status)(self.device, fence) };
                 if status == 1 {
@@ -2482,21 +2538,42 @@ impl Gpu {
         Ok(Duration::from_nanos(nanos.round() as u64))
     }
 
-    fn wait_flight(&mut self, slot: usize) -> Result<(), String> {
-        unsafe {
-            let fences = [self.fences[slot]];
-            if fences[0].is_null() {
-                return Ok(());
-            }
-            let status = (self.fns.fence_status)(self.device, fences[0]);
-            if status == 1 {
-                check(
-                    (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                    "flight wait",
-                )?;
-            }
+    fn idle_device(&self) {
+        let wait = self.fns.device_wait;
+        let device = self.device;
+        block(|| unsafe { wait(device) });
+    }
+
+    /// Wait until `fence` signals. A short wait stays on this thread. A longer
+    /// one dispatches the seat so a ping is not missed.
+    fn wait_fence(&self, fence: Handle, what: &str) -> Result<(), String> {
+        if fence.is_null() {
+            return Ok(());
         }
-        Ok(())
+        let status = unsafe { (self.fns.fence_status)(self.device, fence) };
+        if status == VK_SUCCESS {
+            return Ok(());
+        }
+        let timed = unsafe {
+            (self.fns.wait_fences)(self.device, 1, &fence, 1, FENCE_BUDGET_NS)
+        };
+        if timed == VK_SUCCESS {
+            return Ok(());
+        }
+        if timed != VK_TIMEOUT && timed != VK_NOT_READY {
+            return check(timed, what);
+        }
+        let wait = self.fns.wait_fences;
+        let device = self.device;
+        let mut result = VK_SUCCESS;
+        block(|| {
+            result = unsafe { wait(device, 1, &fence, 1, u64::MAX) };
+        });
+        check(result, what)
+    }
+
+    fn wait_flight(&mut self, slot: usize) -> Result<(), String> {
+        self.wait_fence(self.fences[slot], "flight wait")
     }
 
     fn wait_all_inflight(&mut self) -> Result<(), String> {
@@ -2507,13 +2584,7 @@ impl Gpu {
     }
 
     fn read_host(&mut self, slot: usize) -> Result<Vec<u8>, String> {
-        unsafe {
-            let fences = [self.fences[slot]];
-            check(
-                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                "earlier frame",
-            )?;
-        }
+        self.wait_fence(self.fences[slot], "earlier frame")?;
         let saved = copy_buffer(&self.host);
         self.host = copy_buffer(&self.hosts[slot]);
         let pixels = self.read_color()?;
@@ -2522,14 +2593,7 @@ impl Gpu {
     }
 
     fn wait_gpu(&mut self) -> Result<(), String> {
-        unsafe {
-            let fences = [self.fence];
-            check(
-                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                "present wait",
-            )?;
-        }
-        Ok(())
+        self.wait_fence(self.fence, "present wait")
     }
 
     fn present(&mut self) -> Result<VkResult, String> {
@@ -3434,12 +3498,9 @@ impl Gpu {
         self.sync_audio_scene()?;
         self.write_buffer(&self.audio_rays, &ray_bytes(listener, sources))?;
         self.write_buffer(&self.audio_gains, &vec![0u8; sources.len() * 4])?;
+        self.wait_fence(self.audio_fence, "audio wait")?;
+        let fences = [self.audio_fence];
         unsafe {
-            let fences = [self.audio_fence];
-            check(
-                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                "audio wait",
-            )?;
             check(
                 (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
                 "audio reset fence",
@@ -3552,10 +3613,7 @@ impl Gpu {
                 ),
                 "audio submit",
             )?;
-            check(
-                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                "audio done",
-            )?;
+            self.wait_fence(self.audio_fence, "audio done")?;
         }
         let memory = self.audio_gains.memory;
         let device = self.device;
@@ -3592,9 +3650,7 @@ impl Gpu {
         let bytes = crate::mesh_field::words_bytes(&crate::mesh_field::field_words(live));
         if bytes.len() as u64 > self.mesh_field_cap {
             // The old buffer may be in use by frames in flight.
-            unsafe {
-                (self.fns.device_wait)(self.device);
-            }
+            self.idle_device();
             let share = self.light_families();
             let cap = (bytes.len() as u64).next_power_of_two();
             let mut old = std::mem::replace(&mut self.mesh_field, Buffer::empty());
@@ -3771,9 +3827,7 @@ impl Gpu {
         if self.material_key == world.color_atlas.key && self.normal_key == world.normal_atlas.key {
             return Ok(());
         }
-        unsafe {
-            (self.fns.device_wait)(self.device);
-        }
+        self.idle_device();
         self.store_atlas(true, &world.color_atlas)?;
         self.store_atlas(false, &world.normal_atlas)?;
         self.material_key = world.color_atlas.key;
@@ -3835,7 +3889,7 @@ impl Gpu {
                 ),
                 "map gpu buffer",
             )?;
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped as *mut u8, bytes.len());
+            copy_to_mapped(mapped as *mut u8, bytes.as_ptr(), bytes.len());
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(())
@@ -3862,7 +3916,7 @@ impl Gpu {
                 ),
                 "map gpu buffer",
             )?;
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped as *mut u8, bytes.len());
+            copy_to_mapped(mapped as *mut u8, bytes.as_ptr(), bytes.len());
             (self.fns.unmap_mem)(self.device, buffer.memory);
         }
         Ok(())
@@ -5194,10 +5248,10 @@ impl Buffer {
 impl Drop for Gpu {
     fn drop(&mut self) {
         unsafe {
-            if self.device.is_null() {
+            if self.abandon || self.device.is_null() {
                 return;
             }
-            (self.fns.device_wait)(self.device);
+            self.idle_device();
             self.destroy_lighting();
             self.destroy_targets();
             self.vertex = Buffer::empty();
