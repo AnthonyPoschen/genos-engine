@@ -2172,4 +2172,33 @@ mod launch_tests {
             .iter()
             .any(|&(old, neu)| old == "GENOS_GI2_DEBUG" && neu == "GENOS_LIGHTING_DEBUG"));
     }
+
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this test is the alias contract for process env mirrors"
+    )]
+    fn cli_flag_beats_deprecated_genos_gi2_env_alias() {
+        std::env::remove_var("GENOS_LIGHTING_PRESET");
+        std::env::remove_var("GENOS_GI2_PRESET");
+        std::env::set_var("GENOS_GI2_PRESET", "potato");
+
+        let alias = lighting_env("GENOS_LIGHTING_PRESET").unwrap();
+        assert_eq!(alias, "potato");
+        let mut env = empty();
+        env.preset = Some(alias.as_str());
+
+        let from_alias = resolve_lighting_launch(&[], &env).unwrap();
+        assert_eq!(from_alias.preset, Some(LightingPreset::Potato));
+
+        let from_cli = resolve_lighting_launch(&["--preset", "high"], &env).unwrap();
+        assert_eq!(from_cli.preset, Some(LightingPreset::High));
+        let mut settings = LightingSettings::default();
+        settings.apply_launch(&from_cli);
+        assert_eq!(settings.preset_label(), "high");
+        assert!(settings.gi.enabled);
+
+        std::env::remove_var("GENOS_LIGHTING_PRESET");
+        std::env::remove_var("GENOS_GI2_PRESET");
+    }
 }
