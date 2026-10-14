@@ -19,8 +19,8 @@ use genos_stress::building::{Layout, LightMix};
 use genos_stress::knobs::{apply_lighting_knob, lighting_knobs};
 use genos_stress::stage::{Scale, Stage};
 use genos_ui::{
-    button_panel_sections, Action, FpsOverlay, PanelCheck, PanelDropdown, PanelRow, PanelSection,
-    PanelSlider, Pointer, SliderStep, State,
+    button_panel_sections, show_menu_tab, Action, FpsOverlay, PanelCheck, PanelDropdown, PanelRow,
+    PanelSection, PanelSlider, Pointer, SliderStep, State, MENU_HIDE, MENU_SHOW,
 };
 use genos_window::{extent_changed, FocusGate, Window};
 
@@ -59,7 +59,8 @@ Page Up and Page Down switch scenes. Keys 1-9 jump checkpoints. Home and 0 reset
 to the active checkpoint. Arrow keys and the wheel step the slider under the
 pointer, or move the highlight in an open dropdown. Enter picks the highlighted
 choice. Escape closes the list. Grave hides the menu. Grave again shows it.
-F1 is the same key. F toggles the frame-rate plate. F3 is the same key. A section title
+F1 is the same key. The title bar hide button hides it. A menu tab in the
+top-left corner shows it. F toggles the frame-rate plate. F3 is the same key. A section title
 folds that group. The fold is remembered in <out>/menu/collapsed.txt. The panel
 stays within a third of the window. The scene description is the Info section.
 WASD fly, Space
@@ -315,8 +316,32 @@ fn run() -> Result<(), String> {
         )?;
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
-        let (paints, look_capture) = if opts.headless || !menu_open {
+        let pointer = Pointer {
+            x: frame.pointer_x,
+            y: frame.pointer_y,
+            down: !camera.captured && (gated.mouse_left || gated.capture_click),
+            wheel_y: if camera.captured { 0.0 } else { gated.wheel_y },
+            key_dec: !camera.captured
+                && (input.keyboard.pressed(InputCode::key_left)
+                    || input.keyboard.pressed(InputCode::key_down)),
+            key_inc: !camera.captured
+                && (input.keyboard.pressed(InputCode::key_right)
+                    || input.keyboard.pressed(InputCode::key_up)),
+            key_activate: !camera.captured && input.keyboard.pressed(InputCode::key_enter),
+            key_dismiss: !camera.captured && input.keyboard.pressed(InputCode::key_escape),
+        };
+        let (paints, look_capture) = if opts.headless {
             (Vec::new(), true)
+        } else if !menu_open {
+            let ui_frame = show_menu_tab(&mut ui, [size.0 as f32, size.1 as f32], pointer);
+            if ui_frame
+                .actions
+                .iter()
+                .any(|action| matches!(action, Action::Press(id) if *id == MENU_SHOW))
+            {
+                menu_open = true;
+            }
+            (ui_frame.paints, ui_frame.look_capture)
         } else {
             let fps_menu = app.scene().fps_counter.effective();
             let sections = panel_sections(&app, tools.view_mode(), &fps_menu);
@@ -326,20 +351,7 @@ fn run() -> Result<(), String> {
                 &sections,
                 [size.0 as f32, size.1 as f32],
                 &camera,
-                Pointer {
-                    x: frame.pointer_x,
-                    y: frame.pointer_y,
-                    down: !camera.captured && (gated.mouse_left || gated.capture_click),
-                    wheel_y: if camera.captured { 0.0 } else { gated.wheel_y },
-                    key_dec: !camera.captured
-                        && (input.keyboard.pressed(InputCode::key_left)
-                            || input.keyboard.pressed(InputCode::key_down)),
-                    key_inc: !camera.captured
-                        && (input.keyboard.pressed(InputCode::key_right)
-                            || input.keyboard.pressed(InputCode::key_up)),
-                    key_activate: !camera.captured && input.keyboard.pressed(InputCode::key_enter),
-                    key_dismiss: !camera.captured && input.keyboard.pressed(InputCode::key_escape),
-                },
+                pointer,
             );
             for action in &ui_frame.actions {
                 match *action {
@@ -349,7 +361,9 @@ fn run() -> Result<(), String> {
                     }
                     Action::Toggle { id, on } => toggle(&mut app, id, on)?,
                     Action::Press(id) => {
-                        if FOLDS.iter().any(|fold| fold.id == id) {
+                        if id == MENU_HIDE {
+                            menu_open = false;
+                        } else if FOLDS.iter().any(|fold| fold.id == id) {
                             save_menu_folds(&opts.out, &ui)?;
                         }
                     }

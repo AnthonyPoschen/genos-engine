@@ -71,9 +71,9 @@ pub enum Action {
 pub use fps::FpsOverlay;
 pub use layout::{layout, Align, Direction, Node, Pad, Place, Rect, Sizing, Space};
 pub use panel::{
-    apply_frame_action, apply_lamp, button_panel, button_panel_sections, lighting_frame, Frame,
-    Paint, PanelButton, PanelCheck, PanelDropdown, PanelRow, PanelSection, PanelSlider, Pointer,
-    Shown, State,
+    apply_frame_action, apply_lamp, button_panel, button_panel_sections, lighting_frame,
+    show_menu_tab, Frame, Paint, PanelButton, PanelCheck, PanelDropdown, PanelRow, PanelSection,
+    PanelSlider, Pointer, Shown, State, MENU_HIDE, MENU_SHOW,
 };
 pub use profile::{
     inspect_region, profile_overlay, remember_frame, FrameSample, OpenFrame, PlotScale,

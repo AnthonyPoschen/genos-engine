@@ -27,6 +27,11 @@ const SUN_DIAMETER: f32 = 32.0;
 const SUN_BANDS: usize = 9;
 const SUN_COLOR: [f32; 3] = [1.0, 0.92, 0.35];
 const THUMB_COLOR: [f32; 3] = [0.95, 0.86, 0.40];
+/// Press on the panel title bar. The caller hides the menu.
+pub const MENU_HIDE: u32 = u32::MAX - 5000;
+/// Press on the corner tab while the menu is hidden. The caller shows the menu.
+pub const MENU_SHOW: u32 = u32::MAX - 5001;
+const TITLE_ROW: u32 = u32::MAX - 5002;
 
 /// X and Z reach both edges of the 16 by 16 floor. Neighbor notches are 1 meter apart.
 const XZ_NOTCHES: [f32; 17] = [
@@ -490,7 +495,7 @@ pub fn button_panel(
 ) -> Frame {
     drag_panel(state, pointer);
     refresh_palette(state);
-    let panel = panel_tree(state, title, rows, &[], None);
+    let panel = panel_tree(state, title, rows, &[], None, false);
     finish_panel(state, panel, rows, &[], viewport, camera, pointer)
 }
 
@@ -517,7 +522,7 @@ pub fn button_panel_sections(
         }
     }
     let max_width = viewport[0] / 3.0;
-    let panel = panel_tree(state, title, &visible, sections, Some(max_width));
+    let panel = panel_tree(state, title, &visible, sections, Some(max_width), true);
     finish_panel(state, panel, &visible, &ids, viewport, camera, pointer)
 }
 
@@ -535,6 +540,7 @@ fn panel_tree(
     rows: &[PanelRow],
     sections: &[PanelSection],
     max_width: Option<f32>,
+    hide: bool,
 ) -> Node {
     let palette = state.palette;
     let fill = surface(palette);
@@ -555,7 +561,7 @@ fn panel_tree(
     let inner = max_width.map(|width| (width - 16.0).max(text::CELL_W));
     panel
         .children
-        .push(capped_label(own + 1, title, fill, inner));
+        .push(title_bar(own + 1, title, fill, inner, palette, hide));
     if sections.is_empty() {
         for (index, item) in rows.iter().enumerate() {
             panel.children.push(row_node(
@@ -620,6 +626,92 @@ fn check_columns(inner: f32) -> usize {
 fn check_cell(inner: f32, columns: usize) -> f32 {
     let gaps = 4.0 * columns.saturating_sub(1) as f32;
     ((inner - gaps) / columns as f32).max(text::CELL_W)
+}
+
+fn title_bar(
+    label_id: u32,
+    title: &str,
+    fill: [f32; 3],
+    inner: Option<f32>,
+    palette: Option<Palette>,
+    hide: bool,
+) -> Node {
+    if !hide {
+        return capped_label(label_id, title, fill, inner);
+    }
+    let mut row = Node::new(TITLE_ROW);
+    row.direction = Direction::LeftToRight;
+    row.gap = 4.0;
+    if let Some(inner) = inner {
+        row.width = Sizing::Fit {
+            min: 0.0,
+            max: inner,
+        };
+    }
+    let label_max = inner.map(|width| (width - 64.0).max(text::CELL_W));
+    row.children
+        .push(capped_label(label_id, title, fill, label_max));
+    row.children.push(control(
+        MENU_HIDE,
+        "hide",
+        Action::Press(MENU_HIDE),
+        palette,
+    ));
+    row
+}
+
+/// A small tab in the top-left corner. A press fires [`Action::Press`] with [`MENU_SHOW`].
+pub fn show_menu_tab(state: &mut State, viewport: [f32; 2], pointer: Pointer) -> Frame {
+    refresh_palette(state);
+    let mut tab = control(MENU_SHOW, "menu", Action::Press(MENU_SHOW), state.palette);
+    tab.place = Some(Place::point([0.0, 0.0], [0.0, 0.0], [8.0, 8.0]));
+    let items = layout::layout(&tab, Space::Screen, viewport, None);
+    let press_edge = pointer.down && !state.down;
+    let hit = items
+        .iter()
+        .rev()
+        .find(|item| item.rect.contains(pointer.x, pointer.y));
+    let mut actions = Vec::new();
+    let mut look_capture = false;
+    if press_edge {
+        if let Some(item) = hit {
+            state.look_hold = false;
+            if let Some(action) = item.action {
+                actions.push(action);
+            }
+        } else {
+            state.look_hold = true;
+            look_capture = true;
+        }
+    } else if pointer.down && state.look_hold {
+        look_capture = true;
+    }
+    let mut shown = Vec::new();
+    let mut paints = Vec::new();
+    for item in &items {
+        let look = choose(item, pointer.down, hit.map(|hit| hit.id), None);
+        shown.push(Shown {
+            id: item.id,
+            rect: item.rect,
+            look,
+            idle: item.idle,
+            text: item.text.clone(),
+        });
+        push_paints(&mut paints, item, look, state.palette, None, false);
+    }
+    state.pointer_x = pointer.x;
+    state.pointer_y = pointer.y;
+    state.down = pointer.down;
+    if !pointer.down {
+        state.look_hold = false;
+    }
+    Frame {
+        shown,
+        paints,
+        actions,
+        look_capture,
+        tooltip: None,
+    }
 }
 
 fn section_header(
