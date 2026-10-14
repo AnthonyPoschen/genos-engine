@@ -57,6 +57,7 @@ fn room(settings: LightingSettings) -> World {
         lighting: settings,
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     })
 }
 
@@ -470,6 +471,7 @@ fn interior(settings: LightingSettings) -> World {
         lighting: settings,
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     })
 }
 
@@ -778,6 +780,7 @@ fn shadow_corner(settings: LightingSettings) -> World {
         lighting: settings,
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     })
 }
 

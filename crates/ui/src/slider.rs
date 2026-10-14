@@ -53,7 +53,7 @@ pub fn label_rows(steps: &[SliderStep], left: f32, right: f32) -> u32 {
 }
 
 /// Place a small name under each tick. Neighbours that would overlap drop to the
-/// next row. The current step is always placed.
+/// next row. When a name still overlaps, only the selected step is drawn.
 pub fn place_labels(
     steps: &[SliderStep],
     current: Option<usize>,
@@ -66,6 +66,14 @@ pub fn place_labels(
         return Vec::new();
     }
     let span = right - left;
+    let packed = steps
+        .iter()
+        .map(|step| text::measure_small(&step.name).0)
+        .sum::<f32>()
+        + 4.0 * count.saturating_sub(1) as f32;
+    if packed > span {
+        return vec![selected_only(steps, current, left, right, span, top)];
+    }
     let mut rows: Vec<f32> = Vec::new();
     let mut out = Vec::with_capacity(count);
     for (index, step) in steps.iter().enumerate() {
@@ -106,7 +114,52 @@ pub fn place_labels(
             current: current == Some(index),
         });
     }
-    out
+    if !labels_overlap(&out) {
+        return out;
+    }
+    vec![selected_only(steps, current, left, right, span, top)]
+}
+
+fn selected_only(
+    steps: &[SliderStep],
+    current: Option<usize>,
+    left: f32,
+    right: f32,
+    span: f32,
+    top: f32,
+) -> TickLabel {
+    let index = current.unwrap_or(0).min(steps.len().saturating_sub(1));
+    let step = &steps[index];
+    let width = text::measure_small(&step.name).0;
+    let count = steps.len();
+    let t = if count <= 1 {
+        0.5
+    } else {
+        index as f32 / (count - 1) as f32
+    };
+    TickLabel {
+        index,
+        x: (left + span * t - width * 0.5).clamp(left, (right - width).max(left)),
+        y: top,
+        text: step.name.clone(),
+        current: current == Some(index),
+    }
+}
+
+fn labels_overlap(labels: &[TickLabel]) -> bool {
+    for (i, a) in labels.iter().enumerate() {
+        let a_right = a.x + text::measure_small(&a.text).0;
+        for b in labels.iter().skip(i + 1) {
+            if (a.y - b.y).abs() > 0.5 {
+                continue;
+            }
+            let b_right = b.x + text::measure_small(&b.text).0;
+            if a.x < b_right - 0.5 && b.x < a_right - 0.5 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub fn label_blots(label: &TickLabel) -> Vec<Blot> {
@@ -350,5 +403,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_narrow_track_keeps_only_the_selected_name() {
+        let steps: Vec<SliderStep> = [
+            "potato",
+            "day-cycle",
+            "gi-1bounce",
+            "low",
+            "medium",
+            "high",
+            "custom",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| SliderStep {
+            name: name.into(),
+            value: i as f64,
+        })
+        .collect();
+        let placed = place_labels(&steps, Some(2), 12.0, 160.0, 0.0);
+        assert_eq!(placed.len(), 1);
+        assert_eq!(placed[0].text, "gi-1bounce");
+        assert!(placed[0].current);
+        assert_eq!(label_rows(&steps, 12.0, 160.0), 1);
     }
 }

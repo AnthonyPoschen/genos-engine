@@ -8,6 +8,7 @@ mod codimation;
 mod debug_settings;
 mod fps_counter;
 mod lighting;
+mod menu;
 mod script;
 mod settings;
 mod types;
@@ -27,6 +28,7 @@ pub use lighting::{
     LightingSettings, ProbeSettings, ShadowFilter, ShadowSettings, SurfaceCacheBlend,
     SurfaceCacheSettings, WorldCacheSettings, LIGHTING_BOUNCES_UNLIMITED,
 };
+pub use menu::{parse_focus_policy, parse_menu_visible, FocusPolicy, MenuCli, MenuSettings};
 pub use script::{load_path, load_str};
 pub use settings::EngineSettings;
 pub use types::{

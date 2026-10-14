@@ -37,7 +37,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use genos_debug::{png, Host};
-use genos_input::{character_controller, InputCode, InputSystem};
+use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenLine, ScreenRect};
 use genos_scene::{
     look_direction, update, Actions, Camera, DebugSettings, LightingPreset, LightingSettings,
@@ -82,7 +82,12 @@ const USAGE: &str = "genos-stress [options]
   --frames N                quit after N frames; frames step 1/60 s of scene time
   --fixed-dt SECONDS        scene step per frame (wall clock otherwise; 1/60 with --step)
   --step                    pause; Space or the MCP step command advances one fixed step
+                            U toggles the unfilled count. Shift-U toggles the tint.
+                            F8 and shift-F8 are the same keys. GENOS_DEBUG_KEYS replaces them.
   --shot PATH               settle the light on the last frame and write a PNG
+                            without the panel, the menu tab, the frame graph,
+                            or tool overlays
+  --ui                      keep those overlays in that PNG and in an MCP shot
   --no-panel                hide the panel
   --bench SECONDS           sweep and print tables; per configuration seconds
   --warmup FRAMES           benchmark warm-up frames per configuration (default 30)
@@ -213,6 +218,8 @@ struct Options {
     /// Scene seconds per frame. Unset keeps wall-clock time, except `--frames` and `--shot`.
     fixed_dt: Option<f32>,
     shot: Option<PathBuf>,
+    /// Keep the panel, menu tab, frame graph, and tool overlays in a shot.
+    ui: bool,
     panel: bool,
     bench: Option<bench::Plan>,
     bench_out: Option<PathBuf>,
@@ -323,6 +330,7 @@ fn options() -> Result<Options, String> {
         step: false,
         fixed_dt: None,
         shot: None,
+        ui: false,
         panel: true,
         bench: None,
         bench_out: None,
@@ -398,6 +406,7 @@ fn options() -> Result<Options, String> {
             "--fixed-dt" => opts.fixed_dt = Some(parse(&arg, &value()?)?),
             "--step" => opts.step = true,
             "--shot" => opts.shot = Some(PathBuf::from(value()?)),
+            "--ui" => opts.ui = true,
             "--no-panel" => opts.panel = false,
             "--bench" => seconds = Some(parse::<f32>(&arg, &value()?)?),
             "--warmup" => warmup = parse(&arg, &value()?)?,
@@ -850,6 +859,7 @@ fn run() -> Result<(), String> {
     let mut focus = FocusGate::default();
     let mut ui = State::default();
     let mut input = InputSystem::new();
+    let keys = debug_keys()?;
     let controls = character_controller();
     let mut drawn = 0u32;
     let mut clock: Option<Instant> = None;
@@ -898,19 +908,15 @@ fn run() -> Result<(), String> {
         input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
         input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
         input.poll_gamepads();
-        if input.keyboard.pressed(InputCode::key_f8) {
-            let shift = input.keyboard.down(InputCode::key_shift_left)
-                || input.keyboard.down(InputCode::key_shift_right);
-            if shift {
-                stage.unfilled_tint = !stage.unfilled_tint;
-                if stage.unfilled_tint {
-                    stage.unfilled_count = true;
-                }
-            } else {
-                stage.unfilled_count = !stage.unfilled_count;
-                if !stage.unfilled_count {
-                    stage.unfilled_tint = false;
-                }
+        if keys.pressed(&input, "unfilled_tint") {
+            stage.unfilled_tint = !stage.unfilled_tint;
+            if stage.unfilled_tint {
+                stage.unfilled_count = true;
+            }
+        } else if keys.pressed(&input, "unfilled") {
+            stage.unfilled_count = !stage.unfilled_count;
+            if !stage.unfilled_count {
+                stage.unfilled_tint = false;
             }
         }
         let move_axis = controls.axis_2d(&input, "move");
@@ -985,6 +991,10 @@ fn run() -> Result<(), String> {
             }
         }
 
+        if opts.ui {
+            stage.world.scene.debug.ui = true;
+        }
+        let capture_ui = stage.world.scene.debug.ui;
         let tools_read = tools.before_draw(&mut genos_debug::Ctx {
             renderer: &mut renderer,
             camera: &mut camera,
@@ -1003,7 +1013,7 @@ fn run() -> Result<(), String> {
         unfilled.tint = stage.unfilled_tint;
         renderer.set_unfilled(unfilled);
         let applied = renderer.unfilled();
-        if input.keyboard.pressed(InputCode::key_f8) {
+        if keys.pressed(&input, "unfilled") || keys.pressed(&input, "unfilled_tint") {
             eprintln!("unfilled count {} tint {}", applied.count, applied.tint);
         }
         stage.unfilled_count = applied.count;
@@ -1016,6 +1026,10 @@ fn run() -> Result<(), String> {
         let last = opts.frames.is_some_and(|limit| drawn >= limit);
         let shot = genos_mcp::take_shot_request();
         let want_read = shot || tools_read || (last && opts.shot.is_some());
+        if want_read && !tools.show_capture_overlay(capture_ui) {
+            overlay.clear();
+            renderer.set_overlay_lines(&[]);
+        }
         let draw_start = Instant::now();
         let pixels =
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;

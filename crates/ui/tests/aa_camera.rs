@@ -46,6 +46,7 @@ fn silhouette_world() -> World {
         lighting: genos_scene::LightingSettings::default(),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     });
     world.objects.push(Object {
         hidden: false,
@@ -125,6 +126,7 @@ fn press_mode(mode_id: u32) -> PictureMode {
         lighting: genos_scene::LightingSettings::default(),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     };
     apply_frame_action(&mut scene, action).expect("picture mode")
 }

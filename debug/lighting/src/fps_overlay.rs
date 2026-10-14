@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use genos_debug::png;
 use genos_render::{Renderer, World};
-use genos_scene::{Camera, Floor, FpsCounterSettings, Light, Scene, Vec3};
+use genos_scene::{Camera, Floor, FpsCounterSettings, Light, MenuSettings, Scene, Vec3};
 use genos_ui::FpsOverlay;
 use genos_window::Window;
 
@@ -40,6 +40,7 @@ fn room() -> World {
             enabled: true,
             rate_hz: 4.0,
         },
+        menu: MenuSettings::default(),
     })
 }
 

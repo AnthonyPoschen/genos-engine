@@ -624,6 +624,7 @@ mod tests {
             lighting: genos_scene::LightingSettings::default(),
             debug: genos_scene::DebugSettings::default(),
             fps_counter: genos_scene::FpsCounterSettings::default(),
+            menu: genos_scene::MenuSettings::default(),
         }
     }
 

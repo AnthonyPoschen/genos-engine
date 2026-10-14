@@ -11,6 +11,7 @@
 //! theme colors.
 
 mod dropdown;
+mod focus;
 mod fps;
 mod layout;
 pub mod omarchy;
@@ -71,11 +72,14 @@ pub enum Action {
     Toggle { id: u32, on: bool },
 }
 
+pub use focus::{Consumed, FocusManager, InputKind, InputPolicy};
 pub use fps::FpsOverlay;
 pub use layout::{layout, Align, Direction, Node, Pad, Place, Rect, Sizing, Space};
 pub use panel::{
-    apply_frame_action, apply_lamp, button_panel, lighting_frame, Frame, Paint, PanelButton,
-    PanelCheck, PanelDropdown, PanelRow, PanelSlider, Pointer, Shown, State,
+    apply_frame_action, apply_lamp, button_panel, button_panel_blocks, button_panel_sections,
+    lighting_frame, show_menu_tab, Frame, Paint, PanelBlock, PanelButton, PanelCheck,
+    PanelDropdown, PanelRow, PanelSection, PanelSlider, PanelTab, PanelTabs, Pointer, Shown, State,
+    MENU_HIDE, MENU_SHOW, PANEL_ID,
 };
 pub use profile::{
     inspect_region, profile_overlay, remember_frame, FrameSample, OpenFrame, PlotScale,
