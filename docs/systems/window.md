@@ -20,6 +20,8 @@ The window does not lock the pointer when it opens. A click does not lock the po
 
 `Window::open_proof` is the check window. The class is `genos-camera`. The title is `Genos Engine`. The Hyprland rule for that class floats the window and refuses focus. Checks pass `--proof` so they use this window. `make run` does not pass `--proof`.
 
+`Window::open_proof_on` and `Window::open_named_on` take a Wayland display name. `None` connects to the session compositor. A verdict script passes `--display` so the window opens on that compositor and not on the session one. An empty name is refused.
+
 On Wayland, the keyboard and the mouse act while the window has focus. Gamepads do not use the window.
 
 ## Code

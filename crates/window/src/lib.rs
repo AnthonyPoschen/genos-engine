@@ -49,11 +49,12 @@ struct RawPump {
 }
 
 extern "C" {
-    fn genos_window_open(
+    fn genos_window_open_on(
         width: c_int,
         height: c_int,
         app_id: *const i8,
         title: *const i8,
+        wayland_display: *const i8,
     ) -> *mut c_void;
     fn genos_window_pump(window: *mut c_void, out: *mut RawPump);
     #[cfg_attr(not(test), allow(dead_code))]
@@ -109,17 +110,52 @@ impl Window {
         Self::open_named(width, height, "genos-camera", "Genos Engine")
     }
 
+    /// The check window on `wayland_display`. `None` is the session compositor.
+    pub fn open_proof_on(
+        width: u32,
+        height: u32,
+        wayland_display: Option<&str>,
+    ) -> Result<Self, String> {
+        Self::open_named_on(
+            width,
+            height,
+            "genos-camera",
+            "Genos Engine",
+            wayland_display,
+        )
+    }
+
     pub fn open_named(width: u32, height: u32, app_id: &str, title: &str) -> Result<Self, String> {
+        Self::open_named_on(width, height, app_id, title, None)
+    }
+
+    /// `wayland_display` is the Wayland display name (`wayland-1`). An empty name is refused.
+    pub fn open_named_on(
+        width: u32,
+        height: u32,
+        app_id: &str,
+        title: &str,
+        wayland_display: Option<&str>,
+    ) -> Result<Self, String> {
         let app_id =
             std::ffi::CString::new(app_id).map_err(|_| "app id contains a null".to_string())?;
         let title =
             std::ffi::CString::new(title).map_err(|_| "title contains a null".to_string())?;
+        let display = match wayland_display {
+            None => None,
+            Some(name) if name.is_empty() => return Err("display name is empty".into()),
+            Some(name) => Some(
+                std::ffi::CString::new(name).map_err(|_| "display name contains a null".to_string())?,
+            ),
+        };
+        let display_ptr = display.as_ref().map_or(std::ptr::null(), |name| name.as_ptr());
         let raw = unsafe {
-            genos_window_open(
+            genos_window_open_on(
                 width as c_int,
                 height as c_int,
                 app_id.as_ptr(),
                 title.as_ptr(),
+                display_ptr,
             )
         };
         if raw.is_null() {

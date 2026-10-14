@@ -79,6 +79,7 @@ const USAGE: &str = "genos-stress [options]
   --size WxH                window size (default 1280x720; 2560x1440 for --bench)
   --proof                   open the proof window (floats, takes no focus; --bench
                             always uses it, so the compositor keeps its size)
+  --display NAME            Wayland display name. Omit it to use the session compositor.
   --frames N                quit after N frames; frames step 1/60 s of scene time
   --fixed-dt SECONDS        scene step per frame (wall clock otherwise; 1/60 with --step)
   --step                    pause; Space or the MCP step command advances one fixed step
@@ -212,6 +213,8 @@ struct Options {
     eye: Option<[f32; 5]>,
     size: (u32, u32),
     proof: bool,
+    /// Wayland display name from `--display`. Empty uses the session compositor.
+    display: Option<String>,
     frames: Option<u32>,
     /// Pause and advance one fixed step on Space or MCP `step`.
     step: bool,
@@ -326,6 +329,7 @@ fn options() -> Result<Options, String> {
         eye: None,
         size: (1280, 720),
         proof: false,
+        display: None,
         frames: None,
         step: false,
         fixed_dt: None,
@@ -402,6 +406,7 @@ fn options() -> Result<Options, String> {
                 size_set = true;
             }
             "--proof" => opts.proof = true,
+            "--display" => opts.display = Some(value()?),
             "--frames" => opts.frames = Some(parse(&arg, &value()?)?),
             "--fixed-dt" => opts.fixed_dt = Some(parse(&arg, &value()?)?),
             "--step" => opts.step = true,
@@ -793,10 +798,17 @@ fn run() -> Result<(), String> {
         camera.set_pose(genos_scene::Vec3::new(x, y, z), yaw, pitch);
     }
     let (width, height) = opts.size;
+    let display = opts.display.as_deref();
     let mut window = if opts.proof {
-        Window::open_proof(width, height)?
+        Window::open_proof_on(width, height, display)?
     } else {
-        Window::open_named(width, height, "genos-stress", "Genos lighting stress")?
+        Window::open_named_on(
+            width,
+            height,
+            "genos-stress",
+            "Genos lighting stress",
+            display,
+        )?
     };
     // Window title: what this run is (GENOS_TITLE_TAG from gi-check: binary, GI,
     // world mode, flags, test), and REF while a reference renders. The app id the

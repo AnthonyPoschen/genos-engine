@@ -65,3 +65,28 @@ python3 scripts/verdict/precheck.py --base gi-v2 --key noise-floor --display way
 
 `--process-file` and `--gpu-util-file` are fixtures for the probe. The live
 probe reads `/proc` and, when present, `gpu_busy_percent` or `nvidia-smi`.
+
+## Noise floor
+
+`scripts/verdict/noise-floor.py` repeats one unchanged commit `--repeats` times.
+It writes `repeats.csv`, `numbers.csv`, and `spread.json` (min, max, mean, and
+the spread of frame time, plus picture spread when captures exist).
+
+A cold start that does not settle within `--settle-frames` (default 180) is
+`FAIL`. One sample is `UNSURE`. Two settled repeats are `PASS` and the spread
+is the noise floor later scripts compare against.
+
+```sh
+python3 scripts/verdict/noise-floor.py \
+  --base gi-v2 --repeats 3 --scene stress --checkpoint hall \
+  --display wayland-1
+```
+
+A live run calls precheck first. It launches `genos-lighting --headless
+--display …`, posts `wait_settled`, `timing`, and `capture` with `"ui": false`,
+then MCP `quit` or SIGTERM. `--fixture DIR` scores a saved `repeats.csv` and
+does not open a window.
+
+Picture error is mean absolute channel error, blurred relative luminance, and
+the in-tree FLIP (the same departures as `genos-lighting-ref`, not NVIDIA's
+`flip` tool).

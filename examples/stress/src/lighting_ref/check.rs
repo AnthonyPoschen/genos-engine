@@ -47,6 +47,8 @@ pub struct CheckOptions {
     pub only_scene: Option<String>,
     pub only_checkpoint: Option<String>,
     pub plan: FramePlan,
+    /// Wayland display name for the proof window. `None` is the session compositor.
+    pub display: Option<String>,
 }
 
 struct Wanted {
@@ -373,6 +375,7 @@ fn capture_live(
         plan: opts.plan.clone(),
         params: *params,
         jobs,
+        display: opts.display.clone(),
     }) {
         Ok(outcome) => {
             for (scene, checkpoint, reason) in outcome.skipped {
