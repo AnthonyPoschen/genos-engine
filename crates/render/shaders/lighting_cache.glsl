@@ -2195,7 +2195,8 @@ const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
 float lighting_sc_firefly_sigma() {
     return uintBitsToFloat(ckeys.key[LIGHTING_ARGS_AT + 13u]);
 }
-// surface_cache.ray_budget. 0 keeps the existing dispatch lists.
+// surface_cache.ray_budget. 0 keeps the existing dispatch lists. A total under
+// the budget is unchanged (lighting_sc_cap_lists).
 uint lighting_sc_ray_budget() {
     return ckeys.key[LIGHTING_ARGS_AT + 11u];
 }
@@ -2321,6 +2322,101 @@ uint lighting_dense_entry(uint d) {
     }
     return LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES + (d - g);
 }
+// Ceiling for one cache round (surface_cache.ray_budget). 0, or a total already
+// under the budget, leaves the lists alone. Each list slot is LIGHTING_CACHE_RAYS
+// rays. The floor's leftover entries go to the largest fractional share, and no
+// list grows past the count it already had. When the ceiling can hold one entry
+// per non-empty list, none of those lists drops to zero. A tighter ceiling keeps
+// the largest lists: it cannot hold one entry for every list.
+void lighting_sc_cap_lists(inout uint a, inout uint b, inout uint c, inout uint g, inout uint s) {
+    uint budget = lighting_sc_ray_budget();
+    uint rays = (a + b + c + g + s) * LIGHTING_CACHE_RAYS;
+    if (budget == 0u || rays <= budget) {
+        return;
+    }
+    uint cap = budget / LIGHTING_CACHE_RAYS;
+    uint orig[5] = uint[5](a, b, c, g, s);
+    uint outv[5] = uint[5](0u, 0u, 0u, 0u, 0u);
+    if (cap == 0u) {
+        a = 0u;
+        b = 0u;
+        c = 0u;
+        g = 0u;
+        s = 0u;
+        return;
+    }
+    uint n = 0u;
+    for (uint i = 0u; i < 5u; i++) {
+        n += uint(orig[i] > 0u);
+    }
+    if (cap < n) {
+        uint left = cap;
+        while (left > 0u) {
+            uint best = 5u;
+            uint bestn = 0u;
+            for (uint i = 0u; i < 5u; i++) {
+                if (outv[i] == 0u && orig[i] > bestn) {
+                    best = i;
+                    bestn = orig[i];
+                }
+            }
+            if (best == 5u) {
+                break;
+            }
+            outv[best] = 1u;
+            left--;
+        }
+    } else {
+        uint give = cap;
+        for (uint i = 0u; i < 5u; i++) {
+            if (orig[i] > 0u) {
+                outv[i] = 1u;
+                give--;
+            }
+        }
+        uint sumw = 0u;
+        for (uint i = 0u; i < 5u; i++) {
+            sumw += orig[i] - outv[i];
+        }
+        float frac[5] = float[5](0.0, 0.0, 0.0, 0.0, 0.0);
+        if (sumw > 0u && give > 0u) {
+            uint used = 0u;
+            for (uint i = 0u; i < 5u; i++) {
+                uint w = orig[i] - outv[i];
+                float share = float(give) * float(w) / float(sumw);
+                uint add = min(w, uint(floor(share)));
+                if (used + add > give) {
+                    add = give - used;
+                }
+                outv[i] += add;
+                used += add;
+                frac[i] = share - float(add);
+            }
+            uint left = give - used;
+            while (left > 0u) {
+                uint best = 5u;
+                float bestf = -1.0;
+                for (uint i = 0u; i < 5u; i++) {
+                    if (outv[i] < orig[i] && frac[i] > bestf) {
+                        best = i;
+                        bestf = frac[i];
+                    }
+                }
+                if (best == 5u) {
+                    break;
+                }
+                outv[best] += 1u;
+                frac[best] = -1.0;
+                left--;
+            }
+        }
+    }
+    a = outv[0];
+    b = outv[1];
+    c = outv[2];
+    g = outv[3];
+    s = outv[4];
+}
 void lighting_write_args() {
     uint a;
     uint b = 0u;
@@ -2356,17 +2452,11 @@ void lighting_write_args() {
         uint first = min(lighting_young_count(), LIGHTING_CACHE_BATCH);
         a = lighting_young_only() ? first : min(LIGHTING_CACHE_BATCH, first + lighting_mature_count());
     }
-    // surface_cache.ray_budget is a ceiling on the lists after the variance
-    // scale. Integer lists round toward zero, so a short list can disappear.
-    uint budget = lighting_sc_ray_budget();
-    uint rays = (a + b + c + g + s) * LIGHTING_CACHE_RAYS;
-    if (budget > 0u && rays > budget) {
-        a = uint(float(a) * float(budget) / float(rays));
-        b = uint(float(b) * float(budget) / float(rays));
-        c = uint(float(c) * float(budget) / float(rays));
-        g = uint(float(g) * float(budget) / float(rays));
-        s = uint(float(s) * float(budget) / float(rays));
-    }
+    // surface_cache.ray_budget is a ceiling. Under budget the lists stay as
+    // they are. Over budget, leftover entries after the floor go back to the
+    // lists, and a list that had work stays non-empty when the ceiling can
+    // hold one 16-ray entry for every non-empty list.
+    lighting_sc_cap_lists(a, b, c, g, s);
     uint e = a + b + c + g + s;
     ckeys.key[LIGHTING_ARGS_AT + 10u] = a + b + c + g;
     ckeys.key[LIGHTING_ARGS_AT + 0u] = max((e * LIGHTING_CACHE_RAYS + 63u) / 64u, 1u);
@@ -2536,18 +2626,9 @@ uint lighting_sc_quarter0(uint slot) {
     return min(floatBitsToUint(cache.v[LIGHTING_SC_OBJ_AT + slot].w), LIGHTING_SC_QUARTERS - 1u);
 }
 uint lighting_sc_entries(uint slot, bool full) {
-    uint n = (full || lighting_world_mode() != 3u) ? LIGHTING_SC_QUARTERS - lighting_sc_quarter0(slot) : 1u;
-    // surface_cache.ray_budget 0 keeps the fixed quarter count. A set budget
-    // scales that count by the short-term relative standard deviation, and
-    // keeps at least one 16-ray entry.
-    if (lighting_sc_ray_budget() == 0u || lighting_world_mode() != 3u || n <= 1u) {
-        return n;
-    }
-    vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
-    float dev = sqrt(max(est.w, 0.0));
-    float lum = max(dot(max(est.rgb, vec3(0.0)), vec3(0.299, 0.587, 0.114)), 1.0e-3);
-    float rel = clamp(dev / lum, 0.0, 1.0);
-    return min(n, max(1u, uint(ceil(rel * float(n)))));
+    // The ray budget is a ceiling on the dispatch lists (lighting_sc_cap_lists),
+    // not a per-entry scale. Under budget this count is the fixed quarter count.
+    return (full || lighting_world_mode() != 3u) ? LIGHTING_SC_QUARTERS - lighting_sc_quarter0(slot) : 1u;
 }
 // WRC scout ray s of this round (entries past the batch's texels): from the eye
 // (a quarter from up to 2 m beside it), half over the sphere and half within
