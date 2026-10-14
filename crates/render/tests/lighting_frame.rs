@@ -11,7 +11,7 @@
 #![cfg_attr(test, expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 #![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 
-//! GI v2's frame path (lighting_gpu.rs): its pipelines build quickly, and its direct light
+//! GI frame path (lighting_gpu.rs): its pipelines build quickly, and its direct light
 //! matches the current frame's direct light.
 
 use std::time::Duration;
@@ -39,8 +39,8 @@ fn shipped_hall() -> World {
     World::from_scene(scene)
 }
 
-/// Longest a GI v2 pipeline may take to build. The SDF march inlined into the current
-/// shaders took more than four minutes on the 4070's compiler; each GI v2 pass has one
+/// Longest a GI pipeline may take to build. The SDF march inlined into the current
+/// shaders took more than four minutes on the 4070's compiler; each GI pass has one
 /// trace site and builds in well under a second there. Lavapipe is slower, so the
 /// bound is loose; `GENOS_PIPELINE_LIMIT` (seconds) tightens it on a real GPU.
 fn pipeline_limit() -> Duration {
@@ -118,7 +118,7 @@ fn the_bounce_adds_light_to_the_direct_view() {
     assert!(lit(&full) > lit(&direct), "the bounce adds light");
 }
 
-/// A dark room but for one emissive glTF cube: GI v2 draws the cube's own light,
+/// A dark room but for one emissive glTF cube: GI draws the cube's own light,
 /// and rays that hit it carry that light onto the floor in front of it.
 #[test]
 fn lighting_draws_emitted_light_and_bounces_it() {
@@ -211,7 +211,7 @@ fn lighting_draws_emitted_light_and_bounces_it() {
     );
 }
 
-/// Rays per placed probe GI v2's screen probes held in the last frame drawn.
+/// Rays per placed probe GI's screen probes held in the last frame drawn.
 fn samples_per_probe(renderer: &mut Renderer) -> f32 {
     let [rays, probes] = renderer.lighting_probe_samples();
     assert!(probes > 0, "the probes are placed");
@@ -242,7 +242,7 @@ fn changed_pixels(a: &[u8], b: &[u8]) -> usize {
     a.iter().zip(b).filter(|(x, y)| x.abs_diff(**y) > 2).count()
 }
 
-/// GI v2 keeps visibility (ray hits), never light: a lamp that moves, dims or turns
+/// GI keeps visibility (ray hits), never light: a lamp that moves, dims or turns
 /// off, and a sun or sky that changes, show in full on the next frame while every
 /// probe keeps all its kept rays, the far ones and the ones the lamp lights alike.
 #[test]

@@ -3,7 +3,7 @@
 #![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 #![cfg_attr(test, expect(clippy::ignore_without_reason, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 
-//! GI v2 phase 1 gate: the stress building traced as triangles matches the analytic
+//! GI mesh gate: the stress building traced as triangles matches the analytic
 //! trace within the reference's noise, at the five `reference_views.rhai` poses.
 //!
 //! CPU only (no window, no GPU). Heavy, so ignored by default:

@@ -20,7 +20,7 @@ fn main() {
     let wire = compile("shaders/wire.frag", &out.join("wire.frag.spv"));
     let audio = compile("shaders/transmit.comp", &out.join("transmit.comp.spv"));
     let fxaa = compile("shaders/fxaa.comp", &out.join("fxaa.comp.spv"));
-    // Not embedded: catches errors in GI v2 shader pieces no pass includes yet.
+    // Not embedded: catches errors in lighting shader pieces no pass includes yet.
     compile(
         "shaders/lighting_check.comp",
         &out.join("lighting_check.comp.spv"),
@@ -53,7 +53,7 @@ fn main() {
         ("LIGHTING_ATROUS_SPV", "lighting_atrous.comp"),
         // Compiled into the binary. The pipeline is created the first time a
         // small sun step asks for it, not at startup, so the nine lighting
-        // pipelines and their compile stay the gi-v2 set.
+        // pipelines and their compile stay the lighting set.
         ("SUN_COMPOSE_SPV", "lighting_sun_compose.comp"),
     ]
     .iter()

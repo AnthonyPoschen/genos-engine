@@ -563,9 +563,9 @@ mod tests {
     use super::*;
     use crate::building::LightMix;
 
-    /// Every knob `gi-v2` published on the stress stage, including the preset
+    /// Every GI knob published on the stress stage, including the preset
     /// and bounce knobs and full effort.
-    const GI_V2_KNOBS: &[&str] = &[
+    const GI_KNOBS: &[&str] = &[
         "time_of_day",
         "sun_speed",
         "sun",
@@ -616,7 +616,7 @@ mod tests {
     ];
 
     #[test]
-    fn the_stage_keeps_every_gi_v2_knob() {
+    fn the_stage_keeps_every_gi_knob() {
         let mut stage = Stage::new(
             Scale::SMALL,
             1,
@@ -629,7 +629,7 @@ mod tests {
             0.12,
             120.0,
         );
-        for name in GI_V2_KNOBS {
+        for name in GI_KNOBS {
             let value = stage
                 .knobs()
                 .into_iter()

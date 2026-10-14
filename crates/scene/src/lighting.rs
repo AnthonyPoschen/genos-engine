@@ -360,7 +360,7 @@ pub struct DenoiserSettings {
     /// adaptive is on.
     pub variance_threshold: f32,
     /// `denoise_launch=screen`: picture-sized wavelet over this frame's visible
-    /// fine texels. False is `hash`, the gi-v2 slot launch. Preset high uses
+    /// fine texels. False is `hash`, the baseline GI slot launch. Preset high uses
     /// screen. The other presets use hash. `--denoise-launch` and
     /// `GENOS_LIGHTING_DENOISE_LAUNCH` override the preset.
     pub screen: bool,
@@ -369,7 +369,7 @@ pub struct DenoiserSettings {
 impl DenoiserSettings {
     /// Full-resolution scalar wavelet, adaptive off.
     ///
-    /// That is the gi-v2 kernel. It has its own pipeline so the adaptive branch
+    /// That is the baseline GI kernel. It has its own pipeline so the adaptive branch
     /// is not in the shader the 4070 runs for high.
     pub fn plain(self) -> bool {
         !self.adaptive
