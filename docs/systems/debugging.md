@@ -199,7 +199,7 @@ On a box without a GPU this runs on lavapipe under a headless Weston
 minutes compiling pipelines.
 
 Scripted verdicts (`docs/VERIFY.md`) judge a repeat of the same picture or
-frame time. They print one PASS, FAIL, or UNSURE line and leave the evidence
+frame time. They print one PASS, FAIL, UNSURE, or ERROR line and leave the evidence
 under `./genos-debug/verdict/`. They are on probation.
 
 The report directory holds `report.md` (checks, log, every step with its reply,

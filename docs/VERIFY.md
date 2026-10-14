@@ -14,7 +14,7 @@ A check graduates only after a run of correct verdicts.
 Every script prints one line and nothing else on stdout:
 
 ```text
-PASS|FAIL|UNSURE <short reason> evidence=<dir>
+PASS|FAIL|UNSURE|ERROR <short reason> evidence=<dir>
 ```
 
 | Exit | Meaning |
@@ -22,7 +22,7 @@ PASS|FAIL|UNSURE <short reason> evidence=<dir>
 | 0 | PASS |
 | 1 | FAIL |
 | 2 | UNSURE. Read the evidence. Ask a person only if that still does not decide. |
-| 3 | The check broke (`UNSURE check-broke …`). Not a product fail. |
+| 3 | ERROR. The check itself broke. Not a product fail. |
 
 Evidence (screenshots, diff images, CSV, logs) goes to
 `./genos-debug/verdict/<kind>/<sha>/`, or to `--out`. The line is also

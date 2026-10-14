@@ -86,7 +86,7 @@ class PrecheckTests(unittest.TestCase):
         proc = run_script(["--dry-run", "--out", "genos-debug/verdict/precheck/unknown"])
         self.assertEqual(proc.returncode, 3, proc.stdout)
         self.assertEqual(len(proc.stdout.splitlines()), 1)
-        self.assertIn("check-broke missing --base", proc.stdout)
+        self.assertTrue(proc.stdout.startswith("ERROR missing --base "))
 
     def test_flag_wins_over_the_env_mirror(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -239,7 +239,8 @@ class PrecheckTests(unittest.TestCase):
                 ]
             )
         self.assertEqual(proc.returncode, 3)
-        self.assertIn("check-broke", proc.stdout)
+        self.assertTrue(proc.stdout.startswith("ERROR "))
+        self.assertNotIn("UNSURE", proc.stdout)
 
 
 if __name__ == "__main__":

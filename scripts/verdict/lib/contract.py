@@ -12,8 +12,9 @@ from pathlib import Path
 PASS = "PASS"
 FAIL = "FAIL"
 UNSURE = "UNSURE"
-CODE = {PASS: 0, FAIL: 1, UNSURE: 2}
-BROKEN = 3
+ERROR = "ERROR"
+CODE = {PASS: 0, FAIL: 1, UNSURE: 2, ERROR: 3}
+BROKEN = CODE[ERROR]
 
 
 class Broken(Exception):
@@ -75,14 +76,14 @@ def emit(verdict: Verdict) -> None:
         verdict.evidence.mkdir(parents=True, exist_ok=True)
         (verdict.evidence / "verdict.txt").write_text(line + "\n", encoding="utf-8")
     except OSError as err:
-        print(f"{UNSURE} check-broke {err} evidence={verdict.evidence}", flush=True)
+        print(f"{ERROR} {one_line(str(err))} evidence={verdict.evidence}", flush=True)
         raise SystemExit(BROKEN) from err
     print(line, flush=True)
     raise SystemExit(verdict.exit_code())
 
 
 def broken(reason: str, evidence: Path) -> None:
-    emit(Verdict(UNSURE, f"check-broke {reason}", evidence, BROKEN))
+    emit(Verdict(ERROR, reason, evidence))
 
 
 def add_common(parser: argparse.ArgumentParser) -> None:

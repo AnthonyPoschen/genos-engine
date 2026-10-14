@@ -35,7 +35,8 @@ class NoiseTests(unittest.TestCase):
     def test_dry_run_requires_a_display(self) -> None:
         proc = run_script(["--dry-run", "--repeats", "3", "--base", "gi-v2", "--scene", "stress", "--checkpoint", "hall"])
         self.assertEqual(proc.returncode, 3, proc.stdout)
-        self.assertIn("missing --display", proc.stdout)
+        self.assertTrue(proc.stdout.startswith("ERROR missing --display "))
+        self.assertNotIn("UNSURE", proc.stdout)
         self.assertEqual(len(proc.stdout.splitlines()), 1)
 
     def test_dry_run_writes_capture_ui_false(self) -> None:
