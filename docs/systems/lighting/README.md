@@ -192,6 +192,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [SUN](experiments/SUN-small-sun-step.md) | 2026-10-13 | Small sun step: one compose walks the band; direct every frame; four-frame catch-up | 4070 compose rose 2.78 to 3.17 before the single pass; retest decides merge | this change |
 | Lamp pick | 2026-10-13 | Weighted point-lamp samples (Talbot systematic, Bitterli Algorithm 6). The sun stays exact. GI presets use hits. Reuse is experimental | lavapipe picture and ray-count tests; 4070 hits within noise, reuse p99 26–36 moving and 9–17 still | this change |
 | [LSMOOTH](experiments/LSMOOTH-lighter-smoothing.md) | 2026-10-12 | Lighter smoothing | dropped (Anthony) | none |
+| [200FPS](research/path-to-200fps.md) | 2026-10-13 | Cost model and a 5 ms budget for the moving stress scene at 1080p | research | none |
 
 # Architecture and component notes (history kept as written)
 
