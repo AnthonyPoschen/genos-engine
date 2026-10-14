@@ -21,6 +21,9 @@ Counts below are unique source locations from `cargo clippy --workspace --all-ta
 | `dbg_macro` | deny | 0 | 0 | 2026-10-14 | `dbg!` is not a log. |
 | `wildcard_enum_match_arm` | deny | 37 | 17 | 2026-10-14 | `_` on an enum drops a new variant on the floor. |
 | `as_conversions` | deny | 1737 (252 test-only) | 122 | 2026-10-14 | A raw `as` truncates or wraps. GPU buffer sizes are the case that matters. |
+| `cast_possible_truncation` | warn | 443 lines | | 2026-10-14 | Lossy `as`. Warn on the backlog, deny a new line. See the burndown table. |
+| `cast_possible_wrap` | warn | 77 lines | | 2026-10-14 | Same family. A line in more than one of these three counts once in the 560. |
+| `cast_sign_loss` | warn | 196 lines | | 2026-10-14 | Same family. |
 | `undocumented_unsafe_blocks` | deny | 125 | 12 | 2026-10-14 | Every `unsafe` block needs a `// SAFETY:` comment. Vulkan and OS FFI are the usual sites. |
 | `pedantic` | warn | 3068 | (100 lint names) | 2026-10-14 | The extra clippy pass. Priority `-1` so the denies above still win. |
 | `disallowed_methods` | deny | 24 | 7 | 2026-10-14 | See `clippy.toml`. |
@@ -66,9 +69,172 @@ One real bug found while turning the lints on: `crates/ui/src/profile.rs` comput
 | `std::env::set_var` | 2026-10-14 | A tool publishes intent with a command-line argument. The argument wins. Mutating the process environment is not that argument. | `std::env::set_var("GENOS_LIGHTING_PRESET", "high");` |
 | `std::env::remove_var` | 2026-10-14 | Clearing the environment is the same kind of switch. | `std::env::remove_var("GENOS_LIGHTING_PRESET");` |
 | `std::env::home_dir` | 2026-10-14 | Output lives under `./genos-debug/<kind>/`. Do not ask for a home directory. | `let root = std::env::home_dir().unwrap();` |
+| `std::env::var` | 2026-10-14 | Library code hides a tuning knob from the caller and from tests. Read it in `main` and pass the config struct. | `std::env::var("GENOS_LIGHTING_TILE")` |
+| `std::env::var_os` | 2026-10-14 | Same rule as `std::env::var`. | `std::env::var_os("GENOS_LIGHTING_DEBUG")` |
+| `std::thread::sleep` | 2026-10-14 | A fixed sleep wastes time when the event is early and flakes when it is late. | `std::thread::sleep(Duration::from_millis(4000))` |
 | `ash::Entry`, `ash::Instance`, `ash::Device` | 2026-10-14 | ADR 0007. The renderer loads `libvulkan` itself. | `fn open() -> ash::Device { unimplemented!() }` |
 
-`lint/fail/` is not a workspace member, so these examples are not compiled with the workspace. The method and type bans are the `disallowed_*` rows in the table above, and the 24 `set_var` sites are the backlog.
+`lint/fail/` is not a workspace member, so those examples are not compiled with the workspace. `lint/fixture/fail` is its own package. `scripts/lint-clippy-fixture.py` expects clippy to reject `std::env::var`, `std::env::var_os`, and `std::thread::sleep` there, and expects `lint/fixture/pass` to stay clean. The 24 `set_var` sites are still the backlog for that method.
+
+`std::env::var` and `std::env::var_os` are denied in every crate. Existing reads carry a function `#[allow(clippy::disallowed_methods, reason = "...")]`. A new read in a function that does not already have that allow fails. Build scripts are allowed at the file: Cargo passes `OUT_DIR` and the target triple. `GENOS_MCP_PORT` stays allowed on `listen_port` because the discovery directory is the primary path and that variable is the documented override. `HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, and `WAYLAND_DISPLAY` stay allowed on the one function that reads them.
+
+These files already `expect` `disallowed_methods` for `set_var`, so a new `env::var` in the same file is not gated yet: `examples/stress/src/main.rs`, `examples/stress/src/lighting_ref/capture.rs`, `debug/lighting/src/main.rs`, `crates/render/tests/lighting_frame.rs`, `crates/render/tests/lighting_sun.rs`, `crates/render/tests/lighting_toggles.rs`, `crates/debug/tests/lighting_mcp.rs`. They are binaries and tests. The renderer library is gated per function.
+
+### TODO: renderer tuning reads
+
+The renderer still reads 36 environment names itself. Each one should move onto the lighting config struct. Thirteen already have a CLI flag; the read should use the struct the flag writes. Twenty-three have no flag yet. Do not add a new `kind = "todo"` row while moving them: add the flag, then mark the name `mirror`.
+
+| Variable | Where | CLI today |
+|---|---|---|
+| `GENOS_GPU_DISPATCH` | `crates/render/src/gpu.rs:2315` | none |
+| `GENOS_GPU_TIMES` | `crates/render/src/gpu.rs:1448` | `--gpu-times` |
+| `GENOS_LIGHTING_ASYNC` | `crates/render/src/lighting_gpu.rs:373` | none |
+| `GENOS_LIGHTING_ATROUS_DIRTY` | `crates/render/src/lighting_gpu.rs:2883` | none |
+| `GENOS_LIGHTING_BORROW` | `crates/render/src/lighting_gpu.rs:2191` | none |
+| `GENOS_LIGHTING_CACHE_HZ` | `crates/render/src/lighting_gpu.rs:398` | none |
+| `GENOS_LIGHTING_CACHE_PICKS` | `crates/render/src/lighting_gpu.rs:2182` | none |
+| `GENOS_LIGHTING_CATCH_UP` | `crates/render/src/lighting_gpu.rs:3195` | none |
+| `GENOS_LIGHTING_COMPOSE_ALL` | `crates/render/src/lighting_gpu.rs:2231` | `--full-effort` |
+| `GENOS_LIGHTING_DEBUG` | `crates/render/src/lighting_gpu.rs:3199` | `--lighting-debug` |
+| `GENOS_LIGHTING_DUMP` | `crates/render/src/lighting_gpu.rs:2614` | none |
+| `GENOS_LIGHTING_DUMP_DIR` | `crates/render/src/lighting_gpu.rs:2668` | none |
+| `GENOS_LIGHTING_FILL` | `crates/render/src/lighting_gpu.rs:2183` | none |
+| `GENOS_LIGHTING_FULL_EFFORT` | `crates/render/src/lighting_gpu.rs:3188` | `--lighting-full-effort` |
+| `GENOS_LIGHTING_LAMP_PICK_DIAG` | `crates/render/src/lighting_dispatch.rs:91`, `crates/render/src/gpu.rs:2205` | none |
+| `GENOS_LIGHTING_MOVED_DROP` | `crates/render/src/lighting_gpu.rs:2189` | none |
+| `GENOS_LIGHTING_SC_FLAGS` | `crates/render/src/lighting_gpu.rs:2899` | none |
+| `GENOS_LIGHTING_SC_LOCAL` | `crates/render/src/lighting_gpu.rs:2909` | none |
+| `GENOS_LIGHTING_SC_SETTLE` | `crates/render/src/lighting_gpu.rs:1101` | none |
+| `GENOS_LIGHTING_SC_TRACE` | `crates/render/src/lighting_gpu.rs:1725`, `crates/render/src/lighting_gpu.rs:2870` | none |
+| `GENOS_LIGHTING_SUN` | `crates/render/src/lighting_gpu.rs:3185` | `--lighting-sun` |
+| `GENOS_LIGHTING_SUN_BANDS` | `crates/render/src/lighting_gpu.rs:3191` | `--lighting-sun-bands` |
+| `GENOS_LIGHTING_TILE` | `crates/render/src/lighting_gpu.rs:35` | none |
+| `GENOS_LIGHTING_TOGGLES` | `crates/render/src/lighting_gpu.rs:3121` | none |
+| `GENOS_LIGHTING_TOGGLES_FILE` | `crates/render/src/lighting_gpu.rs:3122` | none |
+| `GENOS_LIGHTING_UNFILLED` | `crates/render/src/unfilled.rs:193` | `--unfilled` |
+| `GENOS_LIGHTING_UNFILLED_DUMP` | `crates/render/src/unfilled.rs:195` | `--unfilled-dump` |
+| `GENOS_LIGHTING_UNFILLED_TINT` | `crates/render/src/unfilled.rs:194` | `--unfilled-tint` |
+| `GENOS_LIGHTING_URGENT` | `crates/render/src/lighting_gpu.rs:2190` | none |
+| `GENOS_LIGHTING_WORLD_CAP` | `crates/render/src/lighting_gpu.rs:1097`, `crates/render/src/lighting_gpu.rs:2010` | none |
+| `GENOS_LIGHTING_YOUNG_ONLY` | `crates/render/src/lighting_gpu.rs:392` | none |
+| `GENOS_SCENE_DELTA` | `crates/render/src/lib.rs:56` | none |
+| `GENOS_UNFILLED_MAX_AGE_SECS` | `crates/render/src/unfilled.rs:198` | `--unfilled-max-age-secs` |
+| `GENOS_UNFILLED_MAX_BYTES` | `crates/render/src/unfilled.rs:197` | `--unfilled-max-bytes` |
+| `GENOS_UNFILLED_MAX_FOLDERS` | `crates/render/src/unfilled.rs:196` | `--unfilled-max-folders` |
+| `GENOS_UNFILLED_SESSION_CAP` | `crates/render/src/unfilled.rs:199` | `--unfilled-session-cap` |
+
+`crates/scene/src/lighting.rs` `apply_env` still reads the same names into `LightingSettings`. That function is allowed until `main` passes the struct in. It is not a second copy of this list.
+
+### TODO: fixed sleeps
+
+`std::thread::sleep` is denied. Existing calls are allowed on the function.
+
+The pointer-lock test in `crates/window/src/lib.rs` (`the_first_click_locks_the_pointer_and_escape_releases_it`) waits on the clock instead of a window event:
+
+| Line | Wait |
+|---|---|
+| 451 | 40 ms, polling for the toplevel |
+| 466 | 300 ms after the pointer move |
+| 479 | 5 s after the click, for the lock |
+| 482 | 4 s holding Escape |
+| 484 | 4 s after the key release |
+
+Replace the 4 s and 5 s waits with an event or a timeout wait. The 40 ms and 300 ms waits in that test go with them.
+
+Other allowed sleeps, same rule, shorter: `crates/audio/src/device.rs` (5 ms at 334, 10 ms at 369, 10 ms at 513), `crates/mcp/src/http.rs` (20 ms at 128), `crates/mcp/src/command.rs` (1 ms at 153, test), `crates/mcp/tests/live_session.rs` (10 ms at 344, test).
+
+## Lossy casts
+
+`cast_possible_truncation`, `cast_possible_wrap`, and `cast_sign_loss` are `warn` (added 2026-10-14). `as_conversions` stays deny. A lossy `as` truncates, wraps, or drops the sign. Use `From` or `TryFrom`.
+
+`scripts/lint-clippy.py` runs `cargo clippy --workspace --all-targets -- -D warnings` and `--force-warn` on these three, so the existing `expect` lines do not hide them from the ceiling. `lint/lossy-cast-baseline.txt` is the per-file count of unique lines. A line that trips more than one of the three counts once. A file above its count fails. A file with no row starts at zero, so the first lossy cast there fails. `genos-math` is the crate already at zero.
+
+Measured 2026-10-14: **560** unique lines. Per lint, before collapsing a line that trips two: truncation 443, sign loss 196, wrap 77.
+
+| Crate | src | tests | examples | Total |
+|---|---:|---:|---:|---:|
+| `render` | 147 | 47 | 0 | 194 |
+| `load` | 64 | 5 | 0 | 69 |
+| `debug` | 63 | 0 | 0 | 63 |
+| `examples/stress` | 43 | 10 | 0 | 53 |
+| `lighting-ref` | 36 | 0 | 0 | 36 |
+| `ui` | 17 | 11 | 0 | 28 |
+| `audio` | 6 | 8 | 3 | 17 |
+| `debug/lighting` | 17 | 0 | 0 | 17 |
+| `bake` | 16 | 0 | 0 | 16 |
+| `gpuref` | 13 | 0 | 0 | 13 |
+| `physics` | 10 | 0 | 0 | 10 |
+| `mesh` | 5 | 2 | 0 | 7 |
+| `examples/camera` | 7 | 0 | 0 | 7 |
+| `window` | 6 | 0 | 0 | 6 |
+| `mcp` | 4 | 1 | 0 | 5 |
+| `scene` | 3 | 2 | 0 | 5 |
+| `audio-check` | 0 | 5 | 0 | 5 |
+| `load-check` | 0 | 3 | 0 | 3 |
+| `input` | 2 | 0 | 0 | 2 |
+| `json` | 2 | 0 | 0 | 2 |
+| `debug/scene-lib` | 2 | 0 | 0 | 2 |
+| `math` | 0 | 0 | 0 | 0 |
+| **Total** | **463** | **94** | **3** | **560** |
+
+`examples/stress` and the `debug/` tools are binaries. Their `src` column is that package, not `crates/*/src`. The 394 lines under `crates/*/src` are the library burndown (463 minus the 69 binary-package lines).
+
+Bad cast (the lint warns, and a new line fails the ceiling):
+
+```rust
+let bytes = words.len() as u32;
+```
+
+### TODO: lossy-cast burndown
+
+Delete the casts, then lower that file's count in `lint/lossy-cast-baseline.txt` in the same change. Do not raise a count to silence a new cast. Start outside `crates/render/src/gpu.rs` so the lighting files stay stable. The GPU length case is also `genos-gpu-len-cast`.
+
+## Shader constants
+
+`scripts/lint-shader-constants.py`, added 2026-10-14. In `*.glsl`, `*.comp`, `*.vert`, and `*.frag`, a fractional literal that is not exactly `0` or `1` must sit on a `const` or `#define` line. `0.0`, `1.0`, and `-1.0` stay allowed. Integers stay allowed. `lint/fail/shader_magic.comp` is the bad example. `lint/pass/shader_named.glsl` is the shape that stays clean.
+
+`lint/shader-magic-baseline.txt` is the per-file count. A higher count fails. Measured 2026-10-14: **867** literals, 26 files.
+
+| File | Literals |
+|---|---:|
+| `crates/render/shaders/lighting_cache.glsl` | 334 |
+| `crates/render/shaders/lighting_cache.comp` | 88 |
+| `crates/render/shaders/lighting_common.glsl` | 46 |
+| `crates/render/shaders/scene_rays.glsl` | 46 |
+| `crates/render/shaders/lighting_direct.comp` | 42 |
+| `crates/render/shaders/lighting_compact.comp` | 40 |
+| `crates/render/shaders/lighting_compose.comp` | 39 |
+| `crates/render/shaders/lighting_sun_compose.comp` | 38 |
+| `crates/render/shaders/fxaa.comp` | 30 |
+| `crates/render/shaders/lighting_gather.comp` | 28 |
+| `crates/gpuref/shaders/path.comp` | 19 |
+| `crates/render/shaders/mesh_field.glsl` | 18 |
+| `crates/render/shaders/gbuffer.frag` | 14 |
+| `crates/render/shaders/lighting_trace.comp` | 12 |
+| `crates/render/shaders/lighting_filter.comp` | 11 |
+| `crates/render/shaders/lighting_screen.comp` | 10 |
+| `crates/render/shaders/material_atlas.glsl` | 10 |
+| `crates/render/shaders/overlay.frag` | 10 |
+| `crates/render/shaders/lighting_place.comp` | 8 |
+| `crates/render/shaders/lighting_pack.glsl` | 6 |
+| `crates/render/shaders/lighting_lamp_pick.glsl` | 5 |
+| `crates/render/shaders/dither.glsl` | 4 |
+| `crates/render/shaders/lighting_check.comp` | 4 |
+| `crates/render/shaders/wire.frag` | 3 |
+| `crates/render/shaders/lighting_atrous.comp` | 1 |
+| `crates/render/shaders/transmit.comp` | 1 |
+
+Bad shader (the check fails this):
+
+```glsl
+float shade(float x) {
+    return x * 0.25 + 0.1;
+}
+```
+
+### TODO: name the shader numbers
+
+Move each literal onto a `const` or `#define` and lower that file's count. A new shader with a bare fraction fails immediately. Start outside `lighting_cache.glsl`.
 
 ## cargo-deny
 

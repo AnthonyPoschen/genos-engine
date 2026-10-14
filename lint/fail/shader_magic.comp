@@ -1,0 +1,5 @@
+#version 450
+
+float shade(float x) {
+    return x * 0.25 + 0.1;
+}

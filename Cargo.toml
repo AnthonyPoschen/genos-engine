@@ -42,3 +42,8 @@ as_conversions = "deny"
 undocumented_unsafe_blocks = "deny"
 disallowed_methods = "deny"
 disallowed_types = "deny"
+# Lossy `as` stays a warning on the sites already in the tree.
+# scripts/lint-clippy.py denies a count above lint/lossy-cast-baseline.txt.
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
