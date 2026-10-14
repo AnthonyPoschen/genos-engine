@@ -1,4 +1,4 @@
-// GI v2 surface light cache (stand-in for the surface cache cards of phase 4).
+// GI surface light cache (stand-in for the surface cache cards of phase 4).
 //
 // A hash table of small surface patches: a cell of the world grid (25 cm near the
 // eye, doubling with distance) on one of six facing axes. Each patch keeps a surface
@@ -132,7 +132,7 @@ float lighting_denoise_variance() {
 }
 // LIGHTING_DENOISE_PLAIN is the high pipeline. Adaptive passes are compiled
 // out of it. That branch lives in the other a-trous pipeline. On the 4070 the
-// extra branches dropped occupancy of this kernel (11.7 ms vs the gi-v2 7.5 ms)
+// extra branches dropped occupancy of this kernel (11.7 ms vs the GI tip 7.5 ms)
 // even with the bits clear. Half-res and tiles were removed after they lost
 // the A/B (S79).
 #ifdef LIGHTING_DENOISE_PLAIN
@@ -3079,7 +3079,7 @@ bool lighting_svgf_active(uint s) {
 }
 #ifdef GENOS_SUN_SHADER
 // Sun amortise words, after the a-trous meta (391 words). The default compose
-// does not compile this block, so its SPIR-V stays the gi-v2 compose.
+// does not compile this block, so its SPIR-V stays the GI compose.
 const uint LIGHTING_SUN_META = 391u;
 const uint LIGHTING_SUN_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS + LIGHTING_SUN_META;
 const uint LIGHTING_SUN_SMALL = 1u;

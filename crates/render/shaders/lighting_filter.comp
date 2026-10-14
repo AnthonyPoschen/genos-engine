@@ -1,5 +1,5 @@
 #version 450
-// GI v2 screen probes, pass 5: spatial filter in direction space, Lumen's recipe
+// GI screen probes, pass 5: spatial filter in direction space, Lumen's recipe
 // (lumen-digest.md 1.4), run three times (lighting_filter_round: cells 0 -> 1 -> 0 ->
 // SH). Each cell of a probe becomes the weighted mean of its own light and the
 // light its 3 x 3 neighbours saw in the same direction (their cell that holds this

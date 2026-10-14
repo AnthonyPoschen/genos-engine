@@ -1,4 +1,4 @@
-// GI v2 compute passes (lighting_gpu.rs): shared bindings, push constants and layout of
+// GI compute passes (lighting_gpu.rs): shared bindings, push constants and layout of
 // the work buffer. Every pass that includes this has at most one trace site
 // (trace_ray or trace_occluded, once): these functions are inlined wherever they
 // are called, and many sites stalled the NVIDIA compiler and ran lavapipe out of

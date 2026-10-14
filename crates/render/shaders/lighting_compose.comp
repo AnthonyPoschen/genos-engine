@@ -3,7 +3,7 @@
 // here. That walk, compiled into this dispatch, is what made a moving frame's
 // compose tens of milliseconds and the NVIDIA compiler sit for minutes. A
 // small sun step uses lighting_sun_compose.comp instead.
-// GI v2 final pass: per pixel, emitted light, then direct irradiance plus the
+// GI final pass: per pixel, emitted light, then direct irradiance plus the
 // screen probes' irradiance
 // (the 4 nearest probes, weighted by plane distance and normal; the light cache
 // where none matches), through the same

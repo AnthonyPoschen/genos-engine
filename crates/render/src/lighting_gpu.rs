@@ -56,7 +56,7 @@ pub(crate) const LIGHTING_STRATA: u32 = 8;
 const LIGHTING_CHANGES: usize = 64;
 /// Vec4s before the bounds in the changes block (lighting_common.glsl LIGHTING_CHANGE_HEAD).
 const LIGHTING_CHANGE_HEAD: usize = 5;
-/// GI v2 counts as settled once the scene block (camera included) has stayed the
+/// GI counts as settled once the scene block (camera included) has stayed the
 /// same for this many frames (the screen probes average up to 32 frames' rays,
 /// lighting_gather.comp) and a full sweep of the light cache changed no patch
 /// by more than LIGHTING_SETTLE_CHANGE.
@@ -131,7 +131,7 @@ pub(crate) struct Lighting {
     /// Frames the probes ran: which views block is last frame's (its parity).
     probe_runs: u32,
     frame: u32,
-    /// Hash of what GI v2 sees (scene block, traced and drawn meshes), and frames
+    /// Hash of what GI sees (scene block, traced and drawn meshes), and frames
     /// it has stayed the same.
     scene_hash: u64,
     still: u32,
@@ -971,7 +971,7 @@ impl Gpu {
         // default compose does not write it. High (refresh every frame) is
         // picture + glow + that slice. The screen wavelet appends two vec4
         // slices (32 bytes a pixel) after that, so it does not alias the bounce.
-        // Hash keeps the gi-v2 buffer. Preset high uses the screen slices.
+        // Hash keeps the GI buffer. Preset high uses the screen slices.
         let screen = u64::from(settings.denoiser.enabled && settings.denoiser.screen);
         self.lighting.out = self.make_buffer(
             pixels * (12 + 4 * hist + 32 * screen),
@@ -1167,7 +1167,7 @@ impl Gpu {
     }
 
     /// Build the sun compose pipeline the first time a small step needs it.
-    /// Startup still compiles the nine gi-v2 pipelines only.
+    /// Startup still compiles the nine lighting pipelines only.
     fn ensure_sun_pipe(&mut self) -> Result<(), String> {
         if !self.lighting.sun_pipe.is_null() {
             return Ok(());
@@ -2868,7 +2868,7 @@ fn lighting_counts_light_on_cpu(world_mode: u32, probe_only: bool, counters_read
     probe_only || (world_mode == 3 && !counters_read)
 }
 
-// Defaults with no env set (S54K, gi-v2): GI v2, the surface cache, cap 64, the
+// Defaults with no env set (S54K): GI, the surface cache, cap 64, the
 // S49 flag set and object-local texels. Each env var still overrides.
 const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
 const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
@@ -3614,7 +3614,7 @@ mod sun_step {
         assert!(check_lighting_sun_arg("--scale", None).is_ok());
     }
 
-    /// The picture compose stays the gi-v2 shader. The sun compose is that pass
+    /// The picture compose stays the GI shader. The sun compose is that pass
     /// plus the sun words, not an occluder walk copied into both.
     #[test]
     fn compose_spirv_stays_near_the_picture_pass() {

@@ -1,5 +1,5 @@
 #version 450
-// GI v2 screen probes, pass 1: place one probe per tile on the G-buffer surface at
+// GI screen probes, pass 1: place one probe per tile on the G-buffer surface at
 // the tile's centre, or the first of four inner points that shows a surface. The
 // probe's place also opens this frame's stratum of its kept hits (lighting_common.glsl).
 #extension GL_GOOGLE_include_directive : require

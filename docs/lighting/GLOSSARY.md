@@ -1,6 +1,6 @@
-# Lighting glossary (genos-engine, gi-v2 @ 2abeb0dd)
+# Lighting glossary (genos-engine)
 
-Status: authoritative (see AGENTS.md, Lighting terminology). Audited against gi-v2 @ 2abeb0dd on 2026-10-14.
+Status: authoritative (see AGENTS.md, Lighting terminology). Audited 2026-10-14.
 Purpose: high-level communication and quick comparison of external techniques. One term, one meaning.
 Entry format: plain definition (one or two lines), **Role**, **Literature** (equivalents), **More detail**.
 Links are relative to this file. GIBS.md is [research/GIBS.md](research/GIBS.md).

@@ -5,7 +5,7 @@
 // every pixel. The probe walk runs only for this frame's probe row and page
 // column, and for a pixel whose stored bounce is still empty. No occluder
 // walk lives here. No second pass.
-// GI v2 final pass: per pixel, emitted light, then direct irradiance plus the
+// GI final pass: per pixel, emitted light, then direct irradiance plus the
 // screen probes' irradiance
 // (the 4 nearest probes, weighted by plane distance and normal; the light cache
 // where none matches), through the same

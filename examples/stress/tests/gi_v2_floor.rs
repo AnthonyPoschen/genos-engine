@@ -7,17 +7,17 @@
 #![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
 #![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 
-//! Still stress hall against gi-v2, not against this branch's hash path.
+//! Still stress hall against the GI tip, not against this branch's hash path.
 //!
-//! Slot claims race across processes, so two gi-v2 runs of the same scene are
+//! Slot claims race across processes, so two GI tip runs of the same scene are
 //! the noise floor. This process must land inside that floor. Set
-//! `GENOS_PICTURE_DUMP` to write one RGBA8 frame (the gi-v2 worktree does
+//! `GENOS_PICTURE_DUMP` to write one RGBA8 frame (the GI tip worktree does
 //! this). Set `GENOS_GI_V2_A` and `GENOS_GI_V2_B` to those two dumps, and
 //! `GENOS_PICTURE_PRESET` to `medium` or `high`. Without the variables the
 //! test does not draw.
 //!
 //! Preset high launches the screen wavelet. This gate compares the hash
-//! launch to gi-v2, so it sets `denoise_launch=hash`.
+//! launch to the GI tip, so it sets `denoise_launch=hash`.
 
 use std::sync::Mutex;
 
@@ -126,7 +126,7 @@ fn mean_p99(reference: &[u8], image: &[u8]) -> (f64, f64) {
     clippy::disallowed_methods,
     reason = "a binary or harness reads the environment and passes the value down. docs/LINT_RULES.md"
 )]
-fn hash_launch_matches_gi_v2_within_cross_process_noise() {
+fn hash_launch_matches_gi_tip_within_cross_process_noise() {
     let dump = std::env::var("GENOS_PICTURE_DUMP").ok();
     let preset = std::env::var("GENOS_PICTURE_PRESET").unwrap_or_else(|_| "medium".into());
     if let Some(path) = dump {
@@ -136,7 +136,7 @@ fn hash_launch_matches_gi_v2_within_cross_process_noise() {
         return;
     }
     let Ok(path_a) = std::env::var("GENOS_GI_V2_A") else {
-        eprintln!("gi-v2 floor skipped: set GENOS_GI_V2_A and GENOS_GI_V2_B");
+        eprintln!("GI floor skipped: set GENOS_GI_V2_A and GENOS_GI_V2_B");
         return;
     };
     let path_b = std::env::var("GENOS_GI_V2_B").expect("GENOS_GI_V2_B");
@@ -153,14 +153,14 @@ fn hash_launch_matches_gi_v2_within_cross_process_noise() {
     };
     let limit = cross_p99 + 1.0 / 3.0;
     eprintln!(
-        "gi-v2 {preset} cross {cross_mean:.3}/{cross_p99:.3} vs A {mean_a:.3}/{p99_a:.3} vs B {mean_b:.3}/{p99_b:.3} closer {mean:.3}/{p99:.3} limit {limit:.3}"
+        "GI floor {preset} cross {cross_mean:.3}/{cross_p99:.3} vs A {mean_a:.3}/{p99_a:.3} vs B {mean_b:.3}/{p99_b:.3} closer {mean:.3}/{p99:.3} limit {limit:.3}"
     );
     assert!(
         p99 <= limit + 1.0e-9,
-        "{preset} p99 {p99:.3} is above the gi-v2 cross-process floor {cross_p99:.3}"
+        "{preset} p99 {p99:.3} is above the GI tip cross-process floor {cross_p99:.3}"
     );
     assert!(
         mean <= cross_mean + 0.25,
-        "{preset} mean {mean:.3} is above the gi-v2 cross-process mean {cross_mean:.3}"
+        "{preset} mean {mean:.3} is above the GI tip cross-process mean {cross_mean:.3}"
     );
 }

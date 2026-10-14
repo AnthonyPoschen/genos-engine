@@ -297,7 +297,7 @@ impl Renderer {
                     instances.push(InstanceRec {
                         model: *model,
                         // w: emitted light as shared-exponent bits (0: none) for the
-                        // GI v2 G-buffer (gbuffer.vert); the picture ignores it.
+                        // GI G-buffer (gbuffer.vert); the picture ignores it.
                         color: [
                             color[0],
                             color[1],
@@ -498,14 +498,14 @@ impl Renderer {
         self.gpu.antialias
     }
 
-    /// Frames in a row GI v2 has seen the same scene (camera, lights, objects): its
+    /// Frames in a row GI has seen the same scene (camera, lights, objects): its
     /// screen probes average that many frames' rays (up to 32), and any change
     /// starts the count, and so the average, over at 0.
     pub fn lighting_still_frames(&self) -> u32 {
         self.gpu.lighting_still_frames()
     }
 
-    /// GI v2's screen probes in the last frame drawn: the rays they held, kept
+    /// GI's screen probes in the last frame drawn: the rays they held, kept
     /// strata included, and the probes placed. Rays over probes is each probe's
     /// effective sample count (up to 8 strata of 64). Waits for that frame.
     pub fn lighting_probe_samples(&mut self) -> [u32; 2] {
@@ -770,7 +770,7 @@ struct Gpu {
     mesh_field_layout: u64,
     mesh_field_shadow: Vec<u8>,
     mesh_field_dirty: Vec<(usize, usize)>,
-    /// GI v2 frame path (lighting_gpu.rs).
+    /// GI frame path (lighting_gpu.rs).
     lighting: Lighting,
     /// Fragment shader for the next raster pipeline built, instead of overlay.frag.
     frag_override: Option<&'static [u8]>,
@@ -1936,7 +1936,7 @@ impl Gpu {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
         }
-        // GI v2 holds its light while nothing it sees changes (lighting_gpu.rs).
+        // GI holds its light while nothing it sees changes (lighting_gpu.rs).
         self.lighting.draw_key = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2738,7 +2738,7 @@ impl Gpu {
                 stages: 0x10 | 0x20,
                 samplers: std::ptr::null(),
             },
-            // GI v2 G-buffer (gbuffer.frag writes it).
+            // GI G-buffer (gbuffer.frag writes it).
             Binding {
                 binding: 6,
                 kind: 7,
@@ -2971,7 +2971,7 @@ impl Gpu {
                 range: u64::MAX,
             },
             BufInfo {
-                // Any buffer until GI v2 sizes its G-buffer; only gbuffer.frag reads it.
+                // Any buffer until GI sizes its G-buffer; only gbuffer.frag reads it.
                 buffer: if self.lighting.gbuf.buffer.is_null() {
                     self.mesh_field.buffer
                 } else {
@@ -5576,7 +5576,7 @@ struct GpuTimes {
     since: Option<std::time::Instant>,
     /// The memory placement line has been printed.
     placed: bool,
-    /// GI v2 pass stamps (2 slots x LIGHTING_STAMPS), whether a slot holds a full frame's
+    /// GI pass stamps (2 slots x LIGHTING_STAMPS), whether a slot holds a full frame's
     /// passes, and the per-pass sums over `lighting_frames`.
     lighting_pool: Handle,
     lighting_ids: [Vec<usize>; 2],
@@ -5589,7 +5589,7 @@ struct GpuTimes {
     /// Frames in this line whose prefill scout was due. Printed as a fraction,
     /// not a millisecond: the scout shares the cache-ray dispatch.
     prefill_frames: u32,
-    /// Async light cache rounds (GI v2) and their GPU time.
+    /// Async light cache rounds (GI) and their GPU time.
     world_runs: u32,
     world_ms: f64,
     /// The async round's passes: compact, trace, light, cache (sums over world_runs).
@@ -5600,7 +5600,7 @@ struct GpuTimes {
     light_spans: Vec<(u64, u64)>,
 }
 
-/// Stamps per frame for the GI v2 passes: one before, one after each of the 10
+/// Stamps per frame for the GI passes: one before, one after each of the 10
 /// dispatches (the filter runs three rounds).
 const LIGHTING_STAMPS: u32 = 24;
 

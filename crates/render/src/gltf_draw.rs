@@ -53,7 +53,7 @@ impl World {
     }
 
     /// Add the scene as [`World::add_gltf`] does, and give every mesh instance its
-    /// baked SDF (`World::fields`) for the GI v2 software tracer. The draws do not
+    /// baked SDF (`World::fields`) for the GI software tracer. The draws do not
     /// stand in as boxes for the old tracer. Returns the new objects' indices.
     pub fn add_gltf_traced(
         &mut self,

@@ -13,7 +13,7 @@
 //! the hit share, and emission averages over all four (its area-weighted mean, so
 //! a small bright detail keeps its power). The texel size is fixed per mesh by the
 //! settings, never by camera distance. A complex mesh will get more cards from a
-//! greedy cover (GI v2 phase 4); six is the simple-mesh case.
+//! greedy cover (GI phase 4); six is the simple-mesh case.
 
 use genos_mesh::Bvh;
 

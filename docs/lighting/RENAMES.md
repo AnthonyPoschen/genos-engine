@@ -1,6 +1,6 @@
 # Lighting renames (proposal)
 
-Status: proposal, not yet applied. Terms are defined in [GLOSSARY.md](GLOSSARY.md). Audited against gi-v2 @ 2abeb0dd on 2026-10-14.
+Status: proposal, not yet applied. Terms are defined in [GLOSSARY.md](GLOSSARY.md). Audited 2026-10-14.
 
 ## Rename table
 Policy: keep old CLI/config/env/MCP names as deprecated aliases that log one warning. Nothing is removed in the same PR.

@@ -8,8 +8,8 @@
 
 //! Screen wavelet against the hash wavelet inside this branch.
 //!
-//! The gi-v2 picture gate is `gi_v2_floor`: it pins the hash launch (medium,
-//! and high with `denoise_launch=hash`) against gi-v2 dumps. This test is the
+//! The GI picture gate is `gi_v2_floor`: it pins the hash launch (medium,
+//! and high with `denoise_launch=hash`) against the GI tip dumps. This test is the
 //! screen launch (`denoise_launch=screen`) against the hash launch, not that
 //! gate. Preset high already uses the screen launch; this test still sets
 //! the flag both ways.

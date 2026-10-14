@@ -259,7 +259,7 @@ v1 views (`bounce:N`, `near`, `far`, `probes:*`) went with GI v1.
 - `geometry: "triangles"` traces the scene's triangle form (`SceneMesh`: the
   floor, roof, walls and solids as meshes, through the CPU BVH in `genos-mesh`)
   instead of the analytic shapes (`"shapes"`, the default). Both agree within the
-  trace's noise (`triangles_match_the_analytic_reference`); GI v2 traces meshes only.
+  trace's noise (`triangles_match_the_analytic_reference`); GI traces meshes only.
   Triangle traces are cached under a separate key.
 - Passes of `spp` paths per pixel run on every core until the mean relative
   standard error of a pixel is at most `noise` (default 0.03), `max_spp` or
@@ -288,7 +288,7 @@ wall to look at. In the stress scene the engine's `direct` view matches a
 `bounces: 0` trace to about 2 %.
 
 GPU reference (`genos-gpuref`, `GENOS_REFERENCE_GPU=1`): the same paths on the
-4070's hardware ray queries (Vulkan `VK_KHR_ray_query`, headless, no GI v2 code):
+4070's hardware ray queries (Vulkan `VK_KHR_ray_query`, headless, no GI code):
 the scene's triangle form in two BLAS (one-sided culled, two-sided), the same
 Lambert materials, lamps (72 units, 10 cm), sun and sky, light sampling at every
 vertex, Russian roulette from the second bounce, f32 per path and f64 sums, two
@@ -308,7 +308,7 @@ under their own key. The CPU proof runs at nice and half the cores
 `cargo run --release -p genos-stress -- gi-check [--out DIR]` is the GI picture gate.
 It runs this build of the stress test four times (one window at a time) and prints a
 table of PASS or FAIL against fixed limits; exit status 1 on any FAIL. A few rows
-are targets GI v2 is working towards (the room's 48 px swim and light structure):
+are targets GI is working towards (the room's 48 px swim and light structure):
 a miss prints MISS and fails nothing.
 
 - `settled`: the five diagnosis views (room-a, corner, contact, lamp-wall, hall) at
@@ -390,7 +390,7 @@ or is the only coverage of a situation):
   and caught the turn swim the clip passed. The whole camera path stays in mid
   and full (the only long mixed path; its worst-tile row caught the per-ray
   gather bug).
-- full's corner walk (`walk`, 19 s): its pop row failed on every GI v2 build
+- full's corner walk (`walk`, 19 s): its pop row failed on every GI build
   (0.44-0.49, worst 10x10 tile of cold against warm, noise-bound) and never
   pointed at a fix; walking is covered by the turn run's walk segment and the
   camera path. Still runnable with `--only walk`.
@@ -428,16 +428,16 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
 
 - The metrics match the earlier Python tool (`splotch_metrics.py`) to the fourth
   decimal on the same pictures.
-- GI v2 settled (gi-v2 7065edb): all view rows PASS (mean 0.037, blob 0.014, worst
+- GI settled (gi-v2 7065edb): all view rows PASS (mean 0.037, blob 0.014, worst
   view lamp-wall 0.027, which shows faint floor blotches). Right: this is the known
   good state.
-- GI v2 with no still averaging (the moving state): all view rows FAIL (blob 0.049,
+- GI with no still averaging (the moving state): all view rows FAIL (blob 0.049,
   corner 0.078, visibly blotched walls). Right.
 - GI v1: mean, contact and open-wall FAIL (0.13 / 0.16 / 0.10: the corners and
   bounce-lit walls are visibly too dark), blob PASS (0.019: v1 is smooth). Right.
 - Camera and trail runs (2026-10-10, 4070, 640x360, tile 4): GI v1 is the
   known-good picture in motion: mid-move error 0.028, worst tile 0.29, flicker
-  0.034, post-stop 0.003 in 0 frames. GI v2 before the per-ray gather fix: 0.092 /
+  0.034, post-stop 0.003 in 0 frames. GI before the per-ray gather fix: 0.092 /
   0.63 / 0.12, its moving frames visibly blotched and 5 % too bright (14 % with
   the 5x5 strata reach). The worst-tile and flicker limits (0.35, 0.05) are set
   from v1 with a margin; the error limit stays 0.03. The mid-move worst-tile row
@@ -449,13 +449,13 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   the moving pass, not yet in the settled one) was every build's worst camera
   frame and the corner walk's worst pop. The path now stops at z 15 and turns
   there (camera.rhai, walk.rhai: 178 and 138 poses). Trail: v1 0.109 (its world probes lag), v2 0.057.
-- Close-up (the hall's west bench at 1.3 m, settled only, own rows): GI v2
+- Close-up (the hall's west bench at 1.3 m, settled only, own rows): GI
   1129d5d mean 0.030, contact 0.026, open wall 0.028; the picture shows the
   bench face, top and foot with their contact shading. Limits 0.045 each.
 - Flick run (2026-10-10, 4070, 12 s): the doorway pose while lamps and boxes move,
   40 frames, upper third, per 4x4 block at 320x180 the frame-to-frame change
   less the net change, per frame (light going back and forth, not the lamps'
-  steady change). GI v2 1129d5d, where kept rays a moving box crossed were
+  steady change). GI 1129d5d, where kept rays a moving box crossed were
   dropped until their stratum came round: 0.0005 (all change 0.00058), its
   frames show the walls around the boxes shimmering. With the re-trace in the
   frame (defa10a): 0.0001 (all change 0.00016). Limit 0.0003. The full tier's
@@ -472,7 +472,7 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   the turn and of the walk against ref.png; onset pop, the first 5 moving frames
   of back against those poses settled (the first saved moving frame already
   stands one step in, checked by matching); the soaked end frames and the frame
-  held after back against ref.png. GI v2 10ce430, whose turn Anthony saw swim
+  held after back against ref.png. GI 10ce430, whose turn Anthony saw swim
   live and in our scripted turn: turn arrival 0.0131 / 0.0108 (two runs), walk
   0.0067 / 0.0073, onset 0.0147 / 0.0133 (rising from 0.009 on the first moving
   frame: the pop when motion starts), end and return 0.0001. The arrival and onset

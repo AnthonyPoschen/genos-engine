@@ -83,7 +83,7 @@ These bind every step.
 | Video | missing | |
 | Composite glyphs, kerning, hinting | missing | `ttf.rs` returns an error for a composite glyph. |
 | Content-addressed cache for source files | missing | The bake cache is FNV-1a of the bake inputs, under `target/bake-cache` or `GENOS_BAKE_CACHE`. It is not a cache of source bytes. |
-| Meshopt, meshlets, LOD | missing | GI v2 design names up to 4 LODs. None are built. |
+| Meshopt, meshlets, LOD | missing | GI design names up to 4 LODs. None are built. |
 | BC7, ASTC, KTX2, Basis | missing | |
 | Virtual textures, mesh streaming, GPU-driven scene draws | missing | Lighting uses `vkCmdDispatchIndirect` (`lighting_gpu.rs`). Scene draws use `vkCmdDraw`. |
 | Hot reload of a cooked file | missing | Shaders are compiled by `crates/render/build.rs` at build time. |
@@ -136,7 +136,7 @@ The note is one line: the path in the file, the feature name, and `used` or `loa
 | `KHR_texture_transform` | Keep the transform | `loaded, unsupported`. `load_gltf` still refuses it when it is required. |
 | `KHR_lights_punctual` | Keep the light nodes | `loaded, unsupported`. Scene lamps stay the Rhai `light` call. |
 | `KHR_materials_emissive_strength` | `used` | `used` |
-| Skins (`JOINTS_0`, `WEIGHTS_0`, inverse bind) | Keep the accessors and the skin JSON | `loaded, unsupported`. GI v2 design says a skinned mesh uses a proxy, not an exact SDF. |
+| Skins (`JOINTS_0`, `WEIGHTS_0`, inverse bind) | Keep the accessors and the skin JSON | `loaded, unsupported`. GI design says a skinned mesh uses a proxy, not an exact SDF. |
 | Morph targets and weights | Keep the deltas | `loaded, unsupported` |
 | Animation clips (translation, rotation, scale, weights) | Keep the samplers | `loaded, unsupported`. The text `Animation` type stays the one the game samples today. |
 | Cameras | Keep the camera JSON | `loaded, unsupported`. The game camera stays `genos-scene`. |

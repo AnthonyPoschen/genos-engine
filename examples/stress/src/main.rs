@@ -96,7 +96,7 @@ const USAGE: &str = "genos-stress [options]
   --sweep-scales LIST       benchmark scales (default small,big)
   --bench-out PATH          also write the tables to PATH
   --gltf FILE               place a glTF 2.0 model (.gltf/.glb) in the building (mean
-                            material colour; its SDF is baked on first load for the GI v2
+                            material colour; its SDF is baked on first load for the GI
                             tracer, the current lighting does not see it); repeatable
   --gltf-at X Y Z SCALE     where the following --gltf models go (default 0 0 0 1)
   --script FILE             run a rhai debug script (docs/systems/debugging.md); scene time
@@ -771,7 +771,7 @@ fn run() -> Result<(), String> {
         place[13] = *y;
         place[14] = *z;
         place[15] = 1.0;
-        // Models carry their baked SDFs for the GI v2 software tracer; the current
+        // Models carry their baked SDFs for the GI software tracer; the current
         // lighting does not see them. The stress tool bakes on first load unless
         // GENOS_BAKE says otherwise.
         let mut bake = genos_render::bake::BakeSettings::default();

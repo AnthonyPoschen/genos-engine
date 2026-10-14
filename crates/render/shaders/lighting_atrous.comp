@@ -1,5 +1,5 @@
 #version 450
-// GI v2 S72V: layer 2 as SVGF over the surface-cache texels (lighting_cache.glsl,
+// GI S72V: layer 2 as SVGF over the surface-cache texels (lighting_cache.glsl,
 // "S72V layer 2 as SVGF"): stage 0 variance, 1-5 a-trous, 6 push + IC placement.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;

@@ -128,7 +128,7 @@ pub enum DrawKind {
         texcoords: Vec<[f32; 2]>,
         color: [f32; 3],
         pose: [f32; 16],
-        /// Emitted light (linear). Only GI v2 draws it.
+        /// Emitted light (linear). Only GI draws it.
         emission: [f32; 3],
         /// Index into [`World::surfaces`]. `None` is a flat colour.
         surface: Option<usize>,
@@ -228,7 +228,7 @@ pub fn solid_reach(solid: &Solid) -> f32 {
 pub struct World {
     pub scene: Scene,
     pub objects: Vec<Object>,
-    /// Meshes the GPU software tracer sees through their SDFs (GI v2).
+    /// Meshes the GPU software tracer sees through their SDFs (GI).
     pub fields: Vec<crate::mesh_field::FieldInstance>,
     /// Per-texel materials. Indexed by [`DrawKind::Mesh::surface`].
     pub surfaces: Vec<Surface>,

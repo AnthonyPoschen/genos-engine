@@ -19,7 +19,7 @@ Lumen (Unreal Engine 5) solved most of these problems with three ideas: a mesh-b
 
 Lumen is the best-tested real-time GI in shipped games, so where it has solved a problem the same way we would, we copy it and save the years. Where its choices are the source of known artefacts, or where our constraints differ, we do something else and say why.
 
-| Topic | Lumen | Genos GI v2 | Copy or diverge, and why |
+| Topic | Lumen | Genos GI | Copy or diverge, and why |
 |---|---|---|---|
 | Software trace target | Per-mesh SDFs near, a merged global SDF in camera-centred clipmaps far | Per-mesh SDFs near, a merged far SDF in world-anchored sparse bricks; level chosen by distance along the ray | **Copy** the per-mesh SDF idea (proven, handles arbitrary meshes). **Diverge** on the far field: camera clipmaps change the answer as the camera moves, which is exactly the pop class we keep fixing. |
 | Hardware trace | Inline ray tracing against a BVH, surface cache at hits | Ray queries from compute against a BVH, surface cache at hits | **Copy.** Proven, and it keeps one pass structure for both tracers. |
@@ -54,7 +54,7 @@ Where Lumen is still ahead and we accept it for now: specular reflections, trans
 ## Non-goals (for v2)
 
 - Specular reflections and mirrors. We store roughness and metallic now so they can come later.
-- Fog, volumetrics and god rays. GI v2 leaves room for a froxel volume that reads the same caches.
+- Fog, volumetrics and god rays. GI leaves room for a froxel volume that reads the same caches.
 - Translucent surfaces receiving GI.
 - Exact GI from skinned (animated) meshes. They use proxies.
 - Baked lightmaps. Everything stays dynamic.
@@ -504,7 +504,7 @@ What we deliberately do not spend memory on: radiance history for temporal accum
 
 ## VRAM budget
 
-Estimates in MB for a scene the size of the stress scene, at the preset's target resolution. "Lighting" is everything GI v2 owns. The BVH is listed separately because it scales with triangle count, not with the preset, and it will also serve reflections later. The G-buffer is rendering, not lighting, and is shown only for the fit check.
+Estimates in MB for a scene the size of the stress scene, at the preset's target resolution. "Lighting" is everything GI owns. The BVH is listed separately because it scales with triangle count, not with the preset, and it will also serve reflections later. The G-buffer is rendering, not lighting, and is shown only for the fit check.
 
 | Component | What it holds | Low (SW, 1080p) | Medium (SW, 1080p) | High (RT, 1440p) | Ultra (RT, 1440p) |
 |---|---|---|---|---|---|
@@ -563,14 +563,14 @@ Thresholds: mean relative error under 3 % static per view and per tracer; no fra
 
 ## Migration plan
 
-Each phase keeps `genos-stress` runnable and is gated by the reference views (no worse than the previous phase on any view), the regression scripts, and the fps targets (no more than 10 % slower than the previous phase until the final phases). GI v2 work lives on the `gi-v2` branch until Anthony decides to land it.
+Each phase keeps `genos-stress` runnable and is gated by the reference views (no worse than the previous phase on any view), the regression scripts, and the fps targets (no more than 10 % slower than the previous phase until the final phases). GI work lives on the `gi-v2` branch until Anthony decides to land it.
 
-**Why the order changed (2026-10-10).** The first plan put the software tracer into the existing shaders (phase 2) and the new final gather last (phase 5). Phase 2 tried that: inlining the mesh SDF march at the trace sites in `scene.frag` and `light.comp` stalled the NVIDIA compiler on the 4070 for more than four minutes at pipeline creation, and ran lavapipe out of memory in LLVM (SROA and PromoteMemToReg) while it built a fragment variant mid-run. Branch-free sampling, `-O` and moving the hooks into `light.comp` alone did not fix it. So GI v2 is now a **separate frame path** behind a setting (`GENOS_GI=v2`, and the `gi` knob in the stress stage for a live A/B), built from small compute passes with one trace site each. The current shaders are left alone until phase 6 deletes them. (Phase 6 landed on 2026-10-12: v1, `GENOS_GI` and the `gi` knob are gone; GI v2 is the only lighting.) Every new shader uses data-bound loops marked `[[dont_unroll]]`, and a test checks each pipeline's creation time.
+**Why the order changed (2026-10-10).** The first plan put the software tracer into the existing shaders (phase 2) and the new final gather last (phase 5). Phase 2 tried that: inlining the mesh SDF march at the trace sites in `scene.frag` and `light.comp` stalled the NVIDIA compiler on the 4070 for more than four minutes at pipeline creation, and ran lavapipe out of memory in LLVM (SROA and PromoteMemToReg) while it built a fragment variant mid-run. Branch-free sampling, `-O` and moving the hooks into `light.comp` alone did not fix it. So GI is now a **separate frame path** behind a setting (`GENOS_GI=v2`, and the `gi` knob in the stress stage for a live A/B), built from small compute passes with one trace site each. The current shaders are left alone until phase 6 deletes them. (Phase 6 landed on 2026-10-12: v1, `GENOS_GI` and the `gi` knob are gone; GI is the only lighting.) Every new shader uses data-bound loops marked `[[dont_unroll]]`, and a test checks each pipeline's creation time.
 
 0. **Baseline.** Record the gate numbers on master, tagged `gi-v2-baseline`: reference error per view, flicker, settle, entrance walk, floor edge walk, sun pop, fps at 720p and 1440p, VRAM. See [GI v1 archive](lighting/archive-v1.md).
 1. **Mesh import and glTF.** (Done, on master.) glTF 2.0 loader (`.gltf`, `.glb`, PNG and JPEG textures) in `genos-load`, including emissive factor, texture and strength in the material. Mesh asset cache. The raster draws meshes with materials.
-2. **Mesh SDF and the software tracer.** SDFs baked at import, uploaded as one field buffer. `trace_ray` and `trace_occluded` (analytic shapes exact, meshes by SDF march) live in `gi2_common.glsl` and are only included by the GI v2 passes.
-3. **The GI v2 frame (direct light and screen probes).** The raster writes a G-buffer (depth, normal, albedo) to a storage buffer. Compute passes, one trace site each: place screen probes (one per 16×16 tile), trace their fixed hashed rays, light the pixels and the ray hits (lamps with one shadow ray), project each probe to SH, compose the picture with the same tone curve. Old light builds do not run while v2 draws. Gate: the direct view matches the current direct view and a `bounces: 0` reference; pipeline creation is fast on the 4070 and lavapipe; flicker passes (no light averaged over time; directions fixed per stratum).
+2. **Mesh SDF and the software tracer.** SDFs baked at import, uploaded as one field buffer. `trace_ray` and `trace_occluded` (analytic shapes exact, meshes by SDF march) live in `gi2_common.glsl` and are only included by the GI passes.
+3. **The GI frame (direct light and screen probes).** The raster writes a G-buffer (depth, normal, albedo) to a storage buffer. Compute passes, one trace site each: place screen probes (one per 16×16 tile), trace their fixed hashed rays, light the pixels and the ray hits (lamps with one shadow ray), project each probe to SH, compose the picture with the same tone curve. Old light builds do not run while v2 draws. Gate: the direct view matches the current direct view and a `bounces: 0` reference; pipeline creation is fast on the 4070 and lavapipe; flicker passes (no light averaged over time; directions fixed per stratum).
 4. **Surface cache.** Cards at import (with captured emission), the atlas, card lighting; probe hits read cards, which gives multiple bounces and emitters. Gate: reference error at or below the current path on every view; settle times no worse.
 5. **World probes.** Rays past `R` and card bounce read the world probes. Gate: `world_probe_role.rhai`, far views, toggle latency.
 6. **Hardware tracer.** BLAS and TLAS, ray queries behind the same interface. Gate: both tracers pass the same scripts; RT is faster; forced software on the 4070 still passes.
@@ -603,5 +603,5 @@ Each phase keeps `genos-stress` runnable and is gated by the reference views (no
 
 1. **Floor hardware for testing.** No GTX 1060, RX 580, GTX 1650 or Iris Xe is available. Can we get one, so the floor numbers become measurements?
 2. **Moving-light layer caps.** Are 8 (Low) to 32 (Ultra) layered lights enough for the games you have in mind?
-3. **Specular timing.** Start reflections straight after GI v2, or after HDR?
+3. **Specular timing.** Start reflections straight after GI, or after HDR?
 4. **Snapshot cadence.** Re-check the survey every six months, or tie it to releases?
