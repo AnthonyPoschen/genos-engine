@@ -2125,6 +2125,10 @@ mod launch_tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this test is the alias contract for process env mirrors"
+    )]
     fn genos_gi2_env_is_a_deprecated_alias() {
         std::env::remove_var("GENOS_LIGHTING_WORLD_CACHE");
         std::env::remove_var("GENOS_GI2_WORLD_CACHE");
@@ -2154,5 +2158,18 @@ mod launch_tests {
         std::env::remove_var("GENOS_LIGHTING_DEBUG");
         std::env::remove_var("GENOS_GI_DEBUG");
         std::env::remove_var("GENOS_GI2_DEBUG");
+    }
+
+    #[test]
+    fn gi2_alias_table_covers_every_lighting_env_and_gi_debug() {
+        assert!(GI2_ENV_ALIASES
+            .iter()
+            .any(|&(old, neu)| old == "GENOS_GI2_WORLD_CACHE" && neu == "GENOS_LIGHTING_WORLD_CACHE"));
+        assert!(GI2_ENV_ALIASES
+            .iter()
+            .any(|&(old, neu)| old == "GENOS_GI_DEBUG" && neu == "GENOS_LIGHTING_DEBUG"));
+        assert!(GI2_ENV_ALIASES
+            .iter()
+            .any(|&(old, neu)| old == "GENOS_GI2_DEBUG" && neu == "GENOS_LIGHTING_DEBUG"));
     }
 }
