@@ -20,9 +20,12 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.contract import repo_root
 from lib.images import solid, write_png
+from lib.launch import binary_help, help_flags
+from lighting_bin import lighting_binary
 
 
 STUB_LIGHTING = r'''#!/usr/bin/env python3
@@ -130,19 +133,35 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True})
 
 
+def documented_flags(text: str) -> set[str]:
+    found: set[str] = set()
+    for token in text.split():
+        if not token.startswith("--") or token == "--":
+            continue
+        name = token.split("=", 1)[0].rstrip(",.;:")
+        if len(name) > 2 and all(ch.isalnum() or ch == "-" for ch in name[2:]):
+            found.add(name)
+    return found
+
+
 def main() -> None:
+    help_path = os.environ.get("GENOS_STUB_HELP")
+    if not help_path:
+        sys.stderr.write("stub genos-lighting: missing GENOS_STUB_HELP\n")
+        sys.exit(2)
+    text = Path(help_path).read_text(encoding="utf-8")
+    allowed = documented_flags(text)
     if "--help" in sys.argv or "-h" in sys.argv:
-        sys.stdout.write(
-            "Usage: genos-lighting [OPTIONS]\n"
-            "  --headless\n"
-            "  --display NAME\n"
-            "  --scene SCENE\n"
-            "  --checkpoint NAME\n"
-            "  --mcp-port PORT\n"
-            "  --out DIR\n"
-        )
+        sys.stdout.write(text if text.endswith("\n") else text + "\n")
         return
-    port = flag("--mcp-port")
+    for item in sys.argv[1:]:
+        if not item.startswith("--"):
+            continue
+        name = item.split("=", 1)[0]
+        if name not in allowed:
+            sys.stderr.write(f"genos-lighting: unknown argument {name}\n")
+            sys.exit(1)
+    port = flag("--mcp-port") or os.environ.get("GENOS_MCP_PORT")
     if port is None:
         sys.stderr.write("stub genos-lighting: missing --mcp-port\n")
         sys.exit(2)
@@ -381,6 +400,10 @@ class DocumentedLiveTests(unittest.TestCase):
         env["GENOS_STUB_LOG"] = str(log_path)
         env["DISPLAY"] = ":1"
         env["WAYLAND_DISPLAY"] = "wayland-0"
+        help_path = caller / "gi-v2-help.txt"
+        help_path.write_text(binary_help(str(lighting_binary("55795f6"))), encoding="utf-8")
+        env["GENOS_STUB_HELP"] = str(help_path)
+        self._allowed = help_flags(help_path.read_text(encoding="utf-8"))
         resolved_cargo = shutil.which("cargo", path=env["PATH"])
         self.assertIsNotNone(resolved_cargo)
         self.assertEqual(Path(resolved_cargo).resolve(), cargo.resolve())
@@ -433,8 +456,11 @@ class DocumentedLiveTests(unittest.TestCase):
             self.assertEqual(item["wayland"], "wayland-1")
             self.assertFalse(item["display_set"])
             self.assertIn("--headless", argv)
-            display_at = argv.index("--display")
-            self.assertEqual(argv[display_at + 1], "wayland-1")
+            self.assertNotIn("--display", argv)
+            self.assertIn("--mcp-port", argv)
+            for token in argv[1:]:
+                if token.startswith("--"):
+                    self.assertIn(token.split("=", 1)[0], self._allowed, argv)
             out_at = argv.index("--out")
             out = Path(argv[out_at + 1])
             self.assertTrue(out.is_absolute(), argv)
