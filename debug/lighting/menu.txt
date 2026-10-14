@@ -42,7 +42,7 @@ Denoise | denoise | Denoise | open | lighting_denoise_adaptive
 Denoise | denoise | Denoise | open | lighting_denoise_iters
 Denoise | denoise | Denoise | open | lighting_denoise_variance
 Shade | shadows | Shadows/Ambient | open | lighting_shadow_filter
-Shade | shadows | Shadows/Ambient | closed | lighting_ambient
+Shade | shadows | Shadows/Ambient | open | lighting_ambient
 Perf | perf | Perf/FPS | open | lighting_full_effort
 Perf | perf | Perf/FPS | open | unfilled
 Perf | perf | Perf/FPS | open | unfilled_tint
