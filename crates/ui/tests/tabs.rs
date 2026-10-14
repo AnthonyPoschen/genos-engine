@@ -3,7 +3,7 @@
 use genos_scene::Camera;
 use genos_ui::{
     button_panel_blocks, Action, PanelBlock, PanelCheck, PanelRow, PanelSection, PanelTab,
-    PanelTabs, Pointer, State,
+    PanelTabs, Pointer, State, PANEL_ID,
 };
 
 fn mark(id: u32, text: &str) -> PanelRow {
@@ -182,17 +182,18 @@ fn a_tab_word_stays_one_line_and_the_bar_does_not_move() {
     );
     let gi = first.shown.iter().find(|shown| shown.id == 101).unwrap();
     let shade = first.shown.iter().find(|shown| shown.id == 102).unwrap();
-    assert!(
-        shade.rect.h <= 16.0 + 8.0 + 0.5,
-        "a word stays on one line"
-    );
-    assert_eq!(gi.rect.w, shade.rect.w);
-    assert_eq!(gi.rect.h, shade.rect.h);
     let panel = first
         .shown
         .iter()
         .find(|shown| shown.id == u32::MAX - 4095)
         .unwrap();
+    assert!(
+        shade.rect.h <= 16.0 + 8.0 + 0.5,
+        "a word stays on one line"
+    );
+    assert!((gi.rect.h - shade.rect.h).abs() < 0.5);
+    assert!((gi.rect.w - (2.0 * 12.0 + 8.0)).abs() < 1.0);
+    assert!(shade.rect.x + shade.rect.w <= panel.rect.x + panel.rect.w + 0.5);
     let width = panel.rect.w;
     let bar = (
         gi.rect.x,
@@ -303,4 +304,107 @@ fn a_page_can_hold_rows_without_a_fold_header() {
         .shown
         .iter()
         .all(|shown| shown.text.as_deref() != Some("+ Info") && shown.id != 50));
+}
+
+fn titled(id: u32, title: &str) -> PanelTab {
+    let rows: Vec<PanelRow> = (1..18).map(|row| mark(id * 100 + row, "Row")).collect();
+    PanelTab {
+        id,
+        title: title.into(),
+        blocks: vec![PanelBlock::Rows(rows)],
+    }
+}
+
+#[test]
+fn tabs_sit_on_one_short_row_and_the_row_scrolls_sideways() {
+    let titles = [
+        "Scene", "Pipeline", "Lamps", "GI", "Denoise", "Shadows", "Perf", "Info",
+    ];
+    let blocks = vec![PanelBlock::Tabs(PanelTabs {
+        id: 100,
+        tabs: titles
+            .iter()
+            .enumerate()
+            .map(|(index, title)| titled(1000 + index as u32, title))
+            .collect(),
+    })];
+    let viewport = [1024.0, 400.0];
+    let mut state = State::default();
+    let frame = button_panel_blocks(
+        &mut state,
+        "stress",
+        &blocks,
+        viewport,
+        &Camera::opening(),
+        Pointer::default(),
+    );
+    let panel = frame
+        .shown
+        .iter()
+        .find(|shown| shown.id == PANEL_ID)
+        .unwrap()
+        .rect;
+    assert!(panel.w <= viewport[0] / 3.0 + 0.5);
+    let strip = frame.shown.iter().find(|shown| shown.id == 100).unwrap().rect;
+    assert!(strip.h <= 16.0 + 8.0 + 0.5, "the row is one line, not a tall box");
+    assert!(strip.h < 40.0);
+    let mut y = None;
+    for (index, title) in titles.iter().enumerate() {
+        let Some(tab) = frame.shown.iter().find(|shown| shown.id == 1000 + index as u32) else {
+            continue;
+        };
+        assert_eq!(tab.text.as_deref(), Some(*title));
+        assert!((tab.rect.h - strip.h).abs() < 0.5);
+        assert!(tab.rect.x + tab.rect.w <= panel.x + panel.w + 0.5);
+        assert!(tab.rect.x >= panel.x - 0.5);
+        y = Some(tab.rect.y);
+    }
+    let y = y.expect("a tab");
+    assert!(frame.shown.iter().filter(|shown| (1000..1008).contains(&shown.id)).all(|shown| (shown.rect.y - y).abs() < 0.5));
+    let scene = frame.shown.iter().find(|shown| shown.id == 1000).unwrap().rect;
+    assert!((scene.w - ("Scene".chars().count() as f32 * 12.0 + 8.0)).abs() < 1.0);
+    assert!(
+        frame.shown.iter().all(|shown| shown.id == PANEL_ID || shown.rect.h <= strip.h + 0.5 || shown.rect.y > strip.y + strip.h),
+        "no empty filler cell beside the tabs"
+    );
+
+    let mut wheel = Pointer::at(strip.x + 8.0, strip.y + strip.h * 0.5, false);
+    wheel.wheel_y = -6.0;
+    let row_y = frame.shown.iter().find(|shown| shown.id == 100001).unwrap().rect.y;
+    let scrolled = button_panel_blocks(
+        &mut state,
+        "stress",
+        &blocks,
+        viewport,
+        &Camera::opening(),
+        wheel,
+    );
+    assert!(scrolled.consumed.wheel);
+    let scene = scrolled.shown.iter().find(|shown| shown.id == 1000);
+    assert!(scene.is_none() || scene.unwrap().rect.x < strip.x - 1.0 || scene.unwrap().rect.w < 20.0);
+    assert_eq!(
+        scrolled.shown.iter().find(|shown| shown.id == 100001).unwrap().rect.y,
+        row_y,
+        "the page stays while the tab row scrolls"
+    );
+    assert!(scrolled.shown.iter().any(|shown| (1003..1008).contains(&shown.id)));
+
+    let below = Pointer {
+        x: panel.x + 8.0,
+        y: strip.y + strip.h + 30.0,
+        wheel_y: -6.0,
+        ..Pointer::default()
+    };
+    let page = button_panel_blocks(
+        &mut state,
+        "stress",
+        &blocks,
+        viewport,
+        &Camera::opening(),
+        below,
+    );
+    assert_ne!(
+        page.shown.iter().find(|shown| shown.id == 100001).map(|shown| shown.rect.y),
+        Some(row_y)
+    );
 }

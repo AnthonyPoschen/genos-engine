@@ -132,6 +132,8 @@ pub struct State {
     panel_hover: bool,
     /// Pixels the page has moved up under the tab bar. The bar stays put.
     scroll: f32,
+    /// Pixels each tab strip has moved left. The strip stays one row.
+    tab_scroll: BTreeMap<u32, f32>,
     /// Per-panel wheel and key policy. Empty means the older path, which takes
     /// keys and the pointer the way it did before policies existed.
     pub input: FocusManager,
@@ -161,6 +163,7 @@ impl Default for State {
             selected_tabs: BTreeMap::new(),
             panel_hover: false,
             scroll: 0.0,
+            tab_scroll: BTreeMap::new(),
             input: FocusManager::default(),
         }
     }
@@ -908,14 +911,7 @@ fn push_row(panel: &mut Node, item: &PanelRow, lay: &mut BlockLay) {
     }
 }
 
-/// Narrowest tab cell. A longer label wraps inside the cell instead of growing it.
-const TAB_MIN: f32 = 56.0;
 const TAB_GAP: f32 = 4.0;
-
-fn tab_columns(inner: f32, count: usize) -> usize {
-    let fit = ((inner + TAB_GAP) / (TAB_MIN + TAB_GAP)).floor() as usize;
-    fit.clamp(1, count.max(1))
-}
 
 fn tab_strip(
     tabs: &PanelTabs,
@@ -924,80 +920,25 @@ fn tab_strip(
     inner: Option<f32>,
 ) -> Node {
     let selected = state.selected_tab(tabs.id);
-    let Some(inner) = inner else {
-        return tab_row(tabs, selected, palette, None, None);
-    };
-    let count = tabs.tabs.len().max(1);
-    let cols = tab_columns(inner, count);
-    let cell_w = ((inner - TAB_GAP * cols.saturating_sub(1) as f32) / cols as f32).max(TAB_MIN);
-    let content_w = (cell_w - 8.0).max(text::CELL_W);
-    let mut strip = Node::new(tabs.id);
-    strip.direction = Direction::TopToBottom;
-    strip.gap = TAB_GAP;
-    strip.width = Sizing::Fixed(inner);
-    for (row_index, row_tabs) in tabs.tabs.chunks(cols).enumerate() {
-        let row_h = row_tabs
-            .iter()
-            .map(|tab| text::measure(&tab.title, Some(content_w)).1 + 8.0)
-            .fold(text::CELL_H + 8.0, f32::max);
-        let mut row = Node::new(tabs.id.wrapping_mul(16).wrapping_add(row_index as u32 + 3));
-        row.direction = Direction::LeftToRight;
-        row.gap = TAB_GAP;
-        row.width = Sizing::Fixed(inner);
-        row.height = Sizing::Fixed(row_h);
-        for tab in row_tabs {
-            row.children.push(tab_button(
-                tab,
-                Some(tab.id) == selected,
-                palette,
-                cell_w,
-                row_h,
-            ));
-        }
-        strip.children.push(row);
-    }
-    strip
-}
-
-fn tab_row(
-    tabs: &PanelTabs,
-    selected: Option<u32>,
-    palette: Option<Palette>,
-    cell_w: Option<f32>,
-    cell_h: Option<f32>,
-) -> Node {
     let mut row = Node::new(tabs.id);
     row.direction = Direction::LeftToRight;
     row.gap = TAB_GAP;
+    if let Some(inner) = inner {
+        row.width = Sizing::Fit {
+            min: 0.0,
+            max: inner,
+        };
+    }
+    paint_looks(&mut row, flat_look(surface(palette)));
     for tab in &tabs.tabs {
-        let mut node = tab_button(
-            tab,
-            Some(tab.id) == selected,
-            palette,
-            cell_w.unwrap_or(0.0),
-            cell_h.unwrap_or(0.0),
-        );
-        if cell_w.is_none() {
-            node.width = Sizing::fit();
-            node.height = Sizing::fit();
-        }
-        row.children.push(node);
+        row.children
+            .push(tab_button(tab, Some(tab.id) == selected, palette));
     }
     row
 }
 
-fn tab_button(
-    tab: &PanelTab,
-    selected: bool,
-    palette: Option<Palette>,
-    width: f32,
-    height: f32,
-) -> Node {
+fn tab_button(tab: &PanelTab, selected: bool, palette: Option<Palette>) -> Node {
     let mut node = control(tab.id, &tab.title, Action::Press(tab.id), palette);
-    if width > 0.0 {
-        node.width = Sizing::Fixed(width);
-        node.height = Sizing::Fixed(height);
-    }
     if selected {
         let looks = control_looks(palette);
         node.idle = looks.pressed;
@@ -1491,24 +1432,34 @@ fn capped_label(id: u32, text: &str, fill: [f32; 3], max_width: Option<f32>) -> 
 struct PageScroll {
     clip: Option<Rect>,
     body: BTreeSet<u32>,
-    /// The page moved under the wheel this frame.
+    /// Tab buttons clip to their strip so a wide row does not paint past it.
+    tab_clips: BTreeMap<u32, Rect>,
+    /// The page or a tab row moved under the wheel this frame.
     wheeled: bool,
 }
 
 impl PageScroll {
     fn hit_rect(&self, item: &Item) -> Rect {
-        let Some(clip) = self.clip else {
-            return item.rect;
-        };
-        if !self.body.contains(&item.id) {
-            return item.rect;
+        let mut rect = item.rect;
+        if let Some(clip) = self.clip {
+            if self.body.contains(&item.id) {
+                rect = intersect(rect, clip).unwrap_or(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.0,
+                    h: 0.0,
+                });
+            }
         }
-        intersect(item.rect, clip).unwrap_or(Rect {
-            x: 0.0,
-            y: 0.0,
-            w: 0.0,
-            h: 0.0,
-        })
+        if let Some(clip) = self.tab_clips.get(&item.id) {
+            rect = intersect(rect, *clip).unwrap_or(Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            });
+        }
+        rect
     }
 }
 
@@ -1530,11 +1481,13 @@ fn scroll_page(
             strips.push(*group);
         }
     }
+    let (tab_clips, mut wheeled) = scroll_strips(state, items, panel_id, tab_ids, &strips, pointer);
     let Some(panel_index) = items.iter().position(|item| item.id == panel_id) else {
         return PageScroll {
             clip: None,
             body: BTreeSet::new(),
-            wheeled: false,
+            tab_clips,
+            wheeled,
         };
     };
     let panel_rect = items[panel_index].rect;
@@ -1544,7 +1497,8 @@ fn scroll_page(
         return PageScroll {
             clip: None,
             body: BTreeSet::new(),
-            wheeled: false,
+            tab_clips,
+            wheeled,
         };
     }
     let mut body = BTreeSet::new();
@@ -1568,7 +1522,8 @@ fn scroll_page(
         return PageScroll {
             clip: None,
             body: BTreeSet::new(),
-            wheeled: false,
+            tab_clips,
+            wheeled,
         };
     }
     let clip = Rect {
@@ -1586,8 +1541,8 @@ fn scroll_page(
         None => over_panel,
         Some(_) => state.input.allows(panel_id, InputKind::Wheel, over_panel),
     };
-    let mut wheeled = false;
-    if max_scroll > 0.0
+    if !wheeled
+        && max_scroll > 0.0
         && take_wheel
         && !over_slider
         && state.open_drop.is_none()
@@ -1612,8 +1567,85 @@ fn scroll_page(
     PageScroll {
         clip: Some(clip),
         body,
+        tab_clips,
         wheeled,
     }
+}
+
+/// A tab row wider than the panel slides sideways. The wheel does this only
+/// while the pointer is on that row, and then the page keeps its own scroll.
+fn scroll_strips(
+    state: &mut State,
+    items: &mut [Item],
+    panel_id: u32,
+    tab_ids: &[(u32, u32)],
+    strips: &[u32],
+    pointer: Pointer,
+) -> (BTreeMap<u32, Rect>, bool) {
+    let mut clips = BTreeMap::new();
+    let mut wheeled = false;
+    let over_panel = items
+        .iter()
+        .find(|item| item.id == panel_id)
+        .is_some_and(|item| item.rect.contains(pointer.x, pointer.y));
+    for strip_id in strips {
+        let Some(window) = items.iter().find(|item| item.id == *strip_id).map(|item| item.rect)
+        else {
+            continue;
+        };
+        let tabs: Vec<usize> = tab_ids
+            .iter()
+            .filter(|(group, _)| group == strip_id)
+            .filter_map(|(_, tab)| items.iter().position(|item| item.id == *tab))
+            .collect();
+        if tabs.is_empty() {
+            continue;
+        }
+        let left = tabs
+            .iter()
+            .map(|index| items[*index].rect.x)
+            .fold(f32::MAX, f32::min);
+        let right = tabs
+            .iter()
+            .map(|index| {
+                let rect = items[*index].rect;
+                rect.x + rect.w
+            })
+            .fold(left, f32::max);
+        let max_scroll = (right - window.x - window.w).max(0.0);
+        let over_strip = window.contains(pointer.x, pointer.y);
+        let allow = match state.input.policy(panel_id) {
+            None => true,
+            Some(_) => state.input.allows(panel_id, InputKind::Wheel, over_panel),
+        };
+        if max_scroll > 0.5
+            && over_strip
+            && allow
+            && state.open_drop.is_none()
+            && pointer.wheel_y != 0.0
+        {
+            let entry = state.tab_scroll.entry(*strip_id).or_insert(0.0);
+            *entry -= pointer.wheel_y * SCROLL_STEP;
+            wheeled = true;
+        }
+        let scroll = state
+            .tab_scroll
+            .get(strip_id)
+            .copied()
+            .unwrap_or(0.0)
+            .clamp(0.0, max_scroll);
+        if scroll == 0.0 {
+            state.tab_scroll.remove(strip_id);
+        } else {
+            state.tab_scroll.insert(*strip_id, scroll);
+        }
+        for index in tabs {
+            items[index].rect.x -= scroll;
+            items[index].content.x -= scroll;
+            clips.insert(items[index].id, window);
+        }
+    }
+    (clips, wheeled)
 }
 
 fn sticky_item(items: &[Item], id: u32, panel_id: u32, strips: &[u32]) -> bool {
@@ -1938,28 +1970,31 @@ fn finish_panel(
         if let Some(check) = checks.iter().find(|check| check.id == item.id) {
             push_check(&mut part, item.rect, check.on);
         }
-        if page.body.contains(&item.id) {
-            if let Some(clip) = page.clip {
-                for paint in &mut part {
-                    match intersect(
-                        Rect {
-                            x: paint.x,
-                            y: paint.y,
-                            w: paint.w,
-                            h: paint.h,
-                        },
-                        clip,
-                    ) {
-                        Some(rect) => {
-                            paint.x = rect.x;
-                            paint.y = rect.y;
-                            paint.w = rect.w;
-                            paint.h = rect.h;
-                        }
-                        None => {
-                            paint.w = 0.0;
-                            paint.h = 0.0;
-                        }
+        let clip = if page.body.contains(&item.id) {
+            page.clip
+        } else {
+            page.tab_clips.get(&item.id).copied()
+        };
+        if let Some(clip) = clip {
+            for paint in &mut part {
+                match intersect(
+                    Rect {
+                        x: paint.x,
+                        y: paint.y,
+                        w: paint.w,
+                        h: paint.h,
+                    },
+                    clip,
+                ) {
+                    Some(rect) => {
+                        paint.x = rect.x;
+                        paint.y = rect.y;
+                        paint.w = rect.w;
+                        paint.h = rect.h;
+                    }
+                    None => {
+                        paint.w = 0.0;
+                        paint.h = 0.0;
                     }
                 }
             }
