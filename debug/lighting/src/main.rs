@@ -1015,11 +1015,7 @@ fn knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
     if knob.choices == ["off", "on"] {
         return None;
     }
-    let label = if name == "lighting_preset" {
-        "Preset".to_string()
-    } else {
-        knob.label.clone()
-    };
+    let label = menu_label(name, &knob.label);
     let slider = if knob.choices.is_empty() {
         PanelSlider::range(
             ID_KNOB + index as u32,
@@ -1163,7 +1159,7 @@ fn switch_rows_for(app: &App, home: u32) -> Vec<PanelRow> {
         .filter(|(_, knob)| switch_home(&knob.name) == home)
         .map(|(index, knob)| PanelCheck {
             id: ID_SWITCH + index as u32,
-            text: knob.label.clone(),
+            text: menu_label(&knob.name, &knob.label),
             on: knob.value >= 0.5,
         })
         .collect();
@@ -1215,11 +1211,46 @@ fn drop_knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
         return None;
     }
     drop_row(
-        &knob.label,
+        &menu_label(name, &knob.label),
         ID_DROP + index as u32,
         knob.value,
         knob.choices,
     )
+}
+
+/// Panel text from `docs/lighting/GLOSSARY.md`. The knob name stays the config key.
+fn menu_label(name: &str, fallback: &str) -> String {
+    match name {
+        "lighting_preset" => "Preset",
+        "lighting_bounces" => "Bounce count",
+        "lighting_direct" => "Direct light",
+        "lighting_direct_refresh" => "Direct refresh frames",
+        "lighting_gi_refresh" => "GI refresh frames",
+        "lighting_budget_shift" => "Ray budget shift",
+        "lighting_lamp_pick" => "Lamp pick",
+        "lighting_lamp_pick_samples" => "Samples",
+        "lighting_lamp_pick_candidates" => "Candidates",
+        "lighting_probe_rays" => "Screen probe rays",
+        "lighting_probe_stale" => "Probe stale frames",
+        "lighting_probes" => "Screen probes",
+        "lighting_world_cache" => "Surface light cache",
+        "lighting_world_stale" => "Cache stale frames",
+        "lighting_denoise" => "Denoiser",
+        "lighting_denoise_iters" => "Denoiser iterations",
+        "lighting_denoise_variance" => "Denoiser variance",
+        "lighting_denoise_launch" => "Denoiser launch",
+        "lighting_denoise_adaptive" => "Adaptive denoise",
+        "lighting_sky" => "Sky light",
+        "lighting_prefill" => "Pre-fill",
+        "lighting_ambient" => "Ambient fill",
+        "lighting_shadow_filter" => "Shadow cell cache",
+        "lighting_gi" => "GI",
+        "lighting_emissive" => "Emissive",
+        "lighting_compose_reuse" => "Compose reuse",
+        "lighting_full_effort" => "Full effort",
+        _ => fallback,
+    }
+    .to_string()
 }
 
 fn fps_row(fps: &FpsCounterSettings) -> PanelRow {
@@ -1569,6 +1600,7 @@ mod tests {
 
     #[test]
     fn each_setting_uses_a_dropdown_a_slider_or_a_toggle() {
+        use genos_debug::Host;
         use genos_scene::Camera;
         use genos_ui::{button_panel, Pointer, State};
 
@@ -1589,8 +1621,8 @@ mod tests {
             "Scene",
             "Checkpoint",
             "View",
-            "Shadow filter",
-            "Ambient",
+            "Shadow cell cache",
+            "Ambient fill",
             "Lamp pick",
         ] {
             assert!(dropdowns.contains(&label), "missing dropdown {label}");
@@ -1619,28 +1651,53 @@ mod tests {
             .collect();
         for label in [
             "Preset",
-            "Bounces",
+            "Bounce count",
             "Max lights",
-            "Direct refresh",
+            "Direct refresh frames",
             "Direct scale",
-            "GI refresh",
-            "Budget shift",
-            "Probe rays",
-            "Probe stale",
-            "World stale",
-            "Denoise iterations",
-            "Denoise variance",
+            "GI refresh frames",
+            "Ray budget shift",
+            "Screen probe rays",
+            "Probe stale frames",
+            "Cache stale frames",
+            "Denoiser iterations",
+            "Denoiser variance",
         ] {
             assert!(sliders.contains(&label), "missing slider {label}");
         }
-        assert!(!sliders.contains(&"Shadow filter"));
-        assert!(!sliders.contains(&"Ambient"));
+        assert!(!sliders.contains(&"Shadow cell cache"));
+        assert!(!sliders.contains(&"Ambient fill"));
         let checks: Vec<&str> = rows
             .iter()
             .flat_map(|row| row.checks.iter().map(|check| check.text.as_str()))
             .collect();
-        for label in ["Direct", "Shadows", "GI", "Denoise", "Full effort", "Show"] {
+        for label in [
+            "Direct light",
+            "Shadows",
+            "GI",
+            "Denoiser",
+            "Screen probes",
+            "Surface light cache",
+            "Sky light",
+            "Pre-fill",
+            "Full effort",
+            "Show",
+        ] {
             assert!(checks.contains(&label), "missing toggle {label}");
+        }
+        let names: Vec<String> = app.knobs().into_iter().map(|knob| knob.name).collect();
+        for name in [
+            "lighting_bounces",
+            "lighting_direct",
+            "lighting_probes",
+            "lighting_world_cache",
+            "lighting_denoise",
+            "lighting_sky",
+            "lighting_prefill",
+            "lighting_ambient",
+            "lighting_shadow_filter",
+        ] {
+            assert!(names.iter().any(|knob| knob == name), "config name {name}");
         }
         assert!(checks.iter().all(|label| !sliders.contains(label)));
         assert!(sliders.contains(&"FPS"));
@@ -1665,7 +1722,7 @@ mod tests {
         assert!(names.contains(&"high"));
         let rays = rows
             .iter()
-            .find(|row| row.label == "Probe rays")
+            .find(|row| row.label == "Screen probe rays")
             .unwrap()
             .slider
             .as_ref()
@@ -1674,7 +1731,7 @@ mod tests {
         assert_eq!(rays.step, 4.0);
         let denoise = rows
             .iter()
-            .find(|row| row.label == "Denoise iterations")
+            .find(|row| row.label == "Denoiser iterations")
             .unwrap()
             .slider
             .as_ref()
