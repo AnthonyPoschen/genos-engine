@@ -58,7 +58,8 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
 Page Up and Page Down switch scenes. Keys 1-9 jump checkpoints. Home and 0 reset
 to the active checkpoint. Arrow keys and the wheel step the slider under the
 pointer, or move the highlight in an open dropdown. Enter picks the highlighted
-choice. Escape closes the list. F3 toggles the frame-rate plate. A section title
+choice. Escape closes the list. F1 hides the menu. F1 again shows it. F3 toggles
+the frame-rate plate. A section title
 folds that group. The fold is remembered in <out>/menu/collapsed.txt. The panel
 stays within a third of the window. The scene description is the Info section.
 WASD fly, Space
@@ -273,6 +274,7 @@ fn run() -> Result<(), String> {
     }
     let mut input = InputSystem::new();
     let controls = character_controller();
+    let mut menu_open = true;
     let mut drawn = 0u32;
     let mut clock: Option<Instant> = None;
     let mut fps_overlay = FpsOverlay::new();
@@ -301,10 +303,17 @@ fn run() -> Result<(), String> {
         input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
         input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
         input.poll_gamepads();
-        hotkeys(&mut app, &input, &mut camera, &mut tools, &mut renderer)?;
+        hotkeys(
+            &mut app,
+            &input,
+            &mut camera,
+            &mut tools,
+            &mut renderer,
+            &mut menu_open,
+        )?;
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
-        let (paints, look_capture) = if opts.headless {
+        let (paints, look_capture) = if opts.headless || !menu_open {
             (Vec::new(), true)
         } else {
             let fps_menu = app.scene().fps_counter.effective();
@@ -846,7 +855,11 @@ fn hotkeys(
     camera: &mut Camera,
     tools: &mut genos_debug::Tools,
     renderer: &mut Renderer,
+    menu_open: &mut bool,
 ) -> Result<(), String> {
+    if input.keyboard.pressed(InputCode::key_f1) {
+        *menu_open = !*menu_open;
+    }
     let n = app.entries.len();
     if input.keyboard.pressed(InputCode::key_page_down) {
         switch_to(app, (app.index + 1) % n, None, camera, tools, renderer)?;
@@ -1842,6 +1855,7 @@ mod tests {
     fn help_lists_the_fps_counter() {
         assert!(super::USAGE.contains("--fps-counter"));
         assert!(super::USAGE.contains("--fps-hz"));
+        assert!(super::USAGE.contains("F1"));
         assert!(super::USAGE.contains("F3"));
         assert!(super::USAGE.contains("GENOS_FPS_COUNTER"));
     }
