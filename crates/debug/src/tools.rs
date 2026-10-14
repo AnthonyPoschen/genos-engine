@@ -1759,7 +1759,7 @@ fn event_loop_value_text(value: &Value) -> Result<String, String> {
     }
     if let Some(n) = value.as_f64() {
         if n.fract() == 0.0 && n.abs() < 1.0e15 {
-            return Ok(format!("{}", n as i64));
+            return Ok(format!("{n:.0}"));
         }
         return Ok(format!("{n:?}"));
     }
