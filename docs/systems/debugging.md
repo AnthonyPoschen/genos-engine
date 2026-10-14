@@ -87,7 +87,9 @@ curl -s -X POST localhost:8801/cmd/compare -d '{"width":160,"noise":0.03,"prefix
 ```
 
 Do not stop a `genos-stress` someone else bound to port 8765; pick another
-`GENOS_MCP_PORT`.
+port with `GENOS_MCP_PORT`. `genos-lighting` listens on 8766 unless
+`--mcp-port` is set. `GENOS_MCP_PORT` applies to that binary only when
+`--mcp-port` was omitted.
 
 Headless, a script with a report (exit code 1 when a check fails):
 

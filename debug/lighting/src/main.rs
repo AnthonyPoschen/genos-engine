@@ -53,6 +53,8 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          GENOS_FPS_HZ applies only when this is omitted
   --menu shown|hidden    debug menu (default shown). GENOS_MENU applies only
                          when this is omitted
+  --mcp-port N           loopback MCP port (default 8766). GENOS_MCP_PORT applies
+                         only when this is omitted. genos-stress stays on 8765
   --out DIR              screenshots, dumps, and logs (default ./genos-debug)
   --size WxH             window size (default 1280x720; 320x180 for --check)
   --check                every scene at its check checkpoint, four frames,
@@ -150,7 +152,12 @@ struct Options {
     out_set: bool,
     size: (u32, u32),
     check: bool,
+    /// Set by `--mcp-port`. Empty means `GENOS_MCP_PORT`, then [`MCP_PORT`].
+    mcp_port: Option<u16>,
 }
+
+/// Loopback port for this binary. `genos-stress` and `genos-camera` stay on 8765.
+const MCP_PORT: u16 = 8766;
 
 fn main() {
     if let Err(err) = run() {
@@ -204,8 +211,9 @@ fn run() -> Result<(), String> {
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let mcp_host = genos_mcp::Host::new(app.scene().clone(), camera.clone());
-    let _server = genos_mcp::Server::start_on(mcp_host, genos_mcp::listen_port())?;
-    let _ = writeln!(log, "mcp http://127.0.0.1:{}/", genos_mcp::listen_port());
+    let mcp_port = opts.mcp_port.unwrap_or_else(mcp_port_from_env);
+    let _server = genos_mcp::Server::start_on(mcp_host, mcp_port)?;
+    let _ = writeln!(log, "mcp http://127.0.0.1:{mcp_port}/");
     let mut tools = genos_debug::Tools::new();
     tools.set_out_dir(opts.out.join("shots"));
     if opts.unfilled {
@@ -1629,6 +1637,7 @@ fn options() -> Result<Options, String> {
     let mut out_set = false;
     let mut size = (1280u32, 720u32);
     let mut check = false;
+    let mut mcp_port = None;
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
             println!("{USAGE}");
@@ -1691,6 +1700,9 @@ fn options() -> Result<Options, String> {
                 };
                 parse_menu_visible(&value).map_err(|err| format!("bad --menu: {err}"))?;
             }
+            "--mcp-port" => {
+                mcp_port = Some(parse_mcp_port(&need_arg(&mut args, "--mcp-port")?)?);
+            }
             other => {
                 if let Some((flag, value)) = placed_flag(other) {
                     let parsed = parse_vec3(flag, value)?;
@@ -1705,6 +1717,8 @@ fn options() -> Result<Options, String> {
                     parse_rate(value).map_err(|err| format!("bad --fps-hz: {err}"))?;
                 } else if let Some(value) = other.strip_prefix("--menu=") {
                     parse_menu_visible(value).map_err(|err| format!("bad --menu: {err}"))?;
+                } else if let Some(value) = other.strip_prefix("--mcp-port=") {
+                    mcp_port = Some(parse_mcp_port(value)?);
                 } else {
                     return Err(format!("unknown argument {other}"));
                 }
@@ -1733,7 +1747,27 @@ fn options() -> Result<Options, String> {
         out_set,
         size,
         check,
+        mcp_port,
     })
+}
+
+fn parse_mcp_port(value: &str) -> Result<u16, String> {
+    let port: u16 = value
+        .trim()
+        .parse()
+        .map_err(|_| format!("--mcp-port needs 1 to 65535, got {value}"))?;
+    if port == 0 {
+        return Err("--mcp-port needs 1 to 65535, got 0".into());
+    }
+    Ok(port)
+}
+
+/// `GENOS_MCP_PORT` when it is a port, otherwise this binary's default.
+fn mcp_port_from_env() -> u16 {
+    std::env::var("GENOS_MCP_PORT")
+        .ok()
+        .and_then(|text| parse_mcp_port(&text).ok())
+        .unwrap_or(MCP_PORT)
 }
 
 #[cfg(test)]
@@ -1795,6 +1829,7 @@ mod tests {
             out_set: false,
             size: (320, 180),
             check: false,
+            mcp_port: None,
         };
         let mut camera = genos_scene::Camera::opening();
         super::place_camera(&opts, &mut camera).unwrap();
@@ -2152,6 +2187,17 @@ mod tests {
         assert!(super::USAGE.contains("--menu"));
         assert!(super::USAGE.contains("GENOS_MENU"));
         assert!(super::USAGE.contains("get_menu_settings"));
+        assert!(super::USAGE.contains("--mcp-port"));
+        assert!(super::USAGE.contains("8766"));
+    }
+
+    #[test]
+    fn the_lighting_mcp_port_is_not_the_stress_port() {
+        assert_eq!(super::MCP_PORT, 8766);
+        assert_ne!(super::MCP_PORT, genos_mcp::PORT);
+        assert_eq!(super::parse_mcp_port("8770").unwrap(), 8770);
+        assert!(super::parse_mcp_port("0").is_err());
+        assert!(super::parse_mcp_port("nope").is_err());
     }
 
     #[test]

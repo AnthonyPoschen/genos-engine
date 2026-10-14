@@ -64,7 +64,7 @@ The stress debug menu edits `world.scene.lighting` through `set_key`. The knobs 
 
 ## MCP
 
-On the existing command catalogue (`GENOS_MCP_PORT`):
+On the existing command catalogue. `genos-lighting` binds port 8766. `--mcp-port` overrides it, and `GENOS_MCP_PORT` applies only when that argument was omitted. `genos-stress` stays on 8765.
 
 - `get_lighting_settings` — the settings text and each bucket's last collected milliseconds and dispatch count. One frame behind the draw that just finished.
 - `set_lighting_settings` — partial update. Keys match the text form. A `text` field overlays `key=value` lines. Writes the scene and clears a renderer override.

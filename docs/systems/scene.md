@@ -45,8 +45,7 @@ The crate is `crates/scene`, package `genos-scene`.
 - `load_path` and `load_str` are in `src/script.rs`.
 - The agent endpoint is `crates/mcp`, package `genos-mcp`.
 - `Host` keeps the scene and the camera that the frame draws.
-- `Server` binds `127.0.0.1` port 8765 and writes one discovery record.
-- `GENOS_MCP_PORT` overrides that port.
+- `Server` binds `127.0.0.1` port 8765 and writes one discovery record. `genos-stress` and `genos-camera` use that port. `genos-lighting` uses 8766 so the two can run together. `--mcp-port` overrides the lighting port. `GENOS_MCP_PORT` overrides a binary's port when that binary did not get `--mcp-port`.
 - `GET /lighting` and the tool `lighting_status` return the live probe report.
 - `stable` is true when no brick is still updating.
 - `GET /shot.png` and the tool `take_screenshot` return the live picture. The light is not settled first.

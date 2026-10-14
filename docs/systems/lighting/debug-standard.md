@@ -50,6 +50,8 @@ cargo run --release -p genos-lighting -- --scene sponza --gpu-times 30
 
 `make lighting` is the benchmark: release, `--scene` from `SCENE` (default `stress`), and `--gpu-times 30`. The same arguments work on `cargo run`. `GENOS_SCENE`, `GENOS_LIGHTING_PRESET`, `GENOS_GPU_TIMES`, and `GENOS_LIGHTING_DEBUG` apply only when the matching argument was omitted.
 
+The lighting MCP server listens on port 8766. `--mcp-port N` overrides it. `GENOS_MCP_PORT` applies only when that argument was omitted. `genos-stress` stays on 8765.
+
 `--unfilled` selects the existing texels view (`ViewMode::Texels`). Slots with fewer than four sets are dim. There is no separate unfilled detector.
 
 Screenshots, dumps, and logs go to `./genos-debug/shots/`, `./genos-debug/logs/`, and `./genos-debug/dumps/` unless `--out` is set. When `GENOS_LIGHTING_DUMP` is set, dumps go to `<out>/dumps` if `--out` was passed or if `GENOS_LIGHTING_DUMP_DIR` was not already set. Nothing defaults to `$HOME`.
