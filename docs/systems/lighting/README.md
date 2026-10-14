@@ -202,7 +202,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 
 # Architecture and component notes (history kept as written)
 
-How GI v2, the lighting engine, works: direct light, shadows, global illumination, the reference it is checked against, and the checks. Each component lists our method, the published method it compares to (Lumen and papers, with links), how and why ours differs, current scores and open issues. The plan and budgets are in [GI v2 design](../gi-v2-design.md); the gate is in [Debugging](../debugging.md). Update this file whenever a method changes, in the same commit as the code.
+How GI, the lighting engine, works: direct light, shadows, global illumination, the reference it is checked against, and the checks. Each component lists our method, the published method it compares to (Lumen and papers, with links), how and why ours differs, current scores and open issues. The plan and budgets are in [GI design](../gi-design.md); the gate is in [Debugging](../debugging.md). Update this file whenever a method changes, in the same commit as the code.
 
 Scores are gi-check numbers (linear luminance, share of the light) against the GPU path-traced references, at the commit named in each section. "P6" is the probe path (6ce7fd4: screen probes, light cache in push mode, `GENOS_LIGHTING_WORLD=0`); it was the gi-v2 default until S54K. Default now (no env, S54K): GI v2 with the surface cache, `GENOS_LIGHTING_WORLD=3`, `GENOS_LIGHTING_WORLD_CAP=64`, `GENOS_LIGHTING_SC_FLAGS=6007050`, `GENOS_LIGHTING_SC_LOCAL=1`; P6 back with `GENOS_LIGHTING_WORLD=0`. GI v1 was removed on 2026-10-12 and there is no lighting-selection switch: plain `make stress` / `make run` run this lighting with the tuned defaults (see "GI v1 removed" below). "SC" is the surface cache (`GENOS_LIGHTING_WORLD=3`, branch `surface-cache`, flags in `GENOS_LIGHTING_SC_FLAGS`).
 
@@ -430,7 +430,7 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 
 GI v1 (radiance cascades, the world probe tier, `stage_tier`, the v1 `kick_light` paths, `light.comp`, `scene.frag`, `tier.glsl`, `ssaa.comp`, `lighting.rs`, `probes.rs`, `probe_tier.rs`, `field.rs`, `shadow.rs`, their tests and bench columns, and the `GENOS_GI` switch and stress `gi` knob) is gone. Removed with it: SSAA (it drew through the v1 fragment shader; panel code 2 now means FXAA), the live-readback switch, `TierStats` (replaced by `SettleStats { settled, still_frames }` from `Renderer::settle_stats()`), and the debug views that showed v1 data (cascade, probes, light field). Debug views now: full, direct, bounce, albedo, normal, depth, light, texels.
 
-Historical v1 numbers (for comparison only; v1 cannot be run any more). Full tables in [GI v2 baseline](../gi-v2-baseline.md) (master `0874229d`, tag `gi-v2-baseline`, zanven-pc, RTX 4070, 2026-10-10):
+Historical v1 numbers (for comparison only; v1 cannot be run any more). Full tables in [GI v1 archive](archive-v1.md) (master `0874229d`, tag `gi-v2-baseline`, zanven-pc, RTX 4070, 2026-10-10):
 
 | v1 check (320x180, CPU reference) | mean_rel | bias |
 |---|---|---|

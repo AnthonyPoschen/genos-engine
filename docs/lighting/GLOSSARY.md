@@ -18,7 +18,7 @@ Role: OUT · Literature: GIBS direct + shadow rays; Lumen direct lighting; DDGI 
 More detail: [`crates/render/shaders/lighting_direct.comp`](../../crates/render/shaders/lighting_direct.comp), `DirectSettings` in [`crates/scene/src/lighting.rs`](../../crates/scene/src/lighting.rs)
 
 **GI (indirect light)**: light that arrives after one or more bounces. `gi.enabled=false` skips every GI pass.
-Role: OUT · Literature: all of them · More detail: [../systems/gi-v2-design.md](../systems/gi-v2-design.md)
+Role: OUT · Literature: all of them · More detail: [../systems/gi-design.md](../systems/gi-design.md)
 
 **Bounce count**: how many bounces GI carries: 0, 1, 2 or unlimited (the cache feeds itself).
 Role: TOOL · Literature: GIBS "infinite bounce via cache"; DDGI recursive probes; Lumen multi-bounce via surface cache · More detail: `BounceSettings`; [GIBS.md §1.11](research/GIBS.md)
@@ -37,11 +37,11 @@ Role: LIGHTS · Literature: GIBS treats it as a shadow-ray light · More detail:
 Role: OUT · Literature: — (classic ambient term) · More detail: `AmbientMode`
 
 **Emissive**: a surface that gives off light. GI rays see it like any other lit surface.
-Role: OUT · Literature: Lumen emissive via surface cache · More detail: [../systems/gi-v2-design.md#emissive-surfaces](../systems/gi-v2-design.md#emissive-surfaces)
+Role: OUT · Literature: Lumen emissive via surface cache · More detail: [../systems/gi-design.md#emissive-surfaces](../systems/gi-design.md#emissive-surfaces)
 
 ### Screen probes (final gather)
 **Screen probe**: a point on the visible surface placed every *probe tile* pixels. It traces rays to gather indirect light for nearby pixels.
-Role: SAMPLE · Literature: Lumen screen probe; DDGI probe is world-space (different); GIBS — (surfels play this role) · More detail: [`lighting_place.comp`](../../crates/render/shaders/lighting_place.comp), [`lighting_trace.comp`](../../crates/render/shaders/lighting_trace.comp); [../systems/gi-v2-design.md#final-gather-screen-probes](../systems/gi-v2-design.md#final-gather-screen-probes)
+Role: SAMPLE · Literature: Lumen screen probe; DDGI probe is world-space (different); GIBS — (surfels play this role) · More detail: [`lighting_place.comp`](../../crates/render/shaders/lighting_place.comp), [`lighting_trace.comp`](../../crates/render/shaders/lighting_trace.comp); [../systems/gi-design.md#final-gather-screen-probes](../systems/gi-design.md#final-gather-screen-probes)
 
 **Probe tile**: the spacing of screen probes in pixels (16 from 720p up).
 Role: STORE · Literature: Lumen probe downsample factor; GIBS 16×16 spawn tile (§1.3)
@@ -53,7 +53,7 @@ Role: OUT · Literature: Lumen final gather · More detail: [`lighting_gather.co
 Role: DENOISE · Literature: Lumen screen-probe spatial filter; GIBS irradiance sharing (§1.14) · More detail: [`lighting_filter.comp`](../../crates/render/shaders/lighting_filter.comp)
 
 **Kept hit**: the stored hit of a screen-probe ray, reused for up to N frames. Its light is re-read every frame, so we reuse visibility, not light.
-Role: TEMPORAL · Literature: — in GIBS/DDGI; Lumen reuses radiance instead (we diverge on purpose) · More detail: [gi-v2-design.md, final gather](../systems/gi-v2-design.md#final-gather-screen-probes); experiments (see [../systems/lighting/experiments/](../systems/lighting/experiments/)) S78D, S78O, E05
+Role: TEMPORAL · Literature: — in GIBS/DDGI; Lumen reuses radiance instead (we diverge on purpose) · More detail: [gi-design.md, final gather](../systems/gi-design.md#final-gather-screen-probes); experiments (see [../systems/lighting/experiments/](../systems/lighting/experiments/)) S78D, S78O, E05
 
 **Stale frames**: once a kept hit or entry has gone this many frames without an update, it is treated as stale.
 Role: SCHED · Literature: — · More detail: `probe_stale`, `world_stale`
@@ -102,7 +102,7 @@ Role: TOOL · Literature: —
 Role: STORE · Literature: GIBS transform/bone-attached surfel (§1.5); Lumen moving cards · More detail: `GENOS_LIGHTING_SC_LOCAL`; branch gibs-mover-attach-msme
 
 **World radiance cache (WRC)**: a coarse world-space cache of incoming light, used for far rays and as a fallback.
-Role: STORE · Literature: Lumen WRC; DDGI volume; GIBS — (GIBS uses its grid for lookup only) · More detail: [../systems/gi-v2-design.md#world-probes-radiance-cache](../systems/gi-v2-design.md#world-probes-radiance-cache)
+Role: STORE · Literature: Lumen WRC; DDGI volume; GIBS — (GIBS uses its grid for lookup only) · More detail: [../systems/gi-design.md#world-probes-radiance-cache](../systems/gi-design.md#world-probes-radiance-cache)
 
 **Acceleration grid** (proposed, not built): a spatial lookup that finds entries near a point in a big world.
 Role: STORE · Literature: GIBS trapezoid grid (§1.7) · More detail: [GIBS.md §1.7](research/GIBS.md)
@@ -149,7 +149,7 @@ Role: LIGHTS · Literature: RIS (Talbot 2005); `reuse` = ReSTIR DI; GIBS weighs 
 Role: SAMPLE · Literature: ReSTIR M candidates / visible samples
 
 **Light tree** (in the pipeline): lamps grouped in a tree and walked randomly. Planned as `--lamp-pick tree`.
-Role: LIGHTS · Literature: Stochastic Lightcuts (Yuksel 2019), GIBS [§1.16](research/GIBS.md) · More detail: [gi-v2-design.md](../systems/gi-v2-design.md#direct-lighting)
+Role: LIGHTS · Literature: Stochastic Lightcuts (Yuksel 2019), GIBS [§1.16](research/GIBS.md) · More detail: [gi-design.md](../systems/gi-design.md#direct-lighting)
 
 **Shadow cell cache** (*shadow filter = cell*): reuses a shadow result across a 12.5 cm world cell for N frames.
 Role: VIS · Literature: — (similar to Lumen cached shadow masks)
@@ -169,7 +169,7 @@ Role: SCHED · Literature: — · More detail: S63–S65, SUN-small-sun-step; [`
 **Reference tester**: [`crates/lighting-ref`](../../crates/lighting-ref): CPU references and picture verdicts. Role: TOOL
 
 ### Historical (do not reuse)
-Radiance cascade, radiance field, v1 world probe, tier, notice band, prominence spacing: GI v1, removed on 2026-10-12. ADR [0008](../adr/0008-lighting-uses-radiance-cascades.md) is superseded by ADR 0012.
+Radiance cascade, radiance field, v1 world probe, tier, notice band, prominence spacing: GI v1, removed on 2026-10-12. ADR [0008](../adr/0008-lighting-uses-radiance-cascades.md) is superseded by [ADR 0012](../adr/0012-gi.md). See [archive-v1.md](../systems/lighting/archive-v1.md).
 
 ---
 ## How to compare a new technique

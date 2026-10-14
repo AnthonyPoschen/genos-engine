@@ -6,7 +6,7 @@ Written 2026-10-12 against `gi-v2` at `e61b89d`. This is a plan. It does not cha
 
 **Architecture.** The G-buffer, the traced shadows, the surface-cache texels, the shape pool, the particle cards, FXAA, and the display curve stay. A new pass is a compute or a raster that runs only when its inputs changed, writes GPU memory, and does not read it back in the frame. New surfaces claim the same world texels a mesh claims. They do not grow a second light cache.
 
-**Bindings.** [ADR 0003](../../adr/0003-one-vulkan-renderer-moltenvk-on-macos.md) is one Vulkan renderer. [ADR 0007](../../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps a third-party crate off that renderer. [ADR 0012](../../adr/0012-gi-v2.md) and [GI v2 design](../gi-v2-design.md) are the lighting design. The non-goals there include mesh shaders and Nanite-style virtual geometry. [PR #5](https://github.com/AnthonyPoschen/genos-engine/pull/5) (`docs/frame-reuse.md` on `cursor/frame-output-reuse-6556`, not merged) is the frame-reuse design. The asset cook is [the asset plan](../assets/plan.md). This plan consumes its meshlets, pages, and chunks. It does not cook them.
+**Bindings.** [ADR 0003](../../adr/0003-one-vulkan-renderer-moltenvk-on-macos.md) is one Vulkan renderer. [ADR 0007](../../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps a third-party crate off that renderer. [ADR 0012](../../adr/0012-gi.md) and [GI design](../gi-design.md) are the lighting design. The non-goals there include mesh shaders and Nanite-style virtual geometry. [PR #5](https://github.com/AnthonyPoschen/genos-engine/pull/5) (`docs/frame-reuse.md` on `cursor/frame-output-reuse-6556`, not merged) is the frame-reuse design. The asset cook is [the asset plan](../assets/plan.md). This plan consumes its meshlets, pages, and chunks. It does not cook them.
 
 ## What was searched
 
@@ -66,7 +66,7 @@ The branch list is in the asset plan. For this plan the extra findings are:
 | Water | missing | |
 | Atmosphere and weather | missing | The sky is one radiance in every direction, including below the horizon (`scene/src/types.rs`). No sun disc, no aerial perspective. The stress sky colour follows the sun in `building.rs`. That is a game-side colour, not a scattering model. |
 | Decals | missing | |
-| Mesh LOD | missing | Designed as up to 4 LODs in `gi-v2-design.md`. The cook plan builds the clusters. The draw does not select them. |
+| Mesh LOD | missing | Designed as up to 4 LODs in `gi-design.md`. The cook plan builds the clusters. The draw does not select them. |
 | GPU occlusion culling of draws | missing | Frustum cull is on the CPU. |
 
 ## Architecture

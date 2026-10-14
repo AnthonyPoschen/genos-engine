@@ -1,8 +1,7 @@
-// GI v2 frame path (docs/systems/gi-v2-design.md), included into gpu.rs.
+// GI frame path (docs/systems/gi-design.md), included into gpu.rs.
 //
-// With GI v2 on, the frame rasters a G-buffer (gbuffer.frag, same vertices and
-// depth prepass) instead of the old shading, then runs small compute passes, each
-// with at most one trace site:
+// The frame rasters a G-buffer (gbuffer.frag, same vertices and depth prepass),
+// then runs small compute passes, each with at most one trace site:
 //
 //   compact  list the light cache's live patches
 //   place    one screen probe per tile on the G-buffer surface
