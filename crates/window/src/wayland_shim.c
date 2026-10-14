@@ -712,6 +712,16 @@ int genos_window_pump_size(void) {
     return (int)sizeof(struct GenosPump);
 }
 
+/* Dispatch the socket without copying input out. A side thread calls this while
+ * the frame thread is inside a device wait, so a ping is answered and the next
+ * genos_window_pump still sees the keys and the pointer. */
+void genos_window_dispatch(struct GenosWindow *win) {
+    if (!win || !win->display) {
+        return;
+    }
+    pump_events(win);
+}
+
 int genos_window_set_title(struct GenosWindow *win, const char *title) {
     if (!win || !win->toplevel || !title) {
         return -1;

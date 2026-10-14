@@ -3,7 +3,6 @@
 #![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::undocumented_unsafe_blocks, reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md")]
 
 //! Debug switches for the picture: what the lighting's compose pass shows, and
 //! per-lamp reports. The tools crate drives these; a game frame leaves them at
@@ -155,9 +154,7 @@ impl Renderer {
 
     /// Counters from the last submitted frame. Waits until that frame's copy is visible.
     pub fn unfilled_stats(&mut self) -> crate::unfilled::UnfilledStats {
-        unsafe {
-            (self.gpu.fns.device_wait)(self.gpu.device);
-        }
+        self.gpu.idle_device();
         let slot = self.gpu.lighting.last_slot;
         self.gpu.take_unfilled(slot);
         self.gpu.last_unfilled.unwrap_or_default()

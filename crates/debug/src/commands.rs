@@ -95,6 +95,14 @@ pub fn specs() -> Vec<CommandSpec> {
             "set_fps_counter",
             "Partial frame-rate overlay update. Keys are enabled (on/off) and rate_hz (0.25 to 30). A text field overlays key=value lines. Writes the scene. --fps-counter, --fps-hz, and the GENOS_FPS_* mirrors still overlay the value the readout uses.",
         ),
+        spec(
+            "get_event_loop",
+            "The event-loop stall mark in force (text form): longest_stall_ms, the longest gap between window pumps since the last clear. The frame writes it. The budget is 100 ms.",
+        ),
+        spec(
+            "set_event_loop",
+            "Partial event-loop update. Key longest_stall_ms (alias stall_ms) is zero or more. Writing 0 clears the high-water mark. A text field overlays key=value lines. Writes the scene. The next frame adopts a lower value.",
+        ),
     ]
     .into_iter()
     .chain(host_specs())
@@ -118,7 +126,7 @@ fn host_specs() -> Vec<CommandSpec> {
         ),
         spec(
             "load_scene",
-            "Load a scene by name. Drops light and object edits and clears the lighting cache. checkpoint (optional) jumps after the load; otherwise the first checkpoint is used.",
+            "Load a scene by name. A large scene loads off the frame thread; the reply arrives when it is in place and the window keeps pumping. Drops light and object edits and clears the lighting cache. checkpoint (optional) jumps after the load; otherwise the first checkpoint is used.",
         ),
         spec(
             "list_checkpoints",

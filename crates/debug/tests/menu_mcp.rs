@@ -43,6 +43,7 @@ fn room() -> World {
         lighting: genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
+        event_loop: genos_scene::EventLoopSettings::default(),
         menu: MenuSettings::default(),
     })
 }

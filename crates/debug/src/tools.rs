@@ -25,12 +25,12 @@ use std::path::PathBuf;
 use genos_mcp::json::Value;
 use genos_render::{DebugView, Renderer, ScreenRect, ViewMode};
 use genos_scene::{
-    Camera, DebugSettings, FpsCounterSettings, Light, LightingPreset, LightingSettings,
-    MenuSettings, Scene, Vec3, PITCH_LIMIT,
+    Camera, DebugSettings, EventLoopSettings, FpsCounterSettings, Light, LightingPreset,
+    LightingSettings, MenuSettings, Scene, Vec3, PITCH_LIMIT,
 };
 
 use crate::image::{Flicker, Image, Region};
-use crate::knobs::{CheckpointPose, Host, Knob};
+use crate::knobs::{CheckpointPose, Host, Knob, LoadPace};
 use crate::reference::{self, RefSetup, Reference};
 use crate::value::{list, num, obj, text, vec3, Args};
 
@@ -218,6 +218,11 @@ enum Job {
         heatmap: Option<PathBuf>,
         frames_dir: Option<PathBuf>,
         index: u32,
+    },
+    /// A scene file is loading off the frame thread.
+    SceneLoad {
+        name: String,
+        checkpoint: String,
     },
 }
 
@@ -407,6 +412,7 @@ impl Tools {
                 Err(err) => genos_mcp::command::reply(cmd.id, Err(err)),
             }
         }
+        self.poll_scene_loads(ctx);
         self.apply_edits(ctx.host.scene());
         self.apply_camera_path(ctx.camera);
         for running in &mut self.jobs {
@@ -552,6 +558,7 @@ impl Tools {
                         None
                     }
                 }
+                Job::SceneLoad { .. } => None,
                 Job::Flicker {
                     left,
                     flicker,
@@ -1230,6 +1237,11 @@ impl Tools {
                 apply_fps_update(&mut ctx.host.scene().fps_counter, args.0)?;
                 reply(fps_counter_value(&ctx.host.scene().fps_counter.effective()))
             }
+            "get_event_loop" => reply(event_loop_value(&ctx.host.scene().event_loop)),
+            "set_event_loop" => {
+                apply_event_loop_update(&mut ctx.host.scene().event_loop, args.0)?;
+                reply(event_loop_value(&ctx.host.scene().event_loop))
+            }
             "get_menu_settings" => {
                 reply(menu_value(&ctx.host.scene().menu.effective()))
             }
@@ -1250,27 +1262,15 @@ impl Tools {
             )),
             "load_scene" => {
                 let name = args.str("name")?.ok_or("load_scene needs name")?;
-                ctx.host.load_scene(&name)?;
-                self.drop_scene_edits();
-                ctx.renderer.reset_lighting_cache();
-                let checkpoint = match args.str("checkpoint")? {
-                    Some(checkpoint) => checkpoint,
-                    None => ctx
-                        .host
-                        .list_checkpoints()
-                        .into_iter()
-                        .next()
-                        .unwrap_or_default(),
-                };
-                if !checkpoint.is_empty() {
-                    let pose = ctx.host.jump_checkpoint(&checkpoint)?;
-                    Self::place_checkpoint(ctx.camera, pose);
+                let checkpoint = args.str("checkpoint")?.unwrap_or_default();
+                match ctx.host.begin_load(&name)? {
+                    LoadPace::Ready => {
+                        self.drop_scene_edits();
+                        ctx.renderer.reset_lighting_cache();
+                        reply(Self::scene_load_reply(ctx, &name, &checkpoint)?)
+                    }
+                    LoadPace::Pending => Ok(Step::Job(Job::SceneLoad { name, checkpoint })),
                 }
-                reply(obj(vec![
-                    ("scene", text(name)),
-                    ("checkpoint", text(checkpoint)),
-                    ("camera", camera_value(ctx.camera)),
-                ]))
             }
             "list_checkpoints" => reply(list(
                 ctx.host
@@ -1290,6 +1290,79 @@ impl Tools {
             }
             _ => Err(format!("unknown command {name}")),
         }
+    }
+
+    fn poll_scene_loads(&mut self, ctx: &mut Ctx) {
+        let pending = self
+            .jobs
+            .iter()
+            .any(|running| matches!(running.job, Job::SceneLoad { .. }));
+        if !pending {
+            return;
+        }
+        match ctx.host.poll_load() {
+            Ok(LoadPace::Pending) => {}
+            Ok(LoadPace::Ready) => {
+                self.drop_scene_edits();
+                ctx.renderer.reset_lighting_cache();
+                let ready: Vec<(usize, u64, String, String)> = self
+                    .jobs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, running)| match &running.job {
+                        Job::SceneLoad { name, checkpoint } => {
+                            Some((index, running.id, name.clone(), checkpoint.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                for (index, id, name, checkpoint) in ready.into_iter().rev() {
+                    let result = Self::scene_load_reply(ctx, &name, &checkpoint);
+                    self.jobs.remove(index);
+                    genos_mcp::command::reply(id, result);
+                }
+            }
+            Err(err) => {
+                let failed: Vec<(usize, u64)> = self
+                    .jobs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, running)| match running.job {
+                        Job::SceneLoad { .. } => Some((index, running.id)),
+                        _ => None,
+                    })
+                    .collect();
+                for (index, id) in failed.into_iter().rev() {
+                    self.jobs.remove(index);
+                    genos_mcp::command::reply(id, Err(err.clone()));
+                }
+            }
+        }
+    }
+
+    fn scene_load_reply(
+        ctx: &mut Ctx,
+        name: &str,
+        checkpoint: &str,
+    ) -> Result<Value, String> {
+        let checkpoint = if checkpoint.is_empty() {
+            ctx.host
+                .list_checkpoints()
+                .into_iter()
+                .next()
+                .unwrap_or_default()
+        } else {
+            checkpoint.to_string()
+        };
+        if !checkpoint.is_empty() {
+            let pose = ctx.host.jump_checkpoint(&checkpoint)?;
+            Self::place_checkpoint(ctx.camera, pose);
+        }
+        Ok(obj(vec![
+            ("scene", text(name.to_string())),
+            ("checkpoint", text(checkpoint)),
+            ("camera", camera_value(ctx.camera)),
+        ]))
     }
 
     fn place_checkpoint(camera: &mut Camera, pose: CheckpointPose) {
@@ -1646,6 +1719,51 @@ fn lighting_value_text(value: &Value) -> Result<String, String> {
         return Ok(parts.join(","));
     }
     Err("a lighting value is a string, number, bool, or list".into())
+}
+
+fn event_loop_value(settings: &EventLoopSettings) -> Value {
+    obj(vec![
+        ("text", text(settings.to_text())),
+        ("longest_stall_ms", num(settings.longest_stall_ms)),
+    ])
+}
+
+fn apply_event_loop_update(settings: &mut EventLoopSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("event-loop settings are an object".into());
+    };
+    if let Some(body) = args.get("text").and_then(|v| v.as_str()) {
+        for line in body.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("event-loop line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &event_loop_value_text(value)?)?;
+    }
+    Ok(())
+}
+
+fn event_loop_value_text(value: &Value) -> Result<String, String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(n) = value.as_f64() {
+        if n.fract() == 0.0 && n.abs() < 1.0e15 {
+            return Ok(format!("{}", n as i64));
+        }
+        return Ok(format!("{n:?}"));
+    }
+    Err("an event-loop value is a string or a number".into())
 }
 
 fn fps_counter_value(settings: &FpsCounterSettings) -> Value {

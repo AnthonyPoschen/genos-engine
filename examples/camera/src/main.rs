@@ -304,6 +304,8 @@ fn run() -> Result<(), String> {
     } else {
         Window::open(size.0, size.1)?
     };
+    window.install_seat_pump();
+    Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let mut drawn = 0u32;
@@ -720,7 +722,15 @@ fn run() -> Result<(), String> {
         bench.report(renderer.width(), renderer.height(), renderer.antialias());
     }
     println!("genos-camera frames={drawn}");
-    Ok(())
+    finish(window, renderer, 0);
+}
+
+fn finish(window: Window, renderer: Renderer, code: i32) -> ! {
+    Renderer::clear_blocker();
+    window.clear_seat_pump();
+    drop(window);
+    renderer.abandon();
+    std::process::exit(code);
 }
 
 /// `GENOS_BENCH=<seconds>`: an unattended benchmark. The camera stays where it starts
