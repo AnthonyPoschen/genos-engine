@@ -30,6 +30,10 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --scene NAME           scene file name (debug/scenes). Falls back to GENOS_SCENE,
                          then stress
   --checkpoint NAME      jump here at launch
+  --eye X,Y,Z            camera position, metres. --eye=X,Y,Z is the same flag.
+                         Keeps the checkpoint aim unless --look is set
+  --look X,Y,Z           world point to aim at. --look=X,Y,Z is the same flag.
+                         Yaw 0 looks down -Z
   --preset NAME          potato, low, medium, or high. Sets GENOS_LIGHTING_PRESET
   --surface-cache-attach-movers on|off
                          mover cache entries follow the object
@@ -52,6 +56,11 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --unfilled             show the texels view (slots with fewer than 4 sets are dim)
   --full-effort          preset high, unless --preset is set, and compose every frame
                          (GENOS_LIGHTING_COMPOSE_ALL)
+  --denoise-launch hash|screen
+                         picture wavelet (GENOS_LIGHTING_DENOISE_LAUNCH). Preset high
+                         uses screen. The other presets keep hash. This flag and the
+                         variable override the preset
+  --denoise-screen on|off alias of --denoise-launch (GENOS_LIGHTING_DENOISE_SCREEN)
   --headless             proof window, no panel
   --frames N             quit after N frames
   --fps-counter [on|off] frame-rate plate (default off). A bare flag turns it on.
@@ -127,11 +136,15 @@ const PRESETS: [&str; 4] = ["potato", "low", "medium", "high"];
 struct Options {
     scene: String,
     checkpoint: Option<String>,
+    eye: Option<[f32; 3]>,
+    look: Option<[f32; 3]>,
     preset: Option<String>,
     gpu_times: Option<u32>,
     lighting_debug: bool,
     unfilled: bool,
     full_effort: bool,
+    denoise_launch: Option<String>,
+    denoise_screen: Option<String>,
     headless: bool,
     frames: Option<u32>,
     out: PathBuf,
@@ -182,6 +195,7 @@ fn run() -> Result<(), String> {
     app.load_scene(&app.entries[index].name.clone())?;
     let mut camera = Camera::opening();
     jump_camera(&mut app, opts.checkpoint.as_deref(), &mut camera)?;
+    place_camera(&opts, &mut camera)?;
     let (width, height) = opts.size;
     let mut window = if opts.headless {
         Window::open_proof(width, height)?
@@ -703,6 +717,49 @@ fn unit(v: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// `--eye=X,Y,Z` and `--look=X,Y,Z`. The spaced form is a separate argument.
+fn placed_flag(arg: &str) -> Option<(&'static str, &str)> {
+    if let Some(value) = arg.strip_prefix("--eye=") {
+        Some(("--eye", value))
+    } else if let Some(value) = arg.strip_prefix("--look=") {
+        Some(("--look", value))
+    } else {
+        None
+    }
+}
+
+fn parse_vec3(flag: &str, text: &str) -> Result<[f32; 3], String> {
+    let parts: Vec<&str> = text.split(',').collect();
+    if parts.len() != 3 {
+        return Err(format!("{flag} is x,y,z"));
+    }
+    let mut out = [0.0; 3];
+    for (i, part) in parts.iter().enumerate() {
+        out[i] = part
+            .trim()
+            .parse()
+            .map_err(|_| format!("{flag} has a bad number {part}"))?;
+    }
+    Ok(out)
+}
+
+/// `--eye` moves the camera. `--look` aims it, from that eye or from the
+/// checkpoint. Yaw and pitch match `look_yaw_pitch` (yaw 0 looks down -Z).
+fn place_camera(opts: &Options, camera: &mut Camera) -> Result<(), String> {
+    let eye = match opts.eye {
+        Some(eye) => eye,
+        None => [camera.position.x, camera.position.y, camera.position.z],
+    };
+    if opts.eye.is_some() && opts.look.is_none() {
+        camera.set_pose(Vec3::new(eye[0], eye[1], eye[2]), camera.yaw, camera.pitch);
+    }
+    if let Some(target) = opts.look {
+        let (yaw, pitch) = genos_scene_lib::look_yaw_pitch(eye, target);
+        camera.set_pose(Vec3::new(eye[0], eye[1], eye[2]), yaw, pitch);
+    }
+    Ok(())
+}
+
 fn jump_camera(app: &mut App, name: Option<&str>, camera: &mut Camera) -> Result<(), String> {
     let chosen = match name {
         Some(name) => name.to_string(),
@@ -1139,6 +1196,12 @@ fn apply_intent(opts: &Options) -> Result<(), String> {
     if opts.lighting_debug {
         std::env::set_var("GENOS_LIGHTING_DEBUG", "1");
     }
+    if let Some(value) = &opts.denoise_screen {
+        std::env::set_var("GENOS_LIGHTING_DENOISE_SCREEN", value);
+    }
+    if let Some(value) = &opts.denoise_launch {
+        std::env::set_var("GENOS_LIGHTING_DENOISE_LAUNCH", value);
+    }
     Ok(())
 }
 
@@ -1150,11 +1213,15 @@ fn options() -> Result<Options, String> {
     let mut args = std::env::args().skip(1).peekable();
     let mut scene = std::env::var("GENOS_SCENE").ok();
     let mut checkpoint = None;
+    let mut eye = None;
+    let mut look = None;
     let mut preset = None;
     let mut gpu_times = None;
     let mut lighting_debug = false;
     let mut unfilled = false;
     let mut full_effort = false;
+    let mut denoise_launch = None;
+    let mut denoise_screen = None;
     let mut headless = false;
     let mut frames = None;
     let mut out = PathBuf::from("genos-debug");
@@ -1169,6 +1236,8 @@ fn options() -> Result<Options, String> {
         match arg.as_str() {
             "--scene" => scene = Some(need_arg(&mut args, "--scene")?),
             "--checkpoint" => checkpoint = Some(need_arg(&mut args, "--checkpoint")?),
+            "--eye" => eye = Some(parse_vec3("--eye", &need_arg(&mut args, "--eye")?)?),
+            "--look" => look = Some(parse_vec3("--look", &need_arg(&mut args, "--look")?)?),
             "--preset" => preset = Some(need_arg(&mut args, "--preset")?),
             "--gpu-times" => {
                 gpu_times = Some(
@@ -1180,6 +1249,8 @@ fn options() -> Result<Options, String> {
             "--lighting-debug" => lighting_debug = true,
             "--unfilled" => unfilled = true,
             "--full-effort" => full_effort = true,
+            "--denoise-launch" => denoise_launch = Some(need_arg(&mut args, "--denoise-launch")?),
+            "--denoise-screen" => denoise_screen = Some(need_arg(&mut args, "--denoise-screen")?),
             "--headless" => headless = true,
             "--frames" => {
                 frames = Some(
@@ -1212,7 +1283,14 @@ fn options() -> Result<Options, String> {
                 parse_rate(&value).map_err(|err| format!("bad --fps-hz: {err}"))?;
             }
             other => {
-                if let Some(value) = other.strip_prefix("--fps-counter=") {
+                if let Some((flag, value)) = placed_flag(other) {
+                    let parsed = parse_vec3(flag, value)?;
+                    if flag == "--eye" {
+                        eye = Some(parsed);
+                    } else {
+                        look = Some(parsed);
+                    }
+                } else if let Some(value) = other.strip_prefix("--fps-counter=") {
                     parse_enabled(value).map_err(|err| format!("bad --fps-counter: {err}"))?;
                 } else if let Some(value) = other.strip_prefix("--fps-hz=") {
                     parse_rate(value).map_err(|err| format!("bad --fps-hz: {err}"))?;
@@ -1233,11 +1311,15 @@ fn options() -> Result<Options, String> {
     Ok(Options {
         scene: scene.unwrap_or_else(|| "stress".into()),
         checkpoint,
+        eye,
+        look,
         preset,
         gpu_times,
         lighting_debug,
         unfilled,
         full_effort,
+        denoise_launch,
+        denoise_screen,
         headless,
         frames,
         out,
@@ -1284,6 +1366,50 @@ mod tests {
         let summary = check_summary(&["camera".into(), "hell".into()], &["sponza".into()], &[]);
         assert_eq!(summary, "2 passed, 1 skipped, 0 failed (skipped sponza)");
         assert!(!summary.contains("sponza passed"));
+    }
+
+    #[test]
+    fn eye_and_look_place_the_camera() {
+        let mut opts = super::Options {
+            scene: "stress".into(),
+            checkpoint: None,
+            eye: Some([1.0, 2.0, 3.0]),
+            look: Some([1.0, 2.0, 1.0]),
+            preset: None,
+            gpu_times: None,
+            lighting_debug: false,
+            unfilled: false,
+            full_effort: false,
+            denoise_launch: None,
+            denoise_screen: None,
+            headless: true,
+            frames: None,
+            out: std::path::PathBuf::from("genos-debug"),
+            out_set: false,
+            size: (320, 180),
+            check: false,
+        };
+        let mut camera = genos_scene::Camera::opening();
+        super::place_camera(&opts, &mut camera).unwrap();
+        assert!((camera.position.x - 1.0).abs() < 1.0e-5);
+        assert!((camera.position.y - 2.0).abs() < 1.0e-5);
+        assert!((camera.position.z - 3.0).abs() < 1.0e-5);
+        // Target is 2 m down -Z from the eye. Yaw 0 looks down -Z.
+        assert!(camera.yaw.abs() < 1.0e-4, "yaw {}", camera.yaw);
+        assert!(camera.pitch.abs() < 1.0e-4, "pitch {}", camera.pitch);
+        opts.look = None;
+        camera.set_pose(genos_scene::Vec3::new(0.0, 0.0, 0.0), 0.4, -0.2);
+        super::place_camera(&opts, &mut camera).unwrap();
+        assert!((camera.position.x - 1.0).abs() < 1.0e-5);
+        assert!((camera.yaw - 0.4).abs() < 1.0e-5);
+        assert!((camera.pitch + 0.2).abs() < 1.0e-5);
+        assert!(super::parse_vec3("--eye", "1, 2, 3").is_ok());
+        assert!(super::parse_vec3("--eye", "1,2").is_err());
+        let (flag, value) = super::placed_flag("--eye=4,5,6").unwrap();
+        assert_eq!(super::parse_vec3(flag, value).unwrap(), [4.0, 5.0, 6.0]);
+        let (flag, value) = super::placed_flag("--look=7,8,9").unwrap();
+        assert_eq!(super::parse_vec3(flag, value).unwrap(), [7.0, 8.0, 9.0]);
+        assert!(super::placed_flag("--eye").is_none());
     }
 
     #[test]

@@ -10,7 +10,9 @@
 //! matching variable applies only when that argument was omitted.
 //!
 //! Defaults match the tuned GI path (preset `high`): every feature on, unlimited
-//! bounces, 64 rays per probe, the surface cache, five a-trous iterations.
+//! bounces, 64 rays per probe, the surface cache, five a-trous iterations on
+//! the picture wavelet. The other presets keep the hash-slot launch.
+//! `--denoise-launch` and `GENOS_LIGHTING_DENOISE_LAUNCH` override the preset.
 
 use std::fmt::Write as _;
 
@@ -30,7 +32,8 @@ pub enum LightingPreset {
     Low,
     /// Surface cache, two bounces, half the ray budget shift.
     Medium,
-    /// The tuned default: unlimited bounces, 64 rays, five denoiser iterations.
+    /// The tuned default: unlimited bounces, 64 rays, five denoiser iterations
+    /// on the picture wavelet.
     High,
 }
 
@@ -342,6 +345,11 @@ pub struct DenoiserSettings {
     /// counts as stable. 0 leaves the decision to sample age. Ignored unless
     /// adaptive is on.
     pub variance_threshold: f32,
+    /// `denoise_launch=screen`: picture-sized wavelet over this frame's visible
+    /// fine texels. False is `hash`, the gi-v2 slot launch. Preset high uses
+    /// screen. The other presets use hash. `--denoise-launch` and
+    /// `GENOS_LIGHTING_DENOISE_LAUNCH` override the preset.
+    pub screen: bool,
 }
 
 impl DenoiserSettings {
@@ -448,6 +456,9 @@ impl LightingSettings {
         match preset {
             LightingPreset::High => {
                 s.lamp_pick.mode = LampPickMode::Hits;
+                // Picture wavelet. The other presets keep the hash launch
+                // stored in `high_defaults`.
+                s.denoiser.screen = true;
             }
             LightingPreset::DayCycle => {
                 s.gi.enabled = false;
@@ -577,6 +588,7 @@ impl LightingSettings {
                 dirty_fraction: 0.25,
                 adaptive: false,
                 variance_threshold: 0.02,
+                screen: false,
             },
             compose_reuse: true,
             sky: true,
@@ -754,6 +766,9 @@ impl LightingSettings {
         self.denoiser.enabled = true;
         self.denoiser.iterations = 5;
         self.denoiser.dirty_fraction = 0.0;
+        // Full effort stays the dense hash wavelet. High's preset uses the
+        // screen launch; this action does not.
+        self.denoiser.screen = false;
         self.compose_reuse = false;
         self.sky = true;
         self.emissive = true;
@@ -962,6 +977,15 @@ impl LightingSettings {
             "denoise_variance={}",
             num_text(self.denoiser.variance_threshold)
         );
+        let _ = writeln!(
+            out,
+            "denoise_launch={}",
+            if self.denoiser.screen {
+                "screen"
+            } else {
+                "hash"
+            }
+        );
         let _ = writeln!(out, "compose_reuse={}", bit(self.compose_reuse));
         let _ = writeln!(out, "sky={}", bit(self.sky));
         let _ = writeln!(out, "emissive={}", bit(self.emissive));
@@ -1113,6 +1137,15 @@ impl LightingSettings {
             "denoise_dirty" => self.denoiser.dirty_fraction = num_f32(value)?,
             "denoise_adaptive" => self.denoiser.adaptive = on(value)?,
             "denoise_variance" => self.denoiser.variance_threshold = num_f32(value)?,
+            "denoise_launch" => {
+                self.denoiser.screen = match value.trim().to_ascii_lowercase().as_str() {
+                    "hash" | "slot" | "slots" => false,
+                    "screen" => true,
+                    other => return Err(format!("denoise_launch is hash or screen, got {other}")),
+                }
+            }
+            // Alias of denoise_launch. on is screen, off is hash.
+            "denoise_screen" => self.denoiser.screen = on(value)?,
             "compose_reuse" => self.compose_reuse = on(value)?,
             "sky" => self.sky = on(value)?,
             "emissive" => self.emissive = on(value)?,
@@ -1241,6 +1274,8 @@ impl LightingSettings {
             ("GENOS_LIGHTING_ATROUS_DIRTY", "denoise_dirty"),
             ("GENOS_LIGHTING_DENOISE_ADAPTIVE", "denoise_adaptive"),
             ("GENOS_LIGHTING_DENOISE_VARIANCE", "denoise_variance"),
+            ("GENOS_LIGHTING_DENOISE_SCREEN", "denoise_screen"),
+            ("GENOS_LIGHTING_DENOISE_LAUNCH", "denoise_launch"),
             ("GENOS_LIGHTING_COMPOSE_REUSE", "compose_reuse"),
             ("GENOS_LIGHTING_SKY", "sky"),
             ("GENOS_LIGHTING_EMISSIVE", "emissive"),

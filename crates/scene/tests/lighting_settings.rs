@@ -177,6 +177,51 @@ fn potato_is_direct_shadows_and_flat_ambient() {
 }
 
 #[test]
+fn high_launches_the_screen_wavelet_and_the_key_overrides_it() {
+    let high = LightingSettings::preset(LightingPreset::High);
+    assert!(high.denoiser.screen);
+    assert!(high.to_text().contains("denoise_launch=screen"));
+    assert_eq!(high.preset_label(), "high");
+    for preset in LightingPreset::all() {
+        if *preset == LightingPreset::High {
+            continue;
+        }
+        let settings = LightingSettings::preset(*preset);
+        assert!(
+            !settings.denoiser.screen,
+            "{} keeps the hash launch",
+            preset.name()
+        );
+        assert!(
+            settings.to_text().contains("denoise_launch=hash"),
+            "{}",
+            preset.name()
+        );
+    }
+    // `--denoise-launch` and `GENOS_LIGHTING_DENOISE_LAUNCH` overlay this key
+    // after the preset, the same path `set_key` uses.
+    let mut over = high.clone();
+    over.set_key("denoise_launch", "hash").unwrap();
+    assert!(!over.denoiser.screen);
+    assert!(over.to_text().contains("denoise_launch=hash"));
+    assert_eq!(over.preset_label(), "custom");
+    over.set_key("denoise_launch", "screen").unwrap();
+    assert!(over.denoiser.screen);
+    assert_eq!(over.preset_label(), "high");
+    over.set_key("denoise_screen", "off").unwrap();
+    assert!(!over.denoiser.screen);
+    over.set_key("denoise_screen", "on").unwrap();
+    assert!(over.denoiser.screen);
+    let parsed = LightingSettings::parse(&over.to_text()).unwrap();
+    assert!(parsed.denoiser.screen);
+    over.set_key("full_effort", "on").unwrap();
+    assert!(!over.denoiser.screen);
+    over.set_key("full_effort", "off").unwrap();
+    assert!(over.denoiser.screen);
+    assert_eq!(over, LightingSettings::preset(LightingPreset::High));
+}
+
+#[test]
 fn full_effort_spends_the_maximum_and_rewrites_every_pixel() {
     let mut settings = LightingSettings::preset(LightingPreset::Low);
     settings.set_key("full_effort", "on").unwrap();
@@ -238,10 +283,12 @@ fn high_is_the_tuned_path() {
     assert_eq!(high.bounce.count, LIGHTING_BOUNCES_UNLIMITED);
     assert_eq!(high.probe_rays(), 64);
     assert_eq!(high.denoiser.iterations, 5);
+    assert!(high.denoiser.screen);
     assert!(!high.denoiser.adaptive);
     assert!(high.denoiser.plain());
     let medium = LightingSettings::preset(LightingPreset::Medium);
     assert_eq!(medium.denoiser.iterations, 3);
+    assert!(!medium.denoiser.screen);
     assert!(!medium.denoiser.adaptive);
     assert!(medium.denoiser.plain());
     let low = LightingSettings::preset(LightingPreset::Low);

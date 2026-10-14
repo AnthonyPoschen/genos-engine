@@ -15,7 +15,15 @@ fn main() {
         "shaders/lighting_check.comp",
         &out.join("lighting_check.comp.spv"),
     );
-    // High's a-trous. Adaptive is compiled out (S79).
+    // High's a-trous. Adaptive is compiled out of the hash pipeline (S79).
+    // The screen launch calls that kernel with the adaptive bit clear: high
+    // does not set it, and the branch is the same test the plain pipeline
+    // compiles out. glslc does not take -D; glslangValidator's SPIR-V for this
+    // shader faulted lavapipe.
+    let screen = compile(
+        "shaders/lighting_screen.comp",
+        &out.join("lighting_screen.comp.spv"),
+    );
     let atrous_plain = compile_define(
         "shaders/lighting_atrous.comp",
         &out.join("lighting_atrous_plain.comp.spv"),
@@ -71,6 +79,10 @@ fn main() {
         "pub static LIGHTING_ATROUS_PLAIN_SPV: &[u8] = include_bytes!(\"{}\");\n",
         atrous_plain.display()
     ));
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_SCREEN_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        screen.display()
+    ));
     std::fs::write(&glue, glue_text).unwrap();
     for piece in [
         "lighting_common.glsl",
@@ -79,6 +91,7 @@ fn main() {
         "lighting_cache_slots.glsl",
         "lighting_lamp_pick.glsl",
         "lighting_sun_compose.comp",
+        "lighting_screen.comp",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }

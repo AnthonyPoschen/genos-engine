@@ -98,6 +98,7 @@ pub(crate) struct Lighting {
     pipes: [Handle; 9],
     /// High: full resolution, adaptive off. The adaptive branch is not in this SPIR-V.
     atrous_plain: Handle,
+    screen_pipe: Handle,
     gbuffer_pipe: Handle,
     gbuf: Buffer,
     work: Buffer,
@@ -245,7 +246,7 @@ pub(crate) struct Lighting {
     /// The million-slot cache is allocated. Off, a small dummy stands in.
     cache_full: bool,
     /// Last buffer class. A live edit rebuilds only when this changes.
-    alloc_key: (u32, u32, u32, u32, u32, u32),
+    alloc_key: (u32, u32, u32, u32, u32, u32, u32),
     /// Ping-pong reservoirs. 64 bytes unless the mode is reuse.
     lamp_res: Buffer,
     /// Fill the reservoir with empty lamps once, not every frame.
@@ -273,10 +274,17 @@ pub struct LightingAtrousStats {
     pub mode: u32,
     /// Threshold the GPU used (`GENOS_LIGHTING_ATROUS_DIRTY`, 0..1).
     pub threshold: f32,
-    /// Filtered texels `dirty_fraction` divided by.
+    /// Filtered texels `dirty_fraction` divided by. On the screen wavelet this
+    /// is the fine-texel pixel count.
     pub filtered: u32,
-    /// Levels 1-5 ran this frame.
+    /// Levels 1-5 ran this frame. The screen wavelet sets this too.
     pub ran: bool,
+    /// Pixels whose fine texel entered the screen wavelet.
+    pub screen_pixels: u32,
+    /// Pixels that read a 25 cm cell and were left on its running mean.
+    pub coarse_pixels: u32,
+    /// Fine pixels whose input moved more than 2% from the stored field.
+    pub changed_pixels: u32,
 }
 
 /// Shadow rays traced last frame, and spatial reservoir merges.
@@ -300,6 +308,10 @@ fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats 
         threshold: w[LIGHTING_ATROUS_STAT + 2] as f32 / 1.0e6,
         filtered: w[LIGHTING_ATROUS_STAT + 3],
         ran: mode_word != 0,
+        // diag[61..63] sit at stats words 85..87 (diag[0] is word 24).
+        changed_pixels: w[85],
+        screen_pixels: w[86],
+        coarse_pixels: w[87],
     }
 }
 
@@ -322,6 +334,7 @@ impl Default for Lighting {
             sets: [std::ptr::null_mut(); 2],
             pipes: [std::ptr::null_mut(); 9],
             atrous_plain: std::ptr::null_mut(),
+            screen_pipe: std::ptr::null_mut(),
             gbuffer_pipe: std::ptr::null_mut(),
             gbuf: Buffer::empty(),
             work: Buffer::empty(),
@@ -406,7 +419,7 @@ impl Default for Lighting {
             lamp_moving: false,
             catch_left: 0,
             cache_full: false,
-            alloc_key: (0, 0, 0, 0, 0, 0),
+            alloc_key: (0, 0, 0, 0, 0, 0, 0),
             lamp_res: Buffer::empty(),
             lamp_res_clear: false,
             frame_tags: [Vec::new(), Vec::new()],
@@ -663,6 +676,13 @@ impl Gpu {
         )?;
         self.note_pipeline_time("atrous-plain", start);
         let start = Instant::now();
+        self.lighting.screen_pipe = self.make_compute_pipe(
+            LIGHTING_SCREEN_SPV,
+            self.lighting.layout,
+            "screen-denoise",
+        )?;
+        self.note_pipeline_time("screen-denoise", start);
+        let start = Instant::now();
         self.frag_override = Some(GBUFFER_FRAG_SPV);
         self.vert_override = Some(GBUFFER_VERT_SPV);
         let made = self.make_pipeline(true, false, false);
@@ -902,8 +922,17 @@ impl Gpu {
                 // The compose words and the a-trous meta must not alias the a-trous lists.
                 assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
                 assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
+                // +SLOTS: screen-owner election, past the sun block. See
+                // LIGHTING_SCREEN_OWNER_AT. Another SLOTS plus a 3-word header:
+                // the screen launch's tap-list dedup (LIGHTING_SCREEN_LIST_AT).
                 self.lighting.cache_keys = self.make_buffer_queues(
-                    (lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS + LIGHTING_SUN_WORDS) * 4,
+                    (lighting_atrous_ppm_at()
+                        + LIGHTING_ATROUS_META_WORDS
+                        + LIGHTING_SUN_WORDS
+                        + LIGHTING_CACHE_SLOTS
+                        + 3
+                        + LIGHTING_CACHE_SLOTS)
+                        * 4,
                     0x20 | 0x2 | 0x100 | 0x1,
                     Memory::Device,
                     &share,
@@ -933,8 +962,15 @@ impl Gpu {
         let hist = u64::from(settings.direct.refresh_frames > 1);
         // One extra slice holds linear bounce for a sun direct-patch. The
         // default compose does not write it. High (refresh every frame) is
-        // picture + glow + that slice.
-        self.lighting.out = self.make_buffer(pixels * (12 + 4 * hist), 0x20 | 0x1 | 0x2, Memory::Device)?;
+        // picture + glow + that slice. The screen wavelet appends two vec4
+        // slices (32 bytes a pixel) after that, so it does not alias the bounce.
+        // Hash keeps the gi-v2 buffer. Preset high uses the screen slices.
+        let screen = u64::from(settings.denoiser.enabled && settings.denoiser.screen);
+        self.lighting.out = self.make_buffer(
+            pixels * (12 + 4 * hist + 32 * screen),
+            0x20 | 0x1 | 0x2,
+            Memory::Device,
+        )?;
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
         self.destroy_buffer(&mut lamp_res);
         let reuse = settings.lamp_pick.reuse();
@@ -1684,9 +1720,11 @@ impl Gpu {
                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
                 eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
             }
-            let mode = match w[LIGHTING_ATROUS_STAT + 1] {
+            let mode_word = w[LIGHTING_ATROUS_STAT + 1];
+            let mode = match mode_word {
                 1 => "list",
                 2 => "dense",
+                3 => "screen",
                 _ => "off",
             };
             eprintln!(
@@ -1696,6 +1734,40 @@ impl Gpu {
                 w[LIGHTING_ATROUS_STAT + 2] as f64 / 1.0e6,
                 w[LIGHTING_ATROUS_STAT + 3]
             );
+            if mode_word == 3 {
+                let fine = w[86];
+                let coarse = w[87];
+                let changed = w[85];
+                eprintln!(
+                    "lightingdenoise {queue} frame {} pixels {fine} coarse {coarse} changed {changed} filtered {fine} mode screen ran 1",
+                    self.lighting.frame
+                );
+                self.write_denoise_log(fine, coarse, changed);
+            }
+        }
+    }
+
+    /// `./genos-debug/denoise/` (or `<out>/denoise` when `--out` is set). Written
+    /// only from the stats read the debug line already performed.
+    fn write_denoise_log(&self, fine: u32, coarse: u32, changed: u32) {
+        let dir = std::path::Path::new(&self.debug_out).join("denoise");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let text = format!(
+            "frame {}\npixels {fine}\ncoarse {coarse}\nchanged {changed}\nfiltered {fine}\nmode screen\nran 1\n",
+            self.lighting.frame
+        );
+        let _ = std::fs::write(dir.join("latest.txt"), &text);
+        let mut line = text.replace('\n', " ");
+        line.push('\n');
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("frames.log"))
+        {
+            use std::io::Write;
+            let _ = file.write_all(line.as_bytes());
         }
     }
 
@@ -2462,6 +2534,8 @@ impl Gpu {
                 // Adaptive uses the scalar shader that still reads the bit.
                 let pipe = if pass == 7 && sun_compose {
                     self.lighting.sun_pipe
+                } else if pass == 8 && self.lighting.settings.denoiser.screen {
+                    self.lighting.screen_pipe
                 } else if pass == 8 && self.lighting.settings.denoiser.plain() {
                     self.lighting.atrous_plain
                 } else {
@@ -2727,6 +2801,7 @@ impl Gpu {
                 .pipes
                 .iter_mut()
                 .chain(std::iter::once(&mut self.lighting.atrous_plain))
+                .chain(std::iter::once(&mut self.lighting.screen_pipe))
                 .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_pipe))
             {

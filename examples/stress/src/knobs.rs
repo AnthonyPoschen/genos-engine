@@ -359,6 +359,12 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             0.005,
             "",
         ),
+        Knob::choice(
+            "lighting_denoise_launch",
+            "Denoise launch",
+            usize::from(lighting.denoiser.screen),
+            &["hash", "screen"],
+        ),
         Knob::switch(
             "lighting_compose_reuse",
             "Compose reuse",
@@ -509,6 +515,11 @@ pub fn apply_lighting_knob(
         ),
         "lighting_denoise_adaptive" => ("denoise_adaptive", on_off(v)),
         "lighting_denoise_variance" => ("denoise_variance", format!("{v}")),
+        "lighting_denoise_launch" => (
+            "denoise_launch",
+            if whole == 0 { "hash" } else { "screen" }.to_string(),
+        ),
+        "lighting_denoise_screen" => ("denoise_screen", on_off(v)),
         "lighting_compose_reuse" => ("compose_reuse", on_off(v)),
         "lighting_sky" => ("sky", on_off(v)),
         "lighting_emissive" => ("emissive", on_off(v)),
@@ -584,6 +595,7 @@ mod tests {
         "lighting_denoise_iters",
         "lighting_denoise_adaptive",
         "lighting_denoise_variance",
+        "lighting_denoise_launch",
         "lighting_compose_reuse",
         "lighting_sky",
         "lighting_emissive",

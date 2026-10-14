@@ -128,6 +128,11 @@ const USAGE: &str = "genos-stress [options]
   --denoise-adaptive on|off experimental: drop settled wavelet iterations
                             (GENOS_LIGHTING_DENOISE_ADAPTIVE). Off on every preset
   --denoise-variance F      relative luminance deviation, 0..0.1 (GENOS_LIGHTING_DENOISE_VARIANCE)
+  --denoise-launch hash|screen
+                            picture wavelet (GENOS_LIGHTING_DENOISE_LAUNCH). Preset high
+                            uses screen. The other presets keep hash. This flag and the
+                            variable override the preset
+  --denoise-screen on|off   alias of --denoise-launch (on is screen, off is hash)
   --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
   --lamp-pick MODE          off, hits, pixels, both, or reuse (experimental)
                             (GENOS_LIGHTING_LAMP_PICK; reuse is the same mode)
@@ -205,6 +210,8 @@ struct Options {
     denoise_iters: Option<String>,
     denoise_adaptive: Option<String>,
     denoise_variance: Option<String>,
+    denoise_launch: Option<String>,
+    denoise_screen: Option<String>,
     gpu_times: Option<String>,
     lamp_pick: Option<String>,
     lamp_pick_samples: Option<String>,
@@ -311,6 +318,8 @@ fn options() -> Result<Options, String> {
         denoise_iters: None,
         denoise_adaptive: None,
         denoise_variance: None,
+        denoise_launch: None,
+        denoise_screen: None,
         gpu_times: None,
         lamp_pick: None,
         lamp_pick_samples: None,
@@ -415,6 +424,8 @@ fn options() -> Result<Options, String> {
             "--denoise-iters" => opts.denoise_iters = Some(value()?),
             "--denoise-adaptive" => opts.denoise_adaptive = Some(value()?),
             "--denoise-variance" => opts.denoise_variance = Some(value()?),
+            "--denoise-launch" => opts.denoise_launch = Some(value()?),
+            "--denoise-screen" => opts.denoise_screen = Some(value()?),
             "--gpu-times" => opts.gpu_times = Some(value()?),
             "--lamp-pick" => opts.lamp_pick = Some(value()?),
             "--lamp-pick-samples" => opts.lamp_pick_samples = Some(value()?),
@@ -616,6 +627,16 @@ fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
             opts.denoise_variance.as_deref(),
             "denoise_variance",
             "GENOS_LIGHTING_DENOISE_VARIANCE",
+        ),
+        (
+            opts.denoise_screen.as_deref(),
+            "denoise_screen",
+            "GENOS_LIGHTING_DENOISE_SCREEN",
+        ),
+        (
+            opts.denoise_launch.as_deref(),
+            "denoise_launch",
+            "GENOS_LIGHTING_DENOISE_LAUNCH",
         ),
         (
             opts.lamp_pick.as_deref(),
