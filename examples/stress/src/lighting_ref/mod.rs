@@ -50,7 +50,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<i32, String> {
 
 enum Command {
     Generate(generate::GenerateOptions),
-    Check(check::CheckOptions),
+    Check(Box<check::CheckOptions>),
 }
 
 struct Options {
@@ -239,7 +239,7 @@ impl Options {
             },
         )?;
         Ok(Self {
-            command: Command::Check(check::CheckOptions {
+            command: Command::Check(Box::new(check::CheckOptions {
                 out,
                 reference_dir,
                 baseline_path,
@@ -255,7 +255,7 @@ impl Options {
                 only_checkpoint,
                 plan,
                 display,
-            }),
+            })),
         })
     }
 }

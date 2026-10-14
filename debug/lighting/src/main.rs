@@ -1947,6 +1947,7 @@ mod tests {
             denoise_launch: None,
             denoise_screen: None,
             headless: true,
+            display: None,
             frames: None,
             ui: false,
             out: std::path::PathBuf::from("genos-debug"),

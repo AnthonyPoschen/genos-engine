@@ -143,7 +143,7 @@ impl Window {
             std::ffi::CString::new(title).map_err(|_| "title contains a null".to_string())?;
         let display = match wayland_display {
             None => None,
-            Some(name) if name.is_empty() => return Err("display name is empty".into()),
+            Some("") => return Err("display name is empty".into()),
             Some(name) => Some(
                 std::ffi::CString::new(name).map_err(|_| "display name contains a null".to_string())?,
             ),
