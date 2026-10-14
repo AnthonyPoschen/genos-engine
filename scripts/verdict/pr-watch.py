@@ -26,6 +26,7 @@ from lib.contract import (
     dry_verdict,
     evidence_dir,
     mirror,
+    repo_root,
     run_main,
     silence_argv,
     write_args,
@@ -36,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="PR head watcher.")
     parser.add_argument("--state", help="json map of pr number to last head sha")
     parser.add_argument("--prs-file", help="fixture json list of {number, head, url}")
-    parser.add_argument("--repo", default=".", help="repository for gh")
+    parser.add_argument("--repo", help="repository for gh (default: this checkout)")
     add_common(parser)
     return parser
 
@@ -116,7 +117,8 @@ def decide(ns: argparse.Namespace, argv: list[str], holder: list[Path]) -> Verdi
     previous: dict[str, str] = {}
     if state_path.is_file():
         previous = {str(key): str(value) for key, value in json.loads(state_path.read_text(encoding="utf-8")).items()}
-    current = load_prs(Path(ns.prs_file)) if ns.prs_file else live_prs(Path(ns.repo))
+    repo = Path(ns.repo) if ns.repo else repo_root()
+    current = load_prs(Path(ns.prs_file)) if ns.prs_file else live_prs(repo)
     fresh = diff_heads(previous, current) if previous else []
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(
