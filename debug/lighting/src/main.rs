@@ -270,6 +270,8 @@ fn run() -> Result<(), String> {
                     || input.keyboard.pressed(InputCode::key_up)),
             key_activate: !camera.captured && input.keyboard.pressed(InputCode::key_enter),
             key_dismiss: !camera.captured && input.keyboard.pressed(InputCode::key_escape),
+            tab_prev: false,
+            tab_next: false,
         };
         let (paints, look_capture) = if opts.headless {
             (Vec::new(), true)
@@ -1016,6 +1018,7 @@ fn flatten_blocks(blocks: &[PanelBlock]) -> Vec<PanelRow> {
                     rows.extend(flatten_blocks(&tab.blocks));
                 }
             }
+            PanelBlock::Rows(page) => rows.extend(page.clone()),
         }
     }
     rows
@@ -1888,14 +1891,17 @@ mod tests {
                 assert_eq!(section.rows[0].label, app.entry().review);
             }
             genos_ui::PanelBlock::Tabs(_) => panic!("info sits outside the tabs"),
+            genos_ui::PanelBlock::Rows(_) => panic!("info sits outside the tabs"),
         }
         match &blocks[1] {
             genos_ui::PanelBlock::Section(section) => assert_eq!(section.title, "Scene/View"),
             genos_ui::PanelBlock::Tabs(_) => panic!("scene sits outside the tabs"),
+            genos_ui::PanelBlock::Rows(_) => panic!("scene sits outside the tabs"),
         }
         let tabs = match &blocks[2] {
             genos_ui::PanelBlock::Tabs(tabs) => tabs,
             genos_ui::PanelBlock::Section(_) => panic!("the third block is the tab strip"),
+            genos_ui::PanelBlock::Rows(_) => panic!("the third block is the tab strip"),
         };
         let titles: Vec<&str> = tabs.tabs.iter().map(|tab| tab.title.as_str()).collect();
         assert_eq!(titles, ["Direct", "GI", "Denoise", "Shade", "Perf"]);

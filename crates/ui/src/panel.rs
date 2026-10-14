@@ -58,6 +58,10 @@ pub struct Pointer {
     pub key_activate: bool,
     /// Dismiss key pressed this frame (escape). Closes an open list.
     pub key_dismiss: bool,
+    /// Previous page of the tab strip. A press edge, not a held key.
+    pub tab_prev: bool,
+    /// Next page of the tab strip. A press edge, not a held key.
+    pub tab_next: bool,
 }
 
 impl Default for Pointer {
@@ -71,6 +75,8 @@ impl Default for Pointer {
             key_inc: false,
             key_activate: false,
             key_dismiss: false,
+            tab_prev: false,
+            tab_next: false,
         }
     }
 }
@@ -116,6 +122,8 @@ pub struct State {
     collapsed_sections: BTreeSet<u32>,
     /// Selected tab id for each tab strip.
     selected_tabs: BTreeMap<u32, u32>,
+    /// The pointer was over the panel on the last frame.
+    panel_hover: bool,
 }
 
 impl Default for State {
@@ -140,6 +148,7 @@ impl Default for State {
             section_seen: BTreeSet::new(),
             collapsed_sections: BTreeSet::new(),
             selected_tabs: BTreeMap::new(),
+            panel_hover: false,
         }
     }
 }
@@ -166,8 +175,14 @@ impl State {
         self.selected_tabs.get(&group).copied()
     }
 
-    fn select_tab(&mut self, group: u32, tab: u32) {
+    /// Show this tab before the first frame. A later press keeps the new choice.
+    pub fn select_tab(&mut self, group: u32, tab: u32) {
         self.selected_tabs.insert(group, tab);
+    }
+
+    /// True when the pointer was over the panel on the last frame.
+    pub fn panel_hovered(&self) -> bool {
+        self.panel_hover
     }
 
     fn toggle_section(&mut self, id: u32) {
@@ -367,11 +382,13 @@ pub struct PanelTabs {
     pub tabs: Vec<PanelTab>,
 }
 
-/// A fold or a tab strip. Either can contain the other.
+/// A fold, a tab strip, or rows with no fold header. Either container can hold the others.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PanelBlock {
     Section(PanelSection),
     Tabs(PanelTabs),
+    /// Controls on a tab, or outside one, with no title to fold.
+    Rows(Vec<PanelRow>),
 }
 
 /// A compact on/off mark and a label. The panel does not store `on`.
@@ -573,7 +590,10 @@ pub fn button_panel_sections(
 /// can be a tab strip. A fold can also sit outside every tab.
 ///
 /// A press on a tab fires [`Action::Press`] with the tab id and shows that tab
-/// on the next frame. A press on a fold title still folds that fold.
+/// on the next frame. [`Pointer::tab_next`] and [`Pointer::tab_prev`] do the
+/// same for the strip. A press on a fold title still folds that fold. Tab
+/// labels share equal cells and wrap inside them, so a short page does not
+/// move the bar.
 pub fn button_panel_blocks(
     state: &mut State,
     title: &str,
@@ -773,6 +793,7 @@ fn collect_blocks(
                     }
                 }
             }
+            PanelBlock::Rows(rows) => visible.extend(rows.iter().cloned()),
         }
     }
 }
@@ -788,6 +809,11 @@ fn push_blocks(panel: &mut Node, state: &State, blocks: &[PanelBlock], lay: &mut
                 let selected = state.selected_tab(tabs.id);
                 if let Some(tab) = tabs.tabs.iter().find(|tab| Some(tab.id) == selected) {
                     push_blocks(panel, state, &tab.blocks, lay);
+                }
+            }
+            PanelBlock::Rows(rows) => {
+                for item in rows {
+                    push_row(panel, item, lay);
                 }
             }
         }
@@ -835,6 +861,15 @@ fn push_row(panel: &mut Node, item: &PanelRow, lay: &mut BlockLay) {
     }
 }
 
+/// Narrowest tab cell. A longer label wraps inside the cell instead of growing it.
+const TAB_MIN: f32 = 56.0;
+const TAB_GAP: f32 = 4.0;
+
+fn tab_columns(inner: f32, count: usize) -> usize {
+    let fit = ((inner + TAB_GAP) / (TAB_MIN + TAB_GAP)).floor() as usize;
+    fit.clamp(1, count.max(1))
+}
+
 fn tab_strip(
     tabs: &PanelTabs,
     state: &State,
@@ -842,25 +877,134 @@ fn tab_strip(
     inner: Option<f32>,
 ) -> Node {
     let selected = state.selected_tab(tabs.id);
+    let Some(inner) = inner else {
+        return tab_row(tabs, selected, palette, None, None);
+    };
+    let count = tabs.tabs.len().max(1);
+    let cols = tab_columns(inner, count);
+    let cell_w = ((inner - TAB_GAP * cols.saturating_sub(1) as f32) / cols as f32).max(TAB_MIN);
+    let content_w = (cell_w - 8.0).max(text::CELL_W);
+    let mut strip = Node::new(tabs.id);
+    strip.direction = Direction::TopToBottom;
+    strip.gap = TAB_GAP;
+    strip.width = Sizing::Fixed(inner);
+    for (row_index, row_tabs) in tabs.tabs.chunks(cols).enumerate() {
+        let row_h = row_tabs
+            .iter()
+            .map(|tab| text::measure(&tab.title, Some(content_w)).1 + 8.0)
+            .fold(text::CELL_H + 8.0, f32::max);
+        let mut row = Node::new(tabs.id.wrapping_mul(16).wrapping_add(row_index as u32 + 3));
+        row.direction = Direction::LeftToRight;
+        row.gap = TAB_GAP;
+        row.width = Sizing::Fixed(inner);
+        row.height = Sizing::Fixed(row_h);
+        for tab in row_tabs {
+            row.children.push(tab_button(
+                tab,
+                Some(tab.id) == selected,
+                palette,
+                cell_w,
+                row_h,
+            ));
+        }
+        strip.children.push(row);
+    }
+    strip
+}
+
+fn tab_row(
+    tabs: &PanelTabs,
+    selected: Option<u32>,
+    palette: Option<Palette>,
+    cell_w: Option<f32>,
+    cell_h: Option<f32>,
+) -> Node {
     let mut row = Node::new(tabs.id);
     row.direction = Direction::LeftToRight;
-    row.gap = 4.0;
-    if let Some(inner) = inner {
-        row.width = Sizing::Fit {
-            min: 0.0,
-            max: inner,
-        };
-    }
+    row.gap = TAB_GAP;
     for tab in &tabs.tabs {
-        let mut node = control(tab.id, &tab.title, Action::Press(tab.id), palette);
-        if Some(tab.id) == selected {
-            let looks = control_looks(palette);
-            node.idle = looks.pressed;
-            node.hover = looks.pressed;
+        let mut node = tab_button(
+            tab,
+            Some(tab.id) == selected,
+            palette,
+            cell_w.unwrap_or(0.0),
+            cell_h.unwrap_or(0.0),
+        );
+        if cell_w.is_none() {
+            node.width = Sizing::fit();
+            node.height = Sizing::fit();
         }
         row.children.push(node);
     }
     row
+}
+
+fn tab_button(
+    tab: &PanelTab,
+    selected: bool,
+    palette: Option<Palette>,
+    width: f32,
+    height: f32,
+) -> Node {
+    let mut node = control(tab.id, &tab.title, Action::Press(tab.id), palette);
+    if width > 0.0 {
+        node.width = Sizing::Fixed(width);
+        node.height = Sizing::Fixed(height);
+    }
+    if selected {
+        let looks = control_looks(palette);
+        node.idle = looks.pressed;
+        node.hover = looks.pressed;
+        node.pressed = looks.pressed;
+    }
+    node
+}
+
+fn cycle_tab(
+    state: &mut State,
+    tab_ids: &[(u32, u32)],
+    items: &[Item],
+    pointer: &Pointer,
+) -> Option<Action> {
+    let dir = if pointer.tab_next {
+        1isize
+    } else if pointer.tab_prev {
+        -1
+    } else {
+        return None;
+    };
+    let mut groups: Vec<(u32, Vec<u32>)> = Vec::new();
+    for (group, tab) in tab_ids {
+        if let Some((_, tabs)) = groups.iter_mut().find(|(id, _)| id == group) {
+            if !tabs.contains(tab) {
+                tabs.push(*tab);
+            }
+        } else {
+            groups.push((*group, vec![*tab]));
+        }
+    }
+    let hit = items
+        .iter()
+        .rev()
+        .find(|item| item.rect.contains(pointer.x, pointer.y));
+    let over_header = hit.and_then(|item| tab_ids.iter().find(|(_, tab)| *tab == item.id));
+    let (group, tabs) = if let Some((group, _)) = over_header {
+        groups.into_iter().find(|(id, _)| id == group)?
+    } else {
+        groups.into_iter().next()?
+    };
+    if tabs.len() < 2 {
+        return None;
+    }
+    let current = state.selected_tab(group).unwrap_or(tabs[0]);
+    let index = tabs.iter().position(|id| *id == current).unwrap_or(0);
+    let next = if dir > 0 {
+        tabs[(index + 1) % tabs.len()]
+    } else {
+        tabs[(index + tabs.len() - 1) % tabs.len()]
+    };
+    state.select_tab(group, next);
+    Some(Action::Press(next))
 }
 
 fn check_columns(inner: f32) -> usize {
@@ -947,6 +1091,7 @@ pub fn show_menu_tab(state: &mut State, viewport: [f32; 2], pointer: Pointer) ->
     state.pointer_x = pointer.x;
     state.pointer_y = pointer.y;
     state.down = pointer.down;
+    state.panel_hover = false;
     if !pointer.down {
         state.look_hold = false;
     }
@@ -1274,6 +1419,9 @@ fn finish_panel(
                 push_step(&mut actions, bar, notches);
             }
         }
+        if let Some(action) = cycle_tab(state, tab_ids, &items, &pointer) {
+            actions.push(action);
+        }
         if pointer.key_dec || pointer.key_inc {
             let keyed = hovered.or_else(|| {
                 state
@@ -1349,6 +1497,7 @@ fn finish_panel(
     state.pointer_x = pointer.x;
     state.pointer_y = pointer.y;
     state.down = pointer.down;
+    state.panel_hover = hit.is_some();
     if !pointer.down {
         state.dragging = false;
         state.look_hold = false;
