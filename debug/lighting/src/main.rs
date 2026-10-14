@@ -1037,6 +1037,7 @@ fn knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
     })
 }
 
+#[cfg(test)]
 fn panel_rows(app: &App, view: ViewMode, fps: &FpsCounterSettings) -> Vec<PanelRow> {
     panel_sections(app, view, fps)
         .into_iter()
