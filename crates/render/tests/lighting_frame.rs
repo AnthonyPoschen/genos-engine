@@ -1198,6 +1198,7 @@ fn shadow_floor_world() -> World {
         }),
         lighting: LightingSettings::preset(LightingPreset::High),
         debug: genos_scene::DebugSettings::default(),
+        fps_counter: genos_scene::FpsCounterSettings::default(),
     });
     // Beside the scored patch, low, so a few cells see it and the rest do not.
     // A few centimetres off the floor, just beside the scored patch, so the
@@ -1436,6 +1437,7 @@ fn banner_world(lamp_x: f32, lamp_z: f32) -> World {
         sky: None,
         lighting: LightingSettings::preset(LightingPreset::High),
         debug: genos_scene::DebugSettings::default(),
+        fps_counter: genos_scene::FpsCounterSettings::default(),
     });
     world
         .add_gltf_traced(&banner, &genos_render::identity_pose(), &settings)
@@ -1789,6 +1791,7 @@ fn sponza_curtain_scores(screen: bool) -> (f64, f64) {
         sky: None,
         lighting: LightingSettings::preset(LightingPreset::High),
         debug: genos_scene::DebugSettings::default(),
+        fps_counter: genos_scene::FpsCounterSettings::default(),
     });
     world
         .add_gltf_traced(&scene, &genos_render::identity_pose(), &settings_bake)
