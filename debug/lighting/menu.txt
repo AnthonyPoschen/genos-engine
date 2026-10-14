@@ -4,14 +4,13 @@
 # A section key of "-" puts the setting on the tab with no fold header.
 # The same section key stays one fold. The first line sets the title and open or closed.
 # GENOS_MENU_LAYOUT points at another file of this shape.
-# Setting names are the config keys, plus review, scene, checkpoint, view, fps, and hint.
+# Setting names are the config keys, plus review, scene, checkpoint, view, and fps.
 # Move a line to another tab or section. No code change is required.
 Scene/View | - | - | open | scene
 Scene/View | - | - | open | checkpoint
 Scene/View | - | - | open | view
 Scene/View | - | - | open | lighting_preset
 Scene/View | - | - | open | sky
-Scene/View | - | - | open | hint
 Pipeline | - | - | open | lighting_direct
 Pipeline | - | - | open | lighting_shadows
 Pipeline | - | - | open | lighting_gi

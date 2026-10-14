@@ -335,7 +335,7 @@ fn run() -> Result<(), String> {
         } else {
             drew_panel = true;
             let fps_menu = app.scene().fps_counter.effective();
-            let blocks = panel_blocks(&app, tools.view_mode(), &fps_menu, &menu, &keys);
+            let blocks = panel_blocks(&app, tools.view_mode(), &fps_menu, &menu);
             let ui_frame = button_panel_blocks(
                 &mut ui,
                 &panel_title(&app),
@@ -1064,8 +1064,7 @@ fn knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
 #[cfg(test)]
 fn panel_rows(app: &App, view: ViewMode, fps: &FpsCounterSettings) -> Vec<PanelRow> {
     let menu = load_menu_layout().expect("layout");
-    let keys = genos_input::KeyBindings::builtin();
-    flatten_blocks(&panel_blocks(app, view, fps, &menu, &keys))
+    flatten_blocks(&panel_blocks(app, view, fps, &menu))
 }
 
 #[cfg(test)]
@@ -1120,7 +1119,6 @@ fn panel_blocks(
     view: ViewMode,
     fps: &FpsCounterSettings,
     lines: &[MenuLine],
-    keys: &genos_input::KeyBindings,
 ) -> Vec<PanelBlock> {
     let mut sections = Vec::new();
     for line in lines {
@@ -1140,7 +1138,7 @@ fn panel_blocks(
                 checks: Vec::new(),
             });
         }
-        let Some(piece) = setting_piece(app, view, fps, keys, &line.setting) else {
+        let Some(piece) = setting_piece(app, view, fps, &line.setting) else {
             continue;
         };
         let section = sections.last_mut().expect("section");
@@ -1207,7 +1205,6 @@ fn setting_piece(
     app: &App,
     view: ViewMode,
     fps: &FpsCounterSettings,
-    keys: &genos_input::KeyBindings,
     setting: &str,
 ) -> Option<Piece> {
     let view_value = VIEWS
@@ -1217,23 +1214,6 @@ fn setting_piece(
     match setting {
         "review" => Some(Piece::Row(PanelRow {
             label: app.entry().review.clone(),
-            buttons: Vec::new(),
-            slider: None,
-            dropdown: None,
-            checks: Vec::new(),
-        })),
-        "hint" => Some(Piece::Row(PanelRow {
-            label: format!(
-                "{} hides. {} plate. {} count. {} tint. {} or {} next page. {} or {} back.",
-                keys.hint("menu"),
-                keys.hint("fps"),
-                keys.hint("unfilled"),
-                keys.hint("unfilled_tint"),
-                keys.hint("tab_next"),
-                keys.hint("tab_focus_next"),
-                keys.hint("tab_prev"),
-                keys.hint("tab_focus_prev")
-            ),
             buttons: Vec::new(),
             slider: None,
             dropdown: None,
@@ -2153,8 +2133,7 @@ mod tests {
         let app = super::App::open(entries, root, log).expect("app");
         let fps = genos_scene::FpsCounterSettings::default();
         let menu = super::load_menu_layout().expect("layout");
-        let keys = genos_input::KeyBindings::builtin();
-        let blocks = super::panel_blocks(&app, ViewMode::Full, &fps, &menu, &keys);
+        let blocks = super::panel_blocks(&app, ViewMode::Full, &fps, &menu);
         let tabs = match &blocks[0] {
             genos_ui::PanelBlock::Tabs(tabs) => tabs,
             genos_ui::PanelBlock::Section(_) | genos_ui::PanelBlock::Rows(_) => {
@@ -2211,6 +2190,7 @@ mod tests {
         let flat = super::panel_rows(&app, ViewMode::Full, &fps);
         assert!(flat.iter().any(|row| row.label == "Bounce count"));
         assert!(flat.iter().any(|row| row.label == "Shadow cell cache"));
+        assert!(flat.iter().all(|row| !row.label.contains("hides.")));
         let folds = super::menu_folds(&menu);
         assert!(folds.iter().all(|fold| fold.key != "-"));
         let mut ui = genos_ui::State::default();
