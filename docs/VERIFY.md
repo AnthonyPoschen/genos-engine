@@ -111,3 +111,19 @@ python3 scripts/verdict/ab-verdict.py gi-v2 HEAD \
   --noise-floor genos-debug/verdict/noise-floor/<sha>/spread.json \
   --display wayland-1 --live
 ```
+
+## Checkpoint catalog
+
+`scripts/verdict/checkpoint-catalog.py` scores blur and FLIP for each catalog
+checkpoint. The fail lines and `human_band` come from
+`crates/lighting-ref/lighting-ref.conf`. A value inside the band is `UNSURE`.
+One repeat is `UNSURE` (one sample is not a pass). The repeat spread is
+`checkpoints.csv`.
+
+Reference images are not written. A golden taken during churn would turn the
+next run into noise. The rows are the repeats of this run, not a file under
+`./genos-debug/reference/`.
+
+```sh
+python3 scripts/verdict/checkpoint-catalog.py --fixture run/ --repeats 3
+```
