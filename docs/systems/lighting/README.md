@@ -48,6 +48,10 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Lighting VRAM may grow if it cuts per-frame compute; total should stay fixed rather than scale with the scene (12 Oct).
 - Never skip lighting on an assumption; verify with an extraordinarily cheap check every frame (12 Oct).
 
+## Names
+
+The surface light cache and the world cache are one cache ([glossary](../../lighting/GLOSSARY.md)). A cache entry is one hashed surface patch. A slot is only its storage index. `world_cache`, `world_cell`, `world_refresh`, and `world_stale` are the current keys. Moving them under `surface_cache.*`, and keeping the old keys as deprecated aliases, is step 1 of [RENAMES.md](../../lighting/RENAMES.md).
+
 ## Deviations from the papers (summary)
 
 - The MSME step follows Barré-Brisebois et al., Ray Tracing Gems ch. 25, `MultiscaleMeanEstimator.hlsl`. The firefly clamp (`0.1 + short mean + sigma * deviation`) is biased. `surface_cache.firefly_sigma` defaults to the listing's 8. Zero keeps the `0.1` floor. Variance is one Rec. 601 scalar, not `float3`. A newborn starts at short mean = long mean, inconsistency 1, vbbr 1, and variance `(0.15 * luma)^2`. The first 16 sets blend at most `1 / (n + 1)`. A mover raises the blend to at least 0.5; a lamp delta is capped at 0.9. The hold path keeps its own clamp of 8 and does not read `surface_cache.firefly_sigma`. `surface_cache.blend` forces estimator bit 20 and the hold bit (bit 30).

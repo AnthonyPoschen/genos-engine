@@ -309,9 +309,13 @@ pub struct ProbeSettings {
     pub staleness_frames: u32,
 }
 
-/// Surface cache and world radiance cache (world mode 3).
-/// Off selects the probe path (world mode 0) and skips the a-trous filter,
-/// which only filters the surface cache.
+/// The surface light cache (world mode 3). The glossary's world cache is this
+/// cache. Off selects the probe path (world mode 0) and skips the a-trous
+/// filter, which only filters this cache.
+///
+/// `world_cache`, `world_cell`, `world_refresh`, and `world_stale` are the
+/// current keys. Moving them under `surface_cache.*`, and keeping the old keys
+/// as deprecated aliases, is step 1 of `docs/lighting/RENAMES.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldCacheSettings {
     pub enabled: bool,
@@ -375,9 +379,13 @@ pub struct AmbientSettings {
     pub dusk_intensity: f32,
 }
 
-/// Surface-cache knobs. These are not the world-cache knobs.
+/// Knobs of the surface light cache. The world cache is this same cache.
 ///
 /// A cache entry is one hashed surface patch. `slot` is only its storage index.
+/// `world_cache`, `world_cell`, `world_refresh`, and `world_stale` are the
+/// current keys for the switch, the cell, the refresh, and the stale time.
+/// Moving those keys under `surface_cache.*`, and keeping the old keys as
+/// deprecated aliases, is step 1 of `docs/lighting/RENAMES.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceCacheSettings {
     /// Cache entries on a moving object are stored in that object's frame and
