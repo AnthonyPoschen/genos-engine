@@ -283,13 +283,16 @@ void main() {
                 // sigma is lighting_sc_firefly_sigma() (the listing's 8). The
                 // clamp is biased. The 0.1 floor stays when sigma is 0.
                 // Deviations from that listing, kept on purpose:
-                // variance is one Rec. 601 luminance scalar, not float3 (SVGF
-                // reads .w); a newborn starts at short = mean, inconsistency 1,
-                // vbbr 1, variance (0.15 * luma)^2 (S72T; the listing has no
-                // init, and variance 0 makes catch-up 1); while t < 16, k is
-                // at most 1/(t+1); a mover raises k to at least 0.5 and a lamp
-                // delta is capped at 0.9; A-SVGF mixes lambda when that path
-                // is on. The hold path below keeps its own clamp of 8.
+                // variance is one luminance scalar, not float3 (SVGF reads .w).
+                // The weights are the listing's Rec. 601 (0.299, 0.587, 0.114).
+                // The hold path below uses Rec. 709 (0.2126, 0.7152, 0.0722)
+                // and its own clamp of 8; it does not read
+                // surface_cache.firefly_sigma. A newborn starts at short = mean,
+                // inconsistency 1, vbbr 1, variance (0.15 * luma)^2 (S72T; the
+                // listing has no init, and variance 0 makes catch-up 1); while
+                // t < 16, k is at most 1/(t+1); a mover raises k to at least
+                // 0.5 and a lamp delta is capped at 0.9; A-SVGF mixes lambda
+                // when that path is on.
                 const vec3 msmel = vec3(0.299, 0.587, 0.114);
                 if (b.x <= 0.0) {
                     a = vec4(old.rgb, pow(0.15 * dot(old.rgb, msmel), 2.0) + 1.0e-8);
