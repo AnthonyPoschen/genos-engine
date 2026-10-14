@@ -48,6 +48,10 @@ A new tool signals intent with command-line arguments. An environment variable i
 
 The lighting debug binary (`debug/lighting`) writes screenshots, dumps, and logs under `./genos-debug/<kind>/` in the current working directory. `--out <dir>` changes that directory. It does not write those files under `$HOME`.
 
+## Lighting terminology
+
+`docs/lighting/GLOSSARY.md` is authoritative for lighting names. Code, settings keys, CLI flags, env mirrors, MCP names, debug-menu labels and docs use only its terms. A new concept gets an entry (a one- or two-line definition, its Role, its literature equivalents and a More-detail link) in the same PR that introduces it. If a change makes something behave differently from what its name says, rename it in that PR (or open a rename issue) and update the glossary. Public names (config keys, CLI flags, env vars, MCP tools) keep the old name as a deprecated alias that logs a warning for at least one release. Historical terms stay in the glossary's Historical section and are not reused. When evaluating an external technique, map it with the glossary's "How to compare a new technique" table. Pending renames are listed in `docs/lighting/RENAMES.md`.
+
 ## Input behavior
 
 `../input-zig` is the behavior source for the input port. Preserve the tested platform calls. The file list is in `docs/architecture.md`.
