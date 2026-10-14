@@ -10,7 +10,9 @@
 //! matching variable applies only when that argument was omitted.
 //!
 //! Defaults match the tuned GI path (preset `high`): every feature on, unlimited
-//! bounces, 64 rays per probe, the surface cache, five a-trous iterations.
+//! bounces, 64 rays per probe, the surface cache, five a-trous iterations on
+//! the picture wavelet. The other presets keep the hash-slot launch.
+//! `--denoise-launch` and `GENOS_LIGHTING_DENOISE_LAUNCH` override the preset.
 
 use std::fmt::Write as _;
 
@@ -30,7 +32,8 @@ pub enum LightingPreset {
     Low,
     /// Surface cache, two bounces, half the ray budget shift.
     Medium,
-    /// The tuned default: unlimited bounces, 64 rays, five denoiser iterations.
+    /// The tuned default: unlimited bounces, 64 rays, five denoiser iterations
+    /// on the picture wavelet.
     High,
 }
 
@@ -310,9 +313,9 @@ pub struct DenoiserSettings {
     /// adaptive is on.
     pub variance_threshold: f32,
     /// `denoise_launch=screen`: picture-sized wavelet over this frame's visible
-    /// fine texels. False is `hash`, the gi-v2 slot launch. Every preset
-    /// defaults to hash. The screen launch is opt-in and is not the picture
-    /// reference.
+    /// fine texels. False is `hash`, the gi-v2 slot launch. Preset high uses
+    /// screen. The other presets use hash. `--denoise-launch` and
+    /// `GENOS_LIGHTING_DENOISE_LAUNCH` override the preset.
     pub screen: bool,
 }
 
@@ -389,6 +392,9 @@ impl LightingSettings {
         match preset {
             LightingPreset::High => {
                 s.lamp_pick.mode = LampPickMode::Hits;
+                // Picture wavelet. The other presets keep the hash launch
+                // stored in `high_defaults`.
+                s.denoiser.screen = true;
             }
             LightingPreset::DayCycle => {
                 s.gi.enabled = false;
@@ -683,7 +689,8 @@ impl LightingSettings {
         self.denoiser.enabled = true;
         self.denoiser.iterations = 5;
         self.denoiser.dirty_fraction = 0.0;
-        // Full effort is the dense hash wavelet, the same launch as every preset.
+        // Full effort stays the dense hash wavelet. High's preset uses the
+        // screen launch; this action does not.
         self.denoiser.screen = false;
         self.compose_reuse = false;
         self.sky = true;
