@@ -63,7 +63,8 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
 
 Page Up and Page Down switch scenes. Keys 1-9 jump checkpoints. Home and 0 reset
 to the active checkpoint. The wheel scrolls the menu while the pointer is over
-it. A click gives the menu the keys. Arrow keys then move the focused control,
+it. Perf can set that wheel policy to hover, modal, click, or passive. A click
+gives the menu the keys. Arrow keys then move the focused control,
 and a focused slider steps. Enter picks the highlighted choice or presses the
 focused control. Escape closes an open list, then releases the keys. A click
 outside releases them too. Grave releases the keys on the first press and

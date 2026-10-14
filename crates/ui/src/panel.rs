@@ -1491,6 +1491,8 @@ fn capped_label(id: u32, text: &str, fill: [f32; 3], max_width: Option<f32>) -> 
 struct PageScroll {
     clip: Option<Rect>,
     body: BTreeSet<u32>,
+    /// The page moved under the wheel this frame.
+    wheeled: bool,
 }
 
 impl PageScroll {
@@ -1532,6 +1534,7 @@ fn scroll_page(
         return PageScroll {
             clip: None,
             body: BTreeSet::new(),
+            wheeled: false,
         };
     };
     let panel_rect = items[panel_index].rect;
@@ -1541,6 +1544,7 @@ fn scroll_page(
         return PageScroll {
             clip: None,
             body: BTreeSet::new(),
+            wheeled: false,
         };
     }
     let mut body = BTreeSet::new();
@@ -1564,6 +1568,7 @@ fn scroll_page(
         return PageScroll {
             clip: None,
             body: BTreeSet::new(),
+            wheeled: false,
         };
     }
     let clip = Rect {
@@ -1577,13 +1582,19 @@ fn scroll_page(
     let over_slider = items
         .iter()
         .any(|item| bar_ids.contains(&item.id) && item.rect.contains(pointer.x, pointer.y));
+    let take_wheel = match state.input.policy(panel_id) {
+        None => over_panel,
+        Some(_) => state.input.allows(panel_id, InputKind::Wheel, over_panel),
+    };
+    let mut wheeled = false;
     if max_scroll > 0.0
-        && over_panel
+        && take_wheel
         && !over_slider
         && state.open_drop.is_none()
         && pointer.wheel_y != 0.0
     {
         state.scroll -= pointer.wheel_y * SCROLL_STEP;
+        wheeled = true;
     }
     state.scroll = state.scroll.clamp(0.0, max_scroll);
     let scroll = state.scroll;
@@ -1601,6 +1612,7 @@ fn scroll_page(
     PageScroll {
         clip: Some(clip),
         body,
+        wheeled,
     }
 }
 
@@ -1685,10 +1697,14 @@ fn finish_panel(
     let mut look_capture = false;
     let mut took_press = false;
     let mut consumed = Consumed::default();
+    if page.wheeled {
+        consumed.wheel = true;
+    }
     let over = hit.is_some();
     let policy = state.input.policy(panel_id);
     let legacy = policy.is_none();
     let keys_open = legacy || state.input.allows(panel_id, InputKind::Keys, over);
+    let wheel_open = legacy || state.input.allows(panel_id, InputKind::Wheel, over);
     if press_edge {
         if let Some(policy) = policy {
             if policy.keys == FocusPolicy::ClickToFocus {
@@ -1803,8 +1819,13 @@ fn finish_panel(
             drive.key_activate = false;
             drive.key_dismiss = false;
         }
+        if !wheel_open {
+            drive.wheel_y = 0.0;
+        }
         let was_open = state.open_drop;
-        drive_open_dropdown(state, &drops, &items, viewport, drive, &mut actions);
+        if drive_open_dropdown(state, &drops, &items, viewport, drive, &mut actions) {
+            consumed.wheel = true;
+        }
         list_closed = was_open.is_some() && state.open_drop.is_none() && pointer.key_dismiss;
         if keys_open && !legacy && (pointer.key_dec || pointer.key_inc || pointer.key_activate || list_closed)
         {
@@ -1812,11 +1833,14 @@ fn finish_panel(
         }
     } else {
         let hovered = hit.and_then(|item| bars.iter().copied().find(|bar| bar.id == item.id));
-        if let Some(bar) = hovered {
-            let notches = wheel_steps(pointer.wheel_y);
-            if notches != 0 {
-                state.focus = Some(bar.id);
-                push_step(&mut actions, bar, notches);
+        if wheel_open {
+            if let Some(bar) = hovered {
+                let notches = wheel_steps(pointer.wheel_y);
+                if notches != 0 {
+                    state.focus = Some(bar.id);
+                    push_step(&mut actions, bar, notches);
+                    consumed.wheel = true;
+                }
             }
         }
         if keys_open && legacy {
@@ -1882,6 +1906,10 @@ fn finish_panel(
                 consumed.blur = true;
             }
         }
+    }
+    if policy.is_some_and(|policy| policy.wheel == FocusPolicy::Modal) && pointer.wheel_y.abs() >= 1.0e-4
+    {
+        consumed.wheel = true;
     }
     let mut shown = Vec::with_capacity(items.len());
     let mut paints = Vec::new();
@@ -2107,14 +2135,14 @@ fn drive_open_dropdown(
     viewport: [f32; 2],
     pointer: Pointer,
     actions: &mut Vec<Action>,
-) {
+) -> bool {
     let Some((drop, list, scroll)) = popup_geom(state, drops, items, viewport) else {
-        return;
+        return false;
     };
     state.drop_scroll = scroll;
     if pointer.key_dismiss {
         state.open_drop = None;
-        return;
+        return false;
     }
     let count = drop.choices.len();
     let (visible, _) = dropdown::window(count, state.drop_scroll);
@@ -2129,10 +2157,12 @@ fn drive_open_dropdown(
         .iter()
         .find(|item| item.id == drop.id)
         .is_some_and(|item| item.rect.contains(pointer.x, pointer.y));
+    let mut used_wheel = false;
     if on_list || on_box {
         let notches = wheel_steps(pointer.wheel_y);
         if notches != 0 {
             state.drop_scroll = dropdown::scroll_by(state.drop_scroll, notches, visible, count);
+            used_wheel = true;
         }
     }
     if let Some(index) = dropdown::row_at(list, state.drop_scroll, count, pointer.x, pointer.y) {
@@ -2147,6 +2177,7 @@ fn drive_open_dropdown(
             state.open_drop = None;
         }
     }
+    used_wheel
 }
 
 fn push_chevron(out: &mut Vec<Paint>, rect: Rect, open: bool) {
