@@ -28,6 +28,8 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 
 `gi-v2` at 8c763bb2 (S78P): still 8.21 ms / 105 fps, moving 18.7 ms / 51 fps (RTX 4070, stress scene). Pipeline: two-layer surface cache (layer 1 traced texels with MSME accumulator; layer 2 SVGF a-trous + pull-push, never fed back), world radiance cache (25 cm cells) for ray hits, sparse screen probes with held strata and check rays, Lumen-style texel direct-light cache for GI hits, per-pixel traced direct light reused in quiet frames, A-SVGF same-seed checks gating rays.
 
+Plan for moving lamps and moving assets (not yet built; measurement first): [dynamic-perf-plan.md](dynamic-perf-plan.md).
+
 ## Principles and rules (Anthony)
 
 - Quality first; a change that saves no measurable time is not pushed, and no change may add visible noise or tearing.
