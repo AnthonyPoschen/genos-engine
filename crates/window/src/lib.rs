@@ -14,10 +14,16 @@
 //! Wayland window. Each pump pulls the seat, then tells subscribers what changed.
 
 mod events;
+mod stall;
 
 pub use events::{WindowEvent, WindowMode};
+pub use stall::{
+    block_with_installed_pump, leave_seat_then, retire, run_pumped, seat_enter, seat_leave,
+    PumpStep, StallMeter, PUMP_BUDGET,
+};
 
 use std::os::raw::{c_int, c_void};
+use std::sync::Arc;
 
 use events::EventHub;
 
@@ -97,6 +103,7 @@ pub struct Window {
     pub display: *mut c_void,
     pub surface: *mut c_void,
     hub: EventHub,
+    meter: Arc<StallMeter>,
 }
 
 impl Window {
@@ -171,12 +178,38 @@ impl Window {
             return Err("Wayland surface is missing".into());
         }
         let frame = decode(&pump);
+        let meter = StallMeter::new();
+        meter.mark();
         Ok(Self {
             raw,
             display: pump.display,
             surface: pump.surface,
             hub: EventHub::from_frame(&frame),
+            meter,
         })
+    }
+
+    /// The pump-gap clock. The frame copies [`StallMeter::longest_ms`] into the scene.
+    pub fn stall(&self) -> &StallMeter {
+        &self.meter
+    }
+
+    /// A clock the frame can hold while it mutably pumps this window.
+    pub fn stall_meter(&self) -> Arc<StallMeter> {
+        Arc::clone(&self.meter)
+    }
+
+    /// Dispatch the seat from a side thread during a blocking device call.
+    ///
+    /// Call this after the window is open and clear it before the window is dropped.
+    /// The side thread must not run at the same time as [`Self::pump`] or a present.
+    pub fn install_seat_pump(&self) {
+        stall::remember_seat(self.raw, &self.meter);
+    }
+
+    /// Stop handing this window to the side thread.
+    pub fn clear_seat_pump(&self) {
+        stall::forget_seat(self.raw);
     }
 
     /// Change the window title (the app id, which the compositor rules match, stays).
@@ -187,6 +220,7 @@ impl Window {
     }
 
     pub fn pump(&mut self) -> Frame {
+        self.meter.mark();
         let frame = self.read_frame();
         self.hub.apply(&frame);
         frame
@@ -264,6 +298,7 @@ impl Window {
 
 impl Drop for Window {
     fn drop(&mut self) {
+        stall::forget_seat(self.raw);
         unsafe { genos_window_destroy(self.raw) };
     }
 }

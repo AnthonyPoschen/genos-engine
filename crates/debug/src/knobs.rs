@@ -104,6 +104,15 @@ pub struct CheckpointPose {
     pub pitch: f32,
 }
 
+/// Whether a scene load has installed its world yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadPace {
+    /// The worker is still reading the scene. Keep pumping the window.
+    Pending,
+    /// The scene the next draw uses is in place.
+    Ready,
+}
+
 /// What an example lets the tools reach: its scene, and settings of its own.
 pub trait Host {
     /// The scene the next draw uses. Edits land after the example's own update.
@@ -127,6 +136,19 @@ pub trait Host {
     /// Replace the scene. The tools drop their edits and clear the lighting cache.
     fn load_scene(&mut self, name: &str) -> Result<(), String> {
         Err(format!("this host has no scene {name}"))
+    }
+
+    /// Start a scene load. [`LoadPace::Pending`] means the frame keeps pumping
+    /// and calls [`Host::poll_load`] until the scene is in place.
+    fn begin_load(&mut self, name: &str) -> Result<LoadPace, String> {
+        self.load_scene(name)?;
+        Ok(LoadPace::Ready)
+    }
+
+    /// [`LoadPace::Ready`] when no load is running, or when the worker has installed
+    /// the scene.
+    fn poll_load(&mut self) -> Result<LoadPace, String> {
+        Ok(LoadPace::Ready)
     }
 
     /// Checkpoint names for the scene that is loaded.

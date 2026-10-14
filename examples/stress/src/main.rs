@@ -38,10 +38,11 @@ use std::time::Instant;
 
 use genos_debug::{png, Host};
 use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
-use genos_render::{Renderer, ScreenLine, ScreenRect};
+use genos_render::{Renderer, ScreenLine, ScreenRect, World};
 use genos_scene::{
-    look_direction, update, Actions, Camera, DebugSettings, LightingPreset, LightingSettings,
-    Scene, Vec3, PITCH_LIMIT,
+    look_direction, update, Actions, Camera, DebugSettings, EventLoopSettings, Floor,
+    FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, Scene, Sky, Vec3,
+    PITCH_LIMIT,
 };
 use genos_ui::{button_panel, Action, PanelButton, PanelRow, PanelSlider, Pointer, State};
 use genos_window::{extent_changed, FocusGate, Window};
@@ -765,34 +766,6 @@ fn run() -> Result<(), String> {
         stage.set_room(genos_scene::load_path(path)?);
         stage.lamp_stop = opts.lamp_stop;
     }
-    for (path, [x, y, z, scale]) in &opts.gltf {
-        let model =
-            genos_load::load_gltf_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut place = [0.0; 16];
-        place[0] = *scale;
-        place[5] = *scale;
-        place[10] = *scale;
-        place[12] = *x;
-        place[13] = *y;
-        place[14] = *z;
-        place[15] = 1.0;
-        // Models carry their baked SDFs for the GI v2 software tracer; the current
-        // lighting does not see them. The stress tool bakes on first load unless
-        // GENOS_BAKE says otherwise.
-        let mut bake = genos_render::bake::BakeSettings::default();
-        if std::env::var_os("GENOS_BAKE").is_none() {
-            bake.mode = genos_render::bake::BakeMode::OnLoad;
-        }
-        let added = stage
-            .world
-            .add_gltf_traced(&model, &place, &bake)
-            .map_err(|e| format!("{}: bake: {e:?}", path.display()))?;
-        eprintln!(
-            "genos-stress: {} placed as {} mesh draws",
-            path.display(),
-            added.len()
-        );
-    }
     let mut camera = camera_at(opts.view);
     if let Some([x, y, z, yaw, pitch]) = opts.eye {
         camera.set_pose(genos_scene::Vec3::new(x, y, z), yaw, pitch);
@@ -810,6 +783,8 @@ fn run() -> Result<(), String> {
             display,
         )?
     };
+    window.install_seat_pump();
+    Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     // Window title: what this run is (GENOS_TITLE_TAG from gi-check: binary, GI,
     // world mode, flags, test), and REF while a reference renders. The app id the
     // compositor rules match does not change.
@@ -823,6 +798,19 @@ fn run() -> Result<(), String> {
     }
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    if !opts.gltf.is_empty() {
+        match load_gltf_pumped(
+            &mut window,
+            &mut renderer,
+            &mut stage,
+            &camera,
+            opts.gltf.clone(),
+        ) {
+            Ok(()) => {}
+            Err(err) if err == "window closed during load" => finish(window, renderer, 0),
+            Err(err) => return Err(err),
+        }
+    }
     stage.unfilled_count = renderer.unfilled().count;
     stage.unfilled_tint = renderer.unfilled().tint;
     let host = genos_mcp::Host::new(stage.world.scene.clone(), camera.clone());
@@ -847,11 +835,11 @@ fn run() -> Result<(), String> {
         if let Some(path) = &opts.bench_out {
             std::fs::write(path, &text).map_err(|err| err.to_string())?;
         }
-        return Ok(());
+        finish(window, renderer, 0);
     }
 
     let mut tools = genos_debug::Tools::new();
-    let script = opts.script.clone().map(|run| {
+    let mut script = opts.script.clone().map(|run| {
         tools.set_fixed_step(Some(bench::STEP));
         tools.set_out_dir(run.report_dir.clone());
         genos_debug::script::spawn(run)
@@ -890,7 +878,12 @@ fn run() -> Result<(), String> {
             real_dt.min(MAX_FRAME_SECONDS)
         });
         clock = Some(now);
+        window
+            .stall()
+            .pull_published(stage.world.scene.event_loop.longest_stall_ms);
         let frame = window.pump();
+        let stall_ms = window.stall().longest_ms();
+        stage.world.scene.event_loop.note(stall_ms);
         if !title_base.is_empty() {
             let rendering =
                 genos_debug::reference::RENDERING.load(std::sync::atomic::Ordering::SeqCst) > 0;
@@ -904,7 +897,7 @@ fn run() -> Result<(), String> {
             }
         }
         if frame.closing {
-            break;
+            finish(window, renderer, tools.quit_code().unwrap_or(0));
         }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
@@ -1085,19 +1078,106 @@ fn run() -> Result<(), String> {
             );
         }
         if last || tools.quit_code().is_some() {
-            break;
+            let mut code = tools.quit_code().unwrap_or(0);
+            if let Some(handle) = script.as_ref() {
+                if handle.is_finished() {
+                    let passed = script
+                        .take()
+                        .and_then(|handle| handle.join().ok())
+                        .unwrap_or(false);
+                    if !passed {
+                        code = 1;
+                    }
+                }
+            }
+            println!("genos-stress frames={drawn}");
+            finish(window, renderer, code);
         }
     }
-    println!("genos-stress frames={drawn}");
-    if let Some(handle) = script {
-        let passed = handle.join().unwrap_or(false);
-        if !passed {
-            std::process::exit(1);
+}
+
+fn finish(window: Window, renderer: Renderer, code: i32) -> ! {
+    Renderer::clear_blocker();
+    window.clear_seat_pump();
+    drop(window);
+    renderer.abandon();
+    std::process::exit(code);
+}
+
+fn loading_world() -> World {
+    World::from_scene(Scene {
+        floor: Floor {
+            position: Vec3::new(0.0, 0.0, 0.0),
+            half_x: 2.0,
+            half_z: 2.0,
+            color: [0.15, 0.15, 0.16],
+        },
+        walls: Vec::new(),
+        solids: Vec::new(),
+        lights: Vec::new(),
+        ceiling: None,
+        sky: Some(Sky {
+            color: [0.02, 0.02, 0.025],
+        }),
+        lighting: LightingSettings::preset(LightingPreset::Potato),
+        debug: DebugSettings::default(),
+        fps_counter: FpsCounterSettings::default(),
+        event_loop: EventLoopSettings::default(),
+        menu: MenuSettings::default(),
+    })
+}
+
+fn bake_gltf(mut world: World, models: &[(PathBuf, [f32; 4])]) -> Result<World, String> {
+    for (path, [x, y, z, scale]) in models {
+        let model =
+            genos_load::load_gltf_file(path).map_err(|err| format!("{}: {err}", path.display()))?;
+        let mut place = [0.0; 16];
+        place[0] = *scale;
+        place[5] = *scale;
+        place[10] = *scale;
+        place[12] = *x;
+        place[13] = *y;
+        place[14] = *z;
+        place[15] = 1.0;
+        let mut bake = genos_render::bake::BakeSettings::default();
+        if std::env::var_os("GENOS_BAKE").is_none() {
+            bake.mode = genos_render::bake::BakeMode::OnLoad;
         }
+        let added = world
+            .add_gltf_traced(&model, &place, &bake)
+            .map_err(|err| format!("{}: bake: {err:?}", path.display()))?;
+        eprintln!(
+            "genos-stress: {} placed as {} mesh draws",
+            path.display(),
+            added.len()
+        );
     }
-    if let Some(code) = tools.quit_code().filter(|c| *c != 0) {
-        std::process::exit(code);
-    }
+    Ok(world)
+}
+
+fn load_gltf_pumped(
+    window: &mut Window,
+    renderer: &mut Renderer,
+    stage: &mut Stage,
+    camera: &Camera,
+    models: Vec<(PathBuf, [f32; 4])>,
+) -> Result<(), String> {
+    let heavy = std::mem::replace(&mut stage.world, loading_world());
+    let meter = window.stall_meter();
+    let loaded = genos_window::run_pumped(
+        &meter,
+        genos_window::PUMP_BUDGET,
+        || {
+            let frame = window.pump();
+            if frame.closing {
+                return genos_window::PumpStep::Close;
+            }
+            let _ = renderer.draw_with_overlay(&stage.world, camera, &[], false, false);
+            genos_window::PumpStep::Continue
+        },
+        move || bake_gltf(heavy, &models),
+    )?;
+    stage.world = loaded?;
     Ok(())
 }
 

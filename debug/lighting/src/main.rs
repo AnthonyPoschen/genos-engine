@@ -26,12 +26,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use genos_debug::{png, CheckpointPose, Host, Knob};
+use genos_debug::{png, CheckpointPose, Host, Knob, LoadPace};
 use genos_input::{character_controller, debug_keys, InputCode, InputSystem, KeyBindings};
 use genos_render::{identity_pose, DrawKind, FixedPart, Renderer, ScreenRect, ViewMode, World};
 use genos_scene::{
     look_direction, parse_enabled, parse_menu_visible, parse_rate, update, Actions, Camera,
-    DebugSettings, Floor, FocusPolicy, FpsCounterSettings, Light, MenuSettings, Scene, Sky, Vec3,
+    DebugSettings, EventLoopSettings, Floor, FocusPolicy, FpsCounterSettings, Light, MenuSettings,
+    Scene, Sky, Vec3,
     PITCH_LIMIT,
 };
 use genos_scene_lib::{Entry, Kind, Lamp, Sun};
@@ -114,7 +115,9 @@ and Key focus to hover, modal, click, or passive. The title bar hide button
 hides it. A menu tab in the top-left corner shows it. --menu hidden starts it
 hidden. GENOS_MENU applies only when that argument was omitted.
 get_menu_settings and set_menu_settings read and write shown or hidden, the
-page, the folds, and those two focus policies. ] and [ change the page while
+page, the folds, and those two focus policies. The Perf page shows the longest
+event-loop stall. get_event_loop and set_event_loop read it and can write 0 to
+clear it. ] and [ change the page while
 the menu has the keys. Tab and shift-Tab do that too. F toggles the frame-rate
 plate. F3 is the same key. A section title folds that group.
 The fold is remembered in <out>/menu/collapsed.txt. The open page is remembered
@@ -251,15 +254,9 @@ fn run() -> Result<(), String> {
     if opts.check {
         return check_all(&mut app, &opts, &mut log);
     }
-    let index = app
-        .entries
-        .iter()
-        .position(|e| e.name == opts.scene)
-        .ok_or_else(|| format!("unknown scene {}", opts.scene))?;
-    app.load_scene(&app.entries[index].name.clone())?;
-    let mut camera = Camera::opening();
-    jump_camera(&mut app, opts.checkpoint.as_deref(), &mut camera)?;
-    place_camera(&opts, &mut camera)?;
+    if !app.entries.iter().any(|entry| entry.name == opts.scene) {
+        return Err(format!("unknown scene {}", opts.scene));
+    }
     let (width, height) = opts.size;
     let display = opts.display.as_deref();
     let mut window = if opts.headless {
@@ -267,8 +264,17 @@ fn run() -> Result<(), String> {
     } else {
         Window::open_named_on(width, height, "genos-lighting", "Genos lighting", display)?
     };
+    window.install_seat_pump();
+    Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let mut camera = Camera::opening();
+    if app.entry().name != opts.scene {
+        app.start_load(&opts.scene)?;
+    }
+    jump_camera(&mut app, opts.checkpoint.as_deref(), &mut camera)?;
+    place_camera(&opts, &mut camera)?;
+    let load_world = loading_world();
     let mcp_host = genos_mcp::Host::new(app.scene().clone(), camera.clone());
     let mcp_port = opts.mcp_port.unwrap_or_else(mcp_port_from_env);
     let _server = genos_mcp::Server::start_on(mcp_host, mcp_port)?;
@@ -316,9 +322,20 @@ fn run() -> Result<(), String> {
             real_dt.min(MAX_FRAME_SECONDS)
         });
         clock = Some(now);
+        window
+            .stall()
+            .pull_published(app.scene().event_loop.longest_stall_ms);
         let frame = window.pump();
+        let stall_ms = window.stall().longest_ms();
+        app.scene().event_loop.note(stall_ms);
+        if app.loading() {
+            app.take_load()?;
+            if !app.loading() {
+                renderer.reset_lighting_cache();
+            }
+        }
         if frame.closing {
-            break;
+            finish(window, renderer, tools.quit_code().unwrap_or(0));
         }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
@@ -432,34 +449,46 @@ fn run() -> Result<(), String> {
                 tab: &mut tracked_tab,
             },
         )?;
-        let mut overlay: Vec<ScreenRect> = paints
-            .iter()
-            .map(|p| ScreenRect {
-                x: p.x,
-                y: p.y,
-                w: p.w,
-                h: p.h,
-                color: p.color,
-            })
-            .collect();
-        app.advance(dt);
-        fly(
-            &mut camera,
-            app.scene(),
-            &input,
-            &Actions {
-                forward: move_axis.y,
-                strafe: move_axis.x,
-                mouse_dx: input.mouse.dx,
-                mouse_dy: input.mouse.dy,
-                look_x: look_axis.x,
-                look_y: look_axis.y,
-                capture_click: look_capture
-                    && (gated.capture_click || controls.down(&input, "capture")),
-                escape: controls.down(&input, "release"),
-            },
-            dt,
-        );
+        let mut overlay: Vec<ScreenRect> = Vec::new();
+        if app.loading() {
+            overlay.push(ScreenRect {
+                x: 0.0,
+                y: 0.0,
+                w: size.0 as f32,
+                h: size.1 as f32,
+                color: [0.04, 0.04, 0.05],
+            });
+        }
+        overlay.extend(paints.iter().map(|p| ScreenRect {
+            x: p.x,
+            y: p.y,
+            w: p.w,
+            h: p.h,
+            color: p.color,
+        }));
+        let loading = app.loading();
+        if !loading {
+            app.advance(dt);
+        }
+        if !loading {
+            fly(
+                &mut camera,
+                app.scene(),
+                &input,
+                &Actions {
+                    forward: move_axis.y,
+                    strafe: move_axis.x,
+                    mouse_dx: input.mouse.dx,
+                    mouse_dy: input.mouse.dy,
+                    look_x: look_axis.x,
+                    look_y: look_axis.y,
+                    capture_click: look_capture
+                        && (gated.capture_click || controls.down(&input, "capture")),
+                    escape: controls.down(&input, "release"),
+                },
+                dt,
+            );
+        }
         if camera.captured != frame.pointer_locked {
             if let Err(err) = window.set_pointer_capture(camera.captured) {
                 eprintln!("genos-lighting: {err}");
@@ -500,8 +529,9 @@ fn run() -> Result<(), String> {
             renderer.set_overlay_lines(&[]);
         }
         let draw_start = Instant::now();
+        let drawn_world = if loading { &load_world } else { app.world() };
         let pixels =
-            renderer.draw_with_overlay(app.world(), &camera, &overlay, want_read, false)?;
+            renderer.draw_with_overlay(drawn_world, &camera, &overlay, want_read, false)?;
         tools.after_draw(
             &mut renderer,
             pixels.as_deref(),
@@ -527,19 +557,26 @@ fn run() -> Result<(), String> {
             }
         }
         if last || tools.quit_code().is_some() {
-            break;
+            finish(window, renderer, tools.quit_code().unwrap_or(0));
         }
     }
-    if let Some(code) = tools.quit_code().filter(|c| *c != 0) {
-        std::process::exit(code);
-    }
-    Ok(())
+}
+
+fn finish(window: Window, renderer: Renderer, code: i32) -> ! {
+    Renderer::clear_blocker();
+    window.clear_seat_pump();
+    drop(window);
+    renderer.abandon();
+    std::process::exit(code);
 }
 
 fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(), String> {
     let mut window = Window::open_proof_on(opts.size.0, opts.size.1, opts.display.as_deref())?;
+    window.install_seat_pump();
+    Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let load_world = loading_world();
     let mut camera = Camera::opening();
     let mut passed = Vec::new();
     let mut skipped = Vec::new();
@@ -548,7 +585,7 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
     for name in &names {
         let _ = writeln!(log, "check {name}");
         eprintln!("genos-lighting: check {name}");
-        if let Err(err) = app.load_scene(name) {
+        if let Err(err) = app.start_load(name) {
             if gltf_scene(&app.entries, name) && gltf_bytes_absent(&err) {
                 let line = skip_line(name, &err);
                 skipped.push(name.clone());
@@ -557,6 +594,28 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
                 continue;
             }
             return Err(err);
+        }
+        let mut spins = 0u32;
+        while app.loading() {
+            let _ = window.pump();
+            let _ = renderer.draw(&load_world, &camera, false);
+            if let Err(err) = app.take_load() {
+                if gltf_scene(&app.entries, name) && gltf_bytes_absent(&err) {
+                    let line = skip_line(name, &err);
+                    skipped.push(name.clone());
+                    eprintln!("genos-lighting: {line}");
+                    let _ = writeln!(log, "{line}");
+                    break;
+                }
+                return Err(err);
+            }
+            spins += 1;
+            if spins > 100_000 {
+                return Err(format!("{name}: scene load did not finish"));
+            }
+        }
+        if skipped.last().is_some_and(|skipped_name| skipped_name == name) {
+            continue;
         }
         let check = app.entry().check.clone();
         jump_camera(app, Some(&check.checkpoint), &mut camera)?;
@@ -593,6 +652,8 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
     }
     let summary = check_summary(&passed, &skipped, &failed);
     let _ = writeln!(log, "{summary}");
+    drop(window);
+    renderer.abandon();
     if failed.is_empty() {
         eprintln!("genos-lighting: {summary}");
         Ok(())
@@ -625,6 +686,10 @@ fn check_summary(passed: &[String], skipped: &[String], failed: &[String]) -> St
     line
 }
 
+struct LoadJob {
+    rx: std::sync::mpsc::Receiver<Result<Show, String>>,
+}
+
 struct App {
     entries: Vec<Entry>,
     index: usize,
@@ -632,6 +697,7 @@ struct App {
     show: Show,
     root: PathBuf,
     log: std::fs::File,
+    load: Option<LoadJob>,
 }
 
 enum Show {
@@ -649,6 +715,7 @@ impl App {
             show,
             root,
             log,
+            load: None,
         })
     }
 
@@ -672,6 +739,77 @@ impl App {
     fn note(&mut self, line: &str) {
         eprintln!("genos-lighting: {line}");
         let _ = writeln!(self.log, "{line}");
+    }
+
+    fn scene_ref(&self) -> &Scene {
+        match &self.show {
+            Show::Stress(stage) => &stage.world.scene,
+            Show::Still(world) => &world.scene,
+        }
+    }
+
+    fn loading(&self) -> bool {
+        self.load.is_some()
+    }
+
+    /// Read `name` on a worker. The call returns while that read is still running.
+    fn start_load(&mut self, name: &str) -> Result<LoadPace, String> {
+        if self.entry().name == name && self.load.is_none() {
+            return Ok(LoadPace::Ready);
+        }
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.name == name)
+            .ok_or_else(|| format!("unknown scene {name}"))?;
+        let root = self.root.clone();
+        let entry = self.entries[index].clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("genos-scene-load".into())
+            .spawn(move || {
+                let _ = tx.send(build_entry(&root, &entry));
+            })
+            .map_err(|err| err.to_string())?;
+        self.index = index;
+        self.checkpoint = 0;
+        self.load = Some(LoadJob { rx });
+        Ok(LoadPace::Pending)
+    }
+
+    fn take_load(&mut self) -> Result<LoadPace, String> {
+        let incoming = {
+            let Some(job) = self.load.as_ref() else {
+                return Ok(LoadPace::Ready);
+            };
+            match job.rx.try_recv() {
+                Ok(value) => value,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(LoadPace::Pending),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.load = None;
+                    return Err("scene load stopped".into());
+                }
+            }
+        };
+        self.load = None;
+        let show = incoming?;
+        self.install_show(show);
+        Ok(LoadPace::Ready)
+    }
+
+    fn install_show(&mut self, show: Show) {
+        let menu = self.scene().menu.clone();
+        let fps = self.scene().fps_counter;
+        let debug = self.scene().debug.clone();
+        let event_loop = self.scene().event_loop;
+        let name = self.entry().name.clone();
+        let old = std::mem::replace(&mut self.show, show);
+        self.scene().menu = menu;
+        self.scene().fps_counter = fps;
+        self.scene().debug = debug;
+        self.scene().event_loop = event_loop;
+        genos_window::retire(old);
+        self.note(&format!("loaded {name}"));
     }
 }
 
@@ -709,6 +847,9 @@ impl Host for App {
 
     fn load_scene(&mut self, name: &str) -> Result<(), String> {
         let menu = self.scene().menu.clone();
+        let fps = self.scene().fps_counter;
+        let debug = self.scene().debug.clone();
+        let event_loop = self.scene().event_loop;
         let index = self
             .entries
             .iter()
@@ -717,10 +858,22 @@ impl Host for App {
         let show = build_entry(&self.root, &self.entries[index])?;
         self.index = index;
         self.checkpoint = 0;
+        self.load = None;
         self.show = show;
         self.scene().menu = menu;
+        self.scene().fps_counter = fps;
+        self.scene().debug = debug;
+        self.scene().event_loop = event_loop;
         self.note(&format!("loaded {name}"));
         Ok(())
+    }
+
+    fn begin_load(&mut self, name: &str) -> Result<LoadPace, String> {
+        self.start_load(name)
+    }
+
+    fn poll_load(&mut self) -> Result<LoadPace, String> {
+        self.take_load()
     }
 
     fn list_checkpoints(&self) -> Vec<String> {
@@ -746,6 +899,29 @@ impl Host for App {
             pitch: cp.pitch,
         })
     }
+}
+
+fn loading_world() -> World {
+    World::from_scene(Scene {
+        floor: Floor {
+            position: Vec3::new(0.0, 0.0, 0.0),
+            half_x: 2.0,
+            half_z: 2.0,
+            color: [0.15, 0.15, 0.16],
+        },
+        walls: Vec::new(),
+        solids: Vec::new(),
+        lights: Vec::new(),
+        ceiling: None,
+        sky: Some(Sky {
+            color: [0.02, 0.02, 0.025],
+        }),
+        lighting: genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato),
+        debug: DebugSettings::default(),
+        fps_counter: FpsCounterSettings::default(),
+        event_loop: EventLoopSettings::default(),
+        menu: MenuSettings::default(),
+    })
 }
 
 fn gltf_scene(entries: &[Entry], name: &str) -> bool {
@@ -818,6 +994,7 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
                 lighting: genos_scene::LightingSettings::default(),
                 debug: DebugSettings::default(),
                 fps_counter: FpsCounterSettings::default(),
+                event_loop: EventLoopSettings::default(),
                 menu: MenuSettings::default(),
             };
             if let Some(sun) = sun {
@@ -1004,7 +1181,7 @@ fn switch_to(
     renderer: &mut Renderer,
 ) -> Result<(), String> {
     let name = app.entries[index].name.clone();
-    app.load_scene(&name)?;
+    app.start_load(&name)?;
     tools.drop_scene_edits();
     renderer.reset_lighting_cache();
     jump_camera(app, checkpoint, camera)
@@ -1310,6 +1487,16 @@ fn setting_piece(
         )
         .map(Piece::Row),
         "fps" => Some(Piece::Row(fps_row(fps))),
+        "stall" => Some(Piece::Row(PanelRow {
+            label: format!(
+                "Stall {:.0} ms",
+                app.scene_ref().event_loop.longest_stall_ms
+            ),
+            buttons: Vec::new(),
+            slider: None,
+            dropdown: None,
+            checks: Vec::new(),
+        })),
         "menu_wheel" => focus_row("Wheel focus", ID_MENU_WHEEL, menu_settings(app).wheel).map(Piece::Row),
         "menu_keys" => focus_row("Key focus", ID_MENU_KEYS, menu_settings(app).keys).map(Piece::Row),
         name => {
@@ -2481,6 +2668,80 @@ mod tests {
         );
         let merged = super::merge_collapsed(&still, &ui, &folds);
         assert_eq!(merged, vec!["world".to_string()]);
+    }
+
+    #[test]
+    fn a_scene_load_returns_inside_the_pump_budget() {
+        use std::sync::{Condvar, Mutex};
+        use std::time::{Duration, Instant};
+        fn wait_ms(ms: u64) {
+            let pair = (Mutex::new(()), Condvar::new());
+            let guard = pair.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = pair.1.wait_timeout(guard, Duration::from_millis(ms));
+        }
+        let root = genos_scene_lib::repo_root();
+        let entries = genos_scene_lib::load_dir(&genos_scene_lib::scenes_dir()).expect("scenes");
+        let sponza = entries
+            .iter()
+            .find(|entry| entry.name == "sponza")
+            .expect("sponza")
+            .clone();
+        let before = Instant::now();
+        let sync = super::build_entry(&root, &sponza);
+        let before_ms = before.elapsed().as_secs_f64() * 1000.0;
+        println!("MEASURE before_load_stall_ms={before_ms:.1}");
+        let absent = sync
+            .as_ref()
+            .err()
+            .is_some_and(|err| super::gltf_bytes_absent(err));
+        let log = std::fs::File::create(std::env::temp_dir().join("genos-stall-load.log")).expect("log");
+        let mut app = super::App::open(entries, root, log).expect("app");
+        let meter = genos_window::StallMeter::new();
+        meter.mark();
+        let begin = Instant::now();
+        app.start_load("sponza").expect("begin");
+        let begin_elapsed = begin.elapsed();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            meter.mark();
+            match app.take_load() {
+                Ok(genos_debug::LoadPace::Pending) => {
+                    assert!(
+                        Instant::now() <= deadline,
+                        "scene load did not finish"
+                    );
+                    wait_ms(16);
+                }
+                Ok(genos_debug::LoadPace::Ready) => break,
+                Err(err) if super::gltf_bytes_absent(&err) || absent => {
+                    meter.mark();
+                    println!(
+                        "MEASURE after_begin_ms={:.1} after_load_stall_ms={:.1} note=gltf bytes absent",
+                        begin_elapsed.as_secs_f64() * 1000.0,
+                        meter.longest_ms()
+                    );
+                    assert!(
+                        begin_elapsed <= Duration::from_millis(100),
+                        "begin_load blocked {begin_elapsed:?}"
+                    );
+                    assert!(
+                        meter.longest_ms() <= genos_scene::EventLoopSettings::BUDGET_MS,
+                        "poll stalled {:.1} ms",
+                        meter.longest_ms()
+                    );
+                    return;
+                }
+                Err(err) => panic!("{err}"),
+            }
+        }
+        meter.mark();
+        println!(
+            "MEASURE after_begin_ms={:.1} after_load_stall_ms={:.1}",
+            begin_elapsed.as_secs_f64() * 1000.0,
+            meter.longest_ms()
+        );
+        assert!(begin_elapsed <= Duration::from_millis(100));
+        assert!(meter.longest_ms() <= genos_scene::EventLoopSettings::BUDGET_MS);
     }
 }
 

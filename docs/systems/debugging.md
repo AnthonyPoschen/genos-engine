@@ -157,6 +157,26 @@ off or the first window has not closed. The probes are the plate, the `FPS`
 menu row, F or F3, `--fps-counter` / `--fps-hz`, and `get_fps_counter` /
 `set_fps_counter`.
 
+### Event-loop stall
+
+`EventLoopSettings` on the scene (`longest_stall_ms`) is the public setting.
+It implements `EngineSettings`. The frame copies the longest gap between window
+pumps into it. The Perf row `Stall` shows that number. `get_event_loop` and
+`set_event_loop` are on the MCP catalogue. A `text` field overlays `key=value`
+lines. Writing `0` clears the mark; the next frame adopts the lower value.
+The budget is 100 ms. Past that, Omarchy reports the window as not responding
+because a mapped window missed `xdg_wm_base.ping`.
+
+The ping is answered only inside the seat dispatch. A scene load runs on
+`genos-scene-load` and the frame draws a loading picture. Device waits and
+pipeline compiles keep a side thread answering pings, and that thread is joined
+before the next present. Quit destroys the window, skips the device idle, and
+exits. The old scene is dropped on `genos-retire`.
+
+Failure modes: a stall above 100 ms means the frame thread blocked inside a
+pump gap (a synchronous load, a device wait, or a teardown). The probes are the
+Perf row, `get_event_loop`, and the headless pump test in `genos-window`.
+
 ### Debug menu
 
 `MenuSettings` on the scene (`visible`, `tab`, `collapsed`, `wheel`, `keys`)

@@ -12,6 +12,10 @@ The frame pulls state. `Window::pump` reads the compositor, then tells subscribe
 
 The window does not lock the pointer when it opens. A click does not lock the pointer. The frame calls `set_pointer_capture` when it accepts the click.
 
+The compositor pings a mapped window (`xdg_wm_base.ping`). The answer is sent only while `Window::pump` or the seat dispatch reads the socket. Omarchy treats a missed ping as "Application not responding". The frame keeps the gap between dispatches inside 100 ms. `StallMeter` records the longest gap. The scene stores it as `EventLoopSettings.longest_stall_ms`.
+
+A scene file is read on a worker once the window is mapped. The frame draws a small loading picture and keeps pumping. Device waits, pipeline compiles, and copies larger than a megabyte run on the frame thread while a side thread dispatches the seat. That side thread stops before the next present or `pump`. Quit destroys the window first, skips `vkDeviceWaitIdle`, and exits. The driver reclaims the device. A scene that is leaving is dropped on `genos-retire`, not on the frame thread.
+
 `lock_cursor` hides the cursor and confines it. `unlock_cursor` shows the cursor and lets it leave. Escape is a game action. The window does not bind Escape itself.
 
 `set_mode` asks for `WindowMode::Fullscreen` or `WindowMode::Windowed`. `WindowEvent::ModeChanged` arrives on a later pump, after the compositor applies the mode.
@@ -56,6 +60,8 @@ Give `window.display` and `window.surface` to the renderer. The window does not 
 The X11 window waits. Windows and macOS windows wait. The editor window is not built. The horizontal wheel is ignored.
 
 A listener cannot pump the window. Fullscreen is a request. The compositor can refuse it.
+
+The frame thread does not spend more than 100 ms between seat dispatches while the window is mapped. A load, a device wait, and a quit that block longer than that miss a ping. The side thread that answers pings must not run at the same time as a present or `Window::pump`.
 
 ## Decisions
 
