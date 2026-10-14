@@ -125,7 +125,7 @@ The 2013 C++ engine in `AnthonyPoschen/Breaking-Point`. It is a reference for ma
 _Avoid_: Genos Engine, the runtime
 
 **Lighting**:
-The light that reaches a surface from an emitter or from another surface.
+The light that reaches a surface from an emitter or from another surface. GI v2 lighting terms are defined in [docs/lighting/GLOSSARY.md](docs/lighting/GLOSSARY.md), which is authoritative for lighting names. The radiance-field, radiance-cascade and world-probe entries below are GI v1 terms only.
 _Avoid_: Shader, material
 
 **Radiance field** (historical, GI v1):
@@ -136,7 +136,7 @@ _Avoid_: Lightmap, g-buffer
 One distance range of the radiance field. A near cascade stores more positions, and a far cascade stores more directions.
 _Avoid_: Cascade shadow map, lightmap
 
-**World probe** (historical, GI v1):
+**World probe** (historical, GI v1; not the GI v2 world radiance cache):
 A coarse probe in the world, past the nearer cascades. It carries material-colored light those ranges miss.
 _Avoid_: Light probe, reflection probe, lightmap
 
