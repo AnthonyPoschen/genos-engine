@@ -87,6 +87,8 @@ Basic mode and detailed mode call `profile_overlay` and draw those paints. Detai
 
 `genos-lighting` keeps an `FpsOverlay` and calls `note` once a frame with the effective `FpsCounterSettings`. It draws `paints` in the overlay pass. A false `enabled` makes that call return without further work.
 
+`button_panel_blocks` lays out `PanelBlock` values. A block is a fold (`PanelSection`) or a tab strip (`PanelTabs`). A tab's blocks can be folds. A fold's `blocks` can be a tab strip. A fold can also sit outside every tab. A press on a tab shows that tab on the next frame. `State` remembers the tab. A press on a fold title still folds only that fold.
+
 `genos-lighting` draws the settings menu with `button_panel_sections`. The panel's width is at most one third of the viewport. Every label wraps inside that width, and a word with no spaces breaks so it cannot widen the panel. The groups are Info, Scene/View, Pipeline toggles, Direct/Lamps, GI/Probes/World cache, Denoise, Shadows/Ambient, and Perf/FPS. Control labels use the lighting glossary. Config keys stay the same. Info holds the scene description and starts folded. The title is the scene name. Direct/Lamps, GI/Probes/World cache, Denoise, and Shadows/Ambient start folded. A press on a title changes the fold, and the binary writes the folded names to `<out>/menu/collapsed.txt`. The next launch reads that file. Grave hides the menu. Grave again shows it. F1 is the same key. The title bar has a hide button. While the menu is hidden, a menu tab in the top-left corner shows it again. F toggles the frame-rate plate. F3 is the same key.
 
 P pauses the graph. A drag inspects one interval. L follows live frames again.

@@ -1,6 +1,6 @@
 //! The lighting panel, the lamp sun, and the pointer step the camera frame uses.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use genos_scene::{Camera, Scene};
@@ -114,6 +114,8 @@ pub struct State {
     section_seen: BTreeSet<u32>,
     /// Section ids that are folded. Later frames keep this set.
     collapsed_sections: BTreeSet<u32>,
+    /// Selected tab id for each tab strip.
+    selected_tabs: BTreeMap<u32, u32>,
 }
 
 impl Default for State {
@@ -137,6 +139,7 @@ impl Default for State {
             palette_from: None,
             section_seen: BTreeSet::new(),
             collapsed_sections: BTreeSet::new(),
+            selected_tabs: BTreeMap::new(),
         }
     }
 }
@@ -156,6 +159,15 @@ impl State {
     /// True when this section is folded.
     pub fn section_collapsed(&self, id: u32) -> bool {
         self.collapsed_sections.contains(&id)
+    }
+
+    /// The tab this strip is showing. `None` until the first frame picks one.
+    pub fn selected_tab(&self, group: u32) -> Option<u32> {
+        self.selected_tabs.get(&group).copied()
+    }
+
+    fn select_tab(&mut self, group: u32, tab: u32) {
+        self.selected_tabs.insert(group, tab);
     }
 
     fn toggle_section(&mut self, id: u32) {
@@ -318,6 +330,8 @@ pub struct PanelSection {
     /// Folded on the first frame this id is seen.
     pub collapsed: bool,
     pub rows: Vec<PanelRow>,
+    /// Folded with the rows. A fold can hold tabs, and a tab can hold folds.
+    pub blocks: Vec<PanelBlock>,
 }
 
 impl PanelSection {
@@ -327,8 +341,37 @@ impl PanelSection {
             title: title.into(),
             collapsed,
             rows,
+            blocks: Vec::new(),
         }
     }
+
+    /// Put tabs or more folds inside this fold.
+    pub fn with_blocks(mut self, blocks: Vec<PanelBlock>) -> Self {
+        self.blocks = blocks;
+        self
+    }
+}
+
+/// One page in a [`PanelTabs`] strip. Its blocks are folds, rows are not required.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PanelTab {
+    pub id: u32,
+    pub title: String,
+    pub blocks: Vec<PanelBlock>,
+}
+
+/// A row of tabs. Only the selected tab's blocks are laid out.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PanelTabs {
+    pub id: u32,
+    pub tabs: Vec<PanelTab>,
+}
+
+/// A fold or a tab strip. Either can contain the other.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PanelBlock {
+    Section(PanelSection),
+    Tabs(PanelTabs),
 }
 
 /// A compact on/off mark and a label. The panel does not store `on`.
@@ -496,7 +539,7 @@ pub fn button_panel(
     drag_panel(state, pointer);
     refresh_palette(state);
     let panel = panel_tree(state, title, rows, &[], None, false);
-    finish_panel(state, panel, rows, &[], viewport, camera, pointer)
+    finish_panel(state, panel, rows, &[], &[], viewport, camera, pointer)
 }
 
 /// Lay out the same panel as [`button_panel`], grouped under folding section titles.
@@ -523,7 +566,40 @@ pub fn button_panel_sections(
     }
     let max_width = viewport[0] / 3.0;
     let panel = panel_tree(state, title, &visible, sections, Some(max_width), true);
-    finish_panel(state, panel, &visible, &ids, viewport, camera, pointer)
+    finish_panel(state, panel, &visible, &ids, &[], viewport, camera, pointer)
+}
+
+/// Lay out folds and tab strips. A tab's blocks can be folds. A fold's blocks
+/// can be a tab strip. A fold can also sit outside every tab.
+///
+/// A press on a tab fires [`Action::Press`] with the tab id and shows that tab
+/// on the next frame. A press on a fold title still folds that fold.
+pub fn button_panel_blocks(
+    state: &mut State,
+    title: &str,
+    blocks: &[PanelBlock],
+    viewport: [f32; 2],
+    camera: &Camera,
+    pointer: Pointer,
+) -> Frame {
+    drag_panel(state, pointer);
+    refresh_palette(state);
+    let mut visible = Vec::new();
+    let mut section_ids = Vec::new();
+    let mut tab_ids = Vec::new();
+    collect_blocks(state, blocks, &mut visible, &mut section_ids, &mut tab_ids);
+    let max_width = viewport[0] / 3.0;
+    let panel = block_panel(state, title, blocks, Some(max_width));
+    finish_panel(
+        state,
+        panel,
+        &visible,
+        &section_ids,
+        &tab_ids,
+        viewport,
+        camera,
+        pointer,
+    )
 }
 
 fn drag_panel(state: &mut State, pointer: Pointer) {
@@ -616,6 +692,175 @@ fn panel_tree(
         }
     }
     panel
+}
+
+fn block_panel(state: &State, title: &str, blocks: &[PanelBlock], max_width: Option<f32>) -> Node {
+    let palette = state.palette;
+    let fill = surface(palette);
+    let own = u32::MAX - 4095;
+    let mut panel = Node::new(own);
+    panel.direction = Direction::TopToBottom;
+    panel.pad = Pad::all(8.0);
+    panel.gap = 6.0;
+    panel.place = Some(Place::point([0.0, 0.0], [0.0, 0.0], state.panel_offset));
+    panel.draggable = true;
+    paint_looks(&mut panel, chrome_looks(palette));
+    if let Some(max_width) = max_width {
+        panel.width = Sizing::Fit {
+            min: 0.0,
+            max: max_width,
+        };
+    }
+    let inner = max_width.map(|width| (width - 16.0).max(text::CELL_W));
+    panel
+        .children
+        .push(title_bar(own + 1, title, fill, inner, palette, true));
+    let columns = inner.map(check_columns).unwrap_or(CHECK_COLUMNS);
+    let cell = inner
+        .map(|width| check_cell(width, columns))
+        .unwrap_or(CHECK_CELL);
+    let mut lay = BlockLay {
+        row_index: 0,
+        columns,
+        cell,
+        inner,
+        fill,
+        palette,
+        own,
+    };
+    push_blocks(&mut panel, state, blocks, &mut lay);
+    panel
+}
+
+struct BlockLay {
+    row_index: usize,
+    columns: usize,
+    cell: f32,
+    inner: Option<f32>,
+    fill: [f32; 3],
+    palette: Option<Palette>,
+    own: u32,
+}
+
+fn collect_blocks(
+    state: &mut State,
+    blocks: &[PanelBlock],
+    visible: &mut Vec<PanelRow>,
+    section_ids: &mut Vec<u32>,
+    tab_ids: &mut Vec<(u32, u32)>,
+) {
+    for block in blocks {
+        match block {
+            PanelBlock::Section(section) => {
+                section_ids.push(section.id);
+                if state.section_is_open(section.id, section.collapsed) {
+                    visible.extend(section.rows.iter().cloned());
+                    collect_blocks(state, &section.blocks, visible, section_ids, tab_ids);
+                }
+            }
+            PanelBlock::Tabs(tabs) => {
+                for tab in &tabs.tabs {
+                    tab_ids.push((tabs.id, tab.id));
+                }
+                let selected = state
+                    .selected_tab(tabs.id)
+                    .filter(|id| tabs.tabs.iter().any(|tab| tab.id == *id))
+                    .or_else(|| tabs.tabs.first().map(|tab| tab.id));
+                if let Some(id) = selected {
+                    state.select_tab(tabs.id, id);
+                    if let Some(tab) = tabs.tabs.iter().find(|tab| tab.id == id) {
+                        collect_blocks(state, &tab.blocks, visible, section_ids, tab_ids);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn push_blocks(panel: &mut Node, state: &State, blocks: &[PanelBlock], lay: &mut BlockLay) {
+    for block in blocks {
+        match block {
+            PanelBlock::Section(section) => push_section(panel, state, section, lay),
+            PanelBlock::Tabs(tabs) => {
+                panel
+                    .children
+                    .push(tab_strip(tabs, state, lay.palette, lay.inner));
+                let selected = state.selected_tab(tabs.id);
+                if let Some(tab) = tabs.tabs.iter().find(|tab| Some(tab.id) == selected) {
+                    push_blocks(panel, state, &tab.blocks, lay);
+                }
+            }
+        }
+    }
+}
+
+fn push_section(panel: &mut Node, state: &State, section: &PanelSection, lay: &mut BlockLay) {
+    panel
+        .children
+        .push(section_header(section, state, lay.palette, lay.inner));
+    if state.section_collapsed(section.id) {
+        return;
+    }
+    for item in &section.rows {
+        push_row(panel, item, lay);
+    }
+    push_blocks(panel, state, &section.blocks, lay);
+}
+
+fn push_row(panel: &mut Node, item: &PanelRow, lay: &mut BlockLay) {
+    if check_grid(item) {
+        for chunk in item.checks.chunks(lay.columns) {
+            let mut part = item.clone();
+            part.checks = chunk.to_vec();
+            panel.children.push(row_node(
+                lay.own + 2 + 3 * lay.row_index as u32,
+                &part,
+                lay.fill,
+                lay.palette,
+                Some(lay.cell),
+                lay.inner,
+            ));
+            lay.row_index += 1;
+        }
+    } else {
+        panel.children.push(row_node(
+            lay.own + 2 + 3 * lay.row_index as u32,
+            item,
+            lay.fill,
+            lay.palette,
+            None,
+            lay.inner,
+        ));
+        lay.row_index += 1;
+    }
+}
+
+fn tab_strip(
+    tabs: &PanelTabs,
+    state: &State,
+    palette: Option<Palette>,
+    inner: Option<f32>,
+) -> Node {
+    let selected = state.selected_tab(tabs.id);
+    let mut row = Node::new(tabs.id);
+    row.direction = Direction::LeftToRight;
+    row.gap = 4.0;
+    if let Some(inner) = inner {
+        row.width = Sizing::Fit {
+            min: 0.0,
+            max: inner,
+        };
+    }
+    for tab in &tabs.tabs {
+        let mut node = control(tab.id, &tab.title, Action::Press(tab.id), palette);
+        if Some(tab.id) == selected {
+            let looks = control_looks(palette);
+            node.idle = looks.pressed;
+            node.hover = looks.pressed;
+        }
+        row.children.push(node);
+    }
+    row
 }
 
 fn check_columns(inner: f32) -> usize {
@@ -921,6 +1166,7 @@ fn finish_panel(
     panel: Node,
     rows: &[PanelRow],
     section_ids: &[u32],
+    tab_ids: &[(u32, u32)],
     viewport: [f32; 2],
     camera: &Camera,
     pointer: Pointer,
@@ -986,7 +1232,9 @@ fn finish_panel(
                 state.dragging = false;
             } else if let Some(action) = item.action {
                 if let Action::Press(id) = action {
-                    if section_ids.contains(&id) {
+                    if let Some((group, _)) = tab_ids.iter().find(|(_, tab)| *tab == id) {
+                        state.select_tab(*group, id);
+                    } else if section_ids.contains(&id) {
                         state.toggle_section(id);
                     }
                 }
