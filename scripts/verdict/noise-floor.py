@@ -17,8 +17,10 @@ from lib.cache import cache_root, store
 from lib.contract import (
     Broken,
     Verdict,
+    absolute_path,
     add_common,
     apply_common_mirrors,
+    capture_file,
     dry_verdict,
     evidence_dir,
     input_hash,
@@ -208,7 +210,7 @@ def _measure(proc, port: int, settle_limit: int, run_dir: Path, index: int) -> d
         {"timeout_frames": settle_limit, "quiet_frames": 3},
     )
     timing = post(port, "timing", {"frames": 30})
-    shot = run_dir / "pose.png"
+    shot = capture_file(run_dir)
     post(port, "capture", {"ui": False, "name": "pose", "path": str(shot)})
     log = run_dir / "mcp.json"
     log.write_text(
@@ -240,7 +242,7 @@ def _numbers(path: Path, rows: list[dict[str, str]], payload: dict) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = silence_argv(argv)
-    holder: list[Path] = [Path("genos-debug/verdict/noise-floor/unknown")]
+    holder: list[Path] = [absolute_path("genos-debug/verdict/noise-floor/unknown")]
 
     def body() -> Verdict:
         ns = parse(args)

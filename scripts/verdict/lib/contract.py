@@ -59,10 +59,22 @@ def safe_name(text: str) -> str:
     return cleaned
 
 
+def absolute_path(path: str | Path) -> Path:
+    """Resolve against the process cwd. The app joins a relative capture onto its shots dir."""
+    return Path(path).expanduser().resolve()
+
+
 def evidence_dir(kind: str, sha: str, out: str | None) -> Path:
     if out:
-        return Path(out)
-    return Path("genos-debug") / "verdict" / safe_name(kind) / safe_name(sha)
+        path: Path = Path(out)
+    else:
+        path = Path("genos-debug") / "verdict" / safe_name(kind) / safe_name(sha)
+    return absolute_path(path)
+
+
+def capture_file(directory: str | Path, name: str = "pose.png") -> Path:
+    """PNG path passed to capture. Absolute, so the app does not nest it under shots/."""
+    return absolute_path(Path(directory) / name)
 
 
 def one_line(text: str) -> str:
@@ -70,6 +82,7 @@ def one_line(text: str) -> str:
 
 
 def emit(verdict: Verdict) -> None:
+    verdict.evidence = absolute_path(verdict.evidence)
     reason = one_line(verdict.reason)
     line = f"{verdict.status} {reason} evidence={verdict.evidence}"
     try:
@@ -126,9 +139,13 @@ def mirror(value: str | None, env_name: str) -> str | None:
 
 def apply_common_mirrors(ns: argparse.Namespace) -> None:
     ns.out = mirror(ns.out, "GENOS_VERDICT_OUT")
+    if ns.out:
+        ns.out = str(absolute_path(ns.out))
     ns.display = mirror(ns.display, "GENOS_VERDICT_DISPLAY")
     ns.sha = mirror(ns.sha, "GENOS_VERDICT_SHA")
     ns.cache_dir = mirror(ns.cache_dir, "GENOS_VERDICT_CACHE_DIR")
+    if ns.cache_dir:
+        ns.cache_dir = str(absolute_path(ns.cache_dir))
 
 
 def input_hash(sha: str, keys: list[str], inputs: list[str]) -> str:

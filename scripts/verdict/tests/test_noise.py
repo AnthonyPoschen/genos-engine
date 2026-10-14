@@ -11,13 +11,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lib.contract import Broken
+from lib.contract import Broken, capture_file
 from lib.images import flip_mean_p99, load_image, solid, write_png
 from lib.launch import child_env, help_lists_display, lighting_argv, stop, stress_argv
 from lib.noise import summarize
 
 
-def run_script(argv: list[str]) -> subprocess.CompletedProcess[str]:
+def run_script(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     for name in list(env):
         if name.startswith("GENOS_VERDICT_"):
@@ -28,6 +28,7 @@ def run_script(argv: list[str]) -> subprocess.CompletedProcess[str]:
         text=True,
         capture_output=True,
         env=env,
+        cwd=cwd,
     )
 
 
@@ -125,6 +126,55 @@ class NoiseTests(unittest.TestCase):
             loaded = load_image(path)
             self.assertEqual(loaded.width, 4)
             self.assertEqual(loaded.at(0, 0), (1.0, 0.0, 0.0))
+
+    def test_relative_out_from_another_cwd_is_absolute(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            caller = Path(tmp) / "caller"
+            caller.mkdir()
+            fixture = Path(tmp) / "fixture"
+            fixture.mkdir()
+            (fixture / "repeats.csv").write_text(
+                "repeat,frame_ms,settled,settle_frames,image\n"
+                "1,16.0,1,30,\n"
+                "2,16.4,1,36,\n",
+                encoding="utf-8",
+            )
+            previous = Path.cwd()
+            try:
+                os.chdir(caller)
+                shot = capture_file(Path("rel/out") / "run-1")
+                argv = lighting_argv(
+                    str(_help_binary(caller / "lighting", "--display NAME\n")),
+                    "wayland-9",
+                    "stress",
+                    "hall",
+                    9,
+                    Path("rel/out/run-1"),
+                )
+            finally:
+                os.chdir(previous)
+            self.assertTrue(shot.is_absolute())
+            self.assertEqual(shot, (caller / "rel/out/run-1/pose.png").resolve())
+            self.assertIn(str((caller / "rel/out/run-1").resolve()), argv)
+            proc = run_script(
+                [
+                    "--fixture",
+                    str(fixture),
+                    "--repeats",
+                    "2",
+                    "--sha",
+                    "abc123",
+                    "--out",
+                    "rel/out",
+                ],
+                cwd=caller,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            evidence = (caller / "rel/out").resolve()
+            self.assertIn(f"evidence={evidence}", proc.stdout)
+            self.assertTrue(Path(proc.stdout.strip().split("evidence=", 1)[1]).is_absolute())
+            self.assertTrue((evidence / "spread.json").is_file())
+            self.assertFalse((previous / "rel/out/spread.json").exists())
 
     def test_launch_targets_the_named_display_and_not_sigkill(self) -> None:
         self.assertTrue(help_lists_display("  --display NAME         Wayland display name\n"))

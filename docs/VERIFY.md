@@ -25,7 +25,10 @@ PASS|FAIL|UNSURE|ERROR <short reason> evidence=<dir>
 | 3 | ERROR. The check itself broke. Not a product fail. |
 
 Evidence (screenshots, diff images, CSV, logs) goes to
-`./genos-debug/verdict/<kind>/<sha>/`, or to `--out`. The line is also
+`./genos-debug/verdict/<kind>/<sha>/`, or to `--out`. Both are resolved to an
+absolute path from the caller’s cwd before anything runs. Capture paths passed
+to the app are absolute too. A relative path would be joined onto the app’s
+shots directory and the picture would land somewhere else. The line is also
 `verdict.txt` in that directory. Stdout does not dump the evidence.
 
 Intent comes from the command line. `GENOS_VERDICT_OUT`, `GENOS_VERDICT_DISPLAY`,

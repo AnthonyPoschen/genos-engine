@@ -7,7 +7,7 @@ import signal
 import subprocess
 from pathlib import Path
 
-from lib.contract import Broken, require_display
+from lib.contract import Broken, absolute_path, require_display
 from lib.gpu import default_lock
 
 CAPTURE_UI_FALSE = {"ui": False, "name": "pose"}
@@ -76,6 +76,7 @@ def lighting_argv(
     out: Path,
     size: str = "320x180",
 ) -> list[str]:
+    out = absolute_path(out)
     argv = [
         binary,
         "--headless",
@@ -96,6 +97,7 @@ def lighting_argv(
 
 
 def stress_argv(binary: str, display: str, frames: int, out: Path) -> list[str]:
+    out = absolute_path(out)
     argv = [
         binary,
         "--proof",

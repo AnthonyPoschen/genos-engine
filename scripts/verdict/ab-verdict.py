@@ -21,8 +21,10 @@ from lib.catalog import available
 from lib.contract import (
     Broken,
     Verdict,
+    absolute_path,
     add_common,
     apply_common_mirrors,
+    capture_file,
     dry_verdict,
     evidence_dir,
     input_hash,
@@ -227,7 +229,7 @@ def _live(ns: argparse.Namespace, repo: Path, evidence: Path) -> list[dict[str, 
                 run_dir = evidence / label / f"{view.scene}-{view.checkpoint}"
                 run_dir.mkdir(parents=True, exist_ok=True)
                 measured[label] = _capture(binary, display, view.lighting_scene, view.lighting_checkpoint, run_dir)
-                shots[label] = run_dir / "pose.png"
+                shots[label] = capture_file(run_dir)
             left = load_image(shots["base"])
             right = load_image(shots["head"])
             rows.append(
@@ -268,7 +270,7 @@ def _capture(binary: Path, display: str, scene: str, checkpoint: str, run_dir: P
         wait_ready(port, proc)
         settled = post(port, "wait_settled", {"timeout_frames": 180, "quiet_frames": 3})
         timing = post(port, "timing", {"frames": 30})
-        shot = run_dir / "pose.png"
+        shot = capture_file(run_dir)
         post(port, "capture", {"ui": False, "name": "pose", "path": str(shot)})
         if settled.get("settled") is not True:
             raise Broken(f"{scene} {checkpoint} did not settle within 180 frames")
@@ -282,7 +284,7 @@ def _capture(binary: Path, display: str, scene: str, checkpoint: str, run_dir: P
 
 def main(argv: list[str] | None = None) -> None:
     args = silence_argv(argv)
-    holder: list[Path] = [Path("genos-debug/verdict/ab/unknown")]
+    holder: list[Path] = [absolute_path("genos-debug/verdict/ab/unknown")]
 
     def body() -> Verdict:
         ns = parse(args)
