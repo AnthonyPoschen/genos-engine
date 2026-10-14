@@ -34,7 +34,7 @@ from lib.contract import (
     silence_argv,
     write_args,
 )
-from lib.gitcheck import head_sha, rev_parse
+from lib.gitcheck import fetch_origin, resolve_ref, sha_lines
 from lib.images import diff_image, flip_mean_p99, load_image, mean_abs, write_png
 from lib.images import blur_relative
 from lib.launch import child_env, hold_lock, lighting_launch, release_lock, stop
@@ -100,24 +100,30 @@ def decide(ns: argparse.Namespace, argv: list[str], holder: list[Path]) -> Verdi
         return dry_verdict(evidence, argv)
     if ns.fixture:
         sha = ns.sha or "fixture"
+        refs: tuple[tuple[str, str], ...] = ()
     else:
-        sha = head_sha(repo, ns.sha or ns.head)
+        fetch_origin(repo)
+        base_sha = resolve_ref(repo, ns.base)
+        sha = resolve_ref(repo, ns.sha or ns.head)
+        refs = (("base", base_sha), ("head", sha))
     evidence = evidence_dir("ab", sha, ns.out)
     evidence.mkdir(parents=True, exist_ok=True)
     holder[0] = evidence
     write_args(evidence, argv)
+    if refs:
+        (evidence / "sha.txt").write_text(sha_lines(refs), encoding="utf-8")
     if ns.fixture:
         root = Path(ns.fixture)
         floor_path = Path(ns.noise_floor) if ns.noise_floor else root / "spread.json"
         rows = read_views(root / "views.csv")
         _diff_fixtures(root, rows, evidence)
     else:
-        pre = _precheck(ns, sha, repo)
+        pre = _precheck(ns, sha, repo, base_sha)
         if pre.status != "PASS" or pre.reason.startswith("cached "):
             return Verdict(pre.status, pre.reason, pre.evidence, pre.code)
-        status, reason, floor_path, rows = _live(ns, repo, evidence)
+        status, reason, floor_path, rows = _live(ns, repo, evidence, base_sha=base_sha, head_sha=sha)
         if status != "PASS":
-            return Verdict(status, reason, evidence)
+            return Verdict(status, reason, evidence, refs=refs)
     floor = load_floor(floor_path)
     status, reason, views, scenes = score_views(rows, floor)
     _write_csv(evidence / "views.csv", views, ["scene", "checkpoint", "status", "detail", "delta_ms"])
@@ -131,9 +137,9 @@ def decide(ns: argparse.Namespace, argv: list[str], holder: list[Path]) -> Verdi
         encoding="utf-8",
     )
     if not ns.fixture and status != "UNSURE":
-        digest = input_hash(sha, _cache_keys(ns), ns.input)
+        digest = input_hash(sha, _cache_keys(ns, refs), ns.input)
         store(cache_root(ns.cache_dir), sha, digest, status, reason, evidence)
-    return Verdict(status, reason, evidence)
+    return Verdict(status, reason, evidence, refs=refs)
 
 
 def floor_job(ns: argparse.Namespace) -> tuple[str, str, int, int]:
@@ -152,7 +158,7 @@ def floor_job(ns: argparse.Namespace) -> tuple[str, str, int, int]:
     return scene, checkpoint, repeats, settle
 
 
-def _cache_keys(ns: argparse.Namespace) -> list[str]:
+def _cache_keys(ns: argparse.Namespace, refs: tuple[tuple[str, str], ...] = ()) -> list[str]:
     """Same text precheck hashes, so a later precheck skips this comparison."""
     if ns.noise_floor:
         floor = ns.noise_floor
@@ -161,13 +167,16 @@ def _cache_keys(ns: argparse.Namespace) -> list[str]:
         _scene, _checkpoint, repeats_n, _settle = floor_job(ns)
         floor = "measured"
         repeats = str(repeats_n)
-    return [f"ab:{ns.base}", f"ab:{ns.head}", f"floor:{floor}", f"repeats:{repeats}", *ns.key]
+    named = {label: sha for label, sha in refs}
+    base = named.get("base", ns.base)
+    head = named.get("head", ns.head)
+    return [f"ab:{base}", f"ab:{head}", f"floor:{floor}", f"repeats:{repeats}", *ns.key]
 
 
-def _precheck(ns: argparse.Namespace, sha: str, repo: Path) -> Verdict:
+def _precheck(ns: argparse.Namespace, sha: str, repo: Path, base_sha: str) -> Verdict:
     argv = [
         "--base",
-        ns.base,
+        base_sha,
         "--head",
         sha,
         "--sha",
@@ -177,7 +186,7 @@ def _precheck(ns: argparse.Namespace, sha: str, repo: Path) -> Verdict:
         "--display",
         ns.display,
     ]
-    for key in _cache_keys(ns):
+    for key in _cache_keys(ns, (("base", base_sha), ("head", sha))):
         argv.extend(["--key", key])
     for item in ns.input:
         argv.extend(["--input", item])
@@ -219,18 +228,23 @@ def _live(
     build=None,
     measure=None,
     capture_views=None,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
 ) -> tuple[str, str, Path, list[dict[str, str]]]:
     """Build BASE, measure its noise floor when none was given, then build HEAD and capture."""
     build = build or _build
     measure = measure or _measure_base_floor
     capture_views = capture_views or _capture_views
-    base_sha = rev_parse(repo, ns.base)
-    head_sha = rev_parse(repo, ns.head)
+    base_sha = base_sha or resolve_ref(repo, ns.base)
+    head_sha = head_sha or resolve_ref(repo, ns.head)
     base_bin = build(repo, base_sha, evidence, "base", ns.binary_name)
     if ns.noise_floor:
         floor_path = absolute_path(ns.noise_floor)
     else:
-        status, reason, floor_path = measure(ns, base_bin, evidence)
+        if measure is _measure_base_floor:
+            status, reason, floor_path = _measure_base_floor(ns, base_bin, evidence, base_sha)
+        else:
+            status, reason, floor_path = measure(ns, base_bin, evidence)
         if status != "PASS":
             return status, reason, floor_path, []
     head_bin = build(repo, head_sha, evidence, "head", ns.binary_name)
@@ -275,7 +289,12 @@ def _build(repo: Path, sha: str, evidence: Path, label: str, binary_name: str) -
     return dest / "target" / "release" / binary_name
 
 
-def _measure_base_floor(ns: argparse.Namespace, binary: Path, evidence: Path) -> tuple[str, str, Path]:
+def _measure_base_floor(
+    ns: argparse.Namespace,
+    binary: Path,
+    evidence: Path,
+    base_sha: str = "",
+) -> tuple[str, str, Path]:
     """Run noise-floor on the BASE binary before HEAD is built."""
     scene, checkpoint, repeats, settle = floor_job(ns)
     floor_dir = evidence / "noise-floor"
@@ -293,7 +312,7 @@ def _measure_base_floor(ns: argparse.Namespace, binary: Path, evidence: Path) ->
     write_repeats(floor_dir / "repeats.csv", rows)
     write_spread(floor_dir / "spread.json", payload)
     (floor_dir / "source.txt").write_text(
-        f"base {ns.base}\nscene {scene}\ncheckpoint {checkpoint}\nrepeats {repeats}\n",
+        f"base {ns.base}\nsha {base_sha}\nscene {scene}\ncheckpoint {checkpoint}\nrepeats {repeats}\n",
         encoding="utf-8",
     )
     return status, f"base noise floor {reason}", floor_dir / "spread.json"

@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from lib.gitcheck import fetch_origin
 from lib.contract import (
     PASS,
     UNSURE,
@@ -113,11 +114,12 @@ def decide(ns: argparse.Namespace, argv: list[str], holder: list[Path]) -> Verdi
     holder[0] = evidence
     if ns.dry_run:
         return dry_verdict(evidence, argv)
+    repo = Path(ns.repo) if ns.repo else repo_root()
+    fetch_origin(repo)
     state_path = Path(ns.state) if ns.state else Path("genos-debug/verdict/pr-watch/state.json")
     previous: dict[str, str] = {}
     if state_path.is_file():
         previous = {str(key): str(value) for key, value in json.loads(state_path.read_text(encoding="utf-8")).items()}
-    repo = Path(ns.repo) if ns.repo else repo_root()
     current = load_prs(Path(ns.prs_file)) if ns.prs_file else live_prs(repo)
     fresh = diff_heads(previous, current) if previous else []
     state_path.parent.mkdir(parents=True, exist_ok=True)

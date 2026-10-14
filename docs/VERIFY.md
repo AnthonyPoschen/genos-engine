@@ -14,7 +14,7 @@ A check graduates only after a run of correct verdicts.
 Every script prints one line and nothing else on stdout:
 
 ```text
-PASS|FAIL|UNSURE|ERROR <short reason> evidence=<dir>
+PASS|FAIL|UNSURE|ERROR <short reason> [label=<sha> ...] evidence=<dir>
 ```
 
 | Exit | Meaning |
@@ -30,6 +30,13 @@ absolute path from the caller’s cwd before anything runs. Capture paths passed
 to the app are absolute too. A relative path would be joined onto the app’s
 shots directory and the picture would land somewhere else. The line is also
 `verdict.txt` in that directory. Stdout does not dump the evidence.
+
+A branch name is resolved only after `git fetch origin`. `gi-v2` means
+`origin/gi-v2`, not a stale local branch. `HEAD` stays the checkout. A commit
+sha stays that commit. A local branch passed as `refs/heads/<name>` is
+`ERROR` when it is behind its upstream. The verdict line and `sha.txt` include
+the resolved sha (`base=<sha> head=<sha>` when both are resolved). `--dry-run`
+does not fetch.
 
 Intent comes from the command line. `GENOS_VERDICT_OUT`, `GENOS_VERDICT_DISPLAY`,
 `GENOS_VERDICT_SHA`, `GENOS_VERDICT_CACHE_DIR`, `GENOS_VERDICT_BASE`, and

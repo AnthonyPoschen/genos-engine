@@ -30,7 +30,7 @@ from lib.contract import (
     silence_argv,
     write_args,
 )
-from lib.gitcheck import head_sha, merge_conflicts, rev_parse
+from lib.gitcheck import fetch_origin, merge_conflicts, resolve_ref, sha_lines
 from lib.gpu import (
     BUSY_PERCENT,
     classify,
@@ -96,21 +96,23 @@ def decide(ns: argparse.Namespace, argv: list[str], holder: list[Path]) -> Verdi
         holder[0] = evidence
         return dry_verdict(evidence, argv)
 
-    sha = head_sha(repo, ns.sha or ns.head)
+    fetch_origin(repo)
+    sha = resolve_ref(repo, ns.sha or ns.head or "HEAD")
     evidence = evidence_dir("precheck", sha, ns.out)
     evidence.mkdir(parents=True, exist_ok=True)
     holder[0] = evidence
     write_args(evidence, argv)
 
-    base = rev_parse(repo, ns.base)
-    head = rev_parse(repo, ns.head or sha)
+    base = resolve_ref(repo, ns.base)
+    head = resolve_ref(repo, ns.head or sha)
+    refs = (("base", base), ("head", head))
     digest = input_hash(head, list(ns.key), ns.input)
-    (evidence / "sha.txt").write_text(f"base {base}\nhead {head}\ninput {digest}\n", encoding="utf-8")
+    (evidence / "sha.txt").write_text(sha_lines(refs) + f"input {digest}\n", encoding="utf-8")
 
     conflict, log = merge_conflicts(repo, base, head)
     (evidence / "merge-tree.log").write_text(log, encoding="utf-8")
     if conflict:
-        return Verdict(FAIL, f"merge conflict with {ns.base}", evidence)
+        return Verdict(FAIL, f"merge conflict with {ns.base}", evidence, refs=refs)
 
     commands = read_process_file(Path(ns.process_file)) if ns.process_file else live_processes()
     util = read_util_file(Path(ns.gpu_util_file)) if ns.gpu_util_file else live_util()
@@ -124,13 +126,15 @@ def decide(ns: argparse.Namespace, argv: list[str], holder: list[Path]) -> Verdi
     )
     status, reason = classify(commands, util, ns.gpu_busy_percent, pid)
     if status != PASS:
-        return Verdict(status, reason, evidence)
+        return Verdict(status, reason, evidence, refs=refs)
 
     record = load(cache_root(ns.cache_dir), head, digest)
     if record is not None:
         (evidence / "skipped.txt").write_text("cache hit\n", encoding="utf-8")
-        return replay(record, evidence)
-    return Verdict(PASS, reason, evidence)
+        found = replay(record, evidence)
+        found.refs = refs
+        return found
+    return Verdict(PASS, reason, evidence, refs=refs)
 
 
 def main(argv: list[str] | None = None) -> None:

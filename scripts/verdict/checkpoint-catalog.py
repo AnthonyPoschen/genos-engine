@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.checkpoints import read_rows, score
+from lib.gitcheck import fetch_origin
 from lib.contract import (
     Broken,
     Verdict,
@@ -55,6 +56,10 @@ def validate(ns) -> None:
 
 
 def decide(ns, argv: list[str], holder: list[Path]) -> Verdict:
+    from lib.contract import repo_root
+
+    if not ns.dry_run:
+        fetch_origin(repo_root())
     label = ns.sha or "fixture"
     evidence = evidence_dir("checkpoint", label, ns.out)
     evidence.mkdir(parents=True, exist_ok=True)

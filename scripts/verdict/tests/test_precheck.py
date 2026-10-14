@@ -45,6 +45,17 @@ def git(repo: Path, args: list[str]) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
 
 
+def rev(repo: Path, ref: str = "HEAD") -> str:
+    proc = subprocess.run(
+        ["git", "rev-parse", ref],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout.strip()
+
+
 def init_repo(root: Path, conflict: bool) -> tuple[str, str]:
     git(root, ["init", "-b", "main"])
     git(root, ["config", "user.email", "verdict@example.com"])
@@ -113,7 +124,8 @@ class PrecheckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
             root.mkdir()
-            _base, head = init_repo(root, conflict=False)
+            base, head = init_repo(root, conflict=False)
+            feature = rev(root, head)
             out = Path(tmp) / "out"
             processes = Path(tmp) / "ps.txt"
             processes.write_text("python3 precheck.py\n", encoding="utf-8")
@@ -140,8 +152,13 @@ class PrecheckTests(unittest.TestCase):
                 ]
             )
             self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
-            self.assertTrue(proc.stdout.startswith("PASS clear gpu 12% evidence="))
+            self.assertTrue(
+                proc.stdout.startswith(f"PASS clear gpu 12% base={base} head={feature} evidence=")
+            )
             self.assertIn(str(out), proc.stdout)
+            saved = (out / "sha.txt").read_text(encoding="utf-8")
+            self.assertIn(f"base {base}\n", saved)
+            self.assertIn(f"head {feature}\n", saved)
             self.assertTrue((out / "merge-tree.log").is_file())
             self.assertTrue((out / "gpu.txt").is_file())
 
@@ -150,6 +167,8 @@ class PrecheckTests(unittest.TestCase):
             root = Path(tmp) / "repo"
             root.mkdir()
             init_repo(root, conflict=True)
+            main = rev(root, "main")
+            feature = rev(root, "HEAD")
             out = Path(tmp) / "out"
             proc = run_script(
                 [
@@ -166,7 +185,11 @@ class PrecheckTests(unittest.TestCase):
                 ]
             )
             self.assertEqual(proc.returncode, CODE[FAIL], proc.stdout + proc.stderr)
-            self.assertIn("FAIL merge conflict with main evidence=", proc.stdout)
+            self.assertIn(
+                f"FAIL merge conflict with main base={main} head={feature} evidence=",
+                proc.stdout,
+            )
+            self.assertIn(f"base {main}\n", (out / "sha.txt").read_text(encoding="utf-8"))
             self.assertIn("file.txt", (out / "merge-tree.log").read_text(encoding="utf-8"))
 
     def test_busy_gpu_is_unsure_and_does_not_need_a_window(self) -> None:
@@ -181,10 +204,8 @@ class PrecheckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
             root.mkdir()
-            _base, _head = init_repo(root, conflict=False)
-            sha = subprocess.run(
-                ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
-            ).stdout.strip()
+            base, _head = init_repo(root, conflict=False)
+            sha = rev(root, "HEAD")
             from lib.contract import input_hash
 
             digest = input_hash(sha, ["noise-floor"], [])
@@ -218,7 +239,10 @@ class PrecheckTests(unittest.TestCase):
                 ]
             )
             self.assertEqual(proc.returncode, CODE[FAIL], proc.stdout)
-            self.assertIn("FAIL cached stress-still slower evidence=", proc.stdout)
+            self.assertIn(
+                f"FAIL cached stress-still slower base={base} head={sha} evidence=",
+                proc.stdout,
+            )
             saved = json.loads((out / "cache.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["status"], FAIL)
             self.assertEqual(len(proc.stdout.splitlines()), 1)

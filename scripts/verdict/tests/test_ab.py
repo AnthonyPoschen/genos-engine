@@ -138,6 +138,13 @@ class AbTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             _git_repo(repo, conflict=False)
+            main = subprocess.run(
+                ["git", "rev-parse", "main"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
             sha = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=repo,
@@ -150,7 +157,11 @@ class AbTests(unittest.TestCase):
 
             floor = (root / "spread.json").resolve()
             floor.write_text('{"frame_ms":{"spread":1}}\n', encoding="utf-8")
-            digest = input_hash(sha, ["ab:main", "ab:feature", f"floor:{floor}", "repeats:"], [])
+            digest = input_hash(
+                sha,
+                [f"ab:{main}", f"ab:{sha}", f"floor:{floor}", "repeats:"],
+                [],
+            )
             cache = root / "cache"
             store(cache_root(str(cache)), sha, digest, "FAIL", "stress-still slower", root / "old")
             out = root / "out"

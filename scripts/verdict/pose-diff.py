@@ -26,6 +26,7 @@ from lib.contract import (
     silence_argv,
     write_args,
 )
+from lib.gitcheck import fetch_origin
 from lib.images import blur_relative, diff_image, flip_mean_p99, load_image, mean_abs, write_png
 from lib.judge import against_line, load_conf, worse
 
@@ -63,6 +64,10 @@ def validate(ns: argparse.Namespace) -> None:
 
 
 def decide(ns: argparse.Namespace, argv: list[str], holder: list[Path]) -> Verdict:
+    from lib.contract import repo_root
+
+    if not ns.dry_run:
+        fetch_origin(repo_root())
     label = ns.sha or (ns.checkpoint or "pose")
     evidence = evidence_dir("pose", label, ns.out)
     evidence.mkdir(parents=True, exist_ok=True)

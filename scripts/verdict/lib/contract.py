@@ -31,6 +31,7 @@ class Verdict:
     reason: str
     evidence: Path
     code: int | None = None
+    refs: tuple[tuple[str, str], ...] = ()
 
     def exit_code(self) -> int:
         if self.code is not None:
@@ -84,9 +85,16 @@ def one_line(text: str) -> str:
 def emit(verdict: Verdict) -> None:
     verdict.evidence = absolute_path(verdict.evidence)
     reason = one_line(verdict.reason)
-    line = f"{verdict.status} {reason} evidence={verdict.evidence}"
+    markers = " ".join(f"{label}={sha}" for label, sha in verdict.refs)
+    marked = f"{reason} {markers}".strip()
+    line = f"{verdict.status} {marked} evidence={verdict.evidence}"
     try:
         verdict.evidence.mkdir(parents=True, exist_ok=True)
+        if verdict.refs and not (verdict.evidence / "sha.txt").is_file():
+            (verdict.evidence / "sha.txt").write_text(
+                "".join(f"{label} {sha}\n" for label, sha in verdict.refs),
+                encoding="utf-8",
+            )
         (verdict.evidence / "verdict.txt").write_text(line + "\n", encoding="utf-8")
     except OSError as err:
         print(f"{ERROR} {one_line(str(err))} evidence={verdict.evidence}", flush=True)

@@ -30,7 +30,7 @@ from lib.contract import (
     silence_argv,
     write_args,
 )
-from lib.gitcheck import head_sha
+from lib.gitcheck import fetch_origin, resolve_ref, sha_lines
 from lib.launch import child_env, hold_lock, lighting_launch, release_lock, stop
 from lib.mcp import post, quit, wait_ready
 from lib.noise import SETTLE_FRAMES, read_repeats, summarize, write_repeats, write_spread
@@ -101,18 +101,27 @@ def decide(ns: argparse.Namespace, argv: list[str], holder: list[Path]) -> Verdi
         note.write_text('{"ui": false, "name": "pose"}\n', encoding="utf-8")
         return dry_verdict(evidence, argv)
 
-    sha = ns.sha if ns.fixture and ns.sha else head_sha(repo, ns.sha)
+    fetch_origin(repo)
+    if ns.fixture and ns.sha:
+        sha = ns.sha
+        refs: tuple[tuple[str, str], ...] = ()
+    else:
+        sha = resolve_ref(repo, ns.sha or "HEAD")
+        base_sha = resolve_ref(repo, ns.base) if ns.base else ""
+        refs = (("sha", sha),) if not base_sha else (("sha", sha), ("base", base_sha))
     evidence = evidence_dir("noise-floor", sha, ns.out)
     evidence.mkdir(parents=True, exist_ok=True)
     holder[0] = evidence
     write_args(evidence, argv)
+    if refs:
+        (evidence / "sha.txt").write_text(sha_lines(refs), encoding="utf-8")
     (evidence / "capture.json").write_text(
         '{"ui": false, "name": "pose"}\n',
         encoding="utf-8",
     )
 
     if not ns.fixture:
-        pre = _precheck(ns, sha, repo)
+        pre = _precheck(ns, sha, repo, base_sha)
         if pre.status != "PASS" or pre.reason.startswith("cached "):
             return Verdict(pre.status, pre.reason, pre.evidence, pre.code)
 
@@ -131,14 +140,14 @@ def decide(ns: argparse.Namespace, argv: list[str], holder: list[Path]) -> Verdi
             digest = input_hash(sha, list(ns.key), ns.input)
             if status != "UNSURE":
                 store(cache_root(ns.cache_dir), sha, digest, status, reason, evidence)
-        return Verdict(status, reason, evidence)
+        return Verdict(status, reason, evidence, refs=refs)
     raise Broken(f"unknown status {status}")
 
 
-def _precheck(ns: argparse.Namespace, sha: str, repo: Path) -> Verdict:
+def _precheck(ns: argparse.Namespace, sha: str, repo: Path, base_sha: str) -> Verdict:
     argv = [
         "--base",
-        ns.base,
+        base_sha or ns.base,
         "--sha",
         sha,
         "--repo",
