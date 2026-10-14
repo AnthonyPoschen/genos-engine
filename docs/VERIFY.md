@@ -142,3 +142,15 @@ locked golden.
 python3 scripts/verdict/pose-diff.py --scene stress --checkpoint hall \
   --display wayland-1 --before previous.png --after pose.png
 ```
+
+## PR watch
+
+`scripts/verdict/pr-watch.py` prints the open PRs whose head sha changed since
+the last run. The first run records a baseline and passes, so a watcher does
+not wake on history. Later, `PASS no new heads` means stay asleep. `UNSURE new
+heads count=N` means wake, and `new-heads.txt` lists `number sha url`. State
+is `./genos-debug/verdict/pr-watch/state.json` unless `--state` is set.
+
+```sh
+python3 scripts/verdict/pr-watch.py
+```
