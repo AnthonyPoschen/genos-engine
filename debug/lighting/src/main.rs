@@ -12,16 +12,17 @@ use genos_input::{character_controller, debug_keys, InputCode, InputSystem, KeyB
 use genos_render::{identity_pose, DrawKind, FixedPart, Renderer, ScreenRect, ViewMode, World};
 use genos_scene::{
     look_direction, parse_enabled, parse_menu_visible, parse_rate, update, Actions, Camera,
-    DebugSettings, Floor, FpsCounterSettings, Light, MenuSettings, Scene, Sky, Vec3, PITCH_LIMIT,
+    DebugSettings, Floor, FocusPolicy, FpsCounterSettings, Light, MenuSettings, Scene, Sky, Vec3,
+    PITCH_LIMIT,
 };
 use genos_scene_lib::{Entry, Kind, Lamp, Sun};
 use genos_stress::building::{Layout, LightMix};
 use genos_stress::knobs::{apply_lighting_knob, lighting_knobs};
 use genos_stress::stage::{Scale, Stage};
 use genos_ui::{
-    button_panel_blocks, show_menu_tab, Action, FpsOverlay, PanelBlock, PanelCheck, PanelDropdown,
-    PanelRow, PanelSection, PanelSlider, PanelTab, PanelTabs, Pointer, SliderStep, State,
-    MENU_HIDE, MENU_SHOW,
+    button_panel_blocks, show_menu_tab, Action, FpsOverlay, InputPolicy, PanelBlock, PanelCheck,
+    PanelDropdown, PanelRow, PanelSection, PanelSlider, PanelTab, PanelTabs, Pointer, SliderStep,
+    State, MENU_HIDE, MENU_SHOW, PANEL_ID,
 };
 use genos_window::{extent_changed, FocusGate, Window};
 
@@ -61,15 +62,20 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          mean luma against that scene's own floor
 
 Page Up and Page Down switch scenes. Keys 1-9 jump checkpoints. Home and 0 reset
-to the active checkpoint. Arrow keys and the wheel step the slider under the
-pointer, or move the highlight in an open dropdown. Enter picks the highlighted
-choice. Escape closes the list. Grave hides the menu. Grave again shows it.
-F1 is the same key. The title bar hide button hides it. A menu tab in the
-top-left corner shows it. --menu hidden starts it hidden. GENOS_MENU applies
-only when that argument was omitted. get_menu_settings and set_menu_settings
-read and write shown or hidden, the page, and the folds. ] and [ change the
-page. Tab and shift-Tab do that while the pointer is over the menu. F toggles
-the frame-rate plate. F3 is the same key. A section title folds that group.
+to the active checkpoint. The wheel scrolls the menu while the pointer is over
+it. A click gives the menu the keys. Arrow keys then move the focused control,
+and a focused slider steps. Enter picks the highlighted choice or presses the
+focused control. Escape closes an open list, then releases the keys. A click
+outside releases them too. Grave releases the keys on the first press and
+leaves the menu up. The next grave hides it. F1 hides it either way. Perf sets
+Wheel focus
+and Key focus to hover, modal, click, or passive. The title bar hide button
+hides it. A menu tab in the top-left corner shows it. --menu hidden starts it
+hidden. GENOS_MENU applies only when that argument was omitted.
+get_menu_settings and set_menu_settings read and write shown or hidden, the
+page, the folds, and those two focus policies. ] and [ change the page while
+the menu has the keys. Tab and shift-Tab do that too. F toggles the frame-rate
+plate. F3 is the same key. A section title folds that group.
 The fold is remembered in <out>/menu/collapsed.txt. The open page is remembered
 in <out>/menu/tab.txt.
 The groups are debug/lighting/menu.txt. A section key of - has no fold.
@@ -96,6 +102,8 @@ const ID_VIEW: u32 = 2400;
 const ID_DROP: u32 = 2600;
 const ID_FPS: u32 = 2800;
 const ID_FPS_HZ: u32 = 2801;
+const ID_MENU_WHEEL: u32 = 2820;
+const ID_MENU_KEYS: u32 = 2821;
 const ID_KNOB: u32 = 3000;
 const ID_SWITCH: u32 = 4000;
 
@@ -286,12 +294,10 @@ fn run() -> Result<(), String> {
             &mut camera,
             &mut tools,
             &mut renderer,
-            &mut menu_open,
         )?;
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
         let page_keys = !camera.captured && menu_open;
-        let over_menu = ui.panel_hovered();
         let pointer = Pointer {
             x: frame.pointer_x,
             y: frame.pointer_y,
@@ -305,14 +311,14 @@ fn run() -> Result<(), String> {
                     || input.keyboard.pressed(InputCode::key_up)),
             key_activate: !camera.captured && input.keyboard.pressed(InputCode::key_enter),
             key_dismiss: !camera.captured && input.keyboard.pressed(InputCode::key_escape),
+            key_blur: !camera.captured && input.keyboard.pressed(InputCode::key_grave),
             tab_prev: page_keys
-                && (keys.pressed(&input, "tab_prev")
-                    || (over_menu && keys.pressed(&input, "tab_focus_prev"))),
+                && (keys.pressed(&input, "tab_prev") || keys.pressed(&input, "tab_focus_prev")),
             tab_next: page_keys
-                && (keys.pressed(&input, "tab_next")
-                    || (over_menu && keys.pressed(&input, "tab_focus_next"))),
+                && (keys.pressed(&input, "tab_next") || keys.pressed(&input, "tab_focus_next")),
         };
         let mut drew_panel = false;
+        let mut menu_blur = false;
         let (paints, look_capture) = if opts.headless {
             (Vec::new(), true)
         } else if !menu_open {
@@ -356,8 +362,12 @@ fn run() -> Result<(), String> {
                     _ => {}
                 }
             }
+            menu_blur = ui_frame.consumed.blur;
             (ui_frame.paints, ui_frame.look_capture)
         };
+        if keys.pressed(&input, "menu") && !menu_blur {
+            menu_open = !menu_open;
+        }
         push_menu(
             &mut app,
             &ui,
@@ -872,11 +882,7 @@ fn hotkeys(
     camera: &mut Camera,
     tools: &mut genos_debug::Tools,
     renderer: &mut Renderer,
-    menu_open: &mut bool,
 ) -> Result<(), String> {
-    if keys.pressed(input, "menu") {
-        *menu_open = !*menu_open;
-    }
     let n = app.entries.len();
     if input.keyboard.pressed(InputCode::key_page_down) {
         switch_to(app, (app.index + 1) % n, None, camera, tools, renderer)?;
@@ -1258,6 +1264,8 @@ fn setting_piece(
         )
         .map(Piece::Row),
         "fps" => Some(Piece::Row(fps_row(fps))),
+        "menu_wheel" => focus_row("Wheel focus", ID_MENU_WHEEL, menu_settings(app).wheel).map(Piece::Row),
+        "menu_keys" => focus_row("Key focus", ID_MENU_KEYS, menu_settings(app).keys).map(Piece::Row),
         name => {
             let knob = app.knobs().into_iter().find(|knob| knob.name == name)?;
             if knob.choices == ["off", "on"] {
@@ -1372,6 +1380,17 @@ fn pull_menu(
         *tracked_tab = menu.tab;
     }
     *menu_open = app.scene().menu.effective().visible;
+    if !*menu_open {
+        ui.set_focused_panel(None);
+    }
+    let menu = app.scene().menu.clone();
+    ui.set_input_policy(
+        PANEL_ID,
+        InputPolicy {
+            wheel: menu.wheel,
+            keys: menu.keys,
+        },
+    );
 }
 
 fn push_menu(
@@ -1536,11 +1555,46 @@ fn select(
                 tools.set_view(mode);
             }
         }
+    } else if id == ID_MENU_WHEEL || id == ID_MENU_KEYS {
+        let name = ["hover", "modal", "click", "passive"]
+            .get(index)
+            .copied()
+            .unwrap_or("hover");
+        let key = if id == ID_MENU_WHEEL { "wheel" } else { "keys" };
+        app.scene().menu.set_key(key, name)?;
     } else if (ID_DROP..ID_DROP + DROP_KNOBS.len() as u32).contains(&id) {
         let name = DROP_KNOBS[(id - ID_DROP) as usize];
         app.set_knob(name, value)?;
     }
     Ok(())
+}
+
+fn menu_settings(app: &App) -> MenuSettings {
+    match &app.show {
+        Show::Stress(stage) => stage.world.scene.menu.clone(),
+        Show::Still(world) => world.scene.menu.clone(),
+    }
+}
+
+fn focus_index(policy: FocusPolicy) -> f64 {
+    match policy {
+        FocusPolicy::Hover => 0.0,
+        FocusPolicy::Modal => 1.0,
+        FocusPolicy::ClickToFocus => 2.0,
+        FocusPolicy::Passive => 3.0,
+    }
+}
+
+fn focus_row(label: &str, id: u32, policy: FocusPolicy) -> Option<PanelRow> {
+    drop_row(
+        label,
+        id,
+        focus_index(policy),
+        ["hover", "modal", "click", "passive"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 fn toggle(app: &mut App, id: u32, on: bool) -> Result<(), String> {

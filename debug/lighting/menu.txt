@@ -49,4 +49,6 @@ Perf | - | - | open | lighting_full_effort
 Perf | - | - | open | unfilled
 Perf | - | - | open | unfilled_tint
 Perf | - | - | open | fps
+Perf | - | - | open | menu_wheel
+Perf | - | - | open | menu_keys
 Info | - | - | open | review

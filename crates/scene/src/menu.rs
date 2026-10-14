@@ -1,11 +1,57 @@
-//! Debug menu visibility, page, and folds.
+//! Debug menu visibility, page, folds, and focus policy.
 //!
 //! The menu is shown until `--menu hidden`, the hide control, or `visible`
 //! is set to hidden. `tab` is the page title. `collapsed` lists folded
-//! section keys. `--menu` wins. `GENOS_MENU` applies only when that argument
-//! was omitted, and then a set variable wins every frame.
+//! section keys. `wheel` and `keys` are each `hover`, `modal`, `click`, or
+//! `passive`. The debug menu default is hover for the wheel and click for
+//! keys. `--menu` wins for `visible`. `GENOS_MENU` applies only when that
+//! argument was omitted, and then a set variable wins every frame.
 
 use crate::EngineSettings;
+
+/// How one panel claims one kind of input. The game picks this per panel and can
+/// change it while the frame loop is running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusPolicy {
+    /// While the panel is shown it owns this input. A click outside does not escape.
+    Modal,
+    /// This input arrives only while the pointer is over the panel.
+    Hover,
+    /// A click on the panel takes this input. A click outside, Escape, or grave releases it.
+    ClickToFocus,
+    /// This input never arrives.
+    Passive,
+}
+
+impl FocusPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Modal => "modal",
+            Self::Hover => "hover",
+            Self::ClickToFocus => "click",
+            Self::Passive => "passive",
+        }
+    }
+}
+
+impl Default for FocusPolicy {
+    fn default() -> Self {
+        Self::Hover
+    }
+}
+
+/// `hover`, `modal`, `click`, or `passive`. `exclusive` is modal.
+pub fn parse_focus_policy(value: &str) -> Result<FocusPolicy, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "modal" | "exclusive" => Ok(FocusPolicy::Modal),
+        "hover" => Ok(FocusPolicy::Hover),
+        "click" | "clicktofocus" | "click_to_focus" => Ok(FocusPolicy::ClickToFocus),
+        "passive" => Ok(FocusPolicy::Passive),
+        _ => Err(format!(
+            "focus is hover, modal, click, or passive, got {value}"
+        )),
+    }
+}
 
 /// Whether the debug menu is on screen, which page is open, and which folds are shut.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,6 +63,10 @@ pub struct MenuSettings {
     /// Section keys that are folded. Empty leaves each fold at its layout default
     /// until a later write names them.
     pub collapsed: Vec<String>,
+    /// How the wheel reaches the menu. The debug menu default is hover.
+    pub wheel: FocusPolicy,
+    /// How keys reach the menu. The debug menu default is click-to-focus.
+    pub keys: FocusPolicy,
 }
 
 /// `--menu` from one argument list. Other arguments are ignored.
@@ -31,6 +81,8 @@ impl Default for MenuSettings {
             visible: true,
             tab: String::new(),
             collapsed: Vec::new(),
+            wheel: FocusPolicy::Hover,
+            keys: FocusPolicy::ClickToFocus,
         }
     }
 }
@@ -96,10 +148,12 @@ impl MenuSettings {
 
     pub fn to_text(&self) -> String {
         format!(
-            "visible={}\ntab={}\ncollapsed={}\n",
+            "visible={}\ntab={}\ncollapsed={}\nwheel={}\nkeys={}\n",
             if self.visible { "shown" } else { "hidden" },
             self.tab,
-            self.collapsed.join(",")
+            self.collapsed.join(","),
+            self.wheel.as_str(),
+            self.keys.as_str()
         )
     }
 
@@ -142,6 +196,14 @@ impl MenuSettings {
             }
             "open" => {
                 self.collapsed.retain(|name| name != value);
+                Ok(())
+            }
+            "wheel" | "focus_wheel" => {
+                self.wheel = parse_focus_policy(value)?;
+                Ok(())
+            }
+            "keys" | "focus_keys" => {
+                self.keys = parse_focus_policy(value)?;
                 Ok(())
             }
             _ => Err(format!("unknown menu setting {key}")),
@@ -197,7 +259,12 @@ mod tests {
         assert!(settings.tab.is_empty());
         assert!(settings.collapsed.is_empty());
         let text = EngineSettings::to_text(&settings);
-        assert_eq!(text, "visible=shown\ntab=\ncollapsed=\n");
+        assert_eq!(
+            text,
+            "visible=shown\ntab=\ncollapsed=\nwheel=hover\nkeys=click\n"
+        );
+        assert_eq!(settings.wheel, FocusPolicy::Hover);
+        assert_eq!(settings.keys, FocusPolicy::ClickToFocus);
         let parsed = <MenuSettings as EngineSettings>::parse(&text).unwrap();
         assert_eq!(parsed, settings);
     }
@@ -227,6 +294,14 @@ mod tests {
         );
         settings.set_key("collapsed", "").unwrap();
         assert!(settings.collapsed.is_empty());
+        settings.set_key("wheel", "passive").unwrap();
+        settings.set_key("focus_keys", "modal").unwrap();
+        assert_eq!(settings.wheel, FocusPolicy::Passive);
+        assert_eq!(settings.keys, FocusPolicy::Modal);
+        let parsed = MenuSettings::parse(&settings.to_text()).unwrap();
+        assert_eq!(parsed.wheel, FocusPolicy::Passive);
+        assert_eq!(parsed.keys, FocusPolicy::Modal);
+        assert!(settings.set_key("wheel", "sideways").is_err());
         assert!(settings.set_key("home", "1").is_err());
         assert!(settings.set_key("visible", "maybe").is_err());
         assert!(MenuSettings::parse("visible\n").is_err());
@@ -238,6 +313,7 @@ mod tests {
             visible: true,
             tab: "Info".into(),
             collapsed: vec!["world".into()],
+            ..MenuSettings::default()
         };
         let locked = stored.resolve(Some(false), Some("shown"));
         assert!(!locked.visible);

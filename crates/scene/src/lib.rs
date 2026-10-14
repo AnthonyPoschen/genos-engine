@@ -27,7 +27,7 @@ pub use lighting::{
     LampPickMode, LampPickSettings, LightingPreset, LightingSettings, ProbeSettings, ShadowFilter,
     ShadowSettings, WorldCacheSettings, LIGHTING_BOUNCES_UNLIMITED,
 };
-pub use menu::{parse_menu_visible, MenuCli, MenuSettings};
+pub use menu::{parse_focus_policy, parse_menu_visible, FocusPolicy, MenuCli, MenuSettings};
 pub use script::{load_path, load_str};
 pub use settings::EngineSettings;
 pub use types::{

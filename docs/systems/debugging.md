@@ -157,16 +157,21 @@ menu row, F or F3, `--fps-counter` / `--fps-hz`, and `get_fps_counter` /
 
 ### Debug menu
 
-`MenuSettings` on the scene (`visible`, `tab`, `collapsed`) is the public
-setting. It implements `EngineSettings`. The default is shown, on the first
-page, with no stored folds. Grave, F1, the title-bar hide button, and the
-corner tab write `visible`. `--menu shown|hidden` wins every frame.
-`GENOS_MENU` applies only when that argument was omitted. `tab` is the page
-title. `collapsed` is a comma-separated list of folded section keys. `fold`
-adds one key and `open` removes one, so a test can move one section without
-a pointer. `get_menu_settings` and `set_menu_settings` are on the MCP
-catalogue. A `text` field overlays `key=value` lines. The lighting binary
-also writes `<out>/menu/collapsed.txt` and `<out>/menu/tab.txt`.
+`MenuSettings` on the scene (`visible`, `tab`, `collapsed`, `wheel`, `keys`)
+is the public setting. It implements `EngineSettings`. The default is shown,
+on the first page, with no stored folds, `wheel=hover`, and `keys=click`.
+Grave, F1, the title-bar hide button, and the corner tab write `visible`.
+The first grave while click-to-focus is held releases the keys and leaves the
+menu up. The next grave hides it. F1 hides it either way. `--menu shown|hidden`
+wins every frame for `visible`. `GENOS_MENU` applies only when that argument
+was omitted. `tab` is the page title. `collapsed` is a comma-separated list of
+folded section keys. `fold` adds one key and `open` removes one, so a test can
+move one section without a pointer. `wheel` and `keys` are `hover`, `modal`,
+`click`, or `passive`. `focus_wheel` and `focus_keys` are the same keys.
+`get_menu_settings` and `set_menu_settings` are on the MCP catalogue. A `text`
+field overlays `key=value` lines. The lighting binary also writes
+`<out>/menu/collapsed.txt` and `<out>/menu/tab.txt`. The Perf page dropdowns
+write `wheel` and `keys`.
 
 - Replicated state: the settings struct. The averaged numbers stay on the client that draws.
 - Authority: the client that owns the view. A server does not time the picture.

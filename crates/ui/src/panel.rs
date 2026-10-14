@@ -3,9 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use genos_scene::{Camera, Scene};
+use genos_scene::{Camera, FocusPolicy, Scene};
 
 use crate::dropdown;
+use crate::focus::{Consumed, FocusManager, InputKind, InputPolicy};
 use crate::layout::{self, Direction, Item, Node, Pad, Place, Rect, Sizing, Space};
 use crate::omarchy::{self, Palette};
 use crate::slider::{self, SliderStep};
@@ -32,6 +33,8 @@ pub const MENU_HIDE: u32 = u32::MAX - 5000;
 /// Press on the corner tab while the menu is hidden. The caller shows the menu.
 pub const MENU_SHOW: u32 = u32::MAX - 5001;
 const TITLE_ROW: u32 = u32::MAX - 5002;
+/// The settings panel. A game sets this id's [`InputPolicy`].
+pub const PANEL_ID: u32 = u32::MAX - 4095;
 
 /// X and Z reach both edges of the 16 by 16 floor. Neighbor notches are 1 meter apart.
 const XZ_NOTCHES: [f32; 17] = [
@@ -58,6 +61,8 @@ pub struct Pointer {
     pub key_activate: bool,
     /// Dismiss key pressed this frame (escape). Closes an open list.
     pub key_dismiss: bool,
+    /// Grave pressed this frame. Click-to-focus releases on this key.
+    pub key_blur: bool,
     /// Previous page of the tab strip. A press edge, not a held key.
     pub tab_prev: bool,
     /// Next page of the tab strip. A press edge, not a held key.
@@ -75,6 +80,7 @@ impl Default for Pointer {
             key_inc: false,
             key_activate: false,
             key_dismiss: false,
+            key_blur: false,
             tab_prev: false,
             tab_next: false,
         }
@@ -126,6 +132,9 @@ pub struct State {
     panel_hover: bool,
     /// Pixels the page has moved up under the tab bar. The bar stays put.
     scroll: f32,
+    /// Per-panel wheel and key policy. Empty means the older path, which takes
+    /// keys and the pointer the way it did before policies existed.
+    pub input: FocusManager,
 }
 
 impl Default for State {
@@ -152,6 +161,7 @@ impl Default for State {
             selected_tabs: BTreeMap::new(),
             panel_hover: false,
             scroll: 0.0,
+            input: FocusManager::default(),
         }
     }
 }
@@ -192,6 +202,31 @@ impl State {
     /// True when the pointer was over the panel on the last frame.
     pub fn panel_hovered(&self) -> bool {
         self.panel_hover
+    }
+
+    /// Replace how this panel takes the wheel and the keys. The next frame uses it.
+    pub fn set_input_policy(&mut self, panel: u32, policy: InputPolicy) {
+        self.input.set_policy(panel, policy);
+    }
+
+    /// The policy last set for this panel.
+    pub fn input_policy(&self, panel: u32) -> Option<InputPolicy> {
+        self.input.policy(panel)
+    }
+
+    /// The panel click-to-focus is holding.
+    pub fn focused_panel(&self) -> Option<u32> {
+        self.input.focused()
+    }
+
+    /// Arm click-to-focus, or pass `None` to release it.
+    pub fn set_focused_panel(&mut self, panel: Option<u32>) {
+        self.input.set_focus(panel);
+    }
+
+    /// The control inside the focused panel that arrows move.
+    pub fn focused_control(&self) -> Option<u32> {
+        self.focus
     }
 
     fn toggle_section(&mut self, id: u32) {
@@ -237,6 +272,8 @@ pub struct Frame {
     pub look_capture: bool,
     /// Name and exact value while the pointer is on a slider. `None` otherwise.
     pub tooltip: Option<String>,
+    /// Events the panel took. A false field belongs to the game.
+    pub consumed: Consumed,
 }
 
 /// Lay out the lighting panel and the lamp sun. Apply hover, press, and drag.
@@ -328,6 +365,7 @@ pub fn lighting_frame(
         actions,
         look_capture,
         tooltip: None,
+        consumed: Consumed::default(),
     }
 }
 
@@ -649,7 +687,7 @@ fn panel_tree(
 ) -> Node {
     let palette = state.palette;
     let fill = surface(palette);
-    let own = u32::MAX - 4095;
+    let own = PANEL_ID;
     let mut panel = Node::new(own);
     panel.direction = Direction::TopToBottom;
     panel.pad = Pad::all(8.0);
@@ -726,7 +764,7 @@ fn panel_tree(
 fn block_panel(state: &State, title: &str, blocks: &[PanelBlock], max_width: Option<f32>) -> Node {
     let palette = state.palette;
     let fill = surface(palette);
-    let own = u32::MAX - 4095;
+    let own = PANEL_ID;
     let mut panel = Node::new(own);
     panel.direction = Direction::TopToBottom;
     panel.pad = Pad::all(8.0);
@@ -969,6 +1007,140 @@ fn tab_button(
     node
 }
 
+/// Arrow keys step a focused slider. Otherwise they walk checks, sliders,
+/// dropdowns, and press targets from top to bottom, then left to right.
+fn step_or_move_focus(
+    state: &mut State,
+    items: &[Item],
+    page: &PageScroll,
+    bars: &[&PanelSlider],
+    drops: &[&PanelDropdown],
+    checks: &[&PanelCheck],
+    pointer: Pointer,
+    actions: &mut Vec<Action>,
+) -> bool {
+    if !(pointer.key_dec || pointer.key_inc) || pointer.key_dec == pointer.key_inc {
+        return false;
+    }
+    if let Some(bar) = state
+        .focus
+        .and_then(|id| bars.iter().copied().find(|bar| bar.id == id))
+    {
+        let delta = i32::from(pointer.key_inc) - i32::from(pointer.key_dec);
+        push_step(actions, bar, delta);
+        return true;
+    }
+    let ids = focusable_ids(items, page, bars, drops, checks);
+    if ids.is_empty() {
+        return false;
+    }
+    let forward = pointer.key_inc;
+    let next = match state
+        .focus
+        .and_then(|id| ids.iter().position(|item| *item == id))
+    {
+        Some(index) if forward => ids[(index + 1) % ids.len()],
+        Some(index) => ids[(index + ids.len() - 1) % ids.len()],
+        None if forward => ids[0],
+        None => ids[ids.len() - 1],
+    };
+    state.focus = Some(next);
+    true
+}
+
+fn focusable_ids(
+    items: &[Item],
+    page: &PageScroll,
+    bars: &[&PanelSlider],
+    drops: &[&PanelDropdown],
+    checks: &[&PanelCheck],
+) -> Vec<u32> {
+    let mut ranked = Vec::new();
+    for item in items {
+        let rect = page.hit_rect(item);
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            continue;
+        }
+        let widget = bars.iter().any(|bar| bar.id == item.id)
+            || drops.iter().any(|drop| drop.id == item.id)
+            || checks.iter().any(|check| check.id == item.id)
+            || matches!(
+                item.action,
+                Some(Action::Press(_)) | Some(Action::Toggle { .. })
+            );
+        if widget {
+            ranked.push((rect.y, rect.x, item.id));
+        }
+    }
+    ranked.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then(a.1.total_cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
+    ranked.into_iter().map(|(_, _, id)| id).collect()
+}
+
+/// Enter opens a focused dropdown or fires the focused control's action.
+fn activate_focused(
+    state: &mut State,
+    items: &[Item],
+    tab_ids: &[(u32, u32)],
+    section_ids: &[u32],
+    drops: &[&PanelDropdown],
+    actions: &mut Vec<Action>,
+) -> bool {
+    let Some(id) = state.focus else {
+        return false;
+    };
+    if let Some(drop) = drops.iter().find(|drop| drop.id == id) {
+        open_dropdown(state, drop);
+        return true;
+    }
+    let Some(item) = items.iter().find(|item| item.id == id) else {
+        return false;
+    };
+    let Some(action) = item.action else {
+        return false;
+    };
+    if let Action::Press(press_id) = action {
+        if let Some((group, _)) = tab_ids.iter().find(|(_, tab)| *tab == press_id) {
+            state.select_tab(*group, press_id);
+        } else if section_ids.contains(&press_id) {
+            state.toggle_section(press_id);
+        }
+    }
+    actions.push(action);
+    true
+}
+
+/// Escape or grave leaves click-to-focus. Escape that just closed a list does not.
+fn release_click_focus(
+    state: &mut State,
+    panel_id: u32,
+    policy: Option<InputPolicy>,
+    keys_open: bool,
+    pointer: Pointer,
+    list_closed: bool,
+    consumed: &mut Consumed,
+) {
+    let click = policy.is_some_and(|policy| policy.keys == FocusPolicy::ClickToFocus);
+    if !(keys_open && click && state.input.focused() == Some(panel_id)) {
+        return;
+    }
+    let grave = pointer.key_blur;
+    let escape = pointer.key_dismiss && !list_closed && state.open_drop.is_none();
+    if !(grave || escape) {
+        return;
+    }
+    if grave {
+        state.open_drop = None;
+    }
+    state.input.set_focus(None);
+    state.focus = None;
+    consumed.blur = true;
+    consumed.keys = true;
+}
+
 fn cycle_tab(
     state: &mut State,
     tab_ids: &[(u32, u32)],
@@ -1110,6 +1282,7 @@ pub fn show_menu_tab(state: &mut State, viewport: [f32; 2], pointer: Pointer) ->
         actions,
         look_capture,
         tooltip: None,
+        consumed: Consumed::default(),
     }
 }
 
@@ -1481,6 +1654,7 @@ fn finish_panel(
     camera: &Camera,
     pointer: Pointer,
 ) -> Frame {
+    let panel_id = panel.id;
     let press_edge = pointer.down && !state.down;
     let palette = state.palette;
     let bars: Vec<&PanelSlider> = rows.iter().filter_map(|r| r.slider.as_ref()).collect();
@@ -1491,7 +1665,7 @@ fn finish_panel(
     let page = scroll_page(
         state,
         &mut items,
-        panel.id,
+        panel_id,
         tab_ids,
         &bar_ids,
         viewport[1],
@@ -1509,8 +1683,39 @@ fn finish_panel(
         .find(|item| page.hit_rect(item).contains(pointer.x, pointer.y));
     let mut actions = Vec::new();
     let mut look_capture = false;
-    let mut consumed = false;
+    let mut took_press = false;
+    let mut consumed = Consumed::default();
+    let over = hit.is_some();
+    let policy = state.input.policy(panel_id);
+    let legacy = policy.is_none();
+    let keys_open = legacy || state.input.allows(panel_id, InputKind::Keys, over);
     if press_edge {
+        if let Some(policy) = policy {
+            if policy.keys == FocusPolicy::ClickToFocus {
+                if over {
+                    state.input.set_focus(Some(panel_id));
+                } else if state.input.focused() == Some(panel_id) {
+                    state.input.set_focus(None);
+                    state.focus = None;
+                }
+            }
+        }
+    }
+    let pointer_open = legacy
+        || match policy.map(|policy| policy.keys) {
+            Some(FocusPolicy::Passive) => false,
+            Some(FocusPolicy::Hover) => over,
+            Some(FocusPolicy::Modal) | Some(FocusPolicy::ClickToFocus) => true,
+            None => true,
+        };
+    if press_edge && !pointer_open {
+        look_capture = true;
+        state.look_hold = true;
+    } else if press_edge && policy.is_some_and(|policy| policy.keys == FocusPolicy::Modal) && !over
+    {
+        consumed.pointer = true;
+        took_press = true;
+    } else if press_edge {
         if let Some((drop, list, _)) = popup_geom(state, &drops, &items, viewport) {
             if let Some(index) = dropdown::row_at(
                 list,
@@ -1535,11 +1740,17 @@ fn finish_panel(
             state.look_hold = false;
             state.held = None;
             state.focus = Some(drop.id);
-            consumed = true;
+            took_press = true;
+            if !legacy {
+                consumed.pointer = true;
+            }
         }
     }
-    if !consumed && press_edge {
+    if !took_press && press_edge && pointer_open {
         if let Some(item) = hit {
+            if !legacy {
+                consumed.pointer = true;
+            }
             state.focus = Some(item.id);
             state.look_hold = false;
             state.sliding = None;
@@ -1574,6 +1785,7 @@ fn finish_panel(
     } else if pointer.down && state.look_hold {
         look_capture = true;
     }
+    let mut list_closed = false;
     if pointer.down {
         let held = state.held.and_then(|id| bars.iter().find(|b| b.id == id));
         let track = held.and_then(|b| items.iter().find(|i| i.id == b.id));
@@ -1584,7 +1796,20 @@ fn finish_panel(
             }
         }
     } else if state.open_drop.is_some() {
-        drive_open_dropdown(state, &drops, &items, viewport, pointer, &mut actions);
+        let mut drive = pointer;
+        if !keys_open {
+            drive.key_dec = false;
+            drive.key_inc = false;
+            drive.key_activate = false;
+            drive.key_dismiss = false;
+        }
+        let was_open = state.open_drop;
+        drive_open_dropdown(state, &drops, &items, viewport, drive, &mut actions);
+        list_closed = was_open.is_some() && state.open_drop.is_none() && pointer.key_dismiss;
+        if keys_open && !legacy && (pointer.key_dec || pointer.key_inc || pointer.key_activate || list_closed)
+        {
+            consumed.keys = true;
+        }
     } else {
         let hovered = hit.and_then(|item| bars.iter().copied().find(|bar| bar.id == item.id));
         if let Some(bar) = hovered {
@@ -1594,27 +1819,67 @@ fn finish_panel(
                 push_step(&mut actions, bar, notches);
             }
         }
-        if let Some(action) = cycle_tab(state, tab_ids, &items, &pointer) {
-            actions.push(action);
-        }
-        if pointer.key_dec || pointer.key_inc {
-            let keyed = hovered.or_else(|| {
-                state
+        if keys_open && legacy {
+            if let Some(action) = cycle_tab(state, tab_ids, &items, &pointer) {
+                actions.push(action);
+            }
+            if pointer.key_dec || pointer.key_inc {
+                let keyed = hovered.or_else(|| {
+                    state
+                        .focus
+                        .and_then(|id| bars.iter().copied().find(|bar| bar.id == id))
+                });
+                if let Some(bar) = keyed {
+                    let delta = i32::from(pointer.key_inc) - i32::from(pointer.key_dec);
+                    state.focus = Some(bar.id);
+                    push_step(&mut actions, bar, delta);
+                }
+            }
+            if pointer.key_activate {
+                if let Some(drop) = state
                     .focus
-                    .and_then(|id| bars.iter().copied().find(|bar| bar.id == id))
-            });
-            if let Some(bar) = keyed {
-                let delta = i32::from(pointer.key_inc) - i32::from(pointer.key_dec);
-                state.focus = Some(bar.id);
-                push_step(&mut actions, bar, delta);
+                    .and_then(|id| drops.iter().find(|drop| drop.id == id))
+                {
+                    open_dropdown(state, drop);
+                }
+            }
+        } else if keys_open {
+            if let Some(action) = cycle_tab(state, tab_ids, &items, &pointer) {
+                actions.push(action);
+                consumed.keys = true;
+            }
+            if step_or_move_focus(state, &items, &page, &bars, &drops, &checks, pointer, &mut actions)
+            {
+                consumed.keys = true;
+            }
+            if pointer.key_activate
+                && activate_focused(state, &items, tab_ids, section_ids, &drops, &mut actions)
+            {
+                consumed.keys = true;
             }
         }
-        if pointer.key_activate {
-            if let Some(drop) = state
-                .focus
-                .and_then(|id| drops.iter().find(|drop| drop.id == id))
-            {
-                open_dropdown(state, drop);
+    }
+    release_click_focus(
+        state,
+        panel_id,
+        policy,
+        keys_open,
+        pointer,
+        list_closed,
+        &mut consumed,
+    );
+    if keys_open && policy.is_some_and(|policy| policy.keys == FocusPolicy::Modal) {
+        let key_edge = pointer.key_dec
+            || pointer.key_inc
+            || pointer.key_activate
+            || pointer.key_dismiss
+            || pointer.key_blur
+            || pointer.tab_prev
+            || pointer.tab_next;
+        if key_edge {
+            consumed.keys = true;
+            if pointer.key_blur {
+                consumed.blur = true;
             }
         }
     }
@@ -1714,6 +1979,7 @@ fn finish_panel(
         actions,
         look_capture,
         tooltip,
+        consumed,
     }
 }
 

@@ -111,6 +111,10 @@ fn menu_settings_round_trip_through_config_and_mcp() {
     let (initial, hidden, folded, opened, after) = worker.join().expect("mcp thread");
     let initial_text = text_of(&initial);
     assert!(initial_text.contains("visible=shown"), "{initial_text}");
+    assert!(initial_text.contains("wheel=hover"), "{initial_text}");
+    assert!(initial_text.contains("keys=click"), "{initial_text}");
+    assert_eq!(initial.get("wheel").and_then(Value::as_str), Some("hover"));
+    assert_eq!(initial.get("keys").and_then(Value::as_str), Some("click"));
     assert_eq!(initial.get("visible").and_then(Value::as_bool), Some(true));
     assert_eq!(initial.get("tab").and_then(Value::as_str), Some(""));
     let hidden_text = text_of(&hidden);

@@ -1617,6 +1617,8 @@ fn menu_value(settings: &MenuSettings) -> Value {
             "collapsed",
             list(settings.collapsed.iter().cloned().map(text).collect()),
         ),
+        ("wheel", text(settings.wheel.as_str())),
+        ("keys", text(settings.keys.as_str())),
     ])
 }
 
