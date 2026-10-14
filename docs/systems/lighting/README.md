@@ -178,6 +178,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78X](experiments/S78X-atrous-work-lists.md) | 2026-10-13 | A-trous levels run dirty work lists | pushed (rough; idle A/B) | S78X |
 | [S78X2](experiments/S78X2-atrous-dense-fallback.md) | 2026-10-12 | Dense a-trous when the dirty fraction is high | pushed | S78X2 |
 | [S79](experiments/S79-half-res-atrous.md) | 2026-10-13 | Half-resolution a-trous, adaptive iterations, shared-memory tiles | Tried and failed. Half-res and tiles removed. Plain shader kept. Adaptive is an off-by-default knob | S79 |
+| [S80](experiments/S80-screen-denoise.md) | 2026-10-13 | Screen wavelet of visible fine texels | opt-in (`denoise_launch=screen`). Every preset defaults to the hash-slot wavelet | S80 |
 | [S78Z](experiments/S78Z-verify-ring-wakes.md) | 2026-10-13 | Probe verification + impact-tested ring wakes | not pushed (no fix; postmortem) | g78/S78Z-verify-ring-wakes.patch |
 | [S78T2](experiments/S78T2-texel-verify.md) | 2026-10-13 | Texel verification: rotating A-SVGF checks + ring wakes | not pushed (no healing; postmortem) | g78/S78T2-texel-verify.patch |
 | [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
@@ -578,3 +579,28 @@ the full-resolution scalar wavelet at 3 iterations. The plain pipeline,
 compiled without the adaptive branch, put high back to about 8.0 ms against
 gi-v2's 7.8 ms moving. Numbers and the five-line postmortem are in
 [S79](experiments/S79-half-res-atrous.md).
+
+### S80: screen wavelet
+
+`denoise_launch` is `hash` or `screen`. Every preset, including high, defaults
+to `hash`: the gi-v2 slot wavelet. Nothing else in that launch differs from
+gi-v2. `screen` is opt-in (`--denoise-launch screen`). It runs the same
+variance, à-trous, and push on the visible 12.5 cm cells and on the active
+cells in their à-trous footprints. One pixel claims each hit cell and lists
+those taps. A still camera with nothing moving reuses the list and appends
+cells claimed after that build. Compose bilerps that field with the same
+weights as the hash launch. A plane or normal weight on the screen blend
+alone moved the hall off the hash picture. The launch is one 8×8 group per
+picture block, not one group per 64 slots of the million-slot table.
+
+The G-buffer stays the gi-v2 packing. A geometric axis in the flag byte
+changed medium as well as high (the lookup replaced the shading normal on
+every preset) and did not remove the Sponza banner squares, so it is not
+used. The screen gather keys a cell with the shading normal, the same key
+the hash compose uses. On a 4070 that opt-in picture is outside the gi-v2
+cross-process floor (high still p99 11.2 against 1.3, Sponza atrium 33
+against 2). The speed is the reason to turn it on. The default picture is
+the hash launch.
+
+Papers, the deviations, and the owner GPU commands are in
+[S80](experiments/S80-screen-denoise.md). Lavapipe does not time the GPU.

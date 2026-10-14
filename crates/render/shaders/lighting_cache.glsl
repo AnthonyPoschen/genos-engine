@@ -3148,6 +3148,18 @@ const uint LIGHTING_ATROUS_LIST_AT = LIGHTING_ATROUS_MARK_AT + 5u * LIGHTING_CAC
 // is this frame's list decision and the dense-path recount.
 // After the compose words (count, y, z, full, stamps, list, packs, rects); this used to alias LIGHTING_COMPOSE_AT.
 const uint LIGHTING_ATROUS_PPM_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS;
+// One word per slot, past the a-trous meta (391) and the sun block (8). The
+// screen launch elects a single kernel thread here. Nothing else reads it.
+const uint LIGHTING_SCREEN_OWNER_AT = LIGHTING_ATROUS_PPM_AT + 391u + 8u;
+// List dedup for the screen launch, one word per slot, after the owner words.
+// Stamp and the two ping-pong counts sit in front of that array
+// (lighting_screen.comp). The count this frame reads is the other frame's
+// word, so committing this frame's count does not race the readers.
+const uint LIGHTING_SCREEN_LIST_HDR = LIGHTING_SCREEN_OWNER_AT + LIGHTING_CACHE_SLOTS;
+const uint LIGHTING_SCREEN_LIST_STAMP = LIGHTING_SCREEN_LIST_HDR;
+const uint LIGHTING_SCREEN_LIST_BASE0 = LIGHTING_SCREEN_LIST_HDR + 1u;
+const uint LIGHTING_SCREEN_LIST_BASE1 = LIGHTING_SCREEN_LIST_HDR + 2u;
+const uint LIGHTING_SCREEN_LIST_AT = LIGHTING_SCREEN_LIST_HDR + 3u;
 const uint LIGHTING_ATROUS_PREV_AT = LIGHTING_ATROUS_PPM_AT + 1u;
 const uint LIGHTING_ATROUS_BIN_AT = LIGHTING_ATROUS_PREV_AT + 1u;
 const uint LIGHTING_ATROUS_MODE_AT = LIGHTING_ATROUS_BIN_AT + 64u;

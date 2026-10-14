@@ -125,6 +125,34 @@ fn potato_is_direct_shadows_and_flat_ambient() {
 }
 
 #[test]
+fn every_preset_launches_the_hash_wavelet_and_screen_is_opt_in() {
+    for preset in LightingPreset::all() {
+        let settings = LightingSettings::preset(*preset);
+        assert!(
+            !settings.denoiser.screen,
+            "{} defaults to the hash launch",
+            preset.name()
+        );
+    }
+    let mut high = LightingSettings::preset(LightingPreset::High);
+    assert!(high.to_text().contains("denoise_launch=hash"));
+    high.set_key("denoise_launch", "screen").unwrap();
+    assert!(high.denoiser.screen);
+    assert!(high.to_text().contains("denoise_launch=screen"));
+    let parsed = LightingSettings::parse(&high.to_text()).unwrap();
+    assert!(parsed.denoiser.screen);
+    high.set_key("denoise_screen", "off").unwrap();
+    assert!(!high.denoiser.screen);
+    high.set_key("denoise_launch", "hash").unwrap();
+    assert!(!high.denoiser.screen);
+    high.set_key("full_effort", "on").unwrap();
+    assert!(!high.denoiser.screen);
+    high.set_key("full_effort", "off").unwrap();
+    assert!(!high.denoiser.screen);
+    assert_eq!(high, LightingSettings::preset(LightingPreset::High));
+}
+
+#[test]
 fn full_effort_spends_the_maximum_and_rewrites_every_pixel() {
     let mut settings = LightingSettings::preset(LightingPreset::Low);
     settings.set_key("full_effort", "on").unwrap();
