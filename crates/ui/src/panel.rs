@@ -573,14 +573,29 @@ fn panel_tree(
             continue;
         }
         for item in &section.rows {
-            panel.children.push(row_node(
-                own + 2 + 3 * row_index as u32,
-                item,
-                fill,
-                palette,
-                None,
-            ));
-            row_index += 1;
+            if check_grid(item) {
+                for chunk in item.checks.chunks(CHECK_COLUMNS) {
+                    let mut part = item.clone();
+                    part.checks = chunk.to_vec();
+                    panel.children.push(row_node(
+                        own + 2 + 3 * row_index as u32,
+                        &part,
+                        fill,
+                        palette,
+                        Some(CHECK_CELL),
+                    ));
+                    row_index += 1;
+                }
+            } else {
+                panel.children.push(row_node(
+                    own + 2 + 3 * row_index as u32,
+                    item,
+                    fill,
+                    palette,
+                    None,
+                ));
+                row_index += 1;
+            }
         }
     }
     panel
@@ -633,9 +648,17 @@ fn row_node(
         children.push(dropdown_box(drop, palette));
     }
     for check in &item.checks {
-        children.push(check_node(check, fill, palette));
+        children.push(check_node(check, fill, palette, _budget));
     }
     row(at, children, fill)
+}
+
+fn check_grid(item: &PanelRow) -> bool {
+    !item.checks.is_empty()
+        && item.buttons.is_empty()
+        && item.slider.is_none()
+        && item.dropdown.is_none()
+        && item.label.is_empty()
 }
 
 fn capped_label(id: u32, text: &str, fill: [f32; 3], _max_width: Option<f32>) -> Node {
@@ -846,10 +869,18 @@ const LIST_BG: [f32; 3] = [0.10, 0.11, 0.14];
 const LIST_HOVER: [f32; 3] = [0.30, 0.38, 0.48];
 const LIST_BORDER: [f32; 3] = [0.55, 0.62, 0.72];
 
+/// Equal column width for on/off marks in a section. The label wraps inside it.
+const CHECK_CELL: f32 = 156.0;
+const CHECK_COLUMNS: usize = 3;
 const CHECK_BOX: f32 = 16.0;
 const CHECK_MARK: [f32; 3] = [0.62, 0.78, 0.42];
 
-fn check_node(check: &PanelCheck, fill: [f32; 3], palette: Option<Palette>) -> Node {
+fn check_node(
+    check: &PanelCheck,
+    fill: [f32; 3],
+    palette: Option<Palette>,
+    cell: Option<f32>,
+) -> Node {
     let mut node = Node::new(check.id);
     node.pad = Pad {
         left: 22.0,
@@ -857,6 +888,9 @@ fn check_node(check: &PanelCheck, fill: [f32; 3], palette: Option<Palette>) -> N
         top: 2.0,
         bottom: 2.0,
     };
+    if let Some(cell) = cell {
+        node.width = Sizing::fixed(cell);
+    }
     node.text = Some(check.text.clone());
     node.action = Some(Action::Toggle {
         id: check.id,

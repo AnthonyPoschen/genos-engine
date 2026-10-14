@@ -68,6 +68,56 @@ fn a_section_stays_folded_on_the_next_frame() {
 }
 
 #[test]
+fn toggles_share_column_width_and_a_long_label_wraps() {
+    let sections = vec![        PanelSection::new(
+        10,
+        "Pipeline toggles",
+        false,
+        vec![PanelRow {
+            label: String::new(),
+            buttons: Vec::new(),
+            slider: None,
+            dropdown: None,
+            checks: vec![
+                PanelCheck {
+                    id: 1,
+                    text: "Direct".into(),
+                    on: true,
+                },
+                PanelCheck {
+                    id: 2,
+                    text: "Adaptive denoise".into(),
+                    on: false,
+                },
+                PanelCheck {
+                    id: 3,
+                    text: "GI".into(),
+                    on: true,
+                },
+            ],
+        }],
+    )];
+    let frame = draw(&mut State::default(), &sections, Pointer::default());
+    let rect = |id: u32| {
+        frame
+            .shown
+            .iter()
+            .find(|shown| shown.id == id)
+            .unwrap()
+            .rect
+    };
+    let direct = rect(1);
+    let adaptive = rect(2);
+    let gi = rect(3);
+    assert!((direct.w - adaptive.w).abs() < 0.5);
+    assert!((adaptive.w - gi.w).abs() < 0.5);
+    assert!(adaptive.x > direct.x + direct.w - 1.0);
+    assert!(gi.x > adaptive.x + adaptive.w - 1.0);
+    assert!(adaptive.h > direct.h + 8.0);
+    assert!(adaptive.w < 180.0);
+}
+
+#[test]
 fn a_remembered_fold_wins_over_the_starting_flag() {
     let sections = vec![PanelSection::new(
         10,
