@@ -25,7 +25,7 @@ pub enum ViewMode {
     /// than 4 sets; shaded by the normal so surfaces read.
     Texels,
     /// Short-term relative standard deviation of the cache entry under each
-    /// pixel. Blue is quiet, red is noisy.
+    /// pixel. Grey is a missing or unallocated entry. Blue is quiet, red is noisy.
     Variance,
 }
 

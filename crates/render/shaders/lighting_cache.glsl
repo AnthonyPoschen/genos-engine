@@ -2798,12 +2798,12 @@ vec2 lighting_sc_debug_size(vec3 pos, vec3 n) {
     return vec2(size, s == ~0u ? 0.0 : floor(max(cache.v[3u * s + 2u].w, 0.0)));
 }
 // Debug view "variance": short-term relative standard deviation of the cache
-// entry under the pixel. 0 is a missing entry. Blue is quiet, red is noisy.
+// entry under the pixel. -1 is a missing or unallocated entry. 0 is quiet.
 float lighting_sc_debug_variance(vec3 pos, vec3 n) {
     float size = lighting_cell_size(pos);
     uint s = lighting_cache_find_sized(pos, n, false, size, pos);
     if (s == ~0u) {
-        return 0.0;
+        return -1.0;
     }
     vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * s];
     float dev = sqrt(max(est.w, 0.0));
