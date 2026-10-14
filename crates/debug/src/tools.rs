@@ -1870,4 +1870,16 @@ mod tests {
         assert!(captures.description.contains("ui"));
         assert!(captures.description.contains("default false"));
     }
+
+    #[test]
+    fn a_fold_sent_with_a_tab_stays_in_collapsed() {
+        let mut settings = MenuSettings::default();
+        let args = genos_mcp::json::parse(r#"{"fold":"direct","tab":"GI"}"#).expect("json");
+        apply_menu_update(&mut settings, &args).expect("update");
+        assert_eq!(settings.tab, "GI");
+        assert_eq!(settings.collapsed, vec!["direct".to_string()]);
+        let text = settings.effective().to_text();
+        assert!(text.contains("collapsed=direct"), "reply text was {text}");
+        assert!(text.contains("tab=GI"), "{text}");
+    }
 }

@@ -168,7 +168,8 @@ menu up. The next grave hides it. F1 hides it either way. `--menu shown|hidden`
 wins every frame for `visible`. `GENOS_MENU` applies only when that argument
 was omitted. `tab` is the page title. `collapsed` is a comma-separated list of
 folded section keys. `fold` adds one key and `open` removes one, so a test can
-move one section without a pointer. `wheel` and `keys` are `hover`, `modal`,
+move one section without a pointer. `fold` together with `tab` keeps the
+fold. A section that is not on the open page stays in the list. `wheel` and `keys` are `hover`, `modal`,
 `click`, or `passive`. `focus_wheel` and `focus_keys` are the same keys.
 `get_menu_settings` and `set_menu_settings` are on the MCP catalogue. A `text`
 field overlays `key=value` lines. The lighting binary also writes

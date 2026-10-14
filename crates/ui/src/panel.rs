@@ -124,6 +124,8 @@ pub struct State {
     palette_from: Option<PathBuf>,
     /// Section ids that have already taken their first-frame fold.
     section_seen: BTreeSet<u32>,
+    /// Section ids laid out on this frame. A fold on another page is not here.
+    section_frame: BTreeSet<u32>,
     /// Section ids that are folded. Later frames keep this set.
     collapsed_sections: BTreeSet<u32>,
     /// Selected tab id for each tab strip.
@@ -157,6 +159,7 @@ impl Default for State {
             palette: None,
             palette_from: None,
             section_seen: BTreeSet::new(),
+            section_frame: BTreeSet::new(),
             collapsed_sections: BTreeSet::new(),
             selected_tabs: BTreeMap::new(),
             panel_hover: false,
@@ -187,6 +190,15 @@ impl State {
     /// A fold that has not been seen yet keeps its layout default.
     pub fn section_known(&self, id: u32) -> bool {
         self.section_seen.contains(&id)
+    }
+
+    /// True when this frame laid the section out. A section on another page is not.
+    pub fn section_shown(&self, id: u32) -> bool {
+        self.section_frame.contains(&id)
+    }
+
+    fn begin_sections(&mut self) {
+        self.section_frame.clear();
     }
 
     /// The tab this strip is showing. `None` until the first frame picks one.
@@ -238,6 +250,7 @@ impl State {
 
     /// First sight uses `start_collapsed`. After that, the remembered fold wins.
     fn section_is_open(&mut self, id: u32, start_collapsed: bool) -> bool {
+        self.section_frame.insert(id);
         if self.section_seen.insert(id) && start_collapsed {
             self.collapsed_sections.insert(id);
         }
@@ -620,6 +633,7 @@ pub fn button_panel_sections(
 ) -> Frame {
     drag_panel(state, pointer);
     refresh_palette(state);
+    state.begin_sections();
     let mut visible = Vec::new();
     let mut ids = Vec::new();
     for section in sections {
@@ -652,6 +666,7 @@ pub fn button_panel_blocks(
 ) -> Frame {
     drag_panel(state, pointer);
     refresh_palette(state);
+    state.begin_sections();
     let mut visible = Vec::new();
     let mut section_ids = Vec::new();
     let mut tab_ids = Vec::new();

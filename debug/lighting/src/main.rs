@@ -1337,11 +1337,12 @@ fn apply_collapsed(ui: &mut State, folds: &[MenuFold], names: &[String]) {
     }
 }
 
-/// Folds the panel has not laid out keep the names already stored.
+/// A fold stays when this frame did not lay that section out. The open page
+/// can change without dropping a fold that lives on another page.
 fn merge_collapsed(previous: &[String], ui: &State, folds: &[MenuFold]) -> Vec<String> {
     let mut names = previous.to_vec();
     for fold in folds {
-        if !ui.section_known(fold.id) {
+        if !ui.section_shown(fold.id) {
             continue;
         }
         if ui.section_collapsed(fold.id) {
@@ -1401,7 +1402,8 @@ fn push_menu(
 ) -> Result<(), String> {
     if drew_panel {
         let merged = merge_collapsed(tracked_collapsed, ui, folds);
-        if merged != app.scene().menu.collapsed {
+        let on_disk = load_menu_folds(out).unwrap_or_default();
+        if merged != app.scene().menu.collapsed || merged != on_disk {
             app.scene().menu.collapsed = merged.clone();
             write_fold_names(out, &merged)?;
         }
@@ -2255,6 +2257,116 @@ mod tests {
     }
 
     #[test]
+    fn a_fold_sent_with_a_tab_survives_the_next_frame() {
+        let root = genos_scene_lib::repo_root();
+        let entries = genos_scene_lib::load_dir(&genos_scene_lib::scenes_dir()).expect("scenes");
+        let log = std::fs::File::create(std::env::temp_dir().join("genos-lighting-fold-tab.log"))
+            .expect("log");
+        use genos_debug::Host;
+        let mut app = super::App::open(entries, root, log).expect("app");
+        let fps = genos_scene::FpsCounterSettings::default();
+        let menu = super::load_menu_layout().expect("layout");
+        let folds = super::menu_folds(&menu);
+        let blocks = super::panel_blocks(&app, ViewMode::Full, &fps, &menu);
+        let mut ui = genos_ui::State::default();
+        ui.select_tab(super::strip_id(0), super::tab_id("Lamps"));
+        let _ = genos_ui::button_panel_blocks(
+            &mut ui,
+            "stress",
+            &blocks,
+            [1024.0, 832.0],
+            &genos_scene::Camera::opening(),
+            genos_ui::Pointer::default(),
+        );
+        assert!(ui.section_known(super::section_id("direct")));
+        assert!(!ui.section_collapsed(super::section_id("direct")));
+        let mut tracked_collapsed = super::merge_collapsed(&[], &ui, &folds);
+        let mut tracked_tab = "Lamps".to_string();
+        app.scene().menu.tab = "Lamps".into();
+        app.scene().menu.collapsed = tracked_collapsed.clone();
+        app.scene().menu.set_key("fold", "direct").expect("fold");
+        app.scene().menu.set_key("tab", "GI").expect("tab");
+        assert_eq!(app.scene().menu.collapsed, vec!["direct".to_string()]);
+        let mut menu_open = true;
+        let dir = std::env::temp_dir().join(format!("genos-fold-tab-{}", std::process::id()));
+        super::pull_menu(
+            &mut app,
+            &mut ui,
+            &folds,
+            &mut menu_open,
+            &mut tracked_collapsed,
+            &mut tracked_tab,
+        );
+        let _ = genos_ui::button_panel_blocks(
+            &mut ui,
+            "stress",
+            &blocks,
+            [1024.0, 832.0],
+            &genos_scene::Camera::opening(),
+            genos_ui::Pointer::default(),
+        );
+        super::push_menu(
+            &mut app,
+            &ui,
+            &folds,
+            &menu,
+            menu_open,
+            true,
+            &dir,
+            &mut tracked_collapsed,
+            &mut tracked_tab,
+        )
+        .expect("push");
+        assert_eq!(app.scene().menu.tab, "GI");
+        assert!(
+            app.scene().menu.collapsed.iter().any(|name| name == "direct"),
+            "collapsed={:?}",
+            app.scene().menu.collapsed
+        );
+        let saved = super::load_menu_folds(&dir).expect("fold file");
+        assert!(
+            saved.iter().any(|name| name == "direct"),
+            "fold file={saved:?}"
+        );
+
+        // The lamps page left the section open, and the stored list already
+        // names it. Showing GI must not drop that fold.
+        ui.fold_section(super::section_id("direct"), false);
+        app.scene().menu.collapsed = vec!["direct".to_string()];
+        tracked_collapsed = vec!["direct".to_string()];
+        app.scene().menu.tab = "GI".into();
+        tracked_tab = "GI".into();
+        ui.select_tab(super::strip_id(0), super::tab_id("GI"));
+        let _ = genos_ui::button_panel_blocks(
+            &mut ui,
+            "stress",
+            &blocks,
+            [1024.0, 832.0],
+            &genos_scene::Camera::opening(),
+            genos_ui::Pointer::default(),
+        );
+        super::push_menu(
+            &mut app,
+            &ui,
+            &folds,
+            &menu,
+            menu_open,
+            true,
+            &dir,
+            &mut tracked_collapsed,
+            &mut tracked_tab,
+        )
+        .expect("push again");
+        assert_eq!(app.scene().menu.tab, "GI");
+        assert_eq!(
+            app.scene().menu.collapsed,
+            vec!["direct".to_string()],
+            "a fold on another page was dropped"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_unseen_fold_stays_in_the_collapsed_list() {
         let mut ui = genos_ui::State::default();
         ui.fold_section(1, true);
@@ -2273,7 +2385,22 @@ mod tests {
         let merged = super::merge_collapsed(&["world".into(), "direct".into()], &ui, &folds);
         assert_eq!(merged, vec!["world".to_string(), "direct".to_string()]);
         ui.fold_section(1, false);
-        let merged = super::merge_collapsed(&merged, &ui, &folds);
+        let still = super::merge_collapsed(&merged, &ui, &folds);
+        assert_eq!(
+            still,
+            vec!["world".to_string(), "direct".to_string()],
+            "an open fold stays until that section is on screen"
+        );
+        let section = genos_ui::PanelSection::new(1, "Lamps", false, vec![]);
+        let _ = genos_ui::button_panel_sections(
+            &mut ui,
+            "stress",
+            &[section],
+            [800.0, 600.0],
+            &genos_scene::Camera::opening(),
+            genos_ui::Pointer::default(),
+        );
+        let merged = super::merge_collapsed(&still, &ui, &folds);
         assert_eq!(merged, vec!["world".to_string()]);
     }
 }
