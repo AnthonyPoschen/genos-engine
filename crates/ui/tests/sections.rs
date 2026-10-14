@@ -166,7 +166,10 @@ fn the_panel_stays_within_a_third_and_wraps_every_line() {
         .iter()
         .find(|shown| shown.text.as_deref() == Some(title))
         .expect("title");
-    assert!(heading.rect.h > 16.0);
+    assert!(
+        heading.rect.h <= 16.0 + 8.0,
+        "a word with no spaces stays one line"
+    );
     assert!(heading.rect.w <= panel.rect.w);
     let body = frame
         .shown

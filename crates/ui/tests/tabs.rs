@@ -163,7 +163,7 @@ fn brackets_change_the_page_and_the_choice_is_remembered() {
 }
 
 #[test]
-fn tab_labels_wrap_and_the_bar_does_not_move() {
+fn a_tab_word_stays_one_line_and_the_bar_does_not_move() {
     let blocks = vec![PanelBlock::Tabs(PanelTabs {
         id: 100,
         tabs: vec![
@@ -183,8 +183,8 @@ fn tab_labels_wrap_and_the_bar_does_not_move() {
     let gi = first.shown.iter().find(|shown| shown.id == 101).unwrap();
     let shade = first.shown.iter().find(|shown| shown.id == 102).unwrap();
     assert!(
-        shade.rect.h > 16.0 + 8.0,
-        "a long label wraps inside its cell"
+        shade.rect.h <= 16.0 + 8.0 + 0.5,
+        "a word stays on one line"
     );
     assert_eq!(gi.rect.w, shade.rect.w);
     assert_eq!(gi.rect.h, shade.rect.h);

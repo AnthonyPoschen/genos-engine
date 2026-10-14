@@ -6,11 +6,11 @@
 # GENOS_MENU_LAYOUT points at another file of this shape.
 # Setting names are the config keys, plus review, scene, checkpoint, view, and fps.
 # Move a line to another tab or section. No code change is required.
-Scene/View | - | - | open | scene
-Scene/View | - | - | open | checkpoint
-Scene/View | - | - | open | view
-Scene/View | - | - | open | lighting_preset
-Scene/View | - | - | open | sky
+Scene | - | - | open | scene
+Scene | - | - | open | checkpoint
+Scene | - | - | open | view
+Scene | - | - | open | lighting_preset
+Scene | - | - | open | sky
 Pipeline | - | - | open | lighting_direct
 Pipeline | - | - | open | lighting_shadows
 Pipeline | - | - | open | lighting_gi
@@ -24,14 +24,14 @@ Pipeline | - | - | open | lighting_denoise_adaptive
 Pipeline | - | - | open | lighting_compose_reuse
 Pipeline | - | - | open | lighting_lamp_pick_reuse
 Pipeline | - | - | open | lighting_lamp_pick_unbiased
-Direct/Lamps | direct | Lamps | open | lighting_direct_lights
-Direct/Lamps | direct | Lamps | open | lighting_direct_refresh
-Direct/Lamps | direct | Lamps | open | lighting_direct_scale
-Direct/Lamps | direct | Lamps | open | lighting_lamp_pick
-Direct/Lamps | direct | Lamps | open | lighting_lamp_pick_samples
-Direct/Lamps | direct | Lamps | open | lighting_lamp_pick_candidates
-Direct/Lamps | direct | Lamps | open | lighting_lamp_pick_radius
-Direct/Lamps | direct | Lamps | open | lighting_lamp_pick_history
+Lamps | direct | Lamps | open | lighting_direct_lights
+Lamps | direct | Lamps | open | lighting_direct_refresh
+Lamps | direct | Lamps | open | lighting_direct_scale
+Lamps | direct | Lamps | open | lighting_lamp_pick
+Lamps | direct | Lamps | open | lighting_lamp_pick_samples
+Lamps | direct | Lamps | open | lighting_lamp_pick_candidates
+Lamps | direct | Lamps | open | lighting_lamp_pick_radius
+Lamps | direct | Lamps | open | lighting_lamp_pick_history
 GI | gi | Probes | open | lighting_bounces
 GI | gi | Probes | open | lighting_gi_refresh
 GI | gi | Probes | open | lighting_budget_shift
@@ -42,8 +42,8 @@ GI | world | World cache | closed | lighting_screen_verify
 GI | world | World cache | closed | lighting_world_verify
 Denoise | - | - | open | lighting_denoise_iters
 Denoise | - | - | open | lighting_denoise_variance
-Shadows/Ambient | - | - | open | lighting_shadow_filter
-Shadows/Ambient | - | - | open | lighting_ambient
+Shadows | - | - | open | lighting_shadow_filter
+Shadows | - | - | open | lighting_ambient
 Perf | - | - | open | lighting_full_effort
 Perf | - | - | open | unfilled
 Perf | - | - | open | unfilled_tint

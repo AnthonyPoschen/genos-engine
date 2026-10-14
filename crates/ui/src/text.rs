@@ -26,6 +26,7 @@ pub(crate) fn measure(text: &str, max_width: Option<f32>) -> (f32, f32) {
         .iter()
         .map(|line| line.chars().count() as f32 * CELL_W)
         .fold(0.0_f32, f32::max);
+    let width = max_width.map(|limit| width.min(limit)).unwrap_or(width);
     (width, lines.len() as f32 * CELL_H)
 }
 
@@ -35,6 +36,9 @@ pub(crate) fn blots(text: &str, x: f32, y: f32, max_width: f32) -> Vec<Blot> {
         let top = y + row as f32 * CELL_H;
         for (col, ch) in line.chars().enumerate() {
             let left = x + col as f32 * CELL_W;
+            if left + CELL_W > x + max_width + 0.01 {
+                break;
+            }
             stamp(&mut out, ch, left, top, PIXEL);
         }
     }
@@ -59,11 +63,6 @@ pub(crate) fn blots_small(text: &str, x: f32, y: f32) -> Vec<Blot> {
 
 fn wrap(text: &str, max_width: Option<f32>) -> Vec<String> {
     let limit = max_width.unwrap_or(f32::INFINITY);
-    let max_chars = if limit.is_finite() {
-        ((limit / CELL_W).floor() as usize).max(1)
-    } else {
-        usize::MAX
-    };
     let words: Vec<&str> = text.split_whitespace().collect();
     if words.is_empty() {
         return Vec::new();
@@ -71,38 +70,23 @@ fn wrap(text: &str, max_width: Option<f32>) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
     for word in words {
-        for piece in break_word(word, max_chars) {
-            let trial = if current.is_empty() {
-                piece.clone()
-            } else {
-                format!("{current} {piece}")
-            };
-            let width = trial.chars().count() as f32 * CELL_W;
-            if width <= limit || current.is_empty() {
-                current = trial;
-            } else {
-                lines.push(std::mem::take(&mut current));
-                current = piece;
-            }
+        let trial = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        let width = trial.chars().count() as f32 * CELL_W;
+        if width <= limit || current.is_empty() {
+            current = trial;
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current = word.to_string();
         }
     }
     if !current.is_empty() {
         lines.push(current);
     }
     lines
-}
-
-/// A token longer than the line is split so it cannot widen the line.
-fn break_word(word: &str, max_chars: usize) -> Vec<String> {
-    let count = word.chars().count();
-    if count <= max_chars {
-        return vec![word.to_string()];
-    }
-    let chars: Vec<char> = word.chars().collect();
-    chars
-        .chunks(max_chars)
-        .map(|chunk| chunk.iter().collect())
-        .collect()
 }
 
 fn stamp(out: &mut Vec<Blot>, ch: char, x: f32, y: f32, pixel: f32) {
@@ -214,5 +198,23 @@ mod tests {
         assert_ne!(glyph(';'), [0, 0, 0, 0, 0, 0, 0]);
         assert_ne!(glyph(','), glyph(';'));
         assert_ne!(glyph('\''), glyph(','));
+    }
+
+    #[test]
+    fn a_word_stays_whole_and_spaces_still_wrap() {
+        let long = "SCENEVIEW";
+        assert_eq!(super::wrap(long, Some(24.0)), vec![long.to_string()]);
+        let (width, height) = super::measure(long, Some(24.0));
+        assert!(width <= 24.0);
+        assert_eq!(height, super::CELL_H);
+        let marks = super::blots(long, 0.0, 0.0, 24.0);
+        assert!(marks.iter().all(|blot| blot.x + blot.w <= 24.0 + 0.01));
+        let columns = marks
+            .iter()
+            .map(|blot| (blot.x / super::CELL_W).floor() as i32)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(columns.len(), 2);
+        let phrase = super::wrap("Adaptive denoise", Some(8.0 * super::CELL_W));
+        assert_eq!(phrase, vec!["Adaptive".to_string(), "denoise".to_string()]);
     }
 }

@@ -81,8 +81,8 @@ The fold is remembered in <out>/menu/collapsed.txt. The open page is remembered
 in <out>/menu/tab.txt.
 The groups are debug/lighting/menu.txt. A section key of - has no fold.
 GENOS_MENU_LAYOUT points at another file. The panel stays within a third of
-the window. The pages are Scene/View, Pipeline, Direct/Lamps, GI, Denoise,
-Shadows/Ambient, Perf, and Info. Direct and GI keep folds because those pages
+the window. The pages are Scene, Pipeline, Lamps, GI, Denoise,
+Shadows, Perf, and Info. Lamps and GI keep folds because those pages
 are tall.
 WASD fly, Space
 up, C or Ctrl down, Shift is faster. The plate shows FPS and frame ms, averaged
@@ -2144,12 +2144,12 @@ mod tests {
         assert_eq!(
             titles,
             [
-                "Scene/View",
+                "Scene",
                 "Pipeline",
-                "Direct/Lamps",
+                "Lamps",
                 "GI",
                 "Denoise",
-                "Shadows/Ambient",
+                "Shadows",
                 "Perf",
                 "Info"
             ]
@@ -2157,13 +2157,13 @@ mod tests {
         let scene = tabs
             .tabs
             .iter()
-            .find(|tab| tab.title == "Scene/View")
+            .find(|tab| tab.title == "Scene")
             .unwrap();
         assert!(matches!(scene.blocks[0], genos_ui::PanelBlock::Rows(_)));
         let direct = tabs
             .tabs
             .iter()
-            .find(|tab| tab.title == "Direct/Lamps")
+            .find(|tab| tab.title == "Lamps")
             .unwrap();
         assert!(direct.blocks.iter().any(|block| matches!(
             block,
