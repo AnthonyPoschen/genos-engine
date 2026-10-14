@@ -193,7 +193,11 @@ fn a_tab_word_stays_one_line_and_the_bar_does_not_move() {
     );
     assert!((gi.rect.h - shade.rect.h).abs() < 0.5);
     assert!((gi.rect.w - (2.0 * 12.0 + 8.0)).abs() < 1.0);
-    assert!(shade.rect.x + shade.rect.w <= panel.rect.x + panel.rect.w + 0.5);
+    assert!(
+        (shade.rect.w - ("Shadows/Ambient".chars().count() as f32 * 12.0 + 8.0)).abs() < 1.0,
+        "a tab wider than the row keeps its whole label"
+    );
+    assert!(panel.rect.w <= 400.0 / 3.0 + 0.5);
     let width = panel.rect.w;
     let bar = (
         gi.rect.x,
@@ -315,8 +319,34 @@ fn titled(id: u32, title: &str) -> PanelTab {
     }
 }
 
+fn tab_line() -> f32 {
+    16.0 + 8.0
+}
+
+fn assert_tabs_fully_visible(frame: &genos_ui::Frame, titles: &[&str], panel: genos_ui::Rect) {
+    let line = tab_line();
+    for (index, title) in titles.iter().enumerate() {
+        let tab = frame
+            .shown
+            .iter()
+            .find(|shown| shown.id == 1000 + index as u32)
+            .unwrap_or_else(|| panic!("{title} is missing"));
+        assert_eq!(tab.text.as_deref(), Some(*title));
+        assert!((tab.rect.h - line).abs() < 0.5, "{title} is one line");
+        assert!(
+            (tab.rect.w - (title.chars().count() as f32 * 12.0 + 8.0)).abs() < 1.0,
+            "{title} keeps its whole label"
+        );
+        assert!(tab.rect.x >= panel.x - 0.5);
+        assert!(
+            tab.rect.x + tab.rect.w <= panel.x + panel.w + 0.5,
+            "{title} is cut at the panel edge"
+        );
+    }
+}
+
 #[test]
-fn tabs_sit_on_one_short_row_and_the_row_scrolls_sideways() {
+fn tabs_wrap_onto_another_compact_row_when_the_strip_overflows() {
     let titles = [
         "Scene", "Pipeline", "Lamps", "GI", "Denoise", "Shadows", "Perf", "Info",
     ];
@@ -346,49 +376,90 @@ fn tabs_sit_on_one_short_row_and_the_row_scrolls_sideways() {
         .rect;
     assert!(panel.w <= viewport[0] / 3.0 + 0.5);
     let strip = frame.shown.iter().find(|shown| shown.id == 100).unwrap().rect;
-    assert!(strip.h <= 16.0 + 8.0 + 0.5, "the row is one line, not a tall box");
-    assert!(strip.h < 40.0);
-    let mut y = None;
-    for (index, title) in titles.iter().enumerate() {
-        let Some(tab) = frame.shown.iter().find(|shown| shown.id == 1000 + index as u32) else {
-            continue;
-        };
-        assert_eq!(tab.text.as_deref(), Some(*title));
-        assert!((tab.rect.h - strip.h).abs() < 0.5);
-        assert!(tab.rect.x + tab.rect.w <= panel.x + panel.w + 0.5);
-        assert!(tab.rect.x >= panel.x - 0.5);
-        y = Some(tab.rect.y);
-    }
-    let y = y.expect("a tab");
-    assert!(frame.shown.iter().filter(|shown| (1000..1008).contains(&shown.id)).all(|shown| (shown.rect.y - y).abs() < 0.5));
-    let scene = frame.shown.iter().find(|shown| shown.id == 1000).unwrap().rect;
-    assert!((scene.w - ("Scene".chars().count() as f32 * 12.0 + 8.0)).abs() < 1.0);
+    let line = tab_line();
+    assert!(strip.h > line + 0.5, "overflow wraps onto a second row");
     assert!(
-        frame.shown.iter().all(|shown| shown.id == PANEL_ID || shown.rect.h <= strip.h + 0.5 || shown.rect.y > strip.y + strip.h),
+        strip.h <= line * 2.0 + 4.0 + 0.5,
+        "the second row stays one line, not a tall box"
+    );
+    assert_tabs_fully_visible(&frame, &titles, panel);
+    let mut rows = Vec::new();
+    for id in 1000..1008 {
+        let y = frame.shown.iter().find(|shown| shown.id == id).unwrap().rect.y;
+        if !rows.iter().any(|row: &f32| (row - y).abs() < 0.5) {
+            rows.push(y);
+        }
+    }
+    assert_eq!(rows.len(), 2, "the eight labels use two rows");
+    let scene = frame.shown.iter().find(|shown| shown.id == 1000).unwrap().rect;
+    let shadows = frame.shown.iter().find(|shown| shown.id == 1005).unwrap().rect;
+    assert!((shadows.y - scene.y).abs() > 1.0, "Shadows is on the next row");
+    assert!(
+        frame.shown.iter().all(|shown| {
+            shown.id == PANEL_ID
+                || shown.rect.h <= strip.h + 0.5
+                || shown.rect.y > strip.y + strip.h
+        }),
         "no empty filler cell beside the tabs"
     );
 
-    let mut wheel = Pointer::at(strip.x + 8.0, strip.y + strip.h * 0.5, false);
-    wheel.wheel_y = -6.0;
-    let row_y = frame.shown.iter().find(|shown| shown.id == 100001).unwrap().rect.y;
-    let scrolled = button_panel_blocks(
+    let wide = button_panel_blocks(
+        &mut State::default(),
+        "stress",
+        &blocks,
+        [1920.0, 1080.0],
+        &Camera::opening(),
+        Pointer::default(),
+    );
+    let wide_panel = wide
+        .shown
+        .iter()
+        .find(|shown| shown.id == PANEL_ID)
+        .unwrap()
+        .rect;
+    let wide_strip = wide.shown.iter().find(|shown| shown.id == 100).unwrap().rect;
+    assert!(wide_strip.h <= line + 0.5, "a wide panel keeps one row");
+    assert_tabs_fully_visible(&wide, &titles, wide_panel);
+    let y = wide.shown.iter().find(|shown| shown.id == 1000).unwrap().rect.y;
+    assert!(wide
+        .shown
+        .iter()
+        .filter(|shown| (1000..1008).contains(&shown.id))
+        .all(|shown| (shown.rect.y - y).abs() < 0.5));
+
+    let bar = frame
+        .shown
+        .iter()
+        .filter(|shown| (1000..1008).contains(&shown.id))
+        .map(|shown| (shown.id, shown.rect.x, shown.rect.y, shown.rect.w))
+        .collect::<Vec<_>>();
+    let mut next = Pointer::default();
+    next.tab_next = true;
+    let _ = button_panel_blocks(
         &mut state,
         "stress",
         &blocks,
         viewport,
         &Camera::opening(),
-        wheel,
+        next,
     );
-    assert!(scrolled.consumed.wheel);
-    let scene = scrolled.shown.iter().find(|shown| shown.id == 1000);
-    assert!(scene.is_none() || scene.unwrap().rect.x < strip.x - 1.0 || scene.unwrap().rect.w < 20.0);
-    assert_eq!(
-        scrolled.shown.iter().find(|shown| shown.id == 100001).unwrap().rect.y,
-        row_y,
-        "the page stays while the tab row scrolls"
+    let second = button_panel_blocks(
+        &mut state,
+        "stress",
+        &blocks,
+        viewport,
+        &Camera::opening(),
+        Pointer::default(),
     );
-    assert!(scrolled.shown.iter().any(|shown| (1003..1008).contains(&shown.id)));
+    let after = second
+        .shown
+        .iter()
+        .filter(|shown| (1000..1008).contains(&shown.id))
+        .map(|shown| (shown.id, shown.rect.x, shown.rect.y, shown.rect.w))
+        .collect::<Vec<_>>();
+    assert_eq!(after, bar, "changing page does not move the bar");
 
+    let row_y = frame.shown.iter().find(|shown| shown.id == 100001).unwrap().rect.y;
     let below = Pointer {
         x: panel.x + 8.0,
         y: strip.y + strip.h + 30.0,
@@ -404,7 +475,10 @@ fn tabs_sit_on_one_short_row_and_the_row_scrolls_sideways() {
         below,
     );
     assert_ne!(
-        page.shown.iter().find(|shown| shown.id == 100001).map(|shown| shown.rect.y),
+        page.shown
+            .iter()
+            .find(|shown| shown.id == 100001)
+            .map(|shown| shown.rect.y),
         Some(row_y)
     );
 }
