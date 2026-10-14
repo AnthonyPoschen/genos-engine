@@ -19,8 +19,9 @@ use genos_stress::building::{Layout, LightMix};
 use genos_stress::knobs::{apply_lighting_knob, lighting_knobs};
 use genos_stress::stage::{Scale, Stage};
 use genos_ui::{
-    button_panel_sections, show_menu_tab, Action, FpsOverlay, PanelCheck, PanelDropdown, PanelRow,
-    PanelSection, PanelSlider, Pointer, SliderStep, State, MENU_HIDE, MENU_SHOW,
+    button_panel_blocks, show_menu_tab, Action, FpsOverlay, PanelBlock, PanelCheck, PanelDropdown,
+    PanelRow, PanelSection, PanelSlider, PanelTab, PanelTabs, Pointer, SliderStep, State,
+    MENU_HIDE, MENU_SHOW,
 };
 use genos_window::{extent_changed, FocusGate, Window};
 
@@ -61,7 +62,8 @@ pointer, or move the highlight in an open dropdown. Enter picks the highlighted
 choice. Escape closes the list. Grave hides the menu. Grave again shows it.
 F1 is the same key. The title bar hide button hides it. A menu tab in the
 top-left corner shows it. F toggles the frame-rate plate. F3 is the same key. A section title
-folds that group. The fold is remembered in <out>/menu/collapsed.txt. The panel
+folds that group. The fold is remembered in <out>/menu/collapsed.txt. The groups
+are debug/lighting/menu.txt. GENOS_MENU_LAYOUT points at another file. The panel
 stays within a third of the window. The scene description is the Info section.
 WASD fly, Space
 up, C or Ctrl down, Shift is faster. The plate shows FPS and frame ms, averaged
@@ -84,73 +86,10 @@ const ID_FPS: u32 = 2800;
 const ID_FPS_HZ: u32 = 2801;
 const ID_KNOB: u32 = 3000;
 const ID_SWITCH: u32 = 4000;
-const SEC_SCENE: u32 = 5100;
-const SEC_PIPELINE: u32 = 5101;
-const SEC_DIRECT: u32 = 5102;
-const SEC_GI: u32 = 5103;
-const SEC_DENOISE: u32 = 5104;
-const SEC_SHADOW: u32 = 5105;
-const SEC_PERF: u32 = 5106;
-const SEC_INFO: u32 = 5107;
-const CHECKS_PER_ROW: usize = 3;
 
-struct Fold {
-    id: u32,
-    key: &'static str,
-    title: &'static str,
-    start_collapsed: bool,
-}
+mod menu_layout;
 
-const FOLDS: &[Fold] = &[
-    Fold {
-        id: SEC_INFO,
-        key: "info",
-        title: "Info",
-        start_collapsed: true,
-    },
-    Fold {
-        id: SEC_SCENE,
-        key: "scene",
-        title: "Scene/View",
-        start_collapsed: false,
-    },
-    Fold {
-        id: SEC_PIPELINE,
-        key: "pipeline",
-        title: "Pipeline toggles",
-        start_collapsed: false,
-    },
-    Fold {
-        id: SEC_DIRECT,
-        key: "direct",
-        title: "Direct/Lamps",
-        start_collapsed: true,
-    },
-    Fold {
-        id: SEC_GI,
-        key: "gi",
-        title: "GI/Probes/World cache",
-        start_collapsed: true,
-    },
-    Fold {
-        id: SEC_DENOISE,
-        key: "denoise",
-        title: "Denoise",
-        start_collapsed: true,
-    },
-    Fold {
-        id: SEC_SHADOW,
-        key: "shadows",
-        title: "Shadows/Ambient",
-        start_collapsed: true,
-    },
-    Fold {
-        id: SEC_PERF,
-        key: "perf",
-        title: "Perf/FPS",
-        start_collapsed: false,
-    },
-];
+use menu_layout::{load_menu_layout, menu_folds, section_id, strip_id, tab_id, MenuFold, MenuLine};
 /// Ordered grades and numeric knobs. An on/off switch is not in this list.
 const SLIDER_KNOBS: &[&str] = &[
     "lighting_preset",
@@ -267,10 +206,12 @@ fn run() -> Result<(), String> {
     }
     let mut size = (renderer.width(), renderer.height());
     let mut focus = FocusGate::default();
+    let menu = load_menu_layout()?;
+    let folds = menu_folds(&menu);
     let mut ui = State::default();
     if let Some(names) = load_menu_folds(&opts.out) {
-        for fold in FOLDS {
-            ui.fold_section(fold.id, names.iter().any(|name| name == fold.key));
+        for fold in &folds {
+            ui.fold_section(fold.id, names.iter().any(|name| name == &fold.key));
         }
     }
     let mut input = InputSystem::new();
@@ -344,11 +285,11 @@ fn run() -> Result<(), String> {
             (ui_frame.paints, ui_frame.look_capture)
         } else {
             let fps_menu = app.scene().fps_counter.effective();
-            let sections = panel_sections(&app, tools.view_mode(), &fps_menu);
-            let ui_frame = button_panel_sections(
+            let blocks = panel_blocks(&app, tools.view_mode(), &fps_menu, &menu, &keys);
+            let ui_frame = button_panel_blocks(
                 &mut ui,
                 &panel_title(&app),
-                &sections,
+                &blocks,
                 [size.0 as f32, size.1 as f32],
                 &camera,
                 pointer,
@@ -363,8 +304,8 @@ fn run() -> Result<(), String> {
                     Action::Press(id) => {
                         if id == MENU_HIDE {
                             menu_open = false;
-                        } else if FOLDS.iter().any(|fold| fold.id == id) {
-                            save_menu_folds(&opts.out, &ui)?;
+                        } else if folds.iter().any(|fold| fold.id == id) {
+                            save_menu_folds(&opts.out, &ui, &folds)?;
                         }
                     }
                     _ => {}
@@ -1056,141 +997,219 @@ fn knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
 
 #[cfg(test)]
 fn panel_rows(app: &App, view: ViewMode, fps: &FpsCounterSettings) -> Vec<PanelRow> {
-    panel_sections(app, view, fps)
-        .into_iter()
-        .flat_map(|section| section.rows)
-        .collect()
+    let menu = load_menu_layout().expect("layout");
+    let keys = genos_input::KeyBindings::builtin();
+    flatten_blocks(&panel_blocks(app, view, fps, &menu, &keys))
 }
 
-fn panel_sections(app: &App, view: ViewMode, fps: &FpsCounterSettings) -> Vec<PanelSection> {
+#[cfg(test)]
+fn flatten_blocks(blocks: &[PanelBlock]) -> Vec<PanelRow> {
+    let mut rows = Vec::new();
+    for block in blocks {
+        match block {
+            PanelBlock::Section(section) => {
+                rows.extend(section.rows.clone());
+                rows.extend(flatten_blocks(&section.blocks));
+            }
+            PanelBlock::Tabs(tabs) => {
+                for tab in &tabs.tabs {
+                    rows.extend(flatten_blocks(&tab.blocks));
+                }
+            }
+        }
+    }
+    rows
+}
+
+enum Piece {
+    Row(PanelRow),
+    Check(PanelCheck),
+}
+
+struct SectionAcc {
+    tab: Option<String>,
+    key: String,
+    title: String,
+    collapsed: bool,
+    rows: Vec<PanelRow>,
+    checks: Vec<PanelCheck>,
+}
+
+fn flush_checks(section: &mut SectionAcc) {
+    if section.checks.is_empty() {
+        return;
+    }
+    section.rows.push(PanelRow {
+        label: String::new(),
+        buttons: Vec::new(),
+        slider: None,
+        dropdown: None,
+        checks: std::mem::take(&mut section.checks),
+    });
+}
+
+fn panel_blocks(
+    app: &App,
+    view: ViewMode,
+    fps: &FpsCounterSettings,
+    lines: &[MenuLine],
+    keys: &genos_input::KeyBindings,
+) -> Vec<PanelBlock> {
+    let mut sections = Vec::new();
+    for line in lines {
+        let same = sections.last().is_some_and(|section: &SectionAcc| {
+            section.tab == line.tab && section.key == line.section
+        });
+        if !same {
+            if let Some(section) = sections.last_mut() {
+                flush_checks(section);
+            }
+            sections.push(SectionAcc {
+                tab: line.tab.clone(),
+                key: line.section.clone(),
+                title: line.title.clone(),
+                collapsed: line.collapsed,
+                rows: Vec::new(),
+                checks: Vec::new(),
+            });
+        }
+        let Some(piece) = setting_piece(app, view, fps, keys, &line.setting) else {
+            continue;
+        };
+        let section = sections.last_mut().expect("section");
+        match piece {
+            Piece::Row(row) => {
+                flush_checks(section);
+                section.rows.push(row);
+            }
+            Piece::Check(check) => section.checks.push(check),
+        }
+    }
+    if let Some(section) = sections.last_mut() {
+        flush_checks(section);
+    }
+    let mut blocks = Vec::new();
+    let mut strip: Option<PanelTabs> = None;
+    let mut strip_index = 0usize;
+    for section in sections {
+        let built = PanelSection::new(
+            section_id(&section.key),
+            section.title,
+            section.collapsed,
+            section.rows,
+        );
+        match section.tab {
+            None => {
+                if let Some(tabs) = strip.take() {
+                    blocks.push(PanelBlock::Tabs(tabs));
+                }
+                blocks.push(PanelBlock::Section(built));
+            }
+            Some(name) => {
+                if strip.is_none() {
+                    strip = Some(PanelTabs {
+                        id: strip_id(strip_index),
+                        tabs: Vec::new(),
+                    });
+                    strip_index += 1;
+                }
+                let tabs = strip.as_mut().expect("strip");
+                if let Some(tab) = tabs.tabs.iter_mut().find(|tab| tab.title == name) {
+                    tab.blocks.push(PanelBlock::Section(built));
+                } else {
+                    tabs.tabs.push(PanelTab {
+                        id: tab_id(&name),
+                        title: name,
+                        blocks: vec![PanelBlock::Section(built)],
+                    });
+                }
+            }
+        }
+    }
+    if let Some(tabs) = strip {
+        blocks.push(PanelBlock::Tabs(tabs));
+    }
+    blocks
+}
+
+fn setting_piece(
+    app: &App,
+    view: ViewMode,
+    fps: &FpsCounterSettings,
+    keys: &genos_input::KeyBindings,
+    setting: &str,
+) -> Option<Piece> {
     let view_value = VIEWS
         .iter()
         .position(|name| *name == view_name(view))
         .unwrap_or(0) as f64;
-    let info = vec![PanelRow {
-        label: app.entry().review.clone(),
-        buttons: Vec::new(),
-        slider: None,
-        dropdown: None,
-        checks: Vec::new(),
-    }];
-    let mut scene = Vec::new();
-    if let Some(row) = drop_row(
-        "Scene",
-        ID_SCENE,
-        app.index as f64,
-        app.entries.iter().map(|entry| entry.name.clone()).collect(),
-    ) {
-        scene.push(row);
-    }
-    if let Some(row) = drop_row(
-        "Checkpoint",
-        ID_CP,
-        app.checkpoint as f64,
-        app.entry()
-            .checkpoints
-            .iter()
-            .map(|checkpoint| checkpoint.name.clone())
-            .collect(),
-    ) {
-        scene.push(row);
-    }
-    if let Some(row) = drop_row(
-        "View",
-        ID_VIEW,
-        view_value,
-        VIEWS.iter().map(|name| (*name).to_string()).collect(),
-    ) {
-        scene.push(row);
-    }
-    scene.extend(switch_rows_for(app, SEC_SCENE));
-    let pipeline = switch_rows_for(app, SEC_PIPELINE);
-    let mut direct = Vec::new();
-    let mut gi = Vec::new();
-    let mut denoise = Vec::new();
-    for (index, name) in SLIDER_KNOBS.iter().enumerate() {
-        let Some(row) = knob_row(app, index, name) else {
-            continue;
-        };
-        match slider_home(name) {
-            SEC_SCENE => scene.push(row),
-            SEC_DIRECT => direct.push(row),
-            SEC_DENOISE => denoise.push(row),
-            _ => gi.push(row),
-        }
-    }
-    let mut shadows = Vec::new();
-    for (index, name) in DROP_KNOBS.iter().enumerate() {
-        let Some(row) = drop_knob_row(app, index, name) else {
-            continue;
-        };
-        if drop_home(name) == SEC_DIRECT {
-            direct.push(row);
-        } else {
-            shadows.push(row);
-        }
-    }
-    let mut perf = switch_rows_for(app, SEC_PERF);
-    perf.push(fps_row(fps));
-    let grouped = [info, scene, pipeline, direct, gi, denoise, shadows, perf];
-    FOLDS
-        .iter()
-        .zip(grouped)
-        .map(|(fold, rows)| PanelSection::new(fold.id, fold.title, fold.start_collapsed, rows))
-        .collect()
-}
-
-fn slider_home(name: &str) -> u32 {
-    match name {
-        "lighting_preset" => SEC_SCENE,
-        "lighting_direct_lights"
-        | "lighting_direct_refresh"
-        | "lighting_direct_scale"
-        | "lighting_lamp_pick_samples"
-        | "lighting_lamp_pick_candidates"
-        | "lighting_lamp_pick_radius"
-        | "lighting_lamp_pick_history" => SEC_DIRECT,
-        "lighting_denoise_iters" | "lighting_denoise_variance" => SEC_DENOISE,
-        _ => SEC_GI,
-    }
-}
-
-fn drop_home(name: &str) -> u32 {
-    match name {
-        "lighting_lamp_pick" => SEC_DIRECT,
-        _ => SEC_SHADOW,
-    }
-}
-
-fn switch_home(name: &str) -> u32 {
-    match name {
-        "sky" => SEC_SCENE,
-        "unfilled" | "unfilled_tint" => SEC_PERF,
-        _ => SEC_PIPELINE,
-    }
-}
-
-fn switch_rows_for(app: &App, home: u32) -> Vec<PanelRow> {
-    let checks: Vec<PanelCheck> = switch_knobs(app)
-        .into_iter()
-        .enumerate()
-        .filter(|(_, knob)| switch_home(&knob.name) == home)
-        .map(|(index, knob)| PanelCheck {
-            id: ID_SWITCH + index as u32,
-            text: menu_label(&knob.name, &knob.label),
-            on: knob.value >= 0.5,
-        })
-        .collect();
-    checks
-        .chunks(CHECKS_PER_ROW)
-        .map(|chunk| PanelRow {
-            label: String::new(),
+    match setting {
+        "review" => Some(Piece::Row(PanelRow {
+            label: app.entry().review.clone(),
             buttons: Vec::new(),
             slider: None,
             dropdown: None,
-            checks: chunk.to_vec(),
-        })
-        .collect()
+            checks: Vec::new(),
+        })),
+        "hint" => Some(Piece::Row(PanelRow {
+            label: format!(
+                "{} hides. {} plate. {} count. {} tint.",
+                keys.hint("menu"),
+                keys.hint("fps"),
+                keys.hint("unfilled"),
+                keys.hint("unfilled_tint")
+            ),
+            buttons: Vec::new(),
+            slider: None,
+            dropdown: None,
+            checks: Vec::new(),
+        })),
+        "scene" => drop_row(
+            "Scene",
+            ID_SCENE,
+            app.index as f64,
+            app.entries.iter().map(|entry| entry.name.clone()).collect(),
+        )
+        .map(Piece::Row),
+        "checkpoint" => drop_row(
+            "Checkpoint",
+            ID_CP,
+            app.checkpoint as f64,
+            app.entry()
+                .checkpoints
+                .iter()
+                .map(|checkpoint| checkpoint.name.clone())
+                .collect(),
+        )
+        .map(Piece::Row),
+        "view" => drop_row(
+            "View",
+            ID_VIEW,
+            view_value,
+            VIEWS.iter().map(|name| (*name).to_string()).collect(),
+        )
+        .map(Piece::Row),
+        "fps" => Some(Piece::Row(fps_row(fps))),
+        name => {
+            let knob = app.knobs().into_iter().find(|knob| knob.name == name)?;
+            if knob.choices == ["off", "on"] {
+                let index = switch_knobs(app)
+                    .iter()
+                    .position(|item| item.name == name)?;
+                Some(Piece::Check(PanelCheck {
+                    id: ID_SWITCH + index as u32,
+                    text: menu_label(name, &knob.label),
+                    on: knob.value >= 0.5,
+                }))
+            } else if let Some(index) = SLIDER_KNOBS.iter().position(|item| *item == name) {
+                knob_row(app, index, name).map(Piece::Row)
+            } else if let Some(index) = DROP_KNOBS.iter().position(|item| *item == name) {
+                drop_knob_row(app, index, name).map(Piece::Row)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 fn menu_fold_path(out: &Path) -> PathBuf {
@@ -1208,15 +1227,15 @@ fn load_menu_folds(out: &Path) -> Option<Vec<String>> {
     )
 }
 
-fn save_menu_folds(out: &Path, ui: &State) -> Result<(), String> {
+fn save_menu_folds(out: &Path, ui: &State, folds: &[MenuFold]) -> Result<(), String> {
     let path = menu_fold_path(out);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     let mut body = String::from("# collapsed menu sections\n");
-    for fold in FOLDS {
+    for fold in folds {
         if ui.section_collapsed(fold.id) {
-            body.push_str(fold.key);
+            body.push_str(&fold.key);
             body.push('\n');
         }
     }
@@ -1859,70 +1878,48 @@ mod tests {
             .expect("log");
         let app = super::App::open(entries, root, log).expect("app");
         let fps = genos_scene::FpsCounterSettings::default();
-        let sections = super::panel_sections(&app, ViewMode::Full, &fps);
-        let titles: Vec<&str> = sections
-            .iter()
-            .map(|section| section.title.as_str())
-            .collect();
-        assert_eq!(
-            titles,
-            [
-                "Info",
-                "Scene/View",
-                "Pipeline toggles",
-                "Direct/Lamps",
-                "GI/Probes/World cache",
-                "Denoise",
-                "Shadows/Ambient",
-                "Perf/FPS",
-            ]
-        );
+        let menu = super::load_menu_layout().expect("layout");
+        let keys = genos_input::KeyBindings::builtin();
+        let blocks = super::panel_blocks(&app, ViewMode::Full, &fps, &menu, &keys);
+        match &blocks[0] {
+            genos_ui::PanelBlock::Section(section) => {
+                assert_eq!(section.title, "Info");
+                assert!(section.collapsed);
+                assert_eq!(section.rows[0].label, app.entry().review);
+            }
+            genos_ui::PanelBlock::Tabs(_) => panic!("info sits outside the tabs"),
+        }
+        match &blocks[1] {
+            genos_ui::PanelBlock::Section(section) => assert_eq!(section.title, "Scene/View"),
+            genos_ui::PanelBlock::Tabs(_) => panic!("scene sits outside the tabs"),
+        }
+        let tabs = match &blocks[2] {
+            genos_ui::PanelBlock::Tabs(tabs) => tabs,
+            genos_ui::PanelBlock::Section(_) => panic!("the third block is the tab strip"),
+        };
+        let titles: Vec<&str> = tabs.tabs.iter().map(|tab| tab.title.as_str()).collect();
+        assert_eq!(titles, ["Direct", "GI", "Denoise", "Shade", "Perf"]);
+        let direct = tabs.tabs.iter().find(|tab| tab.title == "Direct").unwrap();
+        assert!(direct.blocks.iter().any(|block| matches!(
+            block,
+            genos_ui::PanelBlock::Section(section) if section.rows.iter().any(|row| {
+                row.checks.iter().any(|check| check.text == "Direct light")
+            })
+        )));
         let flat = super::panel_rows(&app, ViewMode::Full, &fps);
-        let flat_labels: Vec<&str> = flat
-            .iter()
-            .flat_map(|row| {
-                let mut names = vec![row.label.as_str()];
-                names.extend(row.checks.iter().map(|check| check.text.as_str()));
-                names
-            })
-            .filter(|label| !label.is_empty())
-            .collect();
-        let grouped: Vec<&str> = sections
-            .iter()
-            .flat_map(|section| section.rows.iter())
-            .flat_map(|row| {
-                let mut names = vec![row.label.as_str()];
-                names.extend(row.checks.iter().map(|check| check.text.as_str()));
-                names
-            })
-            .filter(|label| !label.is_empty())
-            .collect();
-        assert_eq!(grouped, flat_labels);
-        assert!(
-            sections
-                .iter()
-                .find(|section| section.title == "Direct/Lamps")
-                .unwrap()
-                .collapsed
-        );
+        assert!(flat.iter().any(|row| row.label == "Bounce count"));
+        assert!(flat.iter().any(|row| row.label == "Shadow cell cache"));
+        let folds = super::menu_folds(&menu);
         let mut ui = genos_ui::State::default();
-        for fold in super::FOLDS {
-            ui.fold_section(fold.id, fold.start_collapsed);
+        for fold in &folds {
+            ui.fold_section(fold.id, fold.collapsed);
         }
         let dir = std::env::temp_dir().join(format!("genos-menu-{}", std::process::id()));
-        super::save_menu_folds(&dir, &ui).expect("save");
+        super::save_menu_folds(&dir, &ui, &folds).expect("save");
         let names = super::load_menu_folds(&dir).expect("load");
         assert!(names.iter().any(|name| name == "info"));
-        assert!(names.iter().any(|name| name == "direct"));
-        assert!(names.iter().any(|name| name == "gi"));
-        let info = sections
-            .iter()
-            .find(|section| section.title == "Info")
-            .unwrap();
-        assert!(info.collapsed);
-        assert_eq!(info.rows[0].label, app.entry().review);
         assert!(names.iter().all(|name| name != "scene"));
-        assert!(names.iter().all(|name| name != "pipeline"));
+        assert!(names.iter().all(|name| name != "direct"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
