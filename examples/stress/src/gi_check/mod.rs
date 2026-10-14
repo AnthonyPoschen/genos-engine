@@ -472,6 +472,10 @@ GENOS_LIGHTING_TILE defaults to the 1440p probe spacing (height / 90), reference
 cached in $GENOS_REFERENCE_CACHE (default target/reference-cache). Exit status 1 on a FAIL;
 a missed target (MISS: 48 px swim, light structure) is reported but does not fail.";
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a binary or harness reads the environment and passes the value down. docs/LINT_RULES.md"
+)]
 fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
     let dir = out.join(run);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;

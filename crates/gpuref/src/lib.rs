@@ -384,6 +384,10 @@ impl Gpu {
 }
 
 /// Trace `setup` to convergence on the first GPU with hardware ray queries.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+)]
 pub fn render(setup: &Setup) -> Result<Output, String> {
     let started = std::time::Instant::now();
     let gpu = Gpu::new()?;

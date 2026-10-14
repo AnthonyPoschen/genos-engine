@@ -306,6 +306,10 @@ mod wasapi {
         Ok(written)
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): fixed sleep. Wait on an event or a deadline. docs/LINT_RULES.md"
+    )]
     unsafe fn fill(
         client: *mut c_void,
         render: *mut c_void,
@@ -346,6 +350,10 @@ mod wasapi {
         Ok(done as u64)
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): fixed sleep. Wait on an event or a deadline. docs/LINT_RULES.md"
+    )]
     unsafe fn wait_until_empty(client: *mut c_void, capacity: u32) -> Result<(), String> {
         let padding: unsafe extern "system" fn(*mut c_void, *mut u32) -> i32 = vcall(client, 6);
         for _ in 0..400 {
@@ -443,6 +451,10 @@ mod core_audio {
         }
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): fixed sleep. Wait on an event or a deadline. docs/LINT_RULES.md"
+    )]
     pub fn play(interleaved: &[i16], device_rate: u32) -> Result<u64, String> {
         unsafe {
             let format = StreamDesc {

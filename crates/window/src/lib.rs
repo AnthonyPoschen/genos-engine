@@ -415,6 +415,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): pointer-lock test reads WAYLAND_DISPLAY and sleeps 4s and 5s. Wait on the window event. docs/LINT_RULES.md"
+    )]
     fn the_first_click_locks_the_pointer_and_escape_releases_it() {
         if std::env::var_os("WAYLAND_DISPLAY").is_none() {
             return;

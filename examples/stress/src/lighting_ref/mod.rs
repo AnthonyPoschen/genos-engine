@@ -264,6 +264,10 @@ fn parse_u32(text: &str) -> Result<u32, String> {
         .map_err(|_| format!("expected a number, got {text}"))
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a binary or harness reads the environment and passes the value down. docs/LINT_RULES.md"
+)]
 fn env_text(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -271,6 +275,10 @@ fn env_text(name: &str) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a binary or harness reads the environment and passes the value down. docs/LINT_RULES.md"
+)]
 fn git_commit() -> String {
     if let Ok(value) = std::env::var("GENOS_ENGINE_COMMIT") {
         let value = value.trim();

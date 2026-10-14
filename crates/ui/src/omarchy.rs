@@ -30,6 +30,10 @@ pub struct Palette {
 }
 
 /// `$XDG_STATE_HOME/omarchy/current`, or `~/.local/state/omarchy/current`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "OS discovery (HOME, XDG, or WAYLAND_DISPLAY), not an engine switch. docs/LINT_RULES.md"
+)]
 pub fn omarchy_current_dir() -> PathBuf {
     let xdg = std::env::var_os("XDG_STATE_HOME");
     let home = std::env::var_os("HOME");

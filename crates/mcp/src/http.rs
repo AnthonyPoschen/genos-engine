@@ -89,6 +89,10 @@ impl Drop for Server {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): fixed sleep. Wait on an event or a deadline. docs/LINT_RULES.md"
+)]
 fn accept_loop(
     listener: TcpListener,
     host: Host,

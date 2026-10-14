@@ -31,6 +31,10 @@ fn aim(from: [f32; 3], to: [f32; 3]) -> (f32, f32) {
 
 #[test]
 #[ignore]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a binary or harness reads the environment and passes the value down. docs/LINT_RULES.md"
+)]
 fn gpu_reference_matches_the_cpu_proof() {
     let stage = Stage::new(
         Scale::SMALL,

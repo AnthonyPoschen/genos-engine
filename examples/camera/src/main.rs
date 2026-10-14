@@ -970,6 +970,10 @@ const BENCH_SETTLE_LIMIT: Duration = Duration::from_secs(10);
 const BENCH_WARMUP: Duration = Duration::from_secs(3);
 
 impl Bench {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a binary or harness reads the environment and passes the value down. docs/LINT_RULES.md"
+    )]
     fn from_env(scene: &Scene, camera: Camera) -> Result<Option<Self>, String> {
         let Ok(value) = std::env::var("GENOS_BENCH") else {
             return Ok(None);

@@ -31,6 +31,10 @@ pub enum BakeMode {
 
 impl BakeMode {
     /// `GENOS_BAKE=prebuilt|onload`; the default is `Prebuilt` (the editor's choice).
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+    )]
     pub fn from_env() -> BakeMode {
         match std::env::var("GENOS_BAKE").as_deref() {
             Ok("onload") | Ok("on-load") | Ok("load") => BakeMode::OnLoad,
@@ -55,6 +59,10 @@ pub struct BakeSettings {
 }
 
 impl Default for BakeSettings {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+    )]
     fn default() -> Self {
         Self {
             mode: BakeMode::from_env(),

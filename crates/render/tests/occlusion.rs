@@ -107,6 +107,10 @@ fn floor(half: f32) -> Floor {
 
 /// Draw the scene with the hidden lamp and with a control lamp the camera side sees.
 /// Every sample must be black with the hidden lamp and the control must light the first.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a binary or harness reads the environment and passes the value down. docs/LINT_RULES.md"
+)]
 fn check(
     label: &str,
     scene: Scene,

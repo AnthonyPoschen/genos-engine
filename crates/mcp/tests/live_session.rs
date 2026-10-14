@@ -324,6 +324,10 @@ fn the_lighting_report_is_served_on_the_bound_port() {
 }
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test waits for a fixture. docs/LINT_RULES.md"
+)]
 fn a_client_sets_the_lighting_and_reads_the_shot() {
     let _serial = serial();
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("free port");

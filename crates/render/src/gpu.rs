@@ -1038,6 +1038,10 @@ type FnQueues = unsafe extern "system" fn(Handle, *mut u32, *mut u8);
 type FnMemProps = unsafe extern "system" fn(Handle, *mut u8);
 
 impl Gpu {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+    )]
     fn open(
         display: *mut c_void,
         wl_surface: *mut c_void,
@@ -2189,6 +2193,10 @@ impl Gpu {
 
     /// Read a finished frame's stamps (its fence has been waited) and print the averages
     /// every `every` frames.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+    )]
     fn collect_frame_times(&mut self, slot: usize) {
         let bits = self.timestamp_bits;
         let period = f64::from(self.timestamp_period);

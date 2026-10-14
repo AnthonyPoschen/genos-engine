@@ -183,6 +183,10 @@ fn process_args() -> Vec<String> {
     std::env::args().skip(1).collect()
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+)]
 fn launch() -> Result<(UnfilledControl, UnfilledLimits), String> {
     let args = process_args();
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();

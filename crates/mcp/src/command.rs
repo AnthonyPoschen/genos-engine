@@ -134,6 +134,10 @@ mod tests {
     use crate::json;
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a test waits for a fixture. docs/LINT_RULES.md"
+    )]
     fn a_command_waits_for_the_frame_reply() {
         register(vec![CommandSpec {
             name: "echo".into(),

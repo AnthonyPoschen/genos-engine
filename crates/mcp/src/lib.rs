@@ -30,6 +30,10 @@ pub use rpc::command_timeout as rpc_timeout;
 pub const PORT: u16 = 8765;
 
 /// Port for [`Server::start_on`]. The environment wins when it is a number.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "GENOS_MCP_PORT is the documented port override. docs/LINT_RULES.md"
+)]
 pub fn listen_port() -> u16 {
     std::env::var("GENOS_MCP_PORT")
         .ok()

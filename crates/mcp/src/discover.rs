@@ -26,6 +26,10 @@ pub struct Endpoint {
     pub url: String,
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "OS discovery (HOME, XDG, or WAYLAND_DISPLAY), not an engine switch. docs/LINT_RULES.md"
+)]
 pub fn discovery_dir() -> PathBuf {
     if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
         if !runtime.is_empty() {

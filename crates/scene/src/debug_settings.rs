@@ -47,6 +47,10 @@ impl DebugSettings {
 
     /// The directory this process will write. `--out` on the command line wins
     /// over the environment mirror, which wins over `self.out`.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+    )]
     pub fn effective(&self, cli: Option<&str>) -> Self {
         let env = std::env::var("GENOS_UNFILLED_DIR").ok();
         Self {

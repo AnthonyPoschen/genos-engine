@@ -83,6 +83,10 @@ pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32,
 ///
 /// `GENOS_LIGHTING_LAMP_PICK_DIAG` sets bit 17 so the shade loop counts shadow
 /// rays. The mode stays off when the setting is off, and the counters still run.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+)]
 pub(crate) fn lamp_pick_push(settings: &LightingSettings) -> [u32; 4] {
     let diag = u32::from(std::env::var_os("GENOS_LIGHTING_LAMP_PICK_DIAG").is_some());
     let mode = settings.lamp_pick.mode as u32;

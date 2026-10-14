@@ -122,6 +122,10 @@ fn mean_p99(reference: &[u8], image: &[u8]) -> (f64, f64) {
 }
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a binary or harness reads the environment and passes the value down. docs/LINT_RULES.md"
+)]
 fn hash_launch_matches_gi_v2_within_cross_process_noise() {
     let dump = std::env::var("GENOS_PICTURE_DUMP").ok();
     let preset = std::env::var("GENOS_PICTURE_PRESET").unwrap_or_else(|_| "medium".into());

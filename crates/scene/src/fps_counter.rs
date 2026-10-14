@@ -98,6 +98,10 @@ impl FpsCounterSettings {
     /// A CLI slot wins. When that slot is empty, a set environment variable wins.
     /// Otherwise the field is used. `GENOS_FPS_COUNTER` and `GENOS_FPS_HZ` are read
     /// here, so a set variable wins on the frame it is set.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+    )]
     pub fn effective(&self) -> Self {
         let cli = Self::cli().unwrap_or(FpsCli {
             enabled: None,

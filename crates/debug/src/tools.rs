@@ -700,6 +700,10 @@ impl Tools {
         })
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+    )]
     fn run(&mut self, name: &str, args: &Args, ctx: &mut Ctx) -> Result<Step, String> {
         let reply = |v: Value| Ok(Step::Reply(v));
         match name {
