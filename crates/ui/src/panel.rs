@@ -124,6 +124,8 @@ pub struct State {
     selected_tabs: BTreeMap<u32, u32>,
     /// The pointer was over the panel on the last frame.
     panel_hover: bool,
+    /// Pixels the page has moved up under the tab bar. The bar stays put.
+    scroll: f32,
 }
 
 impl Default for State {
@@ -149,6 +151,7 @@ impl Default for State {
             collapsed_sections: BTreeSet::new(),
             selected_tabs: BTreeMap::new(),
             panel_hover: false,
+            scroll: 0.0,
         }
     }
 }
@@ -1306,6 +1309,162 @@ fn capped_label(id: u32, text: &str, fill: [f32; 3], max_width: Option<f32>) -> 
     node
 }
 
+struct PageScroll {
+    clip: Option<Rect>,
+    body: BTreeSet<u32>,
+}
+
+impl PageScroll {
+    fn hit_rect(&self, item: &Item) -> Rect {
+        let Some(clip) = self.clip else {
+            return item.rect;
+        };
+        if !self.body.contains(&item.id) {
+            return item.rect;
+        }
+        intersect(item.rect, clip).unwrap_or(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        })
+    }
+}
+
+/// One wheel notch moves the page by this many pixels.
+const SCROLL_STEP: f32 = 48.0;
+
+fn scroll_page(
+    state: &mut State,
+    items: &mut [Item],
+    panel_id: u32,
+    tab_ids: &[(u32, u32)],
+    bar_ids: &[u32],
+    viewport_h: f32,
+    pointer: Pointer,
+) -> PageScroll {
+    let mut strips = Vec::new();
+    for (group, _) in tab_ids {
+        if !strips.contains(group) {
+            strips.push(*group);
+        }
+    }
+    let Some(panel_index) = items.iter().position(|item| item.id == panel_id) else {
+        return PageScroll {
+            clip: None,
+            body: BTreeSet::new(),
+        };
+    };
+    let panel_rect = items[panel_index].rect;
+    let view_bottom = viewport_h - 8.0;
+    if panel_rect.y + panel_rect.h <= view_bottom + 0.5 {
+        state.scroll = 0.0;
+        return PageScroll {
+            clip: None,
+            body: BTreeSet::new(),
+        };
+    }
+    let mut body = BTreeSet::new();
+    let mut sticky_bottom = panel_rect.y;
+    let mut content_top = f32::MAX;
+    let mut content_bottom = panel_rect.y;
+    for item in items.iter() {
+        if item.id == panel_id {
+            continue;
+        }
+        if sticky_item(items, item.id, panel_id, &strips) {
+            sticky_bottom = sticky_bottom.max(item.rect.y + item.rect.h);
+        } else {
+            body.insert(item.id);
+            content_top = content_top.min(item.rect.y);
+            content_bottom = content_bottom.max(item.rect.y + item.rect.h);
+        }
+    }
+    if body.is_empty() || content_top == f32::MAX {
+        state.scroll = 0.0;
+        return PageScroll {
+            clip: None,
+            body: BTreeSet::new(),
+        };
+    }
+    let clip = Rect {
+        x: panel_rect.x,
+        y: content_top,
+        w: panel_rect.w,
+        h: (view_bottom - content_top).max(32.0),
+    };
+    let max_scroll = (content_bottom - content_top - clip.h).max(0.0);
+    let over_panel = panel_rect.contains(pointer.x, pointer.y);
+    let over_slider = items
+        .iter()
+        .any(|item| bar_ids.contains(&item.id) && item.rect.contains(pointer.x, pointer.y));
+    if max_scroll > 0.0
+        && over_panel
+        && !over_slider
+        && state.open_drop.is_none()
+        && pointer.wheel_y != 0.0
+    {
+        state.scroll -= pointer.wheel_y * SCROLL_STEP;
+    }
+    state.scroll = state.scroll.clamp(0.0, max_scroll);
+    let scroll = state.scroll;
+    for item in items.iter_mut() {
+        if !body.contains(&item.id) {
+            continue;
+        }
+        item.rect.y -= scroll;
+        item.content.y -= scroll;
+    }
+    if let Some(panel) = items.iter_mut().find(|item| item.id == panel_id) {
+        let bottom = view_bottom.max(clip.y + clip.h);
+        panel.rect.h = (bottom - panel.rect.y).max(0.0);
+    }
+    PageScroll {
+        clip: Some(clip),
+        body,
+    }
+}
+
+fn sticky_item(items: &[Item], id: u32, panel_id: u32, strips: &[u32]) -> bool {
+    if id == panel_id {
+        return true;
+    }
+    let mut current = Some(id);
+    for _ in 0..64 {
+        let Some(now) = current else {
+            return false;
+        };
+        if now == panel_id {
+            return false;
+        }
+        if strips.contains(&now) || now == TITLE_ROW || now == panel_id.wrapping_add(1) {
+            return true;
+        }
+        current = items
+            .iter()
+            .find(|item| item.id == now)
+            .and_then(|item| item.parent);
+    }
+    false
+}
+
+fn intersect(a: Rect, b: Rect) -> Option<Rect> {
+    let x0 = a.x.max(b.x);
+    let y0 = a.y.max(b.y);
+    let x1 = (a.x + a.w).min(b.x + b.w);
+    let y1 = (a.y + a.h).min(b.y + b.h);
+    if x1 <= x0 || y1 <= y0 {
+        None
+    } else {
+        Some(Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        })
+    }
+}
+
 fn finish_panel(
     state: &mut State,
     panel: Node,
@@ -1321,7 +1480,17 @@ fn finish_panel(
     let bars: Vec<&PanelSlider> = rows.iter().filter_map(|r| r.slider.as_ref()).collect();
     let drops: Vec<&PanelDropdown> = rows.iter().filter_map(|r| r.dropdown.as_ref()).collect();
     let checks: Vec<&PanelCheck> = rows.iter().flat_map(|row| row.checks.iter()).collect();
-    let items = layout::layout(&panel, Space::Screen, viewport, Some(camera));
+    let mut items = layout::layout(&panel, Space::Screen, viewport, Some(camera));
+    let bar_ids: Vec<u32> = bars.iter().map(|bar| bar.id).collect();
+    let page = scroll_page(
+        state,
+        &mut items,
+        panel.id,
+        tab_ids,
+        &bar_ids,
+        viewport[1],
+        pointer,
+    );
     if state
         .open_drop
         .is_some_and(|id| drops.iter().all(|drop| drop.id != id))
@@ -1331,7 +1500,7 @@ fn finish_panel(
     let hit = items
         .iter()
         .rev()
-        .find(|item| item.rect.contains(pointer.x, pointer.y));
+        .find(|item| page.hit_rect(item).contains(pointer.x, pointer.y));
     let mut actions = Vec::new();
     let mut look_capture = false;
     let mut consumed = false;
@@ -1446,30 +1615,60 @@ fn finish_panel(
     let mut shown = Vec::with_capacity(items.len());
     let mut paints = Vec::new();
     for item in &items {
+        let visible = page.hit_rect(item);
+        if visible.h <= 0.0 || visible.w <= 0.0 {
+            continue;
+        }
         let look = choose(item, pointer.down, hit.map(|hit| hit.id), state.focus);
         shown.push(Shown {
             id: item.id,
-            rect: item.rect,
+            rect: visible,
             look,
             idle: item.idle,
             text: item.text.clone(),
         });
-        push_paints(&mut paints, item, look, palette, None, false);
+        let mut part = Vec::new();
+        push_paints(&mut part, item, look, palette, None, false);
         if let Some(bar) = bars.iter().find(|b| b.id == item.id) {
             // Show where a held slider is going this frame.
-            push_bar(
-                &mut paints,
-                item.rect,
-                &shown_slider(bar, &actions),
-                palette,
-            );
+            push_bar(&mut part, item.rect, &shown_slider(bar, &actions), palette);
         }
         if drops.iter().any(|drop| drop.id == item.id) {
-            push_chevron(&mut paints, item.rect, state.open_drop == Some(item.id));
+            push_chevron(&mut part, item.rect, state.open_drop == Some(item.id));
         }
         if let Some(check) = checks.iter().find(|check| check.id == item.id) {
-            push_check(&mut paints, item.rect, check.on);
+            push_check(&mut part, item.rect, check.on);
         }
+        if page.body.contains(&item.id) {
+            if let Some(clip) = page.clip {
+                for paint in &mut part {
+                    match intersect(
+                        Rect {
+                            x: paint.x,
+                            y: paint.y,
+                            w: paint.w,
+                            h: paint.h,
+                        },
+                        clip,
+                    ) {
+                        Some(rect) => {
+                            paint.x = rect.x;
+                            paint.y = rect.y;
+                            paint.w = rect.w;
+                            paint.h = rect.h;
+                        }
+                        None => {
+                            paint.w = 0.0;
+                            paint.h = 0.0;
+                        }
+                    }
+                }
+            }
+        }
+        paints.extend(
+            part.into_iter()
+                .filter(|paint| paint.w > 0.0 && paint.h > 0.0),
+        );
     }
     if let Some((drop, list, scroll)) = popup_geom(state, &drops, &items, viewport) {
         state.drop_scroll = scroll;
