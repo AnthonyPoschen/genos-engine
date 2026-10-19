@@ -195,11 +195,14 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78B2](experiments/S78B2-msme-time-floor.md) | 2026-10-13 | Time-based MSME catch-up floor | not pushed (no healing; postmortem) | g78/S78B2-msme-time-floor.patch |
 | [S78H2](experiments/S78H2-sharc-read-16.md) | 2026-10-13 | SHaRC read rule 16 sets for fine short hits | not pushed (no effect; postmortem) | g78/S78H2-sharc-read-16.patch |
 | [WAKE](experiments/WAKE-neighbour-wake-design.md) | 2026-10-12 | Anthony's wake design: no wakes from shared field; real change wakes neighbours by coarse-to-fine ring tests w | planned (approved by Anthony) | none yet |
+| [WAKE PR #31](experiments/WAKE-ring-tests-pr31.md) | 2026-10-13 | Ring tests + group split implementation attempt | rejected / not remerged (12-file conflict vs master; fps claims tip-specific) | PR #31 `7729ef55` (not on master) |
 | [DEFER-SCURVE](experiments/DEFER-SCURVE-offscreen-lag-scurve.md) | 2026-10-12 | S-curve allowed quality lag for off-screen pages by priority | deferred | none |
 | [DUMP](experiments/DUMP-gpu-dump-tool.md) | 2026-10-12 | Debug dump of GPU data from two consecutive frames per component (direct, bounce, coarse/fine WRC, probe resul | in progress | none yet |
 | [RAYCEIL](experiments/RAYCEIL-world-cache-need-ray-ceilings.md) | 2026-10-12 | World-cache ray count is a per-cell ceiling from an A-SVGF check | rejected (moving +1.35 ms frame despite fewer rays; PR #8 closed) | PR #8 `42d480a6` (not on master) |
 | [QUIET](experiments/QUIET-quiet-paths-compose-filter-compact.md) | 2026-10-12 | Compose redraws 8×8 blocks whose direct, probe SH, or filtered field changed | pushed (compose only; perf on the owner GPU) | this commit |
 | [SUN](experiments/SUN-small-sun-step.md) | 2026-10-13 | Small sun step: one compose walks the band; direct every frame; four-frame catch-up | 4070 compose rose 2.78 to 3.17 before the single pass; retest decides merge | this change |
+| [WORKCUT](experiments/WORKCUT-moving-scene-lighting-reduction.md) | 2026-10-13 | Moving-scene lighting work cut (regimes + sun amortisation stack) | rejected / superseded (sun via #36; phases 3–7 never landed; PR #24 closed) | PR #24 `878aa141` (not on master) |
+| [S80-verify](experiments/S80-verify-budgets.md) | 2026-10-13 | Screen + world verify budgets for settled bounce; yaw-edge guard scouts | rejected / not remerged (no 4070 cost A/B; 12-file conflict) | PR #39 `69ed030c` (not on master) |
 | Lamp pick | 2026-10-13 | Weighted point-lamp samples (Talbot systematic, Bitterli Algorithm 6). The sun stays exact. GI presets use hits. Reuse is experimental | lavapipe picture and ray-count tests; 4070 hits within noise, reuse p99 26–36 moving and 9–17 still | this change |
 | [LSMOOTH](experiments/LSMOOTH-lighter-smoothing.md) | 2026-10-12 | Lighter smoothing | dropped (Anthony) | none |
 
