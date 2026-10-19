@@ -64,14 +64,14 @@ class NoiseTests(unittest.TestCase):
             self.assertTrue(proc.stdout.startswith("PASS dry-run evidence="))
             self.assertIn('"ui": false', (out / "capture.json").read_text(encoding="utf-8"))
 
-    def test_cold_start_past_180_frames_fails(self) -> None:
+    def test_cold_start_past_settle_frames_is_unsure(self) -> None:
         rows = [
             {"repeat": "1", "frame_ms": "16", "settled": "1", "settle_frames": "40", "image": ""},
-            {"repeat": "2", "frame_ms": "17", "settled": "0", "settle_frames": "180", "image": ""},
+            {"repeat": "2", "frame_ms": "17", "settled": "0", "settle_frames": "600", "image": ""},
         ]
-        status, reason, payload = summarize(rows, 180)
-        self.assertEqual(status, "FAIL")
-        self.assertIn("180", reason)
+        status, reason, payload = summarize(rows, 600)
+        self.assertEqual(status, "UNSURE")
+        self.assertIn("600", reason)
         self.assertEqual(payload["frame_ms"]["spread"], 1)
 
     def test_settled_repeats_pass_and_store_the_spread(self) -> None:
