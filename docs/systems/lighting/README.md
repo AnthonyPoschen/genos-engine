@@ -620,3 +620,7 @@ picture gate pins `denoise_launch=hash`.
 
 Papers, the deviations, and the owner GPU commands are in
 [S80](experiments/S80-screen-denoise.md). Lavapipe does not time the GPU.
+
+## Research notes
+
+- [Path to 200 fps (research)](research/path-to-200fps.md) — 5 ms moving-frame budget on a 4070; trimmed 2026-10-19.

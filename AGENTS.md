@@ -74,6 +74,17 @@ Before you change a system, rewrite a system, or add a game feature that uses on
 
 Every new system is designed with networking in mind. Before writing that system's plan, read `docs/systems/core-networking/plan.md` and the networking row in `docs/agent-rubric.md`. The plan states replicated state, authority, prediction or rollback, determinism, and headless server behavior. The implementing commit copies those five lines into the system record.
 
+
+## Cursor Cloud
+
+Cloud agents bootstrap with `.cursor/install.sh` (see `.cursor/environment.json`). That script installs the Wayland and Vulkan build deps, Mesa lavapipe, headless Weston, and a current stable Rust toolchain, then builds the workspace.
+
+There is no GPU on the cloud image. Vulkan is lavapipe (`VK_ICD_FILENAMES` / `VK_DRIVER_FILES` → `/usr/share/vulkan/icd.d/lvp_icd.json`). Picture and window tests need a Wayland compositor: use `tools/lighting/headless.sh` when that script is present (starts Weston `--backend=headless` and runs the given command), or start Weston the same way yourself with a private `XDG_RUNTIME_DIR`.
+
+`cargo test --workspace` on lavapipe: skip `the_first_click_locks_the_pointer_and_escape_releases_it` (needs Hyprland). These GPU picture checks disagree with lavapipe and are expected fails here: `a_camera_spin_does_not_recolor_the_wall`, `the_outside_lamp_and_the_fire_stop_at_the_corridor_wall`, and `walking_does_not_flip_the_light_between_states` in `crates/render/tests/gpu_frame.rs`, and both tests in `examples/stress/tests/picture.rs`. Timing on lavapipe means nothing; use it for correctness only.
+
+`make verify` runs `examples/stress/scripts/smoke.rhai`. On lavapipe, `wait_settled` can hit its frame cap while the script checks still pass.
+
 ## Proof
 
 Before you implement the first scene, read `docs/goals/mvp-scene.md`.
