@@ -24,6 +24,8 @@ A scene file is read on a worker once the window is mapped. The frame draws a sm
 
 `Window::open_proof` is the check window. The class is `genos-camera`. The title is `Genos Engine`. The Hyprland rule for that class floats the window and refuses focus. Checks pass `--proof` so they use this window. `make run` does not pass `--proof`.
 
+`Window::open_proof_on` and `Window::open_named_on` take a Wayland display name. `None` connects to the session compositor. A verdict script sets the child `WAYLAND_DISPLAY` to the requested display. It passes `--display` only when that binary's help lists the flag. An older binary places the window from the environment. An empty name is refused.
+
 On Wayland, the keyboard and the mouse act while the window has focus. Gamepads do not use the window.
 
 ## Code

@@ -84,6 +84,7 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          variable override the preset
   --denoise-screen on|off alias of --denoise-launch (GENOS_LIGHTING_DENOISE_SCREEN)
   --headless             proof window, no panel
+  --display NAME         Wayland display name. Omit it to use the session compositor.
   --frames N             quit after N frames. The last frame PNG leaves out
                          the debug menu, the menu tab, the frame-rate plate,
                          and tool overlays
@@ -202,6 +203,8 @@ struct Options {
     denoise_launch: Option<String>,
     denoise_screen: Option<String>,
     headless: bool,
+    /// Wayland display name from `--display`. Empty uses the session compositor.
+    display: Option<String>,
     frames: Option<u32>,
     /// Keep the debug menu, menu tab, frame-rate plate, and tool overlays
     /// in a `--frames` PNG. A capture leaves them out unless this is set.
@@ -255,10 +258,11 @@ fn run() -> Result<(), String> {
         return Err(format!("unknown scene {}", opts.scene));
     }
     let (width, height) = opts.size;
+    let display = opts.display.as_deref();
     let mut window = if opts.headless {
-        Window::open_proof(width, height)?
+        Window::open_proof_on(width, height, display)?
     } else {
-        Window::open_named(width, height, "genos-lighting", "Genos lighting")?
+        Window::open_named_on(width, height, "genos-lighting", "Genos lighting", display)?
     };
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
@@ -567,7 +571,7 @@ fn finish(window: Window, renderer: Renderer, code: i32) -> ! {
 }
 
 fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(), String> {
-    let mut window = Window::open_proof(opts.size.0, opts.size.1)?;
+    let mut window = Window::open_proof_on(opts.size.0, opts.size.1, opts.display.as_deref())?;
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
@@ -1922,6 +1926,7 @@ fn options() -> Result<Options, String> {
     let mut denoise_launch = None;
     let mut denoise_screen = None;
     let mut headless = false;
+    let mut display = None;
     let mut frames = None;
     let mut ui = false;
     let mut out = PathBuf::from("genos-debug");
@@ -1953,6 +1958,13 @@ fn options() -> Result<Options, String> {
             "--denoise-launch" => denoise_launch = Some(need_arg(&mut args, "--denoise-launch")?),
             "--denoise-screen" => denoise_screen = Some(need_arg(&mut args, "--denoise-screen")?),
             "--headless" => headless = true,
+            "--display" => {
+                let name = need_arg(&mut args, "--display")?;
+                if name.is_empty() {
+                    return Err("display name is empty".into());
+                }
+                display = Some(name);
+            }
             "--frames" => {
                 frames = Some(
                     need_arg(&mut args, "--frames")?
@@ -2038,6 +2050,7 @@ fn options() -> Result<Options, String> {
         denoise_launch,
         denoise_screen,
         headless,
+        display,
         frames,
         ui,
         out,
@@ -2121,6 +2134,7 @@ mod tests {
             denoise_launch: None,
             denoise_screen: None,
             headless: true,
+            display: None,
             frames: None,
             ui: false,
             out: std::path::PathBuf::from("genos-debug"),

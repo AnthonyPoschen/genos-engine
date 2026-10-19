@@ -66,6 +66,8 @@ pub struct CaptureOptions {
     pub plan: FramePlan,
     pub params: MetricParams,
     pub jobs: Vec<Job>,
+    /// Wayland display name. `None` is the session compositor.
+    pub display: Option<String>,
 }
 
 pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
@@ -77,7 +79,7 @@ pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
             unsafe { std::env::set_var("VK_ICD_FILENAMES", icd) }
         }
     }
-    let mut window = Window::open_proof(opts.width, opts.height)?;
+    let mut window = Window::open_proof_on(opts.width, opts.height, opts.display.as_deref())?;
     window.set_title("Genos lighting reference check");
     let frame = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)?;

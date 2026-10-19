@@ -25,6 +25,7 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     │   └── settings-principles.md
     ├── architecture.md
     ├── lighting/ (GLOSSARY.md, RENAMES.md, research/)
+    ├── VERIFY.md
     ├── systems/
     │   ├── README.md
     │   ├── input.md
