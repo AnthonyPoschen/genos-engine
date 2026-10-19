@@ -8,7 +8,7 @@ Written 2026-10-12 against the former `gi-v2` tip at e61b89d (now on `master` af
 |---|---|---|---|
 | Dynamic perf plan (this doc) | [#6](https://github.com/AnthonyPoschen/genos-engine/pull/6) | open | — |
 | GPU_MS / frame timer split | [#23](https://github.com/AnthonyPoschen/genos-engine/pull/23) | open | **Phase 0** moving per-dispatch profile |
-| RAYCEIL need-based world-cache ray ceilings | [#8](https://github.com/AnthonyPoschen/genos-engine/pull/8) | open | WRC / ray budget ceiling (with Item C / cache pacing) |
+| RAYCEIL need-based world-cache ray ceilings | [#8](https://github.com/AnthonyPoschen/genos-engine/pull/8) | **closed** (rejected; see RAYCEIL note) | WRC / ray budget ceiling (with Item C / cache pacing) |
 | Skip GI compose blocks whose inputs did not change | [#11](https://github.com/AnthonyPoschen/genos-engine/pull/11) | open | **compose** path; Item H / F consumers |
 | Dense a-trous when dirty fraction is high | [#20](https://github.com/AnthonyPoschen/genos-engine/pull/20) | open | **Item D** |
 | Reduce moving-scene lighting work | [#24](https://github.com/AnthonyPoschen/genos-engine/pull/24) | open | sun compose vs Item H2 / moving profile |
