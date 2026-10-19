@@ -17,7 +17,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 
 - GI design and ADR 0012 (7d35edd, 10 Oct 03:12; Anthony's answers b7b8ea7 03:27): Lumen-informed but aim to beat Lumen; stop when complete so Anthony can judge; lighting ~200 MB VRAM soft budget (Ultra may exceed); hardware floor newest 80% of the Steam survey, Low tuned for GTX 1060 / RX 580, Vulkan 1.3, 4 GB VRAM minimum; Steam Deck a target but untested; test machines zanven-pc (4070) and his MacBook; mesh SDFs and cards prebuilt at build time (configurable); emissive surfaces required, including texture-driven partial-mesh emission (639ab44).
 - v2 design rules: only finished values are published; fixed ray patterns; each ray answered by exactly one system; screen probes plus surface cache; software SDF plus hardware ray queries; world probes for the far field only.
-- GI lives on gi-v2; phase-1 commits (13e02fe glTF, a22b1c8 BVH, 977ea71, e5cb9ba SDFs/cards, 84c303d) stay on master; master and gi-v2 compared head to head before any merge. Precomputed transport for master dropped.
+- GI is on `master` (merged from the former `gi-v2` branch in PR #54). Phase-1 commits (13e02fe glTF, a22b1c8 BVH, 977ea71, e5cb9ba SDFs/cards, 84c303d) were already on master before that merge. Precomputed transport for the old master path was dropped.
 - v2 became a separate frame path (1a2229f, ec658c5, ~05:30 10 Oct) because the NVIDIA compiler hung with the tracer inside the existing shaders.
 - Proposed, not answered [uncertain status]: rewrites on their own branch with master fixes-only (P7); design doc before a new subsystem (P6). Approved (P9): visual results come with screenshots someone looked at; numbers help bots judge faster. Postmortems go to the shared file (P10).
 - zanven-pc etiquette: bench lock ~/genos-bench.lock and split/lock_run.sh, one time-limited window; low GPU priority, short submissions; must not freeze the desktop; exclusive fps windows Fri-Mon 05-10 and Tue-Thu 05-15 AEDT; never touch his input or processes.
@@ -26,7 +26,7 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 
 ## Current state (2026-10-12)
 
-`gi-v2` at 8c763bb2 (S78P): still 8.21 ms / 105 fps, moving 18.7 ms / 51 fps (RTX 4070, stress scene). Pipeline: two-layer surface cache (layer 1 traced texels with MSME accumulator; layer 2 SVGF a-trous + pull-push, never fed back), world radiance cache (25 cm cells) for ray hits, sparse screen probes with held strata and check rays, Lumen-style texel direct-light cache for GI hits, per-pixel traced direct light reused in quiet frames, A-SVGF same-seed checks gating rays.
+Master (former `gi-v2` tip lineage) at 8c763bb2 (S78P era): still 8.21 ms / 105 fps, moving 18.7 ms / 51 fps (RTX 4070, stress scene). Pipeline: two-layer surface cache (layer 1 traced texels with MSME accumulator; layer 2 SVGF a-trous + pull-push, never fed back), world radiance cache (25 cm cells) for ray hits, sparse screen probes with held strata and check rays, Lumen-style texel direct-light cache for GI hits, per-pixel traced direct light reused in quiet frames, A-SVGF same-seed checks gating rays.
 
 ## Principles and rules (Anthony)
 
