@@ -1,3 +1,6 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! UI layout and pointer behavior.
 //!
 //! A tree resolves to rectangles with no window and no Vulkan. A screen root
@@ -7,10 +10,14 @@
 //! lamp with notched sliders. On Omarchy, the lighting panel uses the current
 //! theme colors.
 
+mod dropdown;
+mod focus;
+mod fps;
 mod layout;
 pub mod omarchy;
 mod panel;
 mod profile;
+mod slider;
 mod text;
 
 /// Idle, hover, and pressed colors. Pointer state picks one.
@@ -35,11 +42,10 @@ pub struct Segment {
 pub enum PictureMode {
     Off = 0,
     Fxaa = 1,
-    Ssaa = 2,
 }
 
 impl PictureMode {
-    /// Code the renderer reads. `0` is off, `1` is FXAA, and `2` is SSAA.
+    /// Code the renderer reads. `0` is off and `1` is FXAA.
     pub fn code(self) -> u8 {
         self as u8
     }
@@ -60,18 +66,27 @@ pub enum Action {
     Press(u32),
     /// A [`PanelSlider`] held or clicked to `value` (already snapped to its step).
     Slide { id: u32, value: f64 },
+    /// A choice picked from an open [`crate::PanelDropdown`].
+    Select { id: u32, value: f64 },
+    /// A press on a [`crate::PanelCheck`]. `on` is the state after the press.
+    Toggle { id: u32, on: bool },
 }
 
+pub use focus::{Consumed, FocusManager, InputKind, InputPolicy};
+pub use fps::FpsOverlay;
 pub use layout::{layout, Align, Direction, Node, Pad, Place, Rect, Sizing, Space};
 pub use panel::{
-    apply_frame_action, apply_lamp, button_panel, lighting_frame, Frame, Paint, PanelButton,
-    PanelRow, PanelSlider, Pointer, Shown, State,
+    apply_frame_action, apply_lamp, button_panel, button_panel_blocks, button_panel_sections,
+    lighting_frame, show_menu_tab, Frame, Paint, PanelBlock, PanelButton, PanelCheck,
+    PanelDropdown, PanelRow, PanelSection, PanelSlider, PanelTab, PanelTabs, Pointer, Shown, State,
+    MENU_HIDE, MENU_SHOW, PANEL_ID,
 };
 pub use profile::{
     inspect_region, profile_overlay, remember_frame, FrameSample, OpenFrame, PlotScale,
     ProfileGraph, ProfileLine, ProfilePoint, ProfileStream, ProfileView, RegionHit, StageSample,
     DRAW_STAGE, GRAPH_BUCKET, GRAPH_WINDOW, OVERLAY_PERIOD, STAGE_COUNT, STAGE_LABELS,
 };
+pub use slider::{SliderStep, LABEL_DIM, LABEL_HOT};
 
 /// Ids for the lighting panel the camera frame submits.
 pub mod id {
@@ -92,7 +107,6 @@ pub mod id {
     /// Luminance-edge picture filter.
     pub const AA_FXAA: u32 = 13;
     /// Double-resolution picture, then a tent downsample.
-    pub const AA_SSAA: u32 = 14;
     /// Starts or holds the red box path.
     pub const BOX_RUN: u32 = 15;
 }

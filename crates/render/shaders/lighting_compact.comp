@@ -1,0 +1,465 @@
+#version 450
+// GI light cache, first pass: list the live patch slots, mature from the front
+// and young from the back (both counts were zeroed before the round), so the
+// round's batch relights live patches only, the young first. A slot claimed but
+// not yet written (normal w 0) waits for the next round. No trace.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+
+const bool LIGHTING_WRC_STALE_CHECK = true;
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    // Screen wavelet counters (diag 61 changed, 62 fine, 63 coarse). Zeroed
+    // before that pass. The hash wavelet does not use these words.
+    if (slot == 0u && (gstats.ctrl_bits & 524288u) != 0u) {
+        gstats.diag[61] = 0u;
+        gstats.diag[62] = 0u;
+        gstats.diag[63] = 0u;
+    }
+    if (lighting_dense()) {
+        // S70A: the args pass (one group, after the counts are in).
+        if (slot == 0u) {
+            lighting_write_args();
+        }
+        return;
+    }
+    if (lighting_world_mode() == 3u && lighting_sc_pages_on()) {
+        lighting_sc_page_clear(slot);
+    }
+    // S78X: this round's a-trous lists start empty (marks come from the
+    // variance stage on). The filtered-texel bins, the per-level mode and the
+    // dense recount bins start empty too. The threshold and last frame's
+    // fraction stay.
+    if (LIGHTING_ATROUS_LISTS && slot < 5u) {
+        ckeys.key[lighting_atrous_list(slot + 1u)] = 0u;
+        ckeys.key[LIGHTING_ATROUS_MODE_AT + slot] = 0u;
+    }
+    if (LIGHTING_ATROUS_LISTS && slot < 64u) {
+        ckeys.key[LIGHTING_ATROUS_BIN_AT + slot] = 0u;
+    }
+    if (LIGHTING_ATROUS_LISTS && slot < 320u) {
+        ckeys.key[LIGHTING_ATROUS_DBIN_AT + slot] = 0u;
+    }
+    if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
+        return;
+    }
+    // S77C compact only what needs it: a fine texel nobody read in the last 60
+    // frames and with no check due (nominated or deferred) has only bookkeeping
+    // here (freeing after LIGHTING_CACHE_LIFE, the global-light refresh list), so
+    // it is visited one round in LIGHTING_COMPACT_IDLE, by hash. Read texels, due
+    // checks and WRC cells are visited every round as before.
+    if (LIGHTING_COMPACT_LIST && lighting_world_mode() == 3u && !(cache.v[3u * slot + 1u].w > 0.2)) {
+        uint last0 = floatBitsToUint(cache.v[3u * slot].w);
+        bool due0 = lighting_sc_check_next(slot) != 0u && lighting_sc_check_due(slot);
+        if (int(lighting_frame() - last0) > 60 && !due0 && ((lighting_hash(slot ^ 0x2545f491u) + lighting_round()) % LIGHTING_COMPACT_IDLE) != 0u) {
+            return;
+        }
+    }
+    // Near a change (params.z bit 5): a patch on or around an object that moved,
+    // came or went sees a different scene, so it is relit with the young (first),
+    // not when the sweep comes round (every live / batch rounds).
+    bool near = ((pc.params.z >> 5u) & 1u) != 0u && lighting_near_change(lighting_sc_texel_pos(slot));
+    float t = cache.v[3u * slot + 2u].w;
+    if (lighting_world_mode() == 3u) {
+        lighting_sc_pool(slot);
+        // Flag 4096: near a change the point a texel is lit from may now be inside
+        // the object that moved there; the readers of this frame offer again.
+        if (near && (lighting_sc_flags() & 4096u) != 0u) {
+            cache.v[LIGHTING_WORLD_AT + slot].x = 1.0e30;
+        }
+        // Surface cache: the young are new texels and those near a change; the
+        // sweep takes the texels still adding sets that someone read in the last
+        // second (every eighth round, all of them), and converged texels only while
+        // the light is changing.
+        // Texels pixels read in the last second grow to the cap; texels only rays
+        // read (the light bounced off them) to LIGHTING_SC_HIT_CAP sets.
+        uint last = floatBitsToUint(cache.v[3u * slot].w);
+        uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z);
+        bool on_screen = lighting_sc_pixel_fresh(shown, 60);
+        bool read = int(lighting_frame() - last) <= 60;
+        bool growing = (lighting_sc_flags() & 4u) != 0u
+            ? (on_screen && t < lighting_sc_cap(slot) - 0.5) || (read && t < LIGHTING_SC_HIT_CAP - 0.5)
+            : (read && t < lighting_sc_cap(slot) - 0.5);
+        // Flag 8192: texels someone read keep relighting at the cap (a running mean
+        // of weight 2 / (cap + 1)), so light bounced in after they converged (the
+        // cache around them was darker while they took their first sets) still
+        // reaches them.
+        if ((lighting_sc_flags() & 8192u) != 0u && read) {
+            growing = (lighting_sc_flags() & 262144u) == 0u || t < LIGHTING_SC_HOLD * lighting_sc_cap(slot) - 0.5;
+        }
+        // Flag 1048576: a dormant texel (converged, its sets agree with its mean)
+        // is relit one sweep in LIGHTING_SC_DORMANT, by slot, to notice change.
+        if ((lighting_sc_flags() & 1048576u) != 0u && growing && t >= lighting_sc_cap(slot) - 0.5 && lighting_sc_dormant(slot)) {
+            growing = ((lighting_hash(slot) + lighting_round()) % lighting_sc_dormant_period()) == 0u;
+        }
+        // Flag 1024: while the light changes only the patches ray hits read (25 cm
+        // and up, flag 256) are relit, as in the other modes; pixels show the probes.
+        bool hit_patch = cache.v[3u * slot + 1u].w > 0.2;
+        bool changing = !lighting_sc_light_quiet() && ((lighting_sc_flags() & 1024u) == 0u || hit_patch);
+        if ((lighting_sc_flags() & 1024u) != 0u && !lighting_sc_light_quiet() && !hit_patch && !near) {
+            growing = false;
+        }
+        if ((lighting_sc_flags() & 131072u) != 0u && hit_patch) {
+            growing = true;
+        }
+        // Lumen priority (LIGHTING_SC_SCHED): replaces growing / changing / dormant
+        // above. Priority = frames read since the last relight (LastUsed -
+        // LastUpdated), times cap / sets (GIBS: unconverged first, at most 8x),
+        // over LIGHTING_SC_DORMANT when dormant; a texel nobody read since its relight
+        // waits. Listed when its bucket reaches the threshold.
+        // WRC cells (25 cm) a pixel needs as a seed this frame with fewer than
+        // LIGHTING_WRC_YOUNG sets are the reveal burst: young, whole sets. New fine
+        // texels start from the WRC (lighting_sc_resample) and take their turn.
+        bool wrc = cache.v[3u * slot + 1u].w > 0.2;
+        // S62B: the burst ends at what the cell can hold now (under changing
+        // light lighting_sc_count keeps it to the light window, 8 samples, which never
+        // reached LIGHTING_WRC_YOUNG = 16: every needed cell stayed a burst and took
+        // the batch from the fine texels), and at most LIGHTING_WRC_BURST_MAX cells a
+        // round burst.
+        // S62C: near a mover the count stays short; those cells refresh from the
+        // change list, not as bursts.
+        bool burst = wrc && !near && t < LIGHTING_WRC_YOUNG - 0.5 && int(lighting_frame() - floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z)) <= 2;
+        if (burst && atomicAdd(ckeys.key[LIGHTING_WRC_BURST_COUNT_AT], 1u) >= (LIGHTING_WRC_BURST_MAX >> lighting_sc_budget_shift())) {
+            burst = false;
+        }
+        if (!wrc) { lighting_dg(19u, 1u); if (near) lighting_dg(28u, 1u); if (on_screen) lighting_dg(30u, 1u); }
+        if (wrc && !burst && LIGHTING_SC_SCHED) {
+            // WRC refresh (fixed budget): change-driven list, else background.
+            if (lighting_sc_expired(last, shown)) {
+                atomicAdd(gstats.freed, 1u);
+                ckeys.key[slot] = 0u;
+                cache.v[3u * slot + 1u] = vec4(0.0);
+                cache.v[3u * slot + 2u] = vec4(0.0);
+                return;
+            }
+            uint updated = lighting_sc_updated(slot);
+            vec3 cp = lighting_sc_texel_pos(slot);
+            if (near || lighting_wrc_lamp_changed(cp, updated)) {
+                // S76B: nominated; refreshed only when its check is due.
+                if (!lighting_sc_check_due(slot)) {
+                    lighting_dg(46u, 1u);
+                    return;
+                }
+                if (cache.v[LIGHTING_SC_GRAD_AT + slot].x > 0.5) {
+                    // S77A escalated by its check: a whole set (background list).
+                    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);
+                    if (at < LIGHTING_WRC_REFRESH_CELLS) {
+                        ckeys.key[LIGHTING_WRC_BG_AT + at] = slot;
+                    }
+                    return;
+                }
+                uint at = atomicAdd(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], 1u);
+                if (at < LIGHTING_WRC_REFRESH_CELLS) {
+                    ckeys.key[LIGHTING_WRC_CHG_AT + at] = slot;
+                    lighting_dg(16u, 1u);
+                }
+                return;
+            }
+            bool stale = int(lighting_frame() - updated) >= int(LIGHTING_WRC_REFRESH_FRAMES);
+            bool growing_wrc = t < LIGHTING_WRC_CAP - 0.5 && (int(last - updated) > 0 || int(lighting_frame() - last) <= int(LIGHTING_SC_READ_SLACK));
+            // S72N dark fill: a growing cell rays read is ranked with the
+            // texels (priority by frames read since its relight, times cap /
+            // samples), not taken first come from the background list: that
+            // list holds 1024 cells a round in slot (hash) order, so the same
+            // cells won each round and the rest, scattered, waited until they
+            // reached the cap; a room lit only by bounces filled in patches.
+            if (LIGHTING_WRC_STALE_CHECK && stale && !growing_wrc) {
+                // S78F: age alone is no reason for a whole set: a stale cell takes
+                // the S77A check (16 rays, change list) when its deferred check is
+                // due; a confirm doubles the deferral, a miss escalates.
+                if (lighting_sc_check_due(slot)) {
+                    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], 1u);
+                    if (at < LIGHTING_WRC_REFRESH_CELLS) {
+                        ckeys.key[LIGHTING_WRC_CHG_AT + at] = slot;
+                        lighting_dg(17u, 1u);
+                    }
+                }
+                return;
+            }
+            if (!(growing_wrc && lighting_sc_dark_fill())) {
+                if (stale || growing_wrc) {
+                    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);
+                    if (at < LIGHTING_WRC_REFRESH_CELLS) {
+                        ckeys.key[LIGHTING_WRC_BG_AT + at] = slot;
+                        lighting_dg(17u, 1u);
+                    }
+                }
+                return;
+            }
+        }
+        // S72D sparse fill, coarse to fine: every texel is relit, but a young one
+        // (short of LIGHTING_DN_MIN_SETS sets) weighs by its level (4-apart keys 4x,
+        // 2-apart 2x), so under a backlog the coarse grid fills first and spreads
+        // (lighting_sc_shown interpolates), the finer ones once the budget allows;
+        // fine ones near a change do not jump the queue while there is a backlog.
+        // (S72A never relit non-keys: a still scene never refined.)
+        bool sparse_c = !wrc && lighting_sc_sparse_on() && !lighting_sc_promoted(slot);
+        uint lvl = sparse_c ? lighting_sc_level(slot) : 2u;
+        // S74A: under A-SVGF a change nearby only nominates checks (below).
+        bool asvgf = LIGHTING_SC_ASVGF && !wrc && lighting_sc_svgf();
+        bool young_now = (((near && !asvgf) || burst) && !(lvl == 0u && lighting_sc_backlog())) || (!LIGHTING_SC_SCHED && t < 1.5);
+        if (LIGHTING_SC_SCHED && !young_now) {
+            uint updated = lighting_sc_updated(slot);
+            int used = int(last - updated);
+            if (updated == 0u) {
+                // Never relit: as if read for a second since.
+                used = min(used, 60);
+            }
+            if (lighting_sc_expired(last, shown)) {
+                atomicAdd(gstats.freed, 1u);
+                ckeys.key[slot] = 0u;
+                cache.v[3u * slot + 1u] = vec4(0.0);
+                cache.v[3u * slot + 2u] = vec4(0.0);
+                return;
+            }
+            // S68A: the readers stamp the frame of the relight itself (or the
+            // one before, rounds are async), so a texel read every frame looked
+            // unread the round after each relight and was relit every other
+            // round (due alternated ~25k / ~50, half the rounds near idle).
+            // Read within the last LIGHTING_SC_READ_SLACK frames counts as read.
+            if (used <= 0 && int(lighting_frame() - last) <= int(LIGHTING_SC_READ_SLACK)) {
+                used = 1;
+            }
+            if (used <= 0) {
+                // S62E (a): resident but unread, and the global light moved more
+                // than 10 % since its relight: a whole set from the WRC
+                // background list (within the WRC refresh cap). Shown rescaled
+                // meanwhile (lighting_ls_ratio).
+                if (abs(lighting_ls_ratio(lighting_sc_updated(slot)) - 1.0) > 0.1) {
+                    uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);
+                    if (at < LIGHTING_WRC_REFRESH_CELLS) {
+                        ckeys.key[LIGHTING_WRC_BG_AT + at] = slot;
+                    }
+                }
+                return;
+            }
+            // S74A A-SVGF (lighting_cache.glsl): the gradient checks alone decide
+            // the rays of a resolved texel; lambda sets the rate of a changing one.
+            if (asvgf) {
+                float lam = lighting_sc_lambda(slot);
+                lighting_dg(20u + (lam < 0.01 ? 0u : lam < 0.02 ? 1u : lam < 0.05 ? 2u : lam < 0.1 ? 3u : lam < 0.25 ? 4u : lam < 0.5 ? 5u : lam < 0.999 ? 6u : 7u), 1u);
+                if (!lighting_sc_grad_stored(slot)) lighting_dg(11u, 1u);
+                else if (lam >= LIGHTING_ASVGF_EPS) lighting_dg(9u, 1u);
+                else if (t < LIGHTING_DN_MIN_SETS - 0.5) lighting_dg(12u, 1u);
+                else if (!lighting_sc_resolved(slot, t, lam)) lighting_dg(10u, 1u);
+                if (lighting_sc_lamp_touched(slot)) lighting_dg(29u, 1u);
+                if (lighting_sc_resolved(slot, t, lam)) {
+                    bool aged = int(lighting_frame() - updated) > int(LIGHTING_ASVGF_AGE);
+                    lighting_dg(7u, 1u);
+                    if (aged) lighting_dg(4u, 1u);
+                    if (!aged) {
+                        bool hinted = near || lighting_sc_lamp_touched(slot);
+                        // S76: checked when its deferred check is due, or, near a
+                        // hint, as its block's pick this round (nominated).
+                        uint od = lighting_frame() - lighting_sc_check_next(slot);
+                        if (lighting_sc_check_next(slot) != 0u && int(od) > 60 && int(od) < 100000) lighting_dg(55u, 1u);
+                        if (LIGHTING_GRAD_CHECKS_ON && (lighting_sc_check_due(slot) || (hinted && lighting_sc_grad_rep(slot))) && lighting_sc_check_turn(slot)) {
+                            uint at = atomicAdd(ckeys.key[LIGHTING_GRAD_COUNT_AT], 1u);
+                            lighting_dg(50u, 1u);
+                            if (at >= ((LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift())) lighting_dg(52u, 1u);
+                            else { lighting_dg(51u, 1u); if (lighting_sc_check_next(slot) != 0u && int(od) > 0 && int(od) < 100000) { lighting_dg(53u, od); atomicMax(gstats.diag[54], od); } }
+                            if (at < ((LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift())) {
+                                lighting_dg(hinted ? 5u : 6u, 1u);
+                                ckeys.key[LIGHTING_GRAD_LIST_AT + at] = slot;
+                            }
+                        }
+                        atomicAdd(gstats.waiting, 1u);
+                        return;
+                    }
+                } else if (lam >= LIGHTING_ASVGF_EPS && !lighting_sc_lambda_fresh(slot)) {
+                    // Spent: its rays are out; wait for the next check.
+                    atomicAdd(gstats.waiting, 1u);
+                    return;
+                } else if (lam >= LIGHTING_ASVGF_EPS) {
+                    // S76: a significant check escalates rays in proportion to
+                    // lambda: ceil(4 lambda / FULL) of the set's 4 sixteen-ray
+                    // quarters (a whole set from lambda >= FULL) [deviation:
+                    // A-SVGF uses lambda for the blend only]. The lambda is spent:
+                    // the next check (next frame) decides whether more follow.
+                    uint mm = min(lighting_sc_entries(slot, true), uint(ceil(clamp(lam / LIGHTING_ASVGF_FULL, 0.0, 1.0) * float(LIGHTING_SC_QUARTERS))));
+                    cache.v[LIGHTING_SC_GRAD_AT + slot].x = -lam;
+                    lighting_sc_check_soon(slot);
+                    lighting_dg(2u, 1u); lighting_dg(3u, mm);
+                    uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], mm);
+                    for (uint i = 0u; i < mm; i++) {
+                        ckeys.key[2u * LIGHTING_CACHE_SLOTS - at - i] = slot;
+                    }
+                    return;
+                }
+            }
+            // S72V irradiance-caching density (lighting_ic_period, S72V4: a rate): a texel off
+            // the grid of spacing a R' takes no rays; layer 2 covers it. Near a
+            // change or a moved lamp every texel is traced [deviation: IC has no
+            // change handling].
+            bool mover_ic;
+            // S72V11: per record, while the global light since its relight has
+            // changed by less than LIGHTING_IC_GLOBAL_STALE (S72V9 required the
+            // whole frame quiet, which a running sun never is: the still smoke
+            // traced 744k rays a round settled against 87k) [inferred threshold].
+            // S72V9: only while the light is quiet: IC records hold for static
+            // light (Ward 1988; Krivanek et al. 2006: records are recomputed when
+            // the lighting changes). Under a moving sun texels relit at different
+            // rounds held light of different moments and the luminance stop kept
+            // those groups apart (dawn camouflage).
+            if (!wrc && lighting_sc_svgf() && lighting_sc_global_change(slot) < LIGHTING_IC_GLOBAL_STALE && !near && t >= 3.5 && !lighting_sc_local_change(slot, mover_ic)) {
+                uint per = lighting_ic_period(slot);
+                if (per > 1u && ((lighting_hash(slot ^ 0x68e31da4u) + lighting_round()) % per) != 0u) {
+                    lighting_dg(31u, 1u);
+                    atomicAdd(gstats.waiting, 1u);
+                    return;
+                }
+            }
+            // S72J: a page's texels refine together: note this one's sets, and
+            // wait while more than LIGHTING_SC_PAGE_LEAD sets ahead of the page's
+            // fewest (last round). Near a change goes first as before.
+            if (!wrc && lighting_sc_pages_on()) {
+                uint page = lighting_sc_page(slot);
+                float tf = floor(max(t, 0.0));
+                lighting_sc_page_note(page, tf);
+                // S72K: a smooth bar across pages (lighting_sc_page_bar); edge
+                // (promoted) texels are held per texel only, not to the pages.
+                float pm = lighting_sc_promoted(slot) ? -1.0 : lighting_sc_page_bar(slot);
+                if (pm >= 0.0 && tf > pm + LIGHTING_SC_PAGE_LEAD && tf < LIGHTING_SC_FULL_SETS) {
+                    atomicAdd(gstats.waiting, 1u);
+                    return;
+                }
+            }
+            // S72O: per-texel commit timing: while refining (DN_MIN to FULL sets)
+            // a texel sits out one round in four, on its own phase (hash), so
+            // the texels of a page commit on different rounds and their counts
+            // spread; a page never steps as one.
+            if (!wrc && lighting_sc_decorrelate() && !lighting_sc_svgf() && !near && t >= LIGHTING_DN_MIN_SETS - 0.5 && t < LIGHTING_SC_FULL_SETS - 0.5
+                && ((lighting_hash(slot ^ 0x5bd1e995u) + lighting_round()) & 3u) == 0u) {
+                atomicAdd(gstats.waiting, 1u);
+                return;
+            }
+            // S72P ray density follows the light: where layer 2 found flat light
+            // (no edge within 4 cells) with at least LIGHTING_SC_L2_FLAT sets of
+            // support, a texel past 16 sets is relit one round in 4 (level 0) or
+            // 2 (level 1); keys, edge texels and texels near a change or a moved
+            // lamp keep their rate (S72Q: the sun moving no longer exempts it).
+            bool mover_l2;
+            // S72V3: under SVGF a settled IC site (a record, Ward 1988: kept
+            // until the light changes) is relit one round in 4 [inferred rate].
+            if (!wrc && lighting_sc_layer2() && (!lighting_sc_svgf() || lighting_sc_global_change(slot) < LIGHTING_IC_GLOBAL_STALE) && !near && t >= 15.5 && !lighting_sc_promoted(slot) && !lighting_sc_local_change(slot, mover_l2)) {
+                float sup = lighting_sc_svgf() ? LIGHTING_SC_L2_FLAT : cache.v[LIGHTING_SC_SPARSE_AT + slot].w;
+                uint lv = lighting_sc_level(slot);
+                uint every = lighting_sc_svgf() ? 4u : (lv == 0u ? 4u : (lv == 1u ? 2u : 1u));
+                // Same phase as the IC gate: the periods are powers of two, so the
+                // two gates nest and the texel is relit one round in max(per,
+                // every). With independent phases 3 texels in 4 never pass both.
+                if (sup >= LIGHTING_SC_L2_FLAT && every > 1u && ((lighting_hash(slot ^ 0x68e31da4u) + lighting_round()) % every) != 0u) {
+                    atomicAdd(gstats.waiting, 1u);
+                    return;
+                }
+            }
+            // S64A: relit only once due (the budget is a ceiling).
+            if (int(lighting_frame() - updated) < int(lighting_sc_interval(slot, t))) {
+                atomicAdd(gstats.waiting, 1u);
+                return;
+            }
+            vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
+            bool settled_now = lighting_sc_settled(slot, t);
+            // S65C: the change is the larger of the estimator's measure and the
+            // moved lamps' delta at the texel (LIGHTING_SC_LAMP_K per unit ratio).
+            float chg = est.x > 0.0 ? max(max(max(est.y, 0.0), LIGHTING_SC_LAMP_K * lighting_sc_lamp_change(slot)), lighting_sc_global_change(slot)) : 1.0e9;
+            bool mover_t;
+            // Eligible once it has its own history (LIGHTING_DN_MIN_SETS sets and the
+            // estimator running), settled or not: the threshold alone splits.
+            if (est.x > 0.0 && t >= LIGHTING_DN_MIN_SETS - 0.5 && chg < LIGHTING_SC_TRICKLE_THR && !lighting_sc_local_change(slot, mover_t)) {
+                // S65A trickle tier.
+                uint at = atomicAdd(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], 1u);
+                if (at < LIGHTING_SC_TRICKLE) {
+                    ckeys.key[LIGHTING_SC_TRICKLE_AT + at] = slot;
+                    atomicAdd(gstats.pad2, 1u);
+                    lighting_dg(15u, 1u);
+                }
+                return;
+            }
+            float cap = lighting_sc_cap(slot);
+            // Hit patches taking each relight whole (flag 131072) hold at most
+            // LIGHTING_CACHE_MATURE sets: they weigh against that, not the pixel cap
+            // (S59C weighed them 8x for good and they took the budget).
+            float w = clamp(cap / max(t, 1.0), 1.0, 8.0);
+            if (wrc) {
+                // WRC cells near the camera first (Lumen keeps the radiance cache
+                // densest around the eye).
+                float d = length(lighting_sc_texel_pos(slot) - scene.eye.xyz);
+                w *= d < LIGHTING_WRC_NEAR ? 2.0 : 0.5;
+            }
+            if (!settled_now) {
+                // Not settled: never below twice a settled texel's priority.
+                w = max(w, LIGHTING_SC_UNSETTLED_W);
+            } else {
+                // S65A: settled above the trickle threshold, ranked by its change.
+                w *= 1.0 + LIGHTING_SC_RATE_K * min(chg, 8.0);
+            }
+            if ((lighting_sc_flags() & 1048576u) != 0u && t >= cap - 0.5 && lighting_sc_dormant(slot)) {
+                w /= float(lighting_sc_dormant_period());
+            }
+            if (sparse_c && t < LIGHTING_DN_MIN_SETS - 0.5) {
+                w *= lvl == 2u ? 4.0 : (lvl == 1u ? 2.0 : 1.0);
+            }
+            uint b = uint(clamp(log2(1.0 + float(used) * w) * 4.0, 0.0, float(LIGHTING_SC_BUCKETS - 1u)));
+            // Whole 64-ray sets until settled, and above the trickle threshold.
+            bool full = !settled_now || chg >= LIGHTING_SC_TRICKLE_THR || (est.x > 0.0 && est.y > LIGHTING_SC_FULL_INC);
+            // A non-zero dormant floor traces one fresh 16-ray entry, not a 64-ray set.
+            if (lighting_sc_dormant_rays() > 0u && t >= cap - 0.5 && lighting_sc_dormant(slot)) {
+                full = false;
+            }
+            uint m = lighting_sc_entries(slot, full);
+            atomicAdd(gstats.due, m);
+            atomicAdd(ckeys.key[LIGHTING_SC_HIST_AT + b], m);
+            if (b < ckeys.key[LIGHTING_SC_THR_AT]) {
+                return;
+            }
+            uint at = atomicAdd(ckeys.key[LIGHTING_CACHE_SLOTS], m);
+            lighting_dg(wrc ? 36u : (t < LIGHTING_DN_MIN_SETS - 0.5 ? 32u : (on_screen ? 13u : 14u)), m);
+            lighting_dg(wrc ? 37u : 18u, 1u);
+            if (!wrc && int(lighting_frame() - updated) > int(LIGHTING_ASVGF_AGE)) lighting_dg(33u, m);
+            for (uint i = 0u; i < m; i++) {
+                ckeys.key[LIGHTING_CACHE_SLOTS + 1u + at + i] = slot;
+            }
+            return;
+        }
+        if (!(near || t < 0.5 || growing || changing)) {
+            // Not in this round: a texel nobody has read for LIGHTING_CACHE_LIFE frames
+            // is freed here (lighting_cache.comp frees only what a round relights).
+            if (lighting_sc_expired(last, shown)) {
+                atomicAdd(gstats.freed, 1u);
+                ckeys.key[slot] = 0u;
+                cache.v[3u * slot + 1u] = vec4(0.0);
+                cache.v[3u * slot + 2u] = vec4(0.0);
+            }
+            return;
+        }
+        bool young = young_now;
+        uint m = lighting_sc_entries(slot, true);
+        lighting_dg(burst ? 1u : (near ? 0u : 34u), m); lighting_dg(35u, 1u);
+        if (young) {
+            uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], m);
+            for (uint i = 0u; i < m; i++) {
+                ckeys.key[2u * LIGHTING_CACHE_SLOTS - at - i] = slot;
+            }
+        } else {
+            uint at = atomicAdd(ckeys.key[LIGHTING_CACHE_SLOTS], m);
+            for (uint i = 0u; i < m; i++) {
+                ckeys.key[LIGHTING_CACHE_SLOTS + 1u + at + i] = slot;
+            }
+        }
+        return;
+    }
+    uint m = lighting_sc_entries(slot, true);
+    if (near || t < LIGHTING_CACHE_MATURE - 0.5) {
+        uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], m);
+        for (uint i = 0u; i < m; i++) {
+            ckeys.key[2u * LIGHTING_CACHE_SLOTS - at - i] = slot;
+        }
+    } else {
+        uint at = atomicAdd(ckeys.key[LIGHTING_CACHE_SLOTS], m);
+        for (uint i = 0u; i < m; i++) {
+            ckeys.key[LIGHTING_CACHE_SLOTS + 1u + at + i] = slot;
+        }
+    }
+}

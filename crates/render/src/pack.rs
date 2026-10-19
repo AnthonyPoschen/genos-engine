@@ -1,3 +1,23 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::assigning_clones, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![expect(clippy::large_enum_variant, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::obfuscated_if_else, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::redundant_closure, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::too_many_arguments, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::unnested_or_patterns, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+
 //! Packed mesh and light inputs for the GPU.
 //!
 //! The CPU writes positions, normals, colors, texture ids, and lamp parameters.
@@ -36,10 +56,6 @@ pub(crate) const OCC_CELL: f32 = 2.0;
 const LAMP_CELL: f32 = 4.0;
 /// Most lamp grid cells along one axis.
 const LAMP_CELLS: f32 = 128.0;
-pub const FIELD_GRID: u32 = 128;
-/// The gather keeps one field until the player or a lamp moves this far, in meters.
-/// A shorter move does not rebuild. Screen rectangles are not part of this decision.
-pub const FIELD_PLACE: f32 = 1.0;
 
 /// One stored triangle corner. `shade` is 1 when the GPU lights the vertex.
 #[repr(C)]
@@ -124,17 +140,6 @@ pub struct Pack {
     pub objects: Vec<GpuObject>,
     pub lamps: Vec<GpuLamp>,
     pub occs: Vec<GpuOcc>,
-    pub light_key: u64,
-    pub count_x: u32,
-    pub count_z: u32,
-    pub spacing: f32,
-    pub origin_x: f32,
-    pub origin_z: f32,
-    pub near_end: f32,
-    pub far_end: f32,
-    pub world_end: f32,
-    /// Near, far, and world cascades. The grids stay on the world.
-    pub(crate) cascades: [crate::field::CascadePlan; 3],
     pub eye: [f32; 3],
     pub floor_center: [f32; 3],
     pub floor_half_x: f32,
@@ -151,17 +156,8 @@ pub struct Pack {
     pub(crate) view_forward: [f32; 3],
     pub(crate) view_tan: f32,
     pub(crate) view_aspect: f32,
-    pub(crate) grid_w: u32,
-    pub(crate) grid_h: u32,
-    /// Near-field rays per pixel plus one, 0 for the shader's own count (scene.frag
-    /// NEAR_RAYS). `GENOS_NEAR_RAYS` sets it, so the near field's share of the raster
-    /// time can be measured (0 turns it off). The shader reads it from `view_grid.z`.
-    pub(crate) near_rays: u32,
     /// Debug word the shader reads from `grid_at.w` (gpu debug_view); 0 is the picture.
     pub(crate) debug_view: u32,
-    /// XZ of the last sun's travel direction. Kept after the sun sets so the
-    /// ground it used to reach can drop that bounce. `view_up.w` and `sky.w`.
-    pub(crate) last_sun: [f32; 2],
     /// Shapes and particle spans in draw order.
     pub draws: Vec<PackedDraw>,
     /// Cells over the occluders and the lamps the light passes walk.
@@ -229,7 +225,7 @@ pub fn build_grid(lamps: &[GpuLamp], occs: &[GpuOcc], eye: [f32; 3], far: f32) -
         let cell = cx.max(cz);
         let nx = (((hi[0] - lo[0]) / cell).ceil() as u32).max(1);
         let nz = (((hi[1] - lo[1]) / cell).ceil() as u32).max(1);
-        grid.lamp = [lo[0], lo[1], cell, crate::probe_tier::notice_band()];
+        grid.lamp = [lo[0], lo[1], cell, 0.0];
         grid.dims[2] = nx;
         grid.dims[3] = nz;
         lamp_lists = vec![Vec::new(); (nx * nz) as usize];
@@ -271,8 +267,6 @@ pub fn build_grid(lamps: &[GpuLamp], occs: &[GpuOcc], eye: [f32; 3], far: f32) -
         words.extend_from_slice(list);
     }
     grid.words = words;
-    // The gather reads the notice band from lamp_grid.w even when no point lamp is binned.
-    grid.lamp[3] = crate::probe_tier::notice_band();
     grid
 }
 
@@ -282,6 +276,14 @@ pub enum PackedDraw {
         key: u64,
         model: [f32; 16],
         color: [f32; 3],
+        /// Emitted light (linear); GI only.
+        emission: [f32; 3],
+        /// Colour-atlas rect (x, y, w, h) in texels. `w == 0` is the vertex colour.
+        color_rect: [f32; 4],
+        /// Normal-atlas rect. `w == 0` keeps the vertex normal.
+        normal_rect: [f32; 4],
+        /// Alpha cutoff. 0 does not discard.
+        cutoff: f32,
         source: ShapeSource,
     },
     Dynamic(Vec<GpuVertex>),
@@ -308,7 +310,13 @@ pub enum ShapeSource {
         radius: f32,
         height: f32,
     },
-    Mesh(Vec<[f32; 3]>),
+    Mesh {
+        positions: Vec<[f32; 3]>,
+        normals: Vec<[f32; 3]>,
+        uvs: Vec<[f32; 2]>,
+        /// 1 lights the face. Above 1.15 marks it two-sided in the G-buffer.
+        shade: f32,
+    },
     Baked(Vec<GpuVertex>),
 }
 
@@ -328,9 +336,14 @@ pub(crate) fn build_shape(source: &ShapeSource) -> Vec<GpuVertex> {
         ShapeSource::Cylinder { radius, height } => {
             push_cylinder(&mut verts, white, 0.0, 0.0, *radius, *height);
         }
-        ShapeSource::Mesh(positions) => {
+        ShapeSource::Mesh {
+            positions,
+            normals,
+            uvs,
+            shade,
+        } => {
             let pose = crate::world::identity_pose();
-            push_mesh(&mut verts, positions, white, &pose);
+            push_mesh(&mut verts, positions, normals, uvs, *shade, white, &pose);
         }
         ShapeSource::Baked(verts_in) => verts = verts_in.clone(),
     }
@@ -437,48 +450,12 @@ pub fn pack_frame(
         }
     }
     let lamps = lamps_of(world);
-    let cascades = crate::field::cascade_plans(&world.scene.floor);
-    let near = cascades[0];
-    let count_x = near.count_x;
-    let count_z = near.count_z;
-    let spacing = near.spacing;
-    let origin_x = near.origin_x;
-    let origin_z = near.origin_z;
-    let near_end = near.t1;
-    let far_end = cascades[1].t1;
-    let world_end = cascades[2].t1;
-    let light_key = hash_light(
-        &lamps,
-        &occs,
-        count_x,
-        count_z,
-        eye,
-        &fire,
-        &puffs,
-        world.scene.floor.position.x,
-        world.scene.floor.position.z,
-        world.scene.floor.half_x,
-        world.scene.floor.half_z,
-        world.scene.floor.color,
-        ceiling_of(&world.scene),
-        sky_of(&world.scene),
-    );
     let grid = build_grid(&lamps, &occs, eye, genos_scene::CAMERA_FAR);
     Pack {
         grid,
         objects,
         lamps,
         occs,
-        light_key,
-        count_x,
-        count_z,
-        spacing,
-        origin_x,
-        origin_z,
-        near_end,
-        far_end,
-        world_end,
-        cascades,
         eye,
         floor_center: [
             world.scene.floor.position.x,
@@ -497,24 +474,9 @@ pub fn pack_frame(
         view_forward: [0.0, 0.0, -1.0],
         view_tan: (30.0_f32.to_radians()).tan(),
         view_aspect: 1.0,
-        grid_w: 1,
-        grid_h: 1,
-        near_rays: near_rays_override(),
         debug_view: 0,
-        last_sun: [0.0, -1.0],
         draws,
     }
-}
-
-/// `GENOS_NEAR_RAYS` as the scene block wants it: the count plus one, 0 when unset.
-fn near_rays_override() -> u32 {
-    static RAYS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *RAYS.get_or_init(|| {
-        std::env::var("GENOS_NEAR_RAYS")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .map_or(0, |n| n.min(64) + 1)
-    })
 }
 
 enum StagedDraw {
@@ -554,6 +516,10 @@ fn pack_draw(
                 key,
                 model: translation(floor.position.x, 0.0, floor.position.z),
                 color,
+                emission: [0.0; 3],
+                color_rect: [0.0; 4],
+                normal_rect: [0.0; 4],
+                cutoff: 0.0,
                 source: ShapeSource::Floor {
                     half_x: floor.half_x,
                     half_z: floor.half_z,
@@ -568,6 +534,10 @@ fn pack_draw(
                 key,
                 model: translation(floor.position.x, ceiling.height, floor.position.z),
                 color,
+                emission: [0.0; 3],
+                color_rect: [0.0; 4],
+                normal_rect: [0.0; 4],
+                cutoff: 0.0,
                 source: ShapeSource::Ceiling {
                     half_x: floor.half_x,
                     half_z: floor.half_z,
@@ -592,6 +562,10 @@ fn pack_draw(
                     wall.position.z,
                 ),
                 color,
+                emission: [0.0; 3],
+                color_rect: [0.0; 4],
+                normal_rect: [0.0; 4],
+                cutoff: 0.0,
                 source: ShapeSource::Box {
                     half,
                     top: true,
@@ -613,6 +587,10 @@ fn pack_draw(
                             solid.yaw,
                         ),
                         color,
+                        emission: [0.0; 3],
+                        color_rect: [0.0; 4],
+                        normal_rect: [0.0; 4],
+                        cutoff: 0.0,
                         source: ShapeSource::Box {
                             half: extent,
                             top: true,
@@ -627,6 +605,10 @@ fn pack_draw(
                         key,
                         model: translation(solid.position.x, 0.0, solid.position.z),
                         color,
+                        emission: [0.0; 3],
+                        color_rect: [0.0; 4],
+                        normal_rect: [0.0; 4],
+                        cutoff: 0.0,
                         source: ShapeSource::Cylinder {
                             radius,
                             height: solid.height,
@@ -635,13 +617,47 @@ fn pack_draw(
                 }
             }
         }
-        DrawKind::Mesh { vertices, pose, .. } => {
-            let key = shape_key_positions(4, vertices);
+        DrawKind::Mesh {
+            vertices,
+            normals,
+            texcoords,
+            pose,
+            emission,
+            surface,
+            ..
+        } => {
+            let shade = world
+                .surfaces
+                .get(surface.unwrap_or(usize::MAX))
+                .is_some_and(|s| s.two_sided)
+                .then_some(1.2)
+                .unwrap_or(1.0);
+            let key = shape_key_mesh(4, vertices, texcoords, shade);
+            let (color_rect, normal_rect, cutoff) = world
+                .surfaces
+                .get(surface.unwrap_or(usize::MAX))
+                .map(|s| {
+                    (
+                        s.color.map(|v| v as f32),
+                        s.normal.map(|v| v as f32),
+                        s.cutoff,
+                    )
+                })
+                .unwrap_or(([0.0; 4], [0.0; 4], 0.0));
             Some(PackedDraw::Shape {
                 key,
                 model: *pose,
                 color,
-                source: ShapeSource::Mesh(vertices.clone()),
+                emission: *emission,
+                color_rect,
+                normal_rect,
+                cutoff,
+                source: ShapeSource::Mesh {
+                    positions: vertices.clone(),
+                    normals: normals.clone(),
+                    uvs: texcoords.clone(),
+                    shade,
+                },
             })
         }
         DrawKind::Particles { .. } => {
@@ -668,6 +684,10 @@ fn pack_draw(
                 key,
                 model: crate::world::identity_pose(),
                 color,
+                emission: [0.0; 3],
+                color_rect: [0.0; 4],
+                normal_rect: [0.0; 4],
+                cutoff: 0.0,
                 source: ShapeSource::Baked(baked),
             })
         }
@@ -686,13 +706,19 @@ fn shape_key(tag: u64, values: &[f32]) -> u64 {
     hasher.finish()
 }
 
-fn shape_key_positions(tag: u64, positions: &[[f32; 3]]) -> u64 {
+fn shape_key_mesh(tag: u64, positions: &[[f32; 3]], uvs: &[[f32; 2]], shade: f32) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     tag.hash(&mut hasher);
+    shade.to_bits().hash(&mut hasher);
     for position in positions {
         for value in position {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    for uv in uvs {
+        for value in uv {
             value.to_bits().hash(&mut hasher);
         }
     }
@@ -715,10 +741,14 @@ fn shape_key_verts(tag: u64, verts: &[GpuVertex]) -> u64 {
 /// The roof is a plane like the floor, so the light shaders test it directly and it
 /// takes no occluder slot.
 fn sky_of(scene: &genos_scene::Scene) -> [f32; 3] {
-    scene
-        .sky
-        .as_ref()
-        .map_or([0.0; 3], |sky| sky.color.map(|c| c.max(0.0)))
+    let scale = scene.lighting.sky_ambient_scale();
+    scene.sky.as_ref().map_or([0.0; 3], |sky| {
+        [
+            sky.color[0].max(0.0) * scale[0],
+            sky.color[1].max(0.0) * scale[1],
+            sky.color[2].max(0.0) * scale[2],
+        ]
+    })
 }
 
 fn ceiling_of(scene: &genos_scene::Scene) -> [f32; 4] {
@@ -791,7 +821,7 @@ pub(crate) fn shape_corners(world: &World, view_proj: &[f32; 16]) -> Vec<[f32; 3
 
 /// Byte offset of the tail in the scene block (scene_data.glsl): the fixed fields end
 /// here and the lamps, occluders and grid words follow.
-pub const SCENE_TAIL: usize = 704;
+pub const SCENE_TAIL: usize = 256;
 
 /// Bytes matching the std430 scene block the shaders read (scene_data.glsl): the fixed
 /// fields, then a tail of 16-byte words with the lamps (two words each), the occluders
@@ -816,19 +846,11 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     push_u32(&mut bytes, lamp_count as u32);
     push_u32(&mut bytes, occ_count as u32);
     push_u32(&mut bytes, pack.objects.len() as u32);
-    push_u32(&mut bytes, pack.count_x);
-    push_u32(&mut bytes, pack.count_z);
-    push_f32(&mut bytes, pack.spacing);
-    push_f32(&mut bytes, pack.origin_x);
-    push_f32(&mut bytes, pack.origin_z);
-    push_f32(&mut bytes, pack.near_end);
-    push_f32(&mut bytes, pack.far_end);
-    push_f32(&mut bytes, pack.world_end);
     push_u32(&mut bytes, 0);
     push_f32(&mut bytes, pack.eye[0]);
     push_f32(&mut bytes, pack.eye[1]);
     push_f32(&mut bytes, pack.eye[2]);
-    push_f32(&mut bytes, pack.puffs.len() as f32);
+    push_f32(&mut bytes, 0.0);
     push_f32(&mut bytes, pack.fire.position[0]);
     push_f32(&mut bytes, pack.fire.position[1]);
     push_f32(&mut bytes, pack.fire.position[2]);
@@ -837,20 +859,6 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     push_f32(&mut bytes, pack.fire.color[1]);
     push_f32(&mut bytes, pack.fire.color[2]);
     push_f32(&mut bytes, 0.0);
-    for index in 0..8 {
-        let puff = pack.puffs.get(index);
-        let center = puff.map(|puff| puff.center).unwrap_or([0.0; 3]);
-        let density = puff.map(|puff| puff.density).unwrap_or(0.0);
-        let radius = puff.map(|puff| puff.radius).unwrap_or(0.0);
-        push_f32(&mut bytes, center[0]);
-        push_f32(&mut bytes, center[1]);
-        push_f32(&mut bytes, center[2]);
-        push_f32(&mut bytes, density);
-        push_f32(&mut bytes, radius);
-        push_f32(&mut bytes, 0.0);
-        push_f32(&mut bytes, 0.0);
-        push_f32(&mut bytes, 0.0);
-    }
     push_f32(&mut bytes, pack.floor_center[0]);
     push_f32(&mut bytes, pack.floor_center[1]);
     push_f32(&mut bytes, pack.floor_center[2]);
@@ -859,20 +867,6 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     push_f32(&mut bytes, pack.floor_color[0]);
     push_f32(&mut bytes, pack.floor_color[1]);
     push_f32(&mut bytes, pack.floor_color[2]);
-    for cascade in &pack.cascades {
-        push_f32(&mut bytes, cascade.spacing);
-        push_f32(&mut bytes, cascade.t0);
-        push_f32(&mut bytes, cascade.t1);
-        push_f32(&mut bytes, cascade.origin_x);
-        push_f32(&mut bytes, cascade.origin_z);
-        push_f32(&mut bytes, cascade.count_x as f32);
-        push_f32(&mut bytes, cascade.count_z as f32);
-        push_f32(&mut bytes, cascade.dirs as f32);
-        push_f32(&mut bytes, cascade.offset as f32);
-        push_f32(&mut bytes, 0.0);
-        push_f32(&mut bytes, 0.0);
-        push_f32(&mut bytes, 0.0);
-    }
     push_f32(&mut bytes, pack.view_right[0]);
     push_f32(&mut bytes, pack.view_right[1]);
     push_f32(&mut bytes, pack.view_right[2]);
@@ -880,25 +874,18 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     push_f32(&mut bytes, pack.view_up[0]);
     push_f32(&mut bytes, pack.view_up[1]);
     push_f32(&mut bytes, pack.view_up[2]);
-    // view_up.w: x of the last sun travel direction.
-    push_f32(&mut bytes, pack.last_sun[0]);
+    push_f32(&mut bytes, 0.0);
     push_f32(&mut bytes, pack.view_forward[0]);
     push_f32(&mut bytes, pack.view_forward[1]);
     push_f32(&mut bytes, pack.view_forward[2]);
     push_f32(&mut bytes, pack.view_aspect);
-    push_f32(&mut bytes, pack.grid_w as f32);
-    push_f32(&mut bytes, pack.grid_h as f32);
-    // view_grid.z is the near-field ray override; w is unused.
-    push_f32(&mut bytes, pack.near_rays as f32);
-    push_f32(&mut bytes, 0.0);
     for value in pack.ceiling {
         push_f32(&mut bytes, value);
     }
     for value in pack.sky {
         push_f32(&mut bytes, value);
     }
-    // sky.w: z of the last sun travel direction.
-    push_f32(&mut bytes, pack.last_sun[1]);
+    push_f32(&mut bytes, 0.0);
     for value in grid.occ.into_iter().chain(grid.lamp) {
         push_f32(&mut bytes, value);
     }
@@ -958,26 +945,17 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     bytes
 }
 
-pub(crate) fn apply_view(
-    pack: &mut Pack,
-    camera: &genos_scene::Camera,
-    aspect: f32,
-    width: u32,
-    height: u32,
-) {
+pub(crate) fn apply_view(pack: &mut Pack, camera: &genos_scene::Camera, aspect: f32) {
     let forward = genos_scene::look_direction(camera.yaw, camera.pitch);
     let mut right = forward.cross(genos_scene::Vec3::Y);
     let scale = right.length().max(1.0e-6);
     right = right / scale;
     let up = right.cross(forward);
-    let (grid_w, grid_h) = crate::field::screen_grid(width, height);
     pack.view_right = [right.x, right.y, right.z];
     pack.view_up = [up.x, up.y, up.z];
     pack.view_forward = [forward.x, forward.y, forward.z];
     pack.view_tan = (30.0_f32.to_radians()).tan();
     pack.view_aspect = aspect.max(0.01);
-    pack.grid_w = grid_w;
-    pack.grid_h = grid_h;
 }
 
 pub fn overlay_vertex(pos: [f32; 3], color: [f32; 3]) -> GpuVertex {
@@ -1199,9 +1177,21 @@ fn push_object(
         }
         DrawKind::Mesh {
             vertices,
+            normals,
+            texcoords,
             color,
             pose,
-        } => push_mesh(out, vertices, *color, pose),
+            surface,
+            ..
+        } => {
+            let shade = world
+                .surfaces
+                .get(surface.unwrap_or(usize::MAX))
+                .is_some_and(|s| s.two_sided)
+                .then_some(1.2)
+                .unwrap_or(1.0);
+            push_mesh(out, vertices, normals, texcoords, shade, *color, pose);
+        }
         DrawKind::Particles {
             density,
             points,
@@ -1348,16 +1338,49 @@ fn push_cylinder(
     }
 }
 
-fn push_mesh(out: &mut Vec<GpuVertex>, vertices: &[[f32; 3]], color: [f32; 3], pose: &[f32; 16]) {
-    for tri in vertices.chunks(3) {
+fn push_mesh(
+    out: &mut Vec<GpuVertex>,
+    vertices: &[[f32; 3]],
+    normals: &[[f32; 3]],
+    uvs: &[[f32; 2]],
+    shade: f32,
+    color: [f32; 3],
+    pose: &[f32; 16],
+) {
+    for (index, tri) in vertices.chunks(3).enumerate() {
         if tri.len() < 3 {
             continue;
         }
         let a = transform_pose(pose, tri[0]);
         let b = transform_pose(pose, tri[1]);
         let c = transform_pose(pose, tri[2]);
-        let n = normal_of(a, b, c);
-        push_tri(out, a, b, c, n, color);
+        let flat = normal_of(a, b, c);
+        let corner = |k: usize| {
+            let Some(n) = normals.get(index * 3 + k).copied() else {
+                return flat;
+            };
+            let spun = [
+                pose[0] * n[0] + pose[4] * n[1] + pose[8] * n[2],
+                pose[1] * n[0] + pose[5] * n[1] + pose[9] * n[2],
+                pose[2] * n[0] + pose[6] * n[1] + pose[10] * n[2],
+            ];
+            let len = (spun[0] * spun[0] + spun[1] * spun[1] + spun[2] * spun[2]).sqrt();
+            if len > 1.0e-6 {
+                [spun[0] / len, spun[1] / len, spun[2] / len]
+            } else {
+                flat
+            }
+        };
+        let uv = |k: usize| uvs.get(index * 3 + k).copied().unwrap_or([-1.0, -1.0]);
+        for (pos, k) in [(a, 0), (b, 1), (c, 2)] {
+            out.push(GpuVertex {
+                pos,
+                albedo: color,
+                normal: corner(k),
+                shade,
+                uv: uv(k),
+            });
+        }
     }
 }
 
@@ -1818,193 +1841,6 @@ fn normal_of(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
     }
 }
 
-fn hash_light(
-    lamps: &[GpuLamp],
-    occs: &[GpuOcc],
-    count_x: u32,
-    count_z: u32,
-    eye: [f32; 3],
-    fire: &FireLight,
-    puffs: &[Puff],
-    floor_x: f32,
-    floor_z: f32,
-    floor_half_x: f32,
-    floor_half_z: f32,
-    floor_color: [f32; 3],
-    ceiling: [f32; 4],
-    sky: [f32; 3],
-) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    count_x.hash(&mut hasher);
-    count_z.hash(&mut hasher);
-    floor_x.to_bits().hash(&mut hasher);
-    floor_z.to_bits().hash(&mut hasher);
-    floor_half_x.to_bits().hash(&mut hasher);
-    floor_half_z.to_bits().hash(&mut hasher);
-    for value in floor_color.into_iter().chain(ceiling).chain(sky) {
-        value.to_bits().hash(&mut hasher);
-    }
-    lamps.len().hash(&mut hasher);
-    for lamp in lamps {
-        for value in lamp.pos.into_iter().chain(lamp.color) {
-            value.to_bits().hash(&mut hasher);
-        }
-    }
-    occs.len().hash(&mut hasher);
-    for occ in occs {
-        occ.shape.to_bits().hash(&mut hasher);
-        for value in occ
-            .center
-            .into_iter()
-            .chain([occ.half_x, occ.height, occ.half_z, occ.radius])
-            .chain(occ.albedo)
-            .chain([occ.absorption, occ.reflectance, occ.color_mix])
-        {
-            value.to_bits().hash(&mut hasher);
-        }
-    }
-    for value in eye {
-        value.to_bits().hash(&mut hasher);
-    }
-    for value in fire
-        .position
-        .into_iter()
-        .chain(fire.color)
-        .chain([fire.strength])
-    {
-        value.to_bits().hash(&mut hasher);
-    }
-    puffs.len().hash(&mut hasher);
-    for puff in puffs {
-        for value in puff.center.into_iter().chain([puff.radius, puff.density]) {
-            value.to_bits().hash(&mut hasher);
-        }
-    }
-    hasher.finish()
-}
-
-/// Placement captured the last time the field was built.
-pub(crate) struct FieldAnchor {
-    eye: [f32; 3],
-    lamps: Vec<GpuLamp>,
-    lamp_count: usize,
-    rest: u64,
-}
-
-impl FieldAnchor {
-    pub(crate) fn capture(pack: &Pack) -> Self {
-        let lamp_count = pack.lamps.len().min(MAX_LAMPS);
-        let lamps = pack.lamps[..lamp_count].to_vec();
-        Self {
-            eye: pack.eye,
-            lamps,
-            lamp_count,
-            rest: field_rest(pack),
-        }
-    }
-
-    /// True when `pack` can keep showing the field this anchor built.
-    pub(crate) fn holds(&self, pack: &Pack) -> bool {
-        if field_rest(pack) != self.rest || pack.lamps.len() != self.lamp_count {
-            return false;
-        }
-        // The probe grids stay on the world. A camera move does not rebuild them.
-        for (lamp, old) in pack.lamps.iter().zip(self.lamps.iter()) {
-            if lamp.color.map(f32::to_bits) != old.color.map(f32::to_bits) {
-                return false;
-            }
-            if lamp.directional || old.directional {
-                if lamp.directional != old.directional
-                    || lamp.pos.map(f32::to_bits) != old.pos.map(f32::to_bits)
-                {
-                    return false;
-                }
-                continue;
-            }
-            let delta = [
-                lamp.pos[0] - old.pos[0],
-                lamp.pos[1] - old.pos[1],
-                lamp.pos[2] - old.pos[2],
-            ];
-            let dist2 = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
-            if dist2 >= FIELD_PLACE * FIELD_PLACE {
-                return false;
-            }
-        }
-        true
-    }
-
-    pub(crate) fn player(&self) -> [f32; 2] {
-        [self.eye[0], self.eye[2]]
-    }
-}
-
-fn field_rest(pack: &Pack) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    pack.count_x.hash(&mut hasher);
-    pack.count_z.hash(&mut hasher);
-    for value in pack
-        .floor_center
-        .into_iter()
-        .chain([pack.floor_half_x, pack.floor_half_z])
-        .chain(pack.floor_color)
-    {
-        value.to_bits().hash(&mut hasher);
-    }
-    pack.lamps.len().hash(&mut hasher);
-    for lamp in &pack.lamps {
-        for value in lamp.color {
-            value.to_bits().hash(&mut hasher);
-        }
-    }
-    pack.occs.len().hash(&mut hasher);
-    for occ in &pack.occs {
-        occ.shape.to_bits().hash(&mut hasher);
-        for value in occ
-            .center
-            .into_iter()
-            .chain([occ.half_x, occ.height, occ.half_z, occ.radius])
-            .chain(occ.albedo)
-            .chain([occ.absorption, occ.reflectance, occ.color_mix])
-        {
-            value.to_bits().hash(&mut hasher);
-        }
-    }
-    for value in pack
-        .fire
-        .position
-        .into_iter()
-        .chain(pack.fire.color)
-        .chain([pack.fire.strength])
-    {
-        value.to_bits().hash(&mut hasher);
-    }
-    pack.puffs.len().hash(&mut hasher);
-    for puff in &pack.puffs {
-        for value in puff.center.into_iter().chain([puff.radius, puff.density]) {
-            value.to_bits().hash(&mut hasher);
-        }
-    }
-    hasher.finish()
-}
-
-/// Spacing of the cascade that covers `(x, z)`. The floor uses the near grid. Outside it, the world grid.
-pub fn probe_spacing(world: &World, _eye: [f32; 3], x: f32, z: f32) -> f32 {
-    let plans = crate::field::cascade_plans(&world.scene.floor);
-    let floor = &world.scene.floor;
-    let on_floor = (x - floor.position.x).abs() <= floor.half_x
-        && (z - floor.position.z).abs() <= floor.half_z;
-    if on_floor {
-        plans[0].spacing
-    } else {
-        plans[2].spacing
-    }
-}
-
 fn push_u32(bytes: &mut Vec<u8>, value: u32) {
     bytes.extend_from_slice(&value.to_ne_bytes());
 }
@@ -2059,6 +1895,11 @@ mod tests {
             }],
             ceiling: None,
             sky: None,
+            lighting: genos_scene::LightingSettings::default(),
+            debug: genos_scene::DebugSettings::default(),
+            fps_counter: genos_scene::FpsCounterSettings::default(),
+            event_loop: genos_scene::EventLoopSettings::default(),
+            menu: genos_scene::MenuSettings::default(),
         };
         let world = World::from_scene(scene);
         let camera = Camera::opening();
@@ -2080,6 +1921,7 @@ mod tests {
                 model,
                 color,
                 source: ShapeSource::Box { .. },
+                ..
             } if color[1] < 0.5 => Some((*key, *model)),
             _ => None,
         });
@@ -2110,59 +1952,5 @@ mod tests {
             model[12],
             moved_model.expect("the moved solid keeps the same block")[12]
         );
-    }
-
-    fn pack_at(eye: [f32; 3], lamp: [f32; 3], solid_x: f32) -> Pack {
-        let scene = Scene {
-            floor: Floor {
-                position: Vec3::new(0.0, 0.0, 0.0),
-                half_x: 8.0,
-                half_z: 8.0,
-                color: [1.0, 1.0, 1.0],
-            },
-            walls: Vec::new(),
-            solids: vec![Solid {
-                yaw: 0.0,
-                shape: Shape::Square,
-                position: Vec3::new(solid_x, 0.0, 0.0),
-                size: 1.0,
-                height: 1.0,
-                color: [1.0, 0.0, 0.0],
-                absorption: 0.0,
-                reflectance: -1.0,
-                color_mix: -1.0,
-            }],
-            lights: vec![Light {
-                position: Vec3::new(lamp[0], lamp[1], lamp[2]),
-                color: [1.0, 1.0, 1.0],
-
-                direction: Vec3::ZERO,
-            }],
-            ceiling: None,
-            sky: None,
-        };
-        let world = World::from_scene(scene);
-        let camera = Camera::opening();
-        let view = view_proj(&camera, 1.0);
-        let mut memory = FrameMemory::default();
-        pack_frame(&world, &view, eye, &mut memory)
-    }
-
-    #[test]
-    fn a_short_move_keeps_the_field_and_a_real_move_rebuilds_it() {
-        let eye = [0.0, 1.7, 0.0];
-        let lamp = [0.0, 7.0, 0.0];
-        let anchor = FieldAnchor::capture(&pack_at(eye, lamp, 0.0));
-        assert!(anchor.holds(&pack_at([0.2, 1.7, -0.1], lamp, 0.0)));
-        assert!(anchor.holds(&pack_at(eye, [0.2, 7.0, 0.0], 0.0)));
-        assert!(
-            anchor.holds(&pack_at([2.0, 1.7, 0.0], lamp, 0.0)),
-            "a camera move rebuilt the world grid"
-        );
-        assert!(!anchor.holds(&pack_at(eye, [0.0, 7.0, 2.0], 0.0)));
-        assert!(!anchor.holds(&pack_at(eye, lamp, 1.5)));
-        let mut tinted = pack_at(eye, lamp, 0.0);
-        tinted.lamps[0].color = [0.2, 0.2, 0.2];
-        assert!(!anchor.holds(&tinted));
     }
 }

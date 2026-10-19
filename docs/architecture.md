@@ -6,7 +6,7 @@ Genos Engine has two programs. The runtime runs a game on Linux, Windows, and ma
 
 Engine code makes each native call to the operating system or to Vulkan. A third-party crate does not own the window, the input, the renderer, the audio, or the network. The Rust standard library stays. See [ADR 0007](adr/0007-native-calls-go-to-the-system-and-vulkan.md).
 
-The first proof uses the window, the input, Vulkan, Rhai, and radiance cascades. Audio follows the same rule. The agent endpoint uses loopback sockets in this repository. Gameplay networking waits.
+The first proof uses the window, the input, Vulkan, Rhai, and the lighting pass. Audio follows the same rule. The agent endpoint uses loopback sockets in this repository. Gameplay networking waits.
 
 ## First proof
 
@@ -42,9 +42,12 @@ crates/physics/     package genos-physics
 crates/scene/       package genos-scene
 crates/mcp/         package genos-mcp
 crates/debug/       package genos-debug
+debug/scene-lib/    package genos-scene-lib
+debug/lighting/     package genos-lighting
 crates/window/      package genos-window
 crates/ui/          package genos-ui
 crates/render/      package genos-render
+crates/lighting-ref/ package genos-lighting-ref
 crates/load/        package genos-load
 crates/load-check/  package genos-load-check
 crates/audio/       package genos-audio
@@ -54,7 +57,9 @@ examples/camera/    package genos-camera
 
 `genos-audio` mixes loaded PCM and submits that stereo buffer to the operating system. Direct-path transmission is one compute pass in `genos-render`. The camera scene does not open a sound device.
 
-`genos-debug` runs the debug commands, scripts, captures and the path-traced ground truth over the MCP command queue. See [Debugging](systems/debugging.md).
+`genos-debug` runs the debug commands, scripts, captures and the path-traced ground truth over the MCP command queue. Each engine system adds a binary under `debug/<system>/` on that scaffolding, with scenes in `debug/scenes/`. `genos-scene-lib` parses those scene files and does not link the renderer. `genos-lighting` is the lighting debug binary: it builds the scenes and writes screenshots, dumps, and logs under `./genos-debug/`. See [Debugging](systems/debugging.md).
+
+`genos-lighting-ref` is the CPU checker for lighting pictures. It holds the metrics, the verdicts, and the audit report, and it does not open a window or a Vulkan device. `genos-stress lighting-ref` is the driver: it owns the scenes, calls the path tracer, and on a machine with Vulkan captures live frames. `make lighting-ref-check` runs it. `MODE=lavapipe-small` is the small wiring check. Pictures and reports are written under `./genos-debug/` in the current directory. The metric core is its own crate so the defect self-test can run without the renderer. `gi-check` remains the scripted picture gate inside the stress runner.
 
 `genos-math` stores positions, directions, and rotations. `genos-physics` steps gravity, a move wish, contact, and springs. The camera capsule calls that step.
 
@@ -91,7 +96,7 @@ A world holds fixed parts, meshes with a pose, particles, and shader draws. A sh
 
 ## Lighting
 
-Lighting is a renderer pass. It uses radiance cascades. Probe spacing is finer beside the player than at the far side of the floor. Far and world ranges keep fewer positions and more directions. World probes sit in the world, past those ranges, and carry material-colored light into empty rays. The engine keeps the field until the player, a light, or an occluder changes. See [Lighting](lighting.md) and [ADR 0008](adr/0008-lighting-uses-radiance-cascades.md).
+Lighting is a renderer pass: a G-buffer, direct light with traced shadows over mesh SDFs, a world-anchored surface cache and screen probes, composed per pixel. Its data stays on the GPU between frames; the CPU uploads small deltas. See [Lighting](systems/lighting/README.md) and [ADR 0012](adr/0012-gi.md). (The radiance cascades of ADR 0008 were removed on 2026-10-12.)
 
 ## Reference
 

@@ -1,3 +1,14 @@
+#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+
 //! The small stress picture against an independent ray trace.
 //!
 //! The tracer never reads the probe field. Samples come from the presented picture.
@@ -62,10 +73,8 @@ fn draw(
 ) -> Vec<u8> {
     let _ = window.pump();
     if settle {
-        renderer.set_live_readback(false);
         renderer.draw(world, camera, true).expect("draw").expect("pixels")
     } else {
-        renderer.set_live_readback(true);
         renderer.draw(world, camera, false).expect("draw");
         renderer.read_picture().expect("pixels")
     }
@@ -389,7 +398,6 @@ fn the_live_picture_tracks_the_ray_trace_within_100ms() {
     let width = renderer.width();
     let height = renderer.height();
     assert!(width >= 1280 && height >= 720, "{width}x{height}");
-    renderer.set_live_readback(true);
 
     let hall_eye = [14.5, 1.7, 23.5];
     let (face_at, face_n) = box_face(red_box(&stage.world.scene), hall_eye);

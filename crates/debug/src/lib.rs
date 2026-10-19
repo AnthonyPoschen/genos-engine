@@ -16,6 +16,6 @@ pub mod tools;
 mod value;
 
 pub use image::{Diff, Flicker, FlickerReport, Image, Luminance, Region};
-pub use knobs::{lighting_knobs, set_lighting_knob, Host, Knob};
+pub use knobs::{CheckpointPose, Host, Knob, LoadPace};
 pub use reference::{compare, render as render_reference, Compare, RefSetup, Reference};
-pub use tools::{Ctx, FrameTiming, Look, ProbeColor, Tools, DEFAULT_STEP};
+pub use tools::{Ctx, FrameTiming, Look, Tools, DEFAULT_STEP};

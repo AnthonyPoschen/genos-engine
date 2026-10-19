@@ -1,0 +1,34 @@
+# S78F: Stale WRC cells take a due check
+
+- **Date:** 2026-10-12
+- **Result:** pushed
+- **Commit / patch:** 6474a941
+
+## Idea
+Stale WRC cells take a due check
+
+## Motivation
+not recorded
+
+## Paper basis
+not recorded
+
+## What was implemented
+not recorded
+
+## Numbers
+still 11.20/80, moving 18.7/51, pop 0.073/0.110
+
+Numbers context: the scene, GPU and resolution are not recorded for these figures unless stated above. For S76B-D onward, still/moving ms and fps are the bisect-log (steps.md) still and moving runs; pop is the share of pixel-frames stepping more than 0.01 from their 9-frame average (definition from the gi-check fill run), at frames 20-80 / 80-320; brightness is smoke mean luminance at pose a ("lum a"). Anything not given here was not recorded.
+
+## Screenshots
+not recorded (under ~/.cache/gi2diag/perf on zanven-pc)
+
+## Outcome and why
+not recorded
+
+## From the Engine chat (Anthony's feedback, reasons, numbers stated)
+Anthony (t423u): moving scene showed 0 improvement for him; still scene improved to 80 fps; no visual issues.
+
+## Lessons / when to revisit
+not recorded

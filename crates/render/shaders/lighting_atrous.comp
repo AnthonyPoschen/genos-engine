@@ -1,0 +1,96 @@
+#version 450
+// GI S72V: layer 2 as SVGF over the surface-cache texels (lighting_cache.glsl,
+// "S72V layer 2 as SVGF"): stage 0 variance, 1-5 a-trous, 6 push + IC placement.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+
+shared uint atrous_red[64];
+
+// Workgroup sum. Every thread in the group calls it; the return is the total.
+uint atrous_wg_sum(uint bit) {
+    uint lid = gl_LocalInvocationID.x;
+    atrous_red[lid] = bit;
+    barrier();
+    if (lid < 32u) atrous_red[lid] += atrous_red[lid + 32u];
+    barrier();
+    if (lid < 16u) atrous_red[lid] += atrous_red[lid + 16u];
+    barrier();
+    if (lid < 8u) atrous_red[lid] += atrous_red[lid + 8u];
+    barrier();
+    if (lid < 4u) atrous_red[lid] += atrous_red[lid + 4u];
+    barrier();
+    if (lid < 2u) atrous_red[lid] += atrous_red[lid + 2u];
+    barrier();
+    if (lid == 0u) atrous_red[0] += atrous_red[1];
+    barrier();
+    return atrous_red[0];
+}
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    uint stage0 = lighting_atrous_stage();
+    // One thread, after levels 1-5: fraction, mode, threshold, filtered count.
+    if (stage0 == 6u && slot == 0u) {
+        lighting_atrous_publish();
+    }
+    // Filtered texels this frame (the fraction's denominator). The variance
+    // pass already visits every slot.
+    if (stage0 == 0u && LIGHTING_ATROUS_LISTS) {
+        uint bit = 0u;
+        if (slot < LIGHTING_CACHE_SLOTS && lighting_sc_svgf() && ckeys.key[slot] != 0u && cache.v[3u * slot + 1u].w > 0.0 && lighting_svgf_active(slot)) {
+            bit = 1u;
+        }
+        uint sum = atrous_wg_sum(bit);
+        if (gl_LocalInvocationID.x == 0u && sum != 0u) {
+            atomicAdd(ckeys.key[LIGHTING_ATROUS_BIN_AT + (gl_WorkGroupID.x & 63u)], sum);
+        }
+    }
+    // S78X: levels 1-5 run their work list while last frame stayed under the
+    // dirty fraction. Above it, or past the list cap, the dense sweep.
+    if (LIGHTING_DIRTY_ATROUS && LIGHTING_ATROUS_LISTS && stage0 >= 1u && stage0 <= 5u) {
+        uint cnt = ckeys.key[lighting_atrous_list(stage0)];
+        bool dense = !lighting_atrous_listing() || cnt > LIGHTING_ATROUS_LIST_CAP;
+        if (slot == 0u) {
+            ckeys.key[LIGHTING_ATROUS_MODE_AT + stage0 - 1u] = dense ? 2u : 1u;
+        }
+        if (dense) {
+            uint bit = 0u;
+            if (slot < LIGHTING_CACHE_SLOTS && lighting_svgf_is_dirty(slot, stage0)) {
+                bit = 1u;
+            }
+            uint sum = atrous_wg_sum(bit);
+            if (gl_LocalInvocationID.x == 0u && sum != 0u) {
+                atomicAdd(ckeys.key[LIGHTING_ATROUS_DBIN_AT + (stage0 - 1u) * 64u + (gl_WorkGroupID.x & 63u)], sum);
+            }
+        } else {
+            if (slot >= cnt) {
+                return;
+            }
+            slot = ckeys.key[lighting_atrous_list(stage0) + 1u + slot];
+        }
+    }
+    if (slot >= LIGHTING_CACHE_SLOTS || !lighting_sc_svgf() || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
+        return;
+    }
+    lighting_obj_salt = cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5 ? cache.v[LIGHTING_SC_OBJ_AT + slot].x : 0.0;
+    uint stage = lighting_atrous_stage();
+    if (!lighting_svgf_active(slot)) {
+        if (stage == 0u) {
+            // No data for the levels: mask 0 in both ping-pong buffers.
+            lighting_svgf_store(LIGHTING_SC_ATROUS_A, slot, vec3(0.0), 0.0, 0.0);
+            lighting_svgf_store(LIGHTING_SC_ATROUS_B, slot, vec3(0.0), 0.0, 0.0);
+            if (LIGHTING_DIRTY_ATROUS) {
+                lighting_svgf_inactive(slot); // S77D: every kept level too
+            }
+        }
+        return;
+    }
+    if (stage == 0u) {
+        lighting_svgf_variance(slot);
+    } else if (stage <= 5u) {
+        lighting_svgf_iter(slot, stage - 1u);
+    } else {
+        lighting_svgf_push(slot);
+    }
+}

@@ -1,11 +1,23 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::match_result_ok, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-use rhai::{Dynamic, Engine};
+use rhai::{Dynamic, Engine, EvalAltResult};
 
 use genos_math::Vec3;
 
+use crate::debug_settings::DebugSettings;
+use crate::event_loop::EventLoopSettings;
+use crate::fps_counter::FpsCounterSettings;
+use crate::lighting::LightingSettings;
+use crate::menu::MenuSettings;
 use crate::types::{Ceiling, Floor, Light, Scene, Shape, Solid, Wall, MAX_LAMPS, MAX_OCCLUDERS};
 
 /// Load the shipped scene file through the Rhai host.
@@ -222,6 +234,107 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
         );
     }
 
+    {
+        let builder = builder.clone();
+        engine.register_fn(
+            "lighting_preset",
+            move |name: &str| -> Result<(), Box<EvalAltResult>> {
+                let preset = crate::LightingPreset::parse(name)
+                    .ok_or_else(|| format!("unknown lighting preset {name}"))?;
+                builder.borrow_mut().lighting = LightingSettings::preset(preset);
+                Ok(())
+            },
+        );
+    }
+    {
+        let builder = builder.clone();
+        engine.register_fn("time_of_day", move |hours: Dynamic| {
+            builder.borrow_mut().lighting.time_of_day = num(&hours);
+            builder.borrow_mut().lighting.sanitize();
+        });
+    }
+    {
+        let builder = builder.clone();
+        engine.register_fn("lighting", move |text: &str| -> Result<(), Box<EvalAltResult>> {
+            let mut settings = builder.borrow().lighting.clone();
+            for raw in text.split(['\n', ';']) {
+                let line = raw.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let Some((key, value)) = line.split_once('=') else {
+                    return Err(format!("use key=value, got {line}").into());
+                };
+                settings
+                    .set_key(key.trim(), value.trim())
+                    .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
+            }
+            builder.borrow_mut().lighting = settings;
+            Ok(())
+        });
+    }
+    {
+        let builder = builder.clone();
+        // `debug` is Rhai's string printer, so the settings call cannot use that name.
+        engine.register_fn("debug_settings", move |text: &str| -> Result<(), Box<EvalAltResult>> {
+            let mut settings = builder.borrow().debug.clone();
+            for raw in text.split(['\n', ';']) {
+                let line = raw.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let Some((key, value)) = line.split_once('=') else {
+                    return Err(format!("use key=value, got {line}").into());
+                };
+                settings
+                    .set_key(key.trim(), value.trim())
+                    .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
+            }
+            builder.borrow_mut().debug = settings;
+            Ok(())
+        });
+    }
+    {
+        let builder = builder.clone();
+        engine.register_fn("fps_counter", move |text: &str| -> Result<(), Box<EvalAltResult>> {
+            let mut settings = builder.borrow().fps_counter;
+            for raw in text.split(['\n', ';']) {
+                let line = raw.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let Some((key, value)) = line.split_once('=') else {
+                    return Err(format!("use key=value, got {line}").into());
+                };
+                settings
+                    .set_key(key.trim(), value.trim())
+                    .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
+            }
+            builder.borrow_mut().fps_counter = settings;
+            Ok(())
+        });
+    }
+    {
+        let builder = builder.clone();
+        engine.register_fn("menu", move |text: &str| -> Result<(), Box<EvalAltResult>> {
+            let mut settings = builder.borrow().menu.clone();
+            for raw in text.split(['\n', ';']) {
+                let line = raw.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let Some((key, value)) = line.split_once('=') else {
+                    return Err(format!("use key=value, got {line}").into());
+                };
+                settings
+                    .set_key(key.trim(), value.trim())
+                    .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
+            }
+            builder.borrow_mut().menu = settings;
+            Ok(())
+        });
+    }
+
     engine.run(source).map_err(|err| err.to_string())?;
     let built = builder.borrow();
     let floor = built.floor.clone().ok_or("script placed no floor")?;
@@ -267,6 +380,11 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
         lights: built.lights.clone(),
         ceiling: built.ceiling.clone(),
         sky: None,
+        lighting: built.lighting.clone(),
+        debug: built.debug.clone(),
+        fps_counter: built.fps_counter,
+        menu: built.menu.clone(),
+        event_loop: built.event_loop,
     })
 }
 
@@ -287,4 +405,9 @@ struct Builder {
     solids: Vec<Solid>,
     lights: Vec<Light>,
     ceiling: Option<Ceiling>,
+    lighting: LightingSettings,
+    debug: DebugSettings,
+    fps_counter: FpsCounterSettings,
+    menu: MenuSettings,
+    event_loop: EventLoopSettings,
 }

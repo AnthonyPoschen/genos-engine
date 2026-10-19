@@ -1,3 +1,12 @@
+#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::too_many_arguments, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+
 //! Presented fire. Pixel checks use `Renderer::draw` readback.
 //!
 //! Two cold simulations must agree. A warm column sits above the red box, a
@@ -5,8 +14,8 @@
 //! far floor because the particles emit light.
 
 use genos_render::{
-    build, fire_radiance, illuminate_facing, medium, sample as field_sample, shade_lit, DrawKind,
-    FireLight, Renderer, Simulation, World, PROOF_STEPS, STEP_DT,
+    direct_light, fire_radiance, luminance, medium, shade_lit, DrawKind, FireLight, Renderer,
+    Simulation, World, PROOF_STEPS, STEP_DT,
 };
 use genos_scene::{load_path, viewport_uv, Camera};
 use genos_window::Window;
@@ -119,16 +128,12 @@ fn cpu_fallback(open_error: &str) {
 
     let normal = [0.0, 1.0, 0.0];
     let albedo = [0.45, 0.45, 0.45];
-    let direct = illuminate_facing(&world.scene, 0.0, 2.4, 0.0, normal);
-    let field = build(&world.scene);
-    let bounce = field_sample(&field, 0.0, 0.0);
-    let lit = shade_lit(albedo, direct, bounce, normal);
+    let direct = luminance(direct_light(&world.scene, [0.0, 2.4, 0.0], normal));
+    let lit = shade_lit(albedo, direct, [0.0; 3], normal);
     let mut dark_scene = world.scene.clone();
     dark_scene.lights.clear();
-    let dark_direct = illuminate_facing(&dark_scene, 0.0, 2.4, 0.0, normal);
-    let dark_field = build(&dark_scene);
-    let dark_bounce = field_sample(&dark_field, 0.0, 0.0);
-    let dark = shade_lit(albedo, dark_direct, dark_bounce, normal);
+    let dark_direct = luminance(direct_light(&dark_scene, [0.0, 2.4, 0.0], normal));
+    let dark = shade_lit(albedo, dark_direct, [0.0; 3], normal);
     assert!(
         brightness(lit) > brightness(dark) + 0.02,
         "a world-lit particle did not darken without the lamp: {lit:?} {dark:?}"

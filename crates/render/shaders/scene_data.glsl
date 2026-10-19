@@ -19,60 +19,30 @@ struct Occ {
     // and sine of the turn about +Y (a square solid's yaw; 1 and 0 for no turn).
     vec4 bounce;
 };
-struct Puff {
-    vec4 center_density;
-    vec4 radius;
-};
-struct Cascade {
-    float spacing;
-    float t0;
-    float t1;
-    float origin_x;
-    float origin_z;
-    float count_x;
-    float count_z;
-    float dirs;
-    float offset;
-    float pad0;
-    float pad1;
-    float pad2;
-};
 layout(std430, set = 0, binding = 0) readonly buffer SceneData {
     uint lamp_count;
     uint occ_count;
     uint obj_count;
-    uint count_x;
-    uint count_z;
-    float spacing;
-    float origin_x;
-    float origin_z;
-    float near_end;
-    float far_end;
-    float world_end;
-    uint pad2;
+    uint pad0;
     vec4 eye;
+    // xyz the fire's place, w its strength; rgb its colour.
     vec4 fire_pos;
     vec4 fire_color;
-    Puff puffs[8];
     // xyz is the floor center. w is half extent on X.
     vec4 floor_center;
     // x is half extent on Z. yzw is the floor color.
     vec4 floor_data;
-    Cascade cascades[3];
-    // xyz is the camera basis. w is tan(half fov), 0, aspect, and unused.
+    // xyz is the camera basis. w is tan(half fov), 0, aspect.
     vec4 view_right;
     vec4 view_up;
     vec4 view_forward;
-    // x is the screen-probe columns. y is the rows. z is the near-field rays plus one
-    // (0: NEAR_RAYS).
-    vec4 view_grid;
     // x is the roof underside height over the floor footprint (0 = no roof). yzw is its color.
     vec4 ceiling;
     // rgb is the sky's radiance (0 = no sky): what a ray that leaves the scene brings.
     vec4 sky;
     // Sparse occluder box: origin x, origin z, cell size, origin y.
     vec4 occ_grid;
-    // Lamp grid: low x, low z, cell size, notice band.
+    // Lamp grid: low x, low z, cell size, unused.
     vec4 lamp_grid;
     // Cells: occluder box x and z, lamp grid x and z. The occluder y count is grid word 1.
     uvec4 grid_dims;

@@ -1,0 +1,59 @@
+# Lighting debug menu. One setting per line. Restart to pick up edits.
+# tab | section key | title | open or closed | setting
+# A tab of "-" sits outside the tab strip.
+# A section key of "-" puts the setting on the tab with no fold header.
+# The same section key stays one fold. The first line sets the title and open or closed.
+# GENOS_MENU_LAYOUT points at another file of this shape.
+# Setting names are the config keys, plus review, scene, checkpoint, view, and fps.
+# Move a line to another tab or section. No code change is required.
+Scene | - | - | open | scene
+Scene | - | - | open | checkpoint
+Scene | - | - | open | view
+Scene | - | - | open | lighting_preset
+Scene | - | - | open | sky
+Pipeline | - | - | open | lighting_direct
+Pipeline | - | - | open | lighting_shadows
+Pipeline | - | - | open | lighting_gi
+Pipeline | - | - | open | lighting_probes
+Pipeline | - | - | open | lighting_world_cache
+Pipeline | - | - | open | lighting_sky
+Pipeline | - | - | open | lighting_emissive
+Pipeline | - | - | open | lighting_prefill
+Pipeline | - | - | open | lighting_denoise
+Pipeline | - | - | open | lighting_denoise_adaptive
+Pipeline | - | - | open | lighting_compose_reuse
+Pipeline | - | - | open | lighting_lamp_pick_reuse
+Pipeline | - | - | open | lighting_lamp_pick_unbiased
+Lamps | direct | Lamps | open | lighting_direct_lights
+Lamps | direct | Lamps | open | lighting_direct_refresh
+Lamps | direct | Lamps | open | lighting_direct_scale
+Lamps | direct | Lamps | open | lighting_lamp_pick
+Lamps | direct | Lamps | open | lighting_lamp_pick_samples
+Lamps | direct | Lamps | open | lighting_lamp_pick_candidates
+Lamps | direct | Lamps | open | lighting_lamp_pick_radius
+Lamps | direct | Lamps | open | lighting_lamp_pick_history
+GI | gi | Probes | open | lighting_bounces
+GI | gi | Probes | open | lighting_gi_refresh
+GI | gi | Probes | open | lighting_budget_shift
+GI | gi | Probes | open | lighting_probe_rays
+GI | gi | Probes | open | lighting_probe_stale
+GI | world | World cache | closed | lighting_world_stale
+GI | world | World cache | closed | lighting_surface_cache_attach_movers
+GI | world | World cache | closed | lighting_surface_cache_blend
+GI | world | World cache | closed | lighting_surface_cache_firefly_sigma
+GI | world | World cache | closed | lighting_surface_cache_ray_budget
+GI | world | World cache | closed | lighting_surface_cache_dormant_rays
+GI | world | World cache | closed | lighting_screen_verify
+GI | world | World cache | closed | lighting_world_verify
+Denoise | - | - | open | lighting_denoise_iters
+Denoise | - | - | open | lighting_denoise_variance
+Shadows | - | - | open | lighting_shadow_filter
+Shadows | - | - | open | lighting_ambient
+Perf | - | - | open | lighting_full_effort
+Perf | - | - | open | unfilled
+Perf | - | - | open | unfilled_tint
+Perf | - | - | open | fps
+Perf | - | - | open | stall
+Perf | - | - | open | menu_wheel
+Perf | - | - | open | menu_keys
+Info | - | - | open | review

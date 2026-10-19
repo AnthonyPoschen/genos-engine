@@ -1,6 +1,12 @@
+#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! The lighting panel through the public UI entry, against a real lamp.
 
-use genos_render::illuminate_facing;
+use genos_render::{direct_light, luminance};
 use genos_scene::{viewport_uv, Camera, Floor, Light, Scene, Shape, Solid, Vec3};
 use genos_ui::{
     apply_lamp, id, lighting_frame, Action, Frame, Paint, PictureMode, Pointer, Shown, State,
@@ -337,7 +343,7 @@ fn the_panel_shows_picture_modes_and_a_press_selects_one() {
         .filter_map(|item| item.text.as_deref())
         .collect();
     for label in [
-        "Light", "X", "Y", "Z", "Dim", "Bright", "off", "FXAA", "SSAA", "Run",
+        "Light", "X", "Y", "Z", "Dim", "Bright", "off", "FXAA", "Run",
     ] {
         assert!(texts.contains(&label), "{label} is missing from {texts:?}");
     }
@@ -346,7 +352,6 @@ fn the_panel_shows_picture_modes_and_a_press_selects_one() {
     for (control, mode, label) in [
         (id::AA_OFF, PictureMode::Off, "off"),
         (id::AA_FXAA, PictureMode::Fxaa, "FXAA"),
-        (id::AA_SSAA, PictureMode::Ssaa, "SSAA"),
     ] {
         let mut state = State::default();
         let idle = ui(&mut state, &scene, &camera, pointer(0.0, 0.0, false));
@@ -383,7 +388,7 @@ fn scale(control: u32, scene: &mut Scene, camera: &Camera) -> (f32, f32) {
     let mut state = State::default();
     let idle = ui(&mut state, scene, camera, pointer(0.0, 0.0, false));
     let (x, y) = center(&shown(&idle, control));
-    let before = illuminate_facing(scene, 0.0, 1.0, 0.0, [0.0, 1.0, 0.0]);
+    let before = luminance(direct_light(scene, [0.0, 1.0, 0.0], [0.0, 1.0, 0.0]));
     let press = ui(&mut state, scene, camera, pointer(x, y, true));
     assert!(!press.look_capture, "a panel press captured look");
     assert!(matches!(
@@ -391,7 +396,7 @@ fn scale(control: u32, scene: &mut Scene, camera: &Camera) -> (f32, f32) {
         [Action::ScaleIntensity(_)]
     ));
     apply_actions(scene, &press);
-    let after = illuminate_facing(scene, 0.0, 1.0, 0.0, [0.0, 1.0, 0.0]);
+    let after = luminance(direct_light(scene, [0.0, 1.0, 0.0], [0.0, 1.0, 0.0]));
     (before, after)
 }
 
@@ -630,7 +635,7 @@ fn ui(state: &mut State, scene: &Scene, camera: &Camera, pointer: Pointer) -> Fr
 }
 
 fn pointer(x: f32, y: f32, down: bool) -> Pointer {
-    Pointer { x, y, down }
+    Pointer::at(x, y, down)
 }
 
 fn shown(frame: &Frame, id: u32) -> Shown {
@@ -677,5 +682,10 @@ fn lamp_scene(position: Vec3) -> Scene {
         }],
         ceiling: None,
         sky: None,
+        lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
+        fps_counter: genos_scene::FpsCounterSettings::default(),
+        event_loop: genos_scene::EventLoopSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     }
 }

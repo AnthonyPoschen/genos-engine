@@ -1,3 +1,12 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![allow(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![allow(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::single_match_else, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! The running stress scene: the building at one scale, the lamp mix, the clocks, and
 //! the [`World`] the renderer draws.
 
@@ -75,6 +84,37 @@ pub struct Stage {
     /// The sky follows the sun; off leaves only the sun and the lamps.
     pub sky_on: bool,
     pub boxes_still: bool,
+    /// The lamp paths' clock stands (moving lamps hold where they are).
+    pub lamps_still: bool,
+    /// Count pixels whose surface-cache texel had no finished set. U toggles it. F8 is the alias.
+    pub unfilled_count: bool,
+    /// Magenta tint on those pixels. Shift-U toggles it and turns counting on. Shift-F8 is the alias.
+    pub unfilled_tint: bool,
+    /// A scene file in place of the building (--scene): its walls, solids and
+    /// lights as they are; nothing moves, the sun, sky and lamp knobs do nothing.
+    pub room: Option<genos_scene::Scene>,
+    /// Move the scene's point lamp, then hold it (--lamp-stop). Catch-up starts
+    /// on the first draw that holds.
+    pub lamp_stop: bool,
+    lamp_stop_frame: u32,
+}
+
+/// Draws at the file position before the point lamp steps.
+const LAMP_STOP_SETTLE: u32 = 12;
+/// Draws that step the lamp. The next draw holds the last step.
+const LAMP_STOP_MOVE: u32 = 8;
+const LAMP_STOP_STEP: f32 = 0.08;
+
+/// Metres the point lamp has moved by this draw. `0` through the settle
+/// draws, then one step per draw, then a constant.
+pub fn lamp_stop_shift(frame: u32) -> f32 {
+    if frame <= LAMP_STOP_SETTLE {
+        0.0
+    } else if frame <= LAMP_STOP_SETTLE + LAMP_STOP_MOVE {
+        LAMP_STOP_STEP * (frame - LAMP_STOP_SETTLE) as f32
+    } else {
+        LAMP_STOP_STEP * LAMP_STOP_MOVE as f32
+    }
 }
 
 impl Stage {
@@ -103,6 +143,12 @@ impl Stage {
             sun_frozen: false,
             sky_on: true,
             boxes_still: false,
+            lamps_still: false,
+            unfilled_count: false,
+            unfilled_tint: false,
+            room: None,
+            lamp_stop: false,
+            lamp_stop_frame: 0,
         };
         stage.apply();
         stage
@@ -110,7 +156,7 @@ impl Stage {
 
     /// Rebuild the building at another scale. The lamp mix and clocks carry over.
     pub fn set_scale(&mut self, scale: Scale) {
-        if scale == self.scale {
+        if scale == self.scale || self.room.is_some() {
             return;
         }
         self.scale = scale;
@@ -128,18 +174,51 @@ impl Stage {
     }
 
     pub fn advance(&mut self, dt: f32) {
-        self.lamp_clock += dt;
+        if !self.lamps_still {
+            self.lamp_clock += dt;
+        }
         if !self.boxes_still {
             self.box_clock += dt;
         }
         if !self.sun_frozen {
             self.day = (self.day + dt * self.sun_speed / self.day_seconds).rem_euclid(1.0);
         }
+        if self.lamp_stop {
+            self.lamp_stop_frame = self.lamp_stop_frame.saturating_add(1);
+        }
+        self.apply();
+    }
+
+    /// Put a scene file in place of the building (--scene).
+    pub fn set_room(&mut self, room: genos_scene::Scene) {
+        self.world = World::from_scene(room.clone());
+        self.room = Some(room);
         self.apply();
     }
 
     /// Write the boxes, lamps, sun and sky for the current clocks into the world.
     pub fn apply(&mut self) {
+        // The stress clock is the scene time of day (same hours as the debug knob).
+        // 0 on the stage clock is sunrise, 06:00.
+        let hours = ((self.day.rem_euclid(1.0) as f64) * 24.0 + 6.0) % 24.0;
+        self.world.scene.lighting.time_of_day = hours as f32;
+        if let Some(room) = &self.room {
+            self.world.scene.lights = room.lights.clone();
+            self.world.scene.sky = room.sky.clone();
+            if self.lamp_stop {
+                let shift = lamp_stop_shift(self.lamp_stop_frame);
+                if let Some(lamp) = self
+                    .world
+                    .scene
+                    .lights
+                    .iter_mut()
+                    .find(|lamp| lamp.direction == genos_scene::Vec3::ZERO)
+                {
+                    lamp.position.x += shift;
+                }
+            }
+            return;
+        }
         self.building
             .place_movers(&mut self.world.scene.solids, self.box_clock);
         let mut lights = self.building.lamps(self.mix, self.lamp_clock, self.power);
@@ -159,5 +238,21 @@ impl Stage {
 
     pub fn occluders(&self) -> usize {
         self.world.scene.walls.len() + self.world.scene.solids.len()
+    }
+}
+
+#[cfg(test)]
+mod lamp_stop_shift_test {
+    use super::{lamp_stop_shift, LAMP_STOP_MOVE, LAMP_STOP_SETTLE};
+
+    #[test]
+    fn the_lamp_holds_on_the_draw_after_the_last_step() {
+        assert_eq!(lamp_stop_shift(1), 0.0);
+        assert_eq!(lamp_stop_shift(LAMP_STOP_SETTLE), 0.0);
+        assert!(lamp_stop_shift(LAMP_STOP_SETTLE + 1) > lamp_stop_shift(LAMP_STOP_SETTLE));
+        let last = LAMP_STOP_SETTLE + LAMP_STOP_MOVE;
+        assert_ne!(lamp_stop_shift(last), lamp_stop_shift(last - 1));
+        assert_eq!(lamp_stop_shift(last), lamp_stop_shift(last + 1));
+        assert_eq!(lamp_stop_shift(last + 8), lamp_stop_shift(last));
     }
 }

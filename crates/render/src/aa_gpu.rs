@@ -93,7 +93,6 @@ impl Gpu {
             )?;
         }
         self.aa_fxaa = self.make_aa_pipe(FXAA_SPV)?;
-        self.aa_ssaa = self.make_aa_pipe(SSAA_SPV)?;
         #[repr(C)]
         struct Size {
             kind: u32,
@@ -215,14 +214,8 @@ impl Gpu {
         let w = self.extent_w;
         let h = self.extent_h;
         let presented = w as u64 * h as u64 * 4;
-        let hi = presented * 4;
         for slot in 0..2 {
-            self.ssaa_color[slot] = self.make_image(self.format, 0x10 | 0x1, 1, w * 2, h * 2)?;
-            self.ssaa_depth[slot] = self.make_image(126, 0x20, 2, w * 2, h * 2)?;
-            let views = [self.ssaa_color[slot].view, self.ssaa_depth[slot].view];
-            self.ssaa_fb[slot] =
-                self.make_framebuffer_for(self.render_pass, &views, w * 2, h * 2)?;
-            self.aa_src[slot] = self.make_buffer(hi, 0x20 | 0x1 | 0x2, crate::gpu::Memory::Device)?;
+            self.aa_src[slot] = self.make_buffer(presented, 0x20 | 0x1 | 0x2, crate::gpu::Memory::Device)?;
             self.aa_dst[slot] = self.make_buffer(presented, 0x20 | 0x1 | 0x2, crate::gpu::Memory::Device)?;
             self.color_layout[slot] = 0;
         }
@@ -303,26 +296,12 @@ impl Gpu {
     }
 
     fn destroy_aa_targets(&mut self) {
-        unsafe {
-            for slot in 0..2 {
-                if !self.ssaa_fb[slot].is_null() {
-                    (self.fns.destroy_framebuffer)(
-                        self.device,
-                        self.ssaa_fb[slot],
-                        std::ptr::null(),
-                    );
-                    self.ssaa_fb[slot] = std::ptr::null_mut();
-                }
-                let mut color = std::mem::replace(&mut self.ssaa_color[slot], Image::empty());
-                let mut depth = std::mem::replace(&mut self.ssaa_depth[slot], Image::empty());
-                let mut src = std::mem::replace(&mut self.aa_src[slot], Buffer::empty());
-                let mut dst = std::mem::replace(&mut self.aa_dst[slot], Buffer::empty());
-                self.destroy_image(&mut color);
-                self.destroy_image(&mut depth);
-                self.destroy_buffer(&mut src);
-                self.destroy_buffer(&mut dst);
-                self.color_layout[slot] = 0;
-            }
+        for slot in 0..2 {
+            let mut src = std::mem::replace(&mut self.aa_src[slot], Buffer::empty());
+            let mut dst = std::mem::replace(&mut self.aa_dst[slot], Buffer::empty());
+            self.destroy_buffer(&mut src);
+            self.destroy_buffer(&mut dst);
+            self.color_layout[slot] = 0;
         }
     }
 
@@ -373,6 +352,8 @@ impl Gpu {
             (self.fns.cmd_begin_rp)(self.cmd, &rp as *const RpBegin as *const u8, 0);
             let world_pipe = if self.wire_on {
                 self.wire_pipeline
+            } else if self.lighting_active() {
+                self.lighting.gbuffer_pipe
             } else {
                 self.pipeline
             };
@@ -539,54 +520,6 @@ impl Gpu {
             false,
         );
         self.image_barrier(image, 7, 6, 0x1000, 0x1000, 0x1000, 0x800);
-        self.color_layout[slot] = 6;
-        Ok(())
-    }
-
-    fn resolve_ssaa(&mut self, slot: usize) -> Result<(), String> {
-        if self.ssaa_color[slot].image.is_null() {
-            return Err("ssaa target is missing".into());
-        }
-        let hi_w = self.extent_w * 2;
-        let hi_h = self.extent_h * 2;
-        self.copy_image_buffer(
-            self.ssaa_color[slot].image,
-            6,
-            self.aa_src[slot].buffer,
-            hi_w,
-            hi_h,
-            true,
-        );
-        self.buffer_barrier(self.aa_src[slot].buffer, 0x1000, 0x800, 0x1000, 0x20);
-        self.dispatch_aa(
-            self.aa_ssaa,
-            self.aa_sets[slot],
-            self.extent_w,
-            self.extent_h,
-            hi_w,
-        );
-        self.buffer_barrier(self.aa_dst[slot].buffer, 0x800, 0x1000, 0x40, 0x800);
-        let old = self.color_layout[slot];
-        let src_stage = if old == 0 { 1 } else { 0x1000 };
-        let src_access = if old == 0 { 0 } else { 0x800 };
-        self.image_barrier(
-            self.color.image,
-            old,
-            7,
-            src_stage,
-            0x1000,
-            src_access,
-            0x1000,
-        );
-        self.copy_image_buffer(
-            self.color.image,
-            7,
-            self.aa_dst[slot].buffer,
-            self.extent_w,
-            self.extent_h,
-            false,
-        );
-        self.image_barrier(self.color.image, 7, 6, 0x1000, 0x1000, 0x1000, 0x800);
         self.color_layout[slot] = 6;
         Ok(())
     }

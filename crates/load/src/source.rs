@@ -1,3 +1,6 @@
+#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Byte sources. Decoders never open a path themselves.
 //!
 //! A file and a memory block both become one byte slice. A later network or disc
@@ -49,9 +52,14 @@ impl FileSource {
     }
 }
 
+const LFS_POINTER: &[u8] = b"version https://git-lfs.github.com/spec/v1";
+
 impl ByteSource for FileSource {
     fn read_bytes(&self) -> Result<Vec<u8>, LoadError> {
         match std::fs::read(&self.path) {
+            Ok(bytes) if bytes.starts_with(LFS_POINTER) => Err(LoadError::LfsPointer {
+                path: self.path.clone(),
+            }),
             Ok(bytes) => Ok(bytes),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(LoadError::NotFound {
                 path: self.path.clone(),

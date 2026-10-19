@@ -1,3 +1,7 @@
+#![cfg_attr(test, expect(clippy::items_after_test_module, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+
 //! What the renderer can draw, and what it may skip on screen.
 //!
 //! Fixed parts are the authored floor, walls, and solids. A mesh can move by
@@ -59,13 +63,75 @@ pub struct ParticleImage {
     pub frame_seconds: f32,
 }
 
+/// One shelf-packed RGBA8 image the material shaders sample.
+///
+/// `key` is 0 when the atlas is empty. A non-empty atlas never uses key 0.
+#[derive(Clone, Debug, Default)]
+pub struct MaterialAtlas {
+    pub width: u32,
+    pub height: u32,
+    /// Row-major RGBA8, length `width * height * 4`. Top to bottom.
+    pub rgba: Vec<u8>,
+    pub key: u64,
+}
+
+impl MaterialAtlas {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Self {
+        let mut atlas = Self {
+            width,
+            height,
+            rgba,
+            key: 0,
+        };
+        atlas.rehash();
+        atlas
+    }
+
+    fn rehash(&mut self) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        if self.width == 0 || self.height == 0 || self.rgba.is_empty() {
+            self.key = 0;
+            return;
+        }
+        let mut hasher = DefaultHasher::new();
+        self.width.hash(&mut hasher);
+        self.height.hash(&mut hasher);
+        self.rgba.hash(&mut hasher);
+        let key = hasher.finish();
+        self.key = if key == 0 { 1 } else { key };
+    }
+}
+
+/// A rectangle in a [`MaterialAtlas`], in texels. `w == 0` means no texture.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Surface {
+    pub color: [u32; 4],
+    pub normal: [u32; 4],
+    /// Discard below this alpha. 0 keeps the whole surface.
+    pub cutoff: f32,
+    pub two_sided: bool,
+}
+
 #[derive(Clone, Debug)]
 pub enum DrawKind {
     Fixed(FixedPart),
     Mesh {
         vertices: Vec<[f32; 3]>,
+        /// Object-space normals, one per vertex. Empty means a flat face normal.
+        normals: Vec<[f32; 3]>,
+        /// Texture coordinates, one per vertex. Empty means the vertex albedo.
+        texcoords: Vec<[f32; 2]>,
         color: [f32; 3],
         pose: [f32; 16],
+        /// Emitted light (linear). Only GI draws it.
+        emission: [f32; 3],
+        /// Index into [`World::surfaces`]. `None` is a flat colour.
+        surface: Option<usize>,
     },
     Particles {
         points: Vec<[f32; 3]>,
@@ -162,6 +228,14 @@ pub fn solid_reach(solid: &Solid) -> f32 {
 pub struct World {
     pub scene: Scene,
     pub objects: Vec<Object>,
+    /// Meshes the GPU software tracer sees through their SDFs (GI).
+    pub fields: Vec<crate::mesh_field::FieldInstance>,
+    /// Per-texel materials. Indexed by [`DrawKind::Mesh::surface`].
+    pub surfaces: Vec<Surface>,
+    /// Base colour (sRGB RGB, linear alpha) for every surface that has one.
+    pub color_atlas: MaterialAtlas,
+    /// Tangent-space normals (linear RGB) for every surface that has one.
+    pub normal_atlas: MaterialAtlas,
 }
 
 impl World {
@@ -184,10 +258,17 @@ impl World {
                 kind: DrawKind::Fixed(part),
             })
             .collect();
-        Self { scene, objects }
+        Self {
+            scene,
+            objects,
+            fields: Vec::new(),
+            surfaces: Vec::new(),
+            color_atlas: MaterialAtlas::empty(),
+            normal_atlas: MaterialAtlas::empty(),
+        }
     }
 
-    /// Scene the cascades march. Hidden and off-screen objects stay in it.
+    /// Scene the lighting traces. Hidden and off-screen objects stay in it.
     pub fn light_scene(&self) -> Scene {
         let mut scene = self.scene.clone();
         let mut drop_solids = vec![false; scene.solids.len()];
@@ -294,9 +375,7 @@ fn fully_outside(plane: [f32; 4], bounds: Bounds) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::field::{build, sample};
-    use crate::lighting::Lighting;
-    use genos_scene::{view_proj, Camera, Floor, Light, Scene, Shape, Solid, Vec3, Wall};
+    use genos_scene::{view_proj, Camera, Floor, Light, Scene, Shape, Solid, Vec3};
 
     fn red_scene() -> Scene {
         Scene {
@@ -326,11 +405,16 @@ mod tests {
             }],
             ceiling: None,
             sky: None,
+            lighting: genos_scene::LightingSettings::default(),
+            debug: genos_scene::DebugSettings::default(),
+            fps_counter: genos_scene::FpsCounterSettings::default(),
+            event_loop: genos_scene::EventLoopSettings::default(),
+            menu: genos_scene::MenuSettings::default(),
         }
     }
 
     #[test]
-    fn hidden_and_offscreen_objects_stay_in_the_light_and_leave_the_picture() {
+    fn hidden_and_offscreen_objects_stay_in_the_light() {
         let mut world = World::from_scene(red_scene());
         for object in &mut world.objects {
             if let DrawKind::Fixed(FixedPart::Solid(_)) = object.kind {
@@ -350,8 +434,12 @@ mod tests {
             },
             kind: DrawKind::Mesh {
                 vertices: vec![[-0.2, 0.0, -0.2], [0.2, 0.0, -0.2], [0.0, 0.5, 0.2]],
+                normals: Vec::new(),
+                texcoords: Vec::new(),
                 color: [0.0, 1.0, 1.0],
                 pose,
+                emission: [0.0; 3],
+                surface: None,
             },
         });
         let camera = Camera::opening();
@@ -371,188 +459,7 @@ mod tests {
             }
         ));
 
-        let field = build(&world.light_scene());
-        let mut dark = red_scene();
-        dark.solids.clear();
-        let dark_field = build(&dark);
-        let tint = sample(&field, 1.15, 0.0);
-        let plain = sample(&dark_field, 1.15, 0.0);
-        assert!(tint[0] > tint[1] && tint[0] > tint[2]);
-        assert!(tint[0] > plain[0]);
         assert_eq!(world.light_scene().solids.len(), 2);
-
-        let mut lighting = Lighting::new();
-        let verts = lighting.vertices(&world, &view);
-        assert!(verts.iter().all(|vertex| {
-            let inside_red =
-                vertex.pos[0].abs() < 0.7 && vertex.pos[2].abs() < 0.7 && vertex.pos[1] > 0.2;
-            let offscreen = vertex.pos[0] < -20.0;
-            !inside_red && !offscreen
-        }));
-    }
-
-    #[test]
-    fn a_height_map_builds_mesh_geometry() {
-        let world_scene = red_scene();
-        let mut world = World::from_scene(world_scene);
-        world.objects.push(Object {
-            hidden: false,
-            affects_light: false,
-            bounds: Bounds {
-                center: [2.0, 0.5, 2.0],
-                half: [1.0, 1.0, 1.0],
-            },
-            kind: DrawKind::Shader {
-                space: ShaderSpace::Mesh,
-                displacement: Some(Displacement {
-                    width: 2,
-                    height: 2,
-                    heights: vec![0, 0, 0, 255],
-                    origin: [2.0, 0.0, 2.0],
-                    scale: [1.0, 2.0, 1.0],
-                }),
-                color: [1.0, 1.0, 1.0],
-            },
-        });
-        let view = view_proj(&Camera::opening(), 16.0 / 9.0);
-        let mut lighting = Lighting::new();
-        let verts = lighting.vertices(&world, &view);
-        assert!(verts
-            .iter()
-            .any(|vertex| (vertex.pos[1] - 2.0).abs() < 0.05));
-    }
-
-    #[test]
-    fn the_back_of_a_wall_is_darker_than_the_lit_face() {
-        use genos_scene::Wall;
-        let mut scene = red_scene();
-        scene.solids.clear();
-        scene.walls.push(Wall {
-            base: 0.0,
-            position: Vec3::new(0.0, 0.0, 0.0),
-            half_x: 1.0,
-            half_z: 0.3,
-            height: 2.0,
-            color: [1.0, 1.0, 1.0],
-            absorption: 0.0,
-            reflectance: -1.0,
-            color_mix: -1.0,
-        });
-        scene.lights[0].position.y = 1.5;
-        scene.lights[0].position.z = -4.0;
-        let world = World::from_scene(scene);
-        let view = view_proj(&Camera::opening(), 16.0 / 9.0);
-        let mut lighting = Lighting::new();
-        let verts = lighting.vertices(&world, &view);
-        let bright =
-            |vertex: &crate::mesh::Vertex| vertex.color[0] + vertex.color[1] + vertex.color[2];
-        let front = verts
-            .iter()
-            .filter(|vertex| (vertex.pos[2] + 0.3).abs() < 0.02 && vertex.pos[1] > 0.4)
-            .map(bright)
-            .fold(0.0_f32, f32::max);
-        let back = verts
-            .iter()
-            .filter(|vertex| (vertex.pos[2] - 0.3).abs() < 0.02 && vertex.pos[1] > 0.4)
-            .map(bright)
-            .fold(0.0_f32, f32::max);
-        assert!(front > 0.04, "lit face is dark: {front}");
-        assert!(
-            front > back + 0.02,
-            "back face is as bright as the front: front {front} back {back}"
-        );
-        assert!(
-            back < 0.05,
-            "the unlit side carries the lit side: back {back} front {front}"
-        );
-
-        let mut colored = red_scene();
-        colored.lights[0].position = Vec3::new(-4.0, 3.0, 0.0);
-        let red = &colored.solids[0];
-        let far_x = red.position.x + red.size * 0.5 + 0.3;
-        let field = build(&colored);
-        let far = sample(&field, far_x, red.position.z);
-        assert!(
-            far[0] < 0.04 && far[0] <= far[1] + 0.02 && far[0] <= far[2] + 0.02,
-            "red underglow on the unlit side: {far:?} at x={far_x}"
-        );
-    }
-
-    #[test]
-    fn a_lit_wall_lifts_the_floor_shadow() {
-        let scene = |wall: bool| Scene {
-            floor: Floor {
-                position: Vec3::new(0.0, 0.0, 0.0),
-                half_x: 8.0,
-                half_z: 8.0,
-                color: [1.0, 1.0, 1.0],
-            },
-            walls: if wall {
-                vec![Wall {
-                    base: 0.0,
-                    position: Vec3::new(3.0, 0.0, 0.0),
-                    half_x: 0.2,
-                    half_z: 3.0,
-                    height: 2.6,
-                    color: [1.0, 1.0, 1.0],
-                    absorption: 0.0,
-                    reflectance: -1.0,
-                    color_mix: -1.0,
-                }]
-            } else {
-                Vec::new()
-            },
-            solids: vec![Solid {
-                yaw: 0.0,
-                shape: Shape::Square,
-                position: Vec3::new(0.0, 0.0, 0.0),
-                size: 1.5,
-                height: 1.5,
-                color: [0.8, 0.2, 0.1],
-                absorption: 0.0,
-                reflectance: -1.0,
-                color_mix: -1.0,
-            }],
-            lights: vec![Light {
-                position: Vec3::new(-5.0, 4.0, 0.0),
-                color: [1.0, 1.0, 1.0],
-
-                direction: Vec3::ZERO,
-            }],
-            ceiling: None,
-            sky: None,
-        };
-        let view = view_proj(&Camera::opening(), 16.0 / 9.0);
-        let floor_at = |wall: bool, x: f32, z: f32| {
-            let world = World::from_scene(scene(wall));
-            let mut lighting = Lighting::new();
-            let verts = lighting.vertices(&world, &view);
-            verts
-                .iter()
-                .filter(|vertex| {
-                    vertex.pos[1] < 0.02
-                        && (vertex.pos[0] - x).abs() < 0.2
-                        && (vertex.pos[2] - z).abs() < 0.2
-                })
-                .map(|vertex| vertex.color[0] + vertex.color[1] + vertex.color[2])
-                .fold(0.0_f32, f32::max)
-        };
-        let near = floor_at(true, 2.4, 0.0);
-        let far = floor_at(true, 1.2, 0.0);
-        let bare = floor_at(false, 2.4, 0.0);
-        let behind = floor_at(true, 3.6, 0.0);
-        assert!(
-            near > bare,
-            "the lit wall did not add bounce: near {near} bare {bare}"
-        );
-        assert!(
-            near + 0.02 >= far,
-            "the floor beside the wall is darker than the floor farther out: near {near} far {far}"
-        );
-        assert!(
-            behind <= near + 1.0e-4,
-            "the floor behind the wall took the bounce: behind {behind} near {near}"
-        );
     }
 }
 

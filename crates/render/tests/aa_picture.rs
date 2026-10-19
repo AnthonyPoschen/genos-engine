@@ -1,3 +1,12 @@
+#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+
 //! Presented-picture antialiasing. The checks read the Vulkan draw, not a CPU bake.
 
 use genos_render::{identity_pose, Antialias, Bounds, DrawKind, Object, Renderer, World};
@@ -32,6 +41,11 @@ fn silhouette_world() -> World {
         }],
         ceiling: None,
         sky: None,
+        lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
+        fps_counter: genos_scene::FpsCounterSettings::default(),
+        event_loop: genos_scene::EventLoopSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     });
     world.objects.push(Object {
         hidden: false,
@@ -42,8 +56,12 @@ fn silhouette_world() -> World {
         },
         kind: DrawKind::Mesh {
             vertices: vec![[-1.2, 0.3, 0.0], [1.2, 0.3, 0.0], [0.0, 2.4, 0.0]],
+            normals: Vec::new(),
+            texcoords: Vec::new(),
             color: [1.0, 1.0, 1.0],
             pose: identity_pose(),
+            emission: [0.0; 3],
+            surface: None,
         },
     });
     world
@@ -117,18 +135,6 @@ fn max_delta(a: &[u8], b: &[u8], width: u32, x0: i32, y0: i32, x1: i32, y1: i32)
     max
 }
 
-fn differs(a: &[u8], b: &[u8], width: u32, x0: i32, y0: i32, x1: i32, y1: i32) -> bool {
-    for y in y0..y1 {
-        for x in x0..x1 {
-            let index = ((y as u32 * width + x as u32) * 4) as usize;
-            if a[index..index + 4] != b[index..index + 4] {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 #[test]
 fn the_picture_switches_filters_and_off_matches_again() {
     let (_gpu, mut window, mut renderer) = open();
@@ -172,13 +178,10 @@ fn the_picture_switches_filters_and_off_matches_again() {
 
     renderer.set_antialias(Antialias::Fxaa);
     let fxaa = draw(&mut window, &mut renderer, &world, &camera);
-    renderer.set_antialias(Antialias::Ssaa);
-    let ssaa = draw(&mut window, &mut renderer, &world, &camera);
     renderer.set_antialias(Antialias::Off);
     let again = draw(&mut window, &mut renderer, &world, &camera);
 
     let fxaa_step = max_adjacent_step(&fxaa, width, x0, y0, x1, y1);
-    let ssaa_step = max_adjacent_step(&ssaa, width, x0, y0, x1, y1);
     let fxaa_face = max_delta(
         &off,
         &fxaa,
@@ -188,32 +191,12 @@ fn the_picture_switches_filters_and_off_matches_again() {
         face_x + 3,
         face_y + 3,
     );
-    let ssaa_face = max_delta(
-        &off,
-        &ssaa,
-        width,
-        face_x - 2,
-        face_y - 2,
-        face_x + 3,
-        face_y + 3,
-    );
-    println!(
-        "aa picture fxaa_step={fxaa_step} ssaa_step={ssaa_step} fxaa_face={fxaa_face} ssaa_face={ssaa_face}"
-    );
+    println!("aa picture fxaa_step={fxaa_step} fxaa_face={fxaa_face}");
     assert!(
         fxaa_step < off_step,
         "FXAA did not soften the silhouette: {fxaa_step} vs {off_step}"
     );
-    assert!(
-        ssaa_step < off_step,
-        "SSAA did not soften the silhouette: {ssaa_step} vs {off_step}"
-    );
     assert!(fxaa_face <= 8, "FXAA changed the flat face by {fxaa_face}");
-    assert!(ssaa_face <= 8, "SSAA changed the flat face by {ssaa_face}");
-    assert!(
-        differs(&fxaa, &ssaa, width, x0, y0, x1, y1),
-        "FXAA and SSAA wrote the same silhouette"
-    );
     assert_eq!(
         again, off,
         "off after a filter did not match the first off picture"

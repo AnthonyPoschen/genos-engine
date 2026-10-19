@@ -1,10 +1,29 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::bool_to_int_with_if, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::borrow_as_ptr, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::undocumented_unsafe_blocks, reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md")]
+
 //! Wayland window. Each pump pulls the seat, then tells subscribers what changed.
 
 mod events;
+mod stall;
 
 pub use events::{WindowEvent, WindowMode};
+pub use stall::{
+    block_with_installed_pump, leave_seat_then, retire, run_pumped, seat_enter, seat_leave,
+    PumpStep, StallMeter, PUMP_BUDGET,
+};
 
 use std::os::raw::{c_int, c_void};
+use std::sync::Arc;
 
 use events::EventHub;
 
@@ -32,20 +51,23 @@ struct RawPump {
     pointer_y: i32,
     display: *mut c_void,
     surface: *mut c_void,
+    wheel_y: f64,
 }
 
 extern "C" {
-    fn genos_window_open(
+    fn genos_window_open_on(
         width: c_int,
         height: c_int,
         app_id: *const i8,
         title: *const i8,
+        wayland_display: *const i8,
     ) -> *mut c_void;
     fn genos_window_pump(window: *mut c_void, out: *mut RawPump);
     #[cfg_attr(not(test), allow(dead_code))]
     fn genos_window_pump_size() -> c_int;
     fn genos_window_set_pointer_capture(window: *mut c_void, capture: c_int) -> c_int;
     fn genos_window_set_fullscreen(window: *mut c_void, fullscreen: c_int) -> c_int;
+    fn genos_window_set_title(window: *mut c_void, title: *const i8) -> c_int;
     fn genos_window_destroy(window: *mut c_void);
 }
 
@@ -72,6 +94,8 @@ pub struct Frame {
     /// Pointer position in window pixels. The origin is the top-left.
     pub pointer_x: f32,
     pub pointer_y: f32,
+    /// Vertical wheel this pump, in notches. Positive is wheel up. Cleared each pump.
+    pub wheel_y: f32,
 }
 
 pub struct Window {
@@ -79,6 +103,7 @@ pub struct Window {
     pub display: *mut c_void,
     pub surface: *mut c_void,
     hub: EventHub,
+    meter: Arc<StallMeter>,
 }
 
 impl Window {
@@ -92,17 +117,52 @@ impl Window {
         Self::open_named(width, height, "genos-camera", "Genos Engine")
     }
 
+    /// The check window on `wayland_display`. `None` is the session compositor.
+    pub fn open_proof_on(
+        width: u32,
+        height: u32,
+        wayland_display: Option<&str>,
+    ) -> Result<Self, String> {
+        Self::open_named_on(
+            width,
+            height,
+            "genos-camera",
+            "Genos Engine",
+            wayland_display,
+        )
+    }
+
     pub fn open_named(width: u32, height: u32, app_id: &str, title: &str) -> Result<Self, String> {
+        Self::open_named_on(width, height, app_id, title, None)
+    }
+
+    /// `wayland_display` is the Wayland display name (`wayland-1`). An empty name is refused.
+    pub fn open_named_on(
+        width: u32,
+        height: u32,
+        app_id: &str,
+        title: &str,
+        wayland_display: Option<&str>,
+    ) -> Result<Self, String> {
         let app_id =
             std::ffi::CString::new(app_id).map_err(|_| "app id contains a null".to_string())?;
         let title =
             std::ffi::CString::new(title).map_err(|_| "title contains a null".to_string())?;
+        let display = match wayland_display {
+            None => None,
+            Some("") => return Err("display name is empty".into()),
+            Some(name) => Some(
+                std::ffi::CString::new(name).map_err(|_| "display name contains a null".to_string())?,
+            ),
+        };
+        let display_ptr = display.as_ref().map_or(std::ptr::null(), |name| name.as_ptr());
         let raw = unsafe {
-            genos_window_open(
+            genos_window_open_on(
                 width as c_int,
                 height as c_int,
                 app_id.as_ptr(),
                 title.as_ptr(),
+                display_ptr,
             )
         };
         if raw.is_null() {
@@ -118,15 +178,49 @@ impl Window {
             return Err("Wayland surface is missing".into());
         }
         let frame = decode(&pump);
+        let meter = StallMeter::new();
+        meter.mark();
         Ok(Self {
             raw,
             display: pump.display,
             surface: pump.surface,
             hub: EventHub::from_frame(&frame),
+            meter,
         })
     }
 
+    /// The pump-gap clock. The frame copies [`StallMeter::longest_ms`] into the scene.
+    pub fn stall(&self) -> &StallMeter {
+        &self.meter
+    }
+
+    /// A clock the frame can hold while it mutably pumps this window.
+    pub fn stall_meter(&self) -> Arc<StallMeter> {
+        Arc::clone(&self.meter)
+    }
+
+    /// Dispatch the seat from a side thread during a blocking device call.
+    ///
+    /// Call this after the window is open and clear it before the window is dropped.
+    /// The side thread must not run at the same time as [`Self::pump`] or a present.
+    pub fn install_seat_pump(&self) {
+        stall::remember_seat(self.raw, &self.meter);
+    }
+
+    /// Stop handing this window to the side thread.
+    pub fn clear_seat_pump(&self) {
+        stall::forget_seat(self.raw);
+    }
+
+    /// Change the window title (the app id, which the compositor rules match, stays).
+    pub fn set_title(&mut self, title: &str) {
+        if let Ok(t) = std::ffi::CString::new(title) {
+            unsafe { genos_window_set_title(self.raw, t.as_ptr()) };
+        }
+    }
+
     pub fn pump(&mut self) -> Frame {
+        self.meter.mark();
         let frame = self.read_frame();
         self.hub.apply(&frame);
         frame
@@ -204,6 +298,7 @@ impl Window {
 
 impl Drop for Window {
     fn drop(&mut self) {
+        stall::forget_seat(self.raw);
         unsafe { genos_window_destroy(self.raw) };
     }
 }
@@ -229,6 +324,7 @@ fn decode(raw: &RawPump) -> Frame {
         clicked_while_focused: raw.clicked_while_focused != 0,
         pointer_x: raw.pointer_x as f32,
         pointer_y: raw.pointer_y as f32,
+        wheel_y: raw.wheel_y as f32,
         mode: if raw.fullscreen != 0 {
             WindowMode::Fullscreen
         } else {
@@ -264,6 +360,7 @@ pub struct GatedInput {
     pub capture_click: bool,
     pub mouse_left: bool,
     pub keys_down: [u8; 256],
+    pub wheel_y: f32,
 }
 
 impl Default for GatedInput {
@@ -279,6 +376,7 @@ impl Default for GatedInput {
             capture_click: false,
             mouse_left: false,
             keys_down: [0; 256],
+            wheel_y: 0.0,
         }
     }
 }
@@ -304,6 +402,7 @@ impl FocusGate {
             capture_click,
             mouse_left: focused && frame.mouse_left,
             keys_down: if focused { frame.keys_down } else { [0; 256] },
+            wheel_y: if focused { frame.wheel_y } else { 0.0 },
         }
     }
 }
@@ -365,6 +464,7 @@ mod tests {
             mode: WindowMode::Windowed,
             pointer_x: 0.0,
             pointer_y: 0.0,
+            wheel_y: 0.0,
         }
     }
 
@@ -386,6 +486,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): pointer-lock test reads WAYLAND_DISPLAY and sleeps 4s and 5s. Wait on the window event. docs/LINT_RULES.md"
+    )]
     fn the_first_click_locks_the_pointer_and_escape_releases_it() {
         if std::env::var_os("WAYLAND_DISPLAY").is_none() {
             return;

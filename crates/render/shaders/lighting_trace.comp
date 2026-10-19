@@ -1,0 +1,179 @@
+#version 450
+// GI rays, pass 2: the screen probes' rays, then the rays of the light cache
+// patches relit this frame. A hit stores its distance and surface for the light
+// pass; a miss takes the sky. A probe ray's record goes into this frame's
+// stratum of the probe's kept hits (lighting_hit_at). Then every older kept hit whose
+// path crosses a change is traced again in place (lighting_kept_crossed), and the
+// strata a probe holds from nowhere are traced from its place (lighting_fill_ray). One trace
+// site. A hit on an emissive mesh also
+// stores the light it gives off (the mesh field's emission table).
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+
+// Emitted light at a hit point: the emissive instance whose surface is nearest,
+// when the point is on it. Only instances in the emission table are sampled.
+uint lighting_hit_glow(vec3 p) {
+    uint table = mesh_field.words[2];
+    if (table == 0u) {
+        return 0u;
+    }
+    uint best = 0u;
+    float nearest = 1.0e30;
+    [[dont_unroll]] for (uint i = 0u; i < mf_count(); i++) {
+        uint glow = mesh_field.words[table + i];
+        MfInst m = mf_inst(i);
+        float near = 4.0 * m.voxel * m.dscale;
+        if (glow == 0u || any(lessThan(p, m.lo - near)) || any(greaterThan(p, m.hi + near))) {
+            continue;
+        }
+        float d = abs(mf_sample(m, mf_to_object(m, p)).x) * m.dscale;
+        if (d < near && d < nearest) {
+            nearest = d;
+            best = glow;
+        }
+    }
+    return best;
+}
+
+// Distance from segment a-b to point c, squared.
+float lighting_seg_dist2(vec3 a, vec3 b, vec3 c) {
+    vec3 ab = b - a;
+    float t = clamp(dot(c - a, ab) / max(dot(ab, ab), 1.0e-12), 0.0, 1.0);
+    vec3 d = a + ab * t - c;
+    return dot(d, d);
+}
+
+// Kept hit h (an older stratum's) again when its path crosses an object that
+// moved, came or went since the last frame (the changes block, lighting_gpu.rs): its
+// origin and direction, or false when it stands. Re-traced here, in the frame,
+// before the light pass shades it: a dropped ray would thin its cell until its
+// stratum came round again (up to 8 frames), and which rays a cell held would
+// change every frame around a moving object (gi-check's moving flicker).
+bool lighting_kept_crossed(uint h, out vec3 origin, out vec3 dir) {
+    origin = vec3(0.0);
+    dir = vec3(0.0, 1.0, 0.0);
+    vec4 head = work.v[lighting_change_at()];
+    uint changes = min(uint(head.x + 0.5), LIGHTING_CHANGES);
+    uint rays = lighting_rays();
+    uint s = (h / rays) % LIGHTING_STRATA;
+    if (changes == 0u || head.y > 0.5 || s == lighting_stratum()) {
+        return false;
+    }
+    vec4 rec = work.v[lighting_kept_at(h)];
+    if (rec.x < 0.0 && rec.x > -0.75) {
+        return false;
+    }
+    vec3 n;
+    if (!lighting_stratum_ray(h / rays / LIGHTING_STRATA, s, h % rays, origin, dir, n)) {
+        return false;
+    }
+    vec3 end = origin + dir * (rec.x >= 0.0 ? rec.x : 200.0);
+    [[dont_unroll]] for (uint j = 0u; j < changes; j++) {
+        vec4 b = work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + j];
+        if (lighting_seg_dist2(origin, end, b.xyz) < b.w * b.w) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// S78K: a held stratum's check found its hit moved: full traces for a round.
+void lighting_hold_fail(uint probe) {
+    work.v[lighting_probe_at(probe) + 1u].w = uintBitsToFloat(lighting_frame() + LIGHTING_STRATA);
+}
+void main() {
+    bool hold_check = false;
+    vec4 hold_old = vec4(0.0);
+    uint hold_probe = 0u;
+    uint ray = gl_GlobalInvocationID.x;
+    uint mode = lighting_mode();
+    if (lighting_dense()) {
+        // S70A: this round's light cache rays only, live entries only.
+        if (ray >= lighting_dense_count() * LIGHTING_CACHE_RAYS) {
+            return;
+        }
+        ray = lighting_probe_rays() + lighting_dense_entry(ray / LIGHTING_CACHE_RAYS) * LIGHTING_CACHE_RAYS + ray % LIGHTING_CACHE_RAYS;
+    } else if (mode == 2u) {
+        ray += lighting_probe_rays();
+    }
+    uint rays_end = mode == 1u ? lighting_probe_rays() : lighting_all_rays();
+    uint at;
+    vec3 origin;
+    vec3 dir;
+    vec3 n;
+    bool probe_ray = ray < lighting_probe_rays();
+    if (ray >= rays_end + lighting_kept_hits()) {
+        // Then one thread per fill slot: a stratum the probe holds from nowhere,
+        // traced from its place now (lighting_fill_ray). Not on the async queue.
+        uint h = ray - rays_end - lighting_kept_hits();
+        uint rays = lighting_rays();
+        if (mode == 2u || h >= lighting_kept_hits()
+            || !lighting_fill_ray(h / rays / LIGHTING_STRATA, (h / rays) % LIGHTING_STRATA, h % rays, origin, dir, n)) {
+            return;
+        }
+        at = lighting_fill_at(h);
+        probe_ray = true;
+    } else if (ray >= rays_end) {
+        // Past this frame's rays: one thread per kept hit, re-traced where it crossed
+        // a change (lighting_kept_crossed). Not on the async queue (mode 2).
+        uint h = ray - rays_end;
+        if (mode == 2u || h >= lighting_kept_hits() || !lighting_kept_crossed(h, origin, dir)) {
+            return;
+        }
+        at = lighting_kept_at(h);
+        probe_ray = true;
+    } else {
+        at = lighting_hit_at(ray);
+        if (!lighting_ray(ray, origin, dir, n)) {
+            work.v[at] = LIGHTING_NO_RAY;
+            return;
+        }
+        if (probe_ray && lighting_stratum_held(ray / lighting_rays())) {
+            uint pr = ray / lighting_rays();
+            uint k = ray % lighting_rays();
+            vec4 old = work.v[at];
+            if (!lighting_held_traced(pr, k, origin, dir, old.x)) {
+                return;
+            }
+            if (k == lighting_hold_check_k(pr)) {
+                hold_check = true;
+                hold_old = old;
+                hold_probe = pr;
+            }
+        }
+    }
+    SceneHit hit;
+    if (!trace_ray(origin, dir, 1.0e-4, 200.0, hit)) {
+        // A probe ray's miss is kept as a miss and takes the sky as it is when shaded.
+        if (hold_check && !(hold_old.x < 0.0)) {
+            lighting_hold_fail(hold_probe);
+        }
+        vec4 mv = probe_ray ? LIGHTING_MISS : lighting_miss_slot(has_sky() ? scene.sky.rgb : vec3(0.0));
+        if (LIGHTING_GATHER_HOLD && probe_ray && any(notEqual(floatBitsToUint(work.v[at]), floatBitsToUint(mv)))) {
+            lighting_gdirty_kept_at(at);
+        }
+        work.v[at] = mv;
+        return;
+    }
+    if (hold_check) {
+        vec3 hn0 = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
+        if (hold_old.x < 0.0 || abs(hit.t - hold_old.x) > 0.02 * max(hit.t, 0.1)
+            || dot(lighting_unpack_normal(floatBitsToUint(hold_old.y)), hn0) < 0.99) {
+            lighting_hold_fail(hold_probe);
+        }
+    }
+    vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
+    vec3 tint = mix(vec3(1.0), hit.albedo, hit.color_mix);
+    vec4 nv = vec4(hit.t, uintBitsToFloat(lighting_pack_normal(hn)),
+                      uintBitsToFloat(packUnorm4x8(vec4(tint * hit.reflect * LIGHTING_PI, 0.0))),
+                      uintBitsToFloat(lighting_hit_glow(origin + dir * hit.t)));
+    if (probe_ray && any(notEqual(floatBitsToUint(work.v[at]), floatBitsToUint(nv)))) {
+        vec4 ow = work.v[at];
+        lighting_chg(CHG_REC, 1u);
+    }
+    if (LIGHTING_GATHER_HOLD && probe_ray && any(notEqual(floatBitsToUint(work.v[at]), floatBitsToUint(nv)))) {
+        lighting_gdirty_kept_at(at);
+    }
+    work.v[at] = nv;
+}

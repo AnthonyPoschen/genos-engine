@@ -1,13 +1,33 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::bool_to_int_with_if, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
+#![expect(clippy::format_push_string, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::similar_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::unwrap_used, reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md")]
+#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use genos_input::{character_controller, InputCode, InputSystem};
+use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
 use genos_render::{Antialias, Renderer, ScreenRect, Simulation, World};
 
-/// The flame, the smoke, and the flame lamp stay off while the radiance field is under study.
+/// The flame, the smoke, and the flame lamp stay off.
 const SHOW_PARTICLES: bool = false;
-use genos_scene::{load_path, update, Actions, Camera, Codimation, Easing, Scene, Vec3};
+use genos_scene::{
+    load_path, update, Actions, Camera, Codimation, DebugSettings, Easing, EventLoopSettings,
+    Floor, FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, Scene, Sky, Vec3,
+};
 use genos_ui::{
     apply_frame_action, lighting_frame, Action, OpenFrame, Pointer, ProfileGraph, ProfileStream,
     State,
@@ -123,6 +143,7 @@ fn run() -> Result<(), String> {
     let mut profile_arg = None;
     let mut scene_name = String::from("scene.rhai");
     let mut size = (1280u32, 720u32);
+    let mut time_of_day = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -165,6 +186,67 @@ fn run() -> Result<(), String> {
             "--scene" => {
                 scene_name = args.next().ok_or("missing scene file")?;
             }
+            "--out" => {
+                // The renderer reads this from the process arguments.
+                let _dir = args.next().ok_or("missing output directory")?;
+            }
+            arg if arg.starts_with("--out=") => {
+                if arg.trim_start_matches("--out=").trim().is_empty() {
+                    return Err("missing output directory".into());
+                }
+            }
+            other if genos_render::unfilled_flag_needs_value(other).is_some() => {
+                let needs = genos_render::unfilled_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_render::check_unfilled_arg(other, next.as_deref())?;
+            }
+            other if genos_scene::lighting_flag_needs_value(other).is_some() => {
+                let needs = genos_scene::lighting_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_scene::check_lighting_arg(other, next.as_deref())?;
+                if let Some(hours) = genos_scene::lighting_arg_time_of_day(other, next.as_deref())?
+                {
+                    time_of_day = Some(hours);
+                }
+            }
+            other if genos_render::gpu_times_flag_needs_value(other).is_some() => {
+                let needs = genos_render::gpu_times_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_render::check_gpu_times_arg(other, next.as_deref())?;
+            }
+            other if genos_render::lighting_sun_flag_needs_value(other).is_some() => {
+                let needs = genos_render::lighting_sun_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_render::check_lighting_sun_arg(other, next.as_deref())?;
+            }
             "--size" => {
                 let text = args.next().ok_or("missing size")?;
                 let (w, h) = text
@@ -180,7 +262,20 @@ fn run() -> Result<(), String> {
     }
 
     let scene_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&scene_name);
-    let scene = load_path(&scene_path)?;
+    let mut window = if proof {
+        Window::open_proof(size.0, size.1)?
+    } else {
+        Window::open(size.0, size.1)?
+    };
+    window.install_seat_pump();
+    Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
+    let first = window.pump();
+    let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let scene = match load_scene_pumped(&mut window, &mut renderer, scene_path) {
+        Ok(scene) => scene,
+        Err(err) if err == "window closed during load" => finish(window, renderer, 0),
+        Err(err) => return Err(err),
+    };
     let mut camera = match eye {
         Some((x, z, yaw)) => Camera::new(x, z, yaw),
         None => Camera::opening(),
@@ -196,6 +291,12 @@ fn run() -> Result<(), String> {
     }
     let bench_camera = camera.clone();
     let host = genos_mcp::Host::new(scene, camera);
+    if let Some(hours) = time_of_day {
+        host.with_frame(|scene, _| {
+            scene.lighting.time_of_day = hours;
+            scene.lighting.sanitize();
+        });
+    }
     if let Some((x, y, z)) = lamp {
         host.with_frame(|scene, _| {
             scene.lights = vec![genos_scene::Light {
@@ -215,19 +316,13 @@ fn run() -> Result<(), String> {
     let mut world = World::from_scene(host.drawn_scene());
     let mut scene_revision = host.scene_revision();
     let mut fire = SHOW_PARTICLES.then(|| Simulation::from_scene(&world.scene));
-    let mut window = if proof {
-        Window::open_proof(size.0, size.1)?
-    } else {
-        Window::open(size.0, size.1)?
-    };
-    let first = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let mut drawn = 0u32;
     let mut size = (renderer.width(), renderer.height());
     let mut focus = FocusGate::default();
     let mut ui = State::default();
     let mut input = InputSystem::new();
     let controls = character_controller();
+    let keys = debug_keys()?;
     let profile_mode = parse_profile_mode(profile_arg.as_deref(), proof)?;
     let mut profile_stream = match profile_mode {
         ProfileMode::Detailed => {
@@ -254,18 +349,11 @@ fn run() -> Result<(), String> {
     let mut drag_origin: Option<Duration> = None;
     let boot = Instant::now();
     let mut wireframe = false;
-    let mut cascade_view = [false; 3];
     let mut frame_clock: Option<Instant> = None;
     let mut bench = Bench::from_env(&world.scene, bench_camera)?;
     if let Some(dir) = bench.as_ref().and_then(|bench| bench.shots.as_ref()) {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("GENOS_BENCH_SHOTS {}: {e}", dir.display()))?;
-    }
-    if bench.is_some() {
-        // A bench reads the picture as it is drawn (shots, the flicker phase): a
-        // readback that settled the light would measure the settled field, not what
-        // a moving lamp shows, and would run every build due inside the frame.
-        renderer.set_live_readback(true);
     }
     loop {
         let now = Instant::now();
@@ -326,6 +414,23 @@ fn run() -> Result<(), String> {
             profile.reset();
             drag_origin = None;
         }
+        if keys.pressed(&input, "unfilled_tint") || keys.pressed(&input, "unfilled") {
+            let mut unfilled = renderer.unfilled();
+            if keys.pressed(&input, "unfilled_tint") {
+                unfilled.tint = !unfilled.tint;
+                if unfilled.tint {
+                    unfilled.count = true;
+                }
+            } else {
+                unfilled.count = !unfilled.count;
+                if !unfilled.count {
+                    unfilled.tint = false;
+                }
+            }
+            renderer.set_unfilled(unfilled);
+            let unfilled = renderer.unfilled();
+            eprintln!("unfilled count {} tint {}", unfilled.count, unfilled.tint);
+        }
         let paused = graph_on && profile.is_paused();
         // camera/scene update, first half: the panel reads the lamp after a reload
         let scene_at = Instant::now();
@@ -335,7 +440,6 @@ fn run() -> Result<(), String> {
         }
         let view = host.camera();
         wireframe = toggle_wireframe(wireframe, &input, view.captured);
-        cascade_view = toggle_cascade_view(cascade_view, &input);
         let lamp = world
             .scene
             .lights
@@ -354,6 +458,7 @@ fn run() -> Result<(), String> {
                 y: frame.pointer_y,
                 // A click can press and release before the next pump. The latch still hits the UI.
                 down: !view.captured && (gated.mouse_left || gated.capture_click),
+                ..Pointer::default()
             },
         );
         let mut overlay: Vec<ScreenRect> = ui_frame
@@ -478,7 +583,7 @@ fn run() -> Result<(), String> {
         let sim_cpu = sim_at.elapsed();
         let draw_camera = match bench.as_mut() {
             Some(bench) => {
-                if bench.step(&mut world.scene, renderer.tier_stats(), now) {
+                if bench.step(&mut world.scene, renderer.settle_stats(), now) {
                     break;
                 }
                 bench.camera.clone()
@@ -486,13 +591,14 @@ fn run() -> Result<(), String> {
             None => draw_camera,
         };
         // gpu draw/present
-        renderer.set_cascade_view(&world.scene, &draw_camera, cascade_view);
         let shot = bench.as_ref().and_then(|bench| {
             let name = bench.shot.as_ref()?;
             Some(bench.shots.as_ref()?.join(name))
         });
         let flicker_frame = bench.as_mut().is_some_and(|bench| bench.wants_frame(now));
-        let want_read = readback.is_some() || shot.is_some() || flicker_frame;
+        // A live client's /shot.png or take_screenshot (genos-mcp) waits for this frame.
+        let live_shot = genos_mcp::take_shot_request();
+        let want_read = readback.is_some() || shot.is_some() || flicker_frame || live_shot;
         if bench.is_some() {
             // The panel and the live graph are not the scene: a bench draws without them.
             overlay.clear();
@@ -507,16 +613,12 @@ fn run() -> Result<(), String> {
                 renderer.draw_with_overlay(&world, &draw_camera, &overlay, want_read, wireframe)?;
             (pixels, None)
         };
-        let stats = renderer.tier_stats();
+        let stats = renderer.settle_stats();
         genos_mcp::publish_lighting(&format!(
-            "stable: {}\npending: {}\nbricks: {}\nfilled: {}\nchanging: {}\nseen: {}\nseen_settled: {}\n",
-            stats.pending_bricks == 0 && stats.changing_bricks == 0,
-            stats.pending_bricks,
-            stats.bricks,
-            stats.filled_bricks,
-            stats.changing_bricks,
-            stats.seen_bricks,
-            stats.seen_settled,
+            "stable: {}\nstill_frames: {}\npicture_settled: {}\n",
+            stats.settled,
+            stats.still_frames,
+            renderer.picture_settled(),
         ));
         let draw_cpu = timing
             .map(|timing| timing.cpu)
@@ -568,6 +670,13 @@ fn run() -> Result<(), String> {
                 bench.take_frame(pixels, renderer.width(), renderer.height(), now);
             }
         }
+        if live_shot {
+            let png = pixels
+                .as_ref()
+                .map(|pixels| encode_png(renderer.width(), renderer.height(), pixels))
+                .unwrap_or_default();
+            genos_mcp::finish_shot(&png);
+        }
         if want_read && (readback.is_some() || shot.is_some()) {
             if let Some(pixels) = pixels {
                 write_png(
@@ -618,22 +727,141 @@ fn run() -> Result<(), String> {
         }
     }
     if let Some(bench) = bench {
-        bench.report(
-            renderer.width(),
-            renderer.height(),
-            renderer.antialias(),
-            renderer.tier_weights(),
-        );
+        bench.report(renderer.width(), renderer.height(), renderer.antialias());
     }
     println!("genos-camera frames={drawn}");
-    Ok(())
+    finish(window, renderer, 0);
+}
+
+fn finish(window: Window, renderer: Renderer, code: i32) -> ! {
+    Renderer::clear_blocker();
+    window.clear_seat_pump();
+    drop(window);
+    renderer.abandon();
+    std::process::exit(code);
+}
+
+/// What [`take_scene_load`] returns while a worker decodes the scene file.
+#[derive(Debug, PartialEq, Eq)]
+enum LoadPace {
+    /// The scene is ready to take from [`SceneLoad::take`].
+    Ready,
+    /// The worker is still reading. Keep pumping the window.
+    Pending,
+}
+
+/// A scene file loading on `genos-scene-load`.
+struct SceneLoad {
+    rx: std::sync::mpsc::Receiver<Result<Scene, String>>,
+    scene: Option<Scene>,
+}
+
+/// Start reading `path` on a worker. Returns while that read is still running.
+fn begin_scene_load(path: PathBuf) -> Result<SceneLoad, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("genos-scene-load".into())
+        .spawn(move || {
+            let _ = tx.send(load_path(&path));
+        })
+        .map_err(|err| err.to_string())?;
+    Ok(SceneLoad { rx, scene: None })
+}
+
+fn take_scene_load(job: &mut SceneLoad) -> Result<LoadPace, String> {
+    if job.scene.is_some() {
+        return Ok(LoadPace::Ready);
+    }
+    match job.rx.try_recv() {
+        Ok(Ok(scene)) => {
+            job.scene = Some(scene);
+            Ok(LoadPace::Ready)
+        }
+        Ok(Err(err)) => Err(err),
+        Err(std::sync::mpsc::TryRecvError::Empty) => Ok(LoadPace::Pending),
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("scene load stopped".into()),
+    }
+}
+
+impl SceneLoad {
+    fn take(&mut self) -> Option<Scene> {
+        self.scene.take()
+    }
+}
+
+fn loading_world() -> World {
+    World::from_scene(Scene {
+        floor: Floor {
+            position: Vec3::new(0.0, 0.0, 0.0),
+            half_x: 2.0,
+            half_z: 2.0,
+            color: [0.15, 0.15, 0.16],
+        },
+        walls: Vec::new(),
+        solids: Vec::new(),
+        lights: Vec::new(),
+        ceiling: None,
+        sky: Some(Sky {
+            color: [0.02, 0.02, 0.025],
+        }),
+        lighting: LightingSettings::preset(LightingPreset::Potato),
+        debug: DebugSettings::default(),
+        fps_counter: FpsCounterSettings::default(),
+        event_loop: EventLoopSettings::default(),
+        menu: MenuSettings::default(),
+    })
+}
+
+/// Decode the scene on a worker while the mapped window keeps pumping.
+fn load_scene_pumped(
+    window: &mut Window,
+    renderer: &mut Renderer,
+    path: PathBuf,
+) -> Result<Scene, String> {
+    let load_world = loading_world();
+    let camera = Camera::opening();
+    let meter = window.stall_meter();
+    let mut job = begin_scene_load(path)?;
+    let slice = genos_window::PUMP_BUDGET / 2;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        meter.mark();
+        let frame = window.pump();
+        if frame.closing {
+            return Err("window closed during load".into());
+        }
+        let _ = renderer.draw(&load_world, &camera, false);
+        match take_scene_load(&mut job)? {
+            LoadPace::Ready => {
+                meter.mark();
+                return job.take().ok_or_else(|| "scene load stopped".to_string());
+            }
+            LoadPace::Pending => {
+                if Instant::now() > deadline {
+                    return Err("scene load did not finish".into());
+                }
+                // Park until the worker replies or half the pump budget elapses.
+                match job.rx.recv_timeout(slice) {
+                    Ok(Ok(scene)) => {
+                        meter.mark();
+                        return Ok(scene);
+                    }
+                    Ok(Err(err)) => return Err(err),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err("scene load stopped".into());
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// `GENOS_BENCH=<seconds>`: an unattended benchmark. The camera stays where it starts
 /// (the opening view, or `--eye`/`--pitch`); input is ignored. After a short warm-up the scene stands still for a third
 /// of the time, then the first lamp circles the boxes for a third, then it drops to
-/// beside the boxes and rises back (the settling clip), each time until the tier has
-/// no work left. Then the lamp orbits for the flicker phase, and the red box (or the
+/// beside the boxes and rises back (the settling clip), each time until the lighting
+/// has settled. Then the lamp orbits for the flicker phase, and the red box (or the
 /// first solid) is dragged across the floor: `Drag` times the frames while it moves,
 /// `Rest` how long its light takes to settle once it stops, and `DragFlicker` reads
 /// back every frame as it moves a fixed step a frame. Last, `Switch` moves every solid
@@ -648,21 +876,12 @@ struct Bench {
     home: Vec3,
     last: Option<Instant>,
     frames: Vec<f32>,
-    /// When a drop or a rise had taken all its change passes: the visible change.
-    visible: Option<Duration>,
-    /// When no brick on screen was still changing (its passes issued), the most bricks
-    /// on screen a batch took at once, and the slowest batch pick in microseconds.
-    view: Option<Duration>,
-    critical: usize,
-    batch_us: u32,
     lines: Vec<String>,
     /// `GENOS_BENCH_SHOTS=<dir>`: live pictures at fixed times into each drop and rise.
     shots: Option<PathBuf>,
     /// The next of `BENCH_SHOT_MS` to take, and the name of the picture due this frame.
     next_shot: usize,
     shot: Option<String>,
-    /// The tier as of the last frame: bricks in it, and those still changing or due.
-    tier: genos_render::TierStats,
     flicker: Flicker,
     /// The solid the drag phases move, and where it started.
     drag: Option<(usize, Vec3)>,
@@ -884,6 +1103,10 @@ const BENCH_SETTLE_LIMIT: Duration = Duration::from_secs(10);
 const BENCH_WARMUP: Duration = Duration::from_secs(3);
 
 impl Bench {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a binary or harness reads the environment and passes the value down. docs/LINT_RULES.md"
+    )]
     fn from_env(scene: &Scene, camera: Camera) -> Result<Option<Self>, String> {
         let Ok(value) = std::env::var("GENOS_BENCH") else {
             return Ok(None);
@@ -912,15 +1135,10 @@ impl Bench {
             home: scene.lights[0].position,
             last: None,
             frames: Vec::new(),
-            visible: None,
-            view: None,
-            critical: 0,
-            batch_us: 0,
             lines: Vec::new(),
             shots: std::env::var_os("GENOS_BENCH_SHOTS").map(PathBuf::from),
             next_shot: 0,
             shot: None,
-            tier: genos_render::TierStats::default(),
             flicker: Flicker {
                 frames: flicker_frames,
                 ..Flicker::default()
@@ -936,9 +1154,8 @@ impl Bench {
     }
 
     /// Set the lamp for this frame and record the last frame's time. True when done.
-    fn step(&mut self, scene: &mut Scene, tier: genos_render::TierStats, now: Instant) -> bool {
-        let pending = tier.pending_bricks;
-        self.tier = tier;
+    fn step(&mut self, scene: &mut Scene, stats: genos_render::SettleStats, now: Instant) -> bool {
+        let pending = usize::from(!stats.settled);
         if let Some(last) = self.last {
             self.frames.push((now - last).as_secs_f32() * 1000.0);
         }
@@ -973,16 +1190,6 @@ impl Bench {
             self.phase,
             BenchPhase::Down | BenchPhase::Up | BenchPhase::Rest | BenchPhase::Switch
         );
-        if settle && self.frames.len() > 1 && tier.changing_bricks == 0 && self.visible.is_none() {
-            self.visible = Some(elapsed);
-        }
-        if settle {
-            self.critical = self.critical.max(tier.critical_bricks);
-            self.batch_us = self.batch_us.max(tier.batch_us);
-            if self.frames.len() > 1 && tier.critical_bricks == 0 && self.view.is_none() {
-                self.view = Some(elapsed);
-            }
-        }
         let done = next.is_some() && (!settle || self.frames.len() > 1);
         if done {
             if self.phase != BenchPhase::Warmup {
@@ -1003,10 +1210,6 @@ impl Bench {
             }
             self.phase_start = now;
             self.frames.clear();
-            self.visible = None;
-            self.view = None;
-            self.critical = 0;
-            self.batch_us = 0;
             self.next_shot = 0;
             self.converge = Converge::default();
             if self.phase == BenchPhase::DragFlicker && self.drag_flicker.frames == 0 {
@@ -1104,19 +1307,10 @@ impl Bench {
             self.phase,
             BenchPhase::Down | BenchPhase::Up | BenchPhase::Rest | BenchPhase::Switch
         ) {
-            let visible = self.visible.map_or(-1.0, |v| v.as_secs_f32() * 1000.0);
-            let view = self.view.map_or(-1.0, |v| v.as_secs_f32() * 1000.0);
             line.push_str(&format!(
-                " view_ms={view:.0} critical={} batch_us={}",
-                self.critical, self.batch_us
-            ));
-            line.push_str(&format!(
-                " visible_ms={visible:.0} settle_ms={:.0} settled={} bricks={} changing={} pending={}",
+                " settle_ms={:.0} settled={}",
                 elapsed.as_secs_f32() * 1000.0,
                 pending == 0,
-                self.tier.bricks,
-                self.tier.changing_bricks,
-                pending,
             ));
         }
         if self.phase == BenchPhase::Flicker {
@@ -1132,15 +1326,8 @@ impl Bench {
         self.lines.push(line);
     }
 
-    fn report(
-        &self,
-        width: u32,
-        height: u32,
-        antialias: Antialias,
-        weights: genos_render::TierWeights,
-    ) {
+    fn report(&self, width: u32, height: u32, antialias: Antialias) {
         println!("BENCH size={width}x{height} antialias={antialias:?}");
-        println!("BENCH tier_weights {weights}");
         for line in &self.lines {
             println!("{line}");
         }
@@ -1222,6 +1409,11 @@ fn publish_profile(
 }
 
 fn write_png(path: &std::path::Path, width: u32, height: u32, bgra: &[u8]) -> Result<(), String> {
+    std::fs::write(path, encode_png(width, height, bgra)).map_err(|err| err.to_string())
+}
+
+/// PNG of the renderer's BGRA readback: stored deflate blocks, no compression.
+fn encode_png(width: u32, height: u32, bgra: &[u8]) -> Vec<u8> {
     let mut raw = Vec::with_capacity(((width * 3 + 1) * height) as usize);
     for y in 0..height {
         raw.push(0);
@@ -1263,7 +1455,7 @@ fn write_png(path: &std::path::Path, width: u32, height: u32, bgra: &[u8]) -> Re
     });
     write_chunk(&mut png, b"IDAT", &zlib);
     write_chunk(&mut png, b"IEND", &[]);
-    std::fs::write(path, png).map_err(|err| err.to_string())
+    png
 }
 
 fn write_chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
@@ -1295,25 +1487,6 @@ fn toggle_wireframe(on: bool, input: &InputSystem, pointer_captured: bool) -> bo
         return !on;
     }
     on
-}
-
-/// Control plus 2, 3, or 4 toggles one cascade layer. 2 is near, 3 is far, 4 is world.
-fn toggle_cascade_view(mut show: [bool; 3], input: &InputSystem) -> [bool; 3] {
-    let control = input.keyboard.down(InputCode::key_control_left)
-        || input.keyboard.down(InputCode::key_control_right);
-    if !control {
-        return show;
-    }
-    let digits = [InputCode::key_2, InputCode::key_3, InputCode::key_4];
-    let control_rising = input.keyboard.pressed(InputCode::key_control_left)
-        || input.keyboard.pressed(InputCode::key_control_right);
-    for (index, digit) in digits.iter().enumerate() {
-        let rising = input.keyboard.pressed(*digit) || control_rising;
-        if input.keyboard.down(*digit) && rising {
-            show[index] = !show[index];
-        }
-    }
-    show
 }
 
 #[cfg(test)]
@@ -1358,8 +1531,7 @@ mod tests {
     use genos_ui::{FrameSample, OpenFrame, ProfileGraph, STAGE_COUNT};
 
     use super::{
-        hold_ready_frames, parse_profile_mode, toggle_cascade_view, toggle_wireframe,
-        PendingProfile, ProfileMode,
+        hold_ready_frames, parse_profile_mode, toggle_wireframe, PendingProfile, ProfileMode,
     };
 
     const EVDEV_DIGIT_1: usize = 2;
@@ -1439,6 +1611,67 @@ mod tests {
     }
 
     #[test]
+    fn a_scene_load_returns_inside_the_pump_budget() {
+        use std::path::PathBuf;
+        use std::sync::{Condvar, Mutex};
+        use std::time::{Duration, Instant};
+
+        use super::{begin_scene_load, take_scene_load, LoadPace};
+
+        fn wait_ms(ms: u64) {
+            let pair = (Mutex::new(()), Condvar::new());
+            let guard = pair
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = pair.1.wait_timeout(guard, Duration::from_millis(ms));
+        }
+
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scene.rhai");
+        let before = Instant::now();
+        let sync = genos_scene::load_path(&path);
+        let before_ms = before.elapsed().as_secs_f64() * 1000.0;
+        println!("MEASURE before_load_stall_ms={before_ms:.1}");
+        sync.expect("scene.rhai");
+
+        let meter = genos_window::StallMeter::new();
+        meter.mark();
+        let begin = Instant::now();
+        let mut job = begin_scene_load(path).expect("begin");
+        let begin_elapsed = begin.elapsed();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            meter.mark();
+            match take_scene_load(&mut job) {
+                Ok(LoadPace::Pending) => {
+                    assert!(Instant::now() <= deadline, "scene load did not finish");
+                    wait_ms(16);
+                }
+                Ok(LoadPace::Ready) => {
+                    assert!(job.take().is_some(), "ready load has no scene");
+                    break;
+                }
+                Err(err) => panic!("{err}"),
+            }
+        }
+        meter.mark();
+        println!(
+            "MEASURE after_begin_ms={:.1} after_load_stall_ms={:.1}",
+            begin_elapsed.as_secs_f64() * 1000.0,
+            meter.longest_ms()
+        );
+        assert!(
+            begin_elapsed <= Duration::from_millis(100),
+            "begin_scene_load blocked {begin_elapsed:?}"
+        );
+        assert!(
+            meter.longest_ms() <= genos_scene::EventLoopSettings::BUDGET_MS,
+            "poll stalled {:.1} ms",
+            meter.longest_ms()
+        );
+    }
+
+    #[test]
     fn control_and_1_toggles_wireframe_while_look_is_captured() {
         let mut input = InputSystem::new();
         let mut keys = [0u8; 256];
@@ -1487,28 +1720,5 @@ mod tests {
             on,
             "the chord did not turn wireframe on again while captured"
         );
-    }
-
-    #[test]
-    fn control_and_2_toggles_the_near_cascade_only() {
-        let mut input = InputSystem::new();
-        let mut keys = [0u8; 256];
-        let mut show = [false; 3];
-        input.begin_frame();
-        input.apply_evdev_keys(&keys);
-        keys[3] = 1;
-        input.begin_frame();
-        input.apply_evdev_keys(&keys);
-        show = toggle_cascade_view(show, &input);
-        assert_eq!(show, [false, false, false]);
-        keys[EVDEV_CONTROL_LEFT] = 1;
-        input.begin_frame();
-        input.apply_evdev_keys(&keys);
-        show = toggle_cascade_view(show, &input);
-        assert_eq!(show, [true, false, false]);
-        input.begin_frame();
-        input.apply_evdev_keys(&keys);
-        show = toggle_cascade_view(show, &input);
-        assert_eq!(show, [true, false, false]);
     }
 }

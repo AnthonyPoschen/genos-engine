@@ -1,0 +1,206 @@
+#version 450
+// GI screen probes, pass 5: spatial filter in direction space, Lumen's recipe
+// (lumen-digest.md 1.4), run three times (lighting_filter_round: cells 0 -> 1 -> 0 ->
+// SH). Each cell of a probe becomes the weighted mean of its own light and the
+// light its 3 x 3 neighbours saw in the same direction (their cell that holds this
+// cell's centre direction), the neighbours 2, 4 and 8 probes apart in the three
+// rounds (a-trous): the noise left is spread over blotches wider than the walls'
+// light varies, and less of it is redrawn as the probe grid slides with the camera
+// (gi-check room: grid redraw, blotch);
+// - weight by depth only: incoming light does not depend on the receiver's
+//   normal, so neighbours on other planes help, as long as they sit at about the
+//   same depth from the eye;
+// - a neighbour's ray is used only if its hit, seen from this probe, lies within
+//   10 degrees of the direction, after clamping its hit distance to this probe's
+//   own: far light (no parallax) is shared, while a near occluder this probe sees
+//   (a contact shadow) is not washed out by neighbours that see past it.
+// The last round projects the cells to SH (bands 0-2, cosine-convolved): the
+// probe's irradiance for any normal. No temporal history and no trace.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+
+const float LIGHTING_FILTER_COS = 0.98481; // cos 10 degrees
+const float LIGHTING_DEPTH_WEIGHT = 1000.0;
+const float LIGHTING_FAR_HIT = 1000.0;
+const bool LIGHTING_FILTER_HOLD = true;
+
+void main() {
+    uint probe = gl_GlobalInvocationID.x;
+    if (probe >= lighting_probes()) {
+        return;
+    }
+    uint round = lighting_filter_round();
+    uint from_table = round == 1u ? 1u : 0u;
+    bool last = round == 2u;
+    vec4 pp = work.v[lighting_probe_at(probe)];
+    bool fhold = LIGHTING_FILTER_HOLD && LIGHTING_GATHER_HOLD && lighting_world_mode() != 2u;
+    uint gdb = lighting_gdirty_at() + 2u * probe;
+    if (pp.w < 0.5) {
+        if (fhold && last) {
+            work.v[gdb + 1u].w = -1.0;
+        }
+        if (last) {
+            bool sh_diff = false;
+            [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
+                vec4 old = work.v[lighting_shf_at(probe) + q];
+                sh_diff = sh_diff || any(notEqual(old, vec4(0.0)));
+                work.v[lighting_shf_at(probe) + q] = vec4(0.0);
+            }
+            if (sh_diff) {
+                lighting_compose_mark_probe(probe);
+            }
+        }
+        return;
+    }
+    vec3 n = work.v[lighting_probe_at(probe) + 1u].xyz;
+    vec3 fwd = scene.view_forward.xyz;
+    float depth = max(dot(pp.xyz - scene.eye.xyz, fwd), 1.0e-3);
+    ivec2 c0 = ivec2(int(probe % pc.dims.z), int(probe / pc.dims.z));
+    ivec2 grid = ivec2(pc.dims.zw);
+    // The neighbours that count (depth weight), self excluded.
+    uint nb[8];
+    float nw[8];
+    uint count = 0u;
+    [[dont_unroll]] for (uint k = 0u; k < 9u; k++) {
+        if (k == 4u) {
+            continue;
+        }
+        ivec2 c = c0 + (2 << int(round)) * ivec2(int(k % 3u) - 1, int(k / 3u) - 1);
+        if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, grid))) {
+            continue;
+        }
+        uint other = uint(c.y) * pc.dims.z + uint(c.x);
+        vec4 op = work.v[lighting_probe_at(other)];
+        if (op.w < 0.5) {
+            continue;
+        }
+        float rel = (dot(op.xyz - scene.eye.xyz, fwd) - depth) / depth;
+        float w = exp2(-LIGHTING_DEPTH_WEIGHT * rel * rel);
+        if (w < 1.0e-3) {
+            continue;
+        }
+        nb[count] = other;
+        nw[count] = w;
+        count++;
+    }
+    // S78Y quiet filter: a round's output is kept (each round has its own
+    // table: graw -> 1 -> 0 -> SH) when none of its inputs changed this frame:
+    // its own and its neighbours' previous-round values (round 0: their gather
+    // ran, lighting_gather.comp stamps gd.x; rounds 1-2: their previous round
+    // was redone, gd.z / gd.w) and the depth weights (each probe's depth from
+    // the eye as of last frame's last round, gp.w; -1 inactive).
+    if (fhold) {
+        uint now = lighting_frame();
+        bool dirty = false;
+        [[dont_unroll]] for (uint k = 0u; k < 9u && !dirty; k++) {
+            ivec2 c = c0 + (2 << int(round)) * ivec2(int(k % 3u) - 1, int(k / 3u) - 1);
+            if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, grid))) {
+                continue;
+            }
+            uint other = uint(c.y) * pc.dims.z + uint(c.x);
+            vec4 og = work.v[lighting_gdirty_at() + 2u * other];
+            float stamp = round == 0u ? og.x : (round == 1u ? og.z : og.w);
+            dirty = floatBitsToUint(stamp) == now;
+            if (round == 0u && !dirty) {
+                vec4 op = work.v[lighting_probe_at(other)];
+                float od = op.w < 0.5 ? -1.0 : max(dot(op.xyz - scene.eye.xyz, fwd), 1.0e-3);
+                dirty = work.v[lighting_gdirty_at() + 2u * other + 1u].w != od;
+            }
+        }
+        if (!dirty) {
+            return;
+        }
+        if (round == 0u) {
+            work.v[gdb].z = uintBitsToFloat(now);
+        } else if (round == 1u) {
+            work.v[gdb].w = uintBitsToFloat(now);
+        }
+    }
+    if (fhold && last) {
+        // Read by the other probes' round 0 next frame only (rounds are dispatches).
+        work.v[gdb + 1u].w = depth;
+    }
+    float c[27];
+    [[dont_unroll]] for (uint f = 0u; f < 27u; f++) {
+        c[f] = 0.0;
+    }
+    uint rays = lighting_rays();
+    [[dont_unroll]] for (uint k = 0u; k < rays; k++) {
+        vec4 own = work.v[LIGHTING_GATHER_HOLD && round == 0u ? lighting_graw_at(probe, k) : lighting_cell_at(from_table, probe, k)];
+        vec3 d = lighting_cell_dir(pp.xyz, n, k);
+        float own_t = own.w >= 0.0 ? own.w : LIGHTING_FAR_HIT;
+        vec3 sum = own.w >= 0.0 ? own.rgb : vec3(0.0);
+        float wsum = own.w >= 0.0 ? 1.0 : 0.0;
+        [[dont_unroll]] for (uint j = 0u; j < count; j++) {
+            vec4 op = work.v[lighting_probe_at(nb[j])];
+            vec3 on = work.v[lighting_probe_at(nb[j]) + 1u].xyz;
+            uint cell = lighting_cell_of(op.xyz, on, d);
+            if (cell == ~0u) {
+                continue;
+            }
+            vec4 v = work.v[LIGHTING_GATHER_HOLD && round == 0u ? lighting_graw_at(nb[j], cell) : lighting_cell_at(from_table, nb[j], cell)];
+            if (v.w < 0.0) {
+                continue;
+            }
+            // The neighbour's hit, no farther than ours, seen from this probe.
+            vec3 hit = op.xyz + d * min(v.w, own_t) - pp.xyz;
+            float len = length(hit);
+            if (len > 1.0e-4 && dot(hit / len, d) < LIGHTING_FILTER_COS) {
+                continue;
+            }
+            sum += nw[j] * v.rgb;
+            wsum += nw[j];
+        }
+        vec3 l = wsum > 0.0 ? sum / wsum : vec3(0.0);
+        if (!last) {
+            work.v[lighting_cell_at(1u - from_table, probe, k)] = vec4(l, wsum > 0.0 ? own_t : -1.0);
+            continue;
+        }
+        float y[9];
+        lighting_sh9(d, y);
+        float a = lighting_cell_solid_angle(k);
+        [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
+            c[3u * j] += a * l.r * y[j];
+            c[3u * j + 1u] += a * l.g * y[j];
+            c[3u * j + 2u] += a * l.b * y[j];
+        }
+    }
+    if (!last) {
+        return;
+    }
+    // Cosine lobe per band: pi, 2 pi / 3, pi / 4.
+    [[dont_unroll]] for (uint f = 0u; f < 27u; f++) {
+        uint band = f < 3u ? 0u : (f < 12u ? 1u : 2u);
+        c[f] *= band == 0u ? LIGHTING_PI : (band == 1u ? LIGHTING_TAU / 3.0 : LIGHTING_PI / 4.0);
+    }
+    uint base = lighting_shf_at(probe);
+    bool sh_diff = false;
+    [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
+        vec4 nw = vec4(c[4u * q], c[4u * q + 1u], c[4u * q + 2u], q == 6u ? 0.0 : c[4u * q + 3u]);
+        sh_diff = sh_diff || any(notEqual(work.v[base + q], nw));
+    }
+    if (lighting_world_mode() == 2u) {
+        float y[9];
+        lighting_sh9(n, y);
+        vec3 e = vec3(0.0);
+        [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
+            e += y[j] * vec3(c[3u * j], c[3u * j + 1u], c[3u * j + 2u]);
+        }
+        vec4 head = work.v[lighting_change_at()];
+        bool changed = head.y > 0.5;
+        [[dont_unroll]] for (uint j = 0u; j < uint(head.x); j++) {
+            vec4 b = work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + j];
+            if (length(pp.xyz - b.xyz) < b.w + 0.5) {
+                changed = true;
+            }
+        }
+        lighting_world_add(pp.xyz, n, max(e, vec3(0.0)), changed);
+    }
+    [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
+        work.v[base + q] = vec4(c[4u * q], c[4u * q + 1u], c[4u * q + 2u], q == 6u ? 0.0 : c[4u * q + 3u]);
+    }
+    if (sh_diff) {
+        lighting_compose_mark_probe(probe);
+    }
+}
