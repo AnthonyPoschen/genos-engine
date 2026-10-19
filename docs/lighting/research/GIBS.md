@@ -5,7 +5,7 @@
 
 Source: SIGGRAPH 2021 Advances talk, Henrik Halén (SEED) + Kyle Hayward (Frostbite), with Andreas Brinck and a Ripple Effect colleague (captions say "Shangshan Bay"; spelling uncertain) [0:07–0:20]. Video: https://www.youtube.com/watch?v=h1ocYFrtsM4. MSME reference code: Ray Tracing Gems ch. 25 (see §6).
 Transcript: `./gibs-transcript.txt` (timestamps below are `[m:ss]` from it). Auto-captions: "circles"/"servos" = surfels.
-Written 2026-10-14 for genos-engine gi-v2 (tip 2abeb0dd). Verdicts: **NOW** = roll in during current work, **LATER** = after perf gate / when usage allows, **NO** = not for us (with reason).
+Written 2026-10-14 for genos-engine GI (tip 2abeb0dd). Verdicts: **NOW** = roll in during current work, **LATER** = after perf gate / when usage allows, **NO** = not for us (with reason).
 Grounding: every line of the transcript was read in full (2026-10-14). Statements tagged with [m:ss] are what the talk says. Anything tagged *(not in talk)* is my background knowledge or inference. Confidence: talk content is from the transcript; related work is from public papers and my background knowledge. Slide frames were viewed on 2026-10-14 (§6). Slide content is tagged [slide m:ss]. Anything marked (unverified) needs a source check before anyone builds on it.
 
 ## 0. Lineage and later evolutions
@@ -19,40 +19,40 @@ Grounding: every line of the transcript was read in full (2026-10-14). Statement
 | GI-1.0 (Boissé et al., **AMD**, 2023, "GI-1.0: a fast scalable two-level radiance caching scheme") | 2023 | Correction to the brief: GI-1.0 is AMD (Capsaicin), not SEED. Screen probes + hash-grid world cache, fully dynamic, no surfels. Closest to gi-v2 |
 | NVIDIA SHaRC / NRC; ReSTIR GI (Ouyang 2021) | 2021–23 | Hash-grid radiance caches; spatiotemporal reservoir reuse. Talk [27:28], [45:57] point this way as future work |
 
-**Takeaway:** the industry moved from "surfels as the cache" to "screen probes + world hash/clipmap cache" (Lumen, GI-1.0, kajiya). gi-v2 is already on that branch, so we take GIBS's *integration/estimator/attachment* ideas, not its surfel data structure.
+**Takeaway:** the industry moved from "surfels as the cache" to "screen probes + world hash/clipmap cache" (Lumen, GI-1.0, kajiya). GI is already on that branch, so we take GIBS's *integration/estimator/attachment* ideas, not its surfel data structure.
 
 ## 1. Technique-by-technique
 
-Format: **ts**, how it works, gi-v2 mapping, **verdict**, deviation flags.
+Format: **ts**, how it works, GI mapping, **verdict**, deviation flags.
 
 ### 1.1 Surfel definition [2:57–3:19]
 Position + radius + normal, approximating a small surface neighbourhood. Like a pixel, but on geometry.
-gi-v2: our surface-cache entries/slots and world probes (1 m lattice, 4 m bricks, six-face cubes + hit distances) play this role. Ours are lattice/mesh-anchored, not disc-shaped.
+GI: our surface-cache entries/slots and world probes (1 m lattice, 4 m bricks, six-face cubes + hit distances) play this role. Ours are lattice/mesh-anchored, not disc-shaped.
 **NO** as a new primitive (ADR 0012 already chose surface cache + screen probes). **NOW** as vocabulary: give cache slots an explicit normal + radius so the apply and sharing weights can use them (see 1.9, 1.11).
 
 ### 1.2 Persistence and opportunistic spawn from the G-buffer [1:53–2:26, 3:21–3:56]
 Surfels spawn as geometry enters view and persist when it leaves, so the work isn't redone. No bakes, no UVs, no special meshes [0:42], [2:43].
-gi-v2: matches our "probes never throw light away" (10-08) and persistent world probes. Pre-fill is our counterpart to "spawn fast enough that you never see gaps" [3:50].
+GI: matches our "probes never throw light away" (10-08) and persistent world probes. Pre-fill is our counterpart to "spawn fast enough that you never see gaps" [3:50].
 **Already ours.** Deviation: GIBS starts empty and lets you watch it converge (3.5–10 s [40:31], [41:30]). Our rule says pre-fill is required, so we must keep pre-fill and not copy their cold start.
 
 ### 1.3 Spawning: 16x16 tile gap fill [3:57–4:27]
 The screen is split into 16x16 tiles. Each tile finds its least-covered pixel, and if that coverage passes a *randomised* threshold, spawns one surfel from G-buffer data. It stops once the tile is covered.
-gi-v2: our equivalent is the smart-wake / allocation of cache slots for visible surfaces. Useful idea: a **per-tile coverage measure with a randomised threshold** limits allocation per frame (≤1 per tile per frame), which avoids spikes when a lot is revealed at once.
+GI: our equivalent is the smart-wake / allocation of cache slots for visible surfaces. Useful idea: a **per-tile coverage measure with a randomised threshold** limits allocation per frame (≤1 per tile per frame), which avoids spikes when a lot is revealed at once.
 **LATER** (for PR #37/#39 if they touch slot allocation). Make it a public config/debug/MCP setting: `--cache-spawn-tile 16`.
 
 ### 1.4 Recycling: GPU free-stack + probabilistic heuristic [6:27–8:10]
 Fixed pool allocated up front. A free-list stack uses an atomic counter (decrement to spawn, increment to recycle). The recycle probability combines live count, time since the surfel last contributed, and distance, and is compared against a uniform random number.
-gi-v2: our slots have a cap and switch dead probes off. The **"last contributed to the image" age plus stochastic eviction under pressure** is better than a hard LRU/distance cut, because it doesn't cause eviction waves.
+GI: our slots have a cap and switch dead probes off. The **"last contributed to the image" age plus stochastic eviction under pressure** is better than a hard LRU/distance cut, because it doesn't cause eviction waves.
 **LATER**: slot eviction score = f(pool fill, frames since last applied, distance) vs rand. Fits the "view coverage × likely error, with aging" single score from 10-09. Flag: stochastic eviction is non-deterministic, so tests need a fixed seed.
 
 ### 1.5 Attach to transform / bone ID [4:27–5:45]
 The G-buffer stores a per-object transform ID, which the surfel stores at spawn along with its *object-relative* position. Each frame, world pos = globalTransforms[id] × localPos. Skinned meshes write the ID of their **highest-weight bone**, giving one-bone skinning of the cache; this is slightly off, but the apply step is forgiving.
-gi-v2: this is the root cause of **PR #31 moving-box lag**: our cache entries for movers are world-anchored, so lighting smears or lags while the object moves and must re-converge. Attaching mover cache entries to the object's transform ID makes their gathered irradiance travel with the object; only the *incoming* light changes, which the adaptive blend (1.8) handles.
+GI: this is the root cause of **PR #31 moving-box lag**: our cache entries for movers are world-anchored, so lighting smears or lags while the object moves and must re-converge. Attaching mover cache entries to the object's transform ID makes their gathered irradiance travel with the object; only the *incoming* light changes, which the adaptive blend (1.8) handles.
 **NOW, top pick**. Fits our 10-09 layered design ("moving objects carry their own record, never dirty probes"). Needs: object/transform ID in the G-buffer (or an existing instance ID), a GPU transform buffer (current + previous), and local-space storage for mover entries. Flag: GIBS attaches *all* geometry. We do it for movers only, because static stays world-lattice per ADR 0012. Note this deviation.
 
 ### 1.6 Screen-relative size [5:50–6:25]
 Radius scales so the screen projection is about constant. Approaching an object shrinks surfels and spawns more; backing away grows them and recycles the extras. This gives constant quality and constant cost at any distance.
-gi-v2: our near 0.5/1 m cells plus 1 m world lattice plus coarse far volume is a discrete version of this.
+GI: our near 0.5/1 m cells plus 1 m world lattice plus coarse far volume is a discrete version of this.
 **NO** for the lattice (it would break world-fixed probes, which fixed camera-move perf on 10-07). **LATER**: cache-slot LOD picked by projected size is a valid idea for the surface cache.
 
 ### 1.7 Non-linear trapezoid acceleration grid [8:10–11:05]: **LATER, big-world track**
@@ -76,7 +76,7 @@ gi-v2: our near 0.5/1 m cells plus 1 m world lattice plus coarse far volume is a
 
 **Cost (inference; the talk gives no grid timing).** Per frame: clear counts O(cells), count pass O(surfels), prefix sum O(cells), scatter O(surfels). The lookup is a few ALU ops (abs/max/div/log) plus 1 indirect read. Expected cost is about 0.1–0.3 ms on a mid GPU for about 1M surfels (estimate, not from the talk). Seams: the cube↔pyramid boundary and the pyramid↔pyramid diagonal edges are where neighbour queries need care. Overlap insertion handles it if the radius ≤ the local cell size.
 
-**gi-v2 mapping.** Today our world probes are a fixed 1 m lattice to 50 m plus a coarse far volume, with no per-frame rebuild. In a big world (km-scale), the 50 m lattice + far volume is the part that will strain, as either a seam or memory. Two possible uses: (a) as a **camera-relative far-field index** replacing the coarse far volume, holding sparse far cache entries with log-distance cells, or (b) if we ever adopt disc-like cache entries, as their neighbour structure for sharing (§1.14) and ray binning (§1.15). It does not replace the world-fixed near lattice: that fixed camera-move perf on 10-07, and a camera-relative structure changes cell membership as the camera moves. That is fine for an index rebuilt each frame, but wrong for storing radiance.
+**GI mapping.** Today our world probes are a fixed 1 m lattice to 50 m plus a coarse far volume, with no per-frame rebuild. In a big world (km-scale), the 50 m lattice + far volume is the part that will strain, as either a seam or memory. Two possible uses: (a) as a **camera-relative far-field index** replacing the coarse far volume, holding sparse far cache entries with log-distance cells, or (b) if we ever adopt disc-like cache entries, as their neighbour structure for sharing (§1.14) and ray binning (§1.15). It does not replace the world-fixed near lattice: that fixed camera-move perf on 10-07, and a camera-relative structure changes cell membership as the camera moves. That is fine for an index rebuilt each frame, but wrong for storing radiance.
 **Deviation flags.** (1) A camera-relative rebuild every frame vs our world-fixed persistent storage: index only, never storage. (2) It is not in our papers or ADR 0012, so it needs an ADR addendum if adopted. (3) Slice law, sizes, memory and cost figures above are all my inference. The talk gives none of them [9:41–11:05].
 
 **Proposed big-world test scene: `bigworld_valley`** (procedural, deterministic seed, no baking)
@@ -111,26 +111,26 @@ A/B: current lattice + far volume vs trapezoid far index, same seed and path.
 - State: 3+3+3+1+1 = 11 floats per entry. Open question 1 is answered.
 
 A plain EMA forces a choice between reactive and converged. MSME keeps a long-term mean plus a **short-term mean and a short-term variance**. When the short-term mean departs from the long-term mean by more than the short-term variance can explain, the long-term blend factor rises (react fast). Otherwise it decays toward 1/N (converge to noise-free). The integrator is reused for the SH probes [34:35].
-gi-v2: this directly fixes the **slow dark-room fade** (fixed 100–200 ms hysteresis plus "snap on big change", which also caused the 10-10 sun-4x fade-then-pop bug). Replace both with one MSME blend per cache entry/probe. It also removes the pop, because there is no separate snap rule.
+GI: this directly fixes the **slow dark-room fade** (fixed 100–200 ms hysteresis plus "snap on big change", which also caused the 10-10 sun-4x fade-then-pop bug). Replace both with one MSME blend per cache entry/probe. It also removes the pop, because there is no separate snap rule.
 **NOW, top pick (paired with 1.5)**. Storage: +2 values per channel (short mean, short variance) per entry, packed in fp16. Flag deviation: our papers/ADR specify hysteresis + snap. MSME replaces that, so record it in the ADR. Must keep "only finished values are published": MSME output is still the published long-term mean.
 
 ### 1.9 Applying surfels to pixels [11:09–11:40]
 Reconstruct world pos, look up the grid cell, and loop over its surfels as virtual point lights, weighted by orientation (normal dot) and distance.
-gi-v2: screen probes / surface-cache gather already do this. **Already ours.** Add a normal-similarity weight if missing.
+GI: screen probes / surface-cache gather already do this. **Already ours.** Add a normal-similarity weight if missing.
 
 ### 1.10 Depth moments + Chebyshev leak test [11:40–13:36]
 **Slide [12:58] "Radial Gaussian Depth":** E(x)≈Z1=Σz/n, E(x²)≈Z2=Σz²/n, σ²=Z2−Z1², and P(x≥t) ≤ σ²/(σ²+(t−μ)²). It cites [Donnelly2006] VSM, [Majercik2019] DDGI and [Chebyshev1867]. "Values are filterable!" 4x4 texels per hemisphere.
 Surfels leak light, e.g. outdoor surfels lighting indoor walls (blotches). Each surfel keeps a **4x4 hemispherical depth map of moving-average depth and depth²** (initialised to the radius, updated from its own GI rays that hit within the radius). At apply time, a Chebyshev inequality gives a soft visibility weight, like VSM/DDGI. Only depth inside the radius and only the hemisphere matter, so 4x4 is enough.
-gi-v2: our world probes already store hit distances (DDGI-style), so check that we use **mean + mean²** and Chebyshev rather than a hard compare. For surface-cache entries and the **box-foot contact strip / dark-hall / bright-corner leaks**, a tiny per-entry moment map is cheap.
+GI: our world probes already store hit distances (DDGI-style), so check that we use **mean + mean²** and Chebyshev rather than a hard compare. For surface-cache entries and the **box-foot contact strip / dark-hall / bright-corner leaks**, a tiny per-entry moment map is cheap.
 **NOW (if PR #39/#37 is the leak work) or LATER**. Flag: it is a DDGI deviation only in resolution (4x4 hemi vs 8x8/16x16 octahedral full sphere). This is acceptable and should be noted.
 
 ### 1.11 Lighting integration: rays, sky, shadow rays, infinite bounce via cache [13:40–15:12]
 Random rays: a miss reads the sky, and a hit evaluates direct light with shadow rays plus the **cached irradiance of surfels at the hit point**, which gives infinite bounce over time.
-gi-v2: same as our world-cache feedback. Our 3–6 bounce slider question: GIBS shows that cache feedback makes the bounce count implicit. **Already ours**. Keep the bounces slider as a cap on feedback weight.
+GI: same as our world-cache feedback. Our 3–6 bounce slider question: GIBS shows that cache feedback makes the bounce count implicit. **Already ours**. Keep the bounces slider as a cap on feedback weight.
 
 ### 1.12 Variance-driven ray counts, dormant state, global budget [16:26–18:19]
 Rays per surfel per frame scale with its MSME variance: high on change or new spawn, near-dormant (one ray every few frames) when converged, but still enough to *detect* change. A global user ray budget scales all requests to give predictable cost.
-gi-v2: this is our **smart wakes**, but driven by a measured statistic instead of event heuristics. Also our "probes that never finish" bug (10-10): the variance gives a finish criterion. The debug view is a blue→red variance heatmap [16:58].
+GI: this is our **smart wakes**, but driven by a measured statistic instead of event heuristics. Also our "probes that never finish" bug (10-10): the variance gives a finish criterion. The debug view is a blue→red variance heatmap [16:58].
 **NOW (pairs with 1.8, same data)**: expose `--gi-ray-budget`, `--gi-dormant-rays`, and a variance debug view. Deviation flag: a stochastic dormant ray every few frames is **not** reusing or holding a frame. It is a fresh trace, so it is allowed. Pre-fill still gives the initial value.
 
 ### 1.13 Cosine sampling → 6x6 ray guiding [18:19–25:14]
@@ -176,27 +176,27 @@ gi-v2: this is our **smart wakes**, but driven by a measured statistic instead o
 
 ### 1.14 Irradiance sharing between neighbours [25:08–26:23]
 Surfels access others "in the same grid cell" via the acceleration structure and apply "weighted irradiance sharing" [25:25–25:43]. The weights are **not given**. Normal, distance and moment gating are my assumption. After 64 samples, it looks far less blotchy.
-gi-v2: Anthony's "**splotchy** / blotchy light detail" complaint (10-10) is this exact symptom. Our equivalent is a spatial filter over surface-cache entries **in cache space** (not screen space, so no frame reuse). It probably overlaps with what PR #40's denoiser does in screen space.
+GI: Anthony's "**splotchy** / blotchy light detail" complaint (10-10) is this exact symptom. Our equivalent is a spatial filter over surface-cache entries **in cache space** (not screen space, so no frame reuse). It probably overlaps with what PR #40's denoiser does in screen space.
 **NOW as a queued roll-in to PR #40** (option: pre-filter in cache space, which is cheaper than screen denoise iterations). Flag: it introduces bias (light blurs across edges) unless gated by normal and moments.
 
 ### 1.15 Ray binning (sort rays by cell + direction) [26:37–27:31]
 [slide 27:30] BF5 approach, **16-bit bin index: 12 bits spatial (cell location hash) + 4 bits orientation (ray direction)**. This corrects the earlier reading, which said ray index: the bin is by *direction*, and the reorder uses ray index plus bin offsets. Speech: bin key = the surfel's cell coordinate converted to 1D (the dominant part) + "the rays shot from the circle" as the other part [27:04–27:15]. That's a per-surfel ray index, not explicitly a direction. Binning is "based on their position and orientation" [26:59–27:01]. There are 2 passes for counts/offsets plus 1 reorder pass (Battlefield V approach). This improves BVH cache coherence.
-gi-v2: our hardware ray queries for the world cache. With lavapipe in the cloud you can't measure it; it needs zanven-pc. Our rays come from a lattice, so they are already fairly coherent.
+GI: our hardware ray queries for the world cache. With lavapipe in the cloud you can't measure it; it needs zanven-pc. Our rays come from a lattice, so they are already fairly coherent.
 **LATER** (perf-gate candidate. Measure on the real GPU first. It may be a win on Sponza, which drops to 9–19 fps on high).
 
 ### 1.16 Many lights: stochastic lightcuts vs RIS/ReSTIR [27:34–33:23]
 Brute-force random N lights doesn't scale. **Stochastic Lightcuts** (Yuksel, HPG 2019): Morton-sorted view-space lights, a bottom-up tree, a cut of 2–8 nodes minimising error, then a stochastic descent. It converges in about 5 s on 1,400 lights but is expensive on console. **Reservoir/RIS** (from ReSTIR): sample 4–8 candidate lights weighted by distance and intensity, keep 1, normalise the PDF, one shadow ray. It's cheap but noisier. Full spatiotemporal resampling is future work (reservoirs stored per cell/surfel [45:57]).
-gi-v2: PR #43 `--lamp-pick hits|reuse`: `hits` is close to their RIS-without-reuse, and `reuse` (experimental, noisy without a denoiser) is the temporal-reservoir step they were also still struggling with.
+GI: PR #43 `--lamp-pick hits|reuse`: `hits` is close to their RIS-without-reuse, and `reuse` (experimental, noisy without a denoiser) is the temporal-reservoir step they were also still struggling with.
 **LATER**: a light tree (SLC) as a third `--lamp-pick tree` mode for the 100-lamp stress scene (moving 17 fps). Storing reservoirs **per cache entry** rather than per pixel is their proposed fix for the storage problem, and it's also our cleanest path to make `reuse` work without a pixel denoiser. Queue it.
 
 ### 1.17 Transparents: SH probes in a volume clipmap [33:23–38:30]
 G-buffer spawn can't cover transparents, so ray-traced probes in nested clipmap levels (4 levels shown [37:21–37:41]; 3 in the perf test [44:07]) are projected to SH [33:59] (order not stated), use the same MSME integrator and variance ray count, and shift toward the camera when it leaves a level's centre grid. Still-valid probes are copied to their new coordinate rather than discarded [35:24–36:07]. That is not explicitly toroidal. New probes are initialised from the coarser level (that's their "pre-fill"). Levels update out of sync. Level borders get a blend band, or **blue-noise dither** between levels (one fetch, TAA cleans it). Cost about 0.2 ms full-screen sampling at 900p.
-gi-v2: our world probes are world-fixed out to 50 m plus a far volume. **Initialise new probes from the coarser level** is a pre-fill technique we should check we already do. **Blue-noise dither** at the near/world/far seams could replace dual-fetch blends.
+GI: our world probes are world-fixed out to 50 m plus a far volume. **Initialise new probes from the coarser level** is a pre-fill technique we should check we already do. **Blue-noise dither** at the near/world/far seams could replace dual-fetch blends.
 **LATER** for transparents (we don't have a transparent GI path yet). **NOW-cheap check**: coarse→fine pre-fill on probe activation. Flag: dither relies on TAA. If we have no TAA in the debug path, dithering will show.
 
 ### 1.18 Skinned meshes [5:09–5:45, 1:08]
 Covered by 1.5 (the highest-weight bone ID). Skinned geometry casts and receives like static.
-gi-v2: no skinning yet (animation is the next roadmap priority). **LATER**: design the transform-ID buffer in 1.5 so bone IDs slot in without changes.
+GI: no skinning yet (animation is the next roadmap priority). **LATER**: design the transform-ID buffer in 1.5 so bone IDs slot in without changes.
 
 ### 1.19 Frame structure and perf [38:52–44:36]
 **Slide [39:10] full pass list:**
@@ -214,13 +214,13 @@ Four phases: persistent surfel work (RT dominated), spawned work (RT or normal r
 - Internal demo, 140 lights: about 5.5 ms
 - Free roam: 5.4 ms, or 3.4 ms at 1800p checkerboard
 - 3-level clipmap solved round-robin: cheap
-gi-v2 comparison: our target is 200+ fps moving (5 ms *whole frame*), so GIBS's 3.4–7 ms GI alone is above our budget. That supports keeping the lattice + screen-probe design and taking only the cheap estimator ideas. Round-robin solving of clipmap levels matches our budgeted updates.
+GI comparison: our target is 200+ fps moving (5 ms *whole frame*), so GIBS's 3.4–7 ms GI alone is above our budget. That supports keeping the lattice + screen-probe design and taking only the cheap estimator ideas. Round-robin solving of clipmap levels matches our budgeted updates.
 
 ### 1.20 Limitations and future work [44:36–46:31]
 - Procedural/deforming geometry continuously respawns, because it isn't tracked.
 - High-detail geometry over-spawns. The planned fix is to combine with SSGI where it suffices.
 - Ideas they listed: share guiding across surfels, ReSTIR to augment guiding, store light visibility per cell to cut dead lights, share lights between binned rays (spatial RIS), reservoirs per cell/surfel, optimise the SLC traversal, move shadow rays to a later pass, and add ray guiding + specular to the probes.
-gi-v2: our screen-space near field already handles the SSGI half. **Per-cell light visibility** is a strong LATER idea for the 100-lamp scenes (pairs with PR #43). The deferred shadow-ray pass is a perf-gate candidate.
+GI: our screen-space near field already handles the SSGI half. **Per-cell light visibility** is a strong LATER idea for the 100-lamp scenes (pairs with PR #43). The deferred shadow-ray pass is a perf-gate candidate.
 
 ## 2. Open questions (things we don't know)
 1. ~~Exact MSME formulas~~ Answered (§1.8, saved code). Originally: (the short-window length, the variance→alpha map). Get Stachowiak's published code before implementing. The agent must cite it.
@@ -246,7 +246,7 @@ gi-v2: our screen-space near field already handles the SSGI half. **Per-cell lig
 
 ## 4. Launch spec for the one new cloud agent (medium effort)
 Repo AnthonyPoschen/genos-engine, base `gi-v2` (2abeb0dd). Branch `gibs-mover-attach-msme`.
-> Implement two GIBS (EA SEED, SIGGRAPH 2021; research note GIBS.md §1.5, §1.8, §1.12) ideas in gi-v2, one commit per change, normal push only, then open a PR to gi-v2.
+> Implement two GIBS (EA SEED, SIGGRAPH 2021; research note GIBS.md §1.5, §1.8, §1.12) ideas in GI, one commit per change, normal push only, then open a PR to gi-v2.
 > (1) Attach surface-cache entries/probes that belong to moving objects to the object's transform ID: store object-local position + normal at allocation; each frame transform them with the object's current transform from a GPU transform buffer; static geometry stays world-lattice (ADR 0012). Flag this deviation from GIBS (they attach everything) in the PR. Target: PR #31 moving-box lighting lag.
 > (2) Replace the fixed hysteresis + snap-on-big-change blend with a multi-scale mean estimator (long mean + short mean + short variance driving the long-term blend factor), following the published MSME at ./MultiscaleMeanEstimator.hlsl (Barré-Brisebois et al., Ray Tracing Gems ch. 25). Flag its 8σ firefly clamp as a bias, and make the clamp a setting. Keep "only finished values are published". Target: slow dark-room fade and the sun-4x fade-then-pop.
 > (3) If clean, make per-entry ray count follow the MSME variance with a dormant floor and a global ray budget (smart wakes). Otherwise leave it for a follow-up and say so.
