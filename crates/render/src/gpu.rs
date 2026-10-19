@@ -756,6 +756,8 @@ struct Gpu {
     format: i32,
     extent_w: u32,
     extent_h: u32,
+    /// Swapchain present mode: 0 immediate, 1 mailbox, 2 FIFO.
+    present_mode: i32,
     swap_images: Vec<Handle>,
     color: Image,
     depth: Image,
@@ -1430,6 +1432,7 @@ impl Gpu {
                 format: 44,
                 extent_w: width.max(1),
                 extent_h: height.max(1),
+                present_mode: 2,
                 swap_images: Vec::new(),
                 color: Image::empty(),
                 depth: Image::empty(),
@@ -1804,6 +1807,7 @@ impl Gpu {
                 old: Handle,
             }
             let present = self.choose_present()?;
+            self.present_mode = present;
             // Mailbox needs a free image while one image is queued and one is on screen.
             if present == 1 {
                 image_count = min_images.max(3);
@@ -2109,6 +2113,7 @@ impl Gpu {
                 if lighting {
                     self.lighting_begin(slot);
                 }
+                self.frame_stamp(slot, FrameStamp::Setup);
                 self.raster_scene(
                     self.framebuffer,
                     self.extent_w,
@@ -2117,13 +2122,17 @@ impl Gpu {
                     !filtering && !lighting,
                 );
                 self.color_layout[slot] = 6;
+                self.frame_stamp(slot, FrameStamp::Gbuffer);
                 if lighting {
                     self.lighting_passes(slot);
-                    if !filtering && self.overlay_count > 0 {
-                        self.raster_overlay();
-                    }
                 }
-                self.frame_stamp(slot, FrameStamp::Raster);
+                self.frame_stamp(slot, FrameStamp::Lighting);
+                // No antialias: the overlay is its own pass, after lighting, so its
+                // time stays out of the lighting span.
+                if lighting && !filtering && self.overlay_count > 0 {
+                    self.raster_overlay();
+                }
+                self.frame_stamp(slot, FrameStamp::EarlyOverlay);
                 if self.antialias == Antialias::Fxaa {
                     self.resolve_fxaa(slot)?;
                 }
@@ -2363,15 +2372,22 @@ impl Gpu {
         let n = f64::from(times.frames);
         let seconds = since.elapsed().as_secs_f64().max(1.0e-6);
         let f = times.frame.map(|v| v / n);
+        let passes = pass_times(&f);
         eprintln!(
-            "GPU_MS frames={} raster={:.3} aa({:?})={:.3} overlay={:.3} copy={:.3} frame={:.3} | fps={:.0}",
+            "GPU_MS frames={} size={}x{} present={} setup={:.3} gbuffer={:.3} aa({:?})={:.3} overlay={:.3} copy={:.3} nonlight={:.3} lighting={:.3} frame={:.3} | fps={:.0}",
             times.frames,
-            f[0],
+            self.extent_w,
+            self.extent_h,
+            present_name(self.present_mode),
+            passes.setup,
+            passes.gbuffer,
             antialias,
-            f[1],
-            f[2],
-            f[3],
-            f.iter().sum::<f64>(),
+            passes.aa,
+            passes.overlay,
+            passes.copy,
+            passes.nonlight,
+            passes.lighting,
+            passes.frame,
             n / seconds,
         );
         if times.lighting_frames > 0 && std::env::var_os("GENOS_GPU_DISPATCH").is_some() {
@@ -5593,19 +5609,74 @@ fn parse_gpu_times_flag(arg: &str, next: Option<&str>) -> Result<Option<u32>, St
 }
 
 /// Frame timestamps per flight slot for `GENOS_GPU_TIMES`.
-const FRAME_STAMPS: u32 = 5;
+const FRAME_STAMPS: u32 = 8;
+/// Intervals between [`FRAME_STAMPS`] (one fewer than the stamps).
+const FRAME_SPANS: usize = FRAME_STAMPS as usize - 1;
 /// Frames averaged per `GENOS_GPU_TIMES` line unless it gives a number.
 const GPU_TIMES_FRAMES: u32 = 120;
 
-/// Where a frame timestamp sits: after the scene raster (which shades the near field
-/// per pixel), the antialias resolve, the overlay and the copies to the screen.
+/// Where a frame timestamp sits. Lighting is its own span so `GPU_MS` does not
+/// fold it into the raster.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FrameStamp {
     Start = 0,
-    Raster = 1,
-    Resolve = 2,
-    Overlay = 3,
-    Copy = 4,
+    /// After the resident updates, the swapchain barrier, and `lighting_begin`.
+    Setup = 1,
+    /// After the depth prepass and the shaded scene raster.
+    Gbuffer = 2,
+    /// After `lighting_passes` (no overlay, no antialias).
+    Lighting = 3,
+    /// After the overlay that runs when lighting is on and antialias is off.
+    EarlyOverlay = 4,
+    /// After the antialias resolve.
+    Resolve = 5,
+    /// After the overlay that runs when antialias is on.
+    Overlay = 6,
+    /// After the swapchain copy and the optional host copy.
+    Copy = 7,
+}
+
+/// `GPU_MS` buckets. `nonlight` is every pass except the lighting span.
+struct PassTimes {
+    setup: f64,
+    gbuffer: f64,
+    aa: f64,
+    overlay: f64,
+    copy: f64,
+    nonlight: f64,
+    lighting: f64,
+    frame: f64,
+}
+
+fn present_name(mode: i32) -> &'static str {
+    match mode {
+        0 => "immediate",
+        1 => "mailbox",
+        _ => "fifo",
+    }
+}
+
+/// Split one frame's stamp intervals into the `GPU_MS` line.
+///
+/// `span` is setup, gbuffer, lighting, early overlay, antialias, late overlay, copy.
+fn pass_times(span: &[f64; FRAME_SPANS]) -> PassTimes {
+    let setup = span[0];
+    let gbuffer = span[1];
+    let lighting = span[2];
+    let overlay = span[3] + span[5];
+    let aa = span[4];
+    let copy = span[6];
+    let nonlight = setup + gbuffer + aa + overlay + copy;
+    PassTimes {
+        setup,
+        gbuffer,
+        aa,
+        overlay,
+        copy,
+        nonlight,
+        lighting,
+        frame: nonlight + lighting,
+    }
 }
 
 /// Running sums for `GENOS_GPU_TIMES`.
@@ -5624,8 +5695,8 @@ struct GpuTimes {
     /// A slot's stamps hold a frame that has not been read yet.
     written: [bool; 2],
     frames: u32,
-    /// Raster, resolve, overlay, copy.
-    frame: [f64; 4],
+    /// Setup, gbuffer, lighting, early overlay, antialias, late overlay, copy.
+    frame: [f64; FRAME_SPANS],
     /// When this line's first frame was read: frames per second count from there.
     since: Option<std::time::Instant>,
     /// The memory placement line has been printed.
@@ -5685,7 +5756,7 @@ impl Default for GpuTimes {
             every: GPU_TIMES_FRAMES,
             written: [false; 2],
             frames: 0,
-            frame: [0.0; 4],
+            frame: [0.0; FRAME_SPANS],
             since: None,
             placed: false,
             lighting_pool: std::ptr::null_mut(),
@@ -5703,6 +5774,28 @@ impl Default for GpuTimes {
         }
     }
 }
+
+#[cfg(test)]
+mod pass_time_tests {
+    use super::pass_times;
+
+    #[test]
+    fn nonlight_leaves_out_the_lighting_span() {
+        // setup, gbuffer, lighting, early overlay, aa, late overlay, copy.
+        let span = [0.20, 1.50, 8.00, 0.05, 0.30, 0.10, 0.15];
+        let times = pass_times(&span);
+        assert!((times.lighting - 8.0).abs() < 1e-9);
+        assert!((times.overlay - 0.15).abs() < 1e-9);
+        assert!((times.gbuffer - 1.50).abs() < 1e-9);
+        assert!((times.aa - 0.30).abs() < 1e-9);
+        assert!((times.copy - 0.15).abs() < 1e-9);
+        assert!((times.setup - 0.20).abs() < 1e-9);
+        let nonlight = 0.20 + 1.50 + 0.30 + 0.15 + 0.15;
+        assert!((times.nonlight - nonlight).abs() < 1e-9);
+        assert!((times.frame - (nonlight + 8.0)).abs() < 1e-9);
+    }
+}
+
 
 #[cfg(test)]
 mod gpu_times_launch {
