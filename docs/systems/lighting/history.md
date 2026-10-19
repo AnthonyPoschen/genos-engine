@@ -102,6 +102,9 @@ Anthony (15:51-15:57, t357u-t363u): do off-screen pre-fill for turns and walking
 ## [S73B: All scout hits claim fine texels and stamp LastUsed](experiments/S73B-lumen-feedback-prefill.md)
 Turn strip ~/.cache/gi2diag/perf/turn-S73B/strip.png was not looked at; logs ship-S73A.log, ship-S73B.log.
 
+## [S73S: Accumulation reads raw means; display keeps dark fill](experiments/S73S-raw-means-feedback-display-fill.md)
+Camera-turn pre-fill ~1.5× too bright on the 4070 (display dark fill feeding accumulation). S73S split feedback to raw means with coarse blend k=2; display kept dark fill. Lavapipe: reveal 0.168 / +8f 0.236 (target 0.10; S73R was 0.313/0.329); still 3.6% darker (8.4% dark quartile) vs former gi-v2. Closed without merge (PR [#25](https://github.com/AnthonyPoschen/genos-engine/pull/25), branch `cursor/unfilled-prefill-bias-8bfe`): misses target, error grows; possible cause is the 16-set freeze from PR #3. Retry later as display-only-safe accumulation against path-traced 4070 after perf PRs. Unfilled detector split to PR #29 (merged).
+
 ## [S74A-cam: Fix: last-frame camera read from stale scene-block offsets](experiments/S74A-cam-last-camera-offsets.md)
 Reported with 50db0f70: 32-38 fps vs 27-30 for the checkpoint, same brightness; pop 0.105% vs 0.084% settled (later shown to be within the checkpoint's own run-to-run range).
 
