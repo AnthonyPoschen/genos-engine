@@ -1,6 +1,6 @@
 #version 450
-// Compile check for the GI v2 tracer pieces that no pass uses yet (build.rs compiles
-// this and discards it). Small on purpose: one trace site, as every GI v2 pass.
+// Compile check for the GI tracer pieces that no pass uses yet (build.rs compiles
+// this and discards it). Small on purpose: one trace site, as every GI pass.
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_control_flow_attributes : require
 layout(local_size_x = 64) in;

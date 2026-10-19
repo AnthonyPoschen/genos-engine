@@ -553,8 +553,9 @@ bool scene_occluded(vec3 a, vec3 b) {
 // occluder walk stops at the camera box, so the extra span tests stored cells
 // inside that box and nothing past it.
 
+bool lighting_sky_enabled();
 bool has_sky() {
-    return any(greaterThan(scene.sky.rgb, vec3(0.0)));
+    return lighting_sky_enabled() && any(greaterThan(scene.sky.rgb, vec3(0.0)));
 }
 
 // The sky's radiance when a ray that met nothing before `t_end` meets nothing after

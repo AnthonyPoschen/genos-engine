@@ -1,5 +1,5 @@
 #version 450
-// GI v2 screen probes, pass 5: spatial filter in direction space, Lumen's recipe
+// GI screen probes, pass 5: spatial filter in direction space, Lumen's recipe
 // (lumen-digest.md 1.4), run three times (lighting_filter_round: cells 0 -> 1 -> 0 ->
 // SH). Each cell of a probe becomes the weighted mean of its own light and the
 // light its 3 x 3 neighbours saw in the same direction (their cell that holds this
@@ -41,8 +41,14 @@ void main() {
             work.v[gdb + 1u].w = -1.0;
         }
         if (last) {
+            bool sh_diff = false;
             [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
+                vec4 old = work.v[lighting_shf_at(probe) + q];
+                sh_diff = sh_diff || any(notEqual(old, vec4(0.0)));
                 work.v[lighting_shf_at(probe) + q] = vec4(0.0);
+            }
+            if (sh_diff) {
+                lighting_compose_mark_probe(probe);
             }
         }
         return;
@@ -169,6 +175,11 @@ void main() {
         c[f] *= band == 0u ? LIGHTING_PI : (band == 1u ? LIGHTING_TAU / 3.0 : LIGHTING_PI / 4.0);
     }
     uint base = lighting_shf_at(probe);
+    bool sh_diff = false;
+    [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
+        vec4 nw = vec4(c[4u * q], c[4u * q + 1u], c[4u * q + 2u], q == 6u ? 0.0 : c[4u * q + 3u]);
+        sh_diff = sh_diff || any(notEqual(work.v[base + q], nw));
+    }
     if (lighting_world_mode() == 2u) {
         float y[9];
         lighting_sh9(n, y);
@@ -188,5 +199,8 @@ void main() {
     }
     [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
         work.v[base + q] = vec4(c[4u * q], c[4u * q + 1u], c[4u * q + 2u], q == 6u ? 0.0 : c[4u * q + 3u]);
+    }
+    if (sh_diff) {
+        lighting_compose_mark_probe(probe);
     }
 }

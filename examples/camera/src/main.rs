@@ -1,13 +1,33 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::bool_to_int_with_if, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
+#![expect(clippy::format_push_string, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::similar_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::unwrap_used, reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md")]
+#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use genos_input::{character_controller, InputCode, InputSystem};
+use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
 use genos_render::{Antialias, Renderer, ScreenRect, Simulation, World};
 
-/// The flame, the smoke, and the flame lamp stay off while the radiance field is under study.
+/// The flame, the smoke, and the flame lamp stay off.
 const SHOW_PARTICLES: bool = false;
-use genos_scene::{load_path, update, Actions, Camera, Codimation, Easing, Scene, Vec3};
+use genos_scene::{
+    load_path, update, Actions, Camera, Codimation, DebugSettings, Easing, EventLoopSettings,
+    Floor, FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, Scene, Sky, Vec3,
+};
 use genos_ui::{
     apply_frame_action, lighting_frame, Action, OpenFrame, Pointer, ProfileGraph, ProfileStream,
     State,
@@ -123,6 +143,7 @@ fn run() -> Result<(), String> {
     let mut profile_arg = None;
     let mut scene_name = String::from("scene.rhai");
     let mut size = (1280u32, 720u32);
+    let mut time_of_day = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -165,6 +186,67 @@ fn run() -> Result<(), String> {
             "--scene" => {
                 scene_name = args.next().ok_or("missing scene file")?;
             }
+            "--out" => {
+                // The renderer reads this from the process arguments.
+                let _dir = args.next().ok_or("missing output directory")?;
+            }
+            arg if arg.starts_with("--out=") => {
+                if arg.trim_start_matches("--out=").trim().is_empty() {
+                    return Err("missing output directory".into());
+                }
+            }
+            other if genos_render::unfilled_flag_needs_value(other).is_some() => {
+                let needs = genos_render::unfilled_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_render::check_unfilled_arg(other, next.as_deref())?;
+            }
+            other if genos_scene::lighting_flag_needs_value(other).is_some() => {
+                let needs = genos_scene::lighting_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_scene::check_lighting_arg(other, next.as_deref())?;
+                if let Some(hours) = genos_scene::lighting_arg_time_of_day(other, next.as_deref())?
+                {
+                    time_of_day = Some(hours);
+                }
+            }
+            other if genos_render::gpu_times_flag_needs_value(other).is_some() => {
+                let needs = genos_render::gpu_times_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_render::check_gpu_times_arg(other, next.as_deref())?;
+            }
+            other if genos_render::lighting_sun_flag_needs_value(other).is_some() => {
+                let needs = genos_render::lighting_sun_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_render::check_lighting_sun_arg(other, next.as_deref())?;
+            }
             "--size" => {
                 let text = args.next().ok_or("missing size")?;
                 let (w, h) = text
@@ -180,7 +262,20 @@ fn run() -> Result<(), String> {
     }
 
     let scene_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&scene_name);
-    let scene = load_path(&scene_path)?;
+    let mut window = if proof {
+        Window::open_proof(size.0, size.1)?
+    } else {
+        Window::open(size.0, size.1)?
+    };
+    window.install_seat_pump();
+    Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
+    let first = window.pump();
+    let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let scene = match load_scene_pumped(&mut window, &mut renderer, scene_path) {
+        Ok(scene) => scene,
+        Err(err) if err == "window closed during load" => finish(window, renderer, 0),
+        Err(err) => return Err(err),
+    };
     let mut camera = match eye {
         Some((x, z, yaw)) => Camera::new(x, z, yaw),
         None => Camera::opening(),
@@ -196,6 +291,12 @@ fn run() -> Result<(), String> {
     }
     let bench_camera = camera.clone();
     let host = genos_mcp::Host::new(scene, camera);
+    if let Some(hours) = time_of_day {
+        host.with_frame(|scene, _| {
+            scene.lighting.time_of_day = hours;
+            scene.lighting.sanitize();
+        });
+    }
     if let Some((x, y, z)) = lamp {
         host.with_frame(|scene, _| {
             scene.lights = vec![genos_scene::Light {
@@ -215,19 +316,13 @@ fn run() -> Result<(), String> {
     let mut world = World::from_scene(host.drawn_scene());
     let mut scene_revision = host.scene_revision();
     let mut fire = SHOW_PARTICLES.then(|| Simulation::from_scene(&world.scene));
-    let mut window = if proof {
-        Window::open_proof(size.0, size.1)?
-    } else {
-        Window::open(size.0, size.1)?
-    };
-    let first = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let mut drawn = 0u32;
     let mut size = (renderer.width(), renderer.height());
     let mut focus = FocusGate::default();
     let mut ui = State::default();
     let mut input = InputSystem::new();
     let controls = character_controller();
+    let keys = debug_keys()?;
     let profile_mode = parse_profile_mode(profile_arg.as_deref(), proof)?;
     let mut profile_stream = match profile_mode {
         ProfileMode::Detailed => {
@@ -319,6 +414,23 @@ fn run() -> Result<(), String> {
             profile.reset();
             drag_origin = None;
         }
+        if keys.pressed(&input, "unfilled_tint") || keys.pressed(&input, "unfilled") {
+            let mut unfilled = renderer.unfilled();
+            if keys.pressed(&input, "unfilled_tint") {
+                unfilled.tint = !unfilled.tint;
+                if unfilled.tint {
+                    unfilled.count = true;
+                }
+            } else {
+                unfilled.count = !unfilled.count;
+                if !unfilled.count {
+                    unfilled.tint = false;
+                }
+            }
+            renderer.set_unfilled(unfilled);
+            let unfilled = renderer.unfilled();
+            eprintln!("unfilled count {} tint {}", unfilled.count, unfilled.tint);
+        }
         let paused = graph_on && profile.is_paused();
         // camera/scene update, first half: the panel reads the lamp after a reload
         let scene_at = Instant::now();
@@ -346,6 +458,7 @@ fn run() -> Result<(), String> {
                 y: frame.pointer_y,
                 // A click can press and release before the next pump. The latch still hits the UI.
                 down: !view.captured && (gated.mouse_left || gated.capture_click),
+                ..Pointer::default()
             },
         );
         let mut overlay: Vec<ScreenRect> = ui_frame
@@ -617,7 +730,131 @@ fn run() -> Result<(), String> {
         bench.report(renderer.width(), renderer.height(), renderer.antialias());
     }
     println!("genos-camera frames={drawn}");
-    Ok(())
+    finish(window, renderer, 0);
+}
+
+fn finish(window: Window, renderer: Renderer, code: i32) -> ! {
+    Renderer::clear_blocker();
+    window.clear_seat_pump();
+    drop(window);
+    renderer.abandon();
+    std::process::exit(code);
+}
+
+/// What [`take_scene_load`] returns while a worker decodes the scene file.
+#[derive(Debug, PartialEq, Eq)]
+enum LoadPace {
+    /// The scene is ready to take from [`SceneLoad::take`].
+    Ready,
+    /// The worker is still reading. Keep pumping the window.
+    Pending,
+}
+
+/// A scene file loading on `genos-scene-load`.
+struct SceneLoad {
+    rx: std::sync::mpsc::Receiver<Result<Scene, String>>,
+    scene: Option<Scene>,
+}
+
+/// Start reading `path` on a worker. Returns while that read is still running.
+fn begin_scene_load(path: PathBuf) -> Result<SceneLoad, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("genos-scene-load".into())
+        .spawn(move || {
+            let _ = tx.send(load_path(&path));
+        })
+        .map_err(|err| err.to_string())?;
+    Ok(SceneLoad { rx, scene: None })
+}
+
+fn take_scene_load(job: &mut SceneLoad) -> Result<LoadPace, String> {
+    if job.scene.is_some() {
+        return Ok(LoadPace::Ready);
+    }
+    match job.rx.try_recv() {
+        Ok(Ok(scene)) => {
+            job.scene = Some(scene);
+            Ok(LoadPace::Ready)
+        }
+        Ok(Err(err)) => Err(err),
+        Err(std::sync::mpsc::TryRecvError::Empty) => Ok(LoadPace::Pending),
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("scene load stopped".into()),
+    }
+}
+
+impl SceneLoad {
+    fn take(&mut self) -> Option<Scene> {
+        self.scene.take()
+    }
+}
+
+fn loading_world() -> World {
+    World::from_scene(Scene {
+        floor: Floor {
+            position: Vec3::new(0.0, 0.0, 0.0),
+            half_x: 2.0,
+            half_z: 2.0,
+            color: [0.15, 0.15, 0.16],
+        },
+        walls: Vec::new(),
+        solids: Vec::new(),
+        lights: Vec::new(),
+        ceiling: None,
+        sky: Some(Sky {
+            color: [0.02, 0.02, 0.025],
+        }),
+        lighting: LightingSettings::preset(LightingPreset::Potato),
+        debug: DebugSettings::default(),
+        fps_counter: FpsCounterSettings::default(),
+        event_loop: EventLoopSettings::default(),
+        menu: MenuSettings::default(),
+    })
+}
+
+/// Decode the scene on a worker while the mapped window keeps pumping.
+fn load_scene_pumped(
+    window: &mut Window,
+    renderer: &mut Renderer,
+    path: PathBuf,
+) -> Result<Scene, String> {
+    let load_world = loading_world();
+    let camera = Camera::opening();
+    let meter = window.stall_meter();
+    let mut job = begin_scene_load(path)?;
+    let slice = genos_window::PUMP_BUDGET / 2;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        meter.mark();
+        let frame = window.pump();
+        if frame.closing {
+            return Err("window closed during load".into());
+        }
+        let _ = renderer.draw(&load_world, &camera, false);
+        match take_scene_load(&mut job)? {
+            LoadPace::Ready => {
+                meter.mark();
+                return job.take().ok_or_else(|| "scene load stopped".to_string());
+            }
+            LoadPace::Pending => {
+                if Instant::now() > deadline {
+                    return Err("scene load did not finish".into());
+                }
+                // Park until the worker replies or half the pump budget elapses.
+                match job.rx.recv_timeout(slice) {
+                    Ok(Ok(scene)) => {
+                        meter.mark();
+                        return Ok(scene);
+                    }
+                    Ok(Err(err)) => return Err(err),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err("scene load stopped".into());
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// `GENOS_BENCH=<seconds>`: an unattended benchmark. The camera stays where it starts
@@ -866,6 +1103,10 @@ const BENCH_SETTLE_LIMIT: Duration = Duration::from_secs(10);
 const BENCH_WARMUP: Duration = Duration::from_secs(3);
 
 impl Bench {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a binary or harness reads the environment and passes the value down. docs/LINT_RULES.md"
+    )]
     fn from_env(scene: &Scene, camera: Camera) -> Result<Option<Self>, String> {
         let Ok(value) = std::env::var("GENOS_BENCH") else {
             return Ok(None);
@@ -1367,6 +1608,67 @@ mod tests {
             ProfileMode::Basic
         );
         assert!(parse_profile_mode(Some("nope"), false).is_err());
+    }
+
+    #[test]
+    fn a_scene_load_returns_inside_the_pump_budget() {
+        use std::path::PathBuf;
+        use std::sync::{Condvar, Mutex};
+        use std::time::{Duration, Instant};
+
+        use super::{begin_scene_load, take_scene_load, LoadPace};
+
+        fn wait_ms(ms: u64) {
+            let pair = (Mutex::new(()), Condvar::new());
+            let guard = pair
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = pair.1.wait_timeout(guard, Duration::from_millis(ms));
+        }
+
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scene.rhai");
+        let before = Instant::now();
+        let sync = genos_scene::load_path(&path);
+        let before_ms = before.elapsed().as_secs_f64() * 1000.0;
+        println!("MEASURE before_load_stall_ms={before_ms:.1}");
+        sync.expect("scene.rhai");
+
+        let meter = genos_window::StallMeter::new();
+        meter.mark();
+        let begin = Instant::now();
+        let mut job = begin_scene_load(path).expect("begin");
+        let begin_elapsed = begin.elapsed();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            meter.mark();
+            match take_scene_load(&mut job) {
+                Ok(LoadPace::Pending) => {
+                    assert!(Instant::now() <= deadline, "scene load did not finish");
+                    wait_ms(16);
+                }
+                Ok(LoadPace::Ready) => {
+                    assert!(job.take().is_some(), "ready load has no scene");
+                    break;
+                }
+                Err(err) => panic!("{err}"),
+            }
+        }
+        meter.mark();
+        println!(
+            "MEASURE after_begin_ms={:.1} after_load_stall_ms={:.1}",
+            begin_elapsed.as_secs_f64() * 1000.0,
+            meter.longest_ms()
+        );
+        assert!(
+            begin_elapsed <= Duration::from_millis(100),
+            "begin_scene_load blocked {begin_elapsed:?}"
+        );
+        assert!(
+            meter.longest_ms() <= genos_scene::EventLoopSettings::BUDGET_MS,
+            "poll stalled {:.1} ms",
+            meter.longest_ms()
+        );
     }
 
     #[test]

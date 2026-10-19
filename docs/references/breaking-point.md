@@ -19,7 +19,7 @@ This repository has no checkout of Breaking Point. Open the GitHub URL. The usef
 
 ## Leave these behind
 
-Breaking Point was a working engine, and it has no lighting pass. Use the radiance cascade plan for lighting. See [ADR 0008](../adr/0008-lighting-uses-radiance-cascades.md).
+Breaking Point was a working engine, and it has no lighting pass. Use the live GI path for lighting. See [ADR 0012](../adr/0012-gi.md).
 
 Breaking Point embedded Python 3.2. Scripts in Genos Engine use Rhai. See [ADR 0009](../adr/0009-rhai-is-the-scripting-language.md).
 

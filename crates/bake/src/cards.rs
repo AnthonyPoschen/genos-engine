@@ -1,3 +1,10 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Surface cache cards of one mesh: six axis-aligned views of its bounds.
 //!
 //! Each card texel looks into the mesh along the card's axis and records the first
@@ -6,7 +13,7 @@
 //! the hit share, and emission averages over all four (its area-weighted mean, so
 //! a small bright detail keeps its power). The texel size is fixed per mesh by the
 //! settings, never by camera distance. A complex mesh will get more cards from a
-//! greedy cover (GI v2 phase 4); six is the simple-mesh case.
+//! greedy cover (GI phase 4); six is the simple-mesh case.
 
 use genos_mesh::Bvh;
 

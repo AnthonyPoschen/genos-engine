@@ -14,13 +14,36 @@ members = [
     "crates/window",
     "crates/render",
     "crates/ui",
+    "crates/lighting-ref",
     "crates/load",
     "crates/load-check",
     "crates/audio",
     "crates/audio-check",
     "examples/camera",
     "examples/stress",
+    "debug/scene-lib",
+    "debug/lighting",
 ]
 
 [workspace.lints.rust]
 warnings = "deny"
+
+# Pedantic stays a warning so a direct deny on one of its lints wins.
+# `cargo clippy --workspace --all-targets -- -D warnings` promotes that warning.
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+wildcard_enum_match_arm = "deny"
+as_conversions = "deny"
+undocumented_unsafe_blocks = "deny"
+disallowed_methods = "deny"
+disallowed_types = "deny"
+# Lossy `as` stays a warning on the sites already in the tree.
+# scripts/lint-clippy.py denies a count above lint/lossy-cast-baseline.txt.
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"

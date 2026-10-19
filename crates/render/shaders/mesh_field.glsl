@@ -1,4 +1,4 @@
-// Mesh SDF instances for the GI v2 software tracer (mesh_field.rs packs the words).
+// Mesh SDF instances for the GI software tracer (mesh_field.rs packs the words).
 //
 // Each traced mesh instance is a sparse signed distance field in object space:
 // 8^3 bricks of byte distances near the surface and one coarse byte per brick
@@ -8,7 +8,7 @@
 // (never less than the band, since a brick away from the surface stores nothing).
 //
 // Needs SceneHit and SCENE_LAMBERT declared first (scene_rays.glsl has them).
-// Include it only in the small GI v2 passes, never in a shader with many trace
+// Include it only in the small GI passes, never in a shader with many trace
 // sites: inlined at the old v1 light shaders' many trace sites it stalled the NVIDIA compiler (4070, over 4
 // minutes at pipeline creation) and ran lavapipe out of memory.
 //

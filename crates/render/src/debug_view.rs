@@ -1,3 +1,9 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Debug switches for the picture: what the lighting's compose pass shows, and
 //! per-lamp reports. The tools crate drives these; a game frame leaves them at
 //! their defaults, which change nothing.
@@ -24,11 +30,14 @@ pub enum ViewMode {
     /// 12.5 cm, blue 25 cm, magenta coarser), dimmed where the texel holds fewer
     /// than 4 sets; shaded by the normal so surfaces read.
     Texels,
+    /// Short-term relative standard deviation of the cache entry under each
+    /// pixel. Grey is a missing or unallocated entry. Blue is quiet, red is noisy.
+    Variance,
 }
 
 impl ViewMode {
     /// In the compose pass's code order (lighting_compose.comp).
-    pub const ALL: [ViewMode; 8] = [
+    pub const ALL: [ViewMode; 9] = [
         Self::Full,
         Self::Direct,
         Self::Bounce,
@@ -37,6 +46,7 @@ impl ViewMode {
         Self::Depth,
         Self::Light,
         Self::Texels,
+        Self::Variance,
     ];
 
     pub fn name(self) -> &'static str {
@@ -49,6 +59,7 @@ impl ViewMode {
             Self::Depth => "depth",
             Self::Light => "light",
             Self::Texels => "texels",
+            Self::Variance => "variance",
         }
     }
 
@@ -62,7 +73,8 @@ impl ViewMode {
 }
 
 /// The compose pass's debug word (scene block `grid_at.w`): mode in bits 0-7, the
-/// lamp in bits 8-23.
+/// lamp in bits 8-23. Bits 24 and 25 are the unfilled detector (count, tint),
+/// written by [`DebugState::apply`], not by [`DebugView::word`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DebugView {
     pub mode: ViewMode,
@@ -79,12 +91,20 @@ impl DebugView {
 #[derive(Default)]
 pub(crate) struct DebugState {
     pub view: DebugView,
+    pub unfilled: crate::unfilled::UnfilledControl,
 }
 
 impl DebugState {
     /// Write the debug word into the scene block.
     pub fn apply(&self, pack: &mut Pack) {
-        pack.debug_view = self.view.word();
+        let mut word = self.view.word();
+        if self.unfilled.count {
+            word |= 1 << 24;
+        }
+        if self.unfilled.tint {
+            word |= 1 << 25;
+        }
+        pack.debug_view = word;
     }
 }
 
@@ -107,6 +127,39 @@ pub struct LampReport {
 }
 
 impl Renderer {
+    /// Count unfilled surface-cache pixels, and optionally tint or dump them.
+    /// Tint or a dump threshold turns counting on.
+    pub fn set_unfilled(&mut self, mut control: crate::unfilled::UnfilledControl) {
+        if control.tint || control.dump_pct.is_some() {
+            control.count = true;
+        }
+        self.debug.unfilled = control;
+        self.gpu.unfilled = control;
+    }
+
+    pub fn unfilled(&self) -> crate::unfilled::UnfilledControl {
+        self.gpu.unfilled
+    }
+
+    /// `--out` when this process was started with that argument.
+    pub fn debug_out_cli(&self) -> Option<&str> {
+        self.gpu.out_cli.as_deref()
+    }
+
+    /// Debug output directory in force: the scene value, then `GENOS_UNFILLED_DIR`
+    /// when `--out` was not passed, then `--out`.
+    pub fn debug_settings(&self, scene: &genos_scene::Scene) -> genos_scene::DebugSettings {
+        scene.debug.effective(self.gpu.out_cli.as_deref())
+    }
+
+    /// Counters from the last submitted frame. Waits until that frame's copy is visible.
+    pub fn unfilled_stats(&mut self) -> crate::unfilled::UnfilledStats {
+        self.gpu.idle_device();
+        let slot = self.gpu.lighting.last_slot;
+        self.gpu.take_unfilled(slot);
+        self.gpu.last_unfilled.unwrap_or_default()
+    }
+
     /// What the picture shows; the default is the picture.
     pub fn set_debug_view(&mut self, view: DebugView) {
         self.debug.view = view;

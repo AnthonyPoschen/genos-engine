@@ -1,5 +1,5 @@
 #version 450
-// GI v2 rays, pass 2: the screen probes' rays, then the rays of the light cache
+// GI rays, pass 2: the screen probes' rays, then the rays of the light cache
 // patches relit this frame. A hit stores its distance and surface for the light
 // pass; a miss takes the sky. A probe ray's record goes into this frame's
 // stratum of the probe's kept hits (lighting_hit_at). Then every older kept hit whose

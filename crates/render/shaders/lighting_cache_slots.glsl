@@ -1,4 +1,4 @@
-// GI v2 light cache sizes (lighting_cache.glsl); lighting_gpu.rs mirrors them.
+// GI light cache sizes (lighting_cache.glsl); lighting_gpu.rs mirrors them.
 const uint LIGHTING_CACHE_SLOTS = 1048576u;
 const uint LIGHTING_CACHE_SEARCH = 16u;
 // Patches relit per frame, and rays per patch (a square; 16 left each patch a

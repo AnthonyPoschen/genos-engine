@@ -1,3 +1,7 @@
+#![cfg_attr(test, expect(clippy::items_after_test_module, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+
 //! What the renderer can draw, and what it may skip on screen.
 //!
 //! Fixed parts are the authored floor, walls, and solids. A mesh can move by
@@ -59,15 +63,75 @@ pub struct ParticleImage {
     pub frame_seconds: f32,
 }
 
+/// One shelf-packed RGBA8 image the material shaders sample.
+///
+/// `key` is 0 when the atlas is empty. A non-empty atlas never uses key 0.
+#[derive(Clone, Debug, Default)]
+pub struct MaterialAtlas {
+    pub width: u32,
+    pub height: u32,
+    /// Row-major RGBA8, length `width * height * 4`. Top to bottom.
+    pub rgba: Vec<u8>,
+    pub key: u64,
+}
+
+impl MaterialAtlas {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Self {
+        let mut atlas = Self {
+            width,
+            height,
+            rgba,
+            key: 0,
+        };
+        atlas.rehash();
+        atlas
+    }
+
+    fn rehash(&mut self) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        if self.width == 0 || self.height == 0 || self.rgba.is_empty() {
+            self.key = 0;
+            return;
+        }
+        let mut hasher = DefaultHasher::new();
+        self.width.hash(&mut hasher);
+        self.height.hash(&mut hasher);
+        self.rgba.hash(&mut hasher);
+        let key = hasher.finish();
+        self.key = if key == 0 { 1 } else { key };
+    }
+}
+
+/// A rectangle in a [`MaterialAtlas`], in texels. `w == 0` means no texture.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Surface {
+    pub color: [u32; 4],
+    pub normal: [u32; 4],
+    /// Discard below this alpha. 0 keeps the whole surface.
+    pub cutoff: f32,
+    pub two_sided: bool,
+}
+
 #[derive(Clone, Debug)]
 pub enum DrawKind {
     Fixed(FixedPart),
     Mesh {
         vertices: Vec<[f32; 3]>,
+        /// Object-space normals, one per vertex. Empty means a flat face normal.
+        normals: Vec<[f32; 3]>,
+        /// Texture coordinates, one per vertex. Empty means the vertex albedo.
+        texcoords: Vec<[f32; 2]>,
         color: [f32; 3],
         pose: [f32; 16],
-        /// Emitted light (linear). Only GI v2 draws it.
+        /// Emitted light (linear). Only GI draws it.
         emission: [f32; 3],
+        /// Index into [`World::surfaces`]. `None` is a flat colour.
+        surface: Option<usize>,
     },
     Particles {
         points: Vec<[f32; 3]>,
@@ -164,8 +228,14 @@ pub fn solid_reach(solid: &Solid) -> f32 {
 pub struct World {
     pub scene: Scene,
     pub objects: Vec<Object>,
-    /// Meshes the GPU software tracer sees through their SDFs (GI v2).
+    /// Meshes the GPU software tracer sees through their SDFs (GI).
     pub fields: Vec<crate::mesh_field::FieldInstance>,
+    /// Per-texel materials. Indexed by [`DrawKind::Mesh::surface`].
+    pub surfaces: Vec<Surface>,
+    /// Base colour (sRGB RGB, linear alpha) for every surface that has one.
+    pub color_atlas: MaterialAtlas,
+    /// Tangent-space normals (linear RGB) for every surface that has one.
+    pub normal_atlas: MaterialAtlas,
 }
 
 impl World {
@@ -192,6 +262,9 @@ impl World {
             scene,
             objects,
             fields: Vec::new(),
+            surfaces: Vec::new(),
+            color_atlas: MaterialAtlas::empty(),
+            normal_atlas: MaterialAtlas::empty(),
         }
     }
 
@@ -332,6 +405,11 @@ mod tests {
             }],
             ceiling: None,
             sky: None,
+            lighting: genos_scene::LightingSettings::default(),
+            debug: genos_scene::DebugSettings::default(),
+            fps_counter: genos_scene::FpsCounterSettings::default(),
+            event_loop: genos_scene::EventLoopSettings::default(),
+            menu: genos_scene::MenuSettings::default(),
         }
     }
 
@@ -356,9 +434,12 @@ mod tests {
             },
             kind: DrawKind::Mesh {
                 vertices: vec![[-0.2, 0.0, -0.2], [0.2, 0.0, -0.2], [0.0, 0.5, 0.2]],
+                normals: Vec::new(),
+                texcoords: Vec::new(),
                 color: [0.0, 1.0, 1.0],
                 pose,
                 emission: [0.0; 3],
+                surface: None,
             },
         });
         let camera = Camera::opening();
