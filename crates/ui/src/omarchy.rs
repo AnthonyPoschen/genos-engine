@@ -1,3 +1,9 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! Omarchy theme colors for the default UI palette.
 //!
 //! The signal is the `current` directory, not `/etc/os-release`.
@@ -24,6 +30,10 @@ pub struct Palette {
 }
 
 /// `$XDG_STATE_HOME/omarchy/current`, or `~/.local/state/omarchy/current`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "OS discovery (HOME, XDG, or WAYLAND_DISPLAY), not an engine switch. docs/LINT_RULES.md"
+)]
 pub fn omarchy_current_dir() -> PathBuf {
     let xdg = std::env::var_os("XDG_STATE_HOME");
     let home = std::env::var_os("HOME");

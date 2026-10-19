@@ -1,4 +1,4 @@
-// GI v2 surface light cache (stand-in for the surface cache cards of phase 4).
+// GI surface light cache (stand-in for the surface cache cards of phase 4).
 //
 // A hash table of small surface patches: a cell of the world grid (25 cm near the
 // eye, doubling with distance) on one of six facing axes. Each patch keeps a surface
@@ -82,7 +82,77 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint atrous_mode;
     uint atrous_ppm;
     uint atrous_active;
+    // Control block (lighting_dispatch.rs pack_lighting_ctrl), word 124.
+    // High writes every bit that today's tuned path assumes, so a set bit
+    // falls through and the picture stays the one the passes recorded before.
+    uint ctrl_bits;
+    uint ctrl_max_lights;
+    uint ctrl_bounce;
+    uint ctrl_scale;
+    uint ctrl_bias;
+    uint ctrl_pixel_only;
+    uint ctrl_ambient_mode;
+    uint ctrl_history;
+    float ctrl_shadow_cell;
+    float ctrl_ambient_r;
+    float ctrl_ambient_g;
+    float ctrl_ambient_b;
+    float ctrl_ambient_i;
+    float ctrl_ground_r;
+    float ctrl_ground_g;
+    float ctrl_ground_b;
+    // Unfilled-on-screen detector (compose). Pixels with no finished set, and
+    // shaded surface pixels. The two pads keep the mask at stats word 144
+    // (lighting_gpu.rs LIGHTING_UNFILLED_MASK_AT), after the 144-word header.
+    // The mask is one bit per pixel, 32 pixels a word, row-major, and is
+    // written only while the detector is on.
+    uint unfilled;
+    uint shaded;
+    uint unfilled_pad0;
+    uint unfilled_pad1;
+    uint mask[];
 } gstats;
+// 0 pixel or probe read, 1 cache-ray hit, 2 probe hit. The direct pass sets it
+// before a cache read. A pixel compose leaves it at 0.
+uint lighting_hit_kind = 0u;
+bool lighting_gi_on() {
+    return (gstats.ctrl_bits & 4u) != 0u;
+}
+bool lighting_sky_enabled() {
+    return (gstats.ctrl_bits & 256u) != 0u;
+}
+// Bits 16..18. High writes 5, which is also the fallback when the field is 0.
+uint lighting_denoise_iters() {
+    uint n = (gstats.ctrl_bits >> 16u) & 7u;
+    return n == 0u ? 5u : n;
+}
+// Bits 22..31, steps of 0.0001. Relative luminance deviation sqrt(var) / mean.
+float lighting_denoise_variance() {
+    return float((gstats.ctrl_bits >> 22u) & 1023u) * 0.0001;
+}
+// LIGHTING_DENOISE_PLAIN is the high pipeline. Adaptive passes are compiled
+// out of it. That branch lives in the other a-trous pipeline. On the 4070 the
+// extra branches dropped occupancy of this kernel (11.7 ms vs the GI tip 7.5 ms)
+// even with the bits clear. Half-res and tiles were removed after they lost
+// the A/B (S79).
+#ifdef LIGHTING_DENOISE_PLAIN
+bool lighting_denoise_adaptive() { return false; }
+#else
+// Bit 20. Fewer wavelet iterations where history is stable. Off unless the
+// experimental knob is on. See S79.
+bool lighting_denoise_adaptive() {
+    return (gstats.ctrl_bits & 1048576u) != 0u;
+}
+#endif
+// Unlimited (bit 16384) is today's cache. Bounce 0 and 1 do not read it: one
+// bounce is the direct light on a probe hit, and the cache lookup is not run.
+// Bounce 2 and above read it (cache-to-cache).
+bool lighting_bounce_ok() {
+    if ((gstats.ctrl_bits & 16384u) != 0u) {
+        return true;
+    }
+    return gstats.ctrl_bounce >= 2u;
+}
 // Kept-hit light writes (light pass): all, changed, by relative luminance delta
 // (<0.2 %, 0.2-1 %, 1-5 %, >5 %), and changed by source of the hit's direct light
 // (TDL reused, TDL checked / recomputed, lamps traced here).
@@ -172,6 +242,25 @@ const uint LIGHTING_COMPOSE_MAXY = LIGHTING_COMPOSE_MAXX + LIGHTING_CACHE_SLOTS;
 // Set by the compose pass around the lookups that colour a pixel.
 bool lighting_sc_display = false;
 uvec2 lighting_compose_px = uvec2(0u);
+// Unfilled-on-screen detector. Bits of scene.grid_at.w: 24 count, 25 magenta tint
+// (debug_view.rs). Off is a uniform test and no atomics. The mask word count is
+// lighting_gpu.rs LIGHTING_UNFILLED_MASK_CAP; word 0 is stats word 144.
+const float LIGHTING_UNFILLED_MIN_SETS = 1.0;
+const uint LIGHTING_UNFILLED_MASK_CAP = 276480u;
+bool lighting_px_unfilled = false;
+bool lighting_unfilled_count() {
+    return (scene.grid_at.w & 0x1000000u) != 0u;
+}
+bool lighting_unfilled_tint() {
+    return (scene.grid_at.w & 0x2000000u) != 0u;
+}
+void lighting_unfilled_mark(uvec2 p) {
+    uint stride = (pc.dims.x + 31u) / 32u;
+    uint at = p.y * stride + (p.x >> 5u);
+    if (at < LIGHTING_UNFILLED_MASK_CAP) {
+        atomicOr(gstats.mask[at], 1u << (p.x & 31u));
+    }
+}
 // The camera matches the one stored for last frame (change block head 1-4).
 // eye.w is the "last camera is valid" flag; up.w is the flag word, not the basis.
 bool lighting_view_held() {
@@ -583,8 +672,19 @@ void lighting_ls_note() {
     ckeys.key[at + 1u] = floatBitsToUint(lighting_global_light());
     ckeys.key[LIGHTING_LS_AT + 2u * LIGHTING_LS_RING] = f;
 }
+#ifdef GENOS_SUN_SHADER
+bool lighting_sun_small();
+float lighting_sun_committed_light();
+#endif
 // The global sun/sky light as of the last round (-1 when unknown).
+// A small sun step (GENOS_SUN_SHADER only) keeps the committed value, so one
+// tick does not rescale every texel. The default compose does not compile this.
 float lighting_ls_now() {
+#ifdef GENOS_SUN_SHADER
+    if (lighting_sun_small()) {
+        return max(lighting_sun_committed_light(), 0.0);
+    }
+#endif
     uint g = ckeys.key[LIGHTING_LS_AT + 2u * LIGHTING_LS_RING];
     uint ga = LIGHTING_LS_AT + 2u * (g % LIGHTING_LS_RING);
     return (g != 0u && ckeys.key[ga] == g) ? uintBitsToFloat(ckeys.key[ga + 1u]) : -1.0;
@@ -992,8 +1092,9 @@ uint lighting_movers_count() {
 vec4 lighting_mover(uint m, uint k) {
     return work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + lighting_movers_first() + LIGHTING_MOVER_VEC4 * m + k];
 }
-// Object-local texels (GIBS 2021: surfels keep a transform id and a local
-// position): GENOS_LIGHTING_SC_LOCAL=1.
+// Object-local cache entries (GIBS 2021 §1.5: a surfel stores a transform id
+// and an object-relative position). Movers only; static geometry stays
+// world-lattice (ADR 0012). The bit is surface_cache.attach_movers, head w / 100000.
 bool lighting_sc_local_on() {
     return lighting_world_mode() == 3u && ((uint(work.v[lighting_change_at()].w) / 100000u) & 1u) != 0u;
 }
@@ -1860,6 +1961,16 @@ vec4 lighting_sc_shown(uint slot) {
     // S72N: the texel's seed (lighting_sc_seed) joins the prior by its
     // confidence, in the same handover.
     vec4 own = cache.v[3u * slot + 2u];
+    // Denoiser off: the a-trous push never writes the display field, so compose
+    // fell through to parent and world-cache walks on every pixel and got
+    // slower than with the filter on. The texel's own mean is one load.
+    // High sets the denoise bit, so this branch is not taken.
+    if ((gstats.ctrl_bits & 64u) == 0u && lighting_world_mode() == 3u) {
+        if (own.w > 0.5) {
+            return vec4(own.rgb * lighting_sc_sun_gain(slot), 1.0);
+        }
+        return vec4(0.0);
+    }
     float n = floor(max(own.w, 0.0));
     // S72P: layer 2 (the rebuilt field) is what shows; its support (sets around)
     // is the count in the handover from the texel's seed.
@@ -1979,6 +2090,9 @@ vec4 lighting_sc_own_shown(uint slot) {
 const float LIGHTING_SC_READ_SETS = 4.0;
 vec3 lighting_cache_irradiance(vec3 pos, vec3 n);
 vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
+    if (!lighting_bounce_ok()) {
+        return vec3(0.0);
+    }
     if (lighting_world_mode() == 3u && (lighting_sc_flags() & 2097152u) == 0u && !lighting_sc_slanted(n)) {
         float hs = lighting_hit_size_n(pos, n);
         if (t < hs * 1.7320508) {
@@ -2003,6 +2117,9 @@ vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
 
 // Irradiance already bounced onto the surface at pos facing n (0 for a new patch).
 vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
+    if (!lighting_bounce_ok()) {
+        return vec3(0.0);
+    }
     // Flag 2097152 (diagnostic): no light from the cache at ray hits, so the
     // picture has one bounce (compare with GENOS_GI_CHECK_BOUNCES=1 references).
     if ((lighting_sc_flags() & 2097152u) != 0u) {
@@ -2072,6 +2189,31 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
 // to the entry (lighting_dense_entry). Nothing past the live entries is dispatched.
 bool lighting_wrc_scout_due();
 const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
+// Surface-cache firefly clamp (`surface_cache.firefly_sigma`). Barré-Brisebois
+// et al., MultiscaleMeanEstimator.hlsl, uses 8. The clamp is biased. 0 keeps
+// the listing's 0.1 floor and still clamps. The hold path does not read this.
+float lighting_sc_firefly_sigma() {
+    return uintBitsToFloat(ckeys.key[LIGHTING_ARGS_AT + 13u]);
+}
+// surface_cache.ray_budget. 0 keeps the existing dispatch lists. A total under
+// the budget is unchanged (lighting_sc_cap_lists).
+uint lighting_sc_ray_budget() {
+    return ckeys.key[LIGHTING_ARGS_AT + 11u];
+}
+// surface_cache.dormant_rays: whole rays per frame, 0 through 16.
+// 0 keeps one sweep in LIGHTING_SC_DORMANT.
+uint lighting_sc_dormant_rays() {
+    return ckeys.key[LIGHTING_ARGS_AT + 12u];
+}
+// Frames between fresh 16-ray traces of a dormant cache entry.
+// A non-zero floor uses ceil(16 / rays). The traces are new; nothing is reused.
+uint lighting_sc_dormant_period() {
+    uint rays = lighting_sc_dormant_rays();
+    if (rays == 0u) {
+        return LIGHTING_SC_DORMANT;
+    }
+    return max(1u, (LIGHTING_CACHE_RAYS + rays - 1u) / rays);
+}
 // S72J region refinement (Anthony: uniform within a region, no sharp islands in
 // blotchy surroundings; Lumen refines surface cache pages). A page is 8 x 8
 // texels of one size on one plane (axis, plane offset); a hashed table of
@@ -2181,6 +2323,101 @@ uint lighting_dense_entry(uint d) {
     }
     return LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES + (d - g);
 }
+// Ceiling for one cache round (surface_cache.ray_budget). 0, or a total already
+// under the budget, leaves the lists alone. Each list slot is LIGHTING_CACHE_RAYS
+// rays. The floor's leftover entries go to the largest fractional share, and no
+// list grows past the count it already had. When the ceiling can hold one entry
+// per non-empty list, none of those lists drops to zero. A tighter ceiling keeps
+// the largest lists: it cannot hold one entry for every list.
+void lighting_sc_cap_lists(inout uint a, inout uint b, inout uint c, inout uint g, inout uint s) {
+    uint budget = lighting_sc_ray_budget();
+    uint rays = (a + b + c + g + s) * LIGHTING_CACHE_RAYS;
+    if (budget == 0u || rays <= budget) {
+        return;
+    }
+    uint cap = budget / LIGHTING_CACHE_RAYS;
+    uint orig[5] = uint[5](a, b, c, g, s);
+    uint outv[5] = uint[5](0u, 0u, 0u, 0u, 0u);
+    if (cap == 0u) {
+        a = 0u;
+        b = 0u;
+        c = 0u;
+        g = 0u;
+        s = 0u;
+        return;
+    }
+    uint n = 0u;
+    for (uint i = 0u; i < 5u; i++) {
+        n += uint(orig[i] > 0u);
+    }
+    if (cap < n) {
+        uint left = cap;
+        while (left > 0u) {
+            uint best = 5u;
+            uint bestn = 0u;
+            for (uint i = 0u; i < 5u; i++) {
+                if (outv[i] == 0u && orig[i] > bestn) {
+                    best = i;
+                    bestn = orig[i];
+                }
+            }
+            if (best == 5u) {
+                break;
+            }
+            outv[best] = 1u;
+            left--;
+        }
+    } else {
+        uint give = cap;
+        for (uint i = 0u; i < 5u; i++) {
+            if (orig[i] > 0u) {
+                outv[i] = 1u;
+                give--;
+            }
+        }
+        uint sumw = 0u;
+        for (uint i = 0u; i < 5u; i++) {
+            sumw += orig[i] - outv[i];
+        }
+        float frac[5] = float[5](0.0, 0.0, 0.0, 0.0, 0.0);
+        if (sumw > 0u && give > 0u) {
+            uint used = 0u;
+            for (uint i = 0u; i < 5u; i++) {
+                uint w = orig[i] - outv[i];
+                float share = float(give) * float(w) / float(sumw);
+                uint add = min(w, uint(floor(share)));
+                if (used + add > give) {
+                    add = give - used;
+                }
+                outv[i] += add;
+                used += add;
+                frac[i] = share - float(add);
+            }
+            uint left = give - used;
+            while (left > 0u) {
+                uint best = 5u;
+                float bestf = -1.0;
+                for (uint i = 0u; i < 5u; i++) {
+                    if (outv[i] < orig[i] && frac[i] > bestf) {
+                        best = i;
+                        bestf = frac[i];
+                    }
+                }
+                if (best == 5u) {
+                    break;
+                }
+                outv[best] += 1u;
+                frac[best] = -1.0;
+                left--;
+            }
+        }
+    }
+    a = outv[0];
+    b = outv[1];
+    c = outv[2];
+    g = outv[3];
+    s = outv[4];
+}
 void lighting_write_args() {
     uint a;
     uint b = 0u;
@@ -2216,6 +2453,11 @@ void lighting_write_args() {
         uint first = min(lighting_young_count(), LIGHTING_CACHE_BATCH);
         a = lighting_young_only() ? first : min(LIGHTING_CACHE_BATCH, first + lighting_mature_count());
     }
+    // surface_cache.ray_budget is a ceiling. Under budget the lists stay as
+    // they are. Over budget, leftover entries after the floor go back to the
+    // lists, and a list that had work stays non-empty when the ceiling can
+    // hold one 16-ray entry for every non-empty list.
+    lighting_sc_cap_lists(a, b, c, g, s);
     uint e = a + b + c + g + s;
     ckeys.key[LIGHTING_ARGS_AT + 10u] = a + b + c + g;
     ckeys.key[LIGHTING_ARGS_AT + 0u] = max((e * LIGHTING_CACHE_RAYS + 63u) / 64u, 1u);
@@ -2358,7 +2600,7 @@ uint lighting_sc_interval(uint slot, float t) {
     }
     float iv = LIGHTING_SC_RATE_SLOW / (1.0 + LIGHTING_SC_RATE_K * max(b.y, 0.0));
     if ((lighting_sc_flags() & 1048576u) != 0u && t >= lighting_sc_cap(slot) - 0.5 && lighting_sc_dormant(slot)) {
-        iv = LIGHTING_SC_RATE_DORMANT;
+        iv = lighting_sc_dormant_rays() == 0u ? LIGHTING_SC_RATE_DORMANT : float(lighting_sc_dormant_period());
     }
     if (!lighting_sc_light_quiet()) {
         iv = min(iv, LIGHTING_SC_RATE_CHANGING);
@@ -2369,6 +2611,9 @@ uint lighting_sc_interval(uint slot, float t) {
 // round in LIGHTING_WRC_SCOUT_STILL.
 const uint LIGHTING_WRC_SCOUT_STILL = 8u;
 bool lighting_wrc_scout_due() {
+    if ((gstats.ctrl_bits & 1024u) == 0u) {
+        return false;
+    }
     vec4 last_eye = work.v[lighting_change_at() + 1u];
     vec3 last_fwd = work.v[lighting_change_at() + 4u].xyz;
     bool moving = last_eye.w < 0.5 || length(scene.eye.xyz - last_eye.xyz) > 0.01
@@ -2382,6 +2627,8 @@ uint lighting_sc_quarter0(uint slot) {
     return min(floatBitsToUint(cache.v[LIGHTING_SC_OBJ_AT + slot].w), LIGHTING_SC_QUARTERS - 1u);
 }
 uint lighting_sc_entries(uint slot, bool full) {
+    // The ray budget is a ceiling on the dispatch lists (lighting_sc_cap_lists),
+    // not a per-entry scale. Under budget this count is the fixed quarter count.
     return (full || lighting_world_mode() != 3u) ? LIGHTING_SC_QUARTERS - lighting_sc_quarter0(slot) : 1u;
 }
 // WRC scout ray s of this round (entries past the batch's texels): from the eye
@@ -2522,6 +2769,7 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj);
 // S72M: the pixel's screen-probe irradiance (lighting_compose.comp), -1 when none.
 vec3 lighting_px_probes = vec3(-1.0);
 vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
+    lighting_px_unfilled = false;
     uint mode = lighting_world_mode();
     // Object-local texels (GENOS_LIGHTING_SC_LOCAL=1, GIBS): a pixel on a mover's
     // surface reads texels keyed in the mover's frame, which move and turn with
@@ -2549,6 +2797,19 @@ vec2 lighting_sc_debug_size(vec3 pos, vec3 n) {
     uint s = lighting_cache_find_sized(pos, n, false, size, pos);
     return vec2(size, s == ~0u ? 0.0 : floor(max(cache.v[3u * s + 2u].w, 0.0)));
 }
+// Debug view "variance": short-term relative standard deviation of the cache
+// entry under the pixel. -1 is a missing or unallocated entry. 0 is quiet.
+float lighting_sc_debug_variance(vec3 pos, vec3 n) {
+    float size = lighting_cell_size(pos);
+    uint s = lighting_cache_find_sized(pos, n, false, size, pos);
+    if (s == ~0u) {
+        return -1.0;
+    }
+    vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * s];
+    float dev = sqrt(max(est.w, 0.0));
+    float lum = max(dot(max(est.rgb, vec3(0.0)), vec3(0.299, 0.587, 0.114)), 1.0e-3);
+    return clamp(dev / lum, 0.0, 1.0);
+}
 vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     uint mode = lighting_world_mode();
     if (lighting_sc_slanted(n)) {
@@ -2566,13 +2827,24 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
     float trust = 0.0;
+    // Finished sets, weighted like the bilinear corners. A missing corner counts
+    // as zero finished sets. Only the compose display path tallies.
+    float unfilled_cov = 0.0;
+    float unfilled_sets = 0.0;
+    bool tally = lighting_sc_display && mode == 3u && lighting_unfilled_count();
     [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
         vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + 0.5;
         vec3 q = pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));
         float bil = ((k & 1u) == 1u ? f.x : 1.0 - f.x) * ((k >> 1u) == 1u ? f.y : 1.0 - f.y);
+        if (tally) {
+            unfilled_cov += bil;
+        }
         uint slot = lighting_cache_find_sized(q, n, mode != 2u, size, pos);
         if (slot == ~0u) {
             continue;
+        }
+        if (tally) {
+            unfilled_sets += bil * floor(max(cache.v[3u * slot + 2u].w, 0.0));
         }
         cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
         bool split = mode == 3u && lighting_sc_seed_split() && size <= 0.2;
@@ -2663,6 +2935,14 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     bool light_swap = !lighting_sc_light_quiet() && (lighting_sc_flags() & 1048576u) == 0u;
     if (mode == 3u && (light_swap || (!obj && !LIGHTING_SC_KEEP_NEAR && lighting_near_change(pos)) || (lighting_sc_flags() & 512u) != 0u)) {
         trust = 0.0;
+    }
+    if (tally && unfilled_cov > 0.0) {
+        atomicAdd(gstats.shaded, 1u);
+        if (unfilled_sets < unfilled_cov * LIGHTING_UNFILLED_MIN_SETS) {
+            atomicAdd(gstats.unfilled, 1u);
+            lighting_unfilled_mark(lighting_compose_px);
+            lighting_px_unfilled = true;
+        }
     }
     return vec4(wsum > 0.0 ? sum / wsum : vec3(0.0), trust);
 }
@@ -2797,6 +3077,110 @@ bool lighting_svgf_active(uint s) {
     uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + s].z);
     return lighting_sc_pixel_fresh(shown, 30);
 }
+#ifdef GENOS_SUN_SHADER
+// Sun amortise words, after the a-trous meta (391 words). The default compose
+// does not compile this block, so its SPIR-V stays the GI compose.
+const uint LIGHTING_SUN_META = 391u;
+const uint LIGHTING_SUN_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS + LIGHTING_SUN_META;
+const uint LIGHTING_SUN_SMALL = 1u;
+bool lighting_stratum_held(uint probe);
+
+uint lighting_sun_flags() {
+    return ckeys.key[LIGHTING_SUN_AT + 1u];
+}
+bool lighting_sun_small() {
+    return (lighting_sun_flags() & LIGHTING_SUN_SMALL) != 0u;
+}
+uint lighting_sun_n() {
+    return max((lighting_sun_flags() >> 8u) & 255u, 1u);
+}
+uint lighting_sun_slice_id() {
+    return (lighting_sun_flags() >> 16u) & 255u;
+}
+// This frame's band. The nearest probe row, or the page column of the surface
+// cell (page_x = cell.x >> 3, the same split as lighting_sun_slot_slice, at the
+// one texel size). A pixel on either walks probes. The rest reuse stored bounce.
+bool lighting_sun_pixel_band(uvec2 p, vec3 pos, vec3 n) {
+    uint bands = lighting_sun_n();
+    uint slice = lighting_sun_slice_id();
+    float tile = float(max(pc.params.y, 1u));
+    float gy = (float(p.y) + 0.5) / tile - 0.5;
+    int row = int(floor(gy + 0.5));
+    int rows = int(max(pc.dims.w, 1u));
+    row = clamp(row, 0, rows - 1);
+    if (uint(row) % bands == slice) {
+        return true;
+    }
+    uint axd = lighting_axis(n);
+    uint ax = axd >> 1u;
+    int cell_x = int(floor(pos[(ax + 1u) % 3u] / LIGHTING_SC_TEXEL));
+    uint page_x = uint(cell_x) >> 3u;
+    return page_x % bands == slice;
+}
+vec3 lighting_sun_committed_dir() {
+    return vec3(uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 2u]), uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 3u]), uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 4u]));
+}
+float lighting_sun_committed_light() {
+    return uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 5u]);
+}
+float lighting_sun_live_light() {
+    return uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 6u]);
+}
+bool lighting_catch_up() {
+    return ckeys.key[LIGHTING_SUN_AT + 7u] != 0u;
+}
+bool lighting_sun_probe_slice(uint probe) {
+    uint cols = max(pc.dims.z, 1u);
+    return (probe / cols) % lighting_sun_n() == lighting_sun_slice_id();
+}
+bool lighting_sun_slot_slice(uint slot) {
+    ivec4 c = lighting_sc_cell(slot);
+    uint page_x = uint(c.x) >> 3u;
+    return page_x % lighting_sun_n() == lighting_sun_slice_id();
+}
+bool lighting_sun_hold_kept(uint h) {
+    if (!lighting_sun_small()) {
+        return false;
+    }
+    uint rays = lighting_rays();
+    uint pk = h / rays / LIGHTING_STRATA;
+    if (lighting_sun_probe_slice(pk) || !lighting_stratum_held(pk)) {
+        return false;
+    }
+    if (floatBitsToUint(work.v[lighting_probe_at(pk) + 1u].w) == lighting_frame() + LIGHTING_STRATA) {
+        return false;
+    }
+    return floatBitsToUint(work.v[lighting_kept_light_at() + h / 4u][h % 4u]) != 0u;
+}
+bool lighting_sun_hold_fill(uint h) {
+    if (!lighting_sun_small()) {
+        return false;
+    }
+    uint pk = h / lighting_rays() / LIGHTING_STRATA;
+    if (lighting_sun_probe_slice(pk)) {
+        return false;
+    }
+    return floatBitsToUint(work.v[lighting_fill_light_at() + h / 4u][h % 4u]) != 0u;
+}
+// One thread records that this dispatch took the sun path. Bit 0: a small sun
+// step. Bit 1: the corner catch-up. The slice id is the band this frame shades
+// with the live sun. The pads are otherwise unused (unfilled mask alignment).
+void lighting_sun_mark() {
+    if (gl_GlobalInvocationID.x != 0u || gl_GlobalInvocationID.y != 0u || gl_GlobalInvocationID.z != 0u) {
+        return;
+    }
+    uint mark = 0u;
+    if (lighting_sun_small()) {
+        mark |= 1u;
+    }
+    if (lighting_catch_up()) {
+        mark |= 2u;
+    }
+    gstats.unfilled_pad0 = mark;
+    gstats.unfilled_pad1 = lighting_sun_slice_id();
+}
+#endif
+
 // Layer-1 input: rgb, luminance variance (-1 unknown), mask weight.
 vec4 lighting_svgf_in(uint s, out float var) {
     vec4 own = cache.v[3u * s + 2u];
@@ -2811,6 +3195,13 @@ vec4 lighting_svgf_in(uint s, out float var) {
     // times under a moving sun held different scales, and the luminance stop
     // kept those groups apart (camouflage plateaus at dawn).
     float g = lighting_sc_sun_gain(s);
+#ifdef GENOS_SUN_SHADER
+    // The page column catching up to the live sun. The rest keep the committed scale.
+    if (lighting_sun_small() && lighting_sun_slot_slice(s)) {
+        float c = max(lighting_sun_committed_light(), 1.0e-4);
+        g *= clamp(lighting_sun_live_light() / c, 0.0, LIGHTING_LS_MAX);
+    }
+#endif
     if (!wrc) {
         vec4 eb = cache.v[LIGHTING_SC_EST_AT + 2u * s + 1u];
         if (eb.x > 0.0 && t >= 4.0) {
@@ -2898,6 +3289,18 @@ const uint LIGHTING_ATROUS_LIST_AT = LIGHTING_ATROUS_MARK_AT + 5u * LIGHTING_CAC
 // is this frame's list decision and the dense-path recount.
 // After the compose words (count, y, z, full, stamps, list, packs, rects); this used to alias LIGHTING_COMPOSE_AT.
 const uint LIGHTING_ATROUS_PPM_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS;
+// One word per slot, past the a-trous meta (391) and the sun block (8). The
+// screen launch elects a single kernel thread here. Nothing else reads it.
+const uint LIGHTING_SCREEN_OWNER_AT = LIGHTING_ATROUS_PPM_AT + 391u + 8u;
+// List dedup for the screen launch, one word per slot, after the owner words.
+// Stamp and the two ping-pong counts sit in front of that array
+// (lighting_screen.comp). The count this frame reads is the other frame's
+// word, so committing this frame's count does not race the readers.
+const uint LIGHTING_SCREEN_LIST_HDR = LIGHTING_SCREEN_OWNER_AT + LIGHTING_CACHE_SLOTS;
+const uint LIGHTING_SCREEN_LIST_STAMP = LIGHTING_SCREEN_LIST_HDR;
+const uint LIGHTING_SCREEN_LIST_BASE0 = LIGHTING_SCREEN_LIST_HDR + 1u;
+const uint LIGHTING_SCREEN_LIST_BASE1 = LIGHTING_SCREEN_LIST_HDR + 2u;
+const uint LIGHTING_SCREEN_LIST_AT = LIGHTING_SCREEN_LIST_HDR + 3u;
 const uint LIGHTING_ATROUS_PREV_AT = LIGHTING_ATROUS_PPM_AT + 1u;
 const uint LIGHTING_ATROUS_BIN_AT = LIGHTING_ATROUS_PREV_AT + 1u;
 const uint LIGHTING_ATROUS_MODE_AT = LIGHTING_ATROUS_BIN_AT + 64u;
@@ -2985,12 +3388,14 @@ bool lighting_svgf_moved(vec4 a, float va, vec4 b, float vb) {
         || abs(a.w - b.w) > LIGHTING_DIRTY_EPS
         || abs(va - vb) > 2.0 * LIGHTING_DIRTY_EPS * max(max(abs(va), abs(vb)), 1.0e-8);
 }
+// Kernel step in cells. Defined below the activity stamps.
+int lighting_svgf_step_for(uint it);
 // Level k of slot changed: its readers at level k + 1 are dirty.
 void lighting_svgf_scatter(uint slot, uint k) {
     if (k >= 5u) {
         return;
     }
-    int step = 1 << k;
+    int step = lighting_svgf_step_for(k);
     [[dont_unroll]] for (int j = -2; j <= 2; j++) {
         [[dont_unroll]] for (int i = -2; i <= 2; i++) {
             lighting_svgf_mark((i == 0 && j == 0) ? slot : lighting_sc_cell_slot(slot, ivec2(-i, -j) * step), k + 1u);
@@ -3015,6 +3420,73 @@ bool lighting_svgf_stamp_recent(uint s, uint c) {
 void lighting_svgf_stamp(uint s, uint c) {
     if (s != ~0u) {
         cache.v[LIGHTING_SC_DIRTY_AT + LIGHTING_CACHE_SLOTS + s][c] = uintBitsToFloat(lighting_frame());
+    }
+}
+// Kernel step in cells. Dammertz HPG 2010 doubles the step each iteration.
+int lighting_svgf_step_for(uint it) {
+    return 1 << int(it);
+}
+// How many wavelet iterations this texel still needs.
+//
+// Schied et al. 2017 (SVGF) sec. 4.2 use the variance to set the luminance
+// edge-stop. They still run every iteration. ReLAX (Zhdan, NVIDIA Real-Time
+// Denoisers) reduces the a-trous iteration count as history length grows.
+// This takes the smaller of the two limits, so either a long sample age or a
+// variance under the threshold drops iterations.
+//
+// Deviations: sample age is the surface-cache set count, not a screen-space
+// history length. No previous frame is kept. SVGF's own filter does not drop
+// iterations; the drop is the ReLAX rule, gated by the SVGF variance as well.
+// Bands: 16 sets or variance at the threshold -> 1 iteration; 8 sets or four
+// times the threshold -> 3; otherwise the configured count.
+uint lighting_svgf_pass_limit(uint slot, float var, float lum) {
+    uint full = lighting_denoise_iters();
+    if (!lighting_denoise_adaptive()) {
+        return full;
+    }
+    float sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+    float rel = sqrt(max(var, 0.0)) / max(lum, 1.0e-3);
+    float thr = lighting_denoise_variance();
+    uint by_age = full;
+    if (sets >= 16.0) {
+        by_age = 1u;
+    } else if (sets >= 8.0) {
+        by_age = min(full, 3u);
+    }
+    uint by_var = full;
+    // The knob tops out at 0.1 (1000 steps of 0.0001). That value forces one
+    // iteration. A young texel's relative deviation sits above 0.1, so the
+    // old test never entered the skip the settled cache takes (16 sets).
+    // ReLAX keys the drop off history length; this stop is the short-run
+    // equivalent, flagged as a deviation in S79.
+    uint thr_q = (gstats.ctrl_bits >> 22u) & 1023u;
+    if (thr_q >= 1000u) {
+        by_var = 1u;
+    } else if (thr > 0.0 && rel <= thr) {
+        by_var = 1u;
+    } else if (thr > 0.0 && rel <= thr * 4.0) {
+        by_var = min(full, 3u);
+    }
+    return min(full, min(by_age, by_var));
+}
+// The push reads buffer A. A skipped iteration must publish the last level
+// that actually ran (level `applied`), even when this level is clean. The
+// dirty early-out used to return first, so A kept an older filter or the
+// zeros from allocation, and the push blended that hole toward the 25 cm
+// WRC: darker and blotchy. Lavapipe zeros the cache and the old test warmed
+// up with the full filter, so A was already the reference and the miss was
+// invisible. A driver that does not zero, or a run that starts in the skip,
+// shows it.
+void lighting_svgf_publish_applied(uint slot, uint applied) {
+    vec4 now = cache.v[lighting_svgf_lvl(applied) + slot];
+    vec4 prev = cache.v[LIGHTING_SC_ATROUS_A + slot];
+    cache.v[LIGHTING_SC_ATROUS_A + slot] = now;
+    if (prev.x != now.x || prev.y != now.y || prev.z != now.z) {
+        lighting_svgf_stamp(slot, 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(1, 0)), 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(-1, 0)), 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(0, 1)), 3u);
+        lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(0, -1)), 3u);
     }
 }
 // An inactive texel: mask 0 at every level (a flip marks its readers once).
@@ -3106,6 +3578,22 @@ void lighting_svgf_variance(uint slot) {
     }
 }
 void lighting_svgf_iter(uint slot, uint it) {
+#ifndef LIGHTING_DENOISE_PLAIN
+    // Before the dirty early-out. A clean texel still has to publish the last
+    // applied level, or the push keeps a stale or empty A. Not in the plain
+    // kernel: high leaves adaptive off (S79).
+    if (lighting_denoise_adaptive()) {
+        float v0;
+        vec4 s0 = lighting_svgf_load(lighting_svgf_lvl(0u), slot, v0);
+        uint limit = lighting_svgf_pass_limit(slot, v0, dot(s0.rgb, LIGHTING_SVGF_LW));
+        if (it + 1u > limit) {
+            if (it + 1u == lighting_denoise_iters()) {
+                lighting_svgf_publish_applied(slot, limit);
+            }
+            return;
+        }
+    }
+#endif
     if (LIGHTING_DIRTY_ATROUS && !lighting_svgf_is_dirty(slot, it + 1u)) {
         return;
     }
@@ -3113,7 +3601,7 @@ void lighting_svgf_iter(uint slot, uint it) {
     uint dst = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it + 1u) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_A : LIGHTING_SC_ATROUS_B);
     float vold;
     vec4 old = lighting_svgf_load(dst, slot, vold);
-    int step = 1 << it;
+    int step = lighting_svgf_step_for(it);
     float varp;
     vec4 vp = lighting_svgf_load(src, slot, varp);
     float lp = dot(vp.rgb, LIGHTING_SVGF_LW);
@@ -3173,13 +3661,16 @@ void lighting_svgf_iter(uint slot, uint it) {
     if (LIGHTING_DIRTY_ATROUS) {
         float vn;
         vec4 nw = lighting_svgf_load(dst, slot, vn);
-        if (it + 1u == 5u) {
+        if (it + 1u == lighting_denoise_iters()) {
             // The push and the IC placement read the last level from A.
+            // Five iterations land on level 5. Fewer iterations used to jump
+            // to the push while A still held an earlier level, so compose
+            // showed an unfiltered field (white boxes, noisy surfaces).
             cache.v[LIGHTING_SC_ATROUS_A + slot] = cache.v[dst + slot];
         }
         if (lighting_svgf_moved(nw, vn, old, vold)) {
             lighting_svgf_scatter(slot, it + 1u);
-            if (it + 1u == 5u) {
+            if (it + 1u == lighting_denoise_iters()) {
                 // S78B: the push of this texel and of its +-1 neighbours (IC gradient).
                 lighting_svgf_stamp(slot, 3u);
                 lighting_svgf_stamp(lighting_sc_cell_slot(slot, ivec2(1, 0)), 3u);
@@ -3191,7 +3682,9 @@ void lighting_svgf_iter(uint slot, uint it) {
     }
 }
 float lighting_svgf_lum_at(uint slot, ivec2 off, out bool ok) {
-    uint q = lighting_sc_cell_slot(slot, off);
+    // A zero offset is this slot. cell_slot(0, 0) hashes a point that is a
+    // cell off for about half the texels (S72V), so the center tap would miss.
+    uint q = (off.x == 0 && off.y == 0) ? slot : lighting_sc_cell_slot(slot, off);
     ok = false;
     if (q == ~0u) {
         return 0.0;
@@ -3207,7 +3700,7 @@ void lighting_svgf_push(uint slot) {
     if (nb.w > 0.2) {
         return;
     }
-    float varp;
+    float varp = 0.0;
     vec4 f = lighting_svgf_load(LIGHTING_SC_ATROUS_A, slot, varp);
     float W = clamp(f.w, 0.0, 1.0);
     // S78B: the push is redone when this texel's last level (or a +-1
@@ -3510,6 +4003,12 @@ void lighting_shadow_epochs() {
         uint at = LIGHTING_SHADOW_EPOCH_AT + 8u * i;
         vec4 last = vec4(uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]), uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]));
         vec4 now = vec4(l.pos.xyz, l.color.w);
+#ifdef GENOS_SUN_SHADER
+        // A small sun step keeps this epoch. Pixels still trace the live sun.
+        if (lighting_sun_small() && l.pos.w > 0.5) {
+            continue;
+        }
+#endif
         // S75: colour too (the texel direct-light cache reads the epoch).
         uint col = lighting_hash(floatBitsToUint(l.color.x) ^ lighting_hash(floatBitsToUint(l.color.y) ^ lighting_hash(floatBitsToUint(l.color.z))));
         bool bump = all || any(notEqual(last, now)) || ckeys.key[at + 5u] != col;
@@ -3529,12 +4028,24 @@ void lighting_shadow_epochs() {
 }
 // The cached entry for (o, n, lamp li): 1 lit, 0 occluded, -1 none (trace it).
 uint lighting_shadow_cell(vec3 o, vec3 n, uint li, out uint tag) {
-    ivec3 c = ivec3(floor(o / LIGHTING_SC_TEXEL));
+    ivec3 c;
+    // The tuned cell is the constant. Dividing by a uniform that holds the
+    // same 0.125 quantises boundaries differently: block-shaped differences
+    // and a darker still frame. A custom cell is the only variable division.
+    if (!(gstats.ctrl_shadow_cell > 0.0) || gstats.ctrl_shadow_cell == LIGHTING_SC_TEXEL) {
+        c = ivec3(floor(o / LIGHTING_SC_TEXEL));
+    } else {
+        c = ivec3(floor(o / gstats.ctrl_shadow_cell));
+    }
     uint h = lighting_hash(uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u ^ lighting_axis(n) * 0x27d4eb2fu ^ (li + 1u) * 0x9e3779b9u);
     tag = h | 1u;
     return LIGHTING_SHADOW_AT + (lighting_hash(h ^ 0x5bd1e995u) % LIGHTING_CACHE_SLOTS);
 }
 float lighting_shadow_get(vec3 o, vec3 n, uint li) {
+    // Shadows off, or the hard filter: trace, do not read the cell.
+    if ((gstats.ctrl_bits & 2u) == 0u || (gstats.ctrl_bits & 2048u) != 0u) {
+        return -1.0;
+    }
     if (!LIGHTING_SHADOW_CACHE || li >= LIGHTING_WRC_SNAP_LAMPS || li >= scene.lamp_count) {
         return -1.0;
     }
@@ -3550,6 +4061,9 @@ float lighting_shadow_get(vec3 o, vec3 n, uint li) {
 const bool LIGHTING_COMPACT_LIST = true;
 const uint LIGHTING_COMPACT_IDLE = 8u;
 void lighting_shadow_put(vec3 o, vec3 n, uint li, bool lit) {
+    if ((gstats.ctrl_bits & 2u) == 0u || (gstats.ctrl_bits & 2048u) != 0u) {
+        return;
+    }
     if (!LIGHTING_SHADOW_CACHE || li >= LIGHTING_WRC_SNAP_LAMPS || li >= scene.lamp_count) {
         return;
     }
@@ -3636,9 +4150,21 @@ const bool LIGHTING_PIX_REUSE = true;
 uint lighting_pix_at() {
     return lighting_fill_light_at() + lighting_kept_hits() / 4u;
 }
+// Mode 3 is the surface cache. Probe-only (world cache bit off) used to skip
+// this and relight every pixel every still frame, which costs more than the
+// cache being on. High keeps the mode-3 check: the cache bit is set there.
+bool lighting_pix_cache_ok() {
+    return lighting_world_mode() == 3u || (gstats.ctrl_bits & 32u) == 0u;
+}
+bool lighting_pix_reuse_on() {
+    // No probes and no world cache is a 4096-byte stand-in. Pixel reuse indexes
+    // the work buffer past that (the same rule as the shadow cells).
+    bool stored = (gstats.ctrl_bits & 16u) != 0u || (gstats.ctrl_bits & 32u) != 0u;
+    return LIGHTING_PIX_REUSE && lighting_gi_on() && stored && lighting_pix_cache_ok();
+}
 bool lighting_pix_quiet() {
     vec4 head = work.v[lighting_change_at()];
-    return lighting_world_mode() == 3u && !(head.y > 0.5) && uint(head.x) == 0u && lighting_movers_count() == 0u;
+    return lighting_pix_cache_ok() && !(head.y > 0.5) && uint(head.x) == 0u && lighting_movers_count() == 0u;
 }
 uint lighting_pix_sig(vec3 pos, vec3 n, bool two_sided, LampList list) {
     ivec3 q = ivec3(floor(pos * 1000.0));

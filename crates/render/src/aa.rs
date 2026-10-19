@@ -1,3 +1,5 @@
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Presented-picture antialiasing. The draw reads one mode. `Off` is the
 //! single-sample color image.
 

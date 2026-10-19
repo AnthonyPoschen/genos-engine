@@ -27,6 +27,7 @@ that system's features. The agent rubric scores this.
   done when its binary covers its features. Lighting is the reference.
   The inventory is [the lighting debug standard](lighting/debug-standard.md).
   Other systems match that set.
+- Engine-feature settings follow [the settings principles](../engine/settings-principles.md): a public serializable value, the MCP catalogue, and the debug menu. Lighting is the reference.
 - Observability. A part that can fail, or that needs tuning, exposes its state
   on the command queue (an agent, over the API, the CLI, or MCP) and in an
   overlay or inspector (a person). That includes a per-entity dump, a
@@ -41,6 +42,14 @@ that system's features. The agent rubric scores this.
 - Ground truth is a CPU path trace of the same frozen scene from the same pose, with
   the picture's lamp unit, paint albedo and tone curve. Until the reference has a
   longer record, look at every reference before using it as a target.
+
+## Networking
+
+- Replicated state: none. The scene list, the checkpoint, and the pictures stay in the process that opened the binary. Lighting settings stay the struct in [Lighting settings](lighting/toggles.md).
+- Authority: that process. The MCP listener is loopback. A load replaces the world in that process.
+- Prediction / rollback: none. There is no predicted camera and no rollback of a scene switch.
+- Determinism: a script and `--frames` step scene time on a fixed step. A recorded replay of a session is not implemented yet.
+- Headless server: `--headless` and `--check` still open a proof window and draw. A gameplay server does not run this binary and does not bind its MCP port.
 
 ## Code
 
@@ -77,8 +86,12 @@ curl -s -X POST localhost:8801/cmd/capture -d '{"mode":"direct","path":"/tmp/dir
 curl -s -X POST localhost:8801/cmd/compare -d '{"width":160,"noise":0.03,"prefix":"/tmp/noon"}'
 ```
 
+`capture` and `captures` take `ui` (default false). The same default is `DebugSettings.ui`, read and written by `get_debug_settings` and `set_debug_settings`. A false value leaves the debug menu, the menu tab, the frame-rate plate, and tool overlays out of the PNG. `ui: true` on the command keeps them for that shot. `--ui` forces the setting on for `genos-lighting --frames` and `genos-stress --shot`.
+
 Do not stop a `genos-stress` someone else bound to port 8765; pick another
-`GENOS_MCP_PORT`.
+port with `GENOS_MCP_PORT`. `genos-lighting` listens on 8766 unless
+`--mcp-port` is set. `GENOS_MCP_PORT` applies to that binary only when
+`--mcp-port` was omitted.
 
 Headless, a script with a report (exit code 1 when a check fails):
 
@@ -88,9 +101,127 @@ genos-stress --proof --no-panel --size 320x180 \
 genos-stress ... --script FILE --trace   # also a screenshot after every changing step
 ```
 
+The lighting binary is `debug/lighting`, package `genos-lighting`. It loads
+`debug/scenes/` (parsed by `debug/scene-lib`, package `genos-scene-lib`).
+Arguments choose the run. An environment variable applies only when the matching
+argument was omitted.
+
+```sh
+cargo run --release -p genos-lighting -- --scene sponza --checkpoint atrium --gpu-times 30
+make lighting SCENE=sponza
+```
+
+`make lighting` is the benchmark: release, `--scene` from `SCENE` (default
+`stress`), and `--gpu-times 30`. `--preset`, `--lighting-debug`, `--unfilled`
+(the existing texels view: slots with fewer than four sets stay dim),
+`--full-effort`, `--headless`, `--frames N`, `--size WxH`, `--fps-counter`,
+`--fps-hz`, `--menu shown|hidden`, and `--out DIR` are in `--help`. The default output directory is
+`./genos-debug/` in the current working directory (`shots/`, `logs/`, `dumps/`).
+`--out` overrides it. The binary does not write those files under `$HOME`.
+
+Page Up and Page Down switch scenes. Keys 1–9 jump checkpoints. Home and 0 reset
+the camera to the active checkpoint. Grave hides the settings menu and grave shows
+it again. F1 is the same key. `--menu hidden` starts it hidden. `GENOS_MENU`
+applies only when that argument was omitted. `]` and `[` change the menu page. Tab and shift-Tab
+do that while the pointer is over the menu. The pages and folds are
+`debug/lighting/menu.txt`. F toggles the frame-rate overlay. F3 is the same key.
+U toggles the unfilled count in the stress and camera programs. Shift-U toggles
+the tint. F8 and shift-F8 are the same keys. `GENOS_DEBUG_KEYS` is a text file
+that replaces any of those chords (`menu key_grave key_f1`).
+`list_scenes`, `load_scene`, `list_checkpoints`, and `jump_checkpoint` are on
+the same MCP catalogue. `load_scene` drops light and object edits and clears
+the lighting caches.
+
+### Frame-rate overlay
+
+`FpsCounterSettings` on the scene (`enabled`, `rate_hz`) is the public setting.
+It implements `EngineSettings`. The default is off, at 4 Hz. The debug menu row
+`FPS` has a checkbox and a hertz slider. Both call `set_key`. F, or F3, toggles
+`enabled`. `--fps-counter` (optional `on` or `off`; bare means on) and
+`--fps-hz N` win every frame. `GENOS_FPS_COUNTER` and `GENOS_FPS_HZ` apply only
+when that argument was omitted, and then a set variable wins every frame.
+`get_fps_counter` and `set_fps_counter` are on the MCP catalogue. A `text`
+field overlays `key=value` lines.
+
+`genos-lighting` draws the plate at the bottom right: frames per second and the
+average frame time in milliseconds. The glyphs are rebuilt when a window of
+`1 / rate_hz` seconds closes, and the frames in between reuse those rectangles.
+Off, the frame does not accumulate time and does not build text. The first
+window draws nothing, so the number is an average, not a single frame. Screenshots
+and logs still go to `./genos-debug/<kind>/` (`shots/`, `logs/`, `dumps/`).
+`--out` overrides that directory.
+
+Failure modes: a stuck readout means the window is not closing (the rate is
+too low, or frame time is not advancing). A missing plate means `enabled` is
+off or the first window has not closed. The probes are the plate, the `FPS`
+menu row, F or F3, `--fps-counter` / `--fps-hz`, and `get_fps_counter` /
+`set_fps_counter`.
+
+### Event-loop stall
+
+`EventLoopSettings` on the scene (`longest_stall_ms`) is the public setting.
+It implements `EngineSettings`. The frame copies the longest gap between window
+pumps into it. The Perf row `Stall` shows that number. `get_event_loop` and
+`set_event_loop` are on the MCP catalogue. A `text` field overlays `key=value`
+lines. Writing `0` clears the mark; the next frame adopts the lower value.
+The budget is 100 ms. Past that, Omarchy reports the window as not responding
+because a mapped window missed `xdg_wm_base.ping`.
+
+The ping is answered only inside the seat dispatch. A scene load runs on
+`genos-scene-load` and the frame draws a loading picture. Device waits and
+pipeline compiles keep a side thread answering pings, and that thread is joined
+before the next present. Quit destroys the window, skips the device idle, and
+exits. The old scene is dropped on `genos-retire`.
+
+Failure modes: a stall above 100 ms means the frame thread blocked inside a
+pump gap (a synchronous load, a device wait, or a teardown). The probes are the
+Perf row, `get_event_loop`, and the headless pump test in `genos-window`.
+
+### Debug menu
+
+`MenuSettings` on the scene (`visible`, `tab`, `collapsed`, `wheel`, `keys`)
+is the public setting. It implements `EngineSettings`. The default is shown,
+on the first page, with no stored folds, `wheel=hover`, and `keys=click`.
+Grave, F1, the title-bar hide button, and the corner tab write `visible`.
+The first grave while click-to-focus is held releases the keys and leaves the
+menu up. The next grave hides it. F1 hides it either way. `--menu shown|hidden`
+wins every frame for `visible`. `GENOS_MENU` applies only when that argument
+was omitted. `tab` is the page title. `collapsed` is a comma-separated list of
+folded section keys. `fold` adds one key and `open` removes one, so a test can
+move one section without a pointer. `fold` together with `tab` keeps the
+fold. A section that is not on the open page stays in the list. `wheel` and `keys` are `hover`, `modal`,
+`click`, or `passive`. `focus_wheel` and `focus_keys` are the same keys.
+`get_menu_settings` and `set_menu_settings` are on the MCP catalogue. A `text`
+field overlays `key=value` lines. The lighting binary also writes
+`<out>/menu/collapsed.txt` and `<out>/menu/tab.txt`. The Perf page dropdowns
+write `wheel` and `keys`.
+
+- Replicated state: the settings struct. The averaged numbers stay on the client that draws.
+- Authority: the client that owns the view. A server does not time the picture.
+- Prediction / rollback: none. The readout is presentation data.
+- Determinism: the same frame durations and the same rate produce the same plate. Wall time is not a scene clock.
+- Headless server: it does not draw the plate. It can store the struct. `--headless` on this binary still draws when the setting is on.
+
+`--check` loads every scene on a 320×180 proof window, jumps to the checkpoint
+named by that scene's `check` line, draws four frames at a fixed 1/60 s step,
+and writes `shots/<scene>.png`. The line is `check CHECKPOINT mean MIN`. MIN is
+that picture's mean luma floor on the 0–255 scale. Scenes do not share one
+floor, so a view that is dark by design is not the check view.
+`bounce_corner` checks `room-a` (mean 8); its `corner` checkpoint stays dark.
+A glTF scene whose file is missing or is still a Git LFS pointer prints
+`skip <name> (not a pass): ...` and is not counted as a pass. The other scenes
+still run. The process exits 0 when every scene that drew met its own floor.
+`--scene` for that missing name still returns the error. A recorded replay and
+a saved setup are not in this binary yet.
+
 On a box without a GPU this runs on lavapipe under a headless Weston
 (`XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`). The first run after a shader change spends
 minutes compiling pipelines.
+
+Scripted verdicts (`docs/VERIFY.md`) judge a repeat of the same picture or
+frame time. They print one PASS, FAIL, UNSURE, or ERROR line and leave the evidence
+under `./genos-debug/verdict/`. A branch name is `origin/<name>` after
+`git fetch origin`, and the line includes that sha. They are on probation.
 
 The report directory holds `report.md` (checks, log, every step with its reply,
 images), `result.json`, and every image the script saved.
@@ -140,6 +271,10 @@ v1 views (`bounce:N`, `near`, `far`, `probes:*`) went with GI v1.
 
 `reference` traces; `compare` traces (or reuses `reference: name`) and compares.
 
+`make lighting-ref-check` scores the catalog against that path trace. The report is `./genos-debug/refcheck/<timestamp>/` unless `--out` is set. `MODE=lavapipe-small` is the small run and uses the same frame indices as the owner run. The scene clock is a fixed step. The note is [the reference check](lighting/reference-check.md).
+
+`genos-stress --step` pauses the stress scene. Space, or the MCP `step` command, advances one frame of `--fixed-dt` (default 1/60 s). `--fixed-dt` alone runs that step every frame instead of wall-clock time. The same fields are MCP `time` (`pause`, `fixed_dt`). A line `genos-stress: frame N sim … wall …s settled …` is printed when a step advances.
+
 - Primary rays through each pixel centre from the camera pose (60 degree vertical
   field of view, the picture's aspect). Each sample gathers shadowed direct light
   from every lamp and the sun at each vertex and continues along a cosine-sampled
@@ -149,7 +284,7 @@ v1 views (`bounce:N`, `near`, `far`, `probes:*`) went with GI v1.
 - `geometry: "triangles"` traces the scene's triangle form (`SceneMesh`: the
   floor, roof, walls and solids as meshes, through the CPU BVH in `genos-mesh`)
   instead of the analytic shapes (`"shapes"`, the default). Both agree within the
-  trace's noise (`triangles_match_the_analytic_reference`); GI v2 traces meshes only.
+  trace's noise (`triangles_match_the_analytic_reference`); GI traces meshes only.
   Triangle traces are cached under a separate key.
 - Passes of `spp` paths per pixel run on every core until the mean relative
   standard error of a pixel is at most `noise` (default 0.03), `max_spp` or
@@ -158,7 +293,9 @@ v1 views (`bounce:N`, `near`, `far`, `probes:*`) went with GI v1.
   `cache: "off"`) by scene, pose, size and bounce limit.
 - `compare` captures the live picture after the trace (`frames: N` waits at least N
   frames after the trace starts; `mode` picks the view; `live:` uses a saved
-  capture), resamples it to the reference size and compares linear luminance (the
+  capture). `ui` defaults to false, so that live picture leaves out the debug
+  menu, the menu tab, the frame-rate plate, and tool overlays. It resamples
+  the picture to the reference size and compares linear luminance (the
   tone curve undone) on `block` x `block` averages (default 2). Pixels where the
   primary ray met nothing are left out.
 - Reply: `mean_rel` (sum of |live - ref| over sum of ref: the share of light that is
@@ -176,7 +313,7 @@ wall to look at. In the stress scene the engine's `direct` view matches a
 `bounces: 0` trace to about 2 %.
 
 GPU reference (`genos-gpuref`, `GENOS_REFERENCE_GPU=1`): the same paths on the
-4070's hardware ray queries (Vulkan `VK_KHR_ray_query`, headless, no GI v2 code):
+4070's hardware ray queries (Vulkan `VK_KHR_ray_query`, headless, no GI code):
 the scene's triangle form in two BLAS (one-sided culled, two-sided), the same
 Lambert materials, lamps (72 units, 10 cm), sun and sky, light sampling at every
 vertex, Russian roulette from the second bounce, f32 per path and f64 sums, two
@@ -196,7 +333,7 @@ under their own key. The CPU proof runs at nice and half the cores
 `cargo run --release -p genos-stress -- gi-check [--out DIR]` is the GI picture gate.
 It runs this build of the stress test four times (one window at a time) and prints a
 table of PASS or FAIL against fixed limits; exit status 1 on any FAIL. A few rows
-are targets GI v2 is working towards (the room's 48 px swim and light structure):
+are targets GI is working towards (the room's 48 px swim and light structure):
 a miss prints MISS and fails nothing.
 
 - `settled`: the five diagnosis views (room-a, corner, contact, lamp-wall, hall) at
@@ -278,7 +415,7 @@ or is the only coverage of a situation):
   and caught the turn swim the clip passed. The whole camera path stays in mid
   and full (the only long mixed path; its worst-tile row caught the per-ray
   gather bug).
-- full's corner walk (`walk`, 19 s): its pop row failed on every GI v2 build
+- full's corner walk (`walk`, 19 s): its pop row failed on every GI build
   (0.44-0.49, worst 10x10 tile of cold against warm, noise-bound) and never
   pointed at a fix; walking is covered by the turn run's walk segment and the
   camera path. Still runnable with `--only walk`.
@@ -316,16 +453,16 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
 
 - The metrics match the earlier Python tool (`splotch_metrics.py`) to the fourth
   decimal on the same pictures.
-- GI v2 settled (gi-v2 7065edb): all view rows PASS (mean 0.037, blob 0.014, worst
+- GI settled (gi-v2 7065edb): all view rows PASS (mean 0.037, blob 0.014, worst
   view lamp-wall 0.027, which shows faint floor blotches). Right: this is the known
   good state.
-- GI v2 with no still averaging (the moving state): all view rows FAIL (blob 0.049,
+- GI with no still averaging (the moving state): all view rows FAIL (blob 0.049,
   corner 0.078, visibly blotched walls). Right.
 - GI v1: mean, contact and open-wall FAIL (0.13 / 0.16 / 0.10: the corners and
   bounce-lit walls are visibly too dark), blob PASS (0.019: v1 is smooth). Right.
 - Camera and trail runs (2026-10-10, 4070, 640x360, tile 4): GI v1 is the
   known-good picture in motion: mid-move error 0.028, worst tile 0.29, flicker
-  0.034, post-stop 0.003 in 0 frames. GI v2 before the per-ray gather fix: 0.092 /
+  0.034, post-stop 0.003 in 0 frames. GI before the per-ray gather fix: 0.092 /
   0.63 / 0.12, its moving frames visibly blotched and 5 % too bright (14 % with
   the 5x5 strata reach). The worst-tile and flicker limits (0.35, 0.05) are set
   from v1 with a margin; the error limit stays 0.03. The mid-move worst-tile row
@@ -337,13 +474,13 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   the moving pass, not yet in the settled one) was every build's worst camera
   frame and the corner walk's worst pop. The path now stops at z 15 and turns
   there (camera.rhai, walk.rhai: 178 and 138 poses). Trail: v1 0.109 (its world probes lag), v2 0.057.
-- Close-up (the hall's west bench at 1.3 m, settled only, own rows): GI v2
+- Close-up (the hall's west bench at 1.3 m, settled only, own rows): GI
   1129d5d mean 0.030, contact 0.026, open wall 0.028; the picture shows the
   bench face, top and foot with their contact shading. Limits 0.045 each.
 - Flick run (2026-10-10, 4070, 12 s): the doorway pose while lamps and boxes move,
   40 frames, upper third, per 4x4 block at 320x180 the frame-to-frame change
   less the net change, per frame (light going back and forth, not the lamps'
-  steady change). GI v2 1129d5d, where kept rays a moving box crossed were
+  steady change). GI 1129d5d, where kept rays a moving box crossed were
   dropped until their stratum came round: 0.0005 (all change 0.00058), its
   frames show the walls around the boxes shimmering. With the re-trace in the
   frame (defa10a): 0.0001 (all change 0.00016). Limit 0.0003. The full tier's
@@ -360,7 +497,7 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   the turn and of the walk against ref.png; onset pop, the first 5 moving frames
   of back against those poses settled (the first saved moving frame already
   stands one step in, checked by matching); the soaked end frames and the frame
-  held after back against ref.png. GI v2 10ce430, whose turn Anthony saw swim
+  held after back against ref.png. GI 10ce430, whose turn Anthony saw swim
   live and in our scripted turn: turn arrival 0.0131 / 0.0108 (two runs), walk
   0.0067 / 0.0073, onset 0.0147 / 0.0133 (rising from 0.009 on the first moving
   frame: the pop when motion starts), end and return 0.0001. The arrival and onset
@@ -450,11 +587,13 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
 
 ## Limits
 
-- Dedicated binaries under `debug/<system>/`, and the shared scene library
-  `debug/scenes/`, are not in the tree yet. `genos-stress` is the lighting
-  harness that moves into `debug/lighting`. `examples/camera/scene.rhai` and
-  `examples/stress/scenes/` are the scene files that move into `debug/scenes/`.
-  `crates/debug` stays the shared command, knob, capture, and script code.
+- `debug/lighting` (`genos-lighting`) and `debug/scenes/` are in the tree.
+  `debug/scene-lib` parses the scene files. `examples/camera/scene.rhai` and
+  `examples/stress/scenes/room.rhai` stay where the tests load them; the scene
+  library points at those paths. Other systems do not have a `debug/<system>/`
+  binary yet. `crates/debug` stays the shared command, knob, capture, and
+  script code. A recorded replay and a saved setup are not in the lighting
+  binary yet.
 - The command catalogue already answers status, knobs, lights, objects, camera,
   time, view, capture, diff, flicker, compare (with a heatmap), and timing.
   `Tools::overlay`, `profile_overlay`, and `inspect_region` draw for a person.
@@ -462,8 +601,8 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   set in [the lighting debug standard](lighting/debug-standard.md). A dump and
   a snapshot plus restore for every other subsystem are not shared commands yet.
   New probes extend the catalogue. `tools/lighting/headless.sh` and a
-  `gi_headless` test module are not in the tree; the headless path that is
-  in the tree is `genos-stress --proof`.
+  `gi_headless` test module are not in the tree; the headless paths that are
+  in the tree are `genos-stress --proof` and `genos-lighting --headless`.
 - The reference knows floors, ceilings, walls and solids. It does not trace fog,
   particle cards, textures or per-material reflectance and colour mix (the stress
   scene uses the defaults). It does not cut lamps at their range as the engine does.

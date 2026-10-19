@@ -2,7 +2,7 @@
 
 Main lighting document. Architecture and component notes are below; every experiment (tried, pushed, reverted, rejected, shelved or planned) has its own file in [experiments/](experiments/), indexed in the table. Before trying an idea, check the index: if it was tried, read how and what we found, and whether it is marked for a retest.
 
-Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and patches in `~/.cache/gi2diag/g78/` (zanven-pc), git history of `gi-v2`, `gi-v2-prefill` (22bcd47f) and tag `gi-v2-checkpoint-2026-10-12` (6b4fe308), the postmortem log, and the GI v2 conversation with Anthony. Figures not in a source are written "not recorded".
+Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and patches in `~/.cache/gi2diag/g78/` (zanven-pc), git history of `gi-v2`, `gi-v2-prefill` (22bcd47f) and tag `gi-v2-checkpoint-2026-10-12` (6b4fe308), the postmortem log, and the GI conversation with Anthony. Figures not in a source are written "not recorded".
 
 ## Missing history (as of 2026-10-12)
 
@@ -15,9 +15,9 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 
 ## From Chief's notes: decisions and rules
 
-- GI v2 design and ADR 0012 (7d35edd, 10 Oct 03:12; Anthony's answers b7b8ea7 03:27): Lumen-informed but aim to beat Lumen; stop when complete so Anthony can judge; lighting ~200 MB VRAM soft budget (Ultra may exceed); hardware floor newest 80% of the Steam survey, Low tuned for GTX 1060 / RX 580, Vulkan 1.3, 4 GB VRAM minimum; Steam Deck a target but untested; test machines zanven-pc (4070) and his MacBook; mesh SDFs and cards prebuilt at build time (configurable); emissive surfaces required, including texture-driven partial-mesh emission (639ab44).
+- GI design and ADR 0012 (7d35edd, 10 Oct 03:12; Anthony's answers b7b8ea7 03:27): Lumen-informed but aim to beat Lumen; stop when complete so Anthony can judge; lighting ~200 MB VRAM soft budget (Ultra may exceed); hardware floor newest 80% of the Steam survey, Low tuned for GTX 1060 / RX 580, Vulkan 1.3, 4 GB VRAM minimum; Steam Deck a target but untested; test machines zanven-pc (4070) and his MacBook; mesh SDFs and cards prebuilt at build time (configurable); emissive surfaces required, including texture-driven partial-mesh emission (639ab44).
 - v2 design rules: only finished values are published; fixed ray patterns; each ray answered by exactly one system; screen probes plus surface cache; software SDF plus hardware ray queries; world probes for the far field only.
-- GI v2 lives on gi-v2; phase-1 commits (13e02fe glTF, a22b1c8 BVH, 977ea71, e5cb9ba SDFs/cards, 84c303d) stay on master; master and gi-v2 compared head to head before any merge. Precomputed transport for master dropped.
+- GI is on `master` (merged from the former `gi-v2` branch in PR #54). Phase-1 commits (13e02fe glTF, a22b1c8 BVH, 977ea71, e5cb9ba SDFs/cards, 84c303d) were already on master before that merge. Precomputed transport for the old master path was dropped.
 - v2 became a separate frame path (1a2229f, ec658c5, ~05:30 10 Oct) because the NVIDIA compiler hung with the tracer inside the existing shaders.
 - Proposed, not answered [uncertain status]: rewrites on their own branch with master fixes-only (P7); design doc before a new subsystem (P6). Approved (P9): visual results come with screenshots someone looked at; numbers help bots judge faster. Postmortems go to the shared file (P10).
 - zanven-pc etiquette: bench lock ~/genos-bench.lock and split/lock_run.sh, one time-limited window; low GPU priority, short submissions; must not freeze the desktop; exclusive fps windows Fri-Mon 05-10 and Tue-Thu 05-15 AEDT; never touch his input or processes.
@@ -26,7 +26,9 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 
 ## Current state (2026-10-12)
 
-`gi-v2` at 8c763bb2 (S78P): still 8.21 ms / 105 fps, moving 18.7 ms / 51 fps (RTX 4070, stress scene). Pipeline: two-layer surface cache (layer 1 traced texels with MSME accumulator; layer 2 SVGF a-trous + pull-push, never fed back), world radiance cache (25 cm cells) for ray hits, sparse screen probes with held strata and check rays, Lumen-style texel direct-light cache for GI hits, per-pixel traced direct light reused in quiet frames, A-SVGF same-seed checks gating rays.
+Master (former `gi-v2` tip lineage) at 8c763bb2 (S78P era): still 8.21 ms / 105 fps, moving 18.7 ms / 51 fps (RTX 4070, stress scene). Pipeline: two-layer surface cache (layer 1 traced texels with MSME accumulator; layer 2 SVGF a-trous + pull-push, never fed back), world radiance cache (25 cm cells) for ray hits, sparse screen probes with held strata and check rays, Lumen-style texel direct-light cache for GI hits, per-pixel traced direct light reused in quiet frames, A-SVGF same-seed checks gating rays.
+
+Plan for moving lamps and moving assets (not yet built; measurement first): [dynamic-perf-plan.md](dynamic-perf-plan.md).
 
 ## Principles and rules (Anthony)
 
@@ -48,8 +50,15 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - Lighting VRAM may grow if it cuts per-frame compute; total should stay fixed rather than scale with the scene (12 Oct).
 - Never skip lighting on an assumption; verify with an extraordinarily cheap check every frame (12 Oct).
 
+## Names
+
+The surface light cache and the world cache are one cache ([glossary](../../lighting/GLOSSARY.md)). A cache entry is one hashed surface patch. A slot is only its storage index. `world_cache`, `world_cell`, `world_refresh`, and `world_stale` are the current keys. Moving them under `surface_cache.*`, and keeping the old keys as deprecated aliases, is step 1 of [RENAMES.md](../../lighting/RENAMES.md).
+
 ## Deviations from the papers (summary)
 
+- The MSME step follows Barré-Brisebois et al., Ray Tracing Gems ch. 25, `MultiscaleMeanEstimator.hlsl`. The firefly clamp (`0.1 + short mean + sigma * deviation`) is biased. `surface_cache.firefly_sigma` defaults to the listing's 8. Zero keeps the `0.1` floor. Variance is one scalar, not `float3`, weighted with the listing's Rec. 601 `(0.299, 0.587, 0.114)`. The hold path uses Rec. 709 `(0.2126, 0.7152, 0.0722)`, keeps its own clamp of 8, and does not read `surface_cache.firefly_sigma`. A newborn starts at short mean = long mean, inconsistency 1, vbbr 1, and variance `(0.15 * luma)^2`. The first 16 sets blend at most `1 / (n + 1)`. A mover raises the blend to at least 0.5; a lamp delta is capped at 0.9. `surface_cache.blend` forces estimator bit 20 and the hold bit (bit 30).
+- Mover cache entries store an object-local position and normal (`surface_cache.attach_movers`). A cache entry is one hashed surface patch. GIBS attaches every surfel. Static geometry and world probes stay on the world lattice.
+- `surface_cache.ray_budget` 0 keeps the fixed ray lists. A total already under the budget is unchanged. Over the budget, the dispatch lists are scaled down and the floor's leftover entries are given back. A list that had work stays non-empty when the ceiling can hold one 16-ray entry per non-empty list. `surface_cache.dormant_rays` is a whole number of fresh rays per frame, 0 through 16. 0 keeps one sweep in eight. 1 through 16 trace one new 16-ray entry every `ceil(16 / rays)` frames.
 - Pixels read surface-cache texels directly (Lumen reads the cache only at ray hits).
 - Running-mean / MSME texels to a cap instead of Lumen's 4-frame accumulation.
 - IC placement as a trace rate on a power-of-two grid, not records in space; no R_geo; grad E from the filtered field; constants inferred (S72V).
@@ -58,7 +67,23 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 - 1-in-16 push refresh floor (S78B); kept-hit bounce refreshed with its re-trace (S78D); held strata keep exact directions (S78K).
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
+- A small sun step (departure 14, [SUN](experiments/SUN-small-sun-step.md)) amortises indirect over bands. Schied et al., Spatiotemporal Variance-Guided Filtering, HPG 2017, and Wright et al., Lumen, SIGGRAPH 2022, recompute every pixel every frame. One compose dispatch writes direct everywhere and walks probes on the current band. Neighbour blend is the existing compose weights, not a per-lamp irradiance layer. After a point lamp holds, four frames shade every kept stratum. That skips the S69C halfway early-out for those frames.
 - Planned: change-scaled ring-test wakes with group splitting (original combination).
+- Flat ambient when bounce is 0 or GI is off is a constant, a classic hemisphere (sky toward the normal, ground away from it), a sun-height day lerp, or a time-of-day curve (night, dawn, noon, dusk). The curve also scales sky colour relative to its noon key. No new GI algorithm. Bounce 0 records no GI dispatch. Bounce 1 records the probe passes and not the cache-to-cache passes. Bounce 2 records those passes. The count does not add a bounce algorithm.
+- The shader GI bit stays off unless probes or the world cache allocated the buffers. Otherwise those buffers are the 4096-byte stand-in, and pixel reuse and bounce reads would index past it. The settings struct still records the request.
+- Lamp picking (Talbot, Cline, and Egbert, EGSR 2005; Bitterli et al., Spatiotemporal reservoir resampling for real-time ray tracing with dynamic direct lighting, TOG 2020). Presets that shade bounce hits (`high`, `medium`, `low`, `gi-1bounce`) sample those hits. Potato and day-cycle stay off. The sun is not a sample: it is traced on its own. Point lamps and the flame use systematic samples along the unshadowed prefix. Pixel reuse merges reservoirs with Algorithm 6 as printed (Z counts a source only when its target of the selected lamp is positive). That is not the MIS balance heuristic (equation 22). The plan text called Algorithm 6 that heuristic; the code follows the printed algorithm.
+- `lamp_pick_unbiased` off is the section-3 merge (always divide by the sum of M) plus the M clamp from Wyman and Panteleev, Improved Direct Lighting, Ray Tracing Gems II, 2021. The unbiased path does not clamp M.
+- The winning sample's visibility is always retraced. An occluded reservoir is kept. The record stores the lamp index and `lamp_light` runs again this frame, so a moving lamp reconnects. Algorithm 5 can reuse a stored visibility bit; this does not.
+- There are no motion vectors and no history G-buffer. Temporal reuse accepts a point only when it reprojects onto the same pixel, GI is on (the last camera lives in the change block), and no mover bound contains it. A camera move that leaves the pixel is a miss and traces `min(lit, max(rays, 4))` point lamps.
+- Spatial neighbours are the previous frame's reservoirs. The shade loop is one pass, so it cannot read a neighbour written this frame. The test uses the current G-buffer (normal dot above 0.9, plane `0.05 + 0.02 * distance`). Radius 0 skips the merge.
+- Hits, fills, and cache rays do not reuse a reservoir. Their sample offset has no frame index, so a still hit does not crawl.
+- A history miss shades with that bumped count and stores the canonical reservoir. Its unshadowed estimate is the point-lamp total.
+- One visible sample of lamps that share a chromaticity reconstructs the sum (`light * total / weight`), not a single lamp's light. Different colours do not. Pixel reuse selects the lamp with Algorithm 6 and stores that merged record, then shades with this frame's `point_total / phat`. Shading with the merged W blends the previous integral and lags a moving lamp.
+- `reuse (experimental)` is not a preset. The shade multiplies one lamp's visibility by the whole unshadowed sum (`point_total / phat`, then one `trace_occluded`). A clear shadow ray keeps light from lamps the point cannot see, and a blocked ray drops the lamps it can see. That estimator is unbiased in expectation and has a huge per-pixel variance. Radius 0 already does this, so a neighbour reservoir is not required. There are no motion vectors: a spatial neighbour is the previous frame's reservoir, checked against the current G-buffer only. A-trous denoises the surface cache and does not denoise this pixel. The owner GPU (RTX 4070) measured that path at p99 26–36 moving and 9–17 still against off. Hits leaves pixels on the full sum, which measured within noise. Lavapipe at 320×180, radius 0, the centre lamp inside a box: hits, covering pixel samples, and both stay within 1 code of off. Reuse's second frame is one shadow ray per pixel, spatial merges stay 0, and the mean absolute error against off is 25.8.
+- A-trous denoises the surface cache. It does not denoise pixel direct. Pixel noise stays in the picture. Hit and cache estimates that land in the cache are what the denoiser can resolve.
+- ADR 0012's deterministic 16×16 light-tree cut, with no radiance history, is not built here and this does not amend that ADR. A GTX 1060 scales by lowering candidates and rays. There is no minimum candidate count.
+- Mode off binds a 64-byte reservoir. The screen-sized pair allocates only while reuse is on. `direct.max_lights` stays a separate hard cap.
+- Networking: replicated state is none (the reservoir stays in that frame's GPU buffer). Authority is the machine that shades the picture. Prediction / rollback is none. The pick is deterministic for a mode, a seed, and a frame. A headless server does not shade.
 
 ## Experiment index
 
@@ -99,7 +124,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S58A](experiments/S58A-lumen-update-priority.md) | 2026-10-12 | Lumen LastUsed - LastUpdated priority replaces round-robin sweep | pushed | a4a7b23d |
 | [S59](experiments/S59-few-rays-gibs-settle.md) | 2026-10-12 | Few rays per relight with GIBS extra rays; higher settle bar (64 sets, 0.15 sd) | pushed | e7803342, eedd6671, c4c787d1 |
 | [S60A](experiments/S60A-probe-hit-lamp-picks.md) | 2026-10-12 | Probe hits take at most 2 shadow rays, lamps picked systematically in proportion to unshadowed light | pushed | a2b41c52 |
-| [S61-S62](experiments/S61-S62-world-radiance-cache.md) | 2026-10-12 | World radiance cache (WRC, 25 cm cells) for hits; variance-guided denoise; WRC refresh budget; global light re | pushed (S62E reverted) | aa1b245e..4eb10b86 |
+| S61-S62 (deleted; see git history) | 2026-10-12 | World radiance cache (WRC, 25 cm cells) for hits; variance-guided denoise; WRC refresh budget; global light re | pushed (S62E reverted) | aa1b245e..4eb10b86 |
 | [S63-S65](experiments/S63-S65-sun-share-rate-tiers.md) | 2026-10-12 | Sun/sky share per texel; rate-based scheduling (batch is a ceiling); two tiers (trickle under change 0.173, wh | pushed | 0f288334..b5a72df4 |
 | [S66-S69](experiments/S66-S69-anti-lag-boost-relight.md) | 2026-10-12 | Budget boost after turns (S66A), neighbourhood clamp/anti-lag (S67A), read-since-relight slack (S68A), seed we | pushed (S68B reverted) | 782fe38b..2f35eaa2 |
 | [S70](experiments/S70-gpu-driven-dispatch.md) | 2026-10-12 | Indirect dispatch for cache rays (S70A), no GPU->CPU counter reads in frame loop (S70B), resident scene buffer | pushed | 8758d467, 76245067, b0675659 |
@@ -123,6 +148,8 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S72V](experiments/S72V-svgf-layer2-ic-placement.md) | 2026-10-12 | Layer 2 as SVGF a-trous + Gortler pull-push; irradiance-caching placement (V-V11 fixes) | pushed (checkpoint 6b4fe308) | d23a9218..6b4fe308 |
 | [S73A](experiments/S73A-offscreen-prefill-guard-band.md) | 2026-10-12 | Guard-band scout rays claim fine texels just outside the frustum | reverted (11639205); kept on gi-v2-prefill | 097d67de |
 | [S73B](experiments/S73B-lumen-feedback-prefill.md) | 2026-10-12 | All scout hits claim fine texels and stamp LastUsed | reverted (8b62829b); kept on gi-v2-prefill (22bcd47f) | 22bcd47f |
+| [S73L](experiments/S73L-unfilled-on-screen.md) | 2026-10-13 | Count composed pixels whose surface-cache texel has no finished set | --unfilled, --unfilled-tint, --unfilled-dump, and the cap flags; GENOS_* mirrors; events in ./genos-debug/unfilled | 8ab2884, 16b4a69, 2058863, 73a49e0 |
+| [S73S](experiments/S73S-raw-means-feedback-display-fill.md) | 2026-10-13 | Accumulation reads raw means (coarse blend k=2); display keeps dark fill | closed (PR #25); retry later vs path-traced 4070 after perf | PR #25 / `cursor/unfilled-prefill-bias-8bfe` |
 | [S74A-cam](experiments/S74A-cam-last-camera-offsets.md) | 2026-10-12 | Fix: last-frame camera read from stale scene-block offsets | pushed | 81c00734 |
 | [S74A-asvgf](experiments/S74A-asvgf-asvgf-change-adaptive-rays.md) | 2026-10-12 | A-SVGF same-seed 1-ray checks on 1/9 resolved texels, lambda drives alpha and rays | pushed | 81c00734 |
 | [S74A-shadow](experiments/S74A-shadow-static-lamp-shadow-reuse.md) | 2026-10-12 | Hit shadow rays kept per 12.5 cm cell/lamp, invalidated by lamp epoch | pushed | 81c00734 |
@@ -160,6 +187,8 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S78Y](experiments/S78Y-quiet-filter.md) | 2026-10-12 | Quiet probe filter | pushed (rough; idle A/B 6am) | S78Y |
 | [S78X](experiments/S78X-atrous-work-lists.md) | 2026-10-13 | A-trous levels run dirty work lists | pushed (rough; idle A/B) | S78X |
 | [S78X2](experiments/S78X2-atrous-dense-fallback.md) | 2026-10-12 | Dense a-trous when the dirty fraction is high | pushed | S78X2 |
+| [S79](experiments/S79-half-res-atrous.md) | 2026-10-13 | Half-resolution a-trous, adaptive iterations, shared-memory tiles | Tried and failed. Half-res and tiles removed. Plain shader kept. Adaptive is an off-by-default knob | S79 |
+| [S80](experiments/S80-screen-denoise.md) | 2026-10-13 | Screen wavelet of visible fine texels | preset high (`denoise_launch=screen`). The other presets keep the hash-slot wavelet | S80 |
 | [S78Z](experiments/S78Z-verify-ring-wakes.md) | 2026-10-13 | Probe verification + impact-tested ring wakes | not pushed (no fix; postmortem) | g78/S78Z-verify-ring-wakes.patch |
 | [S78T2](experiments/S78T2-texel-verify.md) | 2026-10-13 | Texel verification: rotating A-SVGF checks + ring wakes | not pushed (no healing; postmortem) | g78/S78T2-texel-verify.patch |
 | [S78S2](experiments/S78S2-settle-floor-nbhd.md) | 2026-10-13 | Settle floor 16 sets @95% + neighbourhood re-check (A-SVGF adaptation) | not pushed (offset unchanged; postmortem) | g78/S78S2-settle-16-nbhd.patch |
@@ -170,17 +199,19 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [DUMP](experiments/DUMP-gpu-dump-tool.md) | 2026-10-12 | Debug dump of GPU data from two consecutive frames per component (direct, bounce, coarse/fine WRC, probe resul | in progress | none yet |
 | [RAYCEIL](experiments/RAYCEIL-world-cache-need-ray-ceilings.md) | 2026-10-12 | World-cache cells stop at IC error bound instead of fixed 128 samples | queued | none |
 | [QUIET](experiments/QUIET-quiet-paths-compose-filter-compact.md) | 2026-10-12 | Compose redraws 8×8 blocks whose direct, probe SH, or filtered field changed | pushed (compose only; perf on the owner GPU) | this commit |
+| [SUN](experiments/SUN-small-sun-step.md) | 2026-10-13 | Small sun step: one compose walks the band; direct every frame; four-frame catch-up | 4070 compose rose 2.78 to 3.17 before the single pass; retest decides merge | this change |
+| Lamp pick | 2026-10-13 | Weighted point-lamp samples (Talbot systematic, Bitterli Algorithm 6). The sun stays exact. GI presets use hits. Reuse is experimental | lavapipe picture and ray-count tests; 4070 hits within noise, reuse p99 26–36 moving and 9–17 still | this change |
 | [LSMOOTH](experiments/LSMOOTH-lighter-smoothing.md) | 2026-10-12 | Lighter smoothing | dropped (Anthony) | none |
 
 # Architecture and component notes (history kept as written)
 
-How GI v2, the lighting engine, works: direct light, shadows, global illumination, the reference it is checked against, and the checks. Each component lists our method, the published method it compares to (Lumen and papers, with links), how and why ours differs, current scores and open issues. The plan and budgets are in [GI v2 design](../gi-v2-design.md); the gate is in [Debugging](../debugging.md). Update this file whenever a method changes, in the same commit as the code.
+How GI, the lighting engine, works: direct light, shadows, global illumination, the reference it is checked against, and the checks. Each component lists our method, the published method it compares to (Lumen and papers, with links), how and why ours differs, current scores and open issues. The plan and budgets are in [GI design](../gi-design.md); the gate is in [Debugging](../debugging.md). Update this file whenever a method changes, in the same commit as the code.
 
-Scores are gi-check numbers (linear luminance, share of the light) against the GPU path-traced references, at the commit named in each section. "P6" is the probe path (6ce7fd4: screen probes, light cache in push mode, `GENOS_LIGHTING_WORLD=0`); it was the gi-v2 default until S54K. Default now (no env, S54K): GI v2 with the surface cache, `GENOS_LIGHTING_WORLD=3`, `GENOS_LIGHTING_WORLD_CAP=64`, `GENOS_LIGHTING_SC_FLAGS=6007050`, `GENOS_LIGHTING_SC_LOCAL=1`; P6 back with `GENOS_LIGHTING_WORLD=0`. GI v1 was removed on 2026-10-12 and there is no lighting-selection switch: plain `make stress` / `make run` run this lighting with the tuned defaults (see "GI v1 removed" below). "SC" is the surface cache (`GENOS_LIGHTING_WORLD=3`, branch `surface-cache`, flags in `GENOS_LIGHTING_SC_FLAGS`).
+Scores are gi-check numbers (linear luminance, share of the light) against the GPU path-traced references, at the commit named in each section. "P6" is the probe path (6ce7fd4: screen probes, light cache in push mode, `GENOS_LIGHTING_WORLD=0`); it was the GI default until S54K. Default now (no env, S54K): GI with the surface cache, `GENOS_LIGHTING_WORLD=3`, `GENOS_LIGHTING_WORLD_CAP=64`, `GENOS_LIGHTING_SC_FLAGS=6007050`, `GENOS_LIGHTING_SC_LOCAL=1`; P6 back with `GENOS_LIGHTING_WORLD=0`. GI v1 was removed on 2026-10-12 and there is no lighting-selection switch: plain `make stress` / `make run` run this lighting with the tuned defaults (see "GI v1 removed" below). "SC" is the surface cache (`GENOS_LIGHTING_WORLD=3`, branch `surface-cache`, flags in `GENOS_LIGHTING_SC_FLAGS`).
 
 ## Names (2026-10-12)
 
-The lighting has one name scheme, `lighting`, everywhere; "GI v2" survives only in history and design notes. The old `gi2` names map one to one:
+The lighting has one name scheme, `lighting`, everywhere. The old `gi2` names map one to one:
 
 | Kind | Now | Was |
 |---|---|---|
@@ -191,14 +222,14 @@ The lighting has one name scheme, `lighting`, everywhere; "GI v2" survives only 
 | Renderer API | `lighting_still_frames`, `lighting_probe_samples`, `settle_stats`, `picture_settled` | `gi_v2_*`, `tier_stats` |
 | Log lines | `LIGHTING_MS`, `lightingsc` (surface cache trace), `lighting:` | `GI2_MS`, `gi2sc`, `gi2:` |
 | Test | `crates/render/tests/lighting_frame.rs` | `gi2_frame.rs` |
-| Env | `GENOS_LIGHTING_*` | `GENOS_GI2_*`; `GENOS_LIGHTING_DEBUG` was `GENOS_GI_DEBUG` |
+| Env | `GENOS_LIGHTING_*` | `GENOS_GI2_*` (deprecated aliases, one warning per name for one release); `GENOS_LIGHTING_DEBUG` also accepts `GENOS_GI_DEBUG` |
 
 `gi-check` keeps its name (it is the tool), as does `GENOS_GI_CHECK_BOUNCES`.
 
 No environment variable is needed: `make stress` and `make run` run the tuned defaults baked into the code (`LIGHTING_DEFAULT_WORLD` = 3, the surface cache; `LIGHTING_DEFAULT_SC_FLAGS` = 6007050). There is no lighting-selection switch (`GENOS_GI` is gone). The remaining variables are optional debug and tuning knobs:
 
 - Debug and traces: `GENOS_LIGHTING_DEBUG` (per-round counters; reads GPU counters back, so not for fps runs), `GENOS_LIGHTING_SC_TRACE` (surface cache claims and relights per readback), `GENOS_SCENE_DELTA` (resident scene and mesh field delta runs). The dump, the counters, the MCP commands, the stuck and pop checks, the headless path, and the overlays are inventoried in [the debug standard](debug-standard.md). That file is the reference other systems match.
-- Tuning (A/B only): `GENOS_LIGHTING_WORLD` (0 probe path P6, 3 surface cache), `GENOS_LIGHTING_SC_FLAGS`, `GENOS_LIGHTING_SC_LOCAL`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`, `GENOS_LIGHTING_TILE`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_FILL`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_ASYNC` (async compute light cache, off by default), `GENOS_LIGHTING_ATROUS_DIRTY` (a-trous work-list dirty fraction, default 0.25; `0` dense sweep, `1` lists up to the cap).
+- Tuning (A/B only): `GENOS_LIGHTING_WORLD` (0 probe path P6, 3 surface cache), `GENOS_LIGHTING_SC_FLAGS`, `GENOS_LIGHTING_SC_LOCAL`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`, `GENOS_LIGHTING_TILE`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_FILL`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_ASYNC` (async compute light cache, off by default), `GENOS_LIGHTING_ATROUS_DIRTY` (a-trous work-list dirty fraction, default 0.25; `0` dense sweep, `1` lists up to the cap), `GENOS_LIGHTING_DENOISE_RES` (`full` or `half`; high stays `full`), `GENOS_LIGHTING_DENOISE_ADAPTIVE` (off on high), `GENOS_LIGHTING_DENOISE_VARIANCE` (relative luminance deviation, default 0.02), `GENOS_LIGHTING_DENOISE_TILES` (shared-memory wavelet tiles, off on high).
 
 Older entries below quote the names of their time (`GENOS_GI2_*`); read them through the table.
 
@@ -225,6 +256,10 @@ Older entries below quote the names of their time (`GENOS_GI2_*`); read them thr
 
 Research notes with the cvar values: `/workspace/research/lumen-digest.md` (agent box).
 
+## Settings
+
+Presets, per-feature toggles, quality knobs, the scene text, Rhai, the debug menu, the launch arguments (`--preset`, `--bounces`, `--ambient`, `--time-of-day`), and the MCP commands are in [toggles.md](toggles.md). The struct is `LightingSettings` on the scene. High is the tuned path this document describes. A feature that is off skips its passes and its buffers.
+
 ## Frame overview
 
 One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighting_*.comp`); every pass has at most one trace site:
@@ -239,14 +274,14 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 
 ## Scene representation and tracer
 
-- **Ours:** one software tracer over mesh SDF instances (`mesh_field.glsl`): sparse 8³ bricks of byte distances near the surface, one coarse byte per brick elsewhere, sphere-traced in object space after clipping to the instance bounds. All GI v2 rays (probe, cache, shadow) use it.
+- **Ours:** one software tracer over mesh SDF instances (`mesh_field.glsl`): sparse 8³ bricks of byte distances near the surface, one coarse byte per brick elsewhere, sphere-traced in object space after clipping to the instance bounds. All GI rays (probe, cache, shadow) use it.
 - **Reference:** Lumen software RT uses per-mesh SDFs near and a global SDF far; hardware RT uses a BVH [W22, KN].
 - **Differences:** no far global SDF yet; the design wants world-anchored far bricks instead of camera clipmaps (clipmaps change with the camera). No hardware path yet.
 - **Open:** far field (long rays) and hardware RT are not built.
 
 ## Direct light and shadows
 
-- **Ours:** `lighting_direct.comp` lights every lamp at every pixel and at every ray hit with one traced shadow ray each, so pixels, kept probe hits and cache hits share one loop and see this frame's light. No shadow maps, no light history.
+- **Ours:** `lighting_direct.comp` lights every lamp at every pixel and at every ray hit with one traced shadow ray each, so pixels, kept probe hits and cache hits share one loop and see this frame's light. No shadow maps, no light history. GI presets sample point lamps on hits, fills, and cache rays. Pixels stay on the full sum. The deviations list names where that leaves Bitterli et al. 2020.
 - **Reference:** Lumen uses virtual shadow maps for pixels and shadow-map lookups plus traced rays for surface-cache texels, up to 8 lights per 8×8 card tile [W22]; MegaLights samples many lights stochastically and denoises. Many-light trees [LT].
 - **Differences:** traced shadows match the reference tracer exactly and need no denoiser; cost grows with lamp count (fine for the stress scene, five lamps). The design's deterministic light-tree cut per tile and cached shadow masks are not built.
 - **Scores (P6):** direct view matches a `bounces: 0` trace to about 2 %.
@@ -289,7 +324,7 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
   - Pixels read texels directly: this is what removes the screen-probe swim (texels are world-anchored), so texel noise and drift are on screen; Lumen hides cache noise behind the final gather.
   - Running mean of up to 64 sets instead of Lumen's 4-frame accumulation, because the texel is shown directly.
   - Camera only orders updates (flag 524288, S31, testing): once a texel has a set its lit-from point is frozen (no restart when a nearer reader appears), and a texel claimed at a new size (the eye crossed a size ring) starts from the light and count (up to 16 sets) of the lit texel at the next size up or down, as Lumen resamples lighting on realloc.
-  - Per-texel estimator (flag 1048576, S32, testing), after GIBS [GIBS21] and Stachowiak's multi-scale mean estimator [MSME]: besides the long-term mean each texel keeps a short-term mean (blend 0.08) and short-term luminance variance. The long-term blend is a plain mean for the first 16 sets, then grows with how many standard deviations the short-term mean sits from it (with an inconsistency term and a variance-based reduction) and falls to 1/256 once they agree, so a converged texel neither drifts nor freezes and still follows real change. Fireflies above the short-term mean + 8σ are clipped. Converged texels whose sets agree (inconsistency < 0.3) go dormant: the sweep relights them one round in 8 to notice change, freeing budget for the rest (GIBS: dormant surfels fire only change-detection rays). Our ray count per relight stays 64; GIBS varies rays per surfel instead.
+  - Per-texel estimator (flag 1048576, S32, testing), after GIBS [GIBS21] and the multi-scale mean estimator in Barré-Brisebois et al., Ray Tracing Gems ch. 25, `MultiscaleMeanEstimator.hlsl`: besides the long-term mean each texel keeps a short-term mean (blend 0.08) and short-term luminance variance. The long-term blend is a plain mean for the first 16 sets, then grows with how many standard deviations the short-term mean sits from it (with an inconsistency term and a variance-based reduction) and falls to 1/256 once they agree, so a converged texel neither drifts nor freezes and still follows real change. Fireflies above `0.1 + short mean + surface_cache.firefly_sigma * deviation` are clipped (default sigma 8, biased). Converged texels whose sets agree (inconsistency < 0.3) go dormant: the sweep relights them one round in 8 to notice change, freeing budget for the rest (GIBS: dormant surfels fire only change-detection rays). Our ray count per relight stays 64; GIBS varies rays per surfel instead.
   - **Decision (S57, Anthony 2026-10-12): no camera-distance texel sizes.** The bands (6.25 cm within 2.5 m, 12.5 cm to 8 m, 25 cm and up past it, and the ray-hit patches doubling past 8 m) are removed. Every band edge was a ring that followed the camera; crossing it re-keyed texels into new cells that started with few samples, which Anthony saw as coarse grain on walls and floors while running that cleared only after he stopped. Inheriting light across the edge (S56, below) softened it but could not remove it: the new cells still converged from the start, and the far band's 25 cm cells were the ray-hit patches, which hold at most 3 one-relight sets (flag 131072). Lumen's cards are placed by geometry and keep their resolution through camera moves (its distance-based page sizing is a residency budget with hysteresis and resampling), and none of the surveyed papers keys cell size to the eye. Detail and effort now come only from the light and the schedule (below); the camera only decides residency (texels unread for 1800 frames are freed) and update order (young texels first).
   - Band crossings (S56, superseded by S57 the same day; Anthony saw a ring where quality dropped as he came closer): the size bands (6.25 cm within 2.5 m, 12.5 cm to 8 m, 25 cm and up past it) stay, but a texel claimed at a new size now inherits the old size's converged light bilinearly at its centre (the 4 nearest texels of the size up, or the 2 x 2 finer texels it covers) with their full sample count (to the cap), not one texel's light and at most 4 sets. Its own sets then blend in by count, so a crossing never shows fewer samples than before, in either direction. Band edges have 10 % hysteresis: inside the margin a pixel keeps reading the size its surface is already lit at. Debug view `texels` colours the size each pixel reads (red 6.25, green 12.5, blue 25 cm, magenta coarser; dim under 4 sets). Approach run (quick): grain 0.0059 -> 0.0052 (worst frame 0.0087 -> 0.0071), recovery 71 -> 49 frames, soaked end against fresh 0.0175 -> 0.0142; trail 0.0372 -> 0.0421 (passes, limit 0.05).
 - **What decides history and effort per texel (after the bands went), and where each comes from:**
@@ -327,7 +362,7 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 - **Differences:** we invalidate by ray path (exact) rather than by hit velocity.
 - **SC movers (S42-S49):** occluders that moved in the last 240 frames are movers; pixels inside a mover's bounds and within 1 m of this frame's changes show the probes, texels near a change are relit first with 2-set means. While only the light changes (lamps move), texels stay shown and lag a little, as Lumen's surface cache does (S46/S47; swapping every pixel to the probes swapped methods and was most of the mix error).
 - **Scores:** P6 passes trail, mix, spin. SC (S49): mix 0.0084 / 0.0087 (target 0.0055), spin 0.0871 / flicker 0.0470 (the spinning green box is not caught as a mover; Anthony judges spin by eye). S54K (headless gi-check, not comparable bit for bit with the windowed rows): the movers never reached the GPU before S52 (the change block upload stopped after the changes); fixed, object-local texels pooled and trusted by sets (S53), texels kept shown next to movers (S54K): spin 0.0716 / 0.0397 (S49 headless 0.0861 / 0.0460), mix 0.0092 / 0.0095 (S49 headless 0.0084 / 0.0087, worse). Quick tier not yet run on the S54K defaults.
-- **Open:** object-local texels (GIBS: transform id + local position) are not built; texels on a moving box are world-keyed and re-claimed as it moves.
+- **Movers (2026-10-14):** cache entries on a mover store an object-local position and normal and are transformed from the GPU transform buffer each frame (`surface_cache.attach_movers`, default on). Static geometry stays on the world lattice. GIBS attaches every surfel; world probes stay world-anchored here. Off keeps the world-keyed path.
 
 ## Contact term
 
@@ -353,6 +388,13 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 - **Reference:** Lumen is checked visually against the path tracer; we gate numerically.
 - **Fill run (S71D/S71G, time to fill; Anthony 2026-10-12: pop-in is fine when the screen fills near-immediately, smoothing would be lag, so S71E's display ramp was reverted):** `fill.rhai`, the turn pose settled, then a cut to the unseen side held 120 frames (reveal/) and settled (reveal_end/), then a sun move 12:00 -> 15:00 held 120 frames (light/) and settled (light_end/). Score: frames until mean |L - settled| (linear luminance, 320 x 180) stays under 0.005, target 30 (provisional, MISS not FAIL); the note gives the gap at frames 0/10/30/60 and the share of pixel-frames stepping more than 0.01 from their 9-frame average (pop-in, not graded). With turns (turn run) and night->day (dnout frames to 2 %), time to good is the main lighting score. Older builds: run `fill.rhai` with their binary and score with `gi-check --score-only --only fill`.
 - **Open:** the still shimmer row (frame to frame, 60 frames) reads 0 for every build; the drift Anthony sees is slower than 60 frames at 8-bit, so a longer-window row (first vs last of ~600 still frames) is next.
+
+## Reference check
+
+- **Ours:** `make lighting-ref-check` (`genos-stress lighting-ref check`). Each catalog checkpoint is scored against the CPU path trace. The report is `./genos-debug/refcheck/<timestamp>/` (or `--out`): side by side, a heatmap, `metrics.json`, `frames.tsv`, and a summary that says why the verdict was given. Owner mode and lavapipe-small share the frame indices. The scene clock is `--fixed-dt` (default 1/60 s); wall time is logged and does not choose the pose. On a bounced picture the gates are the blurred relative error and the mean luminance ratio. FLIP is reported there and does not change the verdict. FLIP still gates direct-only, where p99 at or under 0.90 is the edge floor: both pictures already sample the pixel centre and antialias is off. Relative error divides by max(Yr, 0.25 times the picture mean, 0.02). That fraction is not scaled by the reference noise. Room-a's blurred error of 0.134 needs a person. The blurred-error fail line stays 0.12. Raw per-pixel error at or under the reference's own noise is not a fail. Hall, hall-moving, and corner stay fails. Thresholds are `crates/lighting-ref/lighting-ref.conf`. `BASE=<sha>` compares with `./genos-debug/reference/<sha>/metrics.json`. Generate writes that file from the reference noise so the comparison works before a live capture. A check that scores pictures replaces it with those candidate metrics. A value in the band, a one-sample trace, or two metrics that disagree needs a person and does not auto-pass. On a bounced picture FLIP is left out of the verdict reasons. The settle cap is recorded in the shot note and does not change the verdict. The planted-defect self-test runs without a window and is written to `self-test/`. How to run it, the scenes, and the blind spots are in [the reference check](reference-check.md).
+- **Reference:** the path tracer is unidirectional path tracing. LDR-FLIP follows Andersson, Nilsson, and Akenine-Möller 2020 with the departures named in `crates/lighting-ref/src/flip.rs`.
+- **Differences:** full effort is a lighting-settings overlay, not a second ground truth. Sponza is listed and skipped. Hell-100 is one 25 m section. `direct-only/hall` traces zero bounces and renders with bounce count 0 and ambient off; it is the normalisation control, and a luminance ratio far from 1 stays a fail. `gi-check` remains the scripted gate.
+- **Networking:** replicated state is none (pictures stay in the run directory). Authority is the machine that runs the check. Prediction / rollback is none. The path trace is deterministic for a commit, a scene, and a sample count. Live frames share one index list and one fixed scene step; the pixels are not cross-device deterministic. A headless server does not run this check.
 
 ## Fill speed: sparse fill, reuse, denoise (S72, 2026-10-12)
 
@@ -391,7 +433,7 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 
 GI v1 (radiance cascades, the world probe tier, `stage_tier`, the v1 `kick_light` paths, `light.comp`, `scene.frag`, `tier.glsl`, `ssaa.comp`, `lighting.rs`, `probes.rs`, `probe_tier.rs`, `field.rs`, `shadow.rs`, their tests and bench columns, and the `GENOS_GI` switch and stress `gi` knob) is gone. Removed with it: SSAA (it drew through the v1 fragment shader; panel code 2 now means FXAA), the live-readback switch, `TierStats` (replaced by `SettleStats { settled, still_frames }` from `Renderer::settle_stats()`), and the debug views that showed v1 data (cascade, probes, light field). Debug views now: full, direct, bounce, albedo, normal, depth, light, texels.
 
-Historical v1 numbers (for comparison only; v1 cannot be run any more). Full tables in [GI v2 baseline](../gi-v2-baseline.md) (master `0874229d`, tag `gi-v2-baseline`, zanven-pc, RTX 4070, 2026-10-10):
+Historical v1 numbers (for comparison only; v1 cannot be run any more). Full tables were in the deleted baseline doc (master `0874229d`, tag `gi-v2-baseline`, zanven-pc, RTX 4070, 2026-10-10); recover from git history:
 
 | v1 check (320x180, CPU reference) | mean_rel | bias |
 |---|---|---|
@@ -530,3 +572,48 @@ already inside the filter. `GENOS_LIGHTING_DEBUG` or `GENOS_LIGHTING_SC_TRACE`
 prints `lightingatrous` (dirty fraction, mode `list`/`dense`, threshold,
 filtered count). Owner's S78X moving regression, RTX 4070, 1920x1080: a-trous
 6.6 -> 9.4 ms, 42 -> 37 fps. This fallback is not re-timed here.
+
+### S79: half-resolution a-trous, adaptive iterations, shared-memory tiles
+
+The moving stress scene's sun changes every frame, so a dirty-block skip of the
+a-trous (tried in PR #26) still filters every block. S79 tried a half-resolution
+bounce wavelet, fewer iterations on stable texels, and shared-memory tiles.
+
+Half-res and tiles are removed. On the RTX 4070 at 1920×1080 they were slower
+than the scalar full wavelet (half moving 17.8 ms vs full 11.7, tiles 18.3 vs
+11.6). The hashed lattice does not shrink the dispatch, and the lavapipe-safe
+tile kernel disables the work lists. Adaptive stays an experimental knob, off
+on every preset: the retest at 476ec13 missed the picture bar (mean 2.8 / p99
+11–13 against 1.5 / 10) and still-atrous got slower (3.13 vs 2.7). Medium is
+the full-resolution scalar wavelet at 3 iterations. The plain pipeline,
+compiled without the adaptive branch, put high back to about 8.0 ms against
+GI's 7.8 ms moving. Numbers and the five-line postmortem are in
+[S79](experiments/S79-half-res-atrous.md).
+
+### S80: screen wavelet
+
+`denoise_launch` is `hash` or `screen`. Preset high uses `screen`: one 8×8
+group per picture block. The other presets, and full effort, keep `hash`,
+the baseline GI slot wavelet. `--denoise-launch` and `GENOS_LIGHTING_DENOISE_LAUNCH`
+override the preset. The screen launch runs the same variance, à-trous, and
+push on the visible 12.5 cm cells and on the active cells in their à-trous
+footprints. One pixel claims each hit cell and lists those taps. A still
+camera with nothing moving reuses the list and appends cells claimed after
+that build. Compose bilerps that field with the same weights as the hash
+launch. A plane or normal weight on the screen blend alone moved the hall
+off the hash picture. The launch is one 8×8 group per picture block, not
+one group per 64 slots of the million-slot table.
+
+The G-buffer stays the GI packing. A geometric axis in the flag byte
+changed medium as well as high (the lookup replaced the shading normal on
+every preset) and did not remove the Sponza banner squares, so it is not
+used. The screen gather keys a cell with the shading normal, the same key
+the hash compose uses. A 4070 moving-camera check put hash and screen within
+0.15% on every flicker and speckle measure. Screen is faster: Sponza went
+from 8.75 fps to 21.3 fps. That is why preset high uses the screen launch.
+The earlier still-hall cross-process compare stayed outside the GI tip floor
+(high still p99 11.2 against 1.3, Sponza atrium 33 against 2). The GI tip
+picture gate pins `denoise_launch=hash`.
+
+Papers, the deviations, and the owner GPU commands are in
+[S80](experiments/S80-screen-denoise.md). Lavapipe does not time the GPU.

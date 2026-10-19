@@ -1,3 +1,8 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::expect_used, reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md")]
+
 //! Submit one mixed buffer through the platform device.
 
 use genos_audio::{mix, submit, Barrier, Listener, Source, Vec3};

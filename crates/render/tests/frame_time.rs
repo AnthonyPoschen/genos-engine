@@ -1,3 +1,5 @@
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+
 //! Equal elapsed time keeps the same motion. A bad interval does not advance.
 
 use genos_render::{Kind, LiveParticle, Simulation, World};
@@ -81,6 +83,11 @@ fn equal_elapsed_time_matches_across_frame_schedules() {
         lights: Vec::new(),
         ceiling: None,
         sky: None,
+        lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
+        fps_counter: genos_scene::FpsCounterSettings::default(),
+        event_loop: genos_scene::EventLoopSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     };
     let mouse = Actions {
         capture_click: true,

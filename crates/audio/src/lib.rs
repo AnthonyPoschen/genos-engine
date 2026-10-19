@@ -1,3 +1,5 @@
+#![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Game audio. The mix is stereo PCM. The operating system only receives that mix.
 //!
 //! Linux submits through ALSA. Windows submits through WASAPI. macOS submits

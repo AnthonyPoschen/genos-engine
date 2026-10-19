@@ -1,6 +1,6 @@
 # Renderer performance review
 
-Written 2026-10-13 against `gi-v2` at `9e08d7d`. This is a review. The timer split in this change makes `GPU_MS` report lighting apart from the raster. It does not change a pass. Every later cut still draws the whole frame.
+Written 2026-10-13 against the former `gi-v2` tip at `9e08d7d` (now on `master`). Terms follow `docs/lighting/GLOSSARY.md` (plain **GI**). This is a review. The timer split in this change makes `GPU_MS` report lighting apart from the raster. It does not change a pass. Every later cut still draws the whole frame.
 
 **Goal.** A moving stress frame at 1920×1080 in about 5 ms (200 fps). The measured frame is 13.4–16.7 ms (62–77 fps).
 

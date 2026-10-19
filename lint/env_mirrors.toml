@@ -1,0 +1,1206 @@
+# Environment names the engine reads.
+# A Rust string GENOS_* or OCC_* that is not listed here fails scripts/lint-env-mirrors.py.
+# kind = mirror: a CLI argument exists and wins when both are set.
+# kind = todo: read today, and still needs an argument. Do not add new todos.
+# kind = override: a documented secondary of a non-CLI mechanism.
+# kind = os / build: the operating system or Cargo, not an engine switch.
+# kind = test: a harness variable, not a shipping switch.
+# Date added: 2026-10-14.
+
+[[var]]
+name = "GENOS_FPS_COUNTER"
+kind = "mirror"
+detail = "--fps-counter"
+
+[[var]]
+name = "GENOS_FPS_HZ"
+kind = "mirror"
+detail = "--fps-hz"
+
+[[var]]
+name = "GENOS_MENU"
+kind = "mirror"
+detail = "--menu"
+
+[[var]]
+name = "GENOS_GPU_TIMES"
+kind = "mirror"
+detail = "--gpu-times"
+
+[[var]]
+name = "GENOS_LIGHTING_AMBIENT"
+kind = "mirror"
+detail = "--ambient"
+
+[[var]]
+name = "GENOS_LIGHTING_BOUNCES"
+kind = "mirror"
+detail = "--bounces"
+
+[[var]]
+name = "GENOS_LIGHTING_COMPOSE_ALL"
+kind = "mirror"
+detail = "--full-effort"
+
+[[var]]
+name = "GENOS_LIGHTING_DEBUG"
+kind = "mirror"
+detail = "--lighting-debug"
+
+[[var]]
+name = "GENOS_LIGHTING_DENOISE_LAUNCH"
+kind = "mirror"
+detail = "--denoise-launch"
+
+[[var]]
+name = "GENOS_LIGHTING_DENOISE_SCREEN"
+kind = "mirror"
+detail = "--denoise-screen"
+
+[[var]]
+name = "GENOS_LIGHTING_FULL_EFFORT"
+kind = "mirror"
+detail = "--lighting-full-effort"
+
+[[var]]
+name = "GENOS_LIGHTING_PRESET"
+kind = "mirror"
+detail = "--preset"
+
+[[var]]
+name = "GENOS_LIGHTING_SUN"
+kind = "mirror"
+detail = "--lighting-sun"
+
+[[var]]
+name = "GENOS_LIGHTING_SUN_BANDS"
+kind = "mirror"
+detail = "--lighting-sun-bands"
+
+[[var]]
+name = "GENOS_LIGHTING_TIME"
+kind = "mirror"
+detail = "--time-of-day"
+
+[[var]]
+name = "GENOS_LIGHTING_UNFILLED"
+kind = "mirror"
+detail = "--unfilled"
+
+[[var]]
+name = "GENOS_LIGHTING_UNFILLED_DUMP"
+kind = "mirror"
+detail = "--unfilled-dump"
+
+[[var]]
+name = "GENOS_LIGHTING_UNFILLED_TINT"
+kind = "mirror"
+detail = "--unfilled-tint"
+
+[[var]]
+name = "GENOS_SCENE"
+kind = "mirror"
+detail = "--scene"
+
+[[var]]
+name = "GENOS_UNFILLED_DIR"
+kind = "mirror"
+detail = "--out"
+
+[[var]]
+name = "GENOS_UNFILLED_MAX_AGE_SECS"
+kind = "mirror"
+detail = "--unfilled-max-age-secs"
+
+[[var]]
+name = "GENOS_UNFILLED_MAX_BYTES"
+kind = "mirror"
+detail = "--unfilled-max-bytes"
+
+[[var]]
+name = "GENOS_UNFILLED_MAX_FOLDERS"
+kind = "mirror"
+detail = "--unfilled-max-folders"
+
+[[var]]
+name = "GENOS_UNFILLED_SESSION_CAP"
+kind = "mirror"
+detail = "--unfilled-session-cap"
+
+[[var]]
+name = "GENOS_ENGINE_COMMIT"
+kind = "override"
+detail = "report stamp when git rev-parse is unavailable"
+
+[[var]]
+name = "GENOS_MCP_PORT"
+kind = "override"
+detail = "discovery directory is the primary path; this forces one port"
+
+[[var]]
+name = "GENOS_DEBUG_KEYS"
+kind = "override"
+detail = "built-in chords are primary; this file replaces the listed actions"
+
+[[var]]
+name = "GENOS_MENU_LAYOUT"
+kind = "override"
+detail = "debug/lighting/menu.txt is primary; this path replaces that table"
+
+[[var]]
+name = "HOME"
+kind = "os"
+detail = "Omarchy theme path only. Never an output root."
+
+[[var]]
+name = "VK_ICD_FILENAMES"
+kind = "os"
+detail = "lavapipe selection for the reference capture"
+
+[[var]]
+name = "WAYLAND_DISPLAY"
+kind = "os"
+detail = "present when the window tests run on Wayland"
+
+[[var]]
+name = "XDG_RUNTIME_DIR"
+kind = "os"
+detail = "MCP discovery directory"
+
+[[var]]
+name = "XDG_STATE_HOME"
+kind = "os"
+detail = "Omarchy theme path"
+
+[[var]]
+name = "CARGO_CFG_TARGET_OS"
+kind = "build"
+detail = "Cargo sets this for build scripts"
+
+[[var]]
+name = "OUT_DIR"
+kind = "build"
+detail = "Cargo sets this for build scripts"
+
+[[var]]
+name = "GENOS_BENCH"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_BENCH_FLICKER"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_BENCH_SHOTS"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_GI_CHECK_BOUNCES"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_GI_FLOOR_A"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_GI_FLOOR_B"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_GPUREF_CPU_SPP"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_GPUREF_CPU_TRIANGLES"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_GPUREF_OUT"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_GPUREF_VIEWS"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_PICTURE_DUMP"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_PICTURE_PRESET"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_PIPELINE_LIMIT"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "OCC_DUMP"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_BAKE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_BAKE_CACHE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_GPUREF_FLIP"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_GPU_DISPATCH"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_AMBIENT_COLOR"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_AMBIENT_GROUND"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_AMBIENT_INTENSITY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_ASYNC"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_ATROUS_DIRTY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_BORROW"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_CACHE_HZ"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_CACHE_PICKS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_CATCH_UP"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_COMPOSE_REUSE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DAWN_COLOR"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DAWN_INTENSITY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DAY_COLOR"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DAY_INTENSITY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DENOISE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DENOISE_ADAPTIVE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DENOISE_ITERS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DENOISE_VARIANCE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DIRECT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DIRECT_LIGHTS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DIRECT_REFRESH"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DIRECT_SCALE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DUMP"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DUMP_DIR"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DUSK_COLOR"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DUSK_INTENSITY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_EMISSIVE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_GI"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_GI_REFRESH"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_CANDIDATES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_DIAG"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_HISTORY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_RADIUS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_RAYS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_REUSE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_SAMPLES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_LAMP_PICK_UNBIASED"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_MOVED_DROP"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_NIGHT_COLOR"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_NIGHT_INTENSITY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_NOON_COLOR"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_NOON_INTENSITY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_PREFILL"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_PROBES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_PROBE_RAYS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_PROBE_REFRESH"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_PROBE_STALE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_REF_BOUNCES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_REF_CAPTURE_FRAMES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_REF_FIXED_DT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_REF_SETTLE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_REF_SETTLE_CAP"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_REF_SETTLE_FRAMES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_REF_WARMUP_FRAMES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SC_BUDGET_SHIFT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SC_FLAGS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SC_LOCAL"
+kind = "mirror"
+detail = "--surface-cache-attach-movers (previous name; used only when GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS is omitted)"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS"
+kind = "mirror"
+detail = "--surface-cache-attach-movers"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_BLEND"
+kind = "mirror"
+detail = "--surface-cache-blend"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS"
+kind = "mirror"
+detail = "--surface-cache-dormant-rays"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA"
+kind = "mirror"
+detail = "--surface-cache-firefly-sigma"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET"
+kind = "mirror"
+detail = "--surface-cache-ray-budget"
+
+[[var]]
+name = "GENOS_LIGHTING_SC_SETTLE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SC_TRACE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SHADOWS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SHADOW_CELL"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SHADOW_FILTER"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SHADOW_REFRESH"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_SKY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_TILE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_TOGGLES"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_TOGGLES_FILE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_URGENT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_WORLD"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_WORLD_CACHE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_WORLD_CAP"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_WORLD_CELL"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_WORLD_REFRESH"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_WORLD_STALE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_YOUNG_ONLY"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_MENU_SHOT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_REFERENCE_CACHE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_REFERENCE_GPU"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_REFERENCE_OUT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_REFERENCE_THREADS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_SCENE_DELTA"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_STRESS_DAY_SECONDS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_STRESS_DYNAMIC"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_STRESS_FIXED_DT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_STRESS_LAYOUT"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_STRESS_LIGHTS"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_STRESS_SCALE"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_STRESS_STEP"
+kind = "todo"
+detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_TITLE_TAG"
+kind = "todo"
+detail = "no CLI argument yet"
+
+# Deprecated GI2 aliases (one release).
+
+[[var]]
+name = "GENOS_GI2_AMBIENT"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_AMBIENT; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_AMBIENT_COLOR"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_AMBIENT_COLOR; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_AMBIENT_GROUND"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_AMBIENT_GROUND; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_AMBIENT_INTENSITY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_AMBIENT_INTENSITY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_ASYNC"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_ASYNC; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_ATROUS_DIRTY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_ATROUS_DIRTY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_BORROW"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_BORROW; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_BOUNCES"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_BOUNCES; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_CACHE_HZ"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_CACHE_HZ; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_CACHE_PICKS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_CACHE_PICKS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_CATCH_UP"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_CATCH_UP; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_COMPOSE_ALL"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_COMPOSE_ALL; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_COMPOSE_REUSE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_COMPOSE_REUSE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DAWN_COLOR"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DAWN_COLOR; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DAWN_INTENSITY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DAWN_INTENSITY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DAY_COLOR"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DAY_COLOR; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DAY_INTENSITY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DAY_INTENSITY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DEBUG"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DEBUG; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DENOISE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DENOISE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DENOISE_ADAPTIVE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DENOISE_ADAPTIVE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DENOISE_ITERS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DENOISE_ITERS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DENOISE_LAUNCH"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DENOISE_LAUNCH; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DENOISE_SCREEN"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DENOISE_SCREEN; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DENOISE_VARIANCE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DENOISE_VARIANCE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DIRECT"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DIRECT; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DIRECT_LIGHTS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DIRECT_LIGHTS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DIRECT_REFRESH"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DIRECT_REFRESH; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DIRECT_SCALE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DIRECT_SCALE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DUMP"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DUMP; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DUMP_DIR"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DUMP_DIR; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DUSK_COLOR"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DUSK_COLOR; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_DUSK_INTENSITY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DUSK_INTENSITY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_EMISSIVE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_EMISSIVE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_FILL"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_FILL; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_FULL_EFFORT"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_FULL_EFFORT; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_GI"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_GI; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_GI_REFRESH"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_GI_REFRESH; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_CANDIDATES"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_CANDIDATES; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_DIAG"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_DIAG; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_HISTORY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_HISTORY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_RADIUS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_RADIUS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_RAYS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_RAYS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_REUSE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_REUSE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_SAMPLES"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_SAMPLES; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_LAMP_PICK_UNBIASED"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_LAMP_PICK_UNBIASED; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_MOVED_DROP"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_MOVED_DROP; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_NIGHT_COLOR"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_NIGHT_COLOR; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_NIGHT_INTENSITY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_NIGHT_INTENSITY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_NOON_COLOR"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_NOON_COLOR; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_NOON_INTENSITY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_NOON_INTENSITY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_PREFILL"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_PREFILL; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_PRESET"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_PRESET; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_PROBE_RAYS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_PROBE_RAYS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_PROBE_REFRESH"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_PROBE_REFRESH; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_PROBES"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_PROBES; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_PROBE_STALE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_PROBE_STALE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SC_BUDGET_SHIFT"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SC_BUDGET_SHIFT; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SC_FLAGS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SC_FLAGS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SC_LOCAL"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SC_LOCAL; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SC_SETTLE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SC_SETTLE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SC_TRACE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SC_TRACE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SHADOW_CELL"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SHADOW_CELL; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SHADOW_FILTER"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SHADOW_FILTER; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SHADOW_REFRESH"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SHADOW_REFRESH; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SHADOWS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SHADOWS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SKY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SKY; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SUN"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SUN; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SUN_BANDS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SUN_BANDS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SURFACE_CACHE_ATTACH_MOVERS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SURFACE_CACHE_BLEND"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SURFACE_CACHE_BLEND; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SURFACE_CACHE_DORMANT_RAYS"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SURFACE_CACHE_FIREFLY_SIGMA"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_SURFACE_CACHE_RAY_BUDGET"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_TILE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_TILE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_TIME"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_TIME; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_TOGGLES"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_TOGGLES; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_TOGGLES_FILE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_TOGGLES_FILE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_UNFILLED"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_UNFILLED; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_UNFILLED_DUMP"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_UNFILLED_DUMP; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_UNFILLED_TINT"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_UNFILLED_TINT; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_URGENT"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_URGENT; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_WORLD"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_WORLD; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_WORLD_CACHE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_WORLD_CACHE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_WORLD_CAP"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_WORLD_CAP; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_WORLD_CELL"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_WORLD_CELL; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_WORLD_REFRESH"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_WORLD_REFRESH; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_WORLD_STALE"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_WORLD_STALE; one-release warning"
+
+[[var]]
+name = "GENOS_GI2_YOUNG_ONLY"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_YOUNG_ONLY; one-release warning"
+
+[[var]]
+name = "GENOS_GI_DEBUG"
+kind = "override"
+detail = "deprecated alias of GENOS_LIGHTING_DEBUG; one-release warning"
+

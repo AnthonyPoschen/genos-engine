@@ -1,3 +1,9 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Named numbers a tool, a script or a slider can read and set.
 //!
 //! An example publishes its own (time of day, lamp count, ...) through [`Knobs`].
@@ -90,6 +96,23 @@ impl Knob {
     }
 }
 
+/// A named camera pose a scene file can jump to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CheckpointPose {
+    pub position: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+/// Whether a scene load has installed its world yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadPace {
+    /// The worker is still reading the scene. Keep pumping the window.
+    Pending,
+    /// The scene the next draw uses is in place.
+    Ready,
+}
+
 /// What an example lets the tools reach: its scene, and settings of its own.
 pub trait Host {
     /// The scene the next draw uses. Edits land after the example's own update.
@@ -103,6 +126,39 @@ pub trait Host {
     /// Set one by name. The value is already snapped to the knob's step.
     fn set_knob(&mut self, name: &str, _value: f64) -> Result<(), String> {
         Err(format!("unknown knob {name}"))
+    }
+
+    /// Scene names this host can load. Empty when the host has one scene.
+    fn list_scenes(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Replace the scene. The tools drop their edits and clear the lighting cache.
+    fn load_scene(&mut self, name: &str) -> Result<(), String> {
+        Err(format!("this host has no scene {name}"))
+    }
+
+    /// Start a scene load. [`LoadPace::Pending`] means the frame keeps pumping
+    /// and calls [`Host::poll_load`] until the scene is in place.
+    fn begin_load(&mut self, name: &str) -> Result<LoadPace, String> {
+        self.load_scene(name)?;
+        Ok(LoadPace::Ready)
+    }
+
+    /// [`LoadPace::Ready`] when no load is running, or when the worker has installed
+    /// the scene.
+    fn poll_load(&mut self) -> Result<LoadPace, String> {
+        Ok(LoadPace::Ready)
+    }
+
+    /// Checkpoint names for the scene that is loaded.
+    fn list_checkpoints(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Remember `name` as the reset pose and return it. The tools move the camera.
+    fn jump_checkpoint(&mut self, name: &str) -> Result<CheckpointPose, String> {
+        Err(format!("this host has no checkpoint {name}"))
     }
 }
 

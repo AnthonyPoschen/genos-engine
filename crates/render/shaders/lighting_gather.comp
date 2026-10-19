@@ -1,5 +1,5 @@
 #version 450
-// GI v2 screen probes, pass 4: each probe's kept rays binned by direction into the
+// GI screen probes, pass 4: each probe's kept rays binned by direction into the
 // cells of its pattern as it stands now (lighting_common.glsl "cells"): per cell the mean
 // light and hit distance, which the spatial filter (lighting_filter.comp) compares
 // across neighbours and turns into SH.
@@ -53,6 +53,10 @@ shared uint g_samples;
 void gather_bin() {
     uint probe = gl_WorkGroupID.x;
     uint k = gl_LocalInvocationID.x;
+    // The workgroup is 64 threads. A preset with fewer rays must not index
+    // kept hits as if every probe still had 64, or the cells fill with
+    // neighbouring probes' memory and the tiles go saturated.
+    uint rays = lighting_rays();
     if (k == 0u) {
         g_samples = 0u;
     }
@@ -100,7 +104,10 @@ void gather_bin() {
         vec3 dir;
         vec3 sn;
         bool fill = src == 0u;
-        uint h = ((fill ? probe : src - 1u) * LIGHTING_STRATA + s) * 64u + k;
+        if (k >= rays) {
+            continue;
+        }
+        uint h = ((fill ? probe : src - 1u) * LIGHTING_STRATA + s) * rays + k;
         if (fill && !lighting_fill_ray(probe, s, k, origin, dir, sn)) {
             continue;
         }
@@ -134,15 +141,17 @@ void gather_bin() {
         return;
     }
     atomicAdd(g_samples, samples);
-    vec4 a = vec4(0.0);
-    float t = 0.0;
-    [[dont_unroll]] for (uint e = 0u; e < 64u * LIGHTING_STRATA; e++) {
-        if (g_cell[e] == k) {
-            a += g_val[e];
-            t += g_t[e];
+    if (k < rays) {
+        vec4 a = vec4(0.0);
+        float t = 0.0;
+        [[dont_unroll]] for (uint e = 0u; e < rays * LIGHTING_STRATA; e++) {
+            if (g_cell[e] == k) {
+                a += g_val[e];
+                t += g_t[e];
+            }
         }
+        work.v[LIGHTING_GATHER_HOLD ? lighting_graw_at(probe, k) : lighting_cell_at(0u, probe, k)] = a.w > 0.0 ? vec4(a.rgb / a.w, t / a.w) : vec4(0.0, 0.0, 0.0, -1.0);
     }
-    work.v[LIGHTING_GATHER_HOLD ? lighting_graw_at(probe, k) : lighting_cell_at(0u, probe, k)] = a.w > 0.0 ? vec4(a.rgb / a.w, t / a.w) : vec4(0.0, 0.0, 0.0, -1.0);
     barrier();
     if (LIGHTING_GATHER_HOLD && k == 0u) {
         work.v[lighting_gdirty_at() + 2u * probe].y = uintBitsToFloat(g_samples);

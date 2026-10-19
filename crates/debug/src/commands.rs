@@ -1,3 +1,5 @@
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! The command catalogue the MCP port lists. Each command takes one JSON object.
 
 use genos_mcp::command::CommandSpec;
@@ -40,9 +42,9 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec(
             "capture",
-            "Save the picture: path (relative to the shot dir), mode (a view), width/height (resampled), name (keep in memory for diff), region [x,y,w,h] in 0..1 for the luminance in the reply.",
+            "Save the picture: path (relative to the shot dir), mode (a view), width/height (resampled), name (keep in memory for diff), region [x,y,w,h] in 0..1 for the luminance in the reply. ui (default false) leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays.",
         ),
-        spec("captures", "Save several views in consecutive frames: modes [..], prefix, width, height."),
+        spec("captures", "Save several views in consecutive frames: modes [..], prefix, width, height. ui (default false) leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays."),
         spec("luminance", "Mean, min and max linear luminance and black share of region [x,y,w,h] (0..1) in mode."),
         spec(
             "diff",
@@ -58,9 +60,81 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec(
             "compare",
-            "Trace a reference (as `reference`, or reuse a stored one: reference: name), then capture the live picture (mode, default full; frames: N waits N frames after the trace starts; or live: a capture name/PNG) and compare in linear luminance on block x block averages (default 2; the reference's noise falls with the block side). Saves <prefix>-reference.png, -live.png, -heatmap.png (red too bright, blue too dark, full at 50% error). Replies mean_abs, mean_rel (share of the light that is wrong), p95_abs, p95_rel, bias (+ too bright), ref_mean, live_mean and regions (grid, default [3,3], row-major mean_rel and bias). region limits it.",
+            "Trace a reference (as `reference`, or reuse a stored one: reference: name), then capture the live picture (mode, default full; frames: N waits N frames after the trace starts; or live: a capture name/PNG) and compare in linear luminance on block x block averages (default 2; the reference's noise falls with the block side). Saves <prefix>-reference.png, -live.png, -heatmap.png (red too bright, blue too dark, full at 50% error). Replies mean_abs, mean_rel (share of the light that is wrong), p95_abs, p95_rel, bias (+ too bright), ref_mean, live_mean and regions (grid, default [3,3], row-major mean_rel and bias). region limits it. ui (default false) leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays.",
         ),
         spec("timing", "Frame time breakdown over the last frames (default 60): fps, frame, draw CPU, GPU."),
+        spec(
+            "get_lighting_settings",
+            "The lighting settings in force (text form) and the last collected GPU pass: name, milliseconds, and dispatch count. One frame behind the draw that just finished.",
+        ),
+        spec(
+            "set_lighting_settings",
+            "Partial lighting update. Keys match the settings text (direct, shadows, gi, bounces, probes, …). A text field overlays key=value lines. The scene keeps the result; a renderer override is cleared. Applies on the next draw.",
+        ),
+        spec(
+            "list_presets",
+            "potato, day-cycle, gi-1bounce, low, medium, and high, each with the settings text that preset writes.",
+        ),
+        spec(
+            "apply_preset",
+            "Replace the scene lighting with preset name (potato, day-cycle, gi-1bounce, low, medium, high) and clear a renderer override.",
+        ),
+        spec(
+            "get_debug_settings",
+            "The debug output directory in force (text form) and whether captures keep the UI. --out wins over GENOS_UNFILLED_DIR, which wins over the scene value. The default directory is genos-debug/unfilled under the working directory. ui defaults to false: a capture leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays.",
+        ),
+        spec(
+            "set_debug_settings",
+            "Partial debug-output update. Key out is the unfilled directory. Key ui is on or off (default off) and is the capture default. A capture command's ui argument overrides it for that shot. A text field overlays key=value lines. Writes the scene. --out and GENOS_UNFILLED_DIR still overlay the directory used for the next save. --ui forces ui on.",
+        ),
+        spec(
+            "get_fps_counter",
+            "The frame-rate overlay settings in force (text form): enabled and rate_hz. Off by default, 4 Hz. --fps-counter and --fps-hz win over GENOS_FPS_COUNTER and GENOS_FPS_HZ, which win over the scene value.",
+        ),
+        spec(
+            "set_fps_counter",
+            "Partial frame-rate overlay update. Keys are enabled (on/off) and rate_hz (0.25 to 30). A text field overlays key=value lines. Writes the scene. --fps-counter, --fps-hz, and the GENOS_FPS_* mirrors still overlay the value the readout uses.",
+        ),
+        spec(
+            "get_event_loop",
+            "The event-loop stall mark in force (text form): longest_stall_ms, the longest gap between window pumps since the last clear. The frame writes it. The budget is 100 ms.",
+        ),
+        spec(
+            "set_event_loop",
+            "Partial event-loop update. Key longest_stall_ms (alias stall_ms) is zero or more. Writing 0 clears the high-water mark. A text field overlays key=value lines. Writes the scene. The next frame adopts a lower value.",
+        ),
+    ]
+    .into_iter()
+    .chain(host_specs())
+    .collect()
+}
+
+fn host_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_menu_settings",
+            "The debug menu in force (text form): visible (shown or hidden), tab (page title), collapsed (folded section keys), wheel, and keys. wheel and keys are hover, modal, click, or passive. Shown by default, with hover for the wheel and click for keys. --menu wins over GENOS_MENU, which wins over the scene value. tab, collapsed, wheel, and keys are the stored fields.",
+        ),
+        spec(
+            "set_menu_settings",
+            "Partial debug-menu update. Keys are visible (shown or hidden), tab, collapsed (comma-separated section keys), fold (add one key), open (remove one key), wheel, and keys (hover, modal, click, or passive). focus_wheel and focus_keys are the same as wheel and keys. A text field overlays key=value lines. Writes the scene. --menu and GENOS_MENU still overlay visible.",
+        ),
         spec("quit", "Stop the example with exit code (default 0)."),
+        spec(
+            "list_scenes",
+            "Names of the scenes this binary can load.",
+        ),
+        spec(
+            "load_scene",
+            "Load a scene by name. A large scene loads off the frame thread; the reply arrives when it is in place and the window keeps pumping. Drops light and object edits and clears the lighting cache. checkpoint (optional) jumps after the load; otherwise the first checkpoint is used.",
+        ),
+        spec(
+            "list_checkpoints",
+            "Checkpoint names for the scene that is loaded.",
+        ),
+        spec(
+            "jump_checkpoint",
+            "Move the camera to a checkpoint by name. That pose is the one Home resets to.",
+        ),
     ]
 }

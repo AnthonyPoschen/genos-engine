@@ -1,5 +1,5 @@
 #version 450
-// GI v2 light cache, first pass: list the live patch slots, mature from the front
+// GI light cache, first pass: list the live patch slots, mature from the front
 // and young from the back (both counts were zeroed before the round), so the
 // round's batch relights live patches only, the young first. A slot claimed but
 // not yet written (normal w 0) waits for the next round. No trace.
@@ -10,6 +10,13 @@ layout(local_size_x = 64) in;
 const bool LIGHTING_WRC_STALE_CHECK = true;
 void main() {
     uint slot = gl_GlobalInvocationID.x;
+    // Screen wavelet counters (diag 61 changed, 62 fine, 63 coarse). Zeroed
+    // before that pass. The hash wavelet does not use these words.
+    if (slot == 0u && (gstats.ctrl_bits & 524288u) != 0u) {
+        gstats.diag[61] = 0u;
+        gstats.diag[62] = 0u;
+        gstats.diag[63] = 0u;
+    }
     if (lighting_dense()) {
         // S70A: the args pass (one group, after the counts are in).
         if (slot == 0u) {
@@ -84,7 +91,7 @@ void main() {
         // Flag 1048576: a dormant texel (converged, its sets agree with its mean)
         // is relit one sweep in LIGHTING_SC_DORMANT, by slot, to notice change.
         if ((lighting_sc_flags() & 1048576u) != 0u && growing && t >= lighting_sc_cap(slot) - 0.5 && lighting_sc_dormant(slot)) {
-            growing = ((lighting_hash(slot) + lighting_round()) % LIGHTING_SC_DORMANT) == 0u;
+            growing = ((lighting_hash(slot) + lighting_round()) % lighting_sc_dormant_period()) == 0u;
         }
         // Flag 1024: while the light changes only the patches ray hits read (25 cm
         // and up, flag 256) are relit, as in the other modes; pixels show the probes.
@@ -389,7 +396,7 @@ void main() {
                 w *= 1.0 + LIGHTING_SC_RATE_K * min(chg, 8.0);
             }
             if ((lighting_sc_flags() & 1048576u) != 0u && t >= cap - 0.5 && lighting_sc_dormant(slot)) {
-                w /= float(LIGHTING_SC_DORMANT);
+                w /= float(lighting_sc_dormant_period());
             }
             if (sparse_c && t < LIGHTING_DN_MIN_SETS - 0.5) {
                 w *= lvl == 2u ? 4.0 : (lvl == 1u ? 2.0 : 1.0);
@@ -397,6 +404,10 @@ void main() {
             uint b = uint(clamp(log2(1.0 + float(used) * w) * 4.0, 0.0, float(LIGHTING_SC_BUCKETS - 1u)));
             // Whole 64-ray sets until settled, and above the trickle threshold.
             bool full = !settled_now || chg >= LIGHTING_SC_TRICKLE_THR || (est.x > 0.0 && est.y > LIGHTING_SC_FULL_INC);
+            // A non-zero dormant floor traces one fresh 16-ray entry, not a 64-ray set.
+            if (lighting_sc_dormant_rays() > 0u && t >= cap - 0.5 && lighting_sc_dormant(slot)) {
+                full = false;
+            }
             uint m = lighting_sc_entries(slot, full);
             atomicAdd(gstats.due, m);
             atomicAdd(ckeys.key[LIGHTING_SC_HIST_AT + b], m);

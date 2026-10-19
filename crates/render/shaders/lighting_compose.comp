@@ -1,5 +1,9 @@
 #version 450
-// GI v2 final pass: per pixel, emitted light, then direct irradiance plus the
+// Picture compose. Do not call scene_candidates_skip or include a work-tube
+// here. That walk, compiled into this dispatch, is what made a moving frame's
+// compose tens of milliseconds and the NVIDIA compiler sit for minutes. A
+// small sun step uses lighting_sun_compose.comp instead.
+// GI final pass: per pixel, emitted light, then direct irradiance plus the
 // screen probes' irradiance
 // (the 4 nearest probes, weighted by plane distance and normal; the light cache
 // where none matches), through the same
@@ -85,8 +89,12 @@ vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
 }
 
 void main() {
+    lighting_px_unfilled = false;
     uvec2 p;
-    if (ckeys.key[LIGHTING_COMPOSE_FULL] != 0u) {
+    // GI off, or compose reuse off, covers the image and does not read the key
+    // table. The table is a dummy while GI is off.
+    bool reuse = (gstats.ctrl_bits & 4u) != 0u && (gstats.ctrl_bits & 128u) != 0u && (gstats.ctrl_bits & 32u) != 0u;
+    if (!reuse || ckeys.key[LIGHTING_COMPOSE_FULL] != 0u) {
         p = gl_GlobalInvocationID.xy;
     } else {
         uint bw = (pc.dims.x + 7u) / 8u;
@@ -106,9 +114,29 @@ void main() {
     if (!lighting_surface(p, pos, n, albedo, two_sided)) {
         return;
     }
-    vec3 direct = lighting_unpack_rgb9e5(gbuf.px[index].w);
-    // The light pass left the pixel's emitted light past the picture.
-    vec3 glow = lighting_unpack_rgb9e5(outc.px[pc.dims.x * pc.dims.y + index]);
+    uint scale = max(gstats.ctrl_scale, 1u);
+    uvec2 sp = (p / scale) * scale;
+    uint sindex = sp.y * pc.dims.x + sp.x;
+    vec3 direct = lighting_unpack_rgb9e5(gbuf.px[sindex].w);
+    vec3 glow;
+    if ((gstats.ctrl_bits & 1u) == 0u) {
+        // The pixel direct pass did not run, so gbuf.w is still emission
+        // (~0 when the surface emits nothing) and the glow half of the picture
+        // was never written. Reading that half unpacks uninitialised rgb9e5,
+        // which is a solid red field with bright speckles.
+        direct = vec3(0.0);
+        uint emitted = gbuf.px[index].w;
+        glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? vec3(0.0) : lighting_unpack_rgb9e5(emitted);
+    } else {
+        if (gstats.ctrl_history != 0u && (gstats.ctrl_bits & 32768u) == 0u) {
+            direct = lighting_unpack_rgb9e5(outc.px[pc.dims.x * pc.dims.y * 2u + sindex]);
+        }
+        // The light pass left the pixel's emitted light past the picture.
+        glow = lighting_unpack_rgb9e5(outc.px[pc.dims.x * pc.dims.y + index]);
+        if ((gstats.ctrl_bits & 512u) == 0u) {
+            glow = vec3(0.0);
+        }
+    }
     gbuf.px[index] = uvec4(~0u);
     if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
         n = -n;
@@ -123,6 +151,14 @@ void main() {
         outc.px[index] = pack_rgb(shown);
         return;
     }
+    if (mode == 8u) {
+        // Short-term relative standard deviation (debug_view.rs ViewMode::Variance).
+        // Missing or unallocated entries are grey. Quiet is blue, noisy is red.
+        float rel = lighting_sc_debug_variance(pos, n);
+        shown = rel < 0.0 ? vec3(0.55, 0.55, 0.55) : mix(vec3(0.15, 0.25, 0.9), vec3(0.9, 0.15, 0.1), rel);
+        outc.px[index] = pack_rgb(shown);
+        return;
+    }
     if (mode == 7u) {
         // Texel sizes (debug_view.rs ViewMode::Texels).
         vec2 ts = lighting_sc_debug_size(pos, n);
@@ -132,7 +168,21 @@ void main() {
         outc.px[index] = pack_rgb(shown);
         return;
     }
-    vec3 bounce = indirect(p, pos, n);
+    vec3 bounce = vec3(0.0);
+    bool gi = (gstats.ctrl_bits & 4u) != 0u;
+    if (gi && ((gstats.ctrl_bits & 16384u) != 0u || gstats.ctrl_bounce > 0u)) {
+        bounce = indirect(p, pos, n);
+    }
+    if ((gstats.ctrl_bits & 4096u) != 0u) {
+        vec3 sky_fill = vec3(gstats.ctrl_ambient_r, gstats.ctrl_ambient_g, gstats.ctrl_ambient_b);
+        vec3 fill = sky_fill;
+        if ((gstats.ctrl_bits & 8192u) != 0u) {
+            float up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
+            vec3 ground = vec3(gstats.ctrl_ground_r, gstats.ctrl_ground_g, gstats.ctrl_ground_b);
+            fill = mix(ground, sky_fill, up);
+        }
+        bounce += fill * gstats.ctrl_ambient_i;
+    }
     if (mode == 1u || mode == 6u) {
         bounce = vec3(0.0);
     }
@@ -142,5 +192,11 @@ void main() {
     }
     vec3 c = albedo * LAMBERT * (direct + bounce) + glow;
     shown = vec3(tone_channel(c.r), tone_channel(c.g), tone_channel(c.b));
+    // Magenta on pixels whose surface-cache corners had no finished set.
+    // GENOS_LIGHTING_UNFILLED_TINT, or Shift+F8. Quiet compose only tints the
+    // blocks it redrew; a turn composes the whole frame.
+    if (lighting_px_unfilled && lighting_unfilled_tint()) {
+        shown = mix(shown, vec3(1.0, 0.0, 1.0), 0.75);
+    }
     outc.px[index] = pack_rgb(dither8(shown, p));
 }

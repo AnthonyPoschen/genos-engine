@@ -1,3 +1,12 @@
+#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+
 //! Presented-picture antialiasing. The checks read the Vulkan draw, not a CPU bake.
 
 use genos_render::{identity_pose, Antialias, Bounds, DrawKind, Object, Renderer, World};
@@ -32,6 +41,11 @@ fn silhouette_world() -> World {
         }],
         ceiling: None,
         sky: None,
+        lighting: genos_scene::LightingSettings::default(),
+        debug: genos_scene::DebugSettings::default(),
+        fps_counter: genos_scene::FpsCounterSettings::default(),
+        event_loop: genos_scene::EventLoopSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
     });
     world.objects.push(Object {
         hidden: false,
@@ -42,9 +56,12 @@ fn silhouette_world() -> World {
         },
         kind: DrawKind::Mesh {
             vertices: vec![[-1.2, 0.3, 0.0], [1.2, 0.3, 0.0], [0.0, 2.4, 0.0]],
+            normals: Vec::new(),
+            texcoords: Vec::new(),
             color: [1.0, 1.0, 1.0],
             pose: identity_pose(),
             emission: [0.0; 3],
+            surface: None,
         },
     });
     world

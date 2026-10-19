@@ -20,8 +20,12 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     ├── agent-rubric.md
     ├── agents/
     │   └── domain.md
+    ├── engine/
+    │   ├── assets.md
+    │   └── settings-principles.md
     ├── architecture.md
-    ├── lighting.md
+    ├── lighting/ (GLOSSARY.md, RENAMES.md, research/)
+    ├── VERIFY.md
     ├── systems/
     │   ├── README.md
     │   ├── input.md
@@ -34,6 +38,7 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     │   ├── renderer.md
     │   ├── ui.md
     │   ├── lighting/ (README.md, debug-standard.md, experiments/)
+    │   ├── gi-design.md
     │   ├── loading.md
     │   ├── audio.md
     │   └── scripting.md
