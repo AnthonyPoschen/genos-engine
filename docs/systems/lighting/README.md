@@ -147,6 +147,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S73A](experiments/S73A-offscreen-prefill-guard-band.md) | 2026-10-12 | Guard-band scout rays claim fine texels just outside the frustum | reverted (11639205); kept on gi-v2-prefill | 097d67de |
 | [S73B](experiments/S73B-lumen-feedback-prefill.md) | 2026-10-12 | All scout hits claim fine texels and stamp LastUsed | reverted (8b62829b); kept on gi-v2-prefill (22bcd47f) | 22bcd47f |
 | [S73L](experiments/S73L-unfilled-on-screen.md) | 2026-10-13 | Count composed pixels whose surface-cache texel has no finished set | --unfilled, --unfilled-tint, --unfilled-dump, and the cap flags; GENOS_* mirrors; events in ./genos-debug/unfilled | 8ab2884, 16b4a69, 2058863, 73a49e0 |
+| [S73S](experiments/S73S-raw-means-feedback-display-fill.md) | 2026-10-13 | Accumulation reads raw means (coarse blend k=2); display keeps dark fill | closed (PR #25); retry later vs path-traced 4070 after perf | PR #25 / `cursor/unfilled-prefill-bias-8bfe` |
 | [S74A-cam](experiments/S74A-cam-last-camera-offsets.md) | 2026-10-12 | Fix: last-frame camera read from stale scene-block offsets | pushed | 81c00734 |
 | [S74A-asvgf](experiments/S74A-asvgf-asvgf-change-adaptive-rays.md) | 2026-10-12 | A-SVGF same-seed 1-ray checks on 1/9 resolved texels, lambda drives alpha and rays | pushed | 81c00734 |
 | [S74A-shadow](experiments/S74A-shadow-static-lamp-shadow-reuse.md) | 2026-10-12 | Hit shadow rays kept per 12.5 cm cell/lamp, invalidated by lamp epoch | pushed | 81c00734 |
