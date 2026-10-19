@@ -1,6 +1,23 @@
 # Dynamic-scene performance plan (moving lamps and moving assets)
 
-Written 2026-10-12 against `gi-v2` at e61b89d, as a code-reading evaluation. Nothing in this plan has been built or measured. Every gain below is an estimate with its reasoning, and each phase starts with a measurement that can prove the estimate wrong before any code lands.
+Written 2026-10-12 against the former `gi-v2` tip at e61b89d (now on `master` after PR #54), as a code-reading evaluation. Terms follow `docs/lighting/GLOSSARY.md` (plain **GI**, not "GI v1" or product `gi-v2`). Every gain below was an estimate with its reasoning; each phase still starts with a measurement that can prove the estimate wrong before any code lands. Related open PRs and landed follow-ups are linked under **Related work** and at the items they overlap.
+
+## Related work (status 2026-10-19)
+
+| Track | PR | Status | Overlaps this plan |
+|---|---|---|---|
+| Dynamic perf plan (this doc) | [#6](https://github.com/AnthonyPoschen/genos-engine/pull/6) | open | — |
+| GPU_MS / frame timer split | [#23](https://github.com/AnthonyPoschen/genos-engine/pull/23) | open | **Phase 0** moving per-dispatch profile |
+| RAYCEIL need-based world-cache ray ceilings | [#8](https://github.com/AnthonyPoschen/genos-engine/pull/8) | open | WRC / ray budget ceiling (with Item C / cache pacing) |
+| Skip GI compose blocks whose inputs did not change | [#11](https://github.com/AnthonyPoschen/genos-engine/pull/11) | open | **compose** path; Item H / F consumers |
+| Dense a-trous when dirty fraction is high | [#20](https://github.com/AnthonyPoschen/genos-engine/pull/20) | open | **Item D** |
+| Reduce moving-scene lighting work | [#24](https://github.com/AnthonyPoschen/genos-engine/pull/24) | open | sun compose vs Item H2 / moving profile |
+| Probe ring wakes | [#31](https://github.com/AnthonyPoschen/genos-engine/pull/31) | open | **Item F** screen-probe need gating |
+| Verify settled bounce budgets / yaw warm | [#39](https://github.com/AnthonyPoschen/genos-engine/pull/39) | open | Phase 0 settle / verify gates |
+| Weighted lamp pick (hits) | [#43](https://github.com/AnthonyPoschen/genos-engine/pull/43) | **merged** | Lamp pick on GI presets; supersedes shelved per-pixel ReSTIR (S78Q) for the hits path |
+| S73S close notes (display fill ≠ accumulation) | [#56](https://github.com/AnthonyPoschen/genos-engine/pull/56) | **merged** | Pre-fill / reveal brightness; see `docs/systems/lighting/experiments/S73S-raw-means-feedback-display-fill.md` |
+
+Land order for the open perf stack (merge `master` with a merge commit, no rebase/force-push): #23 → #8 → #11 → #20 → #24 → #31 → #39, after this plan (#6) is on master. Measure on the 4070 inside the clean-GPU window (Fri–Mon 05:00–10:00 Sydney) when a change claims fps.
 
 Baseline (README "Current state", RTX 4070, stress scene, 1920x1080):
 
@@ -66,6 +83,8 @@ Plausible combined result: moving 18.7 ms comes down to roughly 12-14 ms (70-80 
 | Hash radiance cache | SHaRC: hash grid with bounded linear probing, entries evicted by age. | Same idea (1M slots, 16-slot linear search, no tombstones, so misses always scan all 16). | Misses cost about 2 cache lines. This is minor next to the items above; see D4. |
 
 ## Phase 0: measure before changing anything (no visual change)
+
+Open work: PR [#23](https://github.com/AnthonyPoschen/genos-engine/pull/23) splits GPU_MS lighting out of raster so a moving per-dispatch profile is honest. Prefer landing #23 (or equivalent timers) before trusting Phase 0 numbers.
 
 These steps are measurement only. Each is a debug-only commit or no commit at all.
 
@@ -278,6 +297,8 @@ Without A, the gain is much smaller, because hits and misses still mix inside wa
 
 ## Item D: a-trous in heavy-change frames
 
+Open work: PR [#20](https://github.com/AnthonyPoschen/genos-engine/pull/20) falls back to dense a-trous when the dirty fraction is high — the same heavy-change path this item targets.
+
 ### Problem
 
 The seven SVGF dispatches (`lighting_gpu.rs` 1459-1465) each run over 1M slot threads. Levels 1-5 run their S78X work list when it has at most `LIGHTING_ATROUS_LIST_CAP = 65536` entries (`lighting_atrous.comp` 12-19). Otherwise they fall back to the full sweep and check per-slot stamps.
@@ -343,6 +364,8 @@ Dense levels are exact SVGF, while dirty mode holds changes under 1 %. A texel c
 
 ## Item C: direct light at the WRC cell for hits with no fine texel
 
+Related: PR [#8](https://github.com/AnthonyPoschen/genos-engine/pull/8) RAYCEIL (need-based world-cache ray ceilings) paces WRC rays by measured change; land and measure it before assuming WRC fallback cost in C.
+
 ### Problem
 
 The TDL path (`lighting_direct.comp` 235-268) only looks up a **fine** texel, with `lighting_cache_find_sized(pos, n, false, LIGHTING_SC_TEXEL, pos)`. Fine texels exist only where pixels saw the surface (`lighting_svgf_active` 2634). Probe and cache rays often hit surfaces behind the camera, off screen, or occluded. Those hits fall through to the exact loop with every lamp shadow-traced.
@@ -388,6 +411,8 @@ The direct light feeding off-screen bounces is resolved at 25 cm instead of per 
 3. **C3** (only if d5 shows budget starvation): a separate WRC TDL budget counter.
 
 ## Item E: per-lamp pixel visibility reuse (exact)
+
+Lamp **pick** for GI hits already shipped in PR [#43](https://github.com/AnthonyPoschen/genos-engine/pull/43) (glossary **Lamp pick**; presets that shade bounce hits). That is not this item: E is exact per-lamp **pixel visibility** reuse. Shelved per-pixel ReSTIR remains S78Q.
 
 ### Problem
 
@@ -441,6 +466,8 @@ d1 (pixel shadow rays), d6/d7, the direct-pass time, moving-shadow screenshots, 
 3. **E2**: Per-lamp reuse in non-quiet frames. Compare pixel-exact output in a moving frame; it must be identical.
 
 ## Item F: screen-probe work gated by need
+
+Open work: PR [#31](https://github.com/AnthonyPoschen/genos-engine/pull/31) (probe ring wakes / group splitting) is the live attempt at smarter probe wakes; compose consumers also touch PR [#11](https://github.com/AnthonyPoschen/genos-engine/pull/11).
 
 ### Problem
 
@@ -567,6 +594,8 @@ Moving and still runs with and without `--gltf`, plus the direct and hit-light d
 4. **G4** (only on a measured need): an instance grid.
 
 ## Item H: frame plumbing
+
+Related: PR [#11](https://github.com/AnthonyPoschen/genos-engine/pull/11) (compose skip) and PR [#24](https://github.com/AnthonyPoschen/genos-engine/pull/24) (moving-scene / sun compose split) overlap H2 and the compose path.
 
 1. **H1: gate before reconstruction.** In `lighting_direct.comp` 139-158, a kept-hit thread loads its record and rebuilds its stratum ray (`lighting_stratum_ray`, 153) before the stratum gate at 178-184, which sends about 75 % of kept threads home. Move the `s != cur && s != cur + STRATA/2` test above the reconstruction. The `urgent && near_change` case needs `pos`, so keep it after; `urgent` is off by default (`GENOS_LIGHTING_URGENT`, `lighting_gpu.rs` 1370). Saves about 67 MB of reads and 3M ray rebuilds per frame, roughly 0.05-0.15 ms.
 2. **H2: compose feeds FXAA directly.** The frame does these copies:
