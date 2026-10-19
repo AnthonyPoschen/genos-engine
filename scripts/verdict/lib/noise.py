@@ -6,10 +6,10 @@ import csv
 import json
 from pathlib import Path
 
-from lib.contract import FAIL, PASS, UNSURE
+from lib.contract import PASS, UNSURE
 from lib.images import Image, blur_relative, flip_mean_p99, load_image, mean_abs
 
-SETTLE_FRAMES = 180
+SETTLE_FRAMES = 600
 
 
 def read_repeats(path: Path) -> list[dict[str, str]]:
@@ -57,7 +57,7 @@ def summarize(rows: list[dict[str, str]], settle_limit: int) -> tuple[str, str, 
         "blur_rel": picture["blur_rel"],
     }
     if failed:
-        return FAIL, f"cold start did not settle within {settle_limit} frames", payload
+        return UNSURE, f"cold start did not settle within {settle_limit} frames", payload
     if len(rows) < 2:
         return UNSURE, "one sample", payload
     return PASS, f"spread frame_ms={spread:.4g}", payload

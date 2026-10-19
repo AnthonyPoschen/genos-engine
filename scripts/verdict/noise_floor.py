@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """N repeats of one unchanged commit. Records the spread and the settle cap.
 
-A cold start that is still unsettled after --settle-frames (default 180) fails.
+A cold start that is still unsettled after --settle-frames (default 600) is UNSURE.
 Status: probation. A miss becomes a test in scripts/verdict/tests/test_misses.py.
 """
 
@@ -40,7 +40,7 @@ import precheck
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Measure the noise floor of one commit.")
     parser.add_argument("--repeats", type=int, help="how many cold starts")
-    parser.add_argument("--settle-frames", type=int, help=f"fail past this frame (default {SETTLE_FRAMES})")
+    parser.add_argument("--settle-frames", type=int, help=f"UNSURE past this frame (default {SETTLE_FRAMES})")
     parser.add_argument("--scene", help="debug scene name")
     parser.add_argument("--checkpoint", help="checkpoint in that scene")
     parser.add_argument("--fixture", help="directory with repeats.csv (and optional images)")

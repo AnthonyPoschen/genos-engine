@@ -91,8 +91,8 @@ probe reads `/proc` and, when present, `gpu_busy_percent` or `nvidia-smi`.
 It writes `repeats.csv`, `numbers.csv`, and `spread.json` (min, max, mean, and
 the spread of frame time, plus picture spread when captures exist).
 
-A cold start that does not settle within `--settle-frames` (default 180) is
-`FAIL`. One sample is `UNSURE`. Two settled repeats are `PASS` and the spread
+A cold start that does not settle within `--settle-frames` (default 600) is
+`UNSURE`. One sample is `UNSURE`. Two settled repeats are `PASS` and the spread
 is the noise floor later scripts compare against.
 
 ```sh

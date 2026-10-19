@@ -16,7 +16,7 @@ crates/debug/src/image.rs 20
 crates/debug/src/png.rs 3
 crates/debug/src/reference.rs 24
 crates/debug/src/script.rs 2
-crates/debug/src/tools.rs 10
+crates/debug/src/tools.rs 11
 crates/debug/src/value.rs 4
 crates/gpuref/src/lib.rs 13
 crates/input/src/device.rs 1
