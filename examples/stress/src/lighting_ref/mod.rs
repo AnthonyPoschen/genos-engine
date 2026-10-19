@@ -50,7 +50,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<i32, String> {
 
 enum Command {
     Generate(generate::GenerateOptions),
-    Check(check::CheckOptions),
+    Check(Box<check::CheckOptions>),
 }
 
 struct Options {
@@ -95,6 +95,7 @@ impl Options {
         let mut settle_cap = None;
         let mut capture_frames = None;
         let mut bounces: Option<String> = None;
+        let mut display: Option<String> = None;
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
             match arg.as_str() {
@@ -120,6 +121,13 @@ impl Options {
                 "--settle-cap" => settle_cap = Some(value()?),
                 "--capture-frames" => capture_frames = Some(value()?),
                 "--bounces" => bounces = Some(value()?),
+                "--display" => {
+                    let name = value()?;
+                    if name.is_empty() {
+                        return Err("display name is empty".into());
+                    }
+                    display = Some(name);
+                }
                 other => return Err(format!("unknown argument {other}")),
             }
         }
@@ -231,7 +239,7 @@ impl Options {
             },
         )?;
         Ok(Self {
-            command: Command::Check(check::CheckOptions {
+            command: Command::Check(Box::new(check::CheckOptions {
                 out,
                 reference_dir,
                 baseline_path,
@@ -246,7 +254,8 @@ impl Options {
                 only_scene,
                 only_checkpoint,
                 plan,
-            }),
+                display,
+            })),
         })
     }
 }

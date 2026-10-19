@@ -612,14 +612,23 @@ static void release_pointer_lock(struct GenosWindow *win) {
     apply_cursor(win);
 }
 
-struct GenosWindow *genos_window_open(int width, int height, const char *app_id, const char *title) {
+struct GenosWindow *genos_window_open_on(
+    int width,
+    int height,
+    const char *app_id,
+    const char *title,
+    const char *wayland_display
+) {
     struct GenosWindow *win = calloc(1, sizeof(*win));
     if (!win) {
         return NULL;
     }
     win->width = width > 0 ? width : 1280;
     win->height = height > 0 ? height : 720;
-    win->display = wl_display_connect(NULL);
+    if (wayland_display && wayland_display[0] == '\0') {
+        wayland_display = NULL;
+    }
+    win->display = wl_display_connect(wayland_display);
     if (!win->display) {
         free(win);
         return NULL;
@@ -668,6 +677,10 @@ struct GenosWindow *genos_window_open(int width, int height, const char *app_id,
         }
     }
     return win;
+}
+
+struct GenosWindow *genos_window_open(int width, int height, const char *app_id, const char *title) {
+    return genos_window_open_on(width, height, app_id, title, NULL);
 }
 
 void genos_window_pump(struct GenosWindow *win, struct GenosPump *out) {
