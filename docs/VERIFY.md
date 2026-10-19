@@ -31,12 +31,13 @@ to the app are absolute too. A relative path would be joined onto the app’s
 shots directory and the picture would land somewhere else. The line is also
 `verdict.txt` in that directory. Stdout does not dump the evidence.
 
-A branch name is resolved only after `git fetch origin`. `gi-v2` means
-`origin/gi-v2`, not a stale local branch. `HEAD` stays the checkout. A commit
+A branch name is resolved only after `git fetch origin`. `master` means
+`origin/master`, not a stale local branch. `HEAD` stays the checkout. A commit
 sha stays that commit. A local branch passed as `refs/heads/<name>` is
 `ERROR` when it is behind its upstream. The verdict line and `sha.txt` include
 the resolved sha (`base=<sha> head=<sha>` when both are resolved). `--dry-run`
-does not fetch.
+does not fetch. (The former `gi-v2` integration branch was merged into `master`
+in PR #54; use `master` as the default `--base`.)
 
 Intent comes from the command line. `GENOS_VERDICT_OUT`, `GENOS_VERDICT_DISPLAY`,
 `GENOS_VERDICT_SHA`, `GENOS_VERDICT_CACHE_DIR`, `GENOS_VERDICT_BASE`, and
@@ -69,7 +70,7 @@ lists that flag (the proof window floats and does not take focus). Quit is MCP
 `scripts/verdict/precheck.py` runs before anything uses the GPU.
 
 ```sh
-python3 scripts/verdict/precheck.py --base gi-v2 --key noise-floor --display wayland-1
+python3 scripts/verdict/precheck.py --base master --key noise-floor --display wayland-1
 ```
 
 1. `git merge-tree --write-tree` against `--base`. A conflict is `FAIL`.
@@ -97,7 +98,7 @@ is the noise floor later scripts compare against.
 
 ```sh
 python3 scripts/verdict/noise-floor.py \
-  --base gi-v2 --repeats 3 --scene stress --checkpoint hall \
+  --base master --repeats 3 --scene stress --checkpoint hall \
   --display wayland-1
 ```
 
