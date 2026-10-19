@@ -1,6 +1,6 @@
 #version 450
-// GI v2 G-buffer (lighting_gpu.rs): the scene's surfaces, one record per pixel, for the
-// GI v2 compute passes. Same vertices (gbuffer.vert) and depth prepass as the picture; early
+// GI G-buffer (lighting_gpu.rs): the scene's surfaces, one record per pixel, for the
+// GI compute passes. Same vertices (gbuffer.vert) and depth prepass as the picture; early
 // depth tests so only the surface the pixel shows writes its record.
 //
 // Record (uvec4): x distance from the eye (float bits; all ones = nothing), y the normal
@@ -8,7 +8,7 @@
 // emitted light (shared-exponent RGB; the light pass moves it out and puts the
 // direct irradiance here).
 //
-// Particle cards, fog cards and unlit quads are not in GI v2 yet: they discard.
+// Particle cards, fog cards and unlit quads are not in GI yet: they discard.
 #extension GL_GOOGLE_include_directive : require
 layout(early_fragment_tests) in;
 

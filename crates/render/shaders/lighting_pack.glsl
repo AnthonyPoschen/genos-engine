@@ -1,4 +1,4 @@
-// GI v2 packing helpers shared by the G-buffer and the passes.
+// GI packing helpers shared by the G-buffer and the passes.
 
 vec2 lighting_oct_wrap(vec2 v) {
     return (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);

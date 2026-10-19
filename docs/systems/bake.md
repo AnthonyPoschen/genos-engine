@@ -2,7 +2,7 @@
 
 ## Goal
 
-Build the import-time data GI v2 traces against, once per mesh: a sparse signed distance field (the software tracer) and surface cache cards (albedo, normal, depth and emission seen from each side). See [GI v2 design](gi-v2-design.md), "Scene representation" and "Surface cache".
+Build the import-time data GI traces against, once per mesh: a sparse signed distance field (the software tracer) and surface cache cards (albedo, normal, depth and emission seen from each side). See [GI design](gi-design.md), "Scene representation" and "Surface cache".
 
 ## Intent
 
@@ -36,4 +36,4 @@ Build a `BakeMesh` per mesh and call `load_or_bake(&mesh, &BakeSettings::default
 ## Decisions
 
 - [ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md): no third-party crates for native and renderer work.
-- [ADR 0012](../adr/0012-gi-v2.md): GI v2.
+- [ADR 0012](../adr/0012-gi.md): GI.

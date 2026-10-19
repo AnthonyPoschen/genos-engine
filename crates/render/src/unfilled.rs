@@ -190,9 +190,9 @@ fn process_args() -> Vec<String> {
 fn launch() -> Result<(UnfilledControl, UnfilledLimits), String> {
     let args = process_args();
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let count = std::env::var("GENOS_LIGHTING_UNFILLED").ok();
-    let tint = std::env::var("GENOS_LIGHTING_UNFILLED_TINT").ok();
-    let dump = std::env::var("GENOS_LIGHTING_UNFILLED_DUMP").ok();
+    let count = genos_scene::lighting_env("GENOS_LIGHTING_UNFILLED").ok();
+    let tint = genos_scene::lighting_env("GENOS_LIGHTING_UNFILLED_TINT").ok();
+    let dump = genos_scene::lighting_env("GENOS_LIGHTING_UNFILLED_DUMP").ok();
     let max_folders = std::env::var("GENOS_UNFILLED_MAX_FOLDERS").ok();
     let max_bytes = std::env::var("GENOS_UNFILLED_MAX_BYTES").ok();
     let max_age_secs = std::env::var("GENOS_UNFILLED_MAX_AGE_SECS").ok();

@@ -83,9 +83,10 @@ rules:
     languages: [generic]
     severity: ERROR
     message: >-
-      GI v1 names stay in the glossary Historical section and in the
-      superseded ADR. Do not put radiance cascade, radiance field, lightmap,
-      or light probe back into engine code.
+      GI v1 names and retired paths stay out of engine code. Do not put
+      radiance cascade, radiance field, lightmap, light probe, "GI v2",
+      archive-v1, ADR 0008, or gi_v2_floor back into Rust or shaders.
+      Historical prose belongs only in docs/lighting/GLOSSARY.md.
     metadata:
       date: "2026-10-14"
     paths:
@@ -95,7 +96,7 @@ rules:
         - "**/*.comp"
         - "**/*.vert"
         - "**/*.frag"
-    pattern-regex: '(?i)radiance[- ]cascade|radiance field|\blightmap\b|light probe'
+    pattern-regex: '(?i)radiance[- ]cascade|radiance field|\blightmap\b|light probe|\bGI v2\b|archive-v1\.md|0008-lighting-uses-radiance-cascades|gi_v2_floor'
 
   - id: genos-no-hardcoded-display
     languages: [rust]

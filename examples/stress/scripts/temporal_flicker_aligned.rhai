@@ -1,4 +1,4 @@
-// GI v2 gate (docs/systems/gi-v2-design.md, "temporal_flicker.rhai"); also run on the
+// GI gate (docs/systems/gi-design.md, "temporal_flicker.rhai"); also run on the
 // gi-v2-baseline tag for the head-to-head. Per stress pose: (1) everything frozen after
 // settling: the picture must not change at all; (2) lamps and boxes moving, camera
 // still: frame-to-frame change in the region that holds no moving lamp or box.

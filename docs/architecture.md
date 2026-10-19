@@ -96,7 +96,7 @@ A world holds fixed parts, meshes with a pose, particles, and shader draws. A sh
 
 ## Lighting
 
-Lighting is a renderer pass: a G-buffer, direct light with traced shadows over mesh SDFs, a world-anchored surface cache and screen probes, composed per pixel. Its data stays on the GPU between frames; the CPU uploads small deltas. See [Lighting](systems/lighting/README.md) and [ADR 0012](adr/0012-gi-v2.md). (The radiance cascades of ADR 0008 were removed on 2026-10-12.)
+Lighting is a renderer pass: a G-buffer, direct light with traced shadows over mesh SDFs, a world-anchored surface cache and screen probes, composed per pixel. Its data stays on the GPU between frames; the CPU uploads small deltas. See [Lighting](systems/lighting/README.md) and [ADR 0012](adr/0012-gi.md). (The radiance cascades of ADR 0008 were removed on 2026-10-12.)
 
 ## Reference
 

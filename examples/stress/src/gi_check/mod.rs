@@ -66,16 +66,16 @@ const FLICKER_SCRIPT: &str = include_str!("../../scripts/temporal_flicker_aligne
 const VIEWS: [&str; 5] = ["room-a", "corner", "contact", "lamp-wall", "hall"];
 /// The close-up view (views.rhai, settled only), scored on its own rows.
 const CLOSE_VIEW: &str = "close";
-/// Close-up limits, the five views' contact limit: GI v2 at 1129d5d (before the
+/// Close-up limits, the five views' contact limit: GI at 1129d5d (before the
 /// contact term) scored mean 0.030, contact 0.026, open 0.028.
 const CLOSE_MEAN_LIMIT: f64 = 0.045;
 const CLOSE_CONTACT_LIMIT: f64 = 0.045;
 const CLOSE_OPEN_LIMIT: f64 = 0.045;
 
-/// Limits, set 2026-10-10 from the GI v2 baseline measured on an RTX 4070 and
+/// Limits, set 2026-10-10 from the GI baseline measured on an RTX 4070 and
 /// the de-splotch targets (moving blob at most 0.02, mean at most 0.04). Errors are
 /// shares of the light; each is the mean over the five views.
-/// 2026-10-11, GPU references (no corner leak): the same GI v2 engine (839d449)
+/// 2026-10-11, GPU references (no corner leak): the same GI engine (839d449)
 /// scores settled 0.0364 -> 0.0384 and moving 0.0363 -> 0.0403 (worst view, the
 /// corner, 0.0416 -> 0.0484), so the line moves with it from 0.040 to 0.043, the
 /// same margin over the engine as before.
@@ -573,7 +573,7 @@ fn render(o: &Options, out: &Path, run: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Checks whose limit is a target GI v2 is working towards, not a gate: a miss
+/// Checks whose limit is a target GI is working towards, not a gate: a miss
 /// prints MISS and does not fail the run, a tier or a push.
 const TARGET_CHECKS: &[&str] = &[
     "room turn swim, large scale (48 px)",

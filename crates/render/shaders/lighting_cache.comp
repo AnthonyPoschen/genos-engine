@@ -1,5 +1,5 @@
 #version 450
-// GI v2 light cache, last ray pass: each patch relit this frame sums its rays'
+// GI light cache, last ray pass: each patch relit this frame sums its rays'
 // light into irradiance (uniform hemisphere: 2 pi / C times the cosine-weighted
 // sum). A patch nobody has read for LIGHTING_CACHE_LIFE frames is freed. No trace.
 #extension GL_GOOGLE_include_directive : require

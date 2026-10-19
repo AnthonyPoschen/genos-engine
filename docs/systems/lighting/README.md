@@ -2,7 +2,7 @@
 
 Main lighting document. Architecture and component notes are below; every experiment (tried, pushed, reverted, rejected, shelved or planned) has its own file in [experiments/](experiments/), indexed in the table. Before trying an idea, check the index: if it was tried, read how and what we found, and whether it is marked for a retest.
 
-Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and patches in `~/.cache/gi2diag/g78/` (zanven-pc), git history of `gi-v2`, `gi-v2-prefill` (22bcd47f) and tag `gi-v2-checkpoint-2026-10-12` (6b4fe308), the postmortem log, and the GI v2 conversation with Anthony. Figures not in a source are written "not recorded".
+Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and patches in `~/.cache/gi2diag/g78/` (zanven-pc), git history of `gi-v2`, `gi-v2-prefill` (22bcd47f) and tag `gi-v2-checkpoint-2026-10-12` (6b4fe308), the postmortem log, and the GI conversation with Anthony. Figures not in a source are written "not recorded".
 
 ## Missing history (as of 2026-10-12)
 
@@ -15,9 +15,9 @@ Sources for the experiment files: the bisect log `~/.cache/gi2diag/steps.md` and
 
 ## From Chief's notes: decisions and rules
 
-- GI v2 design and ADR 0012 (7d35edd, 10 Oct 03:12; Anthony's answers b7b8ea7 03:27): Lumen-informed but aim to beat Lumen; stop when complete so Anthony can judge; lighting ~200 MB VRAM soft budget (Ultra may exceed); hardware floor newest 80% of the Steam survey, Low tuned for GTX 1060 / RX 580, Vulkan 1.3, 4 GB VRAM minimum; Steam Deck a target but untested; test machines zanven-pc (4070) and his MacBook; mesh SDFs and cards prebuilt at build time (configurable); emissive surfaces required, including texture-driven partial-mesh emission (639ab44).
+- GI design and ADR 0012 (7d35edd, 10 Oct 03:12; Anthony's answers b7b8ea7 03:27): Lumen-informed but aim to beat Lumen; stop when complete so Anthony can judge; lighting ~200 MB VRAM soft budget (Ultra may exceed); hardware floor newest 80% of the Steam survey, Low tuned for GTX 1060 / RX 580, Vulkan 1.3, 4 GB VRAM minimum; Steam Deck a target but untested; test machines zanven-pc (4070) and his MacBook; mesh SDFs and cards prebuilt at build time (configurable); emissive surfaces required, including texture-driven partial-mesh emission (639ab44).
 - v2 design rules: only finished values are published; fixed ray patterns; each ray answered by exactly one system; screen probes plus surface cache; software SDF plus hardware ray queries; world probes for the far field only.
-- GI v2 lives on gi-v2; phase-1 commits (13e02fe glTF, a22b1c8 BVH, 977ea71, e5cb9ba SDFs/cards, 84c303d) stay on master; master and gi-v2 compared head to head before any merge. Precomputed transport for master dropped.
+- GI lives on gi-v2; phase-1 commits (13e02fe glTF, a22b1c8 BVH, 977ea71, e5cb9ba SDFs/cards, 84c303d) stay on master; master and gi-v2 compared head to head before any merge. Precomputed transport for master dropped.
 - v2 became a separate frame path (1a2229f, ec658c5, ~05:30 10 Oct) because the NVIDIA compiler hung with the tracer inside the existing shaders.
 - Proposed, not answered [uncertain status]: rewrites on their own branch with master fixes-only (P7); design doc before a new subsystem (P6). Approved (P9): visual results come with screenshots someone looked at; numbers help bots judge faster. Postmortems go to the shared file (P10).
 - zanven-pc etiquette: bench lock ~/genos-bench.lock and split/lock_run.sh, one time-limited window; low GPU priority, short submissions; must not freeze the desktop; exclusive fps windows Fri-Mon 05-10 and Tue-Thu 05-15 AEDT; never touch his input or processes.
@@ -122,7 +122,7 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 | [S58A](experiments/S58A-lumen-update-priority.md) | 2026-10-12 | Lumen LastUsed - LastUpdated priority replaces round-robin sweep | pushed | a4a7b23d |
 | [S59](experiments/S59-few-rays-gibs-settle.md) | 2026-10-12 | Few rays per relight with GIBS extra rays; higher settle bar (64 sets, 0.15 sd) | pushed | e7803342, eedd6671, c4c787d1 |
 | [S60A](experiments/S60A-probe-hit-lamp-picks.md) | 2026-10-12 | Probe hits take at most 2 shadow rays, lamps picked systematically in proportion to unshadowed light | pushed | a2b41c52 |
-| [S61-S62](experiments/S61-S62-world-radiance-cache.md) | 2026-10-12 | World radiance cache (WRC, 25 cm cells) for hits; variance-guided denoise; WRC refresh budget; global light re | pushed (S62E reverted) | aa1b245e..4eb10b86 |
+| S61-S62 (deleted; see git history) | 2026-10-12 | World radiance cache (WRC, 25 cm cells) for hits; variance-guided denoise; WRC refresh budget; global light re | pushed (S62E reverted) | aa1b245e..4eb10b86 |
 | [S63-S65](experiments/S63-S65-sun-share-rate-tiers.md) | 2026-10-12 | Sun/sky share per texel; rate-based scheduling (batch is a ceiling); two tiers (trickle under change 0.173, wh | pushed | 0f288334..b5a72df4 |
 | [S66-S69](experiments/S66-S69-anti-lag-boost-relight.md) | 2026-10-12 | Budget boost after turns (S66A), neighbourhood clamp/anti-lag (S67A), read-since-relight slack (S68A), seed we | pushed (S68B reverted) | 782fe38b..2f35eaa2 |
 | [S70](experiments/S70-gpu-driven-dispatch.md) | 2026-10-12 | Indirect dispatch for cache rays (S70A), no GPU->CPU counter reads in frame loop (S70B), resident scene buffer | pushed | 8758d467, 76245067, b0675659 |
@@ -202,13 +202,13 @@ E-numbered entries (E01-E25) come from the Engine chat and cover work with no S-
 
 # Architecture and component notes (history kept as written)
 
-How GI v2, the lighting engine, works: direct light, shadows, global illumination, the reference it is checked against, and the checks. Each component lists our method, the published method it compares to (Lumen and papers, with links), how and why ours differs, current scores and open issues. The plan and budgets are in [GI v2 design](../gi-v2-design.md); the gate is in [Debugging](../debugging.md). Update this file whenever a method changes, in the same commit as the code.
+How GI, the lighting engine, works: direct light, shadows, global illumination, the reference it is checked against, and the checks. Each component lists our method, the published method it compares to (Lumen and papers, with links), how and why ours differs, current scores and open issues. The plan and budgets are in [GI design](../gi-design.md); the gate is in [Debugging](../debugging.md). Update this file whenever a method changes, in the same commit as the code.
 
-Scores are gi-check numbers (linear luminance, share of the light) against the GPU path-traced references, at the commit named in each section. "P6" is the probe path (6ce7fd4: screen probes, light cache in push mode, `GENOS_LIGHTING_WORLD=0`); it was the gi-v2 default until S54K. Default now (no env, S54K): GI v2 with the surface cache, `GENOS_LIGHTING_WORLD=3`, `GENOS_LIGHTING_WORLD_CAP=64`, `GENOS_LIGHTING_SC_FLAGS=6007050`, `GENOS_LIGHTING_SC_LOCAL=1`; P6 back with `GENOS_LIGHTING_WORLD=0`. GI v1 was removed on 2026-10-12 and there is no lighting-selection switch: plain `make stress` / `make run` run this lighting with the tuned defaults (see "GI v1 removed" below). "SC" is the surface cache (`GENOS_LIGHTING_WORLD=3`, branch `surface-cache`, flags in `GENOS_LIGHTING_SC_FLAGS`).
+Scores are gi-check numbers (linear luminance, share of the light) against the GPU path-traced references, at the commit named in each section. "P6" is the probe path (6ce7fd4: screen probes, light cache in push mode, `GENOS_LIGHTING_WORLD=0`); it was the GI default until S54K. Default now (no env, S54K): GI with the surface cache, `GENOS_LIGHTING_WORLD=3`, `GENOS_LIGHTING_WORLD_CAP=64`, `GENOS_LIGHTING_SC_FLAGS=6007050`, `GENOS_LIGHTING_SC_LOCAL=1`; P6 back with `GENOS_LIGHTING_WORLD=0`. GI v1 was removed on 2026-10-12 and there is no lighting-selection switch: plain `make stress` / `make run` run this lighting with the tuned defaults (see "GI v1 removed" below). "SC" is the surface cache (`GENOS_LIGHTING_WORLD=3`, branch `surface-cache`, flags in `GENOS_LIGHTING_SC_FLAGS`).
 
 ## Names (2026-10-12)
 
-The lighting has one name scheme, `lighting`, everywhere; "GI v2" survives only in history and design notes. The old `gi2` names map one to one:
+The lighting has one name scheme, `lighting`, everywhere. The old `gi2` names map one to one:
 
 | Kind | Now | Was |
 |---|---|---|
@@ -219,7 +219,7 @@ The lighting has one name scheme, `lighting`, everywhere; "GI v2" survives only 
 | Renderer API | `lighting_still_frames`, `lighting_probe_samples`, `settle_stats`, `picture_settled` | `gi_v2_*`, `tier_stats` |
 | Log lines | `LIGHTING_MS`, `lightingsc` (surface cache trace), `lighting:` | `GI2_MS`, `gi2sc`, `gi2:` |
 | Test | `crates/render/tests/lighting_frame.rs` | `gi2_frame.rs` |
-| Env | `GENOS_LIGHTING_*` | `GENOS_GI2_*`; `GENOS_LIGHTING_DEBUG` was `GENOS_GI_DEBUG` |
+| Env | `GENOS_LIGHTING_*` | `GENOS_GI2_*` (deprecated aliases, one warning per name for one release); `GENOS_LIGHTING_DEBUG` also accepts `GENOS_GI_DEBUG` |
 
 `gi-check` keeps its name (it is the tool), as does `GENOS_GI_CHECK_BOUNCES`.
 
@@ -271,7 +271,7 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 
 ## Scene representation and tracer
 
-- **Ours:** one software tracer over mesh SDF instances (`mesh_field.glsl`): sparse 8³ bricks of byte distances near the surface, one coarse byte per brick elsewhere, sphere-traced in object space after clipping to the instance bounds. All GI v2 rays (probe, cache, shadow) use it.
+- **Ours:** one software tracer over mesh SDF instances (`mesh_field.glsl`): sparse 8³ bricks of byte distances near the surface, one coarse byte per brick elsewhere, sphere-traced in object space after clipping to the instance bounds. All GI rays (probe, cache, shadow) use it.
 - **Reference:** Lumen software RT uses per-mesh SDFs near and a global SDF far; hardware RT uses a BVH [W22, KN].
 - **Differences:** no far global SDF yet; the design wants world-anchored far bricks instead of camera clipmaps (clipmaps change with the camera). No hardware path yet.
 - **Open:** far field (long rays) and hardware RT are not built.
@@ -430,7 +430,7 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 
 GI v1 (radiance cascades, the world probe tier, `stage_tier`, the v1 `kick_light` paths, `light.comp`, `scene.frag`, `tier.glsl`, `ssaa.comp`, `lighting.rs`, `probes.rs`, `probe_tier.rs`, `field.rs`, `shadow.rs`, their tests and bench columns, and the `GENOS_GI` switch and stress `gi` knob) is gone. Removed with it: SSAA (it drew through the v1 fragment shader; panel code 2 now means FXAA), the live-readback switch, `TierStats` (replaced by `SettleStats { settled, still_frames }` from `Renderer::settle_stats()`), and the debug views that showed v1 data (cascade, probes, light field). Debug views now: full, direct, bounce, albedo, normal, depth, light, texels.
 
-Historical v1 numbers (for comparison only; v1 cannot be run any more). Full tables in [GI v2 baseline](../gi-v2-baseline.md) (master `0874229d`, tag `gi-v2-baseline`, zanven-pc, RTX 4070, 2026-10-10):
+Historical v1 numbers (for comparison only; v1 cannot be run any more). Full tables were in the deleted baseline doc (master `0874229d`, tag `gi-v2-baseline`, zanven-pc, RTX 4070, 2026-10-10); recover from git history:
 
 | v1 check (320x180, CPU reference) | mean_rel | bias |
 |---|---|---|
@@ -584,14 +584,14 @@ on every preset: the retest at 476ec13 missed the picture bar (mean 2.8 / p99
 11–13 against 1.5 / 10) and still-atrous got slower (3.13 vs 2.7). Medium is
 the full-resolution scalar wavelet at 3 iterations. The plain pipeline,
 compiled without the adaptive branch, put high back to about 8.0 ms against
-gi-v2's 7.8 ms moving. Numbers and the five-line postmortem are in
+GI's 7.8 ms moving. Numbers and the five-line postmortem are in
 [S79](experiments/S79-half-res-atrous.md).
 
 ### S80: screen wavelet
 
 `denoise_launch` is `hash` or `screen`. Preset high uses `screen`: one 8×8
 group per picture block. The other presets, and full effort, keep `hash`,
-the gi-v2 slot wavelet. `--denoise-launch` and `GENOS_LIGHTING_DENOISE_LAUNCH`
+the baseline GI slot wavelet. `--denoise-launch` and `GENOS_LIGHTING_DENOISE_LAUNCH`
 override the preset. The screen launch runs the same variance, à-trous, and
 push on the visible 12.5 cm cells and on the active cells in their à-trous
 footprints. One pixel claims each hit cell and lists those taps. A still
@@ -601,15 +601,15 @@ launch. A plane or normal weight on the screen blend alone moved the hall
 off the hash picture. The launch is one 8×8 group per picture block, not
 one group per 64 slots of the million-slot table.
 
-The G-buffer stays the gi-v2 packing. A geometric axis in the flag byte
+The G-buffer stays the GI packing. A geometric axis in the flag byte
 changed medium as well as high (the lookup replaced the shading normal on
 every preset) and did not remove the Sponza banner squares, so it is not
 used. The screen gather keys a cell with the shading normal, the same key
 the hash compose uses. A 4070 moving-camera check put hash and screen within
 0.15% on every flicker and speckle measure. Screen is faster: Sponza went
 from 8.75 fps to 21.3 fps. That is why preset high uses the screen launch.
-The earlier still-hall cross-process compare stayed outside the gi-v2 floor
-(high still p99 11.2 against 1.3, Sponza atrium 33 against 2). The gi-v2
+The earlier still-hall cross-process compare stayed outside the GI tip floor
+(high still p99 11.2 against 1.3, Sponza atrium 33 against 2). The GI tip
 picture gate pins `denoise_launch=hash`.
 
 Papers, the deviations, and the owner GPU commands are in
