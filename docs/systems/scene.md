@@ -45,12 +45,14 @@ The crate is `crates/scene`, package `genos-scene`.
 - `load_path` and `load_str` are in `src/script.rs`.
 - The agent endpoint is `crates/mcp`, package `genos-mcp`.
 - `Host` keeps the scene and the camera that the frame draws.
-- `Server` binds `127.0.0.1` port 8765 and writes one discovery record.
-- `GENOS_MCP_PORT` overrides that port.
+- `Server` binds `127.0.0.1` port 8765 and writes one discovery record. `genos-stress` and `genos-camera` use that port. `genos-lighting` uses 8766 so the two can run together. `--mcp-port` overrides the lighting port. `GENOS_MCP_PORT` overrides a binary's port when that binary did not get `--mcp-port`.
 - `GET /lighting` and the tool `lighting_status` return the live probe report.
 - `stable` is true when no brick is still updating.
 - `GET /shot.png` and the tool `take_screenshot` return the live picture. The light is not settled first.
 - `POST /settings` and the tool `set_lighting` change the sun, the sky, the boxes, the moving-lamp share, and the time of day.
+- `Scene.lighting` is the lighting settings (`crates/scene/src/lighting.rs`), the reference [engine feature setting](../engine/settings-principles.md). A scene file sets them with `lighting_preset("potato")`, `lighting("bounces=1; ambient=curve; time_of_day=18")`, and `time_of_day(18)`. `get_lighting_settings`, `set_lighting_settings`, `list_presets`, and `apply_preset` read and edit that struct over MCP and return the last GPU pass times. The stress knobs write the same struct. The panel tool `set_lighting` is a different patch. The record is [lighting/toggles.md](lighting/toggles.md).
+- `Scene.menu` is the debug menu (`crates/scene/src/menu.rs`): `visible`, `tab`, `collapsed`, `wheel`, and `keys`. A scene file sets it with `menu("visible=hidden; tab=GI; collapsed=world; wheel=hover; keys=click")`. `wheel` and `keys` are `hover`, `modal`, `click`, or `passive`. `--menu shown|hidden` wins over `GENOS_MENU` for `visible`. `get_menu_settings` and `set_menu_settings` read and edit that struct. `fold` and `open` add or remove one section key.
+- `Scene.event_loop` is the longest event-loop stall (`crates/scene/src/event_loop.rs`): `longest_stall_ms`. The frame writes it. The Perf page shows it. `get_event_loop` and `set_event_loop` read and edit it. Writing `0` clears the mark. The budget is 100 ms. See [window](window.md).
 - `sun` is `freeze` or `run`. `sky` is `on` or `off`. `boxes` is `still` or `move`. `dynamic` is 0 to 100. `day` is 0 to 1.
 - The record path is `$XDG_RUNTIME_DIR/genos/mcp/<pid>.json`.
 - When `XDG_RUNTIME_DIR` is empty, the path is `/tmp/genos-mcp-<uid>/<pid>.json`.
@@ -86,7 +88,7 @@ One frame publishes one update when the scene or the camera pose changes. The en
 
 A new room is a new script. Register a new function on the Rhai host before a script can call it. See [Scripting](scripting.md).
 
-`Scene::sky` is `None` or `Some(Sky { color })`: the radiance a ray that leaves the scene brings, and the picture's background. See [Lighting](lighting-v1.md#sky). Scripts do not set it yet.
+`Scene::sky` is `None` or `Some(Sky { color })`: the radiance a ray that leaves the scene brings, and the picture's background. See [Lighting](lighting/README.md). Scripts do not set it yet.
 
 ## Limits
 
@@ -98,7 +100,7 @@ A codimation translates one solid. It does not rotate or scale that solid. The s
 
 This crate does not march light. The ground-plane march is in the renderer.
 
-The physics world holds `MAX_BODIES` (32) bodies. `attach_scene` with more than 30 walls and solids drops the rest, and the view capsule with them, so a large level cannot be walked with colliders yet. The stress example flies instead.
+`attach_scene` inserts the floor, every wall, every solid, and the view capsule. The physics crate stores bodies in a `Vec` and does not drop them past a fixed cap. The stress example still flies: `fly` calls `update` with a zero interval, so the step does not run and a bench pose can sit inside the building.
 
 ## Decisions
 

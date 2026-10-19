@@ -1,9 +1,16 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Fixed-cell labels. Measure and draw use the same cell, so a wrapped line
 //! changes the fit size the layout sees.
 
 pub(crate) const CELL_W: f32 = 12.0;
 pub(crate) const CELL_H: f32 = 16.0;
 const PIXEL: f32 = 2.0;
+/// One-pixel bitmap. Tick names use this so a row of steps stays quiet.
+pub(crate) const SMALL_PIXEL: f32 = 1.0;
+pub(crate) const SMALL_ADVANCE: f32 = 6.0;
+pub(crate) const SMALL_LINE: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Blot {
@@ -22,6 +29,7 @@ pub(crate) fn measure(text: &str, max_width: Option<f32>) -> (f32, f32) {
         .iter()
         .map(|line| line.chars().count() as f32 * CELL_W)
         .fold(0.0_f32, f32::max);
+    let width = max_width.map_or(width, |limit| width.min(limit));
     (width, lines.len() as f32 * CELL_H)
 }
 
@@ -31,8 +39,27 @@ pub(crate) fn blots(text: &str, x: f32, y: f32, max_width: f32) -> Vec<Blot> {
         let top = y + row as f32 * CELL_H;
         for (col, ch) in line.chars().enumerate() {
             let left = x + col as f32 * CELL_W;
-            stamp(&mut out, ch, left, top);
+            if left + CELL_W > x + max_width + 0.01 {
+                break;
+            }
+            stamp(&mut out, ch, left, top, PIXEL);
         }
+    }
+    out
+}
+
+pub(crate) fn measure_small(text: &str) -> (f32, f32) {
+    if text.is_empty() {
+        return (0.0, 0.0);
+    }
+    (text.chars().count() as f32 * SMALL_ADVANCE, SMALL_LINE)
+}
+
+pub(crate) fn blots_small(text: &str, x: f32, y: f32) -> Vec<Blot> {
+    let mut out = Vec::new();
+    for (col, ch) in text.chars().enumerate() {
+        let left = x + col as f32 * SMALL_ADVANCE;
+        stamp(&mut out, ch, left, y, SMALL_PIXEL);
     }
     out
 }
@@ -65,17 +92,17 @@ fn wrap(text: &str, max_width: Option<f32>) -> Vec<String> {
     lines
 }
 
-fn stamp(out: &mut Vec<Blot>, ch: char, x: f32, y: f32) {
+fn stamp(out: &mut Vec<Blot>, ch: char, x: f32, y: f32, pixel: f32) {
     for (row, bits) in glyph(ch).into_iter().enumerate() {
         for col in 0..5 {
             if bits & (0x10 >> col) == 0 {
                 continue;
             }
             out.push(Blot {
-                x: x + col as f32 * PIXEL,
-                y: y + row as f32 * PIXEL,
-                w: PIXEL,
-                h: PIXEL,
+                x: x + col as f32 * pixel,
+                y: y + row as f32 * pixel,
+                w: pixel,
+                h: pixel,
             });
         }
     }
@@ -84,14 +111,38 @@ fn stamp(out: &mut Vec<Blot>, ch: char, x: f32, y: f32) {
 fn glyph(ch: char) -> [u8; 7] {
     match ch.to_ascii_uppercase() {
         ' ' => [0, 0, 0, 0, 0, 0, 0],
-        '+' => [0x04, 0x04, 0x1f, 0x04, 0x04, 0, 0],
-        '-' => [0, 0, 0x1f, 0, 0, 0, 0],
-        '.' => [0, 0, 0, 0, 0, 0x0c, 0x0c],
-        ':' => [0, 0x0c, 0x0c, 0, 0x0c, 0x0c, 0],
+        '!' => [0x04, 0x04, 0x04, 0x04, 0x04, 0, 0x04],
+        '"' => [0x0a, 0x0a, 0x0a, 0, 0, 0, 0],
+        '#' => [0x0a, 0x0a, 0x1f, 0x0a, 0x1f, 0x0a, 0x0a],
+        '$' => [0x04, 0x0f, 0x14, 0x0e, 0x05, 0x1e, 0x04],
         '%' => [0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03],
+        '&' => [0x0c, 0x12, 0x14, 0x08, 0x15, 0x12, 0x0d],
+        '\'' => [0x06, 0x06, 0x04, 0, 0, 0, 0],
         '(' => [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
         ')' => [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
+        '*' => [0, 0x0a, 0x04, 0x1f, 0x04, 0x0a, 0],
+        '+' => [0x04, 0x04, 0x1f, 0x04, 0x04, 0, 0],
+        ',' => [0, 0, 0, 0, 0x06, 0x04, 0x08],
+        '-' => [0, 0, 0x1f, 0, 0, 0, 0],
+        '.' => [0, 0, 0, 0, 0, 0x0c, 0x0c],
         '/' => [0x01, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10],
+        ':' => [0, 0x0c, 0x0c, 0, 0x0c, 0x0c, 0],
+        ';' => [0, 0x0c, 0x0c, 0, 0x06, 0x04, 0x08],
+        '<' => [0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02],
+        '=' => [0, 0x1f, 0, 0x1f, 0, 0, 0],
+        '>' => [0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08],
+        '?' => [0x0e, 0x11, 0x01, 0x02, 0x04, 0, 0x04],
+        '@' => [0x0e, 0x11, 0x17, 0x15, 0x17, 0x10, 0x0e],
+        '[' => [0x0e, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0e],
+        '\\' => [0x10, 0x10, 0x08, 0x04, 0x02, 0x01, 0x01],
+        ']' => [0x0e, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0e],
+        '^' => [0x04, 0x0a, 0x11, 0, 0, 0, 0],
+        '_' => [0, 0, 0, 0, 0, 0, 0x1f],
+        '`' => [0x08, 0x04, 0x02, 0, 0, 0, 0],
+        '{' => [0x02, 0x04, 0x04, 0x08, 0x04, 0x04, 0x02],
+        '|' => [0x04, 0x04, 0x04, 0, 0x04, 0x04, 0x04],
+        '}' => [0x08, 0x04, 0x04, 0x02, 0x04, 0x04, 0x08],
+        '~' => [0, 0, 0x08, 0x15, 0x02, 0, 0],
         '0' => [0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e],
         '1' => [0x04, 0x0c, 0x04, 0x04, 0x04, 0x04, 0x0e],
         '2' => [0x0e, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1f],
@@ -129,5 +180,46 @@ fn glyph(ch: char) -> [u8; 7] {
         'Y' => [0x11, 0x11, 0x0a, 0x04, 0x04, 0x04, 0x04],
         'Z' => [0x1f, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1f],
         _ => [0x1f, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1f],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glyph;
+
+    const BOX: [u8; 7] = [0x1f, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1f];
+
+    #[test]
+    fn printable_ascii_has_its_own_glyph() {
+        for code in 32u8..=126 {
+            let ch = char::from(code);
+            assert_ne!(glyph(ch), BOX, "U+{code:02X} {ch:?} fell through to the box");
+            assert_eq!(glyph(ch.to_ascii_lowercase()), glyph(ch.to_ascii_uppercase()));
+        }
+        assert_ne!(glyph('\''), [0, 0, 0, 0, 0, 0, 0]);
+        assert_ne!(glyph(','), [0, 0, 0, 0, 0, 0, 0]);
+        assert_ne!(glyph(';'), [0, 0, 0, 0, 0, 0, 0]);
+        assert_ne!(glyph(','), glyph(';'));
+        assert_ne!(glyph('\''), glyph(','));
+    }
+
+    #[test]
+    fn a_word_stays_whole_and_spaces_still_wrap() {
+        let long = "SCENEVIEW";
+        assert_eq!(super::wrap(long, Some(24.0)), vec![long.to_string()]);
+        let (width, height) = super::measure(long, Some(24.0));
+        assert!(width <= 24.0);
+        assert_eq!(height, super::CELL_H);
+        let marks = super::blots(long, 0.0, 0.0, 24.0);
+        assert!(marks.iter().all(|blot| blot.x + blot.w <= 24.0 + 0.01));
+        let mut columns = marks
+            .iter()
+            .map(|blot| (blot.x / super::CELL_W).floor())
+            .collect::<Vec<_>>();
+        columns.sort_by(f32::total_cmp);
+        columns.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+        assert_eq!(columns.len(), 2);
+        let phrase = super::wrap("Adaptive denoise", Some(8.0 * super::CELL_W));
+        assert_eq!(phrase, vec!["Adaptive".to_string(), "denoise".to_string()]);
     }
 }

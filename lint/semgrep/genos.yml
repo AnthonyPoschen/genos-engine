@@ -1,0 +1,125 @@
+# Custom rules. The catalog is docs/LINT_RULES.md.
+# Production excludes live on each rule. lint/fail is scanned separately and
+# must match. lint/pass must not match.
+rules:
+  - id: genos-no-home-path
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Debug and tool output stays in the working directory under
+      ./genos-debug/<kind>/. Do not hard-code /home, $HOME, or ~/ and do not
+      read HOME to choose an output path. --out is the override.
+    metadata:
+      date: "2026-10-14"
+    paths:
+      exclude:
+        - crates/ui/src/omarchy.rs
+        - crates/scene/src/debug_settings.rs
+    pattern-either:
+      - pattern-regex: '"/home/[^"]*"'
+      - pattern-regex: '"\$HOME[^"]*"'
+      - pattern-regex: '"~/[^"]*"'
+      - pattern: std::env::var("HOME")
+      - pattern: std::env::var_os("HOME")
+      - pattern: env::var("HOME")
+      - pattern: env::var_os("HOME")
+
+  - id: genos-debug-output-dir
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Screenshots, dumps, and logs default to ./genos-debug/<kind>/ in the
+      working directory. --out overrides that directory. Do not default to
+      lighting-dump or target/reference-*.
+    metadata:
+      date: "2026-10-14"
+    paths:
+      exclude:
+        - crates/render/src/lighting_gpu.rs
+        - crates/debug/src/tools.rs
+        - crates/debug/src/reference.rs
+    pattern-regex: '"(lighting-dump|target/reference-[A-Za-z0-9_-]*)"'
+
+  - id: genos-gpu-len-cast
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      A buffer length crosses into a GPU or packed u32/u64 through
+      try_from or a checked helper. `len() as u32` and `len() as u64` truncate.
+    metadata:
+      date: "2026-10-14"
+    paths:
+      exclude:
+        - crates/render/src/gpu.rs
+        - crates/render/src/pack.rs
+        - crates/render/src/occ_grid.rs
+        - crates/render/src/mesh_field.rs
+        - crates/render/src/lighting_gpu.rs
+        - crates/render/src/pool.rs
+        - crates/render/src/budget.rs
+        - crates/render/src/unfilled.rs
+        - crates/render/src/particles.rs
+        - crates/render/tests/particles.rs
+        - crates/render/tests/gpu_budget.rs
+        - crates/load/tests/load_assets.rs
+        - crates/load-check/tests/consumer.rs
+        - crates/load/src/texture.rs
+        - crates/load/src/gltf.rs
+        - crates/gpuref/src/lib.rs
+        - crates/bake/src/format.rs
+        - crates/bake/src/mesh.rs
+        - crates/mesh/src/bvh.rs
+        - examples/stress/src/lighting_ref/capture.rs
+        - debug/lighting/src/main.rs
+        - examples/camera/src/main.rs
+        - crates/lighting-ref/src/store.rs
+        - crates/lighting-ref/src/picture.rs
+        - crates/debug/src/png.rs
+        - crates/audio/tests/play.rs
+        - crates/audio/examples/submit.rs
+    pattern-regex: '\.len\(\)\s+as\s+u(?:32|64)\b'
+
+  - id: genos-no-gi-v1-term
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      GI v1 names and retired paths stay out of engine code. Do not put
+      radiance cascade, radiance field, lightmap, light probe, "GI v2",
+      archive-v1, ADR 0008, or gi_v2_floor back into Rust or shaders.
+      Historical prose belongs only in docs/lighting/GLOSSARY.md.
+    metadata:
+      date: "2026-10-14"
+    paths:
+      include:
+        - "**/*.rs"
+        - "**/*.glsl"
+        - "**/*.comp"
+        - "**/*.vert"
+        - "**/*.frag"
+    pattern-regex: '(?i)radiance[- ]cascade|radiance field|\blightmap\b|light probe|\bGI v2\b|archive-v1\.md|0008-lighting-uses-radiance-cascades|gi_v2_floor'
+
+  - id: genos-no-hardcoded-display
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      HDMI-A-1 is the proof display and DP-1 is the main display. Only the
+      --proof path may select a proof window, and it must not hard-code
+      either connector.
+    metadata:
+      date: "2026-10-14"
+    pattern-regex: '"(HDMI-A-1|DP-1)"'
+
+  - id: genos-no-hyprctl
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      A proof run does not resize or focus unrelated windows. Shipping code
+      does not spawn hyprctl.
+    metadata:
+      date: "2026-10-14"
+    paths:
+      exclude:
+        - crates/window/src/lib.rs
+    pattern-either:
+      - pattern: std::process::Command::new("hyprctl")
+      - pattern: Command::new("hyprctl")

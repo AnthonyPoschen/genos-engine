@@ -1,3 +1,44 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::assigning_clones, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::bool_to_int_with_if, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::borrow_as_ptr, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_ptr_alignment, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::field_reassign_with_default, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![expect(clippy::float_cmp, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::fn_params_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::if_not_else, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::items_after_statements, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::manual_assert, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::manual_c_str_literals, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::manual_slice_size_calculation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::needless_range_loop, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::panic, reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md")]
+#![expect(clippy::precedence, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::ptr_as_ptr, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::redundant_locals, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::similar_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::struct_field_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::too_many_arguments, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::undocumented_unsafe_blocks, reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md")]
+#![expect(clippy::unnecessary_wraps, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::unreadable_literal, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::unwrap_used, reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md")]
+#![expect(clippy::useless_vec, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Vulkan loader and one forward pass. Entry points come from libvulkan.
 
 use std::collections::VecDeque;
@@ -16,10 +57,54 @@ include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 
 #[path = "debug_view.rs"]
 mod debug_view;
+pub use crate::unfilled::{UnfilledControl, UnfilledStats};
 pub use debug_view::{DebugView, LampReport, ViewMode};
 
 const API_VERSION: u32 = 1 << 22;
 const VK_SUCCESS: i32 = 0;
+const VK_NOT_READY: i32 = 1;
+const VK_TIMEOUT: i32 = 2;
+/// A fence wait on the frame thread before the seat pump takes over.
+const FENCE_BUDGET_NS: u64 = 50_000_000;
+/// A mapped copy above this runs while the seat pump answers pings.
+const COPY_BUDGET: usize = 1_048_576;
+
+thread_local! {
+    static ENTER: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+    static LEAVE: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+}
+
+struct SeatLeave;
+
+impl Drop for SeatLeave {
+    fn drop(&mut self) {
+        if let Some(leave) = LEAVE.with(std::cell::Cell::get) {
+            leave();
+        }
+    }
+}
+
+/// Run `body` while the installed seat pump answers compositor pings.
+fn block<T>(body: impl FnOnce() -> T) -> T {
+    let Some(enter) = ENTER.with(std::cell::Cell::get) else {
+        return body();
+    };
+    enter();
+    let _leave = SeatLeave;
+    body()
+}
+
+/// Copy `len` bytes into a mapped GPU allocation. A large copy yields the seat.
+fn copy_to_mapped(dst: *mut u8, src: *const u8, len: usize) {
+    if dst.is_null() || len == 0 {
+        return;
+    }
+    if len > COPY_BUDGET {
+        block(|| unsafe { std::ptr::copy_nonoverlapping(src, dst, len) });
+    } else {
+        unsafe { std::ptr::copy_nonoverlapping(src, dst, len) };
+    }
+}
 const SUBOPTIMAL: i32 = 1000001003;
 const OUT_OF_DATE: i32 = -1000001004;
 type VkResult = i32;
@@ -54,6 +139,7 @@ impl Renderer {
         let gpu = Gpu::open(display, surface, width, height)?;
         let width = gpu.extent_w;
         let height = gpu.extent_h;
+        let unfilled = gpu.unfilled;
         Ok(Self {
             gpu,
             width,
@@ -65,8 +151,36 @@ impl Renderer {
             overlay_lines: Vec::new(),
             overlay_verts: Vec::new(),
             keep_pictures: false,
-            debug: debug_view::DebugState::default(),
+            debug: debug_view::DebugState {
+                unfilled,
+                ..debug_view::DebugState::default()
+            },
         })
+    }
+
+    /// Answer compositor pings on a side thread during device waits and pipeline compiles.
+    ///
+    /// `enter` and `leave` are `genos_window::seat_enter` and `genos_window::seat_leave`.
+    /// The window must already have installed its seat. Clear them before the window is dropped.
+    pub fn set_blocker(enter: fn(), leave: fn()) {
+        ENTER.with(|cell| cell.set(Some(enter)));
+        LEAVE.with(|cell| cell.set(Some(leave)));
+    }
+
+    /// The next device wait runs on this thread only.
+    pub fn clear_blocker() {
+        ENTER.with(|cell| cell.set(None));
+        LEAVE.with(|cell| cell.set(None));
+    }
+
+    /// Drop the renderer without `vkDeviceWaitIdle`.
+    ///
+    /// Call this after the window is destroyed. The driver reclaims the device
+    /// when the process exits. Waiting here is what makes a quit miss pings
+    /// when the window is still mapped, and what keeps the process alive after
+    /// the window is gone.
+    pub fn abandon(mut self) {
+        self.gpu.abandon = true;
     }
 
     /// Lines drawn over the picture with the next overlay rectangles, in the same
@@ -110,6 +224,60 @@ impl Renderer {
         Ok(())
     }
 
+    /// Replace the draw's lighting settings until [`Renderer::clear_lighting_override`].
+    ///
+    /// A game that already owns the [`genos_scene::Scene`] writes `scene.lighting`
+    /// instead. The next draw applies either value, then the launch locks:
+    /// `--preset`, `--bounces`, and `--ambient` win, and a `GENOS_LIGHTING_*`
+    /// mirror applies only when its argument was omitted.
+    pub fn set_lighting_settings(&mut self, settings: genos_scene::LightingSettings) {
+        self.gpu.lighting.override_settings = Some(settings);
+    }
+
+    /// The scene's lighting settings win again.
+    pub fn clear_lighting_override(&mut self) {
+        self.gpu.lighting.override_settings = None;
+    }
+
+    /// Settings the last draw used, after the scene, the override, and the environment.
+    pub fn lighting_settings(&self) -> genos_scene::LightingSettings {
+        self.gpu.lighting.settings.clone()
+    }
+
+    /// Drop the surface cache and its work list on the next draw.
+    ///
+    /// A scene switch calls this. Recreating the renderer would compile the
+    /// pipelines again; filling the cache buffers is enough.
+    pub fn reset_lighting_cache(&mut self) {
+        self.gpu.lighting.cache_clear = true;
+        self.gpu.lighting.work_clear = true;
+    }
+
+    /// Replace the override with a named preset (`potato`, `low`, `medium`, `high`).
+    pub fn apply_lighting_preset(&mut self, name: &str) -> Result<(), String> {
+        let preset = genos_scene::LightingPreset::parse(name)
+            .ok_or_else(|| format!("unknown lighting preset {name}"))?;
+        self.gpu.lighting.override_settings = Some(genos_scene::LightingSettings::preset(preset));
+        Ok(())
+    }
+
+    /// Dispatches recorded for each lighting bucket on the last collected frame.
+    pub fn lighting_dispatches(&self) -> [u32; 12] {
+        self.gpu.lighting.last_dispatches
+    }
+
+    /// GPU milliseconds of each lighting bucket on the last collected frame.
+    ///
+    /// One frame behind the draw that just returned. Zero when timestamps are off.
+    pub fn lighting_pass_ms(&self) -> [f64; 12] {
+        self.gpu.lighting.last_ms
+    }
+
+    /// Bucket names, in the order of [`Renderer::lighting_dispatches`].
+    pub fn lighting_bucket_names() -> &'static [&'static str] {
+        &LIGHTING_BUCKET_NAMES
+    }
+
     /// Draw one frame: the visible objects, lit by the lighting passes.
     ///
     /// When `readback` is set, return tightly packed BGRA8 pixels.
@@ -143,6 +311,7 @@ impl Renderer {
         readback: bool,
         wireframe: bool,
     ) -> Result<Option<Vec<u8>>, String> {
+        self.gpu.sync_materials(world)?;
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let matrix = view_proj(camera, aspect);
         let eye = [camera.position.x, camera.position.y, camera.position.z];
@@ -175,6 +344,9 @@ impl Renderer {
                     model,
                     color,
                     emission,
+                    color_rect,
+                    normal_rect,
+                    cutoff,
                     source,
                 } => {
                     if !self.memory.contains_shape(*key) {
@@ -193,13 +365,16 @@ impl Renderer {
                     instances.push(InstanceRec {
                         model: *model,
                         // w: emitted light as shared-exponent bits (0: none) for the
-                        // GI v2 G-buffer (gbuffer.vert); the picture ignores it.
+                        // GI G-buffer (gbuffer.vert); the picture ignores it.
                         color: [
                             color[0],
                             color[1],
                             color[2],
                             f32::from_bits(crate::mesh_field::pack_rgb9e5(*emission)),
                         ],
+                        atlas: *color_rect,
+                        normal_atlas: *normal_rect,
+                        extra: [*cutoff, 0.0, 0.0, 0.0],
                     });
                     draws.push(DrawSpan {
                         shapes: true,
@@ -262,6 +437,9 @@ impl Renderer {
         }
         let mut pack = pack;
         pack::apply_view(&mut pack, camera, aspect);
+        self.gpu.unfilled_eye = [camera.position.x, camera.position.y, camera.position.z];
+        self.gpu.unfilled_yaw = camera.yaw;
+        self.gpu.unfilled_pitch = camera.pitch;
         self.debug.apply(&mut pack);
         self.sync_fields(world)?;
         self.gpu.upload_scene(&pack)?;
@@ -270,6 +448,7 @@ impl Renderer {
         self.gpu.note_overlay_count(overlay_count);
         self.gpu.wire_on = wireframe;
         self.gpu.copy_picture = readback || self.keep_pictures;
+        self.gpu.sync_lighting_settings(&world.scene)?;
         self.gpu.record_and_submit(&matrix)?;
         let pixels = if readback {
             self.gpu.wait_gpu()?;
@@ -387,18 +566,44 @@ impl Renderer {
         self.gpu.antialias
     }
 
-    /// Frames in a row GI v2 has seen the same scene (camera, lights, objects): its
+    /// Frames in a row GI has seen the same scene (camera, lights, objects): its
     /// screen probes average that many frames' rays (up to 32), and any change
     /// starts the count, and so the average, over at 0.
     pub fn lighting_still_frames(&self) -> u32 {
         self.gpu.lighting_still_frames()
     }
 
-    /// GI v2's screen probes in the last frame drawn: the rays they held, kept
+    /// GI's screen probes in the last frame drawn: the rays they held, kept
     /// strata included, and the probes placed. Rays over probes is each probe's
     /// effective sample count (up to 8 strata of 64). Waits for that frame.
     pub fn lighting_probe_samples(&mut self) -> [u32; 2] {
         self.gpu.lighting_probe_samples()
+    }
+
+    /// Dirty-fraction threshold for the a-trous work lists. Overrides
+    /// `GENOS_LIGHTING_ATROUS_DIRTY` for later frames. `0` always runs the dense
+    /// sweep, `1` keeps the lists up to the storage cap.
+    pub fn set_lighting_atrous_dirty(&mut self, fraction: f32) {
+        self.gpu.lighting.atrous_dirty = Some(fraction.clamp(0.0, 1.0));
+    }
+
+    /// A-trous dirty fraction, chosen mode and threshold for the last frame
+    /// drawn. Waits for that frame.
+    pub fn lighting_atrous_stats(&mut self) -> LightingAtrousStats {
+        self.gpu.lighting_atrous_stats()
+    }
+
+    /// Shadow rays and spatial merges from the last frame. Waits for that frame.
+    /// The counters are zero unless `GENOS_LIGHTING_LAMP_PICK_DIAG` was set.
+    pub fn lighting_lamp_pick_counts(&mut self) -> LampPickCounts {
+        self.gpu.lighting_lamp_pick_counts()
+    }
+
+    /// Sun-step mark from the last submitted frame. Waits for that frame.
+    /// `gpu_sun` is the shader bit. `host_frames` counts frames the CPU took
+    /// the small-sun path.
+    pub fn lighting_sun_stats(&mut self) -> LightingSunStats {
+        self.gpu.lighting_sun_stats()
     }
 
     /// How long each pipeline took to build, in build order.
@@ -453,6 +658,11 @@ struct DrawSpan {
 struct InstanceRec {
     model: [f32; 16],
     color: [f32; 4],
+    /// Colour atlas rect (x, y, w, h). `w == 0` means no texture.
+    atlas: [f32; 4],
+    normal_atlas: [f32; 4],
+    /// x is the alpha cutoff. 0 does not discard.
+    extra: [f32; 4],
 }
 
 fn identity_instance() -> InstanceRec {
@@ -460,6 +670,9 @@ fn identity_instance() -> InstanceRec {
         model: crate::world::identity_pose(),
         // w 0: no emitted light (gbuffer.vert).
         color: [1.0, 1.0, 1.0, 0.0],
+        atlas: [0.0; 4],
+        normal_atlas: [0.0; 4],
+        extra: [0.0; 4],
     }
 }
 
@@ -571,6 +784,17 @@ struct Gpu {
     wire_on: bool,
     /// This frame also copies its picture into host memory, for a readback.
     copy_picture: bool,
+    /// Unfilled-on-screen detector. Off does no atomics and no mask copy.
+    unfilled: UnfilledControl,
+    unfilled_saved: u32,
+    last_unfilled: Option<UnfilledStats>,
+    unfilled_eye: [f32; 3],
+    unfilled_yaw: f32,
+    unfilled_pitch: f32,
+    /// `--out` from the process arguments. It wins over the environment mirror.
+    out_cli: Option<String>,
+    /// Directory the next unfilled event is written into.
+    debug_out: String,
     layout: Handle,
     pool: Handle,
     cmd: Handle,
@@ -598,6 +822,12 @@ struct Gpu {
     /// differ (vkCmdUpdateBuffer, in the frame's command stream).
     scene_shadow: Vec<u8>,
     particle_buf: Buffer,
+    /// Base-colour atlas (binding 4) and normal atlas (binding 7). Uploaded when
+    /// [`crate::world::MaterialAtlas::key`] changes, not every frame.
+    material_color: Buffer,
+    material_normal: Buffer,
+    material_key: u64,
+    normal_key: u64,
     /// Mesh SDF instances for the software tracer (mesh_field.rs; binding 5).
     /// Device-local and resident: what it holds is `mesh_field_shadow`, and a frame
     /// records only `mesh_field_dirty` (byte ranges) with vkCmdUpdateBuffer, so a
@@ -608,7 +838,7 @@ struct Gpu {
     mesh_field_layout: u64,
     mesh_field_shadow: Vec<u8>,
     mesh_field_dirty: Vec<(usize, usize)>,
-    /// GI v2 frame path (lighting_gpu.rs).
+    /// GI frame path (lighting_gpu.rs).
     lighting: Lighting,
     /// Fragment shader for the next raster pipeline built, instead of overlay.frag.
     frag_override: Option<&'static [u8]>,
@@ -636,10 +866,13 @@ struct Gpu {
     audio_cmd: Handle,
     audio_fence: Handle,
     submit_pending: bool,
+    /// Drop returns without `vkDeviceWaitIdle`. The process is leaving.
+    abandon: bool,
     timestamp_period: f32,
     timestamp_bits: u32,
     query_pool: Handle,
-    /// `GENOS_GPU_TIMES[=frames]`: per-pass GPU times of every frame and light build,
+    /// `--gpu-times N`, or `GENOS_GPU_TIMES` when that argument was omitted:
+    /// per-pass GPU times of every frame and light build,
     /// averaged and printed every `frames` frames ([`GPU_TIMES_FRAMES`] by default).
     gpu_times: Option<Box<GpuTimes>>,
     profile_submit: bool,
@@ -875,6 +1108,10 @@ type FnQueues = unsafe extern "system" fn(Handle, *mut u32, *mut u8);
 type FnMemProps = unsafe extern "system" fn(Handle, *mut u8);
 
 impl Gpu {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+    )]
     fn open(
         display: *mut c_void,
         wl_surface: *mut c_void,
@@ -1213,6 +1450,14 @@ impl Gpu {
                 wire_pipeline: std::ptr::null_mut(),
                 wire_on: false,
                 copy_picture: false,
+                unfilled: UnfilledControl::from_env()?,
+                unfilled_saved: 0,
+                last_unfilled: None,
+                unfilled_eye: [0.0; 3],
+                unfilled_yaw: 0.0,
+                unfilled_pitch: 0.0,
+                out_cli: genos_scene::DebugSettings::cli_out(),
+                debug_out: String::new(),
                 layout: std::ptr::null_mut(),
                 pool: std::ptr::null_mut(),
                 cmd: std::ptr::null_mut(),
@@ -1231,6 +1476,10 @@ impl Gpu {
                 flight: 0,
                 scene_buf: Buffer::empty(),
                 particle_buf: Buffer::empty(),
+                material_color: Buffer::empty(),
+                material_normal: Buffer::empty(),
+                material_key: 0,
+                normal_key: 0,
                 mesh_field: Buffer::empty(),
                 mesh_field_cap: 0,
                 mesh_field_key: 0,
@@ -1260,15 +1509,21 @@ impl Gpu {
                 audio_cmd: std::ptr::null_mut(),
                 audio_fence: std::ptr::null_mut(),
                 submit_pending: false,
+                abandon: false,
                 timestamp_period,
                 timestamp_bits,
                 query_pool: std::ptr::null_mut(),
-                gpu_times: std::env::var("GENOS_GPU_TIMES").ok().map(|v| {
-                    Box::new(GpuTimes {
-                        every: v.parse().unwrap_or(GPU_TIMES_FRAMES).max(1),
-                        ..GpuTimes::default()
+                gpu_times: {
+                    let args: Vec<String> = std::env::args().skip(1).collect();
+                    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                    let env = std::env::var("GENOS_GPU_TIMES").ok();
+                    gpu_times_every(&refs, env.as_deref())?.map(|every| {
+                        Box::new(GpuTimes {
+                            every,
+                            ..GpuTimes::default()
+                        })
                     })
-                }),
+                },
                 profile_submit: false,
                 stamp_pending: [false; 2],
                 inflight: VecDeque::new(),
@@ -1303,8 +1558,11 @@ impl Gpu {
             let _ = (destroy_instance, surface_support);
             gpu.create_static_objects()?;
             gpu.recreate(width, height)?;
-            gpu.make_lighting()?;
+            block(|| gpu.make_lighting())?;
             gpu.make_lighting_targets()?;
+            let launch = genos_scene::DebugSettings::default().effective(gpu.out_cli.as_deref());
+            gpu.debug_out = launch.out.clone();
+            crate::unfilled::enforce_unfilled_cap(std::path::Path::new(&gpu.debug_out))?;
             Ok(gpu)
         }
     }
@@ -1316,11 +1574,11 @@ impl Gpu {
             self.desc_layout = self.make_desc_layout()?;
             self.layout = self.make_layout()?;
             let start = Instant::now();
-            self.pipeline = self.make_pipeline(true, true, false)?;
+            self.pipeline = block(|| self.make_pipeline(true, true, false))?;
             self.note_pipeline_time("scene", start);
-            self.depth_pipeline = self.make_depth_pipeline()?;
-            self.overlay_pipeline = self.make_pipeline(false, false, false)?;
-            self.wire_pipeline = self.make_pipeline(false, false, true)?;
+            self.depth_pipeline = block(|| self.make_depth_pipeline())?;
+            self.overlay_pipeline = block(|| self.make_pipeline(false, false, false))?;
+            self.wire_pipeline = block(|| self.make_pipeline(false, false, true))?;
             #[repr(C)]
             struct PoolInfo {
                 s_type: i32,
@@ -1416,9 +1674,7 @@ impl Gpu {
     }
 
     fn recreate(&mut self, width: u32, height: u32) -> Result<(), String> {
-        unsafe {
-            (self.fns.device_wait)(self.device);
-        }
+        self.idle_device();
         self.destroy_targets();
         self.create_targets(width, height)
     }
@@ -1653,11 +1909,7 @@ impl Gpu {
                 (self.fns.map_mem)(self.device, self.vertex.memory, 0, bytes, 0, &mut mapped),
                 "map vertices",
             )?;
-            std::ptr::copy_nonoverlapping(
-                verts.as_ptr() as *const u8,
-                mapped as *mut u8,
-                bytes as usize,
-            );
+            copy_to_mapped(mapped as *mut u8, verts.as_ptr() as *const u8, bytes as usize);
             (self.fns.unmap_mem)(self.device, self.vertex.memory);
         }
         Ok(())
@@ -1725,9 +1977,9 @@ impl Gpu {
                 (self.fns.map_mem)(self.device, buffer.memory, 0, end, 0, &mut mapped),
                 "map shape block",
             )?;
-            std::ptr::copy_nonoverlapping(
-                verts.as_ptr() as *const u8,
+            copy_to_mapped(
                 (mapped as *mut u8).add(offset as usize),
+                verts.as_ptr() as *const u8,
                 bytes as usize,
             );
             (self.fns.unmap_mem)(self.device, buffer.memory);
@@ -1736,16 +1988,20 @@ impl Gpu {
     }
 
     fn write_instances(&mut self, items: &[InstanceRec]) -> Result<(), String> {
-        let mut bytes = Vec::with_capacity(items.len() * 80);
+        let mut bytes = Vec::with_capacity(items.len() * 128);
         for item in items {
-            for value in item.model {
-                bytes.extend_from_slice(&value.to_ne_bytes());
-            }
-            for value in item.color {
+            for value in item
+                .model
+                .into_iter()
+                .chain(item.color)
+                .chain(item.atlas)
+                .chain(item.normal_atlas)
+                .chain(item.extra)
+            {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
         }
-        // GI v2 holds its light while nothing it sees changes (lighting_gpu.rs).
+        // GI holds its light while nothing it sees changes (lighting_gpu.rs).
         self.lighting.draw_key = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1783,6 +2039,9 @@ impl Gpu {
     }
 
     fn record_and_submit(&mut self, matrix: &[f32; 16]) -> Result<(), String> {
+        if self.unfilled.dump_pct.is_some() {
+            self.copy_picture = true;
+        }
         let profiled = self.profile_submit;
         self.profile_submit = false;
         if profiled && (self.query_pool.is_null() || self.timestamp_period <= 0.0) {
@@ -1790,13 +2049,13 @@ impl Gpu {
         }
         self.bind_flight();
         let slot = self.flight;
+        self.wait_fence(self.fence, "wait fence")?;
+        let fences = [self.fence];
         unsafe {
-            let fences = [self.fence];
-            check(
-                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                "wait fence",
-            )?;
             self.collect_slot_after_wait(slot)?;
+            if self.lighting_active() {
+                self.take_unfilled(slot);
+            }
             self.collect_frame_times(slot);
             self.desc_set = self.raster_sets[slot];
             check(
@@ -1996,10 +2255,29 @@ impl Gpu {
 
     /// Read a finished frame's stamps (its fence has been waited) and print the averages
     /// every `every` frames.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
+    )]
     fn collect_frame_times(&mut self, slot: usize) {
         let bits = self.timestamp_bits;
         let period = f64::from(self.timestamp_period);
         let antialias = self.antialias;
+        // The print below borrows `gpu_times`. Read the diag counters first.
+        let lamp_pick_line = if genos_scene::lighting_env_os("GENOS_LIGHTING_LAMP_PICK_DIAG").is_some()
+            && self
+                .gpu_times
+                .as_ref()
+                .is_some_and(|times| times.written[slot] && times.frames + 1 >= times.every)
+        {
+            let c = self.lighting_lamp_pick_counts();
+            format!(
+                " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} lamp_spatial={}",
+                c.pixels, c.kept, c.fills, c.cache, c.spatial
+            )
+        } else {
+            String::new()
+        };
         let Some(times) = self.gpu_times.as_mut() else {
             return;
         };
@@ -2030,7 +2308,12 @@ impl Gpu {
             .frame_spans
             .push((raw[0], raw[FRAME_STAMPS as usize - 1]));
         let ids = std::mem::take(&mut times.lighting_ids[slot]);
-        if ids.len() > 2 && !times.lighting_pool.is_null() {
+        let tags = std::mem::take(&mut self.lighting.frame_tags[slot]);
+        let shadow = self.lighting.frame_shadow[slot];
+        let prefill = self.lighting.frame_prefill[slot];
+        let counts = self.lighting.frame_counts[slot];
+        let mut bucket_ms = [0.0f64; BUCKETS];
+        if !ids.is_empty() && !times.lighting_pool.is_null() {
             let mut g = vec![0u64; ids.len() + 1];
             let got = unsafe {
                 (self.fns.get_query_results)(
@@ -2050,10 +2333,26 @@ impl Gpu {
                 }
                 for (i, (&pass, w)) in ids.iter().zip(g.windows(2)).enumerate() {
                     let ms = tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
-                    times.lighting[pass] += ms;
+                    if pass < times.lighting.len() {
+                        times.lighting[pass] += ms;
+                    }
                     times.lighting_disp[i].1 += ms;
+                    let tag = tags.get(i).copied().unwrap_or(pass as u8) as usize;
+                    if tag < BUCKETS {
+                        bucket_ms[tag] += ms;
+                        times.lighting_bucket[tag] += ms;
+                    }
+                    if shadow && (tag == B_DIRECT as usize || tag == B_HIT as usize) {
+                        bucket_ms[B_SHADOWS as usize] += ms;
+                        times.lighting_bucket[B_SHADOWS as usize] += ms;
+                    }
                 }
                 times.lighting_frames += 1;
+                if prefill {
+                    times.prefill_frames += 1;
+                }
+                self.lighting.last_ms = bucket_ms;
+                self.lighting.last_dispatches = counts;
             }
         }
         times.frames += 1;
@@ -2077,14 +2376,19 @@ impl Gpu {
         );
         if times.lighting_frames > 0 && std::env::var_os("GENOS_GPU_DISPATCH").is_some() {
             let lf = f64::from(times.lighting_frames);
-            let parts: Vec<String> = times.lighting_disp.iter().enumerate().map(|(i, (p, ms))| format!("{i}:{p}={:.3}", ms / lf)).collect();
+            let parts: Vec<String> = times
+                .lighting_disp
+                .iter()
+                .enumerate()
+                .map(|(i, (p, ms))| format!("{i}:{p}={:.3}", ms / lf))
+                .collect();
             eprintln!("LIGHTING_DISPATCH {}", parts.join(" "));
             times.lighting_disp.clear();
         }
         if times.lighting_frames > 0 {
             let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
-                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3}",
+                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} shadows={:.3} prefill={:.3}{}{}",
                 times.lighting_frames,
                 g[0],
                 g[1],
@@ -2101,7 +2405,14 @@ impl Gpu {
                 times.world_pass[0] / f64::from(times.world_runs.max(1)),
                 times.world_pass[1] / f64::from(times.world_runs.max(1)),
                 times.world_pass[2] / f64::from(times.world_runs.max(1)),
-                times.world_pass[3] / f64::from(times.world_runs.max(1))
+                times.world_pass[3] / f64::from(times.world_runs.max(1)),
+                times.lighting_bucket[B_CACHE_RAYS as usize] / f64::from(times.lighting_frames),
+                times.lighting_bucket[B_SHADOWS as usize] / f64::from(times.lighting_frames),
+                times.prefill_frames as f64 / f64::from(times.lighting_frames),
+                self.last_unfilled
+                    .map(|stats| format!(" | {}", stats.line()))
+                    .unwrap_or_default(),
+                lamp_pick_line
             );
         }
         if !times.light_spans.is_empty() {
@@ -2185,13 +2496,7 @@ impl Gpu {
             }
             let fence = self.fences[slot];
             if wait {
-                let fences = [fence];
-                unsafe {
-                    check(
-                        (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                        "profile fence",
-                    )?;
-                }
+                self.wait_fence(fence, "profile fence")?;
             } else {
                 let status = unsafe { (self.fns.fence_status)(self.device, fence) };
                 if status == 1 {
@@ -2233,21 +2538,42 @@ impl Gpu {
         Ok(Duration::from_nanos(nanos.round() as u64))
     }
 
-    fn wait_flight(&mut self, slot: usize) -> Result<(), String> {
-        unsafe {
-            let fences = [self.fences[slot]];
-            if fences[0].is_null() {
-                return Ok(());
-            }
-            let status = (self.fns.fence_status)(self.device, fences[0]);
-            if status == 1 {
-                check(
-                    (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                    "flight wait",
-                )?;
-            }
+    fn idle_device(&self) {
+        let wait = self.fns.device_wait;
+        let device = self.device;
+        block(|| unsafe { wait(device) });
+    }
+
+    /// Wait until `fence` signals. A short wait stays on this thread. A longer
+    /// one dispatches the seat so a ping is not missed.
+    fn wait_fence(&self, fence: Handle, what: &str) -> Result<(), String> {
+        if fence.is_null() {
+            return Ok(());
         }
-        Ok(())
+        let status = unsafe { (self.fns.fence_status)(self.device, fence) };
+        if status == VK_SUCCESS {
+            return Ok(());
+        }
+        let timed = unsafe {
+            (self.fns.wait_fences)(self.device, 1, &fence, 1, FENCE_BUDGET_NS)
+        };
+        if timed == VK_SUCCESS {
+            return Ok(());
+        }
+        if timed != VK_TIMEOUT && timed != VK_NOT_READY {
+            return check(timed, what);
+        }
+        let wait = self.fns.wait_fences;
+        let device = self.device;
+        let mut result = VK_SUCCESS;
+        block(|| {
+            result = unsafe { wait(device, 1, &fence, 1, u64::MAX) };
+        });
+        check(result, what)
+    }
+
+    fn wait_flight(&mut self, slot: usize) -> Result<(), String> {
+        self.wait_fence(self.fences[slot], "flight wait")
     }
 
     fn wait_all_inflight(&mut self) -> Result<(), String> {
@@ -2258,13 +2584,7 @@ impl Gpu {
     }
 
     fn read_host(&mut self, slot: usize) -> Result<Vec<u8>, String> {
-        unsafe {
-            let fences = [self.fences[slot]];
-            check(
-                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                "earlier frame",
-            )?;
-        }
+        self.wait_fence(self.fences[slot], "earlier frame")?;
         let saved = copy_buffer(&self.host);
         self.host = copy_buffer(&self.hosts[slot]);
         let pixels = self.read_color()?;
@@ -2273,14 +2593,7 @@ impl Gpu {
     }
 
     fn wait_gpu(&mut self) -> Result<(), String> {
-        unsafe {
-            let fences = [self.fence];
-            check(
-                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                "present wait",
-            )?;
-        }
-        Ok(())
+        self.wait_fence(self.fence, "present wait")
     }
 
     fn present(&mut self) -> Result<VkResult, String> {
@@ -2474,6 +2787,14 @@ impl Gpu {
                 stages: 0x1,
                 samplers: std::ptr::null(),
             },
+            // Material colour atlas. Fragment only: the depth mask and the G-buffer.
+            Binding {
+                binding: 4,
+                kind: 7,
+                count: 1,
+                stages: 0x10,
+                samplers: std::ptr::null(),
+            },
             Binding {
                 binding: 5,
                 kind: 7,
@@ -2481,9 +2802,17 @@ impl Gpu {
                 stages: 0x10 | 0x20,
                 samplers: std::ptr::null(),
             },
-            // GI v2 G-buffer (gbuffer.frag writes it).
+            // GI G-buffer (gbuffer.frag writes it).
             Binding {
                 binding: 6,
+                kind: 7,
+                count: 1,
+                stages: 0x10,
+                samplers: std::ptr::null(),
+            },
+            // Tangent-space normal atlas. Same readers as binding 4.
+            Binding {
+                binding: 7,
                 kind: 7,
                 count: 1,
                 stages: 0x10,
@@ -2521,6 +2850,10 @@ impl Gpu {
         ];
         self.particle_buf =
             self.make_buffer_queues(16 + 256 * 256 * 4, 0x20, Memory::Upload, &share)?;
+        self.material_color = self.make_buffer_queues(16, 0x20, Memory::Upload, &share)?;
+        self.material_normal = self.make_buffer_queues(16, 0x20, Memory::Upload, &share)?;
+        self.write_buffer(&self.material_color, &[0u8; 16])?;
+        self.write_buffer(&self.material_normal, &[0u8; 16])?;
         // S70C: one resident scene, written by deltas in the frame's command stream.
         self.frame_scene[0] =
             self.make_buffer(pack::SCENE_CAPACITY as u64, 0x20 | 0x2, Memory::Device)?;
@@ -2548,7 +2881,9 @@ impl Gpu {
             size_count: u32,
             sizes: *const Size,
         }
-        let size = Size { kind: 7, count: 14 };
+        // Two raster sets times seven storage buffers (scene, particles,
+        // instances, material colour, mesh field, G-buffer, material normal).
+        let size = Size { kind: 7, count: 16 };
         let pool = PoolInfo {
             s_type: 33,
             next: std::ptr::null(),
@@ -2644,12 +2979,21 @@ impl Gpu {
     /// instances, the traced meshes and the G-buffer.
     fn write_raster_sets(&self) -> Result<(), String> {
         for slot in 0..2 {
-            self.write_descriptors(self.raster_sets[slot], &self.frame_scene[slot], &self.instance_bufs[slot])?;
+            self.write_descriptors(
+                self.raster_sets[slot],
+                &self.frame_scene[slot],
+                &self.instance_bufs[slot],
+            )?;
         }
         Ok(())
     }
 
-    fn write_descriptors(&self, set: Handle, scene: &Buffer, instances: &Buffer) -> Result<(), String> {
+    fn write_descriptors(
+        &self,
+        set: Handle,
+        scene: &Buffer,
+        instances: &Buffer,
+    ) -> Result<(), String> {
         #[repr(C)]
         struct BufInfo {
             buffer: Handle,
@@ -2691,12 +3035,22 @@ impl Gpu {
                 range: u64::MAX,
             },
             BufInfo {
-                // Any buffer until GI v2 sizes its G-buffer; only gbuffer.frag reads it.
+                // Any buffer until GI sizes its G-buffer; only gbuffer.frag reads it.
                 buffer: if self.lighting.gbuf.buffer.is_null() {
                     self.mesh_field.buffer
                 } else {
                     self.lighting.gbuf.buffer
                 },
+                offset: 0,
+                range: u64::MAX,
+            },
+            BufInfo {
+                buffer: self.material_color.buffer,
+                offset: 0,
+                range: u64::MAX,
+            },
+            BufInfo {
+                buffer: self.material_normal.buffer,
                 offset: 0,
                 range: u64::MAX,
             },
@@ -2760,6 +3114,30 @@ impl Gpu {
                 kind: 7,
                 image: std::ptr::null(),
                 buffer: &infos[4],
+                texel: std::ptr::null(),
+            },
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set,
+                binding: 4,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: &infos[5],
+                texel: std::ptr::null(),
+            },
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set,
+                binding: 7,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: &infos[6],
                 texel: std::ptr::null(),
             },
         ];
@@ -3120,12 +3498,9 @@ impl Gpu {
         self.sync_audio_scene()?;
         self.write_buffer(&self.audio_rays, &ray_bytes(listener, sources))?;
         self.write_buffer(&self.audio_gains, &vec![0u8; sources.len() * 4])?;
+        self.wait_fence(self.audio_fence, "audio wait")?;
+        let fences = [self.audio_fence];
         unsafe {
-            let fences = [self.audio_fence];
-            check(
-                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                "audio wait",
-            )?;
             check(
                 (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
                 "audio reset fence",
@@ -3238,10 +3613,7 @@ impl Gpu {
                 ),
                 "audio submit",
             )?;
-            check(
-                (self.fns.wait_fences)(self.device, 1, fences.as_ptr(), 1, u64::MAX),
-                "audio done",
-            )?;
+            self.wait_fence(self.audio_fence, "audio done")?;
         }
         let memory = self.audio_gains.memory;
         let device = self.device;
@@ -3267,7 +3639,9 @@ impl Gpu {
         let head = crate::mesh_field::words_bytes(&quick.head);
         let tail_at = (quick.head.len() + quick.data_len) * 4;
         let tail = crate::mesh_field::words_bytes(&quick.emission);
-        if quick.layout == self.mesh_field_layout && self.mesh_field_shadow.len() == tail_at + tail.len() {
+        if quick.layout == self.mesh_field_layout
+            && self.mesh_field_shadow.len() == tail_at + tail.len()
+        {
             self.mark_field(0, &head);
             self.mark_field(tail_at, &tail);
             self.mesh_field_key = key;
@@ -3276,9 +3650,7 @@ impl Gpu {
         let bytes = crate::mesh_field::words_bytes(&crate::mesh_field::field_words(live));
         if bytes.len() as u64 > self.mesh_field_cap {
             // The old buffer may be in use by frames in flight.
-            unsafe {
-                (self.fns.device_wait)(self.device);
-            }
+            self.idle_device();
             let share = self.light_families();
             let cap = (bytes.len() as u64).next_power_of_two();
             let mut old = std::mem::replace(&mut self.mesh_field, Buffer::empty());
@@ -3343,7 +3715,9 @@ impl Gpu {
             let stop = stop.min(self.mesh_field_shadow.len());
             let mut at = start & !3;
             while at < stop {
-                let end = (at + RUN).min(stop + 3 & !3).min(self.mesh_field_shadow.len());
+                let end = (at + RUN)
+                    .min(stop + 3 & !3)
+                    .min(self.mesh_field_shadow.len());
                 if end <= at {
                     break;
                 }
@@ -3376,6 +3750,7 @@ impl Gpu {
         self.frame_bytes.clone_from(&bytes);
         self.lighting.light_scene = lighting_scene_key(pack, &bytes);
         self.lighting.trace_key = lighting_trace_key(pack);
+        self.note_lighting_sun(pack);
         self.background = pack.sky.map(crate::mesh::tone);
         Ok(())
     }
@@ -3409,7 +3784,8 @@ impl Gpu {
         let mut at = 0;
         while at < len {
             let end = (at + BLOCK).min(len);
-            let same = self.scene_shadow.len() >= end && self.scene_shadow[at..end] == bytes[at..end];
+            let same =
+                self.scene_shadow.len() >= end && self.scene_shadow[at..end] == bytes[at..end];
             if !same {
                 match runs.last_mut() {
                     Some((start, stop)) if *stop == at && end - *start <= RUN => *stop = end,
@@ -3447,6 +3823,78 @@ impl Gpu {
         self.frame_bytes = bytes;
     }
 
+    fn sync_materials(&mut self, world: &World) -> Result<(), String> {
+        if self.material_key == world.color_atlas.key && self.normal_key == world.normal_atlas.key {
+            return Ok(());
+        }
+        self.idle_device();
+        self.store_atlas(true, &world.color_atlas)?;
+        self.store_atlas(false, &world.normal_atlas)?;
+        self.material_key = world.color_atlas.key;
+        self.normal_key = world.normal_atlas.key;
+        self.write_raster_sets()
+    }
+
+    /// `color` selects the base-colour atlas. The other slot is the normal atlas.
+    fn store_atlas(
+        &mut self,
+        color: bool,
+        atlas: &crate::world::MaterialAtlas,
+    ) -> Result<(), String> {
+        let texels = atlas.width as usize * atlas.height as usize;
+        let mut bytes = Vec::with_capacity(16 + texels * 4);
+        bytes.extend_from_slice(&atlas.width.to_ne_bytes());
+        bytes.extend_from_slice(&atlas.height.to_ne_bytes());
+        bytes.extend_from_slice(&0u32.to_ne_bytes());
+        bytes.extend_from_slice(&0u32.to_ne_bytes());
+        let pixels = texels * 4;
+        if atlas.rgba.len() >= pixels {
+            bytes.extend_from_slice(&atlas.rgba[..pixels]);
+        }
+        let size = if color {
+            self.material_color.size
+        } else {
+            self.material_normal.size
+        };
+        if size < bytes.len() as u64 {
+            let share = self.light_families();
+            let next = self.make_buffer_queues(bytes.len() as u64, 0x20, Memory::Upload, &share)?;
+            let slot = if color {
+                &mut self.material_color
+            } else {
+                &mut self.material_normal
+            };
+            let mut old = std::mem::replace(slot, next);
+            self.destroy_buffer(&mut old);
+        }
+        let memory = if color {
+            self.material_color.memory
+        } else {
+            self.material_normal.memory
+        };
+        self.write_memory(memory, &bytes)
+    }
+
+    fn write_memory(&self, memory: Handle, bytes: &[u8]) -> Result<(), String> {
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(
+                    self.device,
+                    memory,
+                    0,
+                    bytes.len() as u64,
+                    0,
+                    &mut mapped,
+                ),
+                "map gpu buffer",
+            )?;
+            copy_to_mapped(mapped as *mut u8, bytes.as_ptr(), bytes.len());
+            (self.fns.unmap_mem)(self.device, memory);
+        }
+        Ok(())
+    }
+
     fn write_buffer(&self, buffer: &Buffer, bytes: &[u8]) -> Result<(), String> {
         self.write_buffer_at(buffer, 0, bytes)
     }
@@ -3468,7 +3916,7 @@ impl Gpu {
                 ),
                 "map gpu buffer",
             )?;
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped as *mut u8, bytes.len());
+            copy_to_mapped(mapped as *mut u8, bytes.as_ptr(), bytes.len());
             (self.fns.unmap_mem)(self.device, buffer.memory);
         }
         Ok(())
@@ -3702,7 +4150,9 @@ impl Gpu {
             } else {
                 self.vert_override.unwrap_or(VERT_SPV)
             })?;
-            let frag = self.shader(if additive {
+            let frag = self.shader(if depth_only {
+                DEPTH_MASK_SPV
+            } else if additive {
                 WIRE_FRAG_SPV
             } else {
                 self.frag_override.unwrap_or(FRAG_SPV)
@@ -4062,7 +4512,9 @@ impl Gpu {
                 s_type: 28,
                 next: std::ptr::null(),
                 flags: 0,
-                stage_count: if depth_only { 1 } else { 2 },
+                // The depth pass samples masked materials, so it runs a fragment
+                // shader. Colour writes stay masked off.
+                stage_count: 2,
                 stages: stages.as_ptr(),
                 vertex: &vert_info,
                 ia: &ia,
@@ -4796,10 +5248,10 @@ impl Buffer {
 impl Drop for Gpu {
     fn drop(&mut self) {
         unsafe {
-            if self.device.is_null() {
+            if self.abandon || self.device.is_null() {
                 return;
             }
-            (self.fns.device_wait)(self.device);
+            self.idle_device();
             self.destroy_lighting();
             self.destroy_targets();
             self.vertex = Buffer::empty();
@@ -4824,6 +5276,10 @@ impl Drop for Gpu {
             // [1] names the same buffer as [0] (S70C).
             self.destroy_buffer(&mut frame_scene[0]);
             self.destroy_buffer(&mut particle_buf);
+            let mut material_color = std::mem::replace(&mut self.material_color, Buffer::empty());
+            let mut material_normal = std::mem::replace(&mut self.material_normal, Buffer::empty());
+            self.destroy_buffer(&mut material_color);
+            self.destroy_buffer(&mut material_normal);
             self.destroy_buffer(&mut mesh_field);
             if let Some(times) = self.gpu_times.as_ref() {
                 if !times.pool.is_null() {
@@ -5069,6 +5525,73 @@ extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> Pfn;
 }
 
+/// `Some(true)` when `arg` is `--gpu-times` and the count is the next argument.
+/// `Some(false)` when the flag already includes its value. `None` otherwise.
+pub fn gpu_times_flag_needs_value(arg: &str) -> Option<bool> {
+    let (name, inline) = gpu_times_dash(arg)?;
+    (name == "gpu-times").then_some(inline.is_none())
+}
+
+/// Reject a bad `--gpu-times` argument. `next` is the following argument when
+/// [`gpu_times_flag_needs_value`] is `Some(true)`.
+pub fn check_gpu_times_arg(arg: &str, next: Option<&str>) -> Result<(), String> {
+    parse_gpu_times_flag(arg, next).map(|_| ())
+}
+
+/// Frames per printed line. `Some` turns the timestamps on. An argument wins.
+/// `GENOS_GPU_TIMES` applies only when `--gpu-times` was omitted. A mirror that
+/// is not a number uses [`GPU_TIMES_FRAMES`].
+fn gpu_times_every(args: &[&str], env: Option<&str>) -> Result<Option<u32>, String> {
+    let mut chosen = None;
+    let mut i = 0;
+    while i < args.len() {
+        let next = args.get(i + 1).copied();
+        match parse_gpu_times_flag(args[i], next)? {
+            None => i += 1,
+            Some(every) => {
+                let extra = gpu_times_flag_needs_value(args[i]).unwrap_or(false);
+                chosen = Some(every);
+                i += 1 + usize::from(extra);
+            }
+        }
+    }
+    if let Some(every) = chosen {
+        return Ok(Some(every.max(1)));
+    }
+    Ok(env.map(|value| value.parse().unwrap_or(GPU_TIMES_FRAMES).max(1)))
+}
+
+fn gpu_times_dash(arg: &str) -> Option<(&str, Option<&str>)> {
+    let rest = arg.strip_prefix("--")?;
+    if rest.is_empty() {
+        return None;
+    }
+    match rest.split_once('=') {
+        Some((name, value)) => Some((name, Some(value))),
+        None => Some((rest, None)),
+    }
+}
+
+fn parse_gpu_times_flag(arg: &str, next: Option<&str>) -> Result<Option<u32>, String> {
+    let Some((name, inline)) = gpu_times_dash(arg) else {
+        return Ok(None);
+    };
+    if name != "gpu-times" {
+        return Ok(None);
+    }
+    let value = match inline {
+        Some(value) => value,
+        None => next.ok_or_else(|| "--gpu-times needs a value".to_string())?,
+    };
+    if value.is_empty() {
+        return Err("--gpu-times needs a value".into());
+    }
+    let every = value
+        .parse::<u32>()
+        .map_err(|_| format!("--gpu-times {value} is not a number"))?;
+    Ok(Some(every))
+}
+
 /// Frame timestamps per flight slot for `GENOS_GPU_TIMES`.
 const FRAME_STAMPS: u32 = 5;
 /// Frames averaged per `GENOS_GPU_TIMES` line unless it gives a number.
@@ -5107,7 +5630,7 @@ struct GpuTimes {
     since: Option<std::time::Instant>,
     /// The memory placement line has been printed.
     placed: bool,
-    /// GI v2 pass stamps (2 slots x LIGHTING_STAMPS), whether a slot holds a full frame's
+    /// GI pass stamps (2 slots x LIGHTING_STAMPS), whether a slot holds a full frame's
     /// passes, and the per-pass sums over `lighting_frames`.
     lighting_pool: Handle,
     lighting_ids: [Vec<usize>; 2],
@@ -5115,7 +5638,12 @@ struct GpuTimes {
     lighting_disp: Vec<(usize, f64)>,
     lighting_frames: u32,
     lighting: [f64; 9],
-    /// Async light cache rounds (GI v2) and their GPU time.
+    /// Per-bucket sums, including cache rays, hit light, and shadows.
+    lighting_bucket: [f64; 12],
+    /// Frames in this line whose prefill scout was due. Printed as a fraction,
+    /// not a millisecond: the scout shares the cache-ray dispatch.
+    prefill_frames: u32,
+    /// Async light cache rounds (GI) and their GPU time.
     world_runs: u32,
     world_ms: f64,
     /// The async round's passes: compact, trace, light, cache (sums over world_runs).
@@ -5126,7 +5654,7 @@ struct GpuTimes {
     light_spans: Vec<(u64, u64)>,
 }
 
-/// Stamps per frame for the GI v2 passes: one before, one after each of the 10
+/// Stamps per frame for the GI passes: one before, one after each of the 10
 /// dispatches (the filter runs three rounds).
 const LIGHTING_STAMPS: u32 = 24;
 
@@ -5168,8 +5696,54 @@ impl Default for GpuTimes {
             world_pass: [0.0; 4],
             lighting_frames: 0,
             lighting: [0.0; 9],
+            lighting_bucket: [0.0; 12],
+            prefill_frames: 0,
             frame_spans: Vec::new(),
             light_spans: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod gpu_times_launch {
+    use super::{check_gpu_times_arg, gpu_times_every, gpu_times_flag_needs_value};
+
+    #[test]
+    fn arguments_win_and_env_is_the_mirror() {
+        assert_eq!(gpu_times_every(&[], None).unwrap(), None);
+        assert_eq!(gpu_times_every(&[], Some("30")).unwrap(), Some(30));
+        assert_eq!(gpu_times_every(&[], Some("nope")).unwrap(), Some(120));
+        assert_eq!(
+            gpu_times_every(&["--gpu-times", "10"], Some("30")).unwrap(),
+            Some(10)
+        );
+        assert_eq!(
+            gpu_times_every(&["--gpu-times=4"], Some("30")).unwrap(),
+            Some(4)
+        );
+        assert_eq!(
+            gpu_times_every(&["--scale", "big"], Some("8")).unwrap(),
+            Some(8)
+        );
+        assert_eq!(
+            gpu_times_every(&["--gpu-times", "0"], None).unwrap(),
+            Some(1)
+        );
+        assert!(gpu_times_flag_needs_value("--gpu-times").unwrap());
+        assert!(gpu_times_flag_needs_value("--gpu-times=3").is_some_and(|needs| !needs));
+        assert!(gpu_times_flag_needs_value("--preset").is_none());
+        assert_eq!(
+            check_gpu_times_arg("--gpu-times", None).unwrap_err(),
+            "--gpu-times needs a value"
+        );
+        assert_eq!(
+            check_gpu_times_arg("--gpu-times", Some("nope")).unwrap_err(),
+            "--gpu-times nope is not a number"
+        );
+        assert_eq!(
+            check_gpu_times_arg("--gpu-times=", None).unwrap_err(),
+            "--gpu-times needs a value"
+        );
+        assert!(check_gpu_times_arg("--gpu-times", Some("30")).is_ok());
     }
 }

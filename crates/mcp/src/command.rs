@@ -1,3 +1,9 @@
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! Named commands a client sends and the frame thread runs.
 //!
 //! A client (an MCP tool call, `POST /cmd/<name>`, or a script thread) queues a
@@ -128,6 +134,10 @@ mod tests {
     use crate::json;
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a test waits for a fixture. docs/LINT_RULES.md"
+    )]
     fn a_command_waits_for_the_frame_reply() {
         register(vec![CommandSpec {
             name: "echo".into(),

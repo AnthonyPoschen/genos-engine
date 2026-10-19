@@ -1,3 +1,10 @@
+#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::iter_overeager_cloned, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::range_plus_one, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! Omarchy theme colors through the shipped load path and `lighting_frame`.
 
 use std::path::{Path, PathBuf};
@@ -315,7 +322,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn pointer(x: f32, y: f32, down: bool) -> Pointer {
-    Pointer { x, y, down }
+    Pointer::at(x, y, down)
 }
 
 fn shown(frame: &Frame, id: u32) -> Shown {

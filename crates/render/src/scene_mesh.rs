@@ -1,6 +1,13 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::float_cmp, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! The analytic scene as triangles: floor, roof, walls, square and round solids.
 //!
-//! GI v2 traces meshes only, so the authored shapes become meshes with the same
+//! GI traces meshes only, so the authored shapes become meshes with the same
 //! surfaces the analytic tracer in `trace.rs` hits: the floor and the roof are
 //! two-sided planes at y = 0 and at the roof height (the footprint grown by 5 cm,
 //! as `on_floor` does); walls and solids are closed, one-sided boxes and cylinders
@@ -261,6 +268,11 @@ mod tests {
                 color: [0.7, 0.7, 0.7],
             }),
             sky: None,
+            lighting: genos_scene::LightingSettings::default(),
+            debug: genos_scene::DebugSettings::default(),
+            fps_counter: genos_scene::FpsCounterSettings::default(),
+            event_loop: genos_scene::EventLoopSettings::default(),
+            menu: genos_scene::MenuSettings::default(),
         }
     }
 

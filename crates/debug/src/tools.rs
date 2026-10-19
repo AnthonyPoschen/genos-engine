@@ -1,3 +1,20 @@
+#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
+#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::explicit_iter_loop, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::manual_pattern_char_comparison, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![expect(clippy::trivially_copy_pass_by_ref, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+
 //! The frame side of the debug tools: runs queued commands against the renderer,
 //! the scene and the camera, holds edits the example's own update would undo, and
 //! answers waits and captures after the frames they need.
@@ -7,10 +24,13 @@ use std::path::PathBuf;
 
 use genos_mcp::json::Value;
 use genos_render::{DebugView, Renderer, ScreenRect, ViewMode};
-use genos_scene::{Camera, Light, Scene, Vec3, PITCH_LIMIT};
+use genos_scene::{
+    Camera, DebugSettings, EventLoopSettings, FpsCounterSettings, Light, LightingPreset,
+    LightingSettings, MenuSettings, Scene, Vec3, PITCH_LIMIT,
+};
 
 use crate::image::{Flicker, Image, Region};
-use crate::knobs::{Host, Knob};
+use crate::knobs::{CheckpointPose, Host, Knob, LoadPace};
 use crate::reference::{self, RefSetup, Reference};
 use crate::value::{list, num, obj, text, vec3, Args};
 
@@ -63,7 +83,9 @@ impl Look {
         };
         if let Some(a) = arg {
             if look.view.mode != ViewMode::Light {
-                return Err(format!("{head} takes no argument (bounce limits went with the old lighting)"));
+                return Err(format!(
+                    "{head} takes no argument (bounce limits went with the old lighting)"
+                ));
             }
             look.view.lamp = a
                 .parse()
@@ -143,9 +165,13 @@ struct ObjectEdit {
 }
 
 /// A picture a job wants this frame.
+///
+/// `ui` keeps the debug menu, the menu tab, the frame-rate plate, and tool
+/// overlays in the readback. It is false unless the command set it.
 #[derive(Clone, Copy, Debug)]
 struct Shot {
     look: Look,
+    ui: bool,
 }
 
 enum Then {
@@ -192,6 +218,11 @@ enum Job {
         heatmap: Option<PathBuf>,
         frames_dir: Option<PathBuf>,
         index: u32,
+    },
+    /// A scene file is loading off the frame thread.
+    SceneLoad {
+        name: String,
+        checkpoint: String,
     },
 }
 
@@ -292,9 +323,48 @@ impl Tools {
         self.out_dir = dir;
     }
 
+    /// The view the next frame shows, unless a capture job asks for another.
+    pub fn set_view(&mut self, mode: ViewMode) {
+        self.look.view = DebugView { mode, lamp: 0 };
+    }
+
+    /// The view `set_view` stored. A panel uses it to mark the current picture.
+    pub fn view_mode(&self) -> ViewMode {
+        self.look.view.mode
+    }
+
+    /// Whether the capture being read this frame keeps debug overlays.
+    /// A frame with no capture job uses `cli_ui` (`--ui`).
+    pub fn show_capture_overlay(&self, cli_ui: bool) -> bool {
+        match self.reading {
+            Some(shot) => shot.ui,
+            None => cli_ui,
+        }
+    }
+
+    /// Forget light, object, and camera-path edits. A scene switch calls this so
+    /// the previous scene's edits do not land on the new one.
+    pub fn drop_scene_edits(&mut self) {
+        self.lights.clear();
+        self.added.clear();
+        self.solo = None;
+        self.objects.clear();
+        self.camera_path = None;
+    }
+
     /// Run scene time on a fixed step from the start (a script or a test).
     pub fn set_fixed_step(&mut self, dt: Option<f32>) {
         self.fixed_dt = dt;
+    }
+
+    /// Hold the scene clock. MCP `step`, or [`Self::request_steps`], advances it.
+    pub fn pause(&mut self) {
+        self.paused = true;
+    }
+
+    /// Queue scene frames. The next `scene_dt` calls consume them one at a time.
+    pub fn request_steps(&mut self, frames: u32) {
+        self.steps_left = self.steps_left.saturating_add(frames.max(1));
     }
 
     /// Scene seconds this frame should advance: 0 while paused (unless stepping),
@@ -342,6 +412,7 @@ impl Tools {
                 Err(err) => genos_mcp::command::reply(cmd.id, Err(err)),
             }
         }
+        self.poll_scene_loads(ctx);
         self.apply_edits(ctx.host.scene());
         self.apply_camera_path(ctx.camera);
         for running in &mut self.jobs {
@@ -487,6 +558,7 @@ impl Tools {
                         None
                     }
                 }
+                Job::SceneLoad { .. } => None,
                 Job::Flicker {
                     left,
                     flicker,
@@ -623,12 +695,19 @@ impl Tools {
         Ok(v)
     }
 
-    fn shot_from(&self, args: &Args) -> Result<Shot, String> {
+    fn shot_from(&self, args: &Args, ui_default: bool) -> Result<Shot, String> {
         let look = match args.str("mode")? {
             Some(m) => Look::parse(&m)?,
             None => self.look,
         };
-        Ok(Shot { look })
+        Ok(Shot {
+            look,
+            ui: Self::shot_ui(args, ui_default)?,
+        })
+    }
+
+    fn shot_ui(args: &Args, ui_default: bool) -> Result<bool, String> {
+        Ok(args.bool("ui")?.unwrap_or(ui_default))
     }
 
     fn path_arg(
@@ -650,7 +729,12 @@ impl Tools {
         })
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
+    )]
     fn run(&mut self, name: &str, args: &Args, ctx: &mut Ctx) -> Result<Step, String> {
+        let ui_default = ctx.host.scene().debug.ui;
         let reply = |v: Value| Ok(Step::Reply(v));
         match name {
             "status" => {
@@ -673,7 +757,10 @@ impl Tools {
                     ("camera", camera_value(ctx.camera)),
                     ("stable", Value::Bool(stats.settled)),
                     ("still_frames", num(stats.still_frames as f64)),
-                    ("picture_settled", Value::Bool(ctx.renderer.picture_settled())),
+                    (
+                        "picture_settled",
+                        Value::Bool(ctx.renderer.picture_settled()),
+                    ),
                 ]))
             }
             "knobs" => {
@@ -898,7 +985,7 @@ impl Tools {
                 reply(obj(vec![("view", text(self.look.name()))]))
             }
             "capture" => {
-                let shot = self.shot_from(args)?;
+                let shot = self.shot_from(args, ui_default)?;
                 let name = args.str("name")?;
                 let default = format!(
                     "frame-{:05}-{}.png",
@@ -947,9 +1034,11 @@ impl Tools {
                 let mut shots = Vec::new();
                 let mut paths = Vec::new();
                 let mut names = Vec::new();
+                let ui = Self::shot_ui(args, ui_default)?;
                 for m in &modes {
                     shots.push(Shot {
                         look: Look::parse(m)?,
+                        ui,
                     });
                     let file = format!("{prefix}-{}.png", m.replace(':', "-"));
                     paths.push(self.path_arg(&Args(&Value::Null), "", Some(&file))?);
@@ -968,7 +1057,7 @@ impl Tools {
                 }))
             }
             "luminance" => {
-                let shot = self.shot_from(args)?;
+                let shot = self.shot_from(args, ui_default)?;
                 Ok(Step::Job(Job::Shots {
                     shots: vec![shot],
                     got: Vec::new(),
@@ -997,8 +1086,9 @@ impl Tools {
                         .ok_or("diff needs a and b, or mode_a and mode_b")?,
                 )?;
                 let b = Look::parse(&args.str("mode_b")?.ok_or("diff needs mode_b")?)?;
+                let ui = Self::shot_ui(args, ui_default)?;
                 Ok(Step::Job(Job::Shots {
-                    shots: vec![Shot { look: a }, Shot { look: b }],
+                    shots: vec![Shot { look: a, ui }, Shot { look: b, ui }],
                     got: Vec::new(),
                     then: Then::Diff {
                         out,
@@ -1011,7 +1101,10 @@ impl Tools {
             "reference" | "compare" => {
                 let shot = if name == "compare" {
                     let look = Look::parse(&args.str("mode")?.unwrap_or_else(|| "full".into()))?;
-                    Some(Shot { look })
+                    Some(Shot {
+                        look,
+                        ui: Self::shot_ui(args, ui_default)?,
+                    })
                 } else {
                     None
                 };
@@ -1030,7 +1123,9 @@ impl Tools {
                 let triangles = match args.str("geometry")?.as_deref() {
                     None | Some("shapes") => false,
                     Some("triangles") => true,
-                    Some(other) => return Err(format!("geometry must be shapes or triangles, not {other}")),
+                    Some(other) => {
+                        return Err(format!("geometry must be shapes or triangles, not {other}"))
+                    }
                 };
                 let grid = args
                     .floats("grid", 2)?
@@ -1079,7 +1174,7 @@ impl Tools {
             }
             "flicker" => {
                 let frames = args.u32("frames")?.unwrap_or(60).max(2);
-                let shot = self.shot_from(args)?;
+                let shot = self.shot_from(args, ui_default)?;
                 Ok(Step::Job(Job::Flicker {
                     left: frames,
                     shot,
@@ -1093,15 +1188,192 @@ impl Tools {
                 }))
             }
             "timing" => reply(self.timing_value(args.u32("frames")?.unwrap_or(60) as usize)),
+            "get_lighting_settings" => reply(lighting_report(
+                &ctx.renderer.lighting_settings().to_text(),
+                ctx.renderer,
+            )),
+            "set_lighting_settings" => {
+                let scene = ctx.host.scene();
+                apply_lighting_update(&mut scene.lighting, args.0)?;
+                let written = scene.lighting.to_text();
+                ctx.renderer.clear_lighting_override();
+                reply(lighting_report(&written, ctx.renderer))
+            }
+            "list_presets" => {
+                let presets = LightingPreset::all()
+                    .iter()
+                    .map(|preset| {
+                        obj(vec![
+                            ("name", text(preset.name())),
+                            ("text", text(LightingSettings::preset(*preset).to_text())),
+                        ])
+                    })
+                    .collect();
+                reply(obj(vec![("presets", list(presets))]))
+            }
+            "apply_preset" => {
+                let name = args.str("name")?.ok_or("apply_preset needs name")?;
+                let preset =
+                    LightingPreset::parse(&name).ok_or_else(|| format!("unknown preset {name}"))?;
+                ctx.host.scene().lighting = LightingSettings::preset(preset);
+                let written = ctx.host.scene().lighting.to_text();
+                ctx.renderer.clear_lighting_override();
+                reply(lighting_report(&written, ctx.renderer))
+            }
+            "get_debug_settings" => {
+                let settings = ctx.renderer.debug_settings(ctx.host.scene());
+                reply(obj(vec![("text", text(settings.to_text()))]))
+            }
+            "set_debug_settings" => {
+                apply_debug_update(&mut ctx.host.scene().debug, args.0)?;
+                let cli = ctx.renderer.debug_out_cli().map(str::to_string);
+                let settings = ctx.host.scene().debug.effective(cli.as_deref());
+                reply(obj(vec![("text", text(settings.to_text()))]))
+            }
+            "get_fps_counter" => {
+                reply(fps_counter_value(&ctx.host.scene().fps_counter.effective()))
+            }
+            "set_fps_counter" => {
+                apply_fps_update(&mut ctx.host.scene().fps_counter, args.0)?;
+                reply(fps_counter_value(&ctx.host.scene().fps_counter.effective()))
+            }
+            "get_event_loop" => reply(event_loop_value(&ctx.host.scene().event_loop)),
+            "set_event_loop" => {
+                apply_event_loop_update(&mut ctx.host.scene().event_loop, args.0)?;
+                reply(event_loop_value(&ctx.host.scene().event_loop))
+            }
+            "get_menu_settings" => {
+                reply(menu_value(&ctx.host.scene().menu.effective()))
+            }
+            "set_menu_settings" => {
+                apply_menu_update(&mut ctx.host.scene().menu, args.0)?;
+                reply(menu_value(&ctx.host.scene().menu.effective()))
+            }
             "quit" => {
                 self.quit = Some(args.f64("code")?.unwrap_or(0.0) as i32);
                 reply(obj(vec![("quit", Value::Bool(true))]))
+            }
+            "list_scenes" => reply(list(
+                ctx.host
+                    .list_scenes()
+                    .into_iter()
+                    .map(text)
+                    .collect(),
+            )),
+            "load_scene" => {
+                let name = args.str("name")?.ok_or("load_scene needs name")?;
+                let checkpoint = args.str("checkpoint")?.unwrap_or_default();
+                match ctx.host.begin_load(&name)? {
+                    LoadPace::Ready => {
+                        self.drop_scene_edits();
+                        ctx.renderer.reset_lighting_cache();
+                        reply(Self::scene_load_reply(ctx, &name, &checkpoint)?)
+                    }
+                    LoadPace::Pending => Ok(Step::Job(Job::SceneLoad { name, checkpoint })),
+                }
+            }
+            "list_checkpoints" => reply(list(
+                ctx.host
+                    .list_checkpoints()
+                    .into_iter()
+                    .map(text)
+                    .collect(),
+            )),
+            "jump_checkpoint" => {
+                let name = args.str("name")?.ok_or("jump_checkpoint needs name")?;
+                let pose = ctx.host.jump_checkpoint(&name)?;
+                Self::place_checkpoint(ctx.camera, pose);
+                reply(obj(vec![
+                    ("checkpoint", text(name)),
+                    ("camera", camera_value(ctx.camera)),
+                ]))
             }
             _ => Err(format!("unknown command {name}")),
         }
     }
 
-    fn light_cmd(&mut self, args: &Args, ctx: &mut Ctx) -> Result<Value, String> {
+    fn poll_scene_loads(&mut self, ctx: &mut Ctx) {
+        let pending = self
+            .jobs
+            .iter()
+            .any(|running| matches!(running.job, Job::SceneLoad { .. }));
+        if !pending {
+            return;
+        }
+        match ctx.host.poll_load() {
+            Ok(LoadPace::Pending) => {}
+            Ok(LoadPace::Ready) => {
+                self.drop_scene_edits();
+                ctx.renderer.reset_lighting_cache();
+                let ready: Vec<(usize, u64, String, String)> = self
+                    .jobs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, running)| match &running.job {
+                        Job::SceneLoad { name, checkpoint } => {
+                            Some((index, running.id, name.clone(), checkpoint.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                for (index, id, name, checkpoint) in ready.into_iter().rev() {
+                    let result = Self::scene_load_reply(ctx, &name, &checkpoint);
+                    self.jobs.remove(index);
+                    genos_mcp::command::reply(id, result);
+                }
+            }
+            Err(err) => {
+                let failed: Vec<(usize, u64)> = self
+                    .jobs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, running)| match running.job {
+                        Job::SceneLoad { .. } => Some((index, running.id)),
+                        _ => None,
+                    })
+                    .collect();
+                for (index, id) in failed.into_iter().rev() {
+                    self.jobs.remove(index);
+                    genos_mcp::command::reply(id, Err(err.clone()));
+                }
+            }
+        }
+    }
+
+    fn scene_load_reply(
+        ctx: &mut Ctx,
+        name: &str,
+        checkpoint: &str,
+    ) -> Result<Value, String> {
+        let checkpoint = if checkpoint.is_empty() {
+            ctx.host
+                .list_checkpoints()
+                .into_iter()
+                .next()
+                .unwrap_or_default()
+        } else {
+            checkpoint.to_string()
+        };
+        if !checkpoint.is_empty() {
+            let pose = ctx.host.jump_checkpoint(&checkpoint)?;
+            Self::place_checkpoint(ctx.camera, pose);
+        }
+        Ok(obj(vec![
+            ("scene", text(name.to_string())),
+            ("checkpoint", text(checkpoint)),
+            ("camera", camera_value(ctx.camera)),
+        ]))
+    }
+
+    fn place_checkpoint(camera: &mut Camera, pose: CheckpointPose) {
+        camera.set_pose(
+            Vec3::new(pose.position[0], pose.position[1], pose.position[2]),
+            pose.yaw,
+            pose.pitch,
+        );
+    }
+
+fn light_cmd(&mut self, args: &Args, ctx: &mut Ctx) -> Result<Value, String> {
         if args.bool("solo_off")? == Some(true) {
             self.solo = None;
         }
@@ -1259,7 +1531,10 @@ fn finish_reference(
         ("reference", text(path("reference").display().to_string())),
         ("spp", num(r.spp as f64)),
         ("bounces", num(job.max_bounces as f64)),
-        ("geometry", text(if job.triangles { "triangles" } else { "shapes" })),
+        (
+            "geometry",
+            text(if job.triangles { "triangles" } else { "shapes" }),
+        ),
         ("width", num(r.image.width as f64)),
         ("height", num(r.image.height as f64)),
         ("trace_seconds", num(r.seconds as f64)),
@@ -1400,4 +1675,350 @@ fn diff_value(
             out.map_or(Value::Null, |p| text(p.display().to_string())),
         ),
     ]))
+}
+
+fn lighting_report(body: &str, renderer: &Renderer) -> Value {
+    let ms = renderer.lighting_pass_ms();
+    let counts = renderer.lighting_dispatches();
+    let names = Renderer::lighting_bucket_names();
+    let passes = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            obj(vec![
+                ("name", text(*name)),
+                ("ms", num(ms.get(i).copied().unwrap_or(0.0))),
+                (
+                    "dispatches",
+                    num(counts.get(i).copied().unwrap_or(0) as f64),
+                ),
+            ])
+        })
+        .collect();
+    obj(vec![("text", text(body)), ("passes", list(passes))])
+}
+
+fn lighting_value_text(value: &Value) -> Result<String, String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(on) = value.as_bool() {
+        return Ok(if on { "on".into() } else { "off".into() });
+    }
+    if let Some(n) = value.as_f64() {
+        if n.fract() == 0.0 && n.abs() < 1.0e15 {
+            return Ok(format!("{n:.0}"));
+        }
+        return Ok(format!("{n:?}"));
+    }
+    if let Some(items) = value.as_array() {
+        let parts = items
+            .iter()
+            .map(lighting_value_text)
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(parts.join(","));
+    }
+    Err("a lighting value is a string, number, bool, or list".into())
+}
+
+fn event_loop_value(settings: &EventLoopSettings) -> Value {
+    obj(vec![
+        ("text", text(settings.to_text())),
+        ("longest_stall_ms", num(settings.longest_stall_ms)),
+    ])
+}
+
+fn apply_event_loop_update(settings: &mut EventLoopSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("event-loop settings are an object".into());
+    };
+    if let Some(body) = args.get("text").and_then(|v| v.as_str()) {
+        for line in body.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("event-loop line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &event_loop_value_text(value)?)?;
+    }
+    Ok(())
+}
+
+fn event_loop_value_text(value: &Value) -> Result<String, String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(n) = value.as_f64() {
+        if n.fract() == 0.0 && n.abs() < 1.0e15 {
+            return Ok(format!("{n:.0}"));
+        }
+        return Ok(format!("{n:?}"));
+    }
+    Err("an event-loop value is a string or a number".into())
+}
+
+fn fps_counter_value(settings: &FpsCounterSettings) -> Value {
+    obj(vec![
+        ("text", text(settings.to_text())),
+        ("enabled", Value::Bool(settings.enabled)),
+        ("rate_hz", num(settings.rate_hz as f64)),
+    ])
+}
+
+fn menu_value(settings: &MenuSettings) -> Value {
+    obj(vec![
+        ("text", text(settings.to_text())),
+        ("visible", Value::Bool(settings.visible)),
+        ("tab", text(settings.tab.clone())),
+        (
+            "collapsed",
+            list(settings.collapsed.iter().cloned().map(text).collect()),
+        ),
+        ("wheel", text(settings.wheel.as_str())),
+        ("keys", text(settings.keys.as_str())),
+    ])
+}
+
+fn apply_menu_update(settings: &mut MenuSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("menu settings are an object".into());
+    };
+    if let Some(body) = args.get("text").and_then(|v| v.as_str()) {
+        for line in body.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("menu line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &menu_value_text(value)?)?;
+    }
+    Ok(())
+}
+
+fn menu_value_text(value: &Value) -> Result<String, String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(on) = value.as_bool() {
+        return Ok(if on { "shown".into() } else { "hidden".into() });
+    }
+    if let Some(items) = value.as_array() {
+        let parts = items
+            .iter()
+            .map(menu_value_text)
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(parts.join(","));
+    }
+    if let Some(n) = value.as_f64() {
+        if n.fract() == 0.0 && n.abs() < 1.0e15 {
+            return Ok(format!("{}", n as i64));
+        }
+        return Ok(format!("{n:?}"));
+    }
+    Err("a menu value is a string, number, bool, or list".into())
+}
+
+fn apply_fps_update(settings: &mut FpsCounterSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("fps counter settings are an object".into());
+    };
+    if let Some(body) = args.get("text").and_then(|v| v.as_str()) {
+        for line in body.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("fps counter line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &fps_value_text(value)?)?;
+    }
+    Ok(())
+}
+
+fn fps_value_text(value: &Value) -> Result<String, String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(on) = value.as_bool() {
+        return Ok(if on { "on".into() } else { "off".into() });
+    }
+    if let Some(n) = value.as_f64() {
+        if n.fract() == 0.0 && n.abs() < 1.0e15 {
+            return Ok(format!("{}", n as i64));
+        }
+        return Ok(format!("{n:?}"));
+    }
+    Err("an fps counter value is a string, number, or bool".into())
+}
+
+fn apply_debug_update(settings: &mut DebugSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("debug settings are an object".into());
+    };
+    if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
+        for line in text.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("debug line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        let text = if let Some(text) = value.as_str() {
+            text.to_string()
+        } else if let Some(on) = value.as_bool() {
+            if on { "1".into() } else { "0".into() }
+        } else {
+            return Err(format!("debug setting {key} is a string or a bool"));
+        };
+        settings.set_key(key, &text)?;
+    }
+    Ok(())
+}
+
+fn apply_lighting_update(settings: &mut LightingSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("lighting settings are an object".into());
+    };
+    if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
+        for line in text.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("lighting line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &lighting_value_text(value)?)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pause_holds_the_clock_until_a_step_is_requested() {
+        let mut tools = Tools::new();
+        tools.set_fixed_step(Some(DEFAULT_STEP));
+        tools.pause();
+        assert_eq!(tools.scene_dt(1.0), 0.0);
+        tools.request_steps(1);
+        let stepped = tools.scene_dt(1.0);
+        assert!((stepped - DEFAULT_STEP).abs() < 1.0e-6);
+        assert_eq!(tools.scene_dt(1.0), 0.0);
+    }
+
+    #[test]
+    fn a_capture_leaves_the_ui_out_unless_asked() {
+        let tools = Tools::new();
+        let plain = tools
+            .shot_from(&Args(&genos_mcp::json::object([])), false)
+            .unwrap();
+        assert!(!plain.ui);
+        assert!(tools
+            .shot_from(&Args(&genos_mcp::json::object([])), true)
+            .unwrap()
+            .ui);
+        let asked = tools
+            .shot_from(
+                &Args(&genos_mcp::json::object([("ui", genos_mcp::json::bool(true))])),
+                false,
+            )
+            .unwrap();
+        assert!(asked.ui);
+        assert!(!tools
+            .shot_from(
+                &Args(&genos_mcp::json::object([("ui", genos_mcp::json::bool(false))])),
+                true,
+            )
+            .unwrap()
+            .ui);
+        assert!(Tools::shot_ui(
+            &Args(&genos_mcp::json::object([(
+                "ui",
+                genos_mcp::json::string("nope"),
+            )])),
+            false,
+        )
+        .is_err());
+        assert!(!tools.show_capture_overlay(false));
+        assert!(tools.show_capture_overlay(true));
+        let mut tools = tools;
+        tools.reading = Some(Shot {
+            look: tools.look,
+            ui: false,
+        });
+        assert!(!tools.show_capture_overlay(true));
+        tools.reading = Some(Shot {
+            look: tools.look,
+            ui: true,
+        });
+        assert!(tools.show_capture_overlay(false));
+        let capture = crate::commands::specs()
+            .into_iter()
+            .find(|spec| spec.name == "capture")
+            .unwrap();
+        assert!(capture.description.contains("ui"));
+        assert!(capture.description.contains("default false"));
+        let captures = crate::commands::specs()
+            .into_iter()
+            .find(|spec| spec.name == "captures")
+            .unwrap();
+        assert!(captures.description.contains("ui"));
+        assert!(captures.description.contains("default false"));
+    }
+
+    #[test]
+    fn a_fold_sent_with_a_tab_stays_in_collapsed() {
+        let mut settings = MenuSettings::default();
+        let args = genos_mcp::json::parse(r#"{"fold":"direct","tab":"GI"}"#).expect("json");
+        apply_menu_update(&mut settings, &args).expect("update");
+        assert_eq!(settings.tab, "GI");
+        assert_eq!(settings.collapsed, vec!["direct".to_string()]);
+        let text = settings.effective().to_text();
+        assert!(text.contains("collapsed=direct"), "reply text was {text}");
+        assert!(text.contains("tab=GI"), "{text}");
+    }
 }

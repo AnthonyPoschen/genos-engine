@@ -14,13 +14,13 @@ The window shows one scene.
 - Each solid is a square or a circle.
 - The script places at least one light.
 - Color from a colored solid appears on the white floor or on a wall, beyond that solid.
-- Radiance cascades build that bounced light. The renderer keeps the field until a light or an occluder changes.
+- Global illumination builds that bounced light. The renderer keeps the lighting caches until a light or an occluder changes.
 
 The ground is the XZ plane. Y is up, and the camera height stays on Y. X is across the screen. Z is depth. Yaw 0 looks along -Z. Positive yaw turns toward +X. Strafe positive moves toward +X.
 
 In the viewport, the top-left is `(0, 0)` and the bottom-right is `(1, 1)`. Vulkan NDC `y > 0` is the lower half of that viewport. A floor point in front of the camera and below the eye lands in that lower half. A point to the camera's right has NDC `x > 0`.
 
-Cascade rays march on the ground plane. Spacing is finer beside the player than at the far side of the floor. Interval length follows the floor size. A nearer range keeps more positions and fewer directions than a farther range. World probes sit on a coarser world grid past the floor and fill rays the nearer ranges miss. A hit takes the color of that material. Probe colors are blended, and each floor vertex samples that blend. The renderer builds the field from the current scene when the player, a light, or an occluder changes, and keeps it until then. The notes are in [Lighting](../lighting.md).
+Lighting is the live GI path: direct light with traced shadows, a surface light cache, and screen probes. The notes are in [Lighting](../systems/lighting/README.md) and [ADR 0012](../adr/0012-gi.md).
 
 ## Input
 

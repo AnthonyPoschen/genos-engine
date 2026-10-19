@@ -1,0 +1,346 @@
+#version 450
+// Screen launch of the hash wavelet (S80).
+//
+// One 8x8 group per picture block. The kernel is lighting_svgf_variance,
+// lighting_svgf_iter, and lighting_svgf_push: the same stages the hash-slot
+// pipeline runs, including its variance, its luminance weight, and the dirty
+// hold. A screen-sized B3 of the bilinear gather is not that kernel. The
+// luminance weight is nonlinear, so it does not commute with the bilinear,
+// and this path has no hold (ADR 0012). The hash blurs a texel while its
+// spatial estimate is still wide and then holds that blur. Rebuilding from
+// the settled mean leaves the 12.5 cm grid, and a wider phi spreads energy
+// the hold never spread. That was the ceiling, wall, and floor blotch.
+//
+// The launch is the picture, not the million-slot table. Stage 0 stores the
+// fine slot under each pixel and one pixel claims that cell. The claimer
+// lists the cells the hash wavelet reads from it: the five a-trous
+// footprints. A cell between pixel centres (a grazing floor, a far wall) and
+// a cell just past an edge are in that footprint. The hash launch filters
+// them; leaving their level empty makes the normalised convolution and the
+// push certainty differ, and the whole face shifts. Later stages run the
+// hash variance, iterations, and push on the list. Compose bilerps the
+// pushed field with the hash launch's weights. A plane weight on the screen
+// blend alone moved the hall off that picture. A second hop past those taps
+// walks onto other faces and the list no longer fits the picture.
+//
+// A still camera with nothing moving reuses the list and appends cells that
+// become active after the first build (a bilinear corner compose claims).
+// Freezing the first build leaves those taps empty and the face shifts. The
+// walk is the cost that does not idle. 25 cm cells stay on the running mean
+// the hash push reads when this launch has not filtered them.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "lighting_common.glsl"
+
+shared uint screen_red[64];
+
+uint screen_wg_sum(uint bit) {
+    uint lid = gl_LocalInvocationIndex;
+    screen_red[lid] = bit;
+    barrier();
+    if (lid < 32u) screen_red[lid] += screen_red[lid + 32u];
+    barrier();
+    if (lid < 16u) screen_red[lid] += screen_red[lid + 16u];
+    barrier();
+    if (lid < 8u) screen_red[lid] += screen_red[lid + 8u];
+    barrier();
+    if (lid < 4u) screen_red[lid] += screen_red[lid + 4u];
+    barrier();
+    if (lid < 2u) screen_red[lid] += screen_red[lid + 2u];
+    barrier();
+    if (lid == 0u) screen_red[0] += screen_red[1];
+    barrier();
+    return screen_red[0];
+}
+
+uint screen_pixels() {
+    return pc.dims.x * pc.dims.y;
+}
+
+uint screen_at(uint slice, uint index) {
+    uint hist = gstats.ctrl_history != 0u ? 1u : 0u;
+    return ((3u + hist) + slice * 4u) * screen_pixels() + index * 4u;
+}
+
+void screen_store(uint slice, uint index, vec3 rgb, float var, float mask, uint slot) {
+    uint at = screen_at(slice, index);
+    outc.px[at] = lighting_pack_rgb9e5(max(rgb, vec3(0.0)));
+    outc.px[at + 1u] = floatBitsToUint(var);
+    outc.px[at + 2u] = floatBitsToUint(mask);
+    outc.px[at + 3u] = slot;
+}
+
+// Hash stage: 0 variance, 1..5 an iteration, anything else the push.
+void screen_run(uint slot, uint step) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return;
+    }
+    if (ckeys.key[slot] == 0u) {
+        return;
+    }
+    if (!(cache.v[3u * slot + 1u].w > 0.0)) {
+        return;
+    }
+    lighting_obj_salt = cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5 ? cache.v[LIGHTING_SC_OBJ_AT + slot].x : 0.0;
+    if (!lighting_svgf_active(slot)) {
+        if (step == 0u) {
+            lighting_svgf_inactive(slot);
+        }
+        lighting_obj_salt = 0.0;
+        return;
+    }
+    if (step == 0u) {
+        lighting_svgf_variance(slot);
+    } else if (step <= 5u) {
+        lighting_svgf_iter(slot, step - 1u);
+    } else {
+        lighting_svgf_push(slot);
+        // The push idle refreshes the field stamp only while the camera is
+        // held. A one-bit yaw twitch fails that compare, the stamp expires,
+        // and compose shows the unfiltered WRC: the wiggle frame sat about
+        // 3% brighter than the settled one. The field did not change. A cell
+        // this launch still pushes keeps the stamp.
+        if (cache.v[3u * slot + 1u].w <= 0.2) {
+            uint pf = floatBitsToUint(cache.v[LIGHTING_SC_ATROUS_B + slot].w);
+            if (pf != 0u && int(lighting_frame() - pf) >= 2) {
+                cache.v[LIGHTING_SC_ATROUS_B + slot].w = uintBitsToFloat(lighting_frame());
+            }
+        }
+    }
+    lighting_obj_salt = 0.0;
+}
+
+// Stage 0. One hash find per pixel. The slot is kept for the claim.
+uvec3 screen_gather(uvec2 p) {
+    uint index = p.y * pc.dims.x + p.x;
+    uint at = screen_at(0u, index);
+    outc.px[at] = 0u;
+    outc.px[at + 1u] = 0u;
+    outc.px[at + 2u] = 0u;
+    outc.px[at + 3u] = ~0u;
+    vec3 pos;
+    vec3 n;
+    vec3 albedo;
+    bool two_sided;
+    if (!lighting_sc_svgf() || !lighting_surface(p, pos, n, albedo, two_sided)) {
+        return uvec3(0u);
+    }
+    // Same key as the hash compose: the shading normal, not a geometric axis
+    // packed in the G-buffer. That packing changed every preset's picture.
+    vec3 key_n = lighting_axis_vec(lighting_axis(n));
+    uint slot = lighting_cache_find_sized(pos, key_n, false, LIGHTING_SC_TEXEL, pos);
+    // Nested, not `||`: a miss is ~0u, and the other side would index the cache
+    // with it. glslc does not leave that read out.
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return uvec3(0u);
+    }
+    if (ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0) || cache.v[3u * slot + 1u].w > 0.2) {
+        return uvec3(0u);
+    }
+    outc.px[at + 3u] = slot;
+    return uvec3(lighting_svgf_active(slot) ? 1u : 0u, 0u, 0u);
+}
+
+// One pixel per hit cell walks the wavelet taps. The walk lists active
+// cells; it does not take the list lock away from another hit's walk.
+bool screen_list_changed() {
+    if (lighting_movers_count() > 0u) {
+        return true;
+    }
+    vec4 head = work.v[lighting_change_at()];
+    return head.y <= 0.5 && head.x > 0.5;
+}
+
+// Append path: the list already holds the previous build. New cells go after
+// that count. screen_appending is per invocation.
+bool screen_appending = false;
+
+uint screen_list_base_word(uint frame) {
+    return (frame & 1u) == 0u ? LIGHTING_SCREEN_LIST_BASE0 : LIGHTING_SCREEN_LIST_BASE1;
+}
+
+// The count committed by the previous frame. This frame does not write that word.
+uint screen_list_base() {
+    if (lighting_frame() == 0u) {
+        return 0u;
+    }
+    return ckeys.key[screen_list_base_word(lighting_frame() - 1u)];
+}
+
+uint screen_list_gen() {
+    return ckeys.key[LIGHTING_SCREEN_LIST_STAMP] + 1u;
+}
+
+bool screen_list_reuse() {
+    if (!lighting_view_held() || screen_list_changed()) {
+        return false;
+    }
+    uint stamp = ckeys.key[LIGHTING_SCREEN_LIST_STAMP];
+    // The stamp stays on the build frame so the per-slot marks keep matching.
+    // Cells claimed later append. After 30 frames the list is built again.
+    if (stamp == 0u || lighting_frame() <= stamp || lighting_frame() - stamp > 30u) {
+        return false;
+    }
+    return screen_list_base() > 0u;
+}
+
+bool screen_list_add(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return false;
+    }
+    if (ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
+        return false;
+    }
+    if (!lighting_svgf_active(slot)) {
+        return false;
+    }
+    uint gen = screen_appending ? screen_list_gen() : lighting_frame() + 1u;
+    if (screen_appending && ckeys.key[LIGHTING_SCREEN_LIST_AT + slot] == gen) {
+        return false;
+    }
+    if (atomicExchange(ckeys.key[LIGHTING_SCREEN_LIST_AT + slot], gen) == gen) {
+        return false;
+    }
+    uint at = screen_appending
+        ? screen_list_base() + atomicAdd(gstats.diag[41], 1u)
+        : atomicAdd(gstats.diag[40], 1u);
+    if (at < screen_pixels()) {
+        outc.px[screen_at(1u, at)] = slot;
+    }
+    return true;
+}
+
+// The hash kernel's taps: 5 x 5 at step 2^i around the hit. A cell between
+// pixel centres, or just past an edge, is one of those taps. The hash launch
+// filters it. Leaving the level empty changes the normalised convolution and
+// the push certainty, and the face shifts. A second hop (the tap's own taps)
+// walks off the surface into other faces, fills the list past the picture,
+// and the truncated tail is a partial blur the hit then blends. The hit's
+// own taps are the read set.
+void screen_list_from(uint slot) {
+    screen_list_add(slot);
+    lighting_obj_salt = cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5 ? cache.v[LIGHTING_SC_OBJ_AT + slot].x : 0.0;
+    [[dont_unroll]] for (uint s = 0u; s < 5u; s++) {
+        int step = 1 << int(s);
+        [[dont_unroll]] for (int j = -2; j <= 2; j++) {
+            [[dont_unroll]] for (int i = -2; i <= 2; i++) {
+                if (i == 0 && j == 0) {
+                    continue;
+                }
+                screen_list_add(lighting_sc_cell_slot(slot, ivec2(i, j) * step));
+            }
+        }
+    }
+    lighting_obj_salt = 0.0;
+}
+
+void screen_publish() {
+    uint fine = gstats.diag[62];
+    uint changed = gstats.diag[61];
+    uint frac = 0u;
+    if (fine > 0u) {
+        frac = uint(min(1000000.0, 1000000.0 * float(changed) / float(fine)));
+    }
+    gstats.atrous_frac = frac;
+    gstats.atrous_mode = 3u;
+    gstats.atrous_ppm = screen_pixels();
+    gstats.atrous_active = fine;
+}
+
+uint screen_list_n() {
+    if (screen_list_reuse()) {
+        return screen_list_base() + gstats.diag[41];
+    }
+    return gstats.diag[40];
+}
+
+// Writes this frame's count word. Readers of the list length use the other
+// frame's word, so this store does not race them.
+void screen_list_commit(uint n, bool keep_gen) {
+    ckeys.key[screen_list_base_word(lighting_frame())] = n;
+    if (!keep_gen) {
+        ckeys.key[LIGHTING_SCREEN_LIST_STAMP] = lighting_frame();
+    }
+}
+
+uint screen_list_slot_at(uint index) {
+    return outc.px[screen_at(1u, index)];
+}
+
+void main() {
+    uint stage = lighting_atrous_stage();
+    uvec2 p = gl_GlobalInvocationID.xy;
+    bool inside = p.x < pc.dims.x && p.y < pc.dims.y;
+    if (stage == 0u) {
+        uvec3 bits = uvec3(0u);
+        uint slot = ~0u;
+        if (inside) {
+            bits = screen_gather(p);
+            slot = outc.px[screen_at(0u, p.y * pc.dims.x + p.x) + 3u];
+        }
+        uint fine = screen_wg_sum(bits.x);
+        uint coarse = screen_wg_sum(bits.y);
+        uint changed = screen_wg_sum(bits.z);
+        if (gl_LocalInvocationIndex == 0u) {
+            if (fine != 0u) {
+                atomicAdd(gstats.diag[62], fine);
+            }
+            if (coarse != 0u) {
+                atomicAdd(gstats.diag[63], coarse);
+            }
+            if (changed != 0u) {
+                atomicAdd(gstats.diag[61], changed);
+            }
+        }
+        // The workgroup sums above are the barrier. The list walk is after it.
+        if (screen_list_reuse()) {
+            // A cell compose claimed after the build is not in the list yet.
+            // One pixel appends it and its taps. The old entries stay put.
+            if (slot < LIGHTING_CACHE_SLOTS && cache.v[3u * slot + 1u].w > 0.0 && !(cache.v[3u * slot + 1u].w > 0.2) && ckeys.key[LIGHTING_SCREEN_LIST_AT + slot] != screen_list_gen()) {
+                uint stamp = lighting_frame() + 1u;
+                if (atomicExchange(ckeys.key[LIGHTING_SCREEN_OWNER_AT + slot], stamp) != stamp) {
+                    screen_appending = true;
+                    screen_list_from(slot);
+                    screen_appending = false;
+                }
+            }
+            return;
+        }
+        if (slot >= LIGHTING_CACHE_SLOTS) {
+            return;
+        }
+        if (!(cache.v[3u * slot + 1u].w > 0.0) || cache.v[3u * slot + 1u].w > 0.2) {
+            return;
+        }
+        uint stamp = lighting_frame() + 1u;
+        if (atomicExchange(ckeys.key[LIGHTING_SCREEN_OWNER_AT + slot], stamp) == stamp) {
+            return;
+        }
+        screen_list_from(slot);
+        return;
+    }
+    uint n = screen_list_n();
+    if (stage == 1u && p.x == 0u && p.y == 0u) {
+        screen_list_commit(n, screen_list_reuse());
+    }
+    if (!inside) {
+        return;
+    }
+    uint iters = lighting_denoise_iters();
+    uint index = p.y * pc.dims.x + p.x;
+    uint step = 0u;
+    if (stage == 2u + iters) {
+        step = 6u;
+        if (p.x == 0u && p.y == 0u) {
+            screen_publish();
+        }
+    } else if (stage >= 2u && stage < 2u + iters) {
+        step = stage - 1u;
+    } else if (stage != 1u) {
+        return;
+    }
+    if (index >= n) {
+        return;
+    }
+    screen_run(screen_list_slot_at(index), step);
+}

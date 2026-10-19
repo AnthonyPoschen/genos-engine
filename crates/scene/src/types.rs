@@ -1,4 +1,8 @@
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 use genos_math::Vec3;
+
+use crate::{DebugSettings, EventLoopSettings, FpsCounterSettings, LightingSettings, MenuSettings};
 
 /// Share of the incoming light a white painted surface sends back out.
 pub const PAINT_ALBEDO: f32 = 0.8;
@@ -164,6 +168,22 @@ pub struct Scene {
     pub ceiling: Option<Ceiling>,
     /// None: a ray that leaves the scene brings nothing back, and the background is black.
     pub sky: Option<Sky>,
+    /// Lighting features, quality knobs, and the active preset. A scene file sets
+    /// this; the renderer applies it each frame. The default is preset `high`.
+    pub lighting: LightingSettings,
+    /// Debug output directory. Relative to the working directory unless the
+    /// path is absolute. `--out` and `GENOS_UNFILLED_DIR` overlay it.
+    pub debug: DebugSettings,
+    /// Frame-rate overlay. Off until something turns it on. The readout
+    /// averages one window of `1 / rate_hz` seconds. The default rate is 4 Hz.
+    pub fps_counter: FpsCounterSettings,
+    /// Debug menu. Shown until `--menu hidden`, the hide control, or MCP
+    /// sets `visible` to hidden. `tab` is the open page. `collapsed` lists
+    /// the folded section keys.
+    pub menu: MenuSettings,
+    /// Longest gap between window pumps, in milliseconds. The frame writes it.
+    /// A value of `0` clears the mark. See `docs/systems/window.md`.
+    pub event_loop: EventLoopSettings,
 }
 
 impl Scene {

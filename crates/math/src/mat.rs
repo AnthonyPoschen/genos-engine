@@ -1,3 +1,5 @@
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+
 //! Column-major matrices. `A * B` applies `B` first. A matrix multiplies a column vector.
 
 use crate::quat::Quat;

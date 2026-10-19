@@ -1,0 +1,71 @@
+# cargo-deny. `scripts/lint.sh` runs `cargo deny check`.
+# Banned crates are the middleware ADR 0007 and ADR 0009 reject.
+# https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+version = 2
+yanked = "warn"
+ignore = [
+    { id = "RUSTSEC-2026-0249", reason = "rhai 1.26.0, pinned by ADR 0009, depends on unmaintained smartstring. Do not bump Rhai to clear this." },
+]
+
+[licenses]
+version = 2
+unused-allowed-license = "allow"
+confidence-threshold = 0.8
+# Workspace crates set publish = false and do not name a license yet.
+private = { ignore = true }
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+]
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies inside this workspace omit a version. That is not a `*` crate.
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+
+# The renderer, window, input, audio, and network call the OS or Vulkan.
+# genos-gpuref is the offline ray-query reference and the only ash wrapper.
+deny = [
+    { name = "winit", reason = "ADR 0007: the window is a native call, not a toolkit" },
+    { name = "sdl2", reason = "ADR 0007: the window is a native call, not a toolkit" },
+    { name = "sdl3", reason = "ADR 0007: the window is a native call, not a toolkit" },
+    { name = "glfw", reason = "ADR 0007: the window is a native call, not a toolkit" },
+    { name = "wgpu", reason = "ADR 0007: the renderer calls Vulkan, not a graphics toolkit" },
+    { name = "ash", wrappers = ["genos-gpuref"], reason = "ADR 0007: the renderer loads libvulkan itself. ash is only the offline ray-query reference." },
+    { name = "vulkano", reason = "ADR 0007: the renderer calls Vulkan, not a graphics toolkit" },
+    { name = "x11rb", reason = "ADR 0007: window and input call X11 or Wayland, not a client crate" },
+    { name = "cpal", reason = "ADR 0007: audio calls ALSA, WASAPI, or CoreAudio" },
+    { name = "rodio", reason = "ADR 0007: audio calls ALSA, WASAPI, or CoreAudio" },
+    { name = "tokio", reason = "ADR 0007: network calls are sockets, not a runtime" },
+    { name = "pyo3", reason = "ADR 0009: Rhai is the scripting language" },
+    { name = "cpython", reason = "ADR 0009: Rhai is the scripting language" },
+    { name = "mlua", reason = "ADR 0009: Rhai is the scripting language" },
+    { name = "rlua", reason = "ADR 0009: Rhai is the scripting language" },
+    { name = "mlua-sys", reason = "ADR 0009: Rhai is the scripting language" },
+]
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

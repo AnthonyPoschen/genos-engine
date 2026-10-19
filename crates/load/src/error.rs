@@ -9,6 +9,8 @@ use std::path::PathBuf;
 pub enum LoadError {
     /// The path does not name a file.
     NotFound { path: PathBuf },
+    /// The path is a Git LFS pointer. The asset bytes are not in this checkout.
+    LfsPointer { path: PathBuf },
     /// The source exists, and the read failed.
     Read { path: PathBuf },
     /// The bytes ended before the asset was complete.
@@ -21,6 +23,11 @@ impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotFound { path } => write!(f, "file not found: {}", path.display()),
+            Self::LfsPointer { path } => write!(
+                f,
+                "{} is a Git LFS pointer; the asset bytes are not in this checkout",
+                path.display()
+            ),
             Self::Read { path } => write!(f, "could not read {}", path.display()),
             Self::Truncated => f.write_str("truncated asset"),
             Self::Unrecognized => f.write_str("unrecognized asset"),

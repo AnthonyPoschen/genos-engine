@@ -1,0 +1,6 @@
+name camera
+kind rhai
+rhai examples/camera/scene.rhai
+review The camera example scene. The script stays at examples/camera/scene.rhai. The checkpoint is that example's opening view.
+checkpoint open -6 1.7 6 yaw 0.785398163
+check open mean 12

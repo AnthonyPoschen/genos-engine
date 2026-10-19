@@ -1,3 +1,5 @@
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+
 //! glTF 2.0 loading against small fixtures written by `fixtures/make_gltf.py`.
 
 use std::path::{Path, PathBuf};

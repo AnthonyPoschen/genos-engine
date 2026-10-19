@@ -1,3 +1,9 @@
+#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::bool_to_int_with_if, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+
 //! The shipped mix, fed by loaded PCM. Pitch, image, and level are measured on the buffer.
 
 use genos_audio::{mix, Barrier, Listener, Source, Vec3};

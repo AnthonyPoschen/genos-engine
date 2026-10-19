@@ -2,14 +2,14 @@
 
 Chronological extract of the "From the Engine chat" sections of the experiment files (Engine chat, 10-12 Oct 2026). Tags like t102u are Anthony's message numbers in the Engine transcript. See README "Missing history" for gaps.
 
-## Before GI v2 and Chief-side events (from Chief's notes)
+## Before GI and Chief-side events (from Chief's notes)
 - ADR 0008 (date not checked): lighting uses radiance cascades, the v1 lineage [uncertain whether discussed with Chief].
 - 6-8 Oct: heavy engine commits; 8 Oct f9f58dd / 2a0f40d added a flicker phase and flicker pixel counts to the camera bench. Anthony reported a frozen-scene flicker on master [date uncertain]: a measuring artefact, not a bug.
 - 7 Oct: persistent world-fixed probes (1 m spacing out to 50 m, sparse in height, dead probes off) fixed camera-movement perf and removed the 2,048-probe cap; investigation of a lighting pop Anthony filmed.
 - 8 Oct: probes never throw light away, they blend and settle in 100-200 ms; point lights get a fixed/dynamic flag; fixed lights get baked layers re-baked locally ('smart layering'); target 500+ fps at 1440p on a still screen (he measured 233).
-- 9 Oct: layered scheme for movers and moving lights; one priority score (view coverage x likely error, with aging); NRC ruled out as core on 1060-class cards; spherical Gaussians, ReSTIR/path guiding and error-driven ray aiming discussed; point-light pop at the main entrance (lamp bounce drops out far away, snaps on within ~3-4 m); light-transport prototype shelved for GI v2; first-principles research track floated.
+- 9 Oct: layered scheme for movers and moving lights; one priority score (view coverage x likely error, with aging); NRC ruled out as core on 1060-class cards; spherical Gaussians, ReSTIR/path guiding and error-driven ray aiming discussed; point-light pop at the main entrance (lamp bounce drops out far away, snaps on within ~3-4 m); light-transport prototype shelved for GI; first-principles research track floated.
 - 10 Oct: Anthony sees the design moved from radiance cascades to Lumen-like. Bugs: sun at 4x speed fades then pops to the final colour (suspects: snap-on-big-change rule, far-field swap-in); probes never finishing; movers in front of the camera dragging quality down; floor-edge pop from the update-budget size changing.
-- 10 Oct 00:34 9ae7541: view-impact light priority, outdoor probes at night fix. 03:12 7d35edd / 03:27 b7b8ea7: GI v2 design and ADR 0012 with Anthony's answers (see README). 03:30 d2b9881 simplification pass. 04:13 2d400a5: probe window fits the brick table, entrance and floor-edge pops fixed, Anthony confirmed the pop gone; 0874229 tagged gi-v2-baseline. 04:46 fe62b4a CPU counts change-pass samples like the shader. 06:54 6766a08 stricter wait_settled (picture_settled()).
+- 10 Oct 00:34 9ae7541: view-impact light priority, outdoor probes at night fix. 03:12 7d35edd / 03:27 b7b8ea7: GI design and ADR 0012 with Anthony's answers (see README). 03:30 d2b9881 simplification pass. 04:13 2d400a5: probe window fits the brick table, entrance and floor-edge pops fixed, Anthony confirmed the pop gone; 0874229 tagged gi-v2-baseline. 04:46 fe62b4a CPU counts change-pass samples like the shader. 06:54 6766a08 stricter wait_settled (picture_settled()).
 - 10 Oct 07:34, gi-v2 head 7065edb: better than v1 everywhere, 2x faster idle, 10-15% slower moving, blotchy; Anthony: splotchy -> adaptive surface cache.
 - 10/11 Oct: engine ownership moved from Chief to Engine [uncertain exact day].
 - 12 Oct 12:12 6a3cd7c (S71A) GI v1 removed [uncertain whether after a head-to-head]; 12:37 4aeeced S71E reverted (smoothing is lag).
@@ -101,6 +101,9 @@ Anthony (15:51-15:57, t357u-t363u): do off-screen pre-fill for turns and walking
 
 ## [S73B: All scout hits claim fine texels and stamp LastUsed](experiments/S73B-lumen-feedback-prefill.md)
 Turn strip ~/.cache/gi2diag/perf/turn-S73B/strip.png was not looked at; logs ship-S73A.log, ship-S73B.log.
+
+## [S73S: Accumulation reads raw means; display keeps dark fill](experiments/S73S-raw-means-feedback-display-fill.md)
+Camera-turn pre-fill ~1.5× too bright on the 4070 (display dark fill feeding accumulation). S73S split feedback to raw means with coarse blend k=2; display kept dark fill. Lavapipe: reveal 0.168 / +8f 0.236 (target 0.10; S73R was 0.313/0.329); still 3.6% darker (8.4% dark quartile) vs former gi-v2. Closed without merge (PR [#25](https://github.com/AnthonyPoschen/genos-engine/pull/25), branch `cursor/unfilled-prefill-bias-8bfe`): misses target, error grows; possible cause is the 16-set freeze from PR #3. Retry later as display-only-safe accumulation against path-traced 4070 after perf PRs. Unfilled detector split to PR #29 (merged).
 
 ## [S74A-cam: Fix: last-frame camera read from stale scene-block offsets](experiments/S74A-cam-last-camera-offsets.md)
 Reported with 50db0f70: 32-38 fps vs 27-30 for the checkpoint, same brightness; pop 0.105% vs 0.084% settled (later shown to be within the checkpoint's own run-to-run range).

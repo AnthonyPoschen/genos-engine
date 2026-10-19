@@ -1,5 +1,6 @@
 #version 450
-// GI v2 direct light: every lamp at a surface point, each with a shadow ray through
+#define GENOS_SUN_SHADER 1
+// GI direct light: every lamp at a surface point, each with a shadow ray through
 // the tracer. The points are the picture's pixels (G-buffer) followed by every kept
 // hit of the screen probes (all strata, so a kept hit always carries this frame's
 // light: no light history), the light cache's ray hits and the probes' fills, so all share this loop
@@ -10,6 +11,7 @@
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
+#include "lighting_lamp_pick.glsl"
 
 const bool LIGHTING_KEPT_SHOULD = true;
 // S78Q: a kept light that changed marks its probe's gather (lighting_gdirty).
@@ -93,25 +95,49 @@ bool lighting_check_within_noise(uint h, vec3 pos, vec3 n, vec3 refl, vec3 light
     return abs(ln - lo) <= bound;
 }
 void main() {
+    lighting_sun_mark();
     uint idx = gl_GlobalInvocationID.x;
     uint pixels = pc.dims.x * pc.dims.y;
     uint mode = lighting_mode();
     uint kept = lighting_kept_hits();
     uint cache_rays = LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS;
-    if (lighting_dense()) {
+    // Pixel-only (GI off, or a coarser direct grid): leave before any work or
+    // cache read. Mode 0's point count includes cache-ray slots, and the tail
+    // of the last group would index the dummy buffers.
+    if (gstats.ctrl_pixel_only != 0u) {
+        uint scale = max(gstats.ctrl_scale, 1u);
+        uint lw = (pc.dims.x + scale - 1u) / scale;
+        uint lh = (pc.dims.y + scale - 1u) / scale;
+        if (idx >= lw * lh) {
+            return;
+        }
+        uint sx = (idx % lw) * scale;
+        uint sy = (idx / lw) * scale;
+        idx = sy * pc.dims.x + sx;
+    } else if (lighting_dense()) {
         // S70A: this round's light cache rays only, live entries only.
+        // Bias is a pixel skip for the kept-hit dispatch. Applying it here
+        // pushes every dense thread past the live-entry count, so cache rays
+        // never get lit and compose shows whatever was left in the buffers.
         if (idx >= lighting_dense_count() * LIGHTING_CACHE_RAYS) {
             return;
         }
         idx = pixels + kept + lighting_dense_entry(idx / LIGHTING_CACHE_RAYS) * LIGHTING_CACHE_RAYS + idx % LIGHTING_CACHE_RAYS;
-    } else if (mode == 2u) {
-        idx += pixels + kept;
+    } else {
+        if (gstats.ctrl_bias != 0u) {
+            idx += gstats.ctrl_bias;
+        }
+        if (mode == 2u) {
+            idx += pixels + kept;
+        }
     }
     // Then (not on the async queue) one point per fill slot (lighting_fill_ray).
     uint fills = pixels + kept + (mode == 1u ? 0u : cache_rays);
-    uint points = fills + (mode == 2u ? 0u : kept);
-    if (idx >= points) {
-        return;
+    if (gstats.ctrl_pixel_only == 0u) {
+        uint points = fills + (mode == 2u ? 0u : kept);
+        if (idx >= points) {
+            return;
+        }
     }
     // A kept probe hit (index h), a light cache ray (ray) or a fill (index h).
     bool fill_hit = idx >= fills;
@@ -152,7 +178,9 @@ void main() {
                 rec = work.v[lighting_kept_at(h)];
                 live = lighting_stratum_ray(ps / LIGHTING_STRATA, ps % LIGHTING_STRATA, h % rays, origin, dir, from_n);
                 if (live && rec.x < -0.75) {
-                    lighting_put_kept_light_d(h, has_sky() ? scene.sky.rgb : vec3(0.0), 2u);
+                    if (!lighting_sun_hold_kept(h)) {
+                        lighting_put_kept_light_d(h, has_sky() ? scene.sky.rgb : vec3(0.0), 2u);
+                    }
                     return;
                 }
             }
@@ -205,26 +233,43 @@ void main() {
                 held_old = true;
             }
         }
-        if (LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_world_mode() == 3u && !(urgent && lighting_near_change(pos))) {
+        // After a point lamp stops, a few frames shade every kept stratum so the
+        // corner is not waiting on the halfway relight. The word is 0 otherwise,
+        // and this is the S69C skip.
+        if (!lighting_catch_up() && LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_pix_cache_ok() && !(urgent && lighting_near_change(pos))) {
             uint traced = lighting_frame() - LIGHTING_STRATA / 2u;
             if (!lighting_wrc_lamp_changed(pos, traced) && abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
                 return;
             }
         }
     }
+    if (probe_hit && !fill_hit && lighting_sun_hold_kept(h)) {
+        return;
+    }
+    if (fill_hit && lighting_sun_hold_fill(h)) {
+        return;
+    }
     vec3 origin = pos + n * 0.02;
     LampList list = lamps_at(origin);
     uint count = lamp_list_size(list);
     // S78J: a pixel whose point and lamps match last frame's, in a quiet frame.
     uint pix_sig = 0u;
-    if (LIGHTING_PIX_REUSE && idx < pixels && lighting_world_mode() == 3u) {
+    if (lighting_pix_reuse_on() && idx < pixels) {
         pix_sig = lighting_pix_sig(pos, n, two_sided, list);
         vec4 pv = work.v[lighting_pix_at() + idx / 2u];
         uint c = (idx & 1u) * 2u;
-        if (pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig && lighting_pix_quiet()) {
+        // A small sun step still traces. Reusing last frame's direct would
+        // leave the sun and its shadow a frame behind.
+        if (pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig && lighting_pix_quiet() && !lighting_sun_small()) {
             uint emitted = gbuf.px[idx].w;
-            outc.px[idx] = emitted == ~0u ? 0u : emitted;
+            uint glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? 0u : emitted;
+            uint prev = outc.px[pixels + idx];
+            // Emitted stays out of the picture buffer; compose reads it here.
+            outc.px[pixels + idx] = glow;
             gbuf.px[idx].w = floatBitsToUint(pv[c + 1u]);
+            if (glow != prev) {
+                lighting_compose_mark_px(idx);
+            }
             return;
         }
     }
@@ -282,6 +327,16 @@ void main() {
     bool probe_pick = LIGHTING_PROBE_PICKS && probe_hit && ((pc.params.z >> 11u) & 1u) != 0u;
     bool tdl_check = tdl != ~0u && (tdl & 0x40000000u) != 0u;
     bool pick = ((cache_pick || probe_pick) && tdl == ~0u) || tdl_check;
+    // Weighted point-lamp picking shares this loop's one trace. The sun stays
+    // exact. A texel-direct check keeps the legacy estimator. Mode 0 leaves
+    // `pick` as it was, so today's shade is unchanged.
+    uint lamp_mode = pc.lamp.x;
+    bool lamp_pix = idx < pixels && lamp_mode >= 2u && lamp_mode <= 4u;
+    bool lamp_hit = idx >= pixels && (lamp_mode == 1u || lamp_mode == 3u || lamp_mode == 4u);
+    bool lamp_new = (lamp_pix || lamp_hit) && tdl == ~0u;
+    if (lamp_new) {
+        pick = false;
+    }
     float total = 0.0;
     uint lit = 0u;
     float u = 0.0;
@@ -307,11 +362,164 @@ void main() {
             u = lighting_unit(lighting_cell_hash(pos, n) ^ (h * 0x85ebca6bu + 0x27d4eb2fu));
         }
         [[dont_unroll]] for (uint k = 0u; k < count; k++) {
+            if (gstats.ctrl_max_lights != 0u && k >= gstats.ctrl_max_lights) {
+                break;
+            }
             vec3 target;
             vec3 light = lamp_light(lamp_list_get(list, k), origin, n, two_sided, target);
             float w = light.r + light.g + light.b;
             total += w;
             lit += w > 0.0 ? 1u : 0u;
+        }
+    }
+    // Hits outside this frame's slice keep the committed sun. Pixels use the live sun.
+    bool sun_hold = false;
+    bool sun_slice = false;
+    if (lighting_sun_small() && idx >= pixels) {
+        if (probe_hit) {
+            uint pk = h / lighting_rays() / LIGHTING_STRATA;
+            sun_slice = lighting_sun_probe_slice(pk);
+            sun_hold = !sun_slice;
+        } else {
+            uint ent = (ray - lighting_probe_rays()) / LIGHTING_CACHE_RAYS;
+            uint slot = lighting_cache_batch_slot(ent);
+            sun_slice = slot != ~0u && lighting_sun_slot_slice(slot);
+            sun_hold = slot != ~0u && !sun_slice;
+        }
+    }
+    // Chosen point lamps for this point. The shade loop below is still the
+    // only trace. Suns are not entries: they are traced on their own.
+    uint chosen_k[4] = uint[4](0u, 0u, 0u, 0u);
+    float chosen_s[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    uint chosen_n = 0u;
+    if (lamp_new) {
+        float point_total = 0.0;
+        uint point_lit = 0u;
+        lamp_pick_point_sum(list, count, origin, n, two_sided, point_total, point_lit);
+        bool reuse_pix = lamp_pix && lamp_mode == 4u;
+        bool accepted = false;
+        if (reuse_pix && point_lit > 0u) {
+            uint cand = lamp_pick_candidates();
+            float w_ris = 0.0;
+            uint win_k = ~0u;
+            float win_phat = 0.0;
+            [[dont_unroll]] for (uint c = 0u; c < cand; c++) {
+                float uc = lighting_unit(lighting_hash(idx ^ (pc.params.w * 0x9e3779b9u) ^ (c * 0x85ebca6bu + 1u)));
+                float sample_phat = 0.0;
+                uint sample_k = lamp_pick_one(list, count, origin, n, two_sided, point_total, point_lit, uc, sample_phat);
+                float ris = point_total;
+                w_ris += ris;
+                float u_chao = lighting_unit(lighting_hash(idx ^ (pc.params.w * 0x27d4eb2fu) ^ (c * 0x85ebca6bu + 9u)));
+                if (sample_k != ~0u && w_ris > 0.0 && u_chao < ris / w_ris) {
+                    win_k = sample_k;
+                    win_phat = sample_phat;
+                }
+            }
+            uint slot = pc.params.w & 1u;
+            if (win_k == ~0u || win_phat <= 0.0) {
+                lamp_res_store(idx, slot, lamp_res_empty());
+            } else {
+                LampReservoir canonical;
+                canonical.lamp = lamp_list_index(list, win_k);
+                canonical.m = cand;
+                canonical.w_sum = point_total * float(cand);
+                canonical.target = win_phat;
+                uvec2 pix = uvec2(idx % pc.dims.x, idx / pc.dims.x);
+                accepted = lamp_pick_history_ok(pos, pix);
+                LampReservoir merged = canonical;
+                if (accepted) {
+                    uint prev_slot = (pc.params.w + 1u) & 1u;
+                    LampReservoir history = lamp_res_load(idx, prev_slot);
+                    float pq_can = lamp_pick_phat(list, count, canonical.lamp, origin, n, two_sided);
+                    float pq_hist = lamp_pick_phat(list, count, history.lamp, origin, n, two_sided);
+                    float u_merge = lighting_unit(lighting_hash(idx ^ (pc.params.w * 0x9e3779b9u)));
+                    merged = lamp_pick_merge(canonical, history, pq_can, pq_hist, pq_can, pq_hist, lamp_pick_unbiased(), pc.lamp.w, u_merge);
+                    uint radius = pc.lamp.z;
+                    if (radius > 0u && merged.lamp != LAMP_ALL && merged.m > 0u) {
+                        uint hsh = lighting_hash(idx ^ (pc.params.w * 0x85ebca6bu));
+                        uint span = radius * 2u + 1u;
+                        int rx = int(hsh % span) - int(radius);
+                        int ry = int((hsh >> 16u) % span) - int(radius);
+                        if (rx == 0 && ry == 0) {
+                            rx = 1;
+                        }
+                        ivec2 npix = ivec2(pix) + ivec2(rx, ry);
+                        if (npix.x >= 0 && npix.y >= 0 && uint(npix.x) < pc.dims.x && uint(npix.y) < pc.dims.y) {
+                            vec3 npos;
+                            vec3 nn;
+                            vec3 nalbedo;
+                            bool ntwo;
+                            if (lighting_surface(uvec2(npix), npos, nn, nalbedo, ntwo)) {
+                                float dist = length(npos - pos);
+                                float plane = 0.05 + 0.02 * dist;
+                                if (dot(nn, n) > 0.9 && abs(dot(npos - pos, n)) < plane) {
+                                    if (lamp_pick_diag()) {
+                                        atomicAdd(gstats.diag[52u], 1u);
+                                    }
+                                    uint npi = uint(npix.y) * pc.dims.x + uint(npix.x);
+                                    LampReservoir spatial = lamp_res_load(npi, prev_slot);
+                                    vec3 norigin = npos + nn * 0.02;
+                                    float pq_cur = lamp_pick_phat(list, count, merged.lamp, origin, n, two_sided);
+                                    float pq_sp = lamp_pick_phat(list, count, spatial.lamp, origin, n, two_sided);
+                                    float ph_cur = lamp_pick_phat(list, count, merged.lamp, norigin, nn, ntwo);
+                                    float ph_sp = lamp_pick_phat(list, count, spatial.lamp, norigin, nn, ntwo);
+                                    float u_sp = lighting_unit(lighting_hash(idx ^ npi ^ (pc.params.w * 0x27d4eb2fu)));
+                                    merged = lamp_pick_merge(merged, spatial, pq_cur, pq_sp, ph_cur, ph_sp, lamp_pick_unbiased(), pc.lamp.w, u_sp);
+                                }
+                            }
+                        }
+                    }
+                }
+                lamp_res_store(idx, slot, accepted ? merged : canonical);
+                if (accepted && merged.lamp != LAMP_ALL && merged.m > 0u && merged.target > 0.0) {
+                    uint kwin = lamp_pick_find(list, count, merged.lamp);
+                    if (kwin != ~0u && kwin >= list.suns.y && chosen_n < 4u) {
+                        chosen_k[chosen_n] = kwin;
+                        // Algorithm 6's W blends the previous integral, so a moved
+                        // lamp lags. The shade uses this frame's prefix instead.
+                        // The reservoir still stores the merged record.
+                        chosen_s[chosen_n] = point_total / merged.target;
+                        chosen_n += 1u;
+                    }
+                }
+            }
+        } else if (reuse_pix) {
+            lamp_res_store(idx, pc.params.w & 1u, lamp_res_empty());
+        }
+        if (chosen_n == 0u && point_lit > 0u) {
+            uint use_rays = lamp_pick_rays();
+            if (reuse_pix && !accepted) {
+                use_rays = max(use_rays, 4u);
+            }
+            float pick_u = lamp_pick_u(idx, pixels, kept, fill_hit, reuse_pix, ray, h, pos, n);
+            bool exact_pt = point_lit <= use_rays;
+            float step_pt = point_total / float(use_rays);
+            float run_pt = 0.0;
+            [[dont_unroll]] for (uint k = 0u; k < count; k++) {
+                if (gstats.ctrl_max_lights != 0u && k >= gstats.ctrl_max_lights) {
+                    break;
+                }
+                if (k < list.suns.y) {
+                    continue;
+                }
+                vec3 target_pt;
+                vec3 light_pt = lamp_light(lamp_list_get(list, k), origin, n, two_sided, target_pt);
+                float w_pt = light_pt.r + light_pt.g + light_pt.b;
+                if (w_pt <= 0.0) {
+                    continue;
+                }
+                float times_pt = 1.0;
+                if (!exact_pt) {
+                    float before_pt = ceil(run_pt / step_pt - pick_u);
+                    run_pt += w_pt;
+                    times_pt = ceil(run_pt / step_pt - pick_u) - before_pt;
+                }
+                if (times_pt > 0.0 && chosen_n < 4u) {
+                    chosen_k[chosen_n] = k;
+                    chosen_s[chosen_n] = exact_pt ? 1.0 : times_pt * step_pt / w_pt;
+                    chosen_n += 1u;
+                }
+            }
         }
     }
     bool exact = !pick || lit <= LIGHTING_CACHE_PICKS;
@@ -320,34 +528,96 @@ void main() {
     vec3 e = vec3(0.0);
     vec3 e_sun = vec3(0.0);
     [[dont_unroll]] for (uint k = 0u; k < count; k++) {
+        if (gstats.ctrl_max_lights != 0u && k >= gstats.ctrl_max_lights) {
+            break;
+        }
+        Lamp sun_lamp_l = lamp_list_get(list, k);
+        bool sun_lamp = sun_lamp_l.pos.w > 0.5;
+        if (sun_hold && sun_lamp) {
+            vec3 d = lighting_sun_committed_dir();
+            float d2 = dot(d, d);
+            if (d2 > 0.5) {
+                sun_lamp_l.pos.xyz = d * inversesqrt(d2);
+            }
+        }
         vec3 target;
-        vec3 light = lamp_light(lamp_list_get(list, k), origin, n, two_sided, target);
+        vec3 light = lamp_light(sun_lamp_l, origin, n, two_sided, target);
         float w = light.r + light.g + light.b;
         if (w <= 0.0) {
             continue;
         }
         float times = 1.0;
-        if (!exact) {
+        float scale = 1.0;
+        bool take = true;
+        if (lamp_new) {
+            if (sun_lamp) {
+                times = 1.0;
+                scale = 1.0;
+                take = true;
+            } else {
+                take = false;
+                scale = 0.0;
+                times = 0.0;
+                [[dont_unroll]] for (uint s = 0u; s < chosen_n; s++) {
+                    if (chosen_k[s] == k) {
+                        take = true;
+                        scale = chosen_s[s];
+                        times = 1.0;
+                    }
+                }
+            }
+        } else if (!exact) {
             float before = ceil(run / step - u);
             run += w;
             times = ceil(run / step - u) - before;
+            take = times > 0.0;
+            scale = times * step / w;
         }
         // S74A: hits (not pixels) reuse a static lamp's shadow (lighting_cache.glsl).
+        // Shadows off skips the trace and the cell. Hard traces every time.
         bool shadow_lit = false;
-        if (times > 0.0) {
+        bool shadows_on = (gstats.ctrl_bits & 2u) != 0u;
+        if (!shadows_on) {
+            shadow_lit = take;
+        } else if (take) {
             uint li = idx >= pixels ? lamp_list_index(list, k) : LAMP_ALL;
-            float sc = lighting_world_mode() == 3u && li < LAMP_ALL - 1u ? lighting_shadow_get(origin, n, li) : -1.0;
+            // Probe-only keeps the real cache buffer, so the cell still applies.
+            // No probes and no world cache is a dummy: do not index it.
+            // High is mode 3, the same branch as before this gate.
+            bool probes_on = (gstats.ctrl_bits & 16u) != 0u;
+            bool cache_on = (gstats.ctrl_bits & 32u) != 0u;
+            bool cell_stored = lighting_world_mode() == 3u || (!cache_on && probes_on);
+            bool cell = (gstats.ctrl_bits & 2048u) == 0u && lighting_gi_on() && cell_stored && li < LAMP_ALL - 1u;
+            // The slice retraces the live sun and does not write that bit
+            // over the committed epoch. Flag off: the cell is the old path.
+            float sc = cell ? lighting_shadow_get(origin, n, li) : -1.0;
+            if (sun_slice && sun_lamp) {
+                sc = -1.0;
+            }
             if (sc >= 0.0) {
                 shadow_lit = sc > 0.5;
             } else {
                 shadow_lit = !trace_occluded(origin, target);
-                if (li < LAMP_ALL - 1u && lighting_world_mode() == 3u) {
+                // Counts a real shadow ray. A shadow-cell hit does not. Off
+                // unless GENOS_LIGHTING_LAMP_PICK_DIAG set the push bit.
+                if (lamp_pick_diag()) {
+                    uint slot_d = 48u;
+                    if (fill_hit) {
+                        slot_d = 50u;
+                    } else if (probe_hit) {
+                        slot_d = 49u;
+                    } else if (idx >= pixels) {
+                        slot_d = 51u;
+                    }
+                    atomicAdd(gstats.diag[slot_d], 1u);
+                }
+                if (cell && !(lighting_sun_small() && sun_lamp)) {
                     lighting_shadow_put(origin, n, li, shadow_lit);
                 }
             }
         }
         if (shadow_lit) {
-            vec3 add = exact ? light : light * (times * step / w);
+            vec3 add = (!lamp_new && exact) ? light : light * scale;
             e += add;
             if (k < list.suns.y) {
                 e_sun += add;
@@ -393,17 +663,42 @@ void main() {
     }
     if (idx < pixels) {
         uint emitted = gbuf.px[idx].w;
-        outc.px[idx] = emitted == ~0u ? 0u : emitted;
-        gbuf.px[idx].w = lighting_pack_rgb9e5(e);
-        if (LIGHTING_PIX_REUSE && lighting_world_mode() == 3u) {
+        uint glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? 0u : emitted;
+        uint prev_e = outc.px[pixels + idx];
+        uint packed = lighting_pack_rgb9e5(e);
+        uint prev_d = 0u;
+        uint prev_sig = 0u;
+        bool tracked = lighting_pix_reuse_on();
+        if (tracked) {
+            uint c = (idx & 1u) * 2u;
+            prev_sig = floatBitsToUint(work.v[lighting_pix_at() + idx / 2u][c]);
+            prev_d = floatBitsToUint(work.v[lighting_pix_at() + idx / 2u][c + 1u]);
+        }
+        outc.px[pixels + idx] = glow;
+        gbuf.px[idx].w = packed;
+        if (tracked) {
             uint c = (idx & 1u) * 2u;
             work.v[lighting_pix_at() + idx / 2u][c] = uintBitsToFloat(pix_sig);
-            work.v[lighting_pix_at() + idx / 2u][c + 1u] = uintBitsToFloat(gbuf.px[idx].w);
+            work.v[lighting_pix_at() + idx / 2u][c + 1u] = uintBitsToFloat(packed);
+            // Packed direct moved because the sun did. The sun compose writes
+            // this frame's direct on every pixel. The block is not a GI dirty.
+            // Flag off: same mark.
+            bool sun_only = lighting_sun_small() && glow == prev_e && pix_sig == prev_sig;
+            if (!sun_only && (glow != prev_e || packed != prev_d || pix_sig != prev_sig)) {
+                lighting_compose_mark_px(idx);
+            }
+        }
+        if (gstats.ctrl_history != 0u) {
+            outc.px[pixels * 2u + idx] = packed;
         }
     } else {
         lighting_hit_sunfrac = 0.0;
         lighting_bounce_path = 2u;
-        vec3 bounce = lighting_cache_irradiance_at(pos, n, hit_t);
+        lighting_hit_kind = probe_hit ? 2u : 1u;
+        if ((gstats.ctrl_bits & 512u) == 0u) {
+            glow = vec3(0.0);
+        }
+        vec3 bounce = lighting_gi_on() ? lighting_cache_irradiance_at(pos, n, hit_t) : vec3(0.0);
         e += bounce;
         e_sun += lighting_hit_sunfrac * bounce;
         if (fill_hit) {
