@@ -563,7 +563,7 @@ Thresholds: mean relative error under 3 % static per view and per tracer; no fra
 
 ## Migration plan
 
-Each phase keeps `genos-stress` runnable and is gated by the reference views (no worse than the previous phase on any view), the regression scripts, and the fps targets (no more than 10 % slower than the previous phase until the final phases). GI work lives on the `gi-v2` branch until Anthony decides to land it.
+Each phase keeps `genos-stress` runnable and is gated by the reference views (no worse than the previous phase on any view), the regression scripts, and the fps targets (no more than 10 % slower than the previous phase until the final phases). GI landed on `master` (PR #54). New work opens PRs against `master`.
 
 **Why the order changed (2026-10-10).** The first plan put the software tracer into the existing shaders (phase 2) and the new final gather last (phase 5). Phase 2 tried that: inlining the mesh SDF march at the trace sites in `scene.frag` and `light.comp` stalled the NVIDIA compiler on the 4070 for more than four minutes at pipeline creation, and ran lavapipe out of memory in LLVM (SROA and PromoteMemToReg) while it built a fragment variant mid-run. Branch-free sampling, `-O` and moving the hooks into `light.comp` alone did not fix it. So GI is now a **separate frame path** behind a setting (`GENOS_GI=v2`, and the `gi` knob in the stress stage for a live A/B), built from small compute passes with one trace site each. The current shaders are left alone until phase 6 deletes them. (Phase 6 landed on 2026-10-12: v1, `GENOS_GI` and the `gi` knob are gone; GI is the only lighting.) Every new shader uses data-bound loops marked `[[dont_unroll]]`, and a test checks each pipeline's creation time.
 
