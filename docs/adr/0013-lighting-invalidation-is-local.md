@@ -1,33 +1,30 @@
-# 0013: Lighting invalidation is local, not one global stillness hash
+# 0013: Lighting cost is budgeted and reuses a world-space cache
 
-Status: **proposed** (draft for Anthony's review, 2026-10-20). Design: [`docs/systems/lighting/localized-invalidation-design.md`](../systems/lighting/localized-invalidation-design.md).
+Status: **proposed** (draft for Anthony's review; revision 2, 2026-10-20). Design: [`docs/systems/lighting/localized-invalidation-design.md`](../systems/lighting/localized-invalidation-design.md).
 
 ## Context
 
-`lighting_passes` hashes every lamp, occluder and the camera into one value. When that hash changes, `still` goes to 0 and every GI pass runs over the whole frame. The stress/hall breakdown on 2026-10-20 (`/home/box/shared/moving-lighting-breakdown-2026-10-20.md`, master `27228dc4`, relative numbers) found:
-
-- frozen scene: lighting 0.43 ms after it settles
-- three small moving boxes, no lamp moving: 19.95 ms
-- boxes plus 2–3 moving lamps: 22.56 ms
-
-So about 89% of the moving cost is a fixed on/off charge for "something moved somewhere". Only about 2.6 ms (mostly direct light) scales with how much moved. While the boxes move, stress/hall never reaches `still > 0`.
+One global stillness hash switches every GI pass on or off. On stress/hall that means 0.43 ms frozen versus about 20 ms as soon as three boxes move (`/home/box/shared/moving-lighting-breakdown-2026-10-20.md`, master `27228dc4`). Rev 1 proposed screen dirty tiles with a full-frame fallback. Anthony's review: in real play the camera spins while things move, so screen tiles go fully dirty and the fallback is unbounded. He wants a hard static upper limit with maximum reuse.
 
 ## Decision
 
-Replace the global hash with **change records**. A change record is the old and new bounds of a mover, or a lamp's old and new position and reach. The records are turned into a **dirty tile** mask on screen and a **dirty list** of surface-light-cache pages in the world. Direct light, the denoiser, compose, gather, the probe filter and screen-probe tracing work only on dirty tiles or pages. Clean tiles keep their last finished value. In dirty tiles, direct light uses lamp pick with reuse (ReSTIR DI). The camera moving, a resize, or a dirty share above a threshold falls back to today's full-frame path.
+1. The persistent **surface light cache** is the reuse layer. It is extended, not replaced by GIBS surfels: hash LOD levels with hysteresis, a persistent coarse layer, merge-coarsening on eviction, and parent seeding on return.
+2. Every expensive pass has a **static per-preset work cap** (rays, relights, spawns, coarsen ops, fresh shadow rays, denoise items). Work beyond the cap is deferred by priority. **There is no full-frame fallback.** Under load, values get older but are always finished.
+3. A **priority scheduler** (change magnitude from change records, near-camera error, age, new visibility, inconsistency, plus a reserved starvation slice) replaces the global stillness hash.
+4. Screen space does only fixed-size resolve work: apply, budgeted gather, ReSTIR DI resampling, compose, and one denoise iteration.
 
-## Rules this keeps
+## Rules kept
 
-- Only finished values are published, and each is blended once (MSME / hold). A tile never shows a partial result.
-- The stored light never depends on the camera. The camera only orders the work (ADR 0012).
-- Lighting VRAM stays within the ~200 MB soft budget. The new state costs about 75 MB at 1080p.
+Finished values only, blended once. Stored light never depends on the camera (ADR 0012). Lighting VRAM stays within ~200 MB (High ≈ 140 MB). Nothing depends on a minimum ray count (S72S).
 
 ## Rejected
 
-- **Global hash with cheaper passes** (RAYCEIL, WORKCUT, S79 half-res). The cost is the area being redone, not the per-pixel price. Cutting rays made the moving frame slower (RAYCEIL +1.35 ms).
-- **Detecting change only from samples** (pure A-SVGF gradients). The scene already knows exactly what moved. Gradients stay as a safety net, not as the trigger.
-- **Per-slot scattered work lists as the only granularity** (S78A). Atomic order and poor locality cost more than they saved. Work goes in dense 16×16 tiles.
+- **Screen dirty tiles with a full-frame fallback** (rev 1): unbounded under camera motion.
+- **GIBS disc surfels as a replacement cache:** the industry moved to hashed world caches, and ours already has MSME, pre-fill and dormancy (`docs/lighting/research/GIBS.md`).
+- **Per-entry ray ceilings** (RAYCEIL, +1.35 ms moving).
+- **Half-res denoise** (S79).
+- **Scattered per-slot lists** (S78A).
 
 ## Consequences
 
-The full-frame path stays as the fallback and as the A/B reference (`--lighting-invalidation global`). Each phase in the design lands as its own PR with an exclusive still/moving A/B. A phase that does not lower the moving frame is dropped under the standing drop rule.
+`--lighting-schedule global` stays as the A/B reference until P6. Each phase lands with its own A/B and gameplay gates (spin, strafe, approach, many movers, A→B→A, settle). A phase that misses its gate is dropped under the standing drop rule.

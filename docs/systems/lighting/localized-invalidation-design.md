@@ -1,12 +1,19 @@
-# Localized invalidation: design
+# Bounded lighting: world-cache reuse, fixed budgets, priority scheduling
 
-Status: **draft for review** (2026-10-20). ADR: [0013](../../adr/0013-lighting-invalidation-is-local.md). No engine code yet. Terms follow [`docs/lighting/GLOSSARY.md`](../../lighting/GLOSSARY.md). The new terms (*change record*, *dirty tile*, *dirty reason*, *invalidation mode*) are added there in this PR.
+Status: **draft for review, revision 2** (2026-10-20). ADR: [0013](../../adr/0013-lighting-invalidation-is-local.md), status proposed. No engine code yet. Terms follow [`docs/lighting/GLOSSARY.md`](../../lighting/GLOSSARY.md).
 
-## 1. Why
+Revision 2 follows Anthony's review of rev 1. Real play spins the camera while things move. A screen-tile design dirties most tiles on a turn, and its "> 40% dirty or camera cut → full recompute" fallback has no upper bound. Rev 2 therefore:
+- moves reuse into the persistent world-space surface light cache;
+- gives every expensive pass a **static per-preset budget**;
+- deletes the full-frame fallback;
+- replaces the global stillness hash with a priority scheduler;
+- adds LOD and eviction that mirror densification.
 
-The stress/hall breakdown (master `27228dc4`, RTX 4070 on a shared GPU, so the numbers are proportions; `/home/box/shared/moving-lighting-breakdown-2026-10-20.md`):
+## 1. Why (measured)
 
-| pass | frozen (settled 0.43 total) | 3 boxes move | boxes + lamps move |
+Stress/hall breakdown, master `27228dc4`, RTX 4070 on a shared GPU, so these are proportions (`/home/box/shared/moving-lighting-breakdown-2026-10-20.md`):
+
+| pass | frozen | 3 boxes move | boxes + lamps move |
 |---|---|---|---|
 | direct | ~0.2 | 6.69 | 9.17 |
 | denoiser (à-trous, 8 rounds) | ~0 | 5.92 | 5.97 |
@@ -14,115 +21,234 @@ The stress/hall breakdown (master `27228dc4`, RTX 4070 on a shared GPU, so the n
 | trace (screen probes + cache rays) | ~0 | 1.93 | 2.07 |
 | probe filter | ~0 | 1.28 | 1.25 |
 | gather | ~0 | 0.76 | 0.76 |
-| total | 0.43 | 19.95 | 22.56 |
+| **total lighting** | **0.43** | **19.95** | **22.56** |
 
-One global hash (`frame_bytes` + mesh key + draw key in `lighting_passes`) decides "still" for the whole frame. Three boxes covering a few percent of the screen therefore cost the same as moving everything. The goal is that cost scales with the **dirty area**: lighting ≈ settled cost + dirty share × full cost.
+Today one global hash (`frame_bytes` + mesh key + draw key in `lighting_passes`) switches the whole pipeline on or off. Cost is binary: 0.43 ms or about 20 ms, with nothing that caps it.
 
-## 2. Prior art, and where we deviate
+**Goal:** per-frame lighting cost ≤ a fixed preset cap in every situation, including camera spins with movers. Quality, not time, is what degrades under load: values get older but are always finished.
+
+## 2. Reuse layer: extend the surface light cache, don't replace it
+
+| | GIBS surfels (Halén et al., EA SEED, SIGGRAPH 2021) | Lumen surface cache (Wright et al., SIGGRAPH 2022) | **ours today**: surface light cache + WRC |
+|---|---|---|---|
+| Unit | disc: position, radius, normal | card texel in an atlas page | hashed world-grid **cache entry** on one of 6 axes, 8×8 **pages** |
+| Spawn | 16×16 tile gap fill from the G-buffer | mesh cards captured at import | first sight + **pre-fill** (coarse → fine) |
+| Size | screen-relative radius | card resolution / mip | **cache cell size** 25 cm near, doubling with distance |
+| Persistence | yes; recycled stochastically | yes | yes; compact frees unread entries |
+| Movers | transform/bone attached | moving cards | **object-local entry** (branch gibs-mover-attach-msme) |
+| Blend | MSME | temporal accumulation | **MSME** (S72R, verbatim) |
+| Budget | global ray budget, variance-driven | update-priority budget | ray budget / budget shift, trickle, dormant |
+| Far field | trapezoid grid | WRC + global SDF | **WRC** |
+
+**Decision: extend.** Our `docs/lighting/research/GIBS.md` verdict stands. The industry moved from surfels as *the* cache to screen probes plus a world hash cache (Lumen, AMD GI-1.0, kajiya), and we are already on that branch. Our entries are hashed, world-anchored and camera-independent (ADR 0012), with MSME, pre-fill and dormancy already working. What we take from GIBS:
+- **§1.3 tile spawn throttle:** ≤ 1 new entry per screen tile per frame, randomised threshold, so a reveal can't spike.
+- **§1.4 stochastic eviction**, adapted to coarsening (§6).
+- **§1.6 screen-relative size**, reintroduced as **LOD levels of the hash** rather than a free radius. This is a deviation from GIBS; see §9.
+- **§1.12 variance-driven rays plus a global budget**, made strict and per pass.
+
+Nothing is replaced. The cache gains a level index (L0 = 25 cm … L4 = 4 m) in its key, a priority score, and an age.
+
+## 3. Fixed per-frame budgets
+
+Every expensive pass takes a **work-unit cap** fixed per preset: rays, entry relights, pixel reshades, denoise items. Caps are static numbers, not adaptive targets, so the upper bound is a property of the preset. Work that doesn't fit goes back into the priority queue (§5) and is never run late in a burst. The ms column is the cap on a 4070 at 1080p, to be calibrated in P0 against the 3-run breakdown method.
+
+| budget (per frame) | Potato | Low | Medium | High |
+|---|---|---|---|---|
+| screen-probe rays (probe tile × rays) | 0 | 16 px tile × 16 = 33 k | 16 × 32 = 261 k | 16 × 64 = 522 k |
+| cache entry relights | 0 | 16 k | 32 k | 64 k |
+| cache rays | 0 | 64 k | 128 k | 256 k |
+| new entries (spawn, ≤ 1 per tile) | 0 | 2 k | 4 k | 8 k |
+| coarsen/evict ops (§6, shares the cap) | 0 | 2 k | 4 k | 8 k |
+| direct: fresh shadow rays (pixel-equivalents) | 0.5 M | 0.5 M | 1.0 M | 2.0 M |
+| direct: lamp candidates per pixel (ReSTIR DI) | all lamps, no GI | 2, temporal only | 4, temporal + spatial | 8, temporal + spatial |
+| denoiser: page items × iterations | — | 4 k × 1 | 8 k × 3 | 16 k × 3 |
+| **lighting cap (4070 1080p, P0 calibrates)** | **1.5 ms** | **4 ms** | **6 ms** | **8 ms** |
+| fixed screen resolve (§4) inside the cap | 0.8 | 1.5 | 2.0 | 2.5 |
+
+The High cap of 8 ms plus about 0.4 ms of non-lighting gives the ~10 ms stress frame target. Older GPUs use the same work units and therefore get a proportionally higher but still static ms. S72S already requires that nothing depends on a minimum ray count.
+
+**The full-frame fallback is deleted.** Camera cuts, resizes, a 360° spin and a big reveal all run the same capped passes. The pixels they uncover read:
+1. the nearest finished cache level (§6.4);
+2. if there is none, the WRC;
+3. if that is missing too, the ambient fill (never black).
+
+These values are older or coarser, but they are finished, so nothing pops.
+
+## 4. Screen space: only resolve and cheap per-pixel steps
+
+The screen keeps only fixed-size work. It does not grow with motion:
+
+| step | per frame | High est. |
+|---|---|---|
+| cache apply (interpolate entries at G-buffer points, L-blend) | all pixels, fixed | 0.6 ms |
+| screen-probe gather + probe filter for the **budgeted** probes; others reuse kept hits | fixed by budget | 0.6 ms |
+| ReSTIR DI resampling (candidates only; shadow rays are counted in the direct budget) | all pixels | 0.5 ms |
+| compose | all pixels, one pass | 0.6 ms (today 2.7 ms; compose's own quiet path stays) |
+| screen denoise, last iteration only, on the picture | all pixels | 0.2 ms |
+| **fixed resolve total** | | **≈ 2.5 ms**, independent of motion |
+
+Direct light: each frame, pixels get fresh shadow rays up to the budget, picked by priority (§5). A pixel without a fresh ray this frame reads its reservoir's lamp visibility from the **shadow cell cache** (12.5 cm per lamp, S74A, pushed). Pixels inside a mover's shadow volume (§5.2) rank first, which addresses S77B's torn edges: those pixels always get a fresh ray before any reuse.
+
+## 5. Priority scheduler (replaces the global stillness hash)
+
+Each cache entry, screen probe and pixel-group (16×16 tile for direct) has a score. Each budget takes the highest scores and stops at its cap.
+
+```
+p = w_change * change_mag          // from change records
+  + w_near   * screen_err          // projected size / pixel coverage near the camera
+  + w_age    * min(age / age_max, 1)
+  + w_new    * newly_visible       // first sight, disocclusion
+  + w_var    * inconsistency       // MSME, as today
+```
+
+### 5.1 Inputs
+- **Change records** (rev 1), now feeding priority instead of a flag. Mover: old and new AABB. Lamp: old and new position, intensity and reach. Sun: direction. Change magnitude = estimated irradiance change at the item. For a lamp, that is Δ(I/d²) inside reach. For a mover, it is the solid angle the swept AABB subtends from the item, times the lamp radiance it can block or bounce.
+- **Shadow-caster volumes.** For each mover × lamp in reach: the hull of the lamp position and the mover's swept AABB, clipped to reach. The sun extrudes along its direction. Items inside get `change_mag` from the blocked fraction. This is VSM's rule: a moving caster invalidates "any pages that overlap its bounding box from the light's perspective" (verified, §9).
+- **Bounce reach.** Pages within one cache cell of a changed page inherit `change_mag × albedo` for one hop per cache round, up to `bounce_count`. This is the WAKE ring rule at page granularity, taken as a design note and not from the dropped branch.
+- **Near the camera.** `screen_err` = projected entry area × (1 + error proxy). Near-camera error matters most.
+
+### 5.2 Selection
+A GPU histogram of p is built in 64 log bins. Each budget walks the bins from the top until it hits its cap. One threshold is chosen per budget; there is no sort, and the cost is O(n).
+
+### 5.3 Starvation protection
+**10% of each budget is reserved** for a round-robin over all visible or live items ordered by age. Every live entry is touched at least every N = live / (0.1 × budget) frames: at most ~30 frames for visible entries on High. This replaces rev 1's verify trickle and fixes S78G, where trickle starved converging texels.
+
+### 5.4 How it replaces the hash
+"Still" is no longer a global state. A frozen scene has no change and no new visibility, so the top bins empty and most budgets run below cap. Cost falls toward the resolve cost plus the starvation slice, about 0.4–0.8 ms (today 0.43). A moving scene runs at or below the cap. `still_frames` stays only as a debug counter: frames since the last change record.
+
+## 6. LOD, coarsening and eviction (mirror of densification)
+
+Densification and eviction are the same operation in two directions. Fine levels are added near the camera when budget allows and removed from fine to coarse with distance or age. Detail is never dropped wholesale, so walking A→B→A never rebuilds.
+
+### 6.1 Levels
+The cache key gains a level L0–L4: 25 cm, 50 cm, 1 m, 2 m, 4 m. The target level for a surface point is the one whose cell projects to ~`target_px` pixels (High 8 px, Low 16 px), clamped so L0 is only used within `near_max` (High 6 m).
+
+### 6.2 Hysteresis
+- A fine level is **added** when the projected size exceeds 1.5 × target.
+- It is **removed** only when the projected size is below 0.5 × target **and** it has gone unseen for `coarsen_age` frames (High 120, i.e. 2 s at 60 fps).
+- That gives a 3× band plus a time lag, so back-and-forth motion or a spin doesn't thrash. A fine entry seen again inside the lag stays alive at full value.
+
+### 6.3 Coarse layer that persists
+L3 and L4 entries form the **coarse world layer** with its own memory cap: High 24 MB, Medium 16 MB, Low 8 MB. They are never evicted for distance, only by LRU at the cap, and they keep MSME state. The WRC remains the fallback beyond that.
+
+### 6.4 Eviction priority and budget
+`e = w_d * distance_level_excess + w_t * frames_since_seen / coarsen_age − w_i * importance`. Importance means emissive, lit by a lamp, or flagged by the game (e.g. a waypoint).
+
+Coarsening is a **merge**, not a delete. Before a fine entry is retired, its MSME mean and variance are accumulated into its parent (area-weighted, one level up). The parent therefore holds a finished summary of the detail it lost. These merge/retire ops come out of the "coarsen/evict ops" row of the budget table and share the per-frame cap. Under memory pressure, GIBS-style stochastic selection (§1.4, fixed seed for tests) avoids eviction waves.
+
+### 6.5 Seeding fine entries on return (no pop)
+1. A new fine entry starts with its parent's mean as its **finished value**, with variance raised by the parent's spread and treated as "young" (S72N seed rule). Pre-fill already requires that a new entry is never empty.
+2. The cache apply blends levels by distance (a trilinear L-blend), so a fine level fades in over its hysteresis band rather than switching.
+3. MSME blends new samples in once. The displayed value moves from the parent's estimate toward the fine one with no step larger than its noise.
+
+## 7. No pops, no flicker
+
+- **Finished values only.** Every value read by apply or compose is the output of a completed MSME update or reservoir, never a partial pass.
+- **Blended once.** MSME on entries; the reservoir for direct. Compose doesn't blend again.
+- **Deferral ages a value; it never blanks it.** The age is visible in the debug view.
+- **The camera never resets history.** Stored light is world-space (ADR 0012).
+
+## 8. Test scenarios and gates
+
+All run at 1080p on the 4070 in the clean or exclusive window, 3 runs each, with `genos-lighting --headless` on ws6 silent. Per-frame GPU timestamps are needed for p99; P0 adds them. Never genos-stress or 8765.
+
+| scenario | script |
+|---|---|
+| S1 spin | 360° yaw in 2 s at hall while lamps (dynamic 50) and boxes move; repeat 3× |
+| S2 strafe | 6 m/s lateral strafe for 3 s through the hall, movers on |
+| S3 approach | walk from 8 m to 0.3 m of a lit wall, then back |
+| S4 many movers | stress scale medium, 64 moving boxes, 16 moving lamps |
+| S5 A→B→A | walk hall → room-a → hall, 5 cycles, 4 s per leg |
+| S6 settle | all motion stops, hold 600 frames |
+
+| gate | pass condition |
+|---|---|
+| G1 cap | p99 lighting ms ≤ preset cap, and max ≤ cap × 1.1, in S1–S5. Budget counters never exceed caps. |
+| G2 convergence | S6: lighting-ref error vs the path-traced reference ≤ ref floor within **N = 120 frames on High, 240 on Low** |
+| G3 no pops/flicker | frame-to-frame pop metric and `temporal_flicker.rhai` ≤ 1.2 × the frozen baseline in all scenarios |
+| G4 A→B→A | no frame whose cache spawn + relight count exceeds its budget (no rebuild spike); on each return to hall, lighting-ref error vs the pre-departure capture ≤ 1.5 × floor within N = 60 frames, and ≤ floor within 120 |
+| G5 frozen | frozen stress ≤ 0.8 ms lighting |
+| G6 basic scene | `room` / `bounce_corner` with one moving lamp > 500 fps on High (frame < 2 ms) |
+| G7 stress moving | stress moving frame ≤ ~10 ms on High |
+
+## 9. Papers: what we take and where we deviate
 
 | Source | What we take | Deviation (flagged) |
 |---|---|---|
-| UE5 Virtual Shadow Maps, cache invalidation (Epic, UE 5.0 docs / SIGGRAPH 2022 course) | A caster's old and new bounds invalidate only the shadow pages they touch. Static and dynamic casters are kept apart. | We invalidate **screen tiles and cache pages**, not shadow-map pages. We have no shadow maps; shadows are traced rays. The caster bounds are extruded toward each lamp in reach (§4.2). |
-| Lumen (Wright et al., SIGGRAPH 2022) | Surface-cache pages carry their own update priority. Moving objects get a fast update. Screen probes are rebuilt only from the probes. | **Deviation:** Lumen re-gathers every screen probe and composites every pixel each frame. We skip clean tiles entirely and keep their finished picture. |
-| SVGF (Schied et al., HPG 2017) | The à-trous kernel and variance guide are unchanged. | **Deviation:** SVGF filters the full frame. We filter dirty tiles grown by the kernel footprint and read clean neighbours' finished values at the border (§5). |
-| A-SVGF (Schied et al., HPG 2018) | Temporal gradients drop history where shading changed. | **Deviation:** the trigger is the scene's own change records (exact, free). Sparse gradients are only a **safety net**: a rotating 1/64 of clean tiles is re-shaded; a gradient above noise dirties the tile and logs `dirty reason = verify`. |
-| ReSTIR DI (Bitterli et al., SIGGRAPH 2020) | Per-pixel lamp reservoirs, temporal plus spatial reuse, unbiased merge (Alg. 6). This is `lamp_pick` with `reuse` and `unbiased` on. | **Deviation:** reservoirs are rebuilt only in dirty tiles. Clean tiles keep their reservoirs and finished direct light. Spatial reuse never reads across into a dirty tile from a clean one or back. |
+| **UE5 Virtual Shadow Maps, Caching** (Epic, *Virtual Shadow Maps in Unreal Engine*, UE 5.4–5.8 documentation, dev.epicgames.com, checked 2026-10-20) | Verified text: light movement or rotation "will invalidate all cached pages for that light"; a moving, added or removed caster invalidates "any pages that overlap its bounding box from the light's perspective"; separate static caching keeps two copies of depth so dynamic movers don't redraw static geometry (`r.Shadow.Virtual.Cache.StaticSeparate`); a Cached Page visualization (green cached, red invalidated). | We have no shadow maps. The caster-bounds rule raises **priority** of cache entries and pixel groups instead of invalidating pages. The static/dynamic split maps to static entries plus object-local mover entries. A lamp move raises priority inside its reach rather than flushing everything for that lamp. Rev 1 cited "SIGGRAPH 2022 course"; that was unverified and is removed. |
+| Lumen (Wright et al., SIGGRAPH 2022) | Persistent surface cache with update priority and budget; WRC; screen probes as final gather | Lumen recomputes the screen gather and composite every frame at full size; our gather is budgeted. We store hashed entries, not mesh cards. |
+| GIBS (Halén et al., SIGGRAPH 2021) | Persistence, tile spawn throttle, stochastic recycle, global ray budget, MSME | Not disc surfels. Size by hash LOD levels with hysteresis, not a free screen-relative radius (`GIBS.md` §1.6 said NO for the lattice; levels keep entries world-fixed). Coarsening merges into parents, which GIBS does not do. Pre-fill instead of GIBS's cold start. |
+| SVGF (Schied et al., HPG 2017) | à-trous kernel and variance guide | It runs on budgeted pages in the cache plus one screen iteration, not every pixel × N iterations. |
+| A-SVGF (Schied et al., HPG 2018) | Temporal gradients to detect change | The trigger is explicit change records. Gradients are replaced by the starvation slice plus the MSME inconsistency term. |
+| ReSTIR DI (Bitterli et al., SIGGRAPH 2020) | Reservoirs, temporal + spatial reuse, Alg. 6 unbiased merge (`lamp_pick=reuse`) | Fresh shadow rays are budgeted and prioritized. Pixels without one use the shadow cell cache, so the result is biased until their turn (flagged). |
 
-## 3. Data structures (1920×1080; tile = probe tile = 16 px, so 120×68 = 8160 tiles)
+## 10. Drop notes checked
 
-| Buffer | Layout | Size |
+| Note | What failed | How rev 2 avoids it |
 |---|---|---|
-| Change records (CPU → GPU ring) | per record: kind (mover/lamp/sun), old AABB, new AABB, lamp old/new position and reach, frame id; 256 records × 2 frames | ~32 KB |
-| Dirty tile mask | per tile: u32 reason bits (direct, shadow, bounce, disocclusion, verify, camera) + u16 age + u16 dilation level; double-buffered | 8160 × 8 × 2 ≈ 130 KB |
-| Dirty tile list | indirect-dispatch list of tile ids, one per consumer pass (direct, à-trous, compose, gather/filter, trace) | 5 × 8160 × 4 ≈ 165 KB |
-| Tile depth bounds | per tile: min/max view depth + world AABB from the G-buffer, built in the gbuffer pass | 8160 × 32 ≈ 260 KB |
-| Cache page dirty bits | 1 bit per page (8×8 entries) + u8 bounce distance; reuses the existing **dirty list** | < 1 MB |
-| ReSTIR DI reservoirs | per pixel: lamp id, W, M, target pdf (16 B); current + previous | 2 × 33 MB = 66 MB |
-| Finished direct light (held) | per pixel RGB16F, read back by clean tiles; today's direct output is reused where possible | ~8 MB |
-| **Total new** | | **≈ 75 MB** |
+| RAYCEIL | Per-entry ray ceilings with deferral made the moving frame +1.35 ms worse | Caps limit the **total** per pass. Per-entry counts are unchanged. G1/G7 must show a frame drop or the phase is dropped. Watch for deferral overhead (the selection histogram must be ≤ 0.1 ms). |
+| WORKCUT ph. 2 | Invented confirmed-visibility shade failed the picture | No new estimator: MSME, ReSTIR and the existing shadow cell cache only. |
+| S77B | Pixel shadow reuse tore moving shadow edges | Pixels in mover shadow volumes get first claim on fresh rays. Reuse is only for low-priority pixels. |
+| S78A | Per-slot scattered lists were slower | Selection by histogram threshold; passes iterate dense pages and tiles. |
+| S79 | Half-res à-trous was slower and failed the picture | Full resolution kept. Fewer items, not lower resolution. |
+| S72B | ReSTIR GI texel reuse made blotches | ReSTIR for direct only, with visibility on the final sample. |
+| S78Q | ReSTIR DI pixel win hidden because probe hits looped all lamps | P4 measures the pixel direct dispatch alone; hits keep `hits` lamp pick. |
+| S78N | Guess-and-verify reuse mismatched | Change records are explicit, not guessed. |
+| S78G | Stop-at-cap trickle starved converging texels (+40–50% pop) | Reserved 10% starvation slice; young entries also have `w_new`. |
+| S73A/S73B | Off-screen pre-fill took ray budget and darkened the picture | Off-screen work only from leftover budget, below on-screen bins. Coarse seeding costs no rays. |
+| S72S | Must scale to GTX 1060; no minimum ray count | Budgets are caps; Low and Potato work at small caps. |
+| WAKE / PR #31 | Ring launches didn't shrink the frame | Rings only add priority, never extra launches. Judged on per-dispatch ms. |
 
-Today's lighting state is about 10–20 MB plus the S78X lists (+20 MB). The new total stays near 115 MB, inside the ~200 MB budget. Potato/Low may drop the previous reservoir (−33 MB) and use temporal reuse only.
+## 11. Debug views and MCP
 
-## 4. How dirtiness spreads
+- `--lighting-schedule budget|global` (mirror `GENOS_LIGHTING_SCHEDULE`). `global` is today's hash path, kept for A/B only. It is in `--help`, the system record, `EngineSettings`, the MCP catalogue and the debug menu.
+- `--lighting-budget-scale F` scales every cap (test only; the preset sets the values).
+- Debug views:
+  - `priority`: heat map of p;
+  - `age`: frames since an entry was refreshed;
+  - `lod`: level colour per pixel, with the L-blend shown;
+  - `budget`: per-pass fill bars;
+  - `coarsen`: entries merged this frame.
+- Counters on the Perf page and the `--lighting-debug` line: per-budget used/cap, deferred count, max age seen, starvation-slice coverage, spawns, merges, coarse-layer MB.
+- MCP: `get_budgets` / `set_budgets`, `get_schedule_stats`, `lighting_lod_snapshot` (per-level entry counts and memory, used by the S5 gate).
 
-Every frame the CPU emits change records for whatever really moved: mover transforms, lamp position/intensity/radius, and the sun. The camera is not a change record. It reprojects (§4.4). One compute pass, **mark**, turns the records into tile and page bits. Each reason below sets its own bit, so the debug view can show why a tile is dirty.
+## 12. VRAM (High, 1080p)
 
-### 4.1 Direct (lamp change)
-A lamp that moved or changed dirties every tile whose world AABB intersects the union of its old and new reach spheres. A lamp switched off dirties its old sphere; one switched on, its new sphere. This is the existing graded lamp change (S78I) moved from all slots to tiles.
+| item | MB |
+|---|---|
+| fine cache levels L0–L2 (today's cache + level key + priority/age 8 B per entry) | ~40 |
+| coarse layer L3–L4 (cap) | 24 |
+| ReSTIR reservoirs (current + previous, 16 B/px) | 66 |
+| priority histogram, budget lists, change records | < 2 |
+| shadow cell cache (existing) | ~10 |
+| **total** | **≈ 140** (cap 200) |
 
-### 4.2 Shadow (shadow-caster bounds), as in VSM invalidation
-For each mover *m* and each lamp *l* whose reach meets *m*'s swept AABB (old ∪ new), the **shadow volume** is the convex hull of *l*'s position and that swept AABB, clipped to *l*'s reach. Tiles whose world AABB intersects the volume get the `shadow` bit. The sun extrudes the swept AABB along the sun direction to the scene bounds. The test is conservative: it may over-mark but never under-marks. Hull-versus-AABB uses separating axes (the 6 AABB faces and the hull's silhouette planes, ≤ 14 planes).
+Low: one reservoir (33 MB), coarse cap 8 MB, ≈ 75 MB total.
 
-### 4.3 Bounce reach (GI)
-- **Cache pages:** pages whose entries lie in the mover's swept AABB grown by one cache cell size, plus pages inside a changed lamp's reach, get bounce distance 0. Each cache round, a page next to a distance-*d* page whose irradiance changed by more than its inconsistency threshold becomes distance *d*+1, up to `bounce_count` (cap 3). This is the WAKE ring rule (`WAKE-neighbour-wake-design.md`) applied to page granularity; see §8 for why the ring branch itself is not reused.
-- **Screen:** a screen probe whose kept hits read a dirty page sets the `bounce` bit on its tile. The kept-hit → page index already exists (S78O).
+## 13. Phases (each its own PR and A/B)
 
-### 4.4 Disocclusion and the camera
-- A mover's old screen footprint (last frame's projected AABB) is dirtied with the `disocclusion` bit: what it uncovers has no valid finished value.
-- Camera motion: tiles whose reprojection fails (depth or normal test, as in SVGF) get the `camera` bit. A camera cut, a resize, or a dirty share above `local_max_share` (default 40%) takes today's full-frame path for that frame (S78X2 dense fallback, generalized).
-
-### 4.5 Growth for kernels
-Each consumer grows the mask by its read footprint: the probe filter by 1 tile, à-trous round *i* by ⌈2^i × step / 16⌉ tiles, and the ReSTIR spatial reuse radius (30 px) by 2 tiles. Grown tiles are recomputed **in full**, not partially.
-
-## 5. No pops, no flicker
-
-1. **Finished values only.** A dirty tile runs the whole chain in the same frame: direct → gather → probe filter → à-trous rounds → compose. Its published picture is replaced only with that frame's finished output. A clean tile keeps last frame's finished picture, untouched. Nothing is half-updated.
-2. **Blended once.** History blending happens in one place per quantity: MSME on cache entries, and lamp reuse (the reservoir) for direct. Compose writes; it does not blend again. This avoids S77B's torn moving shadow edges, which came from reusing shadow results partway across a mover's edge.
-3. **Seams.** Kernels in a grown tile read clean neighbours' finished values (valid by rule 1). The grown ring is recomputed with the same kernel, so the boundary matches the full-frame result up to noise. Acceptance: a `lighting-ref` picture diff of local vs `--lighting-invalidation global` on the same frames stays under the ref noise floor (`scripts/verdict/noise-floor.py`).
-4. **Stale tiles are bounded.** The verify trickle (§2, A-SVGF row) and a max tile age (`local_max_age`, default 600 frames) force a recompute. Nothing can stay wrong indefinitely.
-
-## 6. Measurement plan
-
-Exclusive or clean-GPU window only, 3 runs each, on zanven-pc RTX 4070. `--gpu-times 60`, `GENOS_GPU_DISPATCH=1`, `genos-lighting --headless --size 1920x1080 --checkpoint hall`, proof window on ws6 silent. Never genos-stress or port 8765.
-
-| scene | today (proportional) | target |
+| PR | Content | Gate |
 |---|---|---|
-| stress, boxes only | 19.95 ms lighting | ≤ 6 ms lighting |
-| stress moving (boxes + lamps) | 22.56 ms lighting / 23.2 frame | **toward ~10 ms frame** |
-| frozen stress | 0.43 ms | unchanged (≤ 0.5) |
-| basic scene (`room` or `bounce_corner`, one moving lamp) | to be measured in P0 | **> 500 fps** (frame < 2.0 ms) |
-| picture | — | local vs global under the ref noise floor; no pop metric regression |
+| P0 | Per-frame GPU timestamps (p99), budget counters, change records, priority buffer, debug views, MCP; behaviour unchanged | overhead ≤ 0.1 ms; calibrates the ms caps |
+| P1 | Budgeted cache relights + rays with the priority scheduler and starvation slice; global hash becomes debug only | G1 in S1–S2; G2; G5 |
+| P2 | LOD levels, hysteresis, coarse layer, merge-coarsening, parent seeding | G4 (A→B→A), G3 |
+| P3 | Budgeted screen-probe trace, gather and filter | G1 in S1–S4 |
+| P4 | Direct: ReSTIR DI with budgeted, prioritized fresh shadow rays + shadow cell cache | G7, G6, S77B edge review |
+| P5 | Denoiser on budgeted pages + one screen iteration; compose fixed | G1 all, G3 |
+| P6 | Remove the full-frame fallback; `global` mode stays as A/B | all gates on all presets |
 
-Every phase records: dirty-tile share and its reason breakdown, the per-dispatch table (still / boxes-only / moving), and a lighting-ref diff. A phase passes only if the moving frame drops and the still frame is not worse. Otherwise drop rule: research note, close, delete the branch.
+A phase that misses its gate is dropped under the standing drop rule: research note, close, delete the branch.
 
-## 7. Debug views and MCP hooks
+## 14. Rev-1 questions, answered under the budget model
 
-- `--lighting-invalidation local|global` (mirror `GENOS_LIGHTING_INVALIDATION`): the A/B switch; `global` is today. It is in `--help`, the system record, `EngineSettings`, the MCP catalogue and the debug menu (GI page), per settings-principles.
-- Debug view `dirty`: a tile overlay coloured by reason (direct, shadow, bounce, disocclusion, verify, camera), with the grown ring hatched. Dump-able with `--frames N` and the `captures` tool.
-- Debug view `dirty-pages`: cache pages tinted by bounce distance.
-- Counters on the `--lighting-debug` line and the Perf page: `dirty_tiles`, `dirty_share`, per-reason counts, `grown_tiles`, `fallback` (yes/no + why), `verify_hits`, `max_age_forced`.
-- MCP: `get_invalidation` (mode, last frame's counters, record count), `set_invalidation` (mode, `local_max_share`, `local_max_age`, verify rate), `dirty_tiles` (the list for a frame, for scripted checks).
-- Probe rule (debug-standard): every failure mode has a counter. An under-mark shows up as `verify_hits` > 0 with reason `verify`.
+1. *Fall back per pass or per frame at 40%?* Neither. The fallback is deleted. Every pass has its own cap and defers by priority.
+2. *Previous reservoir on Low?* No. Low keeps one reservoir with temporal reuse only (−33 MB); spatial reuse starts at Medium.
+3. *Is a 1/64 verify trickle enough?* It is replaced by the reserved 10% starvation slice per budget, which gives a bounded refresh period (≤ ~30 frames for visible entries on High), plus the MSME inconsistency term.
 
-## 8. Not repeating the drop notes
+## 15. New open questions
 
-| Note | What failed | How this design avoids it |
-|---|---|---|
-| RAYCEIL | Fewer rays per entry made the moving frame +1.35 ms worse | Ray counts stay as they are. Only the **area** shrinks. |
-| WORKCUT phase 2 | Confirmed-visibility shade (local invention) failed the picture | No new shading estimator. Dirty tiles run the existing passes unchanged. |
-| S77B pixel shadow reuse | Torn moving shadow edges | Shadow results are never reused inside a dirty tile. The whole tile is re-traced. |
-| S78A list-driven à-trous | Per-slot lists: atomic order and locality cost more | Dense 16×16 tiles, one workgroup each, indirect dispatch. |
-| S79 half-res à-trous | Slower than the scalar wavelet; picture failed | Full resolution inside dirty tiles. No half-res. |
-| S72B ReSTIR GI texel reuse | Blotches from reuse without visibility | ReSTIR is for **direct** only, with a visibility ray on the final sample, and spatial reuse stays within dirty tiles. |
-| S78Q ReSTIR DI pixels (shelved) | Probe-ray hits still loop all lamps, so the pixel win was hidden | Phase P4 measures the pixel direct dispatch alone. Hits keep `hits` lamp pick. |
-| S78N reuse with changes | Verify mismatched often; moving lamps relit anyway | Lamp change is an explicit record (§4.1), so there is no guess and verify. |
-| WAKE / PR #31 | Ring launches did not shrink the frame; branch too old | Only launch-size reductions count. Every phase is judged on per-dispatch ms, on a fresh branch from master. |
-| S80-verify | Never measured | Measurement is a phase gate (§6). |
-
-## 9. Phases (each a PR with its own A/B)
-
-| PR | Content | Behaviour change | Pass gate |
-|---|---|---|---|
-| P0 | Change records, mark pass, dirty-tile/page buffers, `dirty` views, counters, MCP. Consumers still run full frame. | none | Overhead ≤ 0.1 ms; dirty share measured on stress, boxes-only and the basic scene (sets the real targets) |
-| P1 | Compose + gather + probe filter run on dirty tiles (compose's existing 8×8 quiet path is fed by tiles) | yes | Moving: compose + gather + filter drop roughly in proportion to dirty share; picture diff under floor |
-| P2 | à-trous on grown dirty tiles, dense per tile | yes | à-trous ≤ dirty share × 6 ms + 0.3 |
-| P3 | Direct on dirty tiles with shadow-caster bounds (§4.2) | yes | Boxes-only direct ≪ 6.7 ms; moving shadow edges pass review on the proof window |
-| P4 | ReSTIR DI (`lamp_pick=reuse`, unbiased) in dirty tiles | yes | Moving direct drops further; basic scene > 500 fps |
-| P5 | Screen-probe trace + cache-page bounce reach (§4.3) | yes | Trace scales with dirty share; GI lag in the stress script no worse |
-| P6 | Remove the global hash as the trigger; `still` = no dirty tiles for N frames; `global` stays as an A/B mode | yes | Stress moving frame toward ~10 ms; frozen unchanged |
-
-## 10. Open questions for Anthony
-
-1. Should `local_max_share` (40%) fall back per pass or per frame?
-2. Should we spend the 33 MB previous-reservoir buffer on Low, or use temporal-only reuse there?
-3. Is a 1/64 verify trickle enough as the safety net, or should verification follow the existing verification budget?
+1. Caps in work units are static. Should a GPU-tier table also map them to ms targets, or is "same units, slower GPU" acceptable?
+2. Convergence N: are 120 frames (High) and 240 (Low) the right numbers for G2, and 60/120 for G4?
+3. Should game code be able to mark importance (§6.4), e.g. objective areas, through the MCP and settings path?
+4. Coarse-layer cap: is 24 MB on High enough for a big world, or should it scale with world size up to the 200 MB budget?
+5. Is biased direct (shadow cell cache for pixels without a fresh ray) acceptable on Low/Medium, or must every visible pixel get one fresh ray per K frames?
