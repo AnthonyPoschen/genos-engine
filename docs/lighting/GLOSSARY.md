@@ -138,6 +138,21 @@ Role: DENOISE · Literature: Lumen/GIBS screen denoise; the kernel is still SVGF
 **Visibility / leak test**: stops light passing through thin walls. Today it is handled by the facing axis and the cell size. Depth moments are not used.
 Role: VIS · Literature: GIBS depth moments + Chebyshev (§1.10); DDGI Chebyshev visibility · More detail: [GIBS.md §1.10](research/GIBS.md)
 
+**Change record** (proposed, ADR 0013): one frame's description of what moved: a mover's old and new bounds, a lamp's old and new position and reach, or the sun. It raises the priority of what it can affect.
+Role: SCHED · Literature: UE5 VSM caster-bounds invalidation · More detail: [localized-invalidation-design.md](../systems/lighting/localized-invalidation-design.md)
+
+**Schedule mode** (proposed): `budget` (work caps + priority) or `global` (today's single stillness hash). `--lighting-schedule`.
+Role: TOOL · More detail: [ADR 0013](../adr/0013-lighting-invalidation-is-local.md)
+
+**Work cap** (proposed, ADR 0013): the static per-preset limit on one expensive pass per frame (rays, relights, spawns, coarsen ops, fresh shadow rays, denoise items). Work beyond it is deferred by priority.
+Role: SCHED · Literature: GIBS global ray budget (§1.12); Lumen update budget · More detail: [design §3](../systems/lighting/localized-invalidation-design.md)
+
+**Priority** (proposed): the per-item score that picks which entries, probes and pixel groups get fresh work within the caps. It replaces the global stillness hash.
+Role: SCHED · Literature: Lumen surface-cache update priority · More detail: [design §5](../systems/lighting/localized-invalidation-design.md)
+
+**Cache level / coarsening** (proposed): the cache key carries a level (L0 25 cm … L4 4 m). Coarsening merges a fine entry's MSME state into its parent before retiring it; the parent seeds fine entries on return.
+Role: STORE · Literature: GIBS screen-relative size (§1.6, deviates: discrete levels) · More detail: [design §6](../systems/lighting/localized-invalidation-design.md)
+
 ### Lamps and shadows
 **Lamp**: a point light. The sun is not a lamp.
 Role: LIGHTS
