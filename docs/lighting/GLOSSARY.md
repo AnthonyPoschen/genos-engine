@@ -138,6 +138,15 @@ Role: DENOISE · Literature: Lumen/GIBS screen denoise; the kernel is still SVGF
 **Visibility / leak test**: stops light passing through thin walls. Today it is handled by the facing axis and the cell size. Depth moments are not used.
 Role: VIS · Literature: GIBS depth moments + Chebyshev (§1.10); DDGI Chebyshev visibility · More detail: [GIBS.md §1.10](research/GIBS.md)
 
+**Change record** (proposed, ADR 0013): one frame's description of what moved: a mover's old and new bounds, a lamp's old and new position and reach, or the sun. It drives the dirty tiles.
+Role: SCHED · Literature: UE5 VSM caster-bounds invalidation · More detail: [localized-invalidation-design.md](../systems/lighting/localized-invalidation-design.md)
+
+**Dirty tile** (proposed, ADR 0013): a 16×16-pixel screen tile whose lighting inputs changed this frame. Only dirty tiles are recomputed. The others keep their finished picture. Each carries **dirty reasons** (direct, shadow, bounce, disocclusion, verify, camera).
+Role: SCHED · Literature: — (Lumen and SVGF recompute every pixel); A-SVGF gradients are the closest · More detail: [localized-invalidation-design.md](../systems/lighting/localized-invalidation-design.md)
+
+**Invalidation mode** (proposed): `local` (dirty tiles) or `global` (today's single stillness hash). `--lighting-invalidation`.
+Role: TOOL · More detail: [ADR 0013](../adr/0013-lighting-invalidation-is-local.md)
+
 ### Lamps and shadows
 **Lamp**: a point light. The sun is not a lamp.
 Role: LIGHTS
