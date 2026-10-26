@@ -64,6 +64,12 @@ fn feature_metrics_keep_absent_rows_and_grade_the_live_ones() {
     let report = evaluate(Suite::Feature, Fixture::Good);
     let lines = format_lines(&report);
     println!("{lines}");
+    for cost in genos_fog_check::recorded_fits() {
+        println!(
+            "fitted samples {} slices {} ms {:.6}",
+            cost.samples, cost.slices, cost.milliseconds
+        );
+    }
     assert_only_lavapipe_ms_may_fail(&report);
     assert!(report.metrics.len() > 5);
     for name in [
@@ -100,13 +106,14 @@ fn feature_metrics_keep_absent_rows_and_grade_the_live_ones() {
 
 #[test]
 fn planted_bugs_fail_their_feature_rows() {
+    let mut missed = Vec::new();
     for (name, value, threshold) in genos_fog_check::planted_scores() {
         println!("planted {name} {value:.6e} ceiling {threshold:.6e}");
-        assert!(
-            value > threshold,
-            "{name} value {value} did not exceed {threshold}"
-        );
+        if value <= threshold {
+            missed.push(format!("{name} value {value} did not exceed {threshold}"));
+        }
     }
+    assert!(missed.is_empty(), "{missed:?}");
 }
 
 #[test]

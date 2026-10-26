@@ -11,6 +11,7 @@ mod feature;
 mod report;
 
 pub use cli::{resolve, Config, HELP};
+pub use device::recorded_fits;
 pub use feature::planted_scores;
 pub use report::{exit_code, format_lines, judge, write_metrics, Metric, Report, Status};
 

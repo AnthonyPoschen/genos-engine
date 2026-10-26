@@ -8,9 +8,10 @@ use std::cell::RefCell;
 
 use genos_lighting_ref::{blur_relative, MetricParams, Picture};
 use genos_render::{
-    column_luma, flicker_dispatch, local_volume_leak, media_dispatch, near_dispatch, picture_from,
-    point_at, ray_dir, shaft_dispatch, shaft_image, slice_edge, smear_dispatch, smear_tracking,
-    sphere_dispatch, sphere_volume, still_flicker, FogColumn, FogDispatch, FogImage, FroxelGrid,
+    column_luma, flicker_dispatch, integrate_unshadowed, local_volume_leak, media_dispatch,
+    near_dispatch, picture_from, point_at, ray_dir, shaft_dispatch, shaft_image, slice_edge,
+    smear_dispatch, smear_tracking, sphere_dispatch, sphere_volume, still_flicker, FogColumn,
+    FogDispatch, FogImage, FroxelGrid,
     LightingPreset, FOG_FLIP_G, FOG_IGNORE_SPHERE, FOG_LINEAR_SLICE, FOG_SKIP_EXTINCTION,
     FOG_SKIP_SHADOW, Z_FAR, Z_NEAR,
 };
@@ -41,14 +42,15 @@ const NO_GI: &str =
 const NO_TIME: &str = "no lavapipe window for a fog timestamp";
 const LAVAPIPE_BYTES: &str = "lavapipe allocation, decimal MB";
 const LAVAPIPE_MS: &str = "lavapipe timestamp, not an RTX 4070 measurement";
-const SMEAR_NOTE: &str = "lavapipe GPU readback, High 160x90x48, yaw stride 16 of 320";
+const SMEAR_NOTE: &str = "lavapipe GPU readback, High 160x90x48, all 320 yaw frames";
 const SHAFT_NOTE: &str = "lavapipe GPU shadowed columns against the CPU shadowed integral";
 const FLICKER_NOTE: &str = "lavapipe GPU frame N against frame N+1, camera still";
 const MEDIA_NOTE: &str = "lavapipe GPU columns against a local closed form";
 const SPHERE_NOTE: &str = "lavapipe extinction image, peak outside over peak inside";
 
-/// Yaw samples of the High grid. Stride 16 of 320 frames.
-const SMEAR_STEP: u32 = 16;
+/// One sample per yaw frame. A stride of 16 measures the same integral at 0.695 px
+/// on the CPU model, above the frame-to-frame gate.
+const SMEAR_STEP: u32 = 1;
 
 #[derive(Clone, Copy)]
 struct Good {
@@ -243,7 +245,7 @@ pub fn planted_scores() -> Vec<(&'static str, f64, f64)> {
         ),
         (
             "near_fog_blur_rel",
-            media_grade(FOG_SKIP_EXTINCTION, true),
+            extinction_grade(),
             NEAR_FOG_BLUR_REL,
         ),
         (
@@ -258,7 +260,7 @@ pub fn planted_scores() -> Vec<(&'static str, f64, f64)> {
         ),
         (
             "media_path_blur_rel",
-            media_grade(FOG_LINEAR_SLICE, false),
+            linear_slice_grade(),
             MEDIA_PATH_BLUR_REL,
         ),
         (
@@ -315,6 +317,33 @@ fn shaft_grade(flags: u32) -> f64 {
 
 fn shaft_grade_cpu(traced: bool) -> f64 {
     image_grade(shaft_image(true), shaft_image(traced))
+}
+
+/// Dense near segment. Skipping per-slice extinction is visible once optical depth is not tiny.
+fn extinction_grade() -> f64 {
+    let mut job = near_dispatch(FOG_SKIP_EXTINCTION);
+    job.settings.density = 1.0;
+    let Some(gpu) = run(&job) else {
+        return 1.0;
+    };
+    image_grade(
+        closed_picture(&job, true),
+        picture_from(job.size, &gpu.columns),
+    )
+}
+
+/// Local sphere on linear slice edges, against the exponential CPU integral.
+fn linear_slice_grade() -> f64 {
+    let mut job = sphere_dispatch(FOG_LINEAR_SLICE);
+    job.read_extinction = false;
+    let Some(gpu) = run(&job) else {
+        return 1.0;
+    };
+    let cpu = integrate_unshadowed(&job.settings, &job.view, job.size, job.sun);
+    image_grade(
+        picture_from(job.size, &cpu),
+        picture_from(job.size, &gpu.columns),
+    )
 }
 
 fn media_grade(flags: u32, near: bool) -> f64 {

@@ -15,6 +15,7 @@ struct Session {
 
 thread_local! {
     static GPU: RefCell<Option<Session>> = const { RefCell::new(None) };
+    static FITS: RefCell<Vec<PassCost>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Fitted pass time from froxel timestamps. `None` without a lavapipe window.
@@ -31,7 +32,18 @@ pub(crate) fn fitted_cost(preset: LightingPreset) -> Option<PassCost> {
             0.0
         }
     });
-    if missing { None } else { Some(cost) }
+    if missing {
+        None
+    } else {
+        FITS.with(|slot| slot.borrow_mut().push(cost));
+        Some(cost)
+    }
+}
+
+/// Fitted passes recorded by the last good feature grade, in preset order.
+#[must_use]
+pub fn recorded_fits() -> Vec<PassCost> {
+    FITS.with(|slot| slot.borrow().clone())
 }
 
 /// Full sample cap, not reduced. The broken millisecond row uses this.
