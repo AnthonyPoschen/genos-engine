@@ -273,7 +273,7 @@ A missing feature prints `-` for the value and `NOT-IMPLEMENTED`. It does not pr
 | `gi_inscatter_blur_rel` | 0.12 | Same grade where the only light in the medium is the world cache | `NOT-IMPLEMENTED` |
 | `media_path_blur_rel` | 0.12 | Full picture against the media path trace | `NOT-IMPLEMENTED` |
 | `near_fog_blur_rel` | 0.08 | The same grade on the nearest quarter of the slices | `NOT-IMPLEMENTED` |
-| `fog_still_flicker` | 0.02 | Mean frame-to-frame relative luminance of the fog term, camera still | `NOT-IMPLEMENTED` |
+| `fog_still_flicker` | 0.02 | Mean frame-to-frame relative luminance of the fog term, camera still | Graded. History is off, so two still frames match. Scaling the second frame by 1.4 fails. |
 | `froxel_vram_potato_mb` | 0.05 | Allocated fog VRAM | `NOT-IMPLEMENTED` |
 | `froxel_vram_low_mb` | 1.5 | Allocated fog VRAM | `NOT-IMPLEMENTED` |
 | `froxel_vram_medium_mb` | 4 | Allocated fog VRAM | `NOT-IMPLEMENTED` |

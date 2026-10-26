@@ -44,7 +44,11 @@ pub(crate) fn evaluate_feature() -> Vec<Metric> {
         absent("gi_inscatter_blur_rel", GI_INSCATTER_BLUR_REL, NO_GI),
         absent("media_path_blur_rel", MEDIA_PATH_BLUR_REL, NO_MEDIA),
         absent("near_fog_blur_rel", NEAR_FOG_BLUR_REL, NO_FROXEL),
-        absent("fog_still_flicker", FOG_STILL_FLICKER, NO_FROXEL),
+        present(
+            "fog_still_flicker",
+            f64::from(genos_render::still_flicker_fixture()),
+            FOG_STILL_FLICKER,
+        ),
         absent("froxel_vram_potato_mb", FROXEL_VRAM_POTATO_MB, NO_ALLOC),
         absent("froxel_vram_low_mb", FROXEL_VRAM_LOW_MB, NO_ALLOC),
         absent("froxel_vram_medium_mb", FROXEL_VRAM_MEDIUM_MB, NO_ALLOC),

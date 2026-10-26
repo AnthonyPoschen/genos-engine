@@ -58,6 +58,13 @@ fn feature_metrics_keep_absent_rows_and_grade_the_live_ones() {
 }
 
 #[test]
+fn a_scaled_still_frame_fails_the_flicker_gate() {
+    let broken = f64::from(genos_render::still_flicker_broken());
+    assert!(broken > 0.02, "{broken}");
+    assert_eq!(judge(true, Some(broken), 0.02), Status::Fail);
+}
+
+#[test]
 fn a_leaking_volume_fails_the_leak_gate() {
     let broken = f64::from(genos_render::leak_broken());
     assert!(broken > 1.0e-4, "{broken}");

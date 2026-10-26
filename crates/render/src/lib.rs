@@ -19,8 +19,10 @@ mod world;
 
 pub use aa::Antialias;
 pub use fog::{
-    grid_size, inject, leak_broken, leak_fixture, local_volume_leak, puff_volume, slice_edge,
-    world_cache_inscatter, FogView, FroxelGrid, GridSize, Z_FAR, Z_NEAR,
+    apply_fog, grid_size, inject, integrate_samples, integrate_unshadowed, leak_broken,
+    leak_fixture, local_volume_leak, puff_volume, sample_depth_aware, slice_edge, still_flicker,
+    still_flicker_broken, still_flicker_fixture, world_cache_inscatter, DepthTap, DirectSun,
+    FogColumn, FogView, FroxelGrid, GridSize, SliceSample, Z_FAR, Z_NEAR,
 };
 pub use budget::{FrameMemory, ImageAdmit};
 pub use genos_bake as bake;
