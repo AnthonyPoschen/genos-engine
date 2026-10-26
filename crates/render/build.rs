@@ -61,6 +61,7 @@ fn main() {
         // small sun step asks for it, not at startup, so the nine lighting
         // pipelines and their compile stay the lighting set.
         ("SUN_COMPOSE_SPV", "lighting_sun_compose.comp"),
+        ("HDR_AGX_SPV", "hdr_agx.comp"),
     ]
     .iter()
     .map(|(name, file)| {
@@ -99,6 +100,26 @@ fn main() {
         "pub static LIGHTING_SCREEN_SPV: &[u8] = include_bytes!(\"{}\");\n",
         screen.display()
     ));
+    // HDR compose declares the scene image and the bloom buffer. The plain
+    // compile above does not: those declarations moved lavapipe's bounce.
+    let compose_hdr = compile_define(
+        "shaders/lighting_compose.comp",
+        &out.join("lighting_compose_hdr.comp.spv"),
+        "GENOS_HDR_COMPOSE",
+    );
+    let sun_hdr = compile_define(
+        "shaders/lighting_sun_compose.comp",
+        &out.join("lighting_sun_compose_hdr.comp.spv"),
+        "GENOS_HDR_COMPOSE",
+    );
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_COMPOSE_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        compose_hdr.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static SUN_COMPOSE_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        sun_hdr.display()
+    ));
     std::fs::write(&glue, glue_text).unwrap();
     for piece in [
         "lighting_common.glsl",
@@ -123,6 +144,7 @@ fn main() {
     println!("cargo:rerun-if-changed=shaders/scene_data.glsl");
     println!("cargo:rerun-if-changed=shaders/dither.glsl");
     println!("cargo:rerun-if-changed=shaders/hdr_display.glsl");
+    println!("cargo:rerun-if-changed=shaders/hdr_agx.comp");
     println!("cargo:rerun-if-changed=shaders/transmit.comp");
     println!("cargo:rerun-if-changed=shaders/fxaa.comp");
 }

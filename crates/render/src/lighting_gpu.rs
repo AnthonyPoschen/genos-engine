@@ -267,6 +267,12 @@ pub(crate) struct Lighting {
     sun_gpu_slice: u32,
     /// Sun compose. Built the first time a small sun step needs it.
     sun_pipe: Handle,
+    /// AgX display. Built the first time the display mode is AgX.
+    agx_pipe: Handle,
+    /// Compose with the scene image and bloom. The plain pipe stays free of them.
+    compose_hdr_pipe: Handle,
+    /// Sun compose with the scene image and bloom.
+    sun_hdr_pipe: Handle,
     /// The linear-bounce slice was cleared for this sun run. The first frame
     /// walks every pixel; later frames walk the band.
     sun_bounce_live: bool,
@@ -469,6 +475,9 @@ impl Default for Lighting {
             sun_gpu_mark: 0,
             sun_gpu_slice: 0,
             sun_pipe: std::ptr::null_mut(),
+            agx_pipe: std::ptr::null_mut(),
+            compose_hdr_pipe: std::ptr::null_mut(),
+            sun_hdr_pipe: std::ptr::null_mut(),
             sun_bounce_live: false,
             compose_kind: 0,
             compose_dispatches: 0,
@@ -1246,6 +1255,54 @@ impl Gpu {
             self.make_compute_pipe(SUN_COMPOSE_SPV, self.lighting.layout, "lighting sun compose")?;
         self.note_pipeline_time("lighting sun compose", start);
         Ok(())
+    }
+
+    /// AgX display pipeline. The lattice sample is not in the GI compose shader.
+    fn ensure_agx_pipe(&mut self) -> Result<(), String> {
+        if !self.lighting.agx_pipe.is_null() {
+            return Ok(());
+        }
+        let start = Instant::now();
+        self.lighting.agx_pipe =
+            self.make_compute_pipe(HDR_AGX_SPV, self.lighting.layout, "hdr agx")?;
+        self.note_pipeline_time("hdr agx", start);
+        Ok(())
+    }
+
+    fn ensure_hdr_compose(&mut self) -> Result<(), String> {
+        if !self.lighting.compose_hdr_pipe.is_null() {
+            return Ok(());
+        }
+        let start = Instant::now();
+        self.lighting.compose_hdr_pipe = self.make_compute_pipe(
+            LIGHTING_COMPOSE_HDR_SPV,
+            self.lighting.layout,
+            "lighting compose hdr",
+        )?;
+        self.note_pipeline_time("lighting compose hdr", start);
+        Ok(())
+    }
+
+    fn ensure_sun_hdr_pipe(&mut self) -> Result<(), String> {
+        if !self.lighting.sun_hdr_pipe.is_null() {
+            return Ok(());
+        }
+        let start = Instant::now();
+        self.lighting.sun_hdr_pipe = self.make_compute_pipe(
+            SUN_COMPOSE_HDR_SPV,
+            self.lighting.layout,
+            "lighting sun compose hdr",
+        )?;
+        self.note_pipeline_time("lighting sun compose hdr", start);
+        Ok(())
+    }
+
+    fn agx_display(&self) -> bool {
+        !self.lighting.hdr.legacy_bytes
+            && matches!(
+                self.lighting.hdr.display,
+                genos_scene::DisplayTransform::Agx
+            )
     }
 
     /// Record the sun and the view, minus the sun and the sky. Point-lamp motion
@@ -2325,6 +2382,7 @@ impl Gpu {
             std::ptr::copy_nonoverlapping(words.as_ptr(), mapped as *mut f32, 4);
             (self.fns.unmap_mem)(self.device, self.lighting.hdr_params.memory);
         }
+        // Host-coherent upload, finished before submit.
         self.memory_barrier(0x4000, 0x20, 0x4000, 0x20);
     }
 
@@ -2806,9 +2864,30 @@ impl Gpu {
             | ((self.lighting.frame % controls.bands) << 16);
         let mut sun_compose = sun_amortise && !compose_full;
         if sun_compose {
-            if let Err(err) = self.ensure_sun_pipe() {
+            let built = if self.lighting.hdr.legacy_bytes {
+                self.ensure_sun_pipe()
+            } else {
+                self.ensure_sun_hdr_pipe()
+            };
+            if let Err(err) = built {
                 eprintln!("lighting: sun compose off: {err}");
                 sun_compose = false;
+            }
+        }
+        // legacy_bytes keeps the plain compose shader. The HDR compile is the
+        // one that stores scene radiance.
+        let mut hdr_compose = !self.lighting.hdr.legacy_bytes;
+        if hdr_compose {
+            if let Err(err) = self.ensure_hdr_compose() {
+                eprintln!("lighting: hdr compose off: {err}");
+                hdr_compose = false;
+            }
+        }
+        let mut agx_display = hdr_compose && self.agx_display();
+        if agx_display {
+            if let Err(err) = self.ensure_agx_pipe() {
+                eprintln!("lighting: agx display off: {err}");
+                agx_display = false;
             }
         }
         if !sun_compose {
@@ -2996,7 +3075,13 @@ impl Gpu {
                 // Pass 8 is a-trous: the plain kernel has no adaptive branch.
                 // Adaptive uses the scalar shader that still reads the bit.
                 let pipe = if pass == 7 && sun_compose {
-                    self.lighting.sun_pipe
+                    if self.lighting.hdr.legacy_bytes {
+                        self.lighting.sun_pipe
+                    } else {
+                        self.lighting.sun_hdr_pipe
+                    }
+                } else if pass == 7 && hdr_compose {
+                    self.lighting.compose_hdr_pipe
                 } else if pass == 8 && self.lighting.settings.denoiser.screen {
                     self.lighting.screen_pipe
                 } else if pass == 8 && self.lighting.settings.denoiser.plain() {
@@ -3057,6 +3142,29 @@ impl Gpu {
         }
         if compose_full {
             self.lighting.compose_valid = true;
+        }
+        if agx_display {
+            // Compose stored scene radiance and the shoulder. This pass replaces
+            // the 8-bit picture. The lattice sample is not in the GI shader.
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+            unsafe {
+                (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.agx_pipe);
+                (self.fns.cmd_push)(
+                    self.cmd,
+                    self.lighting.layout,
+                    0x20,
+                    0,
+                    LIGHTING_PC_BYTES,
+                    pc.as_ptr() as *const c_void,
+                );
+                (self.fns.cmd_dispatch)(
+                    self.cmd,
+                    w.div_ceil(8).max(1),
+                    h.div_ceil(8).max(1),
+                    1,
+                );
+            }
+            self.memory_barrier(0x800, 0x1000, 0x40, 0x800);
         }
         self.image_barrier(image, 6, 7, 0x1000, 0x1000, 0x800, 0x1000);
         self.copy_image_buffer(image, 7, self.lighting.out.buffer, w, h, false);
@@ -3293,6 +3401,9 @@ impl Gpu {
                 .chain(std::iter::once(&mut self.lighting.screen_pipe))
                 .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_pipe))
+                .chain(std::iter::once(&mut self.lighting.agx_pipe))
+                .chain(std::iter::once(&mut self.lighting.compose_hdr_pipe))
+                .chain(std::iter::once(&mut self.lighting.sun_hdr_pipe))
             {
                 if !pipe.is_null() {
                     (self.fns.destroy_pipeline)(self.device, *pipe, std::ptr::null());

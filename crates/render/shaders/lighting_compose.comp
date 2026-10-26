@@ -20,17 +20,22 @@ layout(local_size_x = 8, local_size_y = 8) in;
 #include "lighting_common.glsl"
 #include "dither.glsl"
 
+// GENOS_HDR_COMPOSE is the second compile of this file. The plain compile is
+// the legacy shoulder with no extra buffers: declaring them here moved the
+// bounce between frames on lavapipe. `legacy_bytes` uses the plain compile.
+#ifdef GENOS_HDR_COMPOSE
 // Scene-referred radiance, before the display transform. w is eye distance in metres.
-layout(std430, set = 0, binding = 13) buffer SceneReferred {
+layout(std430, set = 0, binding = 13) restrict buffer SceneReferred {
     vec4 px[];
 } scene_lin;
 
 // x exposure (0 means 1), y display mode, z bloom intensity.
-layout(std430, set = 0, binding = 14) readonly buffer HdrPost {
+layout(std430, set = 0, binding = 14) restrict readonly buffer HdrPost {
     vec4 v;
 } hdr;
 
 #include "hdr_display.glsl"
+#endif
 
 const float LAMBERT = 0.254647909;
 
@@ -125,9 +130,11 @@ void main() {
     bool two_sided;
     uint index = p.y * pc.dims.x + p.x;
     if (!lighting_surface(p, pos, n, albedo, two_sided)) {
+#ifdef GENOS_HDR_COMPOSE
         // The clear already wrote the toned sky. Keep those bytes. The grade
         // reads this linear sky and does not invert the shoulder.
         scene_lin.px[index] = vec4(scene.sky.rgb, 1000.0);
+#endif
         return;
     }
     uint scale = max(gstats.ctrl_scale, 1u);
@@ -207,6 +214,7 @@ void main() {
         glow = vec3(0.0);
     }
     vec3 c = albedo * LAMBERT * (direct + bounce) + glow;
+#ifdef GENOS_HDR_COMPOSE
     scene_lin.px[index] = vec4(c, length(pos - scene.eye.xyz));
     c = add_bloom(c, index);
     float exposure = hdr.v.x;
@@ -214,13 +222,9 @@ void main() {
         exposure = 1.0;
     }
     c *= exposure;
-    // Mode 0 is the legacy shoulder. Mode 1 is the AgX lattice. Mode 2 is
-    // ACES, which is not the CTL, so it keeps the shoulder. Exposure 1 and
-    // bloom off with mode 0 keep today's bytes.
+#endif
+    // The shoulder stays in this shader. AgX is hdr_agx.comp, after this pass.
     shown = vec3(tone_channel(c.r), tone_channel(c.g), tone_channel(c.b));
-    if (hdr.v.y == 1.0) {
-        shown = agx_sample(c);
-    }
     // Magenta on pixels whose surface-cache corners had no finished set.
     // GENOS_LIGHTING_UNFILLED_TINT, or Shift+F8. Quiet compose only tints the
     // blocks it redrew; a turn composes the whole frame.

@@ -88,6 +88,8 @@ Near the camera still matters most, and it matters in the grade, not by allocati
 
 **Pick: AgX base**, the Eary Chow generator ([AgX_LUT_Gen](https://github.com/EaryChow/AgX_LUT_Gen) `AgX_Base_Rec2020`, then the sRGB cube path). Log2 runs from −10 to +6.5 around middle grey 0.18. The sigmoid slope is 2.4 and both powers are 1.5. The hue mix is 40%. The SDR code is power 2.4, which is what that cube stores. The CPU reference is `agx_rec709`. The gate compares it to generator samples, max CIEDE2000 ≤ 0.5.
 
+**Departure:** `legacy_bytes` binds the plain compose compile. That SPIR-V is the pre-HDR compose shader, with no scene-image or bloom binding. The HDR compile (`GENOS_HDR_COMPOSE`) stores scene radiance, adds bloom, applies exposure, and writes the shoulder. The lattice sample is a later pass (`hdr_agx.comp`) that samples `agx_rec709`. It is not a branch in the GI compose shader.
+
 **Rejected as the implementation of this pick:** Krzysztof Narkowicz, "ACES Filmic Tone Mapping Curve", 2016, [knarkowicz.wordpress.com](https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/). The coefficients `(2.51, 0.03, 2.43, 0.59, 0.14)` are a rational fit of an older ACES curve, then a clamp to 1. Shipping that fit and calling it ACES or AgX would be a silent departure. `display=aces` is the Academy 2.0 transform, not this fit. It lands in phase 5's alternate, after AgX is the default.
 
 **Departure from a community GLSL port** that quotes `min_ev = −12.47393`, `max_ev = 4.026069`. Those are not the generator's limits. We use −10 and +6.5.
@@ -129,6 +131,8 @@ Auto and camera meet at EV100. Compensation adds stops after that: `exposure ×=
 The Vulkan wording is the `VkColorSpaceKHR` table in the `VK_EXT_swapchain_colorspace` extension. HDR10 is "HDR10 (BT.2020), encoded according to SMPTE ST 2084". Extended sRGB linear is "extended sRGB color space, encoded using a linear transfer function". The nonlinear extended-sRGB enum (1000104014) is the scRGB specification's other encoding. We do not pick it. Windows literature for the linear one is `DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709`. We do not call DXGI.
 
 **Pick:** query `vkGetPhysicalDeviceSurfaceFormatsKHR` after the surface exists. On Linux (Wayland) prefer HDR10 when that pair is listed, else scRGB, else the current SDR pair (44, then 37, color space 0). On Windows prefer scRGB, else HDR10, else SDR. Potato and Low ignore HDR pairs and take SDR. Medium and High follow the host preference when `output=auto`. macOS takes the first HDR pair MoltenVK listed, else SDR. The reference is `pick_hdr_output`.
+
+**Departure:** `create_targets` records that pick (`resolve_swapchain`) and computes graphics-white codes with `swapchain_nits` (`pq_st2084`, `scrgb_code`). The created image stays the SDR UNORM search (44, then 37, color space 0). The compose pack is still 8-bit, so an HDR format is not created until that pack writes the code. `VK_EXT_swapchain_colorspace` stays off: enabling it on lavapipe changed which UNORM pair came back.
 
 **Why the split.** HDR10 is PQ in a 10-bit UNORM image, which is the usual Wayland HDR advertisement. scRGB stores linear extended sRGB, which is the Windows linear HDR path (`DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709` in the Windows literature; we do not call DXGI). This preference is a decision, not a driver measurement.
 
