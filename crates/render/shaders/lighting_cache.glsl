@@ -963,9 +963,10 @@ void lighting_coarse_undo(float size) {
 // Largest parent. Past this the tail stops. A 25 cm hit walk would otherwise
 // reach 8 m, and lavapipe faulted when that claim sat in lighting_sc_parent.
 const float LIGHTING_LEVEL_MAX = 4.0;
-// Half the parent. The picture reads a 1 m parent only when the reader sits
-// in the half-size cell of the point that parent was lit from. A 2 m or 4 m
-// cell is claimed and capped, and is not read: it covers both sides of a wall.
+// Half the parent. The picture reads a 1 m, 2 m, or 4 m parent only when the
+// reader sits in the half-size cell of the point that parent was lit from.
+// A coarser world-grid cell can cover both sides of a wall; the other side
+// keeps the finer parent.
 const float LIGHTING_LEVEL_HALF = 0.5;
 
 bool lighting_level_near(vec3 pos, vec3 at, vec3 n, float size) {
@@ -1010,8 +1011,7 @@ vec4 lighting_sc_level_tail(vec3 pos, vec3 n, float size) {
             continue;
         }
         vec4 cv = cache.v[3u * coarse + 2u];
-        bool show = size < LIGHTING_COARSE_METRES
-            && cv.w > LIGHTING_LEVEL_READY
+        bool show = cv.w > LIGHTING_LEVEL_READY
             && lighting_level_near(pos, cache.v[3u * coarse].xyz, n, size);
         if (show) {
             cache.v[3u * coarse].w = uintBitsToFloat(lighting_frame());
