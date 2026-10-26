@@ -1258,23 +1258,10 @@ impl Gpu {
             )?;
             let surface_ext = b"VK_KHR_surface\0";
             let wayland_ext = b"VK_KHR_wayland_surface\0";
-            let color_ext = b"VK_EXT_swapchain_colorspace\0";
-            let mut ext_bytes = vec![0u8; ext_count as usize * 260];
-            check(
-                enumerate_ext(std::ptr::null(), &mut ext_count, ext_bytes.as_mut_ptr()),
-                "extension list",
-            )?;
-            let has_color = ext_bytes.chunks(260).any(|chunk| {
-                let end = chunk.iter().position(|&byte| byte == 0).unwrap_or(256).min(256);
-                &chunk[..end] == b"VK_EXT_swapchain_colorspace"
-            });
-            let mut ext_ptrs = vec![
+            let ext_ptrs = [
                 surface_ext.as_ptr() as *const c_char,
                 wayland_ext.as_ptr() as *const c_char,
             ];
-            if has_color {
-                ext_ptrs.push(color_ext.as_ptr() as *const c_char);
-            }
             let app_name = b"genos-camera\0";
             #[repr(C)]
             struct AppInfo {
@@ -1897,26 +1884,27 @@ impl Gpu {
                 ),
                 "format list",
             )?;
+            self.format = 44;
             self.color_space = crate::hdr_output::COLOR_SPACE_SRGB;
+            let mut found = false;
+            for chunk in formats.chunks(8) {
+                let format = i32::from_ne_bytes(chunk[0..4].try_into().unwrap());
+                if format == 44 || format == 37 {
+                    self.format = format;
+                    found = true;
+                    if format == 44 {
+                        break;
+                    }
+                }
+            }
+            if !found && format_count > 0 {
+                self.format = i32::from_ne_bytes(formats[0..4].try_into().unwrap());
+            }
             let mut listed = Vec::new();
-            let mut sdr_format = 0i32;
             for chunk in formats.chunks(8) {
                 let format = i32::from_ne_bytes(chunk[0..4].try_into().unwrap());
                 let color_space = i32::from_ne_bytes(chunk[4..8].try_into().unwrap());
                 listed.push(crate::hdr_output::ListedFormat { format, color_space });
-                if color_space != crate::hdr_output::COLOR_SPACE_SRGB {
-                    continue;
-                }
-                if format == 44 || (format == 37 && sdr_format != 44) {
-                    sdr_format = format;
-                }
-            }
-            if sdr_format != 0 {
-                self.format = sdr_format;
-            } else if format_count > 0 {
-                self.format = i32::from_ne_bytes(formats[0..4].try_into().unwrap());
-            } else {
-                self.format = 44;
             }
             let force_sdr = self.lighting.hdr.legacy_bytes
                 || matches!(
