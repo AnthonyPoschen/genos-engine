@@ -81,7 +81,7 @@ Networking:
 
 Departures from [ADR 0013](../../adr/0013-lighting-invalidation-is-local.md) and [the design](localized-invalidation-design.md):
 
-- The design feeds records into a priority histogram. This slice dirties cells. There is no scheduler, work cap, starvation slice, or `--lighting-schedule`.
+- Change records still dirty cells. They do not fill a per-item score. The budgeted frame, and where it leaves the design, is the next section.
 - UE5 virtual shadow maps (design §9) raise a page's priority from caster bounds. This slice marks overlapping cells for relight and keeps the stored value until that relight finishes. There is no priority score.
 - The GPU list is a sphere around a mover's swept bounds, so a shader may relight a few cells outside the box and inside the sphere. The CPU test uses the box. A lamp record is not copied onto that list: the list drops kept probe rays that cross a sphere, and a lamp's reach would drop the room. Texels inside the reach still go due through the lamp-touch test.
 - The sun is not a region record. A small sun step is unchanged. A large sun step resets the quiet schedule through the static key.
@@ -91,11 +91,52 @@ Departures from [ADR 0013](../../adr/0013-lighting-invalidation-is-local.md) and
 - The region grid is the uniform `world_cell` (default 25 cm). It is not distance-doubled LOD and not 8×8 pages.
 - More than 64 change spheres wait. They do not expand into a full recompute. `still_frames` stays 0 while any sphere is waiting.
 - Shadow epochs no longer bump every lamp from a whole-world flag. A lamp still bumps when it changes or a change sphere meets its reach.
-- The design's `global` A/B mode is not kept. The hash that zeroed stillness for every mover is deleted.
+- `global` is the A/B mode (`--lighting-schedule global`). It pushes zeros. The hash that zeroed stillness for every mover stays deleted.
+
+## Budgeted refresh
+
+Presets use schedule mode `budget`. Each frame pushes the preset work caps, scaled by the controller and by `budget_scale`. High lighting is 8 ms, Medium 6, Low 4, Potato 1.5. The controller reads the retired `lighting_ms` when `--gi-metrics` is on. Over the cap the scale becomes `cap / ms`, down to 1/64. Under 75% of the cap it grows by 5% up to 1. It does not open the frame past the preset caps.
+
+Direct, à-trous, and trace gate to one centered tile rect when the grant is under the demand. À-trous also requires a change record. Ten percent of the grant is a band that steps down the picture. Outside the rect, a stored direct value and a finished probe hit or miss stay on screen. An empty slot still traces. The lighting images are the guard-band size. The picture is the crop. The eye does not move, and the band leads the turn.
+
+The shown lattice stays 12.5 cm (S57). In budget mode with world-cache mode 3, an empty cell can read or claim a parent at 25 cm, 50 cm, 1 m, 2 m, or 4 m. A finished cell does not take that path. One extra parent claim per empty read is charged to the spawn cap. The 25 cm seed claim is not. Cells at 2 m and 4 m also need a coarse slot (High 24 MB). The slot table is still 1,048,576 entries, about 368 MB.
+
+A frozen scene with grants that cover the picture does not gate, so the full denoise still runs and the picture can settle. The first moving frames can sit over the cap: the scale moves on the sample from the frame before.
+
+Probes: MCP `get_budgets`, `set_budgets`, `get_schedule_stats`, `lighting_lod_snapshot`, and `gi_metrics`. The Perf page rows are `schedule_stats` and `lod_snapshot`. `status.still_frames` and `status.change_records` stay the settle probes. `lighting_lod_snapshot` is the caps, not the live coarse count.
+
+Failure modes and the probe for each:
+
+- The scale sticks at 1/64. `get_budgets` field `controller_scale`. Recording on lavapipe, or a lighting total that stays over the cap, drives it there. Picture tests leave recording off.
+- A moving frame stays over the cap. `gi_metrics` `lighting_ms` p99 against `get_budgets.lighting_cap_ms`. The gate scripts in `debug/lighting/scripts/gates/` assert that. The 4070 at 1080p is the measurement. Lavapipe does not time it.
+- A gated pixel goes black. `get_schedule_stats` gates and tile rect. Direct reuses a stored pixel. Trace keeps a finished hit or miss. An empty direct slot still traces.
+- A waiting area flickers between empty and coarse. A finished cell (`v.w >= 0.5`) does not read its parent. `lighting_lod_snapshot` says whether levels are on.
+- Coarse cells fill the table. `lighting_lod_snapshot` `coarse_slots` is the cap. The live count is GPU word 15 and this probe does not read it.
+- A frozen scene never settles. `status.still_frames` and `a_frozen_scene_settles_and_keeps_its_light`. No change records and a covered grant leave the gates off.
+
+Tunables, all on `set_budgets`: `schedule`, `budget_scale`, `guard_edge`, `cache_loosen`, `floor_level`, `floor_converged`, `near_radius`.
+
+Networking:
+
+- Replicated state: none. The caps, the scale, the tile rect, and the level claims stay on the machine that shades.
+- Authority: the machine that shades the picture.
+- Prediction / rollback: none. A pixel that waits keeps its last finished value or a coarser parent.
+- Determinism: the same settings, scale, change-record count, frame index, and lit size produce the same push words. Which parent a cell claims depends on which slots are empty.
+- Headless server: `genos-lighting --headless` runs the same compute. A process that does not draw does not schedule.
+
+Departures from [ADR 0013](../../adr/0013-lighting-invalidation-is-local.md) and [design §16](localized-invalidation-design.md):
+
+- There is no GPU histogram. `select_refresh` is tested on the CPU and does not pick the GPU work. The screen gate is one rect.
+- The GPU does not merge a retiring fine entry into its parent, and it does not drop coarse cells farthest-first. A missing parent is claimed empty. Coarse cells leave on the expiry sweep after the slot cap.
+- High still runs 5 denoise iterations. The cap table's 3 is not applied. The rect is the cut.
+- The hash table stays about 368 MB, over the ~140 / 200 MB budget. The coarse cap limits 2 m and 4 m cells inside that table.
+- The controller is one scale on the lighting total. It moves one frame after the sample.
+- `lighting_lod_snapshot` does not read the live coarse occupancy.
+- The gate scripts check p99 against the preset cap. They do not check max ≤ cap × 1.1. `--report` is the script report directory. The unique metrics file is `<out>/gi/NAME.csv`, then `NAME-2.csv`.
 
 ## Deviations from the papers (summary)
 
-- Local change tracking (ADR 0013): UE5 virtual shadow maps raise a page's priority from caster bounds. This slice dirties the overlapping world-cache cells and keeps the stored value until the relight finishes. The rest of the departures are in the Local change tracking section.
+- Local change tracking and the budgeted frame (ADR 0013): UE5 virtual shadow maps raise a page's priority from caster bounds. Change records dirty the overlapping world-cache cells and keep the stored value until the relight finishes. The frame gates direct, à-trous, and trace, crops a guard band, and scales the caps from the recorded lighting total. The departures are in Local change tracking, Budgeted refresh, and design §16.
 
 - The MSME step follows Barré-Brisebois et al., Ray Tracing Gems ch. 25, `MultiscaleMeanEstimator.hlsl`. The firefly clamp (`0.1 + short mean + sigma * deviation`) is biased. `surface_cache.firefly_sigma` defaults to the listing's 8. Zero keeps the `0.1` floor. Variance is one scalar, not `float3`, weighted with the listing's Rec. 601 `(0.299, 0.587, 0.114)`. The hold path uses Rec. 709 `(0.2126, 0.7152, 0.0722)`, keeps its own clamp of 8, and does not read `surface_cache.firefly_sigma`. A newborn starts at short mean = long mean, inconsistency 1, vbbr 1, and variance `(0.15 * luma)^2`. The first 16 sets blend at most `1 / (n + 1)`. A mover raises the blend to at least 0.5; a lamp delta is capped at 0.9. `surface_cache.blend` forces estimator bit 20 and the hold bit (bit 30).
 - Mover cache entries store an object-local position and normal (`surface_cache.attach_movers`). A cache entry is one hashed surface patch. GIBS attaches every surfel. Static geometry and world probes stay on the world lattice.

@@ -1,6 +1,6 @@
 # Bounded lighting: world-cache reuse, fixed budgets, priority scheduling
 
-Status: **accepted** by Anthony Poschen, 26 Oct 2026. ADR: [0013](../../adr/0013-lighting-invalidation-is-local.md). Phase 0 records pass times and work counters and does not change the picture. The first code slice is local change tracking: change records dirty world-cache cells, and the full-frame drop is deleted. Section 5's priority scheduler, and phases P1 and P6 in the table below, are not that slice. Terms follow [`docs/lighting/GLOSSARY.md`](../../lighting/GLOSSARY.md).
+Status: **accepted** by Anthony Poschen, 26 Oct 2026. ADR: [0013](../../adr/0013-lighting-invalidation-is-local.md). Phase 0 records pass times and work counters. The frame now spends those caps: shader gates, a guard-band crop, a controller on the recorded lighting total, and 25 cm–4 m parents of the 12.5 cm lattice. Section 16 is what that code does and where it leaves this text. Terms follow [`docs/lighting/GLOSSARY.md`](../../lighting/GLOSSARY.md).
 
 Revision 2 follows Anthony's review of rev 1. Real play spins the camera while things move. A screen-tile design dirties most tiles on a turn, and its "> 40% dirty or camera cut → full recompute" fallback has no upper bound. Rev 2 therefore:
 - moves reuse into the persistent world-space surface light cache;
@@ -159,7 +159,7 @@ genos-lighting --headless --menu hidden --scene stress --checkpoint hall \
   --report genos-debug/gi/s1-spin
 ```
 
-The same command with `s2-strafe.rhai` through `s6-settle.rhai`. `--out DIR` moves the tree. `GENOS_GI_METRICS` applies only when `--gi-metrics` was omitted. Each script writes `<out>/gi/<name>.csv` (p50 and p99) and `<out>/gi/<name>-frames.csv`. The live window is `<out>/gi/frames.csv`. Lavapipe checks that the files appear. The millisecond calibration is the 4070, three runs.
+The same command with `s2-strafe.rhai` through `s6-settle.rhai`. `--out DIR` moves the tree. `GENOS_GI_METRICS` applies only when `--gi-metrics` was omitted. Each script writes `<out>/gi/<name>.csv` (p50 and p99) and `<out>/gi/<name>-frames.csv`. A second run of the same name writes `<name>-2.csv` and `<name>-2-frames.csv`. The live window `<out>/gi/frames.csv` is still replaced on reset. `--report` is the script report directory (`report.md`, `result.json`). A reused directory overwrites that report. It is not the metrics CSV. Each script checks that `lighting_ms` p99 is under `get_budgets.lighting_cap_ms`. Lavapipe checks that the files and the check compile. The millisecond result is the 4070, three runs.
 
 | scenario | script |
 |---|---|
@@ -263,3 +263,33 @@ Anthony Poschen approved these answers. Phase 0 does not implement the controlle
 3. Yes: an optional game-side importance hint (§6.4), through settings and MCP, in a later phase. Not phase 0.
 4. No: the coarse-layer cap stays fixed per preset (High 24 MB, Medium 16 MB, Low 8 MB). When the layer is full, evict the farthest coarse entries, then the least recently seen on a distance tie.
 5. Yes: cached shadow reuse is allowed on Low and Medium. Near-camera pixels are prioritised for fresh shadow rays. A pixel without a fresh ray reads the shadow cell cache. Mover shadow volumes (§5.2, S77B) still rank for torn edges when the scheduler lands.
+
+## 16. Code (26 Oct 2026)
+
+Presets set schedule mode to `budget`. `schedule_push` multiplies the §3 caps by the controller scale (at most 1) and by `budget_scale` (1/64 through 4). Global mode pushes zeros and stays on the display size.
+
+A pass gates when its grant is under its demand and the frame has a change record, or, for direct and trace, when the scale is below 1. The gate is one centered tile rect. Ten percent of that grant is a band that steps down the picture. À-trous gates only when a change record exists. Outside the rect, a direct pixel keeps a stored value, and a probe ray keeps a finished hit or a finished miss. An empty direct slot still traces. A cache ray past the grant does not run.
+
+The lighting targets are the guard-band size. The picture is the crop. The eye stays put, and the band leads the turn. High starts at 15% of the display on each edge.
+
+With `--gi-metrics`, the next frame reads the retired `lighting_ms` against that frame's cap. Over the cap, the scale becomes `cap / ms`, down to 1/64. Under 75% of the cap, the scale grows by 5% up to 1. Picture tests do not record, so a lavapipe timestamp does not pull the scale down.
+
+Budget mode with world-cache mode 3 walks five parents (25 cm, 50 cm, 1 m, 2 m, 4 m) when a 12.5 cm cell is empty. One extra missing parent may be claimed under the spawn cap. The existing 25 cm seed claim is not charged. Cells at 2 m and 4 m also take a coarse slot (High 24 MB at 368 bytes). A cell that already holds a finished value does not read the parent. The slot table stays 1,048,576 entries.
+
+Departures from this design:
+
+- §5.2's GPU histogram is not built. `select_refresh` is the tested CPU order. It does not pick GPU work. The screen gate is one rect, taken from direct, then à-trous, then trace.
+- §5.1's irradiance change, shadow-caster volumes, and bounce reach are not inputs. The gate sees the change-record count.
+- §6.1's projected-pixel target does not pick a level. The shown lattice stays 12.5 cm (S57). Coarser sizes are parents of that key.
+- §6.4's area-weighted merge is the CPU function `merge_into_parent`. The GPU claims a missing parent empty. `should_remove_level` does not run on the GPU. A fine cell is not dropped because it left the view. Coarse cells leave on the expiry sweep once the live coarse count is over the slot cap, not farthest-first.
+- §6.5 does not seed a new fine cell from the parent's mean, and there is no level blend.
+- The denoise row's iteration counts are not applied. High still runs 5 iterations. The rect is the cut.
+- §12's ~140 MB figure is missed. The hash table stays about 368 MB. The coarse cap only limits how many 2 m and 4 m cells stay inside that table.
+- A cell larger than 0.2 m shares the world-radiance refresh lists, so a new 1 m, 2 m, or 4 m cell competes with those refreshes.
+- The spawn counter is cleared on the graphics queue. An overlapping world-cache submission can claim about twice in one frame.
+- `lighting_lod_snapshot` reports the caps. It does not read the live coarse count.
+- The controller is one scale on the lighting total, not a scale per pass. It moves on the frame after the sample, so the first moving frames can sit over the cap.
+- The gate scripts assert p99 under the preset cap. They do not assert max ≤ cap × 1.1, and they do not count rays against the caps. Lavapipe cannot show the 8 ms cap.
+- `--report` is the script report directory. The unique file is `<out>/gi/NAME.csv`, then `NAME-2.csv`.
+- §11's `priority`, `age`, `lod`, `budget`, and `coarsen` views are not built. The probes are `get_budgets`, `set_budgets`, `get_schedule_stats`, and `lighting_lod_snapshot`, plus the Perf rows `schedule_stats` and `lod_snapshot`.
+- The phase table above is the original cut. This change lands the screen gates, the guard crop, the controller, and the parent levels together.

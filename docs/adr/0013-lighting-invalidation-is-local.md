@@ -34,4 +34,6 @@ Finished values only, blended once. Stored light never depends on the camera (AD
 
 Local change tracking is in the engine. Movers and point lamps emit change records. Those records dirty world-cache cells (swept bounds, lamp reach). The global full-frame drop is deleted. There is no full recompute fallback.
 
-Not in this slice: the priority scheduler, per-pass work caps, cache LOD, and `--lighting-schedule`. Screen passes still run while a change record is in flight. The departures are listed in `docs/systems/lighting/README.md` under Local change tracking.
+The budgeted frame is in the engine as well. Presets use `--lighting-schedule budget`. Work caps, a controller on the recorded lighting total, a guard-band crop, and shader gates for direct, à-trous, and trace are pushed each frame. Empty cells can read or claim a parent from 25 cm through 4 m. `global` pushes zeros.
+
+The GPU does not build the §5.2 histogram, does not merge a retiring fine entry into its parent, and does not evict coarse cells farthest-first. The hash table stays about 368 MB, over the ~200 MB budget. The departures are in the lighting record under Budgeted refresh and in design §16.
