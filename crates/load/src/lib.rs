@@ -46,8 +46,8 @@ pub use png::Image;
 pub use shade::{shade_sets, shade_uv, ShadeSample};
 pub use source::{ByteSource, FileSource, MemorySource};
 pub use stream::{
-    gate_rows, texel_rho, wanted_mip, BusMeter, Derivatives, GateRows, Sampled, Streamer,
-    TextureView, DEFAULT_DWELL, EVICT_LEVELS, EVICT_PER_FRAME,
+    gate_rows, texel_rho, wanted_mip, BusMeter, Derivatives, GateRows, PendingCopy, Sampled,
+    Streamer, TextureView, DEFAULT_DWELL, EVICT_LEVELS, EVICT_PER_FRAME,
 };
 pub use vram::{
     headroom_bytes, is_device_oom, retry_device_alloc, AllocError, Budget as VramBudget, Headroom,

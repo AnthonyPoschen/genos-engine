@@ -2,6 +2,7 @@ mod aa;
 mod budget;
 mod gltf_draw;
 mod gpu;
+mod material_stream;
 #[cfg(test)]
 mod lamp_pick;
 mod mesh;

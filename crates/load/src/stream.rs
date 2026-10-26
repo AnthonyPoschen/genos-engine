@@ -129,6 +129,14 @@ struct Pending {
     submitted: u64,
 }
 
+/// One mip the transfer queue should copy this submit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingCopy {
+    pub index: usize,
+    pub level: u32,
+    pub bytes: u64,
+}
+
 /// Faults a broken reader turns on, one scenario at a time.
 #[derive(Clone, Copy, Debug, Default)]
 struct Faults {
@@ -218,6 +226,62 @@ impl Streamer {
     #[must_use]
     pub fn inflight_bytes(&self) -> u64 {
         self.pending.iter().map(|pending| pending.bytes).sum()
+    }
+
+    /// Drop every texture. The meter and the counters stay.
+    pub fn clear(&mut self) {
+        self.textures.clear();
+        self.pending.clear();
+        self.committed = 0;
+    }
+
+    #[must_use]
+    pub fn texture_count(&self) -> usize {
+        self.textures.len()
+    }
+
+    #[must_use]
+    pub fn level_count(&self, index: usize) -> u32 {
+        self.textures.get(index).map_or(0, |tex| {
+            u32::try_from(tex.levels.len()).unwrap_or(0)
+        })
+    }
+
+    /// True when the mip is sampled. An in-flight page is not.
+    #[must_use]
+    pub fn is_resident(&self, index: usize, level: u32) -> bool {
+        let Some(slot) = usize::try_from(level).ok() else {
+            return false;
+        };
+        self.textures
+            .get(index)
+            .and_then(|tex| tex.levels.get(slot))
+            .is_some_and(|mip| mip.resident && !mip.inflight)
+    }
+
+    /// True when the mip occupies device memory: resident or in flight.
+    #[must_use]
+    pub fn holds_memory(&self, index: usize, level: u32) -> bool {
+        let Some(slot) = usize::try_from(level).ok() else {
+            return false;
+        };
+        self.textures
+            .get(index)
+            .and_then(|tex| tex.levels.get(slot))
+            .is_some_and(|mip| mip.resident || mip.inflight)
+    }
+
+    /// Pages the transfer queue still has to copy.
+    #[must_use]
+    pub fn pending_copies(&self) -> Vec<PendingCopy> {
+        self.pending
+            .iter()
+            .map(|pending| PendingCopy {
+                index: pending.index,
+                level: pending.level,
+                bytes: pending.bytes,
+            })
+            .collect()
     }
 
     /// `level_bytes` is finest first, down to the 1×1 mip.
@@ -381,7 +445,7 @@ impl Streamer {
                 true
             }
         });
-        for (index, level, bytes) in done {
+        for (index, level, _bytes) in done {
             let Some(tex) = self.textures.get_mut(index) else {
                 continue;
             };
@@ -394,7 +458,6 @@ impl Streamer {
             if mip.evicted_at != u64::MAX && frame.saturating_sub(mip.evicted_at) < dwell {
                 self.thrash = self.thrash.saturating_add(1);
             }
-            self.meter.observe_transfer(bytes, 1);
         }
     }
 
