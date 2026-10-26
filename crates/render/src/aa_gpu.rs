@@ -414,7 +414,7 @@ impl Gpu {
                 (self.fns.cmd_draw)(self.cmd, draw.count, 1, draw.first, draw.instance);
             }
             if overlay && self.overlay_count > 0 && !self.overlay_pipeline.is_null() {
-                self.draw_overlay_quads(width, height);
+                self.draw_overlay_quads(0.0, 0.0, width as f32, height as f32);
             }
             (self.fns.cmd_end_rp)(self.cmd);
         }
@@ -454,8 +454,8 @@ impl Gpu {
             area: Rect {
                 offset: Offset { x: 0, y: 0 },
                 extent: Extent {
-                    w: self.extent_w,
-                    h: self.extent_h,
+                    w: self.picture_size().0,
+                    h: self.picture_size().1,
                 },
             },
             clear_count: 0,
@@ -463,19 +463,24 @@ impl Gpu {
         };
         unsafe {
             (self.fns.cmd_begin_rp)(self.cmd, &rp as *const RpBegin as *const u8, 0);
-            self.draw_overlay_quads(self.extent_w, self.extent_h);
+            self.draw_overlay_quads(
+                self.crop_x as f32,
+                self.crop_y as f32,
+                self.extent_w as f32,
+                self.extent_h as f32,
+            );
             (self.fns.cmd_end_rp)(self.cmd);
         }
     }
 
-    fn draw_overlay_quads(&self, width: u32, height: u32) {
+    fn draw_overlay_quads(&self, x: f32, y: f32, width: f32, height: f32) {
         unsafe {
             (self.fns.cmd_bind_pipe)(self.cmd, 0, self.overlay_pipeline);
-            let viewport = [0.0f32, 0.0, width as f32, height as f32, 0.0, 1.0];
+            let viewport = [x, y, width, height, 0.0, 1.0];
             (self.fns.cmd_viewport)(self.cmd, 0, 1, viewport.as_ptr());
-            let scissor = [0i32, 0, width as i32, height as i32];
+            let scissor = [x as i32, y as i32, width as i32, height as i32];
             (self.fns.cmd_scissor)(self.cmd, 0, 1, scissor.as_ptr());
-            let ortho = pixel_matrix(width as f32, height as f32);
+            let ortho = pixel_matrix(width, height);
             (self.fns.cmd_push)(
                 self.cmd,
                 self.layout,
@@ -500,6 +505,8 @@ impl Gpu {
             self.extent_w,
             self.extent_h,
             true,
+            self.crop_x as i32,
+            self.crop_y as i32,
         );
         self.buffer_barrier(self.aa_src[slot].buffer, 0x1000, 0x800, 0x1000, 0x20);
         self.dispatch_aa(
@@ -518,6 +525,8 @@ impl Gpu {
             self.extent_w,
             self.extent_h,
             false,
+            self.crop_x as i32,
+            self.crop_y as i32,
         );
         self.image_barrier(image, 7, 6, 0x1000, 0x1000, 0x1000, 0x800);
         self.color_layout[slot] = 6;
@@ -599,6 +608,8 @@ impl Gpu {
         w: u32,
         h: u32,
         to_buffer: bool,
+        origin_x: i32,
+        origin_y: i32,
     ) {
         #[repr(C)]
         #[derive(Clone, Copy)]
@@ -639,7 +650,11 @@ impl Gpu {
                 layer: 0,
                 count: 1,
             },
-            image_offset: Offset { x: 0, y: 0, z: 0 },
+            image_offset: Offset {
+                x: origin_x,
+                y: origin_y,
+                z: 0,
+            },
             extent: Extent { w, h, d: 1 },
         };
         unsafe {

@@ -292,6 +292,9 @@ pub(crate) struct Lighting {
     lit: crate::lighting_schedule::LitFrame,
     /// Probe tile used to size that picture. Zero uses the height rule.
     sched_tile: u32,
+    cam_yaw: f32,
+    cam_pitch: f32,
+    cam_pose_set: bool,
     /// Gates and caps pushed with this frame.
     last_schedule: crate::lighting_schedule::SchedulePush,
     /// Control block uploaded with the frame, reused by the async queue.
@@ -488,6 +491,9 @@ impl Default for Lighting {
                 bottom: 0.0,
             },
             sched_tile: 0,
+            cam_yaw: 0.0,
+            cam_pitch: 0.0,
+            cam_pose_set: false,
             last_schedule: crate::lighting_schedule::SchedulePush::default(),
             ctrl_bytes: [0; 64],
         }
@@ -903,10 +909,12 @@ impl Gpu {
         self.wait_all_inflight()?;
         self.wait_lighting_world();
         self.poll_lighting_world();
-        let (w, h) = (self.extent_w.max(1), self.extent_h.max(1));
+        let (w, h) = self.picture_size();
         let settings = self.lighting.settings.clone();
-        let tile = if settings.probes.tile == 0 {
-            lighting_tile(h)
+        let tile = if self.lighting.sched_tile != 0 {
+            self.lighting.sched_tile
+        } else if settings.probes.tile == 0 {
+            lighting_tile(self.extent_h.max(1))
         } else {
             settings.probes.tile
         };
@@ -1365,9 +1373,8 @@ impl Gpu {
 
     /// The lighting runs this frame: built and sized for the picture.
     fn lighting_active(&self) -> bool {
-        self.lighting.ready
-            && self.lighting.dims[0] == self.extent_w
-            && self.lighting.dims[1] == self.extent_h
+        let (w, h) = self.picture_size();
+        self.lighting.ready && self.lighting.dims[0] == w && self.lighting.dims[1] == h
     }
 
     /// Before the raster: the G-buffer size header, and the last frame's passes done
@@ -1996,6 +2003,115 @@ impl Gpu {
         Some(out)
     }
 
+    /// Frustum margins of the prepared lit picture. Zero is the displayed camera.
+    fn lit_guard(&self) -> GuardFrustum {
+        let lit = self.lighting.lit;
+        GuardFrustum {
+            left: lit.left,
+            right: lit.right,
+            top: lit.top,
+            bottom: lit.bottom,
+        }
+    }
+
+    /// Grow the colour target to the guard band and remember the crop.
+    /// The swapchain and the host buffer stay at the display size.
+    fn prepare_lit_frame(&mut self, camera: &Camera, scene: &genos_scene::Scene) -> Result<(), String> {
+        let mut desired = self
+            .lighting
+            .override_settings
+            .clone()
+            .unwrap_or_else(|| scene.lighting.clone());
+        desired.apply_env();
+        desired.sanitize();
+        let (yaw_delta, pitch_delta) = if self.lighting.cam_pose_set {
+            (
+                camera.yaw - self.lighting.cam_yaw,
+                camera.pitch - self.lighting.cam_pitch,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        self.lighting.cam_yaw = camera.yaw;
+        self.lighting.cam_pitch = camera.pitch;
+        self.lighting.cam_pose_set = true;
+        let tile = if desired.probes.tile == 0 {
+            lighting_tile(self.extent_h.max(1))
+        } else {
+            desired.probes.tile
+        };
+        self.lighting.sched_tile = tile.max(1);
+        let lit = if self.lighting.ready {
+            crate::lighting_schedule::lit_target(
+                &desired,
+                self.extent_w.max(1),
+                self.extent_h.max(1),
+                self.lighting.sched_tile,
+                yaw_delta,
+                pitch_delta,
+            )
+        } else {
+            crate::lighting_schedule::lit_frame(
+                self.extent_w.max(1),
+                self.extent_h.max(1),
+                crate::lighting_schedule::GuardEdges {
+                    left: 0.0,
+                    right: 0.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                },
+                self.lighting.sched_tile,
+            )
+        };
+        self.resize_lit_color(lit.lit_w, lit.lit_h)?;
+        self.crop_x = lit.crop_x;
+        self.crop_y = lit.crop_y;
+        self.lighting.lit = lit;
+        Ok(())
+    }
+
+    fn resize_lit_color(&mut self, lit_w: u32, lit_h: u32) -> Result<(), String> {
+        if lit_w == 0 || lit_h == 0 {
+            return Ok(());
+        }
+        if self.lit_w == lit_w && self.lit_h == lit_h && !self.colors[0].image.is_null() {
+            return Ok(());
+        }
+        if self.render_pass.is_null() {
+            self.lit_w = lit_w;
+            self.lit_h = lit_h;
+            return Ok(());
+        }
+        self.wait_all_inflight()?;
+        for slot in 0..2 {
+            unsafe {
+                if !self.framebuffers[slot].is_null() {
+                    (self.fns.destroy_framebuffer)(self.device, self.framebuffers[slot], std::ptr::null());
+                    self.framebuffers[slot] = std::ptr::null_mut();
+                }
+            }
+            let mut color = std::mem::replace(&mut self.colors[slot], Image::empty());
+            let mut depth = std::mem::replace(&mut self.depths[slot], Image::empty());
+            self.destroy_image(&mut color);
+            self.destroy_image(&mut depth);
+            self.colors[slot] = self.make_image(self.format, 0x10 | 0x4 | 0x1 | 0x2, 1, lit_w, lit_h)?;
+            self.depths[slot] = self.make_image(126, 0x20, 2, lit_w, lit_h)?;
+            self.color = copy_image(&self.colors[slot]);
+            self.depth = copy_image(&self.depths[slot]);
+            self.framebuffers[slot] = self.make_framebuffer_for(
+                self.render_pass,
+                &[self.color.view, self.depth.view],
+                lit_w,
+                lit_h,
+            )?;
+            self.color_layout[slot] = 0;
+        }
+        self.lit_w = lit_w;
+        self.lit_h = lit_h;
+        self.bind_flight();
+        Ok(())
+    }
+
     /// After the raster: the passes, then the result into the colour image.
     /// Copy the scene (or the override), apply env locks, and rebuild buffers
     /// when a size knob changed.
@@ -2010,7 +2126,8 @@ impl Gpu {
         let debug = scene.debug.effective(self.out_cli.as_deref());
         self.debug_out = debug.out;
         let key = lighting_alloc_key(&desired);
-        let resized = self.lighting.dims[0] != self.extent_w || self.lighting.dims[1] != self.extent_h;
+        let (picture_w, picture_h) = self.picture_size();
+        let resized = self.lighting.dims[0] != picture_w || self.lighting.dims[1] != picture_h;
         let rebuild = key != self.lighting.alloc_key || resized;
         self.lighting.settings = desired;
         self.lighting.sun_height = sun_height(scene);
@@ -2424,7 +2541,7 @@ impl Gpu {
         // The raster colour as the base: pixels with no surface keep it. A held
         // frame keeps last frame's picture in the buffer instead.
         if compose_full {
-            self.copy_image_buffer(image, 6, self.lighting.out.buffer, w, h, true);
+            self.copy_image_buffer(image, 6, self.lighting.out.buffer, w, h, true, 0, 0);
         }
         self.memory_barrier(0x80 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
         let set = self.lighting.sets[slot];
@@ -2751,7 +2868,7 @@ impl Gpu {
             self.lighting.compose_valid = true;
         }
         self.image_barrier(image, 6, 7, 0x1000, 0x1000, 0x800, 0x1000);
-        self.copy_image_buffer(image, 7, self.lighting.out.buffer, w, h, false);
+        self.copy_image_buffer(image, 7, self.lighting.out.buffer, w, h, false, 0, 0);
         self.image_barrier(image, 7, 6, 0x1000, 0x1000 | 0x800, 0x1000, 0x800 | 0x20);
         // S78W: the frame's stats to the host-visible copy (read a frame later).
         self.memory_barrier(0x800 | 0x1000, 0x1000, 0x40 | 0x800, 0x800);

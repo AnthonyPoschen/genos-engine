@@ -46,7 +46,7 @@ use std::ffi::c_void;
 use std::os::raw::c_char;
 use std::time::{Duration, Instant};
 
-use genos_scene::{view_proj, Camera};
+use genos_scene::{view_proj, view_proj_guard, Camera, GuardFrustum};
 
 use crate::aa::Antialias;
 use crate::budget::FrameMemory;
@@ -339,8 +339,9 @@ impl Renderer {
         wireframe: bool,
     ) -> Result<Option<Vec<u8>>, String> {
         self.gpu.sync_materials(world)?;
+        self.gpu.prepare_lit_frame(camera, &world.scene)?;
         let aspect = self.width as f32 / self.height.max(1) as f32;
-        let matrix = view_proj(camera, aspect);
+        let matrix = view_proj_guard(camera, aspect, self.gpu.lit_guard());
         let eye = [camera.position.x, camera.position.y, camera.position.z];
         self.memory.begin_frame();
         self.shapes.begin_frame();
@@ -787,6 +788,12 @@ struct Gpu {
     format: i32,
     extent_w: u32,
     extent_h: u32,
+    /// Lit picture. The swapchain and the host readback stay at `extent_*`.
+    /// Equal to the display until a guard band is prepared.
+    lit_w: u32,
+    lit_h: u32,
+    crop_x: u32,
+    crop_y: u32,
     /// Swapchain present mode: 0 immediate, 1 mailbox, 2 FIFO.
     present_mode: i32,
     swap_images: Vec<Handle>,
@@ -1463,6 +1470,10 @@ impl Gpu {
                 format: 44,
                 extent_w: width.max(1),
                 extent_h: height.max(1),
+                lit_w: width.max(1),
+                lit_h: height.max(1),
+                crop_x: 0,
+                crop_y: 0,
                 present_mode: 2,
                 swap_images: Vec::new(),
                 color: Image::empty(),
@@ -1786,6 +1797,22 @@ impl Gpu {
                 self.extent_w = width.max(1);
                 self.extent_h = height.max(1);
             }
+            self.lit_w = self.extent_w;
+            self.lit_h = self.extent_h;
+            self.crop_x = 0;
+            self.crop_y = 0;
+            self.lighting.lit = crate::lighting_schedule::LitFrame {
+                lit_w: 0,
+                lit_h: 0,
+                crop_x: 0,
+                crop_y: 0,
+                display_w: 0,
+                display_h: 0,
+                left: 0.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            };
             let mut format_count = 0u32;
             check(
                 (self.fns.surface_formats)(
@@ -2156,10 +2183,11 @@ impl Gpu {
                     self.lighting_begin(slot);
                 }
                 self.frame_stamp(slot, FrameStamp::Setup);
+                let (picture_w, picture_h) = self.picture_size();
                 self.raster_scene(
                     self.framebuffer,
-                    self.extent_w,
-                    self.extent_h,
+                    picture_w,
+                    picture_h,
                     matrix,
                     !filtering && !lighting,
                 );
@@ -4834,7 +4862,16 @@ impl Gpu {
 
     fn make_framebuffer(&self) -> Result<Handle, String> {
         let views = [self.color.view, self.depth.view];
-        self.make_framebuffer_for(self.render_pass, &views, self.extent_w, self.extent_h)
+        let (w, h) = self.picture_size();
+        self.make_framebuffer_for(self.render_pass, &views, w, h)
+    }
+
+    fn picture_size(&self) -> (u32, u32) {
+        if self.lit_w == 0 || self.lit_h == 0 {
+            (self.extent_w.max(1), self.extent_h.max(1))
+        } else {
+            (self.lit_w, self.lit_h)
+        }
     }
 
     fn make_framebuffer_for(
@@ -5134,7 +5171,11 @@ impl Gpu {
         };
         let region = Region {
             src_layers: layers,
-            src_offset: Offset { x: 0, y: 0, z: 0 },
+            src_offset: Offset {
+                x: self.crop_x as i32,
+                y: self.crop_y as i32,
+                z: 0,
+            },
             dst_layers: layers,
             dst_offset: Offset { x: 0, y: 0, z: 0 },
             extent: Extent {
@@ -5195,7 +5236,11 @@ impl Gpu {
                 layer: 0,
                 count: 1,
             },
-            image_offset: Offset { x: 0, y: 0, z: 0 },
+            image_offset: Offset {
+                x: self.crop_x as i32,
+                y: self.crop_y as i32,
+                z: 0,
+            },
             extent: Extent {
                 w: self.extent_w,
                 h: self.extent_h,
