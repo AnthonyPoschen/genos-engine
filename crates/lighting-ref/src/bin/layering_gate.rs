@@ -112,6 +112,7 @@ Exit 0 when no row is FAIL. Exit 1 when a row is FAIL. NOT-IMPLEMENTED does
 not fail the process. Exit 2 is a bad argument, a write error, or
 UNSETTLED-CAPTURE (the pre-toggle frames never sat within 0.05 of the on
 image for four frames). UNSETTLED-CAPTURE is printed alone and is not a FAIL.
+An endpoint trace whose logged noise is above 0.025 is rejected the same way.
 --capture writes baseline.json. Layer rows stay NOT-IMPLEMENTED.
 Settle, fade, and dim stay NOT-IMPLEMENTED unless weights.txt and both
 expected images are present. The expected image is the path-traced or

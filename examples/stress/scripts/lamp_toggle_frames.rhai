@@ -41,9 +41,9 @@ let trace = #{
     width: 320,
     height: 180,
     spp: 4,
-    max_spp: 16,
-    seconds: 40,
-    noise: 0.05,
+    max_spp: 1024,
+    seconds: 600,
+    noise: 0.025,
     bounces: 3
 };
 trace.prefix = "expected-off";

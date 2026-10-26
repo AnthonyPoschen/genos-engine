@@ -57,6 +57,9 @@ pub const FINISHED_LIMIT: u32 = 0;
 /// Printed, and the process exits 2, when the lit frames never sit on the on image.
 pub const UNSETTLED_CAPTURE: &str = "UNSETTLED-CAPTURE";
 
+/// An endpoint path trace louder than this is not a grade. Mean relative noise.
+pub const TRACE_NOISE_LIMIT: f64 = 0.025;
+
 const HOLD_FRAMES: usize = 4;
 const READ_EPS: f64 = 1.0e-3;
 const TILE: u32 = 8;
@@ -273,6 +276,7 @@ pub fn evaluate_capture(dir: &Path) -> Result<Report, String> {
                 ));
             }
             let expected = images_at(&weights, &on, &off)?;
+            reject_endpoint_noise(&frame_dir)?;
             picture_metrics(&frames, &expected)?
         }
         (None, None) => frames_only(&frames)?,
@@ -1047,6 +1051,43 @@ fn load_weights(frame_dir: &Path) -> Result<Option<Vec<f32>>, String> {
     Ok(Some(weights))
 }
 
+/// `report.md` logs `off trace ... noise N` and `on trace ... noise N`.
+/// A missing report is not a trace. A logged noise above [`TRACE_NOISE_LIMIT`]
+/// refuses the grade.
+fn reject_endpoint_noise(frame_dir: &Path) -> Result<(), String> {
+    let Some(path) = find_file(frame_dir, "report.md") else {
+        return Ok(());
+    };
+    let text = fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+    for which in ["off", "on"] {
+        let Some(noise) = logged_trace_noise(&text, which) else {
+            continue;
+        };
+        if !noise.is_finite() || noise > TRACE_NOISE_LIMIT {
+            return Err(format!(
+                "{which} endpoint trace noise {noise:.4} is above {TRACE_NOISE_LIMIT:.3}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn logged_trace_noise(text: &str, which: &str) -> Option<f64> {
+    let needle = format!("{which} trace ");
+    for line in text.lines() {
+        let Some(at) = line.find(&needle) else {
+            continue;
+        };
+        let rest = &line[at + needle.len()..];
+        let Some(noise_at) = rest.find("noise ") else {
+            continue;
+        };
+        let token = rest[noise_at + "noise ".len()..].split_whitespace().next()?;
+        return token.parse().ok();
+    }
+    None
+}
+
 fn load_endpoints(frame_dir: &Path) -> Result<Option<(Picture, Picture)>, String> {
     let on = find_named(frame_dir, &["expected-on.png", "expected-on-reference.png"]);
     let off = find_named(
@@ -1341,5 +1382,43 @@ mod tests {
         frames.extend(expected[8..].iter().cloned());
         let err = picture_metrics(&frames, &expected).unwrap_err();
         assert_eq!(err, super::UNSETTLED_CAPTURE);
+    }
+
+    #[test]
+    fn an_endpoint_trace_louder_than_0_025_is_rejected() {
+        let dir =
+            std::env::temp_dir().join(format!("genos-layering-cap-noise-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let frames = dir.join("frames");
+        std::fs::create_dir_all(&frames).unwrap();
+        let on = grey(0.4);
+        let off = grey(0.2);
+        let weights = [1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let expected = images_at(&weights, &on, &off).unwrap();
+        for (index, frame) in expected.iter().enumerate() {
+            frame
+                .save_png(&frames.join(format!("frame-{index:04}.png")))
+                .unwrap();
+        }
+        on.save_png(&dir.join("expected-on.png")).unwrap();
+        off.save_png(&dir.join("expected-off.png")).unwrap();
+        std::fs::write(dir.join("weights.txt"), "1\n0\n0\n0\n0\n0\n").unwrap();
+        std::fs::write(
+            dir.join("report.md"),
+            "- off trace spp 16 noise 0.030 seconds 1.0\n- on trace spp 16 noise 0.010 seconds 1.0\n",
+        )
+        .unwrap();
+        let err = evaluate_capture(&dir).unwrap_err();
+        assert!(err.contains("off endpoint trace noise 0.0300"), "{err}");
+        assert!(err.contains("above 0.025"), "{err}");
+
+        std::fs::write(
+            dir.join("report.md"),
+            "- off trace spp 64 noise 0.025 seconds 1.0\n- on trace spp 64 noise 0.020 seconds 1.0\n",
+        )
+        .unwrap();
+        let report = evaluate_capture(&dir).expect("noise at the line is a grade");
+        assert_eq!(report.exit_code(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
