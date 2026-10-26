@@ -1,0 +1,17 @@
+[package]
+name = "genos-fog-check"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Headless metric harness for fog. No window and no Vulkan."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "fog-check"
+path = "src/main.rs"
+
+[dependencies]
+genos-lighting-ref = { path = "../lighting-ref" }
+genos-math = { path = "../math" }
