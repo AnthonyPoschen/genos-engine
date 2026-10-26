@@ -93,6 +93,10 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --lighting-schedule budget|global
                          work caps, or the uncapped frame. GENOS_LIGHTING_SCHEDULE
                          applies only when this argument is omitted
+  --lighting-controller on|off
+                         scale the work caps from the retired lighting total.
+                         Off holds the preset caps. Default on.
+                         GENOS_LIGHTING_CONTROLLER applies only when this is omitted
   --lighting-budget-scale F
                          multiply every work cap, from 1/64 to 4.
                          GENOS_LIGHTING_BUDGET_SCALE applies only when this is omitted
@@ -1781,6 +1785,7 @@ fn menu_label(name: &str, fallback: &str) -> String {
         "lighting_direct_refresh" => "Direct refresh frames",
         "lighting_gi_refresh" => "GI refresh frames",
         "lighting_budget_shift" => "Ray budget shift",
+        "lighting_controller" => "Work-cap controller",
         "lighting_lamp_pick" => "Lamp pick",
         "lighting_lamp_pick_samples" => "Samples",
         "lighting_lamp_pick_candidates" => "Candidates",
@@ -2663,9 +2668,11 @@ mod tests {
         assert!(super::USAGE.contains("--script"));
         assert!(super::USAGE.contains("GENOS_GI_METRICS"));
         assert!(super::USAGE.contains("--lighting-schedule"));
+        assert!(super::USAGE.contains("--lighting-controller"));
         assert!(super::USAGE.contains("--lighting-budget-scale"));
         assert!(super::USAGE.contains("--guard-edge"));
         assert!(super::USAGE.contains("GENOS_LIGHTING_SCHEDULE"));
+        assert!(super::USAGE.contains("GENOS_LIGHTING_CONTROLLER"));
         assert!(super::USAGE.contains("GENOS_LIGHTING_BUDGET_SCALE"));
         assert!(super::USAGE.contains("GENOS_LIGHTING_GUARD_EDGE"));
     }

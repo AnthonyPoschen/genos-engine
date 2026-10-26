@@ -37,8 +37,14 @@ fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
     (guard, window, renderer)
 }
 
+/// Picture checks hold the work-cap controller off. Play leaves it on.
+fn present(mut scene: Scene) -> World {
+    scene.lighting.controller = false;
+    World::from_scene(scene)
+}
+
 fn room(settings: LightingSettings) -> World {
-    World::from_scene(Scene {
+    present(Scene {
         floor: Floor {
             position: Vec3::ZERO,
             half_x: 8.0,
@@ -460,7 +466,7 @@ fn box_at(x: f32, z: f32, color: [f32; 3]) -> Solid {
 /// Closed hangar so the mean is the interior, not the sky. Red and green boxes
 /// sit in front of the camera.
 fn interior(settings: LightingSettings) -> World {
-    World::from_scene(Scene {
+    present(Scene {
         floor: Floor {
             position: Vec3::ZERO,
             half_x: 4.0,
@@ -775,7 +781,7 @@ fn bounce_counts_brighten_the_shadow_and_skip_work() {
 }
 
 fn shadow_corner(settings: LightingSettings) -> World {
-    World::from_scene(Scene {
+    present(Scene {
         floor: Floor {
             position: Vec3::ZERO,
             half_x: 4.0,

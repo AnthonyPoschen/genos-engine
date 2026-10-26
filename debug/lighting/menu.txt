@@ -57,6 +57,7 @@ Perf | - | - | open | fps
 Perf | - | - | open | stall
 Perf | - | - | open | gi_passes
 Perf | - | - | open | gi_work
+Perf | - | - | open | lighting_controller
 Perf | - | - | open | schedule_stats
 Perf | - | - | open | lod_snapshot
 Perf | - | - | open | menu_wheel

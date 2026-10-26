@@ -95,7 +95,7 @@ Departures from [ADR 0013](../../adr/0013-lighting-invalidation-is-local.md) and
 
 ## Budgeted refresh
 
-Presets use schedule mode `budget`. Each frame pushes the preset work caps, scaled by the controller and by `budget_scale`. High lighting is 8 ms, Medium 6, Low 4, Potato 1.5. The controller reads the retired `lighting_ms` on every budgeted frame that has timestamp queries. `--gi-metrics` records that total; it does not gate the controller. Over the cap the scale becomes `cap / ms`, down to 1/64. Under 75% of the cap it grows by 5% up to 1. It does not open the frame past the preset caps.
+Presets use schedule mode `budget`. Each frame pushes the preset work caps, scaled by the controller and by `budget_scale`. High lighting is 8 ms, Medium 6, Low 4, Potato 1.5. With `controller` on, the controller reads the retired `lighting_ms` on every budgeted frame that has timestamp queries. Off holds the preset caps (`budget_scale` still multiplies them). `--lighting-controller` wins over `GENOS_LIGHTING_CONTROLLER`. `--gi-metrics` records that total; it does not gate the controller. Over the cap the scale becomes `cap / ms`, down to 1/64. Under 75% of the cap it grows by 5% up to 1. It does not open the frame past the preset caps.
 
 Direct, à-trous, and trace gate to one tile rect centered on the display when the grant is under the demand. `select_refresh` chooses that count: the display first, then the guard toward the turn, then refinement. A picked turn-side tile grows the rect that way. À-trous also requires a change record. Ten percent of the grant is a band that steps down the picture. Outside the rect, a stored direct value and a finished probe hit or miss stay on screen. An empty slot still traces. The lighting images are the guard-band size. The picture is the crop. The eye does not move, and the band leads the turn. Probe picks and lamp-pick history project the displayed camera through that crop into the lit image.
 
@@ -107,14 +107,14 @@ Probes: MCP `get_budgets`, `set_budgets`, `get_schedule_stats`, `lighting_lod_sn
 
 Failure modes and the probe for each:
 
-- The scale sticks at 1/64. `get_budgets` field `controller_scale`. A lighting total that stays over the cap drives it there. On lavapipe that is the third draw, when the first flight slot is read back. `schedule=global` keeps the preset caps.
+- The scale sticks at 1/64. `get_budgets` field `controller_scale`. A lighting total that stays over the cap drives it there. On lavapipe that is the third draw, when the first flight slot is read back. `controller=off` or `schedule=global` keeps the preset caps. `get_budgets.controller` is the switch.
 - A moving frame stays over the cap. `gi_metrics` `lighting_ms` p99 against `get_budgets.lighting_cap_ms`. The gate scripts in `debug/lighting/scripts/gates/` assert that. The 4070 at 1080p is the measurement. Lavapipe does not time it.
 - A gated pixel goes black. `get_schedule_stats` gates and tile rect. Direct reuses a stored pixel. Trace keeps a finished hit or miss. An empty direct slot still traces.
 - A waiting area flickers between empty and coarse. A finished cell (`v.w >= 0.5`) does not read its parent. `lighting_lod_snapshot` says whether levels are on.
 - Coarse cells fill the table. `lighting_lod_snapshot` `coarse_slots` is the cap. The live count is GPU word 15 and this probe does not read it.
 - A frozen scene never settles. `status.still_frames` and `a_frozen_scene_settles_and_keeps_its_light`. No change records and a covered grant leave the gates off.
 
-Tunables, all on `set_budgets`: `schedule`, `budget_scale`, `guard_edge`, `cache_loosen`, `floor_level`, `floor_converged`, `near_radius`.
+Tunables, all on `set_budgets`: `schedule`, `controller`, `budget_scale`, `guard_edge`, `cache_loosen`, `floor_level`, `floor_converged`, `near_radius`.
 
 Networking:
 

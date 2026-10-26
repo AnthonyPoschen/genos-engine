@@ -483,6 +483,8 @@ pub struct LightingSettings {
     pub time_of_day: f32,
     /// `budget` holds the work caps. `global` is the uncapped A/B.
     pub schedule: ScheduleMode,
+    /// When on, the retired lighting total scales the work caps. Off holds the preset caps.
+    pub controller: bool,
     /// Multiplies every work cap. `1` is the preset. Test knob.
     pub budget_scale: f32,
     /// Extra field of view on each edge of the displayed frame, before turn bias.
@@ -504,6 +506,18 @@ impl Default for LightingSettings {
 }
 
 impl LightingSettings {
+    /// High preset with the work-cap controller held off.
+    ///
+    /// Picture checks use this so a slow device keeps the preset caps.
+    /// Play uses [`Self::default`], which leaves the controller on.
+    #[must_use]
+    pub fn picture() -> Self {
+        Self {
+            controller: false,
+            ..Self::default()
+        }
+    }
+
     pub fn preset(preset: LightingPreset) -> Self {
         let mut s = Self::high_defaults();
         s.preset = preset;
@@ -596,6 +610,7 @@ impl LightingSettings {
     fn apply_schedule_defaults(&mut self) {
         let name = self.preset.name();
         self.schedule = ScheduleMode::Budget;
+        self.controller = true;
         self.budget_scale = 1.0;
         self.guard_edge = match name {
             "medium" => 0.12,
@@ -698,6 +713,7 @@ impl LightingSettings {
             lamp_pick: LampPickSettings::default(),
             time_of_day: 12.0,
             schedule: ScheduleMode::Budget,
+            controller: true,
             budget_scale: 1.0,
             guard_edge: 0.15,
             cache_loosen: 4.0,
@@ -1013,6 +1029,9 @@ impl LightingSettings {
         // The clock is not a preset knob. A moving time of day stays on the named preset.
         a.time_of_day = 0.0;
         b.time_of_day = 0.0;
+        // Holding the work-cap controller is not a quality preset.
+        a.controller = true;
+        b.controller = true;
         a == b
     }
 
@@ -1045,6 +1064,7 @@ impl LightingSettings {
         let _ = writeln!(out, "gi_refresh={}", self.gi.refresh_frames);
         let _ = writeln!(out, "budget_shift={}", self.gi.budget_shift);
         let _ = writeln!(out, "schedule={}", self.schedule.name());
+        let _ = writeln!(out, "controller={}", bit(self.controller));
         let _ = writeln!(out, "budget_scale={}", num_text(self.budget_scale));
         let _ = writeln!(out, "guard_edge={}", num_text(self.guard_edge));
         let _ = writeln!(out, "cache_loosen={}", num_text(self.cache_loosen));
@@ -1233,6 +1253,7 @@ impl LightingSettings {
                 self.schedule = ScheduleMode::parse(value)
                     .ok_or_else(|| format!("schedule is budget or global, got {value}"))?
             }
+            "controller" => self.controller = on(value)?,
             "budget_scale" => self.budget_scale = num_f32(value)?,
             "guard_edge" => self.guard_edge = num_f32(value)?,
             "cache_loosen" => self.cache_loosen = num_f32(value)?,
@@ -1369,6 +1390,7 @@ impl LightingSettings {
         let ray_budget = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET").ok();
         let dormant_rays = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS").ok();
         let schedule = lighting_env("GENOS_LIGHTING_SCHEDULE").ok();
+        let controller = lighting_env("GENOS_LIGHTING_CONTROLLER").ok();
         let budget_scale = lighting_env("GENOS_LIGHTING_BUDGET_SCALE").ok();
         let guard_edge = lighting_env("GENOS_LIGHTING_GUARD_EDGE").ok();
         let Ok(launch) = resolve_lighting_launch(
@@ -1385,6 +1407,7 @@ impl LightingSettings {
                 ray_budget: ray_budget.as_deref(),
                 dormant_rays: dormant_rays.as_deref(),
                 schedule: schedule.as_deref(),
+                controller: controller.as_deref(),
                 budget_scale: budget_scale.as_deref(),
                 guard_edge: guard_edge.as_deref(),
             },
@@ -1493,6 +1516,9 @@ impl LightingSettings {
         if let Some(mode) = launch.schedule {
             self.schedule = mode;
         }
+        if let Some(on) = launch.controller {
+            self.controller = on;
+        }
         if let Some(scale) = launch.budget_scale {
             self.budget_scale = scale;
         }
@@ -1569,6 +1595,7 @@ struct LightingLaunch {
     ray_budget: Option<u32>,
     dormant_rays: Option<u32>,
     schedule: Option<ScheduleMode>,
+    controller: Option<bool>,
     budget_scale: Option<f32>,
     guard_edge: Option<f32>,
 }
@@ -1587,6 +1614,7 @@ struct LightingMirrors<'a> {
     ray_budget: Option<&'a str>,
     dormant_rays: Option<&'a str>,
     schedule: Option<&'a str>,
+    controller: Option<&'a str>,
     budget_scale: Option<&'a str>,
     guard_edge: Option<&'a str>,
 }
@@ -1602,6 +1630,7 @@ enum LightingKind {
     RayBudget,
     DormantRays,
     Schedule,
+    Controller,
     BudgetScale,
     GuardEdge,
 }
@@ -1617,6 +1646,7 @@ enum LightingFlag {
     RayBudget(u32),
     DormantRays(u32),
     Schedule(ScheduleMode),
+    Controller(bool),
     BudgetScale(f32),
     GuardEdge(f32),
 }
@@ -1696,6 +1726,9 @@ fn resolve_lighting_launch(
         schedule: chosen
             .schedule
             .or_else(|| env.schedule.and_then(ScheduleMode::parse)),
+        controller: chosen
+            .controller
+            .or_else(|| env.controller.and_then(|value| on(value).ok())),
         budget_scale: chosen
             .budget_scale
             .or_else(|| env.budget_scale.and_then(|value| num_f32(value).ok())),
@@ -1717,6 +1750,7 @@ struct ChosenLighting {
     ray_budget: Option<u32>,
     dormant_rays: Option<u32>,
     schedule: Option<ScheduleMode>,
+    controller: Option<bool>,
     budget_scale: Option<f32>,
     guard_edge: Option<f32>,
 }
@@ -1734,6 +1768,7 @@ impl ChosenLighting {
             LightingFlag::RayBudget(count) => self.ray_budget = Some(count),
             LightingFlag::DormantRays(count) => self.dormant_rays = Some(count),
             LightingFlag::Schedule(mode) => self.schedule = Some(mode),
+            LightingFlag::Controller(on) => self.controller = Some(on),
             LightingFlag::BudgetScale(scale) => self.budget_scale = Some(scale),
             LightingFlag::GuardEdge(edge) => self.guard_edge = Some(edge),
         }
@@ -1763,6 +1798,7 @@ fn lighting_kind(name: &str) -> Option<LightingKind> {
         "surface-cache-ray-budget" => Some(LightingKind::RayBudget),
         "surface-cache-dormant-rays" => Some(LightingKind::DormantRays),
         "lighting-schedule" => Some(LightingKind::Schedule),
+        "lighting-controller" => Some(LightingKind::Controller),
         "lighting-budget-scale" => Some(LightingKind::BudgetScale),
         "guard-edge" => Some(LightingKind::GuardEdge),
         _ => None,
@@ -1820,6 +1856,9 @@ fn parse_lighting_flag(arg: &str, next: Option<&str>) -> Result<Option<LightingF
         LightingKind::Schedule => LightingFlag::Schedule(
             ScheduleMode::parse(value)
                 .ok_or_else(|| format!("{flag} {value} is not budget or global"))?,
+        ),
+        LightingKind::Controller => LightingFlag::Controller(
+            on(value).map_err(|_| format!("{flag} {value} is not on or off"))?,
         ),
         LightingKind::BudgetScale => LightingFlag::BudgetScale(
             num_f32(value).map_err(|_| format!("{flag} {value} is not a number"))?,
@@ -2107,12 +2146,15 @@ mod launch_tests {
     fn schedule_arguments_win_over_the_env_mirrors() {
         let mut env = empty();
         env.schedule = Some("budget");
+        env.controller = Some("off");
         env.budget_scale = Some("1");
         env.guard_edge = Some("0.2");
         let launch = resolve_lighting_launch(
             &[
                 "--lighting-schedule",
                 "global",
+                "--lighting-controller",
+                "on",
                 "--lighting-budget-scale",
                 "2",
                 "--guard-edge",
@@ -2122,6 +2164,7 @@ mod launch_tests {
         )
         .unwrap();
         assert_eq!(launch.schedule, Some(ScheduleMode::Global));
+        assert_eq!(launch.controller, Some(true));
         assert_eq!(launch.budget_scale, Some(2.0));
         assert_eq!(launch.guard_edge, Some(0.1));
     }

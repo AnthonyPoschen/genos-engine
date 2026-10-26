@@ -9,6 +9,12 @@ use genos_render::{Renderer, World};
 use genos_scene::Camera;
 use genos_window::Window;
 
+/// Picture checks hold the work-cap controller off. Play leaves it on.
+fn present(mut scene: genos_scene::Scene) -> World {
+    scene.lighting.controller = false;
+    World::from_scene(scene)
+}
+
 fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
@@ -27,7 +33,7 @@ fn print_still_hall_hash() {
         "/../../examples/camera/scene.rhai"
     )))
     .expect("scene");
-    let world = World::from_scene(scene);
+    let world = present(scene);
     let camera = Camera::opening();
     let mut last = Vec::new();
     for _ in 0..8 {

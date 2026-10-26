@@ -34,6 +34,12 @@ const STILL_FRAMES: u32 = 36;
 const OVERLAY_FRAMES: u32 = 36;
 const LERP_STEPS: u32 = 96;
 
+/// Picture checks hold the work-cap controller off. Play leaves it on.
+fn present(mut scene: genos_scene::Scene) -> World {
+    scene.lighting.controller = false;
+    World::from_scene(scene)
+}
+
 fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
@@ -364,7 +370,7 @@ fn the_orbit_stays_in_the_still_frame_band() {
     let (_gpu, mut window, mut renderer) = open();
     let loaded = scene();
     let center = red_box(&loaded);
-    let mut world = World::from_scene(loaded);
+    let mut world = present(loaded);
     let mut sim = Simulation::from_scene(&world.scene);
     let boot = Instant::now();
     let still_cam = orbit(center, START);

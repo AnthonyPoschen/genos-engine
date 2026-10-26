@@ -211,6 +211,7 @@ The same command with `s2-strafe.rhai` through `s6-settle.rhai`. `--out DIR` mov
 ## 11. Debug views and MCP
 
 - `--lighting-schedule budget|global` (mirror `GENOS_LIGHTING_SCHEDULE`). `global` is today's hash path, kept for A/B only. It is in `--help`, the system record, `EngineSettings`, the MCP catalogue and the debug menu.
+- `--lighting-controller on|off` (mirror `GENOS_LIGHTING_CONTROLLER`). On scales the caps from the retired lighting total. Off holds the preset caps. Default on. The Perf checkbox is Work-cap controller.
 - `--lighting-budget-scale F` scales every cap (test only; the preset sets the values).
 - Debug views:
   - `priority`: heat map of p;
@@ -272,7 +273,7 @@ A pass gates when its grant is under its demand and the frame has a change recor
 
 The lighting targets are the guard-band size. The picture is the crop. The eye stays put, and the band leads the turn. High starts at 15% of the display on each edge. Probe picks and lamp-pick history project that displayed camera through the crop, so a still probe finds its last tile.
 
-Every budgeted frame with timestamp queries reads the retired `lighting_ms` against that frame's cap. Over the cap, the scale becomes `cap / ms`, down to 1/64. Under 75% of the cap, the scale grows by 5% up to 1. `--gi-metrics` stores the sample, the CSV, and the lamp-pick diag bit. It does not gate the controller. On lavapipe the third draw reads the first flight slot and the scale goes to the floor, because that total is not an 8 ms frame. `schedule=global` keeps the preset caps.
+Every budgeted frame with timestamp queries reads the retired `lighting_ms` against that frame's cap when `controller` is on. Over the cap, the scale becomes `cap / ms`, down to 1/64. Under 75% of the cap, the scale grows by 5% up to 1. Off holds the preset caps. `--gi-metrics` stores the sample, the CSV, and the lamp-pick diag bit. It does not gate the controller. On lavapipe the third draw reads the first flight slot and the scale goes to the floor, because that total is not an 8 ms frame. `controller=off` or `schedule=global` keeps the preset caps. Picture checks hold the controller off so that floor does not change the pixels.
 
 Budget mode with world-cache mode 3 reads parents of an empty 12.5 cm cell at 25 cm, 50 cm, 1 m, 2 m, and 4 m. A finished parent (`v.w > 0.5`) is what a waiting pixel shows, when the reader sits in the half-size cell of the point that parent was lit from. The walk is split, because lavapipe faulted on one five-step body:
 

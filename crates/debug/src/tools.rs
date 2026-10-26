@@ -1758,6 +1758,7 @@ fn budget_key(key: &str) -> bool {
     matches!(
         key,
         "schedule"
+            | "controller"
             | "budget_scale"
             | "guard_edge"
             | "cache_loosen"
@@ -1773,6 +1774,7 @@ fn budgets_value(settings: &LightingSettings, controller_scale: f64) -> Value {
     obj(vec![
         ("preset", text(preset)),
         ("schedule", text(settings.schedule.name())),
+        ("controller", Value::Bool(settings.controller)),
         ("budget_scale", num(f64::from(settings.budget_scale))),
         ("controller_scale", num(controller_scale)),
         ("lighting_cap_ms", num(f64::from(caps.lighting_ms))),
@@ -2146,6 +2148,11 @@ mod tests {
             Some("budget")
         );
         assert!(budget_key("budget_scale"));
+        assert!(budget_key("controller"));
+        assert_eq!(
+            value.get("controller").and_then(Value::as_bool),
+            Some(true)
+        );
         assert!(!budget_key("direct"));
         let mut push = SchedulePush::default();
         push.words[0] = 8;

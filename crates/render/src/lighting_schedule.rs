@@ -997,7 +997,10 @@ pub fn schedule_push(
     } else {
         1.0
     };
-    let ctrl = if controller_scale.is_finite() {
+    // Off holds the preset caps. `budget_scale` still multiplies them.
+    let ctrl = if !settings.controller {
+        1.0
+    } else if controller_scale.is_finite() {
         controller_scale.clamp(f64::from(SCALE_FLOOR), 1.0)
     } else {
         1.0
@@ -1453,6 +1456,21 @@ mod tests {
         assert!(push.plan.direct_gate);
         assert!(push.plan.trace_gate);
         assert!(push.plan.atrous_gate);
+    }
+
+    #[test]
+    fn a_held_controller_keeps_the_preset_scale() {
+        let mut settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+        settings.controller = false;
+        settings.budget_scale = 0.5;
+        let lit = display(1920, 1080);
+        let held = schedule_push(&settings, 0.25, lit, 16, 64, 1, 1);
+        let mut scaled = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+        scaled.budget_scale = 0.5;
+        let full = schedule_push(&scaled, 1.0, lit, 16, 64, 1, 1);
+        assert!((held.scale - 0.5).abs() < 1.0e-6);
+        assert_eq!(held.plan.tile_w, full.plan.tile_w);
+        assert_eq!(held.plan.tile_h, full.plan.tile_h);
     }
 
     #[test]

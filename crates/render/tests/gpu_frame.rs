@@ -30,8 +30,14 @@ fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
     (guard, window, renderer)
 }
 
+/// Picture checks hold the work-cap controller off. Play leaves it on.
+fn present(mut scene: Scene) -> World {
+    scene.lighting.controller = false;
+    World::from_scene(scene)
+}
+
 fn scene(lights: Vec<Light>, walls: Vec<Wall>, solids: Vec<Solid>) -> World {
-    World::from_scene(Scene {
+    present(Scene {
         floor: Floor {
             position: Vec3::new(0.0, 0.0, 0.0),
             half_x: 8.0,
@@ -127,7 +133,7 @@ fn shipped_scene() -> Scene {
 }
 
 fn shipped_hall() -> World {
-    World::from_scene(shipped_scene())
+    present(shipped_scene())
 }
 
 /// High, no `--gi-metrics`. Two flight slots, so the third draw reads the first.
@@ -138,7 +144,8 @@ fn the_budget_controller_scales_without_gi_metrics() {
         !renderer.gi_metrics_enabled(),
         "the sample log is on; this test is normal play"
     );
-    let world = scene(Vec::new(), Vec::new(), Vec::new());
+    let mut world = scene(Vec::new(), Vec::new(), Vec::new());
+    world.scene.lighting.controller = true;
     let camera = Camera::opening();
     let _ = draw(&mut window, &mut renderer, &world, &camera);
     let _ = draw(&mut window, &mut renderer, &world, &camera);
@@ -169,7 +176,7 @@ fn the_budget_controller_scales_without_gi_metrics() {
 fn hall_lamp() -> World {
     let mut scene = shipped_scene();
     scene.solids.clear();
-    World::from_scene(scene)
+    present(scene)
 }
 
 #[test]
@@ -1117,7 +1124,7 @@ fn the_corridor_carries_bounce_around_the_bend() {
     let (_gpu, mut window, mut renderer) = open();
     let width = renderer.width();
     let height = renderer.height();
-    let mut world = World::from_scene(
+    let mut world = present(
         genos_scene::load_path(std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../examples/camera/scene.rhai"
@@ -1168,7 +1175,7 @@ fn the_outside_lamp_and_the_fire_stop_at_the_corridor_wall() {
     let (_gpu, mut window, mut renderer) = open();
     let width = renderer.width();
     let height = renderer.height();
-    let mut world = World::from_scene(
+    let mut world = present(
         genos_scene::load_path(std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../examples/camera/scene.rhai"
@@ -1605,7 +1612,7 @@ fn the_shape_top_and_the_near_corridor_read_local_probes() {
         env!("CARGO_MANIFEST_DIR"),
         "/../../examples/camera/scene.rhai"
     ));
-    let mut world = World::from_scene(genos_scene::load_path(path).expect("shipped scene"));
+    let mut world = present(genos_scene::load_path(path).expect("shipped scene"));
     let mut top_cam = Camera::new(0.0, 2.6, 0.0);
     top_cam.position.y = 4.2;
     top_cam.pitch = -0.95;
@@ -1625,7 +1632,7 @@ fn the_shape_top_and_the_near_corridor_read_local_probes() {
         "the top is not brighter than the unlit face: top {top} face {away}"
     );
 
-    let mut corridor = World::from_scene(genos_scene::load_path(path).expect("shipped scene"));
+    let mut corridor = present(genos_scene::load_path(path).expect("shipped scene"));
     corridor.scene.lights = vec![Light {
         position: Vec3::new(0.0, 3.0, 6.5),
         color: [1.0, 1.0, 1.0],

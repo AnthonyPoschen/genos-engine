@@ -30,13 +30,19 @@ fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
     (guard, window, renderer)
 }
 
+/// Picture checks hold the work-cap controller off. Play leaves it on.
+fn present(mut scene: Scene) -> World {
+    scene.lighting.controller = false;
+    World::from_scene(scene)
+}
+
 fn shipped_hall() -> World {
     let scene: Scene = genos_scene::load_path(std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../examples/camera/scene.rhai"
     )))
     .expect("shipped scene");
-    World::from_scene(scene)
+    present(scene)
 }
 
 /// Longest a GI pipeline may take to build. The SDF march inlined into the current
@@ -134,7 +140,7 @@ fn lighting_draws_emitted_light_and_bounces_it() {
         ..genos_bake::BakeSettings::default()
     };
     let dark_room = |glow: f32| {
-        let mut world = World::from_scene(Scene {
+        let mut world = present(Scene {
             floor: genos_scene::Floor {
                 position: genos_scene::Vec3::ZERO,
                 half_x: 20.0,
@@ -272,7 +278,7 @@ fn lighting_probes_keep_their_rays_when_the_light_changes() {
     sun.sky = Some(genos_scene::Sky {
         color: [0.4, 0.5, 0.7],
     });
-    let still_world = World::from_scene(base.clone());
+    let still_world = present(base.clone());
     let changes: [(&str, Scene); 4] = [
         ("a lamp moving", moved_lamp),
         ("a lamp dimming", dimmed),
@@ -284,7 +290,7 @@ fn lighting_probes_keep_their_rays_when_the_light_changes() {
         let after = draw(
             &mut window,
             &mut renderer,
-            &World::from_scene(scene),
+            &present(scene),
             &camera,
         );
         let held = samples_per_probe(&mut renderer);
@@ -318,14 +324,14 @@ fn lighting_moving_object_retraces_the_rays_it_crosses() {
     let before = fill_strata(
         &mut window,
         &mut renderer,
-        &World::from_scene(base),
+        &present(base),
         &camera,
     );
     let full = samples_per_probe(&mut renderer);
     let after = draw(
         &mut window,
         &mut renderer,
-        &World::from_scene(moved),
+        &present(moved),
         &camera,
     );
     let held = samples_per_probe(&mut renderer);
@@ -378,11 +384,11 @@ fn lighting_floor_recolour_keeps_rays_outside_the_change() {
     fill_strata(
         &mut window,
         &mut renderer,
-        &World::from_scene(base),
+        &present(base),
         &camera,
     );
     let filled = samples_per_probe(&mut renderer);
-    let changed = World::from_scene(floor);
+    let changed = present(floor);
     let _ = draw(&mut window, &mut renderer, &changed, &camera);
     let held = samples_per_probe(&mut renderer);
     assert!(
@@ -1173,7 +1179,7 @@ fn shadow_floor_world() -> World {
         cache_dir: dir.join("bake"),
         ..genos_bake::BakeSettings::default()
     };
-    let mut world = World::from_scene(Scene {
+    let mut world = present(Scene {
         floor: genos_scene::Floor {
             position: genos_scene::Vec3::ZERO,
             half_x: 6.0,
@@ -1443,7 +1449,7 @@ fn banner_world(lamp_x: f32, lamp_z: f32) -> World {
         cache_dir: dir.join(format!("bake-{lamp_x}-{lamp_z}")),
         ..genos_bake::BakeSettings::default()
     };
-    let mut world = World::from_scene(Scene {
+    let mut world = present(Scene {
         floor: genos_scene::Floor {
             position: genos_scene::Vec3::ZERO,
             half_x: 8.0,
@@ -1788,7 +1794,7 @@ fn sponza_curtain_scores(screen: bool) -> (f64, f64) {
         cache_dir: std::env::temp_dir().join("genos-sponza-banner-test"),
         ..genos_bake::BakeSettings::default()
     };
-    let mut world = World::from_scene(Scene {
+    let mut world = present(Scene {
         floor: genos_scene::Floor {
             position: genos_scene::Vec3::ZERO,
             half_x: 1.0,
@@ -1858,7 +1864,7 @@ fn white_lamps(n: usize) -> World {
             direction: genos_scene::Vec3::ZERO,
         });
     }
-    World::from_scene(Scene {
+    present(Scene {
         floor: genos_scene::Floor {
             position: genos_scene::Vec3::ZERO,
             half_x: 20.0,
@@ -2071,7 +2077,7 @@ fn shadowed_lamps() -> World {
         color_mix: -1.0,
     });
     // from_scene is what registers the solid with the tracer.
-    World::from_scene(world.scene)
+    present(world.scene)
 }
 
 /// GI on so a still pixel can accept history. Bounce 1 and the world-cache bit

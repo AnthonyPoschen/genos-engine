@@ -121,11 +121,11 @@ fn schedule_specs() -> Vec<CommandSpec> {
     vec![
         spec(
             "get_budgets",
-            "Preset work caps, the live controller scale, and the schedule knobs in force (schedule, budget_scale, guard_edge, floor_level, floor_converged, near_radius, cache_loosen). lighting_cap_ms is the millisecond ceiling for this preset.",
+            "Preset work caps, the live controller scale, and the schedule knobs in force (schedule, controller, budget_scale, guard_edge, floor_level, floor_converged, near_radius, cache_loosen). lighting_cap_ms is the millisecond ceiling for this preset. controller is the on/off for that scale.",
         ),
         spec(
             "set_budgets",
-            "Partial schedule update. Keys: schedule (budget or global), budget_scale, guard_edge, cache_loosen, floor_level, floor_converged, near_radius. Writes the scene and clears a renderer override. Applies on the next draw.",
+            "Partial schedule update. Keys: schedule (budget or global), controller (on or off), budget_scale, guard_edge, cache_loosen, floor_level, floor_converged, near_radius. Writes the scene and clears a renderer override. Applies on the next draw.",
         ),
         spec(
             "get_schedule_stats",

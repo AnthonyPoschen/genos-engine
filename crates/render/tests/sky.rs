@@ -12,6 +12,12 @@ use genos_render::{Renderer, World};
 use genos_scene::{viewport_uv, Camera, Floor, Scene, Sky, Vec3, Wall};
 use genos_window::Window;
 
+/// Picture checks hold the work-cap controller off. Play leaves it on.
+fn present(mut scene: Scene) -> World {
+    scene.lighting.controller = false;
+    World::from_scene(scene)
+}
+
 fn open() -> (Window, Renderer) {
     let mut window = Window::open_proof(1280, 720).expect("proof window");
     let frame = window.pump();
@@ -21,7 +27,7 @@ fn open() -> (Window, Renderer) {
 }
 
 fn open_floor(sky: Option<Sky>, walls: Vec<Wall>) -> World {
-    World::from_scene(Scene {
+    present(Scene {
         floor: Floor {
             position: Vec3::new(0.0, 0.0, 0.0),
             half_x: 30.0,

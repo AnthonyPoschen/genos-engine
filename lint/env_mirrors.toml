@@ -48,6 +48,11 @@ kind = "mirror"
 detail = "--lighting-budget-scale"
 
 [[var]]
+name = "GENOS_LIGHTING_CONTROLLER"
+kind = "mirror"
+detail = "--lighting-controller"
+
+[[var]]
 name = "GENOS_LIGHTING_COMPOSE_ALL"
 kind = "mirror"
 detail = "--full-effort"

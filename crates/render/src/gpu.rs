@@ -2478,11 +2478,15 @@ impl Gpu {
                 // `--gi-metrics` stores the sample. The controller runs either way.
                 let lighting_ms =
                     bucket_ms.iter().sum::<f64>() - bucket_ms[B_SHADOWS as usize];
-                if self.lighting.settings.schedule == genos_scene::ScheduleMode::Budget {
+                if self.lighting.settings.schedule == genos_scene::ScheduleMode::Budget
+                    && self.lighting.settings.controller
+                {
                     self.lighting.budget.observe(
                         Some(lighting_ms),
                         self.lighting.last_schedule.lighting_cap_ms,
                     );
+                } else if !self.lighting.settings.controller {
+                    self.lighting.budget.scale = 1.0;
                 }
                 if times.record {
                     let world_rays = std::mem::take(&mut times.pending_world_rays);
