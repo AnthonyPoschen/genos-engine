@@ -1,10 +1,11 @@
 //! Measures CCD metrics by running `genos_physics::step`.
 //!
-//! `good` and `bad` are the same 3 000 m/s scene. `good` asks for protection.
-//! `step` has no CCD flag, so that run still tunnels and `tunnel_count` is
-//! `FAIL`. `bad` is protection off and fails the same way. `discrete` is the
-//! 30 m/s run, scored on free-flight steps. `loss` scores that run from start
-//! to end, so the inelastic drop fails `|energy_drift| <= 0.01`.
+//! `good` and `bad` are the same 3 000 m/s scene. `good` asks for protection:
+//! the bullet is speculative, and the ships stay discrete until time of impact,
+//! so `tunnel_count` is still `FAIL`. `bad` leaves protection off and fails the
+//! same way. `discrete` is the 30 m/s run, scored on free-flight steps. `loss`
+//! scores that run from start to end, so the inelastic drop fails
+//! `|energy_drift| <= 0.01`.
 //!
 //! ```text
 //! --out DIR
@@ -18,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use genos_physics::{Body, Shape, World};
+use genos_physics::{Body, MotionQuality, Shape, World};
 
 const DEFAULT_OUT: &str = "genos-debug/physics";
 const DT: f32 = 1.0 / 60.0;
@@ -144,6 +145,7 @@ struct Reading {
     bullet_speed: f32,
     protect: bool,
     full_energy: bool,
+    ccd_in_step: bool,
 }
 
 fn main() {
@@ -355,7 +357,7 @@ fn print_help() {
     proof runs all four. Default proof.
     GENOS_PHYSICS_METRICS_FIXTURE applies only when --fixture is omitted.
 good and bad both run ships and bullet at {TUNNEL_SPEED} m/s.
-    good asks for protection. step has no CCD flag, so good still tunnels.
+    good asks for protection and marks the bullet speculative. The ships stay discrete, so good still tunnels.
 discrete runs ships at {CATCH_SHIP} m/s and the bullet at {CATCH_BULLET} m/s.
     energy_drift on good, bad, and discrete sums free-flight steps only.
 loss is the discrete scene scored from start to end, so an inelastic drop fails.
@@ -377,6 +379,7 @@ fn measure(setup: Setup) -> Result<Reading, String> {
         bullet_speed: first.bullet_speed,
         protect: setup.protect,
         full_energy: setup.full_energy,
+        ccd_in_step: first.ccd_in_step,
     })
 }
 
@@ -387,6 +390,7 @@ struct Simulated {
     energy_drift: f64,
     ship_speed: f32,
     bullet_speed: f32,
+    ccd_in_step: bool,
 }
 
 fn simulate(setup: &Setup) -> Result<Simulated, String> {
@@ -418,6 +422,7 @@ fn simulate(setup: &Setup) -> Result<Simulated, String> {
     Ok(Simulated {
         ship_speed: scene.ship_speed,
         bullet_speed: scene.bullet_speed,
+        ccd_in_step: scene.world.step_stats.ccd_applied,
         world: scene.world,
         tunnel_count: f64::from(tunnels),
         penetration_m: f64::from(deepest),
@@ -487,6 +492,9 @@ fn build(setup: &Setup) -> Scene {
     right.velocity = genos_math::Vec3::new(-ship_speed, 0.0, 0.0);
     let mut bullet = Body::sphere(genos_math::Vec3::new(0.0, 2.0, 4.0), 0.02, 0.05);
     bullet.velocity = genos_math::Vec3::new(bullet_speed, 0.0, 0.0);
+    if setup.protect {
+        bullet.motion = MotionQuality::Speculative;
+    }
     let wall = Body::cuboid(
         genos_math::Vec3::new(0.3, 2.0, 4.0),
         0.0,
@@ -698,8 +706,9 @@ fn print_scene(reading: &Reading) {
     } else {
         "free-flight"
     };
+    let ccd = if reading.ccd_in_step { "true" } else { "false" };
     println!(
-        "scene protection={protection} ships_m_s={} bullet_m_s={} steps={STEPS} energy={energy} ccd_in_step=false",
+        "scene protection={protection} ships_m_s={} bullet_m_s={} steps={STEPS} energy={energy} ccd_in_step={ccd}",
         fmt_num(f64::from(reading.ship_speed)),
         fmt_num(f64::from(reading.bullet_speed)),
     );
@@ -733,8 +742,9 @@ fn json(fixture: &str, reading: &Reading, rows: &[Row]) -> String {
     } else {
         "free-flight"
     };
+    let ccd = if reading.ccd_in_step { "true" } else { "false" };
     let mut out = format!(
-        "{{\n  \"fixture\": \"{fixture}\",\n  \"protection\": {protection},\n  \"ccd_in_step\": false,\n  \"energy\": \"{energy}\",\n  \"ship_speed_m_s\": {},\n  \"bullet_speed_m_s\": {},\n  \"steps\": {STEPS},\n  \"failed\": {failed},\n  \"metrics\": [\n",
+        "{{\n  \"fixture\": \"{fixture}\",\n  \"protection\": {protection},\n  \"ccd_in_step\": {ccd},\n  \"energy\": \"{energy}\",\n  \"ship_speed_m_s\": {},\n  \"bullet_speed_m_s\": {},\n  \"steps\": {STEPS},\n  \"failed\": {failed},\n  \"metrics\": [\n",
         fmt_num(f64::from(reading.ship_speed)),
         fmt_num(f64::from(reading.bullet_speed)),
     );
@@ -745,10 +755,11 @@ fn json(fixture: &str, reading: &Reading, rows: &[Row]) -> String {
         } else {
             "null".to_string()
         };
-        out.push_str(&format!(
+        let row_line = format!(
             "    {{\"name\": \"{}\", \"value\": {value}, \"threshold\": \"{}\", \"status\": \"{}\"}}{comma}\n",
             row.name, row.threshold_text, row.status.as_str()
-        ));
+        );
+        out.push_str(&row_line);
     }
     out.push_str("  ]\n}\n");
     out
@@ -791,10 +802,10 @@ fn prove(out: &Path) -> Result<i32, String> {
     expect_tunnel_fail(&bad.stdout, false)?;
     expect_discrete(&discrete.stdout)?;
     expect_loss(&loss.stdout)?;
-    expect_file(out, "good", true, 1, "free-flight")?;
-    expect_file(out, "bad", false, 1, "free-flight")?;
-    expect_file(out, "discrete", false, 0, "free-flight")?;
-    expect_file(out, "loss", false, 1, "full")?;
+    expect_file(out, "good", true, 1, "free-flight", true)?;
+    expect_file(out, "bad", false, 1, "free-flight", false)?;
+    expect_file(out, "discrete", false, 0, "free-flight", false)?;
+    expect_file(out, "loss", false, 1, "full", false)?;
     Ok(0)
 }
 
@@ -891,8 +902,15 @@ fn expect_tunnel_fail(text: &str, protect: bool) -> Result<(), String> {
     {
         return Err("high-speed scene did not use 3000 m/s for both bodies".into());
     }
-    if !text.contains("energy=free-flight") || !text.contains("ccd_in_step=false") {
-        return Err("high-speed scene did not record free-flight energy and no CCD".into());
+    let ccd = if protect {
+        "ccd_in_step=true"
+    } else {
+        "ccd_in_step=false"
+    };
+    if !text.contains("energy=free-flight") || !text.contains(ccd) {
+        return Err(format!(
+            "high-speed scene did not record free-flight energy and {ccd}"
+        ));
     }
     let mut tunnel_failed = false;
     for row in printed_rows(text)? {
@@ -964,6 +982,7 @@ fn expect_file(
     protect: bool,
     failed: i32,
     energy: &str,
+    ccd: bool,
 ) -> Result<(), String> {
     let path = dir.join(format!("{fixture}.json"));
     let text =
@@ -975,8 +994,9 @@ fn expect_file(
     if !text.contains(&format!("\"protection\": {protection}")) {
         return Err(format!("{fixture} json has the wrong protection flag"));
     }
-    if !text.contains("\"ccd_in_step\": false") {
-        return Err(format!("{fixture} json claims CCD is in step"));
+    let ccd_text = if ccd { "true" } else { "false" };
+    if !text.contains(&format!("\"ccd_in_step\": {ccd_text}")) {
+        return Err(format!("{fixture} json has the wrong ccd_in_step flag"));
     }
     if !text.contains(&format!("\"energy\": \"{energy}\"")) {
         return Err(format!("{fixture} json has the wrong energy account"));

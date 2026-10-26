@@ -101,11 +101,19 @@ A vector that aims a view or a movement.
 _Avoid_: Heading, bearing
 
 **Body**:
-A simulated mass. It has a position, an orientation, a velocity, and a shape.
+A simulated mass. It has a position, an orientation, a velocity, a motion quality, and a shape.
 _Avoid_: Character controller, pawn
 
+**Motion quality**:
+How far one body's collision looks ahead in a single physics step. Discrete uses the current bounds. Speculative uses a margin. Swept is the time-of-impact path.
+_Avoid_: CCD mode, collision flag
+
+**Speculative contact**:
+A contact generated inside `min(speed * dt, speculative margin)` so the solver can stop a body before it overlaps.
+_Avoid_: Sweep, raycast
+
 **Physics step**:
-One update that moves bodies by gravity, contact, and springs.
+One update that moves bodies by gravity, contact, and springs. A speculative body can stop inside its margin.
 _Avoid_: Lighting ray, cascade
 
 **Codimation**:

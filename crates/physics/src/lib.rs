@@ -1,9 +1,27 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::large_enum_variant, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::large_types_passed_by_value, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::match_same_arms, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::neg_cmp_op_on_partial_ord, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::large_enum_variant,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::large_types_passed_by_value,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::match_same_arms,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::neg_cmp_op_on_partial_ord,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! One collision step for dynamic bodies.
 //!
@@ -14,6 +32,7 @@
 //! Gravity is along -Y. There is no air drag. Shapes are a sphere, a capsule,
 //! a box, a plane, and a mesh reduced to a few convex pieces.
 
+mod ccd;
 mod contact;
 mod mesh;
 
@@ -167,6 +186,49 @@ pub struct Spring {
     pub damping: f32,
 }
 
+/// How far one body's collision looks ahead in a single step.
+///
+/// `Discrete` uses the bounds at the current pose. `Speculative` grows the
+/// contact distance by `min(speed * dt, speculative margin)` and lets the
+/// solver stop the body. `Swept` is the ship path; until time of impact lands,
+/// a swept body still integrates with the discrete step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MotionQuality {
+    /// Overlap that already exists.
+    Discrete,
+    /// A margin on the approach. The bullet path.
+    Speculative,
+    /// Time of impact for this body. Treated as discrete until that solve lands.
+    Swept,
+}
+
+/// Counters from the last `step`. A later step replaces them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StepStats {
+    /// A body asked for speculative or swept collision.
+    pub ccd_applied: bool,
+    /// Swept pairs clamped because 16 advances left a gap above 1 mm.
+    pub toi_failed: u32,
+    /// Swept pairs that used the speculative margin because the pair cap was full.
+    pub toi_deferred: u32,
+    /// Contacts between two dynamic bodies that stored a normal impulse.
+    pub dynamic_pair_impulses: u32,
+    /// Advances taken by fast pairs whose travel exceeded the smaller radius.
+    pub pair_slices: u32,
+}
+
+impl StepStats {
+    const fn zero() -> Self {
+        Self {
+            ccd_applied: false,
+            toi_failed: 0,
+            toi_deferred: 0,
+            dynamic_pair_impulses: 0,
+            pair_slices: 0,
+        }
+    }
+}
+
 /// A simulated mass. Position and orientation use the math types.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Body {
@@ -182,6 +244,8 @@ pub struct Body {
     pub motor: bool,
     /// Desired horizontal velocity. Contact can remove the blocked part.
     pub wish: Vec3,
+    /// `Discrete` unless a caller asks for a bullet margin or a swept pair.
+    pub motion: MotionQuality,
 }
 
 impl Body {
@@ -233,6 +297,7 @@ impl Body {
             spring: None,
             motor: false,
             wish: Vec3::ZERO,
+            motion: MotionQuality::Discrete,
         }
     }
 
@@ -250,6 +315,12 @@ impl Body {
 pub struct World {
     pub bodies: Vec<Body>,
     pub gravity: Vec3,
+    /// Cap on `min(speed * dt, margin)` for `MotionQuality::Speculative`. Default 0.25 m.
+    pub speculative_margin: f32,
+    /// Swept pairs past this count use the speculative margin for that step. Default 8.
+    pub swept_pair_cap: u32,
+    /// Replaced at the start of each `step`.
+    pub step_stats: StepStats,
     /// The contact pass's lists, kept so a step after the first does not allocate.
     pairs: contact::Pairs,
 }
@@ -266,6 +337,9 @@ impl World {
         Self {
             bodies: Vec::new(),
             gravity,
+            speculative_margin: 0.25,
+            swept_pair_cap: 8,
+            step_stats: StepStats::zero(),
             pairs: contact::Pairs::new(),
         }
     }
@@ -289,6 +363,14 @@ pub fn step(world: &mut World, dt: f32) {
             body.velocity.x = body.wish.x;
             body.velocity.z = body.wish.z;
         }
+    }
+    world.step_stats = StepStats::zero();
+    world.step_stats.ccd_applied = world
+        .bodies
+        .iter()
+        .any(|body| body.motion == MotionQuality::Speculative);
+    if world.step_stats.ccd_applied {
+        ccd::speculative(&mut world.bodies, dt, world.speculative_margin);
     }
     for body in &mut world.bodies {
         if body.inverse_mass == 0.0 {

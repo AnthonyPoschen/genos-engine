@@ -1,12 +1,39 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::float_cmp, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::large_types_passed_by_value, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::similar_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::single_match_else, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::struct_field_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::unnecessary_wraps, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::float_cmp,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::large_types_passed_by_value,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::similar_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::single_match_else,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::struct_field_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unnecessary_wraps,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md"
+)]
 
 //! Contact between the shapes on two bodies.
 //!
@@ -282,7 +309,7 @@ fn piece_plane(body: &Body, piece: Piece, normal: Vec3, offset: f32) -> Option<(
     }
 }
 
-fn primitive_contact(a: &Body, b: &Body) -> Option<(Vec3, f32)> {
+pub(crate) fn primitive_contact(a: &Body, b: &Body) -> Option<(Vec3, f32)> {
     match (a.shape, b.shape) {
         (Shape::Sphere { radius: ra }, Shape::Sphere { radius: rb }) => {
             spheres(a.position, ra, b.position, rb)
@@ -804,6 +831,46 @@ fn closest_segments(a0: Vec3, a1: Vec3, b0: Vec3, b1: Vec3) -> (Vec3, Vec3) {
 fn segment(body: &Body, half_height: f32) -> (Vec3, Vec3) {
     let axis = body.orientation.rotate(Vec3::Y) * half_height;
     (body.position - axis, body.position + axis)
+}
+
+pub(crate) fn shape_support(body: &Body, dir: Vec3) -> Vec3 {
+    match body.shape {
+        Shape::Mesh(mesh) => {
+            let mut best = body.position;
+            let mut best_dot = f32::NEG_INFINITY;
+            let mut found = false;
+            for piece in mesh.pieces() {
+                let point = piece_support(body, piece, dir);
+                let score = point.dot(dir);
+                if !found || score > best_dot {
+                    best = point;
+                    best_dot = score;
+                    found = true;
+                }
+            }
+            best
+        }
+        Shape::Plane { .. } => body.position,
+        Shape::Sphere { .. } | Shape::Capsule { .. } | Shape::Box { .. } => {
+            support_point(body, dir, None)
+        }
+    }
+}
+
+fn piece_support(body: &Body, piece: &Piece, dir: Vec3) -> Vec3 {
+    let dir = unit(dir);
+    match piece {
+        Piece::Cuboid { center, half } => {
+            let local = conjugate(body.orientation).rotate(dir);
+            let support = Vec3::new(
+                half.x.copysign(local.x),
+                half.y.copysign(local.y),
+                half.z.copysign(local.z),
+            );
+            body.position + body.orientation.rotate(*center + support)
+        }
+        Piece::Hull(hull) => hull_support(body, hull, dir),
+    }
 }
 
 fn support_point(body: &Body, dir: Vec3, piece: Option<&Hull>) -> Vec3 {
