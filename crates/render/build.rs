@@ -126,6 +126,7 @@ fn rerun_shader_pieces() {
         "mesh_field.glsl",
         "scene_data.glsl",
         "dither.glsl",
+        "hdr_shoulder.glsl",
         "hdr_display.glsl",
         "hdr_agx.comp",
         "transmit.comp",

@@ -36,13 +36,7 @@ layout(std430, set = 0, binding = 14) restrict readonly buffer HdrPost {
 
 const float LAMBERT = 0.254647909;
 
-float tone_channel(float x) {
-    if (x <= 0.64) {
-        return max(x, 0.0);
-    }
-    float extra = x - 0.64;
-    return 0.64 + 0.14 * (extra / (extra + 1.1));
-}
+#include "hdr_shoulder.glsl"
 
 uint pack_rgb(vec3 rgb) {
     uvec3 c = uvec3(clamp(rgb, 0.0, 1.0) * 255.0 + 0.5);

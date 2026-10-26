@@ -68,13 +68,7 @@ vec3 agx_sample(vec3 c) {
     return mix(c0, c1, f.z);
 }
 
-float tone_channel(float x) {
-    if (x <= 0.64) {
-        return max(x, 0.0);
-    }
-    float extra = x - 0.64;
-    return 0.64 + 0.14 * (extra / (extra + 1.1));
-}
+#include "hdr_shoulder.glsl"
 
 float pq_st2084(float nits) {
     float c1 = 3424.0 / 4096.0;

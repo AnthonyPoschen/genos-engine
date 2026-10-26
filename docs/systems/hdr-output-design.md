@@ -298,7 +298,8 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | Metric | Threshold | What it grades | Live, this tree |
 |---|---|---|---|
 | `legacy_inverse` | ≤ 1e−4 | `linear_from_display(tone(x))` against `x` for 0, 0.25, 0.64, 1, 4, 16. `tone` is `mesh::tone`. Relative, denominator `max(x, 1)` | PASS |
-| `legacy_shader` | = 0 codes | lavapipe readback of the shipped hall, Potato, `legacy_bytes`, ambient raised to 8 so the shoulder is in frame, against the stored plain-compose picture. The shoulder in that shader is the pre-HDR `tone_channel`. Two settled frames must match | PASS. Moving a colour byte by 8, or changing `tone_channel`, fails |
+| `legacy_shader` | = 0 codes | lavapipe readback of the shipped hall, Potato, `legacy_bytes`, ambient raised to 8 so the shoulder is in frame, against the stored plain-compose picture. The shoulder in that shader is the shared `tone_channel`. Two settled frames must match | PASS. Moving a colour byte by 8, or changing `tone_channel`, fails |
+| `gpu_legacy` | ≤ 1 code | the same hall through `hdr_agx.comp` mode 0 (`display=legacy`, not `legacy_bytes`), against `tone` of exposure times the scene image. Dither may move one code. A pixel above the shoulder start must be in frame | PASS. Changing the shared shoulder fails |
 | `exposure_ev` | ≤ 1e−9 | `ev100_from_luminance` and `exposure_from_ev100` on 0.01, 0.18, 1, and 12.5. EV100 is `log2(L × 100 / 12.5)`. Exposure is `1 / (1.2 × 2^EV100)` | PASS |
 | `exposure_histogram` | ≤ 0.10 stops | `histogram_ev100` on a grey field with a one-pixel sun, and on a field whose top 9% is that sun, against `log2(0.18 × 100 / 12.5)`. The 9% sits inside the dropped tail | PASS. Removing the 10% drop fails the heavy tail |
 | `exposure_still` | ≤ 0.001 | max consecutive relative change of exposure over 8 identical frames | PASS. `exposure_still_change` holds on `step_exposure` |

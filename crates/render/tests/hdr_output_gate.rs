@@ -19,6 +19,7 @@ use genos_render::{
     ev100_from_luminance, exposure_adapt_outside, exposure_from_camera, exposure_from_ev100,
     exposure_overshoot, exposure_still_change, exposure_with_compensation, graphics_white_linear,
     hdr10_pq, histogram_ev100, karis_downsample_rgb, karis_firefly_response, linear_from_display,
+    pack_f32,
     pick_hdr_output, pq_st2084, rec2020_from_rec709, resolve_swapchain,
     scene_luma, scrgb_code, scrgb_from_display, step_exposure, swapchain_nits, tone, HdrSwapchain,
     HDR_PEAK_NITS,
@@ -35,6 +36,8 @@ use std::sync::OnceLock;
 const LEGACY_MAX: f64 = 1e-4;
 /// Max code delta of the plain compose picture against the stored shoulder.
 const LEGACY_CODE_MAX: f64 = 0.0;
+/// Max code delta of hdr_agx mode 0 against `tone`, after 8-bit dither.
+const GPU_LEGACY_MAX: f64 = 1.0;
 const EV_MAX: f64 = 1e-9;
 const HIST_MAX: f64 = 0.10;
 const CAMERA_MAX: f64 = 1e-9;
@@ -246,6 +249,7 @@ fn live_metrics() -> Vec<Metric> {
     vec![
         at_most("legacy_inverse", legacy_inverse_error(), LEGACY_MAX),
         at_most("legacy_shader", legacy_shader_error(false), LEGACY_CODE_MAX),
+        at_most("gpu_legacy", gpu_legacy_error(false), GPU_LEGACY_MAX),
         at_most(
             "exposure_ev",
             exposure_patch_error(ev100_from_luminance, exposure_from_ev100),
@@ -291,6 +295,7 @@ fn proof_good() -> Vec<Metric> {
     vec![
         at_most("legacy_inverse", legacy_inverse_error(), LEGACY_MAX),
         at_most("legacy_shader", legacy_shader_error(false), LEGACY_CODE_MAX),
+        at_most("gpu_legacy", gpu_legacy_error(false), GPU_LEGACY_MAX),
         at_most(
             "exposure_ev",
             exposure_patch_error(ev100_from_luminance, exposure_from_ev100),
@@ -340,6 +345,7 @@ fn proof_broken() -> Vec<Metric> {
     vec![
         at_most("legacy_inverse", identity_inverse_error(), LEGACY_MAX),
         at_most("legacy_shader", legacy_shader_error(true), LEGACY_CODE_MAX),
+        at_most("gpu_legacy", gpu_legacy_error(true), GPU_LEGACY_MAX),
         at_most(
             "exposure_ev",
             exposure_patch_error(ev100_from_luminance, exposure_without_saturation),
@@ -1331,6 +1337,129 @@ fn capture_legacy() -> LegacyGrab {
     LegacyGrab {
         ok: true,
         pixels: first,
+    }
+}
+
+struct LegacyModeGrab {
+    ok: bool,
+    width: usize,
+    height: usize,
+    bgra: bool,
+    pixels: Vec<u8>,
+    scene: Vec<f64>,
+    exposure: f64,
+    shoulder_pixels: u32,
+}
+
+fn legacy_mode_grab() -> &'static LegacyModeGrab {
+    static GRAB: OnceLock<LegacyModeGrab> = OnceLock::new();
+    GRAB.get_or_init(capture_legacy_mode)
+}
+
+/// `hdr_agx.comp` mode 0 against `tone`. Not the plain compose compile.
+fn gpu_legacy_error(broken: bool) -> f64 {
+    let grab = legacy_mode_grab();
+    if !grab.ok || grab.shoulder_pixels == 0 {
+        return 255.0;
+    }
+    let pixels = grab.width.saturating_mul(grab.height);
+    let mut worst = 0.0;
+    for index in 0..pixels {
+        let scene = rgb3(&grab.scene, index);
+        let got = displayed(&grab.pixels, index, grab.bgra);
+        for channel in 0..3 {
+            let exposed = grab.exposure * scene[channel];
+            let formed = f64::from(tone(pack_f32(exposed))).clamp(0.0, 1.0);
+            let want = (formed * 255.0).round();
+            let mut code = got[channel] * 255.0;
+            if broken {
+                code += 8.0;
+            }
+            let err = (code - want).abs();
+            if err > worst {
+                worst = err;
+            }
+        }
+    }
+    worst
+}
+
+fn capture_legacy_mode() -> LegacyModeGrab {
+    let empty = LegacyModeGrab {
+        ok: false,
+        width: 0,
+        height: 0,
+        bgra: false,
+        pixels: Vec::new(),
+        scene: Vec::new(),
+        exposure: 0.0,
+        shoulder_pixels: 0,
+    };
+    let scene = match load_hall() {
+        Ok(scene) => scene,
+        Err(err) => {
+            eprintln!("hdr gate gpu_legacy: {err}");
+            return empty;
+        }
+    };
+    let mut world = World::from_scene(scene);
+    world.scene.lighting = LightingSettings::preset(LightingPreset::Potato);
+    world.scene.lighting.ambient.intensity = 8.0;
+    let mut hdr = HdrSettings::for_preset(LightingPreset::Potato);
+    hdr.display = genos_scene::DisplayTransform::Legacy;
+    hdr.exposure_mode = genos_scene::ExposureMode::Fixed;
+    hdr.ev100 = 0.0;
+    hdr.compensation = 0.0;
+    hdr.bloom = false;
+    hdr.legacy_bytes = false;
+    world.scene.hdr = hdr;
+    let opened = open_grade_renderer();
+    let (mut window, mut renderer) = match opened {
+        Ok(pair) => pair,
+        Err(err) => {
+            eprintln!("hdr gate gpu_legacy: {err}");
+            return empty;
+        }
+    };
+    let camera = Camera::opening();
+    if let Err(err) = draw_once(&mut window, &mut renderer, &world, &camera) {
+        eprintln!("hdr gate gpu_legacy: {err}");
+        return empty;
+    }
+    let pixels = match draw_once(&mut window, &mut renderer, &world, &camera) {
+        Ok(pixels) => pixels,
+        Err(err) => {
+            eprintln!("hdr gate gpu_legacy: {err}");
+            return empty;
+        }
+    };
+    let scene = match renderer.read_scene() {
+        Ok(scene) => scene,
+        Err(err) => {
+            eprintln!("hdr gate gpu_legacy: {err}");
+            return empty;
+        }
+    };
+    let exposure = renderer.hdr_exposure();
+    let width = usize::try_from(scene.width).unwrap_or(0);
+    let height = usize::try_from(scene.height).unwrap_or(0);
+    let mut shoulder_pixels = 0u32;
+    for index in 0..width.saturating_mul(height) {
+        let color = rgb3(&scene.rgb, index);
+        if color.iter().any(|channel| exposure * *channel > 0.64) {
+            shoulder_pixels = shoulder_pixels.saturating_add(1);
+        }
+    }
+    let (format, _) = renderer.hdr_surface();
+    LegacyModeGrab {
+        ok: true,
+        width,
+        height,
+        bgra: format == FORMAT_BGRA8,
+        pixels,
+        scene: scene.rgb,
+        exposure,
+        shoulder_pixels,
     }
 }
 

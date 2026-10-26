@@ -11,7 +11,7 @@ crates/render/shaders/lighting_cache.glsl 338
 crates/render/shaders/lighting_check.comp 4
 crates/render/shaders/lighting_common.glsl 46
 crates/render/shaders/lighting_compact.comp 41
-crates/render/shaders/lighting_compose.comp 48
+crates/render/shaders/lighting_compose.comp 44
 crates/render/shaders/lighting_direct.comp 42
 crates/render/shaders/lighting_filter.comp 11
 crates/render/shaders/lighting_gather.comp 28
@@ -19,7 +19,7 @@ crates/render/shaders/lighting_lamp_pick.glsl 5
 crates/render/shaders/lighting_pack.glsl 6
 crates/render/shaders/lighting_place.comp 8
 crates/render/shaders/lighting_screen.comp 10
-crates/render/shaders/lighting_sun_compose.comp 47
+crates/render/shaders/lighting_sun_compose.comp 43
 crates/render/shaders/lighting_trace.comp 12
 crates/render/shaders/material_atlas.glsl 10
 crates/render/shaders/mesh_field.glsl 18
