@@ -32,11 +32,11 @@ pub use lighting_regions::{
     Aabb, ChangeRecord, FinishedLight, GiRegionStats, WorldCacheRegion, WorldCacheRegions,
 };
 pub use lighting_schedule::{
-    bias_guard, caps_for, coarse_cap_bytes, evict_coarse, floor_for, guard_edge_for, lit_frame,
-    loosen_for, merge_into_parent, near_radius_for, projected_px, scale_u32, screen_plan,
-    select_refresh, should_add_level, should_remove_level, zone_of, BudgetController, CoarseEntry,
-    GuardEdges, ItemZone, LitFrame, MsmeSample, QualityFloor, ScreenPlan, WorkCaps, WorkItem,
-    LEVEL_METRES,
+    bias_guard, caps_for, coarse_cap_bytes, evict_coarse, floor_for, grant_u32, guard_edge_for,
+    lit_frame, lit_target, loosen_for, merge_into_parent, near_radius_for, projected_px, scale_u32,
+    schedule_push, screen_plan, select_refresh, should_add_level, should_remove_level, zone_of,
+    BudgetController, CoarseEntry, GuardEdges, ItemZone, LitFrame, MsmeSample, QualityFloor,
+    SchedulePush, ScreenPlan, WorkCaps, WorkItem, LEVEL_METRES,
 };
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};

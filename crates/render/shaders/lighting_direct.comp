@@ -254,13 +254,21 @@ void main() {
     uint count = lamp_list_size(list);
     // S78J: a pixel whose point and lamps match last frame's, in a quiet frame.
     uint pix_sig = 0u;
+    bool direct_hold = false;
+    if (idx < pixels && (pc.schedule.x & 1u) != 0u) {
+        direct_hold = !lighting_tile_kept(uvec2(idx % pc.dims.x, idx / pc.dims.x));
+    }
     if (lighting_pix_reuse_on() && idx < pixels) {
         pix_sig = lighting_pix_sig(pos, n, two_sided, list);
         vec4 pv = work.v[lighting_pix_at() + idx / 2u];
         uint c = (idx & 1u) * 2u;
         // A small sun step still traces. Reusing last frame's direct would
         // leave the sun and its shadow a frame behind.
-        if (pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig && lighting_pix_quiet() && !lighting_sun_small()) {
+        // Outside the refresh rect, a stored direct value stays up. An empty
+        // slot falls through and traces, so the first sight of a pixel is not a hole.
+        bool quiet_hit = pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig && lighting_pix_quiet();
+        bool held_hit = direct_hold && floatBitsToUint(pv[c]) != 0u;
+        if ((quiet_hit || held_hit) && !lighting_sun_small()) {
             uint emitted = gbuf.px[idx].w;
             uint glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? 0u : emitted;
             uint prev = outc.px[pixels + idx];

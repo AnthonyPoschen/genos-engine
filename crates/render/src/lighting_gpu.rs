@@ -43,9 +43,10 @@ pub(crate) const LIGHTING_RAYS: u32 = 64;
 const LIGHTING_CACHE_SLOTS: u64 = 1048576;
 const LIGHTING_CACHE_BATCH: u32 = 98304;
 const LIGHTING_CACHE_RAYS: u32 = 16;
-/// `pc.dims` + `pc.params` + `pc.lamp`. A shader that ignores `pc.lamp` still
-/// accepts a 48-byte push.
-const LIGHTING_PC_BYTES: u32 = 48;
+/// `pc.dims` + `pc.params` + `pc.lamp` + schedule words + display size.
+/// Zero schedule words keep the symmetric eye ray and leave every pass on.
+const LIGHTING_PC_WORDS: usize = 20;
+const LIGHTING_PC_BYTES: u32 = 80;
 /// ckeys word of the WRC refresh lists' two counts (lighting_cache.glsl LIGHTING_WRC_CHG_COUNT_AT).
 const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
@@ -284,6 +285,15 @@ pub(crate) struct Lighting {
     /// Last collected frame (one frame behind the one just submitted).
     last_ms: [f64; BUCKETS],
     last_dispatches: [u32; BUCKETS],
+    /// Scales the work caps from the last recorded lighting total. Stays at 1
+    /// until a GI sample is recorded, so a picture test does not feed lavapipe times.
+    budget: crate::lighting_schedule::BudgetController,
+    /// Lit picture from the last prepare. Zero until the guard band is applied.
+    lit: crate::lighting_schedule::LitFrame,
+    /// Probe tile used to size that picture. Zero uses the height rule.
+    sched_tile: u32,
+    /// Gates and caps pushed with this frame.
+    last_schedule: crate::lighting_schedule::SchedulePush,
     /// Control block uploaded with the frame, reused by the async queue.
     ctrl_bytes: [u8; 64],
 }
@@ -464,6 +474,21 @@ impl Default for Lighting {
             frame_prefill: [false; 2],
             last_ms: [0.0; BUCKETS],
             last_dispatches: [0; BUCKETS],
+            budget: crate::lighting_schedule::BudgetController::new(),
+            lit: crate::lighting_schedule::LitFrame {
+                lit_w: 0,
+                lit_h: 0,
+                crop_x: 0,
+                crop_y: 0,
+                display_w: 0,
+                display_h: 0,
+                left: 0.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            },
+            sched_tile: 0,
+            last_schedule: crate::lighting_schedule::SchedulePush::default(),
             ctrl_bytes: [0; 64],
         }
     }
@@ -1622,7 +1647,7 @@ impl Gpu {
     /// the live patches, trace and light this round's batch of their rays, relight
     /// them. Skipped while the last round still runs, so at most one is in flight
     /// and a slow round never queues up work behind it.
-    fn submit_lighting_world(&mut self, pc: [u32; 12]) -> Result<bool, String> {
+    fn submit_lighting_world(&mut self, pc: [u32; LIGHTING_PC_WORDS]) -> Result<bool, String> {
         if self.lighting.world_busy || self.lighting.world_cmd.is_null() {
             return Ok(false);
         }
@@ -2332,13 +2357,43 @@ impl Gpu {
         if self.gpu_times.as_ref().is_some_and(|times| times.record) {
             lamp[1] |= 1 << 17;
         }
-        let pc = [
+        let sched_tile = if self.lighting.sched_tile != 0 {
+            self.lighting.sched_tile
+        } else {
+            tile
+        };
+        let lit = if self.lighting.lit.lit_w == w && self.lighting.lit.lit_h == h {
+            self.lighting.lit
+        } else {
+            crate::lighting_schedule::lit_frame(
+                w,
+                h,
+                crate::lighting_schedule::GuardEdges {
+                    left: 0.0,
+                    right: 0.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                },
+                sched_tile.max(1),
+            )
+        };
+        let sched = crate::lighting_schedule::schedule_push(
+            &self.lighting.settings,
+            self.lighting.budget.scale,
+            lit,
+            sched_tile,
+            self.lighting.settings.probe_rays(),
+            u32::try_from(records.len()).unwrap_or(u32::MAX),
+            self.lighting.frame,
+        );
+        self.lighting.last_schedule = sched;
+        let head = [
             w,
             h,
             cols,
             rows,
             self.lighting.settings.probe_rays(),
-            tile,
+            sched_tile,
             z,
             self.lighting.frame,
             lamp[0],
@@ -2346,6 +2401,10 @@ impl Gpu {
             lamp[2],
             lamp[3],
         ];
+        let mut pc = [0u32; LIGHTING_PC_WORDS];
+        pc[..12].copy_from_slice(&head);
+        pc[12..16].copy_from_slice(&sched.words);
+        pc[16..20].copy_from_slice(&sched.tail);
         let image = self.color.image;
         let blocks = (w.div_ceil(8) as u64) * (h.div_ceil(8) as u64);
         // Full compose when the picture has no history yet, the camera or the
@@ -2389,7 +2448,6 @@ impl Gpu {
             && self.lighting.settings.cache_rays_this_frame(self.lighting.frame);
         let round = due && !try_async;
         self.lighting.stats_round[slot] = round;
-        let mut pc = pc;
         if round {
             let n = self.lighting.world_round;
             self.lighting.world_round = n.wrapping_add(1);

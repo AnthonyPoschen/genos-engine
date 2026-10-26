@@ -81,6 +81,15 @@ layout(push_constant) uniform Push {
     // z: spatial radius in pixels (0 skips the neighbour merge)
     // w: M cap for the biased merge
     uvec4 lamp;
+    // x: bit 0 direct gate, bit 1 atrous gate, bit 2 trace gate, bit 3 detail levels.
+    //    Bits 8-31 are the cache-ray grant. Zero keeps the whole batch.
+    // y: tile rect, one byte each of x, y, width, height.
+    // z: starvation band, y then height.
+    // w: crop x in the low half, crop y in the high half.
+    uvec4 schedule;
+    // Display width and height, spawn cap, coarse-slot cap.
+    // A zero display size keeps the symmetric eye ray over pc.dims.
+    uvec4 frame;
 } pc;
 
 #include "lighting_cache_slots.glsl"
@@ -218,13 +227,45 @@ vec3 lighting_ray_light(vec4 v) {
 const vec4 LIGHTING_MISS = vec4(-1.0, 0.0, 0.0, 0.0);
 
 // The eye ray through pixel p (picture y down, clip space Y flipped).
+// A guard-band picture measures p from the display, after the crop, so a
+// displayed pixel matches the unguarded camera. Zero display size is that
+// camera over the whole target.
 vec3 lighting_eye_dir(uvec2 p) {
-    vec2 ndc = vec2((float(p.x) + 0.5) / float(pc.dims.x) * 2.0 - 1.0,
-                    1.0 - (float(p.y) + 0.5) / float(pc.dims.y) * 2.0);
+    float px = float(p.x) + 0.5;
+    float py = float(p.y) + 0.5;
+    float w = float(pc.dims.x);
+    float h = float(pc.dims.y);
+    if (pc.frame.x != 0u && pc.frame.y != 0u) {
+        uint crop = pc.schedule.w;
+        px -= float(crop & 0xffffu);
+        py -= float(crop >> 16u);
+        w = float(pc.frame.x);
+        h = float(pc.frame.y);
+    }
+    vec2 ndc = vec2(px / w * 2.0 - 1.0, 1.0 - py / h * 2.0);
     float t = scene.view_right.w;
     float aspect = scene.view_forward.w;
     return normalize(scene.view_forward.xyz + ndc.x * t * aspect * scene.view_right.xyz
                      + ndc.y * t * scene.view_up.xyz);
+}
+
+// Probe-tile rect the scheduler is refreshing, plus the starvation band.
+bool lighting_tile_kept(uvec2 pix) {
+    uint tile = max(pc.params.y, 1u);
+    uint tx = pix.x / tile;
+    uint ty = pix.y / tile;
+    uint rect = pc.schedule.y;
+    uint x0 = rect & 255u;
+    uint y0 = (rect >> 8u) & 255u;
+    uint rw = (rect >> 16u) & 255u;
+    uint rh = (rect >> 24u) & 255u;
+    if (tx >= x0 && tx < x0 + rw && ty >= y0 && ty < y0 + rh) {
+        return true;
+    }
+    uint band = pc.schedule.z;
+    uint sy = band & 255u;
+    uint sh = (band >> 8u) & 255u;
+    return sh != 0u && ty >= sy && ty < sy + sh;
 }
 
 // G-buffer surface at pixel p: false where the pixel shows nothing.

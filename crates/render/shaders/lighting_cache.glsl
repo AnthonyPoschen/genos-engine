@@ -3582,7 +3582,48 @@ void lighting_svgf_variance(uint slot) {
         }
     }
 }
+// Atrous gate: a slot the scheduler is not refreshing keeps its filtered value.
+// The gate is off when bit 1 is clear, which is every still frame whose denoise
+// grant covers the picture. Both wavelet launches call this, so they filter
+// the same slots.
+bool lighting_slot_in_budget(uint slot) {
+    if ((pc.schedule.x & 2u) == 0u) {
+        return true;
+    }
+    vec3 pos;
+    vec3 nrm;
+    if (!lighting_sc_texel_world(slot, pos, nrm)) {
+        return false;
+    }
+    vec3 v = pos - scene.eye.xyz;
+    float fz = dot(v, scene.view_forward.xyz);
+    if (!(fz > 1.0e-3)) {
+        return false;
+    }
+    float t = scene.view_right.w;
+    float aspect = scene.view_forward.w;
+    if (!(t > 1.0e-6)) {
+        return true;
+    }
+    float ndc_x = dot(v, scene.view_right.xyz) / (fz * t * max(aspect, 1.0e-6));
+    float ndc_y = dot(v, scene.view_up.xyz) / (fz * t);
+    uint dw = pc.frame.x != 0u ? pc.frame.x : pc.dims.x;
+    uint dh = pc.frame.y != 0u ? pc.frame.y : pc.dims.y;
+    float sx = (ndc_x * 0.5 + 0.5) * float(dw);
+    float sy = (0.5 - ndc_y * 0.5) * float(dh);
+    uint crop = pc.schedule.w;
+    int px = int(floor(sx)) + int(crop & 0xffffu);
+    int py = int(floor(sy)) + int(crop >> 16u);
+    if (px < 0 || py < 0) {
+        return false;
+    }
+    return lighting_tile_kept(uvec2(uint(px), uint(py)));
+}
+
 void lighting_svgf_iter(uint slot, uint it) {
+    if (!lighting_slot_in_budget(slot)) {
+        return;
+    }
 #ifndef LIGHTING_DENOISE_PLAIN
     // Before the dirty early-out. A clean texel still has to publish the last
     // applied level, or the push keeps a stale or empty A. Not in the plain

@@ -98,6 +98,13 @@ void main() {
         ray += lighting_probe_rays();
     }
     uint rays_end = mode == 1u ? lighting_probe_rays() : lighting_all_rays();
+    // Cache-ray grant from the controller. Zero keeps the batch. Probe, fill,
+    // and kept-hit retraces are not this range.
+    uint ray_grant = pc.schedule.x >> 8u;
+    if (ray_grant != 0u && ray >= lighting_probe_rays() && ray < rays_end
+        && ray - lighting_probe_rays() >= ray_grant) {
+        return;
+    }
     uint at;
     vec3 origin;
     vec3 dir;
@@ -140,6 +147,20 @@ void main() {
                 hold_check = true;
                 hold_old = old;
                 hold_probe = pr;
+            }
+        }
+    }
+    // Trace gate: a probe outside the refresh rect keeps a finished hit or miss.
+    // An empty slot still traces, so a surface seen for the first time is not a hole.
+    if (probe_ray && ray < lighting_probe_rays() && (pc.schedule.x & 4u) != 0u) {
+        uint cols = max(pc.dims.z, 1u);
+        uint pr = ray / max(lighting_rays(), 1u);
+        uint tile_px = max(pc.params.y, 1u);
+        uvec2 pix = uvec2((pr % cols) * tile_px, (pr / cols) * tile_px);
+        if (!lighting_tile_kept(pix)) {
+            vec4 cur = work.v[at];
+            if (cur.x >= 0.0 || cur.x < -0.75) {
+                return;
             }
         }
     }

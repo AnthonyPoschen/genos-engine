@@ -648,6 +648,191 @@ fn rect_wh(tiles_x: u32, tiles_y: u32, count: u32) -> (u32, u32) {
     (w, h)
 }
 
+/// Push constants for one frame. `tail` is display size, the spawn cap, and the coarse-slot cap.
+/// A zero display size keeps the symmetric eye ray.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SchedulePush {
+    pub words: [u32; 4],
+    pub tail: [u32; 4],
+    pub plan: ScreenPlan,
+    pub lit: LitFrame,
+    pub scale: f32,
+    pub lighting_cap_ms: f32,
+}
+
+impl Default for SchedulePush {
+    fn default() -> Self {
+        Self {
+            words: [0; 4],
+            tail: [0; 4],
+            plan: clear_plan(),
+            lit: LitFrame {
+                lit_w: 0,
+                lit_h: 0,
+                crop_x: 0,
+                crop_y: 0,
+                display_w: 0,
+                display_h: 0,
+                left: 0.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            },
+            scale: 1.0,
+            lighting_cap_ms: 8.0,
+        }
+    }
+}
+
+fn clear_plan() -> ScreenPlan {
+    ScreenPlan {
+        direct_gate: false,
+        atrous_gate: false,
+        trace_gate: false,
+        tile_x: 0,
+        tile_y: 0,
+        tile_w: 0,
+        tile_h: 0,
+        starve_y: 0,
+        starve_h: 0,
+        cache_ray_grant: 0,
+    }
+}
+
+/// Work-cap multiply. `scale` may rise to 4 for the test knob. Zero stays zero.
+#[must_use]
+pub fn grant_u32(value: u32, scale: f32) -> u32 {
+    if value == 0 || !scale.is_finite() || scale <= 0.0 {
+        return 0;
+    }
+    let scaled = (f64::from(value) * f64::from(scale.clamp(SCALE_FLOOR, 4.0))).floor();
+    if scaled <= 1.0 {
+        1
+    } else if scaled >= f64::from(u32::MAX) {
+        u32::MAX
+    } else {
+        scaled as u32
+    }
+}
+
+/// Lit picture for this camera step. Global mode and a zero guard stay on the display.
+#[must_use]
+pub fn lit_target(
+    settings: &genos_scene::LightingSettings,
+    display_w: u32,
+    display_h: u32,
+    tile: u32,
+    yaw_delta: f32,
+    pitch_delta: f32,
+) -> LitFrame {
+    let display_w = display_w.max(1);
+    let display_h = display_h.max(1);
+    let tile = tile.max(1);
+    let edges = if settings.schedule == genos_scene::ScheduleMode::Global || !(settings.guard_edge > 0.0)
+    {
+        GuardEdges {
+            left: 0.0,
+            right: 0.0,
+            top: 0.0,
+            bottom: 0.0,
+        }
+    } else {
+        bias_guard(settings.guard_edge, yaw_delta, pitch_delta)
+    };
+    lit_frame(display_w, display_h, edges, tile)
+}
+
+/// Gates, crop, and caps for the frame. Global mode pushes zeros.
+#[must_use]
+pub fn schedule_push(
+    settings: &genos_scene::LightingSettings,
+    controller_scale: f32,
+    lit: LitFrame,
+    tile: u32,
+    probe_rays: u32,
+    changes: u32,
+    frame: u32,
+) -> SchedulePush {
+    let preset = settings.preset_label();
+    let caps = caps_for(preset);
+    if settings.schedule == genos_scene::ScheduleMode::Global {
+        let display = lit_frame(
+            lit.display_w.max(1),
+            lit.display_h.max(1),
+            GuardEdges {
+                left: 0.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            },
+            1,
+        );
+        return SchedulePush {
+            words: [0; 4],
+            tail: [0; 4],
+            plan: clear_plan(),
+            lit: display,
+            scale: 1.0,
+            lighting_cap_ms: caps.lighting_ms,
+        };
+    }
+    let knob = if settings.budget_scale.is_finite() {
+        settings.budget_scale.clamp(SCALE_FLOOR, 4.0)
+    } else {
+        1.0
+    };
+    let ctrl = if controller_scale.is_finite() {
+        controller_scale.clamp(SCALE_FLOOR, 1.0)
+    } else {
+        1.0
+    };
+    let scale = (ctrl * knob).clamp(SCALE_FLOOR, 4.0);
+    let scaled = scale < 0.999;
+    let tile = tile.max(1);
+    let tiles_x = lit.lit_w.div_ceil(tile).max(1);
+    let tiles_y = lit.lit_h.div_ceil(tile).max(1);
+    let pixels = lit.lit_w.saturating_mul(lit.lit_h);
+    let probes = tiles_x.saturating_mul(tiles_y);
+    let trace_demand = if settings.gi.enabled && settings.probes.enabled {
+        probes.saturating_mul(probe_rays)
+    } else {
+        0
+    };
+    let denoise_demand = if settings.denoiser.enabled { pixels } else { 0 };
+    let plan = screen_plan(
+        tiles_x,
+        tiles_y,
+        grant_u32(caps.fresh_shadow_rays, scale),
+        pixels,
+        grant_u32(caps.denoise_items, scale),
+        denoise_demand,
+        grant_u32(caps.screen_probe_rays, scale),
+        trace_demand,
+        changes,
+        scaled,
+        frame,
+        grant_u32(caps.cache_rays, scale),
+    );
+    let mut words = plan.words(lit.crop_x, lit.crop_y);
+    if plan.cache_ray_grant > 0 {
+        words[0] |= plan.cache_ray_grant.min(0x00ff_ffff) << 8;
+    }
+    let coarse_slots = u32::try_from(coarse_cap_bytes(preset) / 368).unwrap_or(u32::MAX);
+    SchedulePush {
+        words,
+        tail: [
+            lit.display_w,
+            lit.display_h,
+            grant_u32(caps.spawns, scale),
+            coarse_slots,
+        ],
+        plan,
+        lit,
+        scale,
+        lighting_cap_ms: caps.lighting_ms,
+    }
+}
+
 impl ScreenPlan {
     /// Push-constant words. Flags, one tile rect, the starvation band, the crop.
     #[must_use]
@@ -863,5 +1048,86 @@ mod tests {
         assert_eq!(caps.denoise_items, 16_000);
         assert!((caps.lighting_ms - 8.0).abs() < 1.0e-6);
         assert_eq!(caps_for("potato").lighting_ms.to_bits(), 1.5_f32.to_bits());
+    }
+
+    fn display(w: u32, h: u32) -> LitFrame {
+        lit_frame(
+            w,
+            h,
+            GuardEdges {
+                left: 0.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            },
+            16,
+        )
+    }
+
+    #[test]
+    fn a_covered_high_picture_pushes_no_gate() {
+        let settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+        let push = schedule_push(&settings, 1.0, display(1280, 720), 16, 64, 0, 1);
+        assert!(push.plan.gates_off());
+        assert_eq!(push.words[0], 0);
+        assert_eq!(push.tail[0], 1280);
+        assert_eq!(push.tail[1], 720);
+    }
+
+    #[test]
+    fn a_mover_at_720p_gates_denoise_and_leaves_direct_and_trace() {
+        let settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+        let push = schedule_push(&settings, 1.0, display(1280, 720), 16, 64, 2, 4);
+        assert!(push.plan.atrous_gate);
+        assert!(!push.plan.direct_gate);
+        assert!(!push.plan.trace_gate);
+        assert!(push.plan.tile_w * push.plan.tile_h < 80 * 45);
+    }
+
+    #[test]
+    fn high_1080p_with_a_change_gates_direct_and_trace() {
+        let settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+        let push = schedule_push(&settings, 1.0, display(1920, 1080), 16, 64, 1, 1);
+        assert!(push.plan.direct_gate);
+        assert!(push.plan.trace_gate);
+        assert!(push.plan.atrous_gate);
+    }
+
+    #[test]
+    fn the_controller_scale_shrinks_the_refresh_rect() {
+        let settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+        let lit = display(1920, 1080);
+        let full = schedule_push(&settings, 1.0, lit, 16, 64, 1, 1);
+        let half = schedule_push(&settings, 0.5, lit, 16, 64, 1, 1);
+        let full_n = full.plan.tile_w * full.plan.tile_h;
+        let half_n = half.plan.tile_w * half.plan.tile_h;
+        assert!(half_n < full_n);
+        assert!((half.scale - 0.5).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn global_mode_pushes_zero_schedule_words() {
+        let mut settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+        settings.schedule = genos_scene::ScheduleMode::Global;
+        let push = schedule_push(&settings, 0.25, display(1280, 720), 16, 64, 4, 1);
+        assert_eq!(push.words, [0; 4]);
+        assert_eq!(push.tail, [0; 4]);
+        assert!(push.plan.gates_off());
+        assert_eq!(push.lit.lit_w, 1280);
+        assert_eq!(push.lit.crop_x, 0);
+    }
+
+    #[test]
+    fn high_guard_grows_the_lit_frame_around_the_display() {
+        let settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+        let lit = lit_target(&settings, 1280, 720, 16, 0.0, 0.0);
+        assert!(lit.lit_w > 1280);
+        assert!(lit.lit_h > 720);
+        assert_eq!(lit.lit_w % 16, 0);
+        assert_eq!(lit.crop_x % 16, 0);
+        assert!(lit.crop_x + 1280 <= lit.lit_w);
+        assert!(lit.crop_y + 720 <= lit.lit_h);
+        let mid = lit.crop_x + 640;
+        assert!((mid as i32 - lit.lit_w as i32 / 2).abs() < 32);
     }
 }
