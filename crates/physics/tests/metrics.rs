@@ -10,11 +10,12 @@
 //! `spin` is a long thin box that turns a quarter-circle in one step beside a
 //! block. `tunnel_count` is the block still at rest. `wide` is the swept ships
 //! 40 m apart, one step, so a time-of-impact cap of one advance fails
-//! `tunnel_count`.
+//! `tunnel_count`. `rotor` is a cube in free flight. `rotational_energy_j`
+//! is checked against `1/2 ωᵀ I ω` from the box size and mass.
 //!
 //! ```text
 //! --out DIR
-//! --fixture proof|good|bad|discrete|loss|broken|spin|wide
+//! --fixture proof|good|bad|discrete|loss|broken|spin|wide|rotor
 //! ```
 //!
 //! `--out` defaults to `./genos-debug/physics`. `GENOS_PHYSICS_METRICS_OUT`
@@ -46,6 +47,8 @@ enum Bound {
     AtMost,
     AtLeast,
     AbsAtMost,
+    /// `|value - threshold| <= 1e-4`.
+    Near,
 }
 
 struct Spec {
@@ -100,6 +103,30 @@ const SPIN_METRICS: &[Spec] = &[
         bound: Bound::AtMost,
         threshold: 0.0,
         threshold_text: "<=0",
+    },
+    Spec {
+        name: "determinism_hash_match",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+];
+
+/// `Izz = m/3 (hx² + hy²)`, then `1/2 Izz ωz²`. Cube half extents are 1 m, mass 3 kg, `ωz` is 2 rad/s.
+const fn rotor_joules() -> f64 {
+    let mass = 3.0;
+    let half = 1.0;
+    let spin = 2.0;
+    let izz = mass / 3.0 * (half * half + half * half);
+    0.5 * izz * spin * spin
+}
+
+const ROTOR_METRICS: &[Spec] = &[
+    Spec {
+        name: "rotational_energy_j",
+        bound: Bound::Near,
+        threshold: rotor_joules(),
+        threshold_text: "=4",
     },
     Spec {
         name: "determinism_hash_match",
@@ -201,6 +228,7 @@ enum Fixture {
     Broken,
     Spin,
     Wide,
+    Rotor,
 }
 
 impl Fixture {
@@ -214,6 +242,7 @@ impl Fixture {
             Self::Broken => "broken",
             Self::Spin => "spin",
             Self::Wide => "wide",
+            Self::Rotor => "rotor",
         }
     }
 }
@@ -308,6 +337,14 @@ fn run() -> Result<i32, String> {
             let reading = measure_wide()?;
             let rows = judge_wide(&reading);
             write_report(&args.out, "wide", &reading, &rows)?;
+            print_scene(&reading);
+            print_rows(&rows);
+            Ok(exit_code(&rows))
+        }
+        Fixture::Rotor => {
+            let reading = measure_rotor()?;
+            let rows = judge_rotor(&reading);
+            write_report(&args.out, "rotor", &reading, &rows)?;
             print_scene(&reading);
             print_rows(&rows);
             Ok(exit_code(&rows))
@@ -446,6 +483,7 @@ fn parse_fixture(text: &str) -> Result<Fixture, String> {
         "broken" => Ok(Fixture::Broken),
         "spin" => Ok(Fixture::Spin),
         "wide" => Ok(Fixture::Wide),
+        "rotor" => Ok(Fixture::Rotor),
         other => Err(format!("unknown fixture {other}")),
     }
 }
@@ -476,7 +514,7 @@ fn setup(fixture: &Fixture) -> Result<Setup, String> {
             protect: false,
             full_energy: true,
         }),
-        Fixture::Proof | Fixture::Broken | Fixture::Spin | Fixture::Wide => {
+        Fixture::Proof | Fixture::Broken | Fixture::Spin | Fixture::Wide | Fixture::Rotor => {
             Err("proof does not score itself".into())
         }
     }
@@ -488,8 +526,8 @@ fn print_help() {
 --out DIR
     JSON directory. Default ./genos-debug/physics.
     GENOS_PHYSICS_METRICS_OUT applies only when --out is omitted.
---fixture proof|good|bad|discrete|loss|broken|spin|wide
-    proof runs the ship fixtures, the broken overhang, the spinning pair, and the 40 m ships. Default proof.
+--fixture proof|good|bad|discrete|loss|broken|spin|wide|rotor
+    proof runs the ship fixtures, the broken overhang, the spinning pair, the 40 m ships, and the free-flight rotor. Default proof.
     GENOS_PHYSICS_METRICS_FIXTURE applies only when --fixture is omitted.
 good and bad both run ships and bullet at {TUNNEL_SPEED} m/s.
     good marks the bullet speculative and both ships swept. bad leaves protection off, so the ships tunnel.
@@ -501,6 +539,8 @@ spin is one step: a long thin swept box turns a quarter-circle beside a block.
     tunnel_count is 1 when that block is still at rest.
 wide is one step: swept ships start 40 m apart at {TUNNEL_SPEED} m/s.
     A time-of-impact cap of one advance leaves a gap and fails tunnel_count.
+rotor spins a 3 kg cube, half extents 1 m, at 2 rad/s for {STEPS} steps with no gravity.
+    rotational_energy_j is 1/2 Izz ωz² from that size and mass.
 Ship fixtures call step {STEPS} times at 1/60 s.
 Exit 0 when no metric is FAIL. Exit 1 when a metric is FAIL. Exit 2 on a bad argument."
     );
@@ -720,6 +760,57 @@ fn run_wide() -> Result<WideRun, String> {
         contacts_stored: f64::from(stored),
         world,
     })
+}
+
+fn measure_rotor() -> Result<Reading, String> {
+    let first = run_rotor()?;
+    let second = run_rotor()?;
+    let match_bit = u8::from(hash_state(&first.0) == hash_state(&second.0));
+    Ok(Reading {
+        tunnel_count: 0.0,
+        penetration_m: 0.0,
+        energy_drift: first.1,
+        determinism_hash_match: f64::from(match_bit),
+        contacts_stored: 0.0,
+        toi_deferred: 0.0,
+        ship_speed: 0.0,
+        bullet_speed: 0.0,
+        protect: false,
+        full_energy: false,
+        ccd_in_step: false,
+        steps: STEPS,
+    })
+}
+
+/// Free flight, no gravity. The joules are `Body::rotational_energy` after the
+/// steps. The expected number is [`rotor_joules`], from the half extents and mass.
+fn run_rotor() -> Result<(World, f64), String> {
+    let mut cube = Body::cuboid(
+        genos_math::Vec3::ZERO,
+        3.0,
+        genos_math::Vec3::new(1.0, 1.0, 1.0),
+    );
+    cube.angular_velocity = genos_math::Vec3::new(0.0, 0.0, 2.0);
+    let mut world = World::new(genos_math::Vec3::ZERO);
+    let index = world.insert(cube);
+    for _ in 0..STEPS {
+        genos_physics::step(&mut world, DT);
+    }
+    let joules = world
+        .bodies
+        .get(index)
+        .ok_or_else(|| "rotor missing".to_string())?
+        .rotational_energy();
+    Ok((world, f64::from(joules)))
+}
+
+fn judge_rotor(reading: &Reading) -> Vec<Row> {
+    let values = [reading.energy_drift, reading.determinism_hash_match];
+    ROTOR_METRICS
+        .iter()
+        .zip(values)
+        .map(|(spec, value)| judge(spec, value))
+        .collect()
 }
 
 fn judge_wide(reading: &Reading) -> Vec<Row> {
@@ -1070,6 +1161,7 @@ fn judge(spec: &Spec, value: f64) -> Row {
             Bound::AtMost => value <= spec.threshold,
             Bound::AtLeast => value >= spec.threshold,
             Bound::AbsAtMost => value.abs() <= spec.threshold,
+            Bound::Near => (value - spec.threshold).abs() <= 1.0e-4,
         };
     Row {
         name: spec.name,
@@ -1183,6 +1275,7 @@ fn prove(out: &Path) -> Result<i32, String> {
     let broken = run_child(&exe, out, "broken")?;
     let spin = run_child(&exe, out, "spin")?;
     let wide = run_child(&exe, out, "wide")?;
+    let rotor = run_child(&exe, out, "rotor")?;
     println!("# good");
     print!("{}", good.stdout);
     println!("# bad");
@@ -1197,6 +1290,8 @@ fn prove(out: &Path) -> Result<i32, String> {
     print!("{}", spin.stdout);
     println!("# wide");
     print!("{}", wide.stdout);
+    println!("# rotor");
+    print!("{}", rotor.stdout);
     if good.code != 0
         || bad.code != 1
         || discrete.code != 0
@@ -1204,10 +1299,18 @@ fn prove(out: &Path) -> Result<i32, String> {
         || broken.code != 0
         || spin.code != 0
         || wide.code != 0
+        || rotor.code != 0
     {
         return Err(format!(
-            "proof exits good {} bad {} discrete {} loss {} broken {} spin {} wide {}",
-            good.code, bad.code, discrete.code, loss.code, broken.code, spin.code, wide.code
+            "proof exits good {} bad {} discrete {} loss {} broken {} spin {} wide {} rotor {}",
+            good.code,
+            bad.code,
+            discrete.code,
+            loss.code,
+            broken.code,
+            spin.code,
+            wide.code,
+            rotor.code
         ));
     }
     expect_protected(&good.stdout)?;
@@ -1217,6 +1320,7 @@ fn prove(out: &Path) -> Result<i32, String> {
     expect_broken(&broken.stdout)?;
     expect_spin(&spin.stdout)?;
     expect_wide(&wide.stdout)?;
+    expect_rotor(&rotor.stdout)?;
     expect_file(out, "good", true, 0, "free-flight", true)?;
     expect_file(out, "bad", false, 2, "free-flight", false)?;
     expect_file(out, "discrete", false, 0, "free-flight", false)?;
@@ -1224,6 +1328,7 @@ fn prove(out: &Path) -> Result<i32, String> {
     expect_file(out, "broken", false, 0, "free-flight", false)?;
     expect_file(out, "spin", true, 0, "free-flight", true)?;
     expect_file(out, "wide", true, 0, "free-flight", true)?;
+    expect_file(out, "rotor", false, 0, "free-flight", false)?;
     Ok(0)
 }
 
@@ -1412,6 +1517,36 @@ fn expect_loss(text: &str) -> Result<(), String> {
     }
     if !energy_failed {
         return Err("loss run has no energy_drift".into());
+    }
+    Ok(())
+}
+
+fn expect_rotor(text: &str) -> Result<(), String> {
+    let mass = 3.0_f64;
+    let half = 1.0_f64;
+    let spin = 2.0_f64;
+    let izz = mass / 3.0 * (half * half + half * half);
+    let expected = 0.5 * izz * spin * spin;
+    if !text.contains(&format!("steps={STEPS}")) {
+        return Err("rotor scene did not free-fly for the ship step count".into());
+    }
+    let mut saw = false;
+    for row in printed_against(text, ROTOR_METRICS)? {
+        if row.status != "PASS" {
+            return Err(format!("{} wanted PASS on the rotor", row.name));
+        }
+        if row.name == "rotational_energy_j" {
+            if (row.value - expected).abs() > 1.0e-4 {
+                return Err(format!(
+                    "rotational_energy_j {} wanted {expected} from the box moment",
+                    row.value
+                ));
+            }
+            saw = true;
+        }
+    }
+    if !saw {
+        return Err("rotor run has no rotational_energy_j".into());
     }
     Ok(())
 }
