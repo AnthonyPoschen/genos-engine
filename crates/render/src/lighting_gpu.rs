@@ -2306,6 +2306,27 @@ impl Gpu {
         Some(rgba)
     }
 
+    /// Host copy of the bloom upload. Empty until the buffer exists.
+    fn read_bloom_host(&self) -> Result<Vec<f32>, String> {
+        let width = usize::try_from(self.extent_w).unwrap_or(0);
+        let height = usize::try_from(self.extent_h).unwrap_or(0);
+        let count = width.saturating_mul(height).saturating_mul(4);
+        if count == 0 || self.lighting.bloom.memory.is_null() {
+            return Ok(Vec::new());
+        }
+        let bytes = u64::try_from(count.saturating_mul(4)).unwrap_or(0);
+        if self.lighting.bloom.size < bytes {
+            return Ok(Vec::new());
+        }
+        read_f32s(
+            self.fns.map_mem,
+            self.fns.unmap_mem,
+            self.device,
+            self.lighting.bloom.memory,
+            count,
+        )
+    }
+
     fn upload_words(&self, buffer: &Buffer, words: &[f32]) {
         if buffer.memory.is_null() || words.is_empty() {
             return;

@@ -397,6 +397,14 @@ impl Renderer {
         self.gpu.read_scene_host()
     }
 
+    /// Bloom the frame uploaded before compose. RGBA32F, full resolution.
+    ///
+    /// The buffer is host-visible and is not copied again: the draw already waited,
+    /// and the pyramid was written before that frame was submitted.
+    pub fn read_bloom(&self) -> Result<Vec<f32>, String> {
+        self.gpu.read_bloom_host()
+    }
+
     /// Draw the world, then screen rectangles. The rectangles ignore the depth test.
     ///
     /// When `wireframe` is true, each floor, wall, and solid draws its vertices and its edges.

@@ -1,4 +1,5 @@
-//! HDR output metric gate. Calls the engine references. No GPU pass.
+//! HDR output metric gate. CPU references, plus three lavapipe readbacks
+//! (`gpu_agx`, `gpu_exposure`, `gpu_bloom`) of one fixed frame.
 //!
 //! ```text
 //! cargo test -p genos-render --test hdr_output_gate -- --out genos-debug/hdr-output
@@ -12,19 +13,21 @@
 
 use genos_render::{
     aces2_rec709, agx_rec709, bloom_commute_error, bloom_downsample, bloom_downsample_weight_sum,
-    bloom_upsample,
-    bloom_upsample_weight_sum, ev100_from_luminance, exposure_from_camera, exposure_from_ev100,
-    exposure_adapt_outside, exposure_overshoot, exposure_still_change, grade_peak, grade_relative,
-    histogram_ev100, karis_firefly_response, linear_from_display, near_grade, still_pop_share,
-    pick_hdr_output, pq_st2084, resolve_swapchain, scene_peak_error, scene_referred, scrgb_code,
-    swapchain_nits, tone, HdrSwapchain,
-    ListedFormat, PresentHost, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB, COLOR_SPACE_SRGB,
-    FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
+    bloom_upsample, bloom_upsample_weight_sum, ev100_from_luminance, exposure_from_camera,
+    exposure_from_ev100, exposure_adapt_outside, exposure_overshoot, exposure_still_change,
+    exposure_with_compensation, grade_peak, grade_relative, histogram_ev100,
+    karis_downsample_rgb, karis_firefly_response, linear_from_display, near_grade,
+    pick_hdr_output, pq_st2084, resolve_swapchain, scene_luma, scene_peak_error, scene_referred,
+    scrgb_code, step_exposure, still_pop_share, swapchain_nits, tone, HdrSwapchain, Image,
+    ListedFormat, PresentHost, Renderer, World, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB,
+    COLOR_SPACE_SRGB, FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
 };
 
-use genos_scene::OutputMode;
+use genos_scene::{Camera, HdrSettings, LightingPreset, LightingSettings, OutputMode};
+use genos_window::Window;
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 const LEGACY_MAX: f64 = 1e-4;
 const EV_MAX: f64 = 1e-9;
@@ -50,6 +53,20 @@ const NEAR_MAX: f64 = 0.05;
 const POP_MAX: f64 = 0.001;
 const DEVICE_MS_MAX: f64 = 1.5;
 const DEVICE_VRAM_MAX: f64 = 96.0;
+/// Mean |picture − AgX(exposure × (scene + bloom × k))| on lit pixels.
+/// Sits above 8-bit dither and below a skipped `AgX`, a wrong lattice, a ×4 bloom add,
+/// and an exposure that stays at 1.
+const GPU_AGX_MAX: f64 = 0.02;
+/// `|uploaded scale − step_exposure|`. A scale pinned at 1 fails.
+const GPU_EXPOSURE_MAX: f64 = 1.0e-4;
+/// Mean |uploaded bloom − tap pyramid| . A ×2 pyramid fails.
+const GPU_BLOOM_MAX: f64 = 1.0e-3;
+/// Fixed EV100. Exposure `1 / (1.2 × 4)` is far from the legacy scale of 1.
+const GPU_EV100: f64 = 2.0;
+const GPU_TAU: f64 = 0.001;
+const GPU_BLOOM_K: f64 = 1.0;
+const GPU_BLOOM_LEVELS: u32 = 3;
+const GPU_FRAMES: u32 = 2;
 
 /// Scene-linear Rec.709, then the `AgX_LUT_Gen` sRGB power-2.4 code.
 const AGX_LUT: [([f64; 3], [f64; 3]); 10] = [
@@ -251,6 +268,9 @@ fn live_metrics() -> Vec<Metric> {
         at_most("bloom_energy", bloom_error(), BLOOM_MAX),
         at_most("bloom_firefly", karis_firefly_response(1_000.0), FIREFLY_MAX),
         at_most("bloom_commute", bloom_commute_error(), COMMUTE_MAX),
+        at_most("gpu_agx", gpu_agx_error(false), GPU_AGX_MAX),
+        at_most("gpu_exposure", gpu_exposure_error(false), GPU_EXPOSURE_MAX),
+        at_most("gpu_bloom", gpu_bloom_error(false), GPU_BLOOM_MAX),
         at_most("output_pick", live_output_pick(), PICK_MAX),
         at_most("near_error", near_grade(0.0, 0.20), NEAR_MAX),
         at_most(
@@ -307,6 +327,9 @@ fn proof_good() -> Vec<Metric> {
         at_most("bloom_energy", bloom_error(), BLOOM_MAX),
         at_most("bloom_firefly", karis_firefly(1_000.0), FIREFLY_MAX),
         at_most("bloom_commute", 0.0, COMMUTE_MAX),
+        at_most("gpu_agx", gpu_agx_error(false), GPU_AGX_MAX),
+        at_most("gpu_exposure", gpu_exposure_error(false), GPU_EXPOSURE_MAX),
+        at_most("gpu_bloom", gpu_bloom_error(false), GPU_BLOOM_MAX),
         at_most("output_pick", live_output_pick(), PICK_MAX),
         at_most("near_error", weighted(0.0, 0.20), NEAR_MAX),
         at_most(
@@ -367,6 +390,9 @@ fn proof_broken() -> Vec<Metric> {
         at_most("bloom_energy", 1.0, BLOOM_MAX),
         at_most("bloom_firefly", 1_000.0 * 0.125, FIREFLY_MAX),
         at_most("bloom_commute", 0.125, COMMUTE_MAX),
+        at_most("gpu_agx", gpu_agx_error(true), GPU_AGX_MAX),
+        at_most("gpu_exposure", gpu_exposure_error(true), GPU_EXPOSURE_MAX),
+        at_most("gpu_bloom", gpu_bloom_error(true), GPU_BLOOM_MAX),
         at_most(
             "output_pick",
             pick_misses(pick_always_sdr) + force_sdr_misses(pick_ignores_force),
@@ -1058,6 +1084,406 @@ fn json_metric(metric: &Metric) -> String {
         metric.threshold,
         status_str(metric.status)
     )
+}
+
+struct Grab {
+    ok: bool,
+    width: usize,
+    height: usize,
+    bgra: bool,
+    pixels: Vec<u8>,
+    scene: Vec<f64>,
+    bloom_ref: Vec<f64>,
+    bloom_buf: Vec<f32>,
+    exposure_got: f64,
+    exposure_want: f64,
+    gap_x4: f64,
+}
+
+fn gpu_grab() -> &'static Grab {
+    static GRAB: OnceLock<Grab> = OnceLock::new();
+    GRAB.get_or_init(capture_gpu)
+}
+
+fn capture_gpu() -> Grab {
+    let scene = match load_hall() {
+        Ok(scene) => scene,
+        Err(err) => return fail_grab(&err),
+    };
+    let mut world = World::from_scene(scene);
+    world.scene.lighting = LightingSettings::preset(LightingPreset::Potato);
+    world.scene.hdr = gpu_settings();
+    let opened = open_grade_renderer();
+    let (mut window, mut renderer) = match opened {
+        Ok(pair) => pair,
+        Err(err) => return fail_grab(&err),
+    };
+    let camera = Camera::opening();
+    if let Err(err) = draw_once(&mut window, &mut renderer, &world, &camera) {
+        return fail_grab(&err);
+    }
+    let scene1 = match renderer.read_scene() {
+        Ok(scene) => scene,
+        Err(err) => return fail_grab(&err),
+    };
+    let pixels = match draw_once(&mut window, &mut renderer, &world, &camera) {
+        Ok(pixels) => pixels,
+        Err(err) => return fail_grab(&err),
+    };
+    let scene2 = match renderer.read_scene() {
+        Ok(scene) => scene,
+        Err(err) => return fail_grab(&err),
+    };
+    let bloom_buf = match renderer.read_bloom() {
+        Ok(bloom) => bloom,
+        Err(err) => return fail_grab(&err),
+    };
+    finish_grab(&renderer, pixels, &scene1, &scene2, bloom_buf)
+}
+
+fn load_hall() -> Result<genos_scene::Scene, String> {
+    genos_scene::load_path(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/camera/scene.rhai"
+    )))
+}
+
+fn open_grade_renderer() -> Result<(Window, Renderer), String> {
+    let mut window = Window::open_proof(160, 90)?;
+    let frame = window.pump();
+    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    Ok((window, renderer))
+}
+
+fn draw_once(
+    window: &mut Window,
+    renderer: &mut Renderer,
+    world: &World,
+    camera: &Camera,
+) -> Result<Vec<u8>, String> {
+    let _ = window.pump();
+    renderer
+        .draw(world, camera, true)?
+        .ok_or_else(|| "the frame returned no readback".to_string())
+}
+
+fn gpu_settings() -> HdrSettings {
+    let mut hdr = HdrSettings::for_preset(LightingPreset::High);
+    hdr.exposure_mode = genos_scene::ExposureMode::Fixed;
+    hdr.ev100 = GPU_EV100;
+    hdr.compensation = 0.0;
+    hdr.adapt_down = GPU_TAU;
+    hdr.adapt_up = GPU_TAU;
+    hdr.display = genos_scene::DisplayTransform::Agx;
+    hdr.bloom = true;
+    hdr.bloom_intensity = GPU_BLOOM_K;
+    hdr.bloom_levels = GPU_BLOOM_LEVELS;
+    hdr.output = OutputMode::Sdr;
+    hdr.legacy_bytes = false;
+    hdr
+}
+
+fn wanted_exposure() -> f64 {
+    let target = exposure_with_compensation(GPU_EV100, 0.0);
+    let mut scale = 1.0;
+    let frames = usize::try_from(GPU_FRAMES).unwrap_or(0);
+    for _ in 0..frames {
+        scale = step_exposure(scale, target, 1.0 / 60.0, GPU_TAU, GPU_TAU);
+    }
+    scale
+}
+
+fn fail_grab(why: &str) -> Grab {
+    eprintln!("hdr gate gpu: {why}");
+    Grab {
+        ok: false,
+        width: 0,
+        height: 0,
+        bgra: false,
+        pixels: Vec::new(),
+        scene: Vec::new(),
+        bloom_ref: Vec::new(),
+        bloom_buf: Vec::new(),
+        exposure_got: 0.0,
+        exposure_want: wanted_exposure(),
+        gap_x4: 0.0,
+    }
+}
+
+fn finish_grab(
+    renderer: &Renderer,
+    pixels: Vec<u8>,
+    scene1: &genos_render::SceneRead,
+    scene2: &genos_render::SceneRead,
+    bloom_buf: Vec<f32>,
+) -> Grab {
+    let width = usize::try_from(scene2.width).unwrap_or(0);
+    let height = usize::try_from(scene2.height).unwrap_or(0);
+    let src_w = usize::try_from(scene1.width).unwrap_or(0);
+    let src_h = usize::try_from(scene1.height).unwrap_or(0);
+    let bloom_ref = reference_pyramid(&scene1.rgb, src_w, src_h, GPU_BLOOM_LEVELS);
+    let (format, _) = renderer.hdr_surface();
+    let exposure_want = wanted_exposure();
+    let gap_x4 = formula_gap(&scene2.rgb, &bloom_ref, exposure_want);
+    Grab {
+        ok: true,
+        width,
+        height,
+        bgra: format == FORMAT_BGRA8,
+        pixels,
+        scene: scene2.rgb.clone(),
+        bloom_ref,
+        bloom_buf,
+        exposure_got: renderer.hdr_exposure(),
+        exposure_want,
+        gap_x4,
+    }
+}
+
+fn gpu_agx_error(broken: bool) -> f64 {
+    let grab = gpu_grab();
+    if !grab.ok {
+        return 1.0;
+    }
+    let err = picture_error(grab, broken);
+    if !broken && grab.gap_x4 < GPU_AGX_MAX * 2.0 {
+        return 1.0;
+    }
+    err
+}
+
+fn gpu_exposure_error(broken: bool) -> f64 {
+    let grab = gpu_grab();
+    let got = if broken { 1.0 } else { grab.exposure_got };
+    (got - grab.exposure_want).abs()
+}
+
+fn gpu_bloom_error(broken: bool) -> f64 {
+    let grab = gpu_grab();
+    if !grab.ok {
+        return 1.0;
+    }
+    let scale = if broken { 2.0 } else { 1.0 };
+    bloom_delta(&grab.bloom_buf, &grab.bloom_ref, scale)
+}
+
+fn picture_error(grab: &Grab, linear: bool) -> f64 {
+    let pixels = grab.width.saturating_mul(grab.height);
+    if pixels == 0 || grab.scene.len() < pixels.saturating_mul(3) {
+        return 1.0;
+    }
+    if grab.bloom_ref.len() < pixels.saturating_mul(3) || grab.pixels.len() < pixels.saturating_mul(4)
+    {
+        return 1.0;
+    }
+    let mut sum = 0.0;
+    let mut seen = 0.0;
+    for index in 0..pixels {
+        let scene = rgb3(&grab.scene, index);
+        let bloom = rgb3(&grab.bloom_ref, index);
+        if scene_luma(scene) < 0.02 && scene_luma(bloom) < 0.02 {
+            continue;
+        }
+        let linear_rgb = exposed(scene, bloom, grab.exposure_want);
+        let want = if linear {
+            clamp01(linear_rgb)
+        } else {
+            agx_rec709(linear_rgb)
+        };
+        let got = displayed(&grab.pixels, index, grab.bgra);
+        sum += (got[0] - want[0]).abs() + (got[1] - want[1]).abs() + (got[2] - want[2]).abs();
+        seen += 3.0;
+    }
+    if seen < 64.0 * 3.0 {
+        1.0
+    } else {
+        sum / seen
+    }
+}
+
+fn formula_gap(scene: &[f64], bloom: &[f64], exposure: f64) -> f64 {
+    let pixels = scene.len() / 3;
+    if pixels == 0 || bloom.len() < scene.len() {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    let mut seen = 0.0;
+    for index in 0..pixels {
+        let color = rgb3(scene, index);
+        let add = rgb3(bloom, index);
+        if scene_luma(color) < 0.02 && scene_luma(add) < 0.02 {
+            continue;
+        }
+        let once = agx_rec709(exposed(color, add, exposure));
+        let quad = agx_rec709(exposed_k(color, add, exposure, GPU_BLOOM_K * 4.0));
+        sum += (once[0] - quad[0]).abs() + (once[1] - quad[1]).abs() + (once[2] - quad[2]).abs();
+        seen += 3.0;
+    }
+    if seen == 0.0 {
+        0.0
+    } else {
+        sum / seen
+    }
+}
+
+fn exposed(scene: [f64; 3], bloom: [f64; 3], exposure: f64) -> [f64; 3] {
+    exposed_k(scene, bloom, exposure, GPU_BLOOM_K)
+}
+
+fn exposed_k(scene: [f64; 3], bloom: [f64; 3], exposure: f64, intensity: f64) -> [f64; 3] {
+    [
+        exposure * (scene[0] + bloom[0] * intensity),
+        exposure * (scene[1] + bloom[1] * intensity),
+        exposure * (scene[2] + bloom[2] * intensity),
+    ]
+}
+
+fn clamp01(color: [f64; 3]) -> [f64; 3] {
+    [
+        color[0].clamp(0.0, 1.0),
+        color[1].clamp(0.0, 1.0),
+        color[2].clamp(0.0, 1.0),
+    ]
+}
+
+fn bloom_delta(buffer: &[f32], reference: &[f64], scale: f64) -> f64 {
+    let pixels = reference.len() / 3;
+    if pixels == 0 || buffer.len() < pixels.saturating_mul(4) {
+        return 1.0;
+    }
+    let mut sum = 0.0;
+    let mut energy = 0.0;
+    for index in 0..pixels {
+        let want = rgb3(reference, index);
+        let base = index.saturating_mul(4);
+        for (channel, want_c) in want.iter().enumerate() {
+            let got = f64::from(buffer.get(base.saturating_add(channel)).copied().unwrap_or(0.0)) * scale;
+            sum += (got - want_c).abs();
+            energy += want_c.abs();
+        }
+    }
+    let n = f64::from(u32::try_from(pixels.saturating_mul(3)).unwrap_or(u32::MAX));
+    if n == 0.0 || energy / n < 1.0e-2 {
+        1.0
+    } else {
+        sum / n
+    }
+}
+
+fn rgb3(packed: &[f64], index: usize) -> [f64; 3] {
+    let base = index.saturating_mul(3);
+    [
+        packed.get(base).copied().unwrap_or(0.0),
+        packed.get(base.saturating_add(1)).copied().unwrap_or(0.0),
+        packed.get(base.saturating_add(2)).copied().unwrap_or(0.0),
+    ]
+}
+
+fn displayed(bytes: &[u8], index: usize, bgra: bool) -> [f64; 3] {
+    let base = index.saturating_mul(4);
+    let b0 = f64::from(bytes.get(base).copied().unwrap_or(0)) / 255.0;
+    let b1 = f64::from(bytes.get(base.saturating_add(1)).copied().unwrap_or(0)) / 255.0;
+    let b2 = f64::from(bytes.get(base.saturating_add(2)).copied().unwrap_or(0)) / 255.0;
+    if bgra {
+        [b2, b1, b0]
+    } else {
+        [b0, b1, b2]
+    }
+}
+
+/// Tap pyramid. Same chain as `bloom_pyramid`, without calling it, so a ×2
+/// inside `bloom_pyramid` disagrees with this buffer.
+fn reference_pyramid(rgb: &[f64], width: usize, height: usize, levels: u32) -> Vec<f64> {
+    let pixels = width.saturating_mul(height);
+    if levels == 0 || width == 0 || height == 0 || rgb.len() < pixels.saturating_mul(3) {
+        return vec![0.0; pixels.saturating_mul(3)];
+    }
+    let mut chain = vec![karis_downsample_rgb(rgb, width, height)];
+    let count = usize::try_from(levels).unwrap_or(1).max(1);
+    for _ in 1..count {
+        let Some(current) = chain.last() else {
+            break;
+        };
+        chain.push(downsample_linear(current));
+    }
+    let Some(mut acc) = chain.pop() else {
+        return vec![0.0; pixels.saturating_mul(3)];
+    };
+    while let Some(finer) = chain.pop() {
+        acc = upsample_add(&acc, &finer, true);
+    }
+    let full = upsample_add(
+        &acc,
+        &Image {
+            pixels: vec![0.0; rgb.len()],
+            width,
+            height,
+        },
+        false,
+    );
+    full.pixels
+}
+
+fn downsample_linear(current: &Image) -> Image {
+    let dst_w = (current.width / 2).max(1);
+    let dst_h = (current.height / 2).max(1);
+    let mut pixels = vec![0.0; dst_w.saturating_mul(dst_h).saturating_mul(3)];
+    for channel in 0..3 {
+        let plane: Vec<f64> = current
+            .pixels
+            .iter()
+            .skip(channel)
+            .step_by(3)
+            .copied()
+            .collect();
+        let down = bloom_downsample(&plane, current.width, current.height);
+        for (index, sample) in down.pixels.iter().enumerate() {
+            let slot = index.saturating_mul(3).saturating_add(channel);
+            if let Some(dst) = pixels.get_mut(slot) {
+                *dst = *sample;
+            }
+        }
+    }
+    Image {
+        pixels,
+        width: dst_w,
+        height: dst_h,
+    }
+}
+
+fn upsample_add(coarse: &Image, finer: &Image, add_finer: bool) -> Image {
+    let mut pixels = vec![0.0; finer.pixels.len()];
+    for channel in 0..3 {
+        let plane: Vec<f64> = coarse
+            .pixels
+            .iter()
+            .skip(channel)
+            .step_by(3)
+            .copied()
+            .collect();
+        let image = Image {
+            pixels: plane,
+            width: coarse.width,
+            height: coarse.height,
+        };
+        let up = bloom_upsample(&image, finer.width, finer.height);
+        for (index, sample) in up.pixels.iter().enumerate() {
+            let slot = index.saturating_mul(3).saturating_add(channel);
+            let base = if add_finer {
+                finer.pixels.get(slot).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            if let Some(dst) = pixels.get_mut(slot) {
+                *dst = base + *sample;
+            }
+        }
+    }
+    Image {
+        pixels,
+        width: finer.width,
+        height: finer.height,
+    }
 }
 
 fn output_dir() -> PathBuf {
