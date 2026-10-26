@@ -67,6 +67,9 @@ const API_VERSION: u32 = 1 << 22;
 const VK_SUCCESS: i32 = 0;
 const VK_NOT_READY: i32 = 1;
 const VK_TIMEOUT: i32 = 2;
+/// `VK_ERROR_OUT_OF_DEVICE_MEMORY`.
+const VK_ERROR_OUT_OF_DEVICE_MEMORY: i32 = -2;
+const FRAME_BUDGET_MS: f32 = 16.0;
 /// A fence wait on the frame thread before the seat pump takes over.
 const FENCE_BUDGET_NS: u64 = 50_000_000;
 /// A mapped copy above this runs while the seat pump answers pings.
@@ -303,6 +306,41 @@ impl Renderer {
         }
     }
 
+    /// Material knobs in force. `texture_quality` does not follow the VRAM size.
+    pub fn material_settings(&self) -> genos_load::MaterialSettings {
+        self.gpu.materials
+    }
+
+    /// Replace the material knobs. The next frame streams inside the new cap.
+    pub fn set_material_settings(&mut self, settings: genos_load::MaterialSettings) {
+        self.gpu.apply_material_settings(settings);
+    }
+
+    /// Device-local budget after headroom. Lighting can read this later.
+    pub fn vram_budget(&self) -> genos_load::VramBudget {
+        self.gpu.vram
+    }
+
+    /// Bytes other systems have allocated, on top of the render targets and the frame budget.
+    pub fn set_non_texture_bytes(&mut self, bytes: u64) {
+        self.gpu.non_texture_extra = bytes;
+    }
+
+    /// A finished disk read. The admit follows the slowest measured path.
+    pub fn observe_material_disk(&mut self, bytes: u64, ms: u32) {
+        self.gpu.streamer.observe_disk(bytes, ms);
+    }
+
+    /// A finished decode or transcode.
+    pub fn observe_material_decode(&mut self, bytes: u64, ms: u32) {
+        self.gpu.streamer.observe_decode(bytes, ms);
+    }
+
+    /// Device memory for a texture page. An out-of-device-memory error evicts and retries.
+    pub fn allocate_texture_pages(&mut self, size: u64, type_bits: u32) -> Result<(), String> {
+        self.gpu.allocate_texture(size, type_bits).map(|_| ())
+    }
+
     /// Bucket names, in the order of [`Renderer::lighting_dispatches`].
     pub fn lighting_bucket_names() -> &'static [&'static str] {
         &LIGHTING_BUCKET_NAMES
@@ -359,6 +397,7 @@ impl Renderer {
         }
         let overlay_verts = self.overlay_verts.clone();
         self.wire_on = wireframe;
+        self.gpu.tick_materials(self.memory.accounted());
         let overlay_count = overlay_verts.len() as u32;
         // The dynamic patch belongs to the frame that is about to record.
         let slot = self.gpu.flight;
@@ -927,6 +966,25 @@ struct Gpu {
     memory_props: MemProps,
     /// Upload buffers that went to device-local memory, and all upload buffers.
     upload_local: std::cell::Cell<[u32; 2]>,
+    /// Dedicated transfer queue when the device has one, otherwise the graphics queue.
+    transfer_queue: Handle,
+    transfer_family: u32,
+    transfer_pool: Handle,
+    transfer_cmd: Handle,
+    transfer_fence: Handle,
+    transfer_busy: bool,
+    transfer_bytes: u64,
+    transfer_submitted: Option<Instant>,
+    materials: genos_load::MaterialSettings,
+    vram: genos_load::VramBudget,
+    streamer: genos_load::Streamer,
+    non_texture_extra: u64,
+    budget_tick: u32,
+    cached_budget: u64,
+    cached_usage: u64,
+    budget_extension: bool,
+    memory_budget_query: Option<FnMemProps>,
+    frame_mark: Option<Instant>,
 }
 
 struct Image {
@@ -945,6 +1003,7 @@ struct Buffer {
 struct MemProps {
     count: u32,
     types: [u32; 32],
+    device_local_bytes: u64,
 }
 
 #[allow(dead_code)]
@@ -1181,12 +1240,24 @@ impl Gpu {
                 enumerate_ext(std::ptr::null(), &mut ext_count, std::ptr::null_mut()),
                 "extensions",
             )?;
+            let mut inst_listed = vec![0u8; ext_count as usize * 260];
+            if ext_count > 0 {
+                check(
+                    enumerate_ext(std::ptr::null(), &mut ext_count, inst_listed.as_mut_ptr()),
+                    "instance extension list",
+                )?;
+            }
             let surface_ext = b"VK_KHR_surface\0";
             let wayland_ext = b"VK_KHR_wayland_surface\0";
+            let props2_ext = b"VK_KHR_get_physical_device_properties2\0";
+            let has_props2 =
+                extension_listed(&inst_listed, ext_count, b"VK_KHR_get_physical_device_properties2");
             let exts = [
                 surface_ext.as_ptr() as *const c_char,
                 wayland_ext.as_ptr() as *const c_char,
+                props2_ext.as_ptr() as *const c_char,
             ];
+            let inst_ext_count = if has_props2 { 3u32 } else { 2 };
             let app_name = b"genos-camera\0";
             #[repr(C)]
             struct AppInfo {
@@ -1225,7 +1296,7 @@ impl Gpu {
                 app: &app,
                 enabled_layers: 0,
                 layer_names: std::ptr::null(),
-                enabled_exts: exts.len() as u32,
+                enabled_exts: inst_ext_count,
                 ext_names: exts.as_ptr(),
             };
             let mut instance = std::ptr::null_mut();
@@ -1358,7 +1429,24 @@ impl Gpu {
             mem_props(physical, raw_props.as_mut_ptr());
             let memory_props = parse_mem_props(&raw_props);
 
-            let priorities = [1.0f32, 0.0f32];
+            let mut transfer_family = queue_family;
+            let mut transfer_dedicated = false;
+            for index in 0..family_count {
+                if index == queue_family || index == compute_family {
+                    continue;
+                }
+                let base = index as usize * 24;
+                let flags = u32::from_ne_bytes(families[base..base + 4].try_into().unwrap());
+                let queues =
+                    u32::from_ne_bytes(families[base + 4..base + 8].try_into().unwrap());
+                // Transfer without graphics. A shared graphics family keeps the graphics queue.
+                if flags & 0x4 != 0 && flags & 0x1 == 0 && queues > 0 {
+                    transfer_family = index;
+                    transfer_dedicated = true;
+                    break;
+                }
+            }
+            let priorities = [1.0f32, 0.0f32, 1.0f32];
             #[repr(C)]
             struct QueueInfo {
                 s_type: i32,
@@ -1386,8 +1474,16 @@ impl Gpu {
                     count: 1,
                     priorities: priorities.as_ptr().add(1),
                 },
+                QueueInfo {
+                    s_type: 2,
+                    next: std::ptr::null(),
+                    flags: 0,
+                    family: transfer_family,
+                    count: 1,
+                    priorities: priorities.as_ptr().add(2),
+                },
             ];
-            let queue_info_count = if separate {
+            let mut queue_info_count = if separate {
                 2
             } else if gfx_queues >= 2 {
                 queue_infos[0].count = 2;
@@ -1395,12 +1491,60 @@ impl Gpu {
             } else {
                 1
             };
+            if transfer_dedicated {
+                queue_info_count += 1;
+            }
+            let enumerate_device_ext: unsafe extern "system" fn(
+                Handle,
+                *const c_char,
+                *mut u32,
+                *mut u8,
+            ) -> VkResult = transmute(load(b"vkEnumerateDeviceExtensionProperties\0"));
+            let mut dev_ext_count = 0u32;
+            check(
+                enumerate_device_ext(
+                    physical,
+                    std::ptr::null(),
+                    &mut dev_ext_count,
+                    std::ptr::null_mut(),
+                ),
+                "device extensions",
+            )?;
+            let mut dev_listed = vec![0u8; dev_ext_count as usize * 260];
+            if dev_ext_count > 0 {
+                check(
+                    enumerate_device_ext(
+                        physical,
+                        std::ptr::null(),
+                        &mut dev_ext_count,
+                        dev_listed.as_mut_ptr(),
+                    ),
+                    "device extension list",
+                )?;
+            }
+            let budget_query_ptr = load(if has_props2 {
+                b"vkGetPhysicalDeviceMemoryProperties2KHR\0"
+            } else {
+                b"vkGetPhysicalDeviceMemoryProperties2\0"
+            });
+            let budget_extension = extension_listed(&dev_listed, dev_ext_count, b"VK_EXT_memory_budget")
+                && !budget_query_ptr.is_null();
+            let memory_budget_query = if budget_extension {
+                Some(transmute::<FnMemProps>(budget_query_ptr))
+            } else {
+                None
+            };
             // VkPhysicalDeviceFeatures: only fragmentStoresAndAtomics (26), for the GI
             // v2 G-buffer. Every desktop driver (and lavapipe, MoltenVK) has it.
             let mut features = [0u32; 55];
             features[26] = 1;
             let swap_ext = b"VK_KHR_swapchain\0";
-            let ext_ptr = swap_ext.as_ptr() as *const c_char;
+            let budget_ext = b"VK_EXT_memory_budget\0";
+            let dev_ext_ptrs = [
+                swap_ext.as_ptr() as *const c_char,
+                budget_ext.as_ptr() as *const c_char,
+            ];
+            let dev_ext_enabled = if budget_extension { 2u32 } else { 1 };
             #[repr(C)]
             struct DevInfo {
                 s_type: i32,
@@ -1422,8 +1566,8 @@ impl Gpu {
                 queues: queue_infos.as_ptr(),
                 layer_count: 0,
                 layers: std::ptr::null(),
-                ext_count: 1,
-                exts: &ext_ptr,
+                ext_count: dev_ext_enabled,
+                exts: dev_ext_ptrs.as_ptr(),
                 features: features.as_ptr() as *const c_void,
             };
             let mut device = std::ptr::null_mut();
@@ -1446,6 +1590,11 @@ impl Gpu {
             } else if gfx_queues >= 2 {
                 get_device_queue(device, queue_family, 1, &mut compute_queue);
             }
+            let mut transfer_queue = queue;
+            if transfer_dedicated {
+                get_device_queue(device, transfer_family, 0, &mut transfer_queue);
+            }
+            let materials = genos_load::MaterialSettings::default();
 
             let mut gpu = Self {
                 get_instance,
@@ -1594,6 +1743,28 @@ impl Gpu {
                 ),
                 memory_props,
                 upload_local: std::cell::Cell::new([0, 0]),
+                transfer_queue,
+                transfer_family,
+                transfer_pool: std::ptr::null_mut(),
+                transfer_cmd: std::ptr::null_mut(),
+                transfer_fence: std::ptr::null_mut(),
+                transfer_busy: false,
+                transfer_bytes: 0,
+                transfer_submitted: None,
+                materials,
+                vram: genos_load::VramBudget::default(),
+                streamer: genos_load::Streamer::new(
+                    materials.quality_floor(),
+                    materials.mip_bias,
+                    materials.dwell_frames,
+                ),
+                non_texture_extra: 0,
+                budget_tick: 0,
+                cached_budget: 0,
+                cached_usage: 0,
+                budget_extension,
+                memory_budget_query,
+                frame_mark: None,
             };
             let _ = (destroy_instance, surface_support);
             gpu.create_static_objects()?;
@@ -1692,6 +1863,45 @@ impl Gpu {
             self.image_ready = self.image_readies[0];
             self.render_done = self.render_dones[0];
             self.fence = self.fences[0];
+            let transfer_pool = PoolInfo {
+                s_type: 39,
+                next: std::ptr::null(),
+                flags: 0x2,
+                family: self.transfer_family,
+            };
+            check(
+                (self.fns.create_pool)(
+                    self.device,
+                    &transfer_pool as *const PoolInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.transfer_pool,
+                ),
+                "transfer pool",
+            )?;
+            let transfer_alloc = AllocInfo {
+                s_type: 40,
+                next: std::ptr::null(),
+                pool: self.transfer_pool,
+                level: 0,
+                count: 1,
+            };
+            check(
+                (self.fns.alloc_cmd)(
+                    self.device,
+                    &transfer_alloc as *const AllocInfo as *const u8,
+                    &mut self.transfer_cmd,
+                ),
+                "transfer command buffer",
+            )?;
+            check(
+                (self.fns.create_fence)(
+                    self.device,
+                    &fence as *const FenceInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.transfer_fence,
+                ),
+                "transfer fence",
+            )?;
             if self.timestamp_period > 0.0 {
                 self.query_pool = self.make_query_pool()?;
                 if self.gpu_times.is_some() {
@@ -5017,17 +5227,235 @@ impl Gpu {
         };
         let mut memory = std::ptr::null_mut();
         unsafe {
-            check(
-                (self.fns.alloc_mem)(
-                    self.device,
-                    &info as *const Info as *const u8,
-                    std::ptr::null(),
-                    &mut memory,
-                ),
-                "allocate",
-            )?;
+            let result = (self.fns.alloc_mem)(
+                self.device,
+                &info as *const Info as *const u8,
+                std::ptr::null(),
+                &mut memory,
+            );
+            if result == VK_ERROR_OUT_OF_DEVICE_MEMORY {
+                return Err("out of device memory".into());
+            }
+            check(result, "allocate")?;
         }
         Ok(memory)
+    }
+
+    fn apply_material_settings(&mut self, settings: genos_load::MaterialSettings) {
+        self.streamer.set_quality_floor(settings.quality_floor());
+        self.streamer.set_bias(settings.mip_bias);
+        self.streamer.set_dwell(settings.dwell_frames);
+        self.materials = settings;
+    }
+
+    /// Poll the transfer fence, refresh the budget, and admit what the frame can hold.
+    /// Does not wait.
+    fn tick_materials(&mut self, accounted: u64) {
+        let now = Instant::now();
+        let base_ms = self
+            .frame_mark
+            .map(|then| now.saturating_duration_since(then).as_secs_f32() * 1000.0)
+            .unwrap_or(8.0);
+        self.frame_mark = Some(now);
+        let pixels = u64::from(self.extent_w)
+            .saturating_mul(u64::from(self.extent_h))
+            .saturating_mul(16);
+        let non_texture = accounted
+            .saturating_add(self.non_texture_extra)
+            .saturating_add(pixels);
+        self.refresh_vram(non_texture);
+        let ready = self.transfer_signaled();
+        if self.transfer_busy && ready {
+            let elapsed = self
+                .transfer_submitted
+                .map(|start| start.elapsed().as_millis())
+                .unwrap_or(1);
+            let ms = u32::try_from(elapsed).unwrap_or(u32::MAX).max(1);
+            self.streamer.observe_transfer(self.transfer_bytes, ms);
+            self.transfer_busy = false;
+            self.transfer_bytes = 0;
+        }
+        self.streamer
+            .set_transfer_ready(!self.transfer_busy || ready);
+        let budget = self.vram;
+        self.streamer.step(&budget, &[], base_ms, FRAME_BUDGET_MS);
+        if !self.transfer_busy {
+            let bytes = self.streamer.inflight_bytes();
+            if bytes > 0 {
+                let _ = self.submit_transfer(bytes);
+            }
+        }
+    }
+
+    fn refresh_vram(&mut self, non_texture: u64) {
+        self.budget_tick = self.budget_tick.wrapping_add(1);
+        if self.budget_tick == 1 || self.budget_tick % 4 == 0 {
+            self.query_heaps();
+        }
+        let headroom = genos_load::Headroom::from_mb(
+            self.materials.headroom_percent,
+            self.materials.headroom_floor_mb,
+        );
+        self.vram = if self.budget_extension {
+            genos_load::VramBudget::from_heaps(
+                &[genos_load::HeapSlice {
+                    budget: self.cached_budget,
+                    usage: self.cached_usage,
+                    device_local: true,
+                }],
+                non_texture,
+                headroom,
+                true,
+            )
+        } else {
+            genos_load::VramBudget::from_heap_size(
+                self.memory_props.device_local_bytes,
+                self.cached_usage,
+                non_texture,
+                headroom,
+            )
+        };
+    }
+
+    fn query_heaps(&mut self) {
+        let Some(query) = self.memory_budget_query else {
+            self.budget_extension = false;
+            return;
+        };
+        #[repr(C)]
+        struct BudgetProps {
+            s_type: i32,
+            pad: u32,
+            next: *const c_void,
+            heap_budget: [u64; 16],
+            heap_usage: [u64; 16],
+        }
+        let mut budget = BudgetProps {
+            s_type: 1000237000,
+            pad: 0,
+            next: std::ptr::null(),
+            heap_budget: [0; 16],
+            heap_usage: [0; 16],
+        };
+        let mut raw = vec![0u8; 16 + 520];
+        raw[..4].copy_from_slice(&1_000_059_006i32.to_ne_bytes());
+        let next = &mut budget as *mut BudgetProps as usize;
+        raw[8..16].copy_from_slice(&next.to_ne_bytes());
+        unsafe { query(self.physical, raw.as_mut_ptr()) };
+        let props = parse_mem_props(&raw[16..]);
+        let heap_count = u32::from_ne_bytes(raw[16 + 260..16 + 264].try_into().unwrap_or([0; 4])).min(16);
+        let mut heap_budget = 0u64;
+        let mut heap_usage = 0u64;
+        for index in 0..heap_count {
+            let base = 16 + 264 + index as usize * 16;
+            if raw.len() < base + 12 {
+                break;
+            }
+            let flags = u32::from_ne_bytes(raw[base + 8..base + 12].try_into().unwrap_or([0; 4]));
+            if flags & 1 == 0 {
+                continue;
+            }
+            let slot = index as usize;
+            heap_budget = heap_budget.saturating_add(budget.heap_budget[slot]);
+            heap_usage = heap_usage.saturating_add(budget.heap_usage[slot]);
+        }
+        let _ = props;
+        self.cached_budget = heap_budget;
+        self.cached_usage = heap_usage;
+        self.budget_extension = true;
+    }
+
+    fn transfer_signaled(&self) -> bool {
+        if self.transfer_fence.is_null() {
+            return true;
+        }
+        let status = unsafe { (self.fns.fence_status)(self.device, self.transfer_fence) };
+        status == VK_SUCCESS
+    }
+
+    fn submit_transfer(&mut self, bytes: u64) -> Result<(), String> {
+        if self.transfer_cmd.is_null() || self.transfer_fence.is_null() {
+            return Ok(());
+        }
+        unsafe {
+            check(
+                (self.fns.reset_fences)(self.device, 1, &self.transfer_fence),
+                "transfer reset fence",
+            )?;
+            check((self.fns.reset_cmd)(self.transfer_cmd, 0), "transfer reset")?;
+            #[repr(C)]
+            struct BeginInfo {
+                s_type: i32,
+                next: *const c_void,
+                flags: u32,
+                inheritance: *const c_void,
+            }
+            let begin = BeginInfo {
+                s_type: 42,
+                next: std::ptr::null(),
+                flags: 0x1,
+                inheritance: std::ptr::null(),
+            };
+            check(
+                (self.fns.begin_cmd)(self.transfer_cmd, &begin as *const BeginInfo as *const u8),
+                "transfer begin",
+            )?;
+            check((self.fns.end_cmd)(self.transfer_cmd), "transfer end")?;
+            #[repr(C)]
+            struct Submit {
+                s_type: i32,
+                next: *const c_void,
+                wait_count: u32,
+                waits: *const Handle,
+                stages: *const u32,
+                cmd_count: u32,
+                cmds: *const Handle,
+                signal_count: u32,
+                signals: *const Handle,
+            }
+            let cmd = [self.transfer_cmd];
+            let submit = Submit {
+                s_type: 4,
+                next: std::ptr::null(),
+                wait_count: 0,
+                waits: std::ptr::null(),
+                stages: std::ptr::null(),
+                cmd_count: 1,
+                cmds: cmd.as_ptr(),
+                signal_count: 0,
+                signals: std::ptr::null(),
+            };
+            check(
+                (self.fns.queue_submit)(
+                    self.transfer_queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    self.transfer_fence,
+                ),
+                "transfer submit",
+            )?;
+        }
+        self.transfer_busy = true;
+        self.transfer_bytes = bytes;
+        self.transfer_submitted = Some(Instant::now());
+        Ok(())
+    }
+
+    fn allocate_texture(&mut self, size: u64, type_bits: u32) -> Result<Handle, String> {
+        let mut left = 4u32;
+        loop {
+            match self.alloc(size, type_bits, Memory::Device) {
+                Ok(memory) => return Ok(memory),
+                Err(err)
+                    if err == "out of device memory"
+                        && left > 0
+                        && self.streamer.evict_for_oom() =>
+                {
+                    left -= 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     fn image_barrier(
@@ -5399,6 +5827,12 @@ impl Drop for Gpu {
             if !self.compute_pool.is_null() {
                 (self.fns.destroy_pool)(self.device, self.compute_pool, std::ptr::null());
             }
+            if !self.transfer_fence.is_null() {
+                (self.fns.destroy_fence)(self.device, self.transfer_fence, std::ptr::null());
+            }
+            if !self.transfer_pool.is_null() {
+                (self.fns.destroy_pool)(self.device, self.transfer_pool, std::ptr::null());
+            }
             self.destroy_buffer(&mut audio_rays);
             self.destroy_buffer(&mut audio_gains);
             if !self.audio_fence.is_null() {
@@ -5501,13 +5935,56 @@ unsafe fn transmute<T>(ptr: Pfn) -> T {
 }
 
 fn parse_mem_props(raw: &[u8]) -> MemProps {
+    if raw.len() < 4 {
+        return MemProps {
+            count: 0,
+            types: [0; 32],
+            device_local_bytes: 0,
+        };
+    }
     let count = u32::from_ne_bytes(raw[0..4].try_into().unwrap()).min(32);
     let mut types = [0u32; 32];
     for i in 0..count as usize {
         let offset = 4 + i * 8;
+        if raw.len() < offset + 4 {
+            break;
+        }
         types[i] = u32::from_ne_bytes(raw[offset..offset + 4].try_into().unwrap());
     }
-    MemProps { count, types }
+    let mut device_local_bytes = 0u64;
+    if raw.len() >= 264 {
+        let heap_count = u32::from_ne_bytes(raw[260..264].try_into().unwrap()).min(16);
+        for index in 0..heap_count as usize {
+            let base = 264 + index * 16;
+            if raw.len() < base + 12 {
+                break;
+            }
+            let size = u64::from_ne_bytes(raw[base..base + 8].try_into().unwrap());
+            let flags = u32::from_ne_bytes(raw[base + 8..base + 12].try_into().unwrap());
+            if flags & 1 != 0 {
+                device_local_bytes = device_local_bytes.saturating_add(size);
+            }
+        }
+    }
+    MemProps {
+        count,
+        types,
+        device_local_bytes,
+    }
+}
+
+fn extension_listed(bytes: &[u8], count: u32, name: &[u8]) -> bool {
+    for index in 0..count as usize {
+        let start = index * 260;
+        let end = start + name.len();
+        if bytes.len() <= end {
+            return false;
+        }
+        if &bytes[start..end] == name && bytes[end] == 0 {
+            return true;
+        }
+    }
+    false
 }
 
 fn load_fns(
@@ -6038,5 +6515,30 @@ mod gi_metrics_launch {
         );
         assert!(check_gi_metrics_arg("--gi-metrics", None).is_ok());
         assert!(check_gi_metrics_arg("--gi-metrics=off", None).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod memory_props {
+    use super::{extension_listed, parse_mem_props};
+
+    #[test]
+    fn a_device_local_heap_is_counted_and_a_host_heap_is_not() {
+        let mut raw = vec![0u8; 520];
+        raw[0..4].copy_from_slice(&1u32.to_ne_bytes());
+        raw[4..8].copy_from_slice(&1u32.to_ne_bytes());
+        raw[260..264].copy_from_slice(&2u32.to_ne_bytes());
+        raw[264..272].copy_from_slice(&1000u64.to_ne_bytes());
+        raw[272..276].copy_from_slice(&1u32.to_ne_bytes());
+        raw[280..288].copy_from_slice(&50u64.to_ne_bytes());
+        let props = parse_mem_props(&raw);
+        assert_eq!(props.count, 1);
+        assert_eq!(props.types[0], 1);
+        assert_eq!(props.device_local_bytes, 1000);
+        let name = b"VK_EXT_memory_budget";
+        let mut listed = vec![0u8; 260];
+        listed[..name.len()].copy_from_slice(name);
+        assert!(extension_listed(&listed, 1, name));
+        assert!(!extension_listed(&listed, 1, b"VK_KHR_swapchain"));
     }
 }

@@ -13,6 +13,7 @@
 //! sliders all set them through here.
 
 use genos_debug::{Host, Knob};
+use genos_load::{MaterialSettings, TextureQuality};
 use genos_scene::{
     AmbientMode, LampPickMode, LightingPreset, LightingSettings, Scene, ShadowFilter,
     SurfaceCacheBlend,
@@ -134,12 +135,18 @@ impl Host for Stage {
                 &["spread", "first"],
             ),
         ];
+        knobs.extend(material_knobs(&self.materials));
         knobs.extend(lighting_knobs(lighting));
         knobs
     }
 
     fn set_knob(&mut self, name: &str, v: f64) -> Result<(), String> {
         if apply_lighting_knob(&mut self.world.scene.lighting, name, v)? {
+            self.apply();
+            return Ok(());
+        }
+        if apply_material_knob(&mut self.materials, name, v)? {
+            self.materials_dirty = true;
             self.apply();
             return Ok(());
         }
@@ -176,6 +183,127 @@ impl Host for Stage {
         self.apply();
         Ok(())
     }
+}
+
+fn quality_index(quality: TextureQuality) -> usize {
+    match quality {
+        TextureQuality::Ultra => 0,
+        TextureQuality::High => 1,
+        TextureQuality::Medium => 2,
+        TextureQuality::Low => 3,
+    }
+}
+
+fn material_knobs(materials: &MaterialSettings) -> Vec<Knob> {
+    vec![
+        Knob::choice(
+            "texture_quality",
+            "texture_quality",
+            quality_index(materials.texture_quality),
+            &["ultra", "high", "medium", "low"],
+        ),
+        Knob::number(
+            "mip_bias",
+            "mip_bias",
+            f64::from(materials.mip_bias),
+            (-8.0, 8.0),
+            0.5,
+            "",
+        ),
+        Knob::number(
+            "anisotropy",
+            "anisotropy",
+            f64::from(materials.anisotropy),
+            (1.0, 16.0),
+            1.0,
+            "",
+        ),
+        Knob::switch("occlusion", "occlusion", materials.occlusion),
+        Knob::switch(
+            "emissive_promote",
+            "emissive_promote",
+            materials.emissive_promote,
+        ),
+        Knob::number(
+            "emissive_promote_flux",
+            "emissive_promote_flux",
+            f64::from(materials.emissive_promote_flux),
+            (0.0, 1.0),
+            0.01,
+            "",
+        ),
+        Knob::number(
+            "headroom_percent",
+            "headroom_percent",
+            f64::from(materials.headroom_percent),
+            (0.0, 50.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "headroom_floor_mb",
+            "headroom_floor_mb",
+            f64::from(materials.headroom_floor_mb),
+            (0.0, 4096.0),
+            16.0,
+            "",
+        ),
+        Knob::number(
+            "dwell_frames",
+            "dwell_frames",
+            f64::from(materials.dwell_frames),
+            (0.0, 120.0),
+            1.0,
+            "",
+        ),
+    ]
+}
+
+fn apply_material_knob(materials: &mut MaterialSettings, name: &str, v: f64) -> Result<bool, String> {
+    let whole = |value: f64| {
+        if value < 0.0 {
+            0
+        } else {
+            let mut out = 0u32;
+            let mut left = value;
+            while left >= 1.0 && out < u32::MAX {
+                out += 1;
+                left -= 1.0;
+            }
+            out
+        }
+    };
+    let key = match name {
+        "texture_quality" => {
+            let label = ["ultra", "high", "medium", "low"]
+                .get(whole(v) as usize)
+                .copied()
+                .unwrap_or("ultra");
+            materials.set_key("texture_quality", label)?;
+            return Ok(true);
+        }
+        "mip_bias" => "mip_bias",
+        "anisotropy" => "anisotropy",
+        "occlusion" => {
+            materials.set_key("occlusion", if v >= 0.5 { "on" } else { "off" })?;
+            return Ok(true);
+        }
+        "emissive_promote" => {
+            materials.set_key("emissive_promote", if v >= 0.5 { "on" } else { "off" })?;
+            return Ok(true);
+        }
+        "emissive_promote_flux" => "emissive_promote_flux",
+        "headroom_percent" => "headroom_percent",
+        "headroom_floor_mb" => "headroom_floor_mb",
+        "dwell_frames" => "dwell_frames",
+        _ => return Ok(false),
+    };
+    let text = match key {
+        "mip_bias" | "emissive_promote_flux" => format!("{v}"),
+        _ => format!("{}", whole(v)),
+    };
+    materials.set_key(key, &text)?;
+    Ok(true)
 }
 
 /// The lighting knobs shared with the lighting debug binary.

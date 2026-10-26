@@ -22,6 +22,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
+use genos_load::MaterialSettings;
 use genos_mcp::json::Value;
 use genos_render::{DebugView, Renderer, ScreenRect, ViewMode};
 use genos_scene::{
@@ -1257,6 +1258,19 @@ impl Tools {
                 ctx.renderer.clear_lighting_override();
                 reply(lighting_report(&written, ctx.renderer))
             }
+            "get_material_settings" => {
+                reply(obj(vec![(
+                    "text",
+                    text(ctx.renderer.material_settings().to_text()),
+                )]))
+            }
+            "set_material_settings" => {
+                let mut settings = ctx.renderer.material_settings();
+                apply_material_update(&mut settings, args.0)?;
+                let written = settings.to_text();
+                ctx.renderer.set_material_settings(settings);
+                reply(obj(vec![("text", text(written))]))
+            }
             "list_presets" => {
                 let presets = LightingPreset::all()
                     .iter()
@@ -1951,6 +1965,31 @@ fn apply_debug_update(settings: &mut DebugSettings, args: &Value) -> Result<(), 
             return Err(format!("debug setting {key} is a string or a bool"));
         };
         settings.set_key(key, &text)?;
+    }
+    Ok(())
+}
+
+fn apply_material_update(settings: &mut MaterialSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("material settings are an object".into());
+    };
+    if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
+        for line in text.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("material line needs key=value, got {line}"));
+            };
+            settings.set_key(key.trim(), value.trim())?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &lighting_value_text(value)?)?;
     }
     Ok(())
 }

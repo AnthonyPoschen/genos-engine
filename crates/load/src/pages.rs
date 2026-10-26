@@ -1,9 +1,9 @@
-//! Texture pages, the residency cap, and the miss rule.
+//! Texture pages and the miss rule.
 //!
 //! A page that is not resident is the finest coarser mip that is, or the factor
-//! colour. It is never black and never a half-written page. When the budget is
-//! full, the farthest image's finest mip is the one that drops. `--watch` flips
-//! to the new page on the next sample, after the upload has finished.
+//! colour. It is never black and never a half-written page. [`plan_residency`]
+//! is the old one-shot drop by rank. The running decision is [`crate::stream`].
+//! `--watch` flips to the new page on the next sample, after the upload has finished.
 
 /// One image's mip sizes in bytes, finest first. `rank` is distance: higher drops first.
 #[derive(Clone, Debug, PartialEq, Eq)]

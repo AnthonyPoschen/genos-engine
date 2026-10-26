@@ -113,7 +113,21 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
     .into_iter()
     .chain(host_specs())
+    .chain(material_specs())
     .collect()
+}
+
+fn material_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_material_settings",
+            "The material settings in force (text form): texture_quality, mip_bias, anisotropy, occlusion, emissive_promote, emissive_promote_flux, headroom_percent, headroom_floor_mb, dwell_frames. texture_quality does not follow VRAM size.",
+        ),
+        spec(
+            "set_material_settings",
+            "Partial material update. Keys match the settings text. A text field overlays key=value lines. residency_mb is a deprecated alias: it warns once and does not set a pool. Applies on the next draw.",
+        ),
+    ]
 }
 
 fn host_specs() -> Vec<CommandSpec> {
