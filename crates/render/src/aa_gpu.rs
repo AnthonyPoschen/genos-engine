@@ -505,8 +505,8 @@ impl Gpu {
             self.extent_w,
             self.extent_h,
             true,
-            self.crop_x as i32,
-            self.crop_y as i32,
+            i32::try_from(self.crop_x).unwrap_or(i32::MAX),
+            i32::try_from(self.crop_y).unwrap_or(i32::MAX),
         );
         self.buffer_barrier(self.aa_src[slot].buffer, 0x1000, 0x800, 0x1000, 0x20);
         self.dispatch_aa(
@@ -525,8 +525,8 @@ impl Gpu {
             self.extent_w,
             self.extent_h,
             false,
-            self.crop_x as i32,
-            self.crop_y as i32,
+            i32::try_from(self.crop_x).unwrap_or(i32::MAX),
+            i32::try_from(self.crop_y).unwrap_or(i32::MAX),
         );
         self.image_barrier(image, 7, 6, 0x1000, 0x1000, 0x1000, 0x800);
         self.color_layout[slot] = 6;

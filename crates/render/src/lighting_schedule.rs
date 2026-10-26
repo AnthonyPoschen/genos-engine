@@ -7,11 +7,10 @@
 //! 1. Viewport, including the guard band, up to the quality floor.
 //! 2. Out-of-view regions near the camera, up to that same floor.
 //! 3. Leftover budget refines high detail by visible error.
+//!
 //! A fast change stays urgent inside its order. It does not jump the order.
 
-#![expect(clippy::as_conversions, reason = "pixel and budget counts cross the u32 boundary")]
-#![expect(clippy::cast_possible_truncation, reason = "pixel and budget counts fit the picture")]
-#![expect(clippy::cast_sign_loss, reason = "rounded sizes are clamped to zero first")]
+#![expect(clippy::as_conversions, reason = "guard fractions are display pixels over the picture")]
 #![expect(clippy::cast_precision_loss, reason = "tile counts are far below 2^24")]
 
 /// Cell edge of cache levels L0–L4, in metres.
@@ -22,6 +21,41 @@ pub const URGENT_CHANGE: f32 = 0.5;
 
 /// Controller scale never falls below this. The starvation slice still runs.
 pub const SCALE_FLOOR: f32 = 1.0 / 64.0;
+
+/// Non-negative `value` truncated toward zero. Out of range clamps.
+///
+/// The integer comes from the IEEE bits, so this file does not narrow with `as`.
+fn trunc_u32(value: f64) -> u32 {
+    if value.is_nan() || value <= 0.0 {
+        return 0;
+    }
+    // 2^32 is the first integer a `u32` cannot hold. f64 rounds `u32::MAX` to that.
+    if value.is_infinite() || value >= 4_294_967_296.0 {
+        return u32::MAX;
+    }
+    let bits = value.to_bits();
+    let exp = (bits >> 52) & 0x7ff;
+    if exp < 1023 {
+        return 0;
+    }
+    let shift = exp - 1023;
+    let mant = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+    let whole = mant >> (52 - shift);
+    u32::try_from(whole).unwrap_or(u32::MAX)
+}
+
+fn clamp_scale(value: f64, limit: f64) -> f64 {
+    let floor = f64::from(SCALE_FLOOR);
+    if value.is_finite() {
+        value.clamp(floor, limit)
+    } else {
+        floor
+    }
+}
+
+fn usize_from_u32(value: u32) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
 
 /// Per-frame work ceilings for one preset. Zero means the pass does not run.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -92,6 +126,23 @@ pub struct LitFrame {
     pub bottom: f32,
 }
 
+/// Grants and demands for the three screen passes, plus the cache-ray cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScreenBudget {
+    pub tiles_x: u32,
+    pub tiles_y: u32,
+    pub shadow_grant: u32,
+    pub shadow_demand: u32,
+    pub denoise_grant: u32,
+    pub denoise_demand: u32,
+    pub trace_grant: u32,
+    pub trace_demand: u32,
+    pub changes: u32,
+    pub scaled: bool,
+    pub frame: u32,
+    pub cache_rays: u32,
+}
+
 /// What one frame's screen passes are allowed to refresh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScreenPlan {
@@ -111,7 +162,8 @@ pub struct ScreenPlan {
 /// Scales the work caps after a measured lighting total.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BudgetController {
-    pub scale: f32,
+    /// 1 keeps the preset caps. The floor is 1/64. It never rises above 1.
+    pub scale: f64,
 }
 
 impl Default for BudgetController {
@@ -128,17 +180,18 @@ impl BudgetController {
 
     /// `lighting_ms` is `None` when this frame has no timestamp sample.
     /// Over the cap, scale drops by `cap / ms`. Under 75% of the cap, it creeps back toward 1.
-    pub fn observe(&mut self, lighting_ms: Option<f32>, cap_ms: f32) {
+    pub fn observe(&mut self, lighting_ms: Option<f64>, cap_ms: f32) {
         let Some(ms) = lighting_ms else {
             return;
         };
-        if !ms.is_finite() || ms <= 0.0 || !cap_ms.is_finite() || cap_ms <= 0.0 {
+        let cap = f64::from(cap_ms);
+        if !ms.is_finite() || ms <= 0.0 || !cap.is_finite() || cap <= 0.0 {
             return;
         }
-        if ms > cap_ms {
-            self.scale = (self.scale * (cap_ms / ms)).clamp(SCALE_FLOOR, 1.0);
-        } else if ms < cap_ms * 0.75 {
-            self.scale = (self.scale * 1.05).min(1.0);
+        if ms > cap {
+            self.scale = clamp_scale(self.scale * (cap / ms), 1.0);
+        } else if ms < cap * 0.75 {
+            self.scale = clamp_scale(self.scale * 1.05, 1.0);
         }
     }
 }
@@ -260,16 +313,15 @@ pub fn coarse_cap_bytes(preset: &str) -> u64 {
 
 #[must_use]
 pub fn scale_u32(value: u32, scale: f32) -> u32 {
-    if value == 0 || !(scale > 0.0) {
+    if value == 0 || !scale.is_finite() || scale <= 0.0 {
         return 0;
     }
-    let scaled = (f64::from(value) * f64::from(scale.clamp(SCALE_FLOOR, 1.0))).floor();
+    let clamped = f64::from(scale).clamp(f64::from(SCALE_FLOOR), 1.0);
+    let scaled = (f64::from(value) * clamped).floor();
     if scaled <= 1.0 {
         1
-    } else if scaled >= f64::from(u32::MAX) {
-        u32::MAX
     } else {
-        scaled as u32
+        trunc_u32(scaled)
     }
 }
 
@@ -309,7 +361,7 @@ pub fn select_refresh(items: &[WorkItem], budget: u32, floor: QualityFloor) -> V
     let mut chosen = Vec::new();
     let mut taken = vec![false; items.len()];
     for slot in order {
-        if chosen.len() >= main_budget as usize {
+        if chosen.len() >= usize_from_u32(main_budget) {
             break;
         }
         if refresh_rank(&items[slot], floor) > 2 {
@@ -327,7 +379,7 @@ pub fn select_refresh(items: &[WorkItem], budget: u32, floor: QualityFloor) -> V
             .cmp(&items[a].age_frames)
             .then_with(|| items[a].index.cmp(&items[b].index))
     });
-    for slot in ages.into_iter().take(reserve as usize) {
+    for slot in ages.into_iter().take(usize_from_u32(reserve)) {
         chosen.push(items[slot].index);
     }
     chosen
@@ -511,12 +563,12 @@ pub fn lit_frame(display_w: u32, display_h: u32, edges: GuardEdges, tile: u32) -
             bottom: 0.0,
         };
     }
-    let extra_w = (f64::from(display_w) * f64::from(sum_x)).ceil() as u32;
-    let extra_h = (f64::from(display_h) * f64::from(sum_y)).ceil() as u32;
+    let extra_w = trunc_u32((f64::from(display_w) * f64::from(sum_x)).ceil());
+    let extra_h = trunc_u32((f64::from(display_h) * f64::from(sum_y)).ceil());
     let lit_w = (display_w.saturating_add(extra_w)).div_ceil(tile) * tile;
     let lit_h = (display_h.saturating_add(extra_h)).div_ceil(tile) * tile;
-    let mut crop_x = (f64::from(display_w) * f64::from(edges.left.max(0.0))).round() as u32;
-    let mut crop_y = (f64::from(display_h) * f64::from(edges.top.max(0.0))).round() as u32;
+    let mut crop_x = trunc_u32((f64::from(display_w) * f64::from(edges.left.max(0.0))).round());
+    let mut crop_y = trunc_u32((f64::from(display_h) * f64::from(edges.top.max(0.0))).round());
     crop_x = (crop_x / tile) * tile;
     crop_y = (crop_y / tile) * tile;
     crop_x = crop_x.min(lit_w.saturating_sub(display_w));
@@ -540,27 +592,18 @@ pub fn lit_frame(display_w: u32, display_h: u32, edges: GuardEdges, tile: u32) -
 }
 
 #[must_use]
-pub fn screen_plan(
-    tiles_x: u32,
-    tiles_y: u32,
-    shadow_grant: u32,
-    shadow_demand: u32,
-    denoise_grant: u32,
-    denoise_demand: u32,
-    trace_grant: u32,
-    trace_demand: u32,
-    changes: u32,
-    scaled: bool,
-    frame: u32,
-    cache_rays: u32,
-) -> ScreenPlan {
-    let tiles_x = tiles_x.max(1);
-    let tiles_y = tiles_y.max(1);
+pub fn screen_plan(input: ScreenBudget) -> ScreenPlan {
+    let tiles_x = input.tiles_x.max(1);
+    let tiles_y = input.tiles_y.max(1);
     let tiles = tiles_x.saturating_mul(tiles_y);
-    let direct = budget_mode_gates(shadow_grant, shadow_demand, true, scaled);
-    let atrous = changes > 0 && denoise_grant < denoise_demand;
-    let trace = budget_mode_gates(trace_grant, trace_demand, changes > 0, scaled);
-    let cache_ray_grant = if scaled && cache_rays > 0 { cache_rays } else { 0 };
+    let direct = budget_mode_gates(input.shadow_grant, input.shadow_demand, true, input.scaled);
+    let atrous = input.changes > 0 && input.denoise_grant < input.denoise_demand;
+    let trace = budget_mode_gates(input.trace_grant, input.trace_demand, input.changes > 0, input.scaled);
+    let cache_ray_grant = if input.scaled && input.cache_rays > 0 {
+        input.cache_rays
+    } else {
+        0
+    };
     if !direct && !atrous && !trace {
         return ScreenPlan {
             direct_gate: false,
@@ -576,24 +619,24 @@ pub fn screen_plan(
         };
     }
     let grant_tiles = if direct {
-        tiles_for_grant(tiles, shadow_grant, shadow_demand)
+        tiles_for_grant(tiles, input.shadow_grant, input.shadow_demand)
     } else if atrous {
-        tiles_for_grant(tiles, denoise_grant, denoise_demand)
+        tiles_for_grant(tiles, input.denoise_grant, input.denoise_demand)
     } else {
-        tiles_for_grant(tiles, trace_grant, trace_demand)
+        tiles_for_grant(tiles, input.trace_grant, input.trace_demand)
     };
-    let (tile_x, tile_y, tile_w, tile_h, starve_y, starve_h) =
-        centered_and_band(tiles_x, tiles_y, grant_tiles, frame);
+    let (origin_x, origin_y, span_w, span_h, band_y, band_h) =
+        centered_and_band(tiles_x, tiles_y, grant_tiles, input.frame);
     ScreenPlan {
         direct_gate: direct,
         atrous_gate: atrous,
         trace_gate: trace,
-        tile_x,
-        tile_y,
-        tile_w,
-        tile_h,
-        starve_y,
-        starve_h,
+        tile_x: origin_x,
+        tile_y: origin_y,
+        tile_w: span_w,
+        tile_h: span_h,
+        starve_y: band_y,
+        starve_h: band_h,
         cache_ray_grant,
     }
 }
@@ -607,26 +650,26 @@ fn tiles_for_grant(tiles: u32, grant: u32, demand: u32) -> u32 {
         return tiles;
     }
     let share = (u64::from(tiles) * u64::from(grant)) / u64::from(demand);
-    share.max(1).min(u64::from(tiles)) as u32
+    u32::try_from(share.max(1).min(u64::from(tiles))).unwrap_or(u32::MAX)
 }
 
 fn centered_and_band(tiles_x: u32, tiles_y: u32, grant_tiles: u32, frame: u32) -> (u32, u32, u32, u32, u32, u32) {
     let reserve = grant_tiles / 10;
     let main = grant_tiles.saturating_sub(reserve).max(1).min(tiles_x.saturating_mul(tiles_y));
-    let (tile_w, tile_h) = rect_wh(tiles_x, tiles_y, main);
-    let tile_x = tiles_x.saturating_sub(tile_w) / 2;
-    let tile_y = tiles_y.saturating_sub(tile_h) / 2;
-    let starve_h = if reserve == 0 {
+    let (span_w, span_h) = rect_wh(tiles_x, tiles_y, main);
+    let origin_x = tiles_x.saturating_sub(span_w) / 2;
+    let origin_y = tiles_y.saturating_sub(span_h) / 2;
+    let band_h = if reserve == 0 {
         0
     } else {
         reserve.div_ceil(tiles_x).clamp(1, tiles_y)
     };
-    let starve_y = if starve_h == 0 {
+    let band_y = if band_h == 0 {
         0
     } else {
-        (frame % tiles_y) % tiles_y.saturating_sub(starve_h).max(1)
+        (frame % tiles_y) % tiles_y.saturating_sub(band_h).max(1)
     };
-    (tile_x, tile_y, tile_w, tile_h, starve_y, starve_h)
+    (origin_x, origin_y, span_w, span_h, band_y, band_h)
 }
 
 fn rect_wh(tiles_x: u32, tiles_y: u32, count: u32) -> (u32, u32) {
@@ -634,7 +677,7 @@ fn rect_wh(tiles_x: u32, tiles_y: u32, count: u32) -> (u32, u32) {
         return (tiles_x, tiles_y);
     }
     let aspect = f64::from(tiles_x) / f64::from(tiles_y.max(1));
-    let mut h = ((f64::from(count) / aspect).sqrt()).floor().max(1.0) as u32;
+    let mut h = trunc_u32(((f64::from(count) / aspect).sqrt()).floor().max(1.0));
     h = h.clamp(1, tiles_y);
     let mut w = (count / h).clamp(1, tiles_x);
     while w.saturating_mul(h) > count && h > 1 {
@@ -656,7 +699,7 @@ pub struct SchedulePush {
     pub tail: [u32; 4],
     pub plan: ScreenPlan,
     pub lit: LitFrame,
-    pub scale: f32,
+    pub scale: f64,
     pub lighting_cap_ms: f32,
 }
 
@@ -701,17 +744,15 @@ fn clear_plan() -> ScreenPlan {
 
 /// Work-cap multiply. `scale` may rise to 4 for the test knob. Zero stays zero.
 #[must_use]
-pub fn grant_u32(value: u32, scale: f32) -> u32 {
+pub fn grant_u32(value: u32, scale: f64) -> u32 {
     if value == 0 || !scale.is_finite() || scale <= 0.0 {
         return 0;
     }
-    let scaled = (f64::from(value) * f64::from(scale.clamp(SCALE_FLOOR, 4.0))).floor();
+    let scaled = (f64::from(value) * clamp_scale(scale, 4.0)).floor();
     if scaled <= 1.0 {
         1
-    } else if scaled >= f64::from(u32::MAX) {
-        u32::MAX
     } else {
-        scaled as u32
+        trunc_u32(scaled)
     }
 }
 
@@ -728,7 +769,10 @@ pub fn lit_target(
     let display_w = display_w.max(1);
     let display_h = display_h.max(1);
     let tile = tile.max(1);
-    let edges = if settings.schedule == genos_scene::ScheduleMode::Global || !(settings.guard_edge > 0.0)
+    let edge = settings.guard_edge;
+    let edges = if settings.schedule == genos_scene::ScheduleMode::Global
+        || !edge.is_finite()
+        || edge <= 0.0
     {
         GuardEdges {
             left: 0.0,
@@ -746,7 +790,7 @@ pub fn lit_target(
 #[must_use]
 pub fn schedule_push(
     settings: &genos_scene::LightingSettings,
-    controller_scale: f32,
+    controller_scale: f64,
     lit: LitFrame,
     tile: u32,
     probe_rays: u32,
@@ -777,16 +821,16 @@ pub fn schedule_push(
         };
     }
     let knob = if settings.budget_scale.is_finite() {
-        settings.budget_scale.clamp(SCALE_FLOOR, 4.0)
+        f64::from(settings.budget_scale.clamp(SCALE_FLOOR, 4.0))
     } else {
         1.0
     };
     let ctrl = if controller_scale.is_finite() {
-        controller_scale.clamp(SCALE_FLOOR, 1.0)
+        controller_scale.clamp(f64::from(SCALE_FLOOR), 1.0)
     } else {
         1.0
     };
-    let scale = (ctrl * knob).clamp(SCALE_FLOOR, 4.0);
+    let scale = (ctrl * knob).clamp(f64::from(SCALE_FLOOR), 4.0);
     let scaled = scale < 0.999;
     let tile = tile.max(1);
     let tiles_x = lit.lit_w.div_ceil(tile).max(1);
@@ -799,20 +843,20 @@ pub fn schedule_push(
         0
     };
     let denoise_demand = if settings.denoiser.enabled { pixels } else { 0 };
-    let plan = screen_plan(
+    let plan = screen_plan(ScreenBudget {
         tiles_x,
         tiles_y,
-        grant_u32(caps.fresh_shadow_rays, scale),
-        pixels,
-        grant_u32(caps.denoise_items, scale),
+        shadow_grant: grant_u32(caps.fresh_shadow_rays, scale),
+        shadow_demand: pixels,
+        denoise_grant: grant_u32(caps.denoise_items, scale),
         denoise_demand,
-        grant_u32(caps.screen_probe_rays, scale),
+        trace_grant: grant_u32(caps.screen_probe_rays, scale),
         trace_demand,
         changes,
         scaled,
         frame,
-        grant_u32(caps.cache_rays, scale),
-    );
+        cache_rays: grant_u32(caps.cache_rays, scale),
+    });
     let mut words = plan.words(lit.crop_x, lit.crop_y);
     // Bit 3: detail levels (25 cm through 4 m). The shader also requires world-cache mode 3.
     words[0] |= 1 << 3;
@@ -1011,35 +1055,79 @@ mod tests {
     }
 
     #[test]
+    fn trunc_u32_matches_the_integer_part() {
+        assert_eq!(trunc_u32(0.0), 0);
+        assert_eq!(trunc_u32(-2.0), 0);
+        assert_eq!(trunc_u32(f64::NAN), 0);
+        assert_eq!(trunc_u32(f64::INFINITY), u32::MAX);
+        assert_eq!(trunc_u32(0.9), 0);
+        assert_eq!(trunc_u32(1.0), 1);
+        assert_eq!(trunc_u32(1.9), 1);
+        assert_eq!(trunc_u32(2.0), 2);
+        assert_eq!(trunc_u32(255.9), 255);
+        assert_eq!(trunc_u32(65_536.0), 65_536);
+        assert_eq!(trunc_u32(1_000_000.7), 1_000_000);
+        assert_eq!(trunc_u32(16_777_216.0), 16_777_216);
+        assert_eq!(trunc_u32(2_147_483_647.5), 2_147_483_647);
+        assert_eq!(trunc_u32(4_294_967_295.0), u32::MAX);
+    }
+
+    #[test]
     fn the_controller_scales_down_and_does_not_open_the_frame() {
         let mut controller = BudgetController::new();
         controller.observe(None, 8.0);
         assert!((controller.scale - 1.0).abs() < 1.0e-6);
         controller.observe(Some(16.0), 8.0);
         assert!(controller.scale < 0.6);
-        assert!(controller.scale >= SCALE_FLOOR);
-        controller.scale = SCALE_FLOOR / 2.0;
+        assert!(controller.scale >= f64::from(SCALE_FLOOR));
+        controller.scale = f64::from(SCALE_FLOOR) / 2.0;
         controller.observe(Some(1000.0), 8.0);
-        assert!((controller.scale - SCALE_FLOOR).abs() < 1.0e-6);
+        assert!((controller.scale - f64::from(SCALE_FLOOR)).abs() < 1.0e-6);
         controller.observe(Some(1.0), 8.0);
         assert!(controller.scale <= 1.0);
     }
 
     #[test]
     fn a_covered_frame_does_not_gate() {
-        let plan = screen_plan(20, 12, 2_000_000, 57_600, 16_000, 57_600, 522_000, 15_360, 0, false, 0, 256_000);
+        let plan = screen_plan(ScreenBudget {
+            tiles_x: 20,
+            tiles_y: 12,
+            shadow_grant: 2_000_000,
+            shadow_demand: 57_600,
+            denoise_grant: 16_000,
+            denoise_demand: 57_600,
+            trace_grant: 522_000,
+            trace_demand: 15_360,
+            changes: 0,
+            scaled: false,
+            frame: 0,
+            cache_rays: 256_000,
+        });
         assert!(plan.gates_off());
         assert_eq!(plan.words(0, 0)[0], 0);
     }
 
     #[test]
     fn a_mover_gates_denoise_to_a_centered_rect() {
-        let plan = screen_plan(20, 12, 2_000_000, 57_600, 16_000, 57_600, 522_000, 15_360, 1, false, 3, 256_000);
+        let plan = screen_plan(ScreenBudget {
+            tiles_x: 20,
+            tiles_y: 12,
+            shadow_grant: 2_000_000,
+            shadow_demand: 57_600,
+            denoise_grant: 16_000,
+            denoise_demand: 57_600,
+            trace_grant: 522_000,
+            trace_demand: 15_360,
+            changes: 1,
+            scaled: false,
+            frame: 3,
+            cache_rays: 256_000,
+        });
         assert!(plan.atrous_gate);
         assert!(!plan.direct_gate);
         assert!(plan.tile_w > 0 && plan.tile_h > 0);
         let center_x = plan.tile_x + plan.tile_w / 2;
-        assert!((center_x as i32 - 10).abs() <= 1);
+        assert!((i64::from(center_x) - 10).abs() <= 1);
         assert!(plan.tile_w * plan.tile_h < 20 * 12);
     }
 
@@ -1147,6 +1235,6 @@ mod tests {
         assert!(lit.crop_x + 1280 <= lit.lit_w);
         assert!(lit.crop_y + 720 <= lit.lit_h);
         let mid = lit.crop_x + 640;
-        assert!((mid as i32 - lit.lit_w as i32 / 2).abs() < 32);
+        assert!((i64::from(mid) - i64::from(lit.lit_w) / 2).abs() < 32);
     }
 }

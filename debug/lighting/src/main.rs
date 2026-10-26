@@ -562,7 +562,7 @@ fn run() -> Result<(), String> {
             },
         );
         note_gi(&mut app, &mut renderer);
-        note_schedule(&mut app, &mut renderer);
+        note_schedule(&mut app, &renderer);
         if last {
             if let Some(pixels) = pixels {
                 let path = opts

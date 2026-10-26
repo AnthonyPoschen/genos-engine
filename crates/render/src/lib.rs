@@ -36,7 +36,7 @@ pub use lighting_schedule::{
     lit_frame, lit_target, loosen_for, merge_into_parent, near_radius_for, projected_px, scale_u32,
     schedule_push, screen_plan, select_refresh, should_add_level, should_remove_level, zone_of,
     BudgetController, CoarseEntry, GuardEdges, ItemZone, LitFrame, MsmeSample, QualityFloor,
-    SchedulePush, ScreenPlan, WorkCaps, WorkItem, LEVEL_METRES,
+    SchedulePush, ScreenBudget, ScreenPlan, WorkCaps, WorkItem, LEVEL_METRES,
 };
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};

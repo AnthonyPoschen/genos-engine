@@ -1767,14 +1767,14 @@ fn budget_key(key: &str) -> bool {
     )
 }
 
-fn budgets_value(settings: &LightingSettings, controller_scale: f32) -> Value {
+fn budgets_value(settings: &LightingSettings, controller_scale: f64) -> Value {
     let preset = settings.preset_label();
     let caps = caps_for(preset);
     obj(vec![
         ("preset", text(preset)),
         ("schedule", text(settings.schedule.name())),
         ("budget_scale", num(f64::from(settings.budget_scale))),
-        ("controller_scale", num(f64::from(controller_scale))),
+        ("controller_scale", num(controller_scale)),
         ("lighting_cap_ms", num(f64::from(caps.lighting_ms))),
         ("resolve_cap_ms", num(f64::from(caps.resolve_ms))),
         ("guard_edge", num(f64::from(settings.guard_edge))),
@@ -1808,7 +1808,7 @@ fn budgets_value(settings: &LightingSettings, controller_scale: f32) -> Value {
 
 fn schedule_stats(push: &SchedulePush) -> Value {
     obj(vec![
-        ("scale", num(f64::from(push.scale))),
+        ("scale", num(push.scale)),
         ("lighting_cap_ms", num(f64::from(push.lighting_cap_ms))),
         ("direct_gate", Value::Bool(push.plan.direct_gate)),
         ("atrous_gate", Value::Bool(push.plan.atrous_gate)),

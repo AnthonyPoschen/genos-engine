@@ -293,7 +293,7 @@ impl Renderer {
     }
 
     /// Controller scale for the next budgeted frame. `1` is the preset cap.
-    pub fn budget_controller_scale(&self) -> f32 {
+    pub fn budget_controller_scale(&self) -> f64 {
         self.gpu.lighting.budget.scale
     }
 
@@ -2478,7 +2478,7 @@ impl Gpu {
                     // so lavapipe timestamps never pull the scale to the floor.
                     if self.lighting.settings.schedule == genos_scene::ScheduleMode::Budget {
                         self.lighting.budget.observe(
-                            Some(sample.lighting_ms as f32),
+                            Some(sample.lighting_ms),
                             self.lighting.last_schedule.lighting_cap_ms,
                         );
                     }
@@ -5192,8 +5192,8 @@ impl Gpu {
         let region = Region {
             src_layers: layers,
             src_offset: Offset {
-                x: self.crop_x as i32,
-                y: self.crop_y as i32,
+                x: i32::try_from(self.crop_x).unwrap_or(i32::MAX),
+                y: i32::try_from(self.crop_y).unwrap_or(i32::MAX),
                 z: 0,
             },
             dst_layers: layers,
@@ -5257,8 +5257,8 @@ impl Gpu {
                 count: 1,
             },
             image_offset: Offset {
-                x: self.crop_x as i32,
-                y: self.crop_y as i32,
+                x: i32::try_from(self.crop_x).unwrap_or(i32::MAX),
+                y: i32::try_from(self.crop_y).unwrap_or(i32::MAX),
                 z: 0,
             },
             extent: Extent {
