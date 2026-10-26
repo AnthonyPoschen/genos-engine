@@ -25,6 +25,11 @@ const uint LAMP_PICK_EXACT_LIT = 8u;
 const uint LAMP_GEO_RESTIR = 0u;
 const uint LAMP_GEO_COPY = 1u;
 const uint LAMP_GEO_EXACT = 2u;
+// Reject history when the depth gap is both over this fraction and over this many metres.
+const float LAMP_PICK_DEPTH_REL = 0.02;
+const float LAMP_PICK_DEPTH_ABS = 0.05;
+// Reject history when the normal dot is below this.
+const float LAMP_PICK_NORMAL_MIN = 0.9;
 
 layout(std430, set = 0, binding = 12) buffer LampReservoirs {
     uvec4 v[];
@@ -176,11 +181,11 @@ bool lamp_pick_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out float z_no
         return false;
     }
     float gap = abs(z - z_prev);
-    if (gap / z > 0.02 && gap > 0.05) {
+    if (gap / z > LAMP_PICK_DEPTH_REL && gap > LAMP_PICK_DEPTH_ABS) {
         return false;
     }
     vec3 n_prev = lighting_unpack_normal(geo.y);
-    if (dot(n_prev, nrm) < 0.9) {
+    if (dot(n_prev, nrm) < LAMP_PICK_NORMAL_MIN) {
         return false;
     }
     return true;

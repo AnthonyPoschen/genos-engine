@@ -17,6 +17,12 @@ const bool LIGHTING_KEPT_SHOULD = true;
 // S78Q: a kept light that changed marks its probe's gather (lighting_gdirty).
 const bool LIGHTING_KEPT_HYST = false; // S78T: off pending re-test (S78S)
 const float LIGHTING_KEPT_TOL = 0.02;
+// A trusted colour is the same shading point only inside this distance.
+const float LAMP_PICK_COPY_M = 0.005;
+// Lift a history hit off its face before a target evaluation, same as `origin`.
+const float LAMP_PICK_HIST_LIFT = 0.02;
+// A stored depth of 0 is a miss. Exact and ReSTIR records stay positive.
+const float LAMP_PICK_DEPTH_FLOOR = 1.0e-4;
 void lighting_put_kept_light_d(uint h, vec3 light, uint src) {
     uint v = lighting_pack_rgb9e5(light);
     uint at = lighting_kept_light_at() + h / 4u;
@@ -455,7 +461,7 @@ void main() {
                     // would drag the old integral across the picture. A sub-pixel
                     // hold (under 5 mm) is the same point, and only while the
                     // lamps still match the record (w_sum holds that signature).
-                    if (floatBitsToUint(history.w_sum) == pix_sig && lighting_surface(hp, hpos, hn, halb, htwo) && length(hpos - pos) < 0.005) {
+                    if (floatBitsToUint(history.w_sum) == pix_sig && lighting_surface(hp, hpos, hn, halb, htwo) && length(hpos - pos) < LAMP_PICK_COPY_M) {
                         copied = true;
                         copied_rgb = lighting_unpack_rgb9e5(geo_h.w);
                         history.m = lamp_res_samples(history);
@@ -504,7 +510,7 @@ void main() {
                             bool htwo;
                             uvec2 hp = uvec2(hist_px % pc.dims.x, hist_px / pc.dims.x);
                             bool hsurf = lighting_surface(hp, hpos, hn, halb, htwo);
-                            vec3 horigin = hpos + hn * 0.02;
+                            vec3 horigin = hpos + hn * LAMP_PICK_HIST_LIFT;
                             float pq_can = lamp_pick_phat(list, count, canonical.lamp, origin, n, two_sided);
                             float pq_hist = lamp_pick_phat(list, count, history.lamp, origin, n, two_sided);
                             float ph_can = hsurf ? lamp_pick_phat(list, count, canonical.lamp, horigin, hn, htwo) : 0.0;
@@ -783,7 +789,7 @@ void main() {
             cur.w_sum = uintBitsToFloat(pix_sig);
             cur.m = (LIGHTING_DIRECT_HOLD << 24u) | 1u;
             cur.target = 0.0;
-            uvec4 geo = uvec4(floatBitsToUint(max(lamp_pick_depth(pos), 1.0e-4)), lighting_pack_normal(n), LAMP_GEO_EXACT, lighting_pack_rgb9e5(e));
+            uvec4 geo = uvec4(floatBitsToUint(max(lamp_pick_depth(pos), LAMP_PICK_DEPTH_FLOOR)), lighting_pack_normal(n), LAMP_GEO_EXACT, lighting_pack_rgb9e5(e));
             lamp_res_store(idx, slot, cur);
             lamp_geo_store(idx, slot, geo);
             if (lamp_pick_diag()) {
@@ -802,7 +808,7 @@ void main() {
             if (cur.lamp != LAMP_ALL) {
                 cur.m = lamp_res_samples(cur);
                 lamp_res_store(idx, slot, cur);
-                lamp_geo_store(idx, slot, uvec4(floatBitsToUint(max(lamp_pick_depth(pos), 1.0e-4)), lighting_pack_normal(n), LAMP_GEO_RESTIR, lighting_pack_rgb9e5(e)));
+                lamp_geo_store(idx, slot, uvec4(floatBitsToUint(max(lamp_pick_depth(pos), LAMP_PICK_DEPTH_FLOOR)), lighting_pack_normal(n), LAMP_GEO_RESTIR, lighting_pack_rgb9e5(e)));
                 if (lamp_pick_diag()) {
                     atomicAdd(gstats.diag[59u], 1u);
                 }
