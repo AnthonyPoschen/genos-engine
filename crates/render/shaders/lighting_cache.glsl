@@ -918,6 +918,8 @@ const float LIGHTING_LEVEL_ABOVE_SEED = 0.2;
 const float LIGHTING_SLOT_DEPTH = 1.0e-3;
 const float LIGHTING_SLOT_TAN = 1.0e-6;
 const float LIGHTING_NDC_HALF = 0.5;
+// A parent cell with its own samples. Named so the coarse read adds no magic literal.
+const float LIGHTING_LEVEL_READY = 0.5;
 bool lighting_levels_on() {
     return lighting_world_mode() == 3u && (pc.schedule.x & 8u) != 0u;
 }
@@ -958,6 +960,51 @@ void lighting_coarse_undo(float size) {
     }
 }
 
+// Largest parent. Past this the tail stops. A 25 cm hit walk would otherwise
+// reach 8 m, and lavapipe faulted when that claim sat in lighting_sc_parent.
+const float LIGHTING_LEVEL_MAX = 4.0;
+
+// 1 m, 2 m, and 4 m, starting at `size`. One missing parent is claimed.
+// The find stays in this short loop: a fourth copy of lighting_sc_parent's
+// body, or a bilinear step here, overflowed lavapipe.
+vec4 lighting_sc_level_tail(vec3 pos, vec3 n, float size) {
+    bool spawned = false;
+    [[dont_unroll]] for (uint k = 0u; k < 3u; k++) {
+        if (k != 0u) {
+            size += size;
+        }
+        if (size > LIGHTING_LEVEL_MAX) {
+            continue;
+        }
+        bool claim = !spawned;
+        uint coarse = lighting_cache_find_sized(pos, n, claim, size, pos);
+        if (claim && coarse != ~0u && lighting_claim_new != 0u) {
+            spawned = true;
+            bool room = lighting_spawn_permit();
+            if (room) {
+                room = lighting_coarse_permit(size);
+            }
+            if (!room) {
+                ckeys.key[coarse] = 0u;
+                cache.v[3u * coarse + 1u] = vec4(0.0);
+                cache.v[3u * coarse + 2u] = vec4(0.0);
+                continue;
+            }
+            cache.v[3u * coarse].w = uintBitsToFloat(lighting_frame());
+            cache.v[LIGHTING_WORLD_AT + coarse].z = uintBitsToFloat(lighting_frame());
+        }
+        if (coarse == ~0u) {
+            continue;
+        }
+        vec4 cv = cache.v[3u * coarse + 2u];
+        if (cv.w > LIGHTING_LEVEL_READY) {
+            cache.v[3u * coarse].w = uintBitsToFloat(lighting_frame());
+            return vec4(cv.rgb, 1.0);
+        }
+    }
+    return vec4(0.0);
+}
+
 // True when the slot should be dropped. A 2 m or 4 m entry stays while the
 // live coarse count is inside the cap, so a waiting pixel keeps that value.
 bool lighting_sc_may_free(uint slot, uint last, uint shown) {
@@ -984,35 +1031,16 @@ bool lighting_sc_may_free(uint slot, uint last, uint shown) {
     return true;
 }
 
-// Insert the parent at `size` when it is missing and the frame has room.
-// A resident cell is not a spawn. True only when this invocation inserted it.
-bool lighting_level_ensure(vec3 pos, vec3 n, float size) {
-    if (!lighting_levels_on() || !(size > LIGHTING_LEVEL_ABOVE_SEED)) {
-        return false;
-    }
-    if (lighting_cache_find_sized(pos, n, false, size, pos) != ~0u) {
-        return false;
-    }
-    if (!lighting_spawn_permit() || !lighting_coarse_permit(size)) {
-        return false;
-    }
-    uint s = lighting_cache_find_sized(pos, n, true, size, pos);
-    if (s == ~0u || lighting_claim_new == 0u) {
-        lighting_coarse_undo(size);
-        return false;
-    }
-    cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
-    cache.v[LIGHTING_WORLD_AT + s].z = uintBitsToFloat(lighting_frame());
-    return true;
-}
-
 // Surface cache: the lit texel twice the size holding pos (the first fill of a
-// texel not lit yet); w 0 when there is none. With detail levels on, the walk
-// continues through 4 m, and at most one missing parent is claimed.
+// texel not lit yet); w 0 when there is none. Detail levels read one step
+// further here (1 m). Coarser parents are lighting_sc_level_tail: a fourth
+// copy of this body overflowed lavapipe.
 vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
-    uint steps = lighting_levels_on() ? 5u : 2u;
-    bool spawned = false;
-    [[dont_unroll]] for (uint l = 0u; l < steps; l++) {
+    // Constant trip count. A runtime bound on this loop faulted lavapipe.
+    [[dont_unroll]] for (uint l = 0u; l < 3u; l++) {
+        if (l == 2u && !lighting_levels_on()) {
+            continue;
+        }
         size *= 2.0;
         // The WRC cell (25 cm) is claimed if missing and marked as a seed a
         // pixel needs (the reveal burst, lighting_compact.comp).
@@ -1022,12 +1050,6 @@ vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
             cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
             cache.v[LIGHTING_WORLD_AT + s].z = uintBitsToFloat(lighting_frame());
         }
-        if (lighting_levels_on() && !spawned && l > 0u && s == ~0u) {
-            spawned = lighting_level_ensure(pos, n, size);
-            if (spawned) {
-                s = lighting_cache_find_sized(pos, n, false, size, pos);
-            }
-        }
         if (s != ~0u) {
             vec4 v = cache.v[3u * s + 2u];
             if (v.w > 0.5) {
@@ -1036,7 +1058,13 @@ vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
             }
         }
     }
-    return vec4(0.0);
+    if (!lighting_levels_on()) {
+        return vec4(0.0);
+    }
+    // `size` is 1 m when this walk started at 12.5 cm, and 2 m when it
+    // started at the 25 cm hit patch. The tail claims that cell and the
+    // coarser ones, up to 4 m.
+    return lighting_sc_level_tail(pos, n, size);
 }
 
 // Surface cache estimator (flag 1048576): a converged texel whose recent sets
@@ -1135,6 +1163,8 @@ float lighting_seed_sunfrac = 0.0;
 // S72N: first fill from the coarser sizes (2x, then 4x), bilinear over the lit
 // coplanar cells there (any coverage), so it has no cell-shaped steps. The 25 cm
 // cell holding pos is still claimed as a seed a pixel needs (reveal burst).
+// The bilinear walk stays at two steps (25 cm, then 50 cm). A third bilinear
+// overflowed lavapipe. The 1 m, 2 m, and 4 m parents are the short tail.
 vec4 lighting_sc_parent_bilerp(vec3 pos, vec3 n, float size) {
     float s2 = size * 2.0;
     if (s2 > 0.2) {
@@ -1144,21 +1174,17 @@ vec4 lighting_sc_parent_bilerp(vec3 pos, vec3 n, float size) {
             cache.v[LIGHTING_WORLD_AT + c].z = uintBitsToFloat(lighting_frame());
         }
     }
-    uint steps = lighting_levels_on() ? 5u : 2u;
-    bool spawned = false;
-    [[dont_unroll]] for (uint l = 0u; l < steps; l++) {
-        // One missing parent past the 25 cm seed, inside the spawn cap.
-        if (lighting_levels_on() && !spawned && l > 0u && lighting_cache_find_sized(pos, n, false, s2, pos) == ~0u) {
-            lighting_level_ensure(pos, n, s2);
-            spawned = true;
-        }
+    [[dont_unroll]] for (uint l = 0u; l < 2u; l++) {
         vec4 r = lighting_sc_bilerp_cover(pos, n, s2, 1.0e-3);
         if (r.w > -0.5) {
             return vec4(r.rgb, 1.0);
         }
         s2 *= 2.0;
     }
-    return vec4(0.0);
+    if (!lighting_levels_on()) {
+        return vec4(0.0);
+    }
+    return lighting_sc_level_tail(pos, n, s2);
 }
 vec4 lighting_sc_resample(vec3 pos, vec3 n, float size, uint slot) {
     lighting_seed_sunfrac = 0.0;
