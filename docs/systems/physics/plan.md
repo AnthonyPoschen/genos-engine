@@ -526,13 +526,13 @@ Each step is one commit. The `Deviation:` line says where the step leaves a sour
 ### P19. Time of impact for two moving convexes
 
 - [ ] **Files:** `ccd.rs`. Test `crates/physics/tests/ccd.rs`.
-- **Behavior:** `MotionQuality::Swept` uses conservative advancement. GJK distance plus the relative velocity of the closest points, including both linear velocities and both angular velocities, produces a time of impact. Both bodies move. The step advances the pair to a fraction of that time (0.8 of the remaining time of impact, minimum progress `1e-4` s), solves the contact, and repeats until the step is consumed or 16 advances have run. Other bodies keep the normal sub-step. A missed root (no progress) leaves the bodies at the last safe time and flags `toi_failed` on the world for the test to read.
+- **Behavior:** `MotionQuality::Swept` uses conservative advancement. The gap is the GJK distance. The closing-speed bound is `|v_a - v_b| + |ω_a| r_a + |ω_b| r_b`, with `r` the bounding radius. That is an upper bound on how fast the gap can close, not the relative velocity of the closest points. When the bound is positive, the time of impact is `min(remaining, gap / bound)`. Both bodies advance by that time. There is no scale factor. The pair stops when the gap is at most 1 mm or the remaining time is 0, and after at most 16 iterations. If the cap is hit while the gap is still above 1 mm, both bodies clamp at the last safe time, the rest of that pair's tick is dropped, and `toi_failed` is set. Other bodies keep the normal sub-step.
 - **Test:** `two_convex_ships_do_not_tunnel_head_on`
   - Each ship is a box, half-extents `(2, 1, 1)` (4 m along X). Centers start 40 m apart. Both `Swept`. Each speed in `[30, 120, 600, 3000]` m/s, opposite directions, one `step` of `1/60`. Travel per ship at 3 000 m/s is 50 m, which is more than the body length. Combined closing travel is 100 m.
-  - Assert for each speed: the two centers never exchange X order; the inner-face gap stays `>= -0.01` m; `toi_failed` is false; a contact impulse was stored for the pair; a second run matches positions bitwise.
+  - Assert for each speed: the two centers never exchange X order; the penetration depth (positive overlap) stays `<= 0.01` m; `toi_failed` is false; a contact impulse was stored for the pair; a second run matches positions bitwise.
 - **Test:** `a_spinning_convex_does_not_tunnel_through_a_wall`
   - Box half-extent 1 m, angular velocity `(0, 0, 40)` rad/s, linear velocity 30 m/s into a static wall 2 m away. After one step the box bounds do not pass the wall plane.
-- **Deviation:** time of impact is conservative advancement from GJK distance and the relative velocity of the closest points, including both bodies' linear and angular velocity. The pair advances 0.8 of the remaining time of impact, at least `1e-4` s, and at most 16 times. Other bodies keep the normal sub-step. A missed root sets `toi_failed` and leaves the last safe time.
+- **Deviation:** time of impact is `gap / (|v_a - v_b| + |ω_a| r_a + |ω_b| r_b)`. The 12 Oct 2026 text used the closest-point relative velocity, advanced 0.8 of the remaining time, and required at least `1e-4` s of progress. Those three are not used. A `1e-4` s step at 3 000 m/s moves 0.3 m, so the stop condition is a 1 mm gap plus the 16-iteration cap. Past the cap the pair clamps at the last safe time and sets `toi_failed`. Other bodies keep the normal sub-step.
 - **Commit:** `physics: resolve swept time of impact for both bodies`
 
 ### P20. Fast-pair sub-steps
@@ -540,7 +540,7 @@ Each step is one commit. The `Deviation:` line says where the step leaves a sour
 - [ ] **Files:** `ccd.rs`, `solver.rs`. Test `crates/physics/tests/ccd.rs`.
 - **Behavior:** If a pair's relative travel over the outer step exceeds that pair's smaller bounding radius, that pair integrates in extra slices (travel per slice ≤ radius). The rest of the world keeps the P10 sub-step count. Counters: `pair_slices(id_a, id_b)` and `body_slices(id)`.
 - **Test:** `only_the_fast_pair_takes_extra_slices`
-  - A resting box on a plane, and two swept spheres closing at 600 m/s. After one step the resting box's slice count equals the global sub-step count (4). The fast pair's slice count is greater. The spheres' inner gap stays `>= -0.01`.
+  - A resting box on a plane, and two swept spheres closing at 600 m/s. After one step the resting box's slice count equals the global sub-step count (4). The fast pair's slice count is greater. The spheres' penetration depth (positive overlap) stays `<= 0.01` m.
 - **Deviation:** extra slices apply to a pair whose relative travel exceeds its smaller bounding radius. The rest of the world keeps the P10 sub-step count.
 - **Commit:** `physics: sub-step a pair that outruns its radius`
 
