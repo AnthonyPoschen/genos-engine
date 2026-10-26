@@ -44,7 +44,7 @@ For a character, set `motor` and write the desired horizontal velocity in `wish`
 
 For a bullet whose gap at the start of the step is inside the margin, set `motion` to `MotionQuality::Speculative`. `World.speculative_margin` is the cap, 0.25 m unless a caller changes it. For a ship, set `motion` to `MotionQuality::Swept`. `World.swept_pair_cap` is the pair cap, 8 unless a caller changes it. `step_stats.ccd_applied` is true when any body is speculative or swept. `step_stats.toi_failed`, `toi_deferred`, `pair_slices`, and `dynamic_pair_impulses` are the counters for that step.
 
-For a breakable, cook the asset, then `spawn_breakable(&mut world, asset, debris_budget)`. `apply_damage(&mut world, breakable, bond, amount)` subtracts health and swaps when the bond reaches 0. `destruction_report` returns `bonds_broken`, `debris_alive`, and `floor_penetration_m`. `allows_slice` stays false. `intact_body` and `chunk_body` are the body indices.
+For a breakable, cook the asset, then `spawn_breakable(&mut world, asset, debris_budget)`. `apply_damage(&mut world, breakable, bond, amount)` subtracts health and swaps when the bond reaches 0. `destruction_report` returns `bonds_broken`, `debris_alive`, `debris_asleep`, and `floor_penetration_m`. `allows_slice` stays false. `intact_body` and `chunk_body` are the body indices.
 
 After `step`, `change_records` holds this tick's chunk records in `(breakable, chunk)` order: spawned, moved, slept, or culled. Empty bounds are the zero vector on both corners. `emit_change_records` defaults to true. A headless server sets it false and the list stays empty. `CHANGE_RECORDS_AWAIT_LIGHTING` is true. Lighting does not read the records. `gi_cache_dirty` stays false, so a break does not mark a global stillness hash.
 
@@ -58,7 +58,7 @@ A mesh collider is a few convex pieces, not the source triangles. Two concave me
 
 The camera calls this step from the scene crate. Lights have no collider.
 
-`debug/physics` is not in this change. The headless probe is `cargo test -p genos-physics --test metrics`. `--fixture broken` is the overhang: seam broken at step 30, 90 steps, `debris_budget` 8. The ship fixtures do not print the destruction rows.
+`debug/physics` is not in this change. The headless probe is `cargo test -p genos-physics --test metrics`. `--fixture broken` is the overhang: seam broken at step 30, 90 steps, `debris_budget` 8. `--fixture budget` is that overhang with 12 children per chunk and `debris_budget` 1. After it settles, `debris_alive` is at most 1 and `debris_asleep` is at least 1. The ship fixtures do not print the destruction rows.
 
 | Failure | Tunable | Probe |
 |---|---|---|
@@ -68,7 +68,7 @@ The camera calls this step from the scene crate. Lights have no collider.
 | Bond stays whole | `health_per_area`, the `apply_damage` amount | `bonds_broken` on `--fixture broken`. `an_undamaged_breakable_stays_one_body` stays at 0. |
 | Supported branch spawns | support flags, the world bond | `apply_damage_spawns_only_the_unsupported_children` |
 | Debris falls through the floor | contact, the debris pair filter | `floor_penetration_m` `<=0` |
-| Debris ignores sleep or the budget | 0.1 s, 0.4 m/s, `debris_budget` | `debris_sleeps_and_the_budget_keeps_the_largest` |
+| Debris ignores sleep or the budget | 0.1 s, 0.4 m/s, `debris_budget` | `--fixture budget` `debris_alive` `<=1` and `debris_asleep` `>=1`. `debris_sleeps_and_the_budget_keeps_the_largest` keeps the largest of 12. |
 | `step` slices | `allow_slice` | `allows_slice` is false |
 | A cull moves later bodies | tombstone in place | culled presence is `Culled`; the index stays |
 | A break dirties the whole GI cache | `emit_change_records` | `a_break_emits_local_bounds_and_does_not_mark_gi_dirty`. The server probe is `the_server_emits_no_change_records`. |

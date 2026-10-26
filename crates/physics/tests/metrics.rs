@@ -11,11 +11,13 @@
 //! block. `tunnel_count` is the block still at rest. `wide` is the swept ships
 //! 40 m apart, one step, so a time-of-impact cap of one advance fails
 //! `tunnel_count`. `rotor` is a cube in free flight. `rotational_energy_j`
-//! is checked against `1/2 ωᵀ I ω` from the box size and mass.
+//! is checked against `1/2 ωᵀ I ω` from the box size and mass. `budget` breaks
+//! an overhang into 12 children with room for 1 debris body. After it settles,
+//! `debris_alive` stays within that budget and `debris_asleep` is at least 1.
 //!
 //! ```text
 //! --out DIR
-//! --fixture proof|good|bad|discrete|loss|broken|spin|wide|rotor
+//! --fixture proof|good|bad|discrete|loss|broken|spin|wide|rotor|budget
 //! ```
 //!
 //! `--out` defaults to `./genos-debug/physics`. `GENOS_PHYSICS_METRICS_OUT`
@@ -41,6 +43,8 @@ const TUNNEL_SPEED: f32 = 3000.0;
 const PENETRATION_LIMIT: f64 = 0.01;
 const BROKEN_STEPS: u32 = 90;
 const DAMAGE_STEP: u32 = 30;
+const BUDGET_CHILDREN: u8 = 12;
+const DEBRIS_BUDGET: u32 = 1;
 
 #[derive(Clone, Copy)]
 enum Bound {
@@ -169,6 +173,33 @@ const WIDE_METRICS: &[Spec] = &[
     },
 ];
 
+const BUDGET_METRICS: &[Spec] = &[
+    Spec {
+        name: "debris_alive",
+        bound: Bound::AtMost,
+        threshold: 1.0,
+        threshold_text: "<=1",
+    },
+    Spec {
+        name: "debris_asleep",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+    Spec {
+        name: "floor_penetration_m",
+        bound: Bound::AtMost,
+        threshold: 0.0,
+        threshold_text: "<=0",
+    },
+    Spec {
+        name: "determinism_hash_match",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+];
+
 const BROKEN_METRICS: &[Spec] = &[
     Spec {
         name: "bonds_broken",
@@ -229,6 +260,7 @@ enum Fixture {
     Spin,
     Wide,
     Rotor,
+    Budget,
 }
 
 impl Fixture {
@@ -243,6 +275,7 @@ impl Fixture {
             Self::Spin => "spin",
             Self::Wide => "wide",
             Self::Rotor => "rotor",
+            Self::Budget => "budget",
         }
     }
 }
@@ -345,6 +378,14 @@ fn run() -> Result<i32, String> {
             let reading = measure_rotor()?;
             let rows = judge_rotor(&reading);
             write_report(&args.out, "rotor", &reading, &rows)?;
+            print_scene(&reading);
+            print_rows(&rows);
+            Ok(exit_code(&rows))
+        }
+        Fixture::Budget => {
+            let (reading, scores) = measure_budget()?;
+            let rows = judge_budget(&scores);
+            write_report(&args.out, "budget", &reading, &rows)?;
             print_scene(&reading);
             print_rows(&rows);
             Ok(exit_code(&rows))
@@ -484,6 +525,7 @@ fn parse_fixture(text: &str) -> Result<Fixture, String> {
         "spin" => Ok(Fixture::Spin),
         "wide" => Ok(Fixture::Wide),
         "rotor" => Ok(Fixture::Rotor),
+        "budget" => Ok(Fixture::Budget),
         other => Err(format!("unknown fixture {other}")),
     }
 }
@@ -514,9 +556,12 @@ fn setup(fixture: &Fixture) -> Result<Setup, String> {
             protect: false,
             full_energy: true,
         }),
-        Fixture::Proof | Fixture::Broken | Fixture::Spin | Fixture::Wide | Fixture::Rotor => {
-            Err("proof does not score itself".into())
-        }
+        Fixture::Proof
+        | Fixture::Broken
+        | Fixture::Spin
+        | Fixture::Wide
+        | Fixture::Rotor
+        | Fixture::Budget => Err("proof does not score itself".into()),
     }
 }
 
@@ -526,8 +571,8 @@ fn print_help() {
 --out DIR
     JSON directory. Default ./genos-debug/physics.
     GENOS_PHYSICS_METRICS_OUT applies only when --out is omitted.
---fixture proof|good|bad|discrete|loss|broken|spin|wide|rotor
-    proof runs the ship fixtures, the broken overhang, the spinning pair, the 40 m ships, and the free-flight rotor. Default proof.
+--fixture proof|good|bad|discrete|loss|broken|spin|wide|rotor|budget
+    proof runs every fixture below. Default proof.
     GENOS_PHYSICS_METRICS_FIXTURE applies only when --fixture is omitted.
 good and bad both run ships and bullet at {TUNNEL_SPEED} m/s.
     good marks the bullet speculative and both ships swept. bad leaves protection off, so the ships tunnel.
@@ -541,6 +586,9 @@ wide is one step: swept ships start 40 m apart at {TUNNEL_SPEED} m/s.
     A time-of-impact cap of one advance leaves a gap and fails tunnel_count.
 rotor spins a 3 kg cube, half extents 1 m, at 2 rad/s for {STEPS} steps with no gravity.
     rotational_energy_j is 1/2 Izz ωz² from that size and mass.
+budget cooks the overhang with {BUDGET_CHILDREN} children per chunk and debris budget {DEBRIS_BUDGET}.
+    It breaks the seam at step {DAMAGE_STEP} and steps {BROKEN_STEPS} times.
+    debris_alive stays within the budget. debris_asleep is at least 1 after settling.
 Ship fixtures call step {STEPS} times at 1/60 s.
 Exit 0 when no metric is FAIL. Exit 1 when a metric is FAIL. Exit 2 on a bad argument."
     );
@@ -822,6 +870,83 @@ fn judge_wide(reading: &Reading) -> Vec<Row> {
         reading.determinism_hash_match,
     ];
     WIDE_METRICS
+        .iter()
+        .zip(values)
+        .map(|(spec, value)| judge(spec, value))
+        .collect()
+}
+
+struct BudgetScores {
+    debris_alive: f64,
+    debris_asleep: f64,
+    floor_penetration_m: f64,
+    determinism_hash_match: f64,
+}
+
+fn measure_budget() -> Result<(Reading, BudgetScores), String> {
+    let first = run_budget()?;
+    let second = run_budget()?;
+    let match_bit = u8::from(hash_state(&first.0) == hash_state(&second.0));
+    let scores = BudgetScores {
+        debris_alive: f64::from(first.1.debris_alive),
+        debris_asleep: f64::from(first.1.debris_asleep),
+        floor_penetration_m: f64::from(first.1.floor_penetration_m),
+        determinism_hash_match: f64::from(match_bit),
+    };
+    let reading = Reading {
+        tunnel_count: 0.0,
+        penetration_m: 0.0,
+        energy_drift: 0.0,
+        determinism_hash_match: scores.determinism_hash_match,
+        contacts_stored: 0.0,
+        toi_deferred: 0.0,
+        ship_speed: 0.0,
+        bullet_speed: 0.0,
+        protect: false,
+        full_energy: false,
+        ccd_in_step: false,
+        steps: BROKEN_STEPS,
+    };
+    Ok((reading, scores))
+}
+
+fn run_budget() -> Result<(World, genos_physics::DestructionReport), String> {
+    let asset = cook(&CookRequest {
+        min: genos_math::Vec3::new(-0.2, 1.0, -0.15),
+        max: genos_math::Vec3::new(0.8, 1.4, 0.15),
+        coarse: vec![
+            genos_math::Vec3::new(-0.05, 1.2, 0.0),
+            genos_math::Vec3::new(0.5, 1.2, 0.0),
+        ],
+        support: vec![true, false],
+        children_per_chunk: BUDGET_CHILDREN,
+        health_per_area: 10.0,
+    })
+    .map_err(|err| format!("cook {err:?}"))?;
+    let bond = asset
+        .bond_between(0, 1)
+        .ok_or_else(|| "overhang has no seam bond".to_string())?;
+    let mut world = World::new(genos_physics::GRAVITY);
+    world.insert(Body::plane(genos_math::Vec3::Y, 0.0));
+    let id = spawn_breakable(&mut world, asset, DEBRIS_BUDGET);
+    for index in 0..BROKEN_STEPS {
+        if index == DAMAGE_STEP {
+            let _ = apply_damage(&mut world, id, bond, 1.0e6);
+        }
+        genos_physics::step(&mut world, DT);
+    }
+    let report = destruction_report(&world);
+    Ok((world, report))
+}
+
+fn judge_budget(scores: &BudgetScores) -> Vec<Row> {
+    let values = [
+        scores.debris_alive,
+        scores.debris_asleep,
+        scores.floor_penetration_m,
+        scores.determinism_hash_match,
+    ];
+    BUDGET_METRICS
         .iter()
         .zip(values)
         .map(|(spec, value)| judge(spec, value))
@@ -1276,6 +1401,7 @@ fn prove(out: &Path) -> Result<i32, String> {
     let spin = run_child(&exe, out, "spin")?;
     let wide = run_child(&exe, out, "wide")?;
     let rotor = run_child(&exe, out, "rotor")?;
+    let budget = run_child(&exe, out, "budget")?;
     println!("# good");
     print!("{}", good.stdout);
     println!("# bad");
@@ -1292,6 +1418,8 @@ fn prove(out: &Path) -> Result<i32, String> {
     print!("{}", wide.stdout);
     println!("# rotor");
     print!("{}", rotor.stdout);
+    println!("# budget");
+    print!("{}", budget.stdout);
     if good.code != 0
         || bad.code != 1
         || discrete.code != 0
@@ -1300,9 +1428,10 @@ fn prove(out: &Path) -> Result<i32, String> {
         || spin.code != 0
         || wide.code != 0
         || rotor.code != 0
+        || budget.code != 0
     {
         return Err(format!(
-            "proof exits good {} bad {} discrete {} loss {} broken {} spin {} wide {} rotor {}",
+            "proof exits good {} bad {} discrete {} loss {} broken {} spin {} wide {} rotor {} budget {}",
             good.code,
             bad.code,
             discrete.code,
@@ -1310,7 +1439,8 @@ fn prove(out: &Path) -> Result<i32, String> {
             broken.code,
             spin.code,
             wide.code,
-            rotor.code
+            rotor.code,
+            budget.code
         ));
     }
     expect_protected(&good.stdout)?;
@@ -1321,6 +1451,7 @@ fn prove(out: &Path) -> Result<i32, String> {
     expect_spin(&spin.stdout)?;
     expect_wide(&wide.stdout)?;
     expect_rotor(&rotor.stdout)?;
+    expect_budget(&budget.stdout)?;
     expect_file(out, "good", true, 0, "free-flight", true)?;
     expect_file(out, "bad", false, 2, "free-flight", false)?;
     expect_file(out, "discrete", false, 0, "free-flight", false)?;
@@ -1329,6 +1460,7 @@ fn prove(out: &Path) -> Result<i32, String> {
     expect_file(out, "spin", true, 0, "free-flight", true)?;
     expect_file(out, "wide", true, 0, "free-flight", true)?;
     expect_file(out, "rotor", false, 0, "free-flight", false)?;
+    expect_file(out, "budget", false, 0, "free-flight", false)?;
     Ok(0)
 }
 
@@ -1517,6 +1649,38 @@ fn expect_loss(text: &str) -> Result<(), String> {
     }
     if !energy_failed {
         return Err("loss run has no energy_drift".into());
+    }
+    Ok(())
+}
+
+fn expect_budget(text: &str) -> Result<(), String> {
+    if !text.contains(&format!("steps={BROKEN_STEPS}")) {
+        return Err("budget scene did not run 90 steps".into());
+    }
+    let mut saw_alive = false;
+    let mut saw_asleep = false;
+    for row in printed_against(text, BUDGET_METRICS)? {
+        if row.status != "PASS" {
+            return Err(format!("{} wanted PASS on the budget scene", row.name));
+        }
+        if row.name == "debris_alive" {
+            if row.value > f64::from(DEBRIS_BUDGET) {
+                return Err(format!(
+                    "debris_alive {} wanted <= {DEBRIS_BUDGET}",
+                    row.value
+                ));
+            }
+            saw_alive = true;
+        }
+        if row.name == "debris_asleep" {
+            if row.value < 1.0 {
+                return Err(format!("debris_asleep {} wanted at least 1", row.value));
+            }
+            saw_asleep = true;
+        }
+    }
+    if !saw_alive || !saw_asleep {
+        return Err("budget run is missing debris rows".into());
     }
     Ok(())
 }

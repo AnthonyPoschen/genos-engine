@@ -95,6 +95,8 @@ impl ChunkTrack {
 pub struct DestructionReport {
     pub bonds_broken: u32,
     pub debris_alive: u32,
+    /// Spawned debris under the volume limit whose presence is `Asleep`.
+    pub debris_asleep: u32,
     pub floor_penetration_m: f32,
 }
 
@@ -147,6 +149,7 @@ pub fn apply_damage(world: &mut World, breakable: usize, bond: usize, amount: f3
 pub fn destruction_report(world: &World) -> DestructionReport {
     let mut bonds_broken = 0_u32;
     let mut debris_alive = 0_u32;
+    let mut debris_asleep = 0_u32;
     let mut floor = 0.0_f32;
     for item in &world.breakables {
         for bond in &item.asset.bonds {
@@ -166,6 +169,9 @@ pub fn destruction_report(world: &World) -> DestructionReport {
             };
             if chunk.volume < item.debris_volume && body.presence != Presence::Culled {
                 debris_alive = debris_alive.saturating_add(1);
+                if body.presence == Presence::Asleep {
+                    debris_asleep = debris_asleep.saturating_add(1);
+                }
             }
             if body.presence == Presence::Culled {
                 continue;
@@ -179,6 +185,7 @@ pub fn destruction_report(world: &World) -> DestructionReport {
     DestructionReport {
         bonds_broken,
         debris_alive,
+        debris_asleep,
         floor_penetration_m: floor.max(0.0),
     }
 }
