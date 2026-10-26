@@ -1,3 +1,8 @@
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
+
 //! Picture score of the shared shade against the path tracer's Lambert product.
 //!
 //! The legacy picture uses the base colour and ignores metallic. The path tracer
@@ -48,4 +53,44 @@ fn the_lambert_picture_matches_the_path_tracer() {
     assert!(metal_after <= 1.0e-6, "shared metal picture {metal_after}");
     assert!(dielectric_before <= 1.0e-6);
     assert!(dielectric_after <= 1.0e-6);
+}
+
+#[test]
+fn a_texcoord_hit_matches_its_slot() {
+    use std::path::PathBuf;
+
+    use genos_bake::BakeMesh;
+    use genos_load::load_gltf_file;
+
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/materials/panel.gltf");
+    let scene = load_gltf_file(&path).unwrap();
+    let mesh = BakeMesh::from_gltf(&scene, 0);
+    let tri = &mesh.triangles[0];
+    assert!((tri.uvs[0][0] - 0.25).abs() < 1.0e-5);
+    assert!((tri.uvs[0][1] - 0.25).abs() < 1.0e-5);
+    let reference = mesh.shade_hit(0, 0.0, 0.0);
+    let legacy = mesh.shade(tri.material, tri.uvs[0]);
+    let irradiance = [1.0; 3];
+    let before = blurred(
+        legacy.outgoing(1.0, irradiance, [0.0; 3]),
+        reference.outgoing(1.0, irradiance, [0.0; 3]),
+    );
+    let after = blurred(
+        reference.outgoing(1.0, irradiance, [0.0; 3]),
+        reference.outgoing(1.0, irradiance, [0.0; 3]),
+    );
+    eprintln!("picture_texcoord before {before:.6} after {after:.6}");
+    assert!(
+        (reference.emissive[0] - 1.0).abs() < 1.0e-5,
+        "set 1 emission {}",
+        reference.emissive[0]
+    );
+    assert!(
+        (reference.diffuse_albedo()[0] - 0.502_886_5).abs() < 1.0e-4,
+        "set 0 albedo {}",
+        reference.diffuse_albedo()[0]
+    );
+    assert!((before - 0.521_756).abs() < 1.0e-4, "picture_texcoord before {before}");
+    assert!(after <= 1.0e-6, "picture_texcoord after {after}");
 }

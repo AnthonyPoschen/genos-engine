@@ -95,7 +95,7 @@ The cook and the page table follow the asset plan: KTX 2.0 (<https://registry.kh
 | `KHR_materials_ior`, `KHR_materials_specular` | Stored. Not shaded. F0 is 0.04. | `loaded, unsupported` |
 | Transmission, volume, clearcoat, sheen, iridescence, anisotropy, dispersion, variants, specular-glossiness | Not shaded. Specular-glossiness is not converted. | `loaded, unsupported` |
 | `KHR_texture_basisu` | Not decoded in the renderer. | `loaded, unsupported` until the cook accepts the image |
-| `TEXCOORD_1` and above, vertex colour | Not sampled. A transform that selects another UV set is unsupported. | `loaded, unsupported` |
+| `TEXCOORD_0` through `TEXCOORD_7` | The CPU shade, the bake cards, and `surface_mean` read the slot's `texCoord`. A missing set falls back to set 0, then to (0, 0). Vertex colour is not sampled. | The G-buffer atlas is still fetched with `TEXCOORD_0`. A second vertex UV needs the layout in `crates/render/src/gpu.rs`. |
 | Draco, meshopt | Triangles stay absent, so nothing draws a wrong mesh. | Asset plan. Not this design's phases. |
 
 `load_gltf` keeps returning `LoadError` for a required extension it does not apply. The import document from the asset plan is what keeps the JSON. This design does not invent a second document.

@@ -81,20 +81,25 @@ impl ShadeSample {
 
 /// Shade `material` with every texture read at `uv`.
 ///
-/// This is the explicit-UV entry the materials gate and the card sampler use:
-/// the caller has already chosen the coordinate. A hit that carries more than
-/// one TEXCOORD set uses [`shade_sets`].
+/// This is the explicit-UV entry the materials gate uses: the caller has
+/// already chosen the coordinate, and a `texCoord` above 0 falls back to it.
+/// A hit that carries more than one TEXCOORD set uses [`shade_sets`].
 #[must_use]
 pub fn shade_uv(material: &PbrMaterial, images: &[Image], uv: [f32; 2]) -> ShadeSample {
-    shade_sets(material, images, &[uv])
+    shade_sets(material, images, &[Some(uv)])
 }
 
 /// Shade `material`, reading each slot from `uvs[slot.texcoord]`.
 ///
-/// A set the caller did not pass falls back to set 0 when that set exists, and
-/// to (0, 0) otherwise. `uvs` is indexed by TEXCOORD number.
+/// `uvs` is indexed by TEXCOORD number. `None` is a set the primitive did not
+/// have. A missing set falls back to set 0 when that entry is `Some`, and to
+/// (0, 0) otherwise.
 #[must_use]
-pub fn shade_sets(material: &PbrMaterial, images: &[Image], uvs: &[[f32; 2]]) -> ShadeSample {
+pub fn shade_sets(
+    material: &PbrMaterial,
+    images: &[Image],
+    uvs: &[Option<[f32; 2]>],
+) -> ShadeSample {
     let base_tex = sample_slot(material.base_color_texture, images, uvs, true);
     let mr = sample_slot(material.metallic_roughness_texture, images, uvs, false);
     let occlusion_tex = sample_slot(material.occlusion_texture, images, uvs, false);
@@ -142,7 +147,7 @@ fn normal_of(slot: Option<TextureSlot>, texel: [f32; 4]) -> [f32; 3] {
 fn sample_slot(
     slot: Option<TextureSlot>,
     images: &[Image],
-    uvs: &[[f32; 2]],
+    uvs: &[Option<[f32; 2]>],
     srgb: bool,
 ) -> [f32; 4] {
     let Some(slot) = slot else {
@@ -166,12 +171,15 @@ fn sample_slot(
     }
 }
 
-fn uv_for(set: u32, uvs: &[[f32; 2]]) -> [f32; 2] {
+fn uv_for(set: u32, uvs: &[Option<[f32; 2]>]) -> [f32; 2] {
     let index = usize::try_from(set).unwrap_or(0);
-    if let Some(uv) = uvs.get(index) {
+    if let Some(Some(uv)) = uvs.get(index) {
         return *uv;
     }
-    uvs.first().copied().unwrap_or([0.0, 0.0])
+    if let Some(Some(uv)) = uvs.first() {
+        return *uv;
+    }
+    [0.0, 0.0]
 }
 
 fn linear_filter(mag: u32) -> bool {
@@ -351,5 +359,36 @@ mod tests {
         assert!((sample.occlusion - 128.0 / 255.0).abs() < 1.0e-6);
         assert!((full[0] - 1.0).abs() < 1.0e-5);
         assert!((lit[0] - (1.0 + sample.occlusion)).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn a_slot_reads_its_texcoord_and_a_missing_set_falls_back() {
+        let mut material = PbrMaterial {
+            base_color: [1.0, 1.0, 1.0, 1.0],
+            metallic: 0.0,
+            emissive: [1.0, 1.0, 1.0],
+            ..PbrMaterial::default()
+        };
+        material.emissive_texture = Some(TextureSlot {
+            image: 0,
+            texcoord: 1,
+            sampler: crate::Sampler::default(),
+            scale: 1.0,
+        });
+        let images = [Image {
+            width: 2,
+            height: 2,
+            pixels: vec![
+                0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255,
+            ],
+        }];
+        let hit = shade_sets(
+            &material,
+            &images,
+            &[Some([0.25, 0.25]), Some([0.75, 0.75])],
+        );
+        assert!((hit.emissive[0] - 1.0).abs() < 1.0e-5);
+        let fallback = shade_uv(&material, &images, [0.25, 0.25]);
+        assert!(fallback.emissive[0] < 1.0e-5);
     }
 }

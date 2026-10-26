@@ -18,7 +18,8 @@
 //! metallic-roughness materials, decoded images (PNG or JPEG), and one instance
 //! per node that carries a mesh, with the node's world matrix. Triangle strips
 //! and fans become lists; points and lines are skipped. A primitive without
-//! normals gets flat normals, as the specification asks.
+//! normals gets flat normals, as the specification asks. `TEXCOORD_0` through
+//! `TEXCOORD_7` are kept. A slot's `texCoord` selects the set.
 //!
 //! Supported extensions: `KHR_materials_emissive_strength`. A file that
 //! requires any other extension (Draco, meshopt, KHR_texture_basisu, ...) is
@@ -28,6 +29,18 @@ use genos_json::Value;
 
 use crate::error::LoadError;
 use crate::png::Image;
+
+/// glTF allows `TEXCOORD_0` through `TEXCOORD_7`.
+const TEXCOORD_KEYS: [&str; 8] = [
+    "TEXCOORD_0",
+    "TEXCOORD_1",
+    "TEXCOORD_2",
+    "TEXCOORD_3",
+    "TEXCOORD_4",
+    "TEXCOORD_5",
+    "TEXCOORD_6",
+    "TEXCOORD_7",
+];
 
 /// A loaded glTF scene.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -51,8 +64,12 @@ pub struct GltfMesh {
 pub struct Primitive {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
-    /// `TEXCOORD_0`, or empty.
+    /// `TEXCOORD_0`, or empty. Set 0 of [`Self::texcoord_sets`] when that set is present.
     pub texcoords: Vec<[f32; 2]>,
+    /// `TEXCOORD_0` through `TEXCOORD_7`, indexed by set number.
+    /// An absent set is an empty vec, including a gap below a later set.
+    /// A present set has one UV per vertex.
+    pub texcoord_sets: Vec<Vec<[f32; 2]>>,
     /// `TANGENT` (xyz and handedness w), or empty.
     pub tangents: Vec<[f32; 4]>,
     /// Three per triangle.
@@ -719,19 +736,35 @@ impl Reader<'_> {
             .map(|a| self.floats(a))
             .transpose()?
             .unwrap_or_default();
-        let texcoords: Vec<[f32; 2]> = attr("TEXCOORD_0")?
-            .map(|a| self.floats(a))
-            .transpose()?
-            .unwrap_or_default();
         let tangents: Vec<[f32; 4]> = attr("TANGENT")?
             .map(|a| self.floats(a))
             .transpose()?
             .unwrap_or_default();
-        for len in [normals.len(), texcoords.len(), tangents.len()] {
+        for len in [normals.len(), tangents.len()] {
             if len != 0 && len != n {
                 return Err(LoadError::Unrecognized);
             }
         }
+        // A missing lower set stays an empty vec so the index is the set number.
+        let mut texcoord_sets = Vec::new();
+        for (set, key) in TEXCOORD_KEYS.iter().enumerate() {
+            let Some(accessor) = attr(key)? else {
+                continue;
+            };
+            let coords: Vec<[f32; 2]> = self.floats(accessor)?;
+            if coords.len() != n {
+                return Err(LoadError::Unrecognized);
+            }
+            while texcoord_sets.len() < set {
+                texcoord_sets.push(Vec::new());
+            }
+            texcoord_sets.push(coords);
+        }
+        let texcoords = texcoord_sets
+            .first()
+            .filter(|set| !set.is_empty())
+            .cloned()
+            .unwrap_or_default();
         let raw: Vec<u32> = match opt_usize(p, "indices")? {
             Some(a) => self.read(a, 1)?.into_iter().map(|i| i as u32).collect(),
             None => (0..n as u32).collect(),
@@ -766,6 +799,7 @@ impl Reader<'_> {
             positions,
             normals: Vec::new(),
             texcoords,
+            texcoord_sets,
             tangents,
             indices,
             material,
@@ -783,6 +817,7 @@ impl Reader<'_> {
 fn flat_shaded(p: Primitive) -> Primitive {
     let mut out = Primitive {
         material: p.material,
+        texcoord_sets: vec![Vec::new(); p.texcoord_sets.len()],
         ..Primitive::default()
     };
     for tri in p.indices.chunks_exact(3) {
@@ -806,6 +841,11 @@ fn flat_shaded(p: Primitive) -> Primitive {
             out.normals.push(n);
             if !p.texcoords.is_empty() {
                 out.texcoords.push(p.texcoords[i as usize]);
+            }
+            for (set_index, set) in p.texcoord_sets.iter().enumerate() {
+                if !set.is_empty() {
+                    out.texcoord_sets[set_index].push(set[i as usize]);
+                }
             }
             if !p.tangents.is_empty() {
                 out.tangents.push(p.tangents[i as usize]);

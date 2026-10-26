@@ -20,7 +20,7 @@ A texture map keeps one image, frame rectangles, and named clips. The descriptio
 
 A mesh is triangles from a Wavefront OBJ file. A material is a flat color and an optional texture file name.
 
-A glTF 2.0 scene (`.gltf` or `.glb`) is meshes, metallic-roughness materials, decoded images and placed instances. A mesh has primitives: indexed triangles with positions, normals, `TEXCOORD_0` and tangents, and one material. An instance is a mesh and its node's world matrix (column-major, as glTF stores it).
+A glTF 2.0 scene (`.gltf` or `.glb`) is meshes, metallic-roughness materials, decoded images and placed instances. A mesh has primitives: indexed triangles with positions, normals, `TEXCOORD_0` through `TEXCOORD_7`, and tangents, and one material. An instance is a mesh and its node's world matrix (column-major, as glTF stores it).
 
 An animation is timed transform keys. Rotation is a quaternion in x, y, z, w order. `Quat::slerp` takes the short arc when the dot product is negative.
 
@@ -73,7 +73,7 @@ The loader reads the whole source into memory. It does not stream.
 
 PNG images are 8-bit and not interlaced. Each edge is at most 8192 pixels. JPEG images are baseline or progressive Huffman, 8-bit, greyscale or YCbCr (Adobe RGB too), any chroma subsampling, at most 8192 pixels per edge; chroma is upsampled bilinearly, within 3 levels of libjpeg. Arithmetic-coded, lossless and 12-bit JPEG, GIF, WebP, BMP, DDS, KTX, and block-compressed textures are not decoded.
 
-glTF: triangle lists, strips and fans; points and lines are skipped. A primitive without normals gets flat normals (its vertices are unwelded). Sparse accessors, `byteStride`, normalized integers, `data:` URIs and `KHR_materials_emissive_strength` are read. A file that requires any other extension (Draco, meshopt, KHR_texture_basisu, texture transforms) is refused. Skins, morph targets, animations, cameras and lights are ignored. Only `TEXCOORD_0` is kept. Images decode on load, single-threaded (Sponza: 69 images, about 4 s in release); the bake cache keeps the result.
+glTF: triangle lists, strips and fans; points and lines are skipped. A primitive without normals gets flat normals (its vertices are unwelded). Sparse accessors, `byteStride`, normalized integers, `data:` URIs and `KHR_materials_emissive_strength` are read. A file that requires any other extension (Draco, meshopt, KHR_texture_basisu, texture transforms) is refused. Skins, morph targets, animations, cameras and lights are ignored. `TEXCOORD_0` through `TEXCOORD_7` are kept. A material slot's `texCoord` selects the set. Vertex colour is not kept. Images decode on load, single-threaded (Sponza: 69 images, about 4 s in release); the bake cache keeps the result.
 
 FBX is not decoded. A face with more than three vertices becomes a triangle fan.
 

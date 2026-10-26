@@ -33,7 +33,7 @@
 
 use std::collections::HashMap;
 
-use genos_load::{shade_uv, AlphaMode, GltfScene, Image, PbrMaterial, Primitive};
+use genos_load::{shade_sets, shade_uv, AlphaMode, GltfScene, Image, PbrMaterial, Primitive};
 
 use crate::world::{
     transform_pose, Bounds, DrawKind, MaterialAtlas, Object, Surface, World,
@@ -450,10 +450,11 @@ struct GltfPart {
 
 /// Mean diffuse albedo and emitted light of one primitive (linear).
 ///
-/// The mean is [`genos_load::shade_uv`]: base colour times (1 - metallic), and
-/// emission with strength. A metal's Lambert picture is darker than a specular
-/// reference until that lobe exists. Painting the metal with its base colour
-/// fails `metal_diffuse`.
+/// Each sample is [`genos_load::shade_sets`]: base colour times (1 - metallic),
+/// and emission with strength, at that slot's `texCoord`. A metal's Lambert
+/// picture is darker than a specular reference until that lobe exists.
+/// Painting the metal with its base colour fails `metal_diffuse`. The raster
+/// still fetches the atlas with `TEXCOORD_0` only.
 pub fn surface_mean(m: &PbrMaterial, images: &[Image], prim: &Primitive) -> ([f32; 3], [f32; 3]) {
     let textured = m.base_color_texture.is_some()
         || m.metallic_roughness_texture.is_some()
@@ -496,12 +497,10 @@ pub fn surface_mean(m: &PbrMaterial, images: &[Image], prim: &Primitive) -> ([f3
     for (t, area) in tris.iter().zip(&areas) {
         let w = area / total / POINTS.len() as f64;
         for b in POINTS {
-            let uv: [f32; 2] = std::array::from_fn(|k| {
-                b[0] * prim.texcoords[t[0]][k]
-                    + b[1] * prim.texcoords[t[1]][k]
-                    + b[2] * prim.texcoords[t[2]][k]
-            });
-            let (d, e) = texel_light(m, images, uv[0], uv[1]);
+            let uvs = texcoord_sample(prim, t, b);
+            let sample = shade_sets(m, images, &uvs);
+            let d = sample.diffuse_albedo();
+            let e = sample.emissive;
             for c in 0..3 {
                 dsum[c] += w * d[c] as f64;
                 esum[c] += w * e[c] as f64;
@@ -509,6 +508,27 @@ pub fn surface_mean(m: &PbrMaterial, images: &[Image], prim: &Primitive) -> ([f3
         }
     }
     (dsum.map(|v| v as f32), esum.map(|v| v as f32))
+}
+
+/// Interpolate each TEXCOORD set at barycentric `b` (weights of the three corners).
+///
+/// A primitive that only filled `texcoords` is set 0. An empty set is `None`,
+/// so the shade falls back to set 0.
+fn texcoord_sample(prim: &Primitive, corners: &[usize; 3], b: [f32; 3]) -> Vec<Option<[f32; 2]>> {
+    let interp = |set: &[[f32; 2]]| -> Option<[f32; 2]> {
+        if set.len() != prim.positions.len() {
+            return None;
+        }
+        Some(std::array::from_fn(|axis| {
+            b[0] * set[corners[0]][axis]
+                + b[1] * set[corners[1]][axis]
+                + b[2] * set[corners[2]][axis]
+        }))
+    };
+    if prim.texcoord_sets.is_empty() {
+        return vec![interp(&prim.texcoords)];
+    }
+    prim.texcoord_sets.iter().map(|set| interp(set)).collect()
 }
 
 /// Diffuse albedo and emitted light of a material at one texture coordinate.
@@ -638,6 +658,46 @@ mod tests {
         );
         assert!((o.bounds.half[0] - 2.0).abs() < 1e-4 && (o.bounds.half[1] - 2.0).abs() < 1e-4);
         assert!((pose[13] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_mean_reads_emissive_from_its_texcoord() {
+        use genos_load::{Sampler, TextureSlot};
+        let base = Image {
+            width: 2,
+            height: 2,
+            pixels: vec![255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255],
+        };
+        let emissive = Image {
+            width: 2,
+            height: 2,
+            pixels: vec![0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 0, 0, 255],
+        };
+        let slot = |image, texcoord| TextureSlot {
+            image,
+            texcoord,
+            sampler: Sampler::default(),
+            scale: 1.0,
+        };
+        let material = genos_load::PbrMaterial {
+            base_color_texture: Some(slot(0, 0)),
+            metallic: 0.0,
+            emissive: [1.0, 0.0, 0.0],
+            emissive_texture: Some(slot(1, 1)),
+            ..genos_load::PbrMaterial::default()
+        };
+        let set0 = vec![[0.25, 0.25]; 3];
+        let set1 = vec![[0.75, 0.75]; 3];
+        let primitive = genos_load::Primitive {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            texcoords: set0.clone(),
+            texcoord_sets: vec![set0, set1],
+            indices: vec![0, 1, 2],
+            ..genos_load::Primitive::default()
+        };
+        let (_albedo, glow) = surface_mean(&material, &[base, emissive], &primitive);
+        assert!((glow[0] - 1.0).abs() < 1.0e-5, "emissive mean {}", glow[0]);
     }
 
     #[test]
