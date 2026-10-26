@@ -963,19 +963,22 @@ void lighting_coarse_undo(float size) {
 // Largest parent. Past this the tail stops. A 25 cm hit walk would otherwise
 // reach 8 m, and lavapipe faulted when that claim sat in lighting_sc_parent.
 const float LIGHTING_LEVEL_MAX = 4.0;
-// Half the parent. The picture reads a 1 m, 2 m, or 4 m parent only when the
-// reader sits in the half-size cell of the point that parent was lit from.
-// A coarser world-grid cell can cover both sides of a wall; the other side
-// keeps the finer parent.
+// A parent is the light of one surface. The reader has to sit on that plane,
+// and the open segment between them has to stay clear of a wall.
 const float LIGHTING_LEVEL_HALF = 0.5;
 
-bool lighting_level_near(vec3 pos, vec3 at, vec3 n, float size) {
-    float sub = max(size * LIGHTING_LEVEL_HALF, LIGHTING_LEVEL_HALF);
-    uint ax = lighting_axis(n) >> 1u;
-    uint a1 = (ax + 1u) % 3u;
-    uint a2 = (ax + 2u) % 3u;
-    return floor(pos[a1] / sub) == floor(at[a1] / sub)
-        && floor(pos[a2] / sub) == floor(at[a2] / sub);
+bool lighting_level_valid(vec3 pos, vec3 at, vec3 n, float size) {
+    float cell = max(size, LIGHTING_LEVEL_HALF);
+    if (abs(dot(at - pos, n)) > cell * LIGHTING_LEVEL_HALF) {
+        return false;
+    }
+    // A centre that sank into a solid is not a surface point. The value belongs
+    // to whatever geometry contains it, not to the reader.
+    if (scene_inside(at)) {
+        return false;
+    }
+    vec3 lift = n * LIGHTING_SLOT_DEPTH;
+    return !scene_segment_blocked(pos + lift, at + lift);
 }
 
 // 1 m, 2 m, and 4 m, starting at `size`. One missing parent is claimed.
@@ -1012,7 +1015,7 @@ vec4 lighting_sc_level_tail(vec3 pos, vec3 n, float size) {
         }
         vec4 cv = cache.v[3u * coarse + 2u];
         bool show = cv.w > LIGHTING_LEVEL_READY
-            && lighting_level_near(pos, cache.v[3u * coarse].xyz, n, size);
+            && lighting_level_valid(pos, cache.v[3u * coarse].xyz, n, size);
         if (show) {
             cache.v[3u * coarse].w = uintBitsToFloat(lighting_frame());
             return vec4(cv.rgb, 1.0);

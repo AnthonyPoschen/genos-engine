@@ -1119,6 +1119,39 @@ fn check_hall_wall(
     0.0
 }
 
+/// The outside floor beside the corridor wall. A parent that ignores the wall
+/// paints the interior here. The controller stays on, and two draws reuse no flight slot.
+#[test]
+fn a_coarse_parent_stays_on_its_own_surface() {
+    let (_gpu, mut window, mut renderer) = open();
+    let width = renderer.width();
+    let height = renderer.height();
+    let mut world = present(
+        genos_scene::load_path(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/camera/scene.rhai"
+        )))
+        .expect("shipped scene"),
+    );
+    world.scene.lighting.controller = true;
+    world.scene.lights = vec![Light {
+        position: Vec3::new(0.0, 1.1, 6.2),
+        color: [1.0, 1.0, 1.0],
+        direction: Vec3::ZERO,
+    }];
+    let mouth_cam = Camera::new(0.0, 5.5, std::f32::consts::PI);
+    let out_cam = Camera::new(-6.2, 7.0, std::f32::consts::FRAC_PI_2);
+    // The interior draw fills a coarse parent. The outside draw is the other
+    // flight slot, so the controller has not scaled yet.
+    let _ = draw(&mut window, &mut renderer, &world, &mouth_cam);
+    let out_px = draw(&mut window, &mut renderer, &world, &out_cam);
+    let outside = brightness(sample(&out_px, width, height, &out_cam, [-2.4, 0.0, 7.0]));
+    assert!(
+        outside < 20.0,
+        "a coarse parent crossed the corridor wall: {outside}"
+    );
+}
+
 #[test]
 fn the_corridor_carries_bounce_around_the_bend() {
     let (_gpu, mut window, mut renderer) = open();
