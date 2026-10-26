@@ -471,10 +471,12 @@ fn metric_json(metric: &Metric) -> String {
         metric.status.text()
     );
     if let Some(note) = metric.note {
-        line.push_str(&format!(",\"note\":\"{note}\""));
+        let note_field = format!(",\"note\":\"{note}\"");
+        line.push_str(&note_field);
     }
     if let Some(reference) = metric.reference {
-        line.push_str(&format!(",\"reference\":{reference:.6}"));
+        let reference_field = format!(",\"reference\":{reference:.6}");
+        line.push_str(&reference_field);
     }
     line.push('}');
     line
