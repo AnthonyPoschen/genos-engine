@@ -1,5 +1,6 @@
 // Dump a lamp toggle for layering-gate --capture.
-// Frame 0000 requests weight 1. Later frames request weight 0.
+// Frames 0000-0007 request weight 1, after a 600-frame soak.
+// Frames 0008-0120 request weight 0.
 // The shell writes weights.txt (this host has no file write).
 // expected-off-reference.png and expected-on-reference.png are the
 // path traces at those two weights. The grader lerps them.
@@ -10,7 +11,7 @@ knob("sun", "freeze");
 knob("boxes", "still");
 knob("dynamic", 0.0);
 camera(#{ position: [12.5, 1.7, 20.0], look_at: [12.5, 1.0, 8.0] });
-wait(30);
+wait(600);
 let lamps = lights();
 let target = lamps.filter(|l| l.in_view && !l.directional);
 require(target.len() > 0, "a lamp is in view");
@@ -24,10 +25,13 @@ fn pad(i) {
         `0${i}`
     }
 }
-capture(#{ path: "frames/frame-0000.png" });
+let i = 0;
+while i < 8 {
+    capture(#{ path: `frames/frame-${pad(i)}.png` });
+    i += 1;
+}
 light(#{ index: lamp.index, color: [0.0, 0.0, 0.0] });
-let i = 1;
-let n = 36;
+let n = 120;
 while i <= n {
     capture(#{ path: `frames/frame-${pad(i)}.png` });
     i += 1;
@@ -49,4 +53,4 @@ light(#{ index: lamp.index, color: lamp.color });
 trace.prefix = "expected-on";
 let on_trace = reference(trace);
 log(`on trace spp ${on_trace.spp} noise ${on_trace.noise} seconds ${on_trace.trace_seconds}`);
-log(`dumped ${n + 1} frames after turning lamp ${lamp.index} off`);
+log(`dumped ${n + 1} frames, lamp ${lamp.index} off from frame 8`);

@@ -289,22 +289,22 @@ cargo run -p genos-lighting-ref --bin layering-gate -- --case baseline
 
 `cargo test -p genos-lighting-ref layering` locks the same rows: the good fixture passes each comparison, the broken fixture fails each comparison, a 50 ms picture after a step request fails `fade_deviation` while `pop_magnitude` passes and the settle stays inside the 12-frame budget, a scripted weight curve is the target (matching it passes, a 50 ms picture against it fails), the noisy hold fails `hold_flicker`, and the baseline without a capture stays `NOT-IMPLEMENTED` with a null value. `fade_deviation` in those tests stays under 2, the same relative-luma scale as the 0.05 threshold.
 
-`examples/stress/scripts/lamp_toggle_frames.rhai` freezes the stress scene, writes `frame-0000.png` with a lamp on, turns that lamp off, and writes `frame-0001.png` through `frame-0036.png`. It then path-traces the off lamp and the restored on lamp at 320×180 (`expected-off-reference.png`, `expected-on-reference.png`). Paths are relative to `--report`. The script cannot write `weights.txt`. The shell writes it: frame 0 is weight 1, and the later frames are weight 0. That file is the request. The traces are the endpoints.
+`examples/stress/scripts/lamp_toggle_frames.rhai` freezes the stress scene, waits 600 frames, writes `frame-0000.png` through `frame-0007.png` with a lamp on, turns that lamp off, and writes `frame-0008.png` through `frame-0120.png`. It then path-traces the off lamp and the restored on lamp at 320×180 (`expected-off-reference.png`, `expected-on-reference.png`). Paths are relative to `--report`. The script cannot write `weights.txt`. The shell writes it: the first eight frames are weight 1, and frames 8 through 120 are weight 0. That file is the request. The traces are the endpoints.
 
 ```sh
 genos-stress --proof --no-panel --size 320x180 --preset high \
   --script examples/stress/scripts/lamp_toggle_frames.rhai \
   --report genos-debug/gi/layering/capture
-{ echo 1; for i in $(seq 1 36); do echo 0; done; } \
+{ for i in $(seq 1 8); do echo 1; done; for i in $(seq 8 120); do echo 0; done; } \
   > genos-debug/gi/layering/capture/weights.txt
 cargo run -p genos-lighting-ref --bin layering-gate -- \
   --capture genos-debug/gi/layering/capture \
   --out genos-debug/gi/layering
 ```
 
-On a machine with no GPU that command runs under lavapipe and a headless Weston. The warmup is 30 frames, so the capture is the toggle, not a soaked cache. Timing on lavapipe is not a result. The expected image is the path trace at the requested weight, not the held end of the engine frames and not `exp(−t / 50 ms)`.
+On a machine with no GPU that command runs under lavapipe and a headless Weston. The warmup is 600 frames, then eight frames at weight 1, so the capture starts from a soaked cache. Timing on lavapipe is not a result. The expected image is the path trace at the requested weight, not the held end of the engine frames and not `exp(−t / 50 ms)`.
 
-One lavapipe run (320×180, preset high, lamp 0 turned off, 37 frames) scored exit 1. The endpoints are path traces at 16 spp and 3 bounces. They stopped at `max_spp`, not the 40 s cap. Off noise was 0.255, on noise was 0.231.
+One lavapipe run of the earlier script (320×180, preset high, lamp 0 turned off, 30-frame warmup, 37 frames) scored exit 1. The endpoints are path traces at 16 spp and 3 bounces. They stopped at `max_spp`, not the 40 s cap. Off noise was 0.255, on noise was 0.231.
 
 ```
 toggle_settle_frames 37 12 FAIL
