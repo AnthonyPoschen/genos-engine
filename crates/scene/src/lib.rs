@@ -15,8 +15,8 @@ mod settings;
 mod types;
 
 pub use camera::{
-    look_direction, transform_point, update, view_proj, viewport_uv, Actions, Camera, CAMERA_FAR,
-    CAMERA_HEIGHT, CAMERA_NEAR, PITCH_LIMIT,
+    look_direction, project_guard, transform_point, update, view_proj, view_proj_guard, viewport_uv,
+    Actions, Camera, GuardFrustum, CAMERA_FAR, CAMERA_HEIGHT, CAMERA_NEAR, PITCH_LIMIT,
 };
 pub use codimation::{Codimation, Easing};
 pub use debug_settings::DebugSettings;
