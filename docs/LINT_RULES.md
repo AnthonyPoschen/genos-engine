@@ -270,7 +270,7 @@ A `GENOS_*` or `OCC_*` string in Rust must be listed. Kinds:
 
 | Kind | Count | Meaning |
 |---|---|---|
-| `mirror` | 34 | A CLI argument exists and wins when both are set. `detail` is the flag. |
+| `mirror` | 39 | A CLI argument exists and wins when both are set. `detail` is the flag. |
 | `todo` | 94 | Read today, and still has no argument. |
 | `override` | 4 | `GENOS_MCP_PORT` (discovery directory is primary), `GENOS_ENGINE_COMMIT` (stamp when git is missing), `GENOS_DEBUG_KEYS` (a file replaces built-in chords), and `GENOS_MENU_LAYOUT` (a file replaces `debug/lighting/menu.txt`). |
 | `test` | 14 | Harness only. |

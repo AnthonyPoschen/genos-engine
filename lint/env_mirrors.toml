@@ -1224,3 +1224,28 @@ name = "GENOS_MATERIALS_GATE_OUT"
 kind = "mirror"
 detail = "--out"
 
+[[var]]
+name = "GENOS_FOG_SUITE"
+kind = "mirror"
+detail = "--suite"
+
+[[var]]
+name = "GENOS_FOG_FIXTURE"
+kind = "mirror"
+detail = "--fixture"
+
+[[var]]
+name = "GENOS_FOG_OUT"
+kind = "mirror"
+detail = "--out"
+
+[[var]]
+name = "GENOS_PHYSICS_METRICS_FIXTURE"
+kind = "mirror"
+detail = "--fixture"
+
+[[var]]
+name = "GENOS_PHYSICS_METRICS_OUT"
+kind = "mirror"
+detail = "--out"
+
