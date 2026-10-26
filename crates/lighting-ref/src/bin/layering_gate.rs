@@ -10,12 +10,16 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use genos_lighting_ref::layering::{
-    evaluate, evaluate_capture, summary_line, write_report, Case, DEFAULT_OUT,
+    evaluate, evaluate_capture, summary_line, write_report, Case, DEFAULT_OUT, UNSETTLED_CAPTURE,
 };
 
 fn main() -> ExitCode {
     match run() {
         Ok(code) => ExitCode::from(code),
+        Err(err) if err == UNSETTLED_CAPTURE => {
+            println!("{UNSETTLED_CAPTURE}");
+            ExitCode::from(2)
+        }
         Err(err) => {
             eprintln!("layering-gate: {err}");
             ExitCode::from(2)
@@ -105,7 +109,9 @@ layering-gate — score lamp-layer settle metrics
 
 Prints one line per metric: name, value, threshold, PASS/FAIL/NOT-IMPLEMENTED.
 Exit 0 when no row is FAIL. Exit 1 when a row is FAIL. NOT-IMPLEMENTED does
-not fail the process. Exit 2 is a bad argument or a write error.
+not fail the process. Exit 2 is a bad argument, a write error, or
+UNSETTLED-CAPTURE (the pre-toggle frames never sat within 0.05 of the on
+image for four frames). UNSETTLED-CAPTURE is printed alone and is not a FAIL.
 --capture writes baseline.json. Layer rows stay NOT-IMPLEMENTED.
 Settle, fade, and dim stay NOT-IMPLEMENTED unless weights.txt and both
 expected images are present. The expected image is the path-traced or

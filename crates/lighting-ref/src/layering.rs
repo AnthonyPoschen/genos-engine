@@ -54,6 +54,9 @@ pub const HIGH_LAYER_BYTES: u64 = 1_048_576;
 /// Reads that disagree with the published value.
 pub const FINISHED_LIMIT: u32 = 0;
 
+/// Printed, and the process exits 2, when the lit frames never sit on the on image.
+pub const UNSETTLED_CAPTURE: &str = "UNSETTLED-CAPTURE";
+
 const HOLD_FRAMES: usize = 4;
 const READ_EPS: f64 = 1.0e-3;
 const TILE: u32 = 8;
@@ -388,6 +391,7 @@ fn grade(
 
 fn picture_metrics(frames: &[Picture], expected: &[Picture]) -> Result<Vec<Metric>, String> {
     same_pictures(frames, expected)?;
+    pre_toggle_settled(frames, expected)?;
     let settled_at = settle_index(frames, expected)?;
     let observed = u32::try_from(frames.len()).map_err(|_| "too many frames".to_string())?;
     let held_from = held_request_index(expected)?;
@@ -615,6 +619,60 @@ fn pop_magnitude(frames: &[Picture]) -> Result<f64, String> {
     Ok(worst)
 }
 
+/// The frames before the requested image changes are the pre-toggle soak.
+///
+/// A soak of four or more frames must sit within [`FADE_LIMIT`] of the on
+/// image (the first requested image) for four frames in a row. The miss is
+/// `|mean(Y) − mean(Yon)| / max(mean(Yon), 0.02)`, the same relative-luma
+/// unit as [`fade_deviation`]. A shorter prefix is a step fixture, not a
+/// soak, and is graded. A soak that never holds returns [`UNSETTLED_CAPTURE`]
+/// and is not graded.
+fn pre_toggle_settled(frames: &[Picture], expected: &[Picture]) -> Result<(), String> {
+    let count = leading_same(expected)?;
+    if count < HOLD_FRAMES {
+        return Ok(());
+    }
+    let on = &expected[0];
+    let mut run = 0_usize;
+    for frame in frames.iter().take(count) {
+        if luma_miss(frame, on)? <= FADE_LIMIT {
+            run += 1;
+            if run >= HOLD_FRAMES {
+                return Ok(());
+            }
+        } else {
+            run = 0;
+        }
+    }
+    Err(UNSETTLED_CAPTURE.to_string())
+}
+
+/// How many leading expected frames share the first frame's pixels.
+fn leading_same(expected: &[Picture]) -> Result<usize, String> {
+    let first = expected
+        .first()
+        .ok_or_else(|| "series has no frames".to_string())?;
+    let mut count = 0_usize;
+    for picture in expected {
+        if picture.width != first.width
+            || picture.height != first.height
+            || picture.linear != first.linear
+        {
+            break;
+        }
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// `|mean(Y) − mean(Ywant)| / max(mean(Ywant), 0.02)`.
+fn luma_miss(frame: &Picture, want: &Picture) -> Result<f64, String> {
+    let floor = MetricParams::default().rel_floor;
+    let seen = mean_luma(frame)?;
+    let asked = mean_luma(want)?;
+    Ok((seen - asked).abs() / asked.max(floor))
+}
+
 /// Max `|mean(Y) − mean(Yexpected)| / max(mean(Yexpected), 0.02)`.
 ///
 /// The denominator is the expected mean, floored like the settle line. It is
@@ -624,12 +682,9 @@ fn fade_deviation(frames: &[Picture], expected: &[Picture]) -> Result<f64, Strin
     if frames.is_empty() {
         return Err("fade needs a frame".to_string());
     }
-    let floor = MetricParams::default().rel_floor;
     let mut worst = 0.0_f64;
     for (frame, want) in frames.iter().zip(expected) {
-        let seen = mean_luma(frame)?;
-        let asked = mean_luma(want)?;
-        let miss = (seen - asked).abs() / asked.max(floor);
+        let miss = luma_miss(frame, want)?;
         if miss > worst {
             worst = miss;
         }
@@ -1272,5 +1327,19 @@ mod tests {
         let err = evaluate_capture(&dir).unwrap_err();
         assert!(err.contains("expected-on"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_capture_still_climbing_is_unsettled() {
+        let on = grey(0.5);
+        let off = grey(0.2);
+        let mut weights = vec![1.0_f32; 8];
+        weights.extend_from_slice(&[0.0; 4]);
+        let expected = images_at(&weights, &on, &off).unwrap();
+        let climbing = [0.20_f32, 0.22, 0.24, 0.26, 0.28, 0.30, 0.32, 0.34];
+        let mut frames: Vec<_> = climbing.into_iter().map(grey).collect();
+        frames.extend(expected[8..].iter().cloned());
+        let err = picture_metrics(&frames, &expected).unwrap_err();
+        assert_eq!(err, super::UNSETTLED_CAPTURE);
     }
 }

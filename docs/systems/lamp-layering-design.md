@@ -285,7 +285,9 @@ cargo run -p genos-lighting-ref --bin layering-gate -- --case noisy
 cargo run -p genos-lighting-ref --bin layering-gate -- --case baseline
 ```
 
-`--out` sets the directory. The default is `./genos-debug/gi/layering/`. The tool writes `{case}.json` there. `--capture` writes `baseline.json`. It does not write under `$HOME`. There is no environment mirror. Exit 0 when no row is `FAIL`. Exit 1 when any row is `FAIL`. `NOT-IMPLEMENTED` does not fail the process. Exit 2 is a bad argument or an I/O error.
+`--out` sets the directory. The default is `./genos-debug/gi/layering/`. The tool writes `{case}.json` there. `--capture` writes `baseline.json`. It does not write under `$HOME`. There is no environment mirror. Exit 0 when no row is `FAIL`. Exit 1 when any row is `FAIL`. `NOT-IMPLEMENTED` does not fail the process. Exit 2 is a bad argument, an I/O error, or `UNSETTLED-CAPTURE`.
+
+`UNSETTLED-CAPTURE` is a capture whose pre-toggle frames (the leading frames that request the on image, when there are at least four of them) never stay within 0.05 of that on image for four frames in a row. The miss is `|mean(Y) − mean(Yon)| / max(mean(Yon), 0.02)`, the same relative-luma unit as `fade_deviation`. The process prints `UNSETTLED-CAPTURE` and does not print `FAIL` rows. A step fixture with fewer than four leading frames at one weight is graded.
 
 `cargo test -p genos-lighting-ref layering` locks the same rows: the good fixture passes each comparison, the broken fixture fails each comparison, a 50 ms picture after a step request fails `fade_deviation` while `pop_magnitude` passes and the settle stays inside the 12-frame budget, a scripted weight curve is the target (matching it passes, a 50 ms picture against it fails), the noisy hold fails `hold_flicker`, and the baseline without a capture stays `NOT-IMPLEMENTED` with a null value. `fade_deviation` in those tests stays under 2, the same relative-luma scale as the 0.05 threshold.
 
