@@ -24,7 +24,9 @@
 //! bounce limit: every pixel's primary hit gathers next-event direct light at each
 //! vertex and continues along cosine-sampled paths, ended by Russian roulette after
 //! three bounces (capped at `max_bounces`). It runs on the CPU, so it is exact up to
-//! its noise, whatever the GPU path does. Not traced: fog, particle cards, textures.
+//! its noise, whatever the GPU path does. The camera ray carries fog when the
+//! scene dispatches it. Not traced: particle cards, textures. Surface bounces
+//! do not march the medium.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -314,6 +316,23 @@ pub fn render(setup: &RefSetup) -> Reference {
                                         setup.max_bounces,
                                         stratum,
                                         &mut rng,
+                                    );
+                                    let l = genos_render::compose_pixel_medium(
+                                        &setup.scene.fog,
+                                        &genos_render::PixelRay {
+                                            eye: setup.eye,
+                                            forward,
+                                            right,
+                                            up,
+                                            tan_half_y: tan_y,
+                                            aspect,
+                                            x: u32::try_from(x).unwrap_or(u32::MAX),
+                                            y: u32::try_from(y).unwrap_or(u32::MAX),
+                                            width: u32::try_from(w).unwrap_or(u32::MAX),
+                                            height: u32::try_from(h).unwrap_or(u32::MAX),
+                                        },
+                                        first.point,
+                                        l,
                                     );
                                     let y = luma(l) as f64;
                                     row_sq[x] += y * y;

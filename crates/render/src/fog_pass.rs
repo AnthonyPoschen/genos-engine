@@ -7,9 +7,10 @@ use genos_math::{height_optical_depth_f32, phase_hg_f32};
 use genos_scene::{Floor, FogSettings, FogShape, FogVolume, Scene, Vec3, Wall};
 
 use crate::fog::{
-    add, apply_fog, dot, falloff, integrate_samples, length, length_sq, luma, normalize, point_at,
-    ray_dir, scale, scale_color, slice_edge, sub, unit, world_cache_inscatter,
-    DirectSun, FogColumn, FogView, GridSize, SliceSample, Z_FAR,
+    add, apply_fog, dot, falloff, height_closed_column, height_segment_column, integrate_samples,
+    integrate_unshadowed, length, length_sq, luma, near_columns, normalize, point_at, ray_dir,
+    scale, scale_color, slice_edge, sub, unit, world_cache_inscatter, DirectSun, FogColumn,
+    FogView, GridSize, SliceSample, Z_FAR, Z_NEAR,
 };
 use crate::trace::sees;
 
@@ -36,6 +37,67 @@ pub struct FogImage {
     pub height: u32,
     /// Row-major rgb.
     pub linear: Vec<f32>,
+}
+
+/// Froxel picture and the closed-form height ray over the same view.
+#[must_use]
+pub fn media_images() -> (FogImage, FogImage) {
+    let (settings, view, size, sun) = media_scene();
+    let froxel = integrate_unshadowed(&settings, &view, size, sun);
+    let mut closed = Vec::new();
+    for y in 0..size.height {
+        for x in 0..size.width {
+            closed.push(height_closed_column(&settings, &view, size, sun, x, y));
+        }
+    }
+    (columns_image(size, &froxel), columns_image(size, &closed))
+}
+
+/// Nearest quarter of the slices, froxel against the closed-form segment.
+#[must_use]
+pub fn near_images() -> (FogImage, FogImage) {
+    let (settings, view, size, sun) = media_scene();
+    let froxel = near_columns(&settings, &view, size, sun);
+    let stop = (size.slices / 4).max(1);
+    let z1 = slice_edge(stop, size.slices);
+    let mut closed = Vec::new();
+    for y in 0..size.height {
+        for x in 0..size.width {
+            closed.push(height_segment_column(
+                &settings,
+                &view,
+                size,
+                sun,
+                x,
+                y,
+                [Z_NEAR, z1],
+            ));
+        }
+    }
+    (columns_image(size, &froxel), columns_image(size, &closed))
+}
+
+fn media_scene() -> (FogSettings, FogView, GridSize, DirectSun) {
+    let settings = FogSettings {
+        enabled: true,
+        density: 0.08,
+        height: 0.0,
+        thickness: 40.0,
+        albedo: 1.0,
+        phase_g: 0.4,
+        ..FogSettings::default()
+    };
+    let size = GridSize {
+        width: 16,
+        height: 8,
+        slices: 12,
+    };
+    let view = FogView::look([0.0, 1.6, 2.0], 0.15, -0.05, 0.55, 1.4);
+    let sun = DirectSun {
+        toward: normalize([0.3, 0.85, 0.2]),
+        color: [1.0, 0.95, 0.85],
+    };
+    (settings, view, size, sun)
 }
 
 /// Shadowed sun and one point lamp, or the same integral with `V` forced to 1.

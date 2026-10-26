@@ -336,6 +336,329 @@ pub fn integrate_unshadowed(
     columns
 }
 
+/// Closed-form height fog from the near plane to infinity along one column.
+///
+/// `S / σ` is constant for a directional sun, so the piecewise froxel sums to
+/// this. Local volumes are not in this column; those use delta tracking.
+#[must_use]
+pub fn height_closed_column(
+    settings: &FogSettings,
+    view: &FogView,
+    size: GridSize,
+    sun: DirectSun,
+    x: u32,
+    y: u32,
+) -> FogColumn {
+    let dir = ray_dir(view, size, x, y);
+    let near = point_at(view, size, x, y, Z_NEAR);
+    ratio_column(settings, dir, near[1], sun)
+}
+
+/// Closed-form height fog on the segment from `z0` to `z1` in view-Z metres.
+#[must_use]
+pub fn height_segment_column(
+    settings: &FogSettings,
+    view: &FogView,
+    size: GridSize,
+    sun: DirectSun,
+    x: u32,
+    y: u32,
+    span: [f32; 2],
+) -> FogColumn {
+    let dir = ray_dir(view, size, x, y);
+    let p0 = point_at(view, size, x, y, span[0]);
+    let p1 = point_at(view, size, x, y, span[1]);
+    let delta = sub(p1, p0);
+    let distance = length(delta);
+    let tau = if distance <= 1.0e-8 || settings.density <= 0.0 {
+        0.0
+    } else {
+        height_optical_depth_f32(
+            settings.density,
+            settings.thickness,
+            settings.height,
+            p0[1],
+            delta[1],
+            dir[1],
+            distance,
+        )
+    };
+    let mu = dot(dir, sun.toward).clamp(-1.0, 1.0);
+    let ratio = scale_color(
+        sun.color,
+        settings.albedo.clamp(0.0, 1.0) * phase_hg_f32(settings.phase_g, mu),
+    );
+    let (absorb, transmittance) = tail_gain(tau);
+    FogColumn {
+        inscatter: scale_color(ratio, absorb),
+        transmittance,
+    }
+}
+
+/// Froxel columns that stop at the end of the nearest quarter of the slices.
+#[must_use]
+pub fn near_columns(
+    settings: &FogSettings,
+    view: &FogView,
+    size: GridSize,
+    sun: DirectSun,
+) -> Vec<FogColumn> {
+    let mut columns = Vec::new();
+    let stop = near_slice_count(size.slices);
+    for y in 0..size.height {
+        for x in 0..size.width {
+            columns.push(near_column(settings, view, size, sun, x, y, stop));
+        }
+    }
+    columns
+}
+
+/// Pixel-centre camera ray. `x` and `y` are column and row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PixelRay {
+    /// World eye, metres.
+    pub eye: [f32; 3],
+    /// Unit view direction.
+    pub forward: [f32; 3],
+    /// Unit camera right.
+    pub right: [f32; 3],
+    /// Unit camera up.
+    pub up: [f32; 3],
+    /// Tangent of half the vertical field of view.
+    pub tan_half_y: f32,
+    /// Width over height.
+    pub aspect: f32,
+    /// Column.
+    pub x: u32,
+    /// Row.
+    pub y: u32,
+    /// Picture width.
+    pub width: u32,
+    /// Picture height.
+    pub height: u32,
+}
+
+/// Camera-ray composite for one pixel. Density 0 and no volumes leave `surface`.
+#[must_use]
+pub fn compose_pixel_medium(
+    settings: &FogSettings,
+    ray: &PixelRay,
+    end: [f32; 3],
+    surface: [f32; 3],
+) -> [f32; 3] {
+    let width = exact_f32(ray.width.max(1));
+    let height = exact_f32(ray.height.max(1));
+    let u = (exact_f32(ray.x) + 0.5) / width;
+    let v = (exact_f32(ray.y) + 0.5) / height;
+    let nx = (u * 2.0 - 1.0) * ray.tan_half_y * ray.aspect;
+    let ny = (1.0 - v * 2.0) * ray.tan_half_y;
+    let dir = normalize(add(
+        add(ray.forward, scale(ray.right, nx)),
+        scale(ray.up, ny),
+    ));
+    compose_camera_medium(settings, ray.eye, dir, end, surface)
+}
+
+fn exact_f32(value: u32) -> f32 {
+    let low = u16::try_from(value & u32::from(u16::MAX)).unwrap_or(0);
+    let high = u16::try_from(value >> 16).unwrap_or(0);
+    f32::from(low) + f32::from(high) * 65536.0
+}
+
+/// Camera-ray composite. Density 0 and no volumes leave `surface` unchanged.
+/// Surface bounces are not marched. The sun is `+Y`.
+#[must_use]
+pub fn compose_camera_medium(
+    settings: &FogSettings,
+    origin: [f32; 3],
+    dir: [f32; 3],
+    end: [f32; 3],
+    surface: [f32; 3],
+) -> [f32; 3] {
+    if !settings.dispatches() {
+        return surface;
+    }
+    let delta = sub(end, origin);
+    let distance = length(delta);
+    let dir = if length_sq(dir) <= 1.0e-8 {
+        normalize(delta)
+    } else {
+        normalize(dir)
+    };
+    let column = if settings.volumes.is_empty() {
+        let tau = if distance <= 1.0e-8 {
+            0.0
+        } else {
+            height_optical_depth_f32(
+                settings.density,
+                settings.thickness,
+                settings.height,
+                origin[1],
+                delta[1],
+                dir[1],
+                distance,
+            )
+        };
+        let sun = DirectSun {
+            toward: [0.0, 1.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+        };
+        let mu = dot(dir, sun.toward).clamp(-1.0, 1.0);
+        let ratio = scale_color(
+            sun.color,
+            settings.albedo.clamp(0.0, 1.0) * phase_hg_f32(settings.phase_g, mu),
+        );
+        let (absorb, transmittance) = tail_gain(tau);
+        FogColumn {
+            inscatter: scale_color(ratio, absorb),
+            transmittance,
+        }
+    } else {
+        let transmittance = delta_track_transmittance(settings, origin, end, 16);
+        FogColumn {
+            inscatter: [0.0; 3],
+            transmittance,
+        }
+    };
+    apply_fog(surface, column)
+}
+
+/// Mean delta-tracking transmittance of a uniform segment (Novák et al. 2018).
+/// The majorant is `sigma`, so every collision is a real one.
+#[must_use]
+pub fn uniform_delta_transmittance(sigma: f32, distance: f32, samples: u32) -> f32 {
+    if sigma <= 0.0 || distance <= 0.0 || samples == 0 {
+        return 1.0;
+    }
+    let mut state = 0xA5A5_1234_u32;
+    let mut exits = 0.0_f32;
+    for _ in 0..samples {
+        let step = -unit_random(&mut state).max(1.0e-6).ln() / sigma;
+        if step >= distance {
+            exits += 1.0;
+        }
+    }
+    exits / unit(samples)
+}
+
+fn ratio_column(settings: &FogSettings, dir: [f32; 3], y0: f32, sun: DirectSun) -> FogColumn {
+    let mu = dot(dir, sun.toward).clamp(-1.0, 1.0);
+    let ratio = scale_color(
+        sun.color,
+        settings.albedo.clamp(0.0, 1.0) * phase_hg_f32(settings.phase_g, mu),
+    );
+    let tau = tail_optical_depth(settings, y0, dir[1]);
+    let (absorb, transmittance) = tail_gain(tau);
+    FogColumn {
+        inscatter: scale_color(ratio, absorb),
+        transmittance,
+    }
+}
+
+fn near_slice_count(slices: u32) -> u32 {
+    (slices / 4).max(1).min(slices.max(1))
+}
+
+fn near_column(
+    settings: &FogSettings,
+    view: &FogView,
+    size: GridSize,
+    sun: DirectSun,
+    x: u32,
+    y: u32,
+    stop: u32,
+) -> FogColumn {
+    let dir = ray_dir(view, size, x, y);
+    let mu = dot(dir, sun.toward).clamp(-1.0, 1.0);
+    let mut samples = Vec::new();
+    for z in 0..stop {
+        let z0 = slice_edge(z, size.slices);
+        let z1 = slice_edge(z + 1, size.slices);
+        let p0 = point_at(view, size, x, y, z0);
+        let p1 = point_at(view, size, x, y, z1);
+        let delta = sub(p1, p0);
+        let distance = length(delta);
+        let centre = point_at(view, size, x, y, f32::midpoint(z0, z1));
+        let (sigma, source) = scatter_at(&ScatterQuery {
+            settings,
+            dir_y: dir[1],
+            mu,
+            p0,
+            delta,
+            distance,
+            centre,
+            sun,
+            visibility: 1.0,
+        });
+        samples.push(SliceSample {
+            sigma,
+            source,
+            distance,
+        });
+    }
+    integrate_samples(&samples, 0.0, [0.0; 3])
+}
+
+fn delta_track_transmittance(
+    settings: &FogSettings,
+    origin: [f32; 3],
+    end: [f32; 3],
+    samples: u32,
+) -> f32 {
+    let delta = sub(end, origin);
+    let distance = length(delta);
+    if distance <= 1.0e-8 || samples == 0 {
+        return 1.0;
+    }
+    let dir = normalize(delta);
+    let majorant = settings.density.max(0.0)
+        + settings
+            .volumes
+            .iter()
+            .fold(0.0, |sum, volume| sum + volume.density.max(0.0));
+    if majorant <= 1.0e-8 {
+        return 1.0;
+    }
+    let mut state = 0xC0FF_EE11_u32;
+    let mut exits = 0.0_f32;
+    for _ in 0..samples {
+        let mut t = 0.0_f32;
+        let mut alive = true;
+        while t < distance {
+            let step = -unit_random(&mut state).max(1.0e-6).ln() / majorant;
+            t += step;
+            if t >= distance {
+                break;
+            }
+            let point = add(origin, scale(dir, t));
+            let sigma = extinction_point(settings, point);
+            if unit_random(&mut state) < sigma / majorant {
+                alive = false;
+                break;
+            }
+        }
+        if alive {
+            exits += 1.0;
+        }
+    }
+    exits / unit(samples)
+}
+
+fn extinction_point(settings: &FogSettings, point: [f32; 3]) -> f32 {
+    let mut sigma =
+        height_fog_density_f32(settings.density, settings.thickness, point[1], settings.height);
+    for volume in &settings.volumes {
+        sigma += volume.density.max(0.0) * falloff(volume, point);
+    }
+    sigma.max(0.0)
+}
+
+fn unit_random(state: &mut u32) -> f32 {
+    *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    let bits = (*state >> 16) & u32::from(u16::MAX);
+    f32::from(u16::try_from(bits).unwrap_or(u16::MAX)) / 65535.0
+}
+
 /// `background * transmittance + in-scattering`.
 #[must_use]
 pub fn apply_fog(background: [f32; 3], column: FogColumn) -> [f32; 3] {
@@ -798,6 +1121,59 @@ pub(crate) fn normalize(a: [f32; 3]) -> [f32; 3] {
 mod tests {
     use super::*;
     use genos_math::{height_fog_density_f32, homogeneous_inscatter_f32};
+
+    #[test]
+    fn the_froxel_matches_the_closed_form_height_ray() {
+        let settings = FogSettings {
+            enabled: true,
+            density: 0.08,
+            thickness: 40.0,
+            albedo: 1.0,
+            phase_g: 0.4,
+            ..FogSettings::default()
+        };
+        let size = GridSize {
+            width: 4,
+            height: 2,
+            slices: 8,
+        };
+        let view = FogView::look([0.0, 2.0, 0.0], 0.2, 0.1, 0.6, 1.2);
+        let sun = DirectSun {
+            toward: [0.2, 0.9, 0.1],
+            color: [1.0, 0.95, 0.8],
+        };
+        let froxel = integrate_unshadowed(&settings, &view, size, sun);
+        for (index, column) in froxel.iter().enumerate() {
+            let x = u32::try_from(index % 4).unwrap_or(0);
+            let y = u32::try_from(index / 4).unwrap_or(0);
+            let closed = height_closed_column(&settings, &view, size, sun, x, y);
+            for channel in 0..3 {
+                let gap = (column.inscatter[channel] - closed.inscatter[channel]).abs();
+                assert!(gap < 1.0e-4, "channel {channel} gap {gap}");
+            }
+            assert!((column.transmittance - closed.transmittance).abs() < 1.0e-4);
+        }
+    }
+
+    #[test]
+    fn uniform_delta_tracking_matches_beer_lambert() {
+        let mean = uniform_delta_transmittance(0.2, 2.0, 4096);
+        let closed = genos_math::transmittance_f32(0.4);
+        assert!((mean - closed).abs() < 0.05, "delta {mean} closed {closed}");
+    }
+
+    #[test]
+    fn a_clear_medium_leaves_the_surface() {
+        let surface = [0.2, 0.4, 0.6];
+        let out = compose_camera_medium(
+            &FogSettings::default(),
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 1.0, -4.0],
+            surface,
+        );
+        assert_eq!(out, surface);
+    }
 
     #[test]
     fn slice_edges_match_the_exponential() {

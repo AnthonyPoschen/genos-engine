@@ -21,18 +21,21 @@ mod world;
 
 pub use aa::Antialias;
 pub use fog_pass::{
-    shaft_image, smear_broken, smear_fixture, yaw_pop_broken, yaw_pop_fixture, FogImage,
-    FogPointLamp,
+    media_images, near_images, shaft_image, smear_broken, smear_fixture, yaw_pop_broken,
+    yaw_pop_fixture, FogImage, FogPointLamp,
 };
 pub use fog_budget::{
     allocation_mb, allocation_mb_doubled, fit_pass, millisecond_ceiling, sample_cap,
     unfitted_milliseconds, PassCost,
 };
 pub use fog::{
-    apply_fog, grid_size, inject, integrate_samples, integrate_unshadowed, leak_broken,
+    apply_fog, compose_camera_medium, compose_pixel_medium, grid_size, inject,
+    integrate_samples, integrate_unshadowed,
+    leak_broken,
     leak_fixture, local_volume_leak, puff_volume, sample_depth_aware, slice_edge, still_flicker,
-    still_flicker_broken, still_flicker_fixture, world_cache_inscatter, DepthTap, DirectSun,
-    FogColumn, FogView, FroxelGrid, GridSize, SliceSample, Z_FAR, Z_NEAR,
+    still_flicker_broken, still_flicker_fixture, uniform_delta_transmittance, world_cache_inscatter,
+    DepthTap, DirectSun,
+    FogColumn, FogView, FroxelGrid, GridSize, PixelRay, SliceSample, Z_FAR, Z_NEAR,
 };
 pub use budget::{FrameMemory, ImageAdmit};
 pub use genos_bake as bake;

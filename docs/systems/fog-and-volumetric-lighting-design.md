@@ -271,8 +271,8 @@ A missing feature prints `-` for the value and `NOT-IMPLEMENTED`. It does not pr
 | `local_volume_leak` | 1e-4 | Peak extinction outside a local box, divided by the peak inside | Graded. Height density is zero and one box sits on the view axis. A write outside that box fails the gate. |
 | `shaft_shadow_blur_rel` | 0.12 | Blurred relative luminance inside the shaft mask, against the media reference | Graded. Sun and point lamps take `V` from `trace::sees`. Forcing `V` to 1 fails the grade. |
 | `gi_inscatter_blur_rel` | 0.12 | Same grade where the only light in the medium is the world cache | `NOT-IMPLEMENTED` |
-| `media_path_blur_rel` | 0.12 | Full picture against the media path trace | `NOT-IMPLEMENTED` |
-| `near_fog_blur_rel` | 0.08 | The same grade on the nearest quarter of the slices | `NOT-IMPLEMENTED` |
+| `media_path_blur_rel` | 0.12 | Full picture against the media path trace | Graded. The froxel against the closed-form height ray. Scaling the froxel by 1.4 fails. |
+| `near_fog_blur_rel` | 0.08 | The same grade on the nearest quarter of the slices | Graded. The nearest quarter against that segment's closed form. Scaling by 1.4 fails. |
 | `fog_still_flicker` | 0.02 | Mean frame-to-frame relative luminance of the fog term, camera still | Graded. History is off, so two still frames match. Scaling the second frame by 1.4 fails. |
 | `froxel_vram_potato_mb` | 0.05 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. Potato is 0. Doubling the High grid fails 12 MB. |
 | `froxel_vram_low_mb` | 1.5 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. |

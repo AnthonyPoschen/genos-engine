@@ -58,6 +58,41 @@ fn feature_metrics_keep_absent_rows_and_grade_the_live_ones() {
 }
 
 #[test]
+fn a_scaled_medium_fails_the_path_grade() {
+    let (candidate, reference) = scaled_pair(genos_render::media_images());
+    let grade = grade_pair(reference, candidate);
+    assert!(grade > 0.12, "{grade}");
+    let (candidate, reference) = scaled_pair(genos_render::near_images());
+    let grade = grade_pair(reference, candidate);
+    assert!(grade > 0.08, "{grade}");
+}
+
+fn scaled_pair(
+    pair: (genos_render::FogImage, genos_render::FogImage),
+) -> (genos_render::FogImage, genos_render::FogImage) {
+    let (mut candidate, reference) = pair;
+    for value in &mut candidate.linear {
+        *value *= 1.4;
+    }
+    (candidate, reference)
+}
+
+fn grade_pair(reference: genos_render::FogImage, candidate: genos_render::FogImage) -> f64 {
+    let reference =
+        genos_lighting_ref::Picture::new(reference.width, reference.height, reference.linear)
+            .unwrap();
+    let candidate =
+        genos_lighting_ref::Picture::new(candidate.width, candidate.height, candidate.linear)
+            .unwrap();
+    genos_lighting_ref::blur_relative(
+        &reference,
+        &candidate,
+        &genos_lighting_ref::MetricParams::default(),
+    )
+    .unwrap()
+}
+
+#[test]
 fn an_unshadowed_shaft_fails_the_shadow_grade() {
     let reference = genos_render::shaft_image(true);
     let candidate = genos_render::shaft_image(false);

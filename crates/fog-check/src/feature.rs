@@ -24,8 +24,6 @@ const FROXEL_MS_LOW: f64 = 0.40;
 const FROXEL_MS_MEDIUM: f64 = 0.80;
 const FROXEL_MS_HIGH: f64 = 1.20;
 
-const NO_FROXEL: &str = "froxel pass is not in the tree";
-const NO_MEDIA: &str = "path tracer does not trace participating media";
 const NO_GI: &str =
     "world-cache in-scattering waits for lighting phase 3 (cursor/lighting-p3-capped-refresh)";
 const NO_TIME: &str = "no lavapipe window for a fog timestamp";
@@ -55,8 +53,8 @@ pub(crate) fn evaluate_feature() -> Vec<Metric> {
             SHAFT_SHADOW_BLUR_REL,
         ),
         absent("gi_inscatter_blur_rel", GI_INSCATTER_BLUR_REL, NO_GI),
-        absent("media_path_blur_rel", MEDIA_PATH_BLUR_REL, NO_MEDIA),
-        absent("near_fog_blur_rel", NEAR_FOG_BLUR_REL, NO_FROXEL),
+        present("media_path_blur_rel", media_grade(false, 1.0), MEDIA_PATH_BLUR_REL),
+        present("near_fog_blur_rel", media_grade(true, 1.0), NEAR_FOG_BLUR_REL),
         present(
             "fog_still_flicker",
             f64::from(genos_render::still_flicker_fixture()),
@@ -73,9 +71,25 @@ pub(crate) fn evaluate_feature() -> Vec<Metric> {
     ]
 }
 
+fn media_grade(near: bool, scale: f32) -> f64 {
+    let (mut candidate, reference) = if near {
+        genos_render::near_images()
+    } else {
+        genos_render::media_images()
+    };
+    for value in &mut candidate.linear {
+        *value *= scale;
+    }
+    image_grade(reference, candidate)
+}
+
 fn shaft_grade(traced_shadows: bool) -> f64 {
     let reference = genos_render::shaft_image(true);
     let candidate = genos_render::shaft_image(traced_shadows);
+    image_grade(reference, candidate)
+}
+
+fn image_grade(reference: genos_render::FogImage, candidate: genos_render::FogImage) -> f64 {
     let Ok(reference) = Picture::new(reference.width, reference.height, reference.linear) else {
         return 1.0;
     };
