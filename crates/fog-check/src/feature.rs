@@ -8,12 +8,12 @@ use std::cell::RefCell;
 
 use genos_lighting_ref::{blur_relative, MetricParams, Picture};
 use genos_render::{
-    column_luma, flicker_dispatch, integrate_unshadowed, local_volume_leak, media_dispatch,
-    near_dispatch, picture_from, point_at, ray_dir, shaft_dispatch, shaft_image, slice_edge,
-    smear_dispatch, smear_tracking, sphere_dispatch, sphere_volume, still_flicker, FogColumn,
-    FogDispatch, FogImage, FroxelGrid,
+    box_dispatch, box_volume, column_luma, flicker_dispatch, integrate_unshadowed,
+    local_volume_leak, media_dispatch, near_dispatch, picture_from, point_at, ray_dir,
+    shaft_dispatch, shaft_image, slice_edge, smear_dispatch, smear_tracking, sphere_dispatch,
+    sphere_volume, still_flicker, yaw_pop_rel, FogColumn, FogDispatch, FogImage, FroxelGrid,
     LightingPreset, FOG_FLIP_G, FOG_IGNORE_SPHERE, FOG_LINEAR_SLICE, FOG_SKIP_EXTINCTION,
-    FOG_SKIP_SHADOW, Z_FAR, Z_NEAR,
+    FOG_SKIP_SHADOW, YAW_FRAMES, Z_FAR, Z_NEAR,
 };
 
 use crate::device::{allocation_mb, dispatched_ms, frame_grade, run};
@@ -48,6 +48,9 @@ const SHAFT_NOTE: &str = "lavapipe GPU shadowed columns against the CPU shadowed
 const FLICKER_NOTE: &str = "lavapipe GPU frame N against frame N+1, camera still";
 const MEDIA_NOTE: &str = "lavapipe GPU columns against a local closed form";
 const SPHERE_NOTE: &str = "lavapipe extinction image, peak outside over peak inside";
+const BOX_NOTE: &str = "lavapipe extinction image of one box, peak outside over peak inside";
+const POP_NOTE: &str =
+    "lavapipe column luma across the High yaw; a yaw-dependent scale fails after frame 8";
 const FRAME_COLUMN_NOTE: &str =
     "lavapipe frame column buffer against the CPU integral of that frame";
 const FRAME_PICTURE_NOTE: &str =
@@ -62,6 +65,8 @@ const SMEAR_STEP: u32 = 1;
 #[derive(Clone, Copy)]
 struct Good {
     smear: Option<f64>,
+    pop: Option<f64>,
+    box_leak: Option<f64>,
     shaft: Option<f64>,
     flicker: Option<f64>,
     media: Option<f64>,
@@ -88,16 +93,8 @@ fn good_feature() -> Vec<Metric> {
     let good = cached_good();
     vec![
         optional("froxel_temporal_smear_px", good.smear, FROXEL_TEMPORAL_SMEAR_PX, SMEAR_NOTE),
-        present(
-            "fog_yaw_pop_rel",
-            f64::from(genos_render::yaw_pop_fixture()),
-            FOG_YAW_POP_REL,
-        ),
-        present(
-            "local_volume_leak",
-            f64::from(genos_render::leak_fixture()),
-            LOCAL_VOLUME_LEAK,
-        ),
+        optional("fog_yaw_pop_rel", good.pop, FOG_YAW_POP_REL, POP_NOTE),
+        optional("local_volume_leak", good.box_leak, LOCAL_VOLUME_LEAK, BOX_NOTE),
         optional(
             "sphere_volume_leak",
             good.sphere,
@@ -174,7 +171,7 @@ fn broken_feature() -> Vec<Metric> {
         ),
         present(
             "local_volume_leak",
-            f64::from(genos_render::leak_broken()),
+            box_grade(FOG_IGNORE_SPHERE),
             LOCAL_VOLUME_LEAK,
         ),
         present(
@@ -238,6 +235,7 @@ fn cached_good() -> Good {
 
 fn measure_good() -> Good {
     let frame = frame_scores();
+    let yaw = yaw_frames();
     let presets = [
         LightingPreset::Potato,
         LightingPreset::Low,
@@ -245,7 +243,9 @@ fn measure_good() -> Good {
         LightingPreset::High,
     ];
     Good {
-        smear: Some(smear_grade()),
+        smear: Some(yaw.smear),
+        pop: Some(yaw.pop),
+        box_leak: Some(box_grade(0)),
         shaft: Some(shaft_grade(0)),
         flicker: Some(flicker_grade()),
         media: Some(media_grade(0, false)),
@@ -284,6 +284,11 @@ pub fn planted_scores() -> Vec<(&'static str, f64, f64)> {
             SHAFT_SHADOW_BLUR_REL,
         ),
         (
+            "local_volume_leak",
+            box_grade(FOG_IGNORE_SPHERE),
+            LOCAL_VOLUME_LEAK,
+        ),
+        (
             "sphere_volume_leak",
             sphere_grade(FOG_IGNORE_SPHERE),
             LOCAL_VOLUME_LEAK,
@@ -301,14 +306,42 @@ pub fn planted_scores() -> Vec<(&'static str, f64, f64)> {
     ]
 }
 
-fn smear_grade() -> f64 {
-    smear_tracking(SMEAR_STEP, |frame| {
+struct YawFrames {
+    smear: f64,
+    pop: f64,
+}
+
+fn yaw_frames() -> YawFrames {
+    let mut luma = Vec::new();
+    let mut energy = Vec::new();
+    for frame in 0..YAW_FRAMES {
         let job = smear_dispatch(frame);
         let Some(gpu) = run(&job) else {
-            return Vec::new();
+            return YawFrames { smear: 1.0, pop: 1.0 };
         };
-        column_luma(&gpu.columns)
-    })
+        let columns = column_luma(&gpu.columns);
+        energy.push(columns.iter().copied().sum());
+        luma.push(columns);
+    }
+    YawFrames {
+        smear: smear_tracking(SMEAR_STEP, |frame| {
+            let index = usize::try_from(frame).unwrap_or(0);
+            luma.get(index).cloned().unwrap_or_default()
+        }),
+        pop: f64::from(yaw_pop_rel(&energy)),
+    }
+}
+
+fn box_grade(flags: u32) -> f64 {
+    let job = box_dispatch(flags);
+    let Some(gpu) = run(&job) else {
+        return 1.0;
+    };
+    let grid = FroxelGrid {
+        size: job.size,
+        extinction: gpu.extinction,
+    };
+    f64::from(local_volume_leak(&grid, &box_volume(), &job.view))
 }
 
 fn flicker_grade() -> f64 {

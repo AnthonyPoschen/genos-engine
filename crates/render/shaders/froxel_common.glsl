@@ -5,7 +5,7 @@
 // Flag bits in fog.size.w:
 //   1  the column step ignores per-slice extinction
 //   2  shadow rays are skipped (visibility 1)
-//   4  a sphere bound is ignored
+//   4  a local volume bound is ignored (sphere and box)
 //   8  slice edges are linear in i
 //   16 Henyey-Greenstein g is negated
 
@@ -78,10 +78,10 @@ vec3 froxel_point(uvec2 c, float view_z) {
 
 float froxel_falloff(FroxelVolume volume, vec3 point) {
     float face;
+    if ((fog.size.w & 4u) != 0u) {
+        return 1.0;
+    }
     if (volume.position.w > 0.5) {
-        if ((fog.size.w & 4u) != 0u) {
-            return 1.0;
-        }
         float radius = volume.extents.x;
         float dist = length(point - volume.position.xyz);
         if (dist > radius) {

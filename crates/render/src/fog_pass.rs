@@ -20,14 +20,16 @@ use crate::trace::sees;
 
 /// Matches `crates/render/src/trace.rs` `LAMP_UNIT`.
 const LAMP_UNIT: f32 = 72.0;
-const YAW_FRAMES: u32 = 320;
+/// Yaw samples in the smear and pop fixtures. Frame 0 is −45°, the last is +45°.
+pub const YAW_FRAMES: u32 = 320;
 const PICTURE_WIDTH: f64 = 2560.0;
 
 /// Planted-bug bits. The integrate shader reads the same values.
 pub const FOG_SKIP_EXTINCTION: u32 = 1;
 /// Visibility is 1. The shadow ray is not traced.
 pub const FOG_SKIP_SHADOW: u32 = 2;
-/// A sphere's bound is ignored, so its density is written everywhere.
+/// A local volume's bound is ignored, so its density is written in every cell.
+/// Sphere and box both use this bit.
 pub const FOG_IGNORE_SPHERE: u32 = 4;
 /// Slice edges are linear in the index instead of exponential.
 pub const FOG_LINEAR_SLICE: u32 = 8;
@@ -173,16 +175,42 @@ pub fn smear_broken() -> f64 {
     smear(true)
 }
 
-/// Max frame-to-frame relative luminance of the fog term after frame 8.
+/// Max frame-to-frame relative luminance after frame 8.
+/// `energy` is one fog-term sum per yaw frame, frame 0 first.
+/// An empty series returns 1.
 #[must_use]
-pub fn yaw_pop_fixture() -> f32 {
-    yaw_pop(false)
+pub fn yaw_pop_rel(energy: &[f32]) -> f32 {
+    let mut max_rel = 0.0_f32;
+    let Some((first, rest)) = energy.split_first() else {
+        return 1.0;
+    };
+    let mut previous = *first;
+    for (offset, current) in rest.iter().copied().enumerate() {
+        let frame = u32::try_from(offset).unwrap_or(0).saturating_add(1);
+        let rel = (current - previous).abs() / previous.max(current).max(0.02);
+        if frame > 8 {
+            max_rel = max_rel.max(rel);
+        }
+        previous = current;
+    }
+    max_rel
 }
 
-/// Odd frames scale the fog luminance by 1.4.
+/// Max frame-to-frame relative luminance of the CPU fog term after frame 8.
+#[must_use]
+pub fn yaw_pop_fixture() -> f32 {
+    let energy: Vec<f32> = (0..YAW_FRAMES).map(yaw_energy).collect();
+    yaw_pop_rel(&energy)
+}
+
+/// The CPU fog term scaled by `1 + 0.5 sin(yaw * 48)`.
+/// That scale follows the yaw, so a smooth shaft still pops.
 #[must_use]
 pub fn yaw_pop_broken() -> f32 {
-    yaw_pop(true)
+    let energy: Vec<f32> = (0..YAW_FRAMES)
+        .map(|frame| yaw_energy(frame) * yaw_jitter(frame))
+        .collect();
+    yaw_pop_rel(&energy)
 }
 
 fn smear(hold: bool) -> f64 {
@@ -205,26 +233,17 @@ fn smear(hold: bool) -> f64 {
     max_lag
 }
 
-fn yaw_pop(scale_odd: bool) -> f32 {
-    let mut max_rel = 0.0_f32;
-    let mut previous = yaw_energy(0, scale_odd);
-    for frame in 1..YAW_FRAMES {
-        let current = yaw_energy(frame, scale_odd);
-        let rel = (current - previous).abs() / previous.max(current).max(0.02);
-        if frame > 8 {
-            max_rel = max_rel.max(rel);
-        }
-        previous = current;
-    }
-    max_rel
+fn yaw_energy(frame: u32) -> f32 {
+    blob_luma(frame).into_iter().sum()
 }
 
-fn yaw_energy(frame: u32, scale_odd: bool) -> f32 {
-    let mut sum = blob_luma(frame).into_iter().sum::<f32>();
-    if scale_odd && frame % 2 == 1 {
-        sum *= 1.4;
-    }
-    sum
+fn yaw_jitter(frame: u32) -> f32 {
+    1.0 + 0.5 * (blob_yaw(frame) * 48.0).sin()
+}
+
+fn blob_yaw(frame: u32) -> f32 {
+    let t = unit(frame) / unit(YAW_FRAMES - 1);
+    std::f32::consts::FRAC_PI_2 * (t - 0.5)
 }
 
 /// Centroid lag of caller-supplied per-frame luma. `step` 1 walks every yaw frame.
@@ -372,9 +391,7 @@ fn blob_size() -> GridSize {
 }
 
 fn blob_view(frame: u32) -> FogView {
-    let t = unit(frame) / unit(YAW_FRAMES - 1);
-    let yaw = std::f32::consts::FRAC_PI_2 * (t - 0.5);
-    FogView::look([0.0, 1.4, 0.0], yaw, 0.0, 1.5, 2.0)
+    FogView::look([0.0, 1.4, 0.0], blob_yaw(frame), 0.0, 1.5, 2.0)
 }
 
 fn shaft_scene() -> (
@@ -792,6 +809,28 @@ pub fn sphere_dispatch(flags: u32) -> FogDispatch {
     job.view = FogView::look([0.0, 0.0, 0.0], 0.0, 0.0, 1.0, 1.0);
     job.read_extinction = true;
     job
+}
+
+/// One box, height density zero. The extinction image comes back.
+#[must_use]
+pub fn box_dispatch(flags: u32) -> FogDispatch {
+    let mut job = sphere_dispatch(flags);
+    job.settings.volumes = vec![box_volume()];
+    job
+}
+
+/// The box the leak row injects. Same bound as the CPU leak fixture.
+#[must_use]
+pub fn box_volume() -> FogVolume {
+    FogVolume {
+        shape: FogShape::Box,
+        position: [0.0, 0.0, -5.0],
+        extents: [1.5, 1.5, 1.5],
+        density: 1.0,
+        albedo: 1.0,
+        phase_g: 0.0,
+        falloff: 0.0,
+    }
 }
 
 /// The sphere the leak row injects.
