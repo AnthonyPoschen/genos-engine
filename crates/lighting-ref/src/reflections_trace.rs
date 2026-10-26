@@ -75,21 +75,24 @@ pub fn ggx_energy() -> f64 {
     ggx_integral(0.35, 4096)
 }
 
-/// Independent shore clamp. The crest is the Gerstner sample at `(2, 0)`, time 0.
-/// Returns `(max |height| / depth, height / 4 m)`. The cap literal is `0.75`.
+/// Breaking-limited wave height, and the crest in deep water.
+///
+/// The crest is the Finch displacement at `(2, 0)`, time 0. McCowan
+/// (Philosophical Magazine 32, 1891, pp. 45–58) gives the solitary-wave
+/// breaking index `H / d = 0.78`. Returns `(max of min(crest, 0.78 × depth) / depth,
+/// crest / 4 m)`. The limit is that index.
 #[must_use]
 pub fn shore_oracle() -> (f64, f64) {
-    let crest = gerstner_crest();
-    let cap = 0.75;
+    let crest = gerstner_point([2.0, 0.0])[1].abs();
+    // McCowan 1891 breaking index.
+    let breaking = 0.78;
     let depths = [0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0];
     let mut max_ratio = 0.0_f64;
     for depth in depths {
-        let limit = cap * depth;
-        let height = crest.clamp(-limit, limit);
-        max_ratio = max_ratio.max(height.abs() / depth);
+        let height = crest.min(breaking * depth);
+        max_ratio = max_ratio.max(height / depth);
     }
-    let deep = crest.clamp(-cap * 4.0, cap * 4.0).abs() / 4.0;
-    (max_ratio, deep)
+    (max_ratio, crest / 4.0)
 }
 
 fn pixel(
@@ -499,15 +502,21 @@ fn ggx_ndf(mu: f64, alpha: f64) -> f64 {
     a2 / (std::f64::consts::PI * den * den)
 }
 
-fn gerstner_crest() -> f64 {
+/// Finch, GPU Gems, chapter 1. One component, time 0, speed 0.
+fn gerstner_point(xz: [f64; 2]) -> [f64; 3] {
     let amplitude = 0.4;
     let wavelength = 8.0;
     let steepness = 0.5;
     let axis = [1.0, 0.0];
-    let xz = [2.0, 0.0];
     let wave_number = std::f64::consts::TAU / wavelength;
     let phase = wave_number * (axis[0] * xz[0] + axis[1] * xz[1]);
-    amplitude * phase.sin() + 0.0 * steepness
+    let sine = phase.sin();
+    let cosine = phase.cos();
+    [
+        xz[0] + steepness * amplitude * axis[0] * cosine,
+        amplitude * sine,
+        xz[1] + steepness * amplitude * axis[1] * cosine,
+    ]
 }
 
 fn nearest(origin: [f64; 3], dir: [f64; 3]) -> Option<[f64; 3]> {
@@ -751,7 +760,7 @@ mod tests {
             "refracted transmission {snell:?}"
         );
         let (crest, deep) = shore_oracle();
-        assert!((crest - 0.75).abs() < 1.0e-12, "{crest}");
+        assert!((crest - 0.78).abs() < 1.0e-12, "{crest}");
         assert!((deep - 0.1).abs() < 1.0e-12, "{deep}");
         let energy = ggx_energy();
         assert!((energy - 1.0).abs() < 1.0e-3, "{energy}");

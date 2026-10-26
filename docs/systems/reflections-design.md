@@ -109,7 +109,7 @@ Water, same shape of choice:
 | B | Tessendorf's FFT ocean (SIGGRAPH 2001 course) plus a volumetric caustic | Too much for a 1060, and a room-scale shore does not need an FFT. |
 | C | **Pick.** A fixed Gerstner sum (Finch, GPU Gems, chapter 1, 2004), exact Fresnel, one Snell refraction of the opaque colour, Beer–Lambert, an image-space caustic map (Shah, Konttinen, and Pattanaik, IEEE TVCG 13(2), 2007, pp. 272–280) written into the surface cache, and a shoreline clamp. | The displacement is world-anchored, so the cache key does not follow the camera. Flat water has an analytic flux the harness grades. |
 
-Departure from Lengyel: the paper's listing edits an OpenGL projection (clip Z in −1..1). Vulkan clip Z is 0..1. The implementation derives the row. The harness gates the predicate (a point behind the plane is not drawn), not the matrix coefficients. Departure from Luebke and Georges: they use portals as a visibility walk of the whole scene. We fill the opening and stop at the view cap. Departure from Shah: the caustic map is stored in the world cache, so a camera turn does not drop it. Departure from Tessendorf: no FFT. Jacobian foam (the horizontal Jacobian below 0.5) is the foam term we do take from those notes. Departure from Miche (1944): the usual breaking limit is wave height / depth ≈ 0.78. Our cap is 0.75, which is stricter and exact in binary floating point at the depths the harness samples.
+Departure from Lengyel: the paper's listing edits an OpenGL projection (clip Z in −1..1). Vulkan clip Z is 0..1. The implementation derives the row. The harness gates the predicate (a point behind the plane is not drawn), not the matrix coefficients. Departure from Luebke and Georges: they use portals as a visibility walk of the whole scene. We fill the opening and stop at the view cap. Departure from Shah: the caustic map is stored in the world cache, so a camera turn does not drop it. Departure from Tessendorf: no FFT. Jacobian foam (the horizontal Jacobian below 0.5) is the foam term we do take from those notes. Departure from McCowan (Philosophical Magazine 32, 1891): the solitary-wave breaking index is wave height / depth = 0.78. Our cap is 0.75, which is 0.03 stricter and exact in binary floating point at the depths the harness samples. The shallow gate is 0.05 so that gap passes and an unclamped crest fails.
 
 ## Data
 
@@ -175,7 +175,7 @@ The oblique clip is Lengyel's construction with a Vulkan depth row. The third ro
 
 The surface normal comes from the Gerstner sum. The glossy stack is the reflection once that pass exists. The CPU picture in this phase reflects a flat plane along the mirrored ray. Refraction samples the opaque colour along the Snell direction. A refracted miss keeps the opaque sample, darkened by Beer–Lambert over the water depth. It does not invent a tint, and it does not read the world cache. The cache waits with the screen march.
 
-Shoreline depth is the opaque depth minus the water surface, in metres. Wave height is `min(deep_height, 0.75 × depth)`. Foam coverage is 1 where the clamp is active or the horizontal Jacobian drops below 0.5, and 0 elsewhere, with a smooth step between. The path tracer does not model foam yet ([reference check](lighting/reference-check.md) blind spots). Foam's picture grade stays `NOT-IMPLEMENTED` until the reference grows that term. The harness grades the clamp against an independent Gerstner sample at `(2, 0)`, time 0, amplitude 0.4, wavelength 8, steepness 0.5. The oracle writes the cap as the literal `0.75`. Depths are 0.0625, 0.125, 0.25, 0.5, 1, 2, and 4 metres. `shoreline_ratio` is `|engine − oracle|` of the max crest/depth, and `shoreline_deep_ratio` is the same error at 4 m. The gate is `1e-4`: larger than an f32 sine residual near this phase (the f32 sine of π/2 is 1, and an f32 ulp near 0.75 is about `6e-8`) and far below the unclamped gap (about 6) and the forced-cap gap (about 0.65). Skipping the clamp or forcing it in deep water fails.
+Shoreline depth is the opaque depth minus the water surface, in metres. Wave height is `min(deep_height, 0.75 × depth)`. Foam coverage is 1 where the clamp is active or the horizontal Jacobian drops below 0.5, and 0 elsewhere, with a smooth step between. The path tracer does not model foam yet ([reference check](lighting/reference-check.md) blind spots). Foam's picture grade stays `NOT-IMPLEMENTED` until the reference grows that term. The crest is an independent Finch sample at `(2, 0)`, time 0, amplitude 0.4, wavelength 8, steepness 0.5. McCowan (Philosophical Magazine 32, 1891, pp. 45–58) gives the solitary-wave breaking index `H / d = 0.78`. The oracle limits the crest by that index. Depths are 0.0625, 0.125, 0.25, 0.5, 1, 2, and 4 metres. `shoreline_ratio` is `|engine − oracle|` of the max crest/depth. The design cap `0.75` sits 0.03 under 0.78, so the gate is `0.05`: wide enough for that departure, and far below the unclamped gap (about 5.6). `shoreline_deep_ratio` is `|engine − crest / 4 m|`. At 4 m the crest is under both limits, so the gate stays `1e-4`. Forcing the cap in deep water fails that row. Skipping the clamp fails the shallow row.
 
 Caustics:
 
@@ -237,7 +237,7 @@ Presented-frame thresholds are at least `2/255`. One code is `1/255`. Lavapipe a
 - `near_weighted_rel` is the depth-weighted relative error of the whole frame. Weight is `1 / max(depth, 0.25)` on the tracer depth. Per pixel the error is the mean of `|a − b| / max(|b|, 1e-3)` over the three channels.
 - `flicker_reversal` is the max mean-channel change across three still Medium frames.
 - `low_reflection_rays` is the atomic the frame shader increments on Low. The source label is `GPU dispatch count`. The shader calls `reflection_ray_cap`. A one-group launch still runs when the cap is 0, and threads past the cap do not increment.
-- `shoreline_ratio` and `shoreline_deep_ratio` are `|engine − oracle|` against the wave sample above. The source label is `wave oracle`. The gate is `1e-4`.
+- `shoreline_ratio` is `|engine − oracle|` of the max crest/depth. The oracle's breaking index is McCowan's 0.78. The gate is `0.05`, which passes the design cap's 0.03 gap and fails an unclamped crest. `shoreline_deep_ratio` is `|engine − crest / 4 m|`. The source label is `wave oracle`. That gate is `1e-4`.
 
 `ssr_depth_rel`, `denoise_lag_frames`, `caustic_rel`, `ms_frac`, and `vram_frac` are `NOT-IMPLEMENTED` on live, good, and bad. The value is `na`. Lavapipe time is not `ms_frac`. `get_reflection_stats` reports `gpu_ns` and `vram_bytes` without turning them into those fractions.
 
@@ -258,8 +258,8 @@ Presented-frame thresholds are at least `2/255`. One code is `1/255`. Lavapipe a
 | `portal_leak` | 2/255 | fraction of mirror pixels that show the plane behind the mirror |
 | `portal_point` | 2/255 | max channel error of the portal window |
 | `beer_rel` | 0.02 | relative error of transmittance against `exp(-σ d)` |
-| `shoreline_ratio` | 1e-4 | `|engine − oracle|` of max crest / depth. The oracle's cap literal is 0.75 |
-| `shoreline_deep_ratio` | 1e-4 | `|engine − oracle|` of the same crest at 4 m |
+| `shoreline_ratio` | 0.05 | `|engine − oracle|` of max crest / depth. The oracle breaks at McCowan's 0.78; the design cap 0.75 is 0.03 under that |
+| `shoreline_deep_ratio` | 1e-4 | `|engine − crest / 4 m|`. The crest is the Finch sample, under both limits at 4 m |
 | `caustic_rel` | 0.05 | mean relative error against flat-water transmittance |
 | `near_weighted_rel` | 0.03 | depth-weighted relative error, weight `1 / max(depth, 0.25)` |
 | `flicker_reversal` | 2/255 | max mean-channel change across three still frames |
@@ -356,7 +356,7 @@ Each phase is one change. A phase that misses its gate is dropped: a five-line p
 | P5 | Planar mirrors. | `mirror_view_frac`, `portal_leak`, `mirror_point` |
 | P6 | Portals on the same cap. | `portal_point`, `portal_leak` |
 | P7 | Water shade, Snell, Beer–Lambert. | `snell_transmit`, `beer_rel` |
-| P8 | Shoreline clamp and Jacobian foam. | `shoreline_ratio` ≤ 1e-4, `shoreline_deep_ratio` ≤ 1e-4 against the wave oracle |
+| P8 | Shoreline clamp and Jacobian foam. | `shoreline_ratio` ≤ 0.05, `shoreline_deep_ratio` ≤ 1e-4 against the wave oracle |
 | P9 | Caustic modes. | `caustic_rel` ≤ 0.05, `vram_frac` ≤ 1 |
 
 P4 is where half-resolution tracing is confirmed or the near band moves to full resolution inside 32 MB. P9 does not add a ray cap of its own.
@@ -399,6 +399,6 @@ Collected from the sections above, for the pull request that implements each one
 | Luebke and Georges, I3D 1995 | A portal opening | We fill the opening. We do not walk the scene as a PVS. |
 | Finch, GPU Gems ch. 1, 2004 | Gerstner sum | Component count is a cap, not a fixed ocean. |
 | Tessendorf, SIGGRAPH 2001 | Jacobian foam | No FFT. |
-| Miche 1944 | Wave height limited by depth | Cap is 0.75, stricter than 0.78. |
+| McCowan, Philosophical Magazine 32, 1891 | Solitary-wave breaking index H/d = 0.78 | Cap is 0.75, 0.03 stricter. The shallow gate is 0.05. |
 | Shah, Konttinen, and Pattanaik, TVCG 2007 | Image-space caustic map | The map is written into the world cache. |
 | S79 (half-resolution à-trous) | The GI picture stays full resolution | The reflection trace buffer is half resolution. The GI à-trous is unchanged. |

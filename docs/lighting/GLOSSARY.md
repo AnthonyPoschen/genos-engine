@@ -293,7 +293,7 @@ Role: SAMPLE · Literature: Snell's law; Walter et al., EGSR 2007 (the BTDF we d
 Role: LIGHTS · Literature: Shah, Konttinen, and Pattanaik, IEEE TVCG 13(2), 2007 · More detail: [reflections design, water](../systems/reflections-design.md#water)
 
 **Shoreline**: the shallow band where wave height is clamped by depth and foam coverage comes from that clamp and the displacement Jacobian.
-Role: OUT · Literature: Miche 1944 (the 0.78 height limit; our cap is 0.75); Tessendorf, SIGGRAPH 2001 (Jacobian foam) · More detail: [reflections design, water](../systems/reflections-design.md#water)
+Role: OUT · Literature: McCowan, Philosophical Magazine 32, 1891 (H/d = 0.78; our cap is 0.75); Tessendorf, SIGGRAPH 2001 (Jacobian foam) · More detail: [reflections design, water](../systems/reflections-design.md#water)
 
 **Reflection budget**: the per-preset ceiling on reflection milliseconds, VRAM, rays, and mirror views.
 Role: SCHED · Literature: ADR 0013 work cap; Lumen reflection scalability · More detail: [reflections design, budgets](../systems/reflections-design.md#budgets)
