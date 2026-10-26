@@ -2807,9 +2807,18 @@ impl Gpu {
                 (self.fns.destroy_fence)(self.device, self.lighting.world_fence, std::ptr::null());
                 self.lighting.world_fence = std::ptr::null_mut();
             }
+            if !self.lighting.world_qp.is_null() {
+                (self.fns.destroy_query_pool)(self.device, self.lighting.world_qp, std::ptr::null());
+                self.lighting.world_qp = std::ptr::null_mut();
+            }
         }
-        // The command buffer goes with the light command pool; the query pool too
-        // is left to the device (as the frame's are).
+        let dumps = std::mem::take(&mut self.lighting.dump);
+        for (_, set) in dumps {
+            for (_, mut buf) in set {
+                self.destroy_buffer(&mut buf);
+            }
+        }
+        // The world command buffer is freed with the compute command pool.
         let mut gbuf = std::mem::replace(&mut self.lighting.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.lighting.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.lighting.out, Buffer::empty());
@@ -3558,7 +3567,7 @@ fn lighting_view_content_key(pack: &crate::pack::Pack) -> u64 {
 mod sun_step {
     use super::{
         check_lighting_sun_arg, lighting_sun_flag_needs_value, sun_step_small, Lighting,
-        LIGHTING_COMPOSE_SPV, SUN_COMPOSE_SPV,
+        LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_COMPOSE_SPV, SUN_COMPOSE_SPV,
     };
 
     fn lighting_at(dir: [f32; 3], light: f32) -> Lighting {
@@ -3618,6 +3627,21 @@ mod sun_step {
         assert!(check_lighting_sun_arg("--lighting-debug", None).is_ok());
         assert!(check_lighting_sun_arg("--lighting-debug=1", None).is_err());
         assert!(check_lighting_sun_arg("--scale", None).is_ok());
+    }
+
+    /// The instance is Vulkan 1.0. SPIR-V 1.6 is what NVIDIA reports as
+    /// `NVVM compilation failed: 3`, and the failed compile corrupts the
+    /// driver heap (`corrupted size vs. prev_size` at exit).
+    #[test]
+    fn plain_atrous_spirv_matches_the_vulkan_1_0_instance() {
+        assert!(LIGHTING_ATROUS_PLAIN_SPV.len() >= 8);
+        let version = u32::from_le_bytes([
+            LIGHTING_ATROUS_PLAIN_SPV[4],
+            LIGHTING_ATROUS_PLAIN_SPV[5],
+            LIGHTING_ATROUS_PLAIN_SPV[6],
+            LIGHTING_ATROUS_PLAIN_SPV[7],
+        ]);
+        assert_eq!(version, 0x0001_0000, "SPIR-V {version:#x}");
     }
 
     /// The picture compose stays the GI shader. The sun compose is that pass

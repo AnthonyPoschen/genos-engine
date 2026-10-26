@@ -170,8 +170,11 @@ because a mapped window missed `xdg_wm_base.ping`.
 The ping is answered only inside the seat dispatch. A scene load runs on
 `genos-scene-load` and the frame draws a loading picture. Device waits and
 pipeline compiles keep a side thread answering pings, and that thread is joined
-before the next present. Quit destroys the window, skips the device idle, and
-exits. The old scene is dropped on `genos-retire`.
+before the next present. Quit joins the script thread (it is still freeing the
+rhai engine after the report and the `quit` reply), stops the MCP listener,
+idles the device while the window is mapped, destroys the device on the frame
+thread, then destroys the window and exits. The old scene is dropped on
+`genos-retire`.
 
 Failure modes: a stall above 100 ms means the frame thread blocked inside a
 pump gap (a synchronous load, a device wait, or a teardown). The probes are the
