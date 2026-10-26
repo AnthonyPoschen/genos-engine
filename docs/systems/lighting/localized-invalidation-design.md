@@ -270,7 +270,7 @@ Presets set schedule mode to `budget`. `schedule_push` multiplies the §3 caps b
 
 A pass gates when its grant is under its demand and the frame has a change record, or, for direct and trace, when the scale is below 1. The gate is one centered tile rect. Ten percent of that grant is a band that steps down the picture. À-trous gates only when a change record exists. Outside the rect, a direct pixel keeps a stored value, and a probe ray keeps a finished hit or a finished miss. An empty direct slot still traces. A cache ray past the grant does not run.
 
-The lighting targets are the guard-band size. The picture is the crop. The eye stays put, and the band leads the turn. High starts at 15% of the display on each edge.
+The lighting targets are the guard-band size. The picture is the crop. The eye stays put, and the band leads the turn. High starts at 15% of the display on each edge. Probe picks and lamp-pick history project that displayed camera through the crop, so a still probe finds its last tile.
 
 With `--gi-metrics`, the next frame reads the retired `lighting_ms` against that frame's cap. Over the cap, the scale becomes `cap / ms`, down to 1/64. Under 75% of the cap, the scale grows by 5% up to 1. Picture tests do not record, so a lavapipe timestamp does not pull the scale down.
 

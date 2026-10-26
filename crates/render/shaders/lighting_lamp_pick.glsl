@@ -96,7 +96,20 @@ bool lamp_pick_history_ok(vec3 pos, uvec2 pix) {
         return false;
     }
     vec2 ndc = vec2(dot(rel, right) / (z * t * aspect), dot(rel, up) / (z * t));
-    vec2 px = vec2((ndc.x + 1.0) * 0.5 * float(pc.dims.x), (1.0 - ndc.y) * 0.5 * float(pc.dims.y));
+    // Same crop as lighting_eye_dir. A guard band would otherwise shift the
+    // history test off the lit pixel by the crop.
+    float dw = float(pc.dims.x);
+    float dh = float(pc.dims.y);
+    float ox = 0.0;
+    float oy = 0.0;
+    if (pc.frame.x != 0u && pc.frame.y != 0u) {
+        uint crop = pc.schedule.w;
+        dw = float(pc.frame.x);
+        dh = float(pc.frame.y);
+        ox = float(crop & 0xffffu);
+        oy = float(crop >> 16u);
+    }
+    vec2 px = vec2((ndc.x + 1.0) * 0.5 * dw + ox, (1.0 - ndc.y) * 0.5 * dh + oy);
     return ivec2(floor(px)) == ivec2(pix);
 }
 
