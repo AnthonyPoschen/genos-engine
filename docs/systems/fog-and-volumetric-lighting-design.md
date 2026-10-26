@@ -144,7 +144,7 @@ Height fog at a sample height `y`:
 
 `density`, `height`, and `thickness` are settings. The integral of `σ_t` across a slice has a closed form because the ray's `y` is linear in distance and `σ_t` is exponential in `y`. Absorption and scattering share `σ_t`. Single-scatter albedo is the `albedo` setting, so `σ_s = albedo * σ_t` and `σ_a = σ_t - σ_s`. Albedo is clamped to `[0, 1]`.
 
-A local fog volume is a box or a sphere in world space, with its own density, albedo, and falloff in metres. A cell whose center is inside contributes `density * falloff(distance to the bound)`. Volumes add. They do not replace the height field.
+A local fog volume is a box or a sphere in world space, with its own density, albedo, and falloff in metres. A cell whose center is inside contributes `density * falloff(distance to the bound)`. Volumes add. They do not replace the height field. Extinction is that centre sample on the view ray. The in-scatter taps are slid onto the line parallel to the view through the volume's screen position, so a slice thicker than the volume does not shear it across the cell. Hillaire samples the view ray; this is the departure.
 
 Puff spheres from the particle step are local spheres of radius `SMOKE_RADIUS` (0.42 m) and density `SMOKE_DENSITY` (1.7) when the froxel is on. The puff composite is then skipped.
 
@@ -199,7 +199,7 @@ The column target is 160×90 on High, not 2560×1440. The composite samples it w
 
 Fog history is off on Potato, Low, Medium, and High. [ADR 0012](../adr/0012-gi.md) stores no radiance history. The grid layout reserves a history slot so a later decision can turn the setting on without a second allocation. While the setting is off the pass does not read that slot and does not blend a previous frame. An unsampled cell uses the unshadowed closed form (departure 3).
 
-Enabling fog history is an open decision for Anthony. This document does not choose it. The evidence is `froxel_temporal_smear_px` (centroid lag of a static shaft during a 90° yaw, threshold 0.50 px at 1440p) and `fog_yaw_pop_rel` (frame-to-frame relative luminance of the fog term on that yaw, threshold 0.05).
+Enabling fog history is an open decision for Anthony. This document does not choose it. The evidence is `froxel_temporal_smear_px` (centroid lag of a static shaft during a 90° yaw, threshold 0.50 px at 1440p, the worse of stride 1 and stride 16) and `fog_yaw_pop_rel` (frame-to-frame relative luminance of the fog term on that yaw, threshold 0.05).
 
 Extinction is recomputed every frame.
 
@@ -266,7 +266,7 @@ A missing feature prints `-` for the value and `NOT-IMPLEMENTED`. It does not pr
 | `phase_hg_integral_abs` | 1e-4 | Max abs error of the sphere integral of Henyey-Greenstein against 1, Simpson in μ times `2π`, at g = 0, 0.4, and 0.7 | Graded. The good fixture integrates `phase_hg`. Broken fixture drops the `4π`. |
 | `homogeneous_inscatter_max_abs` | 1e-3 | Max abs error of `(S/σ)(1-exp(-σ D))` against piecewise steps, σ = 0.2, S = 0.15 | Graded. The good fixture calls `homogeneous_inscatter`. Broken fixture adds `S*D` with no transmittance. |
 | `image_grade_blur_rel` | 0.12 | `blur_relative` of a synthetic fog picture against itself. The lighting-ref fail line. | Graded. Broken fixture scales luminance by 1.4. |
-| `froxel_temporal_smear_px` | 0.50 | Centroid lag, in picture pixels at 1440p, of a static shaft during a 90° yaw | Graded from lavapipe column readback at High 160×90×48, every one of the 320 yaw frames. History is off. Holding the first frame fails. |
+| `froxel_temporal_smear_px` | 0.50 | Centroid lag, in picture pixels at 1440p, of a static shaft during a 90° yaw | Graded from lavapipe column readback at High 160×90×48. The row is the worse of stride 1 and stride 16 across the 320 yaw frames. History is off. Holding the first frame fails. |
 | `fog_yaw_pop_rel` | 0.05 | Max frame-to-frame relative luminance of the fog term on that yaw, after frame 8 | Graded from lavapipe column luma across the High yaw, 320 frames. History is off. Scaling each frame by `1 + 0.5 sin(yaw * 48)` fails. |
 | `local_volume_leak` | 1e-4 | Peak extinction outside a local box, divided by the peak inside | Graded from the lavapipe extinction image of one box. Height density is zero. Ignoring the box bound fails the gate. |
 | `sphere_volume_leak` | 1e-4 | Peak extinction outside a local sphere, divided by the peak inside | Graded from the lavapipe extinction image. Ignoring the sphere bound fails the gate. |

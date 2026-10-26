@@ -10,7 +10,8 @@ use genos_scene::{
 };
 
 use crate::fog::{
-    add, apply_fog, dot, falloff, grid_size, height_closed_column, height_segment_column,
+    add, aligned_volume_point, apply_fog, dot, falloff, grid_size, height_closed_column,
+    height_segment_column,
     integrate_samples,
     integrate_unshadowed, length, length_sq, luma, near_columns, normalize, point_at, ray_dir,
     scale, scale_color, slice_edge, sub, unit, world_cache_inscatter, DirectSun, FogColumn,
@@ -162,17 +163,17 @@ pub fn shaft_image(traced_shadows: bool) -> FogImage {
 }
 
 /// Centroid lag, in 1440p picture pixels, of a static fog blob across a 90° yaw.
-/// History is off, so the rendered centroid follows the geometric one.
+/// The worse of every frame and a stride of 16. History is off.
 #[must_use]
 pub fn smear_fixture() -> f64 {
-    smear(false)
+    smear_steps(false)
 }
 
 /// The rendered centroid is held on the first frame, which is what a history
 /// blend does to a moving shaft.
 #[must_use]
 pub fn smear_broken() -> f64 {
-    smear(true)
+    smear_steps(true)
 }
 
 /// Max frame-to-frame relative luminance after frame 8.
@@ -213,12 +214,20 @@ pub fn yaw_pop_broken() -> f32 {
     yaw_pop_rel(&energy)
 }
 
-fn smear(hold: bool) -> f64 {
+fn smear_steps(hold: bool) -> f64 {
+    let every = smear_at(1, hold);
+    let stride = smear_at(16, hold);
+    every.max(stride)
+}
+
+fn smear_at(step: u32, hold: bool) -> f64 {
+    let step = step.max(1);
     let mut max_lag = 0.0_f64;
     let mut prev_rendered = picture_x(centroid(0));
     let mut prev_geometric = picture_x(project_blob(0));
     let frozen = prev_rendered;
-    for frame in 1..YAW_FRAMES {
+    let mut frame = step;
+    while frame < YAW_FRAMES {
         let rendered = if hold {
             frozen
         } else {
@@ -229,6 +238,7 @@ fn smear(hold: bool) -> f64 {
         max_lag = max_lag.max(lag);
         prev_rendered = rendered;
         prev_geometric = geometric;
+        frame = frame.saturating_add(step);
     }
     max_lag
 }
@@ -560,6 +570,7 @@ fn lit_column(job: &ColumnJob<'_>, x: u32, y: u32) -> FogColumn {
             });
         let mut source = light_source(&LightQuery {
             settings,
+            view,
             sigma_height: sigma_height.max(0.0),
             p0,
             centre,
@@ -601,6 +612,7 @@ fn lit_column(job: &ColumnJob<'_>, x: u32, y: u32) -> FogColumn {
 
 struct LightQuery<'a> {
     settings: &'a FogSettings,
+    view: &'a FogView,
     sigma_height: f32,
     p0: [f32; 3],
     centre: [f32; 3],
@@ -625,6 +637,7 @@ fn light_source(query: &LightQuery<'_>) -> [f32; 3] {
         1.0
     };
     let sun_coeff = phase_coeff(
+        query.view,
         query.settings,
         query.sigma_height,
         query.p0,
@@ -647,6 +660,7 @@ fn light_source(query: &LightQuery<'_>) -> [f32; 3] {
         };
         let falloff_l = LAMP_UNIT / dist2;
         let coeff = phase_coeff(
+            query.view,
             query.settings,
             query.sigma_height,
             query.p0,
@@ -663,6 +677,7 @@ fn light_source(query: &LightQuery<'_>) -> [f32; 3] {
 }
 
 fn phase_coeff(
+    view: &FogView,
     settings: &FogSettings,
     sigma_height: f32,
     p0: [f32; 3],
@@ -676,7 +691,7 @@ fn phase_coeff(
         for tap in 0..8 {
             let t = (unit(tap) + 0.5) / 8.0;
             let point = add(p0, scale(sub(p1, p0), t));
-            local += falloff(volume, point);
+            local += falloff(volume, aligned_volume_point(view, volume, point));
         }
         local = volume.density.max(0.0) * local / 8.0;
         coeff += local * volume.albedo.clamp(0.0, 1.0) * phase_hg_f32(volume.phase_g, mu);
@@ -969,9 +984,11 @@ mod tests {
 
     #[test]
     fn yaw_evidence_stays_inside_the_gates() {
-        let smear = smear_fixture();
+        let every = smear_tracking(1, blob_luma);
+        let stride = smear_tracking(16, blob_luma);
         let pop = yaw_pop_fixture();
-        assert!(smear <= 0.50, "smear {smear} pop {pop}");
+        assert!(every <= 0.50, "smear {every} pop {pop}");
+        assert!(stride <= 0.50, "stride16 {stride}");
         assert!(pop <= 0.05, "pop {pop}");
         assert!(smear_broken() > 0.50, "broken smear");
         assert!(yaw_pop_broken() > 0.05, "broken pop");

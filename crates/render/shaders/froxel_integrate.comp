@@ -43,7 +43,7 @@ float froxel_scatter(float sigma_height, vec3 p0, vec3 centre, vec3 p1, float mu
         float local = 0.0;
         [[dont_unroll]] for (uint tap = 0u; tap < 8u; tap++) {
             float t = (float(tap) + 0.5) / 8.0;
-            local += froxel_falloff(volume, mix(p0, p1, t));
+            local += froxel_falloff(volume, froxel_align(volume.position.xyz, mix(p0, p1, t)));
         }
         local = max(volume.extents.w, 0.0) * local / 8.0;
         float local_albedo = clamp(volume.shade.x, 0.0, 1.0);

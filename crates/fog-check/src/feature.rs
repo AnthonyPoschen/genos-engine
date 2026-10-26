@@ -43,7 +43,8 @@ const NO_TIME: &str = "no lavapipe window for a fog timestamp";
 const LAVAPIPE_BYTES: &str = "lavapipe allocation, decimal MB";
 const LAVAPIPE_MS: &str =
     "lavapipe full-grid timestamp; not graded against the RTX 4070 ceiling";
-const SMEAR_NOTE: &str = "lavapipe GPU readback, High 160x90x48, all 320 yaw frames";
+const SMEAR_NOTE: &str =
+    "lavapipe column luma, High 160x90x48, worse of stride 1 and stride 16 across 320 yaw frames";
 const SHAFT_NOTE: &str = "lavapipe GPU shadowed columns against the CPU shadowed integral";
 const FLICKER_NOTE: &str = "lavapipe GPU frame N against frame N+1, camera still";
 const MEDIA_NOTE: &str = "lavapipe GPU columns against a local closed form";
@@ -57,10 +58,6 @@ const FRAME_PICTURE_NOTE: &str =
     "0 when fog changes the composed Low picture; 1 when the two pictures match";
 const FRAME_COLUMN_ABS: f64 = 1.0e-3;
 const FRAME_PICTURE_UNCHANGED: f64 = 0.0;
-
-/// One sample per yaw frame. A stride of 16 measures the same integral at 0.695 px
-/// on the CPU model, above the frame-to-frame gate.
-const SMEAR_STEP: u32 = 1;
 
 #[derive(Clone, Copy)]
 struct Good {
@@ -323,11 +320,17 @@ fn yaw_frames() -> YawFrames {
         energy.push(columns.iter().copied().sum());
         luma.push(columns);
     }
+    let at = |frame: u32| {
+        let index = usize::try_from(frame).unwrap_or(0);
+        luma.get(index).cloned().unwrap_or_default()
+    };
+    let every = smear_tracking(1, at);
+    let stride = smear_tracking(16, |frame| {
+        let index = usize::try_from(frame).unwrap_or(0);
+        luma.get(index).cloned().unwrap_or_default()
+    });
     YawFrames {
-        smear: smear_tracking(SMEAR_STEP, |frame| {
-            let index = usize::try_from(frame).unwrap_or(0);
-            luma.get(index).cloned().unwrap_or_default()
-        }),
+        smear: every.max(stride),
         pop: f64::from(yaw_pop_rel(&energy)),
     }
 }

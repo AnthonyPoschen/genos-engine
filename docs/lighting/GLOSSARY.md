@@ -231,6 +231,9 @@ Role: STORE · Literature: Hillaire 2015; Wronski 2014 · More detail: `density 
 **Local fog volume**: a box or a sphere of analytic density added into the froxel grid.
 Role: STORE · Literature: Hillaire 2015 local media; Epic local fog volumes · More detail: [fog design §6](../systems/fog-and-volumetric-lighting-design.md)
 
+**View-aligned volume sample**: a local-volume in-scatter tap moved onto the line parallel to the view through that volume's screen position. Extinction stays on the view ray.
+Role: SAMPLE · Literature: departure from Hillaire 2015, who samples the view ray · More detail: `froxel_align` in [`froxel_common.glsl`](../../crates/render/shaders/froxel_common.glsl)
+
 **Light shaft**: a beam made visible by shadowed direct light in the medium.
 Role: LIGHTS · Literature: Hillaire 2015; Engelhardt and Dachsbacher, I3D 2010 (not the method we use) · More detail: [ADR 0018](../adr/0018-fog-and-volumetric-lighting.md)
 

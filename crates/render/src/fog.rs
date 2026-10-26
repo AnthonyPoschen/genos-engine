@@ -695,6 +695,7 @@ fn near_column(
         let centre = point_at(view, size, x, y, f32::midpoint(z0, z1));
         let (sigma, source) = scatter_at(&ScatterQuery {
             settings,
+            view,
             dir_y: dir[1],
             mu,
             p0,
@@ -871,6 +872,7 @@ fn integrate_column(
         let centre = point_at(view, size, x, y, f32::midpoint(z0, z1));
         let (sigma, source) = scatter_at(&ScatterQuery {
             settings,
+            view,
             dir_y: dir[1],
             mu,
             p0,
@@ -896,6 +898,7 @@ fn integrate_column(
 
 struct ScatterQuery<'a> {
     settings: &'a FogSettings,
+    view: &'a FogView,
     dir_y: f32,
     mu: f32,
     p0: [f32; 3],
@@ -930,7 +933,7 @@ fn scatter_at(query: &ScatterQuery<'_>) -> (f32, [f32; 3]) {
     for volume in &settings.volumes {
         let local = volume.density.max(0.0) * falloff(volume, query.centre);
         sigma += local;
-        let smooth = volume.density.max(0.0) * span_falloff(volume, query.p0, query.centre, p1);
+        let smooth = volume.density.max(0.0) * span_falloff(query.view, volume, query.p0, p1);
         scatter += smooth * volume.albedo.clamp(0.0, 1.0) * phase_hg_f32(volume.phase_g, query.mu);
     }
     let source = scale_color(query.sun.color, scatter * query.visibility);
@@ -1111,13 +1114,27 @@ fn local_density(volumes: &[FogVolume], point: [f32; 3]) -> f32 {
     sum
 }
 
-fn span_falloff(volume: &FogVolume, p0: [f32; 3], _centre: [f32; 3], p1: [f32; 3]) -> f32 {
+/// Slide `point` onto the line parallel to the view through the volume's screen
+/// position. A thick slice's ray segment shears farther than a small volume,
+/// which walks the in-scatter centroid off the projected centre during a yaw.
+/// Extinction stays on the view ray.
+pub(crate) fn aligned_volume_point(view: &FogView, volume: &FogVolume, point: [f32; 3]) -> [f32; 3] {
+    let depth = dot(sub(volume.position, view.origin), view.forward);
+    let along = dot(sub(point, view.origin), view.forward);
+    if depth <= 0.05 || along <= 0.05 {
+        return point;
+    }
+    let lateral = sub(sub(point, view.origin), scale(view.forward, along));
+    add(point, scale(lateral, depth / along - 1.0))
+}
+
+fn span_falloff(view: &FogView, volume: &FogVolume, p0: [f32; 3], p1: [f32; 3]) -> f32 {
     const TAPS: u32 = 8;
     let mut sum = 0.0_f32;
     for tap in 0..TAPS {
         let t = (unit(tap) + 0.5) / unit(TAPS);
         let point = add(p0, scale(sub(p1, p0), t));
-        sum += falloff(volume, point);
+        sum += falloff(volume, aligned_volume_point(view, volume, point));
     }
     sum / unit(TAPS)
 }

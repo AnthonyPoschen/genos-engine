@@ -76,6 +76,20 @@ vec3 froxel_point(uvec2 c, float view_z) {
     return fog.origin.xyz + froxel_offset(c) * view_z;
 }
 
+const float FROXEL_ALIGN_MIN_Z = 0.05;
+
+// Move a local-volume tap onto the line parallel to the view through the
+// volume's screen position. The extinction sample stays on the view ray.
+vec3 froxel_align(vec3 volume_centre, vec3 point) {
+    float depth = dot(volume_centre - fog.origin.xyz, fog.forward.xyz);
+    float z = dot(point - fog.origin.xyz, fog.forward.xyz);
+    if (depth <= FROXEL_ALIGN_MIN_Z || z <= FROXEL_ALIGN_MIN_Z) {
+        return point;
+    }
+    vec3 lateral = point - fog.origin.xyz - fog.forward.xyz * z;
+    return point + lateral * (depth / z - 1.0);
+}
+
 float froxel_falloff(FroxelVolume volume, vec3 point) {
     float face;
     if ((fog.size.w & 4u) != 0u) {
