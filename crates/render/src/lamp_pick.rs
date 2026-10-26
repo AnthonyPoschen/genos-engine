@@ -331,12 +331,38 @@ pub fn reproject_pixel(
     }
     let ndc_x = dot(rel, camera.right) / (z * camera.tan_half_fov * camera.aspect);
     let ndc_y = dot(rel, camera.up) / (z * camera.tan_half_fov);
-    let px = (ndc_x + 1.0) * 0.5 * width as f32;
-    let py = (1.0 - ndc_y) * 0.5 * height as f32;
-    if px < 0.0 || py < 0.0 || px >= width as f32 || py >= height as f32 {
+    let px = f32::midpoint(ndc_x, 1.0) * u32_as_f32(width);
+    let py = f32::midpoint(-ndc_y, 1.0) * u32_as_f32(height);
+    let x = pixel_of(px, width)?;
+    let y = pixel_of(py, height)?;
+    Some((x, y, z))
+}
+
+fn u32_as_f32(n: u32) -> f32 {
+    let hi = f32::from(u16::try_from(n >> 16).unwrap_or(0));
+    let lo = f32::from(u16::try_from(n & 0xffff).unwrap_or(0));
+    hi.mul_add(65536.0, lo)
+}
+
+/// Greatest integer `<= coord` that is inside `0..limit`.
+fn pixel_of(coord: f32, limit: u32) -> Option<u32> {
+    if coord.partial_cmp(&0.0).is_none_or(std::cmp::Ordering::is_lt) || limit == 0 {
         return None;
     }
-    Some((px.floor() as u32, py.floor() as u32, z))
+    if coord >= u32_as_f32(limit) {
+        return None;
+    }
+    let mut lo = 0u32;
+    let mut hi = limit;
+    while lo + 1 < hi {
+        let mid = lo.midpoint(hi);
+        if u32_as_f32(mid) <= coord {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Some(lo)
 }
 
 /// Depth test shared with the shader: reject when the relative gap exceeds 2%
@@ -593,7 +619,9 @@ mod tests {
             tan_half_fov: 0.5,
             aspect: 16.0 / 9.0,
         };
-        let (x, y, z) = reproject_pixel(camera, [0.0, 1.0, 0.0], 160, 90).expect("centre");
+        let hit = reproject_pixel(camera, [0.0, 1.0, 0.0], 160, 90);
+        assert!(hit.is_some(), "centre");
+        let (x, y, z) = hit.unwrap_or((0, 0, 0.0));
         assert_eq!((x, y), (80, 45));
         assert!((z - 4.0).abs() < 1.0e-4, "{z}");
         assert!(depth_accepts(z, 4.0));
