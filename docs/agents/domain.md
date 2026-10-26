@@ -39,6 +39,7 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     │   ├── ui.md
     │   ├── lighting/ (README.md, debug-standard.md, experiments/)
     │   ├── gi-design.md
+    │   ├── fog-and-volumetric-lighting-design.md
     │   ├── loading.md
     │   ├── audio.md
     │   └── scripting.md

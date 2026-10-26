@@ -17,6 +17,7 @@
 use crate::mesh;
 use crate::world::{Bounds, DrawKind, Object, ParticleFrame, ParticleImage, World};
 use genos_load::{MemorySource, Texture, TextureMap};
+use genos_math::{homogeneous_inscatter_f32, transmittance_f32};
 use genos_scene::Scene;
 
 /// Steps in the camera proof. Two cold runs of this many steps match.
@@ -874,19 +875,56 @@ pub fn fog_along(
             continue;
         }
         let slice = puff.density * chord;
-        let absorb = 1.0 - (-slice).exp();
+        let step_trans = transmittance_f32(slice);
         let mid = sphere_mid(eye, dir, puff.center);
         let light = scatter_light(mid, lamps, fire, field);
+        // Puffs are isotropic. Henyey-Greenstein at g = 0 is 1/(4π), so this
+        // weight is 1 and the albedo stays the scatter fraction.
+        let isotropic = phase_weight(0.0, 1.0) * (4.0 * std::f32::consts::PI);
         for axis in 0..3 {
-            inscatter[axis] += trans * absorb * light[axis] * SMOKE_ALBEDO;
+            let added = homogeneous_inscatter_f32(
+                puff.density,
+                light[axis] * SMOKE_ALBEDO * isotropic * puff.density,
+                chord,
+            );
+            inscatter[axis] += trans * added;
         }
-        trans *= (-slice).exp();
+        trans *= step_trans;
         optical += slice;
     }
     FogHit {
         optical,
         transmittance: trans,
         inscatter,
+    }
+}
+
+/// Henyey-Greenstein weight for one scatter. `mu` is the cosine of the
+/// view direction and the direction toward the light.
+#[must_use]
+pub fn phase_weight(g: f32, mu: f32) -> f32 {
+    genos_math::phase_hg_f32(g, mu)
+}
+
+/// Optical depth and transmittance of exponential height fog along one ray.
+///
+/// `cos_theta` is the ray's Y component. In-scattering is left at zero: this
+/// is the extinction integral, not the lit puff integral in [`fog_along`].
+#[must_use]
+pub fn height_fog_along(
+    y0: f32,
+    dy: f32,
+    distance: f32,
+    sigma0: f32,
+    thickness: f32,
+    cos_theta: f32,
+) -> FogHit {
+    let optical =
+        genos_math::height_optical_depth_f32(sigma0, thickness, 0.0, y0, dy, cos_theta, distance);
+    FogHit {
+        optical,
+        transmittance: transmittance_f32(optical),
+        inscatter: [0.0; 3],
     }
 }
 

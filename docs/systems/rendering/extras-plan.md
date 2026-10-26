@@ -141,7 +141,7 @@ The displacement is the Gerstner sum on the scene clock. When time is frozen, th
 
 The sky colour in `Scene::sky` stays the value a miss returns, so the lighting and the background keep agreeing (`types.rs`). Atmosphere is a function that fills that colour, and an aerial-perspective term on the compose pass, from Hillaire, "A Scalable and Production Ready Sky and Atmosphere Rendering Technique", EGSR 2020 ([paper](https://sebh.github.io/publications/egsr2020.pdf)). The LUTs are small and rebuilt when the atmosphere parameters change, not every frame. Bruneton and Neyret, "Precomputed Atmospheric Scattering", 2008, is the model Hillaire replaces. **Deviation.** Hillaire's LUTs can update in one frame. This renderer rebuilds them only when the parameters change, and a still sky is a stable scene key. The sun disc is a smooth function of the existing sun direction in `building.rs`, drawn as the sky miss, not as a new lamp.
 
-Weather is a parameter block on that atmosphere (cloud cover, fog density). Fog that fills a volume is the GI non-goal for volumetrics. A height fog that only tints the miss and the aerial term is allowed, because it does not trace. A froxel volume is out of this plan.
+Weather is a parameter block on that atmosphere (cloud cover, fog density). Fog that fills a volume is the GI non-goal for volumetrics. A height fog that only tints the miss and the aerial term is allowed, because it does not trace. A froxel volume is out of this plan. It is specified in [fog and volumetric lighting](../fog-and-volumetric-lighting-design.md). While that volume is on, this miss tint stays off so height fog is not applied twice.
 
 ### Decals
 
