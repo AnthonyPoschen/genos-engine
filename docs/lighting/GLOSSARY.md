@@ -182,6 +182,43 @@ Role: SAMPLE · Literature: GIBS 6×6 guiding (§1.13); Müller path guiding · 
 **Sun band**: the slice of the cache relit for the sun each frame while the sun moves. **Catch-up**: extra relight rounds when lamps stop, so corners converge.
 Role: SCHED · Literature: — · More detail: S63–S65, SUN-small-sun-step; [`lighting_gpu.rs`](../../crates/render/src/lighting_gpu.rs) ~L3025
 
+### Participating media
+**Participating medium**: a volume that absorbs and scatters light along a ray.
+Role: OUT · Literature: Hillaire, Frostbite, SIGGRAPH 2015; Novák et al., SIGGRAPH 2018 course · More detail: [fog design](../systems/fog-and-volumetric-lighting-design.md)
+
+**Extinction**: how much light a ray loses per metre (`σ_t`).
+Role: STORE · Literature: Hillaire 2015 · More detail: [fog design](../systems/fog-and-volumetric-lighting-design.md)
+
+**Optical depth**: extinction integrated along a path. Transmittance is `exp` of its negation.
+Role: STORE · Literature: Beer-Lambert, as used by Hillaire 2015 · More detail: `fog_along` in [`particles.rs`](../../crates/render/src/particles.rs)
+
+**Transmittance**: the fraction of light that survives a path.
+Role: OUT · Literature: Beer-Lambert · More detail: `FogHit::transmittance`
+
+**In-scattering**: light the medium adds to a ray.
+Role: OUT · Literature: Hillaire 2015 · More detail: `FogHit::inscatter`; [fog design](../systems/fog-and-volumetric-lighting-design.md)
+
+**Phase function**: the directional pattern of one scatter. Ours is Henyey-Greenstein.
+Role: SAMPLE · Literature: Henyey and Greenstein 1941; Hillaire 2015 · More detail: [fog design](../systems/fog-and-volumetric-lighting-design.md)
+
+**Froxel**: one cell of the frustum-aligned volume grid.
+Role: STORE · Literature: Hillaire 2015 (frustum voxel); Wronski, SIGGRAPH 2014 · More detail: [ADR 0018](../adr/0018-fog-and-volumetric-lighting.md)
+
+**Froxel grid**: the 3D grid of froxels. Its size is a preset, not the picture size.
+Role: STORE · Literature: Hillaire 2015; Wronski 2014 · More detail: [fog design §6](../systems/fog-and-volumetric-lighting-design.md)
+
+**Height fog**: extinction that depends only on world height.
+Role: STORE · Literature: Hillaire 2015; Wronski 2014 · More detail: `density * exp(-(y - height) / thickness)`
+
+**Local fog volume**: a box or a sphere of analytic density added into the froxel grid.
+Role: STORE · Literature: Hillaire 2015 local media; Epic local fog volumes · More detail: [fog design §6](../systems/fog-and-volumetric-lighting-design.md)
+
+**Light shaft**: a beam made visible by shadowed direct light in the medium.
+Role: LIGHTS · Literature: Hillaire 2015; Engelhardt and Dachsbacher, I3D 2010 (not the method we use) · More detail: [ADR 0018](../adr/0018-fog-and-volumetric-lighting.md)
+
+**Fog history**: a reserved slot for the previous froxel's in-scattering. The setting is off on every preset. Whether to enable it is open.
+Role: TEMPORAL · Literature: Hillaire 2015 temporal integration; [ADR 0012](../adr/0012-gi.md) stores no radiance history · More detail: [fog design §7](../systems/fog-and-volumetric-lighting-design.md)
+
 ### Quality and tooling
 **Preset**: a named full set of settings: potato, day-cycle, gi-1bounce, low, medium, high. **Potato** is direct light plus flat ambient, with no GI. Role: TOOL
 **Full effort**: one-shot action that pushes every effort knob to max for comparison. Role: TOOL
