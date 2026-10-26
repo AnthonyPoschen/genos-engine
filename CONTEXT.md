@@ -101,8 +101,12 @@ A vector that aims a view or a movement.
 _Avoid_: Heading, bearing
 
 **Body**:
-A simulated mass. It has a position, an orientation, a velocity, a motion quality, and a shape.
+A simulated mass. It has a position, an orientation, a linear velocity, an angular velocity, a motion quality, and a shape.
 _Avoid_: Character controller, pawn
+
+**Angular velocity**:
+How fast a body turns, in world space, radians per second. The step integrates it into orientation. Rotational energy is `½ ωᵀ I ω`.
+_Avoid_: Spin rate, torque
 
 **Motion quality**:
 How far one body's collision looks ahead in a single physics step. Discrete uses the current bounds. Speculative uses a margin. Swept is the time-of-impact path.

@@ -4,7 +4,7 @@
 //! separation. A negative gap is penetration from the discrete contact.
 //!
 //! A swept pair advances by `gap / (|v_a - v_b| + |ω_a| r_a + |ω_b| r_b)`.
-//! Angular velocity is not on `Body` yet, so both ω terms are 0. The advance
+//! The advance
 //! has no scale factor. A pair whose relative travel over the tick exceeds the
 //! smaller bounding radius is sliced so each advance travels at most that
 //! radius. The loop stops at a 1 mm gap, when the tick is consumed, or after
@@ -569,18 +569,31 @@ fn bounds_meet(a: &Body, b: &Body, dt: f32) -> bool {
 fn expanded_bounds(body: &Body, dt: f32) -> Option<(Vec3, Vec3)> {
     let (lo, hi) = contact::bounds(body)?;
     let travel = body.velocity * dt;
+    let arc = angular_pad(body, dt);
     Some((
         Vec3::new(
-            lo.x.min(lo.x + travel.x),
-            lo.y.min(lo.y + travel.y),
-            lo.z.min(lo.z + travel.z),
+            lo.x.min(lo.x + travel.x) - arc,
+            lo.y.min(lo.y + travel.y) - arc,
+            lo.z.min(lo.z + travel.z) - arc,
         ),
         Vec3::new(
-            hi.x.max(hi.x + travel.x),
-            hi.y.max(hi.y + travel.y),
-            hi.z.max(hi.z + travel.z),
+            hi.x.max(hi.x + travel.x) + arc,
+            hi.y.max(hi.y + travel.y) + arc,
+            hi.z.max(hi.z + travel.z) + arc,
         ),
     ))
+}
+
+fn angular_pad(body: &Body, dt: f32) -> f32 {
+    let speed = body.angular_velocity.length();
+    if !(speed > 0.0) || !(dt > 0.0) {
+        return 0.0;
+    }
+    let radius = bounding_radius(body);
+    if !radius.is_finite() {
+        return 0.0;
+    }
+    speed * radius * dt
 }
 
 /// Advance accepted swept pairs. A swept body left out of those pairs uses the speculative margin.
@@ -625,9 +638,7 @@ fn integrate_deferred(bodies: &mut [Body], index: usize, count: usize, dt: f32, 
         return;
     };
     body.motion = MotionQuality::Swept;
-    if body.inverse_mass != 0.0 {
-        body.position += body.velocity * dt;
-    }
+    crate::integrate_body(body, dt);
 }
 
 fn advance_pair(
@@ -734,9 +745,21 @@ fn settle(
     integrate_index(bodies, second, remaining);
 }
 
-/// `|v_a - v_b| + |ω_a| r_a + |ω_b| r_b`. Both ω are 0 until `Body` stores angular velocity.
+/// `|v_a - v_b| + |ω_a| r_a + |ω_b| r_b`.
 fn closing_bound(a: &Body, b: &Body) -> f32 {
-    (a.velocity - b.velocity).length()
+    (a.velocity - b.velocity).length() + spin_bound(a) + spin_bound(b)
+}
+
+fn spin_bound(body: &Body) -> f32 {
+    let speed = body.angular_velocity.length();
+    if !(speed > 0.0) {
+        return 0.0;
+    }
+    let radius = bounding_radius(body);
+    if !radius.is_finite() {
+        return 0.0;
+    }
+    speed * radius
 }
 
 fn radius_slice(a: &Body, b: &Body) -> f32 {
@@ -786,10 +809,7 @@ fn integrate_index(bodies: &mut [Body], index: usize, dt: f32) {
     let Some(body) = bodies.get_mut(index) else {
         return;
     };
-    if body.inverse_mass == 0.0 || !(dt > 0.0) {
-        return;
-    }
-    body.position += body.velocity * dt;
+    crate::integrate_body(body, dt);
 }
 
 #[cfg(test)]

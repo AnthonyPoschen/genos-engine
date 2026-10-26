@@ -248,6 +248,8 @@ pub struct Body {
     pub motion: MotionQuality,
     /// Normal impulse stored on this body during the last `step`. The next step replaces it.
     pub normal_impulse: f32,
+    /// World-space angular velocity, radians per second.
+    pub angular_velocity: Vec3,
 }
 
 impl Body {
@@ -301,7 +303,20 @@ impl Body {
             wish: Vec3::ZERO,
             motion: MotionQuality::Discrete,
             normal_impulse: 0.0,
+            angular_velocity: Vec3::ZERO,
         }
+    }
+
+    /// `½ ωᵀ I ω` in joules. `I` is diagonal in the body frame. Zero when `ω` is zero.
+    pub fn rotational_energy(self) -> f32 {
+        if self.inverse_mass == 0.0 || self.angular_velocity.length_squared() <= 0.0 {
+            return 0.0;
+        }
+        let local = conjugate(self.orientation).rotate(self.angular_velocity);
+        let inertia = inertia_diagonal(self);
+        0.5 * (inertia.x * local.x * local.x
+            + inertia.y * local.y * local.y
+            + inertia.z * local.z * local.z)
     }
 
     pub fn mass(self) -> f32 {
@@ -401,7 +416,7 @@ pub fn step(world: &mut World, dt: f32) {
         if body.motion == MotionQuality::Swept {
             continue;
         }
-        body.position += body.velocity * dt;
+        integrate_body(body, dt);
     }
     ccd::resolve_swept(
         &mut world.bodies,
@@ -415,6 +430,102 @@ pub fn step(world: &mut World, dt: f32) {
         world.step_stats.dynamic_pair_impulses =
             world.step_stats.dynamic_pair_impulses.saturating_add(hits);
     }
+}
+
+pub(crate) fn integrate_body(body: &mut Body, dt: f32) {
+    if body.inverse_mass == 0.0 || !(dt > 0.0) {
+        return;
+    }
+    body.position += body.velocity * dt;
+    let spin = body.angular_velocity;
+    if spin.length_squared() <= 0.0 {
+        return;
+    }
+    // World-space ω: dq/dt = ½ ω q.
+    let omega = Quat::new(spin.x, spin.y, spin.z, 0.0);
+    let delta = quat_mul(omega, body.orientation) * (0.5 * dt);
+    body.orientation = (body.orientation + delta).normalize();
+}
+
+fn quat_mul(lhs: Quat, rhs: Quat) -> Quat {
+    Quat::new(
+        lhs.w * rhs.x + lhs.x * rhs.w + lhs.y * rhs.z - lhs.z * rhs.y,
+        lhs.w * rhs.y - lhs.x * rhs.z + lhs.y * rhs.w + lhs.z * rhs.x,
+        lhs.w * rhs.z + lhs.x * rhs.y - lhs.y * rhs.x + lhs.z * rhs.w,
+        lhs.w * rhs.w - lhs.x * rhs.x - lhs.y * rhs.y - lhs.z * rhs.z,
+    )
+}
+
+fn conjugate(q: Quat) -> Quat {
+    Quat::new(-q.x, -q.y, -q.z, q.w)
+}
+
+/// Body-frame principal moments `(Ixx, Iyy, Izz)`.
+fn inertia_diagonal(body: Body) -> Vec3 {
+    let mass = body.mass();
+    if !mass.is_finite() {
+        return Vec3::ZERO;
+    }
+    match body.shape {
+        Shape::Sphere { radius } => {
+            let moment = 0.4 * mass * radius * radius;
+            Vec3::new(moment, moment, moment)
+        }
+        Shape::Box { half_extents } => box_inertia(mass, half_extents),
+        Shape::Capsule {
+            radius,
+            half_height,
+        } => capsule_inertia(mass, radius, half_height),
+        Shape::Plane { .. } => Vec3::ZERO,
+        Shape::Mesh(mesh) => {
+            let radius = mesh_extent(&mesh);
+            let moment = 0.4 * mass * radius * radius;
+            Vec3::new(moment, moment, moment)
+        }
+    }
+}
+
+/// `Ixx = m/3 (hy² + hz²)` with half extents, which is `m/12` of the full side squares.
+fn box_inertia(mass: f32, half: Vec3) -> Vec3 {
+    let scale = mass / 3.0;
+    Vec3::new(
+        scale * (half.y * half.y + half.z * half.z),
+        scale * (half.x * half.x + half.z * half.z),
+        scale * (half.x * half.x + half.y * half.y),
+    )
+}
+
+fn capsule_inertia(mass: f32, radius: f32, half_height: f32) -> Vec3 {
+    let r = radius.max(0.0);
+    let h = half_height.max(0.0) * 2.0;
+    let cylinder = std::f32::consts::PI * r * r * h;
+    let hemispheres = (4.0 / 3.0) * std::f32::consts::PI * r * r * r;
+    let volume = cylinder + hemispheres;
+    if volume <= f32::MIN_POSITIVE {
+        return Vec3::ZERO;
+    }
+    let cylinder_mass = mass * (cylinder / volume);
+    let sphere_mass = mass * (hemispheres / volume);
+    let axial = 0.5 * cylinder_mass * r * r + 0.4 * sphere_mass * r * r;
+    let perp = cylinder_mass * (0.25 * r * r + h * h / 12.0)
+        + sphere_mass * (0.4 * r * r + 0.5 * h * h + 0.375 * h * r);
+    Vec3::new(perp, axial, perp)
+}
+
+fn mesh_extent(mesh: &Mesh) -> f32 {
+    let mut far = 0.0_f32;
+    for piece in mesh.pieces() {
+        let radius = match piece {
+            Piece::Cuboid { center, half } => center.length() + half.length(),
+            Piece::Hull(hull) => hull
+                .verts
+                .iter()
+                .take(usize::from(hull.vert_count))
+                .fold(0.0_f32, |best, vertex| best.max(vertex.length())),
+        };
+        far = far.max(radius);
+    }
+    far
 }
 
 fn apply_forces(body: &mut Body, gravity: Vec3, dt: f32) {

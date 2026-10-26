@@ -10,13 +10,13 @@ A game can simulate a falling mass, a bounce, a hit between two masses, friction
 
 Gravity is `GRAVITY`, along -Y. There is no air drag. `step` takes a world and a time step and updates that world in place. The first step may size the contact lists. A later step does not allocate.
 
-Each body has a motion quality. `Discrete` is the default and resolves an overlap that already exists. `Speculative` grows the contact distance by `min(speed * dt, speculative margin)` before the move, and the solver stops that approach. The default margin is 0.25 m. `Swept` runs time of impact on the pairs whose bounds meet that body. The advance is `gap / (|v_a − v_b| + |ω_a| r_a + |ω_b| r_b)`, with both ω terms 0 until a body stores angular velocity. There is no scale factor. A pair whose relative travel over the tick exceeds the smaller bounding radius advances in slices of at most that radius. The loop stops at a 1 mm gap or when the tick is used. After 16 advances with the gap still above 1 mm, the pair stays at the last safe time and `toi_failed` increments. Pairs past `swept_pair_cap` (default 8) use the speculative margin for that tick and increment `toi_deferred`. Bodies that are not in a swept pair keep the one integration.
+Each body has a motion quality. `Discrete` is the default and resolves an overlap that already exists. `Speculative` grows the contact distance by `min(speed * dt, speculative margin)` before the move, and the solver stops that approach. The default margin is 0.25 m. `Swept` runs time of impact on the pairs whose bounds meet that body. The advance is `gap / (|v_a − v_b| + |ω_a| r_a + |ω_b| r_b)`. `angular_velocity` is world-space, radians per second. `r` is the bounding radius. There is no scale factor. A pair whose relative travel over the tick exceeds the smaller bounding radius advances in slices of at most that radius. The loop stops at a 1 mm gap or when the tick is used. After 16 advances with the gap still above 1 mm, the pair stays at the last safe time and `toi_failed` increments. Pairs past `swept_pair_cap` (default 8) use the speculative margin for that tick and increment `toi_deferred`. Bodies that are not in a swept pair keep the one integration.
 
 When `motor` is set, the step copies `wish.x` and `wish.z` into the velocity before contact. Contact then removes the part of that wish that points into a surface.
 
 Contact restitution is the larger value on the two bodies. Friction is the larger value too. A spring pushes while the body is closer than `rest_length`. It does not pull. Rest compression on a vertical spring is `mass * -GRAVITY.y / stiffness`.
 
-A capsule is a segment along local Y plus a radius. `half_height` is the segment half-length. A box uses `half_extents` on the local axes. `orientation` aims the capsule segment and the box. The step does not change `orientation`.
+A capsule is a segment along local Y plus a radius. `half_height` is the segment half-length. A box uses `half_extents` on the local axes. `orientation` aims the capsule segment and the box. The step turns `orientation` only when `angular_velocity` is non-zero: `dq/dt = ½ ω q`. Contact does not write a torque, so an impact leaves `angular_velocity` unchanged. Rotational energy is `½ ωᵀ I ω` with `I` diagonal in the body frame. A box uses `Ixx = m/3 (hy² + hz²)` on the half extents. A sphere uses `2/5 m r²`. A mesh uses the bounding-sphere moment.
 
 `Shape::from_triangles` builds a mesh collider before the step. A convex mesh becomes one hull of at most 12 vertices. A concave mesh is split into at most 6 boxes, so a hole in the source stays open. Contact tests those pieces. The pieces stay on the occupied volume.
 
@@ -42,7 +42,7 @@ For a bullet whose gap at the start of the step is inside the margin, set `motio
 
 ## Limits
 
-The step does not turn a body. There is no stack solver and no air drag. A large `dt` drifts from `½gt²`.
+There is no stack solver and no air drag. A large `dt` drifts from `½gt²`. Contact does not change angular velocity.
 
 `Discrete` still tunnels when the travel is longer than the body. `Speculative` does not cover a gap larger than the margin, so a ship at 3 000 m/s has to be `Swept`. With protection on, the metrics fixture marks the bullet speculative and both ships swept, and `tunnel_count` is 0. With protection off, the same speeds still tunnel and store no ship contact. A pair that hits the 16-advance cap counts in `toi_failed` and in `tunnel_count`. A pair past the cap counts in `toi_deferred` and can still tunnel. The knobs are `World.speculative_margin` and `World.swept_pair_cap`. The probe is `cargo test -p genos-physics --test metrics -- --fixture good` and `--fixture bad`. `ccd_in_step` is true when a body asked for speculative or swept collision.
 

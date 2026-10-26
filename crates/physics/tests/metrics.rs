@@ -640,7 +640,6 @@ fn sphere_box_depth(sphere: &Body, box_body: &Body) -> Result<f32, String> {
 }
 
 /// `1/2 m |v|^2 + 1/2 ω^T I ω + m g h` over dynamic bodies.
-/// `Body` has no angular velocity, so `1/2 ω^T I ω` is 0 until that field exists.
 fn energy(world: &World) -> f64 {
     let gravity = f64::from(-world.gravity.y);
     let mut total = 0.0;
@@ -659,8 +658,8 @@ fn energy(world: &World) -> f64 {
     total
 }
 
-fn rotational_joules(_body: &Body) -> f64 {
-    0.0
+fn rotational_joules(body: &Body) -> f64 {
+    f64::from(body.rotational_energy())
 }
 
 fn hash_state(world: &World) -> u64 {
@@ -673,6 +672,13 @@ fn hash_state(world: &World) -> u64 {
             body.velocity.x.to_bits(),
             body.velocity.y.to_bits(),
             body.velocity.z.to_bits(),
+            body.angular_velocity.x.to_bits(),
+            body.angular_velocity.y.to_bits(),
+            body.angular_velocity.z.to_bits(),
+            body.orientation.x.to_bits(),
+            body.orientation.y.to_bits(),
+            body.orientation.z.to_bits(),
+            body.orientation.w.to_bits(),
         ] {
             hash = fnv_u32(hash, bits);
         }

@@ -1,7 +1,8 @@
 //! Speculative contacts stop a bullet that starts inside the margin.
+//! A swept spin uses the rotational term in the time-of-impact bound.
 
 use genos_math::Vec3;
-use genos_physics::{step, Body, MotionQuality, World};
+use genos_physics::{step, Body, MotionQuality, Shape, World};
 
 const DT: f32 = 1.0 / 60.0;
 
@@ -53,6 +54,65 @@ fn a_fast_bullet_inside_the_margin_stops_and_the_discrete_one_tunnels() {
 struct Shot {
     trailing: f32,
     world: World,
+}
+
+#[test]
+fn rotational_energy_matches_the_box_and_sphere_moments() {
+    let mut cube = Body::cuboid(Vec3::ZERO, 1.0, Vec3::new(1.0, 1.0, 1.0));
+    cube.angular_velocity = Vec3::new(0.0, 0.0, 40.0);
+    let expected = 0.5 * (1.0 / 3.0) * (1.0 + 1.0) * 40.0 * 40.0;
+    let energy = cube.rotational_energy();
+    assert!(
+        (energy - expected).abs() < 1.0e-3,
+        "cube energy {energy} wanted {expected}"
+    );
+
+    let mut ball = Body::sphere(Vec3::ZERO, 2.0, 0.5);
+    ball.angular_velocity = Vec3::new(0.0, 3.0, 0.0);
+    let moment = 0.4 * 2.0 * 0.5 * 0.5;
+    let ball_expected = 0.5 * moment * 9.0;
+    let ball_energy = ball.rotational_energy();
+    assert!(
+        (ball_energy - ball_expected).abs() < 1.0e-4,
+        "sphere energy {ball_energy} wanted {ball_expected}"
+    );
+    assert_eq!(Body::sphere(Vec3::ZERO, 1.0, 1.0).rotational_energy(), 0.0);
+}
+
+#[test]
+fn a_spinning_box_stays_on_the_approach_side_of_a_wall() {
+    let mut cube = Body::cuboid(Vec3::ZERO, 8.0, Vec3::new(1.0, 1.0, 1.0));
+    cube.velocity = Vec3::new(30.0, 0.0, 0.0);
+    cube.angular_velocity = Vec3::new(0.0, 0.0, 40.0);
+    cube.motion = MotionQuality::Swept;
+    let wall = Body::cuboid(Vec3::new(3.1, 0.0, 0.0), 0.0, Vec3::new(0.1, 2.0, 2.0));
+    let mut world = World::new(Vec3::ZERO);
+    world.insert(cube);
+    world.insert(wall);
+    for _ in 0..8 {
+        step(&mut world, DT);
+    }
+    let max_x = box_max_x(&world.bodies[0]);
+    assert!(
+        max_x <= 3.02,
+        "spinning box reached {max_x}, the wall face is at 3"
+    );
+}
+
+fn box_max_x(body: &Body) -> f32 {
+    let Shape::Box { half_extents: half } = body.shape else {
+        return f32::MAX;
+    };
+    let mut max_x = f32::MIN;
+    for x in [-half.x, half.x] {
+        for y in [-half.y, half.y] {
+            for z in [-half.z, half.z] {
+                let point = body.position + body.orientation.rotate(Vec3::new(x, y, z));
+                max_x = max_x.max(point.x);
+            }
+        }
+    }
+    max_x
 }
 
 fn shot(motion: MotionQuality) -> Shot {
