@@ -1158,6 +1158,30 @@ pub fn admit_cap() -> f32 {
     }
 }
 
+/// Admit stays at or under the stored rate when that rate is below the
+/// sustainable cap. Scoring the full sustainable value instead of the rate
+/// scores 1.
+#[must_use]
+pub fn admit_rate() -> f32 {
+    let mut stream = Streamer::new(0, 0.0, 0);
+    stream.add_texture(64, 64, &[4_000, 10]);
+    let per = 1_000u64;
+    stream.observe_disk(per, 1);
+    stream.observe_decode(per, 1);
+    stream.observe_transfer(per, 1);
+    let budget = budget_of(8192);
+    let views = [view_at(0, 1.0, near_derivatives(64))];
+    stream.step(&budget, &views, BASE_MS, FRAME_BUDGET_MS);
+    let leftover = floor_nonneg(FRAME_BUDGET_MS - BASE_MS);
+    let sustainable = stream.bytes_per_ms().saturating_mul(u64::from(leftover));
+    let rate = stream.rate();
+    if rate == 0 || sustainable == 0 || rate >= sustainable || stream.last_admit() > rate {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 /// Streaming rows. They grade the streamer, not a shade.
 #[derive(Clone, Copy, Debug)]
 pub struct GateRows {
@@ -1172,6 +1196,7 @@ pub struct GateRows {
     pub evict_order: f32,
     pub fence: f32,
     pub admit_cap: f32,
+    pub admit_rate: f32,
 }
 
 #[must_use]
@@ -1188,6 +1213,7 @@ pub fn gate_rows() -> GateRows {
         evict_order: evict_order(),
         fence: fence(),
         admit_cap: admit_cap(),
+        admit_rate: admit_rate(),
     }
 }
 
@@ -1217,6 +1243,7 @@ mod tests {
         assert!(zero(rows.evict_order), "{}", rows.evict_order);
         assert!(zero(rows.fence), "{}", rows.fence);
         assert!(zero(rows.admit_cap), "{}", rows.admit_cap);
+        assert!(zero(rows.admit_rate), "{}", rows.admit_rate);
     }
 
     #[test]

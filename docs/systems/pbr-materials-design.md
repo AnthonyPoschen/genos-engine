@@ -303,6 +303,7 @@ The binary is not a libtest harness, so it already prints. `--nocapture`, `--tes
 | `frame_streamer` | 0 | Misses when a headless draw's renderer has not registered the colour atlas, has not made mip 0 resident, the first albedo readback is not the coarse page, or the device page texel and the atlas texel are not that resident mip. The atlas write accepts only the resident page. The staging buffer is cleared before that write, so a staging copy into the atlas cannot supply the texel. `cargo test -p genos-render --test material_stream`. |
 | `heap_shrink` | 6 | Frames until committed texture bytes sit under the texture target after `heapBudget` is replaced mid-run on the renderer, with headroom at 0. The scene is four 256² textures, and the row stays 7 when the finest mip never lands or committed stays at a toy chain. |
 | `admit_cap` | 0 | The admit exceeds `bytes_per_ms × leftover_ms`, or that cap is 0. The scored frame uses a synthetic `base_ms` of 12 so the cap is above 0 and below the stored rate. `cargo test -p genos-bake --test materials_gate -- --case good`. |
+| `admit_rate` | 0 | The admit exceeds the stored rate on a frame where that rate is below the sustainable cap. The first step at `base_ms` 8 is that frame. |
 | `oom_device` | 0 | A `VK_ERROR_OUT_OF_DEVICE_MEMORY` injected into the renderer's device alloc. The retry succeeds and `device_bytes` drops. That counter moves only in the free that calls the driver, so evicting without freeing leaves it in place. `cargo test -p genos-render --test material_stream`. |
 | `hot_reload_frames` | 1 | Frames from `HotReload`'s finished upload to the sample that sees the new page. The old page stays until that upload finishes. |
 | `gbuffer_ms` | 0.60 | High, RTX 4070, 1440p, basic scene. |
@@ -319,7 +320,7 @@ Each phase is its own commit and its own measurement. A phase that misses a thre
 | P3 | The CPU path tracer samples the shade. Dielectric pictures use the reference check. | `picture_dielectric`. `picture_metal` stays unimplemented. |
 | P4 | Emission at cache hits, promoted emitters, furnace, double-count switch. | `emissive_furnace`, `double_count`. |
 | P5 | Cook writes BC7 and ASTC mips. Normals stay RGBA8. | `bc7_colour_rmse`, `astc_colour_rmse`. |
-| P6 | View-driven streaming inside the VRAM budget. | `budget_recover`, `upload_refused`, `oom_recover`, `spin_evict`, `quality_cap`, `ultra_near`, `slow_bus`, `thrash`, `evict_order`, `fence`, `frame_streamer`, `heap_shrink`, `oom_device`, `admit_cap`. |
+| P6 | View-driven streaming inside the VRAM budget. | `budget_recover`, `upload_refused`, `oom_recover`, `spin_evict`, `quality_cap`, `ultra_near`, `slow_bus`, `thrash`, `evict_order`, `fence`, `frame_streamer`, `heap_shrink`, `oom_device`, `admit_cap`, `admit_rate`. |
 | P7 | `--watch` hot reload. | `hot_reload_frames`. |
 | — | `gbuffer_ms` | Measured on the 4070 when phase 2's maps exist. Not a reason to build a pass early. |
 
