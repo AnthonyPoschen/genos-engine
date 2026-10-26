@@ -8,4 +8,8 @@ description = "CPU checker for lighting reference images. No window and no Vulka
 [lints]
 workspace = true
 
+[[bin]]
+name = "layering-gate"
+path = "src/bin/layering_gate.rs"
+
 [dependencies]
