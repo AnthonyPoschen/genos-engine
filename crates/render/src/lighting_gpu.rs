@@ -1607,7 +1607,14 @@ impl Gpu {
             head.copy_from_slice(&words[..8]);
             self.note_lighting_round(head, current, light, self.lighting.world_young);
         }
-        if self.gpu_times.is_some() && !self.lighting.world_qp.is_null() {
+        // The async round's host read is the printed line and the sample log.
+        // The frame controller does not use this pool. Normal play leaves it unread.
+        if self
+            .gpu_times
+            .as_ref()
+            .is_some_and(|times| times.print || times.record)
+            && !self.lighting.world_qp.is_null()
+        {
             let mut raw = [0u64; 6];
             let got = unsafe {
                 (self.fns.get_query_results)(

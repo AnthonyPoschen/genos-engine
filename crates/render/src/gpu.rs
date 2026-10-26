@@ -1575,7 +1575,11 @@ impl Gpu {
                     let metrics_env = std::env::var("GENOS_GI_METRICS").ok();
                     let every = gpu_times_every(&refs, env.as_deref())?;
                     let record = gi_metrics_enabled(&refs, metrics_env.as_deref())?;
-                    if every.is_none() && !record {
+                    // Lighting timestamps feed the work-cap controller in normal
+                    // play. `--gpu-times` owns the printed line. `--gi-metrics`
+                    // owns the sample log. A device with no timestamp queries
+                    // drops this below.
+                    if timestamp_period <= 0.0 && every.is_none() && !record {
                         None
                     } else {
                         Some(Box::new(GpuTimes {
@@ -2327,10 +2331,15 @@ impl Gpu {
     }
 
     /// A frame timestamp for `GENOS_GPU_TIMES`, at the end of everything recorded so far.
+    ///
+    /// The printed line is opt-in. The lighting pool is separate and always runs.
     fn frame_stamp(&self, slot: usize, stamp: FrameStamp) {
         let Some(times) = self.gpu_times.as_ref() else {
             return;
         };
+        if !times.print || times.pool.is_null() {
+            return;
+        }
         let first = slot as u32 * FRAME_STAMPS;
         unsafe {
             if stamp == FrameStamp::Start {
@@ -2383,23 +2392,25 @@ impl Gpu {
             times.written[slot] = true;
             return;
         }
-        let mut raw = [0u64; FRAME_STAMPS as usize];
-        let got = unsafe {
-            (self.fns.get_query_results)(
-                self.device,
-                times.pool,
-                slot as u32 * FRAME_STAMPS,
-                FRAME_STAMPS,
-                8 * raw.len(),
-                raw.as_mut_ptr() as *mut c_void,
-                8,
-                0x1,
-            )
-        };
-        if got != 0 {
-            return;
-        }
-        if times.print {
+        // Frame-span stamps exist only for the printed line. An unwritten pool
+        // must not abort the lighting read the controller needs.
+        if times.print && !times.pool.is_null() {
+            let mut raw = [0u64; FRAME_STAMPS as usize];
+            let got = unsafe {
+                (self.fns.get_query_results)(
+                    self.device,
+                    times.pool,
+                    slot as u32 * FRAME_STAMPS,
+                    FRAME_STAMPS,
+                    8 * raw.len(),
+                    raw.as_mut_ptr() as *mut c_void,
+                    8,
+                    0x1,
+                )
+            };
+            if got != 0 {
+                return;
+            }
             for (k, w) in raw.windows(2).enumerate() {
                 times.frame[k] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
             }
@@ -2461,6 +2472,18 @@ impl Gpu {
                 }
                 self.lighting.last_ms = bucket_ms;
                 self.lighting.last_dispatches = counts;
+                // Same total as `gi_sample_from`: every bucket except the shadow
+                // copy of direct and hit. The cap is the schedule pushed for the
+                // retired frame. `lighting_passes` writes the next one after this.
+                // `--gi-metrics` stores the sample. The controller runs either way.
+                let lighting_ms =
+                    bucket_ms.iter().sum::<f64>() - bucket_ms[B_SHADOWS as usize];
+                if self.lighting.settings.schedule == genos_scene::ScheduleMode::Budget {
+                    self.lighting.budget.observe(
+                        Some(lighting_ms),
+                        self.lighting.last_schedule.lighting_cap_ms,
+                    );
+                }
                 if times.record {
                     let world_rays = std::mem::take(&mut times.pending_world_rays);
                     let world_relit = std::mem::take(&mut times.pending_world_relit);
@@ -2472,16 +2495,6 @@ impl Gpu {
                         world_rays,
                         world_relit,
                     );
-                    // The sample is the frame that just retired. `last_schedule`
-                    // is still that frame's cap; `lighting_passes` writes the
-                    // next one after this. Picture tests leave recording off,
-                    // so lavapipe timestamps never pull the scale to the floor.
-                    if self.lighting.settings.schedule == genos_scene::ScheduleMode::Budget {
-                        self.lighting.budget.observe(
-                            Some(sample.lighting_ms),
-                            self.lighting.last_schedule.lighting_cap_ms,
-                        );
-                    }
                     times.samples.push_back(sample);
                     while times.samples.len() > GI_SAMPLE_CAP {
                         times.samples.pop_front();

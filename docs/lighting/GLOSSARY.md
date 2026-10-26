@@ -144,7 +144,7 @@ Role: SCHED · Literature: UE5 VSM caster-bounds invalidation · More detail: [l
 **Schedule mode**: `budget` or `global`. Budget pushes the work caps, the guard band, and detail levels. Global pushes zeros and stays on the display size. `--lighting-schedule`. Presets use budget.
 Role: TOOL · More detail: [ADR 0013](../adr/0013-lighting-invalidation-is-local.md); `LightingSettings.schedule`
 
-**Work cap** (ADR 0013): the per-preset ceiling on one pass. High is 8 ms, 2e6 fresh shadow rays, 16k denoise items, and 522k screen-probe rays. Potato lighting is 1.5 ms and its GI caps are 0. A controller scales the caps by [1/64, 1] from the recorded lighting total: over the cap it becomes cap/ms, under 75% it grows by 1.05, and it never passes 1.
+**Work cap** (ADR 0013): the per-preset ceiling on one pass. High is 8 ms, 2e6 fresh shadow rays, 16k denoise items, and 522k screen-probe rays. Potato lighting is 1.5 ms and its GI caps are 0. A controller scales the caps by [1/64, 1] from the retired lighting total on every budgeted frame: over the cap it becomes cap/ms, under 75% it grows by 1.05, and it never passes 1. `--gi-metrics` records that total. It does not gate the controller.
 Role: SCHED · Literature: GIBS global ray budget (§1.12); Lumen update budget · More detail: [design §3](../systems/lighting/localized-invalidation-design.md); `get_budgets`
 
 **Priority**: viewport including the guard band, then nearby out-of-view, then leftover budget by visible error (change magnitude times closeness). A fast change stays inside its pass. The GPU gate is one centered tile rect plus a 10% band for the oldest rows. The design's histogram is not built.

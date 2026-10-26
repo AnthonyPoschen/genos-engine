@@ -130,6 +130,41 @@ fn shipped_hall() -> World {
     World::from_scene(shipped_scene())
 }
 
+/// High, no `--gi-metrics`. Two flight slots, so the third draw reads the first.
+#[test]
+fn the_budget_controller_scales_without_gi_metrics() {
+    let (_gpu, mut window, mut renderer) = open();
+    assert!(
+        !renderer.gi_metrics_enabled(),
+        "the sample log is on; this test is normal play"
+    );
+    let world = scene(Vec::new(), Vec::new(), Vec::new());
+    let camera = Camera::opening();
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let early = renderer.budget_controller_scale();
+    assert!(
+        (early - 1.0).abs() < 1e-9,
+        "scale moved before a flight slot was reused: {early}"
+    );
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let scale = renderer.budget_controller_scale();
+    let ms = renderer.lighting_pass_ms();
+    let total: f64 = ms.iter().sum();
+    assert!(
+        renderer.gi_metrics_samples().is_empty(),
+        "normal play recorded a GI sample"
+    );
+    assert!(
+        scale < 1.0,
+        "High stayed at the preset cap without --gi-metrics: scale {scale} sum {total} buckets {ms:?}"
+    );
+    assert!(
+        total > 8.0,
+        "the retired lighting total was inside the 8 ms cap: {total} {ms:?}"
+    );
+}
+
 /// Hall walls and the white lamp. The flame and the colored solids stay out.
 fn hall_lamp() -> World {
     let mut scene = shipped_scene();

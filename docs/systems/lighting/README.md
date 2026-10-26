@@ -95,7 +95,7 @@ Departures from [ADR 0013](../../adr/0013-lighting-invalidation-is-local.md) and
 
 ## Budgeted refresh
 
-Presets use schedule mode `budget`. Each frame pushes the preset work caps, scaled by the controller and by `budget_scale`. High lighting is 8 ms, Medium 6, Low 4, Potato 1.5. The controller reads the retired `lighting_ms` when `--gi-metrics` is on. Over the cap the scale becomes `cap / ms`, down to 1/64. Under 75% of the cap it grows by 5% up to 1. It does not open the frame past the preset caps.
+Presets use schedule mode `budget`. Each frame pushes the preset work caps, scaled by the controller and by `budget_scale`. High lighting is 8 ms, Medium 6, Low 4, Potato 1.5. The controller reads the retired `lighting_ms` on every budgeted frame that has timestamp queries. `--gi-metrics` records that total; it does not gate the controller. Over the cap the scale becomes `cap / ms`, down to 1/64. Under 75% of the cap it grows by 5% up to 1. It does not open the frame past the preset caps.
 
 Direct, à-trous, and trace gate to one centered tile rect when the grant is under the demand. À-trous also requires a change record. Ten percent of the grant is a band that steps down the picture. Outside the rect, a stored direct value and a finished probe hit or miss stay on screen. An empty slot still traces. The lighting images are the guard-band size. The picture is the crop. The eye does not move, and the band leads the turn. Probe picks and lamp-pick history project the displayed camera through that crop into the lit image.
 
@@ -107,7 +107,7 @@ Probes: MCP `get_budgets`, `set_budgets`, `get_schedule_stats`, `lighting_lod_sn
 
 Failure modes and the probe for each:
 
-- The scale sticks at 1/64. `get_budgets` field `controller_scale`. Recording on lavapipe, or a lighting total that stays over the cap, drives it there. Picture tests leave recording off.
+- The scale sticks at 1/64. `get_budgets` field `controller_scale`. A lighting total that stays over the cap drives it there. On lavapipe that is the third draw, when the first flight slot is read back. `schedule=global` keeps the preset caps.
 - A moving frame stays over the cap. `gi_metrics` `lighting_ms` p99 against `get_budgets.lighting_cap_ms`. The gate scripts in `debug/lighting/scripts/gates/` assert that. The 4070 at 1080p is the measurement. Lavapipe does not time it.
 - A gated pixel goes black. `get_schedule_stats` gates and tile rect. Direct reuses a stored pixel. Trace keeps a finished hit or miss. An empty direct slot still traces.
 - A waiting area flickers between empty and coarse. A finished cell (`v.w >= 0.5`) does not read its parent. `lighting_lod_snapshot` says whether levels are on.
@@ -344,7 +344,7 @@ Research notes with the cvar values: `/workspace/research/lumen-digest.md` (agen
 
 ## GI pass times
 
-`--gi-metrics` records one sample per collected lighting frame: pass times `direct`, `atrous`, `compose`, `trace`, `filter`, `gather`, `resolve`, and `lighting`, plus work counters `rays`, `cache entries refreshed`, and `lamps shaded`. `resolve` is gather + filter + compose and is not added again into `lighting`. Files land in `<out>/gi/`. MCP `gi_metrics` reads the window and writes p50 and p99. `GENOS_GI_METRICS` applies only when `--gi-metrics` was omitted. The picture path is unchanged. The lamp-pick diag bit, which only counts fresh shadow rays, is set only while metrics are on. The gate scripts are `debug/lighting/scripts/gates/`. The inventory is [the debug standard](debug-standard.md).
+`--gi-metrics` records one sample per collected lighting frame: pass times `direct`, `atrous`, `compose`, `trace`, `filter`, `gather`, `resolve`, and `lighting`, plus work counters `rays`, `cache entries refreshed`, and `lamps shaded`. `resolve` is gather + filter + compose and is not added again into `lighting`. Files land in `<out>/gi/`. MCP `gi_metrics` reads the window and writes p50 and p99. `GENOS_GI_METRICS` applies only when `--gi-metrics` was omitted. The lamp-pick diag bit, which only counts fresh shadow rays, is set only while metrics are on. The budget controller reads the same lighting total without this flag. The gate scripts are `debug/lighting/scripts/gates/`. The inventory is [the debug standard](debug-standard.md).
 
 - Replicated state: none. The samples stay on the machine that drew the frame.
 - Authority: the machine that shades the picture.

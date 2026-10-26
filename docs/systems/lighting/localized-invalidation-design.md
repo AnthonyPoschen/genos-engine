@@ -272,7 +272,7 @@ A pass gates when its grant is under its demand and the frame has a change recor
 
 The lighting targets are the guard-band size. The picture is the crop. The eye stays put, and the band leads the turn. High starts at 15% of the display on each edge. Probe picks and lamp-pick history project that displayed camera through the crop, so a still probe finds its last tile.
 
-With `--gi-metrics`, the next frame reads the retired `lighting_ms` against that frame's cap. Over the cap, the scale becomes `cap / ms`, down to 1/64. Under 75% of the cap, the scale grows by 5% up to 1. Picture tests do not record, so a lavapipe timestamp does not pull the scale down.
+Every budgeted frame with timestamp queries reads the retired `lighting_ms` against that frame's cap. Over the cap, the scale becomes `cap / ms`, down to 1/64. Under 75% of the cap, the scale grows by 5% up to 1. `--gi-metrics` stores the sample, the CSV, and the lamp-pick diag bit. It does not gate the controller. On lavapipe the third draw reads the first flight slot and the scale goes to the floor, because that total is not an 8 ms frame. `schedule=global` keeps the preset caps.
 
 Budget mode with world-cache mode 3 reads parents of an empty 12.5 cm cell at 25 cm, 50 cm, 1 m, 2 m, and 4 m. A finished parent (`v.w > 0.5`) is what a waiting pixel shows, when the reader sits in the half-size cell of the point that parent was lit from. The walk is split, because lavapipe faulted on one five-step body:
 
