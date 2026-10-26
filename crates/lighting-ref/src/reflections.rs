@@ -3,7 +3,8 @@
 //! Module rows call [`genos_math::optics`] (the GLSL mirror is
 //! `crates/render/shaders/reflections.glsl`) or the CPU picture, and
 //! [`Fixture::Live`] grades them. The picture rows compare that picture with
-//! [`crate::reflections_trace`], which does not call the shade. Comparator
+//! [`crate::reflections_trace`], an f64 oracle that does not call `optics` or
+//! the shade. Comparator
 //! rows stay `NOT-IMPLEMENTED` on live. `denoise_lag_frames` stays
 //! `NOT-IMPLEMENTED` on every fixture until a reflection denoiser exists.
 //!
@@ -639,7 +640,11 @@ fn caustic_rel(kind: Kind) -> f64 {
 }
 
 fn near_weighted_rel(kind: Kind) -> f64 {
-    let engine = genos_render::shade_picture(0, fault_of(kind));
+    near_weighted(fault_of(kind))
+}
+
+fn near_weighted(fault: PictureFault) -> f64 {
+    let engine = genos_render::shade_picture(0, fault);
     let reference = reflections_trace::trace();
     if engine.color.len() != reference.color.len() || reference.depth.len() != engine.color.len() {
         return f64::INFINITY;
@@ -648,7 +653,7 @@ fn near_weighted_rel(kind: Kind) -> f64 {
     let mut den: f64 = 0.0;
     for (index, pixel) in engine.color.iter().enumerate() {
         let rel = pixel_rel(*pixel, reference.color[index]);
-        let depth = f64::from(reference.depth[index]);
+        let depth = reference.depth[index];
         let weight = 1.0 / depth.max(0.25);
         num += weight * rel;
         den += weight;
@@ -660,23 +665,27 @@ fn near_weighted_rel(kind: Kind) -> f64 {
     }
 }
 
-fn pixel_rel(engine: [f32; 3], reference: [f32; 3]) -> f64 {
+fn pixel_rel(engine: [f32; 3], reference: [f64; 3]) -> f64 {
     let mut sum = 0.0;
     for channel in 0..3 {
-        let err = f64::from((engine[channel] - reference[channel]).abs());
-        let scale = f64::from(reference[channel].abs()).max(1.0e-3);
+        let err = (f64::from(engine[channel]) - reference[channel]).abs();
+        let scale = reference[channel].abs().max(1.0e-3);
         sum += err / scale;
     }
     sum / 3.0
 }
 
 fn flicker_reversal(kind: Kind) -> f64 {
+    flicker(fault_of(kind))
+}
+
+fn flicker(fault: PictureFault) -> f64 {
     let index = still_index();
     let reference = reflections_trace::still_pixel(index);
     let mut samples = [0.0; 8];
     for (frame, sample) in samples.iter_mut().enumerate() {
         let frame_u = u32::try_from(frame).unwrap_or(0);
-        let picture = genos_render::shade_picture(frame_u, fault_of(kind));
+        let picture = genos_render::shade_picture(frame_u, fault);
         let pixel = picture.color.get(index).copied().unwrap_or([0.0; 3]);
         let mean = f64::from(pixel[0] + pixel[1] + pixel[2]) / 3.0;
         *sample = mean - reference;
@@ -858,7 +867,7 @@ mod tests {
         let mut max_err: f64 = 0.0;
         for (got, truth) in engine.color.iter().zip(reference.color.iter()) {
             for channel in 0..3 {
-                max_err = max_err.max(f64::from((got[channel] - truth[channel]).abs()));
+                max_err = max_err.max((f64::from(got[channel]) - truth[channel]).abs());
             }
         }
         assert!(max_err < 1.0e-4, "{max_err}");
@@ -866,6 +875,26 @@ mod tests {
             crate::reflections_trace::still_pixel(super::still_index()).abs() > 0.1,
             "the still pixel must be lit so a blink can fail"
         );
+    }
+
+    #[test]
+    fn a_near_bias_fails_near_weighted_rel() {
+        let faithful = super::near_weighted(genos_render::PictureFault::default());
+        let planted = super::near_weighted(genos_render::PictureFault::only(
+            genos_render::PictureFault::NEAR_BIAS,
+        ));
+        assert!(faithful <= 0.03, "{faithful}");
+        assert!(planted > 0.03, "{planted}");
+    }
+
+    #[test]
+    fn a_blink_fails_flicker_reversal() {
+        let still = super::flicker(genos_render::PictureFault::default());
+        let planted = super::flicker(genos_render::PictureFault::only(
+            genos_render::PictureFault::BLINK,
+        ));
+        assert!(still <= 0.002, "{still}");
+        assert!(planted > 0.002, "{planted}");
     }
 
     #[test]

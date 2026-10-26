@@ -226,7 +226,7 @@ Picture rows read the CPU mirror, portal, and flat-water image, and the Low ray 
 
 - `portal_leak` is the six-sample oblique disagreement above.
 - `shoreline_ratio` is the Gerstner crest after `shoreline_height`, divided by depth. The crest is the wave, not a canned 0.4.
-- `near_weighted_rel` is the depth-weighted relative error of that image against `crates/lighting-ref/src/reflections_trace.rs`. The tracer rebuilds the tiles with Whitted rays. It does not call `shade_picture` or `water_shade`. Weight is `1 / max(depth, 0.25)` on the tracer depth. Per pixel the error is the mean of `|a − b| / max(|b|, 1e-3)` over the three channels.
+- `near_weighted_rel` is the depth-weighted relative error of that image against `crates/lighting-ref/src/reflections_trace.rs`. The tracer rebuilds the tiles in f64. Its Fresnel, Snell, Beer–Lambert, portal map, and view count are closed forms in that file. It does not call `genos_math::optics`, and it does not read that module's constants. It does not call `shade_picture` or `water_shade`. Weight is `1 / max(depth, 0.25)` on the tracer depth. Per pixel the error is the mean of `|a − b| / max(|b|, 1e-3)` over the three channels. A planted near bias (`PictureFault::NEAR_BIAS` alone) fails this row. A planted blink (`PictureFault::BLINK` alone) fails `flicker_reversal`.
 - `flicker_reversal` is the mean size of a sign change in one still mirror pixel, eight frames, after subtracting the tracer's value.
 - `low_reflection_rays` is the ray count `scheduled_low_rays` reports. The Low preset is 0. The broken scheduler reports 64.
 
