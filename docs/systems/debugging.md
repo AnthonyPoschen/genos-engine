@@ -605,7 +605,8 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   in the tree are `genos-stress --proof` and `genos-lighting --headless`.
 - The reference knows floors, ceilings, walls and solids. It does not trace fog,
   particle cards, textures or per-material reflectance and colour mix (the stress
-  scene uses the defaults). It does not cut lamps at their range as the engine does.
+  scene uses the defaults). Participating media is phase 7 of
+  [fog and volumetric lighting](fog-and-volumetric-lighting-design.md). It does not cut lamps at their range as the engine does.
 - Stress at 160x90 needs about 3000 paths per pixel (4 minutes on 8 cores) for 3 %
   noise. Interiors lit only by bounce light converge slowest.
 - `nobounce` is `full:0`: sky light reaches the picture only through probes, so
