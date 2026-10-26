@@ -58,6 +58,37 @@ fn feature_metrics_keep_absent_rows_and_grade_the_live_ones() {
 }
 
 #[test]
+fn an_unshadowed_shaft_fails_the_shadow_grade() {
+    let reference = genos_render::shaft_image(true);
+    let candidate = genos_render::shaft_image(false);
+    let reference = genos_lighting_ref::Picture::new(
+        reference.width,
+        reference.height,
+        reference.linear,
+    )
+    .unwrap();
+    let candidate = genos_lighting_ref::Picture::new(
+        candidate.width,
+        candidate.height,
+        candidate.linear,
+    )
+    .unwrap();
+    let grade = genos_lighting_ref::blur_relative(
+        &reference,
+        &candidate,
+        &genos_lighting_ref::MetricParams::default(),
+    )
+    .unwrap();
+    assert!(grade > 0.12, "{grade}");
+}
+
+#[test]
+fn held_history_fails_smear_and_a_scaled_yaw_fails_pop() {
+    assert!(genos_render::smear_broken() > 0.50);
+    assert!(f64::from(genos_render::yaw_pop_broken()) > 0.05);
+}
+
+#[test]
 fn a_scaled_still_frame_fails_the_flicker_gate() {
     let broken = f64::from(genos_render::still_flicker_broken());
     assert!(broken > 0.02, "{broken}");
@@ -129,10 +160,10 @@ fn summary_line_has_four_fields() {
     }
     let feature = evaluate(Suite::Feature, Fixture::Good);
     let line = format_lines(&feature).lines().next().unwrap().to_string();
-    assert_eq!(
-        line,
-        "froxel_temporal_smear_px - 5.000000e-1 NOT-IMPLEMENTED"
-    );
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    assert_eq!(fields.len(), 4, "{line}");
+    assert_eq!(fields[0], "froxel_temporal_smear_px");
+    assert_eq!(fields[3], "PASS", "{line}");
 }
 
 #[test]

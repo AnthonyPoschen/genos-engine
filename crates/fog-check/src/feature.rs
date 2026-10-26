@@ -1,6 +1,8 @@
 //! Renderer metrics. A row stays `NOT-IMPLEMENTED` until that pass exists.
 //! A zero is not substituted for a missing pass.
 
+use genos_lighting_ref::{blur_relative, MetricParams, Picture};
+
 use crate::report::{judge, Metric};
 
 const FROXEL_TEMPORAL_SMEAR_PX: f64 = 0.50;
@@ -29,18 +31,26 @@ const NO_TIME: &str = "froxel pass is not timed";
 
 pub(crate) fn evaluate_feature() -> Vec<Metric> {
     vec![
-        absent(
+        present(
             "froxel_temporal_smear_px",
+            genos_render::smear_fixture(),
             FROXEL_TEMPORAL_SMEAR_PX,
-            NO_FROXEL,
         ),
-        absent("fog_yaw_pop_rel", FOG_YAW_POP_REL, NO_FROXEL),
+        present(
+            "fog_yaw_pop_rel",
+            f64::from(genos_render::yaw_pop_fixture()),
+            FOG_YAW_POP_REL,
+        ),
         present(
             "local_volume_leak",
             f64::from(genos_render::leak_fixture()),
             LOCAL_VOLUME_LEAK,
         ),
-        absent("shaft_shadow_blur_rel", SHAFT_SHADOW_BLUR_REL, NO_FROXEL),
+        present(
+            "shaft_shadow_blur_rel",
+            shaft_grade(true),
+            SHAFT_SHADOW_BLUR_REL,
+        ),
         absent("gi_inscatter_blur_rel", GI_INSCATTER_BLUR_REL, NO_GI),
         absent("media_path_blur_rel", MEDIA_PATH_BLUR_REL, NO_MEDIA),
         absent("near_fog_blur_rel", NEAR_FOG_BLUR_REL, NO_FROXEL),
@@ -58,6 +68,18 @@ pub(crate) fn evaluate_feature() -> Vec<Metric> {
         absent("froxel_ms_medium", FROXEL_MS_MEDIUM, NO_TIME),
         absent("froxel_ms_high", FROXEL_MS_HIGH, NO_TIME),
     ]
+}
+
+fn shaft_grade(traced_shadows: bool) -> f64 {
+    let reference = genos_render::shaft_image(true);
+    let candidate = genos_render::shaft_image(traced_shadows);
+    let Ok(reference) = Picture::new(reference.width, reference.height, reference.linear) else {
+        return 1.0;
+    };
+    let Ok(candidate) = Picture::new(candidate.width, candidate.height, candidate.linear) else {
+        return 1.0;
+    };
+    blur_relative(&reference, &candidate, &MetricParams::default()).unwrap_or(1.0)
 }
 
 fn present(name: &'static str, value: f64, threshold: f64) -> Metric {

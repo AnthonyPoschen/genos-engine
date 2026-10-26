@@ -1,6 +1,7 @@
 mod aa;
 mod budget;
 mod fog;
+mod fog_pass;
 mod gltf_draw;
 mod gpu;
 #[cfg(test)]
@@ -18,6 +19,10 @@ mod wire;
 mod world;
 
 pub use aa::Antialias;
+pub use fog_pass::{
+    shaft_image, smear_broken, smear_fixture, yaw_pop_broken, yaw_pop_fixture, FogImage,
+    FogPointLamp,
+};
 pub use fog::{
     apply_fog, grid_size, inject, integrate_samples, integrate_unshadowed, leak_broken,
     leak_fixture, local_volume_leak, puff_volume, sample_depth_aware, slice_edge, still_flicker,

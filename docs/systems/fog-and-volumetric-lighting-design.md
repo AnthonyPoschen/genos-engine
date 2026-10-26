@@ -266,10 +266,10 @@ A missing feature prints `-` for the value and `NOT-IMPLEMENTED`. It does not pr
 | `phase_hg_integral_abs` | 1e-4 | Max abs error of the sphere integral of Henyey-Greenstein against 1, Simpson in μ times `2π`, at g = 0, 0.4, and 0.7 | Graded. The good fixture integrates `phase_hg`. Broken fixture drops the `4π`. |
 | `homogeneous_inscatter_max_abs` | 1e-3 | Max abs error of `(S/σ)(1-exp(-σ D))` against piecewise steps, σ = 0.2, S = 0.15 | Graded. The good fixture calls `homogeneous_inscatter`. Broken fixture adds `S*D` with no transmittance. |
 | `image_grade_blur_rel` | 0.12 | `blur_relative` of a synthetic fog picture against itself. The lighting-ref fail line. | Graded. Broken fixture scales luminance by 1.4. |
-| `froxel_temporal_smear_px` | 0.50 | Centroid lag, in picture pixels at 1440p, of a static shaft during a 90° yaw | `NOT-IMPLEMENTED` |
-| `fog_yaw_pop_rel` | 0.05 | Max frame-to-frame relative luminance of the fog term on that yaw, after frame 8 | `NOT-IMPLEMENTED` |
+| `froxel_temporal_smear_px` | 0.50 | Centroid lag, in picture pixels at 1440p, of a static shaft during a 90° yaw | Graded. History is off, so the froxel centroid tracks the projected shaft. Holding the first frame fails. |
+| `fog_yaw_pop_rel` | 0.05 | Max frame-to-frame relative luminance of the fog term on that yaw, after frame 8 | Graded. History is off, so the fog energy stays under the gate. Scaling odd frames by 1.4 fails. |
 | `local_volume_leak` | 1e-4 | Peak extinction outside a local box, divided by the peak inside | Graded. Height density is zero and one box sits on the view axis. A write outside that box fails the gate. |
-| `shaft_shadow_blur_rel` | 0.12 | Blurred relative luminance inside the shaft mask, against the media reference | `NOT-IMPLEMENTED` |
+| `shaft_shadow_blur_rel` | 0.12 | Blurred relative luminance inside the shaft mask, against the media reference | Graded. Sun and point lamps take `V` from `trace::sees`. Forcing `V` to 1 fails the grade. |
 | `gi_inscatter_blur_rel` | 0.12 | Same grade where the only light in the medium is the world cache | `NOT-IMPLEMENTED` |
 | `media_path_blur_rel` | 0.12 | Full picture against the media path trace | `NOT-IMPLEMENTED` |
 | `near_fog_blur_rel` | 0.08 | The same grade on the nearest quarter of the slices | `NOT-IMPLEMENTED` |

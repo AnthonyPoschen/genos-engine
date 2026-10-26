@@ -568,7 +568,7 @@ fn still_luma() -> Vec<f32> {
         .collect()
 }
 
-fn luma(rgb: [f32; 3]) -> f32 {
+pub(crate) fn luma(rgb: [f32; 3]) -> f32 {
     rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722
 }
 
@@ -598,7 +598,7 @@ fn column_at(columns: &[FogColumn], size: GridSize, x: u32, y: u32) -> FogColumn
         })
 }
 
-fn ray_dir(view: &FogView, size: GridSize, x: u32, y: u32) -> [f32; 3] {
+pub(crate) fn ray_dir(view: &FogView, size: GridSize, x: u32, y: u32) -> [f32; 3] {
     let u = (unit(x) + 0.5) / unit(size.width.max(1));
     let v = (unit(y) + 0.5) / unit(size.height.max(1));
     let nx = (u * 2.0 - 1.0) * view.tan_half_x;
@@ -609,7 +609,7 @@ fn ray_dir(view: &FogView, size: GridSize, x: u32, y: u32) -> [f32; 3] {
     ))
 }
 
-fn scale_color(color: [f32; 3], factor: f32) -> [f32; 3] {
+pub(crate) fn scale_color(color: [f32; 3], factor: f32) -> [f32; 3] {
     [color[0] * factor, color[1] * factor, color[2] * factor]
 }
 
@@ -671,7 +671,7 @@ fn local_density(volumes: &[FogVolume], point: [f32; 3]) -> f32 {
     sum
 }
 
-fn falloff(volume: &FogVolume, point: [f32; 3]) -> f32 {
+pub(crate) fn falloff(volume: &FogVolume, point: [f32; 3]) -> f32 {
     let dist_to_face = match volume.shape {
         FogShape::Box => {
             let dx = (point[0] - volume.position[0]).abs();
@@ -713,7 +713,7 @@ fn volume_contains(volume: &FogVolume, point: [f32; 3]) -> bool {
     }
 }
 
-fn point_at(view: &FogView, size: GridSize, x: u32, y: u32, view_z: f32) -> [f32; 3] {
+pub(crate) fn point_at(view: &FogView, size: GridSize, x: u32, y: u32, view_z: f32) -> [f32; 3] {
     let u = (unit(x) + 0.5) / unit(size.width.max(1));
     let v = (unit(y) + 0.5) / unit(size.height.max(1));
     let nx = (u * 2.0 - 1.0) * view.tan_half_x;
@@ -749,23 +749,23 @@ fn cell_index(size: GridSize, x: u32, y: u32, z: u32) -> Option<usize> {
 }
 
 /// Grid axes fit in `u16`, and every `u16` is an exact `f32`.
-fn unit(value: u32) -> f32 {
+pub(crate) fn unit(value: u32) -> f32 {
     f32::from(u16::try_from(value).unwrap_or(u16::MAX))
 }
 
-fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+pub(crate) fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
-fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+pub(crate) fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-fn scale(a: [f32; 3], s: f32) -> [f32; 3] {
+pub(crate) fn scale(a: [f32; 3], s: f32) -> [f32; 3] {
     [a[0] * s, a[1] * s, a[2] * s]
 }
 
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+pub(crate) fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
@@ -777,15 +777,15 @@ fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn length_sq(a: [f32; 3]) -> f32 {
+pub(crate) fn length_sq(a: [f32; 3]) -> f32 {
     dot(a, a)
 }
 
-fn length(a: [f32; 3]) -> f32 {
+pub(crate) fn length(a: [f32; 3]) -> f32 {
     length_sq(a).sqrt()
 }
 
-fn normalize(a: [f32; 3]) -> [f32; 3] {
+pub(crate) fn normalize(a: [f32; 3]) -> [f32; 3] {
     let len = length(a);
     if len <= 1.0e-8 {
         [0.0, 0.0, -1.0]
