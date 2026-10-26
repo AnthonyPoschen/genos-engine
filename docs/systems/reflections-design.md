@@ -57,7 +57,7 @@ Priority, when a budget is short, is the ADR 0013 score with the near-camera ter
 
 ## Optics
 
-These functions live in `genos-math` (`crates/math/src/optics.rs`). `crates/render/shaders/reflections.glsl` is the same formulas. `reflections_check.comp` compiles that file in the renderer build and is not embedded. A reflection pass includes the GLSL file when it calls one of them. Live rows grade the Rust functions against baked numbers.
+These functions live in `genos-math` (`crates/math/src/optics.rs`). `crates/render/shaders/reflections.glsl` is the same formulas. `reflections_check.comp` compiles that file in the renderer build and is not embedded in the frame. A reflection pass includes the GLSL file when it calls one of them. Live rows grade the Rust functions against baked numbers. `reflections_check.comp` is also dispatched on lavapipe: every optics output in that buffer matches `genos_math::optics` within `1e-5`. A push constant that forgets to invert the below-water index ratio fails that check.
 
 **Reflection direction.** `R = I - 2 dot(N, I) N`. A point `p` through a plane with unit normal `N` through the origin is `p - 2 dot(p, N) N`. The harness bakes both and gates the angle at `1e-4` rad and the point at `1e-5` m (`mirror_law_rad`, `mirror_point_m`).
 

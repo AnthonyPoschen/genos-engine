@@ -50,7 +50,13 @@ pub fn fresnel_dielectric(eta_t_over_eta_i: f32, cos_i: f32) -> f32 {
     let eta = eta_t_over_eta_i;
     let rs = (cos_i - eta * cos_t) / (cos_i + eta * cos_t);
     let rp = (eta * cos_i - cos_t) / (eta * cos_i + cos_t);
-    0.5 * (rs * rs + rp * rp)
+    // The GLSL mirror is `0.5 * (rs * rs + rp * rp)`. `f32::midpoint` is a different expression.
+    #[expect(
+        clippy::manual_midpoint,
+        reason = "keep the same product the GLSL Fresnel mirror uses"
+    )]
+    let fresnel = 0.5 * (rs * rs + rp * rp);
+    fresnel
 }
 
 /// Snell direction. `eta` is `n_incident / n_transmitted`.
