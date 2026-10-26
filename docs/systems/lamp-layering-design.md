@@ -296,13 +296,26 @@ cargo run -p genos-lighting-ref --bin layering-gate -- \
   --out genos-debug/gi/layering
 ```
 
-On a machine with no GPU that command runs under lavapipe and a headless Weston. The warmup is 30 frames, so the capture is the toggle, not a soaked cache. Timing on lavapipe is not a result. The picture rows are.
+On a machine with no GPU that command runs under lavapipe and a headless Weston. The warmup is 30 frames, so the capture is the toggle, not a soaked cache. Timing on lavapipe is not a result. One lavapipe run (320×180, preset high, lamp 0 turned off, 37 frames) scored exit 1:
+
+```
+toggle_settle_frames 23 12 FAIL
+pop_magnitude 0.7071 0.0500 FAIL
+fade_deviation 14.6189 0.0500 FAIL
+hold_flicker 0.0082 0.0200 PASS
+dim_error NOT-IMPLEMENTED 0.0500 NOT-IMPLEMENTED
+layer_same_frame NOT-IMPLEMENTED 0.0500 NOT-IMPLEMENTED
+layer_bytes NOT-IMPLEMENTED 1048576 NOT-IMPLEMENTED
+finished_read NOT-IMPLEMENTED 0 NOT-IMPLEMENTED
+```
+
+The mean drops in one frame and then drifts, so it misses the 50 ms curve and the 12-frame line. The last frames are calm. Settle in that run is against the held end, not a path trace. The layer rows have no lamp layer.
 
 Later phases add rhai gates under `debug/lighting/scripts/gates/`. The host cannot toggle a layer that does not exist, so those scripts wait. Each script soaks, records a settled frame, performs one change, and returns to the start, which is the existing test rule.
 
 | Script | When | Pass |
 |---|---|---|
-| `live-blend.rhai` | Fast-blend. Unflagged lamp, colour or intensity change, camera still, sun frozen. | `toggle_settle_frames`, `pop_magnitude`, `dim_error` against the path trace. `finished_read` is 0. |
+| `live-blend.rhai` | Fast-blend. Unflagged lamp, colour or intensity change, camera still, sun frozen. | `toggle_settle_frames`, `pop_magnitude`, `fade_deviation`, `hold_flicker`. `dim_error` against the path trace. `finished_read` is 0. |
 | `layer-weight.rhai` | A published layer. Weight 1 → 0.5. | `layer_same_frame` and `dim_error` the same frame. Cache-ray counter does not rise. |
 | `layer-toggle.rhai` | Weight 1 → 0 → 1. | Same-frame match to a reference with the lamp off, then on. `temporal_flicker.rhai` while the weight is held. |
 | `layer-fade.rhai` | Scripted weight curve over 30 frames. | Each frame's blurred error against a reference at that weight ≤ 0.05. No cache rays. |
