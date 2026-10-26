@@ -29,3 +29,5 @@ Bloom, auto-exposure, and an HDR swapchain are named in the lighting backlog and
 ## Consequences
 
 Post cost is outside the lighting caps in ADR 0013. The ceilings are in the design. A phase that misses its metric is dropped. `HdrSettings` is its own `EngineSettings` value. The debug menu labels are the glossary terms and carry no help text. Arguments win over `GENOS_HDR_*`.
+
+**Departure, phase 6.** The HDR10 peak is the fixed 1000 nits in `HDR_PEAK_NITS`. The display curve maps above graphics white onto 203 to 1000 nits. `write_hdr_metadata` sets `max_luminance`, `max_cll`, and `max_fall` to that same 1000, with BT.2020 primaries, and only when the created image is HDR10 and `VK_EXT_hdr_metadata` was enabled. A display that reports another peak does not win. The design's open question 3 leaves that read for a later change.

@@ -138,8 +138,8 @@ The Vulkan wording is the `VkColorSpaceKHR` table in the `VK_EXT_swapchain_color
 
 **Nit mapping, HDR only.** SDR runs AgX through to the power-2.4 code. HDR10 and scRGB run the same inset, log, and sigmoid, then map graphics white to 203 nits (ITU-R BT.2408) on both:
 
-- scRGB: code 1.0 stays 80 nits. Graphics white is `203/80 = 2.5375`, written 2.54. The sigmoid's top maps to the display peak, or to 1000 nits when `VK_EXT_hdr_metadata` does not report a peak.
-- HDR10: the same 203 nits, then PQ into 10-bit BT.2020. The sigmoid's top maps to the same peak.
+- scRGB: code 1.0 stays 80 nits. Graphics white is `203/80 = 2.5375`, written 2.54. The sigmoid's top maps to a fixed 1000 nits. A reported display peak does not replace it. That read is the phase-6 departure in [ADR 0015](../adr/0015-hdr-output.md).
+- HDR10: the same 203 nits, then PQ into 10-bit BT.2020. The sigmoid's top maps to the same fixed peak. `vkSetHdrMetadataEXT` writes that peak.
 
 **Departure:** Blender never emits nits. The inset, the log range, and the sigmoid are the generator. The last stage is ours. SDR does not take this departure.
 
@@ -453,7 +453,7 @@ P2 is before P5 on purpose. AgX is not invertible. Shipping it before the linear
 
 1. On the owner's NVIDIA driver, does Hyprland list HDR color spaces without `VK_hdr_layer`? Phase 6 records the list. A missing list is SDR. We do not vendor the layer in this design.
 2. Low forces SDR. HDR10 is 4 bytes, the same as today. If a 1060 timing shows the 10-bit encode inside the Low ceiling, Low can allow HDR10 and still refuse scRGB. That is a later measurement, not the default.
-3. The HDR peak falls back to 1000 nits. A display that reports 400 nits should win. Phase 6 reads `VK_EXT_hdr_metadata` when the device has it.
+3. The HDR peak is the fixed 1000 nits, including `vkSetHdrMetadataEXT`. A display that reports 400 nits should win. That read is not in this implementation. ADR 0015 records it as a phase-6 departure.
 4. FXAA's shader is 8-bit. Phase 6 skips it on HDR10 and on scRGB rather than widening it in the same change.
 5. ADR 0013's 8 ms lighting cap is 1080p. The stress sum at 1440p is unmeasured. Post stays at 1.20 ms on High either way.
 6. Whether `display=aces` ships in phase 5 or in a later phase depends on the Academy transform fitting in the display pass without a LUT asset. A LUT under `assets/` is a last resort and needs the asset record. A fit that is not the Academy's code does not ship under the name ACES.
