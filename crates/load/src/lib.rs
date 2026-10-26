@@ -9,6 +9,8 @@ mod animation;
 mod bin;
 mod emitters;
 mod error;
+mod mips;
+mod pages;
 mod gltf;
 mod inflate;
 mod jpeg;
@@ -24,8 +26,10 @@ mod wav;
 pub use animation::{Animation, Transform, TransformKey};
 pub use emitters::{
     double_count, furnace_wall, settled_wall, should_promote, Enclosure, MaterialSettings,
-    PromoteBudget, PromotePreset, CELL_EDGE_M,
+    PromoteBudget, PromotePreset, SettingEnv, CELL_EDGE_M,
 };
+pub use mips::{mip_chain, Mip, MipSpace};
+pub use pages::{miss_colour, mib_f32, resident_bytes, ImageChain, MaterialWatch};
 pub use error::LoadError;
 pub use gltf::{
     transform_point, AlphaMode, GltfMesh, GltfScene, MeshInstance, PbrMaterial, Primitive, Sampler,

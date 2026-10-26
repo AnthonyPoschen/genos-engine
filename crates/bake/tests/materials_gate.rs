@@ -34,7 +34,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use genos_bake::BakeMesh;
-use genos_load::{double_count as room_double_count, furnace_wall, load_gltf_file, GltfScene};
+use genos_load::{
+    double_count as room_double_count, furnace_wall, load_gltf_file, mib_f32, resident_bytes,
+    GltfScene, ImageChain, MaterialWatch,
+};
 
 const SHADE: f32 = 1.0 / 255.0;
 const SRGB: f32 = 1.0e-5;
@@ -80,7 +83,7 @@ const SHADE_MAT: usize = 0;
 const BRIGHT_MAT: usize = 2;
 const METAL_MAT: usize = 3;
 
-const MUST_FAIL: [&str; 10] = [
+const MUST_FAIL: [&str; 12] = [
     "shade_albedo",
     "shade_emissive",
     "srgb_decode",
@@ -91,6 +94,8 @@ const MUST_FAIL: [&str; 10] = [
     "roughness_from_g",
     "emissive_furnace",
     "double_count",
+    "residency_mb",
+    "hot_reload_frames",
 ];
 
 /// Measured from the loaded file or from `from_gltf`, not from the broken shade.
@@ -342,10 +347,18 @@ fn evaluate(reader: Reader, scene: &GltfScene) -> Result<Vec<Metric>, String> {
             furnace_outgoing(),
         ),
         measured("double_count", promoted_change(reader), RELATIVE),
-        pending("bc7_colour_rmse", BC7, "no BC7 encoder"),
-        pending("astc_colour_rmse", ASTC, "no ASTC encoder"),
-        pending("residency_mb", RESIDENCY_MB, "no page table"),
-        pending("hot_reload_frames", RELOAD_FRAMES, "no watcher"),
+        pending(
+            "bc7_colour_rmse",
+            BC7,
+            "no BC7 encoder is vendored; RGBA8 stays the cook",
+        ),
+        pending(
+            "astc_colour_rmse",
+            ASTC,
+            "no lossless ASTC transcode is linked",
+        ),
+        measured("residency_mb", residency_mb(reader), RESIDENCY_MB),
+        measured("hot_reload_frames", reload_frames(reader), RELOAD_FRAMES),
         pending("gbuffer_ms", GBUFFER_MS, "no GPU timing in this gate"),
     ])
 }
@@ -739,6 +752,45 @@ fn furnace_error(reader: Reader) -> f32 {
 fn promoted_change(reader: Reader) -> f32 {
     let counts_twice = matches!(reader, Reader::Broken);
     room_double_count(0.8, 1.0, 0.05, counts_twice)
+}
+
+fn mib(n: u64) -> u64 {
+    n * 1024 * 1024
+}
+
+/// Resident MiB under the High cap. The broken reader reports the uncapped sum.
+fn residency_mb(reader: Reader) -> f32 {
+    let images = [ImageChain {
+        levels: vec![mib(300), mib(75), mib(20)],
+        rank: 1,
+    }];
+    let bytes = match reader {
+        Reader::Bake => resident_bytes(&images, mib(256)),
+        Reader::Broken => images.iter().flat_map(|image| &image.levels).sum(),
+    };
+    mib_f32(bytes)
+}
+
+/// Frames from a finished upload to the sample. The broken reader stalls.
+fn reload_frames(reader: Reader) -> f32 {
+    if matches!(reader, Reader::Broken) {
+        return 5.0;
+    }
+    let mut watch = MaterialWatch::new(1);
+    watch.begin(2);
+    if watch.sample() != 1 {
+        return 99.0;
+    }
+    watch.finish_upload();
+    if watch.sample() != 2 {
+        return 99.0;
+    }
+    watch.frame();
+    if watch.frames_since_flip() == 1 {
+        1.0
+    } else {
+        99.0
+    }
 }
 
 #[derive(Clone, Copy)]

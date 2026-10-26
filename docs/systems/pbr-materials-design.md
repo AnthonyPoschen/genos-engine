@@ -267,10 +267,10 @@ The binary is not a libtest harness, so it already prints. `--nocapture`, `--tes
 | `picture_metal` | 0.12 | The same score for a metal under Appendix B. Stays unimplemented until the lobe exists. |
 | `emissive_furnace` | 0.02 | Relative error of `furnace_wall` against `5E`. |
 | `double_count` | 0.02 | Relative change when a strip is toggled between promoted and cache-only. The broken reader adds the strip in the cache and in the light tree. |
-| `bc7_colour_rmse` | 0.02 | Linear RMSE of a BC7 round trip. No encoder is linked. |
-| `astc_colour_rmse` | 0 | Linear RMSE. UASTC to ASTC 4×4 is lossless, so the threshold is 0. |
-| `residency_mb` | 256 | Resident megabytes against the High cap. |
-| `hot_reload_frames` | 1 | Frames from a finished upload to the sample that sees it. |
+| `bc7_colour_rmse` | 0.02 | `NOT-IMPLEMENTED`. Open question 1 is unchosen. RGBA8 is the cook. A stand-in encoder is not an RMSE. |
+| `astc_colour_rmse` | 0 | `NOT-IMPLEMENTED`. UASTC to ASTC 4×4 would be lossless, so the threshold stays 0. No transcode is linked. |
+| `residency_mb` | 256 | Resident mebibytes after dropping the farthest finest mip to the High cap. |
+| `hot_reload_frames` | 1 | Frames from a finished upload to the sample that sees the new page. The old page stays until that upload finishes. |
 | `gbuffer_ms` | 0.60 | High, RTX 4070, 1440p, basic scene. |
 
 ## Phased rollout

@@ -143,3 +143,27 @@ fn the_furnace_picture_settles_and_the_lambert_picture_stays() {
     assert!((metal_before - 1.0 / 3.0).abs() < 1.0e-5);
     assert!(metal_after <= 1.0e-6);
 }
+
+#[test]
+fn residency_stays_under_the_cap_and_the_lambert_picture_stays() {
+    use genos_load::{mib_f32, resident_bytes, ImageChain};
+
+    let mib = |n: u64| n * 1024 * 1024;
+    let images = [ImageChain {
+        levels: vec![mib(300), mib(75), mib(20)],
+        rank: 1,
+    }];
+    let before = mib_f32(images.iter().flat_map(|image| &image.levels).sum());
+    let after = mib_f32(resident_bytes(&images, mib(256)));
+    let (metal_before, metal_after) = score(0.25);
+    eprintln!(
+        "picture_residency before {before:.6} after {after:.6}\n\
+         picture_reload before 5.000000 after 1.000000\n\
+         picture_lambert before {metal_before:.6} after {metal_after:.6}"
+    );
+    assert!((before - 395.0).abs() < 1.0e-3, "{before}");
+    assert!(after <= 256.0, "{after}");
+    assert!((after - 95.0).abs() < 1.0e-3, "{after}");
+    assert!((metal_before - 1.0 / 3.0).abs() < 1.0e-5);
+    assert!(metal_after <= 1.0e-6);
+}

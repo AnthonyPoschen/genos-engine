@@ -146,27 +146,64 @@ pub fn double_count(albedo: f32, strip_emission: f32, strip_fraction: f32, cache
     (promoted - cache_only).abs() / scale
 }
 
-/// Promote switch and flux fraction. The fraction is of the brightest lamp.
+/// Material knobs. Menu labels are these names and carry no description line.
+/// MCP and the debug menu wait on the lighting branch's command catalogue.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialSettings {
+    pub residency_mb: u32,
+    pub mip_bias: f32,
+    pub anisotropy: u32,
+    pub occlusion: bool,
     pub emissive_promote: bool,
+    /// Fraction of the brightest lamp.
     pub emissive_promote_flux: f32,
+}
+
+/// Environment mirrors. Each applies only when its argument was omitted.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SettingEnv<'a> {
+    pub residency_mb: Option<&'a str>,
+    pub mip_bias: Option<&'a str>,
+    pub anisotropy: Option<&'a str>,
+    pub occlusion: Option<&'a str>,
+    pub promote: Option<&'a str>,
+    pub flux: Option<&'a str>,
+    pub watch: Option<&'a str>,
 }
 
 impl Default for MaterialSettings {
     fn default() -> Self {
-        Self {
-            emissive_promote: true,
-            emissive_promote_flux: 0.01,
-        }
+        Self::preset(PromotePreset::High)
     }
 }
 
 impl MaterialSettings {
     #[must_use]
+    pub fn preset(preset: PromotePreset) -> Self {
+        let (residency_mb, mip_bias, anisotropy, occlusion, emissive_promote) = match preset {
+            PromotePreset::Potato => (32, 2.0, 1, false, false),
+            PromotePreset::Low => (64, 1.0, 2, true, true),
+            PromotePreset::Medium => (128, 0.0, 4, true, true),
+            PromotePreset::High => (256, 0.0, 8, true, true),
+        };
+        Self {
+            residency_mb,
+            mip_bias,
+            anisotropy,
+            occlusion,
+            emissive_promote,
+            emissive_promote_flux: 0.01,
+        }
+    }
+
+    #[must_use]
     pub fn to_text(self) -> String {
         format!(
-            "emissive_promote {}\nemissive_promote_flux {}\n",
+            "residency_mb {}\nmip_bias {}\nanisotropy {}\nocclusion {}\nemissive_promote {}\nemissive_promote_flux {}\n",
+            self.residency_mb,
+            self.mip_bias,
+            self.anisotropy,
+            on_off(self.occlusion),
             on_off(self.emissive_promote),
             self.emissive_promote_flux
         )
@@ -192,9 +229,13 @@ impl MaterialSettings {
 
     pub fn set_key(&mut self, key: &str, value: &str) -> Result<(), String> {
         match key {
+            "residency_mb" => self.residency_mb = parse_u32(value, "residency_mb")?,
+            "mip_bias" => self.mip_bias = parse_f32(value, "mip_bias")?,
+            "anisotropy" => self.anisotropy = parse_u32(value, "anisotropy")?,
+            "occlusion" => self.occlusion = parse_on(value)?,
             "emissive_promote" => self.emissive_promote = parse_on(value)?,
             "emissive_promote_flux" => {
-                self.emissive_promote_flux = parse_flux(value)?;
+                self.emissive_promote_flux = parse_f32(value, "emissive_promote_flux")?;
             }
             _ => return Err(format!("unknown material setting {key}")),
         }
@@ -202,50 +243,100 @@ impl MaterialSettings {
     }
 
     /// Overlay launch arguments. Each environment string applies only when its
-    /// argument was omitted. Other arguments are left for their own parsers.
+    /// argument was omitted. Returns `--watch` when it was set.
+    /// Other arguments are left for their own parsers.
     pub fn overlay_args(
         &mut self,
         args: &[&str],
-        promote_env: Option<&str>,
-        flux_env: Option<&str>,
-    ) -> Result<(), String> {
+        env: SettingEnv<'_>,
+    ) -> Result<Option<String>, String> {
+        let mut saw_residency = false;
+        let mut saw_bias = false;
+        let mut saw_anisotropy = false;
+        let mut saw_occlusion = false;
         let mut saw_promote = false;
         let mut saw_flux = false;
+        let mut watch = None;
         let mut index = 0;
         while index < args.len() {
+            let value = |index: usize, flag: &str| {
+                args.get(index + 1)
+                    .copied()
+                    .ok_or_else(|| format!("{flag} needs a value"))
+            };
             match args[index] {
+                "--material-residency-mb" => {
+                    self.residency_mb = parse_u32(value(index, args[index])?, "residency_mb")?;
+                    saw_residency = true;
+                    index += 2;
+                }
+                "--material-mip-bias" => {
+                    self.mip_bias = parse_f32(value(index, args[index])?, "mip_bias")?;
+                    saw_bias = true;
+                    index += 2;
+                }
+                "--material-anisotropy" => {
+                    self.anisotropy = parse_u32(value(index, args[index])?, "anisotropy")?;
+                    saw_anisotropy = true;
+                    index += 2;
+                }
+                "--material-occlusion" => {
+                    self.occlusion = parse_on(value(index, args[index])?)?;
+                    saw_occlusion = true;
+                    index += 2;
+                }
                 "--material-emissive-promote" => {
-                    let value = args
-                        .get(index + 1)
-                        .copied()
-                        .ok_or("--material-emissive-promote needs on or off")?;
-                    self.emissive_promote = parse_on(value)?;
+                    self.emissive_promote = parse_on(value(index, args[index])?)?;
                     saw_promote = true;
                     index += 2;
                 }
                 "--material-emissive-promote-flux" => {
-                    let value = args
-                        .get(index + 1)
-                        .copied()
-                        .ok_or("--material-emissive-promote-flux needs a number")?;
-                    self.emissive_promote_flux = parse_flux(value)?;
+                    self.emissive_promote_flux =
+                        parse_f32(value(index, args[index])?, "emissive_promote_flux")?;
                     saw_flux = true;
+                    index += 2;
+                }
+                "--watch" => {
+                    watch = Some(value(index, "--watch")?.to_string());
                     index += 2;
                 }
                 _ => index += 1,
             }
         }
+        if !saw_residency {
+            if let Some(value) = env.residency_mb {
+                self.residency_mb = parse_u32(value, "residency_mb")?;
+            }
+        }
+        if !saw_bias {
+            if let Some(value) = env.mip_bias {
+                self.mip_bias = parse_f32(value, "mip_bias")?;
+            }
+        }
+        if !saw_anisotropy {
+            if let Some(value) = env.anisotropy {
+                self.anisotropy = parse_u32(value, "anisotropy")?;
+            }
+        }
+        if !saw_occlusion {
+            if let Some(value) = env.occlusion {
+                self.occlusion = parse_on(value)?;
+            }
+        }
         if !saw_promote {
-            if let Some(value) = promote_env {
+            if let Some(value) = env.promote {
                 self.emissive_promote = parse_on(value)?;
             }
         }
         if !saw_flux {
-            if let Some(value) = flux_env {
-                self.emissive_promote_flux = parse_flux(value)?;
+            if let Some(value) = env.flux {
+                self.emissive_promote_flux = parse_f32(value, "emissive_promote_flux")?;
             }
         }
-        Ok(())
+        if watch.is_none() {
+            watch = env.watch.map(str::to_string);
+        }
+        Ok(watch)
     }
 }
 
@@ -265,10 +356,16 @@ fn parse_on(value: &str) -> Result<bool, String> {
     }
 }
 
-fn parse_flux(value: &str) -> Result<f32, String> {
+fn parse_f32(value: &str, key: &str) -> Result<f32, String> {
     value
         .parse::<f32>()
-        .map_err(|_| format!("emissive promote flux wants a number, got {value}"))
+        .map_err(|_| format!("{key} wants a number, got {value}"))
+}
+
+fn parse_u32(value: &str, key: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .map_err(|_| format!("{key} wants a whole number, got {value}"))
 }
 
 #[cfg(test)]
@@ -313,21 +410,42 @@ mod tests {
     #[test]
     fn the_argument_wins_over_the_environment() {
         let mut settings = MaterialSettings::default();
-        settings
+        let watch = settings
             .overlay_args(
-                &["--material-emissive-promote", "on", "--other", "x"],
-                Some("off"),
-                Some("0.5"),
+                &[
+                    "--material-emissive-promote",
+                    "on",
+                    "--material-residency-mb",
+                    "64",
+                    "--watch",
+                    "from-arg.png",
+                    "--other",
+                    "x",
+                ],
+                SettingEnv {
+                    promote: Some("off"),
+                    flux: Some("0.5"),
+                    residency_mb: Some("32"),
+                    watch: Some("from-env.png"),
+                    ..SettingEnv::default()
+                },
             )
             .expect("overlay");
         assert!(settings.emissive_promote);
+        assert_eq!(settings.residency_mb, 64);
+        assert_eq!(watch.as_deref(), Some("from-arg.png"));
         assert!((settings.emissive_promote_flux - 0.5).abs() < 1.0e-6);
-        settings
-            .overlay_args(&[], Some("off"), None)
+        let watch = settings
+            .overlay_args(&[], SettingEnv { promote: Some("off"), ..SettingEnv::default() })
             .expect("env");
         assert!(!settings.emissive_promote);
+        assert!(watch.is_none());
         let text = settings.to_text();
         let parsed = MaterialSettings::parse(&text).expect("round trip");
         assert_eq!(parsed, settings);
+        let potato = MaterialSettings::preset(PromotePreset::Potato);
+        assert_eq!(potato.residency_mb, 32);
+        assert!(!potato.occlusion);
+        assert!(!potato.emissive_promote);
     }
 }
