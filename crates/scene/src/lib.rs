@@ -27,7 +27,7 @@ pub use lighting::{
     check_lighting_arg, lighting_arg_time_of_day, lighting_env, lighting_env_flag, lighting_env_os,
     lighting_flag_needs_value, AmbientMode, AmbientSettings, BounceSettings, DenoiserSettings,
     DirectSettings, GiSettings, GpuBuckets, LampPickMode, LampPickSettings, LightingPreset,
-    LightingSettings, ProbeSettings, ShadowFilter, ShadowSettings, SurfaceCacheBlend,
+    LightingSettings, ProbeSettings, ScheduleMode, ShadowFilter, ShadowSettings, SurfaceCacheBlend,
     SurfaceCacheSettings, WorldCacheSettings, LIGHTING_BOUNCES_UNLIMITED,
 };
 pub use menu::{parse_focus_policy, parse_menu_visible, FocusPolicy, MenuCli, MenuSettings};
