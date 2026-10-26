@@ -126,12 +126,15 @@ pub fn write_metrics(dir: &Path, report: &Report) -> Result<PathBuf, String> {
 }
 
 fn to_json(report: &Report) -> String {
+    use std::fmt::Write as _;
+
     let mut body = String::from("{\n");
-    body.push_str(&format!(
+    let _ = write!(
+        body,
         "  \"suite\": {},\n  \"fixture\": {},\n  \"metrics\": [\n",
         json_string(report.suite.as_str()),
         json_string(report.fixture.as_str())
-    ));
+    );
     for (index, metric) in report.metrics.iter().enumerate() {
         let comma = if index + 1 == report.metrics.len() {
             ""
@@ -142,13 +145,14 @@ fn to_json(report: &Report) -> String {
             Some(value) => format!("{value:.6e}"),
             None => "null".to_string(),
         };
-        body.push_str(&format!(
-            "    {{\"name\": {}, \"value\": {value}, \"threshold\": {:.6e}, \"status\": {}, \"note\": {}}}{comma}\n",
+        let _ = writeln!(
+            body,
+            "    {{\"name\": {}, \"value\": {value}, \"threshold\": {:.6e}, \"status\": {}, \"note\": {}}}{comma}",
             json_string(metric.name),
             metric.threshold,
             json_string(metric.status.as_str()),
             json_string(metric.note),
-        ));
+        );
     }
     body.push_str("  ]\n}\n");
     body
