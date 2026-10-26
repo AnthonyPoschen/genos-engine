@@ -14,7 +14,7 @@ The window does not lock the pointer when it opens. A click does not lock the po
 
 The compositor pings a mapped window (`xdg_wm_base.ping`). The answer is sent only while `Window::pump` or the seat dispatch reads the socket. Omarchy treats a missed ping as "Application not responding". The frame keeps the gap between dispatches inside 100 ms. `StallMeter` records the longest gap. The scene stores it as `EventLoopSettings.longest_stall_ms`.
 
-A scene file is read on a worker once the window is mapped. The frame draws a small loading picture and keeps pumping. Device waits, pipeline compiles, and copies larger than a megabyte run on the frame thread while a side thread dispatches the seat. That side thread stops before the next present or `pump`. Quit on `genos-lighting` joins the script thread, stops the MCP listener, and idles the device while the window is still mapped so that side thread can answer pings. It then destroys the device on the frame thread, destroys the window, and exits. Leaving the device for the driver to reclaim at `exit` races those threads and aborts in glibc (`corrupted size vs. prev_size`). A scene that is leaving is dropped on `genos-retire`, not on the frame thread. The current scene is not dropped on the way out.
+A scene file is read on a worker once the window is mapped. The frame draws a small loading picture and keeps pumping. Device waits, pipeline compiles, and copies larger than a megabyte run on the frame thread while a side thread dispatches the seat. That side thread stops before the next present or `pump`. Quit runs the app lifecycle below. A scene that is leaving is dropped on `genos-retire`, not on the frame thread. The current scene is not dropped on the way out.
 
 `lock_cursor` hides the cursor and confines it. `unlock_cursor` shows the cursor and lets it leave. Escape is a game action. The window does not bind Escape itself.
 
@@ -34,7 +34,28 @@ The crate is `crates/window`, package `genos-window`.
 
 - `Window`, `Frame`, and `FocusGate` are in `src/lib.rs`.
 - `WindowEvent` and `WindowMode` are in `src/events.rs`.
+- The app lifecycle is in `src/lifecycle.rs`.
 - The Wayland seat, the pointer lock, and fullscreen are in `src/wayland_shim.c`.
+
+## App lifecycle
+
+`Lifecycle` owns the window and the device. Safe code cannot move either out. Shutdown is a state machine on the event thread: stop producers, drain the GPU, destroy resources, unmap, then exit. `Window::pump` runs before each step, so `xdg_wm_base.ping` is answered while the window is mapped.
+
+Producers are polled. A script thread is joined only after it has finished. After two seconds it is detached, because joining a script blocked on the frame thread would deadlock. The MCP listener is dropped in that same step. Its accept thread is idle, so the join is short.
+
+The GPU drain does not call `vkDeviceWaitIdle`. One empty submit on the graphics queue, and one on the compute queue when that queue is distinct, is ordered after the last present. The machine polls those fences, and the lighting world fence when a world submit is in flight. Each poll is one pump apart. Frame fences are not polled: a reset without a submit leaves them unsignaled. Destruction is three steps (yield, lighting resources, the rest of the device) with a pump between them. The window is unmapped only after the device is gone. `genos_window::exit` flushes stdout and is the only `process::exit`.
+
+The longest gap between those pumps is printed as `lifecycle_quit_gap_ms=`. `lifecycle_drain_forced=1` means a fence was still unsignaled after 30 seconds and destruction continued. The budget is 100 ms. `--lifecycle-block-ms N` waits N milliseconds inside the drain, with no pump inside the wait, so the quit-gap test can prove it catches a stall. `GENOS_LIFECYCLE_BLOCK_MS` is the mirror and applies only when the flag was omitted. It is a test hook, not a player setting.
+
+Failure modes: a gap at or above 100 ms means teardown blocked the event thread (a device wait, a thread join, or a destroy step). Exit 134 and `corrupted size vs. prev_size` mean the device was left for the driver's exit handler while other threads were still alive. The probes are the two stdout lines, the process exit code, and `crates/window/tests/lifecycle_quit.rs`.
+
+## Networking
+
+- Replicated state: none. The window, the seat, and the shutdown phase stay in the process that opened the surface.
+- Authority: that process. The compositor is the display server, not a game server.
+- Prediction / rollback: none. Pointer lock and mode are requests. The compositor confirms them on a later pump.
+- Determinism: shutdown polls fences. It does not wait an unbounded device idle. The quit gap is the longest dispatch interval.
+- Headless server: a gameplay server opens no window and does not run this lifecycle. `--headless` and `--proof` still map a window on a local compositor.
 
 ## Game use
 

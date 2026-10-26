@@ -243,6 +243,8 @@ Role: TEMPORAL · Literature: Hillaire 2015 temporal integration; [ADR 0012](../
 **Screen resolve**: gather, filter, and compose added together. The à-trous pass stays outside that sum. Role: TOOL
 **GI pass time**: GPU milliseconds of one lighting pass (`direct`, `atrous`, `compose`, `trace`, `filter`, `gather`, `resolve`) or of the lighting total. `resolve` is the screen resolve and is not added again into the lighting total. `trace` is the screen-probe trace plus cache rays. `direct` is the direct dispatch plus hit light. Role: TOOL
 **Work counter**: rays traced, cache entries refreshed, or lamps shaded (fresh shadow rays) in one recorded frame. Role: TOOL
+**App lifecycle**: the window-crate owner of shutdown. The event loop stops producers, polls GPU fences, destroys the device, unmaps, then exits. A quit that blocks the seat misses `xdg_wm_base.ping`.
+Role: TOOL · Literature: — (the seat ping is `xdg_wm_base.ping`) · More detail: [window.md](../systems/window.md)
 
 ### Materials
 **Material record**: one glTF material's factors, texture slots, and alpha mode, before any texel is read. The code type is `PbrMaterial`.

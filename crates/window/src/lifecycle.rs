@@ -1,0 +1,655 @@
+//! App lifecycle. The event loop owns shutdown.
+//!
+//! Hyprland (Omarchy shows the same dialog) sends `xdg_wm_base.ping` while a
+//! window is mapped and treats a missed answer as "Application not responding".
+//! The answer is written only when this thread dispatches the seat. A quit that
+//! blocks here, in `vkDeviceWaitIdle`, a thread join, or device destruction,
+//! misses that ping.
+//!
+//! PR #63 (merged as `beb9a88`) fixed that only on `genos-lighting`: join the
+//! script thread, stop MCP, drop the renderer while the window was still mapped
+//! so a side thread could answer pings, then destroy the device. `genos-camera`
+//! and `genos-stress` kept a different quit: clear the seat pump, unmap, abandon
+//! the device, and `process::exit`. The driver then ran `vkDeviceWaitIdle` from
+//! its exit handler while the compositor still had the client. New binaries
+//! copied that second path.
+//!
+//! [`Lifecycle`] is the only owner of that sequence. The frame calls [`Lifecycle::quit`]
+//! or drops the lifecycle. Either way the state machine runs on this thread:
+//! stop producers, poll GPU fences, destroy resources, unmap, then exit.
+//! [`Lifecycle::pump`] is not required. The machine itself dispatches the seat
+//! between steps, so the gap between dispatches stays inside [`PUMP_BUDGET`].
+//!
+//! Safe code cannot move the window or the device out. Both sit in
+//! [`ManuallyDrop`]. [`exit`] is the only `process::exit`.
+
+use std::io::Write;
+use std::mem::ManuallyDrop;
+use std::sync::{Condvar, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use crate::{Window, PUMP_BUDGET};
+
+/// Printed on stdout when shutdown finishes. The quit-gap test reads it.
+pub const QUIT_GAP_PREFIX: &str = "lifecycle_quit_gap_ms=";
+
+/// How long a producer may stay unfinished before shutdown detaches it.
+const PRODUCER_LIMIT: Duration = Duration::from_secs(2);
+
+/// Bound on one phase. Past this the machine moves on. Pings were answered
+/// the whole time. A stuck fence must not hang the process.
+const PHASE_LIMIT: Duration = Duration::from_secs(30);
+
+/// Pause between polls. Short enough that the dispatch gap stays inside the budget.
+const SLICE: Duration = Duration::from_millis(16);
+
+/// Shutdown phases, in order. The seat is dispatched before each step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// The frame is drawing.
+    Running,
+    /// Script threads and the MCP listener are stopping. Polled, not joined blindly.
+    StopProducers,
+    /// GPU fences are polled. No `vkDeviceWaitIdle`.
+    DrainGpu,
+    /// Device resources are destroyed. Each step returns before the next dispatch.
+    DestroyResources,
+    /// The window is unmapped.
+    Unmap,
+    /// The process is about to exit.
+    Exit,
+}
+
+/// What the seat should do during one shutdown step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeatOp {
+    Dispatch,
+    Unmap,
+}
+
+/// A device the lifecycle can drain and destroy without blocking the seat.
+///
+/// `genos-render`'s `Renderer` is the production implementation. The methods
+/// must not call `vkDeviceWaitIdle` and must not block.
+/// [`ShutdownDevice::destroy_step`] may run several times. Each call destroys
+/// the next group and returns `false` until nothing remains.
+pub trait ShutdownDevice {
+    /// Called once, before producers stop. Drop seat-side blockers here.
+    fn prepare_shutdown(&mut self) {}
+
+    /// `true` when every in-flight fence is signaled.
+    fn poll_idle(&mut self) -> bool;
+
+    /// Destroy the next resource group. `true` when the device is gone.
+    fn destroy_step(&mut self) -> bool;
+}
+
+/// A worker the lifecycle joins without blocking the seat.
+///
+/// [`ThreadStop::poll`] joins once the worker has finished. After two seconds
+/// it detaches. [`Drop`] does the same, so a leftover handle does not join on
+/// the event thread.
+pub struct ThreadStop<T> {
+    handle: Option<JoinHandle<T>>,
+    result: Option<T>,
+    started: Option<Instant>,
+    limit: Duration,
+}
+
+impl<T> ThreadStop<T> {
+    /// Take ownership of `handle`. The lifecycle polls it during shutdown.
+    pub fn new(handle: JoinHandle<T>) -> Self {
+        Self {
+            handle: Some(handle),
+            result: None,
+            started: None,
+            limit: PRODUCER_LIMIT,
+        }
+    }
+
+    /// The worker's value, after a successful join.
+    pub fn result(&self) -> Option<&T> {
+        self.result.as_ref()
+    }
+
+    /// Join if the worker has already finished. Does not start the detach timer.
+    pub fn try_join(&mut self) -> bool {
+        if self.handle.is_none() {
+            return true;
+        }
+        self.take_finished()
+    }
+
+    /// Join, or detach once [`PRODUCER_LIMIT`] has passed. `true` when done.
+    pub fn poll(&mut self) -> bool {
+        if self.handle.is_none() {
+            return true;
+        }
+        if self.take_finished() {
+            return true;
+        }
+        let started = self.started.get_or_insert_with(Instant::now);
+        if started.elapsed() >= self.limit {
+            if let Some(handle) = self.handle.take() {
+                // Detach. Joining here would block the event thread.
+                std::mem::forget(handle);
+            }
+            return true;
+        }
+        false
+    }
+
+    fn take_finished(&mut self) -> bool {
+        let finished = self.handle.as_ref().is_some_and(JoinHandle::is_finished);
+        if !finished {
+            return false;
+        }
+        if let Some(handle) = self.handle.take() {
+            if let Ok(value) = handle.join() {
+                self.result = Some(value);
+            }
+        }
+        true
+    }
+}
+
+impl<T> Drop for ThreadStop<T> {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        if handle.is_finished() {
+            let _ = handle.join();
+        } else {
+            std::mem::forget(handle);
+        }
+    }
+}
+
+type Stop = Box<dyn FnMut() -> bool>;
+
+/// The process's window and device. Shutdown is a state machine on the event thread.
+///
+/// Construct it with the open window and the device. Draw through [`Self::window`]
+/// and [`Self::device`]. Call [`Self::quit`] to leave. Dropping it runs the same
+/// machine and returns, so a `?` on the way out still answers pings.
+pub struct Lifecycle<D: ShutdownDevice> {
+    /// The mapped window. Safe code cannot move it out.
+    pub window: ManuallyDrop<Window>,
+    /// The device. Safe code cannot move it out. Only shutdown destroys it.
+    pub device: ManuallyDrop<D>,
+    stops: Vec<Stop>,
+    stall: Option<Duration>,
+    quit: bool,
+    exit_code: i32,
+    window_alive: bool,
+    device_dropped: bool,
+    released: bool,
+    longest: Duration,
+    drain_forced: bool,
+}
+
+impl<D: ShutdownDevice> Lifecycle<D> {
+    /// Own `window` and `device` until shutdown.
+    pub fn new(window: Window, device: D) -> Self {
+        Self {
+            window: ManuallyDrop::new(window),
+            device: ManuallyDrop::new(device),
+            stops: Vec::new(),
+            stall: None,
+            quit: false,
+            exit_code: 0,
+            window_alive: true,
+            device_dropped: false,
+            released: false,
+            longest: Duration::ZERO,
+            drain_forced: false,
+        }
+    }
+
+    /// Register a producer stop. Return `true` when that producer is gone.
+    ///
+    /// The machine calls every stop between seat dispatches until all of them
+    /// return `true`. A stop must not block. Poll a [`ThreadStop`] instead of joining.
+    pub fn add_stop(&mut self, step: impl FnMut() -> bool + 'static) {
+        self.stops.push(Box::new(step));
+    }
+
+    /// Block the event thread once, during drain, with no seat dispatch inside the wait.
+    ///
+    /// The quit-gap test passes `--lifecycle-block-ms` so a regression that
+    /// stalls teardown fails the 100 ms budget. Shipping runs leave this unset.
+    pub fn plant_block(&mut self, stall: Duration) {
+        self.stall = Some(stall);
+    }
+
+    /// Remember a quit request. The caller still has to [`Self::quit`] or drop.
+    pub fn request_quit(&mut self, code: i32) {
+        if !self.quit {
+            self.quit = true;
+            self.exit_code = code;
+        }
+    }
+
+    /// `true` after [`Self::request_quit`].
+    pub fn quit_requested(&self) -> bool {
+        self.quit
+    }
+
+    /// The code from the first [`Self::request_quit`], or 0.
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code
+    }
+
+    /// Longest dispatch gap recorded during shutdown, in milliseconds.
+    pub fn quit_gap_ms(&self) -> f64 {
+        duration_ms(self.longest)
+    }
+
+    /// Run shutdown, then [`exit`] with `code`.
+    ///
+    /// Producers registered with [`Self::add_stop`] run first. The device is
+    /// destroyed while the window is still mapped. The window is unmapped only
+    /// after that. `process::exit` does not run destructors, so this drops the
+    /// device and the window first.
+    pub fn quit(mut self, code: i32) -> ! {
+        if !self.quit {
+            self.exit_code = code;
+            self.quit = true;
+        } else if code != 0 && self.exit_code == 0 {
+            self.exit_code = code;
+        }
+        let code = self.exit_code;
+        self.shutdown();
+        unsafe {
+            if self.window_alive {
+                ManuallyDrop::drop(&mut self.window);
+                self.window_alive = false;
+            }
+            if !self.device_dropped {
+                ManuallyDrop::drop(&mut self.device);
+                self.device_dropped = true;
+            }
+        }
+        std::mem::forget(self);
+        exit(code);
+    }
+
+    fn shutdown(&mut self) {
+        if self.released {
+            return;
+        }
+        self.device.prepare_shutdown();
+        if self.window_alive {
+            self.window.clear_seat_pump();
+        }
+        let device = &mut *self.device;
+        let stops = &mut self.stops;
+        let stall = &mut self.stall;
+        let window = &mut self.window;
+        let alive = &mut self.window_alive;
+        let (gap, forced) = drive_machine(device, stops, stall, |op| match op {
+            SeatOp::Dispatch => {
+                if *alive {
+                    let _ = window.pump();
+                }
+            }
+            SeatOp::Unmap => {
+                if *alive {
+                    window.clear_seat_pump();
+                    // SAFETY: `window` was created in `new` and this flag is the
+                    // only other drop. The compositor is told the window is gone.
+                    unsafe { ManuallyDrop::drop(window) };
+                    *alive = false;
+                }
+            }
+        });
+        self.longest = gap;
+        self.drain_forced = forced;
+        report(gap, forced);
+        self.released = true;
+    }
+}
+
+impl<D: ShutdownDevice> Drop for Lifecycle<D> {
+    fn drop(&mut self) {
+        if !self.released {
+            self.shutdown();
+        }
+        unsafe {
+            if self.window_alive {
+                // SAFETY: the flag is the only other drop of this window.
+                ManuallyDrop::drop(&mut self.window);
+                self.window_alive = false;
+            }
+            if !self.device_dropped {
+                // SAFETY: the flag is the only other drop of this device.
+                // Shutdown already destroyed the GPU objects when it ran.
+                ManuallyDrop::drop(&mut self.device);
+                self.device_dropped = true;
+            }
+        }
+    }
+}
+
+/// `true` when `ms` is inside the seat budget. The quit-gap test uses this
+/// predicate, including on the planted stall, so a block cannot pass quietly.
+pub fn gap_within_budget(ms: f64) -> bool {
+    ms.is_finite() && ms >= 0.0 && ms < duration_ms(PUMP_BUDGET)
+}
+
+/// Read [`QUIT_GAP_PREFIX`] from a child's stdout or stderr.
+pub fn parse_quit_gap(text: &str) -> Option<f64> {
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix(QUIT_GAP_PREFIX) else {
+            continue;
+        };
+        return rest.parse().ok();
+    }
+    None
+}
+
+/// `Some(true)` when `--lifecycle-block-ms` takes the next argument.
+/// `Some(false)` when the value is inline (`--lifecycle-block-ms=N`).
+/// `None` for any other argument.
+pub fn block_ms_needs_value(arg: &str) -> Option<bool> {
+    if arg == "--lifecycle-block-ms" {
+        Some(true)
+    } else if arg.starts_with("--lifecycle-block-ms=") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Parse `--lifecycle-block-ms`. `next` is the following argument when
+/// [`block_ms_needs_value`] returned `Some(true)`.
+pub fn parse_block_ms(arg: &str, next: Option<&str>) -> Result<Duration, String> {
+    let inline = arg.strip_prefix("--lifecycle-block-ms=");
+    let text = if let Some(value) = inline {
+        if value.is_empty() {
+            return Err("--lifecycle-block-ms needs a value".into());
+        }
+        value
+    } else if arg == "--lifecycle-block-ms" {
+        next.ok_or("--lifecycle-block-ms needs a value")?
+    } else {
+        return Err(format!("{arg} is not --lifecycle-block-ms"));
+    };
+    let ms: u64 = text
+        .parse()
+        .map_err(|_| format!("bad --lifecycle-block-ms {text}"))?;
+    Ok(Duration::from_millis(ms))
+}
+
+/// `cli` when the flag was passed. Otherwise `GENOS_LIFECYCLE_BLOCK_MS`.
+///
+/// A value that does not parse is ignored. The flag wins when both are set,
+/// because the caller passes `Some` only for the argument.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "GENOS_LIFECYCLE_BLOCK_MS mirrors --lifecycle-block-ms. The argument wins when cli is Some. docs/LINT_RULES.md"
+)]
+pub fn block_ms_mirror(cli: Option<Duration>) -> Option<Duration> {
+    if cli.is_some() {
+        return cli;
+    }
+    let Ok(text) = std::env::var("GENOS_LIFECYCLE_BLOCK_MS") else {
+        return None;
+    };
+    let Ok(ms) = text.parse::<u64>() else {
+        return None;
+    };
+    Some(Duration::from_millis(ms))
+}
+
+/// Leave the process. Binaries call this instead of `std::process::exit`.
+///
+/// Rust buffers stdout. `process::exit` does not flush it, so this flushes first.
+pub fn exit(code: i32) -> ! {
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    std::process::exit(code);
+}
+
+fn drive_machine<D: ShutdownDevice>(
+    device: &mut D,
+    stops: &mut [Stop],
+    stall: &mut Option<Duration>,
+    mut seat: impl FnMut(SeatOp),
+) -> (Duration, bool) {
+    let mut last = Instant::now();
+    let mut longest = Duration::ZERO;
+    let mut phase = Phase::StopProducers;
+    let mut forced = false;
+    let phase_deadline = Instant::now() + PHASE_LIMIT;
+    let note = |last: &mut Instant, longest: &mut Duration| {
+        let gap = last.elapsed();
+        if gap > *longest {
+            *longest = gap;
+        }
+        *last = Instant::now();
+    };
+    loop {
+        seat(SeatOp::Dispatch);
+        note(&mut last, &mut longest);
+        match phase {
+            Phase::Running | Phase::Exit => return (longest, forced),
+            Phase::StopProducers => {
+                let done = stops.iter_mut().all(|stop| stop());
+                if done || Instant::now() >= phase_deadline {
+                    phase = Phase::DrainGpu;
+                } else {
+                    wait_for(SLICE);
+                }
+            }
+            Phase::DrainGpu => {
+                if let Some(stall) = stall.take() {
+                    // No dispatch inside this wait. The next iteration records it.
+                    wait_for(stall);
+                }
+                if device.poll_idle() {
+                    phase = Phase::DestroyResources;
+                } else if Instant::now() >= phase_deadline {
+                    forced = true;
+                    phase = Phase::DestroyResources;
+                } else {
+                    wait_for(SLICE);
+                }
+            }
+            Phase::DestroyResources => {
+                if device.destroy_step() {
+                    phase = Phase::Unmap;
+                }
+            }
+            Phase::Unmap => {
+                seat(SeatOp::Unmap);
+                phase = Phase::Exit;
+            }
+        }
+    }
+}
+
+fn report(gap: Duration, forced: bool) {
+    let ms = duration_ms(gap);
+    println!("{QUIT_GAP_PREFIX}{ms:.3}");
+    if forced {
+        println!("lifecycle_drain_forced=1");
+    }
+    let _ = std::io::stdout().flush();
+}
+
+fn duration_ms(gap: Duration) -> f64 {
+    gap.as_secs_f64() * 1000.0
+}
+
+fn wait_for(duration: Duration) {
+    if duration.is_zero() {
+        return;
+    }
+    let deadline = Instant::now() + duration;
+    let pair = (Mutex::new(()), Condvar::new());
+    while Instant::now() < deadline {
+        let guard = match pair.0.lock() {
+            Ok(guard) => guard,
+            Err(poison) => poison.into_inner(),
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let _ = pair.1.wait_timeout(guard, remaining);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Scripted {
+        polls: u8,
+        steps: u8,
+        log: std::sync::Arc<Mutex<Vec<&'static str>>>,
+        block: Option<Duration>,
+    }
+
+    impl ShutdownDevice for Scripted {
+        fn prepare_shutdown(&mut self) {
+            self.push("prepare");
+        }
+
+        fn poll_idle(&mut self) -> bool {
+            self.push("poll");
+            self.polls = self.polls.saturating_add(1);
+            self.polls >= 2
+        }
+
+        fn destroy_step(&mut self) -> bool {
+            if let Some(block) = self.block.take() {
+                wait_for(block);
+            }
+            self.push("destroy");
+            self.steps = self.steps.saturating_add(1);
+            self.steps >= 2
+        }
+    }
+
+    impl Scripted {
+        fn push(&self, step: &'static str) {
+            self.log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(step);
+        }
+    }
+
+    fn log_of(log: &std::sync::Arc<Mutex<Vec<&'static str>>>) -> Vec<&'static str> {
+        log.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[test]
+    fn shutdown_dispatches_between_stop_drain_destroy_and_unmap() {
+        let log = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mut device = Scripted {
+            polls: 0,
+            steps: 0,
+            log: std::sync::Arc::clone(&log),
+            block: None,
+        };
+        let mut hits = 0u8;
+        let mut stops: Vec<Stop> = vec![Box::new(move || {
+            hits = hits.saturating_add(1);
+            hits >= 2
+        })];
+        let mut stall = None;
+        let mut seat_log = Vec::new();
+        let (gap, forced) = drive_machine(&mut device, &mut stops, &mut stall, |op| match op {
+            SeatOp::Dispatch => seat_log.push("dispatch"),
+            SeatOp::Unmap => seat_log.push("unmap"),
+        });
+        assert!(!forced);
+        assert!(
+            gap_within_budget(duration_ms(gap)),
+            "idle shutdown gap {} ms",
+            duration_ms(gap)
+        );
+        let trace = log_of(&log);
+        let poll_at = trace.iter().position(|step| *step == "poll").expect("poll");
+        let destroy_at = trace
+            .iter()
+            .position(|step| *step == "destroy")
+            .expect("destroy");
+        let unmap_at = seat_log
+            .iter()
+            .position(|step| *step == "unmap")
+            .expect("unmap");
+        assert!(poll_at < destroy_at, "{trace:?}");
+        assert!(seat_log[..unmap_at].contains(&"dispatch"));
+        assert!(seat_log.iter().filter(|step| **step == "dispatch").count() >= 4);
+        assert_eq!(trace.iter().filter(|step| **step == "destroy").count(), 2);
+        assert_eq!(trace.first().copied(), Some("poll"));
+    }
+
+    #[test]
+    fn a_planted_block_fails_the_budget_predicate() {
+        let log = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mut device = Scripted {
+            polls: 1,
+            steps: 1,
+            log,
+            block: Some(Duration::from_millis(2000)),
+        };
+        let mut stops: Vec<Stop> = Vec::new();
+        let mut stall = None;
+        let (gap, _) = drive_machine(&mut device, &mut stops, &mut stall, |_| {});
+        let ms = duration_ms(gap);
+        println!("MEASURE planted_gap_ms={ms:.1}");
+        assert!(
+            !gap_within_budget(ms),
+            "a 2s teardown block must fail the budget, gap {ms:.1} ms"
+        );
+        assert!(ms >= 1000.0, "planted gap was only {ms:.1} ms");
+    }
+
+    #[test]
+    fn a_stall_between_dispatches_fails_the_same_predicate() {
+        let log = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mut device = Scripted {
+            polls: 1,
+            steps: 1,
+            log,
+            block: None,
+        };
+        let mut stops: Vec<Stop> = Vec::new();
+        let mut stall = Some(Duration::from_millis(2000));
+        let (gap, _) = drive_machine(&mut device, &mut stops, &mut stall, |_| {});
+        let ms = duration_ms(gap);
+        assert!(!gap_within_budget(ms), "stall gap {ms:.1} ms");
+    }
+
+    #[test]
+    fn the_gap_line_parses() {
+        let text = "noise\nlifecycle_quit_gap_ms=12.500\n";
+        assert_eq!(parse_quit_gap(text), Some(12.5));
+        assert!(gap_within_budget(12.5));
+        assert!(!gap_within_budget(100.0));
+        assert!(!gap_within_budget(2000.0));
+    }
+
+    #[test]
+    fn block_flag_parses_inline_and_separate() {
+        assert_eq!(block_ms_needs_value("--lifecycle-block-ms"), Some(true));
+        assert_eq!(block_ms_needs_value("--lifecycle-block-ms=20"), Some(false));
+        assert_eq!(block_ms_needs_value("--frames"), None);
+        assert_eq!(
+            parse_block_ms("--lifecycle-block-ms", Some("40")).expect("parse"),
+            Duration::from_millis(40)
+        );
+        assert_eq!(
+            parse_block_ms("--lifecycle-block-ms=15", None).expect("inline"),
+            Duration::from_millis(15)
+        );
+        assert!(parse_block_ms("--lifecycle-block-ms", None).is_err());
+    }
+}
