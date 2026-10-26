@@ -30,6 +30,8 @@ layout(std430, set = 0, binding = 14) readonly buffer HdrPost {
     vec4 v;
 } hdr;
 
+#include "hdr_display.glsl"
+
 const float LAMBERT = 0.254647909;
 
 float tone_channel(float x) {
@@ -211,8 +213,13 @@ void main() {
         exposure = 1.0;
     }
     c *= exposure;
-    // Legacy display. Exposure 1 and bloom off keep today's bytes.
+    // Mode 0 is the legacy shoulder. Mode 1 is the AgX lattice. Mode 2 is
+    // ACES, which is not the CTL, so it keeps the shoulder. Exposure 1 and
+    // bloom off with mode 0 keep today's bytes.
     shown = vec3(tone_channel(c.r), tone_channel(c.g), tone_channel(c.b));
+    if (hdr.v.y == 1.0) {
+        shown = agx_sample(c);
+    }
     // Magenta on pixels whose surface-cache corners had no finished set.
     // GENOS_LIGHTING_UNFILLED_TINT, or Shift+F8. Quiet compose only tints the
     // blocks it redrew; a turn composes the whole frame.

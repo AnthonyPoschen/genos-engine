@@ -272,6 +272,16 @@ impl Renderer {
         (self.gpu.format, crate::hdr_output::COLOR_SPACE_SRGB)
     }
 
+    /// The legacy shoulder is the display curve, so a missing scene image may undo it.
+    /// `AgX` and ACES are not inverted.
+    pub fn hdr_legacy_display(&self) -> bool {
+        self.gpu.lighting.hdr.legacy_bytes
+            || matches!(
+                self.gpu.lighting.hdr.display,
+                genos_scene::DisplayTransform::Legacy
+            )
+    }
+
     /// Drop the surface cache and its work list on the next draw.
     ///
     /// A scene switch calls this. Recreating the renderer would compile the

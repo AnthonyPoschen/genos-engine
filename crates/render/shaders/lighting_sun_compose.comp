@@ -30,6 +30,8 @@ layout(std430, set = 0, binding = 14) readonly buffer HdrPost {
     vec4 v;
 } hdr;
 
+#include "hdr_display.glsl"
+
 const float LAMBERT = 0.254647909;
 
 float tone_channel(float x) {
@@ -216,5 +218,8 @@ void main() {
     }
     c *= exposure;
     shown = vec3(tone_channel(c.r), tone_channel(c.g), tone_channel(c.b));
+    if (hdr.v.y == 1.0) {
+        shown = agx_sample(c);
+    }
     outc.px[index] = pack_rgb(dither8(shown, p));
 }

@@ -594,6 +594,54 @@ pub fn pq_st2084(nits: f64) -> f64 {
     ((c1 + c2 * y_m) / (1.0 + c3 * y_m)).powf(m2)
 }
 
+/// Lattice edge. Log2 from [`AGX_LOG_MIN`] to [`AGX_LOG_MAX`], inclusive.
+pub const AGX_LUT_N: usize = 32;
+/// Lowest log2 the `AgX` lattice stores.
+pub const AGX_LOG_MIN: f64 = -12.0;
+/// Highest log2 the `AgX` lattice stores.
+pub const AGX_LOG_MAX: f64 = 10.0;
+/// Bytes of the `vec4` lattice (`N³ × 16`).
+pub const AGX_LUT_BYTES: u64 = 32 * 32 * 32 * 16;
+
+/// Linear radiance at lattice index `index` along one axis.
+#[must_use]
+pub fn agx_lut_linear(index: usize) -> f64 {
+    let span = AGX_LUT_N.saturating_sub(1).max(1);
+    let t = usize_to_f64(index) / usize_to_f64(span);
+    (AGX_LOG_MIN + t * (AGX_LOG_MAX - AGX_LOG_MIN)).exp2()
+}
+
+/// One lattice texel. The compose shader samples the buffer this fills.
+#[must_use]
+pub fn agx_lut_texel(x: usize, y: usize, z: usize) -> [f64; 3] {
+    agx_rec709([
+        agx_lut_linear(x),
+        agx_lut_linear(y),
+        agx_lut_linear(z),
+    ])
+}
+
+/// Packed `vec4` words, x-fastest. `w` is 0. Built once per process.
+#[must_use]
+pub fn agx_lut_words() -> &'static [f32] {
+    static WORDS: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    WORDS.get_or_init(|| {
+        let mut words = Vec::with_capacity(AGX_LUT_N * AGX_LUT_N * AGX_LUT_N * 4);
+        for z in 0..AGX_LUT_N {
+            for y in 0..AGX_LUT_N {
+                for x in 0..AGX_LUT_N {
+                    let rgb = agx_lut_texel(x, y, z);
+                    words.push(narrow_f32(rgb[0]));
+                    words.push(narrow_f32(rgb[1]));
+                    words.push(narrow_f32(rgb[2]));
+                    words.push(0.0);
+                }
+            }
+        }
+        words
+    })
+}
+
 /// `AgX` sRGB-cube code for scene-linear `Rec.709`. The display pass calls this for `display=agx`.
 #[must_use]
 pub fn agx_rec709(scene: [f64; 3]) -> [f64; 3] {
@@ -954,4 +1002,27 @@ fn floor_usize(value: f64) -> usize {
 
 fn floor_u32(value: f64) -> u32 {
     u32::try_from(floor_i32(value.max(0.0))).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_agx_lattice_is_agx_rec709() {
+        let lo = agx_lut_linear(0);
+        let hi = agx_lut_linear(AGX_LUT_N - 1);
+        let corner = agx_lut_texel(0, 0, 0);
+        let expect = agx_rec709([lo, lo, lo]);
+        let err = (corner[0] - expect[0]).abs()
+            + (corner[1] - expect[1]).abs()
+            + (corner[2] - expect[2]).abs();
+        assert!(err < 1.0e-12);
+        let top = agx_lut_texel(AGX_LUT_N - 1, AGX_LUT_N - 1, AGX_LUT_N - 1);
+        let expect_hi = agx_rec709([hi, hi, hi]);
+        let err_hi = (top[1] - expect_hi[1]).abs();
+        assert!(err_hi < 1.0e-9);
+        assert_eq!(agx_lut_words().len(), AGX_LUT_N * AGX_LUT_N * AGX_LUT_N * 4);
+        assert!(aces2_rec709([1.0, 1.0, 1.0]).is_none());
+    }
 }

@@ -252,6 +252,8 @@ struct RefJob {
     paused: bool,
     /// Scene-referred read of the live frame. None falls back to the display image.
     scene: Option<SceneRead>,
+    /// The live picture used the legacy shoulder, so a missing scene image may undo it.
+    legacy_display: bool,
 }
 
 struct Running {
@@ -555,6 +557,7 @@ impl Tools {
                                 .read_scene()
                                 .ok()
                                 .filter(|read| !read.rgb.is_empty());
+                            job.legacy_display = renderer.hdr_legacy_display();
                             image_used = true;
                         }
                     }
@@ -565,11 +568,13 @@ impl Tools {
                     if failed {
                         Some(Err("the reference trace panicked".to_string()))
                     } else if ready {
+                        let legacy_display = job.legacy_display;
                         Some(finish_reference(
                             job,
                             &self.out_dir,
                             &mut self.captures,
                             &mut self.references,
+                            legacy_display,
                         ))
                     } else {
                         None
@@ -1200,6 +1205,7 @@ impl Tools {
                     region: region_arg(args)?,
                     paused: self.paused,
                     scene: None,
+                    legacy_display: true,
                 };
                 // Reuse a stored reference instead of tracing again.
                 if let Some(stored) = args.str("reference")? {
@@ -1583,6 +1589,7 @@ fn finish_reference(
     out_dir: &std::path::Path,
     captures: &mut HashMap<String, Image>,
     references: &mut HashMap<String, Reference>,
+    legacy_display: bool,
 ) -> Result<Value, String> {
     let r = job.reference.take().ok_or("no reference")?;
     let prefix = job.prefix.clone().unwrap_or_else(|| "reference".into());
@@ -1611,9 +1618,13 @@ fn finish_reference(
         let (c, heat, grade) = if let Some(scene) = &job.scene {
             let (c, heat) = reference::compare_linear(scene, &r, job.region, job.grid, job.block);
             (c, heat, "scene")
-        } else {
+        } else if legacy_display {
             let (c, heat) = reference::compare(live, &r, job.region, job.grid, job.block);
             (c, heat, "display")
+        } else {
+            return Err(
+                "the scene image is missing, so this display transform is not graded".into(),
+            );
         };
         live.resized(r.image.width, r.image.height)
             .save(&path("live"))?;

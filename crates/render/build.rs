@@ -122,6 +122,7 @@ fn main() {
     println!("cargo:rerun-if-changed=shaders/mesh_field.glsl");
     println!("cargo:rerun-if-changed=shaders/scene_data.glsl");
     println!("cargo:rerun-if-changed=shaders/dither.glsl");
+    println!("cargo:rerun-if-changed=shaders/hdr_display.glsl");
     println!("cargo:rerun-if-changed=shaders/transmit.comp");
     println!("cargo:rerun-if-changed=shaders/fxaa.comp");
 }

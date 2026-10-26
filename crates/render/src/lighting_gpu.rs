@@ -112,6 +112,8 @@ pub(crate) struct Lighting {
     scene_host: Buffer,
     /// Exposure, display mode, bloom intensity. Host-visible. The compose shader reads it.
     hdr_params: Buffer,
+    /// `AgX` lattice from `agx_rec709`. Host-visible. Sampled when the display mode is 1.
+    agx_lut: Buffer,
     hdr: genos_scene::HdrSettings,
     /// Last scale written. Legacy bytes stay at 1.
     exposure_scale: f32,
@@ -366,6 +368,7 @@ impl Default for Lighting {
             scene_lin: Buffer::empty(),
             scene_host: Buffer::empty(),
             hdr_params: Buffer::empty(),
+            agx_lut: Buffer::empty(),
             hdr: genos_scene::HdrSettings::legacy_bytes(),
             exposure_scale: 1.0,
             last_ev100: 0.0,
@@ -557,7 +560,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -646,7 +649,7 @@ impl Gpu {
                 ),
                 "lighting pipeline layout",
             )?;
-            let size = Size { kind: 7, count: 33 };
+            let size = Size { kind: 7, count: 36 };
             let pool = PoolInfo {
                 s_type: 33,
                 next: std::ptr::null(),
@@ -922,12 +925,14 @@ impl Gpu {
         let mut scene_lin = std::mem::replace(&mut self.lighting.scene_lin, Buffer::empty());
         let mut scene_host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
         let mut hdr_params = std::mem::replace(&mut self.lighting.hdr_params, Buffer::empty());
+        let mut agx_lut = std::mem::replace(&mut self.lighting.agx_lut, Buffer::empty());
         self.destroy_buffer(&mut gbuf);
         self.destroy_buffer(&mut work);
         self.destroy_buffer(&mut out);
         self.destroy_buffer(&mut scene_lin);
         self.destroy_buffer(&mut scene_host);
         self.destroy_buffer(&mut hdr_params);
+        self.destroy_buffer(&mut agx_lut);
         // Both queues use the light cache and the work buffer's ray slots.
         let share = self.light_families();
         if self.lighting.stats[0].buffer.is_null() {
@@ -1011,6 +1016,8 @@ impl Gpu {
         self.lighting.scene_lin = self.make_buffer(scene_bytes, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.scene_host = self.make_buffer(scene_bytes, 0x2, Memory::Readback)?;
         self.lighting.hdr_params = self.make_buffer(16, 0x20, Memory::Upload)?;
+        self.lighting.agx_lut = self.make_buffer(crate::hdr_output::AGX_LUT_BYTES, 0x20, Memory::Upload)?;
+        self.write_agx_lut();
         self.lighting.hdr_copied = false;
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
         self.destroy_buffer(&mut lamp_res);
@@ -1074,6 +1081,7 @@ impl Gpu {
                 (8, self.lighting.out.buffer),
                 (13, self.lighting.scene_lin.buffer),
                 (14, self.lighting.hdr_params.buffer),
+                (15, self.lighting.agx_lut.buffer),
                 (9, self.lighting.cache_keys.buffer),
                 (10, self.lighting.cache.buffer),
                 (11, stats),
@@ -2105,10 +2113,16 @@ impl Gpu {
             let extra = self.lighting.exposure_log.len() - 8;
             self.lighting.exposure_log.drain(0..extra);
         }
-        let mode = match self.lighting.hdr.display {
-            genos_scene::DisplayTransform::Legacy => 0.0,
-            genos_scene::DisplayTransform::Agx => 1.0,
-            genos_scene::DisplayTransform::Aces => 2.0,
+        // `legacy_bytes` forces the shoulder. Mode 2 is ACES, which is not the
+        // CTL, so the shader keeps the shoulder for that mode too.
+        let mode = if self.lighting.hdr.legacy_bytes {
+            0.0
+        } else {
+            match self.lighting.hdr.display {
+                genos_scene::DisplayTransform::Legacy => 0.0,
+                genos_scene::DisplayTransform::Agx => 1.0,
+                genos_scene::DisplayTransform::Aces => 2.0,
+            }
         };
         let bloom = if self.lighting.hdr.bloom {
             self.lighting.hdr.bloom_intensity as f32
@@ -2133,6 +2147,30 @@ impl Gpu {
             (self.fns.unmap_mem)(self.device, self.lighting.hdr_params.memory);
         }
         self.memory_barrier(0x4000, 0x20, 0x4000, 0x20);
+    }
+
+    fn write_agx_lut(&mut self) {
+        if self.lighting.agx_lut.memory.is_null() {
+            return;
+        }
+        let words = crate::hdr_output::agx_lut_words();
+        let bytes = u64::try_from(words.len().saturating_mul(4)).unwrap_or(0);
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(
+                self.device,
+                self.lighting.agx_lut.memory,
+                0,
+                bytes,
+                0,
+                &mut mapped,
+            ) != 0
+            {
+                return;
+            }
+            std::ptr::copy_nonoverlapping(words.as_ptr(), mapped.cast::<f32>(), words.len());
+            (self.fns.unmap_mem)(self.device, self.lighting.agx_lut.memory);
+        }
     }
 
     fn copy_scene_for_meter(&mut self) {
@@ -3045,6 +3083,7 @@ impl Gpu {
         let mut scene_lin = std::mem::replace(&mut self.lighting.scene_lin, Buffer::empty());
         let mut scene_host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
         let mut hdr_params = std::mem::replace(&mut self.lighting.hdr_params, Buffer::empty());
+        let mut agx_lut = std::mem::replace(&mut self.lighting.agx_lut, Buffer::empty());
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
@@ -3060,6 +3099,7 @@ impl Gpu {
         self.destroy_buffer(&mut scene_lin);
         self.destroy_buffer(&mut scene_host);
         self.destroy_buffer(&mut hdr_params);
+        self.destroy_buffer(&mut agx_lut);
         self.destroy_buffer(&mut lamp_res);
         self.destroy_buffer(&mut keys);
         self.destroy_buffer(&mut cache);

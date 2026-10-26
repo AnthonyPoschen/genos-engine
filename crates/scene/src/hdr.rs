@@ -101,10 +101,12 @@ impl HdrSettings {
         }
     }
 
-    /// Design defaults for a lighting preset. Display stays legacy until `AgX` is the default.
+    /// Design defaults for a lighting preset. `AgX` is the display transform.
+    /// `legacy_bytes` stays on the shoulder so an old picture does not move.
     pub fn for_preset(preset: LightingPreset) -> Self {
         let mut settings = Self::legacy_bytes();
         settings.legacy_bytes = false;
+        settings.display = DisplayTransform::Agx;
         match preset {
             LightingPreset::Potato => {
                 settings.exposure_mode = ExposureMode::Fixed;
@@ -514,10 +516,11 @@ mod tests {
         let high = HdrSettings::for_preset(LightingPreset::High);
         assert!(matches!(high.exposure_mode, ExposureMode::Auto));
         assert!(!high.legacy_bytes);
-        assert!(matches!(high.display, DisplayTransform::Legacy));
+        assert!(matches!(high.display, DisplayTransform::Agx));
         assert!(matches!(high.output, OutputMode::Auto));
         let potato = HdrSettings::for_preset(LightingPreset::Potato);
         assert!(matches!(potato.exposure_mode, ExposureMode::Fixed));
+        assert!(matches!(potato.display, DisplayTransform::Agx));
         assert!(matches!(potato.output, OutputMode::Sdr));
         assert!(!potato.bloom);
         assert_eq!(potato.bloom_levels, 0);

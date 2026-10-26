@@ -154,9 +154,13 @@ fn capture_one(
         let pixels = renderer.draw(&stage.world, &camera, true)?;
         let wall_s = started.elapsed().as_secs_f64();
         let pixels = pixels.ok_or_else(|| "readback returned no picture".to_string())?;
-        let picture = scene_picture(renderer).or_else(|_| {
-            Picture::from_bgra(renderer.width(), renderer.height(), &pixels)
-        })?;
+        let picture = match scene_picture(renderer) {
+            Ok(picture) => picture,
+            Err(_) if renderer.hdr_legacy_display() => {
+                Picture::from_bgra(renderer.width(), renderer.height(), &pixels)?
+            }
+            Err(err) => return Err(err),
+        };
         let raw_settled = renderer.picture_settled();
         let trusted = prev_phase == Some(step.phase);
         prev_phase = Some(step.phase);

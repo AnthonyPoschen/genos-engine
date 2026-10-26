@@ -191,7 +191,7 @@ The upsample is a 3×3 tent: 0.25 at the centre, 0.125 on the edges, 0.0625 on t
 | `shutter` | seconds | 1/60 |
 | `adapt_down` | seconds, exposure falling (scene got brighter) | 0.40 |
 | `adapt_up` | seconds, exposure rising (scene got darker) | 0.80 |
-| `display` | `agx`, `aces`, `legacy` | `legacy` until phase 5, then `agx` |
+| `display` | `agx`, `aces`, `legacy` | `agx`. `aces` presents the legacy shoulder until `aces2_rec709` is the Academy CTL |
 | `bloom` | `off`, `on` | `on` from phase 4; `off` on Potato |
 | `bloom_intensity` | float, scales the pyramid add | 0.05 (0 on Potato) |
 | `bloom_levels` | 0..6 | 6 on High, 5 Medium, 4 Low, 0 Potato |
