@@ -28,7 +28,9 @@ pub use lighting::{
     lighting_flag_needs_value, AmbientMode, AmbientSettings, BounceSettings, DenoiserSettings,
     DirectSettings, GiSettings, GpuBuckets, LampPickMode, LampPickSettings, LightingPreset,
     LightingSettings, ProbeSettings, ShadowFilter, ShadowSettings, SurfaceCacheBlend,
-    SurfaceCacheSettings, WorldCacheSettings, LIGHTING_BOUNCES_UNLIMITED,
+    SurfaceCacheSettings, WorldCacheSettings, LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_CANDIDATES_LOW,
+    LAMP_PICK_CANDIDATES_MEDIUM, LAMP_PICK_HOLD_FRAMES, LAMP_PICK_SPATIAL_RADIUS,
+    LIGHTING_BOUNCES_UNLIMITED,
 };
 pub use menu::{parse_focus_policy, parse_menu_visible, FocusPolicy, MenuCli, MenuSettings};
 pub use script::{load_path, load_str};

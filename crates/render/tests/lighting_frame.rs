@@ -2154,3 +2154,104 @@ fn lamp_pick_each_mode_against_off() {
         "reuse matched off ({err:.4}); the one-sample visibility error did not show"
     );
 }
+
+/// Preset reservoirs trace one point-lamp shadow ray per pixel.
+///
+/// Off grows with the lamp count. High does not. `lamps_shaded` is those rays.
+#[test]
+fn preset_direct_scales_with_samples_not_lamps() {
+    let (_gpu, mut window, mut renderer) = open();
+    let _diag = LampDiag;
+    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+    let camera = lamp_camera();
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    let slim = |preset: LightingPreset| {
+        let mut settings = LightingSettings::preset(preset);
+        settings.denoiser.enabled = false;
+        settings.probes.enabled = false;
+        settings.prefill = false;
+        settings.bounce.count = 1;
+        settings.sky = false;
+        settings.ambient.mode = AmbientMode::Off;
+        settings.direct.max_lights = 0;
+        if preset != LightingPreset::Potato {
+            settings.world_cache.enabled = true;
+            settings.gi.enabled = true;
+        }
+        settings
+    };
+    let count_of = |renderer: &mut Renderer, window: &mut Window, lights: usize, preset: LightingPreset| {
+        let world = white_lamps(lights);
+        renderer.set_lighting_settings(slim(preset));
+        let _ = draw(window, renderer, &world, &camera);
+        traced_rays(renderer.lighting_lamp_pick_counts())
+    };
+    let off3 = count_of(&mut renderer, &mut window, 3, LightingPreset::Potato);
+    let off12 = count_of(&mut renderer, &mut window, 12, LightingPreset::Potato);
+    eprintln!("preset potato rays 3={off3} 12={off12}");
+    assert!(off3 > 0, "potato traced nothing");
+    assert!(
+        off12 > off3.saturating_mul(2),
+        "potato did not grow with the lamps ({off3} -> {off12})"
+    );
+    let high3 = count_of(&mut renderer, &mut window, 3, LightingPreset::High);
+    let high12 = count_of(&mut renderer, &mut window, 12, LightingPreset::High);
+    eprintln!("preset high rays 3={high3} 12={high12}");
+    assert!(high3 > 0 && high12 > 0, "high traced nothing");
+    assert!(
+        high12 < high3 + high3 / 2,
+        "high grew with the lamps ({high3} -> {high12})"
+    );
+    assert!(
+        high12 * 2 < off12,
+        "high did not stay under the full sum ({high12} vs {off12})"
+    );
+}
+
+/// A quiet occluded pixel's mean moves toward the full sum and then holds still.
+///
+/// Probes stay on and the world cache stays off: bounce 1 with the world-cache
+/// bit set keeps `lighting_pix_quiet` false, so the mean would never run.
+#[test]
+fn preset_direct_converges_without_flicker() {
+    let (_gpu, mut window, mut renderer) = open();
+    let world = shadowed_lamps();
+    let camera = lamp_camera();
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    let mut settings = LightingSettings::preset(LightingPreset::Low);
+    settings.denoiser.enabled = false;
+    settings.prefill = false;
+    settings.sky = false;
+    settings.ambient.mode = AmbientMode::Off;
+    settings.direct.max_lights = 0;
+    settings.compose_reuse = false;
+    settings.probes.rays = 4;
+    settings.probes.tile = 64;
+    renderer.set_lighting_settings(direct_pick(LampPickMode::Off, 1));
+    let off = draw(&mut window, &mut renderer, &world, &camera);
+    assert!(mean_byte(&off) > 1.0, "the full sum is black");
+    renderer.set_lighting_settings(settings);
+    let mut frames = Vec::new();
+    for _ in 0..12 {
+        frames.push(draw(&mut window, &mut renderer, &world, &camera));
+    }
+    let first = mean_abs(&off, &frames[0]);
+    let last = mean_abs(&off, frames.last().expect("frames"));
+    let early = mean_abs(&frames[0], &frames[1]);
+    let late = mean_abs(&frames[10], &frames[11]);
+    eprintln!("preset converge first {first:.3} last {last:.3} early {early:.3} late {late:.3}");
+    assert!(
+        last < first,
+        "the mean did not approach the full sum ({first:.3} -> {last:.3})"
+    );
+    assert!(
+        late < early.max(0.05),
+        "a still pixel flickered ({early:.3} -> {late:.3})"
+    );
+}

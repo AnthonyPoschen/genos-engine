@@ -155,7 +155,7 @@ const USAGE: &str = "genos-stress [options]
                             variable override the preset
   --denoise-screen on|off   alias of --denoise-launch (on is screen, off is hash)
   --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
-  --lamp-pick MODE          off, hits, pixels, both, or reuse (experimental)
+  --lamp-pick MODE          off, hits, pixels, both, or reuse
                             (GENOS_LIGHTING_LAMP_PICK; reuse is the same mode)
   --lamp-pick-samples N     shadow rays per shaded point, 1..4 (GENOS_LIGHTING_LAMP_PICK_SAMPLES)
   --lamp-pick-rays N        same knob as --lamp-pick-samples

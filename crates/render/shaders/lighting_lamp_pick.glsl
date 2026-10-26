@@ -7,8 +7,15 @@
 // positive). This file does not trace. The shade loop's one trace_occluded
 // is the only shadow ray.
 //
-// Deviations from the paper are listed in docs/systems/lighting/README.md.
-// The CPU twin is crates/render/src/lamp_pick.rs.
+// Low keeps one reservoir (temporal only, radius 0). Medium and High keep
+// the current and previous slots. The high 8 bits of `m` are the quiet-frame
+// integration count; Algorithm 6 reads the low 24 bits. Deviations from the
+// paper are listed in docs/systems/lighting/README.md. The CPU twin is
+// crates/render/src/lamp_pick.rs.
+
+// Quiet frames averaged before a still pixel holds its direct light.
+// Matches LAMP_PICK_HOLD_FRAMES in crates/scene/src/lighting.rs.
+const uint LIGHTING_DIRECT_HOLD = 32u;
 
 layout(std430, set = 0, binding = 12) buffer LampReservoirs {
     uvec4 v[];
@@ -28,6 +35,34 @@ LampReservoir lamp_res_empty() {
     r.m = 0u;
     r.target = 0.0;
     return r;
+}
+
+uint lamp_res_frames(LampReservoir r) {
+    return r.m >> 24u;
+}
+
+uint lamp_res_samples(LampReservoir r) {
+    return r.m & 0x00ffffffu;
+}
+
+// Radius 0 is one slot, read and written in place. A neighbour merge needs
+// the previous frame left untouched, so it ping-pongs two slots.
+bool lamp_res_one_slot() {
+    return pc.lamp.z == 0u;
+}
+
+uint lamp_res_slot_now() {
+    return lamp_res_one_slot() ? 0u : (pc.params.w & 1u);
+}
+
+uint lamp_res_slot_prev() {
+    return lamp_res_one_slot() ? 0u : ((pc.params.w + 1u) & 1u);
+}
+
+// A quiet pixel changes its candidate each frame so the mean can converge.
+// A listed mover freezes the seed: the shade does not boil while something moves.
+uint lamp_pick_frame_mix() {
+    return lighting_pix_quiet() ? pc.params.w : 0u;
 }
 
 uint lamp_pick_candidates() {
@@ -139,6 +174,8 @@ LampReservoir lamp_pick_merge(
     uint history_cap,
     float u
 ) {
+    canonical.m = lamp_res_samples(canonical);
+    history.m = lamp_res_samples(history);
     if (canonical.m == 0u || canonical.lamp == LAMP_ALL) {
         if (history.m == 0u) {
             return lamp_res_empty();
@@ -192,7 +229,7 @@ LampReservoir lamp_pick_merge(
     if (z == 0u) {
         z = 1u;
     }
-    uint m_out = canonical.m + hist_m;
+    uint m_out = min(canonical.m + hist_m, 0x00ffffffu);
     LampReservoir outr;
     outr.lamp = lamp;
     outr.w_sum = float(m_out) * wsum / float(z);

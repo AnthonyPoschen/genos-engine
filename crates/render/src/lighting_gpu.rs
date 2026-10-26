@@ -978,8 +978,14 @@ impl Gpu {
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
         self.destroy_buffer(&mut lamp_res);
         let reuse = settings.lamp_pick.reuse();
-        // Two frames of 16-byte records. Off keeps a dummy so binding 12 is valid.
-        let lamp_bytes = if reuse { pixels.saturating_mul(32).max(64) } else { 64 };
+        // 16 bytes a pixel. Spatial reuse keeps the previous frame (32 bytes).
+        // Temporal only (radius 0) keeps one slot. Off binds a dummy so binding 12 is valid.
+        let slots = if settings.lamp_pick.radius > 0 { 2 } else { 1 };
+        let lamp_bytes = if reuse {
+            pixels.saturating_mul(16 * slots).max(64)
+        } else {
+            64
+        };
         self.lighting.lamp_res = self.make_buffer_queues(lamp_bytes, 0x20 | 0x2, Memory::Device, &share)?;
         self.lighting.lamp_res_clear = reuse;
         self.lighting.dims = [w, h, cols, rows];

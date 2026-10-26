@@ -51,6 +51,47 @@ pub fn systematic_point(point: &[f32], sun: f32, rays: u32, u: f32) -> Vec<f32> 
     systematic_contribution(point, rays, u)
 }
 
+/// One reservoir sample's luminance.
+///
+/// The shade is `total * visibility` of the lamp the prefix selects: unbiased
+/// for `sum(weight * visibility)`, and exact when every visibility matches.
+/// `u` is in `[0, 1)`.
+pub fn one_sample_luminance(weights: &[f32], visible: &[f32], u: f32) -> f32 {
+    let total: f32 = weights.iter().copied().filter(|w| *w > 0.0).sum();
+    let lit = weights.iter().filter(|w| **w > 0.0).count();
+    if lit == 0 || total <= 0.0 {
+        return 0.0;
+    }
+    let exact = lit <= 1;
+    let step = total;
+    let mut run = 0.0;
+    let mut found = None;
+    for (i, &w) in weights.iter().enumerate() {
+        if w <= 0.0 {
+            continue;
+        }
+        let times = if exact {
+            1.0
+        } else {
+            let before = (run / step - u).ceil();
+            run += w;
+            (run / step - u).ceil() - before
+        };
+        if times > 0.0 {
+            found = Some(i);
+        }
+    }
+    found.map_or(0.0, |i| total * visible.get(i).copied().unwrap_or(0.0))
+}
+
+/// Running mean of unbiased samples. A still pixel shows this, then holds.
+pub fn cumulative_mean(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    samples.iter().sum::<f32>() / samples.len() as f32
+}
+
 /// How many point lamps a systematic draw traces. The sun is one extra ray.
 pub fn traced_point_lamps(weights: &[f32], rays: u32, u: f32) -> u32 {
     systematic_contribution(weights, rays, u)
@@ -100,14 +141,17 @@ impl Reservoir {
 /// from Wyman and Panteleev 2021. `phat_q` and `phat_hist` are the unshadowed
 /// luminance of a lamp at the current pixel and at the history pixel.
 pub fn merge_reservoirs(
-    canonical: Reservoir,
-    history: Reservoir,
+    mut canonical: Reservoir,
+    mut history: Reservoir,
     phat_q: impl Fn(u32) -> f32,
     phat_hist: impl Fn(u32) -> f32,
     unbiased: bool,
     history_cap: u32,
     u: f32,
 ) -> Reservoir {
+    // The shader stores the quiet-frame count in the high 8 bits of `m`.
+    canonical.m &= 0x00ff_ffff;
+    history.m &= 0x00ff_ffff;
     if canonical.m == 0 || canonical.lamp == LAMP_EMPTY {
         return if history.m == 0 {
             Reservoir::empty()
@@ -275,5 +319,57 @@ mod tests {
             merged.estimate()
         );
         assert_eq!(merged.m, 5);
+    }
+
+    #[test]
+    fn merge_ignores_the_quiet_frame_count_in_the_high_bits() {
+        let canonical = Reservoir {
+            lamp: 1,
+            w_sum: 10.0,
+            m: 2,
+            target: 10.0,
+        };
+        let history = Reservoir {
+            lamp: 1,
+            w_sum: 10.0,
+            m: 3 | (32 << 24),
+            target: 10.0,
+        };
+        let merged = merge_reservoirs(canonical, history, at(1, 10.0), at(1, 10.0), true, 20, 0.9);
+        assert_eq!(merged.m, 5, "the frame count must not enter M");
+    }
+
+    #[test]
+    fn the_cumulative_mean_converges_to_the_visibility_sum() {
+        let weights = [1.0, 3.0, 6.0];
+        let visible = [1.0, 0.0, 1.0];
+        let reference: f32 = weights
+            .iter()
+            .zip(visible)
+            .map(|(w, v)| w * v)
+            .sum();
+        assert!((reference - 7.0).abs() < 1.0e-4);
+        let mut samples = Vec::new();
+        let mut u = 0.0;
+        while u < 1.0 {
+            samples.push(one_sample_luminance(&weights, &visible, u));
+            u += 1.0 / 64.0;
+        }
+        let early = cumulative_mean(&samples[..32]);
+        let late = cumulative_mean(&samples);
+        assert!(
+            (late - reference).abs() < 0.35,
+            "late mean {late} reference {reference}"
+        );
+        assert!(
+            (late - reference).abs() < (early - reference).abs(),
+            "early {early} late {late} reference {reference}"
+        );
+        let stable = one_sample_luminance(&weights, &visible, 0.2);
+        assert_eq!(
+            cumulative_mean(&[stable, stable, stable]),
+            stable,
+            "a frozen seed does not boil"
+        );
     }
 }

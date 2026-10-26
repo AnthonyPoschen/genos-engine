@@ -157,10 +157,10 @@ Role: STORE · Literature: GIBS screen-relative size (§1.6, deviates: discrete 
 **Lamp**: a point light. The sun is not a lamp.
 Role: LIGHTS
 
-**Lamp pick**: chooses a few lamps per shaded point, weighted by their expected contribution, instead of shading all of them. Modes: `off`; `hits` (preset default, GI hits only); `pixels`; `both`; `reuse` (experimental reservoir reuse).
-Role: LIGHTS · Literature: RIS (Talbot 2005); `reuse` = ReSTIR DI; GIBS weighs both (§1.16) · More detail: [`lighting_lamp_pick.glsl`](../../crates/render/shaders/lighting_lamp_pick.glsl)
+**Lamp pick**: chooses a few lamps per shaded point, weighted by their expected contribution, instead of shading all of them. Modes: `off` (potato, day-cycle); `hits` (`gi-1bounce`, pixels stay on the full sum); `pixels`; `both`; `reuse` (low, medium, high: a reservoir per pixel). `reuse (experimental)` is a deprecated value and logs a warning.
+Role: LIGHTS · Literature: RIS (Talbot 2005); `reuse` = ReSTIR DI (Bitterli et al. 2020, Algorithm 6); GIBS weighs both (§1.16) · More detail: [`lighting_lamp_pick.glsl`](../../crates/render/shaders/lighting_lamp_pick.glsl)
 
-**Lamp reuse**: keeps a pixel's chosen lamp in a reservoir and tries that reservoir again next frame (`lamp_pick_reuse`). Off fills a new reservoir each frame. The menu switch is this key.
+**Lamp reuse**: keeps a pixel's chosen lamp in a reservoir and merges it again next frame (`lamp_pick_reuse`). Low is temporal only. Medium and High also merge one neighbour. A quiet pixel shows the mean of fresh samples, then holds. A mover shades the merged lamp. Off fills a new reservoir each frame. The menu switch is this key.
 Role: TEMPORAL · Literature: ReSTIR DI (Bitterli et al. 2020) · More detail: `lamp_pick_reuse`; [toggles.md](../systems/lighting/toggles.md)
 
 **Lamp unbiased**: the reservoir merge (`lamp_pick_unbiased`). On follows Algorithm 6 (a source counts only when its target weight for the selected lamp is positive) and does not clamp M. Off divides by the sum of M and clamps M. The menu switch is this key.
