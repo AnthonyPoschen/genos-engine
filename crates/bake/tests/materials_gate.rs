@@ -80,17 +80,21 @@ const SHADE_MAT: usize = 0;
 const BRIGHT_MAT: usize = 2;
 const METAL_MAT: usize = 3;
 
-const MUST_FAIL: [&str; 6] = [
+const MUST_FAIL: [&str; 8] = [
     "shade_albedo",
     "shade_emissive",
     "srgb_decode",
     "srgb_double",
     "metal_diffuse",
     "mr_channels",
+    "texcoord_sample",
+    "roughness_from_g",
 ];
 
 /// Measured from the loaded file or from `from_gltf`, not from the broken shade.
-const FILE_METRICS: [&str; 3] = ["mask_alpha", "texcoord_set", "emissive_default"];
+/// `texel_alpha` is the raw texel. The broken reader returns that byte too, so it
+/// passes, and the self-check allows it the way it allows `mask_alpha`.
+const FILE_METRICS: [&str; 4] = ["mask_alpha", "texcoord_set", "emissive_default", "texel_alpha"];
 
 struct Sample {
     material: usize,
@@ -308,17 +312,10 @@ fn evaluate(reader: Reader, scene: &GltfScene) -> Result<Vec<Metric>, String> {
         measured("mr_channels", mr_channels(reader, scene, &mesh)?, SHADE),
         measured("mask_alpha", mask_mistakes(&mesh), 0.0),
         measured("texcoord_set", texcoord_mistakes(scene)?, 0.0),
-        pending(
-            "texcoord_sample",
-            0.0,
-            "BakeMesh::surface ignores TextureSlot.texcoord; the mesh keeps TEXCOORD_0 only",
-        ),
+        measured("texcoord_sample", texcoord_sample(reader, scene, &mesh)?, 0.0),
         measured("emissive_default", emissive_default(scene)?, 0.0),
-        pending(
-            "roughness_from_g",
-            SHADE,
-            "BakeMesh::surface does not return roughness; the fixture stores it in G",
-        ),
+        measured("roughness_from_g", roughness_from_g(reader, scene, &mesh)?, SHADE),
+        measured("texel_alpha", texel_alpha(reader, scene, &mesh)?, SHADE),
         pending("draw_mean", SHADE, "genos-render is not linked"),
         pending(
             "occlusion_indirect",
@@ -634,6 +631,87 @@ fn texcoord_mistakes(scene: &GltfScene) -> Result<f32, String> {
         mistakes += 1.0;
     }
     Ok(mistakes)
+}
+
+/// Wrong-slot count at the shade triangle's first corner.
+///
+/// Set 0 is `(0.25, 0.25)` (base, once-decoded 188). Set 1 is `(0.75, 0.75)`
+/// (emissive texel 255). The broken reader samples every slot at set 0.
+fn texcoord_sample(reader: Reader, scene: &GltfScene, mesh: &BakeMesh<'_>) -> Result<f32, String> {
+    let corner = mesh
+        .triangles
+        .first()
+        .ok_or("shade mesh has no triangle")?;
+    if (corner.uvs[0][0] - 0.25).abs() > 1.0e-4 || (corner.uvs[0][1] - 0.25).abs() > 1.0e-4 {
+        return Err("shade corner is not TEXCOORD_0 (0.25, 0.25)".to_string());
+    }
+    let (albedo, emissive) = match reader {
+        Reader::Bake => {
+            let sample = mesh.shade_hit(0, 0.0, 0.0);
+            (sample.diffuse_albedo(), sample.emissive)
+        }
+        Reader::Broken => broken_shade(scene, SHADE_MAT, [0.25, 0.25])?,
+    };
+    let mut mistakes = 0.0_f32;
+    if max_abs(albedo, [ONCE_188, 0.0, 0.0]) > 1.0e-4 {
+        mistakes += 1.0;
+    }
+    if max_abs(emissive, [1.0, 0.0, 0.0]) > 1.0e-4 {
+        mistakes += 1.0;
+    }
+    Ok(mistakes)
+}
+
+/// Absolute error of roughness against `0.5 * 10/255`.
+///
+/// The fixture stores roughness in G. The broken reader uses B, which is 0
+/// at this texel.
+fn roughness_from_g(reader: Reader, scene: &GltfScene, mesh: &BakeMesh<'_>) -> Result<f32, String> {
+    let got = match reader {
+        Reader::Bake => mesh.shade(u32::try_from(SHADE_MAT).map_err(|_| "material")?, [0.25, 0.25]).roughness,
+        Reader::Broken => broken_roughness(scene, SHADE_MAT, [0.25, 0.25])?,
+    };
+    Ok((got - (0.5 * (10.0 / 255.0))).abs())
+}
+
+fn broken_roughness(scene: &GltfScene, material: usize, uv: [f32; 2]) -> Result<f32, String> {
+    let material = scene
+        .materials
+        .get(material)
+        .ok_or("broken shade material is missing")?;
+    let mr = broken_sample(scene, material.metallic_roughness_texture, uv)?;
+    Ok(material.roughness * mr[2])
+}
+
+/// Absolute error of the base-colour texel alpha, before the factor.
+///
+/// Mask UVs land on alpha.png bytes 128, 255, and 0. The product with the
+/// mask factor 0.5 would miss the first sample. The broken reader returns the
+/// raw byte, so this row stays a file metric.
+fn texel_alpha(reader: Reader, scene: &GltfScene, mesh: &BakeMesh<'_>) -> Result<f32, String> {
+    const MASK_MAT: usize = 1;
+    let samples = [([0.1, 0.1], 128.0 / 255.0), ([0.6, 0.1], 1.0), ([0.1, 0.6], 0.0)];
+    let mut worst = 0.0_f32;
+    for (uv, expect) in samples {
+        let got = match reader {
+            Reader::Bake => {
+                mesh.shade(u32::try_from(MASK_MAT).map_err(|_| "material")?, uv)
+                    .texel_alpha
+            }
+            Reader::Broken => broken_texel_alpha(scene, MASK_MAT, uv)?,
+        };
+        worst = worst.max((got - expect).abs());
+    }
+    Ok(worst)
+}
+
+fn broken_texel_alpha(scene: &GltfScene, material: usize, uv: [f32; 2]) -> Result<f32, String> {
+    let material = scene
+        .materials
+        .get(material)
+        .ok_or("broken shade material is missing")?;
+    let texel = broken_sample(scene, material.base_color_texture, uv)?;
+    Ok(texel[3])
 }
 
 fn emissive_default(scene: &GltfScene) -> Result<f32, String> {

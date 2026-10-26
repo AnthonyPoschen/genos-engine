@@ -244,7 +244,7 @@ cargo test -p genos-bake --test materials_gate -- --case bad
 cargo test -p genos-bake --test materials_gate -- --nocapture --case good
 ```
 
-The binary is not a libtest harness, so it already prints. `--nocapture`, `--test-threads`, `--skip`, and `--format` are accepted and ignored, because `cargo test -- --nocapture` forwards those flags to every test binary. The good process also grades the broken shade and exits 2 if that shade would pass a shade metric, or if a missing feature comes back as PASS. File checks (`mask_alpha`, `texcoord_set`, `emissive_default`) stay measured on the broken reader, because that reader does not replace the loader or the mask clip. The bad process is expected to exit 1. `cargo test` without arguments runs the good case.
+The binary is not a libtest harness, so it already prints. `--nocapture`, `--test-threads`, `--skip`, and `--format` are accepted and ignored, because `cargo test -- --nocapture` forwards those flags to every test binary. The good process also grades the broken shade and exits 2 if that shade would pass a shade metric, or if a missing feature comes back as PASS. File checks (`mask_alpha`, `texcoord_set`, `emissive_default`, `texel_alpha`) stay measured on the broken reader, because that reader does not replace the loader or the mask clip. `texel_alpha` is the raw texel, which the broken reader also returns. The bad process is expected to exit 1. `cargo test` without arguments runs the good case.
 
 | Metric | Threshold | What the number is |
 |---|---|---|
@@ -256,9 +256,10 @@ The binary is not a libtest harness, so it already prints. `--nocapture`, `--tes
 | `mr_channels` | 1/255 | Error at the texel whose metallic-roughness image is G=255, B=128. The hand value uses B (`127/255` on a white base). Reading G would be 0. |
 | `mask_alpha` | 0 | Wrong keep/drop count. Alpha is base alpha 0.5 times texture alpha, cutoff 0.5. Products: 64/255 drops, 0.5 stays (the spec keeps `alpha >= cutoff`), 0 drops. |
 | `texcoord_set` | 0 | Wrong-slot count. The emissive slot's `texCoord` is 1, the other slots are 0, and the primitive UVs are `TEXCOORD_0` `(0.25, 0.25)`, not set 1's `(0.75, 0.75)`. |
-| `texcoord_sample` | 0 | `NOT-IMPLEMENTED`. `BakeMesh::surface` takes the UV it is given and ignores `TextureSlot.texcoord`. The primitive keeps `TEXCOORD_0` only. |
+| `texcoord_sample` | 0 | Wrong-slot count at the shade triangle's first corner. Base comes from set 0 (once-decoded 188). Emission comes from set 1 (texel 255). Sampling set 0 for emission is a wrong slot. |
 | `emissive_default` | 0 | Absolute error of the loaded strength against 1 on the material that omits `KHR_materials_emissive_strength`. |
-| `roughness_from_g` | 1/255 | `NOT-IMPLEMENTED`. `BakeMesh::surface` does not return roughness. The fixture stores it in G (byte 10 at the first texel, factor 0.5). |
+| `roughness_from_g` | 1/255 | Absolute error of roughness against `0.5 × 10/255`. The fixture stores roughness in G. Reading B is 0 at that texel and fails. |
+| `texel_alpha` | 1/255 | Absolute error of the base-colour texel alpha before the factor, at the three mask UVs (bytes 128, 255, and 0). The product with the mask factor 0.5 fails the first sample. |
 | `draw_mean` | 1/255 | `surface_mean` against the same shade. The gate does not link `genos-render`. |
 | `occlusion_indirect` | 1/255 | Occlusion scales indirect only. The bake does not return occlusion. |
 | `normal_angle_deg` | 0.5 | Angle between the shaded normal and the tangent-space reference. |

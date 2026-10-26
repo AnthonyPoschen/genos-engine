@@ -94,3 +94,29 @@ fn a_texcoord_hit_matches_its_slot() {
     assert!((before - 0.521_756).abs() < 1.0e-4, "picture_texcoord before {before}");
     assert!(after <= 1.0e-6, "picture_texcoord after {after}");
 }
+
+#[test]
+fn roughness_from_g_leaves_the_lambert_picture() {
+    use std::path::PathBuf;
+
+    use genos_bake::BakeMesh;
+    use genos_load::load_gltf_file;
+
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/materials/panel.gltf");
+    let scene = load_gltf_file(&path).unwrap();
+    let mesh = BakeMesh::from_gltf(&scene, 0);
+    let sample = mesh.shade(0, [0.25, 0.25]);
+    let hand = 0.5 * (10.0 / 255.0);
+    let before = (0.0_f32 - hand).abs();
+    let after = (sample.roughness - hand).abs();
+    let (metal_before, metal_after) = score(0.25);
+    eprintln!(
+        "picture_roughness before {before:.6} after {after:.6}\n\
+         picture_lambert before {metal_before:.6} after {metal_after:.6}"
+    );
+    assert!((before - hand).abs() < 1.0e-6);
+    assert!(after <= 1.0e-6, "roughness error {after}");
+    assert!((metal_before - 1.0 / 3.0).abs() < 1.0e-5);
+    assert!(metal_after <= 1.0e-6);
+}
