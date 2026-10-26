@@ -1,9 +1,9 @@
 //! Grade lamp-layer metrics. No window and no Vulkan.
 //!
 //! `--case good` and `--case broken` are planted pictures. `--case instant`
-//! is a full-frame jump that `pop_magnitude` misses. `--case noisy` shimmers
-//! on the hold. `--capture DIR` scores engine frames. `--case baseline` with
-//! no capture prints `NOT-IMPLEMENTED`.
+//! is a step request whose picture fades for 50 ms. `--case noisy` shimmers
+//! on the hold. `--capture DIR` scores engine frames against the requested
+//! lamp weight. `--case baseline` with no capture prints `NOT-IMPLEMENTED`.
 
 use std::env;
 use std::path::PathBuf;
@@ -94,10 +94,12 @@ fn print_help() {
 layering-gate — score lamp-layer settle metrics
 
   --case good|broken|instant|noisy|baseline
-                                planted pass, planted fail, full-frame jump,
-                                noisy hold, or today's engine with no frames
-  --capture DIR                 grade frame-NNNN.png from the engine
-                                (DIR or DIR/frames; optional reference.png)
+                                planted pass, planted fail, 50 ms fade after
+                                a step request, noisy hold, or no frames
+  --capture DIR                 grade frame-NNNN.png against weights.txt
+                                and expected-on / expected-off
+                                (DIR or DIR/frames; reference PNGs may sit
+                                in the parent as expected-*-reference.png)
   --out DIR                     directory for {{case}}.json
                                 default: {DEFAULT_OUT}
 
@@ -105,6 +107,8 @@ Prints one line per metric: name, value, threshold, PASS/FAIL/NOT-IMPLEMENTED.
 Exit 0 when no row is FAIL. Exit 1 when a row is FAIL. NOT-IMPLEMENTED does
 not fail the process. Exit 2 is a bad argument or a write error.
 --capture writes baseline.json. Layer rows stay NOT-IMPLEMENTED.
-dim_error stays NOT-IMPLEMENTED unless reference.png is present."
+Settle, fade, and dim stay NOT-IMPLEMENTED unless weights.txt and both
+expected images are present. The expected image is the path-traced or
+analytic picture at that frame's requested weight."
     );
 }
