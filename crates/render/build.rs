@@ -25,6 +25,11 @@ fn main() {
         "shaders/lighting_check.comp",
         &out.join("lighting_check.comp.spv"),
     );
+    // Not embedded: the reflection passes include reflections.glsl when they land.
+    compile(
+        "shaders/reflections_check.comp",
+        &out.join("reflections_check.comp.spv"),
+    );
     // High's a-trous. Adaptive is compiled out of the hash pipeline (S79).
     // The screen launch calls that kernel with the adaptive bit clear: high
     // does not set it, and the branch is the same test the plain pipeline
@@ -119,6 +124,8 @@ fn main() {
     println!("cargo:rerun-if-changed=shaders/scene_rays.glsl");
     println!("cargo:rerun-if-changed=shaders/mesh_field.glsl");
     println!("cargo:rerun-if-changed=shaders/lighting_check.comp");
+    println!("cargo:rerun-if-changed=shaders/reflections_check.comp");
+    println!("cargo:rerun-if-changed=shaders/reflections.glsl");
     println!("cargo:rerun-if-changed=shaders/scene_data.glsl");
     println!("cargo:rerun-if-changed=shaders/dither.glsl");
     println!("cargo:rerun-if-changed=shaders/transmit.comp");

@@ -198,7 +198,7 @@ Proposed in [ADR 0019](../adr/0019-reflections.md). The picture path is not buil
 **Specular lobe**: the view-dependent glossy term, kept separate from diffuse GI.
 Role: OUT · Literature: Cook and Torrance, TOG 1982; Lumen reflections · More detail: [../systems/reflections-design.md](../systems/reflections-design.md)
 
-**Fresnel weight**: the fraction of light reflected at a boundary. Dielectrics use the exact equations. Metals use Schlick with F0 equal to the base colour.
+**Fresnel weight**: the fraction of light reflected at a boundary. Dielectrics use the exact equations. From under water the index ratio is inverted, and total internal reflection returns 1. Metals use Schlick with F0 equal to the base colour.
 Role: SAMPLE · Literature: Fresnel equations; Schlick, CGF 1994 (metals) · More detail: [reflections design, optics](../systems/reflections-design.md#optics)
 
 **Screen-space reflection**: a ray marched through the depth buffer along one specular direction.
@@ -219,7 +219,7 @@ Role: DENOISE · Literature: SVGF spatial kernel (Schied, HPG 2017). The tempora
 **Planar mirror**: a flat reflector drawn by one extra camera reflected through its plane.
 Role: OUT · Literature: Diefenbach, PhD 1996 · More detail: [reflections design, mirrors](../systems/reflections-design.md#mirrors)
 
-**Mirror recursion**: the cap on extra mirror and portal views in one frame. Portals share the cap.
+**Mirror recursion**: extra mirror and portal views in one frame. A further view is drawn when the running Fresnel product stays at least 0.02 and the shared cap still has room. Portals share the cap.
 Role: SCHED · Literature: shipped recursive mirrors and portals (a depth budget) · More detail: [reflections design, budgets](../systems/reflections-design.md#budgets)
 
 **Oblique clip**: the near plane moved onto the mirror or portal so the draw rejects geometry behind that plane.

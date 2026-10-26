@@ -9,3 +9,4 @@ description = "CPU checker for lighting reference images. No window and no Vulka
 workspace = true
 
 [dependencies]
+genos-math = { path = "../math" }

@@ -57,15 +57,19 @@ Priority, when a budget is short, is the ADR 0013 score with the near-camera ter
 
 ## Optics
 
+These functions live in `genos-math` (`crates/math/src/optics.rs`). `crates/render/shaders/reflections.glsl` is the same formulas. `reflections_check.comp` compiles that file in the renderer build and is not embedded. A reflection pass includes the GLSL file when it calls one of them. Live rows grade the Rust functions against baked numbers.
+
 **Reflection direction.** `R = I - 2 dot(N, I) N`. A point `p` through a plane with unit normal `N` through the origin is `p - 2 dot(p, N) N`. The harness bakes both and gates the angle at `1e-4` rad and the point at `1e-5` m (`mirror_law_rad`, `mirror_point_m`).
 
-**Dielectric Fresnel.** Unpolarized exact Fresnel, incident index 1, transmitted index the material IOR. Water is 1.333. Glass defaults to 1.5. Schlick's approximation (Schlick, Computer Graphics Forum 13(3), 1994; Karis, SIGGRAPH 2013) is the metal term only, with F0 equal to the base colour, because glTF does not store a complex IOR. On water, Schlick's max absolute error against the exact equations is 0.059, which misses the 0.02 gate. The runtime dielectric term is the exact equations. Gate: `fresnel_abs` ≤ 0.02.
+**Dielectric Fresnel.** Unpolarized exact Fresnel. `eta_t_over_eta_i` is `n_transmitted / n_incident`. From air that ratio is the material IOR. Water is 1.333. Glass defaults to 1.5. From under water the ratio is `1 / 1.333`, and a ray past the critical angle returns 1 (total internal reflection). Schlick's approximation (Schlick, Computer Graphics Forum 13(3), 1994; Karis, SIGGRAPH 2013) is the metal term only, with F0 equal to the base colour, because glTF does not store a complex IOR. On water, Schlick's max absolute error against the exact equations is 0.059, which misses the 0.02 gate. Gates: `fresnel_abs` ≤ 0.02 from air, `fresnel_below_abs` ≤ 0.02 from water.
 
-**Snell.** GLSL `refract(I, N, eta)` with `eta = n_incident / n_transmitted`. Total internal reflection returns no transmitted direction; the pixel keeps the reflection. Gate: `snell_rad` ≤ `1e-4`. Walter et al. (EGSR 2007) supply the GGX NDF and the refraction microfacet. The runtime transmits along the single Snell direction of the shading normal. It does not draw a random BTDF sample. The Gerstner normal is what spreads water.
+**Snell.** `eta = n_incident / n_transmitted`. Total internal reflection returns no transmitted direction; the pixel keeps the reflection. Gate: `snell_rad` ≤ `1e-4`. Walter et al. (EGSR 2007) supply the GGX NDF and the refraction microfacet. The runtime transmits along the single Snell direction of the shading normal. It does not draw a random BTDF sample. The Gerstner normal is what spreads water.
 
 **GGX.** `D(h) = α² / (π (dot(n, h)² (α² − 1) + 1)²)` with `α = roughness²` (glTF). The projected integral of `D` is 1 (Walter et al.). Smith masking (Heitz, JCGT 2014) multiplies the lobe. The gate is the NDF integral, not a claim that the full BRDF integrates to 1. Gate: `ggx_energy` ≤ 0.03.
 
 **Absorption.** `exp(-σ d)` along the transmitted path. Gate: `beer_rel` ≤ 0.02.
+
+**Flat water.** `flat_water_transmittance` is `1 - F` at normal incidence. `caustic_rel` does not grade it. That row only tests the comparator.
 
 ## Alternatives
 
@@ -150,7 +154,7 @@ Each pass is a compute or a raster with one trace site, the GI rule. A cheap che
 9. **Water.** Fresnel blend of the reflection and the refracted opaque colour, times `exp(-σ d)`. Foam coverage from the shoreline clamp and the Jacobian. Caustic add is a cache read.
 10. **Compose.** The formula in [Fit](#fit). One blend.
 
-Change records from ADR 0013 drop a hit whose surface moved. The next shade uses the new cache value. That is the lag path the harness grades: the good filter copies the new sample in the same frame; an exponential moving average at 0.08 does not (`denoise_lag_frames`).
+Change records from ADR 0013 drop a hit whose surface moved. The next shade uses the new cache value. `denoise_lag_frames` stays `NOT-IMPLEMENTED` on every fixture until that reflection filter exists. Copying the new sample is not a passing case. The GI à-trous is a different filter and is not a stand-in.
 
 ## Mirrors
 
@@ -163,7 +167,7 @@ A planar mirror reflects the camera through its plane and draws one view. A port
 | Medium | 2 |
 | High | 3 |
 
-The harness asks for 8 views and checks emitted / cap. The good scheduler clamps. Gate: `mirror_view_frac` ≤ 1. A Potato cap of 0 passes only when Potato emits 0.
+A further view is emitted when the running product of Fresnel reflectances stays at least 0.02 and the cap still has room. `min(request, cap)` is the broken scheduler: a water chain (F ≈ 0.020 then 0.060) emits one view, and clamping a request of 2 to the Medium cap emits two. Gate: `mirror_view_frac` ≤ 0, the max over Potato, Low, Medium, and High of `|emitted − fresnel_budget| / cap`. A cap of 0 passes only when that preset emits 0. The count is `optics::mirror_views`.
 
 The oblique clip is Lengyel's construction with a Vulkan depth row. Until that matrix lands, the harness gates the predicate on six samples, three behind the plane and three in front. Gate: `portal_leak` ≤ 0.
 
@@ -181,7 +185,7 @@ Caustics:
 | image | Medium, High default | one sun, image-space map (Shah et al.), written into the caustic cache |
 | cache | High optional | reflection rays confirm cache texels, inside the ray cap |
 
-Flat water under a vertical sun transmits `1 − F0`. For IOR 1.333 that is 0.979626812158. A uniform bin field matches it. A checker of 0 and 1 does not. Gate: `caustic_rel` ≤ 0.05. Curved-surface caustics are graded against the path tracer when the feature exists, under this same metric name.
+Flat water under a vertical sun transmits `1 − F`. For IOR 1.333 that is 0.979626812158. That number is `flat_water_transmittance` in the shared module. `caustic_rel` does not call it. Good feeds a uniform field of the baked number and bad feeds a 0/1 checker, so the row only tests the comparator. Live leaves it `NOT-IMPLEMENTED`. Gate, once a caustic map exists: `caustic_rel` ≤ 0.05. Curved-surface caustics use the same name against the path tracer.
 
 ## Budgets
 
@@ -214,18 +218,25 @@ Gates: `ms_frac` ≤ 1 and `vram_frac` ≤ 1, each the max of used/cap across th
 
 ## Metrics
 
-Every gate is `value ≤ threshold`. The live fixture has no engine measurement: the value is `na`, the status is `NOT-IMPLEMENTED`, and the JSON `reference` field is the analytic good value. That is the reference running. It is not a pass.
+Every gate is `value ≤ threshold`.
+
+Live grades a row only when `genos-math` optics implements it: `mirror_law_rad`, `mirror_point_m`, `fresnel_abs`, `fresnel_below_abs`, `snell_rad`, `ggx_energy`, `mirror_view_frac`, `portal_point_m`, `beer_rel`. Those values are the module's error against a baked table.
+
+These rows only test the comparator. Live is `NOT-IMPLEMENTED`, the value is `na`, and the JSON `reference` is the good fixture's number: `ssr_depth_rel`, `portal_leak`, `shoreline_ratio`, `caustic_rel`, `near_weighted_rel`, `flicker_reversal`, `low_reflection_rays`, `ms_frac`, `vram_frac`.
+
+`denoise_lag_frames` is `NOT-IMPLEMENTED` on live, good, and bad. There is no reflection denoiser to run, and copying the sample is not a result.
 
 | Metric | Threshold | What it measures |
 |---|---|---|
 | `mirror_law_rad` | 1e-4 | angle error of the reflection direction, radians |
 | `mirror_point_m` | 1e-5 | error of a point reflected through a plane, metres |
-| `fresnel_abs` | 0.02 | max absolute error against the Fresnel equations |
+| `fresnel_abs` | 0.02 | max absolute error against the Fresnel equations, from air |
+| `fresnel_below_abs` | 0.02 | the same error from under water, including total internal reflection |
 | `snell_rad` | 1e-4 | angle error of the transmitted direction, radians |
 | `ggx_energy` | 0.03 | absolute error of the GGX projected integral against 1 |
 | `ssr_depth_rel` | 0.02 | relative depth error of a screen march on a synthetic buffer |
 | `denoise_lag_frames` | 2 | frames after a step until the shaded value reaches 90 % |
-| `mirror_view_frac` | 1 | max of emitted views / cap across Potato, Low, Medium, High |
+| `mirror_view_frac` | 0 | max `|emitted − fresnel_budget| / cap` across Potato, Low, Medium, High |
 | `portal_leak` | 0 | fraction of plane samples drawn on the wrong side |
 | `portal_point_m` | 1e-5 | error of the portal rigid map, metres |
 | `beer_rel` | 0.02 | relative error of transmittance against `exp(-σ d)` |
@@ -244,12 +255,12 @@ Picture grades, once the feature exists, fill these same names from the path tra
 The harness:
 
 ```sh
-cargo run -p genos-lighting-ref --bin reflections-check -- --fixture live
+cargo run -p genos-lighting-ref --bin reflections-check -- --case live
 cargo run -p genos-lighting-ref --bin reflections-check -- --fixture good --out genos-debug/reflections/good
 cargo run -p genos-lighting-ref --bin reflections-check -- --fixture bad --out genos-debug/reflections/bad
 ```
 
-Stdout is one line per metric: `name value=… threshold=… PASS|FAIL|NOT-IMPLEMENTED`. The JSON is `<out>/metrics.json`. The default directory is `./genos-debug/reflections`. `--out` wins. `GENOS_REFLECTIONS_OUT` applies only when `--out` was omitted. Exit 0 when no metric failed. Exit 1 when any metric failed. Exit 2 on a bad argument. `NOT-IMPLEMENTED` is not a failure.
+`--case` is an alias of `--fixture`. The later flag wins when both are set. Stdout is one line per metric: `name value=… threshold=… PASS|FAIL|NOT-IMPLEMENTED`. The JSON is `<out>/metrics.json`. The default directory is `./genos-debug/reflections`. `--out` wins. `GENOS_REFLECTIONS_OUT` applies only when `--out` was omitted. Exit 0 when no metric failed. Exit 1 when any metric failed. Exit 2 on a bad argument. `NOT-IMPLEMENTED` is not a failure.
 
 `cargo test -p genos-lighting-ref reflections` runs the good, bad, and live fixtures and the `--out` precedence. Lavapipe is not required. Picture grades later use lavapipe only to check that the files appear; the numeric picture gate is the owner's RTX 4070, as with the lighting reference check.
 
@@ -264,7 +275,7 @@ Rhai gates land with `debug/reflections`, on the same line format, under `debug/
 | `water.rhai` | a pool, a shore, a vertical sun | `snell_rad`, `beer_rel`, `shoreline_ratio`, `caustic_rel` |
 | `low.rhai` | the pool on the Low preset, software tracer forced | `low_reflection_rays` = 0 |
 
-Until those scenes exist, the metrics stay `NOT-IMPLEMENTED` on `--fixture live`.
+Until those scenes exist, the picture rows stay `NOT-IMPLEMENTED` on live. The optics rows already grade `genos-math`.
 
 ## Debug and tests
 
@@ -293,7 +304,7 @@ Overlays, drawn by the debug binary, with no legend paragraph: source colour, re
 | Failure | Probe |
 |---|---|
 | Reflection direction wrong | `mirror_law_rad`, source overlay |
-| Fresnel bias | `fresnel_abs` |
+| Fresnel bias | `fresnel_abs`, `fresnel_below_abs` |
 | Refraction bend | `snell_rad` |
 | Lobe energy | `ggx_energy` |
 | Screen march accepts the wrong depth | `ssr_depth_rel`, hit age |
@@ -318,7 +329,7 @@ Each phase is one change. A phase that misses its gate is dropped: a five-line p
 
 | Phase | Change | Gate |
 |---|---|---|
-| P0 | This harness. No picture change. | good exits 0, bad exits 1, live is `NOT-IMPLEMENTED` on all 18 metrics |
+| P0 | This harness and `genos-math` optics. No picture change. | good exits 0, bad exits 1, live passes the module rows and leaves the comparator rows `NOT-IMPLEMENTED` |
 | P1 | `ReflectionSettings`, classify, counters. Picture unchanged. | idle ms ≤ 0.05, rays = 0 |
 | P2 | Screen march and cache fallback. No rays. | `ssr_depth_rel`, `mirror_law_rad`, `fresnel_abs` on the spheres |
 | P3 | One spatial filter. | `denoise_lag_frames` ≤ 2, `flicker_reversal` ≤ 0.002 |

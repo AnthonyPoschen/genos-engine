@@ -19,6 +19,7 @@ The crate is `crates/math`, package `genos-math`.
 - `Vec2`, `Vec3`, and `Vec4` are in `src/vec.rs`.
 - `Mat3` and `Mat4` are in `src/mat.rs`.
 - `Quat` is in `src/quat.rs`.
+- Fresnel, Snell, GGX, Beer–Lambert, mirror and portal maps, flat-water transmittance, and the Fresnel mirror-view budget are in `src/optics.rs`. The GLSL mirror is `crates/render/shaders/reflections.glsl`.
 
 ## Game use
 

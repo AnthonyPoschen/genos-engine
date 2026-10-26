@@ -12,7 +12,7 @@ Status: **proposed**. Design: [`docs/systems/reflections-design.md`](../systems/
 
 1. Glossy reflections are a Lumen-style stack: one screen-space march along the specular direction, a world-cache read when that march misses, and an optional trace through the shared tracer (`VK_KHR_ray_query` when the device has it, otherwise the software SDF). The Low preset schedules zero reflection rays.
 2. The specular term stores a hit, not radiance. The hit is re-shaded from the surface cache in the same frame. One spatial filter runs. There is no radiance history, so a step change is not lagged by an exponential blend.
-3. Planar mirrors and portals are extra raster views. One shared cap bounds them (Potato 0, Low 1, Medium 2, High 3). The near plane is the mirror or portal plane. Geometry behind that plane is rejected.
+3. Planar mirrors and portals are extra raster views. One shared cap bounds them (Potato 0, Low 1, Medium 2, High 3). A further view is emitted only when the running Fresnel product stays at least 0.02 and the cap still has room. The near plane is the mirror or portal plane. Geometry behind that plane is rejected.
 4. Water is a Gerstner mesh in world space. Shading is exact dielectric Fresnel, one Snell direction, and Beer–Lambert absorption. Caustics are off on Potato and Low, an image-space sun map on Medium, and that map plus an optional cache confirmation on High. Wave height at the shore is clamped to `0.75 × depth`.
 5. Reflection cost is a ceiling inside the frame target. Potato stays at the classify check (0.05 ms, 0 MB). Low is 0.40 ms and 8 MB. Medium is 0.70 ms and 16 MB. High is 1.00 ms and 32 MB. Work past a cap waits. It is not run as a full-frame fallback.
 
@@ -35,6 +35,6 @@ Finished values only, blended once. The camera orders work and does not resize t
 
 ## Consequences
 
-The P0 harness is `reflections-check` in `genos-lighting-ref`. It grades analytic cases. While the renderer feature is absent, `--fixture live` prints `NOT-IMPLEMENTED` and still records the analytic reference. A known-good candidate passes. A broken candidate fails and exits 1. Picture grades against the path tracer land with the feature, under the same metric names.
+The P0 harness is `reflections-check` in `genos-lighting-ref`. Fresnel, Snell, GGX, Beer–Lambert, the mirror and portal maps, the flat-water transmittance, and the Fresnel view budget live in `genos-math` (`optics`), with a GLSL mirror at `crates/render/shaders/reflections.glsl`. Live grades those functions. Comparator rows (`caustic_rel`, `near_weighted_rel`, `flicker_reversal`, `low_reflection_rays`, `ms_frac`, `vram_frac`, and the screen, leak, and shoreline checks) stay `NOT-IMPLEMENTED` on live and only prove the comparison. `denoise_lag_frames` stays `NOT-IMPLEMENTED` on every fixture until the reflection denoiser exists. A known-good candidate passes the implemented rows. A broken candidate fails them and exits 1. Picture grades against the path tracer land with the feature, under the same metric names.
 
 Each later phase is its own change, with the gates in the design. A phase that misses its gate is dropped.

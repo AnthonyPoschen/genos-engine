@@ -4,6 +4,7 @@
 //! Y is up. The values are plain `Copy` values, and the operations do not allocate.
 
 mod mat;
+pub mod optics;
 mod quat;
 mod vec;
 

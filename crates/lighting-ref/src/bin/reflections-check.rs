@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! reflections-check --fixture live|good|bad --out DIR
+//! reflections-check --case live|good|bad --out DIR
 //! ```
 //!
 //! `./genos-debug/reflections/` is the default directory. `--out` overrides it.
@@ -46,10 +47,7 @@ struct Opts {
     out: std::path::PathBuf,
 }
 
-fn parse(
-    args: impl Iterator<Item = String>,
-    env_out: Option<&str>,
-) -> Result<Opts, String> {
+fn parse(args: impl Iterator<Item = String>, env_out: Option<&str>) -> Result<Opts, String> {
     let mut help = false;
     let mut fixture = Fixture::Live;
     let mut cli_out: Option<String> = None;
@@ -59,17 +57,24 @@ fn parse(
             help = true;
             continue;
         }
-        if arg == "--fixture" {
-            let value = args.next().ok_or_else(|| "--fixture needs live, good, or bad".to_string())?;
+        if arg == "--fixture" || arg == "--case" {
+            let value = args
+                .next()
+                .ok_or_else(|| "--fixture/--case needs live, good, or bad".to_string())?;
             fixture = Fixture::parse(&value)?;
             continue;
         }
-        if let Some(value) = arg.strip_prefix("--fixture=") {
+        if let Some(value) = arg
+            .strip_prefix("--fixture=")
+            .or_else(|| arg.strip_prefix("--case="))
+        {
             fixture = Fixture::parse(value)?;
             continue;
         }
         if arg == "--out" {
-            let value = args.next().ok_or_else(|| "--out needs a directory".to_string())?;
+            let value = args
+                .next()
+                .ok_or_else(|| "--out needs a directory".to_string())?;
             cli_out = Some(nonempty("--out", &value)?);
             continue;
         }
@@ -108,11 +113,12 @@ fn env_mirror() -> Option<String> {
 const HELP: &str = "\
 reflections-check — analytic gates for specular reflections, mirrors, portals, and water.
 
-The renderer feature is not built. The default fixture is live: each metric is
-NOT-IMPLEMENTED. good grades a known-good analytic candidate. bad grades a
-deliberately broken candidate and exits 1.
+The default fixture is live. Rows backed by genos-math optics are graded.
+Comparator rows and denoise_lag_frames are NOT-IMPLEMENTED. good grades a
+known-good candidate. bad grades a deliberately broken candidate and exits 1.
 
   --fixture live|good|bad   candidate to grade (default live)
+  --case live|good|bad      alias of --fixture
   --out DIR                 report directory (default ./genos-debug/reflections)
   --help                    this text
 
