@@ -125,8 +125,32 @@ An upper bound on how fast a gap can close: `gap / (|v_a − v_b| + |ω_a| r_a +
 _Avoid_: Closest-point velocity, time of impact scale
 
 **Physics step**:
-One update that moves bodies by gravity, contact, and springs. A speculative body can stop inside its margin. A swept pair advances to the time of impact.
+One update that moves bodies by gravity, contact, and springs. A speculative body can stop inside its margin. A swept pair advances to the time of impact. A broken bond swaps in chunk bodies from a fracture asset.
 _Avoid_: Lighting ray, cascade
+
+**Bond**:
+One link in a breakable: two chunks, or a chunk and the world, plus the shared area and the health left.
+_Avoid_: Joint, spring
+
+**Breakable**:
+One authored object that simulates as a single body until a bond breaks, then swaps in chunk bodies from its fracture asset.
+_Avoid_: Mesh collider, destructible mesh
+
+**Chunk**:
+One piece of a fracture asset. It is not a body until a hot-swap spawns it.
+_Avoid_: Fragment, shard
+
+**Hot-swap**:
+Replacing the intact stand-in for a broken branch with that branch's child bodies in the step that breaks the bond.
+_Avoid_: Runtime fracture, rebake
+
+**Debris**:
+A spawned chunk under the debris volume. It sleeps quickly, it does not collide with other debris, and it can be removed when the debris budget is full.
+_Avoid_: Particle, gib
+
+**Fracture asset**:
+The cooked `.gfract` file: the chunk hierarchy and the bond graph. The physics step reads it. The step does not cook it.
+_Avoid_: Mesh, texture
 
 **Codimation**:
 A looping move of one solid through fixed positions.

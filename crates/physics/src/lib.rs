@@ -34,7 +34,14 @@
 
 mod ccd;
 mod contact;
+mod destruction;
 mod mesh;
+
+pub use destruction::{
+    allows_slice, apply_damage, chunk_body, destruction_report, intact_body, spawn_breakable,
+    DestructionReport,
+};
+pub use genos_fracture::{cook, Asset, CookRequest};
 
 use genos_math::{Quat, Vec3};
 
@@ -188,6 +195,17 @@ pub struct Spring {
 
 /// How far one body's collision looks ahead in a single step.
 ///
+/// Whether the step still moves a body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presence {
+    /// Forces, contact, and integration run.
+    Live,
+    /// Debris that has slept. The body stays in the list.
+    Asleep,
+    /// Removed from the step. The index stays so other bodies do not move.
+    Culled,
+}
+
 /// `Discrete` uses the bounds at the current pose. `Speculative` grows the
 /// contact distance by `min(speed * dt, speculative margin)` and lets the
 /// solver stop the body. `Swept` advances that body's pairs to the time of
@@ -250,6 +268,10 @@ pub struct Body {
     pub normal_impulse: f32,
     /// World-space angular velocity, radians per second.
     pub angular_velocity: Vec3,
+    /// `Live` until debris sleeps or a culled chunk is tombstoned.
+    pub presence: Presence,
+    /// Spawned chunk under the debris volume. Two debris bodies do not collide.
+    pub debris: bool,
 }
 
 impl Body {
@@ -304,6 +326,8 @@ impl Body {
             motion: MotionQuality::Discrete,
             normal_impulse: 0.0,
             angular_velocity: Vec3::ZERO,
+            presence: Presence::Live,
+            debris: false,
         }
     }
 
@@ -337,6 +361,8 @@ pub struct World {
     pub speculative_margin: f32,
     /// Swept pairs past this count use the speculative margin for that step. Default 8.
     pub swept_pair_cap: u32,
+    /// Fracture assets. Empty for a world that does not break.
+    pub(crate) breakables: Vec<destruction::Breakable>,
     /// Replaced at the start of each `step`.
     pub step_stats: StepStats,
     /// The contact pass's lists, kept so a step after the first does not allocate.
@@ -359,6 +385,7 @@ impl World {
             gravity,
             speculative_margin: 0.25,
             swept_pair_cap: 8,
+            breakables: Vec::new(),
             step_stats: StepStats::zero(),
             pairs: contact::Pairs::new(),
             ccd_scratch: ccd::CcdScratch::new(),
@@ -430,10 +457,13 @@ pub fn step(world: &mut World, dt: f32) {
         world.step_stats.dynamic_pair_impulses =
             world.step_stats.dynamic_pair_impulses.saturating_add(hits);
     }
+    if !world.breakables.is_empty() {
+        destruction::after_step(world, dt);
+    }
 }
 
 pub(crate) fn integrate_body(body: &mut Body, dt: f32) {
-    if body.inverse_mass == 0.0 || !(dt > 0.0) {
+    if body.presence != Presence::Live || body.inverse_mass == 0.0 || !(dt > 0.0) {
         return;
     }
     body.position += body.velocity * dt;
@@ -529,7 +559,7 @@ fn mesh_extent(mesh: &Mesh) -> f32 {
 }
 
 fn apply_forces(body: &mut Body, gravity: Vec3, dt: f32) {
-    if body.inverse_mass == 0.0 {
+    if body.presence != Presence::Live || body.inverse_mass == 0.0 {
         return;
     }
     let mut acceleration = gravity;

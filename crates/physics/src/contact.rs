@@ -79,6 +79,9 @@ pub(crate) fn collide(bodies: &mut [Body], scratch: &mut Pairs) -> u32 {
     scratch.planes.clear();
     scratch.pairs.clear();
     for (index, body) in bodies.iter().enumerate() {
+        if body.presence != crate::Presence::Live {
+            continue;
+        }
         match bounds(body) {
             Some((lo, hi)) => {
                 let margin = Vec3::new(BOUNDS_MARGIN, BOUNDS_MARGIN, BOUNDS_MARGIN);
@@ -95,7 +98,8 @@ pub(crate) fn collide(bodies: &mut [Body], scratch: &mut Pairs) -> u32 {
                 break;
             }
             let meet = lo2.y <= hi.y && lo.y <= hi2.y && lo2.z <= hi.z && lo.z <= hi2.z;
-            if meet && (moving(i) || moving(j)) {
+            let debris_pair = bodies[i as usize].debris && bodies[j as usize].debris;
+            if meet && (moving(i) || moving(j)) && !debris_pair {
                 scratch.pairs.push((i.min(j), i.max(j)));
             }
         }
