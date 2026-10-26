@@ -298,6 +298,7 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | Metric | Threshold | What it grades | Live, this tree |
 |---|---|---|---|
 | `legacy_inverse` | ≤ 1e−4 | `linear_from_display(tone(x))` against `x` for 0, 0.25, 0.64, 1, 4, 16. `tone` is `mesh::tone`. Relative, denominator `max(x, 1)` | PASS |
+| `legacy_shader` | = 0 codes | lavapipe readback of the shipped hall, Potato, `legacy_bytes`, ambient raised to 8 so the shoulder is in frame, against the stored plain-compose picture. The shoulder in that shader is the pre-HDR `tone_channel`. Two settled frames must match | PASS. Moving a colour byte by 8, or changing `tone_channel`, fails |
 | `exposure_ev` | ≤ 1e−9 | `ev100_from_luminance` and `exposure_from_ev100` on 0.01, 0.18, 1, and 12.5. EV100 is `log2(L × 100 / 12.5)`. Exposure is `1 / (1.2 × 2^EV100)` | PASS |
 | `exposure_histogram` | ≤ 0.10 stops | `histogram_ev100` on a grey field with a one-pixel sun, against `log2(0.18 × 100 / 12.5)` | PASS |
 | `exposure_still` | ≤ 0.001 | max consecutive relative change of exposure over 8 identical frames | PASS. `exposure_still_change` holds on `step_exposure` |
@@ -340,7 +341,7 @@ Probes, one per failure mode. They land with the phase that can fail that way. N
 | Bloom pops | `still_pop_share` on subsampled scene luma, reported by `get_hdr`. The gate does not compare two equal flats |
 | The grade ran on a display image | `gpu_agx` grades the picture against `agx_rec709` of the scene image. `get_hdr` records `grade=scene` |
 | HDR was asked and the surface is SDR | `get_hdr` lists every `(format, color_space)` and the chosen mode |
-| The legacy bytes moved | phase 1 image hash at exposure 1, bloom 0, `display=legacy` |
+| The legacy bytes moved | `legacy_shader`. The stored picture is the plain compose of the shipped hall |
 
 `get_hdr_settings` and `set_hdr_settings` are the settings commands. Arguments:
 
@@ -370,7 +371,7 @@ Screenshots and the histogram dump go to `./genos-debug/hdr-output/` unless `--o
 cargo test -p genos-render --test hdr_output_gate -- --out genos-debug/hdr-output
 ```
 
-The test prints one line per metric (`LIVE` or `PROOF`, name, value, threshold, status) and writes `live.json`, `proof-good.json`, and `proof-broken.json`. `PROOF` known-good must be `PASS`. `PROOF` broken must be `FAIL`. A live `FAIL`, or a proof line on the wrong side, exits non-zero. `gpu_agx`, `gpu_exposure`, and `gpu_bloom` open the proof window and read a lavapipe frame back. The other rows stay on the CPU references.
+The test prints one line per metric (`LIVE` or `PROOF`, name, value, threshold, status) and writes `live.json`, `proof-good.json`, and `proof-broken.json`. `PROOF` known-good must be `PASS`. `PROOF` broken must be `FAIL`. A live `FAIL`, or a proof line on the wrong side, exits non-zero. `legacy_shader`, `gpu_agx`, `gpu_exposure`, and `gpu_bloom` open the proof window and read a lavapipe frame back. The other rows stay on the CPU references.
 
 The broken fixtures call a mutated form of the real function: an exposure scale that drops the `1.2`, a meter that averages the sun in, `step_exposure` plus 0.05 a frame, an adaptor that snaps past the target, a camera scale that drops the `1.2`, the real pyramid with its red channel doubled, the firefly sum with the Karis weight left at 1, the commute check with `k` dropped, a picture graded as the linear color instead of `AgX`, an exposure pinned at 1, a bloom buffer scaled by 2, a picker that always returns SDR, AgX replaced by white, a highlight clipped to 1 before `agx_rec709`, an ACES channel 0.2 off, PQ replaced by `nits/10000`, and an 80-nit paper white (`80/80` instead of `scrgb_code(203) = 2.5375`). The device lines of 0.40 ms, 37.5 MiB, 5 ms, and 4000 MiB are comparator fixtures for rows that have no engine input. They are not a 4070 measurement.
 

@@ -1,5 +1,6 @@
-//! HDR output metric gate. CPU references, plus three lavapipe readbacks
-//! (`gpu_agx`, `gpu_exposure`, `gpu_bloom`) of one fixed frame.
+//! HDR output metric gate. CPU references, plus lavapipe readbacks: the plain
+//! compose picture (`legacy_shader`) and one fixed `AgX` frame (`gpu_agx`,
+//! `gpu_exposure`, `gpu_bloom`).
 //!
 //! ```text
 //! cargo test -p genos-render --test hdr_output_gate -- --out genos-debug/hdr-output
@@ -28,6 +29,8 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 const LEGACY_MAX: f64 = 1e-4;
+/// Max code delta of the plain compose picture against the stored shoulder.
+const LEGACY_CODE_MAX: f64 = 0.0;
 const EV_MAX: f64 = 1e-9;
 const HIST_MAX: f64 = 0.10;
 const CAMERA_MAX: f64 = 1e-9;
@@ -60,6 +63,8 @@ const GPU_TAU: f64 = 0.001;
 const GPU_BLOOM_K: f64 = 1.0;
 const GPU_BLOOM_LEVELS: u32 = 3;
 const GPU_FRAMES: u32 = 2;
+/// Plain compose of the shipped hall, Potato, ambient 8, `legacy_bytes`, 160×90.
+const LEGACY_SHOULDER: &[u8] = include_bytes!("data/legacy_shoulder_160x90.bgra");
 
 /// Scene-linear Rec.709, then the `AgX_LUT_Gen` sRGB power-2.4 code.
 const AGX_LUT: [([f64; 3], [f64; 3]); 10] = [
@@ -232,6 +237,7 @@ fn run() -> Result<(), String> {
 fn live_metrics() -> Vec<Metric> {
     vec![
         at_most("legacy_inverse", legacy_inverse_error(), LEGACY_MAX),
+        at_most("legacy_shader", legacy_shader_error(false), LEGACY_CODE_MAX),
         at_most(
             "exposure_ev",
             exposure_patch_error(ev100_from_luminance, exposure_from_ev100),
@@ -274,6 +280,7 @@ fn live_metrics() -> Vec<Metric> {
 fn proof_good() -> Vec<Metric> {
     vec![
         at_most("legacy_inverse", legacy_inverse_error(), LEGACY_MAX),
+        at_most("legacy_shader", legacy_shader_error(false), LEGACY_CODE_MAX),
         at_most(
             "exposure_ev",
             exposure_patch_error(ev100_from_luminance, exposure_from_ev100),
@@ -320,6 +327,7 @@ fn proof_good() -> Vec<Metric> {
 fn proof_broken() -> Vec<Metric> {
     vec![
         at_most("legacy_inverse", identity_inverse_error(), LEGACY_MAX),
+        at_most("legacy_shader", legacy_shader_error(true), LEGACY_CODE_MAX),
         at_most(
             "exposure_ev",
             exposure_patch_error(ev100_from_luminance, exposure_without_saturation),
@@ -1120,6 +1128,115 @@ fn wanted_exposure() -> f64 {
         scale = step_exposure(scale, target, 1.0 / 60.0, GPU_TAU, GPU_TAU);
     }
     scale
+}
+
+struct LegacyGrab {
+    ok: bool,
+    pixels: Vec<u8>,
+}
+
+fn legacy_grab() -> &'static LegacyGrab {
+    static GRAB: OnceLock<LegacyGrab> = OnceLock::new();
+    GRAB.get_or_init(capture_legacy)
+}
+
+/// Plain compose (`legacy_bytes`) against the stored shoulder picture.
+/// Two settled frames must match, so a change to `tone_channel` cannot hide in noise.
+fn legacy_shader_error(broken: bool) -> f64 {
+    let grab = legacy_grab();
+    if !grab.ok {
+        return 255.0;
+    }
+    if grab.pixels.len() != LEGACY_SHOULDER.len() {
+        return 255.0;
+    }
+    let mut worst = 0i32;
+    for (index, (got, want)) in grab.pixels.iter().zip(LEGACY_SHOULDER.iter()).enumerate() {
+        let mut code = i32::from(*got);
+        if broken && index % 4 != 3 {
+            code = (code + 8).min(255);
+        }
+        let err = (code - i32::from(*want)).abs();
+        if err > worst {
+            worst = err;
+        }
+    }
+    f64::from(worst)
+}
+
+fn capture_legacy() -> LegacyGrab {
+    let scene = match load_hall() {
+        Ok(scene) => scene,
+        Err(err) => {
+            eprintln!("hdr gate legacy: {err}");
+            return LegacyGrab {
+                ok: false,
+                pixels: Vec::new(),
+            };
+        }
+    };
+    let mut world = World::from_scene(scene);
+    world.scene.lighting = LightingSettings::preset(LightingPreset::Potato);
+    // Potato's ambient sits under 0.64, so the shoulder never runs. Raised
+    // ambient puts the plain compose onto the curve this row grades.
+    world.scene.lighting.ambient.intensity = 8.0;
+    world.scene.hdr = HdrSettings::legacy_bytes();
+    let opened = open_grade_renderer();
+    let (mut window, mut renderer) = match opened {
+        Ok(pair) => pair,
+        Err(err) => {
+            eprintln!("hdr gate legacy: {err}");
+            return LegacyGrab {
+                ok: false,
+                pixels: Vec::new(),
+            };
+        }
+    };
+    let camera = Camera::opening();
+    if let Err(err) = draw_once(&mut window, &mut renderer, &world, &camera) {
+        eprintln!("hdr gate legacy: {err}");
+        return LegacyGrab {
+            ok: false,
+            pixels: Vec::new(),
+        };
+    }
+    let first = match draw_once(&mut window, &mut renderer, &world, &camera) {
+        Ok(pixels) => pixels,
+        Err(err) => {
+            eprintln!("hdr gate legacy: {err}");
+            return LegacyGrab {
+                ok: false,
+                pixels: Vec::new(),
+            };
+        }
+    };
+    let second = match draw_once(&mut window, &mut renderer, &world, &camera) {
+        Ok(pixels) => pixels,
+        Err(err) => {
+            eprintln!("hdr gate legacy: {err}");
+            return LegacyGrab {
+                ok: false,
+                pixels: Vec::new(),
+            };
+        }
+    };
+    let mut differ = 0usize;
+    for (left, right) in first.iter().zip(second.iter()) {
+        if left != right {
+            differ += 1;
+        }
+    }
+    if differ > 0 || first.len() != second.len() {
+        eprintln!("hdr gate legacy: {differ} bytes moved between frames");
+        return LegacyGrab {
+            ok: false,
+            pixels: Vec::new(),
+        };
+    }
+    LegacyGrab {
+        ok: true,
+        pixels: first,
+    }
 }
 
 fn fail_grab(why: &str) -> Grab {
