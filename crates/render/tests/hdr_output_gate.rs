@@ -13,14 +13,11 @@
 
 use genos_render::{
     aces2_rec709, agx_rec709, bloom_commute_error, bloom_downsample, bloom_pyramid, bloom_upsample,
-    ev100_from_luminance,
-    exposure_from_camera,
-    exposure_from_ev100, exposure_adapt_outside, exposure_overshoot, exposure_still_change,
-    exposure_with_compensation, grade_peak, grade_relative, histogram_ev100,
-    karis_downsample_rgb, karis_firefly_response, linear_from_display, near_grade,
-    pick_hdr_output, pq_st2084, resolve_swapchain, scene_luma, scene_peak_error, scene_referred,
-    scrgb_code, step_exposure, still_pop_share, swapchain_nits, tone, HdrSwapchain, Image,
-    ListedFormat, PresentHost, Renderer, World, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB,
+    ev100_from_luminance, exposure_adapt_outside, exposure_from_camera, exposure_from_ev100,
+    exposure_overshoot, exposure_still_change, exposure_with_compensation, histogram_ev100,
+    karis_downsample_rgb, karis_firefly_response, linear_from_display, pick_hdr_output, pq_st2084,
+    resolve_swapchain, scene_luma, scrgb_code, step_exposure, swapchain_nits, tone, HdrSwapchain,
+    Image, ListedFormat, PresentHost, Renderer, World, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB,
     COLOR_SPACE_SRGB, FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
 };
 
@@ -42,16 +39,11 @@ const ACES_MAX: f64 = 1e-3;
 const PQ_MAX: f64 = 1e-7;
 /// Literal scRGB code of 203 nits. Not `203/80`, so a shared divisor cannot pass itself.
 const SCRGB_WHITE: f64 = 2.5375;
-const PEAK_MAX: f64 = 0.0025;
-const GRADE_MAX: f64 = 0.02;
-const LINEAR_MIN: f64 = 1.5;
 const STILL_MAX: f64 = 0.001;
 const ADAPT_MAX: f64 = 0.0;
 const OVERSHOOT_MAX: f64 = 0.02;
 const FIREFLY_MAX: f64 = 1.0;
 const COMMUTE_MAX: f64 = 0.01;
-const NEAR_MAX: f64 = 0.05;
-const POP_MAX: f64 = 0.001;
 const DEVICE_MS_MAX: f64 = 1.5;
 const DEVICE_VRAM_MAX: f64 = 96.0;
 /// Mean |picture − AgX(exposure × (scene + bloom × k))| on lit pixels.
@@ -183,7 +175,6 @@ enum Status {
 #[derive(Clone, Copy)]
 enum Compare {
     AtMost,
-    AtLeast,
     Equal,
 }
 
@@ -242,12 +233,47 @@ fn live_metrics() -> Vec<Metric> {
     vec![
         at_most("legacy_inverse", legacy_inverse_error(), LEGACY_MAX),
         at_most(
-            "scene_peak",
-            scene_peak_error(scene_referred([4.0, 0.0, 0.0])[0]),
-            PEAK_MAX,
+            "exposure_ev",
+            exposure_patch_error(ev100_from_luminance, exposure_from_ev100),
+            EV_MAX,
         ),
-        at_most("linear_grade", live_linear_grade(), GRADE_MAX),
-        at_least("grade_is_linear", live_grade_peak(), LINEAR_MIN),
+        at_most(
+            "exposure_histogram",
+            histogram_error(histogram_ev100),
+            HIST_MAX,
+        ),
+        at_most("exposure_still", exposure_still_change(), STILL_MAX),
+        at_most("exposure_adapt", exposure_adapt_outside(), ADAPT_MAX),
+        at_most("exposure_overshoot", exposure_overshoot(), OVERSHOOT_MAX),
+        at_most(
+            "physical_camera",
+            camera_error(exposure_from_camera),
+            CAMERA_MAX,
+        ),
+        at_most("bloom_energy", bloom_error(), BLOOM_MAX),
+        at_most("bloom_firefly", karis_firefly_response(1_000.0), FIREFLY_MAX),
+        at_most("bloom_commute", bloom_commute_error(), COMMUTE_MAX),
+        at_most("gpu_agx", gpu_agx_error(false), GPU_AGX_MAX),
+        at_most("gpu_exposure", gpu_exposure_error(false), GPU_EXPOSURE_MAX),
+        at_most("gpu_bloom", gpu_bloom_error(false), GPU_BLOOM_MAX),
+        at_most("output_pick", live_output_pick(), PICK_MAX),
+        at_most("agx_de", agx_delta_e(agx_rec709), AGX_DE_MAX),
+        at_most(
+            "agx_highlight",
+            agx_highlight_distance(agx_rec709),
+            AGX_CODE_MAX,
+        ),
+        aces_row(aces2_rec709([1.0, 1.0, 1.0])),
+        at_most("pq_st2084", pq_error(pq_st2084), PQ_MAX),
+        equal("scrgb_code", scrgb_code(203.0), SCRGB_WHITE),
+        not_implemented("post_ms_device", DEVICE_MS_MAX, Compare::AtMost),
+        not_implemented("post_vram_device", DEVICE_VRAM_MAX, Compare::AtMost),
+    ]
+}
+
+fn proof_good() -> Vec<Metric> {
+    vec![
+        at_most("legacy_inverse", legacy_inverse_error(), LEGACY_MAX),
         at_most(
             "exposure_ev",
             exposure_patch_error(ev100_from_luminance, exposure_from_ev100),
@@ -273,71 +299,6 @@ fn live_metrics() -> Vec<Metric> {
         at_most("gpu_exposure", gpu_exposure_error(false), GPU_EXPOSURE_MAX),
         at_most("gpu_bloom", gpu_bloom_error(false), GPU_BLOOM_MAX),
         at_most("output_pick", live_output_pick(), PICK_MAX),
-        at_most("near_error", near_grade(0.0, 0.20), NEAR_MAX),
-        at_most(
-            "still_pop",
-            still_pop_share(&flat(8, 1.0), &flat(8, 1.0)),
-            POP_MAX,
-        ),
-        at_most("agx_de", agx_delta_e(agx_rec709), AGX_DE_MAX),
-        at_most(
-            "agx_highlight",
-            agx_highlight_distance(agx_rec709),
-            AGX_CODE_MAX,
-        ),
-        aces_row(aces2_rec709([1.0, 1.0, 1.0])),
-        at_most("pq_st2084", pq_error(pq_st2084), PQ_MAX),
-        equal("scrgb_code", scrgb_code(203.0), SCRGB_WHITE),
-        not_implemented("post_ms_device", DEVICE_MS_MAX, Compare::AtMost),
-        not_implemented("post_vram_device", DEVICE_VRAM_MAX, Compare::AtMost),
-    ]
-}
-
-fn proof_good() -> Vec<Metric> {
-    vec![
-        at_most("legacy_inverse", legacy_inverse_error(), LEGACY_MAX),
-        at_most("scene_peak", peak_err(4.0), PEAK_MAX),
-        at_most(
-            "linear_grade",
-            rel_mean(&[0.5, 0.5, 0.5, 0.5], &[0.5, 0.5, 0.5, 0.5]),
-            GRADE_MAX,
-        ),
-        at_least("grade_is_linear", max_channel(&[0.2, 8.0, 0.4]), LINEAR_MIN),
-        at_most(
-            "exposure_ev",
-            exposure_patch_error(ev100_from_luminance, exposure_from_ev100),
-            EV_MAX,
-        ),
-        at_most(
-            "exposure_histogram",
-            histogram_error(histogram_ev100),
-            HIST_MAX,
-        ),
-        at_most(
-            "exposure_still",
-            max_rel_step(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
-            STILL_MAX,
-        ),
-        at_most("exposure_adapt", adapt_outside(false), ADAPT_MAX),
-        at_most("exposure_overshoot", adapt_overshoot(false), OVERSHOOT_MAX),
-        at_most(
-            "physical_camera",
-            camera_error(exposure_from_camera),
-            CAMERA_MAX,
-        ),
-        at_most("bloom_energy", bloom_error(), BLOOM_MAX),
-        at_most("bloom_firefly", karis_firefly(1_000.0), FIREFLY_MAX),
-        at_most("bloom_commute", 0.0, COMMUTE_MAX),
-        at_most("gpu_agx", gpu_agx_error(false), GPU_AGX_MAX),
-        at_most("gpu_exposure", gpu_exposure_error(false), GPU_EXPOSURE_MAX),
-        at_most("gpu_bloom", gpu_bloom_error(false), GPU_BLOOM_MAX),
-        at_most("output_pick", live_output_pick(), PICK_MAX),
-        at_most("near_error", weighted(0.0, 0.20), NEAR_MAX),
-        at_most(
-            "still_pop",
-            pop_share(&flat(100, 1.0), &flat(100, 1.0)),
-            POP_MAX,
-        ),
         at_most("agx_de", agx_delta_e(agx_rec709), AGX_DE_MAX),
         at_most(
             "agx_highlight",
@@ -359,28 +320,13 @@ fn proof_good() -> Vec<Metric> {
 fn proof_broken() -> Vec<Metric> {
     vec![
         at_most("legacy_inverse", identity_inverse_error(), LEGACY_MAX),
-        at_most("scene_peak", peak_err(1.0), PEAK_MAX),
-        at_most(
-            "linear_grade",
-            rel_mean(&[0.7, 0.7, 0.7, 0.7], &[0.5, 0.5, 0.5, 0.5]),
-            GRADE_MAX,
-        ),
-        at_least(
-            "grade_is_linear",
-            max_channel(&[0.2, 0.77, 0.4]),
-            LINEAR_MIN,
-        ),
         at_most(
             "exposure_ev",
             exposure_patch_error(ev100_from_luminance, exposure_without_saturation),
             EV_MAX,
         ),
         at_most("exposure_histogram", histogram_error(mean_ev), HIST_MAX),
-        at_most(
-            "exposure_still",
-            max_rel_step(&[1.0, 1.05, 1.10, 1.15, 1.20, 1.25, 1.30, 1.35]),
-            STILL_MAX,
-        ),
+        at_most("exposure_still", exposure_still_stepped(), STILL_MAX),
         at_most("exposure_adapt", adapt_outside(true), ADAPT_MAX),
         at_most("exposure_overshoot", adapt_overshoot(true), OVERSHOOT_MAX),
         at_most(
@@ -388,9 +334,9 @@ fn proof_broken() -> Vec<Metric> {
             camera_error(exposure_without_saturation_camera),
             CAMERA_MAX,
         ),
-        at_most("bloom_energy", 1.0, BLOOM_MAX),
-        at_most("bloom_firefly", 1_000.0 * 0.125, FIREFLY_MAX),
-        at_most("bloom_commute", 0.125, COMMUTE_MAX),
+        at_most("bloom_energy", bloom_energy_doubled(), BLOOM_MAX),
+        at_most("bloom_firefly", firefly_without_karis(1_000.0), FIREFLY_MAX),
+        at_most("bloom_commute", bloom_commute_dropped_scale(), COMMUTE_MAX),
         at_most("gpu_agx", gpu_agx_error(true), GPU_AGX_MAX),
         at_most("gpu_exposure", gpu_exposure_error(true), GPU_EXPOSURE_MAX),
         at_most("gpu_bloom", gpu_bloom_error(true), GPU_BLOOM_MAX),
@@ -399,12 +345,10 @@ fn proof_broken() -> Vec<Metric> {
             pick_misses(pick_always_sdr) + force_sdr_misses(pick_ignores_force),
             PICK_MAX,
         ),
-        at_most("near_error", weighted(0.20, 0.0), NEAR_MAX),
-        at_most("still_pop", pop_share(&flat(100, 1.0), &popped()), POP_MAX),
         at_most("agx_de", agx_delta_e(|_scene| [1.0, 1.0, 1.0]), AGX_DE_MAX),
         at_most(
             "agx_highlight",
-            outside_window(1.0, 0.998, 0.999_5),
+            agx_highlight_distance(agx_hard_clip),
             AGX_CODE_MAX,
         ),
         at_most(
@@ -461,21 +405,6 @@ fn at_most(name: &'static str, value: f64, threshold: f64) -> Metric {
         value: Some(value),
         threshold,
         compare: Compare::AtMost,
-        status,
-    }
-}
-
-fn at_least(name: &'static str, value: f64, threshold: f64) -> Metric {
-    let status = if value.is_finite() && value >= threshold {
-        Status::Pass
-    } else {
-        Status::Fail
-    };
-    Metric {
-        name,
-        value: Some(value),
-        threshold,
-        compare: Compare::AtLeast,
         status,
     }
 }
@@ -579,7 +508,7 @@ fn exposure_without_saturation_camera(aperture: f64, shutter: f64, iso: f64) -> 
     1.0 / scale
 }
 
-fn bloom_error() -> f64 {
+fn bloom_field() -> (Vec<f32>, Vec<f64>) {
     let side = 16usize;
     let mut rgba = vec![0.0_f32; side.saturating_mul(side).saturating_mul(4)];
     for index in 0..side.saturating_mul(side) {
@@ -594,7 +523,6 @@ fn bloom_error() -> f64 {
             *slot = 0.125;
         }
     }
-    let got = bloom_pyramid(&rgba, side, side, 3);
     let mut rgb = Vec::new();
     for index in 0..side.saturating_mul(side) {
         let base = index.saturating_mul(4);
@@ -602,8 +530,84 @@ fn bloom_error() -> f64 {
         rgb.push(f64::from(rgba.get(base.saturating_add(1)).copied().unwrap_or(0.0)));
         rgb.push(f64::from(rgba.get(base.saturating_add(2)).copied().unwrap_or(0.0)));
     }
-    let want = reference_pyramid(&rgb, side, side, 3);
+    (rgba, rgb)
+}
+
+fn bloom_error() -> f64 {
+    let (rgba, rgb) = bloom_field();
+    let got = bloom_pyramid(&rgba, 16, 16, 3);
+    let want = reference_pyramid(&rgb, 16, 16, 3);
     bloom_delta(&got, &want, 1.0)
+}
+
+/// The real pyramid, with the red channel doubled the way a bad store does.
+fn bloom_energy_doubled() -> f64 {
+    let (rgba, rgb) = bloom_field();
+    let mut got = bloom_pyramid(&rgba, 16, 16, 3);
+    for index in 0..16usize.saturating_mul(16) {
+        let slot = index.saturating_mul(4);
+        if let Some(red) = got.get_mut(slot) {
+            *red *= 2.0;
+        }
+    }
+    let want = reference_pyramid(&rgb, 16, 16, 3);
+    bloom_delta(&got, &want, 1.0)
+}
+
+/// `bloom_commute_error` without the `k` on the unscaled side.
+fn bloom_commute_dropped_scale() -> f64 {
+    let mut pixels = vec![0.0; 16];
+    if let Some(slot) = pixels.get_mut(5) {
+        *slot = 1.0;
+    }
+    let scale = 2.0;
+    let plain = bloom_downsample(&pixels, 4, 4);
+    for sample in &mut pixels {
+        *sample *= scale;
+    }
+    let scaled = bloom_downsample(&pixels, 4, 4);
+    let mut worst = 0.0;
+    for (left, right) in plain.pixels.iter().zip(scaled.pixels.iter()) {
+        let err = (right - left).abs();
+        if err > worst {
+            worst = err;
+        }
+    }
+    worst
+}
+
+/// Same five-box sum as `karis_firefly_response`, with the Karis weight left at 1.
+fn firefly_without_karis(centre: f64) -> f64 {
+    let outer = centre / 4.0;
+    let centre_w = 0.5;
+    let outer_w = 0.125;
+    (outer * outer_w * 4.0) / (centre_w + outer_w * 4.0)
+}
+
+/// `step_exposure` plus a fixed 0.05, so a held target still walks.
+fn exposure_still_stepped() -> f64 {
+    let target = exposure_from_ev100(0.0);
+    let mut scale = target;
+    let mut worst = 0.0;
+    let mut prev = scale;
+    for _ in 0..8 {
+        scale = step_exposure(scale, target, 1.0 / 60.0, 0.40, 0.80) + 0.05;
+        let step = (scale - prev).abs() / prev.abs().max(1.0e-6);
+        if step > worst {
+            worst = step;
+        }
+        prev = scale;
+    }
+    worst
+}
+
+/// Highlight clipped to 1 before `agx_rec709`, so linear 16 never reaches the shoulder.
+fn agx_hard_clip(scene: [f64; 3]) -> [f64; 3] {
+    agx_rec709([
+        scene[0].min(1.0),
+        scene[1].min(1.0),
+        scene[2].min(1.0),
+    ])
 }
 
 fn pq_error(encode: fn(f64) -> f64) -> f64 {
@@ -760,51 +764,6 @@ fn pick_ignores_force(
     pick_hdr_output(host, list)
 }
 
-fn peak_err(stored: f64) -> f64 {
-    scene_peak_error(stored)
-}
-
-fn live_linear_grade() -> f64 {
-    let reference = [0.25_f64, 0.5, 1.0, 4.0];
-    let mut stored = [0.0; 4];
-    for (slot, value) in stored.iter_mut().enumerate() {
-        let radiance = reference[slot];
-        *value = scene_referred([radiance, radiance, radiance])[0];
-    }
-    grade_relative(&stored, &reference)
-}
-
-fn live_grade_peak() -> f64 {
-    let pixel = scene_referred([0.2, 8.0, 0.4]);
-    grade_peak(&pixel)
-}
-
-fn rel_mean(candidate: &[f64], reference: &[f64]) -> f64 {
-    grade_relative(candidate, reference)
-}
-
-fn max_channel(values: &[f64]) -> f64 {
-    grade_peak(values)
-}
-
-fn max_rel_step(values: &[f64]) -> f64 {
-    let mut worst = 0.0;
-    let mut iter = values.iter();
-    let Some(first) = iter.next() else {
-        return 1.0;
-    };
-    let mut prev = *first;
-    for value in iter {
-        let denom = prev.abs().max(1e-6);
-        let step = (value - prev).abs() / denom;
-        if step > worst {
-            worst = step;
-        }
-        prev = *value;
-    }
-    worst
-}
-
 fn adapt_outside(jump: bool) -> f64 {
     outside_window(simulate_adapt(jump).0, 0.40, 2.00)
 }
@@ -850,38 +809,6 @@ fn outside_window(value: f64, low: f64, high: f64) -> f64 {
         value - high
     } else {
         0.0
-    }
-}
-
-fn weighted(near: f64, far: f64) -> f64 {
-    near_grade(near, far)
-}
-
-fn flat(count: usize, value: f64) -> Vec<f64> {
-    vec![value; count]
-}
-
-fn popped() -> Vec<f64> {
-    let mut values = flat(100, 1.0);
-    for value in values.iter_mut().take(10) {
-        *value = 1.5;
-    }
-    values
-}
-
-fn pop_share(before: &[f64], after: &[f64]) -> f64 {
-    let mut n = 0.0;
-    let mut moved = 0.0;
-    for (before_y, after_y) in before.iter().zip(after.iter()) {
-        n += 1.0;
-        if (before_y - after_y).abs() > 0.01 {
-            moved += 1.0;
-        }
-    }
-    if n == 0.0 {
-        1.0
-    } else {
-        moved / n
     }
 }
 
@@ -1028,7 +955,6 @@ fn format_metric(metric: &Metric) -> String {
     };
     let op = match metric.compare {
         Compare::AtMost => "<=",
-        Compare::AtLeast => ">=",
         Compare::Equal => "==",
     };
     format!(
@@ -1045,14 +971,6 @@ fn fmt_num(number: f64) -> String {
     } else {
         format!("{number:.6}")
     }
-}
-
-fn karis_firefly(centre: f64) -> f64 {
-    let outer = centre / 4.0;
-    let weight = |luma: f64| 1.0 / (1.0 + luma);
-    let centre_w = 0.5 * weight(0.0);
-    let outer_w = 0.125 * weight(outer);
-    (outer * outer_w * 4.0) / (centre_w + outer_w * 4.0)
 }
 
 fn status_str(status: Status) -> &'static str {
@@ -1086,7 +1004,6 @@ fn json_metric(metric: &Metric) -> String {
     };
     let compare = match metric.compare {
         Compare::AtMost => "at_most",
-        Compare::AtLeast => "at_least",
         Compare::Equal => "equal",
     };
     format!(

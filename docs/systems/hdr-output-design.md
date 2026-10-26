@@ -298,9 +298,6 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | Metric | Threshold | What it grades | Live, this tree |
 |---|---|---|---|
 | `legacy_inverse` | ≤ 1e−4 | `linear_from_display(tone(x))` against `x` for 0, 0.25, 0.64, 1, 4, 16. `tone` is `mesh::tone`. Relative, denominator `max(x, 1)` | PASS |
-| `scene_peak` | ≤ 0.0025 | `\|stored − 4\| / 4` for a scene-referred pixel of 4 | PASS. `scene_referred` stores 4 |
-| `linear_grade` | ≤ 0.02 | mean relative luminance against a path-trace linear image, pre-exposure, pre-bloom | PASS. `grade_relative` on `scene_referred` |
-| `grade_is_linear` | ≥ 1.5 | max channel of the buffer the grade read, on a fixture whose peak is 8 | PASS. `grade_peak` of a scene pixel whose peak is 8 |
 | `exposure_ev` | ≤ 1e−9 | `ev100_from_luminance` and `exposure_from_ev100` on 0.01, 0.18, 1, and 12.5. EV100 is `log2(L × 100 / 12.5)`. Exposure is `1 / (1.2 × 2^EV100)` | PASS |
 | `exposure_histogram` | ≤ 0.10 stops | `histogram_ev100` on a grey field with a one-pixel sun, against `log2(0.18 × 100 / 12.5)` | PASS |
 | `exposure_still` | ≤ 0.001 | max consecutive relative change of exposure over 8 identical frames | PASS. `exposure_still_change` holds on `step_exposure` |
@@ -314,8 +311,6 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | `gpu_exposure` | ≤ 1e−4 | `Renderer::hdr_exposure` against that same `step_exposure` | PASS. A scale pinned at 1 fails |
 | `gpu_bloom` | ≤ 1e−3 | GPU bloom buffer of the current frame against that same tap pyramid. The graded frame changes the lamp, so the previous frame's pyramid does not match | PASS. A pyramid that doubles energy fails |
 | `output_pick` | = 0 mismatches | Linux: HDR10, else scRGB, else SDR. Windows: scRGB, else HDR10, else SDR. macOS: first listed HDR pair, else SDR. Potato and Low force SDR | PASS. `pick_hdr_output` and `resolve_swapchain`. A picker that ignores the force and keeps HDR10 fails |
-| `near_error` | ≤ 0.05 | `(4 × e_near + e_far) / 5`, distance split at 2 m | PASS. `near_grade(0, 0.20)` |
-| `still_pop` | ≤ 0.001 | share of pixels whose linear `Y` moves by more than 0.01 between two still frames. The 0.01 step is the gi-check pop step | PASS. `still_pop_share` on two equal fields. A 10% pop fails. Compose calls the same function on subsampled scene luma |
 | `agx_de` | ≤ 0.5 | max CIEDE2000 of `agx_rec709` against `AgX_LUT_Gen` sRGB-cube samples | PASS |
 | `agx_highlight` | outside `[0.998, 0.9995]` is 0 | power-2.4 code of linear 16. A hard clip to 1 fails | PASS |
 | `aces_ctl` | ≤ 1e−3 | `aces2_rec709` against Academy CTL `Output.Academy.Rec709-D65_100nit_in_Rec709-D65_sRGB-Piecewise` | NOT-IMPLEMENTED. The function returns `None` until that CTL is the body |
@@ -326,9 +321,7 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 
 The §7 ceilings are not rows. They are not measured, and comparing them to themselves is not a result.
 
-The GI grade does not use `linear_grade`'s 0.02 line. GI keeps 0.12. `linear_grade` is the post readback against the path tracer when both are the same linear radiance, so the only legal error is numerical. A GI miss still fails in the lighting reference check, not by widening this line.
-
-`grade_is_linear` is the guard that the readback is the scene-referred image. A buffer that has been through the legacy shoulder peaks near 0.78 and fails the 1.5 floor. That is the failure mode of grading a display picture.
+`scene_peak`, `linear_grade`, and `grade_is_linear` graded `scene_referred` against itself, so a shader change could not fail them. `near_error` was `near_grade(0, 0.20)`, which is 0.04 on every build. `still_pop` compared two equal flats. Those rows are gone. `still_pop_share` stays on the renderer probe. GI keeps 0.12 in the lighting reference check. A GI miss fails there.
 
 ## 9. Debug tool and tests
 
@@ -344,8 +337,8 @@ Probes, one per failure mode. They land with the phase that can fail that way. N
 | The histogram fence stalls the frame | `hdr_ms` timestamp, split from `lighting`. The read stays after the fence |
 | A sun pixel pins the meter | histogram dump, 256 counts, under `./genos-debug/hdr-output/`. `exposure_ev` |
 | A one-pixel firefly flickers in bloom | bloom level 1 dump. `bloom_firefly` |
-| Bloom pops | no threshold exists to cross. `still_pop` on the scene-referred image |
-| The grade ran on a display image | `grade_is_linear`. The readback path is recorded in `get_hdr` as `grade=scene` |
+| Bloom pops | `still_pop_share` on subsampled scene luma, reported by `get_hdr`. The gate does not compare two equal flats |
+| The grade ran on a display image | `gpu_agx` grades the picture against `agx_rec709` of the scene image. `get_hdr` records `grade=scene` |
 | HDR was asked and the surface is SDR | `get_hdr` lists every `(format, color_space)` and the chosen mode |
 | The legacy bytes moved | phase 1 image hash at exposure 1, bloom 0, `display=legacy` |
 
@@ -379,7 +372,7 @@ cargo test -p genos-render --test hdr_output_gate -- --out genos-debug/hdr-outpu
 
 The test prints one line per metric (`LIVE` or `PROOF`, name, value, threshold, status) and writes `live.json`, `proof-good.json`, and `proof-broken.json`. `PROOF` known-good must be `PASS`. `PROOF` broken must be `FAIL`. A live `FAIL`, or a proof line on the wrong side, exits non-zero. `gpu_agx`, `gpu_exposure`, and `gpu_bloom` open the proof window and read a lavapipe frame back. The other rows stay on the CPU references.
 
-The broken fixtures are deliberate: a peak clamped to 1, a grade of display-encoded bytes, an exposure scale that drops the `1.2`, a meter that averages the sun in, an exposure that steps by 0.05 a frame, an adaptor that snaps past the target, a camera scale that drops the `1.2`, bloom weights that sum to 2, a box filter on the firefly, a threshold bloom, a picture graded as the linear color instead of `AgX`, an exposure pinned at 1, a bloom buffer scaled by 2, a picker that always returns SDR, a near-field error, a 10% pop, AgX replaced by white, a highlight clipped to 1, an ACES channel 0.2 off, PQ replaced by `nits/10000`, an 80-nit paper white (`80/80` instead of `scrgb_code(203) = 2.5375`), and device budgets of 500 MiB and 5 ms. Those device lines are comparator fixtures. They are not a 4070 measurement.
+The broken fixtures call a mutated form of the real function: an exposure scale that drops the `1.2`, a meter that averages the sun in, `step_exposure` plus 0.05 a frame, an adaptor that snaps past the target, a camera scale that drops the `1.2`, the real pyramid with its red channel doubled, the firefly sum with the Karis weight left at 1, the commute check with `k` dropped, a picture graded as the linear color instead of `AgX`, an exposure pinned at 1, a bloom buffer scaled by 2, a picker that always returns SDR, AgX replaced by white, a highlight clipped to 1 before `agx_rec709`, an ACES channel 0.2 off, PQ replaced by `nits/10000`, and an 80-nit paper white (`80/80` instead of `scrgb_code(203) = 2.5375`). The device lines of 0.40 ms, 37.5 MiB, 5 ms, and 4000 MiB are comparator fixtures for rows that have no engine input. They are not a 4070 measurement.
 
 ### Gates that wait for a phase
 
