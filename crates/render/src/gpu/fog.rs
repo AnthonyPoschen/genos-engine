@@ -1171,7 +1171,7 @@ impl Gpu {
                 16,
                 raw.as_mut_ptr().cast(),
                 8,
-                0x1,
+                0x1 | 0x2,
             )
         };
         if got != 0 {
