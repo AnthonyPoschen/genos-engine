@@ -2,8 +2,6 @@
 #![cfg_attr(test, expect(clippy::assert_is_empty, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 #![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
@@ -12,7 +10,7 @@
 
 //! The bake's input: object-space triangles and the material data cards capture.
 
-use genos_load::{AlphaMode, GltfScene, Image, PbrMaterial, TextureSlot};
+use genos_load::{shade_sets, shade_uv, AlphaMode, GltfScene, Image, PbrMaterial, Primitive, ShadeSample};
 use genos_mesh::MeshTriangle;
 
 use crate::BakeSettings;
@@ -28,6 +26,10 @@ pub struct BakeMaterial {
 pub struct BakeMesh<'a> {
     pub name: String,
     pub triangles: Vec<MeshTriangle>,
+    /// TEXCOORD sets parallel to `triangles`. Empty when every slot can use
+    /// `MeshTriangle::uvs` (set 0). Otherwise one entry per triangle, indexed
+    /// by TEXCOORD number. `None` is a set the primitive did not have.
+    pub uv_sets: Vec<Vec<Option<[[f32; 2]; 3]>>>,
     pub materials: Vec<BakeMaterial>,
     /// Images the materials' texture slots index.
     pub images: &'a [Image],
@@ -48,6 +50,13 @@ impl<'a> BakeMesh<'a> {
             pbr: PbrMaterial::default(),
         });
         let mut triangles = Vec::new();
+        let mut uv_sets = Vec::new();
+        let keep_sets = mesh.primitives.iter().any(|p| {
+            p.texcoord_sets
+                .iter()
+                .skip(1)
+                .any(|set| !set.is_empty())
+        });
         for p in &mesh.primitives {
             let material = p.material.map_or(default, |m| m as u32);
             let two_sided = scene
@@ -77,19 +86,32 @@ impl<'a> BakeMesh<'a> {
                 if tri.area() <= 0.0 {
                     continue;
                 }
-                match mask {
-                    Some(cutoff) => {
-                        if let Some(m) = scene.materials.get(material as usize) {
-                            triangles.extend(clip_mask(&tri, cutoff, &scene.images, m, 3));
+                let sets = if keep_sets {
+                    triangle_sets(p, [at(0), at(1), at(2)])
+                } else {
+                    Vec::new()
+                };
+                if let Some(cutoff) = mask {
+                    if let Some(m) = scene.materials.get(material as usize) {
+                        for captured in clip_mask(&tri, &sets, cutoff, &scene.images, m, 3) {
+                            triangles.push(captured.tri);
+                            if keep_sets {
+                                uv_sets.push(captured.sets);
+                            }
                         }
                     }
-                    None => triangles.push(tri),
+                } else {
+                    triangles.push(tri);
+                    if keep_sets {
+                        uv_sets.push(sets);
+                    }
                 }
             }
         }
         BakeMesh {
             name: mesh.name.clone().unwrap_or_else(|| format!("mesh{index}")),
             triangles,
+            uv_sets,
             materials,
             images: &scene.images,
         }
@@ -114,6 +136,7 @@ impl<'a> BakeMesh<'a> {
         BakeMesh {
             name: name.to_string(),
             triangles,
+            uv_sets: Vec::new(),
             materials,
             images: &[],
         }
@@ -128,42 +151,39 @@ impl<'a> BakeMesh<'a> {
         b
     }
 
-    /// Diffuse albedo (base colour x (1 - metallic), linear) and emission at a hit.
-    pub fn surface(&self, material: u32, uv: [f32; 2]) -> ([f32; 3], [f32; 3]) {
+    /// The shared shade at `uv`. Every texture slot is read at that coordinate.
+    pub fn shade(&self, material: u32, uv: [f32; 2]) -> ShadeSample {
         let Some(m) = self.materials.get(material as usize) else {
-            return ([0.8; 3], [0.0; 3]);
+            return ShadeSample::paint([0.8; 3]);
         };
-        let m = &m.pbr;
-        let base = self.sample(m.base_color_texture, uv, true);
-        let mr = self.sample(m.metallic_roughness_texture, uv, false);
-        let metallic = (m.metallic * mr[2]).clamp(0.0, 1.0);
-        let albedo = std::array::from_fn(|c| m.base_color[c] * base[c] * (1.0 - metallic));
-        let e = self.sample(m.emissive_texture, uv, true);
-        let emissive = std::array::from_fn(|c| m.emissive[c] * e[c] * m.emissive_strength);
-        (albedo, emissive)
+        shade_uv(&m.pbr, self.images, uv)
     }
 
-    /// Nearest texel with repeat wrapping (cards are coarser than texels, and the
-    /// card capture averages several samples). White when there is no texture.
-    fn sample(&self, slot: Option<TextureSlot>, uv: [f32; 2], srgb: bool) -> [f32; 4] {
-        let Some(img) = slot.and_then(|s| self.images.get(s.image)) else {
-            return [1.0; 4];
+    /// Diffuse albedo (base colour x (1 - metallic), linear) and emission at a hit.
+    ///
+    /// Every slot is read at `uv`. A hit that should honour `TextureSlot::texcoord`
+    /// uses [`Self::shade_hit`].
+    pub fn surface(&self, material: u32, uv: [f32; 2]) -> ([f32; 3], [f32; 3]) {
+        let sample = self.shade(material, uv);
+        (sample.diffuse_albedo(), sample.emissive)
+    }
+
+    /// The shared shade at barycentric `(u, v)` on `triangle`.
+    ///
+    /// Each slot is read at `TEXCOORD_<slot.texcoord>`. A missing set falls
+    /// back to set 0. [`Self::shade`] still samples every slot at one UV.
+    pub fn shade_hit(&self, triangle: usize, u: f32, v: f32) -> ShadeSample {
+        let Some(tri) = self.triangles.get(triangle) else {
+            return ShadeSample::paint([0.8; 3]);
         };
-        let wrap = |t: f32, n: u32| ((t - t.floor()) * n as f32).min(n as f32 - 1.0) as u32;
-        let (x, y) = (wrap(uv[0], img.width), wrap(uv[1], img.height));
-        let p = img.pixel(x, y).unwrap_or([255; 4]);
-        std::array::from_fn(|c| {
-            let v = p[c] as f32 / 255.0;
-            if srgb && c < 3 {
-                if v <= 0.04045 {
-                    v / 12.92
-                } else {
-                    ((v + 0.055) / 1.055).powf(2.4)
-                }
-            } else {
-                v
-            }
-        })
+        let Some(material) = self.materials.get(tri.material as usize) else {
+            return ShadeSample::paint([0.8; 3]);
+        };
+        let sets = match self.uv_sets.get(triangle) {
+            Some(sets) => sets.as_slice(),
+            None => &[],
+        };
+        shade_bary(&material.pbr, self.images, tri, sets, u, v)
     }
 
     /// FNV-1a over everything that changes the result: triangles, materials,
@@ -183,6 +203,17 @@ impl<'a> BakeMesh<'a> {
             h.bytes(&t.material.to_le_bytes());
             h.bytes(&[t.two_sided as u8]);
         }
+        for sets in &self.uv_sets {
+            for set in sets {
+                match set {
+                    Some(corners) => {
+                        h.bytes(&[1]);
+                        corners.iter().flatten().for_each(|&x| h.f32(x));
+                    }
+                    None => h.bytes(&[0]),
+                }
+            }
+        }
         for m in &self.materials {
             h.bytes(format!("{:?}", m.pbr).as_bytes());
         }
@@ -195,27 +226,37 @@ impl<'a> BakeMesh<'a> {
     }
 }
 
+struct Captured {
+    tri: MeshTriangle,
+    sets: Vec<Option<[[f32; 2]; 3]>>,
+}
+
 /// Subdivide a masked triangle and drop children whose samples fall under `cutoff`.
 ///
 /// Depth 3 is enough for foliage holes in the SDF. A child that is fully opaque or
 /// fully clear stops early, so only the edge of a hole keeps splitting.
 fn clip_mask(
     tri: &MeshTriangle,
+    sets: &[Option<[[f32; 2]; 3]>],
     cutoff: f32,
     images: &[Image],
     material: &PbrMaterial,
     depth: u32,
-) -> Vec<MeshTriangle> {
-    let alpha = |uv: [f32; 2]| sample_alpha(images, material, uv);
+) -> Vec<Captured> {
+    let alpha = |u: f32, v: f32| shade_bary(material, images, tri, sets, u, v).alpha;
     let samples = [
-        alpha(tri.uvs[0]),
-        alpha(tri.uvs[1]),
-        alpha(tri.uvs[2]),
-        alpha(tri.uv_at(1.0 / 3.0, 1.0 / 3.0)),
+        alpha(0.0, 0.0),
+        alpha(1.0, 0.0),
+        alpha(0.0, 1.0),
+        alpha(1.0 / 3.0, 1.0 / 3.0),
     ];
     let clear = |a: f32| a < cutoff;
+    let keep = || Captured {
+        tri: *tri,
+        sets: sets.to_vec(),
+    };
     if samples.iter().all(|a| !clear(*a)) {
-        return vec![*tri];
+        return vec![keep()];
     }
     if samples.iter().all(|a| clear(*a)) {
         return Vec::new();
@@ -224,30 +265,80 @@ fn clip_mask(
         return if clear(samples[3]) {
             Vec::new()
         } else {
-            vec![*tri]
+            vec![keep()]
         };
     }
-    split4(tri)
+    let children = split4(tri);
+    let child_sets = split_sets(sets);
+    children
         .into_iter()
-        .flat_map(|child| clip_mask(&child, cutoff, images, material, depth - 1))
+        .zip(child_sets)
+        .flat_map(|(child, sets)| clip_mask(&child, &sets, cutoff, images, material, depth - 1))
         .collect()
 }
 
-fn sample_alpha(images: &[Image], material: &PbrMaterial, uv: [f32; 2]) -> f32 {
-    let Some(slot) = material.base_color_texture else {
-        return material.base_color[3];
+fn triangle_sets(primitive: &Primitive, corners: [usize; 3]) -> Vec<Option<[[f32; 2]; 3]>> {
+    let triple = |set: &[[f32; 2]]| -> Option<[[f32; 2]; 3]> {
+        if set.len() != primitive.positions.len() {
+            return None;
+        }
+        Some([0, 1, 2].map(|k| set[corners[k]]))
     };
-    let Some(img) = images.get(slot.image) else {
-        return material.base_color[3];
-    };
-    if img.width == 0 || img.height == 0 {
-        return material.base_color[3];
+    if primitive.texcoord_sets.is_empty() {
+        return vec![triple(&primitive.texcoords)];
     }
-    let wrap = |t: f32, n: u32| ((t - t.floor()) * n as f32).min(n as f32 - 1.0) as u32;
-    let texel = img
-        .pixel(wrap(uv[0], img.width), wrap(uv[1], img.height))
-        .unwrap_or([255; 4]);
-    (texel[3] as f32 / 255.0) * material.base_color[3]
+    primitive.texcoord_sets.iter().map(|set| triple(set)).collect()
+}
+
+fn shade_bary(
+    material: &PbrMaterial,
+    images: &[Image],
+    tri: &MeshTriangle,
+    sets: &[Option<[[f32; 2]; 3]>],
+    u: f32,
+    v: f32,
+) -> ShadeSample {
+    if sets.is_empty() {
+        return shade_uv(material, images, tri.uv_at(u, v));
+    }
+    let w = 1.0 - u - v;
+    let mut uvs = [None; 8];
+    let count = sets.len().min(uvs.len());
+    for (index, set) in sets.iter().take(count).enumerate() {
+        uvs[index] = set.map(|corners| {
+            std::array::from_fn(|axis| {
+                w * corners[0][axis] + u * corners[1][axis] + v * corners[2][axis]
+            })
+        });
+    }
+    shade_sets(material, images, &uvs[..count])
+}
+
+fn split_sets(sets: &[Option<[[f32; 2]; 3]>]) -> [Vec<Option<[[f32; 2]; 3]>>; 4] {
+    let mut out = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for set in sets {
+        let parts = match set {
+            None => [None, None, None, None],
+            Some(corners) => {
+                let mid = |a: [f32; 2], b: [f32; 2]| {
+                    std::array::from_fn(|axis| 0.5 * (a[axis] + b[axis]))
+                };
+                let m01 = mid(corners[0], corners[1]);
+                let m12 = mid(corners[1], corners[2]);
+                let m20 = mid(corners[2], corners[0]);
+                [
+                    Some([corners[0], m01, m20]),
+                    Some([m01, corners[1], m12]),
+                    Some([m20, m12, corners[2]]),
+                    Some([m01, m12, m20]),
+                ]
+            }
+        };
+        for (child, part) in out.iter_mut().zip(parts) {
+            child.push(part);
+        }
+    }
+    out
 }
 
 fn split4(tri: &MeshTriangle) -> [MeshTriangle; 4] {
@@ -348,5 +439,62 @@ mod tests {
     fn a_masked_clear_triangle_is_dropped_and_an_opaque_one_stays() {
         assert!(BakeMesh::from_gltf(&mask_scene(0), 0).triangles.is_empty());
         assert_eq!(BakeMesh::from_gltf(&mask_scene(255), 0).triangles.len(), 1);
+    }
+
+    #[test]
+    fn a_hit_reads_each_slot_texcoord() {
+        let mut scene = GltfScene::default();
+        scene.images.push(Image {
+            width: 2,
+            height: 2,
+            pixels: vec![
+                255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255,
+            ],
+        });
+        scene.images.push(Image {
+            width: 2,
+            height: 2,
+            pixels: vec![
+                0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 0, 0, 255,
+            ],
+        });
+        scene.materials.push(PbrMaterial {
+            base_color_texture: Some(TextureSlot {
+                image: 0,
+                texcoord: 0,
+                sampler: Sampler::default(),
+                scale: 1.0,
+            }),
+            metallic: 0.0,
+            emissive: [1.0, 0.0, 0.0],
+            emissive_texture: Some(TextureSlot {
+                image: 1,
+                texcoord: 1,
+                sampler: Sampler::default(),
+                scale: 1.0,
+            }),
+            ..PbrMaterial::default()
+        });
+        let set0 = vec![[0.25, 0.25], [0.75, 0.25], [0.25, 0.75]];
+        let set1 = vec![[0.75, 0.75], [0.25, 0.75], [0.75, 0.25]];
+        scene.meshes.push(GltfMesh {
+            name: Some("panel".into()),
+            primitives: vec![Primitive {
+                positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                normals: vec![[0.0, 0.0, 1.0]; 3],
+                texcoords: set0.clone(),
+                texcoord_sets: vec![set0, set1],
+                indices: vec![0, 1, 2],
+                material: Some(0),
+                ..Primitive::default()
+            }],
+        });
+        let mesh = BakeMesh::from_gltf(&scene, 0);
+        let hit = mesh.shade_hit(0, 0.0, 0.0);
+        assert!((hit.diffuse_albedo()[0] - 1.0).abs() < 1.0e-5);
+        assert!((hit.emissive[0] - 1.0).abs() < 1.0e-5);
+        let (_, explicit) = mesh.surface(mesh.triangles[0].material, [0.25, 0.25]);
+        assert!(explicit[0] < 1.0e-5);
+        assert_eq!(mesh.uv_sets.len(), mesh.triangles.len());
     }
 }

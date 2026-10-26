@@ -166,6 +166,21 @@ Role: TEMPORAL · Literature: ReSTIR DI (Bitterli et al. 2020) · More detail: `
 **Lamp unbiased**: the reservoir merge (`lamp_pick_unbiased`). On follows Algorithm 6 (a source counts only when its target weight for the selected lamp is positive) and does not clamp M. Off divides by the sum of M and clamps M. The menu switch is this key.
 Role: LIGHTS · Literature: Bitterli et al. 2020 Algorithm 6; Wyman and Panteleev, Ray Tracing Gems II, 2021 · More detail: `lamp_pick_unbiased`
 
+**Lamp layer** (proposed, ADR 0017): the finished indirect irradiance of one static point lamp, stored on the cache entries that lamp reaches, at unit white weight. A moving lamp does not get one. This is not the coarse layer, and it is not the traced field or the shown field.
+Role: STORE · Literature: Enlighten per-light transport (Martin and Einarsson, SIGGRAPH 2010); Lumen has none · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
+
+**Layer weight** (proposed): the RGB intensity multiplied onto a lamp layer. Off, on, a dim, and a glow change the weight. They do not rebake the layer.
+Role: LIGHTS · Literature: Enlighten runtime light scale · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
+
+**Live layer** (proposed): the one indirect cache written by every light that has no lamp layer. That is moving lamps, unflagged static lamps, the sun's indirect, and emissive.
+Role: STORE · Literature: Lumen's single surface cache · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
+
+**Fast-blend** (proposed): the live layer's published irradiance closing on a confirmed new mean with a fixed time constant, after the multi-scale mean estimator says the short mean has moved. It is not a display fade.
+Role: TEMPORAL · Literature: MSME catch-up (Barré-Brisebois, Ray Tracing Gems ch. 25); the time floor is not in that listing · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
+
+**Layer combine** (proposed): the pass that writes published irradiance as the live layer plus each published lamp layer times its layer weight. Readers see that sum only.
+Role: OUT · Literature: — · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
+
 **Candidates / samples**: candidates are lamps considered without shadows. Samples are the shadow rays actually traced.
 Role: SAMPLE · Literature: ReSTIR M candidates / visible samples
 
@@ -181,6 +196,43 @@ Role: SAMPLE · Literature: GIBS 6×6 guiding (§1.13); Müller path guiding · 
 ### Sun scheduling
 **Sun band**: the slice of the cache relit for the sun each frame while the sun moves. **Catch-up**: extra relight rounds when lamps stop, so corners converge.
 Role: SCHED · Literature: — · More detail: S63–S65, SUN-small-sun-step; [`lighting_gpu.rs`](../../crates/render/src/lighting_gpu.rs) ~L3025
+
+### Participating media
+**Participating medium**: a volume that absorbs and scatters light along a ray.
+Role: OUT · Literature: Hillaire, Frostbite, SIGGRAPH 2015; Novák et al., SIGGRAPH 2018 course · More detail: [fog design](../systems/fog-and-volumetric-lighting-design.md)
+
+**Extinction**: how much light a ray loses per metre (`σ_t`).
+Role: STORE · Literature: Hillaire 2015 · More detail: [fog design](../systems/fog-and-volumetric-lighting-design.md)
+
+**Optical depth**: extinction integrated along a path. Transmittance is `exp` of its negation.
+Role: STORE · Literature: Beer-Lambert, as used by Hillaire 2015 · More detail: `fog_along` in [`particles.rs`](../../crates/render/src/particles.rs)
+
+**Transmittance**: the fraction of light that survives a path.
+Role: OUT · Literature: Beer-Lambert · More detail: `FogHit::transmittance`
+
+**In-scattering**: light the medium adds to a ray.
+Role: OUT · Literature: Hillaire 2015 · More detail: `FogHit::inscatter`; [fog design](../systems/fog-and-volumetric-lighting-design.md)
+
+**Phase function**: the directional pattern of one scatter. Ours is Henyey-Greenstein.
+Role: SAMPLE · Literature: Henyey and Greenstein 1941; Hillaire 2015 · More detail: [fog design](../systems/fog-and-volumetric-lighting-design.md)
+
+**Froxel**: one cell of the frustum-aligned volume grid.
+Role: STORE · Literature: Hillaire 2015 (frustum voxel); Wronski, SIGGRAPH 2014 · More detail: [ADR 0018](../adr/0018-fog-and-volumetric-lighting.md)
+
+**Froxel grid**: the 3D grid of froxels. Its size is a preset, not the picture size.
+Role: STORE · Literature: Hillaire 2015; Wronski 2014 · More detail: [fog design §6](../systems/fog-and-volumetric-lighting-design.md)
+
+**Height fog**: extinction that depends only on world height.
+Role: STORE · Literature: Hillaire 2015; Wronski 2014 · More detail: `density * exp(-(y - height) / thickness)`
+
+**Local fog volume**: a box or a sphere of analytic density added into the froxel grid.
+Role: STORE · Literature: Hillaire 2015 local media; Epic local fog volumes · More detail: [fog design §6](../systems/fog-and-volumetric-lighting-design.md)
+
+**Light shaft**: a beam made visible by shadowed direct light in the medium.
+Role: LIGHTS · Literature: Hillaire 2015; Engelhardt and Dachsbacher, I3D 2010 (not the method we use) · More detail: [ADR 0018](../adr/0018-fog-and-volumetric-lighting.md)
+
+**Fog history**: a reserved slot for the previous froxel's in-scattering. The setting is off on every preset. Whether to enable it is open.
+Role: TEMPORAL · Literature: Hillaire 2015 temporal integration; [ADR 0012](../adr/0012-gi.md) stores no radiance history · More detail: [fog design §7](../systems/fog-and-volumetric-lighting-design.md)
 
 ### Quality and tooling
 **Preset**: a named full set of settings: potato, day-cycle, gi-1bounce, low, medium, high. **Potato** is direct light plus flat ambient, with no GI. Role: TOOL

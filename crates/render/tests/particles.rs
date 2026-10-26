@@ -8,9 +8,10 @@
 
 use genos_load::{load_texture, load_texture_map, FileSource};
 use genos_render::{
-    card_quad, compose_fog, direct_light, fire_radiance, fog_along, frame_at, image_from_map,
-    image_from_texture, luminance, medium, object_cards, shade_lit, DrawKind, Emitter, FireLight,
-    FogLamp, Kind, Puff, Simulation, World, FIRE_COLOR, PROOF_STEPS, STEP_DT,
+    card_quad, compose_fog, direct_light, fire_radiance, fog_along, frame_at, height_fog_along,
+    image_from_map, image_from_texture, luminance, medium, object_cards, phase_weight, shade_lit,
+    DrawKind, Emitter, FireLight, FogLamp, Kind, Puff, Simulation, World, FIRE_COLOR, PROOF_STEPS,
+    STEP_DT,
 };
 use genos_scene::{load_path, Floor, Light, Scene, Vec3};
 use std::path::PathBuf;
@@ -487,6 +488,22 @@ fn fog_darkens_a_lit_ray_and_fire_warms_the_ground() {
         "far floor took the same fire: near {near:?} far {far:?}"
     );
     assert_eq!(off, [0.0; 3]);
+
+    let slanted = height_fog_along(10.0, 20.0, 40.0, 0.08, 40.0, 0.5);
+    assert!(
+        slanted.optical > 1.0 && slanted.transmittance > 0.0 && slanted.transmittance < 1.0,
+        "slanted height fog did not follow the shared optical depth: {slanted:?}"
+    );
+    let level = height_fog_along(25.0, 0.0, 12.0, 0.08, 40.0, 0.0);
+    assert!(
+        level.optical > 0.4 && level.transmittance < 1.0,
+        "a horizontal height-fog ray was clear: {level:?}"
+    );
+    let isotropic = phase_weight(0.0, 1.0);
+    assert!(
+        (isotropic - 0.0796).abs() < 1.0e-3,
+        "isotropic phase left the shared Henyey-Greenstein: {isotropic}"
+    );
 }
 
 fn cards_of(world: &World, eye: [f32; 3]) -> Vec<genos_render::Card> {
