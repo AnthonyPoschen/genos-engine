@@ -2462,6 +2462,16 @@ impl Gpu {
                         world_rays,
                         world_relit,
                     );
+                    // The sample is the frame that just retired. `last_schedule`
+                    // is still that frame's cap; `lighting_passes` writes the
+                    // next one after this. Picture tests leave recording off,
+                    // so lavapipe timestamps never pull the scale to the floor.
+                    if self.lighting.settings.schedule == genos_scene::ScheduleMode::Budget {
+                        self.lighting.budget.observe(
+                            Some(sample.lighting_ms as f32),
+                            self.lighting.last_schedule.lighting_cap_ms,
+                        );
+                    }
                     times.samples.push_back(sample);
                     while times.samples.len() > GI_SAMPLE_CAP {
                         times.samples.pop_front();
