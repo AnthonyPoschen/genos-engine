@@ -1725,7 +1725,7 @@ fn setting_piece(
         "hdr_bloom" => {
             let hdr = hdr_of(app);
             Some(Piece::Row(PanelRow {
-                label: "Bloom".into(),
+                label: "Bloom intensity".into(),
                 buttons: Vec::new(),
                 slider: Some(PanelSlider::range(
                     ID_HDR_BLOOM_I,
@@ -1746,7 +1746,7 @@ fn setting_piece(
         "hdr_bloom_levels" => {
             let hdr = hdr_of(app);
             Some(Piece::Row(number_row(
-                "Bloom",
+                "Bloom levels",
                 ID_HDR_LEVELS,
                 f64::from(hdr.bloom_levels),
                 0.0,
