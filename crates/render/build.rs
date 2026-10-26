@@ -100,8 +100,42 @@ fn main() {
         "pub static LIGHTING_SCREEN_SPV: &[u8] = include_bytes!(\"{}\");\n",
         screen.display()
     ));
-    // HDR compose declares the scene image and the bloom buffer. The plain
-    // compile above does not: those declarations moved lavapipe's bounce.
+    append_hdr_compose(&mut glue_text, &out);
+    std::fs::write(&glue, glue_text).unwrap();
+    rerun_shader_pieces();
+}
+
+fn rerun_shader_pieces() {
+    for piece in [
+        "lighting_common.glsl",
+        "lighting_pack.glsl",
+        "lighting_cache.glsl",
+        "lighting_cache_slots.glsl",
+        "lighting_lamp_pick.glsl",
+        "lighting_sun_compose.comp",
+        "lighting_screen.comp",
+        "media.glsl",
+        "scene.vert",
+        "overlay.frag",
+        "depth_mask.frag",
+        "material_atlas.glsl",
+        "wire.vert",
+        "wire.frag",
+        "scene_rays.glsl",
+        "mesh_field.glsl",
+        "scene_data.glsl",
+        "dither.glsl",
+        "hdr_display.glsl",
+        "hdr_agx.comp",
+        "transmit.comp",
+        "fxaa.comp",
+    ] {
+        println!("cargo:rerun-if-changed=shaders/{piece}");
+    }
+}
+
+/// HDR compose stores scene radiance. The plain compile does not declare it.
+fn append_hdr_compose(glue_text: &mut String, out: &std::path::Path) {
     let compose_hdr = compile_define(
         "shaders/lighting_compose.comp",
         &out.join("lighting_compose_hdr.comp.spv"),
@@ -120,33 +154,6 @@ fn main() {
         "pub static SUN_COMPOSE_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
         sun_hdr.display()
     ));
-    std::fs::write(&glue, glue_text).unwrap();
-    for piece in [
-        "lighting_common.glsl",
-        "lighting_pack.glsl",
-        "lighting_cache.glsl",
-        "lighting_cache_slots.glsl",
-        "lighting_lamp_pick.glsl",
-        "lighting_sun_compose.comp",
-        "lighting_screen.comp",
-        "media.glsl",
-    ] {
-        println!("cargo:rerun-if-changed=shaders/{piece}");
-    }
-    println!("cargo:rerun-if-changed=shaders/scene.vert");
-    println!("cargo:rerun-if-changed=shaders/overlay.frag");
-    println!("cargo:rerun-if-changed=shaders/depth_mask.frag");
-    println!("cargo:rerun-if-changed=shaders/material_atlas.glsl");
-    println!("cargo:rerun-if-changed=shaders/wire.vert");
-    println!("cargo:rerun-if-changed=shaders/wire.frag");
-    println!("cargo:rerun-if-changed=shaders/scene_rays.glsl");
-    println!("cargo:rerun-if-changed=shaders/mesh_field.glsl");
-    println!("cargo:rerun-if-changed=shaders/scene_data.glsl");
-    println!("cargo:rerun-if-changed=shaders/dither.glsl");
-    println!("cargo:rerun-if-changed=shaders/hdr_display.glsl");
-    println!("cargo:rerun-if-changed=shaders/hdr_agx.comp");
-    println!("cargo:rerun-if-changed=shaders/transmit.comp");
-    println!("cargo:rerun-if-changed=shaders/fxaa.comp");
 }
 
 fn compile(src: &str, dest: &std::path::Path) -> PathBuf {
