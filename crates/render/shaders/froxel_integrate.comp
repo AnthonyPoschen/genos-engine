@@ -34,24 +34,29 @@ float froxel_visibility(vec3 from, vec3 to) {
     return 1.0;
 }
 
-float froxel_scatter(float sigma_height, vec3 centre, float mu) {
+float froxel_scatter(float sigma_height, vec3 p0, vec3 centre, vec3 p1, float mu) {
     float albedo = clamp(fog.sun_color.w, 0.0, 1.0);
     float scatter = sigma_height * albedo * media_phase_hg(froxel_phase_g(fog.medium.w), mu);
     uint n = min(fog.counts.x, 8u);
     [[dont_unroll]] for (uint i = 0u; i < n; i++) {
         FroxelVolume volume = fog.volumes[i];
-        float local = max(volume.extents.w, 0.0) * froxel_falloff(volume, centre);
+        float local = 0.0;
+        [[dont_unroll]] for (uint tap = 0u; tap < 8u; tap++) {
+            float t = (float(tap) + 0.5) / 8.0;
+            local += froxel_falloff(volume, mix(p0, p1, t));
+        }
+        local = max(volume.extents.w, 0.0) * local / 8.0;
         float local_albedo = clamp(volume.shade.x, 0.0, 1.0);
         scatter += local * local_albedo * media_phase_hg(froxel_phase_g(volume.shade.y), mu);
     }
     return scatter;
 }
 
-vec3 froxel_source(float sigma_height, vec3 centre, vec3 dir) {
+vec3 froxel_source(float sigma_height, vec3 p0, vec3 centre, vec3 p1, vec3 dir) {
     vec3 source = vec3(0.0);
     float sun_mu = clamp(dot(dir, fog.sun_toward.xyz), -1.0, 1.0);
     float sun_v = froxel_visibility(centre, centre + fog.sun_toward.xyz * 48.0);
-    source += fog.sun_color.rgb * froxel_scatter(sigma_height, centre, sun_mu) * sun_v;
+    source += fog.sun_color.rgb * froxel_scatter(sigma_height, p0, centre, p1, sun_mu) * sun_v;
     uint n = min(fog.counts.y, 8u);
     [[dont_unroll]] for (uint i = 0u; i < n; i++) {
         vec3 offset = fog.lamps[i].position.xyz - centre;
@@ -59,7 +64,7 @@ vec3 froxel_source(float sigma_height, vec3 centre, vec3 dir) {
         vec3 toward = normalize(offset);
         float mu = clamp(dot(dir, toward), -1.0, 1.0);
         float lamp_v = froxel_visibility(centre, fog.lamps[i].position.xyz);
-        float coeff = froxel_scatter(sigma_height, centre, mu) * (FROXEL_LAMP_UNIT / dist2) * lamp_v;
+        float coeff = froxel_scatter(sigma_height, p0, centre, p1, mu) * (FROXEL_LAMP_UNIT / dist2) * lamp_v;
         source += fog.lamps[i].color.rgb * coeff;
     }
     return source;
@@ -110,7 +115,7 @@ void main() {
             );
             sigma_height = optical / distance;
         }
-        vec3 source = distance <= 1.0e-8 ? vec3(0.0) : froxel_source(sigma_height, centre, dir);
+        vec3 source = distance <= 1.0e-8 ? vec3(0.0) : froxel_source(sigma_height, p0, centre, p1, dir);
         float sigma = imageLoad(froxel_ext, ivec3(c, z)).r;
         if ((fog.size.w & 1u) != 0u) {
             sigma = 0.0;

@@ -4,10 +4,11 @@
 //! term stays the zero stub in `fog::world_cache_inscatter`.
 
 use genos_math::{height_optical_depth_f32, phase_hg_f32};
-use genos_scene::{Floor, FogSettings, FogShape, FogVolume, Scene, Vec3, Wall};
+use genos_scene::{Floor, FogSettings, FogShape, FogVolume, LightingPreset, Scene, Vec3, Wall};
 
 use crate::fog::{
-    add, apply_fog, dot, falloff, height_closed_column, height_segment_column, integrate_samples,
+    add, apply_fog, dot, falloff, grid_size, height_closed_column, height_segment_column,
+    integrate_samples,
     integrate_unshadowed, length, length_sq, luma, near_columns, normalize, point_at, ray_dir,
     scale, scale_color, slice_edge, sub, unit, world_cache_inscatter, DirectSun, FogColumn,
     FogView, GridSize, SliceSample, Z_FAR, Z_NEAR,
@@ -340,11 +341,7 @@ fn blob_centre() -> [f32; 3] {
 }
 
 fn blob_size() -> GridSize {
-    GridSize {
-        width: 384,
-        height: 48,
-        slices: 96,
-    }
+    grid_size(LightingPreset::High)
 }
 
 fn blob_view(frame: u32) -> FogView {
@@ -507,7 +504,9 @@ fn lit_column(job: &ColumnJob<'_>, x: u32, y: u32) -> FogColumn {
         let mut source = light_source(&LightQuery {
             settings,
             sigma_height: sigma_height.max(0.0),
+            p0,
             centre,
+            p1,
             dir,
             sun,
             lamps,
@@ -546,7 +545,9 @@ fn lit_column(job: &ColumnJob<'_>, x: u32, y: u32) -> FogColumn {
 struct LightQuery<'a> {
     settings: &'a FogSettings,
     sigma_height: f32,
+    p0: [f32; 3],
     centre: [f32; 3],
+    p1: [f32; 3],
     dir: [f32; 3],
     sun: DirectSun,
     lamps: &'a [FogPointLamp],
@@ -566,7 +567,14 @@ fn light_source(query: &LightQuery<'_>) -> [f32; 3] {
     } else {
         1.0
     };
-    let sun_coeff = phase_coeff(query.settings, query.sigma_height, query.centre, sun_mu);
+    let sun_coeff = phase_coeff(
+        query.settings,
+        query.sigma_height,
+        query.p0,
+        query.centre,
+        query.p1,
+        sun_mu,
+    );
     for (channel, slot) in source.iter_mut().enumerate() {
         *slot += sun_coeff * query.sun.color[channel] * sun_v;
     }
@@ -581,8 +589,15 @@ fn light_source(query: &LightQuery<'_>) -> [f32; 3] {
             1.0
         };
         let falloff_l = LAMP_UNIT / dist2;
-        let coeff =
-            phase_coeff(query.settings, query.sigma_height, query.centre, mu) * falloff_l * lamp_v;
+        let coeff = phase_coeff(
+            query.settings,
+            query.sigma_height,
+            query.p0,
+            query.centre,
+            query.p1,
+            mu,
+        ) * falloff_l
+            * lamp_v;
         for (channel, slot) in source.iter_mut().enumerate() {
             *slot += coeff * lamp.color[channel];
         }
@@ -590,10 +605,23 @@ fn light_source(query: &LightQuery<'_>) -> [f32; 3] {
     source
 }
 
-fn phase_coeff(settings: &FogSettings, sigma_height: f32, centre: [f32; 3], mu: f32) -> f32 {
+fn phase_coeff(
+    settings: &FogSettings,
+    sigma_height: f32,
+    p0: [f32; 3],
+    _centre: [f32; 3],
+    p1: [f32; 3],
+    mu: f32,
+) -> f32 {
     let mut coeff = sigma_height * settings.albedo.clamp(0.0, 1.0) * phase_hg_f32(settings.phase_g, mu);
     for volume in &settings.volumes {
-        let local = volume.density.max(0.0) * falloff(volume, centre);
+        let mut local = 0.0_f32;
+        for tap in 0..8 {
+            let t = (unit(tap) + 0.5) / 8.0;
+            let point = add(p0, scale(sub(p1, p0), t));
+            local += falloff(volume, point);
+        }
+        local = volume.density.max(0.0) * local / 8.0;
         coeff += local * volume.albedo.clamp(0.0, 1.0) * phase_hg_f32(volume.phase_g, mu);
     }
     coeff

@@ -812,10 +812,12 @@ fn scatter_at(query: &ScatterQuery<'_>) -> (f32, [f32; 3]) {
     let mut scatter = sigma_height
         * settings.albedo.clamp(0.0, 1.0)
         * phase_hg_f32(settings.phase_g, query.mu);
+    let p1 = add(query.p0, query.delta);
     for volume in &settings.volumes {
         let local = volume.density.max(0.0) * falloff(volume, query.centre);
         sigma += local;
-        scatter += local * volume.albedo.clamp(0.0, 1.0) * phase_hg_f32(volume.phase_g, query.mu);
+        let smooth = volume.density.max(0.0) * span_falloff(volume, query.p0, query.centre, p1);
+        scatter += smooth * volume.albedo.clamp(0.0, 1.0) * phase_hg_f32(volume.phase_g, query.mu);
     }
     let source = scale_color(query.sun.color, scatter * query.visibility);
     let _ = world_cache_inscatter(settings.gi);
@@ -992,6 +994,17 @@ fn local_density(volumes: &[FogVolume], point: [f32; 3]) -> f32 {
         sum += volume.density.max(0.0) * falloff(volume, point);
     }
     sum
+}
+
+fn span_falloff(volume: &FogVolume, p0: [f32; 3], _centre: [f32; 3], p1: [f32; 3]) -> f32 {
+    const TAPS: u32 = 8;
+    let mut sum = 0.0_f32;
+    for tap in 0..TAPS {
+        let t = (unit(tap) + 0.5) / unit(TAPS);
+        let point = add(p0, scale(sub(p1, p0), t));
+        sum += falloff(volume, point);
+    }
+    sum / unit(TAPS)
 }
 
 pub(crate) fn falloff(volume: &FogVolume, point: [f32; 3]) -> f32 {
