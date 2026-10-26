@@ -5651,6 +5651,7 @@ fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {
 include!("aa_gpu.rs");
 include!("lighting_gpu.rs");
 include!("reflections_frame.rs");
+include!("reflection_readback.rs");
 
 extern "C" {
     fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;

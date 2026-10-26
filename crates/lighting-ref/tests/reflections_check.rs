@@ -36,7 +36,16 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
     assert!(good_text
         .lines()
         .filter(|line| !line.starts_with("denoise_lag_frames"))
-        .all(|line| line.ends_with(" PASS")));
+        .all(|line| {
+            line.ends_with(" CPU model check") || line.ends_with(" GPU frame readback")
+        }));
+    assert!(good_text.contains("near_weighted_rel") && good_text.contains("low_reflection_rays"));
+    assert!(good_text
+        .lines()
+        .any(|line| line.starts_with("near_weighted_rel") && line.ends_with(" GPU frame readback")));
+    assert!(good_text
+        .lines()
+        .any(|line| line.starts_with("mirror_law_rad") && line.ends_with(" CPU model check")));
     let good_json = std::fs::read_to_string(good_dir.join("metrics.json")).unwrap();
     assert!(good_json.contains("\"fixture\": \"good\""));
     assert!(!good_json.contains("FAIL"));
@@ -48,7 +57,9 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
     assert!(bad_text
         .lines()
         .filter(|line| !line.starts_with("denoise_lag_frames"))
-        .all(|line| line.ends_with(" FAIL")));
+        .all(|line| {
+            line.ends_with(" FAIL CPU model check") || line.ends_with(" FAIL GPU frame readback")
+        }));
     let bad_json = std::fs::read_to_string(bad_dir.join("metrics.json")).unwrap();
     assert!(bad_json.contains("\"fixture\": \"bad\""));
     assert!(!bad_json.contains("\"status\": \"PASS\""));
@@ -76,7 +87,12 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
         assert!(
             live_text
                 .lines()
-                .any(|line| line.starts_with(name) && line.ends_with(" PASS")),
+                .any(|line| {
+                    line.starts_with(name)
+                        && (line.ends_with(" CPU model check")
+                            || line.ends_with(" GPU frame readback"))
+                        && line.contains(" PASS ")
+                }),
             "{name}\n{live_text}"
         );
     }

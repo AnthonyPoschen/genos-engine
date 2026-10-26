@@ -2,7 +2,9 @@
 //!
 //! Module rows call [`genos_math::optics`] (the GLSL mirror is
 //! `crates/render/shaders/reflections.glsl`) or the CPU picture, and
-//! [`Fixture::Live`] grades them. The picture rows compare that picture with
+//! [`Fixture::Live`] grades them. `near_weighted_rel` and `low_reflection_rays`
+//! read the grade buffer `reflections_frame.comp` writes. Until a row reads
+//! that buffer it is a CPU model check. The picture rows compare with
 //! [`crate::reflections_trace`], an f64 oracle that does not call `optics` or
 //! the shade. Comparator
 //! rows stay `NOT-IMPLEMENTED` on live. `denoise_lag_frames` stays
@@ -93,6 +95,8 @@ pub struct Metric {
     pub reference: Option<f64>,
     pub threshold: f64,
     pub status: Status,
+    /// `CPU model check`, `GPU frame readback`, or empty when the row is absent.
+    pub source: &'static str,
     row: Row,
 }
 
@@ -126,6 +130,10 @@ impl Report {
             out.push_str(&fmt_num(metric.threshold));
             out.push(' ');
             out.push_str(metric.status.label());
+            if !metric.source.is_empty() {
+                out.push(' ');
+                out.push_str(metric.source);
+            }
             out.push('\n');
         }
         out
@@ -151,6 +159,8 @@ impl Report {
             out.push_str(&fmt_num(metric.threshold));
             out.push_str(", \"status\": \"");
             out.push_str(metric.status.label());
+            out.push_str("\", \"source\": \"");
+            out.push_str(metric.source);
             out.push_str("\"}");
         }
         out.push_str("\n  ]\n}\n");
@@ -210,6 +220,7 @@ fn live_row(metric: &Metric) -> Metric {
             reference: metric.value,
             threshold: metric.threshold,
             status: Status::NotImplemented,
+            source: "",
             row: Row::Comparator,
         },
     }
@@ -256,7 +267,7 @@ fn measure(kind: Kind) -> Vec<Metric> {
             Row::Module,
         ),
         gate("caustic_rel", caustic_rel(kind), 0.05, Row::Comparator),
-        gate(
+        gate_gpu(
             "near_weighted_rel",
             near_weighted_rel(kind),
             0.03,
@@ -268,7 +279,7 @@ fn measure(kind: Kind) -> Vec<Metric> {
             0.002,
             Row::Module,
         ),
-        gate(
+        gate_gpu(
             "low_reflection_rays",
             low_reflection_rays(kind),
             0.0,
@@ -280,6 +291,20 @@ fn measure(kind: Kind) -> Vec<Metric> {
 }
 
 fn gate(name: &'static str, value: f64, threshold: f64, row: Row) -> Metric {
+    measured(name, value, threshold, row, "CPU model check")
+}
+
+fn gate_gpu(name: &'static str, value: f64, threshold: f64, row: Row) -> Metric {
+    measured(name, value, threshold, row, "GPU frame readback")
+}
+
+fn measured(
+    name: &'static str,
+    value: f64,
+    threshold: f64,
+    row: Row,
+    source: &'static str,
+) -> Metric {
     let status = if value.is_finite() && value <= threshold {
         Status::Pass
     } else {
@@ -291,6 +316,7 @@ fn gate(name: &'static str, value: f64, threshold: f64, row: Row) -> Metric {
         reference: None,
         threshold,
         status,
+        source,
         row,
     }
 }
@@ -302,6 +328,7 @@ fn absent(name: &'static str, threshold: f64) -> Metric {
         reference: None,
         threshold,
         status: Status::NotImplemented,
+        source: "",
         row: Row::Absent,
     }
 }
@@ -670,11 +697,11 @@ fn caustic_rel(kind: Kind) -> f64 {
 }
 
 fn near_weighted_rel(kind: Kind) -> f64 {
-    near_weighted(fault_of(kind))
+    weighted_grade(fault_of(kind))
 }
 
-fn near_weighted(fault: PictureFault) -> f64 {
-    let engine = genos_render::shade_picture(0, fault);
+fn weighted_grade(fault: PictureFault) -> f64 {
+    let engine = frame_grade(fault.bits());
     let reference = reflections_trace::trace();
     if engine.color.len() != reference.color.len() || reference.depth.len() != engine.color.len() {
         return f64::INFINITY;
@@ -693,6 +720,24 @@ fn near_weighted(fault: PictureFault) -> f64 {
     } else {
         num / den
     }
+}
+
+fn frame_grade(fault: u32) -> genos_render::ReflectionGrade {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Vec<(u32, genos_render::ReflectionGrade)>> = Mutex::new(Vec::new());
+    let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, grade)) = cache.iter().find(|(bits, _)| *bits == fault) {
+        return grade.clone();
+    }
+    let grade = genos_render::read_frame_grade(1, fault).unwrap_or(genos_render::ReflectionGrade {
+        ran: false,
+        color: Vec::new(),
+        depth: Vec::new(),
+        rays: u32::MAX,
+        views: 0,
+    });
+    cache.push((fault, grade.clone()));
+    grade
 }
 
 fn pixel_rel(engine: [f32; 3], reference: [f64; 3]) -> f64 {
@@ -750,7 +795,7 @@ fn still_index() -> usize {
 }
 
 fn low_reflection_rays(kind: Kind) -> f64 {
-    f64::from(genos_render::scheduled_low_rays(fault_of(kind)))
+    f64::from(frame_grade(fault_of(kind).bits()).rays)
 }
 
 struct BudgetRow {
@@ -946,12 +991,25 @@ mod tests {
 
     #[test]
     fn a_near_bias_fails_near_weighted_rel() {
-        let faithful = super::near_weighted(genos_render::PictureFault::default());
-        let planted = super::near_weighted(genos_render::PictureFault::only(
+        let faithful = super::weighted_grade(genos_render::PictureFault::default());
+        let planted = super::weighted_grade(genos_render::PictureFault::only(
             genos_render::PictureFault::NEAR_BIAS,
         ));
         assert!(faithful <= 0.03, "{faithful}");
         assert!(planted > 0.03, "{planted}");
+    }
+
+    #[test]
+    fn extra_rays_fail_the_low_cap() {
+        let faithful = super::low_reflection_rays(super::Kind::Good);
+        let planted = f64::from(
+            super::frame_grade(
+                genos_render::PictureFault::only(genos_render::PictureFault::EXTRA_RAYS).bits(),
+            )
+            .rays,
+        );
+        assert!(faithful <= 0.0, "{faithful}");
+        assert!(planted > 0.0, "{planted}");
     }
 
     #[test]

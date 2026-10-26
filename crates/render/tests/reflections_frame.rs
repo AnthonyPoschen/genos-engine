@@ -16,7 +16,8 @@
 use genos_math::optics::{self, WATER_IOR};
 use genos_math::Vec3;
 use genos_render::{
-    frame_ray_count, lighting_reflection_preset, shade_picture, LightingPreset, LightingSettings,
+    frame_ray_count, lighting_reflection_preset, read_frame_grade, shade_picture, LightingPreset,
+    LightingSettings,
     PictureFault, Reflector, ReflectorKind, Renderer, World,
 };
 use genos_scene::{viewport_uv, Camera, Floor, ReflectionSettings, Scene, Vec3 as SceneVec3};
@@ -112,6 +113,10 @@ fn the_frame_grades_low_at_zero_rays_and_shades_water() {
         }
     }
     assert!(worst < 1.0e-3, "{worst}");
+    let headless = read_frame_grade(preset, 0).expect("headless grade");
+    assert_eq!(headless.rays, grade.rays);
+    assert_eq!(headless.views, grade.views);
+    assert_eq!(headless.color, grade.color);
 
     let shaded = optics::water_shade(
         optics::fresnel_dielectric(WATER_IOR, 1.0),

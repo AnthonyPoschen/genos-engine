@@ -3,7 +3,7 @@ name = "genos-lighting-ref"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "CPU checker for lighting reference images. No window and no Vulkan."
+description = "Lighting reference checker. Two reflection rows read the frame grade buffer; the rest stay on the CPU."
 
 [lints]
 workspace = true

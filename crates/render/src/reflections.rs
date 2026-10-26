@@ -66,6 +66,12 @@ impl PictureFault {
     fn has(self, bit: u8) -> bool {
         self.0 & bit != 0
     }
+
+    /// Fault bits the frame shader reads. Bit 4 is the near bias, bit 16 is extra rays.
+    #[must_use]
+    pub fn bits(self) -> u32 {
+        u32::from(self.0)
+    }
 }
 
 /// Linear colour and primary-hit distance, three tiles stacked.
