@@ -1,4 +1,5 @@
 /target/
 /genos-camera.profile
 # Reference pictures, check reports, and lighting debug dumps. Large, and not for git.
-/genos-debug/
+# Unanchored so a gate run from a crate directory is ignored too.
+genos-debug/
