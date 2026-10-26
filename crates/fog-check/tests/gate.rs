@@ -81,6 +81,8 @@ fn feature_metrics_keep_absent_rows_and_grade_the_live_ones() {
         "media_path_blur_rel",
         "near_fog_blur_rel",
         "fog_still_flicker",
+        "frame_column_abs",
+        "frame_picture_unchanged",
         "froxel_vram_potato_mb",
         "froxel_vram_low_mb",
         "froxel_vram_medium_mb",

@@ -619,15 +619,30 @@ impl Renderer {
     #[must_use]
     pub fn fog_frame_probe(&self, fog: &genos_scene::FogSettings, preset: LightingPreset) -> crate::fog_budget::FogProbe {
         let mut probe = crate::fog_budget::fog_probe(fog, preset);
-        if probe.dispatches == 0 {
+        if probe.dispatches == 0 || !self.gpu.froxel_wrote {
+            probe.dispatches = 0;
+            probe.pass_ms = 0.0;
+            probe.vram_bytes = 0;
             return probe;
         }
         probe.pass_ms = self.gpu.froxel_pass_ms();
-        let vram = self.gpu.froxel_vram();
-        if vram > 0 {
-            probe.vram_bytes = vram;
-        }
+        probe.vram_bytes = self.gpu.froxel_vram();
         probe
+    }
+
+    /// Columns written by the last frame dispatch. Empty when that frame skipped fog.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the column buffer cannot be mapped.
+    pub fn frame_fog_columns(&mut self) -> Result<Vec<crate::fog::FogColumn>, String> {
+        self.gpu.read_frame_columns()
+    }
+
+    /// CPU integral of the view the last frame dispatch built. Empty when it did not dispatch.
+    #[must_use]
+    pub fn frame_fog_reference(&self) -> Vec<crate::fog::FogColumn> {
+        self.gpu.frame_fog_reference()
     }
 
     /// One compute pass over the resident occluders. This does not present and does not upload them.
@@ -973,6 +988,8 @@ struct Gpu {
     froxel_vram: u64,
     /// The frame command buffer wrote froxel timestamps that have not been read.
     froxel_pending: bool,
+    /// This frame's `record_froxel` copied columns and wrote the compose header.
+    froxel_wrote: bool,
     submit_pending: bool,
     /// Drop returns without `vkDeviceWaitIdle`. The process is leaving.
     abandon: bool,
@@ -1625,6 +1642,7 @@ impl Gpu {
                 froxel_pass_ms: 0.0,
                 froxel_vram: 0,
                 froxel_pending: false,
+                froxel_wrote: false,
                 submit_pending: false,
                 abandon: false,
                 timestamp_period,
@@ -2229,7 +2247,6 @@ impl Gpu {
                 self.write_stamp(slot, 0, 1);
             }
             self.frame_stamp(slot, FrameStamp::Start);
-            self.arm_froxel_header();
             self.update_resident_scene();
             self.update_resident_fields();
             let swap = self.swap_images[index as usize];
@@ -2250,7 +2267,11 @@ impl Gpu {
                 );
                 self.color_layout[slot] = 6;
                 self.frame_stamp(slot, FrameStamp::Gbuffer);
+                self.froxel_wrote = false;
                 self.record_froxel()?;
+                if !self.froxel_wrote {
+                    self.release_froxel_header();
+                }
                 if lighting {
                     self.lighting_passes(slot);
                 }

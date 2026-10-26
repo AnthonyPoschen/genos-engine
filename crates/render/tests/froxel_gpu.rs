@@ -2,14 +2,16 @@
 
 //! Lavapipe froxel against the CPU column integral.
 //!
-//! `run_fog` is the inject and integrate dispatches. The frame test draws one
-//! Low-preset picture so the same pass is recorded after the depth prepass.
+//! `run_fog` is the inject and integrate dispatches. The frame test draws a
+//! Low-preset picture with fog and without it. The composed bytes must differ,
+//! and the frame's own column buffer must match the CPU integral.
 //! Times are lavapipe timestamps, not RTX 4070 measurements.
 
 use genos_render::{
-    inject, integrate_unshadowed, DirectSun, FogDispatch, FogView, GridSize, Renderer, World,
+    column_peak, composed_frame_camera, composed_frame_scene, inject, integrate_unshadowed,
+    picture_mean_abs, picture_unchanged, DirectSun, FogDispatch, FogView, GridSize, Renderer, World,
 };
-use genos_scene::{Camera, Floor, FogSettings, LightingPreset, LightingSettings, Scene, Vec3};
+use genos_scene::FogSettings;
 use genos_window::Window;
 
 const COLUMN_ABS: f32 = 1.0e-3;
@@ -105,44 +107,44 @@ fn gpu_columns_match_the_unshadowed_integral() {
 #[test]
 fn a_low_preset_frame_dispatches_the_froxel() {
     let (mut window, mut renderer) = open(64, 64).expect("lavapipe device");
-    let mut scene = Scene {
-        floor: Floor {
-            position: Vec3::new(0.0, 0.0, 0.0),
-            half_x: 4.0,
-            half_z: 4.0,
-            color: [0.6, 0.6, 0.6],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: None,
-        lighting: LightingSettings::preset(LightingPreset::Low),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        fog: height_fog(),
-        menu: genos_scene::MenuSettings::default(),
-    };
+    let scene = composed_frame_scene(true);
     let world = World::from_scene(scene.clone());
-    let camera = Camera::new(0.0, 2.0, 0.0);
+    let camera = composed_frame_camera();
     let _ = window.pump();
-    renderer
+    let on = renderer
         .draw(&world, &camera, true)
         .expect("draw")
         .expect("readback");
     let probe = renderer.fog_frame_probe(&scene.fog, scene.lighting.preset);
-    assert_eq!(probe.dispatches, 1);
+    assert_eq!(probe.dispatches, 1, "the frame did not dispatch froxel");
     assert_eq!(probe.history_accepts, 0);
     assert_eq!(probe.history_rejects, 0);
     assert!(probe.vram_bytes > 0, "frame vram was 0");
-    assert!(probe.pass_ms.is_finite() && probe.pass_ms >= 0.0);
+    assert!(probe.pass_ms.is_finite() && probe.pass_ms > 0.0);
+    let columns = renderer.frame_fog_columns().expect("frame columns");
+    let reference = renderer.frame_fog_reference();
+    let err = column_peak(&columns, &reference);
+    assert!(
+        err <= f64::from(COLUMN_ABS),
+        "frame column abs {err} limit {COLUMN_ABS}"
+    );
+    let off_scene = composed_frame_scene(false);
+    let off_probe = renderer.fog_frame_probe(&off_scene.fog, off_scene.lighting.preset);
+    assert_eq!(off_probe.dispatches, 0);
+    assert_eq!(off_probe.pass_ms, 0.0);
+    let off_world = World::from_scene(off_scene);
+    let off = renderer
+        .draw(&off_world, &camera, true)
+        .expect("fog off draw")
+        .expect("fog off readback");
+    let unchanged = picture_unchanged(&on, &off);
+    let mean = picture_mean_abs(&on, &off);
     println!(
-        "froxel frame lavapipe pass_ms {} vram_bytes {}",
+        "froxel frame lavapipe pass_ms {} vram_bytes {} column_abs {err} picture_unchanged {unchanged} picture_mean_abs {mean}",
         probe.pass_ms, probe.vram_bytes
     );
-    scene.fog.enabled = false;
-    let off = renderer.fog_frame_probe(&scene.fog, scene.lighting.preset);
-    assert_eq!(off.dispatches, 0);
-    assert_eq!(off.pass_ms, 0.0);
+    assert!(
+        unchanged <= 0.0,
+        "fog did not change the composed picture, mean abs {mean}"
+    );
 }

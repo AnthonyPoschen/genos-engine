@@ -142,6 +142,21 @@ impl FogView {
     }
 }
 
+/// Frustum the frame froxel uses. Half the vertical field is 30 degrees.
+#[must_use]
+pub fn frame_fog_view(origin: [f32; 3], yaw: f32, pitch: f32, aspect: f32) -> FogView {
+    FogView::look(origin, yaw, pitch, 30.0_f32.to_radians().tan(), aspect)
+}
+
+/// Sun used when the scene has no directional light.
+#[must_use]
+pub fn default_frame_sun() -> DirectSun {
+    DirectSun {
+        toward: [0.0, 1.0, 0.0],
+        color: [1.0, 1.0, 1.0],
+    }
+}
+
 /// Grid for a lighting preset. Potato, day-cycle, and one-bounce GI allocate none.
 #[must_use]
 pub fn grid_size(preset: LightingPreset) -> GridSize {

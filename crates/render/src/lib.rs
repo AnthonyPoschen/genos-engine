@@ -21,18 +21,20 @@ mod world;
 
 pub use aa::Antialias;
 pub use fog_pass::{
-    column_luma, flicker_dispatch, media_dispatch, media_images, near_dispatch, near_images,
-    picture_from, shaft_dispatch, shaft_image, smear_broken, smear_dispatch, smear_fixture,
-    smear_tracking, sphere_dispatch, sphere_volume, yaw_pop_broken,
-    yaw_pop_fixture, FogDispatch, FogGpu, FogImage, FogPointLamp, FOG_FLIP_G,
-    FOG_IGNORE_SPHERE, FOG_LINEAR_SLICE, FOG_SKIP_EXTINCTION, FOG_SKIP_SHADOW,
+    column_luma, column_peak, composed_frame_camera, composed_frame_scene, flicker_dispatch,
+    media_dispatch, media_images, near_dispatch, near_images, picture_from, picture_mean_abs,
+    picture_unchanged, shaft_dispatch, shaft_image, smear_broken, smear_dispatch, smear_fixture,
+    smear_tracking, sphere_dispatch, sphere_volume, yaw_pop_broken, yaw_pop_fixture, FogDispatch,
+    FogGpu, FogImage, FogPointLamp, FOG_FLIP_G, FOG_IGNORE_SPHERE, FOG_LINEAR_SLICE,
+    FOG_SKIP_EXTINCTION, FOG_SKIP_SHADOW,
 };
 pub use fog_budget::{
     allocation_bytes, allocation_mb, allocation_mb_doubled, fit_pass, fog_probe,
     millisecond_ceiling, sample_cap, unfitted_milliseconds, FogProbe, PassCost,
 };
 pub use fog::{
-    apply_fog, compose_camera_medium, compose_pixel_medium, grid_size, inject, point_at, ray_dir,
+    apply_fog, compose_camera_medium, compose_pixel_medium, default_frame_sun, frame_fog_view,
+    grid_size, inject, point_at, ray_dir,
     integrate_samples, integrate_unshadowed,
     leak_broken,
     leak_fixture, local_volume_leak, puff_volume, sample_depth_aware, slice_edge, sphere_leak_broken,

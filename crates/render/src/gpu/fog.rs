@@ -8,7 +8,10 @@ use std::ffi::c_void;
 use genos_scene::{Camera, FogSettings, FogShape, Light, LightingPreset, Scene};
 
 use super::{check, read_f32s, tick_delta, Buffer, Gpu, Handle, Image, Memory};
-use crate::fog::{grid_size, normalize, DirectSun, FogColumn, FogView, GridSize};
+use crate::fog::{
+    default_frame_sun, frame_fog_view, grid_size, integrate_unshadowed, normalize, DirectSun,
+    FogColumn, FogView, GridSize,
+};
 use crate::fog_budget::allocation_bytes;
 use crate::fog_pass::{FogDispatch, FogGpu, FogPointLamp, FOG_SKIP_SHADOW};
 use crate::pack::{self, SCENE_TAIL};
@@ -23,6 +26,9 @@ pub(super) struct FrameJob {
     width: u32,
     height: u32,
     slices: u32,
+    settings: FogSettings,
+    view: FogView,
+    sun: DirectSun,
 }
 
 pub(super) struct Targets {
@@ -59,29 +65,83 @@ impl Gpu {
             self.froxel_vram = 0;
             return;
         }
-        let tan_y = (30.0_f32.to_radians()).tan();
         let origin = [camera.position.x, camera.position.y, camera.position.z];
-        let view = FogView::look(origin, camera.yaw, camera.pitch, tan_y, aspect);
+        let view = frame_fog_view(origin, camera.yaw, camera.pitch, aspect);
         let (sun, lamps) = sun_and_lamps(&scene.lights);
         self.froxel_frame = Some(FrameJob {
             params: encode_params(&scene.fog, &view, size, &sun, &lamps, 0, 0),
             width: size.width,
             height: size.height,
             slices: size.slices,
+            settings: scene.fog.clone(),
+            view,
+            sun,
         });
     }
 
-    /// Patch the scene header so compose can find the column tail.
-    pub(super) fn arm_froxel_header(&mut self) {
+    /// Columns the last frame dispatch wrote. Empty when that frame did not dispatch.
+    pub(super) fn read_frame_columns(&mut self) -> Result<Vec<FogColumn>, String> {
+        if !self.froxel_wrote {
+            return Ok(Vec::new());
+        }
+        self.wait_fence(self.fence, "frame columns")?;
         let Some(job) = self.froxel_frame.as_ref() else {
-            return;
+            return Ok(Vec::new());
         };
-        if self.frame_bytes.len() < 16 || !columns_fit(job.width, job.height) {
+        let memory = self
+            .froxel
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |targets| targets.columns.memory);
+        if memory.is_null() {
+            return Ok(Vec::new());
+        }
+        let count = usize::try_from(job.width)
+            .unwrap_or(0)
+            .saturating_mul(usize::try_from(job.height).unwrap_or(0));
+        let floats = read_f32s(
+            self.fns.map_mem,
+            self.fns.unmap_mem,
+            self.device,
+            memory,
+            count.saturating_mul(4),
+        )?;
+        Ok(columns_from(&floats))
+    }
+
+    /// CPU integral of the view the last frame dispatch built.
+    pub(super) fn frame_fog_reference(&self) -> Vec<FogColumn> {
+        if !self.froxel_wrote {
+            return Vec::new();
+        }
+        let Some(job) = self.froxel_frame.as_ref() else {
+            return Vec::new();
+        };
+        let size = GridSize {
+            width: job.width,
+            height: job.height,
+            slices: job.slices,
+        };
+        integrate_unshadowed(&job.settings, &job.view, size, job.sun)
+    }
+
+    /// Compose reads `pad0`. A frame that did not dispatch leaves it at 0.
+    pub(super) fn release_froxel_header(&self) {
+        if self.froxel_wrote || self.frame_scene[0].buffer.is_null() {
             return;
         }
-        let word = tail_word();
-        self.frame_bytes[12..16].copy_from_slice(&word.to_ne_bytes());
-        let _ = job;
+        let cmd = self.cmd;
+        self.barrier_on(cmd, 0x8000 | 0x800, 0x1000, 0x20, 0x1000);
+        let zero = 0u32.to_ne_bytes();
+        unsafe {
+            (self.fns.cmd_update_buffer)(
+                cmd,
+                self.frame_scene[0].buffer,
+                12,
+                4,
+                zero.as_ptr().cast(),
+            );
+        }
+        self.barrier_on(cmd, 0x1000, 0x800, 0x1000, 0x20);
     }
 
     /// Record inject and integrate on the frame command buffer, then copy the
@@ -96,12 +156,13 @@ impl Gpu {
             slices: job.slices,
         };
         self.ensure_froxel(size)?;
-        let (query, image, columns, params, set, layout, inject, integrate) = {
+        let (query, image, columns, column_mem, params, set, layout, inject, integrate) = {
             let targets = self.froxel.as_ref().ok_or("froxel targets missing")?;
             (
                 targets.query,
                 targets.image.image,
                 targets.columns.buffer,
+                targets.columns.memory,
                 targets.params.memory,
                 targets.set,
                 targets.layout,
@@ -109,10 +170,11 @@ impl Gpu {
                 targets.integrate,
             )
         };
+        self.zero_columns(column_mem, job.width, job.height)?;
         self.write_memory(params, &job.params)?;
         self.write_froxel_set(self.frame_scene[0].buffer)?;
         let cmd = self.cmd;
-        // The depth prepass has read the scene. Host writes cover the params.
+        // The depth prepass has read the scene. Host writes cover the params and the cleared columns.
         self.barrier_on(cmd, 0x4000 | 0x8000, 0x800, 0x4000 | 0x20, 0x20);
         self.transition_froxel_image(cmd, image)?;
         self.stamp_froxel(cmd, query, 0, 0x1);
@@ -121,39 +183,66 @@ impl Gpu {
         );
         self.stamp_froxel(cmd, query, 1, 0x800);
         if columns_fit(job.width, job.height) {
-            // Columns were written and the scene header was read. The tail copy follows.
-            self.barrier_on(cmd, 0x800, 0x1000, 0x40 | 0x20, 0x800 | 0x1000);
-            let head = column_header(job.width, job.height, job.slices);
-            unsafe {
-                (self.fns.cmd_update_buffer)(
-                    cmd,
-                    self.frame_scene[0].buffer,
-                    scene_offset(),
-                    16,
-                    head.as_ptr().cast(),
-                );
-            }
-            let region = CopyRegion {
-                src: 0,
-                dst: scene_offset().saturating_add(16),
-                size: column_bytes(job.width, job.height),
-            };
-            unsafe {
-                (self.fns.cmd_copy_buffer)(
-                    cmd,
-                    columns,
-                    self.frame_scene[0].buffer,
-                    1,
-                    std::ptr::from_ref(&region).cast(),
-                );
-            }
-            self.barrier_on(cmd, 0x1000, 0x800, 0x1000, 0x20);
+            self.publish_frame_columns(cmd, columns, job.width, job.height, job.slices);
+            self.froxel_wrote = true;
         }
         self.froxel_pending = !query.is_null() && self.timestamp_period > 0.0;
         if let Some(targets) = self.froxel.as_ref() {
             self.froxel_vram = targets.bytes;
         }
         Ok(())
+    }
+
+    /// Drop a previous dispatch's columns so a skipped integrate cannot be read back.
+    fn zero_columns(&self, memory: Handle, width: u32, height: u32) -> Result<(), String> {
+        if memory.is_null() {
+            return Ok(());
+        }
+        let bytes = usize::try_from(column_bytes(width, height)).unwrap_or(0);
+        self.write_memory(memory, &vec![0u8; bytes])
+    }
+
+    /// Device-side `pad0` plus the column tail. Compose sees fog only after this.
+    fn publish_frame_columns(
+        &self,
+        cmd: Handle,
+        columns: Handle,
+        width: u32,
+        height: u32,
+        slices: u32,
+    ) {
+        self.barrier_on(cmd, 0x800, 0x1000 | 0x4000, 0x40 | 0x20, 0x800 | 0x1000 | 0x2000);
+        let word = tail_word().to_ne_bytes();
+        let head = column_header(width, height, slices);
+        unsafe {
+            (self.fns.cmd_update_buffer)(
+                cmd,
+                self.frame_scene[0].buffer,
+                12,
+                4,
+                word.as_ptr().cast(),
+            );
+            (self.fns.cmd_update_buffer)(
+                cmd,
+                self.frame_scene[0].buffer,
+                scene_offset(),
+                16,
+                head.as_ptr().cast(),
+            );
+            let region = CopyRegion {
+                src: 0,
+                dst: scene_offset().saturating_add(16),
+                size: column_bytes(width, height),
+            };
+            (self.fns.cmd_copy_buffer)(
+                cmd,
+                columns,
+                self.frame_scene[0].buffer,
+                1,
+                std::ptr::from_ref(&region).cast(),
+            );
+        }
+        self.barrier_on(cmd, 0x1000, 0x800, 0x1000, 0x20);
     }
 
     pub(super) fn collect_froxel_time(&mut self) {
@@ -176,6 +265,8 @@ impl Gpu {
 
     pub(super) fn run_fog(&mut self, job: &FogDispatch) -> Result<FogGpu, String> {
         // The frame path shares this query pool and descriptor set.
+        // A standalone dispatch replaces the frame's columns, so the frame readback ends.
+        self.froxel_wrote = false;
         self.wait_all_inflight()?;
         if job.size.slices == 0 || job.size.width == 0 || job.size.height == 0 {
             return Ok(FogGpu {
@@ -324,13 +415,7 @@ impl Gpu {
             columns_mem,
             count.saturating_mul(4),
         )?;
-        let mut columns = Vec::with_capacity(count);
-        for chunk in floats.chunks_exact(4) {
-            columns.push(FogColumn {
-                inscatter: [chunk[0], chunk[1], chunk[2]],
-                transmittance: chunk[3],
-            });
-        }
+        let columns = columns_from(&floats);
         let extinction = if job.read_extinction {
             let cells = job.size.cells();
             let memory = self
@@ -1335,6 +1420,9 @@ impl FrameJob {
             width: self.width,
             height: self.height,
             slices: self.slices,
+            settings: self.settings.clone(),
+            view: self.view,
+            sun: self.sun,
         })
     }
 }
@@ -1500,11 +1588,19 @@ fn empty_scene() -> Scene {
     }
 }
 
+fn columns_from(floats: &[f32]) -> Vec<FogColumn> {
+    let mut columns = Vec::with_capacity(floats.len() / 4);
+    for chunk in floats.chunks_exact(4) {
+        columns.push(FogColumn {
+            inscatter: [chunk[0], chunk[1], chunk[2]],
+            transmittance: chunk[3],
+        });
+    }
+    columns
+}
+
 fn sun_and_lamps(lights: &[Light]) -> (DirectSun, Vec<FogPointLamp>) {
-    let mut sun = DirectSun {
-        toward: [0.0, 1.0, 0.0],
-        color: [1.0, 1.0, 1.0],
-    };
+    let mut sun = default_frame_sun();
     let mut lamps = Vec::new();
     let mut sun_set = false;
     for light in lights {

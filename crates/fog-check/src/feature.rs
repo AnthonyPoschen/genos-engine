@@ -16,7 +16,7 @@ use genos_render::{
     FOG_SKIP_SHADOW, Z_FAR, Z_NEAR,
 };
 
-use crate::device::{allocation_mb, fitted_cost, run, unfitted_ms};
+use crate::device::{allocation_mb, fitted_cost, frame_grade, run, unfitted_ms};
 use crate::report::{judge, Metric};
 use crate::Fixture;
 
@@ -47,6 +47,12 @@ const SHAFT_NOTE: &str = "lavapipe GPU shadowed columns against the CPU shadowed
 const FLICKER_NOTE: &str = "lavapipe GPU frame N against frame N+1, camera still";
 const MEDIA_NOTE: &str = "lavapipe GPU columns against a local closed form";
 const SPHERE_NOTE: &str = "lavapipe extinction image, peak outside over peak inside";
+const FRAME_COLUMN_NOTE: &str =
+    "lavapipe frame column buffer against the CPU integral of that frame";
+const FRAME_PICTURE_NOTE: &str =
+    "0 when fog changes the composed Low picture; 1 when the two pictures match";
+const FRAME_COLUMN_ABS: f64 = 1.0e-3;
+const FRAME_PICTURE_UNCHANGED: f64 = 0.0;
 
 /// One sample per yaw frame. A stride of 16 measures the same integral at 0.695 px
 /// on the CPU model, above the frame-to-frame gate.
@@ -62,6 +68,8 @@ struct Good {
     sphere: Option<f64>,
     vram: [Option<f64>; 4],
     ms: [Option<f64>; 4],
+    frame_column: Option<f64>,
+    frame_picture: Option<f64>,
 }
 
 thread_local! {
@@ -109,6 +117,18 @@ fn good_feature() -> Vec<Metric> {
             good.flicker,
             FOG_STILL_FLICKER,
             FLICKER_NOTE,
+        ),
+        optional(
+            "frame_column_abs",
+            good.frame_column,
+            FRAME_COLUMN_ABS,
+            FRAME_COLUMN_NOTE,
+        ),
+        optional(
+            "frame_picture_unchanged",
+            good.frame_picture,
+            FRAME_PICTURE_UNCHANGED,
+            FRAME_PICTURE_NOTE,
         ),
         vram_row("froxel_vram_potato_mb", good.vram[0], FROXEL_VRAM_POTATO_MB),
         vram_row("froxel_vram_low_mb", good.vram[1], FROXEL_VRAM_LOW_MB),
@@ -216,6 +236,7 @@ fn cached_good() -> Good {
 }
 
 fn measure_good() -> Good {
+    let frame = frame_scores();
     let presets = [
         LightingPreset::Potato,
         LightingPreset::Low,
@@ -231,7 +252,15 @@ fn measure_good() -> Good {
         sphere: Some(sphere_grade(0)),
         vram: presets.map(|preset| allocation_mb(preset, false)),
         ms: presets.map(|preset| fitted_cost(preset).map(|cost| cost.milliseconds)),
+        frame_column: frame.0,
+        frame_picture: frame.1,
     }
+}
+
+fn frame_scores() -> (Option<f64>, Option<f64>) {
+    frame_grade().map_or((None, None), |(column, picture)| {
+        (Some(column), Some(picture))
+    })
 }
 
 /// One planted bug against the row it is supposed to fail.

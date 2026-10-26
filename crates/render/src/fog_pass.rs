@@ -4,7 +4,10 @@
 //! term stays the zero stub in `fog::world_cache_inscatter`.
 
 use genos_math::{height_optical_depth_f32, phase_hg_f32};
-use genos_scene::{Floor, FogSettings, FogShape, FogVolume, LightingPreset, Scene, Vec3, Wall};
+use genos_scene::{
+    Camera, Floor, FogSettings, FogShape, FogVolume, LightingPreset, LightingSettings, Scene, Vec3,
+    Wall,
+};
 
 use crate::fog::{
     add, apply_fog, dot, falloff, grid_size, height_closed_column, height_segment_column,
@@ -825,6 +828,89 @@ pub fn picture_from(size: GridSize, columns: &[FogColumn]) -> FogImage {
     columns_image(size, columns)
 }
 
+/// Low-preset floor the frame grade draws. `enabled` is the fog switch.
+#[must_use]
+pub fn composed_frame_scene(enabled: bool) -> Scene {
+    Scene {
+        floor: Floor {
+            position: Vec3::new(0.0, 0.0, 0.0),
+            half_x: 4.0,
+            half_z: 4.0,
+            color: [0.6, 0.6, 0.6],
+        },
+        walls: Vec::new(),
+        solids: Vec::new(),
+        lights: Vec::new(),
+        ceiling: None,
+        sky: None,
+        lighting: LightingSettings::preset(LightingPreset::Low),
+        debug: genos_scene::DebugSettings::default(),
+        fps_counter: genos_scene::FpsCounterSettings::default(),
+        event_loop: genos_scene::EventLoopSettings::default(),
+        fog: FogSettings {
+            enabled,
+            density: if enabled { 0.08 } else { 0.0 },
+            thickness: 40.0,
+            albedo: 1.0,
+            phase_g: 0.4,
+            history: false,
+            gi: false,
+            ..FogSettings::default()
+        },
+        menu: genos_scene::MenuSettings::default(),
+    }
+}
+
+/// Eye for [`composed_frame_scene`]. Yaw 0 looks along -Z, across the floor.
+#[must_use]
+pub fn composed_frame_camera() -> Camera {
+    Camera::new(0.0, 2.0, 0.0)
+}
+
+/// Peak channel error. An empty or mismatched buffer scores 1.
+#[must_use]
+pub fn column_peak(gpu: &[FogColumn], cpu: &[FogColumn]) -> f64 {
+    if gpu.is_empty() || gpu.len() != cpu.len() {
+        return 1.0;
+    }
+    let mut peak = 0.0_f32;
+    for (left, right) in gpu.iter().zip(cpu) {
+        for channel in 0..3 {
+            peak = peak.max((left.inscatter[channel] - right.inscatter[channel]).abs());
+        }
+        peak = peak.max((left.transmittance - right.transmittance).abs());
+    }
+    f64::from(peak)
+}
+
+/// 0 when any byte differs, 1 when the pictures match or one is missing.
+#[must_use]
+pub fn picture_unchanged(on: &[u8], off: &[u8]) -> f64 {
+    if on.is_empty() || on.len() != off.len() {
+        return 1.0;
+    }
+    if on.iter().zip(off).any(|(left, right)| left != right) {
+        0.0
+    } else {
+        1.0
+    }
+}
+
+/// Mean absolute byte delta. Printed beside [`picture_unchanged`].
+#[must_use]
+pub fn picture_mean_abs(on: &[u8], off: &[u8]) -> f64 {
+    if on.is_empty() || on.len() != off.len() {
+        return 0.0;
+    }
+    let mut sum = 0_u64;
+    for (left, right) in on.iter().zip(off) {
+        sum += u64::from(left.abs_diff(*right));
+    }
+    let count = u32::try_from(on.len()).unwrap_or(1).max(1);
+    let total = u32::try_from(sum).unwrap_or(u32::MAX);
+    f64::from(total) / f64::from(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -837,6 +923,14 @@ mod tests {
         assert!(pop <= 0.05, "pop {pop}");
         assert!(smear_broken() > 0.50, "broken smear");
         assert!(yaw_pop_broken() > 0.05, "broken pop");
+    }
+
+    #[test]
+    fn a_matching_picture_scores_unchanged() {
+        assert_eq!(picture_unchanged(&[1, 2, 3, 4], &[1, 2, 3, 4]), 1.0);
+        assert_eq!(picture_unchanged(&[0, 0, 0, 0], &[9, 0, 0, 0]), 0.0);
+        assert_eq!(picture_unchanged(&[], &[1]), 1.0);
+        assert!(picture_mean_abs(&[0, 10], &[0, 0]) > 0.0);
     }
 }
 

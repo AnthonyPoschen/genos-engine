@@ -5,7 +5,10 @@
 
 use std::cell::RefCell;
 
-use genos_render::{fit_pass, FogDispatch, FogGpu, LightingPreset, PassCost, Renderer};
+use genos_render::{
+    column_peak, composed_frame_camera, composed_frame_scene, fit_pass, picture_mean_abs,
+    picture_unchanged, FogDispatch, FogGpu, LightingPreset, PassCost, Renderer, World,
+};
 use genos_window::Window;
 
 struct Session {
@@ -65,6 +68,36 @@ pub(crate) fn allocation_mb(preset: LightingPreset, doubled: bool) -> Option<f64
             f64::from(bytes) / 1_000_000.0
         })
     })
+}
+
+/// Column error and picture-unchanged score for one Low frame.
+/// `None` without a lavapipe window.
+pub(crate) fn frame_grade() -> Option<(f64, f64)> {
+    if !open() {
+        return None;
+    }
+    with_renderer(grade_frame)
+}
+
+fn grade_frame(renderer: &mut Renderer) -> Result<(f64, f64), String> {
+    let camera = composed_frame_camera();
+    let on_world = World::from_scene(composed_frame_scene(true));
+    let on = renderer
+        .draw(&on_world, &camera, true)?
+        .unwrap_or_default();
+    let columns = renderer.frame_fog_columns()?;
+    let reference = renderer.frame_fog_reference();
+    let column = column_peak(&columns, &reference);
+    let off_world = World::from_scene(composed_frame_scene(false));
+    let off = renderer
+        .draw(&off_world, &camera, true)?
+        .unwrap_or_default();
+    let picture = picture_unchanged(&on, &off);
+    println!(
+        "frame grade column_abs {column:.6e} picture_unchanged {picture} picture_mean_abs {:.6e}",
+        picture_mean_abs(&on, &off)
+    );
+    Ok((column, picture))
 }
 
 pub(crate) fn run(job: &FogDispatch) -> Option<FogGpu> {

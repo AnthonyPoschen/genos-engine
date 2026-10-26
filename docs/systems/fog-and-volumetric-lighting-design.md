@@ -275,6 +275,8 @@ A missing feature prints `-` for the value and `NOT-IMPLEMENTED`. It does not pr
 | `media_path_blur_rel` | 0.12 | Full picture against a local closed form, not `genos_math` | Graded from lavapipe columns. The broken fixture scales the CPU picture by 1.4. |
 | `near_fog_blur_rel` | 0.08 | The same grade on the nearest quarter of the slices | Graded from lavapipe columns against that segment's local closed form. |
 | `fog_still_flicker` | 0.02 | Mean frame-to-frame relative luminance of the fog term, camera still | Graded from two lavapipe frames. History is off. Scaling the second frame by 1.4 fails. |
+| `frame_column_abs` | 1e-3 | Peak abs error of the frame's own column buffer against the CPU integral of that frame | Graded from the Low frame after the depth prepass. An empty buffer fails. A separate `run_fog` dispatch is not this row. |
+| `frame_picture_unchanged` | 0 | 0 when fog changes the composed picture, 1 when the fog-on and fog-off pictures match | Graded from two Low frames. The compose header is written on the device only inside the frame dispatch, so a missing dispatch and a compose that ignores fog both score 1. |
 | `froxel_vram_potato_mb` | 0.05 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. Potato is 0. Doubling the High grid fails 12 MB. |
 | `froxel_vram_low_mb` | 1.5 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. |
 | `froxel_vram_medium_mb` | 4 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. |
