@@ -312,11 +312,7 @@ impl Gpu {
         self.wait_fence(fence, "froxel done")?;
         let pass_ms = self.read_froxel_ms().unwrap_or(0.0);
         self.froxel_pass_ms = pass_ms;
-        let vram_bytes = self
-            .froxel
-            .as_ref()
-            .map(|targets| targets.bytes)
-            .unwrap_or(0);
+        let vram_bytes = self.froxel.as_ref().map_or(0, |targets| targets.bytes);
         self.froxel_vram = vram_bytes;
         let count = usize::try_from(job.size.width)
             .unwrap_or(0)
@@ -340,8 +336,7 @@ impl Gpu {
             let memory = self
                 .froxel
                 .as_ref()
-                .map(|targets| targets.ext_read.memory)
-                .unwrap_or(std::ptr::null_mut());
+                .map_or(std::ptr::null_mut(), |targets| targets.ext_read.memory);
             read_f32s(
                 self.fns.map_mem,
                 self.fns.unmap_mem,
@@ -401,11 +396,7 @@ impl Gpu {
         }
         self.wait_all_inflight()?;
         self.ensure_froxel(size)?;
-        let once = self
-            .froxel
-            .as_ref()
-            .map(|targets| targets.bytes)
-            .unwrap_or(0);
+        let once = self.froxel.as_ref().map_or(0, |targets| targets.bytes);
         if !doubled {
             return Ok(once);
         }
@@ -538,8 +529,7 @@ impl Gpu {
         let have = self
             .froxel
             .as_ref()
-            .map(|targets| targets.ext_read.size)
-            .unwrap_or(0);
+            .map_or(0, |targets| targets.ext_read.size);
         if have >= bytes && have > 0 {
             return Ok(());
         }
@@ -999,8 +989,7 @@ impl Gpu {
         let buffer = self
             .froxel
             .as_ref()
-            .map(|targets| targets.ext_read.buffer)
-            .unwrap_or(std::ptr::null_mut());
+            .map_or(std::ptr::null_mut(), |targets| targets.ext_read.buffer);
         self.image_barrier_cmd(cmd, image, 1, 1, 0x800, 0x1000, 0x40, 0x800);
         #[repr(C)]
         struct Region {
@@ -1140,8 +1129,7 @@ impl Gpu {
     fn froxel_image(&self) -> Handle {
         self.froxel
             .as_ref()
-            .map(|targets| targets.image.image)
-            .unwrap_or(std::ptr::null_mut())
+            .map_or(std::ptr::null_mut(), |targets| targets.image.image)
     }
 
     fn stamp_froxel(&self, cmd: Handle, query: Handle, index: u32, stage: u32) {

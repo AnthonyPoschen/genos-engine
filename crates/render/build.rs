@@ -106,6 +106,10 @@ fn main() {
         screen.display()
     ));
     std::fs::write(&glue, glue_text).unwrap();
+    watch_shaders();
+}
+
+fn watch_shaders() {
     for piece in [
         "lighting_common.glsl",
         "lighting_pack.glsl",
@@ -121,21 +125,21 @@ fn main() {
         "froxel_integrate.comp",
         "froxel_compose.glsl",
         "lighting_check.comp",
+        "scene.vert",
+        "overlay.frag",
+        "depth_mask.frag",
+        "material_atlas.glsl",
+        "wire.vert",
+        "wire.frag",
+        "scene_rays.glsl",
+        "mesh_field.glsl",
+        "scene_data.glsl",
+        "dither.glsl",
+        "transmit.comp",
+        "fxaa.comp",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }
-    println!("cargo:rerun-if-changed=shaders/scene.vert");
-    println!("cargo:rerun-if-changed=shaders/overlay.frag");
-    println!("cargo:rerun-if-changed=shaders/depth_mask.frag");
-    println!("cargo:rerun-if-changed=shaders/material_atlas.glsl");
-    println!("cargo:rerun-if-changed=shaders/wire.vert");
-    println!("cargo:rerun-if-changed=shaders/wire.frag");
-    println!("cargo:rerun-if-changed=shaders/scene_rays.glsl");
-    println!("cargo:rerun-if-changed=shaders/mesh_field.glsl");
-    println!("cargo:rerun-if-changed=shaders/scene_data.glsl");
-    println!("cargo:rerun-if-changed=shaders/dither.glsl");
-    println!("cargo:rerun-if-changed=shaders/transmit.comp");
-    println!("cargo:rerun-if-changed=shaders/fxaa.comp");
 }
 
 fn compile(src: &str, dest: &std::path::Path) -> PathBuf {
