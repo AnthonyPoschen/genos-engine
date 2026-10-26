@@ -20,6 +20,7 @@
 //! Lighting debug binary. Scenes come from `debug/scenes/`. Arguments choose the
 //! scene, the checkpoint, the lighting preset, and where pictures land.
 //! `./genos-debug/<kind>/` is the default output. `--out` overrides it.
+//! `GENOS_HDR_OUT` applies only when `--out` was omitted.
 //! An environment variable applies only when the matching argument was omitted.
 
 use std::io::Write;
@@ -66,6 +67,10 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --iso F                camera ISO. GENOS_HDR_ISO applies only when this is omitted
   --aperture F           f-number. GENOS_HDR_APERTURE applies only when this is omitted
   --shutter F            shutter seconds. GENOS_HDR_SHUTTER applies only when this is omitted
+  --adapt-down F         seconds for exposure to fall. GENOS_HDR_ADAPT_DOWN applies
+                         only when this is omitted
+  --adapt-up F           seconds for exposure to rise. GENOS_HDR_ADAPT_UP applies
+                         only when this is omitted
   --hdr-display agx|aces|legacy
                          display transform. GENOS_HDR_DISPLAY applies only when this
                          is omitted. --display is the Wayland name; a value of
@@ -123,7 +128,8 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          when this is omitted
   --mcp-port N           loopback MCP port (default 8766). GENOS_MCP_PORT applies
                          only when this is omitted. genos-stress stays on 8765
-  --out DIR              screenshots, dumps, and logs (default ./genos-debug)
+  --out DIR              screenshots, dumps, and logs (default ./genos-debug).
+                         GENOS_HDR_OUT applies only when this is omitted
   --size WxH             window size (default 1280x720; 320x180 for --check)
   --check                every scene at its check checkpoint, four frames,
                          mean luma against that scene's own floor
@@ -2284,6 +2290,17 @@ fn apply_intent(opts: &Options) -> Result<(), String> {
     Ok(())
 }
 
+/// `--out` wins. `GENOS_HDR_OUT` applies only when that argument was omitted.
+fn hdr_out_dir(cli: Option<&str>, env: Option<&str>) -> String {
+    if let Some(dir) = cli {
+        return dir.to_string();
+    }
+    match env {
+        Some(dir) if !dir.is_empty() => dir.to_string(),
+        _ => "genos-debug".to_string(),
+    }
+}
+
 fn need_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
     args.next().ok_or_else(|| format!("{flag} needs a value"))
 }
@@ -2307,8 +2324,7 @@ fn options() -> Result<Options, String> {
     let mut display = None;
     let mut frames = None;
     let mut ui = false;
-    let mut out = PathBuf::from("genos-debug");
-    let mut out_set = false;
+    let mut out_cli = None;
     let mut size = (1280u32, 720u32);
     let mut check = false;
     let mut mcp_port = None;
@@ -2353,10 +2369,7 @@ fn options() -> Result<Options, String> {
                 );
             }
             "--ui" => ui = true,
-            "--out" => {
-                out = PathBuf::from(need_arg(&mut args, "--out")?);
-                out_set = true;
-            }
+            "--out" => out_cli = Some(need_arg(&mut args, "--out")?),
             "--size" => {
                 let text = need_arg(&mut args, "--size")?;
                 let (w, h) = text.split_once('x').ok_or("size is WxH")?;
@@ -2433,6 +2446,10 @@ fn options() -> Result<Options, String> {
     if report.is_some() && script.is_none() {
         return Err("--report needs --script".into());
     }
+    let out = PathBuf::from(hdr_out_dir(
+        out_cli.as_deref(),
+        std::env::var("GENOS_HDR_OUT").ok().as_deref(),
+    ));
     let script = script.map(|path| {
         let stem = path.file_stem().map_or_else(
             || "script".to_string(),
@@ -2462,7 +2479,7 @@ fn options() -> Result<Options, String> {
         frames,
         ui,
         out,
-        out_set,
+        out_set: out_cli.is_some(),
         size,
         check,
         mcp_port,
@@ -2944,6 +2961,18 @@ mod tests {
         assert!(super::USAGE.contains("GENOS_HDR_BLOOM_INTENSITY"));
         assert!(super::USAGE.contains("GENOS_HDR_BLOOM_LEVELS"));
         assert!(super::USAGE.contains("GENOS_HDR_OUTPUT"));
+        assert!(super::USAGE.contains("GENOS_HDR_ADAPT_DOWN"));
+        assert!(super::USAGE.contains("GENOS_HDR_ADAPT_UP"));
+        assert!(super::USAGE.contains("GENOS_HDR_OUT"));
+        assert!(super::USAGE.contains("--adapt-down"));
+        assert!(super::USAGE.contains("--adapt-up"));
+        for name in genos_scene::HDR_ENV_MIRRORS {
+            assert!(super::USAGE.contains(name), "{name}");
+        }
+        assert_eq!(super::hdr_out_dir(Some("shots"), Some("env")), "shots");
+        assert_eq!(super::hdr_out_dir(None, Some("env")), "env");
+        assert_eq!(super::hdr_out_dir(None, Some("")), "genos-debug");
+        assert_eq!(super::hdr_out_dir(None, None), "genos-debug");
         assert!(super::USAGE.contains("Output"));
     }
 

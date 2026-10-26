@@ -321,16 +321,78 @@ pub fn near_grade(near: f64, far: f64) -> f64 {
     (grade_weight(0.0) * near + grade_weight(3.0) * far) / (grade_weight(0.0) + grade_weight(3.0))
 }
 
-#[allow(
-    clippy::as_conversions,
-    reason = "mesh::tone takes f32; the legacy display is that function"
-)]
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "mesh::tone takes f32; the legacy display is that function"
-)]
+/// Round to nearest even, the IEEE `f32` store the shader reads.
+///
+/// A new `as f32` is a lossy cast. This is the same rounding, in integer shifts.
 fn narrow_f32(value: f64) -> f32 {
-    value as f32
+    let bits = value.to_bits();
+    let sign = if bits >> 63 == 0 { 0u32 } else { 1u32 << 31 };
+    let exp = (bits >> 52) & 0x7ff;
+    let frac = bits & 0x000f_ffff_ffff_ffff;
+    if exp == 0 {
+        return f32::from_bits(sign);
+    }
+    if exp == 0x7ff {
+        let payload = if frac == 0 { 0 } else { 0x0040_0000 };
+        return f32::from_bits(sign | 0x7f80_0000 | payload);
+    }
+    let exp_i = i64::try_from(exp).unwrap_or(0);
+    let f32_exp = exp_i - 1023 + 127;
+    if f32_exp >= 0xff {
+        return f32::from_bits(sign | 0x7f80_0000);
+    }
+    if f32_exp > 0 {
+        return narrow_normal(sign, f32_exp, frac);
+    }
+    narrow_subnormal(sign, 1 - f32_exp, frac)
+}
+
+fn narrow_normal(sign: u32, f32_exp: i64, frac: u64) -> f32 {
+    let mut mant = frac >> 29;
+    let rest = frac & 0x1fff_ffff;
+    let half = 0x1000_0000;
+    let odd = (mant & 1) == 1;
+    if rest > half || (rest == half && odd) {
+        mant += 1;
+    }
+    if mant >> 23 != 0 {
+        let bumped = f32_exp + 1;
+        if bumped >= 0xff {
+            return f32::from_bits(sign | 0x7f80_0000);
+        }
+        let exp_u = u32::try_from(bumped).unwrap_or(0);
+        return f32::from_bits(sign | (exp_u << 23));
+    }
+    let exp_u = u32::try_from(f32_exp).unwrap_or(0);
+    let mant_u = u32::try_from(mant).unwrap_or(0);
+    f32::from_bits(sign | (exp_u << 23) | mant_u)
+}
+
+fn narrow_subnormal(sign: u32, shift: i64, frac: u64) -> f32 {
+    if shift > 25 {
+        return f32::from_bits(sign);
+    }
+    let sig = (1u64 << 52) | frac;
+    let cut = u32::try_from(29 + shift).unwrap_or(64);
+    if cut >= 64 {
+        return f32::from_bits(sign);
+    }
+    let mut mant = sig >> cut;
+    let rest_mask = (1u64 << cut) - 1;
+    let rest = sig & rest_mask;
+    let half = 1u64 << (cut - 1);
+    let odd = (mant & 1) == 1;
+    if rest > half || (rest == half && odd) {
+        mant += 1;
+    }
+    let mant_u = u32::try_from(mant).unwrap_or(0);
+    if mant_u == 0 {
+        return f32::from_bits(sign);
+    }
+    if mant_u >= 0x0080_0000 {
+        return f32::from_bits(sign | (1 << 23));
+    }
+    f32::from_bits(sign | mant_u)
 }
 
 /// Host upload of an HDR parameter. The shader stores `f32`.
@@ -1453,5 +1515,19 @@ mod tests {
         assert!(err_hi < 1.0e-9);
         assert_eq!(agx_lut_words().len(), AGX_LUT_N * AGX_LUT_N * AGX_LUT_N * 4);
         assert!(aces2_rec709([1.0, 1.0, 1.0]).is_none());
+    }
+
+    #[test]
+    fn pack_f32_is_round_to_nearest_even() {
+        assert_eq!(pack_f32(0.0).to_bits(), 0x0000_0000);
+        assert_eq!(pack_f32(-0.0).to_bits(), 0x8000_0000);
+        assert_eq!(pack_f32(1.0).to_bits(), 0x3f80_0000);
+        assert_eq!(pack_f32(0.05).to_bits(), 0x3d4c_cccd);
+        assert_eq!(pack_f32(203.0).to_bits(), 0x434b_0000);
+        assert_eq!(pack_f32(1000.0).to_bits(), 0x447a_0000);
+        assert_eq!(pack_f32(1.0 / 1.2).to_bits(), 0x3f55_5555);
+        assert_eq!(pack_f32(1.0 / 60.0).to_bits(), 0x3c88_8889);
+        assert!(pack_f32(f64::NAN).is_nan());
+        assert_eq!(pack_f32(f64::INFINITY).to_bits(), 0x7f80_0000);
     }
 }

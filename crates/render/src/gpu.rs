@@ -296,6 +296,29 @@ impl Renderer {
         }
     }
 
+    /// GPU milliseconds of bloom plus the display pass on the last collected frame.
+    ///
+    /// One frame behind the draw that just returned. Zero when timestamps are off,
+    /// or when the lighting stamp list left no room for the pair. Lavapipe time
+    /// is not a device score.
+    pub fn hdr_ms(&self) -> f64 {
+        self.gpu.lighting.hdr_ms
+    }
+
+    /// Bytes of the post buffers: scene image, host copy, bloom, encode, lattice, params.
+    pub fn hdr_vram_bytes(&self) -> f64 {
+        let lighting = &self.gpu.lighting;
+        let bytes = lighting
+            .scene_lin
+            .size
+            .saturating_add(lighting.scene_host.size)
+            .saturating_add(lighting.bloom.size)
+            .saturating_add(lighting.hdr_encode.size)
+            .saturating_add(lighting.agx_lut.size)
+            .saturating_add(lighting.hdr_params.size);
+        bytes as f64
+    }
+
     /// The legacy shoulder is the display curve, so a missing scene image may undo it.
     /// `AgX` and ACES are not inverted.
     pub fn hdr_legacy_display(&self) -> bool {
@@ -1532,7 +1555,7 @@ impl Gpu {
                 queues: queue_infos.as_ptr(),
                 layer_count: 0,
                 layers: std::ptr::null(),
-                ext_count: dev_exts.len() as u32,
+                ext_count: u32::try_from(dev_exts.len()).unwrap_or(0),
                 exts: dev_exts.as_ptr(),
                 features: features.as_ptr() as *const c_void,
             };
@@ -2732,6 +2755,30 @@ impl Gpu {
                 }
             }
         }
+        let hdr_base = self.lighting.hdr_query[slot];
+        let pool = times.lighting_pool;
+        if hdr_base != u32::MAX && !pool.is_null() {
+            let mut raw = [0u64; 2];
+            let got = unsafe {
+                (self.fns.get_query_results)(
+                    self.device,
+                    pool,
+                    hdr_base,
+                    2,
+                    16,
+                    raw.as_mut_ptr() as *mut c_void,
+                    8,
+                    0x1,
+                )
+            };
+            self.lighting.hdr_ms = if got == 0 {
+                tick_delta(raw[0], raw[1], bits) as f64 * period / 1.0e6
+            } else {
+                0.0
+            };
+        } else {
+            self.lighting.hdr_ms = 0.0;
+        }
         if !times.print {
             return;
         }
@@ -2745,7 +2792,7 @@ impl Gpu {
         let f = times.frame.map(|v| v / n);
         let passes = pass_times(&f);
         eprintln!(
-            "GPU_MS frames={} size={}x{} present={} setup={:.3} gbuffer={:.3} aa({:?})={:.3} overlay={:.3} copy={:.3} nonlight={:.3} lighting={:.3} frame={:.3} | fps={:.0}",
+            "GPU_MS frames={} size={}x{} present={} setup={:.3} gbuffer={:.3} aa({:?})={:.3} overlay={:.3} copy={:.3} nonlight={:.3} lighting={:.3} frame={:.3} hdr={:.3} | fps={:.0}",
             times.frames,
             self.extent_w,
             self.extent_h,
@@ -2759,6 +2806,7 @@ impl Gpu {
             passes.nonlight,
             passes.lighting,
             passes.frame,
+            self.lighting.hdr_ms,
             n / seconds,
         );
         if times.lighting_frames > 0 && std::env::var_os("GENOS_GPU_DISPATCH").is_some() {
@@ -6285,9 +6333,9 @@ struct GpuTimes {
     light_spans: Vec<(u64, u64)>,
 }
 
-/// Stamps per frame for the GI passes: one before, one after each of the 10
-/// dispatches (the filter runs three rounds).
-const LIGHTING_STAMPS: u32 = 24;
+/// Stamps per frame for the GI passes, plus two for bloom and the display pass.
+/// One before the passes, one after each dispatch, then the HDR pair when it fits.
+const LIGHTING_STAMPS: u32 = 28;
 
 /// Frames kept for a gate's p50 and p99. One scenario is shorter than this.
 const GI_SAMPLE_CAP: usize = 16_384;

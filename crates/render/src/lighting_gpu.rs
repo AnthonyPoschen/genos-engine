@@ -301,6 +301,10 @@ pub(crate) struct Lighting {
     /// Last collected frame (one frame behind the one just submitted).
     last_ms: [f64; BUCKETS],
     last_dispatches: [u32; BUCKETS],
+    /// Bloom plus the display pass. Zero when timestamps are off.
+    hdr_ms: f64,
+    /// Query index of that pair. `u32::MAX` means this slot did not stamp it.
+    hdr_query: [u32; 2],
     /// Control block uploaded with the frame, reused by the async queue.
     ctrl_bytes: [u8; 64],
 }
@@ -490,6 +494,8 @@ impl Default for Lighting {
             frame_prefill: [false; 2],
             last_ms: [0.0; BUCKETS],
             last_dispatches: [0; BUCKETS],
+            hdr_ms: 0.0,
+            hdr_query: [u32::MAX; 2],
             ctrl_bytes: [0; 64],
         }
     }
@@ -2142,7 +2148,7 @@ impl Gpu {
             settings.adapt_down,
             settings.adapt_up,
         );
-        next as f32
+        crate::hdr_output::pack_f32(next)
     }
 
     fn meter_scene(&self, bins: u32) -> Option<(f64, Vec<u32>)> {
@@ -2307,7 +2313,7 @@ impl Gpu {
             ping ^= 1;
         }
         self.bloom_dispatch(width, height, src_w, src_h, src, 0, 3, 0);
-        let word = self.lighting.hdr.bloom_intensity as f32;
+        let word = crate::hdr_output::pack_f32(self.lighting.hdr.bloom_intensity);
         unsafe {
             (self.fns.cmd_update_buffer)(
                 self.cmd,
@@ -2563,6 +2569,7 @@ impl Gpu {
     }
 
     fn lighting_passes(&mut self, slot: usize) {
+        self.lighting.hdr_query[slot] = u32::MAX;
         self.write_hdr_exposure();
         let [w, h, cols, rows] = self.lighting.dims;
         let probes = cols * rows;
@@ -3044,6 +3051,8 @@ impl Gpu {
             self.lighting.sun_frames = self.lighting.sun_frames.saturating_add(1);
         }
         self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
+        let mut hdr_pool: Handle = std::ptr::null_mut();
+        let mut hdr_base = None;
         unsafe {
             (self.fns.cmd_update_buffer)(
                 self.cmd,
@@ -3264,6 +3273,14 @@ impl Gpu {
                     (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first + 1 + k as u32);
                 }
             }
+            if agx_display {
+                let hdr_at = hdr_stamp_base(groups.len(), first);
+                if let (Some(pool), Some(base)) = (stamps, hdr_at) {
+                    (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, base);
+                    hdr_pool = pool;
+                    hdr_base = Some(base);
+                }
+            }
         }
         if compose_full {
             self.lighting.compose_valid = true;
@@ -3293,6 +3310,17 @@ impl Gpu {
                 );
             }
             self.memory_barrier(0x800, 0x1000 | 0x4000, 0x40, 0x800 | 0x2000);
+            if let Some(base) = hdr_base {
+                unsafe {
+                    (self.fns.cmd_write_timestamp)(
+                        self.cmd,
+                        0x800,
+                        hdr_pool,
+                        base.saturating_add(1),
+                    );
+                }
+                self.lighting.hdr_query[slot] = base;
+            }
         }
         self.image_barrier(image, 6, 7, 0x1000, 0x1000, 0x800, 0x1000);
         if self.format == crate::hdr_output::FORMAT_R16F {
@@ -3633,6 +3661,16 @@ fn lighting_stats_storage_bytes() -> u64 {
 }
 const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;
 const LIGHTING_ATROUS_STAT: usize = 120;
+/// Query index of the bloom and display pair, after the pass stamps.
+/// `None` when those two would fall outside [`LIGHTING_STAMPS`].
+fn hdr_stamp_base(groups: usize, first: u32) -> Option<u32> {
+    let used = u32::try_from(groups).unwrap_or(u32::MAX).saturating_add(1);
+    if used.saturating_add(2) > LIGHTING_STAMPS {
+        return None;
+    }
+    Some(first.saturating_add(used))
+}
+
 /// S78S: the change counters (lighting_chg) run with GENOS_LIGHTING_SC_TRACE.
 #[allow(
     clippy::disallowed_methods,

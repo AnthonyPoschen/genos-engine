@@ -58,7 +58,7 @@ pub struct HdrSettings {
 }
 
 /// Flags from one argument list. Empty slots were omitted.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct HdrCli {
     pub exposure_mode: Option<ExposureMode>,
     pub ev100: Option<f64>,
@@ -66,12 +66,33 @@ pub struct HdrCli {
     pub iso: Option<f64>,
     pub aperture: Option<f64>,
     pub shutter: Option<f64>,
+    pub adapt_down: Option<f64>,
+    pub adapt_up: Option<f64>,
     pub display: Option<DisplayTransform>,
     pub bloom: Option<bool>,
     pub bloom_intensity: Option<f64>,
     pub bloom_levels: Option<u32>,
     pub output: Option<OutputMode>,
 }
+
+/// Environment mirrors of the design-table keys, then `GENOS_HDR_OUT` for `--out`.
+/// The argument wins. The variable applies only when that argument was omitted.
+pub const HDR_ENV_MIRRORS: [&str; 14] = [
+    "GENOS_HDR_EXPOSURE_MODE",
+    "GENOS_HDR_EV100",
+    "GENOS_HDR_COMPENSATION",
+    "GENOS_HDR_ISO",
+    "GENOS_HDR_APERTURE",
+    "GENOS_HDR_SHUTTER",
+    "GENOS_HDR_ADAPT_DOWN",
+    "GENOS_HDR_ADAPT_UP",
+    "GENOS_HDR_DISPLAY",
+    "GENOS_HDR_BLOOM",
+    "GENOS_HDR_BLOOM_INTENSITY",
+    "GENOS_HDR_BLOOM_LEVELS",
+    "GENOS_HDR_OUTPUT",
+    "GENOS_HDR_OUT",
+];
 
 impl Default for HdrSettings {
     fn default() -> Self {
@@ -149,19 +170,7 @@ impl HdrSettings {
     }
 
     pub fn cli_from(args: &[String]) -> Result<HdrCli, String> {
-        let mut cli = HdrCli {
-            exposure_mode: None,
-            ev100: None,
-            compensation: None,
-            iso: None,
-            aperture: None,
-            shutter: None,
-            display: None,
-            bloom: None,
-            bloom_intensity: None,
-            bloom_levels: None,
-            output: None,
-        };
+        let mut cli = HdrCli::default();
         let mut index = 0;
         while index < args.len() {
             let arg = &args[index];
@@ -190,6 +199,10 @@ impl HdrSettings {
                 "--iso" => cli.iso = Some(parse_f64("iso", &take(&mut index)?)?),
                 "--aperture" => cli.aperture = Some(parse_f64("aperture", &take(&mut index)?)?),
                 "--shutter" => cli.shutter = Some(parse_f64("shutter", &take(&mut index)?)?),
+                "--adapt-down" => {
+                    cli.adapt_down = Some(parse_f64("adapt_down", &take(&mut index)?)?);
+                }
+                "--adapt-up" => cli.adapt_up = Some(parse_f64("adapt_up", &take(&mut index)?)?),
                 "--hdr-display" => cli.display = Some(parse_display(&take(&mut index)?)?),
                 "--display" => {
                     let value = take(&mut index)?;
@@ -228,6 +241,8 @@ impl HdrSettings {
             iso: env("GENOS_HDR_ISO"),
             aperture: env("GENOS_HDR_APERTURE"),
             shutter: env("GENOS_HDR_SHUTTER"),
+            adapt_down: env("GENOS_HDR_ADAPT_DOWN"),
+            adapt_up: env("GENOS_HDR_ADAPT_UP"),
             display: env("GENOS_HDR_DISPLAY"),
             bloom: env("GENOS_HDR_BLOOM"),
             bloom_intensity: env("GENOS_HDR_BLOOM_INTENSITY"),
@@ -274,6 +289,18 @@ impl HdrSettings {
         {
             out.shutter = value;
             out.legacy_bytes = false;
+        }
+        if let Some(value) = cli
+            .adapt_down
+            .or_else(|| parse_opt_f64(env.adapt_down.as_deref()))
+        {
+            out.adapt_down = value;
+        }
+        if let Some(value) = cli
+            .adapt_up
+            .or_else(|| parse_opt_f64(env.adapt_up.as_deref()))
+        {
+            out.adapt_up = value;
         }
         if let Some(value) = cli
             .display
@@ -382,6 +409,8 @@ pub struct HdrEnv {
     pub iso: Option<String>,
     pub aperture: Option<String>,
     pub shutter: Option<String>,
+    pub adapt_down: Option<String>,
+    pub adapt_up: Option<String>,
     pub display: Option<String>,
     pub bloom: Option<String>,
     pub bloom_intensity: Option<String>,
@@ -505,6 +534,8 @@ pub fn hdr_flag_needs_value(arg: &str) -> Option<bool> {
             | "--iso"
             | "--aperture"
             | "--shutter"
+            | "--adapt-down"
+            | "--adapt-up"
             | "--hdr-display"
             | "--bloom"
             | "--bloom-intensity"
@@ -560,5 +591,40 @@ mod tests {
         );
         assert_eq!(hdr_flag_needs_value("--bloom=off"), Some(false));
         assert_eq!(hdr_flag_needs_value("--display"), None);
+        assert_eq!(hdr_flag_needs_value("--adapt-down"), Some(true));
+        assert_eq!(hdr_flag_needs_value("--adapt-up=0.8"), Some(false));
+    }
+
+    #[test]
+    fn adapt_argument_wins_over_the_environment() {
+        let stored = HdrSettings::legacy_bytes();
+        let from_env = stored.resolve(
+            &HdrCli::default(),
+            &HdrEnv {
+                adapt_down: Some("0.20".into()),
+                adapt_up: Some("1.25".into()),
+                ..HdrEnv::default()
+            },
+        );
+        assert!(from_env.legacy_bytes);
+        assert_eq!(from_env.adapt_down.to_bits(), 0.20_f64.to_bits());
+        assert_eq!(from_env.adapt_up.to_bits(), 1.25_f64.to_bits());
+        let from_cli = stored.resolve(
+            &HdrCli {
+                adapt_down: Some(0.90),
+                ..HdrCli::default()
+            },
+            &HdrEnv {
+                adapt_down: Some("0.20".into()),
+                adapt_up: Some("1.25".into()),
+                ..HdrEnv::default()
+            },
+        );
+        assert_eq!(from_cli.adapt_down.to_bits(), 0.90_f64.to_bits());
+        assert_eq!(from_cli.adapt_up.to_bits(), 1.25_f64.to_bits());
+        assert_eq!(HDR_ENV_MIRRORS.len(), 14);
+        assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_ADAPT_DOWN"));
+        assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_ADAPT_UP"));
+        assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_OUT"));
     }
 }

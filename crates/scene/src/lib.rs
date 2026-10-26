@@ -24,7 +24,8 @@ pub use debug_settings::DebugSettings;
 pub use event_loop::EventLoopSettings;
 pub use fps_counter::{parse_enabled, parse_rate, FpsCli, FpsCounterSettings};
 pub use hdr::{
-    hdr_flag_needs_value, DisplayTransform, ExposureMode, HdrCli, HdrEnv, HdrSettings, OutputMode,
+    hdr_flag_needs_value, DisplayTransform, ExposureMode, HdrCli, HdrEnv, HdrSettings,
+    OutputMode, HDR_ENV_MIRRORS,
 };
 pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use lighting::{
