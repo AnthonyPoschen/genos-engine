@@ -176,3 +176,52 @@ fn the_frame_streamer_is_read_back() {
         "frame_streamer {value} finest {finest:?} coarse {coarse} texel {texel:?}"
     );
 }
+
+#[test]
+fn a_smaller_heap_budget_evicts_on_the_renderer() {
+    let (_gpu, mut window, mut renderer) = open();
+    let mut settings = renderer.material_settings();
+    settings.headroom_percent = 0;
+    settings.headroom_floor_mb = 0;
+    renderer.set_material_settings(settings);
+    let world = world();
+    let camera = Camera::new(0.0, 4.0, 0.0);
+    let mut committed = 0u64;
+    let mut finest = None;
+    for _ in 0..8 {
+        let _frame = draw(&mut window, &mut renderer, &world, &camera);
+        committed = renderer.material_committed();
+        finest = renderer.material_residency().1;
+        if finest == Some(0) && committed > 0 {
+            break;
+        }
+    }
+    let ready = finest == Some(0) && committed > 0;
+    let non_texture = renderer.vram_budget().non_texture;
+    // Half the resident chain, so the engine is over heapBudget and dwell does not hold.
+    let heap = non_texture.saturating_add(committed / 2);
+    renderer.set_heap_budget_override(Some((heap, 0)));
+    let mut until = 7u32;
+    let mut now = committed;
+    let mut target = 0u64;
+    if ready {
+        for frame in 1..=6 {
+            let _frame = draw(&mut window, &mut renderer, &world, &camera);
+            now = renderer.material_committed();
+            target = renderer.vram_budget().texture_target();
+            if now <= target {
+                until = frame;
+                break;
+            }
+        }
+    }
+    let value = if ready { until as f32 } else { 7.0 };
+    let status = if value <= 6.0 { "PASS" } else { "FAIL" };
+    eprintln!(
+        "heap_shrink {value:.6} 6.000000 {status} committed {now} target {target} before {committed}"
+    );
+    assert!(
+        value <= 6.0,
+        "heap_shrink {value} committed {now} target {target}"
+    );
+}

@@ -360,6 +360,20 @@ impl Renderer {
         self.gpu.streamer.observe_decode(bytes, ms);
     }
 
+    /// Texture bytes the streamer is holding, including a mip still in flight.
+    #[must_use]
+    pub fn material_committed(&self) -> u64 {
+        self.gpu.streamer.committed()
+    }
+
+    /// Replace the queried `heapBudget` and `heapUsage`. `None` uses the device again.
+    ///
+    /// The pair is `(heap_budget, heap_usage)`. The next frame's texture target
+    /// is that budget minus non-texture bytes minus headroom.
+    pub fn set_heap_budget_override(&mut self, budget_and_usage: Option<(u64, u64)>) {
+        self.gpu.heap_override = budget_and_usage;
+    }
+
     /// Device memory for a texture page. An out-of-device-memory error evicts,
     /// frees that mip's device memory, and retries.
     pub fn allocate_texture_pages(&mut self, size: u64, type_bits: u32) -> Result<(), String> {
@@ -1034,6 +1048,8 @@ struct Gpu {
     budget_tick: u32,
     cached_budget: u64,
     cached_usage: u64,
+    /// `(heapBudget, heapUsage)` in place of the device query.
+    heap_override: Option<(u64, u64)>,
     budget_extension: bool,
     memory_budget_query: Option<FnMemProps>,
     frame_mark: Option<Instant>,
@@ -1843,6 +1859,7 @@ impl Gpu {
                 budget_tick: 0,
                 cached_budget: 0,
                 cached_usage: 0,
+                heap_override: None,
                 budget_extension,
                 memory_budget_query,
                 frame_mark: None,
@@ -5478,13 +5495,28 @@ impl Gpu {
 
     fn refresh_vram(&mut self, non_texture: u64) {
         self.budget_tick = self.budget_tick.wrapping_add(1);
-        if self.budget_tick == 1 || self.budget_tick.is_multiple_of(4) {
+        if self.heap_override.is_none()
+            && (self.budget_tick == 1 || self.budget_tick.is_multiple_of(4))
+        {
             self.query_heaps();
         }
         let headroom = genos_load::Headroom::from_mb(
             self.materials.headroom_percent,
             self.materials.headroom_floor_mb,
         );
+        if let Some((budget, usage)) = self.heap_override {
+            self.vram = genos_load::VramBudget::from_heaps(
+                &[genos_load::HeapSlice {
+                    budget,
+                    usage,
+                    device_local: true,
+                }],
+                non_texture,
+                headroom,
+                true,
+            );
+            return;
+        }
         self.vram = if self.budget_extension {
             genos_load::VramBudget::from_heaps(
                 &[genos_load::HeapSlice {
