@@ -268,7 +268,7 @@ Anthony Poschen approved these answers. Phase 0 does not implement the controlle
 
 Presets set schedule mode to `budget`. `schedule_push` multiplies the §3 caps by the controller scale (at most 1) and by `budget_scale` (1/64 through 4). Global mode pushes zeros and stays on the display size.
 
-A pass gates when its grant is under its demand and the frame has a change record, or, for direct and trace, when the scale is below 1. The gate is one centered tile rect. Ten percent of that grant is a band that steps down the picture. À-trous gates only when a change record exists. Outside the rect, a direct pixel keeps a stored value, and a probe ray keeps a finished hit or a finished miss. An empty direct slot still traces. A cache ray past the grant does not run.
+A pass gates when its grant is under its demand and the frame has a change record, or, for direct and trace, when the scale is below 1. The gate is one tile rect centered on the display. `select_refresh` orders the display, then the guard toward the turn, then refinement. A picked turn-side tile grows the rect that way. Ten percent of that grant is a band that steps down the picture. À-trous gates only when a change record exists. Outside the rect, a direct pixel keeps a stored value, and a probe ray keeps a finished hit or a finished miss. An empty direct slot still traces. A cache ray past the grant does not run.
 
 The lighting targets are the guard-band size. The picture is the crop. The eye stays put, and the band leads the turn. High starts at 15% of the display on each edge. Probe picks and lamp-pick history project that displayed camera through the crop, so a still probe finds its last tile.
 
@@ -284,7 +284,7 @@ The slot table stays 1,048,576 entries. A cell that already holds a finished val
 
 Departures from this design:
 
-- §5.2's GPU histogram is not built. `select_refresh` is the tested CPU order. It does not pick GPU work. The screen gate is one rect, taken from direct, then à-trous, then trace.
+- §5.2's GPU histogram is not built. `select_refresh` picks the screen-gate count and the turn growth. The gate is still one rect, centered on the display, taken from direct, then à-trous, then trace. `merge_into_parent`, `evict_coarse`, `should_add_level`, and `should_remove_level` stay CPU functions. The GPU does not run them.
 - §5.1's irradiance change, shadow-caster volumes, and bounce reach are not inputs. The gate sees the change-record count.
 - §6.1's projected-pixel target does not pick a level. The shown lattice stays 12.5 cm (S57). Coarser sizes are parents of that key.
 - §6.4's area-weighted merge is the CPU function `merge_into_parent`. The GPU claims a missing parent empty. `should_remove_level` does not run on the GPU. A fine cell is not dropped because it left the view. Coarse cells leave on the expiry sweep once the live coarse count is over the slot cap, not farthest-first.

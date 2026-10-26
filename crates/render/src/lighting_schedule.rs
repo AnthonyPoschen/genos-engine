@@ -4,9 +4,9 @@
 //! past the millisecond cap. It never opens the frame to an unlimited pass.
 //!
 //! Refresh order (the glossary keeps "tier" for removed GI v1):
-//! 1. Viewport, including the guard band, up to the quality floor.
-//! 2. Out-of-view regions near the camera, up to that same floor.
-//! 3. Leftover budget refines high detail by visible error.
+//! 1. The display, up to the quality floor.
+//! 2. The guard band toward the turn, up to that same floor.
+//! 3. Leftover budget refines the rest of the lit frame by visible error.
 //!
 //! A fast change stays urgent inside its order. It does not jump the order.
 
@@ -80,7 +80,10 @@ pub struct QualityFloor {
     pub min_converged: f32,
 }
 
-/// Where an item sits relative to the camera. The viewport includes the guard band.
+/// Where an item sits relative to the camera.
+///
+/// On the screen gate the display is the viewport, the turn-side guard is near,
+/// and the rest of the lit frame is far. `zone_of` is the cone used for that split.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemZone {
     Viewport,
@@ -141,6 +144,14 @@ pub struct ScreenBudget {
     pub scaled: bool,
     pub frame: u32,
     pub cache_rays: u32,
+    /// Display window inside the lit grid, in tiles. Zero width means the whole grid.
+    pub display_x: u32,
+    pub display_y: u32,
+    pub display_tiles_w: u32,
+    pub display_tiles_h: u32,
+    /// Sign of the turn. Positive grows the rect toward larger tile x or y.
+    pub turn_x: i32,
+    pub turn_y: i32,
 }
 
 /// What one frame's screen passes are allowed to refresh.
@@ -626,7 +637,7 @@ pub fn screen_plan(input: ScreenBudget) -> ScreenPlan {
         tiles_for_grant(tiles, input.trace_grant, input.trace_demand)
     };
     let (origin_x, origin_y, span_w, span_h, band_y, band_h) =
-        centered_and_band(tiles_x, tiles_y, grant_tiles, input.frame);
+        refresh_rect(&input, tiles_x, tiles_y, grant_tiles);
     ScreenPlan {
         direct_gate: direct,
         atrous_gate: atrous,
@@ -638,6 +649,17 @@ pub fn screen_plan(input: ScreenBudget) -> ScreenPlan {
         starve_y: band_y,
         starve_h: band_h,
         cache_ray_grant,
+    }
+}
+
+fn turn_sign(toward: f32, away: f32) -> i32 {
+    const EDGE: f32 = 0.001;
+    if toward > away + EDGE {
+        1
+    } else if away > toward + EDGE {
+        -1
+    } else {
+        0
     }
 }
 
@@ -653,12 +675,56 @@ fn tiles_for_grant(tiles: u32, grant: u32, demand: u32) -> u32 {
     u32::try_from(share.max(1).min(u64::from(tiles))).unwrap_or(u32::MAX)
 }
 
-fn centered_and_band(tiles_x: u32, tiles_y: u32, grant_tiles: u32, frame: u32) -> (u32, u32, u32, u32, u32, u32) {
+/// Screen tiles are below this floor when they still need a first refresh.
+const SCREEN_FLOOR: QualityFloor = QualityFloor {
+    max_level: 0,
+    min_converged: 0.35,
+};
+
+/// Off-display distance `zone_of` treats as the turn-side shell.
+const TURN_NEAR_M: f32 = 4.0;
+
+fn refresh_rect(input: &ScreenBudget, tiles_x: u32, tiles_y: u32, grant_tiles: u32) -> (u32, u32, u32, u32, u32, u32) {
+    let display = display_window(input, tiles_x, tiles_y);
+    let items = screen_items(tiles_x, tiles_y, display, input.turn_x, input.turn_y);
+    let picks = select_refresh(&items, grant_tiles, SCREEN_FLOOR);
+    let mut viewport_n = 0u32;
+    let mut near_n = 0u32;
+    for index in &picks {
+        match items.get(usize_from_u32(*index)).map(|item| item.zone) {
+            Some(ItemZone::Viewport) => viewport_n = viewport_n.saturating_add(1),
+            Some(ItemZone::Near) => near_n = near_n.saturating_add(1),
+            _ => {}
+        }
+    }
     let reserve = grant_tiles / 10;
-    let main = grant_tiles.saturating_sub(reserve).max(1).min(tiles_x.saturating_mul(tiles_y));
-    let (span_w, span_h) = rect_wh(tiles_x, tiles_y, main);
-    let origin_x = tiles_x.saturating_sub(span_w) / 2;
-    let origin_y = tiles_y.saturating_sub(span_h) / 2;
+    let tiles = tiles_x.saturating_mul(tiles_y);
+    let picked = u32::try_from(picks.len()).unwrap_or(u32::MAX);
+    let refine_n = picked.saturating_sub(viewport_n).saturating_sub(near_n);
+    // The shader band is the oldest-viewport reserve. Near picks grow the turn
+    // edge instead of sitting inside this centered rect.
+    let base = viewport_n
+        .saturating_add(refine_n)
+        .saturating_sub(reserve)
+        .max(1)
+        .min(tiles);
+    let (mut span_w, mut span_h) = rect_wh(tiles_x, tiles_y, base);
+    let (dx, dy, dw, dh) = display;
+    let mut origin_x = center_origin(dx, dw, span_w, tiles_x);
+    let mut origin_y = center_origin(dy, dh, span_h, tiles_y);
+    if near_n > 0 {
+        let mut rect = TileRect {
+            x: origin_x,
+            y: origin_y,
+            w: span_w,
+            h: span_h,
+        };
+        extend_turn(&mut rect, tiles_x, tiles_y, (input.turn_x, input.turn_y), near_n);
+        origin_x = rect.x;
+        origin_y = rect.y;
+        span_w = rect.w;
+        span_h = rect.h;
+    }
     let band_h = if reserve == 0 {
         0
     } else {
@@ -667,9 +733,115 @@ fn centered_and_band(tiles_x: u32, tiles_y: u32, grant_tiles: u32, frame: u32) -
     let band_y = if band_h == 0 {
         0
     } else {
-        (frame % tiles_y) % tiles_y.saturating_sub(band_h).max(1)
+        (input.frame % tiles_y) % tiles_y.saturating_sub(band_h).max(1)
     };
     (origin_x, origin_y, span_w, span_h, band_y, band_h)
+}
+
+fn display_window(input: &ScreenBudget, tiles_x: u32, tiles_y: u32) -> (u32, u32, u32, u32) {
+    if input.display_tiles_w == 0 || input.display_tiles_h == 0 {
+        return (0, 0, tiles_x, tiles_y);
+    }
+    let w = input.display_tiles_w.min(tiles_x).max(1);
+    let h = input.display_tiles_h.min(tiles_y).max(1);
+    let x = input.display_x.min(tiles_x.saturating_sub(w));
+    let y = input.display_y.min(tiles_y.saturating_sub(h));
+    (x, y, w, h)
+}
+
+fn center_origin(window: u32, window_span: u32, rect_span: u32, tiles: u32) -> u32 {
+    let raw = if rect_span >= window_span {
+        window.saturating_sub((rect_span - window_span) / 2)
+    } else {
+        window + (window_span - rect_span) / 2
+    };
+    raw.min(tiles.saturating_sub(rect_span))
+}
+
+fn screen_items(tiles_x: u32, tiles_y: u32, display: (u32, u32, u32, u32), turn_x: i32, turn_y: i32) -> Vec<WorkItem> {
+    let (dx, dy, dw, dh) = display;
+    let cx = dx + dw / 2;
+    let cy = dy + dh / 2;
+    let mut items = Vec::with_capacity(usize_from_u32(tiles_x.saturating_mul(tiles_y)));
+    let mut index = 0u32;
+    for ty in 0..tiles_y {
+        for tx in 0..tiles_x {
+            let in_display = tx >= dx && tx < dx.saturating_add(dw) && ty >= dy && ty < dy.saturating_add(dh);
+            let zone = if in_display {
+                ItemZone::Viewport
+            } else {
+                let on_turn = tile_on_turn(tx, ty, display, (turn_x, turn_y));
+                let distance = if on_turn { 1.0 } else { TURN_NEAR_M + 1.0 };
+                zone_of(0.0, distance, TURN_NEAR_M, 0.0)
+            };
+            let below = zone != ItemZone::Far;
+            let dist_x = tx.abs_diff(cx);
+            let dist_y = ty.abs_diff(cy);
+            items.push(WorkItem {
+                index,
+                zone,
+                level: 0,
+                converged: if below { 0.0 } else { 1.0 },
+                change_mag: 0.0,
+                distance_m: tile_f32(dist_x.max(dist_y)),
+                age_frames: dist_x.max(dist_y),
+            });
+            index = index.saturating_add(1);
+        }
+    }
+    items
+}
+
+fn tile_f32(value: u32) -> f32 {
+    f32::from(u16::try_from(value).unwrap_or(u16::MAX))
+}
+
+fn tile_on_turn(tx: u32, ty: u32, display: (u32, u32, u32, u32), turn: (i32, i32)) -> bool {
+    let (dx, dy, dw, dh) = display;
+    let (turn_x, turn_y) = turn;
+    if turn_x == 0 && turn_y == 0 {
+        return false;
+    }
+    let right = tx >= dx.saturating_add(dw);
+    let left = tx < dx;
+    let up = ty >= dy.saturating_add(dh);
+    let down = ty < dy;
+    let x_hit = (turn_x > 0 && right) || (turn_x < 0 && left);
+    let y_hit = (turn_y > 0 && up) || (turn_y < 0 && down);
+    x_hit || y_hit
+}
+
+struct TileRect {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+fn extend_turn(rect: &mut TileRect, tiles_x: u32, tiles_y: u32, turn: (i32, i32), near_n: u32) {
+    let (turn_x, turn_y) = turn;
+    if turn_x != 0 {
+        let add = near_n.div_ceil(rect.h.max(1)).max(1);
+        if turn_x > 0 {
+            let room = tiles_x.saturating_sub(rect.x.saturating_add(rect.w));
+            rect.w = rect.w.saturating_add(add.min(room));
+        } else {
+            let shift = add.min(rect.x);
+            rect.x = rect.x.saturating_sub(shift);
+            rect.w = rect.w.saturating_add(shift);
+        }
+    }
+    if turn_y != 0 {
+        let add = near_n.div_ceil(rect.w.max(1)).max(1);
+        if turn_y > 0 {
+            let room = tiles_y.saturating_sub(rect.y.saturating_add(rect.h));
+            rect.h = rect.h.saturating_add(add.min(room));
+        } else {
+            let shift = add.min(rect.y);
+            rect.y = rect.y.saturating_sub(shift);
+            rect.h = rect.h.saturating_add(shift);
+        }
+    }
 }
 
 fn rect_wh(tiles_x: u32, tiles_y: u32, count: u32) -> (u32, u32) {
@@ -856,6 +1028,12 @@ pub fn schedule_push(
         scaled,
         frame,
         cache_rays: grant_u32(caps.cache_rays, scale),
+        display_x: lit.crop_x / tile,
+        display_y: lit.crop_y / tile,
+        display_tiles_w: lit.display_w.div_ceil(tile),
+        display_tiles_h: lit.display_h.div_ceil(tile),
+        turn_x: turn_sign(lit.right, lit.left),
+        turn_y: turn_sign(lit.top, lit.bottom),
     });
     let mut words = plan.words(lit.crop_x, lit.crop_y);
     // Bit 3: detail levels (25 cm through 4 m). The shader also requires world-cache mode 3.
@@ -1102,6 +1280,12 @@ mod tests {
             scaled: false,
             frame: 0,
             cache_rays: 256_000,
+            display_x: 0,
+            display_y: 0,
+            display_tiles_w: 0,
+            display_tiles_h: 0,
+            turn_x: 0,
+            turn_y: 0,
         });
         assert!(plan.gates_off());
         assert_eq!(plan.words(0, 0)[0], 0);
@@ -1122,6 +1306,12 @@ mod tests {
             scaled: false,
             frame: 3,
             cache_rays: 256_000,
+            display_x: 0,
+            display_y: 0,
+            display_tiles_w: 0,
+            display_tiles_h: 0,
+            turn_x: 0,
+            turn_y: 0,
         });
         assert!(plan.atrous_gate);
         assert!(!plan.direct_gate);
@@ -1129,6 +1319,71 @@ mod tests {
         let center_x = plan.tile_x + plan.tile_w / 2;
         assert!((i64::from(center_x) - 10).abs() <= 1);
         assert!(plan.tile_w * plan.tile_h < 20 * 12);
+    }
+
+    #[test]
+    fn a_small_grant_centers_on_the_display_and_does_not_grow_into_the_guard() {
+        // 128 tiles, grant 8. The display is 24 tiles, so the turn guard is not picked.
+        let plan = screen_plan(ScreenBudget {
+            tiles_x: 16,
+            tiles_y: 8,
+            shadow_grant: 8,
+            shadow_demand: 128,
+            denoise_grant: 1_000_000,
+            denoise_demand: 1,
+            trace_grant: 1_000_000,
+            trace_demand: 1,
+            changes: 1,
+            scaled: false,
+            frame: 0,
+            cache_rays: 0,
+            display_x: 2,
+            display_y: 2,
+            display_tiles_w: 6,
+            display_tiles_h: 4,
+            turn_x: 1,
+            turn_y: 0,
+        });
+        assert!(plan.direct_gate);
+        assert_eq!(plan.tile_x, 3);
+        assert!(plan.tile_x + plan.tile_w <= 2 + 6);
+        let lit_origin = (16 - plan.tile_w) / 2;
+        assert_ne!(plan.tile_x, lit_origin);
+    }
+
+    #[test]
+    fn a_grant_past_the_display_grows_toward_the_turn() {
+        let plan = screen_plan(ScreenBudget {
+            tiles_x: 16,
+            tiles_y: 8,
+            shadow_grant: 30,
+            shadow_demand: 128,
+            denoise_grant: 1_000_000,
+            denoise_demand: 1,
+            trace_grant: 1_000_000,
+            trace_demand: 1,
+            changes: 1,
+            scaled: false,
+            frame: 0,
+            cache_rays: 0,
+            display_x: 2,
+            display_y: 2,
+            display_tiles_w: 6,
+            display_tiles_h: 4,
+            turn_x: 1,
+            turn_y: 0,
+        });
+        assert!(plan.direct_gate);
+        let display_right = 2 + 6;
+        let rect_right = plan.tile_x + plan.tile_w;
+        let right_extra = rect_right.saturating_sub(display_right);
+        let left_extra = 2u32.saturating_sub(plan.tile_x);
+        assert!(
+            right_extra > left_extra,
+            "rect {}+{} did not grow right of the display",
+            plan.tile_x,
+            plan.tile_w
+        );
     }
 
     #[test]
