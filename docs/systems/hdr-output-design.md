@@ -300,7 +300,7 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | `legacy_inverse` | ≤ 1e−4 | `linear_from_display(tone(x))` against `x` for 0, 0.25, 0.64, 1, 4, 16. `tone` is `mesh::tone`. Relative, denominator `max(x, 1)` | PASS |
 | `legacy_shader` | = 0 codes | lavapipe readback of the shipped hall, Potato, `legacy_bytes`, ambient raised to 8 so the shoulder is in frame, against the stored plain-compose picture. The shoulder in that shader is the pre-HDR `tone_channel`. Two settled frames must match | PASS. Moving a colour byte by 8, or changing `tone_channel`, fails |
 | `exposure_ev` | ≤ 1e−9 | `ev100_from_luminance` and `exposure_from_ev100` on 0.01, 0.18, 1, and 12.5. EV100 is `log2(L × 100 / 12.5)`. Exposure is `1 / (1.2 × 2^EV100)` | PASS |
-| `exposure_histogram` | ≤ 0.10 stops | `histogram_ev100` on a grey field with a one-pixel sun, against `log2(0.18 × 100 / 12.5)` | PASS |
+| `exposure_histogram` | ≤ 0.10 stops | `histogram_ev100` on a grey field with a one-pixel sun, and on a field whose top 9% is that sun, against `log2(0.18 × 100 / 12.5)`. The 9% sits inside the dropped tail | PASS. Removing the 10% drop fails the heavy tail |
 | `exposure_still` | ≤ 0.001 | max consecutive relative change of exposure over 8 identical frames | PASS. `exposure_still_change` holds on `step_exposure` |
 | `exposure_adapt` | outside `[0.40, 2.00]` s is 0 | time to cover 90% of a 4-stop step. The value is the distance outside that window | PASS. `exposure_adapt_outside` at τ 0.40 s |
 | `exposure_overshoot` | ≤ 0.02 | progress past the target on that step | PASS. `exposure_overshoot` on the same step |
@@ -311,7 +311,7 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | `gpu_agx` | ≤ 0.02 | lavapipe readback of one fixed hall frame against `agx_rec709(exposure × (scene + bloom × k))`. Exposure is `step_exposure` from EV100 2, not the uploaded scale. Measured residual on that frame is 0.0025; a ×4 bloom add moves it by about 0.20 | PASS when the picture matches. A skipped `AgX`, a wrong lattice, a ×4 bloom add, or an exposure left at 1 fails |
 | `gpu_exposure` | ≤ 1e−4 | `Renderer::hdr_exposure` against that same `step_exposure` | PASS. A scale pinned at 1 fails |
 | `gpu_bloom` | ≤ 1e−3 | GPU bloom buffer of the current frame against that same tap pyramid. The graded frame changes the lamp, so the previous frame's pyramid does not match | PASS. A pyramid that doubles energy fails |
-| `output_pick` | = 0 mismatches | Linux: HDR10, else scRGB, else SDR. Windows: scRGB, else HDR10, else SDR. macOS: first listed HDR pair, else SDR. Potato and Low force SDR | PASS. `pick_hdr_output` and `resolve_swapchain`. A picker that ignores the force and keeps HDR10 fails |
+| `output_pick` | = 0 mismatches | Linux: HDR10, else scRGB, else SDR. Windows: scRGB, else HDR10, else SDR. macOS: first listed HDR pair, else SDR. Potato and Low force SDR. An asked HDR pair that is not listed is SDR | PASS. `pick_hdr_output` and `resolve_swapchain`. Forcing HDR10 when it is not listed fails |
 | `agx_de` | ≤ 0.5 | max CIEDE2000 of `agx_rec709` against `AgX_LUT_Gen` sRGB-cube samples | PASS |
 | `agx_highlight` | outside `[0.998, 0.9995]` is 0 | power-2.4 code of linear 16. A hard clip to 1 fails | PASS |
 | `aces_ctl` | ≤ 1e−3 | `aces2_rec709` against Academy CTL `Output.Academy.Rec709-D65_100nit_in_Rec709-D65_sRGB-Piecewise` | NOT-IMPLEMENTED. The function returns `None` until that CTL is the body |

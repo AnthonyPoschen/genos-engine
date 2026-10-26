@@ -480,9 +480,17 @@ fn exposure_without_saturation(ev100: f64) -> f64 {
 }
 
 fn histogram_error(meter: fn(&[f64]) -> f64) -> f64 {
-    let mut samples = vec![0.18; 1000];
-    samples.push(10_000.0);
-    (meter(&samples) - spec_ev(0.18)).abs()
+    let mut one = vec![0.18; 1000];
+    one.push(10_000.0);
+    // Nine percent of the samples are the sun. That sits inside the top 10%
+    // the meter drops, so the body stays on 0.18. Without the drop it moves
+    // by more than a stop.
+    let mut heavy = vec![0.18; 910];
+    heavy.extend(std::iter::repeat_n(10_000.0, 90));
+    let grey = spec_ev(0.18);
+    (meter(&one) - grey)
+        .abs()
+        .max((meter(&heavy) - grey).abs())
 }
 
 fn mean_ev(samples: &[f64]) -> f64 {
@@ -748,6 +756,32 @@ fn force_sdr_misses(
     ];
     for (host, output, force, want) in cases {
         if chooser(host, &both, output, force) != want {
+            wrong += 1.0;
+        }
+    }
+    // HDR was asked and that pair is not listed. The result is SDR, not the
+    // missing mode and not the other HDR pair that happens to be listed.
+    let sdr_only = [ListedFormat {
+        format: FORMAT_BGRA8,
+        color_space: COLOR_SPACE_SRGB,
+    }];
+    let scrgb_only = [
+        ListedFormat {
+            format: FORMAT_R16F,
+            color_space: COLOR_SPACE_SCRGB,
+        },
+        ListedFormat {
+            format: FORMAT_BGRA8,
+            color_space: COLOR_SPACE_SRGB,
+        },
+    ];
+    let unlisted = [
+        (PresentHost::Linux, &sdr_only[..], OutputMode::Hdr10),
+        (PresentHost::Linux, &scrgb_only[..], OutputMode::Hdr10),
+        (PresentHost::Windows, &sdr_only[..], OutputMode::Scrgb),
+    ];
+    for (host, list, output) in unlisted {
+        if chooser(host, list, output, false) != HdrSwapchain::Sdr {
             wrong += 1.0;
         }
     }
