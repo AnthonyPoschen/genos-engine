@@ -32,8 +32,7 @@ pub use emitters::{
 };
 pub use mips::{mip_chain, normal_from_bytes, Mip, MipSpace};
 pub use pages::{
-    miss_colour, mib_f32, plan_residency, resident_bytes, HotReload, ImageChain, MaterialWatch,
-    ResidencyPlan,
+    miss_colour, mib_f32, HotReload, MaterialWatch,
 };
 pub use error::LoadError;
 pub use gltf::{
