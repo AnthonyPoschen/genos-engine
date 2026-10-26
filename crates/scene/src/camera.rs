@@ -623,8 +623,11 @@ mod tests {
         };
         let display_w = 320.0_f32;
         let display_h = 180.0_f32;
-        let lit_w = (display_w * (1.0 + guard.left + guard.right)).round() as u32;
-        let lit_h = (display_h * (1.0 + guard.top + guard.bottom)).round() as u32;
+        // 320 * 1.3 and 180 * 1.3. Both products are exact.
+        let lit_w = 416u32;
+        let lit_h = 234u32;
+        assert!((display_w * (1.0 + guard.left + guard.right) - 416.0).abs() < 1.0e-3);
+        assert!((display_h * (1.0 + guard.top + guard.bottom) - 234.0).abs() < 1.0e-3);
         let px = guard.left * display_w + display_w + 4.0;
         let py = guard.top * display_h + display_h * 0.5;
         let dir = lit_pixel_dir(&camera, aspect, guard, lit_w, lit_h, px, py).unwrap_or([0.0, 0.0, -1.0]);
