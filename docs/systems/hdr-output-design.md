@@ -312,6 +312,7 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | `agx_highlight` | outside `[0.998, 0.9995]` is 0 | power-2.4 code of linear 16. A hard clip to 1 fails | PASS |
 | `aces_ctl` | ≤ 1e−3 | `aces2_rec709` against Academy CTL `Output.Academy.Rec709-D65_100nit_in_Rec709-D65_sRGB-Piecewise` | NOT-IMPLEMENTED. The function returns `None` until that CTL is the body |
 | `pq_st2084` | ≤ 1e−7 | `pq_st2084` at 0, 100, 203, 1000, and 10000 nits against the ST 2084 inverse EOTF | PASS. Zero nits is `c1^m2`, not a hard 0 |
+| `scrgb_code` | = 2.5375 | `scrgb_code(203)` against the literal 2.5375. The expected code is not recomputed as `203/80` | PASS. An 80-nit paper white (`80/80`) fails |
 | `post_ms_device` | ≤ 1.50 | measured High post milliseconds on the 4070 at 1440p | NOT-IMPLEMENTED |
 | `post_vram_device` | ≤ 96 | measured post allocation, MiB | NOT-IMPLEMENTED |
 
@@ -369,7 +370,7 @@ cargo test -p genos-render --test hdr_output_gate -- --out genos-debug/hdr-outpu
 
 The test prints one line per metric (`LIVE` or `PROOF`, name, value, threshold, status) and writes `live.json`, `proof-good.json`, and `proof-broken.json`. `PROOF` known-good must be `PASS`. `PROOF` broken must be `FAIL`. A live `FAIL`, or a proof line on the wrong side, exits non-zero. There is no GPU and no window. Lavapipe is not involved.
 
-The broken fixtures are deliberate: a peak clamped to 1, a grade of display-encoded bytes, an exposure scale that drops the `1.2`, a meter that averages the sun in, an exposure that steps by 0.05 a frame, an adaptor that snaps past the target, a camera scale that drops the `1.2`, bloom weights that sum to 2, a box filter on the firefly, a threshold bloom, a picker that always returns SDR, a near-field error, a 10% pop, AgX replaced by white, a highlight clipped to 1, an ACES channel 0.2 off, PQ replaced by `nits/10000`, and device budgets of 500 MiB and 5 ms. Those device lines are comparator fixtures. They are not a 4070 measurement.
+The broken fixtures are deliberate: a peak clamped to 1, a grade of display-encoded bytes, an exposure scale that drops the `1.2`, a meter that averages the sun in, an exposure that steps by 0.05 a frame, an adaptor that snaps past the target, a camera scale that drops the `1.2`, bloom weights that sum to 2, a box filter on the firefly, a threshold bloom, a picker that always returns SDR, a near-field error, a 10% pop, AgX replaced by white, a highlight clipped to 1, an ACES channel 0.2 off, PQ replaced by `nits/10000`, an 80-nit paper white (`80/80` instead of `scrgb_code(203) = 2.5375`), and device budgets of 500 MiB and 5 ms. Those device lines are comparator fixtures. They are not a 4070 measurement.
 
 ### Gates that wait for a phase
 

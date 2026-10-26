@@ -13,9 +13,9 @@
 use genos_render::{
     aces2_rec709, agx_rec709, bloom_downsample, bloom_downsample_weight_sum, bloom_upsample,
     bloom_upsample_weight_sum, ev100_from_luminance, exposure_from_camera, exposure_from_ev100,
-    histogram_ev100, linear_from_display, pick_hdr_output, pq_st2084, tone, HdrSwapchain,
-    ListedFormat, PresentHost, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB, COLOR_SPACE_SRGB,
-    FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
+    histogram_ev100, linear_from_display, pick_hdr_output, pq_st2084, scrgb_code, tone,
+    HdrSwapchain, ListedFormat, PresentHost, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB,
+    COLOR_SPACE_SRGB, FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
 };
 
 use std::path::{Path, PathBuf};
@@ -30,6 +30,8 @@ const AGX_DE_MAX: f64 = 0.5;
 const AGX_CODE_MAX: f64 = 0.0;
 const ACES_MAX: f64 = 1e-3;
 const PQ_MAX: f64 = 1e-7;
+/// Literal scRGB code of 203 nits. Not `203/80`, so a shared divisor cannot pass itself.
+const SCRGB_WHITE: f64 = 2.5375;
 const PEAK_MAX: f64 = 0.0025;
 const GRADE_MAX: f64 = 0.02;
 const LINEAR_MIN: f64 = 1.5;
@@ -158,6 +160,7 @@ enum Status {
 enum Compare {
     AtMost,
     AtLeast,
+    Equal,
 }
 
 struct Metric {
@@ -249,6 +252,7 @@ fn live_metrics() -> Vec<Metric> {
         ),
         aces_row(aces2_rec709([1.0, 1.0, 1.0])),
         at_most("pq_st2084", pq_error(pq_st2084), PQ_MAX),
+        equal("scrgb_code", scrgb_code(203.0), SCRGB_WHITE),
         not_implemented("post_ms_device", DEVICE_MS_MAX, Compare::AtMost),
         not_implemented("post_vram_device", DEVICE_VRAM_MAX, Compare::AtMost),
     ]
@@ -308,6 +312,7 @@ fn proof_good() -> Vec<Metric> {
             ACES_MAX,
         ),
         at_most("pq_st2084", pq_error(pq_st2084), PQ_MAX),
+        equal("scrgb_code", scrgb_code(203.0), SCRGB_WHITE),
         at_most("post_ms_device", 0.40, DEVICE_MS_MAX),
         at_most("post_vram_device", 37.5, DEVICE_VRAM_MAX),
     ]
@@ -363,6 +368,7 @@ fn proof_broken() -> Vec<Metric> {
             ACES_MAX,
         ),
         at_most("pq_st2084", pq_error(|nits| nits / 10_000.0), PQ_MAX),
+        equal("scrgb_code", eighty_nit_paper_white(203.0), SCRGB_WHITE),
         at_most("post_ms_device", 5.0, DEVICE_MS_MAX),
         at_most("post_vram_device", 4_000.0, DEVICE_VRAM_MAX),
     ]
@@ -373,6 +379,30 @@ fn aces_row(formed: Option<[f64; 3]>) -> Metric {
         Some(rgb) => at_most("aces_ctl", channel_error(rgb, [0.0, 0.0, 0.0]), ACES_MAX),
         None => not_implemented("aces_ctl", ACES_MAX, Compare::AtMost),
     }
+}
+
+fn equal(name: &'static str, value: f64, threshold: f64) -> Metric {
+    let status = if value.is_finite() && value.to_bits() == threshold.to_bits() {
+        Status::Pass
+    } else {
+        Status::Fail
+    };
+    Metric {
+        name,
+        value: Some(value),
+        threshold,
+        compare: Compare::Equal,
+        status,
+    }
+}
+
+/// Mutation: paper white is 80 nits, so the code is `80 / 80`.
+#[allow(
+    clippy::eq_op,
+    reason = "the broken proof divides an 80-nit paper white by 80 and must not equal 2.5375"
+)]
+fn eighty_nit_paper_white(_nits: f64) -> f64 {
+    80.0 / 80.0
 }
 
 fn at_most(name: &'static str, value: f64, threshold: f64) -> Metric {
@@ -888,6 +918,7 @@ fn format_metric(metric: &Metric) -> String {
     let op = match metric.compare {
         Compare::AtMost => "<=",
         Compare::AtLeast => ">=",
+        Compare::Equal => "==",
     };
     format!(
         "{} {value} {op}{} {}",
@@ -945,6 +976,7 @@ fn json_metric(metric: &Metric) -> String {
     let compare = match metric.compare {
         Compare::AtMost => "at_most",
         Compare::AtLeast => "at_least",
+        Compare::Equal => "equal",
     };
     format!(
         "{{\"name\":\"{}\",\"value\":{value},\"threshold\":{:.8},\"compare\":\"{compare}\",\"status\":\"{}\"}}",
