@@ -639,10 +639,12 @@ impl Renderer {
         self.gpu.read_frame_columns()
     }
 
-    /// CPU integral of the view the last frame dispatch built. Empty when it did not dispatch.
+    /// CPU shadowed integral of the view the last frame dispatch built.
+    ///
+    /// `scene` is the scene that frame drew. Empty when that frame did not dispatch.
     #[must_use]
-    pub fn frame_fog_reference(&self) -> Vec<crate::fog::FogColumn> {
-        self.gpu.frame_fog_reference()
+    pub fn frame_fog_reference(&self, scene: &genos_scene::Scene) -> Vec<crate::fog::FogColumn> {
+        self.gpu.frame_fog_reference(scene)
     }
 
     /// One compute pass over the resident occluders. This does not present and does not upload them.

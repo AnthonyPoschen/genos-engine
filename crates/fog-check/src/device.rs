@@ -86,7 +86,8 @@ fn grade_frame(renderer: &mut Renderer) -> Result<(f64, f64), String> {
         .draw(&on_world, &camera, true)?
         .unwrap_or_default();
     let columns = renderer.frame_fog_columns()?;
-    let reference = renderer.frame_fog_reference();
+    let scene = composed_frame_scene(true);
+    let reference = renderer.frame_fog_reference(&scene);
     let column = column_peak(&columns, &reference);
     let off_world = World::from_scene(composed_frame_scene(false));
     let off = renderer

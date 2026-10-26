@@ -462,6 +462,19 @@ fn empty_scene() -> Scene {
     }
 }
 
+/// Shadowed column integral. Sun and lamp visibility use `trace::sees`.
+#[must_use]
+pub fn integrate_traced(
+    settings: &FogSettings,
+    view: &FogView,
+    size: GridSize,
+    sun: DirectSun,
+    lamps: &[FogPointLamp],
+    scene: &Scene,
+) -> Vec<FogColumn> {
+    integrate_lit(settings, view, size, sun, lamps, scene, true)
+}
+
 fn integrate_lit(
     settings: &FogSettings,
     view: &FogView,

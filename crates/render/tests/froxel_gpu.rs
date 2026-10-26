@@ -122,7 +122,7 @@ fn a_low_preset_frame_dispatches_the_froxel() {
     assert!(probe.vram_bytes > 0, "frame vram was 0");
     assert!(probe.pass_ms.is_finite() && probe.pass_ms > 0.0);
     let columns = renderer.frame_fog_columns().expect("frame columns");
-    let reference = renderer.frame_fog_reference();
+    let reference = renderer.frame_fog_reference(&scene);
     let err = column_peak(&columns, &reference);
     assert!(
         err <= f64::from(COLUMN_ABS),

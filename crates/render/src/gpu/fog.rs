@@ -9,11 +9,10 @@ use genos_scene::{Camera, FogSettings, FogShape, Light, LightingPreset, Scene};
 
 use super::{check, read_f32s, tick_delta, Buffer, Gpu, Handle, Image, Memory};
 use crate::fog::{
-    default_frame_sun, frame_fog_view, grid_size, integrate_unshadowed, normalize, DirectSun,
-    FogColumn, FogView, GridSize,
+    default_frame_sun, frame_fog_view, grid_size, normalize, DirectSun, FogColumn, FogView, GridSize,
 };
 use crate::fog_budget::allocation_bytes;
-use crate::fog_pass::{FogDispatch, FogGpu, FogPointLamp, FOG_SKIP_SHADOW};
+use crate::fog_pass::{integrate_traced, FogDispatch, FogGpu, FogPointLamp, FOG_SKIP_SHADOW};
 use crate::pack::{self, SCENE_TAIL};
 
 const MAX_VOLUMES: usize = 8;
@@ -29,6 +28,7 @@ pub(super) struct FrameJob {
     settings: FogSettings,
     view: FogView,
     sun: DirectSun,
+    lamps: Vec<crate::fog_pass::FogPointLamp>,
 }
 
 pub(super) struct Targets {
@@ -76,6 +76,7 @@ impl Gpu {
             settings: scene.fog.clone(),
             view,
             sun,
+            lamps,
         });
     }
 
@@ -108,8 +109,8 @@ impl Gpu {
         Ok(columns_from(&floats))
     }
 
-    /// CPU integral of the view the last frame dispatch built.
-    pub(super) fn frame_fog_reference(&self) -> Vec<FogColumn> {
+    /// CPU shadowed integral of the view the last frame dispatch built.
+    pub(super) fn frame_fog_reference(&self, scene: &Scene) -> Vec<FogColumn> {
         if !self.froxel_wrote {
             return Vec::new();
         }
@@ -121,7 +122,7 @@ impl Gpu {
             height: job.height,
             slices: job.slices,
         };
-        integrate_unshadowed(&job.settings, &job.view, size, job.sun)
+        integrate_traced(&job.settings, &job.view, size, job.sun, &job.lamps, scene)
     }
 
     /// Compose reads `pad0`. A frame that did not dispatch leaves it at 0.
@@ -1423,6 +1424,7 @@ impl FrameJob {
             settings: self.settings.clone(),
             view: self.view,
             sun: self.sun,
+            lamps: self.lamps.clone(),
         })
     }
 }
