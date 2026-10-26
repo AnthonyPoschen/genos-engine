@@ -5382,7 +5382,6 @@ impl Gpu {
     }
 
     /// Poll the transfer fence, refresh the budget, and admit what the frame can hold.
-    /// Does not call wait_for_fences or queue_wait_idle.
     fn tick_materials(
         &mut self,
         accounted: u64,
@@ -5517,8 +5516,7 @@ impl Gpu {
         status == VK_SUCCESS
     }
 
-    /// Copy staging mip bytes into device images. The fence is polled later.
-    /// Does not call wait_for_fences or queue_wait_idle.
+    /// Copy staging mip bytes into device images. The fence is polled on the next tick.
     fn submit_transfer(&mut self) -> Result<(), String> {
         let due = self.uncopied_pages();
         if due.is_empty() || self.transfer_cmd.is_null() || self.transfer_fence.is_null() {

@@ -27,7 +27,9 @@
 //! shade.
 //!
 //! The good case also runs the broken shade and exits 2 if that shade would
-//! pass a shade metric, or if a path that is not in the tree comes back as PASS.
+//! pass a shade metric. Streaming rows grade the streamer, so they pass on
+//! the broken shade. A path that is not in the tree comes back as
+//! NOT-IMPLEMENTED.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -79,7 +81,7 @@ const SHADE_MAT: usize = 0;
 const BRIGHT_MAT: usize = 2;
 const METAL_MAT: usize = 3;
 
-const MUST_FAIL: [&str; 18] = [
+const MUST_FAIL: [&str; 10] = [
     "shade_albedo",
     "shade_emissive",
     "srgb_decode",
@@ -90,6 +92,11 @@ const MUST_FAIL: [&str; 18] = [
     "roughness_from_g",
     "mip_chain",
     "hot_reload_frames",
+];
+
+/// Streaming rows grade [`genos_load::gate_rows`]. The broken shade does not
+/// touch that code, so these pass on both readers. A logic change fails them.
+const STREAM_METRICS: [&str; 10] = [
     "budget_recover",
     "upload_refused",
     "oom_recover",
@@ -98,6 +105,8 @@ const MUST_FAIL: [&str; 18] = [
     "ultra_near",
     "slow_bus",
     "thrash",
+    "evict_order",
+    "fence",
 ];
 
 /// Measured from the loaded file or from `from_gltf`, not from the broken shade.
@@ -315,7 +324,7 @@ fn evaluate(reader: Reader, scene: &GltfScene) -> Result<Vec<Metric>, String> {
         return Err("fixture has no mesh".to_string());
     }
     let mesh = BakeMesh::from_gltf(scene, 0);
-    let gates = gate_rows(matches!(reader, Reader::Bake));
+    let gates = gate_rows();
     let albedo = colour_error(reader, scene, &mesh, Colour::Albedo)?;
     let emissive = colour_error(reader, scene, &mesh, Colour::Emissive)?;
     Ok(vec![
@@ -386,6 +395,8 @@ fn evaluate(reader: Reader, scene: &GltfScene) -> Result<Vec<Metric>, String> {
         measured("ultra_near", gates.ultra_near, 0.0),
         measured("slow_bus", gates.slow_bus, 0.0),
         measured("thrash", gates.thrash, 0.0),
+        measured("evict_order", gates.evict_order, 0.0),
+        measured("fence", gates.fence, 0.0),
         pending("gbuffer_ms", GBUFFER_MS, "no GPU timing in this gate"),
     ])
 }
@@ -403,7 +414,10 @@ fn broken_is_wrong(metrics: &[Metric]) -> Option<String> {
         }
     }
     for metric in metrics {
-        if MUST_FAIL.contains(&metric.name) || FILE_METRICS.contains(&metric.name) {
+        if MUST_FAIL.contains(&metric.name)
+            || FILE_METRICS.contains(&metric.name)
+            || STREAM_METRICS.contains(&metric.name)
+        {
             if metric.value.is_none() {
                 return Some(format!("gate_self_check {} was not measured", metric.name));
             }

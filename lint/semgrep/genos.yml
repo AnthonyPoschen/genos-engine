@@ -109,6 +109,29 @@ rules:
       date: "2026-10-14"
     pattern-regex: '"(HDMI-A-1|DP-1)"'
 
+  - id: genos-stream-no-wait
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      tick_materials and submit_transfer poll the transfer fence. They do not
+      call wait_for_fences, queue_wait_idle, or the Vulkan wait and idle entry
+      points.
+    metadata:
+      date: "2026-10-26"
+    pattern-either:
+      - patterns:
+          - pattern-inside: |
+              fn tick_materials(...) {
+                ...
+              }
+          - pattern-regex: 'wait_for_fences|queue_wait_idle|vkWaitForFences|vkQueueWaitIdle|wait_fences|idle_device|device_wait'
+      - patterns:
+          - pattern-inside: |
+              fn submit_transfer(...) {
+                ...
+              }
+          - pattern-regex: 'wait_for_fences|queue_wait_idle|vkWaitForFences|vkQueueWaitIdle|wait_fences|idle_device|device_wait'
+
   - id: genos-no-hyprctl
     languages: [rust]
     severity: ERROR

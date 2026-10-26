@@ -137,30 +137,6 @@ pub struct PendingCopy {
     pub bytes: u64,
 }
 
-/// Faults a broken reader turns on, one scenario at a time.
-#[derive(Clone, Copy, Debug, Default)]
-struct Faults {
-    bits: u8,
-}
-
-const FAULT_HIDE: u8 = 1;
-const FAULT_QUALITY: u8 = 1 << 1;
-const FAULT_OVERFLOW: u8 = 1 << 2;
-const FAULT_SKIP_EVICT: u8 = 1 << 3;
-const FAULT_DWELL: u8 = 1 << 4;
-const FAULT_STALL: u8 = 1 << 5;
-const FAULT_HOLE: u8 = 1 << 6;
-
-impl Faults {
-    fn has(self, bit: u8) -> bool {
-        self.bits & bit != 0
-    }
-
-    fn set(&mut self, bit: u8) {
-        self.bits |= bit;
-    }
-}
-
 /// The resident set for one scene.
 pub struct Streamer {
     textures: Vec<Tex>,
@@ -171,14 +147,17 @@ pub struct Streamer {
     bias: f32,
     dwell: u32,
     rate: u64,
+    /// Bytes `admit` handed to `load` on the last step.
+    last_admit: u64,
     frame_ms: f32,
     refused: u32,
     evictions: u32,
     thrash: u32,
     holes: u32,
+    /// Victims in eviction order: texture index, then mip level.
+    evicted: Vec<(usize, u32)>,
     meter: BusMeter,
-    faults: Faults,
-    /// The transfer fence has signaled. The gate leaves this true.
+    /// The transfer fence has signaled. Completions wait on this.
     transfer_ready: bool,
 }
 
@@ -194,13 +173,14 @@ impl Streamer {
             bias,
             dwell,
             rate: 0,
+            last_admit: 0,
             frame_ms: 0.0,
             refused: 0,
             evictions: 0,
             thrash: 0,
             holes: 0,
+            evicted: Vec::new(),
             meter: BusMeter::new(),
-            faults: Faults::default(),
             transfer_ready: true,
         }
     }
@@ -233,6 +213,25 @@ impl Streamer {
         self.textures.clear();
         self.pending.clear();
         self.committed = 0;
+        self.evicted.clear();
+    }
+
+    /// Bytes per millisecond of the slowest measured path.
+    #[must_use]
+    pub fn bytes_per_ms(&self) -> u64 {
+        self.meter.bytes_per_ms()
+    }
+
+    /// Bytes admitted on the last step, after the sustainable cap.
+    #[must_use]
+    pub fn last_admit(&self) -> u64 {
+        self.last_admit
+    }
+
+    /// Eviction victims in the order they were dropped.
+    #[must_use]
+    pub fn evicted(&self) -> &[(usize, u32)] {
+        &self.evicted
     }
 
     #[must_use]
@@ -242,9 +241,9 @@ impl Streamer {
 
     #[must_use]
     pub fn level_count(&self, index: usize) -> u32 {
-        self.textures.get(index).map_or(0, |tex| {
-            u32::try_from(tex.levels.len()).unwrap_or(0)
-        })
+        self.textures
+            .get(index)
+            .map_or(0, |tex| u32::try_from(tex.levels.len()).unwrap_or(0))
     }
 
     /// True when the mip is sampled. An in-flight page is not.
@@ -382,14 +381,8 @@ impl Streamer {
         self.frame = self.frame.saturating_add(1);
         self.complete_uploads();
         self.apply_views(views);
-        if self.faults.has(FAULT_HIDE) {
-            self.evict_hidden();
-        }
-        if !self.faults.has(FAULT_SKIP_EVICT) {
-            self.evict_pressure(budget);
-        }
-        let demand = self.bytes_wanted();
-        let admit = self.admit(base_ms, frame_budget_ms, demand);
+        self.evict_pressure(budget);
+        let admit = self.admit(base_ms, frame_budget_ms);
         self.load(budget, admit);
         self.count_sample_holes();
     }
@@ -397,10 +390,6 @@ impl Streamer {
     /// Drop the lowest-priority mip. Used when a texture allocation returns
     /// out-of-device-memory. Returns false when nothing is left to drop.
     pub fn evict_for_oom(&mut self) -> bool {
-        if self.faults.has(FAULT_HOLE) {
-            self.holes = self.holes.saturating_add(1);
-            return false;
-        }
         self.evict_one(true)
     }
 
@@ -418,13 +407,15 @@ impl Streamer {
             let Some(derivatives) = view.derivatives else {
                 continue;
             };
-            let floor = if self.faults.has(FAULT_QUALITY) {
-                0
-            } else {
-                self.quality_floor
-            };
             let levels = u32::try_from(tex.levels.len()).unwrap_or(0);
-            tex.demand = wanted_mip(tex.width, tex.height, derivatives, self.bias, floor, levels);
+            tex.demand = wanted_mip(
+                tex.width,
+                tex.height,
+                derivatives,
+                self.bias,
+                self.quality_floor,
+                levels,
+            );
             let rho = texel_rho(tex.width, tex.height, derivatives);
             tex.importance = if rho > 0.0 { 1.0 / rho } else { 1.0e6 };
         }
@@ -461,24 +452,6 @@ impl Streamer {
         }
     }
 
-    fn evict_hidden(&mut self) {
-        let mut victims = Vec::new();
-        for (index, tex) in self.textures.iter().enumerate() {
-            if tex.visible {
-                continue;
-            }
-            let last = tex.levels.len().saturating_sub(1);
-            for (level, mip) in tex.levels.iter().enumerate() {
-                if mip.resident && level != last {
-                    victims.push((index, u32::try_from(level).unwrap_or(0)));
-                }
-            }
-        }
-        for (index, level) in victims {
-            self.drop_level(index, level);
-        }
-    }
-
     fn evict_pressure(&mut self, budget: &Budget) {
         let mut left = EVICT_PER_FRAME;
         while self.committed > budget.texture_target() && left > 0 {
@@ -511,7 +484,7 @@ impl Streamer {
                 if coarsest && !critical {
                     continue;
                 }
-                if !critical && !self.faults.has(FAULT_DWELL) {
+                if !critical {
                     let age = self.frame.saturating_sub(mip.loaded_at);
                     if age < u64::from(self.dwell) {
                         continue;
@@ -555,37 +528,14 @@ impl Streamer {
         mip.evicted_at = self.frame;
         self.committed = self.committed.saturating_sub(mip.bytes);
         self.evictions = self.evictions.saturating_add(1);
+        self.evicted.push((index, level));
     }
 
-    fn bytes_wanted(&self) -> u64 {
-        let mut sum = 0u64;
-        for tex in &self.textures {
-            let have = committed_finest(tex);
-            if have <= tex.demand {
-                continue;
-            }
-            let next = usize::try_from(have - 1).unwrap_or(0);
-            if let Some(level) = tex.levels.get(next) {
-                if !level.resident && !level.inflight {
-                    sum = sum.saturating_add(level.bytes);
-                }
-            }
-        }
-        sum
-    }
-
-    fn admit(&mut self, base_ms: f32, frame_budget_ms: f32, demand: u64) -> u64 {
+    fn admit(&mut self, base_ms: f32, frame_budget_ms: f32) -> u64 {
         let per = self.meter.bytes_per_ms().max(1);
         let leftover = frame_budget_ms - base_ms;
         let leftover_ms = floor_nonneg(if leftover > 0.0 { leftover } else { 0.0 });
         let sustainable = per.saturating_mul(u64::from(leftover_ms));
-        if self.faults.has(FAULT_STALL) {
-            let extra = demand / per;
-            let extra_ms = u32::try_from(extra).unwrap_or(u32::MAX);
-            self.frame_ms = base_ms + u32_to_f32(extra_ms);
-            self.rate = demand;
-            return demand;
-        }
         self.frame_ms = base_ms;
         if base_ms > frame_budget_ms {
             self.rate = (self.rate / 2).max(1);
@@ -596,7 +546,9 @@ impl Streamer {
             let cap = sustainable.max(1);
             self.rate = grown.min(cap).max(1);
         }
-        self.rate.min(sustainable)
+        let admit = self.rate.min(sustainable);
+        self.last_admit = admit;
+        admit
     }
 
     fn load(&mut self, budget: &Budget, mut admit: u64) {
@@ -624,7 +576,7 @@ impl Streamer {
                 if bytes > admit {
                     continue;
                 }
-                if !budget.admits(self.committed, bytes) && !self.faults.has(FAULT_OVERFLOW) {
+                if !budget.admits(self.committed, bytes) {
                     self.refused = self.refused.saturating_add(1);
                     continue;
                 }
@@ -798,13 +750,10 @@ fn far_derivatives(width: u32) -> Derivatives {
 const BASE_MS: f32 = 8.0;
 const FRAME_BUDGET_MS: f32 = 16.0;
 
-/// Frames until a shrink sits under the target. The broken reader does not evict.
+/// Frames until a shrink sits under the target. Staying over the line is a miss.
 #[must_use]
-pub fn budget_recover(live: bool) -> f32 {
+pub fn budget_recover() -> f32 {
     let mut stream = Streamer::new(0, 0.0, DEFAULT_DWELL);
-    if !live {
-        stream.faults.set(FAULT_SKIP_EVICT);
-    }
     for _ in 0..4 {
         stream.add_texture(1024, 1024, &[mb(512), mb(128), mb(32)]);
     }
@@ -834,11 +783,8 @@ pub fn budget_recover(live: bool) -> f32 {
 
 /// 0 when an overflowing upload is refused.
 #[must_use]
-pub fn upload_refused(live: bool) -> f32 {
+pub fn upload_refused() -> f32 {
     let mut stream = Streamer::new(0, 0.0, DEFAULT_DWELL);
-    if !live {
-        stream.faults.set(FAULT_OVERFLOW);
-    }
     stream.add_texture(1024, 1024, &[mb(200), mb(10)]);
     flood(&mut stream);
     let budget = budget_of(400);
@@ -850,31 +796,22 @@ pub fn upload_refused(live: bool) -> f32 {
     }];
     stream.step(&budget, &views, BASE_MS, FRAME_BUDGET_MS);
     let over = stream.committed() > budget.texture_target();
-    if live {
-        if stream.refused() > 0 && !over {
-            0.0
-        } else {
-            1.0
-        }
-    } else if over {
-        1.0
-    } else {
+    if stream.refused() > 0 && !over {
         0.0
+    } else {
+        1.0
     }
 }
 
 /// 0 when a device OOM evicts, retries, and leaves no hole.
 #[must_use]
-pub fn oom_recover(live: bool) -> f32 {
+pub fn oom_recover() -> f32 {
     let mut stream = Streamer::new(0, 0.0, DEFAULT_DWELL);
     stream.add_texture(64, 64, &[100, 10]);
     stream.textures[0].levels[0].resident = true;
     stream.textures[0].levels[0].loaded_at = 0;
     stream.committed = stream.committed.saturating_add(100);
     stream.frame = u64::from(DEFAULT_DWELL) + 1;
-    if !live {
-        stream.faults.set(FAULT_HOLE);
-    }
     let mut attempts = 0u32;
     let result = retry_device_alloc(
         || {
@@ -891,7 +828,7 @@ pub fn oom_recover(live: bool) -> f32 {
     let sampled = stream.sample(0, 0);
     let hole = stream.holes() > 0
         || matches!(sampled, Sampled::Mip(level) if stream.textures[0].levels[usize::try_from(level).unwrap_or(0)].inflight);
-    if live && result.is_ok() && !hole && matches!(sampled, Sampled::Mip(_)) {
+    if result.is_ok() && !hole && matches!(sampled, Sampled::Mip(_)) {
         0.0
     } else {
         1.0
@@ -900,11 +837,8 @@ pub fn oom_recover(live: bool) -> f32 {
 
 /// Evictions during a spin while the budget has room.
 #[must_use]
-pub fn spin_evict(live: bool) -> f32 {
+pub fn spin_evict() -> f32 {
     let mut stream = Streamer::new(0, 0.0, DEFAULT_DWELL);
-    if !live {
-        stream.faults.set(FAULT_HIDE);
-    }
     stream.add_texture(256, 256, &[1000, 100]);
     stream.add_texture(256, 256, &[1000, 100]);
     fast(&mut stream);
@@ -934,13 +868,11 @@ pub fn spin_evict(live: bool) -> f32 {
     u32_to_f32(stream.evictions().saturating_sub(before))
 }
 
-/// Resident mips finer than `texture_quality`.
+/// Resident or in-flight mips finer than `texture_quality`.
 #[must_use]
-pub fn quality_cap(live: bool) -> f32 {
-    let mut stream = Streamer::new(2, 0.0, DEFAULT_DWELL);
-    if !live {
-        stream.faults.set(FAULT_QUALITY);
-    }
+pub fn quality_cap() -> f32 {
+    let floor = 2u32;
+    let mut stream = Streamer::new(floor, 0.0, DEFAULT_DWELL);
     stream.add_texture(512, 512, &[8, 4, 2, 1, 1]);
     fast(&mut stream);
     let budget = budget_of(8192);
@@ -957,18 +889,17 @@ pub fn quality_cap(live: bool) -> f32 {
         .levels
         .iter()
         .enumerate()
-        .filter(|(level, mip)| *level < 2 && (mip.resident || mip.inflight))
+        .filter(|(level, mip)| {
+            u32::try_from(*level).unwrap_or(floor) < floor && (mip.resident || mip.inflight)
+        })
         .count();
     u32::try_from(over).map_or(1.0, u32_to_f32)
 }
 
 /// Ultra on a small heap and a fast bus: the near mip is full, the far one is not.
 #[must_use]
-pub fn ultra_near(live: bool) -> f32 {
+pub fn ultra_near() -> f32 {
     let mut stream = Streamer::new(0, 0.0, DEFAULT_DWELL);
-    if !live {
-        stream.quality_floor = 2;
-    }
     stream.add_texture(1024, 1024, &[mb(32), mb(8), mb(2)]);
     stream.add_texture(1024, 1024, &[mb(32), mb(8), mb(2)]);
     fast(&mut stream);
@@ -1000,81 +931,200 @@ pub fn ultra_near(live: bool) -> f32 {
     }
 }
 
-/// A slow bus lowers the admit. The frame time stays on the graphics budget.
+/// Overrun halves the rate, headroom grows it, and the admit stays under
+/// `bytes_per_ms * leftover_ms` computed from the meter, not from `rate`.
 #[must_use]
-pub fn slow_bus(live: bool) -> f32 {
-    let mut slow = Streamer::new(0, 0.0, DEFAULT_DWELL);
-    let mut fast_stream = Streamer::new(0, 0.0, DEFAULT_DWELL);
-    if !live {
-        slow.faults.set(FAULT_STALL);
-    }
-    slow.add_texture(4096, 4096, &[1_000_000, 1]);
-    fast_stream.add_texture(4096, 4096, &[1_000_000, 1]);
-    slow.observe_disk(1_000, 1);
-    slow.observe_decode(1_000, 1);
-    slow.observe_transfer(1_000, 1);
-    let fast_bytes = 1_000_000u64;
-    fast_stream.observe_disk(fast_bytes, 1);
-    fast_stream.observe_decode(fast_bytes, 1);
-    fast_stream.observe_transfer(fast_bytes, 1);
+pub fn slow_bus() -> f32 {
+    let mut stream = Streamer::new(0, 0.0, 0);
+    stream.add_texture(64, 64, &[4_000, 10]);
+    let per = 1_000u64;
+    stream.observe_disk(per, 1);
+    stream.observe_decode(per, 1);
+    stream.observe_transfer(per, 1);
     let budget = budget_of(8192);
-    let views = [TextureView {
-        index: 0,
-        distance: 1.0,
-        visible: true,
-        derivatives: Some(near_derivatives(4096)),
-    }];
-    slow.step(&budget, &views, BASE_MS, FRAME_BUDGET_MS);
-    fast_stream.step(&budget, &views, BASE_MS, FRAME_BUDGET_MS);
-    if slow.rate() < fast_stream.rate() && slow.frame_ms() <= FRAME_BUDGET_MS {
-        0.0
-    } else {
-        slow.frame_ms()
+    let views = [view_at(0, 1.0, near_derivatives(64))];
+    let mut faults = 0u32;
+    stream.step(&budget, &views, BASE_MS, FRAME_BUDGET_MS);
+    note_admit(&stream, BASE_MS, &mut faults);
+    stream.step(&budget, &views, BASE_MS, FRAME_BUDGET_MS);
+    note_admit(&stream, BASE_MS, &mut faults);
+    let established = stream.rate();
+    if established <= 1 {
+        return 4.0;
     }
+    let overrun = FRAME_BUDGET_MS + 4.0;
+    stream.step(&budget, &views, overrun, FRAME_BUDGET_MS);
+    note_admit(&stream, overrun, &mut faults);
+    let once = stream.rate();
+    if once != established / 2 {
+        faults = faults.saturating_add(1);
+    }
+    stream.step(&budget, &views, overrun, FRAME_BUDGET_MS);
+    note_admit(&stream, overrun, &mut faults);
+    let halved = stream.rate();
+    if halved != once / 2 {
+        faults = faults.saturating_add(1);
+    }
+    stream.step(&budget, &views, BASE_MS, FRAME_BUDGET_MS);
+    note_admit(&stream, BASE_MS, &mut faults);
+    let recovered = stream.rate();
+    if recovered <= halved || recovered >= established {
+        faults = faults.saturating_add(1);
+    }
+    u32_to_f32(faults)
 }
 
-/// Mips evicted and loaded again inside the dwell, during a spin.
+/// Thrash count for an A/B spin that only the dwell can hold still.
 #[must_use]
-pub fn spin_thrash(live: bool) -> f32 {
+pub fn spin_thrash() -> f32 {
     let mut stream = Streamer::new(0, 0.0, DEFAULT_DWELL);
-    if !live {
-        stream.faults.set(FAULT_HIDE);
-        stream.faults.set(FAULT_DWELL);
+    let levels = [40, 8, 2, 1];
+    stream.add_texture(64, 64, &levels);
+    stream.add_texture(64, 64, &levels);
+    flood(&mut stream);
+    let wide = byte_budget(1_000, 0);
+    let near = [
+        view_at(0, 1.0, near_derivatives(64)),
+        view_at(1, 1.0, near_derivatives(64)),
+    ];
+    stream.step(&wide, &near, BASE_MS, FRAME_BUDGET_MS);
+    stream.step(&wide, &near, BASE_MS, FRAME_BUDGET_MS);
+    let tight = byte_budget(130, 40);
+    if stream.committed() <= tight.texture_target() || tight.critical(stream.committed()) {
+        return 1_000.0;
     }
-    stream.add_texture(1024, 1024, &[mb(30), mb(2)]);
-    stream.add_texture(1024, 1024, &[mb(30), mb(2)]);
-    fast(&mut stream);
-    let budget = budget_of(300);
-    let look = |at_first: bool| {
-        [
-            TextureView {
-                index: 0,
-                distance: if at_first { 1.0 } else { 30.0 },
-                visible: at_first,
-                derivatives: at_first.then(|| near_derivatives(1024)),
-            },
-            TextureView {
-                index: 1,
-                distance: if at_first { 30.0 } else { 1.0 },
-                visible: !at_first,
-                derivatives: if at_first {
-                    Some(far_derivatives(1024))
-                } else {
-                    Some(near_derivatives(1024))
-                },
-            },
-        ]
-    };
-    stream.step(&budget, &look(true), BASE_MS, FRAME_BUDGET_MS);
-    stream.step(&budget, &look(true), BASE_MS, FRAME_BUDGET_MS);
-    stream.step(&budget, &look(false), BASE_MS, FRAME_BUDGET_MS);
-    stream.step(&budget, &look(false), BASE_MS, FRAME_BUDGET_MS);
-    stream.step(&budget, &look(true), BASE_MS, FRAME_BUDGET_MS);
-    stream.step(&budget, &look(true), BASE_MS, FRAME_BUDGET_MS);
+    let away = [
+        view_at(0, 30.0, far_derivatives(64)),
+        view_at(1, 1.0, near_derivatives(64)),
+    ];
+    let back = [
+        view_at(0, 1.0, near_derivatives(64)),
+        view_at(1, 30.0, far_derivatives(64)),
+    ];
+    stream.step(&tight, &away, BASE_MS, FRAME_BUDGET_MS);
+    stream.step(&tight, &back, BASE_MS, FRAME_BUDGET_MS);
+    stream.step(&tight, &away, BASE_MS, FRAME_BUDGET_MS);
     u32_to_f32(stream.thrash())
 }
 
-/// The eight gate rows. `live` is the engine. The other side is the broken reader.
+/// Mismatches against importance, then distance, then finer level.
+#[must_use]
+pub fn evict_order() -> f32 {
+    let mut stream = Streamer::new(0, 0.0, 0);
+    let levels = [32, 16, 8, 4, 2];
+    for _ in 0..3 {
+        stream.add_texture(64, 64, &levels);
+    }
+    flood(&mut stream);
+    let wide = byte_budget(10_000, 0);
+    let load = [
+        view_at(0, 1.0, near_derivatives(64)),
+        view_at(1, 1.0, near_derivatives(64)),
+        view_at(2, 1.0, near_derivatives(64)),
+    ];
+    stream.step(&wide, &load, BASE_MS, FRAME_BUDGET_MS);
+    stream.step(&wide, &load, BASE_MS, FRAME_BUDGET_MS);
+    let tight = byte_budget(400, 320);
+    if stream.committed() <= tight.texture_target() || tight.critical(stream.committed()) {
+        return 1_000.0;
+    }
+    let pressure = [
+        view_at(0, 100.0, rho_derivatives(64, 1.0)),
+        view_at(1, 5.0, rho_derivatives(64, 8.0)),
+        view_at(2, 1.0, rho_derivatives(64, 16.0)),
+    ];
+    for _ in 0..3 {
+        stream.step(&tight, &pressure, BASE_MS, FRAME_BUDGET_MS);
+        if stream.committed() <= tight.texture_target() {
+            break;
+        }
+    }
+    let expected = [(2usize, 0u32), (2, 1), (2, 2), (1, 0), (1, 1)];
+    u32_to_f32(sequence_mismatches(stream.evicted(), &expected))
+}
+
+/// Mips that became resident while the transfer fence was still pending.
+#[must_use]
+pub fn fence() -> f32 {
+    let mut stream = Streamer::new(0, 0.0, 0);
+    stream.add_texture(32, 32, &[1_000, 10]);
+    flood(&mut stream);
+    let budget = budget_of(8192);
+    let views = [view_at(0, 1.0, near_derivatives(32))];
+    stream.step(&budget, &views, BASE_MS, FRAME_BUDGET_MS);
+    if stream.is_resident(0, 0) {
+        return 1.0;
+    }
+    stream.set_transfer_ready(false);
+    let mut completed = 0u32;
+    for _ in 0..3 {
+        let before = stream.is_resident(0, 0);
+        stream.step(&budget, &views, BASE_MS, FRAME_BUDGET_MS);
+        if !before && stream.is_resident(0, 0) {
+            completed = completed.saturating_add(1);
+        }
+    }
+    u32_to_f32(completed)
+}
+
+fn view_at(index: usize, distance: f32, derivatives: Derivatives) -> TextureView {
+    TextureView {
+        index,
+        distance,
+        visible: true,
+        derivatives: Some(derivatives),
+    }
+}
+
+fn rho_derivatives(width: u32, rho: f32) -> Derivatives {
+    Derivatives {
+        dudx: rho / u32_to_f32(width.max(1)),
+        dvdx: 0.0,
+        dudy: 0.0,
+        dvdy: 0.0,
+    }
+}
+
+fn byte_budget(heap: u64, headroom: u64) -> Budget {
+    Budget::from_heaps(
+        &[crate::vram::HeapSlice {
+            budget: heap,
+            usage: 0,
+            device_local: true,
+        }],
+        0,
+        Headroom {
+            percent: 0,
+            floor_bytes: headroom,
+        },
+        true,
+    )
+}
+
+fn note_admit(stream: &Streamer, base_ms: f32, faults: &mut u32) {
+    let leftover = if base_ms >= FRAME_BUDGET_MS {
+        0
+    } else {
+        floor_nonneg(FRAME_BUDGET_MS - base_ms)
+    };
+    let cap = stream.bytes_per_ms().saturating_mul(u64::from(leftover));
+    if stream.last_admit() > cap {
+        *faults = faults.saturating_add(1);
+    }
+}
+
+fn sequence_mismatches(got: &[(usize, u32)], expected: &[(usize, u32)]) -> u32 {
+    let mut count = 0u32;
+    let len = got.len().max(expected.len());
+    for index in 0..len {
+        if got.get(index).copied() != expected.get(index).copied() {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
+/// Streaming rows. They grade the streamer, not a shade.
 #[derive(Clone, Copy, Debug)]
 pub struct GateRows {
     pub budget_recover: f32,
@@ -1085,19 +1135,23 @@ pub struct GateRows {
     pub ultra_near: f32,
     pub slow_bus: f32,
     pub thrash: f32,
+    pub evict_order: f32,
+    pub fence: f32,
 }
 
 #[must_use]
-pub fn gate_rows(live: bool) -> GateRows {
+pub fn gate_rows() -> GateRows {
     GateRows {
-        budget_recover: budget_recover(live),
-        upload_refused: upload_refused(live),
-        oom_recover: oom_recover(live),
-        spin_evict: spin_evict(live),
-        quality_cap: quality_cap(live),
-        ultra_near: ultra_near(live),
-        slow_bus: slow_bus(live),
-        thrash: spin_thrash(live),
+        budget_recover: budget_recover(),
+        upload_refused: upload_refused(),
+        oom_recover: oom_recover(),
+        spin_evict: spin_evict(),
+        quality_cap: quality_cap(),
+        ultra_near: ultra_near(),
+        slow_bus: slow_bus(),
+        thrash: spin_thrash(),
+        evict_order: evict_order(),
+        fence: fence(),
     }
 }
 
@@ -1105,34 +1159,27 @@ pub fn gate_rows(live: bool) -> GateRows {
 mod tests {
     use super::*;
 
+    fn zero(value: f32) -> bool {
+        value.to_bits() == 0.0f32.to_bits()
+    }
+
     #[test]
-    fn the_gate_rows_pass_live_and_fail_broken() {
-        let live = gate_rows(true);
-        let broken = gate_rows(false);
+    fn the_gate_rows_pass() {
+        let rows = gate_rows();
         assert!(
-            live.budget_recover.to_bits() <= 6.0f32.to_bits(),
+            rows.budget_recover.to_bits() <= 6.0f32.to_bits(),
             "{}",
-            live.budget_recover
+            rows.budget_recover
         );
-        assert!(
-            broken.budget_recover.to_bits() > 6.0f32.to_bits(),
-            "{}",
-            broken.budget_recover
-        );
-        assert_eq!(live.upload_refused.to_bits(), 0.0f32.to_bits());
-        assert!(broken.upload_refused.to_bits() > 0);
-        assert_eq!(live.oom_recover.to_bits(), 0.0f32.to_bits());
-        assert!(broken.oom_recover.to_bits() > 0);
-        assert_eq!(live.spin_evict.to_bits(), 0.0f32.to_bits());
-        assert!(broken.spin_evict.to_bits() > 0);
-        assert_eq!(live.quality_cap.to_bits(), 0.0f32.to_bits());
-        assert!(broken.quality_cap.to_bits() > 0);
-        assert_eq!(live.ultra_near.to_bits(), 0.0f32.to_bits());
-        assert!(broken.ultra_near.to_bits() > 0);
-        assert_eq!(live.slow_bus.to_bits(), 0.0f32.to_bits());
-        assert!(broken.slow_bus.to_bits() > 0);
-        assert_eq!(live.thrash.to_bits(), 0.0f32.to_bits());
-        assert!(broken.thrash.to_bits() > 0);
+        assert!(zero(rows.upload_refused), "{}", rows.upload_refused);
+        assert!(zero(rows.oom_recover), "{}", rows.oom_recover);
+        assert!(zero(rows.spin_evict), "{}", rows.spin_evict);
+        assert!(zero(rows.quality_cap), "{}", rows.quality_cap);
+        assert!(zero(rows.ultra_near), "{}", rows.ultra_near);
+        assert!(zero(rows.slow_bus), "{}", rows.slow_bus);
+        assert!(zero(rows.thrash), "{}", rows.thrash);
+        assert!(zero(rows.evict_order), "{}", rows.evict_order);
+        assert!(zero(rows.fence), "{}", rows.fence);
     }
 
     #[test]

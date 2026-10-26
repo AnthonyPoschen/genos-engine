@@ -296,8 +296,10 @@ The binary is not a libtest harness, so it already prints. `--nocapture`, `--tes
 | `spin_evict` | 0 | Evictions while the camera spins and the budget has headroom. |
 | `quality_cap` | 0 | Resident mips finer than `texture_quality`. |
 | `ultra_near` | 0 | Small VRAM, fast bus, Ultra: the visible near texture is at mip 0 and the far texture stays coarser, inside the target. |
-| `slow_bus` | 0 | A slow transfer rate lowers the admit. The frame time stays inside the budget. |
-| `thrash` | 0 | Mips evicted and loaded again inside the dwell window during the spin. |
+| `slow_bus` | 0 | An overrun halves the admit rate, a later in-budget frame grows it again, and every admit stays at or under `bytes_per_ms × leftover_ms`. That cap is the meter's bytes per millisecond times the leftover frame time, not the streamer's stored rate. |
+| `thrash` | 0 | An A/B spin where the dwell is the only thing that stops a just-loaded mip from being evicted and loaded again. The level gap does not cover that mip, and the heap is over the texture target without being critical. |
+| `evict_order` | 0 | Mismatches against the victim sequence: lowest screen importance, then farthest distance, then the finer level. |
+| `fence` | 0 | Mips that become resident while `transfer_ready` is false. |
 | `hot_reload_frames` | 1 | Frames from `HotReload`'s finished upload to the sample that sees the new page. The old page stays until that upload finishes. |
 | `gbuffer_ms` | 0.60 | High, RTX 4070, 1440p, basic scene. |
 
@@ -313,7 +315,7 @@ Each phase is its own commit and its own measurement. A phase that misses a thre
 | P3 | The CPU path tracer samples the shade. Dielectric pictures use the reference check. | `picture_dielectric`. `picture_metal` stays unimplemented. |
 | P4 | Emission at cache hits, promoted emitters, furnace, double-count switch. | `emissive_furnace`, `double_count`. |
 | P5 | Cook writes BC7 and ASTC mips. Normals stay RGBA8. | `bc7_colour_rmse`, `astc_colour_rmse`. |
-| P6 | View-driven streaming inside the VRAM budget. | `budget_recover`, `upload_refused`, `oom_recover`, `spin_evict`, `quality_cap`, `ultra_near`, `slow_bus`, `thrash`. |
+| P6 | View-driven streaming inside the VRAM budget. | `budget_recover`, `upload_refused`, `oom_recover`, `spin_evict`, `quality_cap`, `ultra_near`, `slow_bus`, `thrash`, `evict_order`, `fence`. |
 | P7 | `--watch` hot reload. | `hot_reload_frames`. |
 | — | `gbuffer_ms` | Measured on the 4070 when phase 2's maps exist. Not a reason to build a pass early. |
 
