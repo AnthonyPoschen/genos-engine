@@ -1,14 +1,23 @@
 //! Measures CCD metrics by running `genos_physics::step`.
 //!
-//! `good` and `bad` are the same 3 000 m/s scene. `good` asks for protection.
-//! `step` has no CCD flag, so that run still tunnels and `tunnel_count` is
-//! `FAIL`. `bad` is protection off and fails the same way. `discrete` is the
-//! 30 m/s run, scored on free-flight steps. `loss` scores that run from start
-//! to end, so the inelastic drop fails `|energy_drift| <= 0.01`.
+//! `good` and `bad` are the same 3 000 m/s scene. `good` asks for protection:
+//! the bullet is speculative and both ships are swept, so `tunnel_count` is 0.
+//! `bad` leaves protection off and still tunnels. `discrete` is the 30 m/s run,
+//! scored on free-flight steps. `loss` scores that run from start to end, so
+//! the inelastic drop fails `|energy_drift| <= 0.01`. `broken` cooks an
+//! overhang, breaks its seam, and scores `bonds_broken`, `debris_alive`,
+//! and `floor_penetration_m`. Those rows are not printed for the ship fixtures.
+//! `spin` is a long thin box that turns a quarter-circle in one step beside a
+//! block. `tunnel_count` is the block still at rest. `wide` is the swept ships
+//! 40 m apart, one step, so a time-of-impact cap of one advance fails
+//! `tunnel_count`. `rotor` is a cube in free flight. `rotational_energy_j`
+//! is checked against `1/2 ωᵀ I ω` from the box size and mass. `budget` breaks
+//! an overhang into 12 children with room for 1 debris body. After it settles,
+//! `debris_alive` stays within that budget and `debris_asleep` is at least 1.
 //!
 //! ```text
 //! --out DIR
-//! --fixture proof|good|bad|discrete|loss
+//! --fixture proof|good|bad|discrete|loss|broken|spin|wide|rotor|budget
 //! ```
 //!
 //! `--out` defaults to `./genos-debug/physics`. `GENOS_PHYSICS_METRICS_OUT`
@@ -18,7 +27,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use genos_physics::{Body, Shape, World};
+use genos_physics::{
+    apply_damage, cook, destruction_report, spawn_breakable, Body, CookRequest, MotionQuality,
+    Shape, World,
+};
 
 const DEFAULT_OUT: &str = "genos-debug/physics";
 const DT: f32 = 1.0 / 60.0;
@@ -29,12 +41,18 @@ const CATCH_SHIP: f32 = 30.0;
 const CATCH_BULLET: f32 = 6.0;
 const TUNNEL_SPEED: f32 = 3000.0;
 const PENETRATION_LIMIT: f64 = 0.01;
+const BROKEN_STEPS: u32 = 90;
+const DAMAGE_STEP: u32 = 30;
+const BUDGET_CHILDREN: u8 = 12;
+const DEBRIS_BUDGET: u32 = 1;
 
 #[derive(Clone, Copy)]
 enum Bound {
     AtMost,
     AtLeast,
     AbsAtMost,
+    /// `|value - threshold| <= 1e-4`.
+    Near,
 }
 
 struct Spec {
@@ -62,6 +80,144 @@ const METRICS: &[Spec] = &[
         bound: Bound::AbsAtMost,
         threshold: 0.01,
         threshold_text: "|drift|<=0.01",
+    },
+    Spec {
+        name: "determinism_hash_match",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+    Spec {
+        name: "contacts_stored",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+    Spec {
+        name: "toi_deferred",
+        bound: Bound::AtMost,
+        threshold: 0.0,
+        threshold_text: "<=0",
+    },
+];
+
+const SPIN_METRICS: &[Spec] = &[
+    Spec {
+        name: "tunnel_count",
+        bound: Bound::AtMost,
+        threshold: 0.0,
+        threshold_text: "<=0",
+    },
+    Spec {
+        name: "determinism_hash_match",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+];
+
+/// `Izz = m/3 (hx² + hy²)`, then `1/2 Izz ωz²`. Cube half extents are 1 m, mass 3 kg, `ωz` is 2 rad/s.
+const fn rotor_joules() -> f64 {
+    let mass = 3.0;
+    let half = 1.0;
+    let spin = 2.0;
+    let izz = mass / 3.0 * (half * half + half * half);
+    0.5 * izz * spin * spin
+}
+
+const ROTOR_METRICS: &[Spec] = &[
+    Spec {
+        name: "rotational_energy_j",
+        bound: Bound::Near,
+        threshold: rotor_joules(),
+        threshold_text: "=4",
+    },
+    Spec {
+        name: "determinism_hash_match",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+];
+
+const WIDE_METRICS: &[Spec] = &[
+    Spec {
+        name: "tunnel_count",
+        bound: Bound::AtMost,
+        threshold: 0.0,
+        threshold_text: "<=0",
+    },
+    Spec {
+        name: "penetration_m",
+        bound: Bound::AtMost,
+        threshold: PENETRATION_LIMIT,
+        threshold_text: "<=0.01",
+    },
+    Spec {
+        name: "contacts_stored",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+    Spec {
+        name: "toi_deferred",
+        bound: Bound::AtMost,
+        threshold: 0.0,
+        threshold_text: "<=0",
+    },
+    Spec {
+        name: "determinism_hash_match",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+];
+
+const BUDGET_METRICS: &[Spec] = &[
+    Spec {
+        name: "debris_alive",
+        bound: Bound::AtMost,
+        threshold: 1.0,
+        threshold_text: "<=1",
+    },
+    Spec {
+        name: "debris_asleep",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+    Spec {
+        name: "floor_penetration_m",
+        bound: Bound::AtMost,
+        threshold: 0.0,
+        threshold_text: "<=0",
+    },
+    Spec {
+        name: "determinism_hash_match",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+];
+
+const BROKEN_METRICS: &[Spec] = &[
+    Spec {
+        name: "bonds_broken",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+    Spec {
+        name: "debris_alive",
+        bound: Bound::AtMost,
+        threshold: 8.0,
+        threshold_text: "<=8",
+    },
+    Spec {
+        name: "floor_penetration_m",
+        bound: Bound::AtMost,
+        threshold: 0.0,
+        threshold_text: "<=0",
     },
     Spec {
         name: "determinism_hash_match",
@@ -100,6 +256,11 @@ enum Fixture {
     Bad,
     Discrete,
     Loss,
+    Broken,
+    Spin,
+    Wide,
+    Rotor,
+    Budget,
 }
 
 impl Fixture {
@@ -110,6 +271,11 @@ impl Fixture {
             Self::Bad => "bad",
             Self::Discrete => "discrete",
             Self::Loss => "loss",
+            Self::Broken => "broken",
+            Self::Spin => "spin",
+            Self::Wide => "wide",
+            Self::Rotor => "rotor",
+            Self::Budget => "budget",
         }
     }
 }
@@ -140,10 +306,14 @@ struct Reading {
     penetration_m: f64,
     energy_drift: f64,
     determinism_hash_match: f64,
+    contacts_stored: f64,
+    toi_deferred: f64,
     ship_speed: f32,
     bullet_speed: f32,
     protect: bool,
     full_energy: bool,
+    ccd_in_step: bool,
+    steps: u32,
 }
 
 fn main() {
@@ -176,6 +346,46 @@ fn run() -> Result<i32, String> {
             let reading = measure(setup(&args.fixture)?)?;
             let rows = judge_all(&reading);
             write_report(&args.out, args.fixture.name(), &reading, &rows)?;
+            print_scene(&reading);
+            print_rows(&rows);
+            Ok(exit_code(&rows))
+        }
+        Fixture::Broken => {
+            let (reading, broken) = measure_broken()?;
+            let rows = judge_broken(&broken);
+            write_report(&args.out, "broken", &reading, &rows)?;
+            print_scene(&reading);
+            print_rows(&rows);
+            Ok(exit_code(&rows))
+        }
+        Fixture::Spin => {
+            let reading = measure_spin()?;
+            let rows = judge_spin(&reading);
+            write_report(&args.out, "spin", &reading, &rows)?;
+            print_scene(&reading);
+            print_rows(&rows);
+            Ok(exit_code(&rows))
+        }
+        Fixture::Wide => {
+            let reading = measure_wide()?;
+            let rows = judge_wide(&reading);
+            write_report(&args.out, "wide", &reading, &rows)?;
+            print_scene(&reading);
+            print_rows(&rows);
+            Ok(exit_code(&rows))
+        }
+        Fixture::Rotor => {
+            let reading = measure_rotor()?;
+            let rows = judge_rotor(&reading);
+            write_report(&args.out, "rotor", &reading, &rows)?;
+            print_scene(&reading);
+            print_rows(&rows);
+            Ok(exit_code(&rows))
+        }
+        Fixture::Budget => {
+            let (reading, scores) = measure_budget()?;
+            let rows = judge_budget(&scores);
+            write_report(&args.out, "budget", &reading, &rows)?;
             print_scene(&reading);
             print_rows(&rows);
             Ok(exit_code(&rows))
@@ -311,6 +521,11 @@ fn parse_fixture(text: &str) -> Result<Fixture, String> {
         "bad" => Ok(Fixture::Bad),
         "discrete" => Ok(Fixture::Discrete),
         "loss" => Ok(Fixture::Loss),
+        "broken" => Ok(Fixture::Broken),
+        "spin" => Ok(Fixture::Spin),
+        "wide" => Ok(Fixture::Wide),
+        "rotor" => Ok(Fixture::Rotor),
+        "budget" => Ok(Fixture::Budget),
         other => Err(format!("unknown fixture {other}")),
     }
 }
@@ -341,7 +556,12 @@ fn setup(fixture: &Fixture) -> Result<Setup, String> {
             protect: false,
             full_energy: true,
         }),
-        Fixture::Proof => Err("proof does not score itself".into()),
+        Fixture::Proof
+        | Fixture::Broken
+        | Fixture::Spin
+        | Fixture::Wide
+        | Fixture::Rotor
+        | Fixture::Budget => Err("proof does not score itself".into()),
     }
 }
 
@@ -351,15 +571,25 @@ fn print_help() {
 --out DIR
     JSON directory. Default ./genos-debug/physics.
     GENOS_PHYSICS_METRICS_OUT applies only when --out is omitted.
---fixture proof|good|bad|discrete|loss
-    proof runs all four. Default proof.
+--fixture proof|good|bad|discrete|loss|broken|spin|wide|rotor|budget
+    proof runs every fixture below. Default proof.
     GENOS_PHYSICS_METRICS_FIXTURE applies only when --fixture is omitted.
 good and bad both run ships and bullet at {TUNNEL_SPEED} m/s.
-    good asks for protection. step has no CCD flag, so good still tunnels.
+    good marks the bullet speculative and both ships swept. bad leaves protection off, so the ships tunnel.
 discrete runs ships at {CATCH_SHIP} m/s and the bullet at {CATCH_BULLET} m/s.
     energy_drift on good, bad, and discrete sums free-flight steps only.
 loss is the discrete scene scored from start to end, so an inelastic drop fails.
-Each fixture calls step {STEPS} times at 1/60 s.
+broken cooks an overhang, breaks the seam at step {DAMAGE_STEP}, and steps {BROKEN_STEPS} times.
+spin is one step: a long thin swept box turns a quarter-circle beside a block.
+    tunnel_count is 1 when that block is still at rest.
+wide is one step: swept ships start 40 m apart at {TUNNEL_SPEED} m/s.
+    A time-of-impact cap of one advance leaves a gap and fails tunnel_count.
+rotor spins a 3 kg cube, half extents 1 m, at 2 rad/s for {STEPS} steps with no gravity.
+    rotational_energy_j is 1/2 Izz ωz² from that size and mass.
+budget cooks the overhang with {BUDGET_CHILDREN} children per chunk and debris budget {DEBRIS_BUDGET}.
+    It breaks the seam at step {DAMAGE_STEP} and steps {BROKEN_STEPS} times.
+    debris_alive stays within the budget. debris_asleep is at least 1 after settling.
+Ship fixtures call step {STEPS} times at 1/60 s.
 Exit 0 when no metric is FAIL. Exit 1 when a metric is FAIL. Exit 2 on a bad argument."
     );
 }
@@ -373,11 +603,368 @@ fn measure(setup: Setup) -> Result<Reading, String> {
         penetration_m: first.penetration_m,
         energy_drift: first.energy_drift,
         determinism_hash_match: f64::from(match_bit),
+        contacts_stored: first.contacts_stored,
+        toi_deferred: first.toi_deferred,
         ship_speed: first.ship_speed,
         bullet_speed: first.bullet_speed,
         protect: setup.protect,
         full_energy: setup.full_energy,
+        ccd_in_step: first.ccd_in_step,
+        steps: STEPS,
     })
+}
+
+struct BrokenScores {
+    bonds_broken: f64,
+    debris_alive: f64,
+    floor_penetration_m: f64,
+    determinism_hash_match: f64,
+}
+
+fn measure_broken() -> Result<(Reading, BrokenScores), String> {
+    let first = run_broken()?;
+    let second = run_broken()?;
+    let match_bit = u8::from(hash_state(&first.0) == hash_state(&second.0));
+    let broken = BrokenScores {
+        bonds_broken: f64::from(first.1.bonds_broken),
+        debris_alive: f64::from(first.1.debris_alive),
+        floor_penetration_m: f64::from(first.1.floor_penetration_m),
+        determinism_hash_match: f64::from(match_bit),
+    };
+    let reading = Reading {
+        tunnel_count: 0.0,
+        penetration_m: 0.0,
+        energy_drift: 0.0,
+        determinism_hash_match: broken.determinism_hash_match,
+        contacts_stored: 0.0,
+        toi_deferred: 0.0,
+        ship_speed: 0.0,
+        bullet_speed: 0.0,
+        protect: false,
+        full_energy: false,
+        ccd_in_step: false,
+        steps: BROKEN_STEPS,
+    };
+    Ok((reading, broken))
+}
+
+fn run_broken() -> Result<(World, genos_physics::DestructionReport), String> {
+    let asset = cook(&CookRequest {
+        min: genos_math::Vec3::new(-0.2, 1.0, -0.15),
+        max: genos_math::Vec3::new(0.8, 1.4, 0.15),
+        coarse: vec![
+            genos_math::Vec3::new(-0.05, 1.2, 0.0),
+            genos_math::Vec3::new(0.5, 1.2, 0.0),
+        ],
+        support: vec![true, false],
+        children_per_chunk: 4,
+        health_per_area: 10.0,
+    })
+    .map_err(|err| format!("cook {err:?}"))?;
+    let bond = asset
+        .bond_between(0, 1)
+        .ok_or_else(|| "overhang has no seam bond".to_string())?;
+    let mut world = World::new(genos_physics::GRAVITY);
+    world.insert(Body::plane(genos_math::Vec3::Y, 0.0));
+    let id = spawn_breakable(&mut world, asset, 8);
+    for index in 0..BROKEN_STEPS {
+        if index == DAMAGE_STEP {
+            let _ = apply_damage(&mut world, id, bond, 1.0e6);
+        }
+        genos_physics::step(&mut world, DT);
+    }
+    let report = destruction_report(&world);
+    Ok((world, report))
+}
+
+fn measure_spin() -> Result<Reading, String> {
+    let first = run_spin()?;
+    let second = run_spin()?;
+    let match_bit = u8::from(hash_state(&first.0) == hash_state(&second.0));
+    Ok(Reading {
+        tunnel_count: first.1,
+        penetration_m: 0.0,
+        energy_drift: 0.0,
+        determinism_hash_match: f64::from(match_bit),
+        contacts_stored: 0.0,
+        toi_deferred: 0.0,
+        ship_speed: 0.0,
+        bullet_speed: 0.0,
+        protect: true,
+        full_energy: false,
+        ccd_in_step: first.2,
+        steps: 1,
+    })
+}
+
+/// Quarter-turn of a long thin box. The block sits where the tip passes.
+/// A time-of-impact bound without `|ω| r` integrates that whole turn at once
+/// and never strikes the block.
+fn run_spin() -> Result<(World, f64, bool), String> {
+    let mut bar = Body::cuboid(
+        genos_math::Vec3::ZERO,
+        1.0,
+        genos_math::Vec3::new(0.02, 1.5, 0.02),
+    );
+    bar.angular_velocity = genos_math::Vec3::new(0.0, 0.0, std::f32::consts::FRAC_PI_2 / DT);
+    bar.velocity = genos_math::Vec3::new(-1.0, 0.0, 0.0);
+    bar.motion = MotionQuality::Swept;
+    let block = Body::cuboid(
+        genos_math::Vec3::new(-0.3, 1.0, 0.0),
+        1.0,
+        genos_math::Vec3::new(0.05, 0.05, 0.05),
+    );
+    let mut world = World::new(genos_math::Vec3::ZERO);
+    let _bar = world.insert(bar);
+    let block_index = world.insert(block);
+    genos_physics::step(&mut world, DT);
+    let hit = world
+        .bodies
+        .get(block_index)
+        .ok_or_else(|| "spin block missing".to_string())?;
+    let missed = u32::from(hit.velocity.length() < 1.0e-4);
+    let tunnels = missed.saturating_add(world.step_stats.toi_failed);
+    let ccd = world.step_stats.ccd_applied;
+    Ok((world, f64::from(tunnels), ccd))
+}
+
+fn judge_spin(reading: &Reading) -> Vec<Row> {
+    let values = [reading.tunnel_count, reading.determinism_hash_match];
+    SPIN_METRICS
+        .iter()
+        .zip(values)
+        .map(|(spec, value)| judge(spec, value))
+        .collect()
+}
+
+fn measure_wide() -> Result<Reading, String> {
+    let first = run_wide()?;
+    let second = run_wide()?;
+    let match_bit = u8::from(hash_state(&first.world) == hash_state(&second.world));
+    Ok(Reading {
+        tunnel_count: first.tunnel_count,
+        penetration_m: first.penetration_m,
+        energy_drift: 0.0,
+        determinism_hash_match: f64::from(match_bit),
+        contacts_stored: first.contacts_stored,
+        toi_deferred: first.toi_deferred,
+        ship_speed: TUNNEL_SPEED,
+        bullet_speed: 0.0,
+        protect: true,
+        full_energy: false,
+        ccd_in_step: first.ccd_in_step,
+        steps: 1,
+    })
+}
+
+struct WideRun {
+    world: World,
+    tunnel_count: f64,
+    penetration_m: f64,
+    contacts_stored: f64,
+    toi_deferred: f64,
+    ccd_in_step: bool,
+}
+
+/// Centres 40 m apart. The gap along X is 36 m, so the radius slice needs more
+/// than one advance. Capping advances at 1 clamps the pair and counts a tunnel.
+fn run_wide() -> Result<WideRun, String> {
+    let mut world = World::new(genos_math::Vec3::ZERO);
+    let mut left = Body::cuboid(
+        genos_math::Vec3::new(0.0, 2.0, 0.0),
+        1_000.0,
+        genos_math::Vec3::new(2.0, 1.0, 1.0),
+    );
+    left.velocity = genos_math::Vec3::new(TUNNEL_SPEED, 0.0, 0.0);
+    left.motion = MotionQuality::Swept;
+    let mut right = Body::cuboid(
+        genos_math::Vec3::new(40.0, 2.0, 0.0),
+        1_000.0,
+        genos_math::Vec3::new(2.0, 1.0, 1.0),
+    );
+    right.velocity = genos_math::Vec3::new(-TUNNEL_SPEED, 0.0, 0.0);
+    right.motion = MotionQuality::Swept;
+    let left_index = world.insert(left);
+    let right_index = world.insert(right);
+    genos_physics::step(&mut world, DT);
+    let left_body = world
+        .bodies
+        .get(left_index)
+        .ok_or_else(|| "wide left ship missing".to_string())?;
+    let right_body = world
+        .bodies
+        .get(right_index)
+        .ok_or_else(|| "wide right ship missing".to_string())?;
+    let exchanged = u32::from(left_body.position.x > right_body.position.x);
+    let tunnels = exchanged.saturating_add(world.step_stats.toi_failed);
+    let gap = (left_body.position.x - right_body.position.x).abs() - 4.0;
+    let penetration = if gap < 0.0 { -gap } else { 0.0 };
+    let stored = u8::from(left_body.normal_impulse > 0.0 && right_body.normal_impulse > 0.0);
+    Ok(WideRun {
+        ccd_in_step: world.step_stats.ccd_applied,
+        toi_deferred: f64::from(world.step_stats.toi_deferred),
+        tunnel_count: f64::from(tunnels),
+        penetration_m: f64::from(penetration),
+        contacts_stored: f64::from(stored),
+        world,
+    })
+}
+
+fn measure_rotor() -> Result<Reading, String> {
+    let first = run_rotor()?;
+    let second = run_rotor()?;
+    let match_bit = u8::from(hash_state(&first.0) == hash_state(&second.0));
+    Ok(Reading {
+        tunnel_count: 0.0,
+        penetration_m: 0.0,
+        energy_drift: first.1,
+        determinism_hash_match: f64::from(match_bit),
+        contacts_stored: 0.0,
+        toi_deferred: 0.0,
+        ship_speed: 0.0,
+        bullet_speed: 0.0,
+        protect: false,
+        full_energy: false,
+        ccd_in_step: false,
+        steps: STEPS,
+    })
+}
+
+/// Free flight, no gravity. The joules are `Body::rotational_energy` after the
+/// steps. The expected number is [`rotor_joules`], from the half extents and mass.
+fn run_rotor() -> Result<(World, f64), String> {
+    let mut cube = Body::cuboid(
+        genos_math::Vec3::ZERO,
+        3.0,
+        genos_math::Vec3::new(1.0, 1.0, 1.0),
+    );
+    cube.angular_velocity = genos_math::Vec3::new(0.0, 0.0, 2.0);
+    let mut world = World::new(genos_math::Vec3::ZERO);
+    let index = world.insert(cube);
+    for _ in 0..STEPS {
+        genos_physics::step(&mut world, DT);
+    }
+    let joules = world
+        .bodies
+        .get(index)
+        .ok_or_else(|| "rotor missing".to_string())?
+        .rotational_energy();
+    Ok((world, f64::from(joules)))
+}
+
+fn judge_rotor(reading: &Reading) -> Vec<Row> {
+    let values = [reading.energy_drift, reading.determinism_hash_match];
+    ROTOR_METRICS
+        .iter()
+        .zip(values)
+        .map(|(spec, value)| judge(spec, value))
+        .collect()
+}
+
+fn judge_wide(reading: &Reading) -> Vec<Row> {
+    let values = [
+        reading.tunnel_count,
+        reading.penetration_m,
+        reading.contacts_stored,
+        reading.toi_deferred,
+        reading.determinism_hash_match,
+    ];
+    WIDE_METRICS
+        .iter()
+        .zip(values)
+        .map(|(spec, value)| judge(spec, value))
+        .collect()
+}
+
+struct BudgetScores {
+    debris_alive: f64,
+    debris_asleep: f64,
+    floor_penetration_m: f64,
+    determinism_hash_match: f64,
+}
+
+fn measure_budget() -> Result<(Reading, BudgetScores), String> {
+    let first = run_budget()?;
+    let second = run_budget()?;
+    let match_bit = u8::from(hash_state(&first.0) == hash_state(&second.0));
+    let scores = BudgetScores {
+        debris_alive: f64::from(first.1.debris_alive),
+        debris_asleep: f64::from(first.1.debris_asleep),
+        floor_penetration_m: f64::from(first.1.floor_penetration_m),
+        determinism_hash_match: f64::from(match_bit),
+    };
+    let reading = Reading {
+        tunnel_count: 0.0,
+        penetration_m: 0.0,
+        energy_drift: 0.0,
+        determinism_hash_match: scores.determinism_hash_match,
+        contacts_stored: 0.0,
+        toi_deferred: 0.0,
+        ship_speed: 0.0,
+        bullet_speed: 0.0,
+        protect: false,
+        full_energy: false,
+        ccd_in_step: false,
+        steps: BROKEN_STEPS,
+    };
+    Ok((reading, scores))
+}
+
+fn run_budget() -> Result<(World, genos_physics::DestructionReport), String> {
+    let asset = cook(&CookRequest {
+        min: genos_math::Vec3::new(-0.2, 1.0, -0.15),
+        max: genos_math::Vec3::new(0.8, 1.4, 0.15),
+        coarse: vec![
+            genos_math::Vec3::new(-0.05, 1.2, 0.0),
+            genos_math::Vec3::new(0.5, 1.2, 0.0),
+        ],
+        support: vec![true, false],
+        children_per_chunk: BUDGET_CHILDREN,
+        health_per_area: 10.0,
+    })
+    .map_err(|err| format!("cook {err:?}"))?;
+    let bond = asset
+        .bond_between(0, 1)
+        .ok_or_else(|| "overhang has no seam bond".to_string())?;
+    let mut world = World::new(genos_physics::GRAVITY);
+    world.insert(Body::plane(genos_math::Vec3::Y, 0.0));
+    let id = spawn_breakable(&mut world, asset, DEBRIS_BUDGET);
+    for index in 0..BROKEN_STEPS {
+        if index == DAMAGE_STEP {
+            let _ = apply_damage(&mut world, id, bond, 1.0e6);
+        }
+        genos_physics::step(&mut world, DT);
+    }
+    let report = destruction_report(&world);
+    Ok((world, report))
+}
+
+fn judge_budget(scores: &BudgetScores) -> Vec<Row> {
+    let values = [
+        scores.debris_alive,
+        scores.debris_asleep,
+        scores.floor_penetration_m,
+        scores.determinism_hash_match,
+    ];
+    BUDGET_METRICS
+        .iter()
+        .zip(values)
+        .map(|(spec, value)| judge(spec, value))
+        .collect()
+}
+
+fn judge_broken(scores: &BrokenScores) -> Vec<Row> {
+    let values = [
+        scores.bonds_broken,
+        scores.debris_alive,
+        scores.floor_penetration_m,
+        scores.determinism_hash_match,
+    ];
+    BROKEN_METRICS
+        .iter()
+        .zip(values)
+        .map(|(spec, value)| judge(spec, value))
+        .collect()
 }
 
 struct Simulated {
@@ -385,8 +972,11 @@ struct Simulated {
     tunnel_count: f64,
     penetration_m: f64,
     energy_drift: f64,
+    contacts_stored: f64,
+    toi_deferred: f64,
     ship_speed: f32,
     bullet_speed: f32,
+    ccd_in_step: bool,
 }
 
 fn simulate(setup: &Setup) -> Result<Simulated, String> {
@@ -396,6 +986,9 @@ fn simulate(setup: &Setup) -> Result<Simulated, String> {
     let mut bullet_tunneled = false;
     let mut deepest = 0.0_f32;
     let mut free_delta = 0.0;
+    let mut toi_failed = 0_u32;
+    let mut toi_deferred = 0_u32;
+    let mut contacts_stored = false;
     for _ in 0..STEPS {
         let before = velocities(&scene.world);
         let energy_before = energy(&scene.world);
@@ -406,6 +999,9 @@ fn simulate(setup: &Setup) -> Result<Simulated, String> {
         ships_tunneled |= ships_exchanged(&scene)?;
         bullet_tunneled |= bullet_past_wall(&scene)?;
         deepest = deepest.max(penetration(&scene)?);
+        toi_failed = toi_failed.saturating_add(scene.world.step_stats.toi_failed);
+        toi_deferred = toi_deferred.saturating_add(scene.world.step_stats.toi_deferred);
+        contacts_stored |= ships_stored_contact(&scene)?;
     }
     let end = energy(&scene.world);
     let scale = start.abs().max(1.0);
@@ -414,15 +1010,24 @@ fn simulate(setup: &Setup) -> Result<Simulated, String> {
     } else {
         free_delta / scale
     };
-    let tunnels = u32::from(ships_tunneled) + u32::from(bullet_tunneled);
+    let tunnels = u32::from(ships_tunneled) + u32::from(bullet_tunneled) + toi_failed;
     Ok(Simulated {
         ship_speed: scene.ship_speed,
         bullet_speed: scene.bullet_speed,
+        ccd_in_step: scene.world.step_stats.ccd_applied,
         world: scene.world,
         tunnel_count: f64::from(tunnels),
         penetration_m: f64::from(deepest),
         energy_drift: drift,
+        contacts_stored: f64::from(u8::from(contacts_stored)),
+        toi_deferred: f64::from(toi_deferred),
     })
+}
+
+fn ships_stored_contact(scene: &Scene) -> Result<bool, String> {
+    let left = body(scene, scene.left)?;
+    let right = body(scene, scene.right)?;
+    Ok(left.normal_impulse > 0.0 && right.normal_impulse > 0.0)
 }
 
 struct VelocitySample {
@@ -487,6 +1092,11 @@ fn build(setup: &Setup) -> Scene {
     right.velocity = genos_math::Vec3::new(-ship_speed, 0.0, 0.0);
     let mut bullet = Body::sphere(genos_math::Vec3::new(0.0, 2.0, 4.0), 0.02, 0.05);
     bullet.velocity = genos_math::Vec3::new(bullet_speed, 0.0, 0.0);
+    if setup.protect {
+        bullet.motion = MotionQuality::Speculative;
+        left.motion = MotionQuality::Swept;
+        right.motion = MotionQuality::Swept;
+    }
     let wall = Body::cuboid(
         genos_math::Vec3::new(0.3, 2.0, 4.0),
         0.0,
@@ -599,7 +1209,6 @@ fn sphere_box_depth(sphere: &Body, box_body: &Body) -> Result<f32, String> {
 }
 
 /// `1/2 m |v|^2 + 1/2 ω^T I ω + m g h` over dynamic bodies.
-/// `Body` has no angular velocity, so `1/2 ω^T I ω` is 0 until that field exists.
 fn energy(world: &World) -> f64 {
     let gravity = f64::from(-world.gravity.y);
     let mut total = 0.0;
@@ -618,8 +1227,8 @@ fn energy(world: &World) -> f64 {
     total
 }
 
-fn rotational_joules(_body: &Body) -> f64 {
-    0.0
+fn rotational_joules(body: &Body) -> f64 {
+    f64::from(body.rotational_energy())
 }
 
 fn hash_state(world: &World) -> u64 {
@@ -632,6 +1241,13 @@ fn hash_state(world: &World) -> u64 {
             body.velocity.x.to_bits(),
             body.velocity.y.to_bits(),
             body.velocity.z.to_bits(),
+            body.angular_velocity.x.to_bits(),
+            body.angular_velocity.y.to_bits(),
+            body.angular_velocity.z.to_bits(),
+            body.orientation.x.to_bits(),
+            body.orientation.y.to_bits(),
+            body.orientation.z.to_bits(),
+            body.orientation.w.to_bits(),
         ] {
             hash = fnv_u32(hash, bits);
         }
@@ -653,6 +1269,8 @@ fn judge_all(reading: &Reading) -> Vec<Row> {
         reading.penetration_m,
         reading.energy_drift,
         reading.determinism_hash_match,
+        reading.contacts_stored,
+        reading.toi_deferred,
     ];
     METRICS
         .iter()
@@ -668,6 +1286,7 @@ fn judge(spec: &Spec, value: f64) -> Row {
             Bound::AtMost => value <= spec.threshold,
             Bound::AtLeast => value >= spec.threshold,
             Bound::AbsAtMost => value.abs() <= spec.threshold,
+            Bound::Near => (value - spec.threshold).abs() <= 1.0e-4,
         };
     Row {
         name: spec.name,
@@ -698,10 +1317,12 @@ fn print_scene(reading: &Reading) {
     } else {
         "free-flight"
     };
+    let ccd = if reading.ccd_in_step { "true" } else { "false" };
     println!(
-        "scene protection={protection} ships_m_s={} bullet_m_s={} steps={STEPS} energy={energy} ccd_in_step=false",
+        "scene protection={protection} ships_m_s={} bullet_m_s={} steps={} energy={energy} ccd_in_step={ccd}",
         fmt_num(f64::from(reading.ship_speed)),
         fmt_num(f64::from(reading.bullet_speed)),
+        reading.steps,
     );
 }
 
@@ -733,10 +1354,12 @@ fn json(fixture: &str, reading: &Reading, rows: &[Row]) -> String {
     } else {
         "free-flight"
     };
+    let ccd = if reading.ccd_in_step { "true" } else { "false" };
     let mut out = format!(
-        "{{\n  \"fixture\": \"{fixture}\",\n  \"protection\": {protection},\n  \"ccd_in_step\": false,\n  \"energy\": \"{energy}\",\n  \"ship_speed_m_s\": {},\n  \"bullet_speed_m_s\": {},\n  \"steps\": {STEPS},\n  \"failed\": {failed},\n  \"metrics\": [\n",
+        "{{\n  \"fixture\": \"{fixture}\",\n  \"protection\": {protection},\n  \"ccd_in_step\": {ccd},\n  \"energy\": \"{energy}\",\n  \"ship_speed_m_s\": {},\n  \"bullet_speed_m_s\": {},\n  \"steps\": {},\n  \"failed\": {failed},\n  \"metrics\": [\n",
         fmt_num(f64::from(reading.ship_speed)),
         fmt_num(f64::from(reading.bullet_speed)),
+        reading.steps,
     );
     for (index, row) in rows.iter().enumerate() {
         let comma = if index + 1 == rows.len() { "" } else { "," };
@@ -745,10 +1368,11 @@ fn json(fixture: &str, reading: &Reading, rows: &[Row]) -> String {
         } else {
             "null".to_string()
         };
-        out.push_str(&format!(
+        let row_line = format!(
             "    {{\"name\": \"{}\", \"value\": {value}, \"threshold\": \"{}\", \"status\": \"{}\"}}{comma}\n",
             row.name, row.threshold_text, row.status.as_str()
-        ));
+        );
+        out.push_str(&row_line);
     }
     out.push_str("  ]\n}\n");
     out
@@ -773,6 +1397,11 @@ fn prove(out: &Path) -> Result<i32, String> {
     let bad = run_child(&exe, out, "bad")?;
     let discrete = run_child(&exe, out, "discrete")?;
     let loss = run_child(&exe, out, "loss")?;
+    let broken = run_child(&exe, out, "broken")?;
+    let spin = run_child(&exe, out, "spin")?;
+    let wide = run_child(&exe, out, "wide")?;
+    let rotor = run_child(&exe, out, "rotor")?;
+    let budget = run_child(&exe, out, "budget")?;
     println!("# good");
     print!("{}", good.stdout);
     println!("# bad");
@@ -781,20 +1410,57 @@ fn prove(out: &Path) -> Result<i32, String> {
     print!("{}", discrete.stdout);
     println!("# loss");
     print!("{}", loss.stdout);
-    if good.code != 1 || bad.code != 1 || discrete.code != 0 || loss.code != 1 {
+    println!("# broken");
+    print!("{}", broken.stdout);
+    println!("# spin");
+    print!("{}", spin.stdout);
+    println!("# wide");
+    print!("{}", wide.stdout);
+    println!("# rotor");
+    print!("{}", rotor.stdout);
+    println!("# budget");
+    print!("{}", budget.stdout);
+    if good.code != 0
+        || bad.code != 1
+        || discrete.code != 0
+        || loss.code != 1
+        || broken.code != 0
+        || spin.code != 0
+        || wide.code != 0
+        || rotor.code != 0
+        || budget.code != 0
+    {
         return Err(format!(
-            "proof exits good {} bad {} discrete {} loss {}",
-            good.code, bad.code, discrete.code, loss.code
+            "proof exits good {} bad {} discrete {} loss {} broken {} spin {} wide {} rotor {} budget {}",
+            good.code,
+            bad.code,
+            discrete.code,
+            loss.code,
+            broken.code,
+            spin.code,
+            wide.code,
+            rotor.code,
+            budget.code
         ));
     }
-    expect_tunnel_fail(&good.stdout, true)?;
-    expect_tunnel_fail(&bad.stdout, false)?;
+    expect_protected(&good.stdout)?;
+    expect_unprotected(&bad.stdout)?;
     expect_discrete(&discrete.stdout)?;
     expect_loss(&loss.stdout)?;
-    expect_file(out, "good", true, 1, "free-flight")?;
-    expect_file(out, "bad", false, 1, "free-flight")?;
-    expect_file(out, "discrete", false, 0, "free-flight")?;
-    expect_file(out, "loss", false, 1, "full")?;
+    expect_broken(&broken.stdout)?;
+    expect_spin(&spin.stdout)?;
+    expect_wide(&wide.stdout)?;
+    expect_rotor(&rotor.stdout)?;
+    expect_budget(&budget.stdout)?;
+    expect_file(out, "good", true, 0, "free-flight", true)?;
+    expect_file(out, "bad", false, 2, "free-flight", false)?;
+    expect_file(out, "discrete", false, 0, "free-flight", false)?;
+    expect_file(out, "loss", false, 1, "full", false)?;
+    expect_file(out, "broken", false, 0, "free-flight", false)?;
+    expect_file(out, "spin", true, 0, "free-flight", true)?;
+    expect_file(out, "wide", true, 0, "free-flight", true)?;
+    expect_file(out, "rotor", false, 0, "free-flight", false)?;
+    expect_file(out, "budget", false, 0, "free-flight", false)?;
     Ok(0)
 }
 
@@ -827,6 +1493,10 @@ struct Printed {
 }
 
 fn printed_rows(text: &str) -> Result<Vec<Printed>, String> {
+    printed_against(text, METRICS)
+}
+
+fn printed_against(text: &str, specs: &[Spec]) -> Result<Vec<Printed>, String> {
     let mut rows = Vec::new();
     for row in text.lines() {
         if row.is_empty() || row.starts_with("scene ") || row.starts_with("# ") {
@@ -862,14 +1532,14 @@ fn printed_rows(text: &str) -> Result<Vec<Printed>, String> {
             status,
         });
     }
-    if rows.len() != METRICS.len() {
+    if rows.len() != specs.len() {
         return Err(format!(
             "{} metric lines, wanted {}",
             rows.len(),
-            METRICS.len()
+            specs.len()
         ));
     }
-    for (row, spec) in rows.iter().zip(METRICS) {
+    for (row, spec) in rows.iter().zip(specs) {
         if row.name != spec.name || row.threshold != spec.threshold_text {
             return Err(format!("{} does not match the metric table", row.name));
         }
@@ -877,24 +1547,41 @@ fn printed_rows(text: &str) -> Result<Vec<Printed>, String> {
     Ok(rows)
 }
 
-fn expect_tunnel_fail(text: &str, protect: bool) -> Result<(), String> {
-    let flag = if protect {
-        "protection=true"
-    } else {
-        "protection=false"
-    };
-    if !text.contains(flag) {
-        return Err(format!("scene missing {flag}"));
-    }
+fn expect_speed(text: &str) -> Result<(), String> {
     if !text.contains(&format!("ships_m_s={}", fmt_num(f64::from(TUNNEL_SPEED))))
         || !text.contains(&format!("bullet_m_s={}", fmt_num(f64::from(TUNNEL_SPEED))))
     {
         return Err("high-speed scene did not use 3000 m/s for both bodies".into());
     }
-    if !text.contains("energy=free-flight") || !text.contains("ccd_in_step=false") {
-        return Err("high-speed scene did not record free-flight energy and no CCD".into());
+    if !text.contains("energy=free-flight") {
+        return Err("high-speed scene did not record free-flight energy".into());
     }
+    Ok(())
+}
+
+fn expect_protected(text: &str) -> Result<(), String> {
+    if !text.contains("protection=true") || !text.contains("ccd_in_step=true") {
+        return Err("protected scene missing protection or ccd_in_step".into());
+    }
+    expect_speed(text)?;
+    for row in printed_rows(text)? {
+        if row.status != "PASS" {
+            return Err(format!("{} wanted PASS with protection on", row.name));
+        }
+        if row.name == "tunnel_count" && row.value > 0.0 {
+            return Err(format!("tunnel_count {} wanted 0", row.value));
+        }
+    }
+    Ok(())
+}
+
+fn expect_unprotected(text: &str) -> Result<(), String> {
+    if !text.contains("protection=false") || !text.contains("ccd_in_step=false") {
+        return Err("unprotected scene recorded protection".into());
+    }
+    expect_speed(text)?;
     let mut tunnel_failed = false;
+    let mut contacts_failed = false;
     for row in printed_rows(text)? {
         if row.name == "tunnel_count" {
             if row.status != "FAIL" || row.value <= 0.0 {
@@ -904,12 +1591,20 @@ fn expect_tunnel_fail(text: &str, protect: bool) -> Result<(), String> {
                 ));
             }
             tunnel_failed = true;
+        } else if row.name == "contacts_stored" {
+            if row.status != "FAIL" || row.value >= 1.0 {
+                return Err(format!(
+                    "contacts_stored {} {} wanted FAIL below 1",
+                    row.value, row.status
+                ));
+            }
+            contacts_failed = true;
         } else if row.status != "PASS" {
             return Err(format!("{} wanted PASS beside the tunnel", row.name));
         }
     }
-    if !tunnel_failed {
-        return Err("run has no tunnel_count".into());
+    if !tunnel_failed || !contacts_failed {
+        return Err("unprotected run did not fail tunnel and contacts".into());
     }
     Ok(())
 }
@@ -958,12 +1653,139 @@ fn expect_loss(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn expect_budget(text: &str) -> Result<(), String> {
+    if !text.contains(&format!("steps={BROKEN_STEPS}")) {
+        return Err("budget scene did not run 90 steps".into());
+    }
+    let mut saw_alive = false;
+    let mut saw_asleep = false;
+    for row in printed_against(text, BUDGET_METRICS)? {
+        if row.status != "PASS" {
+            return Err(format!("{} wanted PASS on the budget scene", row.name));
+        }
+        if row.name == "debris_alive" {
+            if row.value > f64::from(DEBRIS_BUDGET) {
+                return Err(format!(
+                    "debris_alive {} wanted <= {DEBRIS_BUDGET}",
+                    row.value
+                ));
+            }
+            saw_alive = true;
+        }
+        if row.name == "debris_asleep" {
+            if row.value < 1.0 {
+                return Err(format!("debris_asleep {} wanted at least 1", row.value));
+            }
+            saw_asleep = true;
+        }
+    }
+    if !saw_alive || !saw_asleep {
+        return Err("budget run is missing debris rows".into());
+    }
+    Ok(())
+}
+
+fn expect_rotor(text: &str) -> Result<(), String> {
+    let mass = 3.0_f64;
+    let half = 1.0_f64;
+    let spin = 2.0_f64;
+    let izz = mass / 3.0 * (half * half + half * half);
+    let expected = 0.5 * izz * spin * spin;
+    if !text.contains(&format!("steps={STEPS}")) {
+        return Err("rotor scene did not free-fly for the ship step count".into());
+    }
+    let mut saw = false;
+    for row in printed_against(text, ROTOR_METRICS)? {
+        if row.status != "PASS" {
+            return Err(format!("{} wanted PASS on the rotor", row.name));
+        }
+        if row.name == "rotational_energy_j" {
+            if (row.value - expected).abs() > 1.0e-4 {
+                return Err(format!(
+                    "rotational_energy_j {} wanted {expected} from the box moment",
+                    row.value
+                ));
+            }
+            saw = true;
+        }
+    }
+    if !saw {
+        return Err("rotor run has no rotational_energy_j".into());
+    }
+    Ok(())
+}
+
+fn expect_wide(text: &str) -> Result<(), String> {
+    if !text.contains(&format!("ships_m_s={}", fmt_num(f64::from(TUNNEL_SPEED))))
+        || !text.contains("steps=1")
+        || !text.contains("ccd_in_step=true")
+    {
+        return Err("wide scene is not the 40 m swept step".into());
+    }
+    for row in printed_against(text, WIDE_METRICS)? {
+        if row.status != "PASS" {
+            return Err(format!("{} wanted PASS on the wide scene", row.name));
+        }
+        if row.name == "tunnel_count" && row.value > 0.0 {
+            return Err(format!("tunnel_count {} wanted 0", row.value));
+        }
+    }
+    Ok(())
+}
+
+fn expect_spin(text: &str) -> Result<(), String> {
+    if !text.contains("steps=1") || !text.contains("ccd_in_step=true") {
+        return Err("spin scene did not run one swept step".into());
+    }
+    for row in printed_against(text, SPIN_METRICS)? {
+        if row.status != "PASS" {
+            return Err(format!("{} wanted PASS on the spin scene", row.name));
+        }
+        if row.name == "tunnel_count" && row.value > 0.0 {
+            return Err(format!("tunnel_count {} wanted 0", row.value));
+        }
+    }
+    Ok(())
+}
+
+fn expect_broken(text: &str) -> Result<(), String> {
+    if !text.contains(&format!("steps={BROKEN_STEPS}")) {
+        return Err("broken scene did not run 90 steps".into());
+    }
+    let mut saw_debris = false;
+    for row in printed_against(text, BROKEN_METRICS)? {
+        if row.status != "PASS" {
+            return Err(format!("{} wanted PASS on the broken scene", row.name));
+        }
+        if row.name == "bonds_broken" && row.value < 1.0 {
+            return Err(format!("bonds_broken {} wanted at least 1", row.value));
+        }
+        if row.name == "debris_alive" {
+            if row.value < 1.0 || row.value > 8.0 {
+                return Err(format!("debris_alive {} wanted 1 to 8", row.value));
+            }
+            saw_debris = true;
+        }
+        if row.name == "floor_penetration_m" && row.value > 0.0 {
+            return Err(format!("floor_penetration_m {}", row.value));
+        }
+        if row.name == "determinism_hash_match" && row.value < 1.0 {
+            return Err("broken run did not hash-match".into());
+        }
+    }
+    if !saw_debris {
+        return Err("broken run has no debris_alive".into());
+    }
+    Ok(())
+}
+
 fn expect_file(
     dir: &Path,
     fixture: &str,
     protect: bool,
     failed: i32,
     energy: &str,
+    ccd: bool,
 ) -> Result<(), String> {
     let path = dir.join(format!("{fixture}.json"));
     let text =
@@ -975,8 +1797,9 @@ fn expect_file(
     if !text.contains(&format!("\"protection\": {protection}")) {
         return Err(format!("{fixture} json has the wrong protection flag"));
     }
-    if !text.contains("\"ccd_in_step\": false") {
-        return Err(format!("{fixture} json claims CCD is in step"));
+    let ccd_text = if ccd { "true" } else { "false" };
+    if !text.contains(&format!("\"ccd_in_step\": {ccd_text}")) {
+        return Err(format!("{fixture} json has the wrong ccd_in_step flag"));
     }
     if !text.contains(&format!("\"energy\": \"{energy}\"")) {
         return Err(format!("{fixture} json has the wrong energy account"));
