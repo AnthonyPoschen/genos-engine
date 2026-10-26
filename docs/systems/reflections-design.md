@@ -175,7 +175,7 @@ The oblique clip is Lengyel's construction with a Vulkan depth row. The third ro
 
 The surface normal comes from the Gerstner sum. The glossy stack is the reflection once that pass exists. The CPU picture in this phase reflects a flat plane along the mirrored ray. Refraction samples the opaque colour along the Snell direction. A refracted miss keeps the opaque sample, darkened by Beer–Lambert over the water depth. It does not invent a tint, and it does not read the world cache. The cache waits with the screen march.
 
-Shoreline depth is the opaque depth minus the water surface, in metres. Wave height is `min(deep_height, 0.75 × depth)`. Foam coverage is 1 where the clamp is active or the horizontal Jacobian drops below 0.5, and 0 elsewhere, with a smooth step between. The path tracer does not model foam yet ([reference check](lighting/reference-check.md) blind spots). Foam's picture grade stays `NOT-IMPLEMENTED` until the reference grows that term. The harness grades the clamp on two samples. `shoreline_ratio` is the max crest / depth. The shallow sample sits on the cap, and the gate is `0.75 + 1e-4` (`0.7501`), so a ratio that lands on the cap still passes. `shoreline_deep_ratio` is the same crest at 4 m, where the wave is under the cap, gated at 0.5. Forcing the cap there fails.
+Shoreline depth is the opaque depth minus the water surface, in metres. Wave height is `min(deep_height, 0.75 × depth)`. Foam coverage is 1 where the clamp is active or the horizontal Jacobian drops below 0.5, and 0 elsewhere, with a smooth step between. The path tracer does not model foam yet ([reference check](lighting/reference-check.md) blind spots). Foam's picture grade stays `NOT-IMPLEMENTED` until the reference grows that term. The harness grades the clamp against an independent Gerstner sample at `(2, 0)`, time 0, amplitude 0.4, wavelength 8, steepness 0.5. The oracle writes the cap as the literal `0.75`. Depths are 0.0625, 0.125, 0.25, 0.5, 1, 2, and 4 metres. `shoreline_ratio` is `|engine − oracle|` of the max crest/depth, and `shoreline_deep_ratio` is the same error at 4 m. The gate is `1e-4`: larger than an f32 sine residual near this phase (the f32 sine of π/2 is 1, and an f32 ulp near 0.75 is about `6e-8`) and far below the unclamped gap (about 6) and the forced-cap gap (about 0.65). Skipping the clamp or forcing it in deep water fails.
 
 Caustics:
 
@@ -214,24 +214,28 @@ Frame targets:
 - Basic scene, no glossy pixels, no mirror, no water: reflection time ≤ 0.05 ms. The 500 fps target is a 2 ms frame.
 - Stress scene, High, 1440p: reflection time ≤ 1.00 ms, and lighting time plus reflection time ≤ 10 ms. Reflection work yields first when the sum would pass 10 ms. ADR 0013's 8 ms lighting cap and this 1 ms cap are both ceilings. They do not stack past the frame target.
 
-Gates: `ms_frac` ≤ 1 and `vram_frac` ≤ 1, each the max of used/cap across the four presets. A cap of 0 passes only at a use of 0. `low_reflection_rays` ≤ 0.
+Gates: `ms_frac` ≤ 1 and `vram_frac` ≤ 1, each the max of used/cap across the four presets, once a GPU auto-tune exists. Both rows are `NOT-IMPLEMENTED`. Lavapipe timestamps are not the 4070 or 1060 cap. The pass still reports `gpu_ns` and `vram_bytes` through `get_reflection_stats` for that later tune. `low_reflection_rays` ≤ 0 is the atomic the Low preset's frame shader increments.
 
 ## Metrics
 
 Every gate is `value ≤ threshold`.
 
-Live grades the optics rows and the CPU picture. Optics rows are the module's error against a baked table: `mirror_law_rad`, `mirror_point_m`, `fresnel_abs`, `fresnel_below_abs`, `water_f0_abs`, `snell_rad`, `ggx_energy`, `mirror_view_frac`, `portal_point_m`, `beer_rel`.
+Live and good read the presented frame. The picture is the grade window: a mirror, a portal whose bases are a quarter-turn about Y into a quarter-turn about X, and water from the incident side and from the transmitted side. `reflections-check` opens that window, reads the swapchain, and compares it with `crates/lighting-ref/src/reflections_trace.rs`. The tracer is f64. It does not call `genos_math::optics`, it does not read that module's constants, and it does not call the renderer. The scene literals are copied into the tracer.
 
-Picture rows read the CPU mirror, portal, and flat-water image, and the Low ray cap:
+A channel that matches the quantised trace contributes 0. A one-code miss contributes 0 only when the f64 colour sits within 0.02 of a rounding boundary, which is the f32 store of that shade. Any larger miss is the row's value. The source label is `presented frame`. Nothing is labeled `GPU frame readback`.
 
-- `portal_leak` is the six-sample oblique disagreement above.
-- `shoreline_ratio` is the max Gerstner crest after `shoreline_height`, divided by depth. The shallow sample is the boundary and lands on 0.75. The gate is 0.7501: `1e-4` is the float epsilon, so that landing still passes. An unclamped crest fails it.
-- `shoreline_deep_ratio` is that crest at 4 m divided by depth. The ratio stays under the cap. The gate is 0.5. Applying the cap in deep water (`PictureFault::FORCE_CAP`) fails it.
-- `near_weighted_rel` is the depth-weighted relative error of the frame grade buffer against `crates/lighting-ref/src/reflections_trace.rs`. The buffer is what `reflections_frame.comp` writes; the harness maps it. The tracer rebuilds the tiles in f64. Its Fresnel, Snell, Beer–Lambert, portal map, and view count are closed forms in that file. It does not call `genos_math::optics`, and it does not read that module's constants. It does not call `shade_picture` or `water_shade`. Weight is `1 / max(depth, 0.25)` on the tracer depth. Per pixel the error is the mean of `|a − b| / max(|b|, 1e-3)` over the three channels. A planted near bias (`PictureFault::NEAR_BIAS` alone) fails this row. A planted blink (`PictureFault::BLINK` alone) fails `flicker_reversal`. `low_reflection_rays` is the ray count in that same buffer. Every other implemented row is a CPU model check until it reads the GPU.
-- `flicker_reversal` is the mean size of a sign change in one still mirror pixel, eight frames, after subtracting the tracer's value.
-- `low_reflection_rays` is the ray count `scheduled_low_rays` reports. The Low preset is 0. The broken scheduler reports 64.
+- `mirror_law_rad`, `fresnel_abs`, and `beer_rel` read the incident-side water, excluding the 8×8 GGX swatch.
+- `water_f0_abs` is the incident-side centre. `snell_rad` is the pixel whose incidence is not face-on.
+- `fresnel_below_abs` is the transmitted-side water, past the critical angle.
+- `mirror_point_m` is the mirror window. `portal_point_m` is the portal window. `portal_leak` is the fraction of mirror pixels that show the plane behind the mirror.
+- `mirror_view_frac` is the fraction of the third window that is not the surface albedo. Medium's cap is 2, so that window is refused.
+- `ggx_energy` is `|presented[2,2].r − 1|` on the projected-NDF swatch.
+- `near_weighted_rel` is the depth-weighted relative error of the whole frame. Weight is `1 / max(depth, 0.25)` on the tracer depth. Per pixel the error is the mean of `|a − b| / max(|b|, 1e-3)` over the three channels.
+- `flicker_reversal` is the max mean-channel change across three still Medium frames.
+- `low_reflection_rays` is the atomic the frame shader increments on Low. The source label is `GPU dispatch count`. The shader calls `reflection_ray_cap`. A one-group launch still runs when the cap is 0, and threads past the cap do not increment.
+- `shoreline_ratio` and `shoreline_deep_ratio` are `|engine − oracle|` against the wave sample above. The source label is `wave oracle`. The gate is `1e-4`.
 
-These rows only test the comparator. Live is `NOT-IMPLEMENTED`, the value is `na`, and the JSON `reference` is the good fixture's number: `ssr_depth_rel`, `caustic_rel`, `ms_frac`, `vram_frac`. Lavapipe timing is not a stand-in for `ms_frac` or `vram_frac`.
+`ssr_depth_rel`, `denoise_lag_frames`, `caustic_rel`, `ms_frac`, and `vram_frac` are `NOT-IMPLEMENTED` on live, good, and bad. The value is `na`. Lavapipe time is not `ms_frac`. `get_reflection_stats` reports `gpu_ns` and `vram_bytes` without turning them into those fractions.
 
 `denoise_lag_frames` is `NOT-IMPLEMENTED` on live, good, and bad. There is no reflection denoiser to run, and copying the sample is not a result.
 
@@ -250,8 +254,8 @@ These rows only test the comparator. Live is `NOT-IMPLEMENTED`, the value is `na
 | `portal_leak` | 0 | fraction of plane samples drawn on the wrong side |
 | `portal_point_m` | 1e-5 | error of the portal rigid map, metres |
 | `beer_rel` | 0.02 | relative error of transmittance against `exp(-σ d)` |
-| `shoreline_ratio` | 0.7501 | max wave height / depth. `1e-4` above 0.75 is the float epsilon |
-| `shoreline_deep_ratio` | 0.5 | crest / depth at 4 m, under the cap |
+| `shoreline_ratio` | 1e-4 | `|engine − oracle|` of max crest / depth. The oracle's cap literal is 0.75 |
+| `shoreline_deep_ratio` | 1e-4 | `|engine − oracle|` of the same crest at 4 m |
 | `caustic_rel` | 0.05 | mean relative error against flat-water transmittance |
 | `near_weighted_rel` | 0.03 | depth-weighted relative error, weight `1 / max(depth, 0.25)` |
 | `flicker_reversal` | 0.002 | mean size of a frame-to-frame reversal on a still pixel |
@@ -273,7 +277,7 @@ cargo run -p genos-lighting-ref --bin reflections-check -- --fixture bad --out g
 
 `--case` is an alias of `--fixture`. The later flag wins when both are set. Stdout is one line per metric: `name value=… threshold=… PASS|FAIL|NOT-IMPLEMENTED`. The JSON is `<out>/metrics.json`. The default directory is `./genos-debug/reflections`. `--out` wins. `GENOS_REFLECTIONS_OUT` applies only when `--out` was omitted. Exit 0 when no metric failed. Exit 1 when any metric failed. Exit 2 on a bad argument. `NOT-IMPLEMENTED` is not a failure.
 
-`cargo test -p genos-lighting-ref reflections` runs the good, bad, and live fixtures and the `--out` precedence. Lavapipe is not required. Picture grades later use lavapipe only to check that the files appear; the numeric picture gate is the owner's RTX 4070, as with the lighting reference check.
+`cargo test -p genos-lighting-ref reflections` runs the good, bad, and live fixtures and the `--out` precedence. Good and live open a proof window on lavapipe. The numeric picture gate is that readback against the f64 trace. Timing on lavapipe is not the 4070 or 1060 budget.
 
 Rhai gates land with `debug/reflections`, on the same line format, under `debug/reflections/scripts/gates/`:
 
@@ -286,7 +290,7 @@ Rhai gates land with `debug/reflections`, on the same line format, under `debug/
 | `water.rhai` | a pool, a shore, a vertical sun | `snell_rad`, `beer_rel`, `shoreline_ratio`, `caustic_rel` |
 | `low.rhai` | the pool on the Low preset, software tracer forced | `low_reflection_rays` = 0 |
 
-The CPU picture grades `portal_leak`, `shoreline_ratio`, `shoreline_deep_ratio`, and `flicker_reversal` on live. `near_weighted_rel` and `low_reflection_rays` read the frame grade buffer. Rows that do not read the GPU are labeled CPU model checks. The Rhai scenes and `debug/reflections` still wait. Glossy screen marches, the world-cache read, the `ray_query` fallback, and the reflection denoiser wait on lighting phase 3 (`cursor/lighting-p3-capped-refresh`). That next phase does not edit `lighting_schedule.rs` and does not edit the GI passes. `ssr_depth_rel` stays `NOT-IMPLEMENTED` until the march exists. Foam and `caustic_rel` stay `NOT-IMPLEMENTED` until P9.
+The presented frame grades the mirror, the portal, Fresnel, F0, Snell, Beer, GGX, flicker, the view cap, and the near-weighted error. The shoreline rows are the wave oracle. `low_reflection_rays` is the GPU dispatch count. The Rhai scenes and `debug/reflections` still wait. Glossy screen marches, the world-cache read, the `ray_query` fallback, and the reflection denoiser wait on lighting phase 3 (`cursor/lighting-p3-capped-refresh`). That next phase does not edit `lighting_schedule.rs` and does not edit the GI passes. `ssr_depth_rel` stays `NOT-IMPLEMENTED` until the march exists. Foam and `caustic_rel` stay `NOT-IMPLEMENTED` until P9.
 
 ## Debug and tests
 
@@ -348,7 +352,7 @@ Each phase is one change. A phase that misses its gate is dropped: a five-line p
 | P5 | Planar mirrors. | `mirror_view_frac`, `portal_leak`, `mirror_point_m` |
 | P6 | Portals on the same cap. | `portal_point_m`, `portal_leak` |
 | P7 | Water shade, Snell, Beer–Lambert. | `snell_rad`, `beer_rel` |
-| P8 | Shoreline clamp and Jacobian foam. | `shoreline_ratio` ≤ 0.7501, `shoreline_deep_ratio` ≤ 0.5 |
+| P8 | Shoreline clamp and Jacobian foam. | `shoreline_ratio` ≤ 1e-4, `shoreline_deep_ratio` ≤ 1e-4 against the wave oracle |
 | P9 | Caustic modes. | `caustic_rel` ≤ 0.05, `vram_frac` ≤ 1 |
 
 P4 is where half-resolution tracing is confirmed or the near band moves to full resolution inside 32 MB. P9 does not add a ray cap of its own.
