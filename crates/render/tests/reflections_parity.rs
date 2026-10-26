@@ -37,13 +37,14 @@
 
 use std::ffi::{c_char, c_void};
 
-use genos_math::optics::{self, PortalLink, MIRROR_FRESNEL_CUTOFF};
-use genos_math::{Mat3, Vec3};
+use genos_math::optics::{self, GerstnerWave, PortalLink, ReflectionPreset, MIRROR_FRESNEL_CUTOFF};
+use genos_math::{Mat3, Vec3, Vec4};
 
 const SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/reflections_check.comp.spv"));
 const ROWS: usize = 4;
 const STRIDE: usize = 19;
-const WORDS: usize = ROWS * STRIDE;
+const TRAILER: usize = 16;
+const WORDS: usize = ROWS * STRIDE + TRAILER;
 const LIMIT: f32 = 1.0e-5;
 
 #[derive(Clone, Copy)]
@@ -204,6 +205,48 @@ fn cpu_words(broken: bool) -> [f32; WORDS] {
         ];
         out[base..base + STRIDE].copy_from_slice(&packed);
     }
+    let tail = ROWS * STRIDE;
+    let origin = Vec3::new(0.0, 0.0, -2.0);
+    out[tail] = if optics::plane_in_front(Vec3::new(0.0, 0.0, -1.0), origin, Vec3::Z) {
+        1.0
+    } else {
+        0.0
+    };
+    out[tail + 1] = if optics::plane_in_front(Vec3::new(0.0, 0.0, -3.0), origin, Vec3::Z) {
+        1.0
+    } else {
+        0.0
+    };
+    let row = optics::oblique_clip_row(optics::parity_projection(), Vec4::new(0.0, 0.0, 1.0, 2.0));
+    out[tail + 2..tail + 6].copy_from_slice(&row);
+    let (displaced, normal) = optics::gerstner(
+        &[GerstnerWave {
+            direction: [1.0, 0.0],
+            amplitude: 0.25,
+            wavelength: 4.0,
+            speed: 1.0,
+            steepness: 0.5,
+        }],
+        [1.0, 0.5],
+        0.25,
+    );
+    out[tail + 6] = displaced.y;
+    out[tail + 7] = normal.x;
+    out[tail + 8] = normal.y;
+    out[tail + 9] = normal.z;
+    out[tail + 10] = optics::shoreline_height(0.4, 0.2, 0.75);
+    let shaded = optics::water_shade(
+        0.25,
+        Vec3::new(0.8, 0.2, 0.1),
+        Vec3::new(0.1, 0.3, 0.6),
+        0.5,
+        1.5,
+    );
+    out[tail + 11] = shaded.x;
+    out[tail + 12] = shaded.y;
+    out[tail + 13] = shaded.z;
+    out[tail + 14] = optics::reflection_ray_cap(ReflectionPreset::Low) as f32;
+    out[tail + 15] = optics::reflection_view_cap(ReflectionPreset::Low) as f32;
     out
 }
 
@@ -223,7 +266,7 @@ fn max_abs_slots(gpu: &[f32], cpu: &[f32], slot: usize) -> f32 {
 fn max_abs_except(gpu: &[f32], cpu: &[f32], skip: usize) -> f32 {
     let mut max_err: f32 = 0.0;
     for (index, (got, expect)) in gpu.iter().zip(cpu).enumerate() {
-        if index % STRIDE == skip {
+        if index < ROWS * STRIDE && index % STRIDE == skip {
             continue;
         }
         max_err = max_err.max((got - expect).abs());
