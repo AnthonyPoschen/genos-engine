@@ -169,11 +169,11 @@ A planar mirror reflects the camera through its plane and draws one view. A port
 
 A further view is emitted when the running product of Fresnel reflectances stays at least 0.02 and the cap still has room. `min(request, cap)` is the broken scheduler: a water chain (F ≈ 0.020 then 0.060) emits one view, and clamping a request of 2 to the Medium cap emits two. Gate: `mirror_view_frac` ≤ 0, the max over Potato, Low, Medium, and High of `|emitted − fresnel_budget| / cap`. A cap of 0 passes only when that preset emits 0. The count is `optics::mirror_views`.
 
-The oblique clip is Lengyel's construction with a Vulkan depth row. Until that matrix lands, the harness gates the predicate on six samples, three behind the plane and three in front. Gate: `portal_leak` ≤ 0.
+The oblique clip is Lengyel's construction with a Vulkan depth row. The third row is the scaled plane `c` (scale 1), so the plane sits on clip `z/w = 0`. Lengyel's listing uses scale 2 and `c − row3` because that lands on the OpenGL near plane `z/w = −1`. `sgn(0)` is +1. `portal_leak` is the fraction of six reflected-camera samples where `oblique_draws` disagrees with `plane_in_front`. Gate: `portal_leak` ≤ 0. Drawing every sample is the broken case.
 
 ## Water
 
-The surface normal comes from the Gerstner sum. Reflection uses the glossy stack. Refraction samples the opaque colour along the Snell direction in screen space. A refracted miss keeps the opaque sample at the pixel, darkened by Beer–Lambert over the water depth. It does not invent a tint.
+The surface normal comes from the Gerstner sum. The glossy stack is the reflection once that pass exists. The CPU picture in this phase reflects a flat plane along the mirrored ray. Refraction samples the opaque colour along the Snell direction. A refracted miss keeps the opaque sample, darkened by Beer–Lambert over the water depth. It does not invent a tint, and it does not read the world cache. The cache waits with the screen march.
 
 Shoreline depth is the opaque depth minus the water surface, in metres. Wave height is `min(deep_height, 0.75 × depth)`. Foam coverage is 1 where the clamp is active or the horizontal Jacobian drops below 0.5, and 0 elsewhere, with a smooth step between. The path tracer does not model foam yet ([reference check](lighting/reference-check.md) blind spots). Foam's picture grade stays `NOT-IMPLEMENTED` until the reference grows that term. The harness grades the clamp: `shoreline_ratio` ≤ 0.75.
 
@@ -220,9 +220,17 @@ Gates: `ms_frac` ≤ 1 and `vram_frac` ≤ 1, each the max of used/cap across th
 
 Every gate is `value ≤ threshold`.
 
-Live grades a row only when `genos-math` optics implements it: `mirror_law_rad`, `mirror_point_m`, `fresnel_abs`, `fresnel_below_abs`, `snell_rad`, `ggx_energy`, `mirror_view_frac`, `portal_point_m`, `beer_rel`. Those values are the module's error against a baked table.
+Live grades the optics rows and the CPU picture. Optics rows are the module's error against a baked table: `mirror_law_rad`, `mirror_point_m`, `fresnel_abs`, `fresnel_below_abs`, `snell_rad`, `ggx_energy`, `mirror_view_frac`, `portal_point_m`, `beer_rel`.
 
-These rows only test the comparator. Live is `NOT-IMPLEMENTED`, the value is `na`, and the JSON `reference` is the good fixture's number: `ssr_depth_rel`, `portal_leak`, `shoreline_ratio`, `caustic_rel`, `near_weighted_rel`, `flicker_reversal`, `low_reflection_rays`, `ms_frac`, `vram_frac`.
+Picture rows read the CPU mirror, portal, and flat-water image, and the Low ray cap:
+
+- `portal_leak` is the six-sample oblique disagreement above.
+- `shoreline_ratio` is the Gerstner crest after `shoreline_height`, divided by depth. The crest is the wave, not a canned 0.4.
+- `near_weighted_rel` is the depth-weighted relative error of that image against `crates/lighting-ref/src/reflections_trace.rs`. The tracer rebuilds the tiles with Whitted rays. It does not call `shade_picture` or `water_shade`. Weight is `1 / max(depth, 0.25)` on the tracer depth. Per pixel the error is the mean of `|a − b| / max(|b|, 1e-3)` over the three channels.
+- `flicker_reversal` is the mean size of a sign change in one still mirror pixel, eight frames, after subtracting the tracer's value.
+- `low_reflection_rays` is the ray count `scheduled_low_rays` reports. The Low preset is 0. The broken scheduler reports 64.
+
+These rows only test the comparator. Live is `NOT-IMPLEMENTED`, the value is `na`, and the JSON `reference` is the good fixture's number: `ssr_depth_rel`, `caustic_rel`, `ms_frac`, `vram_frac`. Lavapipe timing is not a stand-in for `ms_frac` or `vram_frac`.
 
 `denoise_lag_frames` is `NOT-IMPLEMENTED` on live, good, and bad. There is no reflection denoiser to run, and copying the sample is not a result.
 
@@ -275,7 +283,7 @@ Rhai gates land with `debug/reflections`, on the same line format, under `debug/
 | `water.rhai` | a pool, a shore, a vertical sun | `snell_rad`, `beer_rel`, `shoreline_ratio`, `caustic_rel` |
 | `low.rhai` | the pool on the Low preset, software tracer forced | `low_reflection_rays` = 0 |
 
-Until those scenes exist, the picture rows stay `NOT-IMPLEMENTED` on live. The optics rows already grade `genos-math`.
+The CPU picture grades `portal_leak`, `shoreline_ratio`, `near_weighted_rel`, `flicker_reversal`, and `low_reflection_rays` on live. The Rhai scenes and `debug/reflections` still wait. Glossy screen marches, the world-cache read, the `ray_query` fallback, and the reflection denoiser wait on lighting phase 3 (`cursor/lighting-p3-capped-refresh`). That next phase does not edit `lighting_schedule.rs` and does not edit the GI passes. `ssr_depth_rel` stays `NOT-IMPLEMENTED` until the march exists. Foam and `caustic_rel` stay `NOT-IMPLEMENTED` until P9.
 
 ## Debug and tests
 
@@ -295,7 +303,7 @@ Arguments, each with an environment mirror that applies only when the argument w
 | `--reflection-tracer off\|software\|ray_query` | `GENOS_REFLECTION_TRACER` | tracer |
 | `--out DIR` | `GENOS_REFLECTIONS_OUT` | report directory |
 
-Only `GENOS_REFLECTIONS_OUT` is read today, by `reflections-check`. The others are the feature's arguments. They are not registered until the feature reads them.
+`reflections-check` reads `GENOS_REFLECTIONS_OUT`. The picture settings read the other six, and the command line wins when the argument is present.
 
 `ReflectionSettings` implements `EngineSettings`, lives on the scene, and is on the MCP catalogue (`get_reflection_settings`, `set_reflection_settings`). The menu, the CLI, and MCP write that struct.
 
@@ -342,6 +350,10 @@ Each phase is one change. A phase that misses its gate is dropped: a five-line p
 
 P4 is where half-resolution tracing is confirmed or the near band moves to full resolution inside 32 MB. P9 does not add a ray cap of its own.
 
+The CPU picture landed the parts that do not need that lighting phase: planar mirrors and portals (P5, P6) with the Fresnel view cap, water shading and refraction (P7) on a flat plane, the shoreline clamp (P8; Jacobian foam still waits), and the Low ray count from P4. The frame is not hooked, so a later schedule skips these passes when their counts are zero and today's Lambert picture stays valid. `ReflectionSettings` is on the scene, the debug menu, and MCP. Classify counters and the idle-millisecond probe wait with the frame hook.
+
+Next, after lighting phase 3: the screen march, the world-cache or `ray_query` fallback, and one spatial reflection filter. Those three stay out of `lighting_schedule.rs` and out of the GI passes. They turn `ssr_depth_rel` and `denoise_lag_frames` live under the same thresholds.
+
 ## Networking
 
 - Replicated state: roughness, metallic, IOR, surface kind, portal link ids, Gerstner amplitudes, and the water clock. Hit records, Hi-Z, mirror targets, and the caustic cache are derived and are not replicated.
@@ -371,7 +383,8 @@ Collected from the sections above, for the pull request that implements each one
 | Walter et al., EGSR 2007 | GGX NDF, `α = roughness²` | Transmission is one Snell direction, not a random BTDF sample. |
 | McGuire and Mara, JCGT 2014 | Hi-Z screen march | Step cap. Thickness is 25 cm in world space. A miss reads the cache. |
 | Diefenbach 1996 | Reflected camera for a planar mirror | View cap. A refused view reads the cache. |
-| Lengyel, JGD 1(2), 2005 | Oblique near plane on the mirror or portal | The matrix is derived for Vulkan clip Z in 0..1. |
+| Lengyel, JGD 1(2), 2005 | Oblique near plane on the mirror or portal | Vulkan clip Z is 0..1, so the third row is `c` and the scale is 1. The listing subtracts the fourth row and uses 2, for OpenGL `z/w = −1`. `sgn(0)` is +1. |
+| Diefenbach 1996, this picture | Reflected camera, graded by a Whitted tracer from the hit | The shaded water hit is a flat plane. Gerstner feeds the shore clamp, not that hit. A refused view and a refraction miss keep the opaque sample. The world cache is not read. |
 | Luebke and Georges, I3D 1995 | A portal opening | We fill the opening. We do not walk the scene as a PVS. |
 | Finch, GPU Gems ch. 1, 2004 | Gerstner sum | Component count is a cap, not a fixed ocean. |
 | Tessendorf, SIGGRAPH 2001 | Jacobian foam | No FFT. |

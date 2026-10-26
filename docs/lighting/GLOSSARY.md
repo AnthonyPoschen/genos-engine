@@ -193,7 +193,7 @@ Role: SCHED · Literature: — · More detail: S63–S65, SUN-small-sun-step; [`
 **Work counter**: rays traced, cache entries refreshed, or lamps shaded (fresh shadow rays) in one recorded frame. Role: TOOL
 
 ### Specular, mirrors, portals, water
-Accepted in [ADR 0019](../adr/0019-reflections.md) (Engine bot, 2026-10-26; Anthony Poschen delegated design approval). The picture path is not built. One term, one meaning.
+Accepted in [ADR 0019](../adr/0019-reflections.md) (Engine bot, 2026-10-26; Anthony Poschen delegated design approval). The CPU picture grades planar mirrors, portals, and flat water. Glossy screen marches, the world cache, ray queries, and the reflection denoiser are not built. One term, one meaning.
 
 **Specular lobe**: the view-dependent glossy term, kept separate from diffuse GI.
 Role: OUT · Literature: Cook and Torrance, TOG 1982; Lumen reflections · More detail: [../systems/reflections-design.md](../systems/reflections-design.md)
