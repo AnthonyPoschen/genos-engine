@@ -8,6 +8,13 @@
 #![cfg_attr(
     test,
     expect(
+        clippy::expect_used,
+        reason = "a fixture test aborts when the grader itself errors"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
         clippy::unwrap_used,
         reason = "a fixture test aborts when the grader itself errors"
     )
@@ -328,8 +335,10 @@ pub fn summary_line(metric: &Metric) -> String {
 #[must_use]
 pub fn to_json(report: &Report) -> String {
     let mut body = String::from("{\n");
-    body.push_str(&format!("  \"case\": \"{}\",\n", report.case_name));
-    body.push_str(&format!("  \"source\": \"{}\",\n", report.source));
+    let case_field = format!("  \"case\": \"{}\",\n", report.case_name);
+    body.push_str(&case_field);
+    let source_field = format!("  \"source\": \"{}\",\n", report.source);
+    body.push_str(&source_field);
     body.push_str("  \"preset\": \"high\",\n");
     body.push_str("  \"metrics\": [\n");
     for (index, metric) in report.metrics.iter().enumerate() {
@@ -339,17 +348,20 @@ pub fn to_json(report: &Report) -> String {
             ","
         };
         body.push_str("    {");
-        body.push_str(&format!("\"name\": \"{}\"", metric.name));
-        body.push_str(&format!(", \"value\": {}", value_json(&metric.value)));
-        body.push_str(&format!(
-            ", \"threshold\": {}",
-            value_json(&metric.threshold)
-        ));
-        body.push_str(&format!(", \"status\": \"{}\"", metric.status.as_str()));
+        let name_field = format!("\"name\": \"{}\"", metric.name);
+        body.push_str(&name_field);
+        let value_field = format!(", \"value\": {}", value_json(&metric.value));
+        body.push_str(&value_field);
+        let threshold_field = format!(", \"threshold\": {}", value_json(&metric.threshold));
+        body.push_str(&threshold_field);
+        let status_field = format!(", \"status\": \"{}\"", metric.status.as_str());
+        body.push_str(&status_field);
         if let Some(detail) = metric.detail {
-            body.push_str(&format!(", \"detail\": \"{detail}\""));
+            let detail_field = format!(", \"detail\": \"{detail}\"");
+            body.push_str(&detail_field);
         }
-        body.push_str(&format!("}}{comma}\n"));
+        let tail = format!("}}{comma}\n");
+        body.push_str(&tail);
     }
     body.push_str("  ]\n}\n");
     body
