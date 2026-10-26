@@ -62,6 +62,19 @@ const F0_BLACK_O: [f32; 3] = [-1.045_739_5, 1.601_692_2, 2.489_488_1];
 const F0_BLACK_N: [f32; 3] = [0.568_410_3, -0.055_271_56, 0.820_886_6];
 const F0_BLACK_T: [f32; 3] = [0.822_143_3, 0.0, -0.569_280_5];
 const F0_BLACK_B: [f32; 3] = [0.031_465_02, 0.998_471_4, 0.045_441_15];
+/// Water tilted 55° off the centre ray of x 52..60, y 48..56. The incident
+/// ray and the refracted ray separate by about 17°.
+const SNELL_O: [f32; 3] = [-0.269_148_23, 1.589_716_1, 2.834_019_7];
+const SNELL_N: [f32; 3] = [0.926_810_74, -0.042_882_52, 0.373_072_33];
+const SNELL_T: [f32; 3] = [0.373_415_83, 0.0, -0.927_664_1];
+const SNELL_B: [f32; 3] = [0.039_780_576, 0.999_080_12, 0.016_013_011];
+/// On the incident ray, 0.5 m past that surface. The refracted ray misses it
+/// and hits the green backstop.
+const SNELL_OCC_O: [f32; 3] = [-0.380_753_7, 1.627_173_8, 2.347_205_4];
+const SNELL_OCC_N: [f32; 3] = [0.224_290_19, -0.074_763_395, 0.971_650_3];
+const SNELL_OCC_T: [f32; 3] = [0.974_377_33, 0.0, -0.224_919_68];
+const SNELL_OCC_B: [f32; 3] = [0.016_815_759, 0.997_201_3, 0.072_847_754];
+const SNELL_OCC_C: [f32; 3] = [0.92, 0.12, 0.08];
 
 /// Camera for [`grade_world`]. Yaw and pitch are zero, so it looks down −Z.
 #[must_use]
@@ -149,8 +162,8 @@ fn grade_reflectors() -> Vec<Reflector> {
         TRANS,
         [0, 0, 80, 46],
     );
-    // The same plane continues under the transmission patch. The flat F0 quad
-    // takes the corner, so this scissor starts at x = 16.
+    // The same plane continues beside the Snell column. The flat F0 quad takes
+    // the corner, so this scissor starts at x = 16 and stops at x = 52.
     let air_tail = reflector(
         ReflectorKind::Water,
         AIR_O,
@@ -158,7 +171,28 @@ fn grade_reflectors() -> Vec<Reflector> {
         AIR_T,
         AIR_B,
         TRANS,
-        [16, 46, 64, 14],
+        [16, 46, 36, 14],
+    );
+    let air_right = reflector(
+        ReflectorKind::Water,
+        AIR_O,
+        AIR_N,
+        AIR_T,
+        AIR_B,
+        TRANS,
+        [60, 46, 20, 14],
+    );
+    // Tilted so the incident ray hits the red block and the refracted ray hits
+    // the green backstop. The column is x 52..60, y 46..60. The gate reads the
+    // inner 8×8, where those two rays disagree.
+    let snell = reflector(
+        ReflectorKind::Water,
+        SNELL_O,
+        SNELL_N,
+        SNELL_T,
+        SNELL_B,
+        TRANS,
+        [52, 46, 8, 14],
     );
     // Albedo is black. The reflection target is white, so a pixel on this quad
     // is the Fresnel weight at normal incidence.
@@ -180,10 +214,12 @@ fn grade_reflectors() -> Vec<Reflector> {
         TRANS,
         [80, 0, 80, 60],
     );
-    vec![mirror, portal, extra, air, air_tail, f0, below]
+    vec![
+        mirror, portal, extra, air, air_tail, air_right, snell, f0, below,
+    ]
 }
 
-fn grade_planes() -> [ShadePlane; 8] {
+fn grade_planes() -> [ShadePlane; 9] {
     // Leak sits on the reflected camera's side of the mirror (z = 0, mirror at
     // z = 1). The oblique near plane drops it. The red wall fills the mirror
     // scissor and stops short of the water reflection ray. The beer back is
@@ -246,6 +282,15 @@ fn grade_planes() -> [ShadePlane; 8] {
             0.074_491_31,
             0.077_033_76,
             [0.0, 0.0, 0.0],
+        ),
+        shade(
+            SNELL_OCC_O,
+            SNELL_OCC_N,
+            SNELL_OCC_T,
+            SNELL_OCC_B,
+            0.061_653_294,
+            0.064_625_71,
+            SNELL_OCC_C,
         ),
     ]
 }

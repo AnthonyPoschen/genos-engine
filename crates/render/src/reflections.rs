@@ -20,6 +20,9 @@ use crate::pack::GpuVertex;
 
 /// Pixels on a side of one mirror, portal, or water tile.
 pub const TILE: u32 = 8;
+/// Reflector quads, shade planes, and the water-buffer plane array.
+/// The grade scene uses 9 reflectors and 9 shade planes.
+pub const REFLECTOR_CAP: usize = 12;
 
 const FOV: f32 = 60.0_f32.to_radians();
 const MIRROR_EYE: Vec3 = Vec3::new(0.0, 1.0, 4.0);
@@ -664,11 +667,11 @@ fn read_u32(bytes: &[u8]) -> u32 {
     u32::from_le_bytes(word)
 }
 
-/// One window quad per reflector, in list order, at most eight.
+/// One window quad per reflector, in list order, at most [`REFLECTOR_CAP`].
 #[must_use]
 pub fn reflector_quads(reflectors: &[crate::world::Reflector]) -> Vec<GpuVertex> {
     let mut out = Vec::new();
-    for reflector in reflectors.iter().take(8) {
+    for reflector in reflectors.iter().take(REFLECTOR_CAP) {
         out.extend(surface_quad(reflector));
     }
     out
@@ -726,14 +729,14 @@ fn surface_quad(reflector: &crate::world::Reflector) -> [GpuVertex; 6] {
     [vert(a), vert(b), vert(c), vert(a), vert(c), vert(d)]
 }
 
-/// Water quads for the translucent pass. At most four surfaces.
+/// Water quads for the translucent pass. At most [`REFLECTOR_CAP`] surfaces.
 #[must_use]
 pub fn water_vertices(reflectors: &[crate::world::Reflector]) -> Vec<GpuVertex> {
     let mut out = Vec::new();
     for reflector in reflectors
         .iter()
         .filter(|item| item.kind == crate::world::ReflectorKind::Water)
-        .take(4)
+        .take(REFLECTOR_CAP)
     {
         let quad = water_quad(
             Vec3::new(

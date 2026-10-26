@@ -281,7 +281,12 @@ fn measure(kind: Kind) -> Vec<Metric> {
             0.02,
             "presented frame",
         ),
-        gate("water_f0", water_f0(kind), PRESENTED_FLOOR, "presented frame"),
+        gate(
+            "water_f0",
+            water_f0(kind),
+            PRESENTED_FLOOR,
+            "presented frame",
+        ),
         gate(
             "snell_transmit",
             snell_transmit(kind),
@@ -407,7 +412,7 @@ fn water_f0(kind: Kind) -> f64 {
 }
 
 fn snell_transmit(kind: Kind) -> f64 {
-    broken(kind, 1.0, || region_abs(40, 48, 72, 58))
+    broken(kind, 1.0, || region_abs(52, 48, 60, 56))
 }
 
 /// `((1.333 − 1) / (1.333 + 1))²` rounded to four decimals.

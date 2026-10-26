@@ -5,6 +5,10 @@
 //! The camera matches the grade window: 160×120, eye `(0, 1.5, 4)`, yaw and pitch 0.
 //! A pixel's ray uses `hy = -ndc_y * tan(30°)`, the same reconstruction the
 //! water shader applies to `gl_FragCoord`.
+//!
+//! Water shading is the dielectric shade: facing normal, Fresnel, the mirrored
+//! direction, and transmission along the refracted ray. Beer–Lambert uses the
+//! view-ray thickness divided by the refracted cosine.
 
 /// Grade window, in pixels.
 pub const WIDTH: u32 = 160;
@@ -20,6 +24,7 @@ const PINK: [f64; 3] = [0.90, 0.42, 0.62];
 const ALBEDO: [f64; 3] = [0.28, 0.30, 0.34];
 const MISS: [f64; 3] = [0.5, 0.5, 0.55];
 const SKY: [f64; 3] = [0.45, 0.58, 0.72];
+const OCC: [f64; 3] = [0.92, 0.12, 0.08];
 const IOR: f64 = 1.333;
 const SIGMA: f64 = 0.55;
 const TAN_HALF: f64 = 0.577_350_269_189_625_7;
@@ -103,7 +108,9 @@ fn pixel(
     let dir = view_ray(x, y, forward, right, up, aspect);
     if y < 60 {
         let plane = if x < 80 {
-            if y >= 46 && x < 16 {
+            if (52..60).contains(&x) && y >= 46 {
+                snell_plane()
+            } else if y >= 46 && x < 16 {
                 f0_plane()
             } else {
                 air_plane()
@@ -404,7 +411,13 @@ fn shade_water(eye: [f64; 3], dir: [f64; 3], plane: &Plane) -> ([f64; 3], f64) {
     let eta_refract = 1.0 / eta_ratio;
     let (bent, transmitted_dir) = refract(incident, facing, eta_refract);
     let reflected = nearest(surf, reflected_dir).unwrap_or(SKY);
-    let transmitted = nearest(surf, incident).unwrap_or(plane.color);
+    // The transmitted sample is the opaque colour along the refracted ray.
+    // Total internal reflection leaves no direction; the weight is then 1.
+    let transmitted = if bent {
+        nearest(surf, transmitted_dir).unwrap_or(plane.color)
+    } else {
+        plane.color
+    };
     let mut beer_dist = 0.0;
     if let Some(t_hit) = nearest_t(eye, dir) {
         if t_hit > t_surf + 1.0e-4 {
@@ -568,6 +581,18 @@ fn below_plane() -> Plane {
     }
 }
 
+fn snell_plane() -> Plane {
+    Plane {
+        origin: [-0.269_148_23, 1.589_716_1, 2.834_019_7],
+        normal: [0.926_810_74, -0.042_882_52, 0.373_072_33],
+        tangent: [0.373_415_83, 0.0, -0.927_664_1],
+        bitangent: [0.039_780_576, 0.999_080_12, 0.016_013_011],
+        half_u: 12.0,
+        half_v: 12.0,
+        color: TRANS,
+    }
+}
+
 fn f0_plane() -> Plane {
     Plane {
         origin: [-1.023_523, 1.599_509_2, 2.522_671_8],
@@ -580,7 +605,7 @@ fn f0_plane() -> Plane {
     }
 }
 
-fn shade_planes() -> [Plane; 8] {
+fn shade_planes() -> [Plane; 9] {
     [
         Plane {
             origin: [-0.77, 0.92, 0.0],
@@ -654,6 +679,15 @@ fn shade_planes() -> [Plane; 8] {
             half_v: 0.077_033_76,
             color: [0.0, 0.0, 0.0],
         },
+        Plane {
+            origin: [-0.380_753_7, 1.627_173_8, 2.347_205_4],
+            normal: [0.224_290_19, -0.074_763_395, 0.971_650_3],
+            tangent: [0.974_377_33, 0.0, -0.224_919_68],
+            bitangent: [0.016_815_759, 0.997_201_3, 0.072_847_754],
+            half_u: 0.061_653_294,
+            half_v: 0.064_625_71,
+            color: OCC,
+        },
     ]
 }
 
@@ -710,6 +744,12 @@ mod tests {
         assert!((extra[0] - 0.28).abs() < 1.0e-9, "{extra:?}");
         let below = at(120, 30);
         assert!(below[0] > 0.8, "below-water total reflection {below:?}");
+        // Transmission hits the green backstop, so this pixel stays green.
+        let snell = at(55, 51);
+        assert!(
+            snell[1] > snell[0] + 0.2,
+            "refracted transmission {snell:?}"
+        );
         let (crest, deep) = shore_oracle();
         assert!((crest - 0.75).abs() < 1.0e-12, "{crest}");
         assert!((deep - 0.1).abs() < 1.0e-12, "{deep}");

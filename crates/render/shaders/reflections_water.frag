@@ -9,6 +9,9 @@ layout(location = 3) in float v_shade;
 layout(location = 4) in vec2 v_uv;
 layout(location = 0) out vec4 out_color;
 
+// Same count as REFLECTOR_CAP in crates/render/src/reflections.rs.
+const int PLANE_CAP = 12;
+
 struct Plane {
     vec4 origin_hu;
     vec4 normal_hv;
@@ -24,7 +27,7 @@ layout(std430, set = 0, binding = 0) readonly buffer WaterData {
     vec4 up;
     vec4 params;
     vec4 sky;
-    Plane planes[8];
+    Plane planes[PLANE_CAP];
 } water;
 
 layout(set = 0, binding = 1) uniform sampler2D scene_depth;
@@ -64,7 +67,7 @@ vec3 nearest_plane(vec3 origin, vec3 dir, vec3 miss) {
     float best = MISS_T;
     vec3 color = miss;
     int count = int(water.sky.w + COUNT_ROUND);
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < PLANE_CAP; i++) {
         if (i >= count) {
             break;
         }
@@ -109,7 +112,12 @@ void main() {
     vec3 transmitted_dir = incident;
     bool bent = reflection_refract(incident, facing, 1.0 / eta_ratio, transmitted_dir);
     vec3 reflected = nearest_plane(v_pos, reflected_dir, water.sky.xyz);
-    vec3 transmitted = nearest_plane(v_pos, incident, v_albedo);
+    // Transmission follows the refracted ray. A miss keeps the opaque albedo.
+    // Total internal reflection has no transmitted direction; Fresnel is 1.
+    vec3 transmitted = v_albedo;
+    if (bent) {
+        transmitted = nearest_plane(v_pos, transmitted_dir, v_albedo);
+    }
     float beer_dist = 0.0;
     vec2 frag = gl_FragCoord.xy;
     vec2 uv = frag / max(water.params.zw, vec2(1.0));

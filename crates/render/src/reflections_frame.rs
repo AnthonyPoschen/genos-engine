@@ -12,8 +12,10 @@ use genos_scene::look_direction;
 use crate::reflections::{self, mirror_view_proj, GRADE_BYTES};
 use crate::world::{Reflector, ReflectorKind, ShadePlane};
 
-const PLANES: usize = 8;
-const WATER_BYTES: u64 = 96 + 8 * 80;
+/// Reflectors and shade planes share [`crate::reflections::REFLECTOR_CAP`].
+const PLANES: usize = crate::reflections::REFLECTOR_CAP;
+const WATER_BYTES: u64 = 96 + 12 * 80;
+const _: () = assert!(WATER_BYTES == 96 + (PLANES as u64) * 80);
 const LINK_BYTES: u64 = 13 * 16;
 const GGX_BYTES: u64 = 6 * 48;
 

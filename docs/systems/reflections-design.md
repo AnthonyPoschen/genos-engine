@@ -63,7 +63,7 @@ These functions live in `genos-math` (`crates/math/src/optics.rs`). `crates/rend
 
 **Dielectric Fresnel.** Unpolarized exact Fresnel. `eta_t_over_eta_i` is `n_transmitted / n_incident`. From air that ratio is the material IOR. Water is 1.333. Glass defaults to 1.5. From under water the ratio is `1 / 1.333`, and a ray past the critical angle returns 1 (total internal reflection). Schlick's approximation (Schlick, Computer Graphics Forum 13(3), 1994; Karis, SIGGRAPH 2013) is the metal term only, with F0 equal to the base colour, because glTF does not store a complex IOR. On water, Schlick's max absolute error against the exact equations is 0.059, which misses the 0.02 gate. Gates: `fresnel_abs` ≤ 0.02 from air, `fresnel_below_abs` ≤ 0.02 from water. `water_f0` reads the flat normal-incidence patch. Reflection there is white and transmission is black, so the pixel is the Fresnel weight. The row is `|mean channel − 0.0204|`. `0.0204` is `((1.333 − 1) / (1.333 + 1))²` rounded to four decimals. The band is `2/255`, so a glass F0 of 0.04 fails.
 
-**Snell.** `eta = n_incident / n_transmitted`. Total internal reflection returns no transmitted direction; the pixel keeps the reflection. Gate: `snell_transmit` ≤ `2/255` on the transmission patch, which does not share pixels with the F0 patch or the reflection patch. Walter et al. (EGSR 2007) supply the GGX NDF and the refraction microfacet. The runtime transmits along the single Snell direction of the shading normal. It does not draw a random BTDF sample. The Gerstner normal is what spreads water.
+**Snell.** `eta = n_incident / n_transmitted`. Total internal reflection returns no transmitted direction; the pixel keeps the reflection. The grade patch at x 52..60, y 48..56 is tilted about 55° off the view ray, so the incident ray hits a red block and the refracted ray hits the green backstop. `snell_transmit` is the colour error on that patch. A shade that samples transmission along the incident ray fails it. The patch does not share pixels with the F0 patch or the reflection patch. Gate: `snell_transmit` ≤ `2/255`. Walter et al. (EGSR 2007) supply the GGX NDF and the refraction microfacet. The runtime transmits along the single Snell direction of the shading normal. It does not draw a random BTDF sample. The Gerstner normal is what spreads water.
 
 **GGX.** `D(h) = α² / (π (dot(n, h)² (α² − 1) + 1)²)` with `α = roughness²` (glTF). The projected integral of `D` is 1 (Walter et al.). Smith masking (Heitz, JCGT 2014) multiplies the lobe. The gate is the NDF integral, not a claim that the full BRDF integrates to 1. Gate: `ggx_energy` ≤ 0.03.
 
@@ -229,7 +229,7 @@ Presented-frame thresholds are at least `2/255`. One code is `1/255`. Lavapipe a
 - `mirror_reflect` is the red reflection patch, x 0..32, y 20..44.
 - `fresnel_abs` is the incident-side water at x 8..80, y 0..16, clear of the GGX swatch.
 - `beer_rel` is x 40..80, y 20..44.
-- `water_f0` is the flat patch x 2..14, y 48..58. `snell_transmit` is x 40..72, y 48..58.
+- `water_f0` is the flat patch x 2..14, y 48..58. `snell_transmit` is x 52..60, y 48..56, where the refracted ray and the incident ray hit different colours.
 - `fresnel_below_abs` is the transmitted-side water, past the critical angle.
 - `mirror_point` is the mirror window. `portal_point` is the portal window. `portal_leak` is the fraction of mirror pixels that show the plane behind the mirror.
 - `mirror_view_frac` is the fraction of the third window that is not the surface albedo. Medium's cap is 2, so that window is refused.
@@ -250,7 +250,7 @@ Presented-frame thresholds are at least `2/255`. One code is `1/255`. Lavapipe a
 | `fresnel_abs` | 0.02 | max absolute error against the Fresnel equations, from air |
 | `fresnel_below_abs` | 0.02 | the same error from under water, including total internal reflection |
 | `water_f0` | 2/255 | `|mean channel − 0.0204|` on the flat normal-incidence patch. Glass F0 0.04 fails |
-| `snell_transmit` | 2/255 | max channel error of the transmission patch |
+| `snell_transmit` | 2/255 | max channel error where the refracted ray and the incident ray hit different colours |
 | `ggx_energy` | 0.03 | absolute error of the GGX projected integral against 1 |
 | `ssr_depth_rel` | 0.02 | relative depth error of a screen march on a synthetic buffer |
 | `denoise_lag_frames` | 2 | frames after a step until the shaded value reaches 90 % |
