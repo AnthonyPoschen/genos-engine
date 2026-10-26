@@ -149,6 +149,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-fog-check"
+version = "0.1.0"
+dependencies = [
+ "genos-lighting-ref",
+]
+
+[[package]]
 name = "genos-gpuref"
 version = "0.1.0"
 dependencies = [
