@@ -5392,6 +5392,9 @@ impl Drop for Gpu {
                 if !times.pool.is_null() {
                     (self.fns.destroy_query_pool)(self.device, times.pool, std::ptr::null());
                 }
+                if !times.lighting_pool.is_null() {
+                    (self.fns.destroy_query_pool)(self.device, times.lighting_pool, std::ptr::null());
+                }
             }
             if !self.compute_pool.is_null() {
                 (self.fns.destroy_pool)(self.device, self.compute_pool, std::ptr::null());

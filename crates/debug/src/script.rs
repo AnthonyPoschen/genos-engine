@@ -63,6 +63,20 @@ const CHANGES: [&str; 9] = [
     "knobs",
 ];
 
+/// Join `script`, then run `release`.
+///
+/// `release` destroys the Vulkan device. The script thread is still running
+/// after it writes the report: it asks the frame to quit, then drops its
+/// stack. `process::exit` while that thread is alive, and the device is left
+/// for the driver's atexit handler, aborts in glibc with `corrupted size vs.
+/// prev_size while consolidating` (exit 134).
+pub fn join_then<T>(script: Option<std::thread::JoinHandle<T>>, release: impl FnOnce()) {
+    if let Some(script) = script {
+        let _ = script.join();
+    }
+    release();
+}
+
 /// Run the script on a new thread. When it ends it writes the report and asks the
 /// frame to quit with 0 (every check passed) or 1.
 pub fn spawn(run: ScriptRun) -> std::thread::JoinHandle<bool> {
@@ -512,7 +526,43 @@ fn value_dynamic(v: &Value) -> Dynamic {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+
+    fn lock<'a>(log: &'a Mutex<Vec<&'static str>>) -> std::sync::MutexGuard<'a, Vec<&'static str>> {
+        match log.lock() {
+            Ok(guard) => guard,
+            Err(poison) => poison.into_inner(),
+        }
+    }
+
+    /// `join` happens-before `release`. The script thread's free is the push.
+    /// Releasing the device first fails this, which is the exit abort: glibc
+    /// consolidates that free while the driver reclaims the device.
+    #[test]
+    fn a_quit_releases_the_device_only_after_the_script_thread_finishes() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let thread_log = Arc::clone(&log);
+        let handle = std::thread::spawn(move || {
+            let mut junk = Vec::with_capacity(50_000);
+            for i in 0..50_000 {
+                junk.push(i);
+            }
+            drop(junk);
+            lock(&thread_log).push("script");
+        });
+        join_then(Some(handle), || {
+            let mut log = lock(&log);
+            assert_eq!(
+                log.as_slice(),
+                ["script"],
+                "device release ran before the script thread finished freeing"
+            );
+            log.push("device");
+        });
+        assert_eq!(lock(&log).as_slice(), ["script", "device"]);
+    }
 
     #[test]
     fn values_round_trip_through_rhai() {

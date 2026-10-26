@@ -2807,9 +2807,18 @@ impl Gpu {
                 (self.fns.destroy_fence)(self.device, self.lighting.world_fence, std::ptr::null());
                 self.lighting.world_fence = std::ptr::null_mut();
             }
+            if !self.lighting.world_qp.is_null() {
+                (self.fns.destroy_query_pool)(self.device, self.lighting.world_qp, std::ptr::null());
+                self.lighting.world_qp = std::ptr::null_mut();
+            }
         }
-        // The command buffer goes with the light command pool; the query pool too
-        // is left to the device (as the frame's are).
+        let dumps = std::mem::take(&mut self.lighting.dump);
+        for (_, set) in dumps {
+            for (_, mut buf) in set {
+                self.destroy_buffer(&mut buf);
+            }
+        }
+        // The world command buffer is freed with the compute command pool.
         let mut gbuf = std::mem::replace(&mut self.lighting.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.lighting.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.lighting.out, Buffer::empty());
