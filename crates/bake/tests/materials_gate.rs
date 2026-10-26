@@ -460,6 +460,7 @@ fn write_json(path: &std::path::Path, case: Case, metrics: &[Metric]) -> Result<
 }
 
 fn metric_json(metric: &Metric) -> String {
+    use std::fmt::Write;
     let value = match metric.value {
         Some(value) => format!("{value:.6}"),
         None => "null".to_string(),
@@ -471,10 +472,10 @@ fn metric_json(metric: &Metric) -> String {
         metric.status.text()
     );
     if let Some(note) = metric.note {
-        line.push_str(&format!(",\"note\":\"{note}\""));
+        let _ = write!(line, ",\"note\":\"{note}\"");
     }
     if let Some(reference) = metric.reference {
-        line.push_str(&format!(",\"reference\":{reference:.6}"));
+        let _ = write!(line, ",\"reference\":{reference:.6}");
     }
     line.push('}');
     line
