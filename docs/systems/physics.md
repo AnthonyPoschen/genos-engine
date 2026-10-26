@@ -46,6 +46,8 @@ For a bullet whose gap at the start of the step is inside the margin, set `motio
 
 For a breakable, cook the asset, then `spawn_breakable(&mut world, asset, debris_budget)`. `apply_damage(&mut world, breakable, bond, amount)` subtracts health and swaps when the bond reaches 0. `destruction_report` returns `bonds_broken`, `debris_alive`, and `floor_penetration_m`. `allows_slice` stays false. `intact_body` and `chunk_body` are the body indices.
 
+After `step`, `change_records` holds this tick's chunk records in `(breakable, chunk)` order: spawned, moved, slept, or culled. Empty bounds are the zero vector on both corners. `emit_change_records` defaults to true. A headless server sets it false and the list stays empty. `CHANGE_RECORDS_AWAIT_LIGHTING` is true. Lighting does not read the records. `gi_cache_dirty` stays false, so a break does not mark a global stillness hash.
+
 ## Limits
 
 There is no stack solver and no air drag. A large `dt` drifts from `½gt²`. Contact does not change angular velocity.
@@ -66,6 +68,7 @@ The camera calls this step from the scene crate. Lights have no collider.
 | Debris ignores sleep or the budget | 0.1 s, 0.4 m/s, `debris_budget` | `debris_sleeps_and_the_budget_keeps_the_largest` |
 | `step` slices | `allow_slice` | `allows_slice` is false |
 | A cull moves later bodies | tombstone in place | culled presence is `Culled`; the index stays |
+| A break dirties the whole GI cache | `emit_change_records` | `a_break_emits_local_bounds_and_does_not_mark_gi_dirty`. The server probe is `the_server_emits_no_change_records`. |
 
 ## Plan
 
@@ -81,7 +84,7 @@ The step does not replicate. Gameplay networking waits ([Architecture](../archit
 - Authority: the server runs `step` and is the only side that decides a bond broke. Clients apply the server's `BondBreak` through `apply_damage`. They do not accept one another's breaks. The server owns body state. The owning client sends input for the view body.
 - Prediction / rollback: none for a breakable or a chunk. The owned view body stays the only predicted body. A client that sees a chunk pose before it has spawned that chunk applies `break_baseline` first.
 - Determinism: one process, `step` on one thread, fixed `1/60` s, the same `.gfract` bytes, seed order, and bond order. `step_parallel` may run on the server only after it hash-matches `step`. The wire compares quantized poses and bond ids. Cross-platform bit identity is not required.
-- Headless server: `step` and the sim subset. No window, no Vulkan device, and no change records.
+- Headless server: `step` and the sim subset. No window, no Vulkan device. The server sets `emit_change_records` false and builds no change records. The client builds them after the step. Lighting does not consume them yet.
 
 ## Decisions
 

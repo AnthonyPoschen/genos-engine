@@ -49,7 +49,7 @@ Gameplay networking still waits. These lines are the contract.
 - Authority: the server runs `step` and is the only side that decides a bond broke. Clients apply the server's `BondBreak` through `apply_damage`. They do not accept one another's breaks.
 - Prediction / rollback: none for a breakable or a chunk. The owned view body stays the only predicted body. A client that sees a chunk pose before it has spawned that chunk applies `break_baseline` first.
 - Determinism: one process, `step` on one thread, fixed `1/60` s, the same `.gfract` bytes, seed order, and bond order. `step_parallel` may run on the server only after it hash-matches `step`. The wire compares quantized poses and bond ids.
-- Headless server: `step` and the sim subset. No window, no Vulkan device, and no change records.
+- Headless server: `step` and the sim subset. No window, no Vulkan device. The server sets `emit_change_records` false and builds no change records. The client builds them after the step. Lighting does not consume them yet.
 
 ## Decisions
 

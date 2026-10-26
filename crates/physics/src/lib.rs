@@ -38,7 +38,8 @@ mod destruction;
 mod mesh;
 
 pub use destruction::{
-    allows_slice, apply_damage, chunk_body, destruction_report, intact_body, spawn_breakable,
+    allows_slice, apply_damage, chunk_body, destruction_report, gi_cache_dirty, intact_body,
+    spawn_breakable, CHANGE_RECORDS_AWAIT_LIGHTING, ChunkChange, ChunkChangeKind,
     DestructionReport,
 };
 pub use genos_fracture::{cook, Asset, CookRequest};
@@ -363,6 +364,11 @@ pub struct World {
     pub swept_pair_cap: u32,
     /// Fracture assets. Empty for a world that does not break.
     pub(crate) breakables: Vec<destruction::Breakable>,
+    /// Chunk bounds records for this step, in `(breakable, chunk)` order.
+    /// Cleared at the start of the next `step`. Lighting does not read them.
+    pub change_records: Vec<destruction::ChunkChange>,
+    /// A client emits [`change_records`](Self::change_records). A headless server sets this false.
+    pub emit_change_records: bool,
     /// Replaced at the start of each `step`.
     pub step_stats: StepStats,
     /// The contact pass's lists, kept so a step after the first does not allocate.
@@ -386,6 +392,8 @@ impl World {
             speculative_margin: 0.25,
             swept_pair_cap: 8,
             breakables: Vec::new(),
+            change_records: Vec::new(),
+            emit_change_records: true,
             step_stats: StepStats::zero(),
             pairs: contact::Pairs::new(),
             ccd_scratch: ccd::CcdScratch::new(),
@@ -404,6 +412,7 @@ pub fn step(world: &mut World, dt: f32) {
     if !(dt > 0.0) {
         return;
     }
+    world.change_records.clear();
     let gravity = world.gravity;
     for body in &mut world.bodies {
         body.normal_impulse = 0.0;

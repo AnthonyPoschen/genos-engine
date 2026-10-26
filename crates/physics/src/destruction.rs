@@ -25,6 +25,69 @@ pub struct Breakable {
     pub debris_budget: u32,
     pub debris_volume: f32,
     pub allow_slice: bool,
+    tracks: Vec<ChunkTrack>,
+    intact_bounds: Option<(Vec3, Vec3)>,
+}
+
+/// What a chunk did on this step. Lighting does not read these yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChunkChangeKind {
+    /// The chunk body appeared. Old bounds are empty.
+    Spawned,
+    /// An awake chunk's bounds changed.
+    Moved,
+    /// The chunk slept. Later asleep steps emit nothing.
+    Slept,
+    /// The chunk left the step. New bounds are empty.
+    Culled,
+}
+
+/// Old and new bounds for one chunk. Empty bounds are the zero vector on both corners.
+///
+/// Lighting does not consume this. [`CHANGE_RECORDS_AWAIT_LIGHTING`] stays set.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChunkChange {
+    pub breakable: u32,
+    pub chunk: u32,
+    pub kind: ChunkChangeKind,
+    pub old_min: Vec3,
+    pub old_max: Vec3,
+    pub new_min: Vec3,
+    pub new_max: Vec3,
+}
+
+/// The renderer does not read [`ChunkChange`]. A break does not mark a global GI cache dirty.
+pub const CHANGE_RECORDS_AWAIT_LIGHTING: bool = true;
+
+/// A break does not mark the GI cache dirty. Lighting does not consume chunk records yet.
+#[must_use]
+pub fn gi_cache_dirty(_world: &World) -> bool {
+    false
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrackPhase {
+    Absent,
+    Awake,
+    SleepAnnounced,
+    Removed,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ChunkTrack {
+    min: Vec3,
+    max: Vec3,
+    phase: TrackPhase,
+}
+
+impl ChunkTrack {
+    const fn fresh() -> Self {
+        Self {
+            min: Vec3::ZERO,
+            max: Vec3::ZERO,
+            phase: TrackPhase::Absent,
+        }
+    }
 }
 
 /// Counts the metrics harness prints for a broken asset.
@@ -51,6 +114,8 @@ pub fn spawn_breakable(world: &mut World, asset: Asset, debris_budget: u32) -> u
         debris_budget,
         debris_volume: DEBRIS_VOLUME,
         allow_slice: false,
+        tracks: vec![ChunkTrack::fresh(); count],
+        intact_bounds: None,
     });
     world.breakables.len() - 1
 }
@@ -122,6 +187,7 @@ pub(crate) fn after_step(world: &mut World, dt: f32) {
     damage_from_contacts(world);
     sleep_debris(world, dt);
     cull_debris(world);
+    emit_changes(world);
 }
 
 fn damage_from_contacts(world: &mut World) {
@@ -503,12 +569,265 @@ pub fn chunk_body(world: &World, breakable: usize, chunk: usize) -> Option<usize
         .and_then(|item| item.chunk_bodies.get(chunk).copied().flatten())
 }
 
+fn emit_changes(world: &mut World) {
+    if !world.emit_change_records {
+        return;
+    }
+    let count = world.breakables.len();
+    for breakable in 0..count {
+        let chunk_count = world
+            .breakables
+            .get(breakable)
+            .map_or(0, |item| item.asset.chunks.len());
+        for chunk in 0..chunk_count {
+            emit_intact_on_chunk(world, breakable, chunk);
+            emit_chunk(world, breakable, chunk);
+        }
+    }
+}
+
+fn emit_intact_on_chunk(world: &mut World, breakable: usize, chunk: usize) {
+    let (intact, previous, solid) = {
+        let Some(item) = world.breakables.get(breakable) else {
+            return;
+        };
+        (item.intact, item.intact_bounds, first_solid(item))
+    };
+    let Some(solid) = solid else {
+        if chunk == 0 {
+            if let Some(old) = previous {
+                push_change(
+                    world,
+                    breakable,
+                    0,
+                    ChunkChangeKind::Culled,
+                    old,
+                    (Vec3::ZERO, Vec3::ZERO),
+                );
+                if let Some(item) = world.breakables.get_mut(breakable) {
+                    item.intact_bounds = None;
+                }
+            }
+        }
+        return;
+    };
+    if chunk != solid {
+        return;
+    }
+    let bounds = intact
+        .and_then(|index| world.bodies.get(index))
+        .and_then(crate::contact::bounds);
+    match (previous, bounds) {
+        (None, Some(bounds)) => {
+            if let Some(item) = world.breakables.get_mut(breakable) {
+                item.intact_bounds = Some(bounds);
+            }
+        }
+        (Some(old), Some(new)) if bounds_differ(old, new) => {
+            push_change(world, breakable, chunk, ChunkChangeKind::Moved, old, new);
+            if let Some(item) = world.breakables.get_mut(breakable) {
+                item.intact_bounds = Some(new);
+            }
+        }
+        (Some(old), None) => {
+            push_change(
+                world,
+                breakable,
+                chunk,
+                ChunkChangeKind::Culled,
+                old,
+                (Vec3::ZERO, Vec3::ZERO),
+            );
+            if let Some(item) = world.breakables.get_mut(breakable) {
+                item.intact_bounds = None;
+            }
+        }
+        (Some(_) | None, _) => {}
+    }
+}
+
+fn first_solid(item: &Breakable) -> Option<usize> {
+    item.asset
+        .chunks
+        .iter()
+        .enumerate()
+        .find_map(|(index, _)| represents_solid(item, index).then_some(index))
+}
+
+struct ChunkSnap {
+    track: ChunkTrack,
+    body_index: Option<usize>,
+    cell_min: Vec3,
+    cell_max: Vec3,
+    children_live: bool,
+}
+
+fn chunk_snapshot(world: &World, breakable: usize, chunk: usize) -> Option<ChunkSnap> {
+    let item = world.breakables.get(breakable)?;
+    let track = item.tracks.get(chunk).copied()?;
+    let cell = item.asset.chunks.get(chunk)?;
+    let first = usize::try_from(cell.first_child).unwrap_or(0);
+    let count = usize::try_from(cell.child_count).unwrap_or(0);
+    let children_live = count > 0
+        && (0..count).any(|offset| {
+            item.chunk_bodies
+                .get(first.saturating_add(offset))
+                .is_some_and(Option::is_some)
+        });
+    Some(ChunkSnap {
+        track,
+        body_index: item.chunk_bodies.get(chunk).copied().flatten(),
+        cell_min: cell.center - cell.half,
+        cell_max: cell.center + cell.half,
+        children_live,
+    })
+}
+
+fn emit_chunk(world: &mut World, breakable: usize, chunk: usize) {
+    let Some(snap) = chunk_snapshot(world, breakable, chunk) else {
+        return;
+    };
+    let body_state = snap.body_index.and_then(|index| {
+        world.bodies.get(index).map(|body| {
+            let bounds = crate::contact::bounds(body).unwrap_or((Vec3::ZERO, Vec3::ZERO));
+            (body.presence, bounds)
+        })
+    });
+    let mut track = snap.track;
+    let Some((presence, bounds)) = body_state else {
+        if track.phase == TrackPhase::Absent && snap.children_live {
+            push_change(
+                world,
+                breakable,
+                chunk,
+                ChunkChangeKind::Culled,
+                (snap.cell_min, snap.cell_max),
+                (Vec3::ZERO, Vec3::ZERO),
+            );
+            track.phase = TrackPhase::Removed;
+            store_track(world, breakable, chunk, track);
+        }
+        return;
+    };
+    if presence == Presence::Culled {
+        if track.phase != TrackPhase::Removed {
+            let old = if track.phase == TrackPhase::Absent {
+                (snap.cell_min, snap.cell_max)
+            } else {
+                (track.min, track.max)
+            };
+            push_change(
+                world,
+                breakable,
+                chunk,
+                ChunkChangeKind::Culled,
+                old,
+                (Vec3::ZERO, Vec3::ZERO),
+            );
+            track.phase = TrackPhase::Removed;
+        }
+        store_track(world, breakable, chunk, track);
+        return;
+    }
+    if track.phase == TrackPhase::Absent {
+        push_change(
+            world,
+            breakable,
+            chunk,
+            ChunkChangeKind::Spawned,
+            (Vec3::ZERO, Vec3::ZERO),
+            bounds,
+        );
+        track.phase = if presence == Presence::Asleep {
+            TrackPhase::SleepAnnounced
+        } else {
+            TrackPhase::Awake
+        };
+        track.min = bounds.0;
+        track.max = bounds.1;
+        store_track(world, breakable, chunk, track);
+        return;
+    }
+    if presence == Presence::Asleep && track.phase == TrackPhase::Awake {
+        push_change(
+            world,
+            breakable,
+            chunk,
+            ChunkChangeKind::Slept,
+            (track.min, track.max),
+            bounds,
+        );
+        track.phase = TrackPhase::SleepAnnounced;
+        track.min = bounds.0;
+        track.max = bounds.1;
+        store_track(world, breakable, chunk, track);
+        return;
+    }
+    if track.phase == TrackPhase::Awake && bounds_differ((track.min, track.max), bounds) {
+        push_change(
+            world,
+            breakable,
+            chunk,
+            ChunkChangeKind::Moved,
+            (track.min, track.max),
+            bounds,
+        );
+    }
+    track.min = bounds.0;
+    track.max = bounds.1;
+    store_track(world, breakable, chunk, track);
+}
+
+fn store_track(world: &mut World, breakable: usize, chunk: usize, track: ChunkTrack) {
+    if let Some(slot) = world
+        .breakables
+        .get_mut(breakable)
+        .and_then(|item| item.tracks.get_mut(chunk))
+    {
+        *slot = track;
+    }
+}
+
+fn push_change(
+    world: &mut World,
+    breakable: usize,
+    chunk: usize,
+    kind: ChunkChangeKind,
+    old: (Vec3, Vec3),
+    new: (Vec3, Vec3),
+) {
+    let (Ok(breakable), Ok(chunk)) = (u32::try_from(breakable), u32::try_from(chunk)) else {
+        return;
+    };
+    world.change_records.push(ChunkChange {
+        breakable,
+        chunk,
+        kind,
+        old_min: old.0,
+        old_max: old.1,
+        new_min: new.0,
+        new_max: new.1,
+    });
+}
+
+fn bounds_differ(old: (Vec3, Vec3), new: (Vec3, Vec3)) -> bool {
+    !same_vec(old.0, new.0) || !same_vec(old.1, new.1)
+}
+
+fn same_vec(left: Vec3, right: Vec3) -> bool {
+    left.x.to_bits() == right.x.to_bits()
+        && left.y.to_bits() == right.y.to_bits()
+        && left.z.to_bits() == right.z.to_bits()
+}
+
 #[cfg(test)]
 mod tests {
     use genos_fracture::cook;
     use genos_math::Vec3;
 
-    use super::{allows_slice, chunk_body, destruction_report, intact_body, spawn_breakable};
+    use super::{
+        allows_slice, chunk_body, destruction_report, intact_body, spawn_breakable, ChunkChangeKind,
+    };
     use crate::{apply_damage, step, Body, CookRequest, Presence, World, GRAVITY};
 
     const DT: f32 = 1.0 / 60.0;
@@ -750,6 +1069,116 @@ mod tests {
             }
         }
         assert!(spawned >= 1, "free children stayed inside the intact body");
+    }
+
+    #[test]
+    fn a_break_emits_local_bounds_and_does_not_mark_gi_dirty() {
+        const {
+            assert!(crate::CHANGE_RECORDS_AWAIT_LIGHTING);
+        };
+        let asset = cook_overhang(4);
+        let bond = seam(&asset);
+        let (_free_first, free_count) = child_range(&asset, 1);
+        let mut world = World::new(Vec3::ZERO);
+        let id = spawn_breakable(&mut world, asset, 8);
+        step(&mut world, DT);
+        assert_eq!(
+            world.change_records.len(),
+            0,
+            "an intact body is not a break"
+        );
+        assert!(apply_damage(&mut world, id, bond, 1.0e6));
+        step(&mut world, DT);
+        assert!(!crate::gi_cache_dirty(&world));
+        let mut last_chunk = 0_u32;
+        let mut spawned = 0_u32;
+        let mut removed_parent = false;
+        assert_ne!(world.change_records.len(), 0);
+        for record in &world.change_records {
+            assert_eq!(record.breakable, u32::try_from(id).unwrap_or(0));
+            assert!(record.chunk >= last_chunk);
+            last_chunk = record.chunk;
+            match record.kind {
+                ChunkChangeKind::Spawned => {
+                    assert!(empty_bounds(record.old_min, record.old_max));
+                    assert!(!empty_bounds(record.new_min, record.new_max));
+                    spawned = spawned.saturating_add(1);
+                }
+                ChunkChangeKind::Culled => {
+                    assert!(empty_bounds(record.new_min, record.new_max));
+                    assert!(!empty_bounds(record.old_min, record.old_max));
+                    if record.chunk == 1 {
+                        removed_parent = true;
+                    }
+                }
+                ChunkChangeKind::Moved | ChunkChangeKind::Slept => {}
+            }
+        }
+        assert_eq!(spawned, u32::try_from(free_count).unwrap_or(0));
+        assert!(removed_parent, "the free parent was not removed");
+    }
+
+    #[test]
+    fn the_server_emits_no_change_records() {
+        let asset = cook_overhang(4);
+        let bond = seam(&asset);
+        let mut world = World::new(Vec3::ZERO);
+        world.emit_change_records = false;
+        let id = spawn_breakable(&mut world, asset, 8);
+        assert!(apply_damage(&mut world, id, bond, 1.0e6));
+        step(&mut world, DT);
+        assert_eq!(world.change_records.len(), 0);
+        assert!(!crate::gi_cache_dirty(&world));
+    }
+
+    #[test]
+    fn a_moving_chunk_emits_one_sleep_record_then_nothing() {
+        let asset = cook_overhang(4);
+        let bond = seam(&asset);
+        let mut world = World::new(Vec3::ZERO);
+        let id = spawn_breakable(&mut world, asset, 8);
+        assert!(apply_damage(&mut world, id, bond, 1.0e6));
+        let mut spawned_bodies = Vec::new();
+        for chunk in 0..16 {
+            if let Some(index) = chunk_body(&world, id, chunk) {
+                spawned_bodies.push(index);
+            }
+        }
+        for index in spawned_bodies {
+            if let Some(body) = world.bodies.get_mut(index) {
+                body.position.y += 4.0;
+                body.velocity = Vec3::new(0.0, 0.05, 0.0);
+            }
+        }
+        step(&mut world, DT);
+        assert!(world
+            .change_records
+            .iter()
+            .any(|record| record.kind == ChunkChangeKind::Spawned));
+        step(&mut world, DT);
+        assert!(world
+            .change_records
+            .iter()
+            .any(|record| record.kind == ChunkChangeKind::Moved));
+        for _ in 0..4 {
+            step(&mut world, DT);
+        }
+        let slept: Vec<u32> = world
+            .change_records
+            .iter()
+            .filter(|record| record.kind == ChunkChangeKind::Slept)
+            .map(|record| record.chunk)
+            .collect();
+        assert_ne!(slept.len(), 0, "the sleep tick emitted nothing");
+        step(&mut world, DT);
+        assert!(world
+            .change_records
+            .iter()
+            .all(|record| !slept.contains(&record.chunk)));
+    }
+
+    fn empty_bounds(min: Vec3, max: Vec3) -> bool {
+        min == Vec3::ZERO && max == Vec3::ZERO
     }
 
     fn rest_body() -> Body {
