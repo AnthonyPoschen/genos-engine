@@ -1,4 +1,4 @@
-//! CPU references the HDR passes call. No swapchain and no display dispatch yet.
+//! CPU references the HDR passes call. The display pass and the swapchain pick call these.
 //!
 //! `AgX` follows Eary Chow's `AgX_LUT_Gen` (`AgX_Base_Rec2020` then the sRGB cube path):
 //! `Rec.709` to `Rec.2020`, lower guard, inset, log2 from −10 to +6.5 around 0.18,
@@ -6,6 +6,8 @@
 
 /// ITU-R BT.2408 graphics white.
 pub const GRAPHICS_WHITE_NITS: f64 = 203.0;
+/// Sigmoid top when the surface reports no peak. BT.2408's HDR reference.
+pub const HDR_PEAK_NITS: f64 = 1000.0;
 /// scRGB code 1.0. Graphics white is `GRAPHICS_WHITE_NITS / SCRGB_NITS_PER_CODE` (2.5375, written 2.54).
 pub const SCRGB_NITS_PER_CODE: f64 = 80.0;
 
@@ -329,6 +331,12 @@ pub fn near_grade(near: f64, far: f64) -> f64 {
 )]
 fn narrow_f32(value: f64) -> f32 {
     value as f32
+}
+
+/// Host upload of an HDR parameter. The shader stores `f32`.
+#[must_use]
+pub fn pack_f32(value: f64) -> f32 {
+    narrow_f32(value)
 }
 
 #[must_use]
@@ -907,6 +915,70 @@ pub fn agx_rec709(scene: [f64; 3]) -> [f64; 3] {
     ]
 }
 
+/// `AgX` before the power-2.4 code. HDR maps this, not the SDR code.
+#[must_use]
+pub fn agx_display_linear(scene: [f64; 3]) -> [f64; 3] {
+    let rec2020 = mul(XYZ_TO_BT2020, mul(BT709_TO_XYZ, scene));
+    let formed = agx_base_rec2020(rec2020);
+    let rec709 = mul(XYZ_TO_BT709, mul(BT2020_TO_XYZ, formed));
+    compensate_low_side(rec709)
+}
+
+/// Display-linear value of scene white `(1, 1, 1)`. The nit map's graphics white.
+#[must_use]
+pub fn graphics_white_linear() -> f64 {
+    static WHITE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *WHITE.get_or_init(|| {
+        let white = agx_display_linear([1.0, 1.0, 1.0]);
+        white[0].max(white[1]).max(white[2]).clamp(1.0e-4, 0.999)
+    })
+}
+
+/// Piecewise nits. Graphics white is 203. The sigmoid top is [`HDR_PEAK_NITS`].
+#[must_use]
+pub fn nits_from_display(display: f64, white: f64) -> f64 {
+    if !display.is_finite() || display <= 0.0 {
+        return 0.0;
+    }
+    let white = white.clamp(1.0e-4, 0.999);
+    let d = display.min(1.0);
+    if d <= white {
+        d / white * GRAPHICS_WHITE_NITS
+    } else {
+        let t = (d - white) / (1.0 - white);
+        GRAPHICS_WHITE_NITS + t * (HDR_PEAK_NITS - GRAPHICS_WHITE_NITS)
+    }
+}
+
+/// Rec.709 display linear to Rec.2020, still linear.
+#[must_use]
+pub fn rec2020_from_rec709(rgb: [f64; 3]) -> [f64; 3] {
+    mul(XYZ_TO_BT2020, mul(BT709_TO_XYZ, rgb))
+}
+
+/// HDR10 PQ of a Rec.709 display-linear colour. Paper white is 203 nits.
+#[must_use]
+pub fn hdr10_pq(display_rec709: [f64; 3]) -> [f64; 3] {
+    let white = graphics_white_linear();
+    let rec2020 = rec2020_from_rec709(display_rec709);
+    [
+        pq_st2084(nits_from_display(rec2020[0], white)),
+        pq_st2084(nits_from_display(rec2020[1], white)),
+        pq_st2084(nits_from_display(rec2020[2], white)),
+    ]
+}
+
+/// scRGB code of a Rec.709 display-linear colour. Code 1.0 stays 80 nits.
+#[must_use]
+pub fn scrgb_from_display(display_rec709: [f64; 3]) -> [f64; 3] {
+    let white = graphics_white_linear();
+    [
+        nits_from_display(display_rec709[0], white) / SCRGB_NITS_PER_CODE,
+        nits_from_display(display_rec709[1], white) / SCRGB_NITS_PER_CODE,
+        nits_from_display(display_rec709[2], white) / SCRGB_NITS_PER_CODE,
+    ]
+}
+
 /// ACES 2.0 Rec.709 display (`Output.Academy.Rec709-D65_100nit_in_Rec709-D65_sRGB-Piecewise`).
 /// `None` until this body is the Academy CTL. Not a Narkowicz fit.
 #[must_use]
@@ -924,6 +996,37 @@ pub fn present_host() -> PresentHost {
     } else {
         PresentHost::Linux
     }
+}
+
+/// Format code uploaded with the display params. Unknown formats upload 0.
+#[must_use]
+pub fn swapchain_format_code(format: i32) -> f32 {
+    match format {
+        FORMAT_RGBA8 => 37.0,
+        FORMAT_BGRA8 => 44.0,
+        FORMAT_A2R10 => 58.0,
+        FORMAT_A2B10 => 64.0,
+        FORMAT_R16F => 97.0,
+        _ => 0.0,
+    }
+}
+
+/// SDR search result, replaced when the resolved HDR pair is actually listed.
+/// The SDR search itself is not filtered by color space.
+#[must_use]
+pub fn surface_choice(
+    sdr_format: i32,
+    listed: &[ListedFormat],
+    host: PresentHost,
+    output: genos_scene::OutputMode,
+    force_sdr: bool,
+) -> (i32, i32, HdrSwapchain) {
+    let mode = resolve_swapchain(host, listed, output, force_sdr);
+    if let Some((format, space)) = swapchain_pair(mode, listed).filter(|_| mode != HdrSwapchain::Sdr)
+    {
+        return (format, space, mode);
+    }
+    (sdr_format, COLOR_SPACE_SRGB, HdrSwapchain::Sdr)
 }
 
 /// Host preference, then the output mode. `force_sdr` is Potato, Low, and `legacy_bytes`.

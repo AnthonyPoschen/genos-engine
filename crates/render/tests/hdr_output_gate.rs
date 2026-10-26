@@ -1,6 +1,7 @@
 //! HDR output metric gate. CPU references, plus lavapipe readbacks: the plain
-//! compose picture (`legacy_shader`) and one fixed `AgX` frame (`gpu_agx`,
-//! `gpu_exposure`, `gpu_bloom`).
+//! compose picture (`legacy_shader`), one fixed `AgX` frame (`gpu_agx`,
+//! `gpu_exposure`, `gpu_bloom`), and the HDR encode buffer (`hdr_encode`,
+//! `hdr_scrgb`).
 //!
 //! ```text
 //! cargo test -p genos-render --test hdr_output_gate -- --out genos-debug/hdr-output
@@ -13,11 +14,14 @@
 //! `aces2_rec709` is the Academy CTL.
 
 use genos_render::{
-    aces2_rec709, agx_rec709, bloom_commute_error, bloom_downsample, bloom_pyramid, bloom_upsample,
+    aces2_rec709, agx_display_linear, agx_rec709, bloom_commute_error, bloom_downsample,
+    bloom_pyramid, bloom_upsample,
     ev100_from_luminance, exposure_adapt_outside, exposure_from_camera, exposure_from_ev100,
-    exposure_overshoot, exposure_still_change, exposure_with_compensation, histogram_ev100,
-    karis_downsample_rgb, karis_firefly_response, linear_from_display, pick_hdr_output, pq_st2084,
-    resolve_swapchain, scene_luma, scrgb_code, step_exposure, swapchain_nits, tone, HdrSwapchain,
+    exposure_overshoot, exposure_still_change, exposure_with_compensation, graphics_white_linear,
+    hdr10_pq, histogram_ev100, karis_downsample_rgb, karis_firefly_response, linear_from_display,
+    pick_hdr_output, pq_st2084, rec2020_from_rec709, resolve_swapchain,
+    scene_luma, scrgb_code, scrgb_from_display, step_exposure, swapchain_nits, tone, HdrSwapchain,
+    HDR_PEAK_NITS,
     Image, ListedFormat, PresentHost, Renderer, World, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB,
     COLOR_SPACE_SRGB, FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
 };
@@ -57,6 +61,8 @@ const GPU_AGX_MAX: f64 = 0.02;
 const GPU_EXPOSURE_MAX: f64 = 1.0e-4;
 /// Mean |uploaded bloom − tap pyramid| . A ×2 pyramid fails.
 const GPU_BLOOM_MAX: f64 = 1.0e-3;
+/// Mean |encode buffer − `hdr10_pq` / `scrgb_from_display`|. An 80-nit paper white fails.
+const HDR_ENCODE_MAX: f64 = 0.02;
 /// Fixed EV100. Exposure `1 / (1.2 × 4)` is far from the legacy scale of 1.
 const GPU_EV100: f64 = 2.0;
 const GPU_TAU: f64 = 0.001;
@@ -262,6 +268,8 @@ fn live_metrics() -> Vec<Metric> {
         at_most("gpu_agx", gpu_agx_error(false), GPU_AGX_MAX),
         at_most("gpu_exposure", gpu_exposure_error(false), GPU_EXPOSURE_MAX),
         at_most("gpu_bloom", gpu_bloom_error(false), GPU_BLOOM_MAX),
+        at_most("hdr_encode", hdr_encode_error(false), HDR_ENCODE_MAX),
+        at_most("hdr_scrgb", hdr_scrgb_error(false), HDR_ENCODE_MAX),
         at_most("output_pick", live_output_pick(), PICK_MAX),
         at_most("agx_de", agx_delta_e(agx_rec709), AGX_DE_MAX),
         at_most(
@@ -305,6 +313,8 @@ fn proof_good() -> Vec<Metric> {
         at_most("gpu_agx", gpu_agx_error(false), GPU_AGX_MAX),
         at_most("gpu_exposure", gpu_exposure_error(false), GPU_EXPOSURE_MAX),
         at_most("gpu_bloom", gpu_bloom_error(false), GPU_BLOOM_MAX),
+        at_most("hdr_encode", hdr_encode_error(false), HDR_ENCODE_MAX),
+        at_most("hdr_scrgb", hdr_scrgb_error(false), HDR_ENCODE_MAX),
         at_most("output_pick", live_output_pick(), PICK_MAX),
         at_most("agx_de", agx_delta_e(agx_rec709), AGX_DE_MAX),
         at_most(
@@ -348,6 +358,8 @@ fn proof_broken() -> Vec<Metric> {
         at_most("gpu_agx", gpu_agx_error(true), GPU_AGX_MAX),
         at_most("gpu_exposure", gpu_exposure_error(true), GPU_EXPOSURE_MAX),
         at_most("gpu_bloom", gpu_bloom_error(true), GPU_BLOOM_MAX),
+        at_most("hdr_encode", hdr_encode_error(true), HDR_ENCODE_MAX),
+        at_most("hdr_scrgb", hdr_scrgb_error(true), HDR_ENCODE_MAX),
         at_most(
             "output_pick",
             pick_misses(pick_always_sdr) + force_sdr_misses(pick_ignores_force),
@@ -1342,6 +1354,233 @@ fn gpu_bloom_error(broken: bool) -> f64 {
     }
     let scale = if broken { 2.0 } else { 1.0 };
     bloom_delta(&grab.bloom_buf, &grab.bloom_ref, scale)
+}
+
+struct EncodeGrab {
+    ok: bool,
+    hdr10_surface: bool,
+    scrgb_surface: bool,
+    scene_hdr10: Vec<f64>,
+    encode_hdr10: Vec<f32>,
+    scene_scrgb: Vec<f64>,
+    encode_scrgb: Vec<f32>,
+    exposure: f64,
+}
+
+fn encode_grab() -> &'static EncodeGrab {
+    static GRAB: OnceLock<EncodeGrab> = OnceLock::new();
+    GRAB.get_or_init(capture_encode)
+}
+
+fn fail_encode(why: &str) -> EncodeGrab {
+    eprintln!("hdr gate encode: {why}");
+    EncodeGrab {
+        ok: false,
+        hdr10_surface: false,
+        scrgb_surface: false,
+        scene_hdr10: Vec::new(),
+        encode_hdr10: Vec::new(),
+        scene_scrgb: Vec::new(),
+        encode_scrgb: Vec::new(),
+        exposure: wanted_exposure(),
+    }
+}
+
+fn encode_settings(output: OutputMode) -> HdrSettings {
+    let mut hdr = HdrSettings::for_preset(LightingPreset::Medium);
+    hdr.exposure_mode = genos_scene::ExposureMode::Fixed;
+    hdr.ev100 = GPU_EV100;
+    hdr.compensation = 0.0;
+    hdr.adapt_down = GPU_TAU;
+    hdr.adapt_up = GPU_TAU;
+    hdr.display = genos_scene::DisplayTransform::Agx;
+    hdr.bloom = false;
+    hdr.bloom_intensity = 0.0;
+    hdr.bloom_levels = 0;
+    hdr.output = output;
+    hdr.legacy_bytes = false;
+    hdr
+}
+
+fn encode_lighting() -> LightingSettings {
+    let mut lighting = LightingSettings::preset(LightingPreset::Medium);
+    lighting.gi.enabled = false;
+    lighting.bounce.count = 0;
+    lighting
+}
+
+fn surface_is(renderer: &Renderer, hdr10: bool) -> bool {
+    let (format, space) = renderer.hdr_surface();
+    let sdr = (format == FORMAT_BGRA8 || format == FORMAT_RGBA8) && space == COLOR_SPACE_SRGB;
+    if hdr10 {
+        let pair = (format == FORMAT_A2B10 || format == FORMAT_A2R10) && space == COLOR_SPACE_HDR10;
+        sdr || pair
+    } else {
+        let pair = format == FORMAT_R16F && space == COLOR_SPACE_SCRGB;
+        sdr || pair
+    }
+}
+
+fn capture_encode() -> EncodeGrab {
+    let scene = match load_hall() {
+        Ok(scene) => scene,
+        Err(err) => return fail_encode(&err),
+    };
+    let mut world = World::from_scene(scene);
+    world.scene.lighting = encode_lighting();
+    world.scene.hdr = encode_settings(OutputMode::Hdr10);
+    let opened = open_grade_renderer();
+    let (mut window, mut renderer) = match opened {
+        Ok(pair) => pair,
+        Err(err) => return fail_encode(&err),
+    };
+    let camera = Camera::opening();
+    if let Err(err) = draw_once(&mut window, &mut renderer, &world, &camera) {
+        return fail_encode(&err);
+    }
+    if let Err(err) = draw_once(&mut window, &mut renderer, &world, &camera) {
+        return fail_encode(&err);
+    }
+    let scene_hdr10 = match renderer.read_scene() {
+        Ok(scene) => scene.rgb,
+        Err(err) => return fail_encode(&err),
+    };
+    let encode_hdr10 = match renderer.read_hdr_encode() {
+        Ok(encoded) => encoded,
+        Err(err) => return fail_encode(&err),
+    };
+    let hdr10_surface = surface_is(&renderer, true);
+    world.scene.hdr.output = OutputMode::Scrgb;
+    if let Err(err) = draw_once(&mut window, &mut renderer, &world, &camera) {
+        return fail_encode(&err);
+    }
+    if let Err(err) = draw_once(&mut window, &mut renderer, &world, &camera) {
+        return fail_encode(&err);
+    }
+    let scene_scrgb = match renderer.read_scene() {
+        Ok(scene) => scene.rgb,
+        Err(err) => return fail_encode(&err),
+    };
+    let encode_scrgb = match renderer.read_hdr_encode() {
+        Ok(encoded) => encoded,
+        Err(err) => return fail_encode(&err),
+    };
+    EncodeGrab {
+        ok: true,
+        hdr10_surface,
+        scrgb_surface: surface_is(&renderer, false),
+        scene_hdr10,
+        encode_hdr10,
+        scene_scrgb,
+        encode_scrgb,
+        exposure: wanted_exposure(),
+    }
+}
+
+fn hdr_encode_error(broken: bool) -> f64 {
+    let grab = encode_grab();
+    if !grab.ok || !grab.hdr10_surface {
+        return 1.0;
+    }
+    encode_delta(&grab.scene_hdr10, &grab.encode_hdr10, grab.exposure, broken, false)
+}
+
+fn hdr_scrgb_error(broken: bool) -> f64 {
+    let grab = encode_grab();
+    if !grab.ok || !grab.scrgb_surface {
+        return 1.0;
+    }
+    encode_delta(&grab.scene_scrgb, &grab.encode_scrgb, grab.exposure, broken, true)
+}
+
+fn encode_delta(scene: &[f64], encoded: &[f32], exposure: f64, broken: bool, scrgb: bool) -> f64 {
+    let pixels = scene.len() / 3;
+    if pixels == 0 || encoded.len() < pixels.saturating_mul(4) {
+        return 1.0;
+    }
+    let mut sum = 0.0;
+    let mut gap = 0.0;
+    let mut seen = 0.0;
+    for index in 0..pixels {
+        let color = rgb3(scene, index);
+        if scene_luma(color) < 0.02 {
+            continue;
+        }
+        let linear = agx_display_linear([
+            exposure * color[0],
+            exposure * color[1],
+            exposure * color[2],
+        ]);
+        let want = if scrgb {
+            if broken {
+                scrgb_at_paper(linear, 80.0)
+            } else {
+                scrgb_from_display(linear)
+            }
+        } else if broken {
+            hdr10_at_paper(linear, 80.0)
+        } else {
+            hdr10_pq(linear)
+        };
+        let paper = if scrgb {
+            scrgb_at_paper(linear, 80.0)
+        } else {
+            hdr10_at_paper(linear, 80.0)
+        };
+        let live = if scrgb {
+            scrgb_from_display(linear)
+        } else {
+            hdr10_pq(linear)
+        };
+        let base = index.saturating_mul(4);
+        for channel in 0..3 {
+            let got = f64::from(encoded.get(base.saturating_add(channel)).copied().unwrap_or(0.0));
+            sum += (got - want[channel]).abs();
+            gap += (live[channel] - paper[channel]).abs();
+            seen += 1.0;
+        }
+    }
+    if seen < 64.0 * 3.0 {
+        return 1.0;
+    }
+    let mean = sum / seen;
+    if !broken && gap / seen < HDR_ENCODE_MAX * 2.0 {
+        return 1.0;
+    }
+    mean
+}
+
+fn nits_at_paper(display: f64, white: f64, paper: f64) -> f64 {
+    if !display.is_finite() || display <= 0.0 {
+        return 0.0;
+    }
+    let white = white.clamp(1.0e-4, 0.999);
+    let d = display.min(1.0);
+    if d <= white {
+        d / white * paper
+    } else {
+        let t = (d - white) / (1.0 - white);
+        paper + t * (HDR_PEAK_NITS - paper)
+    }
+}
+
+fn hdr10_at_paper(display: [f64; 3], paper: f64) -> [f64; 3] {
+    let white = graphics_white_linear();
+    let rec2020 = rec2020_from_rec709(display);
+    [
+        pq_st2084(nits_at_paper(rec2020[0], white, paper)),
+        pq_st2084(nits_at_paper(rec2020[1], white, paper)),
+        pq_st2084(nits_at_paper(rec2020[2], white, paper)),
+    ]
+}
+
+fn scrgb_at_paper(display: [f64; 3], paper: f64) -> [f64; 3] {
+    let white = graphics_white_linear();
+    [
+        nits_at_paper(display[0], white, paper) / 80.0,
+        nits_at_paper(display[1], white, paper) / 80.0,
+        nits_at_paper(display[2], white, paper) / 80.0,
+    ]
 }
 
 fn picture_error(grab: &Grab, linear: bool) -> f64 {

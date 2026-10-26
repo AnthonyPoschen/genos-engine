@@ -71,7 +71,7 @@ Role: OUT · Literature: — · More detail: `tone_channel` in [`lighting_compos
 **Bloom**: scene-referred scatter added before exposure. The kernel is the dual-filter pyramid.
 Role: OUT · Literature: Jimenez, SIGGRAPH 2014 · More detail: [hdr-output design](../systems/hdr-output-design.md)
 
-**HDR10**: a 10-bit BT.2100 swapchain image encoded with the PQ curve. Graphics white is 203 nits. The Linux/Wayland preference.
+**HDR10**: a 10-bit BT.2100 swapchain image encoded with the PQ curve. Graphics white is 203 nits. The sigmoid top maps to 1000 nits when the surface reports no peak. The Linux/Wayland preference.
 Role: OUT · Literature: SMPTE ST 2084; `VK_COLOR_SPACE_HDR10_ST2084_EXT` · More detail: [hdr-output design](../systems/hdr-output-design.md)
 
 **scRGB**: a linear extended-sRGB swapchain image. Code 1.0 is 80 nits. Graphics white is 203 nits, code 2.54. The Windows preference.

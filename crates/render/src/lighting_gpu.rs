@@ -110,8 +110,11 @@ pub(crate) struct Lighting {
     scene_lin: Buffer,
     /// Host copy of `scene_lin`, filled when a picture is read back.
     scene_host: Buffer,
-    /// Exposure, display mode, bloom intensity. Host-visible. The compose shader reads it.
+    /// Exposure, display mode, bloom intensity, output mode, then white, peak, and format.
+    /// Host-visible. The compose shader reads the first `vec4`.
     hdr_params: Buffer,
+    /// HDR10 PQ or scRGB codes, RGBA32F. The fp16 image, when the swapchain is scRGB, follows it.
+    hdr_encode: Buffer,
     /// `AgX` lattice from `agx_rec709`. Host-visible. Sampled when the display mode is 1.
     agx_lut: Buffer,
     /// Full-resolution bloom, then the mip chain. The GPU pyramid writes it.
@@ -383,6 +386,7 @@ impl Default for Lighting {
             scene_lin: Buffer::empty(),
             scene_host: Buffer::empty(),
             hdr_params: Buffer::empty(),
+            hdr_encode: Buffer::empty(),
             agx_lut: Buffer::empty(),
             bloom: Buffer::empty(),
             still_pop: 0.0,
@@ -582,7 +586,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -671,7 +675,7 @@ impl Gpu {
                 ),
                 "lighting pipeline layout",
             )?;
-            let size = Size { kind: 7, count: 39 };
+            let size = Size { kind: 7, count: 42 };
             let pool = PoolInfo {
                 s_type: 33,
                 next: std::ptr::null(),
@@ -947,6 +951,7 @@ impl Gpu {
         let mut scene_lin = std::mem::replace(&mut self.lighting.scene_lin, Buffer::empty());
         let mut scene_host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
         let mut hdr_params = std::mem::replace(&mut self.lighting.hdr_params, Buffer::empty());
+        let mut hdr_encode = std::mem::replace(&mut self.lighting.hdr_encode, Buffer::empty());
         let mut agx_lut = std::mem::replace(&mut self.lighting.agx_lut, Buffer::empty());
         let mut bloom = std::mem::replace(&mut self.lighting.bloom, Buffer::empty());
         self.destroy_buffer(&mut gbuf);
@@ -955,6 +960,7 @@ impl Gpu {
         self.destroy_buffer(&mut scene_lin);
         self.destroy_buffer(&mut scene_host);
         self.destroy_buffer(&mut hdr_params);
+        self.destroy_buffer(&mut hdr_encode);
         self.destroy_buffer(&mut agx_lut);
         self.destroy_buffer(&mut bloom);
         // Both queues use the light cache and the work buffer's ray slots.
@@ -1040,7 +1046,14 @@ impl Gpu {
         self.lighting.scene_lin = self.make_buffer(scene_bytes, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.scene_host = self.make_buffer(scene_bytes, 0x2, Memory::Readback)?;
         // Transfer-dst so the pyramid can write the bloom intensity word.
-        self.lighting.hdr_params = self.make_buffer(16, 0x20 | 0x2, Memory::Upload)?;
+        // Eight floats: scale, mode, bloom, output, white, peak, format, pad.
+        self.lighting.hdr_params = self.make_buffer(32, 0x20 | 0x2, Memory::Upload)?;
+        let mut encode_bytes = scene_bytes;
+        if self.format == crate::hdr_output::FORMAT_R16F {
+            encode_bytes = encode_bytes.saturating_add(scene_bytes / 2);
+        }
+        // Storage for the encode pass, transfer-src when the fp16 tail is copied.
+        self.lighting.hdr_encode = self.make_buffer(encode_bytes, 0x20 | 0x1, Memory::Upload)?;
         self.lighting.agx_lut = self.make_buffer(crate::hdr_output::AGX_LUT_BYTES, 0x20, Memory::Upload)?;
         self.write_agx_lut();
         // The second half holds the mip chain and two upsample scratches.
@@ -1112,6 +1125,7 @@ impl Gpu {
                 (14, self.lighting.hdr_params.buffer),
                 (15, self.lighting.agx_lut.buffer),
                 (16, self.lighting.bloom.buffer),
+                (17, self.lighting.hdr_encode.buffer),
                 (9, self.lighting.cache_keys.buffer),
                 (10, self.lighting.cache.buffer),
                 (11, stats),
@@ -1244,6 +1258,20 @@ impl Gpu {
         self.lighting.sun_pipe =
             self.make_compute_pipe(SUN_COMPOSE_SPV, self.lighting.layout, "lighting sun compose")?;
         self.note_pipeline_time("lighting sun compose", start);
+        Ok(())
+    }
+
+    /// The G-buffer pipeline embeds the color render pass, so a format change rebuilds it.
+    fn remake_gbuffer_pipe(&mut self) -> Result<(), String> {
+        if !self.lighting.ready {
+            return Ok(());
+        }
+        self.frag_override = Some(GBUFFER_FRAG_SPV);
+        self.vert_override = Some(GBUFFER_VERT_SPV);
+        let made = block(|| self.make_pipeline(true, false, false));
+        self.frag_override = None;
+        self.vert_override = None;
+        self.lighting.gbuffer_pipe = made?;
         Ok(())
     }
 
@@ -2064,13 +2092,15 @@ impl Gpu {
         desired.sanitize();
         let debug = scene.debug.effective(self.out_cli.as_deref());
         self.debug_out = debug.out;
-        let key = lighting_alloc_key(&desired);
-        let resized = self.lighting.dims[0] != self.extent_w || self.lighting.dims[1] != self.extent_h;
-        let rebuild = key != self.lighting.alloc_key || resized;
         self.lighting.settings = desired;
         self.lighting.hdr = scene.hdr.effective()?;
         self.lighting.sun_height = sun_height(scene);
-        if rebuild && self.lighting.ready {
+        // The first swapchain is built before a scene exists. A listed HDR pair
+        // replaces it once the settings ask for that pair.
+        self.refresh_hdr_surface()?;
+        let key = lighting_alloc_key(&self.lighting.settings);
+        let resized = self.lighting.dims[0] != self.extent_w || self.lighting.dims[1] != self.extent_h;
+        if (key != self.lighting.alloc_key || resized) && self.lighting.ready {
             self.make_lighting_targets()?;
         }
         Ok(())
@@ -2356,6 +2386,27 @@ impl Gpu {
         Some(rgba)
     }
 
+    /// Host view of the encode buffer: RGBA32F PQ or scRGB, one texel per pixel.
+    fn read_hdr_encode_host(&self) -> Result<Vec<f32>, String> {
+        let width = usize::try_from(self.extent_w).unwrap_or(0);
+        let height = usize::try_from(self.extent_h).unwrap_or(0);
+        let count = width.saturating_mul(height).saturating_mul(4);
+        if count == 0 || self.lighting.hdr_encode.memory.is_null() {
+            return Ok(Vec::new());
+        }
+        let bytes = u64::try_from(count.saturating_mul(4)).unwrap_or(0);
+        if self.lighting.hdr_encode.size < bytes {
+            return Ok(Vec::new());
+        }
+        read_f32s(
+            self.fns.map_mem,
+            self.fns.unmap_mem,
+            self.device,
+            self.lighting.hdr_encode.memory,
+            count,
+        )
+    }
+
     /// Host view of the full-resolution bloom image. The mip chain after it is omitted.
     fn read_bloom_host(&self) -> Result<Vec<f32>, String> {
         let width = usize::try_from(self.extent_w).unwrap_or(0);
@@ -2375,6 +2426,29 @@ impl Gpu {
             self.lighting.bloom.memory,
             count,
         )
+    }
+
+    /// 0 keeps the 8-bit picture. 1 is HDR10. 2 is scRGB. Forced SDR stays 0.
+    /// A requested mode that the surface did not list still returns 1 or 2 so
+    /// the side buffer can be read back.
+    fn hdr_output_word(&self) -> f32 {
+        let force_sdr = self.lighting.hdr.legacy_bytes
+            || matches!(
+                self.lighting.settings.preset,
+                genos_scene::LightingPreset::Potato | genos_scene::LightingPreset::Low
+            );
+        if force_sdr {
+            return 0.0;
+        }
+        match self.hdr_output {
+            crate::hdr_output::HdrSwapchain::Hdr10 => 1.0,
+            crate::hdr_output::HdrSwapchain::Scrgb => 2.0,
+            crate::hdr_output::HdrSwapchain::Sdr => match self.lighting.hdr.output {
+                genos_scene::OutputMode::Hdr10 => 1.0,
+                genos_scene::OutputMode::Scrgb => 2.0,
+                genos_scene::OutputMode::Auto | genos_scene::OutputMode::Sdr => 0.0,
+            },
+        }
     }
 
     fn write_hdr_exposure(&mut self) {
@@ -2402,21 +2476,28 @@ impl Gpu {
         };
         // Bloom intensity stays 0 until the pyramid has run. The display pass
         // reads the updated word. Compose therefore does not add a stale buffer.
-        let words = [scale, mode, 0.0_f32, 0.0_f32];
+        // `w` is the encode: 0 SDR, 1 HDR10 PQ, 2 scRGB. Potato, Low, and
+        // `legacy_bytes` stay 0. An unlisted mode still encodes into the side
+        // buffer; the swapchain image stays the SDR pair.
+        let output = self.hdr_output_word();
+        let white = crate::hdr_output::pack_f32(crate::hdr_output::graphics_white_linear());
+        let peak = crate::hdr_output::pack_f32(crate::hdr_output::HDR_PEAK_NITS);
+        let format_code = crate::hdr_output::swapchain_format_code(self.format);
+        let words = [scale, mode, 0.0_f32, output, white, peak, format_code, 0.0];
         unsafe {
             let mut mapped = std::ptr::null_mut();
             if (self.fns.map_mem)(
                 self.device,
                 self.lighting.hdr_params.memory,
                 0,
-                16,
+                32,
                 0,
                 &mut mapped,
             ) != 0
             {
                 return;
             }
-            std::ptr::copy_nonoverlapping(words.as_ptr(), mapped as *mut f32, 4);
+            std::ptr::copy_nonoverlapping(words.as_ptr(), mapped as *mut f32, 8);
             (self.fns.unmap_mem)(self.device, self.lighting.hdr_params.memory);
         }
         // Host-coherent upload, finished before submit.
@@ -2826,7 +2907,7 @@ impl Gpu {
         // The raster colour as the base: pixels with no surface keep it. A held
         // frame keeps last frame's picture in the buffer instead.
         if compose_full {
-            self.copy_image_buffer(image, 6, self.lighting.out.buffer, w, h, true);
+            self.copy_image_buffer(image, 6, self.lighting.out.buffer, w, h, true, 0);
         }
         self.memory_barrier(0x80 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
         let set = self.lighting.sets[slot];
@@ -3211,10 +3292,15 @@ impl Gpu {
                     1,
                 );
             }
-            self.memory_barrier(0x800, 0x1000, 0x40, 0x800);
+            self.memory_barrier(0x800, 0x1000 | 0x4000, 0x40, 0x800 | 0x2000);
         }
         self.image_barrier(image, 6, 7, 0x1000, 0x1000, 0x800, 0x1000);
-        self.copy_image_buffer(image, 7, self.lighting.out.buffer, w, h, false);
+        if self.format == crate::hdr_output::FORMAT_R16F {
+            let offset = u64::from(w).saturating_mul(u64::from(h)).saturating_mul(16);
+            self.copy_image_buffer(image, 7, self.lighting.hdr_encode.buffer, w, h, false, offset);
+        } else {
+            self.copy_image_buffer(image, 7, self.lighting.out.buffer, w, h, false, 0);
+        }
         self.image_barrier(image, 7, 6, 0x1000, 0x1000 | 0x800, 0x1000, 0x800 | 0x20);
         // S78W: the frame's stats to the host-visible copy (read a frame later).
         self.memory_barrier(0x800 | 0x1000, 0x1000, 0x40 | 0x800, 0x800);
@@ -3417,6 +3503,7 @@ impl Gpu {
         let mut scene_lin = std::mem::replace(&mut self.lighting.scene_lin, Buffer::empty());
         let mut scene_host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
         let mut hdr_params = std::mem::replace(&mut self.lighting.hdr_params, Buffer::empty());
+        let mut hdr_encode = std::mem::replace(&mut self.lighting.hdr_encode, Buffer::empty());
         let mut agx_lut = std::mem::replace(&mut self.lighting.agx_lut, Buffer::empty());
         let mut bloom = std::mem::replace(&mut self.lighting.bloom, Buffer::empty());
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
@@ -3434,6 +3521,7 @@ impl Gpu {
         self.destroy_buffer(&mut scene_lin);
         self.destroy_buffer(&mut scene_host);
         self.destroy_buffer(&mut hdr_params);
+        self.destroy_buffer(&mut hdr_encode);
         self.destroy_buffer(&mut agx_lut);
         self.destroy_buffer(&mut bloom);
         self.destroy_buffer(&mut lamp_res);
